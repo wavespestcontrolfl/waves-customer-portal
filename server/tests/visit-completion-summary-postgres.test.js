@@ -2040,7 +2040,7 @@ postgres('visit summary recipient recovery', () => {
     try {
       await mockPg('visit_completion_packets').where({ id: fixture.packetId }).update({ status: 'done', error: null });
       expect(await Invoice.claimPacketInvoiceForSend(invoiceId, fixture.packetId, { requireDue: true })).toMatchObject({ payerBilled: true, payerId: payer.id });
-      expect(await mockPg('invoices').where({ id: invoiceId }).first()).toMatchObject({ status: 'draft', scheduled_send_error: `payer_billed:${payer.id}` });
+      expect(await mockPg('invoices').where({ id: invoiceId }).first()).toMatchObject({ status: 'draft', scheduled_send_error: `payer_billed:${payer.id}:hold` });
       expect(await mockPg('service_visits').where({ id: fixture.visitId }).first()).toMatchObject({ billing_hold: true });
       // The late withdrawal is office review, like the coordinator's own payer finding: packet error + one alert.
       const closed = await mockPg('visit_completion_packets').where({ id: fixture.packetId }).first();
@@ -2073,7 +2073,7 @@ postgres('visit summary recipient recovery', () => {
       expect(await runVisitCompletionPacketEffects(fixture.packetId)).toMatchObject({ status: 200, body: { state: 'office_required', payment: { state: 'office_required', reason: 'payer_assigned' } } });
       const closed = await mockPg('visit_completion_packets').where({ id: fixture.packetId }).first();
       expect(JSON.parse(closed.error)).toMatchObject({ payment: 'office_required', reason: 'payer_assigned', payerId: payer.id });
-      expect(await mockPg('invoices').where({ id: invoiceId }).first()).toMatchObject({ status: 'draft', scheduled_send_error: `payer_billed:${payer.id}` });
+      expect(await mockPg('invoices').where({ id: invoiceId }).first()).toMatchObject({ status: 'draft', scheduled_send_error: `payer_billed:${payer.id}:hold` });
       const alerts = await mockPg('dispatch_alerts').where({ tech_id: fixture.techId, type: 'visit_closeout_review' }).whereNull('resolved_at');
       expect(alerts).toHaveLength(1);
       expect(alerts[0].payload).toMatchObject({ reason: 'payer_assigned', payerId: payer.id });
@@ -2102,7 +2102,7 @@ postgres('visit summary recipient recovery', () => {
     try {
       expect(await runVisitCompletionPacketEffects(fixture.packetId)).toMatchObject({ status: 200, body: { state: 'office_required', payment: { state: 'office_required', reason: 'payer_assigned', payerId: payer.id } } });
       // The link cannot be recalled: the row keeps its state and only carries the marker.
-      expect(await mockPg('invoices').where({ id: invoiceId }).first()).toMatchObject({ status, scheduled_send_error: `payer_billed:${payer.id}` });
+      expect(await mockPg('invoices').where({ id: invoiceId }).first()).toMatchObject({ status, scheduled_send_error: `payer_billed:${payer.id}:hold` });
       expect(await mockPg('service_visits').where({ id: fixture.visitId }).first()).toMatchObject({ billing_hold: true });
       expect(JSON.parse((await mockPg('visit_completion_packets').where({ id: fixture.packetId }).first()).error)).toMatchObject({ payment: 'office_required', reason: 'payer_assigned', payerId: payer.id });
       expect(await mockPg('dispatch_alerts').where({ tech_id: fixture.techId, type: 'visit_closeout_review' }).whereNull('resolved_at')).toHaveLength(1);
@@ -2407,7 +2407,9 @@ postgres('visit summary recipient recovery', () => {
   test.each([
     ['proven by the email record', 'sent'],
     ['positively unsent (no record)', null],
+    ['positively unsent (aborted before dispatch)', 'aborted'],
     ['still inside the library in-flight window', 'queued'],
+    ['failed after a possible acceptance', 'failed'],
   ])('an email touch left sending after its provider request is reconciled: %s', async (_label, recorded) => {
     const Review = require('../services/review-request');
     const sequenceId = randomUUID();
@@ -2420,7 +2422,8 @@ postgres('visit summary recipient recovery', () => {
     if (recorded) {
       await mockPg('email_messages').insert({
         provider: 'sendgrid', template_key: 'review_request_email', recipient_type: 'customer', recipient_id: fixture.customerId,
-        recipient_email_snapshot: fixture.serviceEmail, idempotency_key: `review_seq:${sequenceId}:1`, status: recorded,
+        recipient_email_snapshot: fixture.serviceEmail, idempotency_key: `review_seq:${sequenceId}:1`, status: recorded === 'aborted' ? 'failed' : recorded,
+        error_message: recorded === 'aborted' ? ABORTED_BEFORE_DISPATCH : recorded === 'failed' ? 'socket hang up' : null,
         queued_at: new Date(), sent_at: recorded === 'sent' ? new Date() : null, provider_message_id: recorded === 'sent' ? randomUUID() : null,
         send_attempt_token: randomUUID(), subject_snapshot: 'S', from_email_snapshot: 'contact@wavespestcontrol.com',
         from_name_snapshot: 'Waves', reply_to_snapshot: 'contact@wavespestcontrol.com', categories: JSON.stringify(['review_request']),
@@ -2440,7 +2443,7 @@ postgres('visit summary recipient recovery', () => {
         expect(row.sms_sent_at).toBeNull();
         // The last planned step went out: the sequence completes as the runner would have completed it.
         expect(seq).toMatchObject({ status: 'completed', stop_reason: 'completed', current_step: 2, touches_sent: 2, next_run_at: null });
-      } else if (recorded === 'queued') {
+      } else if (recorded === 'queued' || recorded === 'failed') {
         expect(outcome).toEqual({ finished: 0, released: 0 });
         expect(row).toMatchObject({ status: 'sending' });
         expect(seq).toMatchObject({ status: 'active', next_run_at: null });
@@ -2646,6 +2649,63 @@ postgres('visit summary recipient recovery', () => {
       expect(await mockPg('service_visits').where({ id: fixture.visitId }).first()).toMatchObject({ billing_hold: true });
     } finally {
       await mockPg('invoices').where({ id: invoiceId }).del();
+    }
+  });
+
+  test('a withdrawal on a visit already held for another reason leaves that hold when the payer is removed', async () => {
+    const Packets = require('../services/visit-completion-packets');
+    const payerId = randomUUID();
+    const invoiceId = randomUUID();
+    await mockPg('service_visits').where({ id: fixture.visitId }).update({ billing_hold: true });
+    await mockPg('invoices').insert({ id: invoiceId, token: randomUUID().replace(/-/g, ''), invoice_number: `FIX-${invoiceId.slice(0, 8)}`,
+      customer_id: fixture.customerId, status: 'draft', visit_completion_packet_id: fixture.packetId });
+    try {
+      expect(await mockPg.transaction((trx) => Packets.withdrawPacketInvoiceForPayer(trx, {
+        packetId: fixture.packetId, invoiceId, visit: { id: fixture.visitId }, billed: [], payerId }))).toBe(true);
+      // The stamp carries no hold flag: the hold was not this withdrawal's.
+      expect(await mockPg('invoices').where({ id: invoiceId }).first()).toMatchObject({ status: 'draft', scheduled_send_error: `payer_billed:${payerId}` });
+      expect(await mockPg.transaction((trx) => Packets.reconcileWithdrawnPacketInvoices(trx, { payerId }))).toBe(1);
+      expect(await mockPg('invoices').where({ id: invoiceId }).first()).toMatchObject({ status: 'scheduled', scheduled_send_error: null });
+      expect(await mockPg('service_visits').where({ id: fixture.visitId }).first()).toMatchObject({ billing_hold: true });
+      // The same withdrawal on an unheld visit owns its hold and lifts it.
+      await mockPg('service_visits').where({ id: fixture.visitId }).update({ billing_hold: false });
+      await mockPg('invoices').where({ id: invoiceId }).update({ status: 'draft' });
+      await mockPg.transaction((trx) => Packets.withdrawPacketInvoiceForPayer(trx, { packetId: fixture.packetId, invoiceId, visit: { id: fixture.visitId }, billed: [], payerId }));
+      expect(await mockPg('invoices').where({ id: invoiceId }).first()).toMatchObject({ scheduled_send_error: `payer_billed:${payerId}:hold` });
+      expect(await mockPg('service_visits').where({ id: fixture.visitId }).first()).toMatchObject({ billing_hold: true });
+      expect(await mockPg.transaction((trx) => Packets.reconcileWithdrawnPacketInvoices(trx, { payerId }))).toBe(1);
+      expect(await mockPg('service_visits').where({ id: fixture.visitId }).first()).toMatchObject({ billing_hold: false });
+    } finally {
+      await mockPg('invoices').where({ id: invoiceId }).del();
+    }
+  });
+
+  test('a review enrollment whose recovery write also fails is reported as unrecorded', async () => {
+    const Packets = require('../services/visit-completion-packets');
+    const down = Object.assign(() => { throw new Error('db down'); }, { fn: { now: () => new Date() } });
+    expect(await Packets.enrollVisitCompletionReview(fixture.packetId, down)).toMatchObject({ enrolled: false, retryable: true, reopened: false, recorded: false });
+  });
+
+  test('an office reassignment during member effects closes the packet for office review instead of retrying forever', async () => {
+    const Packets = require('../services/visit-completion-packets');
+    const otherTech = randomUUID();
+    await mockPg('technicians').insert({ id: otherTech, name: 'Other Technician', role: 'technician', active: true });
+    await mockPg('visit_completion_packets').where({ id: fixture.packetId }).update({
+      payload: JSON.stringify({ ...fixture.payload, actor: { role: 'technician', technicianId: fixture.techId } }) });
+    await mockPg('visit_completion_packet_items').where({ packet_id: fixture.packetId, scheduled_service_id: fixture.serviceIds[0] }).update({ status: 'processing' });
+    await mockPg('scheduled_services').where({ id: fixture.serviceIds[0] }).update({ technician_id: otherTech });
+    try {
+      const result = await Packets.runVisitCompletionPacketMemberEffects(fixture.packetId);
+      expect(result).toMatchObject({ status: 200, body: { state: 'office_required', code: 'service_reassigned' } });
+      expect(await mockPg('visit_completion_packets').where({ id: fixture.packetId }).first()).toMatchObject({ status: 'failed' });
+      expect(await mockPg('service_visits').where({ id: fixture.visitId }).first()).toMatchObject({ billing_hold: true });
+      expect(await mockPg('dispatch_alerts').where({ tech_id: otherTech, type: 'visit_closeout_review' }).whereNull('resolved_at')).toHaveLength(1);
+      // The sweep's next pass finds an owned packet, not a refusal to repeat.
+      expect(await Packets.runVisitCompletionPacketMemberEffects(fixture.packetId)).toMatchObject({ status: 200, body: { state: 'office_required' } });
+    } finally {
+      await mockPg('dispatch_alerts').where({ tech_id: otherTech }).del();
+      await mockPg('scheduled_services').where({ id: fixture.serviceIds[0] }).update({ technician_id: fixture.techId });
+      await mockPg('technicians').where({ id: otherTech }).del();
     }
   });
 

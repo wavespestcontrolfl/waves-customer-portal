@@ -2755,12 +2755,17 @@ const ReviewService = {
   async _emailSendEvidence(row) {
     const key = row.sequence_id != null && row.sequence_step != null
       ? `review_seq:${row.sequence_id}:${row.sequence_step}` : `review_touch:${row.id}`;
-    const message = await db("email_messages").where({ idempotency_key: key }).first("status", "queued_at");
+    const message = await db("email_messages").where({ idempotency_key: key }).first("status", "queued_at", "error_message");
     if (!message) return { found: false };
     const EmailLib = require("./email-template-library");
     if (!EmailLib.shouldRetryExistingMessage(message)) return { found: true };
-    if (EmailLib.queuedRowInFlight(message)) return { unavailable: true };
-    return { found: false };
+    // A row the library would send again is not proof of no send: a failed
+    // or stale queued row can follow a lost response after acceptance, and
+    // the library's retry is a fresh provider request. Only the library's
+    // own pre-dispatch abort marker proves nothing left; anything else
+    // stays ambiguous until a webhook settles the row.
+    if (message.error_message === EmailLib.ABORTED_BEFORE_DISPATCH) return { found: false };
+    return { unavailable: true };
   },
 
   /**
