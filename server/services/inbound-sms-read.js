@@ -20,6 +20,79 @@ const NotificationService = require('./notification-service');
 
 const LEGACY_WINDOW_MS = 30 * 24 * 60 * 60 * 1000;
 
+// The ONE decision for "what should this sender's shared unlinked-style bell
+// (link='/admin/communications', no thread param) do right now" — retarget
+// to whatever's still unread, or clear if nothing is. Used both by
+// markInboundSmsRead's own by-SID read path below AND by twilio-webhook.js's
+// ringSmsReplyBell post-insert race check (codex #4210 round-3 P1): that
+// check used to clear the just-rung bell by bare SID when the thread was
+// read while the bell was still being written, which — for an unknown
+// sender whose bell is phone-shared, not per-message — could clear the only
+// bell while a throttled sibling message sat unread with no bell of its own.
+// `cutoff` is the caller's own request-entry timestamp (bounds which bells
+// are eligible to be touched at all — see the comment on the query below);
+// callers that have no broader "read" request in flight (the post-insert
+// race check) pass `new Date()` so the bell they just wrote is in scope.
+async function retargetOrClearUnknownSenderBell(phone, cutoff) {
+  if (!phone) return 0;
+  try {
+    return await db.transaction(async (trx) => {
+      await trx.raw("SET LOCAL lock_timeout = '2s'");
+      await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`inbound_sms_bell_retarget:${phone}`]);
+      const remaining = await trx('messages as m')
+        .join('conversations as c', 'c.id', 'm.conversation_id')
+        .where({ 'c.contact_phone': phone, 'm.channel': 'sms', 'm.direction': 'inbound' })
+        // Phone-wide, not customer_id-gated (codex #4210 round-2 P2): a
+        // promoted thread's still-unread sibling must still be found here
+        // so the shared unlinked-style bell retargets to it instead of
+        // being cleared with it left silently unread.
+        .andWhere(function unread() { this.where({ 'm.is_read': false }).orWhereNull('m.is_read'); })
+        .whereNotNull('m.twilio_sid')
+        .orderBy('m.created_at', 'asc')
+        .first('m.twilio_sid');
+      // Match the LIVE bell by what it currently rang for, not by the
+      // SID(s) the caller happened to read — those may differ from the SID
+      // the bell is actually keyed to. Scoped to the unlinked-style link so
+      // a promoted thread's now-customer-scoped bell (a different
+      // notification row, keyed by ?thread=) is never touched here.
+      // Bounded by the caller's cutoff (codex #4210 round-2 P1) — a bell
+      // created by a NEW inbound message the caller never saw as unread
+      // must never be touched. `cutoff` is a JS Date (millisecond
+      // precision); created_at is a Postgres timestamptz (microsecond
+      // precision) written by a statement that can land microseconds into
+      // the SAME millisecond `cutoff` was captured in — a strict `<=`
+      // against the truncated JS value would then reject a bell that is,
+      // in reality, no later than the cutoff. Compare against the NEXT
+      // millisecond boundary so same-millisecond writes (the realistic gap
+      // between an insert and the read/check that follows it) still count
+      // as "at or before", while a bell from a genuinely later request
+      // (materially more than a fraction of a millisecond away in
+      // practice) is still excluded.
+      const bellCutoff = new Date(cutoff.getTime() + 1);
+      const liveBell = () => trx('notifications')
+        .where({ recipient_type: 'admin', category: 'inbound_sms', link: '/admin/communications' })
+        .whereNull('read_at')
+        .where('created_at', '<', bellCutoff)
+        .whereRaw(
+          `metadata->'payload'->>'twilioSid' IN (
+            SELECT m2.twilio_sid FROM messages m2
+            JOIN conversations c2 ON c2.id = m2.conversation_id
+            WHERE c2.contact_phone = ?
+          )`,
+          [phone],
+        );
+      if (remaining?.twilio_sid) {
+        await liveBell().update({ metadata: trx.raw("jsonb_set(metadata, '{payload,twilioSid}', to_jsonb(?::text))", [remaining.twilio_sid]) });
+        return 0;
+      }
+      return liveBell().update({ read_at: new Date() });
+    });
+  } catch (e) {
+    logger.warn(`[inbound-sms-read] unknown-sender bell retarget failed for one sender: ${e.message}`);
+    return 0;
+  }
+}
+
 async function markInboundSmsRead({ messageIds = [], conversationIds = [], readBefore = null, adminUserId = null, role } = {}) {
   const ids = messageIds.filter((id) => typeof id === 'string' && id.trim());
   const convs = conversationIds.filter((id) => typeof id === 'string' && id.trim());
@@ -127,62 +200,7 @@ async function markInboundSmsRead({ messageIds = [], conversationIds = [], readB
         if (row.contact_phone) phones.add(row.contact_phone);
       }
       for (const phone of phones) {
-        try {
-          const cleared = await db.transaction(async (trx) => {
-            await trx.raw("SET LOCAL lock_timeout = '2s'");
-            await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`inbound_sms_bell_retarget:${phone}`]);
-            const remaining = await trx('messages as m')
-              .join('conversations as c', 'c.id', 'm.conversation_id')
-              .where({ 'c.contact_phone': phone, 'm.channel': 'sms', 'm.direction': 'inbound' })
-              // Phone-wide, not customer_id-gated (codex #4210 round-2 P2):
-              // a promoted thread's still-unread sibling must still be found
-              // here so the shared unlinked-style bell retargets to it
-              // instead of being cleared with it left silently unread.
-              .andWhere(function unread() { this.where({ 'm.is_read': false }).orWhereNull('m.is_read'); })
-              .whereNotNull('m.twilio_sid')
-              .orderBy('m.created_at', 'asc')
-              .first('m.twilio_sid');
-            // Match the LIVE bell by what it currently rang for, not by the
-            // SID(s) this call happened to read — those may differ from
-            // the SID the bell is actually keyed to. Scoped to the
-            // unlinked-style link so a promoted thread's now-customer-scoped
-            // bell (a different notification row, keyed by ?thread=) is
-            // never touched here. Bounded by the request-entry cutoff `now`
-            // (codex #4210 round-2 P1) — a bell created by a NEW inbound
-            // message that arrived after this read began must never be
-            // cleared: it rang for a message this call never saw as unread.
-            // `now` is a JS Date (millisecond precision); created_at is a
-            // Postgres timestamptz (microsecond precision) written by a
-            // statement that can land microseconds into the SAME
-            // millisecond `now` was captured in — a strict `<=` against the
-            // truncated JS value would then reject a bell that is, in
-            // reality, no later than this read's entry. Compare against the
-            // NEXT millisecond boundary so same-millisecond writes (the
-            // realistic gap between an insert and the read that follows it)
-            // still count as "at or before", while a bell from a genuinely
-            // later request (materially more than a fraction of a
-            // millisecond away in practice) is still excluded.
-            const cutoff = new Date(now.getTime() + 1);
-            const liveBell = () => trx('notifications')
-              .where({ recipient_type: 'admin', category: 'inbound_sms', link: '/admin/communications' })
-              .whereNull('read_at')
-              .where('created_at', '<', cutoff)
-              .whereRaw(
-                `metadata->'payload'->>'twilioSid' IN (
-                  SELECT m2.twilio_sid FROM messages m2
-                  JOIN conversations c2 ON c2.id = m2.conversation_id
-                  WHERE c2.contact_phone = ?
-                )`,
-                [phone],
-              );
-            if (remaining?.twilio_sid) {
-              await liveBell().update({ metadata: trx.raw("jsonb_set(metadata, '{payload,twilioSid}', to_jsonb(?::text))", [remaining.twilio_sid]) });
-              return 0;
-            }
-            return liveBell().update({ read_at: new Date() });
-          });
-          notificationsCleared += cleared;
-        } catch (e) { logger.warn(`[inbound-sms-read] unknown-sender bell retarget failed for one sender: ${e.message}`); }
+        notificationsCleared += await retargetOrClearUnknownSenderBell(phone, now);
       }
     } catch (e) { logger.warn(`[inbound-sms-read] unknown-sender bell retarget failed: ${e.message}`); }
     // The unknown-sender SIDs above are fully handled (retargeted or
@@ -285,4 +303,4 @@ async function customerIdsInScope(ids, convs) {
   return db('conversations').whereIn('id', [...convIds]).whereNotNull('customer_id').distinct('customer_id').pluck('customer_id');
 }
 
-module.exports = { markInboundSmsRead, countUnreadInboundSms };
+module.exports = { markInboundSmsRead, countUnreadInboundSms, retargetOrClearUnknownSenderBell };

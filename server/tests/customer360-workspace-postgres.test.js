@@ -19,7 +19,7 @@ const { randomUUID, randomBytes } = require('node:crypto');
 const { etDateString, parseETDateTime } = require('../utils/datetime-et');
 const { invoiceOverdueSql, invoiceDaysOverdue } = require('../services/collections/account-anchor');
 const router = require('../routes/admin-customers');
-const { countUnreadInboundSms, markInboundSmsRead } = require('../services/inbound-sms-read');
+const { countUnreadInboundSms, markInboundSmsRead, retargetOrClearUnknownSenderBell } = require('../services/inbound-sms-read');
 const NotificationService = require('../services/notification-service');
 const realNotificationService = jest.requireActual('../services/notification-service');
 const { openBalanceSummary } = require('../services/open-balance');
@@ -461,6 +461,45 @@ postgres('Customer 360 migrated PostgreSQL reads', () => {
       expect(refreshedBell.metadata.payload.twilioSid).toBe(laterSid);
     } finally {
       await mockPg('messages').whereIn('id', [alertedMessageId, laterMessageId]).delete();
+      if (bell) await mockPg('notifications').where({ id: bell.id }).delete();
+      await mockPg('conversations').where({ id: conversationId }).delete();
+    }
+  }, 30000);
+
+  test('retargetOrClearUnknownSenderBell — the exported decision ringSmsReplyBell\'s post-insert race check now calls directly — retargets instead of clearing when a sibling is still unread (codex #4210 round-3 P1)', async () => {
+    const conversationId = randomUUID();
+    const readMessageId = randomUUID();
+    const stillUnreadMessageId = randomUUID();
+    const readSid = `SM-synthetic-postcheck-${randomBytes(4).toString('hex')}`;
+    const unreadSid = `SM-synthetic-postcheck-later-${randomBytes(4).toString('hex')}`;
+    const unknownPhone = `+1941555${String(Date.now()).slice(-4)}`;
+    let bell;
+    try {
+      await mockPg('conversations').insert({ id: conversationId, customer_id: null, channel: 'sms', contact_phone: unknownPhone, our_endpoint_id: '+19415550190' });
+      await mockPg('messages').insert([
+        // Already read by the time the post-check runs (the exact race:
+        // the thread was opened while ringSmsReplyBell's bell insert was
+        // still in flight).
+        { id: readMessageId, conversation_id: conversationId, channel: 'sms', direction: 'inbound', author_type: 'lead', is_read: true, twilio_sid: readSid, body: 'Read while the bell was being written', created_at: new Date(Date.now() - 60000) },
+        // A throttled sibling from the same sender, still unread, with no
+        // bell of its own — its only hope is this shared bell.
+        { id: stillUnreadMessageId, conversation_id: conversationId, channel: 'sms', direction: 'inbound', author_type: 'lead', is_read: false, twilio_sid: unreadSid, body: 'Still unread, throttled', created_at: new Date(Date.now() - 30000) },
+      ]);
+      [bell] = await mockPg('notifications').insert({
+        recipient_type: 'admin', category: 'inbound_sms', title: 'Synthetic unknown-sender text',
+        link: '/admin/communications',
+        metadata: JSON.stringify({ payload: { twilioSid: readSid } }),
+      }).returning('*');
+
+      // The exact call ringSmsReplyBell's post-insert race check now makes
+      // for an unknown sender, in place of the old blind by-SID clear.
+      const cleared = await retargetOrClearUnknownSenderBell(unknownPhone, new Date());
+      expect(cleared).toBe(0);
+      const refreshedBell = await mockPg('notifications').where({ id: bell.id }).first();
+      expect(refreshedBell.read_at).toBeNull();
+      expect(refreshedBell.metadata.payload.twilioSid).toBe(unreadSid);
+    } finally {
+      await mockPg('messages').whereIn('id', [readMessageId, stillUnreadMessageId]).delete();
       if (bell) await mockPg('notifications').where({ id: bell.id }).delete();
       await mockPg('conversations').where({ id: conversationId }).delete();
     }

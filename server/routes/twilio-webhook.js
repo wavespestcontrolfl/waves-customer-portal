@@ -2004,9 +2004,21 @@ async function ringSmsReplyBell({ customer, From, MessageSid, message }) {
   }
   try {
     // Post-insert race: the thread was opened while the bell was being
-    // written. Retire it by SID — that works for unlinked threads too.
+    // written. A known customer's bell is per-thread, so retiring it by SID
+    // is correct there. An unknown sender's bell is phone-SHARED (one bell,
+    // retargeted across whichever message is earliest-unread) — clearing it
+    // by bare SID would drop it even while a throttled sibling from the
+    // same window sits unread with no bell of its own (codex #4210
+    // round-3 P1). Route that case through the same locked per-phone
+    // retarget-or-clear decision inbound-sms-read.js uses for an ordinary
+    // read, with "now" as the cutoff since the bell this call just wrote
+    // must be in scope.
     if (!(await unifiedStillUnread())) {
-      await require('../services/notification-service').markInboundSmsReadAdmin({ customerId: customer?.id || null, twilioSid: MessageSid });
+      if (customer) {
+        await require('../services/notification-service').markInboundSmsReadAdmin({ customerId: customer.id, twilioSid: MessageSid });
+      } else {
+        await require('../services/inbound-sms-read').retargetOrClearUnknownSenderBell(From, new Date());
+      }
     }
   } catch (e) { logger.warn(`[notifications] sms_reply post-check failed: ${e.message}`); }
   return stats;
