@@ -91,6 +91,9 @@ test('notAfter: only rows observed at or before the clean run retire (metadata.o
   const q = chain(1);
   mockDb.mockReturnValue(q);
   await resolveOpsDigest({ key: 'k', source: 'ops-crons', notAfter: '2026-09-11T11:10:00.000Z' });
-  expect(q.whereRaw).toHaveBeenCalledWith("COALESCE(NULLIF(metadata->>'observedAt', '')::timestamptz, created_at) <= ?::timestamptz", ['2026-09-11T11:10:00.000Z']);
+  // GREATEST(observedAt, created_at): a refresh can lower observedAt (the
+  // notifyAdmin merge takes incoming metadata verbatim), created_at cannot
+  // move — so the comparison fails safe and never clears a live failure.
+  expect(q.whereRaw).toHaveBeenCalledWith("GREATEST(COALESCE(NULLIF(metadata->>'observedAt', '')::timestamptz, created_at), created_at) <= ?::timestamptz", ['2026-09-11T11:10:00.000Z']);
 });
 
