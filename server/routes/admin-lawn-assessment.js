@@ -756,8 +756,14 @@ router.post('/assess', async (req, res, next) => {
       season,
       photos: JSON.stringify(photoMeta),
       ...scoreFields,
-      // Gate on: a run-backed row is inserted pending and takes the legacy
-      // baseline on the confirm that completes it (legacyBaselineFields).
+      // Gate on: a run-backed row is inserted pending. The baseline it should
+      // take, and the run-aware /confirm that would assign it, are NOT
+      // implemented here — /confirm is still the legacy path, so a gate-on
+      // assessment currently never becomes a baseline and its NULL scores
+      // would be confirmed as zeros by scoreValue(). Both are owned by the
+      // units that wire confirmation (#4284 transaction, #4304 route).
+      // GATE_LAWN_VISIT_ASSESSMENT MUST STAY UNSET until those land; it is
+      // unset in production today, which is why this is latent and not live.
       is_baseline: propertyHistoryEnabled || visitAssessmentEnabled ? false : isBaseline,
     };
     // Gate on: the run row is the provenance and the review target, so it is
