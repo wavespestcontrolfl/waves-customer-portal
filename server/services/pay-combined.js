@@ -596,9 +596,22 @@ async function listUnconfirmedCombinedSessionsForCustomer(database, customerId, 
   return sessions.sort((a, b) => (a.payment_intent_id < b.payment_intent_id ? -1 : a.payment_intent_id > b.payment_intent_id ? 1 : 0));
 }
 
-async function releaseUnconfirmedCombinedSessionsForCustomer(database, customerId, { expectedPaymentIntentIds = null, invalidatedSingleInvoice = false } = {}) {
-  if (!customerId) return { released: 0, inFlight: 0 };
-  // Same setup-serialization lock as the scheduled-service variant.
+/**
+ * Take the customer's setup-serialization lock, read its stamped sessions,
+ * and check them against the approved pin — everything the release does
+ * BEFORE it touches Stripe. Split out (codex #4348 r8 P1) for a caller that
+ * must resolve each side while the rows still belong to it: the merge's FK
+ * sweep repoints the loser's invoices onto the winner, and after that the
+ * loser reads as having no sessions while the winner reads the union of
+ * both — so the loser's would never be released and the winner's pin would
+ * refuse a set it should have matched. Such a caller snapshots both sides
+ * here, before the sweep, and releases the returned rows afterwards.
+ */
+async function lockAndPinStampedSessionsForCustomer(database, customerId, { expectedPaymentIntentIds = null } = {}) {
+  if (!customerId) return [];
+  // Same setup-serialization lock as the scheduled-service variant. It is an
+  // xact lock, so it is still held when the caller releases later in the
+  // same transaction.
   await lockCombinedCustomers(database, [String(customerId)]);
   const rows = await stampedCombinedSessionRows(database, customerId);
   if (Array.isArray(expectedPaymentIntentIds)) {
@@ -610,6 +623,12 @@ async function releaseUnconfirmedCombinedSessionsForCustomer(database, customerI
       throw err;
     }
   }
+  return rows;
+}
+
+async function releaseUnconfirmedCombinedSessionsForCustomer(database, customerId, { expectedPaymentIntentIds = null, invalidatedSingleInvoice = false } = {}) {
+  if (!customerId) return { released: 0, inFlight: 0 };
+  const rows = await lockAndPinStampedSessionsForCustomer(database, customerId, { expectedPaymentIntentIds });
   return releaseUnconfirmedCombinedSessions(database, rows, { invalidatedSingleInvoice });
 }
 
@@ -1243,6 +1262,8 @@ module.exports = {
   lockCombinedCustomerStable,
   releaseUnconfirmedCombinedSessionsForScheduledServices,
   releaseUnconfirmedCombinedSessionsForCustomer,
+  lockAndPinStampedSessionsForCustomer,
+  releaseUnconfirmedCombinedSessions,
   listUnconfirmedCombinedSessionsForCustomer,
   stampedSessionOutcome,
   releaseCombinedSessionBeforeCollection,

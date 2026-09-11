@@ -18,6 +18,7 @@ jest.mock('../services/stripe', () => ({
 }));
 
 const db = require('../models/db');
+const StripeService = require('../services/stripe');
 const dedupe = require('../services/customer-dedupe');
 const {
   phone10, normalizeStreetKey, namesCompatible, addressCompat, pickWinner,
@@ -623,8 +624,10 @@ describe('executeMerge', () => {
   const WINNER = 'bbbbbbbb-0000-0000-0000-000000000001';
   const LOSER = 'bbbbbbbb-0000-0000-0000-000000000002';
 
-  function buildTrx({ winner, loser, fkRows, updates = {}, journalId = 'j1', prefsConflict = false }) {
-    const state = { repointUpdates: [], retired: null, backfilled: null, journal: null, prefsDeleted: false, prefsMerged: null };
+  function buildTrx({ winner, loser, fkRows, updates = {}, journalId = 'j1', prefsConflict = false, sessions = null }) {
+    // `events` is an ORDERED log (the stamped-session reads and every repoint
+    // update) so a test can assert what the executor does before the sweep.
+    const state = { repointUpdates: [], retired: null, backfilled: null, journal: null, prefsDeleted: false, prefsMerged: null, events: [] };
     const route = (table, q) => {
       if (table === 'customers') {
         if (q.called('forUpdate')) return [winner, loser].filter(Boolean);
@@ -692,6 +695,12 @@ describe('executeMerge', () => {
       if ((table === 'scheduled_services' || table === 'invoices') && q.called('first')) {
         return (state.billingArtifacts && state.billingArtifacts[table]) || null;
       }
+      // Stamped combined-session read (pay-combined stampedCombinedSessionRows).
+      if (table === 'invoices' && q.called('whereNotNull') && q.called('select')) {
+        const owner = q.args('where')[0].customer_id;
+        state.events.push(['sessions_read', owner]);
+        return (sessions && sessions[owner]) || [];
+      }
       if (table === 'scheduled_services' && q.called('update')) {
         state.serviceStamp = { whereNull: q.args('whereNull'), payload: q.args('update')[0] };
         return 2;
@@ -699,6 +708,7 @@ describe('executeMerge', () => {
       if (q.called('del')) { state.prefsDeleted = true; return 1; }
       if (q.called('update')) {
         state.repointUpdates.push(table);
+        state.events.push(['update', table]);
         return updates[table] ?? 1;
       }
       // blocker count checks (auto mode)
@@ -727,6 +737,37 @@ describe('executeMerge', () => {
     db.transaction.mockImplementation(async (fn) => fn(trx));
     await expect(dedupe.executeMerge({ winnerId: WINNER, loserId: LOSER, performedBy: 'test' }))
       .rejects.toThrow(/deferred — a collection call is in flight/);
+  });
+
+  it('resolves both sides\' stamped payment sessions BEFORE the FK sweep repoints the loser\'s invoices, and still cancels them after (Codex r8 P1)', async () => {
+    // The sweep moves invoices.customer_id from the loser to the winner. A
+    // release that read AFTER it would find nothing on the loser (its
+    // sessions silently survive the retire) and the union on the winner
+    // (refusing a pin that never actually changed).
+    mockStripePis = { pi_loser: { id: 'pi_loser', status: 'requires_payment_method', metadata: { combined_allocation: '{"x":1}' } } };
+    const winner = { id: WINNER, first_name: 'Diana', last_name: 'Blowers', phone: '+19995550003' };
+    const loser = { id: LOSER, first_name: 'Diana', last_name: null, phone: '9995550003' };
+    const { trx, state } = buildTrx({
+      winner, loser,
+      fkRows: [...FK_ROWS, { table_name: 'invoices', column_name: 'customer_id' }],
+      sessions: { [LOSER]: [{ id: 'inv-1', invoice_number: 'INV-1', stripe_payment_intent_id: 'pi_loser' }] },
+    });
+    db.transaction.mockImplementation(async (fn) => fn(trx));
+    await dedupe.executeMerge({ winnerId: WINNER, loserId: LOSER, performedBy: 'test' });
+
+    const loserRead = state.events.findIndex(([kind, id]) => kind === 'sessions_read' && id === LOSER);
+    const winnerRead = state.events.findIndex(([kind, id]) => kind === 'sessions_read' && id === WINNER);
+    const invoiceSweep = state.events.findIndex(([kind, table]) => kind === 'update' && table === 'invoices');
+    expect(loserRead).toBeGreaterThanOrEqual(0);
+    expect(winnerRead).toBeGreaterThanOrEqual(0);
+    expect(invoiceSweep).toBeGreaterThan(loserRead);
+    expect(invoiceSweep).toBeGreaterThan(winnerRead);
+    // And NOTHING re-reads a side's sessions after the sweep: a post-sweep
+    // read is the bug itself (the loser reads empty, the winner reads the
+    // union), so the executor must work from the snapshot alone.
+    expect(state.events.slice(invoiceSweep).filter(([kind]) => kind === 'sessions_read')).toEqual([]);
+    // ...and the loser's session is still actually cancelled in Stripe.
+    expect(StripeService.cancelPaymentIntent).toHaveBeenCalledWith('pi_loser');
   });
 
   it('takes the invoice-issued-closeout gate lock right after the property-preferences pair, sorted, before any customer row lock (GitHub r7 P2 #4127)', async () => {

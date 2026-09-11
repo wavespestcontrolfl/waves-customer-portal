@@ -1810,10 +1810,15 @@ function getToolsForContext(context, isAdmin = false) {
   if (context === 'tech') {
     return TECH_TOOLS;
   }
-  // Email tools mirror the requireAdmin /api/admin/email surface — never
-  // offer them to technician tokens. ADMIN_ONLY_TOOL_NAMES blocks execution
-  // regardless; this keeps them out of the model's tool list too.
-  const base = isAdmin ? BASE_TOOLS : BASE_TOOLS.filter(t => !EMAIL_TOOL_NAMES.has(t.name));
+  // Every admin-only tool in BASE_TOOLS (the email surface mirroring
+  // requireAdmin /api/admin/email, create_customer, cancel_plan,
+  // merge_customers) is dropped for technician tokens. The route already
+  // forces context 'tech' for a non-admin, so this branch is not reached
+  // today with isAdmin=false — but the filter belongs to the function, not
+  // to one caller's routing, so a future non-tech non-admin context can
+  // never advertise a write the role guard would then refuse (codex #4348
+  // r8 P2). ADMIN_ONLY_TOOL_NAMES blocks execution regardless.
+  const base = isAdmin ? BASE_TOOLS : BASE_TOOLS.filter(t => !ADMIN_ONLY_TOOL_NAMES.has(t.name));
   if (context === 'agent_estimate') {
     return AGENT_ESTIMATE_TOOLS;
   }

@@ -1593,6 +1593,22 @@ async function executeMerge({ winnerId, loserId, performedBy, performedById = nu
       };
     }
 
+    // BEFORE the sweep: resolve each side's stamped payment sessions under
+    // the pay.combined lock and check them against the approved pin here.
+    // The sweep below repoints the loser's invoices onto the winner, after
+    // which the loser reads as having NO sessions and the winner reads the
+    // union of both — so a post-sweep release would silently skip every
+    // loser session (the r13/r14 P1 hazard back again) and refuse the
+    // winner's pin for a set that never actually changed (codex #4348 r8
+    // P1). Only the read moves here; the Stripe cancellations still run at
+    // the fence below, after the sweep.
+    const PayCombinedFence = require('./pay-combined');
+    const pinnedSessionIds = (side) => (approvedEffects ? approvedEffects.combined_payment_sessions[side].map((sess) => sess.payment_intent_id) : null);
+    const stampedSessionRows = {
+      winner: await PayCombinedFence.lockAndPinStampedSessionsForCustomer(trx, winnerId, { expectedPaymentIntentIds: pinnedSessionIds('winner') }),
+      loser: await PayCombinedFence.lockAndPinStampedSessionsForCustomer(trx, loser.id, { expectedPaymentIntentIds: pinnedSessionIds('loser') }),
+    };
+
     // BEFORE the sweep: remember the loser's referral enrollment — after the
     // sweep both promoter rows sit on the winner and can no longer be told
     // apart by customer_id. (referral_promoters has no unique on customer_id,
@@ -2033,18 +2049,17 @@ async function executeMerge({ winnerId, loserId, performedBy, performedById = nu
     // An unreleasable session aborts the merge; the admin retries.
     {
       const PayCombined = require('./pay-combined');
-      // A confirmed card pinned the sessions it disclosed: the release
-      // re-reads them under the pay.combined lock and refuses if a session
-      // appeared or vanished since (previewChanged — fresh card).
-      const pinned = (side) => (approvedEffects ? approvedEffects.combined_payment_sessions[side].map((sess) => sess.payment_intent_id) : null);
+      // The rows are the PRE-SWEEP snapshot taken above, already checked
+      // against the confirmed card's pin under the pay.combined lock (that
+      // lock is an xact lock, so it is still held here).
       // Single-invoice checkouts are NOT combined sessions, so the release
       // leaves them alone by default — except the ones this merge
       // invalidates (the loser's, whose PI metadata names the record being
       // retired; and the winner's when the merge transfers a payer). Same
       // rule the card disclosed.
       const invalidatedSingle = singleInvoiceSessionsInvalidatedByMerge(winner, loser);
-      const winnerRelease = await PayCombined.releaseUnconfirmedCombinedSessionsForCustomer(trx, winnerId, { expectedPaymentIntentIds: pinned('winner'), invalidatedSingleInvoice: invalidatedSingle.winner });
-      const loserRelease = await PayCombined.releaseUnconfirmedCombinedSessionsForCustomer(trx, loser.id, { expectedPaymentIntentIds: pinned('loser'), invalidatedSingleInvoice: invalidatedSingle.loser });
+      const winnerRelease = await PayCombined.releaseUnconfirmedCombinedSessions(trx, stampedSessionRows.winner, { invalidatedSingleInvoice: invalidatedSingle.winner });
+      const loserRelease = await PayCombined.releaseUnconfirmedCombinedSessions(trx, stampedSessionRows.loser, { invalidatedSingleInvoice: invalidatedSingle.loser });
       if (loserRelease.inFlight > 0) {
         throw new Error('A combined payment on the merged-away record is still in flight — retry the merge after it settles');
       }

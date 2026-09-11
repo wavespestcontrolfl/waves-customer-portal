@@ -113,3 +113,27 @@ test('a merge cancels the single-invoice checkouts it invalidates; every other c
     .resolves.toEqual({ released: 0, inFlight: 1 });
   expect(StripeService.cancelPaymentIntent).not.toHaveBeenCalled();
 });
+
+test('the lock+pin step is separable from the Stripe release, so a caller can resolve a side before its rows move (Codex r8 P1)', async () => {
+  const { lockAndPinStampedSessionsForCustomer, releaseUnconfirmedCombinedSessions } = require('../services/pay-combined');
+  StripeService.retrievePaymentIntent.mockImplementation(async (id) => PI[id] || null);
+  const rows = [{ id: 'inv-1', invoice_number: 'INV-1', stripe_payment_intent_id: 'pi_a' }];
+
+  // The read takes the per-customer lock and returns the rows — nothing in
+  // Stripe is touched yet, so the caller can do this before a sweep repoints
+  // the invoices onto another customer.
+  const db = database({ L: rows });
+  await expect(lockAndPinStampedSessionsForCustomer(db, 'L', { expectedPaymentIntentIds: ['pi_a'] })).resolves.toEqual(rows);
+  expect(db.raw).toHaveBeenCalledWith(expect.stringMatching(/pg_advisory_xact_lock/), ['pay.combined.customer', 'L']);
+  expect(StripeService.cancelPaymentIntent).not.toHaveBeenCalled();
+
+  // The pin is checked at read time, per side.
+  await expect(lockAndPinStampedSessionsForCustomer(database({ L: rows }), 'L', { expectedPaymentIntentIds: [] }))
+    .rejects.toMatchObject({ previewChanged: true, message: expect.stringMatching(/combined payment sessions changed/) });
+
+  // Releasing the SNAPSHOT later cancels exactly those sessions, with no
+  // second read of the (by then repointed) invoice rows.
+  const later = database({});
+  await expect(releaseUnconfirmedCombinedSessions(later, rows)).resolves.toEqual({ released: 1, inFlight: 0 });
+  expect(StripeService.cancelPaymentIntent).toHaveBeenCalledWith('pi_a');
+});
