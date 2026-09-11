@@ -3,6 +3,36 @@ import { etDateString } from '../../lib/timezone';
 import { Button } from '../ui/Button';
 import { Field, request, numeric, percentBps, date, words } from './common';
 
+const addDays = (day, count) => { const next = new Date(`${day}T12:00:00Z`); next.setUTCDate(next.getUTCDate() + count); return next.toISOString().slice(0, 10); };
+
+// Keyed by employee: its draft never outlives a change of the selected person.
+function LevelForm({ setup, view, disabled, onBusy, onError, onSaved }) {
+  // saveLevel accepts only active employees (409 otherwise); former employees keep their history read-only.
+  const inactive = view.person.employment_status !== 'active';
+  // Levels are append-only: the next one must be dated after the newest retained level.
+  const newest = view.levels.map(row => date(row.effective_date)).sort().at(-1);
+  const earliest = newest ? addDays(newest, 1) : undefined;
+  const today = etDateString(new Date());
+  const [level, setLevel] = useState(() => ({ id: crypto.randomUUID(), role_key: view.level?.role_key || 'technician_i', effective_date: earliest && earliest > today ? earliest : today }));
+  const [saving, setSaving] = useState(false);
+  async function saveLevel(event) {
+    event.preventDefault(); setSaving(true); onBusy('level'); onError('');
+    try {
+      await request('/levels', { method: 'POST', body: { ...level, technician_id: view.person.id } });
+      setLevel(current => ({ ...current, id: crypto.randomUUID() }));
+      onSaved('Simulation level saved. Current compensation terms remain in effect.');
+    }
+    catch (failure) { onError(failure.message); }
+    finally { setSaving(false); onBusy(''); }
+  }
+  return <form className="pg-card pg-form" onSubmit={saveLevel}><h2>Employee simulation level</h2><p className="pg-muted">This selects a modeled package. It does not change the employee’s title, agreed pay, or field capabilities.</p><fieldset disabled={disabled || inactive}><div className="pg-form-grid">
+    <Field label="Simulation role" options={setup.program.roles.map(role => ({ value: role.key, label: role.title }))} value={level.role_key} onChange={event => setLevel(current => ({ ...current, role_key: event.target.value }))} />
+    <Field label="Level effective date" type="date" required min={earliest} value={level.effective_date} onChange={event => setLevel(current => ({ ...current, effective_date: event.target.value }))} hint={newest ? `Must follow the newest retained level (${newest}).` : undefined} />
+  </div><div className="pg-form-actions"><Button type="submit" disabled={inactive} loading={saving}>Save simulation level</Button></div></fieldset>{inactive && <p className="pg-muted">This employee is {words(view.person.employment_status || 'no longer active')}; simulation levels are read-only for former employees.</p>}
+    {view.levels.map(row => <p key={row.id} className="pg-muted">{date(row.effective_date)} · {setup.program.roles.find(role => role.key === row.role_key)?.title}</p>)}
+  </form>;
+}
+
 export default function ProgramSetup({ setup, view, onSaved }) {
   const newest = setup.rules[0];
   const nextDate = newest ? new Date(`${date(newest.effective_date)}T12:00:00Z`) : null;
@@ -14,9 +44,6 @@ export default function ProgramSetup({ setup, view, onSaved }) {
     handoff_minimum: newest?.definition.handoff_minimum == null ? '' : String(newest.definition.handoff_minimum),
     activation_share: newest?.definition.activation_share_bps == null ? '' : String(newest.definition.activation_share_bps / 100),
   }));
-  const [level, setLevel] = useState(() => ({ id: crypto.randomUUID(), role_key: view.level?.role_key || 'technician_i', effective_date: etDateString(new Date()) }));
-  // saveLevel accepts only active employees (409 otherwise); former employees keep their history read-only.
-  const inactive = view.person.employment_status !== 'active';
   const [busy, setBusy] = useState('');
   const [error, setError] = useState('');
   const change = (key, value) => setDefinition(current => ({ ...current, [key]: value }));
@@ -33,24 +60,9 @@ export default function ProgramSetup({ setup, view, onSaved }) {
     } catch (failure) { setError(failure.message); }
     finally { setBusy(''); }
   }
-  async function saveLevel(event) {
-    event.preventDefault(); setBusy('level'); setError('');
-    try {
-      await request('/levels', { method: 'POST', body: { ...level, technician_id: view.person.id } });
-      setLevel(current => ({ ...current, id: crypto.randomUUID() }));
-      onSaved('Simulation level saved. Current compensation terms remain in effect.');
-    }
-    catch (failure) { setError(failure.message); }
-    finally { setBusy(''); }
-  }
   return <>
     {error && <p role="alert" className="pg-error">{error}</p>}
-    <form className="pg-card pg-form" onSubmit={saveLevel}><h2>Employee simulation level</h2><p className="pg-muted">This selects a modeled package. It does not change the employee’s title, agreed pay, or field capabilities.</p><fieldset disabled={!!busy || inactive}><div className="pg-form-grid">
-      <Field label="Simulation role" options={setup.program.roles.map(role => ({ value: role.key, label: role.title }))} value={level.role_key} onChange={event => setLevel(current => ({ ...current, role_key: event.target.value }))} />
-      <Field label="Level effective date" type="date" required value={level.effective_date} onChange={event => setLevel(current => ({ ...current, effective_date: event.target.value }))} />
-    </div><div className="pg-form-actions"><Button type="submit" disabled={inactive} loading={busy === 'level'}>Save simulation level</Button></div></fieldset>{inactive && <p className="pg-muted">This employee is {words(view.person.employment_status || 'no longer active')}; simulation levels are read-only for former employees.</p>}
-      {view.levels.map(row => <p key={row.id} className="pg-muted">{date(row.effective_date)} · {setup.program.roles.find(role => role.key === row.role_key)?.title}</p>)}
-    </form>
+    <LevelForm key={view.person.id} setup={setup} view={view} disabled={!!busy} onBusy={setBusy} onError={setError} onSaved={onSaved} />
     <form className="pg-card pg-form" onSubmit={saveDefinition}><h2>Program simulation definition</h2><p>Production remains 6% for Technician I and 8% for Technician II. Choose each service key explicitly. Blank observation settings and commission splits remain undefined.</p><fieldset disabled={!!busy}>
       <div className="pg-form-grid"><Field label="Definition label" required maxLength={100} value={definition.label} onChange={event => change('label', event.target.value)} /><Field label="Definition effective date" type="date" required value={definition.effective_date} onChange={event => change('effective_date', event.target.value)} hint="First day of a month. Later definitions retain earlier calculations." /></div>
       <Field label="Add an eligible service key" value="" options={[{ value: '', label: 'Choose from the catalog…' }, ...setup.services.filter(service => !definition.service_rules.some(row => row.service_key === service.service_key)).map(service => ({ value: service.service_key, label: `${service.name} · ${service.service_key}` }))]} onChange={event => { if (event.target.value) change('service_rules', [...definition.service_rules, { service_key: event.target.value, credit_type: 'routine', rework_window_days: null }]); }} />
