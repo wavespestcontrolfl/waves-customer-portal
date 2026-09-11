@@ -167,9 +167,15 @@ export default function CredentialsPage({ embedded = false }) {
     setActionError(null);
     try {
       if (editing) {
-        await adminFetch(`/admin/credentials/${editing.id}`, { method: "PATCH", body: JSON.stringify(payload) });
+        await adminFetch(`/admin/credentials/${editing.id}`, {
+          method: "PATCH",
+          body: JSON.stringify(payload),
+        });
       } else {
-        await adminFetch("/admin/credentials", { method: "POST", body: JSON.stringify(payload) });
+        await adminFetch("/admin/credentials", {
+          method: "POST",
+          body: JSON.stringify(payload),
+        });
       }
       setShowForm(false);
       setEditing(null);
@@ -188,13 +194,20 @@ export default function CredentialsPage({ embedded = false }) {
     setArchiveTarget(row);
   };
 
+  const closeArchive = () => {
+    if (archivePending.current) return;
+    setArchiveTarget(null);
+    setActionError(null);
+  };
+
   const onArchive = async () => {
     if (!archiveTarget || archivePending.current) return;
+    const row = archiveTarget;
     archivePending.current = true;
     setSaving(true);
     setActionError(null);
     try {
-      await adminFetch(`/admin/credentials/${archiveTarget.id}`, { method: "DELETE" });
+      await adminFetch(`/admin/credentials/${row.id}`, { method: "DELETE" });
       setArchiveTarget(null);
       await load();
     } catch (requestError) {
@@ -214,7 +227,7 @@ export default function CredentialsPage({ embedded = false }) {
       <Button onClick={(event) => openForm(event)}>+ Add Credential</Button>
     </div>
     {error && <div className="flex flex-wrap items-center gap-3"><ActionFeedback error>{error}</ActionFeedback><Button variant="secondary" onClick={load}>Retry</Button></div>}
-    {actionError && !showForm && <ActionFeedback error>{actionError}</ActionFeedback>}
+    {actionError && !showForm && archiveTarget === null && <ActionFeedback error>{actionError}</ActionFeedback>}
     {loading ? <ActionFeedback className="min-h-20">Loading…</ActionFeedback> : <>
       <div className="flex flex-col gap-3">
         {active.length === 0 ? <Card><CardBody>
@@ -246,13 +259,13 @@ export default function CredentialsPage({ embedded = false }) {
       <CredentialForm key={editing?.id || "new"} initial={editing} onSave={onSave} onCancel={closeForm} saving={saving} error={actionError} />
     </Dialog>
 
-    <Dialog open={archiveTarget !== null} onClose={() => { if (!archivePending.current) setArchiveTarget(null); }} size="sm">
+    <Dialog open={archiveTarget !== null} onClose={closeArchive} size="sm">
       <DialogHeader><DialogTitle>Archive credential</DialogTitle></DialogHeader>
       <DialogBody>
         <p className="text-ui-body text-zinc-900">Archive "{archiveTarget?.displayName}"? This is a soft delete — the record stays for audit.</p>
         {actionError && <ActionFeedback error className="mt-4">{actionError}</ActionFeedback>}
       </DialogBody>
-      <DialogFooter><Button variant="secondary" onClick={() => setArchiveTarget(null)} disabled={saving}>Cancel</Button><Button variant="danger" loading={saving} onClick={onArchive}>Archive</Button></DialogFooter>
+      <DialogFooter><Button variant="secondary" onClick={closeArchive} disabled={saving}>Cancel</Button><Button variant="danger" loading={saving} onClick={onArchive}>Archive</Button></DialogFooter>
     </Dialog>
   </UiSurface>;
 }
