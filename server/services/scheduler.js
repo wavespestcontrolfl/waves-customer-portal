@@ -174,7 +174,12 @@ async function recoverStaleScheduledSmsClaims(now) {
         created_at = ?,
         updated_at = ?,
         metadata = COALESCE(s.metadata, '{}'::jsonb) || jsonb_build_object(
-          'queued_at', s.created_at,
+          -- Keep an enqueue time an earlier pass already saved: the dispatch
+          -- path re-stamps created_at to send time and parks the real one in
+          -- metadata.queued_at, so reading created_at unconditionally here
+          -- would overwrite it with the dispatch time and lose the queue
+          -- audit trail (codex #4334). Same idiom as scheduled-sms-delivery.
+          'queued_at', COALESCE(s.metadata->'queued_at', to_jsonb(s.created_at)),
           'scheduled_sms_recovered_sent_at', ?::timestamptz
         )
         -- Deferred replays settled here crashed BETWEEN Twilio's accept and

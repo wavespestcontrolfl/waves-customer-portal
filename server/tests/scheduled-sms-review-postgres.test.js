@@ -65,6 +65,55 @@ postgres('queued review ask settlement against migrated PostgreSQL', () => {
     expect(saved.metadata).toMatchObject({ finalize_pending: true, provider_message_id: 'SM-synthetic', entry_point: 'invoice_send_deferred' });
   });
 
+  test('crash recovery keeps an enqueue time an earlier pass already saved (codex #4334)', async () => {
+    const now = new Date();
+    const queuedAt = new Date('2026-01-01T16:00:00Z');
+    // The dispatch path re-stamps created_at to send time and parks the real
+    // enqueue time in metadata.queued_at. A crash between Twilio's accept and
+    // markScheduledSmsSent leaves the row in exactly this shape.
+    const dispatchedAt = new Date(now.getTime() - 45 * 60000);
+    const row = await message({
+      status: 'sending',
+      created_at: dispatchedAt,
+      scheduled_for: new Date(now.getTime() - 3600000),
+      updated_at: new Date(now.getTime() - 31 * 60000),
+      metadata: { queued_at: queuedAt, entry_point: 'invoice_send_deferred' },
+    });
+    // The provider row proving Twilio accepted it — what routes this row down
+    // the settled branch rather than being re-scheduled or failed.
+    await message({ status: 'sent', twilio_sid: 'SM-accepted',
+      metadata: { scheduled_sms_log_id: String(row.id) } });
+
+    await recoverStaleScheduledSmsClaims(now);
+
+    const saved = await trx('sms_log').where({ id: row.id }).first();
+    expect(saved.status).toBe('sent');
+    // The original enqueue time survives; it is NOT overwritten with the
+    // dispatch time that created_at was carrying.
+    expect(new Date(saved.metadata.queued_at)).toEqual(queuedAt);
+    expect(new Date(saved.metadata.queued_at).getTime()).not.toBe(dispatchedAt.getTime());
+  });
+
+  test('crash recovery falls back to created_at when no enqueue time was saved', async () => {
+    const now = new Date();
+    const queuedAt = new Date(now.getTime() - 45 * 60000);
+    const row = await message({
+      status: 'sending',
+      created_at: queuedAt,
+      scheduled_for: new Date(now.getTime() - 3600000),
+      updated_at: new Date(now.getTime() - 31 * 60000),
+      metadata: { entry_point: 'invoice_send_deferred' },
+    });
+    await message({ status: 'sent', twilio_sid: 'SM-accepted-2',
+      metadata: { scheduled_sms_log_id: String(row.id) } });
+
+    await recoverStaleScheduledSmsClaims(now);
+
+    const saved = await trx('sms_log').where({ id: row.id }).first();
+    expect(saved.status).toBe('sent');
+    expect(new Date(saved.metadata.queued_at)).toEqual(queuedAt);
+  });
+
   test('stale final-attempt uncertainty waits for its pre-provider safety deadline', async () => {
     const now = new Date();
     const safetyUntil = new Date(now.getTime() + 71 * 3600000);
