@@ -1,3 +1,4 @@
+import { showScheduleSaveNotice } from './ScheduleSaveNotice';
 // Service-line edit sheet opened from MobileCheckoutSheet per IMG_3730.
 // Lets the tech adjust the scheduled service mid-visit: tier (billing
 // cadence label), price override, staff assignment, duration, notes.
@@ -7,6 +8,7 @@
 // field sent here). Parent refetches the schedule on success so the
 // checkout sheet's totals reflect the change.
 
+import { createPortal } from 'react-dom';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { X, ChevronRight, Check } from 'lucide-react';
 import { apiErrorMessage } from './seriesMove';
@@ -128,7 +130,7 @@ export default function MobileServiceEditModal({
       // Advisory schedule-overlap notes — the save committed (conflicts no
       // longer block admin edits); say what now stacks before closing.
       if (Array.isArray(result?.warnings) && result.warnings.length) {
-        alert(`Saved.\n\n${result.warnings.join('\n\n')}`);
+        showScheduleSaveNotice(`Saved.\n\n${result.warnings.join('\n\n')}`);
       }
       onSaved?.();
     } catch (e) {
@@ -141,11 +143,11 @@ export default function MobileServiceEditModal({
 
   if (!service) return null;
 
-  return (
-    <div className={`fixed inset-0 z-[115] bg-white overflow-y-auto ${desktopVisible ? '' : 'md:hidden'}`}>
+  return createPortal(
+    <div className={`fixed inset-0 z-[115] bg-white overflow-y-auto overscroll-contain ${desktopVisible ? '' : 'md:hidden'}`}>
       {/* Header: X + title + Save */}
       <div
-        className="sticky top-0 bg-white border-b border-hairline border-zinc-200 flex items-center"
+        className="box-border sticky top-0 z-[1] shrink-0 bg-white border-b border-hairline border-zinc-200 flex items-center"
         style={{ height: 'calc(56px + env(safe-area-inset-top, 0px))', paddingTop: 'env(safe-area-inset-top, 0px)' }}
       >
         <button
@@ -409,6 +411,7 @@ export default function MobileServiceEditModal({
           </div>
         )}
       </div>
-    </div>
+    </div>,
+    document.body,
   );
 }

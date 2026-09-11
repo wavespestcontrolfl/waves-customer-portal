@@ -222,7 +222,7 @@ async function sendBillingSms(customer, body, metadata = {}, { customerInitiated
   // so callers log deferred, not lost; a failed enqueue falls through and
   // returns the block unchanged (loudly logged).
   if (!result.sent
-    && ['QUIET_HOURS_HOLD', 'PUSH_IN_FLIGHT'].includes(result.code)
+    && ['QUIET_HOURS_HOLD', 'PUSH_IN_FLIGHT', 'APP_DELIVERY_HOLD', 'APP_PROVIDER_RETRY'].includes(result.code)
     && result.deferred
     && result.nextAllowedAt) {
     try {
@@ -1171,6 +1171,9 @@ async function handleStatementPaymentIntentEvent(paymentIntent, eventType, event
     // leave the statement sent/viewed + unpaid (dunning must keep collecting).
     if (settledNow) {
       logger.info(`[stripe-webhook] statement S-${statementId} settled paid via PI ${piId}`);
+      // Every linked child invoice is paid now: close out their open visits,
+      // outside the money txn (GitHub r9 P1 #4127). Best-effort by contract.
+      await require('../services/invoice-issued-closeout').closeOutVisitsForStatement(statementId, { trigger: 'paid' });
       // Stop any statement-level dunning now that it's paid (best-effort, outside
       // the money txn — the eligibility filter already excludes `paid`, so this is
       // just hygiene and never gates settlement).

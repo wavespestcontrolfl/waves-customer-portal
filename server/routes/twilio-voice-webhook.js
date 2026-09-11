@@ -49,6 +49,12 @@ function scheduleRecordingRecovery(callSid) {
       } catch (err) {
         logger.warn(`[call-status] missed-call bell failed for ${maskSid(callSid)}: ${err.message}`);
       }
+      // Repeat windows use the same post-call grace.
+      try {
+        await require('../services/repeat-caller-bell').ringRepeatCallerIfNeeded(callSid);
+      } catch (err) {
+        logger.warn(`[call-status] repeat-caller bell failed for ${maskSid(callSid)}: ${err.message}`);
+      }
     }, 3 * 60 * 1000);
   }, 2 * 60 * 1000);
 }
@@ -3152,12 +3158,24 @@ router.post('/outbound-connect', async (req, res) => {
     const voicemailText = outboundVoicemailTextDialOptions({
       callLogId: rawCallLogId, customerNumber, callerIdNumber,
     });
+    // The completion action rides only an actual callback attempt — a
+    // bridge linked to a commitment or stamped with the card policy — read
+    // from the persisted row whatever the gate says, so ordinary admin
+    // bridges keep the pre-lane shape and a card bridge keeps its evidence
+    // after rollback. On a read failure, keep dialing with the harmless
+    // completion action.
+    const callbackRow = CALL_LOG_ID_SHAPE.test(String(rawCallLogId || ''))
+      ? await db('call_log').where({ id: rawCallLogId }).first('metadata').catch(() => null) : undefined;
+    const persistedAttempt = foldVoiceMetadata(callbackRow?.metadata, {});
+    const callbackCompletion = callbackRow === null || !!persistedAttempt.relatedCommitmentId || persistedAttempt.callback_policy === 'card';
     const dial = twiml.dial({
       callerId: callerIdNumber,
       record: 'record-from-answer-dual',
       recordingStatusCallback: '/api/webhooks/twilio/recording-status',
       recordingStatusCallbackEvent: 'completed',
       ...voicemailText.dial,
+      ...(!voicemailText.dial.action && rawCallLogId && callbackCompletion
+        ? { action: `/api/webhooks/twilio/outbound-dial-complete?callLogId=${encodeURIComponent(rawCallLogId)}` } : {}),
     });
     dial.number(voicemailText.number, customerNumber);
     res.type('text/xml').send(twiml.toString());
@@ -3349,6 +3367,30 @@ router.post('/outbound-amd', async (req, res) => {
 // (action-less) <Dial> did.
 router.post('/outbound-dial-complete', async (req, res) => {
   const twiml = new VoiceResponse();
+  // Capture the signed CUSTOMER leg for linked callback promises. This
+  // also accepts in-flight callbacks after rollback; it never closes work.
+  const id = String(req.query.callLogId || '');
+  const duration = Number(req.body?.DialCallDuration);
+  const status = String(req.body?.DialCallStatus || '');
+  const sid = String(req.body?.DialCallSid || '');
+  const parentSid = String(req.body?.CallSid || '');
+  if (CALL_LOG_ID_SHAPE.test(id) && ['completed', 'busy', 'no-answer', 'failed', 'canceled'].includes(status)
+    && /^CA[a-f0-9]{32}$/i.test(sid) && /^CA[a-f0-9]{32}$/i.test(parentSid) && Number.isFinite(duration) && duration >= 0) {
+    const leg = JSON.stringify({ status, sid, duration_seconds: duration, ended_at: new Date().toISOString() });
+    try {
+      await db('call_log').where({ id, direction: 'outbound' })
+        .whereRaw('(twilio_call_sid = ? OR twilio_call_sid IS NULL)', [parentSid])
+        // A card bridge links the commitment; the existing call-log callback
+        // links the source call. Both are callback attempts whose customer
+        // leg is the proof the ledger judges.
+        .whereRaw("(metadata->>'relatedCommitmentId' IS NOT NULL OR metadata->>'relatedCallId' IS NOT NULL)")
+        .whereRaw("metadata->'customer_leg' IS NULL")
+        .update({ twilio_call_sid: parentSid,
+          metadata: db.raw("jsonb_set(COALESCE(metadata, '{}'::jsonb), '{customer_leg}', ?::jsonb)", [leg]), updated_at: new Date() });
+    } catch {
+      return res.status(503).type('text/xml').send('<Response><Hangup/></Response>');
+    }
+  }
   try {
     const callLogId = req.query.callLogId;
     let detected = false;

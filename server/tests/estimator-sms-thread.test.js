@@ -70,6 +70,8 @@ const {
   _private,
 } = require('../services/estimator-engine/sms-thread');
 
+const { isSolicitationPitch } = require('../services/sms-solicitation-detector');
+
 const PHONE = '+19415550123';
 
 beforeEach(() => {
@@ -268,7 +270,7 @@ describe('_private.threadQuoteSignal', () => {
       'Our service has $0 upfront cost. Reply NO to opt out.',
     ];
     for (const body of pitches) {
-      expect(_private.isSolicitationPitch(body)).toBe(true);
+      expect(isSolicitationPitch(body)).toBe(true);
       const result = await startSmsThreadDraft({ phone: PHONE, triggerBody: body });
       expect(result.skipped).toBe('no_quote_intent_regex_solicitation');
       expect(result.terminal).toBe(true);
@@ -278,22 +280,22 @@ describe('_private.threadQuoteSignal', () => {
   });
 
   test('a single weak marker is a prospect\'s phrase, not a pitch', () => {
-    expect(_private.isSolicitationPitch('Can I get termite service with no upfront cost?')).toBe(false);
-    expect(_private.isSolicitationPitch('I need pest control Tuesday; reply NO if you cannot make it.')).toBe(false);
-    expect(_private.isSolicitationPitch('I have termites at my new house. Would you like more details?')).toBe(false);
-    expect(_private.isSolicitationPitch('Is there a free trial of the mosquito program?')).toBe(false);
-    expect(_private.isSolicitationPitch('I have more jobs and need extra estimates for pest control.')).toBe(false);
-    expect(_private.isSolicitationPitch('I manage more customers who need pest control estimates.')).toBe(false);
-    expect(_private.isSolicitationPitch('Can you handle more lawn jobs or handle extra pest estimates?')).toBe(false);
+    expect(isSolicitationPitch('Can I get termite service with no upfront cost?')).toBe(false);
+    expect(isSolicitationPitch('I need pest control Tuesday; reply NO if you cannot make it.')).toBe(false);
+    expect(isSolicitationPitch('I have termites at my new house. Would you like more details?')).toBe(false);
+    expect(isSolicitationPitch('Is there a free trial of the mosquito program?')).toBe(false);
+    expect(isSolicitationPitch('I have more jobs and need extra estimates for pest control.')).toBe(false);
+    expect(isSolicitationPitch('I manage more customers who need pest control estimates.')).toBe(false);
+    expect(isSolicitationPitch('Can you handle more lawn jobs or handle extra pest estimates?')).toBe(false);
   });
 
   test.each([
     'We can provide more lawn leads.',
     'We have extra qualified pest leads.',
-    'Our network offers exclusive lawn jobs.',
-    'We provide unlimited estimates for contractors.',
+    'Our network offers exclusive lawn leads.',
+    'We provide unlimited leads for contractors.',
   ])('explicit lead-generation wording stands alone: %s', (body) => {
-    expect(_private.isSolicitationPitch(body)).toBe(true);
+    expect(isSolicitationPitch(body)).toBe(true);
   });
 
   test('homeowner quote asks that share vendor vocabulary still reach the classifier and draft pipeline', async () => {
@@ -315,8 +317,38 @@ describe('_private.threadQuoteSignal', () => {
       'Can you handle more lawn jobs at my rentals? Would you like more details?',
       'Can I get termite service with no upfront cost? Reply NO if you cannot do that.',
       'I tried to request an estimate but the link leads to your home page.',
+      'I have two leads for you: my neighbors both need pest control. Can you quote them?',
+      'I have more lawn leads for you from my neighbors. Can you quote them?',
+      'I can send extra pest leads from my neighborhood. Can you contact them?',
+      'I can send you more pest-control leads from my neighbors. Can you quote them?',
+      'I can bring you extra lawn leads from my neighborhood. Can you contact them?',
+      'We can provide you with more lawn leads from our neighbors who need service.',
+      'I can send you more pest leads: my neighbors both need service.',
+      'My neighbors need service; I can send you more pest leads.',
+      'My neighbors need service. I can send you more pest-control leads; can you quote them?',
+      'I can provide you with more lawn leads. They are my neighbors and need quotes.',
+      'I can send you more pest leads.\nThey are from my neighborhood.',
+      'I can provide you with estimates from other pest companies; do you price match?',
+      'My company can send more lawn leads from our neighbors. Can you quote them?',
+      'My company can provide measurements of our rentals. Can we get unlimited estimates?',
+      'Our company can fill your schedule with pest service for our rentals. Can you quote it?',
+      'Can you send me more details about pest-control leads at my rental?',
       'Can you handle more pest jobs with no upfront cost?',
       'Can I get termite service with no upfront cost? Would you like more details?',
+      'Do you offer exclusive rates for new customers?',
+      'Can I get unlimited estimates for my rental properties?',
+      'Do qualified customers get a discount on pest control?',
+      'We have qualified pest customers at our rentals. Can you quote service?',
+      'Do you provide qualified pest customers with a discount?',
+      'We provide housing; can qualified pest customers get estimates?',
+      'We provide exclusive housing for customers and need pest control.',
+      'We manage several rentals and can fill your schedule; please quote pest control',
+      'We provide housing; can you send pest control estimates for contractors staying here? Would you like more details?',
+      'We provide estimates for contractors and need pest control for our office. Would you like more details?',
+      'My company can offer estimates for local contractors. Can you quote termite treatment for our office? Want more details?',
+      'I provide lawn-care estimates for contractors; our office needs pest control. Want more details?',
+      'Can you fill your calendar with our rental pest services? I can send more details?',
+      'We are growing our business and need a quote for pest control.',
     ];
     for (const body of asks) {
       const result = await startSmsThreadDraft({ phone: PHONE, triggerBody: body });
@@ -551,10 +583,53 @@ describe('scope guards (GATE_ESTIMATOR_SCOPE_GUARDS)', () => {
     expect(mockDispatch).not.toHaveBeenCalled();
   });
 
-  test('a vendor pitch on an active clarify/intake thread is a TERMINAL veto (skipIntentGate), before triage loads', async () => {
+  test.each([
+    'We provide estimates for contractors and need pest control for our office. Would you like more details?',
+    'My company can offer estimates for local contractors. Can you quote termite treatment for our office? Want more details?',
+    'I provide lawn-care estimates for contractors; our office needs pest control. Want more details?',
+  ])('a business description remains eligible on active intake: %s', async (triggerBody) => {
+    const result = await startSmsThreadDraft({ phone: PHONE, triggerBody, skipIntentGate: true });
+    expect(result.started).toBe(true);
+    await result.draftPromise;
+    expect(mockRunDraftPipeline).toHaveBeenCalled();
+    expect(mockDispatch).not.toHaveBeenCalled();
+  });
+
+  test.each([
+    'We can bring you exclusive pest control leads daily with no upfront cost.',
+    'We can send you more pest-control leads.',
+    'We can provide you with more lawn leads.',
+    'We can bring you extra pest control leads.',
+    'I can offer you more lawn leads.',
+    'Our company can send more lawn leads.',
+    'My company can send you more lawn leads.',
+    'My team can bring you extra pest-control leads.',
+    'My network can provide qualified pest customers.',
+    'My company can offer unlimited pest jobs available.',
+    'My team can provide unlimited estimates for contractors.',
+    'We provide unlimited estimates for contractors.',
+    'We provide you with estimates for contractors. Want more details?',
+    'Our company could offer you pest-control estimates for local contractors. Reply STOP to opt out.',
+    'We can provide unlimited estimates for contractors.',
+    'I provide unlimited estimates for contractors.',
+    'Our company could offer qualified pest jobs for local contractors.',
+    'We provide you with unlimited estimates for local contractors.',
+    'I can offer you qualified pest-control customers.',
+    'Our network can provide you with qualified pest jobs available.',
+    'We can offer you unlimited lawn-care jobs available.',
+    'We provide you with unlimited pest-control estimates for contractors.',
+    'We can grow your business with booked pest jobs',
+    'Our company can grow your business with booked pest jobs',
+    'My network could help you scale your business',
+    'We have unlimited pest jobs available in your area',
+    'We provide qualified pest customers in your area',
+    'I offer exclusive lawn care customers in your area',
+    'Our network provides unlimited new customers',
+    'We can offer qualified local customers',
+  ])('a vendor pitch on an active clarify/intake thread is a terminal veto: %s', async (triggerBody) => {
     const result = await startSmsThreadDraft({
       phone: PHONE,
-      triggerBody: 'We can bring you exclusive pest control leads daily with no upfront cost.',
+      triggerBody,
       skipIntentGate: true,
     });
     expect(result.skipped).toBe('no_quote_intent_regex_solicitation');

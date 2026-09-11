@@ -1,3 +1,4 @@
+import { showScheduleSaveNotice } from './ScheduleSaveNotice';
 // client/src/components/schedule/CreateAppointmentModal.jsx
 //
 // Modal opened from the SchedulePage / DispatchPageV2 "+ New" CTA.
@@ -941,6 +942,17 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
   // during the awaited re-quote and booked twice; the ref is synchronous.
   const submittingRef = useRef(false);
   const [toast, setToast] = useState('');
+  const [duplicateConflict, setDuplicateConflict] = useState(null);
+  const [separateProgramReason, setSeparateProgramReason] = useState('');
+  const duplicateConflictRef = useRef(null);
+  const submitLockRef = useRef(false);
+  useEffect(() => {
+    if (duplicateConflict) duplicateConflictRef.current?.scrollIntoView?.({ block: 'center', behavior: 'smooth' });
+  }, [duplicateConflict]);
+  useEffect(() => {
+    setDuplicateConflict(null);
+    setSeparateProgramReason('');
+  }, [selectedCustomer?.id, selectedPropertyId, services]);
 
   // Per-line helpers. Each entry in `services` carries its own `price`
   // string (so an operator can override goodwill / loyalty pricing on one
@@ -1782,7 +1794,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
   });
 
   // Submit
-  const handleSubmit = async () => {
+  const submitAppointments = async (separateProgram) => {
     if (!selectedCustomer || services.length === 0 || bookingPropertyState === 'loading') return;
     if (submittingRef.current) return;
     submittingRef.current = true;
@@ -1898,6 +1910,13 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
           && visitsPerYearForCadence(prepayCadenceKey(group.cadence, group.intervalDays)) != null
           && !!linkedEstimate && linkedEstimate.status !== 'accepted' && !!linkedEstimate.prepay?.eligible;
         const body = {
+          ...(separateProgram?.key === key ? {
+            allowDuplicateSeries: true,
+            duplicateSeriesOverride: {
+              reason: separateProgramReason.trim(),
+              existingSeriesIds: separateProgram.existingSeries.map((series) => series.id),
+            },
+          } : {}),
           customerId: selectedCustomer.id,
           scheduledDate: apptDate,
           serviceType: primary.name,
@@ -2016,27 +2035,29 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
             (s) => s?.sourceEstimateId != null && String(s.sourceEstimateId) === String(linkedEstimate.id),
           ).length
           : 0;
-        if (ownSeriesCount > 0) {
-          // The guard matches by service FAMILY, so with multiple seasonal
-          // lines the first sibling's series also conflicts with the second
-          // group (codex r26 P1). Recovery skips ONLY when the owned-series
-          // count exceeds this group's position among same-family groups —
-          // that count proves this group's own series exists. When it
-          // doesn't, the duplicate error surfaces with the server's guidance
-          // (extend the series, or intentionally run a second program) —
-          // never an automatic allowDuplicateSeries override, whose
-          // client-side count proof is not atomic and could double-book
-          // under concurrent retries (codex r27 P0). Multiple same-family
-          // seasonal lines on one estimate are not producible by the
-          // estimate builder today, so this conservative surface is the
-          // operator-decides path, not a workflow regression.
-          const familyIndex = Number.isInteger(group.seasonalIndex) ? group.seasonalIndex : 0;
-          if (ownSeriesCount > familyIndex) {
-            createdGroupKeysRef.current.add(key);
-            continue;
-          }
+        // The guard matches by service FAMILY, so with multiple seasonal
+        // lines the first sibling's series also conflicts with the second
+        // group (codex r26 P1). Recovery skips ONLY when the owned-series
+        // count exceeds this group's position among same-family groups —
+        // that count proves this group's own series exists. When it
+        // doesn't, the duplicate error surfaces with the server's guidance
+        // (extend the series, or intentionally run a second program) —
+        // never an automatic allowDuplicateSeries override, whose
+        // client-side count proof is not atomic and could double-book
+        // under concurrent retries (codex r27 P0). Multiple same-family
+        // seasonal lines on one estimate are not producible by the
+        // estimate builder today, so this conservative surface is the
+        // operator-decides path, not a workflow regression.
+        const familyIndex = Number.isInteger(group.seasonalIndex) ? group.seasonalIndex : 0;
+        if (ownSeriesCount > familyIndex && separateProgram?.key !== key) {
+          createdGroupKeysRef.current.add(key);
+          continue;
         }
-        firstError = { label: groupLabel(group), message: e.message };
+        if (dupBody) {
+          setDuplicateConflict({ ...dupBody, key, retryUncertain: separateProgram?.key === key });
+          setSeparateProgramReason('');
+        }
+        firstError = { label: groupLabel(group), message: e.message, duplicate: !!dupBody };
         break;
       }
     }
@@ -2050,10 +2071,12 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
       const tail = created > 0 ? ' Click Save to retry the rest.' : '';
       // Warnings from groups that DID commit must surface here too: those
       // groups are recorded in createdGroupKeysRef and skipped on retry, so
-      // this partial-failure alert is their only chance to be seen (e.g. an
+      // their persistent notice must survive the retry (e.g. an
       // advisory schedule-overlap note on an already-booked group).
       const committedWarnings = results.flatMap((r) => (Array.isArray(r?.warnings) ? r.warnings : []));
-      alert(lead + tail + (committedWarnings.length ? `\n\n${committedWarnings.join('\n\n')}` : ''));
+      if (committedWarnings.length) showScheduleSaveNotice(committedWarnings.join('\n\n'));
+      if (firstError.duplicate) setToast(created ? `${created} of ${total} appointment series saved. Review the remaining program below.` : 'Review the existing recurring program below.');
+      else alert(lead + tail);
       return;
     }
     // Annual prepay on a manual booking: mint AFTER the series is committed,
@@ -2147,12 +2170,27 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
     // A guarded estimate (one-time/recurring choice, invoice-mode, expired,
     // pending manager approval) books fine but couldn't be auto-accepted — tell
     // the operator so they can record the win from the Estimates page.
-    if (apptWarnings.length) alert(apptWarnings.join('\n\n'));
+    if (apptWarnings.length) showScheduleSaveNotice(`Appointment saved.\n\n${apptWarnings.join('\n\n')}`);
     setTimeout(() => {
       createdGroupKeysRef.current = new Set();
       onCreated?.({ id: results[0]?.id, scheduledDate: apptDate });
       onChange?.({ id: results[0]?.id, scheduledDate: apptDate });
     }, 1200);
+    return true;
+  };
+
+  // Header, footer and second-program CTA share one synchronous lock. React
+  // state alone can admit two taps before the first render marks us saving.
+  const handleSubmit = async (separateProgram) => {
+    if (submitLockRef.current) return;
+    submitLockRef.current = true;
+    let booked = false;
+    try {
+      booked = await submitAppointments(separateProgram);
+    } finally {
+      // A successful booking stays locked until its closing timer runs.
+      submitLockRef.current = booked === true;
+    }
   };
 
   const overlayStyle = {
@@ -3413,6 +3451,37 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
               </select>
             </div>
           </div>
+          {duplicateConflict && (
+            <section ref={duplicateConflictRef} aria-label="Existing recurring programs" style={{ padding: 16, marginBottom: 16, border: `1px solid ${D.border}`, borderRadius: 8, fontSize: 14, lineHeight: 1.5 }}>
+              <div style={{ fontWeight: 500 }}>An active program already exists</div>
+              <p>{duplicateConflict.retryUncertain
+                ? 'The program list changed. Your previous save may have completed. Check the existing appointments before starting another program.'
+                : 'Open a program to edit or extend it. Create a separate program only when this customer needs additional recurring work.'}</p>
+              {duplicateConflict.existingSeries?.map((series) => (
+                <div key={series.id} style={{ padding: '10px 0', borderBottom: `1px solid ${D.border}` }}>
+                  <div>{series.serviceType} · {String(series.pattern || 'Recurring').replaceAll('_', ' ')}</div>
+                  <div>Next visit: {series.nextUpcomingDate || 'Not scheduled'}</div>
+                  <div>Recorded address: {series.recordedAddress || 'Not recorded — check the existing appointment'}</div>
+                  <a href={`/admin/dispatch?tab=schedule&date=${encodeURIComponent(series.appointmentDate || series.nextUpcomingDate || apptDate)}&appointment=${encodeURIComponent(series.appointmentId || series.id)}`}
+                    target="_blank" rel="noopener noreferrer" style={{ display: 'inline-flex', alignItems: 'center', minHeight: 44, color: D.text, textDecoration: 'underline' }}>Open existing program</a>
+                </div>
+              ))}
+              {duplicateConflict.canCreateSeparateProgram === true && !duplicateConflict.retryUncertain && (
+                <div style={{ marginTop: 12 }}>
+                  <label htmlFor="separate-program-reason">Reason for a separate recurring program</label>
+                  <textarea id="separate-program-reason" value={separateProgramReason} maxLength={500}
+                    onChange={(event) => setSeparateProgramReason(event.target.value)}
+                    placeholder="Describe the additional scope of work"
+                    style={{ display: 'block', boxSizing: 'border-box', width: '100%', margin: '8px 0', padding: 12, fontSize: 14, border: `1px solid ${D.border}`, borderRadius: 6 }} />
+                  <button type="button" disabled={saving || separateProgramReason.trim().length < 5}
+                    onClick={() => handleSubmit(duplicateConflict)}
+                    style={{ minHeight: 44, padding: '10px 16px', fontSize: 14, borderRadius: 6, background: D.text, color: D.white, border: 'none', opacity: saving || separateProgramReason.trim().length < 5 ? 0.5 : 1 }}>
+                    Create separate recurring program
+                  </button>
+                </div>
+              )}
+            </section>
+          )}
           <SlotConflictNotice conflicts={slotConflicts} style={{ marginBottom: 10 }} />
           <BestTimeHint
             bestTimes={bestTimes}

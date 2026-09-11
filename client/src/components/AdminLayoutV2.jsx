@@ -1,4 +1,5 @@
 import { IntelligenceBarPageDataProvider } from '../hooks/useIntelligenceBarPageData';
+import ScheduleSaveNotice, { clearScheduleSaveNotices } from './schedule/ScheduleSaveNotice';
 /*
  * AdminLayoutV2 — Square Dashboard-inspired light admin shell.
  *
@@ -17,6 +18,7 @@ import { useState, useEffect, useRef } from "react";
 import { Outlet, useNavigate, useLocation, Link } from "react-router-dom";
 import { consumeSnapshotOnMount } from "../lib/tapToPayReturn";
 import { cn } from "./ui/cn";
+import { Button } from "./ui";
 import {
   Search,
   LogOut,
@@ -101,6 +103,7 @@ export default function AdminLayoutV2() {
   const [user, setUser] = useState(null);
   const [authStatus, setAuthStatus] = useState("checking");
   const [sidebarOpen, setSidebarOpen] = useState(false);
+  const menuTriggerRef = useRef(null);
   // Mobile drawer: focus moves in on open, Tab is trapped, Escape closes,
   // focus returns to the "Open menu" button (F0014).
   const drawerRef = useModalFocus(isMobile && sidebarOpen, () => setSidebarOpen(false));
@@ -203,13 +206,19 @@ export default function AdminLayoutV2() {
 
   const handleLogout = () => {
     clearEmailDrafts();
+    clearScheduleSaveNotices();
     localStorage.removeItem("waves_admin_token");
     localStorage.removeItem("waves_admin_user");
     refetchFlags().catch(() => {});
     navigate("/admin/login", { replace: true });
   };
 
-  const openPalette = () => paletteRef.current?.open();
+  const closeSidebarForPalette = () => {
+    // The assistant must capture an opener that survives the hidden drawer.
+    if (isMobile && sidebarOpen) menuTriggerRef.current?.focus({ preventScroll: true });
+    setSidebarOpen(false);
+  };
+  const openPalette = () => { closeSidebarForPalette(); paletteRef.current?.open(); };
 
   const sidebarVisible = !isMobile || sidebarOpen;
   // The redirect effect runs after render. Apply its existing role policy to
@@ -255,6 +264,7 @@ export default function AdminLayoutV2() {
         >
           <button
             type="button"
+            ref={menuTriggerRef}
             onClick={() => setSidebarOpen(true)}
             aria-label="Open menu"
             aria-expanded={sidebarOpen}
@@ -276,6 +286,7 @@ export default function AdminLayoutV2() {
           </button>
           <img src="/waves-logo.png" alt="Waves" style={{ height: 24 }} />
           <div style={{ flex: 1 }} />
+          {navigationEnabled && <Button density="comfortable" variant="ghost" onClick={() => paletteRef.current?.openNavigation()} aria-label="Search pages" className="!px-3"><Search size={20} aria-hidden /></Button>}
           <button
             type="button"
             onClick={openPalette}
@@ -350,7 +361,7 @@ export default function AdminLayoutV2() {
             isMobile && sidebarOpen ? "2px 0 16px rgba(0,0,0,0.12)" : "none",
         }}
       >
-        {navigationEnabled ? <AdminWorkspaceNavigation user={user} isMobile={isMobile} onClose={() => setSidebarOpen(false)} onAsk={openPalette} onLogout={handleLogout} unreadCount={unreadConversations} /> : <>
+        {navigationEnabled ? <AdminWorkspaceNavigation user={user} isMobile={isMobile} onClose={() => setSidebarOpen(false)} onAsk={openPalette} onSearch={() => paletteRef.current?.openNavigation()} onLogout={handleLogout} unreadCount={unreadConversations} /> : <>
         {/* Logo + title + notification bell */}
         <div
           style={{
@@ -663,7 +674,7 @@ export default function AdminLayoutV2() {
         ref={mainRef}
       >
         {canRenderRoute ? (
-          <Outlet context={{ user }} />
+          <><Outlet context={{ user }} /><ScheduleSaveNotice /></>
         ) : (
           <div role={authStatus === "error" ? "alert" : "status"}>
             {authStatus === "error"
@@ -758,7 +769,7 @@ export default function AdminLayoutV2() {
       )}
 
       {/* Global ⌘K palette */}
-      <GlobalCommandPalette ref={paletteRef} user={user} />
+      <GlobalCommandPalette ref={paletteRef} user={user} onNavigate={closeSidebarForPalette} />
     </div>
     </AdminNavigationProvider>
     </IntelligenceBarPageDataProvider>
