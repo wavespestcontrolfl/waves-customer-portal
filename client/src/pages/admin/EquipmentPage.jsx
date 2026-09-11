@@ -746,17 +746,26 @@ function JobCostTab() {
   const [costs, setCosts] = useState([]);
   const [loading, setLoading] = useState(true);
   const [readError, setReadError] = useState("");
+  const [listError, setListError] = useState("");
   const [attempt, setAttempt] = useState(0);
   useEffect(() => {
     let active = true;
     setLoading(true);
     setReadError("");
-    Promise.all([adminFetch("/admin/equipment/job-costs/summary"), adminFetch("/admin/equipment/job-costs?limit=30")]).then(([s, c]) => {
+    setListError("");
+    Promise.allSettled([adminFetch("/admin/equipment/job-costs/summary"), adminFetch("/admin/equipment/job-costs?limit=30")]).then(([s, c]) => {
       if (!active) return;
-      setSummary(normalizeJobCostSummary(s));
-      setCosts(c.job_costs || c.costs || []);
-    }).catch(error => {
-      if (active) setReadError(error.message);
+      if (s.status === "rejected") {
+        setReadError(s.reason?.message || "Request failed");
+        return;
+      }
+      setSummary(normalizeJobCostSummary(s.value));
+      if (c.status === "rejected") {
+        setCosts([]);
+        setListError(c.reason?.message || "Request failed");
+      } else {
+        setCosts(c.value.job_costs || c.value.costs || []);
+      }
     }).finally(() => {
       if (active) setLoading(false);
     });
@@ -876,7 +885,10 @@ function JobCostTab() {
             </div>)}
         </Card>}
 
-      {costs.length === 0 && <Card style={{
+      {listError && <ActionFeedback error onRetry={() => setAttempt(v => v + 1)} className="mb-3">
+          Could not load recent job costs: {listError}
+        </ActionFeedback>}
+      {!listError && costs.length === 0 && <Card style={{
       textAlign: "center",
       padding: 40,
       color: "#71717A"

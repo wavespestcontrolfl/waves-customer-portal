@@ -1,0 +1,41 @@
+// @vitest-environment jsdom
+import React from 'react';
+import '@testing-library/jest-dom/vitest';
+import { MemoryRouter, Outlet, Route, Routes } from 'react-router-dom';
+import { cleanup, fireEvent, render, screen } from '@testing-library/react';
+import { afterEach, beforeEach, expect, it, vi } from 'vitest';
+import EquipmentPage from './EquipmentPage';
+vi.mock('../../hooks/useRenderedTabBeacon', () => ({ default: () => {} }));
+vi.mock('./EquipmentMaintenancePage', () => ({ default: () => null }));
+vi.mock('./EquipmentCalibrationPanel', () => ({ default: () => null }));
+const summary = { overall: { total_jobs: 4, total_revenue: 800, total_costs: 200, avg_margin: 75 } };
+const ok = body => ({ ok: true, json: async () => body });
+const fail = () => ({ ok: false, status: 503 });
+let handler;
+beforeEach(() => { handler = async () => ok({}); vi.stubGlobal('fetch', vi.fn((...args) => handler(...args))); });
+afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
+const AdminShell = () => <Outlet context={{ user: { role: 'admin' } }} />;
+const mount = () => render(<MemoryRouter initialEntries={['/?tab=job-costs']}><Routes><Route element={<AdminShell />}><Route path="/" element={<EquipmentPage />} /></Route></Routes></MemoryRouter>);
+const route = url => (String(url).includes('/job-costs/summary') ? 'summary' : 'list');
+it('keeps summary KPIs when only the list request fails, and retries the list', async () => {
+ handler = async url => (route(url) === 'summary' ? ok(summary) : fail());
+ mount();
+ const alert = await screen.findByRole('alert');
+ expect(alert).toHaveTextContent('Could not load recent job costs');
+ expect(screen.getByText('Avg Margin')).toBeInTheDocument();
+ expect(screen.getByText('75.0%')).toBeInTheDocument();
+ expect(screen.queryByText(/No job costs recorded yet/)).not.toBeInTheDocument();
+ handler = async url => (route(url) === 'summary' ? ok(summary) : ok({ job_costs: [] }));
+ fireEvent.click(screen.getByRole('button', { name: 'Try again' }));
+ await screen.findByText(/No job costs recorded yet/);
+ expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+ expect(screen.getByText('Avg Margin')).toBeInTheDocument();
+});
+it('shows the full read error when the summary request fails', async () => {
+ handler = async url => (route(url) === 'summary' ? fail() : ok({ job_costs: [] }));
+ mount();
+ const alert = await screen.findByRole('alert');
+ expect(alert).toHaveTextContent('Could not load job costs:');
+ expect(screen.queryByText('Avg Margin')).not.toBeInTheDocument();
+ expect(screen.queryByText(/No job costs recorded yet/)).not.toBeInTheDocument();
+});
