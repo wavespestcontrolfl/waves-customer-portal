@@ -493,7 +493,18 @@ async function estimateLinks(row, data) {
 // reprice failure internally and REPORTS it as { ok: false, error }; a
 // rejection is handled too. Either way the row is still the unverified
 // snapshot, so the caller withholds pricing.
+//
+// Skipped ENTIRELY for a price-locked row (estimateIsPriceLocked: status
+// accepted/declined, or price_locked_at stamped) — the real reconciler
+// (estimate-public.js reconcileFrozenMembershipSnapshot) only refuses to
+// touch 'accepted' or an explicit price_locked_at stamp, NOT 'declined', so
+// a declined-but-unstamped row's monthly_total/annual_total could still be
+// mutated in memory by a later membership lapse; totalsFor then treats a
+// price-locked row's stored columns as the trusted committed figure, so
+// this call must not let them be silently repriced first (pre-push audit
+// P1).
 async function reconcileMembership(row) {
+  if (lazy.proposalBilling().estimateIsPriceLocked(row)) return null;
   try {
     const result = await lazy.publicRoute().reconcileFrozenMembershipSnapshot(row);
     if (result && result.ok === false) return `membership reconciliation failed: ${result.error || 'unknown error'}`;

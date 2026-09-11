@@ -471,6 +471,23 @@ test('a price-locked estimate whose bundle IS a valid snapshot still reports ful
   expect(shaped.offered_pricing.plan_frequencies).toEqual([expect.objectContaining({ key: 'quarterly', monthly: 47, annual: 564 })]);
 });
 
+test('a DECLINED estimate — no price_locked_at stamp, since the real reconciler only refuses accepted/stamped rows — never runs membership reconciliation, so a lapsed member cannot mutate its committed columns before totalsFor trusts them (pre-push audit P1)', async () => {
+  mockReconcile.mockImplementation(async (estimate) => {
+    // If this ran, it would reprice the row exactly like the "lapsed membership" test above.
+    estimate.monthly_total = '999.00';
+    estimate.annual_total = '11988.00';
+  });
+  mockBuildPricingBundle.mockResolvedValue({ frequencies: [{ key: 'quarterly', monthly: 47, annual: 564 }], snapshotHit: true });
+  const row = estimateRow({ status: 'declined', declined_at: '2026-09-01T00:00:00Z', price_locked_at: null, monthly_total: '47.00', annual_total: '564.00' });
+  const shaped = await shapeEstimate(row);
+  expect(calls).toEqual(['bundle']); // 'reconcile' never called
+  expect(mockReconcile).not.toHaveBeenCalled();
+  expect(row.monthly_total).toBe('47.00'); // untouched
+  expect(shaped.reconciliation_error).toBeUndefined();
+  expect(shaped.offered_pricing.price_locked).toBe(true);
+  expect(shaped.totals).toEqual({ monthly: 47, annual: 564, one_time: 125 });
+});
+
 test('a rebuilt bundle whose default sellable cadence is itself a narrow LOW-confidence line withholds the exact total and carries the range instead — PriceCard shows a range, never a midpoint (pre-push audit P1)', async () => {
   mockBuildPricingBundle.mockResolvedValue({ frequencies: [
     { key: 'monthly', monthly: 500, annual: 6000, perTreatment: 500, visitsPerYear: 12, billedPerApplication: true, lowConfidenceRangePct: 0.2, lowConfidenceFraction: 1 },
