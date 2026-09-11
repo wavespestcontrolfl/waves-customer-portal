@@ -2893,6 +2893,11 @@ async function notifyPaymentFailed(paymentIntent, friendlyFailure, eventId) {
     customerName: customerLabel(customer),
     reason: friendlyFailure,
     invoiceId: failedInvoice?.id || null,
+    // The demo / App Store review account must never ring the shared bell
+    // or push: both the trigger-level and the NotificationService
+    // suppression key on this id, and payment_failed now rings through
+    // the bell policy (codex P2 on #4392).
+    customerId: customer?.id || null,
   });
 }
 

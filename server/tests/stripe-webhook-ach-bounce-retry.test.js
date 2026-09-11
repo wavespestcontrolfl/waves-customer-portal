@@ -296,3 +296,22 @@ describe('async monthly-autopay bounce arming', () => {
       expect.objectContaining({ details: expect.objectContaining({ billed_month: '2026-06' }) }));
   });
 });
+
+describe('payment_failed admin bell payload', () => {
+  test('carries the resolved customerId so the internal-test-customer suppression can key on it (codex P2 on #4392)', async () => {
+    const db = require('../models/db');
+    const { triggerNotification } = require('../services/notification-triggers');
+    // Let the (PI, failed, attempt) claim win so notifyPaymentFailed reaches the trigger.
+    db.raw.mockImplementation(async (sql) => (String(sql).includes('stripe_payment_notification_log') ? { rowCount: 1 } : { rowCount: 0 }));
+    const row = processingRow();
+    mockState.processingRow = row;
+    mockState.paymentRow = row;
+    await handlePaymentIntentFailed(achBouncePI(), 'evt_pf_1');
+    // The bell fan-out is fire-and-forget (not awaited by the handler).
+    await new Promise((resolve) => setImmediate(resolve));
+    const call = triggerNotification.mock.calls.find((c) => c[0] === 'payment_failed');
+    expect(call).toBeTruthy();
+    expect(call[1]).toMatchObject({ customerId: 'cust-1', amount: expect.any(Number), reason: expect.any(String) });
+  });
+});
+
