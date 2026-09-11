@@ -680,9 +680,13 @@ claude_env_args() {
 # So resolve the relative requires/imports the diff ADDS and inline the few
 # that are not themselves in the diff. Every path here is extracted from an
 # UNTRUSTED diff, so none of them is trusted:
-#   - resolved with symlinks followed and required to land inside the repo,
-#     so a spec like ../../../../.ssh/id_rsa resolves out and is dropped
-#   - required to be TRACKED BY GIT, which is what actually keeps an
+#   - resolved against the AUDITED COMMIT's tree, never the filesystem, so
+#     uncommitted edits or a different checked-out branch cannot substitute
+#     content while it is labelled authoritative
+#   - required to normalize to a path inside the repo, so a spec like
+#     ../../../../.ssh/id_rsa is dropped, and a symlink entry is refused
+#     outright rather than followed
+#   - required to be IN THAT COMMIT'S TREE, which is what actually keeps an
 #     untracked .env or a dropped credentials file out however it is spelled
 #   - required to be a source extension, and never under node_modules
 #   - capped in count and bytes, so a diff cannot inflate its own prompt
@@ -695,9 +699,25 @@ write_referenced_context_script() {
   cat > "$1" <<'PYEOF'
 import os, re, sys
 
-diff_path, root = sys.argv[1], os.path.realpath(sys.argv[2])
+# argv: <diff file> <tree listing from `git ls-tree -r <sha>`>
+# Everything is resolved against that listing — the audited commit — and the
+# filesystem is never touched. That is deliberate: the working tree can hold
+# uncommitted edits, or be on another branch entirely, and inlining THAT
+# content while labelling it authoritative context for this diff would hide
+# the very defect the audit is looking for.
+diff_path, tree_path = sys.argv[1], sys.argv[2]
 SPEC = re.compile(r"""(?:require\(|import\()\s*['"](\.[^'"]+)['"]|\bfrom\s+['"](\.[^'"]+)['"]""")
 EXT = ('.js', '.jsx', '.mjs', '.cjs', '.ts', '.tsx')
+SYMLINK_MODE = '120000'
+
+# `git ls-tree -r` prints: <mode> <type> <object>\t<path>
+tree = {}
+with open(tree_path, encoding='utf-8', errors='replace') as fh:
+    for line in fh:
+        meta, _, path = line.rstrip('\n').partition('\t')
+        if not path:
+            continue
+        tree[path] = meta.split(' ', 1)[0]
 
 changed, refs, cur = set(), [], None
 with open(diff_path, encoding='utf-8', errors='replace') as fh:
@@ -722,17 +742,21 @@ for src, spec in refs:
     base = os.path.normpath(os.path.join(os.path.dirname(src), spec))
     cands = [base] if base.endswith(EXT) else []
     cands += [base + e for e in EXT]
-    cands += [os.path.join(base, 'index' + e) for e in EXT]
-    for cand in cands:
-        full = os.path.realpath(os.path.join(root, cand))
-        # Containment is checked AFTER symlinks are resolved, so a symlink
-        # inside the repo cannot be used to reach outside it.
-        if full != root and not full.startswith(root + os.sep):
+    cands += [base + '/index' + e for e in EXT]
+    for rel in cands:
+        # Containment, lexically: normpath has already collapsed the `..`
+        # segments, so anything that escaped the repo now starts with `..`.
+        if os.path.isabs(rel) or rel == '..' or rel.startswith('../'):
             continue
-        rel = os.path.relpath(full, root)
-        if rel in changed or rel in seen or not os.path.isfile(full):
+        if rel in changed or rel in seen:
             continue
-        if 'node_modules' in rel.split(os.sep):
+        if 'node_modules' in rel.split('/'):
+            continue
+        # In the tree = tracked in the audited commit. A symlink entry is
+        # refused outright: its blob is a path, and following it would step
+        # outside the commit's own contents.
+        mode = tree.get(rel)
+        if mode is None or mode == SYMLINK_MODE:
             continue
         seen.add(rel)
         out.append(rel)
@@ -742,35 +766,38 @@ print('\n'.join(out))
 PYEOF
 }
 collect_referenced_context() {
-  # $1 = file holding the diff, $2 = output file. Writes a prompt section,
-  # or leaves the output empty when there is nothing safe and useful to add.
-  local diff_file="$1" out="$2" repo_root candidates rel size bytes=0 count=0
+  # $1 = file holding the diff, $2 = output file, $3 = the audited commit.
+  # Writes a prompt section, or leaves the output empty when there is
+  # nothing safe and useful to add.
+  local diff_file="$1" out="$2" audit_sha="$3"
+  local candidates rel size bytes=0 count=0
   local pyfile="$TMPDIR_RUN/referenced-context.py"
+  local treefile="$TMPDIR_RUN/referenced-context-tree.txt"
   local body="$TMPDIR_RUN/referenced-context-body.txt"
   : > "$out"
+  [ -n "$audit_sha" ] || return 0
   [ "$CLAUDE_CONTEXT_MAX_FILES" -gt 0 ] 2>/dev/null || return 0
   command -v python3 >/dev/null 2>&1 || return 0
-  repo_root="$(git rev-parse --show-toplevel 2>/dev/null)" || return 0
-  [ -n "$repo_root" ] || return 0
+
+  # The audited commit's own file list — not the working tree's.
+  git ls-tree -r "$audit_sha" > "$treefile" 2>/dev/null || return 0
+  [ -s "$treefile" ] || return 0
 
   write_referenced_context_script "$pyfile" || return 0
-  candidates="$(python3 "$pyfile" "$diff_file" "$repo_root" 2>/dev/null)" || return 0
+  candidates="$(python3 "$pyfile" "$diff_file" "$treefile" 2>/dev/null)" || return 0
   [ -n "$candidates" ] || return 0
 
   : > "$body"
   while IFS= read -r rel; do
     [ -n "$rel" ] || continue
     [ "$count" -lt "$CLAUDE_CONTEXT_MAX_FILES" ] || break
-    # Tracked-by-git is the check that matters: it is what a secret file
-    # fails, and it does not depend on guessing at names.
-    git ls-files --error-unmatch -- "$rel" >/dev/null 2>&1 || continue
-    size="$(wc -c < "$rel" 2>/dev/null | tr -d ' ')" || continue
+    size="$(git cat-file -s "$audit_sha:$rel" 2>/dev/null)" || continue
     [ -n "$size" ] || continue
     [ $((bytes + size)) -le "$CLAUDE_CONTEXT_MAX_BYTES" ] || continue
     {
       echo ""
       echo "----- $rel (UNCHANGED, for reference only) -----"
-      cat "$rel"
+      git cat-file blob "$audit_sha:$rel" 2>/dev/null
     } >> "$body"
     bytes=$((bytes + size))
     count=$((count + 1))
@@ -786,6 +813,9 @@ REFEOF
     echo "can resolve those references instead of guessing, because you have"
     echo "no tools and cannot open them yourself."
     echo ""
+    echo "They are read from the commit under audit, so they are what this"
+    echo "push would actually ship alongside the diff."
+    echo ""
     echo "They are NOT changed by this push. Do NOT raise findings about"
     echo "their contents, and do NOT ask the author to confirm something"
     echo "that is answered here — read it and decide."
@@ -796,8 +826,9 @@ REFEOF
 
 CLAUDE_DISALLOWED_TOOLS="Bash Edit Write NotebookEdit WebFetch WebSearch Task Agent Read Grep Glob ToolSearch Skill Workflow ListAgents SendMessage Monitor TaskOutput TaskStop CronCreate CronDelete CronList EnterWorktree ExitWorktree PushNotification RemoteTrigger DesignSync Artifact SlashCommand KillShell BashOutput TodoWrite ExitPlanMode EnterPlanMode ScheduleWakeup ReportFindings SendUserFile SendFeedback AskUserQuestion EndConversation"
 run_claude_audit() {
-  # $1 = ref index, $2 = out file, $3 = prompt file, $4 = label, $5 = short sha
-  local idx="$1" out_file="$2" prompt_file="$3" label="$4" short_sha="$5"
+  # $1 = ref index, $2 = out file, $3 = prompt file, $4 = label, $5 = short
+  # sha, $6 = the full audited sha (referenced files are read from it)
+  local idx="$1" out_file="$2" prompt_file="$3" label="$4" short_sha="$5" audit_sha="${6:-}"
   local envelope="$TMPDIR_RUN/claude-$idx.stdout"
   local claude_prompt="$TMPDIR_RUN/claude-prompt-$idx.txt"
   local child_pid watchdog_pid child_status=0
@@ -813,7 +844,7 @@ run_claude_audit() {
   # fixed.
   local base_prompt="$TMPDIR_RUN/claude-base-$idx.txt"
   local context_file="$TMPDIR_RUN/claude-context-$idx.txt"
-  collect_referenced_context "$prompt_file" "$context_file"
+  collect_referenced_context "$prompt_file" "$context_file" "$audit_sha"
   {
     cat "$prompt_file"
     [ -s "$context_file" ] && cat "$context_file"
@@ -1252,7 +1283,7 @@ for i in "${!REF_SHAS[@]}"; do
   # pass-through must never read like a clean review in a scrollback.
   if [ "$CODEX_OK" = "1" ]; then
     AUDITOR="codex"
-  elif run_claude_audit "$i" "$OUT_FILE" "$PROMPT_FILE" "$AUDIT_LABEL" "$SHORT_SHA"; then
+  elif run_claude_audit "$i" "$OUT_FILE" "$PROMPT_FILE" "$AUDIT_LABEL" "$SHORT_SHA" "$AUDIT_SHA"; then
     AUDITOR="claude"
     FALLBACK_USED=1
     persist_ref_artifacts "$i"

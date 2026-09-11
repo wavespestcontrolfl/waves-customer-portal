@@ -15,6 +15,12 @@
 # working — so each rejection case also proves the SAME shape is accepted
 # when the unsafe property is removed.
 #
+# Everything resolves against the AUDITED COMMIT, never the working tree.
+# That distinction is a correctness guard, not a detail: a dirty tree or a
+# push of a branch you are not standing on would otherwise inline different
+# content than the diff ships, labelled as authoritative context, and hide
+# the defect the audit exists to find. Both cases are pinned below.
+#
 # No model calls, no network, runs in about a second.
 #
 #   scripts/test-referenced-context.sh
@@ -64,7 +70,8 @@ printf 'module.exports = { big: "%s" };\n' "$(head -c 4000 < /dev/zero | tr '\0'
 ln -s /etc/passwd server/services/link.js
 git add -A >/dev/null 2>&1
 git commit -qm init >/dev/null 2>&1
-# Deliberately NOT tracked — this is the .env-shaped case.
+AUDIT_SHA="$(git rev-parse HEAD)"
+# Deliberately NOT committed — this is the .env-shaped case.
 echo "module.exports = { SECRET: 'sk_live_do_not_leak' };" > server/services/secrets.js
 
 # $1 = the added source line(s), $2 = path the diff claims to change
@@ -80,7 +87,7 @@ make_diff() {
   } > "$WORK/diff.txt"
 }
 
-run_collect() { collect_referenced_context "$WORK/diff.txt" "$WORK/out.txt"; }
+run_collect() { collect_referenced_context "$WORK/diff.txt" "$WORK/out.txt" "$AUDIT_SHA"; }
 
 # $1 = label, $2 = added line, $3 = "includes"|"excludes", $4 = needle
 expect() {
@@ -113,9 +120,13 @@ expect "  ...but keeps the same require shape when it stays inside" \
 expect "drops an UNTRACKED file (the .env / dropped-credential case)" \
   "const s = require('./secrets');" excludes "sk_live_do_not_leak"
 git add server/services/secrets.js >/dev/null 2>&1
-expect "  ...and accepts that very file once it is tracked" \
+git commit -qm secrets >/dev/null 2>&1
+SECRETS_SHA="$AUDIT_SHA"; AUDIT_SHA="$(git rev-parse HEAD)"
+expect "  ...and accepts that very file once it is committed" \
   "const s = require('./secrets');" includes "sk_live_do_not_leak"
-git rm -q --cached server/services/secrets.js >/dev/null 2>&1
+AUDIT_SHA="$SECRETS_SHA"
+expect "  ...and drops it again when auditing the commit that predates it" \
+  "const s = require('./secrets');" excludes "sk_live_do_not_leak"
 
 # Symlink escape — containment is checked after resolution.
 expect "drops an in-repo symlink pointing outside the repo" \
@@ -141,6 +152,44 @@ fi
 # Bare specifiers are not paths.
 expect "ignores a bare package specifier" \
   "const knex = require('knex');" excludes "knex"
+
+echo ""
+echo "reads the audited commit, not the working tree:"
+
+# A dirty working tree must not be able to substitute content.
+echo "module.exports = { POLICY: 'DIRTY_WORKTREE' };" > server/config/models.js
+make_diff "const m = require('../config/models');"
+run_collect
+if grep -q "DIRTY_WORKTREE" "$WORK/out.txt"; then
+  fail "inlines the DIRTY WORKING TREE instead of the audited commit"
+else
+  grep -q "POLICY" "$WORK/out.txt" \
+    && pass "ignores uncommitted edits and inlines the committed content" \
+    || fail "inlined nothing at all with a dirty tree"
+fi
+git checkout -q -- server/config/models.js
+
+# Auditing a ref that is not the checked-out branch.
+git checkout -q -b other >/dev/null 2>&1
+echo "module.exports = { POLICY: 'OTHER_BRANCH' };" > server/config/models.js
+git commit -qam other >/dev/null 2>&1
+OTHER_SHA="$(git rev-parse HEAD)"
+git checkout -q - >/dev/null 2>&1
+SAVED_SHA="$AUDIT_SHA"; AUDIT_SHA="$OTHER_SHA"
+make_diff "const m = require('../config/models');"
+run_collect
+if grep -q "OTHER_BRANCH" "$WORK/out.txt"; then
+  pass "audits a ref that is not checked out from that ref's own tree"
+else
+  fail "did not read the pushed ref's content when it is not checked out"
+fi
+AUDIT_SHA="$SAVED_SHA"
+
+# No sha, no context — never a silent fall-back to the working tree.
+SAVED_SHA="$AUDIT_SHA"; AUDIT_SHA=""
+expect "emits nothing when given no commit" \
+  "const m = require('../config/models');" excludes "POLICY"
+AUDIT_SHA="$SAVED_SHA"
 
 echo ""
 echo "caps and framing:"
