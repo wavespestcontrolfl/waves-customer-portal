@@ -1169,6 +1169,42 @@ postgres('SMS commitments on PostgreSQL', () => {
     expect((await mockPg('call_commitments').first()).status).toBe('fulfilled');
   });
 
+  test('a lead-addressed proposal cannot close while the lead that owns it is being deleted', async () => {
+    const after = new Date(message.created_at.getTime() + 1000);
+    const now = new Date(after.getTime() + 1000);
+    result.facts = [];
+    result.obligations[0].due_at = after.toISOString();
+    await recordMessageOperations(mockPg, message, result, context);
+    const commitment = await mockPg('call_commitments').first();
+    // An unowned commercial proposal: the estimate carries no customer_id and
+    // is this customer's only through the lead that names it.
+    const [estimate] = await mockPg('estimates').insert({ customer_id: null,
+      property_id: context.properties[0].id, status: 'sent', service_interest: 'Lawn',
+      estimate_data: { deliveryState: { lastDeliveredAt: after.toISOString() } } }).returning('id');
+    const [lead] = await mockPg('leads').insert({ customer_id: message.customer_id, estimate_id: estimate.id }).returning('id');
+    dispatchWithFallback.mockResolvedValue({ ok: true, json: { verdict: 'fulfilled',
+      record_ref: `estimate:${estimate.id}`, quote: 'Lawn' } });
+    const evidence = await loadSmsFulfillmentEvidence(mockPg, commitment, message, now);
+    const verdict = await verifySmsFulfillment(commitment, evidence, { now });
+    expect(verdict.verdict).toBe('fulfilled');
+    const leadDeleter = await mockPg.transaction();
+    try {
+      // The soft delete holds the lead row; the estimate it points at is
+      // untouched, so only a lock on the lead itself can fence this verdict.
+      await leadDeleter('leads').where({ id: lead.id }).forUpdate().first();
+      await mockPg.transaction(async (trx) => {
+        await trx.raw("SET LOCAL lock_timeout = '500ms'");
+        await trx('customers').where({ id: message.customer_id }).forUpdate().first();
+        expect(await revalidateSmsFulfillment(trx, commitment, message, verdict, now)).toBe(false);
+      });
+    } finally {
+      await leadDeleter.rollback();
+    }
+    expect((await mockPg('call_commitments').first()).status).toBe('open');
+    expect(await refreshSmsCommitments({ conn: mockPg, now })).toMatchObject({ fulfilled: 1 });
+    expect((await mockPg('call_commitments').first()).status).toBe('fulfilled');
+  });
+
   test.each(['failed', 'undelivered', 'unattributed'])('outbound %s during extraction cannot create a promise', async (status) => {
     message = { ...message, direction: 'outbound', from_phone: message.to_phone, to_phone: message.from_phone,
       message_type: 'manual', admin_user_id: '00000000-0000-4000-8000-000000000104', status: 'sent', message_body: "I'll send the estimate" };

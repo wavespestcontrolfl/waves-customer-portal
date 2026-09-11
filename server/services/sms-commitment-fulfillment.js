@@ -293,6 +293,22 @@ function fulfillmentFingerprint(commitment, evidence) {
     failures: [...evidence.failures].sort() })) };
 }
 
+// An unowned commercial proposal belongs to the customer only through live
+// `leads` rows (whereEstimateCustomerOwnership), so ownership can be revoked
+// by a soft delete there without touching the estimate itself. True when the
+// estimate is the customer's own row, or when every lead admitting it is held
+// by this transaction and still live.
+async function holdsLeadOwnership(trx, estimateId, customerId) {
+  const estimate = await trx('estimates').where({ id: estimateId }).first('customer_id');
+  if (!estimate) return false;
+  if (estimate.customer_id) return estimate.customer_id === customerId;
+  const held = await trx('leads').where({ customer_id: customerId }).whereNull('deleted_at')
+    .where((q) => q.where({ estimate_id: estimateId })
+      .orWhereRaw("leads.id::text = (SELECT e.estimate_data ->> 'lead_id' FROM estimates e WHERE e.id = ?)", [estimateId]))
+    .forUpdate().skipLocked().select('id');
+  return held.length > 0;
+}
+
 // The provider runs outside the transaction. Lock its actual witness and
 // re-read the same evidence before allowing a delayed verdict to close work.
 async function revalidateSmsFulfillment(trx, commitment, message, verdict, now) {
@@ -311,6 +327,14 @@ async function revalidateSmsFulfillment(trx, commitment, message, verdict, now) 
     const linkedLock = linkedTable && await trx(linkedTable).where({ id: verdict.linked_record_id }).forUpdate().skipLocked().first('id');
     if (!linkedLock) return false;
   }
+  // The lead that admitted an unowned estimate is a third row this witness
+  // depends on: locking it here, after the estimate and under the same no-wait
+  // rule, means a racing soft delete either loses the row to us or leaves us
+  // nothing to hold, and the verdict fails closed rather than closing work on
+  // a proposal that has stopped belonging to the customer.
+  const estimateId = verdict.record_type === 'estimate' ? verdict.record_id
+    : (verdict.linked_record_type === 'estimate' ? verdict.linked_record_id : null);
+  if (estimateId && !await holdsLeadOwnership(trx, estimateId, message.customer_id)) return false;
   const evidence = await loadSmsFulfillmentEvidence(trx, commitment, message, now);
   if (fulfillmentFingerprint(commitment, evidence).evidenceHash !== verdict.evidence_hash) return false;
   return groundFulfillment({ verdict: 'fulfilled', record_ref: `${verdict.record_type}:${verdict.record_id}`,
