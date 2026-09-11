@@ -447,7 +447,11 @@ function resolveInvoiceMode(row, data) {
 // default sellable cadence is used instead. One-time is the composer's
 // corrected figure when the bundle built (it is what the page shows), the
 // stored column otherwise. Withheld entirely when membership could not be
-// verified.
+// verified, OR when offered_pricing itself is unavailable (an enabled
+// authored proposal's projection failed, or the pricing bundle failed /
+// doesn't exist — pre-push audit P1): this tool exists because the stored
+// columns are not trusted as the quote on their own, so a failed pricing
+// read must not fall back to exposing them as if they were.
 function totalsFor(row, pricing, reconciliation_error) {
   if (reconciliation_error) return { monthly: null, annual: null, one_time: null, withheld: true };
   const offered = pricing.offered_pricing;
@@ -455,8 +459,9 @@ function totalsFor(row, pricing, reconciliation_error) {
     const t = offered.totals;
     return { monthly: t.monthly_equivalent, annual: t.annual_recurring, one_time: t.one_time, total_tax: t.total_tax, first_year_total: t.first_year_total, source: 'authored_proposal' };
   }
-  const oneTime = offered?.one_time_total ?? money(row.onetime_total);
-  if (offered && offered.snapshot_hit === false && offered.rebuilt_default_frequency) {
+  if (!offered) return { monthly: null, annual: null, one_time: null, withheld: true };
+  const oneTime = offered.one_time_total ?? money(row.onetime_total);
+  if (offered.snapshot_hit === false && offered.rebuilt_default_frequency) {
     const d = offered.rebuilt_default_frequency;
     return { monthly: d.monthly, annual: d.annual, one_time: oneTime, source: 'rebuilt_bundle_default' };
   }

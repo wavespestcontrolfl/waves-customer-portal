@@ -265,11 +265,18 @@ test('a reconciler or bundle failure is reported on the response, never thrown a
   expect(shaped.offered_pricing_unavailable).toMatch(/withheld: membership reconciliation failed: plan lookup down/);
   expect(shaped.requote_required).toBeNull(); // unknown without the bundle — never a confident "no"
   expect(shaped.requote_reason).toBeNull();
+  expect(shaped.totals).toEqual({ monthly: null, annual: null, one_time: null, withheld: true });
   mockReconcile.mockResolvedValue(undefined);
   mockBuildPricingBundle.mockResolvedValue(null);
-  expect((await shapeEstimate(estimateRow())).offered_pricing_unavailable).toMatch(/no pricing bundle/);
+  const noBundle = await shapeEstimate(estimateRow());
+  expect(noBundle.offered_pricing_unavailable).toMatch(/no pricing bundle/);
+  // No bundle at all: the stored columns are not the quote this tool
+  // reports — withheld, same as a failed reconciliation (pre-push audit P1).
+  expect(noBundle.totals).toEqual({ monthly: null, annual: null, one_time: null, withheld: true });
   mockBuildPricingBundle.mockRejectedValue(new Error('no customer row'));
-  expect((await shapeEstimate(estimateRow())).offered_pricing_unavailable).toMatch(/no customer row/);
+  const bundleThrew = await shapeEstimate(estimateRow());
+  expect(bundleThrew.offered_pricing_unavailable).toMatch(/no customer row/);
+  expect(bundleThrew.totals).toEqual({ monthly: null, annual: null, one_time: null, withheld: true });
 });
 
 test('the real reconciler never throws — it REPORTS { ok: false }: pricing and totals are withheld, the bundle is not even built (Codex r7 P1)', async () => {
@@ -455,6 +462,10 @@ test('an enabled, itemized proposal is the pricing authority: authored lines, pr
   const failed = await shapeEstimate(row);
   expect(failed.offered_pricing).toBeNull();
   expect(failed.offered_pricing_unavailable).toMatch(/authored proposal failed: billing lane down/);
+  // ...and totals are withheld too, not the row's stale monthly_total/annual_total
+  // columns (92/1104) this tool explicitly does not treat as the billed quote
+  // for a proposal estimate (pre-push audit P1).
+  expect(failed.totals).toEqual({ monthly: null, annual: null, one_time: null, withheld: true });
 });
 
 test('a pending or failed deposit intent collected nothing: total_paid null, the requested face amount kept (Codex r7 P2, r8 P2)', async () => {
@@ -477,9 +488,14 @@ test('totals: monthly/annual from the stored columns; one_time is the composer\'
   mockBuildPricingBundle.mockResolvedValue({ frequencies: [], anchorOneTimePrice: 26 }); // legacy V1 row: stored 125 still carries a setup fee the page subtracts
   const corrected = await shapeEstimate(estimateRow({ monthly_total: null, annual_total: null }));
   expect(corrected.totals).toEqual({ monthly: null, annual: null, one_time: 26 });
+  // A failed bundle build means offered_pricing is unavailable — the stored
+  // columns are never trusted as the quote on their own (that's the whole
+  // point of this tool), so totals are withheld too, exactly like a failed
+  // reconciliation (pre-push audit P1).
   mockBuildPricingBundle.mockRejectedValue(new Error('no bundle'));
   const broken = await shapeEstimate(estimateRow({ estimate_data: '{not json', monthly_total: '12.5', annual_total: null, onetime_total: '0' }));
-  expect(broken.totals).toEqual({ monthly: 12.5, annual: null, one_time: 0 });
+  expect(broken.totals).toEqual({ monthly: null, annual: null, one_time: null, withheld: true });
+  expect(broken.offered_pricing_unavailable).toMatch(/no bundle/);
   mockBuildPricingBundle.mockResolvedValue({ frequencies: [] });
   expect(broken.requote_required).toBeNull(); // no bundle → unknown
 });
