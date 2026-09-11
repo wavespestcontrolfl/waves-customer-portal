@@ -4795,6 +4795,26 @@ function validatePhoneCallAppointmentCustomer(customer = {}, extracted = {}, cal
   return { ok: missing.length === 0, missing, advisory, details: merged };
 }
 
+// Natures where the person on the line is definitively NOT the customer the
+// call is linked to. Narrower than the creation-only
+// V2_NON_CUSTOMER_CALL_NATURES, which also holds the existing-customer
+// natures that an update path exists to serve (GH codex #4432 r1 P1).
+const V2_THIRD_PARTY_CALL_NATURES = new Set(['job_applicant', 'vendor_or_partner']);
+
+// Deliberately NOT gated on callExtractionV2PrimaryEnabled() (GH codex #4432
+// r3 P1). That flag guards ADOPTION — a V2 false positive must not suppress a
+// valid V1 customer create, so the creation hold reverts to legacy behavior
+// when V2 is demoted. This consumer only ever DECLINES to copy contact detail
+// onto a row that already exists, which is the safe direction: a shadow-mode
+// verdict may veto, the capture still rides the call record and the triage
+// cards for the office, and nothing legacy is suppressed. A valid V2
+// extraction is produced in shadow mode too, so the applicant/vendor veto
+// keeps working through a flag flip or rollback.
+function thirdPartyCallNatureFromV2(v2Result) {
+  return v2Result?.status === 'valid'
+    && V2_THIRD_PARTY_CALL_NATURES.has(v2Result.extraction?.call_nature);
+}
+
 // The pre-linked contact-backfill gate, as a pure decision so the identity
 // rules are testable as BEHAVIOR and not as a source-text shape (GH codex
 // #4432 r2 P1): a future edit that preserves the wording while inverting a
@@ -7821,10 +7841,7 @@ const CallRecordingProcessor = {
     // instead, or the calls it exists to serve are exactly the ones it skips
     // (GH codex #4432 r1 P1). 'other' stays out: indeterminate is not
     // third-party, and those consumers carry their own identity gates.
-    const V2_THIRD_PARTY_CALL_NATURES = new Set(['job_applicant', 'vendor_or_partner']);
-    const v2ThirdPartyCallNature = callExtractionV2PrimaryEnabled()
-      && v2Result?.status === 'valid'
-      && V2_THIRD_PARTY_CALL_NATURES.has(v2Result.extraction?.call_nature);
+    const v2ThirdPartyCallNature = thirdPartyCallNatureFromV2(v2Result);
 
     // ── V2-primary field adoption (owner promotion 2026-07-23) ──
     // A valid V2 extraction now DRIVES the canonical writes: its identity /
@@ -17250,6 +17267,7 @@ const LEAD_PLACE_TAIL_MAX_LENGTH = 80;
 CallRecordingProcessor._test = {
   backfillLinkedCustomerFromExtraction,
   prelinkedBackfillGate,
+  thirdPartyCallNatureFromV2,
   linkedCustomerAcceptsBackfill,
   isTechFollowUpCall,
   finalizeTechFollowUpCall,

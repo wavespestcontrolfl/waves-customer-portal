@@ -38,7 +38,10 @@ const path = require('path');
 const fanout = require('../services/customer-email-fanout');
 const { _test } = require('../services/call-recording-processor');
 
-const { backfillLinkedCustomerFromExtraction, prelinkedBackfillGate, linkedCustomerAcceptsBackfill } = _test;
+const {
+  backfillLinkedCustomerFromExtraction, prelinkedBackfillGate, linkedCustomerAcceptsBackfill,
+  thirdPartyCallNatureFromV2,
+} = _test;
 
 describe('backfillLinkedCustomerFromExtraction', () => {
   beforeEach(() => jest.clearAllMocks());
@@ -200,23 +203,41 @@ describe('pre-linked call wiring (placement)', () => {
   });
 });
 
-describe('third-party call natures (GH codex #4432 r1 P1)', () => {
-  const src = fs.readFileSync(path.join(__dirname, '..', 'services', 'call-recording-processor.js'), 'utf8');
+describe('thirdPartyCallNatureFromV2', () => {
+  const v2 = (call_nature, status = 'valid') => ({ status, extraction: { call_nature } });
 
-  test('the backfill gate uses the third-party subset, not the creation-only aggregate', () => {
-    const set = src.match(/const V2_THIRD_PARTY_CALL_NATURES = new Set\(\[([^\]]*)\]\)/);
-    expect(set).not.toBeNull();
-    const natures = set[1].match(/'[a-z_]+'/g).map((s) => s.replace(/'/g, ''));
-    expect(natures.sort()).toEqual(['job_applicant', 'vendor_or_partner']);
-    // The linked-customer natures must NOT gate this backfill off.
-    for (const nature of ['billing_question', 'existing_customer_service', 'existing_customer_scheduling']) {
-      expect(natures).not.toContain(nature);
-    }
+  test.each(['job_applicant', 'vendor_or_partner'])('vetoes %s', (nature) => {
+    expect(thirdPartyCallNatureFromV2(v2(nature))).toBe(true);
   });
+
+  test.each(['billing_question', 'existing_customer_service', 'existing_customer_scheduling', 'new_lead', 'other'])(
+    'lets %s through — these are the linked-customer calls the backfill serves (r1 P1)',
+    (nature) => {
+      expect(thirdPartyCallNatureFromV2(v2(nature))).toBe(false);
+    },
+  );
+
+  test('needs a valid extraction', () => {
+    expect(thirdPartyCallNatureFromV2(v2('job_applicant', 'parse_failed'))).toBe(false);
+    expect(thirdPartyCallNatureFromV2(null)).toBe(false);
+    expect(thirdPartyCallNatureFromV2({ status: 'valid', extraction: {} })).toBe(false);
+  });
+
+  test('the veto does not depend on the V2-primary adoption flag (r3 P1)', () => {
+    // Suppression-only consumer: a shadow-mode verdict may veto, so the
+    // applicant/vendor exclusion survives a flag flip or rollback.
+    const src = fs.readFileSync(path.join(__dirname, '..', 'services', 'call-recording-processor.js'), 'utf8');
+    const fn = src.slice(src.indexOf('function thirdPartyCallNatureFromV2'));
+    expect(fn.slice(0, fn.indexOf('\n}'))).not.toMatch(/callExtractionV2PrimaryEnabled/);
+  });
+});
+
+describe('call-nature sets', () => {
+  const src = fs.readFileSync(path.join(__dirname, '..', 'services', 'call-recording-processor.js'), 'utf8');
 
   test('the creation hold keeps the wider set', () => {
     const set = src.match(/const V2_NON_CUSTOMER_CALL_NATURES = new Set\(\[([\s\S]*?)\]\)/);
-    const natures = set[1].match(/'[a-z_]+'/g).map((s) => s.replace(/'/g, ''));
+    const natures = set[1].match(/'[a-z_]+'/g).map((x) => x.replace(/'/g, ''));
     for (const nature of ['job_applicant', 'billing_question', 'existing_customer_service', 'existing_customer_scheduling', 'other', 'vendor_or_partner']) {
       expect(natures).toContain(nature);
     }
