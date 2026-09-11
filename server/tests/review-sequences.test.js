@@ -1337,7 +1337,10 @@ describe('cadence scheduling + post-service enrollment (2026-07-30 revamp)', () 
       const mock = makeMock({
         customers: [{ id: 'uq-1', first_name: 'Ida', last_name: 'V', phone: '+19410000164', nearest_location_id: 'venice' }],
         review_requests: [{ id: 'rr-uq1', customer_id: 'uq-1', status: 'pending', channel: 'sms', template_key: 'day0_ask', token: 'tuq1', location_id: 'venice', created_at: new Date() }],
-      }, { throwUpdateFor: ['review_requests'] });
+        // Every REAL write throws; the ask branch's no-op send-state recheck
+        // (status → 'pending', codex #4331 P1) passes, so this case still
+        // reaches the provider and fails there, which is what it pins.
+      }, { onUpdate: (table, patch) => { if (table === 'review_requests' && patch.status !== 'pending') throw new Error('pg blip on update'); } });
       db.mockImplementation(mock);
       mockSendCustomerMessage.mockRejectedValueOnce(new Error('network down'));
 
@@ -1361,6 +1364,46 @@ describe('cadence scheduling + post-service enrollment (2026-07-30 revamp)', () 
       // provider call. If that fence cannot be stored, nothing is sent — a
       // due row simply retries on its own, with no duplicate risk.
       expect(out).toEqual({ refused: 'send_fence_unstored' });
+      expect(mockSendCustomerMessage).not.toHaveBeenCalled();
+    });
+
+    test('an ask superseded by a fresh enrollment is refused at the reservation boundary', async () => {
+      // sendSMS's own entry read sees a pending row; startReviewSequence's
+      // supersede write lands in the window between that read and the send.
+      // Commit it as the recheck arrives, so the recheck sees what a real
+      // concurrent enrollment would have left behind.
+      const mock = makeMock({
+        customers: [{ id: 'uq-sup', first_name: 'Ida', phone: '+19410000164', nearest_location_id: 'venice' }],
+        review_requests: [{ id: 'rr-uq-sup', customer_id: 'uq-sup', status: 'pending', channel: 'sms', template_key: 'day0_ask', token: 'tuqs', location_id: 'venice', created_at: new Date() }],
+      }, { onUpdate: (table, patch, state) => {
+        if (table === 'review_requests' && patch.status === 'pending') {
+          state.rows.review_requests[0].status = 'suppressed';
+        }
+      } });
+      db.mockImplementation(mock);
+
+      const out = await ReviewService.sendSMS('rr-uq-sup');
+
+      // Codex #4331 P1: the ask branch's marker is the sms_log reservation,
+      // not the pending row, so it must re-assert 'pending' itself. Sending
+      // here would duplicate the new cadence's own Day-0 touch.
+      expect(out).toEqual({ refused: 'request_not_sendable' });
+      expect(mockSendCustomerMessage).not.toHaveBeenCalled();
+      expect(mock.__state.rows.sms_log || []).toHaveLength(0);
+    });
+
+    test('an ask whose send-state recheck throws is refused before the reservation', async () => {
+      const mock = makeMock({
+        customers: [{ id: 'uq-rc', first_name: 'Ida', phone: '+19410000164', nearest_location_id: 'venice' }],
+        review_requests: [{ id: 'rr-uq-rc', customer_id: 'uq-rc', status: 'pending', channel: 'sms', template_key: 'day0_ask', token: 'tuqrc', location_id: 'venice', created_at: new Date() }],
+      }, { throwUpdateFor: ['review_requests'] });
+      db.mockImplementation(mock);
+
+      const out = await ReviewService.sendSMS('rr-uq-rc');
+
+      // Fail closed, exactly as the non-ask fence does: an unverifiable row
+      // state is not a sendable one, and a due row retries on its own.
+      expect(out).toEqual({ refused: 'send_state_unverified' });
       expect(mockSendCustomerMessage).not.toHaveBeenCalled();
     });
 

@@ -1976,6 +1976,26 @@ const ReviewService = {
         sendCustomerMessage,
       } = require("./messaging/send-customer-message");
       if (OUTREACH.isAskTemplate(request.template_key)) {
+        // The ask branch's durable in-flight marker is the sms_log
+        // reservation, not this pending row — which cost it the recheck the
+        // old conditional pending-row write used to double as. A due ask can
+        // race startReviewSequence: enrollment supersedes every queued ask
+        // (status → 'suppressed', ~4700 below) AFTER sendSMS read this row,
+        // and the new cadence then sends its own Day-0 touch, so proceeding
+        // here delivers an ask the cadence explicitly replaced (codex #4331
+        // P1). Re-assert 'pending' atomically at the reservation boundary:
+        // the write changes nothing, it exists for its row lock and its
+        // rowcount. Zero rows means the row moved on — refuse, exactly as
+        // the non-ask fence does; the enrollment owns the ask now.
+        let stillSendable = 0;
+        try {
+          stillSendable = await db("review_requests")
+            .where({ id: requestId, status: "pending" }).update({ status: "pending" });
+        } catch (stateErr) {
+          logger.warn(`[review] send-state recheck failed (requestId=${requestId} errType=${stateErr?.name || "Error"})`);
+          return { refused: "send_state_unverified" };
+        }
+        if (!stillSendable) return { refused: "request_not_sendable" };
         reservation = await reserveReviewSms({ request, to: contact.phone, body });
       } else {
         // A non-ask template takes no sms_log reservation, so this pending
