@@ -9,6 +9,13 @@ jest.mock('../models/db', () => {
 });
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../services/notification-service', () => ({ notifyAdmin: jest.fn(async () => null) }));
+// Stamped sessions are classified through Stripe (pay-combined
+// stampedSessionOutcome): tests plant intents in mockStripePis by id.
+let mockStripePis = {};
+jest.mock('../services/stripe', () => ({
+  retrievePaymentIntent: jest.fn(async (id) => mockStripePis[id] || null),
+  cancelPaymentIntent: jest.fn(async () => ({})),
+}));
 
 const db = require('../models/db');
 const dedupe = require('../services/customer-dedupe');
@@ -39,7 +46,7 @@ function makeChain(table, route) {
     // defer pin test plants a row via DIALING_CASE.
     if (table === 'collection_cases') {
       if (COLLECTION_CASES_ERROR) throw COLLECTION_CASES_ERROR;
-      return q.called('first') ? DIALING_CASE : [];
+      return q.called('first') ? DIALING_CASE : COLLECTION_CASES_ROWS;
     }
     return route(q);
   }).then(resolve, reject);
@@ -48,7 +55,8 @@ function makeChain(table, route) {
 
 let DIALING_CASE = null;
 let COLLECTION_CASES_ERROR = null;
-afterEach(() => { DIALING_CASE = null; COLLECTION_CASES_ERROR = null; });
+let COLLECTION_CASES_ROWS = [];
+afterEach(() => { DIALING_CASE = null; COLLECTION_CASES_ERROR = null; COLLECTION_CASES_ROWS = []; mockStripePis = {}; });
 
 function installDb(router) {
   db.mockImplementation((table) => makeChain(table, (q) => router(table, q)));
@@ -2227,6 +2235,7 @@ describe('describeMergeEffects (the card\'s disclosure + fingerprint, engine-own
       stripe_profile_from_saved_cards: null,
       saved_card_profile_conflict: false,
       combined_payment_sessions: { winner: [], loser: [] },
+      collection_cases: { available: true, live: [], demoted_to_proposed: [], defers_on_dialing: false },
       predicted_collision_handlers: [],
       revertible_from_queue: expect.stringMatching(/unless the sweep has to fold/),
     });
@@ -2242,6 +2251,10 @@ describe('describeMergeEffects (the card\'s disclosure + fingerprint, engine-own
   });
 
   it('discloses and pins the saved-card Stripe profile the winner will adopt and every stamped combined payment session (Codex r4 P1s)', async () => {
+    mockStripePis = {
+      pi_a: { id: 'pi_a', status: 'requires_payment_method', metadata: { combined_allocation: '1' } },
+      pi_b: { id: 'pi_b', status: 'requires_confirmation', metadata: { invoice_id: 'inv-2' } },
+    };
     install({}, {
       cards: { W: ['cus_shared'], L: ['cus_shared'] },
       sessions: { L: [{ id: 'inv-2', invoice_number: 'INV-2', stripe_payment_intent_id: 'pi_b' }, { id: 'inv-1', invoice_number: 'INV-1', stripe_payment_intent_id: 'pi_a' }] },
@@ -2252,14 +2265,84 @@ describe('describeMergeEffects (the card\'s disclosure + fingerprint, engine-own
     expect(out.financial_effects.saved_card_profile_conflict).toBe(false);
     expect(out.financial_effects.combined_payment_sessions).toEqual({
       winner: [],
-      loser: [{ invoice_id: 'inv-1', invoice_number: 'INV-1', payment_intent_id: 'pi_a' }, { invoice_id: 'inv-2', invoice_number: 'INV-2', payment_intent_id: 'pi_b' }],
+      // Per-intent outcome from the same Stripe read the release makes (r5 P1): pi_b is a single-invoice checkout the release leaves alone.
+      loser: [{ invoice_id: 'inv-1', invoice_number: 'INV-1', payment_intent_id: 'pi_a', outcome: 'cancel' }, { invoice_id: 'inv-2', invoice_number: 'INV-2', payment_intent_id: 'pi_b', outcome: 'kept_single_invoice' }],
     });
+    // The same session moving to money-in-flight → a different fingerprint (the outcome is pinned, not just the id).
+    mockStripePis.pi_a = { ...mockStripePis.pi_a, status: 'processing' };
+    install({}, { cards: { W: ['cus_shared'], L: ['cus_shared'] }, sessions: { L: [{ id: 'inv-2', invoice_number: 'INV-2', stripe_payment_intent_id: 'pi_b' }, { id: 'inv-1', invoice_number: 'INV-1', stripe_payment_intent_id: 'pi_a' }] } });
+    const moved = await dedupe.describeMergeEffects(db, winner, loser);
+    expect(moved.financial_effects.combined_payment_sessions.loser[0].outcome).toBe('in_flight');
+    expect(moved.fingerprint).not.toBe(out.fingerprint);
+    // An unverifiable intent fails the preview closed — no card.
+    mockStripePis = {};
+    install({}, { cards: { W: ['cus_shared'], L: ['cus_shared'] }, sessions: { L: [{ id: 'inv-1', invoice_number: 'INV-1', stripe_payment_intent_id: 'pi_a' }] } });
+    await expect(dedupe.describeMergeEffects(db, winner, loser)).rejects.toThrow(/Could not verify payment session pi_a/);
+    mockStripePis = { pi_a: { id: 'pi_a', status: 'requires_payment_method', metadata: { combined_allocation: '1' } }, pi_b: { id: 'pi_b', status: 'requires_confirmation', metadata: {} } };
     // A new session on the loser → a different fingerprint.
     install({}, { cards: { W: ['cus_shared'], L: ['cus_shared'] }, sessions: { L: [{ id: 'inv-1', invoice_number: 'INV-1', stripe_payment_intent_id: 'pi_a' }] } });
     expect((await dedupe.describeMergeEffects(db, winner, loser)).fingerprint).not.toBe(out.fingerprint);
     // Cards on a third profile: the executor would refuse — the disclosure says so.
     install({}, { cards: { W: ['cus_other'], L: ['cus_shared'] } });
     expect((await dedupe.describeMergeEffects(db, winner, loser)).financial_effects.saved_card_profile_conflict).toBe(true);
+  });
+});
+
+describe('previewCollectionCaseReconciliation (the executor\'s reconcile rule, disclosed and pinned — Codex r5 P1)', () => {
+  const FK_ROWS = { rows: [{ table_name: 'invoices', column_name: 'customer_id' }] };
+  const winner = { id: 'W', first_name: 'Real', last_name: 'Customer', account_credits: '0' };
+  const loser = { id: 'L', first_name: 'Unknown', last_name: '', account_credits: '0' };
+  function install() {
+    db.raw = jest.fn(async () => FK_ROWS);
+    installDb((table, q) => {
+      if (table === 'referral_promoters') return null;
+      if (table === 'payment_methods') return [];
+      if (table === 'invoices' && !q.called('count')) return [];
+      return { n: 0 };
+    });
+  }
+  it('surplusApprovedCollectionCases is the executor rule: newest approval survives, all revert beside a dialing/held row', () => {
+    const a1 = { id: 'c1', current_state: 'approved', case_version: 3 };
+    const a2 = { id: 'c2', current_state: 'approved', case_version: 1 };
+    expect(dedupe.surplusApprovedCollectionCases([a1, a2])).toEqual([a2]);
+    expect(dedupe.surplusApprovedCollectionCases([a1])).toEqual([]);
+    expect(dedupe.surplusApprovedCollectionCases([{ id: 'h', current_state: 'held', case_version: 1 }, a1, a2])).toEqual([a1, a2]);
+  });
+  it('states every live case with state + version, the approvals the merge revokes, and a dialing defer; a new approval in the pending window changes the fingerprint', async () => {
+    COLLECTION_CASES_ROWS = [
+      { id: 'c-w', customer_id: 'W', current_state: 'approved', case_version: 4 },
+      { id: 'c-l', customer_id: 'L', current_state: 'approved', case_version: 2 },
+    ];
+    install();
+    const out = await dedupe.describeMergeEffects(db, winner, loser);
+    expect(out.financial_effects.collection_cases).toEqual({
+      available: true,
+      live: [{ id: 'c-w', side: 'winner', state: 'approved', case_version: 4 }, { id: 'c-l', side: 'loser', state: 'approved', case_version: 2 }],
+      demoted_to_proposed: ['c-l'],
+      defers_on_dialing: false,
+    });
+    expect(JSON.parse(out.fingerprint).financial_effects.collection_cases.demoted_to_proposed).toEqual(['c-l']);
+    // The loser's case was 'proposed' at card time and got approved since → different fingerprint (the executor refuses with previewChanged).
+    COLLECTION_CASES_ROWS = [{ id: 'c-w', customer_id: 'W', current_state: 'approved', case_version: 4 }];
+    install();
+    const before = await dedupe.describeMergeEffects(db, winner, loser);
+    expect(before.financial_effects.collection_cases.demoted_to_proposed).toEqual([]);
+    expect(before.fingerprint).not.toBe(out.fingerprint);
+    // A held row beside approvals: every approval reverts. A dialing row: the merge defers.
+    COLLECTION_CASES_ROWS = [{ id: 'h', customer_id: 'L', current_state: 'held', case_version: 1 }, { id: 'c-w', customer_id: 'W', current_state: 'approved', case_version: 4 }];
+    install();
+    expect((await dedupe.describeMergeEffects(db, winner, loser)).financial_effects.collection_cases.demoted_to_proposed).toEqual(['c-w']);
+    COLLECTION_CASES_ROWS = [{ id: 'd', customer_id: 'W', current_state: 'dialing', case_version: 1 }];
+    install();
+    expect((await dedupe.describeMergeEffects(db, winner, loser)).financial_effects.collection_cases.defers_on_dialing).toBe(true);
+  });
+  it('an absent table reads as unavailable; any other read error fails the preview closed (as the executor\'s reconcile does)', async () => {
+    COLLECTION_CASES_ERROR = Object.assign(new Error('relation "collection_cases" does not exist'), { code: '42P01' });
+    install();
+    expect((await dedupe.describeMergeEffects(db, winner, loser)).financial_effects.collection_cases).toEqual({ available: false, live: [], demoted_to_proposed: [], defers_on_dialing: false });
+    COLLECTION_CASES_ERROR = Object.assign(new Error('statement timeout'), { code: '57014' });
+    install();
+    await expect(dedupe.describeMergeEffects(db, winner, loser)).rejects.toThrow(/statement timeout/);
   });
 });
 

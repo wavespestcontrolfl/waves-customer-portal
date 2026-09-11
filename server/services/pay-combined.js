@@ -531,11 +531,45 @@ function stampedCombinedSessionRows(database, customerId) {
     .select('id', 'invoice_number', 'stripe_payment_intent_id');
 }
 
+// The ONE per-intent decision the release makes, stated as an outcome so a
+// preview can disclose it verbatim (codex #4348 r5 P1: an invoice stamp
+// carries no combined discriminator — an ordinary single-invoice
+// PaymentIntent sits in stampedCombinedSessionRows too, and the release
+// leaves it untouched; a card that promised to cancel it lied):
+//   'cancel'              combined + unconfirmed → canceled in Stripe, stamps cleared
+//   'stamps_cleared'      combined + already canceled → only the stamp cleanup
+//   'in_flight'           combined + money moving → left alone, reported (the merge defers)
+//   'kept_single_invoice' not a combined intent → the invoice's own checkout, untouched
+//   null                  unverifiable (Stripe unavailable) → the caller fails closed
+function stampedSessionOutcome(pi) {
+  if (!pi) return null;
+  if (!isCombinedPiMetadata(pi.metadata)) return 'kept_single_invoice';
+  if (pi.status === 'canceled') return 'stamps_cleared';
+  return UNCONFIRMED_PI_STATUSES.includes(pi.status) ? 'cancel' : 'in_flight';
+}
+
+// Preview of what releaseUnconfirmedCombinedSessionsForCustomer would do:
+// every stamped session with its per-intent outcome, decided by the same
+// Stripe read the release makes. Fails closed on an unverifiable intent
+// (no card is better than a card that promises an outcome nobody checked).
 async function listUnconfirmedCombinedSessionsForCustomer(database, customerId) {
   if (!customerId) return [];
   const rows = await stampedCombinedSessionRows(database, customerId);
-  return rows.map((r) => ({ invoice_id: r.id, invoice_number: r.invoice_number || null, payment_intent_id: String(r.stripe_payment_intent_id) }))
-    .sort((a, b) => (a.payment_intent_id < b.payment_intent_id ? -1 : a.payment_intent_id > b.payment_intent_id ? 1 : 0));
+  const StripeService = require('./stripe');
+  const sessions = [];
+  for (const r of rows) {
+    const piId = String(r.stripe_payment_intent_id);
+    let pi;
+    try {
+      pi = await StripeService.retrievePaymentIntent(piId);
+    } catch (err) {
+      throw new Error(`Could not verify payment session ${piId} for the merge preview (${err.message}) — try again`);
+    }
+    const outcome = stampedSessionOutcome(pi);
+    if (!outcome) throw new Error(`Could not verify payment session ${piId} for the merge preview (payment service unavailable) — try again`);
+    sessions.push({ invoice_id: r.id, invoice_number: r.invoice_number || null, payment_intent_id: piId, outcome });
+  }
+  return sessions.sort((a, b) => (a.payment_intent_id < b.payment_intent_id ? -1 : a.payment_intent_id > b.payment_intent_id ? 1 : 0));
 }
 
 async function releaseUnconfirmedCombinedSessionsForCustomer(database, customerId, { expectedPaymentIntentIds = null } = {}) {
@@ -612,10 +646,11 @@ async function releaseUnconfirmedCombinedSessions(database, rows) {
     if (!pi) {
       throw new Error(`Could not verify payment session ${piId} before the payer change (payment service unavailable) — try again`);
     }
-    if (!isCombinedPiMetadata(pi.metadata)) continue;
+    const outcome = stampedSessionOutcome(pi);
+    if (outcome === 'kept_single_invoice') continue;
     // Already canceled (codex r24 P2): a prior release's cancel succeeded
     // but the stamp cleanup failed — retry the cleanup instead of skipping.
-    if (pi.status === 'canceled') {
+    if (outcome === 'stamps_cleared') {
       await clearPaymentIntentStamps(database, piId);
       released += 1;
       continue;
@@ -628,8 +663,7 @@ async function releaseUnconfirmedCombinedSessions(database, rows) {
     // actually moving (processing/succeeded) is left to the settle-path
     // ownership guards — reported to the caller (codex r24 P1: a merge
     // must DEFER on a loser-side in-flight session, not proceed past it).
-    const unconfirmed = ['requires_payment_method', 'requires_confirmation', 'requires_action'].includes(pi.status);
-    if (!unconfirmed) {
+    if (outcome === 'in_flight') {
       logger.warn(`[pay-combined] payer change: combined PI ${piId} is ${pi.status} — money may be in flight, not touched`);
       inFlight += 1;
       continue;
@@ -1183,6 +1217,7 @@ module.exports = {
   releaseUnconfirmedCombinedSessionsForScheduledServices,
   releaseUnconfirmedCombinedSessionsForCustomer,
   listUnconfirmedCombinedSessionsForCustomer,
+  stampedSessionOutcome,
   releaseCombinedSessionBeforeCollection,
   revokeOutstandingCombinedSessionsOnGateOff,
   settleCombinedPaymentIntent,

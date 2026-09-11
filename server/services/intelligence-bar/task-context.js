@@ -682,7 +682,10 @@ async function validateRecordTarget(params, context = {}, { toolName, forApprova
   // missingTarget refusal below stands unchanged.
   const pairSelectors = CUSTOMER_PAIR_SELECTORS[toolName];
   if (pairSelectors) {
-    const [winnerId, loserId] = pairSelectors.map(key => params[key]);
+    // Canonical lowercase (codex #4348 r5 P2): task targets and record ids
+    // are stored lowercase; an uppercase-but-valid UUID pair must reach the
+    // eligibility check, not fall through to missingTarget.
+    const [winnerId, loserId] = pairSelectors.map(key => (params[key] ? String(params[key]).trim().toLowerCase() : params[key]));
     if (winnerId && loserId && permitted.has(winnerId) !== permitted.has(loserId)) {
       const { duplicatePairEligibility } = require('../customer-dedupe');
       const eligibility = await duplicatePairEligibility(winnerId, loserId);

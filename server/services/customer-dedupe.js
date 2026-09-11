@@ -1571,10 +1571,7 @@ async function executeMerge({ winnerId, loserId, performedBy, performedById = nu
           .whereIn('current_state', ['approved', 'dialing', 'held'])
           .orderBy('approved_at', 'desc')
           .select('id', 'current_state', 'case_version');
-        const approved = liveCases.filter((c) => c.current_state === 'approved');
-        const hasClaimedOrHeld = liveCases.length > approved.length;
-        const surplus = hasClaimedOrHeld ? approved : approved.slice(1);
-        for (const c of surplus) {
+        for (const c of surplusApprovedCollectionCases(liveCases)) {
           await sp('collection_cases')
             .where({ id: c.id, current_state: 'approved', case_version: c.case_version })
             .update({
@@ -4532,6 +4529,52 @@ async function acquirePairAdjudicationLock(trx, aId, bId) {
   await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [key]);
 }
 
+// The collection-case reconciliation rule, shared by the executor and the
+// preview (codex #4348 r5 P1): among the live cases that land under the
+// winner (ordered approved_at desc), surplus 'approved' rows revert to
+// 'proposed' — all of them when a dialing/held row exists, otherwise all
+// but the newest approval. dialing/held rows are never touched.
+function surplusApprovedCollectionCases(liveCases) {
+  const approved = liveCases.filter((c) => c.current_state === 'approved');
+  const hasClaimedOrHeld = liveCases.length > approved.length;
+  return hasClaimedOrHeld ? approved : approved.slice(1);
+}
+
+// What the executor's post-repoint reconcile WOULD do to collection cases:
+// every live (approved/dialing/held) case on either side with its state and
+// version, the approvals the merge would revoke, and whether a dialing case
+// defers it. Read over any knex handle so the under-lock recheck sees the
+// same answer; a case moving proposed→approved (or an approval rotating)
+// during the pending window changes the fingerprint and refuses the merge
+// instead of silently revoking an approval the operator never saw. An
+// absent table (pre-collections environment) reads as `available: false`;
+// any other read error fails the preview, as the executor's reconcile does.
+async function previewCollectionCaseReconciliation(database, winnerId, loserId) {
+  let rows;
+  try {
+    rows = await database('collection_cases')
+      .whereIn('customer_id', [winnerId, loserId])
+      .whereIn('current_state', ['approved', 'dialing', 'held'])
+      .orderBy('approved_at', 'desc')
+      .select('id', 'customer_id', 'current_state', 'case_version');
+  } catch (err) {
+    if (err && err.code === '42P01') return { available: false, live: [], demoted_to_proposed: [], defers_on_dialing: false };
+    throw err;
+  }
+  const liveCases = (Array.isArray(rows) ? rows : []).map((c) => ({
+    id: String(c.id),
+    side: String(c.customer_id) === String(winnerId) ? 'winner' : 'loser',
+    current_state: c.current_state,
+    case_version: c.case_version == null ? null : Number(c.case_version),
+  }));
+  return {
+    available: true,
+    live: liveCases.map(({ id, side, current_state, case_version }) => ({ id, side, state: current_state, case_version })),
+    demoted_to_proposed: surplusApprovedCollectionCases(liveCases).map((c) => c.id),
+    defers_on_dialing: liveCases.some((c) => c.current_state === 'dialing'),
+  };
+}
+
 // EVERYTHING a merge of (winner, loser) would do beyond the row retire,
 // stated as the IB confirmation card discloses it, plus one stable
 // fingerprint of it all (key-sorted JSON). Read over any knex handle: the
@@ -4565,6 +4608,9 @@ async function describeMergeEffects(database, winner, loser) {
     winner: await PayCombined.listUnconfirmedCombinedSessionsForCustomer(database, winner.id),
     loser: await PayCombined.listUnconfirmedCombinedSessionsForCustomer(database, loser.id),
   };
+  // Collection cases landing under the winner: the executor's reconcile
+  // can revoke surplus approvals — stated and pinned (state + version).
+  const collection_cases = await previewCollectionCaseReconciliation(database, winner.id, loser.id);
   const predictedCollisionHandlers = referral?.folded_into_winner_promoter ? ['referral_promoters'] : [];
   const financial_effects = {
     account_credits_moved_to_winner: credits,
@@ -4580,6 +4626,7 @@ async function describeMergeEffects(database, winner, loser) {
       ? { stripe_customer_id: savedCards.derivedStripeCustomerId, from: savedCards.stripeDerivedFrom } : null,
     saved_card_profile_conflict: savedCards.conflict,
     combined_payment_sessions,
+    collection_cases,
     predicted_collision_handlers: predictedCollisionHandlers,
     // Predicted from what can be read ahead (the referral fold); other
     // unique-key collisions (tags, singleton prefs, conversations) are only
@@ -4606,6 +4653,8 @@ module.exports = {
   // a hand-picked subset that could omit a table or a fold.
   previewMergeEffects,
   describeMergeEffects,
+  previewCollectionCaseReconciliation,
+  surplusApprovedCollectionCases,
   predictWinnerBackfills,
   deriveSavedCardStripeCustomer,
   inheritedAutopayRestrictions,

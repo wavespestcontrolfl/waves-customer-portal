@@ -1074,6 +1074,15 @@ test('merge_customers binds both role-named ids as customer records of the task'
   expect(eligibleOnLoser).toBeNull();
   expect(mockDuplicatePairEligibility).toHaveBeenCalledWith(A, B);
 
+  // (c2) Uppercase-but-valid UUIDs (Codex #4348 r5 P2): task targets are
+  // canonical lowercase, so the pair is normalized before the permitted
+  // and eligibility checks — admitted, with the canonical pair passed on.
+  mockDuplicatePairEligibility.mockClear();
+  mockDuplicatePairEligibility.mockResolvedValueOnce({ eligible: true, code: 'eligible', reason: null, candidate: { tier: 'yellow', reasons: [] } });
+  const upper = await Context.validateRecordTarget({ winner_customer_id: A.toUpperCase(), loser_customer_id: B.toUpperCase() }, context(A), { toolName: 'merge_customers' });
+  expect(upper).toBeNull();
+  expect(mockDuplicatePairEligibility).toHaveBeenCalledWith(A, B);
+
   // (d) Neither id is the task's customer: refused outright, no eligibility
   // check needed (there's no established target to widen from).
   mockDuplicatePairEligibility.mockClear();

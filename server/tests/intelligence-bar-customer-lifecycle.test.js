@@ -69,6 +69,7 @@ const FINANCIAL = {
   loser_plan_rate_rows_deleted: 0, referral_fold: NOT_ENROLLED, autopay_restrictions_inherited: {},
   winner_backfills: { email: 'stub@example.com' }, stripe_profile_from_saved_cards: null, saved_card_profile_conflict: false,
   combined_payment_sessions: { winner: [], loser: [] },
+  collection_cases: { available: true, live: [], demoted_to_proposed: [], defers_on_dialing: false },
   predicted_collision_handlers: [], revertible_from_queue: 'unless the sweep has to fold colliding rows (journaled)',
 };
 const EFFECTS = { moving: { scheduled_services: 3, sms_log: 5, 'notifications.recipient_id': 2, total_rows: 10 }, financial_effects: FINANCIAL, fingerprint: 'fp-card-1' };
@@ -142,9 +143,20 @@ describe('merge_customers', () => {
     expect(refused).toMatchObject({ code: 'stripe_profile_conflict', error: expect.stringMatching(/different Stripe profile/) });
     expect(refused.preview).toBeUndefined();
     db.__qb.select.mockResolvedValueOnce([winnerRow, loserRow]);
-    mockDescribeMergeEffects.mockResolvedValueOnce({ ...EFFECTS, financial_effects: { ...FINANCIAL, combined_payment_sessions: { winner: [], loser: [{ invoice_id: 'inv-1', invoice_number: 'INV-1', payment_intent_id: 'pi_a' }] } } });
+    // Per-intent outcomes (Codex r5 P1): the note never promises to cancel a single-invoice checkout the release leaves alone.
+    mockDescribeMergeEffects.mockResolvedValueOnce({ ...EFFECTS, financial_effects: { ...FINANCIAL, combined_payment_sessions: { winner: [{ invoice_id: 'inv-9', invoice_number: 'INV-9', payment_intent_id: 'pi_w', outcome: 'kept_single_invoice' }], loser: [{ invoice_id: 'inv-1', invoice_number: 'INV-1', payment_intent_id: 'pi_a', outcome: 'cancel' }, { invoice_id: 'inv-2', invoice_number: 'INV-2', payment_intent_id: 'pi_b', outcome: 'in_flight' }] } } });
     const withSession = await executeCustomerLifecycleTool('merge_customers', { winner_customer_id: WINNER_ID, loser_customer_id: LOSER_ID }, {});
-    expect(withSession.note_to_operator).toMatch(/1 open combined payment session\(s\) listed above will be cancelled in Stripe first/);
+    expect(withSession.note_to_operator).toMatch(/1 unconfirmed combined payment session\(s\) will be cancelled in Stripe first; 1 combined payment session\(s\) have money in flight \(a merged-away one defers the merge until it settles\); 1 single-invoice checkout session\(s\) stay open and are NOT cancelled\./);
+    expect(withSession.note_to_operator).not.toMatch(/listed above will be cancelled/);
+    // Collection-case reconcile on the card (Codex r5 P1): the approval the merge revokes is named; a dialing case says the merge defers.
+    db.__qb.select.mockResolvedValueOnce([winnerRow, loserRow]);
+    mockDescribeMergeEffects.mockResolvedValueOnce({ ...EFFECTS, financial_effects: { ...FINANCIAL, collection_cases: { available: true, live: [{ id: 'c-w', side: 'winner', state: 'approved', case_version: 4 }, { id: 'c-l', side: 'loser', state: 'approved', case_version: 2 }], demoted_to_proposed: ['c-l'], defers_on_dialing: false } } });
+    const withCases = await executeCustomerLifecycleTool('merge_customers', { winner_customer_id: WINNER_ID, loser_customer_id: LOSER_ID }, {});
+    expect(withCases.note_to_operator).toMatch(/Collection cases: 1 approved case\(s\) \(c-l\) revert to proposed/);
+    db.__qb.select.mockResolvedValueOnce([winnerRow, loserRow]);
+    mockDescribeMergeEffects.mockResolvedValueOnce({ ...EFFECTS, financial_effects: { ...FINANCIAL, collection_cases: { available: true, live: [{ id: 'd', side: 'loser', state: 'dialing', case_version: 1 }], demoted_to_proposed: [], defers_on_dialing: true } } });
+    const dialing = await executeCustomerLifecycleTool('merge_customers', { winner_customer_id: WINNER_ID, loser_customer_id: LOSER_ID }, {});
+    expect(dialing.note_to_operator).toMatch(/A collection call is in flight for one of these customers: the merge defers/);
   });
 
   test('preview refuses not_in_queue with the canonical message', async () => {
