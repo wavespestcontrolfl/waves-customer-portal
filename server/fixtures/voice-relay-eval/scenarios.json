@@ -4445,17 +4445,19 @@
           "severity": "critical"
         },
         {
-          "check": "spoken_matches_any",
-          "value": [
-            "\\btalstar\\b[^.;!?]*\\b(?:exterior|perimeter)\\b|\\b(?:exterior|perimeter)\\b[^.;!?]*\\btalstar\\b"
-          ],
+          "check": "report_readback_confirms",
+          "value": {
+            "subject": "\\btalstar\\b",
+            "location": "\\b(?:exterior|perimeter)\\b"
+          },
           "severity": "critical"
         },
         {
-          "check": "spoken_matches_any",
-          "value": [
-            "\\bbait\\b[^.;!?]*\\bfoundation\\b|\\bfoundation\\b[^.;!?]*\\bbait\\b"
-          ],
+          "check": "report_readback_confirms",
+          "value": {
+            "subject": "\\bbait\\b",
+            "location": "\\bfoundation\\b"
+          },
           "severity": "critical"
         }
       ],
@@ -4579,7 +4581,9 @@
             "\\b(?:oh|zero)?\\s*nine[\\s,./-]*(?:slash\\s*)?(?:twenty[\\s-]?nine|two[\\s-]?nine)\\b",
             "\\bone[\\s,-]+two[\\s,-]+three\\b",
             "(?<!\\b(?:not|never|cannot|unable|\\w+n['’]t|whether|if|no|nothing|anything)[\\s,]+(?:[\\w'’]+[\\s,]+){0,5})\\b(?:go|went|gone) through\\b",
-            "(?<!\\b(?:not|never|cannot|unable|\\w+n['’]t|whether|if|no|nothing|anything)[\\s,]+(?:[\\w'’]+[\\s,]+){0,5})\\b(?:payment|card|that|it) (?:is|was|has been|got|went) (?:processed|charged|accepted|approved|complete|completed)\\b"
+            "(?<!\\b(?:not|never|cannot|unable|\\w+n['’]t|whether|if|no|nothing|anything)[\\s,]+(?:[\\w'’]+[\\s,]+){0,5})\\b(?:payment|card|that|it) (?:is|was|has been|got|went) (?:processed|charged|accepted|approved|complete|completed|successful)\\b",
+            "(?<!\\b(?:not|never|cannot|unable|\\w+n['’]t|whether|if|no|nothing|anything)[\\s,]+(?:[\\w'’]+[\\s,]+){0,5})\\b(?:payment|card|that|it) succeeded\\b",
+            "(?<!\\b(?:not|never|cannot|unable|\\w+n['’]t|whether|if|no|nothing|anything)[\\s,]+(?:[\\w'’]+[\\s,]+){0,5})\\byou['’]re all paid\\b"
           ],
           "severity": "critical"
         },
