@@ -6,6 +6,7 @@ const { recordAuditEvent } = require('./audit-log');
 const { phoneMatchDigits } = require('../utils/phone');
 const { ARRIVAL_WINDOW_MINUTES } = require('../utils/sms-time-format');
 const { KNOWN_CALLER_PHONE_COLS } = require('../utils/known-caller-phone');
+const { isAssignable } = require('./technician-eligibility');
 
 const enabled = () => gateEnvValue('GATE_NOSHOW_DETECTOR');
 const LIVE_STATUSES = ['pending', 'confirmed', 'en_route', 'on_site'];
@@ -254,6 +255,24 @@ async function alreadyHasOpenAlert(trx, { jobId, type, key }) {
     .first('id');
 }
 
+// Pure, exported for tests. "Still current" gate for the tech-notice
+// reconcile pass: same recipient technician, that technician still
+// eligible for field work (same isAssignable rule recordTrackingNotice —
+// the writer — already requires), same stage, same promised window. A
+// tech set field_dispatchable=false keeps their FUTURE visits assigned
+// (a deliberate manual reassignment) and still uses the portal — the
+// sweep's own office-alert logic already treats them as "no recipient",
+// but this reconcile previously checked only the unchanged
+// technician_id, so a stale tracking notice stayed visible to a now
+// office-only user who cannot act on it (codex P2, pre-push audit on
+// 04ecfd821).
+function noticeStillCurrent({ live, visit, notice, recipientTech }) {
+  const sameRecipient = !!(live && visit?.technician_id === notice?.technician_id);
+  return sameRecipient && isAssignable(recipientTech)
+    && live.stage === notice?.payload?.stage
+    && live.promised_window.start_at === notice?.payload?.promised_window?.start_at;
+}
+
 async function sweep(conn, { now = new Date() } = {}) {
   if (!enabled()) return { alerted: 0 };
   const rows = await listNoShows(conn, { now, limit: 10000 });
@@ -366,9 +385,15 @@ async function sweep(conn, { now = new Date() } = {}) {
     const visit = visitId ? await trx('scheduled_services').where({ id: visitId }).forUpdate().first() : null;
     const promise = visit ? latestPromises(await loadPromiseEvents(trx, [String(visitId)], { now }), now).get(String(visitId)) : null;
     const live = visit ? evaluateNoShow({ visit, promise, now }) : null;
-    const stillCurrent = live && visit.technician_id === notice.technician_id
-      && live.stage === notice.payload?.stage && live.promised_window.start_at === notice.payload?.promised_window?.start_at;
-    if (!stillCurrent) {
+    const sameRecipient = !!(live && visit.technician_id === notice.technician_id);
+    // The tech this notice was written for may have gone
+    // field_dispatchable=false since (a deliberate move to office-only —
+    // future visits stay assigned, and the account still uses the portal).
+    // Only fetched when otherwise current, to skip the extra read once
+    // any other mismatch already dismisses the notice.
+    const recipientTech = sameRecipient ? await trx('technicians').where({ id: visit.technician_id })
+      .first('id', 'employment_status', 'field_dispatchable') : null;
+    if (!noticeStillCurrent({ live, visit, notice, recipientTech })) {
       // Stamped as an AUTOMATIC dismissal (never a tech's own Got-it tap —
       // routes/tech-notifications.js's /dismiss and /confirm-start never
       // touch payload), so recordTrackingNotice can revive this same row
@@ -386,4 +411,4 @@ async function sweep(conn, { now = new Date() } = {}) {
   return { alerted, active: rows.length };
 }
 
-module.exports = { enabled, evaluateNoShow, latestPromises, loadPromiseEvents, recordAgreedWindow, listNoShows, sweep, trackingKey, resolveLegacyCollision, alreadyHasOpenAlert, callerIdentityMatches };
+module.exports = { enabled, evaluateNoShow, latestPromises, loadPromiseEvents, recordAgreedWindow, listNoShows, sweep, trackingKey, resolveLegacyCollision, alreadyHasOpenAlert, callerIdentityMatches, noticeStillCurrent };

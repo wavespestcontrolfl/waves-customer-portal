@@ -1,7 +1,7 @@
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../services/dispatch-alerts', () => ({ resolveAlert: jest.fn().mockResolvedValue({ id: 'resolved' }) }));
-const { evaluateNoShow, latestPromises, trackingKey, resolveLegacyCollision, alreadyHasOpenAlert, callerIdentityMatches, loadPromiseEvents } = require('../services/no-show-detector');
+const { evaluateNoShow, latestPromises, trackingKey, resolveLegacyCollision, alreadyHasOpenAlert, callerIdentityMatches, loadPromiseEvents, noticeStillCurrent } = require('../services/no-show-detector');
 const { resolveAlert } = require('../services/dispatch-alerts');
 const { replay } = require('../../ops/agents/replay-no-show-detector');
 
@@ -562,5 +562,35 @@ describe('loadPromiseEvents: pre-deploy legacy reschedule/confirmation messages 
     const latest = map.get('visit-1');
     expect(latest.start_at).toBeNull();
     expect(latest.source_id).toBe('m2');
+  });
+});
+
+describe('noticeStillCurrent: an ineligible technician\'s tracking notice is dismissed (round-3 P2-A)', () => {
+  const live = { stage: 2, promised_window: { start_at: '2026-09-10T13:00:00.000Z' } };
+  const visit = { technician_id: 'tech-a' };
+  const notice = { technician_id: 'tech-a', payload: { stage: 2, promised_window: { start_at: '2026-09-10T13:00:00.000Z' } } };
+
+  test('same recipient, same stage/window, and the tech is still assignable -> stays current', () => {
+    const recipientTech = { id: 'tech-a', employment_status: 'active', field_dispatchable: true };
+    expect(noticeStillCurrent({ live, visit, notice, recipientTech })).toBe(true);
+  });
+
+  test('the recipient went field_dispatchable=false (office-only) -> no longer current, even though everything else matches', () => {
+    const recipientTech = { id: 'tech-a', employment_status: 'active', field_dispatchable: false };
+    expect(noticeStillCurrent({ live, visit, notice, recipientTech })).toBe(false);
+  });
+
+  test('the recipient is no longer active (offboarded) -> no longer current', () => {
+    const recipientTech = { id: 'tech-a', employment_status: 'inactive', field_dispatchable: true };
+    expect(noticeStillCurrent({ live, visit, notice, recipientTech })).toBe(false);
+  });
+
+  test('a different recipient (reassigned) -> no longer current regardless of recipientTech', () => {
+    const otherVisit = { technician_id: 'tech-b' };
+    expect(noticeStillCurrent({ live, visit: otherVisit, notice, recipientTech: { id: 'tech-b', employment_status: 'active', field_dispatchable: true } })).toBe(false);
+  });
+
+  test('live is null (visit no longer overdue) -> no longer current', () => {
+    expect(noticeStillCurrent({ live: null, visit, notice, recipientTech: { id: 'tech-a', employment_status: 'active', field_dispatchable: true } })).toBe(false);
   });
 });
