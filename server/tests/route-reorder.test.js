@@ -49,7 +49,9 @@ const NOW = new Date('2026-08-13T08:10:00Z');
 const BAND = ['2026-08-14', '2026-08-15', '2026-08-16', '2026-08-17', '2026-08-18', '2026-08-19'];
 
 function stop(id, over = {}) {
-  return { id, technician_id: 't1', route_order: null, window_start: '09:00', time_window: null, service_type: 'pest', zone: null, lat: 1, lng: 1, ...over };
+  // service_address_line1 present-but-null, as the day-load select returns
+  // it for a row that inherits the customer's address.
+  return { id, technician_id: 't1', route_order: null, window_start: '09:00', time_window: null, service_type: 'pest', zone: null, lat: 1, lng: 1, service_address_line1: null, ...over };
 }
 
 // A tech-day whose CURRENT order backtracks (B@lng3 first, then A@lng1, C@lng2

@@ -48,7 +48,9 @@ const NOW = new Date('2026-08-13T08:10:00Z');
 const DAY = '2026-08-17';
 
 function stop(id, over = {}) {
-  return { id, technician_id: 't1', route_order: null, window_start: null, time_window: null, estimated_duration_minutes: 60, service_type: 'pest', zone: null, lat: 1, lng: 1, ...over };
+  // service_address_line1 is null on a real row that inherits the
+  // customer's address — present-but-null, which is what the guard needs.
+  return { id, technician_id: 't1', route_order: null, window_start: null, time_window: null, estimated_duration_minutes: 60, service_type: 'pest', zone: null, lat: 1, lng: 1, service_address_line1: null, ...over };
 }
 
 const GUARDS = {
@@ -531,4 +533,20 @@ test('unit: computeWindowFitOrder never splits a co-visit pair away from its sib
   const ids = out.orderedStops.map((s) => s.id);
   expect(Math.abs(ids.indexOf('P') - ids.indexOf('L'))).toBe(1);
   expect(out.afterMeters).toBe(18000);
+});
+
+// Round-0 fallback audit P1: a caller whose select carries no address column
+// at all knows nothing about property identity, and unknown must not read as
+// known-equal — coordinates alone are the two-units-at-one-parcel false merge.
+test('unit: isCoVisitPair fails closed when the rows carry no address column', () => {
+  const { isCoVisitPair } = require('../services/route-reorder-window-fit');
+  const [a, b] = [
+    stop('a', { customer_id: 'cust_b', window_start: '13:00', window_end: '14:00', lat: 1, lng: 1 }),
+    stop('b', { customer_id: 'cust_b', window_start: '13:00', window_end: '14:00', lat: 1, lng: 1 }),
+  ];
+  expect(isCoVisitPair(effectiveWindowRange, a, b)).toBe(true); // both present-but-null
+  const { service_address_line1: _dropA, ...aNoColumn } = a;
+  const { service_address_line1: _dropB, ...bNoColumn } = b;
+  expect(isCoVisitPair(effectiveWindowRange, aNoColumn, bNoColumn)).toBe(false);
+  expect(isCoVisitPair(effectiveWindowRange, aNoColumn, b)).toBe(false);
 });

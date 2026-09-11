@@ -182,15 +182,22 @@ function isCoVisitPair(effectiveWindowRange, prevStop, stop) {
   const lng = parseFloat(stop.lng);
   if (!(lat && lng && prevLat && prevLng)) return false;
   if (lat !== prevLat || lng !== prevLng) return false;
-  return stampedAddress(prevStop) === stampedAddress(stop);
+  const prevAddress = stampedAddress(prevStop);
+  return prevAddress !== null && prevAddress === stampedAddress(stop);
 }
 
 /** The saved per-appointment street line, normalized; '' when the row
- *  inherits the customer's address (or the caller's select omits it, which
- *  makes every row equal and leaves the coordinate rule in charge, exactly
- *  as before the column existed). */
+ *  inherits the customer's address. null when the caller's select carries no
+ *  address column at all — UNKNOWN, which is not the same as known-equal and
+ *  must not merge (round-0 fallback audit P1: a caller that selects
+ *  customer_id and coordinates but forgets this column would otherwise get
+ *  the coordinate-only decision back, which is exactly the two-units-at-one-
+ *  parcel false merge the column exists to stop). Every guard caller's day
+ *  load selects it; fixtures must carry it the way a real row does. */
 function stampedAddress(stop) {
-  return String(stop.service_address_line1 ?? stop.address_line1 ?? '').trim().toLowerCase();
+  const raw = 'service_address_line1' in stop ? stop.service_address_line1
+    : ('address_line1' in stop ? stop.address_line1 : undefined);
+  return raw === undefined ? null : String(raw ?? '').trim().toLowerCase();
 }
 
 /**
