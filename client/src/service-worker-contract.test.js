@@ -129,7 +129,7 @@ describe('customer service-worker update contract', () => {
     expect(source).toContain("new Request(assetUrl, { cache: 'reload' })");
     expect(source).toContain('await Promise.allSettled(assetResponses.map');
     expect(source.indexOf('await Promise.allSettled(assetResponses.map'))
-      .toBeLessThan(source.indexOf('await cache.put(OFFLINE_URL, shellResponse)'));
+      .toBeLessThan(source.indexOf('await cache.put(OFFLINE_URL, shellResponse.clone())'));
     expect(source).toContain('event.waitUntil(cacheCompleteShellResponse(response.clone(), navSeq).catch(() => {}))');
     expect(source).not.toContain('cache.put(OFFLINE_URL, clone)');
   });
@@ -828,6 +828,27 @@ describe('service-worker shell refresh keeps the asset cache bounded to two buil
     expect(await cachedAssets(cache)).toEqual(['/assets/Shared-XYZ.js', '/assets/index-BBB.js']); // index-CCC.js rolled back
     expect((await cache.match('/assets/Shared-XYZ.js')).headers.get('x-waves-build').split(','))
       .toContain(buildIdOf(['/assets/index-BBB.js', '/assets/Shared-XYZ.js']));
+  });
+
+  it('drops the older retained generation and retries when the current bucket itself is full', async () => {
+    // Codex #4335 r7 P1: builds A and B are retained with A's route chunks;
+    // the refresh to C hits the quota writing its own assets, before the
+    // prune that would have dropped A. Without recovery every later refresh
+    // and install repeats the failure (the stale-bucket reclaim never
+    // touches the current bucket) until storage is cleared by hand.
+    const cache = fakeCache();
+    const { cacheCompleteShellResponse, dispatchFetch } = loadWorker(cache);
+    await cacheCompleteShellResponse(fakeResponse(shellHtml(['/assets/index-AAA.js'])));
+    for (let i = 0; i < 5; i += 1) await dispatchFetch(`/assets/Route-A${i}.js`);
+    await cacheCompleteShellResponse(fakeResponse(shellHtml(['/assets/index-BBB.js'])));
+    expect(await cachedAssets(cache)).toHaveLength(7); // A, its five routes, B
+
+    cache.failPut = () => cache.store.size >= 8; // no room for C while A's generation is still there
+    await cacheCompleteShellResponse(fakeResponse(shellHtml(['/assets/index-CCC.js'])));
+    cache.failPut = null;
+
+    expect(await (await cache.match('/')).text()).toBe(shellHtml(['/assets/index-CCC.js']));
+    expect(await cachedAssets(cache)).toEqual(['/assets/index-BBB.js', '/assets/index-CCC.js']);
   });
 
   it('removes a refresh\'s new entries when storing the shell itself hits the quota', async () => {

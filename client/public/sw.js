@@ -223,28 +223,47 @@ async function replaceCompleteShell(shellResponse, enqueuedSeq, supersedable) {
   // failed generation would sit in the bucket, unprunable, holding the
   // very quota the next refresh needs. Every started write settles before
   // the lock is released.
-  const created = [];
-  const rollBackCreated = () => Promise.allSettled(created.map(assetUrl => cache.delete(assetUrl)));
-  await withAssetWrites(async () => {
-    const results = await Promise.allSettled(assetResponses.map(async ([assetUrl, response]) => {
-      const existing = await cache.match(assetUrl);
-      const claims = existing ? [buildId, previousBuildId, ...buildTagsOf(existing)] : [buildId];
-      if (!existing) created.push(assetUrl);
-      await cache.put(assetUrl, tagWithBuild(response, claims));
-    }));
-    const failed = results.find(r => r.status === 'rejected');
-    if (failed) {
-      await rollBackCreated();
-      throw failed.reason;
+  const commitGeneration = async () => {
+    const created = [];
+    const rollBackCreated = () => Promise.allSettled(created.map(assetUrl => cache.delete(assetUrl)));
+    await withAssetWrites(async () => {
+      const results = await Promise.allSettled(assetResponses.map(async ([assetUrl, response]) => {
+        const existing = await cache.match(assetUrl);
+        const claims = existing ? [buildId, previousBuildId, ...buildTagsOf(existing)] : [buildId];
+        if (!existing) created.push(assetUrl);
+        // Clone: a retry below re-reads the same fetched body.
+        await cache.put(assetUrl, tagWithBuild(response.clone(), claims));
+      }));
+      const failed = results.find(r => r.status === 'rejected');
+      if (failed) {
+        await rollBackCreated();
+        throw failed.reason;
+      }
+    });
+    // The shell write can hit the quota too; the generation is only
+    // committed once '/' points at it, so undo its new entries as well.
+    try {
+      await cache.put(OFFLINE_URL, shellResponse.clone());
+    } catch (err) {
+      await withAssetWrites(rollBackCreated);
+      throw err;
     }
-  });
-  // The shell write can hit the quota too; the generation is only
-  // committed once '/' points at it, so undo its new entries as well.
+  };
   try {
-    await cache.put(OFFLINE_URL, shellResponse);
+    await commitGeneration();
   } catch (err) {
-    await withAssetWrites(rollBackCreated);
-    throw err;
+    // This bucket can fill up on its own: two retained generations plus
+    // their route chunks, and the prune that drops the older one only runs
+    // AFTER a refresh commits. A quota failure here would then repeat on
+    // every refresh and every later install (the stale-bucket reclaim
+    // never touches the current bucket), leaving the device unable to
+    // cache a newer shell until storage is cleared by hand. Drop the
+    // generation older than the cached one — what the commit's own prune
+    // would have dropped — and try once more. The cached generation (and
+    // the live page's) stays intact either way.
+    if (!isQuotaError(err)) throw err;
+    await pruneStaleAssets(cache, [previousBuildId, liveBuildId]);
+    await commitGeneration();
   }
   cachedShellSeq += 1;
   knownCachedBuild = buildId;
