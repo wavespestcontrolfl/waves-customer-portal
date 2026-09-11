@@ -76,4 +76,34 @@ describe('GeofenceArrivalPrompt — missing-tracking cards', () => {
     expect(screen.queryByTestId('tracking-notice')).not.toBeInTheDocument();
     expect(calls.some((c) => c.method === 'POST' && c.url.includes(`${STAGE1.id}/dismiss`))).toBe(true);
   });
+
+  // codex P1: follow_through_tracking shared the same "sort purely by
+  // recency" bucket + MAX_VISIT_CARDS(2) cap as routine visit/tech-line
+  // cards, so two newer routine cards could push a stage-2 tracking card
+  // (needs an arrival check right now) into the "more notices" summary,
+  // hidden until the tech happens to clear the routine ones. Tracking
+  // cards must outrank routine cards inside the cap.
+  it('a stage-2 tracking card outranks two newer routine visit cards and still renders inside the cap', async () => {
+    const trackingStage2 = notification('follow_through_tracking',
+      { stage: 2, customer_name: 'Customer Two', when: 'Thu Sep 10, 9–11 AM' }, 'n-track-older');
+    trackingStage2.message = 'The promised window ended over 30 minutes ago; no arrival is recorded.';
+    trackingStage2.created_at = '2026-09-08T18:00:00Z';
+    const newerVisitA = notification('visit_assigned', { headline: 'Routine A visit', service_type: 'Pest control' }, 'n-visit-a');
+    newerVisitA.created_at = '2026-09-08T18:30:00Z';
+    const newerVisitB = notification('visit_assigned', { headline: 'Routine B visit', service_type: 'Pest control' }, 'n-visit-b');
+    newerVisitB.created_at = '2026-09-08T18:40:00Z';
+
+    stubFeed([trackingStage2, newerVisitA, newerVisitB]);
+    render(<GeofenceArrivalPrompt />);
+    await act(async () => { await Promise.resolve(); });
+
+    const card = await screen.findByTestId('tracking-notice');
+    expect(card).toHaveTextContent('The promised window ended over 30 minutes ago; no arrival is recorded.');
+    // MAX_VISIT_CARDS is 2: the tracking card plus the single newest
+    // routine card render; the older-by-creation routine card is the one
+    // pushed into the hidden summary, not the tracking card.
+    expect(screen.getAllByTestId('visit-notice')).toHaveLength(1);
+    expect(screen.getByTestId('visit-notice')).toHaveTextContent('Routine B visit');
+    expect(screen.getByTestId('visit-notice-more')).toHaveTextContent('1 more notice');
+  });
 });

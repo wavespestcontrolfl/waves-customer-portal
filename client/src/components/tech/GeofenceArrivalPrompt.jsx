@@ -164,17 +164,25 @@ export default function GeofenceArrivalPrompt({ onStormReview }) {
       (a, b) => new Date(b.created_at || 0) - new Date(a.created_at || 0),
     );
     const shownStorms = stormAlerts.slice(0, MAX_STORM_CARDS);
-    const visitsNewestFirst = [...visitCards].sort(
-      (a, b) => new Date(b.created_at || 0) - new Date(a.created_at || 0),
-    );
-    const shownVisits = visitsNewestFirst.slice(0, MAX_VISIT_CARDS);
+    // Tracking cards (follow_through_tracking) rank ahead of routine kept
+    // cards inside the cap — stage 2 first, then stage 1 — so two newer
+    // routine visit/text cards can never push a stage-2 "needs an arrival
+    // check" card into the hidden-count summary. Recency alone was the only
+    // sort before this, and both buckets share MAX_VISIT_CARDS (codex P1).
+    const trackingTier = (n) => (n.type === 'follow_through_tracking' ? (n.payload?.stage === 2 ? 2 : 1) : 0);
+    const visitsRanked = [...visitCards].sort((a, b) => {
+      const tierDiff = trackingTier(b) - trackingTier(a);
+      if (tierDiff !== 0) return tierDiff;
+      return new Date(b.created_at || 0) - new Date(a.created_at || 0);
+    });
+    const shownVisits = visitsRanked.slice(0, MAX_VISIT_CARDS);
     // Order: actionable prompts, then storm warnings (both on a timer that
     // marks them read), then the persistent visit cards — nothing that can
     // expire unseen ever sits below something that waits for a tap.
     return {
       cards: [...otherCards, ...shownStorms, ...shownVisits],
       hiddenStormCount: stormAlerts.length - shownStorms.length,
-      hiddenVisitCount: visitsNewestFirst.length - shownVisits.length,
+      hiddenVisitCount: visitsRanked.length - shownVisits.length,
     };
   }, [active]);
 
