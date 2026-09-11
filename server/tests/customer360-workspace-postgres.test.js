@@ -739,25 +739,31 @@ postgres('Customer 360 migrated PostgreSQL reads', () => {
     }
   }, 30000);
 
-  test('a later, genuinely failed message is still recovered even though an older message from the same phone already delivered successfully (codex #4210 round-11 P1)', async () => {
+  test('a later, genuinely failed message past the coverage window is still recovered even though an older message from the same phone already delivered successfully (codex #4210 round-11/12 P1)', async () => {
     const conversationId = randomUUID();
     const olderMessageId = randomUUID();
     const newerMessageId = randomUUID();
     const olderSid = `SM-synthetic-sweep-older-delivered-${randomBytes(4).toString('hex')}`;
     const newerSid = `SM-synthetic-sweep-newer-failed-${randomBytes(4).toString('hex')}`;
     const unknownPhone = `+1941555${String(Date.now()).slice(-4)}`;
-    const olderCreatedAt = new Date(Date.now() - 600000);
+    // The newer message must arrive AFTER the older one's 4h coverage
+    // window lapses (codex #4210 round-12 P1) — within that window, a
+    // second unread message with no receipt of its own is the CORRECT,
+    // intentional throttle shape (one bell covers the whole window), not a
+    // failure; only past the window is "unread, no receipt" unambiguously
+    // a genuine orphan.
+    const olderCreatedAt = new Date(Date.now() - 5 * 60 * 60 * 1000);
     const newerCreatedAt = new Date(Date.now() - 60000);
     let dispatchedWith = null;
     const dispatch = jest.fn(async (args) => { dispatchedWith = args; return true; });
     try {
       // The OLDER message delivered successfully and is simply still
       // unread (staff hasn't looked yet — normal). A LATER message from
-      // the SAME phone then had its own dispatch genuinely fail (claim
-      // released, no receipt). A phone-wide "has anything ever delivered"
-      // check would let the older receipt wrongly cover the newer,
-      // unrelated failure — coverage must be checked per message, at or
-      // after THAT message's own arrival.
+      // the SAME phone arrived hours after that window closed and then
+      // had its own dispatch genuinely fail (claim released, no receipt).
+      // A phone-wide "has anything ever delivered" check would let the
+      // older, long-expired receipt wrongly cover the newer, unrelated
+      // failure — coverage must be window-bounded, not "any receipt ever".
       await mockPg('conversations').insert({ id: conversationId, customer_id: null, channel: 'sms', contact_phone: unknownPhone, our_endpoint_id: '+19415550203' });
       await mockPg('messages').insert([
         { id: olderMessageId, conversation_id: conversationId, channel: 'sms', direction: 'inbound', author_type: 'lead', is_read: false, twilio_sid: olderSid, body: 'Delivered, still unread', created_at: olderCreatedAt },
@@ -775,6 +781,45 @@ postgres('Customer 360 migrated PostgreSQL reads', () => {
     } finally {
       await mockPg('messages').whereIn('id', [olderMessageId, newerMessageId]).delete();
       await mockPg('sms_log').whereIn('twilio_sid', [olderSid, newerSid]).delete();
+      await mockPg('conversations').where({ id: conversationId }).delete();
+    }
+  }, 30000);
+
+  test('the sweep preserves an intentional throttle — a message covered by an earlier successful delivery\'s still-live window is never replayed as a new alert (codex #4210 round-12 P1)', async () => {
+    const conversationId = randomUUID();
+    const coveringMessageId = randomUUID();
+    const throttledMessageId = randomUUID();
+    const coveringSid = `SM-synthetic-sweep-covering-${randomBytes(4).toString('hex')}`;
+    const throttledSid = `SM-synthetic-sweep-throttled-${randomBytes(4).toString('hex')}`;
+    const unknownPhone = `+1941555${String(Date.now()).slice(-4)}`;
+    // The covering message delivered 3 hours ago — its 4h throttle window
+    // is still live. A second message arrived a minute ago and was
+    // correctly, intentionally suppressed by hasRecentUnknownSenderReceipt
+    // (twilio-webhook.js) — it never triggered its own delivery, so it
+    // carries no receipt of its own and is still unread. This is the SAME
+    // durable shape (unread, no receipt) the previous round's genuine-
+    // orphan test uses; only the window bound tells them apart, and no
+    // active claim row is needed to prove it either way.
+    const coveringCreatedAt = new Date(Date.now() - 3 * 60 * 60 * 1000);
+    const throttledCreatedAt = new Date(Date.now() - 60000);
+    const dispatch = jest.fn(async () => true);
+    try {
+      await mockPg('conversations').insert({ id: conversationId, customer_id: null, channel: 'sms', contact_phone: unknownPhone, our_endpoint_id: '+19415550204' });
+      await mockPg('messages').insert([
+        { id: coveringMessageId, conversation_id: conversationId, channel: 'sms', direction: 'inbound', author_type: 'lead', is_read: false, twilio_sid: coveringSid, body: 'First text, delivered', created_at: coveringCreatedAt },
+        { id: throttledMessageId, conversation_id: conversationId, channel: 'sms', direction: 'inbound', author_type: 'lead', is_read: false, twilio_sid: throttledSid, body: 'Second text, throttled by the first', created_at: throttledCreatedAt },
+      ]);
+      await mockPg('sms_log').insert([
+        { direction: 'inbound', from_phone: unknownPhone, to_phone: '+19415550204', twilio_sid: coveringSid, message_body: 'First text, delivered', metadata: JSON.stringify({ sms_reply_eligible: true, sms_reply_alerted: true }), created_at: coveringCreatedAt },
+        { direction: 'inbound', from_phone: unknownPhone, to_phone: '+19415550204', twilio_sid: throttledSid, message_body: 'Second text, throttled by the first', metadata: JSON.stringify({ sms_reply_eligible: true }), created_at: throttledCreatedAt },
+      ]);
+
+      const result = await sweepUnknownSenderAlertClaims({ dispatch });
+      expect(dispatch).not.toHaveBeenCalled();
+      expect(result.dispatched).toBe(0);
+    } finally {
+      await mockPg('messages').whereIn('id', [coveringMessageId, throttledMessageId]).delete();
+      await mockPg('sms_log').whereIn('twilio_sid', [coveringSid, throttledSid]).delete();
       await mockPg('conversations').where({ id: conversationId }).delete();
     }
   }, 30000);

@@ -24,27 +24,46 @@
  * (never promoted) conversation holding an unread, sms_reply-eligible
  * inbound message, skip any phone with a genuinely active (unexpired)
  * claim right now, and — for the rest — find the earliest unread eligible
- * message that has NO delivery covering it (codex #4210 round-11 P1: a
- * receipt is per-MESSAGE coverage, not a phone-wide "anything ever
- * delivered" flag — an older message that delivered successfully but is
- * still sitting unread must not block recovery of a genuinely later,
- * genuinely failed one; each candidate is checked against receipts at or
- * after ITS OWN arrival, not the oldest unread message's). Delivery
- * coverage itself is durable evidence (codex #4210 round-10 P1), not a
- * live-bell snapshot: ringSmsReplyBell stamps sms_log.metadata.
- * sms_reply_alerted on any genuine delivery (bell OR push — the same
- * definition used throughout this feature, e.g.
+ * message that has NO delivery covering it. "Covering" is WINDOW-bounded,
+ * not just "any later receipt" (codex #4210 round-12 P1, correcting round
+ * -11's own overcorrection): a receipt R covers a message M when
+ * `R.created_at <= M.created_at < R.created_at + WINDOW` — mirroring the
+ * exact throttle window claimUnknownSenderAlertWindow/
+ * hasRecentUnknownSenderReceipt already enforce in twilio-webhook.js. This
+ * distinguishes the two things that look identical in the raw data (an
+ * unread message with no receipt of its OWN): a message B that arrived
+ * MINUTES after A's successful delivery, correctly throttled by A's still-
+ * live window (B is COVERED — replaying an alert for it after A's window
+ * lapses would fire a stale, no-longer-relevant bell for no new inbound
+ * message), versus a message B that arrived HOURS after A's window already
+ * closed and never got its own dispatch to succeed (B is NOT covered — a
+ * genuine orphan). Checking only "any receipt at or after M's own arrival"
+ * (round 11) fixed the second case but broke the first, since A's window
+ * had already lapsed for cases like the second one is a coincidence, not a
+ * requirement of round 11's predicate — restoring the window bound fixes
+ * both together. Coverage itself is durable evidence (codex #4210
+ * round-10 P1), not a live-bell snapshot: ringSmsReplyBell stamps
+ * sms_log.metadata.sms_reply_alerted on any genuine delivery (bell OR
+ * push — the same definition used throughout this feature, e.g.
  * hasRecentUnknownSenderReceipt), which survives a bell being dismissed
  * through the admin notification feed without the SMS itself being read,
  * and survives a push-only success that never wrote a bell row at all —
  * both of which a live-bell check alone would misread as orphaned. If
- * nothing durably proves delivery for that message, re-run the SAME
+ * nothing durably proves coverage for that message, re-run the SAME
  * throttled dispatch an ordinary inbound webhook uses, inheriting every
  * existing safeguard (atomic claim, secondary receipt check, fail-open
  * behavior) for free.
  */
 const db = require('../models/db');
 const logger = require('./logger');
+
+// Mirrors twilio-webhook.js's UNKNOWN_SENDER_ALERT_WINDOW_MS — the same 4h
+// throttle window a confirmed delivery covers. Kept as a local constant
+// (not required from twilio-webhook.js) so requiring this module never
+// pulls in that file's whole dependency tree just to read one number; the
+// two are small enough, and change together rarely enough, that a
+// same-value comment here is the right amount of coupling.
+const UNKNOWN_SENDER_ALERT_WINDOW_MS = 4 * 60 * 60 * 1000;
 
 async function findCandidatePhones() {
   const rows = await db('messages as m')
@@ -92,11 +111,19 @@ async function findOrphanMessage(phone) {
     .whereRaw("l.metadata->>'sms_reply_eligible' = 'true'")
     .andWhere(function unread() { this.where({ 'm.is_read': false }).orWhereNull('m.is_read'); })
     .whereNotNull('m.twilio_sid')
-    .whereNotExists(function delivered() {
+    .whereNotExists(function covered() {
+      // A receipt R covers this candidate when R.created_at <= candidate's
+      // created_at < R.created_at + WINDOW — the same throttle window
+      // production enforces, not merely "any receipt at or after this
+      // candidate's own arrival" (codex #4210 round-12 P1). A receipt
+      // strictly BEFORE the candidate can still cover it (an earlier
+      // successful delivery legitimately throttled this later message);
+      // one whose window has since lapsed relative to the candidate cannot.
       this.select(1).from('sms_log as l2')
         .where({ 'l2.direction': 'inbound', 'l2.from_phone': phone })
         .whereRaw("l2.metadata->>'sms_reply_alerted' = 'true'")
-        .whereRaw('l2.created_at >= l.created_at');
+        .whereRaw('l2.created_at <= l.created_at')
+        .whereRaw('l.created_at < l2.created_at + (? * interval \'1 millisecond\')', [UNKNOWN_SENDER_ALERT_WINDOW_MS]);
     })
     .orderBy('m.created_at', 'asc')
     .first('m.twilio_sid', 'm.body');
