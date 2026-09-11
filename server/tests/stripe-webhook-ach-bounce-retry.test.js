@@ -313,5 +313,31 @@ describe('payment_failed admin bell payload', () => {
     expect(call).toBeTruthy();
     expect(call[1]).toMatchObject({ customerId: 'cust-1', amount: expect.any(Number), reason: expect.any(String) });
   });
+
+  test('orphan intent (no invoice, no ledger row) falls back to the PI metadata waves_customer_id', async () => {
+    const db = require('../models/db');
+    const { triggerNotification } = require('../services/notification-triggers');
+    db.raw.mockImplementation(async (sql) => (String(sql).includes('stripe_payment_notification_log') ? { rowCount: 1 } : { rowCount: 0 }));
+    mockState.processingRow = null;
+    mockState.paymentRow = null;
+    mockState.invoiceRow = null;
+    mockState.customer = null;
+    await handlePaymentIntentFailed(achBouncePI({ metadata: { type: 'no_show_fee', waves_customer_id: 'cust-demo' }, last_payment_error: { message: 'declined', code: 'card_declined', payment_method: { type: 'card' } } }), 'evt_pf_2');
+    await new Promise((resolve) => setImmediate(resolve));
+    const call = triggerNotification.mock.calls.find((c) => c[0] === 'payment_failed');
+    expect(call).toBeTruthy();
+    expect(call[1].customerId).toBe('cust-demo');
+  });
+
+  test('a late payment_failed after the ledger row settled rings nothing', async () => {
+    const db = require('../models/db');
+    const { triggerNotification } = require('../services/notification-triggers');
+    db.raw.mockImplementation(async (sql) => (String(sql).includes('stripe_payment_notification_log') ? { rowCount: 1 } : { rowCount: 0 }));
+    mockState.processingRow = null;
+    mockState.paymentRow = processingRow({ status: 'paid' });
+    await handlePaymentIntentFailed(achBouncePI(), 'evt_pf_3');
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(triggerNotification.mock.calls.find((c) => c[0] === 'payment_failed')).toBeUndefined();
+  });
 });
 
