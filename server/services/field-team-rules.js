@@ -52,9 +52,11 @@ function dateOnly(value) {
 }
 const day = Joi.string().pattern(/^\d{4}-\d{2}-\d{2}$/).custom((value, helpers) => {
   const parsed = new Date(`${value}T12:00:00Z`);
-  return Number.isFinite(parsed.getTime()) && parsed.toISOString().slice(0, 10) === value ? value : helpers.error('any.invalid');
+  return /^(19|2\d)\d{2}-/.test(value) && Number.isFinite(parsed.getTime()) && parsed.toISOString().slice(0, 10) === value ? value : helpers.error('any.invalid');
 });
-const month = Joi.string().pattern(/^\d{4}-(0[1-9]|1[0-2])$/);
+// PostgreSQL dates have no year zero; keep selectors inside the years the
+// program can plausibly cover so bounds never reach the database invalid.
+const month = Joi.string().pattern(/^(19|2\d)\d{2}-(0[1-9]|1[0-2])$/);
 const uuid = Joi.string().uuid();
 const cents = Joi.number().integer().min(0).max(100000000);
 const text = Joi.string().trim().max(2000);

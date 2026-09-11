@@ -176,6 +176,7 @@ module.exports = {
   ringTargetForLine,
   lineForTechnician,
   techLineContext,
+  usableCell,
   notifyTechLineText,
   _test: { displayPhone },
 };

@@ -1,6 +1,6 @@
+import { Button, Field, Input, Select, Textarea, Badge, Card, UiSurface, ActionFeedback, Tabs, TabList, Tab, Dialog, DialogHeader, DialogTitle, DialogBody, DialogFooter } from "../../components/ui";
 import { useState, useEffect, useCallback, useRef } from "react";
 import useIsMobile from "../../hooks/useIsMobile";
-import { createPortal } from "react-dom";
 import { useOutletContext, useSearchParams } from "react-router-dom";
 import { BarChart3, Beaker, Calculator, ClipboardCheck, Plus, Wrench } from "lucide-react";
 import AdminCommandHeader from "../../components/admin/AdminCommandHeader";
@@ -10,22 +10,7 @@ import EquipmentCalibrationPanel from "./EquipmentCalibrationPanel";
 const API_BASE = import.meta.env.VITE_API_URL || "/api";
 // V2 token pass: teal/purple fold to zinc-900. Semantic green/amber/red preserved.
 // STATUS_COLORS folds cleanly while keeping semantic green/amber/red distinct.
-const D = {
-  bg: "#F4F4F5",
-  card: "#FFFFFF",
-  border: "#E4E4E7",
-  teal: "#18181B",
-  green: "#15803D",
-  amber: "#A16207",
-  red: "#991B1B",
-  purple: "#18181B",
-  text: "#27272A",
-  muted: "#71717A",
-  white: "#FFFFFF",
-  input: "#FFFFFF",
-  heading: "#09090B",
-  inputBorder: "#D4D4D8"
-};
+
 const MONO = "'JetBrains Mono', monospace";
 function adminFetch(path, options = {}) {
   return fetch(`${API_BASE}${path}`, {
@@ -40,8 +25,8 @@ function adminFetch(path, options = {}) {
   });
 }
 const sCard = {
-  background: D.card,
-  border: `1px solid ${D.border}`,
+  background: "#FFFFFF",
+  border: `1px solid ${"#E4E4E7"}`,
   borderRadius: 12,
   padding: 20,
   marginBottom: 12,
@@ -57,25 +42,6 @@ const sBtn = (bg, color) => ({
   fontWeight: 500,
   cursor: "pointer"
 });
-const sBadge = (bg, color) => ({
-  fontSize: 10,
-  padding: "2px 8px",
-  borderRadius: 4,
-  background: bg,
-  color,
-  fontWeight: 500
-});
-const sInput = {
-  width: "100%",
-  padding: "8px 12px",
-  background: D.input,
-  border: `1px solid ${D.border}`,
-  borderRadius: 8,
-  color: D.text,
-  fontSize: 13,
-  outline: "none",
-  boxSizing: "border-box"
-};
 const fmt = n => n != null ? "$" + Number(n).toLocaleString(undefined, {
   minimumFractionDigits: 2,
   maximumFractionDigits: 2
@@ -115,13 +81,13 @@ function normalizeJobCostSummary(summary) {
   };
 }
 const STATUS_COLORS = {
-  active: D.green,
-  maintenance: D.amber,
-  retired: D.muted,
-  sold: D.muted,
-  lost: D.red,
-  in_service: D.green,
-  pending: D.purple
+  active: "#18181B",
+  maintenance: "#52525B",
+  retired: "#71717A",
+  sold: "#71717A",
+  lost: "#C8312F",
+  in_service: "#18181B",
+  pending: "#18181B"
 };
 const CAT_ICONS = {
   sprayer: "",
@@ -241,10 +207,7 @@ export default function EquipmentPage() {
   // 'assets' and legacy links (?tab=fleet) normalize to 'maintenance' —
   // the raw ?tab= beacon can't see either (Codex #2961 r19).
   useRenderedTabBeacon("/admin/equipment", tab, [searchParams]);
-  return <div style={{
-    maxWidth: 1300,
-    margin: "0 auto"
-  }}>
+  return <UiSurface density="comfortable" className="ui-workspace text-ui-body text-zinc-900">
       {" "}
       <AdminCommandHeader title="Equipment" icon={Wrench} sections={visibleGroups.map(g => ({
       key: g.key,
@@ -253,76 +216,40 @@ export default function EquipmentPage() {
     }))} activeKey={activeGroup.key} onSectionChange={handleSectionChange} ariaLabel="Equipment section" navGridClassName="grid-cols-2 lg:grid-cols-4" action={tab === "assets" ? {
       label: "Add Equipment",
       icon: Plus,
-      onClick: () => setEditing({
-        ...EMPTY_EQUIP
-      })
-    } : null} />
-      {activeGroup.tabs.length > 1 && <div style={{
-      display: "flex",
-      flexWrap: "wrap",
-      gap: 8,
-      marginBottom: 16
-    }}>
-          {activeGroup.tabs.map(key => {
-        const leaf = EQUIPMENT_LEAF_BY_KEY[key];
-        const active = tab === key;
-        const LeafIcon = leaf.Icon;
-        return <button key={key} type="button" onClick={() => selectLeaf(key)} style={{
-          display: "inline-flex",
-          alignItems: "center",
-          gap: 6,
-          height: 36,
-          padding: "0 14px",
-          borderRadius: 6,
-          fontSize: 12,
-          fontWeight: 700,
-          textTransform: "uppercase",
-          letterSpacing: "0.04em",
-          cursor: "pointer",
-          border: `1px solid ${active ? "#18181B" : "#E4E4E7"}`,
-          background: active ? "#18181B" : "#FFFFFF",
-          color: active ? "#fff" : "#27272A"
-        }}>
-                <LeafIcon size={14} strokeWidth={1.9} />
-                {leaf.label}
-              </button>;
-      })}
-        </div>}
+      onClick: event => {
+        event.currentTarget.focus({
+          preventScroll: true
+        });
+        setEditing({
+          ...EMPTY_EQUIP
+        });
+      }
+    } : null} variant="workspace" />
+      {activeGroup.tabs.length > 1 && <Tabs value={tab} onValueChange={selectLeaf} className="mb-4" variant="section">
+          <TabList aria-label={`${activeGroup.label} views`} scrollable>
+            {activeGroup.tabs.map(key => {
+          const leaf = EQUIPMENT_LEAF_BY_KEY[key];
+          const LeafIcon = leaf.Icon;
+          return <Tab key={key} value={key} className="inline-flex items-center gap-2">
+                  <LeafIcon size={14} strokeWidth={1.9} aria-hidden />
+                  {leaf.label}
+                </Tab>;
+        })}
+          </TabList>
+        </Tabs>}
       {tab === "assets" && <EquipmentTab showToast={showToast} editing={editing} setEditing={setEditing} />}
       {tab === "maintenance" && <EquipmentMaintenancePage key="maintenance" embedded initialTab="fleet" />}
-      {tab === "analytics" && <EquipmentMaintenancePage key="analytics" embedded initialTab="analytics" />}
+      {tab === "analytics" && isAdminRole && <EquipmentMaintenancePage key="analytics" embedded initialTab="analytics" />}
       {tab === "tank-mixes" && <TankMixTab showToast={showToast} />}
-      {tab === "job-costs" && <JobCostTab />}
+      {tab === "job-costs" && isAdminRole && <JobCostTab />}
       {tab === "calibrations" && <EquipmentCalibrationPanel />}
-      <div style={{
-      position: "fixed",
-      bottom: 20,
-      right: 20,
-      background: D.card,
-      border: `1px solid ${D.green}`,
-      borderRadius: 8,
-      padding: "10px 16px",
-      display: "flex",
-      alignItems: "center",
-      gap: 8,
-      boxShadow: "0 8px 32px rgba(0,0,0,.4)",
-      zIndex: 300,
-      fontSize: 12,
-      transform: toast ? "translateY(0)" : "translateY(80px)",
-      opacity: toast ? 1 : 0,
-      transition: "all .3s",
-      pointerEvents: "none"
-    }}>
-        {" "}
-        <span style={{
-        color: D.green
-      }}></span>
-        <span style={{
-        color: D.text
-      }}>{toast}</span>{" "}
-      </div>{" "}
-    </div>;
+      {toast && <Card role="status" className="pointer-events-none fixed z-[300] right-4 bottom-[calc(80px+env(safe-area-inset-bottom))] sm:bottom-5 max-w-[calc(100vw-32px)] px-4 py-3">
+          {toast}
+        </Card>}
+    </UiSurface>;
 }
+
+// ── Equipment Tab ──
 
 // ── Equipment Tab ──
 const CATEGORIES = ["sprayer", "pump", "reel", "spreader", "dethatcher", "backpack", "vehicle", "other"];
@@ -348,55 +275,88 @@ function EquipmentTab({
   editing,
   setEditing
 }) {
+  const actionRef = useRef(false);
+  const [actionError, setActionError] = useState("");
   const isMobile = useIsMobile(640);
   const [items, setItems] = useState([]);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
-  const reload = () => adminFetch("/admin/equipment/equipment").then(d => setItems(d.equipment || [])).catch(() => {});
-  useEffect(() => {
-    reload().finally(() => setLoading(false));
-  }, []);
-  const save = async () => {
-    if (!editing.name?.trim()) return showToast("Name is required");
-    setSaving(true);
+  const [loadError, setLoadError] = useState("");
+  const loadSeq = useRef(0);
+  const reload = useCallback(async () => {
+    const seq = ++loadSeq.current;
+    setLoading(true);
+    setLoadError("");
     try {
-      const payload = {
-        ...editing
-      };
-      ["purchase_price", "current_hours", "next_service_hours", "book_value"].forEach(k => {
-        payload[k] = payload[k] === "" || payload[k] == null ? null : Number(payload[k]);
-      });
-      if (!payload.purchase_date) payload.purchase_date = null;
-      if (editing.id) {
-        await adminFetch(`/admin/equipment/equipment/${editing.id}`, {
-          method: "PUT",
-          body: JSON.stringify(payload)
-        });
-        showToast("Equipment updated");
-      } else {
-        await adminFetch("/admin/equipment/equipment", {
-          method: "POST",
-          body: JSON.stringify(payload)
-        });
-        showToast("Equipment added");
-      }
-      setEditing(null);
-      await reload();
-    } catch (e) {
-      showToast(`Failed: ${e.message}`);
+      const d = await adminFetch("/admin/equipment/equipment");
+      if (seq === loadSeq.current) setItems(d.equipment || []);
+    } catch (error) {
+      if (seq === loadSeq.current) setLoadError(error.message);
     } finally {
-      setSaving(false);
+      if (seq === loadSeq.current) setLoading(false);
+    }
+  }, []);
+  useEffect(() => {
+    reload();
+    return () => {
+      loadSeq.current += 1;
+    };
+  }, [reload]);
+  useEffect(() => setActionError(""), [editing?.id, !!editing]);
+  const save = async () => {
+    if (actionRef.current) return;
+    actionRef.current = true;
+    setActionError("");
+    try {
+      if (!editing.name?.trim()) return setActionError("Name is required");
+      setSaving(true);
+      try {
+        const payload = {
+          ...editing
+        };
+        ["purchase_price", "current_hours", "next_service_hours", "book_value"].forEach(k => {
+          payload[k] = payload[k] === "" || payload[k] == null ? null : Number(payload[k]);
+        });
+        if (!payload.purchase_date) payload.purchase_date = null;
+        if (editing.id) {
+          await adminFetch(`/admin/equipment/equipment/${editing.id}`, {
+            method: "PUT",
+            body: JSON.stringify(payload)
+          });
+          showToast("Equipment updated");
+        } else {
+          await adminFetch("/admin/equipment/equipment", {
+            method: "POST",
+            body: JSON.stringify(payload)
+          });
+          showToast("Equipment added");
+        }
+        setEditing(null);
+        await reload();
+      } catch (e) {
+        setActionError(`Failed: ${e.message}`);
+      } finally {
+        setSaving(false);
+      }
+    } finally {
+      actionRef.current = false;
     }
   };
-  if (loading) return <div style={{
-    color: D.muted,
+  if (loading && !items.length) return <div style={{
+    color: "#71717A",
     padding: 40,
     textAlign: "center"
   }}>
         Loading equipment...
       </div>;
   return <>
-      {" "}
+      {loadError && <ActionFeedback error onRetry={reload} className="mb-4">
+          Could not load equipment: {loadError}
+          {items.length > 0 && " Showing previously loaded equipment."}
+        </ActionFeedback>}
+      {!loading && !loadError && items.length === 0 && <Card className="p-6 text-zinc-500">
+          No equipment recorded. Use Add Equipment to record an asset.
+        </Card>}{" "}
       <div style={{
       display: "grid",
       gridTemplateColumns: isMobile ? "1fr" : "repeat(auto-fill, minmax(300px, 1fr))",
@@ -405,11 +365,10 @@ function EquipmentTab({
         {items.map(e => {
         const hoursLeft = e.next_service_hours ? e.next_service_hours - (e.current_hours || 0) : null;
         const needsService = hoursLeft !== null && hoursLeft <= 10;
-        return <div key={e.id} style={{
-          ...sCard,
+        return <Card key={e.id} style={{
           marginBottom: 0,
-          borderLeft: `3px solid ${STATUS_COLORS[e.status] || D.muted}`
-        }}>
+          borderLeft: `3px solid ${STATUS_COLORS[e.status] || "#71717A"}`
+        }} className="min-w-0 [overflow-wrap:anywhere] p-4 mb-3">
               {" "}
               <div style={{
             display: "flex",
@@ -427,13 +386,13 @@ function EquipmentTab({
                   <div style={{
                 fontSize: 14,
                 fontWeight: 500,
-                color: D.heading
+                color: "#09090B"
               }}>
                     {CAT_ICONS[e.category] || ""} {e.name}
                   </div>{" "}
                   <div style={{
-                fontSize: 11,
-                color: D.muted
+                fontSize: 14,
+                color: "#71717A"
               }}>
                     {[e.make, e.model].filter(Boolean).join(" ")}
                   </div>{" "}
@@ -445,71 +404,70 @@ function EquipmentTab({
               flexShrink: 0
             }}>
                   {" "}
-                  <span style={sBadge(`${STATUS_COLORS[e.status]}22`, STATUS_COLORS[e.status])}>
+                  <Badge tone={STATUS_COLORS[e.status] === "#C8312F" ? "alert" : "neutral"}>
                     {e.status}
-                  </span>{" "}
-                  <button onClick={() => setEditing({
-                ...e,
-                purchase_date: e.purchase_date ? String(e.purchase_date).split("T")[0] : "",
-                purchase_price: e.purchase_price ?? "",
-                current_hours: e.current_hours ?? "",
-                next_service_hours: e.next_service_hours ?? "",
-                book_value: e.book_value ?? ""
-              })} style={{
-                padding: "4px 10px",
-                background: "transparent",
-                border: `1px solid ${D.border}`,
-                borderRadius: 6,
-                color: D.muted,
-                fontSize: 11,
-                cursor: "pointer"
-              }}>
+                  </Badge>{" "}
+                  <Button onClick={event => {
+                event.currentTarget.focus({
+                  preventScroll: true
+                });
+                setEditing({
+                  ...e,
+                  purchase_date: e.purchase_date ? String(e.purchase_date).split("T")[0] : "",
+                  purchase_price: e.purchase_price ?? "",
+                  current_hours: e.current_hours ?? "",
+                  next_service_hours: e.next_service_hours ?? "",
+                  book_value: e.book_value ?? ""
+                });
+              }} type="button" variant="secondary" className="min-w-11" disabled={saving}>
                     Edit
-                  </button>{" "}
+                  </Button>{" "}
                 </div>{" "}
               </div>{" "}
               <div style={{
             display: "grid",
             gridTemplateColumns: "1fr 1fr",
             gap: 4,
-            fontSize: 11
+            fontSize: 14
           }}>
                 {e.current_hours > 0 && <div>
                     <span style={{
-                color: D.muted
-              }}>Hours:</span>{" "}
+                color: "#71717A"
+              }}>
+                      Hours:
+                    </span>{" "}
                     <span style={{
-                color: D.heading,
-                fontFamily: MONO
+                color: "#09090B"
               }}>
                       {e.current_hours}
                     </span>
                   </div>}
                 {e.purchase_price > 0 && <div>
                     <span style={{
-                color: D.muted
-              }}>Cost:</span>{" "}
+                color: "#71717A"
+              }}>
+                      Cost:
+                    </span>{" "}
                     <span style={{
-                color: D.green,
-                fontFamily: MONO
+                color: "#18181B"
               }}>
                       {fmt(e.purchase_price)}
                     </span>
                   </div>}
                 {e.book_value > 0 && <div>
                     <span style={{
-                color: D.muted
-              }}>Book:</span>{" "}
-                    <span style={{
-                fontFamily: MONO
+                color: "#71717A"
               }}>
-                      {fmt(e.book_value)}
-                    </span>
+                      Book:
+                    </span>{" "}
+                    <span>{fmt(e.book_value)}</span>
                   </div>}
                 {e.last_service_date && <div>
                     <span style={{
-                color: D.muted
-              }}>Last Svc:</span>{" "}
+                color: "#71717A"
+              }}>
+                      Last Svc:
+                    </span>{" "}
                     <span>
                       {new Date(e.last_service_date).toLocaleDateString()}
                     </span>
@@ -521,23 +479,23 @@ function EquipmentTab({
             flexWrap: "wrap",
             marginTop: 8
           }}>
-                  {Object.entries(typeof e.specs === "string" ? JSON.parse(e.specs) : e.specs).map(([k, v]) => <span key={k} style={sBadge(`${D.teal}22`, D.teal)}>
+                  {Object.entries(typeof e.specs === "string" ? JSON.parse(e.specs) : e.specs).map(([k, v]) => <Badge key={k} tone="neutral">
                       {k.replace(/_/g, " ")}: {v}
-                    </span>)}
+                    </Badge>)}
                 </div>}
               {needsService && <div style={{
             marginTop: 8,
-            fontSize: 11,
-            color: D.amber,
+            fontSize: 14,
+            color: "#52525B",
             fontWeight: 500
           }}>
                   Service due in {Math.round(hoursLeft)} hours —{" "}
                   {e.next_service_type}
                 </div>}
-            </div>;
+            </Card>;
       })}
       </div>
-      {editing && <EquipmentEditModal equipment={editing} onChange={setEditing} onClose={() => setEditing(null)} onSave={save} saving={saving} />}
+      {editing && <EquipmentEditModal equipment={editing} onChange={setEditing} onClose={() => setEditing(null)} onSave={save} saving={saving} error={actionError} />}
     </>;
 }
 function EquipmentEditModal({
@@ -545,91 +503,36 @@ function EquipmentEditModal({
   onChange,
   onClose,
   onSave,
-  saving
+  saving,
+  error
 }) {
-  // Reactive (rotation-safe) — the module-level snapshot never recomputes.
-  const isMobile = useIsMobile(640);
-  const field = (key, label, type = "text", opts = null) => <label style={{
-    display: "block"
-  }}>
-      {" "}
-      <div style={{
-      fontSize: 11,
-      color: D.muted,
-      fontWeight: 500,
-      marginBottom: 4,
-      textTransform: "uppercase",
-      letterSpacing: 0.5
-    }}>
-        {label}
-      </div>
-      {opts ? <select value={e[key] ?? ""} onChange={ev => onChange({
+  const field = (key, label, type = "text", opts = null) => <Field label={label} className="min-w-0">
+      {opts ? <Select value={e[key] ?? ""} onChange={ev => onChange({
       ...e,
       [key]: ev.target.value
-    })} style={sInput}>
+    })} disabled={saving}>
           {opts.map(o => <option key={o} value={o}>
               {o}
             </option>)}
-        </select> : type === "textarea" ? <textarea value={e[key] ?? ""} onChange={ev => onChange({
+        </Select> : type === "textarea" ? <Textarea value={e[key] ?? ""} onChange={ev => onChange({
       ...e,
       [key]: ev.target.value
-    })} rows={3} style={{
-      ...sInput,
-      resize: "vertical",
-      fontFamily: "inherit"
-    }} /> : <input type={type} value={e[key] ?? ""} onChange={ev => onChange({
+    })} rows={3} disabled={saving} /> : <Input type={type} value={e[key] ?? ""} onChange={ev => onChange({
       ...e,
       [key]: ev.target.value
-    })} style={sInput} />}
-    </label>;
-  return createPortal(<div onClick={onClose} style={{
-    position: "fixed",
-    inset: 0,
-    background: "rgba(15,23,42,0.6)",
-    display: "flex",
-    alignItems: "center",
-    justifyContent: "center",
-    padding: isMobile ? 0 : 20,
-    zIndex: 400
-  }}>
-      {" "}
-      <div onClick={ev => ev.stopPropagation()} style={{
-      background: D.card,
-      borderRadius: 12,
-      padding: 24,
-      width: "100%",
-      maxWidth: 640,
-      maxHeight: "90vh",
-      overflowY: "auto",
-      boxShadow: "0 20px 60px rgba(0,0,0,0.3)",
-      ...(isMobile ? {
-        width: "100%",
-        maxWidth: "none",
-        height: "100%",
-        maxHeight: "none",
-        borderRadius: 0,
-        boxSizing: "border-box",
-        overflowY: "auto",
-        paddingTop: "calc(24px + env(safe-area-inset-top, 0px))",
-        paddingBottom: "calc(24px + env(safe-area-inset-bottom, 0px))",
-        paddingLeft: "calc(24px + env(safe-area-inset-left, 0px))",
-        paddingRight: "calc(24px + env(safe-area-inset-right, 0px))"
-      } : {})
-    }}>
-        {" "}
-        <div style={{
-        fontSize: 18,
-        fontWeight: 700,
-        color: D.heading,
-        marginBottom: 16
-      }}>
-          {e.id ? "Edit Equipment" : "Add Equipment"}
-        </div>{" "}
-        <div style={{
-        display: "grid",
-        gridTemplateColumns: isMobile ? "1fr" : "1fr 1fr",
-        gap: 12
-      }}>
+    })} disabled={saving} />}
+    </Field>;
+  return <Dialog open onClose={() => {
+    if (!saving) onClose();
+  }} size="lg">
+      <DialogHeader>
+        <DialogTitle>{e.id ? "Edit Equipment" : "Add Equipment"}</DialogTitle>
+      </DialogHeader>
+      <DialogBody>
+        {error && <ActionFeedback error className="mb-4">
+            {error}
+          </ActionFeedback>}
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
           {field("name", "Name *")}
           {field("category", "Category", "text", CATEGORIES)}
           {field("make", "Make")}
@@ -643,32 +546,21 @@ function EquipmentEditModal({
           {field("next_service_hours", "Next Service @ Hours", "number")}
           {field("next_service_type", "Next Service Type")}
           {field("assigned_to", "Assigned To")}
-        </div>{" "}
-        <div style={{
-        marginTop: 12
-      }}>
-          {field("notes", "Notes", "textarea")}
-        </div>{" "}
-        <div style={{
-        display: "flex",
-        gap: 8,
-        justifyContent: "flex-end",
-        marginTop: 20
-      }}>
-          {" "}
-          <button onClick={onClose} disabled={saving} style={{
-          ...sBtn("transparent", D.muted),
-          border: `1px solid ${D.border}`
-        }}>
-            Cancel
-          </button>{" "}
-          <button onClick={onSave} disabled={saving} style={sBtn(D.teal, "#fff")}>
-            {saving ? "Saving..." : "Save"}
-          </button>{" "}
-        </div>{" "}
-      </div>{" "}
-    </div>, document.body);
+        </div>
+        <div className="mt-3">{field("notes", "Notes", "textarea")}</div>
+      </DialogBody>
+      <DialogFooter className="grid grid-cols-2">
+        <Button variant="secondary" disabled={saving} onClick={onClose}>
+          Cancel
+        </Button>
+        <Button loading={saving} disabled={saving} onClick={onSave}>
+          Save
+        </Button>
+      </DialogFooter>
+    </Dialog>;
 }
+
+// ── Tank Mix Tab ──
 
 // ── Tank Mix Tab ──
 function TankMixTab({
@@ -714,7 +606,7 @@ function TankMixTab({
     }
   };
   if (loading && mixes.length === 0) return <div style={{
-    color: D.muted,
+    color: "#71717A",
     padding: 40,
     textAlign: "center"
   }}>
@@ -723,13 +615,13 @@ function TankMixTab({
   return <div>
       {loadError && <div role="alert" style={{
       ...sCard,
-      color: D.red,
+      color: "#991B1B",
       fontSize: 14
     }}>
           Could not load tank mixes.
           {mixes.length > 0 && " Showing previously loaded mixes; costs may be out of date."}
           <button onClick={loadMixes} aria-label="Retry tank mixes" style={{
-        ...sBtn(D.teal, "#fff"),
+        ...sBtn("#18181B", "#fff"),
         marginLeft: 12,
         fontSize: 14
       }}>
@@ -737,13 +629,13 @@ function TankMixTab({
           </button>
         </div>}
       {loading && <div role="status" style={{
-      color: D.muted
+      color: "#71717A"
     }}>Refreshing tank mixes...</div>}
       {mixes.length === 0 ? !loadError && <div style={{
       ...sCard,
       textAlign: "center",
       padding: 40,
-      color: D.muted
+      color: "#71717A"
     }}>
           No tank mixes configured yet. Add your standard mixes to track costs
           per application.
@@ -765,13 +657,13 @@ function TankMixTab({
                   <div style={{
               fontSize: 15,
               fontWeight: 500,
-              color: D.heading
+              color: "#09090B"
             }}>
                     {m.name}
                   </div>{" "}
                   <div style={{
               fontSize: 12,
-              color: D.muted
+              color: "#71717A"
             }}>
                     {m.service_type} · {m.tank_size_gal}gal tank · covers{" "}
                     {(m.coverage_sqft || 0).toLocaleString()} sqft
@@ -791,27 +683,27 @@ function TankMixTab({
                 fontFamily: MONO,
                 fontSize: 18,
                 fontWeight: 700,
-                color: m.cost_incomplete ? D.amber : D.green
+                color: m.cost_incomplete ? "#A16207" : "#15803D"
               }}>
                       {fmt(m.cost_per_tank)}/tank
                     </div>{" "}
                     <div style={{
                 fontFamily: MONO,
                 fontSize: 12,
-                color: D.muted
+                color: "#71717A"
               }}>
                       {fmt(m.cost_per_1000sf)}/1000sf
                     </div>{" "}
                     {m.cost_incomplete && <div style={{
                 fontSize: 11,
-                color: D.amber
+                color: "#A16207"
               }}>
                         incomplete — unpriced component excluded
                       </div>}{" "}
                   </div>{" "}
                   <button onClick={() => recalculate(m.id)} style={{
-              ...sBtn("transparent", D.muted),
-              border: `1px solid ${D.border}`,
+              ...sBtn("transparent", "#71717A"),
+              border: `1px solid ${"#E4E4E7"}`,
               padding: "4px 8px",
               fontSize: 10
             }}>
@@ -834,12 +726,12 @@ function TankMixTab({
                     <tr>
                       {["Product", "Rate/1000sf", "Oz/Tank", "Cost"].map(h => <th key={h} style={{
                   fontSize: 10,
-                  color: D.muted,
+                  color: "#71717A",
                   textTransform: "uppercase",
                   letterSpacing: 1,
                   textAlign: "left",
                   padding: "4px 8px",
-                  borderBottom: `1px solid ${D.border}22`
+                  borderBottom: `1px solid ${"#E4E4E7"}22`
                 }}>
                             {h}
                           </th>)}
@@ -851,7 +743,7 @@ function TankMixTab({
                         <td style={{
                   padding: "6px 8px",
                   fontSize: 12,
-                  color: D.heading
+                  color: "#09090B"
                 }}>
                           {p.product_name}
                         </td>{" "}
@@ -873,7 +765,7 @@ function TankMixTab({
                   padding: "6px 8px",
                   fontSize: 12,
                   fontFamily: MONO,
-                  color: D.green
+                  color: "#15803D"
                 }}>
                           {fmt(p.cost)}
                         </td>{" "}
@@ -902,7 +794,7 @@ function JobCostTab() {
     });
   }, []);
   if (loading) return <div style={{
-    color: D.muted,
+    color: "#71717A",
     padding: 40,
     textAlign: "center"
   }}>
@@ -918,19 +810,19 @@ function JobCostTab() {
           {[{
         label: "Avg Margin",
         value: summary.avgMargin != null ? `${summary.avgMargin.toFixed(1)}%` : "—",
-        color: summary.avgMargin == null || summary.avgMargin >= 50 ? D.green : D.amber
+        color: summary.avgMargin == null || summary.avgMargin >= 50 ? "#15803D" : "#A16207"
       }, {
         label: "Avg Revenue/Job",
         value: fmt(summary.avgRevenue),
-        color: D.green
+        color: "#15803D"
       }, {
         label: "Avg Cost/Job",
         value: fmt(summary.avgCost),
-        color: D.amber
+        color: "#A16207"
       }, {
         label: "Total Jobs Costed",
         value: summary.totalJobs || 0,
-        color: D.heading
+        color: "#09090B"
       }].map(s => <div key={s.label} style={{
         ...sCard,
         flex: isMobile ? "1 1 calc(50% - 6px)" : "1 1 140px",
@@ -949,7 +841,7 @@ function JobCostTab() {
               </div>{" "}
               <div style={{
           fontSize: 9,
-          color: D.muted,
+          color: "#71717A",
           textTransform: "uppercase",
           letterSpacing: 1,
           marginTop: 2
@@ -965,7 +857,7 @@ function JobCostTab() {
           <div style={{
         fontSize: 15,
         fontWeight: 500,
-        color: D.heading,
+        color: "#09090B",
         marginBottom: 12
       }}>
             Margins by Service Type
@@ -974,12 +866,12 @@ function JobCostTab() {
         display: "flex",
         justifyContent: "space-between",
         padding: "8px 0",
-        borderBottom: `1px solid ${D.border}22`,
+        borderBottom: `1px solid ${"#E4E4E7"}22`,
         fontSize: 12
       }}>
               {" "}
               <span style={{
-          color: D.heading,
+          color: "#09090B",
           fontWeight: 500
         }}>
                 {svc}
@@ -990,22 +882,22 @@ function JobCostTab() {
         }}>
                 {" "}
                 <span style={{
-            color: D.muted
+            color: "#71717A"
           }}>{stats.count} jobs</span>{" "}
                 <span style={{
-            color: D.green,
+            color: "#15803D",
             fontFamily: MONO
           }}>
                   Rev: {fmt(stats.avgRevenue)}
                 </span>{" "}
                 <span style={{
-            color: D.amber,
+            color: "#A16207",
             fontFamily: MONO
           }}>
                   Cost: {fmt(stats.avgCost)}
                 </span>{" "}
                 <span style={{
-            color: stats.avgMargin >= 50 ? D.green : D.amber,
+            color: stats.avgMargin >= 50 ? "#15803D" : "#A16207",
             fontFamily: MONO,
             fontWeight: 700
           }}>
@@ -1019,7 +911,7 @@ function JobCostTab() {
       ...sCard,
       textAlign: "center",
       padding: 40,
-      color: D.muted
+      color: "#71717A"
     }}>
           No job costs recorded yet
         </div>}
@@ -1043,7 +935,7 @@ function MaintenanceTab({
     }).catch(() => setLoading(false));
   }, []);
   if (loading) return <div style={{
-    color: D.muted,
+    color: "#71717A",
     padding: 40,
     textAlign: "center"
   }}>
@@ -1054,7 +946,7 @@ function MaintenanceTab({
       <div style={{
       fontSize: 15,
       fontWeight: 500,
-      color: D.heading,
+      color: "#09090B",
       marginBottom: 12
     }}>
         Upcoming Maintenance
@@ -1063,14 +955,14 @@ function MaintenanceTab({
       ...sCard,
       textAlign: "center",
       padding: 40,
-      color: D.muted
+      color: "#71717A"
     }}>
           No equipment needs service soon
         </div> : equipment.map(e => {
       const hoursLeft = e.next_service_hours - (e.current_hours || 0);
       return <div key={e.id} style={{
         ...sCard,
-        borderLeft: `3px solid ${hoursLeft <= 10 ? D.red : D.amber}`
+        borderLeft: `3px solid ${hoursLeft <= 10 ? "#991B1B" : "#A16207"}`
       }}>
               {" "}
               <div style={{
@@ -1084,13 +976,13 @@ function MaintenanceTab({
                   <div style={{
               fontSize: 14,
               fontWeight: 500,
-              color: D.heading
+              color: "#09090B"
             }}>
                     {e.name}
                   </div>{" "}
                   <div style={{
               fontSize: 12,
-              color: D.muted
+              color: "#71717A"
             }}>
                     {e.next_service_type} — in {Math.round(hoursLeft)} hours
                   </div>{" "}
@@ -1108,7 +1000,7 @@ function MaintenanceTab({
             } catch (err) {
               showToast(`Failed: ${err.message}`);
             }
-          }} style={sBtn(D.green, D.white)}>
+          }} style={sBtn("#15803D", "#FFFFFF")}>
                   Mark Complete
                 </button>{" "}
               </div>{" "}
