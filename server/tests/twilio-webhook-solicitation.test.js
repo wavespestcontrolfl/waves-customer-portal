@@ -84,6 +84,7 @@ const { handleClarifyReply } = require('../services/estimate-clarify-asks');
 const { startSmsThreadDraft } = require('../services/estimator-engine/sms-thread');
 const { processInboundSms } = require('../services/estimate-conversion-agent');
 const { sendSMS } = require('../services/twilio');
+const { uploadTwilioMedia } = require('../services/sms-media');
 const { knownCallerPhoneExists, findKnownCallerCustomer } = require('../utils/known-caller-phone');
 const numbers = require('../config/twilio-numbers');
 const router = require('../routes/twilio-webhook');
@@ -307,6 +308,25 @@ test('a regex-strength pitch never enforces when the model is unavailable', asyn
   const row = mockWrites.find(({ table }) => table === 'sms_log').row;
   expect(row.is_read).not.toBe(true);
   expect(JSON.parse(row.metadata).spam_verdict).toMatchObject({ solicitation: false, method: 'model_failed', enforced: false });
+  expect(startSmsThreadDraft).toHaveBeenCalledTimes(1);
+  expect(sendSMS).toHaveBeenCalledTimes(1);
+});
+
+// Codex P1 chokepoint fix, 2026-09-11 (pre-push): the screen only ever
+// classifies `Body`, the caption text — an attached photo's own content is
+// never read. A regex-strength (or model-confirmed) caption must not
+// enforce when media is attached, since the decision would be made on
+// incomplete context; the message gets ordinary handling instead.
+test('an MMS with a regex-strength caption is never screened — media content was never classified', async () => {
+  process.env.GATE_SMS_SPAM_CLASSIFIER = 'true';
+  uploadTwilioMedia.mockResolvedValueOnce([{ url: 'https://example.com/photo.jpg', contentType: 'image/jpeg' }]);
+  dispatchWithFallback.mockResolvedValue({ ok: true, json: { solicitation: true, confidence: 0.95 } });
+  await receive(PITCH);
+  expect(dispatchWithFallback).not.toHaveBeenCalled();
+  expect(recordTouchpoint.mock.calls[0][0].isRead).toBe(false);
+  const row = mockWrites.find(({ table }) => table === 'sms_log').row;
+  expect(row.is_read).not.toBe(true);
+  expect(JSON.parse(row.metadata).spam_verdict).toBeUndefined();
   expect(startSmsThreadDraft).toHaveBeenCalledTimes(1);
   expect(sendSMS).toHaveBeenCalledTimes(1);
 });

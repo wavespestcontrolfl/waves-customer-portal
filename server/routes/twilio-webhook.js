@@ -405,7 +405,16 @@ router.post('/sms', async (req, res) => {
     try {
       const screen = require('../services/sms-solicitation-classifier');
       solicitationMode = screen.classifierMode();
-      if (inboundTouchpoint?.message?.id && MessageSid && solicitationMode !== 'off' && !customer && !isAiNumber && !smsReaction && Body) {
+      // `!inboundMedia.length` — codex P1 pre-push, 2026-09-11: the screen
+      // only ever reads `Body`, the caption text. An MMS attachment's own
+      // content (a photo, a flyer) is never classified, so a caption that
+      // merely LOOKS like a pitch ("Check out our new service!" alongside a
+      // photo of an actual completed pest-control job at a referred
+      // property) could get the whole message — attachment included —
+      // silenced on caption text alone. Skipping the screen entirely for
+      // any inbound carrying media is the safe default: no verdict, no
+      // enforcement, ordinary handling (alerts/lead intake) proceeds.
+      if (inboundTouchpoint?.message?.id && MessageSid && solicitationMode !== 'off' && !customer && !isAiNumber && !smsReaction && !inboundMedia.length && Body) {
         known = await require('../utils/known-caller-phone').knownCallerPhoneExists(db, From);
         solicitation = await screen.screenInboundSms({ body: Body, hasCustomer: known, isReaction: smsReaction, isAiLine: isAiNumber });
         if (solicitation) {
