@@ -1419,7 +1419,11 @@ router.post('/sms', async (req, res) => {
           await ringSmsReplyBell({ customer, From, MessageSid, message: Body || `${inboundMedia.length} photo${inboundMedia.length === 1 ? '' : 's'}` });
         } catch (e) {
           if (e.alreadyRead) logger.info('[notifications] sms_reply skipped — thread read before the bell');
-          else logger.error('[notifications] unknown-sender sms_reply trigger failed', { code: e.code || 'unknown' });
+          // This branch only runs for a KNOWN customer, so it must not wear
+          // the unknown-sender label the throttled dispatch logs under
+          // (claude pre-push audit P2) — on-call triage reads these two
+          // failures very differently.
+          else logger.error('[notifications] sms_reply retry for a known customer failed', { code: e.code || 'unknown' });
         }
       } else {
         // Unknown sender — ALWAYS through the throttled claim/dispatch path,
