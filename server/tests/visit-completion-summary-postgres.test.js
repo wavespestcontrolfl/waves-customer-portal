@@ -3039,6 +3039,52 @@ postgres('visit summary recipient recovery', () => {
     }
   });
 
+  test('a payer-to-payer handoff moves the office review to the payer that owes it now', async () => {
+    // The stamp, the packet error and the open alert all name the AP account
+    // the office must bill; a second payer taking the packet over has to move
+    // all three, or staff bill the payer that no longer owes it.
+    const Packets = require('../services/visit-completion-packets');
+    const invoiceId = randomUUID();
+    const [first] = await mockPg('payers').insert({ display_name: 'Fixture AP One', ap_email: `${randomUUID()}@example.invalid`, active: true }).returning('id');
+    const [second] = await mockPg('payers').insert({ display_name: 'Fixture AP Two', ap_email: `${randomUUID()}@example.invalid`, active: true }).returning('id');
+    await mockPg('invoices').insert({ id: invoiceId, token: randomUUID().replace(/-/g, ''), invoice_number: `FIX-${invoiceId.slice(0, 8)}`,
+      customer_id: fixture.customerId, status: 'sent', total: 120, visit_completion_packet_id: fixture.packetId });
+    await mockPg('visit_completion_packets').where({ id: fixture.packetId }).update({ status: 'done', error: null });
+    try {
+      await mockPg.transaction(async (trx) => {
+        await trx('customers').where({ id: fixture.customerId }).update({ payer_id: first.id });
+        return Packets.withdrawPacketInvoicesForOwner(trx, { customerId: fixture.customerId });
+      });
+      const packetAfterWithdrawal = await mockPg('visit_completion_packets').where({ id: fixture.packetId }).first('error');
+      expect(JSON.parse(packetAfterWithdrawal.error)).toMatchObject({ reason: 'payer_assigned', payerId: first.id });
+      const alert = await mockPg('dispatch_alerts').where({ type: 'visit_closeout_review' }).whereNull('resolved_at')
+        .whereRaw("payload->>'packetId' = ?", [fixture.packetId]).first('id', 'payload');
+      expect(alert).toBeDefined();
+
+      // The customer's Bill-To moves to a different payer: the packet is still
+      // payer-owned, so nothing is released — the identity is repointed.
+      await mockPg.transaction(async (trx) => {
+        await trx('customers').where({ id: fixture.customerId }).update({ payer_id: second.id });
+        return Packets.reconcileWithdrawnPacketInvoices(trx, { customerId: fixture.customerId });
+      });
+      expect(await mockPg('invoices').where({ id: invoiceId }).first('scheduled_send_error'))
+        .toMatchObject({ scheduled_send_error: `payer_billed:${second.id}:hold` });
+      const packetAfterHandoff = await mockPg('visit_completion_packets').where({ id: fixture.packetId }).first('error');
+      expect(JSON.parse(packetAfterHandoff.error)).toMatchObject({ payment: 'office_required', reason: 'payer_assigned', payerId: second.id });
+      const repointed = await mockPg('dispatch_alerts').where({ id: alert.id }).first('payload', 'resolved_at');
+      expect(repointed.resolved_at).toBeNull();
+      const payload = typeof repointed.payload === 'string' ? JSON.parse(repointed.payload) : repointed.payload;
+      expect(String(payload.payerId)).toBe(String(second.id));
+    } finally {
+      await mockPg('customers').where({ id: fixture.customerId }).update({ payer_id: null });
+      await mockPg('dispatch_alerts').where({ type: 'visit_closeout_review' }).whereRaw("payload->>'packetId' = ?", [fixture.packetId]).del();
+      await mockPg('invoices').where({ id: invoiceId }).del();
+      await mockPg('service_visits').where({ id: fixture.visitId }).update({ billing_hold: false });
+      await mockPg('visit_completion_packets').where({ id: fixture.packetId }).update({ error: null });
+      await mockPg('payers').whereIn('id', [first.id, second.id]).del();
+    }
+  });
+
   test('a parked cadence is not resumed while the sequence gate is off', async () => {
     const gates = require('../config/feature-gates');
     await mockPg('review_sequences').insert({ id: randomUUID(), customer_id: fixture.customerId, service_record_id: fixture.recordIds[0],

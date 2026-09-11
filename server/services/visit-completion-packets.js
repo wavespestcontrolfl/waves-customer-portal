@@ -629,6 +629,11 @@ async function releaseWithdrawnPacketInvoice(trx, invoice) {
     if (String(live) !== stampedPayer) {
       await trx('invoices').where({ id: invoice.id, status: invoice.status, scheduled_send_error: invoice.scheduled_send_error })
         .update({ scheduled_send_error: `payer_billed:${live}${holdFlag ? `:${holdFlag}` : ''}`, updated_at: trx.fn.now() });
+      // The office-review state records WHICH AP account owes this invoice,
+      // so a payer-to-payer handoff has to move it with the stamp (fallback
+      // audit P1): the packet error and the open alert were written with the
+      // payer the withdrawal named, and office staff bill from them.
+      await repointPayerOfficeReview(trx, invoice.visit_completion_packet_id, live);
     }
     return false;
   }
@@ -644,6 +649,21 @@ async function releaseWithdrawnPacketInvoice(trx, invoice) {
   if (holdFlag === 'hold') await trx('service_visits').where({ id: packet.visit_id }).update({ billing_hold: false, updated_at: trx.fn.now() });
   await liftPayerOfficeReview(trx, packet);
   return true;
+}
+
+// The payer named by an OPEN payer-assigned office review, moved to the payer
+// that owns the packet now. Only the identity changes — the review itself is
+// still owed, so nothing is resolved or re-created here.
+async function repointPayerOfficeReview(trx, packetId, payerId) {
+  const packet = await trx('visit_completion_packets').where({ id: packetId }).first('id', 'status', 'error');
+  const state = packet && parseOfficeReviewState(packet.error);
+  if (state?.reason === 'payer_assigned' && String(state.payerId) !== String(payerId)) {
+    await trx('visit_completion_packets').where({ id: packetId })
+      .update({ error: JSON.stringify({ ...state, payerId }), updated_at: trx.fn.now() });
+  }
+  await trx('dispatch_alerts').where({ type: 'visit_closeout_review' }).whereNull('resolved_at')
+    .whereRaw("payload->>'packetId' = ?", [packetId]).whereRaw("payload->>'reason' = 'payer_assigned'")
+    .update({ payload: trx.raw("payload || jsonb_build_object('payerId', ?::text)", [String(payerId)]) });
 }
 
 // Only the payer portion of the office-review state is lifted: an uncertain
