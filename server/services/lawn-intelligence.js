@@ -429,6 +429,13 @@ const LawnIntelligence = {
       };
 
       const insertData = await reportInsertData(reportData);
+      // With no marker column nothing can record that this report exists, so the
+      // recovery sweep would read the step as owed and insert a fresh row on
+      // every pass. Skip the insert rather than pile rows up unrecorded.
+      if (insertData && !assessmentCols.report_auto_generated && !assessmentCols.report_id) {
+        logger.warn(`[lawn-intel] assessment ${assessmentId}: lawn_assessments has no report marker column; report generation skipped`);
+        return null;
+      }
 
       // One transaction. A process exit between the report row and its
       // assessment marker used to leave an unmarked report that delivery

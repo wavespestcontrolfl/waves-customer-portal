@@ -1,7 +1,7 @@
 // Delivery recovery reads report_auto_generated / report_id as durable proof
 // that the report step finished. The marker must therefore follow a real
 // service_reports row, and the row and its marker must land together.
-const state = { rows: [], assessmentUpdates: [], hasTable: true, reportCols: { customer_id: {}, service_date: {}, report_data: {}, status: {}, generated_at: {} }, failUpdate: false };
+const state = { rows: [], assessmentUpdates: [], hasTable: true, assessmentCols: { report_auto_generated: {}, report_id: {}, updated_at: {} }, reportCols: { customer_id: {}, service_date: {}, report_data: {}, status: {}, generated_at: {} }, failUpdate: false };
 
 jest.mock('../models/db', () => {
   const table = (name) => ({
@@ -16,8 +16,7 @@ jest.mock('../models/db', () => {
       },
     }),
     insert: (data) => ({ returning: async () => { const row = { id: `r-${state.rows.length + 1}`, ...data }; state.rows.push(row); return [row]; } }),
-    columnInfo: async () => (name === 'lawn_assessments'
-      ? { report_auto_generated: {}, report_id: {}, updated_at: {} } : state.reportCols),
+    columnInfo: async () => (name === 'lawn_assessments' ? state.assessmentCols : state.reportCols),
   });
   table.schema = { hasTable: async () => state.hasTable };
   // One shared fixture connection: a rolled-back transaction discards both writes.
@@ -38,6 +37,7 @@ const LawnIntel = require('../services/lawn-intelligence');
 describe('generateServiceReport durability markers', () => {
   beforeEach(() => {
     state.rows = []; state.assessmentUpdates = []; state.hasTable = true; state.failUpdate = false;
+    state.assessmentCols = { report_auto_generated: {}, report_id: {}, updated_at: {} };
     state.reportCols = { customer_id: {}, service_date: {}, report_data: {}, status: {}, generated_at: {} };
   });
 
@@ -53,6 +53,14 @@ describe('generateServiceReport durability markers', () => {
     expect(state.rows).toEqual([]);
     // Marking it done here would tell recovery the report exists, forever.
     expect(state.assessmentUpdates.some((u) => u.report_auto_generated)).toBe(false);
+  });
+
+  test('an assessment table with no marker column generates nothing at all', async () => {
+    state.assessmentCols = { updated_at: {} };
+    // An unrecordable report would be re-inserted by every recovery sweep.
+    await LawnIntel.generateServiceReport('a-1');
+    expect(state.rows).toEqual([]);
+    expect(state.assessmentUpdates).toEqual([]);
   });
 
   test('a failed marker write rolls the report row back instead of orphaning it', async () => {
