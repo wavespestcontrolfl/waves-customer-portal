@@ -3170,7 +3170,7 @@ describe('cadence scheduling + post-service enrollment (2026-07-30 revamp)', () 
       const row = mock.__state.rows.review_requests[0];
       expect(row.status).toBe('sent');
       expect(row.sms_sent_at).toBeTruthy();
-      expect(row.scheduled_for).toBeUndefined(); // never queued for a retry that would duplicate the text
+      expect(row.scheduled_for == null).toBe(true); // never queued for a retry that would duplicate the text (fence restored)
     });
 
     test('sendSMS on a thrown UNCERTAIN post-handoff error holds the row, never retries', async () => {
@@ -3191,7 +3191,7 @@ describe('cadence scheduling + post-service enrollment (2026-07-30 revamp)', () 
 
       const row = mock.__state.rows.review_requests[0];
       expect(row.status).toBe('deferred'); // held — processScheduled only picks status='pending'
-      expect(row.scheduled_for).toBeUndefined(); // never queued for a retry that could duplicate the text
+      expect(row.scheduled_for == null).toBe(true); // never queued for a retry that could duplicate the text (fence restored)
     });
 
     // codex #4338 P1, round 3: a RETURNED uncertain result whose own
@@ -3217,11 +3217,13 @@ describe('cadence scheduling + post-service enrollment (2026-07-30 revamp)', () 
       await ReviewService.sendSMS('rr-th4');
 
       const row = mock.__state.rows.review_requests[0];
-      // The write failed, so status could not flip to 'deferred' — but it
-      // must ALSO never gain a scheduled_for: processScheduled only ever
-      // picks whereNotNull('scheduled_for'), so an unset scheduled_for is
-      // what actually keeps this row out of an automatic resend.
-      expect(row.scheduled_for).toBeUndefined();
+      // The write failed, so status could not flip to 'deferred' — but the
+      // row must never become DUE: the pre-send fence (codex #4338 P1, round
+      // 4) pushed scheduled_for past the spacing window before the provider
+      // call, so processScheduled (scheduled_for <= now) cannot resend a text
+      // the customer may already hold.
+      expect(row.status).toBe('pending');
+      expect(row.scheduled_for.getTime()).toBeGreaterThan(Date.now() + 71 * 3600000);
     });
 
     test('sendSMS on an ordinary pre-handoff throw (no providerOutcome) still retries exactly as before', async () => {
