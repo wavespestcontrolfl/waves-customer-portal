@@ -35,4 +35,25 @@ function failSoftRead(database, query, fallback) {
   return savepointRead(database, query).catch(() => fallback);
 }
 
-module.exports = { savepointRead, failSoftRead };
+// A scope whose body performs its own savepoint reads on the same
+// transaction (the appointment planner's fail-soft catalog, turf-profile and
+// ordinance reads) must NOT join the per-transaction queue above: the body's
+// inner reads would wait on the scope that contains them and the closeout
+// would hang (#4113 packet round). Nested PostgreSQL savepoints are fine;
+// only overlapping sibling reads need serializing. Callers await sequentially.
+async function savepointScope(database, fn) {
+  if (!database.isTransaction) return fn(database);
+  const name = `scope_${crypto.randomBytes(6).toString('hex')}`;
+  await database.raw(`SAVEPOINT ${name}`);
+  try {
+    const result = await fn(database);
+    await database.raw(`RELEASE SAVEPOINT ${name}`);
+    return result;
+  } catch (err) {
+    await database.raw(`ROLLBACK TO SAVEPOINT ${name}`);
+    await database.raw(`RELEASE SAVEPOINT ${name}`);
+    throw err;
+  }
+}
+
+module.exports = { savepointRead, failSoftRead, savepointScope };

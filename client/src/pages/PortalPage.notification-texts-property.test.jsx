@@ -49,14 +49,14 @@ afterEach(() => cleanup());
 describe('Appointment texts per saved property', () => {
   it('shows the SELECTED house\'s toggles with the quiet-by-default copy and the shared-contacts note', async () => {
     render(<ScheduleTab customer={customer} properties={entries} activePropertyId="c1:pr" selectedProperty={{ key: 'c1:pr', customerId: 'c1', propertyId: 'pr' }} onSelectProperty={() => {}} />);
-    expect(await screen.findByText('Appointment texts')).toBeInTheDocument();
+    expect(await screen.findByText('Appointment notifications')).toBeInTheDocument();
     expect(screen.getByText(/Rentals and managed properties start quiet/)).toBeInTheDocument();
     expect(screen.getByText(/On-location contacts are shared across this profile/)).toBeInTheDocument();
     expect(screen.getByText('All alerts off')).toBeInTheDocument();
   });
   it('a toggle saves to the PROFILE with the saved property named', async () => {
     render(<ScheduleTab customer={customer} properties={entries} activePropertyId="c1:pr" selectedProperty={{ key: 'c1:pr', customerId: 'c1', propertyId: 'pr' }} onSelectProperty={() => {}} />);
-    await screen.findByText('Appointment texts');
+    await screen.findByText('Appointment notifications');
     const row = screen.getByText('Tech en route').closest('div');
     fireEvent.click(row.querySelector('[role="switch"]'));
     await waitFor(() => expect(api.updatePropertyNotificationPrefs).toHaveBeenCalledWith('c1', { techEnRoute: true, propertyId: 'pr' }));
@@ -72,13 +72,13 @@ describe('Appointment texts per saved property', () => {
   it('a LONE secondary saved property still gets its own toggles', async () => {
     api.getPropertyNotificationPrefs.mockResolvedValue({ properties: [propertyPrefs[1]] });
     render(<ScheduleTab customer={customer} properties={[entries[1]]} activePropertyId="c1:pr" selectedProperty={{ key: 'c1:pr', customerId: 'c1', propertyId: 'pr' }} onSelectProperty={() => {}} />);
-    expect(await screen.findByText('Appointment texts')).toBeInTheDocument();
+    expect(await screen.findByText('Appointment notifications')).toBeInTheDocument();
     expect(screen.getByText('Tech en route')).toBeInTheDocument();
     expect(screen.getByText('All alerts off')).toBeInTheDocument();
   });
   it('names the picker entries by HOUSE and moves the five category switches off the profile card', async () => {
     render(<ScheduleTab customer={customer} properties={entries} activePropertyId="c1:pr" selectedProperty={{ key: 'c1:pr', customerId: 'c1', propertyId: 'pr' }} onSelectProperty={() => {}} />);
-    await screen.findByText('Appointment texts');
+    await screen.findByText('Appointment notifications');
     // The rental has no label: its relationship chip names it, never "Primary".
     expect(screen.getAllByText('Rental').length).toBeGreaterThan(0);
     expect(screen.queryByText(/Primary residence · 77 Pine Ct/)).not.toBeInTheDocument();
@@ -100,7 +100,7 @@ describe('Appointment texts per saved property', () => {
     const sibling = { id: 'c2:pc', key: 'c2:pc', customerId: 'c2', propertyId: 'pc', isPrimaryProfile: false, isPrimaryProperty: true, profileLabel: 'Rental - Sandbar Ln', label: null, relationship: null, address: { line1: '9 Sandbar Ln', city: 'Bradenton', state: 'FL', zip: '34205' } };
     api.getPropertyNotificationPrefs.mockResolvedValue({ properties: [...propertyPrefs, { ...sibling, preferences: prefsOf(true), contactsShared: true, serviceContacts: [], maxServiceContacts: 3 }] });
     render(<ScheduleTab customer={customer} properties={[...entries, sibling]} activePropertyId="c2:pc" selectedProperty={{ key: 'c2:pc', customerId: 'c2', propertyId: 'pc' }} onSelectProperty={() => {}} />);
-    await screen.findByText('Appointment texts');
+    await screen.findByText('Appointment notifications');
     expect(screen.getAllByText('Rental - Sandbar Ln').length).toBeGreaterThan(0);
     expect(screen.queryByText(/Primary residence · 9 Sandbar Ln/)).not.toBeInTheDocument();
   });

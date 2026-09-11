@@ -30,6 +30,7 @@ function purposeForScheduledMessageType(messageType, { hasCustomer = true } = {}
   // for customer-linked rows; lead rows have no customerId so they replay
   // under the transactional-grade conversational policy with the forwarded
   // consent basis — payment_receipt would hard-require a customerId.
+  if (type === 'visit_summary') return 'service_completion';
   if (type === 'deposit_receipt') return hasCustomer ? 'payment_receipt' : 'conversational';
   // Deferred completion texts (service_complete*, service_report_v1*) replay
   // under the appointment purpose the immediate dispatch send enforced.
@@ -734,6 +735,25 @@ function initScheduledJobs() {
     }
   }, { timezone: 'America/New_York' });
 
+  // DAILY 3:20 AM ET — primary-property backstop. The same customer-create
+  // paths never create the lazily-backfilled primary customer_properties
+  // row, so a booking for a fresh lead anchored to NULL (prod 2026-09-07:
+  // 144 rows missing). Daily is enough (owner 2026-09-07) once #4115
+  // lands: from then on the booking anchor backfills a missing primary at
+  // booking time and this only has to catch customers nothing read in
+  // between. Until #4115 merges this sweep is the only backstop, so #4115
+  // merges first. Own job_health name so the watchdog reports it apart
+  // from the geocode sweep.
+  cron.schedule('20 3 * * *', async () => {
+    try {
+      const { runExclusive } = require('../utils/cron-lock');
+      const { sweepMissingPrimaryProperties } = require('./customer-properties');
+      await runExclusive('primary-property-backstop', () => sweepMissingPrimaryProperties());
+    } catch (err) {
+      logger.error(`[customer-properties] primary backstop sweep failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
   // =========================================================================
   // DAILY 2:40AM — Knowledge-index sync (hybrid knowledge search, lane A2):
   // re-reads every corpus connector, upserts changed chunks, embeds pending
@@ -1429,6 +1449,25 @@ function initScheduledJobs() {
       }
     } catch {
       logger.error('[sms-operations] commitment watcher did not complete');
+    }
+  }, { timezone: 'America/New_York' });
+
+  // The same watchdog and persisted identities own reminders before and
+  // after rollback. Cards add a five-minute cadence to the daily sweep.
+  cron.schedule('0 */5 * * * *', async () => {
+    if (!require('./callback-cards').enabled()) return;
+    try {
+      const { runCallCommitmentsWatchdog } = require('./call-commitments-watchdog');
+      const result = await runCallCommitmentsWatchdog();
+      if (result?.skipped === true && result.reason !== 'gated_off' && result.reason !== 'lease_held') {
+        const { recordJobStart, recordJobEnd } = require('../utils/cron-lock');
+        const t0 = Date.now();
+        await recordJobStart('call-commitments-watchdog').catch(() => {});
+        await recordJobEnd('call-commitments-watchdog', t0, new Error(`tick skipped: ${result.reason || 'no_connection'}`)).catch(() => {});
+        throw new Error(`Callback reminder tick skipped: ${result.reason || 'no_connection'}`);
+      }
+    } catch (err) {
+      logger.error(`[callback-cards] tick failed (${err.code || err.name || 'error'})`);
     }
   }, { timezone: 'America/New_York' });
 
@@ -3230,6 +3269,10 @@ function initScheduledJobs() {
         const StatementFollowups = require('./payer-statement-followups');
         const result = await StatementFollowups.runPending();
         logger.info(`Payer statement dunning done: ${result.sent} sent, ${result.skipped} skipped`);
+        // Settled-statement child closeouts that failed or never ran have no
+        // other retry (GitHub r10 P2 #4127); gated on its own flag inside.
+        const sweep = await require('./invoice-issued-closeout').retrySettledStatementCloseouts();
+        if (sweep.retried) logger.info(`Settled-statement closeout retry: ${sweep.retried} retried, ${sweep.closed} closed`);
       });
     } catch (err) {
       logger.error(`Payer statement dunning failed: ${err.message}`);
@@ -3699,6 +3742,10 @@ function initScheduledJobs() {
             customerId: msg.customer_id || undefined,
             identityTrustLevel: msg.customer_id ? 'phone_matches_customer' : 'phone_provided_unverified',
             entryPoint: 'scheduled_sms_cron',
+            withSmsHandoff: require('./messaging/deferred-replay-registry')
+              .deferredSmsHandoff(claimMeta.entry_point, { ...claimMeta,
+                customer_id: msg.customer_id || claimMeta.customer_id || null,
+                to_phone: msg.to_phone || null }),
             // Send-window operator provenance: only rows an operator
             // actually composed/scheduled keep the operator exemption — the
             // composer dispatches at the exact minute the operator picked,
@@ -3985,7 +4032,14 @@ function initScheduledJobs() {
                 // standalone review fallback, flip referral/report state into
                 // the admin retry lane). Armed ONLY here, never on timers,
                 // so fallbacks can't race a still-retryable replay.
-                await runTerminalHookDurably(msg.id, claimMeta.entry_point, claimMeta);
+                // provider_terminal_rejection carries the adapter's proof of
+                // a synchronous, definitive provider rejection (a terminal
+                // Twilio code) into the hook — visit_summary_deferred's
+                // onTerminal uses it to settle an unknown_delivery effect as
+                // suppressed instead of leaving it parked as unknown; other
+                // entry points ignore the field.
+                await runTerminalHookDurably(msg.id, claimMeta.entry_point,
+                  { ...claimMeta, provider_terminal_rejection: smsResult.terminal === true });
               }
               // The customer was never answered — used + parked cards return.
               const blockedMeta = await readFreshMeta();

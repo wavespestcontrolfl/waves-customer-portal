@@ -1,4 +1,5 @@
 /** Token identity and customer projection on isolated synthetic PostgreSQL. */
+jest.mock('../models/marker-db', () => () => require('../models/db'));
 jest.mock('../models/db', () => {
   const db = (...args) => mockPg(...args);
   for (const name of ['raw', 'transaction', 'queryBuilder', 'ref']) db[name] = (...args) => mockPg[name](...args);

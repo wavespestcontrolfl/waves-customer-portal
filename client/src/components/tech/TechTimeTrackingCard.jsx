@@ -46,13 +46,13 @@ async function request(path, options = {}) {
 function actionStyle(color, disabled) {
   return {
     flex: 1,
-    minHeight: 42,
+    minHeight: 48,
     padding: '8px 10px',
     borderRadius: 8,
     border: `1px solid ${disabled ? D.border : color}`,
     background: disabled ? D.bg : `${color}22`,
     color: disabled ? D.muted : color,
-    fontSize: 13,
+    fontSize: 14,
     fontWeight: 700,
     cursor: disabled ? 'not-allowed' : 'pointer',
   };
@@ -102,7 +102,7 @@ export default function TechTimeTrackingCard({ nextStop }) {
     return (
       <section style={{ background: D.card, border: `1px solid ${D.border}`, borderRadius: 12, padding: 14, marginBottom: 16 }}>
         <div style={{ color: D.text, fontSize: 14, fontWeight: 800, fontFamily: "'Montserrat', sans-serif" }}>Time Clock</div>
-        <div role="alert" style={{ color: D.red, fontSize: 12, marginTop: 8 }}>
+        <div role="alert" style={{ color: D.red, fontSize: 14, marginTop: 8 }}>
           {feedback?.text || 'Time clock status is unavailable.'}
         </div>
         <button type="button" onClick={load} style={{ ...actionStyle(D.teal, false), marginTop: 10, width: '100%' }}>
@@ -123,11 +123,11 @@ export default function TechTimeTrackingCard({ nextStop }) {
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10, marginBottom: 10 }}>
         <div>
           <div style={{ color: D.text, fontSize: 14, fontWeight: 800, fontFamily: "'Montserrat', sans-serif" }}>Time Clock</div>
-          <div style={{ color: clockedIn ? D.green : D.muted, fontSize: 12, marginTop: 2 }}>
+          <div style={{ color: clockedIn ? D.green : D.muted, fontSize: 14, marginTop: 2 }}>
             {clockedIn ? (onBreak ? 'Clocked in · on break' : currentJob ? 'Clocked in · job running' : 'Clocked in') : 'Clocked out'}
           </div>
         </div>
-        <div style={{ color: D.muted, fontSize: 11, textAlign: 'right' }}>
+        <div style={{ color: D.muted, fontSize: 14, textAlign: 'right' }}>
           {Math.round(Number(status?.todaySummary?.shiftMinutes || 0))} shift min<br />
           {status?.todaySummary?.jobCount || 0} jobs
         </div>
@@ -178,12 +178,12 @@ export default function TechTimeTrackingCard({ nextStop }) {
       )}
 
       {currentJob && !nextStopIsCurrent && (
-        <div style={{ color: D.amber, fontSize: 11, marginTop: 8 }}>
+        <div style={{ color: D.amber, fontSize: 14, marginTop: 8 }}>
           A different job timer is running. End it before starting the next stop.
         </div>
       )}
       {feedback && (
-        <div role={feedback.isError ? 'alert' : 'status'} style={{ color: feedback.isError ? D.red : D.green, fontSize: 12, marginTop: 8 }}>
+        <div role={feedback.isError ? 'alert' : 'status'} style={{ color: feedback.isError ? D.red : D.green, fontSize: 14, marginTop: 8 }}>
           {feedback.text}
         </div>
       )}

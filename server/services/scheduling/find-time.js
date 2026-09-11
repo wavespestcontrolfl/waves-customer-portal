@@ -154,7 +154,7 @@ async function findCapacitySlots(opts) {
         candidates.push({ context, date, tech, start, options: {
           windowStart: minutesToTime(start), windowEnd: minutesToTime(start + durationMinutes),
           // Owner policy: ordinary setup/closeout is already in the on-site allowance.
-          durationMinutes, bufferMinutes: 0, allowInsertion: false,
+          durationMinutes, bufferMinutes: 0, allowInsertion: opts.capacityPlacement === true,
         } });
       }
     }
@@ -173,7 +173,7 @@ async function findCapacitySlots(opts) {
     const fit = evaluateArrivalPlacement(context, options);
     if (!fit.feasible) continue;
     // Existing save probes have no traffic preload; their fallback must fit too.
-    if (!evaluateArrivalPlacement({ ...context, travel: null }, options).feasible) continue;
+    if (!opts.capacityPlacement && !evaluateArrivalPlacement({ ...context, travel: null }, options).feasible) continue;
     const index = fit.routeOrder.indexOf(context.target.id);
     const byId = new Map(context.rows.map(row => [row.id, row]));
     const familyScore = serviceFamilyPreference(context.rows.filter(row => row.technician_id === tech.id),
