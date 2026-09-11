@@ -364,7 +364,7 @@ export default function BrowseTab({ showFeedback, onRefresh, isMobile }) {
             </Field>
             <Field label="Category">
               <Select value={filterCategory} onChange={(event) => setFilterCategory(event.target.value)}>
-                <option value="">All categories</option>
+                <option value="">All Categories</option>
                 {CATEGORIES.map((category) => (
                   <option key={category} value={category}>{category}</option>
                 ))}
@@ -372,7 +372,7 @@ export default function BrowseTab({ showFeedback, onRefresh, isMobile }) {
             </Field>
             <Field label="Status">
               <Select value={filterStatus} onChange={(event) => setFilterStatus(event.target.value)}>
-                <option value="">All statuses</option>
+                <option value="">All Status</option>
                 <option value="active">Active</option>
                 <option value="flagged">Flagged</option>
                 <option value="archived">Archived</option>

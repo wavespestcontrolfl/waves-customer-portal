@@ -86,7 +86,7 @@ export default function TokensTab({ showFeedback }) {
       {!loading && !loadError && tokens.length === 0 ? (
         <Card>
           <CardBody className="py-10 text-center text-ui-body text-ink-secondary">
-            No token data yet. Run a health check to initialize it.
+            No token data yet -- run a health check to initialize
           </CardBody>
         </Card>
       ) : (

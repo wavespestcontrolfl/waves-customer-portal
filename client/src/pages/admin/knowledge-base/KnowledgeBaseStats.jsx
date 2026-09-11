@@ -4,8 +4,8 @@ const STAT_ITEMS = [
   { key: "active", label: "Active" },
   { key: "flagged", label: "Flagged" },
   { key: "stale", label: "Stale (30d+)" },
-  { key: "highConfidence", label: "High confidence" },
-  { key: "lowConfidence", label: "Needs review" },
+  { key: "highConfidence", label: "High Conf" },
+  { key: "lowConfidence", label: "Needs Review" },
 ];
 
 export default function KnowledgeBaseStats({ stats, loading, error, onRetry }) {
