@@ -6,7 +6,7 @@ const { customerOnAutopay, isPaused } = require('./autopay-eligibility');
 const { technicianReportCustomerCopy } = require('./service-report/technician-report-copy');
 const { etDateString } = require('../utils/datetime-et');
 const { arrivalWindowRange } = require('../utils/sms-time-format');
-const { excludeUnresolvedReviewAskReservations } = require('./messaging/review-ask-reservation');
+const { excludeUnresolvedSendReservations } = require('./messaging/review-ask-reservation');
 
 // Statuses that represent a real, confidently-stated upcoming visit. This is
 // an ALLOW-list (fail-closed) on purpose: a deny-list of cancelled/completed
@@ -534,7 +534,7 @@ class ContextAggregator {
       // message Waves definitely sent, nor displace a real row out of this
       // bounded window — a row that has since resolved to a real status is
       // unaffected and still appears.
-      excludeUnresolvedReviewAskReservations(db('sms_log').where({ customer_id: customer.id }))
+      excludeUnresolvedSendReservations(db('sms_log').where({ customer_id: customer.id }))
         .orderBy('created_at', 'desc').limit(20),
       // completed visits only (Codex r8): an 'incomplete' closeout must not
       // answer "what did you do last time" as though the work happened.

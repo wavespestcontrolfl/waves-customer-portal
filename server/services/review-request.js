@@ -2186,6 +2186,8 @@ const ReviewService = {
           await db("review_requests").where({ id: requestId }).update({
             sms_sent_at: new Date(),
             status: "sent",
+            // Clear the non-ask pre-send fence (a no-op for ask templates).
+            ...(reservation ? {} : { scheduled_for: fencedFrom }),
           });
           await releaseReviewSmsReservation(reservation);
           reservation = null;
@@ -2202,7 +2204,7 @@ const ReviewService = {
       }
       if (!reservation && isExplicitlyUncertainOutcome(providerOutcome)) {
         try {
-          await db("review_requests").where({ id: requestId }).update({ status: "deferred" });
+          await db("review_requests").where({ id: requestId }).update({ status: "deferred", scheduled_for: fencedFrom });
         } catch (dbErr) {
           logger.error(
             `[review] SMS uncertain AND status update failed (requestId=${requestId} errType=${err?.name || "Error"} dbErrType=${dbErr?.name || "Error"})`,
@@ -5345,7 +5347,12 @@ const ReviewService = {
     // deferral (provider blip, consent lookup, push in flight) carries a
     // synthesized nextAllowedAt too, so classify by the outcome code, not by
     // the presence of a retry time (codex #4140 r1).
-    const retryAt = outcome.nextAllowedAt ? new Date(outcome.nextAllowedAt) : new Date(Date.now() + 30 * 60 * 1000);
+    let retryAt = outcome.nextAllowedAt ? new Date(outcome.nextAllowedAt) : new Date(Date.now() + 30 * 60 * 1000);
+    // A weekdays-only step keeps its constraint on the retry too: a Friday
+    // evening quiet-hours hold would otherwise plan Saturday 08:00, and the
+    // spacing floor being satisfied by then lets the touch go out on a
+    // weekend (codex #4330 P2). Weekday retries pass through unchanged.
+    if (plan[seq.current_step]?.weekdaysOnly) retryAt = shiftToWeekdayMorning(retryAt);
     const decision = outcome.code === "QUIET_HOURS_HOLD"
       ? sequenceDecision({ reason: "send_window", plannedAt: retryAt, nextEvalAt: retryAt })
       : sequenceDecision({ reason: outcome.reason || "provider_retry", nextEvalAt: retryAt });
