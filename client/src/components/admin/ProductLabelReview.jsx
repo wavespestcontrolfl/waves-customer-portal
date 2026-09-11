@@ -170,7 +170,7 @@ export default function ProductLabelReview({ product }) {
   const disabled = busy || loading;
 
   return (
-    <section aria-label="Label weather review" className="my-4 max-w-full">
+    <section aria-label="Label weather review" className="my-4 max-w-[calc(100vw-64px)]">
       <Card className="overflow-hidden">
         <CardBody className="space-y-4 break-words">
           <div>
@@ -232,6 +232,7 @@ export default function ProductLabelReview({ product }) {
               </p>
               <Evidence entry={draft} />
               <Checkbox
+                className="shrink-0"
                 id={`label-review-${product.id}`}
                 label="I matched the exact product and formulation and checked each fact against the source pages. Conditional and missing limits remain unresolved."
                 checked={confirmed}
