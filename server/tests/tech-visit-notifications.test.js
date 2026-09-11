@@ -478,3 +478,25 @@ describe('formatWhen', () => {
     expect(formatWhen(null, '09:00', '11:00')).toBeNull();
   });
 });
+
+describe('formatPromisedWindow', () => {
+  const { formatPromisedWindow } = notices;
+  test('reads the promised window instants, in ET, same style as formatWhen', () => {
+    // 13:00Z / 15:00Z = 9 AM / 11 AM EDT.
+    expect(formatPromisedWindow('2026-09-10T13:00:00.000Z', '2026-09-10T15:00:00.000Z')).toBe('Thu Sep 10, 9–11 AM');
+  });
+  test('a service block shorter than the arrival promise does not shrink the rendered window', () => {
+    // The promise was 9-11 AM; a same-day service block of 9-10 AM (or any
+    // other mutable visit field) must never be consulted here — this
+    // function only ever sees the two promised instants (codex P1).
+    const promised = formatPromisedWindow('2026-09-10T13:00:00.000Z', '2026-09-10T15:00:00.000Z');
+    expect(promised).toBe('Thu Sep 10, 9–11 AM');
+    expect(promised).not.toContain('9–10 AM');
+  });
+  test('no end instant renders a single time, matching formatWhen', () => {
+    expect(formatPromisedWindow('2026-09-10T13:30:00.000Z', null)).toBe('Thu Sep 10, 9:30 AM');
+  });
+  test('no start instant is null', () => {
+    expect(formatPromisedWindow(null, '2026-09-10T15:00:00.000Z')).toBeNull();
+  });
+});

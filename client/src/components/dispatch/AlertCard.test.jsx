@@ -32,4 +32,23 @@ describe('communication-based dispatch warnings', () => {
     expect(screen.getByText('Unassigned')).toBeTruthy();
     expect(screen.getByText('Ken I.')).toBeTruthy();
   });
+
+  // codex P1: the card's date/time must come from the PROMISED window, not
+  // the visit's mutable scheduled_date/window_start/window_end — a service
+  // block shorter than the arrival promise (or an uncommunicated internal
+  // move) must not repaint the card with a different time than the one the
+  // stage-2 message is judging.
+  it('renders the promised window, not the mutable scheduled_date/window fields', () => {
+    render(<AlertCard alert={{ id: 'alert', type: 'tech_late', severity: 'critical', created_at: new Date().toISOString(),
+      tech_name: 'Adam Benetti', customer_first_name: 'Maya', customer_last_name: 'Magno',
+      // A shorter, moved service block — must not be what renders.
+      scheduled_date: '2026-09-12', window_start: '14:00', window_end: '15:00',
+      payload: { source: 'no_show_detector', stage: 2,
+        promised_window: { start_at: '2026-09-11T13:00:00.000Z', end_at: '2026-09-11T15:00:00.000Z' },
+        message: 'The promised window ended over 30 minutes ago; no arrival is recorded.' } }} />);
+    expect(screen.getByText(/9\/11\/2026/)).toBeTruthy();
+    expect(screen.getByText(/9:00 AM/)).toBeTruthy();
+    expect(screen.queryByText(/9\/12\/2026/)).toBeNull();
+    expect(screen.queryByText(/2:00 PM/)).toBeNull();
+  });
 });

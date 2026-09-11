@@ -155,9 +155,13 @@ async function sweep(conn, { now = new Date() } = {}) {
       const key = `tracking:${card.id}:${live.promised_window.start_at}:${live.stage}:${type}`;
       // Identify the visit on the card itself (codex P1) — a tech with more
       // than one stop can't tell which one a bare stage message is about.
-      // Same "who/when" a visit_* card shows, not a second formatter.
+      // Same "who/when" a visit_* card shows, not a second formatter. Built
+      // from the PROMISED window, not the visit's current scheduled_date/
+      // window_start/window_end — those are mutable and a shorter service
+      // block or an uncommunicated internal move must not repaint what was
+      // promised (codex P1).
       const customerName = techNotices.customerLabel({ cust_last_name: card.last_name, cust_first_name: card.first_name });
-      const when = techNotices.formatWhen(visit.scheduled_date, visit.window_start, visit.window_end);
+      const when = techNotices.formatPromisedWindow(live.promised_window.start_at, live.promised_window.end_at);
       const notice = await techNotices.recordTrackingNotice(trx, { visitId: card.id, technicianId: recipient,
         stage: live.stage, dedupeKey: `${key}:${recipient}`, message: live.message,
         payload: { ...live, visit_id: card.id, customer_name: customerName, when } });

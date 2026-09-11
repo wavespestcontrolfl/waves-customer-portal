@@ -31,7 +31,7 @@ const logger = require('./logger');
 const { stampedLine2Sql } = require('./stamped-address');
 const { gateEnvValue } = require('../config/feature-gates');
 const { isAssignable } = require('./technician-eligibility');
-const { parseETDateTime, TZ } = require('../utils/datetime-et');
+const { parseETDateTime, TZ, etParts, etDateString } = require('../utils/datetime-et');
 const { VOICE_AGENT_BOOKING_SOURCE_ACTION } = require('./call-booking-source-actions');
 
 const GATE = 'GATE_TECH_VISIT_NOTIFICATIONS';
@@ -116,6 +116,27 @@ function formatWhen(date, windowStart, windowEnd) {
     ? `${start.text}–${end.text} ${end.meridiem}`
     : `${start.text} ${start.meridiem}–${end.text} ${end.meridiem}`;
   return `${dayLabel}, ${window}`;
+}
+
+// Same "day, window" text as formatWhen, but read off the PROMISED window
+// (an ISO instant pair) instead of the visit's current, mutable
+// scheduled_date/window_start/window_end. A stage-2 tracking card is
+// enforced against the promise, so its "when" must render the promise too
+// — an uncommunicated internal move (or a service block shorter than the
+// arrival window) otherwise shows the wrong time next to a message that's
+// judging the old one (codex P1).
+function formatPromisedWindow(startAt, endAt) {
+  if (!startAt) return null;
+  const start = new Date(startAt);
+  if (Number.isNaN(start.getTime())) return null;
+  const clock = (iso) => {
+    if (!iso) return null;
+    const d = new Date(iso);
+    if (Number.isNaN(d.getTime())) return null;
+    const { hour, minute } = etParts(d);
+    return `${String(hour).padStart(2, '0')}:${String(minute).padStart(2, '0')}`;
+  };
+  return formatWhen(etDateString(start), clock(startAt), clock(endAt));
 }
 
 // Who made the change, as the tech should read it. A technicians.id names
@@ -527,6 +548,7 @@ module.exports = {
   // Reused by no-show-detector.js so a tracking notice reads the same "who
   // / when" a visit_* card does, instead of a second date formatter.
   formatWhen,
+  formatPromisedWindow,
   customerLabel,
   GATE,
   KINDS,

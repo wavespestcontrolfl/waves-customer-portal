@@ -23,7 +23,7 @@
  */
 import React, { useState } from 'react';
 import { Card, Button, cn } from '../ui';
-import { formatETTime, formatETDateOnly } from '../../lib/timezone';
+import { formatETTime, formatETDate } from '../../lib/timezone';
 
 const SEVERITY_TONE = {
   info: 'neutral',
@@ -210,8 +210,13 @@ function RouteQualityBody({ alert }) {
 // needs attention (codex P1 — af4925f71).
 function TrackingBody({ alert }) {
   const window = alert.payload?.promised_window;
+  // Read the PROMISED window, not alert.scheduled_date/window_* — those
+  // are the visit's current, mutable fields, and stage 2 is enforced
+  // against the promise. A shorter service block or an uncommunicated
+  // internal move must not repaint the card with a different date/time
+  // than the one the message is judging (codex P1).
   const windowLabel = window?.start_at ? formatETTime(window.start_at) : null;
-  const dateLabel = alert.scheduled_date ? formatETDateOnly(alert.scheduled_date) : null;
+  const dateLabel = window?.start_at ? formatETDate(window.start_at) : null;
   const when = [dateLabel, windowLabel].filter(Boolean).join(' · ');
   return (
     <div className="text-14 text-ink-primary space-y-1">
