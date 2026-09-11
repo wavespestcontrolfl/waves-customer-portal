@@ -809,62 +809,82 @@ router.post('/sms', async (req, res) => {
       }
 
       logger.info('[sms-intent] SMS reaction detected; skipping automated inbound handling');
-      // Unknown sender: route a loud tapback through the SAME throttled
-      // sms_reply alert an ordinary text gets (codex #4210 head-round P1;
-      // throttle wiring fixed per claude pre-push audit P1 — this used to
-      // call ringSmsReplyBell directly, unthrottled, which could reproduce
-      // the exact 19-alerts-from-one-thread spam incident the throttle
-      // exists to prevent if a spam sender's replies keep tripping the
-      // reaction classifier) — the known-customer branch below returned
-      // here BEFORE reaching it, so on an ordinary location line a
-      // stranger's loud reaction fell back to the retired (policy-silenced)
-      // internal_alert owner forward, and on the AI line it skipped even
-      // that, ringing nobody. Tracking numbers stay excluded (their
-      // first-contact channel is new_lead) via the SAME isTrackingLeadInbound
-      // flag alertEligible uses below.
-      let unknownSenderAlertHandled = false;
-      if (!quietReaction && !customer && !isTrackingLeadInbound
-        && !(process.env.ADAM_PHONE && From === process.env.ADAM_PHONE && To === process.env.ADAM_PHONE)) {
-        unknownSenderAlertHandled = await dispatchUnknownSenderAlert({ From, MessageSid, message: Body });
-      }
-      if (!quietReaction && !isAiNumber) {
-        // Loud reaction (answer to a question, or a dislike/question mark):
-        // same alert lifecycle as a text — guarded thread bell for known
-        // customers on any customer-facing number, legacy owner forward when
-        // the bell didn't land — then stop: no reschedule/lead/estimator
-        // automation ever sees a tapback (codex r2/r3).
-        const notifyTypes = ['location', 'gbp_tracking', 'domain_tracking', 'van_tracking', 'tech_line'];
-        // An unknown sender already went through the throttled dispatch
-        // above — `landed` seeds from its result so the legacy owner
-        // forward below never fires a SECOND alert on top of it (codex
-        // #4210 round-2 P1). For a customer, `customer` is truthy and
-        // unknownSenderAlertHandled stays false (the block above is
-        // customer-exclusive), so this is a no-op on that path.
-        let landed = unknownSenderAlertHandled;
-        if (customer && notifyTypes.includes(numberConfig.type)) {
-          try {
-            const stats = await ringSmsReplyBell({ customer, From, MessageSid, message: Body });
-            landed = Boolean(stats && !stats.error && (stats.suppressed || stats.bellWritten || Number(stats.push?.sent || 0) > 0));
-          } catch (e) {
-            if (e.alreadyRead) landed = true;
-            else logger.error(`[notifications] sms_reply (reaction) trigger failed: ${e.message}`);
+      // Quiet reactions (thumbs-up closers) are done: read on arrival, no
+      // alert lifecycle at all.
+      if (quietReaction) return res.type('text/xml').send('<Response></Response>');
+      // Loud reaction: acknowledge Twilio FIRST, then run the alert lifecycle
+      // behind the response — the same shape the ordinary-text path uses
+      // (claude pre-push audit P1, post-merge round: the unknown-sender
+      // dispatch below is several sequential DB round-trips plus a bell/push
+      // send, and awaiting it — and the known-customer bell / owner forward
+      // / tech-line card after it — inside the request path put the Twilio
+      // ACK behind DB and push-provider latency for reactions specifically,
+      // while the identical alert for an ordinary text was already
+      // deferred). Nothing after this point changes the TwiML; the deferred
+      // block carries its own catch because the route's error handler no
+      // longer covers it.
+      res.type('text/xml').send('<Response></Response>');
+      setImmediate(() => { void (async () => {
+        try {
+          // Unknown sender: route a loud tapback through the SAME throttled
+          // sms_reply alert an ordinary text gets (codex #4210 head-round P1;
+          // throttle wiring fixed per claude pre-push audit P1 — this used to
+          // call ringSmsReplyBell directly, unthrottled, which could reproduce
+          // the exact 19-alerts-from-one-thread spam incident the throttle
+          // exists to prevent if a spam sender's replies keep tripping the
+          // reaction classifier) — the known-customer branch below returned
+          // here BEFORE reaching it, so on an ordinary location line a
+          // stranger's loud reaction fell back to the retired (policy-silenced)
+          // internal_alert owner forward, and on the AI line it skipped even
+          // that, ringing nobody. Tracking numbers stay excluded (their
+          // first-contact channel is new_lead) via the SAME isTrackingLeadInbound
+          // flag alertEligible uses below.
+          let unknownSenderAlertHandled = false;
+          if (!customer && !isTrackingLeadInbound
+            && !(process.env.ADAM_PHONE && From === process.env.ADAM_PHONE && To === process.env.ADAM_PHONE)) {
+            unknownSenderAlertHandled = await dispatchUnknownSenderAlert({ From, MessageSid, message: Body });
           }
+          if (isAiNumber) return;
+          // Loud reaction (answer to a question, or a dislike/question mark):
+          // same alert lifecycle as a text — guarded thread bell for known
+          // customers on any customer-facing number, legacy owner forward when
+          // the bell didn't land — then stop: no reschedule/lead/estimator
+          // automation ever sees a tapback (codex r2/r3).
+          const notifyTypes = ['location', 'gbp_tracking', 'domain_tracking', 'van_tracking', 'tech_line'];
+          // An unknown sender already went through the throttled dispatch
+          // above — `landed` seeds from its result so the legacy owner
+          // forward below never fires a SECOND alert on top of it (codex
+          // #4210 round-2 P1). For a customer, `customer` is truthy and
+          // unknownSenderAlertHandled stays false (the block above is
+          // customer-exclusive), so this is a no-op on that path.
+          let landed = unknownSenderAlertHandled;
+          if (customer && notifyTypes.includes(numberConfig.type)) {
+            try {
+              const stats = await ringSmsReplyBell({ customer, From, MessageSid, message: Body });
+              landed = Boolean(stats && !stats.error && (stats.suppressed || stats.bellWritten || Number(stats.push?.sent || 0) > 0));
+            } catch (e) {
+              if (e.alreadyRead) landed = true;
+              else logger.error(`[notifications] sms_reply (reaction) trigger failed: ${e.message}`);
+            }
+          }
+          if (!landed && process.env.ADAM_PHONE && !(From === process.env.ADAM_PHONE && To === process.env.ADAM_PHONE)) {
+            try {
+              const senderName = customer ? `${customer.first_name} ${customer.last_name}` : From;
+              await TwilioService.sendSMS(process.env.ADAM_PHONE, `📩 New SMS\nFrom: ${senderName}\n"${(Body || '').slice(0, 120)}"`, { messageType: 'internal_alert' });
+            } catch (e) { logger.error(`SMS notification failed: ${e.message}`); }
+          }
+          // A loud tapback on a tech line reaches the holder too (same card as a
+          // text — codex #4053 r2 P2); quiet ones stay silent everywhere.
+          if (numberConfig.type === 'tech_line') {
+            await require('../services/tech-line').notifyTechLineText({
+              lineNumber: To, from: From, body: Body, customer, mediaCount: inboundMedia.length,
+            }).catch((e) => logger.warn(`[tech-line] reaction notify failed: ${e.message}`));
+          }
+        } catch (e) {
+          logger.error(`[sms-intent] deferred reaction alert failed: ${e.message}`);
         }
-        if (!landed && process.env.ADAM_PHONE && !(From === process.env.ADAM_PHONE && To === process.env.ADAM_PHONE)) {
-          try {
-            const senderName = customer ? `${customer.first_name} ${customer.last_name}` : From;
-            await TwilioService.sendSMS(process.env.ADAM_PHONE, `📩 New SMS\nFrom: ${senderName}\n"${(Body || '').slice(0, 120)}"`, { messageType: 'internal_alert' });
-          } catch (e) { logger.error(`SMS notification failed: ${e.message}`); }
-        }
-        // A loud tapback on a tech line reaches the holder too (same card as a
-        // text — codex #4053 r2 P2); quiet ones stay silent everywhere.
-        if (numberConfig.type === 'tech_line') {
-          await require('../services/tech-line').notifyTechLineText({
-            lineNumber: To, from: From, body: Body, customer, mediaCount: inboundMedia.length,
-          }).catch((e) => logger.warn(`[tech-line] reaction notify failed: ${e.message}`));
-        }
-      }
-      return res.type('text/xml').send('<Response></Response>');
+      })(); });
+      return undefined;
     }
 
     // Persist the shared source BEFORE either reply consumer performs work.
