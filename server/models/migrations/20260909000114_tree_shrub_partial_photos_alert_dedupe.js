@@ -7,14 +7,6 @@
  * lost response inserts a second unresolved alert and broadcasts it again
  * (pre-push Codex P1, PR #4091). Same storage-level guard as the project
  * follow-up alert (20260521000007).
- *
- * This index covers only UNRESOLVED rows (concurrent / immediate retries).
- * A retry that lands after dispatch resolved the first alert is deduped by
- * the route itself: the alert payload carries `photoSetKey` (the reconciled
- * service_photos id set) and the route skips createAlertOnce when any prior
- * alert for the job — resolved or not — carries the same key
- * (Codex r-63b2098 P2). A later recovery that attaches more photos is a new
- * key and raises a fresh alert.
  */
 
 exports.up = async function up(knex) {
