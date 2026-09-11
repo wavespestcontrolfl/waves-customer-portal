@@ -10,7 +10,9 @@ import {
   Search,
 } from "lucide-react";
 import AdminCommandHeader from "../../components/admin/AdminCommandHeader";
+import { adminFetch as fetchKnowledge } from "../../utils/admin-fetch";
 import KnowledgeQuestionDialog from "./knowledge/KnowledgeQuestionDialog";
+import KnowledgeRecentQueries from "./knowledge/KnowledgeRecentQueries";
 import { ArticleViewer, HealthCheck } from "./knowledge/KnowledgeReader";
 import KnowledgeSources from "./knowledge/KnowledgeSources";
 
@@ -110,6 +112,9 @@ export default function KnowledgePage({ embedded = false }) {
   const [selectedArticle, setSelectedArticle] = useState(null);
   const [showQA, setShowQA] = useState(false);
   const [recentQueries, setRecentQueries] = useState([]);
+  const [queriesLoading, setQueriesLoading] = useState(true);
+  const [queriesError, setQueriesError] = useState("");
+  const [queriesAttempt, setQueriesAttempt] = useState(0);
 
   useEffect(() => {
     if (tab === "articles") {
@@ -125,12 +130,36 @@ export default function KnowledgePage({ embedded = false }) {
         })
         .catch(() => setLoading(false));
     }
-    if (tab === "queries") {
-      adminFetch("/admin/knowledge/queries").then((d) =>
-        setRecentQueries(d.queries || []),
-      );
-    }
   }, [tab, search, filterCat]);
+
+  useEffect(() => {
+    if (tab !== "queries") {
+      // Arm the loading state for the next visit so the panel cannot paint the
+      // empty state, or the previous visit's results, before the read starts.
+      setQueriesLoading(true);
+      return undefined;
+    }
+
+    let active = true;
+    setQueriesLoading(true);
+    setQueriesError("");
+    fetchKnowledge("/admin/knowledge/queries")
+      .then((data) => {
+        if (active) setRecentQueries(data.queries || []);
+      })
+      .catch((requestError) => {
+        if (active) {
+          setQueriesError(requestError?.message || "Could not load recent queries.");
+        }
+      })
+      .finally(() => {
+        if (active) setQueriesLoading(false);
+      });
+
+    return () => {
+      active = false;
+    };
+  }, [tab, queriesAttempt]);
 
   const openQuestion = (event) => {
     event.currentTarget.focus({ preventScroll: true });
@@ -347,59 +376,12 @@ export default function KnowledgePage({ embedded = false }) {
 
       {/* QUERIES TAB */}
       {tab === "queries" && (
-        <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
-          {recentQueries.length === 0 ? (
-            <Card style={{ textAlign: "center", padding: 40 }}>
-              <div style={{ color: D.muted }}>
-                No queries yet. Click "Ask a Question" to start.
-              </div>
-            </Card>
-          ) : (
-            recentQueries.map((q) => (
-              <Card key={q.id} style={{ padding: 16 }}>
-                {" "}
-                <div
-                  style={{
-                    fontSize: 14,
-                    fontWeight: 500,
-                    color: D.teal,
-                    marginBottom: 6,
-                  }}
-                >
-                  Q: {q.query}
-                </div>{" "}
-                <div
-                  style={{
-                    fontSize: 13,
-                    color: D.text,
-                    lineHeight: 1.6,
-                    maxHeight: 120,
-                    overflow: "hidden",
-                  }}
-                >
-                  {q.answer}
-                </div>{" "}
-                <div
-                  style={{
-                    display: "flex",
-                    gap: 12,
-                    marginTop: 8,
-                    fontSize: 11,
-                    color: D.muted,
-                  }}
-                >
-                  {" "}
-                  <span>{q.asked_by}</span>{" "}
-                  <span>{new Date(q.created_at).toLocaleString()}</span>
-                  {q.response_quality && <span>{q.response_quality}/5</span>}
-                  {q.filed_back && (
-                    <span style={{ color: D.green }}>Filed back</span>
-                  )}
-                </div>{" "}
-              </Card>
-            ))
-          )}
-        </div>
+        <KnowledgeRecentQueries
+          queries={recentQueries}
+          loading={queriesLoading}
+          error={queriesError}
+          onRetry={() => setQueriesAttempt((value) => value + 1)}
+        />
       )}
     </div>
   );
