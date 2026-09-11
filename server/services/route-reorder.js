@@ -44,7 +44,7 @@ const { etDateString, addETDays, parseETDateTime, validCalendarDate } = require(
 const { dayStopsQuery, guardedCoordSelects } = require('./scheduling/day-stops');
 const { toDateStr } = require('./auto-dispatch/dates');
 const { loadReminderFreeze, FREEZE_HOURS, TIER2_MIN_DAYS_OUT } = require('./auto-dispatch/route-tiers');
-const { computeWindowFitOrder, effectiveWindowRange, currentOrder, computeChronologicalRepair, workDuration } = require('./route-reorder-window-fit');
+const { computeWindowFitOrder, effectiveWindowRange, currentOrder, computeChronologicalRepair, workDuration, simulateArrivalRoute } = require('./route-reorder-window-fit');
 
 const GOOGLE_WAYPOINT_CAP = 25;
 // The reorder pass models future days, where en_route/on_site can't occur;
@@ -256,16 +256,36 @@ function withinFreezeClock(dateStr, windowStart, now) {
  * order actually failed, for the UI detail line.
  */
 function chooseWindowSafeOrder({ RouteOptimizer, googleOrder, sourceStops, googleSource, legs = null }) {
+  // beforeMeters (current running order, same model as the nightly ledger's
+  // before_distance_meters) rides on EVERY return — a caller aggregating
+  // several tech-days in one response (the multi-tech /optimize endpoint)
+  // can always sum per-tech-day beforeMeters/afterMeters/afterSeconds
+  // straight from this return, rather than falling back to a flat,
+  // truck-blind list that conflates separate trucks into one fictitious
+  // route (pre-push audit P1 — the exact "wrong savings number" defect
+  // class this whole change exists to close).
+  const beforeMeters = modelDistanceMeters(RouteOptimizer, currentOrder(sourceStops));
   const chronoConflict = violatesWindowChronology(googleOrder, sourceStops);
   const fitConflict = !chronoConflict && violatesWindowFeasibility(RouteOptimizer, googleOrder, sourceStops, legs);
   if (!chronoConflict && !fitConflict) {
-    return { orderedStops: googleOrder, source: googleSource };
+    // Google's order is legal — still score it under the shared model (NOT
+    // Google's own road-routed numbers) so a caller that has to AGGREGATE
+    // this tech-day alongside a repaired one is comparing apples to apples;
+    // a single-tech caller that wants Google's own reported numbers for an
+    // unrepaired day keeps using its own `result.*` fields, unaffected by
+    // these — see admin-schedule.js's two callers.
+    const sim = simulateArrivalRoute(RouteOptimizer, effectiveWindowRange, googleOrder);
+    return {
+      orderedStops: googleOrder,
+      source: googleSource,
+      beforeMeters,
+      afterMeters: modelDistanceMeters(RouteOptimizer, googleOrder),
+      // null only if a legal order somehow fails the same-model simulation
+      // the guards themselves already vetted — belt and suspenders.
+      afterSeconds: sim ? Math.round(sim.travelMin * 60) : null,
+    };
   }
   const conflict = chronoConflict ? 'WINDOW_ORDER_CONFLICT' : 'WINDOW_FIT_CONFLICT';
-  // beforeMeters (current running order, same model as the nightly ledger's
-  // before_distance_meters) rides on every rejection too — the UI can show
-  // "here's what driving it as-is costs" even when nothing gets written.
-  const beforeMeters = modelDistanceMeters(RouteOptimizer, currentOrder(sourceStops));
   const windowFitEnabled = gateEnvValue('GATE_ROUTE_REORDER_WINDOW_FIT') && gateEnvValue('GATE_DRIVE_TIME_CALIBRATION');
   if (!windowFitEnabled) {
     return { orderedStops: null, reason: 'WINDOW_FIT_GATE_OFF', conflict, beforeMeters };

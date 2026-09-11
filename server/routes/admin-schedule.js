@@ -14,8 +14,7 @@ const { completeScheduledServiceInsert } = require('../services/booking/create-s
 const { collectiveMoveGateOn, dateExceptionStamp } = require('../services/rebooker');
 const { stampedDivergesSql, stampedLine2Sql } = require('../services/stamped-address');
 const { dayStopsQuery, guardedCoordSelects } = require('../services/scheduling/day-stops');
-const { chooseWindowSafeOrder, modelDistanceMeters } = require('../services/route-reorder');
-const { currentOrder } = require('../services/route-reorder-window-fit');
+const { chooseWindowSafeOrder } = require('../services/route-reorder');
 const {
   assertAdminAppointmentWindow, probeSlotOverlap, slotOverlapWarning, ADMIN_OCCUPANCY_EXCLUDE_STATUSES,
 } = require('../services/scheduling/window-rules');
@@ -13539,15 +13538,21 @@ router.post('/optimize', requireAdmin, async (req, res, next) => {
     // tech-day was window-fit-repaired do the distance/duration figures need
     // recomputing — under the SAME shared model the repair itself scored
     // against (route-reorder.js's modelDistanceMeters), since Google's own
-    // numbers describe an order that was never written.
+    // numbers describe an order that was never written. Summed PER TECH-DAY
+    // from chooseWindowSafeOrder's own before/after figures: scoring the
+    // flat multi-tech list as one route would chain truck A's last stop to
+    // truck B's first and report a fictitious leg nobody drives (pre-push
+    // audit P1). Unassigned stops have no tech-day and are left out of the
+    // sum, same as they are left out of the guards.
     let totalDurationMinutes;
     let totalDistanceMeters;
     let unoptimizedDistanceMeters;
     if (anyWindowConstrained) {
-      totalDistanceMeters = modelDistanceMeters(RouteOptimizer, finalOrdered);
-      unoptimizedDistanceMeters = modelDistanceMeters(RouteOptimizer, currentOrder(services));
+      const outcomes = [...resolvedByTech.values()];
+      totalDistanceMeters = outcomes.reduce((sum, o) => sum + (o.afterMeters || 0), 0);
+      unoptimizedDistanceMeters = outcomes.reduce((sum, o) => sum + (o.beforeMeters || 0), 0);
       totalDurationMinutes = Math.round(
-        [...resolvedByTech.values()].reduce((sum, o) => sum + (o.afterSeconds || 0), 0) / 60,
+        outcomes.reduce((sum, o) => sum + (o.afterSeconds || 0), 0) / 60,
       );
     } else {
       totalDurationMinutes = Math.round(result.totalDurationSeconds / 60);

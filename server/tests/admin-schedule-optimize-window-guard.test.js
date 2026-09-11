@@ -248,6 +248,26 @@ describe('POST /schedule/optimize (multi tech-day)', () => {
     expect(trxUpdates).toHaveLength(5);
   });
 
+  test('repaired multi-tech figures are summed PER TECH-DAY, never scored as one flat route', async () => {
+    process.env.GATE_ROUTE_REORDER_WINDOW_FIT = 'true';
+    process.env.GATE_DRIVE_TIME_CALIBRATION = 'true';
+    const t2 = [stop('X', { technician_id: 't2', lng: 20, route_order: 1 }), stop('Y', { technician_id: 't2', lng: 21, route_order: 2 })];
+    stopsByDate[DATE] = [...chronologyDay('t1'), ...t2];
+    mockOptimizerOrder(['T2', 'X', 'T1', 'Y', 'U']);
+    const { status, body } = await optimizeAll({ date: DATE });
+    expect(status).toBe(200);
+    // t1: current U,T2,T1 = 24000 m → legal T1,U,T2 = 22000 m. t2: X,Y is
+    // legal and unchanged = 44000 m both before and after. Scoring the flat
+    // five-stop list as one route would chain t1's last stop to t2's first
+    // (a leg nobody drives) and report a different, fictitious number.
+    const { modelDistanceMeters } = require('../services/route-reorder');
+    const flatBefore = modelDistanceMeters(RouteOptimizer, [...stopsByDate[DATE]].sort((a, b) => a.route_order - b.route_order));
+    expect(body.unoptimizedDistanceMeters).toBe(24000 + 44000);
+    expect(body.totalDistanceMeters).toBe(22000 + 44000);
+    expect(body.unoptimizedDistanceMeters).not.toBe(flatBefore);
+    expect(body.savedDistanceMeters).toBe(2000);
+  });
+
   test('one unrepairable tech-day fails the WHOLE request — no partial write of the other tech', async () => {
     // t1 legal (two untimed stops); t2 has a chronology conflict and the
     // window-fit gate is off — the whole call must refuse, not write t1 alone.
