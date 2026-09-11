@@ -13388,7 +13388,14 @@ router.put('/:id/status', async (req, res, next) => {
 // which columns exist (a column present on one side only would read as a
 // permanent "changed" and abort every write).
 const OPTIMIZE_GUARD_COLUMNS = ['window_start', 'window_end', 'time_window',
-  'estimated_duration_minutes', 'auto_dispatch_locked', 'auto_dispatch_excluded', 'visit_id'];
+  'estimated_duration_minutes', 'auto_dispatch_locked', 'auto_dispatch_excluded', 'visit_id',
+  // route_order too, exactly as the nightly fence snapshots it: the CURRENT
+  // running order is a guard input, not just a thing being overwritten — it
+  // is the window-fit repair's backbone and the `unoptimizedDistanceMeters`
+  // the response reports. An operator drag landing in the gap would
+  // otherwise be clobbered by an order computed against the sequence it
+  // replaced (round-0 fallback audit P1).
+  'route_order'];
 
 /**
  * Simulation clock for a day that is ALREADY IN PROGRESS. Both optimize
@@ -13419,13 +13426,17 @@ function inProgressStartMin(dateStr, now) {
  * what counts as a change. Throws STALE_OPTIMIZE — the caller's 409 —
  * leaving the transaction untouched.
  */
+function optimizeGuardSignature(stop) {
+  return `${windowGuardSignature(stop)}|${stop.route_order == null ? '' : Number(stop.route_order)}`;
+}
+
 async function assertGuardInputsFresh(trx, dateStr, snapshot) {
   const fresh = await trx('scheduled_services')
     .whereIn('id', [...snapshot.keys()])
     .where('scheduled_date', dateStr)
     .select('id', ...OPTIMIZE_GUARD_COLUMNS);
   const changed = fresh.length !== snapshot.size
-    || fresh.some((row) => windowGuardSignature(row) !== snapshot.get(row.id));
+    || fresh.some((row) => optimizeGuardSignature(row) !== snapshot.get(row.id));
   if (changed) throw Object.assign(new Error('schedule changed while optimizing'), { code: 'STALE_OPTIMIZE' });
 }
 
@@ -13475,7 +13486,7 @@ router.post('/optimize', requireAdmin, async (req, res, next) => {
     if (!services.length) {
       return res.json({ success: true, order: [], totalDistanceMeters: 0, totalDurationMinutes: 0, legs: [], source: 'empty' });
     }
-    const guardSnapshot = new Map(services.map((s) => [s.id, windowGuardSignature(s)]));
+    const guardSnapshot = new Map(services.map((s) => [s.id, optimizeGuardSignature(s)]));
 
     // Assign zone from customer city/zip if not already set
     for (const svc of services) {
@@ -13707,7 +13718,7 @@ router.post('/optimize-route', requireAdmin, async (req, res, next) => {
     if (!services.length) {
       return res.json({ success: true, order: [], totalDistanceMeters: 0, totalDurationMinutes: 0, legs: [], source: 'empty' });
     }
-    const guardSnapshot = new Map(services.map((s) => [s.id, windowGuardSignature(s)]));
+    const guardSnapshot = new Map(services.map((s) => [s.id, optimizeGuardSignature(s)]));
 
     // Assign zone
     for (const svc of services) {

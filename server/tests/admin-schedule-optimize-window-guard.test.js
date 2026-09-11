@@ -407,3 +407,21 @@ describe('round-1 guards', () => {
   });
 });
 
+
+// Round-0 fallback audit P1: the current running order is a guard INPUT (the
+// window-fit repair's backbone and the reported unoptimizedDistanceMeters),
+// so an operator drag landing between the day load and the lock has to abort
+// the write the same way a re-promised window does — the nightly fence
+// snapshots route_order for exactly this reason.
+test('a manual reorder landing between the day load and the lock aborts the write (409)', async () => {
+  const { lockTechDays } = require('../services/scheduling/tech-day-lock');
+  stopsByDate[DATE] = [stop('A', { lng: 1, route_order: 2 }), stop('B', { lng: 2, route_order: 1 })];
+  mockOptimizerOrder(['A', 'B']);
+  lockTechDays.mockImplementation(async () => {
+    stopsByDate[DATE] = stopsByDate[DATE].map((s) => (s.id === 'A' ? { ...s, route_order: 1 } : { ...s, route_order: 2 }));
+  });
+  const { status, body } = await optimizeRoute({ technicianId: 't1', date: DATE });
+  expect(status).toBe(409);
+  expect(body.error).toMatch(/reload and retry/i);
+  expect(trxUpdates).toEqual([]);
+});
