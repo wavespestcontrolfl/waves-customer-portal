@@ -320,6 +320,34 @@ async function authoredProposalPricing(row, data) {
   };
 }
 
+// The route stamps snapshotHit ONLY on its fast path (estimate-public.js
+// buildPricingBundleInner) — its absence means the frozen columns were
+// rejected (retired/below-floor lawn cadence, stale termite pricing, missing
+// setup fee) and this bundle was rebuilt under today's rules, same signal
+// resolveLivePricing in estimate-proposal-billing.js reads. A committed
+// estimate is exempt regardless: its totals describe what the customer
+// ACCEPTED (or declined), never today's re-derived cadence — same predicate
+// resolveLivePricing gates on before calling buildPricingBundle at all
+// (estimate-proposal-billing.js estimateIsPriceLocked); buildPricingBundle
+// itself carries no such guard, so a rebuilt bundle for a locked row must
+// never name a "default" cadence acceptance may not match (pre-push audit
+// P1). Resolves through the route's own defaultFrequencyFromList, so this
+// never names a cadence acceptance itself would price differently — for
+// totalsFor to prefer over the (now stale) monthly_total/annual_total
+// columns. A narrow LOW-confidence candidate has no exact price on the
+// customer page either (PriceCard shows the range, never the midpoint), so
+// it carries its range instead of raw monthly/annual figures.
+function rebuiltDefaultFrequencyFor(bundle, snapshotHit, priceLocked) {
+  if (snapshotHit || priceLocked) return null;
+  const sellable = list(bundle.frequencies).filter((f) => f && f.quoteRequired !== true);
+  const candidate = sellable.length ? lazy.publicRoute().defaultFrequencyFromList(sellable) : null;
+  if (!candidate) return null;
+  const range = lowConfidenceRange(candidate);
+  return range
+    ? { key: candidate.key || null, low_confidence_range: range }
+    : { key: candidate.key || null, monthly: money(candidate.monthly), annual: money(candidate.annual) };
+}
+
 async function offeredPricing(row, data) {
   try {
     const proposal = await authoredProposalPricing(row, data);
@@ -337,40 +365,9 @@ async function offeredPricing(row, data) {
   }
   if (!bundle || typeof bundle !== 'object') return { offered_pricing: null, offered_pricing_unavailable: 'no pricing bundle for this estimate' };
   const fees = upfrontFees(bundle);
-  // The route stamps snapshotHit ONLY on its fast path (estimate-public.js
-  // buildPricingBundleInner) — its absence means the frozen columns were
-  // rejected (retired/below-floor lawn cadence, stale termite pricing,
-  // missing setup fee) and this bundle was rebuilt under today's rules, same
-  // signal resolveLivePricing in estimate-proposal-billing.js reads. Resolve
-  // the rebuilt bundle's own default sellable cadence — through the route's
-  // own defaultFrequencyFromList, so this never names a cadence acceptance
-  // itself would price differently — for totalsFor to prefer over the
-  // (now stale) monthly_total/annual_total columns.
   const snapshotHit = bundle.snapshotHit === true;
-  // A committed estimate's totals describe what the customer ACCEPTED (or
-  // declined), never today's re-derived cadence — same predicate
-  // resolveLivePricing gates on before calling buildPricingBundle at all
-  // (estimate-proposal-billing.js estimateIsPriceLocked: status accepted /
-  // declined, or price_locked_at stamped). buildPricingBundle itself carries
-  // no such guard, so a rebuilt bundle for a locked row must never override
-  // the frozen columns with a "default" cadence acceptance may not match
-  // (pre-push audit P1).
   const priceLocked = lazy.proposalBilling().estimateIsPriceLocked(row);
-  let rebuiltDefaultFrequency = null;
-  if (!snapshotHit && !priceLocked) {
-    const sellable = list(bundle.frequencies).filter((f) => f && f.quoteRequired !== true);
-    const candidate = sellable.length ? lazy.publicRoute().defaultFrequencyFromList(sellable) : null;
-    if (candidate) {
-      // A narrow LOW-confidence candidate has no exact price on the customer
-      // page either — PriceCard shows the range, never the midpoint. Carry
-      // the range instead of the raw monthly/annual figures, so a rebuilt
-      // total is never a false precision the page itself withholds.
-      const range = lowConfidenceRange(candidate);
-      rebuiltDefaultFrequency = range
-        ? { key: candidate.key || null, low_confidence_range: range }
-        : { key: candidate.key || null, monthly: money(candidate.monthly), annual: money(candidate.annual) };
-    }
-  }
+  const rebuiltDefaultFrequency = rebuiltDefaultFrequencyFor(bundle, snapshotHit, priceLocked);
   return {
     offered_pricing: {
       default_service_mode: bundle.defaultServiceMode || null,
