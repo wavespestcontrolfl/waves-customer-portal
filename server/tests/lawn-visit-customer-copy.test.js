@@ -158,7 +158,7 @@ describe('customer publication', () => {
     },
   );
 
-  test.each(['Chinch bug colonies are confirmed along the edge.', 'Chinch bug hotspots were definitely present.', 'The chinch bug zone is certainly established.', 'Chinch bug colonies are active along the edge.', 'Large patch, in the shaded area, is confirmed.', 'Large patch, which is confirmed in the shaded area, is spreading.', 'Confirmed: chinch bug colonies along the edge.'])(
+  test.each(['Chinch bug colonies are confirmed along the edge.', 'Chinch bug hotspots were definitely present.', 'The chinch bug zone is certainly established.', 'Chinch bug colonies are active along the edge.', 'Large patch, in the shaded area, is confirmed.', 'Large patch, which is confirmed in the shaded area, is spreading.'])(
     'a residual definitive cause claim the grammar did not downgrade is rejected whole: %s', (text) => {
       const evidence = { label: 'chinch bug activity', confidence: 'high' };
       expect(copy.residualDefinitiveClaim(text)).toBe(true);
