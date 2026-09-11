@@ -117,6 +117,24 @@ async function countUnreadInboundSms({ excludePhones = [], customerId = null } =
     .where('messages.direction', 'inbound')
     .andWhere(function unread() { this.where({ 'messages.is_read': false }).orWhereNull('messages.is_read'); });
   if (customerId) q = q.where('conversations.customer_id', customerId);
+  // A blocked number's existing thread must not keep the badge lit: "Mark
+  // spam" in the inbox blocks the sender and the thread stops counting.
+  // NANP blocks match on the same last-10 identity the COUNT below groups
+  // on; any other country code must match in full (utils/phone.js keeps
+  // international numbers whole — codex #4213).
+  q = q.whereNotExists(function blocked() {
+    this.select(db.raw('1')).from('blocked_numbers')
+      .whereRaw(`(
+        (regexp_replace(COALESCE(blocked_numbers.number, ''), '[^0-9]', '', 'g') ~ '^1[0-9]{10}$'
+          AND regexp_replace(COALESCE(NULLIF(conversations.contact_phone, ''), customers.phone, ''), '[^0-9]', '', 'g') ~ '^1{0,1}[0-9]{10}$'
+          AND (COALESCE(NULLIF(conversations.contact_phone, ''), customers.phone, '') NOT LIKE '+%'
+            OR COALESCE(NULLIF(conversations.contact_phone, ''), customers.phone, '') LIKE '+1%')
+          AND RIGHT(regexp_replace(COALESCE(blocked_numbers.number, ''), '[^0-9]', '', 'g'), 10)
+            = RIGHT(regexp_replace(COALESCE(NULLIF(conversations.contact_phone, ''), customers.phone, ''), '[^0-9]', '', 'g'), 10))
+        OR NULLIF(regexp_replace(COALESCE(blocked_numbers.number, ''), '[^0-9]', '', 'g'), '')
+            = regexp_replace(COALESCE(NULLIF(conversations.contact_phone, ''), customers.phone, ''), '[^0-9]', '', 'g')
+      )`);
+  });
   for (const phone of excludePhones) {
     q = q
       .whereNot('conversations.our_endpoint_id', phone)
@@ -124,9 +142,12 @@ async function countUnreadInboundSms({ excludePhones = [], customerId = null } =
       .where((b) => b.whereNot('customers.phone', phone).orWhereNull('customers.phone'));
   }
   const row = await q.first(
-    db.raw(`COUNT(DISTINCT COALESCE(NULLIF(RIGHT(
-      regexp_replace(COALESCE(NULLIF(conversations.contact_phone, ''), customers.phone, ''), '[^0-9]', '', 'g'),
-      10), ''), 'unknown'))::int AS conversations`),
+    db.raw(`COUNT(DISTINCT COALESCE(NULLIF(
+      CASE WHEN COALESCE(NULLIF(conversations.contact_phone, ''), customers.phone, '') NOT LIKE '+%'
+        AND regexp_replace(COALESCE(NULLIF(conversations.contact_phone, ''), customers.phone, ''), '[^0-9]', '', 'g') ~ '^[0-9]{10}$'
+      THEN '1' || regexp_replace(COALESCE(NULLIF(conversations.contact_phone, ''), customers.phone, ''), '[^0-9]', '', 'g')
+      ELSE regexp_replace(COALESCE(NULLIF(conversations.contact_phone, ''), customers.phone, ''), '[^0-9]', '', 'g')
+      END, ''), 'unknown'))::int AS conversations`),
     db.raw('COUNT(*)::int AS messages'),
   );
   return { conversations: Number(row?.conversations || 0), messages: Number(row?.messages || 0) };
