@@ -514,6 +514,11 @@ async function summaryEmailEvidence(message, database) {
 async function reconcileSummaryEmailBounce(message, database = db) {
   const match = /^visit_summary:([0-9a-f-]{36})$/.exec(String(message?.trigger_event_id || ''));
   if (!match || message.template_key !== 'service.visit_summary') return { reconciled: false };
+  // A caller outside a transaction (the retry rail's exhaustion) gets one
+  // here: the packet and effect locks below must outlive their SELECTs, or a
+  // review handoff can take the packet row between the read and the flip,
+  // see the still-sent effect and send the ask this parks.
+  if (!database.isTransaction) return database.transaction((trx) => reconcileSummaryEmailBounce(message, trx));
   const visitId = match[1];
   // Two recipients can bounce in concurrent webhook transactions; holding
   // the shared effect serializes them so the second reads the first's
@@ -673,13 +678,17 @@ async function reviewSendThroughSummaryHandoff(serviceRecordId, dispatch, databa
         .whereIn('effect_type', ['completion_sms', 'completion_email']).first('id');
       if (uncertain) return { ok: false, code: 'VISIT_SUMMARY_UNCERTAIN', reason: 'The visit summary this review follows is awaiting recovery' };
     }
-    if (requestId) await trx('review_requests').where({ id: requestId, status: 'pending' }).update({ status: 'sending' });
+    // claimed_at is the mark's time: a row still `sending` past the claim
+    // window after this commits had its provider request made, and the
+    // stranded-send reconciliation (review-request.js) proves or releases it.
+    const marked = requestId
+      ? Number(await trx('review_requests').where({ id: requestId, status: 'pending' }).update({ status: 'sending', claimed_at: trx.fn.now() })) : 0;
     const verdict = await dispatch(trx);
     // A refusal before the request (consent, suppression, send window) is
     // provably unsent: the row returns to pending in this same transaction,
     // so a worker lost before the sender's own bookkeeping strands nothing.
-    if (requestId && verdict && verdict.ok === false) {
-      await trx('review_requests').where({ id: requestId, status: 'sending' }).update({ status: 'pending' });
+    if (marked && verdict && verdict.ok === false) {
+      await trx('review_requests').where({ id: requestId, status: 'sending' }).update({ status: 'pending', claimed_at: null });
     }
     return verdict;
   });

@@ -1421,9 +1421,18 @@ async function handleCombinedPaymentIntentSucceeded(paymentIntent, eventCreated 
   // intent — the combined early-return must not cost customers their
   // review invitation.
   if (combinedSettleOutcome?.paymentStatus === 'paid') {
+    // Every settled invoice gets its attempt before an unrecorded review
+    // hands the event back to Stripe for redelivery.
+    let reviewNotRecorded = null;
     for (const settledId of combinedSettleOutcome.invoiceIds || []) {
-      await scheduleReviewAfterPaidInvoice(piId, { invoiceId: settledId });
+      try {
+        await scheduleReviewAfterPaidInvoice(piId, { invoiceId: settledId });
+      } catch (err) {
+        if (!err.reviewNotRecorded) throw err;
+        reviewNotRecorded = reviewNotRecorded || err;
+      }
     }
+    if (reviewNotRecorded) throw reviewNotRecorded;
     // A settled invoice may be gating a payment-held WDO report — nudge
     // the release sweep like the single-invoice path does (codex r22 P3);
     // the 60s interval remains the fallback.
@@ -2414,8 +2423,20 @@ async function scheduleReviewAfterPaidInvoice(piId, { invoiceId = null } = {}) {
     const outcome = await ReviewService.enrollForPaidInvoice(paidInvoice, { source: 'stripe_webhook' });
     if (outcome.enrolled) {
       logger.info(`[stripe-webhook] Queued review outreach after invoice ${paidInvoice.invoice_number || paidInvoice.id} payment`);
+    } else if (outcome.retryable && outcome.recorded === false) {
+      // Nothing durable holds the packet's review for recovery (the reopen
+      // itself failed): this paid event is the only signal, so it goes back
+      // to Stripe for redelivery. The settle above is status-guarded and the
+      // enrollment idempotent, so the retry re-runs safely.
+      const lost = new Error(`review enrollment for invoice ${paidInvoice.id} was not recorded for recovery: ${outcome.error}`);
+      lost.reviewNotRecorded = true;
+      throw lost;
     }
   } catch (err) {
+    if (err.reviewNotRecorded) {
+      logger.error(`[stripe-webhook] ${err.message} — rethrowing for Stripe retry (PI ${piId})`);
+      throw err;
+    }
     logger.error(`[stripe-webhook] Paid-invoice review request schedule failed for PI ${piId}: ${err.message}`);
   }
 }

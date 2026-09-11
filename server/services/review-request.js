@@ -2643,7 +2643,63 @@ const ReviewService = {
    * Cron: send scheduled review requests.
    * Runs every 15 minutes, picks up requests whose scheduled_for has passed.
    */
+  /**
+   * A review ask whose provider request was made but whose sent-status
+   * bookkeeping failed afterwards stays `sending` (the handoff's pre-provider
+   * mark commits with the request; see reviewSendThroughSummaryHandoff). No
+   * sender selects such a row again, so the delivered ask would be missing
+   * from the lifetime cap and follow-up scheduling forever. Past the claim
+   * window the row is judged on evidence: a send proven by the outbound log
+   * or the provider finishes as sent; the provider positively reporting
+   * none releases the ask (a legacy row back to the scheduler, a cadence
+   * touch to the sequence cron that owns its retries); an unreachable
+   * provider leaves the row alone. Composer (inline) claims keep their own
+   * reconciliation in claimInlineForSend.
+   */
+  async reconcileStrandedSends() {
+    const stranded = await db("review_requests")
+      .where({ status: "sending" })
+      .whereNull("sms_sent_at")
+      .whereNotNull("claimed_at")
+      .where("claimed_at", "<=", new Date(Date.now() - INLINE_CLAIM_STALE_MS))
+      .where(function () {
+        this.whereNull("triggered_by").orWhereNot("triggered_by", "auto_inline");
+      })
+      .where(function () {
+        this.where("channel", "sms").orWhereNull("channel");
+      })
+      .orderBy("claimed_at")
+      .limit(20)
+      .select("id", "customer_id", "token", "claimed_at", "sequence_id");
+    let finished = 0;
+    let released = 0;
+    for (const row of stranded) {
+      let evidence;
+      try {
+        evidence = await this._inlineSendEvidence(row);
+      } catch (err) {
+        logger.warn(`[review] stranded send evidence failed (requestId=${row.id}): ${err.message}`);
+        continue;
+      }
+      if (evidence.unavailable) continue;
+      const guard = { id: row.id, status: "sending", claimed_at: row.claimed_at };
+      if (evidence.found) {
+        const now = new Date();
+        finished += Number(await db("review_requests").where(guard).update({
+          status: "sent", sms_sent_at: now, scheduled_for: null, ...(row.sequence_id ? { sent_at: now } : {}),
+        }));
+        continue;
+      }
+      released += Number(await db("review_requests").where(guard).update(row.sequence_id
+        ? { status: "deferred", claimed_at: null }
+        : { status: "pending", scheduled_for: new Date(), claimed_at: null }));
+    }
+    if (finished || released) logger.info(`[review] stranded sends reconciled (finished=${finished} released=${released})`);
+    return { finished, released };
+  },
+
   async processScheduled() {
+    await this.reconcileStrandedSends().catch((err) => logger.warn(`[review] stranded send reconciliation failed: ${err.message}`));
     // Terminate (not just skip) due requests whose customer was
     // soft-deleted: a row left 'pending' forever would become eligible
     // again — and fire very late — if the customer is ever restored.

@@ -75,6 +75,9 @@ function recordsResult(packet, items, billing, replayed = false) {
 }
 
 /** Owns the commit/rollback boundary; callers must supply a root Knex handle. */
+// Invoice states a Bill-To withdrawal never touches and a reconciliation never releases.
+const INVOICE_TERMINAL_STATUSES = ['void', 'refunded', 'canceled', 'cancelled', 'paid', 'prepaid'];
+
 async function saveVisitCompletionPacket(input, database = db) {
   if (database.isTransaction) throw new TypeError('Visit completion requires a root database connection');
   const request = packetRequest(input);
@@ -519,8 +522,18 @@ async function resolvePacketOwnershipLocked(packetId, trx) {
 // visit_closeout_review alert). A packet still processing gets that state
 // from its own close. The stamp is what the reconciliation below keys on.
 async function withdrawPacketInvoiceForPayer(trx, { packetId, invoiceId, visit, billed, payerId }) {
-  await trx('invoices').where({ id: invoiceId }).whereIn('status', ['draft', 'scheduled', 'sending']).whereNull('payer_id')
-    .update({ status: 'draft', scheduled_send_at: null, scheduled_send_error: `payer_billed:${payerId}`, updated_at: trx.fn.now() });
+  const stamp = `payer_billed:${payerId}`;
+  const withdrawn = await trx('invoices').where({ id: invoiceId }).whereIn('status', ['draft', 'scheduled', 'sending']).whereNull('payer_id')
+    .update({ status: 'draft', scheduled_send_at: null, scheduled_send_error: stamp, updated_at: trx.fn.now() });
+  // A pay link the homeowner already holds (sent, viewed, overdue) or a
+  // settlement in flight cannot be recalled here. The stamp alone records
+  // the withdrawal on such a row, so the office review below carries the
+  // same signal and the Bill-To reconciliation can lift the hold, the
+  // packet error and the alert once ownership returns to self-pay.
+  if (!withdrawn) {
+    await trx('invoices').where({ id: invoiceId }).whereNull('payer_id').whereNotIn('status', INVOICE_TERMINAL_STATUSES)
+      .update({ scheduled_send_error: stamp, updated_at: trx.fn.now() });
+  }
   await trx('service_visits').where({ id: visit.id }).update({ billing_hold: true, updated_at: trx.fn.now() });
   const closed = await trx('visit_completion_packets').where({ id: packetId, status: 'done' })
     .update({ error: JSON.stringify(officeReviewState({ payment: 'office_required', reason: 'payer_assigned', payerId })), updated_at: trx.fn.now() });
@@ -545,37 +558,41 @@ function officeReviewState({ payment, delivery = null, reason = null, payerId = 
 // Every Bill-To transition that can turn a withdrawn invoice self-pay again
 // (a payer deactivated, a customer's or a job's payer link cleared, a self-pay
 // override set) reconciles here, inside the writer's own transaction: each
-// withdrawn draft in scope whose live owner is now nobody returns to the
-// send queue (the worker re-judges ownership on its claim), its visit's
-// hold is lifted, and the office-review state the withdrawal recorded — the
-// packet error and the open alert — is cleared. Only a row that is still the
-// withdrawn draft is requeued: an invoice voided or settled since keeps its
-// terminal state.
+// stamped invoice in scope whose live owner is now nobody is released — a
+// withdrawn draft returns to the send queue (the worker re-judges ownership
+// on its claim); a row the homeowner already holds or that is settling only
+// loses its marker — its visit's hold is lifted, and the office-review state
+// the withdrawal recorded (the packet error and the open alert) is cleared.
+// An invoice voided or settled since keeps its terminal state untouched.
 async function reconcileWithdrawnPacketInvoices(trx, { customerId = null, payerId = null, scheduledServiceId = null } = {}) {
-  const query = trx('invoices').where({ status: 'draft' }).whereNull('payer_id').whereNotNull('visit_completion_packet_id')
+  const query = trx('invoices').whereNotIn('status', INVOICE_TERMINAL_STATUSES).whereNull('payer_id').whereNotNull('visit_completion_packet_id')
     .where('scheduled_send_error', 'like', 'payer_billed:%');
   if (customerId) query.where({ customer_id: customerId });
   if (payerId) query.where({ scheduled_send_error: `payer_billed:${payerId}` });
   if (scheduledServiceId) {
     query.whereIn('visit_completion_packet_id', trx('visit_completion_packet_items').where({ scheduled_service_id: scheduledServiceId }).select('packet_id'));
   }
-  const withdrawn = await query.select('id', 'visit_completion_packet_id', 'scheduled_send_error');
-  let requeued = 0;
+  const withdrawn = await query.select('id', 'status', 'visit_completion_packet_id', 'scheduled_send_error');
+  let released = 0;
   for (const invoice of withdrawn) {
     const live = await liveThirdPartyPayerForPacket(invoice.visit_completion_packet_id, trx);
     if (live) {
       // Another payer still owns the packet: the stamp follows it, so the
       // removal of that payer can still find this withdrawal.
       if (String(live) !== invoice.scheduled_send_error.split(':')[1]) {
-        await trx('invoices').where({ id: invoice.id, status: 'draft', scheduled_send_error: invoice.scheduled_send_error })
+        await trx('invoices').where({ id: invoice.id, status: invoice.status, scheduled_send_error: invoice.scheduled_send_error })
           .update({ scheduled_send_error: `payer_billed:${live}`, updated_at: trx.fn.now() });
       }
       continue;
     }
-    const moved = await trx('invoices').where({ id: invoice.id, status: 'draft', scheduled_send_error: invoice.scheduled_send_error }).whereNull('payer_id')
-      .update({ status: 'scheduled', scheduled_send_at: trx.fn.now(), scheduled_send_attempts: 0, scheduled_send_error: null, updated_at: trx.fn.now() });
+    const moved = invoice.status === 'draft'
+      ? await trx('invoices').where({ id: invoice.id, status: 'draft', scheduled_send_error: invoice.scheduled_send_error }).whereNull('payer_id')
+        .update({ status: 'scheduled', scheduled_send_at: trx.fn.now(), scheduled_send_attempts: 0, scheduled_send_error: null, updated_at: trx.fn.now() })
+      // Already with the homeowner or settling: only the marker is cleared.
+      : await trx('invoices').where({ id: invoice.id, status: invoice.status, scheduled_send_error: invoice.scheduled_send_error }).whereNull('payer_id')
+        .update({ scheduled_send_error: null, updated_at: trx.fn.now() });
     if (!moved) continue;
-    requeued += 1;
+    released += 1;
     const packet = await trx('visit_completion_packets').where({ id: invoice.visit_completion_packet_id }).first('id', 'visit_id', 'status', 'error');
     await trx('service_visits').where({ id: packet.visit_id }).update({ billing_hold: false, updated_at: trx.fn.now() });
     // Only the payer portion of the office-review state is lifted: an
@@ -590,7 +607,7 @@ async function reconcileWithdrawnPacketInvoices(trx, { customerId = null, payerI
       .whereRaw("COALESCE(payload->>'delivery', '') <> 'delivery_review'").select('id');
     for (const alert of alerts) await require('./dispatch-alerts').resolveAlert({ id: alert.id, resolvedBy: null, trx });
   }
-  return requeued;
+  return released;
 }
 
 // Holds FOR SHARE every payer row the live Bill-To resolution for this
@@ -655,7 +672,15 @@ async function enrollVisitCompletionReviewForInvoice(invoiceId, database = db) {
         .whereIn('status', ['done', 'processing'])
         .update({ status: 'processing', error: 'review_enrollment_pending', updated_at: database.fn.now() }));
     } catch { reopened = null; }
-    if (reopened !== 0) return { enrolled: false, retryable: true, reason: 'error', error: err.message, reopened: reopened > 0 };
+    if (reopened === null) {
+      // Neither the lookup nor the reopen reached the database: nothing
+      // durable marks this packet for recovery, and the paid signal is one-
+      // shot. Reported as unrecorded so the webhook can hand the event back
+      // to Stripe; a manual caller has only this log.
+      require('./logger').error(`[visit-closeout] review enrollment for invoice ${invoiceId} could not be recorded for recovery: ${err.message}`);
+      return { enrolled: false, retryable: true, reason: 'error', error: err.message, reopened: false, recorded: false };
+    }
+    if (reopened > 0) return { enrolled: false, retryable: true, reason: 'error', error: err.message, reopened: true };
     // A reopen that ran and touched no packet means either no packet owns
     // this invoice or the owning packet is terminal (the office holds a
     // failed one). Only the first hands the review to the legacy
