@@ -290,6 +290,24 @@ describe('agent stream EOF retry (session_stream_eof)', () => {
     expect(result2.outcome).toBe('failed_agent');
   });
 
+  test('a retry that dies before creating a session keeps the first session pointer (Codex r3)', async () => {
+    const queue = makeQueue({ id: 'opp_eof_nc', action_type: 'new_supporting_blog', claimed_at: claimedAt, signal_metadata: {} });
+    const dispatcher = {
+      runWithBrief: jest.fn()
+        .mockResolvedValueOnce({ ...eof('sesn_real'), agent_id: 'agent_1' })
+        .mockResolvedValueOnce({ ok: false, code: 'session_create_failed', reason: 'session_create_failed: 503', duration_ms: 1200 }),
+    };
+    const { runner } = loadRunner({ queue, briefBuilder: makeBriefBuilder(), dispatcher });
+    const result = await runner.runNext();
+    expect(dispatcher.runWithBrief).toHaveBeenCalledTimes(2);
+    expect(result.outcome).toBe('failed_agent');
+    expect(result.failure_message).toBe('session_create_failed: 503');
+    // The only session that ever existed must stay correlatable.
+    expect(result.agent_session_id).toBe('sesn_real');
+    expect(result.agent_id).toBe('agent_1');
+    expect(result.agent_ms).toBe(241200);
+  });
+
   test('AUTONOMOUS_CONTENT_STREAM_EOF_RETRIES=0 disarms the retry', async () => {
     process.env.AUTONOMOUS_CONTENT_STREAM_EOF_RETRIES = '0';
     const queue = makeQueue({ id: 'opp_eof0', action_type: 'new_supporting_blog', claimed_at: claimedAt, signal_metadata: {} });
