@@ -40,9 +40,14 @@ jest.mock('../services/invoice', () => ({
 }));
 const mockPending = jest.fn();
 const mockConsume = jest.fn();
+// The deposit-ledger advisory lock (Codex round 14 P1 #4131): the mint
+// acquires it before reading pendingDepositCredit — a no-op stub here,
+// asserted against directly in the lock-ordering test below.
+const mockAcquireDepositLock = jest.fn(async () => undefined);
 jest.mock('../services/estimate-deposits', () => ({
   pendingDepositCredit: (...args) => mockPending(...args),
   consumeDepositCredit: (...args) => mockConsume(...args),
+  acquireEstimateDepositLedgerLock: (...args) => mockAcquireDepositLock(...args),
 }));
 const mockPayer = jest.fn(async () => ({ payerId: null }));
 jest.mock('../services/payer', () => ({
@@ -154,6 +159,31 @@ describe('mintScheduledServiceInvoiceWithDeposit', () => {
     expect(mockPending).not.toHaveBeenCalled();
     expect(mockCreate.mock.calls[0][0].depositCredit).toBeUndefined();
     expect(mockConsume).not.toHaveBeenCalled();
+    // No source estimate — nothing to serialize against, so no lock either.
+    expect(mockAcquireDepositLock).not.toHaveBeenCalled();
+  });
+
+  // Codex round 14 P1 #4131: pendingDepositCredit is a plain SELECT and
+  // markDepositReceived is an independent write, so without a shared lock
+  // a deposit could settle between this read and the mint's own commit —
+  // the zero-credit check would pass and a full-balance invoice would go
+  // out beside the newly received deposit. The mint must take the SAME
+  // advisory lock (keyed on the estimate) BEFORE reading, in the SAME
+  // transaction that will go on to create() and consume.
+  it('serializes against a concurrent deposit receipt: the estimate-keyed advisory lock is taken BEFORE pendingDepositCredit reads', async () => {
+    const trx = makeTrx();
+    programTransactions(trx);
+    mockCreate.mockResolvedValueOnce({ id: 'inv-1', applied_deposit_credit: 49 });
+    mockConsume.mockResolvedValueOnce(49);
+    const callOrder = [];
+    mockAcquireDepositLock.mockImplementationOnce(async () => { callOrder.push('lock'); });
+    mockPending.mockImplementationOnce(async () => { callOrder.push('read'); return { amount: 49 }; });
+
+    await mintScheduledServiceInvoiceWithDeposit({ svc, buildCreateParams });
+
+    // Same transaction, same estimate id the read itself uses.
+    expect(mockAcquireDepositLock).toHaveBeenCalledWith(trx, 'est-1');
+    expect(callOrder).toEqual(['lock', 'read']);
   });
 
   it('retries once on allocation mismatch, then alerts and falls back to an uncredited mint', async () => {

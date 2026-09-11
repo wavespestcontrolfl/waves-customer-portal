@@ -323,3 +323,43 @@ describe('sendViaSMS: every pre-delivery exit restores the consumed queue row (t
     }
   });
 });
+
+// Codex round 14 P1 #4131 (2nd P1): processScheduledSends preclaims the
+// invoice (flips it to 'sending' itself) and calls in with
+// allowClaimed:true — that branch used to return before ANY queue check,
+// so a live invoice_send_deferred row from an earlier held DIRECT send
+// stayed live and could still deliver the SAME frozen pay link a second
+// time. claimInvoiceForSend's allowClaimed branch now runs the SAME
+// reconcileQueuedSendUnderClaim chokepoint the ordinary claim path does.
+describe('claimInvoiceForSend (allowClaimed): the preclaimed branch still reconciles a queued pay link', () => {
+  test('a live invoice_send_deferred row (this send\'s own earlier held leg) is CONSUMED — the claim succeeds, one delivery owns it', async () => {
+    const preclaimedInvoice = { ...draftInvoice, status: 'sending' };
+    const consumeChain = chain({ returning: [{ id: 'sms-deferred-1', scheduled_for: new Date('2026-09-11T12:00:00.000Z') }] });
+    db
+      .mockReturnValueOnce(chain({ first: preclaimedInvoice })) // claim read — already 'sending' (preclaimed by processScheduledSends)
+      .mockReturnValueOnce(chain({ first: undefined })) // adopter's view: the still-scheduled invoice_send_deferred row is its own, not a blocker
+      .mockReturnValueOnce(consumeChain) // consumeQueuedInvoiceSend — the row IS consumed here
+      .mockReturnValueOnce(chain({ first: undefined })); // strict re-check after the consume — nothing else live
+
+    const claim = await InvoiceService.claimInvoiceForSend('inv-1', { allowClaimed: true, adoptsQueuedInvoiceSend: true });
+
+    expect(claim).toMatchObject({ claimed: false, previousStatus: 'sending' });
+    expect(claim.consumedQueuedSendRows).toEqual([{ id: 'sms-deferred-1', scheduled_for: new Date('2026-09-11T12:00:00.000Z') }]);
+    // The consume update actually ran (row cancelled) — the earlier held
+    // leg no longer owns a delivery, so only THIS send's own delivery goes
+    // out, not both.
+    expect(consumeChain.update).toHaveBeenCalledTimes(1);
+    expect(consumeChain.update.mock.calls[0][0].status).toBe('cancelled');
+  });
+
+  test('a DIFFERENT live queue (e.g. a completion-deferred text) still refuses the preclaimed branch — it does not own that delivery', async () => {
+    const preclaimedInvoice = { ...draftInvoice, status: 'sending' };
+    db
+      .mockReturnValueOnce(chain({ first: preclaimedInvoice })) // claim read
+      .mockReturnValueOnce(chain({ first: { id: 'sms-completion-1', scheduled_for: new Date('2026-09-11T12:00:00.000Z') } })) // a LIVE completion-deferred row blocks even the adopter's view
+      .mockReturnValueOnce(chain()); // restoreSendClaim's own re-stamp (claimed forced true inside restoreClaimAndThrow)
+
+    await expect(InvoiceService.claimInvoiceForSend('inv-1', { allowClaimed: true, adoptsQueuedInvoiceSend: true }))
+      .rejects.toMatchObject({ code: 'queued_pay_link' });
+  });
+});

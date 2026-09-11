@@ -278,7 +278,13 @@ describe('processScheduledSends send-window handling', () => {
       };
       db
         .mockReturnValueOnce(chain({ first: { payer_statement_id: null } })) // accrual pre-check
-        .mockReturnValueOnce(chain({ first: sendingInvoice })); // claimInvoiceForSend read
+        .mockReturnValueOnce(chain({ first: sendingInvoice })) // claimInvoiceForSend read
+        // The preclaimed allowClaimed branch now reconciles the queue too
+        // (Codex round 14 P1 #4131): pre-check (none live), consume
+        // (nothing pre-existing to adopt), strict re-check (none live).
+        .mockReturnValueOnce(chain({ first: undefined }))
+        .mockReturnValueOnce(chain({ returning: [] }))
+        .mockReturnValueOnce(chain({ first: undefined }));
 
       const result = await InvoiceService.sendViaSMSAndEmail('inv-1', { allowClaimed: true });
 
@@ -416,5 +422,33 @@ describe('processScheduledSends send-window handling', () => {
     expect(result).toEqual({ sent: 0, failed: 1, deferred: 0 });
     const updateArgs = failUpdate.update.mock.calls[0][0];
     expect(updateArgs.scheduled_send_attempts).toBe(3);
+  });
+
+  // Codex round 14 P1 #4131: claimInvoiceForSend's allowClaimed branch now
+  // runs the queued-obligation check too, which can THROW (a live queue
+  // this preclaimed send does not own) instead of only ever resolving —
+  // one row's refusal must not abort the whole batch (the remaining due
+  // invoices, and the batch counters, must survive it).
+  test('sendViaSMSAndEmail throwing (the new preclaimed queue-check refusal) is treated as an ordinary failure — the batch survives', async () => {
+    isWithinSendWindowET.mockReturnValue(true);
+    const staleRecovery = chain();
+    const dueQuery = chain({ rows: [dueRow] });
+    const claim = chain({ returning: [{ id: 'inv-1', scheduled_request_review: false, scheduled_review_delay_minutes: null }] });
+    const failUpdate = chain();
+    db
+      .mockReturnValueOnce(staleRecovery)
+      .mockReturnValueOnce(dueQuery)
+      .mockReturnValueOnce(claim)
+      .mockReturnValueOnce(failUpdate);
+    const thrown = new Error('Invoice send already in progress — a text carrying this pay link is queued for the send window');
+    thrown.code = 'queued_pay_link';
+    sendSpy.mockRejectedValue(thrown);
+
+    const result = await InvoiceService.processScheduledSends();
+
+    expect(result).toEqual({ sent: 0, failed: 1, deferred: 0 });
+    const updateArgs = failUpdate.update.mock.calls[0][0];
+    expect(updateArgs.scheduled_send_attempts).toBe(3);
+    expect(updateArgs.scheduled_send_error).toContain('queued for the send window');
   });
 });

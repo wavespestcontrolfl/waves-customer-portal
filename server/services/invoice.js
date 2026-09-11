@@ -1188,7 +1188,21 @@ async function claimInvoiceForSend(invoiceId, { allowClaimed = false, firstDeliv
     if (!SEND_FINALIZABLE_STATUSES.includes(current.status)) {
       throw invoiceNotSendableError(current);
     }
-    return { invoice: current, previousStatus: current.status, claimed: false, consumedQueuedSendRows: [] };
+    // A preclaimed row (processScheduledSends flips 'scheduled' → 'sending'
+    // itself, then calls in here with allowClaimed:true) still needs the
+    // queued-obligation check (Codex round 14 P1 #4131): without it, a LIVE
+    // invoice_send_deferred row from an earlier held DIRECT send is
+    // invisible to this branch and would deliver the SAME frozen pay link
+    // a second time. Reuses reconcileQueuedSendUnderClaim — the ONE queue
+    // chokepoint — rather than a copy: the adoptable shape (this send's own
+    // earlier held leg) is consumed silently and delivery proceeds; any
+    // OTHER live queue (a completion-deferred text, say) still refuses.
+    // Its claim-restoration calls are inert here: claimed is false below,
+    // so restoreSendClaim's invoice-status leg no-ops (current.status IS
+    // already 'sending' — the caller's own preclaim — so "restoring" it
+    // only re-stamps the row the caller already owns).
+    const consumedQueuedSendRows = await reconcileQueuedSendUnderClaim(invoiceId, current.status, adoptsQueuedInvoiceSend);
+    return { invoice: current, previousStatus: current.status, claimed: false, consumedQueuedSendRows };
   }
 
   if (firstDeliveryOnly && alreadyDeliveredForFirstSend(current)) {
@@ -3951,11 +3965,26 @@ const InvoiceService = {
         ]);
       if (!claimed) continue;
 
-      const result = await this.sendViaSMSAndEmail(claimed.id, {
-        requestReview: Boolean(claimed.scheduled_request_review),
-        reviewDelayMinutes: claimed.scheduled_review_delay_minutes,
-        allowClaimed: true,
-      });
+      let result;
+      try {
+        result = await this.sendViaSMSAndEmail(claimed.id, {
+          requestReview: Boolean(claimed.scheduled_request_review),
+          reviewDelayMinutes: claimed.scheduled_review_delay_minutes,
+          allowClaimed: true,
+        });
+      } catch (err) {
+        // The queued-obligation check inside claimInvoiceForSend's
+        // allowClaimed branch (Codex round 14 P1 #4131) can now refuse a
+        // preclaimed row outright (a live queue this send does not own —
+        // e.g. a completion-deferred text) instead of only ever
+        // succeeding or returning an ok:false result. Synthesize the same
+        // failure shape sendViaSMSAndEmail itself returns on an ordinary
+        // send failure so the existing deferred/failed handling below runs
+        // unchanged, and one row's refusal never aborts the rest of this
+        // batch. No credit was ever applied — the throw happens before
+        // sendViaSMSAndEmail's own credit-apply step runs.
+        result = { ok: false, sms: { error: err.message, code: err.code }, email: { error: null }, creditApplied: 0 };
+      }
       if (result.ok) {
         sent += 1;
         continue;

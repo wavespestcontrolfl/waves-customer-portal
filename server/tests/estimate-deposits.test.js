@@ -7,6 +7,13 @@ jest.mock('../models/db', () => {
   const mock = jest.fn((...args) => mockDbHandler(...args));
   mock.fn = { now: jest.fn(() => 'NOW') };
   mock.raw = jest.fn((sql) => ({ __raw: sql }));
+  // markDepositReceived runs its writes inside db.transaction so it can
+  // take the deposit-ledger advisory lock first (Codex round 14 P1
+  // #4131) — the trx passed to the callback IS this same mock, so
+  // trx('estimate_deposits')/trx.raw/trx.fn.now all route through the
+  // existing per-test mockDbHandler exactly like the untransacted calls
+  // did before.
+  mock.transaction = jest.fn((callback) => callback(mock));
   return mock;
 });
 jest.mock('../services/sms-template-renderer', () => ({
@@ -90,7 +97,7 @@ const {
   pendingDepositCreditForCustomer,
   resolveDepositPolicy,
   resolveDepositPolicyForEstimate,
-  _private: { depositIntentMatchesEstimate },
+  _private: { depositIntentMatchesEstimate, markDepositReceived },
 } = require('../services/estimate-deposits');
 
 beforeEach(() => {
@@ -281,6 +288,45 @@ describe('webhook + invoice credit', () => {
     expect(result.refunded).toBeUndefined();
     expect(state.row).toMatchObject({ estimate_id: 'est-1', amount: 70, status: 'received' });
     expect(mockRefundPaymentIntent).not.toHaveBeenCalled();
+  });
+
+  // Codex round 14 P1 #4131: pendingDepositCredit (scheduled-invoice-mint.js)
+  // is a plain SELECT and this write is otherwise independent, so without a
+  // shared lock a deposit could settle between a mint's zero-credit read and
+  // its own commit — the check would pass and a full-balance invoice would
+  // go out beside the newly received deposit. markDepositReceived must take
+  // the SAME estimate-keyed advisory lock the mint takes, and take it FIRST
+  // — inside one transaction with the writes, so it actually serializes.
+  it('markDepositReceived takes the estimate-keyed deposit-ledger lock BEFORE writing the ledger', async () => {
+    const db = require('../models/db');
+    const callOrder = [];
+    db.raw.mockImplementationOnce((...args) => { callOrder.push('lock'); return { __raw: args[0] }; });
+    mockDbHandler = (table) => {
+      if (table !== 'estimate_deposits') throw new Error(`unexpected table: ${table}`);
+      return {
+        insert: () => ({
+          onConflict: () => ({
+            ignore: () => {
+              const promise = (async () => { callOrder.push('insert'); return [{ id: 'dep-new' }]; })();
+              promise.returning = () => promise;
+              return promise;
+            },
+          }),
+        }),
+        where: () => ({ update: async () => { callOrder.push('update'); return 0; } }),
+      };
+    };
+
+    await markDepositReceived({ paymentIntentId: 'pi_lock_test', estimateId: 'est-1', amountDollars: 70 });
+
+    expect(db.transaction).toHaveBeenCalledTimes(1);
+    // Same namespace + key scheme scheduled-invoice-mint.js reuses for the
+    // mint side of this lock (two-key hashtext(?), hashtext(?::text)).
+    expect(db.raw).toHaveBeenCalledWith(
+      expect.stringMatching(/pg_advisory_xact_lock\(hashtext\(\?\), hashtext\(\?::text\)\)/),
+      ['estimate.deposit.ledger', 'est-1'],
+    );
+    expect(callOrder).toEqual(['lock', 'insert', 'update']);
   });
 
   it('texts the deposit receipt exactly once — first record only, never on replay', async () => {

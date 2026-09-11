@@ -364,6 +364,12 @@ export const VISIT_STATE_CONFLICT_CODES = [
   "visit_billing_unverifiable",
   "visit_already_invoiced",
   "SCHEDULED_PRICE_MOVED",
+  // The visit's Bill-To changed between the picker's payer-derived preview
+  // and the create (Codex round 14 P2 #4131) — same reload-and-reselect
+  // recovery as every other visit-state conflict above, so the picker
+  // re-resolves the current payer instead of leaving the stale preview and
+  // a disabled retry.
+  "PAYER_CHANGED",
 ];
 export function reloadsVisitPickerAfterCreateError(code) {
   return VISIT_STATE_CONFLICT_CODES.includes(String(code || ""));
