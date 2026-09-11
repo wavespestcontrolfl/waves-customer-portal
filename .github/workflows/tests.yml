@@ -95,6 +95,11 @@ jobs:
         env:
           DATABASE_URL: postgresql://waves:waves@localhost:5432/waves_test
         run: npx jest --ci --silent --runInBand tests/invoice-issued-closeout-postgres.test.js
+      - name: Cancellation vs. send-claim fence transaction tests
+        working-directory: server
+        env:
+          DATABASE_URL: postgresql://waves:waves@localhost:5432/waves_test
+        run: npx jest --ci --silent --runInBand tests/invoice-cancel-send-fence-postgres.test.js
       - name: Historical invoice repair transaction tests
         working-directory: server
         env:

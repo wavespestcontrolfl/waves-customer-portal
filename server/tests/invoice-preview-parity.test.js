@@ -349,6 +349,55 @@ describe('previewInvoiceTotals ↔ create parity', () => {
     }
   });
 
+  // The CALLER's payer pin (GitHub r11 P1 #4131) — a different contract from
+  // the frozen tax basis above and independent of it. The Invoices-page
+  // open-visit create decides prepaid coverage against a payer it resolved
+  // under the visit lock; create() then resolves the payer again from
+  // customers.payer_id / payers.active, neither of which the mint lock chain
+  // holds. A default-payer clear or a payer deactivation landing in between
+  // would drop creation to self-pay and mint a collectible homeowner invoice
+  // for a visit the payer's prepayment covered — so the pin refuses instead.
+  test('expectedPayerId: divergence 409s (PAYER_CHANGED) with nothing written; a matching pin — and no pin at all — create normally', async () => {
+    const PayerService = require('../services/payer');
+    // The definitive resolution now reads SELF-PAY (the default payer was
+    // cleared / the payer deactivated between the route's verdict and here).
+    const resolveSpy = jest
+      .spyOn(PayerService, 'resolveForInvoice')
+      .mockResolvedValue({ payerId: null, poNumber: null, taxExempt: false, snapshot: null, paymentTerms: null });
+    try {
+      const refused = mockCreateDb();
+      await expect(InvoiceService.create({
+        customerId: 'cust-1',
+        scheduledServiceId: 'sched-1',
+        title: 'WDO Inspection',
+        lineItems: [{ description: 'WDO inspection', quantity: 1, unit_price: FEE, amount: FEE }],
+        expectedPayerId: 'payer-1', // the route verified a payer-billed visit
+      })).rejects.toMatchObject({ code: 'PAYER_CHANGED', status: 409, statusCode: 409 });
+      // Refused BEFORE the insert — nothing collectible was minted.
+      expect(refused).toHaveLength(0);
+
+      // A pin that matches the definitive resolution is invisible…
+      const pinned = mockCreateDb();
+      await InvoiceService.create({
+        customerId: 'cust-1',
+        scheduledServiceId: 'sched-1',
+        title: 'WDO Inspection',
+        lineItems: [{ description: 'WDO inspection', quantity: 1, unit_price: FEE, amount: FEE }],
+        expectedPayerId: null, // the route verified SELF-PAY
+      });
+      expect(pinned).toHaveLength(1);
+      expect(pinned[0].payer_id ?? null).toBeNull();
+
+      // …and every create that takes no payer verdict (the overwhelming
+      // majority) is untouched by the pin.
+      const unpinned = mockCreateDb();
+      await runCreate();
+      expect(unpinned).toHaveLength(1);
+    } finally {
+      resolveSpy.mockRestore();
+    }
+  });
+
   // Automatic branch (no explicit taxRate) + NON-exempt payer: the customer's
   // certificate must be excluded from the calculator too — create and preview
   // both pass skipCustomerExemption so the payer's AP invoice charges the

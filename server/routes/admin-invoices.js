@@ -1079,13 +1079,17 @@ function validateCreateInvoiceBody(body) {
 // this path has no crediting step, so a partial prepayment would otherwise
 // produce a fully collectible invoice. `conn` is the row lock's transaction
 // inside the chain.
+// Returns the PAYER the verdict was taken against alongside it (GitHub r11
+// P1 #4131) so the caller can pin it through creation — the verdict means
+// nothing if the invoice is then minted for a different party.
 async function linkedVisitPrepaid(conn, visit, { customerId }) {
   const { resolveForInvoice } = require('../services/payer');
   const { prepaidRefusesOfficeInvoice } = require('../services/visit-prepaid-coverage');
   // STRICT (Codex P1 r4): a failed payer lookup must refuse, never read as
   // self-pay — the callers turn the throw into visit_billing_unverifiable.
   const payer = await resolveForInvoice({ database: conn, customerId, scheduledServiceId: visit.id, throwOnError: true });
-  return prepaidRefusesOfficeInvoice(visit, { payerBilled: !!payer?.payerId, conn });
+  const payerId = payer?.payerId || null;
+  return { payerId, prepaid: await prepaidRefusesOfficeInvoice(visit, { payerBilled: !!payerId, conn }) };
 }
 
 // Step 2 — the OPEN visit picked from the Invoices page (owner ruling
@@ -1113,7 +1117,7 @@ async function loadLinkedOpenVisit({ scheduledServiceId, customerId }) {
     logger.warn(`[admin-invoices] linked create: prepaid coverage unverifiable for visit ${visit.id} — refused: ${err.message}`);
     return refusal(409, { error: 'That visit\'s billing (payer or prepaid coverage) could not be verified — nothing was created; try again', code: 'visit_billing_unverifiable' });
   }
-  if (prepaid) {
+  if (prepaid.prepaid) {
     return refusal(409, { error: 'That visit is already prepaid — it needs no new invoice (use Charge now from the schedule to credit the prepayment)', code: 'visit_prepaid' });
   }
   return { visit };
@@ -1122,7 +1126,12 @@ async function loadLinkedOpenVisit({ scheduledServiceId, customerId }) {
 // Step 3 — the same checks ROW-LOCKED inside the mint chain (pre-push P1):
 // a cancellation or prepayment finishing between the pre-check and the
 // lock must refuse, not get a fresh invoice on a dead or covered visit.
-function openVisitEligibilityInTrx({ visit, customerId }) {
+// `payerPin` is an out-parameter (GitHub r11 P1 #4131): the payer this
+// hook's prepaid verdict was taken against is written onto it under the
+// lock, and buildCreateParams hands it to InvoiceService.create as
+// expectedPayerId. The mint's retry loop re-runs this hook per attempt, so
+// the pin is always the CURRENT attempt's verdict, never a stale one.
+function openVisitEligibilityInTrx({ visit, customerId, payerPin = null }) {
   return async (trx) => {
     const still = await trx('scheduled_services').where({ id: visit.id }).forUpdate().first();
     if (!still || String(still.customer_id) !== String(customerId) || !isOpenVisitStatus(still.status)) {
@@ -1166,14 +1175,16 @@ function openVisitEligibilityInTrx({ visit, customerId }) {
     } catch (err) {
       throw conflict('visit_billing_unverifiable', `That visit's billing (payer or prepaid coverage) could not be verified under the lock — nothing was created (${err.message})`);
     }
-    if (prepaid) {
+    if (payerPin) payerPin.payerId = prepaid.payerId;
+    if (prepaid.prepaid) {
       throw conflict('visit_prepaid', 'That visit was prepaid while this invoice was being created — nothing was created');
     }
   };
 }
 
 // Step 4 — a mint refusal as the HTTP response, or null for a real error.
-// visit_not_open | visit_link_moved | visit_invoice_refunded | visit_billing_changing | visit_prepaid | visit_billing_unverifiable | SCHEDULED_PRICE_MOVED |
+// visit_not_open | visit_link_moved | visit_invoice_refunded | visit_billing_changing | visit_prepaid | visit_billing_unverifiable | PAYER_CHANGED |
+// SCHEDULED_PRICE_MOVED |
 // DEPOSIT_CREDIT_CHANGED | DEPOSIT_CREDIT_UNVERIFIABLE | BALANCE_CHANGED. The drift figures ride along so
 // the form can show the balance the server would actually bill.
 const DRIFT_FIELDS = ['expectedDepositCredit', 'pendingDepositCredit', 'expectedBalanceDue', 'balanceDue', 'invoiceTotal', 'appliedDepositCredit'];
@@ -1196,14 +1207,23 @@ function mintRefusalResponse(err) {
 async function createInvoiceLinkedToOpenVisit({ visit, customerId, createArgs, expectedDepositCredit, expectedBalanceDue }) {
   const { mintScheduledServiceInvoiceWithDeposit } = require('../services/scheduled-invoice-mint');
   let minted;
+  // The payer the in-lock prepaid verdict was taken against (GitHub r11 P1
+  // #4131), carried into create() as expectedPayerId so creation cannot
+  // re-resolve its way to a different Bill-To — a default-payer clear or a
+  // payer deactivation racing the mint would otherwise fall back to self-pay
+  // and bill the homeowner for a visit the payer's prepayment covered.
+  // openVisitEligibilityInTrx always runs before buildCreateParams (the mint
+  // chain: advisory → key-share → eligibility hook → visit lock → create),
+  // so this is never still `undefined` at the create — the pin is live.
+  const payerPin = { payerId: undefined };
   try {
     minted = await mintScheduledServiceInvoiceWithDeposit({
       svc: visit,
       allowPriceMovement: true,
       expectedDepositCredit: numberOrNull(expectedDepositCredit),
       expectedBalanceDue: numberOrNull(expectedBalanceDue),
-      assertEligibleInTrx: openVisitEligibilityInTrx({ visit, customerId }),
-      buildCreateParams: () => ({ ...createArgs, scheduledServiceId: visit.id }),
+      assertEligibleInTrx: openVisitEligibilityInTrx({ visit, customerId, payerPin }),
+      buildCreateParams: () => ({ ...createArgs, scheduledServiceId: visit.id, expectedPayerId: payerPin.payerId }),
     });
   } catch (err) {
     const refused = mintRefusalResponse(err);

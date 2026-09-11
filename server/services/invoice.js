@@ -95,6 +95,31 @@ const EDIT_ALLOWED_STATUSES = [...SEND_CLAIMABLE_STATUSES];
 const CANCELLED_SERVICE_VOIDABLE_STATUSES = [
   "draft",
   "scheduled",
+  // A LIVE SEND CLAIM is voidable too (Codex P1 r11 #4131) — the one place
+  // this list deliberately diverges from assertInvoiceVoidable. Excluding
+  // 'sending' left cancellation and the send with no shared fence at all:
+  // the sender's post-claim visit recheck (visitInvoiceRefusalUnderClaim) is
+  // a point-in-time read, so a cancellation landing after it found the row
+  // mid-claim, skipped it, and the sender then finalized 'sent' — the
+  // customer holding a collectible pay link for a visit that never ran.
+  //
+  // The fence is the INVOICE ROW itself: this sweep voids under
+  // SELECT … FOR UPDATE, and every writer that could undo the void is a
+  // status CAS that excludes 'void' — the three delivery finalizes
+  // (whereIn SEND_FINALIZABLE_STATUSES, which has no 'void'),
+  // restoreSendClaim and processScheduledSends' stale-claim recovery (both
+  // .where({ status: 'sending' })), and claimInvoiceForSend's own
+  // read-status flip. So the two orders are both safe:
+  //   void commits first → the sender's finalize re-evaluates its WHERE
+  //     against the voided row and writes nothing; the row stays void, and
+  //     any pay link already texted renders "no longer due" (the /pay route
+  //     refuses a void invoice) — this is the point of voiding mid-claim.
+  //   finalize commits first → this sweep's FOR UPDATE re-read sees 'sent',
+  //     which is voidable below on the ordinary path.
+  // The money guards inside the transaction are unchanged and still apply:
+  // a live PaymentIntent, payment_recorded_at or an applied payment skips
+  // the row exactly as it does for a 'sent' one.
+  "sending",
   "sent",
   "viewed",
   "overdue",
@@ -968,10 +993,18 @@ async function zeroDueOpenVisitSendOutcome(row, invoiceId) {
 
 // Re-checks that need the CLAIM in hand (Codex P1 r10 ×2 #4131): the flip
 // compares status only, so a draft retotalled to $0 (InvoiceService.update
-// keeps 'draft') or a visit cancelled after the invoice was created (the
-// cancellation's void sweep skips 'sending' rows) both slip past the
-// pre-claim reads. Returns a refusal descriptor, or null when the claim
-// stands; a lookup that throws is the caller's cue to give the claim back.
+// keeps 'draft') or a visit cancelled after the invoice was created both
+// slip past the pre-claim reads. Returns a refusal descriptor, or null when
+// the claim stands; a lookup that throws is the caller's cue to give the
+// claim back.
+// This is a courtesy refusal, NOT the cancellation fence (Codex P1 r11
+// #4131): it is a point-in-time read, so a cancellation landing after it
+// still has to be caught somewhere. That fence is the invoice row —
+// CANCELLED_SERVICE_VOIDABLE_STATUSES now includes 'sending', so the void
+// sweep takes the row out from under a live claim and every finalize CAS
+// refuses to move a void row. What this buys is the good case: a visit
+// already cancelled at claim time gives the claim straight back and never
+// texts a pay link at all.
 async function visitInvoiceRefusalUnderClaim(claimedRow, claimedFromStatus) {
   if (!claimedRow?.scheduled_service_id) return null;
   if (zeroDueVisitInvoice({ ...claimedRow, status: claimedFromStatus })) return { kind: "zero_due" };
@@ -1043,7 +1076,9 @@ async function claimInvoiceForSend(invoiceId, { allowClaimed = false, firstDeliv
   // Re-checked UNDER the claim (Codex P1 r10 ×2): a retotal to $0 or a
   // visit cancellation that landed between the read above and the flip.
   // Either gives the claim straight back (settleZeroBalance refuses a
-  // 'sending' row, and the cancellation's void sweep skips one) and refuses.
+  // 'sending' row) and refuses, so nothing is texted. A cancellation that
+  // lands AFTER this read is caught by the void sweep instead, which now
+  // voids the claimed row out from under this send (Codex P1 r11 #4131).
   let underClaim;
   try {
     underClaim = await visitInvoiceRefusalUnderClaim(invoice, current.status);
@@ -1252,6 +1287,14 @@ const InvoiceService = {
       // a party it was never derived for (e.g. a self-pay exempt 0% onto a
       // newly assigned non-exempt payer's AP invoice).
       frozenPayerId = undefined,
+      // The Bill-To identity the CALLER already took a billing decision
+      // against (GitHub r11 P1 #4131). Unlike frozenPayerId this has nothing
+      // to do with a frozen tax basis: it pins the payer a caller resolved
+      // under its own lock so create()'s definitive resolution below cannot
+      // silently land on a different party. `undefined` = the caller took no
+      // payer verdict (every create outside the open-visit picker); `null` =
+      // the caller verified self-pay.
+      expectedPayerId = undefined,
     } = createArgs;
 
     // Only the packet coordinator passes the second argument. Never accept
@@ -1358,6 +1401,34 @@ const InvoiceService = {
       // rate onto the homeowner while a real non-exempt payer exists.
       throwOnError: isEnabled("payerStatements") || frozenTaxAuthority,
     });
+
+    // PIN the caller's payer verdict (GitHub r11 P1 #4131). The Invoices-page
+    // open-visit create decides prepaid coverage from a payer it resolved
+    // under the visit's FOR UPDATE lock (linkedVisitPrepaid → "a payer-billed
+    // visit is never refused on the homeowner's prepay"), but the definitive
+    // resolution above reads `customers.payer_id` and `payers.active` again
+    // and the mint lock chain holds neither: a default-payer clear or a payer
+    // deactivation committing in between (READ COMMITTED sees it even inside
+    // the same transaction) would drop this create to self-pay and mint an
+    // individually collectible homeowner invoice for a visit whose prepayment
+    // was never applied. Pinned instead of re-decided, so prepaid eligibility
+    // and the invoice that gets written are evaluated against the SAME payer.
+    // Divergence fails CLOSED with a retryable 409 — thrown before the
+    // statement accrual and the insert, so the mint transaction rolls back
+    // and nothing is created; the form reloads and the operator sees the
+    // current Bill-To. Checked BEFORE the frozen-tax contract below: the two
+    // pins are independent, and a caller may hold either, both or neither.
+    if (expectedPayerId !== undefined
+      && String(resolvedPayerId || "") !== String(expectedPayerId || "")) {
+      const payerChanged = new Error(
+        "That visit's Bill-To changed while this invoice was being created — nothing was created; reload and try again",
+      );
+      payerChanged.statusCode = 409;
+      payerChanged.status = 409;
+      payerChanged.isOperational = true;
+      payerChanged.code = "PAYER_CHANGED";
+      throw payerChanged;
+    }
 
     // Phase 2 (gated by GATE_PAYER_STATEMENTS): a NET-terms payer invoice is held
     // from individual AP delivery and ACCRUED to the payer's OPEN monthly
@@ -6605,7 +6676,13 @@ const InvoiceService = {
    *
    * Money-state rules:
    *   - Only safely-voidable statuses are touched (never paid/processing —
-   *     mirrors assertInvoiceVoidable).
+   *     mirrors assertInvoiceVoidable, except for the live send claim noted
+   *     on CANCELLED_SERVICE_VOIDABLE_STATUSES).
+   *   - A row under a LIVE SEND CLAIM ('sending') is voided too: this
+   *     transaction's row lock is the shared fence between cancellation and
+   *     the send, and the sender's finalize CAS then refuses to move the
+   *     voided row to 'sent'. If the provider already accepted the text, the
+   *     customer's pay link renders "no longer due" instead of collectible.
    *   - Invoices with money already applied are skipped: a PARTIAL prepaid
    *     credit leaves the invoice in a voidable status (e.g. draft) while a
    *     paid payments row + payment_recorded_at already exist — auto-voiding
@@ -6772,6 +6849,15 @@ const InvoiceService = {
           logger.info(
             `[invoice] Voided ${result.invoice.invoice_number} (was ${result.previousStatus}, $${result.invoice.total}) — scheduled service ${scheduledServiceId} cancelled`,
           );
+          if (result.previousStatus === "sending") {
+            // Operator-visible because a text may already be in the
+            // customer's hand (Codex P1 r11 #4131): the pay link is dead
+            // (void is not collectible), but someone should know a pay
+            // request went out moments before the cancellation.
+            logger.warn(
+              `[invoice] ${result.invoice.invoice_number} was voided out from under a LIVE send claim — a pay link may already have been delivered for cancelled service ${scheduledServiceId}; it now renders as no longer due`,
+            );
+          }
           // Post-commit side effects, matching voidInvoice.
           await stopInvoiceFollowupSequence(result.invoice.id, "invoice_voided");
           try {

@@ -397,6 +397,60 @@ describe('POST /admin/invoices with an open visit link', () => {
     });
   });
 
+  // GitHub r11 P1 #4131 — the in-lock prepaid verdict is only as good as the
+  // payer it was taken against. The route pins that identity onto the create
+  // (expectedPayerId) so a default-payer clear or a payer deactivation racing
+  // the mint cannot let creation re-resolve to self-pay and bill the
+  // homeowner for a prepayment the payer already covered.
+  test('the payer resolved UNDER THE LOCK is pinned onto the create as expectedPayerId (payer-billed and self-pay alike)', async () => {
+    const pins = [];
+    const runHookThenBuild = async ({ svc, assertEligibleInTrx, buildCreateParams }) => {
+      const lockedRow = { ...visitRow };
+      const trx = () => qb({ forUpdate: jest.fn(() => ({ first: jest.fn(async () => lockedRow) })) });
+      trx.raw = jest.fn(async () => ({ rows: [] }));
+      await assertEligibleInTrx(trx);
+      // The mint calls buildCreateParams only AFTER the eligibility hook —
+      // the pin is live by then, never still undefined.
+      pins.push(buildCreateParams().expectedPayerId);
+      return { invoice: { id: 'inv-new', token: 'tok', customer_id: CUSTOMER, invoice_number: 'WPC-TEST-1', scheduled_service_id: svc.id }, reused: false };
+    };
+
+    visitRow = { id: PAYER_VISIT, customer_id: CUSTOMER, status: 'confirmed' };
+    mintScheduledServiceInvoiceWithDeposit.mockImplementationOnce(runHookThenBuild);
+    await withServer(async (baseUrl) => {
+      expect((await post(baseUrl, { scheduledServiceId: PAYER_VISIT })).status).toBe(201);
+    });
+
+    visitRow = { id: VISIT, customer_id: CUSTOMER, status: 'confirmed' };
+    mintScheduledServiceInvoiceWithDeposit.mockImplementationOnce(runHookThenBuild);
+    await withServer(async (baseUrl) => {
+      expect((await post(baseUrl, { scheduledServiceId: VISIT })).status).toBe(201);
+    });
+
+    // Payer-billed pins the payer id; self-pay pins an explicit null (NOT
+    // undefined — that would switch the check off in create()).
+    expect(pins).toEqual(['payer-1', null]);
+  });
+
+  test('a Bill-To that changes between the in-lock verdict and the definitive resolution is refused (409 PAYER_CHANGED)', async () => {
+    visitRow = { id: PAYER_VISIT, customer_id: CUSTOMER, status: 'confirmed' };
+    mintScheduledServiceInvoiceWithDeposit.mockImplementationOnce(async ({ assertEligibleInTrx, buildCreateParams }) => {
+      const trx = () => qb({ forUpdate: jest.fn(() => ({ first: jest.fn(async () => ({ ...visitRow })) })) });
+      trx.raw = jest.fn(async () => ({ rows: [] }));
+      await assertEligibleInTrx(trx);
+      // InvoiceService.create's own contract on a diverged pin, surfaced by
+      // the mint exactly as it would be in production (status 409 makes it
+      // terminal for the mint's retry loop).
+      expect(buildCreateParams().expectedPayerId).toBe('payer-1');
+      throw Object.assign(new Error('That visit\'s Bill-To changed while this invoice was being created — nothing was created; reload and try again'), { status: 409, code: 'PAYER_CHANGED' });
+    });
+    await withServer(async (baseUrl) => {
+      const res = await post(baseUrl, { scheduledServiceId: PAYER_VISIT });
+      expect(res.status).toBe(409);
+      expect(await res.json()).toMatchObject({ code: 'PAYER_CHANGED' });
+    });
+  });
+
   test('a prepayment recorded between the pre-check and the lock is refused inside the chain', async () => {
     mintScheduledServiceInvoiceWithDeposit.mockImplementationOnce(async ({ assertEligibleInTrx }) => {
       const lockedRow = { id: VISIT, customer_id: CUSTOMER, status: 'confirmed', prepaid_amount: 117 };

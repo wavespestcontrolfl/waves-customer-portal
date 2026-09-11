@@ -47,7 +47,7 @@ jest.mock('../services/annual-prepay-renewals', () => {
 
 const knex = require('knex');
 const { randomUUID } = require('crypto');
-const { etDateString } = require('../utils/datetime-et');
+const { etDateString, addETDays } = require('../utils/datetime-et');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
 const { chargeInvoiceWithSavedCard } = require('../services/stripe');
 const { closeOutVisitForIssuedInvoice } = require('../services/invoice-issued-closeout');
@@ -192,6 +192,15 @@ describe('source contracts', () => {
   });
 });
 
+// A SEND closes out a visit whose day has PASSED, never one scheduled today
+// (invoice-issued-closeout `visit_scheduled_today`, Codex P1 r7 #4131): the
+// office invoice picker links pre-completion invoices to open visits and
+// sends them before the tech arrives, so a same-day send would complete the
+// visit early. Every send-trigger fixture below is therefore dated
+// YESTERDAY; the same-day contract has its own test at the end of the file,
+// and `paid` still closes a visit dated today.
+const yesterdayET = () => etDateString(addETDays(new Date(), -1));
+
 postgres('invoice issued ⇒ visit completed through the canonical completion (PostgreSQL)', () => {
   beforeAll(async () => {
     const url = new URL(connection);
@@ -210,9 +219,13 @@ postgres('invoice issued ⇒ visit completed through the canonical completion (P
   afterEach(async () => { const trx = mockPg; mockPg = database; await trx.rollback(); });
   afterAll(async () => { if (database) await database.destroy(); });
 
-  async function fixture({ serviceType, category = 'pest_control', profile = null, customer = {} }) {
-    f = { customerId: randomUUID(), techId: randomUUID(), catalogId: randomUUID(), serviceId: randomUUID(), invoiceId: randomUUID(), key: `fixture_${randomUUID().slice(0, 8)}` };
-    const date = etDateString();
+  // `day` defaults to YESTERDAY (see the note above the describe): a send
+  // leaves a visit scheduled TODAY open. The same-day test passes it
+  // explicitly; expectQuietCompletion reads it back off `f` to decide which
+  // end-instant the backfill should have stamped.
+  async function fixture({ serviceType, category = 'pest_control', profile = null, customer = {}, day = yesterdayET() }) {
+    f = { customerId: randomUUID(), techId: randomUUID(), catalogId: randomUUID(), serviceId: randomUUID(), invoiceId: randomUUID(), key: `fixture_${randomUUID().slice(0, 8)}`, day };
+    const date = day;
     await mockPg('customers').insert({ id: f.customerId, first_name: 'Fixture', last_name: 'Issued', phone: '+12025550123',
       email: `${f.customerId}@example.invalid`, property_type: 'residential', autopay_enabled: false, billing_mode: 'per_application', ...customer });
     await mockPg('technicians').insert({ id: f.techId, name: 'Fixture Technician', role: 'technician', active: true });
@@ -227,15 +240,29 @@ postgres('invoice issued ⇒ visit completed through the canonical completion (P
     return f;
   }
 
+  // backfillCompletionEndInstant's two branches, asserted per service day:
+  //  - the visit's day IS today (only 'paid' reaches a closeout there now):
+  //    the visit ended at the closeout itself, never at an ET noon still
+  //    hours away (GitHub r2 P2).
+  //  - an earlier day keeps the honest day-scale ET-noon instant — the same
+  //    backdated-instant convention every other backfill closeout uses.
+  function expectBackfillEndInstant(completedAt, serviceDay) {
+    const at = new Date(completedAt);
+    expect(Number.isFinite(at.getTime())).toBe(true);
+    if (serviceDay === etDateString()) {
+      expect(at.getTime()).toBeLessThanOrEqual(Date.now() + 1000);
+      expect(at.getTime()).toBeGreaterThan(Date.now() - 5 * 60 * 1000);
+      return;
+    }
+    expect(etDateString(at)).toBe(serviceDay);
+    expect(at.getTime()).toBeLessThan(Date.now());
+  }
+
   async function expectQuietCompletion(out) {
     expect(out).toMatchObject({ closed: true, visitId: f.serviceId, resumed: false });
     const visit = await mockPg('scheduled_services').where({ id: f.serviceId }).first();
     expect(visit.status).toBe('completed');
-    // Same-day closeout: the visit ended at the closeout itself, never at an
-    // ET noon still hours away (GitHub r2 P2).
-    const completedAt = new Date(visit.completed_at).getTime();
-    expect(completedAt).toBeLessThanOrEqual(Date.now() + 1000);
-    expect(completedAt).toBeGreaterThan(Date.now() - 5 * 60 * 1000);
+    expectBackfillEndInstant(visit.completed_at, f.day);
     const records = await mockPg('service_records').where({ scheduled_service_id: f.serviceId });
     expect(records).toHaveLength(1);
     expect(records[0].structured_notes).toMatchObject({ backfill: true, issuedInvoiceCloseout: { invoiceId: f.invoiceId, trigger: 'sent' } });
@@ -376,7 +403,7 @@ postgres('invoice issued ⇒ visit completed through the canonical completion (P
     await fixture({ serviceType: 'Fixture Quarterly Pest Control Service' });
     const draftId = randomUUID();
     await mockPg('invoices').insert({ id: draftId, customer_id: f.customerId, scheduled_service_id: f.serviceId, invoice_number: `TST-${draftId.slice(0, 8)}`,
-      token: randomUUID().replace(/-/g, ''), status: 'draft', total: 45, subtotal: 45, service_date: etDateString(), service_type: 'Fixture Quarterly Pest Control Service',
+      token: randomUUID().replace(/-/g, ''), status: 'draft', total: 45, subtotal: 45, service_date: f.day, service_type: 'Fixture Quarterly Pest Control Service',
       created_at: new Date(Date.now() + 60 * 1000), line_items: JSON.stringify([{ description: 'Add-on', amount: 45, quantity: 1, unit_price: 45 }]) });
     const out = await closeOutVisitForIssuedInvoice({ invoiceId: f.invoiceId, trigger: 'sent', actorTechnicianId: f.techId, conn: mockPg });
     expect(out).toMatchObject({ closed: true, visitId: f.serviceId });
@@ -465,7 +492,7 @@ postgres('invoice issued ⇒ visit completed through the canonical completion (P
     const outer = mockPg;
     mockPg = database;
     const ids = { customerId: randomUUID(), serviceId: randomUUID(), invoiceId: randomUUID() };
-    const date = etDateString();
+    const date = yesterdayET();
     let voider = null;
     try {
       await database('customers').insert({ id: ids.customerId, first_name: 'Race', last_name: 'Fixture', phone: '+12025550199',
@@ -530,7 +557,7 @@ postgres('invoice issued ⇒ visit completed through the canonical completion (P
     const outer = mockPg;
     mockPg = database;
     const ids = { customerId: randomUUID(), serviceId: randomUUID(), invoiceId: randomUUID() };
-    const date = etDateString();
+    const date = yesterdayET();
     let merger = null;
     try {
       await database('customers').insert({ id: ids.customerId, first_name: 'Race', last_name: 'Merge', phone: '+12025550198',
@@ -590,7 +617,7 @@ postgres('invoice issued ⇒ visit completed through the canonical completion (P
 
   test('a lawn visit with an unconfirmed assessment closes — the assessment form gate is a panel gate', async () => {
     await fixture({ serviceType: 'Fixture Monthly Lawn Care Service', category: 'lawn' });
-    await mockPg('lawn_assessments').insert({ id: randomUUID(), customer_id: f.customerId, service_id: f.serviceId, service_date: etDateString(), confirmed_by_tech: false });
+    await mockPg('lawn_assessments').insert({ id: randomUUID(), customer_id: f.customerId, service_id: f.serviceId, service_date: f.day, confirmed_by_tech: false });
     // The panel path is blocked by the unconfirmed assessment…
     const { completeScheduledService } = require('../services/complete-scheduled-service');
     const panel = await completeScheduledService({ serviceId: f.serviceId, idempotencyKey: randomUUID(),
@@ -607,9 +634,9 @@ postgres('invoice issued ⇒ visit completed through the canonical completion (P
     // completion's claim: drive the completion exactly as the closeout does,
     // with the row already a member of a two-visit open stop.
     const visitId = randomUUID();
-    await mockPg('service_visits').insert({ id: visitId, customer_id: f.customerId, scheduled_date: etDateString(), stop_base_key: `stop-${visitId.slice(0, 8)}`, created_by: 'test' });
+    await mockPg('service_visits').insert({ id: visitId, customer_id: f.customerId, scheduled_date: f.day, stop_base_key: `stop-${visitId.slice(0, 8)}`, created_by: 'test' });
     await mockPg('scheduled_services').insert({ id: randomUUID(), customer_id: f.customerId, technician_id: f.techId, service_type: 'Mosquito Barrier Treatment',
-      scheduled_date: etDateString(), window_start: '09:00', window_end: '10:00', status: 'confirmed', visit_id: visitId });
+      scheduled_date: f.day, window_start: '09:00', window_end: '10:00', status: 'confirmed', visit_id: visitId });
     await mockPg('scheduled_services').where({ id: f.serviceId }).update({ visit_id: visitId });
     const { completeScheduledService } = require('../services/complete-scheduled-service');
     const idempotencyKey = `invoice-issued:${f.invoiceId}`;
@@ -646,5 +673,41 @@ postgres('invoice issued ⇒ visit completed through the canonical completion (P
     const again = await closeOutVisitForIssuedInvoice({ invoiceId: f.invoiceId, trigger: 'sent', actorTechnicianId: f.techId, conn: mockPg });
     expect(again).toMatchObject({ closed: false, reason: 'visit_completed' });
     expect(await mockPg('service_records').where({ scheduled_service_id: f.serviceId })).toHaveLength(1);
+  });
+
+  // The rule every fixture above is dated around (Codex P1 r7 #4131). The
+  // office picker links a pre-completion invoice to TODAY's open visit and
+  // texts it before the tech arrives, so a send proves nothing about that
+  // visit: it stays open, audited with `visit_scheduled_today`. Money in
+  // hand still proves it happened, so 'paid' closes the very same row — the
+  // #4127 contract is narrowed by trigger, not withdrawn.
+  test('a visit scheduled TODAY is left open by a send (visit_scheduled_today) and closed by a payment', async () => {
+    await fixture({ serviceType: 'Fixture Quarterly Pest Control Service', day: etDateString() });
+    const sent = await closeOutVisitForIssuedInvoice({ invoiceId: f.invoiceId, trigger: 'sent', actorTechnicianId: f.techId, conn: mockPg });
+    expect(sent).toMatchObject({ closed: false, reason: 'visit_scheduled_today', visitId: f.serviceId });
+    expect((await mockPg('scheduled_services').where({ id: f.serviceId }).first()).status).toBe('confirmed');
+    expect(await mockPg('service_records').where({ scheduled_service_id: f.serviceId })).toHaveLength(0);
+    expect((await mockPg('invoices').where({ id: f.invoiceId }).first()).service_record_id).toBeNull();
+    // The refusal is audited like every other one, so rollout diagnostics
+    // tell this intentional no-op from a failure.
+    expect(await mockPg('audit_log').where({ resource_id: f.serviceId, action: 'visit.completion_on_invoice_issued_refused' }).first())
+      .toMatchObject({ metadata: expect.objectContaining({ code: 'visit_scheduled_today' }) });
+
+    // …and the payment that follows closes it, same day, same invoice.
+    await mockPg('invoices').where({ id: f.invoiceId }).update({ status: 'paid', paid_at: new Date() });
+    const paid = await closeOutVisitForIssuedInvoice({ invoiceId: f.invoiceId, trigger: 'paid', actorTechnicianId: f.techId, conn: mockPg });
+    expect(paid).toMatchObject({ closed: true, visitId: f.serviceId, resumed: false });
+    const visit = await mockPg('scheduled_services').where({ id: f.serviceId }).first();
+    expect(visit.status).toBe('completed');
+    // Same-day closeout: the visit ended at the closeout itself, never at an
+    // ET noon still hours away (GitHub r2 P2).
+    expectBackfillEndInstant(visit.completed_at, f.day);
+    const records = await mockPg('service_records').where({ scheduled_service_id: f.serviceId });
+    expect(records).toHaveLength(1);
+    expect(records[0].structured_notes).toMatchObject({ backfill: true, issuedInvoiceCloseout: { invoiceId: f.invoiceId, trigger: 'paid' } });
+    expect((await mockPg('invoices').where({ id: f.invoiceId }).first()).service_record_id).toBe(records[0].id);
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+    expect(chargeInvoiceWithSavedCard).not.toHaveBeenCalled();
+    expect(await mockPg('invoices').where({ customer_id: f.customerId })).toHaveLength(1);
   });
 });
