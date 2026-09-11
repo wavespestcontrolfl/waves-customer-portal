@@ -106,6 +106,27 @@ describe('EvidenceEditor', () => {
     expect(body.rework_outcome).toBe('unobserved');
   });
 
+  it('never offers or submits an allocation for a callback visit', async () => {
+    const detail = baseDetail({ visit: { ...baseDetail().visit, is_callback: true } });
+    request.mockImplementation((path, options = {}) => {
+      if (options.method === 'POST') return Promise.resolve({});
+      if (path.startsWith('/visits?')) return Promise.resolve(visitsResult);
+      if (path === '/services/visit-1/evidence') return Promise.resolve(detail);
+      return Promise.reject(new Error(`unexpected path ${path}`));
+    });
+    render(<EvidenceEditor technicianId="tech-a" month="2026-04" people={people} onCancel={vi.fn()} onSaved={vi.fn()} />);
+    await selectVisit();
+    await screen.findByText(/Callback visits are corrective/);
+    expect(screen.queryByRole('button', { name: 'Add accepted value allocation' })).not.toBeInTheDocument();
+    expect(screen.queryByLabelText('Service-value allocation')).not.toBeInTheDocument();
+    expect(screen.getByLabelText('Production exclusion')).toHaveValue('corrective');
+    fireEvent.change(screen.getByLabelText('Service and credited-value evidence'), { target: { value: 'Callback reviewed.' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Retain service evidence' }));
+    await waitFor(() => expect(lastCallBody('/service-evidence')).toBeTruthy());
+    expect(lastCallBody('/service-evidence').allocation_id).toBeNull();
+    expect(lastCallBody('/service-evidence').ordinal).toBeNull();
+  });
+
   it('locks the service selector while an allocation save is pending and selects the saved allocation', async () => {
     const detail = baseDetail({ allocations: [] });
     let resolveAllocation;
@@ -268,9 +289,11 @@ describe('Growth', () => {
       if (options.method === 'POST') return Promise.resolve({});
       return Promise.reject(new Error(`unexpected path ${path}`));
     });
-    render(<Growth view={view()} manage onSaved={vi.fn()} />);
+    const levels = [{ id: 'l1', role_key: 'technician_ii', effective_date: '2026-01-15' }];
+    render(<Growth view={view({ levels, level: levels[0] })} manage onSaved={vi.fn()} />);
     fireEvent.click(screen.getByRole('button', { name: 'Record assessment' }));
-    fireEvent.change(screen.getByLabelText('Assess from role'), { target: { value: 'technician_ii' } });
+    expect(screen.getByLabelText('Assess from role')).toHaveValue('technician_ii');
+    expect(screen.getByLabelText('Assess from role')).toBeDisabled();
     expect(screen.getByLabelText('Next step')).toHaveValue('Service Manager');
     expect(screen.getByLabelText('Management position available')).toBeInTheDocument();
     fireEvent.change(screen.getByLabelText('Rubric version / reference'), { target: { value: 'Rubric v3' } });
@@ -298,7 +321,9 @@ describe('Growth', () => {
     expect(screen.getByLabelText('Next step')).toHaveValue('Technician II');
     expect(screen.getByRole('button', { name: 'Retain assessment' })).not.toBeDisabled();
     fireEvent.change(screen.getByLabelText('Assessment date'), { target: { value: '2026-01-01' } });
-    expect(screen.getByLabelText('Assess from role')).not.toBeDisabled();
+    expect(screen.getByLabelText('Assess from role')).toHaveValue('');
+    expect(screen.getByText(/Record the employee’s simulation level/)).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Retain assessment' })).toBeDisabled();
   });
 });
 
