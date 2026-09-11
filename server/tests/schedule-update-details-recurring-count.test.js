@@ -954,6 +954,13 @@ describe('update-details wiring (source guards)', () => {
     expect(techSrc.indexOf('flushDispatchQualityDates(new Set(result.qualityDates))')).toBeGreaterThan(techSrc.indexOf('RainOut.commit({'));
   });
 
+  test('the edit broadcast waits for every board update before the shared Set is flushed (codex #4295 r5 P2)', () => {
+    const start = src.indexOf('const broadcastJobIds = new Set(');
+    const block = src.slice(start, src.indexOf('await flushDispatchQualityDates(qualityDates);', start));
+    expect(block).toContain('await Promise.allSettled([...broadcastJobIds].map((jobId) =>');
+    expect(block).not.toContain('await Promise.all([...broadcastJobIds]');
+  });
+
   test('top-up visits get the post-registration terminal re-check (Codex #3337 r2 P1)', () => {
     // A series cancel landing between this commit and the reminder insert
     // would otherwise leave an armed reminder on a cancelled visit.

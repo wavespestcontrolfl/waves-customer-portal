@@ -10821,9 +10821,16 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
         for (const id of assignmentUpdatedJobIds) broadcastJobIds.add(id);
         for (const id of recurringUpdatedJobIds) broadcastJobIds.add(id);
         if (broadcastJobIds.size === 0) broadcastJobIds.add(req.params.id);
-        await Promise.all([...broadcastJobIds].map((jobId) =>
+        // allSettled, not all: the flush below snapshots and clears the shared
+        // Set, so every broadcast must have added its dates before it runs —
+        // an early rejection must not let a slower survivor add a date to an
+        // already-flushed Set (codex #4295 r5 P2).
+        const settled = await Promise.allSettled([...broadcastJobIds].map((jobId) =>
           emitDispatchJobUpdate({ jobId, actorId: req.technicianId, previousDate: qualityPreviousDates.get(jobId), qualityDates })
         ));
+        for (const outcome of settled) {
+          if (outcome.status === 'rejected') logger.error(`[schedule/update-details] dispatch board broadcast failed: ${outcome.reason?.message || outcome.reason}`);
+        }
       } catch (e) {
         logger.error(`[schedule/update-details] dispatch board broadcast failed: ${e.message}`);
       }
