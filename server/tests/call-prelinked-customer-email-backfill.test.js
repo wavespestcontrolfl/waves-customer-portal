@@ -47,16 +47,16 @@ describe('backfillLinkedCustomerFromExtraction', () => {
   beforeEach(() => jest.clearAllMocks());
 
   test('fills an empty customers.email from a valid capture and settles the missing-email card', async () => {
-    const existing = { id: 'c-1', email: null, address_line1: '2701 9th St E' };
+    const existing = { id: 'c-1', email: null, address_line1: '100 Test Street' };
     const out = await backfillLinkedCustomerFromExtraction({
-      customerId: 'c-1', existing, extracted: { email: 'dot@example.com' }, source: 'call-extraction-backfill-prelinked',
+      customerId: 'c-1', existing, extracted: { email: 'captured@example.com' }, source: 'call-extraction-backfill-prelinked',
     });
     expect(out.emailApplied).toBe(true);
     expect(fanout.applyCustomerUpdatesWithEmailClaimGuard).toHaveBeenCalledWith(expect.objectContaining({
-      customerId: 'c-1', updates: { email: 'dot@example.com' }, source: 'call-extraction-backfill-prelinked',
+      customerId: 'c-1', updates: { email: 'captured@example.com' }, source: 'call-extraction-backfill-prelinked',
     }));
     expect(fanout.resolveOpenEmailReviewCards).toHaveBeenCalledWith(expect.objectContaining({
-      customerId: 'c-1', email: 'dot@example.com', reasonCodes: ['customer_email_missing'],
+      customerId: 'c-1', email: 'captured@example.com', reasonCodes: ['customer_email_missing'],
     }));
     // Empty→value: no old address to retarget, so no fan-out.
     expect(fanout.propagateCustomerEmailChange).not.toHaveBeenCalled();
@@ -103,7 +103,7 @@ describe('backfillLinkedCustomerFromExtraction', () => {
   test('does not settle the missing-email card when the claim guard dropped the email', async () => {
     fanout.applyCustomerUpdatesWithEmailClaimGuard.mockResolvedValueOnce({ emailApplied: false });
     const out = await backfillLinkedCustomerFromExtraction({
-      customerId: 'c-1', existing: { id: 'c-1', email: null, address_line1: 'x' }, extracted: { email: 'dot@example.com' }, source: 's',
+      customerId: 'c-1', existing: { id: 'c-1', email: null, address_line1: 'x' }, extracted: { email: 'captured@example.com' }, source: 's',
     });
     expect(out.emailApplied).toBe(false);
     expect(fanout.resolveOpenEmailReviewCards).not.toHaveBeenCalled();
@@ -112,10 +112,10 @@ describe('backfillLinkedCustomerFromExtraction', () => {
   test('backfills a missing address alongside the email', async () => {
     await backfillLinkedCustomerFromExtraction({
       customerId: 'c-1', existing: { id: 'c-1', email: null, address_line1: '' },
-      extracted: { email: 'dot@example.com', address_line1: '2701 9th St E', city: 'Bradenton', zip: '34208' }, source: 's',
+      extracted: { email: 'captured@example.com', address_line1: '100 Test Street', city: 'Testville', zip: '00000' }, source: 's',
     });
     expect(fanout.applyCustomerUpdatesWithEmailClaimGuard).toHaveBeenCalledWith(expect.objectContaining({
-      updates: { email: 'dot@example.com', address_line1: '2701 9th St E', city: 'Bradenton', zip: '34208' },
+      updates: { email: 'captured@example.com', address_line1: '100 Test Street', city: 'Testville', zip: '00000' },
     }));
   });
 });
