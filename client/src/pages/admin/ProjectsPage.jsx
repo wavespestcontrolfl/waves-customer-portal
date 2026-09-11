@@ -2382,6 +2382,7 @@ export function ProjectDetail({
                 }));
                 setDirty(true);
               }}
+              inputStyle={{ width: "100%" }}
               products={productCatalog}
               onProductSelect={(product) => handleProductSelect(field.key, product)}
             />
@@ -2851,7 +2852,11 @@ export function PhotoThumb({ photo, projectId, onDelete, onCaptionSaved }) {
           {loadFailed ? "Photo unavailable" : "Loading…"}
         </div>
       )}
-      <div className="absolute inset-x-0 bottom-0 flex min-h-11 items-center justify-between gap-1 bg-black/70 px-2 text-ui-body font-medium text-white">
+      <div
+        className={`absolute inset-x-0 bottom-0 bg-black/70 px-2 py-2 text-ui-body font-medium text-white ${
+          editingCaption ? "space-y-2" : "flex min-h-11 items-center justify-between gap-1"
+        }`}
+      >
         {" "}
         {editingCaption ? (
           <>
@@ -2866,26 +2871,28 @@ export function PhotoThumb({ photo, projectId, onDelete, onCaptionSaved }) {
                 if (e.key === "Escape") setEditingCaption(false);
               }}
               placeholder="Photo caption"
-              className="min-w-0 flex-1"
+              className="w-full min-w-0"
             />
-            <Button
-              variant="ghost"
-              onClick={saveCaption}
-              disabled={captionSaving}
-              className="ui-icon-action text-white hover:bg-white/10"
-              aria-label="Save caption"
-            >
-              ✓
-            </Button>
-            <Button
-              variant="ghost"
-              onClick={() => setEditingCaption(false)}
-              disabled={captionSaving}
-              className="ui-icon-action text-white hover:bg-white/10"
-              aria-label="Cancel caption edit"
-            >
-              ✕
-            </Button>
+            <div className="flex justify-end gap-1">
+              <Button
+                variant="ghost"
+                onClick={saveCaption}
+                disabled={captionSaving}
+                className="ui-icon-action text-white hover:bg-white/10"
+                aria-label="Save caption"
+              >
+                ✓
+              </Button>
+              <Button
+                variant="ghost"
+                onClick={() => setEditingCaption(false)}
+                disabled={captionSaving}
+                className="ui-icon-action text-white hover:bg-white/10"
+                aria-label="Cancel caption edit"
+              >
+                ✕
+              </Button>
+            </div>
           </>
         ) : (
           <>

@@ -12,9 +12,15 @@ const now = new Date().toISOString();
 const project = {
   id: 'project-1', project_type: 'pest_inspection', customer_id: 'customer-1', customer_name: 'Synthetic customer',
   title: 'Synthetic inspection', project_date: '2026-09-10', created_at: now, tech_name: 'Fixture technician',
-  status: 'draft', photo_count: 0, findings: { scope: 'Kitchen inspection complete' },
+  status: 'draft', photo_count: 4, findings: { scope: 'Kitchen inspection complete' },
   recommendations: 'Monitor the kitchen and schedule follow-up treatment.', delivery_channels: null,
 };
+const photos = Array.from({ length: 4 }, (_, index) => ({
+  id: `photo-${index + 1}`,
+  caption: `Inspection photo ${index + 1}`,
+  category: 'inspection',
+}));
+const photoDataUrl = 'data:image/svg+xml,%3Csvg xmlns="http://www.w3.org/2000/svg" width="240" height="240"%3E%3Crect width="240" height="240" fill="%23d4d4d8"/%3E%3Cpath d="M40 180l48-58 38 36 32-45 42 67" fill="none" stroke="%2352525b" stroke-width="10"/%3E%3C/svg%3E';
 const types = {
   pest_inspection: { label: 'Pest inspection', findingsFields: [{ key: 'scope', label: 'Inspection scope', type: 'text', required: true }] },
   wdo_inspection: { label: 'WDO inspection', appointmentManaged: true, linkedCreationOnly: true, findingsFields: [] },
@@ -30,8 +36,10 @@ function fixture(api, method, body) {
   if (api === '/admin/projects/types') return { types };
   if (api === '/admin/projects' && method === 'GET') return { projects: [] };
   if (api === '/admin/projects/project-1/activity') return { activity: [{ id: 'event-1', action: 'project_created', description: 'Synthetic report created.', actor_name: 'Fixture technician', created_at: now }] };
-  if (api === '/admin/projects/project-1' && method === 'GET') return { project, photos: [], upcomingAppointment: null, closeoutPreview: { canClose: true, billing: { required: false }, followup: { required: false }, portal: { attached: false }, serviceCompletion: { linked: false } } };
+  if (api === '/admin/projects/project-1' && method === 'GET') return { project, photos, upcomingAppointment: null, closeoutPreview: { canClose: true, billing: { required: false }, followup: { required: false }, portal: { attached: false }, serviceCompletion: { linked: false } } };
   if (api === '/admin/projects/project-1' && method === 'PUT') return { success: true, received: body };
+  if (/^\/admin\/projects\/project-1\/photos\/photo-\d+\/url$/.test(api) && method === 'GET') return { url: photoDataUrl };
+  if (/^\/admin\/projects\/project-1\/photos\/photo-\d+$/.test(api) && method === 'PUT') return { success: true, received: body };
   if (api === '/admin/projects/project-1/send' && body?.dry_run) return { email_routing: { recipient: 'customer@example.invalid', report_copies: [] } };
   if (api === '/admin/projects/project-1/send') return { sent: true, report_url: '/report/project/synthetic', channels: { email: { ok: true }, sms: { ok: true } } };
   if (api === '/admin/projects/project-1/send-portal-invite') return { success: true };
@@ -121,8 +129,32 @@ async function main() {
       await desktop.getByRole('heading', { name: 'Reports', level: 1 }).waitFor();
       await desktop.getByText('Customer report preview', { exact: true }).waitFor();
       await assertFoundation(desktop);
+      const finding = desktop.getByLabel('Inspection scope');
+      const findingBox = await finding.boundingBox();
+      const findingParentBox = await finding.locator('xpath=..').boundingBox();
+      assert.ok(findingBox.width >= findingParentBox.width - 2, `shared field should fill its container (${findingBox.width}px of ${findingParentBox.width}px)`);
       console.log('Desktop foundation passed');
       await shot(desktop, 'projects-desktop-1440');
+      const editCaption = desktop.getByRole('button', { name: 'Edit caption' }).first();
+      await editCaption.scrollIntoViewIfNeeded();
+      await editCaption.click();
+      const captionInput = desktop.getByPlaceholder('Photo caption');
+      const captionTile = captionInput.locator('xpath=../..');
+      const [tileBox, inputBox, saveBox, cancelBox] = await Promise.all([
+        captionTile.boundingBox(),
+        captionInput.boundingBox(),
+        desktop.getByRole('button', { name: 'Save caption' }).boundingBox(),
+        desktop.getByRole('button', { name: 'Cancel caption edit' }).boundingBox(),
+      ]);
+      assert.ok(inputBox.x >= tileBox.x && inputBox.x + inputBox.width <= tileBox.x + tileBox.width, 'caption input must remain inside the photo tile');
+      assert.ok(saveBox.y >= inputBox.y + inputBox.height && cancelBox.y >= inputBox.y + inputBox.height, 'caption actions must sit below the input');
+      assert.ok(cancelBox.x + cancelBox.width <= tileBox.x + tileBox.width, 'caption actions must remain inside the photo tile');
+      await captionInput.fill('Updated inspection caption');
+      await Promise.all([
+        desktop.waitForRequest((request) => request.url().endsWith('/api/admin/projects/project-1/photos/photo-1') && request.method() === 'PUT' && request.postDataJSON().caption === 'Updated inspection caption'),
+        desktop.getByRole('button', { name: 'Save caption' }).click(),
+      ]);
+      console.log('Desktop photo caption geometry and save passed');
       const title = desktop.getByLabel('Report title');
       await title.fill('Updated synthetic inspection');
       await Promise.all([
