@@ -20,7 +20,7 @@ const { etDateString, parseETDateTime } = require('../utils/datetime-et');
 const { invoiceOverdueSql, invoiceDaysOverdue } = require('../services/collections/account-anchor');
 const router = require('../routes/admin-customers');
 const { countUnreadInboundSms, markInboundSmsRead, retargetOrClearUnknownSenderBell } = require('../services/inbound-sms-read');
-const { sweepUnknownSenderAlertClaims } = require('../services/sms-reply-alert-sweep');
+const { sweepUnknownSenderAlertClaims, SWEEP_HORIZON_MS } = require('../services/sms-reply-alert-sweep');
 const NotificationService = require('../services/notification-service');
 const realNotificationService = jest.requireActual('../services/notification-service');
 const { openBalanceSummary } = require('../services/open-balance');
@@ -611,6 +611,49 @@ postgres('Customer 360 migrated PostgreSQL reads', () => {
       await mockPg('sms_reply_alert_claims').where({ phone: unknownPhone }).delete();
       await mockPg('notifications').whereRaw("metadata->'payload'->>'twilioSid' = ?", [sid]).delete();
       await mockPg('conversations').where({ id: conversationId }).delete();
+    }
+  }, 30000);
+
+  test('the sweep never scans past its recovery horizon — an ancient unread orphan is left alone while a recent one from another phone is still recovered (claude audit P1, post-merge)', async () => {
+    const ancientConversationId = randomUUID();
+    const recentConversationId = randomUUID();
+    const ancientMessageId = randomUUID();
+    const recentMessageId = randomUUID();
+    const ancientSid = `SM-synthetic-sweep-ancient-${randomBytes(4).toString('hex')}`;
+    const recentSid = `SM-synthetic-sweep-recent-${randomBytes(4).toString('hex')}`;
+    const stamp = String(Date.now()).slice(-4);
+    const ancientPhone = `+1941556${stamp}`;
+    const recentPhone = `+1941557${stamp}`;
+    const ancientCreatedAt = new Date(Date.now() - SWEEP_HORIZON_MS - 60000);
+    const recentCreatedAt = new Date(Date.now() - 300000);
+    const dispatch = jest.fn(async () => true);
+    try {
+      // Both rows have the exact orphan shape (unread, eligible, no receipt,
+      // no suppression, no live claim). Only the one inside the horizon may
+      // produce a dispatch — the other would otherwise re-enter the scan on
+      // every tick for as long as it stays unread.
+      await mockPg('conversations').insert([
+        { id: ancientConversationId, customer_id: null, channel: 'sms', contact_phone: ancientPhone, our_endpoint_id: '+19415550194' },
+        { id: recentConversationId, customer_id: null, channel: 'sms', contact_phone: recentPhone, our_endpoint_id: '+19415550194' },
+      ]);
+      await mockPg('messages').insert([
+        { id: ancientMessageId, conversation_id: ancientConversationId, channel: 'sms', direction: 'inbound', author_type: 'lead', is_read: false, twilio_sid: ancientSid, body: 'Ancient, past the horizon', created_at: ancientCreatedAt },
+        { id: recentMessageId, conversation_id: recentConversationId, channel: 'sms', direction: 'inbound', author_type: 'lead', is_read: false, twilio_sid: recentSid, body: 'Recent, needs recovery', created_at: recentCreatedAt },
+      ]);
+      await mockPg('sms_log').insert([
+        { direction: 'inbound', from_phone: ancientPhone, to_phone: '+19415550194', twilio_sid: ancientSid, message_body: 'Ancient, past the horizon', metadata: JSON.stringify({ sms_reply_eligible: true }), created_at: ancientCreatedAt, updated_at: ancientCreatedAt },
+        { direction: 'inbound', from_phone: recentPhone, to_phone: '+19415550194', twilio_sid: recentSid, message_body: 'Recent, needs recovery', metadata: JSON.stringify({ sms_reply_eligible: true }), created_at: recentCreatedAt, updated_at: recentCreatedAt },
+      ]);
+
+      const result = await sweepUnknownSenderAlertClaims({ dispatch });
+      expect(dispatch).toHaveBeenCalledTimes(1);
+      expect(dispatch).toHaveBeenCalledWith(expect.objectContaining({ From: recentPhone, MessageSid: recentSid }));
+      expect(dispatch).not.toHaveBeenCalledWith(expect.objectContaining({ From: ancientPhone }));
+      expect(result.dispatched).toBe(1);
+    } finally {
+      await mockPg('messages').whereIn('id', [ancientMessageId, recentMessageId]).delete();
+      await mockPg('sms_log').whereIn('twilio_sid', [ancientSid, recentSid]).delete();
+      await mockPg('conversations').whereIn('id', [ancientConversationId, recentConversationId]).delete();
     }
   }, 30000);
 

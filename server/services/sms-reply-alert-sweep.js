@@ -66,6 +66,18 @@ const logger = require('./logger');
 // two are small enough, and change together rarely enough, that a
 // same-value comment here is the right amount of coupling.
 const UNKNOWN_SENDER_ALERT_WINDOW_MS = 4 * 60 * 60 * 1000;
+// How far back the sweep looks for a lost alert (claude pre-push audit P1,
+// post-merge round): without a floor, the candidate scan's cost grew with
+// the ALL-TIME count of unread eligible unknown-sender messages — robotext
+// threads staff never open stay unread indefinitely, so every one of them
+// re-entered the scan on every 2-minute tick forever. The horizon is many
+// multiples of the throttle window so a sweep outage measured in hours
+// (the round-15 case) still recovers everything it missed, while a text
+// older than this is no longer worth a fresh bell: the thread is still in
+// /admin/communications either way, and an alert two days late reads as
+// noise, not recovery. Applied to BOTH the candidate pre-filter and the
+// per-phone orphan pick so the two never disagree.
+const SWEEP_HORIZON_MS = 12 * UNKNOWN_SENDER_ALERT_WINDOW_MS;
 
 async function findCandidatePhones() {
   const rows = await db('messages as m')
@@ -89,8 +101,16 @@ async function findCandidatePhones() {
       this.on('l.twilio_sid', '=', 'm.twilio_sid').andOnVal('l.direction', 'inbound');
     })
     .where({ 'm.channel': 'sms', 'm.direction': 'inbound' })
+    .where('m.created_at', '>', new Date(Date.now() - SWEEP_HORIZON_MS))
     .andWhere(function unread() { this.where({ 'm.is_read': false }).orWhereNull('m.is_read'); })
     .whereRaw("l.metadata->>'sms_reply_eligible' = 'true'")
+    // The two per-message terminal markers findOrphanMessage applies (its
+    // own receipt; a deliberate suppression) are repeated here so the
+    // steady state — delivered-but-unread messages, which is most of them —
+    // never even produces a candidate phone. Only the SYMMETRIC sibling
+    // coverage check stays per-phone below; it needs the phone.
+    .whereRaw("COALESCE(l.metadata->>'sms_reply_alerted', 'false') != 'true'")
+    .whereRaw("COALESCE(l.metadata->>'sms_reply_suppressed', 'false') != 'true'")
     .select(db.raw('DISTINCT l.from_phone as phone'));
   return rows.map((r) => r.phone).filter(Boolean);
 }
@@ -115,6 +135,7 @@ async function findOrphanMessage(phone) {
       this.on('l.twilio_sid', '=', 'm.twilio_sid').andOnVal('l.direction', 'inbound');
     })
     .where({ 'm.channel': 'sms', 'm.direction': 'inbound', 'l.from_phone': phone })
+    .where('m.created_at', '>', new Date(Date.now() - SWEEP_HORIZON_MS))
     .whereRaw("l.metadata->>'sms_reply_eligible' = 'true'")
     // A candidate's OWN receipt covers it UNCONDITIONALLY, independent of
     // the window math below (codex #4210 round-15 P1): a message first
@@ -212,4 +233,4 @@ async function sweepUnknownSenderAlertClaims({ dispatch } = {}) {
   return { checked, dispatched };
 }
 
-module.exports = { sweepUnknownSenderAlertClaims, recoverPhone };
+module.exports = { sweepUnknownSenderAlertClaims, recoverPhone, SWEEP_HORIZON_MS };
