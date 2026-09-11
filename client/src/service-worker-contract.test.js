@@ -5,6 +5,10 @@ import vm from 'node:vm';
 
 const source = fs.readFileSync(path.resolve(process.cwd(), 'public/sw.js'), 'utf8');
 
+// Claim ids without the provisional marker: tests that only care THAT a build
+// claims an entry, not whether the claim was read off a shell or inferred.
+const claimIds = response => response.headers.get('x-waves-build').split(',').map(t => t.replace(/^~/, ''));
+
 // Minimal Cache API double: URL-keyed, enough for the shell-refresh path.
 function fakeCache() {
   const store = new Map();
@@ -586,6 +590,10 @@ describe('service-worker shell refresh keeps the asset cache bounded to two buil
     expect(await (await cache.match('/')).text()).toBe(shellHtml(['/assets/index-AAA.js']));
 
     await dispatchFetch('/assets/DashboardPageV2-AAA.js'); // A's tab loads its route
+    // A used this chunk while it was the live build, so its claim is firm and
+    // a later provisional guess must not downgrade it.
+    // B is the live build and claims it firmly; the cached build A is the
+    // worker's guess about which tab asked, so its claim is provisional.
     expect((await cache.match('/assets/DashboardPageV2-AAA.js')).headers.get('x-waves-build'))
       .toBe(`${buildIdOf(['/assets/index-BBB.js'])},${buildIdOf(['/assets/index-AAA.js'])}`);
 
@@ -637,11 +645,61 @@ describe('service-worker shell refresh keeps the asset cache bounded to two buil
     await dispatchFetch('/admin/', { mode: 'navigate' });
     await dispatchFetch('/assets/DashboardPageV2-AAA.js'); // first load, from the A tab
     expect((await cache.match('/assets/DashboardPageV2-AAA.js')).headers.get('x-waves-build'))
-      .toBe(`${buildIdOf(['/assets/index-BBB.js'])},${buildIdOf(['/assets/index-AAA.js'])}`);
+      .toBe(`${buildIdOf(['/assets/index-BBB.js'])},~${buildIdOf(['/assets/index-AAA.js'])}`);
 
     setFetch(async (request) => fakeResponse(`asset:${request.url}`));
     await cacheCompleteShellResponse(fakeResponse(shellHtml(['/assets/index-CCC.js'])));
     expect(await cachedAssets(cache)).toEqual(['/assets/DashboardPageV2-AAA.js', '/assets/index-AAA.js', '/assets/index-CCC.js']);
+  });
+
+  it('frees chunks held only by an inferred claim when the bucket is out of room', async () => {
+    // Codex #4335 r12 P1 (sw.js:535): a chunk loaded by a build whose own
+    // shell refresh failed is claimed by that build AND, provisionally, by
+    // the cached one. The cached build is always retained, so a run of
+    // never-cached builds fills the bucket with entries no retention set
+    // can drop, and the device can never cache a newer shell again — the
+    // exact failure this worker exists to prevent. Once the bucket is out
+    // of room the inferred claim has to stop protecting them.
+    const cache = fakeCache();
+    const { cacheCompleteShellResponse, dispatchFetch, setFetch, buildIdOf } = loadWorker(cache);
+    await cacheCompleteShellResponse(fakeResponse(shellHtml(['/assets/index-AAA.js'])));
+
+    // Three deploys in a row whose shell refresh fails; each page loads one
+    // route chunk, so the cache stays on A while the bucket fills.
+    for (const build of ['BBB', 'CCC', 'DDD']) {
+      setFetch(async (request) => {
+        if (request.mode === 'navigate') return fakeResponse(shellHtml([`/assets/index-${build}.js`]));
+        if (request.url.includes(`index-${build}.js`)) return fakeResponse('boom', false);
+        return fakeResponse(`asset:${request.url}`);
+      });
+      await dispatchFetch('/admin/', { mode: 'navigate' });
+      await dispatchFetch(`/assets/Route-${build}.js`);
+    }
+    expect(await cachedAssets(cache)).toEqual([
+      '/assets/Route-BBB.js', '/assets/Route-CCC.js', '/assets/Route-DDD.js', '/assets/index-AAA.js',
+    ]);
+    // Nothing but the inferred claim on A is keeping them alive.
+    for (const build of ['BBB', 'CCC', 'DDD']) {
+      expect((await cache.match(`/assets/Route-${build}.js`)).headers.get('x-waves-build').split(','))
+        .toContain(`~${buildIdOf(['/assets/index-AAA.js'])}`);
+    }
+
+    // The bucket is full: an asset write only succeeds once the wedge clears.
+    setFetch(async (request) => fakeResponse(`asset:${request.url}`));
+    const assetCount = () => [...cache.store.keys()].filter(u => u.includes('/assets/')).length;
+    cache.failPut = (url) => url.includes('/assets/') && assetCount() >= 4;
+
+    await cacheCompleteShellResponse(fakeResponse(shellHtml(['/assets/index-EEE.js'])));
+
+    // The wedge is cleared: E is cached, where the old worker could never
+    // store another shell again. The chunks kept alive only by the inferred
+    // claim are gone; the assets A's and E's own shells list stayed, and so
+    // did D's route — D was the live build when the escalated prune ran, so
+    // it still held a firm claim of its own.
+    expect(await (await cache.match('/')).text()).toBe(shellHtml(['/assets/index-EEE.js']));
+    expect(await cachedAssets(cache)).toEqual([
+      '/assets/Route-DDD.js', '/assets/index-AAA.js', '/assets/index-EEE.js',
+    ]);
   });
 
   it('lets a hit claim the cached build for a chunk stored two builds ago', async () => {
@@ -661,7 +719,7 @@ describe('service-worker shell refresh keeps the asset cache bounded to two buil
     });
     await dispatchFetch('/admin/', { mode: 'navigate' }); // B live, never cached
     await dispatchFetch('/assets/Shared-XYZ.js'); // hit from the A tab
-    expect((await cache.match('/assets/Shared-XYZ.js')).headers.get('x-waves-build').split(','))
+    expect(claimIds(await cache.match('/assets/Shared-XYZ.js')))
       .toContain(buildIdOf(['/assets/index-AAA.js']));
 
     setFetch(async (request) => fakeResponse(`asset:${request.url}`));
@@ -791,7 +849,7 @@ describe('service-worker shell refresh keeps the asset cache bounded to two buil
     const aaa = buildIdOf(['/assets/index-AAA.js']);
     await cache.put('/assets/Shared-XYZ.js', new FakeResponse('shared', { headers: { 'x-waves-build': `${ccc},${aaa}` } }));
     await dispatchFetch('/assets/Shared-XYZ.js'); // a B tab's hit must add B
-    expect((await cache.match('/assets/Shared-XYZ.js')).headers.get('x-waves-build').split(','))
+    expect(claimIds(await cache.match('/assets/Shared-XYZ.js')))
       .toContain(buildIdOf(['/assets/index-BBB.js']));
 
     setFetch(async (request) => fakeResponse(`asset:${request.url}`));
@@ -1059,7 +1117,7 @@ describe('service-worker shell refresh keeps the asset cache bounded to two buil
     const aaa = buildIdOf(['/assets/index-AAA.js']);
     await cache.put('/assets/Shared-XYZ.js', new FakeResponse('shared', { headers: { 'x-waves-build': `${bbb},${aaa}` } }));
     await dispatchFetch('/assets/Shared-XYZ.js'); // a hit must still claim the cached (restored) build
-    expect((await cache.match('/assets/Shared-XYZ.js')).headers.get('x-waves-build').split(','))
+    expect(claimIds(await cache.match('/assets/Shared-XYZ.js')))
       .toContain(buildIdOf(['/assets/index-000.js']));
 
     cache.putGate = null;

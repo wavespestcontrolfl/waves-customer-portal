@@ -95,15 +95,45 @@ function buildIdOf(assets) {
 // "previous" generation the next prune retains); the claims lead the list,
 // so the cap only ever sheds older, unretained builds.
 const BUILD_TAGS_KEPT = 3;
-function buildTagsOf(response) {
+// A claim is PROVISIONAL when the worker inferred it rather than read it: on
+// an /assets/ request it cannot tell which tab asked, so it claims the live
+// build AND the cached shell's, knowing only one of them really used the
+// chunk. A firm claim comes from a shell's own HTML, which does list its
+// assets. Provisional claims count for the ordinary prune exactly as firm
+// ones do — that is what keeps a shared chunk for a retained build. They
+// stop counting only when the bucket is out of quota and the choice is
+// between dropping a chunk that may be refetchable and leaving the device
+// permanently unable to cache a newer shell.
+const PROVISIONAL_CLAIM = '~';
+const claimIdOf = tag => (tag && tag[0] === PROVISIONAL_CLAIM ? tag.slice(1) : tag);
+const provisionalClaim = buildId => (buildId ? `${PROVISIONAL_CLAIM}${claimIdOf(buildId)}` : buildId);
+function rawTagsOf(response) {
   const raw = response && response.headers.get(BUILD_HEADER);
   return raw ? raw.split(',').map(t => t.trim()).filter(Boolean) : [];
 }
+function buildTagsOf(response) {
+  return rawTagsOf(response).map(claimIdOf);
+}
+function firmTagsOf(response) {
+  return rawTagsOf(response).filter(tag => tag[0] !== PROVISIONAL_CLAIM);
+}
 
+// Merge claims into the entry's existing ones, newest first. A build claimed
+// firmly anywhere in the merge stays firm: a later provisional guess about a
+// chunk must never downgrade a claim read off a shell that actually lists it.
 function tagWithBuild(response, buildIds) {
   const headers = new Headers(response.headers);
-  const tags = [...new Set([].concat(buildIds).filter(Boolean).concat(buildTagsOf(response)))].slice(0, BUILD_TAGS_KEPT);
-  headers.set(BUILD_HEADER, tags.join(','));
+  const order = [].concat(buildIds).filter(Boolean).concat(rawTagsOf(response));
+  const firm = new Set(order.filter(tag => tag[0] !== PROVISIONAL_CLAIM));
+  const seen = new Set();
+  const tags = [];
+  for (const tag of order) {
+    const id = claimIdOf(tag);
+    if (seen.has(id)) continue;
+    seen.add(id);
+    tags.push(firm.has(id) ? id : provisionalClaim(id));
+  }
+  headers.set(BUILD_HEADER, tags.slice(0, BUILD_TAGS_KEPT).join(','));
   return new Response(response.body, { status: response.status, statusText: response.statusText, headers });
 }
 
@@ -280,7 +310,7 @@ async function replaceCompleteShell(shellResponse, enqueuedSeq, supersedable, st
     await withAssetWrites(async () => {
       const results = await Promise.allSettled(assetResponses.map(async ([assetUrl, response]) => {
         const existing = await cache.match(assetUrl);
-        const claims = existing ? [buildId, previousBuildId, ...buildTagsOf(existing)] : [buildId];
+        const claims = existing ? [buildId, previousBuildId, ...rawTagsOf(existing)] : [buildId];
         if (!existing) created.push(assetUrl);
         // Clone: a retry below re-reads the same fetched body.
         await cache.put(assetUrl, tagWithBuild(response.clone(), claims));
@@ -345,7 +375,23 @@ async function replaceCompleteShell(shellResponse, enqueuedSeq, supersedable, st
     // the live page's) stays intact either way.
     if (!isQuotaError(err)) throw err;
     await pruneStaleAssets(cache, [previousBuildId, liveBuildId]);
-    await commitGeneration();
+    try {
+      await commitGeneration();
+    } catch (retryErr) {
+      // Still out of room. Every build whose own shell refresh failed is
+      // live but never cached, so the chunks its pages loaded claim the
+      // CACHED build provisionally — and the cached build is always
+      // retained. A run of such builds therefore fills the bucket with
+      // entries no retention set can drop, and the device is left unable
+      // to cache any newer shell: the exact failure this worker exists to
+      // prevent. Drop what only a guess is holding and try once more. A
+      // chunk lost this way is refetched from the network on next use;
+      // the shells and the assets they list are firm, so both retained
+      // generations survive.
+      if (!isQuotaError(retryErr)) throw retryErr;
+      await pruneStaleAssets(cache, [previousBuildId, liveBuildId], { firmOnly: true });
+      await commitGeneration();
+    }
   }
   // The memo already describes this build: putShell set it as part of the
   // write that committed the shell, and nothing has moved '/' since.
@@ -368,14 +414,18 @@ async function replaceCompleteShell(shellResponse, enqueuedSeq, supersedable, st
 // (or with no tag at all). Runs only when the shell's build changed (a deploy),
 // never on a plain navigation, so page chunks cached on use stay with their
 // build until it is two deploys old.
-function pruneStaleAssets(cache, retainedBuildIds) {
-  const retained = new Set(retainedBuildIds.filter(Boolean));
+function pruneStaleAssets(cache, retainedBuildIds, { firmOnly = false } = {}) {
+  const retained = new Set(retainedBuildIds.filter(Boolean).map(claimIdOf));
   return withAssetWrites(async () => {
     const requests = await cache.keys();
     await Promise.all(requests.map(async request => {
       if (!new URL(request.url).pathname.startsWith('/assets/')) return;
       const cached = await cache.match(request);
-      if (!buildTagsOf(cached).some(tag => retained.has(tag))) await cache.delete(request);
+      // firmOnly: a chunk survives only if a RETAINED build really listed it.
+      // Chunks kept alive solely by a provisional claim go, freeing the space
+      // a run of never-cached builds would otherwise hold forever.
+      const tags = firmOnly ? firmTagsOf(cached) : buildTagsOf(cached);
+      if (!tags.some(tag => retained.has(claimIdOf(tag)))) await cache.delete(request);
     }));
   });
 }
@@ -514,7 +564,7 @@ self.addEventListener('fetch', event => {
           // body in that window, making a later clone() throw.
           const copy = cached.clone();
           const touch = Promise.all([currentBuildId(cache), cachedBuildId(cache)]).then(([buildId, cachedId]) => {
-            const claims = [buildId, cachedId].filter(Boolean);
+            const claims = [buildId, provisionalClaim(cachedId)].filter(Boolean);
             if (!claims.length || claims.every(c => tags.includes(c))) return undefined;
             return claimBuilds(cache, event.request, copy, claims);
           }).catch(() => {});
@@ -529,9 +579,13 @@ self.addEventListener('fetch', event => {
             // The worker cannot tell which tab asked: the live build is the
             // newest navigation's, but a tab on the cached shell's build may
             // be the requester (a newer navigation whose refresh failed is
-            // live yet never cached), so the cached build claims it too.
+            // live yet never cached), so the cached build claims it too —
+            // PROVISIONALLY, because only one of the two really used it and
+            // the cached build is always retained. Left firm, chunks from a
+            // run of never-cached builds would be unprunable and wedge the
+            // bucket; see the firmOnly escalation in the quota recovery.
             const store = Promise.all([currentBuildId(cache), cachedBuildId(cache)])
-              .then(([buildId, cachedId]) => claimBuilds(cache, event.request, clone, [buildId || 'untagged', cachedId]))
+              .then(([buildId, cachedId]) => claimBuilds(cache, event.request, clone, [buildId || 'untagged', provisionalClaim(cachedId)]))
               .catch(() => {});
             // The respondWith promise is still pending here, so the event
             // can still be extended; if a browser disagrees, fall back to
