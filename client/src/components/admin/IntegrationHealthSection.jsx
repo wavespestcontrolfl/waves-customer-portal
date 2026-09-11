@@ -38,6 +38,10 @@ function formatRelative(iso) {
 function statusTone(status) {
   if (status === "connected") return "strong";
   if (status === "expired" || status === "error") return "alert";
+  // Main mapped degraded to an amber warn tone. The shared kit had no warning
+  // tone when this migrated, so degraded fell through to neutral and read the
+  // same as a blank or unknown status; #4425 added one.
+  if (status === "degraded") return "warn";
   return "neutral";
 }
 
@@ -130,7 +134,15 @@ export default function IntegrationHealthSection() {
 function IntegrationCard({ integration }) {
   const healthTone = statusTone(integration.health?.status);
   return (
-    <Card className={healthTone === "alert" ? "border-alert-fg" : undefined}>
+    <Card
+      className={
+        healthTone === "alert"
+          ? "border-alert-fg"
+          : healthTone === "warn"
+            ? "border-warn-fg"
+            : undefined
+      }
+    >
       <CardHeader className="flex flex-wrap items-start justify-between gap-3">
         <div className="min-w-0 flex-1">
           <div className="flex flex-wrap items-center gap-2">
