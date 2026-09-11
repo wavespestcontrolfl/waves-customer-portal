@@ -47,6 +47,7 @@ jest.mock('../services/invoice-followups', () => ({
 const mockIsGateEnabled = jest.fn(() => false);
 jest.mock('../config/feature-gates', () => ({
   isEnabled: (...args) => mockIsGateEnabled(...args),
+  gateEnvValue: jest.fn(() => false),
 }));
 const mockGetOrCreateOpenStatement = jest.fn();
 const mockRollupStatement = jest.fn();

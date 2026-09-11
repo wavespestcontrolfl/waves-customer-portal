@@ -1985,12 +1985,34 @@ const ReviewService = {
     let reservation = null;
     let providerStarted = false;
     let deliveryOutcome = null;
+    // The non-ask pre-send fence's original scheduled_for, restored by the
+    // definitive writes below.
+    let fencedFrom = null;
     try {
       const {
         sendCustomerMessage,
       } = require("./messaging/send-customer-message");
       if (OUTREACH.isAskTemplate(request.template_key)) {
         reservation = await reserveReviewSms({ request, to: contact.phone, body });
+      } else {
+        // A non-ask template takes no sms_log reservation, so this pending
+        // row is the ONLY durable in-flight marker. Fence it BEFORE the
+        // provider call: push scheduled_for past the spacing window while
+        // status stays 'pending'. Every definitive branch below rewrites
+        // scheduled_for or status, so the fence only survives when THAT
+        // write fails after an accepted or uncertain handoff — and then it
+        // keeps processScheduled from resending the text next tick
+        // (pre-push codex P1 on #4331). A fence that cannot be stored
+        // refuses the send: nothing left, so the due row retries on its own.
+        let fenced = 0;
+        try {
+          fencedFrom = request.scheduled_for || null;
+          fenced = await db("review_requests").where({ id: requestId, status: "pending" })
+            .update({ scheduled_for: new Date(Date.now() + ASK_SPACING_MS) });
+        } catch (fenceErr) {
+          logger.warn(`[review] pre-send fence failed (requestId=${requestId} errType=${fenceErr?.name || "Error"})`);
+        }
+        if (!fenced) return { refused: "send_fence_unstored" };
       }
       providerStarted = true;
       try {
@@ -2013,6 +2035,8 @@ const ReviewService = {
         const stamped = await stampWithRetry(
           () => db("review_requests").where({ id: requestId }).update({
             sms_sent_at: new Date(), status: "sent",
+            // Clear the non-ask pre-send fence (a no-op for ask templates).
+            ...(reservation ? {} : { scheduled_for: fencedFrom }),
           }),
           `SMS sent stamp (requestId=${requestId})`,
         );
@@ -2043,9 +2067,21 @@ const ReviewService = {
           // a resend that could duplicate it (codex #4338 P1). Ask
           // templates never reach here: their reservation branch above
           // holds the full 72-hour spacing window instead.
-          await db("review_requests").where({ id: requestId }).update({
-            status: "deferred",
-          });
+          try {
+            await db("review_requests").where({ id: requestId }).update({
+              status: "deferred",
+              scheduled_for: fencedFrom,
+            });
+          } catch (bookErr) {
+            // The provider outcome is known (uncertain) regardless of
+            // whether this write landed — never let a bookkeeping failure
+            // here fall into the OUTER catch's generic 5-minute retry,
+            // which would risk a duplicate text over an outcome already
+            // known to be ambiguous (codex #4338 P1, round 3).
+            logger.error(
+              `[review] SMS uncertain-status bookkeeping failed (customerId=${customer.id} requestId=${requestId} errType=${bookErr?.name || "Error"})`,
+            );
+          }
           logger.error(
             `[review] SMS outcome UNCERTAIN (customerId=${customer.id} requestId=${requestId} auditLogId=${result.auditLogId || "n/a"} code=${result.code}) — held, not retried automatically`,
           );
@@ -2129,6 +2165,59 @@ const ReviewService = {
       // The canonical wrapper attaches providerOutcome to throws. A legacy or
       // unexpected throw after the provider boundary is still ambiguous, so
       // retain the reservation and hold the retry for the full ask spacing.
+      //
+      // A throw here can ALSO land AFTER the provider handoff (an audit-
+      // persistence failure post-accept) — sendCustomerMessage attaches
+      // err.providerOutcome with what actually happened on the wire (the
+      // composer's convention). A sent outcome must never fall into the
+      // blind 5-minute retry below, or the customer risks a duplicate text
+      // (codex #4338 P1): it resolves the reservation (ask templates) and
+      // stamps the row sent exactly like the non-thrown accepted path,
+      // regardless of template — reservation release is a no-op when no
+      // reservation was taken. An explicitly-uncertain outcome for a
+      // NON-ask template gets the same park-out-of-the-retry-sweep
+      // treatment as the non-thrown uncertain guard above; an ask
+      // template's uncertain (or otherwise unresolved) outcome instead
+      // falls through to the reservation-retaining hold below — releasing
+      // its reservation on an ambiguous outcome risks a duplicate text.
+      const providerOutcome = err?.providerOutcome || null;
+      if (providerOutcome?.sent === true) {
+        try {
+          await db("review_requests").where({ id: requestId }).update({
+            sms_sent_at: new Date(),
+            status: "sent",
+          });
+          await releaseReviewSmsReservation(reservation);
+          reservation = null;
+          logger.error(
+            `[review] SMS accepted but its audit write failed (requestId=${requestId} errType=${err?.name || "Error"})`,
+          );
+        } catch (dbErr) {
+          logger.error(
+            `[review] SMS accepted, audit write AND status update both failed (requestId=${requestId} errType=${err?.name || "Error"} dbErrType=${dbErr?.name || "Error"})`,
+          );
+          return { sent: true, unrecorded: true };
+        }
+        return { sent: true };
+      }
+      if (!reservation && isExplicitlyUncertainOutcome(providerOutcome)) {
+        try {
+          await db("review_requests").where({ id: requestId }).update({ status: "deferred" });
+        } catch (dbErr) {
+          logger.error(
+            `[review] SMS uncertain AND status update failed (requestId=${requestId} errType=${err?.name || "Error"} dbErrType=${dbErr?.name || "Error"})`,
+          );
+        }
+        logger.error(
+          `[review] SMS outcome UNCERTAIN after a thrown post-handoff error (requestId=${requestId} errType=${err?.name || "Error"}) — held, not retried automatically`,
+        );
+        return { deferred: "provider_uncertain", nextAllowedAt: null };
+      }
+      // Same retry contract on an ordinary thrown exception (network down,
+      // failure before the provider handoff, etc.), and for an ask
+      // template's ambiguous post-handoff outcome (reservation still
+      // held): re-queue for the cron, or retain the reservation for the
+      // full ask spacing, rather than leave the row stranded.
       try {
         if (deliveryOutcome === "accepted") {
           logger.error(`[review] accepted SMS delivery stamp failed (requestId=${requestId} errType=${err?.name || "Error"})`);
@@ -3946,9 +4035,17 @@ const ReviewService = {
         return { ok: false, retryable: true, deferred: true, channel: "sms", requestId: request.id,
           reason: "provider_uncertain", nextAllowedAt };
       }
-      return deliveryOutcome === "accepted"
-        ? { ok: true, sent: true, channel: "sms", requestId: request.id, auditLogId: result.auditLogId }
-        : { ok: false, retryable: true, channel: "sms", requestId: request.id, reason: "bookkeeping_failed" };
+      if (deliveryOutcome === "accepted") {
+        return { ok: true, sent: true, channel: "sms", requestId: request.id, auditLogId: result.auditLogId };
+      }
+      // A no-link check-in takes no reservation, but an explicitly-uncertain
+      // handoff still means the customer may hold the text — it must not
+      // fall back to the retryable rail over a bookkeeping blip (codex #4338
+      // P1, round 3). Only a genuinely not-sent result stays retryable.
+      if (isExplicitlyUncertainOutcome(result)) {
+        return { ok: false, deferred: true, uncertain: true, channel: "sms", requestId: request.id, code: result?.code };
+      }
+      return { ok: false, retryable: true, channel: "sms", requestId: request.id, reason: "bookkeeping_failed" };
     }
   },
 
@@ -3971,6 +4068,10 @@ const ReviewService = {
       } else {
         await db("review_requests").where({ id: request.id }).update({ status: "failed" });
       }
+      // No `uncertain` marker here on purpose: the sms_log reservation is the
+      // durable evidence, so the sequence runner may retry THIS step after the
+      // full ask-spacing window (nextAllowedAt) instead of holding the whole
+      // sequence — the hold is for no-link check-ins, which take no reservation.
       return { ok: false, retryable: true, deferred: true, nextAllowedAt: retryAt,
         reason: "provider_uncertain", channel, requestId: request.id, code: result?.code };
     }
@@ -3981,9 +4082,13 @@ const ReviewService = {
       // processScheduled rather than schedule an automatic resend, which
       // could duplicate a text that already landed (codex #4338 P1). Ask
       // templates never reach here: the branch above holds them for the
-      // full ask-spacing window instead.
+      // full ask-spacing window instead. `uncertain: true` is a distinct
+      // marker from the generic `deferred: true` below — a sequence-step
+      // caller (_runSequenceStep) must hold the WHOLE sequence rather than
+      // schedule the same step again in 30 minutes, which would re-run
+      // sendOutreachTouch and send a second text (codex #4338 P1, round 2).
       await db("review_requests").where({ id: request.id }).update({ status: "deferred" });
-      return { ok: false, deferred: true, channel, requestId: request.id, code: result?.code };
+      return { ok: false, deferred: true, uncertain: true, channel, requestId: request.id, code: result?.code };
     }
     const deferredRetryAt = retryAtForDeferredSend(result);
     if (deferredRetryAt) {
@@ -5215,6 +5320,24 @@ const ReviewService = {
       if (outcome.reason === "no_contact") return stop("no_contact");
       if (outcome.reason === "already_reviewed") return stop("reviewed");
       return stop("opted_out");
+    }
+
+    if (outcome.uncertain) {
+      // The provider handoff crossed the SDK boundary with no definitive
+      // accept/reject — the customer may already hold this touch. Hold the
+      // WHOLE sequence rather than reschedule this step: the generic
+      // 30-minute retry below would re-run sendOutreachTouch and send a
+      // second text (codex #4338 P1). next_run_at stays null and status
+      // stays 'active' (not the enrollment-only 'deferred' lifecycle
+      // _sweepDeferredEnrollments owns, which restarts via
+      // startReviewSequence rather than resuming this step) so the due
+      // sweep's next_run_at scan never re-picks this row automatically;
+      // stopReviewSequence still reaches an 'active' row for a manual stop.
+      await db("review_sequences").where({ id: seq.id }).update({
+        decision: sequenceDecision({ reason: "provider_outcome_uncertain" }),
+        updated_at: new Date(),
+      });
+      return { ran: false, deferred: true, uncertain: true };
     }
 
     // Deferred / transient → retry this step later without advancing. Only a

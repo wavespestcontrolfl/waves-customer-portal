@@ -545,6 +545,7 @@ router.post('/:id/apply-property-roles', async (req, res) => {
     });
     return res.json({ ok: true, ...outcome });
   } catch (err) {
+    if (err.code === 'property_busy') return res.status(409).json({ error: err.message, code: err.code });
     if (err.conflict) return res.status(409).json({ error: err.message || 'Item changed concurrently' });
     if (err.noProposals) return res.status(400).json({ error: 'Card carries no applicable proposals' });
     logger.error(`[admin-triage] apply-property-roles failed: ${err.message}`);

@@ -12,7 +12,15 @@ const REVIEW_INTENT_RE = /\b(?:leave|write|post|submit|share|give|add|update|edi
 // ("thanks for the review you left us") out.
 const REVIEW_CONDITIONAL_RE = /\bif\s+(?:you|y['’]all|ya)\s+(?:ever\s+|could\s+|would\s+|would\s+ever\s+|wouldn['’]t\s+mind\s+)?(?:left|leave|leaving|wrote|write|writing|posted|post|posting|shared|share|sharing|gave|give|giving|submitted|submit|submitting)\s+(?:(?:us|me)\s+)?(?:(?:a|an|your|the)\s+)?(?:(?:quick|short|honest|online|public|five[- ]star|5[- ]star|google|yelp|facebook)\s+)*review\b/i;
 
-const REVIEW_INVITATION_RE = /\b(?:we|i)(?:['’]d|\s+would)\s+(?:(?:really|greatly)\s+)?(?:appreciate|love|be\s+(?:really\s+)?grateful\s+for)\s+(?:(?:a|an|your)\s+)?(?:(?:quick|short|honest|online|public|five[- ]star|5[- ]star|google|yelp|facebook)\s+)*review\b|\b(?:a|your)\s+(?:(?:quick|short|honest|online|public|five[- ]star|5[- ]star|google|yelp|facebook)\s+)*review\s+(?:would|could)\s+(?:really\s+)?(?:mean|help|support|make\s+(?:my|our)\s+day|be\s+(?:(?:greatly|really|much)\s+)?appreciated)\b/i;
+const REVIEW_INVITATION_RE = /\b(?:we|i)(?:['’]d|\s+would)\s+(?:(?:really|greatly)\s+)?(?:appreciate|love|be\s+(?:really\s+)?grateful\s+for)\s+(?:(?:a|an|your)\s+)?(?:(?:quick|short|honest|online|public|five[- ]star|5[- ]star|google|yelp|facebook)\s+)*review\b|\b(?:a|your)\s+(?:(?:quick|short|honest|online|public|five[- ]star|5[- ]star|google|yelp|facebook)\s+)*review\s+(?:would|could)\s+(?:really\s+)?(?:mean|help|support|make\s+(?:my|our)\s+day|be\s+(?:(?:greatly|really|much)\s+)?appreciated)\b|\b(?:a|your)\s+(?:(?:quick|short|honest|online|public|five[- ]star|5[- ]star|google|yelp|facebook)\s+)*review\s+(?:really\s+)?(?:means|helps|supports|makes\s+(?:my|our)\s+day|is\s+(?:(?:greatly|really|much)\s+)?appreciated)\b/i;
+
+// Present-tense declarative asks with no textual link ("that review link one
+// more time") — the repo's own soft_reminder/qr_followup wording — count on
+// their own; they no longer need a co-occurring /l/ short link (see below).
+// Only request/reminder framing counts ("here is that review link", "that
+// review link one more time", "review link: <url>"). Support chatter about the
+// link ("the review link is broken", "I fixed the review link") is not an ask.
+const REVIEW_LINK_MENTION_RE = /\b(?:here(?:['’]s|\s+is)\s+(?:that|the|your)\s+review\s+link|(?:that|the|your)\s+review\s+link\s+(?:again|one\s+more\s+time|below|for\s+you)|review\s+link:\s*\S)/i;
 
 // Link-library destinations and explicit requests count. Acknowledgments
 // ("Thanks for your Google review") without a link/request do not.
@@ -27,33 +35,66 @@ function looksLikeReviewAsk(body) {
       try { return portalHosts.has(new URL(/^https?:/i.test(link) ? link : `https://${link}`).hostname.toLowerCase()); }
       catch { return false; }
     });
-  // Reviewing a document is different from reviewing the business.
-  const intentText = text.replace(/\breview\s+(?:of|on|for)\s+(?:(?:the|your|our|my|attached|updated)\s+)*(?:estimate|invoice|agreement|contract|report|document|proposal)\b/gi, 'document assessment');
+  // Reviewing a document is different from reviewing the business. A noun
+  // ("comments", "feedback", "notes") can sit between "review" and the
+  // document preposition ("share your review comments on the attached
+  // estimate") — tolerate up to two such words so the carve-out still fires.
+  const intentText = text.replace(/\breview\s+(?:\w+\s+){0,2}(?:of|on|for)\s+(?:(?:the|your|our|my|attached|updated)\s+)*(?:estimate|invoice|agreement|contract|report|document|proposal)\b/gi, 'document assessment');
   return portalRate || REVIEW_LINK_RE.test(text) || REVIEW_INTENT_RE.test(intentText) || REVIEW_INVITATION_RE.test(intentText) || REVIEW_CONDITIONAL_RE.test(intentText)
     || /\b(?:could|can|may)\s+(?:i|we)\s+ask\s+(?:you\s+)?for\s+(?:(?:a|an|your)\s+)?(?:(?:quick|short|honest|online|public|five[- ]star|5[- ]star|google|yelp|facebook)\s+)*review\b/i.test(intentText)
     || (/maps\.app\.goo\.gl\/|goo\.gl\/maps|maps\.google\.[a-z.]+\//i.test(text)
       && /\b(?:share|leave|give)\s+(?:(?:us|me)\s+)?(?:(?:your|some)\s+)?feedback\b/i.test(text))
-    || (/\/l\/[A-Za-z0-9]{3,}\b/.test(text) && /\b(?:a|your|google|yelp|facebook)\s+(?:(?:quick|short|honest|online|public|five[- ]star|5[- ]star|google|yelp|facebook)\s+)*review\b|\breview\s+link\b/i.test(text));
+    || REVIEW_LINK_MENTION_RE.test(intentText)
+    || (/\/l\/[A-Za-z0-9]{3,}\b/.test(text) && /\b(?:a|your|google|yelp|facebook)\s+(?:(?:quick|short|honest|online|public|five[- ]star|5[- ]star|google|yelp|facebook)\s+)*review\b/i.test(text));
 }
 
+// review_requests.followup_sent_at is NOT reliable delivery evidence: besides
+// the genuine review_request_followup SMS (review-request.js ~3024),
+// processFollowups also stamps it as a plain "handled" marker for
+// soft-deleted customers, dedup'd siblings, no-consent contacts, and
+// blocked/failed sends (review-request.js:2810,2875,2930,2953,3015) — none
+// of those reached the customer. Real follow-up delivery evidence lives in
+// TWO places: review_requests.followup_delivered_at, which the serialized
+// processFollowups stamps at provider accept, and messaging_audit_log.sent_at
+// (set only once the provider actually dispatches) for follow-ups delivered
+// before that column existed — correlated back via the review_request_id the
+// followup send stamps into its metadata.
+const FOLLOWUP_DELIVERED_SUBQUERY = `(
+  SELECT metadata->>'review_request_id' AS review_request_id, MAX(sent_at) AS followup_delivered_at
+  FROM messaging_audit_log
+  WHERE customer_id = ? AND entry_point = 'review_request_followup' AND sent_at IS NOT NULL
+  GROUP BY metadata->>'review_request_id'
+) followups`;
+
 function deliveredAskRows(customerId, { since = null, excludeRequestId = null, includeReservations = true } = {}) {
-  const timestampColumns = ['sms_sent_at', 'sent_at', 'followup_delivered_at'];
-  if (includeReservations) timestampColumns.push('followup_reserved_at');
+  const timestampColumns = ['review_requests.sms_sent_at', 'review_requests.sent_at',
+    'review_requests.followup_delivered_at', 'followups.followup_delivered_at'];
+  if (includeReservations) timestampColumns.push('review_requests.followup_reserved_at');
   const q = db('review_requests')
-    .where({ customer_id: customerId })
+    // Correlated to the customer so the derived table uses the audit log's
+    // customer index instead of grouping every follow-up ever delivered.
+    .joinRaw(`LEFT JOIN ${FOLLOWUP_DELIVERED_SUBQUERY} ON followups.review_request_id = review_requests.id::text`, [customerId])
+    .where({ 'review_requests.customer_id': customerId })
     .whereRaw(`(${timestampColumns.map(column => `${column} IS NOT NULL`).join(' OR ')})`)
     .whereRaw(ASK_TOUCH_SQL)
-    .select('id', 'sequence_id', 'template_key', 'sms_sent_at', 'sent_at', 'followup_delivered_at', 'followup_reserved_at');
+    .select('review_requests.id', 'review_requests.sequence_id', 'review_requests.template_key',
+      'review_requests.sms_sent_at', 'review_requests.sent_at', 'review_requests.followup_reserved_at',
+      // Both delivery evidence sources ride the row: the audit-log join keeps
+      // the followup_delivered_at name (older callers/tests read it), the
+      // column this slice stamps at provider accept is followup_recorded_at.
+      'followups.followup_delivered_at', 'review_requests.followup_delivered_at as followup_recorded_at');
   if (since) q.whereRaw(`GREATEST(${timestampColumns.join(', ')}) > ?`, [since]);
-  if (excludeRequestId) q.where('id', '!=', excludeRequestId);
+  if (excludeRequestId) q.where('review_requests.id', '!=', excludeRequestId);
   return q;
 }
 
 // An unresolved follow-up reservation conservatively holds spacing until its
 // real outcome is recorded; it does not populate the delivery timestamp.
-// A retried email leg can be later than the SMS of the same request.
+// A retried email leg, or the genuinely delivered legacy follow-up SMS (from
+// either evidence source), can be later than the original ask's own
+// sms_sent_at/sent_at on the same row.
 function latestDeliveredAt(rows, { includeReservations = true } = {}) {
-  const timestampFields = ['sms_sent_at', 'sent_at', 'followup_delivered_at'];
+  const timestampFields = ['sms_sent_at', 'sent_at', 'followup_delivered_at', 'followup_recorded_at'];
   if (includeReservations) timestampFields.push('followup_reserved_at');
   return rows.reduce((latest, row) => {
     const at = Math.max(...timestampFields.map(field => row[field] ? new Date(row[field]).getTime() : 0));
@@ -69,16 +110,29 @@ async function lastDeliveredAskAt(customerId, options) {
 
 // Lookups throw: dispatch callers must hold when evidence is unavailable.
 // The enrollment standdown retains its explicit fail-open wrapper.
-async function lastManualAskAt(customerId, { since, includeReservations = true } = {}) {
+async function lastManualAskAt(customerId, { since, includeReservations = true, excludeReservationId = null } = {}) {
   const sinceAt = since ? new Date(since) : new Date(Date.now() - 30 * 86400000);
-  const outbound = await db('sms_log')
+  const fetchFloor = new Date(sinceAt.getTime() - 90000);
+  const rows = await db('sms_log')
     .where({ customer_id: customerId, direction: 'outbound' })
     // Include correspondence just before the boundary so its timestamp
     // cannot instead be assigned to a manual ask just after the boundary.
-    .where('created_at', '>=', new Date(sinceAt.getTime() - 90000))
+    // A resolved review-ask reservation is fetched by EITHER timestamp:
+    // Communications can open it (created_at) before a same-moment
+    // enrollment misses it while still 'sending' (includeReservations:
+    // false), and only confirm delivery (updated_at) afterward — the
+    // confirmation must not be lost just because the placeholder predates
+    // the boundary (codex P1, review-request.js:1476).
+    .whereRaw('(created_at >= ? OR updated_at >= ?)', [fetchFloor, fetchFloor])
     .whereNotIn('status', ['scheduled', 'canceled', 'cancelled', 'failed', 'undelivered', 'blocked'])
     .orderBy('created_at', 'desc')
-    .select('message_body', 'created_at', 'status', 'metadata');
+    .select('id', 'message_body', 'created_at', 'updated_at', 'status', 'metadata');
+  // The caller's OWN in-flight reservation (already inserted under the same
+  // per-customer lock this check runs inside — see admin-communications.js)
+  // is the current attempt's own evidence, not a PRIOR ask to space against;
+  // excluding it here is exactly the excludeRequestId pattern lastDeliveredAskAt
+  // already uses for a caller's own claimed review_requests row.
+  const outbound = excludeReservationId ? rows.filter(row => row.id !== excludeReservationId) : rows;
   const metadata = row => {
     try { return typeof row.metadata === 'string' ? JSON.parse(row.metadata) : row.metadata || {}; }
     catch { return {}; }
@@ -99,6 +153,16 @@ async function lastManualAskAt(customerId, { since, includeReservations = true }
   }, null);
   const candidates = outbound.filter(row => row.status !== 'sending'
     && (isReviewReservation(row) || looksLikeReviewAsk(row.message_body)));
+  // A resolved reservation's real ask-evidence time is its provider
+  // confirmation (updated_at), not the placeholder's created_at: the
+  // reservation is opened before the send, so its created_at can land
+  // before a since-boundary (typically a sequence's started_at) that the
+  // confirmation itself falls after. An ordinary manual send (never a
+  // reservation) keeps created_at — it is typed and sent in the same
+  // moment, so there is no earlier placeholder to anchor past.
+  const effectiveAskAt = row => (row.status !== 'sending' && isReviewReservation(row) && row.updated_at
+    ? new Date(Math.max(new Date(row.created_at).getTime(), new Date(row.updated_at).getTime()))
+    : new Date(row.created_at));
   if (!candidates.length) return reservedAt;
   const sends = await db('review_requests')
     .where({ customer_id: customerId })
@@ -124,8 +188,8 @@ async function lastManualAskAt(customerId, { since, includeReservations = true }
     matchedRows.add(pair.rowIndex);
   }
   const manual = candidates.find((row, index) => !matchedRows.has(index)
-    && new Date(row.created_at) >= sinceAt);
-  const manualAt = manual ? new Date(manual.created_at) : null;
+    && effectiveAskAt(row) >= sinceAt);
+  const manualAt = manual ? effectiveAskAt(manual) : null;
   return reservedAt && (!manualAt || reservedAt > manualAt) ? reservedAt : manualAt;
 }
 

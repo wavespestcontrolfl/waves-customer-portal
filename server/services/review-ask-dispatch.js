@@ -4,7 +4,7 @@ const { formatETDate, formatETTime } = require('../utils/datetime-et');
 
 // The callback includes provider delivery and its durable delivery stamp.
 // Callers retain their recipient, consent, claim and outcome handling.
-async function dispatchReviewAsk(customerId, dispatch, { excludeRequestId = null } = {}) {
+async function dispatchReviewAsk(customerId, dispatch, { excludeRequestId = null, excludeReservationId = null } = {}) {
   if (!customerId) return { sent: false, blocked: true, code: 'REVIEW_CUSTOMER_REQUIRED',
     reason: 'Select the customer receiving this review request before sending.', httpStatus: 409 };
   const result = await runExclusive(`review-send:${customerId}`, async () => {
@@ -13,7 +13,11 @@ async function dispatchReviewAsk(customerId, dispatch, { excludeRequestId = null
     try {
       [pipelineAt, manualAt] = await Promise.all([
         history.lastDeliveredAskAt(customerId, { excludeRequestId }),
-        history.lastManualAskAt(customerId, { since: new Date(Date.now() - history.ASK_SPACING_MS) }),
+        // excludeReservationId: a caller that already reserved sms_log
+        // evidence for THIS attempt (under the same lock, before this call)
+        // excludes it here — it is this attempt's own claim, not prior
+        // evidence to space against.
+        history.lastManualAskAt(customerId, { since: new Date(Date.now() - history.ASK_SPACING_MS), excludeReservationId }),
       ]);
     } catch {
       return { sent: false, blocked: true, code: 'REVIEW_HISTORY_UNAVAILABLE',

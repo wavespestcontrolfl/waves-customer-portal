@@ -37,6 +37,7 @@ const db = require('../models/db');
 const TWILIO_NUMBERS = require('../config/twilio-numbers');
 const logger = require('./logger');
 const { isEnabled } = require('../config/feature-gates');
+const { ASK_SPACING_MS } = require('./review-ask-history');
 
 const AUTOSEND_WORKFLOW = 'sms_house_voice_auto_send';
 const AUTOSEND_AGENT_NAME = 'House Voice Auto-Send';
@@ -52,6 +53,18 @@ const AUTOSEND_MESSAGE_TYPE = 'ai_autosent';
 const CLAIM_STATUS = 'sending';
 const SENT_STATUS = 'auto_sent';
 const FAILED_STATUS = 'auto_send_failed';
+
+// How long reconcileAutoSendClaims protects a claim armed
+// provider_outcome_uncertain before treating it as an ordinary orphan (codex
+// #4338 P1). With no Twilio SID, the sent-linked sweep above can never
+// resolve it — protecting it indefinitely left the claim in CLAIM_STATUS
+// forever, which also kept its reservation row alive (reservationsCleared
+// below only clears once every linked decision reaches a terminal status)
+// and the draft out of the normal shadow/judge flow. Bounded instead: the
+// claim still holds while recent, but past this window fails like any other
+// orphan — failClaim leaves the draft 'shadow', so it re-enters ordinary
+// drafting rather than staying invisibly stuck.
+const UNCERTAIN_CLAIM_HOLD_HOURS = 24;
 // message_drafts.status once the send is confirmed (out of the judge pool).
 const DRAFT_SENT_STATUS = 'auto_sent';
 
@@ -512,10 +525,12 @@ async function maybeAutoSend(params = {}) {
  *   (a) a claim whose outbound already went out (crash between send and
  *       resolve) → resolve it and flip the draft (the customer WAS texted);
  *   (b) a claim older than orphanMinutes with no live/sent outbound and no
- *       explicit uncertainty reservation → fail it (the draft stays shadow).
+ *       explicit uncertainty reservation younger than uncertainReconciliationHours
+ *       → fail it (the draft stays shadow, re-entering ordinary drafting).
  */
-async function reconcileAutoSendClaims({ orphanMinutes = 30 } = {}) {
+async function reconcileAutoSendClaims({ orphanMinutes = 30, uncertainReconciliationHours = UNCERTAIN_CLAIM_HOLD_HOURS } = {}) {
   const cutoff = new Date(Date.now() - orphanMinutes * 60 * 1000);
+  const uncertainCutoff = new Date(Date.now() - uncertainReconciliationHours * 60 * 60 * 1000);
   let resolved = 0;
   let failed = 0;
 
@@ -543,10 +558,10 @@ async function reconcileAutoSendClaims({ orphanMinutes = 30 } = {}) {
           AND (
             sl.metadata->>'auto_send_reservation' IS DISTINCT FROM 'true'
             OR sl.created_at >= ?
-            OR sl.metadata->>'provider_outcome_uncertain' = 'true'
+            OR (sl.metadata->>'provider_outcome_uncertain' = 'true' AND sl.updated_at >= ?)
             OR sl.status IN ('queued','sent','delivered')
           )
-      )`, [cutoff])
+      )`, [cutoff, uncertainCutoff])
       .update({
         status: FAILED_STATUS,
         correction_note: 'Auto-send claim never confirmed a provider send — reconciled by the recovery sweep.',
@@ -588,10 +603,31 @@ async function reconcileAutoSendClaims({ orphanMinutes = 30 } = {}) {
     logger.warn(`[sms-auto-send] reservation sweep failed: ${err.message}`);
   }
 
-  if (resolved || failed || reservationsCleared) {
-    logger.info(`[sms-auto-send] reconcile: resolved ${resolved} sent-but-unresolved, failed ${failed} orphaned claims, cleared ${reservationsCleared} stale reservations`);
+  // Sweep stale review-ask reservations. review-ask-history's lastManualAskAt
+  // only reads sms_log back to the 72-hour ask-spacing window, so a row still
+  // stuck at 'sending' past that window (an uncertain provider attempt, a
+  // process crash, or a failed delivery-stamp cleanup in settleReviewReservation)
+  // can no longer serve as spacing evidence either way — it is now orphaned.
+  // A row already resolved to 'sent'/'delivered' is real: settleReviewReservation
+  // either deletes it as a confirmed duplicate or promotes it to the durable
+  // sent record when no separate provider log exists, so it must stay out of
+  // this sweep regardless of age.
+  let reviewReservationsExpired = 0;
+  try {
+    const reviewCutoff = new Date(Date.now() - ASK_SPACING_MS);
+    reviewReservationsExpired = await db('sms_log')
+      .where({ direction: 'outbound', status: 'sending' })
+      .whereRaw("metadata->>'review_ask_reservation' = 'true'")
+      .where('created_at', '<', reviewCutoff)
+      .del();
+  } catch (err) {
+    logger.warn(`[sms-auto-send] review reservation sweep failed: ${err.message}`);
   }
-  return { resolved, failed, reservationsCleared };
+
+  if (resolved || failed || reservationsCleared || reviewReservationsExpired) {
+    logger.info(`[sms-auto-send] reconcile: resolved ${resolved} sent-but-unresolved, failed ${failed} orphaned claims, cleared ${reservationsCleared} stale reservations, expired ${reviewReservationsExpired} stale review reservations`);
+  }
+  return { resolved, failed, reservationsCleared, reviewReservationsExpired };
 }
 
 module.exports = {

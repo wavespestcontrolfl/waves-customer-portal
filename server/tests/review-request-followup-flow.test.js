@@ -54,6 +54,7 @@ function chain(overrides = {}) {
     whereNotExists: jest.fn(function () { return this; }),
     whereExists: jest.fn(function () { return this; }),
     leftJoin: jest.fn(function () { return this; }),
+    joinRaw: jest.fn(function () { return this; }),
     select: jest.fn(function () { return this; }),
     orderBy: jest.fn(function () { return this; }),
     limit: jest.fn(function () { return this; }),
@@ -358,6 +359,79 @@ describe('review request follow-up flow', () => {
     }));
     // The reservation must never be reopened here — that is what would let the
     // next run send a second copy of a follow-up the customer may already hold.
+    expect(updateQuery.update).not.toHaveBeenCalledWith(expect.objectContaining({
+      followup_sent: false,
+    }));
+  });
+
+  test('an uncertain follow-up handoff THROWN (not returned) is also held, not left eligible (codex #4338 P1, round 2)', async () => {
+    // The old catch only logged and returned — followup_sent stayed unset,
+    // so the NEXT run's candidate query re-selected this row and could send
+    // a duplicate follow-up after a post-handoff audit-persistence throw.
+    const updateQuery = chain();
+    const reviewRequestQueries = [
+      chain(), // deleted-customer follow-up close-out pre-pass
+      collection([]),
+      collection([
+        {
+          id: 'rr-uncertain-throw',
+          customer_id: 'cust-1',
+          sms_sent_at: '2026-05-30T15:00:00.000Z',
+          status: 'sent',
+          score: null,
+        },
+      ]),
+      resolvesTo([]), // dispatchReviewAsk: deliveredAskRows spacing lookup
+      // The callback re-reads the row it is about to send, then checks the
+      // sibling-followup dedup, then writes the pre-handoff reservation.
+      chain({ first: jest.fn().mockResolvedValue({
+        id: 'rr-uncertain-throw',
+        customer_id: 'cust-1',
+        sms_sent_at: '2026-05-30T15:00:00.000Z',
+        status: 'sent',
+        score: null,
+      }) }),
+      chain({ first: jest.fn().mockResolvedValue(null) }),
+      updateQuery,
+    ];
+    const customerQuery = chain({
+      first: jest.fn().mockResolvedValue({
+        id: 'cust-1',
+        first_name: 'Jamie',
+        last_name: 'Rios',
+        phone: '+19415550123',
+        city: 'Sarasota',
+        has_left_google_review: false,
+      }),
+    });
+
+    db.mockImplementation((table) => {
+      if (table === 'review_requests') return reviewRequestQueries.shift();
+      if (table === 'customers') return customerQuery;
+      // dispatchReviewAsk's manual-ask lookup — an empty history lets the
+      // spacing gate through (a throw here would correctly HOLD instead).
+      if (table === 'sms_log') return resolvesTo([]);
+      throw new Error(`Unexpected table query: ${table}`);
+    });
+    getServiceContact.mockReturnValue({ phone: '+19415550123', name: 'Jamie' });
+    getServiceContactSmsRecipient.mockReturnValue({ phone: '+19415550123', name: 'Jamie' });
+    renderSmsTemplate.mockResolvedValue('Please review us');
+    sendCustomerMessage.mockImplementation(() => {
+      throw Object.assign(new Error('audit write failed'), {
+        providerOutcome: { sent: false, deliveryOutcome: 'uncertain', code: 'PROVIDER_FAILURE' },
+      });
+    });
+
+    const result = await ReviewService.processFollowups();
+
+    // Same third state as the returned-uncertain case above: this slice
+    // reserved followup_sent BEFORE the handoff, the thrown outcome is
+    // converted inside the send callback, and the reservation is kept —
+    // neither sent nor suppressed, never reopened.
+    expect(result).toEqual({ sent: 0, suppressed: 0, internalFollowups: 0 });
+    expect(updateQuery.update).toHaveBeenCalledWith(expect.objectContaining({
+      followup_sent: true,
+    }));
     expect(updateQuery.update).not.toHaveBeenCalledWith(expect.objectContaining({
       followup_sent: false,
     }));
