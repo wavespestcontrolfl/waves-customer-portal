@@ -480,6 +480,11 @@ async function applyFix({ bouncedEmail, candidate, owner, tier, evidence, applie
     if (owner.customer) {
       const field = owner.field === 'billing_email' ? null : owner.field;
       if (field) {
+        // Row → destination key (the key every summary handoff takes), so a
+        // handoff that read the candidate as unowned commits its request
+        // before this claim or re-judges ownership after it.
+        await trx('customers').where({ id: owner.customer.id }).forUpdate().first('id');
+        await require('../utils/customer-comms-lock').lockCustomerEmail(trx, candidate);
         const updated = await trx('customers')
           .where({ id: owner.customer.id })
           .whereRaw(`LOWER(${field}) = ?`, [bouncedEmail])

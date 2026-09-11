@@ -314,15 +314,27 @@ postgres('visit summary recipient recovery', () => {
     fixture.payload.items.forEach((item) => { item.body.requestReview = false; });
     expect(await deliver()).toEqual({ state: 'delivered' });
     const delivered = await mockPg('email_messages').where({ trigger_event_id: `visit_summary:${fixture.visitId}` }).first();
+    const recipients = await mockPg('email_messages').where({ trigger_event_id: `visit_summary:${fixture.visitId}` });
     await mockPg.transaction(async (trx) => {
       await require('../routes/webhooks-sendgrid').handleEmailMessageEvent({ event: 'dropped', reason, timestamp: Math.floor(Date.now() / 1000),
         sg_event_id: randomUUID(), email: delivered.recipient_email_snapshot, asm_group_id: '1' }, delivered, trx);
     });
     expect(await mockPg('email_messages').where({ id: delivered.id }).first()).toMatchObject({ status: 'dropped', error_message: reason });
+    // One recipient declined, the other holds the summary: still sent, no review.
     expect(await mockPg('visit_effects').where({ visit_id: fixture.visitId, effect_type: 'completion_email' }).first()).toMatchObject({ status: 'sent' });
+    expect(await mockPg('dispatch_alerts').where({ tech_id: fixture.techId, type: 'visit_closeout_review' }).whereNull('resolved_at')).toHaveLength(0);
+    // Every recipient declined: the aggregate settles as suppressed, still no review.
+    for (const other of recipients.filter((row) => row.id !== delivered.id)) {
+      await mockPg.transaction(async (trx) => {
+        await require('../routes/webhooks-sendgrid').handleEmailMessageEvent({ event: 'dropped', reason, timestamp: Math.floor(Date.now() / 1000),
+          sg_event_id: randomUUID(), email: other.recipient_email_snapshot, asm_group_id: '1' }, other, trx);
+      });
+    }
+    expect(await mockPg('visit_effects').where({ visit_id: fixture.visitId, effect_type: 'completion_email' }).first()).toMatchObject({ status: 'suppressed' });
     expect(await mockPg('dispatch_alerts').where({ tech_id: fixture.techId, type: 'visit_closeout_review' }).whereNull('resolved_at')).toHaveLength(0);
     // The same drop for an unreachable address is a bounce for review.
     await mockPg('email_messages').where({ id: delivered.id }).update({ bounced_at: null });
+    await mockPg('visit_effects').where({ visit_id: fixture.visitId, effect_type: 'completion_email' }).update({ status: 'sent' });
     await mockPg.transaction(async (trx) => {
       await require('../routes/webhooks-sendgrid').handleEmailMessageEvent({ event: 'dropped', reason: 'Bounced Address', timestamp: Math.floor(Date.now() / 1000),
         sg_event_id: randomUUID(), email: delivered.recipient_email_snapshot }, { ...delivered, bounced_at: null }, trx);
@@ -343,6 +355,46 @@ postgres('visit summary recipient recovery', () => {
     await mockPg('email_messages').where({ trigger_event_id: `visit_summary:${fixture.visitId}` }).update({ status: 'delivered' });
     await mockPg('visit_effects').where({ visit_id: fixture.visitId, effect_type: 'completion_email' }).update({ status: 'sent' });
     expect(await Summary.reconcileSummaryEmailRecovery({ ...delivered, status: 'delivered' })).toEqual({ reconciled: false });
+  });
+
+  test('a provider block that exhausts the retries reopens the summary for delivery review', async () => {
+    fixture.payload.items.forEach((item) => { item.body.requestReview = false; });
+    expect(await deliver()).toEqual({ state: 'delivered' });
+    const rows = await mockPg('email_messages').where({ trigger_event_id: `visit_summary:${fixture.visitId}` });
+    await mockPg('email_messages').whereIn('id', rows.map((row) => row.id)).update({ provider_retry_count: 99 });
+    for (const row of rows) {
+      await mockPg.transaction(async (trx) => {
+        await require('../routes/webhooks-sendgrid').handleEmailMessageEvent({ event: 'bounce', type: 'blocked', reason: 'IP blocked',
+          timestamp: Math.floor(Date.now() / 1000), sg_event_id: randomUUID(), email: row.recipient_email_snapshot }, { ...row, provider_retry_count: 99 }, trx);
+      });
+    }
+    expect(await mockPg('email_messages').where({ id: rows[0].id }).first()).toMatchObject({ status: 'failed' });
+    expect((await mockPg('email_messages').where({ id: rows[0].id }).first()).provider_retry_exhausted_at).not.toBeNull();
+    expect(await mockPg('visit_effects').where({ visit_id: fixture.visitId, effect_type: 'completion_email' }).first())
+      .toMatchObject({ status: 'unknown_delivery', last_error: 'provider_bounce' });
+  });
+
+  test('a definitive provider rejection of the summary text settles as suppressed, not as unknown', async () => {
+    sendCustomerMessage.mockImplementation(handoffSender(async () => ({ sent: false, blocked: false, terminal: true, retryable: false, code: 'PROVIDER_FAILURE' })));
+    fixture.payload.items.forEach((item) => { item.body.sendCompletionSms = true; item.body.requestReview = false; });
+    await mockPg('visit_completion_packets').where({ id: fixture.packetId }).update({ payload: JSON.stringify(fixture.payload) });
+    await deliver();
+    expect(await mockPg('visit_effects').where({ visit_id: fixture.visitId, effect_type: 'completion_sms' }).first()).toMatchObject({ status: 'suppressed' });
+  });
+
+  test('a multi-address writer takes every email key in one global order', async () => {
+    const { lockAssignedCustomerEmails, customerEmailLockKeys } = require('../utils/customer-comms-lock');
+    const keys = [];
+    const onQuery = (query) => { if (/pg_advisory_xact_lock/.test(query.sql)) keys.push(query.bindings[0]); };
+    mockPg.on('query', onQuery);
+    try {
+      await mockPg.transaction((trx) => lockAssignedCustomerEmails(trx, { email: 'john.doe+a@gmail.com', service_contact_email: 'aaa@example.invalid', billing_email: 'johndoe@gmail.com' }));
+    } finally {
+      mockPg.off('query', onQuery);
+    }
+    expect(keys).toEqual([...new Set(keys)].sort());
+    expect(keys).toEqual(['customer-email:aaa@example.invalid', 'customer-email:john.doe+a@gmail.com', 'customer-email:johndoe@gmail.com', 'customer-mailbox:johndoe@gmail.com']);
+    expect(customerEmailLockKeys('john.doe@gmail.com')).toEqual(['customer-email:john.doe@gmail.com', 'customer-mailbox:johndoe@gmail.com']);
   });
 
   test('a billing-email save assigning the recovery destination waits for the held retry handoff', async () => {

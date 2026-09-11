@@ -350,8 +350,11 @@ async function sendSummarySms({ visit, member, customer, summaryUrl, requested }
     // Once handed to a non-idempotent provider, every failure is ambiguous
     // (a timeout, a 5xx, a 429: the provider may hold the text) and stays
     // unknown for office reconciliation. Never reclaim it. A refusal before
-    // the request is a block and keeps its own retry contract.
-    if (!result.sent && !result.blocked && dispatched) {
+    // the request is a block and keeps its own retry contract, and so is a
+    // definitive synchronous rejection (an unsubscribed, invalid or
+    // non-mobile number: the adapter's terminal codes), which proves the
+    // provider accepted nothing.
+    if (!result.sent && !result.blocked && dispatched && result.terminal !== true) {
       await VisitGroups.finalizeVisitNotification(visit.id, 'completion_sms', 'unknown_delivery', new Date(), claim.token);
       return;
     }
