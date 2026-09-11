@@ -23,6 +23,22 @@ const { etDateString } = require('../utils/datetime-et');
 // recorded either way.
 const OPEN_VISIT_STATUSES = ['pending', 'confirmed'];
 
+// ONE null-tolerant predicate for "is this visit still live/open" (Codex
+// round 16 P2 #4131) — a NULL status is a live visit (the repository's live-
+// visit convention; the picker links invoices to such legacy rows), so it
+// must pass exactly like pending/confirmed everywhere this decision is made:
+// the resolver below, and the locked closeout recheck in
+// complete-scheduled-service.js (which re-derives the SAME verdict on the
+// FOR UPDATE row and used to accept only the string statuses, throwing
+// issued_visit_in_progress on a legacy NULL-status visit the resolver had
+// just admitted). The settled-statement sweep's SQL expresses the same
+// OPEN_VISIT_STATUSES + null tolerance directly in its WHERE clause (a JS
+// predicate can't run inside the query) — same source array, so all three
+// can never drift apart.
+function isLiveVisitStatus(status) {
+  return status == null || OPEN_VISIT_STATUSES.includes(String(status));
+}
+
 function dateOnly(value) {
   if (!value) return null;
   if (value instanceof Date) return Number.isNaN(value.getTime()) ? null : value.toISOString().slice(0, 10);
@@ -97,7 +113,7 @@ async function resolveVisitForIssuedInvoice(conn, invoice, { today = etDateStrin
   // A NULL status is a live visit (the repository's live-visit convention;
   // the picker links invoices to such legacy rows — Codex P2 r8 #4131), so it
   // closes out like pending/confirmed instead of being refused as visit_null.
-  if (svc.status != null && !OPEN_VISIT_STATUSES.includes(String(svc.status))) return leaveOpen(`visit_${svc.status}`);
+  if (!isLiveVisitStatus(svc.status)) return leaveOpen(`visit_${svc.status}`);
   const day = dateOnly(svc.scheduled_date);
   if (!day || day > today) return leaveOpen('visit_in_future');
   // A SEND proves nothing about a visit scheduled for today: the office
@@ -429,6 +445,7 @@ module.exports = {
   closeOutVisitsForStatement,
   retrySettledStatementCloseouts,
   OPEN_VISIT_STATUSES,
+  isLiveVisitStatus,
   resolveVisitForIssuedInvoice,
   resumableIssuedCloseoutAttempt,
   closeOutVisitForIssuedInvoice,

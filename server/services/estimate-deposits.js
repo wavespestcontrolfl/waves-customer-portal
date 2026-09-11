@@ -1517,6 +1517,16 @@ async function consumeDepositCredit({ estimateId, amount, invoiceId, trx = db })
   if (!(remainingCents > 0)) return 0;
   const requestedCents = remainingCents;
 
+  // Serialize against markDepositReceived / a concurrent mint's own read
+  // (Codex round 16 P1 #4131 — same chokepoint as pendingDepositCredit):
+  // the lock lives INSIDE this ledger writer so a caller can't forget it.
+  // Callers that already hold it (the mint's own transaction, which locks
+  // before its pendingDepositCredit read) just re-acquire — advisory xact
+  // locks are reentrant within the same transaction. trx must be a REAL
+  // transaction for the lock to actually serialize anything; every current
+  // caller already passes one.
+  await acquireEstimateDepositLedgerLock(trx, estimateId);
+
   const rows = await trx('estimate_deposits')
     .where({ estimate_id: estimateId, status: 'received' })
     .orderBy('created_at', 'asc')
@@ -1612,6 +1622,13 @@ async function restoreDepositCreditForVoidedInvoice({ invoice, trx = db }) {
     totalRequestedCents += requestedCents;
     const estimateId = line.estimate_id || null;
     if (!estimateId) continue; // unstamped line — counted in the shortfall alert below
+    // Serialize against a concurrent mint's pendingDepositCredit read /
+    // consumeDepositCredit write, and against markDepositReceived (Codex
+    // round 16 P1 #4131): this restore makes credit available again, so it
+    // needs the SAME lock those take, acquired here inside the helper
+    // rather than left to each void path to remember. trx must be a real
+    // transaction (every current caller already supplies one).
+    await acquireEstimateDepositLedgerLock(trx, estimateId);
     let remainingCents = requestedCents;
     const rows = await trx('estimate_deposits')
       .where({ estimate_id: estimateId })

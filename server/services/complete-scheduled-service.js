@@ -5017,8 +5017,13 @@ async function completeScheduledService(completionInput, packetContext = null) {
             // P1 r9): the wrapper admits pending/confirmed on an unlocked read;
             // a technician who started the visit in between (en_route /
             // on_site) owns it — a running timer and a completion of their own
-            // — so the closeout refuses instead of completing over them.
-            if (!['pending', 'confirmed'].includes(String(lockedSvcRow?.status))) {
+            // — so the closeout refuses instead of completing over them. Uses
+            // the SAME null-tolerant predicate the resolver does (Codex round
+            // 16 P2 #4131) — a legacy NULL-status visit the resolver had just
+            // admitted used to throw issued_visit_in_progress here on the
+            // string-only check.
+            const { isLiveVisitStatus } = require('../services/invoice-issued-closeout');
+            if (!isLiveVisitStatus(lockedSvcRow?.status)) {
               throw Object.assign(new Error('visit started by its technician during the issued-invoice closeout'), { code: 'issued_visit_in_progress' });
             }
             // The LOCKED status is the transition source (GitHub r10 P2

@@ -1492,6 +1492,25 @@ describe('consumeDepositCredit — partial application tracking', () => {
     const credit = await pendingDepositCredit('est-1');
     expect(credit.amount).toBe(29);
   });
+
+  // Codex round 16 P1 #4131: consuming credit is the OTHER side of the same
+  // race the mint's own read guards against — this lock lives inside the
+  // writer so every caller (the mint, admin-customers.js's annual-prepay
+  // path, estimate-converter.js) gets it automatically, re-acquiring
+  // reentrant-safe when the caller (the mint) already holds it.
+  it('takes the estimate-keyed deposit-ledger lock BEFORE reading the ledger', async () => {
+    const db = require('../models/db');
+    const callOrder = [];
+    db.raw.mockImplementationOnce((...args) => { callOrder.push({ step: 'lock', args }); return { __raw: args[0] }; });
+    const originalHandler = consumeDb({ rows: [{ id: 'd1', amount: '50.00', credited_amount: '0.00' }], updates: [] });
+    mockDbHandler = (...args) => { callOrder.push({ step: 'read' }); return originalHandler(...args); };
+
+    await consumeDepositCredit({ estimateId: 'est-1', amount: 25, invoiceId: 'inv-1' });
+
+    expect(callOrder[0].step).toBe('lock');
+    expect(callOrder[0].args[1]).toEqual(['estimate.deposit.ledger', 'est-1']);
+    expect(callOrder[1].step).toBe('read');
+  });
 });
 
 describe('restoreDepositCreditForVoidedInvoice — void returns consumed dollars to the ledger (P1)', () => {
@@ -1592,6 +1611,39 @@ describe('restoreDepositCreditForVoidedInvoice — void returns consumed dollars
     expect(await restoreDepositCreditForVoidedInvoice({ invoice: voidedInvoice([]) })).toBe(0);
     expect(await restoreDepositCreditForVoidedInvoice({ invoice: { id: 'x', line_items: '{not json' } })).toBe(0);
     expect(mockTriggerNotification).not.toHaveBeenCalled();
+  });
+
+  // Codex round 16 P1 #4131: this restore makes ledger credit available
+  // again without ever taking the SAME advisory lock a concurrent mint's
+  // pendingDepositCredit read takes — a mint could read "nothing pending"
+  // right before this restore commits the very credit it was checking for,
+  // then create a full-balance invoice the restored credit should have
+  // reduced. The lock now lives INSIDE this helper (a caller can't forget
+  // it) and is taken BEFORE the ledger read, keyed on the SAME estimate id
+  // — the exact serialization point a real Postgres advisory lock enforces
+  // against the mint's own (round-14) lock acquisition.
+  it('takes the estimate-keyed deposit-ledger lock BEFORE reading the ledger — the same lock a concurrent mint takes', async () => {
+    const db = require('../models/db');
+    const callOrder = [];
+    db.raw.mockImplementationOnce((...args) => { callOrder.push({ step: 'lock', args }); return { __raw: args[0] }; });
+    mockDbHandler = restoreDb({
+      rows: [{ id: 'd1', status: 'received', credited_amount: '49.00' }],
+      updates: [],
+    });
+    const originalHandler = mockDbHandler;
+    mockDbHandler = (...args) => {
+      callOrder.push({ step: 'read' });
+      return originalHandler(...args);
+    };
+
+    await restoreDepositCreditForVoidedInvoice({ invoice: voidedInvoice([creditLine(49)]) });
+
+    expect(callOrder[0].step).toBe('lock');
+    expect(callOrder[0].args[0]).toMatch(/pg_advisory_xact_lock\(hashtext\(\?\), hashtext\(\?::text\)\)/);
+    // Same namespace + key scheme the mint's own lock (scheduled-invoice-
+    // mint.js) and markDepositReceived use — the ONE shared lock.
+    expect(callOrder[0].args[1]).toEqual(['estimate.deposit.ledger', 'est-1']);
+    expect(callOrder[1].step).toBe('read');
   });
 });
 

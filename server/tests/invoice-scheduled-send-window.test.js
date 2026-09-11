@@ -451,4 +451,43 @@ describe('processScheduledSends send-window handling', () => {
     expect(updateArgs.scheduled_send_attempts).toBe(3);
     expect(updateArgs.scheduled_send_error).toContain('queued for the send window');
   });
+
+  // Codex round 16 P1 #4131: the generic failure branch's restore used to be
+  // an unconditional UPDATE keyed only on id — a worker (or the void sweep,
+  // which takes a 'sending' row out from under a live claim by design) that
+  // moved the row to 'sent' (or 'void') between the send attempt and this
+  // restore would get clobbered back to 'scheduled' with a stale due time,
+  // double-sending on the next tick. The restore is now conditioned on
+  // status='sending' AND the exact updated_at THIS claim's own flip wrote.
+  test('a worker finalizes the invoice to sent between the send attempt and the restore — the restore is a no-op, the row stays sent', async () => {
+    isWithinSendWindowET.mockReturnValue(true);
+    const CLAIM_STAMP = new Date('2026-09-11T12:00:00.000Z');
+    const staleRecovery = chain();
+    const dueQuery = chain({ rows: [dueRow] });
+    const claim = chain({ returning: [{ id: 'inv-1', scheduled_request_review: false, scheduled_review_delay_minutes: null, updated_at: CLAIM_STAMP }] });
+    // 0 rows affected: some other process already moved the row to 'sent'
+    // (or anything else) before this exact updated_at could match.
+    const restoreAttempt = chain({ updateCount: 0 });
+    db
+      .mockReturnValueOnce(staleRecovery)
+      .mockReturnValueOnce(dueQuery)
+      .mockReturnValueOnce(claim)
+      .mockReturnValueOnce(restoreAttempt);
+    sendSpy.mockResolvedValue({
+      ok: false,
+      sms: { ok: false, error: 'Customer has no phone number' },
+      email: { ok: false, error: 'no email on file' },
+      creditApplied: 0,
+    });
+
+    const result = await InvoiceService.processScheduledSends();
+
+    expect(result).toEqual({ sent: 0, failed: 1, deferred: 0 });
+    // The restore matched on this claim's exact stamp — the token that
+    // proves nobody else has touched the row since.
+    expect(restoreAttempt.where.mock.calls[0][0]).toEqual({ id: 'inv-1', status: 'sending', updated_at: CLAIM_STAMP });
+    // 0 rows affected is logged, not thrown — the batch keeps going.
+    const logger = require('../services/logger');
+    expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('moved out from under this claim'));
+  });
 });

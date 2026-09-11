@@ -147,7 +147,10 @@ describe('source contracts', () => {
     expect(completion).toMatch(/code: 'issued_visit_rescheduled' \}\);\s*\}[\s\S]{0,3200}?const lockedProfile = await resolveLockedProfile\(lockedSvcRow, trx, \{ strict: true \}\);\s*if \(lockedProfile\?\.requiresProject \|\| lockedProfile\?\.projectBacked\) \{\s*throw Object\.assign\(new Error\([^)]*\), \{ code: 'project_required_completion' \}\);/);
     expect(completion).toMatch(/if \(err && err\.code === 'project_required_completion' && issuedInvoiceCloseout\) \{\s*await CompletionAttempts\.markCompletionAttemptFailed\(completionAttempt, err, db\);/);
     // The office-only status set is re-checked on the locked row, ahead of the profile re-resolve.
-    expect(completion).toMatch(/code: 'issued_visit_rescheduled' \}\);\s*\}[\s\S]{0,700}?if \(!\['pending', 'confirmed'\]\.includes\(String\(lockedSvcRow\?\.status\)\)\) \{\s*throw Object\.assign\(new Error\([^)]*\), \{ code: 'issued_visit_in_progress' \}\);[\s\S]{0,2200}?const lockedProfile = await resolveLockedProfile/);
+    // Codex round 16 P2 #4131: the string-only check was replaced by the
+    // shared null-tolerant isLiveVisitStatus predicate (a legacy NULL-status
+    // visit the resolver had just admitted used to throw here instead).
+    expect(completion).toMatch(/code: 'issued_visit_rescheduled' \}\);\s*\}[\s\S]{0,900}?if \(!isLiveVisitStatus\(lockedSvcRow\?\.status\)\) \{\s*throw Object\.assign\(new Error\([^)]*\), \{ code: 'issued_visit_in_progress' \}\);[\s\S]{0,2200}?const lockedProfile = await resolveLockedProfile/);
   });
   test('the issued-invoice recheck locks the invoice FIRST — behind the mint advisory lock, ahead of the customer and visit rows (invoice → customer, the reversal paths\' order; GitHub r6 P2)', () => {
     const source = fs.readFileSync(path.join(__dirname, '../services/complete-scheduled-service.js'), 'utf8');
@@ -296,6 +299,17 @@ postgres('invoice issued ⇒ visit completed through the canonical completion (P
 
   test('a pest visit closes quietly on its sent invoice', async () => {
     await fixture({ serviceType: 'Fixture Quarterly Pest Control Service' });
+    await expectQuietCompletion(await closeOutVisitForIssuedInvoice({ invoiceId: f.invoiceId, trigger: 'sent', actorTechnicianId: f.techId, conn: mockPg }));
+  });
+
+  // Codex round 16 P2 #4131: a legacy NULL-status visit is a live visit by
+  // this repository's convention (the resolver already admits it) — the
+  // locked recheck used to accept only the string statuses and threw
+  // issued_visit_in_progress on exactly this row, refusing a closeout the
+  // resolver had just approved. Both now share isLiveVisitStatus.
+  test('a legacy NULL-status visit closes quietly too — the locked recheck no longer refuses it as issued_visit_in_progress', async () => {
+    await fixture({ serviceType: 'Fixture Quarterly Pest Control Service' });
+    await mockPg('scheduled_services').where({ id: f.serviceId }).update({ status: null });
     await expectQuietCompletion(await closeOutVisitForIssuedInvoice({ invoiceId: f.invoiceId, trigger: 'sent', actorTechnicianId: f.techId, conn: mockPg }));
   });
 

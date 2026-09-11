@@ -430,4 +430,39 @@ describe('completionInvoiceAlreadyDelivered', () => {
     expect(completion).toMatch(/throw err;\s*\} finally \{[\s\S]{0,900}?if \(completionInvoiceSendClaim\?\.claimed && !completionInvoiceLinkDelivered\) \{\s*await require\('\.\.\/services\/invoice'\)\.restoreSendClaim\(completionInvoiceSendClaim\.invoiceId, completionInvoiceSendClaim\.previousStatus, true\);[\s\S]{0,120}?\}\s*\}\s*\}\s*\n\s*module\.exports = \{/);
     expect(completion.match(/restoreSendClaim\(completionInvoiceSendClaim\.invoiceId/g)).toHaveLength(1);
   });
+
+  // Codex round 16 P1 #4131: the Dispatch feed's checkoutInvoice fetch used
+  // to exclude ONLY 'void' — a canceled invoice that still carried sent_at
+  // (from before it was canceled) was read as the visit's "current"
+  // invoice, and completionInvoiceAlreadyDelivered reported it delivered
+  // even though nobody can ever collect on it. Both the Dispatch feed and
+  // the schedule feeds now filter on the ONE shared DEAD_INVOICE_STATUSES
+  // set (invoice-helpers.js), so they can never drift apart again.
+  test('canceled + sent_at is excluded by DEAD_INVOICE_STATUSES — the flag a stale narrower filter would have reported true is false', () => {
+    const { DEAD_INVOICE_STATUSES, completionInvoiceAlreadyDelivered } = require('../services/invoice-helpers');
+    expect(DEAD_INVOICE_STATUSES).toEqual(['void', 'canceled', 'cancelled']);
+
+    // The exact bug: a canceled invoice with a stale sent_at stamp reads as
+    // delivered once selected — the fix is that it's never selected.
+    const canceledWithSentAt = { status: 'canceled', sent_at: new Date('2026-01-01') };
+    expect(completionInvoiceAlreadyDelivered(canceledWithSentAt)).toBe(true);
+    // The OLD filter (exclude only 'void') would have let this row through.
+    expect(canceledWithSentAt.status).not.toBe('void');
+    // The FIX: DEAD_INVOICE_STATUSES excludes it before completionInvoiceAlreadyDelivered
+    // ever sees it — simulating the query's WHERE clause directly.
+    const invoiceRows = [canceledWithSentAt, { status: 'cancelled', sent_at: new Date() }, { status: 'draft', sent_at: null }];
+    const selectable = invoiceRows.filter((row) => !DEAD_INVOICE_STATUSES.includes(row.status));
+    expect(selectable).toEqual([{ status: 'draft', sent_at: null }]);
+    // The newest non-dead invoice is what the feed derives the flag from —
+    // here, an undelivered draft, so the flag is false.
+    expect(completionInvoiceAlreadyDelivered(selectable[0] || null)).toBe(false);
+
+    // Both consumers filter on this SAME shared set (Codex round 16 P1
+    // #4131) — not local, possibly-drifting copies.
+    const dispatch = fs.readFileSync(path.join(__dirname, '../routes/admin-dispatch.js'), 'utf8');
+    expect(dispatch).toMatch(/const \{ DEAD_INVOICE_STATUSES \} = require\('\.\.\/services\/invoice-helpers'\);[\s\S]{0,200}?checkoutInvoice = await db\('invoices'\)[\s\S]{0,100}?\.where\(\{ scheduled_service_id: s\.id \}\)[\s\S]{0,50}?\.whereNotIn\('status', DEAD_INVOICE_STATUSES\)/);
+    const schedule = fs.readFileSync(path.join(__dirname, '../routes/admin-schedule.js'), 'utf8');
+    expect(schedule).toMatch(/const \{ DEAD_INVOICE_STATUSES: DEAD_ATTACHED_INVOICE_STATUSES \} = require\('\.\.\/services\/invoice-helpers'\);/);
+    expect(schedule.match(/\.whereNotIn\('status', DEAD_ATTACHED_INVOICE_STATUSES\)/g).length).toBeGreaterThanOrEqual(2);
+  });
 });

@@ -3976,8 +3976,30 @@ const InvoiceService = {
           "id",
           "scheduled_request_review",
           "scheduled_review_delay_minutes",
+          "updated_at",
         ]);
       if (!claimed) continue;
+      // THE claim token for every status-restore below (Codex round 15 P1
+      // #4131): claimed.updated_at is the exact stamp THIS claim's flip
+      // just wrote. A restore that only guards on status='sending' can
+      // clobber a row something else moved on mid-flight — the void sweep
+      // takes a 'sending' row out from under a live claim by design
+      // (CANCELLED_SERVICE_VOIDABLE_STATUSES includes 'sending'), and a
+      // failure here that landed AFTER that void would otherwise resurrect
+      // the voided invoice as 'scheduled' with a fresh due time — matching
+      // the same hazard a competing finalize-to-'sent' would pose. Every
+      // restore in this loop matches on status='sending' AND this exact
+      // updated_at; 0 rows means the row already moved on, so the restore
+      // leaves it exactly as whoever else left it instead of overwriting.
+      const restoreClaimedInvoice = async (payload, label) => {
+        const rows = await db("invoices")
+          .where({ id: inv.id, status: "sending", updated_at: claimed.updated_at })
+          .update(payload);
+        if (!rows) {
+          logger.warn(`[invoice] Scheduled-send ${label} restore skipped for ${inv.invoice_number} — the row moved out from under this claim; leaving it as-is`);
+        }
+        return rows;
+      };
 
       let result;
       try {
@@ -4019,14 +4041,12 @@ const InvoiceService = {
         ["QUIET_HOURS_HOLD", "PUSH_IN_FLIGHT", "APP_DELIVERY_HOLD"].includes(result.sms?.code) && result.sms?.nextAllowedAt;
       if (smsHeld) {
         deferred += 1;
-        await db("invoices")
-          .where({ id: inv.id })
-          .update({
-            status: "scheduled",
-            scheduled_send_at: new Date(result.sms.nextAllowedAt),
-            scheduled_send_error: error,
-            updated_at: new Date(),
-          });
+        await restoreClaimedInvoice({
+          status: "scheduled",
+          scheduled_send_at: new Date(result.sms.nextAllowedAt),
+          scheduled_send_error: error,
+          updated_at: new Date(),
+        }, "held");
       } else {
         failed += 1;
         // A temporary native failure consumes an attempt under this
@@ -4036,15 +4056,13 @@ const InvoiceService = {
           ? Math.max(60000, Number(result.sms.retryAfterMs) || 60000)
             * (2 ** Number(inv.scheduled_send_attempts || 0)) * (1 + Math.random() * 0.2)
           : null;
-        await db("invoices")
-          .where({ id: inv.id })
-          .update({
-            status: "scheduled",
-            scheduled_send_attempts: Number(inv.scheduled_send_attempts || 0) + 1,
-            ...(nativeRetryMs ? { scheduled_send_at: new Date(Date.now() + nativeRetryMs) } : {}),
-            scheduled_send_error: error,
-            updated_at: new Date(),
-          });
+        await restoreClaimedInvoice({
+          status: "scheduled",
+          scheduled_send_attempts: Number(inv.scheduled_send_attempts || 0) + 1,
+          ...(nativeRetryMs ? { scheduled_send_at: new Date(Date.now() + nativeRetryMs) } : {}),
+          scheduled_send_error: error,
+          updated_at: new Date(),
+        }, "failed");
       }
       // We pre-claimed this row, so sendViaSMSAndEmail couldn't reverse the credit
       // it auto-applied (the row was 'sending'). Now that it's back to 'scheduled'

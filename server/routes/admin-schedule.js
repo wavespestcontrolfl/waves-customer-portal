@@ -3091,8 +3091,10 @@ async function extendedChargeGuardsClear(invoice, scheduledServiceId, autopayAct
 // question (Codex P1 — the shortcut excluded only void, and a canceled
 // latest invoice silenced the warning on a visit that then completed with
 // no replacement). Refunded is deliberately NOT here: completion suppresses
-// on it and parks a manual-billing alert instead of re-minting.
-const DEAD_ATTACHED_INVOICE_STATUSES = Object.freeze(['void', 'canceled', 'cancelled']);
+// on it and parks a manual-billing alert instead of re-minting. Shared with
+// admin-dispatch.js's own "newest invoice for this visit" feed (Codex round
+// 16 P1 #4131) via the ONE exported set, so the two can never drift apart.
+const { DEAD_INVOICE_STATUSES: DEAD_ATTACHED_INVOICE_STATUSES } = require('../services/invoice-helpers');
 
 function predictionFromAttachedInvoice(invoice, { autopayActive = false, chargeLikely = false, chargeGuardsClear = false, visitPayerBilled = false } = {}) {
   if (!invoice || DEAD_ATTACHED_INVOICE_STATUSES.includes(String(invoice.status || '').toLowerCase())) return null;

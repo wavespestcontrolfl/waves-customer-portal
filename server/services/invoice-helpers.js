@@ -36,6 +36,18 @@ const INVOICE_UNCOLLECTIBLE_STATUSES = Object.freeze([
 // 'rescheduled' (a pending reschedule REQUEST parks the same row).
 const VISIT_NEVER_RAN_STATUSES = Object.freeze(['cancelled', 'canceled', 'no_show', 'skipped']);
 
+// A void/canceled invoice never settles and completion mints past it — it
+// must not silently gate anything downstream reads as "the current invoice
+// for this visit" (Codex round 16 P1 #4131): a completion-already-sent flag
+// derived from a DEAD row (e.g. a canceled invoice that happened to carry
+// sent_at from before it was canceled) reports delivered for money nobody
+// can ever collect. The ONE shared set every "newest invoice for this
+// visit" lookup filters on — the schedule feeds (admin-schedule.js) and the
+// Dispatch feed (admin-dispatch.js) alike, so they can never drift apart.
+// Refunded is deliberately NOT here: that invoice is handled by its own
+// live-vs-refunded reconciliation, not simply excluded.
+const DEAD_INVOICE_STATUSES = Object.freeze(['void', 'canceled', 'cancelled']);
+
 // Read the linked visit's status under the caller's transaction (FOR UPDATE
 // — same lock the settlement paths already take on the visit) and return
 // the terminal status when the invoice must refuse money, else null.
@@ -162,6 +174,7 @@ module.exports = {
   INVOICE_UPDATE_ALLOWED_FIELDS,
   INVOICE_UNCOLLECTIBLE_STATUSES,
   VISIT_NEVER_RAN_STATUSES,
+  DEAD_INVOICE_STATUSES,
   visitRefusesSettlement,
   lockVisitForSettlement,
   assertInvoiceCollectible,
