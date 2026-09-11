@@ -268,6 +268,32 @@ describe('commercial bid authoring', () => {
     expect(String(siblingExtension.patch.disposition?.sql ?? siblingExtension.patch.disposition)).toMatch(/expired_unviewed/);
     expect(row.expires_at.toISOString()).toBe('2100-01-01T04:59:59.999Z');
   });
+  test('shortening a fixed hold pulls members back off the obsolete widened expiry (GH codex P1 r4 on #4309)', async () => {
+    const oldExpiry = new Date('2100-01-01T04:59:59.999Z');
+    Object.assign(row, { status: 'sent', sent_at: new Date('2026-01-02T12:00:00.000Z'), expires_at: oldExpiry, estimate_group_id: 'synthetic-group',
+      estimate_data: { proposal: { ...proposal(), validThrough: '2099-12-31' } } });
+    // An ordinary sibling delivered on Jan 3 whose entry expiry this
+    // anchor's old date had widened; its own standard window ended Jan 10.
+    const sibling = savedEstimate({ id: 'synthetic-sibling', status: 'viewed', sent_at: new Date('2026-01-03T12:00:00.000Z'), viewed_at: new Date('2026-01-04T12:00:00.000Z'),
+      expires_at: oldExpiry, estimate_group_id: 'synthetic-group', estimate_data: {} });
+    const siblingUpdates = [];
+    db.mockImplementation((table) => {
+      const b = estimateDatabase(table);
+      let groupQuery = false; let targetId = null;
+      const originalWhere = b.where.getMockImplementation();
+      b.where.mockImplementation((key, value) => { if (key?.estimate_group_id && !key.id) groupQuery = true; if (key?.id) targetId = key.id; return originalWhere(key, value); });
+      const originalSelect = b.select.getMockImplementation();
+      b.select.mockImplementation(async (...args) => (groupQuery ? [structuredClone(sibling)] : originalSelect(...args)));
+      const originalUpdate = b.update.getMockImplementation();
+      b.update.mockImplementation(async (patch) => { if (targetId === sibling.id) { siblingUpdates.push(patch); return 1; } return originalUpdate(patch); });
+      return b;
+    });
+    const res = await invoke('/:id/proposal', 'put', { proposal: { ...proposal(), validThrough: '2099-12-21' } });
+    expect(res.statusCode).toBe(200);
+    expect(row.expires_at.toISOString()).toBe('2099-12-22T04:59:59.999Z');
+    expect(siblingUpdates).toHaveLength(1);
+    expect(new Date(siblingUpdates[0].expires_at).toISOString()).toBe('2099-12-22T04:59:59.999Z');
+  });
   test('an older editor omitting validity preserves the saved price hold', async () => {
     gateEnvValue.mockReturnValue(false);
     row.status = 'draft'; row.estimate_data = { proposal: proposal() };
@@ -672,5 +698,38 @@ describe('reviewed multi-property offer revisions', () => {
     expect(persistence.revisionGroupLockIds(
       { estimate_group_id: 'synthetic-group-z' }, { pricing_authority: 'SERVER', estimate_group_id: 'synthetic-group-a' },
     )).toEqual(['synthetic-group-a', 'synthetic-group-z']);
+  });
+});
+
+
+describe('fixed bid deadline at the provider handoff (GH codex P2 r4 on #4309)', () => {
+  const expiry = new Date('2099-12-22T04:59:59.999Z');
+  const setBid = () => {
+    row.estimate_data = { proposal: { enabled: true, validThrough: '2099-12-21',
+      buildings: [{ name: 'Synthetic property', lineItems: [
+        { id: 'application', description: 'Synthetic application', quantity: 1, unit: 'acre', unitPrice: 100, frequency: 'one_time' },
+      ] }] } };
+  };
+  test.each(['sms', 'email'])('%s refuses a bid whose deadline passes during preparation, as a definite failure', async (channel) => {
+    setBid();
+    let at = new Date(expiry.getTime() - 5000);
+    if (channel === 'sms') {
+      shortenOrPassthrough.mockImplementationOnce(async (url) => { at = new Date(expiry.getTime() + 5000); return url; });
+    } else {
+      require('../services/pdf/estimate-doc-pdf').buildEstimateProposalEmailAttachmentPreferred.mockImplementationOnce(async () => {
+        at = new Date(expiry.getTime() + 5000); return { filename: 'synthetic.pdf', content: 'c3ludGhldGlj', type: 'application/pdf' };
+      });
+    }
+    const result = await router.sendEstimateNow(structuredClone(row), channel, { callerPreClaimed: true, now: () => at });
+    expect(result.channels[channel]).toMatchObject({ ok: false, error: expect.stringMatching(/validity date has passed/) });
+    expect(result.channels[channel].uncertain).not.toBe(true);
+    expect(email.sendTemplate).not.toHaveBeenCalled();
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+  });
+  test('a bid still inside its deadline at the handoff goes out', async () => {
+    setBid();
+    const result = await router.sendEstimateNow(structuredClone(row), 'email', { callerPreClaimed: true, now: () => new Date(expiry.getTime() - 5000) });
+    expect(result.channels.email.ok).toBe(true);
+    expect(email.sendTemplate).toHaveBeenCalledTimes(1);
   });
 });

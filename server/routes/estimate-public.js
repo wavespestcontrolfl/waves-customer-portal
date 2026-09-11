@@ -8489,7 +8489,9 @@ async function handleEstimateView(req, res, next) {
       return next();
     }
 
-    if (new Date(estimate.expires_at) < new Date() && estimate.status !== 'accepted') {
+    // This property's own deadline, not the group-widened entry expiry
+    // (GH codex P2 r4 on #4309) — see publicExpiresAt.
+    if (new Date(publicExpiresAt(estimate)) < new Date() && estimate.status !== 'accepted') {
       return res.set('Content-Type', 'text/html').send(
         renderExpiredPage({ address: estimate.address, customerName: estimate.customer_name })
       );
@@ -25198,7 +25200,10 @@ router.get('/:token/data', dataLimiter, async (req, res, next) => {
 
     const terminalState = (() => {
       if (['accepted', 'declined', 'expired'].includes(estimate.status)) return estimate.status;
-      if (estimate.expires_at && new Date(estimate.expires_at) < new Date()) return 'expired';
+      // The CTA/activity state follows THIS property's own deadline, not the
+      // group-widened entry expiry (GH codex P2 r4 on #4309) — see publicExpiresAt.
+      const shownExpiry = publicExpiresAt(estimate);
+      if (shownExpiry && new Date(shownExpiry) < new Date()) return 'expired';
       return null;
     })();
     const ctaTerminalState = terminalState || (quoteRequirement.quoteRequired ? 'quote_required' : null);
@@ -25914,7 +25919,8 @@ async function handleEstimateAsk(req, res, next) {
     if (!verifyEstimateAskToken(req, estimate)) {
       return res.status(403).json({ error: 'estimate_ask_forbidden' });
     }
-    if (!isEstimateAskAnswerable(estimate)) {
+    // Same authored-deadline rule as the page's CTA state (GH codex P2 r4 on #4309).
+    if (!isEstimateAskAnswerable({ ...estimate, expires_at: publicExpiresAt(estimate) })) {
       return res.status(409).json({ error: 'estimate_expired' });
     }
 

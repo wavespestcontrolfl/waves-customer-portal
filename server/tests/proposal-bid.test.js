@@ -110,4 +110,10 @@ describe('publicExpiresAt (GH codex P1 r3 on #4309)', () => {
     expect(src.match(/expiresAt: docRenderPin\?\.validThrough \|\| publicExpiresAt\(estimate\)/g)).toHaveLength(1);
     expect(src.match(/expiresAt: estimate\.expires_at\b/g)).toBeNull();
   });
+  test('the CTA state, the ask route and the legacy expired page judge the same shown deadline (GH codex P2 r4 on #4309)', () => {
+    const src = require('fs').readFileSync(require('path').join(__dirname, '../routes/estimate-public.js'), 'utf8');
+    expect(src).toMatch(/const shownExpiry = publicExpiresAt\(estimate\);\n\s+if \(shownExpiry && new Date\(shownExpiry\) < new Date\(\)\) return 'expired';/);
+    expect(src).toMatch(/isEstimateAskAnswerable\(\{ \.\.\.estimate, expires_at: publicExpiresAt\(estimate\) \}\)/);
+    expect(src).toMatch(/new Date\(publicExpiresAt\(estimate\)\) < new Date\(\) && estimate\.status !== 'accepted'/);
+  });
 });
