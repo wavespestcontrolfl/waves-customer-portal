@@ -69,7 +69,6 @@ const UNKNOWN_SENDER_ALERT_WINDOW_MS = 4 * 60 * 60 * 1000;
 
 async function findCandidatePhones() {
   const rows = await db('messages as m')
-    .join('conversations as c', 'c.id', 'm.conversation_id')
     // Required, not left-joined (codex #4210 round-9 P1): a message with no
     // matching sms_log row, or one that was never stamped eligible by
     // dispatchUnknownSenderAlert, is NOT a recovery candidate — it means
@@ -77,11 +76,18 @@ async function findCandidatePhones() {
     // that answered it, a tracking-line first-contact routed to new_lead
     // instead, a quiet reaction, ...), not that one was lost. This is a
     // coarse pre-filter only — the precise per-message decision is
-    // findOrphanMessage below.
+    // findOrphanMessage below. Scoped by the eligibility stamp alone, NOT
+    // conversations.customer_id (codex #4210 round-14 P1): a still-unread,
+    // never-delivered message's conversation can be promoted to a customer
+    // before this sweep ever runs — promotion moves rows, it does not
+    // deliver the missing bell — and gating on customer_id IS NULL would
+    // permanently exclude it from recovery the instant that happens. The
+    // eligibility stamp itself is durable and was only ever written for
+    // genuine unknown-sender dispatch attempts, so it's already the
+    // correct scope on its own.
     .join('sms_log as l', function join() {
       this.on('l.twilio_sid', '=', 'm.twilio_sid').andOnVal('l.direction', 'inbound');
     })
-    .whereNull('c.customer_id')
     .where({ 'm.channel': 'sms', 'm.direction': 'inbound' })
     .andWhere(function unread() { this.where({ 'm.is_read': false }).orWhereNull('m.is_read'); })
     .whereRaw("l.metadata->>'sms_reply_eligible' = 'true'")
@@ -95,17 +101,16 @@ async function hasActiveClaim(phone) {
 }
 
 // The earliest unread, sms_reply-eligible message from `phone` with NO
-// delivery covering it — "covering" meaning a genuine delivery receipt
-// (sms_log.metadata.sms_reply_alerted) at or after THAT message's own
-// arrival (codex #4210 round-11 P1). Checking coverage per candidate,
-// rather than once against the oldest unread message, is what lets a
-// later genuinely-failed message get recovered even when an older one
-// from the same phone already delivered successfully but is still
-// sitting unread (delivered-but-unread is normal — staff simply hasn't
-// looked yet — and must not mask an unrelated, later failure).
+// delivery covering it — checked per candidate, not once against the
+// oldest unread message (codex #4210 round-11 P1), so a later genuinely-
+// failed message is recoverable even when an older one from the same
+// phone already delivered successfully but is still sitting unread
+// (delivered-but-unread is normal — staff simply hasn't looked yet — and
+// must not mask an unrelated, later failure). Scoped by phone alone, not
+// through a conversations join (codex #4210 round-14 P1) — same
+// promotion-safety reasoning as findCandidatePhones above.
 async function findOrphanMessage(phone) {
   return db('messages as m')
-    .join('conversations as c', 'c.id', 'm.conversation_id')
     .join('sms_log as l', function join() {
       this.on('l.twilio_sid', '=', 'm.twilio_sid').andOnVal('l.direction', 'inbound');
     })
@@ -115,7 +120,7 @@ async function findOrphanMessage(phone) {
     .whereNotNull('m.twilio_sid')
     .whereNotExists(function covered() {
       // A receipt R covers this candidate M when they fall within the SAME
-      // throttle window of each other — |R.created_at - M.created_at| <
+      // throttle window of each other — |R.updated_at - M.created_at| <
       // WINDOW — not a one-directional "R before M" bound (codex #4210
       // round-13 P1, correcting round 12's own directionality assumption).
       // The claim is per-PHONE, contended by every concurrent message in a
@@ -132,11 +137,22 @@ async function findOrphanMessage(phone) {
       // uncovered — the two messages that matter for THIS decision are
       // never far enough apart in time for the window's radius to
       // accidentally bridge an unrelated pair.
+      //
+      // R's own anchor is `updated_at` (when delivery was actually
+      // confirmed), not `created_at` (when R itself arrived) — codex
+      // #4210 round-14 P1: a dispatch — a sweep recovery in particular —
+      // can land minutes after the message's own arrival, and the
+      // CONFIRMED claim window starts from confirm time, not arrival
+      // time. Anchoring on arrival time understates how far the window
+      // actually reaches, wrongly treating a later message that was
+      // genuinely still within the confirmed window as uncovered once
+      // enough time passes for arrival-based math to disagree with the
+      // real (confirm-time-based) expiry the claim row itself used.
       this.select(1).from('sms_log as l2')
         .where({ 'l2.direction': 'inbound', 'l2.from_phone': phone })
         .whereRaw("l2.metadata->>'sms_reply_alerted' = 'true'")
-        .whereRaw('l2.created_at > l.created_at - (? * interval \'1 millisecond\')', [UNKNOWN_SENDER_ALERT_WINDOW_MS])
-        .whereRaw('l2.created_at < l.created_at + (? * interval \'1 millisecond\')', [UNKNOWN_SENDER_ALERT_WINDOW_MS]);
+        .whereRaw('l2.updated_at > l.created_at - (? * interval \'1 millisecond\')', [UNKNOWN_SENDER_ALERT_WINDOW_MS])
+        .whereRaw('l2.updated_at < l.created_at + (? * interval \'1 millisecond\')', [UNKNOWN_SENDER_ALERT_WINDOW_MS]);
     })
     .orderBy('m.created_at', 'asc')
     .first('m.twilio_sid', 'm.body');

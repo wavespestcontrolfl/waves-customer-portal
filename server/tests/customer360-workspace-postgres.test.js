@@ -770,7 +770,7 @@ postgres('Customer 360 migrated PostgreSQL reads', () => {
         { id: newerMessageId, conversation_id: conversationId, channel: 'sms', direction: 'inbound', author_type: 'lead', is_read: false, twilio_sid: newerSid, body: 'Failed, needs recovery', created_at: newerCreatedAt },
       ]);
       await mockPg('sms_log').insert([
-        { direction: 'inbound', from_phone: unknownPhone, to_phone: '+19415550203', twilio_sid: olderSid, message_body: 'Delivered, still unread', metadata: JSON.stringify({ sms_reply_eligible: true, sms_reply_alerted: true }), created_at: olderCreatedAt },
+        { direction: 'inbound', from_phone: unknownPhone, to_phone: '+19415550203', twilio_sid: olderSid, message_body: 'Delivered, still unread', metadata: JSON.stringify({ sms_reply_eligible: true, sms_reply_alerted: true }), created_at: olderCreatedAt, updated_at: olderCreatedAt },
         { direction: 'inbound', from_phone: unknownPhone, to_phone: '+19415550203', twilio_sid: newerSid, message_body: 'Failed, needs recovery', metadata: JSON.stringify({ sms_reply_eligible: true }), created_at: newerCreatedAt },
       ]);
 
@@ -810,7 +810,7 @@ postgres('Customer 360 migrated PostgreSQL reads', () => {
         { id: throttledMessageId, conversation_id: conversationId, channel: 'sms', direction: 'inbound', author_type: 'lead', is_read: false, twilio_sid: throttledSid, body: 'Second text, throttled by the first', created_at: throttledCreatedAt },
       ]);
       await mockPg('sms_log').insert([
-        { direction: 'inbound', from_phone: unknownPhone, to_phone: '+19415550204', twilio_sid: coveringSid, message_body: 'First text, delivered', metadata: JSON.stringify({ sms_reply_eligible: true, sms_reply_alerted: true }), created_at: coveringCreatedAt },
+        { direction: 'inbound', from_phone: unknownPhone, to_phone: '+19415550204', twilio_sid: coveringSid, message_body: 'First text, delivered', metadata: JSON.stringify({ sms_reply_eligible: true, sms_reply_alerted: true }), created_at: coveringCreatedAt, updated_at: coveringCreatedAt },
         { direction: 'inbound', from_phone: unknownPhone, to_phone: '+19415550204', twilio_sid: throttledSid, message_body: 'Second text, throttled by the first', metadata: JSON.stringify({ sms_reply_eligible: true }), created_at: throttledCreatedAt },
       ]);
 
@@ -851,7 +851,7 @@ postgres('Customer 360 migrated PostgreSQL reads', () => {
       ]);
       await mockPg('sms_log').insert([
         { direction: 'inbound', from_phone: unknownPhone, to_phone: '+19415550205', twilio_sid: earlierSid, message_body: 'Persisted first, lost the claim race', metadata: JSON.stringify({ sms_reply_eligible: true }), created_at: earlierCreatedAt },
-        { direction: 'inbound', from_phone: unknownPhone, to_phone: '+19415550205', twilio_sid: laterSid, message_body: 'Persisted seconds later, won and delivered', metadata: JSON.stringify({ sms_reply_eligible: true, sms_reply_alerted: true }), created_at: laterCreatedAt },
+        { direction: 'inbound', from_phone: unknownPhone, to_phone: '+19415550205', twilio_sid: laterSid, message_body: 'Persisted seconds later, won and delivered', metadata: JSON.stringify({ sms_reply_eligible: true, sms_reply_alerted: true }), created_at: laterCreatedAt, updated_at: laterCreatedAt },
       ]);
 
       const result = await sweepUnknownSenderAlertClaims({ dispatch });
@@ -860,6 +860,77 @@ postgres('Customer 360 migrated PostgreSQL reads', () => {
     } finally {
       await mockPg('messages').whereIn('id', [earlierMessageId, laterMessageId]).delete();
       await mockPg('sms_log').whereIn('twilio_sid', [earlierSid, laterSid]).delete();
+      await mockPg('conversations').where({ id: conversationId }).delete();
+    }
+  }, 30000);
+
+  test('coverage is anchored to when delivery was confirmed, not when the message arrived (codex #4210 round-14 P1)', async () => {
+    const conversationId = randomUUID();
+    const coveringMessageId = randomUUID();
+    const laterMessageId = randomUUID();
+    const coveringSid = `SM-synthetic-sweep-confirm-anchor-a-${randomBytes(4).toString('hex')}`;
+    const laterSid = `SM-synthetic-sweep-confirm-anchor-b-${randomBytes(4).toString('hex')}`;
+    const unknownPhone = `+1941555${String(Date.now()).slice(-4)}`;
+    // Mirrors the auditor's own example: a message arrives, its dispatch is
+    // delayed (a sweep recovery in particular can land minutes after
+    // arrival), and delivery is only confirmed 4 minutes later. The
+    // confirmed claim's 4h window runs from THAT confirm time. A second
+    // message arriving late in that true window (1 minute before it
+    // closes) is still legitimately covered — but arrival-time-anchored
+    // math (created_at ± 4h) would place it just outside the window,
+    // wrongly treating it as an orphan.
+    const coveringCreatedAt = new Date(Date.now() - (4 * 60 + 2) * 60 * 1000); // arrived 4h02m ago
+    const coveringConfirmedAt = new Date(coveringCreatedAt.getTime() + 4 * 60 * 1000); // confirmed 4 minutes later (3h58m ago)
+    const laterCreatedAt = new Date(Date.now() - 60 * 1000); // arrived 1 minute ago
+    const dispatch = jest.fn(async () => true);
+    try {
+      await mockPg('conversations').insert({ id: conversationId, customer_id: null, channel: 'sms', contact_phone: unknownPhone, our_endpoint_id: '+19415550206' });
+      await mockPg('messages').insert([
+        { id: coveringMessageId, conversation_id: conversationId, channel: 'sms', direction: 'inbound', author_type: 'lead', is_read: false, twilio_sid: coveringSid, body: 'Arrived, delivery delayed', created_at: coveringCreatedAt },
+        { id: laterMessageId, conversation_id: conversationId, channel: 'sms', direction: 'inbound', author_type: 'lead', is_read: false, twilio_sid: laterSid, body: 'Arrived late in the true confirmed window', created_at: laterCreatedAt },
+      ]);
+      await mockPg('sms_log').insert([
+        { direction: 'inbound', from_phone: unknownPhone, to_phone: '+19415550206', twilio_sid: coveringSid, message_body: 'Arrived, delivery delayed', metadata: JSON.stringify({ sms_reply_eligible: true, sms_reply_alerted: true }), created_at: coveringCreatedAt, updated_at: coveringConfirmedAt },
+        { direction: 'inbound', from_phone: unknownPhone, to_phone: '+19415550206', twilio_sid: laterSid, message_body: 'Arrived late in the true confirmed window', metadata: JSON.stringify({ sms_reply_eligible: true }), created_at: laterCreatedAt },
+      ]);
+
+      const result = await sweepUnknownSenderAlertClaims({ dispatch });
+      expect(dispatch).not.toHaveBeenCalled();
+      expect(result.dispatched).toBe(0);
+    } finally {
+      await mockPg('messages').whereIn('id', [coveringMessageId, laterMessageId]).delete();
+      await mockPg('sms_log').whereIn('twilio_sid', [coveringSid, laterSid]).delete();
+      await mockPg('conversations').where({ id: conversationId }).delete();
+    }
+  }, 30000);
+
+  test('a failed dispatch stays recoverable after its conversation is promoted to a customer before the sweep runs (codex #4210 round-14 P1)', async () => {
+    const conversationId = randomUUID();
+    const messageId = randomUUID();
+    const sid = `SM-synthetic-sweep-promoted-${randomBytes(4).toString('hex')}`;
+    const unknownPhone = `+1941555${String(Date.now()).slice(-4)}`;
+    let dispatchedWith = null;
+    const dispatch = jest.fn(async (args) => { dispatchedWith = args; return true; });
+    try {
+      // The dispatch failed while the sender was still unknown (eligible,
+      // no receipt). Before the sweep ever ran, the conversation was
+      // promoted to a customer — promoteUnknownPhoneThreadWith
+      // (services/conversations.js) NULLs contact_phone and sets
+      // customer_id, but it does not deliver the missing bell.
+      // findCandidatePhones/findOrphanMessage must not gate on
+      // customer_id IS NULL, or this becomes permanently unrecoverable the
+      // instant it's promoted.
+      await mockPg('conversations').insert({ id: conversationId, customer_id: ids[0], channel: 'sms', contact_phone: null, our_endpoint_id: '+19415550207' });
+      await mockPg('messages').insert({ id: messageId, conversation_id: conversationId, channel: 'sms', direction: 'inbound', author_type: 'lead', is_read: false, twilio_sid: sid, body: 'Please quote pest control', created_at: new Date(Date.now() - 300000) });
+      await mockPg('sms_log').insert({ direction: 'inbound', from_phone: unknownPhone, to_phone: '+19415550207', twilio_sid: sid, message_body: 'Please quote pest control', metadata: JSON.stringify({ sms_reply_eligible: true }) });
+
+      const result = await sweepUnknownSenderAlertClaims({ dispatch });
+      expect(dispatch).toHaveBeenCalledTimes(1);
+      expect(dispatchedWith).toMatchObject({ From: unknownPhone, MessageSid: sid });
+      expect(result.dispatched).toBe(1);
+    } finally {
+      await mockPg('messages').where({ id: messageId }).delete();
+      await mockPg('sms_log').where({ twilio_sid: sid }).delete();
       await mockPg('conversations').where({ id: conversationId }).delete();
     }
   }, 30000);

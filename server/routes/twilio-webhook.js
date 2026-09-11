@@ -2017,8 +2017,18 @@ async function ringSmsReplyBell({ customer, From, MessageSid, message }) {
     twilioSid: MessageSid, // stored in metadata.payload — correlates THIS bell to THIS message
   }, { beforePush: unifiedStillUnread });
   if (!customer && stats && !stats.error && (stats.bellWritten || Number(stats.push?.sent || 0) > 0)) {
+    // `updated_at` records WHEN this delivery was actually confirmed —
+    // distinct from the row's own `created_at` (the message's arrival),
+    // which can lag behind delivery by whatever this dispatch took to run
+    // (a sweep recovery in particular can land minutes after arrival —
+    // codex #4210 round-14 P1). The recovery sweep's coverage window is
+    // anchored to THIS timestamp, not created_at, so a later message that
+    // arrives within the true confirmed window is recognized as covered
+    // even when the window itself started a few minutes after this row's
+    // own arrival.
     await db('sms_log').where({ direction: 'inbound', twilio_sid: MessageSid }).update({
       metadata: db.raw("COALESCE(metadata, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ sms_reply_alerted: true })]),
+      updated_at: new Date(),
     }).catch((err) => logger.warn('[notifications] SMS alert receipt failed', { code: err.code || 'unknown' }));
   }
   try {
