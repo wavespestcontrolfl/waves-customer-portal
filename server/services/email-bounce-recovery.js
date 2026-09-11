@@ -792,7 +792,12 @@ async function commitRecoveryOnDelivery(recoveryMessage) {
     const customerField = rec.customer_id && rec.customer_email_field && correctedEmail
       && CUSTOMER_EMAIL_FIELDS.includes(rec.customer_email_field) ? rec.customer_email_field : null;
     const billingField = !customerField && rec.customer_id && rec.customer_email_field === 'billing_email' && correctedEmail;
+    // Row → key is the established order (every customer and billing-
+    // preference writer takes its row before the address key): the
+    // applicable row is held first, then the key, then the recheck under both.
     const commit = await db.transaction(async (trx) => {
+      const before = customerField ? await trx('customers').where({ id: rec.customer_id }).forUpdate().first() : null;
+      if (billingField) await trx('notification_prefs').where({ customer_id: rec.customer_id }).forUpdate().first('customer_id');
       if (correctedEmail) await require('../utils/customer-comms-lock').lockCustomerEmail(trx, correctedEmail);
       if (correctedEmail && await correctedAddressOwnedByOther(correctedEmail, rec.customer_id, trx)) return { ownedByOther: true };
       const fields = [];
@@ -801,7 +806,6 @@ async function commitRecoveryOnDelivery(recoveryMessage) {
       //    holds the bad address — a human edit may have raced us, in which
       //    case we leave their value alone.
       if (customerField) {
-        const before = await trx('customers').where({ id: rec.customer_id }).forUpdate().first();
         const affected = await trx('customers')
           .where({ id: rec.customer_id })
           .whereRaw(`LOWER(${customerField}) = ?`, [bouncedEmail])
@@ -824,7 +828,6 @@ async function commitRecoveryOnDelivery(recoveryMessage) {
       } else if (billingField) {
         // The bounce was to the customer's notification_prefs.billing_email — fix it
         // there (separate table) so future invoice/balance emails stop bouncing.
-        await trx('notification_prefs').where({ customer_id: rec.customer_id }).forUpdate().first('customer_id');
         const affected = await trx('notification_prefs')
           .where({ customer_id: rec.customer_id })
           .whereRaw('LOWER(billing_email) = ?', [bouncedEmail])
@@ -832,10 +835,10 @@ async function commitRecoveryOnDelivery(recoveryMessage) {
         if (Number(affected) > 0) fields.push('notification_prefs.billing_email');
       }
       return { fields };
-    }).catch((err) => {
-      logger.warn(`[bounce-recovery] customer ${rec.customer_email_field || 'record'} overwrite failed: ${err.message}`);
-      return { fields: [] };
     });
+    // A failed write (a lost lock contest, a transient error) must not be
+    // recorded as committed: the throw leaves the recovery uncommitted for
+    // the next delivery event to retry.
     if (commit.ownedByOther) {
       await db('email_bounce_recoveries').where({ id: rec.id }).update({
         status: 'delivered',

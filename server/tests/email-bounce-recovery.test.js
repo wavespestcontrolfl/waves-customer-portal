@@ -1,4 +1,5 @@
 jest.mock('../models/db', () => jest.fn());
+jest.mock('../services/customer-email-fanout', () => ({ propagateCustomerEmailChange: jest.fn(async () => ({})) }));
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../services/sendgrid-mail', () => ({
   sendOne: jest.fn(),

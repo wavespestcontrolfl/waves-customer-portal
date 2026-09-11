@@ -450,8 +450,11 @@ async function sendSummaryEmailRecipient({ visit, customer, claim, summaryUrl, r
 // request left the recipient's ledger row queued; the mark's marker names
 // that row and, past the lease, proves no request was made, so the row is
 // settled as a pre-dispatch abort and the replay finishes that recipient
-// instead of skipping it as uncertain. Read before the claim (which
-// reclaims such a mark), settled once the claim is owned.
+// instead of skipping it as uncertain. Read AND settled before the claim
+// (which reclaims such a mark and would lose the marker): the settlement is
+// provable on its own (marker past the lease, row queued with no provider
+// id) and idempotent, so a crash between it and the claim leaves a row the
+// next owner re-sends, never one it skips as uncertain.
 async function settleAbandonedSummaryEmailRow(visitId, database) {
   const effect = await database('visit_effects').where({ visit_id: visitId, effect_type: 'completion_email', status: 'unknown_delivery' }).first('last_error', 'claimed_at');
   if (!effect || !VisitGroups.isHandoffPending(effect.last_error)) return null;
@@ -467,9 +470,9 @@ async function settleAbandonedSummaryEmailRow(visitId, database) {
 
 async function sendSummaryEmail({ visit, member, customer, prefs, summaryUrl, visible, database }) {
   const abandoned = await settleAbandonedSummaryEmailRow(visit.id, database);
+  if (abandoned) await abandoned();
   const claim = await VisitGroups.claimVisitNotification(member, 'completion_email');
   if (claim?.state !== 'owner') return;
-  if (abandoned) await abandoned();
   const recipients = visible ? summaryEmailRecipients(customer, prefs) : [];
   try {
     const scope = { trigger_event_id: `visit_summary:${visit.id}`, recipient_id: customer.id };
