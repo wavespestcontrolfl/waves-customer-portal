@@ -37,13 +37,32 @@ async function loadLawnCompletionContext(service, knex) {
   const current = currentHistory?.current || null;
   // The turf profile is still customer-owned. Until property templates land,
   // its area/grass can seed only the proven current home, never a second lawn.
-  const propertyMatchesProfile = !!(scope.propertyId && service.address_line1
-    && scope.propertyAddressKey === addressKey(service));
+  // The proof compares the VISIT's address: the plan query joins the
+  // customers row onto the unprefixed address fields, so an appointment
+  // stamped to a second address (service_address_*) must be keyed by that
+  // stamp, not by the account address the sole saved property matches. The
+  // scope resolver already withholds a property under conflicting stamped
+  // evidence; this keeps the direct check honest on its own (Codex #4113 P1).
+  const visitAddress = service.service_address_line1 ? {
+    address_line1: service.service_address_line1, address_line2: service.service_address_line2,
+    city: service.service_address_city, zip: service.service_address_zip,
+  } : service;
+  const propertyMatchesProfile = !!(scope.propertyId && visitAddress.address_line1
+    && scope.propertyAddressKey === addressKey(visitAddress));
   const attempts = await history.assessmentQuery(service.customer_id, knex, { confirmed: false })
     .where('ss.id', service.id).orderBy('la.created_at', 'desc').orderBy('la.id', 'desc');
   const latestAssessment = scope.propertyId ? attempts.find((row) => history.isEligible(row, scope)) || resolvedHistory.previous : null;
   return {
     propertyId: scope.propertyId, propertyMatchesProfile, latestAssessment,
+    // The two keys the proof compared, so the completion transaction can
+    // rebuild them from the LOCKED customer/visit/property rows and abort
+    // when an address edit committed after the plan was built (Codex #4113 P2).
+    addressProof: {
+      // The scope keeps the candidate key after withholding its id; the proof carries a key only for a proven id.
+      propertyId: scope.propertyId, propertyAddressKey: scope.propertyId ? scope.propertyAddressKey : null,
+      visitAddressKey: visitAddress.address_line1 ? addressKey(visitAddress) : null,
+      stamped: !!service.service_address_line1,
+    },
     isLawn: detectServiceLine(service.service_type) === 'lawn',
     history: {
       available: !!scope.propertyId,
@@ -56,7 +75,12 @@ async function loadLawnCompletionContext(service, knex) {
 }
 
 function completionMethod(item, protocolProduct) {
-  if (item.scope?.includes('SPOT') || protocolProduct?.applicationMode === 'spot') return 'spot_treatment';
+  // The operating layer's explicit mode wins over the field-reference line
+  // parse: classifyProtocolLine tags every SpeedZone line SPOT_ALLOWANCE, yet
+  // the seeded Bahia March row is application_mode 'broadcast'. Only a row
+  // without an explicit mode lets the parsed scope decide (Codex r13 P1).
+  const mode = protocolProduct?.applicationMode;
+  if (mode === 'spot' || (!mode && item.scope?.includes('SPOT'))) return 'spot_treatment';
   if (item.product?.applicationMethod) return item.product.applicationMethod;
   // Weighed WDG/WG/WSG/WP concentrates are still sprayed. The catalog
   // formulation, never the quantity unit, distinguishes spreader granules
@@ -141,22 +165,59 @@ function completionItem(item, protocolProduct, amountsAllowed) {
   };
 }
 
+// A lawn plan attributes the visit only when a program actually applies: a
+// WaveGuard tier or a COMPLETE explicit appointment assignment (key, version
+// and window). The planner can still resolve an active protocol by grass
+// track for anyone; that resolution must not become a one-time or commercial
+// visit's protocol — and a partial assignment (window only) must not let the
+// matcher's wildcards adopt the calendar-resolved protocol either.
+// An EXPLICIT non-membership billing lane defeats the tier fallback: a
+// customer reclassified to per_visit / one_time can legitimately keep a
+// legacy Bronze–Platinum tier on the row, and billing-lane already rules
+// that such a lane is authoritative over lingering tier fields (a per_visit
+// / one_time customer is never dues-covered). Attribution follows the same
+// classifier so a nonmember visit's applied products are not recorded as
+// seasonal protocol actuals. per_application and annual_prepay are
+// membership lanes; null / inferred keeps the tier rule.
+const NON_PROGRAM_BILLING_MODES = new Set(['per_visit', 'one_time']);
+
+function lawnPlanProgramApplies(plan) {
+  const assigned = plan?.appointmentAssignment || {};
+  const tierApplies = ['Bronze', 'Silver', 'Gold', 'Platinum'].includes(plan?.propertyGate?.serviceTier)
+    && !NON_PROGRAM_BILLING_MODES.has(plan?.propertyGate?.billingMode);
+  return tierApplies || !!(assigned.protocolKey && assigned.protocolVersion && assigned.windowKey);
+}
+
+// The ledger stamps a visit's protocol only when a program applies, the
+// saved turf profile PROVES this service property (the plan's protocol,
+// grass and products come from that profile — another property's profile
+// must not be stamped onto this one), AND the plan the completion built
+// actually resolved that visit's assignment (key / version / window, exact
+// archived version included). With the completion-defaults gates off the
+// planner neither proves the property nor resolves the assignment, so
+// attribution is withheld — the honest record.
+function lawnPlanAttributesVisit(plan) {
+  return lawnPlanProgramApplies(plan)
+    && plan?.propertyGate?.propertyMatchesProfile === true
+    && matchesLawnCompletionProtocol(plan?.protocol?.structured, plan?.appointmentAssignment || {}, plan?.propertyGate?.trackKey);
+}
+
 function buildLawnCompletionDefaults(plan, context) {
   const protocol = plan.protocol.structured;
   const assigned = plan.appointmentAssignment;
-  const programApplies = ['Bronze', 'Silver', 'Gold', 'Platinum'].includes(plan.propertyGate.serviceTier)
-    || !!assigned.windowKey;
+  const programApplies = lawnPlanProgramApplies(plan);
   const protocolMatches = matchesLawnCompletionProtocol(protocol, assigned, plan.propertyGate.trackKey);
   const eligible = context.isLawn && context.propertyMatchesProfile && programApplies && protocolMatches;
   const amountsAllowed = eligible && plan.propertyGate.blocks.length === 0;
   const products = protocol?.products || [];
+  const protocolProductFor = (item) => products.find((row) => row.productId === (item.substitution?.originalProductId || item.product?.id));
   const items = eligible ? plan.mixCalculator.items.filter((item) => {
-    const product = products.find((row) => row.productId === (item.substitution?.originalProductId || item.product?.id));
+    const product = protocolProductFor(item);
     // defaultInPlan distinguishes defaults from opt-in rows. Gates can also
     // carry annual counters or safety metadata on a selected base product;
     // the planner's blocks still withhold any unavailable suggested quantity.
     return item.selected === true && item.product?.active !== false && product?.defaultInPlan;
-  }).map((item) => completionItem(item, products.find((row) => row.productId === (item.substitution?.originalProductId || item.product?.id)), amountsAllowed)) : [];
+  }).map((item) => completionItem(item, protocolProductFor(item), amountsAllowed)) : [];
   // The planner's recipe comes from the field reference (protocols.json);
   // the defaults list is the owner-edited operating layer. When a live
   // window registers none of the recipe's selected products as defaults,
@@ -169,9 +230,15 @@ function buildLawnCompletionDefaults(plan, context) {
     lawnSqft: context.propertyMatchesProfile ? plan.mixCalculator.lawnSqft : null,
     propertyMatchesProfile: context.propertyMatchesProfile,
     items, history: context.history,
+    // An option carries the protocol row's application mode: the catalog
+    // category alone reads a broadcast herbicide (SpeedZone in its window) as
+    // spot work, and the closeout must record the mode the protocol prescribes.
+    // A protocol row whose catalog product was deactivated is not offered:
+    // the completion writer rejects an inactive product row, so the option
+    // would be an action that cannot be completed (Codex r12 P2).
     options: eligible ? [...plan.mixCalculator.items, ...plan.mixCalculator.conditionalOptions]
-      .filter(item => products.some(row => row.productId === (item.substitution?.originalProductId || item.product?.id)))
-      .map(item => ({ product: { id: item.product.id, name: item.product.name } })) : [],
+      .filter(item => protocolProductFor(item) && item.product?.active !== false)
+      .map(item => ({ product: { id: item.product.id, name: item.product.name }, applicationMethod: completionMethod(item, protocolProductFor(item)) })) : [],
     message: !context.propertyMatchesProfile ? 'The saved turf profile could not be matched to this property. Enter the actual work.'
       : !programApplies ? 'No assigned lawn plan for this visit. Add the products actually applied.'
         : !protocolMatches ? 'The appointment protocol could not be resolved. Enter the actual work.'
@@ -180,4 +247,4 @@ function buildLawnCompletionDefaults(plan, context) {
   };
 }
 
-module.exports = { lawnCompletionDefaultsEnabled, loadLawnCompletionContext, buildLawnCompletionDefaults, matchesLawnCompletionProtocol, archivedLawnRecipeMatches };
+module.exports = { lawnCompletionDefaultsEnabled, lawnPlanProgramApplies, lawnPlanAttributesVisit, loadLawnCompletionContext, buildLawnCompletionDefaults, matchesLawnCompletionProtocol, archivedLawnRecipeMatches };

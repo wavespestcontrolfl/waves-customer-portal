@@ -731,40 +731,76 @@ async function recordEmailSuppressionForEvent(ev, message, groupKey, at, client 
     email_message_id: message?.id || null,
   };
 
-  const existingQuery = client('email_suppressions')
-    .whereRaw('LOWER(email) = ?', [email])
-    .where({
-      status: 'active',
-      suppression_type: suppression.suppression_type,
-    });
-  if (suppression.group_key) existingQuery.where({ group_key: suppression.group_key });
-  else existingQuery.whereNull('group_key');
-  const existing = await existingQuery.first();
+  // Written under the shared per-address lock so a bearer-link email
+  // handoff holding it finishes (or has not yet authorized) before this
+  // suppression is visible.
+  const write = async (trx) => {
+    await require('../utils/customer-comms-lock').lockCustomerEmail(trx, email);
+    const existingQuery = trx('email_suppressions')
+      .whereRaw('LOWER(email) = ?', [email])
+      .where({
+        status: 'active',
+        suppression_type: suppression.suppression_type,
+      });
+    if (suppression.group_key) existingQuery.where({ group_key: suppression.group_key });
+    else existingQuery.whereNull('group_key');
+    const existing = await existingQuery.first();
 
-  if (existing) {
-    await client('email_suppressions').where({ id: existing.id }).update({
+    if (existing) {
+      await trx('email_suppressions').where({ id: existing.id }).update({
+        source: 'sendgrid_event_webhook',
+        metadata: trx.raw('COALESCE(metadata, \'{}\'::jsonb) || ?::jsonb', [JSON.stringify(metadata)]),
+        updated_at: at,
+      });
+      return;
+    }
+
+    await trx('email_suppressions').insert({
+      email,
+      group_key: suppression.group_key,
+      suppression_type: suppression.suppression_type,
+      status: 'active',
       source: 'sendgrid_event_webhook',
-      metadata: client.raw('COALESCE(metadata, \'{}\'::jsonb) || ?::jsonb', [JSON.stringify(metadata)]),
+      suppressed_at: at,
+      metadata: JSON.stringify(metadata),
+      created_at: at,
       updated_at: at,
     });
-    return;
-  }
+  };
+  if (client.isTransaction) return write(client);
+  return client.transaction(write);
+}
 
-  await client('email_suppressions').insert({
-    email,
-    group_key: suppression.group_key,
-    suppression_type: suppression.suppression_type,
-    status: 'active',
-    source: 'sendgrid_event_webhook',
-    suppressed_at: at,
-    metadata: JSON.stringify(metadata),
-    created_at: at,
-    updated_at: at,
-  });
+// The visit summary's aggregate follows the recipient ledger. A provider
+// block is retryable and stays with the retry rail (which reconciles the
+// summary when its retries terminate) unless this very event exhausted the
+// retries; a terminal bounce reopens the summary for office review; a drop
+// for a recipient who opted out is a suppression, not a bounce, and settles
+// the aggregate from the ledger (suppressed when every recipient declined);
+// a delivery event is the durable retry for the recovery the rail attempted
+// inline.
+async function reconcileSummaryForEmailEvent(ev, message, updates, client) {
+  if (!updates) return;
+  const Summary = require('../services/visit-completion-summary');
+  const providerBlock = providerRetry.isProviderBlockedEvent(ev);
+  const optOutDrop = ev.event === 'dropped' && Summary.summaryEmailOptOutDrop(ev.reason || ev.response);
+  const terminalBounce = ['bounce', 'blocked', 'dropped'].includes(ev.event) && !providerBlock && !optOutDrop;
+  if (terminalBounce || (providerBlock && updates.provider_retry_exhausted_at)) {
+    await Summary.reconcileSummaryEmailBounce(message, client);
+  }
+  if (ev.event === 'delivered' || optOutDrop) {
+    await Summary.reconcileSummaryEmailRecovery(message, client);
+  }
 }
 
 async function handleEmailMessageEvent(ev, message, client = db) {
   const now = eventOccurredAt(ev);
+  // The recipient's address key comes FIRST, before this row is touched: the
+  // retry rail's handoff holds that key and then marks this row on its own
+  // connection, so an event that took the row first and then waited on the
+  // key would form a cycle PostgreSQL cannot see. Key → row on both sides.
+  const address = String(ev?.email || message?.recipient_email_snapshot || '').trim().toLowerCase();
+  if (client.isTransaction && address) await require('../utils/customer-comms-lock').lockCustomerEmail(client, address);
   await client('email_message_events').insert({
     email_message_id: message.id,
     provider: 'sendgrid',
@@ -776,6 +812,7 @@ async function handleEmailMessageEvent(ev, message, client = db) {
 
   const updates = computeEmailMessageEventUpdates(ev, message, now);
   if (updates) await client('email_messages').where({ id: message.id }).update(updates);
+  await reconcileSummaryForEmailEvent(ev, message, updates, client);
   const groupKey = await groupKeyForEmailMessage(message, client);
   await recordEmailSuppressionForEvent(ev, message, groupKey, now, client);
 }
@@ -1011,5 +1048,6 @@ module.exports.canUseProviderMessageMatch = canUseProviderMessageMatch;
 module.exports.bindNewsletterDeliveryMessageId = bindNewsletterDeliveryMessageId;
 module.exports.reconcileNewsletterSendStatus = reconcileNewsletterSendStatus;
 module.exports.handleNewsletterEvent = handleNewsletterEvent;
+module.exports.handleEmailMessageEvent = handleEmailMessageEvent;
 module.exports.newsletterSuppressionGroupKeyForEvent = newsletterSuppressionGroupKeyForEvent;
 module.exports.shouldRecordNewsletterSuppression = shouldRecordNewsletterSuppression;
