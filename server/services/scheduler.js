@@ -30,6 +30,7 @@ function purposeForScheduledMessageType(messageType, { hasCustomer = true } = {}
   // for customer-linked rows; lead rows have no customerId so they replay
   // under the transactional-grade conversational policy with the forwarded
   // consent basis — payment_receipt would hard-require a customerId.
+  if (type === 'visit_summary') return 'service_completion';
   if (type === 'deposit_receipt') return hasCustomer ? 'payment_receipt' : 'conversational';
   // Deferred completion texts (service_complete*, service_report_v1*) replay
   // under the appointment purpose the immediate dispatch send enforced.
@@ -3741,6 +3742,10 @@ function initScheduledJobs() {
             customerId: msg.customer_id || undefined,
             identityTrustLevel: msg.customer_id ? 'phone_matches_customer' : 'phone_provided_unverified',
             entryPoint: 'scheduled_sms_cron',
+            withSmsHandoff: require('./messaging/deferred-replay-registry')
+              .deferredSmsHandoff(claimMeta.entry_point, { ...claimMeta,
+                customer_id: msg.customer_id || claimMeta.customer_id || null,
+                to_phone: msg.to_phone || null }),
             // Send-window operator provenance: only rows an operator
             // actually composed/scheduled keep the operator exemption — the
             // composer dispatches at the exact minute the operator picked,
@@ -4027,7 +4032,14 @@ function initScheduledJobs() {
                 // standalone review fallback, flip referral/report state into
                 // the admin retry lane). Armed ONLY here, never on timers,
                 // so fallbacks can't race a still-retryable replay.
-                await runTerminalHookDurably(msg.id, claimMeta.entry_point, claimMeta);
+                // provider_terminal_rejection carries the adapter's proof of
+                // a synchronous, definitive provider rejection (a terminal
+                // Twilio code) into the hook — visit_summary_deferred's
+                // onTerminal uses it to settle an unknown_delivery effect as
+                // suppressed instead of leaving it parked as unknown; other
+                // entry points ignore the field.
+                await runTerminalHookDurably(msg.id, claimMeta.entry_point,
+                  { ...claimMeta, provider_terminal_rejection: smsResult.terminal === true });
               }
               // The customer was never answered — used + parked cards return.
               const blockedMeta = await readFreshMeta();

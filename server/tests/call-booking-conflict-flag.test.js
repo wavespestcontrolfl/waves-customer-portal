@@ -13,10 +13,17 @@
  * this insert committed) could EACH see nothing and land overlapping rows
  * with no card. The AUTHORITATIVE read is the POST-COMMIT recheck
  * (recheckCallBookingConflicts): a dedicated short transaction holding
- * rung 1 for one shared-module read. The booking txn itself still takes no
- * scheduling lock — it must never wait on (or lose to) one, and holding
- * rung 1 across its lead/customer/estimate row writes would invert against
- * the estimate-accept txn's row-locks-then-rung-1 order.
+ * rung 1 for one shared-module read.
+ *
+ * Owner ruling 2026-09-11 (capacity activation, option 1): the booking txn
+ * now TRIES the shared fence (rungs 1 + 3, fenceBookingDay — bounded
+ * non-blocking polling, ~1.5s cap) before its conflict read and before each
+ * INSERT, so a concurrent capacity certification's FOR UPDATE either sees
+ * the phone row or the phone row lands after that certification commits.
+ * The letter of the lock-free rule changed, its intent did not: the booking
+ * still never waits past the cap, never fails, and never blocks on a lock —
+ * a missed fence books exactly as before and the recheck flags overlaps.
+ * fenceBookingDay's own contract is covered in scheduling-booking-fence.test.js.
  *
  * The pure sanity helper + the recheck txn are tested directly via _test;
  * the wiring through the 500-line insert txn needs a live DB, so — matching
@@ -385,12 +392,71 @@ describe('booking conflict wiring (source-level — behavior needs a live DB)', 
     // unflagged rather than failing the booking.
     expect(txnSlice).not.toContain('throw');
     expect(txnSlice).toContain('booking proceeds unflagged');
-    // The booking txn itself stays LOCK-FREE: it must never wait on (or
-    // deadlock-abort against) a scheduling lock — its post-insert work
-    // row-locks leads/customers/estimates, tables the estimate-accept txn
-    // locks BEFORE taking rung 1 inside commitReservation. The lock lives
-    // in the post-commit recheck's own txn instead.
+    // The booking txn takes NO blocking scheduling lock: it must never wait
+    // on (or deadlock-abort against) one. Only the bounded try-fence below
+    // is allowed here; the blocking rung-1 form lives in the post-commit
+    // recheck's own txn.
     expect(txnSlice).not.toContain('acquireOccupancyLock');
+    expect(txnSlice).not.toContain('lockTechDays');
+  });
+
+  test('owner ruling 2026-09-11: the primary INSERT tries the bounded fence BEFORE the conflict read and the first row lock, and a miss books unfenced', () => {
+    const txnSlice = src.slice(
+      src.indexOf("reason: 'existing_appointment_same_date'"),
+      src.indexOf('const insertData = {'),
+    );
+    // In its OWN savepoint: a PostgreSQL error inside the fence must not
+    // leave the booking txn aborted (codex r1 P2).
+    const fenceIdx = txnSlice.indexOf('bookingFence = await trx.transaction((fenceSp) => fenceBookingDay(fenceSp, { date: scheduledDate, techId: defaultTechnicianId || null }));');
+    expect(fenceIdx).toBeGreaterThan(-1);
+    // Fence, then the in-txn conflict read, then the first row lock in this
+    // txn (the re-service customer FOR UPDATE) — rung 1 precedes row locks.
+    expect(fenceIdx).toBeLessThan(txnSlice.indexOf('bookingTimeConflicts = await findConflictingVisits({'));
+    expect(fenceIdx).toBeLessThan(txnSlice.indexOf(".forUpdate()"));
+    expect(txnSlice.indexOf(".forShare()")).toBe(-1);
+    // A miss or a query failure never touches the booking: warn and proceed.
+    expect(txnSlice).toContain('booking unfenced, post-commit recheck flags overlaps');
+    expect(txnSlice).toContain('booking proceeds unfenced');
+    const fenceBlock = txnSlice.slice(fenceIdx, txnSlice.indexOf('bookingTimeConflicts = await findConflictingVisits({'));
+    expect(fenceBlock).not.toContain('throw');
+    expect(fenceBlock).not.toContain('__held');
+  });
+
+  test('codex r1 P2: when the save-time tech recheck books UNASSIGNED, the primary re-fences the unassigned-day rung before its insert', () => {
+    const recheckIdx = src.indexOf('is no longer assignable; booking unassigned`);');
+    expect(recheckIdx).toBeGreaterThan(-1);
+    const slice = src.slice(recheckIdx, src.indexOf(".insert(insertData)", recheckIdx));
+    expect(slice).toContain('insertData.technician_id = null;');
+    // Inside the FIRST attempt's deadline — never a fresh budget (codex r2 P2).
+    expect(slice).toContain('bookingFence = await trx.transaction((fenceSp) => fenceBookingDay(fenceSp, { date: scheduledDate, techId: null, deadline: bookingFence?.deadline ?? Date.now() }));');
+    expect(slice.indexOf('insertData.technician_id = null;')).toBeLessThan(slice.indexOf('techId: null, deadline:'));
+    expect(slice).toContain('booking proceeds unfenced');
+    expect(slice).not.toContain('throw ');
+  });
+
+  test('owner ruling 2026-09-11: the follow-up child tries the fence for ITS OWN date/tech inside the savepoint, before its insert', () => {
+    const seederIdx = src.indexOf('return await trx.transaction(async (sp) => {');
+    expect(seederIdx).toBeGreaterThan(-1);
+    const seeder = src.slice(seederIdx, src.indexOf("scheduled_date: fuPlan.scheduledDate,", seederIdx));
+    const fenceIdx = seeder.indexOf('followUpFence = await sp.transaction((fenceSp) => fenceBookingDay(fenceSp, { date: fuPlan.scheduledDate, techId: followUpTechId }));');
+    expect(fenceIdx).toBeGreaterThan(-1);
+    // After the tech FOR SHARE recheck resolves the tech the row is seeded
+    // onto (so the fenced rung matches the row), before the INSERT itself.
+    expect(fenceIdx).toBeGreaterThan(seeder.indexOf('.forShare()'));
+    expect(fenceIdx).toBeLessThan(seeder.indexOf("const [fuRow] = await sp('scheduled_services')"));
+    expect(seeder).toContain('seeding unfenced');
+    expect(seeder.slice(fenceIdx, seeder.indexOf("const [fuRow]"))).not.toContain('throw');
+  });
+
+  test('owner ruling 2026-09-11: the triage card + bell say whether each INSERT held the fence', () => {
+    const cardSlice = src.slice(
+      src.indexOf("flag: 'unassigned_auto_booking'"),
+      src.indexOf('attachedManualBookingId && attachSkippedFollowUpPlan'),
+    );
+    expect(cardSlice).toContain('primary: bookingFence ? bookingFence.acquired : null');
+    expect(cardSlice).toContain('follow_up: followUpCreated ? (followUpFence ? followUpFence.acquired : null) : null');
+    expect(cardSlice).toContain('fence_primary: bookingFence ? bookingFence.acquired : null');
+    expect(cardSlice).toContain('fence_follow_up: followUpCreated ? (followUpFence ? followUpFence.acquired : null) : null');
   });
 
   test('the AUTHORITATIVE recheck runs post-commit under rung 1 and its result feeds the card', () => {

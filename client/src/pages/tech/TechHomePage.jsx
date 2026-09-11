@@ -55,6 +55,7 @@ import TechServicePhotosModal from '../../components/tech/TechServicePhotosModal
 import TechTreatmentZoneModal from '../../components/tech/TechTreatmentZoneModal';
 import { detectServiceCategory } from '../../lib/service-colors';
 import TechTimeTrackingCard from '../../components/tech/TechTimeTrackingCard';
+import TechFollowThroughCards from '../../components/tech/TechFollowThroughCards';
 import FieldLeadModal from '../../components/tech/FieldLeadModal';
 import VisualNotesPanel from '../../components/tech/VisualNotesPanel';
 import { useFeatureFlag } from '../../hooks/useFeatureFlag';
@@ -192,7 +193,7 @@ const QUICK_ACTIONS = [
 
 export default function TechHomePage({ section = 'today' }) {
   const navigate = useNavigate();
-  const { fieldWorkspace = false, documentsAvailable = false, setNavigationBusy } = useOutletContext() || {};
+  const { fieldWorkspace = false, documentsAvailable = false, payGrowthAvailable = false, setNavigationBusy } = useOutletContext() || {};
   const [searchParams, setSearchParams] = useSearchParams();
   const selectedVisitKey = fieldWorkspace ? searchParams.get('visit') : null;
   const visitSearch = selectedVisitKey ? `?visit=${encodeURIComponent(selectedVisitKey)}` : '';
@@ -641,10 +642,12 @@ export default function TechHomePage({ section = 'today' }) {
           loading={loading} error={scheduleError} rainChance={rainChance}
           onRetry={fetchSchedule} onOpen={openFieldVisit} busy={navigationBusy}
           tools={fieldTools}
+          followThrough={<TechFollowThroughCards fieldWorkspace />}
           timekeeping={<>
             <div className="tf-existing"><TechTimeTrackingCard nextStop={fieldNextStop?.primary} /><TimecardSignoffCard techName={techName} /></div>
             <div className="tf-existing"><TechIntelligenceBar /></div>
             {documentsAvailable && <div className="tf-actions"><Link className="tf-button" to={`/tech/documents${visitSearch}`}>Staff documents</Link></div>}
+            {payGrowthAvailable && <div className="tf-actions"><Link className="tf-button" to={`/tech/pay-growth${visitSearch}`}>My Pay & Growth</Link></div>}
           </>}
           visit={selectedVisitKey && section === 'today' ? (
             <TechFieldVisit
@@ -706,6 +709,7 @@ export default function TechHomePage({ section = 'today' }) {
       <TechIntelligenceBar />
 
       <TechTimeTrackingCard nextStop={nextStop} />
+      <TechFollowThroughCards />
 
       {scheduleError && (
         <div role="alert" style={{
