@@ -3,14 +3,28 @@ import { ActionFeedback, Badge, Card, CardBody, CardHeader, CardTitle, UiSurface
 import { adminFetch } from "../../../utils/admin-fetch";
 
 function normalizeTags(tags) {
-  if (Array.isArray(tags)) return tags;
-  if (typeof tags !== "string") return [];
-  try {
-    const parsed = JSON.parse(tags);
-    return Array.isArray(parsed) ? parsed : [];
-  } catch {
-    return [];
+  let list = tags;
+  if (typeof tags === "string") {
+    try {
+      list = JSON.parse(tags);
+    } catch {
+      return [];
+    }
   }
+  if (!Array.isArray(list)) return [];
+  // Only string tags render; object/array elements would throw as React children.
+  return list.filter((tag) => typeof tag === "string" && tag.trim() !== "");
+}
+
+// Linter severities map onto the §3.3 dot tones: high is a genuine alert,
+// medium is the filled primary dot, low the neutral one.
+const SEVERITY_TONE = { high: "alert", medium: "strong", low: "neutral" };
+
+function scoreBandClass(score) {
+  if (typeof score !== "number") return "border-zinc-300 bg-zinc-50 text-zinc-900";
+  if (score < 60) return "border-alert-fg bg-alert-bg text-alert-fg";
+  if (score < 80) return "border-zinc-900 bg-zinc-50 text-zinc-900";
+  return "border-zinc-300 bg-zinc-50 text-zinc-900";
 }
 
 function LoadingState({ children }) {
@@ -153,18 +167,13 @@ export function HealthCheck() {
 
   const issuesAvailable = Array.isArray(health.issues);
   const issues = issuesAvailable ? health.issues : [];
-  const scoreIsAlert = typeof health.healthScore === "number" && health.healthScore < 60;
 
   return (
     <UiSurface as={Card}>
       <CardHeader>
         <div className="flex flex-wrap items-center gap-4">
           <div
-            className={`flex h-16 w-16 items-center justify-center rounded-md border text-22 font-medium u-nums ${
-              scoreIsAlert
-                ? "border-alert-fg bg-alert-bg text-alert-fg"
-                : "border-zinc-300 bg-zinc-50 text-zinc-900"
-            }`}
+            className={`flex h-16 w-16 items-center justify-center rounded-md border text-22 font-medium u-nums ${scoreBandClass(health.healthScore)}`}
             aria-label={`Wiki health score: ${health.healthScore ?? "unavailable"}`}
           >
             {health.healthScore ?? "—"}
@@ -185,14 +194,17 @@ export function HealthCheck() {
             {issues.slice(0, 15).map((issue, index) => (
               <div
                 key={`${issue.article || issue.title || "issue"}-${index}`}
-                className={`rounded-md border-l-2 bg-zinc-50 px-3 py-2 text-ui-body ${
-                  issue.severity === "high" ? "border-alert-fg" : "border-zinc-400"
-                }`}
+                className="flex flex-wrap items-start gap-2 rounded-md bg-zinc-50 px-3 py-2 text-ui-body"
               >
-                <span className="font-medium text-zinc-900">
-                  {issue.title || issue.article}
-                </span>{" "}
-                <span className="text-ink-secondary">— {issue.detail}</span>
+                <Badge dot tone={SEVERITY_TONE[issue.severity] || "neutral"} className="uppercase tracking-label">
+                  {issue.severity || "issue"}
+                </Badge>
+                <span className="min-w-0 flex-1">
+                  <span className="font-medium text-zinc-900">
+                    {issue.title || issue.article}
+                  </span>{" "}
+                  <span className="text-ink-secondary">— {issue.detail}</span>
+                </span>
               </div>
             ))}
             {issues.length > 15 && (

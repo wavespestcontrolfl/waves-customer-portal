@@ -208,6 +208,47 @@ describe("KnowledgePage embedded navigation", () => {
     expect(screen.getByTestId("location-search")).toHaveTextContent("source=fixture");
   });
 
+  it("marks each linter severity distinctly and skips non-string tags", async () => {
+    localStorage.setItem("waves_admin_user", JSON.stringify({ role: "admin" }));
+    fetch.mockImplementation(async (url) => {
+      if (url.endsWith("/knowledge/health")) {
+        return response({
+          healthScore: 75,
+          totalArticles: 1,
+          issues: [
+            { title: "Broken link", detail: "Target missing", severity: "medium" },
+            { title: "Orphan page", detail: "No inbound links", severity: "low" },
+          ],
+        });
+      }
+      if (url.endsWith("/knowledge/article/fixture")) {
+        return response({ article: { title: "Fixture article", content: "Fixture article body", tags: ["kept", { name: "object" }, ["nested"], 7] } });
+      }
+      return response({ articles: [{ id: "fixture", title: "Fixture article", tags: [] }] });
+    });
+    renderWiki("/admin/knowledge?wikiTab=health");
+
+    const medium = await screen.findByText("medium");
+    const low = screen.getByText("low");
+    expect(medium.querySelector("span")).toHaveClass("bg-zinc-900");
+    expect(low.querySelector("span")).toHaveClass("bg-zinc-500");
+    expect(medium.querySelector("span")).not.toHaveClass("bg-alert-fg");
+    expect(screen.getByLabelText("Wiki health score: 75")).toHaveClass("border-zinc-900");
+  });
+
+  it("renders only string tags so malformed tag elements cannot crash the reader", async () => {
+    localStorage.setItem("waves_admin_user", JSON.stringify({ role: "admin" }));
+    fetch.mockImplementation(async (url) => (
+      url.endsWith("/knowledge/article/fixture")
+        ? response({ article: { title: "Fixture article", content: "Fixture article body", tags: ["kept", { name: "object" }, ["nested"], 7] } })
+        : response({ articles: [{ id: "fixture", title: "Fixture article", tags: [] }] })
+    ));
+    renderWiki("/admin/knowledge?wikiTab=articles");
+    fireEvent.click(await screen.findByText("Fixture article"));
+    expect(await screen.findByText("Fixture article body")).toBeInTheDocument();
+    expect(screen.getByLabelText("Article tags").textContent).toBe("kept");
+  });
+
   it("explains why an answer without a query ID cannot be filed", async () => {
     localStorage.setItem("waves_admin_user", JSON.stringify({ role: "admin" }));
     fetch.mockImplementation(async (url, options) => (
