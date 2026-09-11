@@ -924,6 +924,24 @@ describe('update-details wiring (source guards)', () => {
     expect(blackoutDateString(null)).toBeNull();
   });
 
+  test('a count-only series edit still enters the broadcast-and-flush block (codex #4295 r3 P2)', () => {
+    expect(src).toContain('if (assignmentChanged || detailsChanged || addonsReplaced || addressUpdatedIds.length || recurringUpdatedJobIds.length) {');
+  });
+
+  test('the Edit Appointment series move owns one route-quality Set across rebooker, effects and grouped members (codex #4295 r3 P2)', () => {
+    const start = src.indexOf("const result = await SmartRebooker.reschedule(row.id, target, win, 'admin', 'admin', {");
+    expect(start).toBeGreaterThan(-1);
+    const block = src.slice(src.lastIndexOf('const qualityDates = new Set();', start), src.indexOf('return {', start));
+    expect(block).toContain('qualityDates,\n        adminWindowRules: true,');
+    expect(block).toContain('reasonText: null,\n        qualityDates,\n      });');
+    expect(block).toContain('emitDispatchJobUpdate({ jobId: movedId, actorId: req.technicianId, qualityDates })');
+    expect(block).toContain('await flushDispatchQualityDates(qualityDates);');
+    const dispatchSrc = fs.readFileSync(path.join(__dirname, '../routes/admin-dispatch.js'), 'utf8');
+    // The callee flushes only when it owns the Set; a batch caller flushes once.
+    expect(dispatchSrc).toContain('const ownsFlush = !qualityDates;');
+    expect(dispatchSrc).toMatch(/if \(ownsFlush\) \{\s+try \{\s+await flushDispatchQualityDates\(seriesQualityDates\);/);
+  });
+
   test('top-up visits get the post-registration terminal re-check (Codex #3337 r2 P1)', () => {
     // A series cancel landing between this commit and the reminder insert
     // would otherwise leave an armed reminder on a cancelled visit.

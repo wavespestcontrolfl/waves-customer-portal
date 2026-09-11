@@ -830,6 +830,7 @@ describe('rain-out service', () => {
       const { applySeriesMoveEffects } = require('../routes/admin-dispatch');
       expect(applySeriesMoveEffects).toHaveBeenCalledTimes(1);
       expect(applySeriesMoveEffects.mock.calls[0][0]).toMatchObject({
+        qualityDates: expect.any(Set),
         serviceId: 'svc-1', newDate: '2026-06-12', notify: false,
         result: expect.objectContaining({ rescheduledOccurrences: expect.arrayContaining([expect.objectContaining({ id: 'sib-2', conflicted: true })]) }),
       });

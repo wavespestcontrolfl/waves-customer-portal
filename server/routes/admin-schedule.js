@@ -7624,10 +7624,15 @@ async function planCollectiveEditDateMove(req) {
   return {
     async commit() {
       const SmartRebooker = require('../services/rebooker');
+      // One route-quality refresh for the whole series edit: the rebooker's
+      // move dates, every occurrence's board broadcast and the grouped
+      // members below all collect into this Set (codex #4295 r3 P2).
+      const qualityDates = new Set();
       // Same predicate the choke point evaluates (gate + cadence row + date
       // delta), so this call always lands as a series move.
       const result = await SmartRebooker.reschedule(row.id, target, win, 'admin', 'admin', {
         allowLive: true,
+        qualityDates,
         adminWindowRules: true,
         overlapAdvisory: true,
         sourceSurface: 'edit_modal',
@@ -7663,13 +7668,19 @@ async function planCollectiveEditDateMove(req) {
         notify: notifyCustomer === true,
         actorId: req.technicianId,
         reasonText: null,
+        qualityDates,
       });
       // Grouped siblings moved singly by moveVisitAsUnit sit outside the
       // series effects' broadcast — other boards need them (codex #3609 r10).
       for (const movedId of (result.visitMove?.moved || []).map(String).filter((id) => id !== String(row.id))) {
-        try { await emitDispatchJobUpdate({ jobId: movedId, actorId: req.technicianId }); } catch (err) {
+        try { await emitDispatchJobUpdate({ jobId: movedId, actorId: req.technicianId, qualityDates }); } catch (err) {
           logger.error(`[schedule/update-details] series board broadcast failed for grouped member ${movedId}: ${err.message}`);
         }
+      }
+      try {
+        await flushDispatchQualityDates(qualityDates);
+      } catch (err) {
+        logger.error(`[schedule/update-details] series route quality refresh failed: ${err.message}`);
       }
       return {
         seriesMoveId: result.seriesMoveId || null,
@@ -10793,7 +10804,11 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
       }
     }
 
-    if (assignmentChanged || detailsChanged || addonsReplaced || addressUpdatedIds.length) {
+    // recurringUpdatedJobIds: a count-only series edit (recurringPlannedCount
+    // alone) adds or cancels occurrences without touching assignment,
+    // details, add-ons or addresses, and those dates need the refresh too
+    // (codex #4295 r3 P2).
+    if (assignmentChanged || detailsChanged || addonsReplaced || addressUpdatedIds.length || recurringUpdatedJobIds.length) {
       // One refresh for the whole edit: a cadence resize broadcasts every
       // updated child and booster, and refreshing per broadcast would run
       // that many near-duplicate route passes concurrently (codex #4295 r1 P2).

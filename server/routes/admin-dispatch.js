@@ -4355,6 +4355,11 @@ async function applySeriesMoveEffects({ result, serviceId, newDate, newWindow, n
       // its Set in so this reuses it instead of flushing twice; a caller
       // with none (the reconciler, replaying an already-committed row) gets
       // its own.
+      // A caller that owns the Set flushes it once itself after every series
+      // effect has settled — a batch (rain-out, Edit Appointment) must not
+      // refresh per series (codex #4295 r3 P2); only a caller with none gets
+      // the flush here.
+      const ownsFlush = !qualityDates;
       const seriesQualityDates = qualityDates || new Set();
       for (const occurrence of [...occurrences, ...followUps]) {
         try {
@@ -4364,10 +4369,12 @@ async function applySeriesMoveEffects({ result, serviceId, newDate, newWindow, n
           logger.error(`[dispatch] series reschedule board broadcast failed for ${occurrence.id}: ${err.message}`);
         }
       }
-      try {
-        await flushDispatchQualityDates(seriesQualityDates);
-      } catch (err) {
-        logger.error(`[dispatch] series reschedule route quality refresh failed: ${err.message}`);
+      if (ownsFlush) {
+        try {
+          await flushDispatchQualityDates(seriesQualityDates);
+        } catch (err) {
+          logger.error(`[dispatch] series reschedule route quality refresh failed: ${err.message}`);
+        }
       }
       // Completion means EVERY occurrence's reminder synced AND every board
       // broadcast went out — a swallowed failure of either leaves the marker
@@ -4779,6 +4786,13 @@ router.post('/:serviceId/reschedule', async (req, res, next) => {
         reasonText,
         qualityDates,
       });
+      // This branch owns the Set (rebooker + every occurrence's broadcast):
+      // one refresh for the whole series move (codex #4295 r3 P2).
+      try {
+        await flushDispatchQualityDates(qualityDates);
+      } catch (err) {
+        logger.error(`[dispatch] series reschedule route quality refresh failed: ${err.message}`);
+      }
       const { rescheduledOccurrences, ...response } = result;
       return res.json({
         ...response,

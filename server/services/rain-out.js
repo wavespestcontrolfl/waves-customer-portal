@@ -2243,6 +2243,10 @@ async function commit({ serviceId, technicianId, reasonCode, scope, target, noti
           notify: false,
           actorId: actorUserId || null,
           reasonText: null,
+          // The batch owns the route-quality flush: every shifted series
+          // collects into the same Set the rebooker calls use, and the route
+          // refreshes once after this loop (codex #4295 r3 P2).
+          qualityDates: rebookerQualityDates,
         });
       } catch (err) {
         logger.error(`[rain-out] series effects pass failed for ${job.id}: ${err.message} — the reconciler finishes it`);
