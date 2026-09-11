@@ -570,12 +570,12 @@ const CLEAN_CLAUSE_LEAD = /^\s*(?:no|none|not|clear|nothing)\b/;
 // Every sentence terminator splits, so "No weeds! Large patch is visible" keeps
 // its positive sentence.
 const CLAUSE_SPLIT = /[;.!?]|\b(?:but|while|although|though|whereas|however|yet)\b/;
-const NEGATION_MARKER = /\b(?:no|not|none|non|never|neither|nor|cannot|\w+n['’]t|without|ruled[\s‐‑‒–—-]+out|negative|absent|unlikely|unconfirmed|excluded|free)\b/;
+const NEGATION_MARKER = /\b(?:no|not|none|non|never|neither|nor|cannot|\w+n['’]t|without|ruled[\s‐‑‒–—-]+out|negative|absent|absence|unlikely|unconfirmed|excluded|free)\b/;
 // Negation scope inside one clause. A determiner-style marker (no / without /
 // non / neither, and not / never when a cause term follows) negates what FOLLOWS
 // it, so the text before it stays positive: "Large patch with no weed pressure"
 // keeps large patch, "Drought stress, not chinch bugs" keeps drought. Any other
-// marker (ruled out, absent, unlikely, n't, none, "not present", "never observed",
+// marker (ruled out, absent, absence, unlikely, n't, none, "not present", "never observed",
 // "not a factor") negates the whole clause, because it describes the subject
 // that precedes it. Anything the rule cannot place is treated as negated.
 const FORWARD_NEGATION = /\b(no|not|never|without|non|neither)\b/;
@@ -674,7 +674,7 @@ const NEGATED_ABSENCE = /\b(?:not|never|cannot|\w+n['’]t)\s+(?:\w+[\s‐‑‒
 // evidence observed", "without visible lesions") describes the cause that
 // precedes it, so the whole clause is negated rather than only the object.
 const SYMPTOM_OBJECT = /^\s*(?:(?:visible|active|clear|obvious|new|fresh|further|additional|significant|major|real|current)\s+)*(?:signs?|evidence|lesions?|symptoms?|damage|activity|pressure|spots?|presence|feeding|indications?|issues?|problems?)\b/;
-const RECOGNIZED_MARKER = /\b(?:no|none|non|neither|nor|cannot|without|ruled[\s‐‑‒–—-]+out|negative|absent|unlikely|unconfirmed|excluded|free)\b/;
+const RECOGNIZED_MARKER = /\b(?:no|none|non|neither|nor|cannot|without|ruled[\s‐‑‒–—-]+out|negative|absent|absence|unlikely|unconfirmed|excluded|free)\b/;
 function positiveClauses(lower) {
   const positive = [];
   let negated = false;
@@ -685,8 +685,18 @@ function positiveClauses(lower) {
     let text = clause.trim();
     if (!text) continue;
     // Checked before the "-free" strip so "Not free of chinch bugs" / "Turf is
-    // not pest-free" stay uncertain instead of becoming a clean lawn.
-    if (NEGATED_ABSENCE.test(text)) { uncertain = true; continue; }
+    // not pest-free" stay uncertain instead of becoming a clean lawn. The
+    // uncertainty is scoped to its own predicate segment, so "Large patch
+    // present, chinch bugs not confirmed" and "Large patch visible and chinch
+    // bugs cannot be ruled out" keep large patch while the differential is
+    // dropped; a clause with nothing else beside it stays uncertain.
+    const segments = predicateSegments(text);
+    if (segments.some((segment) => NEGATED_ABSENCE.test(segment))) {
+      uncertain = true;
+      const remaining = segments.filter((segment) => !NEGATED_ABSENCE.test(segment));
+      if (!remaining.length) continue;
+      text = remaining.join(', ');
+    }
     if (FREE_DIFFERENTIAL.test(text)) {
       FREE_DIFFERENTIAL.lastIndex = 0;
       negated = true;
@@ -798,7 +808,7 @@ function buildCustomerSummary({ diagnosis, treatmentRationale = [] } = {}) {
 // is governed only as the hyphenated shorthand or the full "take all root rot" — the
 // ordinary phrase "may take all season" is not a disease — and the full phrase is
 // consumed whole so a predicate after it ("… is confirmed") is still scrubbed.
-const SUMMARY_CAUSE_RE = /\b(chinch(?:[\s‐‑‒–—-]*bugs?)?|large[\s‐‑‒–—-]*patch(?:es)?|brown[\s‐‑‒–—-]*patch(?:es)?|gr[ae]y[\s‐‑‒–—-]*leaf(?:[\s‐‑‒–—-]*spots?)?|dollar[\s‐‑‒–—-]*spots?|rhizoctonia|take[‐‑‒–—-]all(?:[\s‐‑‒–—-]*root[\s‐‑‒–—-]*rot)?|take[\s‐‑‒–—-]*all[\s‐‑‒–—-]*root[\s‐‑‒–—-]*rot|fungus|fungi|fungal|disease[sd]?|leaf[\s‐‑‒–—-]*spots?|mold(?:s|y)?|mildew(?:s|ed|y)?|insects?|pests?|infestations?|grubs?|caterpillars?|worms?|army[\s‐‑‒–—-]*worms?|sod[\s‐‑‒–—-]*webworms?|nutsedges?|sedges?|crabgrass|dollarweeds?|clovers?|spurges?|droughts?|water[\s‐‑‒–—-]*stress|under[\s‐‑‒–—-]*water(?:ed|ing)?|wilt(?:ed|ing)?|chlorosis|(?:iron|nitrogen|magnesium)[\s‐‑‒–—-]*deficienc(?:y|ies))\b/i;
+const SUMMARY_CAUSE_RE = /\b(chinch(?:[\s‐‑‒–—-]*bugs?)?|large[\s‐‑‒–—-]*patch(?:es)?|brown[\s‐‑‒–—-]*patch(?:es)?|gr[ae]y[\s‐‑‒–—-]*leaf(?:[\s‐‑‒–—-]*spots?)?|dollar[\s‐‑‒–—-]*spots?|rhizoctonial?|take[‐‑‒–—-]all(?:[\s‐‑‒–—-]*root[\s‐‑‒–—-]*rot)?|take[\s‐‑‒–—-]*all[\s‐‑‒–—-]*root[\s‐‑‒–—-]*rot|fungus(?:es)?|fungi|fungal|disease[sd]?|leaf[\s‐‑‒–—-]*spots?|mold(?:s|y)?|mildew(?:s|ed|y)?|insects?|pests?|infestations?|grubs?|caterpillars?|worms?|army[\s‐‑‒–—-]*worms?|sod[\s‐‑‒–—-]*webworms?|nutsedges?|sedges?|crabgrass(?:es)?|dollarweeds?|clovers?|spurges?|drought(?:s|y)?|water[\s‐‑‒–—-]*stress|under[\s‐‑‒–—-]*water(?:ed|ing)?|wilt(?:s|ed|ing)?|chlorosis|(?:iron|nitrogen|magnesium)[\s‐‑‒–—-]*deficienc(?:y|ies))\b/i;
 const GENERIC_LOW_CONFIDENCE_SUMMARY = 'Your lawn shows an area worth keeping an eye on. We did not see enough detail to call out a specific pest or disease from these photos, so the best next step is a closer look if it spreads, thins, or does not recover.';
 
 // Public hero summary egress: scrub, then for a low/unknown-confidence report replace
@@ -978,7 +988,11 @@ const STREET_ADDRESS = /\b\d{1,6}\s+[A-Za-z0-9.'-]+(?:\s+[A-Za-z0-9.'-]+){0,3}\s
 // and links before any of it reaches an unauthenticated prospect report.
 const CUSTOMER_TEXT_URL = /\b(?:https?:\/\/|www\.)\S+/gi;
 const CUSTOMER_TEXT_EMAIL = /\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b/gi;
-const CUSTOMER_TEXT_PHONE = /(?:\+?1[\s.-]?)?\(?\d{3}\)?[\s.-]?\d{3}[\s.-]?\d{4}\b/g;
+// International (+ followed by 7–15 digits with optional separators), North
+// American ten-digit, and local seven-digit forms. A seven-digit "555-0100" is
+// removed even though a rare size range could look like it: a leaked contact
+// number is the worse failure on a customer-facing surface.
+const CUSTOMER_TEXT_PHONE = /\+\d(?:[\s.()-]*\d){6,14}\b|(?:\+?1[\s.-]?)?\(?\d{3}\)?[\s.-]?\d{3}[\s.-]?\d{4}\b|\b\d{3}[\s.-]\d{4}\b/g;
 
 // Final egress sanitizer for any free-text published to a prospect. Defense in
 // depth at the public boundary: even if a stale/buggy client stored unsanitized

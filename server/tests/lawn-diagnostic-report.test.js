@@ -580,6 +580,23 @@ describe('lawn diagnostic auto-release ladder', () => {
     expect(out).not.toMatch(/https?:\/\//);
   });
 
+  test.each([
+    ['Call 555-0100 if the patch spreads.', /0100/],
+    ['Call 555 0100 if the patch spreads.', /0100/],
+    ['Call +44 20 7946 0958 if the patch spreads.', /7946|0958/],
+    ['Call +44 (0)20-7946-0958 if the patch spreads.', /7946|0958/],
+    ['Call +1 941 555 0100 if the patch spreads.', /0100/],
+    ['Call 9415550100 if the patch spreads.', /0100/],
+  ])('scrubCustomerText removes local and international phone forms from %s', (text, digits) => {
+    const out = scrubCustomerText(text);
+    expect(out).not.toMatch(digits);
+    expect(out).toMatch(/if the patch spreads\./);
+  });
+
+  test('scrubCustomerText keeps ordinary short figures', () => {
+    expect(scrubCustomerText('Reapply in 10-14 days across 2,000 sq ft; mow at 3.5 in.')).toBe('Reapply in 10-14 days across 2,000 sq ft; mow at 3.5 in.');
+  });
+
   test('customer_summary reduces a raw/injected finding name to an allowlisted label', () => {
     // A stale/compromised client can store an arbitrary finding.name. The deterministic
     // summary must publish only the allowlisted condition label, never the raw text.
@@ -639,6 +656,8 @@ describe('lawn diagnostic auto-release ladder', () => {
     'Chinch bugs and weeds absent', 'Large patch and dollar spot ruled out',
     // "free of" keeps its scope across a coordinated list.
     'Free of chinch bugs and weeds', 'Free of chinch bugs, weeds, or grubs',
+    // The nominal absence form.
+    'Absence of chinch bugs', 'Chinch bug absence', 'Absence of any large patch or dollar spot',
   ])('safeConditionLabel never maps the negated alias %s to a positive cause label', (name) => {
     expect(safeConditionLabel(name, 'high')).toBe('no major visible stress');
   });
@@ -660,6 +679,8 @@ describe('lawn diagnostic auto-release ladder', () => {
     'Large patch cannot be ruled out', 'Chinch bugs have not been ruled out', 'Dollar spot not excluded', 'Chinch bugs aren\u2019t unlikely',
     'Fungal activity is not confirmed', 'Chinch bugs are unconfirmed', 'Chinch bugs cannot be confirmed',
     'Not free of chinch bugs', 'Turf is not pest-free', 'Cannot be disease-free',
+    // A conjunct with no predicate of its own shares the uncertain predicate.
+    'Chinch bugs and large patch cannot be ruled out',
   ])('an unrecognized negation %s never earns the clean label and never maps a cause', (name) => {
     expect(safeConditionLabel(name, 'high')).toBe('a lawn condition we are monitoring');
     expect(safeConditionLabel(name, 'low')).toBe('a lawn condition we are monitoring');
@@ -705,6 +726,13 @@ describe('lawn diagnostic auto-release ladder', () => {
     ['Chinch bugs not a factor, drought stress visible', 'drought stress'],
     ['Nonirrigated strip, chinch bug damage', 'chinch bug activity'],
     ['Healthy overall, some yellowing', 'color and nutrient stress'],
+    // An uncertain differential is scoped to its own predicate segment.
+    ['Large patch present, chinch bugs not confirmed', 'large patch (fungal) activity'],
+    ['Large patch visible and chinch bugs cannot be ruled out', 'large patch (fungal) activity'],
+    ['Chinch bugs not confirmed, large patch present', 'large patch (fungal) activity'],
+    ['Drought stress unconfirmed; chinch bug damage along the edge', 'chinch bug activity'],
+    // The nominal absence form negates its own segment.
+    ['Large patch present, chinch bug absence', 'large patch (fungal) activity'],
   ])('safeConditionLabel maps only the positive clause of %s', (name, label) => {
     expect(safeConditionLabel(name, 'high')).toBe(label);
   });
@@ -724,6 +752,10 @@ describe('lawn diagnostic auto-release ladder', () => {
   test('safeCustomerSummary governs the fully joined gray-leaf-spot spelling', () => {
     expect(safeCustomerSummary('Grayleafspot lesions are visible.', 'low')).not.toMatch(/leaf/i);
     expect(safeConditionLabel('Grayleafspot lesions', 'moderate')).toBe('gray leaf spot');
+  });
+
+  test.each(['Wilts are visible', 'Funguses are spreading', 'Crabgrasses are spreading', 'Rhizoctonial damage', 'Droughty turf'])('safeCustomerSummary governs the inflected spelling %s', (cause) => {
+    expect(safeCustomerSummary(`${cause} across the shaded strip.`, 'low')).not.toMatch(/wilt|fungus|crabgrass|rhizoctonia|drought/i);
   });
 
   test.each(['Moldy growth', 'Mildewed turf', 'Diseased turf', 'Mildewy patches'])('safeCustomerSummary replaces a low-confidence summary using the adjectival form %s with the generic line', (cause) => {

@@ -87,7 +87,7 @@ function distinctCauseCount(name) {
 }
 const CAUSE_TERM_SYNONYMS = { fungus: 'fungal', fungi: 'fungal', disease: 'disease', mold: 'fungal', mildew: 'fungal' };
 const causeTerm = (term) => {
-  const base = String(term || '').toLowerCase().replace(/gr[ae]y/, 'gray').replace(/[\s‐‑‒–—-]+/g, ' ').replace(/\bgray ?leaf ?spots?\b/g, 'gray leaf').replace(/patches\b/g, 'patch').replace(/deficiencies\b/g, 'deficiency').replace(/\b(gray|large|brown|dollar|leaf|water|iron|nitrogen|magnesium|take)\s*(leaf|patch|spots?|stress|deficiency|all)\b/g, '$1 $2').replace(/\btake all root rot\b/, 'take all').replace(/\bunder ?water(?:ed|ing)?\b/, 'underwater').replace(/\bwilt(?:ed|ing)?\b/, 'wilt').replace(/\bmoldy\b/, 'mold').replace(/\bmildew(?:ed|y)\b/, 'mildew').replace(/\bdiseased\b/, 'disease').replace(/\bsod ?webworms?\b/g, 'sod webworm').replace(/\barmy ?worms?\b/g, 'armyworm').replace(/\bchinch ?bugs?\b/g, 'chinch');
+  const base = String(term || '').toLowerCase().replace(/gr[ae]y/, 'gray').replace(/[\s‐‑‒–—-]+/g, ' ').replace(/\bgray ?leaf ?spots?\b/g, 'gray leaf').replace(/patches\b/g, 'patch').replace(/deficiencies\b/g, 'deficiency').replace(/\b(gray|large|brown|dollar|leaf|water|iron|nitrogen|magnesium|take)\s*(leaf|patch|spots?|stress|deficiency|all)\b/g, '$1 $2').replace(/\btake all root rot\b/, 'take all').replace(/\bunder ?water(?:ed|ing)?\b/, 'underwater').replace(/\bwilt(?:s|ed|ing)?\b/, 'wilt').replace(/\bfunguses\b/, 'fungus').replace(/\bcrabgrasses\b/, 'crabgrass').replace(/\brhizoctonial\b/, 'rhizoctonia').replace(/\bdroughty\b/, 'drought').replace(/\bmoldy\b/, 'mold').replace(/\bmildew(?:ed|y)\b/, 'mildew').replace(/\bdiseased\b/, 'disease').replace(/\bsod ?webworms?\b/g, 'sod webworm').replace(/\barmy ?worms?\b/g, 'armyworm').replace(/\bchinch ?bugs?\b/g, 'chinch');
   // Singularize before the synonym lookup so "molds" folds like "mold".
   const singular = /(?:ss|us|is)$/.test(base) ? base : base.replace(/(?<=[a-z])s$/, '');
   return CAUSE_TERM_SYNONYMS[singular] || CAUSE_TERM_SYNONYMS[base] || singular;
@@ -102,6 +102,7 @@ function governedTerms(text) {
 // True when a reviewed finding is positive, unambiguous evidence for the causes
 // its name and label carry. A negated name ("Chinch bugs weren't observed",
 // "Chinch bug activity — unconfirmed", "Non-fungal stress", "Chinch bugs never observed",
+// "Absence of chinch bugs", "Chinch bug absence",
 // "Neither chinch bugs nor drought stress"), an unresolved differential ("Chinch
 // bugs or drought stress", "chinch vs. drought", "chinch/drought", "Chinch bugs?")
 // and any name carrying more than one distinct governed cause ("Chinch bugs and
@@ -116,7 +117,7 @@ function establishesCause(finding) {
   if (finding.keep === false || finding.negated || finding.label === NO_STRESS_LABEL) return false;
   // A negated recovery ("Large patch is not improving") is positive evidence.
   const name = stripNegatedRecovery(spaceJoinedNon(finding.name || ''));
-  if (/\b(?:no|not|none|non|never|neither|nor|cannot|\w+n['’]t|without|ruled[\s‐‑‒–—-]+out|negative|absent|unlikely|unconfirmed|excluded|free)\b/i.test(name)) return false;
+  if (/\b(?:no|not|none|non|never|neither|nor|cannot|\w+n['’]t|without|ruled[\s‐‑‒–—-]+out|negative|absent|absence|unlikely|unconfirmed|excluded|free)\b/i.test(name)) return false;
   if (/\b(?:or|vs\.?|versus|either|alternatively)\b|\w\s*\/\s*\w|\?/i.test(name)) return false;
   return distinctCauseCount(name) <= 1;
 }

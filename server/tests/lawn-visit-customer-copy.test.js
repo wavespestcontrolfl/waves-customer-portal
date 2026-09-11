@@ -88,13 +88,17 @@ describe('customer publication', () => {
     ['Drought stress (water stress)', 'Drought stress is spreading along the edge.', /drought/i],
     ['Underwatered turf', 'Underwatered turf along the edge.', /underwatered/i],
     ['Iron deficiencies', 'Iron deficiencies across the front.', /deficiencies/i],
+    ['Funguses', 'Funguses are spreading in the shade.', /funguses/i],
+    ['Crabgrasses', 'Crabgrasses along the walk.', /crabgrasses/i],
+    ['Rhizoctonia', 'Rhizoctonial damage in the shade.', /rhizoctonial/i],
+    ['Wilt', 'Wilts are visible near the curb.', /wilts/i],
   ])('a single cause spelled %s still authorizes its prose', (name, text, expected) => {
     const evidence = { name, label: 'general lawn stress', confidence: 'moderate' };
     expect(copy.customerObservations(text, [evidence])).toMatch(expected);
     expect(copy.customerObservations(text, [])).toBe(copy.NO_OBSERVATIONS);
   });
 
-  test.each(['Underwatered turf', 'Molds are spreading', 'Iron deficiencies', 'Wilting turf', 'Mildews', 'Droughts'])(
+  test.each(['Underwatered turf', 'Molds are spreading', 'Iron deficiencies', 'Wilting turf', 'Mildews', 'Droughts', 'Wilts are visible', 'Funguses are spreading', 'Crabgrasses are spreading', 'Rhizoctonial damage', 'Droughty turf'])(
     'allowlisted spelling %s never publishes without evidence', (text) => {
       expect(copy.customerObservations(`${text} along the edge.`, [])).toBe(copy.NO_OBSERVATIONS);
       expect(copy.safeConfirmationStep(`${text} along the edge.`)).toBe('');
@@ -301,6 +305,8 @@ describe('customer publication', () => {
     ['Nonfungal stress', 'Fungal activity is spreading.'],
     ['Chinch bugs never observed', 'Chinch bug activity is damaging the edge.'],
     ['Never observed chinch bugs', 'Chinch bug activity is damaging the edge.'],
+    ['Absence of chinch bugs', 'Chinch bug activity is damaging the edge.'],
+    ['Chinch bug absence', 'Chinch bug activity is damaging the edge.'],
   ])('negative-prefix finding %s cannot authorize customer prose', (name, text) => {
     for (const confidence of ['moderate', 'high']) {
       const evidence = { name, label: 'general lawn stress', confidence };
@@ -336,6 +342,11 @@ describe('customer publication', () => {
       expect(copy.safeConfirmationStep('Check the chinch bug activity', analysis.findings[0])).toBe('');
     },
   );
+
+  test.each(['Call 555-0100 if the patch spreads.', 'Call +44 20 7946 0958 if the patch spreads.'])('observations never publish the contact number in %s', (text) => {
+    expect(copy.customerObservations(text, [])).not.toMatch(/0100|7946|0958/);
+    expect(copy.customerObservations(text, [])).toMatch(/if the patch spreads/);
+  });
 
   test('confirmation steps obey the same privacy and cause rules', () => {
     const chinch = { label: 'chinch bug activity', confidence: 'high' };
