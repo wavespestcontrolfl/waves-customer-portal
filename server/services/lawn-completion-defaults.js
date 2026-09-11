@@ -171,10 +171,21 @@ function completionItem(item, protocolProduct, amountsAllowed) {
 // track for anyone; that resolution must not become a one-time or commercial
 // visit's protocol — and a partial assignment (window only) must not let the
 // matcher's wildcards adopt the calendar-resolved protocol either.
+// An EXPLICIT non-membership billing lane defeats the tier fallback: a
+// customer reclassified to per_visit / one_time can legitimately keep a
+// legacy Bronze–Platinum tier on the row, and billing-lane already rules
+// that such a lane is authoritative over lingering tier fields (a per_visit
+// / one_time customer is never dues-covered). Attribution follows the same
+// classifier so a nonmember visit's applied products are not recorded as
+// seasonal protocol actuals. per_application and annual_prepay are
+// membership lanes; null / inferred keeps the tier rule.
+const NON_PROGRAM_BILLING_MODES = new Set(['per_visit', 'one_time']);
+
 function lawnPlanProgramApplies(plan) {
   const assigned = plan?.appointmentAssignment || {};
-  return ['Bronze', 'Silver', 'Gold', 'Platinum'].includes(plan?.propertyGate?.serviceTier)
-    || !!(assigned.protocolKey && assigned.protocolVersion && assigned.windowKey);
+  const tierApplies = ['Bronze', 'Silver', 'Gold', 'Platinum'].includes(plan?.propertyGate?.serviceTier)
+    && !NON_PROGRAM_BILLING_MODES.has(plan?.propertyGate?.billingMode);
+  return tierApplies || !!(assigned.protocolKey && assigned.protocolVersion && assigned.windowKey);
 }
 
 // The ledger stamps a visit's protocol only when a program applies, the

@@ -1,4 +1,4 @@
-import { Button, Field, Select, Badge, Card, ActionFeedback, Table, THead, TBody, TR, TH, TD } from "../../components/ui";
+import { Button, Field, Select, Badge, Card, ActionFeedback, Table, THead, TBody, TR, TH, TD, Input, Checkbox } from "../../components/ui";
 import { useState, useEffect, useCallback, useMemo, useRef } from "react";
 import useIsMobile from "../../hooks/useIsMobile";
 import { BarChart3, Truck, Wrench, Droplets, Cog, RotateCw, Syringe, Leaf, ShieldCheck } from "lucide-react";
@@ -26,44 +26,6 @@ function af(path, opts = {}) {
     return r.json();
   });
 }
-const sCard = {
-  background: "#FFFFFF",
-  border: `1px solid ${"#E4E4E7"}`,
-  borderRadius: 12,
-  padding: 20,
-  marginBottom: 12,
-  boxShadow: "0 1px 3px rgba(0,0,0,0.08)"
-};
-const sBtn = (bg, c) => ({
-  padding: "8px 16px",
-  background: bg,
-  color: c,
-  border: "none",
-  borderRadius: 8,
-  fontSize: 13,
-  fontWeight: 500,
-  cursor: "pointer"
-});
-const sBadge = (bg, c) => ({
-  fontSize: 10,
-  padding: "2px 8px",
-  borderRadius: 4,
-  background: bg,
-  color: c,
-  fontWeight: 500,
-  display: "inline-block"
-});
-const sInput = {
-  width: "100%",
-  padding: "8px 12px",
-  background: "#FFFFFF",
-  border: `1px solid ${"#E4E4E7"}`,
-  borderRadius: 8,
-  color: "#27272A",
-  fontSize: 13,
-  outline: "none",
-  boxSizing: "border-box"
-};
 const fmt = n => n != null ? "$" + Number(n).toLocaleString(undefined, {
   minimumFractionDigits: 2,
   maximumFractionDigits: 2
@@ -1243,6 +1205,8 @@ export function MaintenanceForm({
   onDone,
   onPendingChange
 }) {
+  const actionRef = useRef(false);
+  const [actionError, setActionError] = useState("");
   const isMobile = useIsMobile(768);
   const [form, setForm] = useState({
     scheduleId: "",
@@ -1278,57 +1242,60 @@ export function MaintenanceForm({
     if (s) set("taskName", s.task_name);
     set("scheduleId", id);
   };
-  const [error, setError] = useState("");
   const submit = async () => {
-    if (!form.taskName) return;
-    setSaving(true);
-    setError("");
+    if (actionRef.current) return;
+    actionRef.current = true;
+    setActionError("");
     try {
-      await af(`/admin/equipment-maintenance/${equipmentId}/records`, {
-        method: "POST",
-        body: JSON.stringify({
-          scheduleId: form.scheduleId || null,
-          maintenanceType: form.maintenanceType,
-          taskName: form.taskName,
-          description: form.description || null,
-          performedBy: form.performedBy || null,
-          vendorName: form.vendorName || null,
-          milesAtService: form.milesAtService ? parseInt(form.milesAtService) : null,
-          hoursAtService: form.hoursAtService ? parseFloat(form.hoursAtService) : null,
-          conditionBefore: form.conditionBefore ? parseInt(form.conditionBefore) : null,
-          conditionAfter: form.conditionAfter ? parseInt(form.conditionAfter) : null,
-          partsCost: parseFloat(form.partsCost) || 0,
-          laborCost: parseFloat(form.laborCost) || 0,
-          vendorCost: parseFloat(form.vendorCost) || 0,
-          downtimeHours: parseFloat(form.downtimeHours) || 0,
-          followUpNeeded: form.followUpNeeded,
-          followUpNotes: form.followUpNotes || null,
-          followUpDate: form.followUpDate || null,
-          warrantyClaim: form.warrantyClaim
-        })
-      });
-      onDone();
-    } catch (e) {
-      console.error(e);
-      // Stay open with the operator's form intact and say why (UI audit F0441).
-      setError(`Save failed: ${e.message}`);
+      if (!form.taskName) return;
+      setSaving(true);
+      try {
+        await af(`/admin/equipment-maintenance/${equipmentId}/records`, {
+          method: "POST",
+          body: JSON.stringify({
+            scheduleId: form.scheduleId || null,
+            maintenanceType: form.maintenanceType,
+            taskName: form.taskName,
+            description: form.description || null,
+            performedBy: form.performedBy || null,
+            vendorName: form.vendorName || null,
+            milesAtService: form.milesAtService ? parseInt(form.milesAtService) : null,
+            hoursAtService: form.hoursAtService ? parseFloat(form.hoursAtService) : null,
+            conditionBefore: form.conditionBefore ? parseInt(form.conditionBefore) : null,
+            conditionAfter: form.conditionAfter ? parseInt(form.conditionAfter) : null,
+            partsCost: parseFloat(form.partsCost) || 0,
+            laborCost: parseFloat(form.laborCost) || 0,
+            vendorCost: parseFloat(form.vendorCost) || 0,
+            downtimeHours: parseFloat(form.downtimeHours) || 0,
+            followUpNeeded: form.followUpNeeded,
+            followUpNotes: form.followUpNotes || null,
+            followUpDate: form.followUpDate || null,
+            warrantyClaim: form.warrantyClaim
+          })
+        });
+        onDone();
+      } catch (e) {
+        setActionError(`Save failed: ${e.message || "Request failed"}`);
+      }
+      setSaving(false);
+    } finally {
+      actionRef.current = false;
     }
-    setSaving(false);
   };
-  return <div style={{
-    ...sCard,
-    background: "#FAFAFA",
+  return <Card style={{
     marginBottom: 16
-  }}>
-      {" "}
-      <div style={{
-      fontSize: 14,
-      fontWeight: 700,
+  }} className="p-4 mb-3">
+      {actionError && <ActionFeedback error className="mb-4">
+          {actionError}
+        </ActionFeedback>}{" "}
+      <h2 style={{
+      fontSize: 18,
+      fontWeight: 500,
       color: "#09090B",
       marginBottom: 12
     }}>
         Record Maintenance
-      </div>{" "}
+      </h2>{" "}
       <div style={{
       display: "grid",
       gridTemplateColumns: isMobile ? "1fr" : "1fr 1fr",
@@ -1337,142 +1304,94 @@ export function MaintenanceForm({
         {" "}
         <div>
           {" "}
-          <label style={{
-          fontSize: 11,
-          color: "#71717A"
-        }}>
-            Schedule (optional)
-          </label>{" "}
-          <select value={form.scheduleId} onChange={e => selectSchedule(e.target.value)} style={sInput}>
-            {" "}
-            <option value="">-- Select schedule --</option>
-            {schedules.map(s => <option key={s.id} value={s.id}>
-                {s.task_name}
-                {s.is_overdue ? " (OVERDUE)" : ""}
-              </option>)}
-          </select>{" "}
+          <Field label="Schedule (optional)" className="min-w-0">
+            <Select value={form.scheduleId} onChange={e => selectSchedule(e.target.value)} disabled={saving}>
+              {" "}
+              <option value="">-- Select schedule --</option>
+              {schedules.map(s => <option key={s.id} value={s.id}>
+                  {s.task_name}
+                  {s.is_overdue ? " (OVERDUE)" : ""}
+                </option>)}
+            </Select>
+          </Field>{" "}
         </div>{" "}
         <div>
           {" "}
-          <label style={{
-          fontSize: 11,
-          color: "#71717A"
-        }}>Type</label>{" "}
-          <select value={form.maintenanceType} onChange={e => set("maintenanceType", e.target.value)} style={sInput}>
-            {["scheduled", "reactive", "inspection", "repair", "upgrade", "recall"].map(t => <option key={t} value={t}>
-                {t}
-              </option>)}
-          </select>{" "}
+          <Field label="Type" className="min-w-0">
+            <Select value={form.maintenanceType} onChange={e => set("maintenanceType", e.target.value)} disabled={saving}>
+              {["scheduled", "reactive", "inspection", "repair", "upgrade", "recall"].map(t => <option key={t} value={t}>
+                  {t}
+                </option>)}
+            </Select>
+          </Field>{" "}
         </div>{" "}
         <div style={{
         gridColumn: isMobile ? undefined : "1 / -1"
       }}>
           {" "}
-          <label style={{
-          fontSize: 11,
-          color: "#71717A"
-        }}>
-            Task Name *
-          </label>{" "}
-          <input value={form.taskName} onChange={e => set("taskName", e.target.value)} style={sInput} placeholder="e.g. Oil Change" />{" "}
+          <Field label="Task Name *" className="min-w-0">
+            <Input value={form.taskName} onChange={e => set("taskName", e.target.value)} placeholder="e.g. Oil Change" disabled={saving} />
+          </Field>{" "}
         </div>{" "}
         <div>
           {" "}
-          <label style={{
-          fontSize: 11,
-          color: "#71717A"
-        }}>
-            Performed By
-          </label>{" "}
-          <input value={form.performedBy} onChange={e => set("performedBy", e.target.value)} style={sInput} />{" "}
+          <Field label="Performed By" className="min-w-0">
+            <Input value={form.performedBy} onChange={e => set("performedBy", e.target.value)} disabled={saving} />
+          </Field>{" "}
         </div>{" "}
         <div>
           {" "}
-          <label style={{
-          fontSize: 11,
-          color: "#71717A"
-        }}>Vendor</label>{" "}
-          <input value={form.vendorName} onChange={e => set("vendorName", e.target.value)} style={sInput} />{" "}
+          <Field label="Vendor" className="min-w-0">
+            <Input value={form.vendorName} onChange={e => set("vendorName", e.target.value)} disabled={saving} />
+          </Field>{" "}
         </div>{" "}
         <div>
           {" "}
-          <label style={{
-          fontSize: 11,
-          color: "#71717A"
-        }}>
-            Miles at Service
-          </label>{" "}
-          <input type="number" value={form.milesAtService} onChange={e => set("milesAtService", e.target.value)} style={sInput} />{" "}
+          <Field label="Miles at Service" className="min-w-0">
+            <Input type="number" value={form.milesAtService} onChange={e => set("milesAtService", e.target.value)} disabled={saving} />
+          </Field>{" "}
         </div>{" "}
         <div>
           {" "}
-          <label style={{
-          fontSize: 11,
-          color: "#71717A"
-        }}>
-            Hours at Service
-          </label>{" "}
-          <input type="number" step="0.1" value={form.hoursAtService} onChange={e => set("hoursAtService", e.target.value)} style={sInput} />{" "}
+          <Field label="Hours at Service" className="min-w-0">
+            <Input type="number" step="0.1" value={form.hoursAtService} onChange={e => set("hoursAtService", e.target.value)} disabled={saving} />
+          </Field>{" "}
         </div>{" "}
         <div>
           {" "}
-          <label style={{
-          fontSize: 11,
-          color: "#71717A"
-        }}>
-            Condition Before (1-10)
-          </label>{" "}
-          <input type="number" min="1" max="10" value={form.conditionBefore} onChange={e => set("conditionBefore", e.target.value)} style={sInput} />{" "}
+          <Field label="Condition Before (1-10)" className="min-w-0">
+            <Input type="number" min="1" max="10" value={form.conditionBefore} onChange={e => set("conditionBefore", e.target.value)} disabled={saving} />
+          </Field>{" "}
         </div>{" "}
         <div>
           {" "}
-          <label style={{
-          fontSize: 11,
-          color: "#71717A"
-        }}>
-            Condition After (1-10)
-          </label>{" "}
-          <input type="number" min="1" max="10" value={form.conditionAfter} onChange={e => set("conditionAfter", e.target.value)} style={sInput} />{" "}
+          <Field label="Condition After (1-10)" className="min-w-0">
+            <Input type="number" min="1" max="10" value={form.conditionAfter} onChange={e => set("conditionAfter", e.target.value)} disabled={saving} />
+          </Field>{" "}
         </div>{" "}
         <div>
           {" "}
-          <label style={{
-          fontSize: 11,
-          color: "#71717A"
-        }}>
-            Parts Cost
-          </label>{" "}
-          <input type="number" step="0.01" value={form.partsCost} onChange={e => set("partsCost", e.target.value)} style={sInput} />{" "}
+          <Field label="Parts Cost" className="min-w-0">
+            <Input type="number" step="0.01" value={form.partsCost} onChange={e => set("partsCost", e.target.value)} disabled={saving} />
+          </Field>{" "}
         </div>{" "}
         <div>
           {" "}
-          <label style={{
-          fontSize: 11,
-          color: "#71717A"
-        }}>
-            Labor Cost
-          </label>{" "}
-          <input type="number" step="0.01" value={form.laborCost} onChange={e => set("laborCost", e.target.value)} style={sInput} />{" "}
+          <Field label="Labor Cost" className="min-w-0">
+            <Input type="number" step="0.01" value={form.laborCost} onChange={e => set("laborCost", e.target.value)} disabled={saving} />
+          </Field>{" "}
         </div>{" "}
         <div>
           {" "}
-          <label style={{
-          fontSize: 11,
-          color: "#71717A"
-        }}>
-            Vendor Cost
-          </label>{" "}
-          <input type="number" step="0.01" value={form.vendorCost} onChange={e => set("vendorCost", e.target.value)} style={sInput} />{" "}
+          <Field label="Vendor Cost" className="min-w-0">
+            <Input type="number" step="0.01" value={form.vendorCost} onChange={e => set("vendorCost", e.target.value)} disabled={saving} />
+          </Field>{" "}
         </div>{" "}
         <div>
           {" "}
-          <label style={{
-          fontSize: 11,
-          color: "#71717A"
-        }}>
-            Downtime Hours
-          </label>{" "}
-          <input type="number" step="0.5" value={form.downtimeHours} onChange={e => set("downtimeHours", e.target.value)} style={sInput} />{" "}
+          <Field label="Downtime Hours" className="min-w-0">
+            <Input type="number" step="0.5" value={form.downtimeHours} onChange={e => set("downtimeHours", e.target.value)} disabled={saving} />
+          </Field>{" "}
         </div>{" "}
         <div style={{
         display: "flex",
@@ -1482,25 +1401,25 @@ export function MaintenanceForm({
       }}>
           {" "}
           <label style={{
-          fontSize: 12,
+          fontSize: 14,
           color: "#71717A",
           display: "flex",
           alignItems: "center",
           gap: 4
-        }}>
+        }} className="ui-choice-label">
             {" "}
-            <input type="checkbox" checked={form.followUpNeeded} onChange={e => set("followUpNeeded", e.target.checked)} />
+            <Checkbox type="checkbox" checked={form.followUpNeeded} onChange={e => set("followUpNeeded", e.target.checked)} disabled={saving} />
             Follow-up needed
           </label>{" "}
           <label style={{
-          fontSize: 12,
+          fontSize: 14,
           color: "#71717A",
           display: "flex",
           alignItems: "center",
           gap: 4
-        }}>
+        }} className="ui-choice-label">
             {" "}
-            <input type="checkbox" checked={form.warrantyClaim} onChange={e => set("warrantyClaim", e.target.checked)} />
+            <Checkbox type="checkbox" checked={form.warrantyClaim} onChange={e => set("warrantyClaim", e.target.checked)} disabled={saving} />
             Warranty claim
           </label>{" "}
         </div>
@@ -1508,49 +1427,34 @@ export function MaintenanceForm({
             {" "}
             <div>
               {" "}
-              <label style={{
-            fontSize: 11,
-            color: "#71717A"
-          }}>
-                Follow-up Date
-              </label>{" "}
-              <input type="date" value={form.followUpDate} onChange={e => set("followUpDate", e.target.value)} style={sInput} />{" "}
+              <Field label="Follow-up Date" className="min-w-0">
+                <Input type="date" value={form.followUpDate} onChange={e => set("followUpDate", e.target.value)} disabled={saving} />
+              </Field>{" "}
             </div>{" "}
             <div>
               {" "}
-              <label style={{
-            fontSize: 11,
-            color: "#71717A"
-          }}>
-                Follow-up Notes
-              </label>{" "}
-              <input value={form.followUpNotes} onChange={e => set("followUpNotes", e.target.value)} style={sInput} />{" "}
+              <Field label="Follow-up Notes" className="min-w-0">
+                <Input value={form.followUpNotes} onChange={e => set("followUpNotes", e.target.value)} disabled={saving} />
+              </Field>{" "}
             </div>{" "}
           </>}
       </div>{" "}
-      {error && <div role="alert" style={{
-      color: "#991B1B",
-      fontSize: 13,
-      marginTop: 12
-    }}>
-          {error}
-        </div>}
       <div style={{
       marginTop: 12,
       display: "flex",
       gap: 8
     }}>
         {" "}
-        <button onClick={submit} disabled={saving || !form.taskName} style={{
-        ...sBtn("#15803D", "#FFFFFF"),
-        opacity: saving || !form.taskName ? 0.5 : 1
-      }}>
-          {saving ? "Saving..." : "Save Record"}
-        </button>{" "}
+        <Button onClick={submit} disabled={saving || !form.taskName} type="button" variant="primary" loading={saving} className="min-w-11">
+          {"Save Record"}
+        </Button>{" "}
       </div>{" "}
-    </div>;
+    </Card>;
 }
 
+// ═══════════════════════════════════════════════════════════════════
+// LOG MILEAGE FORM
+// ═══════════════════════════════════════════════════════════════════
 // ═══════════════════════════════════════════════════════════════════
 // LOG MILEAGE FORM
 // ═══════════════════════════════════════════════════════════════════
@@ -1560,6 +1464,8 @@ export function MileageForm({
   onDone,
   onPendingChange
 }) {
+  const actionRef = useRef(false);
+  const [actionError, setActionError] = useState("");
   const isMobile = useIsMobile(768);
   const today = etDateString();
   const [form, setForm] = useState({
@@ -1585,48 +1491,52 @@ export function MileageForm({
   }));
   const totalMiles = (parseInt(form.odometerEnd) || 0) - (parseInt(form.odometerStart) || 0);
   const irsDeduction = totalMiles > 0 ? ((totalMiles - parseFloat(form.personalMiles || 0)) * 0.7).toFixed(2) : "0.00";
-  const [error, setError] = useState("");
   const submit = async () => {
-    if (!form.odometerStart || !form.odometerEnd) return;
-    setSaving(true);
-    setError("");
+    if (actionRef.current) return;
+    actionRef.current = true;
+    setActionError("");
     try {
-      await af(`/admin/equipment-maintenance/${vehicleId}/mileage`, {
-        method: "POST",
-        body: JSON.stringify({
-          logDate: form.logDate,
-          odometerStart: parseInt(form.odometerStart),
-          odometerEnd: parseInt(form.odometerEnd),
-          personalMiles: parseFloat(form.personalMiles) || 0,
-          fuelGallons: form.fuelGallons ? parseFloat(form.fuelGallons) : null,
-          fuelCost: form.fuelCost ? parseFloat(form.fuelCost) : null,
-          jobsServiced: form.jobsServiced ? parseInt(form.jobsServiced) : null,
-          loggedBy: form.loggedBy || null,
-          notes: form.notes || null,
-          source: "manual"
-        })
-      });
-      onDone();
-    } catch (e) {
-      console.error(e);
-      setError(`Save failed: ${e.message}`);
+      if (!form.odometerStart || !form.odometerEnd) return;
+      setSaving(true);
+      try {
+        await af(`/admin/equipment-maintenance/${vehicleId}/mileage`, {
+          method: "POST",
+          body: JSON.stringify({
+            logDate: form.logDate,
+            odometerStart: parseInt(form.odometerStart),
+            odometerEnd: parseInt(form.odometerEnd),
+            personalMiles: parseFloat(form.personalMiles) || 0,
+            fuelGallons: form.fuelGallons ? parseFloat(form.fuelGallons) : null,
+            fuelCost: form.fuelCost ? parseFloat(form.fuelCost) : null,
+            jobsServiced: form.jobsServiced ? parseInt(form.jobsServiced) : null,
+            loggedBy: form.loggedBy || null,
+            notes: form.notes || null,
+            source: "manual"
+          })
+        });
+        onDone();
+      } catch (e) {
+        setActionError(`Save failed: ${e.message || "Request failed"}`);
+      }
+      setSaving(false);
+    } finally {
+      actionRef.current = false;
     }
-    setSaving(false);
   };
-  return <div style={{
-    ...sCard,
-    background: "#FAFAFA",
+  return <Card style={{
     marginBottom: 16
-  }}>
-      {" "}
-      <div style={{
-      fontSize: 14,
-      fontWeight: 700,
+  }} className="p-4 mb-3">
+      {actionError && <ActionFeedback error className="mb-4">
+          {actionError}
+        </ActionFeedback>}{" "}
+      <h2 style={{
+      fontSize: 18,
+      fontWeight: 500,
       color: "#09090B",
       marginBottom: 12
     }}>
         Log Mileage
-      </div>{" "}
+      </h2>{" "}
       <div style={{
       display: "grid",
       gridTemplateColumns: isMobile ? "1fr" : "1fr 1fr 1fr",
@@ -1635,125 +1545,88 @@ export function MileageForm({
         {" "}
         <div>
           {" "}
-          <label style={{
-          fontSize: 11,
-          color: "#71717A"
-        }}>Date</label>{" "}
-          <input type="date" value={form.logDate} onChange={e => set("logDate", e.target.value)} style={sInput} />{" "}
+          <Field label="Date" className="min-w-0">
+            <Input type="date" value={form.logDate} onChange={e => set("logDate", e.target.value)} disabled={saving} />
+          </Field>{" "}
         </div>{" "}
         <div>
           {" "}
-          <label style={{
-          fontSize: 11,
-          color: "#71717A"
-        }}>
-            Odometer Start
-          </label>{" "}
-          <input type="number" value={form.odometerStart} onChange={e => set("odometerStart", e.target.value)} style={sInput} />{" "}
+          <Field label="Odometer Start" className="min-w-0">
+            <Input type="number" value={form.odometerStart} onChange={e => set("odometerStart", e.target.value)} disabled={saving} />
+          </Field>{" "}
         </div>{" "}
         <div>
           {" "}
-          <label style={{
-          fontSize: 11,
-          color: "#71717A"
-        }}>
-            Odometer End
-          </label>{" "}
-          <input type="number" value={form.odometerEnd} onChange={e => set("odometerEnd", e.target.value)} style={sInput} />{" "}
+          <Field label="Odometer End" className="min-w-0">
+            <Input type="number" value={form.odometerEnd} onChange={e => set("odometerEnd", e.target.value)} disabled={saving} />
+          </Field>{" "}
         </div>{" "}
         <div>
           {" "}
-          <label style={{
-          fontSize: 11,
-          color: "#71717A"
-        }}>
-            Personal Miles
-          </label>{" "}
-          <input type="number" step="0.1" value={form.personalMiles} onChange={e => set("personalMiles", e.target.value)} style={sInput} />{" "}
+          <Field label="Personal Miles" className="min-w-0">
+            <Input type="number" step="0.1" value={form.personalMiles} onChange={e => set("personalMiles", e.target.value)} disabled={saving} />
+          </Field>{" "}
         </div>{" "}
         <div>
           {" "}
-          <label style={{
-          fontSize: 11,
-          color: "#71717A"
-        }}>
-            Fuel Gallons
-          </label>{" "}
-          <input type="number" step="0.01" value={form.fuelGallons} onChange={e => set("fuelGallons", e.target.value)} style={sInput} />{" "}
+          <Field label="Fuel Gallons" className="min-w-0">
+            <Input type="number" step="0.01" value={form.fuelGallons} onChange={e => set("fuelGallons", e.target.value)} disabled={saving} />
+          </Field>{" "}
         </div>{" "}
         <div>
           {" "}
-          <label style={{
-          fontSize: 11,
-          color: "#71717A"
-        }}>
-            Fuel Cost ($)
-          </label>{" "}
-          <input type="number" step="0.01" value={form.fuelCost} onChange={e => set("fuelCost", e.target.value)} style={sInput} />{" "}
+          <Field label="Fuel Cost ($)" className="min-w-0">
+            <Input type="number" step="0.01" value={form.fuelCost} onChange={e => set("fuelCost", e.target.value)} disabled={saving} />
+          </Field>{" "}
         </div>{" "}
         <div>
           {" "}
-          <label style={{
-          fontSize: 11,
-          color: "#71717A"
-        }}>
-            Jobs Serviced
-          </label>{" "}
-          <input type="number" value={form.jobsServiced} onChange={e => set("jobsServiced", e.target.value)} style={sInput} />{" "}
+          <Field label="Jobs Serviced" className="min-w-0">
+            <Input type="number" value={form.jobsServiced} onChange={e => set("jobsServiced", e.target.value)} disabled={saving} />
+          </Field>{" "}
         </div>{" "}
         <div>
           {" "}
-          <label style={{
-          fontSize: 11,
-          color: "#71717A"
-        }}>Logged By</label>{" "}
-          <input value={form.loggedBy} onChange={e => set("loggedBy", e.target.value)} style={sInput} />{" "}
+          <Field label="Logged By" className="min-w-0">
+            <Input value={form.loggedBy} onChange={e => set("loggedBy", e.target.value)} disabled={saving} />
+          </Field>{" "}
         </div>{" "}
         <div>
           {" "}
-          <label style={{
-          fontSize: 11,
-          color: "#71717A"
-        }}>Notes</label>{" "}
-          <input value={form.notes} onChange={e => set("notes", e.target.value)} style={sInput} />{" "}
+          <Field label="Notes" className="min-w-0">
+            <Input value={form.notes} onChange={e => set("notes", e.target.value)} disabled={saving} />
+          </Field>{" "}
         </div>{" "}
       </div>
       {totalMiles > 0 && <div style={{
       marginTop: 10,
-      fontSize: 12,
+      fontSize: 14,
       color: "#71717A"
     }}>
           Total: {totalMiles} miles | Business:{" "}
           {totalMiles - parseFloat(form.personalMiles || 0)} miles | IRS
           Deduction:{" "}
           <span style={{
-        color: "#15803D",
-        fontWeight: 700
+        color: "#18181B",
+        fontWeight: 500
       }}>
             ${irsDeduction}
           </span>{" "}
-        </div>}
-      {error && <div role="alert" style={{
-      color: "#991B1B",
-      fontSize: 13,
-      marginTop: 12
-    }}>
-          {error}
         </div>}
       <div style={{
       marginTop: 12
     }}>
         {" "}
-        <button onClick={submit} disabled={saving || totalMiles <= 0} style={{
-        ...sBtn("#18181B", "#FFFFFF"),
-        opacity: saving || totalMiles <= 0 ? 0.5 : 1
-      }}>
-          {saving ? "Saving..." : "Save Mileage"}
-        </button>{" "}
+        <Button onClick={submit} disabled={saving || totalMiles <= 0} type="button" variant="primary" loading={saving} className="min-w-11">
+          {"Save Mileage"}
+        </Button>{" "}
       </div>{" "}
-    </div>;
+    </Card>;
 }
 
+// ═══════════════════════════════════════════════════════════════════
+// ANALYTICS TAB
+// ═══════════════════════════════════════════════════════════════════
 // ═══════════════════════════════════════════════════════════════════
 // ANALYTICS TAB
 // ═══════════════════════════════════════════════════════════════════
@@ -1767,14 +1640,13 @@ function AnalyticsTab({
 }) {
   return <>
       {/* Cost of Ownership Table */}
-      <div style={{
-      ...sCard,
+      <Card style={{
       marginBottom: 16
-    }}>
+    }} className="p-4 mb-3">
         {" "}
         <div style={{
         fontSize: 16,
-        fontWeight: 700,
+        fontWeight: 500,
         color: "#09090B",
         marginBottom: 12
       }}>
@@ -1783,192 +1655,163 @@ function AnalyticsTab({
         <div style={{
         overflowX: "auto"
       }}>
-          <table style={{
-          width: "100%",
-          borderCollapse: "collapse",
-          fontSize: 12
-        }}>
-            <thead>
-              <tr style={{
+          <Table className="min-w-[840px]">
+            <THead>
+              <TR style={{
               borderBottom: `1px solid ${"#E4E4E7"}`
             }}>
-                <th style={{
+                <TH style={{
                 textAlign: "left",
-                padding: "8px",
                 color: "#71717A"
               }}>
                   Equipment
-                </th>
-                <th style={{
+                </TH>
+                <TH style={{
                 textAlign: "left",
-                padding: "8px",
                 color: "#71717A"
               }}>
                   Category
-                </th>
-                <th style={{
+                </TH>
+                <TH style={{
                 textAlign: "right",
-                padding: "8px",
                 color: "#71717A"
               }}>
                   Age (mo)
-                </th>
-                <th style={{
+                </TH>
+                <TH style={{
                 textAlign: "right",
-                padding: "8px",
                 color: "#71717A"
               }}>
                   Purchase
-                </th>
-                <th style={{
+                </TH>
+                <TH style={{
                 textAlign: "right",
-                padding: "8px",
                 color: "#71717A"
               }}>
                   Maintenance
-                </th>
-                <th style={{
+                </TH>
+                <TH style={{
                 textAlign: "right",
-                padding: "8px",
                 color: "#71717A"
               }}>
                   Monthly
-                </th>
-                <th style={{
+                </TH>
+                <TH style={{
                 textAlign: "center",
-                padding: "8px",
                 color: "#71717A"
               }}>
                   Condition
-                </th>
-              </tr>
-            </thead>
-            <tbody>
-              {costs.map(c => <tr key={c.equipment_id} style={{
+                </TH>
+              </TR>
+            </THead>
+            <TBody>
+              {costs.map(c => <TR key={c.equipment_id} style={{
               borderBottom: `1px solid ${"#E4E4E7"}`
             }}>
-                  <td style={{
-                padding: "8px",
+                  <TD style={{
                 color: "#27272A"
               }}>
-                    <EquipmentCategoryIcon category={c.category} /> {c.equipment_name}
+                    <EquipmentCategoryIcon category={c.category} />{" "}
+                    {c.equipment_name}
                     {c.asset_tag && <span style={{
                   color: "#71717A",
-                  fontSize: 10,
+                  fontSize: 14,
                   marginLeft: 6
                 }}>
                         {c.asset_tag}
                       </span>}
-                  </td>
-                  <td style={{
-                padding: "8px",
+                  </TD>
+                  <TD style={{
                 color: "#71717A"
               }}>
                     {c.category}
-                  </td>
-                  <td style={{
-                padding: "8px",
+                  </TD>
+                  <TD style={{
                 color: "#27272A",
                 textAlign: "right"
               }}>
                     {c.age_months}
-                  </td>
-                  <td style={{
-                padding: "8px",
+                  </TD>
+                  <TD style={{
                 color: "#27272A",
                 textAlign: "right"
               }}>
                     {fmt(c.purchase_price)}
-                  </td>
-                  <td style={{
-                padding: "8px",
+                  </TD>
+                  <TD style={{
                 color: "#27272A",
                 textAlign: "right"
               }}>
                     {fmt(c.total_maintenance)}
-                  </td>
-                  <td style={{
-                padding: "8px",
-                color: "#A16207",
-                textAlign: "right",
-                fontWeight: 500
+                  </TD>
+                  <TD style={{
+                color: "#52525B",
+                textAlign: "right"
               }}>
                     {fmt(c.monthly_cost)}
-                  </td>
-                  <td style={{
-                padding: "8px"
-              }}>
+                  </TD>
+                  <TD>
                     <ConditionBar rating={c.condition_rating} />
-                  </td>
-                </tr>)}
-            </tbody>
+                  </TD>
+                </TR>)}
+            </TBody>
             {costs.length > 0 && <tfoot>
-                <tr style={{
+                <TR style={{
               borderTop: `2px solid ${"#E4E4E7"}`
             }}>
-                  <td style={{
-                padding: "8px",
-                color: "#09090B",
-                fontWeight: 700
+                  <TD style={{
+                color: "#09090B"
               }} colSpan={3}>
                     Totals
-                  </td>
-                  <td style={{
-                padding: "8px",
+                  </TD>
+                  <TD style={{
                 color: "#09090B",
-                fontWeight: 700,
                 textAlign: "right"
               }}>
                     {fmt(costs.reduce((s, c) => s + c.purchase_price, 0))}
-                  </td>
-                  <td style={{
-                padding: "8px",
+                  </TD>
+                  <TD style={{
                 color: "#09090B",
-                fontWeight: 700,
                 textAlign: "right"
               }}>
                     {fmt(costs.reduce((s, c) => s + c.total_maintenance, 0))}
-                  </td>
-                  <td style={{
-                padding: "8px",
-                color: "#A16207",
-                fontWeight: 700,
+                  </TD>
+                  <TD style={{
+                color: "#52525B",
                 textAlign: "right"
               }}>
                     {fmt(costs.reduce((s, c) => s + c.monthly_cost, 0))}
-                  </td>
-                  <td />
-                </tr>
+                  </TD>
+                  <TD />
+                </TR>
               </tfoot>}
-          </table>
+          </Table>
         </div>{" "}
-      </div>
+      </Card>
       {/* Monthly Cost Trend - SVG Bar Chart */}
-      {monthlyCosts.length > 0 && <div style={{
-      ...sCard,
+      {monthlyCosts.length > 0 && <Card style={{
       marginBottom: 16
-    }}>
+    }} className="p-4 mb-3">
           {" "}
           <div style={{
         fontSize: 16,
-        fontWeight: 700,
+        fontWeight: 500,
         color: "#09090B",
         marginBottom: 12
       }}>
             Maintenance Cost Trend (Last 6 Months)
           </div>{" "}
           <CostBarChart data={monthlyCosts} />{" "}
-        </div>}
+        </Card>}
 
       {/* Reliability Ranking */}
-      {reliability.length > 0 && <div style={{
-      ...sCard,
+      {reliability.length > 0 && <Card style={{
       marginBottom: 16
-    }}>
+    }} className="p-4 mb-3">
           {" "}
           <div style={{
         fontSize: 16,
-        fontWeight: 700,
+        fontWeight: 500,
         color: "#09090B",
         marginBottom: 12
       }}>
@@ -1978,116 +1821,96 @@ function AnalyticsTab({
         overflowX: "auto"
       }}>
             {" "}
-            <table style={{
-          width: "100%",
-          borderCollapse: "collapse",
-          fontSize: 12
-        }}>
-              {" "}
-              <thead>
-                {" "}
-                <tr style={{
+            <Table className="min-w-[640px]">
+              <THead>
+                <TR style={{
               borderBottom: `1px solid ${"#E4E4E7"}`
             }}>
-                  {" "}
-                  <th style={{
+                  <TH style={{
                 textAlign: "left",
-                padding: "8px",
                 color: "#71717A"
               }}>
                     Equipment
-                  </th>{" "}
-                  <th style={{
+                  </TH>
+                  <TH style={{
                 textAlign: "right",
-                padding: "8px",
                 color: "#71717A"
               }}>
                     Incidents
-                  </th>{" "}
-                  <th style={{
+                  </TH>
+                  <TH style={{
                 textAlign: "right",
-                padding: "8px",
                 color: "#71717A"
               }}>
                     Downtime (hrs)
-                  </th>{" "}
-                  <th style={{
+                  </TH>
+                  <TH style={{
                 textAlign: "right",
-                padding: "8px",
                 color: "#71717A"
               }}>
                     Jobs Affected
-                  </th>{" "}
-                  <th style={{
+                  </TH>
+                  <TH style={{
                 textAlign: "right",
-                padding: "8px",
                 color: "#71717A"
               }}>
                     Revenue Impact
-                  </th>{" "}
-                </tr>{" "}
-              </thead>{" "}
-              <tbody>
-                {reliability.map(r => <tr key={r.id} style={{
+                  </TH>
+                </TR>
+              </THead>
+              <TBody>
+                {reliability.map(r => <TR key={r.id} style={{
               borderBottom: `1px solid ${"#E4E4E7"}`
             }}>
-                    {" "}
-                    <td style={{
-                padding: "8px",
+                    <TD style={{
                 color: "#27272A"
               }}>
                       <EquipmentCategoryIcon category={r.category} /> {r.name}{" "}
                       <span style={{
                   color: "#71717A",
-                  fontSize: 10
+                  fontSize: 14
                 }}>
                         {r.asset_tag}
                       </span>
-                    </td>{" "}
-                    <td style={{
-                padding: "8px",
+                    </TD>
+                    <TD style={{
                 color: "#27272A",
                 textAlign: "right"
               }}>
                       {r.incident_count}
-                    </td>{" "}
-                    <td style={{
-                padding: "8px",
-                color: "#991B1B",
-                textAlign: "right",
-                fontWeight: 500
+                    </TD>
+                    <TD style={{
+                color: "#C8312F",
+                textAlign: "right"
               }}>
                       {parseFloat(r.total_downtime_hours).toFixed(1)}
-                    </td>{" "}
-                    <td style={{
-                padding: "8px",
+                    </TD>
+                    <TD style={{
                 color: "#27272A",
                 textAlign: "right"
               }}>
                       {r.total_jobs_affected}
-                    </td>{" "}
-                    <td style={{
-                padding: "8px",
-                color: "#A16207",
+                    </TD>
+                    <TD style={{
+                color: "#52525B",
                 textAlign: "right"
               }}>
                       {fmt(r.total_revenue_impact)}
-                    </td>{" "}
-                  </tr>)}
-              </tbody>{" "}
-            </table>{" "}
+                    </TD>
+                  </TR>)}
+              </TBody>
+            </Table>{" "}
           </div>{" "}
-        </div>}
+        </Card>}
 
       {/* Fleet Mileage Summary */}
-      {mileageSummary && mileageSummary.vehicles && mileageSummary.vehicles.length > 0 && <div style={{
-      ...sCard,
+      {mileageSummary && mileageSummary.vehicles && mileageSummary.vehicles.length > 0 && <Card style={{
       marginBottom: 16
-    }}>
+    }} className="p-4 mb-3">
             {" "}
             <div style={{
         fontSize: 16,
-        fontWeight: 700,
+        fontWeight: 500,
         color: "#09090B",
         marginBottom: 12
       }}>
@@ -2097,184 +1920,147 @@ function AnalyticsTab({
         overflowX: "auto"
       }}>
               {" "}
-              <table style={{
-          width: "100%",
-          borderCollapse: "collapse",
-          fontSize: 12
-        }}>
-                {" "}
-                <thead>
-                  {" "}
-                  <tr style={{
+              <Table className="min-w-[768px]">
+                <THead>
+                  <TR style={{
               borderBottom: `1px solid ${"#E4E4E7"}`
             }}>
-                    {" "}
-                    <th style={{
+                    <TH style={{
                 textAlign: "left",
-                padding: "8px",
                 color: "#71717A"
               }}>
                       Vehicle
-                    </th>{" "}
-                    <th style={{
+                    </TH>
+                    <TH style={{
                 textAlign: "right",
-                padding: "8px",
                 color: "#71717A"
               }}>
                       Total Miles
-                    </th>{" "}
-                    <th style={{
+                    </TH>
+                    <TH style={{
                 textAlign: "right",
-                padding: "8px",
                 color: "#71717A"
               }}>
                       Business Miles
-                    </th>{" "}
-                    <th style={{
+                    </TH>
+                    <TH style={{
                 textAlign: "right",
-                padding: "8px",
                 color: "#71717A"
               }}>
                       Fuel Cost
-                    </th>{" "}
-                    <th style={{
+                    </TH>
+                    <TH style={{
                 textAlign: "right",
-                padding: "8px",
                 color: "#71717A"
               }}>
                       IRS Deduction
-                    </th>{" "}
-                    <th style={{
+                    </TH>
+                    <TH style={{
                 textAlign: "right",
-                padding: "8px",
                 color: "#71717A"
               }}>
                       Jobs
-                    </th>{" "}
-                  </tr>{" "}
-                </thead>{" "}
-                <tbody>
-                  {mileageSummary.vehicles.map(v => <tr key={v.id} style={{
+                    </TH>
+                  </TR>
+                </THead>
+                <TBody>
+                  {mileageSummary.vehicles.map(v => <TR key={v.id} style={{
               borderBottom: `1px solid ${"#E4E4E7"}`
             }}>
-                      {" "}
-                      <td style={{
-                padding: "8px",
+                      <TD style={{
                 color: "#27272A"
               }}>
                         {v.name}{" "}
                         <span style={{
                   color: "#71717A",
-                  fontSize: 10
+                  fontSize: 14
                 }}>
                           {v.asset_tag}
                         </span>
-                      </td>{" "}
-                      <td style={{
-                padding: "8px",
+                      </TD>
+                      <TD style={{
                 color: "#27272A",
                 textAlign: "right"
               }}>
                         {fmtN(Math.round(parseFloat(v.total_miles)))}
-                      </td>{" "}
-                      <td style={{
-                padding: "8px",
+                      </TD>
+                      <TD style={{
                 color: "#18181B",
                 textAlign: "right"
               }}>
                         {fmtN(Math.round(parseFloat(v.business_miles)))}
-                      </td>{" "}
-                      <td style={{
-                padding: "8px",
-                color: "#A16207",
+                      </TD>
+                      <TD style={{
+                color: "#52525B",
                 textAlign: "right"
               }}>
                         {fmt(v.total_fuel_cost)}
-                      </td>{" "}
-                      <td style={{
-                padding: "8px",
-                color: "#15803D",
-                textAlign: "right",
-                fontWeight: 700
+                      </TD>
+                      <TD style={{
+                color: "#18181B",
+                textAlign: "right"
               }}>
                         {fmt(v.total_irs_deduction)}
-                      </td>{" "}
-                      <td style={{
-                padding: "8px",
+                      </TD>
+                      <TD style={{
                 color: "#27272A",
                 textAlign: "right"
               }}>
                         {v.total_jobs}
-                      </td>{" "}
-                    </tr>)}
-                </tbody>
+                      </TD>
+                    </TR>)}
+                </TBody>
                 {mileageSummary.fleet_totals && <tfoot>
-                    {" "}
-                    <tr style={{
+                    <TR style={{
               borderTop: `2px solid ${"#E4E4E7"}`
             }}>
-                      {" "}
-                      <td style={{
-                padding: "8px",
-                color: "#09090B",
-                fontWeight: 700
+                      <TD style={{
+                color: "#09090B"
               }}>
                         Fleet Totals
-                      </td>{" "}
-                      <td style={{
-                padding: "8px",
+                      </TD>
+                      <TD style={{
                 color: "#09090B",
-                fontWeight: 700,
                 textAlign: "right"
               }}>
                         {fmtN(Math.round(mileageSummary.fleet_totals.total_miles))}
-                      </td>{" "}
-                      <td style={{
-                padding: "8px",
+                      </TD>
+                      <TD style={{
                 color: "#18181B",
-                fontWeight: 700,
                 textAlign: "right"
               }}>
                         {fmtN(Math.round(mileageSummary.fleet_totals.business_miles))}
-                      </td>{" "}
-                      <td style={{
-                padding: "8px",
-                color: "#A16207",
-                fontWeight: 700,
+                      </TD>
+                      <TD style={{
+                color: "#52525B",
                 textAlign: "right"
               }}>
                         {fmt(mileageSummary.fleet_totals.total_fuel_cost)}
-                      </td>{" "}
-                      <td style={{
-                padding: "8px",
-                color: "#15803D",
-                fontWeight: 700,
+                      </TD>
+                      <TD style={{
+                color: "#18181B",
                 textAlign: "right"
               }}>
                         {fmt(mileageSummary.fleet_totals.total_irs_deduction)}
-                      </td>{" "}
-                      <td style={{
-                padding: "8px",
+                      </TD>
+                      <TD style={{
                 color: "#09090B",
-                fontWeight: 700,
                 textAlign: "right"
               }}>
                         {mileageSummary.fleet_totals.total_jobs}
-                      </td>{" "}
-                    </tr>{" "}
+                      </TD>
+                    </TR>
                   </tfoot>}
-              </table>{" "}
+              </Table>{" "}
             </div>{" "}
-          </div>}
+          </Card>}
 
       {/* Upcoming Maintenance (Next 30 Days) */}
-      {dueSchedules.length > 0 && <div style={{
-      ...sCard
-    }}>
+      {dueSchedules.length > 0 && <Card className="p-4 mb-3">
           {" "}
           <div style={{
         fontSize: 16,
-        fontWeight: 700,
+        fontWeight: 500,
         color: "#09090B",
         marginBottom: 12
       }}>
@@ -2284,115 +2070,93 @@ function AnalyticsTab({
         overflowX: "auto"
       }}>
             {" "}
-            <table style={{
-          width: "100%",
-          borderCollapse: "collapse",
-          fontSize: 12
-        }}>
-              {" "}
-              <thead>
-                {" "}
-                <tr style={{
+            <Table className="min-w-[640px]">
+              <THead>
+                <TR style={{
               borderBottom: `1px solid ${"#E4E4E7"}`
             }}>
-                  {" "}
-                  <th style={{
+                  <TH style={{
                 textAlign: "left",
-                padding: "8px",
                 color: "#71717A"
               }}>
                     Equipment
-                  </th>{" "}
-                  <th style={{
+                  </TH>
+                  <TH style={{
                 textAlign: "left",
-                padding: "8px",
                 color: "#71717A"
               }}>
                     Task
-                  </th>{" "}
-                  <th style={{
+                  </TH>
+                  <TH style={{
                 textAlign: "left",
-                padding: "8px",
                 color: "#71717A"
               }}>
                     Due
-                  </th>{" "}
-                  <th style={{
+                  </TH>
+                  <TH style={{
                 textAlign: "left",
-                padding: "8px",
                 color: "#71717A"
               }}>
                     Priority
-                  </th>{" "}
-                  <th style={{
+                  </TH>
+                  <TH style={{
                 textAlign: "right",
-                padding: "8px",
                 color: "#71717A"
               }}>
                     Est Cost
-                  </th>{" "}
-                </tr>{" "}
-              </thead>{" "}
-              <tbody>
-                {dueSchedules.map(s => <tr key={s.id} style={{
+                  </TH>
+                </TR>
+              </THead>
+              <TBody>
+                {dueSchedules.map(s => <TR key={s.id} style={{
               borderBottom: `1px solid ${"#E4E4E7"}`,
               background: s.is_overdue ? "rgba(239,68,68,0.08)" : "transparent"
             }}>
-                    {" "}
-                    <td style={{
-                padding: "8px",
+                    <TD style={{
                 color: "#27272A"
               }}>
-                      <EquipmentCategoryIcon category={s.category} /> {s.equipment_name}
+                      <EquipmentCategoryIcon category={s.category} />{" "}
+                      {s.equipment_name}
                       {s.asset_tag && <span style={{
                   color: "#71717A",
-                  fontSize: 10,
+                  fontSize: 14,
                   marginLeft: 4
                 }}>
                           {s.asset_tag}
                         </span>}
-                    </td>{" "}
-                    <td style={{
-                padding: "8px",
+                    </TD>
+                    <TD style={{
                 color: "#27272A"
               }}>
                       {s.task_name}
-                    </td>{" "}
-                    <td style={{
-                padding: "8px",
-                color: s.is_overdue ? "#991B1B" : "#27272A"
+                    </TD>
+                    <TD style={{
+                color: s.is_overdue ? "#C8312F" : "#27272A"
               }}>
-                      {s.is_overdue && <span style={{
-                  ...sBadge("#991B1B", "#FFFFFF"),
-                  marginRight: 4
-                }}>
-                          OVERDUE
-                        </span>}
+                      {s.is_overdue && <Badge tone="neutral">OVERDUE</Badge>}
                       {s.next_due_at ? formatETDateOnly(s.next_due_at) : "--"}
-                    </td>{" "}
-                    <td style={{
-                padding: "8px"
-              }}>
+                    </TD>
+                    <TD>
                       {" "}
-                      <span style={sBadge(s.priority === "critical" ? "#991B1B" : s.priority === "high" ? "#f97316" : "#18181B", "#FFFFFF")}>
-                        {s.priority}
-                      </span>{" "}
-                    </td>{" "}
-                    <td style={{
-                padding: "8px",
+                      <Badge tone={SEVERITY_TONES[s.priority] || "neutral"}>{s.priority}</Badge>{" "}
+                    </TD>
+                    <TD style={{
                 color: "#27272A",
                 textAlign: "right"
               }}>
                       {s.estimated_cost ? fmt(s.estimated_cost) : "--"}
-                    </td>{" "}
-                  </tr>)}
-              </tbody>{" "}
-            </table>{" "}
+                    </TD>
+                  </TR>)}
+              </TBody>
+            </Table>{" "}
           </div>{" "}
-        </div>}
+        </Card>}
     </>;
 }
 
+// ═══════════════════════════════════════════════════════════════════
+// SVG BAR CHART
+// ═══════════════════════════════════════════════════════════════════
 // ═══════════════════════════════════════════════════════════════════
 // SVG BAR CHART
 // ═══════════════════════════════════════════════════════════════════
@@ -2401,41 +2165,48 @@ function CostBarChart({
 }) {
   if (!data || data.length === 0) return null;
   const maxCost = Math.max(...data.map(d => d.cost), 1);
-  const w = 600;
+  const labelWidth = Math.max(80, fmt(maxCost).length * 8 + 16);
+  const w = Math.max(600, labelWidth * (data.length + 1));
   const h = 200;
-  const barW = Math.min(60, (w - 40) / data.length - 10);
-  const xStep = (w - 40) / data.length;
-  return <svg viewBox={`0 0 ${w} ${h + 30}`} style={{
-    width: "100%",
-    maxWidth: 600,
-    height: "auto"
-  }}>
-      {/* Grid lines */}
-      {[0, 0.25, 0.5, 0.75, 1].map(pct => {
-      const y = h - pct * (h - 20);
-      return <g key={pct}>
-            {" "}
-            <line x1={30} y1={y} x2={w} y2={y} stroke={"#E4E4E7"} strokeWidth={0.5} />{" "}
-            <text x={28} y={y + 4} fill={"#71717A"} fontSize={9} textAnchor="end">
-              {fmt(maxCost * pct)}
-            </text>{" "}
-          </g>;
-    })}
-      {/* Bars */}
-      {data.map((d, i) => {
-      const barH = d.cost / maxCost * (h - 20);
-      const x = 40 + i * xStep + (xStep - barW) / 2;
-      const y = h - barH;
-      return <g key={d.month}>
-            {" "}
-            <rect x={x} y={y} width={barW} height={barH} rx={4} fill={"#18181B"} opacity={0.8} />{" "}
-            <text x={x + barW / 2} y={h + 14} fill={"#71717A"} fontSize={10} textAnchor="middle">
-              {d.month.slice(5)}
-            </text>{" "}
-            <text x={x + barW / 2} y={y - 4} fill={"#27272A"} fontSize={9} textAnchor="middle">
-              {fmt(d.cost)}
-            </text>{" "}
-          </g>;
-    })}
-    </svg>;
+  const xStep = (w - labelWidth) / data.length;
+  const barW = Math.min(60, xStep - 16);
+  return <div role="region" aria-label="Monthly maintenance costs chart" tabIndex={0} className="overflow-x-auto u-focus-ring">
+      <ul className="sr-only">
+        {data.map(d => <li key={d.month}>{d.month}: {fmt(d.cost)}</li>)}
+      </ul>
+      <svg viewBox={`0 0 ${w} ${h + 30}`} aria-hidden="true" style={{
+      display: "block",
+      width: w,
+      maxWidth: "none",
+      height: h + 30
+    }}>
+        {/* Grid lines */}
+        {[0, 0.25, 0.5, 0.75, 1].map(pct => {
+        const y = h - pct * (h - 20);
+        return <g key={pct}>
+              {" "}
+              <line x1={labelWidth} y1={y} x2={w} y2={y} stroke={"#E4E4E7"} strokeWidth={0.5} />{" "}
+              <text x={labelWidth - 12} y={y + 4} fill={"#71717A"} fontSize={14} textAnchor="end">
+                {fmt(maxCost * pct)}
+              </text>{" "}
+            </g>;
+      })}
+        {/* Bars */}
+        {data.map((d, i) => {
+        const barH = d.cost / maxCost * (h - 20);
+        const x = labelWidth + i * xStep + (xStep - barW) / 2;
+        const y = h - barH;
+        return <g key={d.month}>
+              {" "}
+              <rect x={x} y={y} width={barW} height={barH} rx={4} fill={"#18181B"} opacity={0.8} />{" "}
+              <text x={x + barW / 2} y={h + 22} fill={"#71717A"} fontSize={14} textAnchor="middle">
+                {d.month.slice(5)}
+              </text>{" "}
+              <text x={x + barW / 2} y={y - 4} fill={"#27272A"} fontSize={14} textAnchor="middle">
+                {fmt(d.cost)}
+              </text>{" "}
+            </g>;
+      })}
+      </svg>
+    </div>;
 }

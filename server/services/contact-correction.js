@@ -1109,10 +1109,7 @@ async function applyContactCorrections({ customerId, corrections, source, source
           // Shared email claim lock (same key customer-dedupe's merge-undo
           // and the email-fanout claim guard take) — serializes this write
           // against a concurrent merge/undo re-claiming the same address.
-          await trx.raw(
-            'SELECT pg_advisory_xact_lock(hashtextextended(?, 0))',
-            [`customer-email:${newValue.toLowerCase().trim()}`],
-          );
+          await require('../utils/customer-comms-lock').lockCustomerEmail(trx, newValue);
           // ALL matches, not .first() — with the email on both a sibling
           // profile and an unrelated account, an unordered first() could
           // return the sibling and mask the real conflict.

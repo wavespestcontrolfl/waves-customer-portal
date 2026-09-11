@@ -1,6 +1,4 @@
 import { useState, useEffect } from "react";
-import { createPortal } from "react-dom";
-import useIsMobile from "../../hooks/useIsMobile";
 import { useSearchParams } from "react-router-dom";
 import useRenderedTabBeacon from "../../hooks/useRenderedTabBeacon";
 import {
@@ -12,6 +10,7 @@ import {
   Search,
 } from "lucide-react";
 import AdminCommandHeader from "../../components/admin/AdminCommandHeader";
+import KnowledgeQuestionDialog from "./knowledge/KnowledgeQuestionDialog";
 
 const API_BASE = import.meta.env.VITE_API_URL || "/api";
 // V2 token pass: teal/purple/orange fold to zinc-900. Semantic green/amber/red preserved.
@@ -87,212 +86,6 @@ function Card({ children, style }) {
     >
       {children}
     </div>
-  );
-}
-
-// =========================================================================
-// Q&A MODAL
-// =========================================================================
-function QAModal({ onClose }) {
-  const isMobile = useIsMobile();
-  const [question, setQuestion] = useState("");
-  const [result, setResult] = useState(null);
-  const [loading, setLoading] = useState(false);
-
-  const handleAsk = async () => {
-    if (!question.trim()) return;
-    setLoading(true);
-    setResult(null);
-    const r = await adminPost("/admin/knowledge/query", { question });
-    setResult(r);
-    setLoading(false);
-  };
-
-  const handleFileBack = async (queryId) => {
-    await adminPost("/admin/knowledge/file-back", { queryId });
-    setResult((prev) => ({ ...prev, filedBack: true }));
-  };
-
-  return createPortal(
-    <div
-      style={{
-        position: "fixed",
-        inset: 0,
-        background: "rgba(0,0,0,0.6)",
-        zIndex: 100,
-        display: "flex",
-        alignItems: "center",
-        justifyContent: "center",
-        padding: isMobile ? 0 : 20,
-      }}
-    >
-      {" "}
-      <div
-        style={{
-          background: D.card,
-          borderRadius: 16,
-          padding: 28,
-          maxWidth: 600,
-          width: "100%",
-          maxHeight: "80vh",
-          overflow: "auto",
-          border: `1px solid ${D.border}`,
-          ...(isMobile
-            ? {
-                width: "100%",
-                maxWidth: "none",
-                height: "100%",
-                maxHeight: "none",
-                borderRadius: 0,
-                boxSizing: "border-box",
-                overflowY: "auto",
-                paddingTop: "calc(28px + env(safe-area-inset-top, 0px))",
-                paddingBottom: "calc(28px + env(safe-area-inset-bottom, 0px))",
-                paddingLeft: "calc(28px + env(safe-area-inset-left, 0px))",
-                paddingRight: "calc(28px + env(safe-area-inset-right, 0px))",
-              }
-            : {}),
-        }}
-      >
-        {" "}
-        <div
-          style={{
-            display: "flex",
-            justifyContent: "space-between",
-            alignItems: "center",
-            marginBottom: 20,
-          }}
-        >
-          {" "}
-          <div style={{ fontSize: 18, fontWeight: 700, color: D.heading }}>
-            Ask the Knowledge Base
-          </div>{" "}
-          <button
-            onClick={onClose}
-            style={{
-              background: "none",
-              border: "none",
-              color: D.muted,
-              fontSize: 20,
-              cursor: "pointer",
-            }}
-          >
-            {"×"}
-          </button>{" "}
-        </div>{" "}
-        <div style={{ display: "flex", gap: 8, marginBottom: 20 }}>
-          {" "}
-          <input
-            value={question}
-            onChange={(e) => setQuestion(e.target.value)}
-            onKeyDown={(e) => e.key === "Enter" && handleAsk()}
-            placeholder="What's the max annual rate for Celsius WG?"
-            style={{
-              flex: 1,
-              padding: "10px 14px",
-              borderRadius: 8,
-              border: `1px solid ${D.border}`,
-              background: D.bg,
-              color: D.heading,
-              fontSize: 14,
-            }}
-          />{" "}
-          <button
-            onClick={handleAsk}
-            disabled={loading}
-            style={{
-              padding: "10px 18px",
-              borderRadius: 8,
-              border: "none",
-              background: D.teal,
-              color: "#fff",
-              fontSize: 14,
-              fontWeight: 500,
-              cursor: "pointer",
-              opacity: loading ? 0.5 : 1,
-            }}
-          >
-            {loading ? "..." : "Ask"}
-          </button>{" "}
-        </div>
-        {result && (
-          <div>
-            {" "}
-            <div
-              style={{
-                padding: 16,
-                background: D.bg,
-                borderRadius: 10,
-                marginBottom: 12,
-                fontSize: 14,
-                color: D.text,
-                lineHeight: 1.7,
-                whiteSpace: "pre-wrap",
-              }}
-            >
-              {result.answer}
-            </div>
-            {(result.articleTitles || result.articlesUsed || []).length > 0 && (
-              <div style={{ fontSize: 12, color: D.muted, marginBottom: 12 }}>
-                Sources:{" "}
-                {(result.articleTitles || [])
-                  .map((a) => a.title || a)
-                  .join(", ") || (result.articlesUsed || []).join(", ")}
-              </div>
-            )}
-            <div style={{ display: "flex", gap: 8 }}>
-              {" "}
-              <button
-                style={{
-                  padding: "6px 12px",
-                  borderRadius: 6,
-                  border: `1px solid ${D.green}`,
-                  background: "transparent",
-                  color: D.green,
-                  fontSize: 12,
-                  cursor: "pointer",
-                }}
-              >
-                Good
-              </button>{" "}
-              <button
-                style={{
-                  padding: "6px 12px",
-                  borderRadius: 6,
-                  border: `1px solid ${D.amber}`,
-                  background: "transparent",
-                  color: D.amber,
-                  fontSize: 12,
-                  cursor: "pointer",
-                }}
-              >
-                Incomplete
-              </button>
-              {!result.filedBack && (
-                <button
-                  onClick={() => handleFileBack(result.queryId)}
-                  style={{
-                    padding: "6px 12px",
-                    borderRadius: 6,
-                    border: `1px solid ${D.purple}`,
-                    background: "transparent",
-                    color: D.purple,
-                    fontSize: 12,
-                    cursor: "pointer",
-                  }}
-                >
-                  File into wiki
-                </button>
-              )}
-              {result.filedBack && (
-                <span style={{ fontSize: 12, color: D.green }}>Filed</span>
-              )}
-            </div>{" "}
-          </div>
-        )}
-      </div>{" "}
-    </div>,
-    document.body,
   );
 }
 
@@ -884,6 +677,11 @@ export default function KnowledgePage({ embedded = false }) {
     }
   }, [tab, search, filterCat]);
 
+  const openQuestion = (event) => {
+    event.currentTarget.focus({ preventScroll: true });
+    setShowQA(true);
+  };
+
   if (selectedArticle) {
     return (
       <div>
@@ -910,7 +708,12 @@ export default function KnowledgePage({ embedded = false }) {
 
   return (
     <div>
-      {showQA && <QAModal onClose={() => setShowQA(false)} />}
+      {showQA && (
+        <KnowledgeQuestionDialog
+          open
+          onClose={() => setShowQA(false)}
+        />
+      )}
 
       <AdminCommandHeader
         title="Wiki"
@@ -923,7 +726,7 @@ export default function KnowledgePage({ embedded = false }) {
         action={{
           label: "Ask a Question",
           icon: MessageSquare,
-          onClick: () => setShowQA(true),
+          onClick: openQuestion,
         }}
         navGridClassName="grid-cols-2 md:grid-cols-4"
       />
