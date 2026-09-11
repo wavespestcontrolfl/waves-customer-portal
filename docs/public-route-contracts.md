@@ -212,22 +212,43 @@ only an approved recap, consumes `/api/reports/:token/recap` + `/recap/video`,
 same noindex/no-referrer/no-store headers as `/report/:token`),
 `/api/stripe/webhook`, `/api/webhooks/twilio` (all Twilio inbound;
 `GATE_SMS_SPAM_CLASSIFIER=shadow` enables a bounded solicitation screen for
-unknown-sender SMS. Other values, including `true`, leave this stage off.
+unknown-sender SMS; `true` enables enforcement at confidence >= 0.85.
+Unset or any other value disables screening.
 Known primary/secondary/service-contact numbers, reactions, empty bodies,
 standalone carrier commands, and the AI assistant line bypass the classifier.
-Natural-language consent requests never wait on the model; only deterministic
-pitch evidence, such as a vendor footer, may be recorded for those messages.
-The unified inbox message is durably saved before screening. A failed unified
-save or relationship lookup bypasses screening and preserves ordinary handling;
-model failures record a failed non-solicitation verdict. The 3.5-second model
+The unified inbox message is durably saved before screening. Failed unified
+saves or relationship lookups bypass screening. Model failures record a failed
+non-solicitation verdict. Sender relationship (compliance eligibility) is
+resolved once, up front, before any consent handling or screening — a
+compliance-eligible sender's consent (keyword or natural-language, on the
+full untouched text) is honored before the classifier and never waits on the
+model; a non-eligible sender's opt-out-shaped phrasing is not treated as
+consent at all and reaches the classifier like any other message (only a
+standalone carrier command such as a bare STOP bypasses the model for them
+too — natural-language phrasing and a footer never do). Shadow can still
+record deterministic pitch evidence via the regex fast path for any
+solicitation-shaped text, consent-related or not. The 3.5-second model
 budget uses the shared dispatcher.
-Shadow verdicts (`solicitation`, `confidence`, `method`, `version`, `mode`)
+Verdicts (`solicitation`, `confidence`, `method`, `version`, `mode`, `enforced`)
 are stored under `metadata.spam_verdict` on unified messages and ordinary or
-natural-language opt-out `sms_log` rows. Verdict attachment merges metadata on
-the saved unified row. Read state, opt-out suppression,
-TwiML replies, notifications, estimator routing, and provider request/auth
-contracts retain their existing behavior. No enforcement is available in
-this stage. The SMS operational extension runs after acknowledgment under
+natural-language opt-out `sms_log` rows. Read state, opt-out suppression,
+TwiML replies, notifications and estimator routing retain their existing
+behavior in shadow mode. Enforced pitches remain in both message stores,
+are marked read when the verdict is attached, and return empty TwiML before
+lead creation, quoting, alerts or
+auto-replies. A compliance-eligible sender's genuine consent command
+(including a natural-language opt-out or a wrong-number report) bypasses
+enforcement — decided before the classifier ever runs — and retains
+suppression and its existing responses. A non-eligible sender's opt-out-
+shaped phrasing, including a vendor's own reply-instruction footer such as
+`Reply NO if you need me to stop texting`, is never treated as the sender's
+own opt-out: only the classifier's model verdict governs enforcement for
+them, and an enforced verdict never creates a suppression row. The
+unanswered digest omits a thread only when its latest eligible inbound has
+an enforced verdict, so a later genuine message resurfaces.
+Verdict attachment merges metadata without replacing unrelated fields. Failed
+verdict attachment bypasses enforcement. Provider request/auth contracts are unchanged. The SMS operational extension
+runs after acknowledgment under
 `GATE_SMS_OPERATIONAL_ACTIONS` plus an explicit activation timestamp;
 it reuses persisted SMS evidence for private profile updates and admin
 notifications, with no additional response fields or customer sends;
