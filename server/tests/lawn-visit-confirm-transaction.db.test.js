@@ -161,6 +161,23 @@ const SCORING = {
     expect(await loadRun(assessment.id, db.knex)).toEqual(run);
     await db.knex('lawn_assessment_runs').where({ id: run.id }).del();
     await expect(save(assessment.id, { persistChecks })).rejects.toMatchObject({ status: 409 });
+  });
+
+  // Every throw in this flow carries `{ status }` — the shape the assertions
+  // above rely on — but lawn-assessment throws `{ statusCode }`. Without a
+  // translation at that delegation boundary a legitimate 409 from the
+  // property-history path reaches the caller with no `.status` and surfaces
+  // as a 500.
+  test('a delegated baseline error surfaces with this flow\'s error shape', async () => {
+    const { assessment } = await seed(COMPLETE);
+    const lawnAssessment = require('../services/lawn-assessment');
+    const spy = jest.spyOn(lawnAssessment, 'installConfirmedBaseline')
+      .mockRejectedValueOnce(Object.assign(new Error('Assessment ownership changed'), { statusCode: 409 }));
+    try {
+      await expect(save(assessment.id, { propertyHistoryEnabled: true })).rejects.toMatchObject({ status: 409, statusCode: 409 });
+    } finally {
+      spy.mockRestore();
+    }
     expect(persistChecks).not.toHaveBeenCalled();
   });
 

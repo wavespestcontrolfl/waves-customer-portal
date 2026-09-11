@@ -178,6 +178,21 @@ async function reviewRun({ assessmentId, review = {}, technicianId = null, obser
   });
 }
 
+// lawn-assessment throws `{ statusCode }` while every throw in this confirm
+// flow uses `{ status }` — the shape its own tests assert and a caller would
+// branch on. Translate at the one delegation boundary rather than changing
+// lawn-assessment, whose existing route caller already reads statusCode: an
+// ownership-changed or inconsistent-visit-link 409 from the property-history
+// path would otherwise reach the route with no `.status` and surface as a 500.
+async function withRunErrorShape(run) {
+  try {
+    return await run();
+  } catch (error) {
+    if (error && error.status === undefined && error.statusCode !== undefined) error.status = error.statusCode;
+    throw error;
+  }
+}
+
 async function confirmLockedRun(args, customerId, trx) {
   const { assessmentId, adjustedScores, review, technicianId = null, observationEdit,
     stressFlags, propertyHistoryEnabled, persistChecks, scoreValue, calculateOverallScore } = args;
@@ -208,7 +223,7 @@ async function confirmLockedRun(args, customerId, trx) {
     if (!baseline) update.is_baseline = true;
   }
   assessment = decision.confirmed && propertyHistoryEnabled
-    ? await lawnAssessment.installConfirmedBaseline({ assessmentId, updateData: update }, { knex: trx })
+    ? await withRunErrorShape(() => lawnAssessment.installConfirmedBaseline({ assessmentId, updateData: update }, { knex: trx }))
     : (await trx('lawn_assessments').where({ id: assessmentId }).update(update).returning('*'))[0];
   if (persistChecks) {
     await persistChecks(assessment, trx);
