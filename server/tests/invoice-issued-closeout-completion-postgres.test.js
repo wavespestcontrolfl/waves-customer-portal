@@ -74,7 +74,14 @@ describe('source contracts', () => {
   });
   test('the recovered-delivery branch of sendViaSMS runs the closeout too — a recovered send is a durable send', () => {
     const source = fs.readFileSync(path.join(__dirname, '../services/invoice.js'), 'utf8');
-    expect(source).toMatch(/if \(smsDelivered\) \{[\s\S]{0,5000}?closeOutVisitForIssuedInvoice\(\{ invoiceId, trigger: "sent", actorTechnicianId \}\);[\s\S]{0,600}?return \{ sent: true, payUrl, finalizeError: err\.message \};/);
+    // Codex r12 follow-on P1 #4131 round 3: this recovery branch was
+    // extracted out of sendViaSMS's catch into its own named function
+    // (recoverPostDeliverySmsBookkeeping) — sendViaSMS's outer try/finally
+    // guard was pushing the branch's existing nesting past max-depth. The
+    // behavior is unchanged: `if (smsDelivered)` still routes here, and
+    // the closeout still runs before the same durable-send return.
+    expect(source).toMatch(/if \(smsDelivered\) \{[\s\S]{0,1200}?return await recoverPostDeliverySmsBookkeeping\(\{[\s\S]{0,300}?err,[\s\S]{0,50}?\}\);/);
+    expect(source).toMatch(/async function recoverPostDeliverySmsBookkeeping\([\s\S]{0,5000}?closeOutVisitForIssuedInvoice\(\{ invoiceId, trigger: "sent", actorTechnicianId \}\);[\s\S]{0,600}?return \{ sent: true, payUrl, finalizeError: err\.message \};/);
   });
   test('every hand-payment writer reaches the closeout: /payments/reconcile after its commit, the prepaid receipt on both the newly-paid and already-paid legs (GitHub r4 P1)', () => {
     const reconcile = fs.readFileSync(path.join(__dirname, '../routes/admin-payments-reconcile.js'), 'utf8');

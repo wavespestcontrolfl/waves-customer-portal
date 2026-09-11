@@ -49,6 +49,8 @@ jest.mock('../config/twilio-numbers', () => ({
 
 const db = require('../models/db');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
+const { shortenOrPassthrough } = require('../services/short-url');
+const { isTemplateActive, getTemplate } = require('../routes/admin-sms-templates');
 const InvoiceService = require('../services/invoice');
 
 const NEXT_WINDOW_OPEN = '2026-09-12T12:00:00.000Z'; // 8:00 AM ET
@@ -217,5 +219,120 @@ describe('claimInvoiceForSend adoption survives a failed replacement delivery', 
     // live send actually delivered the pay link.
     const anyRestoredToScheduled = fallback.update.mock.calls.some((c) => c[0]?.status === 'scheduled');
     expect(anyRestoredToScheduled).toBe(false);
+  });
+});
+
+// Codex r12 follow-on P1 #4131 round 3: EVERY pre-delivery exit in
+// sendViaSMS — after the claim returns consumedQueuedSendRows but before a
+// confirmed provider accept — now sits inside the ONE try/finally guard
+// (`delivered`), so the queue row this claim's adoption cancelled is
+// restored regardless of WHICH exit fires, no per-branch memory required.
+// Table-driven over the enumerated exits so a future one added inside the
+// guard is covered automatically, and one added OUTSIDE it would need a
+// new row here to prove it too.
+describe('sendViaSMS: every pre-delivery exit restores the consumed queue row (table-driven)', () => {
+  const ORIGINAL_SCHEDULED_FOR = new Date('2026-09-11T09:00:00.000Z');
+  const CONSUMED_ROW = { id: 'sms-queued-1', scheduled_for: ORIGINAL_SCHEDULED_FOR };
+
+  // Common prefix every case shares: claim taken, one pre-existing queued
+  // row adopted (consumed) by this claim, nothing else live.
+  function baseMocks() {
+    return [
+      chain({ first: draftInvoice }), // claim read
+      chain({ first: undefined }), // pre-claim queued check (none)
+      chain({ returning: [{ ...draftInvoice, status: 'sending' }] }), // claim flip
+      chain({ first: undefined }), // reconcile: queued-under-claim check (none)
+      chain({ returning: [CONSUMED_ROW] }), // adoption consumes the pre-existing row
+      chain({ first: undefined }), // strict re-check after the consume (none live)
+    ];
+  }
+
+  const CASES = [
+    {
+      name: 'payer_billed: invoice carries a payer_id — SMS suppressed, no credit reversal',
+      invoiceOverrides: { payer_id: 'payer-1' },
+      expectRejects: null,
+      expectResultCode: 'payer_billed',
+      expectCreditReversalAttempted: false,
+    },
+    {
+      name: 'no phone on file',
+      invoiceOverrides: {},
+      customerOverride: { id: 'cust-1', phone: null },
+      expectRejects: 'Customer has no phone number',
+      expectCreditReversalAttempted: true,
+    },
+    {
+      name: 'pay-url mint failure (shortenOrPassthrough throws — never wrapped in its own try/catch)',
+      invoiceOverrides: {},
+      customerOverride: { id: 'cust-1', phone: '+19415550123', first_name: 'Pat' },
+      beforeRun: () => shortenOrPassthrough.mockImplementationOnce(async () => { throw new Error('short-link service down'); }),
+      expectRejects: 'short-link service down',
+      expectCreditReversalAttempted: true,
+    },
+    {
+      name: 'template missing/disabled',
+      invoiceOverrides: {},
+      customerOverride: { id: 'cust-1', phone: '+19415550123', first_name: 'Pat' },
+      beforeRun: () => { isTemplateActive.mockResolvedValueOnce(false); getTemplate.mockResolvedValueOnce(null); },
+      expectRejects: null,
+      expectResultCode: 'INVOICE_SENT_TEMPLATE_MISSING',
+      expectCreditReversalAttempted: true,
+    },
+    {
+      name: 'provider blocks the send for a NON-hold reason (no deferred/nextAllowedAt)',
+      invoiceOverrides: {},
+      customerOverride: { id: 'cust-1', phone: '+19415550123', first_name: 'Pat' },
+      beforeRun: () => sendCustomerMessage.mockResolvedValueOnce({ sent: false, code: 'OPTED_OUT', reason: 'customer opted out' }),
+      expectRejects: 'payment-link SMS blocked: OPTED_OUT',
+      expectCreditReversalAttempted: true,
+    },
+  ];
+
+  test.each(CASES)('$name', async ({ invoiceOverrides, customerOverride, beforeRun, expectRejects, expectResultCode, expectCreditReversalAttempted }) => {
+    jest.clearAllMocks();
+    const { reverseAppliedCredit, autoApplyAccountCreditIfEnabled } = require('../services/customer-credit');
+    // A partial (non-full) credit application so reverseCreditOnExit's
+    // effect is actually observable — fullyCovered would short-circuit
+    // before any of these exits are even reachable.
+    autoApplyAccountCreditIfEnabled.mockResolvedValueOnce({ applied: 25, fullyCovered: false });
+    const restoreQueueChain = chain();
+    const restoreClaimChain = chain();
+    const invoiceRow = { ...draftInvoice, ...invoiceOverrides };
+    const mocks = [
+      chain({ first: invoiceRow }),
+      chain({ first: undefined }),
+      chain({ returning: [{ ...invoiceRow, status: 'sending' }] }),
+      chain({ first: undefined }),
+      chain({ returning: [CONSUMED_ROW] }),
+      chain({ first: undefined }),
+    ];
+    if (customerOverride) mocks.push(chain({ first: customerOverride }));
+    mocks.push(restoreQueueChain, restoreClaimChain);
+    for (const m of mocks) db.mockReturnValueOnce(m);
+    if (beforeRun) beforeRun();
+
+    if (expectRejects) {
+      await expect(InvoiceService.sendViaSMS('inv-1')).rejects.toThrow(expectRejects);
+    } else {
+      const result = await InvoiceService.sendViaSMS('inv-1');
+      expect(result.sent).toBe(false);
+      if (expectResultCode) expect(result.code).toBe(expectResultCode);
+    }
+
+    // THE invariant under test: the row this claim's adoption cancelled is
+    // restored — same id, same schedule — no matter which exit fired.
+    expect(restoreQueueChain.whereIn.mock.calls[0]).toEqual(['id', ['sms-queued-1']]);
+    const restoreUpdate = restoreQueueChain.update.mock.calls[0][0];
+    expect(restoreUpdate.status).toBe('scheduled');
+    expect(restoreUpdate.scheduled_for).toBeUndefined();
+    // The invoice claim was released too, in the fixed order (queue first).
+    expect(restoreClaimChain.update.mock.calls[0][0]).toMatchObject({ status: 'draft' });
+
+    if (expectCreditReversalAttempted) {
+      expect(reverseAppliedCredit).toHaveBeenCalledTimes(1);
+    } else {
+      expect(reverseAppliedCredit).not.toHaveBeenCalled();
+    }
   });
 });

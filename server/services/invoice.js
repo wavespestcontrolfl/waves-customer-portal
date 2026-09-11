@@ -1381,6 +1381,57 @@ async function requeueHeldPayLinkSms({ invoiceId, customerId, code, nextAllowedA
   }
 }
 
+// Post-delivery bookkeeping recovery, extracted out of sendViaSMS's catch
+// (Codex r12 follow-on P1 #4131 round 3): the provider ACCEPTED the
+// message before this failed (smsDelivered / `delivered` are already
+// true), so nothing here restores the claim or any queue row — it retries
+// the finalize once, and on success mirrors the happy-path bookkeeping
+// (each leg best-effort/idempotent) so a recovered send still gets its
+// collection follow-ups, audit line, and lead conversion instead of
+// silently losing them. Kept as its own function rather than inline: the
+// new outer try/finally guard around sendViaSMS was already pushing this
+// branch's existing nesting past the max-depth threshold.
+async function recoverPostDeliverySmsBookkeeping({ invoiceId, invoice, payUrl, previousStatus, allowClaimed, actorTechnicianId, finalizeInvoiceAfterSms, err }) {
+  logger.error(`[invoice] SMS DELIVERED for ${invoice.invoice_number} but post-delivery bookkeeping failed: ${err.message} — retrying finalize`);
+  try {
+    await finalizeInvoiceAfterSms();
+  } catch (retryErr) {
+    logger.error(`[invoice] finalize retry failed for ${invoice.invoice_number}: ${retryErr.message} — row left under its send claim; do NOT auto-resend`);
+    return { sent: true, payUrl, finalizeError: err.message };
+  }
+  try {
+    await require("./invoice-followups").scheduleForInvoice(invoiceId);
+  } catch (e) {
+    logger.error(`[invoice-followups] scheduleForInvoice failed (post-recovery): ${e.message}`);
+  }
+  await db("activity_log")
+    .insert({
+      customer_id: invoice.customer_id,
+      action: "invoice_sent",
+      description: `Invoice ${invoice.invoice_number} sent via SMS: $${invoiceAmountDue(invoice)}`,
+      metadata: JSON.stringify({ invoiceId, payUrl }),
+    })
+    .catch(() => {});
+  if (!allowClaimed) {
+    try {
+      await convertLeadOnInvoiceSent({ invoiceId, customerId: invoice.customer_id, priorStatus: previousStatus, priorDelivered: Boolean(invoice.sent_at || invoice.sms_sent_at) });
+    } catch (e) {
+      logger.error(`[invoice] lead conversion failed (post-recovery) for ${invoice.invoice_number}: ${e.message}`);
+    }
+    // A recovered send is a durable send (GitHub r1 P1): the customer has
+    // the pay link and the finalize committed, so the linked visit closes
+    // out here exactly as on the happy path — otherwise the invoice is
+    // sent while its visit stays open, the state this gate exists to end.
+    try {
+      const { closeOutVisitForIssuedInvoice } = require("./invoice-issued-closeout");
+      await closeOutVisitForIssuedInvoice({ invoiceId, trigger: "sent", actorTechnicianId });
+    } catch (e) {
+      logger.error(`[invoice] issued-invoice closeout failed (post-recovery) for ${invoice.invoice_number}: ${e.message}`);
+    }
+  }
+  return { sent: true, payUrl, finalizeError: err.message };
+}
+
 const InvoiceService = {
   async buildLineItemsForScheduledService(scheduledServiceId, options = {}) {
     return buildScheduledServiceInvoiceLines(scheduledServiceId, options);
@@ -2880,15 +2931,6 @@ const InvoiceService = {
     // 'sending').
     const claim = await claimInvoiceForSend(invoiceId, { allowClaimed, adoptsQueuedInvoiceSend: true, operatorInitiated });
     const { invoice, previousStatus, claimed, consumedQueuedSendRows } = claim;
-    // consumeQueuedInvoiceSend (inside the claim above) cancels any
-    // pre-existing queued pay-link text BEFORE this delivery is even
-    // attempted, so the worker can never double-send while it's in flight.
-    // If this attempt then fails and nothing else picks up the obligation
-    // (the quiet-hours requeue below), that cancellation must be undone —
-    // restoreSendClaim itself owns restoring it, in the right order,
-    // whenever consumedQueuedSendRows is passed (Codex r12 follow-on P1
-    // #4131 round 2).
-    const restoreClaimAndQueuedSend = () => restoreSendClaim(invoiceId, previousStatus, claimed, consumedQueuedSendRows);
 
     // Direct callers (batch sendImmediately, the AI-assistant send tool, the
     // from-service SMS-only path) bypass sendViaSMSAndEmail, so apply credit here too
@@ -2900,18 +2942,13 @@ const InvoiceService = {
     if (!allowClaimed) {
       const { autoApplyAccountCreditIfEnabled } = require("./customer-credit");
       smsCreditResult = await autoApplyAccountCreditIfEnabled(invoiceId);
-      if (smsCreditResult?.fullyCovered) {
-        // Covered by credit IS success for the caller (the invoice is now 'prepaid',
-        // settled — nothing to send). Direct callers check `sent || ok`, so flag
-        // ok:true; sent stays false because no SMS went out. No claim to restore —
-        // the apply flipped the row to the terminal 'prepaid' state.
-        return { sent: false, ok: true, covered_by_credit: true, code: "covered_by_credit", reason: "Invoice covered by account credit — nothing to collect" };
-      }
     }
     // Reverse this seam's credit application if the SMS ultimately isn't delivered
     // (no phone / provider error) — otherwise we'd consume credit and edit-lock an
     // invoice whose pay link never went out. No-op when nothing was applied here.
-    // Each failure path below restores the 'sending' claim first, so this can run.
+    // Called from the ONE finally below, AFTER the claim (and any consumed queue
+    // rows) is restored — reverseAppliedCredit refuses a still-'sending' invoice,
+    // so credit reversal must never run before the restore.
     const reverseSmsCreditOnFailure = async () => {
       if (allowClaimed || !(smsCreditResult?.applied > 0)) return;
       try {
@@ -2922,389 +2959,385 @@ const InvoiceService = {
       }
     };
 
-    // Third-party Bill-To: never text the homeowner a pay link for a
-    // payer-billed invoice — the pay link + AR route to the payer (email).
-    if (invoice.payer_id) {
-      await restoreClaimAndQueuedSend();
-      return { sent: false, reason: "Suppressed — invoice billed to a third-party payer", code: "payer_billed" };
-    }
-
-    const customer = await db("customers")
-      .where({ id: invoice.customer_id })
-      .first();
-    if (!customer?.phone) {
-      await restoreClaimAndQueuedSend();
-      await reverseSmsCreditOnFailure();
-      throw new Error("Customer has no phone number");
-    }
-
-    const domain = publicPortalUrl();
-    const longPayUrl = appendPayUrlParams(`${domain}/pay/${invoice.token}`, payUrlParams);
-    const payUrl = await shortenOrPassthrough(longPayUrl, {
-      kind: "invoice",
-      entityType: "invoices",
-      entityId: invoice.id,
-      customerId: customer.id,
-      codePrefix: invoiceShortCodePrefix(invoice),
-    });
-
-    const techName = invoice.tech_name || "Our team";
-    const serviceType = invoice.service_type || invoice.title || "your service";
-
-    let formattedDate = "";
-    // Whether the invoice's service date is *today* in ET. The annual-prepay
-    // "Today's visit is the first of N" clause is gated on this: a resend from
-    // sent/viewed/overdue or a delayed/scheduled send can run on a day other
-    // than service_date, where a same-day claim would be false.
-    let serviceDateIsTodayET = false;
-    // Whether the service date is still in the future (ET). An invoice billed
-    // before its service has happened — the setup + first-application invoice
-    // auto-sent at estimate acceptance is the common case — must not use the
-    // generic "...completed on {service_date}" copy. Selects the pre-service
-    // variant below.
-    let serviceDateIsFutureET = false;
-    if (invoice.service_date) {
-      try {
-        // Knex returns DATE as a Date object (UTC midnight). Avoid the broken
-        // `date + 'T12:00:00'` string concat and always format in ET.
-        const d =
-          invoice.service_date instanceof Date
-            ? invoice.service_date
-            : new Date(invoice.service_date + "T12:00:00");
-        if (!isNaN(d.getTime())) {
-          formattedDate = d.toLocaleDateString("en-US", {
-            weekday: "long",
-            month: "long",
-            day: "numeric",
-            year: "numeric",
-            timeZone: "America/New_York",
-          });
-          // Compare date-only values, not the midnight Date through ET: Knex
-          // returns DATE as a Date at UTC midnight, which etDateString() would
-          // format as the previous ET calendar day and wrongly drop the clause
-          // on the real service date. The raw YYYY-MM-DD already is the calendar
-          // date (UTC-midnight Date → toISOString slice; string → leading slice).
-          const serviceYmd =
-            invoice.service_date instanceof Date
-              ? invoice.service_date.toISOString().slice(0, 10)
-              : String(invoice.service_date).slice(0, 10);
-          const todayYmd = etDateString(new Date());
-          serviceDateIsTodayET = serviceYmd === todayYmd;
-          // ISO YYYY-MM-DD compares lexicographically === chronologically.
-          serviceDateIsFutureET = serviceYmd > todayYmd;
-        }
-      } catch {
-        formattedDate = "";
-      }
-    }
-
-    // Annual-prepay invoices use a dedicated, coverage-aware template — the
-    // generic invoice_sent copy ("...completed on {service_date}") misframes a
-    // full year of prepaid visits as a single completed service. Resolve the
-    // term up front; a cancelled/refunded term reverts to the standard copy.
-    const annualPrepay = await loadInvoiceAnnualPrepay(invoice).catch(() => null);
-    // coverageActive is the descriptor's single source of truth for "is this
-    // term still covered" — it keeps a renewal lapse (cancelled +
-    // renewal_decision='cancel', still covered through term_end) active while
-    // excluding true void/refund terms, matching the billing guard.
-    const prepayActive = !!annualPrepay && annualPrepay.coverageActive;
-    const coverage = prepayActive ? buildPrepayCoverageSummary(annualPrepay) : null;
-
-    // Body comes from the editable invoice_sent template (or its annual-prepay
-    // variant). If the row is missing/disabled, we skip the SMS rather than
-    // falling back to inline copy.
-    let body = null;
+    // ONE guard around EVERYTHING between the claim above and a CONFIRMED
+    // provider accept (Codex r12 follow-on P1 #4131 round 3): the prior two
+    // rounds fixed specific branches (the claim's own re-verify lookup, the
+    // final catch's provider-failure path) but the audit kept finding new
+    // ones — no phone on file, the template/render step, a pay-url mint
+    // failure (shortenOrPassthrough is NOT wrapped below) — because
+    // restoration was still a per-branch convention. `delivered` is the
+    // single flag deciding whether the outer finally needs to do anything:
+    // false by default, flipped true ONLY at a genuine terminal outcome —
+    // fully covered by credit (nothing left to text) or a provider-accepted
+    // send (including its post-delivery bookkeeping-failure recovery,
+    // which sets it the moment smsDelivered does, before any bookkeeping
+    // step could rethrow). EVERY other exit from this point on — a return
+    // or a throw, existing or future — leaves it false and the finally
+    // restores the claim and any consumedQueuedSendRows this claim's
+    // adoption cancelled, THEN reverses this seam's credit. A quiet-hours
+    // provider hold requeues the held text FIRST (inside the catch) so the
+    // finally's restore correctly skips the old row once a fresh
+    // replacement secures the delivery instead.
+    let delivered = false;
+    let queuedReplacementSecured = false;
+    // Reversed on every non-delivered exit except payer_billed (matching
+    // the pre-round-3 per-branch behavior exactly — this suppression is an
+    // existing business rule, not part of this fix): a payer-billed
+    // invoice's homeowner SMS leg is suppressed, not failed, and this
+    // seam's credit application is left standing.
+    let reverseCreditOnExit = true;
     try {
-      const templates = require("../routes/admin-sms-templates");
-      const tplOpts = {
-        workflow: "invoice_send",
-        entity_type: "invoice",
-        entity_id: invoiceId,
-      };
-      // The annual-prepay variant is its own template row, so it would render
-      // even when ops disabled the base invoice_sent kill switch — and the
-      // provider (messageType 'invoice' → invoice_sent) would then swallow the
-      // send as a fake success and mark the invoice sent without delivery,
-      // blocking retries. Honor the base kill switch here so a disabled
-      // invoice_sent skips the variant too and the invoice stays retryable
-      // (falls through to the null-body skip + restoreSendClaim path below).
-      const invoiceSmsActive = await templates.isTemplateActive("invoice");
-      if (prepayActive && invoiceSmsActive) {
-        // Coverage summary is built when a visit count is configured; a
-        // display-only prepay flag (no count) still gets the prepay framing via
-        // a generic phrase instead of the misleading "completed on" copy.
-        const coverageSummary = coverage?.coverageSummary || "your annual service plan";
-        // Only claim "today" when the service date actually is today in ET —
-        // resends and delayed sends run on other days. Off-day sends drop the
-        // clause; the coverage summary still conveys the full-term framing.
-        const firstVisitClause = coverage && serviceDateIsTodayET
-          ? ` Today's visit is the first of ${coverage.coverageCount}.`
-          : "";
-        body = await templates.getTemplate("invoice_sent_annual_prepay", {
-          first_name: customer.first_name || "",
-          coverage_summary: coverageSummary,
-          first_visit_clause: firstVisitClause,
-          pay_url: payUrl,
-        }, tplOpts);
+      if (smsCreditResult?.fullyCovered) {
+        delivered = true;
+        // Covered by credit IS success for the caller (the invoice is now 'prepaid',
+        // settled — nothing to send). Direct callers check `sent || ok`, so flag
+        // ok:true; sent stays false because no SMS went out. No claim to restore —
+        // the apply flipped the row to the terminal 'prepaid' state.
+        return { sent: false, ok: true, covered_by_credit: true, code: "covered_by_credit", reason: "Invoice covered by account credit — nothing to collect" };
       }
-      // Upfront invoices — the setup + first-application invoice auto-sent at
-      // estimate acceptance, or any invoice billed before its service date —
-      // must not use the generic "...completed on {service_date}" copy, which
-      // asserts a not-yet-performed service AND prints a future date. A service
-      // date still in the future selects a pre-service variant with no completion
-      // claim and no date placeholder. Gated on the same base `invoice` kill
-      // switch as the prepay variant (a disabled invoice_sent skips this too,
-      // keeping the invoice retryable); a missing/disabled variant row falls
-      // through to the standard copy below so the send is never blocked.
-      if (!body && serviceDateIsFutureET && invoiceSmsActive) {
-        body = await templates.getTemplate("invoice_sent_upfront", {
-          first_name: customer.first_name || "",
-          service_type: serviceType,
-          pay_url: payUrl,
-        }, tplOpts);
-      }
-      if (!body) {
-        // Either an ordinary invoice, or the prepay template was missing/disabled
-        // — fall back to the standard invoice_sent copy so a missing variant row
-        // never blocks the send.
-        body = await templates.getTemplate("invoice_sent", {
-          first_name: customer.first_name || "",
-          service_type: serviceType,
-          service_date: formattedDate || "today",
-          pay_url: payUrl,
-        }, tplOpts);
-      }
-    } catch (err) {
-      logger.warn(`[invoice] Template lookup failed: ${err.message}`);
-    }
 
-    if (!body) {
-      logger.warn(
-        `[invoice] invoice_sent template missing/disabled — skipping SMS for invoice ${invoiceId}`,
-      );
-      await restoreClaimAndQueuedSend();
-      await reverseSmsCreditOnFailure();
-      return {
-        sent: false,
-        reason: "template-missing",
-        code: "INVOICE_SENT_TEMPLATE_MISSING",
-      };
-    }
+      // Third-party Bill-To: never text the homeowner a pay link for a
+      // payer-billed invoice — the pay link + AR route to the payer (email).
+      if (invoice.payer_id) {
+        reverseCreditOnExit = false;
+        return { sent: false, reason: "Suppressed — invoice billed to a third-party payer", code: "payer_billed" };
+      }
 
-    // Post-delivery finalize, extracted so the delivered-SMS recovery in the
-    // catch below can retry it once after a transient DB failure.
-    const finalizeInvoiceAfterSms = () => db("invoices")
-      .where({ id: invoiceId })
-      .whereIn("status", SEND_FINALIZABLE_STATUSES)
-      .update({
-        status: db.raw(
-          "CASE WHEN status IN ('draft', 'scheduled', 'sending') THEN 'sent' ELSE status END",
-        ),
-        sent_at: new Date(),
-        sms_sent_at: new Date(),
-        scheduled_send_at: null,
-        scheduled_send_error: null,
-        scheduled_request_review: false,
-        scheduled_review_delay_minutes: null,
-        updated_at: new Date(),
-      });
-    // Flips the moment the provider accepts the message. Everything after
-    // that point is bookkeeping — its failure must never be reported as a
-    // failed SEND (the UI reads a restored 'draft' as "provably unsent" and
-    // offers Resend, duplicating a text the customer already received).
-    let smsDelivered = false;
-    try {
-      // Routed through customer-message middleware. payment_link is a
-      // sensitive purpose: policy.requireIds includes customerId +
-      // invoiceId, and policy.minIdentityTrust is phone_matches_customer.
-      // Both are satisfied here (we resolved the invoice and customer
-      // by id, and the customer's stored phone matches the recipient).
-      // Payment-link SMS bodies legitimately contain a tap-to-pay URL
-      // but never an exact dollar amount in the SMS itself — the URL
-      // points to the pay page where the amount is shown.
-      const {
-        sendCustomerMessage,
-      } = require("./messaging/send-customer-message");
-      const sendResult = await sendCustomerMessage({
-        to: customer.phone,
-        body,
-        channel: "sms",
-        audience: "customer",
-        purpose: "payment_link",
+      const customer = await db("customers")
+        .where({ id: invoice.customer_id })
+        .first();
+      if (!customer?.phone) {
+        throw new Error("Customer has no phone number");
+      }
+
+      const domain = publicPortalUrl();
+      const longPayUrl = appendPayUrlParams(`${domain}/pay/${invoice.token}`, payUrlParams);
+      const payUrl = await shortenOrPassthrough(longPayUrl, {
+        kind: "invoice",
+        entityType: "invoices",
+        entityId: invoice.id,
         customerId: customer.id,
-        invoiceId,
-        entryPoint: "invoice_send_via_sms",
-        // Send-window operator marker: this shared path serves both the
-        // admin send click and automated resends — only the authenticated
-        // routes pass operatorInitiated (see validators/send-window.js).
-        ...(operatorInitiated ? { operatorInitiated: true } : {}),
-        // Preserve the legacy messageType so the admin-sms-templates
-        // 'invoice' template kill switch (invoice → invoice_sent) still
-        // applies. If ops disables the invoice template to halt broken
-        // billing texts, this flow needs to stop too.
-        metadata: { original_message_type: "invoice" },
+        codePrefix: invoiceShortCodePrefix(invoice),
       });
 
-      if (!sendResult.sent) {
-        logger.warn(
-          `[invoice] payment-link SMS BLOCKED for invoice ${invoiceId}: ${sendResult.code} — ${sendResult.reason}`,
-        );
-        // Don't mark the invoice as sent if the wrapper blocked us.
-        // The follow-up cron + admin can retry once the underlying
-        // condition (consent, opt-out, etc.) is resolved.
-        await reverseSmsCreditOnFailure();
-        const err = new Error(`payment-link SMS blocked: ${sendResult.code}`);
-        err.code = sendResult.code;
-        err.reason = sendResult.reason;
-        // Send-window deferral contract: a QUIET_HOURS_HOLD is "try again at
-        // 8 AM", not a delivery failure — carry the hold metadata so
-        // sendViaSMSAndEmail / processScheduledSends can reschedule instead
-        // of burning one of the five generic scheduled-send attempts. The
-        // rendered body + recipient ride along so a direct (non-scheduled)
-        // caller can requeue the exact pay-link text on the scheduled rail.
-        if (sendResult.deferred) err.deferred = true;
-        if (sendResult.nextAllowedAt) err.nextAllowedAt = sendResult.nextAllowedAt;
-        if (sendResult.retryAfterMs) err.retryAfterMs = sendResult.retryAfterMs;
-        err.smsBody = body;
-        err.toPhone = customer.phone;
-        throw err;
-      }
+      const techName = invoice.tech_name || "Our team";
+      const serviceType = invoice.service_type || invoice.title || "your service";
 
-      smsDelivered = true;
-      await finalizeInvoiceAfterSms();
-
-      // Kick off the per-invoice automated follow-up sequence (Day 0/3/7/14/30)
-      try {
-        await require("./invoice-followups").scheduleForInvoice(invoiceId);
-      } catch (e) {
-        logger.error(
-          `[invoice-followups] scheduleForInvoice failed: ${e.message}`,
-        );
-      }
-
-      // Log
-      await db("activity_log")
-        .insert({
-          customer_id: customer.id,
-          action: "invoice_sent",
-          description: `Invoice ${invoice.invoice_number} sent via SMS: $${invoiceAmountDue(invoice)}`,
-          metadata: JSON.stringify({ invoiceId, payUrl }),
-        })
-        .catch(() => {});
-
-      logger.info(
-        `[invoice] SMS sent for ${invoice.invoice_number} (customerId=${customer.id})`,
-      );
-
-      // First send means the deal closed — convert the originating lead. Only
-      // for DIRECT SMS-only sends: when sendViaSMSAndEmail drives this (allowClaimed),
-      // the wrapper owns the finalize + conversion, so skip here to avoid a double
-      // pass. Resend-safe via the priorStatus gate inside the helper.
-      if (!allowClaimed) {
-        await convertLeadOnInvoiceSent({ invoiceId, customerId: invoice.customer_id, priorStatus: previousStatus, priorDelivered: Boolean(invoice.sent_at || invoice.sms_sent_at) });
-        // Invoice issued ⇒ visit completed (owner ruling 2026-09-07, dark
-        // behind GATE_INVOICE_ISSUED_CLOSES_VISIT). DIRECT SMS-only sends
-        // (admin batch, AI assistant, collections) own it here; when
-        // sendViaSMSAndEmail drives this leg (allowClaimed) the wrapper owns
-        // it after both legs, so the closeout runs once per delivery.
-        const { closeOutVisitForIssuedInvoice } = require("./invoice-issued-closeout");
-        await closeOutVisitForIssuedInvoice({ invoiceId, trigger: "sent", actorTechnicianId });
-      }
-
-      return { sent: true, payUrl };
-    } catch (err) {
-      if (smsDelivered) {
-        // The customer HAS the pay-link text — this is a post-delivery
-        // bookkeeping failure (invoice finalize, follow-up scheduling, lead
-        // conversion), NOT a failed send. Restoring the claim to draft here
-        // would make the UI's "still draft ⇒ provably unsent ⇒ offer
-        // Resend" check duplicate a delivered SMS, and reversing the credit
-        // would refund a message that went out. Retry the finalize once;
-        // if it still fails, leave the 'sending' claim in place — the
-        // stale-claim recovery in processScheduledSends PARKS such rows for
-        // operator review (delivery unverified, no automatic resend) — and
-        // report the send as delivered.
-        logger.error(
-          `[invoice] SMS DELIVERED for ${invoice.invoice_number} but post-delivery bookkeeping failed: ${err.message} — retrying finalize`,
-        );
+      let formattedDate = "";
+      // Whether the invoice's service date is *today* in ET. The annual-prepay
+      // "Today's visit is the first of N" clause is gated on this: a resend from
+      // sent/viewed/overdue or a delayed/scheduled send can run on a day other
+      // than service_date, where a same-day claim would be false.
+      let serviceDateIsTodayET = false;
+      // Whether the service date is still in the future (ET). An invoice billed
+      // before its service has happened — the setup + first-application invoice
+      // auto-sent at estimate acceptance is the common case — must not use the
+      // generic "...completed on {service_date}" copy. Selects the pre-service
+      // variant below.
+      let serviceDateIsFutureET = false;
+      if (invoice.service_date) {
         try {
-          await finalizeInvoiceAfterSms();
-        } catch (retryErr) {
-          logger.error(
-            `[invoice] finalize retry failed for ${invoice.invoice_number}: ${retryErr.message} — row left under its send claim; do NOT auto-resend`,
-          );
-          return { sent: true, payUrl, finalizeError: err.message };
+          // Knex returns DATE as a Date object (UTC midnight). Avoid the broken
+          // `date + 'T12:00:00'` string concat and always format in ET.
+          const d =
+            invoice.service_date instanceof Date
+              ? invoice.service_date
+              : new Date(invoice.service_date + "T12:00:00");
+          if (!isNaN(d.getTime())) {
+            formattedDate = d.toLocaleDateString("en-US", {
+              weekday: "long",
+              month: "long",
+              day: "numeric",
+              year: "numeric",
+              timeZone: "America/New_York",
+            });
+            // Compare date-only values, not the midnight Date through ET: Knex
+            // returns DATE as a Date at UTC midnight, which etDateString() would
+            // format as the previous ET calendar day and wrongly drop the clause
+            // on the real service date. The raw YYYY-MM-DD already is the calendar
+            // date (UTC-midnight Date → toISOString slice; string → leading slice).
+            const serviceYmd =
+              invoice.service_date instanceof Date
+                ? invoice.service_date.toISOString().slice(0, 10)
+                : String(invoice.service_date).slice(0, 10);
+            const todayYmd = etDateString(new Date());
+            serviceDateIsTodayET = serviceYmd === todayYmd;
+            // ISO YYYY-MM-DD compares lexicographically === chronologically.
+            serviceDateIsFutureET = serviceYmd > todayYmd;
+          }
+        } catch {
+          formattedDate = "";
         }
-        // Finalize is durable — run the normal post-delivery bookkeeping
-        // (each leg best-effort/idempotent, mirroring the happy path) so a
-        // recovered send still gets its collection follow-ups, audit line,
-        // and lead conversion instead of silently losing them.
+      }
+
+      // Annual-prepay invoices use a dedicated, coverage-aware template — the
+      // generic invoice_sent copy ("...completed on {service_date}") misframes a
+      // full year of prepaid visits as a single completed service. Resolve the
+      // term up front; a cancelled/refunded term reverts to the standard copy.
+      const annualPrepay = await loadInvoiceAnnualPrepay(invoice).catch(() => null);
+      // coverageActive is the descriptor's single source of truth for "is this
+      // term still covered" — it keeps a renewal lapse (cancelled +
+      // renewal_decision='cancel', still covered through term_end) active while
+      // excluding true void/refund terms, matching the billing guard.
+      const prepayActive = !!annualPrepay && annualPrepay.coverageActive;
+      const coverage = prepayActive ? buildPrepayCoverageSummary(annualPrepay) : null;
+
+      // Body comes from the editable invoice_sent template (or its annual-prepay
+      // variant). If the row is missing/disabled, we skip the SMS rather than
+      // falling back to inline copy.
+      let body = null;
+      try {
+        const templates = require("../routes/admin-sms-templates");
+        const tplOpts = {
+          workflow: "invoice_send",
+          entity_type: "invoice",
+          entity_id: invoiceId,
+        };
+        // The annual-prepay variant is its own template row, so it would render
+        // even when ops disabled the base invoice_sent kill switch — and the
+        // provider (messageType 'invoice' → invoice_sent) would then swallow the
+        // send as a fake success and mark the invoice sent without delivery,
+        // blocking retries. Honor the base kill switch here so a disabled
+        // invoice_sent skips the variant too and the invoice stays retryable
+        // (falls through to the null-body skip below, inside the same guard).
+        const invoiceSmsActive = await templates.isTemplateActive("invoice");
+        if (prepayActive && invoiceSmsActive) {
+          // Coverage summary is built when a visit count is configured; a
+          // display-only prepay flag (no count) still gets the prepay framing via
+          // a generic phrase instead of the misleading "completed on" copy.
+          const coverageSummary = coverage?.coverageSummary || "your annual service plan";
+          // Only claim "today" when the service date actually is today in ET —
+          // resends and delayed sends run on other days. Off-day sends drop the
+          // clause; the coverage summary still conveys the full-term framing.
+          const firstVisitClause = coverage && serviceDateIsTodayET
+            ? ` Today's visit is the first of ${coverage.coverageCount}.`
+            : "";
+          body = await templates.getTemplate("invoice_sent_annual_prepay", {
+            first_name: customer.first_name || "",
+            coverage_summary: coverageSummary,
+            first_visit_clause: firstVisitClause,
+            pay_url: payUrl,
+          }, tplOpts);
+        }
+        // Upfront invoices — the setup + first-application invoice auto-sent at
+        // estimate acceptance, or any invoice billed before its service date —
+        // must not use the generic "...completed on {service_date}" copy, which
+        // asserts a not-yet-performed service AND prints a future date. A service
+        // date still in the future selects a pre-service variant with no completion
+        // claim and no date placeholder. Gated on the same base `invoice` kill
+        // switch as the prepay variant (a disabled invoice_sent skips this too,
+        // keeping the invoice retryable); a missing/disabled variant row falls
+        // through to the standard copy below so the send is never blocked.
+        if (!body && serviceDateIsFutureET && invoiceSmsActive) {
+          body = await templates.getTemplate("invoice_sent_upfront", {
+            first_name: customer.first_name || "",
+            service_type: serviceType,
+            pay_url: payUrl,
+          }, tplOpts);
+        }
+        if (!body) {
+          // Either an ordinary invoice, or the prepay template was missing/disabled
+          // — fall back to the standard invoice_sent copy so a missing variant row
+          // never blocks the send.
+          body = await templates.getTemplate("invoice_sent", {
+            first_name: customer.first_name || "",
+            service_type: serviceType,
+            service_date: formattedDate || "today",
+            pay_url: payUrl,
+          }, tplOpts);
+        }
+      } catch (err) {
+        logger.warn(`[invoice] Template lookup failed: ${err.message}`);
+      }
+
+      if (!body) {
+        logger.warn(
+          `[invoice] invoice_sent template missing/disabled — skipping SMS for invoice ${invoiceId}`,
+        );
+        return {
+          sent: false,
+          reason: "template-missing",
+          code: "INVOICE_SENT_TEMPLATE_MISSING",
+        };
+      }
+
+      // Post-delivery finalize, extracted so the delivered-SMS recovery in the
+      // catch below can retry it once after a transient DB failure.
+      const finalizeInvoiceAfterSms = () => db("invoices")
+        .where({ id: invoiceId })
+        .whereIn("status", SEND_FINALIZABLE_STATUSES)
+        .update({
+          status: db.raw(
+            "CASE WHEN status IN ('draft', 'scheduled', 'sending') THEN 'sent' ELSE status END",
+          ),
+          sent_at: new Date(),
+          sms_sent_at: new Date(),
+          scheduled_send_at: null,
+          scheduled_send_error: null,
+          scheduled_request_review: false,
+          scheduled_review_delay_minutes: null,
+          updated_at: new Date(),
+        });
+      // Flips the moment the provider accepts the message. Everything after
+      // that point is bookkeeping — its failure must never be reported as a
+      // failed SEND (the UI reads a restored 'draft' as "provably unsent" and
+      // offers Resend, duplicating a text the customer already received).
+      let smsDelivered = false;
+      try {
+        // Routed through customer-message middleware. payment_link is a
+        // sensitive purpose: policy.requireIds includes customerId +
+        // invoiceId, and policy.minIdentityTrust is phone_matches_customer.
+        // Both are satisfied here (we resolved the invoice and customer
+        // by id, and the customer's stored phone matches the recipient).
+        // Payment-link SMS bodies legitimately contain a tap-to-pay URL
+        // but never an exact dollar amount in the SMS itself — the URL
+        // points to the pay page where the amount is shown.
+        const {
+          sendCustomerMessage,
+        } = require("./messaging/send-customer-message");
+        const sendResult = await sendCustomerMessage({
+          to: customer.phone,
+          body,
+          channel: "sms",
+          audience: "customer",
+          purpose: "payment_link",
+          customerId: customer.id,
+          invoiceId,
+          entryPoint: "invoice_send_via_sms",
+          // Send-window operator marker: this shared path serves both the
+          // admin send click and automated resends — only the authenticated
+          // routes pass operatorInitiated (see validators/send-window.js).
+          ...(operatorInitiated ? { operatorInitiated: true } : {}),
+          // Preserve the legacy messageType so the admin-sms-templates
+          // 'invoice' template kill switch (invoice → invoice_sent) still
+          // applies. If ops disables the invoice template to halt broken
+          // billing texts, this flow needs to stop too.
+          metadata: { original_message_type: "invoice" },
+        });
+
+        if (!sendResult.sent) {
+          logger.warn(
+            `[invoice] payment-link SMS BLOCKED for invoice ${invoiceId}: ${sendResult.code} — ${sendResult.reason}`,
+          );
+          // Don't mark the invoice as sent if the wrapper blocked us.
+          // The follow-up cron + admin can retry once the underlying
+          // condition (consent, opt-out, etc.) is resolved.
+          const err = new Error(`payment-link SMS blocked: ${sendResult.code}`);
+          err.code = sendResult.code;
+          err.reason = sendResult.reason;
+          // Send-window deferral contract: a QUIET_HOURS_HOLD is "try again at
+          // 8 AM", not a delivery failure — carry the hold metadata so
+          // sendViaSMSAndEmail / processScheduledSends can reschedule instead
+          // of burning one of the five generic scheduled-send attempts. The
+          // rendered body + recipient ride along so a direct (non-scheduled)
+          // caller can requeue the exact pay-link text on the scheduled rail.
+          if (sendResult.deferred) err.deferred = true;
+          if (sendResult.nextAllowedAt) err.nextAllowedAt = sendResult.nextAllowedAt;
+          if (sendResult.retryAfterMs) err.retryAfterMs = sendResult.retryAfterMs;
+          err.smsBody = body;
+          err.toPhone = customer.phone;
+          throw err;
+        }
+
+        smsDelivered = true;
+        delivered = true;
+        await finalizeInvoiceAfterSms();
+
+        // Kick off the per-invoice automated follow-up sequence (Day 0/3/7/14/30)
         try {
           await require("./invoice-followups").scheduleForInvoice(invoiceId);
         } catch (e) {
-          logger.error(`[invoice-followups] scheduleForInvoice failed (post-recovery): ${e.message}`);
+          logger.error(
+            `[invoice-followups] scheduleForInvoice failed: ${e.message}`,
+          );
         }
+
+        // Log
         await db("activity_log")
           .insert({
-            customer_id: invoice.customer_id,
+            customer_id: customer.id,
             action: "invoice_sent",
             description: `Invoice ${invoice.invoice_number} sent via SMS: $${invoiceAmountDue(invoice)}`,
             metadata: JSON.stringify({ invoiceId, payUrl }),
           })
           .catch(() => {});
+
+        logger.info(
+          `[invoice] SMS sent for ${invoice.invoice_number} (customerId=${customer.id})`,
+        );
+
+        // First send means the deal closed — convert the originating lead. Only
+        // for DIRECT SMS-only sends: when sendViaSMSAndEmail drives this (allowClaimed),
+        // the wrapper owns the finalize + conversion, so skip here to avoid a double
+        // pass. Resend-safe via the priorStatus gate inside the helper.
         if (!allowClaimed) {
-          try {
-            await convertLeadOnInvoiceSent({ invoiceId, customerId: invoice.customer_id, priorStatus: previousStatus, priorDelivered: Boolean(invoice.sent_at || invoice.sms_sent_at) });
-          } catch (e) {
-            logger.error(`[invoice] lead conversion failed (post-recovery) for ${invoice.invoice_number}: ${e.message}`);
-          }
-          // A recovered send is a durable send (GitHub r1 P1): the customer
-          // has the pay link and the finalize committed, so the linked visit
-          // closes out here exactly as on the happy path — otherwise the
-          // invoice is sent while its visit stays open, the state this gate
-          // exists to end.
-          try {
-            const { closeOutVisitForIssuedInvoice } = require("./invoice-issued-closeout");
-            await closeOutVisitForIssuedInvoice({ invoiceId, trigger: "sent", actorTechnicianId });
-          } catch (e) {
-            logger.error(`[invoice] issued-invoice closeout failed (post-recovery) for ${invoice.invoice_number}: ${e.message}`);
-          }
+          await convertLeadOnInvoiceSent({ invoiceId, customerId: invoice.customer_id, priorStatus: previousStatus, priorDelivered: Boolean(invoice.sent_at || invoice.sms_sent_at) });
+          // Invoice issued ⇒ visit completed (owner ruling 2026-09-07, dark
+          // behind GATE_INVOICE_ISSUED_CLOSES_VISIT). DIRECT SMS-only sends
+          // (admin batch, AI assistant, collections) own it here; when
+          // sendViaSMSAndEmail drives this leg (allowClaimed) the wrapper owns
+          // it after both legs, so the closeout runs once per delivery.
+          const { closeOutVisitForIssuedInvoice } = require("./invoice-issued-closeout");
+          await closeOutVisitForIssuedInvoice({ invoiceId, trigger: "sent", actorTechnicianId });
         }
-        return { sent: true, payUrl, finalizeError: err.message };
+
+        return { sent: true, payUrl };
+      } catch (err) {
+        if (smsDelivered) {
+          // The customer HAS the pay-link text — this is a post-delivery
+          // bookkeeping failure (invoice finalize, follow-up scheduling, lead
+          // conversion), NOT a failed send. `delivered` is already true (set
+          // the moment the provider accepted, above) so the outer finally
+          // does nothing further — restoring the claim to draft here would
+          // make the UI's "still draft ⇒ provably unsent ⇒ offer Resend"
+          // check duplicate a delivered SMS, and reversing the credit would
+          // refund a message that went out. Retry the finalize once; if it
+          // still fails, leave the 'sending' claim in place — the
+          // stale-claim recovery in processScheduledSends PARKS such rows for
+          // operator review (delivery unverified, no automatic resend) — and
+          // report the send as delivered.
+          return await recoverPostDeliverySmsBookkeeping({
+            invoiceId, invoice, payUrl, previousStatus, allowClaimed, actorTechnicianId, finalizeInvoiceAfterSms, err,
+          });
+        }
+        // NOT delivered. A DIRECT caller (batch sendImmediately, the
+        // AI-assistant send tool, the collections voice path — no wrapping
+        // sendViaSMSAndEmail) has no other retry rail for a send-window /
+        // provider hold: sendViaSMSAndEmail already requeues this exact
+        // shape for ITS OWN direct callers (below, sharing this same step)
+        // — mirror it here so a directly-called sendViaSMS doesn't just
+        // throw the hold away and lose the pay link. A wrapped call
+        // (allowClaimed true) leaves this to the wrapper, which owns the
+        // claim and decides per its own allowClaimed contract.
+        if (!allowClaimed
+          && ["QUIET_HOURS_HOLD", "PUSH_IN_FLIGHT", "APP_DELIVERY_HOLD", "APP_PROVIDER_RETRY"].includes(err.code)
+          && err.deferred && err.nextAllowedAt && err.smsBody && err.toPhone) {
+          const requeue = await requeueHeldPayLinkSms({
+            invoiceId, customerId: invoice.customer_id, code: err.code,
+            nextAllowedAt: err.nextAllowedAt, heldBody: err.smsBody, heldToPhone: err.toPhone,
+          });
+          queuedReplacementSecured = requeue.scheduled === true;
+        }
+        logger.error(
+          `[invoice] SMS failed for ${invoice.invoice_number}: ${err.message}`,
+        );
+        throw err;
       }
-      // A DIRECT caller (batch sendImmediately, the AI-assistant send tool,
-      // the collections voice path — no wrapping sendViaSMSAndEmail) has no
-      // other retry rail for a send-window / provider hold: sendViaSMSAndEmail
-      // already requeues this exact shape for ITS OWN direct callers (below,
-      // sharing this same step) — mirror it here so a directly-called
-      // sendViaSMS doesn't just throw the hold away and lose the pay link
-      // (Codex r12 follow-on P1 #4131). A wrapped call (allowClaimed true)
-      // leaves this to the wrapper, which owns the claim and decides per its
-      // own allowClaimed contract.
-      let queuedReplacementSecured = false;
-      if (!allowClaimed
-        && ["QUIET_HOURS_HOLD", "PUSH_IN_FLIGHT", "APP_DELIVERY_HOLD", "APP_PROVIDER_RETRY"].includes(err.code)
-        && err.deferred && err.nextAllowedAt && err.smsBody && err.toPhone) {
-        const requeue = await requeueHeldPayLinkSms({
-          invoiceId, customerId: invoice.customer_id, code: err.code,
-          nextAllowedAt: err.nextAllowedAt, heldBody: err.smsBody, heldToPhone: err.toPhone,
-        });
-        queuedReplacementSecured = requeue.scheduled === true;
+    } finally {
+      // The ONE place every non-delivered exit above — return or throw,
+      // existing or future — actually restores anything (Codex r12
+      // follow-on P1 #4131 round 3). Queue rows first, invoice claim
+      // second (restoreSendClaim's own contract), THEN credit reversed —
+      // reverseAppliedCredit refuses a still-'sending' invoice, so it must
+      // run after the restore, never before.
+      if (!delivered) {
+        // The queue row this claim's adoption cancelled is only safe to
+        // leave cancelled when a fresh replacement now owns the delivery —
+        // otherwise restore it so a failed send never silently drops a
+        // customer's already-scheduled pay-link text.
+        await restoreSendClaim(invoiceId, previousStatus, claimed, queuedReplacementSecured ? [] : consumedQueuedSendRows);
+        if (reverseCreditOnExit) await reverseSmsCreditOnFailure();
       }
-      // The queue row this claim's adoption cancelled is only safe to leave
-      // cancelled when a fresh replacement now owns the delivery — otherwise
-      // restoreSendClaim restores it (in order, before releasing the
-      // invoice) so a failed send never silently drops a customer's
-      // already-scheduled pay-link text (Codex r12 follow-on P1 #4131).
-      await restoreSendClaim(invoiceId, previousStatus, claimed, queuedReplacementSecured ? [] : consumedQueuedSendRows);
-      // Provider/Twilio error after we auto-applied credit above — the pay
-      // link was never delivered, so return the credit rather than leave it
-      // consumed + the invoice edit-locked.
-      await reverseSmsCreditOnFailure();
-      logger.error(
-        `[invoice] SMS failed for ${invoice.invoice_number}: ${err.message}`,
-      );
-      throw err;
     }
   },
 
@@ -3358,6 +3391,15 @@ const InvoiceService = {
     const { autoApplyAccountCreditIfEnabled } = require("./customer-credit");
     const sendCreditResult = await autoApplyAccountCreditIfEnabled(invoiceId);
     if (sendCreditResult?.fullyCovered) {
+      // Enumerated pre-delivery exit (Codex r12 follow-on P1 #4131 round
+      // 3): this is the ONE exit in this function between claim and
+      // delivery that is NOT already covered by the final ok/else
+      // chokepoint below (every SMS/email attempt past this point is
+      // absorbed into `sms`/`email` and always reaches that chokepoint).
+      // It is a genuine terminal outcome, not a bug — the invoice is now
+      // fully paid via credit, so any queue row this claim's adoption
+      // cancelled correctly stays cancelled (there is nothing left to
+      // text); same reasoning as sendViaSMS's own covered_by_credit exit.
       return {
         ok: true,
         covered_by_credit: true,
