@@ -1,6 +1,7 @@
-import { Badge, Card, CardBody, CardHeader, CardTitle, cn } from "../../../components/ui";
+import { Badge, Card, CardBody, CardHeader, CardTitle, UiSurface, cn } from "../../../components/ui";
+import { ArrowRight, CheckCircle2 } from "lucide-react";
 import { RowLink } from "./RowLink";
-import { CHART_SUCCESS, fmtMoneyCompact } from "../../../components/dashboard/charts";
+import { fmtMoneyCompact } from "../../../components/dashboard/charts";
 
 // Rank: what to do first. Critical before warn; within a severity, do-this-now
 // actions before watch-state alarms (kind comes from the server generators).
@@ -30,38 +31,36 @@ export default function ActionInbox({ alerts, stale = false }) {
 
   if (!loaded || (stale && items.length === 0)) {
     return (
-      <Card className="mb-4 max-md:border-0 max-md:shadow-sm">
+      <UiSurface as={Card} className="mb-4">
         <CardHeader className="flex items-center gap-2.5">
           <CardTitle>Action inbox</CardTitle>
-          <span className="text-12 text-ink-secondary">unavailable</span>
+          <Badge tone="neutral">unavailable</Badge>
         </CardHeader>
         <CardBody>
-          <div className="text-13 text-ink-secondary py-2">
+          <div className="py-2 text-ui-body text-ink-secondary">
             {loaded
               ? "Alerts couldn't be refreshed — refresh to retry."
               : "Alerts couldn't be loaded — refresh to retry."}
           </div>
         </CardBody>
-      </Card>
+      </UiSurface>
     );
   }
 
   return (
-    <Card className="mb-4 max-md:border-0 max-md:shadow-sm">
+    <UiSurface as={Card} className="mb-4">
       <CardHeader className="flex items-center justify-between gap-2">
         <div className="flex items-center gap-2.5 min-w-0">
           <CardTitle>Action inbox</CardTitle>
           {allClear ? (
-            <span
-              className="inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-11 font-medium whitespace-nowrap"
-              style={{ color: CHART_SUCCESS, background: "rgba(16,185,129,0.10)" }}
-            >
-              ✓ All clear
-            </span>
+            <Badge tone="neutral">
+              <CheckCircle2 size={14} aria-hidden />
+              All clear
+            </Badge>
           ) : (
             <span
               className={cn(
-                "text-12",
+                "text-ui-caption",
                 criticalCount > 0 ? "text-alert-fg" : "text-ink-secondary",
               )}
             >
@@ -80,7 +79,7 @@ export default function ActionInbox({ alerts, stale = false }) {
       </CardHeader>
       <CardBody>
         {allClear ? (
-          <div className="text-13 text-ink-secondary py-2">
+          <div className="py-2 text-ui-body text-ink-secondary">
             Nothing needs you right now.
           </div>
         ) : (
@@ -89,7 +88,7 @@ export default function ActionInbox({ alerts, stale = false }) {
               <RowLink
                 key={item.id}
                 href={item.href}
-                className="flex items-center justify-between gap-3 rounded-sm border-hairline border-zinc-200 bg-surface-sunken px-3 py-2 text-13 text-zinc-900 hover:bg-white"
+                className="flex min-h-11 items-center justify-between gap-3 rounded-sm border-hairline border-zinc-200 bg-surface-sunken px-3 py-2 text-ui-body text-zinc-900 hover:bg-white u-focus-ring"
               >
                 <span className="flex items-center gap-2 min-w-0">
                   <span
@@ -104,19 +103,17 @@ export default function ActionInbox({ alerts, stale = false }) {
                 </span>
                 <span className="flex items-center gap-2 flex-shrink-0">
                   {item.amount != null && (
-                    <span className="u-nums text-12 text-ink-secondary">
+                    <span className="u-nums text-ui-caption text-ink-secondary">
                       {fmtMoneyCompact(item.amount)}
                     </span>
                   )}
-                  <span aria-hidden="true" className="text-ink-tertiary">
-                    →
-                  </span>
+                  <ArrowRight size={16} aria-hidden className="text-ink-tertiary" />
                 </span>
               </RowLink>
             ))}
           </div>
         )}
       </CardBody>
-    </Card>
+    </UiSurface>
   );
 }
