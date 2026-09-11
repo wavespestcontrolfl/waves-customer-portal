@@ -174,8 +174,11 @@ function normalizeRecipient(phone) {
  * }>}
  */
 async function sendCustomerMessage(input) {
-  if (String(process.env.GATE_RESCHEDULE_LINK_ON_PROMISE).toLowerCase() === 'true') {
-    return require('../reschedule-link-promises').withSendLock(input, (lockedInput) => sendCustomerMessageCore(lockedInput));
+  // The feature's canonical compound gate (this delivery gate AND
+  // GATE_CALL_COMMITMENTS); live mode only — shadow observes, it never locks.
+  const promises = require('../reschedule-link-promises');
+  if (promises.mode() === 'true') {
+    return promises.withSendLock(input, (lockedInput) => sendCustomerMessageCore(lockedInput));
   }
   return sendCustomerMessageCore(input);
 }
