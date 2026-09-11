@@ -78,7 +78,6 @@ async function getScheduleQualityMeasurements(input = {}, conn = require('../../
   const { etDateDiffDays } = require('../recurring-appointment-seeder');
   const { dayStopsQuery, guardedCoordSelects } = require('./day-stops');
   const { applyAssignable } = require('../technician-eligibility');
-  const { NOT_A_ROUTE_STOP_STATUSES } = require('../stops-ahead');
   const { getBlackoutLayers } = require('./blackout-dates');
   const RouteOptimizer = require('../route-optimizer');
   const today = etDateString(now);
