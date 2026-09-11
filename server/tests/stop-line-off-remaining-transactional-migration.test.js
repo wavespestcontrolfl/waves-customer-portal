@@ -8,13 +8,23 @@
 
 const migration = require('../models/migrations/20260911000010_stop_line_off_remaining_transactional');
 
-const { _SWAPS: SWAPS, _KEYS: KEYS, _KEEP_STOP_KEYS: KEEP_STOP_KEYS, _dropStop: dropStop } = migration;
+const {
+  _SWAPS: SWAPS,
+  _KEYS: KEYS,
+  _KEEP_STOP_KEYS: KEEP_STOP_KEYS,
+  _KEEP_STOP_IF_REACTIVATED: KEEP_STOP_IF_REACTIVATED,
+  _dropStop: dropStop,
+} = migration;
 
 const tokens = (body) => [...String(body).matchAll(/\{([a-zA-Z][a-zA-Z0-9_]*)\}/g)].map((m) => m[1]).sort();
 
-function buildKnex({ templateRows = [], variantRows = [], hasVariants = true } = {}) {
-  const state = { updates: [] };
-  const rowsFor = (table) => (table === 'sms_templates' ? templateRows : variantRows);
+function buildKnex({ templateRows = [], variantRows = [], hasVariants = true, hasSettings = true } = {}) {
+  const state = { updates: [], settings: [] };
+  const rowsFor = (table) => {
+    if (table === 'sms_templates') return templateRows;
+    if (table === 'sms_template_variants') return variantRows;
+    return state.settings;
+  };
   const knex = jest.fn((table) => {
     const q = {
       _where: null,
@@ -33,6 +43,22 @@ function buildKnex({ templateRows = [], variantRows = [], hasVariants = true } =
           .filter(this._filter || (() => true))
           .map((row) => Object.fromEntries(cols.map((c) => [c, row[c]])));
       },
+      async first(...columns) {
+        const cols = columns.flat();
+        const row = rowsFor(table).find(this._filter || (() => true));
+        if (!row) return undefined;
+        return cols.length ? Object.fromEntries(cols.map((c) => [c, row[c]])) : { ...row };
+      },
+      async insert(data) {
+        rowsFor(table).push({ ...data });
+        return [1];
+      },
+      async del() {
+        const keep = rowsFor(table).filter((row) => !(this._filter || (() => true))(row));
+        rowsFor(table).length = 0;
+        rowsFor(table).push(...keep);
+        return 1;
+      },
       async update(data) {
         // Compare-and-swap: only rows still matching the full where clause.
         const matched = rowsFor(table).filter(this._filter || (() => true));
@@ -44,7 +70,11 @@ function buildKnex({ templateRows = [], variantRows = [], hasVariants = true } =
     return q;
   });
   knex.schema = {
-    hasTable: jest.fn(async (table) => (table === 'sms_template_variants' ? hasVariants : true)),
+    hasTable: jest.fn(async (table) => {
+      if (table === 'sms_template_variants') return hasVariants;
+      if (table === 'system_settings') return hasSettings;
+      return true;
+    }),
   };
   return { knex, state };
 }
@@ -75,6 +105,19 @@ describe('stop-line-off-remaining-transactional swap table', () => {
     // and kept (2026-09-11) — a future pass must not quietly absorb them.
     expect(KEEP_STOP_KEYS).toContain('dropped_call_address_request');
     expect(KEEP_STOP_KEYS).toContain('referral_nudge');
+  });
+
+  test('disabled marketing/prospect rows are pinned as survivors, not leftovers', () => {
+    // They carry the line and no sweep touches them because they are inactive.
+    // Pinned so a later pass reading the keep-list cannot mistake them for
+    // rows that were simply missed. See docs/sms-stop-line-policy.md.
+    for (const key of KEEP_STOP_IF_REACTIVATED) {
+      expect({ key, swapped: KEYS.includes(key) }).toEqual({ key, swapped: false });
+      expect({ key, alsoActive: KEEP_STOP_KEYS.includes(key) }).toEqual({ key, alsoActive: false });
+    }
+    expect(new Set(KEEP_STOP_IF_REACTIVATED).size).toBe(KEEP_STOP_IF_REACTIVATED.length);
+    expect(KEEP_STOP_IF_REACTIVATED).toContain('seasonal_reactivation');
+    expect(KEEP_STOP_IF_REACTIVATED.filter((k) => k.startsWith('cancellation_save_'))).toHaveLength(12);
   });
 
   test('every entry changes something and no rewritten body still carries STOP', () => {
@@ -195,30 +238,91 @@ describe('stop-line-off-remaining-transactional up()', () => {
 });
 
 describe('stop-line-off-remaining-transactional down()', () => {
-  test('restores audited bodies and leaves mechanically stripped rows alone', async () => {
-    const [, auditedReview, strippedReview] = SWAPS.find(([k]) => k === 'review_request');
+  test('restores only rows up() rewrote, leaving mechanically stripped ones alone', async () => {
+    const [, auditedReview] = SWAPS.find(([k]) => k === 'review_request');
     const templateRows = [
-      { id: 't1', template_key: 'review_request', body: strippedReview },
-      { id: 't2', template_key: 'upsell_add_service', body: 'Admin wording with no snapshot.' },
+      { id: 't1', template_key: 'review_request', body: auditedReview },
+      { id: 't2', template_key: 'upsell_add_service', body: 'Admin wording. Reply STOP to opt out.' },
     ];
     const { knex } = buildKnex({ templateRows });
 
+    await migration.up(knex);
     await migration.down(knex);
 
     expect(templateRows[0].body).toBe(auditedReview);
-    expect(templateRows[1].body).toBe('Admin wording with no snapshot.');
+    // Mechanically stripped: no snapshot of the admin wording, so no restore.
+    expect(templateRows[1].body).toBe('Admin wording.');
   });
 
-  test('round-trips up() then down() back to the audited bodies', async () => {
-    const templateRows = SWAPS.map(([key, expect_], i) => ({ id: `r${i}`, template_key: key, body: expect_ }));
+  test('never prints the line onto a row that was already clean before up()', async () => {
+    // The rollback hazard: a fresh seed, or an admin who took the line off by
+    // hand, leaves a body identical to what up() would have written. Body
+    // alone cannot tell the two apart — only up()'s own record can.
+    const [, , strippedReview] = SWAPS.find(([k]) => k === 'review_request');
+    const templateRows = [{ id: 't1', template_key: 'review_request', body: strippedReview }];
+    const { knex, state } = buildKnex({ templateRows });
+
+    await migration.up(knex);
+    expect(state.updates.filter((u) => u.table === 'sms_templates')).toHaveLength(0);
+
+    await migration.down(knex);
+
+    expect(templateRows[0].body).toBe(strippedReview);
+    expect(templateRows[0].body).not.toMatch(/Reply STOP/i);
+  });
+
+  test('restores nothing when there is no evidence up() ran', async () => {
+    const [, auditedReview, strippedReview] = SWAPS.find(([k]) => k === 'review_request');
+    const templateRows = [{ id: 't1', template_key: 'review_request', body: strippedReview }];
     const { knex } = buildKnex({ templateRows });
+
+    await migration.down(knex); // no state row — fail closed
+
+    expect(templateRows[0].body).toBe(strippedReview);
+    expect(templateRows[0].body).not.toBe(auditedReview);
+  });
+
+  test('round-trips up() then down() back to the audited bodies, variants included', async () => {
+    const templateRows = SWAPS.map(([key, expect_], i) => ({ id: `r${i}`, template_key: key, body: expect_ }));
+    const [, auditedReview] = SWAPS.find(([k]) => k === 'review_request');
+    const variantRows = [{ id: 'v1', template_key: 'review_request', body: auditedReview }];
+    const { knex } = buildKnex({ templateRows, variantRows });
 
     await migration.up(knex);
     expect(templateRows.every((r) => !/Reply STOP/i.test(r.body))).toBe(true);
+    expect(variantRows[0].body).not.toMatch(/Reply STOP/i);
+
     await migration.down(knex);
 
     for (const [i, [, expect_]] of SWAPS.entries()) {
       expect(templateRows[i].body).toBe(expect_);
     }
+    expect(variantRows[0].body).toBe(auditedReview);
+  });
+
+  test('clears its state row so a later up() starts clean', async () => {
+    const [, auditedReview] = SWAPS.find(([k]) => k === 'review_request');
+    const templateRows = [{ id: 't1', template_key: 'review_request', body: auditedReview }];
+    const { knex, state } = buildKnex({ templateRows });
+
+    await migration.up(knex);
+    expect(state.settings).toHaveLength(1);
+    expect(state.settings[0].key).toBe(migration._STATE_KEY);
+
+    await migration.down(knex);
+    expect(state.settings).toHaveLength(0);
+  });
+
+  test('skips the restore when system_settings does not exist', async () => {
+    const [, auditedReview, strippedReview] = SWAPS.find(([k]) => k === 'review_request');
+    const templateRows = [{ id: 't1', template_key: 'review_request', body: auditedReview }];
+    const { knex } = buildKnex({ templateRows, hasSettings: false });
+
+    await migration.up(knex);
+    expect(templateRows[0].body).toBe(strippedReview);
+
+    await migration.down(knex); // nothing recorded, so nothing restored
+
+    expect(templateRows[0].body).toBe(strippedReview);
   });
 });

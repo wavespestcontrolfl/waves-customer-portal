@@ -48,6 +48,19 @@ when `smsPurpose` is a marketing purpose, and
 `server/services/outbound-voicemail-sms.js` sets its `optout_clause` only when
 there is no `customerId` — i.e. only for a stranger.
 
+## Inactive rows that keep the line if they are ever reactivated
+
+These are disabled in production today, so no sweep has touched them, but each
+one would pass a test above the moment it went live. Treat the list as part of
+the keep-list, not as leftovers to clean up:
+
+- `estimate_followup_unviewed`, `estimate_followup_viewed`,
+  `estimate_followup_final`, `estimate_followup_expiring` — estimate chasers,
+  and the recipient is often still a prospect.
+- `seasonal_reactivation` — a win-back pitch to a lapsed customer.
+- The `cancellation_save_*` set — retention offers made to somebody on their
+  way out, which is selling.
+
 ## Deliberate exceptions
 
 `upsell_add_service` and `upsell_tier_upgrade` pitch a paid add-on to an
@@ -60,4 +73,17 @@ accident.
 
 Seed it without the line unless one of the two tests above says otherwise.
 `server/tests/stop-line-off-remaining-transactional-migration.test.js` pins
-the keep-list; if a new template belongs on it, add it there too.
+both keep-lists; if a new template belongs on one, add it there too.
+
+## Writing a sweep migration
+
+Two traps, both found the hard way:
+
+- **The body is not evidence of what you changed.** A row that already
+  equalled your post-sweep text is indistinguishable from one you rewrote, so
+  a body-only `down()` will print the line onto copy you never touched.
+  Record the rows `up()` actually rewrote (`system_settings`, keyed on the
+  migration's own stamp) and restore only those.
+- **A DB-gated test may assert the seeded body.** Suites that run against the
+  full migrated chain read the body *after* your sweep. Assert against the
+  swept text, not the raw seed.

@@ -65,6 +65,14 @@
  * admin save landing mid-migration wins instead of being overwritten.
  * Experiment variants render INSTEAD of the base body, so
  * sms_template_variants gets the same treatment.
+ *
+ * ROLLBACK SAFETY: up() records the rows it actually rewrote in
+ * system_settings under this migration's own stamp, and down() restores only
+ * those. Body alone is not evidence — a row that already equalled the
+ * post-sweep body (a fresh seed, an admin who took the line off by hand)
+ * looks identical to one this file rewrote, and a body-only rollback would
+ * print the opt-out line onto copy this migration never touched. No record
+ * means no restore.
  */
 
 // [template_key, expected prod body 2026-09-11, new body]
@@ -124,6 +132,30 @@ const KEEP_STOP_KEYS = [
   'referral_nudge',
 ];
 
+// Disabled in production today, so no sweep has touched them — but each would
+// pass one of the two tests the moment it went live (estimate chasers reach
+// prospects; reactivation and cancellation-save copy is selling). Listed so a
+// later pass reading the keep-list does not mistake them for leftovers.
+const KEEP_STOP_IF_REACTIVATED = [
+  'estimate_followup_unviewed',
+  'estimate_followup_viewed',
+  'estimate_followup_final',
+  'estimate_followup_expiring',
+  'seasonal_reactivation',
+  'cancellation_save_accepted_offer',
+  'cancellation_save_callback_requested',
+  'cancellation_save_cancelled',
+  'cancellation_save_step1_default',
+  'cancellation_save_step1_moving',
+  'cancellation_save_step1_price',
+  'cancellation_save_step1_quality',
+  'cancellation_save_step2_default',
+  'cancellation_save_step2_moving',
+  'cancellation_save_step2_price',
+  'cancellation_save_step2_quality',
+  'cancellation_save_step3',
+];
+
 // Same strip as 20260810000060: handles the "\n\nReply STOP…" tail and the
 // same-line "phone. Reply STOP…" form, then tidies whitespace.
 function dropStop(body) {
@@ -135,50 +167,99 @@ function dropStop(body) {
     .trimEnd();
 }
 
+// Rollback evidence. A row that ALREADY equalled the post-sweep body before
+// this migration ran (a fresh seed, or an admin who took the line off by hand)
+// is indistinguishable by body alone from one this migration rewrote — so a
+// body-only down() would print the opt-out line onto copy this file never
+// touched. up() records the rows it actually rewrote; down() restores only
+// those. Derived from this migration's own stamp, per the house convention.
+const STATE_KEY = 'migration.20260911000010.state';
+
+async function readState(knex) {
+  if (!(await knex.schema.hasTable('system_settings'))) return null;
+  const row = await knex('system_settings').where({ key: STATE_KEY }).first();
+  if (!row) return [];
+  try {
+    const parsed = JSON.parse(row.value);
+    return Array.isArray(parsed.rewritten) ? parsed.rewritten : [];
+  } catch {
+    return [];
+  }
+}
+
 async function sweep(knex, table) {
-  if (!(await knex.schema.hasTable(table))) return;
+  if (!(await knex.schema.hasTable(table))) return [];
   const swapByKey = new Map(SWAPS.map(([key, expect, set]) => [key, { expect, set }]));
   const rows = await knex(table).whereIn('template_key', KEYS).select('id', 'template_key', 'body');
+  const rewritten = [];
   for (const row of rows) {
     if (typeof row.body !== 'string') continue;
     const swap = swapByKey.get(row.template_key);
     // Exact audited body → the reviewed replacement. Drifted (admin edited
     // since the audit) → mechanical STOP-drop only, admin wording preserved.
-    const next = swap && row.body === swap.expect ? swap.set : dropStop(row.body);
+    const audited = Boolean(swap) && row.body === swap.expect;
+    const next = audited ? swap.set : dropStop(row.body);
     if (next === row.body) continue;
     // Compare-and-swap on the body we read: an admin save landing between the
     // read and this update wins instead of being overwritten.
-    await knex(table).where({ id: row.id, body: row.body }).update({ body: next, updated_at: new Date() });
+    const changed = await knex(table).where({ id: row.id, body: row.body }).update({ body: next, updated_at: new Date() });
+    // Only an audited rewrite is restorable — a mechanical strip has no
+    // snapshot of the admin wording it removed the line from.
+    if (audited && changed !== 0) rewritten.push([table, row.id]);
   }
+  return rewritten;
 }
 
 exports.up = async function up(knex) {
   if (!(await knex.schema.hasTable('sms_templates'))) return;
-  await sweep(knex, 'sms_templates');
+  const rewritten = await sweep(knex, 'sms_templates');
   // Variants render INSTEAD of the base body (getTemplate prefers an active
   // variant), so a variant left carrying the line would defeat the sweep.
-  await sweep(knex, 'sms_template_variants');
+  rewritten.push(...(await sweep(knex, 'sms_template_variants')));
+
+  if (await knex.schema.hasTable('system_settings')) {
+    const prior = (await readState(knex)) || [];
+    const seen = new Set(prior.map((e) => JSON.stringify(e)));
+    const merged = [...prior, ...rewritten.filter((e) => !seen.has(JSON.stringify(e)))];
+    await knex('system_settings').where({ key: STATE_KEY }).del();
+    await knex('system_settings').insert({
+      key: STATE_KEY,
+      value: JSON.stringify({ rewritten: merged }),
+      category: 'migration',
+      description: 'Rows 20260911000010 rewrote, so down() restores only those.',
+    });
+  }
 };
 
 exports.down = async function down(knex) {
-  // Copy-only migration: restore the audited body where the current body is
-  // exactly what up() set — base rows AND variants. Mechanically stripped
-  // rows are not restored (no snapshot of their prior wording), same contract
-  // as 20260810000060.
+  // Copy-only migration: restore the audited body ONLY on rows up() recorded
+  // as rewritten, and only while the body is still exactly what up() left.
+  // No evidence (state row missing, system_settings absent, a body edited
+  // since) → restore nothing. Failing closed is the right direction here: the
+  // cost of skipping a restore is a template missing a line it does not need,
+  // and the cost of a wrong restore is printing an opt-out line on copy
+  // somebody wrote deliberately.
   if (!(await knex.schema.hasTable('sms_templates'))) return;
-  for (const table of ['sms_templates', 'sms_template_variants']) {
+  const rewritten = await readState(knex);
+  if (!rewritten || rewritten.length === 0) return;
+
+  const setByKey = new Map(SWAPS.map(([key, expect, set]) => [key, { expect, set }]));
+  for (const [table, id] of rewritten) {
     if (!(await knex.schema.hasTable(table))) continue;
-    for (const [key, expect, set] of SWAPS) {
-      const rows = await knex(table).where({ template_key: key }).select('id', 'body');
-      for (const row of rows) {
-        if (row.body !== set) continue;
-        await knex(table).where({ id: row.id, body: set }).update({ body: expect, updated_at: new Date() });
-      }
-    }
+    const row = await knex(table).where({ id }).first('id', 'template_key', 'body');
+    if (!row) continue;
+    const swap = setByKey.get(row.template_key);
+    if (!swap || row.body !== swap.set) continue;
+    await knex(table).where({ id: row.id, body: swap.set }).update({ body: swap.expect, updated_at: new Date() });
+  }
+  if (await knex.schema.hasTable('system_settings')) {
+    await knex('system_settings').where({ key: STATE_KEY }).del();
   }
 };
 
 exports._SWAPS = SWAPS;
 exports._KEYS = KEYS;
 exports._KEEP_STOP_KEYS = KEEP_STOP_KEYS;
+exports._KEEP_STOP_IF_REACTIVATED = KEEP_STOP_IF_REACTIVATED;
+exports._STATE_KEY = STATE_KEY;
 exports._dropStop = dropStop;
