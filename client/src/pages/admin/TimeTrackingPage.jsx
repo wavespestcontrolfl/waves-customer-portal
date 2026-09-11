@@ -178,16 +178,27 @@ const STAFF_LEAF_BY_KEY = Object.fromEntries(
   STAFF_SECTIONS.map((s) => [s.key, s]),
 );
 
+// Resolve the LEAF the page will actually render for a ?tab= deep link.
+// Gate-off or non-admin deep links to pay-growth fall back to the group's
+// default tab entirely (content + beacon + active-tab highlight), same as any
+// other invalid/role-gated deep link. While an admin's availability request
+// is still pending (null) the tab is unresolved: rendering Team meanwhile
+// would flash the wrong view and could flush a false Team usage beacon.
+export function resolveStaffTab(rawTab, payGrowthAvailable, role) {
+  if (rawTab !== "pay-growth") return rawTab;
+  if (role !== "admin" || payGrowthAvailable === false) return "team";
+  return payGrowthAvailable === true ? "pay-growth" : null;
+}
+
 export default function TimeTrackingPage() {
   const controlledDocumentsAvailable = useStaffDocumentsAvailable();
   const payGrowthAvailable = usePayGrowthAvailable();
   const [searchParams, setSearchParams] = useSearchParams();
   const rawTab = STAFF_LEAF_BY_KEY[searchParams.get("tab")] ? searchParams.get("tab") : "dashboard";
-  // Gate-off or non-admin deep links to pay-growth fall back to the
-  // group's default tab entirely (content + beacon + active-tab
-  // highlight), same as any other invalid/role-gated deep link.
   const payGrowthGateOpen = payGrowthAvailable === true && readStaffRole() === "admin";
-  const tab = rawTab === "pay-growth" && !payGrowthGateOpen ? "team" : rawTab;
+  // null = pay-growth requested by an admin while availability is still
+  // unknown: no leaf renders and no beacon fires until it resolves.
+  const tab = resolveStaffTab(rawTab, payGrowthAvailable, readStaffRole());
   const setTab = (value) => {
     const next = new URLSearchParams(searchParams);
     next.set("tab", value);
@@ -195,7 +206,7 @@ export default function TimeTrackingPage() {
     setSearchParams(next);
   };
   const activeGroup =
-    TIMETRACKING_TAB_GROUPS.find((g) => g.tabs.includes(tab)) ||
+    TIMETRACKING_TAB_GROUPS.find((g) => g.tabs.includes(tab ?? rawTab)) ||
     TIMETRACKING_TAB_GROUPS[0];
   useRenderedTabBeacon("/admin/timetracking", tab, [searchParams]);
   const [toast, setToast] = useState("");
@@ -284,6 +295,7 @@ export default function TimeTrackingPage() {
         </details>
       </> : <DocumentsTab showToast={showToast} />)}
       {tab === "pay-growth" && <PayGrowth manage />}
+      {tab === null && <p role="status" style={{ color: "#71717A" }}>Checking pay and growth availability…</p>}
       <div
         style={{
           position: "fixed",
