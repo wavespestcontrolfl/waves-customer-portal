@@ -93,10 +93,18 @@ function mockDb(table) {
 // Seam for the atomic alert-window claim: record every attempt and let a
 // test force a write failure (fail-open path). No transaction is ever
 // opened for this — claimUnknownSenderAlertWindow/release both call plain
-// db.raw / db(table) statements directly.
+// db.raw / db(table) statements directly. Checked BEFORE the mockPg branch
+// (codex #4210 round-4 P1) so the whole claims subsystem — this raw INSERT
+// AND the table-based confirm/release in mockDb(table) above, which already
+// special-cases 'sms_reply_alert_claims' unconditionally — stays on the
+// SAME synthetic Map in every mode. Routing just this INSERT to a real
+// (unmigrated-for-this-table) Postgres connection when SMS_BELL_QA_URL is
+// set would abort the whole shared transaction, while confirm/release kept
+// reading/writing the synthetic Map regardless — two disconnected stores
+// that could never agree, and a claim insert failure this table's own
+// `mockPg` temp-table setup was never asked to survive.
 const mockClaim = { calls: [], fail: false };
 mockDb.raw = (sql, values) => {
-  if (mockPg) return mockPg.raw(sql, values);
   if (String(sql).includes('sms_reply_alert_claims')) {
     mockClaim.calls.push({ sql: String(sql), values });
     if (mockClaim.fail) throw Object.assign(new Error('synthetic claim write failure'), { code: 'synthetic' });
@@ -106,6 +114,7 @@ mockDb.raw = (sql, values) => {
     mockState.claims.set(phone, expiresAt);
     return { rows: [{ phone }] };
   }
+  if (mockPg) return mockPg.raw(sql, values);
   return { sql, merge: values?.[0] ? JSON.parse(values[0]) : {} };
 };
 mockDb.transaction = async () => ({
