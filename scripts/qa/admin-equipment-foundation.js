@@ -70,6 +70,7 @@ const record = {
 // below and these logs have to be the same number or the Cost/Mile tile the
 // fixture is meant to exercise renders from a figure production never produced.
 const vehicleTotalMiles = 100;
+const round2 = (value) => Math.round(value * 100) / 100;
 const mileage = {
   logs: [
     {
@@ -88,13 +89,6 @@ const mileage = {
       source: "manual",
     },
   ],
-  summary: {
-    total_miles: vehicleTotalMiles,
-    business_miles: 90,
-    total_fuel_cost: 20,
-    total_irs_deduction: 63,
-    avg_mpg: 20,
-  },
 };
 const overview = {
   total_assets: 1,
@@ -104,13 +98,32 @@ const overview = {
   ytd_fuel_cost: 20,
   ytd_irs_deduction: 63,
 };
-// costOfOwnership computes the age as a live month difference from
-// purchase_date and divides the total by it, so a pinned age_months/monthly_cost
-// pair stops being a response production can return the moment the month rolls
-// over — 32/$785 today, 33/$761.21 from October. Derive both, exactly as the
-// service does, and include the cost_per_mile it always returns for a vehicle
-// with mileage logs.
-const cost = (() => {
+// The vehicle's mileage rows are the one source for every derived figure the
+// detail and analytics screens show: costOfOwnership sums vehicle_mileage_log
+// for miles and fuel, and the mileage endpoint aggregates the same rows
+// independently of the list limit (server/services/equipment-maintenance.js).
+// Deriving both from whichever rows are being served keeps the long
+// sticky-header set from contradicting the summary and cost tiles rendered
+// beside it.
+function summarizeMileage(logs) {
+  const sum = (field) => logs.reduce((total, log) => total + log[field], 0);
+  const totalMiles = sum("total_miles"),
+    fuelGallons = sum("fuel_gallons");
+  return {
+    total_miles: totalMiles,
+    business_miles: sum("business_miles"),
+    total_fuel_cost: round2(sum("fuel_cost")),
+    total_irs_deduction: round2(sum("irs_deduction_amount")),
+    avg_mpg: fuelGallons > 0 ? round2(totalMiles / fuelGallons) : null,
+  };
+}
+// The age is a live month difference from purchase_date and the total is
+// divided by it, so a pinned age_months/monthly_cost pair stops being a
+// response production can return the moment the month rolls over — 32/$785
+// today, 33/$761.21 from October. The year and month are parsed off the date
+// string rather than through Date, whose UTC midnight reads back as the
+// previous December in this runner's zone.
+function ownership(logs) {
   const [purchaseYear, purchaseMonth] = equipment.purchase_date
     .split("-")
     .map(Number);
@@ -120,25 +133,29 @@ const cost = (() => {
     (now.getFullYear() - purchaseYear) * 12 +
       (now.getMonth() - (purchaseMonth - 1)),
   );
-  const totalCost = 25000 + 100 + 20;
-  const round = (value) => Math.round(value * 100) / 100;
+  const sum = (field) => logs.reduce((total, log) => total + log[field], 0);
+  const totalMiles = sum("total_miles"),
+    totalFuel = round2(sum("fuel_cost")),
+    totalMaintenance = 100,
+    purchasePrice = 25000,
+    totalCost = round2(purchasePrice + totalMaintenance + totalFuel);
   return {
     equipment_id: id,
     equipment_name: equipment.name,
     category: "vehicle",
     asset_tag: "QA-001",
     age_months: ageMonths,
-    purchase_price: 25000,
-    total_maintenance: 100,
-    total_fuel: 20,
+    purchase_price: purchasePrice,
+    total_maintenance: totalMaintenance,
+    total_fuel: totalFuel,
     total_cost: totalCost,
-    monthly_cost: round(totalCost / ageMonths),
-    cost_per_mile: round(totalCost / vehicleTotalMiles),
-    total_miles: vehicleTotalMiles,
+    monthly_cost: round2(totalCost / ageMonths),
+    cost_per_mile: totalMiles > 0 ? round2(totalCost / totalMiles) : null,
+    total_miles: totalMiles,
     condition_rating: 8,
-    total_irs_deduction: 63,
+    total_irs_deduction: round2(sum("irs_deduction_amount")),
   };
-})();
+}
 // Matches the job-cost summary below (1 pest job, $250 revenue, $100 cost,
 // 60% margin) so the list and the summary cannot disagree — the real
 // endpoints read the same `job_costs` table and never do.
@@ -330,12 +347,15 @@ function fixtures(state) {
         equipment,
         schedules: [schedule],
         recentRecords: [record],
-        costOfOwnership: cost,
+        costOfOwnership: ownership(state.mileageLogs || mileage.logs),
       }),
     ],
     [
       `GET /api/admin/equipment-maintenance/${id}/mileage`,
-      () => ({ ...mileage, logs: state.mileageLogs || mileage.logs }),
+      () => {
+        const logs = state.mileageLogs || mileage.logs;
+        return { logs, summary: summarizeMileage(logs) };
+      },
     ],
     [
       `POST /api/admin/equipment-maintenance/${id}/mileage`,
@@ -347,7 +367,7 @@ function fixtures(state) {
     ],
     [
       "GET /api/admin/equipment-maintenance/analytics/costs",
-      () => ({ costs: [cost] }),
+      () => ({ costs: [ownership(state.mileageLogs || mileage.logs)] }),
     ],
     [
       "GET /api/admin/equipment-maintenance/analytics/reliability",
@@ -421,7 +441,7 @@ function fixtures(state) {
     ],
     [
       `GET /api/admin/equipment-systems/${systemId}`,
-      () => ({ system, calibration: state.calibration || calibration }),
+      () => ({ system, calibration }),
     ],
     [
       `POST /api/admin/equipment-systems/${systemId}/calibrations`,
@@ -474,9 +494,14 @@ async function install(page, server, state) {
         url: m.location().url,
       });
   });
-  page.on("dialog", (dialog) =>
-    dialog.accept(dialog.type() === "prompt" ? "80" : undefined),
-  );
+  // None of these views expects a native alert, confirm or prompt. Accepting
+  // silently meant a regression that threw one up would be dismissed before the
+  // screenshots and assertions ran, and the view-only pass would still report
+  // success. Accept so the page cannot hang, but record it as a failure.
+  page.on("dialog", (dialog) => {
+    state.dialogs.push({ type: dialog.type(), message: dialog.message() });
+    return dialog.accept(dialog.type() === "prompt" ? "80" : undefined);
+  });
   await page.context().route("**/*", async (route) => {
     const request = route.request(),
       url = new URL(request.url());
@@ -828,10 +853,21 @@ async function capture(page, state, report, device, key, target) {
   await shot(page, report, device + "-" + key, target);
 }
 async function mileageHeader(page, server, state, report, device) {
-  state.mileageLogs = Array.from({ length: 30 }, (_, index) => ({
-    ...mileage.logs[0],
-    id: `mileage-example-${index}`,
-  }));
+  // vehicle_mileage_log is unique on (vehicle_id, log_date), so 30 rows sharing
+  // one date is a state the real endpoint cannot return — and the summary and
+  // cost tiles beside the list aggregate every row, so they move with it.
+  state.mileageLogs = Array.from({ length: 30 }, (_, index) => {
+    const day = new Date(`${mileage.logs[0].log_date}T12:00:00Z`);
+    day.setUTCDate(day.getUTCDate() - index);
+    return {
+      ...mileage.logs[0],
+      id: `mileage-example-${index}`,
+      log_date: day.toISOString().slice(0, 10),
+      odometer_start:
+        mileage.logs[0].odometer_start - index * vehicleTotalMiles,
+      odometer_end: mileage.logs[0].odometer_end - index * vehicleTotalMiles,
+    };
+  });
   try {
     await page.goto(server.baseUrl + "/admin/equipment?tab=maintenance");
     await fleetDetail(page);
@@ -1017,6 +1053,7 @@ async function main() {
       const state = {
         requests: [],
         badQuery: [],
+        dialogs: [],
         pageErrors: [],
         consoleErrors: [],
         unmatched: [],
@@ -1038,6 +1075,7 @@ async function main() {
         assert.deepEqual(state.pageErrors, [], "Page errors");
         assert.deepEqual(state.unmatched, [], "Unmatched API");
         assert.deepEqual(state.badQuery, [], "Query contract");
+        assert.deepEqual(state.dialogs, [], "Unexpected native dialog");
         // A leaf that stops fetching leaves its fixture simply unused: the
         // geometry and malformed-text checks still pass and the run still
         // reports success while no longer exercising that response contract at
