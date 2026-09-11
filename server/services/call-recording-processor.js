@@ -1134,6 +1134,11 @@ function summarizeKnownCaller(customer) {
   const accountType = classifyCallerAccount(customer.pipeline_stage);
   return {
     name: name || null,
+    // The matched row's identity — carried alongside the on-file address so a
+    // fail-open proof computed against THIS customer can be checked against
+    // whichever customer Step 3's canonical resolution retains before the
+    // proof authorizes a booking stamp (codex P1: resolveOnFileAddressAuthority).
+    id: customer.id,
     accountType,
     // Fail-open booking inputs: an established customer with an address already
     // on file (Google-verified at signup) shouldn't be re-blocked for not
@@ -1247,6 +1252,26 @@ function demoteFailOpenOnV1AddressConflict(routingResult, extracted, knownCaller
     flags: routingResult.flags,
     appointmentBlockingFlags: ['address_unverified'],
   };
+}
+
+// Fail-open on-file address PROOF is customer-scoped (codex P1, 2026-09-09):
+// canAutoRoute's usesOnFileAddress is computed by comparing the caller's
+// restatement against ONE customer's on-file address — knownCaller, resolved
+// by Step 2's lightweight phone-only lookup. Step 3's canonical customer
+// resolution (name-based reassignment, phone-sharing disambiguation) can
+// retain or reconcile the call to a DIFFERENT customer. Carrying the
+// usesOnFileAddress boolean alone across that gap would let a booking stamp
+// the CANONICAL customer's on-file address from proof that was never compared
+// against it — an address the caller neither stated nor had matched.
+// Authorized only when the customer the proof was computed against is the
+// SAME as the one booking finally resolves to; otherwise the booking falls
+// back to whatever address the caller's own extraction carries (never a
+// stamp neither side vouches for). Pure; no side effects.
+function resolveOnFileAddressAuthority({ usesOnFileAddress, proofCustomerId, proofAddress, canonicalCustomerId } = {}) {
+  if (!usesOnFileAddress || !proofCustomerId || proofCustomerId !== canonicalCustomerId) {
+    return { useOnFileAddress: false, onFileAddressSnapshot: null };
+  }
+  return { useOnFileAddress: true, onFileAddressSnapshot: proofAddress || null };
 }
 
 // Non-lead call-content classification — shared with the attribution retire
@@ -3980,23 +4005,50 @@ function v2IsoToEtWallClock(value) {
   return raw.slice(0, 16);
 }
 
+// Trims/caps every field of a flat address object the same way — shared by
+// the booking linkage resolver's own extraction read and its two on-file
+// sources (a caller-supplied proof snapshot, or a fresh customers read).
+function cleanBookingAddressFields(a) {
+  const clean = (v, max) => {
+    const s = String(v == null ? '' : v).trim();
+    return s ? s.slice(0, max) : null;
+  };
+  return {
+    line1: clean(a?.line1 ?? a?.address_line1, 200),
+    line2: clean(a?.line2 ?? a?.address_line2, 100),
+    city: clean(a?.city, 50),
+    state: clean(a?.state, 2),
+    zip: clean(a?.zip, 10),
+  };
+}
+
+// The on-file address to fall back to when the call carried none (or an
+// approved restatement dispatches to it) — a caller-supplied PROOF snapshot
+// (codex P1: resolveOnFileAddressAuthority) takes priority over a fresh
+// customers-table read, so a same-pass customer update between the proof and
+// this booking can never substitute a different address than the one the
+// caller's restatement actually matched. resolveOnFileAddressAuthority never
+// hands back a snapshot without a non-empty line1. Returns null on no address
+// (readers COALESCE back to the customer mirror) or a lookup failure.
+async function resolveOnFileAddressForBooking(customerId, trx, onFileAddressSnapshot) {
+  if (onFileAddressSnapshot) return cleanBookingAddressFields(onFileAddressSnapshot);
+  try {
+    const cust = await trx('customers').where({ id: customerId })
+      .first('address_line1', 'address_line2', 'city', 'state', 'zip');
+    if (cust && String(cust.address_line1 || '').trim()) return cleanBookingAddressFields(cust);
+  } catch (e) {
+    logger.warn(`[call-proc] on-file address fallback failed for booking: ${e.code || e.message}`);
+  }
+  return null;
+}
+
 // Resolve the booked visit's OWN address (the call's post-AV service address)
 // and, when it exactly key-matches one of the customer's known properties,
 // that property's id. Exact addressKey match only — a booking must never be
 // GUESSED onto a property. Approved on-file restatements use the complete
 // saved address before matching; partial extraction must not lose its key.
-async function resolveCallBookingPropertyLinkage(customerId, extracted, trx = db, { useOnFileAddress = false } = {}) {
-  const clean = (v, max) => {
-    const s = String(v == null ? '' : v).trim();
-    return s ? s.slice(0, max) : null;
-  };
-  let address = {
-    line1: clean(extracted.address_line1, 200),
-    line2: clean(extracted.address_line2, 100),
-    city: clean(extracted.city, 50),
-    state: clean(extracted.state, 2),
-    zip: clean(extracted.zip, 10),
-  };
+async function resolveCallBookingPropertyLinkage(customerId, extracted, trx = db, { useOnFileAddress = false, onFileAddressSnapshot = null } = {}) {
+  let address = cleanBookingAddressFields(extracted);
   if (useOnFileAddress || !address.line1) {
     // The caller omitted or restated the saved address. Dispatch to their on-file,
     // Google-verified address instead of leaving the visit address blank —
@@ -4004,22 +4056,7 @@ async function resolveCallBookingPropertyLinkage(customerId, extracted, trx = db
     // property match below: the on-file address may itself be an active
     // customer_properties row whose property_id + geocode the visit should
     // carry (map pin), same as a caller-stated address.
-    let onFile = null;
-    try {
-      const cust = await trx('customers').where({ id: customerId })
-        .first('address_line1', 'address_line2', 'city', 'state', 'zip');
-      if (cust && String(cust.address_line1 || '').trim()) {
-        onFile = {
-          line1: clean(cust.address_line1, 200),
-          line2: clean(cust.address_line2, 100),
-          city: clean(cust.city, 50),
-          state: clean(cust.state, 2),
-          zip: clean(cust.zip, 10),
-        };
-      }
-    } catch (e) {
-      logger.warn(`[call-proc] on-file address fallback failed for booking: ${e.code || e.message}`);
-    }
+    const onFile = await resolveOnFileAddressForBooking(customerId, trx, useOnFileAddress ? onFileAddressSnapshot : null);
     if (!onFile) return { propertyId: null, address: null, lat: null, lng: null };
     address = onFile;
   }
@@ -7983,6 +8020,12 @@ const CallRecordingProcessor = {
     let v2VetoDefinitiveRejection = false;
     let v2ApprovedExtraction = null;
     let v2UsesOnFileAddress = false;
+    // The customer the on-file PROOF above was computed against, plus the
+    // address snapshot compared — Step 3 below may retain or reconcile the
+    // call to a DIFFERENT canonical customer than knownCaller (codex P1:
+    // resolveOnFileAddressAuthority binds the two before booking).
+    let v2OnFileAddressProofCustomerId = null;
+    let v2OnFileAddressProofSnapshot = null;
     // Address/identity bridge (populated below in shadow mode): "confirm before
     // dispatch" reasons that flag the call for a human without blocking writes.
     const bridgeNeedsConfirmation = [];
@@ -8470,6 +8513,15 @@ const CallRecordingProcessor = {
             }
             v2ApprovedExtraction = v2Extraction;
             v2UsesOnFileAddress = routingResult.usesOnFileAddress === true;
+            if (v2UsesOnFileAddress) {
+              v2OnFileAddressProofCustomerId = knownCaller?.id || null;
+              v2OnFileAddressProofSnapshot = knownCaller
+                ? {
+                  line1: knownCaller.addressLine1, line2: knownCaller.addressLine2,
+                  city: knownCaller.addressCity, zip: knownCaller.addressZip,
+                }
+                : null;
+            }
           }
         }
       } catch (err) {
@@ -13323,6 +13375,16 @@ const CallRecordingProcessor = {
                 const bookingSvcAddr = bookingV2Authority
                   ? (v2CanonicalExtraction.property.service_address || null)
                   : null;
+                // The fail-open proof above was computed against knownCaller —
+                // Step 3 may have retained or reconciled this call to a
+                // DIFFERENT canonical customer since (codex P1). Never spend
+                // that proof on a customer it was never compared against.
+                const onFileAuthority = resolveOnFileAddressAuthority({
+                  usesOnFileAddress: v2UsesOnFileAddress,
+                  proofCustomerId: v2OnFileAddressProofCustomerId,
+                  proofAddress: v2OnFileAddressProofSnapshot,
+                  canonicalCustomerId: customerId,
+                });
                 const propertyLinkage = await resolveCallBookingPropertyLinkage(customerId, bookingV2Authority
                   ? {
                     ...extracted,
@@ -13343,7 +13405,7 @@ const CallRecordingProcessor = {
                       || v2ApprovedExtraction?.property?.service_address?.street_line_2
                       || v2CanonicalExtraction?.property?.service_address?.street_line_2
                       || null,
-                  }, trx, { useOnFileAddress: v2UsesOnFileAddress });
+                  }, trx, onFileAuthority);
                 // findExistingCallAppointment only sees THIS call's rows —
                 // a visit booked through ANY other channel (a human in the
                 // portal mid-call, online self-booking) is invisible to it,
@@ -17007,6 +17069,7 @@ CallRecordingProcessor._test = {
   persistCallSecondaryContact,
   resolveCallBookingPropertyLinkage,
   demoteFailOpenOnV1AddressConflict,
+  resolveOnFileAddressAuthority,
   buildFailOpenRoutingContext,
   v2IsoToEtWallClock,
   phoneNearMissOfAni,

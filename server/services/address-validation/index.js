@@ -207,7 +207,11 @@ function buildAddressLines(serviceAddress) {
   const rawTokens = String(sa.raw_text || '').replace(/,/g, ' ').trim().split(/\s+/);
   const streetKey = normalizeStreetLine(street1).toLowerCase();
   const boundary = rawTokens.findIndex((_, i) => normalizeStreetLine(rawTokens.slice(0, i + 1).join(' ')).toLowerCase() === streetKey);
-  const tail = boundary >= 0 ? rawTokens.slice(boundary + 1).join(' ') : '';
+  // Terminal punctuation ("CT 06001.") is transcript/dictation noise, not
+  // part of the ZIP — strip it before matching or the regex below rejects an
+  // otherwise-clean state+ZIP tail and falls through to the ad-hoc parser,
+  // which loses the state entirely on a comma-free string (codex P1).
+  const tail = (boundary >= 0 ? rawTokens.slice(boundary + 1).join(' ') : '').replace(/[.,;]+$/, '');
   const stateOnlyTail = tail.match(/^([a-z]{2})(?:\s+\d{5}(?:-\d{4})?)?$/i);
   const rawState = (stateOnlyTail && normalizeState(stateOnlyTail[1])) || parseRawAddress(sa.raw_text).state;
   const state = rawState && rawState !== SERVICE_STATE ? rawState : (sa.state || rawState);

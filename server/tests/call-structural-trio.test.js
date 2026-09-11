@@ -382,6 +382,65 @@ describe('resolveCallBookingPropertyLinkage', () => {
     expect(out.lat).toBe(27.1);
     expect(out.lng).toBe(-82.4);
   });
+
+  // codex P1 — a lightweight known-caller proof must not be spent against a
+  // DIFFERENT customer than the one canonical resolution retained. A supplied
+  // snapshot must be trusted over a live re-query, so a stale/reassigned
+  // customer row can never silently substitute a different on-file address.
+  test('a supplied on-file address snapshot is used directly, bypassing a live customer re-query', async () => {
+    const props = [{ id: 'prop-home', address_line1: '123 Oak St', address_line2: null, city: 'Venice', zip: '34285', latitude: 27.1, longitude: -82.4 }];
+    const trx = (table) => {
+      const builder = {
+        where: () => builder,
+        // A live re-query would return a DIFFERENT address — if the resolver
+        // ignores the snapshot and falls through to this, the test fails.
+        first: () => Promise.resolve(table === 'customers' ? { address_line1: '999 Wrong Way', address_line2: null, city: 'Nowhere', state: 'FL', zip: '00000' } : null),
+        select: () => Promise.resolve(table === 'customer_properties' ? props : []),
+      };
+      return builder;
+    };
+    const out = await resolveCallBookingPropertyLinkage('cust-1', {}, trx, {
+      useOnFileAddress: true,
+      onFileAddressSnapshot: { line1: '123 Oak Street', line2: null, city: 'Venice', state: 'FL', zip: '34285' },
+    });
+    expect(out.address.line1).toBe('123 Oak Street');
+    expect(out.propertyId).toBe('prop-home');
+  });
+});
+
+// ─── On-file address proof bound to the resolved customer (codex P1) ───────
+describe('resolveOnFileAddressAuthority — proof binds to the CANONICAL customer', () => {
+  const { resolveOnFileAddressAuthority, summarizeKnownCaller } = _test;
+  const snapshot = { line1: '100 Main St', line2: null, city: 'Venice', zip: '34285' };
+
+  test('summarizeKnownCaller carries the matched customer id', () => {
+    expect(summarizeKnownCaller({ id: 'cust-A', first_name: 'Jane', pipeline_stage: 'active', address_line1: '1 Elm St' }).id).toBe('cust-A');
+    expect(summarizeKnownCaller(null)).toBeNull();
+  });
+
+  test('same customer both sides → authorized, snapshot carried', () => {
+    expect(resolveOnFileAddressAuthority({
+      usesOnFileAddress: true, proofCustomerId: 'cust-A', proofAddress: snapshot, canonicalCustomerId: 'cust-A',
+    })).toEqual({ useOnFileAddress: true, onFileAddressSnapshot: snapshot });
+  });
+
+  test('canonical resolution reconciled to a DIFFERENT customer → rejected, never stamps the unmatched proof', () => {
+    expect(resolveOnFileAddressAuthority({
+      usesOnFileAddress: true, proofCustomerId: 'cust-A', proofAddress: snapshot, canonicalCustomerId: 'cust-B',
+    })).toEqual({ useOnFileAddress: false, onFileAddressSnapshot: null });
+  });
+
+  test('no known proof-customer id (unknown caller) → never authorized even when usesOnFileAddress is true', () => {
+    expect(resolveOnFileAddressAuthority({
+      usesOnFileAddress: true, proofCustomerId: null, proofAddress: snapshot, canonicalCustomerId: 'cust-B',
+    })).toEqual({ useOnFileAddress: false, onFileAddressSnapshot: null });
+  });
+
+  test('usesOnFileAddress false → rejected regardless of identity match', () => {
+    expect(resolveOnFileAddressAuthority({
+      usesOnFileAddress: false, proofCustomerId: 'cust-A', proofAddress: snapshot, canonicalCustomerId: 'cust-A',
+    })).toEqual({ useOnFileAddress: false, onFileAddressSnapshot: null });
+  });
 });
 
 // ─── Fail-open V1 address-conflict demotion (codex r7: shared enforce+audit) ─

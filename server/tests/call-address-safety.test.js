@@ -107,6 +107,16 @@ describe('stated geography takes precedence over a service-area hint', () => {
     expect(JSON.parse(global.fetch.mock.calls[0][1].body).address.administrativeArea).toBe(tail.slice(0, 2));
     expect(av.status).toBe('out_of_service_area');
   });
+  test.each([
+    '123 Main Street CT 06001.', '123 Main Street CT 06001-1234.', '123 Main Street CT 06001,',
+  ])('terminal punctuation on the state+ZIP tail does not swallow the state (P1): %s', async raw_text => {
+    const lines = buildAddressLines({ street_line_1: '123 Main Street', raw_text, state: null, city: null, postal_code: null });
+    expect(lines[0]).toBe('123 Main Street');
+    expect(lines[1]).toMatch(/^CT/);
+    const av = await validateAddress({ addressLines: lines, administrativeArea: 'FL' });
+    expect(JSON.parse(global.fetch.mock.calls[0][1].body).address.administrativeArea).toBe('CT');
+    expect(av.status).toBe('out_of_service_area');
+  });
   test('an incomplete Florida result without a provider state can still recover', async () => {
     providerResult.verdict.addressComplete = false;
     providerResult.address.addressComponents = [];
@@ -143,6 +153,10 @@ describe('every stated address component preserves the saved property identity',
   test('a locality-only restatement still uses the complete saved address', () => {
     const ex = v2({ property: { service_address: { city: saved.addressCity } } });
     expect(statesNewAddress(ex, { ...saved, addressLine2: 'Apt 4B' })).toBe(false);
+  });
+  test.each(['34240.', '34240,', '34240-1234'])('a punctuated or ZIP+4 raw ZIP still restates the on-file address (P2): %s', raw_text => {
+    const ex = v2({ property: { service_address: { raw_text, postal_code: saved.addressZip } } });
+    expect(statesNewAddress(ex, saved)).toBe(false);
   });
   test.each([
     [{ unit: 'Apt 45' }, { addressLine2: 'Bldg 4 Apt 5' }],

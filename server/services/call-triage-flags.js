@@ -1611,13 +1611,20 @@ function restatesOnFileAddress(sa, knownCustomer) {
   const tailAgrees = [!rawCity, rawCity === savedCity, cityIsUnit].some(Boolean);
   const streets = structured.map(part => part.street);
   if (raw && !rawIsLocality && !acknowledgment) streets.push(tailAgrees ? splitStreetLineUnit(parsed.line1).street : rawAddress);
+  // A raw ZIP restatement carrying ordinary punctuation or ZIP+4 ("34219.",
+  // "34219-1234") is not the exact-string match rawIsLocality looks for, so it
+  // falls through to the push above — but a bare ZIP parses to an EMPTY
+  // street (parsed.line1 ''), and that phantom entry vetoed agreement on real,
+  // already-matched ZIP evidence below (codex P2). Only actual street text is
+  // street evidence; nothing the caller actually said disappears here.
+  const streetEvidence = streets.filter(Boolean);
   // A building street alone cannot identify the saved apartment. City/ZIP
   // only callers still use the complete on-file address at booking time.
-  if (savedUnit && streets.length && !units.length) return false;
+  if (savedUnit && streetEvidence.length && !units.length) return false;
   const expected = restatementStreetParts(onFile.street);
-  const agree = streets.map(restatementStreetParts).every(part => part.name && [expected.name, expected.withoutSuffix].includes(part.name)
+  const agree = streetEvidence.map(restatementStreetParts).every(part => part.name && [expected.name, expected.withoutSuffix].includes(part.name)
     && (!part.house || part.house === expected.house));
-  return agree && [streets.length, cities.length, zips.length, acknowledgment, rawIsLocality && raw].some(Boolean);
+  return agree && [streetEvidence.length, cities.length, zips.length, acknowledgment, rawIsLocality && raw].some(Boolean);
 }
 
 /**
