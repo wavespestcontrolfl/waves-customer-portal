@@ -346,11 +346,40 @@ async function runQuietCloseout(run) {
     idempotencyKey: run.idempotencyKey,
     issuedInvoiceCloseout: { invoiceId: run.invoice.id, trigger: run.trigger },
   });
-  const closed = result?.status === 200 && result?.body?.success === true;
-  const line = `[invoice-issued-closeout] ${run.label} → visit ${run.svc.id} ${closed ? `completed${run.resuming ? ' (resumed)' : ''}` : `NOT completed (${result?.status} ${result?.body?.code || result?.body?.error || ''})`}`;
-  if (closed) logger.info(line); else logger.warn(line);
-  await auditCloseoutOutcome(run, { closed, visitId: run.svc.id, resumed: run.resuming, status: result?.status || null, code: result?.body?.code || null });
-  return { closed, reason: closed ? null : (result?.body?.code || `status_${result?.status}`), visitId: run.svc.id, resumed: run.resuming };
+  const outcome = completionOutcome(result);
+  const line = `[invoice-issued-closeout] ${run.label} → visit ${run.svc.id} ${outcome.closed ? `completed${run.resuming ? ' (resumed)' : ''}` : `NOT completed (${outcome.status} ${outcome.code || outcome.error || ''})`}`;
+  if (outcome.closed) logger.info(line); else logger.warn(line);
+  await auditCloseoutOutcome(run, { closed: outcome.closed, visitId: run.svc.id, resumed: run.resuming, status: outcome.status, code: outcome.code });
+  return { closed: outcome.closed, reason: outcome.closed ? null : (outcome.code || `status_${outcome.status}`), visitId: run.svc.id, resumed: run.resuming };
+}
+
+// The canonical completion's { status, body } read once, in one shape.
+function completionOutcome(result) {
+  const body = (result && result.body) || {};
+  const status = (result && result.status) || null;
+  return { closed: status === 200 && body.success === true, status, code: body.code || null, error: body.error || null };
+}
+
+async function loadCloseoutInvoice(run) {
+  run.invoice = await run.conn('invoices').where({ id: run.invoiceId }).first();
+  if (!run.invoice) return false;
+  run.label = `invoice ${run.invoice.invoice_number || run.invoice.id} ${run.trigger}`;
+  run.idempotencyKey = `invoice-issued:${run.invoice.id}`;
+  return true;
+}
+
+// A throw anywhere after the linked visit row is in hand (a probe carries it
+// as `linkedVisit`) is audited as that visit's failed outcome — the completion
+// may have committed and back-linked before throwing; its attempt stays
+// resumable and the next send / payment of this invoice, the resend-receipt
+// route, or the settled-statement sweep retries it.
+async function auditCloseoutFailure(run, err) {
+  const visitId = run.linkedVisitId || (err && err.linkedVisit && err.linkedVisit.id) || null;
+  logger.error(`[invoice-issued-closeout] failed for invoice ${run.invoiceId}${visitId ? ` (visit ${visitId})` : ''}: ${err.message}`);
+  if (visitId) {
+    await auditCloseoutOutcome(run, { closed: false, visitId, resumed: run.resuming, code: 'error', error: String(err.message || err).slice(0, 500) });
+  }
+  return { closed: false, reason: 'error', error: err.message, visitId };
 }
 
 // Entry point for the send and record-payment paths. Best-effort by
@@ -361,31 +390,17 @@ async function runQuietCloseout(run) {
 // 'admin' | 'technician'), used ONLY for the audit identity — see
 // auditCloseoutOutcome and runQuietCloseout. Three bounded phases share one
 // `run` context (GitHub r11 P2 #4127): void refusal → target resolution →
-// the quiet canonical completion; a throw anywhere after the linked visit
-// is in hand is audited as that visit's failed outcome (the completion may
-// have committed and back-linked before throwing — its attempt stays
-// resumable; the next send / payment of this invoice, the resend-receipt
-// route, or the settled-statement sweep retries it).
+// the quiet canonical completion.
 async function closeOutVisitForIssuedInvoice({ invoiceId, trigger, actorTechnicianId = null, actorRole = null, conn = db, today = etDateString() } = {}) {
   if (!isEnabled('invoiceIssuedClosesVisit')) return { closed: false, reason: 'gate_off' };
   if (!invoiceId || !['sent', 'paid'].includes(trigger)) return { closed: false, reason: 'bad_input' };
   const run = { invoiceId, trigger, actorTechnicianId, actorRole, conn, today, invoice: null, linkedVisitId: null, svc: null, resuming: false, label: null, idempotencyKey: null };
   try {
-    run.invoice = await conn('invoices').where({ id: invoiceId }).first();
-    if (!run.invoice) return { closed: false, reason: 'no_invoice' };
-    run.label = `invoice ${run.invoice.invoice_number || run.invoice.id} ${trigger}`;
-    run.idempotencyKey = `invoice-issued:${run.invoice.id}`;
+    if (!(await loadCloseoutInvoice(run))) return { closed: false, reason: 'no_invoice' };
     const refused = (await refuseVoidedInvoice(run)) || (await resolveCloseoutTarget(run));
-    if (refused) return refused;
-    return await runQuietCloseout(run);
+    return refused || await runQuietCloseout(run);
   } catch (err) {
-    // A probe that threw after the linked visit row was in hand carries it.
-    run.linkedVisitId = run.linkedVisitId || err?.linkedVisit?.id || null;
-    logger.error(`[invoice-issued-closeout] failed for invoice ${invoiceId}${run.linkedVisitId ? ` (visit ${run.linkedVisitId})` : ''}: ${err.message}`);
-    if (run.linkedVisitId) {
-      await auditCloseoutOutcome(run, { closed: false, visitId: run.linkedVisitId, resumed: run.resuming, code: 'error', error: String(err.message || err).slice(0, 500) });
-    }
-    return { closed: false, reason: 'error', error: err.message, visitId: run.linkedVisitId };
+    return auditCloseoutFailure(run, err);
   }
 }
 
