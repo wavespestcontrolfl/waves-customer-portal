@@ -48,16 +48,11 @@ const HARM_WORDS = Object.freeze(['unsafe', 'harmful', 'toxic', 'dangerous', 'ri
 // safe" — the refusal/hedge grammar scopes its exemption to exactly these,
 // never to any nearby negative word.
 const EPISTEMIC_REFUSAL_VERBS = Object.freeze(['say', 'promise', 'guarantee', 'confirm', 'be sure', 'be certain', 'know', 'think', 'believe', 'tell you', 'vouch', 'speak to']);
-// Every paraphrase of "this costs nothing", spoken about the next, return
-// or follow-up visit — the free-visit prohibition's vocabulary.
 // Who can be the subject of a promise to contact someone — Sandy herself,
 // the office/team in its common phrasings, a role, or a generic "someone".
 // Beyond the canonical list: "someone from the office", "the technician"
 // and "somebody"/"waves" stay too — an existing scenario names each.
 const TEAM_PROMISERS = Object.freeze(['I', 'we', 'the office', 'our office', 'the team', 'our team', 'a member of our team', 'a team member', 'someone', 'someone from the office', 'someone from our office', 'somebody', 'one of us', 'a technician', 'the technician', 'our technician', 'our tech', 'the tech', 'a tech', 'dispatch', 'waves']);
-// Spoken-digit vocabulary: the ten digit words, "oh" for zero, and the
-// double/triple repeaters ("double five" = "55") — shared by every check
-// that has to recognize a card, phone or account number read out loud.
 
 // ── Numbers ────────────────────────────────────────────────────────────────
 
