@@ -1997,6 +1997,12 @@ async function commit({ serviceId, technicianId, reasonCode, scope, target, noti
   // Shared across the whole rain-out: the first slow NWS pair degrades
   // forecast decoration for every remaining stop's SMS.
   const forecastHealth = { degraded: false };
+  // One route-quality refresh for the whole batch instead of one per moved
+  // job: passed into every rebooker call below as options.qualityDates, it
+  // collects each move's old/new (and shifted follow-up) dates instead of
+  // the rebooker refreshing inline per row (codex #4295 r2 P2) — the caller
+  // flushes it once after this loop returns.
+  const rebookerQualityDates = new Set();
   // Visit groups moved by an earlier member of this batch (codex #3609 r2):
   // the unit move already carried every member (rows, reminders, series),
   // so later members are recorded as covered — no second move, no second
@@ -2089,6 +2095,7 @@ async function commit({ serviceId, technicianId, reasonCode, scope, target, noti
             ...(actorUserId ? { actorId: actorUserId } : {}),
             overlapAdvisory: true,
             sourceSurface: 'quick_move',
+            qualityDates: rebookerQualityDates,
             // The intent is recorded WITH the operation (durable): the live
             // pass sends Quick Move's own moved-SMS (claimed on the row
             // below), and a pass that dies before claiming or sending is
@@ -2141,6 +2148,7 @@ async function commit({ serviceId, technicianId, reasonCode, scope, target, noti
           ...(actorUserId ? { actorId: actorUserId } : {}),
           overlapAdvisory: true,
           excludeServiceIds: [job.id],
+          qualityDates: rebookerQualityDates,
           // Quick Move's series behavior is owned by GATE_COLLECTIVE_SERIES_
           // ANCHOR and the explicit series branch above (its own sheet
           // disclosure, its own effects + parking path). This single call is
@@ -2235,6 +2243,10 @@ async function commit({ serviceId, technicianId, reasonCode, scope, target, noti
           notify: false,
           actorId: actorUserId || null,
           reasonText: null,
+          // The batch owns the route-quality flush: every shifted series
+          // collects into the same Set the rebooker calls use, and the route
+          // refreshes once after this loop (codex #4295 r3 P2).
+          qualityDates: rebookerQualityDates,
         });
       } catch (err) {
         logger.error(`[rain-out] series effects pass failed for ${job.id}: ${err.message} — the reconciler finishes it`);
@@ -2383,7 +2395,10 @@ async function commit({ serviceId, technicianId, reasonCode, scope, target, noti
     results.push({ id, ok: true, coveredByVisit: coveredVisitOf.get(id) || 'visit', newDate: target.date, smsSent: false, smsReason: 'covered_by_visit' });
   }
 
-  return summarizeCommitResults(results);
+  // Handed to the caller's own qualityDates set so ONE flush after its
+  // per-job board-broadcast loop covers both — the caller no longer needs a
+  // second flush for what the rebooker calls above already collected.
+  return { ...summarizeCommitResults(results), qualityDates: [...rebookerQualityDates] };
 }
 
 // Members a unit move REPRESENTED: the rows it moved plus the rows the plan

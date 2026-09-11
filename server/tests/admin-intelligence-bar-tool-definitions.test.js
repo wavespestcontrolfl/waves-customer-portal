@@ -184,4 +184,26 @@ describe('tool definitions handed to the model', () => {
     const { HISTORY_TOOLS } = require('../services/intelligence-bar/history-tools');
     expect(HISTORY_TOOLS.find((t) => t.name === 'search_ib_history')._contracts.tables).toContain('ib_thread_turns');
   });
+
+  test('property tools fit provider strict grammar while retaining server address bounds', () => {
+    const apiToolDefinition = require('../services/intelligence-bar/tool-definition');
+    const { PROPERTY_TOOLS } = require('../services/intelligence-bar/property-tools');
+    // Anthropic strict grammar does not support minLength/maxLength. Inspect
+    // the same projection the route sends, without requiring one fix strategy.
+    for (const tool of PROPERTY_TOOLS.map(apiToolDefinition).filter(tool => tool.strict)) {
+      const schemas = [tool.input_schema];
+      while (schemas.length) {
+        const schema = schemas.pop();
+        if (!schema || typeof schema !== 'object') continue;
+        expect(schema).not.toHaveProperty('minLength');
+        expect(schema).not.toHaveProperty('maxLength');
+        schemas.push(...Object.values(schema));
+      }
+    }
+    const { manualPropertyFields } = require('../services/customer-properties');
+    const address = { address_line1: 'x'.repeat(200), city: 'Sarasota', state: 'FL', zip: '34201' };
+    expect(manualPropertyFields('add', address).address_line1).toHaveLength(200);
+    expect(() => manualPropertyFields('add', { ...address, address_line1: 'x'.repeat(201) }))
+      .toThrow('address_line1 must be 200 characters or fewer');
+  });
 });

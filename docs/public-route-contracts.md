@@ -103,8 +103,15 @@ Combined catalog allowances still require `GATE_VISIT_COMBINED_CAPACITY` and
 identity; version-1 members keep their 60-minute contract. Public offer/cache
 responses omit catalog identifiers, route internals and allocation stamps.
 Reservation and acceptance re-resolve catalog policies. Transactional catalog
-reads hold matched rows with FOR SHARE until the outer transaction ends, so
-catalog edits cannot overtake a validated allowance. Existing version-2 holds
+reads under capacity hold a `services` table SHARE lock (taken inside the
+lookup savepoint, before any catalog read) until the outer transaction ends
+and take no catalog row locks: every catalog insert, update or delete — admin
+edits and pre-deploy migrations alike — conflicts with that lock at the
+database, so neither a matched row's allowance nor an absent match can be
+overtaken by a row edited, activated or mapped after the lookup, and SHARE
+readers never block each other. Commit and conversion take that lock before
+any `scheduled_services` row lock, matching catalog migrations that lock
+`services` first and then update visits. Existing version-2 holds
 reject changed allowances with 409 `SLOT_UNAVAILABLE`, even after gate shutdown.
 Reservation creation prepares bounded route traffic outside the transaction,
 then takes the date occupancy lock and the selected-technician/unassigned day
