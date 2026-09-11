@@ -77,14 +77,22 @@ const prettyJson = (value) => {
 };
 
 function StatusBadge({ status }) {
-  const tone = status === "approved" ? "strong" : status === "rejected" ? "alert" : "neutral";
+  // Main: pending amber, approved green, rejected red. The kit has no success
+  // tone, so approved keeps the emphasis tone and pending gets its amber back.
+  const tone = status === "pending" ? "warn" : status === "approved" ? "strong" : status === "rejected" ? "alert" : "neutral";
   return <Badge tone={tone}>{status || "Unknown"}</Badge>;
 }
+
+// Main coloured a changelog category by what it means: bug red, leak amber,
+// everything else plain ink.
+const CATEGORY_TONES = { bug: "alert", leak: "warn" };
 
 function PercentBadge({ value }) {
   if (value == null) return null;
   const number = Number(value);
-  return <Badge tone={Math.abs(number) >= 10 ? "alert" : "neutral"}>{number > 0 ? "+" : ""}{number.toFixed(1)}%</Badge>;
+  // A 10%+ proposed change is a "look at this" threshold, not a failure — main
+  // painted it amber, and alert red is reserved for genuine alerts.
+  return <Badge tone={Math.abs(number) >= 10 ? "warn" : "neutral"}>{number > 0 ? "+" : ""}{number.toFixed(1)}%</Badge>;
 }
 
 function ChangelogTab() {
@@ -119,7 +127,7 @@ function ChangelogTab() {
               const open = expandedId === entry.id;
               return <React.Fragment key={entry.id}>
                 <TR className="cursor-pointer" onClick={() => setExpandedId(open ? null : entry.id)} aria-expanded={open}>
-                  <TD nums>{formatDate(entry.changed_at)}</TD><TD nums>{entry.version_from}{entry.version_from !== entry.version_to ? ` → ${entry.version_to}` : ""}</TD><TD><Badge tone={entry.category === "bug" ? "alert" : "neutral"}>{entry.category}</Badge></TD><TD className="font-medium">{entry.summary}</TD><TD>{entry.changed_by}</TD>
+                  <TD nums>{formatDate(entry.changed_at)}</TD><TD nums>{entry.version_from}{entry.version_from !== entry.version_to ? ` → ${entry.version_to}` : ""}</TD><TD><Badge tone={CATEGORY_TONES[entry.category] || "neutral"}>{entry.category}</Badge></TD><TD className="font-medium">{entry.summary}</TD><TD>{entry.changed_by}</TD>
                 </TR>
                 {open && <TR><TD colSpan="5" className="bg-zinc-50 p-4">
                   <div className="space-y-4">
