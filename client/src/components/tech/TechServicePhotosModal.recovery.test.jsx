@@ -1,10 +1,11 @@
 // @vitest-environment jsdom
 import React from 'react';
 import '@testing-library/jest-dom/vitest';
-import { afterEach, expect, it, vi } from 'vitest';
+import { beforeEach, afterEach, expect, it, vi } from 'vitest';
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import TechServicePhotosModal from './TechServicePhotosModal';
 
+beforeEach(() => { vi.spyOn(window, 'scrollTo').mockImplementation(() => {}); });
 afterEach(() => { cleanup(); vi.unstubAllGlobals(); vi.restoreAllMocks(); });
 
 it.each([false, true])('ignores an older photo refresh after the next upload (old error: %s)', async (oldError) => {
@@ -24,7 +25,7 @@ it.each([false, true])('ignores an older photo refresh after the next upload (ol
   }));
   render(<TechServicePhotosModal serviceId="visit-a" onClose={vi.fn()} />);
   await screen.findByText('No photos yet.');
-  const input = document.querySelector('input[type="file"]');
+  const input = screen.getByLabelText('Choose service photo');
   const pick = () => fireEvent.change(input, { target: { files: [new File(['example'], 'example.png', { type: 'image/png' })] } });
   pick();
   await waitFor(() => expect(reads).toBe(2));
@@ -48,7 +49,7 @@ it('allows closing after upload succeeds while the photo refresh is still pendin
   }));
   render(<TechServicePhotosModal serviceId="visit-a" onClose={close} />);
   await screen.findByText('No photos yet.');
-  fireEvent.change(document.querySelector('input[type="file"]'), { target: { files: [new File(['example'], 'example.png', { type: 'image/png' })] } });
+  fireEvent.change(screen.getByLabelText('Choose service photo'), { target: { files: [new File(['example'], 'example.png', { type: 'image/png' })] } });
   await screen.findByText('Photo uploaded');
   const dismiss = screen.getByRole('button', { name: /Close|×/ });
   await waitFor(() => expect(dismiss).toBeEnabled());
@@ -75,7 +76,7 @@ it('retries the same failed photo with its original caption and type, and protec
   fireEvent.change(screen.getByPlaceholderText(/Front yard before treatment/), { target: { value: 'Example caption' } });
   fireEvent.click(screen.getByRole('button', { name: 'before', exact: true }));
   const file = new File(['example'], 'example.png', { type: 'image/png', lastModified: 1234567890 });
-  fireEvent.change(document.querySelector('input[type="file"]'), { target: { files: [file] } });
+  fireEvent.change(screen.getByLabelText('Choose service photo'), { target: { files: [file] } });
   fireEvent.click(screen.getByRole('button', { name: /Close|×/ }));
   expect(close).not.toHaveBeenCalled();
   release();
@@ -119,9 +120,29 @@ it('keeps successful upload feedback when its photo-list refresh fails', async (
   }));
   render(<TechServicePhotosModal serviceId="visit-a" onClose={vi.fn()} />);
   await screen.findByText('No photos yet.');
-  fireEvent.change(document.querySelector('input[type="file"]'), { target: { files: [new File(['example'], 'example.png', { type: 'image/png' })] } });
+  fireEvent.change(screen.getByLabelText('Choose service photo'), { target: { files: [new File(['example'], 'example.png', { type: 'image/png' })] } });
   await screen.findByText('Refresh unavailable.');
   expect(screen.getByText(/Photo saved — it will attach/)).toBeInTheDocument();
   expect(screen.queryByText('No photos yet.')).not.toBeInTheDocument();
   expect(screen.getByRole('button', { name: /Close|×/ })).toBeEnabled();
+});
+
+it('keeps nested photo marking focus and Escape inside the photo manager', async () => {
+  const close = vi.fn();
+  vi.stubGlobal('scrollTo', vi.fn());
+  vi.stubGlobal('fetch', vi.fn(async (url) => ({ ok: true, json: async () => url.endsWith('photo-marks')
+    ? { supported: true, kinds: [{ kind: 'foam_injection', label: 'Drilled & foamed' }], marksByS3Key: {} }
+    : { photos: [{ id: 'photo-a', s3_key: 'example.jpg', url: '/example.jpg', photo_type: 'after' }] },
+  })));
+  render(<TechServicePhotosModal serviceId="visit-a" onClose={close} />);
+  const opener = await screen.findByRole('button', { name: 'Mark spots', exact: true });
+  fireEvent.click(opener);
+  const nested = await screen.findByRole('dialog', { name: 'Mark treated spots', exact: true });
+  await screen.findByRole('button', { name: 'Drilled & foamed', exact: true });
+  expect(nested.contains(document.activeElement)).toBe(true);
+  fireEvent.keyDown(document, { key: 'Escape' });
+  expect(screen.queryByRole('dialog', { name: 'Mark treated spots', exact: true })).not.toBeInTheDocument();
+  expect(screen.getByRole('dialog', { name: 'Service Photos', exact: true })).toBeInTheDocument();
+  expect(opener).toHaveFocus();
+  expect(close).not.toHaveBeenCalled();
 });
