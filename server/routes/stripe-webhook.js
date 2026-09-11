@@ -1775,6 +1775,30 @@ async function handlePaymentIntentSucceeded(paymentIntent, eventCreated = null) 
 
   if (updated > 0) {
     logger.info(`[stripe-webhook] Updated ${updated} payment(s) to paid for PI: ${piId}`);
+    // A payment already sitting in `processing` was accepted server-side while
+    // the invoice was still self-pay — our own guards would have refused it
+    // otherwise — so a withdrawal that committed during the ACH wait cannot be
+    // quarantined: the money is captured and the payments row exists. Settling
+    // is right, but the office has to act (refund the homeowner or re-bill AP),
+    // so the anomaly gets a durable alert instead of a silent paid invoice
+    // (audit P0). Re-read at settle time — the pre-lock check earlier in this
+    // handler ran before the withdrawal could commit.
+    if (invoiceForTenderGuard?.id) {
+      const settledInvoice = await db('invoices').where({ id: invoiceForTenderGuard.id })
+        .first('id', 'invoice_number', 'customer_id', 'scheduled_send_error')
+        .catch(() => null);
+      if (invoiceWithdrawnFromCustomer(settledInvoice)) {
+        logger.error(`[stripe-webhook] PI ${piId} settled on invoice ${settledInvoice.id} whose Bill-To moved to a third-party payer mid-payment`);
+        await alertSurchargeBypass(
+          paymentIntent,
+          settledInvoice,
+          'wh_payer_billed_settled',
+          'high',
+          'Customer payment settled on payer-billed debt',
+          "This invoice's Bill-To moved to a third-party payer while the payment was in flight. The funds are captured and the invoice is paid — refund the customer or re-bill AP.",
+        );
+      }
+    }
   } else {
     await db.transaction(async (trx) => {
       await lockPaymentIntentPaymentRow(trx, piId);
@@ -1817,6 +1841,21 @@ async function handlePaymentIntentSucceeded(paymentIntent, eventCreated = null) 
         paymentIntent,
         { lock: true },
       );
+      // The withdrawal read UNDER THE ROW LOCK (audit P0): the pre-lock check
+      // earlier in this handler can be overtaken by a Bill-To transaction that
+      // commits while this webhook waits here, and this branch is the one that
+      // CREATES the payment row. An office-initiated saved-card charge still
+      // settles — that is the office's own collection, not the customer's.
+      if (!matchingAmbiguousAttempt && invoiceWithdrawnFromCustomer(lockedInvoice)) {
+        const reason = `PI ${piId} succeeded on invoice ${lockedInvoice.id} after its Bill-To moved to a third-party payer — customer funds must not settle payer-owned debt`;
+        logger.error(`[stripe-webhook] Quarantining ${reason}`);
+        await recordOrphanSucceededPaymentIntent(
+          paymentIntent,
+          chargedTotal ?? centsToDollars(paymentIntent.amount),
+          reason,
+        );
+        return;
+      }
       if (invoicePaymentIntentBlocksFallback({
         invoiceStatus: lockedInvoice.status,
         activePaymentIntentId: activePi,

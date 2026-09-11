@@ -3821,3 +3821,50 @@ describe('codex #3235 r19 — first-send re-resolution failure defers', () => {
     }
   });
 });
+
+// The Twilio adapter catches provider errors and reports them as
+// `sent: false` / PROVIDER_FAILURE instead of raising. On a row the summary
+// handoff left `sending`, the request WAS made and its response was lost, so
+// the deferral bookkeeping would reset the row and send a second ask on top of
+// a delivered one (audit P1).
+describe('legacy sendSMS — ambiguous returned provider failure', () => {
+  const rows = () => ({
+    customers: [{ id: 'unc-1', first_name: 'Lee', last_name: 'P', phone: '+19410000195', nearest_location_id: 'venice' }],
+    review_requests: [{
+      id: 'rr-unc-1', customer_id: 'unc-1', channel: 'sms', status: 'sending', template_key: 'day0_ask',
+      tech_name: null, token: 'tok-unc-1', location_id: 'venice', claimed_at: new Date(),
+    }],
+  });
+
+  test('keeps the claim standing instead of requeuing it', async () => {
+    const mock = makeMock(rows());
+    db.mockImplementation(mock);
+    mockSendCustomerMessage.mockResolvedValueOnce({
+      sent: false, blocked: false, code: 'PROVIDER_FAILURE', reason: 'connection reset',
+      retryable: true, deferred: true, nextAllowedAt: new Date(Date.now() + 300000).toISOString(),
+    });
+
+    const out = await ReviewService.sendSMS('rr-unc-1');
+
+    expect(out).toMatchObject({ sent: false, uncertain: true, reason: 'provider_uncertain' });
+    expect(mock.__state.rows.review_requests[0].status).toBe('sending');
+    expect(mock.__state.rows.review_requests[0].sms_sent_at).toBeFalsy();
+  });
+
+  test('a released row takes the ordinary deferral', async () => {
+    const state = rows();
+    state.review_requests[0].status = 'pending';
+    state.review_requests[0].claimed_at = null;
+    const mock = makeMock(state);
+    db.mockImplementation(mock);
+    mockSendCustomerMessage.mockResolvedValueOnce({
+      sent: false, blocked: false, code: 'PROVIDER_FAILURE', reason: 'connection reset',
+      retryable: true, deferred: true, nextAllowedAt: new Date(Date.now() + 300000).toISOString(),
+    });
+
+    // The deferral path returns nothing — the row IS the verdict.
+    expect(await ReviewService.sendSMS('rr-unc-1')).toBeUndefined();
+    expect(mock.__state.rows.review_requests[0].status).toBe('pending');
+    expect(mock.__state.rows.review_requests[0].scheduled_for).toBeTruthy();
+  });
+});

@@ -1900,6 +1900,20 @@ const ReviewService = {
         logger.info(
           `[review] SMS sent (customerId=${customer.id} requestId=${requestId} auditLogId=${result.auditLogId || "n/a"})`,
         );
+      } else if (!["VISIT_SUMMARY_UNCERTAIN", "VISIT_SUMMARY_STATE_UNAVAILABLE"].includes(result.code)
+        && await this._providerOutcomeUnknown(requestId)) {
+        // The same ambiguity the outreach path fences (audit P1): the Twilio
+        // adapter reports provider errors as `sent: false` rather than
+        // raising, and a durable row the handoff left `sending` means the
+        // request WAS made and its response was lost. The deferral below
+        // would reset it to `pending` and send a second ask on top of a
+        // delivered one, so the claim stays standing for
+        // reconcileStrandedSends to prove or release. The two summary codes
+        // are excluded because the park below owns those rows — the same
+        // split the outreach path makes, where the summary verdict is read
+        // before this check.
+        logger.error(`[review] SMS outcome unknown after a returned provider failure (requestId=${requestId} code=${result.code || "none"})`);
+        return { sent: false, uncertain: true, reason: "provider_uncertain", requestId };
       } else {
         const deferredRetryAt = retryAtForDeferredSend(result);
         if (deferredRetryAt) {
