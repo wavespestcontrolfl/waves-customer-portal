@@ -3777,3 +3777,207 @@ describe('codex #3235 r19 — first-send re-resolution failure defers', () => {
     }
   });
 });
+
+describe('shared ask history foundation', () => {
+  const history = require('../services/review-ask-history');
+  const base = new Date('2035-01-01T15:00:00Z').getTime();
+  function installHistory({ sms = [], sends = [] } = {}) {
+    const mock = makeMock({
+      sms_log: sms.map(({ at, body, status = 'sent', metadata = {} }) => ({
+        customer_id: 'history-customer', direction: 'outbound', status, metadata,
+        message_body: body || 'Please review us: https://g.page/r/example/review', created_at: new Date(at),
+      })),
+      review_requests: sends.map(at => ({ customer_id: 'history-customer', sms_sent_at: new Date(at) })),
+    });
+    db.mockImplementation(mock);
+    return mock;
+  }
+
+  test('the newest manual ask retains its own timestamp after a pipeline ask', async () => {
+    installHistory({ sms: [{ at: base }, { at: base + 240000 }], sends: [base] });
+    const at = await ReviewService.manualReviewAskSentRecently('history-customer', {
+      since: new Date(base - 1), returnAt: true, failClosed: true,
+    });
+    expect(at).toEqual(new Date(base + 240000));
+    expect(at.getTime() + history.ASK_SPACING_MS).toBe(base + 240000 + 72 * 3600000);
+  });
+
+  test('a manual ask inside the correspondence window cannot steal the exact pipeline match', async () => {
+    installHistory({ sms: [{ at: base }, { at: base + 30000 }], sends: [base] });
+    expect(await history.lastManualAskAt('history-customer', { since: new Date(base - 1) }))
+      .toEqual(new Date(base + 30000));
+  });
+
+  test('correlation includes the pipeline log immediately before the history boundary', async () => {
+    installHistory({ sms: [{ at: base - 30000 }, { at: base + 30000 }], sends: [base - 30000] });
+    expect(await history.lastManualAskAt('history-customer', { since: new Date(base) }))
+      .toEqual(new Date(base + 30000));
+  });
+
+  test('multiple pipeline logs are each consumed once before selecting a manual ask', async () => {
+    installHistory({ sms: [{ at: base }, { at: base + 60000 }, { at: base + 90000 }], sends: [base, base + 60000] });
+    expect(await history.lastManualAskAt('history-customer', { since: new Date(base - 1) }))
+      .toEqual(new Date(base + 90000));
+  });
+
+  test('an orphan pipeline stamp does not erase a later manual ask', async () => {
+    installHistory({ sms: [{ at: base + 240000 }], sends: [base] });
+    expect(await history.lastManualAskAt('history-customer', { since: new Date(base - 1) }))
+      .toEqual(new Date(base + 240000));
+  });
+
+  test.each([
+    'Thanks for your Google review',
+    'We really appreciate your Google review.',
+    'Your Google review meant the world to us.',
+    'Thanks for leaving us a Google review',
+    'Office directions: https://maps.app.goo.gl/abc123',
+    'Meet here: https://goo.gl/maps/abc123',
+    'https://maps.google.com/?q=office',
+    'Our office: https://g.page/office-location',
+    'Please review your invoice: https://portal.test/pay/abc',
+    'Please review and sign your agreement: https://portal.test/contract/abc',
+    'Could you review the service report?',
+    'Please submit your review of the attached estimate.',
+    'Please submit your review for the attached estimate.',
+    // codex #4326 finding 2: a noun ("comments"/"feedback"/"notes") between
+    // "review" and the document preposition must not defeat the carve-out.
+    'Please share your review comments on the attached estimate.',
+    'Share your review notes for the updated contract, please.',
+    'Please add your review feedback on the attached proposal.',
+    'Shipping details: https://vendor.example/rate/abc',
+    'Please review your invoice: https://portal.test/l/abc123',
+    'Your invoice is ready: https://portal.test/l/abc123',
+    'We discussed your Google review yesterday.',
+    'Thanks so much for the Google review you left us!',
+    // codex #4326 r3: support chatter about the link is not a request.
+    'The review link is broken; I’ll resend it later.',
+    'I fixed the review link.',
+    'Let me know if the review link works now.',
+  ])('unrelated acknowledgment/support text is not an ask: %s', async body => {
+    installHistory({ sms: [{ at: base, body }] });
+    expect(await history.lastManualAskAt('history-customer', { since: new Date(base - 1) })).toBeNull();
+  });
+
+  test.each([
+    'Could you leave a Google review?',
+    'Could I ask you for a Google review?',
+    'Can we ask for your honest review?',
+    'https://portal.wavespestcontrol.com/rate/abc',
+    'portal.wavespestcontrol.com/api/rate/abc/go',
+    'We’d appreciate a Google review.',
+    'We’d be grateful for a Google review.',
+    'A quick Google review would make my day.',
+    'A quick Google review would mean the world.',
+    'A Google review would be greatly appreciated.',
+    'A 5-star Google review would mean the world.',
+    'We would appreciate a five-star review.',
+    'Could I ask you for a five-star Google review?',
+    'We would really love your honest review.',
+    'A review could help our little crew.',
+    'Would you mind leaving us a Google review?',
+    'https://g.page/office-slug/review',
+    'A quick review helps: https://portal.test/l/abc123',
+    'A quick review means a lot: https://portal.test/l/abc123',
+    'Please consider posting a Google review.',
+    'How about writing a review?',
+    'Please review us when you have a moment.',
+    'Share your experience in a review.',
+    'A review would mean a lot: https://portal.test/l/abc123',
+    'https://www.yelp.com/writeareview/biz/example',
+    'https://facebook.com/example/reviews',
+    'Please leave a review: https://maps.app.goo.gl/abc123',
+    'We’d appreciate it if you left us a Google review.',
+    'It would mean a lot if you left us a review.',
+    'If you could leave us a quick Google review, that would help.',
+    // codex #4326 finding 1: present-tense invitations (no would/could) —
+    // this is the repo's own Day-0 template wording (review-outreach-templates.js).
+    'If we earned it, a Google review means a lot.',
+    'A quick review helps us out a ton.',
+    'A quick Google review really helps.',
+    'A 5-star review supports our small crew.',
+    'That review link one more time:',
+    'Here is that review link one more time.',
+    'Here’s your review link again.',
+    'Review link: https://portal.test/l/abc123',
+  ])('request intent and review destinations count: %s', body => {
+    expect(history.looksLikeReviewAsk(body)).toBe(true);
+  });
+
+  test('every real ask template in review-outreach-templates.js is recognized on its own wording', () => {
+    // Rendered with review_url stripped: a staff member forwarding this exact
+    // wording without the (per-customer) link must still trip the standdown
+    // (codex #4326 finding 1 — the repo's own Day-0 wording was the reported
+    // gap). Two templates lean entirely on the link with no textual review
+    // mention at all ("If we earned it:" / "sharing your experience?") — that
+    // is a structural template-design limit, not a classifier bug, so they
+    // are pinned here as known link-dependent rather than silently ignored.
+    const templates = require('../services/review-outreach-templates');
+    const LINK_DEPENDENT_ONLY = new Set(['service_specific_pest', 'recovery_review']);
+    for (const t of templates.OUTREACH_TEMPLATES) {
+      if (!templates.isAskTemplate(t.id)) continue; // no-link check-ins are not asks
+      const linkFreeBody = templates.renderOutreachBody(t.body, {
+        first: 'Jamie', tech: 'Bob', sender: 'Bob with Waves', review_url: '',
+      });
+      const detected = history.looksLikeReviewAsk(linkFreeBody);
+      if (LINK_DEPENDENT_ONLY.has(t.id)) {
+        expect(detected).toBe(false);
+      } else {
+        expect(detected).toBe(true);
+      }
+    }
+  });
+
+  test('an unresolved manual review reservation cannot be matched away by a pipeline stamp', async () => {
+    installHistory({ sms: [{ at: base, status: 'sending', metadata: { review_ask_reservation: true } }], sends: [base] });
+    expect(await history.lastManualAskAt('history-customer', { since: new Date(base - 1) })).toEqual(new Date(base));
+  });
+
+  test('ordinary in-flight messages do not count as accepted review asks', async () => {
+    installHistory({ sms: [{ at: base, status: 'sending' }] });
+    expect(await history.lastManualAskAt('history-customer', { since: new Date(base - 1) })).toBeNull();
+  });
+
+  test('no manual ask returns null for timestamps and false for the enrollment contract', async () => {
+    installHistory({ sms: [{ at: base }], sends: [base] });
+    expect(await ReviewService.manualReviewAskSentRecently('history-customer', { since: new Date(base - 1), returnAt: true })).toBeNull();
+    expect(await ReviewService.manualReviewAskSentRecently('history-customer', { since: new Date(base - 1) })).toBe(false);
+  });
+
+  test('dispatch history errors propagate while enrollment retains its fail-open contract', async () => {
+    db.mockImplementation(() => { throw new Error('history unavailable'); });
+    await expect(ReviewService.manualReviewAskSentRecently('history-customer', { failClosed: true, returnAt: true })).rejects.toThrow('history unavailable');
+    expect(await ReviewService.manualReviewAskSentRecently('history-customer')).toBe(false);
+  });
+
+  test('the later delivered channel anchors spacing even when requests arrive out of order', () => {
+    expect(history.latestDeliveredAt([
+      { sms_sent_at: new Date(base), sent_at: new Date(base + 3600000) },
+      { sms_sent_at: new Date(base + 60000), sent_at: null },
+    ])).toEqual(new Date(base + 3600000));
+    expect(history.latestDeliveredAt([{ sms_sent_at: null, sent_at: null }])).toBeNull();
+  });
+
+  // codex #4326 finding 3: processFollowups (review-request.js) delivers the
+  // separate review_request_followup SMS several days after the original
+  // ask. The reducer must count that delivery too, or a caller enforcing
+  // ASK_SPACING_MS from this shared history under-counts the elapsed time
+  // and can fire the next ask too soon. (followup_delivered_at is what
+  // deliveredAskRows resolves from messaging_audit_log — see its postgres
+  // coverage in review-ask-history-postgres.test.js for why the raw
+  // review_requests.followup_sent_at column is NOT used directly: it is
+  // also stamped for dedup/no-consent/blocked paths that never reached the
+  // customer.)
+  test('a delivered legacy follow-up outranks the original ask timestamp', () => {
+    expect(history.latestDeliveredAt([
+      { sms_sent_at: new Date(base), sent_at: null, followup_delivered_at: new Date(base + 4 * 86400000) },
+    ])).toEqual(new Date(base + 4 * 86400000));
+  });
+
+  test('a row with only a follow-up timestamp still counts', () => {
+    expect(history.latestDeliveredAt([
+      { sms_sent_at: null, sent_at: null, followup_delivered_at: new Date(base) },
+    ])).toEqual(new Date(base));
+    expect(history.latestDeliveredAt([{ sms_sent_at: null, sent_at: null, followup_delivered_at: null }])).toBeNull();
+  });
+});
