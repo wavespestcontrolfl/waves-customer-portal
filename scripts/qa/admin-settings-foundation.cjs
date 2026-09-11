@@ -174,8 +174,11 @@ async function main() {
       await desktop.getByRole('button', { name: 'Refresh checks' }).click();
       await desktop.getByRole('button', { name: 'Refresh checks' }).waitFor();
       assert.ok(report.requests.some((request) => request.path === '/admin/token-health/check' && request.method === 'POST'));
+      await desktop.getByText('Synthetic provider', { exact: true }).scrollIntoViewIfNeeded();
       await shot(desktop, 'settings-health-desktop-1440');
       await desktop.setViewportSize({ width: 390, height: 900 });
+      await desktop.reload();
+      await desktop.getByText('Synthetic provider', { exact: true }).scrollIntoViewIfNeeded();
       await shot(desktop, 'settings-health-mobile-390');
       await desktop.setViewportSize({ width: 1440, height: 1000 });
     });
