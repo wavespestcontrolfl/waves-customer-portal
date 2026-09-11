@@ -149,7 +149,9 @@ than written per scenario as regexes:
   (“name@example.com”) does not. A yes/no question asserts nothing, but only
   its interrogative clause is exempt: “Can I help you, her appointment is
   cancelled?” still discloses. Short yes/no answers to status or timing
-  questions use the latest caller sentence unless Sandy has since asked
+  questions use the latest caller question (its interrogative clause, kept
+  even when declarative filler follows it: “Is the technician coming today?
+  So I need to know.” still asks about today) unless Sandy has since asked
   another question. Open ETA questions also supply context for bare replies
   such as “Eleven” or “Tomorrow.” Confirming or denying an appointment still
   fails if a later sentence or turn redirects to the portal, including
