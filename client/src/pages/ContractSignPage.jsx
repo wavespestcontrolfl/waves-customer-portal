@@ -8,6 +8,7 @@ import {
   BrandButton,
   SerifHeading,
   HelpPhoneLink,
+  PublicStateCard,
 } from '../components/brand';
 import { useGlassSurface } from '../glass/glass-engine';
 import { DOC, DOC_EYEBROW, FS, FW, LH, SP, RADIUS, docInput } from '../theme-doc';
@@ -26,13 +27,13 @@ function fmtDate(value) {
 function ContractError({ title, message }) {
   return (
     <WavesShell variant="customer" topBar="solid">
-      <CustomerColumn role="alert" className="waves-contract-single">
-        <BrandCard padding={28}>
-          <SerifHeading style={{ marginTop: 0, marginBottom: SP.sm }}>{title}</SerifHeading>
-          <p style={{ margin: 0, color: DOC.ink, lineHeight: LH.body }}>
-            {message} Give us a call and we can help - <HelpPhoneLink tone="dark" inline />.
-          </p>
-        </BrandCard>
+      <CustomerColumn className="waves-contract-single">
+        {/* role="alert" moves off the column and onto the card, where the
+            message actually is. contact="none": the affordance has always been
+            the phone number inside the sentence, not a button pair. */}
+        <PublicStateCard state="not-found" title={title} contact="none">
+          {message} Give us a call and we can help - <HelpPhoneLink tone="dark" inline />.
+        </PublicStateCard>
       </CustomerColumn>
     </WavesShell>
   );

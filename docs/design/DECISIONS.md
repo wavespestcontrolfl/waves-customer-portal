@@ -2340,6 +2340,79 @@ The gate fails in both directions. Over the allowance is a regression, so a file
 
 `SecurePlanChoice`'s two 13px values — the violation the ruling names — are fixed to 14 rather than baselined. Two emoji the scanner found in doc comments rather than rendered JSX were removed from the prose.
 
+## 2026-09-11 — R2b: one terminal-state card (PublicStateCard)
+
+G-02 measured the not-found / expired / error card as a different component on
+every page family: card padding 20 / 24 / 32 at 390, gutter 20 vs 16, the heading
+an `h1` on two pages, a styled `div` on five and absent on four (G-07's
+`h1Count = 0`), and a CTA set running from nothing at all, through "Try again" at
+three different heights, to a two-button Text+Call row. `PublicLoadError` covered
+the load-error branch on eight of fifteen token pages; every page hand-rolled its
+own not-found, and four flow pages hand-rolled both.
+
+`components/brand/PublicStateCard.jsx` is the one card. `state` is
+`"not-found" | "expired" | "error"`. It fixes three things BY CONSTRUCTION so a
+page cannot drift again: the card grammar comes from `BrandCard` (whose padding
+is already the single responsive `clamp(20px, 4vw, 32px)` — this file authors
+none of its own, and exposes no padding or width knob); the title is always an
+`h1` with no authored font-size, because the sheet's `h1` rule is `!important` on
+glass and an authored size would be dead style; and the contact actions are built
+from `constants/business.js`, never a retyped number.
+
+**One primary per card** (style guide §2). When the state is recoverable the
+retry owns the 48 tier and contact drops to the 44 chip; when it is not, "Call
+Waves" is the primary and "Text Waves" the chip. The two-gold `ContactRow` that
+`/secure` and `/reschedule` each authored is what that resolves.
+
+**`PublicLoadError` is now a preset, not a ninth recipe** — `state="error"` plus
+the resource noun, with the copy every caller already got. Nine call sites are
+unchanged. A page with a hand-rolled terminal branch uses `PublicStateCard`
+directly; `PublicLoadError` stays for the load-error branch, where the resource
+noun is the only thing that varies.
+
+**Migrated:** `ScheduleFlowPage` (both `/reschedule` and `/reservice`), `TrackPage`,
+`AppointmentPage` (not-found + load-error), `SecureAppointmentPage`, `ReceiptPage`,
+`ContractSignPage`, `StatementPayPage`, `ReportViewPage`, `ProjectReportViewPage`,
+`LawnReportViewPage`, `PestReportViewPage`, `PriceChangeNoticePage`, `PrepGuidePage`,
+`ServiceOutlinePage`, `CardPage`.
+
+### What this did NOT decide
+
+**The wording.** Four live phrasings for the same condition survive verbatim
+("We couldn't find that X" / "This X isn't available" / "X not found" / "This X
+link has expired"). Which one Waves says is a content decision for the owner, not
+a refactor; the card makes them structurally identical without rewriting them.
+
+**The three no-CTA 404s** (estimate, pay, track) keep `contact="none"`. On those
+pages — and on receipt, contract and statement — the phone number lives *inside a
+sentence*, so replacing it with the button pair means rewriting that sentence.
+Same reason. Where the affordance was already a standalone button, unifying it
+was structural and was done: `ReportViewPage`'s lone "Call Waves" became the
+standard pair.
+
+### Two things that fell out of the migration
+
+`SecureAppointmentPage`'s `unavailable` state — set whenever the payload fetch
+throws, on both the initial load and `refresh()` — **had no render branch at
+all**. It fell through every `if` to the ready render and showed the
+card-capture form for an appointment that never loaded (`data` is null there;
+only the visit summary was guarded). It now renders the error card with a retry.
+
+`ProjectReportViewPage`'s not-found lost its `<Icon name="document">` glyph: no
+other terminal card has one, and a slot for a single caller is exactly the
+speculative config rule 16 forbids. `TrackPage`'s empty 32px decorative `div`
+went the same way.
+
+### Testing
+
+Six suites replace-mock `../components/brand` wholesale, so a new export is
+invisible to them. Rather than hand-stub the card — duplicating its action logic
+in six places — the mocks now spread `importOriginal()`, so `PublicStateCard` and
+`BrandCard` render for real (both are leaf presentational components) and only
+the heavier primitives stay stubbed. `PublicStateCard.test.jsx` asserts the
+invariants, not the pixels: an `h1` on every state, no authored font-size, one
+primary, actions from the shared constants, no width or padding knob.
+
 ## 2026-09-11 — R2a: one customer page column (CustomerColumn)
 
 The Liquid Glass audit's G-01 (`liquid-glass-consistency-audit-2026-09-09.md` §3) found five different phone gutters (10/12/16/20/24) and several desktop column widths across the customer glass pages, because no page-column primitive existed — every page hand-authored its own wrapper, and `index.css` carried five near-duplicate classes (`.waves-customer-page`, `.waves-receipt-page`, `.waves-estimate-page`, `.waves-rate-page`, `.waves-contract-page`) on top of that. `components/brand/CustomerColumn.jsx` is now the one primitive: `boxSizing: 'border-box'`, `width: '100%'`, `margin: '0 auto'`, `padding: '28px 16px 56px'` (`PAGE_TOP` / `PAGE_GUTTER` / `PAGE_BOTTOM`, new named tokens in `theme-doc.js`), `flex: 1` (page roots use `flex: 1`, DECISIONS 2026-09-04, so the shell footer follows the content), and `maxWidth` from `column`: `"document"` (default) → `DOC_COLUMN_MAX` (760) of CONTENT, `"flow"` → `FLOW_COLUMN_MAX` (640) of content. The named widths are content widths — the audit measured card edges — so the border-box outer cap is content + both gutters (792 / 672); a 760 outer cap would have rendered 728 of content past 792px viewports, a 32px narrowing of every desktop document that the first cut of this primitive actually had. None of this is a new choice — 760/28/56 is `DOC_PAGE_MARGIN` and 640 is `FLOW_COLUMN_MAX`, both already exported by `theme-doc.js` per the PR #2527 ruling ("pay's cap is the standard"); the fix is giving every page ONE way to reach them instead of eleven-plus. `DOC_COLUMN` (theme-doc's `min(100% - 32px, 760px)` width string) stays exported for its one non-`<CustomerColumn>` consumer (the tokens dev-preview) but no longer backs any page wrapper; the parallel `FLOW_COLUMN` string had no consumer and was not kept — flow pages reach 640 only through `<CustomerColumn column="flow">`.

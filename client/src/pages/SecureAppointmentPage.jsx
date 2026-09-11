@@ -22,7 +22,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { useParams, useSearchParams } from 'react-router-dom';
 import { COLORS, FONTS } from '../theme-brand';
 import { CUSTOMER_SURFACE } from '../theme-customer';
-import { WavesShell, CustomerColumn } from '../components/brand';
+import { WavesShell, CustomerColumn, PublicStateCard } from '../components/brand';
 import { useGlassSurface } from '../glass/glass-engine';
 import InlineAutoPayCapture from '../components/estimate/InlineAutoPayCapture';
 import SecurePlanChoice from '../components/estimate/SecurePlanChoice';
@@ -475,13 +475,25 @@ export default function SecureAppointmentPage() {
   if (state === 'notfound') {
     return (
       <Shell>
-        <Card>
-          <h1 style={{ fontFamily: FONTS.heading, fontSize: 22, margin: 0, color: S.text }}>We couldn&rsquo;t find that link</h1>
-          <p style={{ fontSize: 16, color: S.body, lineHeight: 1.55, marginTop: 10 }}>
-            The link may have been mistyped. Text or call us and we&rsquo;ll sort it out.
-          </p>
-          <ContactRow />
-        </Card>
+        <PublicStateCard state="not-found" title={<>We couldn&rsquo;t find that link</>}>
+          The link may have been mistyped. Text or call us and we&rsquo;ll sort it out.
+        </PublicStateCard>
+      </Shell>
+    );
+  }
+
+  // `unavailable` is set when the payload fetch throws (refresh() and the
+  // initial load both do it) but had NO branch of its own, so it fell all the
+  // way through to the ready render and showed the card-capture form for an
+  // appointment that never loaded — `data` is null there, and only the visit
+  // summary was guarded. A failed load is a transient error, so it gets the
+  // error card and a retry.
+  if (state === 'unavailable') {
+    return (
+      <Shell>
+        <PublicStateCard state="error" title={<>We couldn&rsquo;t load that link</>} onRetry={refresh}>
+          This looks temporary. Your link is still valid&mdash;try again in a moment.
+        </PublicStateCard>
       </Shell>
     );
   }
@@ -489,17 +501,14 @@ export default function SecureAppointmentPage() {
   if (state === 'closed') {
     return (
       <Shell>
-        <Card>
-          <h1 style={{ fontFamily: FONTS.heading, fontSize: 22, margin: 0, color: S.text }}>
-            {standalone ? 'This link is no longer active' : 'Nothing needed here'}
-          </h1>
-          <p style={{ fontSize: 16, color: S.body, lineHeight: 1.55, marginTop: 10 }}>
-            {standalone
-              ? 'This Auto Pay setup link has expired or Auto Pay is already set up. Text or call us for a fresh link — we’re happy to help.'
-              : <>This appointment doesn&rsquo;t need a card on file anymore. If anything changed, text or call us — we&rsquo;re happy to help.</>}
-          </p>
-          <ContactRow />
-        </Card>
+        <PublicStateCard
+          state="expired"
+          title={standalone ? 'This link is no longer active' : 'Nothing needed here'}
+        >
+          {standalone
+            ? 'This Auto Pay setup link has expired or Auto Pay is already set up. Text or call us for a fresh link — we’re happy to help.'
+            : <>This appointment doesn&rsquo;t need a card on file anymore. If anything changed, text or call us — we&rsquo;re happy to help.</>}
+        </PublicStateCard>
       </Shell>
     );
   }
