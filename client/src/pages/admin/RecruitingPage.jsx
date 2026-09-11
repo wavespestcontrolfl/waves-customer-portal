@@ -25,7 +25,6 @@ import {
   DialogBody,
   DialogFooter,
   Textarea,
-  Field,
   UiSurface,
   Tabs,
   TabList,
@@ -75,6 +74,22 @@ const ROLE_LABELS = {
   sales: "Sales",
   other: "Other",
 };
+
+const roleLabel = (role) => ROLE_LABELS[role] || role;
+
+// Contact actions in the detail dialog, in display order. Each renders only
+// when its snapshot field is present; the label falls back to the value.
+const CONTACT_LINKS = [
+  { key: "phone", scheme: "tel", Icon: Phone },
+  { key: "phone", scheme: "sms", Icon: MessageSquare, label: "Text" },
+  { key: "email", scheme: "mailto", Icon: Mail },
+];
+
+const contactLinkClass = buttonStyles({
+  variant: "ghost",
+  density: "comfortable",
+  className: "max-w-full break-all whitespace-normal",
+});
 
 export const ANSWER_LABELS = {
   drivers_license: "FL driver's license / insurable record",
@@ -285,7 +300,7 @@ export default function RecruitingPage() {
                           {c.name || "Unknown"}
                           <span className="text-zinc-400 font-normal">
                             {" "}
-                            · {ROLE_LABELS[app.role] || app.role}
+                            · {roleLabel(app.role)}
                           </span>
                           {app.language === "es" && (
                             <span className="text-zinc-400 font-normal">
@@ -343,50 +358,22 @@ export default function RecruitingPage() {
           <>
             <DialogHeader>
               <DialogTitle>
-                {contact.name || "Applicant"} —{" "}
-                {ROLE_LABELS[detail.role] || detail.role}
+                {contact.name || "Applicant"} — {roleLabel(detail.role)}
               </DialogTitle>
             </DialogHeader>
             <DialogBody>
               <div className="flex flex-wrap items-center gap-3 mb-4">
-                {contact.phone && (
-                  <>
+                {CONTACT_LINKS.filter(({ key }) => contact[key]).map(
+                  ({ key, scheme, Icon, label }) => (
                     <a
-                      className={buttonStyles({
-                        variant: "ghost",
-                        density: "comfortable",
-                        className: "max-w-full break-all whitespace-normal",
-                      })}
-                      href={`tel:${contact.phone}`}
+                      key={scheme}
+                      className={contactLinkClass}
+                      href={`${scheme}:${contact[key]}`}
                     >
-                      <Phone className="w-4 h-4" />
-                      {contact.phone}
+                      <Icon className="w-4 h-4" />
+                      {label || contact[key]}
                     </a>
-                    <a
-                      className={buttonStyles({
-                        variant: "ghost",
-                        density: "comfortable",
-                        className: "max-w-full break-all whitespace-normal",
-                      })}
-                      href={`sms:${contact.phone}`}
-                    >
-                      <MessageSquare className="w-4 h-4" />
-                      Text
-                    </a>
-                  </>
-                )}
-                {contact.email && (
-                  <a
-                    className={buttonStyles({
-                      variant: "ghost",
-                      density: "comfortable",
-                      className: "max-w-full break-all whitespace-normal",
-                    })}
-                    href={`mailto:${contact.email}`}
-                  >
-                    <Mail className="w-4 h-4" />
-                    {contact.email}
-                  </a>
+                  ),
                 )}
                 {contact.city && (
                   <span className="text-14 text-zinc-500">{contact.city}</span>
@@ -445,17 +432,12 @@ export default function RecruitingPage() {
                   ))}
               </div>
 
-              <Field
-                label="Status change note"
-                help="Optional note for this status change."
-              >
-                <Textarea
-                  value={note}
-                  onChange={(e) => setNote(e.target.value)}
-                  placeholder="Optional note for this status change…"
-                  rows={2}
-                />
-              </Field>
+              <Textarea
+                value={note}
+                onChange={(e) => setNote(e.target.value)}
+                placeholder="Optional note for this status change…"
+                rows={2}
+              />
             </DialogBody>
             <DialogFooter>
               <div className="flex flex-wrap gap-1.5">

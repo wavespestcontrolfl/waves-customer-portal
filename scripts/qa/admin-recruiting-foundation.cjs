@@ -1,5 +1,5 @@
 "use strict";
-/* global localStorage, document, getComputedStyle, innerWidth */
+/* global localStorage, document, getComputedStyle, innerWidth, innerHeight */
 // Actual recruiting route with synthetic API fixtures; no applicant contact occurs.
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
@@ -21,9 +21,12 @@ async function main() {
     unmatched: [],
     errors: [],
   };
-  const server = await previewServer(root),
-    browser = await launchBrowser();
+  // Both resources are acquired inside the cleanup scope so a browser-launch
+  // failure still closes the Vite child instead of keeping the process alive.
+  let server, browser;
   try {
+    server = await previewServer(root);
+    browser = await launchBrowser();
     for (const width of [390, 820, 1440]) {
       let failStatus = false,
         failRead = false;
@@ -133,7 +136,9 @@ async function main() {
           .getAttribute("href"),
         "sms:+19415550199",
       );
-      const note = dialog.getByLabel("Status change note");
+      const note = dialog.getByPlaceholder(
+        "Optional note for this status change…",
+      );
       await note.fill("Fixture review note");
       failStatus = true;
       await dialog
@@ -155,12 +160,28 @@ async function main() {
         { status: "reviewed", note: "Fixture review note" },
         { status: "reviewed", note: "Fixture review note" },
       ]);
-      const geometry = await dialog.evaluate((el) => {
-        const r = el.getBoundingClientRect();
-        return { left: r.left, right: r.right, width: innerWidth };
-      });
+      // The role="dialog" element is the fixed inset-0 overlay, so its box is
+      // always the viewport. Measure the panel (its focusable child) instead.
+      const geometry = await dialog
+        .locator(':scope > [tabindex="-1"]')
+        .evaluate((el) => {
+          const r = el.getBoundingClientRect();
+          return {
+            left: r.left,
+            right: r.right,
+            top: r.top,
+            bottom: r.bottom,
+            overflowX: el.scrollWidth - el.clientWidth,
+            width: innerWidth,
+            height: innerHeight,
+          };
+        });
       assert.ok(
-        geometry.left >= 0 && geometry.right <= width + 1,
+        geometry.left >= 0 &&
+          geometry.right <= width + 1 &&
+          geometry.top >= 0 &&
+          geometry.bottom <= geometry.height + 1 &&
+          geometry.overflowX <= 1,
         JSON.stringify(geometry),
       );
       assert.equal(
@@ -219,9 +240,9 @@ async function main() {
       JSON.stringify(report, null, 2),
     );
     try {
-      await browser.close();
+      if (browser) await browser.close();
     } finally {
-      await server.close();
+      if (server) await server.close();
     }
   }
   console.log(
