@@ -7,6 +7,7 @@ import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import EquipmentMaintenancePage from './EquipmentMaintenancePage';
 const ok = body => ({ ok: true, json: async () => body });
 const eq = { id: 'v1', name: 'Service truck', category: 'vehicle', status: 'active', condition: 'good', assigned_tech_name: 'Sam', current_miles: 1000 };
+const lostEq = { id: 'm1', name: 'Missing blower', category: 'tool', status: 'lost', condition: 'unknown', assigned_tech_name: 'Unassigned' };
 const detail = {
  equipment: eq,
  schedules: [{ id: 's1', task_name: 'Oil change', interval_miles: 5000, next_due_at: '2026-10-01T00:00:00Z', priority: 'high', estimated_cost: 89.5 }],
@@ -26,7 +27,7 @@ beforeEach(() => {
   if (u.includes('/analytics/')) return ok({});
   if (/\/mileage\?/.test(u)) return ok(mileage);
   if (/\/admin\/equipment-maintenance\/v1$/.test(u)) return ok(detail);
-  return ok({ equipment: [eq] });
+  return ok({ equipment: [eq, lostEq] });
  }));
 });
 afterEach(() => { cleanup(); vi.restoreAllMocks(); vi.unstubAllGlobals(); });
@@ -48,6 +49,12 @@ it('names the card opener from its visible details and the expanded state', asyn
  fireEvent.click(opener);
  expect(opener).toHaveAccessibleName(/Expand/);
  expect(opener).toHaveAttribute('aria-expanded', 'false');
+});
+it('keeps the alert tone on lost equipment and neutral on the rest', async () => {
+ render(<MemoryRouter><EquipmentMaintenancePage /></MemoryRouter>);
+ await screen.findByText('Missing blower');
+ expect(screen.getByText('lost').className).toContain('text-alert-fg');
+ expect(screen.getByText('active').className).not.toContain('text-alert-fg');
 });
 it('keeps date and amount cells on one line in the detail tables', async () => {
  await expandCard();

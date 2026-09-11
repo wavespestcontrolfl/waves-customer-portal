@@ -584,7 +584,7 @@ function EquipmentCard({
           }}>
               {eq.name}
             </span>{" "}
-            <Badge tone="neutral">{eq.status}</Badge>{" "}
+            <Badge tone={eq.status === "lost" ? "alert" : "neutral"}>{eq.status}</Badge>{" "}
           </div>{" "}
           <div style={{
           fontSize: 14,
