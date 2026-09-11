@@ -1487,7 +1487,7 @@ router.post('/estimate', async (req, res, next) => {
     // admin UI sends, so strip them exactly as the persistence path does: a
     // posted `termitePricingKnobs.plan` stamp must not price the annual plan
     // past an unset GATE_TERMITE_ANNUAL_PLAN (pre-push audit #4424).
-    const { sanitizeClientIdentityFields } = require('../services/admin-estimate-persistence');
+    const { sanitizeClientIdentityFields } = require('../services/estimate-client-identity-fields');
     const estimate = pricingEngine.generateEstimate(sanitizeClientIdentityFields({ ...(req.body || {}) }));
     res.json({ estimate });
   } catch (err) { next(err); }
