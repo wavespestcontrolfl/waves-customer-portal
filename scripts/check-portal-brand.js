@@ -121,9 +121,9 @@ const LEGACY_BASELINE = {
   'client/src/components/estimate/tokens.js': { 'local-palette': 1 },
   'client/src/index.css': { 'banned-font-size': 2, 'heavy-weight': 1 },
   'client/src/pages/ServiceOutlinePage.jsx': { 'banned-font-size': 3 },
-  'client/src/styles/buttons.css': { 'banned-font-size': 4, 'heavy-weight': 2 },
+  'client/src/styles/buttons.css': { 'banned-font-size': 2 },
   'client/src/styles/tokens.css': { 'banned-font-size': 1 },
-  'client/src/theme-brand.js': { 'banned-font-size': 3, 'heavy-weight': 5 },
+  'client/src/theme-brand.js': { 'banned-font-size': 2 },
 };
 
 // =========================================================================
