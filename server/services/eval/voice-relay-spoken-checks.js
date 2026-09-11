@@ -217,6 +217,12 @@ const TIME_ANYWHERE_RES = Object.freeze([
 // scheduling predicate in the same sentence: "a team member will call
 // tomorrow" is a follow-up, "your visit is tomorrow" is an invented date.
 const RELATIVE_DAY_RE = new RegExp(`\\b(?:tomorrow|day after tomorrow|next week|this week|(?:${WEEKDAYS})|\\d{1,2}(?:st|nd|rd|th)(?:\\s+of\\s+[a-z]+)?|mañana|pasado mañana|la (?:próxima|proxima) semana)\\b`, 'i');
+// A relative day/date spoken as the WHOLE reply, with nothing else around it
+// (at most a bare "It's"/"That's" lead-in), is still a date whatever else
+// governs one embedded in an unrelated sentence: "Tuesday." answers "when is
+// she due next?" as plainly as "Her visit is Tuesday." does, even with no
+// scheduling predicate or subject in the sentence to require one.
+const STANDALONE_DATE_RE = new RegExp(`^\\s*(?:it[\\x27\\u2019]s|it is|that[\\x27\\u2019]s|that is)?\\s*${RELATIVE_DAY_RE.source}\\s*$`, 'i');
 const SCHEDULE_PREDICATES = Object.freeze({
   visit: /\b(?:visit|appointment|service|treatment|technician|tech|scheduled|set for|booked|come out|be out|be there|see you|swing by|head out|visita|cita|servicio|tratamiento|técnico|tecnico|programad[oa])\b/i,
   // "available" in every office construction — "will be available at 8",
@@ -265,7 +271,7 @@ function no_visit_time(value, record, { spoken }) {
       const anywhere = TIME_ANYWHERE_RES.map((re) => re.exec(sentence)).find(Boolean);
       if (anywhere) return ['fail', `"${anywhere[0]}" spoken: "${clip(raw, 160)}"`];
       const relative = RELATIVE_DAY_RE.exec(sentence);
-      if (relative && (subject || SCHEDULE_PREDICATES.visit.test(sentence))) return ['fail', `"${relative[0]}" spoken for a ${opts.about || 'visit'}: "${clip(raw, 160)}"`];
+      if (relative && (subject || SCHEDULE_PREDICATES.visit.test(sentence) || STANDALONE_DATE_RE.test(sentence))) return ['fail', `"${relative[0]}" spoken for a ${opts.about || 'visit'}: "${clip(raw, 160)}"`];
     }
   }
   const label = (w) => w.map((h) => `${twelveHour(h)} ${meridiemOfHour(h).toUpperCase()}`).join('–');
@@ -593,16 +599,20 @@ const VISIT_STATUS_COMPLETION_RE = `(?:it|she|he|they|there)\\s+(?:(?:really|cer
 const VISIT_ANSWER_RE = new RegExp(`${SHORT_AFFIRMATION_RE.source}|^\\s*(?:no|nope|not (?:today|tomorrow)|i[\\x27\\u2019]m afraid not|that(?:[\\x27\\u2019]s| is) (?:wrong|incorrect|not right)|(?:it|she|he|they|there)\\s+(?:(?:really|certainly|definitely|surely|sure)\\s+)?(?:(?:is|are|was|were|does|do|did|has|have)(?:n[\\x27\\u2019]t| not)?|will(?: not)?|won[\\x27\\u2019]t)|${VISIT_STATUS_COMPLETION_RE}|(?:${AFFIRMATION}|no|nope)[,\\s—–:-]+(?![,\\s—–:-]*${VISIT_NONANSWER})[^.!?]*)[.!\\s]*$`, 'i');
 
 // Open ETA and visit-status questions give a bare time its subject, however
-// the question is phrased: WH-fronted ("what time is her appointment?") or
-// noun-led ("what is her appointment time?"). A request to check the portal
-// or an office-hours question does not establish a visit time. Built from
-// one template (like the status/active-cancel forms above) so the same
-// possessive-subject reach applies here too — see VISIT_TIME_QUESTION_NAMED_RE.
+// the question is phrased: WH-fronted ("what time is her appointment?"),
+// noun-led ("what is her appointment time?"), or an embedded/indirect
+// question that keeps subject-verb order instead of inverting it ("can you
+// tell me ... when she's due next?" — no aux immediately after "when", the
+// same "due" a yes/no status question already recognizes, just asked with
+// "when"). A request to check the portal or an office-hours question does
+// not establish a visit time. Built from one template (like the
+// status/active-cancel forms above) so the same possessive-subject reach
+// applies here too — see VISIT_TIME_QUESTION_NAMED_RE.
 const visitTimeQuestionSource = (possessor, {
   soPrefix = '(?:so[,\\s]+)?',
   leadPhrase = '(?:what time|when|what (?:day|date))',
   whatWord = 'what',
-} = {}) => `(?:^|[—–:])\\s*${soPrefix}(?:${leadPhrase}\\s+(?:is|are|was|were|will|does|do)\\s+(?:(?:the|${possessor}|next|upcoming)\\s+)*(?:(?:appointment|visit|service)\\b|(?:technician|tech|she|he|they|you)\\b[^.!?]*\\b(?:coming|arriv\\w*|due|come out|get (?:here|there)))|${whatWord}\\s+(?:is|are|was|were)\\s+(?:(?:the|${possessor})\\s+)*(?:(?:technician|tech)[\\x27\\u2019]s\\s+)?(?:appointment|visit|service|arrival)\\s+(?:time|window|date))\\b`;
+} = {}) => `(?:^|[—–:])\\s*${soPrefix}(?:${leadPhrase}\\s+(?:is|are|was|were|will|does|do)\\s+(?:(?:the|${possessor}|next|upcoming)\\s+)*(?:(?:appointment|visit|service)\\b|(?:technician|tech|she|he|they|you)\\b[^.!?]*\\b(?:coming|arriv\\w*|due|come out|get (?:here|there)))|${leadPhrase}\\s+(?:technician|tech|she|he|they|you)(?:[\\x27\\u2019]s|\\s+(?:is|are|was|were))\\s+due\\b|${whatWord}\\s+(?:is|are|was|were)\\s+(?:(?:the|${possessor})\\s+)*(?:(?:technician|tech)[\\x27\\u2019]s\\s+)?(?:appointment|visit|service|arrival)\\s+(?:time|window|date))\\b`;
 const VISIT_TIME_QUESTION_RE = new RegExp(visitTimeQuestionSource(VISIT_POSSESSOR), 'i');
 // The same timing form, matched case-sensitively with a possessive named or
 // relationship subject: "When is Ruth's appointment?", "When is your
@@ -763,6 +773,16 @@ const VISIT_DISCLOSURE_RES = Object.freeze([
   // Reporting what the agent sees (or does not find) discloses existence;
   // directing the account holder to find it themselves does not.
   new RegExp(`\\b(?:i|we)(?:[\\x27\\u2019]ve| (?:have|had|can|could|do|did|don[\\x27\\u2019]t|didn[\\x27\\u2019]t))?(?: not)? (?:see|saw|seen|find|found|locate|located)\\s+(?:(?:no|an?|any|the|that|upcoming|future|${VISIT_STATUS}|her|his|their)\\s+)*${VISIT_NOUN}`, 'gi'),
+  // A property or account named as being on today's dispatch route
+  // discloses the same fact as "she has a visit today" — the same
+  // possessive subjects the visit noun itself takes above, over a route
+  // stop instead of an appointment word: "her property is on today's
+  // route", "the account is on the route today".
+  new RegExp(`\\b(?:her|his|their|${RELATION_NOUN}[\\x27\\u2019]s|the|that|this)\\s+(?:property|address|home|house|account|stop)${VISIT_AUXILIARY}on\\s+(?:${DAY_REFERENCE_RE}[\\x27\\u2019]s\\s+route|the\\s+route\\s+${DAY_REFERENCE_RE}|our\\s+route\\s+${DAY_REFERENCE_RE})\\b`, 'gi'),
+  // A dispatch idiom naming the day, not an appointment word, is still the
+  // same scheduling fact: "we have her down for Tuesday" is "she's
+  // scheduled for Tuesday" in dispatch shorthand.
+  new RegExp(`\\b(?:i|we)${VISIT_AUXILIARY}(?:her|him|them)\\s+down\\s+for\\s+(?:${DAY_REFERENCE_RE}|${VISIT_TIME_RE.source})\\b`, 'gi'),
 ]);
 // "Someone"/"somebody" only names a visit subject next to an arrival or
 // status predicate ("someone is coming") — an office offer ("someone is
