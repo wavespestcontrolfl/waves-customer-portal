@@ -48,6 +48,18 @@ postgres('review ask history against migrated PostgreSQL', () => {
     expect(await history.lastDeliveredAskAt(customerId, { excludeRequestId: row.id })).toBeNull();
   });
 
+  test('a delivered legacy follow-up is included and outranks the original ask time', async () => {
+    // Mirrors processFollowups (review-request.js): the original ask stamps
+    // sms_sent_at, and the separate review_request_followup SMS stamps
+    // followup_sent_at on the SAME row days later.
+    const followupAt = new Date(at.getTime() + 4 * 86400000);
+    await request({ sms_sent_at: at, followup_sent_at: followupAt });
+    expect(await history.lastDeliveredAskAt(customerId, { since: at })).toEqual(followupAt);
+    const rows = await history.deliveredAskRows(customerId);
+    expect(rows).toHaveLength(1);
+    expect(rows[0].followup_sent_at.toISOString()).toEqual(followupAt.toISOString());
+  });
+
   test('single-channel deliveries survive nulls and customer scoping', async () => {
     const row = await request({ sent_at: at });
     expect(await history.lastDeliveredAskAt(customerId)).toEqual(at);

@@ -3840,6 +3840,11 @@ describe('shared ask history foundation', () => {
     'Could you review the service report?',
     'Please submit your review of the attached estimate.',
     'Please submit your review for the attached estimate.',
+    // codex #4326 finding 2: a noun ("comments"/"feedback"/"notes") between
+    // "review" and the document preposition must not defeat the carve-out.
+    'Please share your review comments on the attached estimate.',
+    'Share your review notes for the updated contract, please.',
+    'Please add your review feedback on the attached proposal.',
     'Shipping details: https://vendor.example/rate/abc',
     'Please review your invoice: https://portal.test/l/abc123',
     'Your invoice is ready: https://portal.test/l/abc123',
@@ -3881,8 +3886,40 @@ describe('shared ask history foundation', () => {
     'We’d appreciate it if you left us a Google review.',
     'It would mean a lot if you left us a review.',
     'If you could leave us a quick Google review, that would help.',
+    // codex #4326 finding 1: present-tense invitations (no would/could) —
+    // this is the repo's own Day-0 template wording (review-outreach-templates.js).
+    'If we earned it, a Google review means a lot.',
+    'A quick review helps us out a ton.',
+    'A quick Google review really helps.',
+    'A 5-star review supports our small crew.',
+    'That review link one more time:',
+    'Here is that review link one more time.',
   ])('request intent and review destinations count: %s', body => {
     expect(history.looksLikeReviewAsk(body)).toBe(true);
+  });
+
+  test('every real ask template in review-outreach-templates.js is recognized on its own wording', () => {
+    // Rendered with review_url stripped: a staff member forwarding this exact
+    // wording without the (per-customer) link must still trip the standdown
+    // (codex #4326 finding 1 — the repo's own Day-0 wording was the reported
+    // gap). Two templates lean entirely on the link with no textual review
+    // mention at all ("If we earned it:" / "sharing your experience?") — that
+    // is a structural template-design limit, not a classifier bug, so they
+    // are pinned here as known link-dependent rather than silently ignored.
+    const templates = require('../services/review-outreach-templates');
+    const LINK_DEPENDENT_ONLY = new Set(['service_specific_pest', 'recovery_review']);
+    for (const t of templates.OUTREACH_TEMPLATES) {
+      if (!templates.isAskTemplate(t.id)) continue; // no-link check-ins are not asks
+      const linkFreeBody = templates.renderOutreachBody(t.body, {
+        first: 'Jamie', tech: 'Bob', sender: 'Bob with Waves', review_url: '',
+      });
+      const detected = history.looksLikeReviewAsk(linkFreeBody);
+      if (LINK_DEPENDENT_ONLY.has(t.id)) {
+        expect(detected).toBe(false);
+      } else {
+        expect(detected).toBe(true);
+      }
+    }
   });
 
   test('an unresolved manual review reservation cannot be matched away by a pipeline stamp', async () => {
@@ -3913,5 +3950,23 @@ describe('shared ask history foundation', () => {
       { sms_sent_at: new Date(base + 60000), sent_at: null },
     ])).toEqual(new Date(base + 3600000));
     expect(history.latestDeliveredAt([{ sms_sent_at: null, sent_at: null }])).toBeNull();
+  });
+
+  // codex #4326 finding 3: processFollowups (review-request.js) records the
+  // separate review_request_followup SMS delivery only in followup_sent_at
+  // on the same row — the reducer must consider it too, or a caller enforcing
+  // ASK_SPACING_MS from this shared history under-counts the elapsed time
+  // and can fire the next ask too soon.
+  test('a delivered legacy follow-up outranks the original ask timestamp', () => {
+    expect(history.latestDeliveredAt([
+      { sms_sent_at: new Date(base), sent_at: null, followup_sent_at: new Date(base + 4 * 86400000) },
+    ])).toEqual(new Date(base + 4 * 86400000));
+  });
+
+  test('a row with only a follow-up timestamp still counts', () => {
+    expect(history.latestDeliveredAt([
+      { sms_sent_at: null, sent_at: null, followup_sent_at: new Date(base) },
+    ])).toEqual(new Date(base));
+    expect(history.latestDeliveredAt([{ sms_sent_at: null, sent_at: null, followup_sent_at: null }])).toBeNull();
   });
 });
