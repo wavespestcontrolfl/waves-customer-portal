@@ -738,18 +738,34 @@ with open(changed_path, encoding='utf-8', errors='replace') as fh:
         if line:
             changed.add(line)
 
-refs, cur = [], None
+# A `+++` prefix is only a file header OUTSIDE a hunk. Inside one it is an
+# added line whose source text begins with `++` — `++ counter;` reaches the
+# patch as `+++ counter;`. Treating that as a header repoints `cur` at a
+# garbage path, and every relative import after it then resolves from the
+# repo root: a nested caller's ./helper silently becomes the root helper.js,
+# inlined under the authoritative UNCHANGED heading. So track hunk state and
+# let only a real header move `cur`.
+refs, cur, in_hunk = [], None, False
 with open(diff_path, encoding='utf-8', errors='replace') as fh:
     for line in fh:
-        if line.startswith('+++ '):
-            path = line[4:].strip()
-            if path.startswith('b/'):
-                path = path[2:]
-            # Only ever used to attribute the added lines below to the file
-            # they came from — never to decide what counts as changed.
-            cur = None if path == '/dev/null' else path
+        if line.startswith('diff --git '):
+            cur, in_hunk = None, False
             continue
-        if line.startswith('---') or not line.startswith('+') or cur is None:
+        if line.startswith('@@'):
+            in_hunk = True
+            continue
+        if not in_hunk:
+            # The file-header region: the only place a `+++` is a header.
+            # Used solely to attribute the added lines below to the file
+            # they came from — never to decide what counts as changed.
+            if line.startswith('+++ '):
+                path = line[4:].strip()
+                if path.startswith('b/'):
+                    path = path[2:]
+                cur = None if path == '/dev/null' else path
+            continue
+        # Inside a hunk, only added lines carry imports worth resolving.
+        if not line.startswith('+') or cur is None:
             continue
         for m in SPEC.finditer(line[1:]):
             spec = m.group(1) or m.group(2)

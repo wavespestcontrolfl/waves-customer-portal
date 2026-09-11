@@ -72,6 +72,12 @@ echo "module.exports = { from_index: 1 };"   > server/services/mod/index.js
 # never be substituted for it when helper.js is filtered out.
 mkdir -p server/services/helper
 echo "module.exports = { helper_index_substituted: 1 };" > server/services/helper/index.js
+# A root helper.js and a nested one: if a parser ever loses track of which
+# file an added line belongs to, ./helper resolves from the repo root and
+# lands on the wrong one. These two make that visible instead of silent.
+mkdir -p server/services/nested
+echo "module.exports = { ROOT_HELPER: 1 };"   > helper.js
+echo "module.exports = { NESTED_HELPER: 1 };" > server/services/nested/helper.js
 printf 'module.exports = { big: "%s" };\n' "$(head -c 4000 < /dev/zero | tr '\0' 'x')" > server/services/big.js
 ln -s /etc/passwd server/services/link.js
 git add -A >/dev/null 2>&1
@@ -205,6 +211,27 @@ if [ "$HELPER_HITS" = "1" ] && ! grep -qa "helper_index_substituted" "$WORK/out.
   pass "a repeated import is inlined once and never falls through"
 else
   fail "repeated import: helper.js inlined $HELPER_HITS time(s), or index.js substituted"
+fi
+
+# `++ counter;` reaches the patch as `+++ counter;`. Read as a file header
+# it repoints the parser at a garbage path and every relative import after
+# it resolves from the repo root — a nested ./helper silently becomes the
+# root helper.js, inlined as authoritative.
+{
+  echo "diff --git a/server/services/nested/caller.js b/server/services/nested/caller.js"
+  echo "--- /dev/null"
+  echo "+++ b/server/services/nested/caller.js"
+  echo "@@ -0,0 +1,2 @@"
+  echo "+++ counter;"
+  echo "+const h = require('./helper');"
+} > "$WORK/diff.txt"
+run_collect
+if grep -qa "ROOT_HELPER" "$WORK/out.txt"; then
+  fail "an added ++ line was read as a file header — resolved from the repo root"
+elif grep -qa "NESTED_HELPER" "$WORK/out.txt"; then
+  pass "an added ++ line is not mistaken for a file header"
+else
+  fail "resolved neither helper — the ++ case inlined nothing at all"
 fi
 
 echo ""
