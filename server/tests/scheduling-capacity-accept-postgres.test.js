@@ -55,7 +55,11 @@ describeDb('scheduling capacity acceptance on PostgreSQL', () => {
       expect((await f.db('scheduled_services').where({ id: legacy.scheduledServiceId }).first()).reservation_policy_version)
         .not.toBe(2);
       process.env.GATE_SCHEDULING_CAPACITY = 'true';
-      const current = await reserveSlot(args);
+      // The legacy offer was signed without the capacity policy: redeeming it
+      // under the gate must fail closed so the customer refreshes and
+      // reselects a capacity-signed offer for the same slot.
+      await expect(reserveSlot(args)).rejects.toMatchObject({ code: 'SLOT_UNAVAILABLE', reason: 'invalid_offer' });
+      const current = await reserveSlot({ ...args, slotId: f.signedSlot(f.ids.estimates[0], 60) });
       expect((await f.db('scheduled_services').where({ id: current.scheduledServiceId }).first()).reservation_policy_version)
         .toBe(2);
       delete process.env.GATE_SCHEDULING_CAPACITY;
