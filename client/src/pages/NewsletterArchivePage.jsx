@@ -57,7 +57,11 @@ function ArchiveBody({ html }) {
   const srcDoc = `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><base target="_blank"><style>
     html,body{margin:0;padding:0;background:#fff;color:${TEXT};}
     body{font-family:${FONTS.body};font-size:16px;line-height:1.6;padding:20px;}
-    h1,h2,h3,h4{font-family:${FONTS.serif};color:${TEXT};line-height:1.25;letter-spacing:0;}
+    /* The system stack, not FONTS.serif (owner ruling C9, DECISIONS
+       2026-09-11). This iframe is sandboxed, so glass-theme.css cannot reach
+       inside it to enforce the sheet, and the serif it authored here was the
+       only serif on any glass surface. */
+    h1,h2,h3,h4{font-family:${FONTS.body};color:${TEXT};line-height:1.25;letter-spacing:0;}
     a{color:${B.wavesBlue};}
     img{max-width:100%;height:auto;}
     *{box-sizing:border-box;}
