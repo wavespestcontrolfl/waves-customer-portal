@@ -352,6 +352,30 @@ it.each(['calculated', 'manual-amount', 'manual-unit', 'partial-zones', 'measure
   if (mode === 'manual-unit') expect(within(totals()[2].parentElement).getAllByRole('combobox')[1].value).toBe('gal');
 });
 
+// A hand-added product is ungoverned: its catalog per-1k rate and the derived
+// total prefill as on a non-defaults closeout (owner 2026-09-11); the tech
+// confirms rather than retypes, and an edit still re-derives / withdraws as
+// the manual-add case above pins.
+it('a manually added product with a catalog per-1k rate prefills its rate and derived total', async () => {
+  enableDefaults();
+  const added = { id: 'manual-talak', name: 'Fixture bifenthrin', category: 'insecticide', rate_unit: 'fl_oz', default_rate_per_1000: '0.5000', min_label_rate_per_1000: 0.25, max_label_rate_per_1000: 1 };
+  render(<CompletionPanel service={service} products={[...catalog, added]} onClose={() => {}} onSubmit={submit} />);
+  await waitFor(() => expect(totals()).toHaveLength(2));
+  fireEvent.change(screen.getByPlaceholderText('Search products...'), { target: { value: added.name } });
+  fireEvent.click(screen.getByText(added.name));
+  await waitFor(() => expect(totals()).toHaveLength(3));
+  expect(screen.getAllByPlaceholderText('Rate')[2].value).toBe('0.5');
+  expect(screen.getAllByPlaceholderText('Sq ft')[2].value).toBe('5000');
+  expect(totals()[2].value).toBe('2.5');
+  expect(screen.getByText('Suggested from the label rate for the visit area. Confirm the actual amount.')).toBeTruthy();
+  expect(screen.getByRole('button', { name: /complete & send recap/i }).disabled).toBe(false);
+  fireEvent.change(screen.getByLabelText('Area for this visit (sq ft)'), { target: { value: '4000' } });
+  await waitFor(() => expect(totals()[2].value).toBe('2'));
+  fireEvent.click(await screen.findByRole('button', { name: /complete & send recap/i }));
+  await waitFor(() => expect(submit).toHaveBeenCalledOnce());
+  expect(submit.mock.calls[0][1].products[2]).toMatchObject({ productId: 'manual-talak', rate: 0.5, rateUnit: 'fl_oz', totalAmount: 2, amountUnit: 'fl_oz', areaValue: '4000' });
+});
+
 it('a withdrawn suggestion requires actual units and method instead of displaying hidden fallbacks', async () => {
   enableDefaults();
   mount();
@@ -440,10 +464,12 @@ it('an "Additional work" protocol option is built from the catalog product, not 
   const selects = within(totals()[2].parentElement).getAllByRole('combobox');
   // Rate unit, amount unit and method come from the catalog row (Codex r6 P1:
   // a bare { id, name } read Hydretain's fl_oz as oz and broke the inventory
-  // conversion). The quantity itself stays an actual for the tech to enter.
+  // conversion). An optional row is added by hand, so its catalog per-1k rate
+  // and the derived total prefill like any other manual add (owner
+  // 2026-09-11); the quantity stays the tech's actual to confirm or edit.
   expect(selects.slice(0, 3).map((select) => select.value)).toEqual(['fl_oz', 'fl_oz', 'broadcast_spray']);
-  expect(totals()[2].value).toBe('');
-  expect(screen.getAllByPlaceholderText('Rate')[2].value).toBe('');
+  expect(screen.getAllByPlaceholderText('Rate')[2].value).toBe('6');
+  expect(totals()[2].value).toBe('30');
 });
 
 it.each([
@@ -463,7 +489,9 @@ it.each([
   // herbicide in its window while the catalog category alone reads it as spot
   // work. Without a mode on the option the catalog default still applies.
   expect(selects[2].value).toBe(expected);
-  expect(totals()[2].value).toBe('');
+  // Broadcast derives the label total over the visit area; spot work has no
+  // area to derive against, so the tech enters the actual.
+  expect(totals()[2].value).toBe(expected === 'broadcast_spray' ? '7.5' : '');
 });
 
 it('changing only the amount unit withdraws a plan-suggested total: blank through a refresh and a rate edit, and a typed total keeps its number under the chosen unit', async () => {

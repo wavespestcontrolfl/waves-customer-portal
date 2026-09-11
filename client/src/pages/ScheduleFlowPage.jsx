@@ -33,9 +33,9 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useParams } from 'react-router-dom';
 import { COLORS, FONTS } from '../theme-brand';
-import { DOC_EYEBROW, FLOW_COLUMN_MAX } from '../theme-doc';
+import { DOC_EYEBROW } from '../theme-doc';
 import { estimateCard } from '../components/estimate/cardStyles';
-import { WavesShell } from '../components/brand';
+import { WavesShell, CustomerColumn } from '../components/brand';
 import Icon from '../components/Icon';
 import { useGlassSurface } from '../glass/glass-engine';
 import SchedulePicker from '../components/booking/SchedulePicker';
@@ -84,9 +84,9 @@ const SOFT_NOTE = {
 function Page({ children }) {
   return (
     <WavesShell variant="customer" topBar="solid">
-      <div style={{ flex: 1, padding: '24px 16px 40px', maxWidth: FLOW_COLUMN_MAX, width: '100%', margin: '0 auto', fontFamily: FONT_BODY, color: S.text }}>
+      <CustomerColumn column="flow" style={{ fontFamily: FONT_BODY, color: S.text }}>
         {children}
-      </div>
+      </CustomerColumn>
     </WavesShell>
   );
 }
