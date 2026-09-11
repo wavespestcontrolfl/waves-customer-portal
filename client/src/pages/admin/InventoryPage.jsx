@@ -4603,7 +4603,6 @@ function ProtocolsTab({
   const [newServiceType, setNewServiceType] = useState("");
   const [showNewService, setShowNewService] = useState(false);
   const [appliedDeepLink, setAppliedDeepLink] = useState(false);
-
   const load = async () => {
     const [sData, pData, hData] = await Promise.all([
       adminFetch("/admin/inventory/service-usage"),
@@ -4618,7 +4617,6 @@ function ProtocolsTab({
   useEffect(() => {
     load();
   }, []);
-
   useEffect(() => {
     if (loading || appliedDeepLink || normalizedInitialLine === "all") return;
     setAppliedDeepLink(true);
@@ -4649,7 +4647,6 @@ function ProtocolsTab({
     services,
     showToast,
   ]);
-
   const startEdit = (row) => {
     setEditingRow(row.id);
     setEditForm({
@@ -4717,14 +4714,7 @@ function ProtocolsTab({
       showToast(`Failed: ${e.message}`);
     }
   };
-
-  if (loading)
-    return (
-      <div style={{ color: D.muted, padding: 40, textAlign: "center" }}>
-        Loading protocols...
-      </div>
-    );
-
+  if (loading) return <ActionFeedback>Loading protocols…</ActionFeedback>;
   const unitOpts = [
     "oz",
     "ml",
@@ -4744,7 +4734,6 @@ function ProtocolsTab({
       : services.filter(
           (svc) => protocolLineForService(svc.serviceType) === serviceFilter,
         );
-
   const lineLabel = (lineKey) =>
     PROTOCOL_FILTERS.find((f) => f.key === lineKey)?.label || lineKey;
   const firstServiceForLine = (lineKey) =>
@@ -4771,341 +4760,185 @@ function ProtocolsTab({
     setCostHighlightLine(lineKey);
     showToast(`Highlighted missing cost data for ${lineLabel(lineKey)}`);
   };
-
   return (
     <div>
       {" "}
-      <div
-        style={{
-          display: "flex",
-          justifyContent: "space-between",
-          alignItems: "center",
-          marginBottom: 16,
-        }}
-      >
+      <div className="flex justify-between items-center mb-[16px]">
         {" "}
         <div>
-          <div style={{ fontSize: 15, fontWeight: 500, color: D.heading }}>
+          <div className="text-ui-body font-medium text-zinc-900">
             Treatment Protocols by Service Line
           </div>{" "}
-          <div style={{ fontSize: 12, color: D.muted }}>
+          <div className="text-ui-body text-ink-secondary">
             Define which products each service uses, at what rates — drives COGS
             calculations
           </div>
         </div>{" "}
-        <button
+        <Button
           onClick={() => setShowNewService(!showNewService)}
-          style={sBtn(D.green, D.white)}
+          variant="primary"
         >
           + New Service Type
-        </button>{" "}
+        </Button>{" "}
       </div>
       {health?.lines?.length > 0 && (
-        <div style={{ ...sCard, padding: 16 }}>
+        <Card className="p-5 mb-3 p-[16px]">
           {" "}
-          <div
-            style={{
-              display: "flex",
-              justifyContent: "space-between",
-              gap: 12,
-              alignItems: "center",
-              marginBottom: 12,
-            }}
-          >
+          <div className="flex justify-between gap-[12px] items-center mb-[12px]">
             {" "}
             <div>
               {" "}
-              <div style={{ fontSize: 14, fontWeight: 700, color: D.heading }}>
+              <div className="text-ui-body font-medium text-zinc-900">
                 Protocol Health
               </div>{" "}
-              <div style={{ fontSize: 11, color: D.muted }}>
+              <div className="text-ui-body text-ink-secondary">
                 Template coverage, linked inventory COGS rows, and missing cost
                 warnings
               </div>{" "}
             </div>{" "}
-            <button
-              onClick={load}
-              style={{
-                ...sBtn("transparent", D.muted),
-                border: `1px solid ${D.border}`,
-                fontSize: 11,
-                padding: "6px 10px",
-              }}
-            >
+            <Button onClick={load} variant="secondary">
               Refresh
-            </button>{" "}
+            </Button>{" "}
           </div>{" "}
-          <div
-            style={{
-              display: "grid",
-              gridTemplateColumns: "repeat(auto-fit, minmax(155px, 1fr))",
-              gap: 8,
-            }}
-          >
+          <div className="grid gap-[8px]">
             {health.lines.map((line) => {
               const label = lineLabel(line.serviceLine);
-              const color =
-                line.status === "healthy"
-                  ? D.green
-                  : line.status === "warning"
-                    ? D.amber
-                    : D.red;
               const needsCogs = line.cogsRows === 0;
               const needsCosts = line.missingCostRows > 0;
               return (
-                <div
+                <Card
                   key={line.serviceLine}
-                  style={{
-                    textAlign: "left",
-                    background: D.input,
-                    border: `1px solid ${color}55`,
-                    borderRadius: 8,
-                    padding: 10,
-                  }}
                   title={(line.warnings || [])
                     .map((w) => `${w.serviceType}: ${w.warning}`)
                     .join("\n")}
+                  className={
+                    needsCogs || needsCosts
+                      ? "text-left p-3 border-alert-fg"
+                      : "text-left p-3"
+                  }
                 >
                   {" "}
-                  <div
-                    style={{
-                      display: "flex",
-                      justifyContent: "space-between",
-                      alignItems: "center",
-                      gap: 8,
-                    }}
-                  >
+                  <div className="flex justify-between items-center gap-[8px]">
                     {" "}
-                    <div
-                      style={{
-                        fontSize: 12,
-                        fontWeight: 700,
-                        color: D.heading,
-                      }}
-                    >
+                    <div className="text-ui-body font-medium text-zinc-900">
                       {label}
                     </div>{" "}
-                    <span style={sBadge(`${color}22`, color)}>
+                    <Badge tone={needsCogs || needsCosts ? "alert" : "neutral"}>
                       {line.status}
-                    </span>{" "}
+                    </Badge>{" "}
                   </div>{" "}
-                  <div
-                    style={{
-                      display: "grid",
-                      gridTemplateColumns: "repeat(3, 1fr)",
-                      gap: 6,
-                      marginTop: 8,
-                    }}
-                  >
+                  <div className="grid gap-[6px] mt-[8px]">
                     {" "}
                     <div>
-                      <div
-                        style={{
-                          fontFamily: "'JetBrains Mono', monospace",
-                          fontSize: 15,
-                          color: D.heading,
-                        }}
-                      >
+                      <div className="text-ui-body text-zinc-900">
                         {line.templateCount}
                       </div>
-                      <div
-                        style={{
-                          fontSize: 11,
-                          color: D.muted,
-                          textTransform: "uppercase",
-                        }}
-                      >
+                      <div className="text-ui-body text-ink-secondary">
                         Templates
                       </div>
                     </div>{" "}
                     <div>
-                      <div
-                        style={{
-                          fontFamily: "'JetBrains Mono', monospace",
-                          fontSize: 15,
-                          color: D.heading,
-                        }}
-                      >
+                      <div className="text-ui-body text-zinc-900">
                         {line.cogsRows}
                       </div>
-                      <div
-                        style={{
-                          fontSize: 11,
-                          color: D.muted,
-                          textTransform: "uppercase",
-                        }}
-                      >
+                      <div className="text-ui-body text-ink-secondary">
                         COGS
                       </div>
                     </div>{" "}
                     <div>
-                      <div
-                        style={{
-                          fontFamily: "'JetBrains Mono', monospace",
-                          fontSize: 15,
-                          color,
-                        }}
-                      >
-                        {line.missingCostRows}
-                      </div>
-                      <div
-                        style={{
-                          fontSize: 11,
-                          color: D.muted,
-                          textTransform: "uppercase",
-                        }}
-                      >
+                      <div className="text-ui-body">{line.missingCostRows}</div>
+                      <div className="text-ui-body text-ink-secondary">
                         Missing
                       </div>
                     </div>{" "}
                   </div>{" "}
-                  <div
-                    style={{
-                      display: "flex",
-                      gap: 6,
-                      flexWrap: "wrap",
-                      marginTop: 10,
-                    }}
-                  >
+                  <div className="flex gap-[6px] flex-wrap mt-[10px]">
                     {" "}
-                    <button
+                    <Button
                       onClick={() => filterToLine(line.serviceLine)}
-                      style={{
-                        ...sBtn("transparent", D.teal),
-                        border: `1px solid ${D.border}`,
-                        fontSize: 11,
-                        padding: "5px 8px",
-                      }}
+                      variant="secondary"
                     >
                       View
-                    </button>
+                    </Button>
                     {needsCogs && (
-                      <button
+                      <Button
                         onClick={() => openAddForLine(line.serviceLine)}
-                        style={{
-                          ...sBtn(D.teal, D.white),
-                          fontSize: 11,
-                          padding: "5px 8px",
-                        }}
+                        variant="primary"
                       >
                         + COGS
-                      </button>
+                      </Button>
                     )}
                     {needsCosts && (
-                      <button
+                      <Button
                         onClick={() => highlightMissingCosts(line.serviceLine)}
-                        style={{
-                          ...sBtn(`${D.amber}22`, D.amber),
-                          border: `1px solid ${D.amber}44`,
-                          fontSize: 11,
-                          padding: "5px 8px",
-                        }}
+                        variant="primary"
                       >
                         Cost Data
-                      </button>
+                      </Button>
                     )}
-                    <button
+                    <Button
                       onClick={() => {
                         window.location.href = "/admin/dispatch?tab=protocols";
                       }}
-                      style={{
-                        ...sBtn(
-                          line.templateCount === 0
-                            ? `${D.red}12`
-                            : "transparent",
-                          line.templateCount === 0 ? D.red : D.muted,
-                        ),
-                        border: `1px solid ${line.templateCount === 0 ? `${D.red}33` : D.border}`,
-                        fontSize: 11,
-                        padding: "5px 8px",
-                      }}
+                      variant={
+                        line.templateCount === 0 ? "danger" : "secondary"
+                      }
                     >
                       Templates
-                    </button>{" "}
+                    </Button>{" "}
                   </div>{" "}
-                </div>
+                </Card>
               );
             })}
           </div>{" "}
-        </div>
+        </Card>
       )}
-      <div
-        style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 14 }}
-      >
+      <div className="flex gap-[6px] flex-wrap mb-[14px]">
         {PROTOCOL_FILTERS.map((filter) => {
           const active = serviceFilter === filter.key;
           return (
-            <button
+            <Button
               key={filter.key}
               onClick={() => {
                 setServiceFilter(filter.key);
                 setCostHighlightLine(null);
               }}
-              style={{
-                ...sBtn(
-                  active ? D.teal : "transparent",
-                  active ? D.white : D.muted,
-                ),
-                border: `1px solid ${active ? D.teal : D.border}`,
-                fontSize: 11,
-                padding: "6px 10px",
-              }}
+              variant={active ? "primary" : "secondary"}
             >
               {filter.label}
-            </button>
+            </Button>
           );
         })}
       </div>
       {showNewService && (
-        <div
-          style={{
-            ...sCard,
-            display: "flex",
-            gap: 8,
-            alignItems: "center",
-            border: `1px solid ${D.green}44`,
-          }}
-        >
+        <Card className="p-5 mb-3 flex gap-[8px] items-center">
           {" "}
-          <input
+          <Input
             value={newServiceType}
             onChange={(e) => setNewServiceType(e.target.value)}
             placeholder="Service type (e.g. Mole Trapping)"
-            style={{ ...sInput, flex: 1 }}
+            className="flex-[1]"
           />{" "}
-          <button
+          <Button
             onClick={() => {
               if (newServiceType.trim()) {
                 setShowAdd(newServiceType.trim());
                 setShowNewService(false);
               }
             }}
-            style={sBtn(D.green, D.white)}
+            variant="primary"
           >
             Create
-          </button>{" "}
-          <button
-            onClick={() => setShowNewService(false)}
-            style={{
-              ...sBtn("transparent", D.muted),
-              border: `1px solid ${D.border}`,
-            }}
-          >
+          </Button>{" "}
+          <Button onClick={() => setShowNewService(false)} variant="secondary">
             Cancel
-          </button>{" "}
-        </div>
+          </Button>{" "}
+        </Card>
       )}
       {showAdd && !services.find((s) => s.serviceType === showAdd) && (
-        <div style={{ ...sCard, border: `1px solid ${D.teal}44` }}>
+        <Card className="p-5 mb-3">
           {" "}
-          <div
-            style={{
-              fontSize: 15,
-              fontWeight: 500,
-              color: D.heading,
-              marginBottom: 12,
-            }}
-          >
+          <div className="text-ui-body font-medium text-zinc-900 mb-[12px]">
             {showAdd}
           </div>{" "}
           <AddProtocolRow
@@ -5116,21 +4949,17 @@ function ProtocolsTab({
             onAdd={() => addRow(showAdd)}
             onCancel={() => setShowAdd(null)}
           />{" "}
-        </div>
+        </Card>
       )}
       {services.length === 0 && !showAdd && (
-        <div
-          style={{ ...sCard, textAlign: "center", padding: 40, color: D.muted }}
-        >
+        <Card className="p-5 mb-3 text-center p-[40px] text-ink-secondary">
           No protocols defined yet.
-        </div>
+        </Card>
       )}
       {services.length > 0 && visibleServices.length === 0 && !showAdd && (
-        <div
-          style={{ ...sCard, textAlign: "center", padding: 40, color: D.muted }}
-        >
+        <Card className="p-5 mb-3 text-center p-[40px] text-ink-secondary">
           No protocols in this service category yet.
-        </div>
+        </Card>
       )}
       {visibleServices.map((svc) => {
         const serviceLine = protocolLineForService(svc.serviceType);
@@ -5138,334 +4967,220 @@ function ProtocolsTab({
           costHighlightLine === serviceLine &&
           svc.products.some((p) => p.costWarning || !p.costPerApp);
         return (
-          <div
+          <Card
             key={svc.serviceType}
-            style={{
-              ...sCard,
-              border: highlightService ? `1px solid ${D.amber}` : sCard.border,
-              boxShadow: highlightService
-                ? `0 0 0 3px ${D.amber}18`
-                : sCard.boxShadow,
-            }}
+            className={
+              highlightService
+                ? "p-5 mb-3 border-alert-fg ring-2 ring-alert-bg"
+                : "p-5 mb-3"
+            }
           >
             {" "}
-            <div
-              style={{
-                display: "flex",
-                justifyContent: "space-between",
-                alignItems: "center",
-                marginBottom: 12,
-              }}
-            >
+            <div className="flex justify-between items-center mb-[12px]">
               {" "}
-              <div style={{ fontSize: 15, fontWeight: 500, color: D.heading }}>
+              <div className="text-ui-body font-medium text-zinc-900">
                 {svc.serviceType}
               </div>{" "}
-              <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+              <div className="flex gap-[8px] items-center">
                 {" "}
-                <div
-                  style={{
-                    fontFamily: "'JetBrains Mono', monospace",
-                    fontSize: 16,
-                    fontWeight: 700,
-                    color: D.green,
-                  }}
-                >
+                <div className="text-ui-body font-medium text-zinc-900">
                   ${svc.totalCost.toFixed(2)}/app
                 </div>{" "}
-                <button
+                <Button
                   onClick={() => {
                     setCostHighlightLine(null);
                     setShowAdd(
                       showAdd === svc.serviceType ? null : svc.serviceType,
                     );
                   }}
-                  style={{
-                    ...sBtn(D.teal, D.white),
-                    fontSize: 11,
-                    padding: "6px 12px",
-                  }}
+                  variant="primary"
                 >
                   + Product
-                </button>{" "}
+                </Button>{" "}
               </div>{" "}
             </div>{" "}
             {/* overflow-x wrapper: phones scroll the wide table instead of
-                clipping it; index.css adds the scroll-shadow affordance. */}
-            <div style={{ overflowX: "auto" }}>
-            <table style={{ width: "100%", borderCollapse: "collapse" }}>
-              <thead>
-                <tr>
-                  {[
-                    "Product",
-                    "Usage",
-                    "Per 1000sf",
-                    "Best Price",
-                    "Cost/App",
-                    "Cost Source",
-                    "Primary",
-                    "Notes",
-                    "",
-                  ].map((h) => (
-                    <th key={h} style={thS}>
-                      {h}
-                    </th>
-                  ))}
-                </tr>
-              </thead>
-              <tbody>
-                {svc.products.map((p) => {
-                  const highlightProductCost =
-                    costHighlightLine === serviceLine &&
-                    (p.costWarning || !p.costPerApp);
-                  return editingRow === p.id ? (
-                    <tr key={p.id} style={{ background: `${D.teal}10` }}>
-                      <td style={{ ...tdS, fontWeight: 500 }}>
-                        {p.productName}
-                      </td>
-                      <td style={tdS}>
-                        <div style={{ display: "flex", gap: 4 }}>
-                          <input
-                            value={editForm.usageAmount}
+                 clipping it; index.css adds the scroll-shadow affordance. */}
+            <div className="overflow-x-auto">
+              <Table className="w-full">
+                <THead>
+                  <TR>
+                    {[
+                      "Product",
+                      "Usage",
+                      "Per 1000sf",
+                      "Best Price",
+                      "Cost/App",
+                      "Cost Source",
+                      "Primary",
+                      "Notes",
+                      "",
+                    ].map((h) => (
+                      <TH key={h}>{h}</TH>
+                    ))}
+                  </TR>
+                </THead>
+                <TBody>
+                  {svc.products.map((p) => {
+                    const highlightProductCost =
+                      costHighlightLine === serviceLine &&
+                      (p.costWarning || !p.costPerApp);
+                    return editingRow === p.id ? (
+                      <TR key={p.id} className="bg-zinc-50">
+                        <TD className="font-medium">{p.productName}</TD>
+                        <TD>
+                          <div className="flex gap-[4px]">
+                            <Input
+                              value={editForm.usageAmount}
+                              onChange={(e) =>
+                                setEditForm((f) => ({
+                                  ...f,
+                                  usageAmount: e.target.value,
+                                }))
+                              }
+                              type="number"
+                              step="0.01"
+                              className="w-[60px]"
+                            />
+
+                            <Select
+                              value={editForm.usageUnit}
+                              onChange={(e) =>
+                                setEditForm((f) => ({
+                                  ...f,
+                                  usageUnit: e.target.value,
+                                }))
+                              }
+                              className="w-[70px]"
+                            >
+                              {unitOpts.map((u) => (
+                                <option key={u} value={u}>
+                                  {u}
+                                </option>
+                              ))}
+                            </Select>
+                          </div>
+                        </TD>
+                        <TD>
+                          <Input
+                            value={editForm.usagePer1000sf}
                             onChange={(e) =>
                               setEditForm((f) => ({
                                 ...f,
-                                usageAmount: e.target.value,
+                                usagePer1000sf: e.target.value,
                               }))
                             }
                             type="number"
-                            step="0.01"
-                            style={{ ...sInput, width: 60 }}
+                            step="0.001"
+                            placeholder="—"
+                            className="w-[70px]"
                           />
-                          <select
-                            value={editForm.usageUnit}
+                        </TD>
+                        <TD>
+                          {p.bestPrice
+                            ? `$${parseFloat(p.bestPrice).toFixed(2)}`
+                            : "—"}
+                        </TD>
+                        <TD className="text-zinc-900">
+                          {p.costPerApp ? `$${p.costPerApp.toFixed(2)}` : "—"}
+                        </TD>
+                        <TD className="text-ink-secondary">
+                          {costSourceLabel(p)}
+                        </TD>
+                        <TD>
+                          <Checkbox
+                            aria-label={`Set ${p.productName} as primary`}
+                            checked={editForm.isPrimary}
                             onChange={(e) =>
                               setEditForm((f) => ({
                                 ...f,
-                                usageUnit: e.target.value,
+                                isPrimary: e.target.checked,
                               }))
                             }
-                            style={{ ...sInput, width: 70 }}
-                          >
-                            {unitOpts.map((u) => (
-                              <option key={u} value={u}>
-                                {u}
-                              </option>
-                            ))}
-                          </select>
-                        </div>
-                      </td>
-                      <td style={tdS}>
-                        <input
-                          value={editForm.usagePer1000sf}
-                          onChange={(e) =>
-                            setEditForm((f) => ({
-                              ...f,
-                              usagePer1000sf: e.target.value,
-                            }))
-                          }
-                          type="number"
-                          step="0.001"
-                          placeholder="—"
-                          style={{ ...sInput, width: 70 }}
-                        />
-                      </td>
-                      <td
-                        style={{
-                          ...tdS,
-                          fontFamily: "'JetBrains Mono', monospace",
-                        }}
+                          />
+                        </TD>
+                        <TD>
+                          <Input
+                            value={editForm.notes}
+                            onChange={(e) =>
+                              setEditForm((f) => ({
+                                ...f,
+                                notes: e.target.value,
+                              }))
+                            }
+                            className="w-full"
+                          />
+                        </TD>
+                        <TD className="w-[80px]">
+                          <div className="flex gap-[4px]">
+                            <Button
+                              onClick={() => saveEdit(p.id)}
+                              variant="primary"
+                            >
+                              Save
+                            </Button>
+                            <Button
+                              onClick={() => setEditingRow(null)}
+                              variant="secondary"
+                            >
+                              ×
+                            </Button>
+                          </div>
+                        </TD>
+                      </TR>
+                    ) : (
+                      <TR
+                        key={p.id}
+                        className={highlightProductCost ? "bg-alert-bg" : ""}
                       >
-                        {p.bestPrice
-                          ? `$${parseFloat(p.bestPrice).toFixed(2)}`
-                          : "—"}
-                      </td>
-                      <td
-                        style={{
-                          ...tdS,
-                          fontFamily: "'JetBrains Mono', monospace",
-                          color: D.green,
-                        }}
-                      >
-                        {p.costPerApp ? `$${p.costPerApp.toFixed(2)}` : "—"}
-                      </td>
-                      <td style={{ ...tdS, fontSize: 11, color: D.muted }}>
-                        {costSourceLabel(p)}
-                      </td>
-                      <td style={tdS}>
-                        <input
-                          type="checkbox"
-                          checked={editForm.isPrimary}
-                          onChange={(e) =>
-                            setEditForm((f) => ({
-                              ...f,
-                              isPrimary: e.target.checked,
-                            }))
-                          }
-                          style={{ accentColor: D.teal }}
-                        />
-                      </td>
-                      <td style={tdS}>
-                        <input
-                          value={editForm.notes}
-                          onChange={(e) =>
-                            setEditForm((f) => ({
-                              ...f,
-                              notes: e.target.value,
-                            }))
-                          }
-                          style={{ ...sInput, width: "100%" }}
-                        />
-                      </td>
-                      <td style={{ ...tdS, width: 80 }}>
-                        <div style={{ display: "flex", gap: 4 }}>
-                          <button
-                            onClick={() => saveEdit(p.id)}
-                            style={{
-                              fontSize: 11,
-                              padding: "3px 6px",
-                              borderRadius: 4,
-                              border: "none",
-                              background: D.green,
-                              color: "#fff",
-                              cursor: "pointer",
-                            }}
-                          >
-                            Save
-                          </button>
-                          <button
-                            onClick={() => setEditingRow(null)}
-                            style={{
-                              fontSize: 11,
-                              padding: "3px 6px",
-                              borderRadius: 4,
-                              border: `1px solid ${D.border}`,
-                              background: "none",
-                              color: D.muted,
-                              cursor: "pointer",
-                            }}
-                          >
-                            ×
-                          </button>
-                        </div>
-                      </td>
-                    </tr>
-                  ) : (
-                    <tr
-                      key={p.id}
-                      style={{
-                        background: highlightProductCost
-                          ? `${D.amber}12`
-                          : "transparent",
-                      }}
-                    >
-                      <td style={{ ...tdS, fontWeight: 500 }}>
-                        {p.productName}{" "}
-                        {p.isPrimary && (
-                          <span style={sBadge(`${D.teal}22`, D.teal)}>
-                            Primary
-                          </span>
-                        )}
-                      </td>
-                      <td style={{ ...tdS, fontSize: 12 }}>
-                        {p.usageAmount} {p.usageUnit}
-                      </td>
-                      <td style={{ ...tdS, fontSize: 12 }}>
-                        {p.usagePer1000sf || "—"}
-                      </td>
-                      <td
-                        style={{
-                          ...tdS,
-                          fontFamily: "'JetBrains Mono', monospace",
-                        }}
-                      >
-                        {p.bestPrice
-                          ? `$${parseFloat(p.bestPrice).toFixed(2)}`
-                          : "—"}
-                      </td>
-                      <td
-                        style={{
-                          ...tdS,
-                          fontFamily: "'JetBrains Mono', monospace",
-                          color: D.green,
-                        }}
-                      >
-                        {p.costPerApp ? `$${p.costPerApp.toFixed(2)}` : "—"}
-                      </td>
-                      <td
-                        style={{
-                          ...tdS,
-                          fontSize: 11,
-                          color: p.costWarning ? D.amber : D.muted,
-                        }}
-                        title={p.costWarning || ""}
-                      >
-                        {costSourceLabel(p)}
-                      </td>
-                      <td style={{ ...tdS, fontSize: 11 }}>
-                        {p.isPrimary ? "" : ""}
-                      </td>
-                      <td
-                        style={{
-                          ...tdS,
-                          fontSize: 11,
-                          color: D.muted,
-                          maxWidth: 200,
-                          overflow: "hidden",
-                          textOverflow: "ellipsis",
-                          whiteSpace: "nowrap",
-                        }}
-                      >
-                        {p.notes || "—"}
-                      </td>
-                      <td style={{ ...tdS, width: 80 }}>
-                        <div style={{ display: "flex", gap: 4 }}>
-                          {" "}
-                          <button
-                            onClick={() => startEdit(p)}
-                            style={{
-                              fontSize: 11,
-                              padding: "2px 6px",
-                              borderRadius: 4,
-                              border: `1px solid ${D.border}`,
-                              background: "none",
-                              color: D.teal,
-                              cursor: "pointer",
-                            }}
-                          >
-                            Edit
-                          </button>{" "}
-                          <button
-                            onClick={() => deleteRow(p.id)}
-                            style={{
-                              fontSize: 11,
-                              padding: "2px 6px",
-                              borderRadius: 4,
-                              border: "none",
-                              background: `${D.red}22`,
-                              color: D.red,
-                              cursor: "pointer",
-                            }}
-                          >
-                            ×
-                          </button>{" "}
-                        </div>
-                      </td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
+                        <TD className="font-medium">
+                          {p.productName}{" "}
+                          {p.isPrimary && <Badge tone="neutral">Primary</Badge>}
+                        </TD>
+                        <TD>
+                          {p.usageAmount} {p.usageUnit}
+                        </TD>
+                        <TD>{p.usagePer1000sf || "—"}</TD>
+                        <TD>
+                          {p.bestPrice
+                            ? `$${parseFloat(p.bestPrice).toFixed(2)}`
+                            : "—"}
+                        </TD>
+                        <TD className="text-zinc-900">
+                          {p.costPerApp ? `$${p.costPerApp.toFixed(2)}` : "—"}
+                        </TD>
+                        <TD title={p.costWarning || ""}>
+                          {costSourceLabel(p)}
+                        </TD>
+                        <TD>{p.isPrimary ? "" : ""}</TD>
+                        <TD className="text-ink-secondary max-w-[200px] overflow-hidden whitespace-nowrap">
+                          {p.notes || "—"}
+                        </TD>
+                        <TD className="w-[80px]">
+                          <div className="flex gap-[4px]">
+                            {" "}
+                            <Button
+                              onClick={() => startEdit(p)}
+                              variant="secondary"
+                            >
+                              Edit
+                            </Button>{" "}
+                            <Button
+                              onClick={() => deleteRow(p.id)}
+                              variant="danger"
+                            >
+                              ×
+                            </Button>{" "}
+                          </div>
+                        </TD>
+                      </TR>
+                    );
+                  })}
+                </TBody>
+              </Table>
             </div>
             {showAdd === svc.serviceType && (
-              <div
-                style={{
-                  marginTop: 8,
-                  padding: 12,
-                  background: D.input,
-                  borderRadius: 8,
-                }}
-              >
+              <Card className="mt-[8px] p-3 bg-zinc-50">
                 {" "}
                 <AddProtocolRow
                   products={products}
@@ -5475,9 +5190,9 @@ function ProtocolsTab({
                   onAdd={() => addRow(svc.serviceType)}
                   onCancel={() => setShowAdd(null)}
                 />{" "}
-              </div>
+              </Card>
             )}
-          </div>
+          </Card>
         );
       })}
     </div>
@@ -5493,32 +5208,18 @@ function AddProtocolRow({
   onCancel,
 }) {
   return (
-    <div
-      style={{
-        display: "flex",
-        gap: 8,
-        alignItems: "flex-end",
-        flexWrap: "wrap",
-      }}
-    >
+    <div className="flex gap-[8px] items-end flex-wrap">
       {" "}
-      <div>
-        <label
-          style={{
-            fontSize: 11,
-            color: D.muted,
-            display: "block",
-            marginBottom: 2,
-          }}
-        >
-          Product
-        </label>{" "}
-        <select
+      <Field label="Product">
+        <Select
           value={newRow.productId}
           onChange={(e) =>
-            setNewRow((r) => ({ ...r, productId: e.target.value }))
+            setNewRow((r) => ({
+              ...r,
+              productId: e.target.value,
+            }))
           }
-          style={{ ...sInput, width: 200 }}
+          className="w-[200px]"
         >
           <option value="">Select...</option>
           {products.map((p) => (
@@ -5526,117 +5227,86 @@ function AddProtocolRow({
               {p.name}
             </option>
           ))}
-        </select>
-      </div>{" "}
-      <div>
-        <label
-          style={{
-            fontSize: 11,
-            color: D.muted,
-            display: "block",
-            marginBottom: 2,
-          }}
-        >
-          Amount
-        </label>{" "}
-        <input
+        </Select>
+      </Field>{" "}
+      <Field label="Amount">
+        <Input
           value={newRow.usageAmount}
           onChange={(e) =>
-            setNewRow((r) => ({ ...r, usageAmount: e.target.value }))
+            setNewRow((r) => ({
+              ...r,
+              usageAmount: e.target.value,
+            }))
           }
           type="number"
           step="0.01"
-          style={{ ...sInput, width: 70 }}
+          className="w-[70px]"
         />
-      </div>{" "}
-      <div>
-        <label
-          style={{
-            fontSize: 11,
-            color: D.muted,
-            display: "block",
-            marginBottom: 2,
-          }}
-        >
-          Unit
-        </label>{" "}
-        <select
+      </Field>{" "}
+      <Field label="Unit">
+        <Select
           value={newRow.usageUnit}
           onChange={(e) =>
-            setNewRow((r) => ({ ...r, usageUnit: e.target.value }))
+            setNewRow((r) => ({
+              ...r,
+              usageUnit: e.target.value,
+            }))
           }
-          style={{ ...sInput, width: 80 }}
+          className="w-[80px]"
         >
           {unitOpts.map((u) => (
             <option key={u} value={u}>
               {u}
             </option>
           ))}
-        </select>
-      </div>{" "}
-      <div>
-        <label
-          style={{
-            fontSize: 11,
-            color: D.muted,
-            display: "block",
-            marginBottom: 2,
-          }}
-        >
-          Per 1000sf
-        </label>{" "}
-        <input
+        </Select>
+      </Field>{" "}
+      <Field label="Per 1000sf">
+        <Input
           value={newRow.usagePer1000sf}
           onChange={(e) =>
-            setNewRow((r) => ({ ...r, usagePer1000sf: e.target.value }))
+            setNewRow((r) => ({
+              ...r,
+              usagePer1000sf: e.target.value,
+            }))
           }
           type="number"
           step="0.001"
           placeholder="—"
-          style={{ ...sInput, width: 70 }}
+          className="w-[70px]"
         />
-      </div>{" "}
-      <div style={{ display: "flex", alignItems: "center", gap: 4 }}>
-        <input
-          type="checkbox"
+      </Field>{" "}
+      <div className="flex items-center">
+        <Checkbox
+          label="Primary"
           checked={newRow.isPrimary}
           onChange={(e) =>
-            setNewRow((r) => ({ ...r, isPrimary: e.target.checked }))
+            setNewRow((r) => ({
+              ...r,
+              isPrimary: e.target.checked,
+            }))
           }
-          style={{ accentColor: D.teal }}
         />
-        <label style={{ fontSize: 11, color: D.muted }}>Primary</label>
       </div>{" "}
-      <div>
-        <label
-          style={{
-            fontSize: 11,
-            color: D.muted,
-            display: "block",
-            marginBottom: 2,
-          }}
-        >
-          Notes
-        </label>{" "}
-        <input
+      <Field label="Notes">
+        <Input
           value={newRow.notes}
-          onChange={(e) => setNewRow((r) => ({ ...r, notes: e.target.value }))}
+          onChange={(e) =>
+            setNewRow((r) => ({
+              ...r,
+              notes: e.target.value,
+            }))
+          }
           placeholder="Usage notes..."
-          style={{ ...sInput, width: 150 }}
+          className="w-[150px]"
         />
-      </div>{" "}
-      <button onClick={onAdd} style={sBtn(D.green, D.white)}>
+      </Field>{" "}
+      <Button onClick={onAdd} variant="primary">
         Add
-      </button>{" "}
-      <button
-        onClick={onCancel}
-        style={{
-          ...sBtn("transparent", D.muted),
-          border: `1px solid ${D.border}`,
-        }}
-      >
+      </Button>{" "}
+      <Button onClick={onCancel} variant="secondary">
         Cancel
-      </button>{" "}
+      </Button>{" "}
     </div>
   );
 }
