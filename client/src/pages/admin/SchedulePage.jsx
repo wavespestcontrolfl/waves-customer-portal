@@ -40,7 +40,10 @@ import { createPortal } from "react-dom";
 
 import { addETDays, etDateString, etDatetimeLocalToISO, etParts, formatETDateOnly, formatETDateTime } from "../../lib/timezone";
 import { completionDraftKey } from "../../lib/completion-drafts";
-import { stackVisitDiscounts, stackablePresets } from "../../lib/discountStack";
+import { stackVisitDiscounts, stackablePresets,
+  isCustomAmountPreset,
+  isCustomPercentagePreset,
+} from "../../lib/discountStack";
 import { useDiscountStacking } from "../../hooks/useDiscountStacking";
 import {
   defaultApplicationMethodForLine,
@@ -2245,12 +2248,11 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
   const presetById = (id) =>
     id ? discountPresets.find((d) => String(d.id) === String(id)) || null : null;
   const lineDiscountRow = (ld) => (ld ? { ...(presetById(ld.id) || {}), ...ld } : null);
-  const isCustomAmountPreset = (d) =>
-    d?.discount_type === "fixed_amount" &&
-    (d?.discount_key === "custom_dollar" || !(Number(d?.amount) > 0));
-  const isCustomPercentPreset = (d) =>
-    d?.discount_type === "percentage" &&
-    (d?.discount_key === "custom_percent" || !(Number(d?.amount) > 0));
+  // Codex r3 P2: this copy recognized only zero-valued fixed_amount/percentage
+  // presets, not the variable_* types, so picking a variable preset skipped
+  // the prompt, created a zero-valued slot and the server dropped the
+  // discount. Now the same shared predicate every other picker uses.
+  const isCustomPercentPreset = isCustomPercentagePreset;
   const presetOptionLabel = (d) => {
     if (isCustomPercentPreset(d)) return `${d.name} - custom %`;
     if (isCustomAmountPreset(d)) return `${d.name} - custom $`;

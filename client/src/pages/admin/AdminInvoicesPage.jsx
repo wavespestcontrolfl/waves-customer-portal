@@ -15,8 +15,14 @@ import {
   buttonStyles,
   cn,
 } from "../../components/ui";
-import { stackDiscounts, stackablePresets } from "../../lib/discountStack";
-import { useDiscountStacking } from "../../hooks/useDiscountStacking";
+import {
+  stackDiscounts,
+  stackDocumentDiscounts,
+  stackablePresets,
+  isCustomAmountPreset,
+  isCustomPercentagePreset,
+} from "../../lib/discountStack";
+import { useDiscountStackingState } from "../../hooks/useDiscountStacking";
 // client/src/pages/admin/AdminInvoicesPage.jsx
 //
 // Admin Invoices page — list, search, create, edit, void, refund.
@@ -131,56 +137,101 @@ export function invoiceDiscountDollars(lineItems, availableDiscounts, { compound
   const items = Array.isArray(lineItems) ? lineItems : [];
   const catalog = Array.isArray(availableDiscounts) ? availableDiscounts : [];
   const dollars = new Map();
-  for (const parent of items.filter((i) => i._kind !== "discount")) {
+  const parents = items.filter((i) => i._kind !== "discount");
+  const termFor = (child) => {
+    if (isStoredDiscountRow(child)) {
+      return {
+        discountType: "fixed_amount",
+        amount: child.discount_dollars != null
+          ? Math.abs(Number(child.discount_dollars))
+          : Math.abs(invoiceLineAmount(child)),
+      };
+    }
+    const row = catalog.find((d) => String(d.id) === String(child.discount_id));
+    if (!row) {
+      return {
+        discountType: "fixed_amount",
+        amount: Math.abs(invoiceLineAmount(child)),
+      };
+    }
+    return {
+      discountType: row.discount_type,
+      // The operator's entry for a custom preset, then the amount the row
+      // was saved with, then the catalog's own (0 for the custom presets).
+      amount:
+        child.custom_discount_percentage ??
+        child.custom_discount_amount ??
+        child.discount_amount ??
+        Number(row.amount) ??
+        0,
+      maxDiscountDollars: row.max_discount_dollars,
+    };
+  };
+  const orderedChildrenOf = (parent) => {
     const children = items.filter(
       (i) => i._kind === "discount" && i.discount_for === parent.client_id,
     );
-    if (!children.length) continue;
-    const ordered = [
+    // Frozen stamps first, so a hand-added row compounds on what they left.
+    return [
       ...children.filter(isStoredDiscountRow),
       ...children.filter((child) => !isStoredDiscountRow(child)),
     ];
-    const terms = ordered.map((child) => {
-      if (isStoredDiscountRow(child)) {
-        return {
-          discountType: "fixed_amount",
-          amount: child.discount_dollars != null
-            ? Math.abs(Number(child.discount_dollars))
-            : Math.abs(invoiceLineAmount(child)),
-        };
-      }
-      const row = catalog.find(
-        (d) => String(d.id) === String(child.discount_id),
+  };
+
+  if (!compound) {
+    // Gate off — each line stacked in isolation, exactly as before this lane.
+    for (const parent of parents) {
+      const ordered = orderedChildrenOf(parent);
+      if (!ordered.length) continue;
+      const stacked = stackDiscounts(
+        Math.max(0, invoiceLineAmount(parent)),
+        ordered.map(termFor),
+        { compound: false },
       );
-      if (!row) {
-        return {
-          discountType: "fixed_amount",
-          amount: Math.abs(invoiceLineAmount(child)),
-        };
-      }
+      ordered.forEach((child, i) => {
+        if (isStoredDiscountRow(child)) return;
+        dollars.set(child.client_id, stacked.items[i].dollars);
+      });
+    }
+    return dollars;
+  }
+
+  // Gate on — the same document model InvoiceService runs. A STORED discount
+  // row with no `discount_for` is an appointment-level stamp that reaches the
+  // whole invoice: it has to ride the stack as a frozen document term, or a
+  // line discount added here resolves against the full line and the preview
+  // disagrees with what the server saves ($85 vs $85.50 on a $100 invoice
+  // with a $10 stamp plus a fresh 5%). A stamp narrowed to one service
+  // (document_scope_service_key) reaches only lines carrying that key.
+  const perParent = parents.map(orderedChildrenOf);
+  const documentStamps = items.filter(
+    (i) => i._kind === "discount" && !i.discount_for && isStoredDiscountRow(i),
+  );
+  const stacked = stackDocumentDiscounts({
+    lines: parents.map((parent, i) => ({
+      gross: Math.max(0, invoiceLineAmount(parent)),
+      terms: perParent[i].map(termFor),
+    })),
+    documentTerms: documentStamps.map((stamp) => {
+      const scopeKey = stamp.document_scope_service_key || null;
       return {
-        discountType: row.discount_type,
-        // The operator's entry for a custom preset, then the amount the row
-        // was saved with, then the catalog's own (0 for the custom presets).
-        amount:
-          child.custom_discount_percentage ??
-          child.custom_discount_amount ??
-          child.discount_amount ??
-          Number(row.amount) ??
-          0,
-        maxDiscountDollars: row.max_discount_dollars,
+        ...termFor(stamp),
+        ...(scopeKey
+          ? {
+            eligibleLines: parents
+              .map((parent, i) => (String(parent.service_key || "") === String(scopeKey) ? i : -1))
+              .filter((i) => i >= 0),
+          }
+          : {}),
       };
-    });
-    const stacked = stackDiscounts(
-      Math.max(0, invoiceLineAmount(parent)),
-      terms,
-      { compound },
-    );
+    }),
+  });
+  perParent.forEach((ordered, parentIdx) => {
     ordered.forEach((child, i) => {
       if (isStoredDiscountRow(child)) return;
-      dollars.set(child.client_id, stacked.items[i].dollars);
+      dollars.set(child.client_id, stacked.lines[parentIdx].termDollars[i]);
     });
-  }
+  });
   return dollars;
 }
 
@@ -5417,7 +5468,11 @@ function CreateInvoice({
   const [availableDiscounts, setAvailableDiscounts] = useState([]);
   // Deploy-wide release gate (GATE_DISCOUNT_STACKING); fails closed, so the
   // builder totals exactly as it did before this lane until it is flipped.
-  const stackingEnabled = useDiscountStacking();
+  const {
+    enabled: stackingEnabled,
+    known: stackingKnown,
+    retry: retryStackingProbe,
+  } = useDiscountStackingState();
   const [discountSearchIdx, setDiscountSearchIdx] = useState(null);
   const [discountQueries, setDiscountQueries] = useState({});
   const [aiNotesLoading, setAiNotesLoading] = useState(false);
@@ -5436,7 +5491,17 @@ function CreateInvoice({
 
   // Load active, invoice-visible discounts once. Tier discounts are included here
   // for explicit line-level selection; customer tier never applies a hidden discount.
-  const builderBusy = saving || aiNotesLoading || aiMessageLoading;
+  // Codex r3 P1: the gate is read INDEPENDENTLY by the server at save time,
+  // so an unconfirmed probe means the preview math and the persisted math can
+  // disagree — two percentages on $100 preview $85 additively while the
+  // server compounds to $85.50. The controls still fail closed (stackingEnabled
+  // is false while unknown); this only blocks SUBMITTING money, and only when
+  // more than one discount row is actually in play, so an ordinary
+  // single-discount invoice saves exactly as it did before this lane.
+  const discountRowCount = lineItems.filter((i) => i._kind === "discount").length;
+  const stackingUnconfirmedBlocksSave = !stackingKnown && discountRowCount > 1;
+  const builderBusy = saving || aiNotesLoading || aiMessageLoading
+    || stackingUnconfirmedBlocksSave;
   useEffect(() => {
     onPendingChange(saving || aiNotesLoading || aiMessageLoading);
     return () => onPendingChange(false);
@@ -5625,14 +5690,9 @@ function CreateInvoice({
     setServiceSearchIdx(null);
     setServiceResults([]);
   };
-  const isCustomAmountDiscount = (d) =>
-    d.discount_type === "variable_amount" ||
-    (d.discount_type === "fixed_amount" &&
-      (d.discount_key === "custom_dollar" || !(Number(d.amount) > 0)));
-  const isCustomPercentageDiscount = (d) =>
-    d.discount_type === "variable_percentage" ||
-    (d.discount_type === "percentage" &&
-      (d.discount_key === "custom_percent" || !(Number(d.amount) > 0)));
+  // One shared predicate (lib/discountStack) across every picker.
+  const isCustomAmountDiscount = isCustomAmountPreset;
+  const isCustomPercentageDiscount = isCustomPercentagePreset;
   const formatDiscountLabel = (d) =>
     d.discount_type === "percentage" ||
     d.discount_type === "variable_percentage"
@@ -7792,6 +7852,45 @@ function CreateInvoice({
               </span>{" "}
             </div>{" "}
           </div>{" "}
+          {stackingUnconfirmedBlocksSave && (
+            <div
+              style={{
+                background: "#DC262615",
+                border: "1px solid #DC262655",
+                borderRadius: 8,
+                padding: 10,
+                marginBottom: 10,
+                fontSize: 12,
+                color: "#DC2626",
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "space-between",
+                gap: 8,
+              }}
+            >
+              <span>
+                Could not confirm how multiple discounts combine — retry before
+                saving.
+              </span>
+              <button
+                type="button"
+                onClick={retryStackingProbe}
+                style={{
+                  background: "none",
+                  border: "1px solid #DC2626",
+                  color: "#DC2626",
+                  borderRadius: 6,
+                  padding: "4px 10px",
+                  fontSize: 12,
+                  fontWeight: 500,
+                  cursor: "pointer",
+                  flex: "0 0 auto",
+                }}
+              >
+                Retry
+              </button>
+            </div>
+          )}
           <Button
             onClick={editMode ? handleSave : handleCreate}
             style={{

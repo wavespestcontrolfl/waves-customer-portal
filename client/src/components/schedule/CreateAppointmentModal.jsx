@@ -38,7 +38,7 @@ import { useSlotConflicts } from './useSlotConflicts';
 import BestTimeHint, { detourPhrase } from './BestTimeHint';
 import { useBestTimes } from './useBestTimes';
 import { etDateString } from '../../lib/timezone';
-import { stackVisitDiscounts, stackablePresets } from '../../lib/discountStack';
+import { stackVisitDiscounts, stackablePresets, isCustomAmountPreset, isCustomPercentagePreset } from '../../lib/discountStack';
 import { useDiscountStackingState } from '../../hooks/useDiscountStacking';
 import { propertyRelationshipChip } from '../../lib/contact-roles';
 
@@ -719,6 +719,11 @@ export function firstGroupSendFlags({ resultsCount, createdCount, sendSms, cardL
 export function recurringGroupRequestFields({
   isRecurring, group, recurringCount, skipWeekends, weekendShift,
   collectPrepay, groupSubtotal, prepayMethod, prepayNote,
+  // What ONE visit of this group actually bills — groupSubtotal carries the
+  // line-level discounts only, so a group also carrying the appointment-level
+  // discount bills less than its subtotal. Defaults to groupSubtotal for a
+  // group with no appointment discount (and for older callers).
+  prepayPerVisitAmount,
 }) {
   if (!isRecurring) return { boosterMonths: undefined, prepaid: undefined };
   // Sent as a finite override only when the operator typed >= 2 — otherwise
@@ -744,10 +749,15 @@ export function recurringGroupRequestFields({
     skipWeekends: !!skipWeekends,
     weekendShift: skipWeekends ? weekendShift : undefined,
     boosterMonths: boosterMonths.length > 0 ? boosterMonths : undefined,
-    // totalAmount projects the per-visit subtotal across the planned visit
-    // count (the same finite-count-or-4 default the server's fallback uses).
+    // totalAmount projects the per-visit total across the planned visit count
+    // (the same finite-count-or-4 default the server's fallback uses). It
+    // must be the FULLY STACKED per-visit total: projecting groupSubtotal
+    // instead charged a four-visit $100 series carrying a 10% appointment
+    // discount $400 while the created visits total $360, and
+    // stampSeriesPrepaid trusts this number and splits the overstatement
+    // across the series (Codex #4405 r3 P1).
     prepaid: collectPrepay ? {
-      totalAmount: groupSubtotal * (finiteCount ?? 4),
+      totalAmount: (prepayPerVisitAmount ?? groupSubtotal) * (finiteCount ?? 4),
       method: prepayMethod,
       note: prepayNote || undefined,
     } : undefined,
@@ -1634,14 +1644,9 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
 
   // Custom discounts ship as a percentage/fixed_amount preset with amount 0 (or
   // the variable_* types) — the operator supplies the value when applying it.
-  const isCustomAmountDiscount = (d) =>
-    d?.discount_type === 'variable_amount' ||
-    (d?.discount_type === 'fixed_amount' &&
-      (d?.discount_key === 'custom_dollar' || !(Number(d?.amount) > 0)));
-  const isCustomPercentageDiscount = (d) =>
-    d?.discount_type === 'variable_percentage' ||
-    (d?.discount_type === 'percentage' &&
-      (d?.discount_key === 'custom_percent' || !(Number(d?.amount) > 0)));
+  // One shared predicate (lib/discountStack) across every picker.
+  const isCustomAmountDiscount = isCustomAmountPreset;
+  const isCustomPercentageDiscount = isCustomPercentagePreset;
   const formatDiscountLabel = (d) => {
     if (!d) return '';
     if (d.discount_type === 'free_service') return 'Free';
@@ -1767,6 +1772,12 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
   };
   // A custom preset takes the operator's amount, like a line pick.
   const pickAppointmentDiscount = (presetId) => {
+    // The scope key belongs to the PRESET that was showing when it was
+    // chosen. Carrying it onto a different preset posts a line the new
+    // preset's catalog scope does not allow and the server refuses the
+    // booking, while the preview quietly follows the new preset (Codex
+    // #4405 r3 P2). The Edit Appointment picker already resets it.
+    setAppointmentDiscountScopeKey('');
     if (!presetId) { setAppointmentDiscount(null); return; }
     const discount = discountPresets.find((d) => String(d.id) === String(presetId));
     if (!discount) return;
@@ -2259,6 +2270,26 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
     });
     return { dollars: stacked.appointmentDiscountDollars, total: stacked.total, lines: stacked.lines };
   }, [services, selectedCustomer, mosquitoQuote, appointmentDiscount, appointmentDiscountScopeKey, netSubtotal, stackingEnabled, percentExcludedKeys]);
+  // ONE cadence group's fully stacked per-visit total. The appointment-level
+  // discount rides exactly one group (appointmentDiscountGroup), so a group
+  // that does not carry it totals to its own subtotal. Used for the prepay
+  // projection, which otherwise multiplies a subtotal that never had the
+  // appointment discount taken off it (Codex #4405 r3 P1).
+  const groupStackedPerVisitTotal = (group) => {
+    const carriesAppointmentDiscount = !!appointmentDiscount
+      && !!appointmentDiscountGroup
+      && groupKey(group) === appointmentDiscountGroup.key;
+    const stacked = stackVisitDiscounts({
+      lines: group.lines.map((s) => ({
+        gross: lineEffectiveBaseAmount(s),
+        lineDiscount: s.lineDiscount,
+        eligible: carriesAppointmentDiscount && appointmentDiscountReaches(s),
+      })),
+      appointmentDiscount: carriesAppointmentDiscount ? appointmentDiscount : null,
+      compound: stackingEnabled,
+    });
+    return stacked.total;
+  };
   const stackedLineDiscountAmount = (svc) => {
     const i = services.indexOf(svc);
     const restated = appointmentDiscountPreview.lines?.[i];
@@ -2617,6 +2648,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
           ...recurringGroupRequestFields({
             isRecurring, group, recurringCount, skipWeekends, weekendShift,
             collectPrepay, groupSubtotal, prepayMethod, prepayNote,
+            prepayPerVisitAmount: groupStackedPerVisitTotal(group),
           }),
           billingTerm,
         };
@@ -3941,7 +3973,12 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
           const parsedCount = Number.parseInt(recurringCount, 10);
           const finiteCount = Number.isInteger(parsedCount) && parsedCount >= 2 ? parsedCount : 0;
           if (!finiteCount) return null;
-          const perVisit = services.reduce((sum, s) => sum + Number(s.price || 0), 0);
+          // The fully stacked per-visit total — the raw price sum carried
+          // neither the line discounts nor the appointment-level one, so the
+          // operator was shown (and charged) more than the visits bill
+          // (Codex #4405 r3 P1). appointmentDiscountPreview.total falls back
+          // to the net subtotal when no appointment discount is selected.
+          const perVisit = appointmentDiscountPreview.total;
           const total = perVisit * finiteCount;
           return (
             <div style={{ ...sectionStyle, background: collectPrepay ? '#F0FDF4' : undefined, border: collectPrepay ? '1px solid #BBF7D0' : undefined, borderRadius: 8, padding: collectPrepay ? 14 : undefined }}>
