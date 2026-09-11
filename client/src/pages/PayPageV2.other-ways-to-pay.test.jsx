@@ -9,6 +9,7 @@ import PayPageV2 from './PayPageV2';
 vi.mock('../glass/glass-engine', () => ({ useGlassSurface: vi.fn() }));
 vi.mock('../components/brand', () => ({
   WavesShell: ({ children }) => <div>{children}</div>,
+  CustomerColumn: ({ children, ...props }) => <div {...props}>{children}</div>,
   BrandCard: ({ children }) => <section>{children}</section>,
   BrandButton: ({ children, ...props }) => <button type="button" {...props}>{children}</button>,
   SerifHeading: ({ children }) => <h1>{children}</h1>,

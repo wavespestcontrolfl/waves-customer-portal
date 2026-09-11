@@ -23,6 +23,7 @@ const ok = (body) => ({ status: 200, body });
 // `upcoming` / `confirmable` payload must carry a FUTURE date: eight ET calendar days out (never tomorrow,
 // which flips `isTomorrow` copy), computed with the same helpers the booking scenarios use.
 const { addETDays, etDateString } = require('../../../../server/utils/datetime-et');
+const { formatDisplayDate } = require('../../../../server/utils/date-only');
 const APPT_DATE = etDateString(addETDays(new Date(), 8));
 const serverError = () => ({ status: 500, body: { error: 'glass-audit: simulated outage' } });
 
@@ -78,18 +79,28 @@ const appointment = {
 // ---------------------------------------------------------------------------
 // /prep/:token  (PrepGuidePage.jsx ← server/routes/prep-public.js)
 // ---------------------------------------------------------------------------
+// `fetchUpcomingFamilyVisits` (prep-public.js) filters `scheduled_date >= etDateString()`, so a
+// literal band stops being a state the route can emit the day it passes: after the first date the
+// route drops that row, and after the second it returns no band at all while this scenario kept
+// rendering both. Both visits are generated from the run date instead. The labels go through the
+// route's own formatters too -- `formatDisplayDate` with no overrides ("September 18, 2026", no
+// weekday) and `formatArrivalWindow`'s H:MM shape -- which the hand-written 'Friday, September 18'
+// and '9-11 AM' strings never matched.
+const PREP_VISIT_1 = etDateString(addETDays(new Date(), 7));
+const PREP_VISIT_2 = etDateString(addETDays(new Date(), 21));
+const prepDateLabel = (ymd) => formatDisplayDate(ymd, { fallback: '' });
 const PREP_PAYLOAD = {
   customerFirstName: 'Jordan',
   customerName: 'Jordan Rivera',
   serviceContactNames: ['Casey Rivera'],
   projectTypeLabel: 'German Cockroach',
-  serviceDate: '2026-09-18',
+  serviceDate: prepDateLabel(PREP_VISIT_1),
   propertyAddress: '1200 Sample Lane, Venice, FL 34285',
   technicianName: 'Alex',
   supportPhone: '(941) 555-0100',
   upcomingVisits: [
-    { dateLabel: 'Friday, September 18', serviceLabel: 'German Cockroach Treatment · Visit 1 of 2', windowLabel: '9–11 AM' },
-    { dateLabel: 'Friday, October 2', serviceLabel: 'German Cockroach Follow-up', windowLabel: '1–3 PM' },
+    { dateLabel: prepDateLabel(PREP_VISIT_1), serviceLabel: 'German Cockroach Treatment · Visit 1 of 2', windowLabel: '9:00–11:00 AM' },
+    { dateLabel: prepDateLabel(PREP_VISIT_2), serviceLabel: 'German Cockroach Follow-up', windowLabel: '1:00–3:00 PM' },
   ],
   blocks: [
     { type: 'paragraph', content: 'A little preparation goes a long way. The steps below give the treatment full access to the places roaches hide and keep your family and pets clear while the products go down.' },

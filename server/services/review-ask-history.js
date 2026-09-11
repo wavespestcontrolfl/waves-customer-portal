@@ -167,9 +167,12 @@ async function lastManualAskAt(customerId, { since, includeReservations = true, 
     matchedSends.add(pair.sendIndex);
     matchedRows.add(pair.rowIndex);
   }
-  // Rows are ordered by created_at, but a resolved reservation's effective
-  // time is its confirmation (updated_at) — so take the LATEST effective
-  // time across the unmatched candidates, not the first row in that order.
+  // The MAX effective time, not the first row in created_at order. A
+  // resolved reservation's evidence time is its confirmation (updated_at),
+  // which can be later than a plain candidate's created_at even though the
+  // placeholder itself is older — .find() on a created_at-desc list would
+  // return that plain row and understate the floor, letting the next touch
+  // fire inside 72 h. Same reduce-to-max the reservation arm above uses.
   const manualAt = candidates.reduce((latest, row, index) => {
     if (matchedRows.has(index)) return latest;
     const at = effectiveAskAt(row);

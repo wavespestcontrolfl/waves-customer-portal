@@ -10,11 +10,30 @@ const fx = (name) => JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'fixt
 const first = (obj) => Object.values(obj)[0].body;
 // The tracker renders "Updated Ns ago" from Date.now() - vehicle.lastReportedAt, so a fixed fixture
 // timestamp goes stale on every rerun; the en-route payload is stamped relative to the run instead.
-const liveTrack = (body) => ({ ...body, vehicle: { ...body.vehicle, lastReportedAt: new Date(Date.now() - 45 * 1000).toISOString() } });
+// The rest of the payload is a same-day state as well: track-public gates the stops-ahead poll on
+// `isServiceDateToday(scheduled_date)` and the page renders an arrival window, so a fixture pinned
+// to its capture date shows a live tracker for a visit that already happened. Every remaining stamp
+// is shifted by whole days onto the run date with its time of day preserved.
+const trackStamps = ['arrivedAt'];
+const liveTrack = (body) => {
+  const anchor = body.window && body.window.start;
+  // Whole ET calendar days between the fixture's visit date and the run's. Adding 86,400,000 ms would
+  // preserve the UTC clock, not the Eastern one: rebasing a September 9am stamp across the November
+  // DST change lands it at 8am and silently rewrites the arrival-window evidence. `addETDaysAtWallClock`
+  // rebuilds the same ET wall-clock time on the target ET date, which is what "9am stays 9am" means.
+  const dayNumber = (ymd) => Math.round(Date.UTC(...ymd.split('-').map((n, i) => (i === 1 ? Number(n) - 1 : Number(n)))) / 86400000);
+  const days = anchor ? dayNumber(etDateString(new Date())) - dayNumber(etDateString(new Date(anchor))) : 0;
+  const shift = (iso) => (typeof iso === 'string' && iso ? addETDaysAtWallClock(new Date(iso), days).toISOString() : iso);
+  const out = { ...body, vehicle: { ...body.vehicle, lastReportedAt: new Date(Date.now() - 45 * 1000).toISOString() } };
+  if (body.window) out.window = { ...body.window, start: shift(body.window.start), end: shift(body.window.end) };
+  for (const k of trackStamps) if (body[k]) out[k] = shift(body[k]);
+  if (body.summary) out.summary = { ...body.summary, completedAt: shift(body.summary.completedAt) };
+  return out;
+};
 // The reschedule fixture is a one-off extraction whose availability window is literal dates; once they
 // are in the past the page still renders "Our best times for you" with slots production could never
 // return. Every date is re-based so `rangeFrom` = today (ET calendar days, see 40-diagnostics-booking).
-const { addETDays, etDateString } = require('../../../../server/utils/datetime-et');
+const { addETDays, addETDaysAtWallClock, etDateString } = require('../../../../server/utils/datetime-et');
 const liveReschedule = (body) => {
   const from = body.availability && body.availability.rangeFrom;
   if (!from) return body;

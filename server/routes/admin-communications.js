@@ -721,7 +721,12 @@ router.post('/sms', async (req, res, next) => {
           return abortUnsent(409, 'The review link is no longer in the message — remove the review request and try again.');
         }
         const owner = await db('customers').where({ id: rr.customer_id }).first('id', 'phone');
-        if (!owner || normalizePhoneLast10(owner.phone) !== normalizePhoneLast10(to)) {
+        // Exact E.164 match, not a last-10-digits suffix match: the owner's
+        // identity is trusted downstream (customerId, consent, lock, spacing
+        // history), and an international destination can share its last ten
+        // digits with a US number (Codex #4339 P2).
+        const ownerPhone = owner ? normalizePhone(owner.phone) : null;
+        if (!owner || !ownerPhone || ownerPhone !== normalizePhone(to)) {
           return abortUnsent(422, 'This review link belongs to a different customer — remove it before sending.');
         }
         trustedCustomerId = rr.customer_id;
@@ -1211,8 +1216,15 @@ router.post('/sms', async (req, res, next) => {
     else if (realProviderSend && manualReservationId) {
       await settleReplyHoldingReservation({ reservationId: manualReservationId, acceptedResult: catchProviderOutcome });
     } else await clearManualReservation();
-    // Before dispatch a claim can be released. After provider entry, only
-    // definitive non-delivery may release it; uncertainty retains evidence.
+    // Same for the inline review claim: a throw with NO confirmed provider
+    // acceptance means the ask never left — hand the claim back so an
+    // immediate retry isn't blocked for the 10-minute stale window. A throw
+    // AFTER acceptance (err.providerOutcome.sent === true, the scheduler's
+    // same convention) means the ask DID text: stamp it delivered instead so
+    // it can never go out twice. Between those two, uncertainty retains the
+    // evidence: only a throw raised BEFORE provider entry is definitively a
+    // non-send, so that is the only case normalized to 'not_sent' here, and a
+    // path that already settled the ask is left alone.
     if (claimedReviewRequestId && !reviewSettlementAttempted) {
       if (!reviewProviderStarted) err.providerOutcome = { sent: false, deliveryOutcome: 'not_sent' };
       try {

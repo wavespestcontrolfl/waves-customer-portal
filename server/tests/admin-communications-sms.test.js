@@ -877,7 +877,7 @@ describe('admin communications SMS route', () => {
       });
 
       test('a throw the provider ACCEPTED still writes the marker; one it did not accept writes nothing', async () => {
-        sendCustomerMessage.mockRejectedValueOnce(Object.assign(new Error('audit write failed'), { providerOutcome: { sent: true, deliveryOutcome: 'accepted', providerMessageId: 'SM-accepted' } }));
+        sendCustomerMessage.mockRejectedValueOnce(Object.assign(new Error('audit write failed'), { providerOutcome: { sent: true, deliveryOutcome: 'accepted', providerMessageId: 'SM-card' } }));
         await withServer(async (baseUrl) => {
           const res = await send(baseUrl, { customerId: 'cust-A', body: PREP_BODY });
           expect(res.status).toBe(500);
@@ -1520,7 +1520,7 @@ describe('admin communications SMS route', () => {
     test('a throw after provider acceptance still emails the Both copy and says so', async () => {
       const ReviewService = require('../services/review-request');
       const accepted = new Error('audit write failed');
-      accepted.providerOutcome = { sent: true, deliveryOutcome: 'accepted', providerMessageId: 'SM-accepted' };
+      accepted.providerOutcome = { sent: true, deliveryOutcome: 'accepted', providerMessageId: 'SM-review' };
       sendCustomerMessage.mockRejectedValue(accepted);
       // The error path fires the async Twilio failure alert (a promise).
       require('../services/twilio-failure-alerts').alertTwilioFailure.mockResolvedValue(undefined);

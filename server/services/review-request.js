@@ -244,7 +244,7 @@ function compareSameDayVisits(a, b) {
   return 0;
 }
 const { toE164 } = require("../utils/phone");
-const { runExclusive } = require("../utils/cron-lock");
+const { runExclusive, wasLockSkipped } = require("../utils/cron-lock");
 
 // GBP review links per location — derived from the canonical office map
 // (config/locations.js) so a GBP link change lands everywhere at once instead
@@ -4983,7 +4983,12 @@ const ReviewService = {
     const seq = await db("review_sequences").where({ id: sequenceId }).first();
     if (!seq || seq.status !== "active") return { ran: false, reason: "not_active" };
     const result = await runExclusive(`review-send:${seq.customer_id}`, () => this._runSequenceStepUnlocked(sequenceId), { recordHealth: false });
-    if (result && result.skipped) return { ran: false, deferred: true, reason: "customer_lock_held" };
+    // Read the skip through cron-lock's own helper, the way
+    // review-ask-dispatch reads the very same lock family. A private
+    // contract with runExclusive's return shape here would stop detecting a
+    // held lock the moment that shape changes, and a due step would run as
+    // if unlocked — the race this slice exists to close.
+    if (wasLockSkipped(result)) return { ran: false, deferred: true, reason: "customer_lock_held" };
     return result;
   },
 

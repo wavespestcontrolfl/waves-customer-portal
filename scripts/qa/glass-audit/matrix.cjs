@@ -44,13 +44,15 @@ lines.push('| Surface | Route / pattern | Role | Family | Scenario | States capt
 const DEFAULT_WIDTHS = [390, 1440];
 const declaredAt = (s, w) => (s.states && s.states.length ? s.states : [{ name: 'default' }])
   .filter((st) => (st.widths || s.widths || DEFAULT_WIDTHS).includes(w)).map((st) => st.name);
+// A capture counts only when it neither failed nor came back without metrics — the same test the
+// extra-width cell applies below, so "inspected" means one thing across the whole matrix.
+const ok = (c) => !!c && !c.failure && !!c.metrics;
 const status = (s, list, w) => {
   const rs = list.filter((c) => c.width === w);
   const states = declaredAt(s, w);
   if (!rs.length) return states.length ? 'NOT VERIFIED' : 'n/a';
   const engines = [...new Set(rs.map((c) => c.engine))];
   const latestOf = (st, e) => rs.filter((c) => c.state === st && c.engine === e).pop();
-  const ok = (c) => !!c && !c.failure && !!c.metrics;
   const failedEngines = engines.filter((e) => states.some((st) => { const c = latestOf(st, e); return c && !ok(c); }));
   // EVERY engine represented at this width must hold a successful latest capture of the state: an
   // interrupted WebKit run that captured only the first state leaves the others partial, not inspected.
@@ -71,13 +73,18 @@ for (const s of scenarios) {
   const declaredStates = (s.states || [{ name: 'default' }]).map((x) => x.name);
   const missing = declaredStates.filter((x) => !states.includes(x));
   const ix = [...new Set(latestList.flatMap((c) => (c.interactions || []).map((i) => `${i.name}${i.ok ? '' : ' (failed)'}`)))];
-  const other = [...new Set(list.map((c) => c.width).filter((w) => w !== 390 && w !== 1440))].sort((a, b) => a - b);
+  // Driven off latestList (not `list`), same as `ix`/`unmatched` above: a timed-out rerun at an extra
+  // width must not hide behind an earlier successful capture of that same width.
+  const otherWidths = [...new Set(latestList.map((c) => c.width).filter((w) => w !== 390 && w !== 1440))].sort((a, b) => a - b);
+  const failedOtherWidths = otherWidths.filter((w) => !latestList.filter((c) => c.width === w).every(ok));
+  const other = otherWidths.map((w) => (failedOtherWidths.includes(w) ? `${w} (failed)` : String(w)));
   const engines = [...new Set(list.map((c) => c.engine))];
   const runsUsed = [...new Set(list.map((c) => c.run))];
   const blockers = [];
   if (!list.length) blockers.push('no capture');
   if (missing.length) blockers.push(`states not captured: ${missing.join(', ')}`);
   if (s.notes) blockers.push(s.notes);
+  if (failedOtherWidths.length) blockers.push(`extra-width capture failed: ${failedOtherWidths.join(', ')}`);
   const unmatched = [...new Set(latestList.flatMap((c) => c.unmatched || []))];
   if (unmatched.length) blockers.push(`unmocked: ${unmatched.slice(0, 2).join(', ')}${unmatched.length > 2 ? ` +${unmatched.length - 2}` : ''}`);
   lines.push(['', s.surface, `\`${s.route}\``, s.role, s.family, s.id, states.join(', ') || '—', ix.join(', ') || '—', status(s, list, 390), status(s, list, 1440), other.join('/') || '—', engines.join('+') || '—', runsUsed.join(', ') || '—', s.findings || '', blockers.join('; ') || '—', ''].map(cell).join(' | ').trim());
