@@ -336,9 +336,14 @@ async function fenceBookingDay(trx, { date, techId = null, waitMs = bookingFence
       const techKeys = await lockTechDays(trx, [{ techId, date: dateStr }], { wait: false });
       if (techKeys) return { acquired: true, keys: keys.concat(techKeys), deadline };
     }
+    const miss = () => ({ acquired: false, keys, reason: haveOccupancy ? 'tech_day_busy' : 'date_busy', deadline });
     const remaining = deadline - now();
-    if (remaining <= 0) return { acquired: false, keys, reason: haveOccupancy ? 'tech_day_busy' : 'date_busy', deadline };
+    if (remaining <= 0) return miss();
     await sleep(Math.max(1, Math.min(pollMs, remaining)));
+    // Re-check AFTER waking (codex #4368 r3 P2): a delayed event loop can
+    // oversleep the clamped timer, and a rung released after the cap must
+    // not be tried, let alone reported as fenced. The cap is a hard cap.
+    if (now() >= deadline) return miss();
   }
 }
 

@@ -69,20 +69,31 @@ describe('fenceBookingDay', () => {
     const c = clock();
     const out = await fenceBookingDay(trx, { date: '2099-01-05', techId: 'tech-1', waitMs: 120, pollMs: 50, ...c });
     expect(out).toEqual({ acquired: false, keys: [], reason: 'date_busy', deadline: 120 });
-    // Tries at 0/50/100ms, then the last sleep is CLAMPED to the 20ms left
-    // so the final try lands exactly at the 120ms deadline — the cap is a
-    // hard cap on wall time, never overrun by a full interval (codex r1 P2).
-    expect(trx.raw).toHaveBeenCalledTimes(4);
+    // Tries at 0/50/100ms; the last sleep is CLAMPED to the 20ms left and,
+    // once the timer wakes AT the deadline, no further try is made — the
+    // cap is a hard cap on wall time (codex r1 + r3 P2).
+    expect(trx.raw).toHaveBeenCalledTimes(3);
     expect(c.sleep.mock.calls.map((call) => call[0])).toEqual([50, 50, 20]);
     expect(c.now()).toBe(120);
   });
 
-  test('a rung released inside the last, clamped interval is still granted within the cap', async () => {
+  test('an oversleeping timer never leads to a try past the cap, even if the rung frees up meanwhile (codex r3 P2)', async () => {
+    // Production timers can wake late; the clock here jumps 500ms on the
+    // final sleep. The rung is free by then — it must NOT be taken.
     const trx = fakeTrx([false, false, false, true, true]);
+    let t = 0;
+    const sleep = jest.fn(async (ms) => { t += ms === 20 ? 500 : ms; });
+    const out = await fenceBookingDay(trx, { date: '2099-01-05', techId: 'tech-1', waitMs: 120, pollMs: 50, sleep, now: () => t });
+    expect(out).toEqual({ acquired: false, keys: [], reason: 'date_busy', deadline: 120 });
+    expect(trx.raw).toHaveBeenCalledTimes(3);
+  });
+
+  test('a rung released before the deadline is still granted within the cap', async () => {
+    const trx = fakeTrx([false, false, true, true]);
     const c = clock();
     const out = await fenceBookingDay(trx, { date: '2099-01-05', techId: 'tech-1', waitMs: 120, pollMs: 50, ...c });
     expect(out.acquired).toBe(true);
-    expect(c.now()).toBe(120);
+    expect(c.now()).toBe(100);
   });
 
   test('rung 1 granted but the tech-day rung busy at the cap is a PARTIAL grant → acquired=false, key kept', async () => {
@@ -137,6 +148,7 @@ describe('fenceBookingDay', () => {
     const partial = await fenceBookingDay(trx, { date: '2099-01-05', techId: null, deadline: 120, waitMs: 1500, pollMs: 50, ...c2 });
     expect(partial.acquired).toBe(false);
     expect(c2.now()).toBe(120);
+    expect(trx.raw).toHaveBeenCalledTimes(4);
   });
 
   test('a query failure propagates (the caller treats the fence as best-effort)', async () => {
