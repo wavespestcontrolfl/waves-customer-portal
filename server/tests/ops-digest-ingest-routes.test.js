@@ -76,6 +76,27 @@ describe('auth and gates', () => {
     expect(mockNotifyAdmin).not.toHaveBeenCalled();
   });
 
+  test('every outcome carries the token-route privacy headers (no-store, noindex, no-referrer)', async () => {
+    const headersOf = async (token) => {
+      const res = await fetch(`${baseUrl}/api/ops/digest`, { method: 'POST', headers: { 'content-type': 'application/json', ...(token ? { authorization: `Bearer ${token}` } : {}) }, body: JSON.stringify(good()) });
+      return { status: res.status, cc: res.headers.get('cache-control'), robots: res.headers.get('x-robots-tag'), ref: res.headers.get('referrer-policy') };
+    };
+    mockNotifyAdmin.mockResolvedValue({ id: 'n-h', deduped: false });
+    for (const [token, expected] of [[TOKEN, 201], ['nope', 401]]) {
+      const h = await headersOf(token);
+      expect(h.status).toBe(expected);
+      expect(h.cc).toContain('no-store');
+      expect(h.robots).toContain('noindex');
+      expect(h.ref).toBe('no-referrer');
+    }
+    delete process.env.OPS_DIGEST_INGEST_TOKEN;
+    const dark = await headersOf('anything');
+    expect(dark.status).toBe(404);
+    expect(dark.cc).toContain('no-store');
+    expect(dark.robots).toContain('noindex');
+    expect(dark.ref).toBe('no-referrer');
+  });
+
   test('the dark 404 sits ahead of the rate limiter, so a prober never sees a 429 while unset', () => {
     // Route-level order is the guarantee: darkUnlessConfigured is the first
     // handler on both POSTs (a production limiter would otherwise answer
@@ -84,13 +105,15 @@ describe('auth and gates', () => {
     for (const layer of router.stack.filter((l) => l.route)) {
       expect(layer.route.stack[0].handle).toBe(darkUnlessConfigured);
       // the limiter lives only in the pre-chain, so a request is counted once
-      expect(layer.route.stack.map((l) => l.handle)).not.toContain(router.ingestPreParsers[1]);
+      expect(layer.route.stack.map((l) => l.handle)).not.toContain(router.ingestPreParsers[2]);
     }
-    // pre-chain order: dark → limiter → auth → parse → body errors
-    expect(router.ingestPreParsers[0]).toBe(darkUnlessConfigured);
-    expect(router.ingestPreParsers[2]).toBe(ingestAuth);
-    expect(router.ingestPreParsers[4]).toBe(ingestBodyErrorHandler);
-    expect(router.ingestPreParsers).toHaveLength(5);
+    // pre-chain order: privacy headers → dark → limiter → auth → parse → body errors
+    const { noStore } = require('../middleware/no-store');
+    expect(router.ingestPreParsers[0]).toBe(noStore);
+    expect(router.ingestPreParsers[1]).toBe(darkUnlessConfigured);
+    expect(router.ingestPreParsers[3]).toBe(ingestAuth);
+    expect(router.ingestPreParsers[5]).toBe(ingestBodyErrorHandler);
+    expect(router.ingestPreParsers).toHaveLength(6);
     delete process.env.OPS_DIGEST_INGEST_TOKEN;
     const res = { status: jest.fn(() => res), json: jest.fn(() => res) };
     const next = jest.fn();
@@ -335,9 +358,11 @@ describe('server/index.js mount order (unobservable-when-dark)', () => {
   const src = fs.readFileSync(path.join(__dirname, '..', 'index.js'), 'utf8');
   const at = (needle) => { const i = src.indexOf(needle); expect(i).toBeGreaterThan(-1); return i; };
 
-  test('the /api/ops/digest dark gate precedes the global /api/ limiter, the global JSON parser, and the router mount', () => {
-    const gate = at("app.use('/api/ops/digest', (req, res, next) => {");
-    expect(src.slice(gate, gate + 400)).toContain('OPS_DIGEST_INGEST_TOKEN');
+  test('the /api/ops/digest dark gate precedes the global cors(), the global /api/ limiter, the global JSON parser, and the router mount', () => {
+    const gate = at("app.use('/api/ops/digest', require('./middleware/no-store').noStore, (req, res, next) => {");
+    expect(src.slice(gate, gate + 600)).toContain('OPS_DIGEST_INGEST_TOKEN');
+    // an OPTIONS preflight must hit the dark 404 before cors() can answer 204
+    expect(gate).toBeLessThan(at("app.use(cors({"));
     expect(gate).toBeLessThan(at("app.use('/api/', limiter);"));
     expect(gate).toBeLessThan(at("app.use(express.json({ limit: '1mb'"));
     expect(gate).toBeLessThan(at("app.use('/api/ops/digest', require('./routes/ops-digest-ingest'));"));

@@ -39,10 +39,14 @@ const logger = require('../services/logger');
 const NotificationService = require('../services/notification-service');
 const { safeEqual } = require('../middleware/hermes-auth');
 const { notFoundBody } = require('../middleware/errors');
+const { noStore } = require('../middleware/no-store');
 const { unauthenticatedAuthLimitKey } = require('../middleware/rate-limit-key');
 const { inAppEnabled, resolveOpsDigest, CATEGORY } = require('../services/ops-digest');
 
 const router = express.Router();
+// Token-route privacy baseline on every outcome (dark 404, 401, 4xx, 201):
+// no-store, noindex, no-referrer — middleware/no-store.js, the shared trio.
+router.use(noStore);
 
 // Exceptions only — see header. FYI / FIRST are refused on purpose.
 const KINDS = new Set(['FIX', 'ACT']);
@@ -198,13 +202,14 @@ function ingestBodyErrorHandler(err, req, res, next) {
 
 // Mounted by server/index.js on /api/ops/digest AHEAD of the global body
 // parsers (the /api/mcp mcpPreParsers pattern): dark 404 → own limiter →
-// bearer auth → small capped JSON parse → JSON body errors. So while the
+// bearer auth → small capped JSON parse → JSON body errors, privacy headers
+// stamped first. So while the
 // token is unset nothing but the generic 404 is observable, and with it set
 // an unauthenticated caller gets 401 before any body is parsed (codex P0 r2
 // on #4392). The router repeats the dark check + auth as its own first
 // layers so it stays fail-closed even if mounted without the chain; the
 // limiter lives ONLY here so a request is counted once.
-const ingestPreParsers = [darkUnlessConfigured, ingestLimiter, ingestAuth, express.json({ limit: '1mb' }), ingestBodyErrorHandler];
+const ingestPreParsers = [noStore, darkUnlessConfigured, ingestLimiter, ingestAuth, express.json({ limit: '1mb' }), ingestBodyErrorHandler];
 
 module.exports = router;
 module.exports.ingestPreParsers = ingestPreParsers;

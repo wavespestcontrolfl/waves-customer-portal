@@ -1745,9 +1745,12 @@ findings so they land as `ops_digest` admin bell rows (the Waves Ops lane
 in Agents → Activity) instead of emails to contact@, and retire a finding's
 standing rows once its check has run clean N times (fall-off rule, owner
 2026-09-11). Token-only auth: `OPS_DIGEST_INGEST_TOKEN` via
-`Authorization: Bearer`, constant-time compare. Fail-closed in ordered
-layers, the dark check FIRST — a pre-router `app.use('/api/ops/digest')`
-gate in server/index.js mounted ahead of the global `/api/` limiter, and a
+`Authorization: Bearer`, constant-time compare. Privacy baseline on every
+outcome (`Cache-Control: no-store`, `X-Robots-Tag: noindex`,
+`Referrer-Policy: no-referrer` via middleware/no-store.js). Fail-closed in
+ordered layers, the dark check FIRST — a pre-router `app.use('/api/ops/digest')`
+gate in server/index.js mounted ahead of the global `cors()` (so even an
+OPTIONS preflight reads 404 while dark), the global `/api/` limiter, and a
 pre-parser chain (`ingestPreParsers`: dark gate → own limiter → bearer auth
 → 1 MB JSON parse → JSON body-error handler) mounted ahead of the global
 JSON parser, same pattern as `/api/mcp`. While the token is unset every
