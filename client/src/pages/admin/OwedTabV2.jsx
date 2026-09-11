@@ -38,6 +38,12 @@ function fmtWhen(value, withTime = true) {
   });
 }
 
+// Card summary when the cards are not on screen, and the deadline policy
+// sentence per the server's callback-cards flag.
+const NO_CARDS = { open: 0, overdue: 0, hasMore: false };
+const CALLBACK_POLICY = { true: "after four staffed hours (office hours and blackout dates apply)", false: "after the day of the call" };
+const MORE_MARK = { true: "+", false: "" };
+
 function humanize(value) {
   return value ? String(value).replace(/_/g, " ") : "";
 }
@@ -105,7 +111,7 @@ export default function OwedTabV2() {
       params.set("limit", "200");
       const body = await adminFetch(`/admin/call-recordings/commitments/open?${params.toString()}`);
       if (seq !== requestSeq.current) return;
-      setState({ status: "ready", rows: body.commitments || [], error: null, implicitDays: body.overdue_implicit_days ?? null, implicitEstimateHours: body.overdue_implicit_estimate_hours ?? null, callbacksEnabled: body.callbacks_enabled === true, enabled: body.enabled !== false, hasMore: body.has_more === true, nextOffset: body.next_offset ?? null });
+      setState({ status: "ready", rows: body.commitments || [], error: null, implicitDays: body.overdue_implicit_days ?? null, implicitEstimateHours: body.overdue_implicit_estimate_hours ?? 24, callbacksEnabled: body.callbacks_enabled === true, enabled: body.enabled !== false, hasMore: body.has_more === true, nextOffset: body.next_offset ?? null });
     } catch (err) {
       if (seq !== requestSeq.current) return;
       setState((s) => ({
@@ -176,10 +182,11 @@ export default function OwedTabV2() {
   // decides that (not this feed's flag): if the card request fails, the
   // ledger rows stay visible rather than vanishing behind a card error.
   const cardsShown = party !== "customer" && cardSummary.enabled;
+  const cards = cardsShown ? cardSummary : NO_CARDS;
   const rows = state.rows.filter((r) => !cardsShown || r.kind !== "callback" || r.party !== "waves");
-  const openCount = rows.length + (cardsShown ? cardSummary.open : 0);
-  const overdueCount = rows.filter((r) => isOverdueNow(r, now)).length + (cardsShown ? cardSummary.overdue : 0);
-  const moreUnloaded = state.hasMore || (cardsShown && cardSummary.hasMore);
+  const openCount = rows.length + cards.open;
+  const overdueCount = rows.filter((r) => isOverdueNow(r, now)).length + cards.overdue;
+  const moreMark = MORE_MARK[state.hasMore || cards.hasMore];
 
   return (
     <div className="space-y-3">
@@ -195,8 +202,8 @@ export default function OwedTabV2() {
           Show possibly-kept
         </label>
         <span className="text-13 md:text-12 text-ink-tertiary">
-          {state.status === "ready" ? `${openCount}${moreUnloaded ? "+" : ""} open${overdueCount ? ` · ${overdueCount} overdue` : ""}` : ""}
-          {state.implicitDays != null && party !== "customer" ? ` · with no due time, an estimate is overdue after ${state.implicitEstimateHours ?? 24} hours, a callback ${state.callbacksEnabled ? "after four staffed hours (office hours and blackout dates apply)" : "after the day of the call"}, other promises after ${state.implicitDays} days` : ""}
+          {state.status === "ready" ? `${openCount}${moreMark} open${overdueCount ? ` · ${overdueCount} overdue` : ""}` : ""}
+          {state.implicitDays != null && party !== "customer" ? ` · with no due time, an estimate is overdue after ${state.implicitEstimateHours} hours, a callback ${CALLBACK_POLICY[state.callbacksEnabled]}, other promises after ${state.implicitDays} days` : ""}
         </span>
         <Button size="sm" variant="ghost" onClick={load} disabled={state.status === "loading"}>Refresh</Button>
       </div>
@@ -213,7 +220,7 @@ export default function OwedTabV2() {
       {state.status === "ready" && state.enabled === false && (
         <div className="text-13 md:text-12 text-ink-tertiary">Commitments are recorded and settled only while GATE_CALL_COMMITMENTS is on; rows already recorded stay visible.</div>
       )}
-      {state.status === "ready" && rows.length === 0 && !(cardsShown && cardSummary.open > 0) && (
+      {state.status === "ready" && rows.length === 0 && !cards.open && (
         <div className="text-14 md:text-13 text-ink-secondary py-6 text-center">
           Nothing owed. Every promise on record is kept, dismissed, or not yet detected.
         </div>

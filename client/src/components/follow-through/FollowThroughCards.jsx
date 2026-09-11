@@ -143,6 +143,7 @@ export default function FollowThroughCards({ ui, onSummary, hints = true, pollMs
       {r.human_note && <Text>Note: {r.human_note}</Text>}
       {possiblyKept(r) && <Text tone="alert">Possibly kept: {humanize(possiblyKept(r).kind)}{possiblyKept(r).matched_at ? ` on ${when(possiblyKept(r).matched_at)}` : ''} · {humanize(possiblyKept(r).basis)} — confirm with Done</Text>}
       <Text tone="muted">{phone(r)} · Call {when(r.call_started_at)}{r.owner_name ? ` · ${r.owner_name}` : ''}</Text>
+      {r.owner_name && r.owner_active === false && <Text tone="alert">Assigned to {r.owner_name}, who is no longer active — take this over</Text>}
       {snoozed.includes(r) && <Text tone="muted">Snoozed until {when(r.snoozed_until)}</Text>}
       <div className="flex flex-wrap gap-2">
         <Button disabled={!!busy || !phone(r)} onClick={() => act(r.id, () => adminFetch('/admin/communications/call', { method: 'POST', body: JSON.stringify({
@@ -159,7 +160,7 @@ export default function FollowThroughCards({ ui, onSummary, hints = true, pollMs
     </Card>;
   };
   return <section aria-label="Follow-through" className="space-y-3 mb-5">
-    <div className="flex items-center justify-between gap-2"><Text tone="title">Follow-through</Text><Button secondary disabled={!!busy} onClick={refresh}>Refresh</Button></div>
+    <div className="flex items-center justify-between gap-2"><Text tone="title">Follow-through</Text><Button secondary disabled={!!busy} onClick={() => { if (!reading.current) refresh(); }}>Refresh</Button></div>
     {error && <div role="alert"><Text tone="alert">{error}</Text></div>}
     {notice && <div role="status"><Text>{notice}</Text></div>}
     {callbacks.filter((r) => !snoozed.includes(r)).map(renderCallback)}

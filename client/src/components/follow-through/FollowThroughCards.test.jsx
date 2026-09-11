@@ -57,6 +57,16 @@ describe('callback cards', () => {
     await screen.findByText('Note: Ask for Pat');
     expect(screen.getByText(/^Possibly kept: outbound call on .* · completed outbound call to caller within 14 days — confirm with Done$/)).toBeInTheDocument();
   });
+  it('warns when the assigned owner is no longer active', async () => {
+    adminFetch.mockResolvedValue({ ...feed, commitments: [
+      { ...row, owner_name: 'Former Tech', owner_active: false },
+      { ...row, id: 'covered', description: 'Covered callback', owner_name: 'Current Tech', owner_active: true },
+    ] });
+    render(<FollowThroughCards ui={ui} />);
+    await screen.findByText('Covered callback');
+    expect(screen.getByText('Assigned to Former Tech, who is no longer active — take this over')).toBeInTheDocument();
+    expect(screen.getAllByText(/no longer active/)).toHaveLength(1);
+  });
   it('marks a card the ledger judged overdue and lists a snoozed card separately', async () => {
     const past = new Date(Date.now() - 3600000).toISOString();
     const future = new Date(Date.now() + 7200000).toISOString();
@@ -107,7 +117,7 @@ describe('callback cards', () => {
     expect(screen.getByText('Second page callback')).toBeInTheDocument();
     expect(screen.getByText(row.description)).toBeInTheDocument();
   });
-  it('lets a Load more page land when a focus or poll refresh fires mid-read', async () => {
+  it('lets a Load more page land when a focus, poll or manual refresh fires mid-read', async () => {
     let releasePage;
     adminFetch.mockImplementation((url) => url.includes('offset=100')
       ? new Promise((resolve) => { releasePage = () => resolve({ ...feed, commitments: [{ ...row, id: 'callback-2', description: 'Second page callback' }] }); })
@@ -117,6 +127,7 @@ describe('callback cards', () => {
     await waitFor(() => expect(releasePage).toBeTypeOf('function'));
     adminFetch.mockClear();
     fireEvent(window, new Event('focus'));
+    fireEvent.click(screen.getByText('Refresh'));
     expect(adminFetch).not.toHaveBeenCalled();
     releasePage();
     await screen.findByText('Second page callback');
