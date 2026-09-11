@@ -27,6 +27,17 @@
 const seeder = require('../services/recurring-appointment-seeder');
 const { buildRecurringFollowUpRows } = seeder;
 const AnnualPrepayRenewals = require('../services/annual-prepay-renewals');
+
+let detachSpy;
+let fileExcSpy;
+beforeEach(() => {
+  detachSpy = jest.spyOn(AnnualPrepayRenewals._private, 'detachCallbacksFromTerm').mockResolvedValue(0);
+  fileExcSpy = jest.spyOn(AnnualPrepayRenewals._private, 'fileCoverageExceptionAfterCommit').mockResolvedValue();
+});
+afterEach(() => {
+  detachSpy.mockRestore();
+  fileExcSpy.mockRestore();
+});
 const { applyExtensionPrepayCoverage } = require('../routes/admin-schedule')._test;
 
 const TERM_ID = 'term-1';
@@ -351,5 +362,54 @@ describe('a seeded batch spanning a renewal boundary', () => {
     );
     expect(applySpy).toHaveBeenCalledTimes(1);
     expect(applySpy.mock.calls[0][0].id).toBe('new-term');
+  });
+});
+
+describe('the durable trail and the legacy-callback cleanup', () => {
+  let applySpy;
+  beforeEach(() => {
+    applySpy = jest.spyOn(AnnualPrepayRenewals, 'applyPrepaidCoverageForTerm').mockResolvedValue({});
+  });
+  afterEach(() => applySpy.mockRestore());
+
+  test('legacy callbacks are detached BEFORE the allocator runs', async () => {
+    const order = [];
+    detachSpy.mockImplementation(async () => { order.push('detach'); return 0; });
+    applySpy.mockImplementation(async () => { order.push('apply'); return {}; });
+    await applyExtensionPrepayCoverage(
+      connWithTerm(LIVE_TERM, { seriesTermIds: [TERM_ID] }), { id: 'root' }, { id: 'svc' }, '2027-01-28',
+    );
+    expect(order).toEqual(['detach', 'apply']);
+  });
+
+  test('a failed re-apply files a durable operator exception on the OUTER trx', async () => {
+    applySpy.mockRejectedValue(new Error('boom'));
+    const conn = connWithTerm(LIVE_TERM, { seriesTermIds: [TERM_ID] });
+    await expect(
+      applyExtensionPrepayCoverage(conn, { id: 'root' }, { id: 'svc' }, '2027-01-28'),
+    ).resolves.toBeUndefined();
+    expect(fileExcSpy).toHaveBeenCalledTimes(1);
+    const [scope, term, reason] = fileExcSpy.mock.calls[0];
+    expect(scope).toBe(conn);
+    expect(term.id).toBe(TERM_ID);
+    expect(reason).toBe('generator_coverage_failed');
+  });
+
+  test('a failure before any term resolves files nothing to attribute', async () => {
+    const conn = connWithTerm(undefined, { seriesTermIds: [TERM_ID] });
+    await applyExtensionPrepayCoverage(conn, { id: 'root' }, { id: 'svc' }, '2027-01-28');
+    expect(fileExcSpy).not.toHaveBeenCalled();
+  });
+
+  test('the sibling scan admits NULL-status rows (source guard)', () => {
+    const fs = require('fs');
+    const path = require('path');
+    for (const rel of ['../routes/admin-schedule.js', '../services/recurring-appointment-seeder.js']) {
+      const src = fs.readFileSync(path.join(__dirname, rel), 'utf8');
+      const scan = src.slice(src.indexOf("whereNotNull('annual_prepay_term_id')"));
+      const head = scan.slice(0, 600);
+      // NULL is live: it must be admitted explicitly, never left to NOT IN.
+      expect(head).toMatch(/whereNull\('status'\)\s*\n?\s*\.orWhereNotIn\('status'/);
+    }
   });
 });

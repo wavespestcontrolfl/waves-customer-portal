@@ -5676,6 +5676,7 @@ module.exports = {
     ensureCoverageRowsForTerm,
     coverageRowsForTerm,
     detachCallbacksFromTerm,
+    fileCoverageExceptionAfterCommit,
     resetCachesForTests,
   },
 };

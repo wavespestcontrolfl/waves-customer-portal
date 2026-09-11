@@ -2491,7 +2491,13 @@ async function seriesTermIds(conn, parentId, ...known) {
         this.where({ id: parentId }).orWhere({ recurring_parent_id: parentId });
       })
       .whereNotNull('annual_prepay_term_id')
-      .whereNotIn('status', ['cancelled', 'canceled', 'no_show', 'skipped', 'rescheduled'])
+      // NULL status is a LIVE visit in this codebase (the allocator's guarded
+      // update preserves it explicitly). A bare NOT IN evaluates unknown and
+      // drops those rows, so a legacy NULL-status sibling carrying the paid
+      // term would be invisible and the extension would go unstamped.
+      .where((q) => q
+        .whereNull('status')
+        .orWhereNotIn('status', ['cancelled', 'canceled', 'no_show', 'skipped', 'rescheduled']))
       .distinct('annual_prepay_term_id')
       .pluck('annual_prepay_term_id');
     for (const id of rows || []) if (id) ids.add(String(id));
@@ -2526,13 +2532,22 @@ async function coveringTermForDate(conn, termIds, coverageDate) {
 // JavaScript catches it, so a lookup outside the savepoint would poison the
 // caller and roll back the visit that was just inserted.
 async function applyExtensionPrepayCoverage(conn, parent, svc = null, coverageDate = null) {
+  const AnnualPrepayRenewals = require('../services/annual-prepay-renewals');
+  let resolvedTerm = null;
   const run = async (c) => {
     const termIds = await seriesTermIds(
       c, parent?.id, svc?.annual_prepay_term_id, parent?.annual_prepay_term_id,
     );
     const term = await coveringTermForDate(c, termIds, coverageDate);
     if (!term) return;
-    const AnnualPrepayRenewals = require('../services/annual-prepay-renewals');
+    resolvedTerm = term;
+    // A callback stamped by the older text-matching behavior is excluded from
+    // coverageRowsForTerm but keeps its annual-prepay amount, so allocating a
+    // replacement slot without clearing it leaves the term with MORE positive
+    // allocations than coverage_visit_count — inflating prepaid-series totals
+    // and making the callback look like held money to the cancellation
+    // guards. The other direct-stamping paths detach first; so does this one.
+    await AnnualPrepayRenewals._private.detachCallbacksFromTerm(term, c);
     await AnnualPrepayRenewals.applyPrepaidCoverageForTerm(term, c, {
       quietTransientExceptions: true,
       // Queries on the savepoint; alerts wait on the OUTER transaction. A
@@ -2546,10 +2561,23 @@ async function applyExtensionPrepayCoverage(conn, parent, svc = null, coverageDa
     if (conn && conn.isTransaction) await conn.transaction(run);
     else await run(conn);
   } catch (e) {
-    // Fail to TODAY's behavior (uncovered), never block the extension: an
-    // unstamped visit is a billing question someone can correct, a missing
-    // visit is a service failure the customer feels.
+    // Fail to TODAY's behavior (uncovered) rather than blocking the
+    // extension: an unstamped visit is a billing question someone can
+    // correct, a missing visit is a service failure the customer feels.
+    //
+    // But NOT silently. The savepoint rolls back and the visit commits
+    // uncovered, and no sweep re-runs ordinary coverage allocation
+    // (reconcileCoveredTermsSweep handles COMPLETED visits), so without a
+    // durable trail that row stays billable until it completes and charges
+    // the customer for prepaid work. File the operator exception on the
+    // OUTER transaction, so it is not minted if the caller later rolls back.
     logger.warn(`[recurring] prepay coverage re-apply failed for parent=${parent?.id}: ${e.message}`);
+    if (resolvedTerm) {
+      await AnnualPrepayRenewals._private.fileCoverageExceptionAfterCommit(
+        conn, resolvedTerm, 'generator_coverage_failed',
+        'A newly scheduled visit on this annual prepay could not be marked as covered, so completing it will invoice the customer for prepaid work. Re-apply the prepay coverage to that visit, or void the invoice if it has already been issued.',
+      ).catch(() => {});
+    }
   }
 }
 

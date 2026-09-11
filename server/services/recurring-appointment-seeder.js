@@ -1156,6 +1156,7 @@ async function applySeededPrepayCoverage(conn, parent, columns, coverageDates = 
   if (!columns?.annual_prepay_term_id) return;
   if (!conn || !parent?.id) return;
   const dates = [...new Set((coverageDates || []).filter(Boolean))].sort();
+  let resolvedTerm = null;
   const run = async (c) => {
     const AnnualPrepayRenewals = require('./annual-prepay-renewals');
     // The term link can sit on any visit in the series, not the root: prepay
@@ -1167,7 +1168,12 @@ async function applySeededPrepayCoverage(conn, parent, columns, coverageDates = 
         this.where({ id: parent.id }).orWhere({ recurring_parent_id: parent.id });
       })
       .whereNotNull('annual_prepay_term_id')
-      .whereNotIn('status', ['cancelled', 'canceled', 'no_show', 'skipped', 'rescheduled'])
+      // NULL status is a LIVE visit here (the allocator's guarded update
+      // preserves it explicitly); a bare NOT IN evaluates unknown and drops
+      // those rows, hiding a legacy sibling that carries the paid term.
+      .where((q) => q
+        .whereNull('status')
+        .orWhereNotIn('status', ['cancelled', 'canceled', 'no_show', 'skipped', 'rescheduled']))
       .distinct('annual_prepay_term_id')
       .pluck('annual_prepay_term_id');
     for (const id of linked || []) if (id) ids.add(String(id));
@@ -1195,6 +1201,13 @@ async function applySeededPrepayCoverage(conn, parent, columns, coverageDates = 
       for (const term of terms || []) {
         if (!term?.id || seen.has(String(term.id))) continue;
         seen.add(String(term.id));
+        resolvedTerm = term;
+        // A callback stamped by the older text-matching behavior is excluded
+        // from coverageRowsForTerm but keeps its annual-prepay amount, so
+        // allocating a replacement slot without clearing it leaves the term
+        // with MORE positive allocations than coverage_visit_count. The other
+        // direct-stamping paths detach first; so does this one.
+        await AnnualPrepayRenewals._private.detachCallbacksFromTerm(term, c);
          
         await AnnualPrepayRenewals.applyPrepaidCoverageForTerm(term, c, {
           quietTransientExceptions: true,
@@ -1218,7 +1231,18 @@ async function applySeededPrepayCoverage(conn, parent, columns, coverageDates = 
     if (conn.isTransaction) await conn.transaction(run);
     else await run(conn);
   } catch (e) {
+    // Fail soft on the transaction, but never silently: the savepoint rolls
+    // back and the seeded rows commit uncovered, and no sweep re-runs
+    // ordinary coverage allocation, so without a durable trail those visits
+    // stay billable and charge the customer for prepaid work. Filed on the
+    // OUTER transaction so a caller rollback does not mint a false alert.
     require('./logger').warn(`[recurring-seeder] prepay coverage re-apply failed for parent=${parent?.id}: ${e.message}`);
+    if (resolvedTerm) {
+      await require('./annual-prepay-renewals')._private.fileCoverageExceptionAfterCommit(
+        conn, resolvedTerm, 'generator_coverage_failed',
+        'Newly scheduled visits on this annual prepay could not be marked as covered, so completing them will invoice the customer for prepaid work. Re-apply the prepay coverage to those visits, or void the invoices if they have already been issued.',
+      ).catch(() => {});
+    }
   }
 }
 
