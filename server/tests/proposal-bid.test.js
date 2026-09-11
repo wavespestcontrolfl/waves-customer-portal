@@ -8,7 +8,7 @@ const { normalizeProposal, computeProposalTotals } = require('../services/estima
 const { buildProposalFirstInvoice } = require('../services/proposal-win');
 const { estimateExpiresAt } = require('../services/admin-estimate-persistence');
 const { proposalExpiry, assertBidSendDate, validateBidFields, normalizeProjectCosting, assertBidScheduleDate, earliestScheduledDelivery, latestReachableSchedule } = require('../services/proposal-bid');
-const { computeProjectCosts, roundCents, showsLineBasis, programRevenueIssue, proposalRevenueIssue } = require('../../shared/proposal-bid.cjs');
+const { computeProjectCosts, costRowOccurrences, roundCents, showsLineBasis, programRevenueIssue, proposalRevenueIssue } = require('../../shared/proposal-bid.cjs');
 const { mapFormPrices, buildProposalBidForm } = require('../services/pdf/proposal-bid-form');
 
 // buildProposalBidForm refuses a lapsed fixed hold against the real clock,
@@ -397,5 +397,24 @@ describe('publicExpiresAt (GH codex P1 r3 on #4309)', () => {
     expect(src).toMatch(/const shownExpiry = publicExpiresAt\(estimate\);\n\s+if \(shownExpiry && new Date\(shownExpiry\) < new Date\(\)\) return 'expired';/);
     expect(src).toMatch(/isEstimateAskAnswerable\(\{ \.\.\.estimate, expires_at: publicExpiresAt\(estimate\) \}\)/);
     expect(src).toMatch(/new Date\(publicExpiresAt\(estimate\)\) < new Date\(\) && estimate\.status !== 'accepted'/);
+  });
+});
+
+describe('cost row occurrences (GH codex P2 r11 on #4270)', () => {
+  const row = { category: 'labor', phase: '', description: 'Labor', quantity: 10, unit: 'hour', unitCost: 40 };
+  test('an absent legacy count means one; a cleared input is the zero the row shows', () => {
+    expect(costRowOccurrences(row)).toBe(1);
+    expect(costRowOccurrences({ ...row, occurrences: '' })).toBe(0);
+    expect(costRowOccurrences({ ...row, occurrences: '3' })).toBe(3);
+  });
+  test('the entered-costs total agrees with the row extended cost when a count is cleared', () => {
+    const totals = { oneTime: 1000, annualRecurring: 0 };
+    expect(computeProjectCosts({ revenueYears: 1, rows: [{ ...row, occurrences: 1 }] }, totals)).toMatchObject({ cost: 400, costsComplete: true });
+    // A legacy row with no count still totals as one occurrence but stays incomplete until it is entered.
+    expect(computeProjectCosts({ revenueYears: 1, rows: [row] }, totals)).toMatchObject({ cost: 400, costsComplete: false });
+    const cleared = computeProjectCosts({ revenueYears: 1, rows: [{ ...row, occurrences: '' }, { ...row, description: 'Materials', occurrences: 2 }] }, totals);
+    expect(cleared.cost).toBe(800);
+    expect(cleared.costsComplete).toBe(false);
+    expect(cleared.profit).toBeNull();
   });
 });

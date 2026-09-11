@@ -1,7 +1,7 @@
 import React from 'react';
 import { Plus, Trash2 } from 'lucide-react';
 import { Button, Input, Select, Card, CardHeader, CardTitle, CardBody, UiSurface } from '../ui';
-import { PROPOSAL_UNITS, COST_CATEGORIES, computeProjectCosts, proposalLineAmount } from '@proposal-bid';
+import { PROPOSAL_UNITS, COST_CATEGORIES, computeProjectCosts, costRowOccurrences, proposalLineAmount } from '@proposal-bid';
 
 const dollars = (n) => Number(n || 0).toLocaleString('en-US', { style: 'currency', currency: 'USD' });
 export default function ProposalProjectCosting({ value, onChange, totals, revenueIssue = null, disabled }) {
@@ -29,7 +29,7 @@ export default function ProposalProjectCosting({ value, onChange, totals, revenu
           <label>Occurrences<Input type="number" min="1" max="1000" step="1" value={row.occurrences} disabled={disabled} onChange={(e) => update(index, { occurrences: e.target.value })} /></label>
         </div>
         <div className="flex justify-between items-center gap-2">
-          <span className="tabular-nums">Extended cost: {dollars(proposalLineAmount({ quantity: row.quantity, unitPrice: row.unitCost }, Number(row.occurrences)))}</span>
+          <span className="tabular-nums">Extended cost: {dollars(proposalLineAmount({ quantity: row.quantity, unitPrice: row.unitCost }, costRowOccurrences(row)))}</span>
           {!disabled && <Button variant="ghost" size="sm" onClick={() => onChange({ ...costing, rows: costing.rows.filter((_, i) => i !== index) })}><Trash2 size={14} /> Remove cost</Button>}
         </div>
       </div>)}

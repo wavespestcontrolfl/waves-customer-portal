@@ -110,6 +110,10 @@ function proposalRevenueIssue({ buildings = [], programs = [], correctiveWork = 
   return null;
 }
 
+// ONE reading of a cost row's occurrence count for the row's extended cost
+// and the sheet's entered-costs total: an ABSENT legacy value means one, a
+// CLEARED input is the zero it shows (GH codex P2 r11 on #4270).
+const costRowOccurrences = (row) => (row?.occurrences == null ? 1 : Number(row.occurrences));
 function computeProjectCosts(costing, totals, { revenueIssue = null } = {}) {
   const rows = Array.isArray(costing?.rows) ? costing.rows : [];
   // An absent period keeps the one-year default; a PRESENT blank or invalid
@@ -120,7 +124,7 @@ function computeProjectCosts(costing, totals, { revenueIssue = null } = {}) {
   const costsComplete = !revenueIssue && revenueYears != null && rows.length > 0 && rows.length <= COST_ROW_LIMITS.rowsMax && rows.every((row) => !costRowIssue(row));
   const byCategory = {};
   for (const row of rows) {
-    const amount = proposalLineAmount({ quantity: row.quantity, unitPrice: row.unitCost }, Number(row.occurrences || 1));
+    const amount = proposalLineAmount({ quantity: row.quantity, unitPrice: row.unitCost }, costRowOccurrences(row));
     byCategory[row.category] = roundCents((byCategory[row.category] || 0) + amount);
   }
   const cost = roundCents(Object.values(byCategory).reduce((sum, amount) => sum + amount, 0));
@@ -129,4 +133,4 @@ function computeProjectCosts(costing, totals, { revenueIssue = null } = {}) {
   return { cost, revenue, revenueYears, profit, marginPercent: costsComplete && revenue > 0 ? roundDecimal(profit / revenue * 100, 2) : null, byCategory, costsComplete };
 }
 
-module.exports = { PROPOSAL_UNITS, PROPOSAL_COUNT_UNITS, proposalLineServiceCount, COST_CATEGORIES, BID_FORM_PROFILES, roundDecimal, roundCents, proposalLineAmount, formatQuantity, formatUnitPrice, formatLineBasis, showsLineBasis, decimalValid, COST_ROW_LIMITS, costRowIssue, programRevenueIssue, proposalRevenueIssue, computeProjectCosts };
+module.exports = { PROPOSAL_UNITS, PROPOSAL_COUNT_UNITS, proposalLineServiceCount, COST_CATEGORIES, BID_FORM_PROFILES, roundDecimal, roundCents, proposalLineAmount, formatQuantity, formatUnitPrice, formatLineBasis, showsLineBasis, decimalValid, COST_ROW_LIMITS, costRowIssue, costRowOccurrences, programRevenueIssue, proposalRevenueIssue, computeProjectCosts };
