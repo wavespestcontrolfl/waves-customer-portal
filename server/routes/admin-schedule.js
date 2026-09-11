@@ -8288,6 +8288,16 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
     if (!stacking && (primaryLineDiscount !== undefined || discountServiceKeyFilter !== undefined)) {
       throw httpError(409, 'Editing a service line discount is turned off (GATE_DISCOUNT_STACKING). Nothing was changed.');
     }
+    // Same contract with the gate ON. The primary line slot is only read on
+    // the multi-line save branch (`Array.isArray(addons)` below); the legacy
+    // single-price branch has no handling for it at all, so a slot posted
+    // without an addons array would be silently DROPPED rather than applied
+    // or refused — the one thing this field's contract forbids (r2 fallback
+    // P1). Every shipped caller posts the slot inside its addons payload, so
+    // this refuses only a malformed request.
+    if (stacking && primaryLineDiscount !== undefined && !Array.isArray(addons)) {
+      throw httpError(409, 'Editing a service line discount requires the full service line list. Nothing was changed.');
+    }
     // A catalog preset (the modal's Discount select) posts its id so the row
     // keeps the discount's identity — name on the invoice line, service
     // filters, and the catalog's own type/amount as the authority. Without
