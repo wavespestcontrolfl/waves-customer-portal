@@ -217,12 +217,17 @@ const TIME_ANYWHERE_RES = Object.freeze([
 // scheduling predicate in the same sentence: "a team member will call
 // tomorrow" is a follow-up, "your visit is tomorrow" is an invented date.
 const RELATIVE_DAY_RE = new RegExp(`\\b(?:tomorrow|day after tomorrow|next week|this week|(?:${WEEKDAYS})|\\d{1,2}(?:st|nd|rd|th)(?:\\s+of\\s+[a-z]+)?|mañana|pasado mañana|la (?:próxima|proxima) semana)\\b`, 'i');
+// A weekday modified by "next"/"this"/"last" ("Next Tuesday", "This
+// Tuesday") is still that same relative day — RELATIVE_DAY_RE's own weekday
+// branch, shared with every embedded-sentence use, accepts only the bare
+// weekday, so a standalone answer needs this alongside it.
+const MODIFIED_WEEKDAY_RE_SOURCE = `(?:next|this|last|coming|pr[oó]xim[oa]|este|esta)\\s+(?:${WEEKDAYS})`;
 // A relative day/date spoken as the WHOLE reply, with nothing else around it
 // (at most a bare "It's"/"That's" lead-in), is still a date whatever else
 // governs one embedded in an unrelated sentence: "Tuesday." answers "when is
 // she due next?" as plainly as "Her visit is Tuesday." does, even with no
 // scheduling predicate or subject in the sentence to require one.
-const STANDALONE_DATE_RE = new RegExp(`^\\s*(?:it[\\x27\\u2019]s|it is|that[\\x27\\u2019]s|that is)?\\s*${RELATIVE_DAY_RE.source}\\s*$`, 'i');
+const STANDALONE_DATE_RE = new RegExp(`^\\s*(?:it[\\x27\\u2019]s|it is|that[\\x27\\u2019]s|that is)?\\s*(?:${MODIFIED_WEEKDAY_RE_SOURCE}|${RELATIVE_DAY_RE.source})\\s*$`, 'i');
 const SCHEDULE_PREDICATES = Object.freeze({
   visit: /\b(?:visit|appointment|service|treatment|technician|tech|scheduled|set for|booked|come out|be out|be there|see you|swing by|head out|visita|cita|servicio|tratamiento|técnico|tecnico|programad[oa])\b/i,
   // "available" in every office construction — "will be available at 8",
@@ -636,7 +641,7 @@ const PART_OF_DAY_RE = '(?:morning|afternoon|evening|night)';
 // between them ("tomorrow morning at nine") — still answers a bare time
 // question just as either half alone already does.
 const COMBINED_DAY_TIME_RE = `${DAY_REFERENCE_RE}(?:\\s+${PART_OF_DAY_RE})?\\s+at\\s+${CLOCK_TIME_RE}|${CLOCK_TIME_RE}\\s+${DAY_REFERENCE_RE}`;
-const VISIT_TIME_ANSWER_RE = new RegExp(`^\\s*(?:(?:it[\\x27\\u2019]s|it is)\\s+)?(?:(?:at|around|about|between|from|not)\\s+)?(?:${COMBINED_DAY_TIME_RE}|${CLOCK_TIME_RE}|${VISIT_TIME_RE.source}|${RELATIVE_PERIOD_RE})[.!\\s]*$`, 'i');
+const VISIT_TIME_ANSWER_RE = new RegExp(`^\\s*(?:(?:it[\\x27\\u2019]s|it is)\\s+)?(?:(?:at|around|about|between|from|not)\\s+)?(?:${COMBINED_DAY_TIME_RE}|${CLOCK_TIME_RE}|${MODIFIED_WEEKDAY_RE_SOURCE}|${VISIT_TIME_RE.source}|${RELATIVE_PERIOD_RE})[.!\\s]*$`, 'i');
 // Every branch that grades a reply against a still-pending private question
 // must recognize the same set of questions: VISIT_QUESTION_RE (pronoun and
 // relationship subjects), VISIT_QUESTION_NAMED_RE (a capitalised name or
@@ -779,6 +784,14 @@ const VISIT_DISCLOSURE_RES = Object.freeze([
   // stop instead of an appointment word: "her property is on today's
   // route", "the account is on the route today".
   new RegExp(`\\b(?:her|his|their|${RELATION_NOUN}[\\x27\\u2019]s|the|that|this)\\s+(?:property|address|home|house|account|stop)${VISIT_AUXILIARY}on\\s+(?:${DAY_REFERENCE_RE}[\\x27\\u2019]s\\s+route|the\\s+route\\s+${DAY_REFERENCE_RE}|our\\s+route\\s+${DAY_REFERENCE_RE})\\b`, 'gi'),
+  // A caller-supplied name possesses the route stop just as "her"/"the
+  // account" does above — caller-supplied names are deliberately not
+  // rejected by no_account_pii, so the route sentence still discloses the
+  // fact. Matched case-sensitively (VISIT_POSSESSOR_NAMED) so a capitalised
+  // proper name — never a common word, NAMED_SUBJECT excludes those — is
+  // recognized as the possessor, the same split VISIT_QUESTION_NAMED_RE
+  // draws from VISIT_QUESTION_RE.
+  new RegExp(`\\b${VISIT_POSSESSOR_NAMED}\\s+(?:property|address|home|house|account|stop)${VISIT_AUXILIARY}on\\s+(?:${DAY_REFERENCE_RE}[\\x27\\u2019]s\\s+route|the\\s+route\\s+${DAY_REFERENCE_RE}|our\\s+route\\s+${DAY_REFERENCE_RE})\\b`, 'g'),
   // A dispatch idiom naming the day, not an appointment word, is still the
   // same scheduling fact: "we have her down for Tuesday" is "she's
   // scheduled for Tuesday" in dispatch shorthand.
