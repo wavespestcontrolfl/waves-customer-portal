@@ -2538,7 +2538,14 @@ async function completeScheduledService(completionInput, packetContext = null) {
     let customerRequestedReview = null;
     try {
       completionReviewDelayMinutes = parseCompletionReviewDelayMinutes(completionInput.body || {});
-      if (completionInput.body?.reviewTiming === 'customer_requested') {
+      // The timing selector can be retained after the review checkbox is
+      // cleared or a client suppression turns the ask off; the stamp must not
+      // claim the customer asked when nothing was authorized (codex #4140
+      // r23 P2). parseCompletionReviewDelayMinutes is null without
+      // requestReview, so a real customer request is exactly delay 0 here.
+      const clientSuppressesReview = !!reviewSuppression && reviewSuppression !== 'invoice_created';
+      if (completionInput.body?.reviewTiming === 'customer_requested'
+        && completionReviewDelayMinutes === 0 && !clientSuppressesReview) {
         customerRequestedReview = {
           by: completionInput.actor?.technicianId || null,
           byName: completionInput.actor?.technician?.name || null,
@@ -5385,7 +5392,10 @@ async function completeScheduledService(completionInput, packetContext = null) {
             reviewScheduledFor: reviewScheduledFor || null,
             // Who captured "Customer asked for the link", when, and where —
             // carried through the paid-invoice deferral (enrollForPaidInvoice).
-            customerRequestedReview: customerRequestedReview || null,
+            // Frozen off with requestReview: an incomplete / internal-only /
+            // backfill completion never carries a customer request either.
+            customerRequestedReview: (isIncompleteVisit || isInternalOnlyCompletion || isBackfillCompletion)
+              ? null : (customerRequestedReview || null),
             incompleteReason,
             customerConcernText: concernText || null,
             customerRecap: effectiveCustomerRecap || null,

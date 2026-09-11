@@ -653,6 +653,11 @@ export default function ReviewVelocityEngine() {
         setLoading(false);
       })
       .catch((err) => {
+        // A failed reload must not keep an earlier success's gate verdict —
+        // the gate could have flipped while the request failed, and decisionLine
+        // /Start Cadence would keep advertising sends (codex #4140 r23 P1).
+        // Unknown reads as paused.
+        setSequencesEnabled(null);
         setLoadError(err?.message || "Failed to load outreach candidates");
         setLoading(false);
       });
@@ -1805,7 +1810,7 @@ function Pipeline({
                         <Tag type="blu">
                           Cadence {c.seqStep}/{c.seqTotal}
                         </Tag>
-                        <div style={{ fontSize: 11, color: C.t3, marginTop: 4 }}>
+                        <div style={{ fontSize: 14, color: C.t3, marginTop: 4 }}>
                           {decisionLine(c.sequence, sequencesEnabled)}
                         </div>
                       </>
@@ -2588,7 +2593,7 @@ function CustomerDrawer({
                 <Btn disabled>In cadence ({c.seqStep}/{c.seqTotal})</Btn>
               ) : null}{" "}
               {c.sequence ? (
-                <div style={{ fontSize: 12, color: C.t3, marginTop: 6, flexBasis: "100%" }}>
+                <div style={{ fontSize: 14, color: C.t3, marginTop: 6, flexBasis: "100%" }}>
                   {decisionLine(c.sequence, sequencesEnabled)}
                 </div>
               ) : sequencesEnabled ? (
