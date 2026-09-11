@@ -169,6 +169,11 @@ function workDuration(stop, fallback = 60) {
  * violatesWindowFeasibility) that have no ungrouped-only gate of their own.
  */
 function isCoVisitPair(effectiveWindowRange, prevStop, stop) {
+  // Presence-checked like the address below, not a bare `!= null`:
+  // `undefined != null` is false in JS, so a select that drops the column
+  // would silently no-op the ONE veto protecting visit-groups' SUM contract
+  // (round-0 fallback audit P1).
+  if (!('visit_id' in prevStop) || !('visit_id' in stop)) return false;
   if (prevStop.visit_id != null || stop.visit_id != null) return false;
   if (prevStop.customer_id == null || stop.customer_id == null) return false;
   if (String(prevStop.customer_id) !== String(stop.customer_id)) return false;
@@ -195,9 +200,8 @@ function isCoVisitPair(effectiveWindowRange, prevStop, stop) {
  *  parcel false merge the column exists to stop). Every guard caller's day
  *  load selects it; fixtures must carry it the way a real row does. */
 function stampedAddress(stop) {
-  const raw = 'service_address_line1' in stop ? stop.service_address_line1
-    : ('address_line1' in stop ? stop.address_line1 : undefined);
-  return raw === undefined ? null : String(raw ?? '').trim().toLowerCase();
+  if (!('service_address_line1' in stop)) return null;
+  return String(stop.service_address_line1 ?? '').trim().toLowerCase();
 }
 
 /**
@@ -220,10 +224,47 @@ function stampedAddress(stop) {
  * of the chain's real estimates, floored by the longest member's
  * window-derived duration.
  */
-function coVisitWork(state, stop) {
-  const floor = Math.max(state.coFloor || 0, workDuration(stop));
-  const estimates = (state.coEstimates || 0) + (Number(stop.estimated_duration_minutes) || 0);
+function coVisitWork(chain, stop) {
+  const floor = Math.max(chain.coFloor || 0, workDuration(stop));
+  const estimates = (chain.coEstimates || 0) + (Number(stop.estimated_duration_minutes) || 0);
   return { floor, estimates, minutes: Math.max(floor, estimates) };
+}
+
+/**
+ * THE co-visit advance — the one place the merge's timing lives, called by
+ * both simulations (advanceSim below and violatesWindowFeasibility's own
+ * inline loop in route-reorder.js, which walks Google's legs itself and so
+ * cannot call advanceSim wholesale). Keeping the arithmetic in one function
+ * is what stops the two from drifting into a phantom hour on one path and an
+ * under-count on the other (round-0 fallback audit P1).
+ *
+ * `chain` = { clock, arrivalMin, coFloor, coEstimates } for the run of rows
+ * already merged at this stop. Returns the same shape advanced by `stop`,
+ * plus the `waiting` those minutes added. Arrival stays pinned to the
+ * sibling's already-proven arrival; only the EXTRA minutes past the current
+ * clock are new, and they obey blockedIntervals exactly as the normal path's
+ * work does (the sibling's own span was checked when it was simulated).
+ */
+function advanceCoVisit(chain, stop, blockedIntervals = []) {
+  const merged = coVisitWork(chain, stop);
+  const extra = Math.max(0, chain.arrivalMin + merged.minutes - chain.clock);
+  let extraStart = chain.clock;
+  if (extra > 0) {
+    for (const block of blockedIntervals) {
+      if (extraStart < block.endMin && extraStart + extra > block.startMin) extraStart = block.endMin;
+    }
+  }
+  return {
+    clock: extraStart + extra,
+    arrivalMin: chain.arrivalMin,
+    coFloor: merged.floor,
+    coEstimates: merged.estimates,
+    // A block that postpones the extra work holds the truck on site with
+    // nothing to do — the same thing waiting for a window to open is, and
+    // evaluateArrivalPlacement breaks equal-travel ties on this number
+    // (Codex #4435 r1 P2).
+    waiting: extraStart - chain.clock,
+  };
 }
 
 function advanceSim(RouteOptimizer, effectiveWindowRange, state, stop, {
@@ -232,32 +273,17 @@ function advanceSim(RouteOptimizer, effectiveWindowRange, state, stop, {
   // Co-visit continuation: no new leg, arrival pinned to the sibling's
   // arrival (already proven inside the promise) — see isCoVisitPair above.
   if (state.prevStop && isCoVisitPair(effectiveWindowRange, state.prevStop, stop)) {
-    const merged = coVisitWork(state, stop);
-    // The sibling's own span was already checked against blockedIntervals
-    // on the normal path below; only the EXTRA minutes this row adds past
-    // the sibling's departure are new, and they obey the same rule — work
-    // that would overlap a block starts after it (blocks arrive sorted).
-    const extra = Math.max(0, state.arrivalMin + merged.minutes - state.clock);
-    let extraStart = state.clock;
-    if (extra > 0) {
-      for (const block of blockedIntervals) {
-        if (extraStart < block.endMin && extraStart + extra > block.startMin) extraStart = block.endMin;
-      }
-    }
+    const merged = advanceCoVisit(state, stop, blockedIntervals);
     return {
-      clock: extraStart + extra,
+      clock: merged.clock,
       prev: state.prev,
       prevStop: stop,
       visited: true,
       travelMin: state.travelMin,
-      arrivalMin: state.arrivalMin,
-      // A block that postpones the extra work holds the truck on site with
-      // nothing to do — the same thing waiting for a window to open is, and
-      // evaluateArrivalPlacement breaks equal-travel ties on this number
-      // (Codex #4435 r1 P2).
-      waitingMin: (state.waitingMin || 0) + (extraStart - state.clock),
-      coFloor: merged.floor,
-      coEstimates: merged.estimates,
+      arrivalMin: merged.arrivalMin,
+      waitingMin: (state.waitingMin || 0) + merged.waiting,
+      coFloor: merged.coFloor,
+      coEstimates: merged.coEstimates,
     };
   }
   const lat = parseFloat(stop.lat);
@@ -562,5 +588,6 @@ module.exports = {
   computeChronologicalRepair,
   workDuration,
   isCoVisitPair,
+  advanceCoVisit,
   _internals: { sequenceCount, exhaustiveSearch, greedyInsertion, EXHAUSTIVE_SEQUENCE_CAP },
 };

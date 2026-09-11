@@ -51,7 +51,7 @@ const BAND = ['2026-08-14', '2026-08-15', '2026-08-16', '2026-08-17', '2026-08-1
 function stop(id, over = {}) {
   // service_address_line1 present-but-null, as the day-load select returns
   // it for a row that inherits the customer's address.
-  return { id, technician_id: 't1', route_order: null, window_start: '09:00', time_window: null, service_type: 'pest', zone: null, lat: 1, lng: 1, service_address_line1: null, ...over };
+  return { id, technician_id: 't1', route_order: null, window_start: '09:00', time_window: null, service_type: 'pest', zone: null, lat: 1, lng: 1, service_address_line1: null, visit_id: null, ...over };
 }
 
 // A tech-day whose CURRENT order backtracks (B@lng3 first, then A@lng1, C@lng2

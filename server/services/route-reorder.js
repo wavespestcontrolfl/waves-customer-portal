@@ -44,7 +44,7 @@ const { etDateString, addETDays, parseETDateTime, validCalendarDate } = require(
 const { dayStopsQuery, guardedCoordSelects } = require('./scheduling/day-stops');
 const { toDateStr } = require('./auto-dispatch/dates');
 const { loadReminderFreeze, FREEZE_HOURS, TIER2_MIN_DAYS_OUT } = require('./auto-dispatch/route-tiers');
-const { computeWindowFitOrder, effectiveWindowRange, currentOrder, computeChronologicalRepair, workDuration, isCoVisitPair } = require('./route-reorder-window-fit');
+const { computeWindowFitOrder, effectiveWindowRange, currentOrder, computeChronologicalRepair, workDuration, isCoVisitPair, advanceCoVisit } = require('./route-reorder-window-fit');
 
 const GOOGLE_WAYPOINT_CAP = 25;
 // The reorder pass models future days, where en_route/on_site can't occur;
@@ -175,22 +175,24 @@ function violatesWindowFeasibility(RouteOptimizer, orderedStops, sourceStops, le
     // coVisitWork in route-reorder-window-fit.js for why neither the plain
     // sum (the phantom hour) nor the plain max (under-counted real work) is
     // the honest number.
-    const coVisit = prevStop && isCoVisitPair(effectiveWindowRange, prevStop, s);
-    let startMin;
-    if (coVisit) {
-      startMin = prevArrivalMin;
-    } else {
-      startMin = clock + travelMin;
-      const range = effectiveWindowRange(s);
-      if (range) {
-        if (startMin > range.endMin) return true; // provably misses the promise
-        startMin = Math.max(startMin, range.startMin); // waiting for open is fine
-      }
+    if (prevStop && isCoVisitPair(effectiveWindowRange, prevStop, s)) {
+      // One shared arithmetic, not a second copy of it — this loop walks
+      // Google's legs itself so it cannot call advanceSim wholesale, but the
+      // merge's timing comes from the same function advanceSim uses.
+      const merged = advanceCoVisit({ clock, arrivalMin: prevArrivalMin, coFloor, coEstimates }, s);
+      ({ clock, coFloor, coEstimates } = merged);
+      prevStop = s;
+      continue; // prevArrivalMin stays pinned to the sibling's arrival
     }
-    coFloor = Math.max(coVisit ? coFloor : 0, workDuration(s));
-    coEstimates = (coVisit ? coEstimates : 0) + (Number(s.estimated_duration_minutes) || 0);
-    const dur = Math.max(coFloor, coEstimates);
-    clock = coVisit ? Math.max(clock, startMin + dur) : startMin + dur;
+    let startMin = clock + travelMin;
+    const range = effectiveWindowRange(s);
+    if (range) {
+      if (startMin > range.endMin) return true; // provably misses the promise
+      startMin = Math.max(startMin, range.startMin); // waiting for open is fine
+    }
+    coFloor = workDuration(s);
+    coEstimates = Number(s.estimated_duration_minutes) || 0;
+    clock = startMin + Math.max(coFloor, coEstimates);
     prevStop = s;
     prevArrivalMin = startMin;
   }

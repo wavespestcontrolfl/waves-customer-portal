@@ -50,7 +50,7 @@ const DAY = '2026-08-17';
 function stop(id, over = {}) {
   // service_address_line1 is null on a real row that inherits the
   // customer's address — present-but-null, which is what the guard needs.
-  return { id, technician_id: 't1', route_order: null, window_start: null, time_window: null, estimated_duration_minutes: 60, service_type: 'pest', zone: null, lat: 1, lng: 1, service_address_line1: null, ...over };
+  return { id, technician_id: 't1', route_order: null, window_start: null, time_window: null, estimated_duration_minutes: 60, service_type: 'pest', zone: null, lat: 1, lng: 1, service_address_line1: null, visit_id: null, ...over };
 }
 
 const GUARDS = {
@@ -549,4 +549,11 @@ test('unit: isCoVisitPair fails closed when the rows carry no address column', (
   const { service_address_line1: _dropB, ...bNoColumn } = b;
   expect(isCoVisitPair(effectiveWindowRange, aNoColumn, bNoColumn)).toBe(false);
   expect(isCoVisitPair(effectiveWindowRange, aNoColumn, b)).toBe(false);
+  // Same rule for the visit_id veto: `undefined != null` is false in JS, so
+  // an unselected column would otherwise no-op the one guard protecting
+  // visit-groups' SUM contract.
+  const { visit_id: _noVisitA, ...aNoVisit } = a;
+  const { visit_id: _noVisitB, ...bNoVisit } = b;
+  expect(isCoVisitPair(effectiveWindowRange, aNoVisit, bNoVisit)).toBe(false);
+  expect(isCoVisitPair(effectiveWindowRange, aNoVisit, b)).toBe(false);
 });
