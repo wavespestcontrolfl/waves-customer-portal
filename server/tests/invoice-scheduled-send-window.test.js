@@ -457,16 +457,20 @@ describe('processScheduledSends send-window handling', () => {
   // which takes a 'sending' row out from under a live claim by design) that
   // moved the row to 'sent' (or 'void') between the send attempt and this
   // restore would get clobbered back to 'scheduled' with a stale due time,
-  // double-sending on the next tick. The restore is now conditioned on
-  // status='sending' AND the exact updated_at THIS claim's own flip wrote.
+  // double-sending on the next tick. Reworked round 18 (#4131): the restore
+  // is conditioned on status='sending' AND a dedicated send_claim_token —
+  // NOT updated_at, which round 18 found an unrelated intra-claim writer
+  // (a partial account-credit apply) can silently re-stamp, matching zero
+  // rows and stranding the invoice under 'sending' even though nothing else
+  // actually moved the row.
   test('a worker finalizes the invoice to sent between the send attempt and the restore — the restore is a no-op, the row stays sent', async () => {
     isWithinSendWindowET.mockReturnValue(true);
-    const CLAIM_STAMP = new Date('2026-09-11T12:00:00.000Z');
+    const CLAIM_TOKEN = 'a1b2c3d4-e5f6-4789-a012-3456789abcde';
     const staleRecovery = chain();
     const dueQuery = chain({ rows: [dueRow] });
-    const claim = chain({ returning: [{ id: 'inv-1', scheduled_request_review: false, scheduled_review_delay_minutes: null, updated_at: CLAIM_STAMP }] });
+    const claim = chain({ returning: [{ id: 'inv-1', scheduled_request_review: false, scheduled_review_delay_minutes: null, send_claim_token: CLAIM_TOKEN }] });
     // 0 rows affected: some other process already moved the row to 'sent'
-    // (or anything else) before this exact updated_at could match.
+    // (or anything else) before this exact token could match.
     const restoreAttempt = chain({ updateCount: 0 });
     db
       .mockReturnValueOnce(staleRecovery)
@@ -483,9 +487,10 @@ describe('processScheduledSends send-window handling', () => {
     const result = await InvoiceService.processScheduledSends();
 
     expect(result).toEqual({ sent: 0, failed: 1, deferred: 0 });
-    // The restore matched on this claim's exact stamp — the token that
-    // proves nobody else has touched the row since.
-    expect(restoreAttempt.where.mock.calls[0][0]).toEqual({ id: 'inv-1', status: 'sending', updated_at: CLAIM_STAMP });
+    // The restore matched on this claim's own dedicated token — an identity
+    // no other writer touches — that proves nobody else has claimed the row
+    // since, regardless of what else it may have written on the row.
+    expect(restoreAttempt.where.mock.calls[0][0]).toEqual({ id: 'inv-1', status: 'sending', send_claim_token: CLAIM_TOKEN });
     // 0 rows affected is logged, not thrown — the batch keeps going.
     const logger = require('../services/logger');
     expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('moved out from under this claim'));

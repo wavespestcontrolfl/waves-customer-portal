@@ -4020,6 +4020,7 @@ const InvoiceService = {
           continue;
         }
       }
+      const claimToken = crypto.randomUUID();
       const [claimed] = await db("invoices")
         .where({ id: inv.id, status: "scheduled" })
         .whereNotNull("scheduled_send_at")
@@ -4029,30 +4030,38 @@ const InvoiceService = {
             .whereNull("scheduled_send_attempts")
             .orWhere("scheduled_send_attempts", "<", 5),
         )
-        .update({ status: "sending", updated_at: new Date() })
+        .update({ status: "sending", updated_at: new Date(), send_claim_token: claimToken })
         .returning([
           "id",
           "scheduled_request_review",
           "scheduled_review_delay_minutes",
-          "updated_at",
+          "send_claim_token",
         ]);
       if (!claimed) continue;
-      // THE claim token for every status-restore below (Codex round 15 P1
-      // #4131): claimed.updated_at is the exact stamp THIS claim's flip
-      // just wrote. A restore that only guards on status='sending' can
-      // clobber a row something else moved on mid-flight — the void sweep
-      // takes a 'sending' row out from under a live claim by design
+      // THE claim token for every status-restore below (Codex round 15 P1,
+      // reworked round 18 #4131): a dedicated send_claim_token column, NOT
+      // updated_at — updated_at is written by unrelated intra-claim writers
+      // (autoApplyAccountCreditIfEnabled's partial credit apply is round
+      // 18's example; an email-delivery stamp is another) that have nothing
+      // to do with this claim, and a restore keyed on that exact stamp
+      // matches zero rows the moment any of them runs, stranding the
+      // invoice under 'sending' with its credit already consumed. This
+      // column is written ONLY here and read ONLY by the match below, so no
+      // other writer — present or future — can invalidate it by accident.
+      // A restore that only guards on status='sending' can still clobber a
+      // row something else moved on mid-flight — the void sweep takes a
+      // 'sending' row out from under a live claim by design
       // (CANCELLED_SERVICE_VOIDABLE_STATUSES includes 'sending'), and a
       // failure here that landed AFTER that void would otherwise resurrect
       // the voided invoice as 'scheduled' with a fresh due time — matching
       // the same hazard a competing finalize-to-'sent' would pose. Every
       // restore in this loop matches on status='sending' AND this exact
-      // updated_at; 0 rows means the row already moved on, so the restore
-      // leaves it exactly as whoever else left it instead of overwriting.
+      // token; 0 rows means the row already moved on, so the restore leaves
+      // it exactly as whoever else left it instead of overwriting.
       const restoreClaimedInvoice = async (payload, label) => {
         const rows = await db("invoices")
-          .where({ id: inv.id, status: "sending", updated_at: claimed.updated_at })
-          .update(payload);
+          .where({ id: inv.id, status: "sending", send_claim_token: claimed.send_claim_token })
+          .update({ ...payload, send_claim_token: null });
         if (!rows) {
           logger.warn(`[invoice] Scheduled-send ${label} restore skipped for ${inv.invoice_number} — the row moved out from under this claim; leaving it as-is`);
         }

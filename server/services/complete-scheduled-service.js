@@ -11390,10 +11390,21 @@ async function completeScheduledService(completionInput, packetContext = null) {
         // the ONE shared send claim before this AP email too; a claim that
         // cannot be taken right now leaves the invoice for the other
         // sender or a resumed retry, never a duplicate AP email.
+        //
+        // firstDeliveryOnly (round 18 P1 #4131): this branch only runs when
+        // payerInvoiceAlreadyDelivered read false above — it is always a
+        // FIRST delivery, never a resend. claimInvoiceForSend's default mode
+        // treats 'sent'/'viewed'/'overdue' as claimable (a deliberate resend
+        // allowance for every OTHER caller), so a plain claim taken after
+        // another sender finalized this invoice between that read and here
+        // would be granted as a "resend" and duplicate the AP email.
+        // firstDeliveryOnly refuses the claim outright once the row shows
+        // any first-delivery evidence (sent_at, or a delivered/settled
+        // status), closing that gap without a second point-in-time check.
         const InvoiceServiceForClaim = require('../services/invoice');
         let payerApClaim = null;
         try {
-          payerApClaim = await InvoiceServiceForClaim.claimInvoiceForSend(invoice.id);
+          payerApClaim = await InvoiceServiceForClaim.claimInvoiceForSend(invoice.id, { firstDeliveryOnly: true });
         } catch (claimErr) {
           logger.info(`[dispatch] payer AP send for invoice ${invoice.id} skipped this attempt — delivery claim unavailable (${claimErr.message})`);
         }

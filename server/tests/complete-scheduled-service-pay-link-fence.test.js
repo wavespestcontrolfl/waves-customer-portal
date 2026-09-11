@@ -36,9 +36,9 @@ describe('complete-scheduled-service.js pay-link senders acquire the shared clai
   test('the payer AP invoice email claims the invoice BEFORE sendInvoiceEmail, and restores on every non-delivered exit', () => {
     const start = source.indexOf('const sendPayerInvoiceToApIfEligible = async () => {');
     expect(start).toBeGreaterThan(-1);
-    const block = source.slice(start, start + 4500); // generous bound — this function is small
+    const block = source.slice(start, start + 5500); // generous bound — this function is small
     const end = start + block.indexOf('\n    };\n'); // the function's own closing
-    const claimAt = block.indexOf('payerApClaim = await InvoiceServiceForClaim.claimInvoiceForSend(invoice.id);');
+    const claimAt = block.indexOf('payerApClaim = await InvoiceServiceForClaim.claimInvoiceForSend(invoice.id, { firstDeliveryOnly: true });');
     const sendAt = block.indexOf('const payerSend = await InvoiceEmail.sendInvoiceEmail(invoice.id);');
     const restoreAt = block.indexOf('await InvoiceServiceForClaim.restoreSendClaim(invoice.id, payerApClaim.previousStatus, payerApClaim.claimed)');
     expect(claimAt).toBeGreaterThan(-1);
@@ -46,5 +46,19 @@ describe('complete-scheduled-service.js pay-link senders acquire the shared clai
     expect(restoreAt).toBeGreaterThan(sendAt);
     expect(block).toMatch(/if \(!payerApDelivered\) \{\s*\n\s*await InvoiceServiceForClaim\.restoreSendClaim\(/);
     expect(end).toBeGreaterThan(restoreAt);
+  });
+
+  // Round-18 P1 (#4131): this branch only runs once payerInvoiceAlreadyDelivered
+  // read false, so it is always a first delivery — never a resend. The default
+  // claim mode treats 'sent'/'viewed'/'overdue' as claimable (a deliberate resend
+  // allowance for every OTHER caller of claimInvoiceForSend), so a bare claim here
+  // would be granted as a "resend" for a row another sender finalized between that
+  // read and this claim, texting the AP inbox a second copy. firstDeliveryOnly
+  // closes that gap by refusing the claim outright once the row shows first-delivery
+  // evidence, instead of only checking a point-in-time snapshot.
+  test('the payer AP claim uses firstDeliveryOnly — this sender never treats an already-delivered row as a resendable claim', () => {
+    const start = source.indexOf('const sendPayerInvoiceToApIfEligible = async () => {');
+    const block = source.slice(start, start + 5500);
+    expect(block).toMatch(/claimInvoiceForSend\(invoice\.id, \{ firstDeliveryOnly: true \}\)/);
   });
 });
