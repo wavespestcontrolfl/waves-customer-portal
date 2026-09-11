@@ -286,4 +286,27 @@ describe('replay-stamp provenance (pre-push audit #4424)', () => {
     expect(termite.setupFee).toBeUndefined();
     expect(termite.pricingKnobs.plan).not.toBe('annual_protection');
   });
+
+  test('the admin quick-quote sandbox strips the same stamp — gate off, no annual-plan pricing', async () => {
+    delete process.env.GATE_TERMITE_ANNUAL_PLAN;
+    const handler = adminPricingConfigRouter.stack
+      .find((layer) => layer.route?.path === '/quick-quote' && layer.route.methods.post).route.stack[0].handle;
+    const body = {
+      homeSqFt: 2400, lotSqFt: 9000,
+      termitePricingKnobs: { plan: 'annual_protection', setupPerStation: 30 },
+      services: { termite: { plan: 'annual_protection' } },
+    };
+    const res = { json: jest.fn(), status: jest.fn().mockReturnThis() };
+    const next = jest.fn();
+    await handler({ body }, res, next);
+    expect(next).not.toHaveBeenCalled();
+    const { quote } = res.json.mock.calls[0][0];
+    const termite = quote.services.find((sv) => sv.name === 'termite_bait');
+    expect(termite).toBeTruthy();
+    // Quarterly program: monitoring is billed per application (monthly figure present),
+    // and the quote's annual is the 4-visit program, not the $249+ plan ladder.
+    const quarterly = generateEstimate({ homeSqFt: 2400, lotSqFt: 9000, services: { termite: {} } });
+    expect(quote.annual).toBe(quarterly.summary.recurringAnnualAfterDiscount);
+    expect(termiteLine(quarterly).plan).toBe('quarterly');
+  });
 });

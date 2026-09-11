@@ -1509,7 +1509,10 @@ router.post('/quick-quote', async (req, res, next) => {
         await pricingEngine.syncConstantsFromDB();
       }
     } catch { /* non-fatal */ }
-    res.json({ quote: pricingEngine.quickQuote(req.body || {}) });
+    // Same posted-input door as /estimate above: replay/identity stamps are
+    // server-derived only, so the compact quote prices a sanitized copy.
+    const { sanitizeClientIdentityFields } = require('../services/estimate-client-identity-fields');
+    res.json({ quote: pricingEngine.quickQuote(sanitizeClientIdentityFields({ ...(req.body || {}) })) });
   } catch (err) { next(err); }
 });
 
