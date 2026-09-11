@@ -1,0 +1,116 @@
+/**
+ * Recovery sweep for the unknown-sender sms_reply alert claim (codex #4210
+ * round-8 P1). claimUnknownSenderAlertWindow's winner can crash — or simply
+ * never get a chance to run its confirm/release branch (process killed
+ * mid-dispatch) — after taking the short lease but before either confirming
+ * it (delivery proven) or releasing it (delivery failed, observed). A
+ * message that LOST that claim race already returned "handled" without
+ * ever verifying a bell actually rang (dispatchUnknownSenderAlert's
+ * `if (!claimed) return true;`), on the assumption the winner has it
+ * covered. With no LATER message from the same sender to reclaim the row,
+ * that assumption goes unchecked forever — the thread stays unread with no
+ * bell, and nothing alive ever retries. This covers BOTH ways the claim row
+ * can end up not reflecting reality: an abandoned lease still sitting there
+ * expired (the winner crashed before touching it), and a released one that
+ * no longer exists at all (the winner observed the failure and released it
+ * correctly, but no later message ever came along to notice) — neither
+ * needs a special marker, since this sweep never looks at the claim row to
+ * decide whether something is WRONG, only to avoid racing a genuinely
+ * in-flight dispatch.
+ *
+ * This sweep is the recovery path that does not depend on either the loser
+ * or the crashed winner still being alive: on a bounded interval
+ * (server/services/scheduler.js), find every phone with a still-unlinked
+ * (never promoted) conversation holding an unread inbound message, skip any
+ * phone with a genuinely active (unexpired) claim right now, and — for the
+ * rest — check whether a live bell already covers it. If not, re-run the
+ * SAME throttled dispatch an ordinary inbound webhook uses for the earliest
+ * such message, inheriting every existing safeguard (atomic claim,
+ * secondary receipt check, fail-open behavior) for free.
+ */
+const db = require('../models/db');
+const logger = require('./logger');
+
+async function findCandidatePhones() {
+  const rows = await db('messages as m')
+    .join('conversations as c', 'c.id', 'm.conversation_id')
+    .leftJoin('sms_log as l', function join() {
+      this.on('l.twilio_sid', '=', 'm.twilio_sid').andOnVal('l.direction', 'inbound');
+    })
+    .whereNull('c.customer_id')
+    .where({ 'm.channel': 'sms', 'm.direction': 'inbound' })
+    .andWhere(function unread() { this.where({ 'm.is_read': false }).orWhereNull('m.is_read'); })
+    .select(db.raw('DISTINCT COALESCE(l.from_phone, c.contact_phone) as phone'));
+  return rows.map((r) => r.phone).filter(Boolean);
+}
+
+async function hasActiveClaim(phone) {
+  const row = await db('sms_reply_alert_claims').where({ phone }).where('expires_at', '>=', new Date()).first('phone');
+  return Boolean(row);
+}
+
+async function findLiveBell(phone) {
+  return db('notifications')
+    .where({ recipient_type: 'admin', category: 'inbound_sms', link: '/admin/communications' })
+    .whereNull('read_at')
+    .whereRaw(
+      `metadata->'payload'->>'twilioSid' IN (
+        SELECT m2.twilio_sid FROM messages m2
+        JOIN conversations c2 ON c2.id = m2.conversation_id
+        LEFT JOIN sms_log l2 ON l2.twilio_sid = m2.twilio_sid AND l2.direction = 'inbound'
+        WHERE COALESCE(l2.from_phone, c2.contact_phone) = ?
+      )`,
+      [phone],
+    )
+    .first('id');
+}
+
+async function earliestUnreadFor(phone) {
+  return db('messages as m')
+    .join('conversations as c', 'c.id', 'm.conversation_id')
+    .leftJoin('sms_log as l', function join() {
+      this.on('l.twilio_sid', '=', 'm.twilio_sid').andOnVal('l.direction', 'inbound');
+    })
+    .where({ 'm.channel': 'sms', 'm.direction': 'inbound' })
+    .whereRaw('COALESCE(l.from_phone, c.contact_phone) = ?', [phone])
+    .andWhere(function unread() { this.where({ 'm.is_read': false }).orWhereNull('m.is_read'); })
+    .whereNotNull('m.twilio_sid')
+    .orderBy('m.created_at', 'asc')
+    .first('m.twilio_sid', 'm.body');
+}
+
+// `dispatch` is injectable for tests — defaults to the real throttled
+// dispatch path so production behavior is a single lazy require (avoids
+// requiring routes/twilio-webhook.js's whole dependency tree at module load
+// time for callers — the scheduler tick — that will usually find nothing to
+// recover).
+async function recoverPhone(phone, dispatch) {
+  if (await hasActiveClaim(phone)) return false; // a dispatch is genuinely still in flight — don't race it
+  if (await findLiveBell(phone)) return false; // already covered — nothing to recover
+  const orphan = await earliestUnreadFor(phone);
+  if (!orphan) return false; // nothing unread for this phone
+  const delivered = await dispatch({ From: phone, MessageSid: orphan.twilio_sid, message: orphan.body });
+  return Boolean(delivered);
+}
+
+async function sweepUnknownSenderAlertClaims({ dispatch } = {}) {
+  const dispatchFn = dispatch || ((args) => require('../routes/twilio-webhook')._internals.dispatchUnknownSenderAlert(args));
+  let dispatched = 0;
+  let checked = 0;
+  try {
+    const candidatePhones = await findCandidatePhones();
+    for (const phone of candidatePhones) {
+      checked += 1;
+      try {
+        if (await recoverPhone(phone, dispatchFn)) dispatched += 1;
+      } catch (e) {
+        logger.warn(`[sms-reply-alert-sweep] recovery failed for one phone: ${e.message}`);
+      }
+    }
+  } catch (e) {
+    logger.warn(`[sms-reply-alert-sweep] sweep failed: ${e.message}`);
+  }
+  return { checked, dispatched };
+}
+
+module.exports = { sweepUnknownSenderAlertClaims, recoverPhone };

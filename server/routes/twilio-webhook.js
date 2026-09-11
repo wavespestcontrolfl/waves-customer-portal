@@ -2152,6 +2152,7 @@ router._internals = {
   claimUnknownSenderAlertWindow,
   confirmUnknownSenderAlertWindow,
   releaseUnknownSenderAlertClaim,
+  dispatchUnknownSenderAlert,
 };
 
 module.exports = router;
