@@ -270,7 +270,7 @@ router.post('/sms', async (req, res) => {
     // message row exists BEFORE the sms_reply bell below is written: the
     // thread-read bell cross-clear only clears bells for threads with no
     // unread message, which needs message-before-bell ordering (hook P1).
-    await require('../services/conversations').recordTouchpoint({
+    const inboundTouchpoint = await require('../services/conversations').recordTouchpoint({
       customerId: customer?.id,
       channel: 'sms',
       ourEndpointId: To,
@@ -289,6 +289,25 @@ router.post('/sms', async (req, res) => {
       messageType: quietReaction ? 'sms_reaction' : undefined,
       metadata: { location: numberConfig?.label, numberType: numberConfig?.type, ...(courtesyOnly ? { courtesyOnly: true } : {}) },
     }).catch(() => {});
+
+    // Save the inbox message before any classifier await: the durable SID
+    // claim suppresses retries even if the process dies during a model call.
+    // A failed unified write bypasses screening and keeps the legacy path.
+    let solicitation = null;
+    try {
+      const screen = require('../services/sms-solicitation-classifier');
+      if (inboundTouchpoint?.message?.id && MessageSid && screen.classifierMode() !== 'off' && !customer && !isAiNumber && !smsReaction && Body) {
+        const known = await require('../utils/known-caller-phone').knownCallerPhoneExists(db, From);
+        solicitation = await screen.screenInboundSms({ body: Body, hasCustomer: known, isReaction: smsReaction, isAiLine: isAiNumber });
+        if (solicitation) {
+          await updateByTwilioSid(MessageSid, {
+            metadata: db.raw("COALESCE(metadata, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ spam_verdict: solicitation })]),
+            updated_at: new Date(),
+          });
+        }
+      }
+    } catch { logger.warn('[sms-solicitation] screen failed; continuing normal handling'); }
+    const solicitationMeta = solicitation ? { spam_verdict: solicitation } : {};
 
     // ── STOP / UNSUBSCRIBE keyword handling ──
     const optCommand = detectSmsOptCommand(Body);
@@ -325,6 +344,7 @@ router.post('/sms', async (req, res) => {
           customer_id: customer?.id || null, direction: 'inbound', from_phone: From, to_phone: To,
           message_body: Body, twilio_sid: MessageSid, status: 'received', message_type: 'opt_out',
           metadata: JSON.stringify({
+            ...solicitationMeta,
             opt_out_reason: optCommand.reason,
             detection_method: optCommand.detectionMethod,
             source_keyword: optCommand.sourceKeyword,
@@ -662,6 +682,7 @@ router.post('/sms', async (req, res) => {
       // sms_log-backed unread counts agree with the unified messages row.
       ...((courtesyOnly || unifiedAlreadyRead) ? { is_read: true } : {}),
       metadata: JSON.stringify({
+        ...solicitationMeta,
         locationId: numberConfig.locationId,
         source: numberConfig.type,
         domain: numberConfig.domain,
