@@ -473,6 +473,25 @@ async function visitOptions(technicianId, selectedMonth) {
     .orderBy('ss.scheduled_date', 'desc').limit(500).then(rows => rows.map(row => calendarRow(row, ['scheduled_date'])));
 }
 
+const previousDay = day => { const at = new Date(`${day}T12:00:00Z`); at.setUTCDate(at.getUTCDate() - 1); return at.toISOString().slice(0, 10); };
+
+// Candidate returns use the save path's ordering: a return scheduled the day
+// before or the same day still qualifies when trustworthy completion instants
+// place it after the original (a visit can finish after Eastern midnight).
+// Later-dated candidates pass by date; the save re-validates the instants.
+async function laterReturns(conn, rows, visit) {
+  const returns = [];
+  for (const row of rows) {
+    const candidate = { ...calendarRow(row, ['scheduled_date']), service_date: dateOnly(row.scheduled_date) };
+    if (candidate.service_date <= visit.service_date) {
+      const record = await resolveServiceRecord(conn, row, { scheduled_service_id: true });
+      if (!returnedAfter({ ...candidate, backfilled: isBackfilledRecord(record.record) }, visit)) continue;
+    }
+    returns.push({ id: candidate.id, service_type: candidate.service_type, scheduled_date: candidate.scheduled_date });
+  }
+  return returns;
+}
+
 async function evidenceDetail(serviceId) {
   const visit = await visitFacts(db, serviceId);
   const owners = await allocationCustomers(db, visit.customer_id);
@@ -485,16 +504,28 @@ async function evidenceDetail(serviceId) {
     db('scheduled_services as ss').leftJoin('services as s', 's.id', 'ss.service_id')
       .where({ 'ss.customer_id': visit.customer_id, 'ss.status': 'completed' }).whereNot('ss.id', visit.id)
       .where(q => properties.length ? q.whereIn('ss.property_id', properties) : q.whereNull('ss.property_id'))
-      .where('ss.scheduled_date', '>=', visit.service_date).whereRaw('COALESCE(ss.service_key_snapshot, s.service_key) = ?', [visit.service_key])
-      .select('ss.id', 'ss.service_type', 'ss.scheduled_date').orderBy('ss.scheduled_date', 'desc').limit(200).then(rows => rows.map(row => calendarRow(row, ['scheduled_date']))),
+      .where(q => {
+        // Same contract as returnedAfter: any scheduled date qualifies when a recorded end instant follows the original's.
+        q.where('ss.scheduled_date', '>=', previousDay(visit.service_date));
+        const finished = completionInstant(visit);
+        if (finished != null) q.orWhereRaw('COALESCE(ss.actual_end_time, ss.check_out_time, ss.completed_at) > ?', [new Date(finished)]);
+      }).whereRaw('COALESCE(ss.service_key_snapshot, s.service_key) = ?', [visit.service_key])
+      .select('ss.id', 'ss.customer_id', 'ss.service_type', 'ss.scheduled_date', 'ss.completed_at', 'ss.actual_end_time', 'ss.check_out_time')
+      .orderBy('ss.scheduled_date', 'desc').limit(200).then(rows => laterReturns(db, rows, visit)),
   ]);
-  return { visit, revisions, allocations, returns };
+  // The forced exclusion (callback, included follow-up, always-free type) is
+  // resolved here so the editor never offers an allocation the save would reject.
+  const record = await resolveServiceRecord(db, visit, { scheduled_service_id: true });
+  return { visit: { ...visit, forced_exclusion: resolveExclusion(visit, record, 'none') }, revisions, allocations, returns };
 }
 
 async function estimateOptions(selectedMonth) {
   const range = monthRange(selectedMonth);
+  // An estimate with retained origination evidence is reviewed through its milestone action, never re-originated.
   return db('estimates').where({ status: 'accepted' }).where('accepted_at', '>=', parseETDateTime(`${range.start}T00:00`))
-    .where('accepted_at', '<', parseETDateTime(`${range.end}T00:00`)).select('id', 'customer_name', 'accepted_at').orderBy('accepted_at', 'desc').limit(500);
+    .where('accepted_at', '<', parseETDateTime(`${range.end}T00:00`))
+    .whereNotExists(function attributed() { this.select(1).from('field_business_evidence').whereRaw('field_business_evidence.estimate_id = estimates.id'); })
+    .select('id', 'customer_name', 'accepted_at').orderBy('accepted_at', 'desc').limit(500);
 }
 
 async function score(serviceId, actor) {
