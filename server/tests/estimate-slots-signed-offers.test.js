@@ -41,12 +41,12 @@ const ESTIMATE_ROW = {
   service_interest: 'Pest Control',
 };
 
-function mockDb() {
+function mockDb(estimate = ESTIMATE_ROW) {
   db.mockImplementation((table) => {
     if (table === 'estimates') {
       return {
         where: jest.fn().mockReturnThis(),
-        first: jest.fn().mockResolvedValue(ESTIMATE_ROW),
+        first: jest.fn().mockResolvedValue(estimate),
       };
     }
     if (table === 'customers') {
@@ -92,6 +92,50 @@ describe('getAvailableSlots — signed offers', () => {
     jest.clearAllMocks();
     mockDb();
     estimateSlotAvailability._internals.clearCaches();
+  });
+
+  test('capacity responses and cache hits omit internal catalog and route fields', async () => {
+    const gate = process.env.GATE_SCHEDULING_CAPACITY;
+    process.env.GATE_SCHEDULING_CAPACITY = 'true';
+    jest.useFakeTimers();
+    jest.setSystemTime(new Date('2027-05-14T15:00:00Z'));
+    mockDb({ ...ESTIMATE_ROW, estimate_data: { result: { oneTime: { items: [{
+      service: 'pest_initial_roach', label: 'Cockroach Treatment Service', price: 250,
+      catalogServiceKey: 'cockroach_control',
+    }] } } } });
+    const catalog = jest.spyOn(require('../services/slot-reservation'), 'catalogLinkForProfile')
+      .mockImplementation(async (_conn, profile) => {
+        expect(profile.services[0]).toMatchObject({
+          engineKey: 'pest_initial_roach', catalogServiceKey: 'cockroach_control',
+        });
+        return { id: 'internal-catalog-id', default_duration_minutes: 30 };
+      });
+    require('../services/scheduling/find-time').findAvailableSlots.mockResolvedValueOnce({ slots: [{
+      date: '2027-05-20', start_time: '09:00', technician: { id: 'tech-1', name: 'Fixture' },
+      detour_minutes: 4, stops_that_day: 3, route_mode: 'arrival_windows',
+    }], total_feasible: 1 });
+    try {
+      for (const cacheHit of [false, true]) {
+        const result = await getAvailableSlots('est-signed-1', {
+          serviceMode: 'one_time', dateFrom: '2027-05-20', dateTo: '2027-05-20',
+        });
+        expect(result.metadata.cacheHit).toBe(cacheHit);
+        const slots = [...result.primary, ...result.expander];
+        expect(slots.length).toBeGreaterThan(0);
+        expect(slots.every(slot => !Object.hasOwn(slot, 'routeMode'))).toBe(true);
+        expect(result.metadata.serviceProfile.services).toEqual([expect.objectContaining({
+          service: 'pest_control', label: 'Cockroach Treatment Service', visitsPerYear: null, durationMinutes: 30,
+        })]);
+        expect(result.metadata.serviceProfile.services.every(service => !Object.hasOwn(service, 'engineKey')
+          && !Object.hasOwn(service, 'catalogServiceKey'))).toBe(true);
+        expect(splitSignedSlotId(slots[0].slotId)).not.toBeNull();
+      }
+    } finally {
+      catalog.mockRestore();
+      jest.useRealTimers();
+      if (gate === undefined) delete process.env.GATE_SCHEDULING_CAPACITY;
+      else process.env.GATE_SCHEDULING_CAPACITY = gate;
+    }
   });
 
   test('every returned slot carries a live signature that verifies for THIS estimate only', async () => {

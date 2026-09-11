@@ -26,6 +26,21 @@ const row = (id, extra = {}) => ({
 
 beforeEach(() => {
   jest.clearAllMocks();
+  const db = require('../models/db');
+  db.raw = (sql) => sql;
+  db.transaction = async (run) => run(db);
+  db.mockImplementation((table) => {
+    let ids = [];
+    const q = {};
+    for (const name of ['where', 'whereNull', 'whereRaw', 'whereNot', 'whereNotExists', 'orderBy', 'forUpdate', 'join']) q[name] = () => q;
+    q.whereIn = (_column, values) => { ids = values; return q; };
+    q.modify = (fn) => { fn(q); return q; };
+    q.update = async () => 1;
+    q.first = async () => null;
+    q.select = async () => table === 'call_commitments as cc'
+      ? [...new Map((await Promise.all(listOpenCommitments.mock.results.map((r) => r.value))).flat().map((r) => [r.id, r])).values()].filter((r) => ids.includes(r.id)) : [];
+    return q;
+  });
   isEnabled.mockReturnValue(true);
   NotificationService.notifyAdmin.mockResolvedValue({ id: 'n1' });
 });
@@ -107,19 +122,18 @@ test('fulfillment is refreshed for every candidate call before paging; a promise
 test('a call whose fulfillment refresh FAILED is left out of the bell — its promise may already be kept — and reported as unverified', async () => {
   listOpenCommitments.mockResolvedValue([row('a'), row('b')]);
   refreshFulfillment.mockRejectedValueOnce(new Error('connection reset'));
-  const out = await runCallCommitmentsWatchdog({ now: NOW });
+  await expect(runCallCommitmentsWatchdog({ now: NOW })).rejects.toThrow('verification incomplete');
   expect(refreshFulfillment).toHaveBeenCalledTimes(2);
-  expect(out).toMatchObject({ overdue: 1, alerted: 1, unverified: 1 });
   expect(NotificationService.notifyAdmin).toHaveBeenCalledTimes(1);
-  expect(NotificationService.notifyAdmin.mock.calls[0][3].dedupeKey).toContain('call-commitment-overdue:b:');
+  expect(NotificationService.notifyAdmin.mock.calls[0][3].metadata.commitment_id).toBe('b');
 });
 
 test('a refresh whose lookups failed (failed > 0 in the summary) also leaves that call out of the bell', async () => {
   listOpenCommitments.mockResolvedValue([row('a'), row('b')]);
   refreshFulfillment.mockResolvedValueOnce({ checked: 1, fulfilled: 0, hinted: 0, cleared: 0, failed: 1 });
-  const out = await runCallCommitmentsWatchdog({ now: NOW });
-  expect(out).toMatchObject({ overdue: 1, alerted: 1, unverified: 1 });
-  expect(NotificationService.notifyAdmin.mock.calls[0][3].dedupeKey).toContain('call-commitment-overdue:b:');
+  await expect(runCallCommitmentsWatchdog({ now: NOW })).rejects.toThrow('verification incomplete');
+  expect(NotificationService.notifyAdmin).toHaveBeenCalledTimes(1);
+  expect(NotificationService.notifyAdmin.mock.calls[0][3].metadata.commitment_id).toBe('b');
 });
 
 test('a promise the office settled after the snapshot was taken never rings: rows are re-checked as still open right before paging; the bells carry the tech-visible trigger key', async () => {

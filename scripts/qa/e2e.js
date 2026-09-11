@@ -324,7 +324,8 @@ async function main() {
       await page.screenshot({ path: path.join(artifactDir, 'tech-photos-mobile.png'), fullPage: false });
       await page.setViewportSize({ width: 1440, height: 1000 });
       await page.screenshot({ path: path.join(artifactDir, 'tech-photos-desktop.png'), fullPage: false });
-      await page.getByRole('dialog', { name: 'Service Photos', exact: true }).getByRole('button', { name: 'Close', exact: true }).click();
+      await page.getByRole('button', { name: 'Close service photos', exact: true }).click();
+      await page.getByRole('heading', { name: 'Service Photos', exact: true }).waitFor({ state: 'hidden' });
       await page.reload();
       await page.getByRole('button', { name: /QA Customer/ }).click();
       await page.getByRole('button', { name: /Photos/ }).click();
