@@ -128,6 +128,11 @@ function installMock(initial = {}, { onUpdate = null } = {}) {
       whereNotNull(c) { this.notNull.push(c); return this; },
       whereNull(c) { this.nulls.push(c); return this; },
       leftJoin() { return this; },
+      // review-ask-history.deliveredAskRows correlates the follow-up delivery
+      // subquery with joinRaw; without it the lookup THROWS and dispatch
+      // fails closed on REVIEW_HISTORY_UNAVAILABLE (a 503 hold), which reads
+      // as a mysterious 'deferred' instead of the send under test.
+      joinRaw() { return this; },
       select() { return this; },
       orderBy(c, d = 'asc') { this.order = [c, d]; return this; },
       orderByRaw() { return this; },

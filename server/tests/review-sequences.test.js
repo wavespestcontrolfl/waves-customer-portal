@@ -80,6 +80,7 @@ function makeMock(initial = {}, opts = {}) {
   // equals/ops/raws/selected) so a test can break a single lookup and leave
   // the rest of the runner alone.
   const throwSelectWhen = typeof opts.throwSelectWhen === 'function' ? opts.throwSelectWhen : null;
+  const throwDeleteFor = new Set(opts.throwDeleteFor || []);
   function filtered(q) {
     let rows = q.matchNone ? [] : [...(state.rows[q.table] || [])];
     rows = rows.filter((r) => q.equals.every(([k, v]) => valueFor(r, k) === v));
@@ -131,7 +132,7 @@ function makeMock(initial = {}, opts = {}) {
         return { returning: async () => [inserted] };
       },
       async update(patch) { if (opts.onUpdate) opts.onUpdate(this.table, patch, state); if (throwUpdateFor.has(this.table)) throw new Error('pg blip on update'); const rows = filtered(this); rows.forEach((r) => Object.assign(r, patch)); return rows.length; },
-      async del() { const rows = filtered(this); const arr = state.rows[this.table] || []; rows.forEach((r) => { const i = arr.indexOf(r); if (i >= 0) arr.splice(i, 1); }); return rows.length; },
+      async del() { if (throwDeleteFor.has(this.table)) throw new Error('pg blip on delete'); const rows = filtered(this); const arr = state.rows[this.table] || []; rows.forEach((r) => { const i = arr.indexOf(r); if (i >= 0) arr.splice(i, 1); }); return rows.length; },
       then(res, rej) {
         if (throwSelectWhen && throwSelectWhen(this)) {
           return Promise.reject(new Error('pg blip on select')).then(res, rej);
@@ -5308,6 +5309,25 @@ describe('direct outreach serialization', () => {
     expect(result).toMatchObject({ blocked: true, code: 'REVIEW_HISTORY_UNAVAILABLE', httpStatus: 503 });
     expect(mockEmailSendTemplate).not.toHaveBeenCalled();
     expect(mock.__state.rows.review_requests).toEqual([]);
+  });
+
+  // The cleanup delete runs on the SAME database whose outage produced the
+  // 503 in the first place, so it fails for the same reason. Throwing here
+  // would convert a truthful "try again later" hold into a generic 500 — and
+  // on the satisfaction page, into the bare fallback link the hold exists to
+  // suppress (Codex #4332 P2).
+  test('a failed cleanup delete keeps the email hold instead of raising', async () => {
+    const customer = { id: 'direct-cleanup', first_name: 'Synthetic', phone: '+12025550101', email: 'synthetic@example.test' };
+    const mock = makeMock({ customers: [customer], notification_prefs: [{ customer_id: customer.id, email_enabled: true, review_request: true }] },
+      { throwSelectWhen: q => q.table === 'sms_log', throwDeleteFor: ['review_requests'] });
+    db.mockImplementation(mock);
+    const result = await ReviewService.sendOutreachTouch({ customer, channel: 'email' });
+    expect(result).toMatchObject({ ok: false, blocked: true, code: 'REVIEW_HISTORY_UNAVAILABLE', httpStatus: 503, channel: 'email' });
+    expect(mockEmailSendTemplate).not.toHaveBeenCalled();
+    // The undeletable row is harmless: no send is attached and the next
+    // attempt re-runs the same guard.
+    expect(mock.__state.rows.review_requests).toHaveLength(1);
+    expect(mock.__state.rows.review_requests[0].status).toBe('pending');
   });
 
   test('direct SMS holds the lock through provider acceptance and the durable stamp', async () => {

@@ -3873,8 +3873,18 @@ const ReviewService = {
     const nextAllowedAt = result.nextAllowedAt || new Date(Date.now() + 15 * 60000).toISOString();
     if (actualChannel === "email") {
       // No provider was called and no worker owns an email retry. Remove the
-      // fresh attempt so it cannot inflate email-touch/sent reporting.
-      await db("review_requests").where({ id: request.id, status: "pending" }).del();
+      // fresh attempt so it cannot inflate email-touch/sent reporting. The
+      // hold itself must survive a cleanup failure: a REVIEW_HISTORY_UNAVAILABLE
+      // caused by the database makes this delete fail for the same reason,
+      // and a throw here would turn the 503 into a generic 500 (or, for the
+      // satisfaction page, an ordinary error that exposes the bare fallback)
+      // (Codex #4332 P2). A leftover pending row is harmless: it carries no
+      // send and the next attempt re-runs the same guard.
+      try {
+        await db("review_requests").where({ id: request.id, status: "pending" }).del();
+      } catch (cleanupErr) {
+        logger.warn(`[review] blocked email ask cleanup failed (requestId=${request.id} code=${result.code} errType=${cleanupErr?.name || "Error"})`);
+      }
       return { ok: false, blocked: true, channel: "email",
         code: result.code, reason: result.reason, nextAllowedAt, httpStatus: result.httpStatus };
     }
