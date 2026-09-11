@@ -52,6 +52,10 @@ describe('annual plan — pricing (ruling A-1 = P1)', () => {
     expect(a).toMatchObject({ plan: 'annual_protection', stations: 15, visitsPerYear: 1, annual: 299, perApp: 299, annualFee: 299, stationsOwnedBy: 'waves', ownership: 'plan' });
     expect(a.installation).toMatchObject({ kind: 'setup', price: 450, retailValue: 653 });
     expect(a.setup).toEqual({ price: 450, perStation: 30, stations: 15, tierDiscountable: false });
+    // installation.margin is the margin on what is BILLED — the setup fee's accepted ≈ −10 % (450 vs ≈ 493.58 cost),
+    // while retailMargin keeps the outright-install formula's figure for reference.
+    expect(a.installation.margin).toBeCloseTo((450 - 493.58) / 450, 2);
+    expect(a.installation.retailMargin).toBeGreaterThan(0);
     expect(a.monitoring).toMatchObject({ annual: 299, model: 'annual_protection' });
     expect(a.planTerms).toMatchObject({ coverageMonths: 12, visitsPerYear: 1, retreatOnly: true, subterraneanOnly: true, renewal: 'annual' });
     const b = termiteLine(generateEstimate(HOME(2117, { services: { termite: { system: 'trelona', plan: 'annual_protection' } } })));

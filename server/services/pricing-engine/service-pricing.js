@@ -5046,6 +5046,10 @@ function priceTermiteBait(property, options = {}) {
   // annual fee, one inspection a year; rental / bond have no meaning there).
   const program = resolveTermiteProgram({ isAnnualPlan, annualPlan, stations, installPrice, ownership });
   const { billedInstallPrice, visitsPerYear, monitoringMonthly, monitoringAnnual } = program;
+  // Margin on what is actually BILLED for the hardware — the outright install
+  // on the quarterly program, the station setup fee on the annual plan
+  // (ruling A-1 accepts its ≈ −10 %), 0 on a rental (nothing billed).
+  const billedInstallMargin = billedInstallPrice > 0 ? (billedInstallPrice - installCost) / billedInstallPrice : 0;
   const costs = termiteProgramCostModel({
     stations,
     installMaterialCost,
@@ -5109,7 +5113,10 @@ function priceTermiteBait(property, options = {}) {
       // this is the "$0 today, $NNN of hardware" figure, and it is the base
       // priceTermiteStationRental amortizes.
       retailValue: installPrice,
-      margin: Math.round(installMargin * 1000) / 1000,
+      // Margin on the BILLED figure (setup fee on the plan); retailMargin is
+      // the outright-install formula's margin for reference.
+      margin: Math.round(billedInstallMargin * 1000) / 1000,
+      retailMargin: Math.round(installMargin * 1000) / 1000,
     },
     monitoring: {
       monthly: monitoringMonthly,
