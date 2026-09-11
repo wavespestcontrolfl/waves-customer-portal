@@ -401,6 +401,22 @@ persist_ref_artifacts() {
 # a finding's description string cannot truncate it. No python3 → no
 # salvage, and the caller falls through to its retry: this is a recovery
 # path, never a requirement.
+# ── "Reviewed nothing" guard ─────────────────────────────────────────────
+# A zero-finding verdict is indistinguishable from a clean one by shape
+# alone, so a reviewer that never saw the diff scores as CLEAN and the push
+# sails through. That is not hypothetical — it happened here: a retry that
+# omitted the diff replied "No diff content was available in this session to
+# review" with findings: [], and the hook printed "clean — push allowed".
+# The structural fix is that every attempt now carries the diff; this is the
+# cheap belt to go with those braces. Narrow on purpose: it only rejects a
+# verdict that BOTH found nothing AND says it could not see anything.
+verdict_reviewed_nothing() {
+  # $1 = verdict json. 0 = the reviewer admits it reviewed nothing.
+  [ "$(jq -r '(.findings|length)' "$1" 2>/dev/null)" = "0" ] || return 1
+  jq -r '.summary // ""' "$1" 2>/dev/null | grep -Eqi \
+    'no diff|diff (was )?(not|un)available|no code (changes|content)|could not (see|read|access|retrieve)|nothing (was )?(provided|to review)|was not (provided|included)|empty diff'
+}
+
 extract_review_json() {
   # $1 = raw reply text, $2 = out file. 0 = salvaged, 1 = nothing usable.
   command -v python3 >/dev/null 2>&1 || return 1
@@ -507,7 +523,7 @@ run_claude_audit() {
   # for a reply that contained no object at all. A rejected reply is NOT
   # treated as clean — it falls through to UN-AUDITED like any other
   # failure.
-  local attempt
+  local attempt accepted
   for attempt in 1 2; do
     : > "$envelope"
     rm -f "$TMPDIR_RUN/timed-out-claude-$idx"
@@ -564,25 +580,45 @@ run_claude_audit() {
     jq -r '.result // empty' "$envelope" > "$TMPDIR_RUN/claude-raw-$idx.txt"
     sed -e '/^[[:space:]]*```/d' "$TMPDIR_RUN/claude-raw-$idx.txt" > "$out_file"
 
+    accepted=0
     if [ -s "$out_file" ] && jq empty "$out_file" >/dev/null 2>&1 \
        && [ "$(jq -r 'has("findings") and (.findings|type=="array")' "$out_file")" = "true" ]; then
-      return 0
+      accepted=1
+    elif extract_review_json "$TMPDIR_RUN/claude-raw-$idx.txt" "$out_file"; then
+      echo "[codex-review] claude wrapped its verdict in prose for $label — salvaged the JSON object." >&2
+      accepted=1
     fi
 
-    if extract_review_json "$TMPDIR_RUN/claude-raw-$idx.txt" "$out_file"; then
-      echo "[codex-review] claude wrapped its verdict in prose for $label — salvaged the JSON object." >&2
-      return 0
+    if [ "$accepted" = "1" ]; then
+      if verdict_reviewed_nothing "$out_file"; then
+        echo "[codex-review] claude returned an EMPTY verdict for $label saying it could not" >&2
+        echo "[codex-review] see the diff — rejecting it. A review of nothing is not a clean" >&2
+        echo "[codex-review] review. Summary was: $(jq -r '.summary // ""' "$out_file" | head -c 200)" >&2
+        accepted=0
+      else
+        [ "$attempt" = "2" ] && echo "[codex-review] (verdict came from the retry attempt)" >&2
+        return 0
+      fi
     fi
 
     if [ "$attempt" = "1" ]; then
       echo "[codex-review] claude did not return the JSON contract for $label — retrying once." >&2
-      # Attempt 2 gets the contract alone, with the prose reply quoted back.
+      # Attempt 2 MUST carry the diff again. An earlier version sent only the
+      # contract plus the previous reply, and the retry duly answered "no diff
+      # content was available to review" with an empty findings array — which
+      # scored as P0:0/P1:0 and printed "clean — push allowed". A verdict on
+      # nothing is the single worst failure this hook can have, so the retry
+      # is built from $prompt_file (diff included) and never replaces it.
       {
-        echo "Your previous reply did not follow the output contract: it was not a single JSON object."
-        echo "Re-issue the SAME review as one JSON object matching the schema below. Nothing else."
+        cat "$prompt_file"
         echo ""
-        echo "── Your previous reply ────────────────────────────────────────────"
-        head -c 20000 "$TMPDIR_RUN/claude-raw-$idx.txt"
+        echo "── Output contract (RETRY) ────────────────────────────────────────"
+        echo "Your previous reply to this exact review request did not follow the"
+        echo "output contract: it was not a single JSON object. Re-issue the SAME"
+        echo "review of the diff above as ONE JSON object and nothing else — no"
+        echo "prose, no markdown, no code fence. Findings belong in the findings"
+        echo "array. An empty findings array means you reviewed the diff and found"
+        echo "nothing; never return it because you could not see the diff."
         echo ""
         echo "── Schema ─────────────────────────────────────────────────────────"
         cat "$SCHEMA"
