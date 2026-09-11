@@ -7,6 +7,7 @@ import {
   Card,
   CardBody,
   Checkbox,
+  UiSurface,
   buttonStyles,
 } from "../ui";
 
@@ -18,17 +19,11 @@ const FIELD_LABELS = {
 };
 
 async function request(productId, action = "", body) {
-  const response = await fetch(
-    `${import.meta.env.VITE_API_URL || "/api"}/admin/inventory/${productId}/label-review${action}`,
-    {
-      method: body ? "POST" : "GET",
-      headers: {
-        Authorization: `Bearer ${localStorage.getItem("waves_admin_token")}`,
-        "Content-Type": "application/json",
-      },
-      ...(body ? { body: JSON.stringify(body) } : {}),
-    },
-  );
+  const response = await fetch(`${import.meta.env.VITE_API_URL || "/api"}/admin/inventory/${productId}/label-review${action}`, {
+    method: body ? "POST" : "GET",
+    headers: { Authorization: `Bearer ${localStorage.getItem("waves_admin_token")}`, "Content-Type": "application/json" },
+    ...(body ? { body: JSON.stringify(body) } : {}),
+  });
   const data = await response.json();
   if (!response.ok)
     throw new Error(data.error || "Label review could not be loaded.");
@@ -76,7 +71,7 @@ function Evidence({ entry }) {
                 </Badge>
               </div>
               {fact.quote && (
-                <blockquote className="my-3 border-0 border-l-2 border-solid border-zinc-200 pl-3 text-ui-body text-ink-secondary">
+                <blockquote className="mx-0 my-3 border-0 border-l-2 border-solid border-zinc-200 pl-3 text-ui-body text-ink-secondary">
                   {fact.quote}
                 </blockquote>
               )}
@@ -170,9 +165,14 @@ export default function ProductLabelReview({ product }) {
   const disabled = busy || loading;
 
   return (
-    <section aria-label="Label weather review" className="my-4 max-w-[calc(100vw-64px)]">
+    <UiSurface
+      as="section"
+      density="comfortable"
+      aria-label="Label weather review"
+      className="my-4 max-w-[calc(100vw-64px)]"
+    >
       <Card className="overflow-hidden">
-        <CardBody className="space-y-4 break-words">
+        <CardBody className="space-y-4 break-words [overflow-wrap:anywhere]">
           <div>
             <h3 className="flex items-center gap-2 text-18 font-medium text-zinc-900">
               <FileText size={18} aria-hidden /> Label weather evidence
@@ -281,6 +281,6 @@ export default function ProductLabelReview({ product }) {
           </p>
         </CardBody>
       </Card>
-    </section>
+    </UiSurface>
   );
 }
