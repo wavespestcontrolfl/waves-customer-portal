@@ -233,6 +233,24 @@ app.use('/api/public/pest-forecast', (req, res, next) => {
   next();
 });
 
+// Ops-digest ingest (routes/ops-digest-ingest.js): unobservable-when-dark,
+// mounted ABOVE the global cors() (which would answer an OPTIONS preflight
+// 204 on its own), the global /api/ limiter (429) and the body parsers
+// (400/413) — while OPS_DIGEST_INGEST_TOKEN is unset EVERY request to the
+// path, any method, gets the generic unknown-route 404 (codex P0 r1/r4 on
+// #4392). Token-route privacy baseline (no-store, noindex, no-referrer) is
+// stamped first so the dark 404 carries it too; the router chain re-stamps
+// for the authenticated outcomes. The router's own darkUnlessConfigured
+// stays as the in-router layer; this one runs first.
+app.use('/api/ops/digest', require('./middleware/no-store').noStore, (req, res, next) => {
+  if (!process.env.OPS_DIGEST_INGEST_TOKEN) {
+    // middleware/errors.js notFoundBody — the one formatter, so this stays
+    // indistinguishable from an unknown route while dark.
+    return res.status(404).json(require('./middleware/errors').notFoundBody(req));
+  }
+  next();
+});
+
 // CORS — allow frontend dev server and production domain
 const { allowedOrigins } = require('./config/cors-origins');
 app.use(cors({
@@ -345,20 +363,6 @@ app.use('/api/public/mcp', (req, res, next) => {
 app.use('/api/public/a2a', (req, res, next) => {
   if (!require('./config/feature-gates').isEnabled('a2aPublic')) {
     return res.status(404).json({ error: 'not found' });
-  }
-  next();
-});
-// Ops-digest ingest (routes/ops-digest-ingest.js): same unobservable-when-
-// dark contract as the public funnels above — while OPS_DIGEST_INGEST_TOKEN
-// is unset the path must read 404 even for an IP that already exhausted the
-// global /api/ limiter, and before the JSON parser can answer 400/413
-// (codex P0 on #4392). The router's own darkUnlessConfigured stays as the
-// in-router layer; this is the one that runs first.
-app.use('/api/ops/digest', (req, res, next) => {
-  if (!process.env.OPS_DIGEST_INGEST_TOKEN) {
-    // middleware/errors.js notFoundBody — the one formatter, so this stays
-    // indistinguishable from an unknown route while dark.
-    return res.status(404).json(require('./middleware/errors').notFoundBody(req));
   }
   next();
 });
