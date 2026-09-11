@@ -8,6 +8,8 @@ import useRenderedTabBeacon from "../../hooks/useRenderedTabBeacon";
 import { getAdminUser } from "../../lib/adminAuth";
 import AdminCommandHeader from "../../components/admin/AdminCommandHeader";
 
+import { UiSurface } from "../../components/ui";
+
 export const PRICING_AREAS = [
   { key: "logic", label: "Logic & Margins", Icon: Calculator },
   // /api/admin/pricing is admin-only (requireAdmin) — hide the area for
@@ -53,13 +55,13 @@ export default function PricingHubPage() {
   const [secondary, setSecondary] = useState(null);
 
   return (
-    <div>
+    <UiSurface density="comfortable">
       {/* One header card for the whole hub: area tabs on the first row; the
           active area (Logic & Margins) hands its own section tabs up for the
           second row instead of stacking a second header. */}
       {/* Width goes on the header itself (its sticky box must stay a direct
           child of the element that also contains the area content). */}
-      <AdminCommandHeader
+      <AdminCommandHeader variant="workspace"
           className="max-w-[1300px] mx-auto"
           title="Pricing"
           icon={Calculator}
@@ -83,6 +85,6 @@ export default function PricingHubPage() {
         <PricingStrategyPage embedded onSecondaryNav={setSecondary} />
       )}
       {activeArea === "notices" && <AdminPriceChangePage embedded />}
-    </div>
+    </UiSurface>
   );
 }
