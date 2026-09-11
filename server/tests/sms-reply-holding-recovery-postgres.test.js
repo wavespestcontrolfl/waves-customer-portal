@@ -92,6 +92,36 @@ postgres('uncertain SMS reply holding recovery on PostgreSQL', () => {
     expect(await trx('sms_log').where({ id: reservationId }).first('id')).toBeUndefined();
   });
 
+  test('an uncertain reservation past the reconciliation window reopens for operator visibility, without touching the reservation row or resending', async () => {
+    const used = await decision();
+    const parked = await decision({ message: 'A different suggestion.' });
+    const reservationId = await uncertainReservation({ kind: 'manual', used, parked });
+    // Simulate provider evidence never arriving: push the reservation's own
+    // updated_at (not just the decisions') well past a short reconciliation
+    // window passed to this call.
+    await trx('sms_log').where({ id: reservationId }).update({ updated_at: new Date(Date.now() - 3 * 60 * 60 * 1000) });
+
+    expect(await suggest.recoverSuggestionHoldingStates({ orphanMinutes: 30, uncertainReconciliationHours: 1 })).toBe(2);
+
+    expect((await trx('agent_decisions').whereIn('id', [used.id, parked.id])).map((row) => row.status).sort())
+      .toEqual(['pending_review', 'pending_review']);
+    // Bounded terminal settlement, not a resend: the linked reservation row
+    // itself is untouched (no SMS send, no Twilio call, no status change).
+    expect(await trx('sms_log').where({ id: reservationId }).first('status')).toMatchObject({ status: 'sending' });
+  });
+
+  test('an uncertain reservation still within the reconciliation window keeps holding its linked decisions', async () => {
+    const used = await decision();
+    const parked = await decision({ message: 'A different suggestion.' });
+    const reservationId = await uncertainReservation({ kind: 'manual', used, parked });
+
+    expect(await suggest.recoverSuggestionHoldingStates({ orphanMinutes: 30, uncertainReconciliationHours: 24 })).toBe(0);
+
+    expect((await trx('agent_decisions').whereIn('id', [used.id, parked.id])).map((row) => row.status).sort())
+      .toEqual(['scheduled', 'scheduled']);
+    expect(await trx('sms_log').where({ id: reservationId }).first('id')).toMatchObject({ id: reservationId });
+  });
+
   test('an ordinary crashed pre-provider reservation still reopens after the orphan cutoff', async () => {
     const used = await decision();
     const parked = await decision({ message: 'A different suggestion.' });
