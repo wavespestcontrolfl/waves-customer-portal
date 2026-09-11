@@ -39,6 +39,7 @@ import VisitProtocol from "../../components/admin/VisitProtocol";
 import { createPortal } from "react-dom";
 
 import { addETDays, etDateString, formatETDateOnly } from "../../lib/timezone";
+import { completionDraftKey } from "../../lib/completion-drafts";
 import {
   defaultApplicationMethodForLine,
   isPerBasisUnit,
@@ -851,10 +852,6 @@ export function completionWillReview({
   reviewSuppressionReason = null,
 } = {}) {
   return (oneTimeRecapOnly || !!requestReview) && !reviewSuppressionReason;
-}
-
-function completionDraftKey(serviceId) {
-  return `waves_completion_draft_${serviceId}`;
 }
 
 // A completed visit whose REQUIRED completion-invoice mint failed (503
@@ -10604,6 +10601,11 @@ export function CompletionPanel({
   const [lawnPlanReady, setLawnPlanReady] = useState(false);
   const [lawnAreaOverride, setLawnAreaOverride] = useState(undefined);
   const [lawnRemovedDefaultIds, setLawnRemovedDefaultIds] = useState([]);
+  // Names of the removed defaults, keyed by catalog id, saved with the draft:
+  // a default removed, then hard-deleted from the catalog before the draft is
+  // restored, has no live lookup left to name it, and an unnamed skip never
+  // reaches the server's unlisted-skip audit (Codex #4113 P2).
+  const lawnRemovedDefaultNamesRef = useRef({});
   const [lawnDefaultsSeedSuppressed, setLawnDefaultsSeedSuppressed] = useState(false);
   const [lawnPlanReloadKey, setLawnPlanReloadKey] = useState(0);
   const lawnDefaultsEnabled = completionImprovements && lawnCompletionDefaults?.enabled === true && lawnCompletionDefaults.serviceId === service.id;
@@ -11864,6 +11866,7 @@ export function CompletionPanel({
     setSelectedProducts([]);
     setLawnAreaOverride(undefined);
     setLawnRemovedDefaultIds([]);
+    lawnRemovedDefaultNamesRef.current = {};
     setLawnDefaultsSeedSuppressed(false);
     setAreasServiced([...lawnDefaultAreas]);
     lawnAreasInitializedRef.current = true;
@@ -12702,7 +12705,9 @@ export function CompletionPanel({
         JSON.stringify(selectedProducts) !== pestDefaultMixSnapshotRef.current &&
         JSON.stringify(selectedProducts) !== lawnDefaultMixSnapshotRef.current) ||
       JSON.stringify(areasServiced) !== JSON.stringify(lawnDefaultAreas) ||
-      (lawnDefaultsEnabled && (lawnAreaOverride !== undefined || lawnRemovedDefaultIds.length > 0)) ||
+      // Governed state restored under a plan outage (no live defaults) is
+      // still draft content: the next autosave must not drop it (Codex #4113 P2).
+      ((lawnDefaultsEnabled || lawnRemovedDefaultIds.length > 0) && (lawnAreaOverride !== undefined || lawnRemovedDefaultIds.length > 0)) ||
       customerInteraction ||
       customerConcern.trim() ||
       selectedProtocolActionLabels.length ||
@@ -12763,7 +12768,12 @@ export function CompletionPanel({
         selectedProducts,
         lawnDefaultMixSnapshot: lawnDefaultMixSnapshotRef.current,
         lawnAreaOverride,
-        lawnRemovedDefaultIds: lawnDefaultsEnabled ? lawnRemovedDefaultIds : undefined,
+        // Persisted whenever removed defaults exist, not only while live
+        // defaults are loaded: a draft restored during a plan outage would
+        // otherwise lose its removed defaults on the next autosave, and the
+        // ledger's unlisted-skip audit with them (Codex #4113 P2).
+        lawnRemovedDefaultIds: lawnDefaultsEnabled || lawnRemovedDefaultIds.length > 0 ? lawnRemovedDefaultIds : undefined,
+        lawnRemovedDefaultNames: lawnDefaultsEnabled || lawnRemovedDefaultIds.length > 0 ? lawnRemovedDefaultNamesRef.current : undefined,
         lawnDefaultsSeedSuppressed,
         sendSms,
         includePayLink,
@@ -12956,7 +12966,10 @@ export function CompletionPanel({
     lawnDefaultMixSeededRef.current = true;
     if (savedDraft.lawnDefaultMixSnapshot) lawnDefaultMixSnapshotRef.current = savedDraft.lawnDefaultMixSnapshot;
     setLawnAreaOverride(savedDraft.lawnAreaOverride);
-    setLawnRemovedDefaultIds(Array.isArray(savedDraft.lawnRemovedDefaultIds) ? savedDraft.lawnRemovedDefaultIds : []);
+    setLawnRemovedDefaultIds(Array.isArray(savedDraft.lawnRemovedDefaultIds) ? [...new Set(savedDraft.lawnRemovedDefaultIds.map(String))] : []);
+    lawnRemovedDefaultNamesRef.current = savedDraft.lawnRemovedDefaultNames && typeof savedDraft.lawnRemovedDefaultNames === 'object' && !Array.isArray(savedDraft.lawnRemovedDefaultNames)
+      ? Object.fromEntries(Object.entries(savedDraft.lawnRemovedDefaultNames).filter(([, name]) => typeof name === 'string' && name.trim()))
+      : {};
     setLawnDefaultsSeedSuppressed(savedDraft.lawnDefaultsSeedSuppressed === true || !Object.hasOwn(savedDraft, "lawnRemovedDefaultIds"));
     setNotes(savedDraft.notes || "");
     // A draft restored while the plan request has already failed carries the
@@ -14024,8 +14037,11 @@ export function CompletionPanel({
       row = planned || { ...row, rate: "", totalAmount: "", applicationArea: areasServiced.join(", "), applicationAreaDefault: true,
         lawnAreaDefault: row.areaUnit === "sqft",
         lawnAmountReason: "Enter the actual amount for this application." };
-      setLawnRemovedDefaultIds(ids => ids.filter(id => String(id) !== String(product.id)));
     }
+    // A re-added product is no longer a removed default whatever the plan
+    // state — a draft restored under an outage carries removed ids too, and
+    // the skip payload must never list an applied product (pre-push audit P1).
+    setLawnRemovedDefaultIds(ids => ids.filter(id => String(id) !== String(product.id)));
     setSelectedProducts((prev) => [...prev, row]);
     setProductSearch("");
   }
@@ -14181,7 +14197,11 @@ export function CompletionPanel({
     // A governed row restored while the plan request failed is still a plan
     // default: its removal must survive a successful retry (pre-push audit).
     const governed = lawnDefaultsEnabled || selectedProducts.some((p) => p.productId === productId && p.lawnPlanDefaults);
-    if (governed) setLawnRemovedDefaultIds(ids => [...new Set([...ids, String(productId)])]);
+    if (governed) {
+      const removedName = selectedProducts.find((p) => p.productId === productId)?.name || (products || []).find((row) => String(row.id) === String(productId))?.name;
+      if (removedName) lawnRemovedDefaultNamesRef.current = { ...lawnRemovedDefaultNamesRef.current, [String(productId)]: removedName };
+      setLawnRemovedDefaultIds(ids => [...new Set([...ids, String(productId)])]);
+    }
     invalidateGeneratedReportOnTypedEdit();
     setSelectedProducts((prev) =>
       prev.filter((p) => p.productId !== productId),
@@ -15037,6 +15057,22 @@ export function CompletionPanel({
           ? [typedRecommendations.trim()]
           : []),
       ];
+      // A removed default keeps its name from the catalog when the refreshed
+      // plan (or a draft restored under an outage) no longer lists it, so the
+      // server still receives it for its unlisted-skip audit (Codex #4113 P2).
+      // Governed state survives a plan outage: a draft restored while the
+      // plan request failed carries its removed defaults even though no
+      // defaults loaded (`lawnDefaultsEnabled` false), and they still owe the
+      // server's unlisted-skip audit (Codex #4113 P2).
+      const lawnSkippedDefaults = lawnDefaultsEnabled || lawnRemovedDefaultIds.length
+        ? lawnRemovedDefaultIds.filter((id) => !selectedProducts.some((row) => String(row.productId) === String(id))).flatMap((id) => {
+            const item = (lawnCompletionDefaults?.items || []).find((row) => String(row.product.id) === String(id));
+            const catalogProduct = (products || []).find((row) => String(row.id) === String(id));
+            const productName = item?.product?.name || catalogProduct?.name || lawnRemovedDefaultNamesRef.current[String(id)];
+            return productName ? [{ productId: item?.product?.id || id, productName }] : [];
+          })
+        : [];
+      const lawnAreaSubmitted = lawnDefaultsEnabled || (completionImprovements && isLawn && lawnAreaOverride !== undefined);
       const body = {
         ...(reviewedPricing ? { pricingReview: reviewedPricing.review } : {}),
         idempotencyKey: completionIdempotencyKeyRef.current,
@@ -15084,9 +15120,14 @@ export function CompletionPanel({
         // carries its visit area (`lawnAreaOverride`), and it is serialized
         // regardless of whether defaults loaded — otherwise the server planner
         // records the full saved lawn for an entered partial area (pre-push
-        // audit P1).
-        lawnProtocolCompletion: lawnDefaultsEnabled || (completionImprovements && isLawn && lawnAreaOverride !== undefined)
-          ? { treatedSqft: lawnVisitArea === "" ? null : Number(lawnVisitArea) } : null,
+        // audit P1). Plan defaults the tech removed ride along as skipped
+        // products for the lawn actuals ledger — id + name only, no reason
+        // demanded.
+        lawnProtocolCompletion: lawnAreaSubmitted || lawnSkippedDefaults.length
+          ? {
+              ...(lawnAreaSubmitted ? { treatedSqft: lawnVisitArea === "" ? null : Number(lawnVisitArea) } : {}),
+              ...(lawnSkippedDefaults.length ? { skippedProducts: lawnSkippedDefaults } : {}),
+            } : null,
         treeShrubCompletion: treeShrubCloseoutRequired
           ? {
               ...treeShrubCloseout,

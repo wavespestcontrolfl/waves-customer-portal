@@ -1432,6 +1432,25 @@ function initScheduledJobs() {
     }
   }, { timezone: 'America/New_York' });
 
+  // The same watchdog and persisted identities own reminders before and
+  // after rollback. Cards add a five-minute cadence to the daily sweep.
+  cron.schedule('0 */5 * * * *', async () => {
+    if (!require('./callback-cards').enabled()) return;
+    try {
+      const { runCallCommitmentsWatchdog } = require('./call-commitments-watchdog');
+      const result = await runCallCommitmentsWatchdog();
+      if (result?.skipped === true && result.reason !== 'gated_off' && result.reason !== 'lease_held') {
+        const { recordJobStart, recordJobEnd } = require('../utils/cron-lock');
+        const t0 = Date.now();
+        await recordJobStart('call-commitments-watchdog').catch(() => {});
+        await recordJobEnd('call-commitments-watchdog', t0, new Error(`tick skipped: ${result.reason || 'no_connection'}`)).catch(() => {});
+        throw new Error(`Callback reminder tick skipped: ${result.reason || 'no_connection'}`);
+      }
+    } catch (err) {
+      logger.error(`[callback-cards] tick failed (${err.code || err.name || 'error'})`);
+    }
+  }, { timezone: 'America/New_York' });
+
   // Keep the existing daily call watchdog independent of timer latency.
   cron.schedule('0 20 7 * * *', async () => {
     try {

@@ -278,6 +278,9 @@ describe("Email workspace feedback and request ownership", () => {
     fireEvent.click(within(dialog).getByRole("button", { name: "Send", exact: true }));
     await waitFor(() => expect(screen.getByRole("status")).toHaveTextContent("Email sent."));
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "New email" }));
+    expect(screen.getByLabelText("Message *")).toHaveValue("");
+    expect(screen.queryByText("Email sent.")).not.toBeInTheDocument();
   });
 
   it.each(["compose", "reply"].flatMap(kind => ["sent", "not_sent"].map(outcome => [kind, outcome])))
@@ -311,6 +314,83 @@ describe("Email workspace feedback and request ownership", () => {
     expect(await open(a)).toHaveValue("Pending first reply");
     expect(screen.getByText("Reply send was not confirmed. Your draft is still here.")).toBeInTheDocument();
   });
+  it.each([{ error: "Fixture provider unavailable" }, {}, { reply_draft: " " }])("reports an unusable AI draft without losing the reply (%j)", async (payload) => {
+    overrides.set(`/api/admin/email/message/${a.id}/ai-draft`, () => response(payload));
+    mount(); const reply = await open(a);
+    fireEvent.change(reply, { target: { value: "Keep my original reply" } });
+    fireEvent.click(screen.getByRole("button", { name: "AI draft" }));
+    await screen.findByText("Could not create an AI draft. Your text is still here.");
+    expect(reply).toHaveValue("Keep my original reply");
+    expect(screen.getByRole("button", { name: "AI draft" })).toBeEnabled();
+  });
+
+  it("reports the Gmail filter warning after the blocklist write succeeds", async () => {
+    const warning = "Blocklist saved; Gmail filter unavailable. Messages may stay visible in Gmail.";
+    overrides.set("/api/admin/email/block", () => response({ id: "new-block", warning }));
+    mount(); fireEvent.click(await screen.findByRole("button", { name: "Blocked senders", exact: true }));
+    await screen.findByText("unwanted.example.invalid");
+    fireEvent.change(screen.getByLabelText("Domain or email to block"), { target: { value: "example.invalid" } });
+    fireEvent.click(screen.getByRole("button", { name: "Block", exact: true }));
+    expect(await screen.findByText(warning)).toBeInTheDocument();
+    expect(screen.queryByText("Sender blocked.")).not.toBeInTheDocument();
+    expect(screen.getByLabelText("Domain or email to block")).toHaveValue("");
+    await waitFor(() => expect(calls("/blocked")).toHaveLength(2));
+  });
+
+  it.each([200, 503])("ignores a linked-message result before route effects clean up (%s)", async (status) => {
+    let finish;
+    overrides.set(`/api/admin/email/message/${a.id}`, () => new Promise((resolve) => { finish = resolve; }));
+    window.history.replaceState({}, "", `/admin/communications?id=${a.id}#tab=email`);
+    mount();
+    const other = await screen.findByRole("button", { name: (name) => name.startsWith("Open email:") && name.includes(b.subject) });
+    await waitFor(() => expect(finish).toBeTypeOf("function"));
+    // Batch selection with the old completion so passive cleanup cannot win the race for us.
+    await act(async () => {
+      fireEvent.click(other);
+      finish(await response(a, status));
+      await Promise.resolve(); await Promise.resolve();
+    });
+    await screen.findByText(b.body_text);
+    expect(screen.getByRole("heading", { name: b.subject })).toBeInTheDocument();
+    expect(screen.queryByText("The linked email is unavailable.")).not.toBeInTheDocument();
+    expect(new URLSearchParams(window.location.search).get("id")).toBe(b.id);
+  });
+
+  it("ignores a mark-read failure from a previous conversation", async () => {
+    let finish;
+    overrides.set("/api/admin/email/inbox", () => response({ emails: [{ ...a, is_read: false }, b], total: 2 }));
+    overrides.set(`/api/admin/email/message/${a.id}/read`, () => new Promise((resolve) => { finish = resolve; }));
+    mount(); await open(a); await open(b);
+    await act(async () => finish(await response({}, 503)));
+    expect(await screen.findByText(b.body_text)).toBeInTheDocument();
+    expect(screen.queryByText("The email could not be marked as read.")).not.toBeInTheDocument();
+  });
+
+  it("clears failed compose feedback after editing and discarding the draft", async () => {
+    overrides.set("/api/admin/email/send", () => response({ success: false }));
+    mount(); fireEvent.click(await screen.findByRole("button", { name: "New email" }));
+    const dialog = screen.getByRole("dialog", { name: "New email" });
+    const message = within(dialog).getByLabelText("Message *");
+    fireEvent.change(within(dialog).getByLabelText("To *"), { target: { value: "recipient@example.invalid" } });
+    fireEvent.change(message, { target: { value: "First draft" } });
+    const send = within(dialog).getByRole("button", { name: "Send", exact: true });
+    const failure = "Email send was not confirmed. Your draft is still here.";
+    fireEvent.click(send); await within(dialog).findByText(failure);
+    fireEvent.change(message, { target: { value: "Revised draft" } });
+    expect(screen.queryByText(failure)).not.toBeInTheDocument();
+    expect(send).toBeDisabled();
+    expect(calls("/send")).toHaveLength(1);
+    fireEvent.click(within(dialog).getByRole("button", { name: "I checked Sent: it was not sent" }));
+    fireEvent.click(send); await within(dialog).findByText(failure);
+    fireEvent.click(within(dialog).getByRole("button", { name: "Discard draft" }));
+    expect(screen.queryByText(failure)).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "New email" }));
+    expect(screen.getByLabelText("Message *")).toHaveValue("");
+    expect(screen.queryByText(failure)).not.toBeInTheDocument();
+    expect(within(screen.getByRole("dialog")).getByRole("button", { name: "I checked Sent: it was not sent" })).toBeInTheDocument();
+    expect(calls("/send")).toHaveLength(2);
+  });
+
 
   it("collapses the selected row while its conversation is unavailable", async () => {
     const view = mount(); await open();

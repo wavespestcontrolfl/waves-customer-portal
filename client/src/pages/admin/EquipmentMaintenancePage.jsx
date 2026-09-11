@@ -5,15 +5,14 @@ import { BarChart3, Truck, Wrench, Droplets, Cog, RotateCw, Syringe, Leaf, Shiel
 import AdminCommandHeader from "../../components/admin/AdminCommandHeader";
 import { etDateString, formatETDate, formatETDateOnly } from "../../lib/timezone";
 const API = import.meta.env.VITE_API_URL || "/api";
-// V2 token pass: teal/purple fold to zinc-900. Semantic green/amber/red preserved.
-// STATUS_COLORS / SEV_COLORS fold cleanly — in_service & low both → zinc-900,
-// stay distinct from green/amber/red/muted in their respective scopes.
-// SEV_COLORS.high keeps explicit '#f97316' for warning-orange between amber and red.
-
-// V2 token pass: teal/purple fold to zinc-900. Semantic green/amber/red preserved.
-// STATUS_COLORS / SEV_COLORS fold cleanly — in_service & low both → zinc-900,
-// stay distinct from green/amber/red/muted in their respective scopes.
-// SEV_COLORS.high keeps explicit '#f97316' for warning-orange between amber and red.
+// Alert severity → shared Badge tone. Critical and high are genuine alerts
+// (alert tone); medium stays prominent (strong); low is informational (neutral).
+const SEVERITY_TONES = {
+  critical: "alert",
+  high: "alert",
+  medium: "strong",
+  low: "neutral"
+};
 
 function af(path, opts = {}) {
   return fetch(`${API}${path}`, {
@@ -180,6 +179,20 @@ function StatCard({
 // ═══════════════════════════════════════════════════════════════════
 // MAIN COMPONENT
 // ═══════════════════════════════════════════════════════════════════
+function hasFleetData(overview, equipment, alerts) {
+  return overview != null || equipment.length > 0 || alerts.length > 0;
+}
+function FleetLoadError({
+  loaded,
+  error,
+  onRetry
+}) {
+  return <ActionFeedback error onRetry={onRetry} className="mb-4">
+      {loaded ? "Could not refresh fleet: " : "Could not load fleet: "}
+      {error}
+      {loaded && ". Showing previously loaded data."}
+    </ActionFeedback>;
+}
 export default function EquipmentMaintenancePage({
   embedded = false,
   initialTab = "fleet"
@@ -300,6 +313,7 @@ export default function EquipmentMaintenancePage({
   };
 
   // ─── RENDER ─────────────────────────────────────────────────────
+  const fleetLoaded = hasFleetData(overview, equipment, alerts);
   return <div style={embedded ? undefined : {
     maxWidth: 1300,
     margin: "0 auto"
@@ -311,13 +325,11 @@ export default function EquipmentMaintenancePage({
       {toast && <Card role="status" className="fixed z-[300] right-4 bottom-[calc(80px+env(safe-area-inset-bottom))] sm:bottom-5 max-w-[calc(100vw-32px)] px-4 py-3">
           {toast}
         </Card>}
-      {tab === "fleet" && fleetError && <ActionFeedback error onRetry={loadFleet} className="mb-4">
-          Could not load fleet: {fleetError}
-        </ActionFeedback>}
+      {tab === "fleet" && fleetError && <FleetLoadError loaded={fleetLoaded} error={fleetError} onRetry={loadFleet} />}
       {analyticsError && tab === "analytics" && <ActionFeedback error onRetry={loadAnalytics} className="mb-4">
           Could not load analytics: {analyticsError}
         </ActionFeedback>}
-      {tab === "fleet" && !fleetError && <FleetTab {...{
+      {tab === "fleet" && (!fleetError || fleetLoaded) && <FleetTab {...{
       loading,
       overview,
       alerts,
@@ -407,7 +419,7 @@ function FleetTab({
         borderBottom: `1px solid ${"#E4E4E7"}`
       }}>
               {" "}
-              <Badge tone="neutral">{a.severity}</Badge>{" "}
+              <Badge tone={SEVERITY_TONES[a.severity] || "neutral"}>{a.severity}</Badge>{" "}
               <span style={{
           flex: 1,
           minWidth: 0,
@@ -453,8 +465,7 @@ function FleetTab({
       marginBottom: 16
     }}>
         {" "}
-        <Field label="Category">
-          <Select value={filterCat} onChange={e => setFilterCat(e.target.value)} style={{
+        <Select aria-label="Category" value={filterCat} onChange={e => setFilterCat(e.target.value)} style={{
           width: "auto",
           minWidth: 140
         }}>
@@ -463,10 +474,8 @@ function FleetTab({
             {categories.map(c => <option key={c} value={c}>
                 {c}
               </option>)}
-          </Select>
-        </Field>{" "}
-        <Field label="Status">
-          <Select value={filterStatus} onChange={e => setFilterStatus(e.target.value)} style={{
+          </Select>{" "}
+        <Select aria-label="Status" value={filterStatus} onChange={e => setFilterStatus(e.target.value)} style={{
           width: "auto",
           minWidth: 130
         }}>
@@ -477,10 +486,8 @@ function FleetTab({
             <option value="retired">Retired</option>{" "}
             <option value="sold">Sold</option>{" "}
             <option value="lost">Lost</option>{" "}
-          </Select>
-        </Field>{" "}
-        <Field label="Sort by">
-          <Select value={sortBy} onChange={e => setSortBy(e.target.value)} style={{
+          </Select>{" "}
+        <Select aria-label="Sort by" value={sortBy} onChange={e => setSortBy(e.target.value)} style={{
           width: "auto",
           minWidth: 130
         }}>
@@ -488,8 +495,7 @@ function FleetTab({
             <option value="name">Sort: Name</option>{" "}
             <option value="condition">Sort: Condition</option>{" "}
             <option value="cost">Sort: Cost</option>{" "}
-          </Select>
-        </Field>{" "}
+          </Select>{" "}
       </div>
       {/* Equipment Grid */}
       <div style={{
