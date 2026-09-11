@@ -1,8 +1,20 @@
 // Real webhook control flow; synthetic persistence and inert delivery seams.
-const mockState = { sms: [], sequence: 0, ai: true, read: false, pending: 0 };
+const mockState = { sms: [], sequence: 0, ai: true, read: false, pending: 0, claims: new Map() };
 let mockPg;
 let mockDatabase;
 function mockDb(table) {
+  // Atomic per-sender alert-window claim (sms_reply_alert_claims): a
+  // synthetic Map standing in for the DB-atomic INSERT ... ON CONFLICT ...
+  // RETURNING in claimUnknownSenderAlertWindow — release deletes the entry.
+  if (table === 'sms_reply_alert_claims') {
+    const q = { _phone: undefined };
+    q.where = (key) => { q._phone = key && typeof key === 'object' ? key.phone : undefined; return q; };
+    q.del = async () => {
+      if (q._phone) { mockState.claims.delete(q._phone); return 1; }
+      return 0;
+    };
+    return q;
+  }
   if (mockPg && table === 'sms_log') {
     const q = mockPg(table);
     const insert = q.insert.bind(q);
@@ -46,17 +58,28 @@ function mockDb(table) {
   q.catch = (reject) => Promise.resolve(q.rows).catch(reject);
   return q;
 }
-mockDb.raw = (sql, values) => mockPg ? mockPg.raw(sql, values) : ({ sql, merge: values?.[0] ? JSON.parse(values[0]) : {} });
-// Seam for the per-sender alert-window lock: record what the route asks for
-// and whether it let the lock go.
-const mockLock = { calls: [], released: 0, fail: false };
-mockDb.transaction = async () => {
-  if (mockLock.fail) throw Object.assign(new Error('synthetic pool exhaustion'), { code: 'synthetic' });
-  return {
-    raw: async (sql, bindings) => { mockLock.calls.push({ sql: String(sql), bindings }); return { rows: [] }; },
-    rollback: async () => { mockLock.released++; },
-  };
+// Seam for the atomic alert-window claim: record every attempt and let a
+// test force a write failure (fail-open path). No transaction is ever
+// opened for this — claimUnknownSenderAlertWindow/release both call plain
+// db.raw / db(table) statements directly.
+const mockClaim = { calls: [], fail: false };
+mockDb.raw = (sql, values) => {
+  if (mockPg) return mockPg.raw(sql, values);
+  if (String(sql).includes('sms_reply_alert_claims')) {
+    mockClaim.calls.push({ sql: String(sql), values });
+    if (mockClaim.fail) throw Object.assign(new Error('synthetic claim write failure'), { code: 'synthetic' });
+    const [phone, expiresAt, now] = values;
+    const existing = mockState.claims.get(phone);
+    if (existing && existing > now) return { rows: [] }; // still held — claim lost
+    mockState.claims.set(phone, expiresAt);
+    return { rows: [{ phone }] };
+  }
+  return { sql, merge: values?.[0] ? JSON.parse(values[0]) : {} };
 };
+mockDb.transaction = async () => ({
+  raw: async () => ({ rows: [] }),
+  rollback: async () => {},
+});
 jest.mock('../models/db', () => mockDb);
 jest.mock('../config/feature-gates', () => ({ isEnabled: (key) => key === 'webhooks' || (key === 'aiAssistantAutoReply' && mockState.ai) }));
 jest.mock('../services/twilio', () => ({ sendSMS: jest.fn(async () => ({})) }));
@@ -127,8 +150,8 @@ async function storedMetadata() {
 beforeEach(async () => {
   if (mockPg) await mockPg.raw('TRUNCATE sms_log');
   jest.clearAllMocks();
-  mockState.sms = []; mockState.sequence = 0; mockState.ai = true; mockState.read = false;
-  mockLock.calls = []; mockLock.released = 0; mockLock.fail = false;
+  mockState.sms = []; mockState.sequence = 0; mockState.ai = true; mockState.read = false; mockState.claims = new Map();
+  mockClaim.calls = []; mockClaim.fail = false;
   processMessage.mockResolvedValue({ reply: 'Synthetic answer', escalated: false });
   sendCustomerMessage.mockResolvedValue({ sent: true });
   triggerNotification.mockResolvedValue({ bellWritten: true, push: { sent: 1 } });
@@ -183,25 +206,41 @@ test('ordinary location-line unknown texts ring the SMS bell', async () => {
   expect(processMessage).not.toHaveBeenCalled();
 });
 
-test('the alert window is serialized per sender across the check and the bell', async () => {
+test('the alert window is claimed atomically with no transaction held across the dispatch', async () => {
   mockState.ai = false;
   await receive('Please quote pest control.', numbers.locations.parrish.number);
-  const lock = mockLock.calls.find(({ sql }) => sql.includes('pg_advisory_xact_lock'));
-  expect(lock).toBeDefined();
-  expect(lock.bindings).toEqual([`sms_reply_alert:${sender}`]);
-  // Bounded, so a stuck peer cannot stall the webhook.
-  expect(mockLock.calls.some(({ sql }) => sql.includes('lock_timeout'))).toBe(true);
+  const claim = mockClaim.calls.find(({ sql }) => sql.includes('INSERT INTO sms_reply_alert_claims'));
+  expect(claim).toBeDefined();
+  expect(claim.values[0]).toBe(sender);
+  // The claim is a single INSERT ... RETURNING, never a held pooled
+  // transaction — codex #4210 head-round P1.
+  expect(mockClaim.calls).toHaveLength(1);
   expect(triggerNotification).toHaveBeenCalledTimes(1);
-  // Held across the dispatch, then let go exactly once.
-  expect(mockLock.released).toBe(1);
 });
 
-test('an unavailable window lock rings unfenced rather than dropping first contact', async () => {
+test('two concurrent claims for the same sender let only one dispatch', async () => {
   mockState.ai = false;
-  mockLock.fail = true;
+  // Simulate the exact race the claim closes: a second sender arrives while
+  // the first still holds the (unexpired) window.
+  mockState.claims.set(sender, new Date(Date.now() + 60 * 60 * 1000));
+  await receive('Please quote pest control.', numbers.locations.parrish.number);
+  expect(triggerNotification).not.toHaveBeenCalled();
+});
+
+test('a claim write failure rings unfenced rather than dropping first contact', async () => {
+  mockState.ai = false;
+  mockClaim.fail = true;
   await receive('Please quote pest control.', numbers.locations.parrish.number);
   expect(triggerNotification).toHaveBeenCalledTimes(1);
-  expect(mockLock.released).toBe(0);
+});
+
+test('a claimed window that never delivers is released for the next message to retry', async () => {
+  mockState.ai = false;
+  triggerNotification.mockResolvedValueOnce({ bellWritten: false, push: { sent: 0 } });
+  await receive('Please quote pest control.', numbers.locations.parrish.number);
+  expect(mockState.claims.has(sender)).toBe(false);
+  await receive('Second message, same sender.', numbers.locations.parrish.number);
+  expect(triggerNotification).toHaveBeenCalledTimes(2);
 });
 
 test('a consumed START or a courtesy row does not consume the first alert window', async () => {

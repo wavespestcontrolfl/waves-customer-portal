@@ -18,7 +18,11 @@ function mockDb(table) {
   query.catch = (reject) => Promise.resolve(query.rows).catch(reject);
   return query;
 }
-mockDb.raw = jest.fn((sql, bindings) => ({ rows: [], sql, bindings }));
+// The unknown-sender alert-window claim (INSERT ... RETURNING) needs a
+// non-empty row back to read as "claimed" — every other raw() call here
+// (advisory locks, etc.) ignores .rows, so a generic non-empty result is
+// a safe default across the file.
+mockDb.raw = jest.fn((sql, bindings) => ({ rows: [{ phone: bindings?.[0] }], sql, bindings }));
 mockDb.transaction = async (fn) => fn(mockDb);
 jest.mock('../models/db', () => mockDb);
 jest.mock('../config/feature-gates', () => ({ isEnabled: jest.fn((gate) => gate === 'webhooks') }));

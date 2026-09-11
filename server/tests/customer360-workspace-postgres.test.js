@@ -191,4 +191,53 @@ postgres('Customer 360 migrated PostgreSQL reads', () => {
     expect((await mockPg('messages').where({ id: laterMessage }).first()).is_read).toBe(false);
     expect(await countUnreadInboundSms({ customerId: ids[1] })).toEqual({ conversations: 1, messages: 1 });
   }, 30000);
+
+  test('reading an unknown sender\'s alerted SID retargets its one bell to a later unread message instead of clearing it (codex #4210)', async () => {
+    const conversationId = randomUUID();
+    const alertedMessageId = randomUUID();
+    const laterMessageId = randomUUID();
+    const alertedSid = `SM-synthetic-alerted-${randomBytes(4).toString('hex')}`;
+    const laterSid = `SM-synthetic-later-${randomBytes(4).toString('hex')}`;
+    // A phone unique to this run — contact_phone carries a dedup constraint
+    // shared with real inbound rows.
+    const unknownPhone = `+1941555${String(Date.now()).slice(-4)}`;
+    let bell;
+    try {
+      // Unknown sender: no customer_id, so the customer-scoped
+      // nothing-left-unread clear below can never reach this conversation's
+      // bell — only the SID it rang for (codex #4210 P2).
+      await mockPg('conversations').insert({ id: conversationId, customer_id: null, channel: 'sms', contact_phone: unknownPhone, our_endpoint_id: '+19415550190' });
+      await mockPg('messages').insert([
+        { id: alertedMessageId, conversation_id: conversationId, channel: 'sms', direction: 'inbound', author_type: 'lead', is_read: false, twilio_sid: alertedSid, body: 'First synthetic text', created_at: new Date(Date.now() - 120000) },
+        // Throttled: the 4h per-sender window suppressed its own bell.
+        { id: laterMessageId, conversation_id: conversationId, channel: 'sms', direction: 'inbound', author_type: 'lead', is_read: false, twilio_sid: laterSid, body: 'Second synthetic text, same sender', created_at: new Date(Date.now() - 60000) },
+      ]);
+      [bell] = await mockPg('notifications').insert({
+        recipient_type: 'admin', category: 'inbound_sms', title: 'Synthetic unknown-sender text',
+        metadata: JSON.stringify({ payload: { twilioSid: alertedSid } }),
+      }).returning('*');
+
+      // Reading only the alerted message must NOT clear the thread's only
+      // bell while the later throttled message is still unread — it must
+      // retarget the bell to that later SID instead.
+      await markInboundSmsRead({ messageIds: [alertedMessageId], role: 'admin' });
+      expect((await mockPg('messages').where({ id: alertedMessageId }).first()).is_read).toBe(true);
+      expect((await mockPg('messages').where({ id: laterMessageId }).first()).is_read).toBe(false);
+      let refreshedBell = await mockPg('notifications').where({ id: bell.id }).first();
+      expect(refreshedBell.read_at).toBeNull();
+      expect(refreshedBell.metadata.payload.twilioSid).toBe(laterSid);
+
+      // Reading the last remaining unread message finds nothing left in the
+      // conversation, so the retarget is a no-op and the bell (now keyed to
+      // this SID) is eligible for the ordinary by-SID clear.
+      await markInboundSmsRead({ messageIds: [laterMessageId], role: 'admin' });
+      expect((await mockPg('messages').where({ id: laterMessageId }).first()).is_read).toBe(true);
+      refreshedBell = await mockPg('notifications').where({ id: bell.id }).first();
+      expect(refreshedBell.metadata.payload.twilioSid).toBe(laterSid);
+    } finally {
+      await mockPg('messages').whereIn('id', [alertedMessageId, laterMessageId]).delete();
+      if (bell) await mockPg('notifications').where({ id: bell.id }).delete();
+      await mockPg('conversations').where({ id: conversationId }).delete();
+    }
+  }, 30000);
 });

@@ -77,6 +77,39 @@ async function markInboundSmsRead({ messageIds = [], conversationIds = [], readB
   //     bell carries the SID it rang for (codex #4210 P2).
   if (mirrorSids.length) {
     try {
+      // Retarget an unknown-sender bell BEFORE clearing (codex #4210
+      // head-round P2): the throttle rings once per 4h window, so a
+      // single-message read of exactly that alerted SID would otherwise
+      // clear the thread's only bell while a later throttled message in the
+      // SAME conversation is still unread — and that later message's own
+      // read, in a future call, can never match the bell (it's keyed to
+      // the SID that just cleared). Point the bell at a still-unread SID in
+      // the conversation first, mirroring the customer-scoped
+      // nothing-left-unread check below for threads that have no
+      // customer_id to key that check on.
+      const unknownReadRows = await db('messages as m')
+        .join('conversations as c', 'c.id', 'm.conversation_id')
+        .whereNull('c.customer_id')
+        .whereIn('m.twilio_sid', mirrorSids)
+        .select('m.twilio_sid', 'm.conversation_id');
+      const readSidsByConversation = {};
+      for (const row of unknownReadRows) (readSidsByConversation[row.conversation_id] ??= []).push(row.twilio_sid);
+      for (const [conversationId, readSids] of Object.entries(readSidsByConversation)) {
+        const remaining = await db('messages')
+          .where({ conversation_id: conversationId, channel: 'sms', direction: 'inbound' })
+          .andWhere(function unread() { this.where({ is_read: false }).orWhereNull('is_read'); })
+          .whereNotNull('twilio_sid')
+          .orderBy('created_at', 'asc')
+          .first('twilio_sid');
+        if (!remaining?.twilio_sid) continue; // nothing left unread — leave the bell keyed to a SID that will clear normally below
+        await db('notifications')
+          .where({ recipient_type: 'admin', category: 'inbound_sms' })
+          .whereNull('read_at')
+          .whereRaw("metadata->'payload'->>'twilioSid' = ANY(?)", [readSids])
+          .update({ metadata: db.raw("jsonb_set(metadata, '{payload,twilioSid}', to_jsonb(?::text))", [remaining.twilio_sid]) });
+      }
+    } catch (e) { logger.warn(`[inbound-sms-read] unknown-sender bell retarget failed: ${e.message}`); }
+    try {
       notificationsCleared += await NotificationService.markInboundSmsReadAdmin({ twilioSids: mirrorSids, before: now, role });
     } catch (e) { logger.warn(`[inbound-sms-read] bell clear by sid failed: ${e.message}`); }
   }
