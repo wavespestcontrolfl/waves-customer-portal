@@ -163,6 +163,42 @@ const taxRegisterAsset = {
   serial_number: equipment.serial_number,
   make_model: `${equipment.make} ${equipment.model}`,
 };
+// The real endpoint answers a request that carries no `year` with the current
+// Eastern year (server/routes/admin-equipment-maintenance.js). Pinning a
+// literal here would keep rendering "Fleet Mileage Summary (2026)" from January
+// onward, against a response shape production could no longer return for that
+// request.
+function easternYear() {
+  return Number(
+    new Intl.DateTimeFormat("en-US", {
+      timeZone: "America/New_York",
+      year: "numeric",
+    }).format(new Date()),
+  );
+}
+// install()'s route key is `${method} ${pathname}`, so a request whose query
+// changed still matches its fixture and still receives the happy-path body.
+// These are the query values each of those responses is only truthful for: an
+// alerts view that started asking for `status=all`, or a list that dropped or
+// mangled its `limit`, is asking production a different question than the
+// fixture answers, and the real endpoint would return other rows or reject the
+// parse outright.
+function limitParam(query) {
+  const raw = query.get("limit");
+  return raw !== null && /^[1-9][0-9]*$/.test(raw) ? null : `limit=${raw}`;
+}
+function queryContracts() {
+  return new Map([
+    [
+      "GET /api/admin/equipment-maintenance/alerts",
+      (query) =>
+        query.get("status") === "new" ? null : `status=${query.get("status")}`,
+    ],
+    ["GET /api/admin/equipment-maintenance/records/recent", limitParam],
+    [`GET /api/admin/equipment-maintenance/${id}/mileage`, limitParam],
+    ["GET /api/admin/equipment/job-costs", limitParam],
+  ]);
+}
 function fixtures(state) {
   return new Map([
     [
@@ -306,8 +342,8 @@ function fixtures(state) {
     ],
     [
       "GET /api/admin/equipment-maintenance/mileage/summary",
-      () => ({
-        year: 2026,
+      (url) => ({
+        year: Number(url.searchParams.get("year")) || easternYear(),
         vehicles: [
           {
             id,
@@ -374,7 +410,8 @@ function fixtures(state) {
   ]);
 }
 async function install(page, server, state) {
-  const handlers = fixtures(state);
+  const handlers = fixtures(state),
+    contracts = queryContracts();
   await page.addInitScript(() => {
     localStorage.setItem("waves_admin_token", "synthetic-token");
     // Chromium can let keepalive fetches outlive Playwright interception.
@@ -427,6 +464,11 @@ async function install(page, server, state) {
       query: url.search,
       body,
     });
+    const contract = contracts.get(key);
+    if (contract) {
+      const violation = contract(url.searchParams);
+      if (violation) state.badQuery.push(`${key} (${violation})`);
+    }
     if (!handlers.has(key)) {
       state.unmatched.push(key);
       return route.fulfill({
@@ -461,10 +503,44 @@ async function shot(page, report, name, target) {
       name + ": screenshot target is inside the viewport");
   }
   const file = path.join(output, `${name}.png`);
-  await page.screenshot({
-    path: file,
-    fullPage: !target && (await page.getByRole("dialog").count()) === 0,
-  });
+  const fullPage = !target && (await page.getByRole("dialog").count()) === 0;
+  // #admin-main owns this page's vertical scrolling (AdminLayoutV2), so the
+  // document stays viewport-height and Playwright's fullPage — which expands
+  // the document, not an arbitrary nested scroller — would capture only the
+  // visible slice of a long leaf. Releasing the scroller alone is not enough:
+  // .admin-shell-v2 above it is a fixed-height overflow:hidden box that clamps
+  // the document right back. Free the whole chain up to the body for the
+  // capture, then restore each element's own inline style. Descendants are
+  // untouched, so the intentional table and chart scrollers still clip.
+  const released = fullPage
+    ? await page.evaluate(() => {
+        const main = document.getElementById("admin-main");
+        if (!main) return 0;
+        let count = 0;
+        for (
+          let node = main;
+          node && node !== document.body;
+          node = node.parentElement
+        ) {
+          node.dataset.qaPreviousStyle = node.style.cssText;
+          node.style.height = "auto";
+          node.style.minHeight = "0";
+          node.style.maxHeight = "none";
+          node.style.overflow = "visible";
+          count += 1;
+        }
+        return count;
+      })
+    : 0;
+  if (released) await page.waitForTimeout(300);
+  await page.screenshot({ path: file, fullPage });
+  if (released)
+    await page.evaluate(() => {
+      for (const node of document.querySelectorAll("[data-qa-previous-style]")) {
+        node.style.cssText = node.dataset.qaPreviousStyle;
+        delete node.dataset.qaPreviousStyle;
+      }
+    });
   report.screenshots.push(path.relative(root, file));
 }
 async function geometry(page, state, surface) {
@@ -533,10 +609,40 @@ async function geometry(page, state, surface) {
         return range.getClientRects().length > 1;
       })
       .map((n) => n.textContent.trim());
+    // The 44px target for a checkbox or radio comes from its .ui-choice-label
+    // wrapper (ui-workspace.css), never from the 16px input, and the controls
+    // sweep above deliberately excludes checkbox inputs — so without this the
+    // Record Maintenance choices have no size or labelling check at all.
+    const choices = [...root.querySelectorAll(".ui-choice-label")]
+      .filter(visible)
+      .map((n) => {
+        const r = n.getBoundingClientRect(),
+          box = n.querySelector(
+            'input[type="checkbox"],input[type="radio"]',
+          );
+        return {
+          name: n.textContent.trim(),
+          height: r.height,
+          width: r.width,
+          left: r.left,
+          right: r.right,
+          labeled:
+            !!box && [...(box.labels || [])].some((l) => l.textContent.trim()),
+        };
+      });
+    // Every width here scrolls inside the fixed-height #admin-main
+    // (AdminLayoutV2), so content that widens that element is contained by it
+    // and never reaches documentElement.scrollWidth — a regression that adds a
+    // page-level horizontal scrollbar is invisible to the check below.
+    const adminMain = document.getElementById("admin-main");
     return {
       controls,
+      choices,
       smallText,
       narrowCells,
+      mainScroller: !!adminMain,
+      mainOverflow:
+        !!adminMain && adminMain.scrollWidth > adminMain.clientWidth + 1,
       overflow: document.documentElement.scrollWidth > innerWidth + 1,
       title: parseFloat(
         getComputedStyle(document.querySelector("main h1")).fontSize,
@@ -549,6 +655,11 @@ async function geometry(page, state, surface) {
     ...data,
   });
   assert.equal(data.overflow, false, `${surface}: document overflow`);
+  // Without this the check above reports "no overflow" for a layout that no
+  // longer has the scroller at all, which is exactly the silent pass it exists
+  // to close.
+  assert.equal(data.mainScroller, true, `${surface}: admin main is present`);
+  assert.equal(data.mainOverflow, false, `${surface}: admin main overflow`);
   assert.deepEqual(data.smallText, [], `${surface}: small text`);
   assert.deepEqual(
     data.narrowCells,
@@ -567,6 +678,17 @@ async function geometry(page, state, surface) {
         c.left >= -1 && c.right <= page.viewportSize().width + 1,
         `${surface}: bounds ${JSON.stringify(c)}`,
       );
+  }
+  for (const c of data.choices) {
+    assert.ok(
+      c.height >= 43.5,
+      `${surface}: choice height ${JSON.stringify(c)}`,
+    );
+    assert.ok(c.labeled, `${surface}: choice label ${JSON.stringify(c)}`);
+    assert.ok(
+      c.left >= -1 && c.right <= page.viewportSize().width + 1,
+      `${surface}: choice bounds ${JSON.stringify(c)}`,
+    );
   }
 }
 async function widths(page, state, surface) {
@@ -780,6 +902,26 @@ async function views(page, server, state, report, device) {
     await page.getByRole("button", { name: label, exact: true }).click();
     await capture(page, state, report, device, key,
       page.getByRole("heading", { name: label, exact: true }));
+    if (label === "Record Maintenance") {
+      // Record Maintenance is the only surface in this runner with choice
+      // controls, so without this pin the geometry sweep's choice checks would
+      // pass on every screen by measuring nothing at all.
+      const measured = state.geometry
+        .filter((entry) => entry.surface === key)
+        .map((entry) => entry.choices.map((choice) => choice.name));
+      assert.ok(
+        measured.length > 0 &&
+          measured.every(
+            (names) =>
+              names.includes("Follow-up needed") &&
+              names.includes("Warranty claim"),
+          ),
+        `Record Maintenance choice targets measured: ${JSON.stringify(measured)}`,
+      );
+      state.checks.push(
+        "Follow-up needed and Warranty claim meet the choice target size at every width",
+      );
+    }
     await shot(page, report, device + "-" + key + "-actions",
       page.getByRole("button", { name: label === "Record Maintenance" ? "Save Record" : "Save Mileage", exact: true }));
     await page.getByRole("button", { name: "Cancel", exact: true }).click();
@@ -840,6 +982,7 @@ async function main() {
       const browser = await launch();
       const state = {
         requests: [],
+        badQuery: [],
         pageErrors: [],
         consoleErrors: [],
         unmatched: [],
@@ -860,6 +1003,7 @@ async function main() {
         await views(page, server, state, report, device);
         assert.deepEqual(state.pageErrors, [], "Page errors");
         assert.deepEqual(state.unmatched, [], "Unmatched API");
+        assert.deepEqual(state.badQuery, [], "Query contract");
         // This is a view-only run: it opens dialogs but always Cancels, so the
         // only write it may issue is the admin usage beacon. The write handlers
         // below answer 200, so without this an accidental Save/Recalc/Dismiss
