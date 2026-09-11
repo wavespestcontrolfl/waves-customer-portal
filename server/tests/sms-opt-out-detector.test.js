@@ -47,6 +47,13 @@ describe('SMS opt-out detector', () => {
     'Reply STOP to stop messages about exclusive leads did not work when I tried it.',
     'STOP',
     'Disliked "STOP"',
+    // Codex P1 pre-push, 2026-09-11: a standalone command riding right after
+    // a stripped footer, with only punctuation between them — the leading
+    // orphan punctuation the old lookahead-only strip left behind broke the
+    // exact-keyword match for the first case and the natural-language match
+    // for the second.
+    'Reply STOP to stop messages. STOP',
+    'Reply STOP to stop messages. Please remove me.',
   ])('preserves a real opt-out even when reply instructions are excluded: %s', (body) => {
     expect(detectSmsOptCommand(body, { ignoreReplyInstructions: true }).action).toBe('opt_out');
   });

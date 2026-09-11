@@ -52,8 +52,16 @@ const STOP_CONFIRMATION_TEMPLATE =
 
 // A vendor can offer the recipient a reply instruction without asking Waves
 // to stop. Only a complete instruction starting a sentence or line can be
-// removed; narrated attempts and requests elsewhere must still win.
-const REPLY_OPT_OUT_INSTRUCTION = /(^|[.!?;\r\n])\s*(?:reply|respond|text|say)\s+(?:with\s+)?["'\u2018\u2019\u201C\u201D]?(?:no|stop|unsubscribe)["'\u2018\u2019\u201C\u201D]?\s+(?:if\s+you\s+(?:want|need)(?:\s+(?:me|us))?\s+to\s+|to\s+)(?:stop\s+(?:texting|messaging|texts?|messages?|sms)(?:\s+(?:you|me))?|unsubscribe|opt\s*out)\b(?=\s*(?:[.!?;\r\n]|$))/gi;
+// removed; narrated attempts and requests elsewhere must still win. The
+// trailing sentence-ending punctuation is CONSUMED (not just a lookahead),
+// so it is removed along with the rest of the instruction \u2014 codex P1
+// pre-push, 2026-09-11: a lookahead left an orphan ". " between the
+// stripped footer and whatever came next, so "Reply STOP to stop messages.
+// STOP" stripped down to ". STOP" instead of "STOP" and the leading period
+// broke the exact-keyword match (compactKeyword only trims TRAILING
+// punctuation), silently losing a genuine separate consent command riding
+// right after the footer.
+const REPLY_OPT_OUT_INSTRUCTION = /(^|[.!?;\r\n])\s*(?:reply|respond|text|say)\s+(?:with\s+)?["'\u2018\u2019\u201C\u201D]?(?:no|stop|unsubscribe)["'\u2018\u2019\u201C\u201D]?\s+(?:if\s+you\s+(?:want|need)(?:\s+(?:me|us))?\s+to\s+|to\s+)(?:stop\s+(?:texting|messaging|texts?|messages?|sms)(?:\s+(?:you|me))?|unsubscribe|opt\s*out)\b\s*(?:[.!?;\r\n]|$)/gi;
 
 // Same shape, but for a vendor footer that invites a STOP/NO reply keyed on
 // "wrong number" or "sent in error" rather than "stop texting" \u2014 e.g. "Reply
@@ -64,7 +72,7 @@ const REPLY_OPT_OUT_INSTRUCTION = /(^|[.!?;\r\n])\s*(?:reply|respond|text|say)\s
 // (codex P0, 2026-09-11). A genuine human reply ("sorry wrong number", "you
 // have the wrong number") never matches this reply-instruction shape, so it
 // still falls through to WRONG_NUMBER_PATTERNS untouched.
-const REPLY_WRONG_NUMBER_FOOTER = /(^|[.!?;\r\n])\s*(?:reply|respond|text|say)\s+(?:with\s+)?["'\u2018\u2019\u201C\u201D]?(?:no|stop|unsubscribe)["'\u2018\u2019\u201C\u201D]?\s+if\s+(?:this\s+is\s+)?(?:you(?:'re|\s+are)\s+)?(?:not\s+the\s+intended\s+recipient|(?:the\s+)?wrong\s+number|you\s+(?:received|got)\s+this\s+(?:in\s+error|by\s+mistake))\b(?=\s*(?:[.!?;\r\n]|$))/gi;
+const REPLY_WRONG_NUMBER_FOOTER = /(^|[.!?;\r\n])\s*(?:reply|respond|text|say)\s+(?:with\s+)?["'\u2018\u2019\u201C\u201D]?(?:no|stop|unsubscribe)["'\u2018\u2019\u201C\u201D]?\s+if\s+(?:this\s+is\s+)?(?:you(?:'re|\s+are)\s+)?(?:not\s+the\s+intended\s+recipient|(?:the\s+)?wrong\s+number|you\s+(?:received|got)\s+this\s+(?:in\s+error|by\s+mistake))\b\s*(?:[.!?;\r\n]|$)/gi;
 
 // Same footer, condition-first order \u2014 "If this is the wrong number, reply
 // STOP." / "If wrong number, text STOP." \u2014 rather than reply-first (codex
@@ -75,7 +83,7 @@ const REPLY_WRONG_NUMBER_FOOTER = /(^|[.!?;\r\n])\s*(?:reply|respond|text|say)\s
 // (the quote and the following punctuation) and never matches, so
 // "...reply \"STOP\"." silently fell through unstripped (codex P1,
 // 2026-09-11).
-const CONDITION_FIRST_WRONG_NUMBER_FOOTER = /(^|[.!?;\r\n])\s*if\s+(?:this\s+is\s+)?(?:you(?:'re|\s+are)\s+)?(?:not\s+the\s+intended\s+recipient|(?:the\s+)?wrong\s+number|you\s+(?:received|got)\s+this\s+(?:in\s+error|by\s+mistake))\s*,?\s*(?:please\s+)?(?:reply|respond|text|say)\s+(?:with\s+)?["'\u2018\u2019\u201C\u201D]?(?:no|stop|unsubscribe)\b["'\u2018\u2019\u201C\u201D]?(?=\s*(?:[.!?;\r\n]|$))/gi;
+const CONDITION_FIRST_WRONG_NUMBER_FOOTER = /(^|[.!?;\r\n])\s*if\s+(?:this\s+is\s+)?(?:you(?:'re|\s+are)\s+)?(?:not\s+the\s+intended\s+recipient|(?:the\s+)?wrong\s+number|you\s+(?:received|got)\s+this\s+(?:in\s+error|by\s+mistake))\s*,?\s*(?:please\s+)?(?:reply|respond|text|say)\s+(?:with\s+)?["'\u2018\u2019\u201C\u201D]?(?:no|stop|unsubscribe)\b["'\u2018\u2019\u201C\u201D]?\s*(?:[.!?;\r\n]|$)/gi;
 
 function normalizeBody(body) {
   return String(body || '')
