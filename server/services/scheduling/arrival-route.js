@@ -394,7 +394,14 @@ async function assertCapacityEligibility(conn, context, serviceTypes) {
     || [context.target];
   await require('../technician-capabilities').assertCapabilitiesActive(conn, context.target.technician_id, members,
     () => capacityError('technician_unavailable'));
-  if ((await require('./blackout-dates').getBlackoutLayers(context.date, context.date, conn)).dates.has(context.date)) {
+  // Serialize against the blackout/weekly-days-off mutation endpoints
+  // (routes/admin-schedule.js) before reading closure state: without this
+  // shared lock, a READ COMMITTED read here can observe the pre-mutation
+  // closure state and let the hold commit for a day an admin write closes a
+  // moment later (codex #4346 P2). See blackout-dates.js for lock order.
+  const { lockClosureState, getBlackoutLayers } = require('./blackout-dates');
+  await lockClosureState(conn);
+  if ((await getBlackoutLayers(context.date, context.date, conn)).dates.has(context.date)) {
     throw capacityError('day_unavailable');
   }
 }
