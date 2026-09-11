@@ -73,7 +73,7 @@ function fakeLocks() {
   };
 }
 
-function loadWorker(cache, { locks, cacheNames = [], cachesByName = {} } = {}) {
+function loadWorker(cache, { locks, cacheNames = [], cachesByName = {}, now } = {}) {
   const listeners = {};
   const names = new Set([...cacheNames, ...Object.keys(cachesByName)]);
   const sandbox = {
@@ -89,6 +89,9 @@ function loadWorker(cache, { locks, cacheNames = [], cachesByName = {} } = {}) {
       async delete(name) { return names.delete(name); },
     },
     Request: class { constructor(url) { this.url = url; } },
+    // A test may freeze the clock the worker reads, so two instances can
+    // start within the same Date.now() tick on purpose.
+    Date: now ? class extends Date { static now() { return now(); } } : Date,
     Response: FakeResponse,
     Headers,
     URL,
@@ -132,9 +135,12 @@ describe('customer service-worker update contract', () => {
     expect(source).toContain("new Request(assetUrl, { cache: 'reload' })");
     expect(source).toContain('await Promise.allSettled(assetResponses.map');
     expect(source.indexOf('await Promise.allSettled(assetResponses.map'))
-      .toBeLessThan(source.indexOf('await cache.put(OFFLINE_URL, shellResponse.clone())'));
+      .toBeLessThan(source.indexOf('await putShell(cache, shellResponse.clone(), buildId)'));
     expect(source).toContain('event.waitUntil(cacheCompleteShellResponse(response.clone(), navSeq, { startedAt }).catch(() => {}))');
     expect(source).not.toContain('cache.put(OFFLINE_URL, clone)');
+    // Every write to '/' goes through putShell, so no shell write can move
+    // the build the cache describes without the memo moving with it.
+    expect(source.match(/cache\.put\(OFFLINE_URL/g)).toHaveLength(1); // putShell's own
   });
 
   it('serializes cache writes with origin-wide Web Locks so an installing worker queues behind the active one', () => {
@@ -1001,6 +1007,98 @@ describe('service-worker shell refresh keeps the asset cache bounded to two buil
 
     expect(await (await cache.match('/')).text()).toBe(shell000); // A restored the prior shell; B failed
     expect(await cachedAssets(cache)).toEqual(['/assets/index-000.js']);
+  });
+
+  it('leaves the cached-build memo on the restored shell when a refresh is superseded mid-write', async () => {
+    // Codex #4335 r11 P1: the restore that undoes a superseded shell write
+    // moves the cached build back, but left the memo alone. A miss that
+    // read the temporarily written shell publishes that build; after the
+    // restore the memo names a generation the cache no longer holds, the
+    // hit fast path stops adding the restored build's claim to a shared
+    // chunk, and the next deploy's prune deletes a chunk a live tab needs.
+    const cache = fakeCache();
+    const { cacheCompleteShellResponse, dispatchFetch, setFetch, buildIdOf } = loadWorker(cache);
+    const shell000 = shellHtml(['/assets/index-000.js']);
+    await cacheCompleteShellResponse(fakeResponse(shell000));
+
+    let navs = 0;
+    setFetch(async (request) => {
+      if (request.mode === 'navigate') {
+        navs += 1;
+        return fakeResponse(shellHtml([navs === 1 ? '/assets/index-AAA.js' : '/assets/index-BBB.js']));
+      }
+      if (request.url.endsWith('/assets/index-BBB.js')) return fakeResponse('gone', false); // B live, never cached
+      return fakeResponse(`asset:${request.url}`);
+    });
+
+    let releaseCommit; const commitGate = new Promise(resolve => { releaseCommit = resolve; });
+    let releaseRestore; const restoreGate = new Promise(resolve => { releaseRestore = resolve; });
+    let shellPuts = 0;
+    cache.putGate = (url) => {
+      if (url !== 'https://portal.test/') return null;
+      shellPuts += 1;
+      if (shellPuts === 1) return commitGate; // A commits shell AAA
+      if (shellPuts === 2) return restoreGate; // A puts shell 000 back
+      return null;
+    };
+
+    const navAPromise = dispatchFetch('/admin/', { mode: 'navigate' });
+    await tick(); await tick(); await tick();
+    expect(shellPuts).toBe(1);
+    const navBPromise = dispatchFetch('/admin/', { mode: 'navigate' }); // B lands: live build moves on
+    await tick();
+    releaseCommit();
+    await tick(); await tick(); await tick(); await tick();
+    expect(shellPuts).toBe(2); // A is inside the restore, shell AAA momentarily cached
+    await dispatchFetch('/assets/Temp-AAA.js'); // a miss reads the temporary shell
+    releaseRestore();
+    await Promise.all([navAPromise, navBPromise]);
+    expect(await (await cache.match('/')).text()).toBe(shell000);
+
+    const bbb = buildIdOf(['/assets/index-BBB.js']);
+    const aaa = buildIdOf(['/assets/index-AAA.js']);
+    await cache.put('/assets/Shared-XYZ.js', new FakeResponse('shared', { headers: { 'x-waves-build': `${bbb},${aaa}` } }));
+    await dispatchFetch('/assets/Shared-XYZ.js'); // a hit must still claim the cached (restored) build
+    expect((await cache.match('/assets/Shared-XYZ.js')).headers.get('x-waves-build').split(','))
+      .toContain(buildIdOf(['/assets/index-000.js']));
+
+    cache.putGate = null;
+    setFetch(async (request) => fakeResponse(`asset:${request.url}`));
+    await cacheCompleteShellResponse(fakeResponse(shellHtml(['/assets/index-DDD.js'])));
+    expect(await cachedAssets(cache)).toContain('/assets/Shared-XYZ.js');
+  });
+
+  it('treats an install that began in the same tick as an older navigation as superseding it (two instances)', async () => {
+    // Codex #4335 r11 P1: Date.now() resolution is coarse (coarser still
+    // with reduced timer precision), so an active navigation and an
+    // installer can read the same value. Under a strict `>` the navigation
+    // read the tie as "not superseded" and replaced the installed shell
+    // with its own older one, leaving the cache on the wrong generation.
+    const cache = fakeCache();
+    const locks = fakeLocks();
+    const clock = 1_757_000_000_000;
+    const now = () => clock; // both instances start within one tick
+    const active = loadWorker(cache, { locks, now });
+    await active.cacheCompleteShellResponse(fakeResponse(shellHtml(['/assets/index-000.js'])));
+
+    let releaseA;
+    const gateA = new Promise(resolve => { releaseA = resolve; });
+    active.setFetch(async (request) => {
+      if (request.mode === 'navigate') { await gateA; return fakeResponse(shellHtml(['/assets/index-AAA.js'])); }
+      return fakeResponse(`asset:${request.url}`);
+    });
+    const navA = active.dispatchFetch('/admin/', { mode: 'navigate' }); // response parked
+    await tick();
+
+    const installer = loadWorker(cache, { locks, now });
+    installer.setFetch(async (request) => (request.url === '/' ? fakeResponse(shellHtml(['/assets/index-BBB.js'])) : fakeResponse(`asset:${request.url}`)));
+    await installer.dispatchInstall();
+    expect(await (await cache.match('/')).text()).toBe(shellHtml(['/assets/index-BBB.js']));
+
+    releaseA();
+    await navA;
+    expect(await (await cache.match('/')).text()).toBe(shellHtml(['/assets/index-BBB.js'])); // the tie did not let A win
+    expect(await cachedAssets(cache)).toEqual(['/assets/index-000.js', '/assets/index-BBB.js']); // A's batch rolled back
   });
 
   it('fails the install when its ordering marker cannot be stored, keeping the prior shell', async () => {

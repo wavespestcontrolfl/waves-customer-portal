@@ -61,10 +61,18 @@ const BUILD_HEADER = 'x-waves-build';
 // not commit its (older) shell over the installer's.
 const INSTALL_MARK_URL = '/__waves/install-commit';
 const INSTALL_STARTED_HEADER = 'x-waves-install-started';
+// Equality counts as superseding. Date.now() has coarse resolution (and
+// coarser still where timer precision is reduced for privacy), so an active
+// navigation and an installer that began within the same tick read the same
+// value; under a strict `>` the navigation would treat the tie as "not
+// superseded" and replace the just-installed shell with its older one,
+// leaving the cache describing — and tagging chunks for — the wrong
+// generation. The marker only ever records an install, never a navigation,
+// so the tie can only cost that navigation its (background) refresh.
 async function installCommittedAfter(cache, startedAt) {
   const mark = await cache.match(INSTALL_MARK_URL);
   const installStarted = Number(mark && mark.headers.get(INSTALL_STARTED_HEADER));
-  return Number.isFinite(installStarted) && installStarted > startedAt;
+  return Number.isFinite(installStarted) && installStarted >= startedAt;
 }
 function buildIdOf(assets) {
   const key = [...assets].sort().join('|');
@@ -117,6 +125,28 @@ async function cachedBuildId(cache) {
   const buildId = buildIdOf(shellAssetUrls(await shell.text()));
   if (seq === cachedShellSeq) knownCachedBuild = buildId;
   return buildId;
+}
+
+// The only way to write '/'. A refresh can store its shell and then put the
+// prior one back (superseded while the write was pending), so the restore
+// moves the cached build just as much as the commit did: a reader that
+// sampled the temporary shell would otherwise publish a build the cache no
+// longer holds, the hit fast path would stop adding the restored build's
+// claim to a shared chunk, and the next prune would drop a chunk a live tab
+// still needs. Bump the sequence on BOTH sides of the write — a read that
+// straddles either edge refuses to publish — and leave the memo describing
+// what the cache actually holds, or null when that is not known (a write
+// that failed part-way leaves the entry unread).
+async function putShell(cache, response, buildId) {
+  cachedShellSeq += 1;
+  let stored = false;
+  try {
+    await cache.put(OFFLINE_URL, response);
+    stored = true;
+  } finally {
+    cachedShellSeq += 1;
+    knownCachedBuild = stored ? (buildId || null) : null;
+  }
 }
 
 // The build pages are running right now. A navigation hands the page build
@@ -280,10 +310,10 @@ async function replaceCompleteShell(shellResponse, enqueuedSeq, supersedable, st
     // (quota retries below; the previous worker keeps serving otherwise).
     const previousShell = await cache.match(OFFLINE_URL);
     const restorePreviousShell = async () => {
-      if (previousShell) await cache.put(OFFLINE_URL, previousShell.clone()).catch(() => {});
+      if (previousShell) await putShell(cache, previousShell.clone(), previousBuildId).catch(() => {});
     };
     try {
-      await cache.put(OFFLINE_URL, shellResponse.clone());
+      await putShell(cache, shellResponse.clone(), buildId);
       if (!supersedable) await cache.put(INSTALL_MARK_URL, new Response('', { headers: { [INSTALL_STARTED_HEADER]: String(startedAt) } }));
     } catch (err) {
       await restorePreviousShell();
@@ -317,8 +347,8 @@ async function replaceCompleteShell(shellResponse, enqueuedSeq, supersedable, st
     await pruneStaleAssets(cache, [previousBuildId, liveBuildId]);
     await commitGeneration();
   }
-  cachedShellSeq += 1;
-  knownCachedBuild = buildId;
+  // The memo already describes this build: putShell set it as part of the
+  // write that committed the shell, and nothing has moved '/' since.
   // Refreshes are queued, so an older one can finish after a newer
   // navigation already advanced the live build — writing its own build back
   // would mis-tag the newer page's chunks. Only claim the memo if no
