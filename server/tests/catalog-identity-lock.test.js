@@ -12,8 +12,10 @@
  * certification — no advisory-lock convention for a writer to forget.
  *
  *   - helper: the exact SHARE-mode statement, transaction required
- *   - reader (catalogLinkForProfile): duration authorities take it before any
- *     services read; identity-only callers stay lock-free
+ *   - reader (catalogLinkForProfile): every capacity-transaction read takes it
+ *     as the first statement of its savepoint and requests NO row lock (a row
+ *     lock alongside the table lock deadlocks against writers that pre-lock
+ *     rows, codex #4369 r2); non-capacity reads stay lock-free
  *   - the engine-key migrations' explicit table lock is a mode that conflicts
  *     with SHARE (source-level pin — the DB-enforced guarantee rests on it)
  */
@@ -47,33 +49,48 @@ describe('lockCatalogIdentity', () => {
   });
 });
 
-describe('catalogLinkForProfile — absent match serialization', () => {
-  // A transactional conn whose containment lookup finds NO row.
+describe('catalogLinkForProfile — table SHARE lock replaces catalog row locks', () => {
+  // A transactional conn whose lookups find NO row. Records every services
+  // read and whether FOR SHARE was requested on it.
   function absentConn({ isTransaction = true } = {}) {
     const events = [];
-    const chain = () => ({ andWhere: () => chain(), limit: () => chain(), select: () => ({ modify: async () => { events.push('services-read'); return []; } }) });
-    const builder = () => ({
-      where: () => chain(),
-      whereRaw: () => { events.push('services-read'); return chain(); },
+    const chain = () => ({
+      andWhere: () => chain(), limit: () => chain(),
+      forShare: () => { events.push('FOR SHARE'); return chain(); },
+      modify: async (fn) => { const q = { forShare: () => events.push('FOR SHARE') }; fn?.(q); events.push('services-read'); return []; },
+      select: () => { events.push('services-read'); const c = chain(); c.then = (resolve) => resolve([]); return c; },
     });
-    builder.transaction = async (cb) => cb(builder);
+    const builder = () => ({ where: () => chain(), whereRaw: () => chain() });
+    builder.transaction = async (cb) => { events.push('savepoint'); return cb(builder); };
     builder.raw = jest.fn(async (sql) => { events.push(sql === CATALOG_SHARE_LOCK_SQL ? 'share-lock' : sql); });
     if (isTransaction) builder.isTransaction = true;
     return { conn: builder, events };
   }
   const profile = { services: [{ service: 'pest_control', engineKey: 'unmapped_engine_key', durationMinutes: 60 }] };
 
-  test('a duration authority takes the SHARE lock BEFORE the services read and still returns null on a miss', async () => {
+  test('a duration authority takes the SHARE lock as the FIRST statement of the lookup savepoint and returns null on a miss', async () => {
     const { conn, events } = absentConn();
     const link = await catalogLinkForProfile(conn, profile, { preserveCapacity: true, validateAllowance: true });
     expect(link).toBeNull();
     expect(conn.raw).toHaveBeenCalledTimes(1);
     expect(conn.raw).toHaveBeenCalledWith(CATALOG_SHARE_LOCK_SQL);
-    expect(events.indexOf('share-lock')).toBeGreaterThan(-1);
+    expect(events.slice(0, 2)).toEqual(['savepoint', 'share-lock']);
     expect(events.indexOf('share-lock')).toBeLessThan(events.indexOf('services-read'));
+    expect(events).not.toContain('FOR SHARE');
   });
 
-  test('a duration authority under the live gate (no preserveCapacity) takes it too', async () => {
+  test('identity-only and strict readers inside a capacity transaction take the same table lock — never a row lock', async () => {
+    let { conn, events } = absentConn();
+    expect(await catalogLinkForProfile(conn, profile, { preserveCapacity: true })).toBeNull();
+    expect(conn.raw).toHaveBeenCalledWith(CATALOG_SHARE_LOCK_SQL);
+    expect(events).not.toContain('FOR SHARE');
+    ({ conn, events } = absentConn());
+    expect(await catalogLinkForProfile(conn, profile, { preserveCapacity: true, strictAllowanceRead: true })).toBeNull();
+    expect(conn.raw).toHaveBeenCalledWith(CATALOG_SHARE_LOCK_SQL);
+    expect(events).not.toContain('FOR SHARE');
+  });
+
+  test('under the live gate (no preserveCapacity) the lock is taken too', async () => {
     const previous = process.env.GATE_SCHEDULING_CAPACITY;
     process.env.GATE_SCHEDULING_CAPACITY = 'true';
     try {
@@ -86,17 +103,21 @@ describe('catalogLinkForProfile — absent match serialization', () => {
     }
   });
 
-  test('identity-only callers (no validateAllowance) stay lock-free and fail open', async () => {
-    const { conn } = absentConn();
-    expect(await catalogLinkForProfile(conn, profile, { preserveCapacity: true })).toBeNull();
-    expect(await catalogLinkForProfile(conn, profile, { preserveCapacity: true, strictAllowanceRead: true })).toBeNull();
+  test('outside a transaction, or with capacity off, no catalog lock of any kind is attempted (legacy fail-open read)', async () => {
+    let { conn } = absentConn({ isTransaction: false });
+    expect(await catalogLinkForProfile(conn, profile, { preserveCapacity: true, validateAllowance: true })).toBeNull();
+    expect(conn.raw).not.toHaveBeenCalled();
+    ({ conn } = absentConn());
+    expect(await catalogLinkForProfile(conn, profile, {})).toBeNull();
     expect(conn.raw).not.toHaveBeenCalled();
   });
 
-  test('outside a transaction no catalog lock of any kind is attempted (matches the FOR SHARE contract)', async () => {
-    const { conn } = absentConn({ isTransaction: false });
-    expect(await catalogLinkForProfile(conn, profile, { preserveCapacity: true, validateAllowance: true })).toBeNull();
-    expect(conn.raw).not.toHaveBeenCalled();
+  test('no catalog reader in the capacity transactions requests a services row lock any more (source-level)', () => {
+    const slotSrc = fs.readFileSync(path.join(__dirname, '../services/slot-reservation.js'), 'utf8');
+    expect(slotSrc).not.toMatch(/lockCatalog\) query\.forShare/);
+    const converterSrc = fs.readFileSync(path.join(__dirname, '../services/estimate-converter.js'), 'utf8');
+    expect(converterSrc).not.toMatch(/catalogQuery\.forShare\(\)/);
+    expect(converterSrc.match(/lockCatalogIdentity\((database|trx)\)/g)).toHaveLength(3);
   });
 });
 

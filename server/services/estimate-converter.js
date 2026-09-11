@@ -5748,7 +5748,10 @@ const EstimateConverter = {
             const protectV2Member = combinedCapacity?.version === 2 && sameTrip;
             try {
               const catalogQuery = database('services').where({ service_key: unit.catalogServiceKey });
-              if (protectV2Member) catalogQuery.forShare();
+              // Table SHARE lock instead of FOR SHARE (scheduling/catalog-lock.js):
+              // a row lock here deadlocks against the SHARE lock the same accept
+              // transaction holds through commitReservation (codex #4369 r2).
+              if (protectV2Member) await require('./scheduling/catalog-lock').lockCatalogIdentity(database);
               const catalogRow = await catalogQuery.first('id', 'name', 'default_duration_minutes', 'min_duration_minutes',
                   'max_duration_minutes', 'scheduling_duration_policy');
               if (catalogRow) {
@@ -5951,7 +5954,10 @@ const EstimateConverter = {
           const protectV2Rewrite = row.reservation_policy_version === 2 && capacitySnapshot?.version !== 1;
           try {
             const catalogQuery = database('services').where({ service_key: combo.route.catalogServiceKey });
-            if (protectV2Rewrite) catalogQuery.forShare();
+            // Table SHARE lock instead of FOR SHARE (scheduling/catalog-lock.js):
+            // a row lock here deadlocks against the SHARE lock the same accept
+            // transaction holds through commitReservation (codex #4369 r2).
+            if (protectV2Rewrite) await require('./scheduling/catalog-lock').lockCatalogIdentity(database);
             catalogRow = await catalogQuery.first('id', 'default_duration_minutes', 'min_duration_minutes',
                 'max_duration_minutes', 'scheduling_duration_policy');
             if (protectV2Rewrite) {
@@ -6153,7 +6159,10 @@ const EstimateConverter = {
                     && capacitySnapshot?.version !== 1;
                   try {
                     const catalogQuery = trx('services').where({ service_key: reservedCatalogKey });
-                    if (protectV2Parent) catalogQuery.forShare();
+                    // Table SHARE lock instead of FOR SHARE (scheduling/catalog-lock.js):
+                    // a row lock here deadlocks against the SHARE lock the same accept
+                    // transaction holds through commitReservation (codex #4369 r2).
+                    if (protectV2Parent) await require('./scheduling/catalog-lock').lockCatalogIdentity(trx);
                     const catalogRow = await catalogQuery.first('id', 'service_key', 'default_duration_minutes', 'min_duration_minutes',
                         'max_duration_minutes', 'scheduling_duration_policy');
                     if (catalogRow && protectV2Parent) {

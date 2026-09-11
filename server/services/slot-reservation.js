@@ -341,7 +341,21 @@ function cadenceCatalogKeyForProfile(primary, isOneTime) {
 }
 
 async function catalogLinkForProfile(conn, serviceProfile = {}, { preserveCapacity = false, strictAllowanceRead = false, validateAllowance = false } = {}) {
+  // CATALOG SERIALIZATION under capacity: a `services` table SHARE lock
+  // (scheduling/catalog-lock.js), taken as the FIRST statement of the
+  // lookup savepoint and held to the outer commit. It replaced per-row FOR
+  // SHARE (codex #4344 P1 + #4369 r1/r2): a row lock protects only a MATCHED
+  // row, so an absent match could be overtaken by a row activated or mapped
+  // before the commit; and mixing row locks with a table lock deadlocked
+  // against writers that pre-lock rows (deactivateService's FOR UPDATE) or
+  // against this transaction's own earlier FOR SHARE reads. SHARE conflicts
+  // with every INSERT/UPDATE/DELETE (implicit ROW EXCLUSIVE) — admin writes
+  // and pre-deploy migrations alike — and not with other SHARE readers, so
+  // reads under it need no row lock at all and concurrent bookings never
+  // block each other. Inside the savepoint so a lock_timeout stays a
+  // recoverable catalog_unavailable and never aborts the outer transaction.
   const lockCatalog = conn?.isTransaction && (capacityEnabled() || preserveCapacity);
+  const lockCatalogTable = async (sp) => { if (lockCatalog) await require('./scheduling/catalog-lock').lockCatalogIdentity(sp); };
   const catalogColumns = ['id', 'name', 'service_key', 'default_duration_minutes', 'min_duration_minutes', 'max_duration_minutes',
     ...(capacityEnabled() || preserveCapacity ? ['scheduling_duration_policy'] : [])];
   const services = Array.isArray(serviceProfile?.services) ? serviceProfile.services : [];
@@ -380,20 +394,6 @@ async function catalogLinkForProfile(conn, serviceProfile = {}, { preserveCapaci
   const commercialIdentity = [primary?.engineKey, primary?.key, primary?.serviceKey, primary?.service_key, primary?.name, primary?.label, primary?.displayName]
     .filter(Boolean).join(' ');
   if (primary?.commercial || /commercial/i.test(commercialIdentity)) return null;
-  // ABSENT-MATCH SERIALIZATION (codex #4344 P1, posted after merge): the
-  // FOR SHARE reads below protect a MATCHED row through the outer commit,
-  // but a lookup that finds no row locks nothing — an admin could activate
-  // or map a longer-duration row between this read and the commit, and a
-  // version-2 hold on the 60-minute fallback would graduate against a
-  // policy it never saw. Duration authorities take the services table
-  // SHARE lock here (scheduling/catalog-lock.js), before any services row
-  // lock, and hold it to their commit: every catalog INSERT/UPDATE/DELETE —
-  // admin writes and pre-deploy migrations alike — conflicts with it at the
-  // database, so no writer convention is needed. Identity-only callers keep
-  // their lock-free fail-open read.
-  if (lockCatalog && validateAllowance) {
-    await require('./scheduling/catalog-lock').lockCatalogIdentity(conn);
-  }
   // A VERIFIED catalog key frozen on the line by a keyed public quote
   // (the standalone cockroach package: cockroach_control's engine key
   // pest_initial_roach is deliberately NOT in any row's engine_keys — the
@@ -413,11 +413,11 @@ async function catalogLinkForProfile(conn, serviceProfile = {}, { preserveCapaci
     let byKey = null;
     try {
       await conn.transaction(async (sp) => {
+        await lockCatalogTable(sp);
         const rows = await sp('services')
           .where({ service_key: catalogKey })
           .limit(2)
-          .select(...catalogColumns)
-          .modify(query => { if (lockCatalog) query.forShare(); });
+          .select(...catalogColumns);
         if (rows.length === 1) byKey = rows[0];
         else if (rows.length > 1) {
           logger.error(`[slot-reservation] catalog key "${catalogKey}" names MULTIPLE active rows — refusing to stamp service_id`);
@@ -444,6 +444,7 @@ async function catalogLinkForProfile(conn, serviceProfile = {}, { preserveCapaci
   let resolved = null;
   try {
     await conn.transaction(async (sp) => {
+        await lockCatalogTable(sp);
       // Containment, not equality: engine_keys is a jsonb ARRAY because the
       // engine emits versioned aliases for one catalog service
       // (stinging_insect + stinging_insect_v2 → bee_wasp_removal). Codex
@@ -468,8 +469,7 @@ async function catalogLinkForProfile(conn, serviceProfile = {}, { preserveCapaci
         const cadenceRows = await sp('services')
           .where({ service_key: cadenceKey, is_active: true })
           .limit(2)
-          .select(...catalogColumns)
-          .modify(query => { if (lockCatalog) query.forShare(); });
+          .select(...catalogColumns);
         if (cadenceRows.length === 1) resolved = cadenceRows[0];
         else if (cadenceRows.length > 1 && (strictAllowanceRead || validateAllowance)) throw capacityError('catalog_unavailable');
         return;
@@ -478,8 +478,7 @@ async function catalogLinkForProfile(conn, serviceProfile = {}, { preserveCapaci
         .whereRaw('engine_keys @> ?::jsonb', [JSON.stringify([engineKey])])
         .andWhere({ is_active: true })
         .limit(2)
-        .select(...catalogColumns)
-        .modify(query => { if (lockCatalog) query.forShare(); });
+        .select(...catalogColumns);
       if (rows.length === 1) {
         resolved = rows[0];
       } else if (rows.length > 1) {
