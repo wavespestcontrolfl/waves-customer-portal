@@ -762,24 +762,40 @@ for src, spec in refs:
     cands = [base] if base.endswith(EXT) else []
     cands += [base + e for e in EXT]
     cands += [base + '/index' + e for e in EXT]
+
+    # RESOLUTION FIRST, filtering second, and the two must not be mixed.
+    # Walking the candidate list while filtering lets an excluded target
+    # fall through to the next candidate: if ./helper resolves to helper.js
+    # but that file is changed, the loop would go on to inline
+    # helper/index.js and present it as what the import points at. Pick the
+    # first candidate that exists in the commit — that IS the target — and
+    # then judge it.
+    target = None
     for rel in cands:
         # Containment, lexically: normpath has already collapsed the `..`
         # segments, so anything that escaped the repo now starts with `..`.
+        # Such a path is never in the tree either, so this is belt and
+        # braces rather than the only guard.
         if os.path.isabs(rel) or rel == '..' or rel.startswith('../'):
             continue
-        if rel in changed or rel in seen:
-            continue
-        if 'node_modules' in rel.split('/'):
-            continue
-        # In the tree = tracked in the audited commit. A symlink entry is
-        # refused outright: its blob is a path, and following it would step
-        # outside the commit's own contents.
-        mode = tree.get(rel)
-        if mode is None or mode == SYMLINK_MODE:
-            continue
-        seen.add(rel)
-        out.append(rel)
-        break
+        if rel in tree:
+            target = rel
+            break
+    if target is None:
+        continue
+
+    # From here a failed check drops the REFERENCE, never advances to a
+    # different file.
+    if target in seen or target in changed:
+        continue
+    if 'node_modules' in target.split('/'):
+        continue
+    # A symlink entry is refused outright: its blob is a path, and following
+    # it would step outside the commit's own contents.
+    if tree.get(target) == SYMLINK_MODE:
+        continue
+    seen.add(target)
+    out.append(target)
 
 print('\n'.join(out))
 PYEOF

@@ -68,6 +68,10 @@ echo "module.exports = { helper: 1 };"       > server/services/helper.js
 echo "module.exports = { data: 1 };"         > server/services/data.json
 echo "module.exports = { dep: 1 };"          > node_modules/pkg/index.js
 echo "module.exports = { from_index: 1 };"   > server/services/mod/index.js
+# ./helper has TWO possible targets. helper.js wins; helper/index.js must
+# never be substituted for it when helper.js is filtered out.
+mkdir -p server/services/helper
+echo "module.exports = { helper_index_substituted: 1 };" > server/services/helper/index.js
 printf 'module.exports = { big: "%s" };\n' "$(head -c 4000 < /dev/zero | tr '\0' 'x')" > server/services/big.js
 ln -s /etc/passwd server/services/link.js
 git add -A >/dev/null 2>&1
@@ -177,6 +181,31 @@ git checkout -q - >/dev/null 2>&1
 # Bare specifiers are not paths.
 expect "ignores a bare package specifier" \
   "const knex = require('knex');" excludes "knex"
+
+# Resolution must settle on ONE target before any filter runs. If ./helper
+# resolves to helper.js and that file is excluded, the collector must drop
+# the reference — not walk on and inline helper/index.js while presenting it
+# as what the import points at.
+git checkout -q -B competing "$PUSH_SHA" >/dev/null 2>&1
+echo "module.exports = { helper: 2 };" > server/services/helper.js
+git add -A >/dev/null 2>&1; git commit -qm touch-helper >/dev/null 2>&1
+SAVED_SHA="$AUDIT_SHA"; SAVED_BASE="$AUDIT_BASE"
+AUDIT_SHA="$(git rev-parse HEAD)"; AUDIT_BASE="$PUSH_SHA"
+expect "does not substitute helper/index.js when helper.js is changed" \
+  "const h = require('./helper');" excludes "helper_index_substituted"
+AUDIT_SHA="$SAVED_SHA"; AUDIT_BASE="$SAVED_BASE"
+git checkout -q - >/dev/null 2>&1
+
+# The same specifier twice must be inlined once, and must not fall through
+# to the competing candidate on the second pass.
+make_diff "const a = require('./helper'); const b = require('./helper');"
+run_collect
+HELPER_HITS="$(grep -ac '^----- server/services/helper.js' "$WORK/out.txt" 2>/dev/null || echo 0)"
+if [ "$HELPER_HITS" = "1" ] && ! grep -qa "helper_index_substituted" "$WORK/out.txt"; then
+  pass "a repeated import is inlined once and never falls through"
+else
+  fail "repeated import: helper.js inlined $HELPER_HITS time(s), or index.js substituted"
+fi
 
 echo ""
 echo "reads the audited commit, not the working tree:"
