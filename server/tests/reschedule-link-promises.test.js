@@ -250,7 +250,7 @@ test('an agent who takes the promise back later in the call stops the send', () 
 // for every outbox row when `selfServe` is truthy, empty when it is not —
 // keeps every existing fixture behaving exactly as before; pass it
 // explicitly to pull the two apart.
-function fakeConn({ outbox = [], selfServe = null, selfServeVisitIds = null, cards = [], throwOn = null, smsLog = null } = {}) {
+function fakeConn({ outbox = [], selfServe = null, selfServeVisitIds = null, cards = [], throwOn = null, smsLog = null, systemSettings = {} } = {}) {
   const seen = { statusAllowlist: null, logFilters: [], visitIdFilters: [], orderByCalls: [], whereRawCalls: [], updates: [], inserts: [], resolved: [] };
   const openCards = () => cards.filter((card) => !seen.resolved.includes(card.id));
   const build = (table) => {
@@ -292,9 +292,31 @@ function fakeConn({ outbox = [], selfServe = null, selfServeVisitIds = null, car
         if (name === 'reschedule_log') { seen.logFilters.push({ eq: { ...state.eq }, ranges: [...state.ranges] }); return selfServe; }
         if (name === 'triage_items') return openCards()[0] || null;
         if (name === 'sms_log') return smsLog;
+        if (name === 'system_settings') {
+          const key = state.eq.key;
+          return key != null && systemSettings[key] !== undefined ? { value: systemSettings[key] } : null;
+        }
         return null;
       },
-      insert: async (data) => { seen.inserts.push({ table: name, data }); return [1]; },
+      insert: (data) => {
+        seen.inserts.push({ table: name, data });
+        // 'insert-if-absent' for system_settings mirrors onConflict('key').ignore()
+        // in production: first writer wins, everyone else just reads it back.
+        const settle = () => {
+          if (name === 'system_settings' && data?.key && !(data.key in systemSettings)) systemSettings[data.key] = data.value;
+          return 1;
+        };
+        return {
+          then: (resolve, reject) => Promise.resolve().then(() => [settle()]).then(resolve, reject),
+          onConflict: () => ({
+            ignore: async () => settle(),
+            merge: async (mergeData) => {
+              if (name === 'system_settings' && data?.key) systemSettings[data.key] = (mergeData && 'value' in mergeData) ? mergeData.value : data.value;
+              return 1;
+            },
+          }),
+        };
+      },
       update: async (patch) => {
         seen.updates.push({ table: name, eq: { ...state.eq }, whereIn: [...state.whereIn], patch });
         if (name === 'triage_items' && patch.status === 'resolved' && state.eq.id) seen.resolved.push(state.eq.id);
@@ -332,6 +354,100 @@ test('a push-channel row is never counted as promised-link delivery evidence', a
   expect(evidenceFilter).toBeDefined();
   expect(evidenceFilter.sql).toContain("COALESCE(from_phone, '') <> 'push'");
   expect(evidenceFilter.sql).toContain("COALESCE(metadata->>'channel', '') <> 'push'");
+});
+
+// A dedicated stand-in for stagePromises' own tables (call_commitments /
+// call_log / outbox_messages) — the main fakeConn above is shaped around
+// outbox_messages/triage_items/reschedule_log/sms_log for the sweep and
+// reconcile paths, a different join entirely. `commitments` and `outbox`
+// stand in for "what the query would find": eligible commitments needing a
+// fresh row are exactly those with no existing outbox row whose
+// commitment_generation is already at or past the commitment's own current
+// processing_generation — the same predicate stagePromises' own NOT EXISTS
+// subquery encodes.
+function fakeStageConn({ commitments = [], outbox = [] } = {}) {
+  const inserts = [];
+  const state = { generationAware: false };
+  const base = (cc) => cc.kind === 'send_reschedule_link' && cc.party === 'waves' && cc.status === 'open' && cc.human_state == null;
+  // If the query never asks a generation-aware question at all (whereRaw
+  // mentioning commitment_generation), fall back to the OLD "any existing
+  // row at all counts as staged" reading — the exact bug: this excludes a
+  // reopened commitment whose only outbox row is for a stale generation,
+  // proving a regression back to that shape would leave it unstaged again.
+  const eligible = () => commitments.filter((cc) => base(cc) && (state.generationAware
+    ? !outbox.some((o) => o.commitment_id === cc.id && (o.commitment_generation ?? -1) >= (cc.processing_generation ?? 0))
+    : !outbox.some((o) => o.commitment_id === cc.id)));
+  const conn = (table) => {
+    const name = String(table).split(' ')[0];
+    const b = {};
+    const pass = () => (...args) => b;
+    Object.assign(b, {
+      join: pass(), leftJoin: pass(), where: pass(), whereNull: pass(), limit: pass(), select: pass(),
+      whereRaw: (sql) => { if (name === 'call_commitments' && /commitment_generation/.test(sql)) state.generationAware = true; return b; },
+      then: (resolve, reject) => Promise.resolve()
+        .then(() => (name === 'call_commitments' ? eligible().map((cc) => ({ ...cc })) : []))
+        .then(resolve, reject),
+      insert: (data) => {
+        inserts.push({ table: name, data });
+        return {
+          onConflict: () => ({
+            ignore: async () => {
+              if (name === 'outbox_messages') outbox.push({ commitment_id: data.commitment_id, commitment_generation: data.commitment_generation });
+              return 1;
+            },
+          }),
+        };
+      },
+    });
+    return b;
+  };
+  return { conn, inserts, outbox };
+}
+
+test('a replacement recording reopening a delivered commitment stages a fresh outbox row', async () => {
+  const prior = process.env.GATE_RESCHEDULE_LINK_ON_PROMISE, priorCommitments = gates.callCommitments;
+  try {
+    gates.callCommitments = true;
+    process.env.GATE_RESCHEDULE_LINK_ON_PROMISE = 'shadow';
+    // upsertCommitments reset this commitment to open and stamped generation
+    // 2 on the reprocess pass — but generation 1 already has a delivered
+    // outbox row, and the OLD whereNull('o.id') join would have treated that
+    // as "already staged," leaving the reopened promise with nothing left
+    // driving it toward delivery (codex #4293 P1, missed on 5ce420509).
+    const reopened = { id: 'commitment', call_log_id: 'call', customer_id: 'customer', created_at: new Date('2030-01-08T00:00:00Z'),
+      processing_generation: 2, kind: 'send_reschedule_link', party: 'waves', status: 'open', human_state: null };
+    const { conn, inserts } = fakeStageConn({
+      commitments: [reopened],
+      outbox: [{ commitment_id: 'commitment', commitment_generation: 1 }],
+    });
+    const staged = await links.stagePromises(conn);
+    expect(staged).toBe(1);
+    const staging = inserts.find((i) => i.table === 'outbox_messages');
+    expect(staging).toBeDefined();
+    expect(staging.data).toMatchObject({ commitment_id: 'commitment', commitment_generation: 2 });
+  } finally {
+    if (prior === undefined) delete process.env.GATE_RESCHEDULE_LINK_ON_PROMISE; else process.env.GATE_RESCHEDULE_LINK_ON_PROMISE = prior;
+    gates.callCommitments = priorCommitments;
+  }
+});
+
+test('the same generation already staged is never restaged', async () => {
+  const prior = process.env.GATE_RESCHEDULE_LINK_ON_PROMISE, priorCommitments = gates.callCommitments;
+  try {
+    gates.callCommitments = true;
+    process.env.GATE_RESCHEDULE_LINK_ON_PROMISE = 'shadow';
+    const unchanged = { id: 'commitment', call_log_id: 'call', customer_id: 'customer', created_at: new Date('2030-01-08T00:00:00Z'),
+      processing_generation: 1, kind: 'send_reschedule_link', party: 'waves', status: 'open', human_state: null };
+    const { conn, inserts } = fakeStageConn({
+      commitments: [unchanged],
+      outbox: [{ commitment_id: 'commitment', commitment_generation: 1 }],
+    });
+    expect(await links.stagePromises(conn)).toBe(0);
+    expect(inserts).toEqual([]);
+  } finally {
+    if (prior === undefined) delete process.env.GATE_RESCHEDULE_LINK_ON_PROMISE; else process.env.GATE_RESCHEDULE_LINK_ON_PROMISE = prior;
+    gates.callCommitments = priorCommitments;
+  }
 });
 
 test('a replay that moved nothing closes no cards; a real self-serve move does', async () => {
@@ -547,17 +663,62 @@ test('a promise recorded before an explicit activation boundary is cancelled wit
   }
 });
 
-test('with no activation env set, the process start time is the boundary', async () => {
+test('with no env set, nothing persisted yet writes now() under the stored key and uses it immediately', async () => {
   const prior = process.env.RESCHEDULE_LINK_PROMISE_ACTIVATED_AT;
   try {
     delete process.env.RESCHEDULE_LINK_PROMISE_ACTIVATED_AT;
-    // A bare gate flip with no boundary configured must never promote real
-    // history — any commitment recorded long before this test process
-    // itself started has to read as pre-activation from the fallback alone.
+    // A bare gate flip with nothing stored yet must never promote real
+    // history — a commitment recorded long before this test's own
+    // (real-clock) run time has to read as pre-activation against whatever
+    // instant gets written, not against this process's own start time.
+    const systemSettings = {};
     const ancient = promiseRow('ancient', 'first', { payload: { kind: 'send_reschedule_link', commitment_created_at: '2000-01-01T00:00:00.000Z' } });
-    const { seen } = await sweepWith({ outbox: [ancient], selfServeVisitIds: [] });
+    const { seen } = await sweepWith({ outbox: [ancient], selfServeVisitIds: [], systemSettings });
     expect(seen.updates).toContainEqual(expect.objectContaining({ table: 'outbox_messages', eq: { id: 'ancient' },
       patch: expect.objectContaining({ status: 'cancelled', last_error: 'pre_activation' }) }));
+    // The instant is durable — written where every future process (this one
+    // after a restart, or any other) will find it, not kept in memory.
+    expect(seen.inserts).toContainEqual(expect.objectContaining({ table: 'system_settings',
+      data: expect.objectContaining({ key: 'reschedule_link_promise_activated_at' }) }));
+    expect(systemSettings.reschedule_link_promise_activated_at).toBeDefined();
+  } finally {
+    if (prior === undefined) delete process.env.RESCHEDULE_LINK_PROMISE_ACTIVATED_AT;
+    else process.env.RESCHEDULE_LINK_PROMISE_ACTIVATED_AT = prior;
+  }
+});
+
+test('a restart (a fresh sweep against the same stored row) reuses the SAME boundary, not a new one', async () => {
+  // The stored instant, not this process's own uptime, is authoritative —
+  // an earlier round's process-start fallback moved the boundary forward on
+  // every restart, silently cancelling a commitment created after the last
+  // sweep but before a routine deploy (codex #4293 P1 r9). Simulating a
+  // restart is exactly this: a sweep that finds the row ALREADY there.
+  const systemSettings = { reschedule_link_promise_activated_at: '2030-01-05T00:00:00.000Z' };
+  const stale = promiseRow('stale', 'first', { payload: { kind: 'send_reschedule_link', commitment_created_at: '2030-01-01T00:00:00.000Z' } });
+  const fresh = promiseRow('fresh', 'second', { payload: { kind: 'send_reschedule_link', commitment_created_at: '2030-01-06T00:00:00.000Z' } });
+  const { seen } = await sweepWith({ outbox: [stale, fresh], selfServeVisitIds: [], systemSettings });
+  expect(seen.updates).toContainEqual(expect.objectContaining({ table: 'outbox_messages', eq: { id: 'stale' },
+    patch: expect.objectContaining({ status: 'cancelled', last_error: 'pre_activation' }) }));
+  const freshUpdate = seen.updates.find((u) => u.table === 'outbox_messages' && u.eq.id === 'fresh');
+  expect(freshUpdate.patch.last_error).not.toBe('pre_activation');
+  // The row already existed — nothing about it was rewritten.
+  expect(seen.inserts.some((i) => i.table === 'system_settings')).toBe(false);
+  expect(systemSettings.reschedule_link_promise_activated_at).toBe('2030-01-05T00:00:00.000Z');
+});
+
+test('an explicit activation env overrides the persisted stored value', async () => {
+  const prior = process.env.RESCHEDULE_LINK_PROMISE_ACTIVATED_AT;
+  try {
+    process.env.RESCHEDULE_LINK_PROMISE_ACTIVATED_AT = '2030-01-10T00:00:00.000Z'; // later than stored
+    const systemSettings = { reschedule_link_promise_activated_at: '2030-01-01T00:00:00.000Z' }; // earlier
+    // Between the two boundaries: post-activation under the stored value,
+    // pre-activation under the env — proving which one actually won.
+    const between = promiseRow('between', 'first', { payload: { kind: 'send_reschedule_link', commitment_created_at: '2030-01-05T00:00:00.000Z' } });
+    const { seen } = await sweepWith({ outbox: [between], selfServeVisitIds: [], systemSettings });
+    expect(seen.updates).toContainEqual(expect.objectContaining({ table: 'outbox_messages', eq: { id: 'between' },
+      patch: expect.objectContaining({ status: 'cancelled', last_error: 'pre_activation' }) }));
+    // The env path never even touches the stored row.
+    expect(seen.inserts.some((i) => i.table === 'system_settings')).toBe(false);
   } finally {
     if (prior === undefined) delete process.env.RESCHEDULE_LINK_PROMISE_ACTIVATED_AT;
     else process.env.RESCHEDULE_LINK_PROMISE_ACTIVATED_AT = prior;

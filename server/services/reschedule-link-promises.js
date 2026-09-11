@@ -24,18 +24,37 @@ function mode() {
 // GATE_RESCHEDULE_LINK_ON_PROMISE. Staging them all unconditionally the
 // moment the gate goes live would text a backlog of stale reschedule links
 // at once, on a promise the caller made days ago (codex #4293 P1 r8).
-// RESCHEDULE_LINK_PROMISE_ACTIVATED_AT (an ISO instant) names the deliberate
-// activation moment; read fresh each call so a live env change takes effect
-// without a restart, exactly like mode() itself. Unset, the boundary is this
-// PROCESS's own start time — captured ONCE at module load, not re-evaluated
-// per call, so a bare gate flip can never promote history just because the
-// process happened to stay up a while: only commitments created from this
-// deploy forward are ever staged live.
-const PROCESS_STARTED_AT = new Date();
-function activationBoundary() {
+// RESCHEDULE_LINK_PROMISE_ACTIVATED_AT (an ISO instant), when set, always
+// wins — read fresh each call so a live env change takes effect without a
+// restart, exactly like mode() itself.
+const ACTIVATION_SETTINGS_KEY = 'reschedule_link_promise_activated_at';
+
+// Unset, the boundary is READ FROM system_settings (this repo's existing
+// generic key/value store — server/models/migrations/
+// 20260414000029_geofence_timers.js) rather than derived from anything about
+// THIS process. An earlier round used this process's own start time, which
+// moved the boundary forward on every restart: a commitment created after
+// the last sweep but before a routine deploy would read as pre_activation
+// on the very next sweep — a live promise silently lost (codex #4293 P1 r9).
+// The first live sweep ANYWHERE to find nothing stored writes now() under
+// this key; onConflict + a re-read means a multi-process race still
+// converges every process on the SAME winning instant, and every later
+// sweep — on this process or after any future restart — just reads it back.
+async function persistedActivationBoundary(conn) {
+  const existing = await conn('system_settings').where({ key: ACTIVATION_SETTINGS_KEY }).first('value');
+  if (existing?.value) return new Date(existing.value);
+  const now = new Date();
+  await conn('system_settings').insert({ key: ACTIVATION_SETTINGS_KEY, value: now.toISOString(), category: 'reschedule_link_promises',
+    description: 'First live-activation instant for GATE_RESCHEDULE_LINK_ON_PROMISE; a send_reschedule_link commitment recorded before it is historical, not a live promise.' })
+    .onConflict('key').ignore();
+  const settled = await conn('system_settings').where({ key: ACTIVATION_SETTINGS_KEY }).first('value');
+  return settled?.value ? new Date(settled.value) : now;
+}
+
+async function activationBoundary(conn) {
   const configured = process.env.RESCHEDULE_LINK_PROMISE_ACTIVATED_AT;
   const parsed = configured ? new Date(configured) : null;
-  return parsed && !Number.isNaN(parsed.getTime()) ? parsed : PROCESS_STARTED_AT;
+  return parsed && !Number.isNaN(parsed.getTime()) ? parsed : persistedActivationBoundary(conn);
 }
 const norm = (s) => String(s || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
 const dateOnly = (v) => v instanceof Date ? v.toISOString().slice(0, 10) : String(v || '').slice(0, 10);
@@ -479,19 +498,39 @@ async function settleDelivery(conn, row, sms, context = null) {
   }).then((result) => result?.needsReview ? parkReview(conn, row, 'delivery_scope_changed') : result);
 }
 
+// A replacement/adopted recording (call-commitments.js upsertCommitments)
+// resets an untouched AI commitment back to status 'open' and hands it a
+// NEW processing_generation the moment the next reprocess pass detects it
+// on the newly adopted audio. A commitment_id that already owns a
+// delivered/cancelled outbox row from a PRIOR generation must still be
+// eligible for a fresh one: "NOT EXISTS an outbox row for this commitment
+// at or past its CURRENT generation" covers both never-staged (no row at
+// all) and reopened-since-last-staged (every existing row is for an older
+// generation) in one predicate, so a reopened promise is not stuck open in
+// call_commitments forever with nothing left driving it toward delivery
+// (codex #4293 P1, an earlier round on 5ce420509 that was missed).
 async function stagePromises(conn) {
   if (mode() === 'off') return 0;
   const rows = await conn('call_commitments as cc').join('call_log as cl', 'cl.id', 'cc.call_log_id')
-    .leftJoin('outbox_messages as o', 'o.commitment_id', 'cc.id').whereNull('o.id')
     .where({ 'cc.kind': KIND, 'cc.party': 'waves', 'cc.status': 'open' }).whereNull('cc.human_state')
-    .select('cc.id', 'cc.call_log_id', 'cc.created_at', 'cl.customer_id').limit(200);
+    .whereRaw(`NOT EXISTS (
+      SELECT 1 FROM outbox_messages o
+      WHERE o.commitment_id = cc.id
+        AND COALESCE(o.commitment_generation, -1) >= COALESCE(cc.processing_generation, 0)
+    )`)
+    .select('cc.id', 'cc.call_log_id', 'cc.created_at', 'cc.processing_generation', 'cl.customer_id').limit(200);
   // commitment_created_at rides along on the outbox row itself so runOne can
   // judge pre-activation without a second call_commitments query per row —
   // the exact check the r8 activation boundary needs to run before anything
-  // else, for every historical row a live sweep might otherwise touch at once.
+  // else, for every historical row a live sweep might otherwise touch at
+  // once. commitment_generation is what makes THIS row distinct from any
+  // earlier one staged for the same commitment_id — see the composite
+  // (commitment_id, commitment_generation) uniqueness in migration
+  // 20260911000030_outbox_messages_commitment_generation.js.
   for (const row of rows) await conn('outbox_messages').insert({ channel: 'sms', status: mode() === 'shadow' ? 'shadow' : 'pending',
-    payload: { kind: KIND, commitment_created_at: row.created_at }, commitment_id: row.id, related_call_log_id: row.call_log_id,
-    related_customer_id: row.customer_id, available_at: new Date() }).onConflict('commitment_id').ignore();
+    payload: { kind: KIND, commitment_created_at: row.created_at }, commitment_id: row.id, commitment_generation: row.processing_generation ?? 0,
+    related_call_log_id: row.call_log_id, related_customer_id: row.customer_id, available_at: new Date() })
+    .onConflict(['commitment_id', 'commitment_generation']).ignore();
   return rows.length;
 }
 
@@ -654,11 +693,11 @@ async function holdBeforeSend(conn, row, context, planned, now) {
 
 // True when the commitment behind this row predates the activation
 // boundary — see stagePromises for where commitment_created_at is stamped.
-function isPreActivationRow(row) {
+async function isPreActivationRow(conn, row) {
   const createdAt = row.payload?.commitment_created_at;
   if (!createdAt) return false;
   const created = new Date(createdAt);
-  return !Number.isNaN(created.getTime()) && created < activationBoundary();
+  return !Number.isNaN(created.getTime()) && created < (await activationBoundary(conn));
 }
 
 // Terminal, exactly like a promise the office already closed
@@ -695,7 +734,7 @@ async function runOne(conn, row, { now = new Date(), send = null, buildLink = nu
   // A commitment recorded before this delivery gate's own activation
   // boundary is a historical observation, not a live promise to keep —
   // see isPreActivationRow / cancelPreActivation (codex #4293 P1 r8).
-  if (isPreActivationRow(row)) return cancelPreActivation(conn, row);
+  if (await isPreActivationRow(conn, row)) return cancelPreActivation(conn, row);
   // Reconcile accepted/ambiguous attempts before planning any new send.
   if (row.provider_message_id && await reconcileAttempt(conn, row, now)) return;
   const context = await contextFor(conn, row.commitment_id, now);
