@@ -50,7 +50,8 @@ node scripts/qa/glass-audit/run.cjs --only <id>[,<id>] --run <name> [--url http:
   and treats a `box-shadow` as a ring only when it differs from the resting
   shadow; every capture records its `engine`. `analyze.cjs` and `matrix.cjs` let
   the LAST run in argument order supersede earlier captures of the same
-  scenario/state/width even when that latest capture FAILED (it is then excluded
+  scenario/state/width AND engine (a Chromium rerun never supersedes a WebKit
+  capture; non-Chromium rows are labelled `[webkit]`) even when that latest capture FAILED (it is then excluded
   and listed under "Latest capture failed" / shown as `BLOCKED`, never masked by an
   older success); `matrix.cjs` derives expected states from the scenario
   declaration (honouring a state's `widths`). Interactions run in sequence on one

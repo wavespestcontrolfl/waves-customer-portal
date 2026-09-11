@@ -11,9 +11,13 @@ if (!runs.length) { console.error('usage: analyze.cjs <run> [<run>…]'); proces
 const results = [];
 for (const run of runs) {
   const dir = path.join(root, '.tmp/glass-audit', run);
+  // Each capture records its own engine; the run summary is the fallback for captures made before that.
+  let runEngine = 'chromium';
+  try { runEngine = JSON.parse(fs.readFileSync(path.join(dir, 'summary.json'), 'utf8')).engine || runEngine; } catch (e) { /* no summary */ }
   for (const sc of fs.readdirSync(dir, { withFileTypes: true }).filter((d) => d.isDirectory())) {
     for (const f of fs.readdirSync(path.join(dir, sc.name)).filter((x) => x.endsWith('.json'))) {
-      results.push({ run, ...JSON.parse(fs.readFileSync(path.join(dir, sc.name, f), 'utf8')) });
+      const rec = JSON.parse(fs.readFileSync(path.join(dir, sc.name, f), 'utf8'));
+      results.push({ run, ...rec, engine: rec.engine || runEngine });
     }
   }
 }
@@ -21,22 +25,25 @@ for (const run of runs) {
 // earlier one everywhere (summary table and every detail section), so a corrective rerun retires issues.
 // The latest record wins even when it FAILED: a failed rerun must not leave an older successful capture
 // standing in the tables as if it were current. Such records are excluded from every metric section and
-// listed under `supersededByFailure` / "Latest capture failed".
+// listed under `supersededByFailure` / "Latest capture failed". The identity includes the ENGINE:
+// a Chromium rerun never supersedes a WebKit capture (or vice versa), and non-Chromium captures are
+// labelled `[engine]` in every row so one browser's result cannot stand in for another's.
+const engineOf = (r) => r.engine || 'chromium';
 const latest = new Map();
-for (const r of results) latest.set(`${r.scenario}/${r.state}@${r.width}`, r);
+for (const r of results) latest.set(`${r.scenario}/${r.state}@${r.width}#${engineOf(r)}`, r);
 const withMetrics = [...latest.values()].filter((r) => r.metrics && !r.failure);
 const latestFailed = [...latest.values()].filter((r) => r.failure || !r.metrics);
-const key = (r) => `${r.scenario}/${r.state}`;
+const key = (r) => `${r.scenario}/${r.state}${engineOf(r) !== 'chromium' ? ` [${engineOf(r)}]` : ''}`;
 const byScenario = {};
 for (const r of withMetrics) (byScenario[key(r)] = byScenario[key(r)] || []).push(r);
 
 const count = (map, k) => { map[k] = (map[k] || 0) + 1; };
 const lines = [];
-const out = { runs, captures: results.length, withMetrics: withMetrics.length, failures: results.filter((r) => r.failure).map((r) => ({ id: key(r), width: r.width, failure: r.failure })), supersededByFailure: latestFailed.map((r) => ({ id: key(r), width: r.width, run: r.run, failure: r.failure || 'no metrics' })) };
+const out = { runs, captures: results.length, withMetrics: withMetrics.length, failures: results.filter((r) => r.failure).map((r) => ({ id: key(r), width: r.width, failure: r.failure })), supersededByFailure: latestFailed.map((r) => ({ id: key(r), width: r.width, engine: engineOf(r), run: r.run, failure: r.failure || 'no metrics' })) };
 lines.push(`# glass-audit digest — runs: ${runs.join(', ')}`, '', `Captures: ${results.length} (${withMetrics.length} current with metrics, ${out.failures.length} failed in total, ${latestFailed.length} scenario/state/width whose LATEST capture failed and is excluded)`, '');
 if (latestFailed.length) {
   lines.push('## Latest capture failed (excluded from every section below)', '');
-  for (const r of latestFailed) lines.push(`- ${key(r)} @${r.width} (${r.run}): ${(r.failure || 'no metrics').slice(0, 160)}`);
+  for (const r of latestFailed) lines.push(`- ${key(r)} @${r.width} ${engineOf(r)} (${r.run}): ${(r.failure || 'no metrics').slice(0, 160)}`);
   lines.push('');
 }
 
@@ -61,7 +68,7 @@ function section(title, getter, fmt, limitPer = 12) {
     for (const it of getter(r) || []) {
       const id = `${r.scenario}|${fmt(it)}`;
       if (seen.has(id)) continue; seen.add(id);
-      (grouped[r.scenario] = grouped[r.scenario] || []).push(`${fmt(it)} @${r.width}`);
+      (grouped[r.scenario] = grouped[r.scenario] || []).push(`${fmt(it)} @${r.width}${engineOf(r) !== 'chromium' ? '/' + engineOf(r) : ''}`);
     }
   }
   const total = Object.values(grouped).reduce((n, a) => n + a.length, 0);
