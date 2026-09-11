@@ -3526,7 +3526,7 @@ export function SubscribersView() {
               value={q}
               onChange={(e) => setQ(e.target.value)}
               placeholder="Search email…"
-              className="w-full"
+              className="w-full pl-8"
               aria-label="Search email…"
             />{" "}
           </div>{" "}
