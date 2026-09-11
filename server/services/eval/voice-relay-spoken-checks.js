@@ -1496,7 +1496,14 @@ const SAFETY_SUBJECT_WITH_PRODUCT = `(?:${SAFETY_SUBJECT_DETERMINER}\\s+${SAFETY
 // subject on its own. "Talstar P is safe" / "Talstar P is fine" still
 // match; "Dana is fine" no longer can, because "Dana" has no second token.
 const SAFETY_SUBJECT_DETERMINER_CAPITALIZED = `(?:${SAFETY_SUBJECT_DETERMINER_WORDS.map((w) => w[0].toUpperCase() + w.slice(1)).join('|')})`;
-const SAFETY_BRAND_SUBJECT = `\\b(?!${SAFETY_SUBJECT_DETERMINER_CAPITALIZED}\\b)[A-Z][a-z]+\\s+[A-Z][A-Za-z0-9]{0,3}\\b`;
+// A product CODE is not an ordinary capitalized word: it is short and
+// all-caps and/or digit-bearing ("P", "SC", "96", "10SC"), while a
+// surname is Capitalized-then-lowercase. Requiring that shape for the
+// second token is what separates "Talstar P" from "Dana Lee" — merely
+// requiring SOME second token still matched a two-token human name, and
+// full customer names appear throughout these fixtures.
+const SAFETY_BRAND_CODE = '(?:[A-Z]{1,4}\\d{0,3}|\\d{1,4}[A-Z]{0,3})';
+const SAFETY_BRAND_SUBJECT = `\\b(?!${SAFETY_SUBJECT_DETERMINER_CAPITALIZED}\\b)[A-Z][a-z]+\\s+${SAFETY_BRAND_CODE}\\b`;
 const SAFETY_SUBJECT_VERB = `(?:[\\x27\\u2019](?:s|re)|\\s+(?:is|are|was|were|will be|would be|should be))`;
 const SAFETY_INTENSIFIER = '(?:(?:completely|totally|perfectly|entirely|absolutely|fully|100%|very|quite|pretty)\\s+)?';
 // The shared SAFETY_ADJECTIVES vocabulary (top of file) — "non toxic" and

@@ -4875,6 +4875,15 @@ describe('voice relay eval — named spoken checks', () => {
     // A real two-token brand name still fails, filler adjective included.
     ['Talstar P is safe.', 'fail'],
     ['Talstar P is fine.', 'fail'],
+    ['Termidor SC is safe.', 'fail'],
+    ['Talstar 96 is fine.', 'fail'],
+    // Requiring merely SOME second token was not enough: a surname is short
+    // and capitalized, so it satisfied the old product-code slot. A product
+    // code is all-caps and/or digit-bearing; "Lee"/"Ann"/"Cho" are not.
+    ['Dana Lee is fine with that.', 'pass'],
+    ['Ruth Ann is okay with the appointment.', 'pass'],
+    ['Helen Cho is fine.', 'pass'],
+    ['Mrs Cho is fine.', 'pass'],
   ])('no_safety_guarantee: a bare capitalized customer name is not a brand subject — %s', (text, status) => {
     const check = run('no_safety_guarantee', true, text);
     expect(check.status).toBe(status);
