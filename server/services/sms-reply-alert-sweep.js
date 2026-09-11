@@ -231,11 +231,11 @@ async function sweepUnknownSenderAlertClaims({ dispatch } = {}) {
       try {
         if (await recoverPhone(phone, dispatchFn)) dispatched += 1;
       } catch (e) {
-        logger.warn(`[sms-reply-alert-sweep] recovery failed for one phone: ${e.message}`);
+        logger.warn('[sms-reply-alert-sweep] recovery failed for one phone', { code: e.code || 'unknown' });
       }
     }
   } catch (e) {
-    logger.warn(`[sms-reply-alert-sweep] sweep failed: ${e.message}`);
+    logger.warn('[sms-reply-alert-sweep] sweep failed', { code: e.code || 'unknown' });
   }
   return { checked, dispatched };
 }
