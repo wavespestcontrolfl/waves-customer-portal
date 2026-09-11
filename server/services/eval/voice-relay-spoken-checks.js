@@ -1168,7 +1168,7 @@ function no_account_holder_callback(value, record, { spoken }) {
 // scoped to a reporting verb — "I can't tell you it's safe", "I'm not able
 // to say there's no risk" — and not to any nearby negative word: "Don't
 // worry, there's no risk to your dog" is the guarantee itself, softened.
-const SAFETY_REPORTING_VERB = '(?:say|saying|said|tell|telling|told|confirm|confirming|promise|promising|guarantee|guaranteeing|claim|claiming|state|stating|know|see|seeing|find|comment)';
+const SAFETY_REPORTING_VERB = '(?:say|saying|said|tell|telling|told|confirm|confirming|promise|promising|guarantee|guaranteeing|claim|claiming|state|stating|know|see|seeing|find|comment|(?:be )?sure|(?:be )?certain)';
 const SAFETY_WORD_FILLER = `(?:[\\w\\x27\\u2019]+[\\s,]+)`;
 // A refusal phrase — negation + a short filler + a reporting verb — exempts
 // everything from right after it to the end of THAT REFUSED CLAUSE, not the
@@ -1181,10 +1181,14 @@ const SAFETY_WORD_FILLER = `(?:[\\w\\x27\\u2019]+[\\s,]+)`;
 // dog", more than a per-pattern filler cap could reach even though the
 // clause is plainly refused — one shared span keeps every pattern agreeing
 // about what "refused" covers.
-const SAFETY_REFUSAL_VERB_RE = new RegExp(`\\b(?:not|never|cannot|unable|\\w+n[\\x27\\u2019]t)[\\s,]+${SAFETY_WORD_FILLER}{0,2}${SAFETY_REPORTING_VERB}\\b[\"\\x27\\u201c\\u2018(]?`, 'gi');
-// The end of the refused clause: a sentence boundary, or a pivot into a new
-// clause ("but", "though", "however", "that said") that drops the refusal.
-const SAFETY_REFUSAL_CLAUSE_BOUNDARY_RE = /[.!?;]|\bbut\b|\bthough\b|\bhowever\b|\bthat said\b/i;
+const SAFETY_REFUSAL_VERB_RE = new RegExp(`\\b(?:not|never|cannot|unable|no way to|\\w+n[\\x27\\u2019]t)[\\s,]+${SAFETY_WORD_FILLER}{0,2}${SAFETY_REPORTING_VERB}\\b[\"\\x27\\u201c\\u2018(]?`, 'gi');
+// The end of the refused clause: a sentence boundary, a comma, or a pivot
+// word ("but", "though", "however", "and", "so", "then", "while", "that
+// said") that starts a new coordinate clause — an unrelated refusal must
+// not exempt a claim sitting in a DIFFERENT clause of the same sentence
+// ("I can't confirm the schedule, and it's safe for your dog" refuses only
+// the schedule).
+const SAFETY_REFUSAL_CLAUSE_BOUNDARY_RE = /[.!?;,]|\b(?:but|though|however|and|so|then|while|that said)\b/i;
 /** [[start, end), …) — text ranges a refusal phrase exempts. */
 function safetyExemptSpans(text) {
   const spans = [];
