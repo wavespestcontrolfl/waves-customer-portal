@@ -585,6 +585,88 @@ test('a service section\'s own frequencies never fall back to the combined-card 
   expect(section.frequencies[0].low_confidence_range).toBeUndefined();
 });
 
+test('a ranged estimate\'s combos withhold the same way as top-level frequencies — the combined-card fallback applies to combos too, through the single post-projection pass (Codex round 3 P1, finding 3987796196)', async () => {
+  mockBuildPricingBundle.mockResolvedValue({
+    frequencies: [], // combo-mode estimate: the top-level ladder is empty, combos carry the priced selections
+    combinedRecurring: { monthlySubtotal: 300, annualSubtotal: 3600, lowConfidenceRangePct: 0.2, lowConfidenceFraction: 0.5, lowConfidenceMonthly: 150 },
+    serviceCadenceCombos: [
+      {
+        key: 'lawn_care:enhanced|commercial_pest:monthly', selection: { lawn_care: 'enhanced', commercial_pest: 'monthly' }, monthly: 300, annual: 3600,
+        perServiceTreatments: { commercial_pest: { perTreatment: 200, treatments: 12 }, lawn_care: { perTreatment: 60, treatments: 9 } },
+        manualDiscount: { amountAnnual: 20 },
+      },
+      // A combo with no positive monthly gets no band (bandForFrequency requires monthly > 0) — stays exact.
+      { key: 'zero_combo', selection: null, monthly: 0, annual: 0 },
+    ],
+  });
+  const [ranged, zero] = (await shapeEstimate(estimateRow())).offered_pricing.combos;
+  // Same math as the top-level-frequency test above: fraction = min(150/300, 1) = 0.5; band = 300 × 0.5 × 0.2 = 30.
+  expect(ranged.monthly).toBeNull();
+  expect(ranged.annual).toBeNull();
+  expect(ranged.low_confidence_range).toEqual({ pct: 0.2, fraction: 0.5, range_unit: 'monthly', cadence: [270, 330], annual: [3240, 3960] });
+  // Treatment allocations withhold too — the visit count survives, the dollar figure doesn't.
+  expect(ranged.per_service_treatments).toEqual({
+    commercial_pest: { treatments: 12, prices_withheld: 'low_confidence_range' },
+    lawn_care: { treatments: 9, prices_withheld: 'low_confidence_range' },
+  });
+  expect(JSON.stringify(ranged.per_service_treatments)).not.toMatch(/200|60/);
+  // Unrelated fields (manual_discount) are untouched by the withholding pass.
+  expect(ranged.manual_discount).toEqual({ amountAnnual: 20 });
+  expect(zero.monthly).toBe(0);
+  expect(zero.low_confidence_range).toBeUndefined();
+});
+
+test('a quote-required combo withholds its amounts and treatment allocations exactly like a quote-required frequency, and says why (Codex round 3 follow-through)', async () => {
+  mockBuildPricingBundle.mockResolvedValue({
+    frequencies: [],
+    serviceCadenceCombos: [{
+      key: 'commercial_pest:monthly|lawn_care:enhanced', selection: { commercial_pest: 'monthly', lawn_care: 'enhanced' }, monthly: 500, annual: 6000,
+      perServiceTreatments: { commercial_pest: { perTreatment: 300, treatments: 12 } },
+      quoteRequired: true,
+    }],
+  });
+  const [combo] = (await shapeEstimate(estimateRow())).offered_pricing.combos;
+  expect(combo).toMatchObject({ monthly: null, annual: null, quote_required: true });
+  expect(combo.low_confidence_range).toBeUndefined();
+  // Not a range: PriceCard's own treatment-row gate is showLowConfidenceRange,
+  // not quoteRequired, so a merely quote-required combo's allocations stay
+  // exact — same rule as a merely quote-required frequency.
+  expect(combo.per_service_treatments).toEqual({ commercial_pest: { perTreatment: 300, treatments: 12 } });
+});
+
+test('same_day_treatment_total projects on frequencies and combos (PaymentPreferenceButtons\' firstVisitAmount fallback) and withholds under a range like any other recurring amount (Codex round 3 P2, finding 3987796210)', async () => {
+  mockBuildPricingBundle.mockResolvedValue({
+    frequencies: [{ key: 'quarterly', monthly: 90, annual: 1080, visitsPerYear: 4, sameDayTreatmentTotal: 220 }],
+    serviceCadenceCombos: [{ key: 'x', selection: null, monthly: 90, annual: 1080, sameDayTreatmentTotal: 220 }],
+  });
+  const shaped = await shapeEstimate(estimateRow());
+  expect(shaped.offered_pricing.plan_frequencies[0].same_day_treatment_total).toBe(220);
+  expect(shaped.offered_pricing.combos[0].same_day_treatment_total).toBe(220);
+
+  // Ranged: nulled right alongside monthly/annual — no field-specific opt-in needed.
+  mockBuildPricingBundle.mockResolvedValue({
+    frequencies: [{ key: 'quarterly', monthly: 90, annual: 1080, visitsPerYear: 4, sameDayTreatmentTotal: 220, lowConfidenceRangePct: 0.2, lowConfidenceFraction: 1 }],
+  });
+  const ranged = await shapeEstimate(estimateRow());
+  expect(ranged.offered_pricing.plan_frequencies[0].same_day_treatment_total).toBeNull();
+  expect(ranged.offered_pricing.plan_frequencies[0].low_confidence_range).toBeTruthy();
+});
+
+test('bundle.annualPrepayEligible rides on offered_pricing as the estimate-level fallback the customer page reads when neither the selected combo nor the combined frequency carries its own boolean (EstimateViewPage.jsx ~7038-7047, Codex round 3 P2, finding 3987796204)', async () => {
+  mockBuildPricingBundle.mockResolvedValue({ frequencies: [], annualPrepayEligible: true });
+  const eligible = await shapeEstimate(estimateRow());
+  expect(eligible.offered_pricing.annual_prepay_eligible).toBe(true);
+
+  mockBuildPricingBundle.mockResolvedValue({ frequencies: [], annualPrepayEligible: false });
+  const ineligible = await shapeEstimate(estimateRow());
+  expect(ineligible.offered_pricing.annual_prepay_eligible).toBe(false);
+
+  // Not stamped at all on the bundle: the key is omitted, not defaulted to false.
+  mockBuildPricingBundle.mockResolvedValue({ frequencies: [] });
+  const unstamped = await shapeEstimate(estimateRow());
+  expect(unstamped.offered_pricing.annual_prepay_eligible).toBeUndefined();
+});
+
 test('section-level price selectors ride the service section with the composer\'s amounts: bond terms, station rental, the commercial interior toggle (Codex r7 P1)', async () => {
   mockBuildPricingBundle.mockResolvedValue({ frequencies: [], services: [
     { key: 'termite_bait', label: 'Termite', defaultFrequencyKey: 'quarterly', frequencies: [{ key: 'quarterly', monthly: 35, annual: 420, perTreatment: 105, visitsPerYear: 4, billedPerApplication: true }],

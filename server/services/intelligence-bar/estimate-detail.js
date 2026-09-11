@@ -166,13 +166,10 @@ function bandForFrequency(f, combinedRange) {
   return { pct: combinedRange.pct, fraction, range_unit: 'monthly', cadence: band(monthly), annual: Number.isFinite(annual) ? band(annual) : null };
 }
 
-// On a ranged LOW-confidence cadence PriceCard suppresses the treatment rows
-// entirely (only the range is shown), so their exact amounts are withheld
-// here too — the service identity stays, every dollar figure goes.
-function treatmentRow(r, { withholdPrices = false } = {}) {
-  if (withholdPrices) {
-    return { service: r.service || null, label: r.label || null, visits_per_year: Number(r.visitsPerYear) > 0 ? Number(r.visitsPerYear) : null, prices_withheld: 'low_confidence_range' };
-  }
+// The full, unwithheld treatment row — every amount the composer carries.
+// Whether the customer page actually shows these prices (a ranged cadence
+// hides them) is decided later, in ONE place: withholdRangedPricing.
+function treatmentRow(r) {
   return {
     service: r.service || null,
     label: r.label || null,
@@ -185,49 +182,39 @@ function treatmentRow(r, { withholdPrices = false } = {}) {
   };
 }
 
-function frequencyEntry(f, combinedRange) {
+// The full, unwithheld frequency entry — real monthly/annual/per_application
+// and full treatment rows, whether or not the customer page would actually
+// show them for THIS cadence. Ranging and quote-required withholding are no
+// longer decided here (Codex round 3 P1: threading a combinedRange fallback
+// through every producer function individually is exactly the pattern that
+// let combos bypass it) — see withholdRangedPricing, the single place that
+// walks the fully-built offered_pricing shape afterward and nulls whatever
+// it finds.
+function frequencyEntry(f) {
   const rows = list(f.perServiceTreatments);
-  // This frequency's own stamped range first (PriceCard's per-cadence
-  // ladder), else the aggregate combined-card range when no individual
-  // stamp exists (see combinedLowConfidenceRange/bandForFrequency) — only
-  // one of the two customer-facing cards actually renders a range for any
-  // given payload, but withholding on either signal keeps the bar from
-  // quoting a midpoint the page could show as a range under either reading.
-  const range = lowConfidenceRange(f) || bandForFrequency(f, combinedRange);
-  // A quote-required cadence shows "Quote required" on the customer page
-  // (PriceCard.jsx) with no exact monthly/annual figure at all — a ranged
-  // cadence never has quoteRequired true simultaneously (lowConfidenceRange
-  // zeroes pct when quoteRequired), so this is an independent, additive
-  // withholding condition, not a duplicate of `range`.
-  const withheld = !!range || f.quoteRequired === true;
   const entry = {
     key: f.key || null,
     label: f.label || null,
-    // A ranged LOW-confidence cadence has no exact monthly/annual figure on
-    // the customer page either — PriceCard's headline renders the range
-    // string, never frequency.monthly or the interval-scaled cadencePrice —
-    // so the bar must not quote a midpoint the page itself withholds
-    // (pre-push audit P1). A quote-required cadence withholds the same way
-    // (PriceCard.jsx suppresses the amount and shows "Quote required").
-    monthly: withheld ? null : money(f.monthly),
-    annual: withheld ? null : money(f.annual),
+    monthly: money(f.monthly),
+    annual: money(f.annual),
     visits_per_year: Number(f.visitsPerYear) > 0 ? Number(f.visitsPerYear) : null,
     billing_unit: f.billedPerApplication === true ? 'per_application' : 'monthly',
-    // PriceCard's perAppNet rule: a ranged (or quote-required) cadence shows
-    // the RANGE and no exact per-application headline — the customer never
-    // sees the midpoint, so the bar must not quote it either.
-    per_application: withheld ? null : perApplicationFor(f),
-    per_service_treatments: rows.map((r) => treatmentRow(r, { withholdPrices: !!range })),
+    per_application: perApplicationFor(f),
+    per_service_treatments: rows.map(treatmentRow),
     // Row-level discount state: a program minimum can cap or suppress the
     // manual discount on SOME cadences only — the global manual_discount
     // never speaks for an individual cadence.
     manual_discount: f.manualDiscount || null,
   };
   if (f.manualDiscountSuppressed === true) entry.manual_discount_suppressed = true;
-  if (range) entry.low_confidence_range = range;
   if (f.oneTimeTotal != null) entry.one_time_total = money(f.oneTimeTotal);
   if (f.quoteRequired === true) entry.quote_required = true;
   if (f.annualPrepayEligible != null) entry.annual_prepay_eligible = f.annualPrepayEligible === true;
+  // The payment card's fallback first-visit total when a selected cadence
+  // mixes per-application services with a flat-monthly row and the treatment
+  // rows don't sum to a usable figure (PaymentPreferenceButtons.jsx
+  // firstVisitAmount, lines 71-90).
+  if (f.sameDayTreatmentTotal != null) entry.same_day_treatment_total = money(f.sameDayTreatmentTotal);
   return entry;
 }
 
@@ -241,6 +228,8 @@ function feeEntry(f) {
 // (perServiceTreatments) and its own manual-discount state; the section
 // ladders (services[].frequencies) are the pre-manual-discount prices the
 // customer picks between — both are reported, each labelled as what it is.
+// Full, unwithheld shape — same rule as frequencyEntry: ranging and
+// quote-required withholding happen once, afterward, in withholdRangedPricing.
 function comboEntry(c) {
   const entry = {
     key: c.key || null,
@@ -258,7 +247,114 @@ function comboEntry(c) {
   // stamp disagrees with the section ladder.
   if (c.annualPrepayEligible != null) entry.annual_prepay_eligible = c.annualPrepayEligible === true;
   if (c.manualDiscountSuppressed === true) entry.manual_discount_suppressed = true;
+  // A combo can itself be quoteRequired (estimate-proposal.js filters on
+  // combo.quoteRequired) — surfaced the same way a frequency's is, so a
+  // combo nulled by withholdRangedPricing still says why.
+  if (c.quoteRequired === true) entry.quote_required = true;
+  if (c.sameDayTreatmentTotal != null) entry.same_day_treatment_total = money(c.sameDayTreatmentTotal);
   return entry;
+}
+
+// ── Withholding: the range/quote-required chokepoint ────────────────
+// frequencyEntry and comboEntry above build the offered_pricing shape RAW
+// and unwithheld — every entry carries its real monthly, annual,
+// per_application, same_day_treatment_total, and per_service_treatments,
+// whether or not the customer page would actually show them. This is the
+// ONE place that decides what gets withheld: it walks the fully-built shape
+// once, after every frequency/section/combo entry exists, so a field added
+// to frequencyEntry or comboEntry later is covered automatically instead of
+// by remembering to gate it at its own producer (Codex round 3 P1 — round 2
+// threaded the combined-range fallback through frequencyEntry and
+// defaultCadenceForTotals independently, and combos bypassed both entirely).
+const WITHHELD_MONEY_FIELDS = ['monthly', 'annual', 'per_application', 'same_day_treatment_total'];
+
+// The withheld shape of ONE frequency-style treatment row (an array entry
+// under per_service_treatments): service identity and visit count survive,
+// every dollar figure goes. Mirrors the shape treatmentRow(r) already
+// produces so the two agree byte-for-byte on a non-withheld field.
+function withholdTreatmentRowEntry(row) {
+  return { service: row?.service ?? null, label: row?.label ?? null, visits_per_year: row?.visits_per_year ?? null, prices_withheld: 'low_confidence_range' };
+}
+
+// A combo's per_service_treatments is a plain object keyed by service
+// ({ pest_control: { perTreatment, treatments }, ... }), not an array of
+// labelled rows — there is no service/label pair to preserve beyond the key
+// itself, so only the visit count (treatments) survives per entry.
+function withholdComboTreatmentRow(row) {
+  if (!row || typeof row !== 'object') return row;
+  return { ...(row.treatments != null ? { treatments: row.treatments } : {}), prices_withheld: 'low_confidence_range' };
+}
+
+// entry: the projected (frequencyEntry/comboEntry) shape. source: the RAW
+// bundle object it was built from — its quoteRequired flag, and everything
+// lowConfidenceRange/bandForFrequency need. range: this entry's resolved
+// low-confidence band, already computed by the caller (withholdingRangeFor).
+function withholdEntry(entry, source, range) {
+  const quoteRequired = source?.quoteRequired === true;
+  if (!range && !quoteRequired) return entry;
+  const next = { ...entry };
+  for (const field of WITHHELD_MONEY_FIELDS) {
+    if (Object.prototype.hasOwnProperty.call(next, field)) next[field] = null;
+  }
+  // Treatment-row prices withhold ONLY under a range: PriceCard hides them
+  // entirely for a ranged cadence (an exact row price would contradict
+  // "confirmed on site"), but a MERELY quote-required cadence still renders
+  // them at their real price on the customer page — its treatment-row gate
+  // is showLowConfidenceRange, not quoteRequired (PriceCard.jsx).
+  if (range) {
+    if (Array.isArray(next.per_service_treatments)) {
+      next.per_service_treatments = next.per_service_treatments.map(withholdTreatmentRowEntry);
+    } else if (next.per_service_treatments && typeof next.per_service_treatments === 'object') {
+      next.per_service_treatments = Object.fromEntries(
+        Object.entries(next.per_service_treatments).map(([key, row]) => [key, withholdComboTreatmentRow(row)]),
+      );
+    }
+    next.low_confidence_range = range;
+  }
+  return next;
+}
+
+// This RAW source's own stamped range first (PriceCard's per-cadence ladder
+// / a combo's own stamp), else — when the caller allows it — the aggregate
+// combinedRecurring fallback (bandForFrequency). Never allowed for a service
+// section's own frequencies: those already carry their own correct
+// per-section stamp from stampLowConfidenceRangeOnServices, and applying the
+// fallback there too would range a section twice by two different
+// mechanisms.
+function withholdingRangeFor(source, combinedRange, allowCombinedFallback) {
+  return lowConfidenceRange(source) || (allowCombinedFallback ? bandForFrequency(source, combinedRange) : null);
+}
+
+// The single post-projection pass: walks plan_frequencies, every service
+// section's frequencies, and combos — in that order, mirroring the shape
+// builtOfferedPricing just assembled — pairing each projected entry with
+// the RAW bundle object it came from (same array, same index) so
+// withholdingRangeFor/withholdEntry can decide and apply withholding. Called
+// exactly once, after the whole offered_pricing shape exists.
+function withholdRangedPricing(offered, bundle) {
+  const combinedRange = combinedLowConfidenceRange(bundle.combinedRecurring);
+  const frequencies = list(bundle.frequencies);
+  offered.plan_frequencies = offered.plan_frequencies.map((entry, i) => {
+    const source = frequencies[i] || {};
+    return withholdEntry(entry, source, withholdingRangeFor(source, combinedRange, true));
+  });
+  const sections = list(bundle.services);
+  offered.services = offered.services.map((section, si) => {
+    const sourceFrequencies = list(sections[si]?.frequencies);
+    return {
+      ...section,
+      frequencies: section.frequencies.map((entry, i) => {
+        const source = sourceFrequencies[i] || {};
+        return withholdEntry(entry, source, withholdingRangeFor(source, combinedRange, false));
+      }),
+    };
+  });
+  const combos = list(bundle.serviceCadenceCombos);
+  offered.combos = offered.combos.map((entry, i) => {
+    const source = combos[i] || {};
+    return withholdEntry(entry, source, withholdingRangeFor(source, combinedRange, true));
+  });
+  return offered;
 }
 
 // Section-level price selectors the composer attaches to a service section
@@ -477,12 +573,7 @@ function stalePriceLockedOfferedPricing(bundle, priceLocked, snapshotHit) {
 
 function builtOfferedPricing(bundle, priceLocked, snapshotHit, defaultCadenceRange, rebuiltDefaultFrequency, noSellableCadence) {
   const fees = upfrontFees(bundle);
-  // Aggregate combined-card fallback (see combinedLowConfidenceRange), applied
-  // to every top-level frequency that carries no stamp of its own —
-  // frequencyEntry falls back to it identically for defaultCadenceForTotals'
-  // candidate, so plan_frequencies and totals never disagree.
-  const combinedRange = combinedLowConfidenceRange(bundle.combinedRecurring);
-  return {
+  const offered = {
     default_service_mode: bundle.defaultServiceMode || null,
     // A price-locked (accepted/declined) row's totals — monthly, annual,
     // AND one-time — describe what was actually committed, never today's
@@ -498,16 +589,20 @@ function builtOfferedPricing(bundle, priceLocked, snapshotHit, defaultCadenceRan
     // fallback figure to show either, so totals must not fall back to the
     // stored monthly_total/annual_total columns (pre-push audit / Codex r2 P1).
     ...(noSellableCadence ? { no_sellable_cadence: true } : {}),
-    plan_frequencies: list(bundle.frequencies).map((f) => frequencyEntry(f, combinedRange)),
+    // Estimate-level annual-prepay fallback the customer page reads when
+    // neither the selected combo nor the combined frequency carries its own
+    // boolean (EstimateViewPage.jsx annualPrepayEligibleEffective, ~7038-7047).
+    ...(bundle.annualPrepayEligible != null ? { annual_prepay_eligible: bundle.annualPrepayEligible === true } : {}),
+    // RAW — every frequency/section/combo below carries its real amounts,
+    // whether or not the customer page would actually show them for that
+    // cadence. withholdRangedPricing (below) is the single place that
+    // decides and applies what gets nulled, after the whole shape exists.
+    plan_frequencies: list(bundle.frequencies).map(frequencyEntry),
     services: list(bundle.services).map((s) => ({
       key: s.key || null,
       label: s.label || null,
       default_frequency_key: s.defaultFrequencyKey || null,
-      // Section frequencies already carry their own correct per-section
-      // stamp from stampLowConfidenceRangeOnServices — no combined-card
-      // fallback here, or a section would be ranged twice by two different
-      // mechanisms.
-      frequencies: list(s.frequencies).map((f) => frequencyEntry(f)),
+      frequencies: list(s.frequencies).map(frequencyEntry),
       ...sectionSelectors(s),
     })),
     combos: list(bundle.serviceCadenceCombos).map(comboEntry),
@@ -528,6 +623,7 @@ function builtOfferedPricing(bundle, priceLocked, snapshotHit, defaultCadenceRan
     quote_required_items: list(bundle.quoteRequiredItems),
     source: bundle.source || null,
   };
+  return withholdRangedPricing(offered, bundle);
 }
 
 async function offeredPricing(row, data) {
