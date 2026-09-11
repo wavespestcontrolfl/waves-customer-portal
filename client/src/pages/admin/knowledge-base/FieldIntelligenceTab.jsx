@@ -16,7 +16,7 @@ import {
   Textarea,
 } from "../../../components/ui";
 import { adminFetch } from "../../../utils/admin-fetch";
-import { formatDate, parseArray, sentenceCase } from "./config";
+import { formatDate, parseArray } from "./config";
 
 const EMPTY_QUEUE = { pending: [], blocked: [], recentYellow: [] };
 const REVIEW_STATUS_LABELS = {
@@ -27,7 +27,7 @@ const REVIEW_STATUS_LABELS = {
 };
 
 function TierBadge({ tier }) {
-  return <Badge>{sentenceCase(tier, "Untiered")}</Badge>;
+  return <Badge>{(tier || "untiered").toUpperCase()}</Badge>;
 }
 
 function WikiPageDetail({
@@ -52,7 +52,7 @@ function WikiPageDetail({
           <div className="mt-2 flex flex-wrap items-center gap-2 text-ui-caption text-ink-secondary">
             <TierBadge tier={page.review_tier} />
             <Badge tone={page.review_status === "pending_review" ? "alert" : "neutral"}>
-              {REVIEW_STATUS_LABELS[page.review_status] || sentenceCase(page.review_status)}
+              {REVIEW_STATUS_LABELS[page.review_status] || page.review_status}
             </Badge>
             <span className="u-nums">{page.data_point_count} data points</span>
             <span>{page.confidence} confidence</span>
@@ -168,7 +168,7 @@ function FieldIntelligenceDirectory({
                     <span className="u-nums">{page.data_point_count} data points</span>
                     <span>{page.confidence} confidence</span>
                     {parseArray(page.risk_flags).map((flag) => (
-                      <Badge key={flag} tone="alert">{sentenceCase(flag)}</Badge>
+                      <Badge key={flag} tone="alert">{flag.replace(/_/g, " ")}</Badge>
                     ))}
                   </div>
                 </div>

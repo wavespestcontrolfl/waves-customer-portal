@@ -9,7 +9,17 @@ import {
   CardTitle,
 } from "../../../components/ui";
 import { adminFetch } from "../../../utils/admin-fetch";
-import { formatDate, parseObject, sentenceCase } from "./config";
+import { formatDate, parseObject } from "./config";
+
+// Pre-migration status text: the ASCII glyph prefix is operator-facing copy
+// and stays verbatim (AGENTS.md L230-231).
+const TOKEN_STATUS_ICONS = {
+  healthy: "OK",
+  expired: "X",
+  "expiring-soon": "!",
+  error: "X",
+  unknown: "?",
+};
 
 function tokenTone(status) {
   return ["expired", "expiring-soon", "error"].includes(status) ? "alert" : "neutral";
@@ -103,7 +113,9 @@ export default function TokensTab({ showFeedback }) {
                       {token.env_var_name}
                     </div>
                   </div>
-                  <Badge tone={tokenTone(token.status)}>{sentenceCase(token.status)}</Badge>
+                  <Badge tone={tokenTone(token.status)}>
+                    {TOKEN_STATUS_ICONS[token.status]} {token.status}
+                  </Badge>
                 </CardHeader>
                 <CardBody>
                   {token.last_error && (

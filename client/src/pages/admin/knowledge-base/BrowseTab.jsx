@@ -19,7 +19,7 @@ import {
   Textarea,
 } from "../../../components/ui";
 import { adminFetch } from "../../../utils/admin-fetch";
-import { CATEGORIES, formatDate, parseArray, sentenceCase } from "./config";
+import { CATEGORIES, formatDate, parseArray } from "./config";
 
 function statusTone(status) {
   return status === "flagged" ? "alert" : status === "active" ? "strong" : "neutral";
@@ -52,9 +52,9 @@ function KnowledgeEntryDetail({
         <div className="min-w-0">
           <CardTitle className="text-18 break-words">{selected.title}</CardTitle>
           <div className="mt-2 flex flex-wrap items-center gap-2">
-            <Badge>{sentenceCase(selected.category)}</Badge>
-            <Badge>{sentenceCase(selected.confidence)}</Badge>
-            <Badge tone={statusTone(selected.status)}>{sentenceCase(selected.status)}</Badge>
+            <Badge>{selected.category}</Badge>
+            <Badge>{selected.confidence}</Badge>
+            <Badge tone={statusTone(selected.status)}>{selected.status}</Badge>
             <span className="text-ui-caption text-ink-secondary">
               src: {selected.source}
             </span>
@@ -417,10 +417,10 @@ export default function BrowseTab({ showFeedback, onRefresh, isMobile }) {
                           {entry.title}
                         </span>
                         <span className="mt-2 flex flex-wrap gap-2">
-                          <Badge>{sentenceCase(entry.confidence)}</Badge>
-                          <Badge>{sentenceCase(entry.category)}</Badge>
+                          <Badge>{entry.confidence}</Badge>
+                          <Badge>{entry.category}</Badge>
                           {/* Every status is visible, as main's status-coloured row border was. */}
-                          <Badge tone={statusTone(entry.status)}>{sentenceCase(entry.status)}</Badge>
+                          <Badge tone={statusTone(entry.status)}>{entry.status}</Badge>
                         </span>
                       </span>
                       <span className="shrink-0 text-ui-caption text-ink-secondary u-nums">

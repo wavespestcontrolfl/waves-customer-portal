@@ -49,8 +49,3 @@ export function formatDate(value, includeTime = false) {
   return includeTime ? date.toLocaleString(undefined, options) : date.toLocaleDateString(undefined, options);
 }
 
-export function sentenceCase(value, fallback = "Unknown") {
-  if (!value) return fallback;
-  const normalized = String(value).replace(/[_-]+/g, " ");
-  return `${normalized.charAt(0).toUpperCase()}${normalized.slice(1)}`;
-}

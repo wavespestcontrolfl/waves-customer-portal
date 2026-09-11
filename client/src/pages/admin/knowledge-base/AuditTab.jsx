@@ -11,7 +11,6 @@ import {
   Input,
 } from "../../../components/ui";
 import { adminFetch } from "../../../utils/admin-fetch";
-import { sentenceCase } from "./config";
 
 export default function AuditTab({ showFeedback, onRefresh }) {
   // null | "stale" | "force": which audit request is in flight
@@ -107,7 +106,7 @@ export default function AuditTab({ showFeedback, onRefresh }) {
                       <div className="flex flex-wrap items-start justify-between gap-2">
                         <h3 className="text-ui-body font-medium text-zinc-900">{result.title}</h3>
                         <Badge tone={result.status === "pass" ? "strong" : "alert"}>
-                          {sentenceCase(result.status)}
+                          {result.status}
                         </Badge>
                       </div>
                       <p className="mt-2 text-ui-body text-ink-secondary">{result.summary}</p>

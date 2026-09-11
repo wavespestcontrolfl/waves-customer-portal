@@ -112,6 +112,43 @@ describe("Knowledge base interactions", () => {
     expect(search.className).not.toMatch(/md:col-span-1/);
   });
 
+  it("renders entry and wiki metadata values verbatim, as the pre-migration page did", async () => {
+    const entry = { ...ENTRY, category: "customer-lifecycle", confidence: "high", status: "needs_review" };
+    adminFetch.mockImplementation(async (path) => {
+      if (path === "/admin/kb?limit=50") return { entries: [entry], total: 1 };
+      return {};
+    });
+    surface(<BrowseTab showFeedback={vi.fn()} onRefresh={vi.fn()} isMobile={false} />);
+
+    const row = await screen.findByRole("button", { name: /Rodent exclusion protocol/ });
+    expect(within(row).getByText("customer-lifecycle")).toBeInTheDocument();
+    expect(within(row).getByText("needs_review")).toBeInTheDocument();
+    expect(within(row).queryByText("Customer lifecycle")).toBeNull();
+
+    fireEvent.click(row);
+    await screen.findByRole("button", { name: "Delete" });
+    // Row badge + detail badge (the category <select> option carries the
+    // value too); the pre-migration page never title-cased either of them.
+    expect(screen.getAllByText("customer-lifecycle").length).toBeGreaterThanOrEqual(2);
+    expect(screen.getAllByText("needs_review")).toHaveLength(2);
+    expect(screen.queryByText("Needs review")).toBeNull();
+    expect(screen.queryByText("Customer lifecycle")).toBeNull();
+    cleanup();
+
+    const page = { ...WIKI_PAGE, review_tier: "yellow", risk_flags: ["stale_source"] };
+    adminFetch.mockImplementation(async (path) => {
+      if (path === "/admin/wiki/review/queue") return { pending: [page], blocked: [], recentYellow: [] };
+      if (path === "/admin/wiki?limit=200") return { pages: [page] };
+      return {};
+    });
+    surface(<FieldIntelligenceTab showFeedback={vi.fn()} isMobile={false} canReviewQueue />);
+    await screen.findAllByText("Product: Celsius WG");
+    expect(screen.getAllByText("YELLOW").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("stale source").length).toBeGreaterThan(0);
+    expect(screen.queryByText("Yellow")).toBeNull();
+    expect(screen.queryByText("Stale source")).toBeNull();
+  });
+
   it("marks only the audit mode that was started as pending", async () => {
     let finishAudit;
     adminFetch.mockReturnValue(new Promise((resolve) => { finishAudit = resolve; }));
