@@ -427,8 +427,9 @@ describe('booking conflict wiring (source-level — behavior needs a live DB)', 
     expect(recheckIdx).toBeGreaterThan(-1);
     const slice = src.slice(recheckIdx, src.indexOf(".insert(insertData)", recheckIdx));
     expect(slice).toContain('insertData.technician_id = null;');
-    expect(slice).toContain('bookingFence = await trx.transaction((fenceSp) => fenceBookingDay(fenceSp, { date: scheduledDate, techId: null }));');
-    expect(slice.indexOf('insertData.technician_id = null;')).toBeLessThan(slice.indexOf('techId: null }));'));
+    // Inside the FIRST attempt's deadline — never a fresh budget (codex r2 P2).
+    expect(slice).toContain('bookingFence = await trx.transaction((fenceSp) => fenceBookingDay(fenceSp, { date: scheduledDate, techId: null, deadline: bookingFence?.deadline ?? Date.now() }));');
+    expect(slice.indexOf('insertData.technician_id = null;')).toBeLessThan(slice.indexOf('techId: null, deadline:'));
     expect(slice).toContain('booking proceeds unfenced');
     expect(slice).not.toContain('throw ');
   });

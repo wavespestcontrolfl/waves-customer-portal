@@ -37,7 +37,7 @@ describe('fenceBookingDay', () => {
     const trx = fakeTrx([true, true]);
     const c = clock();
     const out = await fenceBookingDay(trx, { date: '2099-01-05T00:00:00.000Z', techId: 'tech-1', waitMs: 1500, pollMs: 50, ...c });
-    expect(out).toEqual({ acquired: true, keys: ['occupancy:2099-01-05', 'tech-1:2099-01-05'] });
+    expect(out).toEqual({ acquired: true, keys: ['occupancy:2099-01-05', 'tech-1:2099-01-05'], deadline: 1500 });
     expect(trx.raw.mock.calls.map((call) => call[1])).toEqual([
       ['slot-reserve', 'occupancy:2099-01-05'],
       ['slot-reserve', 'tech-1:2099-01-05'],
@@ -68,7 +68,7 @@ describe('fenceBookingDay', () => {
     const trx = fakeTrx([false, false, false, false, false, false]);
     const c = clock();
     const out = await fenceBookingDay(trx, { date: '2099-01-05', techId: 'tech-1', waitMs: 120, pollMs: 50, ...c });
-    expect(out).toEqual({ acquired: false, keys: [], reason: 'date_busy' });
+    expect(out).toEqual({ acquired: false, keys: [], reason: 'date_busy', deadline: 120 });
     // Tries at 0/50/100ms, then the last sleep is CLAMPED to the 20ms left
     // so the final try lands exactly at the 120ms deadline — the cap is a
     // hard cap on wall time, never overrun by a full interval (codex r1 P2).
@@ -89,7 +89,7 @@ describe('fenceBookingDay', () => {
     const trx = fakeTrx([true, false, false, false]);
     const c = clock();
     const out = await fenceBookingDay(trx, { date: '2099-01-05', techId: 'tech-1', waitMs: 60, pollMs: 50, ...c });
-    expect(out).toEqual({ acquired: false, keys: ['occupancy:2099-01-05'], reason: 'tech_day_busy' });
+    expect(out).toEqual({ acquired: false, keys: ['occupancy:2099-01-05'], reason: 'tech_day_busy', deadline: 60 });
     // rung 1 was requested exactly once; the rest are rung-3 retries.
     expect(trx.raw.mock.calls.filter((call) => call[1][1] === 'occupancy:2099-01-05')).toHaveLength(1);
   });
@@ -97,7 +97,7 @@ describe('fenceBookingDay', () => {
   test('a missing date is a no-op miss', async () => {
     const trx = fakeTrx([]);
     expect(await fenceBookingDay(trx, { date: null, techId: 'tech-1', ...clock() }))
-      .toEqual({ acquired: false, keys: [], reason: 'no_date' });
+      .toEqual({ acquired: false, keys: [], reason: 'no_date', deadline: 1500 });
     expect(trx.raw).not.toHaveBeenCalled();
   });
 
@@ -115,6 +115,28 @@ describe('fenceBookingDay', () => {
     expect(out.acquired).toBe(true);
     expect(CALL_BOOKING_FENCE_WAIT_MS).toBe(1500);
     expect(c.sleep).toHaveBeenCalledTimes(2);
+  });
+
+  test('an absolute `deadline` wins over waitMs, so a re-fence runs inside the FIRST attempt\'s budget (codex r2 P2)', async () => {
+    // First attempt: tech-1 busy for the whole 100ms budget → miss at t=100.
+    const c = clock();
+    let trx = fakeTrx([true, false, false, false]);
+    const first = await fenceBookingDay(trx, { date: '2099-01-05', techId: 'tech-1', waitMs: 100, pollMs: 50, ...c });
+    expect(first).toMatchObject({ acquired: false, reason: 'tech_day_busy', deadline: 100 });
+    expect(c.now()).toBe(100);
+    // Re-fence on the unassigned rung with that deadline: budget exhausted →
+    // exactly one try per rung, no sleep, and the miss carries the SAME deadline.
+    trx = fakeTrx([true, false]);
+    const again = await fenceBookingDay(trx, { date: '2099-01-05', techId: null, deadline: first.deadline, waitMs: 1500, pollMs: 50, ...c });
+    expect(again).toEqual({ acquired: false, keys: ['occupancy:2099-01-05'], reason: 'tech_day_busy', deadline: 100 });
+    expect(trx.raw).toHaveBeenCalledTimes(2);
+    expect(c.now()).toBe(100);
+    // With budget left, the re-fence polls only up to the ORIGINAL deadline.
+    const c2 = clock();
+    trx = fakeTrx([true, false, false, false, false, false]);
+    const partial = await fenceBookingDay(trx, { date: '2099-01-05', techId: null, deadline: 120, waitMs: 1500, pollMs: 50, ...c2 });
+    expect(partial.acquired).toBe(false);
+    expect(c2.now()).toBe(120);
   });
 
   test('a query failure propagates (the caller treats the fence as best-effort)', async () => {

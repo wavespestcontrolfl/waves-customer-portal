@@ -13765,11 +13765,14 @@ const CallRecordingProcessor = {
                     // this row now lands on the unassigned-day rung, which is
                     // what a capacity certification fences for unassigned
                     // work. Re-fence it (rung 1 is already held and re-tries
-                    // as a no-op), same bounded try-only savepoint contract,
-                    // and let the outcome replace the recorded one (codex r1 P2).
+                    // as a no-op), same try-only savepoint contract, INSIDE
+                    // the first attempt's deadline (codex r2 P2): one insert
+                    // never polls past the single documented cap — an
+                    // exhausted budget means exactly one try, no sleep. The
+                    // outcome replaces the recorded one (codex r1 P2).
                     try {
                       const { fenceBookingDay } = require('./scheduling/occupancy');
-                      bookingFence = await trx.transaction((fenceSp) => fenceBookingDay(fenceSp, { date: scheduledDate, techId: null }));
+                      bookingFence = await trx.transaction((fenceSp) => fenceBookingDay(fenceSp, { date: scheduledDate, techId: null, deadline: bookingFence?.deadline ?? Date.now() }));
                       if (!bookingFence.acquired) {
                         logger.warn(`[call-proc] unassigned-day re-fence missed for ${maskSid(callSid)} on ${scheduledDate} (${bookingFence.reason}); booking unfenced, post-commit recheck flags overlaps`);
                       }

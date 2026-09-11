@@ -311,13 +311,18 @@ function bookingFenceWaitMs() {
   return Number.isFinite(raw) && raw >= 0 ? raw : CALL_BOOKING_FENCE_WAIT_MS;
 }
 
-async function fenceBookingDay(trx, { date, techId = null, waitMs = bookingFenceWaitMs(),
+// `deadline` (absolute, same clock as `now`) lets a caller RE-FENCE — e.g.
+// the phone writer's fallback to the unassigned-day rung — inside the budget
+// its first attempt was given, instead of starting a fresh one (codex #4368
+// r2 P2); it wins over `waitMs`. Every result carries the deadline it ran
+// against so the caller can pass it back.
+async function fenceBookingDay(trx, { date, techId = null, waitMs = bookingFenceWaitMs(), deadline: fixedDeadline = null,
   pollMs = CALL_BOOKING_FENCE_POLL_MS, sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
   now = () => Date.now() } = {}) {
+  const deadline = Number.isFinite(fixedDeadline) ? fixedDeadline : now() + Math.max(0, waitMs);
   const dateStr = String(date || '').split('T')[0];
-  if (!dateStr) return { acquired: false, keys: [], reason: 'no_date' };
+  if (!dateStr) return { acquired: false, keys: [], reason: 'no_date', deadline };
   const { lockTechDays } = require('./tech-day-lock');
-  const deadline = now() + Math.max(0, waitMs);
   const keys = [];
   let haveOccupancy = false;
   for (;;) {
@@ -329,10 +334,10 @@ async function fenceBookingDay(trx, { date, techId = null, waitMs = bookingFence
     }
     if (haveOccupancy) {
       const techKeys = await lockTechDays(trx, [{ techId, date: dateStr }], { wait: false });
-      if (techKeys) return { acquired: true, keys: keys.concat(techKeys) };
+      if (techKeys) return { acquired: true, keys: keys.concat(techKeys), deadline };
     }
     const remaining = deadline - now();
-    if (remaining <= 0) return { acquired: false, keys, reason: haveOccupancy ? 'tech_day_busy' : 'date_busy' };
+    if (remaining <= 0) return { acquired: false, keys, reason: haveOccupancy ? 'tech_day_busy' : 'date_busy', deadline };
     await sleep(Math.max(1, Math.min(pollMs, remaining)));
   }
 }
