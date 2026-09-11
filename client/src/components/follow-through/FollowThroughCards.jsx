@@ -120,14 +120,17 @@ export default function FollowThroughCards({ ui, onSummary, hints = true, pollMs
   const enabled = data?.callbacks_enabled === true;
   const callbacks = data?.commitments || [];
   const open = enabled ? callbacks.length : 0;
-  const overdueCount = enabled ? callbacks.filter((r) => r.overdue === true).length : 0;
+  // One judgement for the card and the host's count: the ledger's verdict,
+  // or a deadline the local clock has passed since the last read.
+  const isOverdue = (r) => r.overdue === true || (!!dueAt(r) && new Date(dueAt(r)).getTime() < now);
+  const overdueCount = enabled ? callbacks.filter(isOverdue).length : 0;
   const hasMore = enabled && data?.has_more === true;
   useEffect(() => { onSummary?.({ enabled, open, overdue: overdueCount, hasMore }); }, [onSummary, enabled, open, overdueCount, hasMore]);
   if (!enabled && !error) return null;
   const snoozed = callbacks.filter((r) => r.snoozed_until && new Date(r.snoozed_until).getTime() > now);
   const renderCallback = (r) => {
     const due = dueAt(r);
-    const overdue = r.overdue === true || (!!due && new Date(due).getTime() < now);
+    const overdue = isOverdue(r);
     return <Card key={r.id}>
       <Text tone="title">Call {who(r)}</Text>
       <Text tone={overdue || !due ? 'alert' : 'muted'}>{overdue ? 'Overdue · ' : 'Due '}{when(due)}</Text>

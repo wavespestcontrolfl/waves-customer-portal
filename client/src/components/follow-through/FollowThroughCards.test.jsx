@@ -38,13 +38,16 @@ describe('callback cards', () => {
     ] });
     vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval', 'Date'] });
     try {
-      render(<FollowThroughCards ui={ui} pollMs={600000} />);
+      const onSummary = vi.fn();
+      render(<FollowThroughCards ui={ui} pollMs={600000} onSummary={onSummary} />);
       await screen.findByText('1 snoozed callback');
+      await waitFor(() => expect(onSummary).toHaveBeenLastCalledWith({ enabled: true, open: 1, overdue: 0, hasMore: false }));
       expect(screen.getByText(/^Due /)).toBeInTheDocument();
       vi.setSystemTime(Date.now() + 61000);
       act(() => { vi.advanceTimersByTime(60000); });
       expect(screen.queryByText('1 snoozed callback')).not.toBeInTheDocument();
       expect(screen.getByText(/^Overdue · /)).toBeInTheDocument();
+      expect(onSummary).toHaveBeenLastCalledWith({ enabled: true, open: 1, overdue: 1, hasMore: false });
     } finally { vi.useRealTimers(); }
   });
   it('keeps the operator note and the possibly-kept warning the Owed row carried', async () => {
