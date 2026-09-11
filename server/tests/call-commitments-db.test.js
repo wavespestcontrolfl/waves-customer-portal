@@ -331,6 +331,20 @@ maybeDescribe('call_commitments (live Postgres)', () => {
       // an existing appointment) is not this call's proof either.
       await db('scheduled_services').where({ source_call_log_id: callId }).update({ created_at: new Date(call.created_at.getTime() - 24 * 60 * 60 * 1000) });
       expect(await cc.resolveFulfillment(db, { kind: 'schedule_visit' }, { ...call, customer_id: null })).toBeNull();
+      // A visit this call MOVED keeps the promise with no new row for either
+      // lookup to find — the applier's activity row is the witness (#4204 r6
+      // P2). An activity row naming a DIFFERENT call proves nothing here.
+      const [strayAct] = await db('activity_log').insert({ action: 'call_reschedule_applied', description: 'other call',
+        metadata: JSON.stringify({ call_log_id: '00000000-0000-4000-8000-000000000000', scheduled_service_id: String(visit.id) }) }).returning('id');
+      expect(await cc.resolveFulfillment(db, { kind: 'schedule_visit' }, { ...call, customer_id: null })).toBeNull();
+      const [movedAct] = await db('activity_log').insert({ action: 'call_reschedule_applied', description: 'moved from this call',
+        metadata: JSON.stringify({ call_log_id: String(callId), scheduled_service_id: String(visit.id) }) }).returning('id');
+      expect(await cc.resolveFulfillment(db, { kind: 'schedule_visit' }, { ...call, customer_id: null }))
+        .toMatchObject({ kind: 'appointment_rescheduled', record_id: String(visit.id), strength: 'direct' });
+      // A moved visit is NOT proof a promised technician follow-up happened —
+      // closing that owed work on this evidence would drop it silently (r7 P2).
+      expect(await cc.resolveFulfillment(db, { kind: 'technician_follow_up' }, { ...call, customer_id: null })).toBeNull();
+      await db('activity_log').whereIn('id', [strayAct.id, movedAct.id]).del();
       await db('scheduled_services').where({ id: visit.id }).update({ created_at: new Date(Date.now() - 30 * 1000) });
       expect(await cc.resolveFulfillment(db, { kind: 'schedule_visit' }, { ...call, customer_id: null })).toMatchObject({ kind: 'appointment_booked', record_id: visit.id, strength: 'direct' });
       // Paid before the call: neither the direct path nor the same-customer hint.
