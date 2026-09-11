@@ -570,7 +570,7 @@ const CLEAN_CLAUSE_LEAD = /^\s*(?:no|none|not|clear|nothing)\b/;
 // Every sentence terminator splits, so "No weeds! Large patch is visible" keeps
 // its positive sentence.
 const CLAUSE_SPLIT = /[;.!?]|\b(?:but|while|although|though|whereas|however|yet)\b/;
-const NEGATION_MARKER = /\b(?:no|not|none|non|never|neither|nor|cannot|\w+n['’]t|without|ruled[\s‐‑‒–—-]+out|negative|absent|absence|unlikely|unconfirmed|excluded|free)\b/;
+const NEGATION_MARKER = /\b(?:no|not|none|non|never|neither|nor|cannot|\w+n['’]t|without|ruled[\s‐‑‒–—-]+out|negative|absent|absence|lack(?:s|ed|ing)?|unlikely|unconfirmed|excluded|free)\b/;
 // Negation scope inside one clause. A determiner-style marker (no / without /
 // non / neither, and not / never when a cause term follows) negates what FOLLOWS
 // it, so the text before it stays positive: "Large patch with no weed pressure"
@@ -677,7 +677,7 @@ const NEGATED_ABSENCE = /\b(?:not|never|cannot|\w+n['’]t)\s+(?:\w+[\s‐‑‒
 // evidence observed", "without visible lesions") describes the cause that
 // precedes it, so the whole clause is negated rather than only the object.
 const SYMPTOM_OBJECT = /^\s*(?:(?:visible|active|clear|obvious|new|fresh|further|additional|significant|major|real|current)\s+)*(?:signs?|evidence|lesions?|symptoms?|damage|activity|pressure|spots?|presence|feeding|indications?|issues?|problems?)\b/;
-const RECOGNIZED_MARKER = /\b(?:no|none|non|neither|nor|cannot|without|ruled[\s‐‑‒–—-]+out|negative|absent|absence|unlikely|unconfirmed|excluded|free)\b/;
+const RECOGNIZED_MARKER = /\b(?:no|none|non|neither|nor|cannot|without|ruled[\s‐‑‒–—-]+out|negative|absent|absence|lack(?:s|ed|ing)?|unlikely|unconfirmed|excluded|free)\b/;
 // "not only" / "not just" / "not merely" intensify rather than negate ("Large
 // patch is not only visible but spreading"), so they are removed before any
 // negation check. Shared with the copy module's establishesCause.
@@ -863,12 +863,13 @@ const PREDICATIVE_ACTIVE = '(?!\\s+(?:recovery|regrowth|growth|repair|healing|re
 // patch …" is not read as one claim.
 // An imperative ("Confirm suspected chinch pressure") or a hedged object
 // ("confirm possible …", "confirm whether …") is a request as well.
-const NOT_A_CLAIM = "(?<!\\b(?:to|should|will|can|must|please|would|could|may|might|cannot|not|never|let['’]s|help)\\s+(?:\\w+\\s+)?)(?<!(?:^|[.!?;:])\\s*)(?!confirm\\w*\\s+(?:suspected|possible|potential|likely|whether|if)\\b)";
-const NOUN_WORD = '(?!(?:and|or|but|nor|while|with|in|on|at|near|along|by|from|to|for|as|than|then|so|yet|is|are|was|were)\\b)\\w+';
+const NOT_A_CLAIM = "(?<!\\b(?:to|should|will|can|must|please|would|could|may|might|cannot|not|never|let['’]s|help|we|we['’]ve|has|have|had|having)\\s+(?:\\w+\\s+)?)(?<!(?:^|[.!?;:])\\s*)(?!confirm\\w*\\s+(?:suspected|possible|potential|likely|whether|if)\\b)";
+const NOUN_WORD = '(?!(?:and|or|but|nor|while|with|in|on|at|near|along|by|from|to|for|as|than|then|so|yet|is|are|was|were|has|have|had|do|does|did|be|been|being|will|would|can|could|may|might|must|should)\\b)\\w+';
 const CAUSE_AHEAD = `(?=\\s+(?:that\\s+|the\\s+|an?\\s+|some\\s+)?(?:${NOUN_WORD}\\s+){0,2}?(?:of\\s+)?(?:${SUMMARY_CAUSE_RE.source.slice(2, -2)}))`;
-const FINITE_CONFIRM = `${NOT_A_CLAIM}confirm(?:s|ed|ing)?\\b${CAUSE_AHEAD}`;
+// verified / proven are definitive synonyms of confirmed on every rule.
+const FINITE_CONFIRM = `${NOT_A_CLAIM}(?:confirm(?:s|ed|ing)?|verif(?:y|ies|ied|ying)|prov(?:e|es|ed|en|ing))\\b${CAUSE_AHEAD}`;
 const ADJECTIVE_ACTIVE = `(?<!\\b(?:may|might|could)\\s(?:\\w+\\s){0,2})active${PREDICATIVE_ACTIVE}${CAUSE_AHEAD}`;
-const DEFINITIVE_PREDICATE = new RegExp(`\\b(?:confirmed|definite(?:ly)?|certain(?:ly)?|${FINITE_CONFIRM}|${ADJECTIVE_ACTIVE}|(?<!\\b(?:may|might|could)\\s(?:\\w+\\s){0,2})(?:is|are|was|were|has|have|had|remains?|remained|stays?|stayed|keeps?|kept|continues?|continued)\\s+(?:\\w+\\s+){0,6}?active${PREDICATIVE_ACTIVE})\\b`, 'i');
+const DEFINITIVE_PREDICATE = new RegExp(`\\b(?:confirmed|verified|proven|definite(?:ly)?|certain(?:ly)?|${FINITE_CONFIRM}|${ADJECTIVE_ACTIVE}|(?<!\\b(?:may|might|could)\\s(?:\\w+\\s){0,2})(?:is|are|was|were|has|have|had|remains?|remained|stays?|stayed|keeps?|kept|continues?|continued)\\s+(?:\\w+\\s+){0,6}?active${PREDICATIVE_ACTIVE})\\b`, 'i');
 // "and" joins two independent clauses only when each side has its own finite
 // verb ("The schedule was confirmed and large patch remains only a possibility");
 // a compound subject ("Large patch and dollar spot are confirmed") stays whole.
@@ -989,7 +990,7 @@ const PLURAL_LINKER = /^(?:are|have|remain|stay|continue|keep)\b/i;
 // "Fungal activity is confirmed in the shade" → "Fungal activity appears most
 // consistent with the visible pattern in the shade".
 const CAUSE_PREFIX = `\\b(${SUMMARY_CAUSE_RE.source})(?<phrase>(?:\\s*\\([^()]{1,40}\\))?(?:\\s+(?:activity|damage|pressure|presence|signs?|evidence|symptoms?|feeding|population|outbreak|disease|infestation|stress|spots?))*)\\s+${PREDICATE_LINKER}`;
-const CONFIRMED_PREDICATE = new RegExp(`${CAUSE_PREFIX}(?<adverbs>(?:\\s+(?:been|now|also|already|just|again|still|since|yet|only|\\w+ly)){0,6})\\s+confirmed\\b`, 'gi');
+const CONFIRMED_PREDICATE = new RegExp(`${CAUSE_PREFIX}(?<adverbs>(?:\\s+(?:been|now|also|already|just|again|still|since|yet|only|\\w+ly)){0,6})\\s+(?:confirmed|verified|proven|proved)\\b`, 'gi');
 const ACTIVE_PREDICATE = new RegExp(`${CAUSE_PREFIX}(?<adverbs>(?:\\s+(?:been|remained|stayed|kept|now|also|already|just|again|still|very|highly|only|\\w+ly)){0,6})\\s+active\\b${PREDICATIVE_ACTIVE}`, 'gi');
 // Named groups survive SUMMARY_CAUSE_RE's own groups; the cause is always $1.
 function predicateParts(args) {
@@ -1004,10 +1005,15 @@ function predicateParts(args) {
 function stripConfirmedLanguage(text) {
   if (!text) return text;
   return String(text).replace(/\s+/g, ' ')
-    // "Confirmed chinch bugs" and the heading form "Confirmed: chinch bugs".
-    // The cause may sit a short noun phrase away ("Active colonies of chinch
+    // A finite confirmation verb becomes a suggestion verb ('The photos confirm
+    // chinch bug activity' → 'The photos suggest chinch bug activity'); a request
+    // to confirm is left alone.
+    .replace(new RegExp(`${NOT_A_CLAIM}\\b(confirm(?:s|ed|ing)?|verif(?:y|ies|ied|ying)|prov(?:e|es|ed|en|ing))\\b${CAUSE_AHEAD}`, 'gi'),
+      (verb) => (/(?:ies|s)$/i.test(verb) ? 'suggests' : /(?:ied|ed|en)$/i.test(verb) ? 'suggested' : /ing$/i.test(verb) ? 'suggesting' : 'suggest'))
+    // "Confirmed chinch bugs", the heading form "Confirmed: chinch bugs", and
+    // the cause a short noun phrase away ("Active colonies of chinch
     // bugs remain" → "suspected colonies of chinch bugs remain").
-    .replace(new RegExp(`\\b(?:confirmed|active${PREDICATIVE_ACTIVE}|definite(?:ly)?|certain(?:ly)?)\\s*(?:[:—–-]\\s*)?((?:${NOUN_WORD}\\s+){0,2}?(?:of\\s+)?${SUMMARY_CAUSE_RE.source})`, 'gi'),
+    .replace(new RegExp(`\\b(?:confirmed|verified|proven|active${PREDICATIVE_ACTIVE}|definite(?:ly)?|certain(?:ly)?)\\s*(?:[:—–-]\\s*)?((?:${NOUN_WORD}\\s+){0,2}?(?:of\\s+)?${SUMMARY_CAUSE_RE.source})`, 'gi'),
       (match, noun) => `suspected ${noun}`)
     .replace(CONFIRMED_PREDICATE, (...args) => {
       const { subject, qualifier, appears } = predicateParts(args);
@@ -1020,10 +1026,6 @@ function stripConfirmedLanguage(text) {
       const { subject, qualifier, past } = predicateParts(args);
       return past ? `${subject} may have been ${qualifier}active` : `${subject} may be active`;
     })
-    // A finite confirmation verb becomes a suggestion verb ('The photos confirm
-    // chinch bug activity' → 'The photos suggest chinch bug activity'); a request
-    // to confirm is left alone.
-    .replace(new RegExp(`${NOT_A_CLAIM}\\bconfirm(s|ed|ing)?\\b${CAUSE_AHEAD}`, 'gi'), 'suggest$1')
     .replace(/\bwe (?:have )?confirmed\b/gi, 'the pattern is most consistent with');
 }
 
@@ -1039,11 +1041,11 @@ const STREET_ADDRESS = /\b\d{1,6}\s+[A-Za-z0-9.'-]+(?:\s+[A-Za-z0-9.'-]+){0,3}\s
 // and links before any of it reaches an unauthenticated prospect report.
 const CUSTOMER_TEXT_URL = /\b(?:https?:\/\/|www\.)\S+/gi;
 const CUSTOMER_TEXT_EMAIL = /\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b/gi;
-// International (+ followed by 7–15 digits with optional separators), North
+// International (+ or 00 followed by 7–15 digits with optional separators), North
 // American ten-digit, and local seven-digit forms. A seven-digit "555-0100" is
 // removed even though a rare size range could look like it: a leaked contact
 // number is the worse failure on a customer-facing surface.
-const CUSTOMER_TEXT_PHONE = /\+\d(?:[\s.()-]*\d){6,14}\b|(?:\+?1[\s.-]?)?\(?\d{3}\)?[\s.-]?\d{3}[\s.-]?\d{4}\b|\b\d{3}[\s.-]\d{4}\b/g;
+const CUSTOMER_TEXT_PHONE = /(?:\+|\b00[\s.-]?)\d(?:[\s.()-]*\d){6,14}\b|(?:\+?1[\s.-]?)?\(?\d{3}\)?[\s.-]?\d{3}[\s.-]?\d{4}\b|\b\d{3}[\s.-]\d{4}\b/g;
 
 // Final egress sanitizer for any free-text published to a prospect. Defense in
 // depth at the public boundary: even if a stale/buggy client stored unsanitized

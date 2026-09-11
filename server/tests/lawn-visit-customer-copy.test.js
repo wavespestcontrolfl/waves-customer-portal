@@ -307,6 +307,7 @@ describe('customer publication', () => {
     ['Never observed chinch bugs', 'Chinch bug activity is damaging the edge.'],
     ['Absence of chinch bugs', 'Chinch bug activity is damaging the edge.'],
     ['Chinch bug absence', 'Chinch bug activity is damaging the edge.'],
+    ['Lack of chinch bugs', 'Chinch bug activity is damaging the edge.'],
   ])('negative-prefix finding %s cannot authorize customer prose', (name, text) => {
     for (const confidence of ['moderate', 'high']) {
       const evidence = { name, label: 'general lawn stress', confidence };
@@ -343,7 +344,7 @@ describe('customer publication', () => {
     },
   );
 
-  test.each(['Call 555-0100 if the patch spreads.', 'Call +44 20 7946 0958 if the patch spreads.'])('observations never publish the contact number in %s', (text) => {
+  test.each(['Call 555-0100 if the patch spreads.', 'Call +44 20 7946 0958 if the patch spreads.', 'Call 0044 20 7946 0958 if the patch spreads.'])('observations never publish the contact number in %s', (text) => {
     expect(copy.customerObservations(text, [])).not.toMatch(/0100|7946|0958/);
     expect(copy.customerObservations(text, [])).toMatch(/if the patch spreads/);
   });

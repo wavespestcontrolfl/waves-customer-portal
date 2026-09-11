@@ -570,6 +570,11 @@ describe('lawn diagnostic auto-release ladder', () => {
     expect(residualDefinitiveClaim('Active recovery of large patch continues.')).toBe(false);
     expect(residualDefinitiveClaim('Confirm chinch bug activity with a float test.')).toBe(false);
     expect(residualDefinitiveClaim('The photos confirm possible chinch bug activity.')).toBe(false);
+    // verified / proven are definitive synonyms.
+    expect(residualDefinitiveClaim('Chinch bug activity has been verified along the edge.')).toBe(true);
+    expect(residualDefinitiveClaim('Chinch bug activity was proven by the float test.')).toBe(true);
+    expect(residualDefinitiveClaim('The float test verified chinch bug activity.')).toBe(true);
+    expect(residualDefinitiveClaim('The lawn definitely has chinch bugs.')).toBe(true);
     // The definitive word must share the cause's clause, not merely its sentence.
     const unrelated = 'The watering schedule was confirmed with the customer, while large patch remains only a possibility.';
     expect(residualDefinitiveClaim(unrelated)).toBe(false);
@@ -605,6 +610,8 @@ describe('lawn diagnostic auto-release ladder', () => {
     ['Call +44 (0)20-7946-0958 if the patch spreads.', /7946|0958/],
     ['Call +1 941 555 0100 if the patch spreads.', /0100/],
     ['Call 9415550100 if the patch spreads.', /0100/],
+    ['Call 0044 20 7946 0958 if the patch spreads.', /7946|0958/],
+    ['Call 00 44 20 7946 0958 if the patch spreads.', /7946|0958/],
   ])('scrubCustomerText removes local and international phone forms from %s', (text, digits) => {
     const out = scrubCustomerText(text);
     expect(out).not.toMatch(digits);
@@ -627,6 +634,21 @@ describe('lawn diagnostic auto-release ladder', () => {
     expect(colonies).toMatch(/^suspected colonies of chinch bugs remain along the edge\.$/i);
     expect(scrubCustomerText('Float test required to confirm active chinch pressure.')).toBe('Float test required to confirm suspected chinch pressure.');
     expect(safeCustomerSummary('The photos confirm chinch bug activity.', 'moderate')).not.toMatch(/confirm/i);
+  });
+
+  test('scrubCustomerText downgrades verified / proven like confirmed', () => {
+    expect(scrubCustomerText('Chinch bug activity has been verified along the edge.')).toBe('Chinch bug activity appears most consistent with the visible pattern along the edge.');
+    expect(scrubCustomerText('Chinch bug activity was proven by the float test.')).toBe('Chinch bug activity appeared most consistent with the visible pattern by the float test.');
+    expect(scrubCustomerText('The float test verified chinch bug activity.')).toBe('The float test suggested chinch bug activity.');
+    expect(scrubCustomerText('The photos prove chinch bug activity.')).toBe('The photos suggest chinch bug activity.');
+    expect(safeCustomerSummary('Chinch bug activity has been verified.', 'moderate')).not.toMatch(/verified/i);
+  });
+
+  test('an auxiliary never joins an adjective-first cause rewrite', () => {
+    const out = scrubCustomerText('The lawn definitely has chinch bugs.');
+    expect(out).not.toMatch(/suspected has/);
+    expect(residualDefinitiveClaim(out)).toBe(true);
+    expect(safeCustomerSummary('The lawn definitely has chinch bugs.', 'high')).not.toMatch(/definitely|suspected has/);
   });
 
   test('scrubCustomerText keeps ordinary short figures', () => {
@@ -696,6 +718,7 @@ describe('lawn diagnostic auto-release ladder', () => {
     'Absence of chinch bugs', 'Chinch bug absence', 'Absence of any large patch or dollar spot',
     // A conjunct sharing the negated predicate; symbolic conjunctions in a free-of list.
     'No chinch bugs and weeds observed', 'Free of chinch bugs & weeds', 'Free of chinch bugs, weeds & grubs', 'Free of chinch bugs / weeds',
+    'Lack of chinch bugs', 'Lacking any chinch bugs',
   ])('safeConditionLabel never maps the negated alias %s to a positive cause label', (name) => {
     expect(safeConditionLabel(name, 'high')).toBe('no major visible stress');
   });
@@ -779,6 +802,7 @@ describe('lawn diagnostic auto-release ladder', () => {
     ['No weeds and large patch is present', 'large patch (fungal) activity'],
     ['No weeds, and large patch is present', 'large patch (fungal) activity'],
     ['No chinch bugs and drought stress is visible', 'drought stress'],
+    ['Large patch present, lack of weeds', 'large patch (fungal) activity'],
   ])('safeConditionLabel maps only the positive clause of %s', (name, label) => {
     expect(safeConditionLabel(name, 'high')).toBe(label);
   });

@@ -160,7 +160,7 @@ function establishesCause(finding) {
   // A negated recovery ("Large patch is not improving") is positive evidence.
   // "not only visible but spreading" intensifies rather than negates.
   const name = stripIntensifierNot(stripNegatedRecovery(spaceJoinedNon(finding.name || '')));
-  if (/\b(?:no|not|none|non|never|neither|nor|cannot|\w+n['’]t|without|ruled[\s‐‑‒–—-]+out|negative|absent|absence|unlikely|unconfirmed|excluded|free)\b/i.test(name)) return false;
+  if (/\b(?:no|not|none|non|never|neither|nor|cannot|\w+n['’]t|without|ruled[\s‐‑‒–—-]+out|negative|absent|absence|lack(?:s|ed|ing)?|unlikely|unconfirmed|excluded|free)\b/i.test(name)) return false;
   if (/\b(?:or|vs\.?|versus|either|alternatively)\b|\w\s*\/\s*\w|\?/i.test(name)) return false;
   return distinctCauseCount(name) <= 1;
 }
