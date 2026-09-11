@@ -4452,7 +4452,12 @@
             "(?<!\\b(?:not|never|cannot|unable|won['’]t|will not|\\w+n['’]t)[\\s,]+(?:[\\w'’]+[\\s,]+){0,3}(?:say|saying|said|tell|telling|told|confirm|confirming|promise|promising|guarantee|guaranteeing|claim|claiming|state|stating|know|see|seeing|find|comment|offer|offering|provide|providing|flag|flagging|report|reporting)[\\s,]+(?:[\\w'’]+[\\s,]+){0,4})\\b(?:it|that|this)(?:['’]s|\\s+(?:is|will be|would be))\\s+(?:free|on us|at no charge|no charge|at no cost|no cost|complimentary|on the house)\\b",
             "(?<!\\b(?:not|never|cannot|unable|won['’]t|will not|\\w+n['’]t)[\\s,]+(?:[\\w'’]+[\\s,]+){0,3}(?:say|saying|said|tell|telling|told|confirm|confirming|promise|promising|guarantee|guaranteeing|claim|claiming|state|stating|know|see|seeing|find|comment|offer|offering|provide|providing|flag|flagging|report|reporting)[\\s,]+(?:[\\w'’]+[\\s,]+){0,4})\\b(?:won['’]t|will not|not going to) have to pay\\b[^.!?]{0,30}?\\b(?:next|your next|the next|your|return|follow-up|follow up)\\s+(?:visit|one|service|treatment|appointment)\\b",
             "(?<!\\b(?:not|never|cannot|unable|won['’]t|will not|\\w+n['’]t)[\\s,]+(?:[\\w'’]+[\\s,]+){0,3}(?:say|saying|said|tell|telling|told|confirm|confirming|promise|promising|guarantee|guaranteeing|claim|claiming|state|stating|know|see|seeing|find|comment|offer|offering|provide|providing|flag|flagging|report|reporting)[\\s,]+(?:[\\w'’]+[\\s,]+){0,4})\\b(?:we|i)['’]ll cover (?:it|that|this|the (?:cost|visit))\\b",
-            "(?<!\\b(?:not|never|cannot|unable|won['’]t|will not|\\w+n['’]t)[\\s,]+(?:[\\w'’]+[\\s,]+){0,3}(?:say|saying|said|tell|telling|told|confirm|confirming|promise|promising|guarantee|guaranteeing|claim|claiming|state|stating|know|see|seeing|find|comment|offer|offering|provide|providing|flag|flagging|report|reporting)[\\s,]+(?:[\\w'’]+[\\s,]+){0,4})\\b(?:not going to|won['’]t|will not) charge you\\b"
+            "(?<!\\b(?:not|never|cannot|unable|won['’]t|will not|\\w+n['’]t)[\\s,]+(?:[\\w'’]+[\\s,]+){0,3}(?:say|saying|said|tell|telling|told|confirm|confirming|promise|promising|guarantee|guaranteeing|claim|claiming|state|stating|know|see|seeing|find|comment|offer|offering|provide|providing|flag|flagging|report|reporting)[\\s,]+(?:[\\w'’]+[\\s,]+){0,4})\\b(?:not going to|won['’]t|will not) charge you\\b",
+            "(?<!\\b(?:not|never|cannot|unable|won['’]t|will not|\\w+n['’]t)[\\s,]+(?:[\\w'’]+[\\s,]+){0,3}(?:say|saying|said|tell|telling|told|confirm|confirming|promise|promising|guarantee|guaranteeing|claim|claiming|state|stating|know|see|seeing|find|comment|offer|offering|provide|providing|flag|flagging|report|reporting)[\\s,]+(?:[\\w'’]+[\\s,]+){0,4})\\b(?:won['’]t|will not|not going to|never|no need to) (?:bill|charge|invoice)(?: you)?\\b[^.!?]{0,40}?\\b(?:next|your next|the next|your|that|this|the|return|follow-up|follow up)\\s+(?:visit|one|service|treatment|appointment)\\b",
+            "(?<!\\b(?:not|never|cannot|unable|won['’]t|will not|\\w+n['’]t)[\\s,]+(?:[\\w'’]+[\\s,]+){0,3}(?:say|saying|said|tell|telling|told|confirm|confirming|promise|promising|guarantee|guaranteeing|claim|claiming|state|stating|know|see|seeing|find|comment|offer|offering|provide|providing|flag|flagging|report|reporting)[\\s,]+(?:[\\w'’]+[\\s,]+){0,4})\\b(?:next|your next|the next|your|that|this|the|return|follow-up|follow up)\\s+(?:visit|one|service|treatment|appointment)\\b[^.!?]{0,20}?\\b(?:costs? (?:you )?nothing|won['’]t cost (?:you )?(?:anything|a thing|a dime|a penny)|(?:is|will be|would be|has been|['’]s) (?:waived|no cost|free of charge|complimentary|at no cost|at no charge))\\b",
+            "(?<!\\b(?:not|never|cannot|unable|won['’]t|will not|\\w+n['’]t)[\\s,]+(?:[\\w'’]+[\\s,]+){0,3}(?:say|saying|said|tell|telling|told|confirm|confirming|promise|promising|guarantee|guaranteeing|claim|claiming|state|stating|know|see|seeing|find|comment|offer|offering|provide|providing|flag|flagging|report|reporting)[\\s,]+(?:[\\w'’]+[\\s,]+){0,4})\\b(?:you )?(?:won['’]t|will not|don['’]t|do not) owe (?:us )?(?:anything|a thing|a dime|a penny)\\b[^.!?]{0,40}?\\b(?:visit|one|service|treatment|appointment)\\b",
+            "(?<!\\b(?:not|never|cannot|unable|won['’]t|will not|\\w+n['’]t)[\\s,]+(?:[\\w'’]+[\\s,]+){0,3}(?:say|saying|said|tell|telling|told|confirm|confirming|promise|promising|guarantee|guaranteeing|claim|claiming|state|stating|know|see|seeing|find|comment|offer|offering|provide|providing|flag|flagging|report|reporting)[\\s,]+(?:[\\w'’]+[\\s,]+){0,4})\\bowe (?:us )?nothing\\b[^.!?]{0,40}?\\b(?:visit|one|service|treatment|appointment)\\b",
+            "(?<!\\b(?:not|never|cannot|unable|won['’]t|will not|\\w+n['’]t)[\\s,]+(?:[\\w'’]+[\\s,]+){0,3}(?:say|saying|said|tell|telling|told|confirm|confirming|promise|promising|guarantee|guaranteeing|claim|claiming|state|stating|know|see|seeing|find|comment|offer|offering|provide|providing|flag|flagging|report|reporting)[\\s,]+(?:[\\w'’]+[\\s,]+){0,4})\\bno (?:bill|charge|cost|fee)\\b[^.!?]{0,30}?\\b(?:next|your next|the next|your|that|this|the|return|follow-up|follow up)\\s+(?:visit|one|service|treatment|appointment)\\b"
           ],
           "severity": "critical"
         },
@@ -4615,8 +4620,14 @@
         {
           "check": "spoken_matches_any",
           "value": [
-            "portal"
+            "portal",
+            "(?:a |the )?(?:team member|member of (?:our|the) team|someone (?:from|in|at) (?:our|the) office|the office|our office|our team|a colleague|one of (?:our|the) team)\\b[^.!?]{0,30}?\\b(?:can|will|is able to|would be (?:happy|glad) to|is happy to) (?:help|assist|take care|handle|sort|walk you through|get (?:that|it) (?:sorted|taken care of)|take (?:your )?payment)"
           ],
+          "severity": "critical"
+        },
+        {
+          "check": "no_card_digit_readback",
+          "value": true,
           "severity": "critical"
         }
       ],
