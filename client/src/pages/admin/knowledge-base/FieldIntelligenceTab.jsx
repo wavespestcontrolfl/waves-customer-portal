@@ -97,7 +97,7 @@ function WikiPageDetail({
               disabled={isBusy}
               onChange={(event) => onTierPin(page.slug, event.target.value)}
             >
-              <option value="">Choose a tier…</option>
+              <option value="">Pin tier...</option>
               <option value="green">Green (auto)</option>
               <option value="yellow">Yellow (digest)</option>
               <option value="red">Red (review)</option>
