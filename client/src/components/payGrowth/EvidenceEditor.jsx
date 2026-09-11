@@ -46,7 +46,8 @@ function evidenceForm(detail) {
   };
   const facts = previous.facts || {};
   const fields = Object.fromEntries(Object.entries(defaults).map(([key, fallback]) => [key, facts[key] ?? fallback]));
-  if (forced !== 'none') fields.exclusion = forced; // the server resolves it this way regardless of the prior revision
+  // Mirror the server: callbacks are always corrective; a free visit only replaces a 'none' classification, never a retained manual one.
+  if (forced === 'corrective' || (forced !== 'none' && fields.exclusion === 'none')) fields.exclusion = forced;
   return { ...fields, id: crypto.randomUUID(), service_id: detail.visit.id, base_id: previous.id || null,
     allocation_id: excluded ? '' : previous.allocation_id || '', ordinal: excluded || previous.ordinal == null ? '' : String(previous.ordinal),
     cutoff_at: fields.cutoff_at ? etDatetimeLocalValue(new Date(fields.cutoff_at)) : '', complete_at_cutoff: String(fields.complete_at_cutoff),
@@ -95,7 +96,8 @@ export default function EvidenceEditor({ technicianId, month, serviceId = '', pe
   const options = [{ value: '', label: 'Choose a performed service…' }, ...visitOptions.values()];
   const allocationLocked = detail?.revisions.some(revision => revision.allocation_id != null);
   const forced = Boolean(detail) && forcedExclusion(detail.visit) !== 'none';
-  const excluded = forced && !allocationLocked;
+  // Any excluded first review (forced or reviewer-selected) cannot claim a new allocation; a retained one is kept.
+  const excluded = Boolean(detail) && (forced || data.exclusion !== 'none') && !allocationLocked;
   return <section className="pg-card pg-form"><div className="pg-row"><h2>Review service evidence</h2><Button variant="secondary" disabled={busy || allocationSaving} onClick={onCancel}>Close review</Button></div>{error && <p role="alert" className="pg-error">{error}</p>}
     <Field label="Performed service" options={options} disabled={busy || allocationSaving} value={selected} onChange={event => setSelected(event.target.value)} />
     {selected && !detail && !error && <p role="status">Loading service evidence…</p>}
