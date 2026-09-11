@@ -1569,6 +1569,7 @@ const cityKey = (v) => String(v || '').toLowerCase().replace(/[^a-z ]/g, ' ').re
 // r10 P1), so only the former is dropped.
 const unitKey = value => unitLineValueKey(normalizeUnitLine(value)).replace(/(?<!\d)-|-(?!\d)/g, '');
 const statedValues = values => values.map(value => String(value || '').trim()).filter(Boolean);
+const UNIT_WORD = /^(?:#|apt|apartment|unit|ste|suite|bldg|building|fl|floor|lot|spc|space|rm|room)$/i;
 
 // codex P2: "Parrish FL" / "Parrish, FL 34219" / "34219 Parrish" restate the
 // on-file locality just as plainly as a bare "Parrish" — appending the
@@ -1637,12 +1638,25 @@ function restatesOnFileAddress(sa, knownCustomer) {
   // EVERY unit the raw phrase names is compared ("Apt 4, 500 Main St Apt 5"
   // against on-file Apt 4 is a contradiction, not a restatement — codex
   // r11 P1); a first-match pick let the later unit vanish.
-  const rawUnits = [leadingUnit, unitAnywhereOnLine(rawAddress), unitAnywhereOnLine(parsed.line1)].filter(Boolean);
+  // The parsed street's own unit is a FRAGMENT of the whole-line unit when
+  // the parser split a compound unit across line1/city ("Bldg 4 Apt 5" →
+  // line1 "… Bldg 4", city "Apt 5") — only consulted when the whole line
+  // carried no unit at all (codex r12 P2).
+  const rawUnits = [leadingUnit, unitAnywhereOnLine(rawAddress) || unitAnywhereOnLine(parsed.line1)].filter(Boolean);
+  // The comma-free parser reads an alphabetic unit value as a city + state
+  // ("100 Main St Apt CT" → city "Apt", state CT): a unit designator in the
+  // city slot is neither a locality nor geography (codex r12 P2).
+  const parsedCityIsUnitWord = UNIT_WORD.test(parsed.city || '');
+  const parsedCity = parsedCityIsUnitWord ? '' : parsed.city;
+  const parsedState = parsedCityIsUnitWord ? '' : parsed.state;
+  // …and that designator + value pair IS the caller's unit ("Apt CT"), which
+  // no unit detector recognizes on its own because the value is alphabetic.
+  if (parsedCityIsUnitWord && parsed.state && !rawUnits.length) rawUnits.push(`${parsed.city} ${parsed.state}`);
   const savedUnit = unitKey(saved.addressLine2 || onFile.unit);
   const units = statedValues([sa.street_line_2, sa.line2, sa.unit, sa.apt, ...rawUnits, ...structured.map(part => part.unit)]);
   const cities = statedValues([sa.city, sa.locality]).map(cityKey);
   const zips = statedValues([sa.postal_code, sa.zip, sa.zip_code, parsed.zip]).map(zip5Of);
-  const states = statedValues([sa.state, parsed.state]).map(normalizeState);
+  const states = statedValues([sa.state, parsedState]).map(normalizeState);
   const savedCity = cityKey(saved.addressCity);
   const savedZip = zip5Of(saved.addressZip);
   const comparisons = [
@@ -1659,8 +1673,14 @@ function restatesOnFileAddress(sa, knownCustomer) {
   // a plain "Parrish" — the contradictory ZIP vanished.
   const rawIsLocality = raw === savedZip || rawIsPureLocalityPhrase(raw, savedCity, savedZip);
   const acknowledgment = /^(?:yes|(?:the )?same (?:place|address|as before|as always))\.?$/i.test(raw);
-  const rawCity = cityKey(parsed.city);
-  const cityIsUnit = rawUnits.some(unit => unitKey(parsed.city) === unitKey(unit));
+  const rawCity = cityKey(parsedCity);
+  // A city slot holding the TAIL of a compound raw unit ("Apt 5" of
+  // "Bldg 4 Apt 5") is that unit, not a locality.
+  const cityUnitLine = String(normalizeUnitLine(parsed.city) || '').toLowerCase();
+  const cityIsUnit = Boolean(cityUnitLine) && rawUnits.some((unit) => {
+    const line = String(normalizeUnitLine(unit) || '').toLowerCase();
+    return line === cityUnitLine || line.endsWith(` ${cityUnitLine}`);
+  });
   const tailAgrees = [!rawCity, rawCity === savedCity, cityIsUnit].some(Boolean);
   const streets = structured.map(part => part.street);
   if (raw && !rawIsLocality && !acknowledgment) streets.push(tailAgrees ? splitStreetLineUnit(parsed.line1).street : rawAddress);

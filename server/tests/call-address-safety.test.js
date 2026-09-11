@@ -303,6 +303,22 @@ describe('finding 3 — address fragments and on-file restatements', () => {
 });
 
 describe('regressions', () => {
+  // codex r12 P2s: an alphabetic unit value that is also a state code is a
+  // unit, not geography, in the matcher too; and a compound unit the parser
+  // splits across line1/city is one unit, not two independent fragments.
+  test('an alphabetic unit value that is also a state code restates the saved unit', () => {
+    const saved = { hasAddress: true, addressLine1: '100 Main St', addressLine2: 'Apt CT', addressCity: 'Bradenton', addressZip: '34205' };
+    expect(statesNewAddress(v2({ property: { service_address: { raw_text: '100 Main St Apt CT' } } }), saved)).toBe(false);
+    expect(statesNewAddress(v2({ property: { service_address: { street_line_1: '100 Main St', unit: 'Apt CT', raw_text: '100 Main St Apt CT' } } }), saved)).toBe(false);
+    expect(statesNewAddress(v2({ property: { service_address: { raw_text: '100 Main St Apt NE' } } }), saved)).toBe(true);
+  });
+
+  test('a comma-free compound unit restates the saved compound unit', () => {
+    const saved = { hasAddress: true, addressLine1: '500 Sample Tower Blvd', addressLine2: 'Bldg 4 Apt 5', addressCity: 'Sarasota', addressZip: '34240' };
+    expect(statesNewAddress(v2({ property: { service_address: { raw_text: '500 Sample Tower Blvd Bldg 4 Apt 5' } } }), saved)).toBe(false);
+    expect(statesNewAddress(v2({ property: { service_address: { raw_text: '500 Sample Tower Blvd Bldg 4 Apt 6' } } }), saved)).toBe(true);
+  });
+
   // codex r11 P1: every unit the raw phrase names is compared, not just
   // the first one found.
   test('a raw phrase naming two units is a new address when either differs from the saved unit', () => {
