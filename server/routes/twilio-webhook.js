@@ -738,9 +738,10 @@ router.post('/sms', async (req, res) => {
       // that, ringing nobody. Tracking numbers stay excluded (their
       // first-contact channel is new_lead, mirroring alertEligible's
       // isTrackingLeadInbound exclusion below).
+      let unknownSenderAlertHandled = false;
       if (!quietReaction && !customer && numberConfig.type !== 'domain_tracking' && numberConfig.type !== 'van_tracking'
         && !(process.env.ADAM_PHONE && From === process.env.ADAM_PHONE && To === process.env.ADAM_PHONE)) {
-        await dispatchUnknownSenderAlert({ From, MessageSid, message: Body });
+        unknownSenderAlertHandled = await dispatchUnknownSenderAlert({ From, MessageSid, message: Body });
       }
       if (!quietReaction && !isAiNumber) {
         // Loud reaction (answer to a question, or a dislike/question mark):
@@ -749,7 +750,13 @@ router.post('/sms', async (req, res) => {
         // the bell didn't land — then stop: no reschedule/lead/estimator
         // automation ever sees a tapback (codex r2/r3).
         const notifyTypes = ['location', 'gbp_tracking', 'domain_tracking', 'van_tracking', 'tech_line'];
-        let landed = false;
+        // An unknown sender already went through the throttled dispatch
+        // above — `landed` seeds from its result so the legacy owner
+        // forward below never fires a SECOND alert on top of it (codex
+        // #4210 round-2 P1). For a customer, `customer` is truthy and
+        // unknownSenderAlertHandled stays false (the block above is
+        // customer-exclusive), so this is a no-op on that path.
+        let landed = unknownSenderAlertHandled;
         if (customer && notifyTypes.includes(numberConfig.type)) {
           try {
             const stats = await ringSmsReplyBell({ customer, From, MessageSid, message: Body });
@@ -1920,22 +1927,49 @@ router.post('/status', async (req, res) => {
 // skipping the alert: a duplicate bell is recoverable, a silently dropped
 // first contact is not.
 const UNKNOWN_SENDER_ALERT_WINDOW_MS = 4 * 60 * 60 * 1000;
+// Short lease held between the claim insert and the confirm below (codex
+// #4210 round-2 P1). A claim used to jump straight to the full 4h window: if
+// the process died after the INSERT committed but before ringSmsReplyBell()
+// finished (deploy mid-request), the row was left with a live 4h expiry and
+// no bell ever delivered — every later message from that sender lost the
+// claim and the thread went silent for up to 4h with no way to recover.
+// Mirrors the voicemail_sms_claims / dropped_call_sms_claims claim-then-
+// confirm shape: claim short, confirm long only once delivery is proven. An
+// unconfirmed lease is just an ordinary expired row to the next claim
+// attempt's `WHERE expires_at < now`, so it's reclaimed within minutes
+// instead of hours.
+const UNKNOWN_SENDER_ALERT_LEASE_MS = 2 * 60 * 1000;
 async function claimUnknownSenderAlertWindow(From) {
   try {
     const now = new Date();
-    const expiresAt = new Date(now.getTime() + UNKNOWN_SENDER_ALERT_WINDOW_MS);
+    const leaseExpiresAt = new Date(now.getTime() + UNKNOWN_SENDER_ALERT_LEASE_MS);
     const result = await db.raw(
       `INSERT INTO sms_reply_alert_claims (phone, expires_at)
        VALUES (?, ?)
        ON CONFLICT (phone) DO UPDATE SET expires_at = EXCLUDED.expires_at
        WHERE sms_reply_alert_claims.expires_at < ?
        RETURNING phone`,
-      [From, expiresAt, now],
+      [From, leaseExpiresAt, now],
     );
     return (result?.rows || []).length > 0;
   } catch (e) {
     logger.warn('[twilio-webhook] alert-window claim failed; proceeding unfenced', { code: e.code || 'unknown' });
     return true;
+  }
+}
+
+// Confirm a won claim to the full 4h window once the bell/push has actually
+// been delivered (codex #4210 round-2 P1) — the second half of the
+// claim/confirm two-step. Until this runs the row only carries the short
+// lease above, so a crash between claim and confirm self-heals instead of
+// wedging the sender behind a silent 4h window.
+async function confirmUnknownSenderAlertWindow(From) {
+  try {
+    const now = new Date();
+    await db('sms_reply_alert_claims').where({ phone: From })
+      .update({ expires_at: new Date(now.getTime() + UNKNOWN_SENDER_ALERT_WINDOW_MS) });
+  } catch (e) {
+    logger.warn('[twilio-webhook] alert-window claim confirm failed', { code: e.code || 'unknown' });
   }
 }
 
@@ -2005,22 +2039,29 @@ async function hasRecentUnknownSenderReceipt(From, excludeSid) {
 // one-thread spam incident this throttle exists to prevent could reproduce
 // through it if a spam sender's replies keep tripping the reaction
 // classifier).
+// Returns true when this call site should be considered HANDLED — either it
+// delivered a fresh bell, or the window is already covered by a delivery
+// this call made no attempt at (lost the claim race, or a recent receipt
+// already rang) — so a caller can skip a legacy fallback alert without
+// double-ringing (codex #4210 round-2 P1: the loud-reaction branch used to
+// fall through to the internal_alert owner forward regardless, ringing a
+// second alert on top of a dispatch that already succeeded).
 async function dispatchUnknownSenderAlert({ From, MessageSid, message }) {
   // Claim the window atomically FIRST — no transaction held across the
   // check or the dispatch (codex #4210 head-round P1). Losing the claim
   // means another delivery already owns this sender's window.
   const claimed = await claimUnknownSenderAlertWindow(From);
-  if (!claimed) return;
+  if (!claimed) return true;
   // Secondary guard: a row stamped sms_reply_alerted by any other writer
-  // still counts — but this claim was just freshly stamped expiring 4h from
-  // NOW, not from that receipt's actual timestamp. Release it rather than
-  // leave an over-long hold: the real expiry already lives on the receipt
-  // itself, so the next message's check keeps reading the correct (possibly
-  // much sooner) cutoff instead of this claim's inflated one (codex
-  // pre-push audit P1).
+  // still counts — but this claim was just freshly stamped expiring in a
+  // couple of minutes, not from that receipt's actual timestamp. Release it
+  // rather than leave a stale lease behind: the real expiry already lives on
+  // the receipt itself, so the next message's check keeps reading the
+  // correct (possibly much sooner) cutoff instead of this claim's own
+  // (codex pre-push audit P1).
   if (await hasRecentUnknownSenderReceipt(From, MessageSid)) {
     await releaseUnknownSenderAlertClaim(From);
-    return;
+    return true;
   }
   let delivered = false;
   try {
@@ -2030,12 +2071,17 @@ async function dispatchUnknownSenderAlert({ From, MessageSid, message }) {
     if (e.alreadyRead) logger.info('[notifications] sms_reply skipped — thread read before the bell');
     else logger.error(`[notifications] unknown-sender sms_reply trigger failed: ${e.message}`);
   }
-  if (!delivered) {
+  if (delivered) {
+    // Confirm the claim to the full 4h window only now that delivery is
+    // proven (codex #4210 round-2 P1) — see claimUnknownSenderAlertWindow.
+    await confirmUnknownSenderAlertWindow(From);
+  } else {
     // Nothing actually delivered — release so a later message in this
     // window gets another chance (mirrors the voicemail/dropped-call claim
     // contract's release-on-non-delivery half).
     await releaseUnknownSenderAlertClaim(From);
   }
+  return delivered;
 }
 
 async function lastOutboundAskedQuestion(toPhone, ourNumber) {

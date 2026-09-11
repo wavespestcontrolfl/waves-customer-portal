@@ -221,7 +221,7 @@ postgres('Customer 360 migrated PostgreSQL reads', () => {
         { id: laterMessageId, conversation_id: conversationId, channel: 'sms', direction: 'inbound', author_type: 'lead', is_read: false, twilio_sid: laterSid, body: 'Second synthetic text, same sender', created_at: new Date(Date.now() - 60000) },
       ]);
       [bell] = await mockPg('notifications').insert({
-        recipient_type: 'admin', category: 'inbound_sms', title: 'Synthetic unknown-sender text',
+        recipient_type: 'admin', category: 'inbound_sms', title: 'Synthetic unknown-sender text', link: '/admin/communications',
         metadata: JSON.stringify({ payload: { twilioSid: alertedSid } }),
       }).returning('*');
 
@@ -264,7 +264,7 @@ postgres('Customer 360 migrated PostgreSQL reads', () => {
         { id: laterMessageId, conversation_id: conversationId, channel: 'sms', direction: 'inbound', author_type: 'lead', is_read: false, twilio_sid: laterSid, body: 'Second synthetic text, same sender', created_at: new Date(Date.now() - 60000) },
       ]);
       [bell] = await mockPg('notifications').insert({
-        recipient_type: 'admin', category: 'inbound_sms', title: 'Synthetic unknown-sender text',
+        recipient_type: 'admin', category: 'inbound_sms', title: 'Synthetic unknown-sender text', link: '/admin/communications',
         metadata: JSON.stringify({ payload: { twilioSid: alertedSid } }),
       }).returning('*');
 
@@ -313,7 +313,7 @@ postgres('Customer 360 migrated PostgreSQL reads', () => {
         { id: laterMessageId, conversation_id: secondConversationId, channel: 'sms', direction: 'inbound', author_type: 'lead', is_read: false, twilio_sid: laterSid, body: 'Second synthetic text, second number', created_at: new Date(Date.now() - 60000) },
       ]);
       [bell] = await mockPg('notifications').insert({
-        recipient_type: 'admin', category: 'inbound_sms', title: 'Synthetic unknown-sender text',
+        recipient_type: 'admin', category: 'inbound_sms', title: 'Synthetic unknown-sender text', link: '/admin/communications',
         metadata: JSON.stringify({ payload: { twilioSid: alertedSid } }),
       }).returning('*');
 
@@ -352,7 +352,7 @@ postgres('Customer 360 migrated PostgreSQL reads', () => {
         { id: secondMessageId, conversation_id: conversationId, channel: 'sms', direction: 'inbound', author_type: 'lead', is_read: false, twilio_sid: secondSid, body: 'Second synthetic text, same sender', created_at: new Date(Date.now() - 60000) },
       ]);
       [bell] = await mockPg('notifications').insert({
-        recipient_type: 'admin', category: 'inbound_sms', title: 'Synthetic unknown-sender text',
+        recipient_type: 'admin', category: 'inbound_sms', title: 'Synthetic unknown-sender text', link: '/admin/communications',
         metadata: JSON.stringify({ payload: { twilioSid: firstSid } }),
       }).returning('*');
 
@@ -380,6 +380,87 @@ postgres('Customer 360 migrated PostgreSQL reads', () => {
     } finally {
       NotificationService.markInboundSmsReadAdmin.mockReset().mockResolvedValue(0);
       await mockPg('messages').whereIn('id', [firstMessageId, secondMessageId]).delete();
+      if (bell) await mockPg('notifications').where({ id: bell.id }).delete();
+      await mockPg('conversations').where({ id: conversationId }).delete();
+    }
+  }, 30000);
+
+  test('reading an unknown sender\'s message never clears a bell created after this read began, even when nothing else is unread (codex #4210 round-2 P1)', async () => {
+    const conversationId = randomUUID();
+    const messageId = randomUUID();
+    const sid = `SM-synthetic-entry-${randomBytes(4).toString('hex')}`;
+    const unknownPhone = `+1941555${String(Date.now()).slice(-4)}`;
+    let bell;
+    try {
+      await mockPg('conversations').insert({ id: conversationId, customer_id: null, channel: 'sms', contact_phone: unknownPhone, our_endpoint_id: '+19415550190' });
+      await mockPg('messages').insert({ id: messageId, conversation_id: conversationId, channel: 'sms', direction: 'inbound', author_type: 'lead', is_read: false, twilio_sid: sid, body: 'Synthetic text', created_at: new Date(Date.now() - 60000) });
+      // Stands in for a bell whose underlying inbound row lands strictly
+      // AFTER this read's request-entry `now` (the real race: a new message
+      // arrives, and its bell is written, between the `remaining` check and
+      // the clear/retarget write). A future created_at guarantees it
+      // postdates any `now` this call captures.
+      [bell] = await mockPg('notifications').insert({
+        recipient_type: 'admin', category: 'inbound_sms', title: 'Synthetic unknown-sender text',
+        link: '/admin/communications', created_at: new Date(Date.now() + 5 * 60000),
+        metadata: JSON.stringify({ payload: { twilioSid: sid } }),
+      }).returning('*');
+
+      await markInboundSmsRead({ messageIds: [messageId], role: 'admin' });
+      expect((await mockPg('messages').where({ id: messageId }).first()).is_read).toBe(true);
+      // Nothing else is unread for this phone, so the pre-fix code would
+      // clear the bell outright here — but it postdates the read's entry
+      // and must be left alone.
+      const refreshedBell = await mockPg('notifications').where({ id: bell.id }).first();
+      expect(refreshedBell.read_at).toBeNull();
+    } finally {
+      await mockPg('messages').where({ id: messageId }).delete();
+      if (bell) await mockPg('notifications').where({ id: bell.id }).delete();
+      await mockPg('conversations').where({ id: conversationId }).delete();
+    }
+  }, 30000);
+
+  test('a promoted thread\'s alerted SID still finds its live bell and retargets to a still-unread sibling instead of losing it to the blunt by-SID clear (codex #4210 round-2 P2)', async () => {
+    const conversationId = randomUUID();
+    const alertedMessageId = randomUUID();
+    const laterMessageId = randomUUID();
+    const alertedSid = `SM-synthetic-promoted-${randomBytes(4).toString('hex')}`;
+    const laterSid = `SM-synthetic-promoted-later-${randomBytes(4).toString('hex')}`;
+    const unknownPhone = `+1941555${String(Date.now()).slice(-4)}`;
+    let bell;
+    try {
+      // Promoted BEFORE the read: the conversation now carries a
+      // customer_id, even though its bell rang while the sender was still
+      // unknown (link stays '/admin/communications', never rewritten). A
+      // distinct our_endpoint_id avoids the (customer_id, channel,
+      // our_endpoint_id) dedup index colliding with ids[0]'s fixture
+      // conversation from beforeAll.
+      await mockPg('conversations').insert({ id: conversationId, customer_id: ids[0], channel: 'sms', contact_phone: unknownPhone, our_endpoint_id: '+19415550192' });
+      await mockPg('messages').insert([
+        { id: alertedMessageId, conversation_id: conversationId, channel: 'sms', direction: 'inbound', author_type: 'lead', is_read: false, twilio_sid: alertedSid, body: 'First synthetic text, alerted while unknown', created_at: new Date(Date.now() - 120000) },
+        // Arrived after promotion with no bell of its own (the throttled
+        // dispatch never rang again for this window) — its only hope is the
+        // ORIGINAL, still-live unlinked-style bell.
+        { id: laterMessageId, conversation_id: conversationId, channel: 'sms', direction: 'inbound', author_type: 'lead', is_read: false, twilio_sid: laterSid, body: 'Second synthetic text, after promotion', created_at: new Date(Date.now() - 60000) },
+      ]);
+      [bell] = await mockPg('notifications').insert({
+        recipient_type: 'admin', category: 'inbound_sms', title: 'Synthetic unknown-sender text',
+        link: '/admin/communications',
+        metadata: JSON.stringify({ payload: { twilioSid: alertedSid } }),
+      }).returning('*');
+
+      // Reading the alerted message must NOT be handed to the blunt by-SID
+      // clear just because the conversation is now customer-linked — that
+      // would clear the bell while laterMessageId sits unread with no bell
+      // of its own (pre-fix: c.customer_id IS NULL excluded this SID from
+      // unknownSenderSids purely on today's linkage).
+      await markInboundSmsRead({ messageIds: [alertedMessageId], role: 'admin' });
+      expect((await mockPg('messages').where({ id: alertedMessageId }).first()).is_read).toBe(true);
+      expect((await mockPg('messages').where({ id: laterMessageId }).first()).is_read).toBe(false);
+      const refreshedBell = await mockPg('notifications').where({ id: bell.id }).first();
+      expect(refreshedBell.read_at).toBeNull();
+      expect(refreshedBell.metadata.payload.twilioSid).toBe(laterSid);
+    } finally {
+      await mockPg('messages').whereIn('id', [alertedMessageId, laterMessageId]).delete();
       if (bell) await mockPg('notifications').where({ id: bell.id }).delete();
       await mockPg('conversations').where({ id: conversationId }).delete();
     }

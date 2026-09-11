@@ -102,8 +102,24 @@ async function markInboundSmsRead({ messageIds = [], conversationIds = [], readB
       // independent code paths.
       const unknownReadRows = await db('messages as m')
         .join('conversations as c', 'c.id', 'm.conversation_id')
-        .whereNull('c.customer_id')
         .whereIn('m.twilio_sid', mirrorSids)
+        .where(function scope() {
+          this.whereNull('c.customer_id')
+            // Promoted thread (codex #4210 round-2 P2): the conversation may
+            // have gained a customer_id since the alert rang, but the SID
+            // being read here is still what an unlinked-style bell (no
+            // thread param) is CURRENTLY pointed at. Deciding purely from
+            // today's linkage would hand this SID to the blunt by-SID clear
+            // below, which has no phone-wide unread check and can clear the
+            // bell out from under a still-unread sibling message that never
+            // got a bell of its own.
+            .orWhereExists(function unlinkedBell() {
+              this.select(1).from('notifications')
+                .where({ recipient_type: 'admin', category: 'inbound_sms', link: '/admin/communications' })
+                .whereNull('read_at')
+                .whereRaw("metadata->'payload'->>'twilioSid' = m.twilio_sid");
+            });
+        })
         .select('m.twilio_sid', 'c.contact_phone');
       const phones = new Set();
       for (const row of unknownReadRows) {
@@ -118,22 +134,44 @@ async function markInboundSmsRead({ messageIds = [], conversationIds = [], readB
             const remaining = await trx('messages as m')
               .join('conversations as c', 'c.id', 'm.conversation_id')
               .where({ 'c.contact_phone': phone, 'm.channel': 'sms', 'm.direction': 'inbound' })
-              .whereNull('c.customer_id')
+              // Phone-wide, not customer_id-gated (codex #4210 round-2 P2):
+              // a promoted thread's still-unread sibling must still be found
+              // here so the shared unlinked-style bell retargets to it
+              // instead of being cleared with it left silently unread.
               .andWhere(function unread() { this.where({ 'm.is_read': false }).orWhereNull('m.is_read'); })
               .whereNotNull('m.twilio_sid')
               .orderBy('m.created_at', 'asc')
               .first('m.twilio_sid');
             // Match the LIVE bell by what it currently rang for, not by the
             // SID(s) this call happened to read — those may differ from
-            // the SID the bell is actually keyed to.
+            // the SID the bell is actually keyed to. Scoped to the
+            // unlinked-style link so a promoted thread's now-customer-scoped
+            // bell (a different notification row, keyed by ?thread=) is
+            // never touched here. Bounded by the request-entry cutoff `now`
+            // (codex #4210 round-2 P1) — a bell created by a NEW inbound
+            // message that arrived after this read began must never be
+            // cleared: it rang for a message this call never saw as unread.
+            // `now` is a JS Date (millisecond precision); created_at is a
+            // Postgres timestamptz (microsecond precision) written by a
+            // statement that can land microseconds into the SAME
+            // millisecond `now` was captured in — a strict `<=` against the
+            // truncated JS value would then reject a bell that is, in
+            // reality, no later than this read's entry. Compare against the
+            // NEXT millisecond boundary so same-millisecond writes (the
+            // realistic gap between an insert and the read that follows it)
+            // still count as "at or before", while a bell from a genuinely
+            // later request (materially more than a fraction of a
+            // millisecond away in practice) is still excluded.
+            const cutoff = new Date(now.getTime() + 1);
             const liveBell = () => trx('notifications')
-              .where({ recipient_type: 'admin', category: 'inbound_sms' })
+              .where({ recipient_type: 'admin', category: 'inbound_sms', link: '/admin/communications' })
               .whereNull('read_at')
+              .where('created_at', '<', cutoff)
               .whereRaw(
                 `metadata->'payload'->>'twilioSid' IN (
                   SELECT m2.twilio_sid FROM messages m2
                   JOIN conversations c2 ON c2.id = m2.conversation_id
-                  WHERE c2.contact_phone = ? AND c2.customer_id IS NULL
+                  WHERE c2.contact_phone = ?
                 )`,
                 [phone],
               );

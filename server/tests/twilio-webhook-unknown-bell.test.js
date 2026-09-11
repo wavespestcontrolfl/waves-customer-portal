@@ -13,6 +13,15 @@ function mockDb(table) {
       if (q._phone) { mockState.claims.delete(q._phone); return 1; }
       return 0;
     };
+    // Confirm step: extends an existing (short-lease) claim row to the full
+    // window — standing in for confirmUnknownSenderAlertWindow's UPDATE.
+    q.update = async (patch) => {
+      if (q._phone && mockState.claims.has(q._phone) && patch?.expires_at) {
+        mockState.claims.set(q._phone, patch.expires_at);
+        return 1;
+      }
+      return 0;
+    };
     return q;
   }
   if (mockPg && table === 'sms_log') {
@@ -328,4 +337,46 @@ test('an unknown sender still throttles through dispatchUnknownSenderAlert when 
   expect(triggerNotification).toHaveBeenCalledTimes(1);
   await receive('Second message, same sender.', numbers.locations.parrish.number);
   expect(triggerNotification).toHaveBeenCalledTimes(1);
+});
+
+test('a delivered alert confirms the claim to the full 4h window, not left on the short claim lease (codex #4210 round-2 P1)', async () => {
+  mockState.ai = false;
+  const before = Date.now();
+  await receive('Please quote pest control.', numbers.locations.parrish.number);
+  const expiresAt = mockState.claims.get(sender);
+  expect(expiresAt).toBeDefined();
+  // The claim lease is a couple of minutes; a confirmed window is ~4h out.
+  // Assert it landed well past the lease so a stray "confirm never ran"
+  // regression (the window silently staying on the short lease) shows up.
+  expect(expiresAt.getTime() - before).toBeGreaterThan(3 * 60 * 60 * 1000);
+});
+
+test('an expired, unconfirmed lease is reclaimed by the next message instead of blocking on a claim nothing ever delivered for (codex #4210 round-2 P1)', async () => {
+  mockState.ai = false;
+  // Stands in for the deploy-crash gap: the process died between the claim
+  // insert and confirmUnknownSenderAlertWindow, leaving a row whose (short)
+  // lease has already expired with no bell ever rung for it.
+  mockState.claims.set(sender, new Date(Date.now() - 1000));
+  await receive('Please quote pest control.', numbers.locations.parrish.number);
+  expect(triggerNotification).toHaveBeenCalledTimes(1);
+  // And the winning claim itself gets confirmed to the full window.
+  expect(mockState.claims.get(sender).getTime() - Date.now()).toBeGreaterThan(3 * 60 * 60 * 1000);
+});
+
+test('an unknown loud reaction rings exactly one alert — not also the legacy owner forward (codex #4210 round-2 P1)', async () => {
+  mockState.ai = false;
+  const originalAdamPhone = process.env.ADAM_PHONE;
+  process.env.ADAM_PHONE = '+19415993489';
+  try {
+    await receive('Disliked "We will treat inside"', numbers.locations.parrish.number);
+    expect(triggerNotification).toHaveBeenCalledTimes(1);
+    // Before the fix: the legacy branch's `landed` only gets set when
+    // `customer` is truthy, so for an unknown sender it stayed false
+    // regardless of the throttled dispatch above already ringing — and the
+    // internal_alert owner forward fired as a SECOND, undeduped alert.
+    expect(require('../services/twilio').sendSMS).not.toHaveBeenCalled();
+  } finally {
+    if (originalAdamPhone === undefined) delete process.env.ADAM_PHONE;
+    else process.env.ADAM_PHONE = originalAdamPhone;
+  }
 });
