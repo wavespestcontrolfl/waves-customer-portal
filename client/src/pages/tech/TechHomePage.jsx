@@ -1036,6 +1036,7 @@ export default function TechHomePage({ section = 'today' }) {
 
       {photoTarget && (
         <TechServicePhotosModal
+          key={photoTarget.id}
           serviceId={photoTarget.id}
           customerName={photoTarget.customerName}
           onClose={() => setPhotoTarget(null)}
