@@ -80,6 +80,7 @@ function statusTone(value) {
 // Raw platform keys came off the API lowercase and were displayed through
 // textTransform: "capitalize". The shared type stack drops that, so the label
 // has to be built rather than styled.
+const PLATFORM_HEALTH_LABELS = { healthy: "Healthy", expired: "Expired", error: "Error", not_configured: "Not configured" };
 const PLATFORM_LABELS = { gbp: "GBP", facebook: "Facebook", instagram: "Instagram", linkedin: "LinkedIn", gemini: "Gemini", x: "X", tiktok: "TikTok", youtube: "YouTube" };
 function platformLabel(key, overrides = {}) {
   if (overrides[key]) return overrides[key];
@@ -202,27 +203,28 @@ function useIsMobile() {
   }, []);
   return isMobile;
 }
-function MetaHealthStrip({ health, onRefresh }) {
-  const facebook = health?.credentials?.find(
-    (cred) => cred.platform === "facebook",
-  );
-  const instagram = health?.credentials?.find(
-    (cred) => cred.platform === "instagram",
-  );
+// The summary line's optional-chain fallbacks are what pushed this function over
+// the complexity limit; deriving them once keeps the component a render.
+function metaHealthSummary(health) {
+  const facebook = health?.credentials?.find((cred) => cred.platform === "facebook");
+  const instagram = health?.credentials?.find((cred) => cred.platform === "instagram");
   if (!facebook && !instagram) return null;
-  const healthy =
-    facebook?.status === "healthy" && instagram?.status === "healthy";
   const fbDetails = facebook?.details || {};
   const igDetails = instagram?.details || {};
-  const linkedIg = fbDetails.linkedInstagramUsername
-    ? `@${fbDetails.linkedInstagramUsername}`
-    : "No linked IG";
-  const igLabel = igDetails.username ? `@${igDetails.username}` : "Instagram";
-  const quotaLabel =
-    igDetails.quotaUsage != null &&
-    Number.isFinite(Number(igDetails.quotaUsage))
-      ? `Quota used: ${igDetails.quotaUsage}`
-      : "Quota available";
+  const quota = Number(igDetails.quotaUsage);
+  return {
+    healthy: facebook?.status === "healthy" && instagram?.status === "healthy",
+    pageName: fbDetails.pageName || "Page check",
+    linkedIg: fbDetails.linkedInstagramUsername ? `@${fbDetails.linkedInstagramUsername}` : "No linked IG",
+    igLabel: igDetails.username ? `@${igDetails.username}` : "Instagram",
+    quotaLabel: igDetails.quotaUsage != null && Number.isFinite(quota) ? `Quota used: ${igDetails.quotaUsage}` : "Quota available",
+  };
+}
+
+function MetaHealthStrip({ health, onRefresh }) {
+  const summary = metaHealthSummary(health);
+  if (!summary) return null;
+  const { healthy, pageName, linkedIg, igLabel, quotaLabel } = summary;
   return (
     <Card
       className={cn(
@@ -235,7 +237,7 @@ function MetaHealthStrip({ health, onRefresh }) {
           Meta Publishing Health
         </div>
         <div className="text-ui-body text-ink-secondary mt-1">
-          Facebook: {fbDetails.pageName || "Page check"} · Linked IG: {linkedIg}{" "}
+          Facebook: {pageName} · Linked IG: {linkedIg}{" "}
           · Instagram: {igLabel} · {quotaLabel}
         </div>
         {health?.checkedAt && (
@@ -463,18 +465,12 @@ export default function SocialMediaPage() {
             );
             const healthStatus =
               cred?.status || (p.configured ? "unknown" : "not_configured");
-            const statusLabel =
-              !p.enabled && key !== "ai" && key !== "gemini"
-                ? "Disabled"
-                : healthStatus === "healthy"
-                  ? "Healthy"
-                  : healthStatus === "expired"
-                    ? "Expired"
-                    : healthStatus === "error"
-                      ? "Error"
-                      : healthStatus === "not_configured"
-                        ? "Not configured"
-                        : "Unknown";
+            const disabled = !p.enabled && key !== "ai" && key !== "gemini";
+            const statusLabel = disabled ? "Disabled" : PLATFORM_HEALTH_LABELS[healthStatus] || "Unknown";
+            // Disabled wins over the credential state: an expired token on a
+            // platform nobody is publishing to is not actionable, and main
+            // overrode the credential colour to muted whenever enabled was false.
+            const statusBadgeTone = disabled ? "neutral" : statusTone(healthStatus);
             return (
               <Card
                 key={key}
@@ -484,7 +480,7 @@ export default function SocialMediaPage() {
                   {platformLabel(key)}
                 </div>
                 <div className="mt-1">
-                  <Badge tone={statusTone(healthStatus)}>{statusLabel}</Badge>
+                  <Badge tone={statusBadgeTone}>{statusLabel}</Badge>
                 </div>
                 {cred?.lastError && healthStatus !== "healthy" && (
                   <div
@@ -637,6 +633,19 @@ function ChannelToggles({ channels, onChange }) {
     </div>
   );
 }
+// The run-outcome and enablement ladders are what put this panel over the
+// complexity limit; both are pure functions of the response and the status.
+function autonomousRunMessage(result, mode) {
+  if (result.skipped) return `Autonomous run skipped: ${result.reason}`;
+  if (result.dryRun) return "Autonomous dry run completed";
+  return mode === "draft" ? "Autonomous draft created" : "Autonomous publish run completed";
+}
+
+function autonomousStateLabel(status) {
+  if (status?.paused) return "Paused";
+  return status?.enabled && status?.globalAutomationEnabled ? "Autonomous" : "Not fully enabled";
+}
+
 function AutonomousStudioPanel({ showToast, onRan }) {
   const [status, setStatus] = useState(null);
   const [running, setRunning] = useState("");
@@ -655,14 +664,7 @@ function AutonomousStudioPanel({ showToast, onRan }) {
         method: "POST",
         body: JSON.stringify({ force: true, mode }),
       });
-      if (result.skipped) showToast(`Autonomous run skipped: ${result.reason}`);
-      else if (result.dryRun) showToast("Autonomous dry run completed");
-      else
-        showToast(
-          mode === "draft"
-            ? "Autonomous draft created"
-            : "Autonomous publish run completed",
-        );
+      showToast(autonomousRunMessage(result, mode));
       load();
       onRan?.();
     } catch (e) {
@@ -673,11 +675,7 @@ function AutonomousStudioPanel({ showToast, onRan }) {
   };
   const latest = status?.latestRun;
   const stateIsAlert = status?.paused;
-  const stateLabel = status?.paused
-    ? "Paused"
-    : status?.enabled && status?.globalAutomationEnabled
-      ? "Autonomous"
-      : "Not fully enabled";
+  const stateLabel = autonomousStateLabel(status);
   return (
     <Card
       className={cn(
@@ -746,6 +744,344 @@ function formatRunDate(value) {
   });
 }
 // ── Autonomous Run Audit Tab ──
+// One audit row per run. Extracted from the map so the studio tab's arrow stops
+// carrying the whole card's branch set (variant choice, video vs still, per-
+// platform results and the approve/reject controls all branch independently).
+// The draft-review panel — variant chooser, per-channel copy and the
+// approve/reject controls — is the bulk of a pending run's branch set, so it
+// renders on its own rather than inside the card's arrow.
+function AutonomousDraftReview({ run, variants, chosenIdx, chosenVariant, chosenIsVideo, drafts, busy, acting, setVariantChoice, approveRun, rejectRun }) {
+  return (
+                <div className="mt-3 p-3 rounded-md border-hairline border-zinc-300 bg-zinc-50">
+                  <div className="text-ui-body font-medium text-zinc-700">
+                    Pending approval
+                  </div>
+
+                  {variants.length > 1 && (
+                    <div className="flex gap-2 flex-wrap mt-2.5">
+                      {variants.map((v, idx) => {
+                        const isVideo = v?.type === "video";
+                        const src = safeHttpHref(
+                          isVideo ? v?.videoUrl : v?.imageUrl,
+                        );
+                        if (!src) return null;
+                        const selected = idx === chosenIdx;
+                        return (
+                          <Button
+                            key={`${run.id}-variant-${idx}`}
+                            type="button"
+                            onClick={() =>
+                              setVariantChoice((prev) => ({
+                                ...prev,
+                                [run.id]: idx,
+                              }))
+                            }
+                            title={v?.conceptKey || `Variant ${idx + 1}`}
+                            variant="secondary"
+                            className={cn(
+                              "p-0 rounded-md cursor-pointer leading-none relative",
+                              selected
+                                ? "ring-2 ring-zinc-900"
+                                : "opacity-75",
+                            )}
+                          >
+                            {isVideo ? (
+                              <video
+                                src={src}
+                                muted
+                                playsInline
+                                className="w-[84px] h-[84px] object-cover rounded-sm pointer-events-none"
+                              />
+                            ) : (
+                              <img
+                                src={src}
+                                alt={v?.conceptKey || `Variant ${idx + 1}`}
+                                className="w-[84px] h-[84px] object-cover rounded-sm"
+                              />
+                            )}
+                            {isVideo && (
+                              <Badge className="absolute bottom-1 left-1 leading-[14px]">
+                                ▶ REEL
+                              </Badge>
+                            )}
+                          </Button>
+                        );
+                      })}
+                    </div>
+                  )}
+
+                  {Object.keys(drafts).length > 0 && (
+                    <div className="mt-2.5 grid gap-1.5">
+                      {Object.entries(drafts).map(([platform, text]) => (
+                        <div
+                          key={`${run.id}-draft-${platform}`}
+                          className="rounded-md px-2.5 py-2 bg-white border-hairline border-zinc-200"
+                        >
+                          <div className="text-ui-body font-medium text-ink-secondary mb-1">
+                            {platform === "gbp" ? "GBP" : platform}
+                          </div>
+                          <div className="text-ui-body text-zinc-900 whitespace-pre-wrap max-h-[110px] overflow-y-auto">
+                            {String(text || "")}
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+
+                  {Array.isArray(run.preview?.sources) &&
+                    run.preview.sources.length > 0 && (
+                      <div className="mt-2.5 grid gap-1.5">
+                        <div className="text-ui-body font-medium text-ink-secondary">
+                          Source facts
+                        </div>
+                        {run.preview.sources.map((source, index) => (
+                          <div
+                            key={`${run.id}-source-${index}`}
+                            className="flex gap-1.5 items-baseline text-ui-body leading-[1.45]"
+                          >
+                            <Badge>{source.type}</Badge>
+                            <span className="text-ink-secondary">
+                              <span className="text-zinc-900 font-medium">
+                                {source.label}
+                              </span>
+                              {source.detail ? ` — ${source.detail}` : ""}
+                            </span>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+
+                  <div className="flex gap-2 mt-3 flex-wrap">
+                    <Button
+                      onClick={() => approveRun(run)}
+                      disabled={busy || !variants.length}
+                    >
+                      {acting === `approve-${run.id}`
+                        ? "Publishing..."
+                        : "Approve & Publish"}
+                    </Button>
+                    <Button
+                      onClick={() => rejectRun(run)}
+                      disabled={busy}
+                      variant="danger"
+                    >
+                      {acting === `reject-${run.id}`
+                        ? "Rejecting..."
+                        : "Reject"}
+                    </Button>
+                    {run.preview?.visual?.creative?.conceptKey && (
+                      <span className="text-ui-body text-ink-secondary self-center">
+                        scene:{" "}
+                        {variants[chosenIdx]?.conceptKey ||
+                          run.preview.visual.creative.conceptKey}
+                      </span>
+                    )}
+                  </div>
+                </div>
+  );
+}
+
+// Per-platform outcome rows: each result independently branches on location,
+// success, dryRun and skipped, which is most of what was left in the card.
+function AutonomousPlatformResults({ run, platformResults }) {
+  return (
+                <div className="mt-3 grid gap-1.5">
+                  {platformResults.map((result, index) => {
+                    const label = result.location
+                      ? `${result.platform}/${result.location}`
+                      : result.platform;
+                    const detail = result.success
+                      ? "posted"
+                      : result.dryRun
+                        ? "dry run"
+                        : result.skipped
+                          ? "skipped"
+                          : result.error || "failed";
+                    return (
+                      <div
+                        key={`${run.id}-${label}-${index}`}
+                        className="flex justify-between gap-2.5 px-[9px] py-[7px] rounded-md border-hairline border-zinc-200 text-ui-body"
+                      >
+                        <span className="text-zinc-900 font-medium">
+                          {label || "platform"}
+                        </span>
+                        <span
+                          className={
+                            !result.success &&
+                            !result.dryRun &&
+                            !result.skipped
+                              ? "text-alert-fg"
+                              : "text-ink-secondary"
+                          }
+                        >
+                          {detail}
+                        </span>
+                      </div>
+                    );
+                  })}
+                </div>
+  );
+}
+
+// Which media a run row shows, and which variant it is showing, is a ladder of
+// its own: a pending draft follows the operator's variant choice, a published
+// run prefers the Reel it actually shipped over the fallback still.
+function autonomousRunMedia(run, variantChoice) {
+  const isPendingDraft = run.status === "draft_created";
+  const variants = isPendingDraft ? draftRunVariants(run) : [];
+  const chosenIdx = Math.min(variantChoice[run.id] ?? 0, Math.max(0, variants.length - 1));
+  const chosenVariant = isPendingDraft && variants.length ? variants[chosenIdx] : null;
+  const publishedVideoUrl = isPendingDraft ? null : safeHttpHref(run.preview?.visual?.videoUrl);
+  const chosenIsVideo = chosenVariant ? chosenVariant.type === "video" : !!publishedVideoUrl;
+  const chosenMedia = chosenVariant && (chosenIsVideo ? chosenVariant.videoUrl : chosenVariant.imageUrl);
+  return {
+    isPendingDraft, variants, chosenIdx, chosenVariant, chosenIsVideo,
+    displayImage: chosenVariant ? chosenMedia : publishedVideoUrl || run.imageUrl,
+  };
+}
+
+// Three independent optional links/ids; pulling them out keeps the card's own
+// branch count under the configured maximum.
+function AutonomousRunLinks({ run }) {
+  return (
+              <div className="flex gap-3 mt-3 flex-wrap text-ui-body">
+                {safeHttpHref(run.imageUrl) && (
+                  <a
+                    href={safeHttpHref(run.imageUrl)}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="text-zinc-900"
+                  >
+                    Open image
+                  </a>
+                )}
+                {safeHttpHref(run.post?.sourceUrl) && (
+                  <a
+                    href={safeHttpHref(run.post.sourceUrl)}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="text-zinc-900"
+                  >
+                    Open source
+                  </a>
+                )}
+                {run.socialMediaPostId && (
+                  <span className="text-ink-secondary">
+                    Post ID: {run.socialMediaPostId}
+                  </span>
+                )}
+              </div>
+  );
+}
+
+function AutonomousRunHeading({ run }) {
+  return (
+    <div className="flex justify-between items-start gap-3 flex-wrap">
+      <div>
+        <div className="text-ui-body font-medium text-zinc-900">
+          {run.topic || run.post?.title || "Autonomous social run"}
+        </div>
+        <div className="text-ui-body text-ink-secondary mt-1">
+          {[run.city, run.service, run.mode].filter(Boolean).join(" · ")} · {formatRunDate(run.startedAt)}
+        </div>
+      </div>
+      <Badge tone={statusTone(run.status)}>{run.status}</Badge>
+    </div>
+  );
+}
+
+function AutonomousRunCard({ run, variantChoice, setVariantChoice, acting, approveRun, rejectRun, isMobile }) {
+          const platformResults = run.platformResults || [];
+          const channels = run.channels?.length
+            ? run.channels
+            : parseMaybeJson(run.preview?.inputs?.channels, []);
+          const { isPendingDraft, variants, chosenIdx, chosenVariant, chosenIsVideo, displayImage } =
+            autonomousRunMedia(run, variantChoice);
+          const drafts = run.preview?.drafts || {};
+          const busy =
+            acting === `approve-${run.id}` || acting === `reject-${run.id}`;
+          return (
+            <Card
+              key={run.id}
+              style={{
+                gridTemplateColumns:
+                  isMobile || !displayImage ? "1fr" : "1fr 150px",
+              }}
+              className={cn(
+                "mb-0 grid gap-4 border-l-4",
+                statusTone(run.status) === "alert"
+                  ? "border-l-alert-fg"
+                  : "border-l-zinc-300",
+              )}
+            >
+              <div>
+                <AutonomousRunHeading run={run} />
+
+                <div className="flex gap-1.5 flex-wrap mt-2.5">
+                  {channels.map((channel) => (
+                    <Badge key={`${run.id}-${channel}`}>
+                      {channel === "gbp" ? "GBP" : channel}
+                    </Badge>
+                  ))}
+                  {run.post?.status && <Badge>post {run.post.status}</Badge>}
+                </div>
+
+                {run.skipReason && (
+                  <div className="mt-2.5 text-ui-body text-alert-fg">
+                    {run.skipReason}
+                  </div>
+                )}
+
+                {isPendingDraft && (
+                  <AutonomousDraftReview
+                    run={run}
+                    variants={variants}
+                    chosenIdx={chosenIdx}
+                    chosenVariant={chosenVariant}
+                    chosenIsVideo={chosenIsVideo}
+                    drafts={drafts}
+                    busy={busy}
+                    acting={acting}
+                    setVariantChoice={setVariantChoice}
+                    approveRun={approveRun}
+                    rejectRun={rejectRun}
+                  />
+                )}
+
+                {platformResults.length > 0 && (
+                  <AutonomousPlatformResults run={run} platformResults={platformResults} />
+                )}
+
+                <AutonomousRunLinks run={run} />
+              </div>
+
+              {safeHttpHref(displayImage) &&
+                (chosenIsVideo ? (
+                  <video
+                    src={safeHttpHref(displayImage)}
+                    controls
+                    muted
+                    playsInline
+                    className="w-full aspect-[9/16] object-cover rounded-md border-hairline border-zinc-200 bg-zinc-100"
+                  />
+                ) : (
+                  <a
+                    href={safeHttpHref(displayImage)}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="block"
+                  >
+                    <img
+                      src={safeHttpHref(displayImage)}
+                      alt=""
+                      className="w-full aspect-square object-cover rounded-md border-hairline border-zinc-200 bg-zinc-100"
+                    />
+                  </a>
+                ))}
+            </Card>
+          );
+}
+
 function AutonomousRunAuditTab({ showToast, onRan }) {
   const isMobile = useIsMobile();
   const [data, setData] = useState({
@@ -912,304 +1248,18 @@ function AutonomousRunAuditTab({ showToast, onRan }) {
         </Card>
       ) : (
         <div className="grid gap-3">
-          {runs.map((run) => {
-            const platformResults = run.platformResults || [];
-            const channels = run.channels?.length
-              ? run.channels
-              : parseMaybeJson(run.preview?.inputs?.channels, []);
-            const isPendingDraft = run.status === "draft_created";
-            const variants = isPendingDraft ? draftRunVariants(run) : [];
-            const chosenIdx = Math.min(
-              variantChoice[run.id] ?? 0,
-              Math.max(0, variants.length - 1),
-            );
-            const chosenVariant =
-              isPendingDraft && variants.length ? variants[chosenIdx] : null;
-            // A published run that shipped a Reel records preview.visual.videoUrl —
-            // show the actual video in the audit row, not just the fallback still.
-            const publishedVideoUrl = !isPendingDraft
-              ? safeHttpHref(run.preview?.visual?.videoUrl)
-              : null;
-            const chosenIsVideo = chosenVariant
-              ? chosenVariant.type === "video"
-              : !!publishedVideoUrl;
-            const displayImage = chosenVariant
-              ? chosenIsVideo
-                ? chosenVariant.videoUrl
-                : chosenVariant.imageUrl
-              : publishedVideoUrl || run.imageUrl;
-            const drafts = run.preview?.drafts || {};
-            const busy =
-              acting === `approve-${run.id}` || acting === `reject-${run.id}`;
-            return (
-              <Card
-                key={run.id}
-                style={{
-                  gridTemplateColumns:
-                    isMobile || !displayImage ? "1fr" : "1fr 150px",
-                }}
-                className={cn(
-                  "mb-0 grid gap-4 border-l-4",
-                  statusTone(run.status) === "alert"
-                    ? "border-l-alert-fg"
-                    : "border-l-zinc-300",
-                )}
-              >
-                <div>
-                  <div className="flex justify-between items-start gap-3 flex-wrap">
-                    <div>
-                      <div className="text-ui-body font-medium text-zinc-900">
-                        {run.topic ||
-                          run.post?.title ||
-                          "Autonomous social run"}
-                      </div>
-                      <div className="text-ui-body text-ink-secondary mt-1">
-                        {[run.city, run.service, run.mode]
-                          .filter(Boolean)
-                          .join(" · ")}{" "}
-                        · {formatRunDate(run.startedAt)}
-                      </div>
-                    </div>
-                    <Badge tone={statusTone(run.status)}>{run.status}</Badge>
-                  </div>
-
-                  <div className="flex gap-1.5 flex-wrap mt-2.5">
-                    {channels.map((channel) => (
-                      <Badge key={`${run.id}-${channel}`}>
-                        {channel === "gbp" ? "GBP" : channel}
-                      </Badge>
-                    ))}
-                    {run.post?.status && <Badge>post {run.post.status}</Badge>}
-                  </div>
-
-                  {run.skipReason && (
-                    <div className="mt-2.5 text-ui-body text-alert-fg">
-                      {run.skipReason}
-                    </div>
-                  )}
-
-                  {isPendingDraft && (
-                    <div className="mt-3 p-3 rounded-md border-hairline border-zinc-300 bg-zinc-50">
-                      <div className="text-ui-body font-medium text-zinc-700">
-                        Pending approval
-                      </div>
-
-                      {variants.length > 1 && (
-                        <div className="flex gap-2 flex-wrap mt-2.5">
-                          {variants.map((v, idx) => {
-                            const isVideo = v?.type === "video";
-                            const src = safeHttpHref(
-                              isVideo ? v?.videoUrl : v?.imageUrl,
-                            );
-                            if (!src) return null;
-                            const selected = idx === chosenIdx;
-                            return (
-                              <Button
-                                key={`${run.id}-variant-${idx}`}
-                                type="button"
-                                onClick={() =>
-                                  setVariantChoice((prev) => ({
-                                    ...prev,
-                                    [run.id]: idx,
-                                  }))
-                                }
-                                title={v?.conceptKey || `Variant ${idx + 1}`}
-                                variant="secondary"
-                                className={cn(
-                                  "p-0 rounded-md cursor-pointer leading-none relative",
-                                  selected
-                                    ? "ring-2 ring-zinc-900"
-                                    : "opacity-75",
-                                )}
-                              >
-                                {isVideo ? (
-                                  <video
-                                    src={src}
-                                    muted
-                                    playsInline
-                                    className="w-[84px] h-[84px] object-cover rounded-sm pointer-events-none"
-                                  />
-                                ) : (
-                                  <img
-                                    src={src}
-                                    alt={v?.conceptKey || `Variant ${idx + 1}`}
-                                    className="w-[84px] h-[84px] object-cover rounded-sm"
-                                  />
-                                )}
-                                {isVideo && (
-                                  <Badge className="absolute bottom-1 left-1 leading-[14px]">
-                                    ▶ REEL
-                                  </Badge>
-                                )}
-                              </Button>
-                            );
-                          })}
-                        </div>
-                      )}
-
-                      {Object.keys(drafts).length > 0 && (
-                        <div className="mt-2.5 grid gap-1.5">
-                          {Object.entries(drafts).map(([platform, text]) => (
-                            <div
-                              key={`${run.id}-draft-${platform}`}
-                              className="rounded-md px-2.5 py-2 bg-white border-hairline border-zinc-200"
-                            >
-                              <div className="text-ui-body font-medium text-ink-secondary mb-1">
-                                {platform === "gbp" ? "GBP" : platform}
-                              </div>
-                              <div className="text-ui-body text-zinc-900 whitespace-pre-wrap max-h-[110px] overflow-y-auto">
-                                {String(text || "")}
-                              </div>
-                            </div>
-                          ))}
-                        </div>
-                      )}
-
-                      {Array.isArray(run.preview?.sources) &&
-                        run.preview.sources.length > 0 && (
-                          <div className="mt-2.5 grid gap-1.5">
-                            <div className="text-ui-body font-medium text-ink-secondary">
-                              Source facts
-                            </div>
-                            {run.preview.sources.map((source, index) => (
-                              <div
-                                key={`${run.id}-source-${index}`}
-                                className="flex gap-1.5 items-baseline text-ui-body leading-[1.45]"
-                              >
-                                <Badge>{source.type}</Badge>
-                                <span className="text-ink-secondary">
-                                  <span className="text-zinc-900 font-medium">
-                                    {source.label}
-                                  </span>
-                                  {source.detail ? ` — ${source.detail}` : ""}
-                                </span>
-                              </div>
-                            ))}
-                          </div>
-                        )}
-
-                      <div className="flex gap-2 mt-3 flex-wrap">
-                        <Button
-                          onClick={() => approveRun(run)}
-                          disabled={busy || !variants.length}
-                        >
-                          {acting === `approve-${run.id}`
-                            ? "Publishing..."
-                            : "Approve & Publish"}
-                        </Button>
-                        <Button
-                          onClick={() => rejectRun(run)}
-                          disabled={busy}
-                          variant="danger"
-                        >
-                          {acting === `reject-${run.id}`
-                            ? "Rejecting..."
-                            : "Reject"}
-                        </Button>
-                        {run.preview?.visual?.creative?.conceptKey && (
-                          <span className="text-ui-body text-ink-secondary self-center">
-                            scene:{" "}
-                            {variants[chosenIdx]?.conceptKey ||
-                              run.preview.visual.creative.conceptKey}
-                          </span>
-                        )}
-                      </div>
-                    </div>
-                  )}
-
-                  {platformResults.length > 0 && (
-                    <div className="mt-3 grid gap-1.5">
-                      {platformResults.map((result, index) => {
-                        const label = result.location
-                          ? `${result.platform}/${result.location}`
-                          : result.platform;
-                        const detail = result.success
-                          ? "posted"
-                          : result.dryRun
-                            ? "dry run"
-                            : result.skipped
-                              ? "skipped"
-                              : result.error || "failed";
-                        return (
-                          <div
-                            key={`${run.id}-${label}-${index}`}
-                            className="flex justify-between gap-2.5 px-[9px] py-[7px] rounded-md border-hairline border-zinc-200 text-ui-body"
-                          >
-                            <span className="text-zinc-900 font-medium">
-                              {label || "platform"}
-                            </span>
-                            <span
-                              className={
-                                !result.success &&
-                                !result.dryRun &&
-                                !result.skipped
-                                  ? "text-alert-fg"
-                                  : "text-ink-secondary"
-                              }
-                            >
-                              {detail}
-                            </span>
-                          </div>
-                        );
-                      })}
-                    </div>
-                  )}
-
-                  <div className="flex gap-3 mt-3 flex-wrap text-ui-body">
-                    {safeHttpHref(run.imageUrl) && (
-                      <a
-                        href={safeHttpHref(run.imageUrl)}
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        className="text-zinc-900"
-                      >
-                        Open image
-                      </a>
-                    )}
-                    {safeHttpHref(run.post?.sourceUrl) && (
-                      <a
-                        href={safeHttpHref(run.post.sourceUrl)}
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        className="text-zinc-900"
-                      >
-                        Open source
-                      </a>
-                    )}
-                    {run.socialMediaPostId && (
-                      <span className="text-ink-secondary">
-                        Post ID: {run.socialMediaPostId}
-                      </span>
-                    )}
-                  </div>
-                </div>
-
-                {safeHttpHref(displayImage) &&
-                  (chosenIsVideo ? (
-                    <video
-                      src={safeHttpHref(displayImage)}
-                      controls
-                      muted
-                      playsInline
-                      className="w-full aspect-[9/16] object-cover rounded-md border-hairline border-zinc-200 bg-zinc-100"
-                    />
-                  ) : (
-                    <a
-                      href={safeHttpHref(displayImage)}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      className="block"
-                    >
-                      <img
-                        src={safeHttpHref(displayImage)}
-                        alt=""
-                        className="w-full aspect-square object-cover rounded-md border-hairline border-zinc-200 bg-zinc-100"
-                      />
-                    </a>
-                  ))}
-              </Card>
-            );
-          })}
+          {runs.map((run) => (
+            <AutonomousRunCard
+              key={run.id}
+              run={run}
+              variantChoice={variantChoice}
+              setVariantChoice={setVariantChoice}
+              acting={acting}
+              approveRun={approveRun}
+              rejectRun={rejectRun}
+              isMobile={isMobile}
+            />
+          ))}
         </div>
       )}
     </div>
