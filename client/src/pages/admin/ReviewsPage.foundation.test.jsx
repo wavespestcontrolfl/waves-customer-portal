@@ -29,6 +29,25 @@ afterEach(() => {
 });
 
 describe("Reviews workspace foundation", () => {
+  it("renders location and pipeline badges on a populated review feed", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => response({
+      reviews: [{
+        id: "review-1",
+        reviewerName: "Taylor Example",
+        reviewText: "Synthetic review evidence",
+        starRating: 2,
+        locationId: "sarasota",
+        autoReply: { status: "parked", reason: "low_rating" },
+      }],
+      locations: [],
+      stats: { totalReviews: 1, avgRating: 2, unresponded: 1, responded: 0 },
+    })));
+    render(<ReviewsPage />);
+    expect(await screen.findByText("Synthetic review evidence")).toBeInTheDocument();
+    expect(screen.getByText("Needs you (low rating)")).toBeInTheDocument();
+    expect(screen.getByText("Sarasota", { selector: "span" })).toBeInTheDocument();
+  });
+
   it("keeps the grouped Reviews, Outreach, Incentives, and GBP workspaces reachable", async () => {
     const fetch = vi.fn(async () =>
       response({
