@@ -26,13 +26,18 @@ export default function ProgramSetup({ setup, view, onSaved }) {
     try {
       const { activation_share, ...body } = definition;
       await request('/rules', { method: 'POST', body: { ...body, rework_minimum: numeric(definition.rework_minimum), handoff_minimum: numeric(definition.handoff_minimum), activation_share_bps: percentBps(activation_share) } });
+      change('id', crypto.randomUUID());
       onSaved('Simulation definition saved with its effective date.');
     } catch (failure) { setError(failure.message); }
     finally { setBusy(''); }
   }
   async function saveLevel(event) {
     event.preventDefault(); setBusy('level'); setError('');
-    try { await request('/levels', { method: 'POST', body: { ...level, technician_id: view.person.id } }); onSaved('Simulation level saved. Current compensation terms remain in effect.'); }
+    try {
+      await request('/levels', { method: 'POST', body: { ...level, technician_id: view.person.id } });
+      setLevel(current => ({ ...current, id: crypto.randomUUID() }));
+      onSaved('Simulation level saved. Current compensation terms remain in effect.');
+    }
     catch (failure) { setError(failure.message); }
     finally { setBusy(''); }
   }

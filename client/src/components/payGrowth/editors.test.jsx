@@ -305,6 +305,19 @@ describe('ServiceScore', () => {
     expect(request.mock.calls[0][0]).toBe('/services/svc-1/score');
     expect(request.mock.calls[1][0]).toBe('/services/svc-1/score');
   });
+
+  it('takes the viewer role from the caller, never from the score payload', async () => {
+    request.mockResolvedValue({ entries: [entry], can_manage: true });
+    const { container, unmount } = render(withRouter(<ServiceScore serviceId="svc-1" />));
+    await screen.findByText('Quarterly Pest');
+    expect(container.querySelector('.pay-growth').hasAttribute('data-admin')).toBe(false);
+    expect(screen.getByRole('link', { name: 'Open Pay & Growth' })).toHaveAttribute('href', '/tech/pay-growth');
+    unmount();
+    request.mockImplementation(() => new Promise(() => {}));
+    const admin = render(withRouter(<ServiceScore serviceId="svc-1" manage />));
+    expect(admin.container.querySelector('.pay-growth').hasAttribute('data-admin')).toBe(true);
+    expect(screen.getByRole('link', { name: 'Open Pay & Growth' })).toHaveAttribute('href', '/admin/timetracking?tab=pay-growth');
+  });
 });
 
 describe('ServiceEvidence', () => {
