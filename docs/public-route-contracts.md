@@ -1746,9 +1746,12 @@ in Agents → Activity) instead of emails to contact@, and retire a finding's
 standing rows once its check has run clean N times (fall-off rule, owner
 2026-09-11). Token-only auth: `OPS_DIGEST_INGEST_TOKEN` via
 `Authorization: Bearer`, constant-time compare. Fail-closed in ordered
-layers, the dark check FIRST and ahead of the rate limiter so a prober
-never sees a revealing 429: 404 while the token is unset (that IS the kill
-switch), then 120/15-min per-IP limiter (/64-collapsed), 401 on mismatch,
+layers, the dark check FIRST — a pre-router `app.use('/api/ops/digest')`
+gate in server/index.js mounted ahead of the global `/api/` limiter and the
+JSON parser, so while the token is unset a prober sees a plain 404 and
+never a revealing 429, 400 or 413 (the router repeats the check as its own
+first layer): 404 while the token is unset (that IS the kill switch), then
+120/15-min per-IP limiter (/64-collapsed), 401 on mismatch,
 409 while `GATE_OPS_DIGESTS_IN_APP` / `GATE_AGENT_ACTIVITY` are off, 400 on
 a rejected payload (kinds other than FIX/ACT are refused — routine/FYI
 reporting stays on email), 503 when no row landed; the caller emails on

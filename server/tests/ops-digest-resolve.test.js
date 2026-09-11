@@ -39,7 +39,8 @@ test('retires not-yet-resolved rows (read or unread) by opsKey + source and stam
   const patch = q.update.mock.calls[0][0];
   // read_at only stamped when still null — an owner's earlier read stands.
   expect(patch.read_at).toEqual({ sql: 'COALESCE(read_at, NOW())', bindings: undefined });
-  expect(patch.metadata.sql).toBe("COALESCE(metadata, '{}'::jsonb) || ?::jsonb");
+  // dedupeKey is removed so a recurrence inside the rolling window rings again.
+  expect(patch.metadata.sql).toBe("(COALESCE(metadata, '{}'::jsonb) - 'dedupeKey') || ?::jsonb");
   const merged = JSON.parse(patch.metadata.bindings[0]);
   expect(merged).toMatchObject({ resolved: true, resolvedBy: 'ops-crons:3-clean-runs' });
   expect(typeof merged.resolvedAt).toBe('string');

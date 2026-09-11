@@ -451,12 +451,16 @@ async function loadRows(windowHours) {
       db('notifications')
         .select('id', 'title', 'body', 'link', 'metadata', 'read_at', 'created_at')
         .where({ recipient_type: 'admin', category: DIGEST_CATEGORY })
-        // An unread action (ACT: / [Review]) or unresolved FIX: digest stays
-        // in the feed until read, however old — its email was suppressed, so
-        // this row is the only place it exists. FYI rows keep the window.
+        // An unread action (ACT: / [Review]) stays in the feed until read,
+        // however old — its email was suppressed, so this row is the only
+        // place it exists. A FIX: digest stays until RESOLVED (the fall-off
+        // rule stamps metadata.resolved), not merely read: opening it does
+        // not fix it, and it must not vanish from the feed before the check
+        // runs clean (codex P1 on #4392). FYI rows keep the window.
         .where((q) =>
           q.where('created_at', '>=', since)
-            .orWhere((u) => u.whereNull('read_at').andWhereRaw("title ~* '^(ACT:|FIX:|\\[Review\\])'")))
+            .orWhere((u) => u.whereNull('read_at').andWhereRaw("title ~* '^(ACT:|\\[Review\\])'"))
+            .orWhere((f) => f.whereRaw("COALESCE(metadata->>'resolved', '') <> 'true'").andWhereRaw("title ~* '^FIX:'")))
         .orderBy('created_at', 'desc')
         .limit(MAX_ITEMS)),
   ]);
