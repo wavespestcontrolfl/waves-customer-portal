@@ -18,7 +18,7 @@ const {
 const graduation = require('../services/sms-graduation');
 
 const {
-  autoSendPreflight, autoSendActionsSafe, isRealProviderSend,
+  autoSendPreflight, autoSendActionsSafe, isRealProviderSend, isAmbiguousProviderOutcome,
   AUTOSEND_MODE, AUTOSEND_MESSAGE_TYPE, CLAIM_STATUS, SENT_STATUS, FAILED_STATUS, SUPPRESSION_SENTINELS,
 } = autoSend;
 
@@ -122,6 +122,22 @@ describe('isRealProviderSend — suppression sentinels are NOT a delivered SMS',
   test('sent:true with no provider id is NOT a send', () => {
     expect(isRealProviderSend({ sent: true, providerMessageId: null })).toBe(false);
     expect(isRealProviderSend({ sent: true })).toBe(false);
+  });
+});
+
+describe('isAmbiguousProviderOutcome — canonical delivery state owns claim settlement', () => {
+  test('explicit uncertainty holds even without retry flags or a provider id', () => {
+    expect(isAmbiguousProviderOutcome({ sent: false, deliveryOutcome: 'uncertain' })).toBe(true);
+    expect(isAmbiguousProviderOutcome({ sent: true, deliveryOutcome: 'uncertain', providerMessageId: null })).toBe(true);
+  });
+
+  test('explicit non-delivery releases even when retryable', () => {
+    expect(isAmbiguousProviderOutcome({ sent: false, deliveryOutcome: 'not_sent', retryable: true })).toBe(false);
+  });
+
+  test('legacy outcomes retain the retryable/deferred fallback', () => {
+    expect(isAmbiguousProviderOutcome({ sent: false, retryable: true })).toBe(true);
+    expect(isAmbiguousProviderOutcome({ sent: false, blocked: true, retryable: true })).toBe(false);
   });
 });
 

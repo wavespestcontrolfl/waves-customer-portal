@@ -43,7 +43,7 @@ const DiscountEngine = require('../services/discount-engine');
 const { serviceExcludedFromPercentDiscount } = require('../services/pricing-engine/discount-engine');
 const { isReService } = require('../services/re-service');
 const { hasMembership } = require('../services/project-completion');
-const { assignDispatchJob, emitDispatchJobUpdate } = require('../services/dispatch-assignment');
+const { assignDispatchJob, emitDispatchJobUpdate, flushDispatchQualityDates } = require('../services/dispatch-assignment');
 const { shiftCallFollowUpsForParentMove, cancelCallFollowUpsForParentCancel } = require('../services/call-booking-catalog');
 const {
   isNewRecurringSignupCandidate,
@@ -2473,6 +2473,118 @@ async function loadStoredDiscountScope(_database, parent, addonRows = []) {
 // visits, not the year-old series parent); the parent template is the
 // fallback when no sibling carries a value. Returns undefined when nothing
 // carries a value so the insert keeps the column default.
+// Re-apply the parent term's coverage after a series row is inserted, so the
+// new visit is stamped if — and only if — the term still has a slot for it.
+// Failing soft leaves the visit uncovered, which is a billing question
+// someone can correct; blocking the extension is a service failure the
+// customer feels.
+// Every annual-prepay term id carried by a live visit anywhere in this
+// series, plus the ones the caller already has in hand. The link can sit on
+// any visit, not the root: prepay activated partway through an ongoing series
+// links only visits inside the term window (coverageRowsForTerm /
+// attachScheduledServices), so a root predating term_start is never linked.
+async function seriesTermIds(conn, parentId, ...known) {
+  const ids = new Set(known.filter(Boolean).map(String));
+  if (parentId) {
+    const rows = await conn('scheduled_services')
+      .where(function inSeries() {
+        this.where({ id: parentId }).orWhere({ recurring_parent_id: parentId });
+      })
+      .whereNotNull('annual_prepay_term_id')
+      // NO status filter, deliberately. This is term DISCOVERY, not slot
+      // counting: any linked visit — live, NULL-status, or terminal — is
+      // valid evidence that this series belongs to that term. Filtering
+      // terminal rows out destroyed the only link when the historical parent
+      // was unlinked and the one linked sibling was later cancelled, leaving
+      // a replacement extension unable to resolve a still-paid term and
+      // billable again — precisely when the cancellation had FREED a slot for
+      // it. Whether the term is real is coveredTermsAsOf's job (it rejects
+      // unpaid and revoked), and whether a slot is free is
+      // coverageRowsForTerm's (it still excludes terminal rows from the
+      // covered set). Discovery only has to find candidates.
+      .distinct('annual_prepay_term_id')
+      .pluck('annual_prepay_term_id');
+    for (const id of rows || []) if (id) ids.add(String(id));
+  }
+  return [...ids];
+}
+
+// The term that covers a specific DATE, chosen from the ids a series carries.
+//
+// Not "the first link found": at a renewal boundary the just-completed visit
+// still points at the OLD term, whose window excludes the new visit, while a
+// sibling already carries the renewed one. Stopping at the historical link
+// left the extension unstamped exactly when coverage was available. Passing
+// the date to coveredTermsAsOf picks the term that is live, paid AND whose
+// window contains the visit — the same authority annualPrepayCoversVisit
+// consults, so the two cannot disagree about which term is real.
+async function coveringTermForDate(conn, termIds, coverageDate) {
+  if (!termIds.length) return null;
+  const AnnualPrepayRenewals = require('../services/annual-prepay-renewals');
+  return AnnualPrepayRenewals.coveredTermsAsOf(conn, coverageDate || null)
+    .whereIn('t.id', termIds)
+    .orderBy('t.term_start', 'desc')
+    .first('t.*');
+}
+
+// Re-apply the series' annual-prepay coverage after an extension row is
+// inserted, so the new visit is stamped if — and only if — a live paid term
+// covers its date and still has a slot for it.
+//
+// EVERY query, the series scan included, runs inside the savepoint. A failed
+// statement leaves a PostgreSQL transaction aborted (25P02) even when
+// JavaScript catches it, so a lookup outside the savepoint would poison the
+// caller and roll back the visit that was just inserted.
+async function applyExtensionPrepayCoverage(conn, parent, svc = null, coverageDate = null) {
+  const AnnualPrepayRenewals = require('../services/annual-prepay-renewals');
+  let resolvedTerm = null;
+  const run = async (c) => {
+    const termIds = await seriesTermIds(
+      c, parent?.id, svc?.annual_prepay_term_id, parent?.annual_prepay_term_id,
+    );
+    const term = await coveringTermForDate(c, termIds, coverageDate);
+    if (!term) return;
+    resolvedTerm = term;
+    // A callback stamped by the older text-matching behavior is excluded from
+    // coverageRowsForTerm but keeps its annual-prepay amount, so allocating a
+    // replacement slot without clearing it leaves the term with MORE positive
+    // allocations than coverage_visit_count — inflating prepaid-series totals
+    // and making the callback look like held money to the cancellation
+    // guards. The other direct-stamping paths detach first; so does this one.
+    await AnnualPrepayRenewals._private.detachCallbacksFromTerm(term, c);
+    await AnnualPrepayRenewals.applyPrepaidCoverageForTerm(term, c, {
+      quietTransientExceptions: true,
+      // Queries on the savepoint; alerts wait on the OUTER transaction. A
+      // savepoint's executionPromise resolves on RELEASE, so filing against
+      // it would let a later rollback leave a false cancellation alert that
+      // dedupes the real retry for seven days.
+      notifyConn: conn,
+    });
+  };
+  try {
+    if (conn && conn.isTransaction) await conn.transaction(run);
+    else await run(conn);
+  } catch (e) {
+    // Fail to TODAY's behavior (uncovered) rather than blocking the
+    // extension: an unstamped visit is a billing question someone can
+    // correct, a missing visit is a service failure the customer feels.
+    //
+    // But NOT silently. The savepoint rolls back and the visit commits
+    // uncovered, and no sweep re-runs ordinary coverage allocation
+    // (reconcileCoveredTermsSweep handles COMPLETED visits), so without a
+    // durable trail that row stays billable until it completes and charges
+    // the customer for prepaid work. File the operator exception on the
+    // OUTER transaction, so it is not minted if the caller later rolls back.
+    logger.warn(`[recurring] prepay coverage re-apply failed for parent=${parent?.id}: ${e.message}`);
+    if (resolvedTerm) {
+      await AnnualPrepayRenewals._private.fileCoverageExceptionAfterCommit(
+        conn, resolvedTerm, 'generator_coverage_failed',
+        'A newly scheduled visit on this annual prepay could not be marked as covered, so completing it will invoice the customer for prepaid work. Re-apply the prepay coverage to that visit, or void the invoice if it has already been issued.',
+      ).catch(() => {});
+    }
+  }
+}
+
 async function resolveSeriesCreateInvoiceOnComplete(conn, parentId, parent) {
   try {
     const sibling = await conn('scheduled_services')
@@ -6718,6 +6830,13 @@ router.post('/bulk-action', requireAdmin, async (req, res, next) => {
 
     const { transitionJobStatus } = require('../services/job-status');
 
+    // Every date this batch touched, refreshed ONCE after the loop. The
+    // endpoint accepts 100 ids and each refresh repairs and remeasures whole
+    // routes, so a per-row refresh would run up to 100 near-duplicate passes
+    // serially and could time out the response after the rows had already
+    // committed (codex #4295 r1 P2).
+    const qualityDates = new Set();
+
     for (const id of serviceIds) {
       try {
         // Held locally until this row's transaction COMMITS: the CAS below
@@ -6736,7 +6855,7 @@ router.post('/bulk-action', requireAdmin, async (req, res, next) => {
                 trx,
               });
             });
-            try { await emitDispatchJobUpdate({ jobId: id, actorId: req.technicianId }); } catch {}
+            try { await emitDispatchJobUpdate({ jobId: id, actorId: req.technicianId, qualityDates }); } catch {}
             break;
           }
           case 'reschedule': {
@@ -7217,6 +7336,7 @@ router.post('/bulk-action', requireAdmin, async (req, res, next) => {
             // shared with the rebooker path; best-effort outside the trx (a
             // failed shift leaves the child where it was; the helper no-ops
             // when the date didn't actually change).
+            const bulkFollowUpReport = {};
             try {
               const shifted = await shiftCallFollowUpsForParentMove({
                 conn: db,
@@ -7224,6 +7344,9 @@ router.post('/bulk-action', requireAdmin, async (req, res, next) => {
                 fromDate: callFollowUpShiftFrom,
                 toDate: bulkTargetDate,
                 noticeActorId: req.technicianId || null,
+                // Reported so the route refresh covers the child's own two
+                // days as well as the parent's (codex #4295 r1 P2).
+                report: bulkFollowUpReport,
               });
               if (shifted > 0) {
                 logger.info(`[admin-schedule] bulk reschedule shifted ${shifted} call-created follow-up visit(s) with parent ${id}`);
@@ -7231,6 +7354,9 @@ router.post('/bulk-action', requireAdmin, async (req, res, next) => {
             } catch (e) {
               logger.error(`[admin-schedule] bulk reschedule call follow-up shift failed for ${id}: ${e.message}`);
             }
+            [callFollowUpShiftFrom, bulkTargetDate,
+              ...(bulkFollowUpReport.shifted || []).flatMap((row) => [row.previousDate, row.date])]
+              .filter(Boolean).forEach((date) => qualityDates.add(date));
             break;
           }
           case 'cancel': {
@@ -7260,6 +7386,9 @@ router.post('/bulk-action', requireAdmin, async (req, res, next) => {
                 // (notify-or-suppress below per the bulk flag) — the
                 // shared-writer hook must stand down, not race the claim.
                 notifyCustomer: payload?.notifyCustomer === false ? 'caller_suppress' : 'caller',
+                // The batch's shared date set: one route refresh after the
+                // loop instead of a concurrent pass per cancelled row.
+                qualityDates,
               });
             });
             try {
@@ -7355,6 +7484,15 @@ router.post('/bulk-action', requireAdmin, async (req, res, next) => {
       } catch (e) {
         failed.push({ id, reason: e.message });
       }
+    }
+
+    // One pass for the whole batch, after every row settled. Best-effort:
+    // the schedule writes are already committed and the refresh reports its
+    // own failures.
+    try {
+      await flushDispatchQualityDates(qualityDates);
+    } catch (e) {
+      logger.error(`[admin-schedule] bulk-action route quality refresh failed: ${e.message}`);
     }
 
     res.json({
@@ -7598,10 +7736,15 @@ async function planCollectiveEditDateMove(req) {
   return {
     async commit() {
       const SmartRebooker = require('../services/rebooker');
+      // One route-quality refresh for the whole series edit: the rebooker's
+      // move dates, every occurrence's board broadcast and the grouped
+      // members below all collect into this Set (codex #4295 r3 P2).
+      const qualityDates = new Set();
       // Same predicate the choke point evaluates (gate + cadence row + date
       // delta), so this call always lands as a series move.
       const result = await SmartRebooker.reschedule(row.id, target, win, 'admin', 'admin', {
         allowLive: true,
+        qualityDates,
         adminWindowRules: true,
         overlapAdvisory: true,
         sourceSurface: 'edit_modal',
@@ -7637,13 +7780,19 @@ async function planCollectiveEditDateMove(req) {
         notify: notifyCustomer === true,
         actorId: req.technicianId,
         reasonText: null,
+        qualityDates,
       });
       // Grouped siblings moved singly by moveVisitAsUnit sit outside the
       // series effects' broadcast — other boards need them (codex #3609 r10).
       for (const movedId of (result.visitMove?.moved || []).map(String).filter((id) => id !== String(row.id))) {
-        try { await emitDispatchJobUpdate({ jobId: movedId, actorId: req.technicianId }); } catch (err) {
+        try { await emitDispatchJobUpdate({ jobId: movedId, actorId: req.technicianId, qualityDates }); } catch (err) {
           logger.error(`[schedule/update-details] series board broadcast failed for grouped member ${movedId}: ${err.message}`);
         }
+      }
+      try {
+        await flushDispatchQualityDates(qualityDates);
+      } catch (err) {
+        logger.error(`[schedule/update-details] series route quality refresh failed: ${err.message}`);
       }
       return {
         seriesMoveId: result.seriesMoveId || null,
@@ -8572,6 +8721,7 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
     let assignmentUpdatedJobIds = [];
     let recurringCreated = 0;
     let recurringUpdatedJobIds = [];
+    const qualityPreviousDates = new Map();
     // Children spawned inside the trx below; reminder rows are registered for
     // them AFTER commit (mirrors the POST create path) so the 72h/24h cron
     // never reads a row whose visit could still roll back.
@@ -9963,6 +10113,7 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
                 );
               }
               recurringUpdatedJobIds.push(child.id);
+              qualityPreviousDates.set(child.id, child.scheduled_date);
             }
             if (pendingBoosters.length > 0) {
               for (const booster of pendingBoosters) {
@@ -10023,6 +10174,7 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
                   );
                 }
                 recurringUpdatedJobIds.push(booster.id);
+                qualityPreviousDates.set(booster.id, booster.scheduled_date);
               }
             }
           }
@@ -10354,6 +10506,11 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
                 windowStart: parent.window_start,
                 serviceType: childIdentity.service_type,
               });
+              // Same batching contract as the visit-count spawn branches
+              // below: without this, converting a one-time visit to a
+              // series gets its new children's dates NO measurement/alert
+              // reconciliation — only the edited parent's (codex #4295 r2 P2).
+              recurringUpdatedJobIds.push(childRow.id);
             }
             if (parentAddons.length > 0 && childRow?.id) {
               try {
@@ -10733,6 +10890,7 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
     // edit modal moves the primary — shared with the rebooker path; best-effort
     // outside the trx (a failed shift leaves the child where it was; the
     // helper no-ops when the date didn't actually change).
+    const editFollowUpReport = {};
     if (callFollowUpShiftFrom != null && updates.scheduled_date !== undefined) {
       try {
         const shifted = await shiftCallFollowUpsForParentMove({
@@ -10741,6 +10899,9 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
           fromDate: callFollowUpShiftFrom,
           toDate: updates.scheduled_date,
           noticeActorId: req.technicianId || null,
+          // Reported so the route refresh covers the child's own two days as
+          // well as the parent's (codex #4295 r1 P2).
+          report: editFollowUpReport,
         });
         if (shifted > 0) {
           logger.info(`[schedule/update-details] shifted ${shifted} call-created follow-up visit(s) with parent ${req.params.id}`);
@@ -10779,18 +10940,40 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
       }
     }
 
-    if (assignmentChanged || detailsChanged || addonsReplaced || addressUpdatedIds.length) {
+    // recurringUpdatedJobIds: a count-only series edit (recurringPlannedCount
+    // alone) adds or cancels occurrences without touching assignment,
+    // details, add-ons or addresses, and those dates need the refresh too
+    // (codex #4295 r3 P2).
+    if (assignmentChanged || detailsChanged || addonsReplaced || addressUpdatedIds.length || recurringUpdatedJobIds.length) {
+      // One refresh for the whole edit: a cadence resize broadcasts every
+      // updated child and booster, and refreshing per broadcast would run
+      // that many near-duplicate route passes concurrently (codex #4295 r1 P2).
+      const qualityDates = new Set((editFollowUpReport.shifted || [])
+        .flatMap((row) => [row.previousDate, row.date]).filter(Boolean));
       try {
+        qualityPreviousDates.set(req.params.id, callFollowUpShiftFrom);
         const broadcastJobIds = new Set((detailsChanged || addonsReplaced) ? [req.params.id] : []);
         for (const id of addressUpdatedIds) broadcastJobIds.add(id);
         for (const id of assignmentUpdatedJobIds) broadcastJobIds.add(id);
         for (const id of recurringUpdatedJobIds) broadcastJobIds.add(id);
         if (broadcastJobIds.size === 0) broadcastJobIds.add(req.params.id);
-        await Promise.all([...broadcastJobIds].map((jobId) =>
-          emitDispatchJobUpdate({ jobId, actorId: req.technicianId })
+        // allSettled, not all: the flush below snapshots and clears the shared
+        // Set, so every broadcast must have added its dates before it runs —
+        // an early rejection must not let a slower survivor add a date to an
+        // already-flushed Set (codex #4295 r5 P2).
+        const settled = await Promise.allSettled([...broadcastJobIds].map((jobId) =>
+          emitDispatchJobUpdate({ jobId, actorId: req.technicianId, previousDate: qualityPreviousDates.get(jobId), qualityDates })
         ));
+        for (const outcome of settled) {
+          if (outcome.status === 'rejected') logger.error(`[schedule/update-details] dispatch board broadcast failed: ${outcome.reason?.message || outcome.reason}`);
+        }
       } catch (e) {
         logger.error(`[schedule/update-details] dispatch board broadcast failed: ${e.message}`);
+      }
+      try {
+        await flushDispatchQualityDates(qualityDates);
+      } catch (e) {
+        logger.error(`[schedule/update-details] route quality refresh failed: ${e.message}`);
       }
     }
 
@@ -10979,12 +11162,20 @@ router.put('/:id/assign', requireAdmin, async (req, res, next) => {
     });
 
     const job = await db('scheduled_services').where({ id: req.params.id }).first();
+    // A series-scoped assignment changes every future occurrence — collect
+    // their dates and refresh once (codex #4295 r1 P2).
+    const qualityDates = new Set();
     for (const jobId of result.changedJobIds || []) {
       try {
-        await emitDispatchJobUpdate({ jobId, actorId: req.technicianId });
+        await emitDispatchJobUpdate({ jobId, actorId: req.technicianId, qualityDates });
       } catch (e) {
         logger.error(`[schedule/assign] dispatch board broadcast failed for ${jobId}: ${e.message}`);
       }
+    }
+    try {
+      await flushDispatchQualityDates(qualityDates);
+    } catch (e) {
+      logger.error(`[schedule/assign] route quality refresh failed: ${e.message}`);
     }
 
     if (job?.technician_id === null) {
@@ -12565,6 +12756,26 @@ async function runRecurringSeriesMaintenanceLocked(conn, svc, parentId) {
             if (seriesCioc !== undefined) nextData.create_invoice_on_complete = seriesCioc;
           }
           const [autoExtRow] = await conn('scheduled_services').insert(nextData).returning('*');
+          // Annual-prepay coverage for the row we just inserted.
+          //
+          // The auto-extend used to build its next visit with no prepay
+          // field at all, so a prepay customer's extension read as UNCOVERED
+          // and billed again for service the prepay had already bought.
+          // Deliberately delegated rather than computed here: the coverage
+          // budget has ONE authority. applyPrepaidCoverageForTerm selects
+          // through coverageRowsForTerm, which caps the set at
+          // coverage_visit_count (committed rows first, date-ordered), skips
+          // completed rows for reconcilePendingWindowCompletions to settle,
+          // skips rows a different term or an out-of-band cash/check/Zelle
+          // payment already covers, and slices by position so the remainder
+          // cents land on the final visit. A second allocator here could
+          // only disagree with it.
+          //
+          // Runs on `conn`, so it commits or rolls back with the extension.
+          // The transient completion-race bell is quiet (this fires per
+          // generated visit and reconciliation settles that case); the
+          // cancelled-paid-slot bell still rings — nothing re-seeds it.
+          await applyExtensionPrepayCoverage(conn, parent, svc, nextStr);
           // Post-insert re-check closes the remaining race: a
           // cancellation can stop the series between the pre-insert
           // read above and this insert. The row hasn't been mirrored,
@@ -13271,6 +13482,14 @@ router.post('/optimize', requireAdmin, async (req, res, next) => {
         }
       });
     }
+    // A manual reorder writes route_order directly, never through the
+    // batched dispatch/rebooker paths — without this the day's card stays
+    // stale after an operator fixes the route (codex #4295 r2 P2).
+    try {
+      await require('../services/scheduling/quality-after-change').refreshScheduleQualityAfterChange({ dates: [dateStr] });
+    } catch (e) {
+      logger.error(`[schedule/optimize] route quality refresh failed: ${e.message}`);
+    }
 
     const totalDurationMinutes = Math.round(result.totalDurationSeconds / 60);
     const savedDistanceMeters = Math.max(0, result.unoptimizedDistanceMeters - result.totalDistanceMeters);
@@ -13381,6 +13600,12 @@ router.post('/optimize-route', requireAdmin, async (req, res, next) => {
           }
         }
       });
+    }
+    // Same after-commit refresh as /optimize above (codex #4295 r2 P2).
+    try {
+      await require('../services/scheduling/quality-after-change').refreshScheduleQualityAfterChange({ dates: [dateStr] });
+    } catch (e) {
+      logger.error(`[schedule/optimize-route] route quality refresh failed: ${e.message}`);
     }
 
     const totalDurationMinutes = Math.round(result.totalDurationSeconds / 60);
@@ -17778,14 +18003,18 @@ router.put('/blackout-dates/weekly', requireAdmin, async (req, res, next) => {
     if (!raw) return res.status(400).json({ error: 'daysOff (array of day-of-week ints 0-6) required' });
     const days = [...new Set(raw.map(Number).filter((d) => Number.isInteger(d) && d >= 0 && d <= 6))]
       .sort((a, b) => a - b);
-    const { WEEKLY_DAYS_OFF_KEY, lockClosureState } = require('../services/scheduling/blackout-dates');
+    const { WEEKLY_DAYS_OFF_KEY, getWeeklyDaysOff, lockClosureState } = require('../services/scheduling/blackout-dates');
     // Exclusive closure-state lock before the write — serializes against a
     // capacity reservation transaction's shared read (arrival-route.js
     // assertCapacityEligibility) so a hold cannot commit for a day this
     // write is about to close (codex #4346 P2). See blackout-dates.js for
     // lock order.
+    let previousDays = [];
     await db.transaction(async (trx) => {
       await lockClosureState(trx, { exclusive: true });
+      // Read under the lock, before the write: only the weekdays that
+      // toggle need a route-quality refresh (codex #4295 r2 P2).
+      previousDays = [...(await getWeeklyDaysOff(trx))];
       await trx('system_settings')
         .insert({
           key: WEEKLY_DAYS_OFF_KEY,
@@ -17798,6 +18027,7 @@ router.put('/blackout-dates/weekly', requireAdmin, async (req, res, next) => {
     });
     logger.info(`[schedule] weekly days off set to [${days.join(',')}]`);
     flushEstimateSlotCaches();
+    await refreshQualityForBlackoutChange(weeklyBlackoutRefreshDates(previousDays, days));
     res.json({ success: true, weeklyDaysOff: days });
   } catch (err) { next(err); }
 });
@@ -17827,6 +18057,7 @@ router.post('/blackout-dates', requireAdmin, async (req, res, next) => {
     // may type a name/phone/address into it. Date + presence only.
     logger.info(`[schedule] blackout date ${date} set${reason ? ' (with reason)' : ''}`);
     flushEstimateSlotCaches();
+    await refreshQualityForBlackoutChange([date]);
     res.json({ success: true, blackout: { id: row.id, date, reason: row.reason || null } });
   } catch (err) { next(err); }
 });
@@ -17835,13 +18066,18 @@ router.delete('/blackout-dates/:id', requireAdmin, async (req, res, next) => {
   try {
     const { lockClosureState } = require('../services/scheduling/blackout-dates');
     // Exclusive closure-state lock before the write — see the weekly-days-off
-    // handler above / blackout-dates.js for why and the lock order.
-    const deleted = await db.transaction(async (trx) => {
+    // handler above / blackout-dates.js for why and the lock order. The date
+    // is read first, under the lock: once the row is gone nothing else says
+    // which day's closure card to reconcile (codex #4295 r2 P2).
+    const { row, deleted } = await db.transaction(async (trx) => {
       await lockClosureState(trx, { exclusive: true });
-      return trx('schedule_blackout_dates').where({ id: req.params.id }).del();
+      const existing = await trx('schedule_blackout_dates').where({ id: req.params.id }).first('date');
+      const count = await trx('schedule_blackout_dates').where({ id: req.params.id }).del();
+      return { row: existing, deleted: count };
     });
     if (!deleted) return res.status(404).json({ error: 'Not found' });
     flushEstimateSlotCaches();
+    await refreshQualityForBlackoutChange([blackoutDateString(row && row.date)]);
     res.json({ success: true });
   } catch (err) { next(err); }
 });
@@ -17858,7 +18094,46 @@ function flushEstimateSlotCaches() {
   }
 }
 
+// A blackout write changes `day.closed` for the affected date(s), and the
+// route-quality reconciler only notices when something refreshes those
+// dates — so refresh them here, after the write, best-effort like the cache
+// flush above (codex #4295 r2 P2). With the quality gates off this returns
+// immediately.
+async function refreshQualityForBlackoutChange(dates) {
+  const list = [...new Set((dates || []).filter(Boolean))];
+  if (!list.length) return;
+  try {
+    await require('../services/scheduling/quality-after-change').refreshScheduleQualityAfterChange({ dates: list });
+  } catch (err) {
+    logger.error(`[schedule] blackout route quality refresh failed: ${err.message}`);
+  }
+}
+
+// A weekly days-off change touches every future occurrence of the weekdays
+// that toggled — bounded to the reconciler's 30-day horizon, tomorrow
+// onward (today's closure is already in effect). Pure; exported for tests.
+function weeklyBlackoutRefreshDates(previousDays, nextDays, now = new Date()) {
+  const { etDateString, addETDays } = require('../utils/datetime-et');
+  const { expandWeeklyDaysOff } = require('../services/scheduling/blackout-dates');
+  const previous = new Set((previousDays || []).map(Number));
+  const next = new Set((nextDays || []).map(Number));
+  const toggled = new Set([...previous, ...next].filter((day) => previous.has(day) !== next.has(day)));
+  return expandWeeklyDaysOff(etDateString(addETDays(now, 1)), etDateString(addETDays(now, 30)), toggled);
+}
+
+// schedule_blackout_dates.date is a DATE column: pg hands it back as a
+// local-midnight Date unless a parser is installed. Either way, YYYY-MM-DD.
+function blackoutDateString(value) {
+  if (!value) return null;
+  if (typeof value === 'string') return value.slice(0, 10);
+  const d = new Date(value);
+  if (Number.isNaN(d.getTime())) return null;
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+}
+
 router._test = {
+  weeklyBlackoutRefreshDates,
+  blackoutDateString,
   registerSpawnedVisitReminder,
   adminMoveProbeExcludeIds,
   windowIntakeFromBody,
@@ -17917,6 +18192,9 @@ router._test = {
   runRecurringSeriesMaintenance,
   runRecurringAlertAction,
   resolveSeriesCreateInvoiceOnComplete,
+  applyExtensionPrepayCoverage,
+  seriesTermIds,
+  coveringTermForDate,
   normalizePriceServiceScope,
   computePriceServiceGroupChanges,
   pickUnpinnedGroupFields,

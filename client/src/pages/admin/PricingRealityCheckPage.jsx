@@ -1,44 +1,73 @@
 import { useEffect, useMemo, useState } from "react";
-import { AlertTriangle, RefreshCw, ShieldCheck } from "lucide-react";
+import { RefreshCw, ShieldCheck } from "lucide-react";
 import { adminFetch } from "../../lib/adminFetch";
-
-const D = {
-  card: "#FFFFFF",
-  border: "#E4E4E7",
-  heading: "#09090B",
-  text: "#27272A",
-  muted: "#71717A",
-  green: "#15803D",
-  red: "#991B1B",
-  amber: "#A16207",
-  ink: "#18181B",
-  softGreen: "#ECFDF3",
-  softRed: "#FEF2F2",
-};
+import {
+  UiSurface,
+  Card,
+  Field,
+  Select,
+  Button,
+  Badge,
+  ActionFeedback,
+  Table,
+  THead,
+  TBody,
+  TR,
+  TH,
+  TD,
+  cn,
+} from "../../components/ui";
 
 const LOOKBACK_OPTIONS = [
-  { value: "30", label: "30 days" },
-  { value: "90", label: "90 days" },
-  { value: "365", label: "365 days" },
+  {
+    value: "30",
+    label: "30 days",
+  },
+  {
+    value: "90",
+    label: "90 days",
+  },
+  {
+    value: "365",
+    label: "365 days",
+  },
 ];
-
 const GROUP_OPTIONS = [
-  { key: "service_type", label: "Service type" },
-  { key: "lawn_care_track", label: "Lawn-care track" },
-  { key: "sqft_band", label: "Sqft band" },
-  { key: "zone", label: "Zone" },
-  { key: "technician", label: "Technician" },
-  { key: "month", label: "Month" },
-  { key: "billing_cohort", label: "Billing cohort" },
+  {
+    key: "service_type",
+    label: "Service type",
+  },
+  {
+    key: "lawn_care_track",
+    label: "Lawn-care track",
+  },
+  {
+    key: "sqft_band",
+    label: "Sqft band",
+  },
+  {
+    key: "zone",
+    label: "Zone",
+  },
+  {
+    key: "technician",
+    label: "Technician",
+  },
+  {
+    key: "month",
+    label: "Month",
+  },
+  {
+    key: "billing_cohort",
+    label: "Billing cohort",
+  },
 ];
-
 const ET_DATE_FORMATTER = new Intl.DateTimeFormat("en-US", {
   timeZone: "America/New_York",
   year: "numeric",
   month: "2-digit",
   day: "2-digit",
 });
-
 const EMPTY_FILTERS = {
   serviceType: "",
   lawnCareTrack: "",
@@ -48,33 +77,6 @@ const EMPTY_FILTERS = {
   month: "",
   billingCohort: "",
 };
-
-const cardStyle = {
-  background: D.card,
-  border: `1px solid ${D.border}`,
-  borderRadius: 8,
-  boxShadow: "0 1px 2px rgba(15,23,42,0.04)",
-};
-
-const labelStyle = {
-  fontSize: 11,
-  fontWeight: 700,
-  color: D.muted,
-  marginBottom: 6,
-};
-
-const selectStyle = {
-  width: "100%",
-  minHeight: 40,
-  border: `1px solid ${D.border}`,
-  borderRadius: 6,
-  background: D.card,
-  color: D.text,
-  fontSize: 13,
-  padding: "0 10px",
-  boxSizing: "border-box",
-};
-
 function fmtNumber(value, digits = 1) {
   const n = Number(value);
   if (!Number.isFinite(n)) return "-";
@@ -83,15 +85,12 @@ function fmtNumber(value, digits = 1) {
     maximumFractionDigits: digits,
   });
 }
-
 function fmtMinutes(value) {
   return `${fmtNumber(value, 1)} min`;
 }
-
 function fmtPercent(value) {
   return `${fmtNumber(value, 1)}%`;
 }
-
 function fmtMoney(value) {
   const n = Number(value);
   if (!Number.isFinite(n)) return "-";
@@ -102,7 +101,6 @@ function fmtMoney(value) {
     maximumFractionDigits: 2,
   });
 }
-
 function fmtETDate(value) {
   if (!value) return "-";
   const date = new Date(value);
@@ -111,25 +109,23 @@ function fmtETDate(value) {
   const get = (type) => parts.find((part) => part.type === type)?.value;
   return `${get("year")}-${get("month")}-${get("day")}`;
 }
-
 function marginColor(value) {
   const n = Number(value);
-  if (!Number.isFinite(n) || n === 0) return D.text;
-  return n < 0 ? D.red : D.green;
+  if (!Number.isFinite(n) || n === 0) return "text-zinc-900";
+  return n < 0 ? "text-alert-fg" : "text-zinc-900";
 }
-
 function deltaColor(value) {
   const n = Number(value);
-  if (!Number.isFinite(n) || n === 0) return D.text;
-  return n > 0 ? D.red : D.green;
+  if (!Number.isFinite(n) || n === 0) return "text-zinc-900";
+  return n > 0 ? "text-alert-fg" : "text-zinc-900";
 }
-
 export function sortSegmentsWorstMarginFirst(segments = []) {
   return [...segments].sort(
-    (a, b) => Number(a.totalDollarMarginImpact || 0) - Number(b.totalDollarMarginImpact || 0),
+    (a, b) =>
+      Number(a.totalDollarMarginImpact || 0) -
+      Number(b.totalDollarMarginImpact || 0),
   );
 }
-
 export function buildPricingRealityQuery({ lookbackDays, groupBy, filters }) {
   const params = new URLSearchParams({
     lookbackDays: String(lookbackDays || 90),
@@ -140,9 +136,12 @@ export function buildPricingRealityQuery({ lookbackDays, groupBy, filters }) {
   });
   return params.toString();
 }
-
 async function loadPricingReality({ lookbackDays, groupBy, filters }) {
-  const query = buildPricingRealityQuery({ lookbackDays, groupBy, filters });
+  const query = buildPricingRealityQuery({
+    lookbackDays,
+    groupBy,
+    filters,
+  });
   const response = await adminFetch(`/admin/pricing-reality-check?${query}`);
   if (!response.ok) {
     const body = await response.json().catch(() => ({}));
@@ -150,217 +149,311 @@ async function loadPricingReality({ lookbackDays, groupBy, filters }) {
   }
   return response.json();
 }
-
-function FilterSelect({ label, value, onChange, options, placeholder = "All" }) {
+function FilterSelect({
+  label,
+  value,
+  onChange,
+  options,
+  placeholder = "All",
+}) {
   return (
-    <label style={{ display: "block", minWidth: 0 }}>
-      <div style={labelStyle}>{label}</div>
-      <select
-        value={value}
-        onChange={(event) => onChange(event.target.value)}
-        style={selectStyle}
-      >
+    <Field label={label}>
+      <Select value={value} onChange={(event) => onChange(event.target.value)}>
         <option value="">{placeholder}</option>
         {options.map((option) => {
           const id = typeof option === "string" ? option : option.id;
-          const optionLabel = typeof option === "string" ? option : option.label;
+          const optionLabel =
+            typeof option === "string" ? option : option.label;
           return (
             <option key={id} value={id}>
               {optionLabel}
             </option>
           );
         })}
-      </select>
-    </label>
+      </Select>
+    </Field>
   );
 }
-
 function KpiCard({ label, value, tone }) {
-  const color = tone === "good" ? D.green : tone === "bad" ? D.red : D.heading;
+  const color = tone === "bad" ? "text-alert-fg" : "text-zinc-900";
   return (
-    <div style={{ ...cardStyle, padding: 16, minHeight: 86 }}>
-      <div style={{ fontSize: 12, color: D.muted, fontWeight: 500, marginBottom: 8 }}>
+    <Card className="p-4 min-h-[86px]">
+      <div className="text-ui-body text-ink-secondary font-medium mb-[8px]">
         {label}
       </div>
-      <div style={{ fontSize: 24, color, fontWeight: 700, lineHeight: 1.1 }}>
-        {value}
-      </div>
-    </div>
+      <div className={cn("text-[24px] font-medium", color)}>{value}</div>
+    </Card>
   );
 }
-
 function CoverageStrip({ coverage }) {
   const c = coverage || {};
   return (
-    <div
-      style={{
-        ...cardStyle,
-        padding: "10px 12px",
-        display: "flex",
-        gap: 14,
-        flexWrap: "wrap",
-        alignItems: "center",
-        fontSize: 12,
-        color: D.muted,
-      }}
-    >
-      <span>Completed: <strong style={{ color: D.heading }}>{c.completedServiceCount || 0}</strong></span>
-      <span>Included: <strong style={{ color: D.heading }}>{c.includedServiceCount || 0}</strong></span>
-      <span>Missing quote: <strong style={{ color: D.amber }}>{c.excludedMissingQuoteCount || 0}</strong></span>
-      <span>Missing actual: <strong style={{ color: D.amber }}>{c.excludedMissingActualCount || 0}</strong></span>
-      <span>Invalid duration: <strong style={{ color: D.red }}>{c.excludedInvalidDurationCount || 0}</strong></span>
-    </div>
+    <Card className="p-5 mb-3 flex gap-[14px] flex-wrap items-center text-ui-body text-ink-secondary">
+      <span>
+        Completed:{" "}
+        <strong className="text-zinc-900">
+          {c.completedServiceCount || 0}
+        </strong>
+      </span>
+      <span>
+        Included:{" "}
+        <strong className="text-zinc-900">{c.includedServiceCount || 0}</strong>
+      </span>
+      <span>
+        Missing quote:{" "}
+        <strong className="text-zinc-900">
+          {c.excludedMissingQuoteCount || 0}
+        </strong>
+      </span>
+      <span>
+        Missing actual:{" "}
+        <strong className="text-zinc-900">
+          {c.excludedMissingActualCount || 0}
+        </strong>
+      </span>
+      <span>
+        Invalid duration:{" "}
+        <strong className="text-alert-fg">
+          {c.excludedInvalidDurationCount || 0}
+        </strong>
+      </span>
+    </Card>
   );
 }
-
 function SegmentTable({ segments }) {
   const rows = sortSegmentsWorstMarginFirst(segments);
   return (
-    <section style={{ ...cardStyle, overflow: "hidden" }}>
-      <div style={{ padding: "14px 16px", borderBottom: `1px solid ${D.border}` }}>
-        <h2 style={{ margin: 0, fontSize: 16, color: D.heading }}>Segment variance</h2>
-        <div style={{ fontSize: 12, color: D.muted, marginTop: 4 }}>
-          Margin impact is (quoted minutes - actual minutes) / 60 * $35. Negative means actual labor exceeded quoted labor.
+    <Card className="overflow-hidden">
+      <div className="p-4 border-b-hairline border-zinc-200">
+        <h2 className="m-0 text-18 font-medium text-zinc-900">
+          Segment variance
+        </h2>
+        <div className="text-ui-body text-ink-secondary mt-[4px]">
+          Margin impact is (quoted minutes - actual minutes) / 60 * $35.
+          Negative means actual labor exceeded quoted labor.
         </div>
       </div>
-      <div style={{ overflowX: "auto" }}>
-        <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
-          <thead>
-            <tr>
-              {["Segment", "Services", "Avg quoted", "Avg actual", "Avg delta", "Weighted variance", "Margin impact", "Avg margin", "Outliers"].map((header) => (
-                <th
+      <div className="overflow-x-auto">
+        <Table layout="records">
+          <THead>
+            <TR>
+              {[
+                "Segment",
+                "Services",
+                "Avg quoted",
+                "Avg actual",
+                "Avg delta",
+                "Weighted variance",
+                "Margin impact",
+                "Avg margin",
+                "Outliers",
+              ].map((header) => (
+                <TH
                   key={header}
-                  style={{
-                    padding: "10px 12px",
-                    textAlign: header === "Segment" ? "left" : "right",
-                    color: D.muted,
-                    fontSize: 11,
-                    borderBottom: `1px solid ${D.border}`,
-                    whiteSpace: "nowrap",
-                  }}
+                  className="text-ink-secondary text-ui-body border-b border-hairline border-zinc-200 whitespace-nowrap"
                 >
                   {header}
-                </th>
+                </TH>
               ))}
-            </tr>
-          </thead>
-          <tbody>
+            </TR>
+          </THead>
+          <TBody>
             {rows.map((row) => (
-              <tr key={row.key} style={{ borderBottom: `1px solid ${D.border}80` }}>
-                <td style={{ padding: "10px 12px", color: D.heading, fontWeight: 700 }}>{row.label}</td>
-                <td style={{ padding: "10px 12px", textAlign: "right" }}>{row.serviceCount}</td>
-                <td style={{ padding: "10px 12px", textAlign: "right" }}>{fmtMinutes(row.avgQuotedMinutes)}</td>
-                <td style={{ padding: "10px 12px", textAlign: "right" }}>{fmtMinutes(row.avgActualMinutes)}</td>
-                <td style={{ padding: "10px 12px", textAlign: "right", color: deltaColor(row.avgVarianceMinutes), fontWeight: 700 }}>
+              <TR key={row.key}>
+                <TD data-label="Segment" className="text-zinc-900 font-medium">
+                  {row.label}
+                </TD>
+                <TD data-label="Services" align="right">
+                  {row.serviceCount}
+                </TD>
+                <TD data-label="Avg quoted" align="right">
+                  {fmtMinutes(row.avgQuotedMinutes)}
+                </TD>
+                <TD data-label="Avg actual" align="right">
+                  {fmtMinutes(row.avgActualMinutes)}
+                </TD>
+                <TD
+                  data-label="Avg delta"
+                  align="right"
+                  className={cn(
+                    "font-medium",
+                    deltaColor(row.avgVarianceMinutes),
+                  )}
+                >
                   {fmtMinutes(row.avgVarianceMinutes)}
-                </td>
-                <td style={{ padding: "10px 12px", textAlign: "right" }}>{fmtPercent(row.weightedPercentVariance)}</td>
-                <td style={{ padding: "10px 12px", textAlign: "right", color: marginColor(row.totalDollarMarginImpact), fontWeight: 700 }}>
+                </TD>
+                <TD data-label="Weighted variance" align="right">
+                  {fmtPercent(row.weightedPercentVariance)}
+                </TD>
+                <TD
+                  data-label="Margin impact"
+                  align="right"
+                  className={cn(
+                    "font-medium",
+                    marginColor(row.totalDollarMarginImpact),
+                  )}
+                >
                   {fmtMoney(row.totalDollarMarginImpact)}
-                </td>
-                <td style={{ padding: "10px 12px", textAlign: "right", color: marginColor(row.avgDollarMarginImpact) }}>
+                </TD>
+                <TD
+                  data-label="Avg margin"
+                  align="right"
+                  className={cn(
+                    "font-medium",
+                    marginColor(row.avgDollarMarginImpact),
+                  )}
+                >
                   {fmtMoney(row.avgDollarMarginImpact)}
-                </td>
-                <td style={{ padding: "10px 12px", textAlign: "right" }}>{row.outlierCount}</td>
-              </tr>
+                </TD>
+                <TD data-label="Outliers" align="right">
+                  {row.outlierCount}
+                </TD>
+              </TR>
             ))}
-          </tbody>
-        </table>
+          </TBody>
+        </Table>
       </div>
-    </section>
+    </Card>
   );
 }
-
 function customerLink(row) {
   if (!row.customerId) return null;
   return `/admin/customers?customerId=${encodeURIComponent(row.customerId)}`;
 }
-
 function OutliersTable({ outliers }) {
   return (
-    <section style={{ ...cardStyle, overflow: "hidden" }}>
-      <div style={{ padding: "14px 16px", borderBottom: `1px solid ${D.border}` }}>
-        <h2 style={{ margin: 0, fontSize: 16, color: D.heading }}>Outlier services</h2>
-        <div style={{ fontSize: 12, color: D.muted, marginTop: 4 }}>
+    <Card className="overflow-hidden">
+      <div className="p-4 border-b-hairline border-zinc-200">
+        <h2 className="m-0 text-18 font-medium text-zinc-900">
+          Outlier services
+        </h2>
+        <div className="text-ui-body text-ink-secondary mt-[4px]">
           Sorted by absolute z-score across the selected window and filters.
         </div>
       </div>
-      <div style={{ overflowX: "auto" }}>
-        <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
-          <thead>
-            <tr>
-              {["Service date", "Service", "Customer/property", "Service type", "Lawn track", "Sqft band", "Zone", "Technician", "Quoted", "Actual", "Delta", "Variance", "Margin impact", "Z-score", "Billing"].map((header) => (
-                <th
+      <div className="overflow-x-auto">
+        <Table layout="records">
+          <THead>
+            <TR>
+              {[
+                "Service date",
+                "Service",
+                "Customer/property",
+                "Service type",
+                "Lawn track",
+                "Sqft band",
+                "Zone",
+                "Technician",
+                "Quoted",
+                "Actual",
+                "Delta",
+                "Variance",
+                "Margin impact",
+                "Z-score",
+                "Billing",
+              ].map((header) => (
+                <TH
                   key={header}
-                  style={{
-                    padding: "10px 12px",
-                    textAlign: ["Service", "Customer/property", "Service type", "Lawn track", "Sqft band", "Zone", "Technician", "Billing"].includes(header) ? "left" : "right",
-                    color: D.muted,
-                    fontSize: 11,
-                    borderBottom: `1px solid ${D.border}`,
-                    whiteSpace: "nowrap",
-                  }}
+                  className="text-ink-secondary text-ui-body border-b border-hairline border-zinc-200 whitespace-nowrap"
                 >
                   {header}
-                </th>
+                </TH>
               ))}
-            </tr>
-          </thead>
-          <tbody>
+            </TR>
+          </THead>
+          <TBody>
             {outliers.map((row) => {
               const link = customerLink(row);
               return (
-                <tr key={row.serviceId} style={{ borderBottom: `1px solid ${D.border}80` }}>
-                  <td style={{ padding: "10px 12px", textAlign: "right", whiteSpace: "nowrap" }}>
+                <TR key={row.serviceId}>
+                  <TD
+                    data-label="Service date"
+                    className="text-right whitespace-nowrap"
+                  >
                     {fmtETDate(row.completedAt)}
-                  </td>
-                  <td style={{ padding: "10px 12px", fontWeight: 700, color: D.heading }}>
-                    <a href={`/admin/dispatch?serviceId=${encodeURIComponent(row.serviceId)}`} style={{ color: D.heading }}>
+                  </TD>
+                  <TD
+                    data-label="Service"
+                    className="font-medium text-zinc-900"
+                  >
+                    <a
+                      href={`/admin/dispatch?serviceId=${encodeURIComponent(row.serviceId)}`}
+                      className="inline-flex min-h-11 items-center break-all text-zinc-900 underline u-focus-ring"
+                    >
                       {row.serviceId}
                     </a>
-                  </td>
-                  <td style={{ padding: "10px 12px", minWidth: 180 }}>
+                  </TD>
+                  <TD data-label="Customer/property" className="break-words">
                     {link ? (
-                      <a href={link} style={{ color: D.heading, fontWeight: 700 }}>
-                        {row.customerName || row.propertyLabel || row.customerId}
+                      <a
+                        href={link}
+                        className="inline-flex min-h-11 items-center break-words text-zinc-900 underline u-focus-ring"
+                      >
+                        {row.customerName ||
+                          row.propertyLabel ||
+                          row.customerId}
                       </a>
                     ) : (
                       <span>{row.propertyLabel || "-"}</span>
                     )}
-                  </td>
-                  <td style={{ padding: "10px 12px" }}>{row.serviceType || "-"}</td>
-                  <td style={{ padding: "10px 12px" }}>{row.lawnCareTrack || "-"}</td>
-                  <td style={{ padding: "10px 12px" }}>{row.sqftBand || "-"}</td>
-                  <td style={{ padding: "10px 12px" }}>{row.zone || "-"}</td>
-                  <td style={{ padding: "10px 12px" }}>{row.technician || "-"}</td>
-                  <td style={{ padding: "10px 12px", textAlign: "right" }}>{fmtMinutes(row.quotedMinutes)}</td>
-                  <td style={{ padding: "10px 12px", textAlign: "right" }}>{fmtMinutes(row.actualMinutes)}</td>
-                  <td style={{ padding: "10px 12px", textAlign: "right", color: deltaColor(row.varianceMinutes), fontWeight: 700 }}>
+                  </TD>
+                  <TD data-label="Service type">{row.serviceType || "-"}</TD>
+                  <TD data-label="Lawn track">{row.lawnCareTrack || "-"}</TD>
+                  <TD data-label="Sqft band">{row.sqftBand || "-"}</TD>
+                  <TD data-label="Zone">{row.zone || "-"}</TD>
+                  <TD data-label="Technician">{row.technician || "-"}</TD>
+                  <TD data-label="Quoted" align="right">
+                    {fmtMinutes(row.quotedMinutes)}
+                  </TD>
+                  <TD data-label="Actual" align="right">
+                    {fmtMinutes(row.actualMinutes)}
+                  </TD>
+                  <TD
+                    data-label="Delta"
+                    align="right"
+                    className={cn(
+                      "font-medium",
+                      deltaColor(row.varianceMinutes),
+                    )}
+                  >
                     {fmtMinutes(row.varianceMinutes)}
-                  </td>
-                  <td style={{ padding: "10px 12px", textAlign: "right" }}>{fmtPercent(row.percentVariance)}</td>
-                  <td style={{ padding: "10px 12px", textAlign: "right", color: marginColor(row.dollarMarginImpact), fontWeight: 700 }}>
+                  </TD>
+                  <TD data-label="Variance" align="right">
+                    {fmtPercent(row.percentVariance)}
+                  </TD>
+                  <TD
+                    data-label="Margin impact"
+                    align="right"
+                    className={cn(
+                      "font-medium",
+                      marginColor(row.dollarMarginImpact),
+                    )}
+                  >
                     {fmtMoney(row.dollarMarginImpact)}
-                  </td>
-                  <td style={{ padding: "10px 12px", textAlign: "right" }}>{fmtNumber(row.zScore, 2)}</td>
-                  <td style={{ padding: "10px 12px" }}>{row.billingCohort || "-"}</td>
-                </tr>
+                  </TD>
+                  <TD data-label="Z-score" align="right">
+                    {fmtNumber(row.zScore, 2)}
+                  </TD>
+                  <TD data-label="Billing">{row.billingCohort || "-"}</TD>
+                </TR>
               );
             })}
             {!outliers.length && (
-              <tr>
-                <td colSpan={15} style={{ padding: 18, color: D.muted, textAlign: "center" }}>
+              <TR>
+                <TD
+                  colSpan={15}
+                  className="p-[18px] text-ink-secondary text-center"
+                >
                   No outlier services for the selected filters.
-                </td>
-              </tr>
+                </TD>
+              </TR>
             )}
-          </tbody>
-        </table>
+          </TBody>
+        </Table>
       </div>
-    </section>
+    </Card>
   );
 }
-
 export default function PricingRealityCheckPage() {
   const [lookbackDays, setLookbackDays] = useState("90");
   const [groupBy, setGroupBy] = useState("service_type");
@@ -368,12 +461,15 @@ export default function PricingRealityCheckPage() {
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
-
   const refresh = async () => {
     setLoading(true);
     setError("");
     try {
-      const payload = await loadPricingReality({ lookbackDays, groupBy, filters });
+      const payload = await loadPricingReality({
+        lookbackDays,
+        groupBy,
+        filters,
+      });
       setData(payload);
     } catch (err) {
       setError(err.message || "Failed to load pricing audit");
@@ -382,102 +478,188 @@ export default function PricingRealityCheckPage() {
       setLoading(false);
     }
   };
-
   useEffect(() => {
     refresh();
   }, [lookbackDays, groupBy, filters]);
-
   const summary = data?.summary || {};
   const coverage = data?.coverage || {};
   const available = data?.availableFilters || {};
-  const segments = useMemo(() => sortSegmentsWorstMarginFirst(data?.segments || []), [data?.segments]);
-  const emptyIncluded = !loading && !error && Number(coverage.includedServiceCount || 0) === 0;
-  const setFilter = (key, value) => setFilters((current) => ({ ...current, [key]: value }));
-
+  const segments = useMemo(
+    () => sortSegmentsWorstMarginFirst(data?.segments || []),
+    [data?.segments],
+  );
+  const emptyIncluded =
+    !loading && !error && Number(coverage.includedServiceCount || 0) === 0;
+  const setFilter = (key, value) =>
+    setFilters((current) => ({
+      ...current,
+      [key]: value,
+    }));
   return (
-    <div style={{ maxWidth: 1320, margin: "0 auto", color: D.text }}>
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 16, marginBottom: 18, flexWrap: "wrap" }}>
+    <UiSurface
+      density="comfortable"
+      className="max-w-[1320px] mx-auto text-zinc-900"
+    >
+      <div className="flex justify-between items-start gap-[16px] mb-[18px] flex-wrap">
         <div>
-          <h1 style={{ margin: 0, fontSize: 28, color: D.heading, fontWeight: 700 }}>Audit</h1>
-          <div style={{ marginTop: 5, color: D.muted, fontSize: 13 }}>
-            Read-only comparison of quoted pricing minutes vs Bouncie actual on-site minutes.
+          <h1 className="m-0 text-22 text-zinc-900 font-medium">
+            Audit
+          </h1>
+          <div className="mt-[5px] text-ink-secondary text-ui-body">
+            Read-only comparison of quoted pricing minutes vs Bouncie actual
+            on-site minutes.
           </div>
-          <div style={{ display: "inline-flex", alignItems: "center", gap: 6, marginTop: 10, padding: "5px 8px", borderRadius: 6, background: D.softGreen, color: D.green, fontSize: 12, fontWeight: 700 }}>
+          <Badge tone="neutral" className="mt-3">
             <ShieldCheck size={14} strokeWidth={2} />
             Read-only. No pricing engine writes.
-          </div>
+          </Badge>
         </div>
-        <button
+        <Button
           type="button"
           onClick={refresh}
           disabled={loading}
-          style={{ minHeight: 40, display: "inline-flex", alignItems: "center", gap: 8, border: `1px solid ${D.border}`, borderRadius: 6, background: D.card, color: D.heading, padding: "0 12px", fontSize: 13, fontWeight: 700, cursor: loading ? "wait" : "pointer" }}
+          variant="secondary"
         >
           <RefreshCw size={15} strokeWidth={2} />
           Refresh
-        </button>
+        </Button>
       </div>
 
-      <div style={{ ...cardStyle, padding: 14, marginBottom: 14 }}>
-        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))", gap: 10, marginBottom: 12 }}>
-          <FilterSelect label="Lookback" value={lookbackDays} onChange={setLookbackDays} options={LOOKBACK_OPTIONS.map((o) => ({ id: o.value, label: o.label }))} placeholder="Lookback" />
-          <FilterSelect label="Service type" value={filters.serviceType} onChange={(value) => setFilter("serviceType", value)} options={available.serviceTypes || []} />
-          <FilterSelect label="Lawn-care track" value={filters.lawnCareTrack} onChange={(value) => setFilter("lawnCareTrack", value)} options={available.lawnCareTracks || []} />
-          <FilterSelect label="Sqft band" value={filters.sqftBand} onChange={(value) => setFilter("sqftBand", value)} options={available.sqftBands || []} />
-          <FilterSelect label="Zone" value={filters.zoneId} onChange={(value) => setFilter("zoneId", value)} options={available.zones || []} />
-          <FilterSelect label="Technician" value={filters.technicianId} onChange={(value) => setFilter("technicianId", value)} options={available.technicians || []} />
-          <FilterSelect label="Month" value={filters.month} onChange={(value) => setFilter("month", value)} options={available.months || []} />
-          <FilterSelect label="Billing cohort" value={filters.billingCohort} onChange={(value) => setFilter("billingCohort", value)} options={available.billingCohorts || []} />
+      <Card className="p-4 mb-4">
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3 mb-3">
+          <FilterSelect
+            label="Lookback"
+            value={lookbackDays}
+            onChange={setLookbackDays}
+            options={LOOKBACK_OPTIONS.map((o) => ({
+              id: o.value,
+              label: o.label,
+            }))}
+            placeholder="Lookback"
+          />
+          <FilterSelect
+            label="Service type"
+            value={filters.serviceType}
+            onChange={(value) => setFilter("serviceType", value)}
+            options={available.serviceTypes || []}
+          />
+          <FilterSelect
+            label="Lawn-care track"
+            value={filters.lawnCareTrack}
+            onChange={(value) => setFilter("lawnCareTrack", value)}
+            options={available.lawnCareTracks || []}
+          />
+          <FilterSelect
+            label="Sqft band"
+            value={filters.sqftBand}
+            onChange={(value) => setFilter("sqftBand", value)}
+            options={available.sqftBands || []}
+          />
+          <FilterSelect
+            label="Zone"
+            value={filters.zoneId}
+            onChange={(value) => setFilter("zoneId", value)}
+            options={available.zones || []}
+          />
+          <FilterSelect
+            label="Technician"
+            value={filters.technicianId}
+            onChange={(value) => setFilter("technicianId", value)}
+            options={available.technicians || []}
+          />
+          <FilterSelect
+            label="Month"
+            value={filters.month}
+            onChange={(value) => setFilter("month", value)}
+            options={available.months || []}
+          />
+          <FilterSelect
+            label="Billing cohort"
+            value={filters.billingCohort}
+            onChange={(value) => setFilter("billingCohort", value)}
+            options={available.billingCohorts || []}
+          />
         </div>
-        <div style={labelStyle}>Segment by</div>
-        <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+        <div className="text-ui-body font-medium mb-2">Segment by</div>
+        <div className="flex flex-wrap gap-[6px]">
           {GROUP_OPTIONS.map((option) => (
-            <button
+            <Button
               key={option.key}
               type="button"
               onClick={() => setGroupBy(option.key)}
-              style={{ minHeight: 36, border: `1px solid ${groupBy === option.key ? D.ink : D.border}`, borderRadius: 6, background: groupBy === option.key ? D.ink : D.card, color: groupBy === option.key ? "#FFFFFF" : D.text, padding: "0 11px", fontSize: 13, fontWeight: 700, cursor: "pointer" }}
+              variant={groupBy === option.key ? "primary" : "secondary"}
+              aria-pressed={groupBy === option.key}
             >
               {option.label}
-            </button>
+            </Button>
           ))}
         </div>
-      </div>
+      </Card>
 
       {error && (
-        <div style={{ ...cardStyle, background: D.softRed, borderColor: "#FCA5A5", color: D.red, padding: 14, marginBottom: 14, display: "flex", alignItems: "center", gap: 8, fontSize: 13, fontWeight: 700 }}>
-          <AlertTriangle size={16} strokeWidth={2} />
+        <ActionFeedback error className="mb-4">
           {error}
-        </div>
+        </ActionFeedback>
       )}
-
-      {loading && <div style={{ ...cardStyle, padding: 28, textAlign: "center", color: D.muted }}>Loading pricing variance...</div>}
+      {loading && (
+        <ActionFeedback className="p-6">
+          Loading pricing variance...
+        </ActionFeedback>
+      )}
 
       {!loading && data && (
         <>
-          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(170px, 1fr))", gap: 10, marginBottom: 12 }}>
-            <KpiCard label="Included services" value={summary.serviceCount || 0} />
-            <KpiCard label="Average quoted minutes" value={fmtMinutes(summary.avgQuotedMinutes)} />
-            <KpiCard label="Average actual minutes" value={fmtMinutes(summary.avgActualMinutes)} />
-            <KpiCard label="Weighted percent variance" value={fmtPercent(summary.weightedPercentVariance)} tone={Number(summary.weightedPercentVariance || 0) > 0 ? "bad" : "good"} />
-            <KpiCard label="Total dollar margin impact" value={fmtMoney(summary.totalDollarMarginImpact)} tone={Number(summary.totalDollarMarginImpact || 0) < 0 ? "bad" : "good"} />
+          <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-3 mb-3">
+            <KpiCard
+              label="Included services"
+              value={summary.serviceCount || 0}
+            />
+            <KpiCard
+              label="Average quoted minutes"
+              value={fmtMinutes(summary.avgQuotedMinutes)}
+            />
+            <KpiCard
+              label="Average actual minutes"
+              value={fmtMinutes(summary.avgActualMinutes)}
+            />
+            <KpiCard
+              label="Weighted percent variance"
+              value={fmtPercent(summary.weightedPercentVariance)}
+              tone={
+                Number(summary.weightedPercentVariance || 0) > 0
+                  ? "bad"
+                  : "good"
+              }
+            />
+            <KpiCard
+              label="Total dollar margin impact"
+              value={fmtMoney(summary.totalDollarMarginImpact)}
+              tone={
+                Number(summary.totalDollarMarginImpact || 0) < 0
+                  ? "bad"
+                  : "good"
+              }
+            />
             <KpiCard label="Outlier count" value={summary.outlierCount || 0} />
           </div>
 
-          <div style={{ marginBottom: 14 }}><CoverageStrip coverage={coverage} /></div>
+          <div className="mb-[14px]">
+            <CoverageStrip coverage={coverage} />
+          </div>
 
           {emptyIncluded ? (
-            <div style={{ ...cardStyle, padding: 28, textAlign: "center", color: D.muted }}>
-              No completed services with both quoted and actual minutes were found for this window.
-            </div>
+            <Card className="p-5 mb-3 p-[28px] text-center text-ink-secondary">
+              No completed services with both quoted and actual minutes were
+              found for this window.
+            </Card>
           ) : (
-            <div style={{ display: "grid", gap: 14 }}>
+            <div className="grid gap-[14px]">
               <SegmentTable segments={segments} />
               <OutliersTable outliers={data.outliers || []} />
             </div>
           )}
         </>
       )}
-    </div>
+    </UiSurface>
   );
 }
