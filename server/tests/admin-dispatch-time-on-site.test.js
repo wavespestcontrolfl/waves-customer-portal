@@ -1105,7 +1105,7 @@ describe('PATCH /:serviceId/time-on-site — behavioral', () => {
 
   test('the closeout passes its billing_mode column probe to the planner so a pre-migration schema still plans (codex #4365 r3 P2)', () => {
     const source = fs.readFileSync(path.join(__dirname, '../services/complete-scheduled-service.js'), 'utf8');
-    expect(source).toMatch(/buildPlanForService\(svc\.id, \{[^}]*billingModeColumnExists: billingModeColumnsExist,[^}]*\}\)/);
+    expect(source).toMatch(/buildPlanForService\(svc\.id, \{[^}]*billingModeColumnExists: customerColumnsProbeFailed \? undefined : billingModeColumnsExist,[^}]*\}\)/);
   });
 
   test('a ledgered visit whose planner fails drops assignment-derived equipment IDs instead of recording the unverified rig (codex #4113 P2)', () => {

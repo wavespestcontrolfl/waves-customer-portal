@@ -972,7 +972,7 @@ describe('buildPlanForService strict mode (job-card hook P1)', () => {
       : Promise.reject(new Error('db down')));
     return chain;
   };
-  knex.schema = { hasTable: async () => false };
+  knex.schema = { hasTable: async () => false, hasColumn: async () => true };
 
   test('strict: a failed safety read (turf profile) throws instead of reading as "nothing on file"', async () => {
     await expect(buildPlanForService('svc1', { db: knex, strict: true })).rejects.toThrow('db down');
@@ -989,7 +989,7 @@ describe('buildPlanForService strict mode (job-card hook P1)', () => {
       chain.catch = (reject) => chain.then(undefined, reject);
       return chain;
     };
-    aliasesDown.schema = { hasTable: async () => false };
+    aliasesDown.schema = { hasTable: async () => false, hasColumn: async () => true };
     await expect(buildPlanForService('svc1', { db: aliasesDown, strict: true })).rejects.toThrow('aliases down');
   });
 });
@@ -1040,10 +1040,13 @@ describe('buildPlanForService selects customers.billing_mode only when the colum
     expect(columns(selects)).toContain('c.billing_mode');
   });
 
-  test.each([['no schema API', null], ['a failing probe', async () => { throw new Error('probe down'); }]])('%s reads as absent, never as a planner failure', async (_label, hasColumn) => {
+  test.each([
+    ['no schema API', null, 'probe unavailable'],
+    ['a failing probe', async () => { throw new Error('probe down'); }, 'probe failed: probe down'],
+  ])('%s is unknown, not a legacy schema: the plan fails closed before the visit select (codex #4365 r4 P2)', async (_label, hasColumn, message) => {
     const { knex, selects } = mockDb(hasColumn);
-    await expect(buildPlanForService('svc1', { db: knex })).rejects.toThrow('stop after the visit select');
-    expect(columns(selects)).not.toContain('c.billing_mode');
+    await expect(buildPlanForService('svc1', { db: knex })).rejects.toThrow(message);
+    expect(selects).toHaveLength(0);
   });
 
   test('a caller that already probed (the closeout) passes its result and the planner does not probe again', async () => {
@@ -1064,6 +1067,7 @@ test('a failed profile lookup cannot become a St. Augustine plan', async () => {
       : Promise.reject(new Error('Turf profile lookup failed'));
     return query;
   };
+  db.schema = { hasColumn: async () => true };
   await expect(buildPlanForService('test-service', { db })).rejects.toThrow('Turf profile lookup failed');
 });
 

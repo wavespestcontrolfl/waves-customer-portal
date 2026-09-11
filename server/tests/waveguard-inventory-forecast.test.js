@@ -2,13 +2,13 @@
 // Only persistence, plan lookup and auth are mocked; conversion/date math stay real.
 jest.mock('../models/db', () => Object.assign(jest.fn(), { transaction: jest.fn() }));
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
-jest.mock('../services/waveguard-plan-engine', () => ({ buildPlanForService: jest.fn() }));
+jest.mock('../services/waveguard-plan-engine', () => ({ buildPlanForService: jest.fn(), customerBillingModeColumnExists: jest.fn(async () => true) }));
 jest.mock('../middleware/admin-auth', () => ({
   adminAuthenticate: jest.fn(), requireTechOrAdmin: jest.fn(), requireAdmin: jest.fn(),
 }));
 
 const db = require('../models/db');
-const { buildPlanForService } = require('../services/waveguard-plan-engine');
+const { buildPlanForService, customerBillingModeColumnExists } = require('../services/waveguard-plan-engine');
 const { buildWaveGuardInventoryForecast, runWaveGuardInventoryForecastCheck } = require('../services/waveguard-inventory-forecast');
 const router = require('../routes/admin-inventory');
 
@@ -38,6 +38,7 @@ let visits;
 let products;
 beforeEach(() => {
   jest.resetAllMocks();
+  customerBillingModeColumnExists.mockResolvedValue(true);
   // Fixed clock deliberately straddles UTC/ET dates; no freshness validator involved.
   jest.useFakeTimers().setSystemTime(new Date('2030-01-10T02:00:00Z'));
   visits = readQuery([
@@ -169,8 +170,11 @@ test('cron runs forecast and deduplicated alert writes on its locked transaction
   expect(db.transaction).toHaveBeenCalledTimes(1);
   expect(trx.raw).toHaveBeenCalledWith('SELECT pg_advisory_xact_lock(hashtext(?))', ['waveguard-inventory-forecast-cron']);
   expect(trx.raw.mock.invocationCallOrder[0]).toBeLessThan(buildPlanForService.mock.invocationCallOrder[0]);
+  // One schema probe per batch, passed to every plan build (codex #4365 r4 P2).
+  expect(customerBillingModeColumnExists).toHaveBeenCalledTimes(1);
+  expect(customerBillingModeColumnExists).toHaveBeenCalledWith(trx);
   expect(buildPlanForService.mock.calls).toEqual([
-    ['visit-1', { db: trx }], ['visit-2', { db: trx }], ['visit-3', { db: trx }],
+    ['visit-1', { db: trx, billingModeColumnExists: true }], ['visit-2', { db: trx, billingModeColumnExists: true }], ['visit-3', { db: trx, billingModeColumnExists: true }],
   ]);
   expect(alert.insert).toHaveBeenCalledWith(expect.objectContaining({ dedupe_key: 'waveguard_inventory_forecast', severity: 'high' }));
   expect(alert.onConflict).toHaveBeenCalledWith('dedupe_key');

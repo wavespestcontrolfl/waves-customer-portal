@@ -1,6 +1,6 @@
 const db = require('../models/db');
 const logger = require('./logger');
-const { buildPlanForService } = require('./waveguard-plan-engine');
+const { buildPlanForService, customerBillingModeColumnExists } = require('./waveguard-plan-engine');
 const { etDateString, addETDays } = require('../utils/datetime-et');
 const { describeInventoryConversion } = require('./inventory-units');
 
@@ -93,9 +93,12 @@ async function buildWaveGuardInventoryForecast({ days = 14, limit = 150, knex = 
     return productMap.get(key);
   }
 
+  // One schema probe for the whole batch — the planner would otherwise
+  // probe information_schema once per forecasted service (Codex #4365 r4 P2).
+  const billingModeColumnExists = await customerBillingModeColumnExists(knex);
   for (const service of services) {
     try {
-      const plan = await buildPlanForService(service.id, { db: knex });
+      const plan = await buildPlanForService(service.id, { db: knex, billingModeColumnExists });
       const customerName = `${service.first_name || ''} ${service.last_name || ''}`.trim() || 'Customer';
       // Under the lawn completion gates the planner withholds EVERY product
       // when the assigned protocol version/window cannot be resolved

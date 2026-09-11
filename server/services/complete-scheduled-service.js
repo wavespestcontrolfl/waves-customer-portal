@@ -4203,8 +4203,10 @@ async function completeScheduledService(completionInput, packetContext = null) {
           // The closeout's own column probe: the planner must not select
           // customers.billing_mode on a pre-migration schema (Codex #4365 r3
           // P2), and the lane recheck under the customer lock compares the
-          // same column under the same probe.
-          billingModeColumnExists: billingModeColumnsExist,
+          // same column under the same probe. A FAILED probe is unknown, not
+          // absent: the planner probes again and fails closed rather than
+          // planning the visit on the tier alone (Codex #4365 r4 P2).
+          billingModeColumnExists: customerColumnsProbeFailed ? undefined : billingModeColumnsExist,
         }));
       } catch (planErr) {
         if (waveguardCloseout) throw planErr;
