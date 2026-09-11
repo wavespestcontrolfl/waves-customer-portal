@@ -557,3 +557,56 @@ test('unit: isCoVisitPair fails closed when the rows carry no address column', (
   expect(isCoVisitPair(effectiveWindowRange, aNoVisit, bNoVisit)).toBe(false);
   expect(isCoVisitPair(effectiveWindowRange, aNoVisit, b)).toBe(false);
 });
+
+// ── Codex #4435 round 2 ──────────────────────────────────────────────────
+describe('round-2 co-visit guards', () => {
+  const premisePair = (over = {}) => [
+    stop('pest', { customer_id: 'cust_b', window_start: '13:00', window_end: '14:00', estimated_duration_minutes: null, lat: 1, lng: 1, service_address_line1: '100 Main St' }),
+    stop('lawn', { customer_id: 'cust_b', window_start: '13:00', window_end: '14:00', estimated_duration_minutes: null, lat: 1, lng: 1, service_address_line1: '100 Main St', ...over }),
+  ];
+
+  test('two units of one building share a pin AND line 1 — the unit still separates them', () => {
+    const { isCoVisitPair } = require('../services/route-reorder-window-fit');
+    const same = premisePair();
+    expect(isCoVisitPair(effectiveWindowRange, same[0], same[1])).toBe(true);
+    // Unit in line 2 — premiseStampConflicts' own rule, the case a line-1
+    // string match could not see.
+    const units = premisePair({ service_address_line2: 'Apt 2' });
+    units[0] = { ...units[0], service_address_line2: 'Apt 1' };
+    expect(isCoVisitPair(effectiveWindowRange, units[0], units[1])).toBe(false);
+    // Different zip likewise.
+    const zips = premisePair({ service_address_zip: '34209' });
+    zips[0] = { ...zips[0], service_address_zip: '34205' };
+    expect(isCoVisitPair(effectiveWindowRange, zips[0], zips[1])).toBe(false);
+  });
+
+  test('a caller that pre-normalizes durations keeps its raw estimates — no phantom hour', () => {
+    // arrival-route.js's evaluateArrivalPlacement rewrites every ungrouped
+    // row's estimated_duration_minutes to workDuration(row) before
+    // simulating. Reading THAT as a real estimate sums 60 + 60 = the phantom
+    // hour; raw_estimate_minutes carries the truth (null ⇒ no estimate).
+    const stops = premisePair().map((s) => ({ ...s, raw_estimate_minutes: s.estimated_duration_minutes, estimated_duration_minutes: 60 }));
+    const sim = simulateArrivalRoute(RouteOptimizer, effectiveWindowRange, stops, { dayEndMin: 845 });
+    expect(sim).not.toBeNull();
+    expect(sim.arrivals.map((a) => a.departureMin)).toEqual([840, 840]);
+    // A row carrying a REAL estimate through the same rewrite still adds up.
+    const real = stops.map((s, i) => (i === 1 ? { ...s, raw_estimate_minutes: 75 } : s));
+    expect(simulateArrivalRoute(RouteOptimizer, effectiveWindowRange, real, {}).arrivals[1].departureMin).toBe(855);
+  });
+
+  test('a third member’s work survives a block that postponed the second', () => {
+    // 1st: span 60 → departs 840. 2nd: 75 real minutes → +15, but a 845-865
+    // block pushes the clock to 880. 3rd: +20 more real minutes → 95 total
+    // work, so 20 minutes past 880 = 900. Measuring against the idle-carrying
+    // clock instead of the work delta would have dropped all 20.
+    const [a, b] = premisePair();
+    const stops = [
+      a,
+      { ...b, id: 'lawn', raw_estimate_minutes: 75, estimated_duration_minutes: 75 },
+      { ...b, id: 'extra', raw_estimate_minutes: 20, estimated_duration_minutes: 20 },
+    ];
+    const sim = simulateArrivalRoute(RouteOptimizer, effectiveWindowRange, stops, { blockedIntervals: [{ startMin: 845, endMin: 865 }] });
+    expect(sim).not.toBeNull();
+    expect(sim.arrivals.map((s) => s.departureMin)).toEqual([840, 880, 900]);
+  });
+});

@@ -20,7 +20,9 @@ const COLUMNS = [
   'estimated_duration_minutes', 'status', 'route_order', 'created_at', 'visit_id',
   'reservation_expires_at', 'actual_end_time', 'check_out_time', 'completed_at', 'time_window',
   'service_type', 'service_id', 'source_estimate_id', 'updated_at',
-  'service_address_line1',
+  // Premise identity for the co-visit merge — premiseStampConflicts reads
+  // all four (street, unit, zip, city).
+  'service_address_line1', 'service_address_line2', 'service_address_city', 'service_address_zip',
   'reservation_service_mix', 'reservation_policy_version',
 ];
 
@@ -218,7 +220,12 @@ function evaluateArrivalPlacement(context, { windowStart, windowEnd, durationMin
     const usedLegs = [];
     const travel = context.travel || (capacity ? RouteOptimizer.createSchedulingTravel({ maxRequests: 0 }) : null);
     const simulation = simulateArrivalRoute(RouteOptimizer, rangeForStop,
-      order.map(row => ({ ...row, estimated_duration_minutes: row.memberIds ? row.estimated_duration_minutes : workDuration(row) })), {
+      // raw_estimate_minutes keeps the UNTOUCHED estimate for the co-visit
+      // sum: the rewrite below hands every ungrouped row its window span as
+      // a duration, which would otherwise read as a real estimate and sum a
+      // span-only pair back into the phantom hour (Codex #4435 r2 P1).
+      order.map(row => ({ ...row, raw_estimate_minutes: row.memberIds ? null : row.estimated_duration_minutes,
+        estimated_duration_minutes: row.memberIds ? row.estimated_duration_minutes : workDuration(row) })), {
         origin, startMin, dayEndMin, includeReturnInFinish: capacity, bufferMinutes,
         blockedIntervals: (context.blocks || []).map(block => ({ startMin: minuteOfDay(block.start_time), endMin: minuteOfDay(block.end_time) })),
         ...(travel ? { legMinutes: (from, to, departureMin) => {

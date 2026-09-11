@@ -905,3 +905,39 @@ describe('runScheduleQualityAlertsOnly (reorder off, quality gates own the night
     expect(ledgerInserts).toHaveLength(0);
   });
 });
+
+// ── Codex #4435 round 2 ──────────────────────────────────────────────────
+// The commit-time fence hashed workDuration, which is max(window span, real
+// estimate) — so a pair of 60-minute-span rows could go from 20+20 to 20+50
+// real minutes with every workDuration still 60 and the fence none the wiser,
+// committing an order certified against a 60-minute stop that is now 70. The
+// signature carries the RAW estimate (and the merge's own customer/premise
+// inputs) for exactly that.
+test('commit-time revalidation: a raw estimate change that leaves workDuration alone still rolls back', async () => {
+  stopsByDate['2026-08-18'] = backtrackDay('', { window_end: '10:00', estimated_duration_minutes: 20 });
+  liveRowsOverride = [
+    { id: 'A', window_start: '09:00', window_end: '10:00', estimated_duration_minutes: 20, route_order: 2, lat: 1, lng: 1 },
+    // 20 → 50: still under the 60-minute span, so workDuration is unchanged.
+    { id: 'B', window_start: '09:00', window_end: '10:00', estimated_duration_minutes: 50, route_order: 1, lat: 1, lng: 3 },
+    { id: 'C', window_start: '09:00', window_end: '10:00', estimated_duration_minutes: 20, route_order: 3, lat: 1, lng: 2 },
+  ];
+  const res = await runRouteReorder({ now: NOW });
+  expect(res.applied).toBe(0);
+  expect(trxUpdates).toEqual([]);
+  const ledger = JSON.parse(ledgerInserts[0].result);
+  expect(ledger.skips).toContainEqual(expect.objectContaining({ date: '2026-08-18', reason: 'STALE_TECH_DAY' }));
+});
+
+test('commit-time revalidation: a premise re-stamp mid-run rolls back (it is a merge input)', async () => {
+  stopsByDate['2026-08-18'] = backtrackDay('', { service_address_line1: '100 Main St' });
+  liveRowsOverride = [
+    { id: 'A', window_start: '09:00', route_order: 2, lat: 1, lng: 1, service_address_line1: '100 Main St' },
+    { id: 'B', window_start: '09:00', route_order: 1, lat: 1, lng: 3, service_address_line1: '100 Main St', service_address_line2: 'Apt 2' },
+    { id: 'C', window_start: '09:00', route_order: 3, lat: 1, lng: 2, service_address_line1: '100 Main St' },
+  ];
+  const res = await runRouteReorder({ now: NOW });
+  expect(res.applied).toBe(0);
+  expect(trxUpdates).toEqual([]);
+  const ledger = JSON.parse(ledgerInserts[0].result);
+  expect(ledger.skips).toContainEqual(expect.objectContaining({ date: '2026-08-18', reason: 'STALE_TECH_DAY' }));
+});

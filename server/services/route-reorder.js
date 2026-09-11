@@ -147,6 +147,7 @@ function violatesWindowFeasibility(RouteOptimizer, orderedStops, sourceStops, le
   let prevArrivalMin = null;
   let coFloor = 0; // longest window-derived duration in the current co-visit chain
   let coEstimates = 0; // sum of that chain's real estimates — see coVisitWork
+  let coMerged = 0; // minutes already charged for the chain, so advanceCoVisit adds only the delta
   let geoIdx = 0;
   for (const stop of orderedStops) {
     const s = byId.get(stop.id) || stop;
@@ -179,8 +180,8 @@ function violatesWindowFeasibility(RouteOptimizer, orderedStops, sourceStops, le
       // One shared arithmetic, not a second copy of it — this loop walks
       // Google's legs itself so it cannot call advanceSim wholesale, but the
       // merge's timing comes from the same function advanceSim uses.
-      const merged = advanceCoVisit({ clock, arrivalMin: prevArrivalMin, coFloor, coEstimates }, s);
-      ({ clock, coFloor, coEstimates } = merged);
+      const merged = advanceCoVisit({ clock, arrivalMin: prevArrivalMin, coFloor, coEstimates, coMerged }, s);
+      ({ clock, coFloor, coEstimates, coMerged } = merged);
       prevStop = s;
       continue; // prevArrivalMin stays pinned to the sibling's arrival
     }
@@ -192,7 +193,8 @@ function violatesWindowFeasibility(RouteOptimizer, orderedStops, sourceStops, le
     }
     coFloor = workDuration(s);
     coEstimates = Number(s.estimated_duration_minutes) || 0;
-    clock = startMin + Math.max(coFloor, coEstimates);
+    coMerged = Math.max(coFloor, coEstimates);
+    clock = startMin + coMerged;
     prevStop = s;
     prevArrivalMin = startMin;
   }
@@ -296,7 +298,8 @@ async function runRouteReorder(opts = {}, conn = db) {
             // Stamped street line: two units in one building share a parcel
             // centroid, so coordinates alone must not collapse them into one
             // physical stop (Codex #4435 r1 P1 — see isCoVisitPair).
-            'scheduled_services.service_address_line1',
+            'scheduled_services.service_address_line1', 'scheduled_services.service_address_line2',
+            'scheduled_services.service_address_city', 'scheduled_services.service_address_zip',
             'scheduled_services.route_order', 'scheduled_services.window_start',
             'scheduled_services.window_end', 'scheduled_services.visit_id',
             'scheduled_services.time_window',
@@ -605,16 +608,32 @@ async function runRouteReorder(opts = {}, conn = db) {
                   'scheduled_services.time_window',
                   'scheduled_services.estimated_duration_minutes',
                   'scheduled_services.auto_dispatch_locked', 'scheduled_services.auto_dispatch_excluded',
+                  // Co-visit inputs: two rows can keep identical
+                  // workDurations while their RAW estimates change the
+                  // merged clock (20+20 → 20+50 is 60 → 70 minutes on site),
+                  // and the merge itself keys on customer + premise (Codex
+                  // #4435 r2 P1).
+                  'scheduled_services.customer_id',
+                  'scheduled_services.service_address_line1', 'scheduled_services.service_address_line2',
+                  'scheduled_services.service_address_city', 'scheduled_services.service_address_zip',
                   'scheduled_services.route_order', ...guardedCoordSelects(trx));
               const num = (v) => (v == null || v === '' ? null : parseFloat(v));
               // Full guard-input signature: window RANGE + service duration —
               // the chronology AND feasibility guards were evaluated against
               // these, so any mid-run change invalidates the order.
+              const premise = (s) => [s.service_address_line1, s.service_address_line2,
+                s.service_address_city, s.service_address_zip]
+                .map((v) => String(v ?? '').trim().toLowerCase()).join(',');
               const windowSig = (s) => {
                 const r = effectiveWindowRange(s);
                 const dur = workDuration(s, repair ? 0 : 60);
                 const locked = (s.auto_dispatch_locked || s.auto_dispatch_excluded) ? 'L' : '-';
-                return `${r ? `${r.startMin}-${r.endMin}` : 'open'}|${dur}|${locked}|${s.visit_id || ''}`;
+                // customer + premise + the RAW estimate ride along: they are
+                // isCoVisitPair's own inputs and the merged on-site clock,
+                // and two rows can hold workDuration steady while changing
+                // both (Codex #4435 r2 P1).
+                const raw = Number(s.estimated_duration_minutes) || 0;
+                return `${r ? `${r.startMin}-${r.endMin}` : 'open'}|${dur}|${raw}|${locked}|${s.visit_id || ''}|${s.customer_id ?? ''}|${premise(s)}`;
               };
               const snapshot = new Map(techStops.map((s) => [s.id, {
                 window: windowSig(s),

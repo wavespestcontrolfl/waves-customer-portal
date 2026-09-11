@@ -46,6 +46,7 @@
  */
 
 const { ARRIVAL_WINDOW_MINUTES } = require('../utils/sms-time-format');
+const { premiseStampConflicts } = require('./stamped-address');
 const hhmmToMin = (hhmm) => {
   const [h, m] = String(hhmm).split(':').map(Number);
   return h * 60 + m;
@@ -145,13 +146,17 @@ function workDuration(stop, fallback = 60) {
  *
  * True when `stop` is a continuation of the SAME physical stop as
  * `prevStop`: identical customer, identical promised arrival window
- * (effectiveWindowRange), identical STAMPED service address, and BOTH rows
- * geocoded to identical coordinates. Coordinates alone do not prove one
+ * (effectiveWindowRange), the same stamped PREMISE, and BOTH rows geocoded
+ * to identical coordinates. Coordinates alone do not prove one
  * physical stop — a customer's two units in one building share the parcel
  * centroid (Codex #4435 r1 P1) — so the saved per-appointment address
  * (authoritative for an existing appointment, see day-stops.js) has to agree
- * too: both rows unstamped (both inherit the customer's own address, so the
- * same property) or both stamped identically.
+ * too — and "the same premise" is the repo's existing premiseStampConflicts
+ * rule (street key, then the unit from line 2 or embedded in the street
+ * line, then zip, then city), not a line-1 string match: Apt 1 and Apt 2 of
+ * one building share both the parcel pin AND their line 1 (Codex #4435 r2
+ * P1). A row whose select carries no address column at all is UNKNOWN, not
+ * known-equal, and never merges.
  * A coordless side never matches: a multi-property customer (commercial
  * chain, rental owner) with one ungeocoded row in the same auto-templated
  * slot is two addresses, and merging them would under-count real work —
@@ -187,21 +192,8 @@ function isCoVisitPair(effectiveWindowRange, prevStop, stop) {
   const lng = parseFloat(stop.lng);
   if (!(lat && lng && prevLat && prevLng)) return false;
   if (lat !== prevLat || lng !== prevLng) return false;
-  const prevAddress = stampedAddress(prevStop);
-  return prevAddress !== null && prevAddress === stampedAddress(stop);
-}
-
-/** The saved per-appointment street line, normalized; '' when the row
- *  inherits the customer's address. null when the caller's select carries no
- *  address column at all — UNKNOWN, which is not the same as known-equal and
- *  must not merge (round-0 fallback audit P1: a caller that selects
- *  customer_id and coordinates but forgets this column would otherwise get
- *  the coordinate-only decision back, which is exactly the two-units-at-one-
- *  parcel false merge the column exists to stop). Every guard caller's day
- *  load selects it; fixtures must carry it the way a real row does. */
-function stampedAddress(stop) {
-  if (!('service_address_line1' in stop)) return null;
-  return String(stop.service_address_line1 ?? '').trim().toLowerCase();
+  if (!('service_address_line1' in prevStop) || !('service_address_line1' in stop)) return false;
+  return !premiseStampConflicts(prevStop, stop);
 }
 
 /**
@@ -226,8 +218,22 @@ function stampedAddress(stop) {
  */
 function coVisitWork(chain, stop) {
   const floor = Math.max(chain.coFloor || 0, workDuration(stop));
-  const estimates = (chain.coEstimates || 0) + (Number(stop.estimated_duration_minutes) || 0);
+  const estimates = (chain.coEstimates || 0) + rawEstimateMinutes(stop);
   return { floor, estimates, minutes: Math.max(floor, estimates) };
+}
+
+/**
+ * The row's REAL service estimate, 0 when it has none. arrival-route.js's
+ * evaluateArrivalPlacement pre-normalizes every ungrouped row's
+ * estimated_duration_minutes to workDuration(row) before simulating, which
+ * would make a span-only row look like a real 60-minute estimate and sum two
+ * of them straight back into the phantom hour (Codex #4435 r2 P1) — so that
+ * caller stamps the untouched value as raw_estimate_minutes, and this is
+ * what the co-visit sum reads.
+ */
+function rawEstimateMinutes(stop) {
+  const raw = 'raw_estimate_minutes' in stop ? stop.raw_estimate_minutes : stop.estimated_duration_minutes;
+  return Number(raw) || 0;
 }
 
 /**
@@ -247,7 +253,11 @@ function coVisitWork(chain, stop) {
  */
 function advanceCoVisit(chain, stop, blockedIntervals = []) {
   const merged = coVisitWork(chain, stop);
-  const extra = Math.max(0, chain.arrivalMin + merged.minutes - chain.clock);
+  // The DELTA of merged work, NOT (ideal end − clock): once a block has
+  // postponed an earlier extension the clock carries idle minutes, and
+  // measuring against it would let that idle swallow a later member's work
+  // outright (Codex #4435 r2 P1 — a third row's 20 minutes vanishing).
+  const extra = Math.max(0, merged.minutes - (chain.coMerged || 0));
   let extraStart = chain.clock;
   if (extra > 0) {
     for (const block of blockedIntervals) {
@@ -259,6 +269,7 @@ function advanceCoVisit(chain, stop, blockedIntervals = []) {
     arrivalMin: chain.arrivalMin,
     coFloor: merged.floor,
     coEstimates: merged.estimates,
+    coMerged: merged.minutes,
     // A block that postpones the extra work holds the truck on site with
     // nothing to do — the same thing waiting for a window to open is, and
     // evaluateArrivalPlacement breaks equal-travel ties on this number
@@ -284,6 +295,7 @@ function advanceSim(RouteOptimizer, effectiveWindowRange, state, stop, {
       waitingMin: (state.waitingMin || 0) + merged.waiting,
       coFloor: merged.coFloor,
       coEstimates: merged.coEstimates,
+      coMerged: merged.coMerged,
     };
   }
   const lat = parseFloat(stop.lat);
@@ -311,7 +323,7 @@ function advanceSim(RouteOptimizer, effectiveWindowRange, state, stop, {
     if (startMin < block.endMin && startMin + workDuration(stop) > block.startMin) startMin = block.endMin;
   }
   if (range && startMin > range.endMin && !reportLate) return null;
-  return { clock: startMin + workDuration(stop), prev, prevStop: stop, visited: true, travelMin: state.travelMin + travel, arrivalMin: startMin, waitingMin: (state.waitingMin || 0) + Math.max(0, startMin - state.clock - travel), coFloor: workDuration(stop), coEstimates: Number(stop.estimated_duration_minutes) || 0 };
+  return { clock: startMin + workDuration(stop), prev, prevStop: stop, visited: true, travelMin: state.travelMin + travel, arrivalMin: startMin, waitingMin: (state.waitingMin || 0) + Math.max(0, startMin - state.clock - travel), coFloor: workDuration(stop), coEstimates: rawEstimateMinutes(stop), coMerged: workDuration(stop) };
 }
 
 /** Repair the demonstrated null-position insertion defect. Keep the relative
