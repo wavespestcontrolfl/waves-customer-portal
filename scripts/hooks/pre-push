@@ -665,7 +665,7 @@ run_claude_audit() {
   # for a reply that contained no object at all. A rejected reply is NOT
   # treated as clean — it falls through to UN-AUDITED like any other
   # failure.
-  local attempt accepted salvage_status remaining
+  local attempt accepted salvage_status remaining reject_reason
   # ONE budget for the whole fallback, not one per attempt: CLAUDE_REVIEW_TIMEOUT
   # is documented per-ref, and a per-attempt watchdog let a malformed first
   # attempt push a routine push to roughly double the stated ceiling.
@@ -732,6 +732,7 @@ run_claude_audit() {
     sed -e '/^[[:space:]]*```/d' "$TMPDIR_RUN/claude-raw-$idx.txt" > "$out_file"
 
     accepted=0
+    reject_reason="contract"
     if [ -s "$out_file" ] && jq empty "$out_file" >/dev/null 2>&1 \
        && verdict_matches_schema "$out_file"; then
       accepted=1
@@ -742,6 +743,7 @@ run_claude_audit() {
         echo "[codex-review] claude's reply for $label contains MORE THAN ONE review object —" >&2
         echo "[codex-review] refusing to guess which is the verdict (the first could be an" >&2
         echo "[codex-review] illustrative clean example and the second the real P0)." >&2
+        reject_reason="ambiguous"
       elif [ "$salvage_status" = "0" ]; then
         if verdict_matches_schema "$out_file"; then
           echo "[codex-review] claude wrapped its verdict in prose for $label — salvaged the JSON object." >&2
@@ -749,6 +751,7 @@ run_claude_audit() {
         else
           echo "[codex-review] claude's salvaged verdict for $label does not match the schema" >&2
           echo "[codex-review] (bad priority value, or a finding missing file/title/description)." >&2
+          reject_reason="schema"
         fi
       fi
     fi
@@ -759,6 +762,7 @@ run_claude_audit() {
         echo "[codex-review] see the diff — rejecting it. A review of nothing is not a clean" >&2
         echo "[codex-review] review. Summary was: $(jq -r '.summary // ""' "$out_file" | head -c 200)" >&2
         accepted=0
+        reject_reason="reviewed_nothing"
       else
         [ "$attempt" = "2" ] && echo "[codex-review] (verdict came from the retry attempt)" >&2
         return 0
@@ -766,23 +770,52 @@ run_claude_audit() {
     fi
 
     if [ "$attempt" = "1" ]; then
-      echo "[codex-review] claude did not return the JSON contract for $label — retrying once." >&2
+      echo "[codex-review] retrying $label once (reason: $reject_reason)." >&2
       # Attempt 2 MUST carry the diff again. An earlier version sent only the
       # contract plus the previous reply, and the retry duly answered "no diff
       # content was available to review" with an empty findings array — which
       # scored as P0:0/P1:0 and printed "clean — push allowed". A verdict on
       # nothing is the single worst failure this hook can have, so the retry
       # is built from $prompt_file (diff included) and never replaces it.
+      # The retry prompt must name the ACTUAL defect. Telling a model that
+      # returned perfectly good JSON "your reply was not a single JSON object"
+      # sends it to fix something that was never wrong, and the real problem
+      # survives the retry. The reviewed-nothing case matters most: that
+      # model needs to be told the diff IS present, not lectured about JSON.
       {
         cat "$base_prompt"
         echo ""
         echo "── Output contract (RETRY) ────────────────────────────────────────"
-        echo "Your previous reply to this exact review request did not follow the"
-        echo "output contract: it was not a single JSON object. Re-issue the SAME"
-        echo "review of the diff above as ONE JSON object and nothing else — no"
-        echo "prose, no markdown, no code fence. Findings belong in the findings"
-        echo "array. An empty findings array means you reviewed the diff and found"
-        echo "nothing; never return it because you could not see the diff."
+        case "$reject_reason" in
+          reviewed_nothing)
+            echo "Your previous reply was well-formed JSON, but it said you could not"
+            echo "see the diff. The diff IS included above, in full, under the"
+            echo "'Changed files' and 'Diff' headings. Read it and review it."
+            echo "Return an empty findings array ONLY if you actually reviewed the"
+            echo "diff and found nothing wrong — never because you believe no diff"
+            echo "was provided."
+            ;;
+          ambiguous)
+            echo "Your previous reply contained MORE THAN ONE JSON object, so there"
+            echo "was no way to tell which one was the verdict. Re-issue the SAME"
+            echo "review as EXACTLY ONE JSON object. Do not include an example, a"
+            echo "template, or a second illustrative object of any kind."
+            ;;
+          schema)
+            echo "Your previous reply was JSON but did not match the schema. Every"
+            echo "finding needs priority (exactly \"P0\", \"P1\" or \"P2\" — no"
+            echo "brackets, no lowercase), a non-empty file, title and description,"
+            echo "and line as a number or null. Re-issue the SAME review correctly."
+            ;;
+          *)
+            echo "Your previous reply to this exact review request did not follow the"
+            echo "output contract: it was not a single JSON object. Re-issue the SAME"
+            echo "review of the diff above as ONE JSON object and nothing else — no"
+            echo "prose, no markdown, no code fence. Findings belong in the findings"
+            echo "array. An empty findings array means you reviewed the diff and found"
+            echo "nothing; never return it because you could not see the diff."
+            ;;
+        esac
         echo ""
         echo "── Schema ─────────────────────────────────────────────────────────"
         cat "$SCHEMA"
