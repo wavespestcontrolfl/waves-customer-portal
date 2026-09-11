@@ -2311,6 +2311,35 @@ describe('Communications review ask serialization', () => {
       expect(reviews.releaseInlineClaim).not.toHaveBeenCalled();
     });
   });
+  test('an UNCLASSIFIED throw after provider entry retains the inline claim — it is not proof the ask never left', async () => {
+    // Deliberate, and the one case the pre-provider normalization above does
+    // not cover: every throw raised before `reviewProviderStarted` is stamped
+    // { sent: false, deliveryOutcome: 'not_sent' } by the route and releases
+    // the claim immediately. A throw with NO providerOutcome can therefore
+    // only come from inside sendCustomerMessage — at or past the provider
+    // handoff — where the text may already have gone out. Releasing there
+    // would let a second operator re-send the same ask; the claim instead
+    // ages out through the normal 10-minute stale-claim reconciliation.
+    sendCustomerMessage.mockRejectedValue(new Error('provider adapter blew up with no outcome'));
+    await withServer(async baseUrl => {
+      expect((await send(baseUrl, inline)).status).toBe(500);
+      expect(reviews.releaseInlineClaim).not.toHaveBeenCalled();
+      expect(reviews.markInlineDelivered).not.toHaveBeenCalled();
+    });
+  });
+  test('a throw raised BEFORE provider entry still releases the inline claim at once', async () => {
+    // The counterpart: the route stamps a definitive not_sent on a throw that
+    // never reached the provider, so an operator can re-insert the link
+    // straight away rather than waiting out the stale window.
+    // The claim recheck sits inside sendAndSettle's try, one line before
+    // reviewProviderStarted flips — a throw here is definitively a non-send.
+    reviews.inlineClaimStillHeld.mockRejectedValueOnce(new Error('claim recheck unavailable'));
+    await withServer(async baseUrl => {
+      expect((await send(baseUrl, inline)).status).toBe(503);
+      expect(sendCustomerMessage).not.toHaveBeenCalled();
+      expect(reviews.releaseInlineClaim).toHaveBeenCalledWith('rr-1', expect.anything());
+    });
+  });
   test.each([
     'Please review your invoice when you have time.',
     'Office directions: https://maps.app.goo.gl/abc123',

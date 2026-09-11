@@ -2379,6 +2379,14 @@ async function settleInlineReviewAfterThrow({ err, requestId, claimToken, emailR
   const ReviewService = require('../services/review-request');
   if (err?.providerOutcome?.deliveryOutcome !== 'accepted'
     && !require('../services/sms-auto-send').isRealProviderSend(err?.providerOutcome)) {
+    // ONLY an explicit not_sent releases, and that is deliberate. Both call
+    // sites stamp { sent: false, deliveryOutcome: 'not_sent' } on any throw
+    // raised before `reviewProviderStarted`, so an unclassified outcome here
+    // can only come from inside sendCustomerMessage — at or past the provider
+    // handoff, where the customer may already hold the ask. Releasing on it
+    // would let a second operator send the same ask; the claim instead ages
+    // out through the normal stale-claim reconciliation. Both directions are
+    // pinned in admin-communications-sms.test.js.
     if (err?.providerOutcome?.deliveryOutcome === 'not_sent') await ReviewService.releaseInlineClaim(requestId, claimToken);
     return;
   }
