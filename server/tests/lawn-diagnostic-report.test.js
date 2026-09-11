@@ -560,6 +560,16 @@ describe('lawn diagnostic auto-release ladder', () => {
     expect(residualDefinitiveClaim('Large patch has active recovery in the shade.')).toBe(false);
     expect(residualDefinitiveClaim('Chinch bug damage has active regrowth.')).toBe(false);
     expect(residualDefinitiveClaim('Chinch bug colonies are active along the edge.')).toBe(true);
+    // Finite confirmation verbs and adjective-first activity claims.
+    expect(residualDefinitiveClaim('The photos confirm chinch bug activity along the edge.')).toBe(true);
+    expect(residualDefinitiveClaim('The photo confirms chinch bug activity.')).toBe(true);
+    expect(residualDefinitiveClaim('Active colonies of chinch bugs remain along the edge.')).toBe(true);
+    expect(residualDefinitiveClaim('We should confirm chinch bug activity if it spreads.')).toBe(false);
+    expect(residualDefinitiveClaim('A closer look is needed to confirm chinch bug activity.')).toBe(false);
+    expect(residualDefinitiveClaim('Chinch bugs may be active and large patch is a possibility.')).toBe(false);
+    expect(residualDefinitiveClaim('Active recovery of large patch continues.')).toBe(false);
+    expect(residualDefinitiveClaim('Confirm chinch bug activity with a float test.')).toBe(false);
+    expect(residualDefinitiveClaim('The photos confirm possible chinch bug activity.')).toBe(false);
     // The definitive word must share the cause's clause, not merely its sentence.
     const unrelated = 'The watering schedule was confirmed with the customer, while large patch remains only a possibility.';
     expect(residualDefinitiveClaim(unrelated)).toBe(false);
@@ -607,6 +617,16 @@ describe('lawn diagnostic auto-release ladder', () => {
 
   test('scrubCustomerText still downgrades a predicative active claim beside a recovery noun', () => {
     expect(scrubCustomerText('Chinch bugs are active and recovery is slow.')).toMatch(/chinch bugs may be active and recovery is slow/i);
+  });
+
+  test('scrubCustomerText downgrades finite confirmation verbs and adjective-first activity claims', () => {
+    expect(scrubCustomerText('The photos confirm chinch bug activity along the edge.')).toBe('The photos suggest chinch bug activity along the edge.');
+    expect(scrubCustomerText('The photo confirms chinch bug activity.')).toBe('The photo suggests chinch bug activity.');
+    const colonies = scrubCustomerText('Active colonies of chinch bugs remain along the edge.');
+    expect(colonies).not.toMatch(/\bactive\b/i);
+    expect(colonies).toMatch(/^suspected colonies of chinch bugs remain along the edge\.$/i);
+    expect(scrubCustomerText('Float test required to confirm active chinch pressure.')).toBe('Float test required to confirm suspected chinch pressure.');
+    expect(safeCustomerSummary('The photos confirm chinch bug activity.', 'moderate')).not.toMatch(/confirm/i);
   });
 
   test('scrubCustomerText keeps ordinary short figures', () => {
@@ -674,6 +694,8 @@ describe('lawn diagnostic auto-release ladder', () => {
     'Free of chinch bugs and weeds', 'Free of chinch bugs, weeds, or grubs',
     // The nominal absence form.
     'Absence of chinch bugs', 'Chinch bug absence', 'Absence of any large patch or dollar spot',
+    // A conjunct sharing the negated predicate; symbolic conjunctions in a free-of list.
+    'No chinch bugs and weeds observed', 'Free of chinch bugs & weeds', 'Free of chinch bugs, weeds & grubs', 'Free of chinch bugs / weeds',
   ])('safeConditionLabel never maps the negated alias %s to a positive cause label', (name) => {
     expect(safeConditionLabel(name, 'high')).toBe('no major visible stress');
   });
@@ -753,6 +775,10 @@ describe('lawn diagnostic auto-release ladder', () => {
     ['Large patch is not only visible but spreading', 'large patch (fungal) activity'],
     ['Chinch bug damage is not just visible, it is spreading', 'chinch bug activity'],
     ['Dollar spot not merely present but spreading', 'dollar spot'],
+    // An "and"-led segment with its own finite verb is a new positive statement.
+    ['No weeds and large patch is present', 'large patch (fungal) activity'],
+    ['No weeds, and large patch is present', 'large patch (fungal) activity'],
+    ['No chinch bugs and drought stress is visible', 'drought stress'],
   ])('safeConditionLabel maps only the positive clause of %s', (name, label) => {
     expect(safeConditionLabel(name, 'high')).toBe(label);
   });

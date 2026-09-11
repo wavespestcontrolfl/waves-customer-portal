@@ -78,28 +78,54 @@ const SPECIFIC_FAMILY = {
   'iron deficiency': 'nutrient', 'nitrogen deficiency': 'nutrient', 'magnesium deficiency': 'nutrient',
   nutsedge: 'weed', crabgrass: 'weed', dollarweed: 'weed', clover: 'weed', spurge: 'weed',
 };
-// A generic class word never authorizes prose, but it still counts as a
-// distinct cause when no named cause of its class is beside it: "Chinch bugs
-// and disease" is two causes, while "Chinch bug infestation", "Fungal disease"
-// and "Insect pests" stay one. "Infestation" belongs to whatever cause it is
-// attached to and counts only when it stands alone.
+// A family or class word is absorbed by a named cause only when it modifies
+// or aliases that cause ("Large patch (fungal) activity", "Large patch, a
+// fungal disease", "Chinch bug infestation"); a coordinated one ("Large patch
+// and mildew", "Dollar spot and mold", "Chinch bugs and disease") is a second
+// cause. A generic class word (insect / pest / disease) never authorizes prose
+// on its own; "infestation" belongs to whatever cause it is attached to and
+// counts only when it stands alone.
 const GENERIC_CLASS = { insect: 'pest', pest: 'pest', disease: 'disease' };
 const FAMILY_CLASS = { caterpillar: 'pest', fungal: 'disease' };
 const TERM_CLASS = { chinch: 'pest', grub: 'pest' };
+const COORDINATED = /\b(?:and|plus|or|nor|with|vs\.?|versus|either|alongside)\b|[&+/;]|,(?!\s*(?:a|an|the)\b)/i;
+function governedMatches(text) {
+  const matches = [];
+  const re = new RegExp(SUMMARY_CAUSE_RE.source, 'gi');
+  let match;
+  while ((match = re.exec(String(text || ''))) !== null) {
+    const term = causeTerm(match[1]);
+    matches.push({ term: CAUSE_SYNONYMS[term] || term, index: match.index, end: match.index + match[0].length });
+  }
+  return matches;
+}
+function attached(a, b, text) {
+  const [left, right] = a.index < b.index ? [a, b] : [b, a];
+  const between = text.slice(left.end, right.index);
+  return between.length <= 30 && !COORDINATED.test(between);
+}
 function distinctCauseCount(name) {
-  const all = new Set([...governedTerms(name)].map((term) => CAUSE_SYNONYMS[term] || term));
-  const terms = [...all].filter((term) => !GENERIC_CAUSE_TERMS.includes(term));
-  const specifics = terms.filter((term) => !GENERIC_FAMILY_WORDS[term]);
-  const coveredFamilies = new Set(specifics.map((term) => SPECIFIC_FAMILY[term]).filter(Boolean));
-  const generics = terms.filter((term) => GENERIC_FAMILY_WORDS[term] && !coveredFamilies.has(GENERIC_FAMILY_WORDS[term]));
-  const coveredClasses = new Set([
-    ...specifics.map((term) => TERM_CLASS[term] || FAMILY_CLASS[SPECIFIC_FAMILY[term]]),
-    ...generics.map((term) => FAMILY_CLASS[GENERIC_FAMILY_WORDS[term]]),
-  ].filter(Boolean));
-  const classWords = [...all].filter((term) => GENERIC_CAUSE_TERMS.includes(term));
-  const classes = new Set(classWords.map((term) => GENERIC_CLASS[term]).filter((cls) => cls && !coveredClasses.has(cls)));
-  const bareInfestation = classWords.includes('infestation') && !specifics.length && !generics.length && !classes.size;
-  return specifics.length + generics.length + classes.size + (bareInfestation ? 1 : 0);
+  const text = String(name || '');
+  const matches = governedMatches(text);
+  const specifics = matches.filter((m) => !GENERIC_CAUSE_TERMS.includes(m.term) && !GENERIC_FAMILY_WORDS[m.term]);
+  const families = matches.filter((m) => GENERIC_FAMILY_WORDS[m.term]);
+  const classWords = matches.filter((m) => GENERIC_CAUSE_TERMS.includes(m.term));
+  const specificClass = (m) => TERM_CLASS[m.term] || FAMILY_CLASS[SPECIFIC_FAMILY[m.term]];
+  const distinct = new Set(specifics.map((m) => m.term));
+  for (const family of families) {
+    const absorbed = specifics.some((s) => SPECIFIC_FAMILY[s.term] === GENERIC_FAMILY_WORDS[family.term] && attached(s, family, text));
+    if (!absorbed) distinct.add(family.term);
+  }
+  const classes = new Set();
+  for (const word of classWords) {
+    const cls = GENERIC_CLASS[word.term];
+    if (!cls) continue;
+    const covered = specifics.some((s) => specificClass(s) === cls && attached(s, word, text))
+      || families.some((f) => FAMILY_CLASS[GENERIC_FAMILY_WORDS[f.term]] === cls && attached(f, word, text));
+    if (!covered) classes.add(cls);
+  }
+  const bareInfestation = classWords.some((m) => m.term === 'infestation') && !distinct.size && !classes.size;
+  return distinct.size + classes.size + (bareInfestation ? 1 : 0);
 }
 const CAUSE_TERM_SYNONYMS = { fungus: 'fungal', fungi: 'fungal', disease: 'disease', mold: 'fungal', mildew: 'fungal' };
 const causeTerm = (term) => {

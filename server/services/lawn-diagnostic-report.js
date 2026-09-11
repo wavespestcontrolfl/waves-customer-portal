@@ -616,7 +616,7 @@ function freeDifferentialRe() {
     // by mandatory whitespace so the repetition has one parse (no backtracking
     // blow-up when a state word makes the match fail).
     const word = `(?!\\b(?:and|or|nor|but|with)\\b|\\b${state}\\b)[\\w‐‑‒–—-]+`;
-    const item = `${word}(?:\\s+${word})*\\s*(?=$|[,.;!?]|(?:and|or|nor|&|\\/)\\b)`;
+    const item = `${word}(?:\\s+${word})*\\s*(?=$|[,.;!?]|(?:and|or|nor)\\b|[&\\/])`;
     // Comma items, then at most one conjunction item, which closes the list.
     const freeList = `\\bfree\\s+(?:of|from)\\s+${item}(?:,\\s*${item})*(?:,?\\s*(?:and|or|nor|&|\\/)\\s*${item})?`;
     freeDifferential = new RegExp(`${freeList}|\\b(?:${cause})(?:[\\s‐‑‒–—-]*(?:spots?|activity|damage|pressure|stress|disease|signs?))?[\\s‐‑‒–—-]*free\\b(?!\\s+(?:of|from)\\b)|\\b\\w+[\\s‐‑‒–—-]*free\\b(?!\\s+(?:of|from)\\b)`, 'gi');
@@ -625,6 +625,9 @@ function freeDifferentialRe() {
   return freeDifferential;
 }
 const SEGMENT_PREDICATE = /\b(?:present|visible|spreading|active|observed|seen|noted|confirmed|is|are|was|were|has|have|had|appears?|looks?|remains?)\b/;
+// A finite verb of its own, which an "and"-led segment needs before it counts
+// as an independent statement rather than a conjunct sharing the predicate.
+const INDEPENDENT_PREDICATE = /\b(?:is|are|was|were|has|have|had|remains?|appears?|looks?|seems?|may|might|could|can|will|should|must)\b/;
 // A conjunct that carries its own content (a symptom/damage noun or a location)
 // is an independent positive statement even without a verb.
 const SEGMENT_CONTENT = /\b(?:damage|activity|pressure|signs?|evidence|symptoms?|lesions?|thinning|feeding|infestation|outbreak|stress|patches|at|along|near|in|on|across|around|by)\b/;
@@ -718,10 +721,17 @@ function forwardScopedPositives(text, forward) {
   const head = text.slice(0, forward.index).trim();
   const wholeClauseMarker = NEGATION_MARKER.test(head) || NEGATION_MARKER.test(rest.replace(new RegExp(FORWARD_NEGATION.source, 'g'), ''));
   if (head && !wholeClauseMarker) positive.push(head);
-  for (const segment of rest.split(/[,:]/).slice(1)) {
-    const part = segment.trim();
-    if (!part || /^(?:and|or|nor)\b/.test(part) || NEGATION_MARKER.test(part)) continue;
-    if (SEGMENT_PREDICATE.test(part) && (SUMMARY_CAUSE_RE.test(part) || /\bweeds?\b/.test(part))) positive.push(part);
+  // A comma/colon segment needs any predicate word ("No weeds, large patch
+  // present"); an "and"-led segment needs a finite verb of its own ("No weeds
+  // and large patch is present"), so a shared predicate ("No chinch bugs and
+  // weeds observed") stays one negated list.
+  const tokens = rest.split(/([,:]|\s+and\s+)/);
+  for (let i = 2; i < tokens.length; i += 2) {
+    const coordinated = /^\s*and\s*$/.test(tokens[i - 1]) || /^and\b/.test(tokens[i].trim());
+    const part = tokens[i].trim().replace(/^and\s+/, '');
+    if (!part || /^(?:or|nor)\b/.test(part) || NEGATION_MARKER.test(part)) continue;
+    const predicate = coordinated ? INDEPENDENT_PREDICATE : SEGMENT_PREDICATE;
+    if (predicate.test(part) && (SUMMARY_CAUSE_RE.test(part) || /\bweeds?\b/.test(part))) positive.push(part);
   }
   return positive;
 }
@@ -845,7 +855,20 @@ const GENERIC_LOW_CONFIDENCE_SUMMARY = 'Your lawn shows an area worth keeping an
 // turf noun: "Large patch has active recovery" describes regrowth, not a
 // definitive activity claim, on both the scrub and the backstop.
 const PREDICATIVE_ACTIVE = '(?!\\s+(?:recovery|regrowth|growth|repair|healing|recuperation|rooting|greening|fill[\\s-]*in|turf|grass|lawn|roots?|blades?|canopy|ingredients?)\\b)';
-const DEFINITIVE_PREDICATE = new RegExp(`\\b(?:confirmed|definite(?:ly)?|certain(?:ly)?|(?<!\\b(?:may|might|could)\\s(?:\\w+\\s){0,2})(?:is|are|was|were|has|have|had|remains?|remained|stays?|stayed|keeps?|kept|continues?|continued)\\s+(?:\\w+\\s+){0,6}?active${PREDICATIVE_ACTIVE})\\b`, 'i');
+// A finite confirmation verb ("The photos confirm chinch bug activity") is a
+// claim unless it is a request to confirm ("to confirm", "should confirm",
+// "cannot confirm"). An adjective-first activity claim ("Active colonies of
+// chinch bugs remain") names the cause within a short noun phrase after
+// "active"; function words never bridge the gap, so "may be active and large
+// patch …" is not read as one claim.
+// An imperative ("Confirm suspected chinch pressure") or a hedged object
+// ("confirm possible …", "confirm whether …") is a request as well.
+const NOT_A_CLAIM = "(?<!\\b(?:to|should|will|can|must|please|would|could|may|might|cannot|not|never|let['’]s|help)\\s+(?:\\w+\\s+)?)(?<!(?:^|[.!?;:])\\s*)(?!confirm\\w*\\s+(?:suspected|possible|potential|likely|whether|if)\\b)";
+const NOUN_WORD = '(?!(?:and|or|but|nor|while|with|in|on|at|near|along|by|from|to|for|as|than|then|so|yet|is|are|was|were)\\b)\\w+';
+const CAUSE_AHEAD = `(?=\\s+(?:that\\s+|the\\s+|an?\\s+|some\\s+)?(?:${NOUN_WORD}\\s+){0,2}?(?:of\\s+)?(?:${SUMMARY_CAUSE_RE.source.slice(2, -2)}))`;
+const FINITE_CONFIRM = `${NOT_A_CLAIM}confirm(?:s|ed|ing)?\\b${CAUSE_AHEAD}`;
+const ADJECTIVE_ACTIVE = `(?<!\\b(?:may|might|could)\\s(?:\\w+\\s){0,2})active${PREDICATIVE_ACTIVE}${CAUSE_AHEAD}`;
+const DEFINITIVE_PREDICATE = new RegExp(`\\b(?:confirmed|definite(?:ly)?|certain(?:ly)?|${FINITE_CONFIRM}|${ADJECTIVE_ACTIVE}|(?<!\\b(?:may|might|could)\\s(?:\\w+\\s){0,2})(?:is|are|was|were|has|have|had|remains?|remained|stays?|stayed|keeps?|kept|continues?|continued)\\s+(?:\\w+\\s+){0,6}?active${PREDICATIVE_ACTIVE})\\b`, 'i');
 // "and" joins two independent clauses only when each side has its own finite
 // verb ("The schedule was confirmed and large patch remains only a possibility");
 // a compound subject ("Large patch and dollar spot are confirmed") stays whole.
@@ -982,7 +1005,9 @@ function stripConfirmedLanguage(text) {
   if (!text) return text;
   return String(text).replace(/\s+/g, ' ')
     // "Confirmed chinch bugs" and the heading form "Confirmed: chinch bugs".
-    .replace(new RegExp(`\\b(?:confirmed|active|definite(?:ly)?|certain(?:ly)?)\\s*(?:[:—–-]\\s*)?(${SUMMARY_CAUSE_RE.source})`, 'gi'),
+    // The cause may sit a short noun phrase away ("Active colonies of chinch
+    // bugs remain" → "suspected colonies of chinch bugs remain").
+    .replace(new RegExp(`\\b(?:confirmed|active${PREDICATIVE_ACTIVE}|definite(?:ly)?|certain(?:ly)?)\\s*(?:[:—–-]\\s*)?((?:${NOUN_WORD}\\s+){0,2}?(?:of\\s+)?${SUMMARY_CAUSE_RE.source})`, 'gi'),
       (match, noun) => `suspected ${noun}`)
     .replace(CONFIRMED_PREDICATE, (...args) => {
       const { subject, qualifier, appears } = predicateParts(args);
@@ -995,6 +1020,10 @@ function stripConfirmedLanguage(text) {
       const { subject, qualifier, past } = predicateParts(args);
       return past ? `${subject} may have been ${qualifier}active` : `${subject} may be active`;
     })
+    // A finite confirmation verb becomes a suggestion verb ('The photos confirm
+    // chinch bug activity' → 'The photos suggest chinch bug activity'); a request
+    // to confirm is left alone.
+    .replace(new RegExp(`${NOT_A_CLAIM}\\bconfirm(s|ed|ing)?\\b${CAUSE_AHEAD}`, 'gi'), 'suggest$1')
     .replace(/\bwe (?:have )?confirmed\b/gi, 'the pattern is most consistent with');
 }
 

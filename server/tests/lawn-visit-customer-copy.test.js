@@ -68,7 +68,7 @@ describe('customer publication', () => {
     },
   );
 
-  test.each(['Chinch bugs or drought stress', 'Chinch bugs vs. drought stress', 'Chinch bugs versus drought stress', 'Chinch bug / drought stress', 'Either chinch bugs or drought stress', 'Chinch bugs?', 'Chinch bugs and drought stress', 'Chinch bugs plus drought stress', 'Chinch bugs along with drought stress', 'Chinch bugs with drought stress', 'Neither chinch bugs nor drought stress observed', 'Chinch bugs & drought stress', 'Chinch bugs + drought stress', 'Chinch bugs, drought stress', 'Chinch bug drought stress', 'Large patch and dollar spot', 'Chinch bugs and disease', 'Chinch bugs plus disease', 'Drought stress and insects', 'Weeds and disease'])(
+  test.each(['Chinch bugs or drought stress', 'Chinch bugs vs. drought stress', 'Chinch bugs versus drought stress', 'Chinch bug / drought stress', 'Either chinch bugs or drought stress', 'Chinch bugs?', 'Chinch bugs and drought stress', 'Chinch bugs plus drought stress', 'Chinch bugs along with drought stress', 'Chinch bugs with drought stress', 'Neither chinch bugs nor drought stress observed', 'Chinch bugs & drought stress', 'Chinch bugs + drought stress', 'Chinch bugs, drought stress', 'Chinch bug drought stress', 'Large patch and dollar spot', 'Chinch bugs and disease', 'Chinch bugs plus disease', 'Drought stress and insects', 'Weeds and disease', 'Large patch and mildew', 'Dollar spot and mold', 'Large patch and disease', 'Large patch plus fungal activity'])(
     'an unresolved differential named %s cannot authorize either cause', (name) => {
       const evidence = { name, label: 'general lawn stress', confidence: 'high' };
       expect(copy.customerObservations('Chinch bug activity is damaging the edge.', [evidence])).toBe(copy.NO_OBSERVATIONS);
@@ -352,6 +352,9 @@ describe('customer publication', () => {
     ['Chinch bug infestation', 'Chinch bug activity along the edge.'],
     ['Fungal disease', 'Fungal activity in the shade.'],
     ['Large patch disease', 'Large patch in the shade.'],
+    ['Large patch, a fungal disease', 'Large patch in the shade.'],
+    ['Fungal large patch', 'Large patch in the shade.'],
+    ['Mold and mildew', 'Fungal activity in the shade.'],
     ['Large patch is not only visible but spreading', 'Large patch is spreading in the shade.'],
   ])('a generic class word beside its own cause in %s still counts as one cause', (name, text) => {
     const evidence = { name, label: 'general lawn stress', confidence: 'moderate' };
