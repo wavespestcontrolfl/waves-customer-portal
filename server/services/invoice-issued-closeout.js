@@ -171,11 +171,14 @@ const CLOSEOUT_AUDIT_ACTIONS = ['visit.completed_on_invoice_issued', 'visit.comp
 // every closeout writes is the persisted record of that failure; this sweep
 // (the daily payer-statement scheduler tick) re-runs the closeout for each
 // linked child of a recently settled statement whose visit is still open and
-// not in the future AND whose latest paid-trigger closeout audit is missing
-// or an error. A child refused for a real reason (grouped, packet-owned,
-// project-backed, moved) carries a non-error refusal row and is left alone —
-// the sweep never re-audits an intentional no-op. System actor: nobody is
-// behind a retry.
+// not in the future — or already COMPLETED with this closeout's own attempt
+// still parked (the canonical completion commits status='completed' before
+// its post-commit work; a crash there leaves the attempt resumable and the
+// tracker / snapshot work owed; pre-push P1 r10) — AND whose latest
+// paid-trigger closeout audit is missing or an error. A child refused for a
+// real reason (grouped, packet-owned, project-backed, moved) carries a
+// non-error refusal row and is left alone — the sweep never re-audits an
+// intentional no-op. System actor: nobody is behind a retry.
 async function retrySettledStatementCloseouts({ conn = db, today = etDateString(), sinceDays = 7 } = {}) {
   if (!isEnabled('invoiceIssuedClosesVisit')) return { candidates: 0, retried: 0, closed: 0 };
   let rows = [];
@@ -185,8 +188,14 @@ async function retrySettledStatementCloseouts({ conn = db, today = etDateString(
       .join('scheduled_services as s', 's.id', 'i.scheduled_service_id')
       .where('ps.status', 'paid')
       .where('ps.paid_at', '>=', new Date(Date.now() - sinceDays * 86400000))
-      .whereIn('s.status', OPEN_VISIT_STATUSES)
-      .where('s.scheduled_date', '<=', today)
+      .where((q) => q
+        .where((open) => open.whereIn('s.status', OPEN_VISIT_STATUSES).where('s.scheduled_date', '<=', today))
+        .orWhere((done) => done.where('s.status', 'completed').whereExists(function ownParkedAttempt() {
+          this.select(1).from('service_completion_attempts as a')
+            .whereRaw('a.service_id = s.id')
+            .whereRaw("a.idempotency_key = 'invoice-issued:' || i.id::text")
+            .whereNotIn('a.status', ['succeeded', 'failed']);
+        })))
       .orderBy(['ps.id', 'i.id'])
       .select('ps.id as statement_id', 'i.id as invoice_id', 's.id as visit_id');
   } catch (err) {

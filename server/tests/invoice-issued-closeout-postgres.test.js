@@ -344,7 +344,7 @@ postgres('invoice issued ⇒ visit completed (migrated PostgreSQL)', () => {
       metadata: JSON.stringify({ invoiceId, trigger: 'paid', code }),
     });
     // 1. never ran (no audit row) → retried
-    const v1 = await visit(); const i1 = await invoice({ status: 'paid', payer_statement_id: recent, scheduled_service_id: v1.id });
+    const v1 = await visit(); await invoice({ status: 'paid', payer_statement_id: recent, scheduled_service_id: v1.id });
     // 2. failed with an outage → retried
     const v2 = await visit(); const i2 = await invoice({ status: 'paid', payer_statement_id: recent, scheduled_service_id: v2.id });
     await auditRow(v2.id, i2.id, 'visit.completion_on_invoice_issued_refused', 'error');
@@ -358,11 +358,19 @@ postgres('invoice issued ⇒ visit completed (migrated PostgreSQL)', () => {
     const v5 = await visit({ date: '2040-03-05' }); await invoice({ status: 'paid', payer_statement_id: recent, scheduled_service_id: v5.id });
     // 6. settled outside the window → not a candidate
     const v6 = await visit(); await invoice({ status: 'paid', payer_statement_id: stale, scheduled_service_id: v6.id });
+    // 7. completed, but THIS closeout's own attempt is still parked (post-commit failure) → resumed (pre-push P1 r10)
+    const v7 = await visit({ status: 'completed' }); const i7 = await invoice({ status: 'paid', payer_statement_id: recent, scheduled_service_id: v7.id });
+    await trx('service_completion_attempts').insert({ id: randomUUID(), service_id: v7.id, idempotency_key: `invoice-issued:${i7.id}`, status: 'side_effects_pending', request_hash: 'x' });
+    await auditRow(v7.id, i7.id, 'visit.completion_on_invoice_issued_refused', 'error');
+    // 8. completed with a parked attempt that is a PANEL's, not ours → not a candidate
+    const v8 = await visit({ status: 'completed' }); await invoice({ status: 'paid', payer_statement_id: recent, scheduled_service_id: v8.id });
+    await trx('service_completion_attempts').insert({ id: randomUUID(), service_id: v8.id, idempotency_key: randomUUID(), status: 'side_effects_pending', request_hash: 'x' });
 
     const out = await retrySettledStatementCloseouts({ conn: trx, today: TODAY });
-    expect(out).toEqual({ candidates: 3, retried: 2, closed: 2 });
+    expect(out).toEqual({ candidates: 4, retried: 3, closed: 3 });
     const retriedIds = mockCompleteScheduledService.mock.calls.map(([args]) => args.serviceId).sort();
-    expect(retriedIds).toEqual([v1.id, v2.id].sort());
+    expect(retriedIds).toEqual([v1.id, v2.id, v7.id].sort());
+    expect(mockCompleteScheduledService.mock.calls.find(([args]) => args.serviceId === v7.id)[0].idempotencyKey).toBe(`invoice-issued:${i7.id}`);
     // A retry is nobody's action: the system is the actor.
     for (const [args] of mockCompleteScheduledService.mock.calls) expect(args.actor).toEqual({ techRole: 'admin', technicianId: null, technician: null });
     mockGate.on = false;
