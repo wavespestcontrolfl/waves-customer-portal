@@ -51,7 +51,7 @@ postgres('review ask history against migrated PostgreSQL', () => {
   async function auditRow(reviewRequestId, values = {}) {
     return trx('messaging_audit_log').insert({
       to_hash: 'fixture-hash', to_last4: '0102', audience: 'customer', purpose: 'review_request',
-      channel: 'sms', entry_point: 'review_request_followup', body_hash: 'fixture-body-hash',
+      channel: 'sms', entry_point: 'review_request_followup', body_hash: 'fixture-body-hash', customer_id: customerId,
       metadata: JSON.stringify({ original_message_type: 'review_followup', review_request_id: reviewRequestId }),
       ...values,
     });
@@ -84,6 +84,12 @@ postgres('review ask history against migrated PostgreSQL', () => {
     expect(await history.lastDeliveredAskAt(customerId, { since })).toEqual(at);
     await auditRow(row.id, { sent_at: null, blocked_code: 'CONSENT_LOOKUP_FAILED' });
     expect(await history.lastDeliveredAskAt(customerId, { since })).toEqual(at);
+  });
+
+  test("a delivered follow-up logged under another customer never counts as this customer's ask", async () => {
+    const row = await request({ sms_sent_at: at, followup_sent_at: new Date(at.getTime() + 3 * 86400000) });
+    await auditRow(row.id, { sent_at: new Date(at.getTime() + 3 * 86400000), customer_id: randomUUID() });
+    expect(await history.lastDeliveredAskAt(customerId, { since: new Date(at.getTime() - 1) })).toEqual(at);
   });
 
   test('single-channel deliveries survive nulls and customer scoping', async () => {

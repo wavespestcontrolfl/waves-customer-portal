@@ -3850,6 +3850,10 @@ describe('shared ask history foundation', () => {
     'Your invoice is ready: https://portal.test/l/abc123',
     'We discussed your Google review yesterday.',
     'Thanks so much for the Google review you left us!',
+    // codex #4326 r3: support chatter about the link is not a request.
+    'The review link is broken; I’ll resend it later.',
+    'I fixed the review link.',
+    'Let me know if the review link works now.',
   ])('unrelated acknowledgment/support text is not an ask: %s', async body => {
     installHistory({ sms: [{ at: base, body }] });
     expect(await history.lastManualAskAt('history-customer', { since: new Date(base - 1) })).toBeNull();
@@ -3894,6 +3898,8 @@ describe('shared ask history foundation', () => {
     'A 5-star review supports our small crew.',
     'That review link one more time:',
     'Here is that review link one more time.',
+    'Here’s your review link again.',
+    'Review link: https://portal.test/l/abc123',
   ])('request intent and review destinations count: %s', body => {
     expect(history.looksLikeReviewAsk(body)).toBe(true);
   });

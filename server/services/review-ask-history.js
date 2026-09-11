@@ -16,7 +16,10 @@ const REVIEW_INVITATION_RE = /\b(?:we|i)(?:['’]d|\s+would)\s+(?:(?:really|grea
 // Present-tense declarative asks with no textual link ("that review link one
 // more time") — the repo's own soft_reminder/qr_followup wording — count on
 // their own; they no longer need a co-occurring /l/ short link (see below).
-const REVIEW_LINK_MENTION_RE = /\breview\s+link\b/i;
+// Only request/reminder framing counts ("here is that review link", "that
+// review link one more time", "review link: <url>"). Support chatter about the
+// link ("the review link is broken", "I fixed the review link") is not an ask.
+const REVIEW_LINK_MENTION_RE = /\b(?:here(?:['’]s|\s+is)\s+(?:that|the|your)\s+review\s+link|(?:that|the|your)\s+review\s+link\s+(?:again|one\s+more\s+time|below|for\s+you)|review\s+link:\s*\S)/i;
 
 // Link-library destinations and explicit requests count. Acknowledgments
 // ("Thanks for your Google review") without a link/request do not.
@@ -56,13 +59,15 @@ function looksLikeReviewAsk(body) {
 const FOLLOWUP_DELIVERED_SUBQUERY = `(
   SELECT metadata->>'review_request_id' AS review_request_id, MAX(sent_at) AS followup_delivered_at
   FROM messaging_audit_log
-  WHERE entry_point = 'review_request_followup' AND sent_at IS NOT NULL
+  WHERE customer_id = ? AND entry_point = 'review_request_followup' AND sent_at IS NOT NULL
   GROUP BY metadata->>'review_request_id'
 ) followups`;
 
 function deliveredAskRows(customerId, { since = null, excludeRequestId = null } = {}) {
   const q = db('review_requests')
-    .joinRaw(`LEFT JOIN ${FOLLOWUP_DELIVERED_SUBQUERY} ON followups.review_request_id = review_requests.id::text`)
+    // Correlated to the customer so the derived table uses the audit log's
+    // customer index instead of grouping every follow-up ever delivered.
+    .joinRaw(`LEFT JOIN ${FOLLOWUP_DELIVERED_SUBQUERY} ON followups.review_request_id = review_requests.id::text`, [customerId])
     .where({ 'review_requests.customer_id': customerId })
     .whereRaw('(review_requests.sms_sent_at IS NOT NULL OR review_requests.sent_at IS NOT NULL OR followups.followup_delivered_at IS NOT NULL)')
     .whereRaw(ASK_TOUCH_SQL)
