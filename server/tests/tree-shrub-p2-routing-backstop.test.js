@@ -204,6 +204,42 @@ describe('treeShrubTierCatalogStamp — adopted reservation rows get the tier ca
     expect(stamp.service_id).toBe(CATALOG_ID);
   });
 
+  test('a newly available tier cannot exceed a preserved member allowance after gate shutdown', async () => {
+    const priorGate = process.env.GATE_SCHEDULING_CAPACITY;
+    delete process.env.GATE_SCHEDULING_CAPACITY;
+    const forShare = jest.fn().mockReturnThis();
+    const query = { forShare, first: jest.fn(async () => ({ id: CATALOG_ID,
+      default_duration_minutes: 30,
+      scheduling_duration_policy: { version: 1, default_duration_minutes: 90 },
+    })) };
+    const trx = () => ({ where: () => query });
+    const reservation = { reservation_policy_version: 2, estimated_duration_minutes: 120,
+      reservation_service_mix: { version: 2, services: ['pest_control', 'tree_shrub'],
+        durations: [60, 60], durationMinutes: 120 } };
+    try {
+      await expect(treeShrubTierCatalogStamp(trx, { selectedFrequency: lightTierCard,
+        rowServiceType: 'Tree & Shrub', reservation,
+      })).rejects.toMatchObject({ code: 'SLOT_UNAVAILABLE', reason: 'service_duration_changed', status: 409 });
+      expect(forShare).toHaveBeenCalledTimes(1);
+      // A longer deliberate scalar allowance is valid and is not resized.
+      expect(await treeShrubTierCatalogStamp(trx, { selectedFrequency: lightTierCard,
+        rowServiceType: 'Tree & Shrub', reservation: { reservation_policy_version: 2, estimated_duration_minutes: 120 },
+      })).toMatchObject({ service_id: CATALOG_ID });
+      expect(reservation.estimated_duration_minutes).toBe(120);
+    } finally {
+      if (priorGate === undefined) delete process.env.GATE_SCHEDULING_CAPACITY;
+      else process.env.GATE_SCHEDULING_CAPACITY = priorGate;
+    }
+  });
+
+  test('a preserved tier lookup error aborts instead of silently stamping only its name', async () => {
+    const query = { forShare: jest.fn().mockReturnThis(), first: jest.fn().mockRejectedValue(new Error('catalog read failed')) };
+    const trx = () => ({ where: () => query });
+    await expect(treeShrubTierCatalogStamp(trx, { selectedFrequency: lightTierCard,
+      rowServiceType: 'Tree & Shrub', reservation: { reservation_policy_version: 2, estimated_duration_minutes: 60 },
+    })).rejects.toMatchObject({ code: 'SLOT_UNAVAILABLE', reason: 'catalog_unavailable', status: 409 });
+  });
+
   test('no tier selection anywhere returns null (legacy accepts unchanged)', async () => {
     expect(await treeShrubTierCatalogStamp(fakeTrx, {
       selectedFrequency: null,

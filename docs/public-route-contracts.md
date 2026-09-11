@@ -99,8 +99,29 @@ Reservation and acceptance re-resolve catalog policies. Transactional catalog
 reads hold matched rows with FOR SHARE until the outer transaction ends, so
 catalog edits cannot overtake a validated allowance. Existing version-2 holds
 reject changed allowances with 409 `SLOT_UNAVAILABLE`, even after gate shutdown.
-Transactional route certification and independent-companion conversion belong
-to the following writer stages; capacity remains off until those are integrated.
+Reservation creation prepares bounded route traffic outside the transaction,
+then takes the date occupancy lock and the selected-technician/unassigned day
+fences together in canonical order before row locks. It rechecks the signed
+offer, live route fingerprint, catalog allowance, eligibility and closure state
+before persisting the hold, certified route order and audit. Relevant route rows
+remain locked through persistence; a busy completion yields recoverable
+`SLOT_UNAVAILABLE`. Unrelated assigned technicians do not invalidate the proof;
+a concurrent move to unassigned is fenced. Completed stops retain their prefix.
+Capacity offers preserve the enabled south-zone day funnel and omit speculative
+ASAP expansion. Public acceptance and one-tap prepare route traffic before opening their write
+transaction, then acquire the date, selected-technician and unassigned fences
+before their first row lock. Commit verifies the prepared date/technician,
+current catalog allowance, live route, eligibility and closures; changed state
+returns recoverable `SLOT_UNAVAILABLE` without acceptance writes. One-tap
+preparation failures retain its existing pick-a-time recovery. Version-1 holds
+keep their legacy path, while version-2 holds retain certification and allowance
+checks after gate shutdown. Independent-companion conversion/allocation remains
+the following stage; capacity stays off until it and the other writers integrate.
+Activation also requires the remaining booking writers: phone-booking primary
+and follow-up inserts retain the owner's lock-free book-and-flag contract.
+Existing-row locks do not fence those inserts, and their post-commit conflict
+check detects overlaps without preventing them. This stage does not close that
+race or authorize changing the phone-booking contract or enabling capacity.
 Existing request fields, token/signature guards, rate limits and privacy headers
 apply. With strict opt-in `GATE_VISIT_COMBINED_CAPACITY` and prerequisite
 `GATE_SEPARATE_COMBO_VISITS`, version-1 multi-service recurring selections reserve 60 minutes
@@ -163,8 +184,24 @@ older cached PDFs to match this evidence rule),
 the SPA `/recap/:token` "Your Visit, in Motion" recap player (token-gated; serves
 only an approved recap, consumes `/api/reports/:token/recap` + `/recap/video`,
 same noindex/no-referrer/no-store headers as `/report/:token`),
-`/api/stripe/webhook`, `/api/webhooks/twilio` (all Twilio inbound; the SMS
-operational extension runs after acknowledgment under
+`/api/stripe/webhook`, `/api/webhooks/twilio` (all Twilio inbound;
+`GATE_SMS_SPAM_CLASSIFIER=shadow` enables a bounded solicitation screen for
+unknown-sender SMS. Other values, including `true`, leave this stage off.
+Known primary/secondary/service-contact numbers, reactions, empty bodies,
+standalone carrier commands, and the AI assistant line bypass the classifier.
+Natural-language consent requests never wait on the model; only deterministic
+pitch evidence, such as a vendor footer, may be recorded for those messages.
+The unified inbox message is durably saved before screening. A failed unified
+save or relationship lookup bypasses screening and preserves ordinary handling;
+model failures record a failed non-solicitation verdict. The 3.5-second model
+budget uses the shared dispatcher.
+Shadow verdicts (`solicitation`, `confidence`, `method`, `version`, `mode`)
+are stored under `metadata.spam_verdict` on unified messages and ordinary or
+natural-language opt-out `sms_log` rows. Verdict attachment merges metadata on
+the saved unified row. Read state, opt-out suppression,
+TwiML replies, notifications, estimator routing, and provider request/auth
+contracts retain their existing behavior. No enforcement is available in
+this stage. The SMS operational extension runs after acknowledgment under
 `GATE_SMS_OPERATIONAL_ACTIONS` plus an explicit activation timestamp;
 it reuses persisted SMS evidence for private profile updates and admin
 notifications, with no additional response fields or customer sends;
@@ -851,6 +888,9 @@ Router-wide url-safe 15-64 token param gate (generic 404, prod-verified
 against all live tokens 2026-08-07); accept/decline carry a 10/hr
 limiter — the two heaviest public money-adjacent writes; select-tier/
 preferences ride estimateToggleLimiter, data/pdf ride dataLimiter).
+Authored commercial proposals expose reviewed four-decimal quantities and unit
+rates, explicit unit labels and cent-rounded line amounts through the existing
+normalized proposal and document output. These additions do not widen draft access.
 The `/estimate/:token?website=1` SPA uses the website's compact pricing →
 scheduling → Auto Pay presentation over these same APIs. `embed=1` permits
 framing only while `GATE_WEBSITE_QUOTE_BOOKING` is on and only from the

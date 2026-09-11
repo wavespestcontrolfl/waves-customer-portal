@@ -96,6 +96,7 @@
  *
  *   GATE_LAWN_PROPERTY_HISTORY=true (property-scoped confirmed lawn history, one installed row per visit, report-date/reset windows and confirm-time baseline; dark in dev AND prod; consumers read at call time)
  *   GATE_LAWN_COMPLETION_DEFAULTS=true (appointment-plan completion defaults; requires GATE_LAWN_PROPERTY_HISTORY; opt-in in every environment)
+ *   GATE_LAWN_ACTUALS_LEDGER=true (lawn actuals ledger for EVERY lawn visit — one-time, commercial and incomplete-with-products included, no protocol attribution invented; off = WaveGuard-only writer, byte-identical; read at call time)
  *
  * In development, most gates are OPEN by default so you can test locally.
  * Customer-facing auto-send gates still require explicit opt-in everywhere.
@@ -131,6 +132,8 @@ const gates = {
   appPropertyTexts: gateEnvValue('GATE_APP_PROPERTY_TEXTS'),
   // Registered for startup logging; the planner decides both gates per operation.
   lawnCompletionDefaults: gateEnvValue('GATE_LAWN_COMPLETION_DEFAULTS'),
+  // Registered for startup logging; the completion writer reads it at call time (strict 'true').
+  lawnActualsLedger: process.env.GATE_LAWN_ACTUALS_LEDGER === 'true',
   // Complete Service: job-matched estimate evidence and reviewed discounts.
   completionServicePricing: process.env.GATE_COMPLETION_SERVICE_PRICING === 'true',
   // Customer selects one available visit; later cadence dates await auto-dispatch ±3 days.
@@ -1233,6 +1236,8 @@ const gates = {
   // Layered spam classifier: records verdicts to call_spam_verdicts (100%
   // precision offline; any discard action is a separate consumer decision).
   callSpamClassifier: process.env.GATE_CALL_SPAM_CLASSIFIER === 'true',
+  // SMS shadow classification is active only for `shadow`; enforcement is unavailable.
+  smsSpamClassifier: String(process.env.GATE_SMS_SPAM_CLASSIFIER || '').trim().toLowerCase() === 'shadow',
   // Profile-enrichment writer: gate codes/pets/notes from extraction into
   // property_preferences + customers.internal_notes (admin-edit-preserving).
   callProfileEnrichment: process.env.GATE_CALL_PROFILE_ENRICHMENT === 'true',
@@ -1883,6 +1888,10 @@ const gates = {
   // time via gateEnvValue so tests and gate flips take effect immediately.
   // Kill switch: unset GATE_COMMERCIAL_ONETIME_SCOPED.
   commercialOneTimeScoped: gateEnvValue('GATE_COMMERCIAL_ONETIME_SCOPED'),
+
+  // Bid unit controls; default off everywhere.
+  // Readers always honor saved quantities and units after the controls are off.
+  commercialBidBuilder: gateEnvValue('GATE_COMMERCIAL_BID_BUILDER'),
 
   // Browser-rendered estimate PDF — GET /api/estimates/:token/pdf, the admin
   // proposal.pdf download, and the proposal email attachment render the React

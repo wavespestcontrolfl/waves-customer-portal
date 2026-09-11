@@ -37,13 +37,32 @@ async function loadLawnCompletionContext(service, knex) {
   const current = currentHistory?.current || null;
   // The turf profile is still customer-owned. Until property templates land,
   // its area/grass can seed only the proven current home, never a second lawn.
-  const propertyMatchesProfile = !!(scope.propertyId && service.address_line1
-    && scope.propertyAddressKey === addressKey(service));
+  // The proof compares the VISIT's address: the plan query joins the
+  // customers row onto the unprefixed address fields, so an appointment
+  // stamped to a second address (service_address_*) must be keyed by that
+  // stamp, not by the account address the sole saved property matches. The
+  // scope resolver already withholds a property under conflicting stamped
+  // evidence; this keeps the direct check honest on its own (Codex #4113 P1).
+  const visitAddress = service.service_address_line1 ? {
+    address_line1: service.service_address_line1, address_line2: service.service_address_line2,
+    city: service.service_address_city, zip: service.service_address_zip,
+  } : service;
+  const propertyMatchesProfile = !!(scope.propertyId && visitAddress.address_line1
+    && scope.propertyAddressKey === addressKey(visitAddress));
   const attempts = await history.assessmentQuery(service.customer_id, knex, { confirmed: false })
     .where('ss.id', service.id).orderBy('la.created_at', 'desc').orderBy('la.id', 'desc');
   const latestAssessment = scope.propertyId ? attempts.find((row) => history.isEligible(row, scope)) || resolvedHistory.previous : null;
   return {
     propertyId: scope.propertyId, propertyMatchesProfile, latestAssessment,
+    // The two keys the proof compared, so the completion transaction can
+    // rebuild them from the LOCKED customer/visit/property rows and abort
+    // when an address edit committed after the plan was built (Codex #4113 P2).
+    addressProof: {
+      // The scope keeps the candidate key after withholding its id; the proof carries a key only for a proven id.
+      propertyId: scope.propertyId, propertyAddressKey: scope.propertyId ? scope.propertyAddressKey : null,
+      visitAddressKey: visitAddress.address_line1 ? addressKey(visitAddress) : null,
+      stamped: !!service.service_address_line1,
+    },
     isLawn: detectServiceLine(service.service_type) === 'lawn',
     history: {
       available: !!scope.propertyId,
@@ -146,11 +165,36 @@ function completionItem(item, protocolProduct, amountsAllowed) {
   };
 }
 
+// A lawn plan attributes the visit only when a program actually applies: a
+// WaveGuard tier or a COMPLETE explicit appointment assignment (key, version
+// and window). The planner can still resolve an active protocol by grass
+// track for anyone; that resolution must not become a one-time or commercial
+// visit's protocol — and a partial assignment (window only) must not let the
+// matcher's wildcards adopt the calendar-resolved protocol either.
+function lawnPlanProgramApplies(plan) {
+  const assigned = plan?.appointmentAssignment || {};
+  return ['Bronze', 'Silver', 'Gold', 'Platinum'].includes(plan?.propertyGate?.serviceTier)
+    || !!(assigned.protocolKey && assigned.protocolVersion && assigned.windowKey);
+}
+
+// The ledger stamps a visit's protocol only when a program applies, the
+// saved turf profile PROVES this service property (the plan's protocol,
+// grass and products come from that profile — another property's profile
+// must not be stamped onto this one), AND the plan the completion built
+// actually resolved that visit's assignment (key / version / window, exact
+// archived version included). With the completion-defaults gates off the
+// planner neither proves the property nor resolves the assignment, so
+// attribution is withheld — the honest record.
+function lawnPlanAttributesVisit(plan) {
+  return lawnPlanProgramApplies(plan)
+    && plan?.propertyGate?.propertyMatchesProfile === true
+    && matchesLawnCompletionProtocol(plan?.protocol?.structured, plan?.appointmentAssignment || {}, plan?.propertyGate?.trackKey);
+}
+
 function buildLawnCompletionDefaults(plan, context) {
   const protocol = plan.protocol.structured;
   const assigned = plan.appointmentAssignment;
-  const programApplies = ['Bronze', 'Silver', 'Gold', 'Platinum'].includes(plan.propertyGate.serviceTier)
-    || !!assigned.windowKey;
+  const programApplies = lawnPlanProgramApplies(plan);
   const protocolMatches = matchesLawnCompletionProtocol(protocol, assigned, plan.propertyGate.trackKey);
   const eligible = context.isLawn && context.propertyMatchesProfile && programApplies && protocolMatches;
   const amountsAllowed = eligible && plan.propertyGate.blocks.length === 0;
@@ -192,4 +236,4 @@ function buildLawnCompletionDefaults(plan, context) {
   };
 }
 
-module.exports = { lawnCompletionDefaultsEnabled, loadLawnCompletionContext, buildLawnCompletionDefaults, matchesLawnCompletionProtocol, archivedLawnRecipeMatches };
+module.exports = { lawnCompletionDefaultsEnabled, lawnPlanProgramApplies, lawnPlanAttributesVisit, loadLawnCompletionContext, buildLawnCompletionDefaults, matchesLawnCompletionProtocol, archivedLawnRecipeMatches };

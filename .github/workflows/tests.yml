@@ -143,7 +143,7 @@ jobs:
         working-directory: server
         env:
           SCHEDULING_CAPACITY_TEST_DATABASE_URL: postgresql://waves:waves@localhost:5432/waves_test
-        run: npx jest --ci --silent --runInBand tests/scheduling-catalog-postgres.test.js
+        run: npx jest --ci --silent --runInBand tests/scheduling-catalog-postgres.test.js tests/scheduling-capacity-holds-postgres.test.js tests/scheduling-capacity-accept-postgres.test.js
       - name: Shared reservation arrival transaction tests
         working-directory: server
         env:
