@@ -1411,6 +1411,14 @@ async function executeMerge({ winnerId, loserId, performedBy, performedById = nu
     mergeLockedAt = new Date();
     if (!winner || !loser) throw new Error('executeMerge: customer not found');
     if (winner.deleted_at || loser.deleted_at) throw new Error('executeMerge: refusing to merge a deleted customer');
+    // Both sides' saved cards, locked for the life of this transaction
+    // (pre-push audit P1). payment_methods is read three times here — the
+    // Stripe-profile derivation inside the fingerprint recheck, the same
+    // derivation again for the actual backfill, and the demotion set — and
+    // an unlocked row could change between them, so the profile the card
+    // disclosed and the profile the winner adopts could disagree. Locked in
+    // one id-ordered statement, like the promoter rows.
+    await trx('payment_methods').whereIn('customer_id', [winnerId, loserId]).orderBy('id').forUpdate().select('id');
     // An approved snapshot (the Intelligence Bar's confirmation card) is
     // validated HERE, under the row locks, not in a caller-side preflight:
     // updated_at::text is the same full-precision version the card pinned,
@@ -1776,9 +1784,24 @@ async function executeMerge({ winnerId, loserId, performedBy, performedById = nu
 
     // Normalize payment-method defaults now that the loser's cards moved:
     // the winner's own pre-merge default stays the ONE default/autopay card.
-    if (savedCardDemotions.winner_has_default && savedCardDemotions.cards.length) {
+    // RE-DERIVED immediately before the write, not applied from the early
+    // snapshot (pre-push audit P1). The FOR UPDATE above stops an existing
+    // card's flags moving, but a card INSERTED for the loser mid-merge has
+    // no row to lock — applying a stale id list would leave it default and
+    // the winner would carry two autopay cards, which is the exact invariant
+    // this demotion exists to hold. A set that differs from the one the card
+    // disclosed is drift: refuse (nothing external has happened yet — the
+    // Stripe fence is further down).
+    const demotionsNow = await predictSavedCardDemotions(trx, winnerId, loserId);
+    if (expectedEffectsFingerprint
+      && JSON.stringify(demotionsNow) !== JSON.stringify(savedCardDemotions)) {
+      const err = new Error('executeMerge: the saved cards this merge would change moved since it was approved — review a fresh proposal');
+      err.previewChanged = true;
+      throw err;
+    }
+    if (demotionsNow.winner_has_default && demotionsNow.cards.length) {
       const demoted = await trx('payment_methods')
-        .whereIn('id', savedCardDemotions.cards.map((c) => c.id))
+        .whereIn('id', demotionsNow.cards.map((c) => c.id))
         .update({ is_default: false, autopay_enabled: false, updated_at: trx.fn.now() });
       if (demoted) repointed['payment_methods.demoted_defaults'] = demoted;
     }

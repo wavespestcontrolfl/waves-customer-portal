@@ -1780,7 +1780,10 @@ describe('executeMerge', () => {
     const trx = jest.fn((table) => makeChain(table, (q) => {
       if (table === 'customers' && q.called('forUpdate')) return [winner, loser];
       if (table === 'payment_methods' && q.called('select')) {
-        const w = q.args('where')[0];
+        // The transaction-wide FOR UPDATE lock reads both sides by whereIn
+        // and selects only ids; the per-side derivation uses where().
+        const w = q.args('where')?.[0];
+        if (!w) return [];
         return w.customer_id === WINNER ? [{ stripe_customer_id: 'cus_x' }] : [];
       }
       return [];
@@ -1803,7 +1806,9 @@ describe('executeMerge', () => {
         if (table === 'payment_methods') {
           return makeChain(table, (q) => {
             if (q.called('select')) {
-              const w = q.args('where')[0];
+              // whereIn = the transaction-wide FOR UPDATE lock over both sides.
+              const w = q.args('where')?.[0];
+              if (!w) return [];
               const ids = w.customer_id === WINNER ? winnerPm : loserPm;
               return ids.map((id) => ({ stripe_customer_id: id }));
             }
@@ -2447,6 +2452,23 @@ describe('describeMergeEffects (the card\'s disclosure + fingerprint, engine-own
     expect(first.fingerprint).toContain('"collection_cases":{"available":true,"defers_on_dialing"');
     // ...and the string still round-trips to exactly what the card shows.
     expect(JSON.parse(first.fingerprint)).toEqual({ moving: first.moving, financial_effects: first.financial_effects });
+  });
+
+  it('re-derives the saved-card demotion set at write time and refuses if it moved since the card (pre-push audit P1)', async () => {
+    // The early snapshot cannot see a card INSERTED mid-merge (no row to
+    // lock), and applying a stale id list would leave the winner with two
+    // default/autopay cards — the exact thing this demotion prevents.
+    const src = require('fs').readFileSync(require.resolve('../services/customer-dedupe.js'), 'utf8');
+    // The write applies the FRESH set, never the snapshot.
+    expect(src).toContain("const demotionsNow = await predictSavedCardDemotions(trx, winnerId, loserId);");
+    expect(src).toContain(".whereIn('id', demotionsNow.cards.map((c) => c.id))");
+    expect(src).not.toContain(".whereIn('id', savedCardDemotions.cards.map((c) => c.id))");
+    // A pinned merge whose demotion set moved refuses with previewChanged,
+    // and it does so BEFORE the Stripe fence (nothing external yet).
+    const body = src.split('const demotionsNow = await predictSavedCardDemotions')[1];
+    expect(body.indexOf('previewChanged = true')).toBeLessThan(body.indexOf('planStampedSessionRelease'));
+    // Both sides' cards are locked for the life of the transaction.
+    expect(src).toContain("await trx('payment_methods').whereIn('customer_id', [winnerId, loserId]).orderBy('id').forUpdate().select('id');");
   });
 
   it('locks both promoter rows under the executor transaction before fingerprinting the fold, and re-reads them (Codex r10 P1)', async () => {

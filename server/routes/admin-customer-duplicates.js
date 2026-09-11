@@ -95,6 +95,13 @@ async function handleMerge(req, res, { linkAsProperty }) {
       performedBy: performedBy(req),
       performedById: performedById(req),
       evidence: { via: linkAsProperty ? 'admin_link_as_property' : 'admin_review_queue' },
+      // The eligibility check above is check-then-act: a /dismiss ("not a
+      // duplicate") committing in the window between it and the merge would
+      // otherwise be overtaken. The executor re-decides eligibility inside
+      // its transaction under the pair adjudication lock — the same lock the
+      // dismissal writers take — so this admin path gets the serialization
+      // the Intelligence Bar path already had (pre-push audit P1).
+      requireQueueEligibility: true,
     });
     let propertyLinked = false;
     if (linkAsProperty) {
