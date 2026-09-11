@@ -109,6 +109,12 @@ async function assessPhotoQuality(base64Image, mimeType) {
 // MAIN SERVICE
 // ══════════════════════════════════════════════════════════════
 
+// Delivery recovery's lease check must reach the caller, not the send-failure log.
+const isOwnershipLoss = (err) => err?.code === 'LAWN_DELIVERY_OWNERSHIP_LOST';
+async function runBeforeSend(options) {
+  if (options?.beforeSend) await options.beforeSend();
+}
+
 const LawnIntelligence = {
 
   fetchFawnWeather,
@@ -173,7 +179,9 @@ const LawnIntelligence = {
   // 2026-08-01 (owner ruling — the completion text is a short link to the
   // report; the score lives ON the report). Retained for manual re-send /
   // backfill; not invoked from the confirm or completion pipelines.
-  async sendAssessmentNotification(assessmentId) {
+  // options.beforeSend runs right before the dispatcher call; delivery recovery
+  // passes its lease check so a worker that lost ownership mid-step never sends.
+  async sendAssessmentNotification(assessmentId, options) {
     try {
       const assessment = await db('lawn_assessments').where({ id: assessmentId, confirmed_by_tech: true }).first();
       if (!assessment || assessment.notification_sent) return null;
@@ -198,6 +206,7 @@ const LawnIntelligence = {
         entity_id: assessment.id,
       });
 
+      await runBeforeSend(options);
       const NotificationDispatcher = require('./notification-dispatcher');
       const result = await NotificationDispatcher.notify(customer.id, 'service_complete', {
         smsMessage,
@@ -220,6 +229,7 @@ const LawnIntelligence = {
 
       return result;
     } catch (err) {
+      if (isOwnershipLoss(err)) throw err;
       logger.error(`[lawn-intel] sendAssessmentNotification failed: ${err.message}`);
       return null;
     }

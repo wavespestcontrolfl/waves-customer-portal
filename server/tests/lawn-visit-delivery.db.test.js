@@ -195,6 +195,31 @@ const deferred = () => { let resolve; const promise = new Promise((r) => { resol
     expect((await stored(assessment.id)).pipeline_completed_at).toBeNull();
   });
 
+  test('a worker losing ownership while its customer send is in flight cannot dispatch', async () => {
+    const assessment = await seed();
+    const deps = dependencies();
+    const entered = deferred(), finish = deferred();
+    // Mirror the real sender: the lease check runs immediately before dispatch.
+    deps.LawnIntel.sendAssessmentNotification.mockImplementation(async (id, { beforeSend }) => {
+      entered.resolve();
+      await finish.promise;
+      await beforeSend();
+      return db.knex('lawn_assessments').where({ id }).update({ notification_sent: true });
+    });
+    const running = deliver(assessment.id, deps);
+    const rejected = expect(running).rejects.toMatchObject({ code: 'LAWN_DELIVERY_OWNERSHIP_LOST' });
+    await entered.promise;
+    await expire(assessment.id);
+    const replacement = await runs.claimPipeline(assessment.id, db.knex);
+    finish.resolve();
+    await rejected;
+    expect(deps.LawnIntel.sendAssessmentNotification).toHaveBeenCalledWith(assessment.id, { beforeSend: expect.any(Function) });
+    expect((await db.knex('lawn_assessments').where({ id: assessment.id }).first()).notification_sent).toBe(false);
+    expect(deps.LawnIntel.generateServiceReport).not.toHaveBeenCalled();
+    expect((await stored(assessment.id)).pipeline_owner_token).toBe(replacement.pipeline_owner_token);
+    expect((await stored(assessment.id)).pipeline_completed_at).toBeNull();
+  });
+
   test('completion refuses missing durable steps even with a valid lease', async () => {
     const assessment = await seed();
     const claim = await runs.claimPipeline(assessment.id, db.knex);

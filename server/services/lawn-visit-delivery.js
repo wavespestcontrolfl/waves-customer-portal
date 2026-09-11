@@ -43,7 +43,10 @@ async function deliverConfirmedAssessment({ assessmentId }, deps = {}) {
         if (!result) throw stepIncomplete('health');
         if (!(await runs.markPipelineHealthComplete(assessmentId, owner, knex, { staleAfterMs }))) throw ownershipLost();
       }],
-      ['notification', () => LawnIntel.sendAssessmentNotification(assessmentId)],
+      // The customer send is the one non-idempotent effect: the sender re-checks
+      // this worker's lease immediately before dispatching, so a stale worker
+      // cannot text a customer the replacement is already notifying.
+      ['notification', () => LawnIntel.sendAssessmentNotification(assessmentId, { beforeSend: guard })],
       ['report', () => LawnIntel.generateServiceReport(assessmentId)],
     ];
     for (const [step, action] of actions) {
@@ -51,6 +54,7 @@ async function deliverConfirmedAssessment({ assessmentId }, deps = {}) {
       if (!state.gaps.includes(step)) continue;
       await guard();
       await action(state);
+      await guard();
       if ((await runs.deliveryState(assessmentId, knex)).gaps.includes(step)) throw stepIncomplete(step);
       done.push(step);
     }
