@@ -107,6 +107,21 @@ describe('callback cards', () => {
     expect(screen.getByText('Second page callback')).toBeInTheDocument();
     expect(screen.getByText(row.description)).toBeInTheDocument();
   });
+  it('lets a Load more page land when a focus or poll refresh fires mid-read', async () => {
+    let releasePage;
+    adminFetch.mockImplementation((url) => url.includes('offset=100')
+      ? new Promise((resolve) => { releasePage = () => resolve({ ...feed, commitments: [{ ...row, id: 'callback-2', description: 'Second page callback' }] }); })
+      : Promise.resolve({ ...feed, has_more: true, next_offset: 100 }));
+    render(<FollowThroughCards ui={ui} />);
+    fireEvent.click(await screen.findByText('Load more'));
+    await waitFor(() => expect(releasePage).toBeTypeOf('function'));
+    adminFetch.mockClear();
+    fireEvent(window, new Event('focus'));
+    expect(adminFetch).not.toHaveBeenCalled();
+    releasePage();
+    await screen.findByText('Second page callback');
+    expect(screen.getByText(row.description)).toBeInTheDocument();
+  });
   it('walks the queue by offset when the ledger says there is more, and tells the host more remains', async () => {
     const onSummary = vi.fn();
     adminFetch.mockResolvedValueOnce({ ...feed, has_more: true, next_offset: 100 })

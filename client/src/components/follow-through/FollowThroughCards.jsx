@@ -44,6 +44,9 @@ export default function FollowThroughCards({ ui, onSummary, hints = true, pollMs
   const [now, setNow] = useState(() => Date.now());
   const busyRef = useRef(false);
   const request = useRef(0);
+  // A read in flight (initial, page append, or refresh); background ticks
+  // wait for it rather than superseding a Load more page mid-read.
+  const reading = useRef(false);
   const mounted = useRef(true);
   // Pages the operator has walked to; a background refresh re-reads that
   // whole range so "Load more" rows and the queue position survive it.
@@ -53,6 +56,7 @@ export default function FollowThroughCards({ ui, onSummary, hints = true, pollMs
   // Loads one more page (append) or re-reads pages 0..count-1 (replace).
   const load = useCallback(async ({ page = null, count = 1 } = {}) => {
     const seq = ++request.current;
+    reading.current = true;
     try {
       let next;
       if (page != null) {
@@ -78,7 +82,7 @@ export default function FollowThroughCards({ ui, onSummary, hints = true, pollMs
       // not keep suppressing its own rows on a flag the cards no longer hold.
       setData((old) => old?.pending ? null : old);
       setError(err.message || 'Could not load follow-through.');
-    }
+    } finally { if (seq === request.current) reading.current = false; }
   }, [fetchPage]);
   const refresh = useCallback(() => load({ count: pages.current }), [load]);
   // Actions resolve their post-action refresh through the latest filter, not
@@ -96,7 +100,7 @@ export default function FollowThroughCards({ ui, onSummary, hints = true, pollMs
     // while the replacement read is pending.
     setData((old) => ({ callbacks_enabled: old?.callbacks_enabled, commitments: [], has_more: false, pending: true }));
     load({ page: 0 });
-    const tick = () => { if (!document.hidden && !busyRef.current) refresh(); };
+    const tick = () => { if (!document.hidden && !busyRef.current && !reading.current) refresh(); };
     const timer = setInterval(tick, pollMs);
     const clock = setInterval(() => setNow(Date.now()), 60000);
     window.addEventListener('focus', tick);
