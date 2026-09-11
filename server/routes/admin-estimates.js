@@ -4307,6 +4307,17 @@ router.put('/:id/proposal', async (req, res, next) => {
           disposition_source: db.raw("CASE WHEN disposition IN ('expired_unviewed', 'expired_viewed') THEN NULL ELSE disposition_source END"),
           disposition_at: db.raw("CASE WHEN disposition IN ('expired_unviewed', 'expired_viewed') THEN NULL ELSE disposition_at END"),
           disposition_note: db.raw("CASE WHEN disposition IN ('expired_unviewed', 'expired_viewed') THEN NULL ELSE disposition_note END"),
+          // Preserve the deadline this member's link ACTUALLY carried right
+          // before this widen overwrites expires_at — an explicit extension
+          // SMS/email may have promised exactly this date. GREATEST against
+          // any prior preserved floor keeps it monotonic across repeated
+          // widenings. The shrink reconstruction below reads it back so a
+          // later shortened/cleared hold can never drop the member under a
+          // deadline already promised (GH codex P1 r6 on #4309).
+          estimate_data: db.raw(
+            `jsonb_set(COALESCE(estimate_data, '{}'::jsonb), '{groupWidenFloorExpiresAt}', `
+            + `to_jsonb(GREATEST(expires_at, COALESCE((estimate_data->>'groupWidenFloorExpiresAt')::timestamptz, expires_at))))`,
+          ),
           updated_at: db.fn.now(),
         });
     }
@@ -4333,7 +4344,15 @@ router.put('/:id/proposal', async (req, res, next) => {
       for (const member of Array.isArray(widened) ? widened : []) {
         const deliveredAt = member.sent_at || member.scheduled_at;
         const own = estimateExpiresAt(() => (deliveredAt ? new Date(deliveredAt) : new Date()), member);
-        const next = remainingHold && remainingHold > own ? remainingHold : own;
+        // The floor this widen (or an earlier one) preserved before it
+        // overwrote expires_at — the highest deadline this member's link
+        // ever actually promised, including an explicit extension SMS/email
+        // that predates the fixed hold. Never reconstruct below it (GH codex
+        // P1 r6 on #4309).
+        const memberData = parseEstimateData(member.estimate_data) || {};
+        const savedFloor = memberData.groupWidenFloorExpiresAt ? new Date(memberData.groupWidenFloorExpiresAt) : null;
+        const next = [remainingHold, own, savedFloor].filter(Boolean)
+          .reduce((latest, at) => (!latest || at > latest ? at : latest), null);
         if (next < previousAuthoredExpiry) {
           await trx('estimates').where({ id: member.id, expires_at: previousAuthoredExpiry }).update({ expires_at: next, updated_at: db.fn.now() });
         }

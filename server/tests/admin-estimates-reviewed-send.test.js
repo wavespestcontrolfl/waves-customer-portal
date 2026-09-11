@@ -266,11 +266,15 @@ describe('commercial bid authoring', () => {
     const res = await invoke('/:id/proposal', 'put', { proposal: { ...proposal(), validThrough: '2099-12-31' } });
     expect(whereRawSql.some((sql) => /expired_unsent/.test(sql))).toBe(true);
     expect(res.statusCode).toBe(200);
-    const siblingExtension = mutations.find(({ patch }) => !patch.estimate_data && patch.expires_at);
+    const siblingExtension = mutations.find(({ patch }) => patch.status && patch.expires_at);
     expect(new Date(siblingExtension.patch.expires_at).toISOString()).toBe('2100-01-01T04:59:59.999Z');
     // A sweep-expired published anchor is revived by the same write, never an unsent expiry.
     expect(String(siblingExtension.patch.status?.sql ?? siblingExtension.patch.status)).toMatch(/WHEN status = 'expired' THEN \(CASE WHEN viewed_at IS NOT NULL THEN 'viewed' ELSE 'sent' END\)/);
     expect(String(siblingExtension.patch.disposition?.sql ?? siblingExtension.patch.disposition)).toMatch(/expired_unviewed/);
+    // The pre-widen deadline is preserved as a floor (GH codex P1 r6 on
+    // #4309) so a later shrink can never drop this member below whatever
+    // its link actually promised before this widen overwrote expires_at.
+    expect(String(siblingExtension.patch.estimate_data?.sql ?? siblingExtension.patch.estimate_data)).toMatch(/groupWidenFloorExpiresAt/);
     expect(row.expires_at.toISOString()).toBe('2100-01-01T04:59:59.999Z');
   });
   test('the push-forward revival carries the pricing-authority predicate while the rollout gate is on (GH codex P1 r5 on #4309)', async () => {

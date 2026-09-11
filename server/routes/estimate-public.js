@@ -15824,21 +15824,41 @@ router.post('/:token/measurement-review', measurementReviewLimiter, async (req, 
 // manually via POST /api/admin/estimates/:id/extend on their own judgment.
 // Every path raises an in-app admin notification.
 // The notify-only extension claim: group lock (same lock proposal saves,
-// grouped sends, extensions and renewals take) → fresh row → fixed-hold
-// verdict on the CURRENT group → dedupe claim, all in one transaction.
-// `blocked` is the generic-404 answer; `claimed` 0 without a block is the
-// ordinary 24h dedupe (GH codex P1 r5 on #4309). Exported for tests.
+// grouped sends, extensions and renewals take) → re-read the row FOR UPDATE
+// and confirm it is STILL in the group just locked → fixed-hold verdict on
+// that CONFIRMED group → dedupe claim pinned to that same membership, all in
+// one transaction. `blocked` is the generic-404 answer; `claimed` 0 without a
+// block is the ordinary 24h dedupe (GH codex P1 r5 on #4309).
+//
+// Lock-then-reread ordering matches the auto-renew sweep
+// (estimate-auto-renew.js): the initial read is only a PEEK of the group to
+// lock — an eligible sent/viewed row can be moved into or between groups
+// while this transaction waits on that group's advisory lock (or, for an
+// initially ungrouped row, no lock is taken at all), so the code re-reads
+// `estimate_group_id` FOR UPDATE after the lock and refuses to judge or
+// claim on the stale peek if membership changed underneath it. The final
+// update is predicated on that same confirmed membership so a membership
+// change between the verdict and the write makes the update match nothing
+// rather than committing the estimate into a fixed-validity sibling's group,
+// burning `extension_requested_at`, and paging the office instead of
+// returning the contract's generic 404 (GH codex P1 r6 on #4309). Exported
+// for tests.
 async function claimNotifyOnlyExtensionRequest(estimateId, dedupeOpen) {
   return db.transaction(async (trx) => {
-    const fresh = await trx('estimates').where({ id: estimateId }).first();
-    if (!fresh) return { claimed: 0, blocked: true };
-    if (fresh.estimate_group_id) {
+    const initial = await trx('estimates').where({ id: estimateId }).first();
+    if (!initial) return { claimed: 0, blocked: true };
+    const groupId = initial.estimate_group_id || null;
+    let fresh = initial;
+    if (groupId) {
       await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
-        ['estimate-group-send', String(fresh.estimate_group_id)]);
+        ['estimate-group-send', String(groupId)]);
+      fresh = await trx('estimates').where({ id: estimateId }).forUpdate().first();
+      if (!fresh || (fresh.estimate_group_id || null) !== groupId) return { claimed: 0, blocked: true };
     }
     if (await require('../services/estimate-extension').fixedBidBlocksExtension(trx, fresh)) return { claimed: 0, blocked: true };
-    const claimed = await trx('estimates')
-      .where({ id: estimateId })
+    let query = trx('estimates').where({ id: estimateId });
+    query = groupId ? query.where({ estimate_group_id: groupId }) : query.whereNull('estimate_group_id');
+    const claimed = await query
       .where(dedupeOpen)
       .whereRaw(REPRICE_PENDING_ABSENT_SQL)
       .update({ extension_requested_at: trx.fn.now() });

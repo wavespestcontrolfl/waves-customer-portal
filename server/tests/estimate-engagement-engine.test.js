@@ -854,6 +854,24 @@ describe('processDueJobs', () => {
     expect(jobUpdate.payload).toEqual(expect.objectContaining({ status: 'skipped', outcome_reason: 'link-expired' }));
   });
 
+  test('a fixed-validity anchor past its OWN authored deadline skips link-expired even though the group-widened expires_at is still future (GH codex P1 r6 on #4309)', async () => {
+    enqueueProcessorHappyPath({
+      est: baseEstimate({
+        // Raw expires_at was widened to a grouped sibling's later fixed
+        // hold, but this property's own authored bid lapsed days ago.
+        expires_at: new Date(NOW.getTime() + 10 * 86400000),
+        estimate_data: { proposal: { enabled: true, validThrough: '2026-06-08' } },
+      }),
+    });
+
+    const result = await Engine.processDueJobs(NOW);
+
+    expect(result.sent).toBe(0);
+    expect(followupShared.claimFollowupSend).not.toHaveBeenCalled();
+    const jobUpdate = writes.filter((w) => w.table === 'estimate_followup_jobs' && w.op === 'update').pop();
+    expect(jobUpdate.payload).toEqual(expect.objectContaining({ status: 'skipped', outcome_reason: 'link-expired' }));
+  });
+
   test('a legacy-lane expiring claim suppresses the engine expiring email', async () => {
     const EXPIRING_RULE = { rule_key: 'expiring_engaged', enabled: true, trigger_type: 'time_sweep', priority: 30, template_key: 'estimate.engage_expiring', params: {} };
     enqueue('estimate_followup_jobs', { rows: [pendingJob({ rule_key: 'expiring_engaged' })] });
