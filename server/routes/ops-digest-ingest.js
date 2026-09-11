@@ -113,7 +113,7 @@ function validateDigest(body) {
   if (link.error) return link;
   const metadata = validateMetadata(body.metadata);
   if (metadata.error) return metadata;
-  return { value: { key, kind, subject, text, link: link.value, metadata: metadata.value } };
+  return { value: { key, kind, subject, text, link: link.value, metadata: metadata.value, observedAt: observedAtFrom(body.observedAt) } };
 }
 
 // Admin-relative only: a digest never deep-links off the portal, and a
@@ -130,7 +130,17 @@ function validateLink(raw) {
 // render as cleared), re-key it, or spoof its source; the route sets these
 // after the caller's fields and the fall-off path is the only writer of
 // the resolved* stamps.
-const RESERVED_METADATA_KEYS = ['opsKey', 'subject', 'kind', 'source', 'dedupeKey', 'dedupeVersion', 'resolved', 'resolvedAt', 'resolvedBy'];
+const RESERVED_METADATA_KEYS = ['opsKey', 'subject', 'kind', 'source', 'dedupeKey', 'dedupeVersion', 'resolved', 'resolvedAt', 'resolvedBy', 'observedAt'];
+
+// Observation time of a finding / clean run: the caller's ISO timestamp when
+// valid and not in the future, else now. Ordering resolves against ingests
+// (resolveOpsDigest notAfter) — a later failure must outlive an earlier
+// clean run even when their requests arrive out of order.
+function observedAtFrom(raw, now = Date.now()) {
+  const t = typeof raw === 'string' ? Date.parse(raw) : NaN;
+  if (!Number.isFinite(t) || t > now + 60 * 1000) return new Date(now).toISOString();
+  return new Date(t).toISOString();
+}
 
 function validateMetadata(raw) {
   if (raw === undefined || raw === null) return { value: {} };
@@ -148,7 +158,7 @@ router.post('/', darkUnlessConfigured, ingestAuth, async (req, res) => {
   const { error, value } = validateDigest(req.body);
   if (error) return res.status(400).json({ ok: false, reason: 'invalid_payload', error });
 
-  const { key, kind, subject, text, link, metadata } = value;
+  const { key, kind, subject, text, link, metadata, observedAt } = value;
   const title = `${kind}: ${subject}`;
   let row = null;
   try {
@@ -160,7 +170,7 @@ router.post('/', darkUnlessConfigured, ingestAuth, async (req, res) => {
       bell: true,
       dedupeKey: `${SOURCE}:${key}`,
       dedupeWindowMs: DEDUPE_WINDOW_MS,
-      metadata: { ...metadata, opsKey: key, subject: title, kind, source: SOURCE },
+      metadata: { ...metadata, opsKey: key, subject: title, kind, source: SOURCE, observedAt },
     });
   } catch (err) {
     logger.error(`[ops-digest-ingest] ${key}: bell write threw: ${err.message}`);
@@ -187,8 +197,11 @@ router.post('/resolve', darkUnlessConfigured, ingestAuth, async (req, res) => {
   if (!KEY_RE.test(key)) return res.status(400).json({ ok: false, reason: 'invalid_payload', error: 'key: 1-120 chars of letters, digits, . _ : -' });
   const successes = Number.isInteger(body.successes) && body.successes > 0 ? body.successes : null;
   // lockKey = the dedupeKey the ingest writes for this key, so resolve and a
-  // concurrent recurrence serialize under one advisory lock.
-  const resolved = await resolveOpsDigest({ key, source: SOURCE, lockKey: `${SOURCE}:${key}`, resolvedBy: successes ? `${SOURCE}:${successes}-clean-runs` : SOURCE });
+  // concurrent recurrence serialize under one advisory lock; notAfter = the
+  // clean run's observation time, so only findings observed at or before it
+  // retire (a newer failure that landed first survives).
+  const notAfter = observedAtFrom(body.observedAt);
+  const resolved = await resolveOpsDigest({ key, source: SOURCE, lockKey: `${SOURCE}:${key}`, notAfter, resolvedBy: successes ? `${SOURCE}:${successes}-clean-runs` : SOURCE });
   logger.info(`[ops-digest-ingest] ${key}: resolve → ${resolved} row(s)`);
   return res.status(200).json({ ok: true, resolved });
 });
@@ -215,4 +228,4 @@ const ingestPreParsers = [noStore, darkUnlessConfigured, ingestLimiter, ingestAu
 
 module.exports = router;
 module.exports.ingestPreParsers = ingestPreParsers;
-module.exports._private = { validateDigest, ingestAuth, darkUnlessConfigured, ingestBodyErrorHandler, genericNotFound, KINDS, RESERVED_METADATA_KEYS };
+module.exports._private = { validateDigest, ingestAuth, darkUnlessConfigured, ingestBodyErrorHandler, genericNotFound, observedAtFrom, KINDS, RESERVED_METADATA_KEYS };

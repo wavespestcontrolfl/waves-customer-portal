@@ -200,6 +200,7 @@ describe('bell write', () => {
         subject: 'FIX: schedule integrity — 3 overlapping visits',
         kind: 'FIX',
         source: 'ops-crons',
+        observedAt: expect.any(String),
       },
     });
   });
@@ -222,6 +223,23 @@ describe('bell write', () => {
     expect(json).toEqual({ ok: false, reason: 'bell_write_failed' });
   });
 
+  test('observedAt: caller ISO timestamp is honoured, future or garbage falls back to now, and it is seam-owned', () => {
+    const { observedAtFrom } = router._private;
+    const now = Date.parse('2026-09-11T12:00:00.000Z');
+    expect(observedAtFrom('2026-09-11T11:10:00Z', now)).toBe('2026-09-11T11:10:00.000Z');
+    expect(observedAtFrom('2027-01-01T00:00:00Z', now)).toBe('2026-09-11T12:00:00.000Z');
+    expect(observedAtFrom('nope', now)).toBe('2026-09-11T12:00:00.000Z');
+    expect(observedAtFrom(undefined, now)).toBe('2026-09-11T12:00:00.000Z');
+    expect(validateDigest({ ...good(), observedAt: '2026-09-11T11:10:00Z', metadata: { observedAt: 'spoof' } }).value.metadata).toEqual({});
+  });
+
+  test('resolve passes the clean run observation as notAfter', async () => {
+    mockResolve.mockResolvedValue(1);
+    const res = await fetch(`${baseUrl}/api/ops/digest/resolve`, { method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${TOKEN}` }, body: JSON.stringify({ key: 'k1', observedAt: '2026-09-11T11:10:00Z' }) });
+    expect(res.status).toBe(200);
+    expect(mockResolve.mock.calls[0][0].notAfter).toBe('2026-09-11T11:10:00.000Z');
+  });
+
   test('metadata cannot override the seam fields or pre-resolve the finding', async () => {
     mockNotifyAdmin.mockResolvedValue({ id: 'n2', deduped: false });
     await post({ ...good(), metadata: { source: 'spoof', opsKey: 'spoof', kind: 'FYI', resolved: true, resolvedAt: 'x', resolvedBy: 'y', dedupeKey: 'z', keep: 1 } });
@@ -232,6 +250,7 @@ describe('bell write', () => {
       subject: 'FIX: schedule integrity — 3 overlapping visits',
       kind: 'FIX',
       source: 'ops-crons',
+      observedAt: expect.any(String),
     });
     expect(opts.metadata.resolved).toBeUndefined();
     expect(validateDigest({ ...good(), metadata: { resolved: true } }).value.metadata).toEqual({});
@@ -264,13 +283,13 @@ describe('POST /resolve (fall-off rule)', () => {
     const { status, json } = await resolve({ key: 'e22-schedule-integrity:overlaps', successes: 3 });
     expect(status).toBe(200);
     expect(json).toEqual({ ok: true, resolved: 2 });
-    expect(mockResolve).toHaveBeenCalledWith({ key: 'e22-schedule-integrity:overlaps', source: 'ops-crons', lockKey: 'ops-crons:e22-schedule-integrity:overlaps', resolvedBy: 'ops-crons:3-clean-runs' });
+    expect(mockResolve).toHaveBeenCalledWith({ key: 'e22-schedule-integrity:overlaps', source: 'ops-crons', lockKey: 'ops-crons:e22-schedule-integrity:overlaps', notAfter: expect.any(String), resolvedBy: 'ops-crons:3-clean-runs' });
   });
 
   test('nothing standing is still a 200 with resolved 0; bad key is 400', async () => {
     mockResolve.mockResolvedValue(0);
     expect((await resolve({ key: 'never-rang' })).json).toEqual({ ok: true, resolved: 0 });
-    expect(mockResolve).toHaveBeenCalledWith({ key: 'never-rang', source: 'ops-crons', lockKey: 'ops-crons:never-rang', resolvedBy: 'ops-crons' });
+    expect(mockResolve).toHaveBeenCalledWith({ key: 'never-rang', source: 'ops-crons', lockKey: 'ops-crons:never-rang', notAfter: expect.any(String), resolvedBy: 'ops-crons' });
     expect((await resolve({ key: 'has spaces' })).status).toBe(400);
     expect((await resolve({})).status).toBe(400);
   });

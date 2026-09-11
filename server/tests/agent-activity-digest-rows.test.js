@@ -40,7 +40,7 @@ test('pinned rows are loaded without the window, merged with windowed rows, dedu
   expect(windowed._ops.some((o) => o[0] === 'where' && o[1] === 'created_at' && o[2] === '>=')).toBe(true);
 });
 
-test('the pinned predicate keeps unresolved FIX rows only when something can resolve them (source ops-crons or fallOff), else the read-or-window rule', () => {
+test('the pinned predicate keeps unresolved FIX rows only when something can resolve them (source ops-crons), else the read-or-window rule; cleared rows re-enter via resolvedAt', () => {
   const pinned = builder([]); const windowed = builder([]);
   mockQueue.push(pinned, windowed);
   const db = require('../models/db');
@@ -50,9 +50,11 @@ test('the pinned predicate keeps unresolved FIX rows only when something can res
     expect(raws).toEqual(expect.arrayContaining([
       "COALESCE(metadata->>'resolved', '') <> 'true'",
       "metadata->>'source' = 'ops-crons'",
-      "metadata->>'fallOff' = 'true'",
     ]));
+    expect(raws).not.toContain("metadata->>'fallOff' = 'true'"); // no in-process resolver ships in this PR
     expect(pinned._ops.filter((o) => o[0] === 'whereNull' && o[1] === 'read_at').length).toBe(2); // ACT/[Review] rule + legacy FIX rule
+    // the windowed query admits rows resolved inside the window
+    expect(windowed._ops.some((o) => o[0] === 'orWhereRaw' && /resolvedAt/.test(String(o[1])))).toBe(true);
   });
 });
 
