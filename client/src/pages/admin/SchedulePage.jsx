@@ -12310,16 +12310,23 @@ export function CompletionPanel({
   // as it can be known before the completion exists (legacy path AND no
   // service-report-v1 delivery) — not a client re-derivation of one of its
   // predicates (codex #4140 r4 P2). Unknown reads as "not bundled".
-  const reviewSendsWithCompletionSms =
-    willReview &&
-    effectiveSendSms &&
-    (oneTimeRecapOnly ||
-      (reviewTiming === "customer_requested" && reviewSendPreview?.bundlesImmediateAsk === true));
   // The server's invoiceBlocksReview: an UNPAID invoice after completion —
   // one minted now (willInvoice) or one already sent from dispatch and still
   // open (completionInvoiceAlreadySent, codex #4140 r12 P2). Prepaid and
   // paid invoices never hold the ask.
   const reviewAwaitsPayment = willInvoice || (!!service.completionInvoiceAlreadySent && !invoiceAlreadyPaid);
+  // An unpaid invoice holds the customer-requested ask server-side
+  // (invoiceBlocksReview gates effectiveRequestReview, so shouldBundleReview
+  // is false) — the preview must not promise the link the timing hint says
+  // waits for payment (codex #4140 r22 P2). The one-time recap path is exempt
+  // server-side (recapReviewOnly) and stays exempt here.
+  const reviewSendsWithCompletionSms =
+    willReview &&
+    effectiveSendSms &&
+    (oneTimeRecapOnly ||
+      (reviewTiming === "customer_requested" &&
+        reviewSendPreview?.bundlesImmediateAsk === true &&
+        !reviewAwaitsPayment));
   const reviewTimingHintText = willReview && !oneTimeRecapOnly
     ? reviewTimingHint({ reviewTiming, reviewCustomAt, preview: reviewSendPreview, bundled: reviewSendsWithCompletionSms, awaitsPayment: reviewAwaitsPayment })
     : "";
