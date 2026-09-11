@@ -28,6 +28,7 @@ const { v5 } = require('uuid');
 const jwt = require('jsonwebtoken');
 const express = require('express');
 const db = require('../../server/models/db');
+const { createScheduledService } = require('../../server/services/booking/create-scheduled-service');
 const { etDateString, parseETDateTime, addETDays } = require('../../server/utils/datetime-et');
 const id = name => v5(`field-team-qa:${name}`, context.id);
 const fixtureFile = path.join(context.root, '.tmp', 'qa', 'field-team-fixture.json');
@@ -41,6 +42,16 @@ const f = { admin: id('admin'), tech: id('tech'), crew: id('crew'), prospect: id
   merged: id('merged'), deleted: id('deleted'), early: id('early'), late: id('late'), untimed: id('untimed'), backfilled: id('backfilled'), garbled: id('garbled'), free: id('free'), propertyDup: id('propertyDup'), dupReturn: id('dupReturn'), overnight: id('overnight'), nightReturn: id('nightReturn'),
   customer: id('customer'), property: id('property'), visit: id('visit'), callback: id('callback'), missing: id('missing'),
   duplicate: id('duplicate'), unverified: id('unverified'), estimate: id('estimate'), review: id('review'), month, visitDate };
+
+// Visits go through the booking stamping contract like the other QA harnesses (booking-insert-contract test);
+// a re-run refreshes the deterministic fixture row in place instead of inserting it again.
+async function seedVisit(trx, data) {
+  if (await trx('scheduled_services').where({ id: data.id }).first('id')) {
+    await trx('scheduled_services').where({ id: data.id }).update(data);
+    return;
+  }
+  await createScheduledService({ trx, cols: await trx('scheduled_services').columnInfo(), source: { sourceAction: 'qa_fixture' }, insertData: data });
+}
 
 async function seed() {
   await db.transaction(async trx => {
@@ -69,9 +80,9 @@ async function seed() {
     const service = await trx('services').where({ service_key: 'pest_general_quarterly' }).first();
     assert.ok(service, 'migrated service catalog');
     for (const [key, day, status, callback] of [['visit', '02', 'completed', false], ['callback', '05', 'completed', true], ['missing', '06', 'on_site', false], ['duplicate', '07', 'completed', false], ['unverified', '08', 'completed', false]]) {
-      await trx('scheduled_services').insert({ id: f[key], customer_id: f.customer, property_id: f.property, technician_id: f.tech,
+      await seedVisit(trx, { id: f[key], customer_id: f.customer, property_id: f.property, technician_id: f.tech,
         service_id: service.id, service_type: `${service.name} · QA ${key}`, service_key_snapshot: service.service_key,
-        scheduled_date: `${month}-${day}`, status, is_callback: callback, actual_end_time: parseETDateTime(`${month}-${day}T12:00`) }).onConflict('id').merge();
+        scheduled_date: `${month}-${day}`, status, is_callback: callback, actual_end_time: parseETDateTime(`${month}-${day}T12:00`) });
     }
     // Three completed same-day services for the crew member, ordered by operational end (or with none recorded).
     // Closeout stamps run the other way: the early visit was closed out last and the late one early, so completed_at
@@ -79,36 +90,36 @@ async function seed() {
     const ends = { early: { actual_end_time: '09:00', completed_at: '16:00' }, late: { check_out_time: '15:00', completed_at: '14:00' }, untimed: {} };
     for (const [key, stamps] of Object.entries(ends)) {
       const at = Object.fromEntries(['actual_end_time', 'check_out_time', 'completed_at'].map(col => [col, stamps[col] ? parseETDateTime(`${month}-09T${stamps[col]}`) : null]));
-      await trx('scheduled_services').insert({ id: f[key], customer_id: f.customer, property_id: f.property, technician_id: f.crew,
+      await seedVisit(trx, { id: f[key], customer_id: f.customer, property_id: f.property, technician_id: f.crew,
         service_id: service.id, service_type: `${service.name} · QA ${key}`, service_key_snapshot: service.service_key,
-        scheduled_date: `${month}-09`, status: 'completed', is_callback: false, ...at, actual_start_time: null }).onConflict('id').merge();
+        scheduled_date: `${month}-09`, status: 'completed', is_callback: false, ...at, actual_start_time: null });
     }
     // A backdated quiet closeout on the same day: completed_at carries the ET-noon day marker and the service record is frozen with structured_notes.backfill.
-    await trx('scheduled_services').insert({ id: f.backfilled, customer_id: f.customer, property_id: f.property, technician_id: f.crew,
+    await seedVisit(trx, { id: f.backfilled, customer_id: f.customer, property_id: f.property, technician_id: f.crew,
       service_id: service.id, service_type: `${service.name} · QA backfilled`, service_key_snapshot: service.service_key,
-      scheduled_date: `${month}-09`, status: 'completed', is_callback: false, actual_end_time: null, completed_at: parseETDateTime(`${month}-09T12:00`), actual_start_time: parseETDateTime(`${month}-09T08:00`) }).onConflict('id').merge();
+      scheduled_date: `${month}-09`, status: 'completed', is_callback: false, actual_end_time: null, completed_at: parseETDateTime(`${month}-09T12:00`), actual_start_time: parseETDateTime(`${month}-09T08:00`) });
     await trx('service_records').where({ scheduled_service_id: f.backfilled }).del();
     await trx('service_records').insert({ customer_id: f.customer, scheduled_service_id: f.backfilled, service_date: `${month}-09`, service_type: `${service.name} · QA backfilled`, status: 'completed', structured_notes: JSON.stringify({ backfill: true }) });
     // A same-day completion whose legacy service record holds a malformed serialized structured_notes string.
-    await trx('scheduled_services').insert({ id: f.garbled, customer_id: f.customer, property_id: f.property, technician_id: f.crew,
+    await seedVisit(trx, { id: f.garbled, customer_id: f.customer, property_id: f.property, technician_id: f.crew,
       service_id: service.id, service_type: `${service.name} · QA garbled`, service_key_snapshot: service.service_key,
-      scheduled_date: `${month}-09`, status: 'completed', is_callback: false, actual_end_time: null, completed_at: parseETDateTime(`${month}-09T10:00`), actual_start_time: null }).onConflict('id').merge();
+      scheduled_date: `${month}-09`, status: 'completed', is_callback: false, actual_end_time: null, completed_at: parseETDateTime(`${month}-09T10:00`), actual_start_time: null });
     await trx('service_records').where({ scheduled_service_id: f.garbled }).del();
     await trx('service_records').insert({ customer_id: f.customer, scheduled_service_id: f.garbled, service_date: `${month}-09`, service_type: `${service.name} · QA garbled`, status: 'completed', structured_notes: JSON.stringify('{"backfill": tru') });
     // A later completed return recorded against the retained duplicate property of the same address.
-    await trx('scheduled_services').insert({ id: f.dupReturn, customer_id: f.customer, property_id: f.propertyDup, technician_id: f.crew,
+    await seedVisit(trx, { id: f.dupReturn, customer_id: f.customer, property_id: f.propertyDup, technician_id: f.crew,
       service_id: service.id, service_type: `${service.name} · QA duplicate-property return`, service_key_snapshot: service.service_key,
-      scheduled_date: `${month}-11`, status: 'completed', is_callback: false, actual_end_time: parseETDateTime(`${month}-11T12:00`) }).onConflict('id').merge();
+      scheduled_date: `${month}-11`, status: 'completed', is_callback: false, actual_end_time: parseETDateTime(`${month}-11T12:00`) });
     // A visit that runs past Eastern midnight, and a next-day visit that actually finished before it did.
     for (const [key, day, end] of [['overnight', '09', '10T01:00'], ['nightReturn', '10', '10T00:30']]) {
-      await trx('scheduled_services').insert({ id: f[key], customer_id: f.customer, property_id: f.property, technician_id: f.crew,
+      await seedVisit(trx, { id: f[key], customer_id: f.customer, property_id: f.property, technician_id: f.crew,
         service_id: service.id, service_type: `${service.name} · QA ${key}`, service_key_snapshot: service.service_key,
-        scheduled_date: `${month}-${day}`, status: 'completed', is_callback: false, actual_end_time: parseETDateTime(`${month}-${end}`) }).onConflict('id').merge();
+        scheduled_date: `${month}-${day}`, status: 'completed', is_callback: false, actual_end_time: parseETDateTime(`${month}-${end}`) });
     }
     // An always-free visit type (by name) for the crew member, with a stale positive price.
-    await trx('scheduled_services').insert({ id: f.free, customer_id: f.customer, property_id: f.property, technician_id: f.crew,
+    await seedVisit(trx, { id: f.free, customer_id: f.customer, property_id: f.property, technician_id: f.crew,
       service_id: service.id, service_type: 'Follow-up · QA free', service_key_snapshot: service.service_key, estimated_price: 95,
-      scheduled_date: `${month}-10`, status: 'completed', is_callback: false, followup_included: false, actual_end_time: parseETDateTime(`${month}-10T12:00`) }).onConflict('id').merge();
+      scheduled_date: `${month}-10`, status: 'completed', is_callback: false, followup_included: false, actual_end_time: parseETDateTime(`${month}-10T12:00`) });
     await trx('estimates').insert({ id: f.estimate, customer_id: f.customer, status: 'accepted', accepted_at: parseETDateTime(`${visitDate}T12:00`), customer_name: 'QA Field Customer', created_by_technician_id: f.admin }).onConflict('id').merge();
     await trx('review_incentive_payouts').insert({ id: f.review, technician_id: f.tech, amount_cents: 2500, earned_at: parseETDateTime(`${visitDate}T12:00`), status: 'earned' }).onConflict('id').ignore();
     await trx('user_feature_flags').insert({ user_id: f.tech, flag_key: 'tech-field-workspace', enabled: true }).onConflict(['user_id', 'flag_key']).merge();
