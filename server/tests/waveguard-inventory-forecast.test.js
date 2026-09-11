@@ -135,8 +135,42 @@ test.each([
     expect(result.skippedNonProgram).toEqual([]);
   } else {
     expect(result.productCount).toBe(0);
-    expect(result.skippedNonProgram).toEqual([{ serviceId: 'visit-lane', scheduledDate: '2030-01-10', customerName: 'Ada Lovelace', billingMode }]);
+    // Office-only lane stays out of the (technician-readable) response (codex #4365 r8 P2).
+    expect(result.skippedNonProgram).toEqual([{ serviceId: 'visit-lane', scheduledDate: '2030-01-10', customerName: 'Ada Lovelace' }]);
   }
+});
+
+const laneWhereClause = (query) => {
+  const clauses = query.where.mock.calls.map(([arg]) => arg).filter((arg) => typeof arg === 'function' && arg.name === 'programLane');
+  if (!clauses.length) return null;
+  const calls = [];
+  const builder = {};
+  for (const method of ['whereNull', 'orWhereNotIn', 'orWhere', 'whereNotNull']) {
+    builder[method] = jest.fn((...args) => { calls.push([method, ...args]); if (method === 'orWhere' && typeof args[0] === 'function') args[0].call(builder); return builder; });
+  }
+  clauses[0].call(builder);
+  return calls;
+};
+
+test('non-program lanes are excluded in SQL before the limit when the column exists (codex #4365 r8 P2)', async () => {
+  await buildWaveGuardInventoryForecast({ days: 2, limit: 20 });
+  const calls = laneWhereClause(visits);
+  expect(calls).toEqual([
+    ['whereNull', 'c.billing_mode'],
+    ['orWhereNotIn', 'c.billing_mode', ['per_visit', 'one_time']],
+    ['orWhere', expect.any(Function)],
+    ['whereNotNull', 'ss.lawn_protocol_key'],
+    ['whereNotNull', 'ss.lawn_protocol_version'],
+    ['whereNotNull', 'ss.lawn_protocol_window_key'],
+  ]);
+  // The lane clause is applied before the limit consumes the window's slots.
+  expect(visits.where.mock.invocationCallOrder.at(-1)).toBeLessThan(visits.limit.mock.invocationCallOrder[0]);
+});
+
+test('a legacy schema (no billing_mode column) adds no lane clause', async () => {
+  customerBillingModeColumnExists.mockResolvedValue(false);
+  await buildWaveGuardInventoryForecast({ days: 2, limit: 20 });
+  expect(laneWhereClause(visits)).toBeNull();
 });
 
 test('forecast HTTP handler returns computed demand and forwards query bounds', async () => {
