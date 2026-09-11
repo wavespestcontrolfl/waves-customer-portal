@@ -12,6 +12,11 @@ const { recordAuditEvent } = require('./audit-log');
 const KIND = 'send_reschedule_link';
 // How long a send waits after losing the customer's advisory interlock.
 const LOCK_RETRY_MINUTES = 5;
+// Must name EXACTLY the same columns and predicate as the partial unique
+// index in migration 20260911000030_outbox_messages_commitment_generation.js
+// — Postgres only accepts an ON CONFLICT target that matches an existing
+// unique index verbatim, predicate included.
+const COMMITMENT_GENERATION_CONFLICT_TARGET = '(commitment_id, commitment_generation) WHERE commitment_id IS NOT NULL';
 const sendContext = new AsyncLocalStorage();
 function mode() {
   const value = String(process.env.GATE_RESCHEDULE_LINK_ON_PROMISE || '').toLowerCase();
@@ -51,7 +56,18 @@ async function persistedActivationBoundary(conn) {
   return settled?.value ? new Date(settled.value) : now;
 }
 
+// The activation concept only means anything once sends are actually LIVE.
+// A shadow run (mode 'shadow') never sends anything, but it DOES walk every
+// open commitment through runOne exactly like a live sweep — reading (and,
+// on the very first LIVE run anywhere, WRITING) the persisted boundary from
+// shadow mode fixed that instant at whatever moment shadow testing happened
+// to start, weeks before anyone actually went live. Returning null here
+// keeps shadow purely observational: it never touches system_settings at
+// all, and isPreActivationRow below treats a null boundary as "nothing to
+// judge" rather than cancelling anything (codex #4293 P1, round 2 on
+// baa4cf295).
 async function activationBoundary(conn) {
+  if (mode() !== 'true') return null;
   const configured = process.env.RESCHEDULE_LINK_PROMISE_ACTIVATED_AT;
   const parsed = configured ? new Date(configured) : null;
   return parsed && !Number.isNaN(parsed.getTime()) ? parsed : persistedActivationBoundary(conn);
@@ -530,7 +546,16 @@ async function stagePromises(conn) {
   for (const row of rows) await conn('outbox_messages').insert({ channel: 'sms', status: mode() === 'shadow' ? 'shadow' : 'pending',
     payload: { kind: KIND, commitment_created_at: row.created_at }, commitment_id: row.id, commitment_generation: row.processing_generation ?? 0,
     related_call_log_id: row.call_log_id, related_customer_id: row.customer_id, available_at: new Date() })
-    .onConflict(['commitment_id', 'commitment_generation']).ignore();
+    // The index this must match (migration 20260911000030) is PARTIAL —
+    // WHERE commitment_id IS NOT NULL, to keep it off the many ordinary
+    // outbox rows with no commitment at all. Postgres accepts an ON
+    // CONFLICT target only when it names the SAME columns AND the SAME
+    // predicate as an existing unique index; a bare column-list conflict
+    // target here does not match a partial index at all, so every insert
+    // would raise "no unique or exclusion constraint matching the ON
+    // CONFLICT specification" instead of silently no-op'ing a duplicate
+    // (codex #4293 P1, round 2 on baa4cf295).
+    .onConflict(conn.raw(COMMITMENT_GENERATION_CONFLICT_TARGET)).ignore();
   return rows.length;
 }
 
@@ -697,7 +722,9 @@ async function isPreActivationRow(conn, row) {
   const createdAt = row.payload?.commitment_created_at;
   if (!createdAt) return false;
   const created = new Date(createdAt);
-  return !Number.isNaN(created.getTime()) && created < (await activationBoundary(conn));
+  if (Number.isNaN(created.getTime())) return false;
+  const boundary = await activationBoundary(conn);
+  return boundary != null && created < boundary;
 }
 
 // Terminal, exactly like a promise the office already closed
