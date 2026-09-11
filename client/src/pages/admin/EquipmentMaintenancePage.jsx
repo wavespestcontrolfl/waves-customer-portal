@@ -532,33 +532,18 @@ function EquipmentCard({
   const isMobile = useIsMobile(768);
   const [detail, setDetail] = useState(null);
   const [mileage, setMileage] = useState(null);
-  const [recordForm, setRecordForm] = useState(false);
-  const [mileageForm, setMileageForm] = useState(false);
-  const [detailError, setDetailError] = useState("");
-  const [detailLoading, setDetailLoading] = useState(false);
-  const [attempt, setAttempt] = useState(0);
+  const [openForm, setOpenForm] = useState(null);
+  const recordForm = openForm === "record";
+  const mileageForm = openForm === "mileage";
+  const toggleForm = name => setOpenForm(current => current === name ? null : name);
   useEffect(() => {
-    if (!isExpanded || detail) {
-      setDetailLoading(false);
-      return;
-    }
-    let active = true;
-    setDetailLoading(true);
-    setDetailError("");
-    Promise.all([af(`/admin/equipment-maintenance/${eq.id}`), eq.category === "vehicle" ? af(`/admin/equipment-maintenance/${eq.id}/mileage?limit=30`) : Promise.resolve(null)]).then(([d, m]) => {
-      if (active) {
+    if (isExpanded && !detail) {
+      Promise.all([af(`/admin/equipment-maintenance/${eq.id}`), eq.category === "vehicle" ? af(`/admin/equipment-maintenance/${eq.id}/mileage?limit=30`) : Promise.resolve(null)]).then(([d, m]) => {
         setDetail(d);
         setMileage(m);
-      }
-    }).catch(error => {
-      if (active) setDetailError(error.message);
-    }).finally(() => {
-      if (active) setDetailLoading(false);
-    });
-    return () => {
-      active = false;
-    };
-  }, [isExpanded, eq.id, eq.category, detail, attempt]);
+      }).catch(console.error);
+    }
+  }, [isExpanded, eq.id, eq.category, detail]);
   const nm = eq.next_maintenance;
   const overdue = nm && nm.is_overdue;
   return <Card style={{
@@ -572,8 +557,8 @@ function EquipmentCard({
       display: "flex",
       gap: 12,
       alignItems: "flex-start"
-    }} variant="secondary" className="!h-auto w-full text-left whitespace-normal" aria-expanded={isExpanded} aria-controls={`equipment-detail-${eq.id}`} aria-label={`Open ${eq.name}`} disabled={formBusy}>
-        {" "}
+    }} variant="secondary" className="!h-auto w-full text-left whitespace-normal" aria-expanded={isExpanded} aria-controls={`equipment-detail-${eq.id}`} disabled={formBusy}>
+        <span className="sr-only">{isExpanded ? "Collapse" : "Expand"} </span>
         <div style={{
         fontSize: 28,
         lineHeight: 1
@@ -655,12 +640,6 @@ function EquipmentCard({
           </div>{" "}
         </div>{" "}
       </Button>
-      {isExpanded && detailLoading && <div className="min-h-24 py-4 text-zinc-500" id={`equipment-detail-${eq.id}`}>
-          Loading equipment details…
-        </div>}
-      {isExpanded && detailError && <ActionFeedback error onRetry={() => setAttempt(v => v + 1)} className="mt-4">
-          Could not load equipment details: {detailError}
-        </ActionFeedback>}
       {/* Expanded Detail */}
       {isExpanded && detail && <div style={{
       marginTop: 16,
@@ -759,7 +738,7 @@ function EquipmentCard({
                   }}>
                           {intervals.join(" / ") || "--"}
                         </TD>
-                        <TD style={{
+                        <TD className="whitespace-nowrap" style={{
                     color: s.is_overdue ? "#C8312F" : "#27272A"
                   }}>
                           {s.is_overdue && "OVERDUE "}
@@ -770,7 +749,7 @@ function EquipmentCard({
                         <TD>
                           <Badge tone="neutral">{s.priority}</Badge>
                         </TD>
-                        <TD style={{
+                        <TD className="whitespace-nowrap" style={{
                     color: "#27272A",
                     textAlign: "right"
                   }}>
@@ -790,16 +769,16 @@ function EquipmentCard({
         flexWrap: "wrap"
       }}>
             {" "}
-            <Button onClick={() => setRecordForm(!recordForm)} type="button" variant="primary" className="min-w-11" disabled={formBusy}>
+            <Button onClick={() => toggleForm("record")} type="button" variant="primary" className="min-w-11" disabled={formBusy}>
               {recordForm ? "Cancel" : "Record Maintenance"}
             </Button>
-            {eq.category === "vehicle" && <Button onClick={() => setMileageForm(!mileageForm)} type="button" variant="secondary" className="min-w-11" disabled={formBusy}>
+            {eq.category === "vehicle" && <Button onClick={() => toggleForm("mileage")} type="button" variant="secondary" className="min-w-11" disabled={formBusy}>
                 {mileageForm ? "Cancel" : "Log Mileage"}
               </Button>}
           </div>
           {/* Record Maintenance Form */}
           {recordForm && <MaintenanceForm equipmentId={eq.id} schedules={detail.schedules || []} onDone={() => {
-        setRecordForm(false);
+        setOpenForm(null);
         setDetail(null);
         loadFleet();
         showToast("Maintenance recorded");
@@ -807,7 +786,7 @@ function EquipmentCard({
 
           {/* Log Mileage Form */}
           {mileageForm && <MileageForm vehicleId={eq.id} currentMiles={eq.current_miles} onDone={() => {
-        setMileageForm(false);
+        setOpenForm(null);
         setMileage(null);
         setDetail(null);
         loadFleet();
@@ -872,7 +851,7 @@ function EquipmentCard({
                     {detail.recentRecords.slice(0, 10).map(r => <TR key={r.id} style={{
                 borderBottom: `1px solid ${"#E4E4E7"}`
               }}>
-                        <TD style={{
+                        <TD className="whitespace-nowrap" style={{
                   color: "#27272A"
                 }}>
                           {formatETDate(r.performed_at)}
@@ -890,7 +869,7 @@ function EquipmentCard({
                 }}>
                           {r.performed_by || r.vendor_name || "--"}
                         </TD>
-                        <TD style={{
+                        <TD className="whitespace-nowrap" style={{
                   color: "#27272A",
                   textAlign: "right"
                 }}>
@@ -1187,7 +1166,7 @@ function EquipmentCard({
                     {mileage.logs.slice(0, 30).map(l => <TR key={l.id} style={{
                 borderBottom: `1px solid ${"#E4E4E7"}`
               }}>
-                        <TD style={{
+                        <TD className="whitespace-nowrap" style={{
                   color: "#27272A"
                 }}>
                           {formatETDateOnly(l.log_date)}
@@ -1204,13 +1183,13 @@ function EquipmentCard({
                 }}>
                           {l.business_pct}%
                         </TD>
-                        <TD style={{
+                        <TD className="whitespace-nowrap" style={{
                   color: "#27272A",
                   textAlign: "right"
                 }}>
                           {l.fuel_cost ? fmt(l.fuel_cost) : "--"}
                         </TD>
-                        <TD style={{
+                        <TD className="whitespace-nowrap" style={{
                   color: "#18181B",
                   textAlign: "right"
                 }}>
