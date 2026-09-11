@@ -12,7 +12,6 @@ import {
   DialogFooter,
   DialogHeader,
   DialogTitle,
-  Field,
   Select,
   Textarea,
 } from "../../../components/ui";
@@ -538,20 +537,21 @@ function BlockPageDialog({ page, notes, setNotes, busy, error, onClose, onConfir
   return (
     <Dialog open={Boolean(page)} onClose={() => !busy && onClose()} size="sm">
       <DialogHeader>
-        <DialogTitle>Block wiki page</DialogTitle>
+        {/* The pre-migration prompt() text, verbatim. */}
+        <DialogTitle>Why is this page blocked? (stored as review notes)</DialogTitle>
       </DialogHeader>
       <DialogBody>
-        <p className="mb-4 text-ui-body text-zinc-700">
-          Block “{page?.title}”? Review notes are optional.
-        </p>
-        <Field label="Review notes">
-          <Textarea value={notes} onChange={(event) => setNotes(event.target.value)} rows={4} />
-        </Field>
+        <Textarea
+          aria-label="Review notes"
+          value={notes}
+          onChange={(event) => setNotes(event.target.value)}
+          rows={4}
+        />
         {error && <ActionFeedback error className="mt-3">{error}</ActionFeedback>}
       </DialogBody>
       <DialogFooter>
         <Button variant="ghost" disabled={busy} onClick={onClose}>Cancel</Button>
-        <Button variant="danger" loading={busy} onClick={onConfirm}>Block page</Button>
+        <Button variant="danger" loading={busy} onClick={onConfirm}>Block</Button>
       </DialogFooter>
     </Dialog>
   );

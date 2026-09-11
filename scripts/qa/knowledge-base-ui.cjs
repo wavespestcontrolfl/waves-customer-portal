@@ -135,15 +135,15 @@ async function main() {
       await page.getByText('Entry flagged for review', { exact: true }).waitFor();
       assert.deepEqual(requests('POST', '/api/admin/kb/fixture-entry/flag')[0].body, { reason: 'Flagged from admin UI' });
       await page.getByRole('button', { name: 'Delete', exact: true }).click();
-      const deletion = page.getByRole('dialog', { name: 'Delete knowledge base entry', exact: true });
+      const deletion = page.getByRole('dialog', { name: 'Delete this knowledge base entry?', exact: true });
       await deletion.waitFor(); await measure('delete-dialog'); await screenshot('delete-dialog');
       await deletion.getByRole('button', { name: 'Cancel', exact: true }).click();
       assert.equal(requests('DELETE', '/api/admin/kb/fixture-entry').length, 0);
       await page.getByRole('button', { name: 'Delete', exact: true }).click();
       failPath = '/api/admin/kb/fixture-entry'; failMethod = 'DELETE';
-      await deletion.getByRole('button', { name: 'Delete entry', exact: true }).click();
+      await deletion.getByRole('button', { name: 'Delete', exact: true }).click();
       await deletion.getByRole('alert').waitFor(); failPath = ''; failMethod = '';
-      await deletion.getByRole('button', { name: 'Delete entry', exact: true }).click();
+      await deletion.getByRole('button', { name: 'Delete', exact: true }).click();
       await deletion.waitFor({ state: 'detached' });
       assert.equal(requests('DELETE', '/api/admin/kb/fixture-entry').length, 2);
 
@@ -196,7 +196,7 @@ async function main() {
       await page.getByText(wikiFixture.content, { exact: true }).scrollIntoViewIfNeeded();
       await screenshot('field-detail');
       await page.getByRole('button', { name: 'Block', exact: true }).last().click();
-      const blocking = page.getByRole('dialog', { name: 'Block wiki page', exact: true });
+      const blocking = page.getByRole('dialog', { name: 'Why is this page blocked? (stored as review notes)', exact: true });
       await blocking.getByRole('textbox', { name: 'Review notes', exact: true }).fill('Synthetic block reason');
       await measure('block-dialog'); await screenshot('block-dialog');
       await blocking.getByRole('button', { name: 'Cancel', exact: true }).click();
@@ -204,11 +204,11 @@ async function main() {
       await page.getByRole('button', { name: 'Block', exact: true }).last().click();
       await blocking.getByRole('textbox', { name: 'Review notes', exact: true }).fill('Synthetic block reason');
       failPath = '/api/admin/wiki/review/protocol/fixture-page'; failMethod = 'POST';
-      await blocking.getByRole('button', { name: 'Block page', exact: true }).click();
+      await blocking.getByRole('button', { name: 'Block', exact: true }).click();
       await blocking.getByRole('alert').waitFor();
       assert.equal(await blocking.getByRole('textbox', { name: 'Review notes', exact: true }).inputValue(), 'Synthetic block reason');
       failPath = ''; failMethod = '';
-      await blocking.getByRole('button', { name: 'Block page', exact: true }).click(); await blocking.waitFor({ state: 'detached' });
+      await blocking.getByRole('button', { name: 'Block', exact: true }).click(); await blocking.waitFor({ state: 'detached' });
       assert.deepEqual(requests('POST', '/api/admin/wiki/review/protocol/fixture-page').at(-1).body, { action: 'block', notes: 'Synthetic block reason' });
       await openField(); await page.getByRole('combobox', { name: 'Pin review tier', exact: true }).selectOption('yellow');
       await page.getByText('Tier pinned to yellow', { exact: true }).waitFor();

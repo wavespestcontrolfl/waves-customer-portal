@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import React from "react";
 import "@testing-library/jest-dom/vitest";
-import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { UiSurface } from "../../../components/ui";
 import { adminFetch } from "../../../utils/admin-fetch";
@@ -80,13 +80,14 @@ describe("Knowledge base interactions", () => {
 
     fireEvent.click(await screen.findByRole("button", { name: /Rodent exclusion protocol/ }));
     fireEvent.click(screen.getByRole("button", { name: "Delete" }));
-    expect(screen.getByRole("dialog", { name: "Delete knowledge base entry" }))
-      .toBeInTheDocument();
+    const deletion = screen.getByRole("dialog", { name: "Delete this knowledge base entry?" });
+    expect(deletion).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
     expect(adminFetch.mock.calls.some(([, options]) => options?.method === "DELETE")).toBe(false);
 
     fireEvent.click(screen.getByRole("button", { name: "Delete" }));
-    fireEvent.click(screen.getByRole("button", { name: "Delete entry" }));
+    fireEvent.click(within(screen.getByRole("dialog", { name: "Delete this knowledge base entry?" }))
+      .getByRole("button", { name: "Delete" }));
     await waitFor(() => expect(adminFetch).toHaveBeenCalledWith(
       `/admin/kb/${ENTRY.id}`,
       { method: "DELETE" },
@@ -194,7 +195,7 @@ describe("Knowledge base interactions", () => {
     expect(adminFetch.mock.calls.some(([path]) => path.includes("/review/product"))).toBe(false);
 
     fireEvent.click(block);
-    fireEvent.click(screen.getByRole("button", { name: "Block page" }));
+    fireEvent.click(within(screen.getByRole("dialog")).getByRole("button", { name: "Block" }));
     await waitFor(() => expect(adminFetch).toHaveBeenCalledWith(
       "/admin/wiki/review/product/celsius-wg",
       { method: "POST", body: JSON.stringify({ action: "block", notes: undefined }) },
@@ -255,7 +256,8 @@ describe("Knowledge base interactions", () => {
 
     await act(async () => finishApproval({ success: true }));
 
-    expect(screen.getByRole("dialog", { name: "Block wiki page" })).toBeInTheDocument();
+    expect(screen.getByRole("dialog", { name: "Why is this page blocked? (stored as review notes)" }))
+      .toBeInTheDocument();
     expect(screen.getByRole("textbox", { name: "Review notes" }))
       .toHaveValue("Needs a source check");
     expect(adminFetch.mock.calls.filter(([, options]) => options?.method === "POST"))

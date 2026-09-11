@@ -456,17 +456,17 @@ function DeleteEntryDialog({ entry, busy, error, onClose, onConfirm }) {
   return (
     <Dialog open={Boolean(entry)} onClose={() => !busy && onClose()} size="sm">
       <DialogHeader>
-        <DialogTitle>Delete knowledge base entry</DialogTitle>
+        {/* The pre-migration confirm() text, verbatim. */}
+        <DialogTitle>Delete this knowledge base entry?</DialogTitle>
       </DialogHeader>
-      <DialogBody>
-        <p className="text-ui-body text-zinc-700">
-          Delete “{entry?.title}”? This permanently removes the entry.
-        </p>
-        {error && <ActionFeedback error className="mt-3">{error}</ActionFeedback>}
-      </DialogBody>
+      {error && (
+        <DialogBody>
+          <ActionFeedback error>{error}</ActionFeedback>
+        </DialogBody>
+      )}
       <DialogFooter>
         <Button variant="ghost" disabled={busy} onClick={onClose}>Cancel</Button>
-        <Button variant="danger" loading={busy} onClick={onConfirm}>Delete entry</Button>
+        <Button variant="danger" loading={busy} onClick={onConfirm}>Delete</Button>
       </DialogFooter>
     </Dialog>
   );
