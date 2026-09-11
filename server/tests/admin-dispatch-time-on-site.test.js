@@ -1080,7 +1080,7 @@ describe('PATCH /:serviceId/time-on-site — behavioral', () => {
 
   test('a ledgered visit whose in-transaction tier reread errors aborts retryably instead of freezing the handler-entry tier (codex #4113 P2)', () => {
     const source = fs.readFileSync(path.join(__dirname, '../services/complete-scheduled-service.js'), 'utf8');
-    expect(source).toMatch(/\} catch \{ snapshotCustomer = null; \}\s*\n(?:\s*\/\/[^\n]*\n)*\s*if \(lawnLedgerVisit && waveguardPlan && !snapshotCustomer\) \{[^}]*err\.statusCode = 409;[^}]*err\.code = 'VISIT_TIER_UNVERIFIED';\s*throw err;\s*\}/);
+    expect(source).toMatch(/\} catch \{ snapshotCustomer = null; \}\s*\n(?:\s*\/\/[^\n]*\n)*\s*if \(\(lawnLedgerVisit \|\| waveguardCloseout\) && waveguardPlan && !snapshotCustomer\) \{[^}]*err\.statusCode = 409;[^}]*err\.code = 'VISIT_TIER_UNVERIFIED';\s*throw err;\s*\}/);
     expect(source).toMatch(/if \(lawnLedgerVisit && waveguardPlan\s*&& String\(snapshotCustomer\.waveguard_tier \|\| ''\) !== String\(waveguardPlan\.propertyGate\?\.serviceTier \|\| ''\)\) \{/);
   });
 
@@ -1105,7 +1105,11 @@ describe('PATCH /:serviceId/time-on-site — behavioral', () => {
 
   test('the closeout passes its billing_mode column probe to the planner so a pre-migration schema still plans (codex #4365 r3 P2)', () => {
     const source = fs.readFileSync(path.join(__dirname, '../services/complete-scheduled-service.js'), 'utf8');
-    expect(source).toMatch(/buildPlanForService\(svc\.id, \{[^}]*billingModeColumnExists: customerColumnsProbeFailed \? undefined : billingModeColumnsExist,[^}]*\}\)/);
+    expect(source).toMatch(/buildPlanForService\(svc\.id, \{[^}]*billingModeColumnExists: billingModeColumnsExist,[^}]*\}\)/);
+    // A failed handler-entry probe stays closed for the closeout (retryable 409) before any plan build (codex #4365 r6 P2).
+    expect(source).toMatch(/if \(customerColumnsProbeFailed\) \{[^}]*err\.statusCode = 409;[^}]*err\.code = 'VISIT_BILLING_LANE_UNVERIFIED';\s*throw err;\s*\}\s*waveguardPlan = await savepointScope\(db, \(database\) => buildPlanForService\(svc\.id, \{/);
+    // The legacy (gate-off) writer path shares the program predicate with the stamp (codex #4365 r6 P2).
+    expect(source).toMatch(/plan: waveguardPlan && !\(lawnLedgerVisit \? lawnPlanAttributesVisit\(waveguardPlan\) : lawnPlanProgramApplies\(waveguardPlan\)\)\s*\? \{ \.\.\.waveguardPlan, protocol: null \} : waveguardPlan,/);
   });
 
   test('a ledgered visit whose planner fails drops assignment-derived equipment IDs instead of recording the unverified rig (codex #4113 P2)', () => {

@@ -4195,6 +4195,18 @@ async function completeScheduledService(completionInput, packetContext = null) {
         // fail-soft path real (Codex #4113 P1). savepointScope, not
         // savepointRead: the planner performs its own fail-soft reads on this
         // transaction, and the queued variant would wait on itself.
+        // A FAILED handler-entry column probe is unknown, not absent, and it
+        // stays closed for this closeout: the visit row and the lock-time
+        // customer reread were both selected under that probe, so a planner
+        // retry that succeeded would read a lane the recheck below cannot
+        // compare (Codex #4365 r4 + r6 P2). Retryable: the retry re-probes.
+        if (customerColumnsProbeFailed) {
+          const err = new Error('This customer\'s billing lane could not be verified while completing — reload the job and complete it again.');
+          err.statusCode = 409;
+          err.isOperational = true;
+          err.code = 'VISIT_BILLING_LANE_UNVERIFIED';
+          throw err;
+        }
         waveguardPlan = await savepointScope(db, (database) => buildPlanForService(svc.id, {
           db: database,
           equipmentSystemId: waveguardEquipmentSystemId || null,
@@ -4203,10 +4215,8 @@ async function completeScheduledService(completionInput, packetContext = null) {
           // The closeout's own column probe: the planner must not select
           // customers.billing_mode on a pre-migration schema (Codex #4365 r3
           // P2), and the lane recheck under the customer lock compares the
-          // same column under the same probe. A FAILED probe is unknown, not
-          // absent: the planner probes again and fails closed rather than
-          // planning the visit on the tier alone (Codex #4365 r4 P2).
-          billingModeColumnExists: customerColumnsProbeFailed ? undefined : billingModeColumnsExist,
+          // same column under the same probe (a failed probe aborted above).
+          billingModeColumnExists: billingModeColumnsExist,
         }));
       } catch (planErr) {
         if (waveguardCloseout) throw planErr;
@@ -5710,7 +5720,10 @@ async function completeScheduledService(completionInput, packetContext = null) {
           // non-ledger fallback to the entry read is exactly the stale tier
           // this recheck exists to catch, so a ledgered visit whose reread
           // errored aborts instead of comparing nothing (Codex #4113 P2).
-          if (lawnLedgerVisit && waveguardPlan && !snapshotCustomer) {
+          // WaveGuard-only closeouts (ledger gate off) compare the billing
+          // lane below, so an unverifiable reread aborts for them too instead
+          // of dereferencing a null snapshot (Codex #4365 r6 P2).
+          if ((lawnLedgerVisit || waveguardCloseout) && waveguardPlan && !snapshotCustomer) {
             const err = new Error('This customer\'s membership tier could not be verified while completing — reload the job and complete it again.');
             err.statusCode = 409;
             err.isOperational = true;
@@ -6395,7 +6408,12 @@ async function completeScheduledService(completionInput, packetContext = null) {
             // visit's protocol — record the actuals without attribution.
             // Only the protocol portion is withheld: the plan's calibrated rig
             // carrier is still the visit's measured carrier (Codex #4113 P2).
-            plan: lawnLedgerVisit && waveguardPlan && !lawnPlanAttributesVisit(waveguardPlan) ? { ...waveguardPlan, protocol: null } : waveguardPlan,
+            // The legacy (gate-off) writer keeps its attribution rules but
+            // shares the program predicate with the lawn_protocol_* stamp: a
+            // per_visit / one_time customer's lingering tier is not a program
+            // there either (Codex #4365 r6 P2).
+            plan: waveguardPlan && !(lawnLedgerVisit ? lawnPlanAttributesVisit(waveguardPlan) : lawnPlanProgramApplies(waveguardPlan))
+              ? { ...waveguardPlan, protocol: null } : waveguardPlan,
             serviceProducts: insertedServiceProducts,
             completionInput: {
               ...(lawnProtocolCompletion || {}),
