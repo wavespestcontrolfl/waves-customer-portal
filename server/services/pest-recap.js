@@ -31,7 +31,7 @@ const { sendCustomerMessage } = require('./messaging/send-customer-message');
 const { generateRecap, smsRecap } = require('./completion-recap');
 const { resolveCompletionProfileForScheduledService } = require('./service-completion-profiles');
 const { invalidateServiceReportPdfCache } = require('./service-report/pdf-storage');
-const { buildReportIdentitySnapshot, canonicalProductId } = require('./service-report/report-identity-snapshot');
+const { buildReportIdentitySnapshot, canonicalProductId, resolveVisitAddress } = require('./service-report/report-identity-snapshot');
 const { approvedReportProductFacts } = require('./service-report/report-data');
 const { detectServiceLine } = require('./service-report/service-line-configs');
 const { isValidRateUnit } = require('./inventory-units');
@@ -81,6 +81,11 @@ async function loadServiceWithCustomer(serviceId, knex = db) {
       'customers.first_name',
       'customers.last_name',
       'customers.phone as cust_phone',
+      'customers.address_line1 as cust_address_line1',
+      'customers.address_line2 as cust_address_line2',
+      'customers.city as cust_city',
+      'customers.state as cust_state',
+      'customers.zip as cust_zip',
     )
     .first();
 }
@@ -199,6 +204,18 @@ async function buildRecapContext(serviceId, knex = db) {
       serviceType: svc.service_type,
       status: svc.status,
       scheduledDate: svc.scheduled_date,
+      propertyId: svc.property_id ?? null,
+      catalogServiceId: svc.service_id ?? null,
+      address: resolveVisitAddress({
+        visit: svc,
+        customer: {
+          address_line1: svc.cust_address_line1,
+          address_line2: svc.cust_address_line2,
+          city: svc.cust_city,
+          state: svc.cust_state,
+          zip: svc.cust_zip,
+        },
+      }),
       hasPhone: !!svc.cust_phone,
       category: profile?.category || null,
     },
@@ -263,6 +280,29 @@ async function draftRecapMessage({ serviceId, technicianNotes, areasTreated, pro
  * Commit the recap: complete (no bill) + service_records + service_products,
  * track_state complete, optional customer SMS.
  */
+const sameIdentityKey = (a, b) => String(a ?? '') === String(b ?? '');
+// Calendar-day identity for scheduled_date on both sides: the context
+// serializes a driver Date as ISO, the lock reads the same driver value.
+const dateIdentity = (v) => (v == null ? '' : (v instanceof Date ? v.toISOString() : String(v)).slice(0, 10));
+
+// True when the client's expected ownership identity no longer matches the
+// locked visit row. Only keys the client sent are compared (ownership,
+// catalog service, service type, calendar day); the address is
+// resolved the same way the context resolves it (stamped visit address
+// first, legacy primary fallback).
+function recapVisitIdentityChanged(expected, locked, customerRow) {
+  if (!expected || typeof expected !== 'object') return false;
+  if ('propertyId' in expected && !sameIdentityKey(expected.propertyId, locked.property_id)) return true;
+  if ('customerId' in expected && !sameIdentityKey(expected.customerId, locked.customer_id)) return true;
+  if ('catalogServiceId' in expected && !sameIdentityKey(expected.catalogServiceId, locked.service_id)) return true;
+  if ('serviceType' in expected && !sameIdentityKey(expected.serviceType, locked.service_type)) return true;
+  if ('scheduledDate' in expected && dateIdentity(expected.scheduledDate) !== dateIdentity(locked.scheduled_date)) return true;
+  if (!('address' in expected)) return false;
+  const live = resolveVisitAddress({ visit: locked, customer: customerRow || {} });
+  const want = expected.address || {};
+  return ['line1', 'line2', 'city', 'state', 'zip'].some((field) => !sameIdentityKey(want[field], live[field]));
+}
+
 async function submitRecap({
   serviceId,
   actorType,
@@ -282,6 +322,12 @@ async function submitRecap({
   customerRecap,
   sendSms = false,
   clientPestRating = null,
+  // Ownership identity the client's form was built against (customer,
+  // property, catalog service, resolved address). Re-checked under the
+  // row lock so a visit reassigned after the context loaded cannot be
+  // completed with the former property's treatment (codex P1 on #4249).
+  // Legacy clients omit it and keep the previous behavior.
+  expectedVisit = null,
   knex = db,
 }) {
   const { ok, reason, svc, eligible } = await resolveEligibility(serviceId, knex);
@@ -373,6 +419,7 @@ async function submitRecap({
       .where({ id: serviceId })
       .forUpdate()
       .first('id', 'status', 'scheduled_date', 'service_id', 'service_type', 'visit_id', 'is_callback',
+        'customer_id', 'property_id',
         // Stamped visit address + coords feed the report identity snapshot.
         'service_address_line1', 'service_address_line2', 'service_address_city',
         'service_address_state', 'service_address_zip', 'lat', 'lng');
@@ -403,6 +450,15 @@ async function submitRecap({
     //     must not complete (TOCTOU; Codex P1).
     if (locked && trackTransitions.isFutureScheduledDate(locked.scheduled_date)) {
       rejectReason = 'future_scheduled_date';
+      return;
+    }
+
+    // 0d. Ownership identity under the lock (codex P1 on #4249): the same
+    //     visit id can be moved to another property, customer or catalog
+    //     service between the context read and this submit; the client's
+    //     comparison against its stale context cannot see that.
+    if (locked && recapVisitIdentityChanged(expectedVisit, locked, snapshotCustomerRow)) {
+      rejectReason = 'visit_identity_changed';
       return;
     }
 

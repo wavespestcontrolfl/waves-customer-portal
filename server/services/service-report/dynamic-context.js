@@ -74,7 +74,9 @@ function numberOrNull(value) {
 
 async function loadLawnProtocolCompletion(record, knex) {
   if (!record?.id) return null;
-  const hasTable = await knex.schema.hasTable('lawn_protocol_service_completions').catch(() => false);
+  // The existence probe propagates like the lookup below: a transient error
+  // must not read as "no completion" (Codex #4113).
+  const hasTable = await knex.schema.hasTable('lawn_protocol_service_completions');
   if (!hasTable) return null;
 
   return knex('lawn_protocol_service_completions as lpsc')
@@ -91,8 +93,11 @@ async function loadLawnProtocolCompletion(record, knex) {
       'ec.verified_test_area_sqft',
       'ec.verified_captured_gallons',
     )
-    .first()
-    .catch(() => null);
+    .first();
+  // No catch: a transient lookup failure must not read as "no completion" —
+  // an unattributed one-time visit would then fall through to the calendar
+  // protocol card this row exists to suppress. The error reaches safeBuild,
+  // which omits the module (Codex #4113 P2).
 }
 
 async function loadAssignedLawnProtocol(record, knex) {
@@ -237,6 +242,12 @@ function attachProtocolOperationalContext(protocol, { completion, assignment } =
 
 async function buildLawnProtocolReportContext(record, knex, now) {
   const completion = await loadLawnProtocolCompletion(record, knex);
+  // An actuals row recorded without a lawn plan (GATE_LAWN_ACTUALS_LEDGER,
+  // metadata.attribution 'none': one-time / commercial / unresolved
+  // assignment) is authoritative — the closeout said no protocol applied, so
+  // the report shows no protocol card rather than the seasonal default
+  // labelled as a completed protocol visit.
+  if (completion && parseJson(completion.metadata, {}).attribution === 'none') return null;
   const assignment = completion ? null : await loadAssignedLawnProtocol(record, knex);
   const serviceDate = record.service_date
     ? new Date(`${String(record.service_date).slice(0, 10)}T12:00:00`)

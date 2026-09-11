@@ -20,7 +20,7 @@ function makeKnex(rowsByTable = {}) {
       where: () => q, andWhere: () => q, whereIn: () => q, whereNull: () => q, whereNot: () => q,
       orderBy: () => q, leftJoin: () => q, join: () => q, select: () => q, limit: () => q,
       columnInfo: () => Promise.resolve({}),
-      first: () => Promise.resolve(rows[0] || null),
+      first: () => (rows instanceof Error ? Promise.reject(rows) : Promise.resolve(rows[0] || null)),
       catch: () => Promise.resolve(rows),
       then: (resolve) => Promise.resolve(rows).then(resolve),
     };
@@ -64,5 +64,47 @@ describe('lawn protocol report context — never assume a grass', () => {
     expect(getProtocolWindowContext).toHaveBeenCalledTimes(1);
     const [, opts] = getProtocolWindowContext.mock.calls[0];
     expect(opts.grassTrack).toBe('st_augustine'); // normalized from 'Floratam', a real known grass
+  });
+});
+
+describe('lawn protocol report context — actuals rows recorded without a plan', () => {
+  beforeEach(() => jest.clearAllMocks());
+  const AT = new Date('2026-06-15T12:00:00Z');
+
+  test('attribution none suppresses the seasonal protocol card even when the grass is known', async () => {
+    const knex = makeKnex({
+      customer_turf_profiles: [{ track_key: 'zoysia', active: true }],
+      'lawn_protocol_service_completions as lpsc': [{ id: 'c-1', protocol_key: null, lawn_protocol_id: null, window_key: null, treated_sqft: 1500, metadata: { attribution: 'none', treatedSqftSource: 'visit' } }],
+    });
+    knex.schema = { hasTable: () => Promise.resolve(true) };
+    expect(await buildLawnProtocolReportContext(RECORD, knex, AT)).toBeNull();
+    expect(getProtocolWindowContext).not.toHaveBeenCalled();
+  });
+
+  test('a failed completion lookup fails closed instead of reading as "no completion" and inventing the calendar card', async () => {
+    const knex = makeKnex({
+      customer_turf_profiles: [{ track_key: 'zoysia', active: true }],
+      'lawn_protocol_service_completions as lpsc': new Error('connection reset'),
+    });
+    knex.schema = { hasTable: () => Promise.resolve(true) };
+    await expect(buildLawnProtocolReportContext(RECORD, knex, AT)).rejects.toThrow('connection reset');
+    expect(getProtocolWindowContext).not.toHaveBeenCalled();
+  });
+
+  test('a failed table-existence probe fails closed the same way', async () => {
+    const knex = makeKnex({ customer_turf_profiles: [{ track_key: 'zoysia', active: true }] });
+    knex.schema = { hasTable: () => Promise.reject(new Error('probe timeout')) };
+    await expect(buildLawnProtocolReportContext(RECORD, knex, AT)).rejects.toThrow('probe timeout');
+    expect(getProtocolWindowContext).not.toHaveBeenCalled();
+  });
+
+  test('a protocol-attributed row still resolves its own protocol window', async () => {
+    const knex = makeKnex({
+      'lawn_protocol_service_completions as lpsc': [{ id: 'c-2', protocol_key: 'st_augustine', lawn_protocol_id: 'proto-1', window_key: 'summer_insect', metadata: { attribution: 'protocol' } }],
+    });
+    knex.schema = { hasTable: () => Promise.resolve(true) };
+    await buildLawnProtocolReportContext(RECORD, knex, AT);
+    expect(getProtocolWindowContext).toHaveBeenCalledTimes(1);
+    expect(getProtocolWindowContext.mock.calls[0][1]).toMatchObject({ protocolId: 'proto-1', windowKey: 'summer_insect' });
   });
 });

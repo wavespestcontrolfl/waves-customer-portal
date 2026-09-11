@@ -326,6 +326,42 @@ function validatePricingConfigData(configKey, data, oldConfig) {
     if (!Number.isInteger(win) || win < 1 || win > 168) {
       return fail('estimate_card_hold.cancelWindowHours must be a whole number of hours between 1 and 168');
     }
+  } else if (configKey === 'termite_install') {
+    // Station hardware costs feed installation.price through the install
+    // multiplier, so a typo here is a doorstep price move — and db-bridge
+    // applies BOTH key spellings (`trelona_bait ?? trelona_station_cost`,
+    // `multiplier ?? install_multiplier`, snake_case ?? camelCase for the
+    // cartridge inputs), so every alias is bounded the same way its primary
+    // is. Station costs and multipliers must be strictly positive: a stored
+    // 0 prices a 15-station install at ~$131 and disables the catalog link
+    // (the sanity band anchors on the config value). Cartridge keys are
+    // report-only (plan 2026-09-03 §A1) but a bad rate corrupts every
+    // margin report. Optional keys: absent keeps the constant.
+    const check = (keys, predicate, label) => {
+      for (const key of keys) {
+        if (data?.[key] == null) continue;
+        if (!predicate(data[key])) return fail(`termite_install.${key} must be ${label}`);
+      }
+      return null;
+    };
+    // Price-driving knobs carry plausible UPPER bounds too (codex #4313 P1):
+    // a mistyped `multiplier: 145` or `trelona_bait: 2400` would otherwise
+    // be persisted and applied by the bridge on the next sync.
+    const within = (lo, hi) => (v) => Number.isFinite(num(v)) && num(v) >= lo && num(v) <= hi;
+    const failed = check(['trelona_bait', 'trelona_station_cost', 'advance_bait', 'advance_station_cost', 'hexpro_bait'], (v) => isPositive(v) && num(v) <= 200, 'a positive $/station cost no greater than 200')
+      || check(['multiplier', 'install_multiplier'], (v) => isPositive(v) && num(v) <= 5, 'a positive multiplier no greater than 5')
+      || check(['labor_per_station', 'labor_material_per_station', 'misc_per_station'], within(0, 50), 'a $/station amount between 0 and 50')
+      // Positive: a zero cartridge cost removes cartridge COGS from every
+      // margin report AND disables the catalog link (the sanity band anchors
+      // on it). The reserve is a fraction of a visit's labor per year — a
+      // deliberate 0 is fine, "25" typed for 0.25 is not (codex #4313 r4 P2).
+      || check(['cartridge_cost', 'cartridgeCost'], (v) => isPositive(v) && num(v) <= 100, 'a positive $/cartridge cost no greater than 100')
+      || check(['follow_up_visit_reserve', 'followUpVisitReserve'], (v) => Number.isFinite(num(v)) && num(v) >= 0 && num(v) <= 4, 'a number of extra visits per year between 0 and 4')
+      || check(['min_stations', 'minStations'], (v) => Number.isInteger(num(v)) && num(v) >= 1 && num(v) <= 50, 'a whole number of stations between 1 and 50')
+      || check(['cartridges_per_station', 'cartridgesPerStation'], (v) => Number.isInteger(num(v)) && num(v) >= 1 && num(v) <= 4, 'a whole number between 1 and 4')
+      || check(['cartridge_replacement_rate', 'cartridgeReplacementRate'], (v) => Number.isFinite(num(v)) && num(v) >= 0 && num(v) <= 1, 'a fraction between 0 and 1')
+      || check(['link_station_costs_to_catalog', 'linkStationCostsToCatalog'], (v) => typeof v === 'boolean', 'a boolean');
+    if (failed) return failed;
   } else if (configKey === 'termite_bond') {
     // Warranty-bond quarterly rates by term (owner 2026-07-20). Strictly
     // positive dollars — the db-bridge sync coerces and overwrites runtime
@@ -611,7 +647,7 @@ async function ensureTable() {
       { config_key: 'mosquito_pressure', name: 'Mosquito Pressure Factors', category: 'mosquito', sort_order: 4, data: JSON.stringify({ trees_heavy: 0.15, trees_moderate: 0.05, complexity_complex: 0.10, complexity_moderate: 0.05, pool: 0.05, near_water: 0.10, irrigation: 0.08, lot_acre: 0.15, lot_half: 0.05, cap: 2.0 }) },
 
       // Termite
-      { config_key: 'termite_install', name: 'Termite Install Multiplier', category: 'termite', sort_order: 1, data: JSON.stringify({ multiplier: 1.45, hexpro_bait: 8.69, advance_bait: 13.16, trelona_bait: 22.05, labor_per_station: 5.25, misc_per_station: 0.75 }) },
+      { config_key: 'termite_install', name: 'Termite Install Multiplier', category: 'termite', sort_order: 1, data: JSON.stringify({ multiplier: 1.45, hexpro_bait: 8.69, advance_bait: 13.16, trelona_bait: 24.00, labor_per_station: 5.25, misc_per_station: 0.75, link_station_costs_to_catalog: true, cartridge_cost: 6.83, cartridges_per_station: 2, cartridge_replacement_rate: 0.33, follow_up_visit_reserve: 0.25 }) },
       { config_key: 'termite_monitoring', name: 'Termite Station-Check Brackets', category: 'termite', sort_order: 2, data: JSON.stringify({ pricing_model: 'station_brackets', base_monthly: 19, step_monthly: 5, bracket_stations: 5 }) },
 
       // Rodent — bait stations (recurring monthly)
@@ -1204,9 +1240,61 @@ function configKeySubFeaturesAvailable(key) {
   return Object.fromEntries(Object.entries(subs).map(([name, gate]) => [name, gateEnvOn(gate)]));
 }
 
+// The station/cartridge cost the ENGINE is pricing with right now: the
+// pricing_config row overlaid by the inventory catalog link (db-bridge
+// syncTermiteStationCostsFromCatalog), which the row itself cannot show.
+// Served with termite_install so the Admin V1 fallback estimator previews —
+// and stamps — the same hardware cost the server will price (codex #4313
+// r1 P1: the client literal never saw a catalog move). ALWAYS syncs first
+// (codex r2 P1): inventory approvals do not invalidate the bridge's 60 s
+// cache, and a CLIENT_FALLBACK save cannot be recomputed later, so the one
+// read that stamps the quote must see the catalog as it is right now. One
+// admin request per estimator load — the sync cost is fine here.
+async function effectiveTermiteInstallBasis() {
+  try {
+    const bridge = require('../services/pricing-engine/db-bridge');
+    // syncConstantsFromDB resolves false (never rejects) when the DB read
+    // failed and the previous singleton values stand — that is NOT a fresh
+    // basis, so serve nothing rather than a stale one the client would
+    // stamp (codex #4313 r3 P1). The client blocks termite fallback quotes
+    // when `effective` is absent.
+    const synced = await bridge.syncConstantsFromDB();
+    if (synced !== true) return null;
+    const { TERMITE } = require('../services/pricing-engine/constants');
+    const trelona = TERMITE.systems?.trelona || {};
+    const cartridges = TERMITE.cartridges || {};
+    return {
+      trelona_station_cost: Number(trelona.stationCost),
+      trelona_station_cost_source: trelona.stationCostSource === 'catalog' ? 'catalog' : 'config',
+      advance_station_cost: Number(TERMITE.systems?.advance?.stationCost),
+      labor_material_per_station: Number(trelona.laborMaterial),
+      misc_per_station: Number(trelona.misc),
+      install_multiplier: Number(TERMITE.installMultiplier),
+      // The station floor is a price-driving knob too — served with the
+      // rest so the client never pairs a stale row floor with fresh
+      // effective costs (codex #4313 P2).
+      min_stations: Number(TERMITE.minStations),
+      cartridge_cost: Number(cartridges.cartridgeCost),
+      cartridge_cost_source: cartridges.cartridgeCostSource === 'catalog' ? 'catalog' : 'config',
+      link_station_costs_to_catalog: TERMITE.linkStationCostsToCatalog === true,
+      synced_at: bridge.getLastSyncAt ? bridge.getLastSyncAt() : null,
+    };
+  } catch (err) {
+    return null;
+  }
+}
+
 router.get('/:key', async (req, res, next) => {
   try {
     const config = await db('pricing_config').where({ config_key: req.params.key }).first();
+    if (!config && req.params.key === 'termite_install') {
+      // Row absence is a supported kill-value state (the bridge resets to the
+      // in-code defaults and may still apply the catalog link), so the Admin
+      // V1 fallback must still receive the engine-effective basis it prices
+      // and stamps from — a bare 404 would block every termite fallback
+      // quote (codex #4313 P2). data: null keeps the "no row" meaning.
+      return res.json({ config_key: req.params.key, data: null, featureAvailable: configKeyFeatureAvailable(req.params.key), effective: await effectiveTermiteInstallBasis() });
+    }
     if (!config) return res.status(404).json({ error: 'Config not found' });
     const subFeaturesAvailable = configKeySubFeaturesAvailable(req.params.key);
     res.json({
@@ -1214,6 +1302,7 @@ router.get('/:key', async (req, res, next) => {
       // Read at request time so a gate flip needs no redeploy of the client.
       featureAvailable: configKeyFeatureAvailable(req.params.key),
       ...(subFeaturesAvailable ? { subFeaturesAvailable } : {}),
+      ...(req.params.key === 'termite_install' ? { effective: await effectiveTermiteInstallBasis() } : {}),
     });
   } catch (err) { next(err); }
 });
