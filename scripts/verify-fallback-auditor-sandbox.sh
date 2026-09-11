@@ -278,8 +278,25 @@ fi
 
 echo ""
 if [ "$FAILURES" -eq 0 ]; then
+  # Stamp WHAT was proved and against WHICH CLI. The hook reads this back on
+  # every fallback run and warns when the installed claude version or the
+  # sandbox definition has moved since — otherwise the sandbox silently
+  # depends on someone remembering to re-run this script after an upgrade
+  # that could rename or add a tool the disallow list does not name.
+  STAMP="$SCRIPT_DIR/.fallback-auditor-verified"
+  FINGERPRINT="$(printf '%s|%s|%s' "$SANDBOX_FLAGS" "$ENV_SCRUB" "$DISALLOWED" \
+    | (shasum -a 256 2>/dev/null || sha256sum 2>/dev/null) | awk '{print $1}')"
+  {
+    echo "# Written by scripts/verify-fallback-auditor-sandbox.sh. Do not edit by hand."
+    echo "# Commit it: the pre-push hook warns when the installed claude CLI or the"
+    echo "# sandbox definition differs from what was last actually proved here."
+    echo "claude_version=$(claude --version 2>/dev/null | awk '{print $1}')"
+    echo "sandbox_fingerprint=$FINGERPRINT"
+    echo "verified_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  } > "$STAMP"
   echo "Fallback auditor sandbox VERIFIED — no file, tool-loading or network access"
   echo "reachable inside OR outside the repo, and both controls are live."
+  echo "Stamped $STAMP for the hook's drift check."
   exit 0
 fi
 echo "Fallback auditor sandbox FAILED ($FAILURES check(s))."

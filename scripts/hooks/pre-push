@@ -511,6 +511,47 @@ sys.exit(2 if len(candidates) > 1 else 1)
 PYEOF
 }
 
+# ── Sandbox drift tripwire ───────────────────────────────────────────────
+# The sandbox is the only thing between an untrusted diff and an
+# authenticated local CLI, and it is enumerated by NAME. A `claude` upgrade
+# that renames a tool, adds one, or changes a flag's meaning weakens it
+# silently — and nothing would say so until someone happened to re-run the
+# verifier. So the verifier stamps what it proved, and the hook checks that
+# stamp against what is installed now.
+#
+# It WARNS rather than blocking, deliberately. Refusing to run the fallback
+# on an unrecognised CLI version would re-create the dark round 0 this whole
+# feature exists to remove, and would do it on the most common day of all
+# (the day after an upgrade). A loud, specific warning with the exact command
+# to run is the right trade; an unverified sandbox is still a sandbox.
+SANDBOX_STAMP="scripts/.fallback-auditor-verified"
+sandbox_fingerprint() {
+  printf '%s|%s|%s' "$CLAUDE_SANDBOX_FLAGS" "$CLAUDE_ENV_SCRUB" "$CLAUDE_DISALLOWED_TOOLS" \
+    | (shasum -a 256 2>/dev/null || sha256sum 2>/dev/null) | awk '{print $1}'
+}
+warn_if_sandbox_unverified() {
+  local now_version now_fp stamped_version stamped_fp
+  now_version="$(claude --version 2>/dev/null | awk '{print $1}')"
+  now_fp="$(sandbox_fingerprint)"
+  if [ ! -f "$SANDBOX_STAMP" ]; then
+    echo "[codex-review] ⚠️  fallback sandbox has NEVER been verified on this checkout." >&2
+    echo "[codex-review]     run: scripts/verify-fallback-auditor-sandbox.sh" >&2
+    return 0
+  fi
+  stamped_version="$(sed -n 's/^claude_version=//p' "$SANDBOX_STAMP" | head -1)"
+  stamped_fp="$(sed -n 's/^sandbox_fingerprint=//p' "$SANDBOX_STAMP" | head -1)"
+  if [ "$now_version" != "$stamped_version" ]; then
+    echo "[codex-review] ⚠️  claude CLI is $now_version but the fallback sandbox was last" >&2
+    echo "[codex-review]     verified on $stamped_version. An upgrade can rename or add a tool" >&2
+    echo "[codex-review]     that the disallow list does not name." >&2
+    echo "[codex-review]     run: scripts/verify-fallback-auditor-sandbox.sh" >&2
+  elif [ "$now_fp" != "$stamped_fp" ]; then
+    echo "[codex-review] ⚠️  the sandbox flags/disallow list changed since they were last" >&2
+    echo "[codex-review]     verified. run: scripts/verify-fallback-auditor-sandbox.sh" >&2
+  fi
+  return 0
+}
+
 # ── Fallback auditor: Claude ─────────────────────────────────────────────
 # Same prompt, same schema, same P0 gate. Codex gets the schema via
 # --output-schema; claude has no such flag, so the contract goes in the
@@ -592,6 +633,10 @@ run_claude_audit() {
   } > "$claude_prompt"
 
   echo "[codex-review] codex unavailable for $label — falling back to claude ($CLAUDE_MODEL)…" >&2
+  if [ "${SANDBOX_CHECKED:-0}" != "1" ]; then
+    SANDBOX_CHECKED=1
+    warn_if_sandbox_unverified
+  fi
 
   # Two attempts. Codex is pinned to the schema by --output-schema; claude
   # has no such flag, so a reviewer that finds something interesting will
