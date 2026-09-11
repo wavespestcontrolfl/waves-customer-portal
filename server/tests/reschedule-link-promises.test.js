@@ -107,7 +107,40 @@ test('a stated appointment date binds by exact match, not the new-booking slot r
   }
 });
 
+test('an extracted date needs the quote to actually name it once more than one visit is open', () => {
+  const second = { ...visit, id: 'second', scheduled_date: '2030-01-15' };
+  // The call happened 2030-01-07 (ET). "tomorrow" means 2030-01-08 relative
+  // to THAT date — not whatever date the model happened to select.
+  const subject = { quote: 'My appointment tomorrow, please.' };
+  const source = { ...call, transcription: `${call.transcription}\nCaller: ${subject.quote}` };
+  // The model picked the OTHER visit's date; the quote never grounds that
+  // pick, so a wrong extraction cannot silently bind the wrong appointment —
+  // it parks for review instead (codex #4293 P1).
+  expect(select({ call: source, commitment: { ...commitment, subject: { ...subject, visit_date: '2030-01-15' } },
+    candidates: [visit, second] }).reason).toBe('date_not_grounded');
+  // The same "tomorrow" DOES ground the date the caller actually meant.
+  expect(select({ call: source, commitment: { ...commitment, subject: { ...subject, visit_date: '2030-01-08' } },
+    candidates: [visit, second] }).visit?.id).toBe('visit');
+  // With only one visit open, there is nothing to disambiguate — no grounding
+  // is required at all, even for the same mismatched pick from above.
+  expect(select({ call: source, commitment: { ...commitment, subject: { ...subject, visit_date: '2030-01-15' } },
+    candidates: [second] }).visit?.id).toBe('second');
+});
 
+test('a bare weekday name grounds the date among several open visits', () => {
+  const second = { ...visit, id: 'second', scheduled_date: '2030-01-15' };
+  const weekday = parseETDateTime('2030-01-15T09:00').toLocaleDateString('en-US', { timeZone: 'America/New_York', weekday: 'long' });
+  const subject = { quote: `My appointment is on ${weekday}.`, visit_date: '2030-01-15' };
+  const source = { ...call, transcription: `${call.transcription}\nCaller: ${subject.quote}` };
+  expect(select({ call: source, commitment: { ...commitment, subject }, candidates: [visit, second] }).visit?.id).toBe('second');
+});
+
+test('an extracted date with no naming token at all parks for review among several visits', () => {
+  const second = { ...visit, id: 'second', scheduled_date: '2030-01-15' };
+  const subject = { quote: 'My WaveGuard appointment.', visit_date: '2030-01-08', service: 'WaveGuard' };
+  const source = { ...call, transcription: `${call.transcription}\nCaller: ${subject.quote}` };
+  expect(select({ call: source, commitment: { ...commitment, subject }, candidates: [visit, second] }).reason).toBe('date_not_grounded');
+});
 
 test('an inactive account cannot be promised a link the reschedule page refuses', () => {
   for (const active of [false, null, undefined]) {
@@ -154,8 +187,15 @@ test('an agent who takes the promise back later in the call stops the send', () 
 // A knex stand-in that records the filters the worker builds and the writes it
 // makes. Only the shapes this module actually uses are modelled; builders are
 // thenable the way knex's are.
-function fakeConn({ outbox = [], selfServe = null, cards = [], throwOn = null } = {}) {
-  const seen = { statusAllowlist: null, logFilters: [], updates: [], inserts: [], resolved: [] };
+// `selfServeVisitIds` answers the sweep's bulk "which visits have ANY
+// self-serve move at all" pre-filter (reconcileUsedLinks's evidence-before-
+// LIMIT query); `selfServe` still answers the per-row exact-match check
+// (selfServeMoveAfterSend). Defaulting the former from the latter — present
+// for every outbox row when `selfServe` is truthy, empty when it is not —
+// keeps every existing fixture behaving exactly as before; pass it
+// explicitly to pull the two apart.
+function fakeConn({ outbox = [], selfServe = null, selfServeVisitIds = null, cards = [], throwOn = null } = {}) {
+  const seen = { statusAllowlist: null, logFilters: [], visitIdFilters: [], updates: [], inserts: [], resolved: [] };
   const openCards = () => cards.filter((card) => !seen.resolved.includes(card.id));
   const build = (table) => {
     const name = String(table).split(' ')[0];
@@ -176,6 +216,12 @@ function fakeConn({ outbox = [], selfServe = null, cards = [], throwOn = null } 
       modify: (fn) => { fn(b); return b; },
       then: (resolve, reject) => Promise.resolve().then(rows).then(resolve, reject),
       select: pass(),   // knex returns the builder; awaiting it yields the rows
+      pluck: async (col) => {
+        if (name !== 'reschedule_log' || col !== 'scheduled_service_id') return [];
+        seen.visitIdFilters.push({ eq: { ...state.eq } });
+        if (selfServeVisitIds !== null) return selfServeVisitIds;
+        return selfServe ? [...new Set(outbox.map((row) => row.related_scheduled_service_id).filter(Boolean))] : [];
+      },
       first: async () => {
         if (name === 'outbox_messages') {
           if (throwOn && state.eq.id === throwOn) throw new Error('Promised-link delivery evidence is truncated');
@@ -233,6 +279,26 @@ test('a link used after the row was parked still closes its cards and the call',
   expect(seen.updates).toContainEqual(expect.objectContaining({ table: 'call_log', patch: expect.objectContaining({ review_status: 'resolved' }) }));
 });
 
+test('a visit with no self-serve move on record is never scanned by the reconcile sweep', async () => {
+  // A row whose link was simply never used has no reschedule_log evidence at
+  // all — ordering the raw unreconciled set by updated_at let a backlog of
+  // exactly these rows fill the LIMIT 100 forever, since nothing about an
+  // unmatched row ever changes its updated_at (codex #4293 P1). The bulk
+  // evidence query runs BEFORE any per-row check, so an all-untouched backlog
+  // costs one empty lookup and zero per-row work, never a wasted scan slot.
+  const untouched = { ...sentRow, id: 'untouched' };
+  const { conn, seen } = fakeConn({ outbox: [untouched], selfServe: null, selfServeVisitIds: [] });
+  expect(await links.reconcileUsedLinks(conn)).toBe(0);
+  expect(seen.visitIdFilters).toEqual([{ eq: { initiated_by: 'customer_self_serve' } }]);
+  // No self-serve evidence at all means the per-row check never runs either.
+  expect(seen.logFilters).toEqual([]);
+
+  // A visit that DOES have evidence on record still reconciles exactly as
+  // before once it clears the bulk pre-filter.
+  const { conn: withEvidence } = fakeConn({ outbox: [sentRow], selfServe: { id: 'log' }, selfServeVisitIds: ['visit'] });
+  expect(await links.reconcileUsedLinks(withEvidence)).toBe(1);
+});
+
 const promiseRow = (id, commitmentId, extra = {}) => ({ id, status: 'pending', commitment_id: commitmentId,
   related_call_log_id: 'call', related_customer_id: 'customer', related_scheduled_service_id: 'visit', payload: {}, ...extra });
 
@@ -256,7 +322,11 @@ test('one unprocessable row cannot starve the rest of the sweep', async () => {
   // link messages, and that row is by definition the oldest unchanged item —
   // an unguarded loop would abort every later promise and the used-link
   // reconciliation on every tick, forever.
-  const { seen, result } = await sweepWith({ outbox: [promiseRow('boom', 'first'), promiseRow('ok', 'second')], throwOn: 'boom' });
+  // selfServeVisitIds carries evidence for 'visit' so the reconcile step's
+  // bulk pre-filter still admits both rows into the per-row loop below —
+  // selfServe stays null so neither actually matches, keeping reconciled: 0.
+  const { seen, result } = await sweepWith({ outbox: [promiseRow('boom', 'first'), promiseRow('ok', 'second')],
+    throwOn: 'boom', selfServeVisitIds: ['visit'] });
   expect(result).toMatchObject({ processed: 2, failed: 1, reconciled: 0 });
   // The failing row parks for the office instead of retrying invisibly...
   expect(seen.updates).toContainEqual(expect.objectContaining({ table: 'outbox_messages', eq: { id: 'boom' },

@@ -4,6 +4,7 @@ const { AsyncLocalStorage } = require('async_hooks');
 const db = require('../models/db');
 const { isEnabled } = require('../config/feature-gates');
 const { normalizePhone, phoneMatchDigits } = require('../utils/phone');
+const { etParts, addETDays } = require('../utils/datetime-et');
 const { isWithinSendWindowET, nextSendWindowOpenET } = require('./messaging/send-window');
 const { lockTriageCall } = require('../utils/triage-locks');
 const { recordAuditEvent } = require('./audit-log');
@@ -136,6 +137,53 @@ function quoteContradictsVisitDate(quote, ymd) {
   return WEEKDAY_NAMES.some((name, index) => index !== weekday && new RegExp(`\\b${name}\\b`).test(q));
 }
 
+// Positive grounding for an extracted appointment date: quoteContradictsVisitDate
+// only rejects a quote that says something ELSE, so "my appointment tomorrow"
+// sails through unexamined and binds whatever date the model happened to pick
+// — right or wrong — the moment some candidate visit shares it. With more than
+// one open visit that is not a check, it is a coin flip (codex #4293 P1). These
+// three helpers ask the positive question instead: does the quote itself name
+// the model's chosen date, resolved against the call's own Eastern date rather
+// than the server's now()?
+function quoteNamesAbsoluteDate(q, month, day) {
+  for (const [index, name] of MONTH_NAMES.entries()) {
+    const spoken = q.match(new RegExp(`\\b${name}\\b\\s*(\\d{1,2})?`));
+    if (spoken?.[1] && index + 1 === month && Number(spoken[1]) === day) return true;
+  }
+  const ordinal = q.match(/\b(\d{1,2})(?:st|nd|rd|th)\b/);
+  return !!ordinal && Number(ordinal[1]) === day;
+}
+
+function quoteNamesWeekday(q, weekday) {
+  return new RegExp(`\\b${WEEKDAY_NAMES[weekday]}\\b`).test(q);
+}
+
+// "today" / "tomorrow" / "next <weekday>" only resolve against the call's OWN
+// Eastern date — the day the caller was actually speaking from.
+function quoteNamesRelativeDate(q, target, reference) {
+  if (!(reference instanceof Date) || Number.isNaN(reference.getTime())) return false;
+  const ref = etParts(reference);
+  const matches = (parts) => parts.year === target.year && parts.month === target.month && parts.day === target.day;
+  if (/\btoday\b/.test(q)) return matches(ref);
+  if (/\btomorrow\b/.test(q)) return matches(etParts(addETDays(reference, 1)));
+  return WEEKDAY_NAMES.some((name, index) => {
+    if (!new RegExp(`\\bnext ${name}\\b`).test(q)) return false;
+    const aheadFromToday = (index - ref.dayOfWeek + 7) % 7;
+    return matches(etParts(addETDays(reference, aheadFromToday === 0 ? 7 : aheadFromToday + 7)));
+  });
+}
+
+// True once the quote itself names the extracted date — an absolute date, a
+// bare weekday, or a today/tomorrow/next-weekday token that resolves to it.
+function quoteGroundsVisitDate(quote, ymd, reference) {
+  const q = ` ${norm(quote)} `;
+  const [year, month, day] = String(ymd).split('-').map(Number);
+  if (![year, month, day].every(Number.isFinite)) return false;
+  const weekday = new Date(Date.UTC(year, month - 1, day)).getUTCDay();
+  return quoteNamesAbsoluteDate(q, month, day) || quoteNamesWeekday(q, weekday)
+    || quoteNamesRelativeDate(q, { year, month, day }, reference);
+}
+
 function narrowBySubject(candidates, subject) {
   let selected = candidates;
   if (subject?.visit_date) {
@@ -164,11 +212,20 @@ function visitNotSelfServiceReason(visit, now) {
   return verdict.reason === 'past' ? 'visit_elapsed' : 'visit_not_self_service';
 }
 
+// A wrong extraction cannot be trusted to disambiguate on its own once more
+// than one visit is open: the quote itself must name the picked date. Exactly
+// one open visit needs no such check — there is nothing left to disambiguate.
+function extractedDateUngrounded({ subject, call, candidates, callCommitments }) {
+  return !!subject?.visit_date && candidates.length > 1
+    && !quoteGroundsVisitDate(subject.quote, subject.visit_date, callCommitments.callEndedAt(call) || call.created_at);
+}
+
 function selectDiscussedVisit({ commitment, call, customer, candidates = [], now = new Date() }) {
   const skip = (reason) => ({ reason });
   const identity = callerIdentityReason(call, customer);
   if (identity) return skip(identity);
-  const turns = require('./call-commitments').speakerTurns(call.transcription);
+  const callCommitments = require('./call-commitments');
+  const turns = callCommitments.speakerTurns(call.transcription);
   const revoked = (turns?.caller || []).some((turn) => /\b(?:don t|do not|no need|never mind)\b/.test(turn) && /\b(?:link|text|send|email)\b/.test(turn));
   const promisedQuotes = standingPromiseQuotes(commitment, turns);
   const subject = commitment.subject;
@@ -179,6 +236,7 @@ function selectDiscussedVisit({ commitment, call, customer, candidates = [], now
     && (groundedSubject || promisedQuotes.some((quote) => RESCHEDULE_WORD.test(quote) || MOVE_INTENT.test(quote) || EXISTING_SLOT.test(quote)));
   if (revoked || !promisedQuotes.length || !aboutThisAppointment
     || !Number.isFinite(Number(commitment.confidence)) || Number(commitment.confidence) < 0.9) return skip('promise_needs_review');
+  if (extractedDateUngrounded({ subject, call, candidates, callCommitments })) return skip('date_not_grounded');
   const selected = narrowBySubject(candidates, subject);
   if (selected.length !== 1) return skip(selected.length ? 'ambiguous_visit' : 'discussed_visit_unavailable');
   const notReady = visitNotSelfServiceReason(selected[0], now);
@@ -766,6 +824,21 @@ async function resolveUsedLink(conn, visitId) {
     .select('id', 'status', 'commitment_id', 'related_call_log_id', 'related_scheduled_service_id', 'sent_at'));
 }
 
+// Every visit that has EVER had a self-serve move recorded — fetched once,
+// before the per-row LIMIT below. A promised-link row whose customer never
+// touched /reschedule/:token can never be reconciled, and ordering the raw
+// unreconciled set by updated_at let a backlog of exactly those untouched
+// rows occupy the whole LIMIT 100 forever: their updated_at never advances
+// (nothing about them changes), so once 100 accumulated, no row behind them
+// was ever scanned again and its triage card stayed open even after the
+// post-commit hook in reschedule-public failed (codex #4293 P1). Filtering on
+// this set first means only rows that could actually resolve compete for a
+// scan slot; selfServeMoveAfterSend below still enforces the exact
+// after-sent_at boundary per row.
+function selfServeVisitIds(conn) {
+  return conn('reschedule_log').where({ initiated_by: SELF_SERVE_INITIATOR }).pluck('scheduled_service_id');
+}
+
 // The post-commit hook in reschedule-public is best-effort: a transient DB
 // failure or a process death after the move commits would otherwise leave the
 // linked triage cards open forever, because a delivered row has left the
@@ -773,7 +846,9 @@ async function resolveUsedLink(conn, visitId) {
 // (codex #4293 r1 P2). This is the last chance — same evidence, run from the
 // sweep until it lands.
 async function reconcileUsedLinks(conn) {
-  return reconcileRows(conn, await unreconciledPromiseRows(conn).orderBy('updated_at')
+  const visitIds = await selfServeVisitIds(conn);
+  if (!visitIds.length) return 0;
+  return reconcileRows(conn, await unreconciledPromiseRows(conn).whereIn('related_scheduled_service_id', visitIds).orderBy('updated_at')
     .limit(100).select('id', 'status', 'commitment_id', 'related_call_log_id', 'related_scheduled_service_id', 'sent_at'));
 }
 
