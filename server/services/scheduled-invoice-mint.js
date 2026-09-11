@@ -218,7 +218,9 @@ async function payerEligiblePendingDeposit(trx, { svc, lockedSvc, depositCredit,
   const pendingAmount = depositCredit ? Number(depositCredit.amount) || 0 : 0;
   if (expectedDepositCredit == null || pendingAmount <= 0) return pendingAmount;
   const { resolveForInvoice } = require('./payer');
-  const payer = await resolveForInvoice({ database: trx, customerId: lockedSvc.customer_id || svc.customer_id || null, scheduledServiceId: svc.id });
+  // Fail closed like every other payer resolution on this path: a fail-soft
+  // self-pay answer here would let the deposit preview pass on a stale payer.
+  const payer = await resolveForInvoice({ database: trx, customerId: lockedSvc.customer_id || svc.customer_id || null, scheduledServiceId: svc.id, throwOnError: true });
   return payer?.payerId ? 0 : pendingAmount;
 }
 
