@@ -4245,59 +4245,27 @@ function VendorsTab({ showToast }) {
       showToast("Failed: " + e.message);
     }
   };
-  if (loading)
-    return (
-      <div style={{ color: D.muted, padding: 40, textAlign: "center" }}>
-        Loading vendors...
-      </div>
-    );
+  if (loading) return <ActionFeedback>Loading vendors…</ActionFeedback>;
   return (
-    <div
-      style={{
-        display: "grid",
-        gridTemplateColumns: "repeat(auto-fill, minmax(280px, 1fr))",
-        gap: 12,
-      }}
-    >
+    <div className="grid gap-[12px]">
       {vendors.map((v) => (
-        <div key={v.id} style={{ ...sCard, marginBottom: 0 }}>
+        <Card key={v.id} className="p-5 mb-3 mb-[0px]">
           {" "}
-          <div
-            style={{
-              display: "flex",
-              justifyContent: "space-between",
-              alignItems: "flex-start",
-              marginBottom: 8,
-            }}
-          >
+          <div className="flex justify-between items-start mb-[8px]">
             {" "}
             <div>
-              <div style={{ fontSize: 15, fontWeight: 500, color: D.heading }}>
+              <div className="text-ui-body font-medium text-zinc-900">
                 {v.name}
               </div>
-              <div style={{ fontSize: 11, color: D.muted }}>{v.type}</div>
+              <div className="text-ui-body text-ink-secondary">{v.type}</div>
             </div>{" "}
-            <div style={{ display: "flex", gap: 4 }}>
-              {v.scrapingEnabled && (
-                <span style={sBadge(`${D.green}22`, D.green)}>Scrape</span>
-              )}
-              {v.hasCredentials && (
-                <span style={sBadge(`${D.teal}22`, D.teal)}>Login</span>
-              )}
-              {!v.active && (
-                <span style={sBadge(`${D.red}22`, D.red)}>Inactive</span>
-              )}
+            <div className="flex gap-[4px]">
+              {v.scrapingEnabled && <Badge tone="neutral">Scrape</Badge>}
+              {v.hasCredentials && <Badge tone="neutral">Login</Badge>}
+              {!v.active && <Badge tone="alert">Inactive</Badge>}
             </div>{" "}
           </div>{" "}
-          <div
-            style={{
-              display: "flex",
-              gap: 12,
-              fontSize: 12,
-              color: D.muted,
-              marginBottom: 8,
-            }}
-          >
+          <div className="flex gap-[12px] text-ui-body text-ink-secondary mb-[8px]">
             <span>{v.productCount} products</span>
             <span>{v.bestPriceCount} best prices</span>
           </div>
@@ -4306,12 +4274,7 @@ function VendorsTab({ showToast }) {
               href={v.website}
               target="_blank"
               rel="noopener noreferrer"
-              style={{
-                fontSize: 11,
-                color: D.teal,
-                display: "block",
-                marginTop: 4,
-              }}
+              className="text-ui-body text-zinc-900 block mt-[4px]"
             >
               {v.website}
             </a>
@@ -4323,20 +4286,15 @@ function VendorsTab({ showToast }) {
               onCancel={() => setEditing(null)}
             />
           ) : (
-            <button
+            <Button
               onClick={() => setEditing(v.id)}
-              style={{
-                ...sBtn("transparent", D.muted),
-                border: `1px solid ${D.border}`,
-                marginTop: 8,
-                width: "100%",
-                fontSize: 11,
-              }}
+              variant="secondary"
+              className="mt-[8px] w-full"
             >
               Edit Credentials
-            </button>
+            </Button>
           )}
-        </div>
+        </Card>
       ))}
     </div>
   );
@@ -4351,61 +4309,54 @@ function VendorEditForm({ vendor, onSave, onCancel }) {
     loginUrl: vendor.loginUrl || "",
   });
   return (
-    <div
-      style={{
-        marginTop: 8,
-        padding: 12,
-        background: D.input,
-        borderRadius: 8,
-      }}
-    >
+    <Card className="mt-[8px] p-3 bg-zinc-50">
       {[
-        { key: "loginUsername", label: "Username" },
-        { key: "loginEmail", label: "Email" },
-        { key: "loginPassword", label: "Password", type: "password" },
-        { key: "accountNumber", label: "Account #" },
-        { key: "loginUrl", label: "Login URL" },
+        {
+          key: "loginUsername",
+          label: "Username",
+        },
+        {
+          key: "loginEmail",
+          label: "Email",
+        },
+        {
+          key: "loginPassword",
+          label: "Password",
+          type: "password",
+        },
+        {
+          key: "accountNumber",
+          label: "Account #",
+        },
+        {
+          key: "loginUrl",
+          label: "Login URL",
+        },
       ].map((f) => (
-        <div key={f.key} style={{ marginBottom: 6 }}>
-          <label
-            style={{
-              fontSize: 11,
-              color: D.muted,
-              display: "block",
-              marginBottom: 2,
-            }}
-          >
-            {f.label}
-          </label>{" "}
-          <input
+        <Field key={f.key} label={f.label} className="mb-[6px]">
+          <Input
             value={form[f.key]}
             onChange={(e) =>
-              setForm((p) => ({ ...p, [f.key]: e.target.value }))
+              setForm((p) => ({
+                ...p,
+                [f.key]: e.target.value,
+              }))
             }
             type={f.type || "text"}
             placeholder={f.label}
-            style={{ ...sInput, width: "100%" }}
+            className="w-full"
           />
-        </div>
+        </Field>
       ))}
-      <div style={{ display: "flex", gap: 6, marginTop: 8 }}>
-        <button
-          onClick={() => onSave(vendor.id, form)}
-          style={sBtn(D.teal, D.white)}
-        >
+      <div className="flex gap-[6px] mt-[8px]">
+        <Button onClick={() => onSave(vendor.id, form)} variant="primary">
           Save
-        </button>
-        <button
-          onClick={onCancel}
-          style={{
-            ...sBtn("transparent", D.muted),
-            border: `1px solid ${D.border}`,
-          }}
-        >
+        </Button>
+        <Button onClick={onCancel} variant="secondary">
           Cancel
-        </button>
+        </Button>
       </div>{" "}
-    </div>
+    </Card>
   );
 }
 
