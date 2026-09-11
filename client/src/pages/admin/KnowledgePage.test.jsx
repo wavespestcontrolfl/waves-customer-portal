@@ -110,6 +110,122 @@ describe("KnowledgePage embedded navigation", () => {
       .toHaveAttribute("aria-current", "page");
   });
 
+  it.each(["compile", "add"])(
+    "guards duplicate source %s requests and retries only a failed refresh",
+    async (mutation) => {
+      const pending = deferred();
+      let getCount = 0;
+      fetch.mockImplementation((url, options) => {
+        if (options?.method === "POST") return pending.promise;
+        getCount += 1;
+        if (getCount === 2) {
+          return Promise.resolve(response(
+            { error: "Refresh unavailable" },
+            { ok: false, status: 503 },
+          ));
+        }
+        const sources = mutation === "compile" && getCount === 1
+          ? [{ id: "source-1", filename: "rates.csv", file_type: "csv", processed: false }]
+          : [];
+        return Promise.resolve(response({ sources }));
+      });
+      localStorage.setItem("waves_admin_user", JSON.stringify({ role: "admin" }));
+      renderWiki("/admin/knowledge?wikiTab=sources");
+      expect(document.querySelector('[data-ui-density="comfortable"]')).toBeInTheDocument();
+
+      if (mutation === "compile") {
+        const compile = await screen.findByRole("button", { name: "Compile" });
+        // Spec §5.7: Sources is table-first, one row per source document.
+        const table = screen.getByRole("table", { name: "Source documents" });
+        expect(table).toContainElement(compile);
+        expect(table.querySelectorAll("tbody tr")).toHaveLength(1);
+        fireEvent.click(compile);
+        fireEvent.click(compile);
+      } else {
+        fireEvent.click(await screen.findByRole("button", { name: "Add source" }));
+        const filename = screen.getByRole("textbox", { name: "Filename" });
+        fireEvent.change(filename, { target: { value: "rates.csv" } });
+        fireEvent.submit(filename.closest("form"));
+        fireEvent.submit(filename.closest("form"));
+      }
+
+      expect(fetch.mock.calls.filter(([, options]) => options?.method === "POST"))
+        .toHaveLength(1);
+      pending.resolve(response({}));
+      expect(await screen.findByRole("alert")).toHaveTextContent(
+        "Changes saved, but the source list could not be refreshed.",
+      );
+      fireEvent.click(screen.getByRole("button", { name: "Try again" }));
+      await waitFor(() => expect(getCount).toBe(3));
+      expect(fetch.mock.calls.filter(([, options]) => options?.method === "POST"))
+        .toHaveLength(1);
+    },
+  );
+
+  it("lets a later successful refresh supersede an earlier one that failed", async () => {
+    // The per-source guard permits two different sources to compile at once.
+    // Each one refreshes the list, and loadError replaces the whole panel.
+    const firstCompile = deferred();
+    const secondCompile = deferred();
+    let posts = 0;
+    let getCount = 0;
+    fetch.mockImplementation((url, options) => {
+      if (options?.method === "POST") {
+        posts += 1;
+        return posts === 1 ? firstCompile.promise : secondCompile.promise;
+      }
+      getCount += 1;
+      if (getCount === 2) {
+        return Promise.resolve(response(
+          { error: "Refresh unavailable" },
+          { ok: false, status: 503 },
+        ));
+      }
+      return Promise.resolve(response({
+        sources: [
+          { id: "source-1", filename: "rates.csv", file_type: "csv", processed: getCount > 2 },
+          { id: "source-2", filename: "pricing.csv", file_type: "csv", processed: getCount > 2 },
+        ],
+      }));
+    });
+    localStorage.setItem("waves_admin_user", JSON.stringify({ role: "admin" }));
+    renderWiki("/admin/knowledge?wikiTab=sources");
+
+    const compiles = await screen.findAllByRole("button", { name: "Compile" });
+    expect(compiles).toHaveLength(2);
+    fireEvent.click(compiles[0]);
+    fireEvent.click(compiles[1]);
+    expect(fetch.mock.calls.filter(([, options]) => options?.method === "POST"))
+      .toHaveLength(2);
+
+    firstCompile.resolve(response({}));
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "Changes saved, but the source list could not be refreshed.",
+    );
+
+    secondCompile.resolve(response({}));
+    await waitFor(() => expect(screen.queryByRole("alert")).not.toBeInTheDocument());
+    expect(screen.getByRole("table", { name: "Source documents" })).toBeInTheDocument();
+  });
+
+  it("retains the source draft across cancel and a rejected add", async () => {
+    fetch.mockImplementation(async (url, options) => options?.method === "POST"
+      ? response({ error: "Invalid wiki path" }, { ok: false, status: 400 })
+      : response({ sources: [] }));
+    localStorage.setItem("waves_admin_user", JSON.stringify({ role: "admin" }));
+    renderWiki("/admin/knowledge?wikiTab=sources");
+
+    fireEvent.click(await screen.findByRole("button", { name: "Add source" }));
+    const filename = screen.getByRole("textbox", { name: "Filename" });
+    fireEvent.change(filename, { target: { value: "rates.csv" } });
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+    fireEvent.click(screen.getByRole("button", { name: "Add source" }));
+    expect(screen.getByRole("textbox", { name: "Filename" })).toHaveValue("rates.csv");
+    fireEvent.click(screen.getByRole("button", { name: "Add" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("Invalid wiki path");
+    expect(screen.getByRole("textbox", { name: "Filename" })).toHaveValue("rates.csv");
+  });
+
   it("retains a failed question and restores opener focus on close", async () => {
     localStorage.setItem("waves_admin_user", JSON.stringify({ role: "admin" }));
     fetch.mockImplementation(async (url, options) => options?.method === "POST"
