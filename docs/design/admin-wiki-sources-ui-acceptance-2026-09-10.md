@@ -11,3 +11,7 @@ Eight focused tests, scoped ESLint, and production build/prebuild gates passed. 
 Desktop/mobile source-form screenshots were visually reviewed for wrapping, readable fields, and reachable actions. The page scrolls to the form's lower actions on phones. Local runner/evidence: `.tmp/wiki-sources/`; screenshots are attached to the PR. Fictional local API fulfillment blocks external traffic and WebSockets. No real source compilation, database/provider request, or customer communication was exercised; physical iPhone/PWA keyboard/safe-area behavior remains unverified.
 
 Existing role mismatch remains separate: technicians can see Add source, while its backend POST requires admin. No permission is widened by this UI change.
+
+## Intelligence Bar census
+
+Four exact request fingerprints were reviewed: the initial and post-mutation source-list GETs, source creation POST with `{filename,file_path,file_type,description}`, and compile POST with `{sourceId}`. They preserve the existing bearer-authenticated operations and server effects. The extraction adds guarded writes and GET-only recovery but no Intelligence Bar tool or verified parity, so all four remain explicitly unsupported as `reviewed_unmapped`.
