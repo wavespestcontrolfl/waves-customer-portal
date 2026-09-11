@@ -1801,7 +1801,10 @@ async function notifyOutcome({ notifyOnFailure, notify, sendEmail, finalAttempt,
   }
   if (finalAttempt.status === 'fail') return notifyFailure({ notify, sendEmail, finalAttempt, attempts, fixturePath });
   if (finalAttempt.status === 'inconclusive') return notifyInconclusive({ notify, sendEmail, attempt: finalAttempt, fixturePath });
-  await retireIfClean(OPS_KEY); // fall-off: a scheduled pass clears the standing FIX
+  // Fall-off: a SCHEDULED pass clears the standing FIX. `notifyOnFailure` is
+  // already true here (the manual-run case returned above); restated so the
+  // guard is visible at the call.
+  if (notifyOnFailure) await retireIfClean(OPS_KEY);
   return null;
 }
 
