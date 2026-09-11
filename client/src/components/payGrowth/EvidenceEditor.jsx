@@ -35,7 +35,9 @@ const exclusionNote = visit => EXCLUSION_NOTES[forcedExclusion(visit)] || 'This 
 
 function evidenceForm(detail) {
   const previous = detail.revisions[0] || {};
-  const excluded = forcedExclusion(detail.visit) !== 'none';
+  // A forced exclusion suppresses a NEW claim; a revision of already-allocated evidence must keep its allocation and ordinal.
+  const forced = forcedExclusion(detail.visit);
+  const excluded = forced !== 'none' && previous.allocation_id == null;
   const defaults = {
     participants: [{ technician_id: detail.visit.technician_id || '', share_bps: 10000 }],
     provenance: 'verified', source_reference: '', exclusion: forcedExclusion(detail.visit),
@@ -44,6 +46,7 @@ function evidenceForm(detail) {
   };
   const facts = previous.facts || {};
   const fields = Object.fromEntries(Object.entries(defaults).map(([key, fallback]) => [key, facts[key] ?? fallback]));
+  if (forced !== 'none') fields.exclusion = forced; // the server resolves it this way regardless of the prior revision
   return { ...fields, id: crypto.randomUUID(), service_id: detail.visit.id, base_id: previous.id || null,
     allocation_id: excluded ? '' : previous.allocation_id || '', ordinal: excluded || previous.ordinal == null ? '' : String(previous.ordinal),
     cutoff_at: fields.cutoff_at ? etDatetimeLocalValue(new Date(fields.cutoff_at)) : '', complete_at_cutoff: String(fields.complete_at_cutoff),
@@ -79,7 +82,7 @@ export default function EvidenceEditor({ technicianId, month, serviceId = '', pe
     event.preventDefault(); setBusy(true); setError('');
     try {
       await request('/service-evidence', { method: 'POST', body: { ...data,
-        allocation_id: excluded ? null : data.allocation_id || null, ordinal: excluded ? null : numeric(data.ordinal),
+        allocation_id: excluded ? null : data.allocation_id || null, ordinal: excluded ? null : numeric(data.ordinal), // excluded = forced exclusion without a retained allocation
         cutoff_at: data.cutoff_at ? etDatetimeLocalToISO(data.cutoff_at) : null,
         complete_at_cutoff: data.complete_at_cutoff === '' ? null : data.complete_at_cutoff === 'true', return_service_id: data.return_service_id || null,
       } });
@@ -91,14 +94,15 @@ export default function EvidenceEditor({ technicianId, month, serviceId = '', pe
   if (detail) visitOptions.set(selected, { value: selected, label: `${detail.visit.service_date} · ${detail.visit.service_type} · ${words(detail.visit.status)}` });
   const options = [{ value: '', label: 'Choose a performed service…' }, ...visitOptions.values()];
   const allocationLocked = detail?.revisions.some(revision => revision.allocation_id != null);
-  const excluded = Boolean(detail) && forcedExclusion(detail.visit) !== 'none';
+  const forced = Boolean(detail) && forcedExclusion(detail.visit) !== 'none';
+  const excluded = forced && !allocationLocked;
   return <section className="pg-card pg-form"><div className="pg-row"><h2>Review service evidence</h2><Button variant="secondary" disabled={busy || allocationSaving} onClick={onCancel}>Close review</Button></div>{error && <p role="alert" className="pg-error">{error}</p>}
     <Field label="Performed service" options={options} disabled={busy || allocationSaving} value={selected} onChange={event => setSelected(event.target.value)} />
     {selected && !detail && !error && <p role="status">Loading service evidence…</p>}
     {detail && <>
       <p className="pg-muted">{detail.visit.service_key || 'Unmapped service key'} · {detail.revisions.length ? `${detail.revisions.length} retained revisions` : 'First review'}. A no-application decision is assessed against the purchased scope.</p>
       {detail.visit.status !== 'completed' && <p className="pg-error">This service appears performed but is not marked complete. Resolve its completion record before calculating credit.</p>}
-      {excluded && <p className="pg-muted">{exclusionNote(detail.visit)}</p>}
+      {forced && <p className="pg-muted">{exclusionNote(detail.visit)}</p>}
       {!excluded && !newAllocation && !allocationLocked && <Button variant="secondary" disabled={!detail.visit.service_key || busy} onClick={() => setNewAllocation(true)}>Add accepted value allocation</Button>}
       {newAllocation && <AllocationForm visit={detail.visit} onBusy={setAllocationSaving} onCancel={() => setNewAllocation(false)} onCreated={(allocation, serviceId) => {
         // The service selector is disabled while the save is pending; this guard keeps a late response from another service out of this review.
