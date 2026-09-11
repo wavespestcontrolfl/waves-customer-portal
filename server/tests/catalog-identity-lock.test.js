@@ -21,7 +21,7 @@
  */
 const fs = require('fs');
 const path = require('path');
-const { lockCatalogIdentity, CATALOG_SHARE_LOCK_SQL } = require('../services/scheduling/catalog-lock');
+const { lockCatalogIdentity, lockCatalogForWrite, CATALOG_SHARE_LOCK_SQL, CATALOG_WRITE_LOCK_SQL } = require('../services/scheduling/catalog-lock');
 const { _internals } = require('../services/slot-reservation');
 
 const { catalogLinkForProfile } = _internals;
@@ -171,8 +171,42 @@ describe('catalog writers need no convention: their locks conflict with SHARE at
 
   test('service-library writes go through knex insert/update on `services` (implicit ROW EXCLUSIVE) — no advisory convention to keep in step', () => {
     const src = fs.readFileSync(path.join(__dirname, '../services/service-library.js'), 'utf8');
-    expect(src).not.toContain('catalog-lock');
+    // The only catalog-lock reference is the writer-side TABLE lock in
+    // deactivateService, the one path that pre-locks a services row (codex
+    // #4369 r4 P1) — still no advisory-lock convention anywhere.
+    expect(src).not.toContain('pg_advisory');
+    expect(src.match(/require\('\.\/scheduling\/catalog-lock'\)/g)).toHaveLength(1);
+    expect(src).toContain('lockCatalogForWrite(trx)');
     expect(src).toMatch(/trx\('services'\)\.insert\(/);
     expect(src).toMatch(/trx\('services'\)\.where\(\{ id \}\)\.update\(/);
+  });
+});
+
+describe('the one row-prelocking catalog writer takes its table lock first (codex #4369 r4)', () => {
+  test('lockCatalogForWrite issues ROW EXCLUSIVE (conflicts with the readers\' SHARE) and needs a transaction', async () => {
+    await expect(lockCatalogForWrite(undefined)).rejects.toMatchObject({ code: 'TRANSACTION_REQUIRED' });
+    const trx = fakeTrx();
+    await lockCatalogForWrite(trx);
+    expect(trx.raw).toHaveBeenCalledWith(CATALOG_WRITE_LOCK_SQL);
+    expect(CATALOG_WRITE_LOCK_SQL).toBe('LOCK TABLE services IN ROW EXCLUSIVE MODE');
+  });
+
+  test('deactivateService locks the table before its services row FOR UPDATE (source-level)', () => {
+    const src = fs.readFileSync(path.join(__dirname, '../services/service-library.js'), 'utf8');
+    const start = src.indexOf('async function deactivateService');
+    expect(start).toBeGreaterThan(-1);
+    const body = src.slice(start, src.indexOf('\n}\n', start));
+    const lock = body.indexOf("lockCatalogForWrite(trx)");
+    const rowLock = body.indexOf(".forUpdate()");
+    expect(lock).toBeGreaterThan(-1);
+    expect(rowLock).toBeGreaterThan(lock);
+  });
+
+  test('commitReservation pre-reads reservation_policy_version so a persisted V2 hold keeps the early lock after gate shutdown (source-level)', () => {
+    const src = fs.readFileSync(path.join(__dirname, '../services/slot-reservation.js'), 'utf8');
+    expect(src).toContain(".first('scheduled_date', 'technician_id', 'reservation_policy_version')");
+    const pre = src.indexOf(".first('scheduled_date', 'technician_id', 'reservation_policy_version')");
+    const decision = src.indexOf('preRow.reservation_policy_version === 2', pre);
+    expect(decision).toBeGreaterThan(pre);
   });
 });

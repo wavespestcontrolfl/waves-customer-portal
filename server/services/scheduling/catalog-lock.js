@@ -41,4 +41,24 @@ async function lockCatalogIdentity(conn) {
   await conn.raw(CATALOG_SHARE_LOCK_SQL);
 }
 
-module.exports = { lockCatalogIdentity, CATALOG_SHARE_LOCK_SQL };
+// Writer side of the same scheme, for the ONE writer that pre-locks a
+// services ROW before its write: deactivateService reads the row FOR UPDATE,
+// checks references, then UPDATEs. A capacity reader holding SHARE later
+// inserts a scheduled_services row whose service_id FK takes FOR KEY SHARE on
+// that same service row — blocked by the writer's FOR UPDATE — while the
+// writer's UPDATE waits for ROW EXCLUSIVE behind the reader's SHARE: a
+// deadlock through the FK lock (codex #4369 r4 P1). Taking ROW EXCLUSIVE up
+// front, before any row lock, puts the writer behind every in-flight
+// certification and ahead of every later one, so it never holds a row lock
+// a SHARE holder is waiting on. Writers that write without a prior row lock
+// need nothing: their UPDATE/INSERT/DELETE takes ROW EXCLUSIVE first anyway.
+const CATALOG_WRITE_LOCK_SQL = 'LOCK TABLE services IN ROW EXCLUSIVE MODE';
+
+async function lockCatalogForWrite(conn) {
+  if (!conn?.isTransaction) {
+    throw Object.assign(new Error('lockCatalogForWrite requires an open transaction'), { code: 'TRANSACTION_REQUIRED' });
+  }
+  await conn.raw(CATALOG_WRITE_LOCK_SQL);
+}
+
+module.exports = { lockCatalogIdentity, lockCatalogForWrite, CATALOG_SHARE_LOCK_SQL, CATALOG_WRITE_LOCK_SQL };

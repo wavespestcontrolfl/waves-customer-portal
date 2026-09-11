@@ -1362,9 +1362,13 @@ async function commitReservation({
     // this key: it pre-acquires rung 1 as its first statements — before its
     // estimates UPDATE / customers insert take row locks — and passes the
     // locked key down as preLockedDate (checked against the pre-read below).
+    // reservation_policy_version rides along: the early catalog lock below
+    // keys on it for a persisted version-2 hold after the gate is turned off,
+    // and a pre-read without it left that hold on the late (ABBA-prone) lock
+    // path (codex #4369 r4 P1).
     const preRow = await client('scheduled_services')
       .where({ id: scheduledServiceId })
-      .first('scheduled_date', 'technician_id');
+      .first('scheduled_date', 'technician_id', 'reservation_policy_version');
     if (!preRow) {
       const err = new Error('reservation not found');
       err.code = 'RESERVATION_NOT_FOUND';
