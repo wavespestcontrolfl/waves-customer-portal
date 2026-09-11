@@ -201,7 +201,7 @@ async function updatePayer(id, body) {
         ...await trx('scheduled_services').where({ payer_id: pid }).whereNotNull('customer_id').pluck('customer_id'),
       ].map(String))].sort();
       if (referencingCustomerIds.length) {
-        await trx('customers').whereIn('id', referencingCustomerIds).forShare().select('id');
+        await trx('customers').whereIn('id', referencingCustomerIds).orderBy('id').forShare().select('id');
         await trx('scheduled_services').where({ payer_id: pid }).orderBy('id').forShare().select('id');
       }
       const current = await trx('payers').where({ id: pid }).forUpdate().first();
