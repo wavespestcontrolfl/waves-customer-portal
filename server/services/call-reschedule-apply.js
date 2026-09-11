@@ -20,7 +20,9 @@
  *   - confirmed_start_at is a real future instant exactly on the hour
  *   - exactly ONE live visit (pending or confirmed — a row parked at
  *     'rescheduled' awaits a real rebook and stays a card; not dispatch-
- *     owned pending, not grouped) of that customer's named service at the
+ *     owned pending, not an unactivated AI office-review booking, not
+ *     grouped) of that customer's service — matched on the row's CATALOG
+ *     identity, never on a label a repoint can leave stale — at the
  *     identified property sits within
  *     CANDIDATE_SPAN_DAYS of the target date — two candidates is ambiguous,
  *     zero means the call was about a visit we don't have (the booking lane
@@ -31,10 +33,13 @@
  *   - the customer has no open portal reschedule request for that same
  *     appointment — that is a staff-owned track with its own preferred date,
  *     lifecycle and (legacy flow) parked card hold
+ *   - no unanswered reschedule-options SMS offer is outstanding on that
+ *     appointment — a later '1'/'2' reply would rebook it onto the stale
+ *     offered slot, and closing an offer is reschedule-sms's authority
  *
  * Apply: SmartRebooker.reschedule (same choke point the admin editor and the
- * customer self-serve reschedule use — occupancy probe, reminder resync,
- * reschedule_log, CAS pin on the row as read) with keepStatus so a pending
+ * customer self-serve reschedule use — occupancy probe, reschedule_log, CAS
+ * pin on the row as read) with keepStatus so a pending
  * visit stays pending; the caller's interior/access request is appended to
  * the visit's internal_notes; an activity_log row records the move with the
  * call id (and doubles as the idempotency marker for a reprocess); the
@@ -42,8 +47,18 @@
  * cards are resolved with resolution_source 'auto' and call_log.review_status
  * re-synced the way admin-triage's transitionCore does.
  *
+ * Post-commit fan-out, because the rebooker itself does NOT touch
+ * appointment_reminders: a moved /book visit's self_booked_appointments
+ * snapshot is synced either way, then a SINGLE move mirrors the other
+ * single-visit reschedule callers — appointment_reminders resync (without it
+ * the 72h/24h reminder keeps texting the OLD slot, the very failure this
+ * service exists to prevent) and the dispatch board broadcast. A series move
+ * runs the shared durable effects pass for both instead.
+ *
  * NO customer communication: no SMS, no email, no appointment card. Owner
- * directive 2026-09-08. The reminder cron picks up the new time on its own.
+ * directive 2026-09-08. The reminder cron picks up the new time on its own —
+ * which is why the reminder resync does NOT set coverDueWindows: covering an
+ * already-due window would suppress the only notice of the new time.
  *
  * Dark behind GATE_CALL_RESCHEDULE_APPLY (feature-gates.js
  * callRescheduleApply); the processor never blocks on this step.
@@ -51,7 +66,7 @@
 
 const { etParts, etDateString, etCalendarDayOf, deriveWindowEnd, windowDurationMinutes } = require('../utils/datetime-et');
 const { lockTriageCall } = require('../utils/triage-locks');
-const { DISPATCH_OWNED_PENDING_SOURCE_ACTIONS } = require('./call-booking-source-actions');
+const { DISPATCH_OWNED_PENDING_SOURCE_ACTIONS, OFFICE_REVIEW_PENDING_SOURCE_ACTIONS } = require('./call-booking-source-actions');
 const { hasAgentCommittedEvidence, confirmedStartOnTheHour, etWallClockOfConfirmedStart, statesNewAddress } = require('./call-triage-flags');
 const { addressKey } = require('./customer-properties');
 const { phoneMatchDigits } = require('../utils/phone');
@@ -60,6 +75,7 @@ const { stripServiceSuffixes } = require('../utils/service-normalizer');
 const { serviceNameCandidates } = require('./service-completion-profiles');
 const { isEnabled } = require('../config/feature-gates');
 const { createHash } = require('crypto');
+const logger = require('./logger');
 
 const MIN_SCHEDULING_CONFIDENCE = 0.8;
 // The uniquely identified occurrence may move within this span. Destination
@@ -180,9 +196,20 @@ function planRescheduleFromCall({ v2, call, customer, properties = [], candidate
   // catalog identity stays in office review.
   const namedServices = new Set(serviceNameCandidates(v2.service_request?.specific_service_name)
     .map((name) => stripServiceSuffixes(name).toLowerCase()));
-  const matchingServices = atProperty.filter((row) => serviceNameCandidates(row.service_type)
-    .some((name) => namedServices.has(stripServiceSuffixes(name).toLowerCase())));
-  const programIds = new Set(matchingServices.map((row) => row.service_id || stripServiceSuffixes(row.service_type).toLowerCase()));
+  // A row that names a catalog service is matched on THAT catalog name only:
+  // a repoint leaves scheduled_services.service_type stale, so the label alone
+  // can name the requested program while the row now belongs to a different
+  // one (admin-schedule.js:14115-14118 documents the same hazard; GH codex
+  // #4204 r8 P1). A row whose service_id no longer resolves to a catalog row
+  // has no authoritative identity and matches nothing. A row with NO
+  // service_id cannot have been repointed — its free-text label is the only
+  // identity it ever had, so it keeps matching on that.
+  const matchingServices = atProperty.filter((row) => {
+    const authoritative = row.service_id ? row.catalog_service_name : row.service_type;
+    if (!authoritative) return false;
+    return serviceNameCandidates(authoritative).some((name) => namedServices.has(stripServiceSuffixes(name).toLowerCase()));
+  });
+  const programIds = new Set(matchingServices.map((row) => row.service_id || stripServiceSuffixes(row.catalog_service_name || row.service_type).toLowerCase()));
   if (programIds.size !== 1) return skip('service_needs_review');
   if (matchingServices.length > 1) return skip('ambiguous_visit', { candidateIds: matchingServices.map((r) => r.id) });
   const nearby = matchingServices.filter((row) => {
@@ -194,6 +221,18 @@ function planRescheduleFromCall({ v2, call, customer, properties = [], candidate
   if (!LIVE_STATUSES.includes(visit.status)) return skip('visit_not_live', { visitId: visit.id });
   if (!MOVABLE_STATUSES.includes(visit.status)) return skip('visit_parked_for_rebook', { visitId: visit.id });
   if (visit.visit_id) return skip('grouped_visit', { visitId: visit.id });
+  // An AI office-review booking the office has not activated is not an
+  // ordinary visit whatever its status: moving it trips the rebooker's lazy
+  // activation, which resolves its review card, arms customer reminders and
+  // can open the card-on-file funnel for a booking nobody has vetted — and
+  // outbound-review-confirm.js, the authority for that lane, classifies these
+  // rows by source membership + customer_confirmed rather than by status
+  // (outbound-review-confirm.js:703 and :866-876, which also treats a
+  // 'rescheduled' one as superseded). The status-scoped dispatch-owned check
+  // below sees only the pending ones (GH codex #4204 r6 P1).
+  if (visit.source_action && OFFICE_REVIEW_PENDING_SOURCE_ACTIONS.includes(visit.source_action) && visit.customer_confirmed !== true) {
+    return skip('office_review_unconfirmed', { visitId: visit.id });
+  }
   if (visit.source_action && DISPATCH_OWNED_PENDING_SOURCE_ACTIONS.includes(visit.source_action) && visit.status === 'pending') {
     return skip('dispatch_owned_pending', { visitId: visit.id });
   }
@@ -226,12 +265,25 @@ function planRescheduleFromCall({ v2, call, customer, properties = [], candidate
 
 async function loadCandidates(conn, customerId, now = new Date()) {
   return conn('scheduled_services')
-    .where({ customer_id: customerId })
-    .whereIn('status', LIVE_STATUSES)
-    .where('scheduled_date', '>=', etDateString(now))
-    .orderBy('scheduled_date', 'asc')
-    .select('id', 'customer_id', 'property_id', 'service_id', 'service_type', 'scheduled_date', 'window_start', 'window_end', 'estimated_duration_minutes', 'status', 'source_action', 'visit_id', 'internal_notes', 'is_recurring',
-      'service_address_line1', 'service_address_line2', 'service_address_city', 'service_address_zip');
+    .where({ 'scheduled_services.customer_id': customerId })
+    .whereIn('scheduled_services.status', LIVE_STATUSES)
+    .where('scheduled_services.scheduled_date', '>=', etDateString(now))
+    .orderBy('scheduled_services.scheduled_date', 'asc')
+    // The catalog row is joined because a repoint leaves scheduled_services
+    // .service_type stale: matching the label alone can move a DIFFERENT
+    // catalog service that happens to still carry the requested name (GH
+    // codex #4204 r8 P1). Base table stays unaliased so the column list below
+    // is the only qualified part.
+    .leftJoin('services', 'services.id', 'scheduled_services.service_id')
+    .select('scheduled_services.id', 'scheduled_services.customer_id', 'scheduled_services.property_id',
+      'scheduled_services.service_id', 'scheduled_services.service_type', 'scheduled_services.scheduled_date',
+      'scheduled_services.window_start', 'scheduled_services.window_end', 'scheduled_services.estimated_duration_minutes',
+      'scheduled_services.status', 'scheduled_services.source_action', 'scheduled_services.visit_id',
+      'scheduled_services.customer_confirmed',
+      'scheduled_services.internal_notes', 'scheduled_services.is_recurring', 'scheduled_services.self_booking_id',
+      'scheduled_services.service_address_line1', 'scheduled_services.service_address_line2',
+      'scheduled_services.service_address_city', 'scheduled_services.service_address_zip',
+      'services.name as catalog_service_name');
 }
 
 // Resolve the call's open reschedule cards and re-sync review_status —
@@ -281,8 +333,11 @@ async function applyCallReschedule({ conn, call, procGeneration = null, appointm
   if (!settled.customer_id || settled.customer_id !== call.customer_id) return { outcome: 'skipped', reason: 'customer_link_changed' };
   const v2 = settled.v2_extraction_status === 'valid' ? settled.ai_extraction_enriched : null;
   const sourceHash = createHash('sha256').update(JSON.stringify([settled.transcription, v2])).digest('hex');
-  // Customer → property → call locks precede every visit/occupancy lock.
-  // The mover invokes this at transaction entry, before it locks the route.
+  // The caller-supplied pre-move guard: customer → property → call locks.
+  // The mover runs it AFTER its date-occupancy/tech locks (rung 1) and before
+  // its first row lock — taking the customer row first inverted the scheduling
+  // ORDERING CONTRACT against a staff create and deadlocked (rebooker.js:1253-
+  // 1260 single, :1899-1909 series; GH codex #4204 r5 P1).
   const beforeMove = async (trx) => {
     await trx('customers').where({ id: settled.customer_id }).forShare().first('id');
     await trx('customer_properties').where({ customer_id: settled.customer_id, active: true }).forShare().select('id');
@@ -321,6 +376,41 @@ async function applyCallReschedule({ conn, call, procGeneration = null, appointm
     .whereNotIn('status', ['resolved', 'closed', 'cancelled'])
     .where('description', 'like', `Appointment ${serviceId}:%`)
     .first('id');
+  // An unanswered reschedule-OPTIONS text is a live offer: reschedule-sms's
+  // reply handler still honors a '1' or '2' for seven days and rebooks that
+  // row's own visit onto the offered slot, which would drag the visit this
+  // call just moved straight back to the stale time — the call's new reminder
+  // row included (GH codex #4204 r8 P1). Retiring an offer is reschedule-sms's
+  // authority, not this path's, so the automation stands down while one is
+  // outstanding for the visit it wants to move.
+  //
+  // The predicate mirrors what reschedule-sms ACTS on, not just its first
+  // SELECT: pending (no customer_response), inside its 7-day window, AND
+  // carrying the option payload that makes a reply actionable. The window
+  // alone is far too broad — every rebooker move writes a response-less
+  // reschedule_log audit row (rebooker.js:1526, :2897), so an ordinary staff
+  // move last Tuesday would stand this path down for a week. Rows with no
+  // options are exactly the ones reschedule-sms skips (its modern rain-out
+  // rows ask for no reply).
+  const OFFER_WINDOW_MS = 7 * 86400000;
+  const offerOptions = (row) => {
+    try {
+      const notes = typeof row.notes === 'string' ? JSON.parse(row.notes) : (row.notes || {});
+      return !!(notes && (notes.option1 || notes.option2));
+    } catch {
+      // Unparseable notes are not an actionable offer to reschedule-sms
+      // either — its own parseOptions degrades to {} on the same input.
+      return false;
+    }
+  };
+  const pendingSmsOffer = async (trx, serviceId) => {
+    const rows = await trx('reschedule_log')
+      .where({ customer_id: settled.customer_id, scheduled_service_id: serviceId })
+      .whereNull('customer_response')
+      .where('created_at', '>', new Date(now.getTime() - OFFER_WINDOW_MS))
+      .select('id', 'notes');
+    return (rows || []).find(offerOptions) || null;
+  };
   const newerMove = (trx) => trx('reschedule_log')
     .whereIn('scheduled_service_id', trx('scheduled_services').where({ customer_id: settled.customer_id }).select('id'))
     .where('created_at', '>', settled.created_at).first('id');
@@ -337,6 +427,10 @@ async function applyCallReschedule({ conn, call, procGeneration = null, appointm
   if (await openPortalRequest(conn, plan.visitId)) {
     await stampSkipOnCards(conn, call.id, { reason: 'portal_request_open', visitId: plan.visitId });
     return { outcome: 'skipped', reason: 'portal_request_open', visitId: plan.visitId };
+  }
+  if (await pendingSmsOffer(conn, plan.visitId)) {
+    await stampSkipOnCards(conn, call.id, { reason: 'pending_sms_offer', visitId: plan.visitId });
+    return { outcome: 'skipped', reason: 'pending_sms_offer', visitId: plan.visitId };
   }
   let cardsResolved = 0;
   const note = `Applied from the call: visit ${plan.visitId} at ${plan.newDate} ${plan.newWindow.start}. No customer message sent.`;
@@ -367,7 +461,11 @@ async function applyCallReschedule({ conn, call, procGeneration = null, appointm
     // so an unserialized check could be overwritten (GH codex #4204 r7 P2).
     await trx('scheduled_services').where({ id: visit.id }).forUpdate().first('id');
     const portalRequest = await openPortalRequest(trx, visit.id);
-    if (handled || moved || portalRequest) throw Object.assign(new Error('The request was handled after this call'), { code: 'CALL_RESCHEDULE_HANDLED' });
+    // Under the visit's row lock, taken just above. The rebooker writes its
+    // own reschedule_log row AFTER this guard, and that row carries no
+    // options, so this never stands down on the move it is guarding.
+    const smsOffer = await pendingSmsOffer(trx, visit.id);
+    if (handled || moved || portalRequest || smsOffer) throw Object.assign(new Error('The request was handled after this call'), { code: 'CALL_RESCHEDULE_HANDLED' });
     const latestCustomer = await trx('customers').where({ id: settled.customer_id }).forShare().first();
     const latestProperties = await trx('customer_properties').where({ customer_id: settled.customer_id, active: true }).forShare().select('*');
     const latestCandidates = await loadCandidates(trx, settled.customer_id, now);
@@ -408,10 +506,59 @@ async function applyCallReschedule({ conn, call, procGeneration = null, appointm
         property_id: visit.property_id, service_id: visit.service_id, service_type: visit.service_type,
         status: visit.status, visit_id: visit.visit_id, source_action: visit.source_action, is_recurring: visit.is_recurring },
     });
-    if (result?.seriesMoveId) await require('../routes/admin-dispatch').applySeriesMoveEffects({
-      result, serviceId: visit.id, newDate: plan.newDate, newWindow: plan.newWindow,
-      notify: false, actorId: null, reasonText: null,
-    });
+    // Post-commit fan-out. A series move runs the shared durable pass; a
+    // SINGLE move had NO fan-out at all (GH codex #4204 r8), which defeated
+    // this service's own purpose: SmartRebooker never touches
+    // appointment_reminders, so the 72h/24h reminder kept the OLD slot — the
+    // exact failure this path exists to prevent. Each effect is best-effort
+    // after a committed move, the way every other reschedule caller treats
+    // them: a socket or snapshot hiccup must not undo the visit move.
+    //
+    // The /book snapshot first, and for BOTH shapes — the anchor moved either
+    // way, and reschedule-public.js:823-839 syncs it ahead of the same split.
+    // The public availability builder counts self_booked_appointments for the
+    // day cap and GET /api/booking/status/:code reads the date and times back
+    // to the customer, so a stale row leaves their confirmation code showing
+    // the old appointment forever (GH codex #4204 r8 P2).
+    if (visit.self_booking_id) {
+      try {
+        await conn('self_booked_appointments').where({ id: visit.self_booking_id }).update({
+          date: plan.newDate,
+          start_time: plan.newWindow.start,
+          end_time: plan.newWindow.end,
+          updated_at: new Date(),
+        });
+      } catch (err) {
+        logger.warn(`[call-reschedule] self-booking snapshot sync failed for ${visit.id}: ${err.message}`);
+      }
+    }
+    if (result?.seriesMoveId) {
+      await require('../routes/admin-dispatch').applySeriesMoveEffects({
+        result, serviceId: visit.id, newDate: plan.newDate, newWindow: plan.newWindow,
+        notify: false, actorId: null, reasonText: null,
+      });
+    } else {
+      // sendNotification false — this path never messages the customer (owner
+      // directive 2026-09-08). Unlike reschedule-sms, coverDueWindows is NOT
+      // set: that caller sends its own confirmation text, so it covers the
+      // already-due window. We send nothing, so covering it would suppress
+      // the only notice the customer gets about the new time. Letting the
+      // cron fire the standard reminder at the new slot IS the design.
+      try {
+        await require('./appointment-reminders').handleReschedule(
+          visit.id,
+          `${plan.newDate}T${plan.newWindow.start}`,
+          { sendNotification: false },
+        );
+      } catch (err) {
+        logger.warn(`[call-reschedule] reminder sync failed for ${visit.id}: ${err.message}`);
+      }
+      try {
+        await require('./dispatch-assignment').emitDispatchJobUpdate({ jobId: visit.id, actorId: null });
+      } catch (err) {
+        logger.warn(`[call-reschedule] board broadcast failed for ${visit.id}: ${err.message}`);
+      }
+    }
   } catch (err) {
     const reasons = { CALL_RESCHEDULE_CHANGED: 'changed_before_apply', CALL_RESCHEDULE_HANDLED: 'handled_after_call', CALL_RESCHEDULE_ALREADY_APPLIED: 'already_applied' };
     if (!reasons[err.code]) throw err;
