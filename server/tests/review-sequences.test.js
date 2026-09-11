@@ -3151,6 +3151,30 @@ describe('cadence scheduling + post-service enrollment (2026-07-30 revamp)', () 
     // AFTER the provider handoff (audit-persistence failure), attaching
     // err.providerOutcome — the old catch retried blind either way, risking a
     // duplicate text for an accepted-but-unaudited send, or for an uncertain one.
+    test('sendSMS on a RETURNED accepted result whose sent stamp throws stays fenced, never re-dued (codex #4338 P1, round 4)', async () => {
+      const due = new Date(Date.now() - 60000);
+      const mock = makeMock({
+        customers: [{ id: 'th-5', first_name: 'Ada', last_name: 'Q', phone: '+19410000105', nearest_location_id: 'venice' }],
+        review_requests: [
+          { id: 'rr-th5', customer_id: 'th-5', channel: 'sms', status: 'pending', template_key: 'day0_ask', token: 'tok-th5', location_id: 'venice', scheduled_for: due },
+        ],
+      }, {
+        onUpdate: (table, patch) => {
+          if (table === 'review_requests' && patch.status === 'sent') throw new Error('pg blip on sent stamp');
+        },
+      });
+      db.mockImplementation(mock);
+      mockSendCustomerMessage.mockResolvedValueOnce({ sent: true, deliveryOutcome: 'accepted', providerMessageId: 'SM-th5', auditLogId: 'audit-th5' });
+
+      const out = await ReviewService.sendSMS('rr-th5');
+
+      expect(out).toEqual({ sent: true, unrecorded: true });
+      const row = mock.__state.rows.review_requests[0];
+      expect(row.status).toBe('pending');
+      // Never the generic 5-minute retry: the pre-send fence holds.
+      expect(row.scheduled_for.getTime()).toBeGreaterThan(Date.now() + 71 * 3600000);
+    });
+
     test('sendSMS on a thrown ACCEPTED post-handoff error marks the row sent, never retries', async () => {
       const mock = makeMock({
         customers: [{ id: 'th-1', first_name: 'Rae', last_name: 'Q', phone: '+19410000097', nearest_location_id: 'venice' }],

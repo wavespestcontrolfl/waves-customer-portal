@@ -1834,11 +1834,20 @@ const ReviewService = {
       });
 
       if (result.sent) {
-        await db("review_requests").where({ id: requestId }).update({
-          sms_sent_at: new Date(),
-          status: "sent",
-          scheduled_for: fencedFrom,
-        });
+        // The provider ACCEPTED; a thrown stamp must never reach the outer
+        // catch's generic 5-minute retry (which would re-due the fenced row
+        // and duplicate the text). Retry the stamp once, then report the
+        // send as unrecorded — the pre-send fence keeps the row out of
+        // processScheduled for the spacing window (codex #4338 P1, round 4).
+        const stamped = await stampWithRetry(
+          () => db("review_requests").where({ id: requestId }).update({
+            sms_sent_at: new Date(),
+            status: "sent",
+            scheduled_for: fencedFrom,
+          }),
+          `SMS sent stamp (requestId=${requestId})`,
+        );
+        if (!stamped) return { sent: true, unrecorded: true };
         // PII: ID-only per AGENTS.md.
         logger.info(
           `[review] SMS sent (customerId=${customer.id} requestId=${requestId} auditLogId=${result.auditLogId || "n/a"})`,
