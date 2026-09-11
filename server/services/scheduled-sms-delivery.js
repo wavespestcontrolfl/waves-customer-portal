@@ -105,7 +105,12 @@ async function dispatchScheduledSms(msg, meta, send, purpose, maxAttempts = 3) {
         if (!reserved) throw new Error('Scheduled review claim lost before provider dispatch');
       }
       result = await send();
-      const deliveryOutcome = result?.deliveryOutcome;
+      // sendCustomerMessage always names its outcome (#4338); a legacy
+      // sender shape that reports sent:true with no outcome is still an
+      // accepted handoff — the scheduler's own follow-up (finalization,
+      // terminal hooks) already treats it as sent, so the row must flip to
+      // 'sent' here too or it strands in 'sending' until stale recovery.
+      const deliveryOutcome = result?.deliveryOutcome || (result?.sent === true ? 'accepted' : undefined);
       if (deliveryOutcome === 'not_sent' && result.sent) {
         // The scheduler owns the sending -> blocked transition and stamps
         // its durable terminal-hook obligation in that same update.
