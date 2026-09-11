@@ -10,7 +10,7 @@ const { resolveLocation } = require('../config/locations');
 const logger = require('../services/logger');
 const MODELS = require('../config/models');
 const { dispatchWithFallback } = require('../services/llm/call');
-const { normalizePhone, phoneMatchDigits } = require('../utils/phone');
+const { normalizePhone, phoneMatchDigits, phoneIdentityKey } = require('../utils/phone');
 const { mediaFromOutboundAttachments, signMediaForClient } = require('../services/sms-media');
 const { alertTwilioFailure } = require('../services/twilio-failure-alerts');
 const { placeBridgeCall } = require('../services/call-bridge');
@@ -172,15 +172,20 @@ async function customerOfSourceCall(callId, to) {
 }
 
 async function findSingleCustomerForPhone(phone) {
-  // Compare on the last 10 digits so stored formats ('+19415551234',
-  // '9415551234', '(941) 555-1234') all match the same dialable number —
-  // full-digit equality misses customers stored without the country code.
-  const last10 = normalizePhoneLast10(normalizePhone(phone) || phone);
-  if (!last10) return null;
+  // Full-digit match on every stored format the number could plausibly be
+  // ('+19415551234', '9415551234', '(941) 555-1234' all match the same
+  // NANP line), via the same NANP-vs-international candidate set the
+  // exact-contact search above uses (phoneMatchDigits, utils/phone.js) —
+  // NOT a last-10-digit suffix match, which let an international sender
+  // resolve to an unrelated US customer that merely shared its last ten
+  // digits (codex #4213 P2; the wrong-customer-attach incident this rule
+  // exists to prevent).
+  const candidates = phoneMatchDigits(phone);
+  if (!candidates.length) return null;
 
   const matches = await db('customers')
     .whereNull('deleted_at')
-    .whereRaw("RIGHT(regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g'), 10) = ?", [last10])
+    .whereRaw("regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g') = ANY (?::text[])", [candidates])
     .orderBy('updated_at', 'desc')
     .limit(2);
 
@@ -201,7 +206,10 @@ async function resolveSmsLogCustomerFallbacks(rows) {
   for (const row of rows || []) {
     if (row.customer_id || row.first_name) continue;
     const contactPhone = row.contact_phone || row.customer_phone;
-    const key = normalizePhoneLast10(normalizePhone(contactPhone) || contactPhone);
+    // phoneIdentityKey (utils/phone.js) — NOT normalizePhoneLast10 — so an
+    // international contact never buckets under the same key as a US
+    // customer sharing its last ten digits; see findSingleCustomerForPhone.
+    const key = phoneIdentityKey(contactPhone);
     if (key && !phones.has(key)) phones.set(key, contactPhone);
   }
   if (!phones.size) return new Map();
@@ -1438,7 +1446,7 @@ router.get('/log', async (req, res, next) => {
     const messages = await Promise.all(rows.map(async (m) => {
       const initialContact = m.contact_phone || m.customer_phone;
       const fallbackCustomer = !m.customer_id && initialContact
-        ? fallbackCustomers.get(normalizePhoneLast10(normalizePhone(initialContact) || initialContact))
+        ? fallbackCustomers.get(phoneIdentityKey(initialContact))
         : null;
       const customerName = m.first_name
         ? `${m.first_name} ${m.last_name || ''}`.trim()
