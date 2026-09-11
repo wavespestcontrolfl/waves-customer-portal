@@ -706,6 +706,20 @@ router.put('/preferences', async (req, res, next) => {
 
     await db.transaction(async (trx) => {
       for (const id of [...new Set([req.customerId, primaryId])].sort()) await lockCustomerComms(trx, id);
+      // Row before key, like every other notification_prefs writer in this
+      // file: lock the preference row(s) this save is about to update
+      // BEFORE requesting the address key. retrySummaryThroughHandoff and
+      // commitRecoveryOnDelivery both lock a preference row first and take
+      // the address key second — taking the key first here would let this
+      // transaction wait on a preference row while one of those waits on
+      // this transaction's key, a deadlock either side can lose.
+      const prefRowIds = [
+        ...(Object.keys(propertyDbUpdates).length ? [req.customerId] : []),
+        ...(Object.keys(channelDbUpdates).length ? [primaryId] : []),
+      ];
+      for (const id of [...new Set(prefRowIds)].sort()) {
+        await trx('notification_prefs').where({ customer_id: id }).forUpdate().first('customer_id');
+      }
       // A billing address assigned here takes the address key after the row
       // locks, like every customer address writer: a bearer-link handoff
       // that read the address as unowned commits before this claim or

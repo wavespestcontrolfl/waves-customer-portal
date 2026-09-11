@@ -214,7 +214,29 @@ describe('transactional email provider retry classification', () => {
     const stored = message({ template_key: 'service.visit_summary', trigger_event_id: 'visit_summary:00000000-0000-4000-8000-000000000001', send_attempt_token: 'attempt-7' });
     expect(await retry.retryOne(stored)).toMatchObject({ sent: false, stopped: true });
     expect(sendgrid.sendOne).not.toHaveBeenCalled();
-    expect(summary.reconcileSummaryEmailRecovery).toHaveBeenCalledWith(expect.objectContaining({ id: stored.id, status: 'blocked' }));
+    // The ledger terminalization and the summary settlement commit
+    // together (Codex #4303 r6 P2): the reconcile call now rides the same
+    // transaction as the email_messages update, not a call of its own.
+    expect(summary.reconcileSummaryEmailRecovery).toHaveBeenCalledWith(expect.objectContaining({ id: stored.id, status: 'blocked' }), db);
+  });
+
+  test('a stopped visit summary retry never reports terminalized when its summary reconcile fails, so the transaction has something to roll back', async () => {
+    const chain = {};
+    chain.where = jest.fn(() => chain);
+    chain.update = jest.fn(() => chain);
+    chain.then = (res, rej) => Promise.resolve(1).then(res, rej);
+    chain.returning = jest.fn(async () => [{ id: 'message-1', status: 'blocked', template_key: 'service.visit_summary' }]);
+    db.mockReturnValue(chain);
+    emailTemplates.loadTemplateByKey.mockResolvedValue({ template: { template_key: 'service.visit_summary' } });
+    emailTemplates.activeSuppressionFor.mockResolvedValue({ suppression_type: 'do_not_email' });
+    const summary = require('../services/visit-completion-summary');
+    summary.reconcileSummaryEmailRecovery.mockRejectedValueOnce(new Error('reconcile down'));
+    const stored = message({ template_key: 'service.visit_summary', trigger_event_id: 'visit_summary:00000000-0000-4000-8000-000000000001', send_attempt_token: 'attempt-10' });
+    // Never terminalizes the ledger row silently: a failed reconcile must
+    // surface so the transaction wrapping both writes has something to
+    // fail on (the real db.transaction rolls back; this mock only proves
+    // the error is no longer swallowed by a standalone .catch).
+    await expect(retry.retryOne(stored)).rejects.toThrow('reconcile down');
   });
 
   test('a failed uncertain settlement after an ambiguous provider throw is retried once and never requeued', async () => {

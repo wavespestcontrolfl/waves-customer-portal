@@ -251,15 +251,25 @@ async function markRetryUncertain(message, err, now = new Date()) {
 // A row stopped before any provider request: terminal for the rail, and a
 // summary's aggregate is settled from the ledger since no webhook follows.
 async function stopRetry(message, { status, reason, exhaustedAlert = false }) {
-  const [updated] = await db('email_messages')
-    .where({ id: message.id, send_attempt_token: message.send_attempt_token, status: 'queued' })
-    .update({ status, error_message: reason, provider_retry_next_at: null, provider_retry_exhausted_at: new Date(), updated_at: new Date() })
-    .returning('*');
+  const isSummary = message.template_key === 'service.visit_summary';
+  const settle = async (trx) => {
+    const [row] = await trx('email_messages')
+      .where({ id: message.id, send_attempt_token: message.send_attempt_token, status: 'queued' })
+      .update({ status, error_message: reason, provider_retry_next_at: null, provider_retry_exhausted_at: new Date(), updated_at: new Date() })
+      .returning('*');
+    if (row && isSummary) {
+      // The ledger terminalization and the summary settlement commit
+      // together, the same posture markRetryUncertain already holds: a
+      // failure reconciling the aggregate must not leave a terminalized
+      // ledger row with no queued row and no future webhook left to retry
+      // the transition, stranding the effect at 'sent' while closeout
+      // keeps reporting delivery.
+      await require('./visit-completion-summary').reconcileSummaryEmailRecovery({ ...message, ...row, status: row.status || status }, trx);
+    }
+    return row || null;
+  };
+  const updated = isSummary ? await db.transaction(settle) : await settle(db);
   if (updated && exhaustedAlert) await alertExhausted(updated, reason);
-  if (message.template_key === 'service.visit_summary') {
-    await require('./visit-completion-summary').reconcileSummaryEmailRecovery({ ...message, ...(updated || {}), status: updated?.status || status })
-      .catch((err) => logger.warn(`[email-provider-retry] visit summary suppression not reconciled for ${message.id}: ${err.message}`));
-  }
   return { sent: false, stopped: true, reason };
 }
 

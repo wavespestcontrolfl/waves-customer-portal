@@ -1618,4 +1618,48 @@ postgres('visit summary recipient recovery', () => {
     expect(sendOne).toHaveBeenCalledTimes(2);
   });
 
+  // Codex #4303 r6 P2: the handoff's pre-provider marker clears before the
+  // provider request, so a throw from the request itself (the only way a
+  // deferred SMS reaches this hook parked at unknown_delivery) leaves no
+  // further proof recorded on the row. A synchronous, definitive Twilio
+  // rejection (a terminal code) is proof the scheduler already has; the
+  // hook must accept it instead of leaving the leg unknown forever.
+  test('the deferred SMS terminal hook leaves an unknown-delivery leg unknown without proof of a definitive rejection', async () => {
+    await priorClaim('completion_sms', { status: 'unknown_delivery', claim_token: 'claim-no-proof', last_error: 'provider_outcome_unknown' });
+    await Summary.terminalDeferredSummarySms({ visit_id: fixture.visitId, visit_summary_claim_token: 'claim-no-proof' });
+    expect(await mockPg('visit_effects').where({ visit_id: fixture.visitId, effect_type: 'completion_sms' }).first())
+      .toMatchObject({ status: 'unknown_delivery' });
+  });
+
+  test('the deferred SMS terminal hook settles as suppressed when the scheduler proves a synchronous terminal provider rejection', async () => {
+    await priorClaim('completion_sms', { status: 'unknown_delivery', claim_token: 'claim-terminal', last_error: 'provider_outcome_unknown' });
+    await Summary.terminalDeferredSummarySms({ visit_id: fixture.visitId, visit_summary_claim_token: 'claim-terminal', provider_terminal_rejection: true });
+    expect(await mockPg('visit_effects').where({ visit_id: fixture.visitId, effect_type: 'completion_sms' }).first())
+      .toMatchObject({ status: 'suppressed' });
+  });
+
+  // Codex #4303 r6 P2: a recipient-generated event (unsubscribe, group
+  // unsubscribe, spam report) proves the recipient received the message —
+  // the same sent evidence as opened/clicked — so a still-bounced sibling
+  // recipient's later correction can settle the aggregate.
+  test.each(['unsubscribed', 'spam_report'])('a recipient %s after delivery counts as sent evidence, letting a sibling bounce correction settle the aggregate', async (postDeliveryStatus) => {
+    const bounced = fixture.primaryEmail;
+    const other = fixture.serviceEmail;
+    await priorEmail(bounced, { status: 'sent', sent_at: new Date() });
+    await priorEmail(other, { status: postDeliveryStatus });
+    const [effect] = await mockPg('visit_effects').insert({ visit_id: fixture.visitId, effect_type: 'completion_email',
+      dedupe_key: `${fixture.visitId}:completion_email`, claim_token: 'owner', status: 'sent', sent_at: new Date() }).returning('*');
+    // The bounce reopens the aggregate exactly as reconcileSummaryEmailBounce does.
+    await mockPg('email_messages').where({ recipient_email_snapshot: bounced, trigger_event_id: `visit_summary:${fixture.visitId}` })
+      .update({ status: 'bounced', bounced_at: new Date() });
+    await mockPg('visit_effects').where({ id: effect.id }).update({ status: 'unknown_delivery', last_error: 'provider_bounce' });
+    // The bounce is now corrected — a delivery event proves the recipient received it.
+    await mockPg('email_messages').where({ recipient_email_snapshot: bounced, trigger_event_id: `visit_summary:${fixture.visitId}` })
+      .update({ status: 'delivered', delivered_at: new Date() });
+    const message = { trigger_event_id: `visit_summary:${fixture.visitId}`, template_key: 'service.visit_summary',
+      recipient_id: fixture.customerId, recipient_email_snapshot: bounced };
+    expect(await Summary.reconcileSummaryEmailRecovery(message)).toEqual({ reconciled: true });
+    expect(await mockPg('visit_effects').where({ id: effect.id }).first()).toMatchObject({ status: 'sent', last_error: null });
+  });
+
 });

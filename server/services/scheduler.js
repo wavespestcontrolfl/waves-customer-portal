@@ -3990,7 +3990,14 @@ function initScheduledJobs() {
                 // standalone review fallback, flip referral/report state into
                 // the admin retry lane). Armed ONLY here, never on timers,
                 // so fallbacks can't race a still-retryable replay.
-                await runTerminalHookDurably(msg.id, claimMeta.entry_point, claimMeta);
+                // provider_terminal_rejection carries the adapter's proof of
+                // a synchronous, definitive provider rejection (a terminal
+                // Twilio code) into the hook — visit_summary_deferred's
+                // onTerminal uses it to settle an unknown_delivery effect as
+                // suppressed instead of leaving it parked as unknown; other
+                // entry points ignore the field.
+                await runTerminalHookDurably(msg.id, claimMeta.entry_point,
+                  { ...claimMeta, provider_terminal_rejection: smsResult.terminal === true });
               }
               // The customer was never answered — used + parked cards return.
               const blockedMeta = await readFreshMeta();
