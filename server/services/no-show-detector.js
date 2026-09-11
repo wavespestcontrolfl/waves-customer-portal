@@ -76,7 +76,22 @@ function latestPromises(events, now = new Date()) {
 // scheduled time is deliberately never used as proof of what we promised.
 async function loadPromiseEvents(conn, visitIds, { now = new Date() } = {}) {
   if (!visitIds.length) return [];
-  const since = new Date(now.getTime() - 100 * 86400000);
+  // No lower time bound — scoped by the candidate visit ids instead (codex
+  // P2). A visit booked >100 days ahead whose customer disabled the 72h/24h
+  // reminders has only the ORIGINAL confirmation as evidence; a fixed
+  // lookback measured from `now` (evaluated near the service date, not the
+  // booking date) excluded a confirmation sent well before that horizon,
+  // and with the gate on, the legacy overdue scans are also off — the
+  // visit got NO alert at all. All three reads are already scoped to
+  // `visitIds` (a small, bounded candidate set from listNoShows) and each
+  // one's supporting index is appointment/visit-id-keyed —
+  // messaging_audit_appointment_sent_idx, audit_visit_promised_window_idx
+  // (20260911000020_follow_through_alerts.js), and
+  // customer_interactions_email_scheduled_service_idx
+  // (20260911000030_no_show_evidence_indexes.js) — so the visit-id scope
+  // alone keeps every read indexed without a time-horizon filter. `now` is
+  // still an upper bound: a row can't communicate a promise from the
+  // future.
   const reads = [
     () => conn('messaging_audit_log as a').leftJoin('sms_log as s', 's.twilio_sid', 'a.provider_message_id')
       .whereIn('a.appointment_id', visitIds)
@@ -86,7 +101,7 @@ async function loadPromiseEvents(conn, visitIds, { now = new Date() } = {}) {
       .whereRaw(`(a.purpose = ANY(?::text[]) OR (a.purpose = 'appointment' AND
         (a.metadata->>'rendered_slot_ms' IS NOT NULL OR a.metadata->>'original_message_type' LIKE 'rain_out_moved%'
           OR a.metadata->>'original_message_type' = ANY(?::text[]))))`, [NOTICE_PURPOSES, LEGACY_SCHEDULING_MESSAGE_TYPES])
-      .whereBetween('a.sent_at', [since, now]).whereNull('a.blocked_code').whereNull('a.provider_error')
+      .where('a.sent_at', '<=', now).whereNull('a.blocked_code').whereNull('a.provider_error')
       .where(function delivered() { this.where('a.provider', 'push').orWhereIn('s.status', ['sent', 'delivered', 'read']); })
       .select('a.id', 'a.appointment_id', 'a.metadata', 'a.sent_at'),
     // appointment-email.js's own send-time customer_interactions row is
@@ -105,14 +120,14 @@ async function loadPromiseEvents(conn, visitIds, { now = new Date() } = {}) {
       .leftJoin('email_messages as em', function joinOnProviderMessageId() {
         this.on(conn.raw("em.provider_message_id = (ci.metadata->>'provider_message_id')"));
       })
-      .where('ci.interaction_type', 'email_outbound').whereBetween('ci.created_at', [since, now])
+      .where('ci.interaction_type', 'email_outbound').where('ci.created_at', '<=', now)
       .whereRaw("ci.metadata->>'scheduled_service_id' = ANY(?::text[])", [visitIds])
       .whereRaw("ci.metadata->>'status' IN ('sent','delivered')")
       .whereRaw("ci.metadata->>'event_type' IN ('appointment.confirmation','appointment.reminder_72h','appointment.reminder_24h','appointment.rescheduled')")
       .where((qb) => qb.whereNull('em.id').orWhereNotIn('em.status', ['bounced', 'dropped', 'blocked', 'failed']))
       .select('ci.id', 'ci.metadata', 'ci.created_at'),
     () => conn('audit_log').where({ action: 'visit_window_promised', resource_type: 'scheduled_service' })
-      .whereIn('resource_id', visitIds).whereBetween('created_at', [since, now]).select('id', 'resource_id', 'metadata', 'created_at'),
+      .whereIn('resource_id', visitIds).where('created_at', '<=', now).select('id', 'resource_id', 'metadata', 'created_at'),
   ];
   const results = [];
   if (conn.isTransaction) {

@@ -594,3 +594,43 @@ describe('noticeStillCurrent: an ineligible technician\'s tracking notice is dis
     expect(noticeStillCurrent({ live: null, visit, notice, recipientTech: { id: 'tech-a', employment_status: 'active', field_dispatchable: true } })).toBe(false);
   });
 });
+
+describe('loadPromiseEvents: no fixed lookback — confirmations older than 100 days still count (round-3 P2-B)', () => {
+  function passthroughChain(result = []) {
+    const chain = {};
+    for (const m of ['leftJoin', 'whereIn', 'whereRaw', 'whereNull', 'where']) chain[m] = () => chain;
+    chain.select = () => Promise.resolve(result);
+    return chain;
+  }
+
+  // The messaging_audit_log chain intentionally has no `whereBetween` — if
+  // the real query still called it, this test would throw "not a
+  // function" instead of silently passing.
+  function fakeConn({ messageRows = [] } = {}) {
+    const conn = (table) => {
+      if (table === 'customer_interactions as ci' || table === 'audit_log') return passthroughChain([]);
+      if (table === 'messaging_audit_log as a') return passthroughChain(messageRows);
+      throw new Error(`fake conn: unexpected table ${table}`);
+    };
+    conn.raw = (sql, bindings) => ({ sql, bindings });
+    conn.isTransaction = true;
+    return conn;
+  }
+
+  test('a visit booked >100 days out whose only evidence is a 120-day-old confirmation still gets it as the latest promise', async () => {
+    // A visit booked far ahead, reminders disabled: nothing else was ever
+    // sent, and the sweep evaluates near the actual service date — 120
+    // days after the confirmation went out. The old fixed
+    // now-100days..now lookback excluded this row entirely; with the gate
+    // on, the legacy overdue scans are off too, so the visit got NO alert
+    // at all.
+    const now = new Date('2026-09-10T00:00:00.000Z');
+    const oldConfirmation = { id: 'm1', appointment_id: 'visit-1',
+      metadata: { rendered_slot_ms: new Date('2026-09-10T13:00:00.000Z').getTime() },
+      sent_at: new Date(now.getTime() - 120 * 86400000).toISOString() };
+    const conn = fakeConn({ messageRows: [oldConfirmation] });
+    const events = await loadPromiseEvents(conn, ['visit-1'], { now });
+    const map = latestPromises(events, now);
+    expect(map.get('visit-1')).toMatchObject({ start_at: new Date('2026-09-10T13:00:00.000Z').toISOString(), source_id: 'm1' });
+  });
+});
