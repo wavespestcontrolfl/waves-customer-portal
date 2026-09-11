@@ -142,8 +142,12 @@ async function main() {
       await page.screenshot({ path: path.join(output, `${name}-dashboard.png`), fullPage: true });
 
       await page.getByRole('button', { name: 'Application Log' }).click();
+      // The waiter is armed before the fill that triggers the request: the
+      // synthetic route fulfils immediately, so a listener installed after the
+      // action can miss the response and time out on a page that behaved.
+      const filteredApplications = page.waitForResponse((response) => response.url().includes('productName=Synthetic+treatment'));
       await page.getByLabel('Product name').fill('Synthetic treatment');
-      await page.waitForResponse((response) => response.url().includes('productName=Synthetic+treatment'));
+      await filteredApplications;
       const downloadPromise = page.waitForEvent('download');
       await page.getByRole('button', { name: 'Export for DACS' }).click();
       await downloadPromise;

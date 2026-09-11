@@ -104,21 +104,28 @@ function DashboardTab({ token }) {
   </div>;
 }
 
+function limitSeverityTone(severity) {
+  if (!severity) return "neutral";
+  return severity === "hard_block" ? "alert" : "warn";
+}
+
 function ApplicationLogTab({ token }) {
   const [filters, setFilters] = useState({ startDate: "", endDate: "", productName: "", page: 0 });
-  const query = new URLSearchParams({
+  const qs = new URLSearchParams({
     ...(filters.startDate && { startDate: filters.startDate }),
     ...(filters.endDate && { endDate: filters.endDate }),
     ...(filters.productName && { productName: filters.productName }),
     limit: String(APPLICATION_PAGE_SIZE), offset: String(filters.page * APPLICATION_PAGE_SIZE),
   }).toString();
-  const { data, loading, error, reload } = useFetch(`${API}/applications?${query}`, token, [query]);
+  const { data, loading, error, reload } = useFetch(`${API}/applications?${qs}`, token, [qs]);
   const exportCSV = async () => {
     const params = new URLSearchParams({
       ...(filters.startDate && { startDate: filters.startDate }),
       ...(filters.endDate && { endDate: filters.endDate }),
     }).toString();
-    const response = await fetch(`${API}/report/export?${params}`, { headers: headers(token) });
+    const response = await fetch(`${API}/report/export?${params}`, {
+      headers: headers(token),
+    });
     const blob = await response.blob();
     const url = URL.createObjectURL(blob);
     const anchor = document.createElement("a");
@@ -161,8 +168,14 @@ function ApplicationLogTab({ token }) {
   </div>;
 }
 
+// Same class as the severity badge: main painted exceeded / blackout_active /
+// expired red and warning / expiring_soon amber, so collapsing all five into
+// alert put reserved red on two warning states.
+const ALERT_STATUSES = ["exceeded", "blackout_active", "expired"];
+const WARN_STATUSES = ["warning", "expiring_soon"];
 function statusTone(status) {
-  return ["warning", "exceeded", "blackout_active", "expired", "expiring_soon"].includes(status) ? "alert" : "neutral";
+  if (ALERT_STATUSES.includes(status)) return "alert";
+  return WARN_STATUSES.includes(status) ? "warn" : "neutral";
 }
 function StatusBadge({ status }) {
   return <Badge tone={statusTone(status)}>{status?.replace(/_/g, " ")}</Badge>;
@@ -177,7 +190,9 @@ function ProductLimitsTab({ token }) {
     if (!customerId) return;
     setLoading(true);
     try {
-      const response = await fetch(`${API}/product-limits?customer_id=${customerId}`, { headers: headers(token) });
+      const response = await fetch(`${API}/product-limits?customer_id=${customerId}`, {
+        headers: headers(token),
+      });
       setResult(await response.json());
     } catch (requestError) { console.error(requestError); }
     setLoading(false);
@@ -196,7 +211,10 @@ function ProductLimitsTab({ token }) {
           <TD className="font-medium text-zinc-900">{limit.limitType?.replace(/_/g, " ")}</TD>
           <TD data-label="Limit" nums>{limit.limitValue}</TD><TD data-label="Current" nums>{limit.currentUsage}</TD>
           <TD data-label="Status"><StatusBadge status={limit.status} /></TD>
-          <TD data-label="Severity"><Badge tone={limit.severity ? "alert" : "neutral"}>{limit.severity}</Badge></TD>
+          {/* Only hard_block is a genuine alert. compliance.js paints everything
+              else amber, and the truthiness check was giving an informational
+              rule the reserved red treatment. */}
+          <TD data-label="Severity"><Badge tone={limitSeverityTone(limit.severity)}>{limit.severity}</Badge></TD>
           <TD data-label="Description" className="text-ink-secondary">{limit.description}</TD>
         </TR>)}</TBody>
       </Table></CardBody>
@@ -246,7 +264,11 @@ function LicensesTab({ token }) {
     setSaving(true);
     setSaveError(null);
     try {
-      const response = await fetch(`${API}/licenses/${editing}`, { method: "PUT", headers: headers(token), body: JSON.stringify(form) });
+      const response = await fetch(`${API}/licenses/${editing}`, {
+      method: "PUT",
+      headers: headers(token),
+      body: JSON.stringify(form),
+    });
       if (!response.ok) throw new Error(`HTTP ${response.status}`);
       setEditing(null);
       reload();
