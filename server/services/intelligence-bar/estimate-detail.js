@@ -293,8 +293,13 @@ function blockedRecord(row) {
 }
 
 async function shapeEstimate(row, deposits = []) {
-  const data = parseStoredJson(row.estimate_data);
   const reconciliation_error = await reconcileMembership(row);
+  // Parsed AFTER the reconcile, never before (pre-push audit P1): the
+  // reconciler rewrites row.estimate_data in place for a lapsed member, and
+  // the public route runs its own call-side-block check on the
+  // post-reconcile row. Reading a pre-mutation copy here would be the same
+  // two-projections-of-one-row divergence this re-cut exists to remove.
+  const data = parseStoredJson(row.estimate_data);
   const links = await estimateLinks(row, data);
   if (links.link_state === 'blocked') return blockedRecord(row);
   // Withheld outright when the live membership state could not be verified:

@@ -206,6 +206,16 @@ test('the reconciler runs BEFORE the composer, on the same row object, and opts 
   expect(mockCompose.mock.calls[0][0].monthly_total).toBe('61.00');
 });
 
+test('the call-side block reads the POST-reconcile estimate_data, the same row state the public route checks', async () => {
+  mockReconcile.mockImplementation(async (estimate) => {
+    const parsed = JSON.parse(estimate.estimate_data);
+    estimate.estimate_data = JSON.stringify({ ...parsed, estimatorEngine: { callLogId: 'call-after-reconcile' } });
+    return { ok: true };
+  });
+  await shapeEstimate(estimateRow());
+  expect(mockCallSideBlock.mock.calls[0][1]).toMatchObject({ estimatorEngine: { callLogId: 'call-after-reconcile' } });
+});
+
 test('an unverifiable membership withholds the whole projection — the composer is never even called', async () => {
   mockReconcile.mockResolvedValue({ ok: false, error: 'customers lookup timed out' });
   const shaped = await shapeEstimate(estimateRow());
