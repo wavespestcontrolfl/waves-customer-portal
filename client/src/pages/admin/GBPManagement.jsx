@@ -1244,7 +1244,7 @@ function UpdateQueueTab({
                   {" "}
                   <div className="p-[10px] rounded-md border-hairline border-zinc-200">
                     {" "}
-                    <div className="text-ui-body text-alert-fg font-medium mb-[4px]">
+                    <div className="text-ui-body text-ink-secondary font-medium mb-[4px]">
                       OLD VALUE
                     </div>{" "}
                     <div className="text-ink-secondary max-h-[60px] overflow-hidden">
