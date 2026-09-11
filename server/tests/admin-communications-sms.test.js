@@ -79,6 +79,8 @@ jest.mock('../services/sms-suggest-mode', () => ({
   revertDraftsToShadow: jest.fn(async () => 0),
   markSuggestionScheduled: jest.fn(async () => 1),
   parkThreadSuggestions: jest.fn(async () => []),
+  createReplyHoldingReservation: jest.fn(async () => 'resv-1'),
+  settleReplyHoldingReservation: jest.fn(async () => true),
   reopenScheduledSuggestions: jest.fn(async () => 0),
   ignoreParkedSuggestions: jest.fn(async () => 0),
   sweepStaleSuggestionsAfterReply: jest.fn(async () => undefined),
@@ -89,7 +91,17 @@ jest.mock('../services/sms-suggest-mode', () => ({
 // proceed; the executor's own behavior is covered by sms-auto-send.test.js.
 jest.mock('../services/sms-auto-send', () => ({
   hasActiveAutoSendClaim: jest.fn(async () => false),
-  isRealProviderSend: jest.fn((r) => !!r?.providerMessageId),
+  isRealProviderSend: jest.fn((r) => r?.sent === true
+    && (!r.deliveryOutcome || r.deliveryOutcome === 'accepted')
+    && !!r.providerMessageId
+    && !['gate-blocked', 'template-disabled', 'owner-silence'].includes(r.providerMessageId)),
+  isAmbiguousProviderOutcome: jest.fn((r) => {
+    if (!r) return false;
+    if (r.deliveryOutcome === 'uncertain') return true;
+    if (['accepted', 'not_sent'].includes(r.deliveryOutcome)) return false;
+    if (r.deliveryOutcome != null) return true;
+    return r.sent !== true && !r.blocked && Boolean(r.retryable || r.deferred);
+  }),
 }));
 // The inline review claim boundary: the route must verify + claim BEFORE the
 // provider call and abort on any validation miss (fail closed — the tokenized
@@ -138,6 +150,7 @@ const db = require('../models/db');
 const communicationsRouter = require('../routes/admin-communications');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
 const { hasActiveAutoSendClaim } = require('../services/sms-auto-send');
+const suggestMode = require('../services/sms-suggest-mode');
 const smsMedia = require('../services/sms-media');
 
 function makeQueryBuilder(rows = []) {
@@ -859,7 +872,7 @@ describe('admin communications SMS route', () => {
       });
 
       test('a throw the provider ACCEPTED still writes the marker; one it did not accept writes nothing', async () => {
-        sendCustomerMessage.mockRejectedValueOnce(Object.assign(new Error('audit write failed'), { providerOutcome: { sent: true } }));
+        sendCustomerMessage.mockRejectedValueOnce(Object.assign(new Error('audit write failed'), { providerOutcome: { sent: true, deliveryOutcome: 'accepted', providerMessageId: 'SM-card' } }));
         await withServer(async (baseUrl) => {
           const res = await send(baseUrl, { customerId: 'cust-A', body: PREP_BODY });
           expect(res.status).toBe(500);
@@ -985,7 +998,7 @@ describe('admin communications SMS route', () => {
 
       test('a throw AFTER provider acceptance records the delivery; a throw before it restores', async () => {
         const accepted = new Error('audit row failed');
-        accepted.providerOutcome = { sent: true, providerMessageId: 'SM8', provider: 'twilio' };
+        accepted.providerOutcome = { sent: true, deliveryOutcome: 'accepted', providerMessageId: 'SM8', provider: 'twilio' };
         sendCustomerMessage.mockRejectedValueOnce(accepted);
         wireContractDb();
         await withServer(async (baseUrl) => {
@@ -1078,7 +1091,7 @@ describe('admin communications SMS route', () => {
         return { where: jest.fn(function () { return this; }), whereNull: jest.fn(function () { return this; }), whereIn: jest.fn(function () { return this; }), whereRaw: jest.fn(function () { return this; }), first, select: jest.fn(async () => []), update: jest.fn(async () => 1) };
       });
       const accepted = new Error('audit row failed');
-      accepted.providerOutcome = { sent: true, providerMessageId: 'SM9' };
+      accepted.providerOutcome = { sent: true, deliveryOutcome: 'accepted', providerMessageId: 'SM9' };
       sendCustomerMessage.mockRejectedValueOnce(accepted);
       await withServer(async (baseUrl) => {
         const res = await send(baseUrl, { body: STMT_BODY });
@@ -1484,7 +1497,7 @@ describe('admin communications SMS route', () => {
     test('a throw after provider acceptance still emails the Both copy and says so', async () => {
       const ReviewService = require('../services/review-request');
       const accepted = new Error('audit write failed');
-      accepted.providerOutcome = { sent: true };
+      accepted.providerOutcome = { sent: true, deliveryOutcome: 'accepted', providerMessageId: 'SM-review' };
       sendCustomerMessage.mockRejectedValue(accepted);
       // The error path fires the async Twilio failure alert (a promise).
       require('../services/twilio-failure-alerts').alertTwilioFailure.mockResolvedValue(undefined);
@@ -1497,6 +1510,39 @@ describe('admin communications SMS route', () => {
         expect(ReviewService.markInlineDelivered).toHaveBeenCalledWith('rr-1', expect.any(Date));
         expect(ReviewService.sendInlineEmailCopy).toHaveBeenCalledWith('rr-1');
         expect(ReviewService.releaseInlineClaim).not.toHaveBeenCalled();
+      });
+    });
+
+    test('canonical uncertainty retains the inline claim without sending the email copy', async () => {
+      const ReviewService = require('../services/review-request');
+      const uncertain = new Error('audit write failed');
+      uncertain.providerOutcome = { sent: false, deliveryOutcome: 'uncertain' };
+      sendCustomerMessage.mockRejectedValueOnce(uncertain);
+      wireInlineRow();
+      await withServer(async (baseUrl) => {
+        const res = await send(baseUrl, { reviewRequestEmail: true });
+        expect(res.status).toBe(500);
+        expect(ReviewService.releaseInlineClaim).not.toHaveBeenCalled();
+        expect(ReviewService.markInlineDelivered).not.toHaveBeenCalled();
+        expect(ReviewService.sendInlineEmailCopy).not.toHaveBeenCalled();
+      });
+    });
+
+    test('proven retryable non-delivery releases the inline claim', async () => {
+      const ReviewService = require('../services/review-request');
+      sendCustomerMessage.mockResolvedValueOnce({
+        sent: false,
+        blocked: false,
+        deliveryOutcome: 'not_sent',
+        retryable: true,
+        code: 'PROVIDER_FAILURE',
+      });
+      wireInlineRow();
+      await withServer(async (baseUrl) => {
+        const res = await send(baseUrl, { reviewRequestEmail: true });
+        expect(res.status).toBe(422);
+        expect(ReviewService.releaseInlineClaim).toHaveBeenCalledWith('rr-1', expect.any(Date));
+        expect(ReviewService.markInlineDelivered).not.toHaveBeenCalled();
       });
     });
 
@@ -1564,6 +1610,47 @@ describe('admin communications SMS route', () => {
       });
 
       expect(res.status).toBe(409);
+      expect(sendCustomerMessage).not.toHaveBeenCalled();
+    });
+  });
+
+  test.each([
+    ['returned', async () => sendCustomerMessage.mockResolvedValueOnce({ sent: false, deliveryOutcome: 'uncertain', code: 'PROVIDER_UNKNOWN' })],
+    ['thrown', async () => sendCustomerMessage.mockRejectedValueOnce(Object.assign(new Error('provider unknown'), { providerOutcome: { sent: false, deliveryOutcome: 'uncertain' } }))],
+  ])('a %s uncertain outcome keeps gate-off claimed suggestions linked for recovery', async (_kind, arrange) => {
+    db.mockImplementation(() => makeUniversalBuilder());
+    suggestMode.parkThreadSuggestions.mockResolvedValueOnce(['parked-1']);
+    await arrange();
+
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/communications/sms`, {
+        method: 'POST',
+        headers: { Authorization: 'Bearer admin', 'Content-Type': 'application/json' },
+        body: JSON.stringify({ to: '+15551234567', body: 'Replying by hand' }),
+      });
+
+      expect(res.status).toBeGreaterThanOrEqual(400);
+      expect(suggestMode.createReplyHoldingReservation).toHaveBeenCalledWith(db, expect.objectContaining({
+        parkedDecisionIds: ['parked-1'],
+      }));
+      expect(suggestMode.settleReplyHoldingReservation).toHaveBeenCalledWith({ reservationId: 'resv-1', uncertain: true });
+      expect(suggestMode.reopenScheduledSuggestions).not.toHaveBeenCalled();
+    });
+  });
+
+  test('does not enter the provider when the durable uncertainty boundary cannot be armed', async () => {
+    mockGates.smsAutoSend = true;
+    db.mockImplementation(() => makeUniversalBuilder());
+    suggestMode.settleReplyHoldingReservation.mockResolvedValueOnce(false);
+
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/communications/sms`, {
+        method: 'POST',
+        headers: { Authorization: 'Bearer admin', 'Content-Type': 'application/json' },
+        body: JSON.stringify({ to: '+15551234567', body: 'Replying by hand' }),
+      });
+
+      expect(res.status).toBe(503);
       expect(sendCustomerMessage).not.toHaveBeenCalled();
     });
   });
