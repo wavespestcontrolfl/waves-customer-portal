@@ -2,7 +2,7 @@ const db = require('../models/db');
 const logger = require('./logger');
 const { etDateString, addETDays } = require('../utils/datetime-et');
 const { SIGNAL_TYPES } = require('./customer-intelligence/signal-detector');
-const { excludeUnresolvedReviewAskReservations } = require('./messaging/review-ask-reservation');
+const { excludeUnresolvedSendReservations } = require('./messaging/review-ask-reservation');
 
 // ---------------------------------------------------------------------------
 // Weights for composite score
@@ -231,7 +231,7 @@ async function computeEngagementScore(customerId) {
       // Unresolved review-ask reservations excluded (Codex #4331 P2): an
       // in-flight, unconfirmed placeholder must not count as an outbound
       // touch or set daysSinceLastContact — a resolved row still counts.
-      const smsRows = await excludeUnresolvedReviewAskReservations(db('sms_log').where('customer_id', customerId))
+      const smsRows = await excludeUnresolvedSendReservations(db('sms_log').where('customer_id', customerId))
         .orderBy('created_at', 'desc').limit(100);
       details.smsInbound = smsRows.filter(s => s.direction === 'inbound').length;
       details.smsOutbound = smsRows.filter(s => s.direction === 'outbound').length;

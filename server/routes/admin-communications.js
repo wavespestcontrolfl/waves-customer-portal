@@ -36,7 +36,7 @@ const {
   supersedeStaleDecision,
 } = require('../services/sms-suggest-mode');
 const autoSendExecutor = require('../services/sms-auto-send');
-const { excludeUnresolvedReviewAskReservations } = require('../services/messaging/review-ask-reservation');
+const { excludeUnresolvedSendReservations } = require('../services/messaging/review-ask-reservation');
 
 router.use(adminAuthenticate, requireTechOrAdmin);
 
@@ -1884,7 +1884,7 @@ router.post('/ai-draft', async (req, res, next) => {
     const customer = await db('customers').where('phone', 'like', `%${cleanPhone}`).first();
 
     // Get recent SMS history for context
-    const recentSms = await excludeUnresolvedReviewAskReservations(
+    const recentSms = await excludeUnresolvedSendReservations(
       db('sms_log').where(function () {
         this.where('from_phone', 'like', `%${cleanPhone}`).orWhere('to_phone', 'like', `%${cleanPhone}`);
       }),

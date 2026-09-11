@@ -11,9 +11,10 @@
 // to 'sent' in place (admin-communications.js's settleReviewReservation).
 //
 // A Communications reply reservation (sms-suggest-mode's
-// createReplyHoldingReservation, marker manual_send_reservation) is the same
-// kind of placeholder: inserted 'sending' before the provider call and only
-// settled — stamped sent, deleted, or held for reconciliation — afterward.
+// createReplyHoldingReservation, marker manual_send_reservation) and the
+// automatic reply reservation (sms-auto-send, marker auto_send_reservation)
+// are the same kind of placeholder: inserted 'sending' before the provider
+// call and only settled — stamped sent, deleted, or held — afterward.
 //
 // General readers of sms_log — conversation history, outbound counts,
 // message context fed to composers, unanswered-thread checks — must not
@@ -37,22 +38,47 @@ function parseMetadata(value) {
 // True only while the reservation is still in flight/unconfirmed. A row
 // that has since resolved to any other status (sent, delivered, failed,
 // undelivered, blocked, canceled…) is a real message and returns false.
-const RESERVATION_MARKERS = ['review_ask_reservation', 'manual_send_reservation'];
+// Every 'sending' placeholder a general reader must not mistake for a sent
+// message: the review-ask reservation, the Communications reply reservation
+// (manual_send_reservation) and the automatic reply reservation
+// (auto_send_reservation, sms-auto-send). Only the FIRST is review-ask
+// spacing evidence — history readers use the narrow predicate.
+const REVIEW_ASK_MARKER = 'review_ask_reservation';
+const SEND_RESERVATION_MARKERS = [REVIEW_ASK_MARKER, 'manual_send_reservation', 'auto_send_reservation'];
 
-function isUnresolvedReviewAskReservation(row) {
-  if (!row || row.status !== 'sending') return false;
-  const metadata = typeof row.metadata === 'string' ? parseMetadata(row.metadata) : row.metadata;
-  return RESERVATION_MARKERS.some(marker => metadata?.[marker] === true);
+function unresolvedMetadata(row) {
+  if (!row || row.status !== 'sending') return null;
+  return typeof row.metadata === 'string' ? parseMetadata(row.metadata) : row.metadata;
 }
 
-// Excludes unresolved review-ask reservations at the SQL level (metadata is
+// True only while a REVIEW-ASK reservation is still in flight/unconfirmed. A
+// row that has since resolved to any other status (sent, delivered, failed,
+// undelivered, blocked, canceled…) is a real message and returns false. This
+// is the spacing-evidence predicate: a reply reservation is NOT a review ask.
+function isUnresolvedReviewAskReservation(row) {
+  return unresolvedMetadata(row)?.[REVIEW_ASK_MARKER] === true;
+}
+
+// True while ANY send reservation is still in flight — what general readers
+// (history, counts, context, unanswered-thread checks) must hide.
+function isUnresolvedSendReservation(row) {
+  const metadata = unresolvedMetadata(row);
+  return !!metadata && SEND_RESERVATION_MARKERS.some(marker => metadata[marker] === true);
+}
+
+// Excludes every unresolved send reservation at the SQL level (metadata is
 // jsonb) — apply this to a query BEFORE any LIMIT/ORDER-then-slice so an
 // unresolved placeholder can never displace a real row out of a bounded
 // history window. `table` lets a caller that aliases or joins sms_log
 // qualify the column; default matches a bare `db('sms_log')` query.
-function excludeUnresolvedReviewAskReservations(query, table = 'sms_log') {
-  const markers = RESERVATION_MARKERS.map(marker => `COALESCE(${table}.metadata->>'${marker}', 'false') = 'true'`).join(' OR ');
+function excludeUnresolvedSendReservations(query, table = 'sms_log') {
+  const markers = SEND_RESERVATION_MARKERS.map(marker => `COALESCE(${table}.metadata->>'${marker}', 'false') = 'true'`).join(' OR ');
   return query.whereRaw(`NOT (${table}.status = 'sending' AND (${markers}))`);
 }
 
-module.exports = { isUnresolvedReviewAskReservation, excludeUnresolvedReviewAskReservations };
+module.exports = {
+  isUnresolvedReviewAskReservation,
+  isUnresolvedSendReservation,
+  excludeUnresolvedSendReservations,
+  SEND_RESERVATION_MARKERS,
+};
