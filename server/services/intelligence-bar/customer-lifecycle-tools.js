@@ -304,8 +304,17 @@ async function mergeCustomers(input, actionContext = {}) {
   if (!winnerId || !loserId) return { error: 'winner_customer_id and loser_customer_id are required' };
   if (String(winnerId) === String(loserId)) return { error: 'winner_customer_id and loser_customer_id must be two different customers' };
 
-  const confirmed = input.confirmed === true || actionContext.confirmed === true;
-  if (!confirmed) return previewMergeCustomers(winnerId, loserId);
+  // ONLY the server-derived context can confirm (pre-push audit P0). Both
+  // dispatchers overwrite input.confirmed from actionContext for every
+  // WRITE_TWO_STEP tool, so reading input.confirmed was safe — but only
+  // because of an invariant held two modules away, and `input` is raw
+  // tool_use JSON from the model. A model reaching this executor by any
+  // future path (or steered by an injection in customer text it reads
+  // elsewhere) must not be able to approve an irreversible customer merge
+  // by adding a field to its own call. The header's contract — "only
+  // /confirm-action can attach confirmed:true" — is now enforced here, not
+  // merely stated.
+  if (actionContext.confirmed !== true) return previewMergeCustomers(winnerId, loserId);
   const approved = input._approved_versions && input._approved_versions.winner && input._approved_versions.loser
     ? { winner: String(input._approved_versions.winner), loser: String(input._approved_versions.loser) } : null;
   const approvedEffects = typeof input._approved_effects === 'string' && input._approved_effects ? input._approved_effects : null;
@@ -327,6 +336,9 @@ The first call returns a PREVIEW naming both customers (name, phone, email) and 
         loser_customer_id: { type: 'string', format: 'uuid', description: 'The duplicate record that gets archived and folded into the winner' },
       },
       required: ['winner_customer_id', 'loser_customer_id'],
+      // Defence in depth: the model cannot introduce a field of its own
+      // (`confirmed`, `_approved_versions`, …) into this call.
+      additionalProperties: false,
     },
   },
 ];
