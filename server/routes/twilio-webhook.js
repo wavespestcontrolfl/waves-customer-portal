@@ -864,24 +864,24 @@ router.post('/sms', async (req, res) => {
               landed = Boolean(stats && !stats.error && (stats.suppressed || stats.bellWritten || Number(stats.push?.sent || 0) > 0));
             } catch (e) {
               if (e.alreadyRead) landed = true;
-              else logger.error(`[notifications] sms_reply (reaction) trigger failed: ${e.message}`);
+              else logger.error('[notifications] sms_reply (reaction) trigger failed', { code: e.code || 'unknown' });
             }
           }
           if (!landed && process.env.ADAM_PHONE && !(From === process.env.ADAM_PHONE && To === process.env.ADAM_PHONE)) {
             try {
               const senderName = customer ? `${customer.first_name} ${customer.last_name}` : From;
               await TwilioService.sendSMS(process.env.ADAM_PHONE, `📩 New SMS\nFrom: ${senderName}\n"${(Body || '').slice(0, 120)}"`, { messageType: 'internal_alert' });
-            } catch (e) { logger.error(`SMS notification failed: ${e.message}`); }
+            } catch (e) { logger.error('SMS notification failed', { code: e.code || 'unknown' }); }
           }
           // A loud tapback on a tech line reaches the holder too (same card as a
           // text — codex #4053 r2 P2); quiet ones stay silent everywhere.
           if (numberConfig.type === 'tech_line') {
             await require('../services/tech-line').notifyTechLineText({
               lineNumber: To, from: From, body: Body, customer, mediaCount: inboundMedia.length,
-            }).catch((e) => logger.warn(`[tech-line] reaction notify failed: ${e.message}`));
+            }).catch((e) => logger.warn('[tech-line] reaction notify failed', { code: e.code || 'unknown' }));
           }
         } catch (e) {
-          logger.error(`[sms-intent] deferred reaction alert failed: ${e.message}`);
+          logger.error('[sms-intent] deferred reaction alert failed', { code: e.code || 'unknown' });
         }
       })(); });
       return undefined;
@@ -1405,7 +1405,7 @@ router.post('/sms', async (req, res) => {
           await ringSmsReplyBell({ customer, From, MessageSid, message: Body || `${inboundMedia.length} photo${inboundMedia.length === 1 ? '' : 's'}` });
         } catch (e) {
           if (e.alreadyRead) logger.info('[notifications] sms_reply skipped — thread read before the bell');
-          else logger.error(`[notifications] unknown-sender sms_reply trigger failed: ${e.message}`);
+          else logger.error('[notifications] unknown-sender sms_reply trigger failed', { code: e.code || 'unknown' });
         }
       } else {
         // Unknown sender — ALWAYS through the throttled claim/dispatch path,
@@ -2277,7 +2277,7 @@ async function dispatchUnknownSenderAlert({ From, MessageSid, message }) {
     suppressed = Boolean(stats && (stats.suppressed || stats.policySilenced));
   } catch (e) {
     if (e.alreadyRead) logger.info('[notifications] sms_reply skipped — thread read before the bell');
-    else logger.error(`[notifications] unknown-sender sms_reply trigger failed: ${e.message}`);
+    else logger.error('[notifications] unknown-sender sms_reply trigger failed', { code: e.code || 'unknown' });
   }
   if (delivered) {
     // Confirm the claim to the full 4h window only now that delivery is

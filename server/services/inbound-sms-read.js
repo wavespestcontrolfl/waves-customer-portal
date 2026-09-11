@@ -127,7 +127,7 @@ async function retargetOrClearUnknownSenderBell(phone, cutoff) {
         .update({ read_at: new Date() });
     });
   } catch (e) {
-    logger.warn(`[inbound-sms-read] unknown-sender bell retarget failed for one sender: ${e.message}`);
+    logger.warn('[inbound-sms-read] unknown-sender bell retarget failed for one sender', { code: e.code || 'unknown' });
     return 0;
   }
 }
@@ -231,7 +231,7 @@ async function clearBacklogResetMarkers({ scope, ids, convs }) {
         .whereRaw("jsonb_exists(COALESCE(metadata,'{}'::jsonb), 'backlog_reset')")
         .update({ metadata: db.raw("metadata - 'backlog_reset'") });
     }
-  } catch (e) { logger.warn(`[inbound-sms-read] backlog-reset marker clear failed: ${e.message}`); }
+  } catch (e) { logger.warn('[inbound-sms-read] backlog-reset marker clear failed', { code: e.code || 'unknown' }); }
 }
 
 async function markInboundSmsRead({ messageIds = [], conversationIds = [], readBefore = null, adminUserId = null, role } = {}) {
@@ -263,7 +263,7 @@ async function markInboundSmsRead({ messageIds = [], conversationIds = [], readB
       await db('sms_log').where({ direction: 'inbound' }).whereIn('twilio_sid', mirrorSids)
         .andWhere(function unread() { this.where({ is_read: false }).orWhereNull('is_read'); })
         .update({ is_read: true });
-    } catch (e) { logger.warn(`[inbound-sms-read] sms_log read mirror failed: ${e.message}`); }
+    } catch (e) { logger.warn('[inbound-sms-read] sms_log read mirror failed', { code: e.code || 'unknown' }); }
   }
 
   // 3. Bell cross-clear — only threads with nothing unread left, bells that
@@ -280,7 +280,7 @@ async function markInboundSmsRead({ messageIds = [], conversationIds = [], readB
       for (const phone of membership.phones) {
         notificationsCleared += await retargetOrClearUnknownSenderBell(phone, now);
       }
-    } catch (e) { logger.warn(`[inbound-sms-read] unknown-sender bell retarget failed: ${e.message}`); }
+    } catch (e) { logger.warn('[inbound-sms-read] unknown-sender bell retarget failed', { code: e.code || 'unknown' }); }
     // The unknown-sender SIDs above are fully handled (retargeted or
     // cleared) inside the per-phone lock; only known-customer SIDs still
     // need the ordinary by-SID clear.
@@ -288,7 +288,7 @@ async function markInboundSmsRead({ messageIds = [], conversationIds = [], readB
     if (knownSids.length) {
       try {
         notificationsCleared += await NotificationService.markInboundSmsReadAdmin({ twilioSids: knownSids, before: now, role });
-      } catch (e) { logger.warn(`[inbound-sms-read] bell clear by sid failed: ${e.message}`); }
+      } catch (e) { logger.warn('[inbound-sms-read] bell clear by sid failed', { code: e.code || 'unknown' }); }
     }
   }
   notificationsCleared += await clearCustomerThreadCrossBells({ ids, convs, now, role });
@@ -330,7 +330,7 @@ async function clearCustomerThreadCrossBells({ ids, convs, now, role }) {
     }
     return cleared;
   } catch (e) {
-    logger.warn(`[inbound-sms-read] bell cross-clear failed: ${e.message}`);
+    logger.warn('[inbound-sms-read] bell cross-clear failed', { code: e.code || 'unknown' });
     return 0;
   }
 }
