@@ -62,26 +62,30 @@ function normalizeFrequency(value) {
   return 'monthly';
 }
 
+const { PROPOSAL_UNITS, roundDecimal, proposalLineAmount } = require('../../shared/proposal-bid.cjs');
+
 function normalizeLineItem(raw = {}) {
-  const quantity = Math.max(1, Math.round(num(raw.quantity, 1)));
+  const quantity = num(raw.quantity, 1) > 0 ? roundDecimal(raw.quantity ?? 1) : 1;
   // Proposal lines are commercial quote amounts — never negative. Clamp at the
   // authoritative normalizer (the PDF and computeProposalTotals both read this)
   // so a bad/hostile client can't drive the persisted estimate totals negative,
   // regardless of entry path. The PUT route additionally rejects negatives so an
   // operator authoring in the modal gets feedback instead of a silent zero.
-  const unitPrice = Math.max(0, roundMoney(num(raw.unitPrice ?? raw.unit_price ?? raw.price, 0)));
+  const unitPrice = Math.max(0, roundDecimal(num(raw.unitPrice ?? raw.unit_price ?? raw.price, 0)));
   const frequency = normalizeFrequency(raw.frequency);
   // amount is the price per occurrence (qty × unit price). Annualization is
   // derived from the frequency in computeProposalTotals.
-  const amount = roundMoney(quantity * unitPrice);
+  const amount = proposalLineAmount({ quantity, unitPrice });
   // per_application lines carry their own occurrence count; without one the
   // line annualizes to $0 (same as any unknown cadence would).
   const visitsPerYear = frequency === 'per_application'
     ? Math.max(0, Math.round(num(raw.visitsPerYear ?? raw.visits_per_year, 0)))
     : 0;
   return {
+    ...(typeof raw.id === 'string' && /^[a-zA-Z0-9_-]{1,64}$/.test(raw.id) ? { id: raw.id } : {}),
     description: String(raw.description || raw.name || '').slice(0, 300),
     quantity,
+    ...(Object.hasOwn(PROPOSAL_UNITS, raw.unit) ? { unit: raw.unit } : {}),
     unitPrice,
     frequency,
     frequencyLabel: FREQUENCY_LABELS[frequency],

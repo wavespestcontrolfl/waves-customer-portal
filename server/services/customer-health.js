@@ -2,6 +2,7 @@ const db = require('../models/db');
 const logger = require('./logger');
 const { etDateString, addETDays } = require('../utils/datetime-et');
 const { SIGNAL_TYPES } = require('./customer-intelligence/signal-detector');
+const { excludeUnresolvedReviewAskReservations } = require('./messaging/review-ask-reservation');
 
 // ---------------------------------------------------------------------------
 // Weights for composite score
@@ -227,7 +228,11 @@ async function computeEngagementScore(customerId) {
   try {
     // SMS engagement
     if (await tableExists('sms_log')) {
-      const smsRows = await db('sms_log').where('customer_id', customerId).orderBy('created_at', 'desc').limit(100);
+      // Unresolved review-ask reservations excluded (Codex #4331 P2): an
+      // in-flight, unconfirmed placeholder must not count as an outbound
+      // touch or set daysSinceLastContact — a resolved row still counts.
+      const smsRows = await excludeUnresolvedReviewAskReservations(db('sms_log').where('customer_id', customerId))
+        .orderBy('created_at', 'desc').limit(100);
       details.smsInbound = smsRows.filter(s => s.direction === 'inbound').length;
       details.smsOutbound = smsRows.filter(s => s.direction === 'outbound').length;
 
@@ -889,4 +894,7 @@ module.exports = {
   getGrade,
   summarizeBehavioralSignals,
   WEIGHTS,
+  // Exported for focused unit coverage of the outbound-count signal (Codex
+  // #4331 P2) — not part of the scoreCustomer public surface otherwise.
+  computeEngagementScore,
 };

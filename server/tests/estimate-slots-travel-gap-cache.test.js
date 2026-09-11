@@ -95,7 +95,7 @@ function mockDb() {
 }
 
 
-const ENV_KEYS = ['GATE_SLOT_TRAVEL_GAP', 'SLOT_TRAVEL_BUFFER_MINUTES'];
+const ENV_KEYS = ['GATE_SLOT_TRAVEL_GAP', 'SLOT_TRAVEL_BUFFER_MINUTES', 'GATE_SCHEDULING_CAPACITY'];
 const saved = {};
 beforeAll(() => { for (const k of ENV_KEYS) saved[k] = process.env[k]; });
 afterAll(() => {
@@ -118,6 +118,16 @@ describe('getAvailableSlots — wrapper cache keyed by the travel policy', () =>
   afterEach(() => { jest.useRealTimers(); });
 
   const OPTS = { dateFrom: '2027-05-20', dateTo: '2027-05-20' };
+
+  test('capacity activation cannot reuse a legacy signed-slot cache entry', async () => {
+    await getAvailableSlots('est-rain-1', OPTS);
+    expect((await getAvailableSlots('est-rain-1', OPTS)).metadata.cacheHit).toBe(true);
+    process.env.GATE_SCHEDULING_CAPACITY = 'true';
+    expect((await getAvailableSlots('est-rain-1', OPTS)).metadata.cacheHit).toBe(false);
+    expect((await getAvailableSlots('est-rain-1', OPTS)).metadata.cacheHit).toBe(true);
+    delete process.env.GATE_SCHEDULING_CAPACITY;
+    expect((await getAvailableSlots('est-rain-1', OPTS)).metadata.cacheHit).toBe(true);
+  });
 
   test('gate flip and buffer change each miss the cache; an unchanged policy hits it', async () => {
     const off = await getAvailableSlots('est-rain-1', OPTS);
