@@ -84,6 +84,8 @@ test.each([
   [{ productId: '00000000-0000-4000-8000-000000000201', productName: 'Iron', extra: true }], [{ productId: true, productName: 'Iron' }],
   [{ productId: 'p1', productName: 'Iron' }], [{ productId: 42, productName: 'Iron' }],
   [{ productId: '00000000-0000-4000-8000-000000000201', productName: 'Iron' }, { productId: '00000000-0000-4000-8000-000000000201', productName: 'Iron', reason: 'again' }],
+  // A case-variant pair is the same PostgreSQL uuid: canonicalized before uniqueness (codex #4113 P2).
+  [{ productId: '0000ABCD-0000-4000-8000-000000000201', productName: 'Iron' }, { productId: '0000abcd-0000-4000-8000-000000000201', productName: 'Iron' }],
 ])('malformed skipped plan defaults %j are rejected before a completion claim or database read, whatever the UI gates', async skippedProducts => {
   delete process.env.GATE_LAWN_COMPLETION_DEFAULTS;
   delete process.env.GATE_LAWN_PROPERTY_HISTORY;

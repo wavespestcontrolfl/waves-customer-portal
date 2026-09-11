@@ -98,6 +98,8 @@ describeDb('appointment completion defaults through PostgreSQL', () => {
     const result = await loadLawnCompletionContext(joined(visit, f), knex);
     expect(result.propertyMatchesProfile).toBe(false);
     expect(result.propertyId).toBe(null);
+    // The proof the completion transaction rebuilds from locked rows: keyed by the stamp.
+    expect(result.addressProof).toEqual({ propertyId: null, propertyAddressKey: null, visitAddressKey: expect.stringMatching(/^200/), stamped: true });
   });
 
   test('an explicit second property gets its own history and no primary turf area', async () => {

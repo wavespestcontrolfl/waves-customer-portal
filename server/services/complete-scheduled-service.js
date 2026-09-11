@@ -2393,7 +2393,12 @@ async function completeScheduledService(completionInput, packetContext = null) {
     // id would inflate the compliance metric by the number of copies
     // (Codex #4113 P2). Rejected, not deduplicated — strict validation.
     const { value: lawnSkippedProducts, error: lawnSkippedProductsError } = Joi.array().max(50).items(Joi.object({
-      productId: Joi.string().uuid().required(),
+      // Canonical lowercase: Joi's uuid() accepts uppercase text unchanged,
+      // while the plan/catalog maps compare lowercase UUID strings and
+      // PostgreSQL treats both spellings as one uuid — normalize BEFORE the
+      // uniqueness check so a case-variant pair cannot evade it and an
+      // uppercase id from an older client still matches its default (Codex #4113 P2).
+      productId: Joi.string().uuid().lowercase().required(),
       productName: Joi.string().trim().max(180).required(),
       reason: Joi.string().trim().max(500).allow(null, ''),
     })).unique('productId').allow(null).validate(lawnProtocolCompletion?.skippedProducts);
@@ -4940,6 +4945,59 @@ async function completeScheduledService(completionInput, packetContext = null) {
                 err.isOperational = true;
                 err.code = 'VISIT_DATE_CHANGED';
                 throw err;
+              }
+            }
+            // Address inputs likewise (Codex #4113 P2): a Customer 360 primary
+            // address edit that committed between the plan build and the
+            // customer FOR SHARE above moves the primary property's address
+            // (syncPrimaryAddress) without touching property_id or the turf
+            // profile's updated_at, so the checks above all pass while the
+            // plan proved the OLD home. Rebuild both keys the proof compared
+            // from the locked customer row / locked visit row / the property
+            // row (readable under the customer share lock the address writer
+            // must wait on) and abort with the same retryable shape.
+            if (lawnLedgerVisit && waveguardPlan?.propertyGate?.addressProof) {
+              const { addressKey } = require('./customer-properties');
+              const proof = waveguardPlan.propertyGate.addressProof;
+              const lockedVisitAddress = lockedSvcRow.service_address_line1 ? {
+                address_line1: lockedSvcRow.service_address_line1, address_line2: lockedSvcRow.service_address_line2,
+                city: lockedSvcRow.service_address_city, zip: lockedSvcRow.service_address_zip,
+              } : (snapshotCustomerRow || {});
+              const lockedVisitKey = lockedVisitAddress.address_line1 ? addressKey(lockedVisitAddress) : null;
+              const lockedProperty = proof.propertyId
+                ? await savepointRead(trx, (k) => k('customer_properties').where({ id: proof.propertyId }).first('address_line1', 'address_line2', 'city', 'zip'))
+                : null;
+              const lockedPropertyKey = lockedProperty ? addressKey(lockedProperty) : null;
+              if (String(lockedVisitKey || '') !== String(proof.visitAddressKey || '')
+                || String(lockedPropertyKey || '') !== String(proof.propertyAddressKey || '')) {
+                const err = new Error('This appointment\'s address changed while completing — reload the job and complete it again.');
+                err.statusCode = 409;
+                err.isOperational = true;
+                err.code = 'VISIT_ADDRESS_CHANGED';
+                throw err;
+              }
+            }
+            // Assignment-derived rig IDs are revalidated INSIDE the transaction
+            // (Codex #4113 P2): a calibration PUT that deactivated the assigned
+            // rig after buildPlanForService observed it active leaves the stale
+            // plan's `unresolved` false, and the writer would record the
+            // deactivated rig as equipment actually used. Same outcome as the
+            // planner's unresolved path — clear, never 409 — and FOR SHARE on
+            // the calibration row so a deactivation cannot commit underneath.
+            if (lawnLedgerVisit && !waveguardCloseout && (assignmentDerivedEquipmentSystem || assignmentDerivedCalibration)
+              && (waveguardEquipmentSystemId || waveguardCalibrationId)) {
+              const liveRig = await savepointRead(trx, (k) => {
+                const query = k('equipment_calibrations as ec')
+                  .join('equipment_systems as es', 'ec.equipment_system_id', 'es.id')
+                  .where('ec.active', true).where('es.active', true).forShare('ec');
+                if (waveguardCalibrationId) query.where('ec.id', waveguardCalibrationId);
+                else query.where('es.id', waveguardEquipmentSystemId);
+                return query.first('ec.id');
+              });
+              if (!liveRig) {
+                if (assignmentDerivedEquipmentSystem) waveguardEquipmentSystemId = null;
+                if (assignmentDerivedCalibration) waveguardCalibrationId = null;
+                waveguardCalibrationCleared = true;
               }
             }
             const normStampVal = (v) => (v == null || v === '' ? null : Number(v));

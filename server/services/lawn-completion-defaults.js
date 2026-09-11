@@ -54,6 +54,15 @@ async function loadLawnCompletionContext(service, knex) {
   const latestAssessment = scope.propertyId ? attempts.find((row) => history.isEligible(row, scope)) || resolvedHistory.previous : null;
   return {
     propertyId: scope.propertyId, propertyMatchesProfile, latestAssessment,
+    // The two keys the proof compared, so the completion transaction can
+    // rebuild them from the LOCKED customer/visit/property rows and abort
+    // when an address edit committed after the plan was built (Codex #4113 P2).
+    addressProof: {
+      // The scope keeps the candidate key after withholding its id; the proof carries a key only for a proven id.
+      propertyId: scope.propertyId, propertyAddressKey: scope.propertyId ? scope.propertyAddressKey : null,
+      visitAddressKey: visitAddress.address_line1 ? addressKey(visitAddress) : null,
+      stamped: !!service.service_address_line1,
+    },
     isLawn: detectServiceLine(service.service_type) === 'lawn',
     history: {
       available: !!scope.propertyId,

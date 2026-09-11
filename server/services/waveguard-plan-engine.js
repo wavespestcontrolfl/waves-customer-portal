@@ -1636,6 +1636,10 @@ async function buildPlanForService(serviceId, options = {}) {
       // true = the saved turf profile proves THIS service property; false =
       // it does not; null = not evaluated (completion-defaults gates off).
       propertyMatchesProfile: completionContext ? completionContext.propertyMatchesProfile === true : null,
+      // The address inputs that proof compared (property key + visit key):
+      // the completion transaction rebuilds both from locked rows and aborts
+      // on drift (Codex #4113 P2). null = not evaluated.
+      addressProof: completionContext ? completionContext.addressProof : null,
       // The saved whole-property area, untouched by a visit-only override: the
       // denominator every annual per-1,000 nutrient figure shares.
       profileLawnSqft: profile?.lawn_sqft || null,
