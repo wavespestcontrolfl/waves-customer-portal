@@ -416,6 +416,24 @@ async function persistArrivalOrder(conn, fit, targetId) {
   await recordCapacityDecision(conn, fit, targetId);
 }
 
+// Conversion expands a certified combined anchor without changing its route position.
+async function persistCapacityAllocation(conn, anchor, memberIds) {
+  // Accept callers pre-acquire this fence before their first row lock.
+  // Other converter callers may already hold rows: never wait in reverse
+  // order. A busy reorder rolls this allocation back for a recoverable retry.
+  if (!await require('./tech-day-lock').lockTechDays(conn,
+    [{ techId: anchor.technician_id, date: dateOnly(anchor.scheduled_date) }], { wait: false })) throw capacityError();
+  const rows = await conn('scheduled_services').where({ scheduled_date: dateOnly(anchor.scheduled_date),
+    technician_id: anchor.technician_id }).select('id', 'route_order', 'window_start', 'created_at');
+  const order = currentOrder(rows).filter(row => row.id === anchor.id || !memberIds.includes(row.id))
+    .flatMap(row => row.id === anchor.id ? memberIds : [row.id]);
+  if (!order.includes(anchor.id)) throw capacityError();
+  for (const [index, id] of order.entries()) await conn('scheduled_services').where({ id }).update({ route_order: index + 1 });
+  await require('../audit-log').recordAuditEvent({ actor_type: 'system', action: 'schedule.capacity_allocated',
+    resource_type: 'scheduled_service', resource_id: anchor.id, critical: true, trx: conn,
+    metadata: { route_order: order, allocated_service_ids: memberIds } });
+}
+
 async function recordCapacityDecision(conn, fit, targetId) {
   const order = fit.routeOrder.map(id => id === '__candidate__' ? targetId : id);
   // Audit application-owned decisions, never Google response bodies or legs.
@@ -436,5 +454,5 @@ module.exports = {
   arrivalWindowRoutingEnabled, loadArrivalRouteContext, evaluateArrivalPlacement, checkArrivalPlacement,
   enumerateArrivalPlacements,
   groupRouteStops, workDuration,
-  prepareArrivalCapacity, verifyArrivalCapacity, persistArrivalOrder, capacityError,
+  prepareArrivalCapacity, verifyArrivalCapacity, persistArrivalOrder, persistCapacityAllocation, capacityError,
 };
