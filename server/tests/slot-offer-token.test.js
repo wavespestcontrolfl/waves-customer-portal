@@ -11,6 +11,7 @@
  */
 const {
   SLOT_OFFER_TTL_MS,
+  CAPACITY_OFFER_POLICY,
   signSlotOffer,
   verifySlotOffer,
   appendOfferToSlotId,
@@ -31,6 +32,24 @@ const OFFER = {
 };
 
 describe('signSlotOffer / verifySlotOffer', () => {
+  test('the scheduling policy is bound into the signature: a capacity offer never verifies as legacy and vice versa', () => {
+    const legacy = signSlotOffer(OFFER);
+    const capacity = signSlotOffer({ ...OFFER, policy: CAPACITY_OFFER_POLICY }, legacy.exp - SLOT_OFFER_TTL_MS);
+    expect(capacity.exp).toBe(legacy.exp);
+    expect(capacity.sig).not.toBe(legacy.sig);
+    expect(verifySlotOffer({ ...OFFER, exp: legacy.exp, policy: CAPACITY_OFFER_POLICY }, capacity.sig)).toBe(true);
+    expect(verifySlotOffer({ ...OFFER, exp: legacy.exp }, capacity.sig)).toBe(false);
+    expect(verifySlotOffer({ ...OFFER, exp: legacy.exp, policy: CAPACITY_OFFER_POLICY }, legacy.sig)).toBe(false);
+  });
+
+  test('an omitted or empty policy leaves the legacy canonical string unchanged', () => {
+    const now = Date.now();
+    const plain = signSlotOffer(OFFER, now);
+    expect(signSlotOffer({ ...OFFER, policy: undefined }, now).sig).toBe(plain.sig);
+    expect(signSlotOffer({ ...OFFER, policy: '' }, now).sig).toBe(plain.sig);
+    expect(signSlotOffer({ ...OFFER, policy: null }, now).sig).toBe(plain.sig);
+  });
+
   test('a freshly signed offer verifies', () => {
     const { exp, sig } = signSlotOffer(OFFER);
     expect(verifySlotOffer({ ...OFFER, exp }, sig)).toBe(true);

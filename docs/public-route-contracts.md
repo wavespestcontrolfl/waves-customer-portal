@@ -88,12 +88,56 @@ provider legs or exact route coordinates. Scheduling traffic lookups share a
 40-request/800-element allowance per application process per 15 minutes across
 HTTP requests and fall back to the conservative model when exhausted; response
 data remains request-local. Gate-off availability is unchanged.
-Transactional reservation and route-order persistence belong to the following
-writer stage; this gate remains off until those writers are integrated.
+Catalog-sized estimate offers resolve the primary appointment allowance from
+`services.scheduling_duration_policy`; independent recurring companions do not
+enlarge that appointment, while one-time paid add-ons contribute shared work.
+Combined catalog allowances still require `GATE_VISIT_COMBINED_CAPACITY` and
+`GATE_SEPARATE_COMBO_VISITS`. Version-2 combined allowances follow service
+identity; version-1 members keep their 60-minute contract. Public offer/cache
+responses omit catalog identifiers, route internals and allocation stamps.
+Reservation and acceptance re-resolve catalog policies. Transactional catalog
+reads hold matched rows with FOR SHARE until the outer transaction ends, so
+catalog edits cannot overtake a validated allowance. Existing version-2 holds
+reject changed allowances with 409 `SLOT_UNAVAILABLE`, even after gate shutdown.
+Reservation creation prepares bounded route traffic outside the transaction,
+then takes the date occupancy lock and the selected-technician/unassigned day
+fences together in canonical order before row locks. It rechecks the signed
+offer, live route fingerprint, catalog allowance, eligibility and closure state
+before persisting the hold, certified route order and audit. Relevant route rows
+remain locked through persistence; a busy completion yields recoverable
+`SLOT_UNAVAILABLE`. Unrelated assigned technicians do not invalidate the proof;
+a concurrent move to unassigned is fenced. Completed stops retain their prefix.
+Capacity offers preserve the enabled south-zone day funnel and omit speculative
+ASAP expansion. Public acceptance and one-tap prepare route traffic before opening their write
+transaction, then acquire the date, selected-technician and unassigned fences
+before their first row lock. Commit verifies the prepared date/technician,
+current catalog allowance, live route, eligibility and closures; changed state
+returns recoverable `SLOT_UNAVAILABLE` without acceptance writes. One-tap
+preparation failures retain its existing pick-a-time recovery. Version-1 holds
+keep their legacy path, while version-2 holds retain certification and allowance
+checks after gate shutdown. Without combined allocation, excluded recurring
+companions and their follow-ups remain unassigned and without a promised window;
+they cannot inherit the certified primary trip. Version-2 primary-only holds
+preserve that separation even with `GATE_SEPARATE_COMBO_VISITS` off or capacity
+shut down. Version-2 parent allowances take precedence during follow-up seeding.
+Combined conversion stamps each member before seeding and preserves adjacent
+allocation order at the certified anchor, using a nonblocking day fence for
+callers already holding rows. A busy reorder aborts allocation for recovery.
+Capacity stays off until the other booking/dispatch writers and parent traffic
+prerequisites integrate.
+Phone-booking primary and follow-up inserts (owner ruling 2026-09-11, option 1)
+try the shared day fence — rung 1 date occupancy plus the tech-day or
+unassigned-day rung — with a bounded non-blocking wait (`CALL_BOOKING_FENCE_WAIT_MS`,
+default 1500 ms) before each insert. A granted fence makes the phone row visible
+to a concurrent route certification or lands it after that certification commits.
+A missed fence books exactly as before (unfenced, post-commit conflict check
+flags overlaps, the card records which insert missed its fence); the booking
+never fails, waits past the cap, or blocks on a lock. This stage still does
+not authorize enabling capacity.
 Existing request fields, token/signature guards, rate limits and privacy headers
 apply. With strict opt-in `GATE_VISIT_COMBINED_CAPACITY` and prerequisite
-`GATE_SEPARATE_COMBO_VISITS`, multi-service recurring selections reserve 60 minutes
-per physical service program. Termite rental and bond billing riders fold into
+`GATE_SEPARATE_COMBO_VISITS`, version-1 multi-service recurring selections reserve 60 minutes
+per physical service program; capacity-enabled selections use version-2 catalog allowances. Termite rental and bond billing riders fold into
 bait service; legacy supplements use the converter's physical-program rules.
 Unsupported families/cadences, recurring foam and commercial programs return
 409 `COMBINED_VISIT_UNAVAILABLE` before offering or holding combined work.
@@ -102,8 +146,8 @@ remains start plus 120 minutes. One assignable technician must have no selected
 service capability explicitly disabled. The allocation stamp is server-owned
 and excluded from public slot metadata. `/api/estimates/:token/accept` rechecks
 the selection, technician and full occupancy under existing locks, then converts
-the hold into separate sequential 60-minute service windows with independent
-cadences. Missing or unmatched members abort the transaction. A stamped hold
+the hold into independent programs: version-1 members use sequential 60-minute
+windows, and version-2 members use their catalog allowance at one arrival anchor. Missing or unmatched members abort the transaction. A stamped hold
 retains its capacity policy when the creation gate turns off. Shared-arrival
 reminder consumers use the persisted allocation, including with grouping off
 or Auto Pay enabled; invoice and Auto Pay policies remain unchanged), `/api/reports/:token/*` (the
@@ -152,8 +196,24 @@ older cached PDFs to match this evidence rule),
 the SPA `/recap/:token` "Your Visit, in Motion" recap player (token-gated; serves
 only an approved recap, consumes `/api/reports/:token/recap` + `/recap/video`,
 same noindex/no-referrer/no-store headers as `/report/:token`),
-`/api/stripe/webhook`, `/api/webhooks/twilio` (all Twilio inbound; the SMS
-operational extension runs after acknowledgment under
+`/api/stripe/webhook`, `/api/webhooks/twilio` (all Twilio inbound;
+`GATE_SMS_SPAM_CLASSIFIER=shadow` enables a bounded solicitation screen for
+unknown-sender SMS. Other values, including `true`, leave this stage off.
+Known primary/secondary/service-contact numbers, reactions, empty bodies,
+standalone carrier commands, and the AI assistant line bypass the classifier.
+Natural-language consent requests never wait on the model; only deterministic
+pitch evidence, such as a vendor footer, may be recorded for those messages.
+The unified inbox message is durably saved before screening. A failed unified
+save or relationship lookup bypasses screening and preserves ordinary handling;
+model failures record a failed non-solicitation verdict. The 3.5-second model
+budget uses the shared dispatcher.
+Shadow verdicts (`solicitation`, `confidence`, `method`, `version`, `mode`)
+are stored under `metadata.spam_verdict` on unified messages and ordinary or
+natural-language opt-out `sms_log` rows. Verdict attachment merges metadata on
+the saved unified row. Read state, opt-out suppression,
+TwiML replies, notifications, estimator routing, and provider request/auth
+contracts retain their existing behavior. No enforcement is available in
+this stage. The SMS operational extension runs after acknowledgment under
 `GATE_SMS_OPERATIONAL_ACTIONS` plus an explicit activation timestamp;
 it reuses persisted SMS evidence for private profile updates and admin
 notifications, with no additional response fields or customer sends;
@@ -162,7 +222,17 @@ create customer/account rows or guess a customer name from message prose.
 Substantive messages ring a per-message `new_lead` bell/push linking to the
 inbox; reactions, empty messages and courtesy-only replies do not;
 ordinary inbound SMS is persisted before reschedule or lead-intake consumption,
-including replies that return early. Failure to persist that source returns
+including replies that return early. STOP/HELP/START handling (opt-out
+suppression + the `<Message>` confirmation TwiML) applies only to a sender
+Waves has messaged: a matched customer, the AI assistant line, a
+provider-accepted outbound `sms_log`/unified `messages` row (excluding
+operator alerts — by current phone AND by a durable `to_owner_phone_at_send`
+send-time stamp, so a later ADAM_PHONE change can't un-exclude a historical
+alert — the AI assistant's own auto-replies, and push-only touchpoints;
+unified fallback requires a Twilio message SID and phone identities preserve
+country codes), or an active
+`messaging_suppression` row; any other sender's text is ordinary inbound
+(empty TwiML, no reply, no suppression). The eligibility lookup fails open. Failure to persist that source returns
 503 with empty TwiML before either consumer runs; the owned SID claim is
 released before that response. Twilio's configured retry/fallback policy
 governs redelivery),
@@ -170,8 +240,23 @@ governs redelivery),
 `/api/webhooks/twilio/outbound-dial-complete` (POST; machine-to-machine
 callbacks under the existing Twilio-signature-validated mount. The shared
 press-1 `/outbound-connect` bridge adds `<Number machineDetection="Enable">`
-and the `<Dial action>` only with `GATE_OUTBOUND_VOICEMAIL_SMS=true`, excluding
-technician caller-ID lines. Query context is `callLogId`, `customerNumber`,
+with `GATE_OUTBOUND_VOICEMAIL_SMS=true`, excluding technician caller-ID lines.
+The `<Dial action>` is also added only for an actual callback attempt: the
+persisted bridge row links a callback commitment or was placed under the card
+policy (`metadata.callback_policy = card`, stamped on the existing Call Log
+callback action too), read whatever the gate says, so ordinary admin bridges
+keep the pre-lane shape and a card bridge keeps its evidence after rollback
+before staff press 1. Both lanes use this one completion
+route. Signed terminal child-leg results with a valid duration and SID record
+the first `metadata.customer_leg` on an outbound row matching the call-log UUID,
+parent CallSid and a validated callback link (the card's commitment link, or
+the existing call-log callback's source-call link). If its parent SID backfill
+failed, the signed completion atomically adopts the missing SID on that
+server-linked outbound row. An existing different SID cannot be replaced.
+Retries cannot replace that
+evidence; a failed write returns 503 for provider retry. In-flight results
+remain accepted after gate rollback. This records evidence without closing a
+commitment; fulfillment requires a valid non-voicemail extraction as well. Query context is `callLogId`, `customerNumber`,
 and `callerIdNumber`, generated by the bridge and covered by the signature.
 AMD accepts the child `CallSid`, `AnsweredBy`, and `MachineDetectionDuration`.
 It records the verdict and responds 200; only a `machine_*` verdict can
@@ -825,6 +910,9 @@ Router-wide url-safe 15-64 token param gate (generic 404, prod-verified
 against all live tokens 2026-08-07); accept/decline carry a 10/hr
 limiter — the two heaviest public money-adjacent writes; select-tier/
 preferences ride estimateToggleLimiter, data/pdf ride dataLimiter).
+Authored commercial proposals expose reviewed four-decimal quantities and unit
+rates, explicit unit labels and cent-rounded line amounts through the existing
+normalized proposal and document output. These additions do not widen draft access.
 The `/estimate/:token?website=1` SPA uses the website's compact pricing →
 scheduling → Auto Pay presentation over these same APIs. `embed=1` permits
 framing only while `GATE_WEBSITE_QUOTE_BOOKING` is on and only from the

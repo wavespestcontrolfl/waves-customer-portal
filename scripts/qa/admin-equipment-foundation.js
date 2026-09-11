@@ -1,5 +1,5 @@
 "use strict";
-/* global document, localStorage, navigator, getComputedStyle, innerWidth, requestAnimationFrame, history, window */
+/* global document, localStorage, navigator, getComputedStyle, innerWidth, requestAnimationFrame, history, window, MutationObserver */
 const assert = require("node:assert/strict"),
   fs = require("node:fs"),
   path = require("node:path");
@@ -128,6 +128,17 @@ const system = {
   active_linked_equipment_ids: [id],
   primary_equipment: equipment,
   component_assets: [],
+};
+const taxRegisterAsset = {
+  id: "tax-asset-example",
+  name: equipment.name,
+  asset_category: "vehicle",
+  active: true,
+  disposed: false,
+  purchase_cost: equipment.purchase_price,
+  current_book_value: equipment.book_value,
+  serial_number: equipment.serial_number,
+  make_model: `${equipment.make} ${equipment.model}`,
 };
 function fixtures(state) {
   return new Map([
@@ -285,8 +296,10 @@ function fixtures(state) {
         ],
         fleet_totals: {
           total_miles: 100,
+          business_miles: 90,
           total_fuel_cost: 20,
           total_irs_deduction: 63,
+          total_jobs: 3,
         },
       }),
     ],
@@ -306,7 +319,7 @@ function fixtures(state) {
       "GET /api/admin/equipment-systems/reconciliation",
       () => ({
         systems: [system],
-        equipment: [equipment],
+        equipment: [{ ...equipment, tax_register: taxRegisterAsset }],
         issues: [],
         summary: {
           systems_with_any_equipment_link: 1,
@@ -337,6 +350,33 @@ function fixtures(state) {
 async function install(page, server, state) {
   const handlers = fixtures(state);
   await page.addInitScript(() => {
+    // Toasts live for 3.5s and a second toast can be cleared early by the
+    // first one's timer, so record every status render instead of racing it.
+    window.__toasts = [];
+    const record = (node, type) => {
+      if (!node || node.nodeType !== 1) return;
+      const found = node.matches?.('[role="status"]') ? [node] : [];
+      node.querySelectorAll?.('[role="status"]').forEach((n) => found.push(n));
+      for (const el of found) {
+        const text = (el.textContent || "").trim();
+        if (text) window.__toasts.push({ text, type, at: Date.now() });
+      }
+    };
+    const observe = () =>
+      new MutationObserver((records) => {
+        for (const entry of records) {
+          entry.addedNodes.forEach((n) => record(n, "shown"));
+          entry.removedNodes.forEach((n) => record(n, "removed"));
+          if (entry.type === "characterData")
+            record(entry.target.parentElement, "shown");
+        }
+      }).observe(document.documentElement, {
+        childList: true,
+        subtree: true,
+        characterData: true,
+      });
+    if (document.documentElement) observe();
+    else document.addEventListener("DOMContentLoaded", observe);
     localStorage.setItem("waves_admin_token", "synthetic-token");
     // Chromium can let keepalive fetches outlive Playwright interception.
     // Drop synthetic auth before the app's pagehide usage-beacon listener.
@@ -686,7 +726,7 @@ async function section(page, group, leaf) {
 }
 async function fleetDetail(page) {
   await page
-    .getByRole("button", { name: "Open " + equipment.name, exact: true })
+    .getByRole("button", { name: new RegExp("^Expand .*" + equipment.name) })
     .click();
   await page
     .getByRole("button", { name: "Record Maintenance", exact: true })
@@ -748,6 +788,17 @@ async function views(page, server, state, report, device) {
   ]) {
     await section(page, group, leaf);
     await capture(page, state, report, device, key);
+    const rendered = await page.locator("main").innerText();
+    assert.ok(!/\bNaN\b/.test(rendered), `${key} view renders without NaN`);
+    if (key === "analytics") {
+      const fleetTotalsRow = page.getByRole("row", { name: /Fleet Totals/ });
+      assert.equal(await fleetTotalsRow.count(), 1, "Fleet totals row is rendered");
+      const cells = await fleetTotalsRow.locator("td").allInnerTexts();
+      assert.ok(
+        cells.every((cell) => cell.trim().length > 0),
+        "Fleet totals row has no blank cells",
+      );
+    }
     console.log(device + ": " + key);
   }
   const chart = page.getByRole("region", { name: "Monthly maintenance costs chart", exact: true });
@@ -803,6 +854,16 @@ async function views(page, server, state, report, device) {
   await shot(page, report, device + "-verify-calibration-actions",
     page.getByRole("button", { name: "Mark Field Verified", exact: true }));
   await mileageHeader(page, server, state, report, device);
+}
+async function toast(page, text) {
+  await page.waitForFunction(
+    (expected) =>
+      (window.__toasts || []).some(
+        (entry) => entry.type === "shown" && entry.text.includes(expected),
+      ),
+    text,
+    { timeout: 15000 },
+  );
 }
 async function fillFields(page, fields) {
   for (const [label, value] of Object.entries(fields))
@@ -881,10 +942,7 @@ async function writes(page, server, state, report, device) {
     notes: "Synthetic asset draft",
   });
   await dialog.waitFor({ state: "hidden" });
-  await page
-    .getByRole("status")
-    .filter({ hasText: "Equipment added" })
-    .waitFor();
+  await toast(page, "Equipment added");
   await page.getByRole("button", { name: "Edit", exact: true }).click();
   await page
     .getByLabel("Name *", { exact: true })
@@ -903,10 +961,7 @@ async function writes(page, server, state, report, device) {
   );
   assert.deepEqual(updated, { ...equipment, name: "Example updated truck" });
   await dialog.waitFor({ state: "hidden" });
-  await page
-    .getByRole("status")
-    .filter({ hasText: "Equipment updated" })
-    .waitFor();
+  await toast(page, "Equipment updated");
 
   await section(page, "Tank Mixes");
   const recalculated = await retryWrite(
@@ -922,10 +977,7 @@ async function writes(page, server, state, report, device) {
     },
   );
   assert.equal(recalculated, null);
-  await page
-    .getByRole("status")
-    .filter({ hasText: "Costs recalculated" })
-    .waitFor();
+  await toast(page, "Costs recalculated");
 
   await section(page, "Maintenance");
   const resolved = await retryWrite(
@@ -981,7 +1033,15 @@ async function writes(page, server, state, report, device) {
     },
     async () => {
       assert.equal(await page.getByRole("button", { name: "Cancel", exact: true }).isDisabled(), true);
-      assert.equal(await page.getByRole("button", { name: `Open ${equipment.name}`, exact: true }).isDisabled(), true);
+      assert.equal(
+        await page
+          .getByRole("button", {
+            name: new RegExp("^(Expand|Collapse) .*" + equipment.name),
+          })
+          .isDisabled(),
+        true,
+        "Card toggle disabled while a form save is pending",
+      );
     },
   );
   assert.deepEqual(maintenance, {
@@ -1004,10 +1064,7 @@ async function writes(page, server, state, report, device) {
     followUpDate: null,
     warrantyClaim: false,
   });
-  await page
-    .getByRole("status")
-    .filter({ hasText: "Maintenance recorded" })
-    .waitFor();
+  await toast(page, "Maintenance recorded");
   await page.getByRole("button", { name: "Log Mileage", exact: true }).click();
   assert.equal(
     await page
@@ -1046,7 +1103,15 @@ async function writes(page, server, state, report, device) {
     },
     async () => {
       assert.equal(await page.getByRole("button", { name: "Cancel", exact: true }).isDisabled(), true);
-      assert.equal(await page.getByRole("button", { name: `Open ${equipment.name}`, exact: true }).isDisabled(), true);
+      assert.equal(
+        await page
+          .getByRole("button", {
+            name: new RegExp("^(Expand|Collapse) .*" + equipment.name),
+          })
+          .isDisabled(),
+        true,
+        "Card toggle disabled while a form save is pending",
+      );
     },
   );
   assert.deepEqual(logged, {
@@ -1061,10 +1126,7 @@ async function writes(page, server, state, report, device) {
     notes: "Synthetic mileage draft",
     source: "manual",
   });
-  await page
-    .getByRole("status")
-    .filter({ hasText: "Mileage logged" })
-    .waitFor();
+  await toast(page, "Mileage logged");
 
   await section(page, "Maintenance", "Calibrations");
   const saveCalibration = page.getByRole("button", {
@@ -1172,6 +1234,7 @@ async function writes(page, server, state, report, device) {
   });
   await verifyCalibration.waitFor({ state: "hidden" });
   await page.getByText("Field verified", { exact: true }).waitFor();
+  state.toasts = await page.evaluate(() => window.__toasts || []);
 }
 async function analyticsIndependence(page, server, state) {
   for (const key of [

@@ -6,16 +6,20 @@ jest.mock('../config', () => ({ twilio: { accountSid: 'AC_test', authToken: 'aut
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../services/call-recording-processor', () => ({ processRecording: jest.fn(), quarantineCardRecording: jest.fn(() => Promise.resolve()) }));
 jest.mock('../services/conversations', () => ({ syncVoiceMessageForCall: jest.fn(() => Promise.resolve(true)) }));
-jest.mock('../config/feature-gates', () => ({ isEnabled: jest.fn(() => true) }));
+jest.mock('../config/feature-gates', () => ({ isEnabled: jest.fn(() => true), gateEnvValue: jest.fn(() => false) }));
 jest.mock('../services/sms-operational-actions', () => ({
   smsCommitmentsEnabled: jest.fn(() => false), listSmsCommitments: jest.fn(async () => []), applySmsCommitmentUpdate: jest.fn(),
 }));
 jest.mock('../services/call-intelligence', () => ({ loadCallIntelligence: jest.fn() }));
+jest.mock('../services/callback-cards', () => ({
+  enabled: jest.fn(() => false), prepareCallbackCards: jest.fn(), decorateCallbackRows: jest.fn(async (_db, rows) => rows), actOnCallback: jest.fn(),
+}));
 jest.mock('../services/call-commitments', () => ({
   applyHumanUpdate: jest.fn(),
   addHumanCommitment: jest.fn(),
   listOpenCommitments: jest.fn(),
   refreshFulfillment: jest.fn(() => Promise.resolve({ fulfilled: 0 })),
+  COMMITMENT_KINDS: ['callback', 'send_estimate', 'send_report'],
   OVERDUE_IMPLICIT_DAYS: 3,
   OVERDUE_IMPLICIT_ESTIMATE_HOURS: 24,
 }));
@@ -88,6 +92,73 @@ beforeEach(() => {
   mockRole = 'admin';
   isEnabled.mockReturnValue(true);
   require('../services/sms-operational-actions').smsCommitmentsEnabled.mockReturnValue(false);
+  require('../services/callback-cards').enabled.mockReturnValue(false);
+});
+
+describe('callback actions use the commitment PATCH endpoint', () => {
+  test.each([
+    { action: 'snooze', snooze: 'two_hours' },
+    { action: 'edit', description: 'Call after lunch', due_at: null, note: 'Customer asked' },
+  ])('forwards the complete $action payload and displayed version', async (payload) => {
+    const cards = require('../services/callback-cards');
+    cards.enabled.mockReturnValue(true);
+    cards.actOnCallback.mockResolvedValue({ id: COMMIT_ID });
+    mockDb([{ kind: 'callback', party: 'waves', call_log_id: CALL_ID }]);
+    const expected_at = new Date().toISOString();
+    await withServer(async (base) => {
+      const response = await fetch(`${base}/admin/call-recordings/commitments/${COMMIT_ID}`, {
+        method: 'PATCH', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ...payload, expected_at }),
+      });
+      expect(response.status).toBe(200);
+      expect(await response.json()).toEqual({ commitment: { id: COMMIT_ID } });
+    });
+    expect(cards.actOnCallback).toHaveBeenCalledWith(db, COMMIT_ID,
+      expect.objectContaining({ ...payload, actorId: 'tech-1', expectedAt: expected_at }));
+    expect(commitments.applyHumanUpdate).not.toHaveBeenCalled();
+  });
+});
+
+describe('GET /commitments/open — the callback lane', () => {
+  test('kind=callback narrows the canonical feed and returns owner projections with the actor', async () => {
+    const cards = require('../services/callback-cards');
+    cards.enabled.mockReturnValue(true);
+    const rows = ['callback-1', 'callback-2'].map((id) => ({ id, call_log_id: CALL_ID, kind: 'callback', party: 'waves', overdue: false }));
+    commitments.listOpenCommitments.mockResolvedValue(rows);
+    cards.decorateCallbackRows.mockImplementationOnce(async (_db, page) => page.map((r) => ({ ...r, owner_name: 'Sam', owner_active: true })));
+    await withServer(async (base) => {
+      const res = await fetch(`${base}/admin/call-recordings/commitments/open?party=waves&kind=callback`);
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      expect(body.callbacks_enabled).toBe(true);
+      expect(body.actor_id).toBe('tech-1');
+      expect(body.commitments.map((r) => r.owner_name)).toEqual(['Sam', 'Sam']);
+      expect(body.next_offset).toBeNull();
+    });
+    expect(commitments.listOpenCommitments).toHaveBeenCalledWith(db, expect.objectContaining({ party: 'waves', kind: 'callback' }));
+    expect(cards.decorateCallbackRows).toHaveBeenCalledWith(db, rows);
+    expect(commitments.refreshFulfillment).toHaveBeenCalledWith(db, CALL_ID);
+  });
+
+  test('an unknown kind is rejected before any query', async () => {
+    await withServer(async (base) => {
+      const res = await fetch(`${base}/admin/call-recordings/commitments/open?kind=telepathy`);
+      expect(res.status).toBe(400);
+    });
+    expect(commitments.listOpenCommitments).not.toHaveBeenCalled();
+    expect(db).not.toHaveBeenCalled();
+  });
+
+  test('a disabled callback lane reports itself without decorating rows', async () => {
+    const cards = require('../services/callback-cards');
+    commitments.listOpenCommitments.mockResolvedValue([]);
+    await withServer(async (base) => {
+      const res = await fetch(`${base}/admin/call-recordings/commitments/open?kind=callback`);
+      expect(res.status).toBe(200);
+      expect((await res.json()).callbacks_enabled).toBe(false);
+    });
+    expect(cards.decorateCallbackRows).toHaveBeenCalledWith(db, []);
+  });
 });
 
 describe('GET /calls/:id/intelligence', () => {
@@ -150,11 +221,15 @@ describe('GET /commitments/open — the Owed queue', () => {
       expect(body.enabled).toBe(true);
     });
     // limit + 1: the probe row behind has_more.
-    expect(commitments.listOpenCommitments).toHaveBeenCalledWith(db, { party: 'waves', customerId: CUSTOMER_ID, leadId: null, limit: 51, offset: 0, includeHints: false });
+    expect(commitments.listOpenCommitments).toHaveBeenCalledWith(db, { party: 'waves', kind: null, customerId: CUSTOMER_ID, leadId: null, limit: 51, offset: 0, includeHints: false, prepare: true });
     // hints=0: the refresh candidates come from the UNFILTERED page, so a
     // hint the facts no longer support gets cleared instead of hiding the
     // row for good.
-    expect(commitments.listOpenCommitments).toHaveBeenCalledWith(db, { party: 'waves', customerId: CUSTOMER_ID, leadId: null, limit: 51, offset: 0, includeHints: true });
+    // Undated callbacks are prepared by the FIRST read only; the unfiltered
+    // candidate read and any re-list after a refresh must not staff new
+    // deadlines that reorder rows ahead of the page already selected.
+    expect(commitments.listOpenCommitments).toHaveBeenCalledWith(db, { party: 'waves', kind: null, customerId: CUSTOMER_ID, leadId: null, limit: 51, offset: 0, includeHints: true, prepare: false });
+    expect(commitments.listOpenCommitments.mock.calls.filter(([, o]) => o.prepare)).toHaveLength(1);
     expect(commitments.refreshFulfillment).toHaveBeenCalledWith(db, CALL_ID);
     expect(commitments.listOpenCommitments).toHaveBeenCalledTimes(3);
   });

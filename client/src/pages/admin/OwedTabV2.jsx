@@ -8,6 +8,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Badge, Button, Select, cn } from "../../components/ui";
 import { adminFetch, isRateLimitError } from "../../utils/admin-fetch";
+import AdminFollowThroughCards from "../../components/admin/AdminFollowThroughCards";
 
 const KIND_LABEL = {
   send_estimate: "Send estimate",
@@ -37,6 +38,12 @@ function fmtWhen(value, withTime = true) {
   });
 }
 
+// Card summary when the cards are not on screen, and the deadline policy
+// sentence per the server's callback-cards flag.
+const NO_CARDS = { open: 0, overdue: 0, hasMore: false };
+const CALLBACK_POLICY = { true: "after four staffed hours (office hours and blackout dates apply)", false: "after the day of the call" };
+const MORE_MARK = { true: "+", false: "" };
+
 function humanize(value) {
   return value ? String(value).replace(/_/g, " ") : "";
 }
@@ -49,19 +56,28 @@ export function whoLabel(row) {
 }
 
 export function isOverdueNow(row, now = Date.now()) {
-  return Boolean(row.overdue) || (Boolean(row.due_at) && new Date(row.due_at).getTime() < now);
+  const due = row.effective_due_at || row.due_at;
+  return Boolean(row.overdue) || (Boolean(due) && new Date(due).getTime() < now);
 }
 
 export function dueLabel(row, now = Date.now()) {
+  // effective_due_at is the server's judged deadline: the staffed one,
+  // pushed out to the end of an active snooze.
+  const due = row.effective_due_at || row.due_at;
   // A human-recorded promise is open since it was RECORDED — the instant its
   // implicit deadline ages from — not since a call that may be weeks older.
   const openSince = row.source === "human" ? row.created_at : (row.call_started_at || row.created_at);
   // The server's overdue flag is a snapshot; a stated deadline that passed
   // while the tab stayed open is overdue NOW (Codex #3725 r19 P2).
-  if (isOverdueNow(row, now)) return { text: row.due_at ? `Overdue · was due ${fmtWhen(row.due_at)}` : `Overdue · open since ${fmtWhen(openSince, false)}`, tone: "alert" };
-  if (row.due_at) {
-    const soon = new Date(row.due_at).getTime() - now < 24 * 60 * 60 * 1000;
-    return { text: `Due ${fmtWhen(row.due_at)}`, tone: soon ? "strong" : "neutral" };
+  if (isOverdueNow(row, now)) return { text: due ? `Overdue · was due ${fmtWhen(due)}` : `Overdue · open since ${fmtWhen(openSince, false)}`, tone: "alert" };
+  // A snooze label only when the snooze IS the judged deadline; a snooze
+  // that ends before the deadline changes nothing about when work is due.
+  if (row.snoozed_until && due && new Date(row.snoozed_until).getTime() === new Date(due).getTime() && new Date(due).getTime() > now) {
+    return { text: `Snoozed until ${fmtWhen(row.snoozed_until)}`, tone: "neutral" };
+  }
+  if (due) {
+    const soon = new Date(due).getTime() - now < 24 * 60 * 60 * 1000;
+    return { text: `Due ${fmtWhen(due)}`, tone: soon ? "strong" : "neutral" };
   }
   return { text: "No due time", tone: "neutral" };
 }
@@ -69,7 +85,11 @@ export function dueLabel(row, now = Date.now()) {
 export default function OwedTabV2() {
   const [party, setParty] = useState("waves");
   const [showHints, setShowHints] = useState(true);
-  const [state, setState] = useState({ status: "loading", rows: [], error: null, implicitDays: null, implicitEstimateHours: null, enabled: true, hasMore: false, nextOffset: null });
+  // The shared callback cards above the list: shown only while the selected
+  // party includes Waves, filtered by the same hints toggle, counted with the
+  // list so the summary reflects everything on screen.
+  const [cardSummary, setCardSummary] = useState({ enabled: false, open: 0, overdue: 0, hasMore: false });
+  const [state, setState] = useState({ status: "loading", rows: [], error: null, implicitDays: null, implicitEstimateHours: null, callbacksEnabled: false, enabled: true, hasMore: false, nextOffset: null });
   const [loadingMore, setLoadingMore] = useState(false);
   // A minute tick so a deadline that passes while the tab is open re-renders
   // as overdue without a reload.
@@ -91,7 +111,7 @@ export default function OwedTabV2() {
       params.set("limit", "200");
       const body = await adminFetch(`/admin/call-recordings/commitments/open?${params.toString()}`);
       if (seq !== requestSeq.current) return;
-      setState({ status: "ready", rows: body.commitments || [], error: null, implicitDays: body.overdue_implicit_days ?? null, implicitEstimateHours: body.overdue_implicit_estimate_hours ?? null, enabled: body.enabled !== false, hasMore: body.has_more === true, nextOffset: body.next_offset ?? null });
+      setState({ status: "ready", rows: body.commitments || [], error: null, implicitDays: body.overdue_implicit_days ?? null, implicitEstimateHours: body.overdue_implicit_estimate_hours ?? 24, callbacksEnabled: body.callbacks_enabled === true, enabled: body.enabled !== false, hasMore: body.has_more === true, nextOffset: body.next_offset ?? null });
     } catch (err) {
       if (seq !== requestSeq.current) return;
       setState((s) => ({
@@ -137,7 +157,7 @@ export default function OwedTabV2() {
     if (busyId) return;
     setBusyId(row.id);
     try {
-      await adminFetch(`/admin/call-recordings/commitments/${encodeURIComponent(row.id)}`, { method: "PATCH", body: JSON.stringify({ action }) });
+      await adminFetch(`/admin/call-recordings/commitments/${encodeURIComponent(row.id)}`, { method: "PATCH", body: JSON.stringify({ action, expected_at: row.updated_at }) });
       await loadRef.current();
     } catch (err) {
       setState((s) => ({ ...s, error: err.message || "That change did not save." }));
@@ -157,11 +177,20 @@ export default function OwedTabV2() {
     else window.location.hash = next;
   };
 
-  const rows = state.rows;
-  const overdueCount = rows.filter((r) => isOverdueNow(r, now)).length;
+  // While callback cards are on, the cards above own Waves' callbacks; the
+  // ledger list keeps every other promise. The cards' own successful load
+  // decides that (not this feed's flag): if the card request fails, the
+  // ledger rows stay visible rather than vanishing behind a card error.
+  const cardsShown = party !== "customer" && cardSummary.enabled;
+  const cards = cardsShown ? cardSummary : NO_CARDS;
+  const rows = state.rows.filter((r) => !cardsShown || r.kind !== "callback" || r.party !== "waves");
+  const openCount = rows.length + cards.open;
+  const overdueCount = rows.filter((r) => isOverdueNow(r, now)).length + cards.overdue;
+  const moreMark = MORE_MARK[state.hasMore || cards.hasMore];
 
   return (
     <div className="space-y-3">
+      {party !== "customer" && <AdminFollowThroughCards hints={showHints} onSummary={setCardSummary} />}
       <div className="flex flex-wrap items-center gap-2">
         <Select aria-label="Whose promises" value={party} onChange={(e) => setParty(e.target.value)} className="h-11 md:h-9">
           <option value="waves">Waves promised</option>
@@ -173,8 +202,8 @@ export default function OwedTabV2() {
           Show possibly-kept
         </label>
         <span className="text-13 md:text-12 text-ink-tertiary">
-          {state.status === "ready" ? `${rows.length}${state.hasMore ? "+" : ""} open${overdueCount ? ` · ${overdueCount} overdue` : ""}` : ""}
-          {state.implicitDays != null && party !== "customer" ? ` · with no due time, an estimate is overdue after ${state.implicitEstimateHours ?? 24} hours, a callback after the day of the call, other promises after ${state.implicitDays} days` : ""}
+          {state.status === "ready" ? `${openCount}${moreMark} open${overdueCount ? ` · ${overdueCount} overdue` : ""}` : ""}
+          {state.implicitDays != null && party !== "customer" ? ` · with no due time, an estimate is overdue after ${state.implicitEstimateHours} hours, a callback ${CALLBACK_POLICY[state.callbacksEnabled]}, other promises after ${state.implicitDays} days` : ""}
         </span>
         <Button size="sm" variant="ghost" onClick={load} disabled={state.status === "loading"}>Refresh</Button>
       </div>
@@ -191,7 +220,7 @@ export default function OwedTabV2() {
       {state.status === "ready" && state.enabled === false && (
         <div className="text-13 md:text-12 text-ink-tertiary">Commitments are recorded and settled only while GATE_CALL_COMMITMENTS is on; rows already recorded stay visible.</div>
       )}
-      {state.status === "ready" && rows.length === 0 && (
+      {state.status === "ready" && rows.length === 0 && !cards.open && (
         <div className="text-14 md:text-13 text-ink-secondary py-6 text-center">
           Nothing owed. Every promise on record is kept, dismissed, or not yet detected.
         </div>

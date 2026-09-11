@@ -140,6 +140,9 @@ const ACTIONABLE_COMMS_FAILED = new Set(['completion_sms_failed']);
 const TRANSIENT_DELIVERY_REASONS = new Set([
   'awaiting_completion', 'report_not_published', 'delivery_queued', 'delivery_sending',
   'project_delivery_sending', 'project_report_on_hold', 'recap_sms_in_flight',
+  // A combined-visit summary leg still claimed or awaiting the packet replay
+  // is owned by the recovery worker until it reaches a terminal outcome.
+  'visit_summary_delivery_pending',
 ]);
 
 // The five MAPPED facts are readable — probes outside them (billing,
