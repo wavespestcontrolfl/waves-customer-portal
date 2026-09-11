@@ -406,6 +406,7 @@ function deliverArrival(channel, ctx) {
 }
 
 const TwilioService = {
+  isKnownOwnerPhone,
   // =========================================================================
   // PHONE VERIFICATION (Login via OTP)
   // =========================================================================
@@ -929,6 +930,19 @@ const TwilioService = {
       // Log to sms_log (legacy) AND dual-write to unified messages.
       // PR 2 cuts the inbox read path over to messages; sms_log stays as
       // long as anything still queries it (scheduled-SMS queue, BI scripts).
+      // An explicit internal_alert/admin_alert send to a known owner phone
+      // never reaches here (redirectInternalAdminSmsToNotification above
+      // diverts it to a bell/push instead) — so a row landing here with an
+      // owner-phone recipient is always an UNTYPED alert (e.g. the office
+      // satisfaction-request text) that would otherwise pass the compliance
+      // gate's message_type exclusion. Stamp that provenance durably, at
+      // send time, rather than leaving the compliance reader (twilio-webhook
+      // hasOutboundHistory) to re-derive it from the CURRENT owner-phone env
+      // vars: if ADAM_PHONE later changes and this number is reassigned, a
+      // read-time check would stop recognizing it as ever having been an
+      // operator alert and treat the row as ordinary customer-facing
+      // history (codex #4211 P2).
+      const sentToKnownOwnerPhone = isKnownOwnerPhone(to);
       try {
         await db("sms_log").insert({
           customer_id: options.customerId || null,
@@ -958,6 +972,7 @@ const TwilioService = {
           // the carrier verdict).
           metadata: JSON.stringify({
             pre_handoff_stamp: true,
+            ...(sentToKnownOwnerPhone ? { to_owner_phone_at_send: true } : {}),
             ...(options.media ? { media: options.media } : {}),
             ...(options.agentDecisionId ? { agent_decision_id: options.agentDecisionId } : {}),
             ...(Array.isArray(options.parkedDecisionIds) && options.parkedDecisionIds.length
@@ -983,6 +998,7 @@ const TwilioService = {
           media: options.media || explicitMedia,
           messageType: options.messageType || "manual",
           deliveryStatus: "sent",
+          ...(sentToKnownOwnerPhone ? { metadata: { to_owner_phone_at_send: true } } : {}),
         })
         .then((recorded) => {
           if (!recorded?.message) return null;

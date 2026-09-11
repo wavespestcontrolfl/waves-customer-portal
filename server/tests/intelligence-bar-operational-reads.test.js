@@ -124,3 +124,25 @@ test('call returned_count excludes internal calls omitted from the response', as
   expect(result.calls.map(row => row.id)).toEqual(['customer']);
   expect(result.returned_count).toBe(1);
 });
+
+test('customer list and duplicate readers skip soft-deleted rows', async () => {
+  // A website stub was soft-deleted minutes after intake, yet query_customers
+  // and find_duplicates kept listing it while get_customer_detail and
+  // update_customer refused it — the model chased a record no tool would touch.
+  db.__queries = [];
+  db.__rows = q => q.sql.includes('count(*)') ? [{ count: '1' }] : [{ id: 'fixture-customer' }];
+  const list = await executeTool('query_customers', { search: 'Unknown', limit: 1 });
+  expect(list.error).toBeUndefined();
+  const [rows, matched, total] = db.__queries;
+  expect(rows.sql).toContain('"customers"."deleted_at" is null');
+  expect(matched.sql).toContain('"customers"."deleted_at" is null');
+  expect(total.sql).toContain('"deleted_at" is null');
+
+  for (const match_on of ['phone', 'email', 'name_address']) {
+    db.__queries = [];
+    db.__rows = () => [];
+    const result = await executeTool('find_duplicates', { match_on });
+    expect(result.error).toBeUndefined();
+    expect(db.__queries[0].sql).toContain('"deleted_at" is null');
+  }
+});
