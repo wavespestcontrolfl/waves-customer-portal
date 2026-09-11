@@ -110,7 +110,7 @@ describe("Pest Pressure settings new UI foundation", () => {
   it("preserves recalculate and audited override actions", async () => {
     mount();
     await screen.findByText("Synthetic customer");
-    fireEvent.click(screen.getAllByRole("button", { name: "Recalculate" })[0]);
+    fireEvent.click(screen.getAllByRole("button", { name: "Recalc" })[0]);
     await waitFor(() => expect(fetch.mock.calls.some(([url, options]) =>
       url === "/api/admin/pest-pressure/scores/service-1/recalculate" && options?.method === "POST"
       && options.body === JSON.stringify({ clearOverride: false }))).toBe(true));

@@ -19,7 +19,6 @@ import {
   Card,
   CardBody,
   CardHeader,
-  CardTitle,
   Checkbox,
   Dialog,
   DialogBody,
@@ -72,7 +71,7 @@ function SectionHeading({ icon: Icon, label, description }) {
     <div>
       <div className="flex items-center gap-2">
         {Icon ? <Icon size={17} aria-hidden className="text-zinc-900" /> : null}
-        <CardTitle className="text-16">{label}</CardTitle>
+        <h2 className="text-16 leading-[1.4] font-medium text-zinc-900">{label}</h2>
       </div>
       {description ? (
         <p className="mt-1 text-ui-body text-ink-secondary">{description}</p>
@@ -96,21 +95,29 @@ function Toggle({ checked, onChange, label, description }) {
 }
 
 function NumberField({ value, onChange, min, max, step = 0.1, suffix, label }) {
+  // Main rendered the unit beside the input rather than folding it into the
+  // label text, so the visible label string stays 1:1. Field requires its
+  // single child to be the labelable control itself (it clones an id/htmlFor
+  // association onto it), so the suffix renders as a sibling instead of
+  // wrapping the Input in an extra div.
   return (
-    <Field label={suffix ? `${label} (${suffix})` : label}>
-      <Input
-        type="number"
-        value={value}
-        min={min}
-        max={max}
-        step={step}
-        onChange={(e) => {
-          const next = e.target.value === "" ? "" : Number(e.target.value);
-          onChange(next);
-        }}
-        className="u-nums"
-      />
-    </Field>
+    <div className={suffix ? "flex items-end gap-2" : undefined}>
+      <Field label={label} className={suffix ? "flex-1" : undefined}>
+        <Input
+          type="number"
+          value={value}
+          min={min}
+          max={max}
+          step={step}
+          onChange={(e) => {
+            const next = e.target.value === "" ? "" : Number(e.target.value);
+            onChange(next);
+          }}
+          className="u-nums"
+        />
+      </Field>
+      {suffix ? <span className="pb-2 text-ui-caption text-ink-secondary">{suffix}</span> : null}
+    </div>
   );
 }
 
@@ -717,7 +724,7 @@ export default function PestPressureSettingsPage() {
           {previewResult ? (
             <div className="mt-4 rounded-md border-hairline border-zinc-200 bg-zinc-50 p-4">
               <div className="flex flex-wrap items-center gap-3">
-                <div className="text-32 leading-none font-medium text-zinc-900 u-nums">
+                <div className="text-28 leading-none font-medium text-zinc-900 u-nums">
                   {previewResult.score === null ? "—" : previewResult.score.toFixed(1)}
                 </div>
                 <div className="text-ui-body text-ink-secondary">/ 5</div>
@@ -803,8 +810,8 @@ export default function PestPressureSettingsPage() {
                         <TD className="text-ink-secondary">{row.trend}</TD>
                         <TD>
                           {row.is_overridden
-                            ? <Pill tone="warning"><ShieldAlert size={14} aria-hidden /> Override</Pill>
-                            : <Pill tone="neutral">Calculated</Pill>}
+                            ? <Pill tone="warning"><ShieldAlert size={14} aria-hidden /> override</Pill>
+                            : <Pill tone="neutral">calc</Pill>}
                         </TD>
                         <TD>
                           <div className="flex flex-wrap gap-2">
@@ -814,7 +821,7 @@ export default function PestPressureSettingsPage() {
                             onClick={() => handleRecalculate(row, false)}
                             title="Re-run the engine with current source data"
                           >
-                            <RefreshCw size={15} aria-hidden /> Recalculate
+                            <RefreshCw size={15} aria-hidden /> Recalc
                           </Button>
                           {row.is_overridden ? (
                             <Button

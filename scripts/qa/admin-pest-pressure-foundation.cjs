@@ -166,7 +166,7 @@ async function main() {
     });
 
     await scenario('record recalculate and override preserve audited mutations', async () => {
-      await desktop.getByRole('button', { name: 'Recalculate' }).first().click();
+      await desktop.getByRole('button', { name: 'Recalc' }).first().click();
       await desktop.getByRole('button', { name: 'Override', exact: true }).click();
       const dialog = desktop.getByRole('dialog', { name: 'Override Pest Pressure score' });
       await dialog.waitFor();
