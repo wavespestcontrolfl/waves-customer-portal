@@ -420,7 +420,13 @@ function parseCompletionReviewDelayMinutes(body = {}) {
     Object.prototype.hasOwnProperty.call(body, 'reviewScheduledFor');
   if (!hasExplicitTiming) return undefined;
 
-  if (body.reviewTiming === 'now') return 0;
+  // "Automatic (recommended)" = no operator override: legacy 120-min separate
+  // ask (never bundled), cadence smart send window (calculateReviewSendPlan).
+  if (body.reviewTiming === 'auto') return undefined;
+  // 'now' is the legacy value (still posted by the one-time recap path);
+  // 'customer_requested' is the panel's "Customer asked for the link" — same
+  // timing (next cadence tick), plus the request is recorded on the sequence.
+  if (body.reviewTiming === 'now' || body.reviewTiming === 'customer_requested') return 0;
   if (body.reviewTiming === 'tomorrow_8') {
     const targetDay = etDateString(addETDays(new Date(), 1));
     const target = parseETDateTime(`${targetDay}T08:00`);
@@ -2529,8 +2535,24 @@ async function completeScheduledService(completionInput, packetContext = null) {
     let preCommitCompletionPhotoRows = [];
     const promotedPhotoIds = new Set();
     let completionReviewDelayMinutes;
+    let customerRequestedReview = null;
     try {
       completionReviewDelayMinutes = parseCompletionReviewDelayMinutes(completionInput.body || {});
+      // The timing selector can be retained after the review checkbox is
+      // cleared or a client suppression turns the ask off; the stamp must not
+      // claim the customer asked when nothing was authorized (codex #4140
+      // r23 P2). parseCompletionReviewDelayMinutes is null without
+      // requestReview, so a real customer request is exactly delay 0 here.
+      const clientSuppressesReview = !!reviewSuppression && reviewSuppression !== 'invoice_created';
+      if (completionInput.body?.reviewTiming === 'customer_requested'
+        && completionReviewDelayMinutes === 0 && !clientSuppressesReview) {
+        customerRequestedReview = {
+          by: completionInput.actor?.technicianId || null,
+          byName: completionInput.actor?.technician?.name || null,
+          at: new Date().toISOString(),
+          source: 'completion_panel',
+        };
+      }
     } catch (timingErr) {
       // A committed chain replays an immutable body, and by the time a
       // retry lands its custom reviewScheduledFor can legitimately be in
@@ -4726,6 +4748,13 @@ async function completeScheduledService(completionInput, packetContext = null) {
       waveguardManagerApproval = resumedStructuredNotes.waveguardManagerApproval || null;
       waveguardCalibrationAdvisory = resumedStructuredNotes.waveguardCalibrationAdvisory || null;
       waveguardInventoryAdvisory = resumedStructuredNotes.waveguardInventoryAdvisory || null;
+      // "Customer asked for the link" was frozen with the record — a resumed
+      // retry (possibly another operator, later) must not re-stamp who/when
+      // (codex #4140 r2).
+      customerRequestedReview = resumedStructuredNotes.customerRequestedReview
+        && typeof resumedStructuredNotes.customerRequestedReview === 'object'
+        ? resumedStructuredNotes.customerRequestedReview
+        : null;
       durableCompletionCommitted = true;
       // Phase-1 legacy fallback, deferred to durable commit (codex #3590
       // r4; r6 resume path): the open packet-less visit this completion
@@ -5386,6 +5415,12 @@ async function completeScheduledService(completionInput, packetContext = null) {
             reviewTiming: reviewTiming || null,
             reviewDelayMinutes: completionReviewDelayMinutes == null ? null : completionReviewDelayMinutes,
             reviewScheduledFor: reviewScheduledFor || null,
+            // Who captured "Customer asked for the link", when, and where —
+            // carried through the paid-invoice deferral (enrollForPaidInvoice).
+            // Frozen off with requestReview: an incomplete / internal-only /
+            // backfill completion never carries a customer request either.
+            customerRequestedReview: (isIncompleteVisit || isInternalOnlyCompletion || isBackfillCompletion)
+              ? null : (customerRequestedReview || null),
             incompleteReason,
             customerConcernText: concernText || null,
             customerRecap: effectiveCustomerRecap || null,
@@ -10997,7 +11032,12 @@ async function completeScheduledService(completionInput, packetContext = null) {
       effectiveRequestReview &&
       svc.cust_phone &&
       !serviceReportV1Delivery &&
-      (completionReviewDelayMinutes === undefined || completionReviewDelayMinutes === 0) &&
+      // Only an operator-chosen immediate ask rides inside the completion
+      // text. No timing ("Automatic", or a client that sent none) is the
+      // legacy 120-minute separate ask that enrollPostService schedules
+      // below — bundling it instantly contradicted both that schedule and
+      // the panel's preview (codex #4140 r1).
+      completionReviewDelayMinutes === 0 &&
       // Cadence mode owns the ask: the review link is its own Day-0 message at
       // the smart send window, never bundled into the completion/receipt SMS
       // (bundling would also dodge the sequence's cap/cooldown bookkeeping).
@@ -11032,9 +11072,9 @@ async function completeScheduledService(completionInput, packetContext = null) {
     const bundledReviewRetryAt = (sendResult = {}) => {
       const explicit = sendResult.nextAllowedAt ? new Date(sendResult.nextAllowedAt) : null;
       if (explicit && !Number.isNaN(explicit.getTime())) return explicit;
-      const delayMinutes = completionReviewDelayMinutes === undefined
-        ? 120
-        : Math.max(5, Number(completionReviewDelayMinutes) || 5);
+      // A bundled ask only exists for an explicit immediate timing, so the
+      // retry is a short back-off, never the legacy 120-minute schedule.
+      const delayMinutes = Math.max(5, Number(completionReviewDelayMinutes) || 5);
       return new Date(Date.now() + delayMinutes * 60000);
     };
     const markBundledReviewFailed = async (sendResult = {}) => {
@@ -12323,7 +12363,8 @@ async function completeScheduledService(completionInput, packetContext = null) {
           // it wins in both modes (Codex P2, r2). Untouched selector =
           // undefined = legacy 120-min default / cadence smart window.
           delayMinutes: completionReviewDelayMinutes,
-          legacyDelayMinutes: 120,
+          legacyDelayMinutes: ReviewService.LEGACY_REVIEW_DELAY_MINUTES,
+          customerRequested: customerRequestedReview,
         });
       } catch (e) { logger.error(`[dispatch] Review request schedule failed: ${e.message}`); }
     }
@@ -12799,4 +12840,5 @@ module.exports = {
   completionSmsWithheldForMissingReportToken,
   backfillExpectedMintAtCommit,
   shouldAutoInvoiceCompletion,
+  parseCompletionReviewDelayMinutes,
 };
