@@ -1,4 +1,6 @@
-// get_estimate_detail: the amounts inside a sent estimate, per line.
+// get_estimate_detail: what an estimate offered, read through the public
+// route's own composer (membership reconciliation first, then the pricing
+// bundle), never a hand-itemized reading of estimate_data.
 jest.mock('../models/db', () => {
   const db = require('knex')({ client: 'pg' });
   db.__queries = [];
@@ -12,37 +14,16 @@ jest.mock('../models/db', () => {
   };
   return db;
 });
-// The converter's own amount/visit readers run for real (alias handling is
-// theirs); only the container extractor is stubbed to keep fixtures small.
-// It honors collapseMirrored by object identity like the real one.
-jest.mock('../services/estimate-converter', () => {
-  const actual = jest.requireActual('../services/estimate-converter');
-  return {
-    recurringServiceKey: actual.recurringServiceKey,
-    recurringLineAnnualAmount: actual.recurringLineAnnualAmount,
-    visitsPerYearForRecurringService: actual.visitsPerYearForRecurringService,
-    recurringServicesFromEstimateData: jest.fn((data) => data.recurring?.services || []),
-    estimateOneTimeItemsFromData: jest.fn((data) => {
-      const result = data.result && typeof data.result === 'object' ? data.result : data;
-      return [...(data.oneTime?.items || []), ...(result.oneTime?.items || [])];
-    }),
-  };
-});
-// The acceptance path's recurring list: converter rows plus scalar supplements.
-jest.mock('../services/plan-rate-ledger', () => ({
-  acceptedRecurringBillingLines: jest.fn((data) => {
-    const rows = [...(data.recurring?.services || [])];
-    if (data.recurring?.rodentBaitMo) rows.push({ service: 'rodent_bait', name: 'Rodent Bait Stations', monthly: data.recurring.rodentBaitMo, visitsPerYear: 12 });
-    return rows;
-  }),
-}));
 const mockCallSideBlock = jest.fn(async () => null);
 jest.mock('../utils/estimate-claim-sql', () => ({ callSideBlockForEstimateData: (...a) => mockCallSideBlock(...a) }));
+const calls = [];
 const mockBuildPricingBundle = jest.fn(async () => ({ frequencies: [] }));
+const mockReconcile = jest.fn(async () => undefined);
 jest.mock('../routes/estimate-public', () => {
   const unpublished = ['draft', 'scheduled'];
   return {
-    buildPricingBundle: (...a) => mockBuildPricingBundle(...a),
+    buildPricingBundle: (...a) => { calls.push('bundle'); return mockBuildPricingBundle(...a); },
+    reconcileFrozenMembershipSnapshot: (...a) => { calls.push('reconcile'); return mockReconcile(...a); },
     isEstimateCustomerViewable: (e) => !e.archived_at && !unpublished.includes(e.status) && !['expired', 'send_failed'].includes(e.status),
     adminDraftPreviewEligible: (e, p) => p === '1' && !e.archived_at && unpublished.includes(e.status),
   };
@@ -59,162 +40,72 @@ const estimateRow = (overrides = {}) => ({
   accepted_service_mode: null, accepted_frequency_key: null, disposition: null, disposition_note: null, decline_reason: null,
   created_at: '2026-09-05T14:00:00Z', updated_at: '2026-09-05T15:00:00Z',
   estimate_data: JSON.stringify({
-    recurring: { services: [
-      { name: 'Quarterly Pest Control', frequency: 'quarterly', visitsPerYear: 4, monthly: 47, annual: 564 },
-      { key: 'lawn_care', frequency: 'every_6_weeks', visits: 8, quoteRequired: true },
-    ] },
-    oneTime: { items: [{ label: 'Initial cleanup', price: 200, priceAfterDiscount: 150 }, { name: 'Referral credit', amount: -25 }] },
-    result: { summary: { recurringMonthlyAfterDiscount: 47, recurringAnnualAfterDiscount: 564, oneTimeTotal: 125 } },
+    recurring: { services: [{ name: 'Quarterly Pest Control', frequency: 'quarterly', visitsPerYear: 4, monthly: 47, annual: 564 }] },
+    membershipSnapshot: { isExistingCustomer: true },
     agentDraftReview: { reasoning: 'internal only' },
   }),
   ...overrides,
 });
 
+const BUNDLE = {
+  defaultServiceMode: 'recurring',
+  waveGuardTier: 'Silver',
+  frequencies: [{ key: 'quarterly', label: 'Quarterly', monthly: 92, annual: 1104, perVisit: 141, oneTimeTotal: null, annualPrepayEligible: true }],
+  services: [
+    { key: 'pest_control', label: 'Pest Control', defaultFrequencyKey: 'bi_monthly', frequencies: [
+      { key: 'quarterly', label: 'Quarterly', monthly: 47, annual: 564, perTreatment: 141, visitsPerYear: 4 },
+      { key: 'bi_monthly', label: 'Bi-monthly', monthly: 55, annual: 660, perTreatment: 110, visitsPerYear: 6 },
+    ] },
+    { key: 'lawn_care', label: 'Lawn Care', defaultFrequencyKey: 'enhanced', frequencies: [
+      { key: 'standard', label: 'Standard', monthly: 45, annual: 540, visitsPerYear: 6 },
+      { key: 'enhanced', label: 'Enhanced', monthly: 51.98, annual: 623.76, visitsPerYear: 9, quoteRequired: true },
+    ] },
+  ],
+  serviceCadenceCombos: [{
+    key: 'lawn_care:enhanced|pest_control:quarterly', selection: { lawn_care: 'enhanced', pest_control: 'quarterly' },
+    monthly: 98.98, annual: 1187.76,
+    perServiceTreatments: { pest_control: { perTreatment: 131, treatments: 4 }, lawn_care: { perTreatment: 60.45, treatments: 9 } },
+    manualDiscount: { amountAnnual: 40, capped: false }, manualDiscountSuppressed: true,
+  }],
+  oneTimeBreakdown: { items: [{ service: 'pest_initial_roach', label: 'Cockroach Treatment Service', amount: 150, detail: '2 treatments' }, { service: null, label: 'Custom exclusion', amount: null, quoteRequired: true }], total: 150, quoteRequired: true },
+  anchorOneTimePrice: 125,
+  firstVisitFees: [{ service: 'waveguard_setup', amount: 99, label: 'WaveGuard setup', waivedWithPrepay: true }, { service: 'pest_initial_roach', amount: 150, label: 'Cockroach Treatment Service', treatments: 2, waivedWithPrepay: false }],
+  setupFee: { service: 'waveguard_setup', amount: 99, label: 'WaveGuard setup', waivedWithPrepay: true },
+  rodentBaitSetupFee: { service: 'rodent_bait_setup', amount: 250, label: 'Bait Station Setup', waivedWithPrepay: false },
+  manualDiscount: { amountAnnual: 40 },
+  source: 'engine_invocation',
+};
+
 beforeEach(() => {
+  calls.length = 0;
   mockBuildPricingBundle.mockReset();
   mockBuildPricingBundle.mockResolvedValue({ frequencies: [] });
+  mockReconcile.mockReset();
+  mockReconcile.mockResolvedValue(undefined);
   mockCallSideBlock.mockReset();
   mockCallSideBlock.mockResolvedValue(null);
+  db.__rows = () => [];
 });
 
-test('tool definition names the per-application use, takes either selector, types the ids', () => {
+test('tool definition names the per-application use, takes either selector, types the ids, and says what it does not itemize', () => {
   expect(GET_ESTIMATE_DETAIL_TOOL.name).toBe('get_estimate_detail');
   expect(GET_ESTIMATE_DETAIL_TOOL.description).toMatch(/per-application/);
-  const props = GET_ESTIMATE_DETAIL_TOOL.input_schema.properties;
-  expect(Object.keys(props).sort()).toEqual(['customer_id', 'estimate_id', 'limit']);
-  expect(props.estimate_id.format).toBe('uuid');
-  expect(props.customer_id.format).toBe('uuid');
+  expect(GET_ESTIMATE_DETAIL_TOOL.description).toMatch(/exactly as the customer's estimate page prices it/);
+  expect(GET_ESTIMATE_DETAIL_TOOL.description).toMatch(/does not itemize the internal engine rows/);
+  expect(GET_ESTIMATE_DETAIL_TOOL.input_schema.properties.estimate_id.format).toBe('uuid');
+  expect(GET_ESTIMATE_DETAIL_TOOL.input_schema.properties.customer_id.format).toBe('uuid');
+  expect(GET_ESTIMATE_DETAIL_TOOL.input_schema.required).toBeUndefined();
 });
 
-test('shapes recurring lines with per-visit prices, one-time discounts and credits, totals, customer link', async () => {
-  const shaped = await shapeEstimate(estimateRow(), [{ amount: '50.00', credited_amount: '0', refunded_amount: '0', status: 'received', received_at: '2026-09-06T10:00:00Z' }]);
-  expect(shaped.recurring_services).toEqual([
-    { service: 'Quarterly Pest Control', frequency: 'quarterly', visits_per_year: 4, monthly: 47, annual: 564, per_visit: 141 },
-    { service: 'lawn_care', frequency: 'every_6_weeks', visits_per_year: 8, monthly: null, annual: null, per_visit: null, quote_required: true, review_required: true, review_reasons: ['requires_review'] },
-  ]);
-  expect(shaped.one_time_items).toEqual([
-    { item: 'Initial cleanup', amount: 150 },
-    { item: 'Referral credit', amount: -25, credit: true },
-  ]);
-  expect(shaped.totals).toEqual({ monthly: 47, annual: 564, one_time: 125 });
-  expect(shaped.deposits).toEqual([{ amount: 50, credited: 0, refunded: 0, status: 'received', received_at: '2026-09-06T10:00:00Z' }]);
-  expect(shaped.customer_link).toBe('https://portal.wavespestcontrol.com/estimate/xydejpzuxx');
-  expect(shaped.link_state).toBe('customer_viewable');
-  expect(shaped.customer_notes).toBe('Includes exterior perimeter treatment');
-  expect(JSON.stringify(shaped)).not.toContain('internal only');
-});
-
-test('operator-accepted finals outrank engine figures; review markers and scalar supplements are reported (Codex r1/r3)', async () => {
-  const shaped = await shapeEstimate(estimateRow({
-    estimate_data: JSON.stringify({
-      recurring: {
-        services: [
-          { label: 'Bi-monthly Pest', mo: 40, ann: 480, apps: 6 },
-          { name: 'Mosquito', annualAfterDiscount: 600, visitsPerYear: 8, manualFinalAnnual: 480 },
-          { name: 'Flea treatment', annual: 300, visitsPerYear: 3, manualFinalAnnual: 0 },
-          { name: 'Lawn Care', displayName: 'Lawn Program', monthly: 60, annual: 720, visitsPerYear: 8, requiresMeasurement: true, pricingConfidence: 'LOW', manualReviewReasons: ['lot size unverified'] },
-        ],
-        rodentBaitMo: 15,
-      },
-      oneTime: { items: [{ label: 'Bed bug prep', price: 900, priceAfterDiscount: 800, manualFinalOneTime: 650 }, { label: 'Comped inspection', price: 95, manualFinalOneTime: 0 }] },
-    }),
-  }));
-  expect(shaped.recurring_services).toEqual([
-    { service: 'Bi-monthly Pest', frequency: null, visits_per_year: 6, monthly: 40, annual: 480, per_visit: 80 },
-    { service: 'Mosquito', frequency: null, visits_per_year: 8, monthly: 40, annual: 480, per_visit: 60 },
-    { service: 'Flea treatment', frequency: null, visits_per_year: 3, monthly: 0, annual: 0, per_visit: 0, comped: true },
-    { service: 'Lawn Program', frequency: null, visits_per_year: 8, monthly: 60, annual: 720, per_visit: 90, review_required: true, review_reasons: ['requires_review', 'low_confidence', 'lot size unverified'] },
-    { service: 'Rodent Bait Stations', frequency: null, visits_per_year: 12, monthly: 15, annual: 180, per_visit: 15 },
-  ]);
-  expect(shaped.one_time_items).toEqual([
-    { item: 'Bed bug prep', amount: 650 },
-    { item: 'Comped inspection', amount: 0, comped: true },
-  ]);
-});
-
-test('both raw containers, installation charges, repeated units, exact-amount twins and conflicts (Codex r2/r3 P1s)', async () => {
-  const row = estimateRow({
-    monthly_total: null, annual_total: null, onetime_total: null,
-    estimate_data: JSON.stringify({
-      result: { summary: { recurringMonthlyAfterDiscount: 0, recurringAnnualAfterDiscount: 0, oneTimeTotal: 1175 }, lineItems: [
-        { service: 'bed_bug', name: 'Bed bug treatment', price: 1200 },
-      ] },
-      engineResult: { lineItems: [
-        { service: 'flea', display: { name: 'Flea knockdown' }, price: 250, manualFinalOneTime: 0 },
-        { service: 'credit', name: 'Referral credit', price: -25 },
-        { service: 'roach', name: 'German roach cleanout', price: 300, visits: 3 },
-        { service: 'pest_control', name: 'Quarterly Pest', mo: 47, ann: 564, visitsPerYear: 4 },
-        { service: 'lawn_care', name: 'Lawn', price: 90, appsPerYear: 8 },
-        { service: 'perimeter', name: 'Perimeter spray', price: 80, onProg: true },
-        // recurring row carrying a one-time installation charge
-        { service: 'termite_bait', name: 'Termite Bait', ann: 480, visitsPerYear: 4, installation: { price: 350 } },
-        // two legitimate identical unit treatments stay two lines
-        { service: 'unit', name: 'Unit treatment', price: 75 },
-        { service: 'unit', name: 'Unit treatment', price: 75 },
-      ] },
-    }),
-  });
-  const shaped = await shapeEstimate(row);
-  expect(shaped.one_time_items).toEqual([
-    { item: 'Bed bug treatment', amount: 1200 },
-    { item: 'Flea knockdown', amount: 0, comped: true },
-    { item: 'Referral credit', amount: -25, credit: true },
-    { item: 'German roach cleanout', amount: 300 },
-    { item: 'Unit treatment', amount: 75 },
-    { item: 'Unit treatment', amount: 75 },
-    { item: 'Termite Bait installation', amount: 350 },
-  ]);
-  expect(shaped.totals).toEqual({ monthly: 0, annual: 0, one_time: 1175 });
-
-  // mapped rows pick the exact-amount twin first; a same-service twin with a
-  // different engine amount is a flagged conflict, not a silent choice
-  const twins = await shapeEstimate(estimateRow({
-    estimate_data: JSON.stringify({
-      oneTime: { items: [
-        { service: 'exclusion', label: 'Exclusion work', price: 450 },
-        { service: 'exclusion', label: 'Exclusion add-on', price: 120 },
-      ] },
-      result: { lineItems: [
-        { service: 'exclusion', name: 'Exclusion add-on', price: 120, manualFinalOneTime: 100 },
-        { service: 'exclusion', name: 'Exclusion work', price: 450 },
-        { service: 'exclusion', name: 'Exclusion extra', price: 999 },
-      ] },
-    }),
-  }));
-  expect(twins.one_time_items).toEqual([
-    { item: 'Exclusion work', amount: 450 },
-    { item: 'Exclusion add-on', amount: 100 },
-    { item: 'Exclusion extra', amount: 999 },
-  ]);
-  const conflict = await shapeEstimate(estimateRow({
-    estimate_data: JSON.stringify({
-      oneTime: { items: [{ service: 'exclusion', label: 'Exclusion work', price: 450 }] },
-      result: { lineItems: [{ service: 'exclusion', name: 'Exclusion work', price: 500 }] },
-    }),
-  }));
-  expect(conflict.one_time_items).toEqual([{ item: 'Exclusion work', amount: 450, conflict: true, other_amount: 500 }]);
-});
-
-test('offered pricing carries plan cadences, per-service ladders and combos from the public bundle (Codex r2/r3 P1)', async () => {
-  mockBuildPricingBundle.mockResolvedValue({
-    frequencies: [{ key: 'quarterly', label: 'Quarterly', monthly: 92, annual: 1104, perVisit: 141, oneTimeTotal: null }],
-    services: [
-      { key: 'pest_control', label: 'Pest Control', defaultFrequencyKey: 'bi_monthly', frequencies: [
-        { key: 'quarterly', label: 'Quarterly', monthly: 47, annual: 564, perTreatment: 141, visitsPerYear: 4 },
-        { key: 'bi_monthly', label: 'Bi-monthly', monthly: 55, annual: 660, perTreatment: 110, visitsPerYear: 6 },
-      ] },
-      { key: 'lawn_care', label: 'Lawn Care', defaultFrequencyKey: 'enhanced', frequencies: [
-        { key: 'standard', label: 'Standard', monthly: 45, annual: 540, visitsPerYear: 6 },
-        { key: 'enhanced', label: 'Enhanced', monthly: 51.98, annual: 623.76, visitsPerYear: 9, quoteRequired: true },
-      ] },
-    ],
-    serviceCadenceCombos: [{ key: 'lawn_care:enhanced|pest_control:quarterly', monthly: 98.98, annual: 1187.76 }],
-  });
+test('offered pricing is the public bundle verbatim in shape: cadences, ladders, combos with per-service allocations + manual-discount state, one-time breakdown, fees (Codex r4)', async () => {
+  mockBuildPricingBundle.mockResolvedValue(BUNDLE);
   const row = estimateRow();
   const shaped = await shapeEstimate(row);
   expect(mockBuildPricingBundle).toHaveBeenCalledWith(row);
   expect(shaped.offered_pricing).toEqual({
-    plan_frequencies: [{ key: 'quarterly', label: 'Quarterly', monthly: 92, annual: 1104, per_visit: 141, visits_per_year: null }],
+    default_service_mode: 'recurring',
+    waveguard_tier: 'Silver',
+    plan_frequencies: [{ key: 'quarterly', label: 'Quarterly', monthly: 92, annual: 1104, per_visit: 141, visits_per_year: null, annual_prepay_eligible: true }],
     services: [
       { key: 'pest_control', label: 'Pest Control', default_frequency_key: 'bi_monthly', frequencies: [
         { key: 'quarterly', label: 'Quarterly', monthly: 47, annual: 564, per_visit: 141, visits_per_year: 4 },
@@ -225,10 +116,72 @@ test('offered pricing carries plan cadences, per-service ladders and combos from
         { key: 'enhanced', label: 'Enhanced', monthly: 51.98, annual: 623.76, per_visit: null, visits_per_year: 9, quote_required: true },
       ] },
     ],
-    combos: [{ key: 'lawn_care:enhanced|pest_control:quarterly', monthly: 98.98, annual: 1187.76 }],
+    combos: [{
+      key: 'lawn_care:enhanced|pest_control:quarterly', selection: { lawn_care: 'enhanced', pest_control: 'quarterly' },
+      monthly: 98.98, annual: 1187.76,
+      per_service_treatments: { pest_control: { perTreatment: 131, treatments: 4 }, lawn_care: { perTreatment: 60.45, treatments: 9 } },
+      manual_discount: { amountAnnual: 40, capped: false }, manual_discount_suppressed: true,
+    }],
+    one_time_breakdown: { items: [
+      { service: 'pest_initial_roach', label: 'Cockroach Treatment Service', amount: 150, detail: '2 treatments' },
+      { service: null, label: 'Custom exclusion', amount: null, detail: null, quote_required: true },
+    ], total: 150, quote_required: true },
+    anchor_one_time_price: 125,
+    first_visit_fees: [
+      { service: 'waveguard_setup', label: 'WaveGuard setup', amount: 99, waived_with_prepay: true },
+      { service: 'pest_initial_roach', label: 'Cockroach Treatment Service', amount: 150, waived_with_prepay: false, treatments: 2 },
+    ],
+    setup_fee: { service: 'waveguard_setup', label: 'WaveGuard setup', amount: 99, waived_with_prepay: true },
+    rodent_bait_setup_fee: { service: 'rodent_bait_setup', label: 'Bait Station Setup', amount: 250, waived_with_prepay: false },
+    manual_discount: { amountAnnual: 40 },
+    source: 'engine_invocation',
   });
+  expect(shaped.offered_pricing_unavailable).toBeUndefined();
+  // No hand-itemized reading of estimate_data rides on the response.
+  expect(shaped.recurring_services).toBeUndefined();
+  expect(shaped.one_time_items).toBeUndefined();
+  expect(JSON.stringify(shaped)).not.toMatch(/internal only/);
+  expect(shaped.totals).toEqual({ monthly: 47, annual: 564, one_time: 125 });
+  expect(shaped).toMatchObject({ customer: 'Avery Example', tier: 'silver', customer_link: 'https://portal.wavespestcontrol.com/estimate/xydejpzuxx', link_state: 'customer_viewable', view_count: 2 });
+});
+
+test('a lapsed membership is reconciled BEFORE totals and the bundle, on the same row object the public renderers mutate (Codex r4 P1)', async () => {
+  mockReconcile.mockImplementation(async (estimate) => {
+    // The reconciler reprices in memory: stored totals and the requote flag change on the row it was handed.
+    estimate.monthly_total = '61.00';
+    estimate.annual_total = '732.00';
+    estimate.estimate_data = JSON.stringify({ ...JSON.parse(estimate.estimate_data), membershipSnapshot: null, requoteRequired: true });
+  });
+  mockBuildPricingBundle.mockImplementation(async (estimate) => ({ frequencies: [{ key: 'quarterly', monthly: Number(estimate.monthly_total) }] }));
+  const row = estimateRow();
+  const shaped = await shapeEstimate(row);
+  expect(calls).toEqual(['reconcile', 'bundle']);
+  expect(mockReconcile).toHaveBeenCalledWith(row);
+  expect(shaped.totals).toEqual({ monthly: 61, annual: 732, one_time: 125 });
+  expect(shaped.offered_pricing.plan_frequencies[0].monthly).toBe(61);
+  expect(shaped.requote_required).toBe(true);
+  expect(shaped.reconciliation_error).toBeUndefined();
+});
+
+test('a reconciler or bundle failure is reported on the response, never thrown and never silently a stale answer', async () => {
+  mockReconcile.mockRejectedValue(new Error('plan lookup down'));
   mockBuildPricingBundle.mockRejectedValue(new Error('no customer row'));
-  expect((await shapeEstimate(row)).offered_pricing).toBeNull();
+  const shaped = await shapeEstimate(estimateRow());
+  expect(shaped.reconciliation_error).toMatch(/plan lookup down/);
+  expect(shaped.offered_pricing).toBeNull();
+  expect(shaped.offered_pricing_unavailable).toMatch(/no customer row/);
+  mockReconcile.mockResolvedValue(undefined);
+  mockBuildPricingBundle.mockResolvedValue(null);
+  expect((await shapeEstimate(estimateRow())).offered_pricing_unavailable).toMatch(/no pricing bundle/);
+});
+
+test('totals come from the stored columns; the one-time total falls back to the bundle breakdown; bad JSON still answers', async () => {
+  mockBuildPricingBundle.mockResolvedValue({ frequencies: [], oneTimeBreakdown: { items: [], total: 300 } });
+  const fromBundle = await shapeEstimate(estimateRow({ monthly_total: null, annual_total: null, onetime_total: null }));
+  expect(fromBundle.totals).toEqual({ monthly: null, annual: null, one_time: 300 });
+  const broken = await shapeEstimate(estimateRow({ estimate_data: '{not json', monthly_total: '12.5', annual_total: null, onetime_total: '0' }));
+  expect(broken.totals).toEqual({ monthly: 12.5, annual: null, one_time: 0 });
+  expect(broken.requote_required).toBe(false);
 });
 
 test('links follow the public route: call-side block, viewable, staff preview, expired, archived (Codex r1/r3 P2)', async () => {
@@ -245,21 +198,16 @@ test('links follow the public route: call-side block, viewable, staff preview, e
   expect((await shapeEstimate(estimateRow())).link_state).toBe('blocked');
 });
 
-test('totals fall back to the engine summary when the columns are empty, and bad JSON still answers', async () => {
-  const fromSummary = await shapeEstimate(estimateRow({ monthly_total: null, annual_total: null, onetime_total: null }));
-  expect(fromSummary.totals).toEqual({ monthly: 47, annual: 564, one_time: 125 });
-  const broken = await shapeEstimate(estimateRow({ estimate_data: '{not json', monthly_total: '12.5', annual_total: null, onetime_total: null }));
-  expect(broken.recurring_services).toEqual([]);
-  expect(broken.one_time_items).toEqual([]);
-  expect(broken.totals).toEqual({ monthly: 12.5, annual: 0, one_time: 0 });
-});
-
-test('estimate_id reads one row; customer_id reads latest live estimates with a bounded limit', async () => {
+test('estimate_id reads one full row; customer_id reads latest live estimates with a bounded limit; deposits ride along', async () => {
   db.__queries = [];
-  db.__rows = (q) => (q.sql.includes('"estimate_deposits"') ? [] : [estimateRow()]);
+  db.__rows = (q) => (q.sql.includes('"estimate_deposits"')
+    ? [{ estimate_id: 'est-1', amount: '100', credited_amount: '100', refunded_amount: null, status: 'credited', received_at: '2026-09-06T00:00:00Z' }]
+    : [estimateRow()]);
   const one = await getEstimateDetail({ estimate_id: 'est-1' });
   expect(one.count).toBe(1);
   expect(one.estimates[0].id).toBe('est-1');
+  expect(one.estimates[0].deposits).toEqual([{ amount: 100, credited: 100, refunded: null, status: 'credited', received_at: '2026-09-06T00:00:00Z' }]);
+  expect(db.__queries[0].sql).toMatch(/^select \* from "estimates"/); // the reconciler/bundle read the row the public handlers load
   expect(db.__queries[0].sql).toContain('"id" = ');
   expect(db.__queries[0].sql).toContain('limit');
   expect(db.__queries[1].sql).toContain('"estimate_deposits"');
