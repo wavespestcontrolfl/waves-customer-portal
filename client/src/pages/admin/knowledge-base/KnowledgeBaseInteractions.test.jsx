@@ -178,6 +178,31 @@ describe("Knowledge base interactions", () => {
     ));
   });
 
+  it("marks only the in-flight action as pending and merely disables its siblings", async () => {
+    let finishApproval;
+    const approval = new Promise((resolve) => { finishApproval = resolve; });
+    adminFetch.mockImplementation(async (path) => {
+      if (path === "/admin/wiki/review/queue") return { pending: [], blocked: [], recentYellow: [] };
+      if (path === "/admin/wiki?limit=200") return { pages: [WIKI_PAGE] };
+      if (path === `/admin/wiki/${WIKI_PAGE.slug}`) return { page: WIKI_PAGE };
+      if (path === `/admin/wiki/review/${WIKI_PAGE.slug}`) return approval;
+      return {};
+    });
+    surface(<FieldIntelligenceTab showFeedback={vi.fn()} isMobile={false} canRegenerate />);
+
+    fireEvent.click(await screen.findByRole("button", { name: /Product: Celsius WG/ }));
+    const regenerate = await screen.findByRole("button", { name: "Regenerate" });
+    fireEvent.click(screen.getByRole("button", { name: "Approve" }));
+
+    await waitFor(() => expect(screen.getByRole("button", { name: "Approve" }))
+      .toHaveAttribute("aria-busy", "true"));
+    expect(regenerate).toBeDisabled();
+    expect(regenerate).not.toHaveAttribute("aria-busy", "true");
+    expect(screen.getByRole("button", { name: "Block" })).toBeDisabled();
+
+    await act(async () => { finishApproval({}); });
+  });
+
   it("keeps another page's block draft open when an earlier approval resolves", async () => {
     let finishApproval;
     const approval = new Promise((resolve) => { finishApproval = resolve; });

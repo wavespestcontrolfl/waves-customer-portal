@@ -42,7 +42,8 @@ function WikiPageDetail({
   onRegenerate,
   actionError,
 }) {
-  const isBusy = busy(page.slug);
+  const activeOp = busy(page.slug);
+  const isBusy = Boolean(activeOp);
 
   return (
     <Card>
@@ -67,7 +68,11 @@ function WikiPageDetail({
       <CardBody>
         <div className="ui-record-actions mb-4">
           {page.review_status !== "approved" && (
-            <Button loading={isBusy} onClick={() => onReview(page.slug, "approve")}>
+            <Button
+              loading={activeOp === "approve"}
+              disabled={isBusy}
+              onClick={() => onReview(page.slug, "approve")}
+            >
               Approve
             </Button>
           )}
@@ -77,7 +82,12 @@ function WikiPageDetail({
             </Button>
           )}
           {canRegenerate && (
-            <Button variant="secondary" loading={isBusy} onClick={() => onRegenerate(page.slug)}>
+            <Button
+              variant="secondary"
+              loading={activeOp === "regenerate"}
+              disabled={isBusy}
+              onClick={() => onRegenerate(page.slug)}
+            >
               Regenerate
             </Button>
           )}
@@ -165,7 +175,8 @@ function FieldIntelligenceDirectory({
                 </div>
                 <div className="ui-record-actions">
                   <Button
-                    loading={busySlugs.has(page.slug)}
+                    loading={busySlugs.get(page.slug) === "approve"}
+                    disabled={busySlugs.has(page.slug)}
                     onClick={() => onReview(page.slug, "approve")}
                   >
                     Approve
@@ -290,8 +301,9 @@ export default function FieldIntelligenceTab({
   const [pendingBlock, setPendingBlock] = useState(null);
   const [blockNotes, setBlockNotes] = useState("");
   const pendingBlockRef = useRef(null);
-  const writesRef = useRef(new Set());
-  const [busySlugs, setBusySlugs] = useState(new Set());
+  // slug -> operation in flight ("approve" | "block" | "tier" | "regenerate")
+  const writesRef = useRef(new Map());
+  const [busySlugs, setBusySlugs] = useState(new Map());
 
   const loadQueue = useCallback(async () => {
     setQueueError("");
@@ -341,16 +353,16 @@ export default function FieldIntelligenceTab({
     load();
   }, [loadPages, loadQueue]);
 
-  const beginWrite = (slug) => {
+  const beginWrite = (slug, operation) => {
     if (writesRef.current.has(slug)) return false;
-    writesRef.current.add(slug);
-    setBusySlugs(new Set(writesRef.current));
+    writesRef.current.set(slug, operation);
+    setBusySlugs(new Map(writesRef.current));
     return true;
   };
 
   const finishWrite = (slug) => {
     writesRef.current.delete(slug);
-    setBusySlugs(new Set(writesRef.current));
+    setBusySlugs(new Map(writesRef.current));
   };
 
   const openPage = useCallback(async (slug) => {
@@ -371,7 +383,7 @@ export default function FieldIntelligenceTab({
   };
 
   const handleReview = async (slug, action, notes) => {
-    if (!beginWrite(slug)) return;
+    if (!beginWrite(slug, action)) return;
     setActionError(null);
     try {
       await adminFetch(`/admin/wiki/review/${slug}`, {
@@ -396,7 +408,7 @@ export default function FieldIntelligenceTab({
   };
 
   const handleTierPin = async (slug, tier) => {
-    if (!tier || !beginWrite(slug)) return;
+    if (!tier || !beginWrite(slug, "tier")) return;
     setActionError(null);
     try {
       await adminFetch(`/admin/wiki/tier/${slug}`, {
@@ -415,7 +427,7 @@ export default function FieldIntelligenceTab({
   };
 
   const handleRegenerate = async (slug) => {
-    if (!beginWrite(slug)) return;
+    if (!beginWrite(slug, "regenerate")) return;
     setActionError(null);
     try {
       await adminFetch(`/admin/wiki/update/${slug}`, {
@@ -443,7 +455,7 @@ export default function FieldIntelligenceTab({
   const detail = selected && (
     <WikiPageDetail
       page={selected}
-      busy={(slug) => busySlugs.has(slug)}
+      busy={(slug) => busySlugs.get(slug) || null}
       canRegenerate={canRegenerate}
       onClose={() => setSelected(null)}
       onReview={handleReview}
@@ -462,7 +474,7 @@ export default function FieldIntelligenceTab({
           page={pendingBlock}
           notes={blockNotes}
           setNotes={setBlockNotes}
-          busy={pendingBlock ? busySlugs.has(pendingBlock.slug) : false}
+          busy={pendingBlock ? busySlugs.get(pendingBlock.slug) === "block" : false}
           error={actionError && actionError.slug === pendingBlock?.slug ? actionError.message : ""}
           onClose={() => {
             pendingBlockRef.current = null;
@@ -509,7 +521,7 @@ export default function FieldIntelligenceTab({
         page={pendingBlock}
         notes={blockNotes}
         setNotes={setBlockNotes}
-        busy={pendingBlock ? busySlugs.has(pendingBlock.slug) : false}
+        busy={pendingBlock ? busySlugs.get(pendingBlock.slug) === "block" : false}
         error={actionError && actionError.slug === pendingBlock?.slug ? actionError.message : ""}
         onClose={() => {
           pendingBlockRef.current = null;

@@ -87,12 +87,7 @@ export default function AuditTab({ showFeedback, onRefresh }) {
             </CardTitle>
           </CardHeader>
           <CardBody>
-            {(results.results || []).length === 0 ? (
-              <p className="text-ui-body text-ink-secondary">
-                The audit finished without returning entry-level results.
-              </p>
-            ) : (
-              <div className="grid gap-3">
+            <div className="grid gap-3">
                 {(results.results || []).map((result, index) => (
                   <Card
                     key={`${result.title || "entry"}-${index}`}
@@ -116,8 +111,7 @@ export default function AuditTab({ showFeedback, onRefresh }) {
                     </CardBody>
                   </Card>
                 ))}
-              </div>
-            )}
+            </div>
           </CardBody>
         </Card>
       )}

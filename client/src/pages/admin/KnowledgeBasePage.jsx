@@ -131,7 +131,7 @@ export default function KnowledgeBasePage({ embedded = false }) {
         // Fixed like the pre-migration toast: actions fire well below the
         // header on long entry/detail views, and the page does not scroll on
         // completion, so in-flow feedback above the stats can go unseen.
-        <div className="fixed bottom-5 right-5 z-[300] max-w-sm rounded-md border-hairline border-zinc-200 bg-white px-4 py-3 shadow-lg">
+        <div className="pointer-events-none fixed bottom-5 right-5 z-[300] max-w-sm rounded-md border-hairline border-zinc-200 bg-white px-4 py-3 shadow-lg">
           <ActionFeedback error={feedback.error}>{feedback.message}</ActionFeedback>
         </div>
       )}
