@@ -488,7 +488,10 @@ async function evidenceDetail(serviceId) {
       .where('ss.scheduled_date', '>=', visit.service_date).whereRaw('COALESCE(ss.service_key_snapshot, s.service_key) = ?', [visit.service_key])
       .select('ss.id', 'ss.service_type', 'ss.scheduled_date').orderBy('ss.scheduled_date', 'desc').limit(200).then(rows => rows.map(row => calendarRow(row, ['scheduled_date']))),
   ]);
-  return { visit, revisions, allocations, returns };
+  // The forced exclusion (callback, included follow-up, always-free type) is
+  // resolved here so the editor never offers an allocation the save would reject.
+  const record = await resolveServiceRecord(db, visit, { scheduled_service_id: true });
+  return { visit: { ...visit, forced_exclusion: resolveExclusion(visit, record, 'none') }, revisions, allocations, returns };
 }
 
 async function estimateOptions(selectedMonth) {

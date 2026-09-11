@@ -127,6 +127,27 @@ describe('EvidenceEditor', () => {
     expect(lastCallBody('/service-evidence').ordinal).toBeNull();
   });
 
+  it('never offers or submits an allocation when the server resolves a forced follow-up exclusion', async () => {
+    const detail = baseDetail({ visit: { ...baseDetail().visit, is_callback: false, forced_exclusion: 'planned_followup' } });
+    request.mockImplementation((path, options = {}) => {
+      if (options.method === 'POST') return Promise.resolve({});
+      if (path.startsWith('/visits?')) return Promise.resolve(visitsResult);
+      if (path === '/services/visit-1/evidence') return Promise.resolve(detail);
+      return Promise.reject(new Error(`unexpected path ${path}`));
+    });
+    render(<EvidenceEditor technicianId="tech-a" month="2026-04" people={people} onCancel={vi.fn()} onSaved={vi.fn()} />);
+    await selectVisit();
+    await screen.findByText(/included follow-up or an always-free visit type/);
+    expect(screen.queryByRole('button', { name: 'Add accepted value allocation' })).not.toBeInTheDocument();
+    expect(screen.queryByLabelText('Service-value allocation')).not.toBeInTheDocument();
+    expect(screen.getByLabelText('Production exclusion')).toHaveValue('planned_followup');
+    fireEvent.change(screen.getByLabelText('Service and credited-value evidence'), { target: { value: 'Follow-up reviewed.' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Retain service evidence' }));
+    await waitFor(() => expect(lastCallBody('/service-evidence')).toBeTruthy());
+    expect(lastCallBody('/service-evidence').allocation_id).toBeNull();
+    expect(lastCallBody('/service-evidence').ordinal).toBeNull();
+  });
+
   it('locks the service selector while an allocation save is pending and selects the saved allocation', async () => {
     const detail = baseDetail({ allocations: [] });
     let resolveAllocation;
@@ -279,6 +300,28 @@ describe('ProgramSetup', () => {
     expect(body).toHaveProperty('id');
   });
 
+  it('defaults the next level after the newest retained level and resets the draft when the employee changes', async () => {
+    request.mockImplementation((path, options = {}) => {
+      if (options.method === 'POST') return Promise.resolve({});
+      return Promise.reject(new Error(`unexpected path ${path}`));
+    });
+    const today = etDateString(new Date());
+    const shift = (day, count) => { const next = new Date(`${day}T12:00:00Z`); next.setUTCDate(next.getUTCDate() + count); return next.toISOString().slice(0, 10); };
+    const newest = shift(today, 10);
+    const levels = [{ id: 'l1', role_key: 'technician_ii', effective_date: newest }];
+    const { rerender } = render(<ProgramSetup setup={setup} view={view({ levels, level: levels[0] })} onSaved={vi.fn()} />);
+    expect(screen.getByLabelText('Level effective date')).toHaveValue(shift(newest, 1));
+    expect(screen.getByLabelText('Level effective date')).toHaveAttribute('min', shift(newest, 1));
+    fireEvent.change(screen.getByLabelText('Simulation role'), { target: { value: 'service_manager' } });
+    rerender(<ProgramSetup setup={setup} view={view({ person: { id: 'tech-b', pay_rate: '20.00', job_title: 'Technician', employment_status: 'active' }, level: { role_key: 'trainee' } })} onSaved={vi.fn()} />);
+    expect(screen.getByLabelText('Simulation role')).toHaveValue('trainee');
+    expect(screen.getByLabelText('Level effective date')).toHaveValue(today);
+    fireEvent.click(screen.getByRole('button', { name: 'Save simulation level' }));
+    await waitFor(() => expect(lastCallBody('/levels')).toBeTruthy());
+    expect(lastCallBody('/levels').technician_id).toBe('tech-b');
+    expect(lastCallBody('/levels').role_key).toBe('trainee');
+  });
+
   it('keeps simulation levels read-only for an inactive employee', () => {
     render(<ProgramSetup setup={setup} view={view({ person: { id: 'tech-a', pay_rate: '22.00', job_title: 'Technician', employment_status: 'inactive' } })} onSaved={vi.fn()} />);
     expect(screen.getByRole('button', { name: 'Save simulation level' })).toBeDisabled();
@@ -338,6 +381,25 @@ describe('Growth', () => {
     expect(screen.getByRole('button', { name: 'Retain assessment' })).toBeDisabled();
   });
 
+  it('drops an open assessment draft when the selected employee changes', async () => {
+    request.mockImplementation((path, options = {}) => {
+      if (options.method === 'POST') return Promise.resolve({});
+      return Promise.reject(new Error(`unexpected path ${path}`));
+    });
+    const levels = [{ id: 'l1', role_key: 'technician_i', effective_date: '2026-01-15' }];
+    const { rerender } = render(<Growth view={view({ levels, level: levels[0] })} manage onSaved={vi.fn()} />);
+    fireEvent.click(screen.getByRole('button', { name: 'Record assessment' }));
+    fireEvent.change(screen.getByLabelText('Rubric version / reference'), { target: { value: 'Rubric v3' } });
+    rerender(<Growth view={view({ person: { id: 'tech-b', pay_rate: '20.00', job_title: 'Technician', employment_status: 'active' }, levels, level: levels[0] })} manage onSaved={vi.fn()} />);
+    expect(screen.getByLabelText('Rubric version / reference')).toHaveValue('');
+    fireEvent.change(screen.getByLabelText('Rubric version / reference'), { target: { value: 'Rubric v3' } });
+    fireEvent.change(screen.getByLabelText('Item 1 evidence'), { target: { value: 'Observed.' } });
+    fireEvent.change(screen.getByLabelText('Verified outcome evidence / observation period'), { target: { value: 'Three months.' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Retain assessment' }));
+    await waitFor(() => expect(lastCallBody('/assessments')).toBeTruthy());
+    expect(lastCallBody('/assessments').technician_id).toBe('tech-b');
+  });
+
   it('blocks a reassessment on dates where the original starting role is no longer in effect', async () => {
     request.mockImplementation((path, options = {}) => {
       if (options.method === 'POST') return Promise.resolve({});
@@ -371,6 +433,16 @@ describe('Growth', () => {
 });
 
 describe('PayOverview', () => {
+  it('drops an open origination draft when the employee or month changes', () => {
+    request.mockImplementation(path => path.startsWith('/estimates?') ? Promise.resolve({ estimates: [] }) : Promise.reject(new Error(`unexpected path ${path}`)));
+    const { rerender } = render(withRouter(<PayOverview view={view()} manage onSaved={vi.fn()} />));
+    fireEvent.click(screen.getByRole('button', { name: 'Record origination' }));
+    fireEvent.change(screen.getByLabelText('Accepted net value, including baseline ($)'), { target: { value: '1500' } });
+    expect(screen.getByLabelText('Accepted net value, including baseline ($)')).toHaveValue(1500);
+    rerender(withRouter(<PayOverview view={view({ month: '2026-05' })} manage onSaved={vi.fn()} />));
+    expect(screen.getByLabelText('Accepted net value, including baseline ($)')).toHaveValue(null);
+  });
+
   it('carries the active visit into the technician documents link', () => {
     render(<MemoryRouter initialEntries={['/tech/pay-growth?visit=visit%2F42']}><PayOverview view={view()} manage={false} onSaved={vi.fn()} /></MemoryRouter>);
     expect(screen.getByRole('link', { name: 'Staff documents' })).toHaveAttribute('href', '/tech/documents?visit=visit%2F42');
