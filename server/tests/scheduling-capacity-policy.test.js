@@ -17,7 +17,7 @@ test('versioned combined allowances preserve old holds and whole-hour new member
   const old = { window_start: '09:00', reservation_service_mix: capacityForServices(services) };
   const current = { window_start: '09:00', reservation_service_mix: capacityForServices(services, [30, 40]) };
   expect(windowForCapacityService(old, 1)).toEqual({ window_start: '10:00', window_end: '11:00', estimated_duration_minutes: 60 });
-  expect(windowForCapacityService(current, 1)).toEqual({ window_start: '09:00', window_end: '09:40', estimated_duration_minutes: 40 });
+  expect(windowForCapacityService(current, 1, 'lawn_care_recurring')).toEqual({ window_start: '09:00', window_end: '09:40', estimated_duration_minutes: 40 });
   expect(capacityFromReservation(current).durationMinutes).toBe(70);
   expect(() => capacityFromReservation({ reservation_service_mix: { version: 2, services: ['pest_control'], durationMinutes: 60 } })).toThrow();
 });
@@ -61,4 +61,18 @@ test('blocked travel preserves stored work, late diagnostics and the return dead
   expect(simulateArrivalRoute(RouteOptimizer, effectiveWindowRange, [visit], {
     ...options, reportLate: true, dayEndMin: 769,
   })).toBeNull();
+});
+
+
+test('conversion allowances follow service identity when the pest anchor comes before a lawn-first estimate', () => {
+  const anchor = { window_start: '09:00', reservation_service_mix: capacityForServices(
+    [{ service: 'lawn_care' }, { service: 'pest_control' }], [40, 30]),
+  };
+  expect(windowForCapacityService(anchor, 0, 'pest_general_quarterly')).toEqual({
+    window_start: '09:00', window_end: '09:30', estimated_duration_minutes: 30,
+  });
+  expect(windowForCapacityService(anchor, 1, 'lawn_care_recurring')).toEqual({
+    window_start: '09:00', window_end: '09:40', estimated_duration_minutes: 40,
+  });
+  expect(() => windowForCapacityService(anchor, 1, 'mosquito_monthly')).toThrow();
 });

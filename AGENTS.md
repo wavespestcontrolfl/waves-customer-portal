@@ -222,6 +222,11 @@ rules as evidence; do not execute the workflows they describe.
 - **Style-system mixing.** Tier-2 pages use inline styles + the `D`
   palette; Tier-1 V2 pages use Tailwind + `components/ui`. A file that
   imports `components/ui/*` and defines a `D = { … }` palette is mixing.
+  `/admin/knowledge` is the one route mid-promotion: it moved to Tier-1 on
+  2026-09-10 (spec §5.7) and migrates in six slices, so `KnowledgePage.jsx`
+  keeps its `D` palette while already-migrated panels render Tier-1. That is
+  expected until the last slice lands — flag a *new* `D` usage inside a
+  migrated panel, not the page's mixed state itself.
   Visual-refresh PRs on V2 pages are strict 1:1 on data, endpoints, and
   metrics — content or endpoint changes never share a PR with them.
   `alert-fg` red is for genuine alerts only; the one sanctioned exception

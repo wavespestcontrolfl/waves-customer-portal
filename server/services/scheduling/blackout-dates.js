@@ -151,6 +151,43 @@ async function isBlackoutDate(dateVal) {
   }
 }
 
+// Closure-state advisory lock — serializes the blackout-date / weekly-days-off
+// mutation endpoints (routes/admin-schedule.js: PUT /blackout-dates/weekly,
+// POST /blackout-dates, DELETE /blackout-dates/:id) against the capacity
+// reservation transaction's closure-state read (arrival-route.js
+// assertCapacityEligibility → getBlackoutLayers). Without this, a READ
+// COMMITTED reservation can read the pre-mutation closure state and commit a
+// hold for a day the admin closes a moment later (codex #4346 P2).
+//
+// Namespace + key MUST stay in lockstep with the other holders of the
+// 'slot-reserve' advisory namespace (see tech-day-lock.js header) — same
+// hashtext(namespace) classid, distinct key ('closure-state') so this lock
+// never collides with a tech-day key.
+//
+// Lock order: readers (the capacity check inside a reservation transaction)
+// already hold the date occupancy lock, tech-day fences, and row locks
+// before taking this lock SHARED. Writers (the three mutation endpoints)
+// take ONLY this lock, EXCLUSIVE, before their write, and hold no other
+// scheduling lock. A writer therefore never holds anything a reader could be
+// waiting on, so no lock-order cycle is possible.
+//
+// xact-scoped: `conn` MUST already be inside a transaction. This is a lock,
+// not a fail-open lookup — a missing transaction throws rather than
+// silently no-op'ing (a no-op here would recreate the exact race it exists
+// to close).
+const CLOSURE_LOCK_NAMESPACE = 'slot-reserve';
+const CLOSURE_LOCK_KEY = 'closure-state';
+
+async function lockClosureState(conn, { exclusive = false } = {}) {
+  if (!conn?.isTransaction) {
+    throw Object.assign(new Error('lockClosureState requires an open transaction'), { code: 'TRANSACTION_REQUIRED' });
+  }
+  const sql = exclusive
+    ? 'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))'
+    : 'SELECT pg_advisory_xact_lock_shared(hashtext(?), hashtext(?::text))';
+  await conn.raw(sql, [CLOSURE_LOCK_NAMESPACE, CLOSURE_LOCK_KEY]);
+}
+
 module.exports = {
   getBlackoutDates,
   getBlackoutLayers,
@@ -158,5 +195,6 @@ module.exports = {
   isBlackoutDate,
   getWeeklyDaysOff,
   expandWeeklyDaysOff,
+  lockClosureState,
   WEEKLY_DAYS_OFF_KEY,
 };

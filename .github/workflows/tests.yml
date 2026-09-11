@@ -89,7 +89,12 @@ jobs:
         working-directory: server
         env:
           VISIT_PACKET_TEST_DATABASE_URL: postgresql://waves:waves@localhost:5432/waves_test
-        run: npx jest --ci --silent --runInBand tests/visit-completion-packets-postgres.test.js
+        run: npx jest --ci --silent --runInBand tests/visit-completion-packets-postgres.test.js tests/invoice-issued-closeout-completion-postgres.test.js
+      - name: Invoice-issued closeout resolver transaction tests
+        working-directory: server
+        env:
+          DATABASE_URL: postgresql://waves:waves@localhost:5432/waves_test
+        run: npx jest --ci --silent --runInBand tests/invoice-issued-closeout-postgres.test.js
       - name: Historical invoice repair transaction tests
         working-directory: server
         env:
@@ -139,6 +144,11 @@ jobs:
         env:
           COMBINED_VISIT_TEST_DATABASE_URL: postgresql://waves:waves@localhost:5432/waves_test
         run: npx jest --ci --silent --runInBand tests/combined-visit-capacity-postgres.test.js tests/combined-visit-conversion-postgres.test.js
+      - name: Catalog allowance transaction tests
+        working-directory: server
+        env:
+          SCHEDULING_CAPACITY_TEST_DATABASE_URL: postgresql://waves:waves@localhost:5432/waves_test
+        run: npx jest --ci --silent --runInBand tests/scheduling-catalog-postgres.test.js tests/scheduling-capacity-holds-postgres.test.js tests/scheduling-capacity-accept-postgres.test.js tests/scheduling-capacity-allocation-postgres.test.js
       - name: Shared reservation arrival transaction tests
         working-directory: server
         env:
