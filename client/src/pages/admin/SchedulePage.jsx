@@ -446,12 +446,25 @@ function heldToWindowOpenISO(iso, preview) {
 }
 // The custom-time mode: the one whose hint parses operator input and has to
 // reconcile it with the send window and the worker's ticks.
+// A spring-forward gap wall clock (2:30 AM on the DST day) does not exist in
+// ET: the client helper and the server's parseETDateTime resolve it to
+// different instants, so the hint would promise a tick an hour off the real
+// send (codex #4140 r24 P2). Reject it instead of guessing.
+const ET_GAP_TIME_MESSAGE = "That time does not exist in Eastern time (clocks spring forward) — choose another time.";
+function etWallClockExists(value, iso) {
+  if (!iso) return false;
+  const [, timePart = ""] = String(value).split("T");
+  const [h, mi] = timePart.split(":").map(Number);
+  const et = etParts(new Date(iso));
+  return et.hour === h && et.minute === mi;
+}
 function customReviewTimingHint(reviewCustomAt, preview) {
   // The datetime-local value is an ET wall clock (the server parses it with
   // parseETDateTime) — never `new Date(value)`, which reads it in the
   // browser's zone (codex #4140 r1).
   const iso = etDatetimeLocalToISO(reviewCustomAt);
   if (!iso) return "Choose a time for the review text.";
+  if (!etWallClockExists(reviewCustomAt, iso)) return ET_GAP_TIME_MESSAGE;
   // The server clamps every review delay to 30 days after completion
   // (MAX_REVIEW_DELAY_MINUTES): a later date would send ~30 days out, not
   // on the chosen day. Say so instead of promising the date (codex #4140 r10 P2).
@@ -12375,7 +12388,14 @@ export function CompletionPanel({
       .catch(() => null);
   }, [service?.serviceType]);
   useEffect(() => {
-    if (!willReview || oneTimeRecapOnly) return undefined;
+    if (!willReview || oneTimeRecapOnly) {
+      // Polling stops here; a preview cached from before must not survive
+      // as "known" — the gates can flip while the controls are hidden, and
+      // the submit guard would trust it (codex #4140 r24 P1). Unknown reads
+      // as fail-closed; re-enabling the controls re-fetches.
+      setReviewSendPreview(null);
+      return undefined;
+    }
     let cancelled = false;
     const load = () => fetchReviewSendPreview().then((data) => {
       if (cancelled) return;
@@ -15546,6 +15566,10 @@ export function CompletionPanel({
         target.getTime() <= Date.now()
       ) {
         alert("Choose a future review request time.");
+        return;
+      }
+      if (!etWallClockExists(reviewCustomAt, targetISO)) {
+        alert(ET_GAP_TIME_MESSAGE);
         return;
       }
       // The server clamps to 30 days; a later time would silently move (codex #4140 r10 P2).

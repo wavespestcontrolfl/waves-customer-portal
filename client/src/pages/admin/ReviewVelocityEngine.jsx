@@ -338,6 +338,9 @@ function decisionLine(seq, sequencesEnabled) {
   // have (codex #4140 r18 P2).
   if (sequencesEnabled !== true) return `Paused — cadences are off (GATE_REVIEW_SEQUENCES / GATE_CRON_JOBS)${sequencesEnabled == null ? " or the gate state is unavailable" : ""} · Owner action: turn the gates on${seq.parked ? " — the parked final is redeemed by the next sweep" : ""}`;
   if (seq.sending) return "Sending now · Owner action: none";
+  // Overdue by more than 7 days: the worker retires the row as stale at its
+  // next pickup instead of sending (codex #4140 r24 P2) — no send time exists.
+  if (seq.staleRetire) return "Overdue over 7 days — retired as stale at the next tick, nothing sends · Owner action: re-enroll from a completion if a review ask is still wanted";
   // A parked series final (deferred until the opener's send settles) is a
   // durable enrollment the redemption sweep redeems — not "no cadence"
   // (codex #4140 r12 P2). It needs no branch of its own: its stored
