@@ -116,7 +116,7 @@ export default function AdminPriceChangePage({ embedded = false } = {}) {
     <UiSurface density="comfortable" className="min-h-full max-w-[1100px] mx-auto p-4 sm:p-6 space-y-4">
       <div>
         {!embedded && (
-          <h1 className="text-ui-page-title font-semibold text-zinc-900">Price change notices</h1>
+          <h1 className="text-22 font-medium text-zinc-900">Price change notices</h1>
         )}
         <p className="text-ui-body text-ink-secondary mt-0.5 max-w-2xl">
           Formal advance notice for recurring-service price changes — a short email + text per
