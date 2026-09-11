@@ -4,9 +4,9 @@ import { Button, Input, Select, Card, CardHeader, CardTitle, CardBody, UiSurface
 import { PROPOSAL_UNITS, COST_CATEGORIES, computeProjectCosts, proposalLineAmount } from '@proposal-bid';
 
 const dollars = (n) => Number(n || 0).toLocaleString('en-US', { style: 'currency', currency: 'USD' });
-export default function ProposalProjectCosting({ value, onChange, totals, disabled }) {
+export default function ProposalProjectCosting({ value, onChange, totals, revenueIssue = null, disabled }) {
   const costing = value || { revenueYears: 1, rows: [] };
-  const summary = computeProjectCosts(costing, totals);
+  const summary = computeProjectCosts(costing, totals, { revenueIssue });
   const update = (index, patch) => onChange({ ...costing, rows: costing.rows.map((row, i) => i === index ? { ...row, ...patch } : row) });
   return <UiSurface as={Card}>
     <CardHeader><CardTitle>Project cost sheet · private</CardTitle></CardHeader>
@@ -39,7 +39,8 @@ export default function ProposalProjectCosting({ value, onChange, totals, disabl
       <dl className="grid grid-cols-2 sm:grid-cols-4 gap-3 tabular-nums">
         {[['Revenue', summary.revenue == null ? '—' : dollars(summary.revenue)], ['Entered costs', dollars(summary.cost)], ['Estimated gross profit', summary.profit == null ? '—' : dollars(summary.profit)], ['Estimated margin', summary.marginPercent == null ? '—' : `${summary.marginPercent}%`]].map(([label, amount]) => <div key={label}><dt className="text-zinc-600">{label}</dt><dd className="font-medium">{amount}</dd></div>)}
       </dl>
-      {!summary.costsComplete && <p className="text-zinc-600">Complete the cost rows and a 1–30 year revenue period to see estimated profit and margin.</p>}
+      {revenueIssue && <p className="text-zinc-600">Fix the quoted itemization before comparing costs: {revenueIssue}</p>}
+      {!summary.costsComplete && !revenueIssue && <p className="text-zinc-600">Complete the cost rows and a 1–30 year revenue period to see estimated profit and margin.</p>}
     </CardBody>
   </UiSurface>;
 }

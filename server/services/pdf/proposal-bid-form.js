@@ -21,8 +21,8 @@ const { BID_FORM_PROFILES, roundCents, roundDecimal, proposalLineAmount, formatQ
 // `node server/scripts/bid-form-fingerprint.js <pdf> <page>` on the original
 // and record all three values here.
 const FORM_PAGE_FINGERPRINTS = {
-  north_port_pr27_02: { contents: '728fcdbde060cbbd0406774aaab47bbff7e0a47bd34eca8ece46d30fb5d4ea45', resources: '8f8dd15efaf336d0fed58631876ec381b2712cbb6d29b5f15841d413560043e9', packet: 'f1475247451feafe4f0b07f3ed5ed358e6bc76b9425aa5a1ab48ff4cb6851d9c' },
-  cove_termite: { contents: '04aa8cb7b95eacb57c550a743796078bd113aa8a3a129ca7928241b225ca84f4', resources: 'da975e4497103e7eaed5ccb3fe24e99aef2d49814551b7caf04bcbd1fd3abe74', packet: '076f7213f3f9ba350d0bd6dddf2d7bf974a3706b691c85a8d8bc787a89197792' },
+  north_port_pr27_02: { contents: '728fcdbde060cbbd0406774aaab47bbff7e0a47bd34eca8ece46d30fb5d4ea45', resources: '8f8dd15efaf336d0fed58631876ec381b2712cbb6d29b5f15841d413560043e9', packet: '85920d48e2f175a336ebc433d2cf204f939d785ac66a39dee1008abc4e6a767b' },
+  cove_termite: { contents: '04aa8cb7b95eacb57c550a743796078bd113aa8a3a129ca7928241b225ca84f4', resources: 'da975e4497103e7eaed5ccb3fe24e99aef2d49814551b7caf04bcbd1fd3abe74', packet: '47880c1549eb8ac684225bc5a5a9c3822aa73225a391932320a8fd95fce8e6d3' },
 };
 const invalid = (message) => Object.assign(new Error(message), { statusCode: 400 });
 // Hash every object the page's /Resources reaches (dictionaries by sorted
@@ -113,9 +113,14 @@ function pageFingerprint(document, page) {
 // `save()` preserves but the geometry line does not cover is pinned as well
 // (GH codex P2 r7 on #4270). Flattening a filled field rewrites the content
 // stream and drops the widget; a stamp or an added or removed page changes
-// the sequence. The selected page is excluded because it is fingerprinted on
-// its own, which also lets the value be recorded from a reviewed export
-// whose only change is that page.
+// the sequence. The selected page's drawing, resources and annotations are
+// excluded because they are fingerprinted or asserted blank on their own,
+// which also lets the value be recorded from a reviewed export whose only
+// change is that page — but its remaining dictionary state (trim and bleed
+// boxes, transitions, groups) is pinned like every other page's, since the
+// blank-form check inspects only the visible boxes, rotation and scale (GH
+// codex P2 r8 on #4270). Drawing on the page normalizes only `/Contents`
+// and `/Resources`, so an export still hashes like its original here.
 const PAGE_KEYS_HASHED_SEPARATELY = new Set(['/Contents', '/Resources', '/Annots', '/Parent']);
 function packetFingerprint(document, selectedIndex) {
   const hash = crypto.createHash('sha256');
@@ -123,12 +128,13 @@ function packetFingerprint(document, selectedIndex) {
   const pages = document.getPages();
   hash.update(`pages:${pages.length};selected:${selectedIndex};`);
   pages.forEach((page, index) => {
-    if (index === selectedIndex) return;
-    const box = (b) => [b.x, b.y, b.width, b.height].join(',');
-    hash.update(`${index}:media=${box(page.getMediaBox())};crop=${box(page.getCropBox())};rotate=${page.getRotation().angle};`);
-    hash.update(`${pageContentHash(document, page)}:${pageResourceHash(document, page)};annots:`);
-    const annots = page.node.Annots();
-    if (annots) visit(annots); else hash.update('none');
+    if (index !== selectedIndex) {
+      const box = (b) => [b.x, b.y, b.width, b.height].join(',');
+      hash.update(`${index}:media=${box(page.getMediaBox())};crop=${box(page.getCropBox())};rotate=${page.getRotation().angle};`);
+      hash.update(`${pageContentHash(document, page)}:${pageResourceHash(document, page)};annots:`);
+      const annots = page.node.Annots();
+      if (annots) visit(annots); else hash.update('none');
+    } else hash.update(`${index}:selected`);
     hash.update(';dict:<<');
     for (const [key, value] of sortedEntries(page.node)) {
       if (PAGE_KEYS_HASHED_SEPARATELY.has(key.toString())) continue;

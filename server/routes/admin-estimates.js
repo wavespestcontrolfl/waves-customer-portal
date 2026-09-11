@@ -59,6 +59,7 @@ const {
   inferEstimateServiceLines,
 } = require('../services/estimate-service-lines');
 const { normalizeProposal, computeProposalTotals, isCommercialProposalData } = require('../services/estimate-proposal');
+const { programRevenueIssue } = require('../../shared/proposal-bid.cjs');
 const { proposalExpiry, hasFixedBidValidity, assertBidSendDate, assertBidScheduleDate, earliestScheduledDelivery, latestReachableSchedule, validateBidFields, normalizeProjectCosting, FIXED_BID_VALIDITY_ABSENT_SQL } = require('../services/proposal-bid');
 const { generateEstimateProposalPDF } = require('../services/pdf/estimate-pdf');
 const {
@@ -3864,18 +3865,13 @@ router.put('/:id/proposal', async (req, res, next) => {
         return res.status(400).json({ error: 'Proposals are limited to 10 service programs.' });
       }
       for (const program of incomingPrograms) {
-        const freq = Number(program?.frequencyPerYear ?? program?.visitsPerYear);
-        if (!Number.isInteger(freq) || freq < 1 || freq > 52) {
-          return res.status(400).json({ error: 'Each program needs a whole-number service frequency between 1 and 52 visits per year.' });
-        }
-        // Finite, positive, cent-representable — 0.001 or Infinity would
-        // normalize to a dropped program and rewrite the authoritative
-        // totals to zero (pre-push codex P0).
-        const price = Number(program?.pricePerApplication ?? program?.perApplication);
-        if (!Number.isFinite(price) || price < 0.01
-          || Math.abs(price * 100 - Math.round(price * 100)) > 1e-6) {
-          return res.status(400).json({ error: 'Each program needs a per-application price of at least $0.01, in whole cents.' });
-        }
+        // Whole-number 1–52 frequency; finite, positive, cent-representable
+        // price — 0.001 or Infinity would normalize to a dropped program and
+        // rewrite the authoritative totals to zero (pre-push codex P0). The
+        // predicate is shared with the builder's costing card (GH codex P2
+        // r8 on #4270).
+        const programIssue = programRevenueIssue(program);
+        if (programIssue) return res.status(400).json({ error: programIssue });
         if (String(program?.label ?? program?.name ?? '').length > 120) {
           return res.status(400).json({ error: 'Program names are limited to 120 characters.' });
         }

@@ -82,14 +82,37 @@ function costRowIssue(row) {
   return null;
 }
 
-function computeProjectCosts(costing, totals) {
+// ONE definition of the revenue-side limits the proposal save enforces on
+// the itemization computeTotals sums, so the costing card never presents a
+// margin over revenue that cannot be saved as entered — a 4.5-visit program
+// rounds to five in the sidebar and is refused by the PUT (GH codex P2 r8
+// on #4270). The server validator uses the same predicates.
+const PROGRAM_FREQUENCY_MAX = 52;
+const wholeCents = (n) => Number.isFinite(n) && Math.abs(n * 100 - Math.round(n * 100)) <= 1e-6;
+function programRevenueIssue(program) {
+  const freq = Number(program?.frequencyPerYear ?? program?.visitsPerYear);
+  if (!Number.isInteger(freq) || freq < 1 || freq > PROGRAM_FREQUENCY_MAX) return 'Each program needs a whole-number service frequency between 1 and 52 visits per year.';
+  const price = Number(program?.pricePerApplication ?? program?.perApplication);
+  if (!wholeCents(price) || price < 0.01) return 'Each program needs a per-application price of at least $0.01, in whole cents.';
+  return null;
+}
+function proposalRevenueIssue({ buildings = [], programs = [], correctiveWork = [] } = {}) {
+  for (const program of programs) { const issue = programRevenueIssue(program); if (issue) return issue; }
+  const lines = buildings.flatMap((b) => (Array.isArray(b?.lineItems || b?.line_items) ? (b.lineItems || b.line_items) : []));
+  if (lines.some((i) => Number(i?.unitPrice ?? i?.unit_price ?? i?.price) < 0 || Number(i?.quantity) < 0)) return 'Proposal line items cannot have negative quantities or unit prices.';
+  if (correctiveWork.some((w) => Number(w?.amount ?? w?.price) < 0)) return 'Corrective work amounts cannot be negative.';
+  if (correctiveWork.some((w) => !wholeCents(Number(w?.amount ?? w?.price ?? 0)))) return 'Corrective work amounts must be whole-cent dollar values.';
+  return null;
+}
+
+function computeProjectCosts(costing, totals, { revenueIssue = null } = {}) {
   const rows = Array.isArray(costing?.rows) ? costing.rows : [];
   // An absent period keeps the one-year default; a PRESENT blank or invalid
   // period is incomplete, never silently one year (GH codex P2 on #4270).
   const rawYears = costing?.revenueYears;
   const revenueYears = rawYears == null ? 1
     : (String(rawYears).trim() !== '' && Number.isInteger(Number(rawYears)) && Number(rawYears) >= 1 && Number(rawYears) <= 30 ? Number(rawYears) : null);
-  const costsComplete = revenueYears != null && rows.length > 0 && rows.length <= COST_ROW_LIMITS.rowsMax && rows.every((row) => !costRowIssue(row));
+  const costsComplete = !revenueIssue && revenueYears != null && rows.length > 0 && rows.length <= COST_ROW_LIMITS.rowsMax && rows.every((row) => !costRowIssue(row));
   const byCategory = {};
   for (const row of rows) {
     const amount = proposalLineAmount({ quantity: row.quantity, unitPrice: row.unitCost }, Number(row.occurrences || 1));
@@ -101,4 +124,4 @@ function computeProjectCosts(costing, totals) {
   return { cost, revenue, revenueYears, profit, marginPercent: costsComplete && revenue > 0 ? roundDecimal(profit / revenue * 100, 2) : null, byCategory, costsComplete };
 }
 
-module.exports = { PROPOSAL_UNITS, PROPOSAL_COUNT_UNITS, proposalLineServiceCount, COST_CATEGORIES, BID_FORM_PROFILES, roundDecimal, roundCents, proposalLineAmount, formatQuantity, formatUnitPrice, formatLineBasis, showsLineBasis, decimalValid, COST_ROW_LIMITS, costRowIssue, computeProjectCosts };
+module.exports = { PROPOSAL_UNITS, PROPOSAL_COUNT_UNITS, proposalLineServiceCount, COST_CATEGORIES, BID_FORM_PROFILES, roundDecimal, roundCents, proposalLineAmount, formatQuantity, formatUnitPrice, formatLineBasis, showsLineBasis, decimalValid, COST_ROW_LIMITS, costRowIssue, programRevenueIssue, proposalRevenueIssue, computeProjectCosts };

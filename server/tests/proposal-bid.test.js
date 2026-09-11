@@ -8,7 +8,7 @@ const { normalizeProposal, computeProposalTotals } = require('../services/estima
 const { buildProposalFirstInvoice } = require('../services/proposal-win');
 const { estimateExpiresAt } = require('../services/admin-estimate-persistence');
 const { proposalExpiry, assertBidSendDate, validateBidFields, normalizeProjectCosting, assertBidScheduleDate, earliestScheduledDelivery, latestReachableSchedule } = require('../services/proposal-bid');
-const { computeProjectCosts, roundCents, showsLineBasis } = require('../../shared/proposal-bid.cjs');
+const { computeProjectCosts, roundCents, showsLineBasis, programRevenueIssue, proposalRevenueIssue } = require('../../shared/proposal-bid.cjs');
 const { mapFormPrices, buildProposalBidForm } = require('../services/pdf/proposal-bid-form');
 
 // buildProposalBidForm refuses a lapsed fixed hold against the real clock,
@@ -44,6 +44,18 @@ describe('bid quantity and costing authority', () => {
   test('unknown or incomplete costs do not imply a zero-cost project and 100% margin', () => {
     expect(computeProjectCosts({ rows: [] }, { oneTime: 10000 })).toMatchObject({ profit: null, marginPercent: null, costsComplete: false });
     expect(computeProjectCosts({ rows: [{ description: 'Awaiting supplier price', quantity: 1, unitCost: '', occurrences: 1 }] }, { oneTime: 10000 })).toMatchObject({ profit: null, marginPercent: null });
+  });
+  test('margins are withheld while the quoted itemization would be refused by the save (GH codex P2 r8 on #4270)', () => {
+    const rows = [{ description: 'Labor', phase: '', category: 'labor', unit: 'hour', quantity: 10, unitCost: 50, occurrences: 1 }];
+    expect(computeProjectCosts({ rows }, { oneTime: 1000 })).toMatchObject({ costsComplete: true, profit: 500 });
+    expect(computeProjectCosts({ rows }, { oneTime: 1000 }, { revenueIssue: 'Each program needs a whole-number service frequency between 1 and 52 visits per year.' })).toMatchObject({ costsComplete: false, profit: null, marginPercent: null });
+    expect(programRevenueIssue({ frequencyPerYear: 4.5, pricePerApplication: 100 })).toMatch(/whole-number service frequency/);
+    expect(programRevenueIssue({ frequencyPerYear: 53, pricePerApplication: 100 })).toMatch(/whole-number service frequency/);
+    expect(programRevenueIssue({ frequencyPerYear: 4, pricePerApplication: 0.001 })).toMatch(/at least \$0\.01, in whole cents/);
+    expect(programRevenueIssue({ frequencyPerYear: 4, pricePerApplication: 100 })).toBeNull();
+    expect(proposalRevenueIssue({ programs: [{ frequencyPerYear: 12, pricePerApplication: 80 }], correctiveWork: [{ amount: 10.005 }] })).toMatch(/whole-cent/);
+    expect(proposalRevenueIssue({ buildings: [{ lineItems: [{ quantity: 1, unitPrice: -5 }] }] })).toMatch(/negative/);
+    expect(proposalRevenueIssue({ buildings: [{ lineItems: [{ quantity: 1, unitPrice: 5 }] }], programs: [], correctiveWork: [{ amount: 10 }] })).toBeNull();
   });
   test.each([['', null], ['abc', null], [0, null], [31, null], [2.5, null], ['3', 3], [undefined, 1]])('a present revenue period of %s never silently compares one year (GH codex P2 on #4270)', (revenueYears, expected) => {
     const rows = [{ category: 'labor', description: 'Synthetic complete cost', quantity: 1, unit: 'hour', unitCost: 10, occurrences: 1 }];
@@ -219,7 +231,9 @@ describe('bid form original integrity beyond the content streams', () => {
     ['shifted media origin', [20, 0, 612, 792], [0, 0, 612, 792], false],
     ['shifted crop origin', [0, 0, 612, 792], [20, 0, 612, 792], false],
   ])('%s page is accepted only with the reviewed visible layout', async (name, media, crop, accepted) => {
-    await approve(await blankPage());
+    // The reviewed original carries the same explicit box entries; a
+    // packet's dictionary keys are pinned as written, not by their effect.
+    await approve(await blankPage(async (pdf, page) => { page.setMediaBox(0, 0, 612, 792); page.setCropBox(0, 0, 612, 792); }));
     const sourcePdf = await blankPage(async (pdf, page) => { page.setMediaBox(...media); page.setCropBox(...crop); });
     if (accepted) await expect(build(sourcePdf)).resolves.toBeInstanceOf(Buffer);
     else await expect(build(sourcePdf)).rejects.toThrow(/does not match/);
@@ -227,7 +241,15 @@ describe('bid form original integrity beyond the content streams', () => {
   test('a selected page scaled with /UserUnit is refused (GH codex P2 r7 on #4270)', async () => {
     await approve(await blankPage());
     await expect(build(await blankPage(async (pdf, page) => page.node.set(PDFName.of('UserUnit'), PDFNumber.of(2))))).rejects.toThrow(/does not match/);
-    await expect(build(await blankPage(async (pdf, page) => page.node.set(PDFName.of('UserUnit'), PDFNumber.of(1))))).resolves.toBeInstanceOf(Buffer);
+    const unit = (value) => blankPage(async (pdf, page) => page.node.set(PDFName.of('UserUnit'), PDFNumber.of(value)));
+    await approve(await unit(1));
+    await expect(build(await unit(1))).resolves.toBeInstanceOf(Buffer);
+    await expect(build(await unit(2))).rejects.toThrow(/does not match/);
+  });
+  test('a selected page whose trim box or other dictionary state changed is refused (GH codex P2 r8 on #4270)', async () => {
+    await approve(await blankPage());
+    await expect(build(await blankPage(async (pdf, page) => page.node.set(PDFName.of('TrimBox'), pdf.context.obj([20, 20, 300, 400]))))).rejects.toThrow(/other pages of this PDF differ/);
+    await expect(build(await blankPage(async (pdf, page) => page.node.set(PDFName.of('Trans'), pdf.context.obj({ S: 'Fade' }))))).rejects.toThrow(/other pages of this PDF differ/);
   });
   test('a page carrying annotations or widgets is refused before fingerprinting', async () => {
     await approve(await blankPage());

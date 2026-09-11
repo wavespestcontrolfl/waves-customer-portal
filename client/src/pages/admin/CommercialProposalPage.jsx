@@ -10,7 +10,7 @@ import AdminCommandHeader from '../../components/admin/AdminCommandHeader';
 import { EstimateSendProvider, useEstimateSend } from '../../components/admin/EstimateSendDialog';
 import ProposalProjectCosting from '../../components/estimates/ProposalProjectCosting';
 import ProposalBidForm from '../../components/estimates/ProposalBidForm';
-import { PROPOSAL_UNITS, proposalLineAmount } from '@proposal-bid';
+import { PROPOSAL_UNITS, proposalLineAmount, proposalRevenueIssue } from '@proposal-bid';
 
 // Commercial proposal builder — the full-page surface for authoring the
 // multi-building, per-line-item commercial bid on an estimate (HOAs,
@@ -368,6 +368,13 @@ function CommercialProposalEditor() {
   const totals = useMemo(
     () => computeTotals(programsMode ? [] : buildings, taxRate, correctiveWork, programsState),
     [programsMode, buildings, taxRate, correctiveWork, programsState],
+  );
+  // The save's revenue-side limits over the same itemization the sidebar
+  // sums: the costing card withholds profit and margin while any of it
+  // would be refused (GH codex P2 r8 on #4270).
+  const revenueIssue = useMemo(
+    () => proposalRevenueIssue({ buildings: programsMode ? [] : buildings, correctiveWork, programs: programsState.filter(programRowIsPriced) }),
+    [programsMode, buildings, correctiveWork, programsState],
   );
 
   // "Generate from estimate" (slice 1A-ii): pulls DRAFT sections derived
@@ -1440,7 +1447,7 @@ function CommercialProposalEditor() {
             </Button>
           )}
 
-          {(bidToolsEnabled || projectCosting.rows.length > 0) && <ProposalProjectCosting value={projectCosting} totals={totals} disabled={!!locked || !bidToolsEnabled}
+          {(bidToolsEnabled || projectCosting.rows.length > 0) && <ProposalProjectCosting value={projectCosting} totals={totals} revenueIssue={revenueIssue} disabled={!!locked || !bidToolsEnabled}
             onChange={(value) => { setProjectCosting(value); markEdit(); }} />}
 
           {bidToolsEnabled && !programsMode && <ProposalBidForm buildings={buildings} onDownload={downloadBidForm} disabled={saving || estimate?.status === 'sending'} />}
