@@ -2,18 +2,38 @@
 // Persistence and providers are mocked; no SMS or customer record is touched.
 const mockWrites = [];
 const mockWhereRawCalls = [];
-// The /sms handler's only reachable db('sms_log')...first() call in an
-// unknown-sender flow is the repeat-sender alert-quota check — queueing a
-// row here simulates "a prior sms_log row exists" for that one check.
+// The repeat-sender alert-quota check's own db('sms_log')...first() call —
+// queueing a row here simulates "a prior sms_log row exists" for THAT check
+// only. Distinguished from the compliance outbound-history check's OWN
+// sms_log/messages/messaging_suppression first() calls (below) by whether
+// the query chain used `.whereIn` — only the outbound-history query does
+// (codex round 3 design fix, 2026-09-11: relationship resolution, including
+// this query, now runs BEFORE the repeat-sender check, so both are
+// genuinely reachable and must not share one queue).
 const mockSmsLogFirstQueue = [];
+// queryOutboundHistory's own sms_log / messages / messaging_suppression
+// first() calls, consumed in that query order — empty (the default) means
+// "no outbound history", i.e. NOT compliance-eligible via this path.
+let mockHistoryResults = [];
+// Records each table queryOutboundHistory actually reached (its `.first()`
+// call) — used to assert the query was SKIPPED entirely (codex P1 restored
+// `||` short-circuit, 2026-09-11) when the AI line or a known caller record
+// already resolves eligibility on its own.
+const mockOutboundHistoryCalls = [];
 // findSingleCustomerByPhone runs a raw db('customers')... query — set this
 // to simulate a matched customer for the sender (null/[] = no match).
 let mockCustomersRows = null;
 function mockDb(table) {
   const query = { rows: table === 'customers' && mockCustomersRows ? mockCustomersRows : [] };
-  for (const method of ['where', 'whereNull', 'whereNot', 'orderBy', 'limit']) {
+  for (const method of ['where', 'whereNull', 'whereNot', 'whereNotIn', 'orWhereNull', 'orderBy', 'limit']) {
     query[method] = () => query;
   }
+  query.whereIn = () => { query.usedWhereIn = true; return query; };
+  // Only queryOutboundHistory's `messages` branch joins — the unrelated
+  // read-state checks elsewhere in the handler (`db('messages').where({...
+  // twilio_sid}).first('is_read')`) never do, so this flag alone tells them
+  // apart for `mockOutboundHistoryCalls` below.
+  query.join = () => { query.usedJoin = true; return query; };
   query.whereRaw = (...args) => { mockWhereRawCalls.push({ table, args }); return query; };
   query.insert = (row) => {
     mockWrites.push({ table, row });
@@ -23,7 +43,22 @@ function mockDb(table) {
     query.merge = async () => query.rows;
     return query;
   };
-  query.first = async () => (table === 'sms_log' && mockSmsLogFirstQueue.length ? mockSmsLogFirstQueue.shift() : null);
+  query.first = async () => {
+    if (table === 'messages' && query.usedJoin) {
+      mockOutboundHistoryCalls.push(table);
+      return mockHistoryResults.length ? mockHistoryResults.shift() : null;
+    }
+    if (table === 'messaging_suppression') {
+      mockOutboundHistoryCalls.push(table);
+      return mockHistoryResults.length ? mockHistoryResults.shift() : null;
+    }
+    if (table === 'sms_log' && query.usedWhereIn) {
+      mockOutboundHistoryCalls.push(table);
+      return mockHistoryResults.length ? mockHistoryResults.shift() : null;
+    }
+    if (table === 'messages') return null; // unrelated is_read lookups
+    return table === 'sms_log' && mockSmsLogFirstQueue.length ? mockSmsLogFirstQueue.shift() : null;
+  };
   query.returning = async () => query.rows;
   query.then = (resolve, reject) => Promise.resolve(query.rows).then(resolve, reject);
   query.catch = (reject) => Promise.resolve(query.rows).catch(reject);
@@ -63,12 +98,10 @@ jest.mock('../services/contact-correction', () => ({ detectContactCorrectionInte
 jest.mock('../services/contact-correction-queue', () => ({}));
 jest.mock('../services/recipient-optin', () => ({ markRecipientOptin: jest.fn(async () => true) }));
 jest.mock('../utils/known-caller-phone', () => ({
-  knownCallerPhoneExists: jest.fn(async () => false),
-  // The STOP/HELP/START compliance gate (twilio-webhook.js, merged from
-  // fix/sms-compliance-known-senders) also calls this — unrelated to this
-  // file's solicitation-classifier scenarios, but a missing export makes
-  // that gate's `.catch()` handler unreachable (a synchronous throw on a
-  // non-function skips it), erroring every request through this handler.
+  // The single relationship lookup twilio-webhook.js now uses for both the
+  // STOP/HELP/START compliance gate AND the classifier's own eligibility
+  // gate (codex round 3 design fix, 2026-09-11 — see the "Consent-before-
+  // classification" section of the PR body).
   findKnownCallerCustomer: jest.fn(async () => null),
 }));
 jest.mock('../services/estimate-clarify-asks', () => ({ handleClarifyReply: jest.fn(async () => ({ handled: false })) }));
@@ -85,7 +118,7 @@ const { startSmsThreadDraft } = require('../services/estimator-engine/sms-thread
 const { processInboundSms } = require('../services/estimate-conversion-agent');
 const { sendSMS } = require('../services/twilio');
 const { uploadTwilioMedia } = require('../services/sms-media');
-const { knownCallerPhoneExists, findKnownCallerCustomer } = require('../utils/known-caller-phone');
+const { findKnownCallerCustomer } = require('../utils/known-caller-phone');
 const numbers = require('../config/twilio-numbers');
 const router = require('../routes/twilio-webhook');
 const handler = router.stack.find((layer) => layer.route?.path === '/sms').route.stack[0].handle;
@@ -114,11 +147,13 @@ beforeEach(() => {
   mockWrites.length = 0;
   mockWhereRawCalls.length = 0;
   mockSmsLogFirstQueue.length = 0;
+  mockHistoryResults = [];
+  mockOutboundHistoryCalls.length = 0;
   mockCustomersRows = null;
   process.env.GATE_SMS_SPAM_CLASSIFIER = 'shadow';
   process.env.ADAM_PHONE = '+12025550199';
   dispatchWithFallback.mockResolvedValue({ ok: true, json: { solicitation: false, confidence: 0.97 } });
-  knownCallerPhoneExists.mockResolvedValue(false);
+  findKnownCallerCustomer.mockResolvedValue(null);
 });
 afterAll(() => {
   if (savedGate === undefined) delete process.env.GATE_SMS_SPAM_CLASSIFIER;
@@ -148,24 +183,38 @@ test('a shadow pitch stays unread, records its verdict, and follows ordinary est
   expect(sendSMS).toHaveBeenCalledTimes(1);
 });
 
-test.each([[PITCH, true], ["Please stop texting me. I don't have any leads for you.", null]])(
-  'shadow metadata preserves the existing opt-out response and suppression: %s', async (body, solicitation) => {
-    const res = await receive(body);
-    expect(res.body).toContain('<Message>');
-    expect(res.body).toContain('unsubscribed');
-    expect(recordSuppression).toHaveBeenCalledTimes(1);
-    expect(recordTouchpoint.mock.calls[0][0].isRead).toBe(false);
-    const row = mockWrites.find(({ table }) => table === 'sms_log').row;
-    expect(row.message_type).toBe('opt_out');
-    if (solicitation === null) expect(JSON.parse(row.metadata).spam_verdict).toBeUndefined();
-    else expect(JSON.parse(row.metadata).spam_verdict).toMatchObject({ solicitation, mode: 'shadow' });
-    expect(dispatchWithFallback).not.toHaveBeenCalled();
-  },
-);
+// Codex round 3 design fix, 2026-09-11: consent (opt-out) handling now runs
+// ONLY for a compliance-eligible sender, on the full untouched text — a
+// NON-eligible sender (the default sender in this file: no customer match,
+// no known caller record, no outbound history) never reaches
+// `detectSmsOptCommand` at all, footer or natural-language phrasing alike.
+// Their text is classified instead, and the model's verdict — never a
+// footer's own wording — decides solicitation vs. genuine message. This
+// replaces the old "shadow honors the footer regardless of eligibility"
+// premise, which was exactly the 2026-07-23 incident class.
+test('a non-eligible sender\'s reply-footer pitch is classified, never suppressed (shadow)', async () => {
+  const res = await receive(PITCH);
+  expect(res.body).not.toContain('unsubscribed');
+  expect(recordSuppression).not.toHaveBeenCalled();
+  const row = mockWrites.find(({ table }) => table === 'sms_log').row;
+  expect(row.message_type).not.toBe('opt_out');
+  expect(JSON.parse(row.metadata).spam_verdict).toMatchObject({ solicitation: true, mode: 'shadow' });
+  expect(dispatchWithFallback).not.toHaveBeenCalled(); // regex fast path, no model needed
+});
+
+test('a non-eligible sender\'s natural-language opt-out phrasing reaches the model, never suppressed (shadow)', async () => {
+  const res = await receive("Please stop texting me. I don't have any leads for you.");
+  expect(res.body).not.toContain('unsubscribed');
+  expect(recordSuppression).not.toHaveBeenCalled();
+  expect(dispatchWithFallback).toHaveBeenCalledTimes(1);
+  const row = mockWrites.find(({ table }) => table === 'sms_log').row;
+  expect(row.message_type).not.toBe('opt_out');
+});
 
 test.each([
   ['STOP', 'opt_out'], ['START', 'opt_in'], ['HELP', 'help_request'],
-])('standalone %s retains its carrier response without classification', async (body, messageType) => {
+])('a known sender\'s standalone %s retains its carrier response without classification', async (body, messageType) => {
+  findKnownCallerCustomer.mockResolvedValueOnce({ id: 'contact-1', first_name: 'Known', last_name: 'Contact' });
   const res = await receive(body);
   expect(res.body).toContain('<Message>');
   expect(mockWrites.find(({ table }) => table === 'sms_log').row.message_type).toBe(messageType);
@@ -173,8 +222,20 @@ test.each([
   expect(recordTouchpoint.mock.calls[0][0].metadata.spam_verdict).toBeUndefined();
 });
 
+// Contract: "standalone carrier commands ... bypass the classifier" applies
+// to ANY sender, but STOP/HELP/START HANDLING (suppression + confirmation
+// TwiML) applies only to a sender Waves has messaged — a non-eligible
+// sender's bare command stays ordinary inbound (empty TwiML, no reply, no
+// suppression) AND never reaches the model either.
+test.each(['STOP', 'START', 'HELP'])('a non-eligible sender\'s standalone %s stays ordinary inbound — no reply, no suppression, no classification', async (body) => {
+  const res = await receive(body);
+  expect(res.body).toBe('<Response></Response>');
+  expect(recordSuppression).not.toHaveBeenCalled();
+  expect(dispatchWithFallback).not.toHaveBeenCalled();
+});
+
 test('known service contacts keep ordinary handling without a verdict', async () => {
-  knownCallerPhoneExists.mockResolvedValue(true);
+  findKnownCallerCustomer.mockResolvedValue({ id: 'contact-1', first_name: 'Known', last_name: 'Contact' });
   await receive('We have exclusive pest leads for you.');
   expect(recordTouchpoint.mock.calls[0][0].metadata.spam_verdict).toBeUndefined();
   expect(recordTouchpoint.mock.calls[0][0].isRead).toBe(false);
@@ -182,8 +243,28 @@ test('known service contacts keep ordinary handling without a verdict', async ()
   expect(sendSMS).toHaveBeenCalledTimes(1);
 });
 
+// Codex P1, 2026-09-11: restored the pre-round-2 `||` short-circuit — the
+// (unindexed) outbound-history scan only needs to run while the
+// relationship is STILL unresolved. A known caller record already answers
+// eligibility on its own, so the scan must never fire for one.
+test('a known caller record short-circuits the outbound-history query entirely', async () => {
+  findKnownCallerCustomer.mockResolvedValue({ id: 'contact-1', first_name: 'Known', last_name: 'Contact' });
+  await receive('Can you quote pest control?');
+  expect(mockOutboundHistoryCalls).toEqual([]);
+});
+
+test('the AI line short-circuits the outbound-history query entirely', async () => {
+  await receive('Any texts?', '+18559260203');
+  expect(mockOutboundHistoryCalls).toEqual([]);
+});
+
+test('a genuinely unresolved sender (no known caller record) still runs the outbound-history query', async () => {
+  await receive('Can you quote pest control?');
+  expect(mockOutboundHistoryCalls).not.toEqual([]);
+});
+
 test('a failed relationship lookup bypasses classification and keeps the message actionable', async () => {
-  knownCallerPhoneExists.mockRejectedValueOnce(new Error('database unavailable'));
+  findKnownCallerCustomer.mockRejectedValueOnce(new Error('database unavailable'));
   await receive('Can you quote pest control?');
   expect(recordTouchpoint.mock.calls[0][0].metadata.spam_verdict).toBeUndefined();
   expect(recordTouchpoint.mock.calls[0][0].isRead).toBe(false);
@@ -191,12 +272,13 @@ test('a failed relationship lookup bypasses classification and keeps the message
   expect(startSmsThreadDraft).toHaveBeenCalledTimes(1);
 });
 
-test('the disabled gate does no screening or relationship lookup', async () => {
+test('the disabled gate records no verdict — relationship resolution for STOP/HELP/START still runs, gate-independent', async () => {
   delete process.env.GATE_SMS_SPAM_CLASSIFIER;
   await receive('We have exclusive pest leads for you.');
   expect(recordTouchpoint.mock.calls[0][0].metadata.spam_verdict).toBeUndefined();
   expect(recordTouchpoint.mock.calls[0][0].isRead).toBe(false);
-  expect(knownCallerPhoneExists).not.toHaveBeenCalled();
+  expect(findKnownCallerCustomer).toHaveBeenCalled();
+  expect(dispatchWithFallback).not.toHaveBeenCalled();
 });
 
 test.each(['shadow', 'true'])('the %s model cannot start until the unified inbox message is durably saved', async (mode) => {
@@ -207,7 +289,9 @@ test.each(['shadow', 'true'])('the %s model cannot start until the unified inbox
   await new Promise(setImmediate);
   try {
     expect(dispatchWithFallback).not.toHaveBeenCalled();
-    expect(knownCallerPhoneExists).not.toHaveBeenCalled();
+    // Sequential code order — relationship resolution now runs right after
+    // the unified-inbox save, so it is blocked on this same pending promise.
+    expect(findKnownCallerCustomer).not.toHaveBeenCalled();
   } finally {
     finishSave({ message: { id: 'saved-inbound-message' } });
     await delivery;
@@ -219,8 +303,10 @@ test.each(['shadow', 'true'])('failed unified persistence bypasses %s screening 
   process.env.GATE_SMS_SPAM_CLASSIFIER = mode;
   recordTouchpoint.mockResolvedValueOnce(null);
   await receive('Our software team wants to discuss a partnership.');
+  // A failed unified save bypasses the CLASSIFIER (gated on the unified
+  // message id) — relationship resolution for STOP/HELP/START is
+  // independent of that save and still runs.
   expect(dispatchWithFallback).not.toHaveBeenCalled();
-  expect(knownCallerPhoneExists).not.toHaveBeenCalled();
   const row = mockWrites.find(({ table }) => table === 'sms_log').row;
   expect(row.message_body).toBe('Our software team wants to discuss a partnership.');
   expect(JSON.parse(row.metadata).spam_verdict).toBeUndefined();
@@ -331,6 +417,13 @@ test('an MMS with a regex-strength caption is never screened — media content w
   expect(sendSMS).toHaveBeenCalledTimes(1);
 });
 
+// Codex round 3 design fix, 2026-09-11: this used to exercise a
+// NON-eligible sender's pitch-shaped text (natural-language opt-out phrasing
+// mixed with vendor-pitch wording) "outranking" classification purely on
+// its own wording — exactly the shortcut the redesign removes. For an
+// eligible sender the outcome is guaranteed by construction (the classifier
+// is fully bypassed for them, not merely outranked): this now asserts that
+// invariant directly.
 test.each([
   "Please stop texting me. I don't have any leads for you.",
   'We have exclusive leads. Please remove me from your list.',
@@ -339,8 +432,9 @@ test.each([
   'Reply STOP to stop messages about exclusive leads did not work when I tried it.',
   `${PITCH}. Please stop texting me.`,
   'STOP',
-])('a real opt-out outranks pitch markers in enforcement mode: %s', async (body) => {
+])('an eligible sender\'s own opt-out outranks pitch-shaped phrasing in enforcement mode: %s', async (body) => {
   process.env.GATE_SMS_SPAM_CLASSIFIER = 'true';
+  findKnownCallerCustomer.mockResolvedValueOnce({ id: 'contact-1', first_name: 'Known', last_name: 'Contact' });
   const res = await receive(body);
   expect(res.body).toContain('unsubscribed');
   expect(recordSuppression).toHaveBeenCalledTimes(1);
@@ -382,19 +476,19 @@ test.each([
   expect(sendSMS).toHaveBeenCalledTimes(1);
 });
 
-// Codex P0, 2026-09-11: the footer guard hung off `solicitationEnforced`, so
-// every fail-open path in enforcement mode fell back to the legacy detector and
-// read the vendor's own "Reply STOP to stop messages" as the sender's request —
-// a real suppression row plus an unsubscribe reply from a Waves line, which is
-// the 2026-07-23 incident. The guard now follows the MODE.
+// Codex round 3 design fix, 2026-09-11: footer-stripping (the previous
+// guard tying itself to `solicitationEnforced`/mode) was removed entirely.
+// A NON-eligible sender never reaches `detectSmsOptCommand` at all — footer
+// or not — so none of these classifier-level failure modes can produce a
+// false suppression by construction any more; what's still worth asserting
+// is that none of them make enforcement misbehave either.
 test.each([
   ['a failed verdict write (missing row)', PITCH, () => updateByTwilioSid.mockResolvedValueOnce(null)],
   ['a failed verdict write (error)', PITCH, () => updateByTwilioSid.mockRejectedValueOnce(new Error('metadata unavailable'))],
-  ['a screen that throws', PITCH, () => knownCallerPhoneExists.mockRejectedValueOnce(new Error('lookup down'))],
   ['a non-solicitation model verdict', 'Checking in about last week. Reply STOP to stop messages.', () => {}],
   ['a low-confidence solicitation verdict', 'Checking in about last week. Reply STOP to stop messages.',
     () => dispatchWithFallback.mockResolvedValue({ ok: true, json: { solicitation: true, confidence: 0.5 } })],
-])('%s never lets a reply footer become the sender\'s opt-out in enforcement mode', async (_label, body, arrange) => {
+])('%s never lets a non-eligible sender\'s reply footer become an opt-out in enforcement mode', async (_label, body, arrange) => {
   process.env.GATE_SMS_SPAM_CLASSIFIER = 'true';
   arrange();
   const res = await receive(body);
@@ -409,11 +503,20 @@ test.each([
   expect(recordTouchpoint.mock.calls[0][0].isRead).toBe(false);
 });
 
-test('shadow mode still honors a reply footer exactly as before the enforcement stage', async () => {
-  process.env.GATE_SMS_SPAM_CLASSIFIER = 'shadow';
+// The one fail-open path that now DOES end in a real opt-out: a
+// relationship-lookup failure fails the sender OPEN to compliance-eligible
+// (the contract's safe side — this dissolves the round-2 lookup-error
+// fail-direction question: with footer-stripping gone, "fail open" simply
+// means the sender's own text is honored on its own terms, never that a
+// vendor pitch's footer slips through, since a genuinely non-eligible
+// sender never reaches `detectSmsOptCommand` regardless of this lookup).
+test('a relationship-lookup failure fails OPEN — the sender is honored as eligible, never a spoofed footer', async () => {
+  process.env.GATE_SMS_SPAM_CLASSIFIER = 'true';
+  findKnownCallerCustomer.mockRejectedValueOnce(new Error('lookup down'));
   const res = await receive(PITCH);
   expect(res.body).toContain('unsubscribed');
   expect(recordSuppression).toHaveBeenCalledTimes(1);
+  expect(dispatchWithFallback).not.toHaveBeenCalled();
 });
 
 // Codex P1, 2026-09-11: an enforced pitch's own sms_log row was counted as a
@@ -484,6 +587,12 @@ test('the unified copy is marked read only after the legacy sms_log row is persi
 test('a known customer\'s own opt-out is never stripped as a vendor footer, even in enforcement mode', async () => {
   process.env.GATE_SMS_SPAM_CLASSIFIER = 'true';
   mockCustomersRows = [{ id: 'cust-1', first_name: 'Known', last_name: 'Customer', phone: '+12025550101' }];
+  // findKnownCallerCustomer is a separate mock in this suite (it does not
+  // share state with mockCustomersRows the way the real query — which scans
+  // customers.phone among its columns too — would): mirror the match here
+  // so `complianceEligible` resolves the same way it would against a real
+  // customer row.
+  findKnownCallerCustomer.mockResolvedValueOnce({ id: 'cust-1', first_name: 'Known', last_name: 'Customer' });
   const res = await receive('Reply STOP to stop messages');
   expect(res.body).toContain('unsubscribed');
   expect(recordSuppression).toHaveBeenCalledTimes(1);
@@ -495,35 +604,35 @@ test('a known customer\'s own opt-out is never stripped as a vendor footer, even
 // Codex P0, 2026-09-11: `customer` is findSingleCustomerByPhone, a
 // customers.phone-only match. A sender known solely through a service-contact
 // or secondary-phone column (spouse/tenant/manager slot) is `!customer` but
-// still a known relationship per knownCallerPhoneExists — the footer guard
-// must be keyed on that full recognition set, not the primary-only match, or
-// their own genuine opt-out gets silently dropped as if it were a vendor's
-// spoofed compliance footer.
+// still a known relationship per findKnownCallerCustomer — consent handling
+// (and the classifier bypass) must be keyed on that full recognition set,
+// not the primary-only match, or their own genuine opt-out gets silently
+// dropped as if it were a vendor's spoofed compliance footer.
 test('a service-contact-only known sender\'s own opt-out is never stripped, even in enforcement mode', async () => {
   process.env.GATE_SMS_SPAM_CLASSIFIER = 'true';
   // No primary customers.phone match — mockCustomersRows stays null — but the
   // sender is known through service_contact_phone/secondary_phone, which is
-  // exactly what knownCallerPhoneExists recognizes.
-  knownCallerPhoneExists.mockResolvedValue(true);
+  // exactly what findKnownCallerCustomer recognizes.
+  findKnownCallerCustomer.mockResolvedValue({ id: 'contact-1', first_name: 'Service', last_name: 'Contact' });
   const res = await receive('Reply STOP to stop messages');
   expect(res.body).toContain('unsubscribed');
   expect(recordSuppression).toHaveBeenCalledTimes(1);
   expect(mockWrites.find(({ table }) => table === 'sms_log').row.message_type).toBe('opt_out');
   // Known via the relationship lookup, not the primary match — never a
-  // solicitation-screening candidate either (mirrors the classifier gate,
-  // which already uses this same knownCallerPhoneExists result).
+  // solicitation-screening candidate either (the classifier gate now uses
+  // this exact same `complianceEligible`, one resolution for both).
   expect(dispatchWithFallback).not.toHaveBeenCalled();
 });
 
 // Codex P1 follow-up, 2026-09-11: a failed unified-inbox persistence skips
-// the classifier gate entirely (recordTouchpoint's message id never lands),
-// so knownCallerPhoneExists/`known` never runs and stays at its default
-// false — but the always-on compliance relationship lookup
-// (findKnownCallerCustomer, feeding complianceEligible on every message
-// regardless of persistence) still resolves this same service contact.
-// That already-successful result must still count for the footer decision,
-// or a known sender's genuine opt-out is silently dropped by an unrelated
-// persistence failure.
+// the classifier gate entirely (recordTouchpoint's message id never lands,
+// `inboundTouchpoint?.message?.id` is falsy) — but relationship resolution
+// (findKnownCallerCustomer, feeding `complianceEligible` for STOP/HELP/START
+// handling) runs BEFORE that persistence and BEFORE the classifier gate
+// entirely (codex round 3 reorder), so it still resolves this service
+// contact regardless. That already-successful result must still count for
+// the opt-out decision, or a known sender's genuine opt-out is silently
+// dropped by an unrelated persistence failure.
 test('a failed unified persistence bypass still honors a known service contact\'s own opt-out', async () => {
   process.env.GATE_SMS_SPAM_CLASSIFIER = 'true';
   recordTouchpoint.mockResolvedValueOnce(null);
@@ -533,6 +642,5 @@ test('a failed unified persistence bypass still honors a known service contact\'
   expect(recordSuppression).toHaveBeenCalledTimes(1);
   expect(mockWrites.find(({ table }) => table === 'sms_log').row.message_type).toBe('opt_out');
   // The classifier gate itself never ran — persistence failed before it.
-  expect(knownCallerPhoneExists).not.toHaveBeenCalled();
   expect(dispatchWithFallback).not.toHaveBeenCalled();
 });

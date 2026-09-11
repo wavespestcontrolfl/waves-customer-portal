@@ -2,13 +2,19 @@
 // customer record and no service-contact match, but a genuine accepted
 // outbound sms_log/messages row on file, is `complianceEligible` for
 // STOP/HELP/START handling — and their own "Reply STOP to stop messages"
-// must not be silently stripped as if it were a vendor's spoofed footer.
-// A separate scenario: when the outbound-history lookup itself fails, the
-// relationship is UNRESOLVED, and the established fail-direction for the
-// footer-stripping guard (distinct from the eligibility fail-open) is to
-// fail toward stripping — an unresolved relationship must never let a
-// spoofed vendor footer through. See docs/public-route-contracts.md:210-251
-// and the comment above `knownRelationship` in twilio-webhook.js.
+// must not be silently dropped as if it were a vendor's spoofed footer.
+// A separate scenario: when the outbound-history lookup itself fails,
+// `complianceEligible` fails OPEN (the existing eligibility semantics,
+// unchanged). Codex round 3 design fix, 2026-09-11, REMOVED the separate
+// footer-stripping mechanism entirely (the regexes, `ignoreReplyInstructions`,
+// `knownRelationship`) — a non-eligible sender's text never reaches
+// `detectSmsOptCommand` at all any more, so there is no vendor-footer
+// bypass left for a lookup error to open. This dissolves the round-2
+// lookup-error fail-direction question the old test below encoded: a
+// lookup error now simply means the sender is honored as eligible, same
+// as the fail-open eligibility gate itself. See
+// docs/public-route-contracts.md:200-260 and the "Consent-before-
+// classification" section of PR #4244.
 //
 // This file uses its own DB mock (rather than extending the shared one in
 // twilio-webhook-solicitation.test.js) because it needs `whereIn`/`join`
@@ -135,19 +141,17 @@ test('an unlinked prospect with real outbound history keeps their own opt-out in
   expect(mockWrites.find(({ table }) => table === 'sms_log').row.message_type).toBe('opt_out');
 });
 
-// The established fail-direction (see the file-header comment): the
-// eligibility gate itself (`complianceEligible`) still fails OPEN on this
-// same lookup error (a real bare STOP is never silently refused), but the
-// footer-stripping guard (`knownRelationship`) does not inherit that
-// fail-open — an unresolved relationship fails toward stripping, so a
-// vendor's spoofed reply-instruction footer can never slip through during
-// a DB hiccup. This deliberately reads OPPOSITE of a literal "lookup error
-// never strips" rule; the reasoning is in the file-header comment.
-test('an outbound-history lookup error strips the footer instead of trusting it', async () => {
+// The established fail-direction (see the file-header comment): a failed
+// outbound-history lookup fails the sender OPEN to `complianceEligible`
+// (never silently refuse a real STOP over a DB hiccup) — and since
+// footer-stripping no longer exists at all, "fails open" now simply means
+// their full-text "Reply STOP to stop messages" is honored as their own
+// consent, same as any other eligible sender's.
+test('an outbound-history lookup error fails OPEN and honors the sender\'s own opt-out', async () => {
   mockHistoryShouldFail = true;
   const res = await receive('Reply STOP to stop messages');
-  expect(res.body).not.toContain('unsubscribed');
-  expect(recordSuppression).not.toHaveBeenCalled();
+  expect(res.body).toContain('unsubscribed');
+  expect(recordSuppression).toHaveBeenCalledTimes(1);
   const row = mockWrites.find(({ table }) => table === 'sms_log').row;
-  expect(row.message_type).not.toBe('opt_out');
+  expect(row.message_type).toBe('opt_out');
 });

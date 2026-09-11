@@ -65,12 +65,12 @@ function maskPhone(phone) {
 // their full country code. Query errors preserve real consent handling.
 // Split from the fail-open wrapper below (codex P0 follow-up, 2026-09-11):
 // the wrapper's "true" on a query error is the right default for compliance
-// ELIGIBILITY (never silently refuse a real STOP), but the exact same
-// unresolved-error "true" is the WRONG default for a known-RELATIONSHIP
-// signal — it would let an unrelated DB hiccup mark a first-contact vendor
-// pitch as "known" and disable the footer-stripping protection. A caller
-// that needs to tell a genuine match apart from a fail-open default awaits
-// this directly instead of the wrapper.
+// ELIGIBILITY (never silently refuse a real STOP). The webhook route awaits
+// this directly (not the wrapper) so it can log a genuine MATCH separately
+// from a fail-open default and, since round-3's design fix (2026-09-11),
+// decide whether the query needs to run at all — the AI line or an already-
+// resolved known caller record answers eligibility without it (see
+// `complianceEligible` in twilio-webhook.js).
 async function queryOutboundHistory(phone) {
   const variants = phoneMatchDigits(phone);
   if (!variants.length) return false;
@@ -385,38 +385,89 @@ router.post('/sms', async (req, res) => {
       metadata: { location: numberConfig?.label, numberType: numberConfig?.type, ...(courtesyOnly ? { courtesyOnly: true } : {}) },
     }).catch(() => {});
 
+    // ── Resolve the sender relationship FIRST, before any screening or
+    // opt-out handling (codex round 3 design fix, 2026-09-11 — see the PR's
+    // "Consent-before-classification" section). One lookup answers both
+    // "is this sender compliance-eligible" (STOP/HELP/START handling below)
+    // and, further down, "is this sender a classifier candidate at all":
+    // a known caller record covers the primary phone AND the three
+    // service-contact slots AND secondary_phone (known-caller-phone.js),
+    // a strict superset of `customer` (customers.phone-only). Fails OPEN to
+    // eligible on a query error so a real STOP is always honored.
+    let knownCallerRecord = null;
+    let knownCallerLookupFailed = false;
+    try {
+      knownCallerRecord = await require('../utils/known-caller-phone').findKnownCallerCustomer(db, From);
+    } catch { knownCallerLookupFailed = true; }
+    // The outbound-history query only runs while the relationship is STILL
+    // unresolved — the AI line or a known caller record already answers
+    // eligibility on their own, so an unlinked-prospect scan of sms_log
+    // (no index on to_phone; see the PR report) never runs for them
+    // (codex P1, restoring the pre-round-2 `||` short-circuit). Queried
+    // directly (not through the `hasOutboundHistory` fail-open wrapper) so a
+    // genuine positive MATCH can be told apart from the wrapper's fail-open
+    // default.
+    let outboundHistoryMatch = false;
+    let outboundHistoryLookupFailed = false;
+    if (!isAiNumber && !knownCallerLookupFailed && !knownCallerRecord) {
+      try {
+        outboundHistoryMatch = await queryOutboundHistory(From);
+      } catch (err) {
+        outboundHistoryLookupFailed = true;
+        logger.warn('[sms-compliance] outbound-history check failed; treating sender as eligible', { code: err.code || 'unknown' });
+      }
+    }
+    // Compliance-eligible: a sender Waves has actually messaged (the AI
+    // line, a known caller record, or genuine outbound history), OR a
+    // lookup that failed and fails OPEN so a real STOP is never silently
+    // refused.
+    const complianceEligible = isAiNumber
+      || Boolean(knownCallerLookupFailed || knownCallerRecord)
+      || outboundHistoryMatch
+      || outboundHistoryLookupFailed;
+
+    // ── STOP / UNSUBSCRIBE / HELP / START keyword handling ──
+    // Consent runs BEFORE the classifier, and ONLY for eligible senders, on
+    // the FULL untouched text: a real customer's or known prospect's STOP is
+    // honored immediately — no model call, no 3.5s budget, no footer
+    // stripping. A NON-eligible sender's opt-out-shaped phrasing is never
+    // checked here at all: their full text (footer included) goes to the
+    // classifier below, and the model alone decides solicitation vs. a
+    // genuine message. Bypass out of enforcement exists ONLY for eligible
+    // senders, so a vendor's own "Reply STOP to stop messages." footer can
+    // no longer earn a false opt-out this way (fixes codex round 3 P0
+    // 3987949450 / P1 3987949459 — the 2026-07-23 incident class). A first-
+    // contact stranger's body was already never scanned before this
+    // redesign (audit 2026-09-09); this just removes the regex machinery
+    // that used to try to protect that same boundary from inside the
+    // detector.
+    const optCommand = complianceEligible
+      ? detectSmsOptCommand(Body)
+      : { action: null };
+
     // Save the inbox message before any classifier await: the durable SID
     // claim suppresses retries even if the process dies during a model call.
     // A failed unified write bypasses screening and keeps the legacy path.
     let solicitation = null;
     let verdictMessage = null;
-    // Enforcement MODE, not this text's enforcement outcome, decides whether a
-    // vendor's own reply footer may be read as the sender's opt-out. Every
-    // fail-open path — confidence under the bar, a non-solicitation verdict, a
-    // failed verdict write, a screen that threw — must still refuse to treat
-    // "Reply STOP to stop messages" as a request from the sender, or the spam
-    // footer earns a real suppression row and an unsubscribe reply from a Waves
-    // line. That is the 2026-07-23 incident this lane exists to stop (codex P0).
-    let solicitationMode = 'off';
-    // Hoisted so the footer-stripping decision below can reuse this exact
-    // result instead of a second, independently-gated lookup (codex P0,
-    // 2026-09-11) — see the comment on `ignoreReplyInstructions`.
-    let known = false;
     try {
       const screen = require('../services/sms-solicitation-classifier');
-      solicitationMode = screen.classifierMode();
-      // `!inboundMedia.length` — codex P1 pre-push, 2026-09-11: the screen
-      // only ever reads `Body`, the caption text. An MMS attachment's own
-      // content (a photo, a flyer) is never classified, so a caption that
-      // merely LOOKS like a pitch ("Check out our new service!" alongside a
-      // photo of an actual completed pest-control job at a referred
-      // property) could get the whole message — attachment included —
-      // silenced on caption text alone. Skipping the screen entirely for
-      // any inbound carrying media is the safe default: no verdict, no
-      // enforcement, ordinary handling (alerts/lead intake) proceeds.
-      if (inboundTouchpoint?.message?.id && MessageSid && solicitationMode !== 'off' && !customer && !isAiNumber && !smsReaction && !inboundMedia.length && Body) {
-        known = await require('../utils/known-caller-phone').knownCallerPhoneExists(db, From);
-        solicitation = await screen.screenInboundSms({ body: Body, hasCustomer: known, isReaction: smsReaction, isAiLine: isAiNumber });
+      const solicitationMode = screen.classifierMode();
+      // `!complianceEligible` — an eligible sender (known relationship or
+      // outbound history) never reaches the classifier at all, consent or
+      // not (contract: known primary/secondary/service-contact numbers and
+      // the AI line bypass the classifier). `!inboundMedia.length` — codex
+      // P1 pre-push, 2026-09-11: the screen only ever reads `Body`, the
+      // caption text. An MMS attachment's own content (a photo, a flyer) is
+      // never classified, so a caption that merely LOOKS like a pitch
+      // ("Check out our new service!" alongside a photo of an actual
+      // completed pest-control job at a referred property) could get the
+      // whole message — attachment included — silenced on caption text
+      // alone. Skipping the screen entirely for any inbound carrying media
+      // is the safe default: no verdict, no enforcement, ordinary handling
+      // (alerts/lead intake) proceeds.
+      if (inboundTouchpoint?.message?.id && MessageSid && solicitationMode !== 'off' && !complianceEligible && !smsReaction && !inboundMedia.length && Body) {
+        solicitation = await screen.screenInboundSms({ body: Body, isReaction: smsReaction, isAiLine: isAiNumber });
         if (solicitation) {
           // NOT marked read here even when enforced — see the deferred
           // read-mark right after the legacy sms_log row persists, below.
@@ -429,66 +480,6 @@ router.post('/sms', async (req, res) => {
     } catch { logger.warn('[sms-solicitation] screen failed; continuing normal handling'); }
     const solicitationEnforced = Boolean(solicitation?.enforced && verdictMessage?.id);
     const solicitationMeta = solicitation ? { spam_verdict: { ...solicitation, enforced: solicitationEnforced } } : {};
-
-    // ── STOP / UNSUBSCRIBE / HELP / START keyword handling ──
-    // Only a number Waves has actually messaged can be opting out of, asking
-    // about, or re-joining Waves texts: a matched customer, any known
-    // service-contact/secondary slot, the AI line, an unlinked prospect
-    // with an accepted outbound send on file, or an active suppression row.
-    // A first-contact stranger's body is NOT scanned. The opt-out detector
-    // matches phrases inside a message ("stop texting", "no more texts"),
-    // and lead-gen robotexts carry that phrasing in their own compliance
-    // footer — on 2026-07-23 a vendor pitch ending "Reply NO if you need me
-    // to stop texting" earned a "You've been unsubscribed" text back from a
-    // Waves line and a suppression row for the vendor's number (audit
-    // 2026-09-09). Fails OPEN to eligible on a query error so a real STOP
-    // is always honored.
-    let knownCallerRecord = null;
-    let knownCallerLookupFailed = false;
-    try {
-      knownCallerRecord = await require('../utils/known-caller-phone').findKnownCallerCustomer(db, From);
-    } catch { knownCallerLookupFailed = true; }
-    // The outbound-history check is queried directly (not through the
-    // `hasOutboundHistory` fail-open wrapper) so a genuine positive MATCH
-    // can be told apart from the wrapper's fail-open default — codex P0
-    // follow-up, 2026-09-11: an unlinked prospect with an accepted outbound
-    // send on file is compliance-eligible, but was missing from the
-    // footer-stripping population below, so their own "Reply STOP to stop
-    // messages" was stripped and neither suppressed nor confirmed.
-    let outboundHistoryMatch = false;
-    let outboundHistoryLookupFailed = false;
-    try {
-      outboundHistoryMatch = await queryOutboundHistory(From);
-    } catch (err) {
-      outboundHistoryLookupFailed = true;
-      logger.warn('[sms-compliance] outbound-history check failed; treating sender as eligible', { code: err.code || 'unknown' });
-    }
-    const complianceEligible = isAiNumber
-      || Boolean(knownCallerLookupFailed || knownCallerRecord)
-      || outboundHistoryMatch
-      || outboundHistoryLookupFailed;
-    // Enforcement mode also strips a vendor's own reply-instruction footer
-    // before matching (see the comment above `solicitationMode`), so an
-    // unknown sender's pitch can't earn a false opt-out from its own
-    // compliance text. `knownRelationship` is the same known-sender
-    // population `complianceEligible` recognizes — a matched customer, any
-    // service-contact/secondary-phone slot, or a genuine outbound-history
-    // match — but deliberately does NOT inherit complianceEligible's two
-    // lookup-failure fail-opens: those exist so a real STOP is never
-    // silently refused, but reused here they would do the opposite of what
-    // this guard exists for, letting an unrelated DB hiccup disable
-    // footer-stripping for a genuinely unknown vendor pitch (the 2026-07-23
-    // incident). A failed lookup here fails toward stripping (treated as
-    // not known) so an unresolved relationship can never let a spoofed
-    // footer through. Keep this in sync with `complianceEligible` above —
-    // codex has flagged one more missing population here on each of the
-    // last three rounds (customer-only → service-contact-only →
-    // classifier-bypass → outbound-history-only).
-    const knownRelationship = Boolean(customer) || known || Boolean(knownCallerRecord) || outboundHistoryMatch;
-    const ignoreReplyInstructions = solicitationMode === 'enforce' && !knownRelationship && !isAiNumber;
-    const optCommand = complianceEligible
-      ? detectSmsOptCommand(Body, { ignoreReplyInstructions })
-      : { action: null };
 
     if (optCommand.action === 'opt_out') {
       const normalizedFrom = normalizeE164(From);

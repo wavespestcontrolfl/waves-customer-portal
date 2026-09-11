@@ -24,6 +24,15 @@ describe('SMS opt-out detector', () => {
     expect(detectSmsOptCommand('take me off the route tomorrow')).toEqual({ action: null });
   });
 
+  // Footer-stripping (the `ignoreReplyInstructions` option and its regexes)
+  // was removed 2026-09-11 (codex round 3 design fix): this detector now
+  // only ever runs against a sender the webhook has already resolved as
+  // compliance-eligible, on their full untouched text, so a vendor's own
+  // reply-instruction footer is never a scenario this detector needs to
+  // defend against — see the comment above `detectSmsOptCommand` and
+  // docs/public-route-contracts.md:200-260. It still matches this phrasing
+  // as natural-language opt-out (unchanged): who gets that treated as a
+  // real opt-out is now decided entirely by the caller's eligibility check.
   test.each([
     'Reply "NO" if you need me to stop texting',
     'Reply STOP to stop messages',
@@ -31,60 +40,8 @@ describe('SMS opt-out detector', () => {
     'Say NO if you want us to stop messaging you',
     'We have exclusive leads. Reply STOP to stop messages.',
     'We have exclusive leads\nReply STOP to stop messages',
-  ])('can exclude a vendor reply instruction while keeping legacy detection: %s', (body) => {
+  ])('still recognizes a reply-instruction footer as natural-language opt-out (no stripping option exists anymore): %s', (body) => {
     expect(detectSmsOptCommand(body).action).toBe('opt_out');
-    expect(detectSmsOptCommand(body, { ignoreReplyInstructions: true }).action).toBeNull();
-  });
-
-  test.each([
-    "Please stop texting me. I don't have any leads for you.",
-    'Please remove me from your list. Reply STOP to stop messages.',
-    'Reply NO if you need me to stop texting. Please stop texting me.',
-    'Reply NO if you need me to stop texting; do not contact me again.',
-    'Wrong number. Reply STOP to stop messages.',
-    'I already tried to reply STOP to stop messages about exclusive leads, but you keep texting me.',
-    'Your instructions told me to text STOP to stop messages about exclusive leads.',
-    'Reply STOP to stop messages about exclusive leads did not work when I tried it.',
-    'STOP',
-    'Disliked "STOP"',
-    // Codex P1 pre-push, 2026-09-11: a standalone command riding right after
-    // a stripped footer, with only punctuation between them — the leading
-    // orphan punctuation the old lookahead-only strip left behind broke the
-    // exact-keyword match for the first case and the natural-language match
-    // for the second.
-    'Reply STOP to stop messages. STOP',
-    'Reply STOP to stop messages. Please remove me.',
-  ])('preserves a real opt-out even when reply instructions are excluded: %s', (body) => {
-    expect(detectSmsOptCommand(body, { ignoreReplyInstructions: true }).action).toBe('opt_out');
-  });
-
-  test.each([
-    'We have exclusive pest leads. Reply STOP if this is the wrong number.',
-    'We have exclusive pest leads for you. Text STOP if wrong number.',
-    'Exclusive leads available in your area\nReply NO if this is the wrong number',
-  ])('can exclude a vendor wrong-number footer while keeping legacy detection: %s', (body) => {
-    expect(detectSmsOptCommand(body).action).toBe('opt_out');
-    expect(detectSmsOptCommand(body, { ignoreReplyInstructions: true }).action).toBeNull();
-  });
-
-  test('strips an "in error" footer variant that carries no other opt-out signal', () => {
-    const body = 'I found your info online. Reply STOP if you received this in error.';
-    expect(detectSmsOptCommand(body).action).toBeNull();
-    expect(detectSmsOptCommand(body, { ignoreReplyInstructions: true }).action).toBeNull();
-  });
-
-  test.each([
-    'We have exclusive pest leads. If this is the wrong number, reply STOP.',
-    'We have exclusive pest leads for you. If wrong number, text STOP.',
-    'Exclusive leads available in your area\nIf this is the wrong number, reply NO',
-    // Codex P1, 2026-09-11: a trailing \b positioned AFTER the optional
-    // closing quote never matched (quote and following punctuation are both
-    // non-word), so a quoted keyword silently skipped stripping.
-    'We have exclusive pest leads. If this is the wrong number, reply "STOP".',
-    'We have exclusive pest leads for you. If wrong number, text ‘STOP’.',
-  ])('can exclude a condition-first vendor wrong-number footer while keeping legacy detection: %s', (body) => {
-    expect(detectSmsOptCommand(body).action).toBe('opt_out');
-    expect(detectSmsOptCommand(body, { ignoreReplyInstructions: true }).action).toBeNull();
   });
 
   test.each([
@@ -92,8 +49,8 @@ describe('SMS opt-out detector', () => {
     'sorry wrong number',
     'you have the wrong number',
     'Sorry, you have the wrong number.',
-  ])('keeps a genuine human wrong-number reply working even when reply instructions are excluded: %s', (body) => {
-    expect(detectSmsOptCommand(body, { ignoreReplyInstructions: true })).toMatchObject({
+  ])('a genuine human wrong-number reply is opt_out/wrong_number: %s', (body) => {
+    expect(detectSmsOptCommand(body)).toMatchObject({
       action: 'opt_out',
       reason: 'wrong_number',
     });

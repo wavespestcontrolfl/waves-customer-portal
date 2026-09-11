@@ -22,8 +22,14 @@ test.each([undefined, '', 'false', 'on'])('gate %s is off', async (gate) => {
   expect(mockDispatch).not.toHaveBeenCalled();
 });
 
-test('known senders, reactions, the AI line and empty messages bypass the classifier', async () => {
-  for (const args of [{ hasCustomer: true }, { isReaction: true }, { isAiLine: true }, { body: ' ' }]) {
+// Codex round 3 design fix, 2026-09-11: `screenInboundSms` no longer knows
+// (or needs to know) about a matched customer — the webhook route resolves
+// compliance eligibility BEFORE ever calling the classifier at all, so an
+// eligible sender never reaches this function regardless of what it does
+// here. Only reactions, the AI line, and empty text are still recognized
+// locally (defense in depth).
+test('reactions, the AI line and empty messages bypass the classifier', async () => {
+  for (const args of [{ isReaction: true }, { isAiLine: true }, { body: ' ' }]) {
     expect(await screenInboundSms({ body: PITCH, ...args })).toBeNull();
   }
   expect(mockDispatch).not.toHaveBeenCalled();
@@ -34,13 +40,22 @@ test.each(['STOP', 'stop.', 'STOPP', 'REMOVE', 'OPT OUT', 'DO NOT TEXT', 'START'
   expect(mockDispatch).not.toHaveBeenCalled();
 });
 
+// Codex round 3 design fix, 2026-09-11: footer-stripping was removed from
+// the opt-out detector entirely, and natural-language opt-out-shaped text
+// (as opposed to a bare, standalone carrier command) no longer bypasses the
+// classifier on its own — only the webhook's own compliance-eligibility
+// resolution decides whose consent to honor pre-model, and this function
+// only ever runs for a sender that resolution already determined is NOT
+// eligible. So this phrasing now reaches the model like any other text; the
+// model itself judges whether it reads as a solicitation.
 test.each([
   "Please stop texting me. I don't have any leads for you.",
   'Please remove me from your list.',
   'This is the wrong number.',
-])('natural-language consent does not wait on the model: %s', async (body) => {
-  expect(await screenInboundSms({ body })).toBeNull();
-  expect(mockDispatch).not.toHaveBeenCalled();
+])('natural-language opt-out phrasing (not a standalone carrier command) reaches the model: %s', async (body) => {
+  mockDispatch.mockResolvedValue({ ok: true, json: { solicitation: false, confidence: 0.9 } });
+  expect(await screenInboundSms({ body })).toMatchObject({ method: 'model' });
+  expect(mockDispatch).toHaveBeenCalledTimes(1);
 });
 
 test.each([
@@ -76,7 +91,7 @@ test.each([
 test('model confidence is recorded without taking an enforcement action', async () => {
   mockDispatch.mockResolvedValue({ ok: true, json: { solicitation: true, confidence: 0.93 } });
   expect(await screenInboundSms({ body: SOFT_PITCH })).toEqual({
-    solicitation: true, confidence: 0.93, method: 'model', mode: 'shadow', enforced: false, version: 'sms-solicitation-v3',
+    solicitation: true, confidence: 0.93, method: 'model', mode: 'shadow', enforced: false, version: 'sms-solicitation-v4',
   });
 });
 
@@ -152,6 +167,24 @@ test('an unavailable model never lets a regex-strength pitch enforce', async () 
   expect(verdict).toMatchObject({ solicitation: false, method: 'model_failed', enforced: false });
 });
 
+// Codex round 3 design fix, 2026-09-11: a standalone carrier command still
+// bypasses enforcement unconditionally (it never reaches this function for
+// an eligible sender anyway — the webhook honors it pre-model — but the
+// classifier's own defense-in-depth recognizer still refuses to spend a
+// model call on one either).
+test.each(['START', 'HELP'])('a standalone carrier command still bypasses enforcement: %s', async (body) => {
+  process.env.GATE_SMS_SPAM_CLASSIFIER = 'true';
+  expect(await screenInboundSms({ body })).toBeNull();
+  expect(mockDispatch).not.toHaveBeenCalled();
+});
+
+// Natural-language opt-out-shaped text — including footer-style phrasing a
+// vendor pitch might carry — no longer bypasses enforcement on its own
+// (footer-stripping was removed from the detector entirely). This function
+// only runs for a sender the webhook already determined is NOT
+// compliance-eligible, so there is no consent of theirs to honor here: the
+// full text reaches the model exactly like any other message, and only the
+// model's own confident verdict may enforce.
 test.each([
   "Please stop texting me. I don't have any leads for you.",
   'We have exclusive leads. Please remove me from your list.',
@@ -159,11 +192,12 @@ test.each([
   'I already tried to reply STOP to stop messages about exclusive leads, but you keep texting me.',
   'Your instructions told me to text STOP to stop messages about exclusive leads.',
   'Reply STOP to stop messages about exclusive leads did not work when I tried it.',
-  'START', 'HELP',
-])('genuine consent/support commands bypass enforcement: %s', async (body) => {
+])('natural-language opt-out phrasing reaches the model in enforcement mode — the model decides: %s', async (body) => {
   process.env.GATE_SMS_SPAM_CLASSIFIER = 'true';
-  expect(await screenInboundSms({ body })).toBeNull();
-  expect(mockDispatch).not.toHaveBeenCalled();
+  mockDispatch.mockResolvedValue({ ok: true, json: { solicitation: true, confidence: 0.95 } });
+  const verdict = await screenInboundSms({ body });
+  expect(mockDispatch).toHaveBeenCalledTimes(1);
+  expect(verdict).toMatchObject({ method: 'model', enforced: true });
 });
 
 test('a model failure in enforcement mode keeps ordinary handling', async () => {

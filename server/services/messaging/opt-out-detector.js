@@ -50,41 +50,17 @@ const HELP_RESPONSE_TEMPLATE =
 const STOP_CONFIRMATION_TEMPLATE =
   "You've been unsubscribed from Waves Pest Control SMS. Reply START to re-subscribe.";
 
-// A vendor can offer the recipient a reply instruction without asking Waves
-// to stop. Only a complete instruction starting a sentence or line can be
-// removed; narrated attempts and requests elsewhere must still win. The
-// trailing sentence-ending punctuation is CONSUMED (not just a lookahead),
-// so it is removed along with the rest of the instruction \u2014 codex P1
-// pre-push, 2026-09-11: a lookahead left an orphan ". " between the
-// stripped footer and whatever came next, so "Reply STOP to stop messages.
-// STOP" stripped down to ". STOP" instead of "STOP" and the leading period
-// broke the exact-keyword match (compactKeyword only trims TRAILING
-// punctuation), silently losing a genuine separate consent command riding
-// right after the footer.
-const REPLY_OPT_OUT_INSTRUCTION = /(^|[.!?;\r\n])\s*(?:reply|respond|text|say)\s+(?:with\s+)?["'\u2018\u2019\u201C\u201D]?(?:no|stop|unsubscribe)["'\u2018\u2019\u201C\u201D]?\s+(?:if\s+you\s+(?:want|need)(?:\s+(?:me|us))?\s+to\s+|to\s+)(?:stop\s+(?:texting|messaging|texts?|messages?|sms)(?:\s+(?:you|me))?|unsubscribe|opt\s*out)\b\s*(?:[.!?;\r\n]|$)/gi;
-
-// Same shape, but for a vendor footer that invites a STOP/NO reply keyed on
-// "wrong number" or "sent in error" rather than "stop texting" \u2014 e.g. "Reply
-// STOP if this is the wrong number." / "Text STOP if wrong number." / "Reply
-// STOP if you received this in error." Left unstripped, WRONG_NUMBER_PATTERNS
-// below reads the footer's own "wrong number" as the recipient's own reply
-// and the classifier treats a vendor pitch as a real wrong-number opt-out
-// (codex P0, 2026-09-11). A genuine human reply ("sorry wrong number", "you
-// have the wrong number") never matches this reply-instruction shape, so it
-// still falls through to WRONG_NUMBER_PATTERNS untouched.
-const REPLY_WRONG_NUMBER_FOOTER = /(^|[.!?;\r\n])\s*(?:reply|respond|text|say)\s+(?:with\s+)?["'\u2018\u2019\u201C\u201D]?(?:no|stop|unsubscribe)["'\u2018\u2019\u201C\u201D]?\s+if\s+(?:this\s+is\s+)?(?:you(?:'re|\s+are)\s+)?(?:not\s+the\s+intended\s+recipient|(?:the\s+)?wrong\s+number|you\s+(?:received|got)\s+this\s+(?:in\s+error|by\s+mistake))\b\s*(?:[.!?;\r\n]|$)/gi;
-
-// Same footer, condition-first order \u2014 "If this is the wrong number, reply
-// STOP." / "If wrong number, text STOP." \u2014 rather than reply-first (codex
-// P0, 2026-09-11: the reply-first regex above does not match this ordering,
-// so WRONG_NUMBER_PATTERNS still reads the footer's own wording as consent).
-// The word boundary sits BEFORE the optional closing quote, not after it: a
-// \b right after a consumed quote character finds non-word on both sides
-// (the quote and the following punctuation) and never matches, so
-// "...reply \"STOP\"." silently fell through unstripped (codex P1,
-// 2026-09-11).
-const CONDITION_FIRST_WRONG_NUMBER_FOOTER = /(^|[.!?;\r\n])\s*if\s+(?:this\s+is\s+)?(?:you(?:'re|\s+are)\s+)?(?:not\s+the\s+intended\s+recipient|(?:the\s+)?wrong\s+number|you\s+(?:received|got)\s+this\s+(?:in\s+error|by\s+mistake))\s*,?\s*(?:please\s+)?(?:reply|respond|text|say)\s+(?:with\s+)?["'\u2018\u2019\u201C\u201D]?(?:no|stop|unsubscribe)\b["'\u2018\u2019\u201C\u201D]?\s*(?:[.!?;\r\n]|$)/gi;
-
+// Footer-stripping (a set of regexes that removed a vendor's own reply
+// instruction before matching) was removed 2026-09-11 (codex round 3 P0
+// 3987949450 / P1 3987949459 design fix). It existed only to keep a
+// NON-eligible sender's own compliance footer ("Reply STOP to stop
+// messages.") from being misread as their opt-out \u2014 but this detector now
+// only ever runs against a COMPLIANCE-ELIGIBLE sender's full, untouched
+// text (server/routes/twilio-webhook.js resolves eligibility before calling
+// this at all); a non-eligible sender's text never reaches
+// `detectSmsOptCommand` for opt-out purposes in the first place, so there is
+// nothing left to strip. See docs/public-route-contracts.md:200-260 and the
+// "Consent-before-classification" section of PR #4244.
 function normalizeBody(body) {
   return String(body || '')
     .replace(/[\u2018\u2019]/g, "'")
@@ -106,13 +82,8 @@ function compactKeyword(body) {
     .toUpperCase();
 }
 
-function detectSmsOptCommand(body, { ignoreReplyInstructions = false } = {}) {
-  const normalized = normalizeBody(ignoreReplyInstructions
-    ? String(body || '')
-      .replace(REPLY_OPT_OUT_INSTRUCTION, '$1')
-      .replace(REPLY_WRONG_NUMBER_FOOTER, '$1')
-      .replace(CONDITION_FIRST_WRONG_NUMBER_FOOTER, '$1')
-    : body);
+function detectSmsOptCommand(body) {
+  const normalized = normalizeBody(body);
   if (!normalized) return { action: null };
 
   const tapbackStripped = stripTapbackPrefix(normalized);
