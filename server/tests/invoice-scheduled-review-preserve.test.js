@@ -363,3 +363,44 @@ describe('InvoiceService.markDeliverySent scheduled-review fallback', () => {
       .toBeLessThan(ReviewService.enrollPostService.mock.invocationCallOrder[0]);
   });
 });
+
+describe('sendViaSMSAndEmail: nothing due on a pre-completion open-visit invoice (deposit-covered) — settle, never a $0 pay link (Codex P1 r7 #4131)', () => {
+  const zeroDue = (over = {}) => ({ payer_statement_id: null, status: 'draft', total: 0, credit_applied: 0, scheduled_service_id: 'svc-1', service_record_id: null, ...over });
+  let smsSpy;
+  beforeEach(() => {
+    jest.clearAllMocks();
+    smsSpy = jest.spyOn(InvoiceService, 'sendViaSMS').mockResolvedValue({ sent: true, payUrl: 'https://pay.example/x' });
+  });
+  afterEach(() => jest.restoreAllMocks());
+
+  test('settles through the zero-balance transition and reports it covered — no claim, no SMS, no email', async () => {
+    db.mockReturnValueOnce(chain({ first: zeroDue() }));
+    const settle = jest.spyOn(InvoiceService, 'settleZeroBalance').mockResolvedValue({ settled: true, invoice: { id: 'inv-1', status: 'prepaid' } });
+    const result = await InvoiceService.sendViaSMSAndEmail('inv-1', {});
+    expect(result).toMatchObject({ ok: true, settled_by_deposit: true, sms: { code: 'settled_by_deposit' }, email: { code: 'settled_by_deposit' } });
+    expect(settle).toHaveBeenCalledWith('inv-1');
+    expect(smsSpy).not.toHaveBeenCalled();
+    expect(db).toHaveBeenCalledTimes(1); // the pre-check read only — the claim never ran
+  });
+
+  test('a refused or throwing settlement REFUSES the send (retryable code) instead of delivering', async () => {
+    db.mockReturnValueOnce(chain({ first: zeroDue() }));
+    jest.spyOn(InvoiceService, 'settleZeroBalance').mockResolvedValue({ settled: false, reason: 'followup_in_flight', retryable: true });
+    expect(await InvoiceService.sendViaSMSAndEmail('inv-1', {})).toMatchObject({ ok: false, code: 'deposit_settlement_pending', error: expect.stringMatching(/followup_in_flight/) });
+    db.mockReturnValueOnce(chain({ first: zeroDue() }));
+    jest.spyOn(InvoiceService, 'settleZeroBalance').mockRejectedValue(new Error('deadlock detected'));
+    expect(await InvoiceService.sendViaSMSAndEmail('inv-1', {})).toMatchObject({ ok: false, code: 'deposit_settlement_pending', error: expect.stringMatching(/deadlock detected/) });
+    expect(smsSpy).not.toHaveBeenCalled();
+  });
+
+  test('scope: a balance due, a record-linked invoice, an unlinked invoice, or a non-claimable status all take the normal path', async () => {
+    const settle = jest.spyOn(InvoiceService, 'settleZeroBalance').mockResolvedValue({ settled: true });
+    for (const row of [zeroDue({ total: 117 }), zeroDue({ service_record_id: 'sr-1' }), zeroDue({ scheduled_service_id: null }), zeroDue({ status: 'void' })]) {
+      db.mockReset();
+      // mockSendSequence's first read IS the pre-check: the merged row carries the scope fields.
+      mockSendSequence({ ...scheduledInvoice(), ...row });
+      await InvoiceService.sendViaSMSAndEmail('inv-1', {}).catch(() => {});
+      expect(settle).not.toHaveBeenCalled();
+    }
+  });
+});

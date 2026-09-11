@@ -1228,9 +1228,12 @@ async function createInvoiceLinkedToOpenVisit({ visit, customerId, createArgs, e
 // would do the same when the completion later reuses it. Close it through
 // the existing zero-balance transition instead — the same non-cash 'prepaid'
 // state the completion uses — and tell the client so it skips the send.
-// Best-effort: a refused settlement (reminder lease in flight, payment work
-// already recorded) leaves the row as minted and is logged; the completion
-// settles it again on the same authority.
+// Fail CLOSED (Codex P1 r7): a refused or failed settlement (reminder lease
+// in flight, payment work already recorded, transient error) leaves the row
+// as minted but reports deliveryHeld — the client skips its send, and
+// sendViaSMSAndEmail refuses a zero-due open-visit invoice on its own
+// (settling it if it can) so no caller can text a $0 pay link. The
+// completion settles it again on the same authority.
 async function settleDepositCoveredInvoice(invoice) {
   const { invoiceAmountDue } = require('../services/invoice-helpers');
   if (!invoice || invoice.status !== 'draft' || invoiceAmountDue(invoice) > 0) return { invoice };
@@ -1241,10 +1244,11 @@ async function settleDepositCoveredInvoice(invoice) {
       return { invoice: settlement.invoice, settledByDeposit: true };
     }
     logger.warn(`[admin-invoices] invoice ${invoice.id} is fully deposit-covered but zero-balance settlement was refused: ${settlement.reason}`);
+    return { invoice, deliveryHeld: { code: 'deposit_settlement_pending', reason: settlement.reason || 'refused' } };
   } catch (err) {
     logger.error(`[admin-invoices] zero-balance settlement failed for deposit-covered invoice ${invoice.id}: ${err.message}`);
+    return { invoice, deliveryHeld: { code: 'deposit_settlement_pending', reason: err.message } };
   }
-  return { invoice };
 }
 
 // Step 6 — the unlinked / record-linked create. A record-linked invoice
@@ -1297,7 +1301,7 @@ router.post('/', requireAdmin, async (req, res, next) => {
       outcome = { invoice: await createInvoiceUnlinked({ createArgs, serviceRecordId, stampedEstimateId }) };
     }
     if (outcome.refusal) return res.status(outcome.refusal.status).json(outcome.refusal.body);
-    const { invoice, settledByDeposit = false } = outcome;
+    const { invoice, settledByDeposit = false, deliveryHeld = null } = outcome;
 
     if (stampedEstimateId) {
       // Post-commit retirement: the new coverage rewrites/resolves the
@@ -1324,6 +1328,10 @@ router.post('/', requireAdmin, async (req, res, next) => {
       // invoice and it was settled at creation — the client skips its
       // send-now call (there is no balance to text a pay link for).
       settledByDeposit,
+      // Set when the deposit covers the invoice but settlement was refused or
+      // failed right now: the client must NOT send (a $0 pay link would go out
+      // and follow-ups would arm); the send path refuses it server-side too.
+      deliveryHeld,
     });
   } catch (err) {
     if (err?.isOperational && err.statusCode) {
@@ -1867,6 +1875,11 @@ router.post('/:id/send', requireAdmin, async (req, res, next) => {
         sms: { ok: false, code: 'already_delivered' },
         email: { ok: false, code: 'already_delivered' },
       });
+    }
+    if (result.code === 'deposit_settlement_pending') {
+      // Nothing due (deposit-covered) but not settleable right now: a
+      // retryable conflict, never a $0 pay link (Codex P1 r7 #4131).
+      return res.status(409).json(result);
     }
     if (!result.ok) {
       // Both channels failed. adminFetch toasts `body.error` — without a

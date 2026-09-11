@@ -918,6 +918,35 @@ async function consumeQueuedInvoiceSend(invoiceId) {
   return Array.isArray(rows) ? rows.length : 0;
 }
 
+// A claimable invoice linked to an open visit (no service record yet) with
+// nothing due: settle (prepaid, system:zero_balance) and report it covered;
+// if the settlement is refused or throws, refuse the send with a retryable
+// code. Null for every other invoice — the normal send proceeds.
+async function zeroDueOpenVisitSendOutcome(service, row, invoiceId) {
+  if (!row || !row.scheduled_service_id || row.service_record_id) return null;
+  if (!SEND_CLAIMABLE_STATUSES.includes(row.status)) return null;
+  if (row.total == null || require("./invoice-helpers").invoiceAmountDue(row) > 0) return null;
+  let settlement;
+  try {
+    settlement = await service.settleZeroBalance(invoiceId);
+  } catch (err) {
+    settlement = { settled: false, reason: err.message };
+  }
+  if (settlement?.settled) {
+    logger.info(`[invoice] ${invoiceId}: nothing due on the open-visit invoice (deposit-covered) — settled at send instead of delivering a $0 pay link`);
+    return { ok: true, settled_by_deposit: true, sms: { ok: false, code: "settled_by_deposit" }, email: { ok: false, code: "settled_by_deposit" }, payUrl: null };
+  }
+  const reason = settlement?.reason || "refused";
+  logger.warn(`[invoice] ${invoiceId}: nothing due on the open-visit invoice but zero-balance settlement was refused (${reason}) — send refused`);
+  return {
+    ok: false,
+    code: "deposit_settlement_pending",
+    error: `Nothing is due on this invoice (covered by the estimate deposit), but it could not be settled yet (${reason}) — not sent. Retry shortly; the visit's completion settles it too.`,
+    sms: { ok: false, code: "deposit_settlement_pending" },
+    email: { ok: false, code: "deposit_settlement_pending" },
+  };
+}
+
 function queuedPayLinkError(queued) {
   const e = new Error(`Invoice send already in progress — a text carrying this pay link is queued for the send window${queued.scheduled_for ? ` (${new Date(queued.scheduled_for).toISOString()})` : ""}; it delivers then`);
   e.code = "queued_pay_link";
@@ -2932,10 +2961,17 @@ const InvoiceService = {
     // Phase 2: an accrued invoice (on a payer statement) is never delivered
     // individually. Refuse BEFORE claiming/applying credit so we don't flip its
     // status to 'sending'. (sendInvoiceEmail also fails closed; this is the early gate.)
-    const accrualPre = await db("invoices").where({ id: invoiceId }).first("payer_statement_id");
+    const accrualPre = await db("invoices").where({ id: invoiceId }).first("payer_statement_id", "status", "total", "credit_applied", "scheduled_service_id", "service_record_id");
     if (accrualPre?.payer_statement_id) {
       return { ok: false, error: "Invoice is billed on the payer’s monthly statement; not sent individually.", sms: { ok: false }, email: { ok: false } };
     }
+    // Nothing due on a pre-completion invoice linked to an OPEN visit (the
+    // estimate deposit covered it): never text a $0 pay link or arm
+    // follow-ups (Codex P1 r7 #4131). Settle it through the zero-balance
+    // transition instead; when that is refused right now, refuse the send
+    // (retryable) rather than deliver — whichever client called.
+    const zeroDue = await zeroDueOpenVisitSendOutcome(this, accrualPre, invoiceId);
+    if (zeroDue) return zeroDue;
     // Claim FIRST, then apply credit. Applying before the claim strands credit when
     // two sends race: the loser draws down the balance, but the winner already owns
     // the 'sending' row — reverseAppliedCredit refuses 'sending', so the loser can't

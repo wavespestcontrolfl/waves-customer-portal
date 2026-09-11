@@ -148,14 +148,26 @@ describe('POST /admin/invoices with an open visit link', () => {
       } finally { settle.mockRestore(); }
     });
 
-    test('a refused settlement leaves the row as minted and reports settledByDeposit false — never a throw', async () => {
+    test('a refused settlement fails CLOSED: the row stays as minted and the response holds delivery (Codex P1 r7) — never a throw', async () => {
       minted({ total: 0 });
       const settle = jest.spyOn(InvoiceService, 'settleZeroBalance').mockResolvedValue({ settled: false, reason: 'followup_in_flight', retryable: true, invoice: null });
       try {
         await withServer(async (baseUrl) => {
           const res = await post(baseUrl, { scheduledServiceId: VISIT });
           expect(res.status).toBe(201);
-          expect(await res.json()).toMatchObject({ id: 'inv-new', status: 'draft', settledByDeposit: false });
+          expect(await res.json()).toMatchObject({ id: 'inv-new', status: 'draft', settledByDeposit: false, deliveryHeld: { code: 'deposit_settlement_pending', reason: 'followup_in_flight' } });
+        });
+      } finally { settle.mockRestore(); }
+    });
+
+    test('a settlement that THROWS holds delivery the same way', async () => {
+      minted({ total: 0 });
+      const settle = jest.spyOn(InvoiceService, 'settleZeroBalance').mockRejectedValue(new Error('deadlock detected'));
+      try {
+        await withServer(async (baseUrl) => {
+          const res = await post(baseUrl, { scheduledServiceId: VISIT });
+          expect(res.status).toBe(201);
+          expect(await res.json()).toMatchObject({ id: 'inv-new', status: 'draft', settledByDeposit: false, deliveryHeld: { code: 'deposit_settlement_pending', reason: 'deadlock detected' } });
         });
       } finally { settle.mockRestore(); }
     });
@@ -168,7 +180,7 @@ describe('POST /admin/invoices with an open visit link', () => {
           const res = await post(baseUrl, { scheduledServiceId: VISIT });
           expect(res.status).toBe(201);
           expect(settle).not.toHaveBeenCalled();
-          expect(await res.json()).toMatchObject({ id: 'inv-new', status: 'draft', settledByDeposit: false });
+          expect(await res.json()).toMatchObject({ id: 'inv-new', status: 'draft', settledByDeposit: false, deliveryHeld: null });
         });
       } finally { settle.mockRestore(); }
     });

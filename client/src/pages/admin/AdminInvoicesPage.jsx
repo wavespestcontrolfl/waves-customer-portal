@@ -6283,12 +6283,17 @@ function CreateInvoice({
           return;
         }
       }
-      if (sendTiming === "now" && invoice.id && invoice.settledByDeposit) {
+      if (sendTiming === "now" && invoice.id && (invoice.settledByDeposit || invoice.deliveryHeld)) {
         // The linked visit's estimate deposit covered the whole invoice: the
         // server settled it at creation (prepaid) — there is no balance to
         // text a pay link for, and a send would be refused as not sendable.
+        // deliveryHeld = covered but NOT settleable right now (Codex P1 r7):
+        // still never send (the server refuses it too); the completion
+        // settles it, or the operator retries Send later.
         showToast(
-          `Invoice created: ${invoice.invoice_number} — fully covered by the estimate deposit, nothing to send`,
+          invoice.settledByDeposit
+            ? `Invoice created: ${invoice.invoice_number} — fully covered by the estimate deposit, nothing to send`
+            : `Invoice created: ${invoice.invoice_number} — fully covered by the estimate deposit but not settled yet (${invoice.deliveryHeld?.reason || invoice.deliveryHeld?.code}); not sent. It settles at the visit's completion, or retry Send later.`,
         );
         onCreated();
         savingRef.current = false;

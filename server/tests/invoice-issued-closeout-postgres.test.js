@@ -111,6 +111,12 @@ postgres('invoice issued ⇒ visit completed (migrated PostgreSQL)', () => {
     expect((await resolveVisitForIssuedInvoice(trx, await invoice({ scheduled_service_id: open.id }), { today: TODAY })).svc.id).toBe(open.id);
     const past = await visit({ date: '2040-02-20', status: 'pending' });
     expect((await resolveVisitForIssuedInvoice(trx, await invoice({ scheduled_service_id: past.id, date: '2040-02-20' }), { today: TODAY })).svc.id).toBe(past.id);
+    // A SEND leaves a visit scheduled for TODAY open (Codex P1 r7 #4131): the
+    // office picker sends pre-completion invoices for today's visits before
+    // the tech arrives. A payment still closes it; a past day closes on a send.
+    expect(await resolveVisitForIssuedInvoice(trx, await invoice({ scheduled_service_id: open.id }), { today: TODAY, trigger: 'sent' })).toMatchObject({ svc: null, reason: 'visit_scheduled_today' });
+    expect((await resolveVisitForIssuedInvoice(trx, await invoice({ scheduled_service_id: open.id }), { today: TODAY, trigger: 'paid' })).svc.id).toBe(open.id);
+    expect((await resolveVisitForIssuedInvoice(trx, await invoice({ scheduled_service_id: past.id, date: '2040-02-20' }), { today: TODAY, trigger: 'sent' })).svc.id).toBe(past.id);
     // In-progress visits stay with their technician (GitHub r9 P1): a running
     // job timer and a completion of their own — the office closeout leaves them.
     const onSite = await visit({ date: '2040-02-21', status: 'on_site' });

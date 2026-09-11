@@ -88,7 +88,7 @@ async function probeVisitRefusal(conn, svc) {
 // refusal carries it as `visit` so the caller can audit the refusal — and
 // resume its OWN partially committed closeout on a completed one (see
 // resumableIssuedCloseoutAttempt), never anyone else's.
-async function resolveVisitForIssuedInvoice(conn, invoice, { today = etDateString() } = {}) {
+async function resolveVisitForIssuedInvoice(conn, invoice, { today = etDateString(), trigger = null } = {}) {
   if (!invoice) return { svc: null, reason: 'no_invoice' };
   const linked = await linkedVisitForInvoice(conn, invoice);
   if (!linked.svc) return { svc: null, reason: linked.reason, ...(linked.visit ? { visit: linked.visit } : {}) };
@@ -97,6 +97,13 @@ async function resolveVisitForIssuedInvoice(conn, invoice, { today = etDateStrin
   if (!OPEN_VISIT_STATUSES.includes(String(svc.status))) return leaveOpen(`visit_${svc.status}`);
   const day = dateOnly(svc.scheduled_date);
   if (!day || day > today) return leaveOpen('visit_in_future');
+  // A SEND proves nothing about a visit scheduled for today: the office
+  // invoice picker links pre-completion invoices to open visits and sends
+  // them immediately, so a same-day send would create the service record
+  // and complete the visit before the tech arrives (Codex P1 r7 #4131).
+  // Only a visit whose day has passed closes out on a send; money received
+  // (trigger 'paid') still closes a same-day visit, as #4127 intended.
+  if (day === today && trigger === 'sent') return leaveOpen('visit_scheduled_today');
   if (svc.visit_id) {
     const { openMembers } = require('./visit-groups');
     if ((await openMembers(conn, svc.visit_id)).length >= 2) return leaveOpen('grouped_visit');
@@ -308,7 +315,7 @@ async function refuseVoidedInvoice(run) {
 // link has nothing to audit against — the send / payment itself is logged.
 // Sets run.svc / run.resuming and returns null to continue, else the refusal.
 async function resolveCloseoutTarget(run) {
-  const resolved = await resolveVisitForIssuedInvoice(run.conn, run.invoice, { today: run.today });
+  const resolved = await resolveVisitForIssuedInvoice(run.conn, run.invoice, { today: run.today, trigger: run.trigger });
   run.linkedVisitId = resolved.visit?.id || null;
   if (resolved.svc) {
     run.svc = resolved.svc;
