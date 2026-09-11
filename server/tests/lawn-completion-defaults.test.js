@@ -81,7 +81,7 @@ test('a live window whose defaults name none of the recipe products explains the
   expect(partial.message).toBeNull();
 });
 
-test.each(['property', 'grass', 'window', 'version', 'archived', 'nonmember', 'nonlawn'])('%s mismatch cannot invent an eligible plan', (reason) => {
+test.each(['property', 'grass', 'window', 'version', 'archived', 'nonmember', 'nonmember_lane', 'nonlawn'])('%s mismatch cannot invent an eligible plan', (reason) => {
   const { plan, context } = fixture();
   if (reason === 'property') context.propertyMatchesProfile = false;
   if (reason === 'grass') plan.propertyGate.trackKey = 'zoysia';
@@ -89,6 +89,10 @@ test.each(['property', 'grass', 'window', 'version', 'archived', 'nonmember', 'n
   if (reason === 'version') plan.appointmentAssignment.protocolVersion = 'missing';
   if (reason === 'archived') plan.protocol.structured.status = 'archived';
   if (reason === 'nonmember') plan.propertyGate.serviceTier = null;
+  // A legacy tier lingering on an explicit per_visit / one_time customer is
+  // not a program (Codex #4113 batch 12 follow-up); the assignment is also
+  // withdrawn so the tier is the only claim.
+  if (reason === 'nonmember_lane') { plan.propertyGate.billingMode = 'one_time'; plan.appointmentAssignment = {}; }
   if (reason === 'nonlawn') context.isLawn = false;
   expect(buildLawnCompletionDefaults(plan, context).items).toEqual([]);
 });
@@ -221,6 +225,11 @@ test.each([
   ['assignment on a plan with no structured window', { protocolKey: 'protocol', protocolVersion: '1', windowKey: 'june' }, 'Silver', 'no-window'],
   ['member whose turf profile does NOT prove this property', {}, 'Silver', 'unproven'],
   ['member with the property proof never evaluated (defaults gates off)', {}, 'Silver', 'unevaluated'],
+  ['legacy tier on an explicit one_time customer, no assignment', {}, 'Silver', 'one_time'],
+  ['legacy tier on an explicit per_visit customer, no assignment', {}, 'Silver', 'per_visit'],
+  ['legacy tier on an explicit per_application customer (membership lane)', {}, 'Silver', 'per_application'],
+  ['legacy tier on an explicit annual_prepay customer (membership lane)', {}, 'Silver', 'annual_prepay'],
+  ['explicit one_time customer whose appointment carries a COMPLETE assignment', { protocolKey: 'protocol', protocolVersion: '1', windowKey: 'june' }, 'Silver', 'one_time_assigned'],
 ])('ledger attribution — %s', (_label, assignment, tier, expected) => {
   const { plan } = fixture();
   plan.appointmentAssignment = assignment;
@@ -228,6 +237,9 @@ test.each([
   if (expected === 'no-window') { plan.protocol.structured = null; expected = false; }
   if (expected === 'unproven') { plan.propertyGate.propertyMatchesProfile = false; expected = false; }
   if (expected === 'unevaluated') { plan.propertyGate.propertyMatchesProfile = null; expected = false; }
+  if (['one_time', 'per_visit'].includes(expected)) { plan.propertyGate.billingMode = expected; expected = false; }
+  if (['per_application', 'annual_prepay'].includes(expected)) { plan.propertyGate.billingMode = expected; expected = true; }
+  if (expected === 'one_time_assigned') { plan.propertyGate.billingMode = 'one_time'; expected = true; }
   expect(lawnPlanAttributesVisit(plan)).toBe(expected);
   expect(lawnPlanAttributesVisit(null)).toBe(false);
 });

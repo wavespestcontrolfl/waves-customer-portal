@@ -12707,7 +12707,13 @@ export function CompletionPanel({
       JSON.stringify(areasServiced) !== JSON.stringify(lawnDefaultAreas) ||
       // Governed state restored under a plan outage (no live defaults) is
       // still draft content: the next autosave must not drop it (Codex #4113 P2).
-      ((lawnDefaultsEnabled || lawnRemovedDefaultIds.length > 0) && (lawnAreaOverride !== undefined || lawnRemovedDefaultIds.length > 0)) ||
+      // The visit area counts on its own — the same condition under which it
+      // is submitted (lawnAreaSubmitted) — so an area-only draft (a plan with
+      // no default rows, nothing removed) restored during an outage is not
+      // read as empty and cleared by the debounced autosave (Codex #4113
+      // batch 12, follow-up). Shared with the V2 page through CompletionPanel.
+      (completionImprovements && isLawn && lawnAreaOverride !== undefined) ||
+      lawnRemovedDefaultIds.length > 0 ||
       customerInteraction ||
       customerConcern.trim() ||
       selectedProtocolActionLabels.length ||

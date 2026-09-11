@@ -1296,7 +1296,7 @@ async function buildPlanForService(serviceId, options = {}) {
     .select(
       'ss.*',
       'c.first_name', 'c.last_name', 'c.address_line1', 'c.address_line2', 'c.city', 'c.state', 'c.zip',
-      'c.waveguard_tier', 'c.lawn_type',
+      'c.waveguard_tier', 'c.lawn_type', 'c.billing_mode',
       't.name as technician_name',
     )
     .first();
@@ -1628,6 +1628,11 @@ async function buildPlanForService(serviceId, options = {}) {
       customerName: `${service.first_name || ''} ${service.last_name || ''}`.trim(),
       service: service.service_type,
       serviceTier: service.waveguard_tier || null,
+      // The explicit billing lane (customers.billing_mode): an explicit
+      // per_visit / one_time lane defeats a lingering legacy tier for
+      // protocol attribution, mirroring billing-lane's coverage rule
+      // (Codex #4113 batch 12, follow-up). null = unset / inferred.
+      billingMode: service.billing_mode || null,
       trackKey,
       trackName: track?.name || null,
       month,
