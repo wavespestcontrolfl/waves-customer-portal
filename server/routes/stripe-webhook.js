@@ -1799,8 +1799,14 @@ async function handlePaymentIntentSucceeded(paymentIntent, eventCreated = null) 
       .where({ stripe_payment_intent_id: piId, status: 'processing' })
       .update(paymentUpdates);
     if (flipped > 0 && invoiceForTenderGuard?.id) {
+      // FOR UPDATE, not a plain read (fallback audit P1): an unlocked SELECT
+      // under READ COMMITTED sees a racing withdrawal only once it has
+      // committed, so a withdrawal still in flight here would read as absent
+      // and the anomaly alert would be skipped on a payment that settles
+      // against payer-owned debt. The lock waits for that transaction to
+      // finish and then reads its outcome.
       const settledInvoice = await trx('invoices').where({ id: invoiceForTenderGuard.id })
-        .first('id', 'invoice_number', 'customer_id', 'scheduled_send_error');
+        .forUpdate().first('id', 'invoice_number', 'customer_id', 'scheduled_send_error');
       if (invoiceWithdrawnFromCustomer(settledInvoice)) {
         logger.error(`[stripe-webhook] PI ${piId} settled on invoice ${settledInvoice.id} whose Bill-To moved to a third-party payer mid-payment`);
         await trx('customer_health_alerts').insert({
