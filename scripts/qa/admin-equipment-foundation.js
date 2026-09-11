@@ -90,14 +90,7 @@ const mileage = {
     },
   ],
 };
-const overview = {
-  total_assets: 1,
-  overdue_maintenance: 0,
-  ytd_maintenance_spend: 100,
-  ytd_total_miles: 100,
-  ytd_fuel_cost: 20,
-  ytd_irs_deduction: 63,
-};
+const maintenanceSpend = 100;
 // The vehicle's mileage rows are the one source for every derived figure the
 // detail and analytics screens show: costOfOwnership sums vehicle_mileage_log
 // for miles and fuel, and the mileage endpoint aggregates the same rows
@@ -105,17 +98,57 @@ const overview = {
 // Deriving both from whichever rows are being served keeps the long
 // sticky-header set from contradicting the summary and cost tiles rendered
 // beside it.
-function summarizeMileage(logs) {
+// One aggregate over the rows, shaped per endpoint. The fleet route sums the
+// same columns the detail summary does (routes/admin-equipment-maintenance.js
+// and services/equipment-maintenance.js), so a single source here is what keeps
+// the long sticky-header set from contradicting the tiles beside it.
+function sumMileage(logs) {
   const sum = (field) => logs.reduce((total, log) => total + log[field], 0);
-  const totalMiles = sum("total_miles"),
-    fuelGallons = sum("fuel_gallons");
   return {
-    total_miles: totalMiles,
+    total_miles: sum("total_miles"),
     business_miles: sum("business_miles"),
+    personal_miles: sum("personal_miles"),
     total_fuel_cost: round2(sum("fuel_cost")),
+    total_fuel_gallons: round2(sum("fuel_gallons")),
     total_irs_deduction: round2(sum("irs_deduction_amount")),
-    avg_mpg: fuelGallons > 0 ? round2(totalMiles / fuelGallons) : null,
+    total_jobs: sum("jobs_serviced"),
   };
+}
+function summarizeMileage(logs) {
+  const totals = sumMileage(logs);
+  return {
+    total_miles: totals.total_miles,
+    business_miles: totals.business_miles,
+    total_fuel_cost: totals.total_fuel_cost,
+    total_irs_deduction: totals.total_irs_deduction,
+    avg_mpg:
+      totals.total_fuel_gallons > 0
+        ? round2(totals.total_miles / totals.total_fuel_gallons)
+        : null,
+  };
+}
+// getFleetOverview() sums the same rows, so the long sticky-header set has to
+// move these YTD figures with it — navigating back to Maintenance re-fetches
+// this endpoint while those rows are installed.
+function fleetOverview(logs) {
+  const totals = sumMileage(logs);
+  return {
+    total_assets: 1,
+    overdue_maintenance: 0,
+    ytd_maintenance_spend: maintenanceSpend,
+    ytd_total_miles: totals.total_miles,
+    ytd_fuel_cost: totals.total_fuel_cost,
+    ytd_irs_deduction: totals.total_irs_deduction,
+  };
+}
+// The real list routes apply the requested limit while their aggregates are
+// computed over every row, so the fixture has to do both — otherwise a page
+// that quietly halved its limit would still look like it rendered the full set,
+// and the sticky-header scroll check would pass on rows production would not
+// have sent.
+function limited(url, rows) {
+  const limit = Number(url.searchParams.get("limit"));
+  return Number.isInteger(limit) && limit > 0 ? rows.slice(0, limit) : rows;
 }
 // The age is a live month difference from purchase_date and the total is
 // divided by it, so a pinned age_months/monthly_cost pair stops being a
@@ -136,7 +169,7 @@ function ownership(logs) {
   const sum = (field) => logs.reduce((total, log) => total + log[field], 0);
   const totalMiles = sum("total_miles"),
     totalFuel = round2(sum("fuel_cost")),
-    totalMaintenance = 100,
+    totalMaintenance = maintenanceSpend,
     purchasePrice = 25000,
     totalCost = round2(purchasePrice + totalMaintenance + totalFuel);
   return {
@@ -243,6 +276,7 @@ function queryContracts() {
   ]);
 }
 function fixtures(state) {
+  const activeMileage = () => state.mileageLogs || mileage.logs;
   return new Map([
     [
       "GET /api/admin/auth/me",
@@ -316,13 +350,21 @@ function fixtures(state) {
     ],
     [
       "GET /api/admin/equipment/job-costs",
-      () => ({ job_costs: [jobCost], costs: [jobCost], total: 1, page: 1 }),
+      (url) => ({
+        job_costs: limited(url, [jobCost]),
+        costs: limited(url, [jobCost]),
+        total: 1,
+        page: 1,
+      }),
     ],
     [
       "GET /api/admin/equipment-maintenance",
       () => ({ equipment: state.empty ? [] : [equipment] }),
     ],
-    ["GET /api/admin/equipment-maintenance/analytics/overview", () => overview],
+    [
+      "GET /api/admin/equipment-maintenance/analytics/overview",
+      () => fleetOverview(activeMileage()),
+    ],
     [
       "GET /api/admin/equipment-maintenance/alerts",
       () => ({
@@ -347,14 +389,14 @@ function fixtures(state) {
         equipment,
         schedules: [schedule],
         recentRecords: [record],
-        costOfOwnership: ownership(state.mileageLogs || mileage.logs),
+        costOfOwnership: ownership(activeMileage()),
       }),
     ],
     [
       `GET /api/admin/equipment-maintenance/${id}/mileage`,
-      () => {
-        const logs = state.mileageLogs || mileage.logs;
-        return { logs, summary: summarizeMileage(logs) };
+      (url) => {
+        const logs = activeMileage();
+        return { logs: limited(url, logs), summary: summarizeMileage(logs) };
       },
     ],
     [
@@ -367,7 +409,7 @@ function fixtures(state) {
     ],
     [
       "GET /api/admin/equipment-maintenance/analytics/costs",
-      () => ({ costs: [ownership(state.mileageLogs || mileage.logs)] }),
+      () => ({ costs: [ownership(activeMileage())] }),
     ],
     [
       "GET /api/admin/equipment-maintenance/analytics/reliability",
@@ -388,28 +430,16 @@ function fixtures(state) {
     ],
     [
       "GET /api/admin/equipment-maintenance/mileage/summary",
-      (url) => ({
-        year: Number(url.searchParams.get("year")) || easternYear(),
-        vehicles: [
-          {
-            id,
-            name: equipment.name,
-            asset_tag: "QA-001",
-            total_miles: 100,
-            business_miles: 90,
-            total_fuel_cost: 20,
-            total_irs_deduction: 63,
-            total_jobs: 3,
-          },
-        ],
-        fleet_totals: {
-          total_miles: 100,
-          business_miles: 90,
-          total_fuel_cost: 20,
-          total_irs_deduction: 63,
-          total_jobs: 3,
-        },
-      }),
+      (url) => {
+        const totals = sumMileage(activeMileage());
+        return {
+          year: Number(url.searchParams.get("year")) || easternYear(),
+          vehicles: [
+            { id, name: equipment.name, asset_tag: "QA-001", ...totals },
+          ],
+          fleet_totals: totals,
+        };
+      },
     ],
     [
       "GET /api/admin/equipment-maintenance/schedules/due",
@@ -417,7 +447,7 @@ function fixtures(state) {
     ],
     [
       "GET /api/admin/equipment-maintenance/records/recent",
-      () => ({ records: [record] }),
+      (url) => ({ records: limited(url, [record]) }),
     ],
     [
       "GET /api/admin/equipment-systems",
@@ -1049,7 +1079,6 @@ async function main() {
         true,
       ],
     ]) {
-      const browser = await launch();
       const state = {
         requests: [],
         badQuery: [],
@@ -1061,15 +1090,22 @@ async function main() {
         checks: [],
       };
       report.browsers.push({ device, state });
-      const page = await browser.newPage({
-        viewport,
-        hasTouch,
-        timezoneId: "America/New_York",
-        serviceWorkers: "block",
-      });
-      page.setDefaultTimeout(15000);
-      page.setDefaultNavigationTimeout(45000);
+      // The launch and page creation are inside the recorded lifecycle: a
+      // WebKit launch that fails after Chromium has finished used to throw
+      // outside it, and the outer finally still wrote report.json and the
+      // gallery with only the successful evidence and nothing saying why the
+      // required touch-webkit pass was missing.
+      let browser, page;
       try {
+        browser = await launch();
+        page = await browser.newPage({
+          viewport,
+          hasTouch,
+          timezoneId: "America/New_York",
+          serviceWorkers: "block",
+        });
+        page.setDefaultTimeout(15000);
+        page.setDefaultNavigationTimeout(45000);
         await install(page, server, state);
         await views(page, server, state, report, device);
         assert.deepEqual(state.pageErrors, [], "Page errors");
@@ -1107,13 +1143,16 @@ async function main() {
         assert.deepEqual(state.consoleErrors, [], "Unexpected console errors");
       } catch (error) {
         report.error = error.stack;
-        await shot(page, report, device + "-failure");
+        report.failedDevice = device;
+        if (page)
+          await shot(page, report, device + "-failure").catch(() => {});
         throw error;
       } finally {
-        await page
-          .evaluate(() => localStorage.removeItem("waves_admin_token"))
-          .catch(() => {});
-        await browser.close();
+        if (page)
+          await page
+            .evaluate(() => localStorage.removeItem("waves_admin_token"))
+            .catch(() => {});
+        if (browser) await browser.close();
       }
     }
   } finally {
