@@ -245,13 +245,19 @@ function ConfigCard({ config, onUpdate }) {
   };
   const saveData = async (updated) => {
     setSaving(true); setError("");
-    try { await adminFetch(`/admin/pricing-config/${config.config_key}`, { method: "PUT", body: JSON.stringify({ data: updated }) }); onUpdate(config.config_key, updated); }
-    catch (nextError) { setError(`Save failed: ${nextError.message}`); }
+    try {
+      await adminFetch(`/admin/pricing-config/${config.config_key}`, { method: "PUT", body: JSON.stringify({ data: updated }) });
+      onUpdate(config.config_key, updated);
+      return true;
+    } catch (nextError) {
+      setError(`Save failed: ${nextError.message}`);
+      return false;
+    }
     finally { setSaving(false); }
   };
   const handlePathUpdate = (path, value) => saveData(setAtPath(data, path, value));
   const handleRawSave = async () => {
-    try { const parsed = JSON.parse(rawText); await saveData(parsed); setRawEdit(false); }
+    try { const parsed = JSON.parse(rawText); if (await saveData(parsed)) setRawEdit(false); }
     catch (nextError) { setError(`Save failed: ${nextError.message}`); }
   };
 
@@ -264,7 +270,7 @@ function ConfigCard({ config, onUpdate }) {
     const updateCell = (rowIndex, column, value) => { if (parentKey) handlePathUpdate(parentKey, array.map((row, index) => index === rowIndex ? { ...row, [column]: value } : row)); };
     const deleteRow = (rowIndex) => { if (parentKey) handlePathUpdate(parentKey, array.filter((_, index) => index !== rowIndex)); };
     const addRow = () => { if (parentKey) handlePathUpdate(parentKey, [...array, Object.fromEntries(columns.map((column) => [column, typeof first[column] === "number" ? 0 : ""]))]); };
-    return <div className="space-y-2"><Table className="min-w-[580px]"><THead><TR>{columns.map((column) => <TH key={column}>{column.replace(/_/g, " ")}</TH>)}{parentKey && canEditPricing() && <TH aria-label="Actions" />}</TR></THead><TBody>{array.map((row, rowIndex) => <TR key={`${rowIndex}-${formatValue(row)}`}>{columns.map((column) => <TD key={column}>{parentKey ? <EditCell value={row[column]} onSave={(value) => updateCell(rowIndex, column, value)} type={typeof row[column] === "number" ? "number" : "text"} /> : formatValue(row[column])}</TD>)}{parentKey && canEditPricing() && <TD align="right"><Button variant="ghost" size="sm" aria-label={`Delete row ${rowIndex + 1}`} onClick={() => deleteRow(rowIndex)}><Trash2 size={16} aria-hidden /></Button></TD>}</TR>)}</TBody></Table>{parentKey && canEditPricing() && <Button variant="secondary" size="sm" onClick={addRow}><Plus size={16} aria-hidden /> Add row</Button>}</div>;
+    return <div className="space-y-2"><Table className="min-w-[580px]"><THead><TR>{columns.map((column) => <TH key={column}>{column.replace(/_/g, " ")}</TH>)}{parentKey && canEditPricing() && <TH aria-label="Actions" />}</TR></THead><TBody>{array.map((row, rowIndex) => <TR key={`row-${rowIndex}`}>{columns.map((column) => <TD key={column}>{parentKey ? <EditCell value={row[column]} onSave={(value) => updateCell(rowIndex, column, value)} type={typeof row[column] === "number" ? "number" : "text"} /> : formatValue(row[column])}</TD>)}{parentKey && canEditPricing() && <TD align="right"><Button variant="ghost" size="sm" aria-label={`Delete row ${rowIndex + 1}`} onClick={() => deleteRow(rowIndex)}><Trash2 size={16} aria-hidden /></Button></TD>}</TR>)}</TBody></Table>{parentKey && canEditPricing() && <Button variant="secondary" size="sm" onClick={addRow}><Plus size={16} aria-hidden /> Add row</Button>}</div>;
   };
 
   const renderValue = (key, value, parentPath = []) => {
