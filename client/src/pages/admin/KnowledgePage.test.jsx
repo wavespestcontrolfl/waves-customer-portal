@@ -236,6 +236,25 @@ describe("KnowledgePage embedded navigation", () => {
     expect(screen.getByLabelText("Wiki health score: 75")).toHaveClass("border-zinc-900");
   });
 
+  it("renders the Health panel blank off a 403 instead of offering a retry", async () => {
+    localStorage.setItem("waves_admin_user", JSON.stringify({ role: "admin" }));
+    let healthReads = 0;
+    fetch.mockImplementation(async (url) => {
+      if (url.endsWith("/knowledge/health")) {
+        healthReads += 1;
+        return response({ error: "Admin access required" }, { ok: false, status: 403 });
+      }
+      return response({ articles: [] });
+    });
+    renderWiki("/admin/knowledge?wikiTab=health");
+
+    await waitFor(() => expect(healthReads).toBe(1));
+    await waitFor(() => expect(screen.queryByText("Running health check…")).not.toBeInTheDocument());
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Try again" })).not.toBeInTheDocument();
+    expect(screen.queryByText("Admin access required")).not.toBeInTheDocument();
+  });
+
   it("renders only string tags so malformed tag elements cannot crash the reader", async () => {
     localStorage.setItem("waves_admin_user", JSON.stringify({ role: "admin" }));
     fetch.mockImplementation(async (url) => (

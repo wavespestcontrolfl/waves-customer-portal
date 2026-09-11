@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { ActionFeedback, Badge, Card, CardBody, CardHeader, CardTitle, UiSurface } from "../../../components/ui";
-import { adminFetch } from "../../../utils/admin-fetch";
+import { adminFetch, isForbiddenError } from "../../../utils/admin-fetch";
 
 function normalizeTags(tags) {
   let list = tags;
@@ -131,6 +131,7 @@ export function HealthCheck() {
   const [health, setHealth] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
+  const [forbidden, setForbidden] = useState(false);
   const [attempt, setAttempt] = useState(0);
 
   useEffect(() => {
@@ -142,9 +143,15 @@ export function HealthCheck() {
         if (active) setHealth(data);
       })
       .catch((requestError) => {
-        if (active) {
-          setError(requestError?.message || "Could not run the health check.");
+        if (!active) return;
+        // The endpoint is requireAdmin; a stale cached role can still reach
+        // this panel. Spec §5.7: render blank off the 403 — a retry cannot
+        // succeed, so offering one would misreport the failure.
+        if (isForbiddenError(requestError)) {
+          setForbidden(true);
+          return;
         }
+        setError(requestError?.message || "Could not run the health check.");
       })
       .finally(() => {
         if (active) setLoading(false);
@@ -155,6 +162,7 @@ export function HealthCheck() {
   }, [attempt]);
 
   if (loading) return <LoadingState>Running health check…</LoadingState>;
+  if (forbidden) return null;
   if (error || !health) {
     return (
       <UiSurface>
