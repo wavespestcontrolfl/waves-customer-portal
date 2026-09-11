@@ -935,6 +935,34 @@ postgres('Customer 360 migrated PostgreSQL reads', () => {
     }
   }, 30000);
 
+  test('a message first delivered more than 4h after its own arrival is not repeatedly re-alerted on later sweeps (codex #4210 round-15 P1)', async () => {
+    const conversationId = randomUUID();
+    const messageId = randomUUID();
+    const sid = `SM-synthetic-sweep-late-recovery-${randomBytes(4).toString('hex')}`;
+    const unknownPhone = `+1941555${String(Date.now()).slice(-4)}`;
+    const dispatch = jest.fn(async () => true);
+    try {
+      // An outage (or similar) kept the sweep down for hours; this message
+      // finally delivered — updated_at is now, but created_at is 5 hours
+      // ago, more than the WINDOW apart. It is still unread (staff hasn't
+      // looked yet). A window-bounded self-coverage check would reject its
+      // own receipt as "too far away" and select it as an orphan again on
+      // every subsequent sweep tick, forever — a message's own delivery
+      // must count regardless of how long ago it happened.
+      await mockPg('conversations').insert({ id: conversationId, customer_id: null, channel: 'sms', contact_phone: unknownPhone, our_endpoint_id: '+19415550208' });
+      await mockPg('messages').insert({ id: messageId, conversation_id: conversationId, channel: 'sms', direction: 'inbound', author_type: 'lead', is_read: false, twilio_sid: sid, body: 'Please quote pest control', created_at: new Date(Date.now() - 5 * 60 * 60 * 1000) });
+      await mockPg('sms_log').insert({ direction: 'inbound', from_phone: unknownPhone, to_phone: '+19415550208', twilio_sid: sid, message_body: 'Please quote pest control', metadata: JSON.stringify({ sms_reply_eligible: true, sms_reply_alerted: true }), created_at: new Date(Date.now() - 5 * 60 * 60 * 1000), updated_at: new Date() });
+
+      const result = await sweepUnknownSenderAlertClaims({ dispatch });
+      expect(dispatch).not.toHaveBeenCalled();
+      expect(result.dispatched).toBe(0);
+    } finally {
+      await mockPg('messages').where({ id: messageId }).delete();
+      await mockPg('sms_log').where({ twilio_sid: sid }).delete();
+      await mockPg('conversations').where({ id: conversationId }).delete();
+    }
+  }, 30000);
+
   test('the sweep never re-alerts an AI-answered message just because it is still unread (codex #4210 round-9 P1)', async () => {
     const conversationId = randomUUID();
     const messageId = randomUUID();

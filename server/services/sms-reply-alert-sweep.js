@@ -116,6 +116,18 @@ async function findOrphanMessage(phone) {
     })
     .where({ 'm.channel': 'sms', 'm.direction': 'inbound', 'l.from_phone': phone })
     .whereRaw("l.metadata->>'sms_reply_eligible' = 'true'")
+    // A candidate's OWN receipt covers it UNCONDITIONALLY, independent of
+    // the window math below (codex #4210 round-15 P1): a message first
+    // recovered more than 4h after its own arrival (an outage kept the
+    // sweep down that long, say) stamps updated_at far enough from its own
+    // created_at that the symmetric window check on the OTHER messages'
+    // coverage (below) would reject even its OWN receipt as covering
+    // itself — repeatedly re-selecting and re-alerting on an
+    // already-successfully-delivered message every tick, forever, for as
+    // long as it stays unread. The window bound exists to relate a
+    // candidate to SOME OTHER message's receipt; a message's own delivery
+    // is never in question regardless of how long ago it happened.
+    .whereRaw("COALESCE(l.metadata->>'sms_reply_alerted', 'false') != 'true'")
     .andWhere(function unread() { this.where({ 'm.is_read': false }).orWhereNull('m.is_read'); })
     .whereNotNull('m.twilio_sid')
     .whereNotExists(function covered() {
