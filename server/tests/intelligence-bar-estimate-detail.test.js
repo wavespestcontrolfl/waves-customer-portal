@@ -29,6 +29,8 @@ jest.mock('../routes/estimate-public', () => {
     adminDraftPreviewEligible: (e, p) => p === '1' && !e.archived_at && unpublished.includes(e.status),
   };
 });
+const mockBillingContext = jest.fn(async () => ({ billsPerApplication: false, livePricing: null }));
+jest.mock('../services/estimate-proposal-billing', () => ({ resolveProposalBillingContext: (...a) => mockBillingContext(...a) }));
 const db = require('../models/db');
 const { getEstimateDetail, shapeEstimate, GET_ESTIMATE_DETAIL_TOOL } = require('../services/intelligence-bar/estimate-detail');
 
@@ -94,6 +96,8 @@ beforeEach(() => {
   mockReconcile.mockResolvedValue(undefined);
   mockCallSideBlock.mockReset();
   mockCallSideBlock.mockResolvedValue(null);
+  mockBillingContext.mockReset();
+  mockBillingContext.mockResolvedValue({ billsPerApplication: false, livePricing: null });
   db.__rows = () => [];
 });
 
@@ -134,7 +138,8 @@ test('offered pricing is the public bundle verbatim in shape: cadences, ladders,
         { key: 'enhanced', label: 'Enhanced', monthly: 51.98, annual: 623.76, visits_per_year: 9, billing_unit: 'monthly', per_application: null, ...noRows, quote_required: true },
       ] },
       { key: 'commercial_pest', label: 'Commercial Pest', default_frequency_key: 'monthly', frequencies: [
-        { key: 'monthly', label: 'Monthly', monthly: 200, annual: 2400, visits_per_year: 12, billing_unit: 'per_application', per_application: 200, ...noRows,
+        // per_application is null: the page shows the RANGE and no exact per-application headline (PriceCard perAppNet rule, Codex r7 P1)
+        { key: 'monthly', label: 'Monthly', monthly: 200, annual: 2400, visits_per_year: 12, billing_unit: 'per_application', per_application: null, ...noRows,
           // price ± price × fraction × pct (PriceCard): 200 × 0.5 × 0.2 = 20
           low_confidence_range: { pct: 0.2, fraction: 0.5, monthly: [180, 220], annual: [2160, 2640] } },
       ] },
@@ -239,12 +244,145 @@ test('a reconciler or bundle failure is reported on the response, never thrown a
   const shaped = await shapeEstimate(estimateRow());
   expect(shaped.reconciliation_error).toMatch(/plan lookup down/);
   expect(shaped.offered_pricing).toBeNull();
-  expect(shaped.offered_pricing_unavailable).toMatch(/no customer row/);
+  expect(shaped.offered_pricing_unavailable).toMatch(/withheld: membership reconciliation failed: plan lookup down/);
   expect(shaped.requote_required).toBeNull(); // unknown without the bundle — never a confident "no"
   expect(shaped.requote_reason).toBeNull();
   mockReconcile.mockResolvedValue(undefined);
   mockBuildPricingBundle.mockResolvedValue(null);
   expect((await shapeEstimate(estimateRow())).offered_pricing_unavailable).toMatch(/no pricing bundle/);
+  mockBuildPricingBundle.mockRejectedValue(new Error('no customer row'));
+  expect((await shapeEstimate(estimateRow())).offered_pricing_unavailable).toMatch(/no customer row/);
+});
+
+test('the real reconciler never throws — it REPORTS { ok: false }: pricing and totals are withheld, the bundle is not even built (Codex r7 P1)', async () => {
+  mockReconcile.mockResolvedValue({ ok: false, error: 'membership lookup timed out' });
+  mockBuildPricingBundle.mockResolvedValue(BUNDLE);
+  const shaped = await shapeEstimate(estimateRow());
+  expect(shaped.reconciliation_error).toBe('membership reconciliation failed: membership lookup timed out');
+  expect(shaped.offered_pricing).toBeNull();
+  expect(shaped.offered_pricing_unavailable).toMatch(/withheld/);
+  expect(shaped.totals).toEqual({ monthly: null, annual: null, one_time: null, withheld: true });
+  expect(shaped.requote_required).toBeNull();
+  expect(mockBuildPricingBundle).not.toHaveBeenCalled();
+  // { ok: true } and undefined (nothing to reconcile) both price normally
+  for (const result of [{ ok: true }, undefined]) {
+    mockReconcile.mockResolvedValue(result);
+    const ok = await shapeEstimate(estimateRow());
+    expect(ok.reconciliation_error).toBeUndefined();
+    expect(ok.offered_pricing.plan_frequencies[0].per_application).toBe(131);
+    expect(ok.totals).toEqual({ monthly: 47, annual: 564, one_time: 125 });
+  }
+});
+
+test('a ranged LOW-confidence cadence reports the range and NO exact per-application figure; a quote-required cadence reports neither (PriceCard, Codex r7 P1)', async () => {
+  mockBuildPricingBundle.mockResolvedValue({ frequencies: [
+    { key: 'monthly', monthly: 200, annual: 2400, perTreatment: 200, visitsPerYear: 12, billedPerApplication: true, lowConfidenceRangePct: 0.2 },
+    { key: 'monthly', monthly: 200, annual: 2400, perTreatment: 200, visitsPerYear: 12, billedPerApplication: true, lowConfidenceRangePct: 0.2, quoteRequired: true }, // PriceCard zeroes the range when quote-required
+    { key: 'quarterly', monthly: 0, annual: 0, perTreatment: 0, visitsPerYear: 4, billedPerApplication: true, lowConfidenceRangePct: 0.2 }, // no positive price → no range (PriceCard showLowConfidenceRange)
+    { key: 'quarterly', monthly: 47, annual: 564, perTreatment: 141, visitsPerYear: 4, billedPerApplication: true, quoteRequired: true },
+  ] });
+  const [ranged, rangedQuote, zero, quoteOnly] = (await shapeEstimate(estimateRow())).offered_pricing.plan_frequencies;
+  expect(ranged).toMatchObject({ per_application: null, low_confidence_range: { pct: 0.2, fraction: 1, monthly: [160, 240], annual: [1920, 2880] } });
+  expect(rangedQuote.per_application).toBeNull();
+  expect(rangedQuote.low_confidence_range).toBeUndefined();
+  expect(rangedQuote.quote_required).toBe(true);
+  expect(zero.low_confidence_range).toBeUndefined();
+  expect(quoteOnly.per_application).toBeNull();
+});
+
+test('section-level price selectors ride the service section with the composer\'s amounts: bond terms, station rental, the commercial interior toggle (Codex r7 P1)', async () => {
+  mockBuildPricingBundle.mockResolvedValue({ frequencies: [], services: [
+    { key: 'termite_bait', label: 'Termite', defaultFrequencyKey: 'quarterly', frequencies: [{ key: 'quarterly', monthly: 35, annual: 420, perTreatment: 105, visitsPerYear: 4, billedPerApplication: true }],
+      bondOptions: [{ key: 'bond_1yr', label: '1-year bond', years: 1, perApplicationAdd: 45, monthlyAdd: 15, annualAdd: 180 }, { key: 'none', label: 'No bond', years: 0, perApplicationAdd: 0, monthlyAdd: 0, annualAdd: 0 }],
+      selectedBondTerm: 'bond_1yr',
+      stationRental: { label: 'Termite Station Rental', detail: 'Waves owns the in-ground stations — $0 install.', perApplicationAdd: 20, monthlyAdd: 6.67, annualAdd: 80 } },
+    { key: 'commercial_pest', label: 'Commercial Pest', defaultFrequencyKey: 'monthly', frequencies: [{ key: 'monthly', monthly: 200, annual: 2400 }],
+      interiorScopeExcluded: true,
+      interiorOption: { selected: false, label: 'Interior service', perApplicationAdd: 25, monthlyAdd: 25, annualAdd: 300, detail: 'Interior treatment on every visit.' } },
+    { key: 'pest_control', label: 'Pest Control', defaultFrequencyKey: 'quarterly', frequencies: [] },
+  ] });
+  const [termite, commercial, pest] = (await shapeEstimate(estimateRow())).offered_pricing.services;
+  expect(termite).toMatchObject({
+    bond_options: [
+      { key: 'bond_1yr', label: '1-year bond', years: 1, per_application_add: 45, monthly_add: 15, annual_add: 180 },
+      { key: 'none', label: 'No bond', years: null, per_application_add: 0, monthly_add: 0, annual_add: 0 },
+    ],
+    selected_bond_term: 'bond_1yr',
+    station_rental: { label: 'Termite Station Rental', detail: 'Waves owns the in-ground stations — $0 install.', per_application_add: 20, monthly_add: 6.67, annual_add: 80, price_itemized: false },
+  });
+  expect(termite.interior_option).toBeUndefined();
+  expect(commercial).toMatchObject({ interior_scope_excluded: true, interior_option: { selected: false, label: 'Interior service', per_application_add: 25, monthly_add: 25, annual_add: 300, detail: 'Interior treatment on every visit.' } });
+  expect(commercial.bond_options).toBeUndefined();
+  // a section without selectors gains no selector keys at all
+  expect(Object.keys(pest).sort()).toEqual(['default_frequency_key', 'frequencies', 'key', 'label']);
+});
+
+test('an enabled, itemized proposal is the pricing authority: authored lines, programs, corrective work and computed totals, never the engine bundle (Codex r7 P1)', async () => {
+  mockBuildPricingBundle.mockResolvedValue(BUNDLE);
+  const row = estimateRow({
+    category: 'COMMERCIAL', monthly_total: '92.00', annual_total: '1104.00', onetime_total: '125.00',
+    estimate_data: JSON.stringify({
+      recurring: { services: [{ name: 'Engine row', frequency: 'monthly', monthly: 92, annual: 1104 }] },
+      proposal: {
+        enabled: true, title: 'Commercial Service Proposal', preparedFor: 'Harbor Plaza LLC', propertyAddress: '9 Dock Rd', taxRate: 0.07, taxLabel: 'FL sales tax', terms: 'Net 30',
+        buildings: [{ name: 'Building A', lineItems: [
+          { description: 'Monthly pest service', quantity: 1, unitPrice: 250, frequency: 'monthly', taxable: false },
+          { description: 'Initial clean-out', quantity: 2, unitPrice: 100, frequency: 'one_time', taxable: true },
+        ] }],
+        correctiveWork: [{ label: 'Door sweeps', amount: 300, taxable: false }],
+        commercialTerms: { paymentTerms: 'net_30', initialTermMonths: 12, renewal: 'Auto-renews annually' },
+      },
+    }),
+  });
+  const shaped = await shapeEstimate(row);
+  expect(mockBillingContext).toHaveBeenCalledWith(row);
+  expect(mockBuildPricingBundle).not.toHaveBeenCalled();
+  expect(shaped.offered_pricing).toMatchObject({
+    pricing_authority: 'authored_proposal', bills_per_application: false, source: 'authored_proposal',
+    proposal: {
+      title: 'Commercial Service Proposal', prepared_for: 'Harbor Plaza LLC', property_address: '9 Dock Rd', tax_rate: 0.07, tax_label: 'FL sales tax', terms: 'Net 30',
+      buildings: [{ name: 'Building A', line_items: [
+        { description: 'Monthly pest service', quantity: 1, unit_price: 250, amount: 250, frequency: 'monthly', visits_per_year: null, taxable: false },
+        { description: 'Initial clean-out', quantity: 2, unit_price: 100, amount: 200, frequency: 'one_time', taxable: true },
+      ] }],
+      programs: null,
+      corrective_work: [{ label: 'Door sweeps', amount: 300, taxable: false }],
+      commercial_terms: { payment_terms: 'net30', initial_term_months: 12, renewal: 'Auto-renews annually' }, // the normalizer's canonical term key
+    },
+    // 250 × 12 = 3000 recurring; 200 + 300 one-time; tax 7% on the taxable 200 = 14
+    totals: { annual_recurring: 3000, monthly_equivalent: 250, one_time: 500, recurring_tax: 0, one_time_tax: 14, total_tax: 14, first_year_total: 3514 },
+  });
+  expect(shaped.offered_pricing.plan_frequencies).toBeUndefined();
+  expect(shaped.totals).toEqual({ monthly: 250, annual: 3000, one_time: 500, total_tax: 14, first_year_total: 3514, source: 'authored_proposal' });
+  expect(shaped.requote_required).toBeNull();
+  expect(JSON.stringify(shaped)).not.toMatch(/Engine row/);
+
+  // enabled flag with NO itemization normalizes to the synthesized fallback → the page prices from the bundle, and so does the tool
+  mockBuildPricingBundle.mockClear();
+  const bare = await shapeEstimate(estimateRow({ estimate_data: JSON.stringify({ proposal: { enabled: true } }) }));
+  expect(mockBuildPricingBundle).toHaveBeenCalledTimes(1);
+  expect(bare.offered_pricing.pricing_authority).toBeUndefined();
+  expect(bare.offered_pricing.plan_frequencies).toHaveLength(1);
+
+  // a proposal projection failure withholds — never a fall-through to engine cadences
+  mockBillingContext.mockRejectedValue(new Error('billing lane down'));
+  const failed = await shapeEstimate(row);
+  expect(failed.offered_pricing).toBeNull();
+  expect(failed.offered_pricing_unavailable).toMatch(/authored proposal failed: billing lane down/);
+});
+
+test('a pending deposit intent collected nothing: total_paid null, the requested face amount kept (Codex r7 P2)', async () => {
+  db.__rows = (q) => (q.sql.includes('"estimate_deposits"')
+    ? [
+      { estimate_id: 'est-1', amount: '100', card_surcharge: null, credited_amount: null, refunded_amount: null, refunded_surcharge: null, status: 'pending', received_at: null },
+      { estimate_id: 'est-1', amount: '100', card_surcharge: '3.50', credited_amount: null, refunded_amount: '100', refunded_surcharge: '3.50', status: 'refunded', received_at: '2026-09-06T00:00:00Z' },
+    ]
+    : [estimateRow()]);
+  const { estimates: [one] } = await getEstimateDetail({ estimate_id: 'est-1' });
+  expect(one.deposits).toEqual([
+    { amount: 100, card_surcharge: null, collected: false, total_paid: null, credited: null, refunded: null, refunded_surcharge: null, status: 'pending', received_at: null },
+    { amount: 100, card_surcharge: 3.5, collected: true, total_paid: 103.5, credited: null, refunded: 100, refunded_surcharge: 3.5, status: 'refunded', received_at: '2026-09-06T00:00:00Z' },
+  ]);
 });
 
 test('totals: monthly/annual from the stored columns; one_time is the composer\'s corrected figure when the bundle built, the column otherwise; bad JSON still answers', async () => {
@@ -281,7 +419,7 @@ test('estimate_id reads one full row; customer_id reads latest live estimates wi
   expect(one.count).toBe(1);
   expect(one.estimates[0].id).toBe('est-1');
   // face amount + the card surcharge actually collected on top of it (and how much of that fee was refunded)
-  expect(one.estimates[0].deposits).toEqual([{ amount: 100, card_surcharge: 3.5, total_paid: 103.5, credited: 100, refunded: null, refunded_surcharge: null, status: 'credited', received_at: '2026-09-06T00:00:00Z' }]);
+  expect(one.estimates[0].deposits).toEqual([{ amount: 100, card_surcharge: 3.5, collected: true, total_paid: 103.5, credited: 100, refunded: null, refunded_surcharge: null, status: 'credited', received_at: '2026-09-06T00:00:00Z' }]);
   expect(db.__queries[1].sql).toContain('"card_surcharge"');
   expect(db.__queries[1].sql).toContain('"refunded_surcharge"');
   expect(db.__queries[0].sql).toMatch(/^select \* from "estimates"/); // the reconciler/bundle read the row the public handlers load

@@ -10,12 +10,23 @@
 // route's own order —
 //   membership      → estimate-public reconcileFrozenMembershipSnapshot first
 //                     (a lapsed member's frozen discount is repriced or the
-//                     row is marked requote, exactly as /:token/data does)
-//   offered pricing → estimate-public buildPricingBundle after that: plan
+//                     row is marked requote, exactly as /:token/data does);
+//                     when the live lookup fails the reconciler reports it
+//                     and offered pricing is WITHHELD — never priced from the
+//                     unverified snapshot
+//   authored proposal → estimate-proposal normalizeProposal +
+//                     computeProposalTotals when estimate_data.proposal is
+//                     enabled and itemized: the formal commercial proposal is
+//                     the billed quote, the engine rows a promoted estimate
+//                     still carries are not (the public page and the PDF
+//                     price from the same projection)
+//   offered pricing → estimate-public buildPricingBundle otherwise: plan
 //                     cadences, per-service ladders, cadence combos with
 //                     their allocated per-service amounts and manual-
-//                     discount state, the one-time breakdown, first-visit /
-//                     setup fees, the rodent bait setup fee
+//                     discount state, section-level price selectors (termite
+//                     bond terms, station rental, commercial interior toggle),
+//                     the one-time breakdown, first-visit / setup fees, the
+//                     rodent bait setup fee
 //   totals          → the stored estimate columns the send path wrote
 //   links           → estimate-public isEstimateCustomerViewable /
 //                     adminDraftPreviewEligible + the durable call-side
@@ -56,6 +67,8 @@ function parseStoredJson(value) {
 const lazy = {
   publicRoute: () => require('../../routes/estimate-public'),
   claimSql: () => require('../../utils/estimate-claim-sql'),
+  proposal: () => require('../estimate-proposal'),
+  proposalBilling: () => require('../estimate-proposal-billing'),
 };
 
 const list = (v) => (Array.isArray(v) ? v : []);
@@ -92,8 +105,8 @@ function perApplicationFor(f) {
 // composer stamps lowConfidenceRangePct + lowConfidenceFraction and the
 // customer page shows price ± price × fraction × pct (PriceCard).
 function lowConfidenceRange(f) {
-  const pct = Number(f.lowConfidenceRangePct);
-  if (!(pct > 0)) return null;
+  const pct = f.quoteRequired === true ? 0 : Number(f.lowConfidenceRangePct);
+  if (!(pct > 0) || !(Number(f.monthly) > 0)) return null;
   const rawFraction = Number(f.lowConfidenceFraction);
   const fraction = Number.isFinite(rawFraction) && rawFraction > 0 ? Math.min(rawFraction, 1) : 1;
   const band = (price) => (price == null ? null : [money(price - price * fraction * pct), money(price + price * fraction * pct)]);
@@ -115,6 +128,7 @@ function treatmentRow(r) {
 
 function frequencyEntry(f) {
   const rows = list(f.perServiceTreatments);
+  const range = lowConfidenceRange(f);
   const entry = {
     key: f.key || null,
     label: f.label || null,
@@ -122,7 +136,10 @@ function frequencyEntry(f) {
     annual: money(f.annual),
     visits_per_year: Number(f.visitsPerYear) > 0 ? Number(f.visitsPerYear) : null,
     billing_unit: f.billedPerApplication === true ? 'per_application' : 'monthly',
-    per_application: perApplicationFor(f),
+    // PriceCard's perAppNet rule: a ranged (or quote-required) cadence shows
+    // the RANGE and no exact per-application headline — the customer never
+    // sees the midpoint, so the bar must not quote it either.
+    per_application: range || f.quoteRequired === true ? null : perApplicationFor(f),
     per_service_treatments: rows.map(treatmentRow),
     // Row-level discount state: a program minimum can cap or suppress the
     // manual discount on SOME cadences only — the global manual_discount
@@ -130,7 +147,6 @@ function frequencyEntry(f) {
     manual_discount: f.manualDiscount || null,
   };
   if (f.manualDiscountSuppressed === true) entry.manual_discount_suppressed = true;
-  const range = lowConfidenceRange(f);
   if (range) entry.low_confidence_range = range;
   if (f.oneTimeTotal != null) entry.one_time_total = money(f.oneTimeTotal);
   if (f.quoteRequired === true) entry.quote_required = true;
@@ -159,6 +175,29 @@ function comboEntry(c) {
   };
   if (c.manualDiscountSuppressed === true) entry.manual_discount_suppressed = true;
   return entry;
+}
+
+// Section-level price selectors the composer attaches to a service section
+// (attachTermiteBondSelector / attachTermiteStationRental /
+// attachCommercialInteriorSelector): selectable additions the customer page
+// renders beside the base cadence. Reported only when the composer set them,
+// with the same amounts, so the base ladder is never passed off as the
+// complete offer.
+const addAmounts = (o) => ({ per_application_add: money(o.perApplicationAdd), monthly_add: money(o.monthlyAdd), annual_add: money(o.annualAdd) });
+function sectionSelectors(s) {
+  const out = {};
+  if (Array.isArray(s.bondOptions)) {
+    out.bond_options = s.bondOptions.map((o) => ({ key: o.key || null, label: o.label || null, years: Number(o.years) > 0 ? Number(o.years) : null, ...addAmounts(o) }));
+    out.selected_bond_term = s.selectedBondTerm || null;
+  }
+  if (s.stationRental && typeof s.stationRental === 'object') {
+    out.station_rental = { label: s.stationRental.label || null, detail: s.stationRental.detail || null, ...addAmounts(s.stationRental), price_itemized: s.stationRental.priceItemized === true };
+  }
+  if (s.interiorOption && typeof s.interiorOption === 'object') {
+    out.interior_option = { selected: s.interiorOption.selected !== false, label: s.interiorOption.label || null, ...addAmounts(s.interiorOption), detail: s.interiorOption.detail || null };
+  }
+  if (s.interiorScopeExcluded === true) out.interior_scope_excluded = true;
+  return out;
 }
 
 // ONE canonical upfront-fee list. The composer also ships compatibility
@@ -196,7 +235,72 @@ function breakdownEntry(b, excludedServices) {
   return { items, excluded_upfront_fee_services: [...excluded], total, quote_required: b.quoteRequired === true };
 }
 
-async function offeredPricing(row) {
+// ── Authored proposal (the billed quote when one exists) ─────────────
+// The public page and the PDF generator both price an enabled, itemized
+// proposal from normalizeProposal + computeProposalTotals in the live billing
+// lane (resolveProposalBillingContext); the engine rows such an estimate
+// still carries are explicitly not the billed price (estimate-public
+// attachCommercialInteriorSelector). Projected field-by-field like the public
+// view — the stored block is admin-authored. Returns null when the stored
+// proposal is not itemized (normalizeProposal falls back to the synthesized
+// view, enabled:false) — the page then prices from the bundle, and so does
+// this tool.
+async function authoredProposalPricing(row, data) {
+  if (data?.proposal?.enabled !== true) return null;
+  const { normalizeProposal, computeProposalTotals } = lazy.proposal();
+  const billing = await lazy.proposalBilling().resolveProposalBillingContext(row);
+  const proposal = normalizeProposal(row, {
+    recurringMode: billing?.billsPerApplication === true ? 'per_application' : 'legacy',
+    livePricing: billing?.livePricing || null,
+  });
+  if (proposal.enabled !== true) return null;
+  const totals = computeProposalTotals(proposal);
+  return {
+    pricing_authority: 'authored_proposal',
+    bills_per_application: billing?.billsPerApplication === true,
+    proposal: {
+      title: proposal.title,
+      prepared_for: proposal.preparedFor,
+      property_address: proposal.propertyAddress,
+      tax_rate: totals.taxRate,
+      tax_label: proposal.taxLabel,
+      terms: proposal.terms,
+      buildings: list(proposal.buildings).map((b) => ({
+        name: b.name,
+        note: b.note ?? null,
+        line_items: list(b.lineItems).map((i) => ({
+          description: i.description, quantity: i.quantity, unit_price: money(i.unitPrice), amount: money(i.amount),
+          frequency: i.frequency, frequency_label: i.frequencyLabel || null, visits_per_year: i.visitsPerYear > 0 ? i.visitsPerYear : null, taxable: i.taxable === true,
+        })),
+      })),
+      programs: proposal.programs ? proposal.programs.map((p) => ({
+        service: p.service, label: p.label, frequency_per_year: p.frequencyPerYear, price_per_application: money(p.pricePerApplication), annual: money(p.annual),
+        taxable: p.taxable === true, note: p.note ?? null, inclusions: p.inclusions ?? null, exclusions: p.exclusions ?? null,
+        buildings: list(p.buildings).map((b) => ({ name: b.name, note: b.note ?? null })),
+      })) : null,
+      corrective_work: proposal.correctiveWork ? proposal.correctiveWork.map((w) => ({ label: w.label, amount: money(w.amount), taxable: w.taxable === true, includes: w.includes ?? null })) : null,
+      commercial_terms: proposal.commercialTerms ? {
+        payment_terms: proposal.commercialTerms.paymentTerms ?? null, initial_term_months: proposal.commercialTerms.initialTermMonths ?? null, renewal: proposal.commercialTerms.renewal ?? null,
+        price_adjustment: proposal.commercialTerms.priceAdjustment ?? null, cancellation: proposal.commercialTerms.cancellation ?? null, access_requirements: proposal.commercialTerms.accessRequirements ?? null,
+      } : null,
+    },
+    totals: {
+      annual_recurring: money(totals.annualRecurring), monthly_equivalent: money(totals.monthlyEquivalent), one_time: money(totals.oneTime),
+      recurring_tax: money(totals.recurringTax), one_time_tax: money(totals.oneTimeTax), total_tax: money(totals.totalTax), first_year_total: money(totals.firstYearTotal),
+    },
+    source: 'authored_proposal',
+  };
+}
+
+async function offeredPricing(row, data) {
+  try {
+    const proposal = await authoredProposalPricing(row, data);
+    if (proposal) return { offered_pricing: proposal };
+  } catch (err) {
+    // An enabled proposal whose projection failed must not fall through to
+    // engine cadences — they are not the billed quote.
+    return { offered_pricing: null, offered_pricing_unavailable: `authored proposal failed: ${err.message}` };
+  }
   let bundle;
   try {
     bundle = await lazy.publicRoute().buildPricingBundle(row);
@@ -215,6 +319,7 @@ async function offeredPricing(row) {
         label: s.label || null,
         default_frequency_key: s.defaultFrequencyKey || null,
         frequencies: list(s.frequencies).map(frequencyEntry),
+        ...sectionSelectors(s),
       })),
       combos: list(bundle.serviceCadenceCombos).map(comboEntry),
       // The one-time total the customer page shows (the composer's
@@ -264,11 +369,15 @@ async function estimateLinks(row, data) {
 
 // Same order as the public renderers: reconcile the frozen membership
 // snapshot FIRST (mutates the row's pricing data in memory for a lapsed
-// member; never throws by contract), then read totals, links, and the
-// bundle from the reconciled row.
+// member), then read totals, links, and the bundle from the reconciled row.
+// The reconciler never throws by contract — it catches the live lookup /
+// reprice failure internally and REPORTS it as { ok: false, error }; a
+// rejection is handled too. Either way the row is still the unverified
+// snapshot, so the caller withholds pricing.
 async function reconcileMembership(row) {
   try {
-    await lazy.publicRoute().reconcileFrozenMembershipSnapshot(row);
+    const result = await lazy.publicRoute().reconcileFrozenMembershipSnapshot(row);
+    if (result && result.ok === false) return `membership reconciliation failed: ${result.error || 'unknown error'}`;
     return null;
   } catch (err) {
     return `membership reconciliation failed: ${err.message}`;
@@ -283,11 +392,47 @@ function resolveInvoiceMode(row, data) {
   }
 }
 
+// Authored proposal: its computed totals ARE the quote. Otherwise monthly /
+// annual are the stored totals the send path wrote (after reconciliation) and
+// one-time is the composer's corrected figure when the bundle built (it is
+// what the page shows), the stored column otherwise. Withheld entirely when
+// membership could not be verified.
+function totalsFor(row, pricing, reconciliation_error) {
+  if (reconciliation_error) return { monthly: null, annual: null, one_time: null, withheld: true };
+  const offered = pricing.offered_pricing;
+  if (offered?.pricing_authority === 'authored_proposal') {
+    const t = offered.totals;
+    return { monthly: t.monthly_equivalent, annual: t.annual_recurring, one_time: t.one_time, total_tax: t.total_tax, first_year_total: t.first_year_total, source: 'authored_proposal' };
+  }
+  return { monthly: money(row.monthly_total), annual: money(row.annual_total), one_time: offered?.one_time_total ?? money(row.onetime_total) };
+}
+
+// Deposits: amount is the FACE value requested; card_surcharge is the extra
+// cash collected on top of it and refunded_surcharge how much of that fee went
+// back (null = no explicit record). A 'pending' row is an abandoned Stripe
+// intent (estimate_deposits keeps it for the deposit follow-up stage) —
+// nothing was collected, so collected is false and total_paid null; every
+// other status (received / credited / refunding / refunded) records cash that
+// was taken.
+function depositEntry(d) {
+  const collected = d.status !== 'pending';
+  return {
+    amount: money(d.amount), card_surcharge: money(d.card_surcharge), collected,
+    total_paid: collected ? money(Number(d.amount || 0) + Number(d.card_surcharge || 0)) : null,
+    credited: money(d.credited_amount), refunded: money(d.refunded_amount), refunded_surcharge: money(d.refunded_surcharge),
+    status: d.status, received_at: d.received_at,
+  };
+}
+
 async function shapeEstimate(row, deposits = []) {
   const reconciliation_error = await reconcileMembership(row);
-  const pricing = await offeredPricing(row);
   const data = parseStoredJson(row.estimate_data);
-  const composerOneTime = pricing.offered_pricing?.one_time_total ?? null;
+  // Pricing is WITHHELD when the live membership state could not be verified:
+  // the row is then the stale frozen-member snapshot, and an answer built
+  // from it would quote a discount the page may no longer give.
+  const pricing = reconciliation_error
+    ? { offered_pricing: null, offered_pricing_unavailable: `withheld: ${reconciliation_error}` }
+    : await offeredPricing(row, data);
   return {
     id: row.id,
     customer_id: row.customer_id,
@@ -307,27 +452,13 @@ async function shapeEstimate(row, deposits = []) {
     bill_by_invoice: resolveInvoiceMode(row, data),
     // Derived from the bundle's verdict, never from a stored flag: null when
     // the bundle could not be built (unknown, not "no").
-    requote_required: pricing.offered_pricing ? pricing.offered_pricing.quote_required : null,
+    requote_required: pricing.offered_pricing ? (pricing.offered_pricing.quote_required ?? null) : null,
     requote_reason: pricing.offered_pricing?.quote_required_reason ?? null,
-    // Monthly / annual: the stored totals the send path wrote (after
-    // reconciliation). One-time: the composer's corrected figure when the
-    // bundle built (it is what the page shows), the stored column otherwise.
-    totals: {
-      monthly: money(row.monthly_total),
-      annual: money(row.annual_total),
-      one_time: composerOneTime ?? money(row.onetime_total),
-    },
+    totals: totalsFor(row, pricing, reconciliation_error),
     ...pricing,
     ...(reconciliation_error ? { reconciliation_error } : {}),
     accepted: row.accepted_at ? { at: row.accepted_at, service_mode: row.accepted_service_mode || null, frequency: row.accepted_frequency_key || null } : null,
-    // Deposits: amount is the FACE value; card_surcharge is the extra cash
-    // actually collected on top of it and refunded_surcharge how much of
-    // that fee went back (null = no explicit record).
-    deposits: deposits.map((d) => ({
-      amount: money(d.amount), card_surcharge: money(d.card_surcharge), total_paid: money(Number(d.amount || 0) + Number(d.card_surcharge || 0)),
-      credited: money(d.credited_amount), refunded: money(d.refunded_amount), refunded_surcharge: money(d.refunded_surcharge),
-      status: d.status, received_at: d.received_at,
-    })),
+    deposits: deposits.map(depositEntry),
     customer_notes: row.notes || null,
     ...(await estimateLinks(row, data)),
     sent_at: row.sent_at,
@@ -377,7 +508,7 @@ async function getEstimateDetail({ estimate_id, customer_id, limit } = {}) {
 
 const GET_ESTIMATE_DETAIL_TOOL = {
   name: 'get_estimate_detail',
-  description: `Read what an estimate offered, exactly as the customer's estimate page prices it: the plan cadences with their monthly / annual prices and, on cadences billed per application, the per-application price the page shows (a monthly-billed plan reports billing_unit monthly and no per-application figure; a LOW-confidence commercial price reports its range), each service's cadence ladder (pest quarterly / bi-monthly / monthly, lawn standard / enhanced / premium), the priced cadence combinations on a mixed estimate with their allocated per-service amounts and any manual discount, one canonical upfront-fee list plus the remaining one-time breakdown (never the same fee twice), the page's one-time total, totals, deposits (face amount + card surcharge), status, view/sent/accepted timestamps, and which link (customer or staff preview) can actually be opened. A lapsed membership is reconciled first, so the amounts match the live page (requote_required + requote_reason carry the page's own quote-required verdict, e.g. a lapsed member whose price could not be repriced). Pass estimate_id for one estimate or customer_id for that customer's latest estimates (newest first).
+  description: `Read what an estimate offered, exactly as the customer's estimate page prices it: the plan cadences with their monthly / annual prices and, on cadences billed per application, the per-application price the page shows (a monthly-billed plan reports billing_unit monthly and no per-application figure; a LOW-confidence commercial price reports its range), each service's cadence ladder (pest quarterly / bi-monthly / monthly, lawn standard / enhanced / premium) with any selectable additions the page offers beside it (termite bond terms, station rental, commercial interior service), the priced cadence combinations on a mixed estimate with their allocated per-service amounts and any manual discount, one canonical upfront-fee list plus the remaining one-time breakdown (never the same fee twice), the page's one-time total, totals, deposits (face amount + card surcharge; a pending intent collected nothing), status, view/sent/accepted timestamps, and which link (customer or staff preview) can actually be opened. A formal commercial proposal (pricing_authority authored_proposal) is reported from its authored line items, programs, corrective work and computed totals instead — that is the billed quote. A lapsed membership is reconciled first, so the amounts match the live page (requote_required + requote_reason carry the page's own quote-required verdict, e.g. a lapsed member whose price could not be repriced); when the live membership state cannot be verified, pricing and totals are withheld (offered_pricing_unavailable says so) rather than quoted from the stale snapshot. Pass estimate_id for one estimate or customer_id for that customer's latest estimates (newest first).
 Use for: "what did we quote him for quarterly pest", "what is the per-application price on her estimate", "what would monthly have cost", "what did the 9/5 estimate say" — anything about the amounts inside a sent estimate. Prefer this over guessing from monthly_rate or from the SMS thread. It does not itemize the internal engine rows behind those prices; offered_pricing_unavailable says when the pricing bundle could not be built.`,
   input_schema: {
     type: 'object',

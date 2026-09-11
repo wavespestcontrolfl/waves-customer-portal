@@ -8087,6 +8087,9 @@ function applyMembershipRepriceToEstimate(estimate, estData, reprice) {
   return estimate;
 }
 
+// Resolves undefined when there was nothing to reconcile, { ok: true } after a
+// reconcile, { ok: false, error } when the live lookup / reprice failed (the
+// row is then still the UNRECONCILED snapshot). Never rejects.
 async function reconcileFrozenMembershipSnapshot(estimate) {
   try {
     if (!estimate || !estimate.customer_id) return;
@@ -8295,7 +8298,14 @@ async function reconcileFrozenMembershipSnapshot(estimate) {
     clearEstimatePricingCache(estimate.id);
   } catch (err) {
     logger.warn(`[estimate-public] membership snapshot reconcile skipped: ${err.message}`);
+    // Never throws (the public renderers fall back to the stored row), but
+    // the failure is REPORTED to callers that can act on it: a reader that
+    // must not price from an unverified member snapshot (the intelligence
+    // bar's get_estimate_detail, codex #4345 r7 P1) checks ok === false and
+    // withholds. The early returns above resolve undefined = nothing to do.
+    return { ok: false, error: err.message };
   }
+  return { ok: true };
 }
 
 async function handleEstimateView(req, res, next) {
