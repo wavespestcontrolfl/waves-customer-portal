@@ -16,7 +16,9 @@ export default function PayOverview({ view, manage: canManage, onSaved }) {
   const [editor, setEditor] = useState(null);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
-  const role = view.program.roles.find(item => item.key === view.level?.role_key);
+  // Outcomes for the selected month are modeled at the level in effect on its first day, not today's level.
+  const monthLevel = view.levels.find(item => date(item.effective_date) <= `${view.month}-01`) || null;
+  const role = view.program.roles.find(item => item.key === monthLevel?.role_key);
   function saved(label) { setEditor(null); onSaved(label); }
   async function saveSnapshot() {
     setSaving(true); setError('');
@@ -28,7 +30,7 @@ export default function PayOverview({ view, manage: canManage, onSaved }) {
 
     <div className="pg-summary-grid">
       <section className="pg-card"><p className="pg-eyebrow">Recorded hourly rate</p><strong className="pg-number">{view.person.pay_rate == null ? 'Not recorded' : money(Math.round(Number(view.person.pay_rate) * 100))}<small>{view.person.pay_rate != null && ' / hour'}</small></strong><p>{view.person.job_title || 'No job title recorded'}</p><p className="pg-muted">The profile rate is separate from the modeled package. Refer to your issued terms.</p><Link to={canManage ? '/admin/timetracking?tab=documents' : '/tech/documents'}>Staff documents</Link></section>
-      <section className="pg-card pg-emphasis"><p className="pg-eyebrow">Simulated production</p><strong className="pg-number">{money(view.simulation.production.amount_cents)}</strong><p>{view.simulation.production.calculated} calculated services · {view.simulation.production.needs_evidence} need evidence</p><p className="pg-muted">{role ? `Simulation level: ${role.title}` : 'No simulation level recorded'}. Incentives are added to hourly pay in the model.</p></section>
+      <section className="pg-card pg-emphasis"><p className="pg-eyebrow">Simulated production</p><strong className="pg-number">{money(view.simulation.production.amount_cents)}</strong><p>{view.simulation.production.calculated} calculated services · {view.simulation.production.needs_evidence} need evidence</p><p className="pg-muted">{role ? `Simulation level for ${view.month}: ${role.title}` : `No simulation level in effect for ${view.month}`}. Incentives are added to hourly pay in the model.</p></section>
       <section className="pg-card"><p className="pg-eyebrow">Existing review payouts</p><strong className="pg-number">{money(view.reviews.reduce((sum, row) => sum + row.amount_cents, 0))}</strong><p>Recorded in the existing review program</p><p className="pg-muted">Shown once from its authoritative payout record. Separate from these simulations.</p></section>
     </div>
     <div className="pg-row"><h2>Monthly outcome model</h2><span className="pg-muted">{view.simulation.period_closed ? 'Service month closed' : 'Month in progress'} · evaluated {view.simulation.as_of_date}</span></div>

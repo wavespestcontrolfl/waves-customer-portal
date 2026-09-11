@@ -35,7 +35,7 @@ function evidenceForm(detail) {
   const facts = previous.facts || {};
   const fields = Object.fromEntries(Object.entries(defaults).map(([key, fallback]) => [key, facts[key] ?? fallback]));
   return { ...fields, id: crypto.randomUUID(), service_id: detail.visit.id, base_id: previous.id || null,
-    allocation_id: previous.allocation_id || '', ordinal: previous.ordinal == null ? '' : String(previous.ordinal),
+    allocation_id: detail.visit.is_callback ? '' : previous.allocation_id || '', ordinal: detail.visit.is_callback || previous.ordinal == null ? '' : String(previous.ordinal),
     cutoff_at: fields.cutoff_at ? etDatetimeLocalValue(new Date(fields.cutoff_at)) : '', complete_at_cutoff: String(fields.complete_at_cutoff),
   };
 }
@@ -69,7 +69,7 @@ export default function EvidenceEditor({ technicianId, month, serviceId = '', pe
     event.preventDefault(); setBusy(true); setError('');
     try {
       await request('/service-evidence', { method: 'POST', body: { ...data,
-        allocation_id: data.allocation_id || null, ordinal: numeric(data.ordinal),
+        allocation_id: detail.visit.is_callback ? null : data.allocation_id || null, ordinal: detail.visit.is_callback ? null : numeric(data.ordinal),
         cutoff_at: data.cutoff_at ? etDatetimeLocalToISO(data.cutoff_at) : null,
         complete_at_cutoff: data.complete_at_cutoff === '' ? null : data.complete_at_cutoff === 'true', return_service_id: data.return_service_id || null,
       } });
@@ -87,14 +87,15 @@ export default function EvidenceEditor({ technicianId, month, serviceId = '', pe
     {detail && <>
       <p className="pg-muted">{detail.visit.service_key || 'Unmapped service key'} · {detail.revisions.length ? `${detail.revisions.length} retained revisions` : 'First review'}. A no-application decision is assessed against the purchased scope.</p>
       {detail.visit.status !== 'completed' && <p className="pg-error">This service appears performed but is not marked complete. Resolve its completion record before calculating credit.</p>}
-      {!newAllocation && !allocationLocked && <Button variant="secondary" disabled={!detail.visit.service_key || busy} onClick={() => setNewAllocation(true)}>Add accepted value allocation</Button>}
+      {detail.visit.is_callback && <p className="pg-muted">Callback visits are corrective: they receive zero production credit and never claim an application from an accepted-value allocation.</p>}
+      {!detail.visit.is_callback && !newAllocation && !allocationLocked && <Button variant="secondary" disabled={!detail.visit.service_key || busy} onClick={() => setNewAllocation(true)}>Add accepted value allocation</Button>}
       {newAllocation && <AllocationForm visit={detail.visit} onBusy={setAllocationSaving} onCancel={() => setNewAllocation(false)} onCreated={(allocation, serviceId) => {
         // The service selector is disabled while the save is pending; this guard keeps a late response from another service out of this review.
         setReview(current => current.detail?.visit.id === serviceId ? { detail: { ...current.detail, allocations: [allocation, ...current.detail.allocations] }, data: { ...current.data, allocation_id: allocation.id, ordinal: '1' } } : current);
         setNewAllocation(false);
       }} />}
       <form onSubmit={save}><fieldset disabled={busy || newAllocation || detail.visit.status !== 'completed'}>
-        <div className="pg-form-grid"><Field label="Service-value allocation" value={data.allocation_id} disabled={allocationLocked} options={[{ value: '', label: 'Not yet recorded' }, ...detail.allocations.map(row => ({ value: row.id, label: `${date(row.coverage_start)} – ${date(row.coverage_end)} · $${(row.net_value_cents / 100).toFixed(2)} / ${row.planned_visits} applications` }))]} onChange={event => { change('allocation_id', event.target.value); change('ordinal', event.target.value ? '1' : ''); }} /><Field label="Application number in original allocation" type="number" min="1" max="366" disabled={allocationLocked || !data.allocation_id} value={data.ordinal} onChange={event => change('ordinal', event.target.value)} /></div>
+        {!detail.visit.is_callback && <div className="pg-form-grid"><Field label="Service-value allocation" value={data.allocation_id} disabled={allocationLocked} options={[{ value: '', label: 'Not yet recorded' }, ...detail.allocations.map(row => ({ value: row.id, label: `${date(row.coverage_start)} – ${date(row.coverage_end)} · $${(row.net_value_cents / 100).toFixed(2)} / ${row.planned_visits} applications` }))]} onChange={event => { change('allocation_id', event.target.value); change('ordinal', event.target.value ? '1' : ''); }} /><Field label="Application number in original allocation" type="number" min="1" max="366" disabled={allocationLocked || !data.allocation_id} value={data.ordinal} onChange={event => change('ordinal', event.target.value)} /></div>}
         <div className="pg-form-grid"><Field label="Value provenance" value={data.provenance} options={['verified', 'backfilled', 'synthetic'].map(value => ({ value, label: words(value) }))} onChange={event => change('provenance', event.target.value)} /><Field label="Production exclusion" value={data.exclusion} options={['none', 'corrective', 'planned_followup', 'duplicate', 'unnecessary', 'inspection'].map(value => ({ value, label: words(value) }))} onChange={event => change('exclusion', event.target.value)} /></div>
         <Field label="Service and credited-value evidence" multiline required maxLength={2000} value={data.source_reference} onChange={event => change('source_reference', event.target.value)} />
         <h3>Employee credit shares</h3>{data.participants.map((participant, index) => <div className="pg-form-row" key={index}><div className="pg-form-grid"><Field label={`Employee ${index + 1}`} disabled={!!data.base_id} value={participant.technician_id} options={[{ value: '', label: 'Choose employee…' }, ...people.map(person => ({ value: person.id, label: person.name }))]} onChange={event => change('participants', data.participants.map((item, i) => i === index ? { ...item, technician_id: event.target.value } : item))} /><Field label={`Employee ${index + 1} share (%)`} type="number" min="0.01" max="100" step="0.01" required disabled={!!data.base_id} value={participant.share_bps == null ? '' : participant.share_bps / 100} onChange={event => change('participants', data.participants.map((item, i) => i === index ? { ...item, share_bps: percentBps(event.target.value) } : item))} /></div>{!data.base_id && index > 0 && <Button variant="secondary" onClick={() => change('participants', data.participants.filter((_, i) => i !== index))}>Remove employee {index + 1}</Button>}</div>)}
