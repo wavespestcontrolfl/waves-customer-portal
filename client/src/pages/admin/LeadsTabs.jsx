@@ -117,9 +117,7 @@ function LeadOwedPromises({ leadId }) {
   const load = useCallback(async () => {
     if (!leadId) return;
     try {
-      const data = await adminFetch(
-        `/admin/call-recordings/commitments/open?lead_id=${encodeURIComponent(leadId)}&limit=${LEAD_OWED_LIMIT + 1}`,
-      );
+      const data = await adminFetch(`/admin/call-recordings/commitments/open?lead_id=${encodeURIComponent(leadId)}&limit=${LEAD_OWED_LIMIT + 1}`);
       setRows(data.commitments || []);
       setEnabled(data.enabled !== false);
       setError(null);
@@ -136,16 +134,7 @@ function LeadOwedPromises({ leadId }) {
     if (busyId) return;
     setBusyId(row.id);
     try {
-      await adminFetch(
-        `/admin/call-recordings/commitments/${encodeURIComponent(row.id)}`,
-        {
-          method: "PATCH",
-          body: JSON.stringify({
-            action,
-            expected_at: row.updated_at,
-          }),
-        },
-      );
+      await adminFetch(`/admin/call-recordings/commitments/${encodeURIComponent(row.id)}`, { method: "PATCH", body: JSON.stringify({ action, expected_at: row.updated_at }) });
       await load();
     } catch (err) {
       setError(err.message || "That change did not save.");
@@ -1065,9 +1054,7 @@ export function LeadsSection({ newLeadRequest = 0 }) {
     try {
       await adminFetch(`/admin/leads/${leadId}`, {
         method: "PUT",
-        body: {
-          status,
-        },
+        body: { status },
       });
       loadLeads();
     } catch (e) {
@@ -1089,9 +1076,7 @@ export function LeadsSection({ newLeadRequest = 0 }) {
     }
     setDeletingLeadId(lead.id);
     try {
-      await adminFetch(`/admin/leads/${lead.id}`, {
-        method: "DELETE",
-      });
+      await adminFetch(`/admin/leads/${lead.id}`, { method: "DELETE" });
       setLeads((rows) => rows.filter((row) => row.id !== lead.id));
       setLeadsTotal((total) => Math.max(0, total - 1));
       if (expandedLead === lead.id) {
@@ -1123,10 +1108,7 @@ export function LeadsSection({ newLeadRequest = 0 }) {
     setLoading(true);
     try {
       if (showModal === "newLead") {
-        await adminFetch("/admin/leads", {
-          method: "POST",
-          body: formData,
-        });
+        await adminFetch("/admin/leads", { method: "POST", body: formData });
         loadLeads();
       } else if (showModal === "newSource") {
         await adminFetch("/admin/leads/sources", {
@@ -1154,9 +1136,7 @@ export function LeadsSection({ newLeadRequest = 0 }) {
       } else if (showModal === "assign") {
         await adminFetch(`/admin/leads/${formData.leadId}/assign`, {
           method: "POST",
-          body: {
-            technician_id: formData.technician_id,
-          },
+          body: { technician_id: formData.technician_id },
         });
         loadLeads();
       } else if (showModal === "builderWarranty") {
@@ -1948,9 +1928,7 @@ export function LeadsSection({ newLeadRequest = 0 }) {
                                       <Button
                                         variant={"primary"}
                                         onClick={() =>
-                                          navigate(
-                                            `/admin/agent-estimate?leadId=${encodeURIComponent(lead.id)}`,
-                                          )
+                                          navigate(`/admin/agent-estimate?leadId=${encodeURIComponent(lead.id)}`)
                                         }
                                       >
                                         Agent Estimate
@@ -2364,28 +2342,25 @@ export function LeadsSection({ newLeadRequest = 0 }) {
                                                   method: "POST",
                                                   body: {
                                                     ...extra,
-                                                    date: apptForm.date,
-                                                    time: apptForm.time,
-                                                    serviceType:
-                                                      apptForm.serviceType,
-                                                    serviceId:
-                                                      apptForm.serviceId ||
-                                                      null,
-                                                    technicianId:
-                                                      apptForm.technicianId ||
-                                                      null,
-                                                    notes: apptForm.notes,
-                                                    // Card already shows a CONVERTED
-                                                    // lead → explicit repeat booking.
-                                                    // converted_at ALONE: the public
-                                                    // quote flow links customer_id
-                                                    // without converting, and that
-                                                    // lead's first submit must not
-                                                    // send this (server 409s retries
-                                                    // on converted leads).
-                                                    rebook: Boolean(
-                                                      lead.converted_at,
-                                                    ),
+                                                  date: apptForm.date,
+                                                  time: apptForm.time,
+                                                  serviceType:
+                                                    apptForm.serviceType,
+                                                  serviceId:
+                                                    apptForm.serviceId || null,
+                                                  technicianId:
+                                                    apptForm.technicianId ||
+                                                    null,
+                                                  notes: apptForm.notes,
+                                                  // Card already shows a CONVERTED
+                                                  // lead → explicit repeat booking.
+                                                  // converted_at ALONE: the public
+                                                  // quote flow links customer_id
+                                                  // without converting, and that
+                                                  // lead's first submit must not
+                                                  // send this (server 409s retries
+                                                  // on converted leads).
+                                                  rebook: Boolean(lead.converted_at),
                                                   },
                                                 },
                                               );
