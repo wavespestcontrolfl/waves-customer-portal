@@ -224,6 +224,11 @@ describe('bid form original integrity beyond the content streams', () => {
     if (accepted) await expect(build(sourcePdf)).resolves.toBeInstanceOf(Buffer);
     else await expect(build(sourcePdf)).rejects.toThrow(/does not match/);
   });
+  test('a selected page scaled with /UserUnit is refused (GH codex P2 r7 on #4270)', async () => {
+    await approve(await blankPage());
+    await expect(build(await blankPage(async (pdf, page) => page.node.set(PDFName.of('UserUnit'), PDFNumber.of(2))))).rejects.toThrow(/does not match/);
+    await expect(build(await blankPage(async (pdf, page) => page.node.set(PDFName.of('UserUnit'), PDFNumber.of(1))))).resolves.toBeInstanceOf(Buffer);
+  });
   test('a page carrying annotations or widgets is refused before fingerprinting', async () => {
     await approve(await blankPage());
     const sourcePdf = await blankPage(async (pdf, page) => { pdf.getForm().createTextField('bidder').addToPage(page, { x: 50, y: 50, width: 200, height: 20 }); });
@@ -258,6 +263,9 @@ describe('bid form original integrity beyond the content streams', () => {
     ['cropped', (other) => other.setCropBox(0, 0, 300, 792)],
     ['rotated', (other) => other.setRotation(degrees(90))],
     ['widget moved without a value', (other, field) => { field.acroField.getWidgets()[0].setRectangle({ x: 60, y: 50, width: 200, height: 20 }); }],
+    // `/UserUnit` doubles the printed size while every hashed box stays
+    // identical (GH codex P2 r7 on #4270).
+    ['scaled (/UserUnit 2)', (other) => other.node.set(PDFName.of('UserUnit'), PDFNumber.of(2))],
   ])('a %s attestation page elsewhere in the packet is refused (GH codex P2 r4 on #4270)', async (name, mutateOther) => {
     await approve(await packet(null));
     await expect(build(await packet(null, { mutateOther }))).rejects.toThrow(/other pages of this PDF differ/);

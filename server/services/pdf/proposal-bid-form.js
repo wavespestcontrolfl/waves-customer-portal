@@ -21,8 +21,8 @@ const { BID_FORM_PROFILES, roundCents, roundDecimal, proposalLineAmount, formatQ
 // `node server/scripts/bid-form-fingerprint.js <pdf> <page>` on the original
 // and record all three values here.
 const FORM_PAGE_FINGERPRINTS = {
-  north_port_pr27_02: { contents: '728fcdbde060cbbd0406774aaab47bbff7e0a47bd34eca8ece46d30fb5d4ea45', resources: '8f8dd15efaf336d0fed58631876ec381b2712cbb6d29b5f15841d413560043e9', packet: 'f189787f282ffc77a2c0a8bb915570aaa77294e42daaafebacca764ab1e6b456' },
-  cove_termite: { contents: '04aa8cb7b95eacb57c550a743796078bd113aa8a3a129ca7928241b225ca84f4', resources: 'da975e4497103e7eaed5ccb3fe24e99aef2d49814551b7caf04bcbd1fd3abe74', packet: 'ec0f145251056ed72a6a7ae6ccaa594603d6a95d5b501ab6e242e0e970da6972' },
+  north_port_pr27_02: { contents: '728fcdbde060cbbd0406774aaab47bbff7e0a47bd34eca8ece46d30fb5d4ea45', resources: '8f8dd15efaf336d0fed58631876ec381b2712cbb6d29b5f15841d413560043e9', packet: 'f1475247451feafe4f0b07f3ed5ed358e6bc76b9425aa5a1ab48ff4cb6851d9c' },
+  cove_termite: { contents: '04aa8cb7b95eacb57c550a743796078bd113aa8a3a129ca7928241b225ca84f4', resources: 'da975e4497103e7eaed5ccb3fe24e99aef2d49814551b7caf04bcbd1fd3abe74', packet: '076f7213f3f9ba350d0bd6dddf2d7bf974a3706b691c85a8d8bc787a89197792' },
 };
 const invalid = (message) => Object.assign(new Error(message), { statusCode: 400 });
 // Hash every object the page's /Resources reaches (dictionaries by sorted
@@ -107,12 +107,16 @@ function pageFingerprint(document, page) {
 // resources and its annotation objects — the original's own blank widgets
 // with their appearance streams, hashed as objects rather than counted, so a
 // cropped or rotated attestation page or a widget whose appearance was
-// altered without setting `/V` is refused too (GH codex P2 r4 on #4270).
-// Flattening a filled field rewrites the content stream and drops the
-// widget; a stamp or an added or removed page changes the sequence. The
-// selected page is excluded because it is fingerprinted on its own, which
-// also lets the value be recorded from a reviewed export whose only change
-// is that page.
+// altered without setting `/V` is refused too (GH codex P2 r4 on #4270) —
+// and the rest of the page dictionary (`/UserUnit`, which scales the printed
+// page, boxes, transitions, groups, structure links), so state that
+// `save()` preserves but the geometry line does not cover is pinned as well
+// (GH codex P2 r7 on #4270). Flattening a filled field rewrites the content
+// stream and drops the widget; a stamp or an added or removed page changes
+// the sequence. The selected page is excluded because it is fingerprinted on
+// its own, which also lets the value be recorded from a reviewed export
+// whose only change is that page.
+const PAGE_KEYS_HASHED_SEPARATELY = new Set(['/Contents', '/Resources', '/Annots', '/Parent']);
 function packetFingerprint(document, selectedIndex) {
   const hash = crypto.createHash('sha256');
   const visit = objectHasher(document, hash);
@@ -125,7 +129,12 @@ function packetFingerprint(document, selectedIndex) {
     hash.update(`${pageContentHash(document, page)}:${pageResourceHash(document, page)};annots:`);
     const annots = page.node.Annots();
     if (annots) visit(annots); else hash.update('none');
-    hash.update(';');
+    hash.update(';dict:<<');
+    for (const [key, value] of sortedEntries(page.node)) {
+      if (PAGE_KEYS_HASHED_SEPARATELY.has(key.toString())) continue;
+      hash.update(`${key.toString()}=`); visit(value);
+    }
+    hash.update('>>;');
   });
   // Catalog state other than the page tree: the name trees (destinations
   // and the original's JavaScript), viewer preferences, structure, metadata,
@@ -175,7 +184,11 @@ function pageContentHash(document, page) {
 function assertBlankFormState(document, page) {
   const boxes = [page.getMediaBox(), page.getCropBox()].every((box) => Math.abs(box.x) <= 0.1 && Math.abs(box.y) <= 0.1
     && Math.abs(box.width - 612) <= 0.1 && Math.abs(box.height - 792) <= 0.1);
-  if (!boxes || page.getRotation().angle !== 0) throw invalid('This page does not match the supported blank bid form. Select the original form page; revised layouts need a reviewed template.');
+  // `/UserUnit` scales the printed page; the reviewed originals carry none
+  // (default 1), and the selected page sits outside the packet fingerprint.
+  const userUnit = page.node.lookup(PDFName.of('UserUnit'));
+  const scaled = userUnit != null && Number(userUnit.asNumber?.() ?? NaN) !== 1;
+  if (!boxes || page.getRotation().angle !== 0 || scaled) throw invalid('This page does not match the supported blank bid form. Select the original form page; revised layouts need a reviewed template.');
   if ((page.node.Annots()?.size() || 0) > 0) throw invalid('The selected page carries annotations or form fields. Upload the untouched original form.');
   assertInertDocument(document);
   const acroForm = document.catalog.lookup(PDFName.of('AcroForm'));
