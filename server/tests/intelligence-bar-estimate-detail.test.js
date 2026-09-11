@@ -262,11 +262,15 @@ test('a lapsed membership is reconciled BEFORE totals and the bundle, on the sam
   const shaped = await shapeEstimate(row);
   expect(calls).toEqual(['reconcile', 'bundle']);
   expect(mockReconcile).toHaveBeenCalledWith(row);
-  // No sendSnapshot on this row's estimate_data → the bundle is rebuilt
-  // (snapshot_hit false), so totals come from its own reconciled frequency,
-  // which happens to equal the just-reconciled columns here.
-  expect(shaped.totals).toEqual({ monthly: 61, annual: 732, one_time: 125, source: 'rebuilt_bundle_default' });
-  expect(shaped.offered_pricing.plan_frequencies[0].monthly).toBe(61);
+  // The composer marked the whole BUNDLE quote-required here (a lapsed
+  // member whose price could not be repriced) without stamping the single
+  // frequency itself — exactly the case the React quote_required terminal
+  // branch renders with no pricing at all, so totals withhold entirely
+  // (Codex round 4 P1) rather than exposing the reconciled 61/732 columns.
+  expect(shaped.totals).toEqual({ monthly: null, annual: null, one_time: null, source: 'quote_required' });
+  // The one un-stamped frequency withholds too, through the same
+  // bundle-level signal — not because IT carries quoteRequired (it doesn't).
+  expect(shaped.offered_pricing.plan_frequencies[0].monthly).toBeNull();
   // Quote-required state is the bundle's verdict, surfaced twice: on offered_pricing and as the top-level flag + reason.
   expect(shaped.offered_pricing).toMatchObject({ quote_required: true, quote_required_reason: 'membership_lapsed_requote', quote_required_items: [] });
   expect(shaped.requote_required).toBe(true);
@@ -665,6 +669,94 @@ test('bundle.annualPrepayEligible rides on offered_pricing as the estimate-level
   mockBuildPricingBundle.mockResolvedValue({ frequencies: [] });
   const unstamped = await shapeEstimate(estimateRow());
   expect(unstamped.offered_pricing.annual_prepay_eligible).toBeUndefined();
+});
+
+test('a bundle-level quote-required verdict (manager approval, a wide low-confidence commercial range, commercial risk-type review, a custom-quote one-time item...) withholds EVERY money field in offered_pricing, not just the cadences the composer happened to stamp individually — the React quote_required terminal branch renders no pricing at all (Codex round 4 P1, finding 3987976743)', async () => {
+  mockBuildPricingBundle.mockResolvedValue({
+    // Every frequency/section/combo below is a PLAIN numeric entry — none
+    // individually stamped quoteRequired. Only the BUNDLE says so.
+    frequencies: [{ key: 'quarterly', monthly: 300, annual: 3600, visitsPerYear: 4, perTreatment: 75, billedPerApplication: true,
+      perServiceTreatments: [{ service: 'commercial_pest', label: 'Commercial Pest', perTreatment: 75, displayPrice: 75, visitsPerYear: 4 }] }],
+    services: [{ key: 'commercial_pest', label: 'Commercial Pest', defaultFrequencyKey: 'monthly', frequencies: [
+      { key: 'monthly', monthly: 300, annual: 3600, visitsPerYear: 12 },
+    ] }],
+    serviceCadenceCombos: [{ key: 'x', selection: null, monthly: 300, annual: 3600,
+      perServiceTreatments: { commercial_pest: { perTreatment: 200, treatments: 12 } } }],
+    anchorOneTimePrice: 500,
+    firstVisitFees: [{ service: 'waveguard_setup', amount: 99, label: 'WaveGuard setup' }],
+    oneTimeBreakdown: { items: [{ service: 'exclusion', label: 'Exclusion work', amount: 450 }], total: 450 },
+    quoteRequired: true,
+    quoteRequiredReason: 'commercial_risk_type_review',
+    quoteRequiredItems: [],
+  });
+  const shaped = await shapeEstimate(estimateRow());
+  const offered = shaped.offered_pricing;
+  expect(offered.quote_required).toBe(true);
+  expect(offered.quote_required_reason).toBe('commercial_risk_type_review');
+  // Top-level frequency: money nulled, treatment row withheld too (no
+  // low_confidence_range — this isn't a range, the terminal branch just
+  // renders nothing).
+  expect(offered.plan_frequencies[0]).toMatchObject({ monthly: null, annual: null, per_application: null });
+  expect(offered.plan_frequencies[0].low_confidence_range).toBeUndefined();
+  expect(offered.plan_frequencies[0].per_service_treatments).toEqual([
+    { service: 'commercial_pest', label: 'Commercial Pest', visits_per_year: 4, prices_withheld: 'low_confidence_range' },
+  ]);
+  // Section frequency: same, even though sections never take the
+  // combined-range fallback — bundle-level quoteRequired is a different,
+  // unconditional signal.
+  expect(offered.services[0].frequencies[0]).toMatchObject({ monthly: null, annual: null });
+  // Combo: money and treatment allocations withheld too.
+  expect(offered.combos[0]).toMatchObject({ monthly: null, annual: null });
+  expect(offered.combos[0].per_service_treatments).toEqual({ commercial_pest: { treatments: 12, prices_withheld: 'low_confidence_range' } });
+  // One-time items withhold too — the terminal branch shows no pricing at all.
+  expect(offered.one_time_total).toBeNull();
+  expect(offered.upfront_fees[0]).toMatchObject({ service: 'waveguard_setup', label: 'WaveGuard setup', amount: null });
+  expect(offered.one_time_breakdown).toMatchObject({ total: null, items: [{ service: 'exclusion', label: 'Exclusion work', amount: null }] });
+  // Totals withhold entirely too — not the stored monthly_total/annual_total/onetime_total columns.
+  expect(shaped.totals).toEqual({ monthly: null, annual: null, one_time: null, source: 'quote_required' });
+  expect(shaped.requote_required).toBe(true);
+  expect(shaped.requote_reason).toBe('commercial_risk_type_review');
+});
+
+test('a PER-CADENCE-only quote-required frequency (bundle-level quoteRequired false) stays exactly as before — only that cadence withholds, its treatment rows stay exact, other cadences are untouched', async () => {
+  mockBuildPricingBundle.mockResolvedValue({
+    frequencies: [
+      { key: 'quarterly', monthly: 90, annual: 1080, visitsPerYear: 4 }, // sellable, untouched
+      { key: 'monthly', monthly: 300, annual: 3600, visitsPerYear: 12, quoteRequired: true,
+        perServiceTreatments: [{ service: 'commercial_pest', label: 'Commercial Pest', perTreatment: 300, displayPrice: 300, visitsPerYear: 12 }] },
+    ],
+    anchorOneTimePrice: 125,
+    // bundle-level quoteRequired is FALSE here — the composer's overall verdict.
+  });
+  const shaped = await shapeEstimate(estimateRow());
+  const [sellable, quoteOnly] = shaped.offered_pricing.plan_frequencies;
+  expect(sellable).toMatchObject({ monthly: 90, annual: 1080 });
+  expect(quoteOnly).toMatchObject({ monthly: null, annual: null, quote_required: true });
+  // Not a range: this cadence's treatment rows stay exact (PriceCard's own
+  // gate is showLowConfidenceRange, not quoteRequired) — unchanged from
+  // round 3.
+  expect(quoteOnly.per_service_treatments).toEqual([
+    { service: 'commercial_pest', label: 'Commercial Pest', per_treatment: 300, display_price: 300, visits_per_year: 12 },
+  ]);
+  expect(shaped.offered_pricing.one_time_total).toBe(125); // one-time items untouched
+  expect(shaped.offered_pricing.quote_required).toBe(false);
+});
+
+test('a service-specific credit (kind:\'included\', amount 0) carries its kind on the projected one-time row so the page renders "Included" instead of a literal $0 charge (Codex round 4 P2, finding 3987976729)', async () => {
+  mockBuildPricingBundle.mockResolvedValue({
+    frequencies: [],
+    oneTimeBreakdown: {
+      items: [
+        { service: 'first_app_credit', label: 'First application', amount: 0, detail: 'Covered by your welcome credit', kind: 'included' },
+        { service: 'exclusion', label: 'Exclusion work', amount: 450 }, // no kind — untouched
+      ],
+      total: 450,
+    },
+  });
+  const shaped = await shapeEstimate(estimateRow());
+  const [included, plain] = shaped.offered_pricing.one_time_breakdown.items;
+  expect(included).toMatchObject({ service: 'first_app_credit', amount: 0, kind: 'included' });
+  expect(plain.kind).toBeUndefined();
 });
 
 test('section-level price selectors ride the service section with the composer\'s amounts: bond terms, station rental, the commercial interior toggle (Codex r7 P1)', async () => {

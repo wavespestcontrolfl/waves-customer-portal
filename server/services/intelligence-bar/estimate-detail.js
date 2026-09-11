@@ -286,22 +286,33 @@ function withholdComboTreatmentRow(row) {
 }
 
 // entry: the projected (frequencyEntry/comboEntry) shape. source: the RAW
-// bundle object it was built from — its quoteRequired flag, and everything
-// lowConfidenceRange/bandForFrequency need. range: this entry's resolved
-// low-confidence band, already computed by the caller (withholdingRangeFor).
-function withholdEntry(entry, source, range) {
-  const quoteRequired = source?.quoteRequired === true;
+// bundle object it was built from — its own quoteRequired flag, and
+// everything lowConfidenceRange/bandForFrequency need. range: this entry's
+// resolved low-confidence band, already computed by the caller
+// (withholdingRangeFor). bundleQuoteRequired: the COMPOSER's whole-bundle
+// verdict (resolveEstimateQuoteRequirement — manager approval, a wide
+// low-confidence commercial range forced to a site quote, commercial
+// risk-type review, a custom-quote one-time item…), which can be true with
+// no single frequency/combo individually stamped quoteRequired at all — the
+// React quote_required terminal branch (EstimateViewPage.jsx ~7501-7623)
+// exits before rendering ANY pricing in that case, not just this entry's
+// headline (pre-push audit / Codex round 4 P1).
+function withholdEntry(entry, source, range, bundleQuoteRequired = false) {
+  const quoteRequired = bundleQuoteRequired || source?.quoteRequired === true;
   if (!range && !quoteRequired) return entry;
   const next = { ...entry };
   for (const field of WITHHELD_MONEY_FIELDS) {
     if (Object.prototype.hasOwnProperty.call(next, field)) next[field] = null;
   }
-  // Treatment-row prices withhold ONLY under a range: PriceCard hides them
-  // entirely for a ranged cadence (an exact row price would contradict
-  // "confirmed on site"), but a MERELY quote-required cadence still renders
-  // them at their real price on the customer page — its treatment-row gate
-  // is showLowConfidenceRange, not quoteRequired (PriceCard.jsx).
-  if (range) {
+  // Treatment-row prices withhold under a range (PriceCard hides them
+  // entirely for a ranged cadence — an exact row price would contradict
+  // "confirmed on site") OR when the whole bundle is quote-required (the
+  // terminal branch renders no PriceCard at all). A MERELY per-cadence
+  // quote-required entry on an otherwise-sellable bundle still renders its
+  // treatment rows at their real price — its own gate is
+  // showLowConfidenceRange, not quoteRequired (PriceCard.jsx) — so this
+  // stays narrower than the money-field null above.
+  if (range || bundleQuoteRequired) {
     if (Array.isArray(next.per_service_treatments)) {
       next.per_service_treatments = next.per_service_treatments.map(withholdTreatmentRowEntry);
     } else if (next.per_service_treatments && typeof next.per_service_treatments === 'object') {
@@ -309,7 +320,7 @@ function withholdEntry(entry, source, range) {
         Object.entries(next.per_service_treatments).map(([key, row]) => [key, withholdComboTreatmentRow(row)]),
       );
     }
-    next.low_confidence_range = range;
+    if (range) next.low_confidence_range = range;
   }
   return next;
 }
@@ -325,18 +336,42 @@ function withholdingRangeFor(source, combinedRange, allowCombinedFallback) {
   return lowConfidenceRange(source) || (allowCombinedFallback ? bandForFrequency(source, combinedRange) : null);
 }
 
+// One-time items withhold the same way under a bundle-level quote-required
+// verdict: a fee/breakdown row's identity (service/label/detail) survives,
+// its dollar amount doesn't — the terminal branch shows no pricing at all,
+// one-time included.
+function withholdOneTimeAmounts(offered) {
+  offered.one_time_total = null;
+  if (Array.isArray(offered.upfront_fees)) {
+    offered.upfront_fees = offered.upfront_fees.map((fee) => ({ ...fee, amount: null }));
+  }
+  if (offered.one_time_breakdown) {
+    offered.one_time_breakdown = {
+      ...offered.one_time_breakdown,
+      items: list(offered.one_time_breakdown.items).map((item) => ({ ...item, amount: null })),
+      total: null,
+    };
+  }
+}
+
 // The single post-projection pass: walks plan_frequencies, every service
-// section's frequencies, and combos — in that order, mirroring the shape
-// builtOfferedPricing just assembled — pairing each projected entry with
-// the RAW bundle object it came from (same array, same index) so
+// section's frequencies, combos, and (when the whole bundle is
+// quote-required) the one-time items too — in that order, mirroring the
+// shape builtOfferedPricing just assembled — pairing each projected entry
+// with the RAW bundle object it came from (same array, same index) so
 // withholdingRangeFor/withholdEntry can decide and apply withholding. Called
 // exactly once, after the whole offered_pricing shape exists.
 function withholdRangedPricing(offered, bundle) {
   const combinedRange = combinedLowConfidenceRange(bundle.combinedRecurring);
+  // offered.quote_required is the composer's bundle-level verdict, already
+  // stamped below in builtOfferedPricing before this pass runs — reading it
+  // back here (rather than bundle.quoteRequired a second time) keeps this
+  // pass agreeing with whatever the top-level field actually says.
+  const bundleQuoteRequired = offered.quote_required === true;
   const frequencies = list(bundle.frequencies);
   offered.plan_frequencies = offered.plan_frequencies.map((entry, i) => {
     const source = frequencies[i] || {};
-    return withholdEntry(entry, source, withholdingRangeFor(source, combinedRange, true));
+    return withholdEntry(entry, source, withholdingRangeFor(source, combinedRange, true), bundleQuoteRequired);
   });
   const sections = list(bundle.services);
   offered.services = offered.services.map((section, si) => {
@@ -345,15 +380,16 @@ function withholdRangedPricing(offered, bundle) {
       ...section,
       frequencies: section.frequencies.map((entry, i) => {
         const source = sourceFrequencies[i] || {};
-        return withholdEntry(entry, source, withholdingRangeFor(source, combinedRange, false));
+        return withholdEntry(entry, source, withholdingRangeFor(source, combinedRange, false), bundleQuoteRequired);
       }),
     };
   });
   const combos = list(bundle.serviceCadenceCombos);
   offered.combos = offered.combos.map((entry, i) => {
     const source = combos[i] || {};
-    return withholdEntry(entry, source, withholdingRangeFor(source, combinedRange, true));
+    return withholdEntry(entry, source, withholdingRangeFor(source, combinedRange, true), bundleQuoteRequired);
   });
+  if (bundleQuoteRequired) withholdOneTimeAmounts(offered);
   return offered;
 }
 
@@ -404,6 +440,14 @@ function breakdownEntry(b, excludedServices) {
       amount: money(i.amount),
       detail: i.detail || null,
       ...(i.quoteRequired === true ? { quote_required: true } : {}),
+      // The composer's row kind — 'included' (a service-specific credit that
+      // zeroes this line; OneTimeBreakdownCard renders "Included", green,
+      // instead of $0.00) or 'discount' (renders the negative amount) — the
+      // page's isQuoteRequired/isDiscount/isIncluded checks read this
+      // alongside (or in place of) the numeric amount and the quote_required
+      // flag above (EstimateViewPage.jsx ~2014-2053), so dropping it here
+      // would report a credited row as a literal $0 charge.
+      ...(i.kind ? { kind: i.kind } : {}),
     }));
   // The page's rule (OneTimeBreakdownCard): the composer's total stands
   // only when nothing was excluded; with exclusions the total is the sum of
@@ -745,6 +789,17 @@ function totalsFor(row, pricing, reconciliation_error) {
   if (!offered) return { monthly: null, annual: null, one_time: null, withheld: true };
   if (offered.price_locked === true) {
     return { monthly: money(row.monthly_total), annual: money(row.annual_total), one_time: money(row.onetime_total) };
+  }
+  // The composer's bundle-level quote-required verdict (manager approval, a
+  // wide low-confidence commercial range, commercial risk-type review, a
+  // custom-quote one-time item…) outranks every cadence-selection question
+  // below: the React quote_required terminal branch renders no pricing at
+  // all, one-time included, so the stored monthly_total/annual_total/
+  // onetime_total columns must not stand in for any of it (pre-push audit /
+  // Codex round 4 P1 — this used to fall through to the stored columns
+  // whenever the composer's reason wasn't stamped on any single cadence).
+  if (offered.quote_required === true) {
+    return { monthly: null, annual: null, one_time: null, source: 'quote_required' };
   }
   const oneTime = offered.one_time_total ?? money(row.onetime_total);
   // A narrow LOW-confidence default cadence withholds the exact figure and

@@ -47,20 +47,38 @@ module.exports = {
   // estimate-tools.js (which owns the tool's registry sourcePath) — the
   // static source scan on estimate-tools.js finds none of these
   // references, so without this manual contract the DB-columns gate
-  // silently checks nothing for this tool (Codex round 2, #4345).
+  // silently checks nothing for this tool (Codex round 2, #4345). Round 4
+  // widened the walk past estimate-detail.js's OWN column reads to every
+  // small helper it calls with the row (reconcileFrozenMembershipSnapshot,
+  // resolveEstimateInvoiceMode, isEstimateCustomerViewable,
+  // adminDraftPreviewEligible, estimateIsPriceLocked,
+  // resolveProposalBillingContext → estimateBillsPerApplication →
+  // matchUnlinkedCustomer → matchAcceptCustomerByPhone/
+  // pickAcceptCustomerMatch, normalizeProposal) — three more columns
+  // (price_locked_at, customer_phone, customer_email) turned up nowhere
+  // else in this file's own source text either. buildPricingBundle itself
+  // is deliberately NOT walked this way: it is the public route's whole
+  // pricing engine, exercised by the public route's own tests/contract —
+  // re-deriving its entire column surface here would just be a second,
+  // hand-maintained copy of a schema the route already owns.
   get_estimate_detail: {
     tables: ['estimates', 'estimate_deposits'],
     columns: {
-      // select('*') plus every estimates.<column> the tool reads off the
-      // row afterward (shapeEstimate / getEstimateDetail's own where/
-      // orderBy/whereNull clauses) — enumerated so a dropped or renamed
-      // column is still caught, not just table existence.
+      // select('*') plus every estimates.<column> read off the row: by
+      // getEstimateDetail/shapeEstimate directly (where/orderBy/whereNull
+      // clauses, every field placed on the response), and by the small
+      // helpers above (price_locked_at — estimateIsPriceLocked;
+      // customer_phone/customer_email — the unlinked-customer match chain
+      // resolveProposalBillingContext can reach for an estimate with no
+      // customer_id). Enumerated so a dropped or renamed column is still
+      // caught, not just table existence.
       estimates: [
         'id', 'customer_id', 'customer_name', 'address', 'status', 'disposition', 'disposition_note',
         'decline_reason', 'category', 'service_interest', 'waveguard_tier', 'pricing_version', 'bill_by_invoice',
         'monthly_total', 'annual_total', 'onetime_total', 'accepted_at', 'accepted_service_mode',
         'accepted_frequency_key', 'notes', 'token', 'sent_at', 'viewed_at', 'view_count', 'declined_at',
         'expires_at', 'archived_at', 'created_at', 'updated_at', 'estimate_data',
+        'price_locked_at', 'customer_phone', 'customer_email',
       ],
       // Exactly the .select(...) list in getEstimateDetail(), plus the
       // orderBy column.
