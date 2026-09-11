@@ -132,6 +132,7 @@ async function main() {
       assert.equal(report.requests.filter(r => r.key.endsWith('/bulk-send')).length, sendsBefore + 1);
       assert.deepEqual(report.requests.filter(r => r.key.endsWith('/bulk-send')).at(-1).body, report.requests.filter(r => r.key.endsWith('/bulk-preview')).at(-1).body);
       report.scenarios.push({ width, draftRecovery: true, metadataPayload: true, requestDeliveryPayload: true, queryNavigation: true, emptyState: true, form });
+      await context.setOffline(true);
       await context.close();
     }
     assert.deepEqual(report.unmatched, []);
@@ -139,7 +140,8 @@ async function main() {
     report.passed = true;
   } finally {
     fs.writeFileSync(path.join(output, 'report.json'), JSON.stringify(report, null, 2));
-    await browser.close(); await server.close();
+    try { await browser.close(); }
+    finally { await server.close(); }
   }
   console.log(JSON.stringify({ passed: report.passed, scenarios: report.scenarios, output }));
 }
