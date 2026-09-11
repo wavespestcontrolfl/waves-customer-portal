@@ -293,6 +293,7 @@ describe('estimate manual acceptance', () => {
 
     const result = await markEstimateManuallyAccepted({
       estimateId: estimate.id,
+      bookedAppointmentIds: ['booked-1'],
       adminUserId: 'admin-1',
       database,
       leadLinkService,
@@ -324,6 +325,7 @@ describe('estimate manual acceptance', () => {
     expect(estimateConverter.convertEstimate).toHaveBeenCalledWith(estimate.id, {
       database,
       skipAutoSchedule: true,
+      bookedAppointmentIds: ['booked-1'],
       skipSetupInvoice: true,
       skipMembershipEmail: true,
       deferCommercialScheduleNotification: true,
@@ -400,6 +402,7 @@ describe('estimate manual acceptance', () => {
     expect(estimateConverter.convertEstimate).toHaveBeenCalledWith(estimate.id, {
       database,
       skipAutoSchedule: true,
+      bookedAppointmentIds: [],
       skipSetupInvoice: false,
       skipMembershipEmail: true,
       deferCommercialScheduleNotification: true,
@@ -1315,6 +1318,7 @@ describe('prepay-on-book (one-step annual prepay while booking)', () => {
     expect(estimateConverter.convertEstimate).toHaveBeenCalledWith(estimate.id, expect.objectContaining({
       billingTerm: 'prepay_annual',
       skipAutoSchedule: true,
+      bookedAppointmentIds: [],
       annualPrepayTermStart: '2026-07-30',
       coverageServiceType: 'Quarterly Pest Control Service',
       coverageVisitCount: 4,

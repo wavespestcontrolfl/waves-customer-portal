@@ -99,4 +99,24 @@ describe('Home under a saved-property selection', () => {
     expect(await screen.findByText('Property Alerts')).toBeInTheDocument();
     expect(screen.queryByTestId('home-primary-facts-notice')).not.toBeInTheDocument();
   });
+  // App property scope (PR 4): the lawn teaser shows under a SECONDARY house
+  // only when the server resolved the lawn read to that house (echo).
+  it('shows the lawn teaser under a secondary house when the lawn read echoes it', async () => {
+    api.getLawnHealth.mockResolvedValue({ hasLawnCare: true, scores: { overallScore: 80 }, initialScores: { overallScore: 60 }, photos: [], trend: [], propertyScope: { enabled: true, propertyId: 'pb', closed: false } });
+    render(<DashboardTab customer={customer} properties={[primary, secondary]} activePropertyId="cust-1:pb" onSwitchTab={() => {}} onOpenPlanService={() => {}} />);
+    // The notice renders with the "lawn health" wording until the lawn read
+    // resolves, so wait for the echoed scope to drop it rather than asserting
+    // the moment the element exists.
+    await waitFor(() => expect(api.getLawnHealth).toHaveBeenCalled());
+    await waitFor(() => expect(screen.getByTestId('home-primary-facts-notice')).toHaveTextContent('Your protection score and local alerts'));
+    expect(screen.getByTestId('home-primary-facts-notice')).not.toHaveTextContent('lawn health');
+  });
+  it('withholds the lawn teaser and re-reads the list when the lawn echo names ANOTHER house', async () => {
+    const refresh = vi.fn();
+    api.getLawnHealth.mockResolvedValue({ hasLawnCare: true, scores: { overallScore: 80 }, initialScores: { overallScore: 60 }, photos: [], trend: [], propertyScope: { enabled: true, propertyId: 'pa', closed: false } });
+    render(<DashboardTab customer={customer} properties={[primary, secondary]} activePropertyId="cust-1:pb" onSwitchTab={() => {}} onOpenPlanService={() => {}} onSavedScopeUnavailable={refresh} />);
+    await waitFor(() => expect(api.getLawnHealth).toHaveBeenCalled());
+    await waitFor(() => expect(refresh).toHaveBeenCalled());
+    expect(screen.getByTestId('home-primary-facts-notice')).toHaveTextContent('lawn health');
+  });
 });

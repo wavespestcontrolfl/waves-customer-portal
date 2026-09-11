@@ -432,6 +432,20 @@ function pickNum(...vals) {
   return vals.map(numOrNaN).find((v) => Number.isFinite(v));
 }
 
+// Live-basis annual program cost for a termite row that persisted only its
+// station count (see service-pricing termiteProgramAnnualCostForStations).
+function termiteAnnualCostFromStations(stations, system) {
+  const n = Number(stations);
+  if (!(n > 0)) return NaN;
+  try {
+    const { termiteProgramAnnualCostForStations } = require('./pricing-engine/service-pricing');
+    const cost = termiteProgramAnnualCostForStations(n, String(system || 'trelona').toLowerCase());
+    return Number.isFinite(cost) ? cost : NaN;
+  } catch (_err) {
+    return NaN;
+  }
+}
+
 function normalizeRecurringLines(result) {
   const discount = Number(result?.recurring?.discount || 0);
   const lines = [];
@@ -487,6 +501,15 @@ function normalizeRecurringLines(result) {
     }
     const quoted = quotedFieldsFrom(svc);
     if (quoted) line.quoted = quoted;
+    // Residential termite bait persisted as a mapped / CLIENT_FALLBACK
+    // envelope has no costs block, but results.tmBait carries the station
+    // count — the engine's per-station model on the live basis is its COGS
+    // (codex #4313 r8 P1); the usage registry cannot express it.
+    if (serviceKey === 'termite_bait' && line.explicitCogsCost === undefined) {
+      const tmBait = result?.results?.tmBait;
+      const derived = termiteAnnualCostFromStations(tmBait?.sta, tmBait?.selectedSystem || tmBait?.system);
+      if (Number.isFinite(derived) && derived > 0) line.explicitCogsCost = money(derived);
+    }
     lines.push(line);
   }
   // The scalar is legacy fallback only — a 2026-08-29+ estimate carries a
@@ -856,9 +879,24 @@ function normalizeEngineLineItems(result, { emitInitialFee = true, initialFeeOve
     // MAPPED services keep live inventory COGS: residential lawn/T&S also
     // expose costs.total, but freezing it there would stop the audit's
     // cost view from responding to product-cost changes (GH codex P2).
-    const explicitAnnualCost = num(item.costs?.total);
+    // Residential termite bait is the one MAPPED service whose engine line
+    // carries a costs block the inventory registry cannot express: service
+    // labor per station, label-driven cartridge replacement and the
+    // follow-up reserve are all per-STATION, while the registry costs a
+    // usage row per visit (codex #4313 P1). costs.annualTotal is that
+    // quote-time model — the station cost it used may itself have come from
+    // the catalog link — so it is the honest annual COGS for the line.
+    // A raw termite line saved before the costs block existed still carries
+    // its station count — the same per-station model on the live basis is
+    // the honest COGS for it too (codex #4313 r8 P1).
+    const termiteAnnualCost = serviceKey === 'termite_bait'
+      ? (num(item.costs?.annualTotal) > 0 ? num(item.costs.annualTotal) : termiteAnnualCostFromStations(item.stations, item.selectedSystem || item.system))
+      : NaN;
+    const explicitAnnualCost = Number.isFinite(termiteAnnualCost) && termiteAnnualCost > 0
+      ? termiteAnnualCost
+      : num(item.costs?.total);
     const useExplicitCost = !isAdjustment
-      && !SERVICE_MAP[serviceKey]
+      && (!SERVICE_MAP[serviceKey] || (serviceKey === 'termite_bait' && Number.isFinite(termiteAnnualCost) && termiteAnnualCost > 0))
       && Number.isFinite(explicitAnnualCost) && explicitAnnualCost > 0;
     // Raw pest rows carry the customer-visible setup charge as initialFee
     // (the mapper normally converts it to the one-time membership fee) —

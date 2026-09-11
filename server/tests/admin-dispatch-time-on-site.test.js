@@ -1078,6 +1078,60 @@ describe('PATCH /:serviceId/time-on-site — behavioral', () => {
     expect(source).toMatch(/: \(typeof effectiveTimeOnSite === 'number'\s*\n\s*\? \(completionWallClockAt\s*\n\s*\? adjustedCompletionEndInstant\(svc, effectiveTimeOnSite, completionWallClockAt\)\s*\n\s*: \(finiteDate\(svc\.actual_end_time\) \|\| finiteDate\(svc\.check_out_time\) \|\| null\)\)\s*\n\s*: null\);/);
   });
 
+  test('a ledgered visit whose in-transaction tier reread errors aborts retryably instead of freezing the handler-entry tier (codex #4113 P2)', () => {
+    const source = fs.readFileSync(path.join(__dirname, '../services/complete-scheduled-service.js'), 'utf8');
+    expect(source).toMatch(/\} catch \{ snapshotCustomer = null; \}\s*\n(?:\s*\/\/[^\n]*\n)*\s*if \(lawnLedgerVisit && waveguardPlan && !snapshotCustomer\) \{[^}]*err\.statusCode = 409;[^}]*err\.code = 'VISIT_TIER_UNVERIFIED';\s*throw err;\s*\}/);
+    expect(source).toMatch(/if \(lawnLedgerVisit && waveguardPlan\s*&& String\(snapshotCustomer\.waveguard_tier \|\| ''\) !== String\(waveguardPlan\.propertyGate\?\.serviceTier \|\| ''\)\) \{/);
+  });
+
+  test('a ledgered visit whose planner fails drops assignment-derived equipment IDs instead of recording the unverified rig (codex #4113 P2)', () => {
+    const source = fs.readFileSync(path.join(__dirname, '../services/complete-scheduled-service.js'), 'utf8');
+    // The IDs copied from the appointment assignment are tracked...
+    expect(source).toMatch(/waveguardEquipmentSystemId = svc\.assigned_equipment_system_id;\s*assignmentDerivedEquipmentSystem = true;/);
+    expect(source).toMatch(/waveguardCalibrationId = svc\.assigned_calibration_id;\s*assignmentDerivedCalibration = true;/);
+    // ...and cleared in the fail-soft catch, where the null plan means the
+    // `unresolved` guard below cannot run.
+    const catchAt = source.indexOf("if (waveguardCloseout) throw planErr;");
+    const clearAt = source.indexOf("if (assignmentDerivedEquipmentSystem) waveguardEquipmentSystemId = null;");
+    expect(catchAt).toBeGreaterThan(-1);
+    expect(clearAt).toBeGreaterThan(catchAt);
+    expect(source).toMatch(/waveguardPlan = null;\s*\n(?:\s*\/\/[^\n]*\n)*\s*if \(assignmentDerivedEquipmentSystem \|\| assignmentDerivedCalibration\) \{\s*if \(assignmentDerivedEquipmentSystem\) waveguardEquipmentSystemId = null;\s*if \(assignmentDerivedCalibration\) waveguardCalibrationId = null;\s*waveguardCalibrationCleared = true;\s*\}/);
+  });
+
+  test('a ledgered visit rechecks scheduled_date under the visit lock and aborts retryably when rescheduled mid-flight (codex #4113 P2)', () => {
+    const source = fs.readFileSync(path.join(__dirname, '../services/complete-scheduled-service.js'), 'utf8');
+    expect(source).toMatch(/if \(lawnLedgerVisit && waveguardPlan && Object\.prototype\.hasOwnProperty\.call\(lockedSvcRow, 'scheduled_date'\)\) \{[\s\S]*?if \(dateKey\(lockedSvcRow\.scheduled_date\) !== dateKey\(svc\.scheduled_date\)\) \{[^}]*err\.statusCode = 409;[^}]*err\.code = 'VISIT_DATE_CHANGED';\s*throw err;\s*\}/);
+    // After the FOR UPDATE row lock, never between the customer FOR SHARE and the visit lock.
+    const lockAt = source.indexOf("const lockedSvcRow = await trx('scheduled_services').where({ id: svc.id }).forUpdate().first();");
+    const dateAt = source.indexOf("err.code = 'VISIT_DATE_CHANGED';");
+    expect(lockAt).toBeGreaterThan(-1);
+    expect(dateAt).toBeGreaterThan(lockAt);
+  });
+
+  test('a ledgered visit rebuilds the address proof from locked rows and aborts retryably when a primary-address edit landed mid-flight (codex #4113 P2)', () => {
+    const source = fs.readFileSync(path.join(__dirname, '../services/complete-scheduled-service.js'), 'utf8');
+    const lockAt = source.indexOf("const lockedSvcRow = await trx('scheduled_services').where({ id: svc.id }).forUpdate().first();");
+    const addrAt = source.indexOf("err.code = 'VISIT_ADDRESS_CHANGED';");
+    expect(lockAt).toBeGreaterThan(-1);
+    expect(addrAt).toBeGreaterThan(lockAt);
+    // Visit key: the locked row's stamp, else the FOR SHARE customer snapshot.
+    expect(source).toMatch(/const lockedVisitAddress = lockedSvcRow\.service_address_line1 \? \{[\s\S]*?\} : \(snapshotCustomerRow \|\| \{\}\);/);
+    // Property key: re-read from customer_properties by the proof's property id.
+    expect(source).toMatch(/k\('customer_properties'\)\.where\(\{ id: proof\.propertyId \}\)\.first\('address_line1', 'address_line2', 'city', 'zip'\)/);
+    expect(source).toMatch(/if \(String\(lockedVisitKey \|\| ''\) !== String\(proof\.visitAddressKey \|\| ''\)\s*\|\| String\(lockedPropertyKey \|\| ''\) !== String\(proof\.propertyAddressKey \|\| ''\)\) \{[^}]*err\.statusCode = 409;[^}]*err\.code = 'VISIT_ADDRESS_CHANGED';\s*throw err;\s*\}/);
+  });
+
+  test('assignment-derived rig IDs are revalidated FOR SHARE inside the transaction and cleared when the rig went inactive after planning (codex #4113 P2)', () => {
+    const source = fs.readFileSync(path.join(__dirname, '../services/complete-scheduled-service.js'), 'utf8');
+    const lockAt = source.indexOf("const lockedSvcRow = await trx('scheduled_services').where({ id: svc.id }).forUpdate().first();");
+    const rigAt = source.indexOf("const liveRig = await savepointRead(trx, (k) => {");
+    expect(lockAt).toBeGreaterThan(-1);
+    expect(rigAt).toBeGreaterThan(lockAt);
+    expect(source).toMatch(/if \(lawnLedgerVisit && !waveguardCloseout && \(assignmentDerivedEquipmentSystem \|\| assignmentDerivedCalibration\)\s*&& \(waveguardEquipmentSystemId \|\| waveguardCalibrationId\)\) \{/);
+    expect(source).toMatch(/\.where\('ec\.active', true\)\.where\('es\.active', true\)\.forShare\('ec'\);\s*if \(waveguardCalibrationId\) query\.where\('ec\.id', waveguardCalibrationId\);\s*else query\.where\('es\.id', waveguardEquipmentSystemId\);/);
+    expect(source).toMatch(/if \(!liveRig\) \{\s*if \(assignmentDerivedEquipmentSystem\) waveguardEquipmentSystemId = null;\s*if \(assignmentDerivedCalibration\) waveguardCalibrationId = null;\s*waveguardCalibrationCleared = true;\s*\}/);
+  });
+
   test('the finalization takes the row lock at transaction start — corrections and finalizations are strictly ordered (codex P2 round 14)', () => {
     // Lawn baseline serialization precedes estimate -> customer -> parent -> visit;
     // pricing reads retain their existing relative lock order,

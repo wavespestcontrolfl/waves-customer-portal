@@ -1,7 +1,9 @@
-import { useEffect, useState, useCallback } from "react";
+import { useEffect, useState, useCallback, useRef } from "react";
 import { formatETDate } from "../../lib/timezone";
 import { Ruler, RefreshCw } from "lucide-react";
 import AdminCommandHeader from "../../components/admin/AdminCommandHeader";
+
+import { UiSurface, Button, Card, CardBody, ActionFeedback } from "../../components/ui";
 
 const API_BASE = import.meta.env.VITE_API_URL || "/api";
 
@@ -15,11 +17,6 @@ function adminFetch(path, options = {}) {
     },
   });
 }
-
-const M = {
-  bg: "#fafafa", card: "#ffffff", ink: "#111111", muted: "#6b7280",
-  line: "#e5e5e5", red: "#c8102e", wash: "#f5f5f5",
-};
 
 function fmtIn(v) {
   return v == null ? "—" : `${v}″`;
@@ -39,7 +36,8 @@ export default function TurfHeightReviewPage() {
   const [items, setItems] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
-  const [resolving, setResolving] = useState(null);
+  const [resolving, setResolving] = useState(new Set());
+  const pendingConfirmations = useRef(new Set());
   // Per-row confirm failures: two rows confirmed back-to-back must not let
   // one success wipe the other's failure (UI audit F0558, Codex r2).
   const [rowErrors, setRowErrors] = useState({});
@@ -56,7 +54,9 @@ export default function TurfHeightReviewPage() {
   useEffect(() => { load(); }, [load]);
 
   async function resolve(id) {
-    setResolving(id);
+    if (pendingConfirmations.current.has(id)) return;
+    pendingConfirmations.current.add(id);
+    setResolving(new Set(pendingConfirmations.current));
     try {
       const r = await adminFetch(`/admin/turf-height/${id}/resolve`, {
         method: "PATCH",
@@ -74,64 +74,67 @@ export default function TurfHeightReviewPage() {
       // unhandled while the row silently stayed put.
       setRowErrors((prev) => ({ ...prev, [id]: "Could not confirm reading — check your connection and try again." }));
     } finally {
-      setResolving(null);
+      pendingConfirmations.current.delete(id);
+      setResolving(new Set(pendingConfirmations.current));
     }
   }
 
   return (
-    <div style={{ background: M.bg, minHeight: "100%", padding: 24, fontFamily: "'Roboto', Arial, sans-serif", color: M.ink }}>
+    <UiSurface density="comfortable" className="mx-auto max-w-[1300px] text-ui-body text-ink-primary">
       <AdminCommandHeader
+        variant="workspace"
         title="Turf height review"
         icon={Ruler}
-        actions={[{ key: "refresh", label: "Refresh", size: "sm", variant: "ghost", icon: RefreshCw, onClick: load }]}
+        actions={[{ key: "refresh", label: "Refresh", variant: "ghost", icon: RefreshCw, onClick: load }]}
       />
-      <p style={{ color: M.muted, fontSize: 13, marginTop: 0, marginBottom: 18 }}>
+      <p className="mb-5 text-ui-body text-ink-secondary">
         Readings where the gauge-photo OCR diverged from the tech's entry, or couldn't be read. The manual reading is the record — confirming just clears the flag.
       </p>
 
-      {loading && <div style={{ color: M.muted }}>Loading…</div>}
-      {error && <div role="alert" style={{ color: M.red }}>{error}</div>}
+      {loading && <ActionFeedback className="min-h-16 mb-3">Loading…</ActionFeedback>}
+      {error && <ActionFeedback error className="mb-3">{error}</ActionFeedback>}
       {!loading && !error && items.length === 0 && (
-        <div style={{ background: M.card, border: `1px solid ${M.line}`, borderRadius: 12, padding: 28, textAlign: "center", color: M.muted }}>
+        <Card><CardBody className="py-8 text-center text-ui-body text-ink-secondary">
           Nothing to review — every captured reading agrees with its gauge photo.
-        </div>
+        </CardBody></Card>
       )}
 
-      <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+      <div className="flex flex-col gap-3">
         {items.map((it) => (
-          <div key={it.id} style={{ background: M.card, border: `1px solid ${it.verificationStatus === "discrepancy" ? M.red : M.line}`, borderRadius: 12, padding: 16, display: "flex", gap: 16, alignItems: "center", flexWrap: "wrap" }}>
-            {it.gaugePhotoUrl
-              ? <img src={it.gaugePhotoUrl} alt="Gauge" style={{ width: 72, height: 72, objectFit: "cover", borderRadius: 8, border: `1px solid ${M.line}` }} />
-              : <div style={{ width: 72, height: 72, borderRadius: 8, background: M.wash, border: `1px solid ${M.line}`, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 11, color: M.muted }}>No photo</div>}
-            <div style={{ flex: 1, minWidth: 180 }}>
-              <div style={{ fontWeight: 500 }}>{it.customerName || "Customer"}</div>
-              <div style={{ fontSize: 12, color: M.muted }}>{fmtDate(it.measuredAt)} · {it.grassType?.replace(/_/g, " ") || "—"} · ideal {it.band.min}–{it.band.max}″</div>
-            </div>
-            <div style={{ display: "flex", gap: 18, alignItems: "center" }}>
-              <div style={{ textAlign: "center" }}>
-                <div style={{ fontSize: 11, color: M.muted, textTransform: "uppercase", letterSpacing: ".04em" }}>Tech</div>
-                <div style={{ fontSize: 18, fontWeight: 700 }}>{fmtIn(it.manualHeightIn)}</div>
+          <Card key={it.id} className={it.verificationStatus === "discrepancy" ? "!border-alert-fg" : undefined}>
+            <CardBody className="flex flex-wrap items-center gap-4">
+              {it.gaugePhotoUrl
+                ? <img src={it.gaugePhotoUrl} alt="Gauge" className="h-[72px] w-[72px] shrink-0 rounded-md border-hairline border-zinc-200 object-cover" />
+                : <div className="flex h-[72px] w-[72px] shrink-0 items-center justify-center rounded-md border-hairline border-zinc-200 bg-zinc-50 text-ui-caption text-ink-secondary">No photo</div>}
+              <div className="min-w-0 flex-1 basis-44 break-words">
+                <h2 className="text-ui-body font-medium">{it.customerName || "Customer"}</h2>
+                <div className="text-ui-caption text-ink-secondary u-nums">{fmtDate(it.measuredAt)} · {it.grassType?.replace(/_/g, " ") || "—"} · ideal {it.band.min}–{it.band.max}″</div>
               </div>
-              <div style={{ textAlign: "center" }}>
-                <div style={{ fontSize: 11, color: M.muted, textTransform: "uppercase", letterSpacing: ".04em" }}>OCR</div>
-                <div style={{ fontSize: 18, fontWeight: 700, color: it.verificationStatus === "ocr_failed" ? M.muted : M.red }}>
-                  {it.verificationStatus === "ocr_failed" ? "unread" : fmtIn(it.ocrHeightIn)}
+              <dl className="flex items-start gap-5 u-nums">
+                <div className="text-center">
+                  <dt className="text-ui-caption text-ink-secondary">Tech</dt>
+                  <dd className="text-18 leading-[1.35] font-medium">{fmtIn(it.manualHeightIn)}</dd>
                 </div>
-                {it.ocrConfidence != null && it.verificationStatus !== "ocr_failed" && (
-                  <div style={{ fontSize: 11, color: M.muted }}>{Math.round(it.ocrConfidence * 100)}% conf</div>
-                )}
-              </div>
-            </div>
-            <button type="button" disabled={resolving === it.id} onClick={() => resolve(it.id)}
-              style={{ background: M.ink, color: "#fff", border: "none", borderRadius: 999, padding: "8px 16px", fontSize: 13, fontWeight: 500, cursor: "pointer", opacity: resolving === it.id ? 0.6 : 1 }}>
-              {resolving === it.id ? "…" : "Confirm reading"}
-            </button>
-            {rowErrors[it.id] && (
-              <div role="alert" style={{ flexBasis: "100%", color: M.red, fontSize: 13 }}>{rowErrors[it.id]}</div>
-            )}
-          </div>
+                <div className="text-center">
+                  <dt className="text-ui-caption text-ink-secondary">OCR</dt>
+                  <dd className={`text-18 leading-[1.35] font-medium ${it.verificationStatus === "ocr_failed" ? "text-ink-secondary" : "text-alert-fg"}`}>
+                    {it.verificationStatus === "ocr_failed" ? "unread" : fmtIn(it.ocrHeightIn)}
+                  </dd>
+                  {it.ocrConfidence != null && it.verificationStatus !== "ocr_failed" && (
+                    <dd className="text-ui-caption text-ink-secondary">{Math.round(it.ocrConfidence * 100)}% conf</dd>
+                  )}
+                </div>
+              </dl>
+              <Button variant="secondary" loading={resolving.has(it.id)} onClick={() => resolve(it.id)} className="w-full sm:w-auto sm:ml-auto">
+                Confirm reading
+              </Button>
+              {rowErrors[it.id] && (
+                <ActionFeedback error className="basis-full">{rowErrors[it.id]}</ActionFeedback>
+              )}
+            </CardBody>
+          </Card>
         ))}
       </div>
-    </div>
+    </UiSurface>
   );
 }

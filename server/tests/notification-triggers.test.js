@@ -36,8 +36,25 @@ describe('notification trigger push tags', () => {
     expect(second).not.toContain(payload.fromPhone);
   });
 
+  test('tracking SMS leads have a per-message tag while ordinary leads retain their tag', () => {
+    const first = __private.pushTagFor('new_lead', { twilioSid: 'SM-synthetic-first' });
+    const second = __private.pushTagFor('new_lead', { twilioSid: 'SM-synthetic-second' });
+    expect(first).toBe('waves-new_lead-SM-synthetic-first');
+    expect(second).not.toBe(first);
+    expect(__private.pushTagFor('new_lead', {})).toBe('waves-new_lead');
+  });
+
   test('non-SMS triggers keep collapsing by trigger key', () => {
     expect(__private.pushTagFor('payment_failed', {})).toBe('waves-payment_failed');
+  });
+
+  it('customer_landline_from_call gets a per-customer push tag so concurrent alerts do not collapse', () => {
+    const a = __private.pushTagFor('customer_landline_from_call', { customerId: 'cust-a' });
+    const b = __private.pushTagFor('customer_landline_from_call', { customerId: 'cust-b' });
+    expect(a).toBe('waves-customer_landline_from_call-cust-a');
+    expect(b).toBe('waves-customer_landline_from_call-cust-b');
+    expect(a).not.toBe(b);
+    expect(__private.pushTagFor('customer_landline_from_call', {})).toBe('waves-customer_landline_from_call-unknown-customer');
   });
 
   test('bill payment error trigger highlights ACH checkout failures', () => {
@@ -73,6 +90,27 @@ describe('notification trigger push tags', () => {
     expect(built.body).not.toContain('+18182079399');
     expect(built.body).not.toContain('1000 Riverside Drive');
     expect(built.link).toBe('/admin/leads?lead=lead-123');
+  });
+
+  test('new lead trigger without a lead record points at the SMS inbox', () => {
+    // Tracking-line texts from unknown numbers no longer mint a customer
+    // row (twilio-webhook.js domain/van branch), so the bell must not send
+    // the owner to a lead that does not exist.
+    const built = TRIGGER_REGISTRY.new_lead.build({
+      title: 'New text from wavespestcontrol.com',
+      name: 'Unknown sender',
+      source: 'wavespestcontrol.com',
+      area: 'Bradenton',
+      phone: '+12025550101',
+      message: 'Please quote service for the garden shed.',
+      link: '/admin/communications',
+    });
+
+    expect(built.title).toBe('New text from wavespestcontrol.com');
+    expect(built.body).toContain('Unknown sender via wavespestcontrol.com (Bradenton)');
+    expect(built.body).toContain('Message in the SMS inbox');
+    expect(built.body).not.toContain('swimming pool');
+    expect(built.link).toBe('/admin/communications');
   });
 
   test('SMS reply trigger masks fallback phone and redacts sensitive message text', () => {
@@ -420,5 +458,49 @@ describe('push follows the bell policy (owner ruling 2026-08-28)', () => {
     expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
     expect(PushService.sendToAdminUsers).not.toHaveBeenCalled();
     gateSpy.mockRestore(); allowSpy.mockRestore();
+  });
+
+  // codex review, PR #4341 r1 P1: customer_landline_from_call's category
+  // ('alert') default-denies under the gated policy — it must instead ring
+  // via its own DEFAULT_ON_CATEGORIES membership (notification-bell-policy.js),
+  // same treatment as estimate_change_request. Real bellAllowed/
+  // loadCategoryOverrides run (not mocked) so this proves the actual
+  // allowlist wiring, not just an assertion about the registry's category.
+  test('customer_landline_from_call rings under the gated bell policy with no owner override (DEFAULT_ON category)', async () => {
+    const NotificationService = require('../services/notification-service');
+    const bellPolicy = require('../services/notification-bell-policy');
+    bellPolicy.clearOverrideCache();
+    const gateSpy = jest.spyOn(bellPolicy, 'isBellPolicyEnabled').mockReturnValue(true);
+    // notification_preferences serves two different shapes here: the plain
+    // per-trigger prefs lookup (`.where(...)`, awaited directly) and
+    // loadCategoryOverrides' join/select — empty rows either way, i.e. no
+    // admin has ever saved an override for this trigger or category.
+    const prefsChain = {
+      where: jest.fn(() => prefsChain),
+      join: jest.fn(() => prefsChain),
+      select: jest.fn(() => Promise.resolve([])),
+      then: (resolve, reject) => Promise.resolve([]).then(resolve, reject),
+    };
+    db.mockImplementation((table) => (
+      table === 'technicians' ? tableMock([{ id: 'admin-1', role: 'admin' }])
+        : table === 'notification_preferences' ? prefsChain
+          : tableMock([])
+    ));
+    NotificationService.notifyAdmin.mockClear();
+
+    const stats = await triggerNotification('customer_landline_from_call', {
+      customerId: 'cust-1', name: 'Pat Landline', phone: '+19415550202',
+    });
+
+    expect(stats.policySilenced).toBeUndefined();
+    expect(stats.bellWritten).toBe(true);
+    expect(NotificationService.notifyAdmin).toHaveBeenCalledWith(
+      'customer_landline_from_call',
+      expect.stringContaining('Pat Landline'),
+      expect.any(String),
+      expect.any(Object)
+    );
+    gateSpy.mockRestore();
+    bellPolicy.clearOverrideCache();
   });
 });
