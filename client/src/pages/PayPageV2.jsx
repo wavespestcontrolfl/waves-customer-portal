@@ -2644,7 +2644,12 @@ export default function PayPageV2() {
           header, footer, .waves-no-print { display: none !important; }
         }
       `}</style>
-      <CustomerColumn>
+      {/* waves-print-root: glass-theme.css scopes its soft-inner-box rule to
+          `.waves-print-root [data-glass-clear]`; the inactive payment-method
+          icon tile below relies on it (pre-R2a this page carried
+          waves-receipt-page for the same match). The only other rule on the
+          class is ReceiptPage's own print override, which is not mounted here. */}
+      <CustomerColumn className="waves-print-root">
         {isOverdue && (
           <div style={{
             marginBottom: SP.md,
