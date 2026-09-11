@@ -1368,11 +1368,11 @@ export function LeadsSection({ newLeadRequest = 0 }) {
             {/* Leads Table */}
             <Card className="p-[0px]">
               {" "}
-              <Table className="lead-queue-table" layout="records">
+              <Table className="lead-queue-table table-fixed" layout="records">
                 {!compactQueue && (
                   <colgroup>
                     {[26, 13, 19, 8, 18, 10, 6].map((width, index) => (
-                      <col key={index} />
+                      <col key={index} style={{ width: `${width}%` }} />
                     ))}
                   </colgroup>
                 )}
@@ -3980,6 +3980,19 @@ export function LeadsSection({ newLeadRequest = 0 }) {
   // ═════════════════════════════════════════════════════════════════════════
   return (
     <UiSurface className="min-w-0 max-w-[1400px] text-zinc-900">
+      <style>{`
+        .lead-queue-table td { overflow-wrap: anywhere; }
+        .lead-queue-table :is(td, th) { padding-inline: 8px !important; }
+        @media (max-width: 1279px) {
+          .lead-queue-table, .lead-queue-table > tbody, .lead-queue-table > tbody > tr, .lead-queue-table > tbody > tr > td { display: block; width: 100%; }
+          .lead-queue-record { display: grid; grid-template-columns: minmax(0, 1fr); padding: 12px 16px; }
+          .lead-queue-table :is(button, input, select, textarea) { scroll-margin-block: 90px; }
+          .lead-queue-record > td { padding: 0 !important; }
+          .lead-queue-record > td:last-child { padding-top: 8px !important; }
+          .lead-queue-record select { width: 100%; }
+          .lead-queue-table > tbody > tr:not(.lead-queue-record) > td > div { padding: 16px !important; }
+        }
+      `}</style>
       <LeadsWorkspaceNav
         active={tab}
         onChange={setTab}
