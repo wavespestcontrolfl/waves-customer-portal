@@ -166,7 +166,7 @@ Only returns active customers with prior service history in that category.`,
   },
   {
     name: 'find_duplicates',
-    description: 'Find potential duplicate customers by phone, email, or name+address. match_on phone also returns queue: the canonical duplicate-review queue (winner customer_id, each candidate customer_id, tier, reasons) — the ids merge_customers takes.',
+    description: 'Find potential duplicate customers by phone, email, or name+address. match_on phone also returns queue: the canonical duplicate-review queue (winner customer_id, each candidate customer_id, tier, reasons) — the ids merge_customers takes. If the queue cannot be read, queue is [] and queue_error says why.',
     input_schema: {
       type: 'object',
       properties: {
@@ -919,7 +919,10 @@ async function findDuplicates(input) {
     // normalized phones, pickWinner, tiers, reasons) — the ids and
     // winner/loser roles merge_customers needs; the raw grouping above
     // matches the stored string only.
+    // queue is always an array; a failed queue read is reported beside it
+    // in queue_error so callers never branch on the shape of one field.
     let queue = [];
+    let queueError = null;
     try {
       const { findDuplicateGroups } = require('../customer-dedupe');
       const groups = await findDuplicateGroups();
@@ -930,9 +933,9 @@ async function findDuplicates(input) {
         candidates: g.candidates.map((c) => ({ customer_id: c.loser.id, name: name(c.loser), tier: c.tier, reasons: c.reasons })),
       }));
     } catch (err) {
-      queue = { error: `duplicate queue unavailable: ${err.message}` };
+      queueError = `duplicate queue unavailable: ${err.message}`;
     }
-    return { match_on: 'phone', duplicates: dupes, queue };
+    return { match_on: 'phone', duplicates: dupes, queue, ...(queueError ? { queue_error: queueError } : {}) };
   }
 
   if (match_on === 'email') {

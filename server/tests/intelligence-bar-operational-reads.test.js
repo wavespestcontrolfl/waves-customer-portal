@@ -124,3 +124,34 @@ test('call returned_count excludes internal calls omitted from the response', as
   expect(result.calls.map(row => row.id)).toEqual(['customer']);
   expect(result.returned_count).toBe(1);
 });
+
+test('find_duplicates keeps queue an array when the canonical queue read fails, and names the failure in queue_error', async () => {
+  const dedupe = require('../services/customer-dedupe');
+  const spy = jest.spyOn(dedupe, 'findDuplicateGroups').mockRejectedValue(new Error('relation "customer_dedupe_dismissals" does not exist'));
+  try {
+    db.__rows = () => [{ phone: '5555550100', count: '2', names: 'A Example, B Example' }];
+    const result = await executeTool('find_duplicates', { match_on: 'phone' });
+    expect(result.error).toBeUndefined();
+    expect(Array.isArray(result.queue)).toBe(true);
+    expect(result.queue).toEqual([]);
+    expect(result.queue_error).toMatch(/duplicate queue unavailable: relation "customer_dedupe_dismissals"/);
+    expect(result.duplicates).toHaveLength(1);
+  } finally {
+    spy.mockRestore();
+  }
+});
+
+test('find_duplicates omits queue_error when the canonical queue reads cleanly', async () => {
+  const dedupe = require('../services/customer-dedupe');
+  const spy = jest.spyOn(dedupe, 'findDuplicateGroups').mockResolvedValue([
+    { phone10: '5555550100', winner: { id: 'w1', first_name: 'A', last_name: 'Example' }, candidates: [{ loser: { id: 'l1', first_name: 'B', last_name: 'Example' }, tier: 'green', reasons: ['same_phone'] }] },
+  ]);
+  try {
+    db.__rows = () => [];
+    const result = await executeTool('find_duplicates', { match_on: 'phone' });
+    expect(result.queue_error).toBeUndefined();
+    expect(result.queue).toEqual([{ phone: '5555550100', winner: { customer_id: 'w1', name: 'A Example' }, candidates: [{ customer_id: 'l1', name: 'B Example', tier: 'green', reasons: ['same_phone'] }] }]);
+  } finally {
+    spy.mockRestore();
+  }
+});

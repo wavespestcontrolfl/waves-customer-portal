@@ -160,18 +160,16 @@ async function previewMergeCustomers(winnerId, loserId) {
 
 async function commitMergeCustomers(winnerId, loserId, actionContext, approvedVersions = null, approvedEffects = null) {
   const { executeMerge } = require('../customer-dedupe');
-  // Before executeMerge: re-read both customer versions and re-run
-  // eligibility, then do it again immediately before the write. The
-  // two-step route already re-runs the (unconfirmed) preview and refuses on
-  // a fingerprint mismatch before reaching this function — this is a second,
-  // narrower belt-and-suspenders check for the gap between that re-run and
-  // this call actually executing the merge.
+  // Before executeMerge: one unlocked re-read of both customer versions and
+  // the pair's eligibility. The two-step route already re-runs the
+  // (unconfirmed) preview and refuses on a fingerprint mismatch before
+  // reaching this function; the executor then validates versions, effects
+  // fingerprint, and queue eligibility UNDER its row + pair locks. Each
+  // loadMergeEligibility runs the full duplicate-queue scan, and a second
+  // back-to-back unlocked sample cannot see drift those locked checks do
+  // not already refuse — so there is exactly one preflight here.
   const before = await loadMergeEligibility(winnerId, loserId);
   if (!before.ok) return { error: before.error, code: before.code, preview_changed: true };
-  const recheck = await loadMergeEligibility(winnerId, loserId);
-  if (!recheck.ok || recheck.winner.version !== before.winner.version || recheck.loser.version !== before.loser.version) {
-    return { error: 'The pair changed after the card was shown — ask again for a fresh confirmation card.', preview_changed: true };
-  }
   try {
     const result = await executeMerge({
       winnerId,

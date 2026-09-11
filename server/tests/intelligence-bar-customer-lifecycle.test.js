@@ -199,8 +199,8 @@ describe('merge_customers', () => {
     expect(result.error).toMatch(/loser customer is already archived/);
   });
 
-  test('confirmed call re-reads versions and eligibility twice before executeMerge, then runs it with performedBy/mode from the action context', async () => {
-    db.__qb.select.mockResolvedValue([winnerRow, loserRow]); // loadMergePair, called twice
+  test('confirmed call re-reads versions and eligibility once before executeMerge, then runs it with performedBy/mode from the action context', async () => {
+    db.__qb.select.mockResolvedValue([winnerRow, loserRow]); // loadMergePair, called once
     mockExecuteMerge.mockResolvedValueOnce({ journalId: 'journal-1', repointed: { scheduled_services: 3 }, backfills: {} });
 
     const result = await executeCustomerLifecycleTool(
@@ -209,8 +209,10 @@ describe('merge_customers', () => {
       { confirmed: true, technicianId: 'tech-42' },
     );
 
-    expect(mockDuplicatePairEligibility).toHaveBeenCalledTimes(2);
-    expect(db.__qb.select).toHaveBeenCalledTimes(2);
+    // One unlocked preflight — the executor re-validates under its locks
+    // (ultrareview nit: each preflight is a full duplicate-queue scan).
+    expect(mockDuplicatePairEligibility).toHaveBeenCalledTimes(1);
+    expect(db.__qb.select).toHaveBeenCalledTimes(1);
     expect(mockExecuteMerge).toHaveBeenCalledWith({
       winnerId: WINNER_ID,
       loserId: LOSER_ID,
@@ -237,17 +239,19 @@ describe('merge_customers', () => {
     expect(mockExecuteMerge).not.toHaveBeenCalled();
   });
 
-  test('confirmed call refuses with preview_changed when a customer version changed between the two rechecks', async () => {
-    db.__qb.select
-      .mockResolvedValueOnce([winnerRow, loserRow]) // first recheck
-      .mockResolvedValueOnce([{ ...winnerRow, version: 'v2-winner' }, loserRow]); // second recheck: winner moved on
+  test('a customer version that moved after the preflight is refused by the executor under its locks, not by a second unlocked sample', async () => {
+    db.__qb.select.mockResolvedValue([winnerRow, loserRow]);
+    const drift = new Error('Customer version changed since the card was shown');
+    drift.previewChanged = true;
+    mockExecuteMerge.mockRejectedValueOnce(drift);
     const result = await executeCustomerLifecycleTool(
       'merge_customers',
-      { winner_customer_id: WINNER_ID, loser_customer_id: LOSER_ID, confirmed: true },
+      { winner_customer_id: WINNER_ID, loser_customer_id: LOSER_ID, confirmed: true, _approved_versions: { winner: winnerRow.version, loser: loserRow.version } },
       { confirmed: true, technicianId: 'tech-42' },
     );
-    expect(result.preview_changed).toBe(true);
-    expect(mockExecuteMerge).not.toHaveBeenCalled();
+    expect(db.__qb.select).toHaveBeenCalledTimes(1);
+    expect(mockExecuteMerge).toHaveBeenCalledWith(expect.objectContaining({ expectedVersions: { winner: winnerRow.version, loser: loserRow.version } }));
+    expect(result).toMatchObject({ preview_changed: true });
   });
 
   test('confirmed call validates the APPROVED card versions (route pin), not freshly sampled ones (pre-push Codex P1)', async () => {
