@@ -350,8 +350,11 @@ async function sendSummarySms({ visit, member, customer, summaryUrl, requested }
     // Once handed to a non-idempotent provider, every failure is ambiguous
     // (a timeout, a 5xx, a 429: the provider may hold the text) and stays
     // unknown for office reconciliation. Never reclaim it. A refusal before
-    // the request is a block and keeps its own retry contract.
-    if (!result.sent && !result.blocked && dispatched) {
+    // the request is a block and keeps its own retry contract, and so is a
+    // definitive synchronous rejection (an unsubscribed, invalid or
+    // non-mobile number: the adapter's terminal codes), which proves the
+    // provider accepted nothing.
+    if (!result.sent && !result.blocked && dispatched && result.terminal !== true) {
       await VisitGroups.finalizeVisitNotification(visit.id, 'completion_sms', 'unknown_delivery', new Date(), claim.token);
       return;
     }
@@ -365,10 +368,20 @@ async function sendSummarySms({ visit, member, customer, summaryUrl, requested }
 
 // The template library saves each recipient before provider handoff. Only an
 // absent row or its explicit pre-dispatch abort proves another send is safe.
+// SendGrid drops a message for a recipient who opted out (a group or
+// address unsubscribe, a spam report) under one of these reasons. The
+// address is reachable; the customer declined. Such a leg settles as
+// suppressed, never as an unknown delivery for the office to chase.
+const SUMMARY_OPT_OUT_DROP_REASONS = ['group unsubscribe', 'unsubscribed address', 'spam reporting address'];
+function summaryEmailOptOutDrop(reason) {
+  return SUMMARY_OPT_OUT_DROP_REASONS.includes(String(reason || '').trim().toLowerCase());
+}
+
 function summaryEmailState(message) {
   if (!message) return 'retry';
   if (['sent', 'delivered', 'opened', 'clicked'].includes(message.status)) return 'sent';
   if (message.status === 'blocked') return 'suppressed';
+  if (message.status === 'dropped' && summaryEmailOptOutDrop(message.error_message)) return 'suppressed';
   if (message.status === 'failed' && !message.sent_at && !message.provider_message_id
     && message.error_message === require('./email-template-library').ABORTED_BEFORE_DISPATCH) return 'retry';
   return 'unknown_delivery';
@@ -437,8 +450,11 @@ async function sendSummaryEmailRecipient({ visit, customer, claim, summaryUrl, r
 // request left the recipient's ledger row queued; the mark's marker names
 // that row and, past the lease, proves no request was made, so the row is
 // settled as a pre-dispatch abort and the replay finishes that recipient
-// instead of skipping it as uncertain. Read before the claim (which
-// reclaims such a mark), settled once the claim is owned.
+// instead of skipping it as uncertain. Read AND settled before the claim
+// (which reclaims such a mark and would lose the marker): the settlement is
+// provable on its own (marker past the lease, row queued with no provider
+// id) and idempotent, so a crash between it and the claim leaves a row the
+// next owner re-sends, never one it skips as uncertain.
 async function settleAbandonedSummaryEmailRow(visitId, database) {
   const effect = await database('visit_effects').where({ visit_id: visitId, effect_type: 'completion_email', status: 'unknown_delivery' }).first('last_error', 'claimed_at');
   if (!effect || !VisitGroups.isHandoffPending(effect.last_error)) return null;
@@ -454,9 +470,9 @@ async function settleAbandonedSummaryEmailRow(visitId, database) {
 
 async function sendSummaryEmail({ visit, member, customer, prefs, summaryUrl, visible, database }) {
   const abandoned = await settleAbandonedSummaryEmailRow(visit.id, database);
+  if (abandoned) await abandoned();
   const claim = await VisitGroups.claimVisitNotification(member, 'completion_email');
   if (claim?.state !== 'owner') return;
-  if (abandoned) await abandoned();
   const recipients = visible ? summaryEmailRecipients(customer, prefs) : [];
   try {
     const scope = { trigger_event_id: `visit_summary:${visit.id}`, recipient_id: customer.id };
@@ -763,8 +779,15 @@ async function reconcileSummaryEmailRecovery(message, database = db) {
     // provider_bounce: a bounce reopened a sent aggregate. provider_outcome_unknown:
     // the bounce landed before the initial send returned, or the handoff was
     // ambiguous — a delivery event is the proof either lacked.
-    const effect = await trx('visit_effects').where({ visit_id: visitId, effect_type: 'completion_email', status: 'unknown_delivery' })
-      .whereIn('last_error', ['provider_bounce', 'provider_outcome_unknown']).forUpdate().first('id');
+    // A still-sent aggregate is judged too: a provider block that scheduled
+    // a retry never reopened it (the rail owns the block), so when that
+    // retry is refused and the ledger holds no accepted send any more, the
+    // aggregate settles as suppressed instead of reading as delivered.
+    const effect = await trx('visit_effects').where({ visit_id: visitId, effect_type: 'completion_email' })
+      .where(function () {
+        this.where({ status: 'sent' })
+          .orWhere(function () { this.where({ status: 'unknown_delivery' }).whereIn('last_error', ['provider_bounce', 'provider_outcome_unknown']); });
+      }).forUpdate().first('id', 'status');
     if (!effect) return { reconciled: false };
     const { outcomes } = await summaryEmailEvidence(message, trx);
     // Every recipient row must be settled: a delivery proves sent, and a
@@ -774,6 +797,7 @@ async function reconcileSummaryEmailRecovery(message, database = db) {
       return { reconciled: false };
     }
     const settled = outcomes.includes('sent') ? 'sent' : 'suppressed';
+    if (effect.status === settled) return { reconciled: false };
     await trx('visit_effects').where({ id: effect.id })
       .update({ status: settled, sent_at: settled === 'sent' ? trx.fn.now() : null, last_error: null, updated_at: trx.fn.now() });
     // The bounce alert, or the coordinator's delivery-review alert when the
@@ -852,4 +876,4 @@ module.exports = { VISIT_SUMMARY_TOKEN_RE, ensureVisitSummaryToken, packetHasPub
   deliverVisitCompletionSummary, reconcileSummaryEmailBounce, reconcileSummaryEmailRecovery, summaryRetryAuthorized,
   recheckDeferredSummarySms, beginDeferredSummarySms, finalizeDeferredSummarySms, terminalDeferredSummarySms,
   retrySummaryThroughHandoff, parkVisitReviewOutreach, resumeVisitReviewOutreach, visitSummaryUncertainForRecord,
-  reviewSendThroughSummaryHandoff, PARKED_REVIEW_REASON, PACKET_OWNED_REVIEW_TRIGGERS };
+  reviewSendThroughSummaryHandoff, PARKED_REVIEW_REASON, PACKET_OWNED_REVIEW_TRIGGERS, summaryEmailOptOutDrop };

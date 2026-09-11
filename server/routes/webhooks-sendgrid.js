@@ -792,15 +792,28 @@ async function handleEmailMessageEvent(ev, message, client = db) {
   if (updates) await client('email_messages').where({ id: message.id }).update(updates);
   // A provider block is retryable and stays with the retry rail (which
   // reconciles the summary when its retries terminate); only a terminal
-  // bounce reopens the summary for office review here.
-  if (updates && ['bounce', 'blocked', 'dropped'].includes(ev.event) && !providerRetry.isProviderBlockedEvent(ev)) {
-    await require('../services/visit-completion-summary').reconcileSummaryEmailBounce(message, client);
+  // bounce reopens the summary for office review here. A drop for a
+  // recipient who opted out is a suppression, not a bounce: the ledger
+  // below records it and the summary leg settles as suppressed.
+  const optOutDrop = ev.event === 'dropped'
+    && require('../services/visit-completion-summary').summaryEmailOptOutDrop(ev.reason || ev.response);
+  const Summary = require('../services/visit-completion-summary');
+  if (updates && ['bounce', 'blocked', 'dropped'].includes(ev.event) && !providerRetry.isProviderBlockedEvent(ev) && !optOutDrop) {
+    await Summary.reconcileSummaryEmailBounce(message, client);
+  }
+  // A provider block the rail can no longer retry (this event exhausted the
+  // retries) is terminal too: the summary reopens for delivery review the
+  // way an exhausted retry does.
+  if (updates && providerRetry.isProviderBlockedEvent(ev) && updates.provider_retry_exhausted_at) {
+    await Summary.reconcileSummaryEmailBounce(message, client);
   }
   // A delivery event after a provider-retry resend is the durable retry for
   // the recovery the rail attempted inline (a transient failure there would
   // otherwise leave the effect on office review with the message sent).
-  if (ev.event === 'delivered') {
-    await require('../services/visit-completion-summary').reconcileSummaryEmailRecovery(message, client);
+  // An opt-out drop settles the aggregate from the ledger the same way: a
+  // summary whose every recipient declined reads as suppressed, not sent.
+  if (ev.event === 'delivered' || (updates && optOutDrop)) {
+    await Summary.reconcileSummaryEmailRecovery(message, client);
   }
   const groupKey = await groupKeyForEmailMessage(message, client);
   await recordEmailSuppressionForEvent(ev, message, groupKey, now, client);

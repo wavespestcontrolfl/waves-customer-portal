@@ -784,7 +784,62 @@ async function commitRecoveryOnDelivery(recoveryMessage) {
     // delivery event. The resend already delivered (can't unsend), but we must NOT
     // overwrite any record to an address that now belongs to someone else. This
     // also subsumes the unique-primary-email collision check.
-    if (correctedEmail && await correctedAddressOwnedByOther(correctedEmail, rec.customer_id)) {
+    // The ownership recheck and every customer-field write run under the
+    // corrected address's key (the key every summary handoff and every
+    // customer address writer takes), so a handoff that read the address as
+    // unowned either committed its request before this claim or re-judges
+    // ownership after it, and the recheck cannot go stale before the write.
+    const customerField = rec.customer_id && rec.customer_email_field && correctedEmail
+      && CUSTOMER_EMAIL_FIELDS.includes(rec.customer_email_field) ? rec.customer_email_field : null;
+    const billingField = !customerField && rec.customer_id && rec.customer_email_field === 'billing_email' && correctedEmail;
+    // Row → key is the established order (every customer and billing-
+    // preference writer takes its row before the address key): the
+    // applicable row is held first, then the key, then the recheck under both.
+    const commit = await db.transaction(async (trx) => {
+      const before = customerField ? await trx('customers').where({ id: rec.customer_id }).forUpdate().first() : null;
+      if (billingField) await trx('notification_prefs').where({ customer_id: rec.customer_id }).forUpdate().first('customer_id');
+      if (correctedEmail) await require('../utils/customer-comms-lock').lockCustomerEmail(trx, correctedEmail);
+      if (correctedEmail && await correctedAddressOwnedByOther(correctedEmail, rec.customer_id, trx)) return { ownedByOther: true };
+      const fields = [];
+      // 1. Customer record (primary email or service-contact column), when the
+      //    bounce resolved to a customer. Only overwrite if the column STILL
+      //    holds the bad address — a human edit may have raced us, in which
+      //    case we leave their value alone.
+      if (customerField) {
+        const affected = await trx('customers')
+          .where({ id: rec.customer_id })
+          .whereRaw(`LOWER(${customerField}) = ?`, [bouncedEmail])
+          .update({ [customerField]: correctedEmail, updated_at: new Date() });
+        if (Number(affected) > 0) {
+          fields.push(customerField);
+          // A PRIMARY email correction rides the canonical fanout in this
+          // same transaction, so lead/estimate snapshots retarget and the
+          // newsletter tokens rotate; the narrowed review scope keeps an
+          // automated correction from settling an owner read-back card.
+          if (customerField === 'email') {
+            await require('./customer-email-fanout').propagateCustomerEmailChange({
+              before: { ...(before || {}), id: rec.customer_id, email: bouncedEmail },
+              after: { id: rec.customer_id, email: correctedEmail },
+              source: 'email-bounce-recovery',
+              reviewReasonCodes: ['customer_email_missing'],
+            }, trx);
+          }
+        }
+      } else if (billingField) {
+        // The bounce was to the customer's notification_prefs.billing_email — fix it
+        // there (separate table) so future invoice/balance emails stop bouncing.
+        const affected = await trx('notification_prefs')
+          .where({ customer_id: rec.customer_id })
+          .whereRaw('LOWER(billing_email) = ?', [bouncedEmail])
+          .update({ billing_email: correctedEmail, updated_at: new Date() });
+        if (Number(affected) > 0) fields.push('notification_prefs.billing_email');
+      }
+      return { fields };
+    });
+    // A failed write (a lost lock contest, a transient error) must not be
+    // recorded as committed: the throw leaves the recovery uncommitted for
+    // the next delivery event to retry.
+    if (commit.ownedByOther) {
       await db('email_bounce_recoveries').where({ id: rec.id }).update({
         status: 'delivered',
         updated_at: new Date(),
@@ -793,40 +848,7 @@ async function commitRecoveryOnDelivery(recoveryMessage) {
       await alertEmailCollision({ recovery: rec, correctedEmail });
       return;
     }
-
-    // 1. Customer record (primary email or service-contact column), when the
-    //    bounce resolved to a customer.
-    if (rec.customer_id && rec.customer_email_field && correctedEmail
-        && CUSTOMER_EMAIL_FIELDS.includes(rec.customer_email_field)) {
-      const field = rec.customer_email_field;
-      // Only overwrite if the column STILL holds the bad address — a human edit
-      // may have raced us, in which case we leave their value alone.
-      const affected = await db('customers')
-        .where({ id: rec.customer_id })
-        .whereRaw(`LOWER(${field}) = ?`, [bouncedEmail])
-        .update({ [field]: correctedEmail, updated_at: new Date() })
-        .catch((err) => {
-          logger.warn(`[bounce-recovery] customer ${field} overwrite failed: ${err.message}`);
-          return 0;
-        });
-      if (Number(affected) > 0) updatedFields.push(field);
-    } else if (rec.customer_id && rec.customer_email_field === 'billing_email' && correctedEmail) {
-      // The bounce was to the customer's notification_prefs.billing_email — fix it
-      // there (separate table) so future invoice/balance emails stop bouncing.
-      const affected = await db.transaction(async (trx) => {
-        await trx('notification_prefs').where({ customer_id: rec.customer_id }).forUpdate().first('customer_id');
-        await require('../utils/customer-comms-lock').lockCustomerEmail(trx, correctedEmail);
-        return trx('notification_prefs')
-          .where({ customer_id: rec.customer_id })
-          .whereRaw('LOWER(billing_email) = ?', [bouncedEmail])
-          .update({ billing_email: correctedEmail, updated_at: new Date() });
-      })
-        .catch((err) => {
-          logger.warn(`[bounce-recovery] billing_email overwrite failed: ${err.message}`);
-          return 0;
-        });
-      if (Number(affected) > 0) updatedFields.push('notification_prefs.billing_email');
-    }
+    updatedFields.push(...(commit.fields || []));
 
     // 2. SOURCE estimate/lead rows that follow-ups read (estimate-follow-up.js →
     //    est.customer_email). Runs for BOTH customer-owned and lead/prospect

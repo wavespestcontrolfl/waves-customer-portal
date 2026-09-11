@@ -128,7 +128,10 @@ async function recoverStaleClaims(now = new Date()) {
     provider_retry_exhausted_at: now,
     error_message: 'Provider outcome unknown: interrupted after the provider handoff began',
     updated_at: now,
-  });
+  }).returning('*');
+  // A summary interrupted after its handoff began has no known provider
+  // outcome: terminal for the office, exactly like an exhausted retry.
+  for (const row of uncertain) await reconcileExhaustedSummary(row);
   const requeued = await stale()
     .where((q) => q.whereNull('error_message').orWhereNot('error_message', HANDOFF_STARTED))
     .update({
@@ -141,7 +144,17 @@ async function recoverStaleClaims(now = new Date()) {
       error_message: 'Interrupted provider retry claim recovered',
       updated_at: now,
     });
-  return Number(requeued || 0) + Number(uncertain || 0);
+  return Number(requeued || 0) + uncertain.length;
+}
+
+// A summary whose retries ended without a delivery — the provider block
+// never cleared, or the last request's outcome is unknown — is a terminal
+// failure for the office, exactly like a hard bounce: the sent effect
+// reopens for delivery review.
+async function reconcileExhaustedSummary(updated) {
+  if (updated?.template_key !== 'service.visit_summary') return;
+  await require('./visit-completion-summary').reconcileSummaryEmailBounce(updated)
+    .catch((err) => logger.warn(`[email-provider-retry] visit summary bounce not reconciled for ${updated.id}: ${err.message}`));
 }
 
 async function alertExhausted(message, reason) {
@@ -192,12 +205,7 @@ async function markRetryFailure(message, err, now = new Date()) {
     .returning('*');
   if (updated && exhausted) {
     await alertExhausted(updated, reason);
-    // A summary whose provider block never cleared is a terminal failure
-    // for the office, exactly like a hard bounce.
-    if (updated.template_key === 'service.visit_summary') {
-      await require('./visit-completion-summary').reconcileSummaryEmailBounce(updated)
-        .catch((err) => logger.warn(`[email-provider-retry] visit summary bounce not reconciled for ${updated.id}: ${err.message}`));
-    }
+    await reconcileExhaustedSummary(updated);
   }
   return updated || null;
 }
@@ -213,7 +221,10 @@ async function markRetryUncertain(message, err, now = new Date()) {
     .where({ id: message.id, send_attempt_token: message.send_attempt_token, status: 'queued' })
     .update({ status: 'failed', error_message: reason, provider_retry_next_at: null, provider_retry_exhausted_at: now, updated_at: now })
     .returning('*');
-  if (updated) await alertExhausted(updated, reason);
+  if (updated) {
+    await alertExhausted(updated, reason);
+    await reconcileExhaustedSummary(updated);
+  }
   return updated || null;
 }
 
