@@ -514,12 +514,20 @@ async function recordTrackingNotice(trx, { visitId, technicianId, stage, dedupeK
   const [row] = await trx('tech_notifications').insert({ technician_id: technicianId,
     type: 'follow_through_tracking', dedupe_key: dedupeKey, message, payload })
     .onConflict('dedupe_key').ignore().returning('id');
-  return row ? { technicianId, visitId, pushTitle: stage === 2 ? 'A visit needs an arrival check' : 'A visit window is underway' } : null;
+  const headline = stage === 2 ? 'A visit needs an arrival check' : 'A visit window is underway';
+  // Named on the push too (codex P1) — a tech with more than one open stop
+  // can't tell which visit a bare headline is about until they open the app.
+  const pushTitle = payload?.customer_name ? `${headline} — ${payload.customer_name}` : headline;
+  return row ? { technicianId, visitId, pushTitle } : null;
 }
 
 module.exports = {
   recordTrackingNotice,
   pushTrackingNotice: pushCard,
+  // Reused by no-show-detector.js so a tracking notice reads the same "who
+  // / when" a visit_* card does, instead of a second date formatter.
+  formatWhen,
+  customerLabel,
   GATE,
   KINDS,
   isEnabled: enabled,

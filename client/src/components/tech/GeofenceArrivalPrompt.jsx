@@ -451,12 +451,22 @@ function TextCard({ n, onDismiss }) {
 // (no-show-detector.js). The server composes `message`; stage 2 means the
 // promised window is well behind, not just due.
 function TrackingCard({ n, onDismiss }) {
-  const stage = n.payload?.stage;
+  const p = n.payload || {};
+  const stage = p.stage;
   return (
     <div style={cardStyle(stage === 2 ? COLORS.red : COLORS.amber)} data-testid="tracking-notice">
       <div style={{ fontSize: 14, color: COLORS.muted, marginBottom: 4 }}>
         {stage === 2 ? '⚠️ Arrival check needed' : '📍 Window underway'}
       </div>
+      {/* Same customer_name/when shape a VisitCard reads — identifies which
+          stop this is about (codex P1: a tech with more than one open stop
+          can't tell from the bare stage message alone). */}
+      <div style={{ fontSize: 16, fontWeight: 600, color: COLORS.text, marginBottom: 4 }}>
+        {p.customer_name || 'Customer'}
+      </div>
+      {p.when && (
+        <div style={{ fontSize: 13, color: COLORS.muted, marginBottom: 12 }}>{p.when}</div>
+      )}
       <div style={{ fontSize: 14, color: COLORS.text, marginBottom: 12, lineHeight: 1.4 }}>
         {n.message}
       </div>

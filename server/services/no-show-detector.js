@@ -152,8 +152,14 @@ async function sweep(conn, { now = new Date() } = {}) {
         employment_status: 'active', field_dispatchable: true }).first('id'))?.id : null;
       const type = recipient ? 'tech_late' : 'unassigned_overdue';
       const key = `tracking:${card.id}:${live.promised_window.start_at}:${live.stage}:${type}`;
+      // Identify the visit on the card itself (codex P1) — a tech with more
+      // than one stop can't tell which one a bare stage message is about.
+      // Same "who/when" a visit_* card shows, not a second formatter.
+      const customerName = techNotices.customerLabel({ cust_last_name: card.last_name, cust_first_name: card.first_name });
+      const when = techNotices.formatWhen(visit.scheduled_date, visit.window_start, visit.window_end);
       const notice = await techNotices.recordTrackingNotice(trx, { visitId: card.id, technicianId: recipient,
-        stage: live.stage, dedupeKey: `${key}:${recipient}`, message: live.message, payload: { ...live, visit_id: card.id } });
+        stage: live.stage, dedupeKey: `${key}:${recipient}`, message: live.message,
+        payload: { ...live, visit_id: card.id, customer_name: customerName, when } });
       const office = live.stage === 2 || !recipient;
       const existing = await trx('dispatch_alerts').where({ job_id: card.id }).whereIn('type', dispatch.OVERDUE_ALERT_TYPES).whereNull('resolved_at');
       for (const alert of existing) {
@@ -197,6 +203,28 @@ async function sweep(conn, { now = new Date() } = {}) {
     const live = evaluateNoShow({ visit, promise, now });
     if (!live || live.stage !== alert.payload.stage || live.promised_window.start_at !== alert.payload.promised_window?.start_at) {
       await dispatch.resolveAlert({ id: alert.id, trx });
+    }
+  });
+  // Tech-side notices have no auto-resolve of their own (codex P1): a
+  // stage-1-only notice never gets a dispatch_alerts row, and even a stage 2
+  // that DOES only clears the office side above. Reconcile every unread/
+  // undismissed tracking notice the same way — arrived, reassigned (the row
+  // is scoped to the technician_id it was written for), or superseded by a
+  // later stage (dedupeKey differs per stage, so the old stage-1 row would
+  // otherwise sit next to the new stage-2 one forever) all dismiss it.
+  const activeNotices = await conn('tech_notifications').where({ type: 'follow_through_tracking' })
+    .whereNull('dismissed_at').select('id', 'technician_id', 'payload');
+  for (const notice of activeNotices) await conn.transaction(async (trx) => {
+    if (!enabled()) return;
+    const visitId = notice.payload?.visit_id;
+    const visit = visitId ? await trx('scheduled_services').where({ id: visitId }).forUpdate().first() : null;
+    const promise = visit ? latestPromises(await loadPromiseEvents(trx, [String(visitId)], { now }), now).get(String(visitId)) : null;
+    const live = visit ? evaluateNoShow({ visit, promise, now }) : null;
+    const stillCurrent = live && visit.technician_id === notice.technician_id
+      && live.stage === notice.payload?.stage && live.promised_window.start_at === notice.payload?.promised_window?.start_at;
+    if (!stillCurrent) {
+      await trx('tech_notifications').where({ id: notice.id }).whereNull('dismissed_at')
+        .update({ dismissed_at: new Date(), read: true, updated_at: new Date() });
     }
   });
   return { alerted, active: rows.length };
