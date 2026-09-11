@@ -5297,16 +5297,6 @@ const ReviewService = {
     }
 
     if (outcome.reason === "visit_summary_parked") return this._parkSequence(seq.id);
-    // The provider may hold this touch: the step stays claimed (next_run_at
-    // null) for reconcileStrandedSends, which advances the sequence on proof
-    // of the send or reschedules it when the provider reports none.
-    if (outcome.uncertain) return { ran: false, uncertain: true, step: seq.current_step };
-    if (outcome.terminal || outcome.blocked) {
-      if (outcome.reason === "no_contact") return stop("no_contact");
-      if (outcome.reason === "already_reviewed") return stop("reviewed");
-      return stop("opted_out");
-    }
-
     if (outcome.uncertain) {
       // The provider handoff crossed the SDK boundary with no definitive
       // accept/reject — the customer may already hold this touch. Hold the
@@ -5318,11 +5308,19 @@ const ReviewService = {
       // startReviewSequence rather than resuming this step) so the due
       // sweep's next_run_at scan never re-picks this row automatically;
       // stopReviewSequence still reaches an 'active' row for a manual stop.
+      // The step stays claimed for reconcileStrandedSends, which advances
+      // the sequence on proof of the send or reschedules it when the
+      // provider reports none.
       await db("review_sequences").where({ id: seq.id }).update({
         decision: sequenceDecision({ reason: "provider_outcome_uncertain" }),
         updated_at: new Date(),
       });
-      return { ran: false, deferred: true, uncertain: true };
+      return { ran: false, deferred: true, uncertain: true, step: seq.current_step };
+    }
+    if (outcome.terminal || outcome.blocked) {
+      if (outcome.reason === "no_contact") return stop("no_contact");
+      if (outcome.reason === "already_reviewed") return stop("reviewed");
+      return stop("opted_out");
     }
 
     // Deferred / transient → retry this step later without advancing. Only a

@@ -4055,11 +4055,19 @@ describe('legacy sendSMS — ambiguous returned provider failure', () => {
   });
 
   test('keeps the claim standing instead of requeuing it', async () => {
-    const mock = makeMock(rows());
+    // The row is `pending` when sendSMS starts (the pre-send fence only
+    // stores against a pending row); the summary handoff inside the
+    // provider call is what marks it `sending` before the request is made.
+    const state = rows();
+    state.review_requests[0].status = 'pending';
+    const mock = makeMock(state);
     db.mockImplementation(mock);
-    mockSendCustomerMessage.mockResolvedValueOnce({
-      sent: false, blocked: false, code: 'PROVIDER_FAILURE', reason: 'connection reset',
-      retryable: true, deferred: true, nextAllowedAt: new Date(Date.now() + 300000).toISOString(),
+    mockSendCustomerMessage.mockImplementationOnce(async () => {
+      mock.__state.rows.review_requests[0].status = 'sending';
+      return {
+        sent: false, blocked: false, code: 'PROVIDER_FAILURE', reason: 'connection reset',
+        retryable: true, deferred: true, nextAllowedAt: new Date(Date.now() + 300000).toISOString(),
+      };
     });
 
     const out = await ReviewService.sendSMS('rr-unc-1');
