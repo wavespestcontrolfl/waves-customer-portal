@@ -17,12 +17,13 @@ const first = (obj) => Object.values(obj)[0].body;
 const trackStamps = ['arrivedAt'];
 const liveTrack = (body) => {
   const anchor = body.window && body.window.start;
-  const dayMs = 86400000;
-  // Shift = whole ET calendar days between the fixture's visit date and the run's, so 9am stays 9am.
-  const offset = anchor
-    ? Date.parse(`${etDateString(new Date())}T00:00:00Z`) - Date.parse(`${String(anchor).slice(0, 10)}T00:00:00Z`)
-    : 0;
-  const shift = (iso) => (typeof iso === 'string' && iso ? new Date(Date.parse(iso) + Math.round(offset / dayMs) * dayMs).toISOString() : iso);
+  // Whole ET calendar days between the fixture's visit date and the run's. Adding 86,400,000 ms would
+  // preserve the UTC clock, not the Eastern one: rebasing a September 9am stamp across the November
+  // DST change lands it at 8am and silently rewrites the arrival-window evidence. `addETDaysAtWallClock`
+  // rebuilds the same ET wall-clock time on the target ET date, which is what "9am stays 9am" means.
+  const dayNumber = (ymd) => Math.round(Date.UTC(...ymd.split('-').map((n, i) => (i === 1 ? Number(n) - 1 : Number(n)))) / 86400000);
+  const days = anchor ? dayNumber(etDateString(new Date())) - dayNumber(etDateString(new Date(anchor))) : 0;
+  const shift = (iso) => (typeof iso === 'string' && iso ? addETDaysAtWallClock(new Date(iso), days).toISOString() : iso);
   const out = { ...body, vehicle: { ...body.vehicle, lastReportedAt: new Date(Date.now() - 45 * 1000).toISOString() } };
   if (body.window) out.window = { ...body.window, start: shift(body.window.start), end: shift(body.window.end) };
   for (const k of trackStamps) if (body[k]) out[k] = shift(body[k]);
@@ -32,7 +33,7 @@ const liveTrack = (body) => {
 // The reschedule fixture is a one-off extraction whose availability window is literal dates; once they
 // are in the past the page still renders "Our best times for you" with slots production could never
 // return. Every date is re-based so `rangeFrom` = today (ET calendar days, see 40-diagnostics-booking).
-const { addETDays, etDateString } = require('../../../../server/utils/datetime-et');
+const { addETDays, addETDaysAtWallClock, etDateString } = require('../../../../server/utils/datetime-et');
 const liveReschedule = (body) => {
   const from = body.availability && body.availability.rangeFrom;
   if (!from) return body;
