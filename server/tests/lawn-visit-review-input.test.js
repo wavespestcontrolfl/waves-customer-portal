@@ -148,3 +148,29 @@ test('a product may map to a detail added in the same review, but a poisoned ref
     .toEqual(['appliedProducts[0].addresses_findings is not a finding of this run: T900']);
   expect(validateReview({ appliedProducts: [{ product_name: 'Bifen', addresses_findings: ['T1'] }] }, poisoned).errors).toEqual([]);
 });
+
+test('references are checked against the IDs the allocator actually assigns, not an upper bound', () => {
+  const stored = {
+    findings: JSON.stringify([{ finding_id: 'F1' }]),
+    added_details: JSON.stringify([{ finding_id: 'T1', name: 'Grubs found' }]),
+    reconciliation: JSON.stringify({ products: [], technician_finding_high_water: 1 }),
+  };
+  // Resubmitting an unchanged detail keeps its stored T1, so T2 is never
+  // assigned: an upper bound of "one new ID per detail sent" would have let a
+  // product point at a detail that does not exist and report it as untreated.
+  expect(validateReview({
+    addedDetails: [{ text: 'Grubs found' }],
+    appliedProducts: [{ product_name: 'Bifen', addresses_findings: ['T2'] }],
+  }, stored).errors).toEqual(['appliedProducts[0].addresses_findings is not a finding of this run: T2']);
+
+  expect(validateReview({
+    addedDetails: [{ text: 'Grubs found' }],
+    appliedProducts: [{ product_name: 'Bifen', addresses_findings: ['T1'] }],
+  }, stored).errors).toEqual([]);
+
+  // A genuinely new detail does allocate the next ID, so T2 is addressable.
+  expect(validateReview({
+    addedDetails: [{ text: 'Grubs found' }, { text: 'Dog run' }],
+    appliedProducts: [{ product_name: 'Bifen', addresses_findings: ['T1', 'T2'] }],
+  }, stored).errors).toEqual([]);
+});
