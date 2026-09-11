@@ -32,8 +32,9 @@ const EXCLUSION_NOTES = {
   planned_followup: 'This service is an included follow-up or an always-free visit type: it receives zero production credit and never claims an application from an accepted-value allocation.',
 };
 // Why the exclusion selector is locked: a claimed allocation must stay claimed on this review.
-function exclusionLock(data, created, excluded) {
-  const claimed = Boolean(data?.allocation_id) && !excluded;
+// A retained (locked) allocation is exempt: the server keeps it while the classification is corrected.
+function exclusionLock(data, created, excluded, retained) {
+  const claimed = Boolean(data?.allocation_id) && !excluded && !retained;
   if (!claimed) return { disabled: false, hint: undefined };
   const fresh = created.includes(data.allocation_id);
   return { disabled: true, fresh, hint: fresh ? 'This review must claim the allocation it retained; exclusions are unavailable.' : 'Clear the allocation to record an exclusion.' };
@@ -107,7 +108,7 @@ export default function EvidenceEditor({ technicianId, month, serviceId = '', pe
   const forced = Boolean(detail) && forcedExclusion(detail.visit) !== 'none';
   // Any excluded first review (forced or reviewer-selected) cannot claim a new allocation; a retained one is kept.
   const excluded = Boolean(detail) && (forced || data.exclusion !== 'none') && !allocationLocked;
-  const lock = exclusionLock(data, created, excluded);
+  const lock = exclusionLock(data, created, excluded, allocationLocked);
   // A pool retained from this review stays unclaimed until the evidence saves: leaving or switching would strand it.
   const held = allocationSaving || Boolean(lock.fresh);
   // Only pools whose coverage contains the service date can be claimed; a retained selection stays listed.

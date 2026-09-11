@@ -504,7 +504,12 @@ async function evidenceDetail(serviceId) {
     db('scheduled_services as ss').leftJoin('services as s', 's.id', 'ss.service_id')
       .where({ 'ss.customer_id': visit.customer_id, 'ss.status': 'completed' }).whereNot('ss.id', visit.id)
       .where(q => properties.length ? q.whereIn('ss.property_id', properties) : q.whereNull('ss.property_id'))
-      .where('ss.scheduled_date', '>=', previousDay(visit.service_date)).whereRaw('COALESCE(ss.service_key_snapshot, s.service_key) = ?', [visit.service_key])
+      .where(q => {
+        // Same contract as returnedAfter: any scheduled date qualifies when a recorded end instant follows the original's.
+        q.where('ss.scheduled_date', '>=', previousDay(visit.service_date));
+        const finished = completionInstant(visit);
+        if (finished != null) q.orWhereRaw('COALESCE(ss.actual_end_time, ss.check_out_time, ss.completed_at) > ?', [new Date(finished)]);
+      }).whereRaw('COALESCE(ss.service_key_snapshot, s.service_key) = ?', [visit.service_key])
       .select('ss.id', 'ss.customer_id', 'ss.service_type', 'ss.scheduled_date', 'ss.completed_at', 'ss.actual_end_time', 'ss.check_out_time')
       .orderBy('ss.scheduled_date', 'desc').limit(200).then(rows => laterReturns(db, rows, visit)),
   ]);
@@ -516,8 +521,11 @@ async function evidenceDetail(serviceId) {
 
 async function estimateOptions(selectedMonth) {
   const range = monthRange(selectedMonth);
+  // An estimate with retained origination evidence is reviewed through its milestone action, never re-originated.
   return db('estimates').where({ status: 'accepted' }).where('accepted_at', '>=', parseETDateTime(`${range.start}T00:00`))
-    .where('accepted_at', '<', parseETDateTime(`${range.end}T00:00`)).select('id', 'customer_name', 'accepted_at').orderBy('accepted_at', 'desc').limit(500);
+    .where('accepted_at', '<', parseETDateTime(`${range.end}T00:00`))
+    .whereNotExists(function attributed() { this.select(1).from('field_business_evidence').whereRaw('field_business_evidence.estimate_id = estimates.id'); })
+    .select('id', 'customer_name', 'accepted_at').orderBy('accepted_at', 'desc').limit(500);
 }
 
 async function score(serviceId, actor) {
