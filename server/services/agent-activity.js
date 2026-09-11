@@ -387,12 +387,17 @@ function clampWindowHours(value) {
 
 // Digest rows for the feed. Two queries, not one windowed query with a
 // LIMIT: the PINNED set — unread actions (ACT: / [Review]) and UNRESOLVED
-// FIX: digests — must survive however old they are (their email was
-// suppressed, so the row is the only copy; opening a FIX does not fix it,
-// only the fall-off rule's metadata.resolved does), and a single ORDER BY
-// DESC + LIMIT over the union would silently drop the oldest pinned rows
-// once enough newer ones exist (pre-push P1 on #4397). The windowed set
-// fills the rest; ids are merged so a row never renders twice.
+// FIX: digests that HAVE a resolution path — must survive however old they
+// are (their email was suppressed, so the row is the only copy; opening a
+// FIX does not fix it, only the fall-off rule's metadata.resolved does),
+// and a single ORDER BY DESC + LIMIT over the union would silently drop
+// the oldest pinned rows once enough newer ones exist (pre-push P1 on
+// #4397). "Has a resolution path" = metadata.source = 'ops-crons' (retired
+// by POST /api/ops/digest/resolve) or metadata.fallOff = true (a sender
+// that calls the fall-off on its clean run). A FIX row nothing can ever
+// resolve keeps the older read-or-window rule, or it would sit as
+// "failed" forever (codex P1 r2 on #4392). The windowed set fills the
+// rest; ids are merged so a row never renders twice.
 const DIGEST_COLUMNS = ['id', 'title', 'body', 'link', 'metadata', 'read_at', 'created_at'];
 async function loadDigestRows(db, since) {
   const base = () => db('notifications')
@@ -401,7 +406,10 @@ async function loadDigestRows(db, since) {
   const pinned = await base()
     .where((q) =>
       q.where((u) => u.whereNull('read_at').andWhereRaw("title ~* '^(ACT:|\\[Review\\])'"))
-        .orWhere((f) => f.whereRaw("COALESCE(metadata->>'resolved', '') <> 'true'").andWhereRaw("title ~* '^FIX:'")))
+        .orWhere((f) => f.whereRaw("COALESCE(metadata->>'resolved', '') <> 'true'")
+          .andWhereRaw("title ~* '^FIX:'")
+          .andWhere((r) => r.whereRaw("metadata->>'source' = 'ops-crons'").orWhereRaw("metadata->>'fallOff' = 'true'")))
+        .orWhere((legacy) => legacy.whereNull('read_at').andWhereRaw("title ~* '^FIX:'")))
     .orderBy('created_at', 'desc')
     .limit(MAX_ITEMS);
   const windowed = await base()

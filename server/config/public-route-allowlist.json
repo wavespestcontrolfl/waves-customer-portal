@@ -22,7 +22,7 @@
       "routes": [
         "USE / (inline function#1fe36153)",
         "USE /api/ai/chat/report (inline function#6b8b71c2)",
-        "USE /api/ops/digest (inline function#82075b63)",
+        "USE /api/ops/digest (inline function#82c97d26)",
         "USE /api/pay/statement (inline function#cf970c43)",
         "USE /api/public/a2a (inline function#c621253a)",
         "USE /api/public/careers (inline function#91580da7)",
