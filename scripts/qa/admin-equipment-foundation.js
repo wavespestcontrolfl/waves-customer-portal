@@ -15,6 +15,38 @@ const root = path.resolve(__dirname, "../.."),
 const id = "00000000-0000-4000-8000-000000000001",
   systemId = "00000000-0000-4000-8000-000000000002",
   calibrationId = "00000000-0000-4000-8000-000000000003";
+// Every date these fixtures serve is generated relative to the run. Pinning
+// them meant the runner kept asserting a response production could no longer
+// return: a schedule a few weeks out becomes overdue once that date passes, a
+// calibration expires, and mileage rows drop out of the year that
+// /mileage/summary and getFleetOverview filter on.
+const easternToday = () =>
+  new Intl.DateTimeFormat("en-CA", { timeZone: "America/New_York" }).format(
+    new Date(),
+  );
+function easternYear() {
+  return Number(easternToday().slice(0, 4));
+}
+function easternDate(offsetDays) {
+  const [year, month, day] = easternToday().split("-").map(Number);
+  return new Date(Date.UTC(year, month - 1, day + offsetDays))
+    .toISOString()
+    .slice(0, 10);
+}
+// Anchored to the run date but never earlier than the year start, so the
+// endpoints that filter on the current year always have the baseline row to
+// report — otherwise the analytics pass would find an empty fleet for the first
+// few days of January.
+function recentEasternDate(daysAgo) {
+  const candidate = easternDate(-daysAgo),
+    yearStart = `${easternYear()}-01-01`;
+  return candidate > yearStart ? candidate : yearStart;
+}
+const scheduleDueAt = easternDate(20),
+  mileageLogDate = recentEasternDate(3),
+  maintenanceAt = `${recentEasternDate(10)}T12:00:00Z`,
+  jobServiceDate = recentEasternDate(6),
+  calibrationExpiresAt = `${easternDate(30)}T12:00:00Z`;
 const equipment = {
   id,
   name: "Example service truck",
@@ -40,8 +72,8 @@ const equipment = {
   depreciation_method: "MACRS",
   next_maintenance: {
     task_name: "Synthetic inspection",
-    next_due_at: "2026-10-01",
-    is_overdue: false,
+    next_due_at: scheduleDueAt,
+    is_overdue: scheduleDueAt < easternToday(),
   },
 };
 const schedule = {
@@ -49,10 +81,10 @@ const schedule = {
   task_name: "Synthetic inspection",
   interval_miles: 5000,
   interval_months: 6,
-  next_due_at: "2026-10-01",
+  next_due_at: scheduleDueAt,
   priority: "normal",
   estimated_cost: 100,
-  is_overdue: false,
+  is_overdue: scheduleDueAt < easternToday(),
   equipment_name: equipment.name,
   category: "vehicle",
   asset_tag: "QA-001",
@@ -62,19 +94,26 @@ const record = {
   task_name: "Synthetic oil change",
   maintenance_type: "scheduled",
   performed_by: "Fixture operator",
-  performed_at: "2026-09-01T12:00:00Z",
+  performed_at: maintenanceAt,
   total_cost: 100,
 };
+// The real costOfOwnership divides total_cost by the SUM of this vehicle's
+// mileage logs (server/services/equipment-maintenance.js), so the cost metrics
+// below and these logs have to be the same number or the Cost/Mile tile the
+// fixture is meant to exercise renders from a figure production never produced.
+const vehicleTotalMiles = 100;
+const round2 = (value) => Math.round(value * 100) / 100;
 const mileage = {
   logs: [
     {
       id: "mileage-example",
-      log_date: "2026-09-08",
+      log_date: mileageLogDate,
       odometer_start: 11900,
-      odometer_end: 12000,
-      total_miles: 100,
+      odometer_end: 11900 + vehicleTotalMiles,
+      total_miles: vehicleTotalMiles,
       business_miles: 90,
       personal_miles: 10,
+      business_pct: 90,
       fuel_gallons: 5,
       fuel_cost: 20,
       jobs_serviced: 3,
@@ -82,41 +121,138 @@ const mileage = {
       source: "manual",
     },
   ],
-  summary: {
-    total_miles: 100,
-    business_miles: 90,
-    total_fuel_cost: 20,
-    total_irs_deduction: 63,
-    avg_mpg: 20,
-  },
 };
-const overview = {
-  total_assets: 1,
-  overdue_maintenance: 0,
-  ytd_maintenance_spend: 100,
-  ytd_total_miles: 100,
-  ytd_fuel_cost: 20,
-  ytd_irs_deduction: 63,
-};
-const cost = {
-  equipment_id: id,
-  equipment_name: equipment.name,
-  category: "vehicle",
-  asset_tag: "QA-001",
-  age_months: 32,
-  purchase_price: 25000,
-  total_maintenance: 100,
-  total_fuel: 20,
-  total_cost: 25120,
-  monthly_cost: 785,
-  condition_rating: 8,
-  total_irs_deduction: 63,
+const maintenanceSpend = 100;
+// The vehicle's mileage rows are the one source for every derived figure the
+// detail and analytics screens show: costOfOwnership sums vehicle_mileage_log
+// for miles and fuel, and the mileage endpoint aggregates the same rows
+// independently of the list limit (server/services/equipment-maintenance.js).
+// Deriving both from whichever rows are being served keeps the long
+// sticky-header set from contradicting the summary and cost tiles rendered
+// beside it.
+// One aggregate over the rows, shaped per endpoint. The fleet route sums the
+// same columns the detail summary does (routes/admin-equipment-maintenance.js
+// and services/equipment-maintenance.js), so a single source here is what keeps
+// the long sticky-header set from contradicting the tiles beside it.
+function sumMileage(logs) {
+  const sum = (field) => logs.reduce((total, log) => total + log[field], 0);
+  return {
+    total_miles: sum("total_miles"),
+    business_miles: sum("business_miles"),
+    personal_miles: sum("personal_miles"),
+    total_fuel_cost: round2(sum("fuel_cost")),
+    total_fuel_gallons: round2(sum("fuel_gallons")),
+    total_irs_deduction: round2(sum("irs_deduction_amount")),
+    total_jobs: sum("jobs_serviced"),
+  };
+}
+function summarizeMileage(logs) {
+  const totals = sumMileage(logs);
+  return {
+    total_miles: totals.total_miles,
+    business_miles: totals.business_miles,
+    total_fuel_cost: totals.total_fuel_cost,
+    total_irs_deduction: totals.total_irs_deduction,
+    avg_mpg:
+      totals.total_fuel_gallons > 0
+        ? round2(totals.total_miles / totals.total_fuel_gallons)
+        : null,
+  };
+}
+const inYear = (date, year) => date.slice(0, 4) === String(year);
+// getFleetOverview() sums the same rows, so the long sticky-header set has to
+// move these YTD figures with it — navigating back to Maintenance re-fetches
+// this endpoint while those rows are installed. It is a year-to-date figure:
+// the query starts at the year boundary, so rows the long set walks back past
+// it are excluded here even though the detail summary and costOfOwnership,
+// which have no year filter, still count them.
+function fleetOverview(logs) {
+  const year = easternYear(),
+    totals = sumMileage(logs.filter((log) => inYear(log.log_date, year)));
+  return {
+    total_assets: 1,
+    overdue_maintenance: 0,
+    ytd_maintenance_spend: inYear(maintenanceAt, year) ? maintenanceSpend : 0,
+    ytd_total_miles: totals.total_miles,
+    ytd_fuel_cost: totals.total_fuel_cost,
+    ytd_irs_deduction: totals.total_irs_deduction,
+  };
+}
+// The real list routes apply the requested limit while their aggregates are
+// computed over every row, so the fixture has to do both — otherwise a page
+// that quietly halved its limit would still look like it rendered the full set,
+// and the sticky-header scroll check would pass on rows production would not
+// have sent.
+function limited(url, rows) {
+  const limit = Number(url.searchParams.get("limit"));
+  return Number.isInteger(limit) && limit > 0 ? rows.slice(0, limit) : rows;
+}
+// The age is a live month difference from purchase_date and the total is
+// divided by it, so a pinned age_months/monthly_cost pair stops being a
+// response production can return the moment the month rolls over — 32/$785
+// today, 33/$761.21 from October. The year and month are parsed off the date
+// string rather than through Date, whose UTC midnight reads back as the
+// previous December in this runner's zone.
+function ownership(logs) {
+  const [purchaseYear, purchaseMonth] = equipment.purchase_date
+    .split("-")
+    .map(Number);
+  const now = new Date();
+  const ageMonths = Math.max(
+    1,
+    (now.getFullYear() - purchaseYear) * 12 +
+      (now.getMonth() - (purchaseMonth - 1)),
+  );
+  const sum = (field) => logs.reduce((total, log) => total + log[field], 0);
+  const totalMiles = sum("total_miles"),
+    totalFuel = round2(sum("fuel_cost")),
+    totalMaintenance = maintenanceSpend,
+    purchasePrice = 25000,
+    totalCost = round2(purchasePrice + totalMaintenance + totalFuel);
+  return {
+    equipment_id: id,
+    equipment_name: equipment.name,
+    category: "vehicle",
+    asset_tag: "QA-001",
+    age_months: ageMonths,
+    purchase_price: purchasePrice,
+    total_maintenance: totalMaintenance,
+    total_fuel: totalFuel,
+    total_cost: totalCost,
+    monthly_cost: round2(totalCost / ageMonths),
+    cost_per_mile: totalMiles > 0 ? round2(totalCost / totalMiles) : null,
+    total_miles: totalMiles,
+    condition_rating: 8,
+    total_irs_deduction: round2(sum("irs_deduction_amount")),
+  };
+}
+// Matches the job-cost summary below (1 pest job, $250 revenue, $100 cost,
+// 60% margin) so the list and the summary cannot disagree — the real
+// endpoints read the same `job_costs` table and never do.
+const jobCost = {
+  id: "job-cost-example",
+  service_record_id: null,
+  customer_id: "customer-example",
+  customer_name: "Fixture Customer",
+  service_date: jobServiceDate,
+  service_type: "pest",
+  products_cost: 40,
+  labor_cost: 45,
+  drive_cost: 10,
+  equipment_cost: 5,
+  total_cost: 100,
+  revenue: 250,
+  gross_profit: 150,
+  margin_pct: 60,
+  tank_mix_id: null,
+  sqft_treated: 2500,
+  products_used: [],
 };
 const calibration = {
   id: calibrationId,
   carrier_gal_per_1000: 2,
   calibration_status: "estimated_not_field_verified",
-  expires_at: "2026-10-01T12:00:00Z",
+  expires_at: calibrationExpiresAt,
 };
 const system = {
   id: systemId,
@@ -140,7 +276,36 @@ const taxRegisterAsset = {
   serial_number: equipment.serial_number,
   make_model: `${equipment.make} ${equipment.model}`,
 };
+// The real endpoint answers a request that carries no `year` with the current
+// Eastern year (server/routes/admin-equipment-maintenance.js). Pinning a
+// literal here would keep rendering "Fleet Mileage Summary (2026)" from January
+// onward, against a response shape production could no longer return for that
+// request.
+// install()'s route key is `${method} ${pathname}`, so a request whose query
+// changed still matches its fixture and still receives the happy-path body.
+// These are the query values each of those responses is only truthful for: an
+// alerts view that started asking for `status=all`, or a list that dropped or
+// mangled its `limit`, is asking production a different question than the
+// fixture answers, and the real endpoint would return other rows or reject the
+// parse outright.
+function limitParam(query) {
+  const raw = query.get("limit");
+  return raw !== null && /^[1-9][0-9]*$/.test(raw) ? null : `limit=${raw}`;
+}
+function queryContracts() {
+  return new Map([
+    [
+      "GET /api/admin/equipment-maintenance/alerts",
+      (query) =>
+        query.get("status") === "new" ? null : `status=${query.get("status")}`,
+    ],
+    ["GET /api/admin/equipment-maintenance/records/recent", limitParam],
+    [`GET /api/admin/equipment-maintenance/${id}/mileage`, limitParam],
+    ["GET /api/admin/equipment/job-costs", limitParam],
+  ]);
+}
 function fixtures(state) {
+  const activeMileage = () => state.mileageLogs || mileage.logs;
   return new Map([
     [
       "GET /api/admin/auth/me",
@@ -212,12 +377,23 @@ function fixtures(state) {
           },
         },
     ],
-    ["GET /api/admin/equipment/job-costs", () => ({ job_costs: [] })],
+    [
+      "GET /api/admin/equipment/job-costs",
+      (url) => ({
+        job_costs: limited(url, [jobCost]),
+        costs: limited(url, [jobCost]),
+        total: 1,
+        page: 1,
+      }),
+    ],
     [
       "GET /api/admin/equipment-maintenance",
       () => ({ equipment: state.empty ? [] : [equipment] }),
     ],
-    ["GET /api/admin/equipment-maintenance/analytics/overview", () => overview],
+    [
+      "GET /api/admin/equipment-maintenance/analytics/overview",
+      () => fleetOverview(activeMileage()),
+    ],
     [
       "GET /api/admin/equipment-maintenance/alerts",
       () => ({
@@ -242,12 +418,15 @@ function fixtures(state) {
         equipment,
         schedules: [schedule],
         recentRecords: [record],
-        costOfOwnership: cost,
+        costOfOwnership: ownership(activeMileage()),
       }),
     ],
     [
       `GET /api/admin/equipment-maintenance/${id}/mileage`,
-      () => ({ ...mileage, logs: state.mileageLogs || mileage.logs }),
+      (url) => {
+        const logs = activeMileage();
+        return { logs: limited(url, logs), summary: summarizeMileage(logs) };
+      },
     ],
     [
       `POST /api/admin/equipment-maintenance/${id}/mileage`,
@@ -259,7 +438,7 @@ function fixtures(state) {
     ],
     [
       "GET /api/admin/equipment-maintenance/analytics/costs",
-      () => ({ costs: [cost] }),
+      () => ({ costs: [ownership(activeMileage())] }),
     ],
     [
       "GET /api/admin/equipment-maintenance/analytics/reliability",
@@ -280,28 +459,21 @@ function fixtures(state) {
     ],
     [
       "GET /api/admin/equipment-maintenance/mileage/summary",
-      () => ({
-        year: 2026,
-        vehicles: [
-          {
-            id,
-            name: equipment.name,
-            asset_tag: "QA-001",
-            total_miles: 100,
-            business_miles: 90,
-            total_fuel_cost: 20,
-            total_irs_deduction: 63,
-            total_jobs: 3,
-          },
-        ],
-        fleet_totals: {
-          total_miles: 100,
-          business_miles: 90,
-          total_fuel_cost: 20,
-          total_irs_deduction: 63,
-          total_jobs: 3,
-        },
-      }),
+      (url) => {
+        // The route filters log_date to the requested year and groups by
+        // equipment, so a vehicle with no rows in that year is absent entirely
+        // rather than present with zeroes.
+        const year = Number(url.searchParams.get("year")) || easternYear(),
+          rows = activeMileage().filter((log) => inYear(log.log_date, year)),
+          totals = sumMileage(rows);
+        return {
+          year,
+          vehicles: rows.length
+            ? [{ id, name: equipment.name, asset_tag: "QA-001", ...totals }]
+            : [],
+          fleet_totals: totals,
+        };
+      },
     ],
     [
       "GET /api/admin/equipment-maintenance/schedules/due",
@@ -309,7 +481,7 @@ function fixtures(state) {
     ],
     [
       "GET /api/admin/equipment-maintenance/records/recent",
-      () => ({ records: [record] }),
+      (url) => ({ records: limited(url, [record]) }),
     ],
     [
       "GET /api/admin/equipment-systems",
@@ -333,7 +505,7 @@ function fixtures(state) {
     ],
     [
       `GET /api/admin/equipment-systems/${systemId}`,
-      () => ({ system, calibration: state.calibration || calibration }),
+      () => ({ system, calibration }),
     ],
     [
       `POST /api/admin/equipment-systems/${systemId}/calibrations`,
@@ -348,7 +520,11 @@ function fixtures(state) {
   ]);
 }
 async function install(page, server, state) {
-  const handlers = fixtures(state);
+  const handlers = fixtures(state),
+    contracts = queryContracts();
+  state.fixtureGets = [...handlers.keys()].filter((key) =>
+    key.startsWith("GET "),
+  );
   await page.addInitScript(() => {
     // Toasts live for 3.5s and a second toast can be cleared early by the
     // first one's timer, so record every status render instead of racing it.
@@ -409,9 +585,14 @@ async function install(page, server, state) {
         url: m.location().url,
       });
   });
-  page.on("dialog", (dialog) =>
-    dialog.accept(dialog.type() === "prompt" ? "80" : undefined),
-  );
+  // None of these views expects a native alert, confirm or prompt. Accepting
+  // silently meant a regression that threw one up would be dismissed before the
+  // screenshots and assertions ran, and the view-only pass would still report
+  // success. Accept so the page cannot hang, but record it as a failure.
+  page.on("dialog", (dialog) => {
+    state.dialogs.push({ type: dialog.type(), message: dialog.message() });
+    return dialog.accept(dialog.type() === "prompt" ? "80" : undefined);
+  });
   await page.context().route("**/*", async (route) => {
     const request = route.request(),
       url = new URL(request.url());
@@ -428,6 +609,14 @@ async function install(page, server, state) {
       query: url.search,
       body,
     });
+    // The query contract is checked before the injection branches below, so a
+    // request that is about to be held or failed is still judged on what it
+    // asked for.
+    const contract = contracts.get(key);
+    if (contract) {
+      const violation = contract(url.searchParams);
+      if (violation) state.badQuery.push(`${key} (${violation})`);
+    }
     if (state.hold?.key === key) await state.hold.promise;
     if (state.failures.has(key)) {
       if (request.method() !== "GET") state.failures.delete(key);
@@ -474,10 +663,44 @@ async function shot(page, report, name, target) {
       name + ": screenshot target is inside the viewport");
   }
   const file = path.join(output, `${name}.png`);
-  await page.screenshot({
-    path: file,
-    fullPage: !target && (await page.getByRole("dialog").count()) === 0,
-  });
+  const fullPage = !target && (await page.getByRole("dialog").count()) === 0;
+  // #admin-main owns this page's vertical scrolling (AdminLayoutV2), so the
+  // document stays viewport-height and Playwright's fullPage — which expands
+  // the document, not an arbitrary nested scroller — would capture only the
+  // visible slice of a long leaf. Releasing the scroller alone is not enough:
+  // .admin-shell-v2 above it is a fixed-height overflow:hidden box that clamps
+  // the document right back. Free the whole chain up to the body for the
+  // capture, then restore each element's own inline style. Descendants are
+  // untouched, so the intentional table and chart scrollers still clip.
+  const released = fullPage
+    ? await page.evaluate(() => {
+        const main = document.getElementById("admin-main");
+        if (!main) return 0;
+        let count = 0;
+        for (
+          let node = main;
+          node && node !== document.body;
+          node = node.parentElement
+        ) {
+          node.dataset.qaPreviousStyle = node.style.cssText;
+          node.style.height = "auto";
+          node.style.minHeight = "0";
+          node.style.maxHeight = "none";
+          node.style.overflow = "visible";
+          count += 1;
+        }
+        return count;
+      })
+    : 0;
+  if (released) await page.waitForTimeout(300);
+  await page.screenshot({ path: file, fullPage });
+  if (released)
+    await page.evaluate(() => {
+      for (const node of document.querySelectorAll("[data-qa-previous-style]")) {
+        node.style.cssText = node.dataset.qaPreviousStyle;
+        delete node.dataset.qaPreviousStyle;
+      }
+    });
   report.screenshots.push(path.relative(root, file));
 }
 async function geometry(page, state, surface) {
@@ -546,10 +769,40 @@ async function geometry(page, state, surface) {
         return range.getClientRects().length > 1;
       })
       .map((n) => n.textContent.trim());
+    // The 44px target for a checkbox or radio comes from its .ui-choice-label
+    // wrapper (ui-workspace.css), never from the 16px input, and the controls
+    // sweep above deliberately excludes checkbox inputs — so without this the
+    // Record Maintenance choices have no size or labelling check at all.
+    const choices = [...root.querySelectorAll(".ui-choice-label")]
+      .filter(visible)
+      .map((n) => {
+        const r = n.getBoundingClientRect(),
+          box = n.querySelector(
+            'input[type="checkbox"],input[type="radio"]',
+          );
+        return {
+          name: n.textContent.trim(),
+          height: r.height,
+          width: r.width,
+          left: r.left,
+          right: r.right,
+          labeled:
+            !!box && [...(box.labels || [])].some((l) => l.textContent.trim()),
+        };
+      });
+    // Every width here scrolls inside the fixed-height #admin-main
+    // (AdminLayoutV2), so content that widens that element is contained by it
+    // and never reaches documentElement.scrollWidth — a regression that adds a
+    // page-level horizontal scrollbar is invisible to the check below.
+    const adminMain = document.getElementById("admin-main");
     return {
       controls,
+      choices,
       smallText,
       narrowCells,
+      mainScroller: !!adminMain,
+      mainOverflow:
+        !!adminMain && adminMain.scrollWidth > adminMain.clientWidth + 1,
       overflow: document.documentElement.scrollWidth > innerWidth + 1,
       title: parseFloat(
         getComputedStyle(document.querySelector("main h1")).fontSize,
@@ -562,6 +815,11 @@ async function geometry(page, state, surface) {
     ...data,
   });
   assert.equal(data.overflow, false, `${surface}: document overflow`);
+  // Without this the check above reports "no overflow" for a layout that no
+  // longer has the scroller at all, which is exactly the silent pass it exists
+  // to close.
+  assert.equal(data.mainScroller, true, `${surface}: admin main is present`);
+  assert.equal(data.mainOverflow, false, `${surface}: admin main overflow`);
   assert.deepEqual(data.smallText, [], `${surface}: small text`);
   assert.deepEqual(
     data.narrowCells,
@@ -580,6 +838,17 @@ async function geometry(page, state, surface) {
         c.left >= -1 && c.right <= page.viewportSize().width + 1,
         `${surface}: bounds ${JSON.stringify(c)}`,
       );
+  }
+  for (const c of data.choices) {
+    assert.ok(
+      c.height >= 43.5,
+      `${surface}: choice height ${JSON.stringify(c)}`,
+    );
+    assert.ok(c.labeled, `${surface}: choice label ${JSON.stringify(c)}`);
+    assert.ok(
+      c.left >= -1 && c.right <= page.viewportSize().width + 1,
+      `${surface}: choice bounds ${JSON.stringify(c)}`,
+    );
   }
 }
 async function widths(page, state, surface) {
@@ -712,7 +981,7 @@ function gallery(report) {
       .join("")}</main></html>`,
   );
 }
-async function section(page, group, leaf) {
+async function section(page, group, leaf, expected) {
   await page
     .getByRole("navigation", { name: "Equipment section", exact: true })
     .getByRole("button", { name: group, exact: true })
@@ -722,6 +991,18 @@ async function section(page, group, leaf) {
       .locator("main")
       .getByRole("tab", { name: leaf, exact: true })
       .click();
+  // EquipmentPage writes the rendered leaf into ?tab= (assets clears it), so
+  // the URL is the authoritative "which leaf mounted" signal. Without this a
+  // parent click that silently stops moving the leaf would leave the previous
+  // view mounted and every later check — screenshot, widths, NaN — would pass
+  // against the wrong screen under the next leaf's name.
+  await page.waitForFunction(
+    (want) =>
+      (new URL(window.location.href).searchParams.get("tab") || "assets") ===
+      want,
+    expected,
+    { timeout: 5000 },
+  );
   await page.waitForTimeout(200);
 }
 async function fleetDetail(page) {
@@ -737,10 +1018,21 @@ async function capture(page, state, report, device, key, target) {
   await shot(page, report, device + "-" + key, target);
 }
 async function mileageHeader(page, server, state, report, device) {
-  state.mileageLogs = Array.from({ length: 30 }, (_, index) => ({
-    ...mileage.logs[0],
-    id: `mileage-example-${index}`,
-  }));
+  // vehicle_mileage_log is unique on (vehicle_id, log_date), so 30 rows sharing
+  // one date is a state the real endpoint cannot return — and the summary and
+  // cost tiles beside the list aggregate every row, so they move with it.
+  state.mileageLogs = Array.from({ length: 30 }, (_, index) => {
+    const day = new Date(`${mileage.logs[0].log_date}T12:00:00Z`);
+    day.setUTCDate(day.getUTCDate() - index);
+    return {
+      ...mileage.logs[0],
+      id: `mileage-example-${index}`,
+      log_date: day.toISOString().slice(0, 10),
+      odometer_start:
+        mileage.logs[0].odometer_start - index * vehicleTotalMiles,
+      odometer_end: mileage.logs[0].odometer_end - index * vehicleTotalMiles,
+    };
+  });
   try {
     await page.goto(server.baseUrl + "/admin/equipment?tab=maintenance");
     await fleetDetail(page);
@@ -786,10 +1078,17 @@ async function views(page, server, state, report, device) {
     ["Costs", null, "job-costs"],
     ["Costs", "Analytics", "analytics"],
   ]) {
-    await section(page, group, leaf);
+    await section(page, group, leaf, key);
     await capture(page, state, report, device, key);
+    // A fixture that omits a field the real endpoint always returns renders it
+    // literally — `NaN` through a Number(), `undefined` when interpolated raw —
+    // and the screenshot captures that malformed state while the run passes.
     const rendered = await page.locator("main").innerText();
-    assert.ok(!/\bNaN\b/.test(rendered), `${key} view renders without NaN`);
+    const malformed = rendered.match(/\b(?:NaN|undefined)\b/);
+    assert.ok(
+      !malformed,
+      `${key} view renders without NaN/undefined (found "${malformed?.[0]}")`,
+    );
     if (key === "analytics") {
       const fleetTotalsRow = page.getByRole("row", { name: /Fleet Totals/ });
       assert.equal(await fleetTotalsRow.count(), 1, "Fleet totals row is rendered");
@@ -802,9 +1101,39 @@ async function views(page, server, state, report, device) {
     console.log(device + ": " + key);
   }
   const chart = page.getByRole("region", { name: "Monthly maintenance costs chart", exact: true });
-  await chart.evaluate((node) => { node.scrollLeft = node.scrollWidth - node.clientWidth; });
+  // Setting scrollLeft proves nothing on its own: a chart that became clipped
+  // or non-scrollable would still take an ordinary screenshot and the run would
+  // report success while quietly losing the scrolled-chart evidence.
+  const scrolled = await chart.evaluate((node) => {
+    node.scrollLeft = node.scrollWidth - node.clientWidth;
+    return {
+      overflow: node.scrollWidth - node.clientWidth,
+      scrollLeft: node.scrollLeft,
+    };
+  });
+  // The chart has a fixed minimum width, so it overflows on the phone column
+  // and fits on the desktop one. Pinning that per device makes both directions
+  // falsifiable: a desktop chart that started overflowing is a regression, and
+  // so is a phone chart that stopped scrolling — which is what the
+  // "analytics-chart" capture claims to show.
+  const mustScroll = device === "touch-webkit";
+  assert.equal(
+    scrolled.overflow > 0,
+    mustScroll,
+    `${device} chart overflow: ${JSON.stringify(scrolled)}`,
+  );
+  if (mustScroll)
+    assert.ok(
+      Math.abs(scrolled.scrollLeft - scrolled.overflow) <= 1,
+      `Chart reaches its end position: ${JSON.stringify(scrolled)}`,
+    );
+  state.checks.push(
+    mustScroll
+      ? "Monthly cost chart scrolls to its end position on the phone column"
+      : "Monthly cost chart fits the desktop column without scrolling",
+  );
   await shot(page, report, device + "-analytics-chart", chart);
-  await section(page, "Assets");
+  await section(page, "Assets", null, "assets");
   for (const [label, key] of [
     ["Add Equipment", "new-equipment"],
     ["Edit", "edit-equipment"],
@@ -822,8 +1151,13 @@ async function views(page, server, state, report, device) {
       "Opener focus returns",
     );
   }
-  await section(page, "Maintenance");
+  await section(page, "Maintenance", null, "maintenance");
   await fleetDetail(page);
+  // costOfOwnership always returns cost_per_mile for a vehicle that has mileage
+  // logs, and the detail renders that tile conditionally — without this the
+  // fixture could drop the metric again and every screenshot would still pass.
+  await page.getByText("Cost/Mile", { exact: true }).waitFor();
+  state.checks.push("Expanded detail renders the Cost/Mile tile");
   await capture(page, state, report, device, "maintenance-detail",
     page.getByRole("button", { name: "Record Maintenance", exact: true }));
   for (const [label, key] of [
@@ -833,11 +1167,31 @@ async function views(page, server, state, report, device) {
     await page.getByRole("button", { name: label, exact: true }).click();
     await capture(page, state, report, device, key,
       page.getByRole("heading", { name: label, exact: true }));
+    if (label === "Record Maintenance") {
+      // Record Maintenance is the only surface in this runner with choice
+      // controls, so without this pin the geometry sweep's choice checks would
+      // pass on every screen by measuring nothing at all.
+      const measured = state.geometry
+        .filter((entry) => entry.surface === key)
+        .map((entry) => entry.choices.map((choice) => choice.name));
+      assert.ok(
+        measured.length > 0 &&
+          measured.every(
+            (names) =>
+              names.includes("Follow-up needed") &&
+              names.includes("Warranty claim"),
+          ),
+        `Record Maintenance choice targets measured: ${JSON.stringify(measured)}`,
+      );
+      state.checks.push(
+        "Follow-up needed and Warranty claim meet the choice target size at every width",
+      );
+    }
     await shot(page, report, device + "-" + key + "-actions",
       page.getByRole("button", { name: label === "Record Maintenance" ? "Save Record" : "Save Mileage", exact: true }));
     await page.getByRole("button", { name: "Cancel", exact: true }).click();
   }
-  await section(page, "Maintenance", "Calibrations");
+  await section(page, "Maintenance", "Calibrations", "calibrations");
   await page
     .getByLabel("Equipment system", { exact: true })
     .selectOption(systemId);
@@ -963,7 +1317,7 @@ async function writes(page, server, state, report, device) {
   await dialog.waitFor({ state: "hidden" });
   await toast(page, "Equipment updated");
 
-  await section(page, "Tank Mixes");
+  await section(page, "Tank Mixes", null, "tank-mixes");
   const recalculated = await retryWrite(
     page,
     state,
@@ -979,7 +1333,7 @@ async function writes(page, server, state, report, device) {
   assert.equal(recalculated, null);
   await toast(page, "Costs recalculated");
 
-  await section(page, "Maintenance");
+  await section(page, "Maintenance", null, "maintenance");
   const resolved = await retryWrite(
     page,
     state,
@@ -1128,7 +1482,7 @@ async function writes(page, server, state, report, device) {
   });
   await toast(page, "Mileage logged");
 
-  await section(page, "Maintenance", "Calibrations");
+  await section(page, "Maintenance", "Calibrations", "calibrations");
   const saveCalibration = page.getByRole("button", {
     name: "Save Calibration (expires in 30 days)",
     exact: true,
@@ -1572,9 +1926,10 @@ async function main() {
         true,
       ],
     ]) {
-      const browser = await launch();
       const state = {
         requests: [],
+        badQuery: [],
+        dialogs: [],
         pageErrors: [],
         consoleErrors: [],
         expectedFailures: [],
@@ -1584,21 +1939,60 @@ async function main() {
         checks: [],
       };
       report.browsers.push({ device, state });
-      const page = await browser.newPage({
-        viewport,
-        hasTouch,
-        timezoneId: "America/New_York",
-        serviceWorkers: "block",
-      });
-      page.setDefaultTimeout(15000);
-      page.setDefaultNavigationTimeout(45000);
+      // The launch and page creation are inside the recorded lifecycle: a
+      // WebKit launch that fails after Chromium has finished used to throw
+      // outside it, and the outer finally still wrote report.json and the
+      // gallery with only the successful evidence and nothing saying why the
+      // required touch-webkit pass was missing.
+      let browser, page;
       try {
+        browser = await launch();
+        page = await browser.newPage({
+          viewport,
+          hasTouch,
+          timezoneId: "America/New_York",
+          serviceWorkers: "block",
+        });
+        page.setDefaultTimeout(15000);
+        page.setDefaultNavigationTimeout(45000);
         await install(page, server, state);
         await views(page, server, state, report, device);
+        // Up to here the run has only viewed: the view pass opens dialogs but
+        // always Cancels, so the one write it may have issued is the admin
+        // usage beacon. Asserted between the passes rather than at the end,
+        // because the writes pass below performs and asserts each of those
+        // requests deliberately.
+        assert.deepEqual(
+          state.requests
+            .map((request) => request.key)
+            .filter(
+              (key) =>
+                !key.startsWith("GET ") &&
+                key !== "POST /api/admin/usage/track",
+            ),
+          [],
+          "Unexpected write during the view pass",
+        );
         await writes(page, server, state, report, device);
         await readsAndNavigation(page, server, state, report, device);
         assert.deepEqual(state.pageErrors, [], "Page errors");
         assert.deepEqual(state.unmatched, [], "Unmatched API");
+        assert.deepEqual(state.badQuery, [], "Query contract");
+        assert.deepEqual(state.dialogs, [], "Unexpected native dialog");
+        // A leaf that stops fetching leaves its fixture simply unused: the
+        // geometry and malformed-text checks still pass and the run still
+        // reports success while no longer exercising that response contract at
+        // all. Only GETs — the writes pass asserts its own requests.
+        const requested = new Set(
+          state.requests.map((request) => request.key),
+        );
+        assert.deepEqual(
+          state.fixtureGets.filter((key) => !requested.has(key)),
+          [],
+          "Unexercised fixture",
+        );
+        // The injected 503s are expected, so their console noise is filtered by
+        // the exact URLs this run failed on rather than by matching text.
         assert.deepEqual(
           state.consoleErrors.filter(
             (e) =>
@@ -1612,14 +2006,17 @@ async function main() {
         );
       } catch (error) {
         report.error = error.stack;
-        await shot(page, report, device + "-failure");
+        report.failedDevice = device;
+        if (page)
+          await shot(page, report, device + "-failure").catch(() => {});
         throw error;
       } finally {
         state.hold?.release?.();
-        await page
-          .evaluate(() => localStorage.removeItem("waves_admin_token"))
-          .catch(() => {});
-        await browser.close();
+        if (page)
+          await page
+            .evaluate(() => localStorage.removeItem("waves_admin_token"))
+            .catch(() => {});
+        if (browser) await browser.close();
       }
     }
   } finally {
