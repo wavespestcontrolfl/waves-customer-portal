@@ -597,7 +597,7 @@ export default function PricingRealityCheckPage() {
       </Card>
 
       {error && (
-        <ActionFeedback error className="mb-4" onRetry={refresh}>
+        <ActionFeedback error className="mb-4">
           {error}
         </ActionFeedback>
       )}

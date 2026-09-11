@@ -26,7 +26,8 @@ createRoot(document.getElementById('root')).render(React.createElement(Page));
 async function main() {
   fs.mkdirSync(output, { recursive: true });
   const report = { ...evidence(root), passed: false, requests: [], unmatched: [], errors: [] };
-  const server = await previewServer(root), browser = await launchBrowser();
+  const server = await previewServer(root);
+  const browser = await launchBrowser().catch(async error => { await server.close(); throw error; });
   try {
     for (const width of [1440, 390, 820]) {
       let failure = false, empty = false;
@@ -62,7 +63,7 @@ async function main() {
       await page.getByRole('button', { name: 'Refresh', exact: true }).click();
       await page.getByRole('alert').filter({ hasText: 'Synthetic audit unavailable' }).waitFor();
       failure = false; empty = true;
-      await page.getByRole('button', { name: 'Try again' }).click();
+      await page.getByRole('button', { name: 'Refresh', exact: true }).click();
       await page.getByText('No completed services with both quoted and actual minutes were found for this window.').waitFor();
       assert.equal(await page.getByLabel('Service type', { exact: true }).inputValue(), 'Mowing');
       await context.close();
