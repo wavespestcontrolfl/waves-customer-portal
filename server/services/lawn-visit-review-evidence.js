@@ -47,8 +47,13 @@ const POSITIVE_MARKER_RE = /\b(?:confirmed|confirms?|active|present|found|seen|o
 // words like "found" read as conditions.
 const NEGATION_WORDS_RE = new RegExp(NEGATED_DETAIL_RE.source, 'gi');
 const UNSPECIFIC_LABELS = new Set([NO_STRESS_LABEL, 'general lawn stress', 'a lawn condition we are monitoring']);
-const namesCondition = (text) => SUMMARY_CAUSE_RE.test(text)
-  || !UNSPECIFIC_LABELS.has(safeConditionLabel(String(text || '').replace(NEGATION_WORDS_RE, ' ').trim(), 'moderate'));
+const namesCondition = (text) => {
+  if (SUMMARY_CAUSE_RE.test(text)) return true;
+  // Stripping the negation can empty the text ("not confirmed"), and
+  // safeConditionLabel answers null for that — no label names no condition.
+  const label = safeConditionLabel(String(text || '').replace(NEGATION_WORDS_RE, ' ').trim(), 'moderate');
+  return !!label && !UNSPECIFIC_LABELS.has(label);
+};
 function causePartsOf(clause) {
   // Split whenever more than one SEGMENT names a condition, not just when more
   // than one governed cause is mentioned: SUMMARY_CAUSE_RE excludes generic

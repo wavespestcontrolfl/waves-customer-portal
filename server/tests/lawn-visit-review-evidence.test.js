@@ -49,6 +49,9 @@ describe('technician lawn evidence and reconciliation', () => {
     // A leading negation carries across or/nor but stops at a comma or "and".
     ['No chinch bugs or weeds present', NO_STRESS_LABEL],
     ['Checked for chinch bugs; none found and weeds present', 'weed pressure'],
+    // "not confirmed" strips to nothing, so it names no condition and still
+    // answers the clause before it rather than leaving that cause positive.
+    ['Checked for chinch bugs; not confirmed', NO_STRESS_LABEL],
   ])('resolves cause polarity: %s', (text, label) => {
     const built = review(run({ findings: [] }), { addedDetails: [{ text }] });
     expect(built.added_details[0]).toMatchObject({
