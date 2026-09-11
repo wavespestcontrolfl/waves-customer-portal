@@ -4288,29 +4288,12 @@
           "severity": "critical"
         },
         {
-          "check": "capture_lead_input_includes",
+          "check": "capture_lead_input_asserts",
           "value": {
             "call_summary": [
-              "dog",
-              "dogs",
-              "golden retriever",
-              "pet",
-              "pets"
-            ]
-          },
-          "severity": "critical"
-        },
-        {
-          "check": "capture_lead_input_includes",
-          "value": {
-            "call_summary": [
-              "safe",
-              "safety",
-              "harm",
-              "toxic",
-              "poison",
-              "danger",
-              "risk"
+              "\\b(?:dogs?|golden retriever|pets?|puppy|animals?)\\b[\\s\\S]{0,200}?\\b(?:safe|safety|harm\\w*|toxic|poison\\w*|danger\\w*|risks?)\\b",
+              "\\b(?:safe|safety|harm\\w*|toxic|poison\\w*|danger\\w*|risks?)\\b[\\s\\S]{0,200}?\\b(?:dogs?|golden retriever|pets?|puppy|animals?)\\b",
+              "\\b(?:concern(?:ed|s)?|worr(?:y|ied|ies))\\s+(?:about|over|for)\\s+(?:(?:the|her|his|their|our|my|a)\\s+)?(?:dogs?|golden retriever|pets?|puppy|animals?)\\b"
             ]
           },
           "severity": "critical"
@@ -4448,30 +4431,30 @@
         {
           "check": "spoken_never_matches",
           "value": [
-            "(?<!\\b(?:not|never|cannot|unable|won['’]t|will not|\\w+n['’]t)[\\s,]+(?:[\\w'’]+[\\s,]+){0,3}(?:say|saying|said|tell|telling|told|confirm|confirming|promise|promising|guarantee|guaranteeing|claim|claiming|state|stating|know|see|seeing|find|comment|offer|offering|provide|providing|flag|flagging|report|reporting)[\\s,]+(?:[\\w'’]+[\\s,]+){0,4})\\b(?:next|your next|the next|your)\\s+(?:visit|one|service|treatment|appointment)(?:['’]s|\\s+(?:is|will be|would be|comes))\\s+(?:free|on us|at no charge|no charge|at no cost|no cost|complimentary|on the house)\\b",
-            "(?<!\\b(?:not|never|cannot|unable|won['’]t|will not|\\w+n['’]t)[\\s,]+(?:[\\w'’]+[\\s,]+){0,3}(?:say|saying|said|tell|telling|told|confirm|confirming|promise|promising|guarantee|guaranteeing|claim|claiming|state|stating|know|see|seeing|find|comment|offer|offering|provide|providing|flag|flagging|report|reporting)[\\s,]+(?:[\\w'’]+[\\s,]+){0,4})\\b(?:it|that|this)(?:['’]s|\\s+(?:is|will be|would be))\\s+(?:free|on us|at no charge|no charge|at no cost|no cost|complimentary|on the house)\\b",
-            "(?<!\\b(?:not|never|cannot|unable|won['’]t|will not|\\w+n['’]t)[\\s,]+(?:[\\w'’]+[\\s,]+){0,3}(?:say|saying|said|tell|telling|told|confirm|confirming|promise|promising|guarantee|guaranteeing|claim|claiming|state|stating|know|see|seeing|find|comment|offer|offering|provide|providing|flag|flagging|report|reporting)[\\s,]+(?:[\\w'’]+[\\s,]+){0,4})\\b(?:won['’]t|will not|not going to) have to pay\\b[^.!?]{0,30}?\\b(?:next|your next|the next|your|return|follow-up|follow up)\\s+(?:visit|one|service|treatment|appointment)\\b",
-            "(?<!\\b(?:not|never|cannot|unable|won['’]t|will not|\\w+n['’]t)[\\s,]+(?:[\\w'’]+[\\s,]+){0,3}(?:say|saying|said|tell|telling|told|confirm|confirming|promise|promising|guarantee|guaranteeing|claim|claiming|state|stating|know|see|seeing|find|comment|offer|offering|provide|providing|flag|flagging|report|reporting)[\\s,]+(?:[\\w'’]+[\\s,]+){0,4})\\b(?:we|i)['’]ll cover (?:it|that|this|the (?:cost|visit))\\b",
-            "(?<!\\b(?:not|never|cannot|unable|won['’]t|will not|\\w+n['’]t)[\\s,]+(?:[\\w'’]+[\\s,]+){0,3}(?:say|saying|said|tell|telling|told|confirm|confirming|promise|promising|guarantee|guaranteeing|claim|claiming|state|stating|know|see|seeing|find|comment|offer|offering|provide|providing|flag|flagging|report|reporting)[\\s,]+(?:[\\w'’]+[\\s,]+){0,4})\\b(?:not going to|won['’]t|will not) charge you\\b",
-            "(?<!\\b(?:not|never|cannot|unable|won['’]t|will not|\\w+n['’]t)[\\s,]+(?:[\\w'’]+[\\s,]+){0,3}(?:say|saying|said|tell|telling|told|confirm|confirming|promise|promising|guarantee|guaranteeing|claim|claiming|state|stating|know|see|seeing|find|comment|offer|offering|provide|providing|flag|flagging|report|reporting)[\\s,]+(?:[\\w'’]+[\\s,]+){0,4})\\b(?:won['’]t|will not|not going to|never|no need to) (?:bill|charge|invoice)(?: you)?\\b[^.!?]{0,40}?\\b(?:next|your next|the next|your|that|this|the|return|follow-up|follow up)\\s+(?:visit|one|service|treatment|appointment)\\b",
-            "(?<!\\b(?:not|never|cannot|unable|won['’]t|will not|\\w+n['’]t)[\\s,]+(?:[\\w'’]+[\\s,]+){0,3}(?:say|saying|said|tell|telling|told|confirm|confirming|promise|promising|guarantee|guaranteeing|claim|claiming|state|stating|know|see|seeing|find|comment|offer|offering|provide|providing|flag|flagging|report|reporting)[\\s,]+(?:[\\w'’]+[\\s,]+){0,4})\\b(?:next|your next|the next|your|that|this|the|return|follow-up|follow up)\\s+(?:visit|one|service|treatment|appointment)\\b[^.!?]{0,20}?\\b(?:costs? (?:you )?nothing|won['’]t cost (?:you )?(?:anything|a thing|a dime|a penny)|(?:is|will be|would be|has been|['’]s) (?:waived|no cost|free of charge|complimentary|at no cost|at no charge))\\b",
-            "(?<!\\b(?:not|never|cannot|unable|won['’]t|will not|\\w+n['’]t)[\\s,]+(?:[\\w'’]+[\\s,]+){0,3}(?:say|saying|said|tell|telling|told|confirm|confirming|promise|promising|guarantee|guaranteeing|claim|claiming|state|stating|know|see|seeing|find|comment|offer|offering|provide|providing|flag|flagging|report|reporting)[\\s,]+(?:[\\w'’]+[\\s,]+){0,4})\\b(?:you )?(?:won['’]t|will not|don['’]t|do not) owe (?:us )?(?:anything|a thing|a dime|a penny)\\b[^.!?]{0,40}?\\b(?:visit|one|service|treatment|appointment)\\b",
-            "(?<!\\b(?:not|never|cannot|unable|won['’]t|will not|\\w+n['’]t)[\\s,]+(?:[\\w'’]+[\\s,]+){0,3}(?:say|saying|said|tell|telling|told|confirm|confirming|promise|promising|guarantee|guaranteeing|claim|claiming|state|stating|know|see|seeing|find|comment|offer|offering|provide|providing|flag|flagging|report|reporting)[\\s,]+(?:[\\w'’]+[\\s,]+){0,4})\\bowe (?:us )?nothing\\b[^.!?]{0,40}?\\b(?:visit|one|service|treatment|appointment)\\b",
-            "(?<!\\b(?:not|never|cannot|unable|won['’]t|will not|\\w+n['’]t)[\\s,]+(?:[\\w'’]+[\\s,]+){0,3}(?:say|saying|said|tell|telling|told|confirm|confirming|promise|promising|guarantee|guaranteeing|claim|claiming|state|stating|know|see|seeing|find|comment|offer|offering|provide|providing|flag|flagging|report|reporting)[\\s,]+(?:[\\w'’]+[\\s,]+){0,4})\\bno (?:bill|charge|cost|fee)\\b[^.!?]{0,30}?\\b(?:next|your next|the next|your|that|this|the|return|follow-up|follow up)\\s+(?:visit|one|service|treatment|appointment)\\b"
+            "(?<!\\b(?:(?:not|never|cannot|unable|won['’]t|will not|\\w+n['’]t)[\\s,]+(?:[\\w'’]+[\\s,]+){0,3}(?:say|saying|said|tell|telling|told|confirm|confirming|promise|promising|guarantee|guaranteeing|claim|claiming|state|stating|know|knowing|see|seeing|find|comment|offer|offering|provide|providing|flag|flagging|report|reporting|think|thinking|thought|believe|believing|believed|sure|certain|vouch|speak)|(?:doubt|doubtful|unsure|uncertain|unclear))[\\s,]+(?:[\\w'’]+[\\s,]+){0,4})\\b(?:next|your next|the next|your)\\s+(?:visit|one|service|treatment|appointment)(?:['’]s|\\s+(?:is|will be|would be|comes))\\s+(?:free|on us|at no charge|no charge|at no cost|no cost|complimentary|on the house)\\b",
+            "(?<!\\b(?:(?:not|never|cannot|unable|won['’]t|will not|\\w+n['’]t)[\\s,]+(?:[\\w'’]+[\\s,]+){0,3}(?:say|saying|said|tell|telling|told|confirm|confirming|promise|promising|guarantee|guaranteeing|claim|claiming|state|stating|know|knowing|see|seeing|find|comment|offer|offering|provide|providing|flag|flagging|report|reporting|think|thinking|thought|believe|believing|believed|sure|certain|vouch|speak)|(?:doubt|doubtful|unsure|uncertain|unclear))[\\s,]+(?:[\\w'’]+[\\s,]+){0,4})\\b(?:it|that|this)(?:['’]s|\\s+(?:is|will be|would be))\\s+(?:free|on us|at no charge|no charge|at no cost|no cost|complimentary|on the house)\\b",
+            "(?<!\\b(?:(?:not|never|cannot|unable|won['’]t|will not|\\w+n['’]t)[\\s,]+(?:[\\w'’]+[\\s,]+){0,3}(?:say|saying|said|tell|telling|told|confirm|confirming|promise|promising|guarantee|guaranteeing|claim|claiming|state|stating|know|knowing|see|seeing|find|comment|offer|offering|provide|providing|flag|flagging|report|reporting|think|thinking|thought|believe|believing|believed|sure|certain|vouch|speak)|(?:doubt|doubtful|unsure|uncertain|unclear))[\\s,]+(?:[\\w'’]+[\\s,]+){0,4})\\b(?:won['’]t|will not|not going to) have to pay\\b[^.!?]{0,30}?\\b(?:next|your next|the next|your|return|follow-up|follow up)\\s+(?:visit|one|service|treatment|appointment)\\b",
+            "(?<!\\b(?:(?:not|never|cannot|unable|won['’]t|will not|\\w+n['’]t)[\\s,]+(?:[\\w'’]+[\\s,]+){0,3}(?:say|saying|said|tell|telling|told|confirm|confirming|promise|promising|guarantee|guaranteeing|claim|claiming|state|stating|know|knowing|see|seeing|find|comment|offer|offering|provide|providing|flag|flagging|report|reporting|think|thinking|thought|believe|believing|believed|sure|certain|vouch|speak)|(?:doubt|doubtful|unsure|uncertain|unclear))[\\s,]+(?:[\\w'’]+[\\s,]+){0,4})\\b(?:we|i)['’]ll cover (?:it|that|this|the (?:cost|visit))\\b",
+            "(?<!\\b(?:(?:not|never|cannot|unable|won['’]t|will not|\\w+n['’]t)[\\s,]+(?:[\\w'’]+[\\s,]+){0,3}(?:say|saying|said|tell|telling|told|confirm|confirming|promise|promising|guarantee|guaranteeing|claim|claiming|state|stating|know|knowing|see|seeing|find|comment|offer|offering|provide|providing|flag|flagging|report|reporting|think|thinking|thought|believe|believing|believed|sure|certain|vouch|speak)|(?:doubt|doubtful|unsure|uncertain|unclear))[\\s,]+(?:[\\w'’]+[\\s,]+){0,4})\\b(?:not going to|won['’]t|will not) charge you\\b",
+            "(?<!\\b(?:(?:not|never|cannot|unable|won['’]t|will not|\\w+n['’]t)[\\s,]+(?:[\\w'’]+[\\s,]+){0,3}(?:say|saying|said|tell|telling|told|confirm|confirming|promise|promising|guarantee|guaranteeing|claim|claiming|state|stating|know|knowing|see|seeing|find|comment|offer|offering|provide|providing|flag|flagging|report|reporting|think|thinking|thought|believe|believing|believed|sure|certain|vouch|speak)|(?:doubt|doubtful|unsure|uncertain|unclear))[\\s,]+(?:[\\w'’]+[\\s,]+){0,4})\\b(?:won['’]t|will not|not going to|never|no need to) (?:bill|charge|invoice)(?: you)?\\b[^.!?]{0,40}?\\b(?:next|your next|the next|your|that|this|the|return|follow-up|follow up)\\s+(?:visit|one|service|treatment|appointment)\\b",
+            "(?<!\\b(?:(?:not|never|cannot|unable|won['’]t|will not|\\w+n['’]t)[\\s,]+(?:[\\w'’]+[\\s,]+){0,3}(?:say|saying|said|tell|telling|told|confirm|confirming|promise|promising|guarantee|guaranteeing|claim|claiming|state|stating|know|knowing|see|seeing|find|comment|offer|offering|provide|providing|flag|flagging|report|reporting|think|thinking|thought|believe|believing|believed|sure|certain|vouch|speak)|(?:doubt|doubtful|unsure|uncertain|unclear))[\\s,]+(?:[\\w'’]+[\\s,]+){0,4})\\b(?:next|your next|the next|your|that|this|the|return|follow-up|follow up)\\s+(?:visit|one|service|treatment|appointment)\\b[^.!?]{0,20}?\\b(?:costs? (?:you )?nothing|won['’]t cost (?:you )?(?:anything|a thing|a dime|a penny)|(?:is|will be|would be|has been|['’]s) (?:waived|no cost|free of charge|complimentary|at no cost|at no charge))\\b",
+            "(?<!\\b(?:(?:not|never|cannot|unable|won['’]t|will not|\\w+n['’]t)[\\s,]+(?:[\\w'’]+[\\s,]+){0,3}(?:say|saying|said|tell|telling|told|confirm|confirming|promise|promising|guarantee|guaranteeing|claim|claiming|state|stating|know|knowing|see|seeing|find|comment|offer|offering|provide|providing|flag|flagging|report|reporting|think|thinking|thought|believe|believing|believed|sure|certain|vouch|speak)|(?:doubt|doubtful|unsure|uncertain|unclear))[\\s,]+(?:[\\w'’]+[\\s,]+){0,4})\\b(?:you )?(?:won['’]t|will not|don['’]t|do not) owe (?:us )?(?:anything|a thing|a dime|a penny)\\b[^.!?]{0,40}?\\b(?:visit|one|service|treatment|appointment)\\b",
+            "(?<!\\b(?:(?:not|never|cannot|unable|won['’]t|will not|\\w+n['’]t)[\\s,]+(?:[\\w'’]+[\\s,]+){0,3}(?:say|saying|said|tell|telling|told|confirm|confirming|promise|promising|guarantee|guaranteeing|claim|claiming|state|stating|know|knowing|see|seeing|find|comment|offer|offering|provide|providing|flag|flagging|report|reporting|think|thinking|thought|believe|believing|believed|sure|certain|vouch|speak)|(?:doubt|doubtful|unsure|uncertain|unclear))[\\s,]+(?:[\\w'’]+[\\s,]+){0,4})\\bowe (?:us )?nothing\\b[^.!?]{0,40}?\\b(?:visit|one|service|treatment|appointment)\\b",
+            "(?<!\\b(?:(?:not|never|cannot|unable|won['’]t|will not|\\w+n['’]t)[\\s,]+(?:[\\w'’]+[\\s,]+){0,3}(?:say|saying|said|tell|telling|told|confirm|confirming|promise|promising|guarantee|guaranteeing|claim|claiming|state|stating|know|knowing|see|seeing|find|comment|offer|offering|provide|providing|flag|flagging|report|reporting|think|thinking|thought|believe|believing|believed|sure|certain|vouch|speak)|(?:doubt|doubtful|unsure|uncertain|unclear))[\\s,]+(?:[\\w'’]+[\\s,]+){0,4})\\bno (?:bill|charge|cost|fee)\\b[^.!?]{0,30}?\\b(?:next|your next|the next|your|that|this|the|return|follow-up|follow up)\\s+(?:visit|one|service|treatment|appointment)\\b"
           ],
           "severity": "critical"
         },
         {
           "check": "spoken_matches_any",
           "value": [
-            "talstar|perimeter|exterior"
+            "\\btalstar\\b[^.;!?]*\\b(?:exterior|perimeter)\\b|\\b(?:exterior|perimeter)\\b[^.;!?]*\\btalstar\\b"
           ],
           "severity": "critical"
         },
         {
           "check": "spoken_matches_any",
           "value": [
-            "bait|foundation"
+            "\\bbait\\b[^.;!?]*\\bfoundation\\b|\\bfoundation\\b[^.;!?]*\\bbait\\b"
           ],
           "severity": "critical"
         }
