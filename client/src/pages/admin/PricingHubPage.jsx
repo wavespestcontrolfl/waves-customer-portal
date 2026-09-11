@@ -55,18 +55,18 @@ export default function PricingHubPage() {
   // active area has none).
   const [secondary, setSecondary] = useState(null);
 
-  // Only Price Notices is migrated. The comfortable surface sets font-size and
-  // line-height on itself, and a nested legacy surface can only reset the
-  // token variables, not those inherited properties — so wrapping the whole hub
-  // would push Tier-1 typography through the unmigrated inline-`D` Logic and
-  // Strategy pages. Swapping the shell per area confines it without moving the
-  // header, whose sticky box has to stay a direct child of the element that
-  // also holds the area content.
-  const Shell = activeArea === "notices" ? UiSurface : "div";
-  const shellProps = activeArea === "notices" ? { density: "comfortable" } : {};
+  // Only Price Notices is migrated, so the comfortable density has to stop at
+  // it — the comfortable rule sets font-size and line-height on the surface
+  // itself, and letting that cascade would push Tier-1 typography through the
+  // unmigrated inline-`D` Logic and Strategy pages. The density flips rather
+  // than the element: swapping the wrapper's type would make React unmount and
+  // remount this whole subtree, AdminCommandHeader included, on every area
+  // switch, since a host element and a component never reconcile. `legacy` is
+  // the context default, so those two areas render exactly as they do on main.
+  const density = activeArea === "notices" ? "comfortable" : "legacy";
 
   return (
-    <Shell {...shellProps}>
+    <UiSurface density={density}>
       {/* One header card for the whole hub: area tabs on the first row; the
           active area (Logic & Margins) hands its own section tabs up for the
           second row instead of stacking a second header. */}
@@ -101,6 +101,6 @@ export default function PricingHubPage() {
         <PricingStrategyPage embedded onSecondaryNav={setSecondary} />
       )}
       {activeArea === "notices" && <AdminPriceChangePage embedded />}
-    </Shell>
+    </UiSurface>
   );
 }
