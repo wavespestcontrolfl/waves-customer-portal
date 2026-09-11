@@ -94,9 +94,7 @@ export default function PriceMatchPage() {
     setLoading(true);
     setError(null);
     try {
-      const data = await adminFetch(
-        `/admin/price-match/drafts?status=${filter}`,
-      );
+      const data = await adminFetch(`/admin/price-match/drafts?status=${filter}`);
       if (seq !== loadSeqRef.current) return; // superseded by a newer load
       setDrafts((data && data.drafts) || []);
       setRecipient((data && data.recipient) || null);
@@ -155,10 +153,7 @@ export default function PriceMatchPage() {
       setError(null);
       setNotice(null);
       try {
-        const res = await adminFetch(
-          `/admin/price-match/drafts/${id}/${action}`,
-          { method: "POST" },
-        );
+        const res = await adminFetch(`/admin/price-match/drafts/${id}/${action}`, { method: "POST" });
         // Resync FIRST, then set the message LAST — loadDrafts() runs setError(null)
         // at its start, so any message set before it would be wiped before the
         // operator sees it.
@@ -216,10 +211,7 @@ export default function PriceMatchPage() {
     setError(null);
     setNotice(null);
     try {
-      const res = await adminFetch(`/admin/price-match/scan`, {
-        method: "POST",
-        body: JSON.stringify({ mode }),
-      });
+      const res = await adminFetch(`/admin/price-match/scan`, { method: "POST", body: JSON.stringify({ mode }) });
       if (mode === "select") {
         const names = (res && res.products) || [];
         const vendorList = (res && res.vendors) || [];
