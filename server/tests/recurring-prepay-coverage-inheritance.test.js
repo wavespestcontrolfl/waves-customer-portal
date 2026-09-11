@@ -69,7 +69,23 @@ describe('buildRecurringFollowUpRows carries the LINK and never a stamp', () => 
 
 // Both generators reach the authority the same way: load the term, hand it
 // and the caller's connection to applyPrepaidCoverageForTerm, quietly.
+// The term is resolved through coveredTermsAsOf — the live/paid authority —
+// so the fake stands in for THAT, not a bare annual_prepay_terms lookup.
+// `term` is what the authority yields: undefined means "not a covered term"
+// (unpaid, refunded, revoked, or simply gone).
+let coveredSpy;
+afterEach(() => {
+  if (coveredSpy) coveredSpy.mockRestore();
+  coveredSpy = null;
+});
+
 function connWithTerm(term, { isTransaction = false } = {}) {
+  coveredSpy = jest.spyOn(AnnualPrepayRenewals, 'coveredTermsAsOf').mockImplementation(() => {
+    const b = {};
+    b.where = () => b;
+    b.first = () => Promise.resolve(term);
+    return b;
+  });
   const conn = (table) => {
     const b = {};
     b.where = () => b;
@@ -120,9 +136,20 @@ describe.each([
     expect(applySpy).not.toHaveBeenCalled();
   });
 
-  test('a term row that no longer exists never calls the authority', async () => {
+  test('a term that is not live+paid never gets stamped', async () => {
+    // coveredTermsAsOf yields nothing for an unpaid, refunded or revoked
+    // term. Those keep their visit links for audit, and re-stamping one
+    // would restore coverage revocation deliberately cleared — and block
+    // cancelling the visit, since findBillingCoveredVisits reads a positive
+    // prepaid_amount as money held.
     await run(connWithTerm(undefined), parent);
     expect(applySpy).not.toHaveBeenCalled();
+  });
+
+  test('the term is resolved through coveredTermsAsOf, not a bare lookup', async () => {
+    const conn = connWithTerm(LIVE_TERM);
+    await run(conn, parent);
+    expect(coveredSpy).toHaveBeenCalled();
   });
 
   test('inside a caller transaction the work runs in a SAVEPOINT', async () => {

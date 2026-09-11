@@ -2483,7 +2483,16 @@ async function applyExtensionPrepayCoverage(conn, parent) {
   if (!termId) return;
   const run = async (c) => {
     const AnnualPrepayRenewals = require('../services/annual-prepay-renewals');
-    const term = await c('annual_prepay_terms').where({ id: termId }).first();
+    // Resolve through coveredTermsAsOf, the same live/paid authority
+    // annualPrepayCoversVisit uses to decide whether a stamp suppresses
+    // billing. A plain terms lookup would also find a refunded or revoked
+    // term — those keep their visit links for audit, and
+    // applyPrepaidCoverageForTerm checks coverage CONFIG, not payment — so
+    // generating another visit would restore stamps that revocation had
+    // deliberately cleared, and findBillingCoveredVisits reads any positive
+    // prepaid_amount as money held and blocks cancelling or trimming the
+    // visit.
+    const term = await AnnualPrepayRenewals.coveredTermsAsOf(c, null).where('t.id', termId).first('t.*');
     if (!term) return;
     await AnnualPrepayRenewals.applyPrepaidCoverageForTerm(term, c, { quietExceptions: true });
   };
