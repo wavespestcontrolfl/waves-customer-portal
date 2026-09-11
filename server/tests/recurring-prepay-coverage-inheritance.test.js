@@ -401,15 +401,22 @@ describe('the durable trail and the legacy-callback cleanup', () => {
     expect(fileExcSpy).not.toHaveBeenCalled();
   });
 
-  test('the sibling scan admits NULL-status rows (source guard)', () => {
+  test('term DISCOVERY filters on no status at all (source guard)', () => {
+    // Discovery is not slot counting. Any linked visit — live, NULL-status
+    // or terminal — is evidence the series belongs to that term; a cancelled
+    // sibling is often the ONLY evidence, and its cancellation freed the very
+    // slot the replacement wants. coveredTermsAsOf rejects unpaid/revoked
+    // terms and coverageRowsForTerm still excludes terminal rows from the
+    // covered set, so discovery needs no status predicate of its own.
     const fs = require('fs');
     const path = require('path');
     for (const rel of ['../routes/admin-schedule.js', '../services/recurring-appointment-seeder.js']) {
       const src = fs.readFileSync(path.join(__dirname, rel), 'utf8');
-      const scan = src.slice(src.indexOf("whereNotNull('annual_prepay_term_id')"));
-      const head = scan.slice(0, 600);
-      // NULL is live: it must be admitted explicitly, never left to NOT IN.
-      expect(head).toMatch(/whereNull\('status'\)\s*\n?\s*\.orWhereNotIn\('status'/);
+      const at = src.indexOf("whereNotNull('annual_prepay_term_id')");
+      expect(at).toBeGreaterThan(0);
+      const scan = src.slice(at, src.indexOf("distinct('annual_prepay_term_id')", at));
+      const code = scan.split('\n').filter((l) => !l.trim().startsWith('//')).join('\n');
+      expect(code).not.toMatch(/whereNotIn\('status'|whereNull\('status'|orWhereNotIn\('status'/);
     }
   });
 });

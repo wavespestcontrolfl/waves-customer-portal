@@ -2491,13 +2491,17 @@ async function seriesTermIds(conn, parentId, ...known) {
         this.where({ id: parentId }).orWhere({ recurring_parent_id: parentId });
       })
       .whereNotNull('annual_prepay_term_id')
-      // NULL status is a LIVE visit in this codebase (the allocator's guarded
-      // update preserves it explicitly). A bare NOT IN evaluates unknown and
-      // drops those rows, so a legacy NULL-status sibling carrying the paid
-      // term would be invisible and the extension would go unstamped.
-      .where((q) => q
-        .whereNull('status')
-        .orWhereNotIn('status', ['cancelled', 'canceled', 'no_show', 'skipped', 'rescheduled']))
+      // NO status filter, deliberately. This is term DISCOVERY, not slot
+      // counting: any linked visit — live, NULL-status, or terminal — is
+      // valid evidence that this series belongs to that term. Filtering
+      // terminal rows out destroyed the only link when the historical parent
+      // was unlinked and the one linked sibling was later cancelled, leaving
+      // a replacement extension unable to resolve a still-paid term and
+      // billable again — precisely when the cancellation had FREED a slot for
+      // it. Whether the term is real is coveredTermsAsOf's job (it rejects
+      // unpaid and revoked), and whether a slot is free is
+      // coverageRowsForTerm's (it still excludes terminal rows from the
+      // covered set). Discovery only has to find candidates.
       .distinct('annual_prepay_term_id')
       .pluck('annual_prepay_term_id');
     for (const id of rows || []) if (id) ids.add(String(id));

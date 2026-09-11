@@ -1168,12 +1168,17 @@ async function applySeededPrepayCoverage(conn, parent, columns, coverageDates = 
         this.where({ id: parent.id }).orWhere({ recurring_parent_id: parent.id });
       })
       .whereNotNull('annual_prepay_term_id')
-      // NULL status is a LIVE visit here (the allocator's guarded update
-      // preserves it explicitly); a bare NOT IN evaluates unknown and drops
-      // those rows, hiding a legacy sibling that carries the paid term.
-      .where((q) => q
-        .whereNull('status')
-        .orWhereNotIn('status', ['cancelled', 'canceled', 'no_show', 'skipped', 'rescheduled']))
+      // NO status filter, deliberately. This is term DISCOVERY, not slot
+      // counting: any linked visit — live, NULL-status, or terminal — is
+      // valid evidence that this series belongs to that term. Filtering
+      // terminal rows out destroyed the only link when the historical parent
+      // was unlinked and the one linked sibling was later cancelled, leaving
+      // a replacement extension unable to resolve a still-paid term and
+      // billable again — precisely when the cancellation had FREED a slot for
+      // it. Whether the term is real is coveredTermsAsOf's job (it rejects
+      // unpaid and revoked), and whether a slot is free is
+      // coverageRowsForTerm's (it still excludes terminal rows from the
+      // covered set). Discovery only has to find candidates.
       .distinct('annual_prepay_term_id')
       .pluck('annual_prepay_term_id');
     for (const id of linked || []) if (id) ids.add(String(id));
