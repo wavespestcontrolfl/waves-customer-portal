@@ -5730,8 +5730,11 @@ async function completeScheduledService(completionInput, packetContext = null) {
           // billing_mode edit that committed between the plan build and this
           // customer share lock would stamp attribution the current lane
           // denies (or omit attribution it now allows). Same retryable shape;
-          // the retry rebuilds the plan from the current lane.
-          if (lawnLedgerVisit && waveguardPlan && billingModeColumnsExist
+          // the retry rebuilds the plan from the current lane. WaveGuard-only
+          // closeouts (ledger gate off) read the lane too, through the
+          // lawn_protocol_* stamp guard (Codex #4365 r5 P2), so they recheck
+          // as well.
+          if ((lawnLedgerVisit || waveguardCloseout) && waveguardPlan && billingModeColumnsExist
             && String(snapshotCustomer.billing_mode || '') !== String(waveguardPlan.propertyGate?.billingMode || '')) {
             const err = new Error('This customer\'s billing lane changed while completing — reload the job and complete it again.');
             err.statusCode = 409;
