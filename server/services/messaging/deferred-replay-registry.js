@@ -4,7 +4,7 @@
  *
  * Every send path that requeues a held text (QUIET_HOURS_HOLD →
  * sms_log status 'scheduled') registers its entry_point here with up to
- * three hooks, and the executor consults the registry generically:
+ * four hooks, and the executor consults the registry generically:
  *
  *   recheck(claimMeta)   — BEFORE dispatch: is this message still valid?
  *                          The world moves overnight — estimates get
@@ -16,6 +16,11 @@
  *                          bounded re-check (used when the state READ
  *                          failed — fail closed, never send unverified),
  *                          or { eligible:true }.
+ *   smsHandoff(claimMeta, dispatch) — the canonical sender's locked handoff:
+ *                          the entry re-authorizes and claims its dispatch,
+ *                          then runs `dispatch(trx)` while those rows are
+ *                          still held, so nothing can change under the
+ *                          provider request.
  *   finalize(claimMeta, ctx) — AFTER the provider accepts: the state
  *                          transitions the immediate path would have run
  *                          inline (invoice draft→sent, review delivered
@@ -227,6 +232,14 @@ const REGISTRY = {
         },
       });
     },
+    durableFinalize: true,
+  },
+
+  visit_summary_deferred: {
+    recheck: (meta) => require('../visit-completion-summary').recheckDeferredSummarySms(meta),
+    smsHandoff: (meta, dispatch) => require('../visit-completion-summary').beginDeferredSummarySms(meta, dispatch),
+    finalize: (meta) => require('../visit-completion-summary').finalizeDeferredSummarySms(meta),
+    onTerminal: (meta) => require('../visit-completion-summary').terminalDeferredSummarySms(meta),
     durableFinalize: true,
   },
 
@@ -1166,6 +1179,15 @@ async function recheckDeferredReplay(entryPoint, claimMeta = {}) {
   }
 }
 
+// undefined = no locked handoff registered: the sender dispatches normally.
+// Errors propagate: the provider wrapper distinguishes a failed read before
+// the handoff (retryable, nothing left) from a failure after acceptance.
+function deferredSmsHandoff(entryPoint, claimMeta = {}) {
+  const entry = entryFor(entryPoint);
+  if (!entry?.smsHandoff) return undefined;
+  return (dispatch) => entry.smsHandoff(claimMeta, dispatch);
+}
+
 // null = no finalize registered. { ok:false } rides the durable
 // finalize_only retry rail for durableFinalize entry points.
 async function finalizeDeferredReplay(entryPoint, claimMeta = {}, ctx = {}) {
@@ -1333,6 +1355,7 @@ const DURABLE_FINALIZE_ENTRY_POINTS = Object.entries(REGISTRY)
 
 module.exports = {
   recheckDeferredReplay,
+  deferredSmsHandoff,
   finalizeDeferredReplay,
   onTerminalDeferredReplay,
   runTerminalHookDurably,

@@ -505,22 +505,24 @@ async function saveBillingRecipientPreference(customerId, { email, name }) {
     billing_contact_name: name || null,
     updated_at: new Date(),
   };
-  const existing = await db('notification_prefs')
-    .where({ customer_id: customerId })
-    .first('id');
-  if (existing) {
-    await db('notification_prefs')
+  await db.transaction(async (trx) => {
+    const existing = await trx('notification_prefs')
+      .where({ customer_id: customerId })
+      .forUpdate()
+      .first('id');
+    if (!existing) {
+      // Canonical helper first (marketing flags NULL) — a bare insert would
+      // take the legacy true defaults and mint marketing consent.
+      const { createDefaultCustomerRows } = require('../services/customer-default-rows');
+      await createDefaultCustomerRows(trx, customerId);
+    }
+    // billing_email is an ownership source for the bounce recovery: the
+    // address key is taken after the row, like every other address writer.
+    await require('../utils/customer-comms-lock').lockAssignedCustomerEmails(trx, updates);
+    await trx('notification_prefs')
       .where({ customer_id: customerId })
       .update(updates);
-  } else {
-    // Canonical helper first (marketing flags NULL) — a bare insert would
-    // take the legacy true defaults and mint marketing consent.
-    const { createDefaultCustomerRows } = require('../services/customer-default-rows');
-    await createDefaultCustomerRows(db, customerId);
-    await db('notification_prefs')
-      .where({ customer_id: customerId })
-      .update(updates);
-  }
+  });
 }
 
 // GET /stats

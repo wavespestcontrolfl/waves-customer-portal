@@ -1211,12 +1211,10 @@ async function updateCustomer(customerId, updates, expectedVersion) {
       // customer-dedupe.js and routes/admin-customers.js — extend ALL in
       // the same commit): pg_advisory_xact_lock(hashtextextended(
       //   'customer-email:' || lower(trim(<email>)), 0)).
+      // Every assigned address (primary and service-contact slots) takes the
+      // key — utils/customer-comms-lock.js lockAssignedCustomerEmails.
+      await require('../../utils/customer-comms-lock').lockAssignedCustomerEmails(trx, clean);
       if (clean.email) {
-        const emailLc = String(clean.email).trim().toLowerCase();
-        await trx.raw(
-          'SELECT pg_advisory_xact_lock(hashtextextended(?, 0))',
-          [`customer-email:${emailLc}`],
-        );
         // Serialization ONLY — deliberately NO claimant refusal (r23):
         // customers.email is intentionally non-unique (20260417000010 —
         // spouses/shared household addresses are supported), so an
@@ -1570,12 +1568,8 @@ async function bulkUpdateCustomers(customerIds, updates) {
           throw err;
         }
         const lockedMerged = { ...lockedBefore, ...clean };
+        await require('../../utils/customer-comms-lock').lockAssignedCustomerEmails(trx, clean);
         if (emailSubmitted && clean.email) {
-          const emailLc = String(clean.email).trim().toLowerCase();
-          await trx.raw(
-            'SELECT pg_advisory_xact_lock(hashtextextended(?, 0))',
-            [`customer-email:${emailLc}`],
-          );
           // Serialization ONLY — no claimant refusal (r23): shared
           // household addresses are supported (20260417000010); see
           // updateCustomer.
