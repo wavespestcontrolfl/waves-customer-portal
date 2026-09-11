@@ -5042,7 +5042,7 @@ function priceTermiteBait(property, options = {}) {
   // a rental) or the annual protection plan (station SETUP fee + prepaid
   // annual fee, one inspection a year; rental / bond have no meaning there).
   const program = resolveTermiteProgram({ isAnnualPlan, annualPlan, stations, installPrice, ownership });
-  const { isRentedStations, billedInstallPrice, visitsPerYear, monitoringMonthly, monitoringAnnual } = program;
+  const { billedInstallPrice, visitsPerYear, monitoringMonthly, monitoringAnnual } = program;
   const costs = termiteProgramCostModel({
     stations,
     installMaterialCost,
