@@ -2563,6 +2563,32 @@ describe('previewCollectionCaseReconciliation (the executor\'s reconcile rule, d
     expect(dedupe.surplusApprovedCollectionCases([a1])).toEqual([]);
     expect(dedupe.surplusApprovedCollectionCases([{ id: 'h', current_state: 'held', case_version: 1 }, a1, a2])).toEqual([a1, a2]);
   });
+  it('orders live cases the SAME way in the preview and the executor, so a tied approved_at cannot revoke the approval the card promised to keep (pre-push Codex P1)', async () => {
+    // surplusApprovedCollectionCases keeps the FIRST row and reverts the
+    // rest, so the two sides must agree on "first" — on an approved_at tie
+    // only the unique id decides, and the fingerprint matches either way.
+    const orderOf = (calls) => calls.filter(([m]) => m === 'orderBy').map(([, args]) => args.join(' '));
+    const seen = [];
+    db.raw = jest.fn(async () => FK_ROWS);
+    db.mockImplementation((table) => {
+      const q = makeChain(table, () => (table === 'customer_plan_rates' ? { n: 0 } : { n: 0 }));
+      if (table === 'collection_cases') seen.push(q);
+      return q;
+    });
+    COLLECTION_CASES_ROWS = [
+      { id: 'c-b', customer_id: 'W', current_state: 'approved', case_version: 1 },
+      { id: 'c-a', customer_id: 'W', current_state: 'approved', case_version: 1 },
+    ];
+    await dedupe.previewCollectionCaseReconciliation(db, 'W', 'L');
+    expect(orderOf(seen[0]._calls)).toEqual(['approved_at desc', 'id']);
+    // The executor's own query, read from the source it shares with nobody:
+    // both orderBy clauses must be present, in the same order.
+    const executorQuery = require('fs').readFileSync(require.resolve('../services/customer-dedupe.js'), 'utf8')
+      .split("const liveCases = await sp('collection_cases')")[1].split('.select(')[0];
+    expect(executorQuery).toContain(".orderBy('approved_at', 'desc')");
+    expect(executorQuery).toContain(".orderBy('id')");
+  });
+
   it('states every live case with state + version, the approvals the merge revokes, and a dialing defer; a new approval in the pending window changes the fingerprint', async () => {
     COLLECTION_CASES_ROWS = [
       { id: 'c-w', customer_id: 'W', current_state: 'approved', case_version: 4 },

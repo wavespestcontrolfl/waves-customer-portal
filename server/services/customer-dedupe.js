@@ -1714,7 +1714,14 @@ async function executeMerge({ winnerId, loserId, performedBy, performedById = nu
         const liveCases = await sp('collection_cases')
           .where({ customer_id: winnerId })
           .whereIn('current_state', ['approved', 'dialing', 'held'])
+          // EXACTLY the preview's order (previewCollectionCaseReconciliation):
+          // surplusApprovedCollectionCases keeps the FIRST approval and
+          // reverts the rest, so on an approved_at tie an order that differs
+          // from the card's would revoke the approval the card promised to
+          // keep — with a matching fingerprint, since the same set is
+          // disclosed either way. The unique id breaks the tie on both sides.
           .orderBy('approved_at', 'desc')
+          .orderBy('id')
           .select('id', 'current_state', 'case_version');
         for (const c of surplusApprovedCollectionCases(liveCases)) {
           await sp('collection_cases')
