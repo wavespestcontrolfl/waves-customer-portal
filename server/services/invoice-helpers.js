@@ -109,14 +109,19 @@ function invoiceWithdrawnFromCustomer(invoice) {
     && PACKET_WITHDRAWN_SEND_ERROR.test(String(invoice.scheduled_send_error || ''));
 }
 
-// Accepts the invoice ROW (preferred — it can see the withdrawal stamp) or,
-// for compatibility with any caller that only holds a status, the status
-// string. A string argument keeps exactly the pre-existing behavior, so a
-// caller that has not been converted is never silently weakened; it simply
-// does not get the withdrawal check.
-function assertInvoiceCollectible(invoiceOrStatus) {
-  const row = invoiceOrStatus && typeof invoiceOrStatus === 'object' ? invoiceOrStatus : null;
-  const status = invoiceStatusKey(row ? row.status : invoiceOrStatus);
+// Takes the invoice ROW — the only shape that can see the withdrawal stamp.
+// There is deliberately no status-string overload (Codex #4311 r27 P2,
+// AGENTS.md: no compatibility shims for callers this repo controls): a second
+// internal contract that silently skips the withdrawal check would let the
+// payer-owned collection bug back in the first time a new seam followed the
+// old shape. Every call site in this repo passes the row; anything else is a
+// programming error and fails loudly rather than collecting.
+function assertInvoiceCollectible(invoice) {
+  if (!invoice || typeof invoice !== 'object') {
+    throw new Error('assertInvoiceCollectible requires the invoice row (a status string cannot show a payer withdrawal)');
+  }
+  const row = invoice;
+  const status = invoiceStatusKey(row.status);
   if (status === 'paid') {
     throw new Error('Invoice already paid');
   }

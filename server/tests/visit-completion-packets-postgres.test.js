@@ -788,7 +788,7 @@ postgres('visit completion packet records on PostgreSQL', () => {
       expect(options).toMatchObject({ requireAutopayForCustomerId: fixture.customerId, refuseWhenDunningStopped: true });
       await mockPg.transaction(async (trx) => {
         const invoice = await trx('invoices').where({ id: invoiceId }).forUpdate().first();
-        require('../services/invoice-helpers').assertInvoiceCollectible(invoice.status);
+        require('../services/invoice-helpers').assertInvoiceCollectible(invoice);
         await trx('customers').where({ id: fixture.customerId }).forUpdate().first();
         await assertVisitCompletionCharge(trx, invoice, options.requireVisitCompletionPacketId);
         providerSubmissions += 1;

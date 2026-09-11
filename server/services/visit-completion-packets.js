@@ -475,7 +475,13 @@ async function packetInvoiceSendInFlight({ customerId = null, scheduledServiceId
   // charge or credit settlement in flight is the same window for a payer.
   const VisitGroups = require('./visit-groups');
   const query = database('invoices').whereNotNull('visit_completion_packet_id').whereNull('payer_id')
-    .where((q) => q.where({ status: 'sending' }).orWhereExists(database('visit_effects as e')
+    // A bank debit already CAPTURED on a packet invoice is the same window
+    // (Codex #4311 r27 P1): settlement never re-resolves ownership, so an
+    // ownership transition taken while the homeowner's money is moving
+    // commits over funds that are about to pay a debt the payer now owes.
+    .where((q) => q.where({ status: 'sending' })
+      .orWhere((p) => p.where({ status: 'processing' }).whereNotNull('stripe_payment_intent_id'))
+      .orWhereExists(database('visit_effects as e')
       .join('visit_completion_packets as p', 'p.visit_id', 'e.visit_id')
       .whereRaw('p.id = invoices.visit_completion_packet_id')
       .where({ 'e.effect_type': 'visit_payment', 'e.status': 'claimed' })

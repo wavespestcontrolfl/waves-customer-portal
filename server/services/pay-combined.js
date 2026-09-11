@@ -511,7 +511,13 @@ async function releaseUnconfirmedCombinedSessionsForScheduledServices(database, 
     .pluck('customer_id')).filter(Boolean).map(String).sort();
   await lockCombinedCustomers(database, customerIds);
   const rows = await database('invoices')
-    .whereIn('scheduled_service_id', ids)
+    // A combined-visit invoice is anchored to ONE billed member's
+    // scheduled_service_id; a Bill-To edit on any OTHER member of that
+    // packet moves the same debt, so every invoice whose packet contains an
+    // edited member is in the scan too (Codex #4311 r27 P1).
+    .where((q) => q.whereIn('scheduled_service_id', ids)
+      .orWhereIn('visit_completion_packet_id', database('visit_completion_packet_items')
+        .whereIn('scheduled_service_id', ids).select('packet_id')))
     .whereNotNull('stripe_payment_intent_id')
     // 'processing' rows stay IN the scan (codex r26 P1): they are exactly
     // the in-flight signal the PI-status check must see and report.
@@ -523,11 +529,21 @@ async function releaseUnconfirmedCombinedSessionsForScheduledServices(database, 
 /** Customer-default-payer variant of the same fence (the customers.payer_id
  * writer creates the identical late-assignment gap). */
 async function releaseUnconfirmedCombinedSessionsForCustomer(database, customerId) {
-  if (!customerId) return { released: 0, inFlight: 0 };
+  return releaseUnconfirmedCombinedSessionsForCustomers(database, customerId ? [customerId] : []);
+}
+
+/** The same fence over several customers at once — one scan, one verdict
+ * (Codex #4311 r27 P2): a payer reactivation moves every referencing
+ * customer's debt together, so their sessions are judged together; a
+ * per-customer loop would cancel one customer's session before a later
+ * customer's in-flight payment refuses the change. */
+async function releaseUnconfirmedCombinedSessionsForCustomers(database, customerIds) {
+  const ids = [...new Set((customerIds || []).filter(Boolean).map(String))].sort();
+  if (!ids.length) return { released: 0, inFlight: 0 };
   // Same setup-serialization lock as the scheduled-service variant.
-  await lockCombinedCustomers(database, [String(customerId)]);
+  await lockCombinedCustomers(database, ids);
   const rows = await database('invoices')
-    .where({ customer_id: customerId })
+    .whereIn('customer_id', ids)
     .whereNotNull('stripe_payment_intent_id')
     // 'processing' rows stay IN the scan (codex r26 P1): filtering them
     // out hid the exact in-flight sessions the merge's defer check exists
@@ -577,10 +593,15 @@ async function lockCombinedCustomerStable(database, invoiceId, snapshotCustomerI
 
 async function releaseUnconfirmedCombinedSessions(database, rows) {
   const piIds = [...new Set(rows.map((r) => String(r.stripe_payment_intent_id)))];
-  let released = 0;
+  const StripeService = require('./stripe');
+  // Every session is verified BEFORE any is canceled (Codex #4311 r27 P2):
+  // the ownership change is refused as a whole while any of them carries
+  // money in flight, and a refused change must not have destroyed a
+  // sibling's confirmable session on the way to finding out — a Stripe
+  // cancel is not rolled back with the caller's transaction.
+  const sessions = [];
   let inFlight = 0;
   for (const piId of piIds) {
-    const StripeService = require('./stripe');
     let pi;
     try {
       pi = await StripeService.retrievePaymentIntent(piId);
@@ -595,13 +616,6 @@ async function releaseUnconfirmedCombinedSessions(database, rows) {
       throw new Error(`Could not verify payment session ${piId} before the payer change (payment service unavailable) — try again`);
     }
     if (!isCombinedPiMetadata(pi.metadata)) continue;
-    // Already canceled (codex r24 P2): a prior release's cancel succeeded
-    // but the stamp cleanup failed — retry the cleanup instead of skipping.
-    if (pi.status === 'canceled') {
-      await clearPaymentIntentStamps(database, piId);
-      released += 1;
-      continue;
-    }
     // NO microdeposit exemption here (codex r10 P1, unlike stop-dunning):
     // a pending bank verification is still an UNCAPTURED session, and the
     // customer completing it later would charge debt that now belongs to
@@ -611,19 +625,28 @@ async function releaseUnconfirmedCombinedSessions(database, rows) {
     // ownership guards — reported to the caller (codex r24 P1: a merge
     // must DEFER on a loser-side in-flight session, not proceed past it).
     const unconfirmed = ['requires_payment_method', 'requires_confirmation', 'requires_action'].includes(pi.status);
-    if (!unconfirmed) {
+    if (pi.status !== 'canceled' && !unconfirmed) {
       logger.warn(`[pay-combined] payer change: combined PI ${piId} is ${pi.status} — money may be in flight, not touched`);
       inFlight += 1;
       continue;
     }
-    try {
-      await StripeService.cancelPaymentIntent(piId);
-    } catch (err) {
-      throw new Error(`Could not release the combined payment session ${piId} before the payer change (${err.message}) — payer NOT changed, try again`);
+    sessions.push({ piId, canceled: pi.status === 'canceled' });
+  }
+  if (inFlight > 0) return { released: 0, inFlight };
+  let released = 0;
+  for (const { piId, canceled } of sessions) {
+    // Already canceled (codex r24 P2): a prior release's cancel succeeded
+    // but the stamp cleanup failed — retry the cleanup instead of skipping.
+    if (!canceled) {
+      try {
+        await StripeService.cancelPaymentIntent(piId);
+      } catch (err) {
+        throw new Error(`Could not release the combined payment session ${piId} before the payer change (${err.message}) — payer NOT changed, try again`);
+      }
+      logger.info(`[pay-combined] payer change released unconfirmed combined PI ${piId} and cleared its stamps`);
     }
     await clearPaymentIntentStamps(database, piId);
     released += 1;
-    logger.info(`[pay-combined] payer change released unconfirmed combined PI ${piId} and cleared its stamps`);
   }
   return { released, inFlight };
 }
@@ -1163,6 +1186,7 @@ module.exports = {
   lockCombinedCustomers,
   lockCombinedCustomerStable,
   releaseUnconfirmedCombinedSessionsForScheduledServices,
+  releaseUnconfirmedCombinedSessionsForCustomers,
   releaseUnconfirmedCombinedSessionsForCustomer,
   releaseCombinedSessionBeforeCollection,
   revokeOutstandingCombinedSessionsOnGateOff,

@@ -2390,6 +2390,16 @@ postgres('visit summary recipient recovery', () => {
       await mockPg('invoices').where({ id: invoiceId }).update({ status: 'sent' });
       expect(await packetInvoiceSendInFlight({ customerId: fixture.customerId })).toBe(false);
       expect(await packetInvoiceSendInFlight({ payerId: payer.id })).toBe(false);
+      // A bank debit already captured on the packet invoice is money moving:
+      // settlement never re-resolves ownership, so a Bill-To transition taken
+      // now would commit over the homeowner's funds (Codex r27 P1).
+      await mockPg('invoices').where({ id: invoiceId }).update({ status: 'processing', stripe_payment_intent_id: 'pi_fixture_processing' });
+      expect(await packetInvoiceSendInFlight({ customerId: fixture.customerId })).toBe(true);
+      expect(await packetInvoiceSendInFlight({ payerId: payer.id })).toBe(true);
+      // …and the fence reaches it through ANY billed member of the packet,
+      // not only the member the invoice is anchored to.
+      expect(await packetInvoiceSendInFlight({ scheduledServiceId: fixture.serviceIds[fixture.serviceIds.length - 1] })).toBe(true);
+      await mockPg('invoices').where({ id: invoiceId }).update({ status: 'sent', stripe_payment_intent_id: null });
     } finally {
       await mockPg('scheduled_services').where({ id: fixture.serviceIds[0] }).update({ payer_id: null });
       await mockPg('invoices').where({ id: invoiceId }).del();
@@ -2979,9 +2989,10 @@ postgres('visit summary recipient recovery', () => {
       // Still `sent` with no payer_id — the state every seam used to read as payable.
       expect(withdrawn).toMatchObject({ status: 'sent', payer_id: null, scheduled_send_error: `payer_billed:${payer.id}:hold` });
       expect(() => assertInvoiceCollectible(withdrawn)).toThrow(/third-party payer/);
-      // A caller holding only the status keeps the old behavior — never
-      // silently strengthened OR weakened by the widened signature.
-      expect(() => assertInvoiceCollectible(withdrawn.status)).not.toThrow();
+      // There is no status-only shape to fall back to: a caller that hands
+      // over just the status is refused outright rather than collecting a
+      // payer-owned invoice because the stamp was invisible to it.
+      expect(() => assertInvoiceCollectible(withdrawn.status)).toThrow(/requires the invoice row/);
 
       // Ownership back to self-pay: the reconciliation clears the stamp and
       // the same seam collects again.
@@ -3007,10 +3018,14 @@ postgres('visit summary recipient recovery', () => {
     await mockPg('customers').where({ id: fixture.customerId }).update({ payer_id: payer.id });
     await mockPg('invoices').insert({ id: invoiceId, token: randomUUID().replace(/-/g, ''), invoice_number: `FIX-${invoiceId.slice(0, 8)}`,
       customer_id: fixture.customerId, status: 'draft', total: 120, visit_completion_packet_id: fixture.packetId });
-    const fence = jest.spyOn(PayCombined, 'releaseUnconfirmedCombinedSessionsForCustomer').mockResolvedValue({ released: 0, inFlight: 1 });
+    const fence = jest.spyOn(PayCombined, 'releaseUnconfirmedCombinedSessionsForCustomers').mockResolvedValue({ released: 0, inFlight: 1 });
     try {
       expect(await Payer.updatePayer(payer.id, { active: true })).toMatchObject({ conflict: true, code: 'combined_payment_in_flight' });
-      expect(fence).toHaveBeenCalledWith(expect.anything(), String(fixture.customerId));
+      // One fence call carrying EVERY referencing customer: a conflict on
+      // any of them must be known before a session belonging to another is
+      // cancelled (a Stripe cancel does not roll back with the refusal).
+      expect(fence).toHaveBeenCalledTimes(1);
+      expect(fence).toHaveBeenCalledWith(expect.anything(), expect.arrayContaining([String(fixture.customerId)]));
       expect(await mockPg('payers').where({ id: payer.id }).first()).toMatchObject({ active: false });
       fence.mockResolvedValue({ released: 0, inFlight: 0 });
       expect(await Payer.updatePayer(payer.id, { active: true })).toMatchObject({ payer: { active: true } });
@@ -3305,6 +3320,55 @@ postgres('visit summary recipient recovery', () => {
       // The other sender's claim is left exactly as it was.
       expect(await mockPg('review_requests').where({ id: askId }).first('status')).toMatchObject({ status: 'sending' });
     } finally {
+      await mockPg('review_requests').where({ id: askId }).del();
+    }
+  });
+
+  test('a claim taken over while the packet row was awaited never reaches the provider', async () => {
+    // Waiting on the packet row can outlast the stranded-send window: the
+    // reconciliation then releases this `sending` mark and another worker
+    // claims the ask. The mark performed BEFORE the wait proves nothing by
+    // then, so the exact claim is re-verified inside the transaction — and a
+    // lost one is left to its new holder, never released back to pending.
+    const askId = randomUUID();
+    const reclaimedAt = new Date(Date.now() + 1000);
+    await mockPg('review_requests').insert({ id: askId, customer_id: fixture.customerId, service_record_id: fixture.recordIds[0],
+      status: 'pending', token: randomUUID().replace(/-/g, ''), channel: 'sms', triggered_by: 'auto' });
+    let releaseLock;
+    const lockReleased = new Promise((resolve) => { releaseLock = resolve; });
+    let lockHeld;
+    const lockTaken = new Promise((resolve) => { lockHeld = resolve; });
+    // Hold the packet row so the handoff's FOR SHARE blocks exactly where a
+    // slow lock wait would, and take the ask over while it waits.
+    const blocker = mockPg.transaction(async (trx) => {
+      await trx('visit_completion_packets').where({ id: fixture.packetId }).forUpdate().first('id');
+      lockHeld();
+      await lockReleased;
+    });
+    try {
+      await lockTaken;
+      let dispatched = false;
+      const handoff = Summary.reviewSendThroughSummaryHandoff(
+        fixture.recordIds[0],
+        async () => { dispatched = true; return { ok: true }; },
+        undefined,
+        { requestId: askId },
+      );
+      // The pre-provider mark runs before the transaction, so it has landed
+      // by the time the handoff is blocked on the packet row.
+      await new Promise((resolve) => { setTimeout(resolve, 150); });
+      expect(await mockPg('review_requests').where({ id: askId }).first('status')).toMatchObject({ status: 'sending' });
+      await mockPg('review_requests').where({ id: askId }).update({ status: 'sending', claimed_at: reclaimedAt });
+      releaseLock();
+      await blocker;
+      expect(await handoff).toMatchObject({ ok: false, code: 'REVIEW_CLAIM_LOST' });
+      expect(dispatched).toBe(false);
+      const row = await mockPg('review_requests').where({ id: askId }).first('status', 'claimed_at');
+      expect(row.status).toBe('sending');
+      expect(new Date(row.claimed_at).getTime()).toBe(reclaimedAt.getTime());
+    } finally {
+      releaseLock();
+      await blocker.catch(() => {});
       await mockPg('review_requests').where({ id: askId }).del();
     }
   });

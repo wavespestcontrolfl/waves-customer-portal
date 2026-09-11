@@ -733,9 +733,10 @@ async function reviewSendThroughSummaryHandoff(serviceRecordId, dispatch, databa
   // (review-request.js) proves or releases, never a pending row the
   // scheduler would send again. claimed_at is written at JavaScript
   // precision so the reconciliation's guards compare it losslessly.
+  const claimedAt = new Date();
   const marked = requestId
     ? Number(await require('../models/marker-db')()('review_requests').where({ id: requestId, status: 'pending' })
-      .update({ status: 'sending', claimed_at: new Date() })) : 0;
+      .update({ status: 'sending', claimed_at: claimedAt })) : 0;
   // A claim that moved NO row is not a send permit (audit P1): the row is
   // already `sending` under another sender, or it was suppressed, parked or
   // deleted between batching and here. Dispatching anyway lets two senders
@@ -744,8 +745,9 @@ async function reviewSendThroughSummaryHandoff(serviceRecordId, dispatch, databa
   // check, so a park (which removes the row) still reports itself as a park
   // rather than as a lost claim. Nothing is written either way — the row
   // belongs to whoever holds the claim, or to the state that replaced it.
-  const claimLost = !!requestId && !marked;
-  const release = () => database('review_requests').where({ id: requestId, status: 'sending' }).update({ status: 'pending', claimed_at: null });
+  let claimLost = !!requestId && !marked;
+  const release = () => database('review_requests').where({ id: requestId, status: 'sending', claimed_at: claimedAt })
+    .update({ status: 'pending', claimed_at: null });
   let dispatched = false;
   let verdict;
   try {
@@ -757,6 +759,18 @@ async function reviewSendThroughSummaryHandoff(serviceRecordId, dispatch, databa
         const uncertain = packet && await trx('visit_effects').where({ visit_id: packet.visit_id, status: 'unknown_delivery' })
           .whereIn('effect_type', ['completion_sms', 'completion_email']).first('id');
         if (uncertain) return { ok: false, code: 'VISIT_SUMMARY_UNCERTAIN', reason: 'The visit summary this review follows is awaiting recovery' };
+      }
+      // The claim is re-verified on the row itself once the packet row is
+      // held (Codex r27 P1): a wait on that row longer than the stranded-send
+      // window lets the reconciliation release this `sending` mark and a
+      // later worker claim the same ask, and `marked` only records the update
+      // that ran before the wait. The exact claim (status + timestamp) has
+      // to still be this sender's immediately before the request; otherwise
+      // the ask belongs to whoever holds it now and nothing here is written
+      // or released.
+      if (!claimLost && marked) {
+        const held = await trx('review_requests').where({ id: requestId, status: 'sending', claimed_at: claimedAt }).first('id');
+        claimLost = !held;
       }
       if (claimLost) {
         return { ok: false, code: 'REVIEW_CLAIM_LOST', reason: 'This review ask is already being sent or is no longer pending' };
@@ -772,7 +786,9 @@ async function reviewSendThroughSummaryHandoff(serviceRecordId, dispatch, databa
   }
   // A refusal before the request (consent, suppression, send window, an
   // uncertain summary) is provably unsent: the row returns to pending, so a
-  // worker lost before the sender's own bookkeeping strands nothing.
+  // worker lost before the sender's own bookkeeping strands nothing. The
+  // release names this sender's own claim, so a mark that was taken over in
+  // the meantime (claim lost above) is left to its new holder.
   if (marked && verdict && verdict.ok === false) await release();
   return verdict;
 }

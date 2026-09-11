@@ -187,6 +187,23 @@ async function updatePayer(id, body) {
   // in flight (the same 409 the payer_id writers raise).
   if (Object.prototype.hasOwnProperty.call(dbUpdates, 'active')) {
     return db.transaction(async (trx) => {
+      // OWNERSHIP ROWS FIRST (Codex #4311 r27 P2): the withdrawal below
+      // (withdrawPacketInvoicesForOwner → resolvePacketOwnershipLocked) takes
+      // customer and member rows before payer rows, and every competing
+      // ownership writer (customer edit, merge, job Bill-To) does the same and
+      // then waits on this payer row. Locking the payer first and the customer
+      // rows afterwards is the inverse order, and PostgreSQL aborts one side.
+      // Taking the referencing rows FOR SHARE here — before the payer row —
+      // puts this transaction on the established order; the set is re-read
+      // under the payer lock below, and the withdrawal re-locks per packet.
+      const referencingCustomerIds = [...new Set([
+        ...await trx('customers').where({ payer_id: pid }).whereNull('deleted_at').pluck('id'),
+        ...await trx('scheduled_services').where({ payer_id: pid }).whereNotNull('customer_id').pluck('customer_id'),
+      ].map(String))].sort();
+      if (referencingCustomerIds.length) {
+        await trx('customers').whereIn('id', referencingCustomerIds).forShare().select('id');
+        await trx('scheduled_services').where({ payer_id: pid }).orderBy('id').forShare().select('id');
+      }
       const current = await trx('payers').where({ id: pid }).forUpdate().first();
       if (!current) return { error: 'Payer not found', notFound: true };
       const activating = dbUpdates.active === true && current.active !== true;
@@ -205,12 +222,17 @@ async function updatePayer(id, body) {
           ...await trx('scheduled_services').where({ payer_id: pid }).whereNotNull('customer_id').pluck('customer_id'),
         ].map(String))];
         const PayCombined = require('./pay-combined');
-        for (const customerId of referencing) {
-          const release = await PayCombined.releaseUnconfirmedCombinedSessionsForCustomer(trx, customerId);
-          if (release.inFlight > 0) {
-            return { error: 'A combined bank payment for a customer billed to this payer is still in flight; retry the activation after it settles or fails.',
-              conflict: true, code: 'combined_payment_in_flight' };
-          }
+        // ONE verdict over ALL referencing customers (Codex #4311 r27 P2): the
+        // per-customer loop this replaces cancelled the first customer's
+        // confirmable session and only then discovered a second customer's
+        // in-flight payment — the activation was refused, but a Stripe cancel
+        // does not roll back with this transaction, so an uninvolved
+        // homeowner lost a live pay-page session for nothing. The batched
+        // fence verifies every session before cancelling any.
+        const release = await PayCombined.releaseUnconfirmedCombinedSessionsForCustomers(trx, referencing);
+        if (release.inFlight > 0) {
+          return { error: 'A combined bank payment for a customer billed to this payer is still in flight; retry the activation after it settles or fails.',
+            conflict: true, code: 'combined_payment_in_flight' };
         }
       }
       const [row] = await trx('payers').where({ id: pid }).update(dbUpdates).returning('*');
