@@ -70,7 +70,12 @@ const REPLY_WRONG_NUMBER_FOOTER = /(^|[.!?;\r\n])\s*(?:reply|respond|text|say)\s
 // STOP." / "If wrong number, text STOP." \u2014 rather than reply-first (codex
 // P0, 2026-09-11: the reply-first regex above does not match this ordering,
 // so WRONG_NUMBER_PATTERNS still reads the footer's own wording as consent).
-const CONDITION_FIRST_WRONG_NUMBER_FOOTER = /(^|[.!?;\r\n])\s*if\s+(?:this\s+is\s+)?(?:you(?:'re|\s+are)\s+)?(?:not\s+the\s+intended\s+recipient|(?:the\s+)?wrong\s+number|you\s+(?:received|got)\s+this\s+(?:in\s+error|by\s+mistake))\s*,?\s*(?:please\s+)?(?:reply|respond|text|say)\s+(?:with\s+)?["'\u2018\u2019\u201C\u201D]?(?:no|stop|unsubscribe)["'\u2018\u2019\u201C\u201D]?\b(?=\s*(?:[.!?;\r\n]|$))/gi;
+// The word boundary sits BEFORE the optional closing quote, not after it: a
+// \b right after a consumed quote character finds non-word on both sides
+// (the quote and the following punctuation) and never matches, so
+// "...reply \"STOP\"." silently fell through unstripped (codex P1,
+// 2026-09-11).
+const CONDITION_FIRST_WRONG_NUMBER_FOOTER = /(^|[.!?;\r\n])\s*if\s+(?:this\s+is\s+)?(?:you(?:'re|\s+are)\s+)?(?:not\s+the\s+intended\s+recipient|(?:the\s+)?wrong\s+number|you\s+(?:received|got)\s+this\s+(?:in\s+error|by\s+mistake))\s*,?\s*(?:please\s+)?(?:reply|respond|text|say)\s+(?:with\s+)?["'\u2018\u2019\u201C\u201D]?(?:no|stop|unsubscribe)\b["'\u2018\u2019\u201C\u201D]?(?=\s*(?:[.!?;\r\n]|$))/gi;
 
 function normalizeBody(body) {
   return String(body || '')

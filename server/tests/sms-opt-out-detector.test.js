@@ -70,6 +70,11 @@ describe('SMS opt-out detector', () => {
     'We have exclusive pest leads. If this is the wrong number, reply STOP.',
     'We have exclusive pest leads for you. If wrong number, text STOP.',
     'Exclusive leads available in your area\nIf this is the wrong number, reply NO',
+    // Codex P1, 2026-09-11: a trailing \b positioned AFTER the optional
+    // closing quote never matched (quote and following punctuation are both
+    // non-word), so a quoted keyword silently skipped stripping.
+    'We have exclusive pest leads. If this is the wrong number, reply "STOP".',
+    'We have exclusive pest leads for you. If wrong number, text ‘STOP’.',
   ])('can exclude a condition-first vendor wrong-number footer while keeping legacy detection: %s', (body) => {
     expect(detectSmsOptCommand(body).action).toBe('opt_out');
     expect(detectSmsOptCommand(body, { ignoreReplyInstructions: true }).action).toBeNull();
