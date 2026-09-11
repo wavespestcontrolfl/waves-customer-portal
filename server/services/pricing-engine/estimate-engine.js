@@ -1068,7 +1068,9 @@ function generateEstimate(input) {
       const wantsRental = !wantsAnnualPlan && rentalGateOn && String(termiteOptions.ownership || '').toLowerCase() === 'rent';
       const result = priceTermiteBait(property, {
         ...termiteOptions,
-        system: termiteOptions.system || 'trelona',
+        // The annual plan is Trelona-only (company-owned ATBS stations at the
+        // label 15-ft spacing); a legacy Advance request cannot ride it.
+        system: wantsAnnualPlan ? 'trelona' : (termiteOptions.system || 'trelona'),
         monitoringTier: termiteOptions.monitoringTier || 'basic',
         ownership: wantsRental ? 'rent' : 'own',
         plan: wantsAnnualPlan ? 'annual_protection' : null,

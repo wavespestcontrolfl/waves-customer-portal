@@ -226,6 +226,14 @@ describe("annual protection plan mirror (ruling A-1 = P1; server gate word via f
       const row = on.recurring.services.find((s) => s.service === "termite_bait");
       expect(row).toMatchObject({ perTreatment: 249 + brackets * 50, visitsPerYear: 1 });
       expect(on.oneTime.tmInstall).toBe(sta * 30);
+      // Exact annual fee in the aggregates (never the rounded monthly × 12), and Trelona forced on the plan.
+      expect(on.recurring.annualBeforeDiscount).toBe(249 + brackets * 50);
+      const adv = calculateEstimate(termiteInput({ termiteBaitSystem: "advance", termitePlan: "annual_protection" }));
+      expect(adv.results.tmBait.system).toBe("trelona");
+      expect(adv.results.tmBait.sta).toBe(sta);
+      // A failed gate lookup fails closed.
+      applyServerTermiteAnnualPlanPricingConfig(null, false);
+      expect(calculateEstimate(termiteInput({ termiteBaitSystem: "trelona", termitePlan: "annual_protection" })).results.tmBait.plan).toBe("quarterly");
     } finally {
       applyServerTermiteAnnualPlanPricingConfig(null, false);
     }

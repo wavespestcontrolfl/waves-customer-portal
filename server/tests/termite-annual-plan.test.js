@@ -75,6 +75,14 @@ describe('annual plan — pricing (ruling A-1 = P1)', () => {
     }
   });
 
+  test('the plan is Trelona-only: a legacy Advance request is priced as Trelona at 15-ft spacing', () => {
+    const li = termiteLine(generateEstimate(HOME(2000, { services: { termite: { system: 'advance', plan: 'annual_protection' } } })));
+    expect(li.system).toBe('trelona');
+    expect(li.stations).toBe(15); // 224 LF / 15 ft, not 23 at Advance's 10 ft
+    expect(li.installation.price).toBe(450);
+    expect(li.annual).toBe(299);
+  });
+
   test('the cost model runs on one service visit a year', () => {
     const li = termiteLine(generateEstimate(HOME(2000, { services: { termite: { system: 'trelona', plan: 'annual_protection' } } })));
     expect(li.costs.serviceVisitsPerYear).toBe(1);

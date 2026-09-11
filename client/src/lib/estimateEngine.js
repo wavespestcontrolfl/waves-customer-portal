@@ -2756,7 +2756,12 @@ export function calculateEstimate(inputs) {
       // 10 ft, Trelona 15 ft — so each system's install prices off ITS OWN
       // station count. Menu is Trelona-only; Advance stays computable for
       // replaying old estimates.
-      const tmSystem = termiteBaitSystem || 'trelona';
+      // Annual protection plan (ruling A-1 = P1) — only when the server's
+      // gate says the engine will honor it; otherwise the request is ignored
+      // exactly as the server ignores it (today's quarterly program). The
+      // plan is Trelona-only, so it overrides a legacy Advance request.
+      const onAnnualPlan = TERMITE_ANNUAL_PLAN.available && String(termitePlan || '').toLowerCase() === 'annual_protection';
+      const tmSystem = onAnnualPlan ? 'trelona' : (termiteBaitSystem || 'trelona');
       // Install basis from the live server config + catalog link
       // (applyServerTermiteInstallPricingConfig), never a baked literal —
       // this preview is a CLIENT_FALLBACK save candidate and must price and
@@ -2770,10 +2775,6 @@ export function calculateEstimate(inputs) {
       // Bracketed by the selected system's station count; the retired
       // Basic/Premier tier input no longer changes price (bmo/pmo kept for
       // legacy readers, both stamped with the bracket monthly).
-      // Annual protection plan (ruling A-1 = P1) — only when the server's
-      // gate says the engine will honor it; otherwise the request is ignored
-      // exactly as the server ignores it (today's quarterly program).
-      const onAnnualPlan = TERMITE_ANNUAL_PLAN.available && String(termitePlan || '').toLowerCase() === 'annual_protection';
       const setupFee = onAnnualPlan ? Math.round(sta * TERMITE_ANNUAL_PLAN.setupPerStation) : null;
       const annualFee = onAnnualPlan ? termiteAnnualPlanFee(sta) : null;
       const monMonthly = onAnnualPlan ? Math.round((annualFee / 12) * 100) / 100 : termiteMonitoringMonthly(sta);
@@ -3635,9 +3636,14 @@ export function calculateEstimate(inputs) {
     // Bracketed station-check monthly off the priced system's station count
     // (owner 2026-07-28) — the flat tier literals are retired.
     const termiteMonthly = R.tmBait.monMonthly ?? termiteMonitoringMonthly(R.tmBait.sta);
+    // The annual plan's fee is the exact annual figure ($299, not the
+    // rounded $24.92 × 12) — carry it into the aggregates as-is.
+    const termiteAnnual = R.tmBait.plan === 'annual_protection' && Number(R.tmBait.annualFee) > 0
+      ? Number(R.tmBait.annualFee)
+      : termiteMonthly * 12;
     ac++;
-    ra += termiteMonthly * 12;
-    lineItems.push({ name: 'Termite Bait', service: 'termite_bait', ann: termiteMonthly * 12, discountable: true });
+    ra += termiteAnnual;
+    lineItems.push({ name: 'Termite Bait', service: 'termite_bait', ann: termiteAnnual, discountable: true });
     // Bond rider: in the recurring totals, no tier count (no ac++), no
     // bundle % discount — mirrors server excludedFromPercentDiscount.
     if (R.tmBond) {

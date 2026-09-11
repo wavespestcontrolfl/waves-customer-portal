@@ -4721,17 +4721,20 @@ function resolveTermiteInstallBasis(sys, selectedSystem, knobs) {
 // its station count (the Admin V1 CLIENT_FALLBACK envelope carries no costs
 // block) — the same model priceTermiteBait emits, on the LIVE basis, for
 // the production pricing audit's COGS view (codex #4313 r8 P1). Report only.
-function termiteProgramAnnualCostForStations(stations, system = TERMITE.defaultSystem) {
+function termiteProgramAnnualCostForStations(stations, system = TERMITE.defaultSystem, { visitsPerYear = null } = {}) {
   const n = Number(stations);
   if (!(n > 0)) return null;
   const selected = TERMITE.systems[system] ? system : TERMITE.defaultSystem;
   const sys = TERMITE.systems[selected];
   const stationCost = Number(sys?.stationCost) || 0;
+  // The stored row says how many service visits the program bills — 4 on
+  // the quarterly program, 1 on the annual plan (codex #4424 r1 P2).
+  const visits = Number(visitsPerYear) > 0 ? Number(visitsPerYear) : TERMITE.monitoringVisitsPerYear;
   const model = termiteProgramCostModel({
     stations: n,
     installMaterialCost: n * (stationCost + (Number(sys?.laborMaterial) || 0) + (Number(sys?.misc) || 0)),
     installLabor: n * 0.083 * GLOBAL.LABOR_RATE,
-    visitsPerYear: TERMITE.monitoringVisitsPerYear,
+    visitsPerYear: visits,
     stationCost,
     system: selected,
   });
