@@ -2533,7 +2533,14 @@ async function applyExtensionPrepayCoverage(conn, parent, svc = null, coverageDa
     const term = await coveringTermForDate(c, termIds, coverageDate);
     if (!term) return;
     const AnnualPrepayRenewals = require('../services/annual-prepay-renewals');
-    await AnnualPrepayRenewals.applyPrepaidCoverageForTerm(term, c, { quietTransientExceptions: true });
+    await AnnualPrepayRenewals.applyPrepaidCoverageForTerm(term, c, {
+      quietTransientExceptions: true,
+      // Queries on the savepoint; alerts wait on the OUTER transaction. A
+      // savepoint's executionPromise resolves on RELEASE, so filing against
+      // it would let a later rollback leave a false cancellation alert that
+      // dedupes the real retry for seven days.
+      notifyConn: conn,
+    });
   };
   try {
     if (conn && conn.isTransaction) await conn.transaction(run);

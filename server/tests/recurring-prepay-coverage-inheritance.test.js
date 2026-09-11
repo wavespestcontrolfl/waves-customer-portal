@@ -83,12 +83,17 @@ function connWithTerm(term, { isTransaction = false, seriesTermIds: linkedIds = 
   // coveredTermsAsOf is the live/paid authority. `term` is what it yields —
   // undefined means "no term is live, paid and covering that date".
   coveredSpy = jest.spyOn(AnnualPrepayRenewals, 'coveredTermsAsOf').mockImplementation((c, date) => {
-    const b = { calledWithDate: date };
+    const b = {};
     coveredSpy.lastDate = date;
+    (coveredSpy.dates = coveredSpy.dates || []).push(date);
+    const yielded = typeof term === 'function' ? term(date) : term;
     b.where = () => b;
     b.whereIn = (_col, ids) => { coveredSpy.lastIds = ids; return b; };
     b.orderBy = () => b;
-    b.first = () => Promise.resolve(term);
+    b.first = () => Promise.resolve(Array.isArray(yielded) ? yielded[0] : yielded);
+    b.select = () => Promise.resolve(
+      Array.isArray(yielded) ? yielded : (yielded ? [yielded] : []),
+    );
     return b;
   });
   const conn = () => {
@@ -116,7 +121,7 @@ const COLS = { annual_prepay_term_id: {} };
 
 describe.each([
   ['auto-extend', (conn, parent) => applyExtensionPrepayCoverage(conn, parent)],
-  ['seeder', (conn, parent) => seeder._internals.applySeededPrepayCoverage(conn, parent, COLS)],
+  ['seeder', (conn, parent) => seeder._internals.applySeededPrepayCoverage(conn, parent, COLS, ['2027-01-28'])],
 ])('%s delegates coverage to applyPrepaidCoverageForTerm', (_label, run) => {
   const parent = { id: 'parent-1', annual_prepay_term_id: TERM_ID };
   let applySpy;
@@ -133,8 +138,10 @@ describe.each([
     expect(term.id).toBe(TERM_ID);
     // Same connection ⇒ the stamp commits or rolls back with the insert.
     expect(passedConn).toBe(conn);
-    // Only the self-healing completion-race bell is silenced.
-    expect(options).toEqual({ quietTransientExceptions: true });
+    // Only the self-healing completion-race bell is silenced, and alerts
+    // are scoped to the OUTER transaction, never the savepoint.
+    expect(options.quietTransientExceptions).toBe(true);
+    expect(options.notifyConn).toBe(conn);
   });
 
   test('a parent on no term never calls the authority', async () => {
@@ -271,7 +278,7 @@ describe('the auto-extend finds the term wherever the series carries it', () => 
 test('the seeder skips the re-apply when the link column does not exist', async () => {
   const applySpy = jest.spyOn(AnnualPrepayRenewals, 'applyPrepaidCoverageForTerm').mockResolvedValue({});
   await seeder._internals.applySeededPrepayCoverage(
-    connWithTerm(LIVE_TERM), { id: 'p', annual_prepay_term_id: TERM_ID }, {},
+    connWithTerm(LIVE_TERM), { id: 'p', annual_prepay_term_id: TERM_ID }, {}, ['2027-01-28'],
   );
   expect(applySpy).not.toHaveBeenCalled();
   applySpy.mockRestore();
@@ -291,7 +298,9 @@ describe('quietTransientExceptions silences ONE bell, never the durable one', ()
     const flagged = lines.filter((l) => l.includes('quietTransientExceptions') && !l.trim().startsWith('//'));
     // Exactly the signature and the ONE guarded bell read the flag.
     expect(flagged).toHaveLength(2);
-    expect(flagged.some((l) => l.includes('async function applyPrepaidCoverageForTerm'))).toBe(true);
+    // One is the option's own declaration in the signature; the other is the
+    // single bell it guards.
+    expect(flagged.some((l) => l.includes('quietTransientExceptions = false'))).toBe(true);
     expect(flagged.some((l) => l.includes("'stamp_raced_completion'"))).toBe(true);
 
     // stamp_raced_cancel reports a PAID slot cancelled out from under the
@@ -306,5 +315,41 @@ describe('quietTransientExceptions silences ONE bell, never the durable one', ()
     // The warn-level record of either race is never suppressed.
     expect(fn).toMatch(/completed while the prepaid stamp ran/);
     expect(fn).toMatch(/were cancelled while the prepaid stamp ran/);
+  });
+});
+
+describe('a seeded batch spanning a renewal boundary', () => {
+  // Picking one term from the earliest date left the later visits unstamped
+  // despite a linked, paid renewal — and an earliest date predating coverage
+  // skipped the whole batch.
+  const OLD_TERM = { id: 'old-term', prepay_amount: '400.00', coverage_visit_count: 4 };
+  const NEW_TERM = { id: 'new-term', prepay_amount: '444.60', coverage_visit_count: 4 };
+  let applySpy;
+  beforeEach(() => {
+    applySpy = jest.spyOn(AnnualPrepayRenewals, 'applyPrepaidCoverageForTerm').mockResolvedValue({});
+  });
+  afterEach(() => applySpy.mockRestore());
+
+  test('every term covering any seeded date is applied, once each', async () => {
+    const byDate = (date) => (date < '2027-01-01' ? [OLD_TERM] : [NEW_TERM]);
+    const conn = connWithTerm(byDate, { seriesTermIds: ['old-term', 'new-term'] });
+    await seeder._internals.applySeededPrepayCoverage(
+      conn, { id: 'root', annual_prepay_term_id: 'old-term' }, COLS,
+      ['2026-10-22', '2026-12-11', '2027-03-12', '2027-06-11'],
+    );
+    const applied = applySpy.mock.calls.map(([t]) => t.id);
+    expect(applied).toEqual(expect.arrayContaining(['old-term', 'new-term']));
+    // Deduped: each term applied once however many dates it covers.
+    expect(new Set(applied).size).toBe(applied.length);
+  });
+
+  test('an earliest date outside coverage no longer skips the batch', async () => {
+    const byDate = (date) => (date === '2026-01-01' ? [] : [NEW_TERM]);
+    const conn = connWithTerm(byDate, { seriesTermIds: ['new-term'] });
+    await seeder._internals.applySeededPrepayCoverage(
+      conn, { id: 'root' }, COLS, ['2026-01-01', '2027-03-12'],
+    );
+    expect(applySpy).toHaveBeenCalledTimes(1);
+    expect(applySpy.mock.calls[0][0].id).toBe('new-term');
   });
 });

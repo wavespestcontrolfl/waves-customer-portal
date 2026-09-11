@@ -1152,9 +1152,10 @@ async function planFollowUpSeedDates(conn, parent, opts = {}) {
 
 // Re-apply the parent term's coverage across the series after seeding, so
 // the new rows are stamped if — and only if — the term has slots for them.
-async function applySeededPrepayCoverage(conn, parent, columns, coverageDate = null) {
+async function applySeededPrepayCoverage(conn, parent, columns, coverageDates = []) {
   if (!columns?.annual_prepay_term_id) return;
   if (!conn || !parent?.id) return;
+  const dates = [...new Set((coverageDates || []).filter(Boolean))].sort();
   const run = async (c) => {
     const AnnualPrepayRenewals = require('./annual-prepay-renewals');
     // The term link can sit on any visit in the series, not the root: prepay
@@ -1171,21 +1172,40 @@ async function applySeededPrepayCoverage(conn, parent, columns, coverageDate = n
       .pluck('annual_prepay_term_id');
     for (const id of linked || []) if (id) ids.add(String(id));
     if (!ids.size) return;
+
+    // EVERY term covering ANY seeded date, not just the earliest one's.
+    // A batch can span a renewal boundary: picking a single term left the
+    // later visits unstamped despite a linked, paid renewal, and an earliest
+    // date that predated coverage skipped the whole batch.
+    //
     // coveredTermsAsOf is the same live/paid authority annualPrepayCoversVisit
     // consults. A plain terms lookup would also find a refunded or revoked
     // term — those keep their visit links for audit, and
     // applyPrepaidCoverageForTerm checks coverage CONFIG, not payment — so
     // re-stamping one would restore coverage revocation deliberately cleared,
     // and findBillingCoveredVisits reads a positive prepaid_amount as money
-    // held and blocks cancelling the visit. Passing the seeded date picks the
-    // term whose window actually contains these visits, so a series spanning
-    // a renewal boundary does not stamp against the expired term.
-    const term = await AnnualPrepayRenewals.coveredTermsAsOf(c, coverageDate || null)
-      .whereIn('t.id', [...ids])
-      .orderBy('t.term_start', 'desc')
-      .first('t.*');
-    if (!term) return;
-    await AnnualPrepayRenewals.applyPrepaidCoverageForTerm(term, c, { quietTransientExceptions: true });
+    // held and blocks cancelling the visit.
+    const seen = new Set();
+    for (const date of (dates.length ? dates : [null])) {
+       
+      const terms = await AnnualPrepayRenewals.coveredTermsAsOf(c, date)
+        .whereIn('t.id', [...ids])
+        .orderBy('t.term_start', 'desc')
+        .select('t.*');
+      for (const term of terms || []) {
+        if (!term?.id || seen.has(String(term.id))) continue;
+        seen.add(String(term.id));
+         
+        await AnnualPrepayRenewals.applyPrepaidCoverageForTerm(term, c, {
+          quietTransientExceptions: true,
+          // Queries on the savepoint; alerts wait on the OUTER transaction —
+          // a savepoint's executionPromise resolves on RELEASE, so filing
+          // against it would let a rollback leave a false alert that dedupes
+          // the real retry for seven days.
+          notifyConn: conn,
+        });
+      }
+    }
   };
   try {
     // Inside a caller transaction the work must run on that trx (the rows we
@@ -1328,7 +1348,7 @@ async function seedFollowUpsForParent(conn, parent, opts = {}) {
   // seed is a missing visit the customer feels.
   await applySeededPrepayCoverage(
     conn, parent, columns,
-    insertedRows.map((r) => dateOnly(r.scheduled_date)).filter(Boolean).sort()[0] || null,
+    insertedRows.map((r) => dateOnly(r.scheduled_date)).filter(Boolean),
   );
   // Visit-group seam (visit-group-scope.md §2) in the CANONICAL seeder —
   // every caller (estimate converter, admin-schedule, customer booking)
