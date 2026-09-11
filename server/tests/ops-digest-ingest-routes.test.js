@@ -75,6 +75,22 @@ describe('auth and gates', () => {
     expect(mockNotifyAdmin).not.toHaveBeenCalled();
   });
 
+  test('the dark 404 sits ahead of the rate limiter, so a prober never sees a 429 while unset', () => {
+    // Route-level order is the guarantee: darkUnlessConfigured is the first
+    // handler on both POSTs (a production limiter would otherwise answer
+    // 429 after 120 probes and reveal the route).
+    const { darkUnlessConfigured } = router._private;
+    for (const layer of router.stack.filter((l) => l.route)) {
+      expect(layer.route.stack[0].handle).toBe(darkUnlessConfigured);
+    }
+    delete process.env.OPS_DIGEST_INGEST_TOKEN;
+    const res = { status: jest.fn(() => res), json: jest.fn(() => res) };
+    const next = jest.fn();
+    darkUnlessConfigured({}, res, next);
+    expect(res.status).toHaveBeenCalledWith(404);
+    expect(next).not.toHaveBeenCalled();
+  });
+
   test('401 on a wrong or missing bearer', async () => {
     expect((await post(good(), { token: 'nope' })).status).toBe(401);
     expect((await post(good(), { token: null })).status).toBe(401);

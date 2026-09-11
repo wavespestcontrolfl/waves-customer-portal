@@ -61,6 +61,14 @@ const ingestLimiter = rateLimit({
   skip: () => process.env.NODE_ENV !== 'production',
 });
 
+// Dark-route check FIRST, ahead of the limiter: while the token is unset
+// the endpoint must be a plain 404 at any request volume — a 429 from the
+// limiter would tell a prober the route is real (pre-push P1).
+function darkUnlessConfigured(req, res, next) {
+  if (!process.env.OPS_DIGEST_INGEST_TOKEN) return res.status(404).json({ ok: false, reason: 'not_configured' });
+  return next();
+}
+
 function ingestAuth(req, res, next) {
   const expected = process.env.OPS_DIGEST_INGEST_TOKEN;
   if (!expected) return res.status(404).json({ ok: false, reason: 'not_configured' });
@@ -111,7 +119,7 @@ function validateMetadata(raw) {
   return { value: raw };
 }
 
-router.post('/', ingestLimiter, ingestAuth, async (req, res) => {
+router.post('/', darkUnlessConfigured, ingestLimiter, ingestAuth, async (req, res) => {
   // Read at CALL time (both gates), same as the in-process senders: with
   // the lane off the caller keeps emailing — nothing is dropped silently.
   if (!inAppEnabled()) return res.status(409).json({ ok: false, reason: 'in_app_disabled' });
@@ -151,7 +159,7 @@ router.post('/', ingestLimiter, ingestAuth, async (req, res) => {
 // resolved, kept as history. Idempotent; a key with nothing standing is a
 // 200 with resolved: 0. Only rows this seam wrote (source = ops-crons) are
 // touched — the in-process senders keep their own keys.
-router.post('/resolve', ingestLimiter, ingestAuth, async (req, res) => {
+router.post('/resolve', darkUnlessConfigured, ingestLimiter, ingestAuth, async (req, res) => {
   const body = isPlainObject(req.body) ? req.body : {};
   const key = typeof body.key === 'string' ? body.key.trim() : '';
   if (!KEY_RE.test(key)) return res.status(400).json({ ok: false, reason: 'invalid_payload', error: 'key: 1-120 chars of letters, digits, . _ : -' });
@@ -162,4 +170,4 @@ router.post('/resolve', ingestLimiter, ingestAuth, async (req, res) => {
 });
 
 module.exports = router;
-module.exports._private = { validateDigest, ingestAuth, KINDS };
+module.exports._private = { validateDigest, ingestAuth, darkUnlessConfigured, KINDS };
