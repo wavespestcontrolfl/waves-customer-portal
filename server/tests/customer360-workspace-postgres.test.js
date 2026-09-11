@@ -249,6 +249,45 @@ postgres('Customer 360 migrated PostgreSQL reads', () => {
     }
   }, 30000);
 
+  test('the retarget also runs for a conversationIds-driven read, not just an explicit messageIds one (claude pre-push audit P1, round 4)', async () => {
+    const conversationId = randomUUID();
+    const alertedMessageId = randomUUID();
+    const laterMessageId = randomUUID();
+    const alertedSid = `SM-synthetic-alerted-${randomBytes(4).toString('hex')}`;
+    const laterSid = `SM-synthetic-later-${randomBytes(4).toString('hex')}`;
+    const unknownPhone = `+1941555${String(Date.now()).slice(-4)}`;
+    let bell;
+    try {
+      await mockPg('conversations').insert({ id: conversationId, customer_id: null, channel: 'sms', contact_phone: unknownPhone, our_endpoint_id: '+19415550190' });
+      await mockPg('messages').insert([
+        { id: alertedMessageId, conversation_id: conversationId, channel: 'sms', direction: 'inbound', author_type: 'lead', is_read: false, twilio_sid: alertedSid, body: 'First synthetic text', created_at: new Date(Date.now() - 120000) },
+        { id: laterMessageId, conversation_id: conversationId, channel: 'sms', direction: 'inbound', author_type: 'lead', is_read: false, twilio_sid: laterSid, body: 'Second synthetic text, same sender', created_at: new Date(Date.now() - 60000) },
+      ]);
+      [bell] = await mockPg('notifications').insert({
+        recipient_type: 'admin', category: 'inbound_sms', title: 'Synthetic unknown-sender text',
+        metadata: JSON.stringify({ payload: { twilioSid: alertedSid } }),
+      }).returning('*');
+
+      // Opening the whole thread (the admin inbox's usual shape) passes
+      // conversationIds + readBefore, not an explicit messageIds list — the
+      // shared `scope` both mirrorSids and the retarget key off of covers
+      // either input shape identically, but the P2 fix was only exercised
+      // through messageIds until this test.
+      const readBefore = new Date(Date.now() + 1000);
+      await markInboundSmsRead({ conversationIds: [conversationId], readBefore, role: 'admin' });
+      expect((await mockPg('messages').where({ id: alertedMessageId }).first()).is_read).toBe(true);
+      expect((await mockPg('messages').where({ id: laterMessageId }).first()).is_read).toBe(true);
+      // Both messages in scope are read in the SAME call, so nothing
+      // remains unread — the bell must be cleared directly, not retargeted.
+      const refreshedBell = await mockPg('notifications').where({ id: bell.id }).first();
+      expect(refreshedBell.read_at).not.toBeNull();
+    } finally {
+      await mockPg('messages').whereIn('id', [alertedMessageId, laterMessageId]).delete();
+      if (bell) await mockPg('notifications').where({ id: bell.id }).delete();
+      await mockPg('conversations').where({ id: conversationId }).delete();
+    }
+  }, 30000);
+
   test('the retarget follows the sender across the business numbers they texted, not just one conversation (pre-push audit P1)', async () => {
     const firstConversationId = randomUUID();
     const secondConversationId = randomUUID();
