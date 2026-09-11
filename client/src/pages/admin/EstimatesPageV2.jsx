@@ -26,6 +26,7 @@ import React, {
 } from "react";
 import { useSearchParams, useNavigate } from "react-router-dom";
 import useRenderedTabBeacon from "../../hooks/useRenderedTabBeacon";
+import { useIntelligenceBarActions } from "../../hooks/useIntelligenceBarPageData";
 import {
   STATUS_CONFIG,
   PIPELINE_FILTERS,
@@ -1611,6 +1612,9 @@ function EstimatePipelineViewV2({
   const [outlineTarget, setOutlineTarget] = useState(null);
   const [pendingToggleKeys, setPendingToggleKeys] = useState(() => new Set());
   const [scheduleEstimate, setScheduleEstimate] = useState(null);
+  const { lastMutation } = useIntelligenceBarActions();
+  const estimatesRefresh =
+    lastMutation?.domain === "estimate" ? lastMutation.id : null;
   const activeFilterRef = useRef(filter);
   activeFilterRef.current = filter;
   const estimatesRequestRef = useRef(0);
@@ -1651,7 +1655,7 @@ function EstimatePipelineViewV2({
     return () => {
       estimatesRequestRef.current += 1;
     };
-  }, [filter, refreshEstimates]);
+  }, [filter, refreshEstimates, estimatesRefresh]);
   const archiveEstimate = useCallback(
     async (e) => {
       if (
@@ -3433,6 +3437,9 @@ function EstimatesMobileListView({
   const [extendTarget, setExtendTarget] = useState(null);
   const [outlineTarget, setOutlineTarget] = useState(null);
   const [sort, setSort] = useState("newest");
+  const { lastMutation } = useIntelligenceBarActions();
+  const estimatesRefresh =
+    lastMutation?.domain === "estimate" ? lastMutation.id : null;
   const activeFilterRef = useRef(filter);
   activeFilterRef.current = filter;
   const estimatesRequestRef = useRef(0);
@@ -3457,7 +3464,7 @@ function EstimatesMobileListView({
     return () => {
       estimatesRequestRef.current += 1;
     };
-  }, [filter, refreshEstimates]);
+  }, [filter, refreshEstimates, estimatesRefresh]);
   const markEstimateAccepted = useCallback(
     async (e) => {
       // A commercial proposal win auto-creates the customer when none is linked
