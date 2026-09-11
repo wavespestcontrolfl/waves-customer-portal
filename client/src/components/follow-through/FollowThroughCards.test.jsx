@@ -43,6 +43,28 @@ describe('callback cards', () => {
     expect(screen.getByText('1 snoozed callback')).toBeInTheDocument();
     expect(screen.getByText(/^Snoozed until /)).toBeInTheDocument();
   });
+  it('passes the hints filter through and reports its counts to the host', async () => {
+    const onSummary = vi.fn();
+    adminFetch.mockResolvedValue({ ...feed, commitments: [row, { ...row, id: 'late', description: 'Late callback', overdue: true }] });
+    render(<FollowThroughCards ui={ui} hints={false} onSummary={onSummary} />);
+    await screen.findByText('Late callback');
+    expect(adminFetch).toHaveBeenCalledWith(LIST.replace('&limit', '&hints=0&limit'));
+    expect(onSummary).toHaveBeenLastCalledWith({ enabled: true, open: 2, overdue: 1 });
+  });
+  it('re-reads every loaded page on a background refresh instead of snapping back to page one', async () => {
+    const second = { ...row, id: 'callback-2', description: 'Second page callback' };
+    adminFetch.mockImplementation(async (url) => url.includes('offset=100')
+      ? { ...feed, commitments: [second] } : { ...feed, has_more: true, next_offset: 100 });
+    render(<FollowThroughCards ui={ui} />);
+    fireEvent.click(await screen.findByText('Load more'));
+    await screen.findByText('Second page callback');
+    adminFetch.mockClear();
+    fireEvent(window, new Event('focus'));
+    await waitFor(() => expect(adminFetch).toHaveBeenCalledTimes(2));
+    expect(adminFetch.mock.calls.map(([url]) => url)).toEqual([LIST, LIST.replace('offset=0', 'offset=100')]);
+    expect(screen.getByText('Second page callback')).toBeInTheDocument();
+    expect(screen.getByText(row.description)).toBeInTheDocument();
+  });
   it('walks the queue by offset when the ledger says there is more', async () => {
     adminFetch.mockResolvedValueOnce({ ...feed, has_more: true, next_offset: 100 })
       .mockResolvedValueOnce({ ...feed, commitments: [{ ...row, id: 'callback-2', description: 'Second page callback' }] });

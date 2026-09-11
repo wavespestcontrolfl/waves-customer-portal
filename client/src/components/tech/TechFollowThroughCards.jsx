@@ -21,6 +21,10 @@ const fieldUi = {
   Link: (props) => <a {...props} className="tf-button" />,
 };
 
+// A fleet of tech tabs must not each run the ledger's fulfillment refresh
+// twice a minute; the field poll is slow and window focus still refreshes.
+const TECH_POLL_MS = 5 * 60 * 1000;
+
 export default function TechFollowThroughCards({ fieldWorkspace = false, ...props }) {
-  return <FollowThroughCards {...props} ui={fieldWorkspace ? fieldUi : ui} />;
+  return <FollowThroughCards pollMs={TECH_POLL_MS} {...props} ui={fieldWorkspace ? fieldUi : ui} />;
 }
