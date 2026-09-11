@@ -59,10 +59,24 @@ function causePartsOf(clause) {
   // than one governed cause is mentioned: SUMMARY_CAUSE_RE excludes generic
   // class words, so "No chinch bugs, weeds present" counted one mention, stayed
   // whole, and the negation swallowed the weed observation.
+  // Adjacent separators ("…, and …" — an Oxford comma) leave an empty segment
+  // between them. Drop it and fold its separators into the joiner that reaches
+  // the next real segment, so the clause still splits and the comma is still
+  // seen: discarding the empty segment instead used to disable splitting and
+  // let one segment's "ruled out" negate the confirmed cause beside it.
   const pieces = clause.split(/\s*(,|\band\b|\bor\b|\bnor\b)\s*/i);
-  const segments = pieces.filter((_, index) => index % 2 === 0).map((part) => part.trim());
-  const joiners = pieces.filter((_, index) => index % 2 === 1).map((part) => part.trim().toLowerCase());
-  const split = segments.filter(Boolean).length === segments.length && segments.filter((part) => namesCondition(part)).length > 1;
+  const segments = [];
+  const joiners = [];
+  let pending = [];
+  pieces.forEach((piece, index) => {
+    if (index % 2 === 1) { pending.push(piece.trim().toLowerCase()); return; }
+    const text = piece.trim();
+    if (!text) return;
+    if (segments.length) joiners.push(pending.join(' '));
+    segments.push(text);
+    pending = [];
+  });
+  const split = segments.filter((part) => namesCondition(part)).length > 1;
   const parts = split ? segments : [clause];
   const entries = parts.map((part) => ({ clause: part, cause: namesCondition(part), negation: NEGATED_DETAIL_RE.test(part), positive: POSITIVE_MARKER_RE.test(part) }));
   // "No chinch bugs or weeds present" is one negative statement: a leading

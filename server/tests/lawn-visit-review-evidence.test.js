@@ -24,6 +24,9 @@ describe('technician lawn evidence and reconciliation', () => {
     ['Chinch ruled out and no drought either', NO_STRESS_LABEL],
     ['Drought ruled out and chinch bugs confirmed by float test', 'chinch bug activity'],
     ['Drought ruled out, chinch bugs confirmed by float test', 'chinch bug activity'],
+    // Oxford comma: adjacent separators leave an empty segment between them,
+    // which must not disable splitting and let "ruled out" reach the next cause.
+    ['Drought ruled out, and chinch bugs confirmed by float test', 'chinch bug activity'],
     ['Grubs found, drought ruled out', 'grub activity'],
     ['No chinch bugs, grubs found', 'grub activity'],
     ['Chinch bugs and grubs ruled out', NO_STRESS_LABEL],
