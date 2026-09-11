@@ -41,8 +41,14 @@ function LoadingState({ children }) {
 // headings into real heading elements so the §5.7 in-page TOC has targets.
 // CommonMark only treats a trailing run of hashes as a closing sequence when
 // whitespace precedes it, so `# C#` keeps its hash instead of rendering as `C`.
-const HEADING_LINE = /^(#{1,3})\s+(.+?)(?:\s+#+)?\s*$/;
-const FENCE_LINE = /^\s*(`{3,}|~{3,})(.*)$/;
+// Both expressions allow at most THREE leading spaces, which is the boundary
+// where CommonMark stops reading a construct and starts reading an indented
+// code block. Getting this wrong in FENCE_LINE was the load-bearing half: a
+// `\s*` prefix accepted an indented code line containing ``` as a fence
+// opener, and because nothing ever closed it every later heading in the
+// article was suppressed — the whole TOC disappeared.
+const HEADING_LINE = /^ {0,3}(#{1,3})\s+(.+?)(?:\s+#+)?\s*$/;
+const FENCE_LINE = /^ {0,3}(`{3,}|~{3,})(.*)$/;
 
 // The stored ATX level drives both the rendered element and the TOC depth, so a
 // `###` subsection reads as a child of its `##` section rather than a peer.

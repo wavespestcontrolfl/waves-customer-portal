@@ -344,6 +344,36 @@ describe("KnowledgePage embedded navigation", () => {
     expect(child.className).toContain("pl-8");
   });
 
+  it("honors Markdown's three-space indentation boundary for headings and fences", async () => {
+    localStorage.setItem("waves_admin_user", JSON.stringify({ role: "admin" }));
+    const content = [
+      "# Top",
+      "   ### Indented three spaces is still a heading",
+      "    ```",
+      "    # four-space indent is a code block, not a fence opener",
+      "## Later heading must survive",
+      "Body",
+    ].join("\n");
+    fetch.mockImplementation(async (url) => (
+      url.endsWith("/knowledge/article/fixture")
+        ? response({ article: { title: "Fixture article", content, tags: [] } })
+        : response({ articles: [{ id: "fixture", title: "Fixture article", tags: [] }] })
+    ));
+    window.HTMLElement.prototype.scrollIntoView = vi.fn();
+    renderWiki("/admin/knowledge?wikiTab=articles");
+    fireEvent.click(await screen.findByText("Fixture article"));
+
+    const toc = await screen.findByRole("navigation", { name: "Article contents" });
+    const entries = within(toc).getAllByRole("button").map((button) => button.textContent);
+    // Up to three spaces still opens a heading; a four-space-indented ``` is an
+    // indented code block, so it must NOT open a fence and swallow what follows.
+    expect(entries).toEqual([
+      "Top",
+      "Indented three spaces is still a heading",
+      "Later heading must survive",
+    ]);
+  });
+
   it("renders only string tags so malformed tag elements cannot crash the reader", async () => {
     localStorage.setItem("waves_admin_user", JSON.stringify({ role: "admin" }));
     fetch.mockImplementation(async (url) => (
