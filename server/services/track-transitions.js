@@ -477,6 +477,7 @@ async function claimAndSendEnRoute({ svc, serviceId, opts, staleFieldClears = {}
         {
           operatorInitiated: ['tech', 'admin'].includes(String(opts.actorType || '')),
           notificationEventKey: enRouteNotificationKey(svc, attemptAt),
+          scheduledServiceId: svc.id,
         },
       );
 

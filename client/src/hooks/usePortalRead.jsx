@@ -2,7 +2,7 @@ import { createContext, useCallback, useContext, useEffect, useMemo, useRef, use
 import { useBiometricLock } from '../components/BiometricGate';
 
 const PortalReadContext = createContext(null);
-const READ_TIMEOUT_MS = 15000;
+export const READ_TIMEOUT_MS = 15000;
 
 // Scoped to the mounted, authenticated property. Nothing is written to browser
 // storage: logout, a different session, or a property change drops these reads.

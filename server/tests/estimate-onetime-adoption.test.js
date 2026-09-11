@@ -182,7 +182,9 @@ describe('adoptedAppointmentCatalogStamp', () => {
   const makeCatalogConn = (onQuery) => {
     const builder = () => ({
       whereRaw: (_sql, b) => ({
-        andWhere: (w) => ({ limit: () => ({ select: async () => onQuery(b, w) }) }),
+        andWhere: (w) => ({ limit: () => ({ select: () => ({
+          modify: () => Promise.resolve().then(() => onQuery(b, w)),
+        }) }) }),
       }),
     });
     builder.transaction = async (cb) => cb(builder);

@@ -27,7 +27,7 @@ postgres('SMS compliance history identity and delivery evidence', () => {
     await mockPg.raw(`
       CREATE TEMP TABLE sms_log (id uuid, direction text, from_phone text, to_phone text, status text, message_type text, metadata jsonb);
       CREATE TEMP TABLE conversations (id uuid PRIMARY KEY, contact_phone text);
-      CREATE TEMP TABLE messages (id uuid, conversation_id uuid, channel text, direction text, delivery_status text, message_type text, twilio_sid text);
+      CREATE TEMP TABLE messages (id uuid, conversation_id uuid, channel text, direction text, delivery_status text, message_type text, twilio_sid text, metadata jsonb);
       CREATE TEMP TABLE messaging_suppression (id uuid, phone text, active boolean);
     `);
   });
@@ -91,4 +91,34 @@ postgres('SMS compliance history identity and delivery evidence', () => {
     await mockPg('messaging_suppression').insert({ id: randomUUID(), phone: '+19415550199', active: true });
     expect(await hasOutboundHistory('+19415550199')).toBe(true);
   });
+
+  // codex #4211 P2: the current-phone operator check above is a fast path
+  // only — it re-derives from live env vars, so a number that WAS the
+  // operator's before ADAM_PHONE changed and the number was reassigned no
+  // longer trips it. TwilioService.sendSMS durably stamps
+  // metadata.to_owner_phone_at_send at the moment of send instead, so the
+  // exclusion survives a later env change regardless of the phone's CURRENT
+  // status (isKnownOwnerPhone here only matches +19415550199 — this row's
+  // phone is a different, never-owner number).
+  test('a durable owner-phone-at-send stamp is excluded even for a number that is not currently the operator', async () => {
+    await legacy('+19415550177', { message_type: 'manual', metadata: JSON.stringify({ to_owner_phone_at_send: true }) });
+    expect(await hasOutboundHistory('+19415550177')).toBe(false);
+    await mockPg('sms_log').del();
+    await unified('+19415550177', { metadata: JSON.stringify({ to_owner_phone_at_send: true }) });
+    expect(await hasOutboundHistory('+19415550177')).toBe(false);
+  });
+
+  // codex #4211 P1: the toll-free AI number answers first-contact strangers
+  // by design, including a vendor robotext. Without this exclusion, that
+  // reply becomes real outbound evidence that legitimizes the robotexter's
+  // next footer-bearing text on every OTHER Waves line too.
+  test.each(['ai_assistant', 'ai_assistant_reply'])(
+    'an AI assistant auto-reply (%s) is not customer-facing evidence', async (messageType) => {
+      await legacy('+19415550188', { message_type: messageType });
+      expect(await hasOutboundHistory('+19415550188')).toBe(false);
+      await mockPg('sms_log').del();
+      await unified('+19415550188', { message_type: messageType });
+      expect(await hasOutboundHistory('+19415550188')).toBe(false);
+    },
+  );
 });

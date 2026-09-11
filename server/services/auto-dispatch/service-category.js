@@ -47,6 +47,39 @@ function classifyServiceCategory(serviceType) {
   return 'general';
 }
 
+function serviceFamily(serviceType) {
+  const text = String(serviceType || '').replace(/_/g, ' ');
+  const hasLawn = CATEGORY_PATTERNS.find(([key]) => key === 'lawn')[1].test(text);
+  const hasPest = /pest|insect|\bant\b|roach|spider|flea|tick/i.test(text)
+    || CATEGORY_PATTERNS.some(([key, pattern]) => key !== 'lawn' && pattern.test(text));
+  if (hasLawn && hasPest) return null;
+  const category = classifyServiceCategory(text);
+  if (category === 'lawn') return 'lawn';
+  if (category !== 'general' || /pest|insect|\bant\b|roach|spider|flea|tick/i.test(text)) return 'pest';
+  return null;
+}
+
+// A finite preference, measured in route-score minutes. Work rows contribute
+// their actual allowance; several services at one visit do not count as
+// several geographic stops. Empty, unknown and balanced days stay neutral.
+function serviceFamilyPreference(rows, serviceType, { before, after } = {}) {
+  const family = serviceFamily(serviceType);
+  if (!family) return 0;
+  const work = { lawn: 0, pest: 0 };
+  for (const row of rows) {
+    const key = serviceFamily(row.service_type);
+    if (key) work[key] += Math.max(0, Number(row.estimated_duration_minutes) || 60);
+  }
+  const total = work.lawn + work.pest;
+  const other = family === 'lawn' ? 'pest' : 'lawn';
+  const dominance = total ? (work[family] - work[other]) / total : 0;
+  const previous = serviceFamily(before?.service_type);
+  const next = serviceFamily(after?.service_type);
+  const switches = Number(!!previous && previous !== family) + Number(!!next && next !== family)
+    - Number(!!previous && !!next && previous !== next);
+  return 8 * dominance - 3 * switches;
+}
+
 /**
  * Default time-of-day window for a service when the customer has no explicit
  * preferred_time. Lawn-family → mid/late morning; everything pest-family → early.
@@ -59,6 +92,10 @@ function defaultTimeWindow(serviceType) {
 // Map the property_preferences.preferred_time enum → a TIME_WINDOWS bucket.
 function timeWindowForPreferenceKey(key) {
   if (!key || key === 'no_preference') return null;
+  if (key === 'afternoon' && require('../scheduling/policy').capacityEnabled()) {
+    // Half-open anchor range: the final 16:00 start promises arrival by 18:00.
+    return { ...TIME_WINDOWS.afternoon, endMin: 17 * 60, label: '1:00–6:00 PM' };
+  }
   return TIME_WINDOWS[key] || null;
 }
 
@@ -66,6 +103,8 @@ module.exports = {
   TIME_WINDOWS,
   CAPABILITY_CATEGORIES,
   classifyServiceCategory,
+  serviceFamily,
+  serviceFamilyPreference,
   defaultTimeWindow,
   timeWindowForPreferenceKey,
 };

@@ -35,6 +35,17 @@ describe('Pipeline queue navigation', () => {
     await waitFor(() => expect(calls.filter(({ path }) => path === '/api/admin/leads/lead-qa').length).toBeGreaterThan(before));
     expect(screen.getByRole('button', { name: 'QA Prospect', exact: true })).toHaveAttribute('aria-expanded', 'true');
   });
+  it('shows the effective callback deadline on the lead', async () => {
+    const base = fetch.getMockImplementation();
+    fetch.mockImplementation(async (url, opts) => String(url).includes('/commitments/open')
+      ? { ok: true, json: async () => ({ commitments: [{ id: 'callback-1', party: 'waves',
+        description: 'Synthetic callback', due_at: null, effective_due_at: '2040-09-05T17:00:00Z',
+        call_started_at: '2040-09-05T13:00:00Z' }], enabled: true }) }
+      : base(url, opts));
+    mount();
+    fireEvent.click(await screen.findByRole('button', { name: 'QA Prospect' }));
+    expect(await screen.findByText(/Due Sep 5.*1:00/)).toBeInTheDocument();
+  });
   it('retains source and date scope on its first request', async () => {
     mount('/admin/pipeline?source_name=Synthetic&from=2020-01-01&to=2020-02-01&period_label=Test');
     await screen.findByRole('button', { name: 'QA Prospect' });

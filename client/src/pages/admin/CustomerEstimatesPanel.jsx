@@ -25,13 +25,13 @@ import { adminFetch } from "../../lib/adminFetch";
 import CallBridgeLink from "../../components/admin/CallBridgeLink";
 
 const STATUS_TONES = {
-  draft: "muted",
+  draft: "neutral",
   scheduled: "neutral",
   sent: "neutral",
   viewed: "neutral",
   accepted: "strong",
   declined: "alert",
-  expired: "muted",
+  expired: "neutral",
 };
 
 const STATUS_LABELS = {
@@ -279,7 +279,7 @@ export default function CustomerEstimatesPanel({ customerId, onClose }) {
                 )}
                 {c.property_type === "commercial" ||
                 c.property_type === "business" ? (
-                  <Badge tone="muted">Commercial</Badge>
+                  <Badge tone="neutral">Commercial</Badge>
                 ) : null}
                 {c.active === false && <Badge tone="alert">Inactive</Badge>}
               </div>{" "}
@@ -399,7 +399,7 @@ export default function CustomerEstimatesPanel({ customerId, onClose }) {
               ) : (
                 <div className="space-y-1.5">
                   {estimates.map((e) => {
-                    const tone = STATUS_TONES[e.status] || "muted";
+                    const tone = STATUS_TONES[e.status] || "neutral";
                     const label = STATUS_LABELS[e.status] || e.status;
                     const anchorDate =
                       e.accepted_at ||

@@ -3,6 +3,7 @@ import { Outlet, useNavigate, useLocation, Link } from 'react-router-dom';
 import { getAdminAuthToken, getAdminDisplayName } from '../lib/adminAuth';
 import { refetchFlags } from '../hooks/useFeatureFlag';
 import AddToHomeScreenHint from './tech/AddToHomeScreenHint';
+import TechFieldShell from './tech/TechFieldShell';
 import useStaffDocumentsAvailable from '../hooks/useStaffDocumentsAvailable';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
@@ -232,6 +233,7 @@ export default function TechLayout() {
   };
 
   return (
+    <TechFieldShell techName={techName} techRole={techRole} documentsAvailable={controlledDocumentsAvailable}>
     <div style={{
       minHeight: '100dvh',
       background: DARK.bg,
@@ -268,7 +270,7 @@ export default function TechLayout() {
             color: DARK.text,
           }}>Field Tools</span>
         </div>
-        <span style={{ fontSize: 13, color: DARK.muted }}>{techName}</span>
+        <span style={{ fontSize: 14, color: DARK.muted }}>{techName}</span>
       </header>
 
       {/* Main content area. Bottom padding clears the fixed nav (8px pad +
@@ -308,9 +310,9 @@ export default function TechLayout() {
                 gap: 2,
                 textDecoration: 'none',
                 padding: '4px 12px',
-                // 44px effective touch target (field use = gloved thumbs).
-                minHeight: 44,
-                minWidth: 44,
+                // 48px effective touch target (field use = gloved thumbs).
+                minHeight: 48,
+                minWidth: 48,
                 borderRadius: 8,
                 color: active ? DARK.teal : DARK.muted,
                 transition: 'color 0.2s',
@@ -326,5 +328,6 @@ export default function TechLayout() {
         })}
       </nav>
     </div>
+    </TechFieldShell>
   );
 }

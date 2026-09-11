@@ -5118,6 +5118,7 @@ router.post('/:id/send-with-invoice', requireAdmin, async (req, res, next) => {
           invoiceId: invoice.id,
           identityTrustLevel: 'phone_matches_customer',
           entryPoint: 'admin_project_report_with_invoice',
+          operatorInitiated: true,
           // original_message_type 'invoice' keeps the admin-sms-templates
           // invoice kill switch applicable to this billing text.
           metadata: { original_message_type: 'invoice', project_id: project.id, invoice_id: invoice.id },
@@ -5192,6 +5193,7 @@ router.post('/:id/send-with-invoice', requireAdmin, async (req, res, next) => {
         email: isPayerInvoice ? !!channels.payer_email?.ok : !!channels.email?.ok,
         source: 'project_report_with_invoice',
         payUrl,
+        actorTechnicianId: req.technicianId || null,
       }).catch((err) => logger.error(`[projects] markDeliverySent failed for ${invoice.id}: ${err.message}`));
       // Invoice is delivered + finalized — now run the full-coverage side effects we
       // deferred at apply time (stop dunning followups + activate the annual-prepay
