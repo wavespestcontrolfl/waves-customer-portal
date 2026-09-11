@@ -2,6 +2,7 @@ jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ warn: jest.fn(), info: jest.fn(), error: jest.fn() }));
 jest.mock('../services/triage-auto-resolve', () => ({ resolveRescheduleCards: jest.fn(async () => 1) }));
 jest.mock('../utils/triage-locks', () => ({ lockTriageCall: jest.fn(async () => {}) }));
+jest.mock('../services/audit-log', () => ({ recordAuditEvent: jest.fn(async () => {}) }));
 const db = require('../models/db');
 const { resolveRescheduleCards } = require('../services/triage-auto-resolve');
 const links = require('../services/reschedule-link-promises');
@@ -45,7 +46,7 @@ test('each subject field must occur in its own source quote, and units remain di
   expect(select({ call: source, commitment: { ...commitment, subject }, candidates: [visit, { ...visit, id: 'unit-3', property_unit: 'Unit 3' }] }).visit?.id).toBe('visit');
 });
 
-test('a stated current date must bind to the canonical quoted weekday and time', () => {
+test('a stated current date must match the candidate visit exactly', () => {
   const weekday = parseETDateTime('2030-01-08T09:00').toLocaleDateString('en-US', { timeZone: 'America/New_York', weekday: 'long' });
   const subject = { quote: `My appointment is ${weekday} at 9 AM.`, visit_date: '2030-01-08' };
   const source = { ...call, transcription: `${call.transcription}\nCaller: ${subject.quote}` };
@@ -53,11 +54,60 @@ test('a stated current date must bind to the canonical quoted weekday and time',
   expect(select({ call: source, commitment: { ...commitment, subject: { ...subject, visit_date: '2030-01-09' } } }).reason).toBe('discussed_visit_unavailable');
 });
 
-test('dispatch-owned pending, elapsed and grouped visits stay in review', () => {
+test('dispatch-owned pending and grouped visits stay in review', () => {
   expect(select({ candidates: [{ ...visit, visit_id: 'group' }] }).reason).toBe('visit_not_self_service');
   expect(select({ candidates: [{ ...visit, status: 'pending', source_action: 'ai_call_outbound_review' }] }).visit).toBeUndefined();
-  expect(select({ now: parseETDateTime('2030-01-08T11:00') }).reason).toBe('visit_elapsed');
 });
+
+test('a missed appointment is still promised the link the page would honour', () => {
+  // /reschedule/:token treats a pending or confirmed visit whose window has
+  // passed as MISSED, not served, and still lets the customer pick a new time.
+  // The call right after a missed visit is the one most likely to be promised
+  // this link, so the worker reaches the page's own verdict.
+  expect(select({ now: parseETDateTime('2030-01-08T11:00') }).visit?.id).toBe('visit');
+  expect(select({ now: parseETDateTime('2030-02-01T09:00') }).visit?.id).toBe('visit');
+  // Still inside the quoted two-hour arrival window: not missed, and eligible
+  // for the same reason.
+  expect(select({ now: parseETDateTime('2030-01-08T10:45') }).visit?.id).toBe('visit');
+  // Terminal and live states are still refused, elapsed or not.
+  for (const status of ['completed', 'cancelled', 'en_route', 'rescheduled']) {
+    expect(select({ candidates: [{ ...visit, status }], now: parseETDateTime('2030-01-08T11:00') }).reason).toBe('visit_not_self_service');
+  }
+});
+
+test('an emailed link is office work, not a silent SMS', () => {
+  const emailed = 'I will email you a reschedule link for that appointment.';
+  expect(select({ call: { ...call, transcription: `Agent: ${emailed}` },
+    commitment: { ...commitment, evidence: [{ quote: emailed, speaker: 'agent' }] } }).reason).toBe('channel_unsupported');
+  // An extracted channel the one SMS pipeline cannot keep parks the same way,
+  // whatever the quote says.
+  expect(select({ commitment: { ...commitment, channel: 'email' } }).reason).toBe('channel_unsupported');
+  // "email or text" names a channel this worker can keep, and an absent or
+  // unknown channel is the default.
+  const either = 'I will email or text you a reschedule link for that appointment.';
+  expect(select({ call: { ...call, transcription: `Agent: ${either}` },
+    commitment: { ...commitment, evidence: [{ quote: either, speaker: 'agent' }] } }).visit?.id).toBe('visit');
+  for (const channel of [undefined, null, '', 'sms', 'unknown']) {
+    expect(select({ commitment: { ...commitment, channel } }).visit?.id).toBe('visit');
+  }
+});
+
+test('a stated appointment date binds by exact match, not the new-booking slot rules', () => {
+  const far = { ...visit, scheduled_date: '2030-09-20', window_start: '13:00', window_end: '15:00' };
+  const subject = { quote: 'My September 20 appointment.', visit_date: '2030-09-20' };
+  // Months out, no weekday word and no time word: all three were refused by
+  // the new-booking slot validator even though the date matched exactly.
+  expect(select({ call: { ...call, transcription: `${call.transcription}\nCaller: ${subject.quote}` },
+    commitment: { ...commitment, subject }, candidates: [far] }).visit?.id).toBe('visit');
+  // A quote that contradicts the stated date still binds nothing.
+  for (const spoken of ['My September 27 appointment.', 'My October 20 appointment.', 'My appointment on the 27th.']) {
+    expect(select({ call: { ...call, transcription: `${call.transcription}\nCaller: ${spoken}` },
+      commitment: { ...commitment, subject: { quote: spoken, visit_date: '2030-09-20' } }, candidates: [far] })
+      .reason).toBe('discussed_visit_unavailable');
+  }
+});
+
+
 
 test('an inactive account cannot be promised a link the reschedule page refuses', () => {
   for (const active of [false, null, undefined]) {
@@ -101,30 +151,46 @@ test('an agent who takes the promise back later in the call stops the send', () 
   expect(select({ call: { ...call, transcription: `Agent: I cannot send that link yet.\nAgent: ${quote}` } }).visit?.id).toBe('visit');
 });
 
-// A knex stand-in that records the filters the reconciliation builds and the
-// writes it makes. Only the shapes this module actually uses are modelled.
-function fakeConn({ rows = [], selfServe = null } = {}) {
-  const seen = { statusAllowlist: null, logFilters: [], updates: [] };
+// A knex stand-in that records the filters the worker builds and the writes it
+// makes. Only the shapes this module actually uses are modelled; builders are
+// thenable the way knex's are.
+function fakeConn({ outbox = [], selfServe = null, cards = [], throwOn = null } = {}) {
+  const seen = { statusAllowlist: null, logFilters: [], updates: [], inserts: [], resolved: [] };
+  const openCards = () => cards.filter((card) => !seen.resolved.includes(card.id));
   const build = (table) => {
+    const name = String(table).split(' ')[0];
     const state = { eq: {}, ranges: [] };
+    const rows = () => (name === 'outbox_messages' ? outbox : name === 'triage_items' ? openCards() : []);
     const b = {};
     const pass = (fn) => (...args) => { if (fn) fn(...args); return b; };
     Object.assign(b, {
-      whereNotNull: pass(), orWhereNotNull: pass(), whereNot: pass(), orWhere: pass(), whereRaw: pass(),
-      orderBy: pass(), limit: pass(),
-      whereIn: pass((col, values) => { if (table === 'outbox_messages' && col === 'status') seen.statusAllowlist = values; }),
+      whereNotNull: pass(), orWhereNotNull: pass(), whereNot: pass(), whereNotIn: pass(), orWhere: pass(), whereRaw: pass(),
+      whereNull: pass(), join: pass(), leftJoin: pass(), orderBy: pass(), limit: pass(), forUpdate: pass(), forShare: pass(),
+      onConflict: () => ({ ignore: async () => 1 }),
+      whereIn: pass((col, values) => { if (name === 'outbox_messages' && col === 'status') seen.statusAllowlist = values; }),
       where: pass((first, op, value) => {
         if (typeof first === 'function') first.call(b);
         else if (first && typeof first === 'object') Object.assign(state.eq, first);
         else state.ranges.push({ col: first, op, value });
       }),
       modify: (fn) => { fn(b); return b; },
-      select: async () => (table === 'outbox_messages' ? rows : []),
+      then: (resolve, reject) => Promise.resolve().then(rows).then(resolve, reject),
+      select: pass(),   // knex returns the builder; awaiting it yields the rows
       first: async () => {
-        if (table === 'reschedule_log') { seen.logFilters.push({ eq: { ...state.eq }, ranges: [...state.ranges] }); return selfServe; }
+        if (name === 'outbox_messages') {
+          if (throwOn && state.eq.id === throwOn) throw new Error('Promised-link delivery evidence is truncated');
+          return outbox.find((row) => row.id === state.eq.id) || null;
+        }
+        if (name === 'reschedule_log') { seen.logFilters.push({ eq: { ...state.eq }, ranges: [...state.ranges] }); return selfServe; }
+        if (name === 'triage_items') return openCards()[0] || null;
         return null;
       },
-      update: async (patch) => { seen.updates.push({ table, eq: { ...state.eq }, patch }); return 1; },
+      insert: async (data) => { seen.inserts.push({ table: name, data }); return [1]; },
+      update: async (patch) => {
+        seen.updates.push({ table: name, eq: { ...state.eq }, patch });
+        if (name === 'triage_items' && patch.status === 'resolved' && state.eq.id) seen.resolved.push(state.eq.id);
+        return 1;
+      },
     });
     return b;
   };
@@ -138,7 +204,7 @@ const sentRow = { id: 'outbox', status: 'sent', commitment_id: 'commitment', rel
   related_scheduled_service_id: 'visit', sent_at: new Date('2030-01-07T12:00:00Z') };
 
 test('a replay that moved nothing closes no cards; a real self-serve move does', async () => {
-  const none = fakeConn({ rows: [sentRow], selfServe: null });
+  const none = fakeConn({ outbox: [sentRow], selfServe: null });
   expect(await links.resolveUsedLink(none.conn, 'visit')).toBe(0);
   expect(resolveRescheduleCards).not.toHaveBeenCalled();
   expect(none.seen.updates).toEqual([]);
@@ -147,7 +213,7 @@ test('a replay that moved nothing closes no cards; a real self-serve move does',
   expect(none.seen.logFilters[0].eq).toMatchObject({ scheduled_service_id: 'visit', initiated_by: 'customer_self_serve' });
   expect(none.seen.logFilters[0].ranges).toContainEqual({ col: 'created_at', op: '>=', value: sentRow.sent_at });
 
-  const moved = fakeConn({ rows: [sentRow], selfServe: { id: 'log' } });
+  const moved = fakeConn({ outbox: [sentRow], selfServe: { id: 'log' } });
   expect(await links.resolveUsedLink(moved.conn, 'visit')).toBe(1);
   expect(resolveRescheduleCards).toHaveBeenCalledWith(moved.conn, 'call', expect.any(String), 'visit');
   expect(moved.seen.updates).toEqual([expect.objectContaining({ table: 'outbox_messages', eq: { id: 'outbox' } })]);
@@ -155,7 +221,7 @@ test('a replay that moved nothing closes no cards; a real self-serve move does',
 
 test('a link used after the row was parked still closes its cards and the call', async () => {
   const parked = { ...sentRow, status: 'review' };
-  const { conn, seen } = fakeConn({ rows: [parked], selfServe: { id: 'log' } });
+  const { conn, seen } = fakeConn({ outbox: [parked], selfServe: { id: 'log' }, cards: [{ id: 'card', payload: { reschedule_link_promise: { commitment_id: 'commitment', commitment_ids: ['commitment'] } } }] });
   expect(await links.reconcileUsedLinks(conn)).toBe(1);
   // Parked rows are inside the reconciliation allowlist (an attempt was made
   // even though the carrier receipt never arrived).
@@ -164,6 +230,64 @@ test('a link used after the row was parked still closes its cards and the call',
   // The promise's own exception card closes, and review_status resyncs.
   expect(seen.updates).toContainEqual(expect.objectContaining({ table: 'triage_items', patch: expect.objectContaining({ status: 'resolved' }) }));
   expect(seen.updates).toContainEqual(expect.objectContaining({ table: 'call_log', patch: expect.objectContaining({ review_status: 'resolved' }) }));
+});
+
+const promiseRow = (id, commitmentId, extra = {}) => ({ id, status: 'pending', commitment_id: commitmentId,
+  related_call_log_id: 'call', related_customer_id: 'customer', related_scheduled_service_id: 'visit', payload: {}, ...extra });
+
+// Drive one sweep tick with the gate in shadow so nothing can reach a
+// customer, and return what the tick did.
+async function sweepWith(options) {
+  const prior = process.env.GATE_RESCHEDULE_LINK_ON_PROMISE, priorCommitments = gates.callCommitments;
+  const fake = fakeConn(options);
+  try {
+    gates.callCommitments = true;
+    process.env.GATE_RESCHEDULE_LINK_ON_PROMISE = 'shadow';
+    return { ...fake, result: await links.sweep(fake.conn, { now }) };
+  } finally {
+    if (prior === undefined) delete process.env.GATE_RESCHEDULE_LINK_ON_PROMISE; else process.env.GATE_RESCHEDULE_LINK_ON_PROMISE = prior;
+    gates.callCommitments = priorCommitments;
+  }
+}
+
+test('one unprocessable row cannot starve the rest of the sweep', async () => {
+  // matchingSend throws outright for a customer with more than 200 matching
+  // link messages, and that row is by definition the oldest unchanged item —
+  // an unguarded loop would abort every later promise and the used-link
+  // reconciliation on every tick, forever.
+  const { seen, result } = await sweepWith({ outbox: [promiseRow('boom', 'first'), promiseRow('ok', 'second')], throwOn: 'boom' });
+  expect(result).toMatchObject({ processed: 2, failed: 1, reconciled: 0 });
+  // The failing row parks for the office instead of retrying invisibly...
+  expect(seen.updates).toContainEqual(expect.objectContaining({ table: 'outbox_messages', eq: { id: 'boom' },
+    patch: expect.objectContaining({ status: 'review', last_error: 'worker_error' }) }));
+  // ...the later row is still processed...
+  expect(seen.updates.some((u) => u.table === 'outbox_messages' && u.eq.id === 'ok')).toBe(true);
+  // ...and used-link reconciliation still runs for both rows.
+  expect(seen.logFilters).toHaveLength(2);
+});
+
+test('one call-level card speaks for every promise parked against the call', async () => {
+  const card = { id: 'card', payload: { reschedule_link_promise: { commitment_id: 'first', commitment_ids: ['first'], reason: 'delivery_failed' } } };
+  const { seen } = await sweepWith({ outbox: [promiseRow('boom', 'second')], throwOn: 'boom', cards: [card] });
+  // A second parked promise joins the existing card rather than vanishing
+  // behind the first one's id.
+  const merged = seen.updates.find((u) => u.table === 'triage_items');
+  expect(merged.patch.payload.reschedule_link_promise.commitment_ids).toEqual(['first', 'second']);
+  expect(merged.patch.status).toBeUndefined();
+  expect(seen.inserts.filter((i) => i.table === 'triage_items')).toHaveLength(0);
+});
+
+test('settling one promise leaves the card open for the promise still parked', async () => {
+  const card = { id: 'card', payload: { reschedule_link_promise: { commitment_id: 'first', commitment_ids: ['first', 'second'] } } };
+  const parked = { id: 'outbox', status: 'review', commitment_id: 'first', related_call_log_id: 'call',
+    related_scheduled_service_id: 'visit', sent_at: new Date('2030-01-07T12:00:00Z') };
+  const { conn, seen } = fakeConn({ outbox: [parked], selfServe: { id: 'log' }, cards: [card] });
+  expect(await links.reconcileUsedLinks(conn)).toBe(1);
+  const patched = seen.updates.find((u) => u.table === 'triage_items');
+  expect(patched.patch.payload.reschedule_link_promise.commitment_ids).toEqual(['second']);
+  expect(patched.patch.status).toBeUndefined();
+  // The call stays in review while the second promise is still parked.
+  expect(seen.updates).toContainEqual(expect.objectContaining({ table: 'call_log', patch: expect.objectContaining({ review_status: 'open' }) }));
 });
 
 test('a busy send interlock is a retryable block, and the gate off is a pass-through', async () => {
