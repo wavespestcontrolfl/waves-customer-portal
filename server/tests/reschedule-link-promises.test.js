@@ -127,12 +127,36 @@ test('an extracted date needs the quote to actually name it once more than one v
     candidates: [second] }).visit?.id).toBe('second');
 });
 
-test('a bare weekday name grounds the date among several open visits', () => {
+test('a bare weekday alongside an explicit relative token cannot override the relative token', () => {
+  // 2030-01-07 is a Monday, so "tomorrow" is 2030-01-08 — but 2030-01-15 is
+  // ALSO a Tuesday, like the visit the caller actually meant. Checking the
+  // bare weekday name BEFORE the explicit relative token let "Tuesday" match
+  // first and ground the wrong visit (codex #4293 P1 r2).
   const second = { ...visit, id: 'second', scheduled_date: '2030-01-15' };
-  const weekday = parseETDateTime('2030-01-15T09:00').toLocaleDateString('en-US', { timeZone: 'America/New_York', weekday: 'long' });
-  const subject = { quote: `My appointment is on ${weekday}.`, visit_date: '2030-01-15' };
+  const subject = { quote: 'My appointment tomorrow, Tuesday, please.' };
   const source = { ...call, transcription: `${call.transcription}\nCaller: ${subject.quote}` };
-  expect(select({ call: source, commitment: { ...commitment, subject }, candidates: [visit, second] }).visit?.id).toBe('second');
+  expect(select({ call: source, commitment: { ...commitment, subject: { ...subject, visit_date: '2030-01-15' } },
+    candidates: [visit, second] }).reason).toBe('date_not_grounded');
+  expect(select({ call: source, commitment: { ...commitment, subject: { ...subject, visit_date: '2030-01-08' } },
+    candidates: [visit, second] }).visit?.id).toBe('visit');
+});
+
+test('a bare weekday name grounds the date only when exactly one open visit shares it', () => {
+  // `visit` is 2030-01-08, a Tuesday; this candidate is the following day, a
+  // Wednesday, so the weekday word alone is unambiguous.
+  const second = { ...visit, id: 'second', scheduled_date: '2030-01-16' };
+  const weekday = parseETDateTime('2030-01-16T09:00').toLocaleDateString('en-US', { timeZone: 'America/New_York', weekday: 'long' });
+  const uniqueSubject = { quote: `My appointment is on ${weekday}.`, visit_date: '2030-01-16' };
+  const uniqueSource = { ...call, transcription: `${call.transcription}\nCaller: ${uniqueSubject.quote}` };
+  expect(select({ call: uniqueSource, commitment: { ...commitment, subject: uniqueSubject }, candidates: [visit, second] }).visit?.id).toBe('second');
+
+  // Two open visits sharing the SAME weekday leave a bare weekday name unable
+  // to tell them apart, so it grounds neither pick.
+  const alsoTuesday = { ...visit, id: 'also-tuesday', scheduled_date: '2030-01-15' };
+  const sharedSubject = { quote: 'My appointment is on Tuesday.', visit_date: '2030-01-15' };
+  const sharedSource = { ...call, transcription: `${call.transcription}\nCaller: ${sharedSubject.quote}` };
+  expect(select({ call: sharedSource, commitment: { ...commitment, subject: sharedSubject }, candidates: [visit, alsoTuesday] })
+    .reason).toBe('date_not_grounded');
 });
 
 test('an extracted date with no naming token at all parks for review among several visits', () => {
@@ -195,19 +219,23 @@ test('an agent who takes the promise back later in the call stops the send', () 
 // keeps every existing fixture behaving exactly as before; pass it
 // explicitly to pull the two apart.
 function fakeConn({ outbox = [], selfServe = null, selfServeVisitIds = null, cards = [], throwOn = null } = {}) {
-  const seen = { statusAllowlist: null, logFilters: [], visitIdFilters: [], updates: [], inserts: [], resolved: [] };
+  const seen = { statusAllowlist: null, logFilters: [], visitIdFilters: [], orderByCalls: [], updates: [], inserts: [], resolved: [] };
   const openCards = () => cards.filter((card) => !seen.resolved.includes(card.id));
   const build = (table) => {
     const name = String(table).split(' ')[0];
-    const state = { eq: {}, ranges: [] };
+    const state = { eq: {}, ranges: [], whereIn: [] };
     const rows = () => (name === 'outbox_messages' ? outbox : name === 'triage_items' ? openCards() : []);
     const b = {};
     const pass = (fn) => (...args) => { if (fn) fn(...args); return b; };
     Object.assign(b, {
       whereNotNull: pass(), orWhereNotNull: pass(), whereNot: pass(), whereNotIn: pass(), orWhere: pass(), whereRaw: pass(),
-      whereNull: pass(), join: pass(), leftJoin: pass(), orderBy: pass(), limit: pass(), forUpdate: pass(), forShare: pass(),
+      whereNull: pass(), join: pass(), leftJoin: pass(), limit: pass(), forUpdate: pass(), forShare: pass(),
+      orderBy: pass((arg) => seen.orderByCalls.push({ table: name, arg })),
       onConflict: () => ({ ignore: async () => 1 }),
-      whereIn: pass((col, values) => { if (name === 'outbox_messages' && col === 'status') seen.statusAllowlist = values; }),
+      whereIn: pass((col, values) => {
+        if (name === 'outbox_messages' && col === 'status') seen.statusAllowlist = values;
+        state.whereIn.push({ col, values });
+      }),
       where: pass((first, op, value) => {
         if (typeof first === 'function') first.call(b);
         else if (first && typeof first === 'object') Object.assign(state.eq, first);
@@ -234,7 +262,7 @@ function fakeConn({ outbox = [], selfServe = null, selfServeVisitIds = null, car
       },
       insert: async (data) => { seen.inserts.push({ table: name, data }); return [1]; },
       update: async (patch) => {
-        seen.updates.push({ table: name, eq: { ...state.eq }, patch });
+        seen.updates.push({ table: name, eq: { ...state.eq }, whereIn: [...state.whereIn], patch });
         if (name === 'triage_items' && patch.status === 'resolved' && state.eq.id) seen.resolved.push(state.eq.id);
         return 1;
       },
@@ -295,8 +323,16 @@ test('a visit with no self-serve move on record is never scanned by the reconcil
 
   // A visit that DOES have evidence on record still reconciles exactly as
   // before once it clears the bulk pre-filter.
-  const { conn: withEvidence } = fakeConn({ outbox: [sentRow], selfServe: { id: 'log' }, selfServeVisitIds: ['visit'] });
-  expect(await links.reconcileUsedLinks(withEvidence)).toBe(1);
+  const { conn: withEvidence, seen: seenWithEvidence } = fakeConn({ outbox: [sentRow], selfServe: { id: 'log' }, selfServeVisitIds: ['visit'] });
+  const scanTime = new Date('2030-01-09T00:00:00Z');
+  expect(await links.reconcileUsedLinks(withEvidence, scanTime)).toBe(1);
+  // The reconcile sweep shares the SAME fairness ordering as the send-queue
+  // sweep, and stamps every row it examines, matched or not.
+  expect(seenWithEvidence.orderByCalls.find((c) => c.table === 'outbox_messages').arg)
+    .toEqual([{ column: 'last_scanned_at', order: 'asc', nulls: 'first' }, { column: 'updated_at', order: 'asc' }]);
+  const evidenceStamp = seenWithEvidence.updates.find((u) => u.table === 'outbox_messages' && u.patch && 'last_scanned_at' in u.patch);
+  expect(evidenceStamp.whereIn).toContainEqual({ col: 'id', values: ['outbox'] });
+  expect(evidenceStamp.patch.last_scanned_at).toEqual(scanTime);
 });
 
 const promiseRow = (id, commitmentId, extra = {}) => ({ id, status: 'pending', commitment_id: commitmentId,
@@ -335,6 +371,26 @@ test('one unprocessable row cannot starve the rest of the sweep', async () => {
   expect(seen.updates.some((u) => u.table === 'outbox_messages' && u.eq.id === 'ok')).toBe(true);
   // ...and used-link reconciliation still runs for both rows.
   expect(seen.logFilters).toHaveLength(2);
+});
+
+test('a review row parked for the same unchanging reason is still stamped scanned, so it cannot starve the send queue', async () => {
+  // A review row whose context stays invalid on every pass has nothing about
+  // it that ever changes on its own — parkReview's own guard skips the write
+  // once status/last_error already match — so an oldest-updated-first LIMIT
+  // 100 would keep re-selecting it forever once 100 such rows accumulated,
+  // starving every newer row behind it (codex #4293 P1, the send-queue
+  // sweep's own version of the reconcile-sweep starvation above). The OUTER
+  // stamp below fires for every selected row up front, independent of
+  // whatever its own (here unmodelled) downstream processing does.
+  const stuck = { ...promiseRow('stuck', 'first'), status: 'review', last_error: 'discussed_visit_unavailable' };
+  const { seen, result } = await sweepWith({ outbox: [stuck], selfServeVisitIds: [] });
+  expect(result.processed).toBe(1);
+  const stamp = seen.updates.find((u) => u.table === 'outbox_messages' && u.patch && 'last_scanned_at' in u.patch);
+  expect(stamp).toBeDefined();
+  expect(stamp.whereIn).toContainEqual({ col: 'id', values: ['stuck'] });
+  expect(stamp.patch.last_scanned_at).toEqual(now);
+  expect(seen.orderByCalls.find((c) => c.table === 'outbox_messages').arg)
+    .toEqual([{ column: 'last_scanned_at', order: 'asc', nulls: 'first' }, { column: 'updated_at', order: 'asc' }]);
 });
 
 test('one call-level card speaks for every promise parked against the call', async () => {

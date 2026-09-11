@@ -141,47 +141,68 @@ function quoteContradictsVisitDate(quote, ymd) {
 // only rejects a quote that says something ELSE, so "my appointment tomorrow"
 // sails through unexamined and binds whatever date the model happened to pick
 // — right or wrong — the moment some candidate visit shares it. With more than
-// one open visit that is not a check, it is a coin flip (codex #4293 P1). These
-// three helpers ask the positive question instead: does the quote itself name
-// the model's chosen date, resolved against the call's own Eastern date rather
-// than the server's now()?
-function quoteNamesAbsoluteDate(q, month, day) {
+// one open visit that is not a check, it is a coin flip (codex #4293 P1).
+//
+// An EXPLICIT claim — an absolute month+day, an ordinal-only day, or a
+// today/tomorrow/next-<weekday> token resolved against the call's own Eastern
+// date — must be checked FIRST and must match the extracted date exactly; a
+// bare weekday name is a DAY OF WEEK, not a date, and is only trusted as a
+// last resort when the quote makes no explicit claim at all. Checking the
+// weekday first — as an earlier round of this fix did — let "my appointment
+// tomorrow, Tuesday" ground Jan 15 for a Jan 7 (Tuesday) call with visits on
+// Jan 8 AND Jan 15 (also a Tuesday): the bare "Tuesday" matched before
+// "tomorrow" (which actually resolves to Jan 8) ever got a look (codex #4293
+// P1 r2).
+function explicitQuoteDate(q, reference) {
   for (const [index, name] of MONTH_NAMES.entries()) {
     const spoken = q.match(new RegExp(`\\b${name}\\b\\s*(\\d{1,2})?`));
-    if (spoken?.[1] && index + 1 === month && Number(spoken[1]) === day) return true;
+    // "may" is an ordinary verb too — it only reads as a month with a day on it.
+    if (spoken?.[1]) return { month: index + 1, day: Number(spoken[1]) };
   }
   const ordinal = q.match(/\b(\d{1,2})(?:st|nd|rd|th)\b/);
-  return !!ordinal && Number(ordinal[1]) === day;
-}
-
-function quoteNamesWeekday(q, weekday) {
-  return new RegExp(`\\b${WEEKDAY_NAMES[weekday]}\\b`).test(q);
-}
-
-// "today" / "tomorrow" / "next <weekday>" only resolve against the call's OWN
-// Eastern date — the day the caller was actually speaking from.
-function quoteNamesRelativeDate(q, target, reference) {
-  if (!(reference instanceof Date) || Number.isNaN(reference.getTime())) return false;
+  if (ordinal) return { day: Number(ordinal[1]) }; // "the 14th" — month-agnostic.
+  if (!(reference instanceof Date) || Number.isNaN(reference.getTime())) return null;
   const ref = etParts(reference);
-  const matches = (parts) => parts.year === target.year && parts.month === target.month && parts.day === target.day;
-  if (/\btoday\b/.test(q)) return matches(ref);
-  if (/\btomorrow\b/.test(q)) return matches(etParts(addETDays(reference, 1)));
-  return WEEKDAY_NAMES.some((name, index) => {
-    if (!new RegExp(`\\bnext ${name}\\b`).test(q)) return false;
+  if (/\btoday\b/.test(q)) return ref;
+  if (/\btomorrow\b/.test(q)) return etParts(addETDays(reference, 1));
+  for (const [index, name] of WEEKDAY_NAMES.entries()) {
+    if (!new RegExp(`\\bnext ${name}\\b`).test(q)) continue;
     const aheadFromToday = (index - ref.dayOfWeek + 7) % 7;
-    return matches(etParts(addETDays(reference, aheadFromToday === 0 ? 7 : aheadFromToday + 7)));
-  });
+    return etParts(addETDays(reference, aheadFromToday === 0 ? 7 : aheadFromToday + 7));
+  }
+  return null;
 }
 
-// True once the quote itself names the extracted date — an absolute date, a
-// bare weekday, or a today/tomorrow/next-weekday token that resolves to it.
-function quoteGroundsVisitDate(quote, ymd, reference) {
+function weekdayOf(ymd) {
+  const [y, m, d] = String(ymd).split('-').map(Number);
+  return new Date(Date.UTC(y, m - 1, d)).getUTCDay();
+}
+
+// A bare weekday name only grounds the pick when it could not have meant
+// anything else: exactly one of the customer's open visits falls on that
+// weekday at all, and it is the very one the model selected. Two Tuesdays
+// open ("Jan 8" and "Jan 15") leaves "Tuesday" unable to tell them apart, so
+// neither is grounded by the word alone.
+function quoteNamesWeekday(q, weekday, candidates, ymd) {
+  if (!new RegExp(`\\b${WEEKDAY_NAMES[weekday]}\\b`).test(q)) return false;
+  const onWeekday = candidates.filter((v) => weekdayOf(dateOnly(v.scheduled_date)) === weekday);
+  return onWeekday.length === 1 && dateOnly(onWeekday[0].scheduled_date) === ymd;
+}
+
+// True once the quote itself grounds the extracted date: an explicit claim
+// (absolute date, ordinal day, or today/tomorrow/next-weekday) must equal it
+// exactly; absent any explicit claim, a bare weekday name may ground it only
+// when it names exactly one open visit.
+function quoteGroundsVisitDate(quote, ymd, reference, candidates = []) {
   const q = ` ${norm(quote)} `;
   const [year, month, day] = String(ymd).split('-').map(Number);
   if (![year, month, day].every(Number.isFinite)) return false;
-  const weekday = new Date(Date.UTC(year, month - 1, day)).getUTCDay();
-  return quoteNamesAbsoluteDate(q, month, day) || quoteNamesWeekday(q, weekday)
-    || quoteNamesRelativeDate(q, { year, month, day }, reference);
+  const explicit = explicitQuoteDate(q, reference);
+  if (explicit) {
+    return explicit.day === day && (explicit.month == null || explicit.month === month)
+      && (explicit.year == null || explicit.year === year);
+  }
+  return quoteNamesWeekday(q, weekdayOf(ymd), candidates, ymd);
 }
 
 function narrowBySubject(candidates, subject) {
@@ -217,7 +238,7 @@ function visitNotSelfServiceReason(visit, now) {
 // one open visit needs no such check — there is nothing left to disambiguate.
 function extractedDateUngrounded({ subject, call, candidates, callCommitments }) {
   return !!subject?.visit_date && candidates.length > 1
-    && !quoteGroundsVisitDate(subject.quote, subject.visit_date, callCommitments.callEndedAt(call) || call.created_at);
+    && !quoteGroundsVisitDate(subject.quote, subject.visit_date, callCommitments.callEndedAt(call) || call.created_at, candidates);
 }
 
 function selectDiscussedVisit({ commitment, call, customer, candidates = [], now = new Date() }) {
@@ -569,11 +590,31 @@ async function runOne(conn, row, { now = new Date(), send = null, buildLink = nu
   return dispatch(conn, row, context, { now, send, buildLink, render, planned, evidenceSince });
 }
 
+// Oldest-SCANNED-first, falling back to oldest-updated-first for a row that
+// has never been scanned (fresh, or predating this column) — the fairness
+// ordering every LIMIT-100 sweep over outbox_messages shares.
+const SCAN_FAIRNESS_ORDER = [{ column: 'last_scanned_at', order: 'asc', nulls: 'first' }, { column: 'updated_at', order: 'asc' }];
+
+// Marks every row a sweep looked at as scanned, regardless of what else
+// happened to it. A row a sweep examines but leaves unchanged (context still
+// invalid, a review row parked for the same reason as last time, a promise
+// with no matching evidence yet) never advances updated_at on its own — that
+// is exactly the row an oldest-updated-first LIMIT 100 keeps re-selecting
+// forever once 100 of them accumulate, starving every newer row behind them
+// (codex #4293 P1). Stamping this unconditionally, independent of whatever
+// else the row's own processing does, is what SCAN_FAIRNESS_ORDER relies on.
+async function stampScanned(conn, rows, now) {
+  const ids = rows.map((row) => row.id);
+  if (ids.length) await conn('outbox_messages').whereIn('id', ids).update({ last_scanned_at: now });
+}
+
 async function sweep(conn = db, options = {}) {
   if (mode() === 'off') return { processed: 0 };
   await stagePromises(conn);
+  const now = options.now || new Date();
   const rows = await conn('outbox_messages').whereNotNull('commitment_id').whereIn('status', ['pending', 'shadow', 'sending', 'sent', 'review'])
-    .where(function due() { this.whereNull('available_at').orWhere('available_at', '<=', options.now || new Date()); }).orderBy('updated_at').limit(100);
+    .where(function due() { this.whereNull('available_at').orWhere('available_at', '<=', now); }).orderBy(SCAN_FAIRNESS_ORDER).limit(100);
+  await stampScanned(conn, rows, now);
   // One row must never starve the tick. There is an explicit row-specific
   // throw in matchingSend (a customer with more than 200 matching link
   // messages), and that row is by definition the oldest unchanged item, so an
@@ -594,7 +635,7 @@ async function sweep(conn = db, options = {}) {
       });
     }
   }
-  const reconciled = await reconcileUsedLinks(conn);
+  const reconciled = await reconcileUsedLinks(conn, now);
   return { processed: rows.length, failed, reconciled, mode: mode() };
 }
 
@@ -845,11 +886,13 @@ function selfServeVisitIds(conn) {
 // worker sweep and a client retry returns from the idempotent-replay branch
 // (codex #4293 r1 P2). This is the last chance — same evidence, run from the
 // sweep until it lands.
-async function reconcileUsedLinks(conn) {
+async function reconcileUsedLinks(conn, now = new Date()) {
   const visitIds = await selfServeVisitIds(conn);
   if (!visitIds.length) return 0;
-  return reconcileRows(conn, await unreconciledPromiseRows(conn).whereIn('related_scheduled_service_id', visitIds).orderBy('updated_at')
-    .limit(100).select('id', 'status', 'commitment_id', 'related_call_log_id', 'related_scheduled_service_id', 'sent_at'));
+  const rows = await unreconciledPromiseRows(conn).whereIn('related_scheduled_service_id', visitIds).orderBy(SCAN_FAIRNESS_ORDER)
+    .limit(100).select('id', 'status', 'commitment_id', 'related_call_log_id', 'related_scheduled_service_id', 'sent_at');
+  await stampScanned(conn, rows, now);
+  return reconcileRows(conn, rows);
 }
 
 module.exports = { mode, selectDiscussedVisit, snapshot, stagePromises, runOne, sweep, withSendLock, resolveUsedLink, reconcileUsedLinks };
