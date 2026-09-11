@@ -14607,9 +14607,18 @@ export function CompletionPanel({
     if (lawnDefaultsEnabled) {
       const item = lawnCompletionDefaults.items.find(item => String(item.product.id) === String(product.id));
       const planned = item && lawnPlanSelections([item], buildSelectedProduct, products, { areas: areasServiced, governed: true })[0];
-      row = planned || { ...row, rate: "", totalAmount: "", applicationArea: areasServiced.join(", "), applicationAreaDefault: true,
+      // A product the tech adds by hand is not governed by the plan, so it
+      // keeps the catalog label prefill (rate + rate × visit area / 1,000)
+      // exactly as an ungoverned closeout does — a per-1k rate on file is
+      // the tech's starting point, never a withheld blank (owner 2026-09-11:
+      // techs were retyping every rate and total after the gate went live).
+      // The suggestion stays editable and is still the tech's actual to
+      // confirm; a label with no per-1k rate prefills nothing, as before.
+      row = planned || { ...row, applicationArea: areasServiced.join(", "), applicationAreaDefault: true,
         lawnAreaDefault: row.areaUnit === "sqft",
-        lawnAmountReason: "Enter the actual amount for this application." };
+        lawnAmountReason: row.totalAmount !== ""
+          ? "Suggested from the label rate for the visit area. Confirm the actual amount."
+          : "Enter the actual amount for this application." };
     }
     // A re-added product is no longer a removed default whatever the plan
     // state — a draft restored under an outage carries removed ids too, and
