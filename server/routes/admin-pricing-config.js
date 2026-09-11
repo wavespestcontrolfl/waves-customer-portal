@@ -378,6 +378,14 @@ function validatePricingConfigData(configKey, data, oldConfig) {
   } else if (configKey === 'termite_annual_plan') {
     // Ruling A-1 (owner 2026-09-11): P1 — setup per station + bracketed
     // annual fee. Whole dollars (doorstep figures), bounded against typos.
+    // Every knob below is OPTIONAL, so a non-object payload (`[]`, a string,
+    // null) would skip all of them and save "successfully" — the row then
+    // holds a shape the DB bridge ignores (silently pricing off the in-code
+    // defaults) and the Pricing Logic panel can no longer edit the leaves.
+    // Same plain-object precondition waveguard_tiers uses (codex #4424 P2).
+    if (!data || typeof data !== 'object' || Array.isArray(data)) {
+      return fail('termite_annual_plan must be an object of plan knobs (setup_per_station, annual_base, annual_step, bracket_stations, bracket_floor)');
+    }
     // The bands live with the engine (TERMITE.annualPlanBounds) — the same
     // ones the replay resolver accepts a stamp against — so they cannot drift.
     const bounds = TERMITE.annualPlanBounds;

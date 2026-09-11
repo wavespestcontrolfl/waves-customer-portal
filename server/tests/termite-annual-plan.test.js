@@ -245,6 +245,18 @@ describe('annual plan — DB overlay and admin validation', () => {
       expect(verdict.error).toContain(`termite_annual_plan.${key}`);
     }
   });
+
+  test('a non-object payload is refused, not saved as an unreadable row (codex #4424 P2)', () => {
+    // Every knob is optional, so without the precondition each of these
+    // skips all five checks and returns ok — the row then holds a shape the
+    // DB bridge ignores while the admin panel can no longer edit the leaves.
+    for (const bad of [[], 'invalid', 42, null, undefined]) {
+      const verdict = validatePricingConfigData('termite_annual_plan', bad, null);
+      expect(verdict.ok).toBe(false);
+      expect(verdict.error).toMatch(/termite_annual_plan must be an object/i);
+    }
+    expect(validatePricingConfigData('termite_annual_plan', {}, null)).toEqual({ ok: true });
+  });
 });
 
 describe('replay-stamp provenance (pre-push audit #4424)', () => {
