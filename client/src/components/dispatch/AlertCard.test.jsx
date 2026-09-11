@@ -51,4 +51,23 @@ describe('communication-based dispatch warnings', () => {
     expect(screen.queryByText(/9\/12\/2026/)).toBeNull();
     expect(screen.queryByText(/2:00 PM/)).toBeNull();
   });
+
+  // codex P1: createAlertOnce's dispatch:alert broadcast carries the bare
+  // inserted row — no joined tech_name/customer — until the next /alerts
+  // hydration. An admin with the board already open must still see who and
+  // when on an assigned stage-2 card from the identity fields the detector
+  // now writes into the payload itself.
+  it('falls back to payload identity fields on a bare live-socket row', () => {
+    render(<AlertCard alert={{ id: 'alert', type: 'tech_late', severity: 'critical', created_at: new Date().toISOString(),
+      tech_id: 'tech-b', job_id: 'visit-1',
+      // No row-level tech_name / customer_first_name / customer_last_name —
+      // exactly what the bare dispatch:alert broadcast looks like.
+      payload: { source: 'no_show_detector', stage: 2, tech_name: 'Jordan Reyes',
+        customer_first_name: 'Bart', customer_last_name: 'Davis',
+        promised_window: { start_at: '2026-09-11T13:00:00.000Z', end_at: '2026-09-11T15:00:00.000Z' },
+        message: 'The promised window ended over 30 minutes ago; no arrival is recorded.' } }} />);
+    expect(screen.getByText('Jordan Reyes')).toBeTruthy();
+    expect(screen.getByText('Bart D.')).toBeTruthy();
+    expect(screen.queryByText('Unassigned')).toBeNull();
+  });
 });

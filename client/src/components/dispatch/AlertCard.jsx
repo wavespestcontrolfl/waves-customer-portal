@@ -209,7 +209,8 @@ function RouteQualityBody({ alert }) {
 // would show "Unknown tech running late" with no way to tell which visit
 // needs attention (codex P1 — af4925f71).
 function TrackingBody({ alert }) {
-  const window = alert.payload?.promised_window;
+  const payload = alert.payload || {};
+  const window = payload.promised_window;
   // Read the PROMISED window, not alert.scheduled_date/window_* — those
   // are the visit's current, mutable fields, and stage 2 is enforced
   // against the promise. A shorter service block or an uncommunicated
@@ -218,22 +219,32 @@ function TrackingBody({ alert }) {
   const windowLabel = window?.start_at ? formatETTime(window.start_at) : null;
   const dateLabel = window?.start_at ? formatETDate(window.start_at) : null;
   const when = [dateLabel, windowLabel].filter(Boolean).join(' · ');
+  // The dispatch:alert socket broadcast carries the bare inserted row (no
+  // tech_name/customer join) until the board's next /alerts hydration — an
+  // admin with the board already open would otherwise see "Unassigned" on
+  // an assigned stage-2 card and a blank customer name (codex P1). The
+  // generator puts these in the payload too; prefer the row-level (joined)
+  // field when present, same pattern as RouteQualityBody's techName.
+  const techName = alert.tech_name || payload.tech_name;
+  const customer = customerLine(alert) || customerLine({
+    customer_first_name: payload.customer_first_name, customer_last_name: payload.customer_last_name,
+  });
   return (
     <div className="text-14 text-ink-primary space-y-1">
       <div>
-        {alert.tech_name ? (
-          <span className="font-medium">{alert.tech_name}</span>
+        {techName ? (
+          <span className="font-medium">{techName}</span>
         ) : (
           <span className="text-ink-tertiary italic">Unassigned</span>
         )}
-        {customerLine(alert) && (
+        {customer && (
           <>
-            {' '}— <span className="font-medium">{customerLine(alert)}</span>
+            {' '}— <span className="font-medium">{customer}</span>
           </>
         )}
         {when && <span className="text-ink-secondary"> ({when})</span>}
       </div>
-      <p className="text-ink-secondary">{alert.payload?.message}</p>
+      <p className="text-ink-secondary">{payload.message}</p>
     </div>
   );
 }

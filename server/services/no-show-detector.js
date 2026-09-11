@@ -136,6 +136,16 @@ async function listNoShows(conn, { now = new Date(), limit = 100, offset = 0, ac
   return cards.slice(offset, offset + limit);
 }
 
+// Pure. The dispatch:alert socket broadcast carries the bare inserted row
+// (createAlertOnce -> emitAlert), no tech/customer join — an admin with the
+// board already open sees "Unassigned" and a blank name on an assigned
+// stage-2 card until the next /alerts hydration otherwise (codex P1). Same
+// pattern as scheduling/quality-alerts.js's payload.techName.
+function trackingIdentityFields(recipientTech, card) {
+  return { tech_name: recipientTech?.name || null,
+    customer_first_name: card.first_name || null, customer_last_name: card.last_name || null };
+}
+
 async function sweep(conn, { now = new Date() } = {}) {
   if (!enabled()) return { alerted: 0 };
   const rows = await listNoShows(conn, { now, limit: 10000 });
@@ -149,8 +159,9 @@ async function sweep(conn, { now = new Date() } = {}) {
       const promise = latestPromises(await loadPromiseEvents(trx, [String(card.id)], { now }), now).get(String(card.id));
       const live = evaluateNoShow({ visit, promise, now });
       if (!live || live.stage !== card.stage || live.promised_window.start_at !== card.promised_window.start_at) return null;
-      const recipient = visit.technician_id ? (await trx('technicians').where({ id: visit.technician_id,
-        employment_status: 'active', field_dispatchable: true }).first('id'))?.id : null;
+      const recipientTech = visit.technician_id ? await trx('technicians').where({ id: visit.technician_id,
+        employment_status: 'active', field_dispatchable: true }).first('id', 'name') : null;
+      const recipient = recipientTech?.id || null;
       const type = recipient ? 'tech_late' : 'unassigned_overdue';
       const key = `tracking:${card.id}:${live.promised_window.start_at}:${live.stage}:${type}`;
       // Identify the visit on the card itself (codex P1) — a tech with more
@@ -182,7 +193,8 @@ async function sweep(conn, { now = new Date() } = {}) {
         if (!already) {
           const result = await dispatch.createAlertOnce({ type, severity: live.stage === 2 ? 'critical' : 'warn',
             techId: recipient, jobId: card.id, trx, payload: { source: 'no_show_detector', tracking_key: key, ...live,
-              scheduled_date: visit.scheduled_date, window_start: visit.window_start, window_end: visit.window_end } });
+              scheduled_date: visit.scheduled_date, window_start: visit.window_start, window_end: visit.window_end,
+              ...trackingIdentityFields(recipientTech, card) } });
           created = result.created;
           if (created) await require('./notification-service').notifyAdmin('alert', 'A promised arrival needs attention', live.message, {
             // The tracking card lives on the dispatch Action Queue (this
