@@ -14,7 +14,7 @@ const { completeScheduledServiceInsert } = require('../services/booking/create-s
 const { collectiveMoveGateOn, dateExceptionStamp } = require('../services/rebooker');
 const { stampedDivergesSql, stampedLine2Sql } = require('../services/stamped-address');
 const { dayStopsQuery, guardedCoordSelects } = require('../services/scheduling/day-stops');
-const { chooseWindowSafeOrder } = require('../services/route-reorder');
+const { chooseWindowSafeOrder, windowGuardSignature } = require('../services/route-reorder');
 const {
   assertAdminAppointmentWindow, probeSlotOverlap, slotOverlapWarning, ADMIN_OCCUPANCY_EXCLUDE_STATUSES,
 } = require('../services/scheduling/window-rules');
@@ -13382,6 +13382,53 @@ router.put('/:id/status', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+// Guard-input columns both optimize endpoints load and re-read under the
+// tech-day lock — the inputs windowGuardSignature() hashes. Kept as one list
+// so the day-load snapshot and the post-lock re-read can never disagree about
+// which columns exist (a column present on one side only would read as a
+// permanent "changed" and abort every write).
+const OPTIMIZE_GUARD_COLUMNS = ['window_start', 'window_end', 'time_window',
+  'estimated_duration_minutes', 'auto_dispatch_locked', 'auto_dispatch_excluded', 'visit_id'];
+
+/**
+ * Simulation clock for a day that is ALREADY IN PROGRESS. Both optimize
+ * buttons default to TODAY, but the guard chain's simulation starts at the
+ * 08:00 day-open and its chronology treats every promised window as still
+ * bindable (codex round 1 P1): at 15:30, an overdue 09:00 stop and a still
+ * achievable 16:00 stop, that model can reject Google's attempt to visit
+ * 16:00 first and write a "repair" that drives the overdue stop first —
+ * losing the one promise still keepable. Passing the caller's real ET
+ * minute-of-day makes the simulation start where the truck actually is and
+ * lets chooseWindowSafeOrder relax windows whose deadline has already
+ * passed. null for any other date, which is byte-for-byte the old behavior.
+ */
+function inProgressStartMin(dateStr, now) {
+  if (dateStr !== etDateString(now)) return null;
+  const { hour, minute } = etParts(now);
+  return hour * 60 + minute;
+}
+
+/**
+ * Post-lock staleness fence for the guard inputs (codex round 1 P2). The
+ * per-row update below already refuses a stop that changed tech-day, but the
+ * ORDER itself was computed against windows and durations read before the
+ * tech-day lock was acquired: an appointment re-promised in that gap would
+ * commit an order validated against a promise that no longer exists. Same
+ * signature the nightly pass fences its own commit with
+ * (route-reorder.js's windowGuardSignature), so the two writers agree on
+ * what counts as a change. Throws STALE_OPTIMIZE — the caller's 409 —
+ * leaving the transaction untouched.
+ */
+async function assertGuardInputsFresh(trx, dateStr, snapshot) {
+  const fresh = await trx('scheduled_services')
+    .whereIn('id', [...snapshot.keys()])
+    .where('scheduled_date', dateStr)
+    .select('id', ...OPTIMIZE_GUARD_COLUMNS);
+  const changed = fresh.length !== snapshot.size
+    || fresh.some((row) => windowGuardSignature(row) !== snapshot.get(row.id));
+  if (changed) throw Object.assign(new Error('schedule changed while optimizing'), { code: 'STALE_OPTIMIZE' });
+}
+
 // POST /api/admin/schedule/optimize — route optimization v3 (Google Routes API)
 // Uses Google Routes API with traffic-aware optimization, falls back to nearest-neighbor.
 // requireAdmin: reads the whole board and rewrites route_order across every
@@ -13390,7 +13437,10 @@ router.post('/optimize', requireAdmin, async (req, res, next) => {
   try {
     const RouteOptimizer = require('../services/route-optimizer');
     const { date, technicianId } = req.body;
-    const dateStr = date || etDateString();
+    const now = new Date();
+    const dateStr = date || etDateString(now);
+    // Today's route is already partly driven — see inProgressStartMin.
+    const startMin = inProgressStartMin(dateStr, now);
 
     // Shared day-stops scaffold (services/scheduling/day-stops) — same rows as
     // the inline query it replaced: same status exclusions, same select list,
@@ -13411,6 +13461,10 @@ router.post('/optimize', requireAdmin, async (req, res, next) => {
         'scheduled_services.window_start', 'scheduled_services.window_end',
         'scheduled_services.estimated_duration_minutes',
         'scheduled_services.route_order', 'scheduled_services.created_at',
+        // The remaining windowGuardSignature inputs, so the post-lock
+        // freshness fence hashes the same columns on both sides.
+        'scheduled_services.auto_dispatch_locked', 'scheduled_services.auto_dispatch_excluded',
+        'scheduled_services.visit_id',
         ...guardedCoordSelects(db),
         db.raw('COALESCE(scheduled_services.service_address_city, customers.city) as city'),
         db.raw('COALESCE(scheduled_services.service_address_zip, customers.zip) as zip'),
@@ -13421,6 +13475,7 @@ router.post('/optimize', requireAdmin, async (req, res, next) => {
     if (!services.length) {
       return res.json({ success: true, order: [], totalDistanceMeters: 0, totalDurationMinutes: 0, legs: [], source: 'empty' });
     }
+    const guardSnapshot = new Map(services.map((s) => [s.id, windowGuardSignature(s)]));
 
     // Assign zone from customer city/zip if not already set
     for (const svc of services) {
@@ -13465,7 +13520,7 @@ router.post('/optimize', requireAdmin, async (req, res, next) => {
       const ids = new Set(techStops.map((s) => s.id));
       const googleSlice = result.orderedStops.filter((s) => ids.has(s.id));
       const outcome = chooseWindowSafeOrder({
-        RouteOptimizer, googleOrder: googleSlice, sourceStops: techStops, googleSource: result.source, legs: legsAlignToTech,
+        RouteOptimizer, googleOrder: googleSlice, sourceStops: techStops, googleSource: result.source, legs: legsAlignToTech, startMin,
       });
       if (!outcome.orderedStops) {
         rejection = { technicianId: techId, ...outcome };
@@ -13505,6 +13560,7 @@ router.post('/optimize', requireAdmin, async (req, res, next) => {
       const { lockTechDays } = require('../services/scheduling/tech-day-lock');
       await db.transaction(async (trx) => {
         await lockTechDays(trx, services.map((s) => ({ techId: s.technician_id, date: dateStr })));
+        await assertGuardInputsFresh(trx, dateStr, guardSnapshot);
         // Stale-snapshot guard (uncapped audit r21 P1): the optimizer ran
         // BEFORE this fence was acquired — a reassignment/date move that
         // committed while we waited for the lock must not receive the stale
@@ -13618,7 +13674,10 @@ router.post('/optimize-route', requireAdmin, async (req, res, next) => {
       return res.status(400).json({ error: 'technicianId is required' });
     }
 
-    const dateStr = date || etDateString();
+    const now = new Date();
+    const dateStr = date || etDateString(now);
+    // Today's route is already partly driven — see inProgressStartMin.
+    const startMin = inProgressStartMin(dateStr, now);
 
     // Shared day-stops scaffold — same rows as the inline query it replaced.
     // Plus route-reorder.js's own window-guard select (window_start/end,
@@ -13635,6 +13694,9 @@ router.post('/optimize-route', requireAdmin, async (req, res, next) => {
         'scheduled_services.window_start', 'scheduled_services.window_end',
         'scheduled_services.estimated_duration_minutes',
         'scheduled_services.route_order', 'scheduled_services.created_at',
+        // The remaining windowGuardSignature inputs — see /optimize above.
+        'scheduled_services.auto_dispatch_locked', 'scheduled_services.auto_dispatch_excluded',
+        'scheduled_services.visit_id',
         ...guardedCoordSelects(db),
         db.raw('COALESCE(scheduled_services.service_address_city, customers.city) as city'),
         db.raw('COALESCE(scheduled_services.service_address_zip, customers.zip) as zip'),
@@ -13645,6 +13707,7 @@ router.post('/optimize-route', requireAdmin, async (req, res, next) => {
     if (!services.length) {
       return res.json({ success: true, order: [], totalDistanceMeters: 0, totalDurationMinutes: 0, legs: [], source: 'empty' });
     }
+    const guardSnapshot = new Map(services.map((s) => [s.id, windowGuardSignature(s)]));
 
     // Assign zone
     for (const svc of services) {
@@ -13664,7 +13727,7 @@ router.post('/optimize-route', requireAdmin, async (req, res, next) => {
     // Google's legs align 1:1 with `services`, unlike the multi-tech
     // /optimize call, so they ride straight into the feasibility guard).
     const outcome = chooseWindowSafeOrder({
-      RouteOptimizer, googleOrder: result.orderedStops, sourceStops: services, googleSource: result.source, legs: result.legs,
+      RouteOptimizer, googleOrder: result.orderedStops, sourceStops: services, googleSource: result.source, legs: result.legs, startMin,
     });
     if (!outcome.orderedStops) {
       return res.status(409).json({
@@ -13686,6 +13749,7 @@ router.post('/optimize-route', requireAdmin, async (req, res, next) => {
       const { lockTechDays } = require('../services/scheduling/tech-day-lock');
       await db.transaction(async (trx) => {
         await lockTechDays(trx, [{ techId: technicianId, date: dateStr }]);
+        await assertGuardInputsFresh(trx, dateStr, guardSnapshot);
         // Stale-snapshot guard — same contract as /optimize above: the stop
         // must still be on THIS tech-day or the whole rewrite aborts.
         for (let i = 0; i < finalOrdered.length; i++) {

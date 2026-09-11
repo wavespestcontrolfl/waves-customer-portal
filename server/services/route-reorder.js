@@ -121,15 +121,19 @@ function effectiveWindowStart(stop) {
  * (Google road minutes) when the returned legs align with the geocoded
  * sequence — the fallback haversine model is documented as underestimating
  * some trips, so preferring real legs is what makes a "pass" trustworthy
- * (uncapped audit P1) — else the shared fallback leg model. Depart HQ at the
- * 08:00 day open, each stop takes estimated_duration_minutes (default 60),
- * a promised stop may wait for its window to OPEN but must START no later
- * than its arrival deadline (effectiveWindowRange — the actual customer
- * promise). The simulation is optimistic (no buffers), so a failure here is
- * a real impossibility — and rejection only SKIPS the day (safe direction),
- * never writes.
+ * (uncapped audit P1) — else the shared fallback leg model. Depart HQ at
+ * `startMin` (default 08:00, the nightly day-open — the admin optimize
+ * endpoints pass the caller's actual ET minute-of-day for a day already in
+ * progress, codex GitHub round P1: simulating from 8am when it is really
+ * mid-afternoon can pass a stop that is no longer reachable in time), each
+ * stop takes estimated_duration_minutes (default 60), a promised stop may
+ * wait for its window to OPEN but must START no later than its arrival
+ * deadline (effectiveWindowRange — the actual customer promise). The
+ * simulation is optimistic (no buffers), so a failure here is a real
+ * impossibility — and rejection only SKIPS the day (safe direction), never
+ * writes.
  */
-function violatesWindowFeasibility(RouteOptimizer, orderedStops, sourceStops, legs) {
+function violatesWindowFeasibility(RouteOptimizer, orderedStops, sourceStops, legs, startMin = 8 * 60) {
   const byId = new Map(sourceStops.map((s) => [s.id, s]));
   const geocodedCount = orderedStops.filter((o) => {
     const s = byId.get(o.id) || o;
@@ -141,7 +145,7 @@ function violatesWindowFeasibility(RouteOptimizer, orderedStops, sourceStops, le
   const useLegs = Array.isArray(legs)
     && legs.length >= geocodedCount
     && legs.slice(0, geocodedCount).every((l) => Number.isFinite(l?.durationMinutes));
-  let clock = 8 * 60; // minute-of-day, ET day open
+  let clock = startMin; // minute-of-day, caller-supplied day open
   let prev = RouteOptimizer.HQ;
   let geoIdx = 0;
   for (const stop of orderedStops) {
@@ -224,6 +228,31 @@ function withinFreezeClock(dateStr, windowStart, now) {
 }
 
 /**
+ * A promised window whose deadline has ALREADY PASSED relative to `startMin`
+ * (the admin optimize endpoints' "today, already in progress" simulation
+ * clock — see chooseWindowSafeOrder) is not a promise the chosen order can
+ * still keep OR break: forcing it ahead of a still-achievable later window
+ * (the chronology guard's whole job) only sinks that later promise for
+ * nothing, and holding it to a deadline that is already unreachable rejects
+ * every candidate order on an already-lost cause (codex GitHub round P1 — the
+ * concrete case: 15:30, an overdue 09:00 stop, an achievable 16:00 stop).
+ * Relaxed to unconstrained for GUARD purposes only — the stop is still
+ * visited and still costs travel/service time, it just no longer dictates
+ * order or a deadline. A no-op (returns `sourceStops` unchanged) when
+ * `startMin` is null — the nightly pass never passes it, since today is
+ * structurally excluded from its band and every future-day call already
+ * starts fresh at 08:00.
+ */
+function relaxElapsedWindows(sourceStops, startMin) {
+  if (startMin == null) return sourceStops;
+  return sourceStops.map((s) => {
+    const range = effectiveWindowRange(s);
+    if (!range || range.endMin > startMin) return s;
+    return { ...s, window_start: null, window_end: null, time_window: null };
+  });
+}
+
+/**
  * Shared "never write an order that breaks a promise" decision — pulled out
  * so the trusted admin buttons (POST /optimize, /optimize-route in
  * admin-schedule.js) apply the EXACT SAME chronology + feasibility guards
@@ -233,7 +262,10 @@ function withinFreezeClock(dateStr, windowStart, now) {
  * stop FIRST and a 10:00 stop SIXTH — 5-19 mi WORSE than window order — while
  * the endpoint reported it as a "savings". This function is pure (no gates
  * read beyond GATE_ROUTE_REORDER_WINDOW_FIT / GATE_DRIVE_TIME_CALIBRATION,
- * no db, no writes) so both callers stay on one decision.
+ * no db, no writes) so both callers — this pass's runRouteReorder below AND
+ * the admin routes — stay on the SAME decision (codex GitHub round P1: an
+ * earlier revision left runRouteReorder running its own parallel chronology
+ * /feasibility/fallback implementation instead of calling this).
  *
  * `googleOrder` = the ordered stops to validate (Google's/optimizeRoute's
  * result, or — for a multi-tech admin call — one technician's slice of it).
@@ -244,18 +276,33 @@ function withinFreezeClock(dateStr, windowStart, now) {
  * ONLY when they align 1:1 with `googleOrder` (a multi-tech flat sequence's
  * legs do NOT align to one tech's extracted slice — pass null there; see
  * violatesWindowFeasibility's own alignment check for why a misaligned leg
- * list must never be trusted).
+ * list must never be trusted). `startMin` (default null ⇒ 08:00, the nightly
+ * day-open) is the admin-only "day already in progress" simulation clock —
+ * pass the caller's actual ET minute-of-day only when the requested date IS
+ * today; leave it null for every future-day call (nightly and admin alike),
+ * which reproduces today's behavior exactly.
  *
  * Returns one of:
- *   { orderedStops, source }                                    — write it
+ *   { orderedStops, source, conflict: null }                    — write it
  *   { orderedStops: null, reason, conflict, beforeMeters }       — DO NOT WRITE
  * `reason` is 'WINDOW_FIT_GATE_OFF' (either gate is off — no repair was even
- * attempted) or 'NO_FEASIBLE_IMPROVEMENT' (gates on, the search ran, no legal
- * order exists) — the actionable "why didn't this get fixed". `conflict` is
- * 'WINDOW_ORDER_CONFLICT' or 'WINDOW_FIT_CONFLICT' — which guard Google's
- * order actually failed, for the UI detail line.
+ * attempted; `gateOff` says which: 'WINDOW_FIT' or 'CALIBRATION' — nightly-only
+ * bookkeeping, admin's response contract keeps using the combined `reason`),
+ * 'COORDLESS_STOPS' (a source stop lacks usable coordinates — both the
+ * feasibility simulation and the distance model would treat its travel as
+ * zero, so a fallback built on it is not trustworthy; fail closed before
+ * attempting the repair, codex GitHub round P1), or 'NO_FEASIBLE_IMPROVEMENT'
+ * (gates on, coordinates present, the search ran, no legal order exists) —
+ * the actionable "why didn't this get fixed". `conflict` — always present,
+ * null when Google's order was legal — is 'WINDOW_ORDER_CONFLICT' or
+ * 'WINDOW_FIT_CONFLICT': which guard Google's order actually failed, for the
+ * UI detail line (admin) and the skip reason (nightly, which additionally
+ * applies its own min-savings floor on top of this decision — see
+ * runRouteReorder).
  */
-function chooseWindowSafeOrder({ RouteOptimizer, googleOrder, sourceStops, googleSource, legs = null }) {
+function chooseWindowSafeOrder({
+  RouteOptimizer, googleOrder, sourceStops, googleSource, legs = null, startMin = null,
+}) {
   // beforeMeters (current running order, same model as the nightly ledger's
   // before_distance_meters) rides on EVERY return — a caller aggregating
   // several tech-days in one response (the multi-tech /optimize endpoint)
@@ -265,8 +312,11 @@ function chooseWindowSafeOrder({ RouteOptimizer, googleOrder, sourceStops, googl
   // route (pre-push audit P1 — the exact "wrong savings number" defect
   // class this whole change exists to close).
   const beforeMeters = modelDistanceMeters(RouteOptimizer, currentOrder(sourceStops));
-  const chronoConflict = violatesWindowChronology(googleOrder, sourceStops);
-  const fitConflict = !chronoConflict && violatesWindowFeasibility(RouteOptimizer, googleOrder, sourceStops, legs);
+  const simStart = startMin == null ? 8 * 60 : startMin;
+  const guardStops = relaxElapsedWindows(sourceStops, startMin);
+  const chronoConflict = violatesWindowChronology(googleOrder, guardStops);
+  const fitConflict = !chronoConflict && violatesWindowFeasibility(RouteOptimizer, googleOrder, guardStops, legs, simStart);
+  const conflict = chronoConflict ? 'WINDOW_ORDER_CONFLICT' : (fitConflict ? 'WINDOW_FIT_CONFLICT' : null);
   if (!chronoConflict && !fitConflict) {
     // Google's order is legal — still score it under the shared model (NOT
     // Google's own road-routed numbers) so a caller that has to AGGREGATE
@@ -274,10 +324,11 @@ function chooseWindowSafeOrder({ RouteOptimizer, googleOrder, sourceStops, googl
     // a single-tech caller that wants Google's own reported numbers for an
     // unrepaired day keeps using its own `result.*` fields, unaffected by
     // these — see admin-schedule.js's two callers.
-    const sim = simulateArrivalRoute(RouteOptimizer, effectiveWindowRange, googleOrder);
+    const sim = simulateArrivalRoute(RouteOptimizer, effectiveWindowRange, googleOrder, { startMin: simStart });
     return {
       orderedStops: googleOrder,
       source: googleSource,
+      conflict,
       beforeMeters,
       afterMeters: modelDistanceMeters(RouteOptimizer, googleOrder),
       // null only if a legal order somehow fails the same-model simulation
@@ -285,24 +336,52 @@ function chooseWindowSafeOrder({ RouteOptimizer, googleOrder, sourceStops, googl
       afterSeconds: sim ? Math.round(sim.travelMin * 60) : null,
     };
   }
-  const conflict = chronoConflict ? 'WINDOW_ORDER_CONFLICT' : 'WINDOW_FIT_CONFLICT';
-  const windowFitEnabled = gateEnvValue('GATE_ROUTE_REORDER_WINDOW_FIT') && gateEnvValue('GATE_DRIVE_TIME_CALIBRATION');
-  if (!windowFitEnabled) {
-    return { orderedStops: null, reason: 'WINDOW_FIT_GATE_OFF', conflict, beforeMeters };
+  const windowFitFlagOn = gateEnvValue('GATE_ROUTE_REORDER_WINDOW_FIT');
+  const calibrationFlagOn = gateEnvValue('GATE_DRIVE_TIME_CALIBRATION');
+  if (!windowFitFlagOn || !calibrationFlagOn) {
+    return {
+      orderedStops: null, reason: 'WINDOW_FIT_GATE_OFF', conflict, beforeMeters,
+      gateOff: !windowFitFlagOn ? 'WINDOW_FIT' : 'CALIBRATION',
+    };
   }
-  const fallback = computeWindowFitOrder(RouteOptimizer, currentOrder(sourceStops), {
+  if (sourceStops.some((s) => !(parseFloat(s.lat) && parseFloat(s.lng)))) {
+    return { orderedStops: null, reason: 'COORDLESS_STOPS', conflict, beforeMeters };
+  }
+  const fallback = computeWindowFitOrder(RouteOptimizer, currentOrder(guardStops), {
     effectiveWindowStart, effectiveWindowRange, violatesWindowChronology, violatesWindowFeasibility, modelDistanceMeters,
-  });
+  }, { startMin: simStart });
   if (!fallback) {
     return { orderedStops: null, reason: 'NO_FEASIBLE_IMPROVEMENT', conflict, beforeMeters };
   }
   return {
     orderedStops: fallback.orderedStops,
     source: 'window_constrained',
+    conflict,
     beforeMeters,
     afterMeters: fallback.afterMeters,
     afterSeconds: fallback.afterSeconds,
   };
+}
+
+/**
+ * Full guard-input signature for the commit-time staleness fence: window
+ * RANGE + service duration + the staff-pin flags + the linked visit — the
+ * chronology AND feasibility guards (and, for a linked visit, its identity)
+ * were evaluated against these, so any mid-run change invalidates the order
+ * that was computed for it. Shared by this pass's own commit-time re-read
+ * (below) and the admin optimize endpoints' post-lock re-validation (codex
+ * GitHub round P2: those endpoints previously compared only id/date/
+ * technician, so a window edited after the day-load but before the lock
+ * could commit a stale order). `repairDurationFallback` mirrors this pass's
+ * own `repair`-mode duration convention (0, not the flat-60 default) — admin
+ * callers never set it, since neither admin endpoint runs the chronological-
+ * repair path.
+ */
+function windowGuardSignature(stop, { repairDurationFallback = false } = {}) {
+  const range = effectiveWindowRange(stop);
+  const dur = workDuration(stop, repairDurationFallback ? 0 : 60);
+  const locked = (stop.auto_dispatch_locked || stop.auto_dispatch_excluded) ? 'L' : '-';
+  return `${range ? `${range.startMin}-${range.endMin}` : 'open'}|${dur}|${locked}|${stop.visit_id || ''}`;
 }
 
 async function runRouteReorder(opts = {}, conn = db) {
@@ -499,72 +578,71 @@ async function runRouteReorder(opts = {}, conn = db) {
             ...(repair ? { before_window_feasible: false, after_window_feasible: true,
               distance_change_meters: afterMeters - beforeMeters } : {}),
           };
-          // Window chronology guard: the optimizer sees only coordinates, so a
-          // pure-distance order could put a later fixed window before an
-          // earlier one — an infeasible running order. Feasibility guard:
-          // chronology alone lets untimed stops wedge between fixed windows;
-          // if the simulated day provably cannot make every promised window,
-          // the sequence is undriveable. Either violation rejects Google's
-          // order — and, when GATE_ROUTE_REORDER_WINDOW_FIT is on, hands the
-          // day to the in-process window-fit fallback instead of skipping it
-          // outright (gate off = byte-for-byte the pre-fallback skip).
+          // Window chronology + feasibility guard, THE SAME decision
+          // chooseWindowSafeOrder makes for the admin optimize endpoints
+          // (codex GitHub round P1 — this used to be a second, independent
+          // implementation of the same safety decision): Google's order
+          // passes both guards ⇒ kept; it fails and GATE_ROUTE_REORDER_WINDOW_FIT
+          // + GATE_DRIVE_TIME_CALIBRATION are on ⇒ handed to the in-process
+          // window-fit fallback; either gate off ⇒ byte-for-byte the
+          // pre-fallback skip. `startMin` stays null (nightly never runs
+          // today — the band starts tomorrow — so every call starts at the
+          // shared 08:00 day-open, unlike the admin "day in progress" case).
           let finalOrdered = result.orderedStops;
           let appliedMetrics = metrics;
-          const windowFitEnabled = gateEnvValue('GATE_ROUTE_REORDER_WINDOW_FIT');
-          const chronoConflict = violatesWindowChronology(result.orderedStops, techStops);
-          const fitConflict = !chronoConflict
-            && violatesWindowFeasibility(RouteOptimizer, result.orderedStops, techStops, result.legs);
+          const guardOutcome = chooseWindowSafeOrder({
+            RouteOptimizer, googleOrder: result.orderedStops, sourceStops: techStops, googleSource: result.source, legs: result.legs,
+          });
           // Savings floor for GOOGLE's order. Fallback ON + a guard conflict
-          // defers the floor to the fallback's own check: Google optimizes
-          // ROUTED distance, so its (illegal) permutation can score below the
-          // 805 m model floor while a legal permutation clears it — exiting
-          // here would record BELOW_MIN_SAVINGS and never consult the
-          // fallback (pre-push audit r3 P1). Fallback OFF keeps the legacy
-          // sequencing byte for byte.
+          // defers the floor to the fallback's own check below: Google
+          // optimizes ROUTED distance, so its (illegal) permutation can score
+          // below the 805 m model floor while a legal permutation clears it —
+          // exiting here would record BELOW_MIN_SAVINGS and never consult the
+          // fallback (pre-push audit r3 P1). Exactly the original
+          // `!windowFitEnabled || (!chronoConflict && !fitConflict)`, where
+          // `windowFitEnabled` read GATE_ROUTE_REORDER_WINDOW_FIT ALONE:
+          // true when Google's order was legal (conflict null) regardless of
+          // the gates, or when that one flag is off. Calibration-off with a
+          // conflict deliberately does NOT short-circuit here — it falls
+          // through to the skip below so the ledger still records the
+          // conflict plus `fallback: 'CALIBRATION_OFF'`.
+          const gateStoodDown = guardOutcome.reason === 'WINDOW_FIT_GATE_OFF';
           if (!repair && savedMeters < config.minSavingsMeters
-              && (!windowFitEnabled || (!chronoConflict && !fitConflict))) {
+              && (guardOutcome.conflict === null || guardOutcome.gateOff === 'WINDOW_FIT')) {
             summary.skipped.push({ ...entryBase, reason: 'BELOW_MIN_SAVINGS', ...metrics });
             continue;
           }
-          if (chronoConflict || fitConflict) {
-            const reason = chronoConflict ? 'WINDOW_ORDER_CONFLICT' : 'WINDOW_FIT_CONFLICT';
-            if (!windowFitEnabled) {
-              summary.skipped.push({ ...entryBase, reason, ...metrics });
-              continue;
-            }
-            // HARD DEPENDENCY (pre-push audit P1): the fallback's whole
-            // safety case rests on the CALIBRATED drive-time model (owner
-            // ruling accepted model-authored orders on its MAE, not the
-            // legacy 30 mph constant the guard documents as
-            // underestimating). If calibration is killed or drifts off,
-            // model-authored orders must not be written — the day skips
-            // as before, tagged so the ledger says why the fallback
-            // stood down.
-            if (!gateEnvValue('GATE_DRIVE_TIME_CALIBRATION')) {
-              summary.skipped.push({ ...entryBase, reason, ...metrics, fallback: 'CALIBRATION_OFF' });
-              continue;
-            }
-            // Pass the CURRENT RUNNING order (not raw query order — the day
-            // load has no ORDER BY): equal-window backbone ties then default
-            // to the sequence the operator actually sees on the board.
-            const fallback = computeWindowFitOrder(RouteOptimizer, ordered, {
-              effectiveWindowStart,
-              effectiveWindowRange,
-              violatesWindowChronology,
-              violatesWindowFeasibility,
-              modelDistanceMeters,
-            });
-            const fallbackSaved = fallback ? Math.max(0, beforeMeters - fallback.afterMeters) : 0;
-            if (!fallback || fallbackSaved < config.minSavingsMeters) {
+          if (guardOutcome.orderedStops == null) {
+            // guardOutcome.conflict is always set here — orderedStops is only
+            // null inside the shared decision's post-conflict branch.
+            const tag = gateStoodDown
+              ? (guardOutcome.gateOff === 'CALIBRATION' ? { fallback: 'CALIBRATION_OFF' } : {})
+              // NO_FEASIBLE_IMPROVEMENT (or, in principle, COORDLESS_STOPS —
+              // this pass's own earlier COORDLESS_STOPS day-skip already
+              // guarantees every stop reaching here is geocoded, so that
+              // branch is unreachable in practice, same as before this
+              // refactor).
+              : { fallback: guardOutcome.reason };
+            summary.skipped.push({ ...entryBase, reason: guardOutcome.conflict, ...metrics, ...tag });
+            continue;
+          }
+          if (guardOutcome.source === 'window_constrained') {
+            // The shared decision writes ANY legal repair it finds (the admin
+            // buttons have no savings floor); this pass only ever reorders
+            // when it is worth it — apply ITS OWN floor to the found order
+            // before accepting it (nightly-only bookkeeping, not a duplicate
+            // safety decision).
+            const fallbackSaved = Math.max(0, guardOutcome.beforeMeters - guardOutcome.afterMeters);
+            if (fallbackSaved < config.minSavingsMeters) {
               // The day stays skipped under its ORIGINAL reason — the
               // fallback tag records that the legal-order search ran and
               // found nothing worth writing (same 805 m floor, owner-ruled).
               summary.skipped.push({
                 ...entryBase,
-                reason,
+                reason: guardOutcome.conflict,
                 ...metrics,
                 fallback: 'NO_FEASIBLE_IMPROVEMENT',
-                ...(fallback ? { fallback_saved_meters: fallbackSaved } : {}),
+                fallback_saved_meters: fallbackSaved,
               });
               continue;
             }
@@ -572,17 +650,21 @@ async function runRouteReorder(opts = {}, conn = db) {
             // fenced write below (zero new writers). unconstrained_saved_meters
             // records what Google's illegal order would have saved — the gap
             // the promises cost us, for the ledger/observability.
-            finalOrdered = fallback.orderedStops;
+            finalOrdered = guardOutcome.orderedStops;
             appliedMetrics = {
-              before_distance_meters: beforeMeters,
-              after_distance_meters: fallback.afterMeters,
+              before_distance_meters: guardOutcome.beforeMeters,
+              after_distance_meters: guardOutcome.afterMeters,
               optimizer_distance_meters: result.totalDistanceMeters || 0,
-              after_duration_seconds: fallback.afterSeconds,
+              after_duration_seconds: guardOutcome.afterSeconds,
               saved_meters: fallbackSaved,
               source: 'window_constrained',
               unconstrained_saved_meters: savedMeters,
             };
           }
+          // else: Google's order (or, when `repair` is set, the already
+          // chronologically-repaired order — guaranteed conflict-free by
+          // computeChronologicalRepair, so it always lands here) was legal —
+          // finalOrdered/appliedMetrics keep their defaults set above.
 
           // Same write as the trusted /optimize path (route_order = position),
           // but transactional AND revalidated at COMMIT time: the optimizer
@@ -653,15 +735,12 @@ async function runRouteReorder(opts = {}, conn = db) {
                   'scheduled_services.auto_dispatch_locked', 'scheduled_services.auto_dispatch_excluded',
                   'scheduled_services.route_order', ...guardedCoordSelects(trx));
               const num = (v) => (v == null || v === '' ? null : parseFloat(v));
-              // Full guard-input signature: window RANGE + service duration —
+              // Full guard-input signature (shared with the admin optimize
+              // endpoints' own post-lock re-validation — see
+              // windowGuardSignature above): window RANGE + service duration —
               // the chronology AND feasibility guards were evaluated against
               // these, so any mid-run change invalidates the order.
-              const windowSig = (s) => {
-                const r = effectiveWindowRange(s);
-                const dur = workDuration(s, repair ? 0 : 60);
-                const locked = (s.auto_dispatch_locked || s.auto_dispatch_excluded) ? 'L' : '-';
-                return `${r ? `${r.startMin}-${r.endMin}` : 'open'}|${dur}|${locked}|${s.visit_id || ''}`;
-              };
+              const windowSig = (s) => windowGuardSignature(s, { repairDurationFallback: !!repair });
               const snapshot = new Map(techStops.map((s) => [s.id, {
                 window: windowSig(s),
                 routeOrder: s.route_order == null ? null : Number(s.route_order),
@@ -938,9 +1017,9 @@ module.exports = {
   recordSkippedTick,
   getRouteReorderConfig,
   chooseWindowSafeOrder,
-  // A real production caller (admin-schedule.js, alongside chooseWindowSafeOrder)
-  // needs the SAME-MODEL distance comparison — a named export rather than
-  // reaching into the test-only _internals bag below.
-  modelDistanceMeters,
+  // Real production callers: admin-schedule.js's post-lock staleness
+  // re-validation reuses this SAME signature the shared decision was
+  // evaluated against (codex GitHub round P2) rather than re-deriving it.
+  windowGuardSignature,
   _internals: { currentOrder, effectiveWindowStart, effectiveWindowRange, violatesWindowFeasibility, withinFreezeClock, violatesWindowChronology, modelDistanceMeters, loadAutoDispatchSummary, EXCLUDE_STATUSES, GOOGLE_WAYPOINT_CAP },
 };

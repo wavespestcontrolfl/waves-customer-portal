@@ -98,11 +98,18 @@ let trxUpdates;
 
 function trxTable() {
   const filters = {};
+  let idsIn = null;
   const c = {};
   c.where = (a, b) => { if (typeof a === 'object') Object.assign(filters, a); else filters[a] = b; return c; };
   c.whereNull = (col) => { filters[col] = null; return c; };
+  c.whereIn = (col, vals) => { if (col === 'id') idsIn = new Set(vals); return c; };
   c.modify = (fn) => { fn(c); return c; };
   c.update = async (u) => { trxUpdates.push({ ...filters, ...u }); return 1; };
+  // The post-lock guard-input re-read. Reads stopsByDate LIVE, so a test that
+  // mutates a row inside the lockTechDays mock is mutating it in the same gap
+  // the fence exists to catch.
+  c.select = async () => (stopsByDate[filters.scheduled_date] || [])
+    .filter((row) => !idsIn || idsIn.has(row.id));
   return c;
 }
 
@@ -260,7 +267,7 @@ describe('POST /schedule/optimize (multi tech-day)', () => {
     // legal and unchanged = 44000 m both before and after. Scoring the flat
     // five-stop list as one route would chain t1's last stop to t2's first
     // (a leg nobody drives) and report a different, fictitious number.
-    const { modelDistanceMeters } = require('../services/route-reorder');
+    const { modelDistanceMeters } = require('../services/route-reorder')._internals;
     const flatBefore = modelDistanceMeters(RouteOptimizer, [...stopsByDate[DATE]].sort((a, b) => a.route_order - b.route_order));
     expect(body.unoptimizedDistanceMeters).toBe(24000 + 44000);
     expect(body.totalDistanceMeters).toBe(22000 + 44000);
@@ -312,5 +319,90 @@ describe('POST /schedule/optimize (multi tech-day)', () => {
       totalDistanceMeters: 4000, unoptimizedDistanceMeters: 5000, savedDistanceMeters: 1000, savedPercent: 20,
     });
     expect(body.reason).toBeUndefined();
+  });
+});
+
+// ── Codex round 1 ────────────────────────────────────────────────────────
+describe('round-1 guards', () => {
+  const { lockTechDays } = require('../services/scheduling/tech-day-lock');
+
+  test('a stop without usable coordinates fails closed: 409 COORDLESS_STOPS, nothing written', async () => {
+    process.env.GATE_ROUTE_REORDER_WINDOW_FIT = 'true';
+    process.env.GATE_DRIVE_TIME_CALIBRATION = 'true';
+    // Same chronology conflict as (a), but T1 never geocoded: both the
+    // feasibility simulation and the distance model would treat its travel
+    // as zero, so no repair built on it is trustworthy.
+    stopsByDate[DATE] = chronologyDay().map((s) => (s.id === 'T1' ? { ...s, lat: null, lng: null } : s));
+    mockOptimizerOrder(['T2', 'T1', 'U']);
+    const { status, body } = await optimizeRoute({ technicianId: 't1', date: DATE });
+    expect(status).toBe(409);
+    expect(body).toMatchObject({ success: false, reason: 'COORDLESS_STOPS', conflict: 'WINDOW_ORDER_CONFLICT' });
+    expect(trxUpdates).toEqual([]);
+    expect(db.transaction).not.toHaveBeenCalled();
+  });
+
+  test('a window edited between the day load and the tech-day lock aborts the write (409)', async () => {
+    stopsByDate[DATE] = [stop('A', { lng: 1, route_order: 2 }), stop('B', { lng: 2, route_order: 1 })];
+    mockOptimizerOrder(['A', 'B']);
+    // Re-promised inside the lock gap: the order that is about to commit was
+    // validated against A having no window at all.
+    lockTechDays.mockImplementation(async () => {
+      stopsByDate[DATE] = stopsByDate[DATE].map((s) => (s.id === 'A' ? { ...s, window_start: '09:00', window_end: '10:00' } : s));
+    });
+    const { status, body } = await optimizeRoute({ technicianId: 't1', date: DATE });
+    expect(status).toBe(409);
+    expect(body.error).toMatch(/reload and retry/i);
+    expect(trxUpdates).toEqual([]);
+  });
+
+  test('an untouched day still commits — the fence is not a blanket abort', async () => {
+    stopsByDate[DATE] = [stop('A', { lng: 1, route_order: 2 }), stop('B', { lng: 2, route_order: 1 })];
+    mockOptimizerOrder(['A', 'B']);
+    lockTechDays.mockImplementation(async () => {});
+    const { status } = await optimizeRoute({ technicianId: 't1', date: DATE });
+    expect(status).toBe(200);
+    expect(trxUpdates.map((u) => u.id)).toEqual(['A', 'B']);
+  });
+
+  describe("today's route is already in progress", () => {
+    // 15:30 ET on the day being optimized. T1's 09:00-10:00 promise is long
+    // gone; T2's 16:00-17:00 is still keepable. Pre-fix, the guard simulated
+    // from 08:00 with BOTH windows binding, so Google's T2-first order read
+    // as a chronology violation and the repair drove the overdue T1 first —
+    // losing the one promise still in play.
+    const TODAY = '2026-09-20';
+    beforeEach(() => {
+      jest.useFakeTimers({ doNotFake: ['nextTick', 'setImmediate'] });
+      jest.setSystemTime(new Date('2026-09-20T19:30:00Z')); // 15:30 ET
+    });
+    afterEach(() => { jest.useRealTimers(); });
+
+    const elapsedDay = () => [
+      stop('T1', { window_start: '09:00', window_end: '10:00', lng: 10, route_order: 1 }),
+      stop('T2', { window_start: '16:00', window_end: '17:00', lng: 1, route_order: 2 }),
+    ];
+
+    test('an elapsed window no longer dictates order: Google’s T2-first order is written unchanged', async () => {
+      process.env.GATE_ROUTE_REORDER_WINDOW_FIT = 'true';
+      process.env.GATE_DRIVE_TIME_CALIBRATION = 'true';
+      stopsByDate[TODAY] = elapsedDay();
+      mockOptimizerOrder(['T2', 'T1']);
+      const { status, body } = await optimizeRoute({ technicianId: 't1' }); // no date ⇒ today
+      expect(status).toBe(200);
+      expect(body.source).toBe('google_routes_api');
+      expect(trxUpdates.map((u) => u.id)).toEqual(['T2', 'T1']);
+    });
+
+    test('the same day on a FUTURE date still binds both windows and repairs to T1 first', async () => {
+      process.env.GATE_ROUTE_REORDER_WINDOW_FIT = 'true';
+      process.env.GATE_DRIVE_TIME_CALIBRATION = 'true';
+      const FUTURE = '2026-09-21';
+      stopsByDate[FUTURE] = elapsedDay();
+      mockOptimizerOrder(['T2', 'T1']);
+      const { status, body } = await optimizeRoute({ technicianId: 't1', date: FUTURE });
+      expect(status).toBe(200);
+      expect(body.source).toBe('window_constrained');
+      expect(trxUpdates.map((u) => u.id)).toEqual(['T1', 'T2']);
+    });
   });
 });
