@@ -29,6 +29,10 @@ export default function KnowledgeSources() {
     try {
       const data = await adminFetch("/admin/knowledge/sources");
       setSources(data.sources || []);
+      // Concurrent compiles each refresh the list, and loadError replaces the
+      // whole panel. A later success supersedes an earlier refresh failure, or
+      // the stale error keeps hiding the table it just reloaded.
+      setLoadError("");
     } catch (requestError) {
       if (!afterMutation) throw requestError;
       setLoadError("Changes saved, but the source list could not be refreshed.");
