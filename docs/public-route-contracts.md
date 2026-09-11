@@ -99,8 +99,22 @@ Reservation and acceptance re-resolve catalog policies. Transactional catalog
 reads hold matched rows with FOR SHARE until the outer transaction ends, so
 catalog edits cannot overtake a validated allowance. Existing version-2 holds
 reject changed allowances with 409 `SLOT_UNAVAILABLE`, even after gate shutdown.
-Transactional route certification and independent-companion conversion belong
-to the following writer stages; capacity remains off until those are integrated.
+Reservation creation prepares bounded route traffic outside the transaction,
+then takes the date occupancy lock and the selected-technician/unassigned day
+fences together in canonical order before row locks. It rechecks the signed
+offer, live route fingerprint, catalog allowance, eligibility and closure state
+before persisting the hold, certified route order and audit. Relevant route rows
+remain locked through persistence; a busy completion yields recoverable
+`SLOT_UNAVAILABLE`. Unrelated assigned technicians do not invalidate the proof;
+a concurrent move to unassigned is fenced. Completed stops retain their prefix.
+Capacity offers preserve the enabled south-zone day funnel and omit speculative
+ASAP expansion. Acceptance revalidation and independent-companion conversion
+belong to the following stages; capacity remains off until those are integrated.
+Activation also requires the remaining booking writers: phone-booking primary
+and follow-up inserts retain the owner's lock-free book-and-flag contract.
+Existing-row locks do not fence those inserts, and their post-commit conflict
+check detects overlaps without preventing them. This stage does not close that
+race or authorize changing the phone-booking contract or enabling capacity.
 Existing request fields, token/signature guards, rate limits and privacy headers
 apply. With strict opt-in `GATE_VISIT_COMBINED_CAPACITY` and prerequisite
 `GATE_SEPARATE_COMBO_VISITS`, version-1 multi-service recurring selections reserve 60 minutes

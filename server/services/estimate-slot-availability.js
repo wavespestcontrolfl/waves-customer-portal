@@ -37,7 +37,7 @@ const {
   violatesTravelGap, travelGapEnabled, travelBufferMinutes, customerFacingBufferMinutes,
 } = require('./scheduling/travel-gap');
 const { addETDays, etDateString, etParts, parseETDateTime } = require('../utils/datetime-et');
-const { signSlotOffer, appendOfferToSlotId } = require('../utils/slot-offer-token');
+const { signSlotOffer, appendOfferToSlotId, CAPACITY_OFFER_POLICY } = require('../utils/slot-offer-token');
 const { resolveEstimateZone, zoneSlugOf } = require('./slot-zone');
 const { getZoneFunnelDays, applyZoneDayFunnel, fallbackCenterZoneName } = require('./scheduling/zone-day-funnel');
 const { isEnabled } = require('../config/feature-gates');
@@ -1570,6 +1570,7 @@ function signCustomerFacingSlots(slots, estimateId) {
       startMinutes: timeToMinutes(slot.windowStart),
       technicianId: slot.techId || null,
       durationMinutes: slot.durationMinutes,
+      policy: capacityEnabled() ? CAPACITY_OFFER_POLICY : undefined,
     });
     const publicSlot = { ...slot, slotId: appendOfferToSlotId(slot.slotId, offer) };
     delete publicSlot.routeMode;
@@ -1578,7 +1579,8 @@ function signCustomerFacingSlots(slots, estimateId) {
 }
 
 function classifySlot(slot, proximityDriveMinutes, durationMinutes = DEFAULT_OPTS.durationMinutes) {
-  const routeOptimal = Number.isFinite(slot.detour_minutes) && slot.detour_minutes <= proximityDriveMinutes;
+  const routeOptimal = Number.isFinite(slot.detour_minutes) && slot.detour_minutes <= proximityDriveMinutes
+    && (!capacityEnabled() || slot.stops_that_day > 0);
   const nearbyAnchor = routeOptimal ? pickNearbyAnchor(slot) : null;
   // Round display times to clean hour boundaries. slotId still uses the
   // rounded start so collisions between two slots that rounded to the
@@ -1829,7 +1831,9 @@ async function getAvailableSlots(estimateId, userOpts = {}) {
       lat: coords.lat,
       lng: coords.lng,
       durationMinutes: serviceProfile.durationMinutes,
+      serviceType: serviceProfile.services.map(service => service.label || service.service).join(' '),
       serviceTypes: serviceProfile.services.map(service => service.label || service.service),
+      capacityPlacement: true,
       // Travel gap (GATE_SLOT_TRAVEL_GAP): customer-facing turnaround buffer.
       bufferMinutes: customerFacingBufferMinutes(),
       dateFrom: segFrom,
@@ -1837,7 +1841,7 @@ async function getAvailableSlots(estimateId, userOpts = {}) {
       topN: Number.MAX_SAFE_INTEGER,
       includeWeekends: opts.includeWeekends,
     }))),
-    Promise.all(slotSegments.map(([segFrom, segTo]) => buildAsapCapacitySlots({
+    capacityEnabled() ? Promise.resolve([]) : Promise.all(slotSegments.map(([segFrom, segTo]) => buildAsapCapacitySlots({
       dateFrom: segFrom,
       dateTo: segTo,
       durationMinutes: serviceProfile.durationMinutes,
@@ -1886,9 +1890,8 @@ async function getAvailableSlots(estimateId, userOpts = {}) {
   for (const s of seedRankedRoute) {
     if (s?.date && !preferredSeedDates.includes(s.date)) preferredSeedDates.push(s.date);
   }
-  const { slots: funneledBookable, funnel } = applyZoneDayFunnel(
-    filterTimeOfDay(bookable, opts.timeOfDay), funnelDays, { preferredSeedDates },
-  );
+  const allBookable = filterTimeOfDay(bookable, opts.timeOfDay).sort(compareCustomerFacingSlots);
+  const { slots: funneledBookable, funnel } = applyZoneDayFunnel(allBookable, funnelDays, { preferredSeedDates });
   // Route-first ordering only on the coords path — the no-coords fallback
   // above has no detour data, so its ordering is unchanged either way.
   const selected = selectCustomerFacingSlots(funneledBookable, TARGET_TOTAL, {
@@ -2035,6 +2038,7 @@ async function getSlotDebug(estimateId, userOpts = {}) {
     lng: coords.lng,
     durationMinutes: serviceProfile.durationMinutes,
     serviceTypes: serviceProfile.services.map(service => service.label || service.service),
+    capacityPlacement: true,
     bufferMinutes: customerFacingBufferMinutes(),
     dateFrom,
     dateTo,

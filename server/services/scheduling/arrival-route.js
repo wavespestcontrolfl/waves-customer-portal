@@ -1,8 +1,8 @@
 /**
  * Staff appointment placement within the EXISTING two-hour arrival promises.
  * Extends the route-reorder simulation; never changes other visits' windows,
- * service durations, route_order, or customer communications. Capacity reads
- * evaluate insertion orders for the later reservation and dispatch writers.
+ * service durations, or customer communications. Capacity writers certify
+ * insertion orders and persist them with an audit inside the occupancy lock.
  */
 const db = require('../../models/db');
 const RouteOptimizer = require('../route-optimizer');
@@ -286,7 +286,8 @@ function evaluateArrivalPlacement(context, { windowStart, windowEnd, durationMin
     ...(capacity ? {
       finishMinute: simulation.returnFinishMin,
       occupiedMinutes: simulation.returnFinishMin - startMin,
-      routeOrder: order.flatMap(row => row.memberIds || [row.id]),
+      routeOrder: [...currentOrder(own.filter(row => row.status === 'completed')).map(row => row.id),
+        ...order.flatMap(row => row.memberIds || [row.id])],
       travelSource: usedLegs.every(leg => leg.source === 'google_traffic') ? 'google_traffic' : 'conservative_model',
       travelReasons: [...new Set(usedLegs.map(leg => leg.reason).filter(Boolean))],
     } : {}),
@@ -312,10 +313,34 @@ function enumerateArrivalPlacements(context, { durationMinutes, earliestStartMin
   return { placements, evaluated, rejections };
 }
 
-async function checkArrivalPlacement({ windowStart, windowEnd, durationMinutes, ...options }) {
-  const context = await loadArrivalRouteContext(options);
-  return evaluateArrivalPlacement(context, { windowStart, windowEnd, durationMinutes, allowInsertion: false });
+function routeFingerprint(context) {
+  const { createHash } = require('crypto');
+  const relevant = context.rows.filter(row => row.technician_id == null
+    || row.technician_id === context.target.technician_id);
+  const rows = [...relevant, context.target].map(row => Object.fromEntries(
+    [...COLUMNS, 'lat', 'lng'].map(key => [key, row[key] ?? null]),
+  )).sort((a, b) => String(a.id).localeCompare(String(b.id)));
+  // Prospective creation time is bookkeeping, not a changed route input.
+  for (const row of rows) if (row.id === '__candidate__') row.created_at = null;
+  return createHash('sha256').update(JSON.stringify({ rows,
+    blocks: [...(context.blocks || [])].sort((a, b) => String(a.id).localeCompare(String(b.id))) })).digest('hex');
 }
+
+
+async function certifyArrivalPlacement(context, options) {
+  if (!context) return unverified(null, 'this date');
+  if (!capacityEnabled() && !context.preserveCapacity) return evaluateArrivalPlacement(context, options);
+  context.travel ||= RouteOptimizer.createSchedulingTravel();
+  // Recompute departure times after road estimates change a leg. A final
+  // uncovered leg retains the conservative model and is labelled accordingly.
+  for (let pass = 0; pass < 3; pass++) {
+    const legs = [];
+    evaluateArrivalPlacement(context, { ...options, collectLegs: legs });
+    await context.travel.preload(legs);
+  }
+  return evaluateArrivalPlacement(context, options);
+}
+
 
 function capacityError(reason = 'route_changed') {
   return Object.assign(new Error('This time is no longer available. Please choose another appointment.'), {
@@ -323,9 +348,93 @@ function capacityError(reason = 'route_changed') {
   });
 }
 
+async function prepareArrivalCapacity(options) {
+  if (!capacityEnabled() && !options.preserveCapacity) return null;
+  const context = await loadArrivalRouteContext(options);
+  if (!context) throw capacityError('route_unverified');
+  await certifyArrivalPlacement(context, options);
+  return { options, fingerprint: routeFingerprint(context), travel: context.travel };
+}
+
+async function verifyArrivalCapacity(prepared, { conn, windowStart, windowEnd, durationMinutes, serviceTypes } = {}) {
+  if (!prepared || (!capacityEnabled() && !prepared.options.preserveCapacity)) throw capacityError();
+  // Callers hold selected and unassigned tech-day fences before row locks.
+  // Completion writers lock stops without the tech-day fence. Hold relevant
+  // rows through persistence; NOWAIT avoids reversing their lock order.
+  if (!conn?.isTransaction) throw capacityError('transaction_required');
+  try {
+    await conn('scheduled_services').where({ scheduled_date: prepared.options.date })
+      .where(query => query.where('technician_id', prepared.options.technicianId).orWhereNull('technician_id'))
+      .whereNotIn('status', NOT_A_ROUTE_STOP_STATUSES)
+      .orderBy('id').select('id').forUpdate().noWait();
+  } catch (error) {
+    if (error.code === '55P03') throw capacityError('route_busy');
+    throw error;
+  }
+  const context = await loadArrivalRouteContext({ ...prepared.options, conn, travel: prepared.travel });
+  if (!context || routeFingerprint(context) !== prepared.fingerprint) throw capacityError();
+  const fit = evaluateArrivalPlacement(context, { ...prepared.options,
+    ...(windowStart ? { windowStart } : {}), ...(windowEnd ? { windowEnd } : {}),
+    ...(durationMinutes ? { durationMinutes } : {}), bufferMinutes: 0 });
+  if (!fit.feasible) throw capacityError(fit.reason);
+  await assertCapacityEligibility(conn, context, serviceTypes);
+  return fit;
+}
+
+async function assertCapacityEligibility(conn, context, serviceTypes) {
+  const { assertAssignableTechnician, NOT_ASSIGNABLE } = require('../technician-eligibility');
+  try {
+    await assertAssignableTechnician(context.target.technician_id, { conn });
+  } catch (error) {
+    if (error.code !== NOT_ASSIGNABLE) throw error;
+    throw capacityError('technician_unavailable');
+  }
+  const members = serviceTypes?.map(service_type => ({ service_type }))
+    || context.target.reservation_service_mix?.services?.map(service_type => ({ service_type }))
+    || [context.target];
+  await require('../technician-capabilities').assertCapabilitiesActive(conn, context.target.technician_id, members,
+    () => capacityError('technician_unavailable'));
+  // Serialize against the blackout/weekly-days-off mutation endpoints
+  // (routes/admin-schedule.js) before reading closure state: without this
+  // shared lock, a READ COMMITTED read here can observe the pre-mutation
+  // closure state and let the hold commit for a day an admin write closes a
+  // moment later (codex #4346 P2). See blackout-dates.js for lock order.
+  const { lockClosureState, getBlackoutLayers } = require('./blackout-dates');
+  await lockClosureState(conn);
+  if ((await getBlackoutLayers(context.date, context.date, conn)).dates.has(context.date)) {
+    throw capacityError('day_unavailable');
+  }
+}
+
+async function persistArrivalOrder(conn, fit, targetId) {
+  const order = fit.routeOrder.map(id => id === '__candidate__' ? targetId : id);
+  for (let i = 0; i < order.length; i++) {
+    await conn('scheduled_services').where({ id: order[i] })
+      .where({ scheduled_date: fit.target.scheduled_date, technician_id: fit.target.technician_id })
+      .whereRaw('route_order IS DISTINCT FROM ?', [i + 1]).update({ route_order: i + 1 });
+  }
+  await recordCapacityDecision(conn, fit, targetId);
+}
+
+async function recordCapacityDecision(conn, fit, targetId) {
+  const order = fit.routeOrder.map(id => id === '__candidate__' ? targetId : id);
+  // Audit application-owned decisions, never Google response bodies or legs.
+  await require('../audit-log').recordAuditEvent({ actor_type: 'system', action: 'schedule.capacity_verified',
+    resource_type: 'scheduled_service', resource_id: targetId, critical: true, trx: conn,
+    metadata: { policy: 'capacity_2026_09_09', route_order: order,
+      travel_source: fit.travelSource, reason_codes: fit.travelReasons,
+      finish_minute: fit.finishMinute, occupied_minutes: fit.occupiedMinutes } });
+}
+
+async function checkArrivalPlacement({ windowStart, windowEnd, durationMinutes, ...options }) {
+  const context = await loadArrivalRouteContext(options);
+  return evaluateArrivalPlacement(context, { windowStart, windowEnd, durationMinutes, allowInsertion: false });
+}
+
+
 module.exports = {
-  capacityError,
   arrivalWindowRoutingEnabled, loadArrivalRouteContext, evaluateArrivalPlacement, checkArrivalPlacement,
   enumerateArrivalPlacements,
   groupRouteStops, workDuration,
+  prepareArrivalCapacity, verifyArrivalCapacity, persistArrivalOrder, capacityError,
 };

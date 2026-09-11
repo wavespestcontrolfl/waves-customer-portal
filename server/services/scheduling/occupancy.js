@@ -191,6 +191,9 @@ const DEFAULT_DURATION_MINUTES = 60;
 //     the same rung-1 lock BEFORE extending the hold's expiry — a hold
 //     whose window a committed visit has since taken is superseded
 //     (released, delete-only) and the reserve throws instead of refreshing.
+//     Capacity holds also take selected-technician and unassigned day fences
+//     in canonical order before any row lock. This fences dispatch membership
+//     changes from another technician to unassigned through certification.
 //   services/slot-reservation.js commitReservation  1
 //     Keys rung 1 off an UNLOCKED read of the hold row's date; its
 //     FOR UPDATE follows the lock, and a date moved in between fails into
