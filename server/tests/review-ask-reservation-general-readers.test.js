@@ -36,13 +36,18 @@ describe('isUnresolvedReviewAskReservation — the shared predicate', () => {
     }
   });
 
-  test('a reply reservation is NOT review-ask spacing evidence, but IS a placeholder general readers hide', () => {
+  test('a reply reservation is NOT review-ask spacing evidence, but IS a placeholder general readers hide — while its hold runs', () => {
+    const fresh = new Date(Date.now() - 3600000);
+    const stale = new Date(Date.now() - 25 * 3600000);
     for (const marker of ['manual_send_reservation', 'auto_send_reservation']) {
-      expect(isUnresolvedReviewAskReservation({ status: 'sending', metadata: { [marker]: true } })).toBe(false);
-      expect(isUnresolvedSendReservation({ status: 'sending', metadata: { [marker]: true } })).toBe(true);
-      expect(isUnresolvedSendReservation({ status: 'sent', metadata: { [marker]: true } })).toBe(false);
+      expect(isUnresolvedReviewAskReservation({ status: 'sending', metadata: { [marker]: true }, created_at: fresh })).toBe(false);
+      expect(isUnresolvedSendReservation({ status: 'sending', metadata: { [marker]: true }, created_at: fresh })).toBe(true);
+      expect(isUnresolvedSendReservation({ status: 'sent', metadata: { [marker]: true }, created_at: fresh })).toBe(false);
+      // Past the reconciliation hold it SURFACES as the unresolved attempt it is.
+      expect(isUnresolvedSendReservation({ status: 'sending', metadata: { [marker]: true }, created_at: stale })).toBe(false);
     }
-    expect(isUnresolvedSendReservation({ status: 'sending', metadata: { review_ask_reservation: true } })).toBe(true);
+    // A review-ask reservation is hidden for as long as it is unresolved.
+    expect(isUnresolvedSendReservation({ status: 'sending', metadata: { review_ask_reservation: true }, created_at: stale })).toBe(true);
   });
 
   test('false for an ordinary sending row without the marker', () => {
@@ -64,6 +69,7 @@ describe('excludeUnresolvedSendReservations — SQL-level exclusion', () => {
     expect(sql).toContain("sms_log.metadata->>'review_ask_reservation'");
     expect(sql).toContain("sms_log.metadata->>'manual_send_reservation'");
     expect(sql).toContain("sms_log.metadata->>'auto_send_reservation'");
+    expect(sql).toContain("sms_log.created_at >= NOW() - INTERVAL '24 hours'");
   });
 
   test('qualifies an aliased/joined table when given', () => {
