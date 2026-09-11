@@ -307,6 +307,7 @@ test.each([
   'My neighbors need service. I can send you more pest-control leads; can you quote them?',
   'I can provide you with more lawn leads. They are my neighbors and need quotes.',
   'I have three qualified leads for you—my neighbors all need pest control. Can you quote them?',
+  'I can provide you with more pest-control leads. They are my friends who need quotes. Can you quote them?',
 ])('a genuine referral remains unread and reaches ordinary handling in enforcement mode: %s', async (body) => {
   process.env.GATE_SMS_SPAM_CLASSIFIER = 'true';
   await receive(body);

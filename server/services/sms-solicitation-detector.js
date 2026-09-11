@@ -16,9 +16,11 @@ const SOLICITATION_MARKERS = [
   // Referring neighbors is ordinary intake; more leads or "leads for you"
   // needs independent vendor evidence, such as a supplier offer or footer.
   { key: 'lead_referral', strong: false, re: /\b(?:more|extra)\s+(?:[\w-]+\s+){0,3}leads?\b|\bleads?\s+for\s+(?:you|your)\b/i },
-  // A sender's own neighbors/neighborhood establishes referral context
-  // across the message, including when the sender offers to deliver leads.
-  { key: 'lead_supplier', strong: false, outreach: true, re: /^(?![\s\S]*\b(?:my|our)\s+neighbou?r(?:s|hood)?\b)[\s\S]*\b(?:we|i|(?:my|our)\s+(?:network|team|company))\s+(?:(?:can|could|will)\s+)?(?:provide|offer|send|bring)s?\s+(?:you\s+(?:with\s+)?)?(?:more|extra)\s+(?:[\w-]+\s+){0,3}leads?\b/i },
+  // A sender's own neighbors/neighborhood/friends/family establishes
+  // referral context across the message, including when the sender offers
+  // to deliver leads (codex P1, 2026-09-11: the veto covered neighbor
+  // context only, so a friend/family referral still enforced).
+  { key: 'lead_supplier', strong: false, outreach: true, re: /^(?![\s\S]*\b(?:my|our)\s+(?:neighbou?r(?:s|hood)?|friends?|family)\b)[\s\S]*\b(?:we|i|(?:my|our)\s+(?:network|team|company))\s+(?:(?:can|could|will)\s+)?(?:provide|offer|send|bring)s?\s+(?:you\s+(?:with\s+)?)?(?:more|extra)\s+(?:[\w-]+\s+){0,3}leads?\b/i },
   { key: 'ad_spend', strong: true, re: /\bfund\s+your\s+ads?\b|\bad[\s-]?spend\b/i },
   // A prospect can offer enough service work to fill our schedule.
   // This needs an independent outreach clue, like other capacity wording.

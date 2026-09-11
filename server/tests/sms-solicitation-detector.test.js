@@ -50,11 +50,18 @@ describe('shared SMS vendor-pitch detector', () => {
     'I have three qualified leads for you—my neighbors all need pest control. Can you quote them?',
     'My neighbors all need pest control. I have three qualified leads for you. Can you quote them?',
     'I have unlimited leads for you from our neighbors who need lawn care.',
+    // Codex P1, 2026-09-11: lead_supplier's own veto covered neighbor
+    // context only, so a friend/family referral still enforced.
+    'I can provide you with more pest-control leads. They are my friends who need quotes. Can you quote them?',
+    'I can send you more lawn leads. They are my family and need service.',
   ])('ambiguous customer wording does not establish a pitch: %s', (body) => {
     expect(isSolicitationPitch(body)).toBe(false);
   });
 
   test.each([
+    // Paired negative for the friend/family veto above: the same
+    // lead_supplier wording with no referral context still enforces.
+    'I can provide you with more pest-control leads for your business.',
     'Our network offers exclusive lawn leads.',
     'We can provide more lawn leads.',
     'We can send you more pest-control leads.',
