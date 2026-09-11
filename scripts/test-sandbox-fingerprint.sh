@@ -117,6 +117,32 @@ else
   fail "the verifier no longer calls the shared helper"
 fi
 
+# Calling the helper is not enough if a second copy of the extraction is
+# sitting next to the call. The verifier asserts the sandbox components
+# against the invocation and the helper hashes it; a duplicated awk pattern
+# is how those two quietly stop describing the same command.
+if grep -q 'in_fn && /\[\[:space:\]\]claude -p' "$SCRIPT_DIR/verify-fallback-auditor-sandbox.sh"; then
+  fail "the verifier carries its own copy of the invocation-extraction awk"
+else
+  pass "the verifier has no duplicate copy of the invocation-extraction awk"
+fi
+
+# The extraction mode has to actually return the command, or the verifier's
+# component assertions are checking an empty string and passing vacuously.
+INVOCATION="$(bash "$TOOL" --print-invocation "$HOOK" 2>/dev/null)"
+MISSING=""
+for component in 'env -i "${claude_env[@]}" claude -p' '$CLAUDE_SANDBOX_FLAGS' '--disallowedTools "$CLAUDE_DISALLOWED_TOOLS"'; do
+  case "$INVOCATION" in
+    *"$component"*) ;;
+    *) MISSING="$MISSING $component" ;;
+  esac
+done
+if [ -z "$MISSING" ]; then
+  pass "--print-invocation returns the command with every sandbox component in it"
+else
+  fail "--print-invocation is missing:$MISSING"
+fi
+
 echo ""
 if [ "$FAILURES" -eq 0 ]; then
   echo "All sandbox-fingerprint tests passed."

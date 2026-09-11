@@ -23,10 +23,21 @@
 # Everything is read out of the hook FILE rather than from the caller's live
 # variables, so the hook and the verifier hash the same bytes.
 #
-# Usage: sandbox-fingerprint.sh <path-to-pre-push-hook>
-# Prints the fingerprint on stdout; exits non-zero with a message on stderr
-# if any component cannot be found.
+# Usage: sandbox-fingerprint.sh [--print-invocation] <path-to-pre-push-hook>
+# Prints the fingerprint on stdout, or with --print-invocation the extracted
+# `claude -p` command it hashes. That second mode exists so the verifier can
+# assert the sandbox components against the SAME extraction that gets hashed
+# and stamped, instead of keeping a second copy of the awk here-too. A copy
+# is how the assertion and the fingerprint quietly stop describing the same
+# command.
+# Exits non-zero with a message on stderr if any component cannot be found.
 set -u
+
+MODE="fingerprint"
+if [ "${1:-}" = "--print-invocation" ]; then
+  MODE="invocation"
+  shift
+fi
 
 HOOK="${1:-}"
 [ -n "$HOOK" ]  || { echo "sandbox-fingerprint: usage: $0 <path-to-pre-push-hook>" >&2; exit 2; }
@@ -53,6 +64,11 @@ INVOCATION="$(awk '
   in_cmd && /&[[:space:]]*$/ { exit }
 ' "$HOOK" | tr '\n' ' ' | tr -s '[:space:]' ' ' | sed 's/^ //; s/ $//')"
 [ -n "$INVOCATION" ] || { echo "sandbox-fingerprint: no claude -p invocation inside run_claude_audit in $HOOK" >&2; exit 1; }
+
+if [ "$MODE" = "invocation" ]; then
+  printf '%s\n' "$INVOCATION"
+  exit 0
+fi
 
 printf '%s|%s|%s|%s' "$FLAGS" "$ENV_ALLOW" "$DISALLOWED" "$INVOCATION" \
   | (shasum -a 256 2>/dev/null || sha256sum 2>/dev/null) | awk '{print $1}'

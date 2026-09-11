@@ -100,12 +100,12 @@ done
 # require every component to appear in it. Also require that it is the only
 # `claude -p` in the hook: a second, unsandboxed call site would otherwise be
 # invisible to this script.
-HOOK_INVOCATION="$(awk '
-  /^run_claude_audit\(\)/ { in_fn = 1 }
-  in_fn && /[[:space:]]claude -p([[:space:]]|$)/ { in_cmd = 1 }
-  in_cmd { print }
-  in_cmd && /&[[:space:]]*$/ { exit }
-' "$HOOK")"
+# The extraction comes from the shared helper, NOT a copy of its awk. The
+# assertion below and the fingerprint that gets stamped have to be talking
+# about the same command; two copies of the pattern is precisely how they
+# would stop doing that, quietly, while both still looked right.
+HOOK_INVOCATION="$(bash "$SCRIPT_DIR/hooks/sandbox-fingerprint.sh" --print-invocation "$HOOK")" || {
+  echo "FAIL: could not extract the hook's claude -p invocation via scripts/hooks/sandbox-fingerprint.sh"; exit 1; }
 [ -n "$HOOK_INVOCATION" ] || { echo "FAIL: could not find the claude -p invocation inside run_claude_audit in $HOOK"; exit 1; }
 CALL_SITES="$(grep -c '[[:space:]]claude -p\([[:space:]]\|$\)' "$HOOK")"
 [ "$CALL_SITES" = "1" ] || { echo "FAIL: expected exactly one claude -p call site in $HOOK, found $CALL_SITES — this script only proves the one in run_claude_audit"; exit 1; }
