@@ -16,6 +16,11 @@ const phone = (r) => r.phone || r.customer_phone || (String(r.direction || '').s
 // The deadline the ledger judges the card by: a staffed or stated deadline,
 // else the implicit one it projects (effective_due_at is snooze-aware).
 const dueAt = (r) => r.effective_due_at || r.due_at || null;
+const humanize = (value) => String(value || '').replace(/_/g, ' ');
+// The ledger's association hint: a completed outbound call (or similar) that
+// may already have kept this callback. Shown so staff confirm instead of
+// calling twice (the Owed row carried the same warning).
+const possiblyKept = (r) => r.fulfillment?.strength === 'association' ? r.fulfillment : null;
 
 const DEFAULT_POLL_MS = 30000;
 const EMPTY_TEXT = { true: 'Loading follow-through…', false: 'No follow-through needs attention.' };
@@ -128,6 +133,8 @@ export default function FollowThroughCards({ ui, onSummary, hints = true, pollMs
       <Text tone={overdue || !due ? 'alert' : 'muted'}>{overdue ? 'Overdue · ' : 'Due '}{when(due)}</Text>
       <Text>{r.description}</Text>
       {r.evidence?.[0]?.quote && <Text>“{r.evidence[0].quote}”</Text>}
+      {r.human_note && <Text>Note: {r.human_note}</Text>}
+      {possiblyKept(r) && <Text tone="alert">Possibly kept: {humanize(possiblyKept(r).kind)}{possiblyKept(r).matched_at ? ` on ${when(possiblyKept(r).matched_at)}` : ''} · {humanize(possiblyKept(r).basis)} — confirm with Done</Text>}
       <Text tone="muted">{phone(r)} · Call {when(r.call_started_at)}{r.owner_name ? ` · ${r.owner_name}` : ''}</Text>
       {snoozed.includes(r) && <Text tone="muted">Snoozed until {when(r.snoozed_until)}</Text>}
       <div className="flex flex-wrap gap-2">

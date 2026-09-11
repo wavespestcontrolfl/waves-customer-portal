@@ -47,6 +47,13 @@ describe('callback cards', () => {
       expect(screen.getByText(/^Overdue · /)).toBeInTheDocument();
     } finally { vi.useRealTimers(); }
   });
+  it('keeps the operator note and the possibly-kept warning the Owed row carried', async () => {
+    adminFetch.mockResolvedValue({ ...feed, commitments: [{ ...row, human_note: 'Ask for Pat',
+      fulfillment: { kind: 'outbound_call', strength: 'association', basis: 'completed_outbound_call_to_caller_within_14_days', matched_at: '2026-09-03T14:00:00Z' } }] });
+    render(<FollowThroughCards ui={ui} />);
+    await screen.findByText('Note: Ask for Pat');
+    expect(screen.getByText(/^Possibly kept: outbound call on .* · completed outbound call to caller within 14 days — confirm with Done$/)).toBeInTheDocument();
+  });
   it('marks a card the ledger judged overdue and lists a snoozed card separately', async () => {
     const past = new Date(Date.now() - 3600000).toISOString();
     const future = new Date(Date.now() + 7200000).toISOString();
