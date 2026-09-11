@@ -382,11 +382,15 @@ router.post('/sms', async (req, res) => {
     // footer earns a real suppression row and an unsubscribe reply from a Waves
     // line. That is the 2026-07-23 incident this lane exists to stop (codex P0).
     let solicitationMode = 'off';
+    // Hoisted so the footer-stripping decision below can reuse this exact
+    // result instead of a second, independently-gated lookup (codex P0,
+    // 2026-09-11) — see the comment on `ignoreReplyInstructions`.
+    let known = false;
     try {
       const screen = require('../services/sms-solicitation-classifier');
       solicitationMode = screen.classifierMode();
       if (inboundTouchpoint?.message?.id && MessageSid && solicitationMode !== 'off' && !customer && !isAiNumber && !smsReaction && Body) {
-        const known = await require('../utils/known-caller-phone').knownCallerPhoneExists(db, From);
+        known = await require('../utils/known-caller-phone').knownCallerPhoneExists(db, From);
         solicitation = await screen.screenInboundSms({ body: Body, hasCustomer: known, isReaction: smsReaction, isAiLine: isAiNumber });
         if (solicitation) {
           // NOT marked read here even when enforced — see the deferred
@@ -428,7 +432,23 @@ router.post('/sms', async (req, res) => {
     // the AI line, neither of which is ever enforced, so stripping their
     // reply-instruction-shaped wording risked silently dropping a real
     // customer's own genuine opt-out.
-    const ignoreReplyInstructions = solicitationMode === 'enforce' && !customer && !isAiNumber;
+    // `customer` alone under-covers that population: it is
+    // findSingleCustomerByPhone, a primary-`customers.phone` match only,
+    // while a spouse/tenant/service-contact stored solely in one of the
+    // other identity columns is just as known — the same recognition set
+    // knownCallerPhoneExists already uses for the classifier gate above.
+    // Left keyed on `customer`, their own "Reply STOP to stop messages"
+    // got stripped and silently dropped, same as a spoofed vendor footer
+    // (codex P0, 2026-09-11). Reuses `known` — the hoisted result of the
+    // SAME knownCallerPhoneExists lookup the classifier gate above already
+    // made for this exact population (!customer && !isAiNumber, enforcement
+    // not off) — rather than issuing a second, differently-gated query: any
+    // bypass that left the classifier from running (a reaction, an empty
+    // body, a failed durable save) also leaves `known` at its fail-toward-
+    // stripping default of false, so an unresolved relationship can never
+    // let a spoofed footer through.
+    const knownRelationship = Boolean(customer) || known;
+    const ignoreReplyInstructions = solicitationMode === 'enforce' && !knownRelationship && !isAiNumber;
     const optCommand = complianceEligible
       ? detectSmsOptCommand(Body, { ignoreReplyInstructions })
       : { action: null };

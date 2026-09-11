@@ -438,3 +438,26 @@ test('a known customer\'s own opt-out is never stripped as a vendor footer, even
   // A matched customer is never a solicitation-screening candidate.
   expect(dispatchWithFallback).not.toHaveBeenCalled();
 });
+
+// Codex P0, 2026-09-11: `customer` is findSingleCustomerByPhone, a
+// customers.phone-only match. A sender known solely through a service-contact
+// or secondary-phone column (spouse/tenant/manager slot) is `!customer` but
+// still a known relationship per knownCallerPhoneExists — the footer guard
+// must be keyed on that full recognition set, not the primary-only match, or
+// their own genuine opt-out gets silently dropped as if it were a vendor's
+// spoofed compliance footer.
+test('a service-contact-only known sender\'s own opt-out is never stripped, even in enforcement mode', async () => {
+  process.env.GATE_SMS_SPAM_CLASSIFIER = 'true';
+  // No primary customers.phone match — mockCustomersRows stays null — but the
+  // sender is known through service_contact_phone/secondary_phone, which is
+  // exactly what knownCallerPhoneExists recognizes.
+  knownCallerPhoneExists.mockResolvedValue(true);
+  const res = await receive('Reply STOP to stop messages');
+  expect(res.body).toContain('unsubscribed');
+  expect(recordSuppression).toHaveBeenCalledTimes(1);
+  expect(mockWrites.find(({ table }) => table === 'sms_log').row.message_type).toBe('opt_out');
+  // Known via the relationship lookup, not the primary match — never a
+  // solicitation-screening candidate either (mirrors the classifier gate,
+  // which already uses this same knownCallerPhoneExists result).
+  expect(dispatchWithFallback).not.toHaveBeenCalled();
+});
