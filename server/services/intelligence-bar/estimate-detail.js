@@ -61,18 +61,31 @@ const lazy = {
 const list = (v) => (Array.isArray(v) ? v : []);
 
 // ── Offered pricing (the public bundle, verbatim in shape) ───────────
-// The per-application figure the customer page shows (PriceCard
-// perApplicationNetForFrequency): the single allocated treatment row's net
-// displayPrice when there is exactly one, else the cadence's own
-// perTreatment — and only on a cadence the composer marks billed per
-// application. A legacy monthly-billed member's bundle has that flag
+// The per-application figure the customer page shows — a server mirror of
+// PriceCard.jsx perApplicationNetForFrequency (the client module cannot be
+// imported into the server; keep the two in step): the single priced
+// treatment row's net displayPrice when there is exactly one, else the
+// cadence's own perTreatment with PriceCard's visit derivation — and only
+// on a cadence the composer marks billed per application. A legacy monthly-billed member's bundle has that flag
 // stripped by the composer; such a cadence is a monthly charge, and no
 // per-application amount is invented for it.
-function perApplicationFor(f, rows) {
+const CADENCE_VISITS = { quarterly: 4, bi_monthly: 6, monthly: 12 };
+function perApplicationFor(f) {
   if (f.billedPerApplication !== true) return null;
-  if (rows.length === 1 && Number(rows[0].displayPrice) > 0 && Number(rows[0].visitsPerYear) > 0) return money(rows[0].displayPrice);
-  if (Number(f.perTreatment ?? f.perVisit) > 0 && Number(f.visitsPerYear) > 0) return money(f.perTreatment ?? f.perVisit);
-  return null;
+  const rows = list(f.perServiceTreatments)
+    .map((row) => ({ displayPrice: Number(row.displayPrice ?? row.perTreatment), monthlyPrice: Number(row.monthly), visitsPerYear: Number(row.visitsPerYear) }))
+    .filter((row) => (Number.isFinite(row.displayPrice) && row.displayPrice > 0) || (Number.isFinite(row.monthlyPrice) && row.monthlyPrice > 0));
+  if (rows.length === 1) return rows[0].displayPrice > 0 && rows[0].visitsPerYear > 0 ? money(rows[0].displayPrice) : null;
+  if (rows.length > 1) return null;
+  // No priced treatment row: the cadence's own perTreatment, with the visit
+  // count from the cadence, a single visit-bearing row, or the cadence key
+  // (legacy / snapshotted rows omit visitsPerYear) — PriceCard's order.
+  const visitRows = list(f.perServiceTreatments).filter((row) => Number(row?.visitsPerYear) > 0);
+  const visits = Number(f.visitsPerYear) > 0
+    ? Number(f.visitsPerYear)
+    : (visitRows.length === 1 ? Number(visitRows[0].visitsPerYear) : (visitRows.length === 0 ? (CADENCE_VISITS[f.key] || null) : null));
+  const pt = Number(f.perTreatment);
+  return pt > 0 && Number.isFinite(visits) && visits > 0 ? money(pt) : null;
 }
 
 // A LOW-confidence commercial cadence carries a range, not a price: the
@@ -109,7 +122,7 @@ function frequencyEntry(f) {
     annual: money(f.annual),
     visits_per_year: Number(f.visitsPerYear) > 0 ? Number(f.visitsPerYear) : null,
     billing_unit: f.billedPerApplication === true ? 'per_application' : 'monthly',
-    per_application: perApplicationFor(f, rows),
+    per_application: perApplicationFor(f),
     per_service_treatments: rows.map(treatmentRow),
     // Row-level discount state: a program minimum can cap or suppress the
     // manual discount on SOME cadences only — the global manual_discount
@@ -164,20 +177,23 @@ function upfrontFees(bundle) {
 function breakdownEntry(b, excludedServices) {
   if (!b || typeof b !== 'object') return null;
   const excluded = new Set(excludedServices);
-  return {
-    items: list(b.items)
-      .filter((i) => !excluded.has(i.service))
-      .map((i) => ({
-        service: i.service || null,
-        label: i.label || null,
-        amount: money(i.amount),
-        detail: i.detail || null,
-        ...(i.quoteRequired === true ? { quote_required: true } : {}),
-      })),
-    excluded_upfront_fee_services: [...excluded],
-    total: money(b.total),
-    quote_required: b.quoteRequired === true,
-  };
+  const items = list(b.items)
+    .filter((i) => !excluded.has(i.service))
+    .map((i) => ({
+      service: i.service || null,
+      label: i.label || null,
+      amount: money(i.amount),
+      detail: i.detail || null,
+      ...(i.quoteRequired === true ? { quote_required: true } : {}),
+    }));
+  // The page's rule (OneTimeBreakdownCard): the composer's total stands
+  // only when nothing was excluded; with exclusions the total is the sum of
+  // the remaining items, so a fee reported in upfront_fees never rides in
+  // this subtotal too.
+  const total = excluded.size === 0 && Number.isFinite(Number(b.total))
+    ? money(b.total)
+    : money(items.reduce((sum, i) => sum + (Number(i.amount) || 0), 0));
+  return { items, excluded_upfront_fee_services: [...excluded], total, quote_required: b.quoteRequired === true };
 }
 
 async function offeredPricing(row) {

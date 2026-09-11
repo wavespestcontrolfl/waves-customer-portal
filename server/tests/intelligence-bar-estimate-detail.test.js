@@ -158,7 +158,8 @@ test('offered pricing is the public bundle verbatim in shape: cadences, ladders,
         { service: null, label: 'Custom exclusion', amount: null, detail: null, quote_required: true },
       ],
       excluded_upfront_fee_services: ['waveguard_setup', 'pest_initial_roach', 'rodent_bait_setup'],
-      total: 600, quote_required: true,
+      total: 450, // recomputed from the remaining items once a fee was excluded (OneTimeBreakdownCard rule), not the composer's 600
+      quote_required: true,
     },
     manual_discount: { amountAnnual: 40 },
     quote_required: false,
@@ -175,6 +176,26 @@ test('offered pricing is the public bundle verbatim in shape: cadences, ladders,
   expect(shaped.one_time_items).toBeUndefined();
   expect(JSON.stringify(shaped)).not.toMatch(/internal only/);
   expect(shaped).toMatchObject({ customer: 'Avery Example', tier: 'silver', bill_by_invoice: false, customer_link: 'https://portal.wavespestcontrol.com/estimate/xydejpzuxx', link_state: 'customer_viewable', view_count: 2 });
+});
+
+test('per-application follows PriceCard\'s full resolver: priced treatment row first, else perTreatment with visits from the cadence, a single visit row, or the cadence key', async () => {
+  mockBuildPricingBundle.mockResolvedValue({ frequencies: [
+    { key: 'quarterly', perTreatment: 140, billedPerApplication: true }, // legacy: no visitsPerYear → 4 from the key
+    { key: 'bi_monthly', perTreatment: 110, billedPerApplication: true, perServiceTreatments: [{ service: 'pest_control', visitsPerYear: 6 }] }, // one visit-bearing unpriced row
+    { key: 'custom', perTreatment: 90, billedPerApplication: true }, // unknown key, no visits anywhere → no figure
+    { key: 'monthly', perTreatment: 50, billedPerApplication: true, perServiceTreatments: [{ service: 'a', displayPrice: 30, visitsPerYear: 12 }, { service: 'b', displayPrice: 20, visitsPerYear: 12 }] }, // two priced rows → ambiguous
+    { key: 'quarterly', perTreatment: 140, billedPerApplication: true, perServiceTreatments: [{ service: 'a', monthly: 40, visitsPerYear: 4 }] }, // one row priced only monthly → no per-app figure
+  ] });
+  const shaped = await shapeEstimate(estimateRow());
+  expect(shaped.offered_pricing.plan_frequencies.map((f) => f.per_application)).toEqual([140, 110, null, null, null]);
+  const breakdownOnly = await shapeEstimate(estimateRow());
+  expect(breakdownOnly.offered_pricing.one_time_breakdown).toBeNull();
+});
+
+test('a breakdown with nothing excluded keeps the composer\'s total', async () => {
+  mockBuildPricingBundle.mockResolvedValue({ frequencies: [], firstVisitFees: [], oneTimeBreakdown: { items: [{ service: 'exclusion', label: 'Exclusion', amount: 450 }], total: 455.5 } });
+  const shaped = await shapeEstimate(estimateRow());
+  expect(shaped.offered_pricing.one_time_breakdown).toMatchObject({ total: 455.5, excluded_upfront_fee_services: [] });
 });
 
 test('a legacy monthly-billed member (composer strips billedPerApplication) reports a monthly charge, never an invented per-application price; bill_by_invoice is the effective mode', async () => {
