@@ -1735,6 +1735,17 @@ function normalizeDiscountAmount(row, clientAmount) {
   return Number.isFinite(num) ? num : 0;
 }
 
+// A checkout row may carry an operator-entered rate (the custom_percent /
+// custom_dollar presets and the variable_* types — that is what makes
+// "Custom %" work at the terminal). Bound it before it reaches the stack: a
+// percentage is 0-100, a dollar amount is non-negative. The resolved dollars
+// are clamped to the services base regardless.
+function boundCheckoutDiscountAmount(row, amount) {
+  const value = Number(amount);
+  if (!Number.isFinite(value) || value < 0) return 0;
+  return isPercentDiscountType(row?.discount_type) ? Math.min(100, value) : value;
+}
+
 function calculateDiscountDollars(row, baseAmount, clientAmount) {
   if (!row || !(baseAmount > 0)) return { amount: 0, dollars: 0 };
   const amount = normalizeDiscountAmount(row, clientAmount);
@@ -12138,16 +12149,22 @@ router.post('/:id/invoice', async (req, res, next) => {
       }
     }
     if (checkoutStacking) {
-      // Every checkout discount reaches the same services base, so they all
-      // span it — two rows of one tier group never combine here.
-      assertStackGroups([...discountCatalogRows.values()].map((row) => stackRowOf(row, { spansAll: true })));
+      // One entry per POSTED row, not per cached catalog row: every checkout
+      // discount reaches the same services base, so two rows of one tier
+      // group never combine — including the same row posted twice.
+      assertStackGroups(discountLines.map((e) => (e.discount_id
+        ? stackRowOf(discountCatalogRows.get(e.discount_id), { spansAll: true })
+        : null)));
     }
     const stacked = stackDiscounts(extraDiscountBase, discountLines.map((e) => {
       const discount = e.discount_id ? discountCatalogRows.get(e.discount_id) : null;
       if (discount) {
         return {
           discountType: discount.discount_type,
-          amount: normalizeDiscountAmount(discount, e.discount_amount),
+          amount: boundCheckoutDiscountAmount(
+            discount,
+            normalizeDiscountAmount(discount, e.discount_amount),
+          ),
           maxDiscountDollars: discount.max_discount_dollars,
         };
       }
@@ -12187,7 +12204,10 @@ router.post('/:id/invoice', async (req, res, next) => {
             category: e.category,
             discount_id: discount.id,
             discount_type: discount.discount_type,
-            discount_amount: normalizeDiscountAmount(discount, e.discount_amount),
+            discount_amount: boundCheckoutDiscountAmount(
+              discount,
+              normalizeDiscountAmount(discount, e.discount_amount),
+            ),
             discount_dollars: dollars,
             use_stored_discount: true,
             stored_discount_source: 'validated_checkout',

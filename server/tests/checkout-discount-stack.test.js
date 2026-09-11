@@ -25,7 +25,18 @@ describe('checkout discount stacking', () => {
   });
 
   test('one WaveGuard tier per checkout, checked before any line is minted', () => {
-    expect(src).toMatch(/assertStackGroups\(\[\.\.\.discountCatalogRows\.values\(\)\]\.map\(\(row\) => stackRowOf\(row, \{ spansAll: true \}\)\)\);/);
+    expect(src).toMatch(/assertStackGroups\(discountLines\.map\(\(e\) => \(e\.discount_id[\s\S]{0,160}spansAll: true \}\)/);
+  });
+
+  test('the tier guard sees one entry per POSTED row, so the same tier twice is caught', () => {
+    // discountCatalogRows is keyed by id — feeding its values would collapse
+    // a duplicate and let two tier rows through.
+    expect(src).toMatch(/assertStackGroups\(discountLines\.map\(\(e\) => \(e\.discount_id/);
+  });
+
+  test('an operator-entered rate on a variable / custom row is bounded before it reaches the stack', () => {
+    expect(src).toMatch(/function boundCheckoutDiscountAmount\(row, amount\) \{[\s\S]{0,320}Math\.min\(100, value\)/);
+    expect(src).toMatch(/amount: boundCheckoutDiscountAmount\(\s*\n\s*discount,\s*\n\s*normalizeDiscountAmount\(discount, e\.discount_amount\),/);
   });
 
   test('a custom (id-less) percentage keeps its shape so it compounds like a catalog row', () => {
