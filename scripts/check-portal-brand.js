@@ -95,13 +95,14 @@ const EXCLUDED_DIR_HINTS = [
 //   own findings, invisible to CI until now.
 // - BrandFooter and AppShowcaseCard's 7.5px is App Store / Google Play badge
 //   artwork reproduced as inline SVG — fixed proportions, not page type.
-// - ServiceRecapModal and Icon carry emoji the Icon sweep has not reached.
+// - ServiceRecapModal carries emoji the Icon sweep has not reached. (Icon.jsx
+//   itself is no longer listed: its one "violation" was the word-emoji inside
+//   the comment describing that sweep, which the comment skip above retires.)
 const LEGACY_BASELINE = {
   'client/src/App.jsx': { 'banned-font-size': 2, 'heavy-weight': 7 },
   'client/src/components/ActivityCard.jsx': { 'banned-font-size': 1 },
   'client/src/components/BrandFooter.jsx': { 'banned-font-size': 2 },
   'client/src/components/GlassNewsletterCard.jsx': { 'banned-font-size': 1, 'heavy-weight': 1 },
-  'client/src/components/Icon.jsx': { 'emoji': 1 },
   'client/src/components/InstallPrompt.jsx': { 'heavy-weight': 1 },
   'client/src/components/NewsletterSignup.jsx': { 'banned-font-size': 2, 'heavy-weight': 1 },
   'client/src/components/NotificationBell.jsx': { 'banned-font-size': 9, 'heavy-weight': 2 },
@@ -116,7 +117,7 @@ const LEGACY_BASELINE = {
   'client/src/components/estimate/PriceCard.jsx': { 'banned-font-size': 1 },
   'client/src/components/estimate/ProposalDetailCard.jsx': { 'banned-font-size': 1 },
   'client/src/components/estimate/ReportShowcaseCard.jsx': { 'banned-font-size': 14 },
-  'client/src/components/estimate/glass/GlassEstimateExtras.jsx': { 'emoji': 4 },
+  'client/src/components/estimate/glass/GlassEstimateExtras.jsx': { 'emoji': 3 },
   'client/src/components/estimate/glass/glass-components.css': { 'banned-font-size': 3 },
   'client/src/components/estimate/tokens.js': { 'local-palette': 1 },
   'client/src/index.css': { 'banned-font-size': 2, 'heavy-weight': 1 },
@@ -217,8 +218,28 @@ function checkFile(filePath) {
   const lines = text.split('\n');
   const violations = [];
 
+  // A line that is ENTIRELY a comment renders nothing, so scanning it reports
+  // debt that does not exist: Icon.jsx's `// sweep could migrate {'\u{1F3E0}'} \u2192 <Icon/>`
+  // note and GlassEstimateExtras' `* 5\u2605 reviews only.` docblock were both
+  // counted as raw-emoji violations, and a developer could not so much as
+  // DESCRIBE the sweep this gate asks for without tripping it. Only whole-line
+  // comments are skipped \u2014 a code line with a trailing comment is still scanned
+  // in full, so nothing real can hide behind a `//`. Block state is tracked
+  // across lines; a line that opens and closes a comment mid-line falls
+  // through to the scanner deliberately (conservative: never mask).
+  let inBlock = false;
   lines.forEach((line, i) => {
     const n = i + 1;
+    const t = line.trim();
+    const opens = t.indexOf('/*') !== -1;
+    const closes = t.indexOf('*/') !== -1;
+    if (inBlock) {
+      if (closes) inBlock = false;
+      return; // whole line sits inside /* ... */ (or is its closing line)
+    }
+    if (t.startsWith('//')) return;
+    if (t.startsWith('/*') && !closes) { inBlock = true; return; }
+    if (t.startsWith('/*') && closes && t.endsWith('*/')) return;
 
     if (EMOJI_RX.test(line)) {
       violations.push({
@@ -423,4 +444,9 @@ function main() {
   process.exit(1);
 }
 
-main();
+// Run as a CLI; importable for tests. The comment-skip and the
+// both-directions baseline are the two behaviours that have silently broken
+// this gate before, so they get a test rather than a comment.
+if (require.main === module) main();
+
+module.exports = { checkFile, LEGACY_BASELINE };
