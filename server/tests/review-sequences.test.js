@@ -965,6 +965,31 @@ describe('cadence scheduling + post-service enrollment (2026-07-30 revamp)', () 
       expect(mockSendCustomerMessage).toHaveBeenCalledTimes(1);
     });
 
+    test('a weekdays-only step whose quiet-hours hold names Saturday morning retries Monday morning instead (codex #4330 P2)', async () => {
+      // Friday 19:30 ET: the 72h floor is satisfied, the provider defers to
+      // the next send window — Saturday 08:00. weekdaysOnly must reapply.
+      const fri = new Date('2026-08-07T19:30:00-04:00');
+      const realNow = Date.now;
+      Date.now = () => fri.getTime();
+      try {
+        const mock = makeMock(fixture('seq-wk-sat', { lastAskAgoMs: 80 * 3600000, step: { day: 4, channel: 'sms', templateKey: 'soft_reminder', weekdaysOnly: true } }));
+        db.mockImplementation(mock);
+        const sat8 = new Date('2026-08-08T08:00:00-04:00');
+        mockSendCustomerMessage.mockResolvedValueOnce({ sent: false, blocked: true, deferred: true, retryable: true, code: 'QUIET_HOURS_HOLD', nextAllowedAt: sat8.toISOString() });
+
+        const out = await ReviewService.processReviewSequences();
+
+        expect(out.sent).toBe(0);
+        const seq = mock.__state.rows.review_sequences[0];
+        expect(seq.status).toBe('active');
+        const { etParts } = require('../utils/datetime-et');
+        expect(etParts(seq.next_run_at)).toMatchObject({ dayOfWeek: 1, hour: 10 });
+        expect(parse(seq.decision).reason).toBe('send_window');
+      } finally {
+        Date.now = realNow;
+      }
+    });
+
     test('a weekdays-only follow-up held by the rule lands on a weekday morning', async () => {
       // Force lastSent + 72h onto a Saturday: pick lastSent = Wednesday 09:00 ET.
       const wed = new Date('2026-08-05T09:00:00-04:00');
@@ -3954,6 +3979,32 @@ describe('cadence scheduling + post-service enrollment (2026-07-30 revamp)', () 
     // AFTER the provider handoff (audit-persistence failure), attaching
     // err.providerOutcome — the old catch retried blind either way, risking a
     // duplicate text for an accepted-but-unaudited send, or for an uncertain one.
+    test('sendSMS on a RETURNED accepted result whose sent stamp throws stays fenced, never re-dued (codex #4338 P1, round 4)', async () => {
+      const due = new Date(Date.now() - 60000);
+      const mock = makeMock({
+        customers: [{ id: 'th-5', first_name: 'Ada', last_name: 'Q', phone: '+19410000105', nearest_location_id: 'venice' }],
+        review_requests: [
+          { id: 'rr-th5', customer_id: 'th-5', channel: 'sms', status: 'pending', template_key: 'resolution_check', token: 'tok-th5', location_id: 'venice', scheduled_for: due },
+        ],
+      }, {
+        onUpdate: (table, patch) => {
+          if (table === 'review_requests' && patch.status === 'sent') throw new Error('pg blip on sent stamp');
+        },
+      });
+      db.mockImplementation(mock);
+      mockSendCustomerMessage.mockResolvedValueOnce({ sent: true, deliveryOutcome: 'accepted', providerMessageId: 'SM-th5', auditLogId: 'audit-th5' });
+
+      // In this slice an ASK template's durable evidence is its sms_log reservation
+      // (kept when the stamp fails); the pre-send fence covers no-link check-ins.
+      const out = await ReviewService.sendSMS('rr-th5');
+
+      expect(out).toEqual({ sent: true, unrecorded: true });
+      const row = mock.__state.rows.review_requests[0];
+      expect(row.status).toBe('pending');
+      // Never the generic 5-minute retry: the pre-send fence holds.
+      expect(row.scheduled_for.getTime()).toBeGreaterThan(Date.now() + 71 * 3600000);
+    });
+
     test('sendSMS on a thrown ACCEPTED post-handoff error marks the row sent, never retries', async () => {
       const mock = makeMock({
         customers: [{ id: 'th-1', first_name: 'Rae', last_name: 'Q', phone: '+19410000097', nearest_location_id: 'venice' }],
@@ -3973,7 +4024,7 @@ describe('cadence scheduling + post-service enrollment (2026-07-30 revamp)', () 
       const row = mock.__state.rows.review_requests[0];
       expect(row.status).toBe('sent');
       expect(row.sms_sent_at).toBeTruthy();
-      expect(row.scheduled_for).toBeUndefined(); // never queued for a retry that would duplicate the text
+      expect(row.scheduled_for == null).toBe(true); // never queued for a retry that would duplicate the text (fence restored)
     });
 
     test('sendSMS on a thrown UNCERTAIN post-handoff error holds the row, never retries', async () => {

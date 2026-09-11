@@ -228,6 +228,7 @@ describe('review request follow-up flow', () => {
       ]),
       chain({ first: jest.fn().mockResolvedValue(null) }),
       updateQuery,
+      updateQuery, // the reopen after the definite not-sent
     ];
     const customerQuery = chain({
       first: jest.fn().mockResolvedValue({
@@ -260,7 +261,10 @@ describe('review request follow-up flow', () => {
     const result = await ReviewService.processFollowups();
 
     expect(result).toEqual({ sent: 0, suppressed: 0, internalFollowups: 0 });
-    expect(updateQuery.update).not.toHaveBeenCalled();
+    // Pre-send marker, then handed back on the definite not-sent (codex
+    // #4338 P1, round 4) — the row is eligible again for a later run.
+    expect(updateQuery.update).toHaveBeenNthCalledWith(1, expect.objectContaining({ followup_sent: true }));
+    expect(updateQuery.update).toHaveBeenLastCalledWith(expect.objectContaining({ followup_sent: false, followup_sent_at: null }));
   });
 
   test('an uncertain follow-up handoff is held, not left retryable (codex #4338 P1)', async () => {
