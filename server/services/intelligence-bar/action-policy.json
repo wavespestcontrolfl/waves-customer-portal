@@ -31,14 +31,6 @@
     "approval": "confirmed_endpoint",
     "scope": "none"
   },
-  "archive_customer": {
-    "module": "customer-lifecycle-tools.js",
-    "domain": "customers",
-    "kind": "internal_write",
-    "role": "admin",
-    "approval": "ui_confirm",
-    "scope": "record"
-  },
   "assign_technician": {
     "module": "schedule-tools.js",
     "domain": "schedule",

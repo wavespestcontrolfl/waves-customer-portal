@@ -115,7 +115,6 @@ const ACTION_LABELS = {
   bulk_update_customers: 'Update multiple customers',
   update_property_access: 'Update property access notes',
   merge_customers: 'Merge duplicate customer',
-  archive_customer: 'Archive customer',
   create_appointment: 'Book an appointment',
   reschedule_appointment: 'Move an appointment',
   cancel_appointment: 'Cancel an appointment',

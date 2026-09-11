@@ -1085,7 +1085,4 @@ test('merge_customers binds both role-named ids as customer records of the task'
   rows.customers = rows.customers.filter(row => row.id !== B);
   const vanished = await Context.validateRecordTarget({ winner_customer_id: A, loser_customer_id: B }, task, { toolName: 'merge_customers' });
   expect(vanished.code).toBe('record_unavailable');
-  // archive_customer takes the plain selector and is admitted for the task customer.
-  const archive = await Context.validateRecordTarget({ customer_id: A }, task, { toolName: 'archive_customer' });
-  expect(archive).toBeNull();
 });

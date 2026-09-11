@@ -245,7 +245,7 @@ const SCOPE_SNAPSHOT = {
     // block_sender carries no record id; validateSenderBlock binds it to the task customer's own address.
     // merge_customers' winner/loser ids are mapped to the customer collection by validateRecordTarget
     // (CUSTOMER_PAIR_SELECTORS), so both halves must belong to the task's customers.
-    'archive_customer', 'assign_technician', 'block_sender', 'bulk_update_customers', 'bulk_update_leads', 'cancel_appointment', 'cancel_plan',
+    'assign_technician', 'block_sender', 'bulk_update_customers', 'bulk_update_leads', 'cancel_appointment', 'cancel_plan',
     'create_agent_estimate_draft', 'create_appointment', 'create_customer', 'create_pending_estimate', 'merge_customers', 'move_stops_to_day',
     'reply_via_sms', 'reschedule_appointment', 'send_email_reply', 'send_sms', 'set_estimate_presentation', 'submit_review_reply',
     'switch_appointment_property', 'toggle_estimate_v2_view', 'toggle_show_one_time_option', 'trigger_review_request', 'update_customer',

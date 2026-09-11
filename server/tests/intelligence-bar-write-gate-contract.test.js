@@ -130,7 +130,6 @@ const WRITE_TWO_STEP = [
   'update_restock_request',
   'cancel_plan',
   'merge_customers',
-  'archive_customer',
 ];
 
 // Writes blocked in the /query tool loop and executable only via /execute
@@ -519,13 +518,9 @@ describe('two-step writes do not mutate without confirmed (behavioral)', () => {
     ['procurement-tools', 'executeProcurementTool', 'adjust_stock', { product_name: 'Bifen', movement_type: 'restock', quantity: 32 }],
     ['procurement-tools', 'executeProcurementTool', 'create_restock_request', { product_name: 'Bifen', quantity: 128, unit: 'fl_oz' }],
     ['procurement-tools', 'executeProcurementTool', 'update_restock_request', { request_id: 'req-1', action: 'receive' }],
-    // merge_customers / archive_customer carry their own `customers` seed
-    // (the shared SEED deliberately leaves `customers` unseeded for
-    // create_customer's duplicate-miss check); archive_customer also
-    // overrides scheduled_services/invoices to empty so the fake recording
-    // db's unfiltered .first() rotation (it ignores whereNotIn/whereRaw)
-    // does not hand back one of SEED's own scheduled_services rows as a
-    // false "blocking appointment".
+    // merge_customers carries its own `customers` seed (the shared SEED
+    // deliberately leaves `customers` unseeded for create_customer's
+    // duplicate-miss check).
     ['customer-lifecycle-tools', 'executeCustomerLifecycleTool', 'merge_customers', {
       winner_customer_id: '00000000-0000-0000-0000-00000000a001',
       loser_customer_id: '00000000-0000-0000-0000-00000000a002',
@@ -534,13 +529,6 @@ describe('two-step writes do not mutate without confirmed (behavioral)', () => {
         { id: '00000000-0000-0000-0000-00000000a001', first_name: 'Real', last_name: 'Winner', phone: '9415550100', email: 'winner@example.com', deleted_at: null },
         { id: '00000000-0000-0000-0000-00000000a002', first_name: 'Unknown', last_name: '', phone: '9415550100', email: null, deleted_at: null },
       ],
-    }],
-    ['customer-lifecycle-tools', 'executeCustomerLifecycleTool', 'archive_customer', {
-      customer_id: '00000000-0000-0000-0000-00000000a003',
-    }, {
-      customers: [{ id: '00000000-0000-0000-0000-00000000a003', first_name: 'Stale', last_name: 'Stub', phone: '9415550199', email: 'stub@example.com', deleted_at: null }],
-      scheduled_services: [],
-      invoices: [],
     }],
     // cancel_plan's preview needs the customer to EXIST (create_customer's
     // duplicate check needs it to be missing), so it carries its own seed —

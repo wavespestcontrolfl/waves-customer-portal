@@ -2,25 +2,27 @@
  * Intelligence Bar — Customer Lifecycle Tools
  * server/services/intelligence-bar/customer-lifecycle-tools.js
  *
- * Two confirmed customer-record writes the bar previously had no way to do:
- * merging a duplicate into the real customer, and archiving one outright.
- * Both are #1568 UI-confirm, preview→confirmed two-step tools (WRITE_TWO_STEP
- * in write-gates.js) — an unconfirmed call is mutation-free and returns the
- * rich preview the confirmation card is built from; only /confirm-action can
- * attach confirmed:true (see action-registry.js execute()).
+ * merge_customers: the confirmed customer-record write the bar previously
+ * had no way to do — merging a duplicate into the real customer. A #1568
+ * UI-confirm, preview→confirmed two-step tool (WRITE_TWO_STEP in
+ * write-gates.js) — an unconfirmed call is mutation-free and returns the
+ * rich preview the confirmation card is built from; only /confirm-action
+ * can attach confirmed:true (see action-registry.js execute()).
  *
- * merge_customers reuses the existing merge engine (customer-dedupe.js
- * executeMerge) untouched — same transaction, same FK repoint, same journal,
- * same revert path as the admin duplicates-queue route
- * (routes/admin-customer-duplicates.js). archive_customer mirrors the three
- * steps of DELETE /api/admin/customers/:id (routes/admin-customers.js): stamp
- * deleted_at, relink newsletter subscribers, write a critical audit event —
- * all inside one transaction.
+ * It reuses the existing merge engine (customer-dedupe.js executeMerge)
+ * untouched — same transaction, same FK repoint, same journal, same revert
+ * path as the admin duplicates-queue route
+ * (routes/admin-customer-duplicates.js). The card's pins (both customer
+ * versions and the disclosed effects fingerprint) are validated by the
+ * executor UNDER its row locks, never in a caller-side preflight.
+ *
+ * archive_customer (retire a record outright) was split out of this module:
+ * it ships separately on a shared archive service with the DELETE
+ * /api/admin/customers/:id route and cancellation-eligibility as a blocker.
  */
 
 const db = require('../../models/db');
 const logger = require('../logger');
-const { etDateString } = require('../../utils/datetime-et');
 
 // The transferred columns executeMerge backfills between winner and loser
 // (customer-dedupe.js ~1680-1810: stripe_customer_id/billing_mode/payer_id/
@@ -112,6 +114,18 @@ async function fullMovingCounts(database, loserId) {
   return moving;
 }
 
+// The card's disclosed effect set as one stable string: per-table moving
+// counts + the executor's money effects, key-sorted. The route pins the
+// preview's fingerprint on the approved card; the confirmed path recomputes
+// it UNDER executeMerge's row locks and refuses on any difference — a child
+// row (invoice, visit, message) added or removed on the loser since the card
+// was shown never rides silently into the merge (pre-push Codex P1: related-
+// row effects were only sampled unlocked).
+function effectsFingerprint(moving, financialEffects) {
+  const sortKeys = (obj) => Object.fromEntries(Object.entries(obj || {}).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)));
+  return JSON.stringify({ moving: sortKeys(moving), financial_effects: sortKeys(financialEffects) });
+}
+
 function customerName(row) {
   return `${row.first_name || ''} ${row.last_name || ''}`.trim() || 'Unnamed customer';
 }
@@ -180,11 +194,12 @@ async function previewMergeCustomers(winnerId, loserId) {
     billing_and_contacts: { winner: billingSnapshot(winner), loser: billingSnapshot(loser) },
     financial_effects,
     moving,
+    effects_fingerprint: effectsFingerprint(moving, financial_effects),
     note_to_operator: `${loserName} will be archived (soft-deleted) and folded into ${winnerName}: every appointment, service record, invoice, estimate, message, and every other row listed above repoints onto ${winnerName} in one transaction. The merge is journaled and reviewable (and revertible) from the duplicates queue afterward. Nothing was changed — the operator confirms from the card.`,
   };
 }
 
-async function commitMergeCustomers(winnerId, loserId, actionContext, approvedVersions = null) {
+async function commitMergeCustomers(winnerId, loserId, actionContext, approvedVersions = null, approvedEffects = null) {
   const { executeMerge } = require('../customer-dedupe');
   // Before executeMerge: re-read both customer versions and re-run
   // eligibility, then do it again immediately before the write. The
@@ -212,6 +227,19 @@ async function commitMergeCustomers(winnerId, loserId, actionContext, approvedVe
       // preview) — the preflight sample above is only the fallback for a
       // direct call with no card, never a substitute for the approved pin.
       expectedVersions: approvedVersions || { winner: before.winner.version, loser: before.loser.version },
+      // Related-row effects validated under the SAME locks: the approved
+      // card's fingerprint (route pin) against a recount through the
+      // executor's transaction. Without a pin (direct call, no card) the
+      // effects are not asserted — the version check above still holds.
+      underLock: approvedEffects ? async (trx, { winner, loser }) => {
+        const lockedMoving = await fullMovingCounts(trx, loserId);
+        const lockedEffects = await financialEffects(trx, winner, loser);
+        if (effectsFingerprint(lockedMoving, lockedEffects) !== approvedEffects) {
+          const e = new Error('The rows that would move changed after the card was shown — ask again for a fresh confirmation card.');
+          e.previewChanged = true;
+          throw e;
+        }
+      } : null,
     });
     logger.info(`[intelligence-bar] merge_customers committed loser=${loserId} -> winner=${winnerId} (journal ${result.journalId})`);
     return {
@@ -243,156 +271,8 @@ async function mergeCustomers(input, actionContext = {}) {
   if (!confirmed) return previewMergeCustomers(winnerId, loserId);
   const approved = input._approved_versions && input._approved_versions.winner && input._approved_versions.loser
     ? { winner: String(input._approved_versions.winner), loser: String(input._approved_versions.loser) } : null;
-  return commitMergeCustomers(winnerId, loserId, actionContext, approved);
-}
-
-// ─── archive_customer ───────────────────────────────────────────────────
-
-// Mirrors the canonical unpaid-invoice filter (dashboard-tools.js
-// getOutstandingBalances): paid_at IS NULL, not draft/void, and the amount
-// still due (after applied credit) is positive.
-async function hasUnpaidInvoice(customerId, trx = db) {
-  const row = await trx('invoices')
-    .where({ customer_id: customerId })
-    .whereNull('paid_at')
-    .whereNotIn('status', ['draft', 'void'])
-    .whereRaw('GREATEST(total - COALESCE(credit_applied, 0), 0) > 0')
-    .first('id');
-  return !!row;
-}
-
-async function hasBlockingAppointment(customerId, trx = db) {
-  const row = await trx('scheduled_services')
-    .where({ customer_id: customerId })
-    .whereNotIn('status', ['cancelled', 'completed', 'skipped'])
-    .where('scheduled_date', '>=', etDateString())
-    .first('id');
-  return !!row;
-}
-
-async function archiveBlockers(customerId, trx = db) {
-  const blockers = [];
-  if (await hasBlockingAppointment(customerId, trx)) {
-    blockers.push('has an upcoming scheduled visit that is not cancelled, completed, or skipped');
-  }
-  if (await hasUnpaidInvoice(customerId, trx)) {
-    blockers.push('has an unpaid invoice');
-  }
-  return blockers;
-}
-
-async function resolveTwinNames(twins) {
-  if (!twins.length) return [];
-  const ids = [...new Set(twins.map((t) => t.twin_id))];
-  const rows = await db('customers').whereIn('id', ids).select('id', 'first_name', 'last_name');
-  const byId = new Map(rows.map((r) => [String(r.id), customerName(r)]));
-  return twins.map((t) => ({ twin_id: t.twin_id, twin_name: byId.get(String(t.twin_id)) || 'Unnamed customer' }));
-}
-
-// Same twin ids (any order) and the same row count — the shape a card cares
-// about; email_key never rides on the disclosed side, so it plays no part
-// in the comparison.
-function samePlan(a, b) {
-  return a.count === b.count && a.twin_ids.length === b.twin_ids.length && a.twin_ids.every((id, i) => id === b.twin_ids[i]);
-}
-
-async function previewArchiveCustomer(customer, reason) {
-  const blockers = await archiveBlockers(customer.id);
-  const name = customerName(customer);
-  if (blockers.length) {
-    // An unexecutable preview is a tool failure, not a card (same rule
-    // cancel_plan's nothing_to_cancel follows): a card for a blocked
-    // archive would deterministically fail on Confirm.
-    return { error: `${name} cannot be archived yet — ${blockers.join('; ')}. Resolve that first, or use merge_customers if this is a duplicate of a live customer.`, code: 'archive_blocked', blockers };
-  }
-  const { planRelinkFromArchivedCustomer } = require('../newsletter-subscribers');
-  const plan = await planRelinkFromArchivedCustomer(db, customer.id);
-  const twins = await resolveTwinNames(plan.twins);
-  return {
-    preview: true,
-    customer_id: customer.id,
-    customer_name: name,
-    customer_phone: customer.phone || null,
-    customer_email: customer.email || null,
-    reason: reason || null,
-    newsletter_relink: { count: plan.relinked_count, twins },
-    note_to_operator: `${name} will be archived (deleted_at stamped). Any newsletter subscribers linked to this customer are relinked to a live same-email twin, if one exists, in the same commit. Nothing was changed — the operator confirms from the card.`,
-  };
-}
-
-// The card's pinned relink plan shape: count + sorted twin ids.
-function planShape(plan) {
-  return { count: Number(plan?.relinked_count ?? plan?.count ?? 0), twin_ids: (plan?.twins || []).map((t) => String(t.twin_id)).sort() };
-}
-
-async function commitArchiveCustomer(customer, reason, actionContext, approvedPlan = null) {
-  const { relinkSubscribersFromArchivedCustomer, planRelinkFromArchivedCustomer, acquireRelinkLock } = require('../newsletter-subscribers');
-  const { recordAuditEvent } = require('../audit-log');
-  try {
-    // Fresh, unlocked plan at the START of the confirmed call — recomputed
-    // again under the row lock below. The route already re-runs the
-    // unconfirmed preview and refuses on a fingerprint mismatch before
-    // reaching this function; this closes the narrower gap between that
-    // re-run and the lock actually being held (a subscriber signs up, or a
-    // twin gets archived, in between).
-    const freshPlan = await planRelinkFromArchivedCustomer(db, customer.id);
-    const relink = await db.transaction(async (trx) => {
-      const locked = await trx('customers').where({ id: customer.id }).forUpdate().first('id', 'deleted_at');
-      if (!locked) { const e = new Error('This customer no longer exists.'); e.previewChanged = true; throw e; }
-      if (locked.deleted_at) { const e = new Error(`${customerName(customer)} was already archived since the card was shown.`); e.previewChanged = true; throw e; }
-      const freshBlockers = await archiveBlockers(customer.id, trx);
-      if (freshBlockers.length) {
-        const e = new Error(`Cannot archive — ${freshBlockers.join('; ')} (this changed after the card was shown).`);
-        e.previewChanged = true;
-        throw e;
-      }
-      // Same advisory lock the relink UPDATE takes (reentrant in this
-      // transaction): the plan is read and the relink runs under ONE lock,
-      // so no subscriber or twin can change between the check and the write.
-      await acquireRelinkLock(trx);
-      const lockedPlan = await planRelinkFromArchivedCustomer(trx, customer.id);
-      const reference = approvedPlan || planShape(freshPlan);
-      if (!samePlan(reference, planShape(lockedPlan))) {
-        const e = new Error('The newsletter relink plan changed after the card was shown — ask again for a fresh confirmation card.');
-        e.previewChanged = true;
-        throw e;
-      }
-      await trx('customers').where({ id: customer.id }).update({ deleted_at: new Date() });
-      const result = await relinkSubscribersFromArchivedCustomer(trx, customer.id);
-      await recordAuditEvent({
-        actor_type: 'technician',
-        actor_id: actionContext.technicianId || null,
-        action: 'customer.archive',
-        resource_type: 'customer',
-        resource_id: customer.id,
-        metadata: { previousDeletedAt: customer.deleted_at || null, newsletterRelinked: result.relinked, reason: reason || null, source: 'intelligence_bar' },
-        critical: true,
-        trx,
-      });
-      return result;
-    });
-    logger.info(`[intelligence-bar] archive_customer committed id=${customer.id}` + (relink.relinked ? ` (newsletter subscribers relinked: ${relink.relinked})` : ''));
-    return { success: true, customer_id: customer.id, newsletter_relinked: relink.relinked };
-  } catch (err) {
-    return { error: err.message, ...(err.previewChanged ? { preview_changed: true } : {}) };
-  }
-}
-
-async function archiveCustomer(input, actionContext = {}) {
-  const customerId = input.customer_id;
-  if (!customerId) return { error: 'customer_id is required' };
-  const reason = input.reason ? String(input.reason).trim().slice(0, 500) : null;
-
-  const customer = await db('customers').where({ id: customerId })
-    .first('id', 'first_name', 'last_name', 'phone', 'email', 'deleted_at');
-  if (!customer) return { error: 'customer_id does not match a customer', code: 'record_unavailable' };
-  if (customer.deleted_at) return { error: `${customerName(customer)} is already archived.`, code: 'record_unavailable' };
-
-  const confirmed = input.confirmed === true || actionContext.confirmed === true;
-  if (!confirmed) return previewArchiveCustomer(customer, reason);
-  const approvedPlan = input._approved_relink_plan && Array.isArray(input._approved_relink_plan.twin_ids)
-    ? { count: Number(input._approved_relink_plan.count || 0), twin_ids: input._approved_relink_plan.twin_ids.map(String).sort() } : null;
-  return commitArchiveCustomer(customer, reason, actionContext, approvedPlan);
+  const approvedEffects = typeof input._approved_effects === 'string' && input._approved_effects ? input._approved_effects : null;
+  return commitMergeCustomers(winnerId, loserId, actionContext, approved, approvedEffects);
 }
 
 // ─── TOOL DEFINITIONS ───────────────────────────────────────────────────
@@ -412,27 +292,12 @@ The first call returns a PREVIEW naming both customers (name, phone, email) and 
       required: ['winner_customer_id', 'loser_customer_id'],
     },
   },
-  {
-    name: 'archive_customer',
-    description: `Archive (soft-delete) a customer record — use to retire a stale duplicate stub, an account created in error, or a customer who should no longer appear as active. This does NOT move any data onto another record; use merge_customers instead when the customer is a duplicate of a real, active customer (e.g. an "Unknown" website stub that turned out to be an existing customer).
-Refuses when the customer has an upcoming scheduled visit that is not cancelled, completed, or skipped, or an unpaid invoice — resolve those first.
-The first call returns a PREVIEW naming the customer, or an error explaining what blocks the archive; nothing changes until the operator confirms from the card.`,
-    input_schema: {
-      type: 'object',
-      properties: {
-        customer_id: { type: 'string', format: 'uuid' },
-        reason: { type: 'string', description: 'Optional free-text reason recorded on the audit event' },
-      },
-      required: ['customer_id'],
-    },
-  },
 ];
 
 async function executeCustomerLifecycleTool(toolName, input, actionContext = {}) {
   try {
     switch (toolName) {
       case 'merge_customers': return await mergeCustomers(input, actionContext);
-      case 'archive_customer': return await archiveCustomer(input, actionContext);
       default:
         return { error: `Unknown tool: ${toolName}` };
     }
@@ -446,5 +311,5 @@ module.exports = {
   CUSTOMER_LIFECYCLE_TOOLS,
   executeCustomerLifecycleTool,
   // exported for tests
-  _test: { archiveBlockers, fullMovingCounts, customerName, samePlan },
+  _test: { fullMovingCounts, customerName, effectsFingerprint },
 };

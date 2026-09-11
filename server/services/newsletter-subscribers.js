@@ -429,24 +429,6 @@ async function relinkSubscribersForEmail(trx, email) {
   return { winnerId, relinked: Number(relinked || 0) };
 }
 
-// Shared subquery: one twin per DISTINCT normalized subscriber email of the
-// archived customer — a live (non-deleted, non-self) customer whose own
-// email matches. Same scope + ordering as liveTwinSubselect. Factored into
-// one string so the UPDATE below (relinkSubscribersFromArchivedCustomer) and
-// the read-only plan (planRelinkFromArchivedCustomer, the archive preview's
-// disclosure) cannot drift apart — two bindings, both the archived customer
-// id: [archivedCustomerId, archivedCustomerId].
-const ARCHIVED_CUSTOMER_TWIN_SUBQUERY_SQL = `
-  SELECT DISTINCT ON (LOWER(TRIM(c.email))) LOWER(TRIM(c.email)) AS email_key, c.id AS twin_id
-    FROM customers c
-   WHERE c.deleted_at IS NULL
-     AND c.id <> ?
-     AND LOWER(TRIM(c.email)) IN (
-       SELECT LOWER(TRIM(x.email)) FROM newsletter_subscribers x WHERE x.customer_id = ?
-     )
-   ORDER BY LOWER(TRIM(c.email)), c.is_primary_profile DESC NULLS LAST, c.created_at ASC, c.id ASC
-`;
-
 /**
  * ARCHIVE-side relink. The subscriber's stored email is a SNAPSHOT taken at
  * signup and is never refreshed, so it can differ from the archived
@@ -465,43 +447,21 @@ async function relinkSubscribersFromArchivedCustomer(trx, archivedCustomerId) {
   const res = await trx.raw(
     `UPDATE newsletter_subscribers ns
         SET customer_id = t.twin_id, updated_at = NOW()
-       FROM (${ARCHIVED_CUSTOMER_TWIN_SUBQUERY_SQL}) t
+       FROM (
+         SELECT DISTINCT ON (LOWER(TRIM(c.email))) LOWER(TRIM(c.email)) AS email_key, c.id AS twin_id
+           FROM customers c
+          WHERE c.deleted_at IS NULL
+            AND c.id <> ?
+            AND LOWER(TRIM(c.email)) IN (
+              SELECT LOWER(TRIM(x.email)) FROM newsletter_subscribers x WHERE x.customer_id = ?
+            )
+          ORDER BY LOWER(TRIM(c.email)), c.is_primary_profile DESC NULLS LAST, c.created_at ASC, c.id ASC
+       ) t
       WHERE ns.customer_id = ?
         AND LOWER(TRIM(ns.email)) = t.email_key`,
     [archivedCustomerId, archivedCustomerId, archivedCustomerId],
   );
   return { relinked: Number(res?.rowCount || 0) };
-}
-
-/**
- * Read-only PLAN of what relinkSubscribersFromArchivedCustomer would do —
- * runs the identical twin subquery (never a re-derived copy) so a preview
- * can never drift from the eventual write. Used by archive_customer's IB
- * preview (disclosure) and its confirmed path (drift recheck under the row
- * lock — see customer-lifecycle-tools.js). No lock: callers that need the
- * lock's consistency (the confirmed write) acquire it themselves via the
- * `database` they pass in (a locked trx) or via relinkSubscribersFromArchivedCustomer.
- * `relinked_count` is the number of the archived customer's own subscriber
- * ROWS whose email has a twin — not the twin count (one twin can absorb more
- * than one row only if the archived customer somehow has duplicate
- * subscriber rows for the same email, which the unique constraint prevents
- * in practice, but the count is computed from rows, not twins, to stay
- * exactly what the UPDATE's rowCount will report).
- */
-async function planRelinkFromArchivedCustomer(database, archivedCustomerId) {
-  if (!archivedCustomerId) return { relinked_count: 0, twins: [] };
-  const twinRows = await database.raw(
-    `SELECT * FROM (${ARCHIVED_CUSTOMER_TWIN_SUBQUERY_SQL}) t`,
-    [archivedCustomerId, archivedCustomerId],
-  );
-  const twins = (twinRows?.rows || []).map((r) => ({ email_key: r.email_key, twin_id: r.twin_id }));
-  if (!twins.length) return { relinked_count: 0, twins: [] };
-  const countRow = await database('newsletter_subscribers')
-    .where('customer_id', archivedCustomerId)
-    .whereRaw('LOWER(TRIM(email)) = ANY(?)', [twins.map((t) => t.email_key)])
-    .count({ n: '*' })
-    .first();
-  return { relinked_count: Number(countRow?.n || 0), twins };
 }
 
 /**
@@ -547,4 +507,4 @@ async function relinkArchivedLinkedSubscribers(conn = db) {
   });
 }
 
-module.exports = { acquireRelinkLock, subscribeOrResubscribe, lookupByToken, confirmByToken, linkToCustomer, linkManyToCustomers, liveTwinSubselect, relinkSubscribersForEmail, relinkSubscribersFromArchivedCustomer, planRelinkFromArchivedCustomer, relinkArchivedLinkedSubscribers, purgeStalePendingSubscribers, EMAIL_RE, CONFIRM_TTL_MS };
+module.exports = { subscribeOrResubscribe, lookupByToken, confirmByToken, linkToCustomer, linkManyToCustomers, liveTwinSubselect, relinkSubscribersForEmail, relinkSubscribersFromArchivedCustomer, relinkArchivedLinkedSubscribers, purgeStalePendingSubscribers, EMAIL_RE, CONFIRM_TTL_MS };

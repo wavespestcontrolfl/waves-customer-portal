@@ -177,11 +177,9 @@ const ADMIN_ONLY_TOOL_NAMES = new Set([
   // Cancel plan (C3) churns accounts and moves billing — admin only, like the
   // requireAdmin Customer 360 endpoints it mirrors.
   'cancel_plan',
-  // Merge and archive retire/repoint whole customer records — admin only,
-  // like the requireAdmin admin-customer-duplicates.js and DELETE
-  // /api/admin/customers/:id routes they mirror.
+  // Merge repoints whole customer records — admin only, like the
+  // requireAdmin admin-customer-duplicates.js route it mirrors.
   'merge_customers',
-  'archive_customer',
   ...EMAIL_TOOLS.map(t => t.name),
 ]);
 
@@ -609,12 +607,6 @@ function confirmationDisplayParams(toolName, params, preview) {
       winner: `${preview.winner_name} (…${(preview.winner_phone || '').replace(/\D/g, '').slice(-4) || '????'})`,
       loser: `${preview.loser_name} (…${(preview.loser_phone || '').replace(/\D/g, '').slice(-4) || '????'})`,
       moving: preview.moving,
-    };
-  }
-  if (toolName === 'archive_customer' && preview?.preview === true) {
-    return {
-      customer: `${preview.customer_name} (…${(preview.customer_phone || '').replace(/\D/g, '').slice(-4) || '????'})`,
-      ...(preview.reason ? { reason: preview.reason } : {}),
     };
   }
   if ((toolName === 'trigger_review_request' || toolName === 'reply_via_sms') && preview?.pinned_recipient) {
@@ -3046,17 +3038,13 @@ router.post('/confirm-action', async (req, res, next) => {
           || (action.tool_name === 'swap_tech_assignments' && livePreview?.stops && typeof livePreview.stops === 'object')) {
           execParams._verified_stops = livePreview.stops;
         }
-        // merge_customers / archive_customer: the fingerprint-verified
-        // preview's pins ride to the executor so it validates the APPROVED
-        // snapshot under its own locks — never a freshly sampled one.
+        // merge_customers: the fingerprint-verified preview's pins (both
+        // customer versions + the disclosed effects fingerprint) ride to
+        // the executor so it validates the APPROVED snapshot under its own
+        // locks — never a freshly sampled one.
         if (action.tool_name === 'merge_customers' && livePreview?.winner_version && livePreview?.loser_version) {
           execParams._approved_versions = { winner: String(livePreview.winner_version), loser: String(livePreview.loser_version) };
-        }
-        if (action.tool_name === 'archive_customer' && livePreview?.newsletter_relink) {
-          execParams._approved_relink_plan = {
-            count: Number(livePreview.newsletter_relink.count || 0),
-            twin_ids: (livePreview.newsletter_relink.twins || []).map((t) => String(t.twin_id)).sort(),
-          };
+          if (typeof livePreview.effects_fingerprint === 'string') execParams._approved_effects = livePreview.effects_fingerprint;
         }
         // Route optimizers (GH r14 P1): the verified preview's ordered
         // sequence IS the approved plan — hand the ordered ids to the

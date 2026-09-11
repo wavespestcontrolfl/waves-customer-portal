@@ -140,63 +140,6 @@ describe('relinkSubscribersFromArchivedCustomer (archive route) keys on the SUBS
   });
 });
 
-describe('planRelinkFromArchivedCustomer — read-only preview of the same relink', () => {
-  const { planRelinkFromArchivedCustomer } = require('../services/newsletter-subscribers');
-
-  function fakeTrx(rowCount) {
-    const trx = jest.fn();
-    trx.raw = jest.fn(async () => ({ rowCount }));
-    return trx;
-  }
-
-  function fakeDatabase(twinRows, countN) {
-    const qb = {};
-    qb.where = jest.fn(() => qb);
-    qb.whereRaw = jest.fn(() => qb);
-    qb.count = jest.fn(() => qb);
-    qb.first = jest.fn(async () => ({ n: countN }));
-    const database = jest.fn(() => qb);
-    database.raw = jest.fn(async () => ({ rows: twinRows }));
-    return { database, qb };
-  }
-
-  // Pulls just the DISTINCT-ON subquery text out of a captured SQL string —
-  // used to prove the plan and the write embed the IDENTICAL subquery.
-  const subqueryOf = (sql) => sql.slice(sql.indexOf('SELECT DISTINCT ON'), sql.indexOf(') t'));
-
-  test('no twins → zero count, no subscriber-count query', async () => {
-    const { database, qb } = fakeDatabase([], 0);
-    const plan = await planRelinkFromArchivedCustomer(database, 'archived-7');
-    expect(plan).toEqual({ relinked_count: 0, twins: [] });
-    expect(qb.count).not.toHaveBeenCalled();
-  });
-
-  test('no archived customer id → zero count, no query at all', async () => {
-    const { database } = fakeDatabase([], 0);
-    expect(await planRelinkFromArchivedCustomer(database, null)).toEqual({ relinked_count: 0, twins: [] });
-    expect(database.raw).not.toHaveBeenCalled();
-  });
-
-  test('twins found → relinked_count is the archived customer\'s OWN subscriber-row count for those emails, not the twin count', async () => {
-    const twinRows = [{ email_key: 'a@b.com', twin_id: 'twin-1' }];
-    const { database, qb } = fakeDatabase(twinRows, 3);
-    const plan = await planRelinkFromArchivedCustomer(database, 'archived-9');
-    expect(plan).toEqual({ relinked_count: 3, twins: [{ email_key: 'a@b.com', twin_id: 'twin-1' }] });
-    expect(database.raw).toHaveBeenCalledTimes(1);
-    const [planSql, planBindings] = database.raw.mock.calls[0];
-    expect(planBindings).toEqual(['archived-9', 'archived-9']);
-    expect(qb.where).toHaveBeenCalledWith('customer_id', 'archived-9');
-    expect(qb.whereRaw).toHaveBeenCalledWith('LOWER(TRIM(email)) = ANY(?)', [['a@b.com']]);
-
-    // Shared-SQL proof: the exact subquery text is identical to the one the
-    // UPDATE embeds — never a re-derived copy that could drift.
-    const trx = fakeTrx(1);
-    await relinkSubscribersFromArchivedCustomer(trx, 'archived-9');
-    const updateSql = trx.raw.mock.calls[1][0];
-    expect(subqueryOf(planSql)).toBe(subqueryOf(updateSql));
-  });
-});
-
 describe('relinkSubscribersForEmail (archive AND restore) uses the same picker', () => {
   function fakeTrx(winnerId) {
     const subs = {};

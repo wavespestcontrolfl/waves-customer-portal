@@ -930,7 +930,7 @@ function isEmptyValue(v) {
  *                 BOTH rows carry a Stripe customer (that must be resolved in
  *                 Stripe first — two payment profiles cannot be repointed).
  */
-async function executeMerge({ winnerId, loserId, performedBy, performedById = null, mode = 'manual', evidence = {}, expectedVersions = null }) {
+async function executeMerge({ winnerId, loserId, performedBy, performedById = null, mode = 'manual', evidence = {}, expectedVersions = null, underLock = null }) {
   if (!winnerId || !loserId || winnerId === loserId) {
     throw new Error('executeMerge: winnerId and loserId must be distinct');
   }
@@ -1012,6 +1012,11 @@ async function executeMerge({ winnerId, loserId, performedBy, performedById = nu
         throw err;
       }
     }
+    // Caller-supplied assertion that runs INSIDE the executor's transaction
+    // with both customer rows locked (the IB merge tool recounts the card's
+    // disclosed related-row effects here). It throws to refuse; a
+    // previewChanged error means "ask for a fresh card", nothing committed.
+    if (typeof underLock === 'function') await underLock(trx, { winner, loser });
     // The surviving row must be live: retiring an active customer into an
     // inactive winner would hide them from every live-customer surface.
     if (winner.active === false) throw new Error('executeMerge: winner is inactive — reactivate it first or keep the other row');

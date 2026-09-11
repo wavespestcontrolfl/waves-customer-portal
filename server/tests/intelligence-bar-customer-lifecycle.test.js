@@ -1,8 +1,7 @@
 /**
- * merge_customers / archive_customer — the two confirmed customer-lifecycle
- * writes added so the Intelligence Bar can merge a duplicate ("Unknown"
- * website stub sharing a phone with a real customer) or retire a stale
- * record outright. Both are #1568 preview→confirmed two-step tools
+ * merge_customers — the confirmed customer-lifecycle write added so the
+ * Intelligence Bar can merge a duplicate ("Unknown" website stub sharing a
+ * phone with a real customer). A #1568 preview→confirmed two-step tool
  * (write-gates.js WRITE_TWO_STEP_TOOL_NAMES): an unconfirmed call is
  * mutation-free and returns the rich preview the confirmation card is built
  * from; only a server-derived confirmed:true (never a model-supplied one)
@@ -17,8 +16,7 @@
  * chains, `.first`/`.select`/`.update` are mockable terminals, and
  * `db.transaction` just invokes its callback with the same object as `trx`.
  * customer-dedupe.js (the merge engine + the canonical eligibility check +
- * FK discovery) and newsletter-subscribers.js (the relink plan) are mocked
- * per the assignment.
+ * FK discovery) is mocked per the assignment.
  */
 
 jest.mock('../models/db', () => {
@@ -50,29 +48,14 @@ jest.mock('../services/customer-dedupe', () => ({
   customerFkColumns: (...args) => mockCustomerFkColumns(...args),
 }));
 
-const mockRelink = jest.fn();
-const mockPlanRelink = jest.fn();
-const mockAcquireRelinkLock = jest.fn(async () => undefined);
-jest.mock('../services/newsletter-subscribers', () => ({
-  relinkSubscribersFromArchivedCustomer: (...args) => mockRelink(...args),
-  planRelinkFromArchivedCustomer: (...args) => mockPlanRelink(...args),
-  acquireRelinkLock: (...args) => mockAcquireRelinkLock(...args),
-}));
-
-const mockRecordAuditEvent = jest.fn();
-jest.mock('../services/audit-log', () => ({ recordAuditEvent: (...args) => mockRecordAuditEvent(...args) }));
-
 const db = require('../models/db');
 const { executeCustomerLifecycleTool } = require('../services/intelligence-bar/customer-lifecycle-tools');
 
 const WINNER_ID = '10000000-0000-4000-8000-000000000001';
 const LOSER_ID = '10000000-0000-4000-8000-000000000002';
-const CUSTOMER_ID = '10000000-0000-4000-8000-000000000003';
-const TWIN_ID = '10000000-0000-4000-8000-000000000004';
 
 const winnerRow = { id: WINNER_ID, first_name: 'Real', last_name: 'Customer', phone: '9415550101', email: 'real@example.com', deleted_at: null, version: '2026-09-10 20:00:00.000001+00', account_credits: '0' };
 const loserRow = { id: LOSER_ID, first_name: 'Unknown', last_name: '', phone: '9415550101', email: null, deleted_at: null, version: '2026-09-10 20:05:00.000002+00', account_credits: '12.50', billing_mode: 'per_application', per_application_fee: '85.00' };
-const customerRow = { id: CUSTOMER_ID, first_name: 'Stale', last_name: 'Stub', phone: '9415550199', email: 'stub@example.com', deleted_at: null };
 
 const ELIGIBLE = { eligible: true, code: 'eligible', reason: null, candidate: { tier: 'yellow', reasons: ['name_conflict'] } };
 
@@ -91,7 +74,6 @@ beforeEach(() => {
   db.__qb.update.mockResolvedValue(1);
   mockDuplicatePairEligibility.mockResolvedValue(ELIGIBLE);
   mockCustomerFkColumns.mockResolvedValue(FK_COLUMNS);
-  mockPlanRelink.mockResolvedValue({ relinked_count: 0, twins: [] });
 });
 
 describe('merge_customers', () => {
@@ -206,6 +188,7 @@ describe('merge_customers', () => {
       mode: 'intelligence_bar',
       evidence: { via: 'intelligence_bar' },
       expectedVersions: { winner: winnerRow.version, loser: loserRow.version },
+      underLock: null, // no card pin on a direct call — nothing to assert under the locks
     });
     expect(result).toMatchObject({ success: true, journal_id: 'journal-1' });
   });
@@ -254,6 +237,50 @@ describe('merge_customers', () => {
     expect(drift).toMatchObject({ preview_changed: true });
   });
 
+  test('preview carries an effects fingerprint (key-sorted moving counts + money effects) the route pins on the card', async () => {
+    db.__qb.select.mockResolvedValueOnce([winnerRow, loserRow]);
+    db.__qb.first.mockResolvedValueOnce({ n: 2 }).mockResolvedValueOnce({ n: 0 }).mockResolvedValueOnce({ n: 1 }).mockResolvedValueOnce({ n: 0 });
+    const result = await executeCustomerLifecycleTool('merge_customers', { winner_customer_id: WINNER_ID, loser_customer_id: LOSER_ID }, {});
+    expect(typeof result.effects_fingerprint).toBe('string');
+    const parsed = JSON.parse(result.effects_fingerprint);
+    expect(parsed).toEqual({ moving: result.moving, financial_effects: result.financial_effects });
+    expect(Object.keys(parsed.moving)).toEqual([...Object.keys(parsed.moving)].sort());
+  });
+
+  test('confirmed call with an approved effects pin recounts UNDER executeMerge\'s locks and refuses on drift (pre-push Codex P1)', async () => {
+    db.__qb.select.mockResolvedValue([winnerRow, loserRow]);
+    // Card showed 3 scheduled_services + 5 sms_log, 12.50 credits, 0 plan-rate rows.
+    const approved = JSON.stringify({
+      moving: { scheduled_services: 3, sms_log: 5, total_rows: 8 },
+      financial_effects: { account_credits_moved_to_winner: 12.5, billing_mode_adopted_from_loser: 'per_application', loser_plan_rate_rows_deleted: 0, per_application_fee_adopted_from_loser: 85 },
+    });
+    mockExecuteMerge.mockImplementation(async ({ underLock }) => {
+      await underLock(db, { winner: winnerRow, loser: loserRow });
+      return { journalId: 'journal-3', repointed: {}, backfills: {} };
+    });
+    // Under the lock: same counts → proceeds.
+    db.__qb.first.mockReset();
+    db.__qb.first.mockResolvedValueOnce({ n: 3 }).mockResolvedValueOnce({ n: 0 }).mockResolvedValueOnce({ n: 5 }).mockResolvedValueOnce({ n: 0 });
+    const ok = await executeCustomerLifecycleTool(
+      'merge_customers',
+      { winner_customer_id: WINNER_ID, loser_customer_id: LOSER_ID, confirmed: true, _approved_versions: { winner: winnerRow.version, loser: loserRow.version }, _approved_effects: approved },
+      { confirmed: true, technicianId: 'tech-42' },
+    );
+    expect(ok).toMatchObject({ success: true, journal_id: 'journal-3' });
+    expect(mockExecuteMerge).toHaveBeenCalledWith(expect.objectContaining({ underLock: expect.any(Function) }));
+    // Under the lock: a new invoice landed on the loser → preview_changed, nothing committed.
+    db.__qb.first.mockReset();
+    db.__qb.first.mockResolvedValueOnce({ n: 3 }).mockResolvedValueOnce({ n: 1 }).mockResolvedValueOnce({ n: 5 }).mockResolvedValueOnce({ n: 0 });
+    const drift = await executeCustomerLifecycleTool(
+      'merge_customers',
+      { winner_customer_id: WINNER_ID, loser_customer_id: LOSER_ID, confirmed: true, _approved_versions: { winner: winnerRow.version, loser: loserRow.version }, _approved_effects: approved },
+      { confirmed: true, technicianId: 'tech-42' },
+    );
+    expect(drift).toMatchObject({ preview_changed: true });
+    expect(drift.error).toMatch(/rows that would move changed/);
+    expect(drift.success).toBeUndefined();
+  });
+
   test('confirmed call relays an executeMerge refusal without a partial write', async () => {
     db.__qb.select.mockResolvedValue([winnerRow, loserRow]);
     mockExecuteMerge.mockRejectedValueOnce(new Error('executeMerge: both customers have Stripe profiles — resolve in Stripe first'));
@@ -264,161 +291,5 @@ describe('merge_customers', () => {
     );
     expect(result.error).toMatch(/Stripe profiles/);
     expect(result.success).toBeUndefined();
-  });
-});
-
-describe('archive_customer', () => {
-  test('preview names the customer, shows the newsletter relink plan, and mutates nothing when nothing blocks it', async () => {
-    db.__qb.first
-      .mockResolvedValueOnce(customerRow) // top-level lookup
-      .mockResolvedValueOnce(null) // no blocking appointment
-      .mockResolvedValueOnce(null); // no unpaid invoice
-    db.__qb.select.mockResolvedValueOnce([{ id: TWIN_ID, first_name: 'Twin', last_name: 'Customer' }]); // resolveTwinNames
-    mockPlanRelink.mockResolvedValueOnce({ relinked_count: 2, twins: [{ email_key: 'a@b.com', twin_id: TWIN_ID }] });
-
-    const result = await executeCustomerLifecycleTool('archive_customer', { customer_id: CUSTOMER_ID, reason: 'duplicate stub' }, {});
-
-    expect(result).toMatchObject({
-      preview: true, customer_id: CUSTOMER_ID, customer_name: 'Stale Stub',
-      customer_phone: '9415550199', customer_email: 'stub@example.com', reason: 'duplicate stub',
-      newsletter_relink: { count: 2, twins: [{ twin_id: TWIN_ID, twin_name: 'Twin Customer' }] },
-    });
-    expect(mockPlanRelink).toHaveBeenCalledWith(db, CUSTOMER_ID);
-    expect(result.note_to_operator).toMatch(/newsletter subscribers/);
-    expect(db.__qb.update).not.toHaveBeenCalled();
-    expect(mockRelink).not.toHaveBeenCalled();
-    expect(mockRecordAuditEvent).not.toHaveBeenCalled();
-  });
-
-  test('preview with no relink twins reports a zero count and no name lookup', async () => {
-    db.__qb.first
-      .mockResolvedValueOnce(customerRow)
-      .mockResolvedValueOnce(null)
-      .mockResolvedValueOnce(null);
-    mockPlanRelink.mockResolvedValueOnce({ relinked_count: 0, twins: [] });
-    const result = await executeCustomerLifecycleTool('archive_customer', { customer_id: CUSTOMER_ID }, {});
-    expect(result.newsletter_relink).toEqual({ count: 0, twins: [] });
-    expect(db.__qb.select).not.toHaveBeenCalled();
-  });
-
-  test('refuses (as a tool failure, not a card) when the customer is already archived', async () => {
-    db.__qb.first.mockResolvedValueOnce({ ...customerRow, deleted_at: new Date('2026-01-01') });
-    const result = await executeCustomerLifecycleTool('archive_customer', { customer_id: CUSTOMER_ID }, {});
-    expect(result).toMatchObject({ code: 'record_unavailable' });
-    expect(result.error).toMatch(/already archived/);
-  });
-
-  test('refuses on a future non-terminal scheduled visit, naming the blocker', async () => {
-    db.__qb.first
-      .mockResolvedValueOnce(customerRow)
-      .mockResolvedValueOnce({ id: 'appt-1' }) // blocking appointment found
-      .mockResolvedValueOnce(null);
-    const result = await executeCustomerLifecycleTool('archive_customer', { customer_id: CUSTOMER_ID }, {});
-    expect(result.code).toBe('archive_blocked');
-    expect(result.error).toMatch(/upcoming scheduled visit/);
-    expect(result.blockers).toEqual(['has an upcoming scheduled visit that is not cancelled, completed, or skipped']);
-    expect(mockPlanRelink).not.toHaveBeenCalled();
-  });
-
-  test('refuses on an unpaid invoice, naming the blocker', async () => {
-    db.__qb.first
-      .mockResolvedValueOnce(customerRow)
-      .mockResolvedValueOnce(null)
-      .mockResolvedValueOnce({ id: 'inv-1' }); // unpaid invoice found
-    const result = await executeCustomerLifecycleTool('archive_customer', { customer_id: CUSTOMER_ID }, {});
-    expect(result.code).toBe('archive_blocked');
-    expect(result.error).toMatch(/unpaid invoice/);
-  });
-
-  test('confirmed call stamps deleted_at, relinks newsletter subscribers, and writes a critical audit event when the plan is unchanged', async () => {
-    db.__qb.first
-      .mockResolvedValueOnce(customerRow) // top-level lookup (unconfirmed guard)
-      .mockResolvedValueOnce({ id: CUSTOMER_ID, deleted_at: null }) // locked row inside the transaction
-      .mockResolvedValueOnce(null) // fresh blockers: appointment
-      .mockResolvedValueOnce(null); // fresh blockers: invoice
-    mockPlanRelink
-      .mockResolvedValueOnce({ relinked_count: 2, twins: [{ email_key: 'a@b.com', twin_id: TWIN_ID }] }) // fresh, unlocked, at start
-      .mockResolvedValueOnce({ relinked_count: 2, twins: [{ email_key: 'a@b.com', twin_id: TWIN_ID }] }); // locked, under the row lock
-    mockRelink.mockResolvedValueOnce({ relinked: 2 });
-
-    const result = await executeCustomerLifecycleTool(
-      'archive_customer',
-      { customer_id: CUSTOMER_ID, reason: 'duplicate stub', confirmed: true },
-      { confirmed: true, technicianId: 'tech-7' },
-    );
-
-    expect(result).toMatchObject({ success: true, customer_id: CUSTOMER_ID, newsletter_relinked: 2 });
-    expect(mockPlanRelink).toHaveBeenNthCalledWith(1, db, CUSTOMER_ID);
-    expect(mockPlanRelink).toHaveBeenNthCalledWith(2, db, CUSTOMER_ID); // trx === db in this mock
-    // The locked plan is read under the SAME advisory lock the relink takes
-    // (pre-push Codex P1): lock first, then plan, then relink.
-    expect(mockAcquireRelinkLock).toHaveBeenCalledWith(db);
-    expect(mockAcquireRelinkLock.mock.invocationCallOrder[0]).toBeLessThan(mockPlanRelink.mock.invocationCallOrder[1]);
-    expect(mockPlanRelink.mock.invocationCallOrder[1]).toBeLessThan(mockRelink.mock.invocationCallOrder[0]);
-    expect(db.__qb.update).toHaveBeenCalledWith(expect.objectContaining({ deleted_at: expect.any(Date) }));
-    expect(mockRelink).toHaveBeenCalledWith(db, CUSTOMER_ID);
-    expect(mockRecordAuditEvent).toHaveBeenCalledWith(expect.objectContaining({
-      actor_type: 'technician',
-      actor_id: 'tech-7',
-      action: 'customer.archive',
-      resource_type: 'customer',
-      resource_id: CUSTOMER_ID,
-      critical: true,
-      metadata: expect.objectContaining({ newsletterRelinked: 2, reason: 'duplicate stub', source: 'intelligence_bar' }),
-    }));
-  });
-
-  test('confirmed call compares the locked plan against the APPROVED card plan (route pin) and refuses drift', async () => {
-    db.__qb.first
-      .mockResolvedValueOnce(customerRow)
-      .mockResolvedValueOnce({ id: CUSTOMER_ID, deleted_at: null })
-      .mockResolvedValueOnce(null)
-      .mockResolvedValueOnce(null);
-    mockPlanRelink
-      .mockResolvedValueOnce({ relinked_count: 1, twins: [{ email_key: 'a@b.com', twin_id: TWIN_ID }] }) // fresh sample (ignored when a pin exists)
-      .mockResolvedValueOnce({ relinked_count: 1, twins: [{ email_key: 'a@b.com', twin_id: TWIN_ID }] }); // locked
-    const result = await executeCustomerLifecycleTool(
-      'archive_customer',
-      { customer_id: CUSTOMER_ID, confirmed: true, _approved_relink_plan: { count: 0, twin_ids: [] } },
-      { confirmed: true, technicianId: 'tech-7' },
-    );
-    expect(result).toMatchObject({ preview_changed: true });
-    expect(result.error).toMatch(/relink plan changed/);
-    expect(mockRelink).not.toHaveBeenCalled();
-    expect(db.__qb.update).not.toHaveBeenCalled();
-  });
-
-  test('confirmed call refuses with preview_changed when the row was archived since the card was shown', async () => {
-    db.__qb.first
-      .mockResolvedValueOnce(customerRow) // top-level lookup: still live
-      .mockResolvedValueOnce({ id: CUSTOMER_ID, deleted_at: new Date() }); // locked row: archived in the meantime
-    const result = await executeCustomerLifecycleTool(
-      'archive_customer',
-      { customer_id: CUSTOMER_ID, confirmed: true },
-      { confirmed: true, technicianId: 'tech-7' },
-    );
-    expect(result.preview_changed).toBe(true);
-    expect(mockRelink).not.toHaveBeenCalled();
-    expect(mockRecordAuditEvent).not.toHaveBeenCalled();
-  });
-
-  test('confirmed call refuses with preview_changed when the relink plan changed under the row lock', async () => {
-    db.__qb.first
-      .mockResolvedValueOnce(customerRow) // top-level lookup (unconfirmed guard)
-      .mockResolvedValueOnce({ id: CUSTOMER_ID, deleted_at: null }) // locked row
-      .mockResolvedValueOnce(null) // fresh blockers: appointment
-      .mockResolvedValueOnce(null); // fresh blockers: invoice
-    mockPlanRelink
-      .mockResolvedValueOnce({ relinked_count: 2, twins: [{ email_key: 'a@b.com', twin_id: TWIN_ID }] }) // fresh, at start
-      .mockResolvedValueOnce({ relinked_count: 1, twins: [{ email_key: 'a@b.com', twin_id: TWIN_ID }] }); // locked: a subscriber vanished
-    const result = await executeCustomerLifecycleTool(
-      'archive_customer',
-      { customer_id: CUSTOMER_ID, confirmed: true },
-      { confirmed: true, technicianId: 'tech-7' },
-    );
-    expect(result.preview_changed).toBe(true);
-    expect(result.error).toMatch(/relink plan changed/);
-    expect(mockRelink).not.toHaveBeenCalled();
-    expect(mockRecordAuditEvent).not.toHaveBeenCalled();
   });
 });
