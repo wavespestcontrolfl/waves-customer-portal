@@ -88,6 +88,18 @@ describeDb('appointment completion defaults through PostgreSQL', () => {
     expect((await loadLawnCompletionContext(joined(unfinished, f), knex)).propertyMatchesProfile).toBe(false);
   });
 
+  test('a tierless assigned visit stamped to a second address cannot adopt the sole saved property (codex #4113 P1)', async () => {
+    const f = await fixture(knex);
+    // The plan query joins the CUSTOMER address onto the visit; the visit is
+    // stamped elsewhere with no property id. The sole saved property matches
+    // the account address, never the stamped one.
+    const visit = await f.visit(0, { property_id: null, lawn_protocol_key: 'fixture_lawn', lawn_protocol_version: 'fixture1', lawn_protocol_window_key: 'fixture_6',
+      service_address_line1: '200 Fixture Street', service_address_city: f.property.city, service_address_zip: f.property.zip });
+    const result = await loadLawnCompletionContext(joined(visit, f), knex);
+    expect(result.propertyMatchesProfile).toBe(false);
+    expect(result.propertyId).toBe(null);
+  });
+
   test('an explicit second property gets its own history and no primary turf area', async () => {
     const f = await fixture(knex);
     const [second] = await knex('customer_properties').insert({ customer_id: f.customerId, address_line1: '200 Fixture Street', city: f.property.city, zip: f.property.zip }).returning('*');

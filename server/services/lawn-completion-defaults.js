@@ -37,8 +37,18 @@ async function loadLawnCompletionContext(service, knex) {
   const current = currentHistory?.current || null;
   // The turf profile is still customer-owned. Until property templates land,
   // its area/grass can seed only the proven current home, never a second lawn.
-  const propertyMatchesProfile = !!(scope.propertyId && service.address_line1
-    && scope.propertyAddressKey === addressKey(service));
+  // The proof compares the VISIT's address: the plan query joins the
+  // customers row onto the unprefixed address fields, so an appointment
+  // stamped to a second address (service_address_*) must be keyed by that
+  // stamp, not by the account address the sole saved property matches. The
+  // scope resolver already withholds a property under conflicting stamped
+  // evidence; this keeps the direct check honest on its own (Codex #4113 P1).
+  const visitAddress = service.service_address_line1 ? {
+    address_line1: service.service_address_line1, address_line2: service.service_address_line2,
+    city: service.service_address_city, zip: service.service_address_zip,
+  } : service;
+  const propertyMatchesProfile = !!(scope.propertyId && visitAddress.address_line1
+    && scope.propertyAddressKey === addressKey(visitAddress));
   const attempts = await history.assessmentQuery(service.customer_id, knex, { confirmed: false })
     .where('ss.id', service.id).orderBy('la.created_at', 'desc').orderBy('la.id', 'desc');
   const latestAssessment = scope.propertyId ? attempts.find((row) => history.isEligible(row, scope)) || resolvedHistory.previous : null;

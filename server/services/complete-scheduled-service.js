@@ -2690,11 +2690,18 @@ async function completeScheduledService(completionInput, packetContext = null) {
       }
     }
 
+    // Track which IDs came from the appointment assignment rather than the
+    // submitted actuals: only the planner can verify an assignment, so a
+    // ledgered visit whose planner fails must drop them again (Codex #4113 P2).
+    let assignmentDerivedEquipmentSystem = false;
+    let assignmentDerivedCalibration = false;
     if (!waveguardEquipmentSystemId && svc.assigned_equipment_system_id) {
       waveguardEquipmentSystemId = svc.assigned_equipment_system_id;
+      assignmentDerivedEquipmentSystem = true;
     }
     if (!waveguardCalibrationId && svc.assigned_calibration_id) {
       waveguardCalibrationId = svc.assigned_calibration_id;
+      assignmentDerivedCalibration = true;
     }
 
     // The profile row is the typed-completion feature flag AND the project
@@ -4193,6 +4200,16 @@ async function completeScheduledService(completionInput, packetContext = null) {
         if (waveguardCloseout) throw planErr;
         logger.warn('lawn actuals ledger: appointment plan unavailable, recording actuals without attribution', { serviceId: svc.id, error: planErr?.message });
         waveguardPlan = null;
+        // With no plan the `unresolved` guard below cannot run, yet the
+        // assignment's IDs were copied above and the writer gives explicit
+        // IDs precedence — a deleted or deactivated rig would be recorded as
+        // equipment actually used during the outage. Keep only IDs the
+        // closeout submitted as visit actuals (Codex #4113 P2).
+        if (assignmentDerivedEquipmentSystem || assignmentDerivedCalibration) {
+          if (assignmentDerivedEquipmentSystem) waveguardEquipmentSystemId = null;
+          if (assignmentDerivedCalibration) waveguardCalibrationId = null;
+          waveguardCalibrationCleared = true;
+        }
       }
     }
     // A ledgered non-WaveGuard or incomplete lawn visit skips the WaveGuard
@@ -4903,6 +4920,25 @@ async function completeScheduledService(completionInput, packetContext = null) {
                 err.statusCode = 409;
                 err.isOperational = true;
                 err.code = 'VISIT_TURF_PROFILE_CHANGED';
+                throw err;
+              }
+            }
+            // The service date likewise: the planner picked the seasonal
+            // protocol and defaults from the handler-entry scheduled_date
+            // (toServiceDate), and a reschedule that committed between the
+            // load and this lock would persist the former date's protocol
+            // onto the moved appointment. Same retryable shape (Codex #4113 P2).
+            if (lawnLedgerVisit && waveguardPlan && Object.prototype.hasOwnProperty.call(lockedSvcRow, 'scheduled_date')) {
+              const dateKey = (value) => {
+                if (value == null || value === '') return '';
+                const parsed = value instanceof Date ? value : new Date(value);
+                return Number.isNaN(parsed.getTime()) ? String(value) : parsed.toISOString();
+              };
+              if (dateKey(lockedSvcRow.scheduled_date) !== dateKey(svc.scheduled_date)) {
+                const err = new Error('This appointment was rescheduled while completing — reload the job and complete it again.');
+                err.statusCode = 409;
+                err.isOperational = true;
+                err.code = 'VISIT_DATE_CHANGED';
                 throw err;
               }
             }
