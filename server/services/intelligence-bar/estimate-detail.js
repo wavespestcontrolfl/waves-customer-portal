@@ -1,46 +1,57 @@
-// get_estimate_detail — what an estimate offered, read the way the customer
-// page reads it.
+// get_estimate_detail — what an estimate offered, read from the customer
+// page's own projection.
 //
 // Before this reader the bar could see that estimate links went out
 // (find_similar_estimates, the conversation thread) but not the amounts
 // inside them: "what did we quote him per application?" ended with the
-// operator being sent to the Estimates tab. The priced contents live in
-// estimates.estimate_data (JSONB, engine-shaped) and are NOT re-read here:
-// every amount comes from the public route's own composer, in the public
-// route's own order —
-//   membership      → estimate-public reconcileFrozenMembershipSnapshot first
-//                     (a lapsed member's frozen discount is repriced or the
-//                     row is marked requote, exactly as /:token/data does);
-//                     when the live lookup fails the reconciler reports it
-//                     and offered pricing is WITHHELD — never priced from the
-//                     unverified snapshot
-//   authored proposal → estimate-proposal normalizeProposal +
-//                     computeProposalTotals when estimate_data.proposal is
-//                     enabled and itemized: the formal commercial proposal is
-//                     the billed quote, the engine rows a promoted estimate
-//                     still carries are not (the public page and the PDF
-//                     price from the same projection)
-//   offered pricing → estimate-public buildPricingBundle otherwise: plan
-//                     cadences, per-service ladders, cadence combos with
-//                     their allocated per-service amounts and manual-
-//                     discount state, section-level price selectors (termite
-//                     bond terms, station rental, commercial interior toggle),
-//                     the one-time breakdown, first-visit / setup fees, the
-//                     rodent bait setup fee
-//   totals          → the stored estimate columns the send path wrote
-//   links           → estimate-public isEstimateCustomerViewable /
-//                     adminDraftPreviewEligible + the durable call-side
-//                     block (estimate-claim-sql), the same 404 checks the
-//                     public page runs
-// A hand-itemized reading of estimate_data (recurring rows, one-time rows,
-// review markers, mirrors, twins) was deliberately removed from this tool
-// after four review rounds kept finding pricing rules the public composer
-// applies and a re-implementation would have to mirror — the bundle IS
-// what the customer sees, so the bar answers from it or says it cannot.
+// operator being sent to the Estimates tab.
+//
+// HOW IT READS THE AMOUNTS (re-cut, #4345 rounds 1-5). The first cut
+// re-projected the customer page's pricing shape by hand off
+// estimates.estimate_data + buildPricingBundle: per-application figures,
+// low-confidence bands, cadence combos, section selectors, one-time
+// breakdown, withholding rules. Five review rounds found the same defect
+// at ten different sites — a field the page withholds or renders
+// differently that the hand projection re-exposed or re-derived (ranged
+// cadences, price-locked rows, quote-required cadences, combined ranges,
+// bundle-level quote-required, nested bond/station/interior prices,
+// single-service ranges, add-ons, one-time-option availability). The
+// counts never fell, because two independent projections of one offer
+// cannot be kept in step by review.
+//
+// So this tool no longer projects anything. It calls
+// estimate-public.composeEstimateDataPayload — the exact function that
+// builds the JSON body of GET /:token/data, the payload the React estimate
+// page renders — and passes the priced sections through VERBATIM. Every
+// withholding rule, every band, every quote-required verdict is applied
+// once, by the page's own composer, upstream of this file. If the page
+// starts withholding something new, this tool withholds it the same day
+// with no change here; if it exposes something new, the bar can answer
+// about it the same day. There is no second copy to drift.
+//
+// What this file still owns, and why each one is not a re-projection:
+//   membership   — reconcileFrozenMembershipSnapshot with strictMembership,
+//                  the opt-in the public route does NOT take: the page may
+//                  degrade to nonmember pricing when the live plan lookup
+//                  fails, but a staff answer must not report ANY amount off
+//                  an unverified frozen snapshot. Failure withholds the
+//                  whole projection.
+//   links        — the same 404 checks the public page runs
+//                  (callSideBlockForEstimateData, isEstimateCustomerViewable,
+//                  adminDraftPreviewEligible), reported as link_state so the
+//                  operator knows whether the customer can still open it.
+//                  The page's 404 is a customer-surface rule, not a
+//                  staff-disclosure rule, so an expired estimate still
+//                  reports its amounts to the bar.
+//   committed    — for a price-locked row (accepted / declined /
+//                  price_locked_at) the stored monthly/annual/onetime
+//                  columns ARE the committed deal and the composer does not
+//                  recompute them; they are reported as committed_totals,
+//                  never as "the price today".
+//   deposits     — estimate_deposits, which the page never shows.
 // Record scope: estimate_id resolves to its customer through the
 // task-context RECORDS map, customer_id is the customer selector itself.
 const db = require('../../models/db');
-const { roundDecimal } = require('../../../shared/proposal-bid.cjs');
 
 const MAX_PER_CUSTOMER = 10;
 const DEFAULT_PER_CUSTOMER = 3;
@@ -68,629 +79,68 @@ function parseStoredJson(value) {
 const lazy = {
   publicRoute: () => require('../../routes/estimate-public'),
   claimSql: () => require('../../utils/estimate-claim-sql'),
-  proposal: () => require('../estimate-proposal'),
   proposalBilling: () => require('../estimate-proposal-billing'),
 };
 
-const list = (v) => (Array.isArray(v) ? v : []);
+// ── The page projection ──────────────────────────────────────────────
+// Dropped from the payload before it reaches the bar, and NOTHING else:
+//   askToken  — a live bearer credential for the ask endpoint. Never leaves
+//               the page's own response.
+//   token     — the estimate link secret; the openable link is already
+//               reported as customer_link when the page would serve it.
+//   intelligence / showYourWork — the page's generated narrative and
+//               reasoning copy. No amounts, thousands of tokens of context.
+//   satelliteUrl / licenseNumber — page chrome.
+//   notes     — already reported as customer_notes at the top level.
+// Everything else passes through untouched. The list is a DENYLIST on
+// purpose: a priced section the page adds tomorrow arrives here on its own,
+// which is the whole point of the re-cut.
+const DROPPED_PAYLOAD_KEYS = new Set(['intelligence', 'showYourWork']);
+const DROPPED_ESTIMATE_KEYS = new Set([
+  'askToken', 'token', 'intelligence', 'satelliteUrl', 'licenseNumber', 'notes',
+]);
 
-// ── Offered pricing (the public bundle, verbatim in shape) ───────────
-// The per-application figure the customer page shows — a server mirror of
-// PriceCard.jsx perApplicationNetForFrequency (the client module cannot be
-// imported into the server; keep the two in step): the single priced
-// treatment row's net displayPrice when there is exactly one, else the
-// cadence's own perTreatment with PriceCard's visit derivation — and only
-// on a cadence the composer marks billed per application. A legacy monthly-billed member's bundle has that flag
-// stripped by the composer; such a cadence is a monthly charge, and no
-// per-application amount is invented for it.
-const CADENCE_VISITS = { quarterly: 4, bi_monthly: 6, monthly: 12 };
-function perApplicationFor(f) {
-  if (f.billedPerApplication !== true) return null;
-  const rows = list(f.perServiceTreatments)
-    .map((row) => ({ displayPrice: Number(row.displayPrice ?? row.perTreatment), monthlyPrice: Number(row.monthly), visitsPerYear: Number(row.visitsPerYear) }))
-    .filter((row) => (Number.isFinite(row.displayPrice) && row.displayPrice > 0) || (Number.isFinite(row.monthlyPrice) && row.monthlyPrice > 0));
-  if (rows.length === 1) return rows[0].displayPrice > 0 && rows[0].visitsPerYear > 0 ? money(rows[0].displayPrice) : null;
-  if (rows.length > 1) return null;
-  // No priced treatment row: the cadence's own perTreatment, with the visit
-  // count from the cadence, a single visit-bearing row, or the cadence key
-  // (legacy / snapshotted rows omit visitsPerYear) — PriceCard's order.
-  const visitRows = list(f.perServiceTreatments).filter((row) => Number(row?.visitsPerYear) > 0);
-  const visits = Number(f.visitsPerYear) > 0
-    ? Number(f.visitsPerYear)
-    : (visitRows.length === 1 ? Number(visitRows[0].visitsPerYear) : (visitRows.length === 0 ? (CADENCE_VISITS[f.key] || null) : null));
-  const pt = Number(f.perTreatment);
-  return pt > 0 && Number.isFinite(visits) && visits > 0 ? money(pt) : null;
-}
-
-// PriceCard bands the DISPLAYED cadence price, not the raw monthly figure:
-// a quarterly or bi-monthly cadence first multiplies monthly by its interval
-// (quarterly ×3, bi_monthly ×2) and shows/bands that per-period number — a
-// $100/mo quarterly line reads "$240–$360/quarter" on the customer page, not
-// "$80–$120". The annual band is unaffected (annual is already annual).
-const CADENCE_INTERVAL_MONTHS = { quarterly: 3, bi_monthly: 2 };
-function cadenceIntervalMonths(f) {
-  const key = f.billingFrequencyKey || f.key;
-  return CADENCE_INTERVAL_MONTHS[key] || 1;
-}
-
-// A LOW-confidence commercial cadence carries a range, not a price: the
-// composer stamps lowConfidenceRangePct + lowConfidenceFraction and the
-// customer page shows cadencePrice ± cadencePrice × fraction × pct
-// (PriceCard), where cadencePrice is the interval-scaled figure above.
-function lowConfidenceRange(f) {
-  const pct = f.quoteRequired === true ? 0 : Number(f.lowConfidenceRangePct);
-  if (!(pct > 0) || !(Number(f.monthly) > 0)) return null;
-  const rawFraction = Number(f.lowConfidenceFraction);
-  const fraction = Number.isFinite(rawFraction) && rawFraction > 0 ? Math.min(rawFraction, 1) : 1;
-  const band = (price) => (price == null ? null : [money(price - price * fraction * pct), money(price + price * fraction * pct)]);
-  const intervalMonths = cadenceIntervalMonths(f);
-  const cadencePrice = money(Number(f.monthly) * intervalMonths);
-  const rangeUnit = intervalMonths === 3 ? 'quarterly' : intervalMonths === 2 ? 'bi_monthly' : 'monthly';
-  return { pct, fraction, range_unit: rangeUnit, cadence: band(cadencePrice), annual: band(money(f.annual)) };
-}
-
-// On a MULTI-service estimate, a narrow LOW-confidence commercial line can
-// leave every individual top-level frequency exact (its own
-// lowConfidenceRangePct unset) while the composer stamps the AGGREGATE range
-// on bundle.combinedRecurring instead (withCombinedLowConfidenceRange,
-// estimate-public.js) — CombinedRecurringPriceCard/PlanTotalSummary on the
-// customer page fall back to combined.lowConfidenceRangePct exactly when the
-// selected top-level frequency carries none, and then never render the exact
-// combined monthly/annual, only the range. Extracted once per bundle so the
-// aggregate uncertain dollars (lowConfidenceMonthly) are read a single time.
-function combinedLowConfidenceRange(combined) {
-  if (!combined || typeof combined !== 'object') return null;
-  const pct = Number(combined.lowConfidenceRangePct);
-  if (!(pct > 0)) return null;
-  const rawFraction = Number(combined.lowConfidenceFraction);
-  const stampedFraction = Number.isFinite(rawFraction) && rawFraction > 0 ? Math.min(rawFraction, 1) : 1;
-  const rawLowMonthly = Number(combined.lowConfidenceMonthly);
-  return { pct, stampedFraction, lowMonthly: Number.isFinite(rawLowMonthly) && rawLowMonthly > 0 ? rawLowMonthly : null };
-}
-
-// Bands ONE top-level frequency against the combined aggregate's fixed
-// uncertain dollars — same math as the customer page's combined card: the
-// fraction is recomputed against THIS candidate's own (unscaled) monthly
-// figure when the aggregate low dollars are known, else the stamped
-// fallback fraction; the SAME fraction then bands annual. Never applied to a
-// section's own frequencies (services[].frequencies) — those already carry
-// their own correct per-section stamp from the composer.
-function bandForFrequency(f, combinedRange) {
-  if (!combinedRange) return null;
-  const monthly = Number(f.monthly);
-  if (!(monthly > 0)) return null;
-  const fraction = combinedRange.lowMonthly != null ? Math.min(combinedRange.lowMonthly / monthly, 1) : combinedRange.stampedFraction;
-  if (!(fraction > 0)) return null;
-  const band = (price) => (Number.isFinite(price) && price != null ? [money(price - price * fraction * combinedRange.pct), money(price + price * fraction * combinedRange.pct)] : null);
-  const annual = Number(f.annual);
-  return { pct: combinedRange.pct, fraction, range_unit: 'monthly', cadence: band(monthly), annual: Number.isFinite(annual) ? band(annual) : null };
-}
-
-// The full, unwithheld treatment row — every amount the composer carries.
-// Whether the customer page actually shows these prices (a ranged cadence
-// hides them) is decided later, in ONE place: withholdRangedPricing.
-function treatmentRow(r) {
-  return {
-    service: r.service || null,
-    label: r.label || null,
-    per_treatment: money(r.perTreatment),
-    display_price: money(r.displayPrice),
-    visits_per_year: Number(r.visitsPerYear) > 0 ? Number(r.visitsPerYear) : null,
-    ...(r.monthly != null ? { monthly: money(r.monthly) } : {}),
-    ...(r.monthlyBase != null ? { monthly_base: money(r.monthlyBase) } : {}),
-    ...(r.waveGuardDiscountEligible != null ? { waveguard_discount_eligible: r.waveGuardDiscountEligible === true } : {}),
-  };
-}
-
-// The full, unwithheld frequency entry — real monthly/annual/per_application
-// and full treatment rows, whether or not the customer page would actually
-// show them for THIS cadence. Ranging and quote-required withholding are no
-// longer decided here (Codex round 3 P1: threading a combinedRange fallback
-// through every producer function individually is exactly the pattern that
-// let combos bypass it) — see withholdRangedPricing, the single place that
-// walks the fully-built offered_pricing shape afterward and nulls whatever
-// it finds.
-function frequencyEntry(f) {
-  const rows = list(f.perServiceTreatments);
-  const entry = {
-    key: f.key || null,
-    label: f.label || null,
-    monthly: money(f.monthly),
-    annual: money(f.annual),
-    visits_per_year: Number(f.visitsPerYear) > 0 ? Number(f.visitsPerYear) : null,
-    billing_unit: f.billedPerApplication === true ? 'per_application' : 'monthly',
-    per_application: perApplicationFor(f),
-    per_service_treatments: rows.map(treatmentRow),
-    // Row-level discount state: a program minimum can cap or suppress the
-    // manual discount on SOME cadences only — the global manual_discount
-    // never speaks for an individual cadence.
-    manual_discount: f.manualDiscount || null,
-  };
-  if (f.manualDiscountSuppressed === true) entry.manual_discount_suppressed = true;
-  if (f.oneTimeTotal != null) entry.one_time_total = money(f.oneTimeTotal);
-  if (f.quoteRequired === true) entry.quote_required = true;
-  if (f.annualPrepayEligible != null) entry.annual_prepay_eligible = f.annualPrepayEligible === true;
-  // The payment card's fallback first-visit total when a selected cadence
-  // mixes per-application services with a flat-monthly row and the treatment
-  // rows don't sum to a usable figure (PaymentPreferenceButtons.jsx
-  // firstVisitAmount, lines 71-90).
-  if (f.sameDayTreatmentTotal != null) entry.same_day_treatment_total = money(f.sameDayTreatmentTotal);
-  return entry;
-}
-
-function feeEntry(f) {
-  const entry = { service: f.service || null, label: f.label || null, amount: money(f.amount), waived_with_prepay: f.waivedWithPrepay === true };
-  if (Number(f.treatments) > 0) entry.treatments = Number(f.treatments);
-  return entry;
-}
-
-// Each combo carries the AUTHORITATIVE allocated per-service amounts
-// (perServiceTreatments) and its own manual-discount state; the section
-// ladders (services[].frequencies) are the pre-manual-discount prices the
-// customer picks between — both are reported, each labelled as what it is.
-// Full, unwithheld shape — same rule as frequencyEntry: ranging and
-// quote-required withholding happen once, afterward, in withholdRangedPricing.
-function comboEntry(c) {
-  const entry = {
-    key: c.key || null,
-    selection: c.selection && typeof c.selection === 'object' ? c.selection : null,
-    monthly: money(c.monthly),
-    annual: money(c.annual),
-    per_service_treatments: c.perServiceTreatments && typeof c.perServiceTreatments === 'object' ? c.perServiceTreatments : null,
-    manual_discount: c.manualDiscount || null,
-  };
-  // The matched combo's stamped flag takes precedence over the top-level
-  // frequency's on the customer page (EstimateViewPage annualPrepayEligibleEffective)
-  // — it can both RESTORE prepay a seasonal-default estimate's flag alone
-  // would hide, and hard-disable it for a multi-service mosquito-axis combo.
-  // Drop it here and the bar reads the wrong eligibility for any combo whose
-  // stamp disagrees with the section ladder.
-  if (c.annualPrepayEligible != null) entry.annual_prepay_eligible = c.annualPrepayEligible === true;
-  if (c.manualDiscountSuppressed === true) entry.manual_discount_suppressed = true;
-  // A combo can itself be quoteRequired (estimate-proposal.js filters on
-  // combo.quoteRequired) — surfaced the same way a frequency's is, so a
-  // combo nulled by withholdRangedPricing still says why.
-  if (c.quoteRequired === true) entry.quote_required = true;
-  if (c.sameDayTreatmentTotal != null) entry.same_day_treatment_total = money(c.sameDayTreatmentTotal);
-  return entry;
-}
-
-// ── Withholding: the range/quote-required chokepoint ────────────────
-// frequencyEntry and comboEntry above build the offered_pricing shape RAW
-// and unwithheld — every entry carries its real monthly, annual,
-// per_application, same_day_treatment_total, and per_service_treatments,
-// whether or not the customer page would actually show them. This is the
-// ONE place that decides what gets withheld: it walks the fully-built shape
-// once, after every frequency/section/combo entry exists, so a field added
-// to frequencyEntry or comboEntry later is covered automatically instead of
-// by remembering to gate it at its own producer (Codex round 3 P1 — round 2
-// threaded the combined-range fallback through frequencyEntry and
-// defaultCadenceForTotals independently, and combos bypassed both entirely).
-const WITHHELD_MONEY_FIELDS = ['monthly', 'annual', 'per_application', 'same_day_treatment_total'];
-
-// The withheld shape of ONE frequency-style treatment row (an array entry
-// under per_service_treatments): service identity and visit count survive,
-// every dollar figure goes. Mirrors the shape treatmentRow(r) already
-// produces so the two agree byte-for-byte on a non-withheld field.
-function withholdTreatmentRowEntry(row) {
-  return { service: row?.service ?? null, label: row?.label ?? null, visits_per_year: row?.visits_per_year ?? null, prices_withheld: 'low_confidence_range' };
-}
-
-// A combo's per_service_treatments is a plain object keyed by service
-// ({ pest_control: { perTreatment, treatments }, ... }), not an array of
-// labelled rows — there is no service/label pair to preserve beyond the key
-// itself, so only the visit count (treatments) survives per entry.
-function withholdComboTreatmentRow(row) {
-  if (!row || typeof row !== 'object') return row;
-  return { ...(row.treatments != null ? { treatments: row.treatments } : {}), prices_withheld: 'low_confidence_range' };
-}
-
-// entry: the projected (frequencyEntry/comboEntry) shape. source: the RAW
-// bundle object it was built from — its own quoteRequired flag, and
-// everything lowConfidenceRange/bandForFrequency need. range: this entry's
-// resolved low-confidence band, already computed by the caller
-// (withholdingRangeFor). bundleQuoteRequired: the COMPOSER's whole-bundle
-// verdict (resolveEstimateQuoteRequirement — manager approval, a wide
-// low-confidence commercial range forced to a site quote, commercial
-// risk-type review, a custom-quote one-time item…), which can be true with
-// no single frequency/combo individually stamped quoteRequired at all — the
-// React quote_required terminal branch (EstimateViewPage.jsx ~7501-7623)
-// exits before rendering ANY pricing in that case, not just this entry's
-// headline (pre-push audit / Codex round 4 P1).
-function withholdEntry(entry, source, range, bundleQuoteRequired = false) {
-  const quoteRequired = bundleQuoteRequired || source?.quoteRequired === true;
-  if (!range && !quoteRequired) return entry;
-  const next = { ...entry };
-  for (const field of WITHHELD_MONEY_FIELDS) {
-    if (Object.prototype.hasOwnProperty.call(next, field)) next[field] = null;
-  }
-  // Treatment-row prices withhold under a range (PriceCard hides them
-  // entirely for a ranged cadence — an exact row price would contradict
-  // "confirmed on site") OR when the whole bundle is quote-required (the
-  // terminal branch renders no PriceCard at all). A MERELY per-cadence
-  // quote-required entry on an otherwise-sellable bundle still renders its
-  // treatment rows at their real price — its own gate is
-  // showLowConfidenceRange, not quoteRequired (PriceCard.jsx) — so this
-  // stays narrower than the money-field null above.
-  if (range || bundleQuoteRequired) {
-    if (Array.isArray(next.per_service_treatments)) {
-      next.per_service_treatments = next.per_service_treatments.map(withholdTreatmentRowEntry);
-    } else if (next.per_service_treatments && typeof next.per_service_treatments === 'object') {
-      next.per_service_treatments = Object.fromEntries(
-        Object.entries(next.per_service_treatments).map(([key, row]) => [key, withholdComboTreatmentRow(row)]),
-      );
-    }
-    if (range) next.low_confidence_range = range;
-  }
-  return next;
-}
-
-// This RAW source's own stamped range first (PriceCard's per-cadence ladder
-// / a combo's own stamp), else — when the caller allows it — the aggregate
-// combinedRecurring fallback (bandForFrequency). Never allowed for a service
-// section's own frequencies: those already carry their own correct
-// per-section stamp from stampLowConfidenceRangeOnServices, and applying the
-// fallback there too would range a section twice by two different
-// mechanisms.
-function withholdingRangeFor(source, combinedRange, allowCombinedFallback) {
-  return lowConfidenceRange(source) || (allowCombinedFallback ? bandForFrequency(source, combinedRange) : null);
-}
-
-// One-time items withhold the same way under a bundle-level quote-required
-// verdict: a fee/breakdown row's identity (service/label/detail) survives,
-// its dollar amount doesn't — the terminal branch shows no pricing at all,
-// one-time included.
-function withholdOneTimeAmounts(offered) {
-  offered.one_time_total = null;
-  if (Array.isArray(offered.upfront_fees)) {
-    offered.upfront_fees = offered.upfront_fees.map((fee) => ({ ...fee, amount: null }));
-  }
-  if (offered.one_time_breakdown) {
-    offered.one_time_breakdown = {
-      ...offered.one_time_breakdown,
-      items: list(offered.one_time_breakdown.items).map((item) => ({ ...item, amount: null })),
-      total: null,
-    };
-  }
-}
-
-// The single post-projection pass: walks plan_frequencies, every service
-// section's frequencies, combos, and (when the whole bundle is
-// quote-required) the one-time items too — in that order, mirroring the
-// shape builtOfferedPricing just assembled — pairing each projected entry
-// with the RAW bundle object it came from (same array, same index) so
-// withholdingRangeFor/withholdEntry can decide and apply withholding. Called
-// exactly once, after the whole offered_pricing shape exists.
-function withholdRangedPricing(offered, bundle) {
-  const combinedRange = combinedLowConfidenceRange(bundle.combinedRecurring);
-  // offered.quote_required is the composer's bundle-level verdict, already
-  // stamped below in builtOfferedPricing before this pass runs — reading it
-  // back here (rather than bundle.quoteRequired a second time) keeps this
-  // pass agreeing with whatever the top-level field actually says.
-  const bundleQuoteRequired = offered.quote_required === true;
-  const frequencies = list(bundle.frequencies);
-  offered.plan_frequencies = offered.plan_frequencies.map((entry, i) => {
-    const source = frequencies[i] || {};
-    return withholdEntry(entry, source, withholdingRangeFor(source, combinedRange, true), bundleQuoteRequired);
-  });
-  const sections = list(bundle.services);
-  offered.services = offered.services.map((section, si) => {
-    const sourceFrequencies = list(sections[si]?.frequencies);
-    return {
-      ...section,
-      frequencies: section.frequencies.map((entry, i) => {
-        const source = sourceFrequencies[i] || {};
-        return withholdEntry(entry, source, withholdingRangeFor(source, combinedRange, false), bundleQuoteRequired);
-      }),
-    };
-  });
-  const combos = list(bundle.serviceCadenceCombos);
-  offered.combos = offered.combos.map((entry, i) => {
-    const source = combos[i] || {};
-    return withholdEntry(entry, source, withholdingRangeFor(source, combinedRange, true), bundleQuoteRequired);
-  });
-  if (bundleQuoteRequired) withholdOneTimeAmounts(offered);
-  return offered;
-}
-
-// Section-level price selectors the composer attaches to a service section
-// (attachTermiteBondSelector / attachTermiteStationRental /
-// attachCommercialInteriorSelector): selectable additions the customer page
-// renders beside the base cadence. Reported only when the composer set them,
-// with the same amounts, so the base ladder is never passed off as the
-// complete offer.
-const addAmounts = (o) => ({ per_application_add: money(o.perApplicationAdd), monthly_add: money(o.monthlyAdd), annual_add: money(o.annualAdd) });
-function sectionSelectors(s) {
+function stripPayload(payload) {
   const out = {};
-  if (Array.isArray(s.bondOptions)) {
-    out.bond_options = s.bondOptions.map((o) => ({ key: o.key || null, label: o.label || null, years: Number(o.years) > 0 ? Number(o.years) : null, ...addAmounts(o) }));
-    out.selected_bond_term = s.selectedBondTerm || null;
+  for (const [key, value] of Object.entries(payload || {})) {
+    if (DROPPED_PAYLOAD_KEYS.has(key)) continue;
+    if (key === 'estimate' && value && typeof value === 'object') {
+      const estimateBlock = {};
+      for (const [k, v] of Object.entries(value)) {
+        if (DROPPED_ESTIMATE_KEYS.has(k)) continue;
+        estimateBlock[k] = v;
+      }
+      out.estimate = estimateBlock;
+      continue;
+    }
+    out[key] = value;
   }
-  if (s.stationRental && typeof s.stationRental === 'object') {
-    out.station_rental = { label: s.stationRental.label || null, detail: s.stationRental.detail || null, ...addAmounts(s.stationRental), price_itemized: s.stationRental.priceItemized === true };
-  }
-  if (s.interiorOption && typeof s.interiorOption === 'object') {
-    out.interior_option = { selected: s.interiorOption.selected !== false, label: s.interiorOption.label || null, ...addAmounts(s.interiorOption), detail: s.interiorOption.detail || null };
-  }
-  if (s.interiorScopeExcluded === true) out.interior_scope_excluded = true;
   return out;
 }
 
-// ONE canonical upfront-fee list. The composer also ships compatibility
-// aliases of the same charges (setupFee = the matching firstVisitFees
-// entry; the rodent bait setup and initial-roach fees can recur inside
-// oneTimeBreakdown) — the customer page renders the fee cards from
-// firstVisitFees and EXCLUDES those services from the breakdown card, so
-// the tool reports the same partition and never the same dollar twice.
-function upfrontFees(bundle) {
-  const fees = list(bundle.firstVisitFees).map(feeEntry);
-  const rodent = bundle.rodentBaitSetupFee && typeof bundle.rodentBaitSetupFee === 'object' ? feeEntry(bundle.rodentBaitSetupFee) : null;
-  if (rodent && !fees.some((f) => f.service === rodent.service)) fees.push(rodent);
-  return fees;
-}
-
-function breakdownEntry(b, excludedServices) {
-  if (!b || typeof b !== 'object') return null;
-  const excluded = new Set(excludedServices);
-  const items = list(b.items)
-    .filter((i) => !excluded.has(i.service))
-    .map((i) => ({
-      service: i.service || null,
-      label: i.label || null,
-      amount: money(i.amount),
-      detail: i.detail || null,
-      ...(i.quoteRequired === true ? { quote_required: true } : {}),
-      // The composer's row kind — 'included' (a service-specific credit that
-      // zeroes this line; OneTimeBreakdownCard renders "Included", green,
-      // instead of $0.00) or 'discount' (renders the negative amount) — the
-      // page's isQuoteRequired/isDiscount/isIncluded checks read this
-      // alongside (or in place of) the numeric amount and the quote_required
-      // flag above (EstimateViewPage.jsx ~2014-2053), so dropping it here
-      // would report a credited row as a literal $0 charge.
-      ...(i.kind ? { kind: i.kind } : {}),
-    }));
-  // The page's rule (OneTimeBreakdownCard): the composer's total stands
-  // only when nothing was excluded; with exclusions the total is the sum of
-  // the remaining items, so a fee reported in upfront_fees never rides in
-  // this subtotal too.
-  const total = excluded.size === 0 && Number.isFinite(Number(b.total))
-    ? money(b.total)
-    : money(items.reduce((sum, i) => sum + (Number(i.amount) || 0), 0));
-  return { items, excluded_upfront_fee_services: [...excluded], total, quote_required: b.quoteRequired === true };
-}
-
-// ── Authored proposal (the billed quote when one exists) ─────────────
-// The public page and the PDF generator both price an enabled, itemized
-// proposal from normalizeProposal + computeProposalTotals in the live billing
-// lane (resolveProposalBillingContext); the engine rows such an estimate
-// still carries are explicitly not the billed price (estimate-public
-// attachCommercialInteriorSelector). Projected field-by-field like the public
-// view — the stored block is admin-authored. Returns null when the stored
-// proposal is not itemized (normalizeProposal falls back to the synthesized
-// view, enabled:false) — the page then prices from the bundle, and so does
-// this tool.
-async function authoredProposalPricing(row, data) {
-  if (data?.proposal?.enabled !== true) return null;
-  const { normalizeProposal, computeProposalTotals } = lazy.proposal();
-  const billing = await lazy.proposalBilling().resolveProposalBillingContext(row);
-  const proposal = normalizeProposal(row, {
-    recurringMode: billing?.billsPerApplication === true ? 'per_application' : 'legacy',
-    livePricing: billing?.livePricing || null,
-  });
-  if (proposal.enabled !== true) return null;
-  const totals = computeProposalTotals(proposal);
-  // The public resolver always marks an enabled/itemized proposal
-  // quote-required (reason commercial_proposal) — a formal commercial
-  // proposal is finalized by the account manager, never self-serve accepted
-  // (estimate-public.js resolveEstimateQuoteRequirement, commercialProposal
-  // check). This early-return branch bypasses buildPricingBundle entirely,
-  // so without reading the resolver directly here shapeEstimate's
-  // requote_required/requote_reason would read null instead of agreeing
-  // with the customer page (pre-push audit / Codex r2 P2). Same call
-  // pattern as the legacy SSR page (estimate-public.js:4979): no bundle,
-  // just the stored estData.
-  const quoteState = lazy.publicRoute().resolveEstimateQuoteRequirement(null, data);
-  return {
-    pricing_authority: 'authored_proposal',
-    quote_required: quoteState.quoteRequired === true,
-    quote_required_reason: quoteState.reason || null,
-    bills_per_application: billing?.billsPerApplication === true,
-    proposal: {
-      title: proposal.title,
-      prepared_for: proposal.preparedFor,
-      property_address: proposal.propertyAddress,
-      tax_rate: totals.taxRate,
-      tax_label: proposal.taxLabel,
-      terms: proposal.terms,
-      buildings: list(proposal.buildings).map((b) => ({
-        name: b.name,
-        note: b.note ?? null,
-        line_items: list(b.lineItems).map((i) => ({
-          description: i.description, quantity: i.quantity, ...(i.unit ? { unit: i.unit } : {}), unit_price: roundDecimal(i.unitPrice), amount: money(i.amount),
-          frequency: i.frequency, frequency_label: i.frequencyLabel || null, visits_per_year: i.visitsPerYear > 0 ? i.visitsPerYear : null, taxable: i.taxable === true,
-        })),
-      })),
-      programs: proposal.programs ? proposal.programs.map((p) => ({
-        service: p.service, label: p.label, frequency_per_year: p.frequencyPerYear, price_per_application: money(p.pricePerApplication), annual: money(p.annual),
-        taxable: p.taxable === true, note: p.note ?? null, inclusions: p.inclusions ?? null, exclusions: p.exclusions ?? null,
-        buildings: list(p.buildings).map((b) => ({ name: b.name, note: b.note ?? null })),
-      })) : null,
-      corrective_work: proposal.correctiveWork ? proposal.correctiveWork.map((w) => ({ label: w.label, amount: money(w.amount), taxable: w.taxable === true, includes: w.includes ?? null })) : null,
-      commercial_terms: proposal.commercialTerms ? {
-        payment_terms: proposal.commercialTerms.paymentTerms ?? null, initial_term_months: proposal.commercialTerms.initialTermMonths ?? null, renewal: proposal.commercialTerms.renewal ?? null,
-        price_adjustment: proposal.commercialTerms.priceAdjustment ?? null, cancellation: proposal.commercialTerms.cancellation ?? null, access_requirements: proposal.commercialTerms.accessRequirements ?? null,
-      } : null,
-    },
-    totals: {
-      annual_recurring: money(totals.annualRecurring), monthly_equivalent: money(totals.monthlyEquivalent), one_time: money(totals.oneTime),
-      recurring_tax: money(totals.recurringTax), one_time_tax: money(totals.oneTimeTax), total_tax: money(totals.totalTax), first_year_total: money(totals.firstYearTotal),
-    },
-    source: 'authored_proposal',
-  };
-}
-
-// Resolves the bundle's own default sellable cadence for totals purposes —
-// through the route's own defaultFrequencyFromList, so this never names a
-// cadence acceptance itself would price differently.
-//
-// Two independent concerns, both keyed off that SAME candidate cadence:
-//
-//   range   — a narrow LOW-confidence candidate has no exact price on the
-//             customer page EITHER WAY (PriceCard's headline always renders
-//             the range string, never a stored midpoint): applies whenever
-//             this cadence is the one that priced, valid snapshot or
-//             rebuilt alike — a snapshot's own frozen columns can themselves
-//             be that same range's midpoint (pre-push audit P1).
-//   override — a NUMERIC replacement for the frozen monthly_total /
-//             annual_total columns, needed only when those columns are
-//             stale: the route stamps snapshotHit ONLY on its fast path
-//             (estimate-public.js buildPricingBundleInner), so its absence
-//             means the columns were rejected (retired/below-floor lawn
-//             cadence, stale termite pricing, missing setup fee) and this
-//             bundle was rebuilt under today's rules — same signal
-//             resolveLivePricing in estimate-proposal-billing.js reads. A
-//             valid snapshot's columns already agree with this candidate,
-//             so no override is needed there.
-//
-// A THIRD outcome — noSellableCadence — fires when every frequency on offer
-// is quoteRequired: the customer page shows "Quote required" with no
-// fallback figure at all, so totalsFor must not let the stored
-// monthly_total/annual_total columns stand in for a cadence the page never
-// prices (pre-push audit / Codex r2 P1). Distinguished from "no frequencies
-// at all" (a one-time-only estimate, which is not a quote-required signal).
-//
-// Both range/override are null for a price-locked (accepted/declined)
-// estimate: its totals describe what was actually committed — same
-// predicate resolveLivePricing gates on before calling buildPricingBundle at
-// all (estimate-proposal-billing.js estimateIsPriceLocked; buildPricingBundle
-// itself carries no such guard) — and a low-confidence range is resolved to
-// an exact, site-confirmed price before acceptance can go through at all.
-function defaultCadenceForTotals(bundle, snapshotHit, priceLocked) {
-  if (priceLocked) return { range: null, override: null, noSellableCadence: false };
-  const frequencies = list(bundle.frequencies);
-  const sellable = frequencies.filter((f) => f && f.quoteRequired !== true);
-  if (frequencies.length > 0 && sellable.length === 0) {
-    return { range: null, override: null, noSellableCadence: true };
-  }
-  const candidate = sellable.length ? lazy.publicRoute().defaultFrequencyFromList(sellable) : null;
-  if (!candidate) return { range: null, override: null, noSellableCadence: false };
-  // The candidate's own stamped range first, else the aggregate combined-card
-  // fallback (see combinedLowConfidenceRange/bandForFrequency) — the same
-  // fallback frequencyEntry applies to plan_frequencies, so totals and the
-  // per-cadence list never disagree about whether this cadence is ranged.
-  const range = lowConfidenceRange(candidate) || bandForFrequency(candidate, combinedLowConfidenceRange(bundle.combinedRecurring));
-  if (range) return { range, override: null, noSellableCadence: false };
-  if (snapshotHit) return { range: null, override: null, noSellableCadence: false };
-  return { range: null, override: { key: candidate.key || null, monthly: money(candidate.monthly), annual: money(candidate.annual) }, noSellableCadence: false };
-}
-
-// A price-locked (accepted/declined) row whose bundle rebuilt WITHOUT a
-// valid snapshot has no reliable item-level pricing left to show:
-// totalsFor's price-lock guard already keeps totals on the frozen columns,
-// but buildPricingBundle itself carries no price-lock guard, so its cadence
-// ladder, combos, and fees can still be today's re-derived amounts — a
-// different price than what was actually offered/accepted, with no way to
-// reconstruct the historical item breakdown from here (pre-push audit P1).
-// Withhold the item-level structure rather than present it as the committed
-// offer.
-function stalePriceLockedOfferedPricing(bundle, priceLocked, snapshotHit) {
-  return {
-    default_service_mode: bundle.defaultServiceMode || null,
-    price_locked: priceLocked,
-    waveguard_tier: bundle.waveGuardTier || null,
-    snapshot_hit: snapshotHit,
-    item_pricing_unavailable: 'this estimate is price-locked (accepted/declined) but its pricing bundle rebuilt without a valid snapshot — item-level prices are withheld rather than shown as the committed offer; totals above still reflect the frozen columns',
-    plan_frequencies: null,
-    services: null,
-    combos: null,
-    one_time_total: null,
-    upfront_fees: null,
-    setup_fee_service: bundle.setupFee?.service || null,
-    one_time_breakdown: null,
-    manual_discount: null,
-    quote_required: false,
-    quote_required_reason: null,
-    quote_required_items: [],
-    source: bundle.source || null,
-  };
-}
-
-function builtOfferedPricing(bundle, priceLocked, snapshotHit, defaultCadenceRange, rebuiltDefaultFrequency, noSellableCadence) {
-  const fees = upfrontFees(bundle);
-  const offered = {
-    default_service_mode: bundle.defaultServiceMode || null,
-    // A price-locked (accepted/declined) row's totals — monthly, annual,
-    // AND one-time — describe what was actually committed, never today's
-    // re-derived pricing, even when the bundle rebuilt without a
-    // snapshotHit (pre-push audit P1: buildPricingBundle carries no
-    // price-lock guard of its own).
-    price_locked: priceLocked,
-    waveguard_tier: bundle.waveGuardTier || null,
-    snapshot_hit: snapshotHit,
-    ...(defaultCadenceRange ? { default_cadence_low_confidence_range: defaultCadenceRange } : {}),
-    ...(rebuiltDefaultFrequency ? { rebuilt_default_frequency: rebuiltDefaultFrequency } : {}),
-    // Every cadence on offer is quoteRequired — the customer page has no
-    // fallback figure to show either, so totals must not fall back to the
-    // stored monthly_total/annual_total columns (pre-push audit / Codex r2 P1).
-    ...(noSellableCadence ? { no_sellable_cadence: true } : {}),
-    // Estimate-level annual-prepay fallback the customer page reads when
-    // neither the selected combo nor the combined frequency carries its own
-    // boolean (EstimateViewPage.jsx annualPrepayEligibleEffective, ~7038-7047).
-    ...(bundle.annualPrepayEligible != null ? { annual_prepay_eligible: bundle.annualPrepayEligible === true } : {}),
-    // RAW — every frequency/section/combo below carries its real amounts,
-    // whether or not the customer page would actually show them for that
-    // cadence. withholdRangedPricing (below) is the single place that
-    // decides and applies what gets nulled, after the whole shape exists.
-    plan_frequencies: list(bundle.frequencies).map(frequencyEntry),
-    services: list(bundle.services).map((s) => ({
-      key: s.key || null,
-      label: s.label || null,
-      default_frequency_key: s.defaultFrequencyKey || null,
-      frequencies: list(s.frequencies).map(frequencyEntry),
-      ...sectionSelectors(s),
-    })),
-    combos: list(bundle.serviceCadenceCombos).map(comboEntry),
-    // The one-time total the customer page shows (the composer's
-    // corrected figure for legacy rows whose stored total still carries a
-    // setup fee that no longer applies, or lacks one now owed).
-    one_time_total: money(bundle.anchorOneTimePrice),
-    upfront_fees: fees,
-    setup_fee_service: bundle.setupFee?.service || null,
-    one_time_breakdown: breakdownEntry(bundle.oneTimeBreakdown, fees.map((f) => f.service)),
-    manual_discount: bundle.manualDiscount || null,
-    // The composer's own quote-required verdict (resolveEstimateQuoteRequirement:
-    // lapsed-member reprice impossible, unverified setup waiver, retired
-    // lawn pricing, commercial review, quote-required items…) — the state
-    // the public page fails closed on instead of self-serve accepting.
-    quote_required: bundle.quoteRequired === true,
-    quote_required_reason: bundle.quoteRequiredReason || null,
-    quote_required_items: list(bundle.quoteRequiredItems),
-    source: bundle.source || null,
-  };
-  return withholdRangedPricing(offered, bundle);
-}
-
-async function offeredPricing(row, data) {
+// The page's own composer, run for this row. adminDraftPreview mirrors what
+// a staff "Customer View" of an unpublished draft renders (the page serves
+// drafts to verified staff only, and this tool is staff-only behind the
+// intelligence-bar gate) — for every other row it is false, so the
+// projection is byte-for-byte the customer's. isPdfRenderPass stays false:
+// the document render is a different surface with a signed display pin.
+async function pageProjection(row, linkState) {
   try {
-    const proposal = await authoredProposalPricing(row, data);
-    if (proposal) return { offered_pricing: proposal };
+    const payload = await lazy.publicRoute().composeEstimateDataPayload(row, {
+      adminDraftPreview: linkState === 'staff_preview_only',
+      isPdfRenderPass: false,
+      docRenderPin: null,
+    });
+    if (!payload || typeof payload !== 'object') {
+      return { page: null, page_unavailable: 'the estimate page composed no payload for this row' };
+    }
+    return { page: stripPayload(payload) };
   } catch (err) {
-    // An enabled proposal whose projection failed must not fall through to
-    // engine cadences — they are not the billed quote.
-    return { offered_pricing: null, offered_pricing_unavailable: `authored proposal failed: ${err.message}` };
+    // The page itself would 500 for this row — say so rather than falling
+    // back to the stored columns. This tool exists because those columns are
+    // not the quote.
+    return { page: null, page_unavailable: `the estimate page could not be composed: ${err.message}` };
   }
-  let bundle;
-  try {
-    bundle = await lazy.publicRoute().buildPricingBundle(row);
-  } catch (err) {
-    return { offered_pricing: null, offered_pricing_unavailable: `pricing bundle failed: ${err.message}` };
-  }
-  if (!bundle || typeof bundle !== 'object') return { offered_pricing: null, offered_pricing_unavailable: 'no pricing bundle for this estimate' };
-  const snapshotHit = bundle.snapshotHit === true;
-  const priceLocked = lazy.proposalBilling().estimateIsPriceLocked(row);
-  if (priceLocked && !snapshotHit) return { offered_pricing: stalePriceLockedOfferedPricing(bundle, priceLocked, snapshotHit) };
-  const { range: defaultCadenceRange, override: rebuiltDefaultFrequency, noSellableCadence } = defaultCadenceForTotals(bundle, snapshotHit, priceLocked);
-  return { offered_pricing: builtOfferedPricing(bundle, priceLocked, snapshotHit, defaultCadenceRange, rebuiltDefaultFrequency, noSellableCadence) };
 }
 
 // ── Links ────────────────────────────────────────────────────────────
@@ -719,112 +169,32 @@ async function estimateLinks(row, data) {
 }
 
 // Same order as the public renderers: reconcile the frozen membership
-// snapshot FIRST (mutates the row's pricing data in memory for a lapsed
-// member), then read totals, links, and the bundle from the reconciled row.
-// The reconciler never throws by contract — it catches the live lookup /
-// reprice failure internally and REPORTS it as { ok: false, error }; a
-// rejection is handled too. Either way the row is still the unverified
-// snapshot, so the caller withholds pricing.
+// snapshot FIRST (it mutates the row's pricing data in memory for a lapsed
+// member), then compose the page from the reconciled row.
+//
+// STRICT here and nowhere else. The reconciler's default live probe reads a
+// failed customers lookup as "no plan" — right for the page, which then
+// renders nonmember pricing and still sells. A staff answer has the opposite
+// requirement: reporting a member discount that may no longer exist is worse
+// than reporting nothing, so strictMembership turns that lookup failure into
+// { ok: false } and the whole projection is withheld. (Round 5 caught the
+// inverse of this shipped as a regression: strictness applied to the PUBLIC
+// route, whose callers ignore the result.)
 //
 // Skipped ENTIRELY for a price-locked row (estimateIsPriceLocked: status
-// accepted/declined, or price_locked_at stamped) — the real reconciler
-// (estimate-public.js reconcileFrozenMembershipSnapshot) only refuses to
-// touch 'accepted' or an explicit price_locked_at stamp, NOT 'declined', so
-// a declined-but-unstamped row's monthly_total/annual_total could still be
-// mutated in memory by a later membership lapse; totalsFor then treats a
-// price-locked row's stored columns as the trusted committed figure, so
-// this call must not let them be silently repriced first (pre-push audit
-// P1).
+// accepted/declined, or price_locked_at stamped) — the real reconciler only
+// refuses to touch 'accepted' or an explicit price_locked_at stamp, NOT
+// 'declined', so a declined-but-unstamped row's committed columns could
+// still be repriced in memory by a later membership lapse.
 async function reconcileMembership(row) {
   if (lazy.proposalBilling().estimateIsPriceLocked(row)) return null;
   try {
-    const result = await lazy.publicRoute().reconcileFrozenMembershipSnapshot(row);
+    const result = await lazy.publicRoute().reconcileFrozenMembershipSnapshot(row, { strictMembership: true });
     if (result && result.ok === false) return `membership reconciliation failed: ${result.error || 'unknown error'}`;
     return null;
   } catch (err) {
     return `membership reconciliation failed: ${err.message}`;
   }
-}
-
-function resolveInvoiceMode(row, data) {
-  try {
-    return lazy.publicRoute().resolveEstimateInvoiceMode(row, data) === true;
-  } catch {
-    return row.bill_by_invoice === true;
-  }
-}
-
-// Authored proposal: its computed totals ARE the quote. A price-locked
-// (accepted/declined) row always keeps ALL THREE stored columns — monthly,
-// annual, AND one-time — because they describe what was actually committed;
-// buildPricingBundle re-derives today's pricing regardless of lock state, so
-// its anchorOneTimePrice is no safer to trust here than its cadence ladder
-// (pre-push audit P1). Otherwise, when the bundle's own default sellable
-// cadence is a narrow LOW-confidence line, monthly/annual are withheld and
-// the range carried instead — PriceCard's headline shows the range, never
-// an exact midpoint, and a VALID snapshot's stored columns can themselves
-// be that same range's midpoint, so this applies regardless of snapshot_hit
-// (pre-push audit P1). Otherwise monthly/annual are the stored totals the
-// send path wrote (after reconciliation), UNLESS the bundle was rejected and
-// rebuilt (offered.snapshot_hit === false — retired/below-floor lawn
-// cadence, stale termite pricing, missing setup fee:
-// estimate-proposal-billing.js:148-169), in which case the frozen columns no
-// longer describe what this bundle offers and the rebuilt default sellable
-// cadence's own monthly/annual are used instead. One-time (unlocked) is the
-// composer's corrected figure when the bundle built (it is what the page
-// shows), the stored column otherwise. Withheld entirely when
-// membership could not be verified, OR when offered_pricing itself is
-// unavailable (an enabled authored proposal's projection failed, or the
-// pricing bundle failed / doesn't exist — pre-push audit P1): this tool
-// exists because the stored columns are not trusted as the quote on their
-// own, so a failed pricing read must not fall back to exposing them as if
-// they were.
-function totalsFor(row, pricing, reconciliation_error) {
-  if (reconciliation_error) return { monthly: null, annual: null, one_time: null, withheld: true };
-  const offered = pricing.offered_pricing;
-  if (offered?.pricing_authority === 'authored_proposal') {
-    const t = offered.totals;
-    return { monthly: t.monthly_equivalent, annual: t.annual_recurring, one_time: t.one_time, total_tax: t.total_tax, first_year_total: t.first_year_total, source: 'authored_proposal' };
-  }
-  if (!offered) return { monthly: null, annual: null, one_time: null, withheld: true };
-  if (offered.price_locked === true) {
-    return { monthly: money(row.monthly_total), annual: money(row.annual_total), one_time: money(row.onetime_total) };
-  }
-  // The composer's bundle-level quote-required verdict (manager approval, a
-  // wide low-confidence commercial range, commercial risk-type review, a
-  // custom-quote one-time item…) outranks every cadence-selection question
-  // below: the React quote_required terminal branch renders no pricing at
-  // all, one-time included, so the stored monthly_total/annual_total/
-  // onetime_total columns must not stand in for any of it (pre-push audit /
-  // Codex round 4 P1 — this used to fall through to the stored columns
-  // whenever the composer's reason wasn't stamped on any single cadence).
-  if (offered.quote_required === true) {
-    return { monthly: null, annual: null, one_time: null, source: 'quote_required' };
-  }
-  const oneTime = offered.one_time_total ?? money(row.onetime_total);
-  // A narrow LOW-confidence default cadence withholds the exact figure and
-  // carries the range regardless of snapshot_hit — a valid snapshot's own
-  // frozen columns can themselves be that same range's midpoint, which
-  // PriceCard never shows either (pre-push audit P1).
-  if (offered.default_cadence_low_confidence_range) {
-    return {
-      monthly: null, annual: null, one_time: oneTime,
-      low_confidence_range: offered.default_cadence_low_confidence_range,
-      source: offered.snapshot_hit ? 'default_cadence_range' : 'rebuilt_bundle_default_range',
-    };
-  }
-  if (offered.rebuilt_default_frequency) {
-    const d = offered.rebuilt_default_frequency;
-    return { monthly: d.monthly, annual: d.annual, one_time: oneTime, source: 'rebuilt_bundle_default' };
-  }
-  // Every cadence on offer is quoteRequired: the customer page shows
-  // "Quote required" with no fallback figure, so the stored
-  // monthly_total/annual_total columns (which can describe a stale or
-  // different cadence) must not stand in for it (pre-push audit / Codex r2 P1).
-  if (offered.no_sellable_cadence) {
-    return { monthly: null, annual: null, one_time: oneTime, source: 'no_sellable_cadence' };
-  }
-  return { monthly: money(row.monthly_total), annual: money(row.annual_total), one_time: oneTime };
 }
 
 // Deposits: amount is the FACE value requested; card_surcharge is the extra
@@ -847,14 +217,29 @@ function depositEntry(d) {
 }
 
 async function shapeEstimate(row, deposits = []) {
-  const reconciliation_error = await reconcileMembership(row);
   const data = parseStoredJson(row.estimate_data);
-  // Pricing is WITHHELD when the live membership state could not be verified:
-  // the row is then the stale frozen-member snapshot, and an answer built
-  // from it would quote a discount the page may no longer give.
-  const pricing = reconciliation_error
-    ? { offered_pricing: null, offered_pricing_unavailable: `withheld: ${reconciliation_error}` }
-    : await offeredPricing(row, data);
+  const reconciliation_error = await reconcileMembership(row);
+  const links = await estimateLinks(row, data);
+  // Withheld outright when the live membership state could not be verified:
+  // the row is then the stale frozen-member snapshot, and a page composed
+  // from it would quote a discount that may no longer be given.
+  //
+  // A call-side BLOCK withholds it too, and for a different reason: that
+  // block means the estimate's own provenance is in doubt (wrong-identity
+  // draft, rejected or in-flight call), so its amounts may belong to another
+  // customer entirely. The page 404s it for exactly that reason; a staff
+  // answer must not launder it back out.
+  const projection = reconciliation_error
+    ? { page: null, page_unavailable: `withheld: ${reconciliation_error}` }
+    : links.link_state === 'blocked'
+      ? { page: null, page_unavailable: 'withheld: a call-side block is on this estimate — its provenance is unverified, so the page will not serve it to anyone' }
+      : await pageProjection(row, links.link_state);
+  // The committed deal, for a row whose price is locked (accepted, declined,
+  // or explicitly stamped). These are the columns the send/accept path wrote
+  // and the composer does not recompute them, so they are the answer to
+  // "what did he accept" — and ONLY that. An unlocked row has no committed
+  // figure: its price is whatever the page renders today, in `page`.
+  const priceLocked = lazy.proposalBilling().estimateIsPriceLocked(row);
   return {
     id: row.id,
     customer_id: row.customer_id,
@@ -868,21 +253,23 @@ async function shapeEstimate(row, deposits = []) {
     service_interest: row.service_interest,
     tier: row.waveguard_tier,
     pricing_version: row.pricing_version || null,
-    // Effective invoice mode, the public acceptance/payment surfaces' own
-    // resolver (a rodent-guarantee-only renewal bills by invoice even when
-    // the column says false).
-    bill_by_invoice: resolveInvoiceMode(row, data),
-    // Derived from the bundle's verdict, never from a stored flag: null when
-    // the bundle could not be built (unknown, not "no").
-    requote_required: pricing.offered_pricing ? (pricing.offered_pricing.quote_required ?? null) : null,
-    requote_reason: pricing.offered_pricing?.quote_required_reason ?? null,
-    totals: totalsFor(row, pricing, reconciliation_error),
-    ...pricing,
+    price_locked: !!priceLocked,
+    ...(priceLocked && !reconciliation_error
+      ? {
+        committed_totals: {
+          monthly: money(row.monthly_total),
+          annual: money(row.annual_total),
+          one_time: money(row.onetime_total),
+          locked_at: row.price_locked_at || row.accepted_at || row.declined_at || null,
+        },
+      }
+      : {}),
+    ...projection,
     ...(reconciliation_error ? { reconciliation_error } : {}),
     accepted: row.accepted_at ? { at: row.accepted_at, service_mode: row.accepted_service_mode || null, frequency: row.accepted_frequency_key || null } : null,
     deposits: deposits.map(depositEntry),
     customer_notes: row.notes || null,
-    ...(await estimateLinks(row, data)),
+    ...links,
     sent_at: row.sent_at,
     viewed_at: row.viewed_at,
     view_count: row.view_count || 0,
@@ -896,9 +283,9 @@ async function shapeEstimate(row, deposits = []) {
 
 async function getEstimateDetail({ estimate_id, customer_id, limit } = {}) {
   if (!estimate_id && !customer_id) return { error: 'Provide estimate_id or customer_id' };
-  // The whole row: the public route's reconciler and bundle composer read
-  // the estimate the way the public handlers load it (select *), so a
-  // column subset here could starve them of a field they consult.
+  // The whole row: the public route's reconciler and page composer read the
+  // estimate the way the public handlers load it (select *), so a column
+  // subset here could starve them of a field they consult.
   let query = db('estimates').select('*').orderBy('created_at', 'desc');
   if (estimate_id) {
     query = query.where('id', estimate_id).limit(1);
@@ -930,8 +317,8 @@ async function getEstimateDetail({ estimate_id, customer_id, limit } = {}) {
 
 const GET_ESTIMATE_DETAIL_TOOL = {
   name: 'get_estimate_detail',
-  description: `Read what an estimate offered, exactly as the customer's estimate page prices it: the plan cadences with their monthly / annual prices and, on cadences billed per application, the per-application price the page shows (a monthly-billed plan reports billing_unit monthly and no per-application figure; a LOW-confidence commercial price reports its range), each service's cadence ladder (pest quarterly / bi-monthly / monthly, lawn standard / enhanced / premium) with any selectable additions the page offers beside it (termite bond terms, station rental, commercial interior service), the priced cadence combinations on a mixed estimate with their allocated per-service amounts and any manual discount, one canonical upfront-fee list plus the remaining one-time breakdown (never the same fee twice), the page's one-time total, totals, deposits (face amount + card surcharge; a pending or failed intent collected nothing), status, view/sent/accepted timestamps, and which link (customer or staff preview) can actually be opened. A formal commercial proposal (pricing_authority authored_proposal) is reported from its authored line items, programs, corrective work and computed totals instead — that is the billed quote. A lapsed membership is reconciled first, so the amounts match the live page (requote_required + requote_reason carry the page's own quote-required verdict, e.g. a lapsed member whose price could not be repriced); when the live membership state cannot be verified, pricing and totals are withheld (offered_pricing_unavailable says so) rather than quoted from the stale snapshot. Pass estimate_id for one estimate or customer_id for that customer's latest estimates (newest first).
-Use for: "what did we quote him for quarterly pest", "what is the per-application price on her estimate", "what would monthly have cost", "what did the 9/5 estimate say" — anything about the amounts inside a sent estimate. Prefer this over guessing from monthly_rate or from the SMS thread. It does not itemize the internal engine rows behind those prices; offered_pricing_unavailable says when the pricing bundle could not be built.`,
+  description: `Read what an estimate offered, as the customer's own estimate page prices it. Returns that page's projection verbatim under \`page\`: \`page.pricing\` carries the plan cadences with their monthly / annual prices and per-application figures, each service's cadence ladder with its selectable additions (termite bond terms, station rental, commercial interior service), the priced cadence combinations on a mixed estimate, the one-time breakdown and upfront fees; \`page.cta\` carries the page's quote-required verdict and reason, whether it can still be self-accepted, and whether it bills monthly; \`page.estimate\` carries status, membership, effective invoice mode and acceptance; a formal commercial proposal arrives under \`page.proposal\` (that is the billed quote, not the engine rows). The page's own withholding applies before you see it — a low-confidence commercial price arrives as its range, a quote-required bundle arrives with no amounts — so quote whatever \`page\` says and nothing more. Also returns deposits (face amount + card surcharge; a pending or failed intent collected nothing), status and timestamps, and which link (customer or staff preview) can actually be opened. A lapsed membership is reconciled first so the amounts match the live page; when the live membership state cannot be verified, \`page\` is null and page_unavailable says so — never quote from a withheld projection. An accepted or declined estimate also reports committed_totals: what was actually committed, which is not the same as what the page would price today.
+Use for: "what did we quote him for quarterly pest", "what is the per-application price on her estimate", "what would monthly have cost", "what did the 9/5 estimate say" — anything about the amounts inside a sent estimate. Prefer this over guessing from monthly_rate or from the SMS thread. Pass estimate_id for one estimate or customer_id for that customer's latest estimates (newest first).`,
   input_schema: {
     type: 'object',
     properties: {

@@ -8092,7 +8092,18 @@ function applyMembershipRepriceToEstimate(estimate, estData, reprice) {
 // Resolves undefined when there was nothing to reconcile, { ok: true } after a
 // reconcile, { ok: false, error } when the live lookup / reprice failed (the
 // row is then still the UNRECONCILED snapshot). Never rejects.
-async function reconcileFrozenMembershipSnapshot(estimate) {
+//
+// strictMembership is OPT-IN and off for every public renderer: the default
+// live probe reads a failed customers lookup as "no plan", which is right for
+// the page (it degrades to nonmember pricing, the conservative direction, and
+// the customer still sees a quote). A reader that must not report ANY price
+// from an unverified member snapshot — the intelligence bar's
+// get_estimate_detail — passes strictMembership so the lookup failure throws
+// into the catch below and comes back as { ok: false }, and withholds.
+// Making this strict for the public route instead was the #4345 r5
+// REGRESSION: the public callers ignore the result, so strictness there
+// bought nothing and only risked repricing paths it could not report to.
+async function reconcileFrozenMembershipSnapshot(estimate, { strictMembership = false } = {}) {
   try {
     if (!estimate || !estimate.customer_id) return;
     // Never reconcile an accepted or price-locked estimate: that deal was
@@ -8149,7 +8160,7 @@ async function reconcileFrozenMembershipSnapshot(estimate) {
     const frozenUnwaivedSetup = !frozenSetupWaiver && !!estimate.customer_id
       && require('../services/estimate-converter').frozenRodentBaitSetupAmount(estData) > 0;
     if (!frozenSnapshot && !frozenRecurring && !frozenSetupWaiver && !frozenUnwaivedSetup) return;
-    const activeMember = await isActivePlanCustomer(db, estimate.customer_id);
+    const activeMember = await isActivePlanCustomer(db, estimate.customer_id, { strict: strictMembership });
     // The rodent setup waiver is re-validated INDEPENDENTLY of plan
     // membership (codex #3591 r39 P1): it was granted by ANOTHER qualifying
     // family (e.g. pest) and rodent bait never self-waives, so a still-active

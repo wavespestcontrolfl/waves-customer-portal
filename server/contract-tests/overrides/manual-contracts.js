@@ -47,31 +47,30 @@ module.exports = {
   // estimate-tools.js (which owns the tool's registry sourcePath) — the
   // static source scan on estimate-tools.js finds none of these
   // references, so without this manual contract the DB-columns gate
-  // silently checks nothing for this tool (Codex round 2, #4345). Round 4
-  // widened the walk past estimate-detail.js's OWN column reads to every
-  // small helper it calls with the row (reconcileFrozenMembershipSnapshot,
-  // resolveEstimateInvoiceMode, isEstimateCustomerViewable,
-  // adminDraftPreviewEligible, estimateIsPriceLocked,
-  // resolveProposalBillingContext → estimateBillsPerApplication →
-  // matchUnlinkedCustomer → matchAcceptCustomerByPhone/
-  // pickAcceptCustomerMatch, normalizeProposal) — three more columns
-  // (price_locked_at, customer_phone, customer_email) turned up nowhere
-  // else in this file's own source text either. buildPricingBundle itself
-  // is deliberately NOT walked this way: it is the public route's whole
-  // pricing engine, exercised by the public route's own tests/contract —
-  // re-deriving its entire column surface here would just be a second,
+  // silently checks nothing for this tool (Codex round 2, #4345).
+  // Post-re-cut the tool composes the customer page's own payload
+  // (estimate-public composeEstimateDataPayload) instead of re-projecting
+  // its pricing, so the walk is short: this file's own column reads, plus
+  // the small helpers it still calls with the row
+  // (reconcileFrozenMembershipSnapshot, isEstimateCustomerViewable,
+  // adminDraftPreviewEligible, estimateIsPriceLocked → price_locked_at).
+  // composeEstimateDataPayload itself is deliberately NOT walked, for the
+  // same reason buildPricingBundle never was: it is the public route's
+  // whole rendering pipeline, exercised by that route's own tests and
+  // contract — re-deriving its column surface here would just be a second,
   // hand-maintained copy of a schema the route already owns.
   get_estimate_detail: {
     tables: ['estimates', 'estimate_deposits'],
     columns: {
       // select('*') plus every estimates.<column> read off the row: by
       // getEstimateDetail/shapeEstimate directly (where/orderBy/whereNull
-      // clauses, every field placed on the response), and by the small
-      // helpers above (price_locked_at — estimateIsPriceLocked;
-      // customer_phone/customer_email — the unlinked-customer match chain
-      // resolveProposalBillingContext can reach for an estimate with no
-      // customer_id). Enumerated so a dropped or renamed column is still
-      // caught, not just table existence.
+      // clauses, every field placed on the response) and by the small
+      // helpers above (price_locked_at — estimateIsPriceLocked).
+      // customer_phone/customer_email stay listed: the composer resolves
+      // contact fields off the same row, and an estimate with no
+      // customer_id has nowhere else to read them from. Enumerated so a
+      // dropped or renamed column is still caught, not just table
+      // existence.
       estimates: [
         'id', 'customer_id', 'customer_name', 'address', 'status', 'disposition', 'disposition_note',
         'decline_reason', 'category', 'service_interest', 'waveguard_tier', 'pricing_version', 'bill_by_invoice',
