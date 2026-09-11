@@ -749,6 +749,9 @@ router.post('/payment-notices/:id/apply', requireAdmin, async (req, res, next) =
         reference: zelleRef,
         note: notice.memo ? `Zelle memo: ${notice.memo}` : '',
         recordedBy,
+        // The operator tapped Apply: the invoice-issued closeout writes them
+        // up as the actor of the visit transition (GitHub r3 P2 #4127).
+        recordedByTechnicianId: req.technicianId || null,
         sendReceipt: true,
         via: 'both',
         // Atomic with the paid flip: the exact-cent check above is advisory
@@ -1150,8 +1153,8 @@ router.post('/batch', requireAdmin, async (req, res, next) => {
         if (sendImmediately && existing.status === 'draft') {
           try {
             entry.sent = existing.payer_id
-              ? await InvoiceService.sendViaSMSAndEmail(existing.id, { operatorInitiated: true })
-              : await InvoiceService.sendViaSMS(existing.id, { operatorInitiated: true });
+              ? await InvoiceService.sendViaSMSAndEmail(existing.id, { operatorInitiated: true, actorTechnicianId: req.technicianId || null })
+              : await InvoiceService.sendViaSMS(existing.id, { operatorInitiated: true, actorTechnicianId: req.technicianId || null });
           } catch (sendErr) {
             logger.error(`[admin-invoices:batch] retry send failed for ${existing.id}: ${sendErr.message}`);
             entry.sent = { sent: false, error: sendErr.message };
@@ -1192,8 +1195,8 @@ router.post('/batch', requireAdmin, async (req, res, next) => {
             // payer AP inbox receives it and the invoice is finalized; self-pay
             // invoices keep the existing SMS-only immediate send.
             sendResult = invoice.payer_id
-              ? await InvoiceService.sendViaSMSAndEmail(invoice.id, { operatorInitiated: true })
-              : await InvoiceService.sendViaSMS(invoice.id, { operatorInitiated: true });
+              ? await InvoiceService.sendViaSMSAndEmail(invoice.id, { operatorInitiated: true, actorTechnicianId: req.technicianId || null })
+              : await InvoiceService.sendViaSMS(invoice.id, { operatorInitiated: true, actorTechnicianId: req.technicianId || null });
           } catch (sendErr) {
             logger.error(`[admin-invoices:batch] send failed for ${invoice.id}: ${sendErr.message}`);
             sendResult = { sent: false, error: sendErr.message };
@@ -1270,7 +1273,7 @@ router.post('/batch/send', requireAdmin, async (req, res, next) => {
 
     for (const invoiceId of invoiceIds) {
       try {
-        const result = await InvoiceService.sendViaSMSAndEmail(invoiceId, { operatorInitiated: true });
+        const result = await InvoiceService.sendViaSMSAndEmail(invoiceId, { operatorInitiated: true, actorTechnicianId: req.technicianId || null });
         if (result.ok) {
           sent.push({
             invoiceId,
@@ -1329,6 +1332,14 @@ router.post('/batch/send-receipts', requireAdmin, async (req, res, next) => {
       if (invoice.status !== 'paid') {
         skipped.push({ invoiceId, reason: `status=${invoice.status}` });
         continue;
+      }
+
+      // The same paid-closeout retry as the single resend below (GitHub r7
+      // P2 #4127): a payment-triggered closeout that committed but left its
+      // post-commit work pending is finished here too, ahead of both legs.
+      {
+        const { closeOutVisitForIssuedInvoice } = require('../services/invoice-issued-closeout');
+        await closeOutVisitForIssuedInvoice({ invoiceId, trigger: 'paid', actorTechnicianId: req.technicianId || null });
       }
 
       let emailOk = false;
@@ -1489,6 +1500,7 @@ router.post('/:id/send', requireAdmin, async (req, res, next) => {
       reviewDelayMinutes,
       emailRecipientOverride,
       operatorInitiated: true,
+      actorTechnicianId: req.technicianId || null,
     });
     if (!result.ok) {
       // Both channels failed. adminFetch toasts `body.error` — without a
@@ -1968,6 +1980,16 @@ router.post('/:id/send-receipt', requireAdmin, async (req, res, next) => {
       return res.status(400).json({ error: 'Invoice is not paid — receipt can only be sent for paid invoices' });
     }
 
+    // Invoice issued ⇒ visit completed (owner ruling 2026-09-07, dark behind
+    // GATE_INVOICE_ISSUED_CLOSES_VISIT): the operator's "resend receipt" is
+    // the reachable retry for a payment-triggered closeout that did not
+    // finish (pre-push P1). Runs once here, ahead of BOTH legs, so an
+    // email-only resend retries too; a completed visit refuses quietly.
+    {
+      const { closeOutVisitForIssuedInvoice } = require('../services/invoice-issued-closeout');
+      await closeOutVisitForIssuedInvoice({ invoiceId: id, trigger: 'paid', actorTechnicianId: req.technicianId || null });
+    }
+
     const { sendReceiptEmail } = require('../services/invoice-email');
 
     let emailResult = { ok: false, skipped: true };
@@ -2086,7 +2108,7 @@ router.post('/:id/record-payment', requireAdmin, async (req, res, next) => {
     // effects and the receipt all live in services/invoice-manual-payment.js
     // — the one manual-settlement path (shared with the Zelle notice
     // reconciler). Refusals arrive as statusCode-shaped errors.
-    const { invoice, receipt } = await recordManualPayment(id, { method, reference, note, recordedBy, sendReceipt, via });
+    const { invoice, receipt } = await recordManualPayment(id, { method, reference, note, recordedBy, sendReceipt, via, recordedByTechnicianId: req.technicianId || null });
     res.json({ ok: true, invoice, receipt });
   } catch (err) {
     // 400 / 404 refusals and the 409-shaped conflicts (combined-session

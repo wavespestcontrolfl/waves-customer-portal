@@ -332,6 +332,10 @@ router.get('/:token/available-slots', async (req, res) => {
     if (err.code === 'COMBINED_VISIT_UNAVAILABLE') {
       return res.status(409).json({ error: err.message, code: err.code });
     }
+    if (err.code === 'SLOT_UNAVAILABLE') {
+      const unavailable = require('../services/scheduling/arrival-route').capacityError();
+      return res.status(409).json({ error: unavailable.message, code: unavailable.code, retry: true });
+    }
     logger.error(`[estimate-slots-public] ${err.message}`, { stack: err.stack });
     return res.status(500).json({ error: 'unable to load availability', retry: true });
   }
@@ -454,6 +458,10 @@ router.post('/:token/find-slots', findSlotsLimiter, async (req, res) => {
   } catch (err) {
     if (err.code === 'COMBINED_VISIT_UNAVAILABLE') {
       return res.status(409).json({ error: err.message, code: err.code });
+    }
+    if (err.code === 'SLOT_UNAVAILABLE') {
+      const unavailable = require('../services/scheduling/arrival-route').capacityError();
+      return res.status(409).json({ error: unavailable.message, code: unavailable.code, retry: true });
     }
     logger.error(`[estimate-slots-public:find-slots] ${err.message}`, { stack: err.stack });
     return res.status(500).json({ error: 'unable to search availability', retry: true });
