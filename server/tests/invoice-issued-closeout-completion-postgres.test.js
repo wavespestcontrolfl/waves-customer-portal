@@ -176,6 +176,12 @@ describe('source contracts', () => {
     expect(completion).toMatch(/fromStatus = String\(lockedSvcRow\.status\);[\s\S]{0,1200}?const driftedField = ISSUED_CLOSEOUT_IDENTITY_FIELDS\.find\([\s\S]{0,300}?\{ code: 'issued_visit_identity_changed' \}\);/);
     expect(completion).toMatch(/if \(err && err\.code === 'issued_visit_identity_changed'\) \{\s*await CompletionAttempts\.markCompletionAttemptFailed\(completionAttempt, err, db\);/);
     expect(completion).toMatch(/if \(\(!resumingCommittedCompletion \|\| packetEffects\) && !issuedInvoiceCloseout\) \{\s*try \{\s*const writeActivity = async/);
+    // r12: a settled issued invoice releases a live card hold instead of parking it; the referral credit posts quietly; the card mint runs on the silent backfill path.
+    expect(completion).toMatch(/\} else if \(isBackfillCompletion\) \{[\s\S]{0,1600}?if \(liveHold && issuedInvoiceCloseout && \['paid', 'prepaid'\]\.includes\(String\(invoice\.status\)\)\) \{\s*const release = await CardHolds\.releaseCardHold\(\{ scheduledServiceId: svc\.id, reason: 'issued_invoice_settled' \}\);/);
+    expect(completion).toMatch(/const referralVisitPerformed = closedDealVisitPerformed && \(!isBackfillCompletion \|\| !!issuedInvoiceCloseout\);[\s\S]{0,400}?creditReferralOnFirstService\(\{ customerId: svc\.customer_id, serviceId: svc\.id, notify: !issuedInvoiceCloseout \}\)/);
+    expect(completion).toMatch(/if \(!packetEffects && \(!isInternalOnlyCompletion \|\| issuedInvoiceCloseout\) && cardMintOutcomePerformed\) \{/);
+    const referral = fs.readFileSync(path.join(__dirname, '../services/referral-engine.js'), 'utf8');
+    expect(referral).toMatch(/async function creditReferralOnFirstService\(\{ customerId, serviceId, notify = true \}\)[\s\S]*?if \(notify && outcome\.referral\.promoter_id\) \{/);
     const scheduler = fs.readFileSync(path.join(__dirname, '../services/scheduler.js'), 'utf8');
     expect(scheduler).toMatch(/StatementFollowups\.runPending\(\);[\s\S]{0,600}?retrySettledStatementCloseouts\(\);/);
     // Statement delivery carries the operator through to the child closeouts.

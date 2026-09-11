@@ -10510,10 +10510,21 @@ async function completeScheduledService(completionInput, packetContext = null) {
         // reviewable, the same posture the hold service's own withheld-for-
         // review paths use — and bell the office so it doesn't sit silent
         // (holds don't surface on the unpaid-invoice feeds).
+        //
+        // EXCEPT an issued-invoice closeout on an invoice that is already
+        // settled (GitHub r12 P2 #4127): the ordinary completion path's hold
+        // charge helper releases a hold whose invoice is no longer collectible
+        // without charging it; leaving that consent live
+        // after the visit is paid and completed would keep completion /
+        // no-show charging armed until someone cleared the alert by hand.
+        // Same no-charge posture, released instead of parked for review.
         try {
           const CardHolds = require('../services/estimate-card-holds');
           const liveHold = await CardHolds.heldCardForScheduledService(svc.id);
-          if (liveHold) {
+          if (liveHold && issuedInvoiceCloseout && ['paid', 'prepaid'].includes(String(invoice.status))) {
+            const release = await CardHolds.releaseCardHold({ scheduledServiceId: svc.id, reason: 'issued_invoice_settled' });
+            logger.info(`[dispatch] issued-invoice closeout: settled invoice ${invoice.id} — card hold ${liveHold.id} ${release.released ? 'released' : 'not released (parked or moved)'}`);
+          } else if (liveHold) {
             logger.warn(`[dispatch] backfill completion: card-hold charge skipped for visit ${svc.id} — hold left held for operator review`);
             await require('../services/notification-service').notifyAdmin(
               'billing',
@@ -10725,8 +10736,14 @@ async function completeScheduledService(completionInput, packetContext = null) {
     // (pure data setup — card row / promoter enroll / short link), but
     // suppressIssuedEmail keeps the card.issued email from firing off a
     // days-old visit; it sends on the next real completion instead.
+    // An issued-invoice closeout borrows the internal-only DELIVERY posture
+    // (no report, no customer comms) but the service itself was performed
+    // (GitHub r12 P2 #4127): it takes the silent backfill mint path — card
+    // row / promoter enroll / short link, issued email suppressed, first
+    // visit dated to the record's service day — so a first visit closed out
+    // this way still anchors the customer's card.
     const cardMintOutcomePerformed = !['inspection_only', 'customer_declined', 'incomplete'].includes(visitOutcome);
-    if (!packetEffects && !isInternalOnlyCompletion && cardMintOutcomePerformed) {
+    if (!packetEffects && (!isInternalOnlyCompletion || issuedInvoiceCloseout) && cardMintOutcomePerformed) {
       try {
         const CustomerCardService = require('../services/customer-card');
         void CustomerCardService.ensureCardForCompletion({
@@ -12225,11 +12242,17 @@ async function completeScheduledService(completionInput, packetContext = null) {
     const closedDealVisitPerformed = visitOutcome !== 'inspection_only'
       && visitOutcome !== 'customer_declined'
       && !isIncompleteVisit;
-    const referralVisitPerformed = closedDealVisitPerformed && !isBackfillCompletion;
+    // An issued-invoice closeout is NOT a stale cleanup (GitHub r12 P1
+    // #4127): the invoice event is the proof the service happened, and this
+    // may be the referred customer's first qualifying visit — withholding
+    // the credit here would delay it to a later completion or lose it. The
+    // credits post; the referrer's reward SMS / email stay suppressed so the
+    // closeout remains quiet.
+    const referralVisitPerformed = closedDealVisitPerformed && (!isBackfillCompletion || !!issuedInvoiceCloseout);
     if (referralVisitPerformed && !packetEffects) {
       try {
         const referralEngine = require('../services/referral-engine');
-        await referralEngine.creditReferralOnFirstService({ customerId: svc.customer_id, serviceId: svc.id });
+        await referralEngine.creditReferralOnFirstService({ customerId: svc.customer_id, serviceId: svc.id, notify: !issuedInvoiceCloseout });
       } catch (referralErr) {
         logger.warn(`[referral] first-service credit failed for customer=${svc?.customer_id}: ${referralErr.message}`);
       }

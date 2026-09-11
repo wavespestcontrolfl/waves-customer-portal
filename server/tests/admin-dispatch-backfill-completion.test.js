@@ -2681,7 +2681,7 @@ describe('completion route wiring (source contracts)', () => {
     // log + job_complete notification block directly above still runs
     // first-run only.
     const before = source.slice(0, costingAt);
-    const activityGuardAt = before.lastIndexOf('if (!resumingCommittedCompletion || packetEffects) {');
+    const activityGuardAt = before.lastIndexOf('if ((!resumingCommittedCompletion || packetEffects) && !issuedInvoiceCloseout) {');
     const activityBlock = source.slice(activityGuardAt, costingAt);
     expect(activityBlock).toContain('Job form save failed');
   });
@@ -2760,6 +2760,8 @@ describe('completion route wiring (source contracts)', () => {
     expect(backfillHoldBranch).not.toBeNull();
     expect(backfillHoldBranch[1]).toContain('heldCardForScheduledService');
     expect(backfillHoldBranch[1]).not.toContain('chargeCardHoldOnCompletion');
+    // A settled issued invoice releases the hold (no charge) instead of parking it (GitHub r12 P2 #4127).
+    expect(backfillHoldBranch[1]).toContain("releaseCardHold({ scheduledServiceId: svc.id, reason: 'issued_invoice_settled' })");
     expect(backfillHoldBranch[1]).not.toContain('chargeInvoiceWithSavedCard');
     // The real charge call survives, unreachable for backfill completions.
     expect(source).toMatch(/\} else try \{\s*\n\s*const CardHolds = require\('\.\.\/services\/estimate-card-holds'\);\s*\n\s*const holdCharge = await CardHolds\.chargeCardHoldOnCompletion/);
@@ -2770,7 +2772,10 @@ describe('completion route wiring (source contracts)', () => {
     // referrer and the referee AND messages the referrer, so the quiet path
     // must not reach it. The guard also protects the reward's single-use
     // idempotency: firing here would burn it on a visit nobody announced.
-    expect(source).toMatch(/const referralVisitPerformed = closedDealVisitPerformed && !isBackfillCompletion;/);
+    // The ONE carve-out is the issued-invoice closeout (GitHub r12 P1 #4127):
+    // the invoice event proves the service happened, so the credits post —
+    // with the referrer's SMS / email suppressed (notify: false).
+    expect(source).toMatch(/const referralVisitPerformed = closedDealVisitPerformed && \(!isBackfillCompletion \|\| !!issuedInvoiceCloseout\);/);
     const referralBlock = source.match(/if \(referralVisitPerformed && !packetEffects\) \{([\s\S]*?)\n {4}\}/);
     expect(referralBlock).not.toBeNull();
     expect(referralBlock[1]).toContain('creditReferralOnFirstService');

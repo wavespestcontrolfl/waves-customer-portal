@@ -190,6 +190,28 @@ postgres('invoice issued ⇒ visit completed (migrated PostgreSQL)', () => {
     expect(recordAuditEvent).toHaveBeenCalledWith(expect.objectContaining({ resource_id: svc.id, action: 'visit.completion_on_invoice_issued_refused', metadata: expect.objectContaining({ code: 'invoice_void' }) }));
   });
 
+  test('a record-only linked invoice voided before the closeout reads it is still audited (invoice_void) against its visit; a statement closeout reaches record-only children (GitHub r12 P2)', async () => {
+    const day = '2020-01-06';
+    const open = await visit({ status: 'on_site', date: day });
+    const recordId = randomUUID();
+    await trx('service_records').insert({ id: recordId, customer_id: customerId, scheduled_service_id: open.id, service_date: day, service_type: open.service_type });
+    const inv = await invoice({ service_record_id: recordId, status: 'void', date: day });
+    expect(await closeOutVisitForIssuedInvoice({ invoiceId: inv.id, trigger: 'sent', conn: trx, today: TODAY })).toMatchObject({ closed: false, reason: 'invoice_void', visitId: open.id });
+    expect(recordAuditEvent).toHaveBeenCalledWith(expect.objectContaining({ resource_id: open.id, metadata: expect.objectContaining({ code: 'invoice_void' }) }));
+    recordAuditEvent.mockClear();
+    const [payerId] = await trx('payers').insert({ display_name: 'Fixture Bill-To' }).returning('id').then((r) => r.map((x) => x.id ?? x));
+    const [statementId] = await trx('payer_statements').insert({
+      payer_id: payerId, period_start: '2020-01-01', period_end: '2020-01-31', status: 'paid', terms_snapshot: 'net30', token: randomUUID().replace(/-/g, ''), paid_at: new Date(),
+    }).returning('id').then((r) => r.map((x) => x.id ?? x));
+    const recordOnly = await visit({ status: 'on_site', date: day });
+    const recordOnlyRecord = randomUUID();
+    await trx('service_records').insert({ id: recordOnlyRecord, customer_id: customerId, scheduled_service_id: recordOnly.id, service_date: day, service_type: recordOnly.service_type });
+    await invoice({ status: 'paid', date: day, payer_statement_id: statementId, service_record_id: recordOnlyRecord });
+    const { closeOutVisitsForStatement } = require('../services/invoice-issued-closeout');
+    expect(await closeOutVisitsForStatement(statementId, { trigger: 'paid', conn: trx })).toEqual({ attempted: 1, closed: 0, failed: [] });
+    expect(recordAuditEvent).toHaveBeenCalledWith(expect.objectContaining({ resource_id: recordOnly.id, metadata: expect.objectContaining({ code: 'record_linked_only', trigger: 'paid' }) }));
+    expect(mockCompleteScheduledService).not.toHaveBeenCalled();
+  });
   test('a linked visit left open is audited as refused with the reason; an invoice with no visit link is logged only', async () => {
     const future = await visit({ date: '2040-03-05' });
     const inv = await invoice({ scheduled_service_id: future.id, date: '2040-03-05' });

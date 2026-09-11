@@ -148,7 +148,11 @@ async function issuedCloseoutOwnsRecord(serviceRecordId, conn = db) {
 async function closeOutVisitsForStatement(statementId, { trigger, actorTechnicianId = null, actorRole = null, conn = db } = {}) {
   let invoiceIds = [];
   try {
-    invoiceIds = (await conn('invoices').where({ payer_statement_id: statementId }).whereNotNull('scheduled_service_id').select('id')).map((r) => r.id);
+    // Every LINKED child — directly or through its service record — so a
+    // record-only link reaches the resolver and is audited (GitHub r12 P2 #4127).
+    invoiceIds = (await conn('invoices').where({ payer_statement_id: statementId })
+      .where((q) => q.whereNotNull('scheduled_service_id').orWhereNotNull('service_record_id'))
+      .select('id')).map((r) => r.id);
   } catch (err) {
     logger.error(`[invoice-issued-closeout] statement ${statementId}: child invoice lookup failed — no closeouts run: ${err.message}`);
     return { attempted: 0, closed: 0, failed: [] };
@@ -284,11 +288,17 @@ async function refuseVoidedInvoice(run) {
   if (String(invoice.status) !== 'void') return null;
   if (invoice.scheduled_service_id
     && await resumableIssuedCloseoutAttempt(conn, { serviceId: invoice.scheduled_service_id, idempotencyKey: run.idempotencyKey })) return null;
-  if (!invoice.scheduled_service_id) return { closed: false, reason: 'no_invoice' };
-  run.linkedVisitId = invoice.scheduled_service_id;
-  logger.info(`[invoice-issued-closeout] ${run.label} → visit ${run.linkedVisitId} left open (invoice_void)`);
-  await auditCloseoutOutcome(run, { closed: false, visitId: run.linkedVisitId, code: 'invoice_void' });
-  return { closed: false, reason: 'invoice_void', visitId: run.linkedVisitId };
+  // The linkage is resolved the same way as for a live invoice — a record-only
+  // link names a visit too, and its void refusal is audited against it
+  // (GitHub r12 P2 #4127). A direct link whose visit row is gone still
+  // audits against the id the invoice carries.
+  const linked = await linkedVisitForInvoice(conn, invoice);
+  const visitId = linked.svc?.id || linked.visit?.id || invoice.scheduled_service_id || null;
+  if (!visitId) return { closed: false, reason: 'no_invoice' };
+  run.linkedVisitId = visitId;
+  logger.info(`[invoice-issued-closeout] ${run.label} → visit ${visitId} left open (invoice_void)`);
+  await auditCloseoutOutcome(run, { closed: false, visitId, code: 'invoice_void' });
+  return { closed: false, reason: 'invoice_void', visitId };
 }
 
 // Phase 2 — which visit, if any: the linked open visit, or this closeout's
