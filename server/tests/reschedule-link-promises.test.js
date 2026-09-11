@@ -5,7 +5,7 @@ const { parseETDateTime } = require('../utils/datetime-et');
 const { gates } = require('../config/feature-gates');
 const now = new Date('2030-01-07T12:00:00Z');
 const quote = 'I will text you a reschedule link for that appointment.';
-const customer = { id: 'customer', phone: '+15555550100' };
+const customer = { id: 'customer', phone: '+15555550100', active: true };
 const visit = { id: 'visit', customer_id: customer.id, scheduled_date: '2030-01-08', window_start: '09:00', window_end: '10:30',
   status: 'confirmed', service_type: 'WaveGuard', reschedule_token: 'token', property_address: '100 Example Street', property_unit: 'Unit 2' };
 const call = { customer_id: customer.id, direction: 'inbound', from_phone: customer.phone, created_at: now,
@@ -52,6 +52,31 @@ test('dispatch-owned pending, elapsed and grouped visits stay in review', () => 
   expect(select({ candidates: [{ ...visit, visit_id: 'group' }] }).reason).toBe('visit_not_self_service');
   expect(select({ candidates: [{ ...visit, status: 'pending', source_action: 'ai_call_outbound_review' }] }).visit).toBeUndefined();
   expect(select({ now: parseETDateTime('2030-01-08T11:00') }).reason).toBe('visit_elapsed');
+});
+
+test('an inactive account cannot be promised a link the reschedule page refuses', () => {
+  for (const active of [false, null, undefined]) {
+    expect(select({ customer: { ...customer, active } }).reason).toBe('customer_inactive');
+  }
+});
+
+test('a bare "I will text you a link" needs rescheduling language or a grounded subject', () => {
+  const generic = 'I will text you a link.';
+  const bare = { ...commitment, evidence: [{ quote: generic, speaker: 'agent' }] };
+  const source = { ...call, transcription: `Agent: ${generic}\nCaller: Thank you.` };
+  expect(select({ call: source, commitment: bare }).reason).toBe('promise_needs_review');
+  // A subject with a grounded quote but no date/service/address names no
+  // appointment, so it cannot stand in for the missing language.
+  expect(select({ call: source, commitment: { ...bare, subject: { quote: 'Thank you.' } } }).reason).toBe('promise_needs_review');
+  // Either half is enough on its own.
+  const subjectQuote = 'That is for my WaveGuard service.';
+  expect(select({ call: { ...call, transcription: `Agent: ${generic}\nCaller: ${subjectQuote}` },
+    commitment: { ...bare, subject: { quote: subjectQuote, service: 'WaveGuard' } } }).visit?.id).toBe('visit');
+  for (const spoken of ['I will text you a link to pick a new time.', 'I will send you a link to move your appointment.',
+    'Let me text you a link to re-schedule that visit.']) {
+    expect(select({ call: { ...call, transcription: `Agent: ${spoken}` },
+      commitment: { ...commitment, evidence: [{ quote: spoken, speaker: 'agent' }] } }).visit?.id).toBe('visit');
+  }
 });
 
 test('the commitment gate and explicit shadow/true modes are required', () => {

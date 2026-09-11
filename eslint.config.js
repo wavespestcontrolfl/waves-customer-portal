@@ -59,7 +59,7 @@ module.exports = [
   // Server, scripts, ops, packages — CommonJS on Node. (video/ is NOT here:
   // its package.json has "type": "module", so its .js files are ESM.)
   {
-    files: ['server/**/*.js', 'scripts/**/*.js', 'ops/**/*.js', 'packages/**/*.js', 'shared/**/*.js', '*.js'],
+    files: ['server/**/*.js', 'scripts/**/*.js', 'scripts/qa/tech-foundation.cjs', 'ops/**/*.js', 'packages/**/*.js', 'shared/**/*.js', '*.js'],
     languageOptions: {
       ecmaVersion: 'latest',
       sourceType: 'commonjs',

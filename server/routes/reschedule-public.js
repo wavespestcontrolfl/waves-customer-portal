@@ -703,6 +703,14 @@ router.post('/:token', commitLimiter, async (req, res, next) => {
           logger.warn(`[reschedule-public] replay series-log lookup failed for ${svc.id}: ${err.message}`);
         }
       }
+      // The original commit's promise hook is best-effort — if it failed, the
+      // retry that lands here is the next chance to close the linked cards
+      // (the background sweep is the last one). Idempotent per promise row.
+      try {
+        await require('../services/reschedule-link-promises').resolveUsedLink(db, svc.id);
+      } catch (err) {
+        logger.warn(`[reschedule-public] promise resolve failed on replay for ${svc.id}: ${err.code || err.name || 'error'}`);
+      }
       return res.json({
         success: true,
         replayed: true,

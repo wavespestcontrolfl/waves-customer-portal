@@ -51,6 +51,19 @@ const updateSchema = Joi.object({
   assignedTechnicianId: Joi.string().uuid().allow(null).optional(),
 }).min(1);
 
+function requestProperty(metadata) {
+  let meta = metadata;
+  if (typeof meta === 'string') { try { meta = JSON.parse(meta); } catch { return null; } }
+  const p = meta && typeof meta === 'object' ? meta.property : null;
+  if (!p || typeof p !== 'object') return null;
+  return {
+    id: p.id != null ? String(p.id) : null,
+    isPrimary: p.isPrimary === true,
+    label: p.label || null,
+    address: p.address || null,
+  };
+}
+
 // GET /api/admin/requests — list service requests for staff triage.
 router.get('/', async (req, res, next) => {
   try {
@@ -81,15 +94,24 @@ router.get('/', async (req, res, next) => {
         'customers.email as customerEmail',
         'customers.phone as customerPhone',
         'technicians.name as assignedTechnician',
+        'service_requests.metadata',
       );
     if (status) query = query.where('service_requests.status', status);
     if (openOnly) query = query.whereNotIn('service_requests.status', TERMINAL_STATUSES);
     if (customerId) query = query.where('service_requests.customer_id', customerId);
 
-    const requests = await query
+    const rows = await query
       .orderBy('service_requests.created_at', 'desc')
       .limit(limit)
       .offset(offset);
+    // The saved property a portal ticket was filed under (POST /requests
+    // persists it in metadata.property) is what tells two identical tickets
+    // from two houses apart where staff mark them handled (uncapped codex
+    // r2a P1). Surfaced as `property`; the raw metadata stays internal.
+    const requests = rows.map(({ metadata, ...r }) => {
+      const property = requestProperty(metadata);
+      return property ? { ...r, property } : r;
+    });
 
     let countQuery = db('service_requests');
     if (status) countQuery = countQuery.where({ status });

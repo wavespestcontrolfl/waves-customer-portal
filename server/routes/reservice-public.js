@@ -54,6 +54,7 @@ const router = express.Router();
 const rateLimit = require('express-rate-limit');
 const db = require('../models/db');
 const logger = require('../services/logger');
+const { capacityEnabled } = require('../services/scheduling/policy');
 const { noStore } = require('../middleware/no-store');
 const { etDateString, addETDays } = require('../utils/datetime-et');
 const {
@@ -164,7 +165,7 @@ async function loadLaneCatalog() {
 // Route-aware availability around the CUSTOMER's property — the coords
 // resolution mirrors reschedule-public's buildAvailabilityForService (stored
 // coords first, geocode of the address text as fallback).
-async function buildAvailabilityForCustomer(customer, { rangeFrom, rangeTo, config, duration, timeOfDay }) {
+async function buildAvailabilityForCustomer(customer, { rangeFrom, rangeTo, config, duration, timeOfDay, lanes }) {
   const booking = require('./booking');
   const { resolveBookingCoords, buildBookingAvailability } = booking._internals;
 
@@ -183,6 +184,7 @@ async function buildAvailabilityForCustomer(customer, { rangeFrom, rangeTo, conf
     lat,
     lng,
     duration,
+    serviceKey: lanes.map(lane => ({ pest: 'pest_control', lawn: 'lawn_care' })[lane]).join('+'),
     rangeFrom,
     rangeTo,
     config,
@@ -239,15 +241,22 @@ router.get('/:token', async (req, res, next) => {
     const config = await booking._internals.loadBookingConfig();
     const range = bookingRange(config);
 
-    // Browse at the LONGEST bookable-lane duration so every offered slot is
-    // feasible for whichever lane the customer picks; the commit re-validates
-    // at the lane's own duration anyway (a shorter visit in a longer slot's
-    // window only relaxes the constraints).
-    const browseDuration = Math.max(...bookableLanes.map((lane) => laneCatalog[lane].durationMinutes));
+    const requestedLane = req.query.lane;
+    if (requestedLane != null && !bookableLanes.includes(requestedLane)) {
+      // A parallel booking or plan change should refresh eligibility, not
+      // trap Retry on the same stale lane query. Malformed lanes still fail.
+      if (Object.hasOwn(RESERVICE_LANES, requestedLane)) return res.json({ ...base, availability: null });
+      return res.status(400).json({ error: 'Choose an available service.' });
+    }
+    const browseLanes = requestedLane ? [requestedLane] : bookableLanes;
+    if (capacityEnabled() && browseLanes.length > 1) {
+      return res.json({ ...base, availability: null });
+    }
+    const browseDuration = Math.max(...browseLanes.map((lane) => laneCatalog[lane].durationMinutes));
 
     let availability = null;
     try {
-      availability = await buildAvailabilityForCustomer(customer, { ...range, config, duration: browseDuration });
+      availability = await buildAvailabilityForCustomer(customer, { ...range, config, duration: browseDuration, lanes: browseLanes });
     } catch (err) {
       logger.error(`[reservice-public] availability failed for customer ${customer.id}: ${err.message}`);
     }
@@ -290,10 +299,19 @@ router.post('/:token/find-slots', findSlotsLimiter, async (req, res, next) => {
       return res.status(409).json({ error: 'A re-service can no longer be booked from this link.' });
     }
 
+    const requestedLane = req.body?.lane;
+    if (requestedLane != null && !bookableLanes.includes(requestedLane)) {
+      return res.status(400).json({ error: 'Choose an available service.' });
+    }
+    const browseLanes = requestedLane ? [requestedLane] : bookableLanes;
+    if (capacityEnabled() && browseLanes.length > 1) {
+      return res.status(400).json({ error: 'Choose a service before searching for times.' });
+    }
+
     const booking = require('./booking');
     const config = await booking._internals.loadBookingConfig();
     const range = bookingRange(config);
-    const browseDuration = Math.max(...bookableLanes.map((lane) => laneCatalog[lane].durationMinutes));
+    const browseDuration = Math.max(...browseLanes.map((lane) => laneCatalog[lane].durationMinutes));
 
     const { parseWhen, summarizeWindow } = require('../services/scheduling/parse-when');
     const when = await parseWhen(query, searchParseOpts(config));
@@ -305,6 +323,7 @@ router.post('/:token/find-slots', findSlotsLimiter, async (req, res, next) => {
         rangeTo: when.dateTo,
         config,
         duration: browseDuration,
+        lanes: browseLanes,
         timeOfDay: when.timeOfDay,
       });
     } catch (err) {
@@ -393,6 +412,7 @@ router.post('/:token', commitLimiter, async (req, res, next) => {
       rangeTo: date,
       config,
       duration: catalog.durationMinutes,
+      lanes: [lane],
     });
     const day = dayAvailability?.days?.find((d) => d.date === date);
     const slot = day?.slots?.find((s) => s.start_time === startTime);
@@ -400,7 +420,7 @@ router.post('/:token', commitLimiter, async (req, res, next) => {
       let refreshed = null;
       try {
         refreshed = await buildAvailabilityForCustomer(customer, {
-          ...range, config, duration: catalog.durationMinutes,
+          ...range, config, duration: catalog.durationMinutes, lanes: [lane],
         });
       } catch (err) {
         logger.warn(`[reservice-public] refresh availability failed for customer ${customer.id}: ${err.message}`);
@@ -460,7 +480,7 @@ router.post('/:token', commitLimiter, async (req, res, next) => {
         let refreshed = null;
         try {
           refreshed = await buildAvailabilityForCustomer(customer, {
-            ...range, config, duration: catalog.durationMinutes,
+            ...range, config, duration: catalog.durationMinutes, lanes: [lane],
           });
         } catch { /* answer without the refresh */ }
         return res.status(409).json({
@@ -511,6 +531,7 @@ router._test = {
   searchParseOpts,
   loadLaneCatalog,
   resolveLaneState,
+  buildAvailabilityForCustomer,
 };
 
 module.exports = router;

@@ -3,6 +3,7 @@ process.env.JWT_SECRET = process.env.JWT_SECRET || 'test-jwt-secret';
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../services/notification-service', () => ({ notifyAdmin: jest.fn(async () => ({ id: 'notif-1' })) }));
+jest.mock('../services/request-app-notifications', () => ({ send: jest.fn(async () => ({})) }));
 jest.mock('../middleware/auth', () => ({
   authenticate: (req, _res, next) => {
     req.customerId = 'cust-1';
@@ -34,7 +35,7 @@ function updateChain(updatedCount) {
 }
 
 function insertChain() {
-  return { insert: jest.fn(async () => [1]) };
+  return { insert: jest.fn(() => ({ returning: jest.fn(async () => [{ id: 'request-1', status: 'new', status_version: 0 }]) })) };
 }
 
 async function withServer(fn) {
@@ -66,7 +67,7 @@ describe('customer appointment confirmation race guard', () => {
       });
     });
 
-    expect(update.where).toHaveBeenCalledWith({ id: 'svc-1', customer_id: 'cust-1', status: 'pending', visit_id: null }); // membership pinned (codex #3609 r28)
+    expect(update.where).toHaveBeenCalledWith({ id: 'svc-1', customer_id: 'cust-1', status: 'pending', visit_id: null, property_id: null }); // membership + property pinned (codex #3609 r28, #4207 r1)
     expect(logger.info).not.toHaveBeenCalled();
   });
 

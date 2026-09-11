@@ -1873,16 +1873,34 @@ async function sweep({ now = new Date() } = {}) {
   return { skipped: false, scanned: items.length, applied: totalApplied, deferred, counts, callsSynced };
 }
 
-// Resolve the call's open reschedule cards and re-sync review_status —
-// admin-triage transitionCore's rule: open/in_progress cards remaining keep
-// the call 'open', otherwise it takes the applied status.
-async function resolveRescheduleCards(conn, callLogId, note) {
+// Resolve the call's open reschedule cards for ONE appointment and re-sync
+// review_status — admin-triage transitionCore's rule: open/in_progress cards
+// remaining keep the call 'open', otherwise it takes the applied status.
+//
+// visitId binds the transition to the appointment that actually moved. A call
+// can discuss two existing appointments, and closing every matching reason
+// code would hide the office work the other visit still owes (codex #4293 r1
+// P2). A card that names no appointment is ambiguous: it closes with the move
+// only when no OTHER open card on the call names a different visit.
+async function resolveRescheduleCards(conn, callLogId, note, visitId = null) {
   const now = new Date();
   return conn.transaction(async (trx) => {
     await lockTriageCall(trx, callLogId);
-    const resolved = await trx('triage_items')
+    const candidates = await trx('triage_items')
       .where({ call_log_id: callLogId, status: 'open' })
       .whereIn('reason_code', ['reschedule_or_cancel', 'existing_appointment_coordination'])
+      .select('id', 'related_scheduled_service_id');
+    const namesAnotherVisit = visitId
+      && candidates.some((item) => item.related_scheduled_service_id && item.related_scheduled_service_id !== visitId);
+    const targets = candidates
+      .filter((item) => !visitId
+        || item.related_scheduled_service_id === visitId
+        || (!item.related_scheduled_service_id && !namesAnotherVisit))
+      .map((item) => item.id);
+    if (!targets.length) return 0;
+    const resolved = await trx('triage_items')
+      .whereIn('id', targets)
+      .where({ status: 'open' })
       .update({ status: 'resolved', resolution_note: note, resolution_source: 'auto', resolved_at: now, updated_at: now })
       .returning('id');
     if (!resolved.length) return 0;

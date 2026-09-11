@@ -66,6 +66,14 @@ describe('buildCallIntelligence', () => {
     expect(view.links.customer_link).toEqual({ source: 'human', customer_id: 'cust-2', by: 'tech-1', at: '2026-09-01T15:00:00Z', previous_customer_id: 'cust-1' });
   });
 
+  test('next action orders by the staffed effective deadline, so an undated callback due first is not left behind a dated promise', () => {
+    const commitments = [
+      { id: 'c2', party: 'waves', kind: 'send_estimate', description: 'Send the estimate', status: 'open', due_at: '2026-09-03T00:00:00Z', effective_due_at: '2026-09-03T00:00:00Z', source: 'ai', human_state: null },
+      { id: 'c1', party: 'waves', kind: 'callback', description: 'Call back', status: 'open', due_at: null, effective_due_at: '2026-09-02T14:00:00Z', source: 'ai', human_state: null },
+    ];
+    expect(nextAction({ commitments, disposition: null, v2: null, reviewStatus: null })).toMatchObject({ commitment_id: 'c1', due_at: '2026-09-02T14:00:00Z', due_basis: 'staffed' });
+  });
+
   test('next action is the earliest-due open Waves commitment, and says whether it was detected or office-added', () => {
     const commitments = [
       { id: 'c2', party: 'waves', kind: 'send_estimate', description: 'Send the estimate', status: 'open', due_at: '2026-09-03T00:00:00Z', source: 'ai', human_state: null },

@@ -22,12 +22,43 @@
  *
  * Best-effort: never throws; callers treat { url: null, line: '' } as
  * "send the message without the link".
+ *
+ * opts.reuseExisting: return the visit's OLDEST existing reschedule short
+ * code instead of minting, once every eligibility check above has passed.
+ * For the Quick Move segment cap, which measures a body pre-move and
+ * sends it after: the sheet's counter estimated against the existing
+ * code (a legacy 5-char code vs a fresh 10-char mint flips a boundary
+ * case), and a bare existing-code lookup would skip the grouped / frozen /
+ * dispatch-pending refusals that make the link a dead end.
+ * opts.previewOnly: read-only — the same eligibility checks and existing-
+ * code reuse, but where a mint would happen returns a placeholder of a
+ * fresh code's length instead (the sheet's advisory counter must never
+ * mint). Implies reuseExisting.
+ * opts.assumeConfirmed: judge eligibility on the row's LANDED state — the
+ * caller is about to move it through the rebooker, which confirms it, so
+ * the dispatch-owned-pending refusal does not apply (the link would be
+ * minted moments later by the post-move send anyway). Grouped / frozen
+ * refusals still apply. For the Quick Move pre-move measurement only.
+ * opts.pinnedUrl: the URL a pre-move check measured — after the same
+ * eligibility checks, return THIS url (no lookup, no mint) or null when
+ * the visit is no longer eligible, so a post-move send can only shrink
+ * the measured body, never grow it.
+ *
+ * A thrown error inside the build (the service-row read, most likely)
+ * still resolves to { url: null, line: '' } but carries `failed: true`,
+ * so a caller that must fail closed on a read failure can tell it apart
+ * from a plain "not eligible" (Quick Move's segment cap); every other
+ * caller keeps treating the null url as "send without the link".
  */
+
+// What a fresh mint looks like, length-wise (short-url createShortCode:
+// 10 chars, 11 on collision retries) — the counter measures this.
+const PREVIEW_CODE_PLACEHOLDER = 'xxxxxxxxxx';
 
 const db = require('../models/db');
 const logger = require('./logger');
 const { portalUrl } = require('../utils/portal-url');
-const { shortenOrPassthrough } = require('./short-url');
+const { shortenOrPassthrough, existingShortUrlFor, shortLinkBaseUrl } = require('./short-url');
 const { DISPATCH_OWNED_PENDING_SOURCE_ACTIONS } = require('./call-booking-source-actions');
 
 function smsLineFor(url) {
@@ -42,7 +73,7 @@ async function hasUnblockedVisitGroup(conn, visitId) {
   return !(await vg.frozenVisitVerdict(conn, visitId)).frozen;
 }
 
-async function buildRescheduleLink(scheduledServiceId, { customerId = null } = {}) {
+async function buildRescheduleLink(scheduledServiceId, { customerId = null, reuseExisting = false, previewOnly = false, assumeConfirmed = false, pinnedUrl = undefined } = {}) {
   try {
     if (!scheduledServiceId) return { url: null, line: '' };
     const svc = await db('scheduled_services')
@@ -67,10 +98,23 @@ async function buildRescheduleLink(scheduledServiceId, { customerId = null } = {
     // confirm, and a bearer reschedule URL would let the recipient move a
     // booking the authenticated schedule routes deliberately hide/refuse.
     // Callers already treat { url: null, line: '' } as "send without link".
-    if (DISPATCH_OWNED_PENDING_SOURCE_ACTIONS.includes(svc.source_action)
+    if (!assumeConfirmed
+      && DISPATCH_OWNED_PENDING_SOURCE_ACTIONS.includes(svc.source_action)
       && String(svc.status || '').toLowerCase() === 'pending'
       && !svc.customer_confirmed) {
       return { url: null, line: '' };
+    }
+
+    if (pinnedUrl !== undefined) return { url: pinnedUrl, line: smsLineFor(pinnedUrl) };
+    if (reuseExisting || previewOnly) {
+      const existing = await existingShortUrlFor({
+        kind: 'reschedule', entityType: 'scheduled_services', entityId: svc.id,
+      });
+      if (existing) return { url: existing, line: smsLineFor(existing) };
+    }
+    if (previewOnly) {
+      const placeholder = `${shortLinkBaseUrl()}/l/${PREVIEW_CODE_PLACEHOLDER}`;
+      return { url: placeholder, line: smsLineFor(placeholder) };
     }
 
     const longUrl = portalUrl(`/reschedule/${svc.reschedule_token}`);
@@ -86,7 +130,7 @@ async function buildRescheduleLink(scheduledServiceId, { customerId = null } = {
     return { url, line: smsLineFor(url) };
   } catch (err) {
     logger.warn(`[reschedule-link] build failed for ${scheduledServiceId}: ${err.message}`);
-    return { url: null, line: '' };
+    return { url: null, line: '', failed: true };
   }
 }
 

@@ -5,6 +5,7 @@ const PRESENTATIONS = {
   framed: {
     frame: "overflow-hidden rounded-md border-hairline border-zinc-200 bg-white",
     heading: "flex flex-wrap items-center justify-between gap-2 px-3 py-2 md:gap-3 md:px-4 md:py-3",
+    titleSize: "text-18 md:text-22",
     divider: "border-b border-hairline border-zinc-200",
     nav: "u-scroll-strip flex p-1 md:grid md:gap-1 md:overflow-visible md:p-2",
     item: "inline-flex h-11 shrink-0 items-center gap-1.5 whitespace-nowrap px-3 border-0 border-b-2 border-solid bg-transparent text-12 font-medium uppercase leading-tight tracking-label u-focus-ring transition-colors md:h-9 md:min-w-0 md:shrink md:justify-center md:gap-2 md:whitespace-normal md:text-center md:rounded-sm md:border-hairline",
@@ -14,6 +15,7 @@ const PRESENTATIONS = {
   workspace: {
     frame: "ui-workspace-command",
     heading: "ui-workspace-command-heading",
+    titleSize: "text-22",
     nav: "ui-workspace-nav",
     item: "ui-workspace-nav-action u-focus-ring",
   },
@@ -120,7 +122,11 @@ export default function AdminCommandHeader({
             <Heading
               className={cn(
                 "m-0 min-w-0 font-medium tracking-normal text-zinc-900",
-                headingLevel === 2 ? "text-16 md:text-18" : "text-18 md:text-22",
+                headingLevel === 2
+                  ? "text-16 md:text-18"
+                  : density === "legacy"
+                    ? presentation.titleSize
+                    : "text-22 leading-[1.3]",
               )}
             >
               {title}

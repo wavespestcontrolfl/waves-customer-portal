@@ -1,3 +1,20 @@
+import {
+  ActionFeedback,
+  Badge,
+  Button,
+  Card,
+  Checkbox,
+  Dialog,
+  DialogBody,
+  DialogTitle,
+  Field,
+  Input,
+  Select,
+  Textarea,
+  UiSurface,
+  buttonStyles,
+  cn,
+} from "../../components/ui";
 // client/src/pages/admin/AdminInvoicesPage.jsx
 //
 // Admin Invoices page — list, search, create, edit, void, refund.
@@ -61,7 +78,6 @@
 // - alert-fg discipline: spec reserves red for overdue / failed /
 //   refund-error. Watch for decorative misuse.
 import { useState, useEffect, useCallback, useRef } from "react";
-import { createPortal } from "react-dom";
 import { useSearchParams } from "react-router-dom";
 import {
   ExternalLink,
@@ -77,36 +93,19 @@ import {
 import { launchTapToPay } from "../../lib/tapToPay";
 import { useFeatureFlag } from "../../hooks/useFeatureFlag";
 import { computeCardTotal } from "../../lib/cardSurcharge";
-import { invoiceDateOnly, formatInvoiceDate, isInvoiceDueDateOverdue } from "../../lib/invoiceDates";
+import {
+  invoiceDateOnly,
+  formatInvoiceDate,
+  isInvoiceDueDateOverdue,
+} from "../../lib/invoiceDates";
 import { formatETDate } from "../../lib/timezone";
 import AdminCommandHeader from "../../components/admin/AdminCommandHeader";
 import DictationButton from "../../components/tech/DictationButton";
 import MobileCardOnFileSheet from "../../components/schedule/MobileCardOnFileSheet";
 import { getAdminUser } from "../../lib/adminAuth";
-
 const API_BASE = import.meta.env.VITE_API_URL || "/api";
 // V2 token pass: teal/blue/purple fold to zinc-900. Semantic green/amber/red preserved.
 // STATUS_COLORS folds cleanly — sent/viewed were both #0A7EC2 in V1, stay identical post-fold.
-const D = {
-  bg: "#F4F4F5",
-  card: "#FFFFFF",
-  border: "#E4E4E7",
-  teal: "#18181B",
-  green: "#15803D",
-  amber: "#A16207",
-  red: "#991B1B",
-  purple: "#18181B",
-  blue: "#18181B",
-  // V2 ink tokens (owner-requested normalization 2026-07-09): primary =
-  // zinc-900 like every other admin page; muted = ink-secondary so labels
-  // and captions read one step lighter than values again.
-  text: "#18181B",
-  muted: "#52525B",
-  white: "#FFFFFF",
-  input: "#FFFFFF",
-  heading: "#18181B",
-  inputBorder: "#D4D4D8",
-};
 
 async function adminFetch(path, options = {}) {
   const r = await fetch(`${API_BASE}${path}`, {
@@ -131,7 +130,6 @@ async function adminFetch(path, options = {}) {
   }
   return r.json();
 }
-
 async function adminUpload(path, formData) {
   const r = await fetch(`${API_BASE}${path}`, {
     method: "POST",
@@ -155,98 +153,46 @@ async function adminUpload(path, formData) {
   }
   return r.json();
 }
-
-const sCard = {
-  background: D.card,
-  border: `1px solid ${D.border}`,
-  borderRadius: 12,
-  padding: 20,
-  marginBottom: 12,
-  boxShadow: "0 1px 3px rgba(0,0,0,0.08)",
-};
-const sBtn = (bg, color, isMobile) => ({
-  padding: isMobile ? "12px 18px" : "8px 16px",
-  background: bg,
-  color,
-  border: "none",
-  borderRadius: 8,
-  fontSize: isMobile ? 14 : 13,
-  fontWeight: 500,
-  cursor: "pointer",
-  minHeight: isMobile ? 44 : undefined,
-  textTransform: "uppercase",
-  letterSpacing: "0.04em",
-});
-const sBadge = (bg, color) => ({
-  fontSize: 10,
-  padding: "2px 8px",
-  borderRadius: 4,
-  background: bg,
-  color,
-  fontWeight: 500,
-  display: "inline-block",
-});
-
 function annualPrepayInvoiceLabel(inv = {}) {
   const status = String(inv.annual_prepay_status || "").toLowerCase();
   if (!status) return null;
   if (status === "payment_pending") return "Annual prepay pending";
   if (status === "active") return "Annual prepay active";
   if (status === "renewal_pending") return "Annual prepay renewal";
-  if (status === "cancelled" || status === "canceled") return "Annual prepay cancelled";
+  if (status === "cancelled" || status === "canceled")
+    return "Annual prepay cancelled";
   if (status === "refunded") return "Annual prepay refunded";
   return `Annual prepay ${status.replace(/_/g, " ")}`;
 }
-
-const sInput = (isMobile) => ({
-  width: "100%",
-  padding: isMobile ? "12px 14px" : "10px 12px",
-  background: D.input,
-  border: `1px solid ${D.border}`,
-  borderRadius: 8,
-  color: D.text,
-  fontSize: isMobile ? 16 : 13,
-  fontFamily: "'Roboto', Arial, sans-serif",
-  outline: "none",
-  boxSizing: "border-box",
-  minHeight: isMobile ? 44 : undefined,
-});
-
-// In-box AI "write/rewrite" icon button. Mirrors the Sparkles control in the
-// CommunicationsPageV2 SMS composer (round icon, Loader2 spinner while working),
-// styled to pair with DictationButton on this inline-styled (legacy palette) page.
-function AiWriteButton({ loading, onClick, title, size = 30 }) {
-  const icon = Math.round(size * 0.52);
+// Icon and accessible name retain their space while the caller is pending.
+function AiWriteButton({ loading, disabled, onClick, title }) {
   return (
-    <button
+    <Button
       type="button"
       onClick={onClick}
-      disabled={loading}
+      disabled={disabled || loading}
+      aria-busy={loading || undefined}
       title={title}
       aria-label={title}
-      style={{
-        width: size,
-        height: size,
-        display: "inline-flex",
-        alignItems: "center",
-        justifyContent: "center",
-        borderRadius: "50%",
-        border: `1px solid ${D.inputBorder}`,
-        background: D.card,
-        color: D.teal,
-        cursor: loading ? "default" : "pointer",
-        opacity: loading ? 0.55 : 1,
-        padding: 0,
-        flex: "0 0 auto",
-        transition: "background 0.15s",
-      }}
+      variant={"secondary"}
+      onClickCapture={(event) =>
+        event.currentTarget.focus({
+          preventScroll: true,
+        })
+      }
+      className="ui-icon-action"
     >
       {loading ? (
-        <Loader2 size={icon} strokeWidth={2.2} className="animate-spin" />
+        <Loader2
+          size={20}
+          strokeWidth={2.2}
+          className="animate-spin motion-reduce:animate-none"
+          aria-hidden
+        />
       ) : (
-        <Sparkles size={icon} strokeWidth={2.2} />
+        <Sparkles size={20} strokeWidth={2.2} aria-hidden />
       )}
-    </button>
+    </Button>
   );
 }
 
@@ -260,12 +206,6 @@ function appendDictation(prev, chunk, maxLen) {
 }
 
 // Shared palette for in-box DictationButton instances on this page.
-const DICTATION_PALETTE = {
-  accent: D.teal,
-  muted: D.inputBorder,
-  red: D.red,
-  card: D.card,
-};
 
 const ATTACHMENT_MAX_COUNT = 10;
 const ATTACHMENT_MAX_BYTES = 25 * 1024 * 1024;
@@ -273,7 +213,8 @@ const ATTACHMENT_MAX_MB = ATTACHMENT_MAX_BYTES / 1024 / 1024;
 const ATTACHMENT_ACCEPT = ".jpg,.jpeg,.png,.gif,.tif,.tiff,.bmp,.pdf";
 const ATTACHMENT_ALLOWED_TYPE_LABEL = "JPG, PNG, GIF, TIFF, BMP, and PDF";
 export const ATTACHMENT_HELP_TEXT = `Attach up to ${ATTACHMENT_MAX_COUNT} files totaling ${ATTACHMENT_MAX_MB} MB. Supported file types: ${ATTACHMENT_ALLOWED_TYPE_LABEL}.`;
-export const ATTACHMENT_VISIBILITY_TEXT = "Customers can view these files from the invoice/payment link. They are not sent as separate email attachments.";
+export const ATTACHMENT_VISIBILITY_TEXT =
+  "Customers can view these files from the invoice/payment link. They are not sent as separate email attachments.";
 const ATTACHMENT_ALLOWED_TYPES = new Set([
   "image/jpeg",
   "image/png",
@@ -293,38 +234,41 @@ const ATTACHMENT_ALLOWED_EXTENSIONS = new Set([
   "bmp",
   "pdf",
 ]);
-
 function fileExtension(name = "") {
-  const match = String(name).toLowerCase().match(/\.([a-z0-9]+)$/);
+  const match = String(name)
+    .toLowerCase()
+    .match(/\.([a-z0-9]+)$/);
   return match ? match[1] : "";
 }
-
 export function isAllowedAttachmentFile(file) {
   return (
     ATTACHMENT_ALLOWED_TYPES.has(String(file.type || "").toLowerCase()) ||
     ATTACHMENT_ALLOWED_EXTENSIONS.has(fileExtension(file.name))
   );
 }
-
 function formatFileSize(bytes = 0) {
   const value = Number(bytes) || 0;
   if (value >= 1024 * 1024) return `${(value / 1024 / 1024).toFixed(1)} MB`;
   if (value >= 1024) return `${Math.round(value / 1024)} KB`;
   return `${value} B`;
 }
-
 export function attachmentTotalBytes(files = []) {
-  return files.reduce((sum, file) => sum + Number(file.size || file.file_size_bytes || file.fileSizeBytes || 0), 0);
+  return files.reduce(
+    (sum, file) =>
+      sum +
+      Number(file.size || file.file_size_bytes || file.fileSizeBytes || 0),
+    0,
+  );
 }
-
 export function canAddInvoiceAttachments(files = []) {
-  return files.length < ATTACHMENT_MAX_COUNT && attachmentTotalBytes(files) < ATTACHMENT_MAX_BYTES;
+  return (
+    files.length < ATTACHMENT_MAX_COUNT &&
+    attachmentTotalBytes(files) < ATTACHMENT_MAX_BYTES
+  );
 }
-
 export function invoiceAttachmentLimitLabel(files = []) {
   return `${files.length}/${ATTACHMENT_MAX_COUNT} files · ${formatFileSize(attachmentTotalBytes(files))}/${ATTACHMENT_MAX_MB} MB`;
 }
-
 export function validateAttachmentFiles(existingFiles, incomingFiles) {
   const next = [...existingFiles, ...incomingFiles];
   if (next.length > ATTACHMENT_MAX_COUNT) {
@@ -333,40 +277,30 @@ export function validateAttachmentFiles(existingFiles, incomingFiles) {
   if (attachmentTotalBytes(next) > ATTACHMENT_MAX_BYTES) {
     return "Attachments can total up to 25 MB";
   }
-  const unsupported = incomingFiles.find((file) => !isAllowedAttachmentFile(file));
+  const unsupported = incomingFiles.find(
+    (file) => !isAllowedAttachmentFile(file),
+  );
   if (unsupported) {
     return `Supported file types: ${ATTACHMENT_ALLOWED_TYPE_LABEL}`;
   }
   return null;
 }
-
 async function uploadInvoiceAttachments(invoiceId, files) {
   if (!files.length) return [];
   const fd = new FormData();
   files.forEach((file) => fd.append("attachments", file));
-  const result = await adminUpload(`/admin/invoices/${invoiceId}/attachments`, fd);
+  const result = await adminUpload(
+    `/admin/invoices/${invoiceId}/attachments`,
+    fd,
+  );
   return result.attachments || [];
 }
-
-const STATUS_COLORS = {
-  draft: D.muted,
-  scheduled: D.amber,
-  sending: D.amber,
-  sent: D.blue,
-  viewed: D.teal,
-  paid: D.green,
-  prepaid: D.green,
-  overdue: D.red,
-  void: D.muted,
-};
-
 function formatDateParam(date) {
   const year = date.getFullYear();
   const month = String(date.getMonth() + 1).padStart(2, "0");
   const day = String(date.getDate()).padStart(2, "0");
   return `${year}-${month}-${day}`;
 }
-
 function datePeriodStart(period) {
   const current = new Date();
   const today = new Date(
@@ -381,11 +315,9 @@ function datePeriodStart(period) {
     return new Date(current.getFullYear(), current.getMonth(), 1);
   return null;
 }
-
 function dateOnlyAtNoon(dateOnly) {
   return new Date(`${dateOnly}T12:00:00`);
 }
-
 function parseInvoiceCreatedAt(value) {
   if (!value) return null;
   if (typeof value === "string" && /^\d{4}-\d{2}-\d{2}$/.test(value)) {
@@ -394,7 +326,6 @@ function parseInvoiceCreatedAt(value) {
   const date = value instanceof Date ? value : new Date(value);
   return Number.isNaN(date.getTime()) ? null : date;
 }
-
 export function invoiceListRowDate(inv = {}) {
   const serviceDate = invoiceDateOnly(inv.service_date);
   if (serviceDate) return dateOnlyAtNoon(serviceDate);
@@ -486,7 +417,6 @@ export function invoiceCreatedSendFailedToast(
   const label = invoiceNumber ? `Invoice ${invoiceNumber}` : "Invoice";
   return `${label} created but not ${action} — ${err?.message || "send failed"}. ${recovery}`;
 }
-
 export function buildInvoiceListParams({
   limit = 100,
   pageNo = 1,
@@ -503,19 +433,20 @@ export function buildInvoiceListParams({
   });
   if (filter === "archived") params.set("archived", "only");
   else if (filter !== "all") params.set("status", filter);
-
   const term = query.trim();
   if (term) params.set("search", term);
   if (customerFilterId) params.set("customerId", customerFilterId);
-
   const start = datePeriodStart(datePeriod);
   if (start) params.set("from", formatDateParam(start));
   return params;
 }
-
 export default function AdminInvoicesPage() {
   const [tab, setTab] = useState("list");
   const [stats, setStats] = useState(null);
+  const [statsLoading, setStatsLoading] = useState(true);
+  const [statsError, setStatsError] = useState(false);
+  const [builderPending, setBuilderPending] = useState(false);
+  const statsRequestRef = useRef(0);
   const [toast, setToast] = useState("");
   const [toastTone, setToastTone] = useState("ok");
   const [editInvoice, setEditInvoice] = useState(null);
@@ -523,7 +454,6 @@ export default function AdminInvoicesPage() {
   // opens the resend modal for this id so the customer gets the new version.
   const [promptResendId, setPromptResendId] = useState(null);
   const [isMobile, setIsMobile] = useState(window.innerWidth < 768);
-
   useEffect(() => {
     const handler = () => setIsMobile(window.innerWidth < 768);
     window.addEventListener("resize", handler);
@@ -534,8 +464,15 @@ export default function AdminInvoicesPage() {
   // notice card) so the list refetches instead of showing it still open.
   const [listRefreshKey, setListRefreshKey] = useState(0);
   const loadStats = useCallback(async () => {
+    const request = ++statsRequestRef.current;
+    setStatsLoading(true);
+    setStatsError(false);
+    setStats(null);
     const s = await adminFetch("/admin/invoices/stats").catch(() => null);
+    if (request !== statsRequestRef.current) return;
     setStats(s);
+    setStatsError(!s);
+    setStatsLoading(false);
   }, []);
   useEffect(() => {
     loadStats();
@@ -554,26 +491,22 @@ export default function AdminInvoicesPage() {
     );
   };
   useEffect(() => () => clearTimeout(toastTimerRef.current), []);
-
   return (
-    <div
-      style={{
-        maxWidth: 1300,
-        margin: "0 auto",
-        padding: isMobile ? "0 0 24px" : "0",
-        fontFamily: "'Roboto', Arial, sans-serif",
-        color: D.text,
-      }}
+    <UiSurface
+      density="comfortable"
+      className="mx-auto max-w-[1300px] text-ui-body text-zinc-900 u-nums"
     >
       {" "}
       <AdminCommandHeader
         title="Invoices"
         icon={FileText}
         action={{
-          label: tab === "create" ? "Invoice List" : "Create Invoice",
+          label: tab === "create" ? "Invoice list" : "Create invoice",
           icon: tab === "create" ? ListChecks : Plus,
           variant: tab === "create" ? "secondary" : "primary",
+          disabled: builderPending,
           onClick: () => {
+            if (builderPending) return;
             if (tab === "create") {
               setEditInvoice(null);
               setTab("list");
@@ -582,11 +515,26 @@ export default function AdminInvoicesPage() {
             }
           },
         }}
+        variant="workspace"
       />
+      {tab === "list" && (statsLoading || statsError) && (
+        <ActionFeedback
+          error={statsError}
+          onRetry={statsError ? loadStats : undefined}
+          className="mb-5 min-h-11"
+        >
+          {statsError
+            ? "Invoice totals could not be loaded."
+            : "Loading invoice totals…"}
+        </ActionFeedback>
+      )}
       {tab === "list" && (
         <ZelleNoticesCard
           showToast={showToast}
-          onRefresh={() => { loadStats(); setListRefreshKey((k) => k + 1); }}
+          onRefresh={() => {
+            loadStats();
+            setListRefreshKey((k) => k + 1);
+          }}
           isMobile={isMobile}
         />
       )}
@@ -609,6 +557,7 @@ export default function AdminInvoicesPage() {
         <CreateInvoice
           showToast={showToast}
           editInvoice={editInvoice}
+          onPendingChange={setBuilderPending}
           onCreated={(opts) => {
             loadStats();
             setEditInvoice(null);
@@ -616,47 +565,28 @@ export default function AdminInvoicesPage() {
             setPromptResendId(opts?.promptResendId || null);
           }}
           isMobile={isMobile}
+          key={editInvoice?.id || "new-invoice"}
         />
       )}
       <div
-        role="status"
-        aria-live="polite"
-        aria-hidden={!toast}
+        className="fixed right-4 left-4 sm:left-auto sm:max-w-xl z-[500]"
         style={{
-          position: "fixed",
-          bottom: isMobile
-            ? "calc(72px + env(safe-area-inset-bottom, 0px))"
-            : 20,
-          right: 20,
-          background: D.card,
-          border: `1px solid ${toastTone === "error" ? D.red : D.green}`,
-          borderRadius: 8,
-          padding: "10px 16px",
-          display: "flex",
-          alignItems: "center",
-          gap: 8,
-          boxShadow: "0 8px 32px rgba(0,0,0,.4)",
-          zIndex: 300,
-          fontSize: 13,
-          transform: toast ? "translateY(0)" : "translateY(80px)",
-          opacity: toast ? 1 : 0,
-          transition: "all .3s",
-          pointerEvents: "none",
+          top: isMobile
+            ? "calc(64px + env(safe-area-inset-top, 0px))"
+            : undefined,
+          bottom: isMobile ? undefined : 20,
         }}
       >
-        {/* Children render only while a toast is up: the container stays
-            mounted for its slide transition, but an always-present "OK" /
-            "Error" would linger in the live region after the message clears. */}
-        {toast ? (
-          <>
-            <span style={{ color: toastTone === "error" ? D.red : D.green }}>
-              {toastTone === "error" ? "Error" : "OK"}
-            </span>
-            <span style={{ color: D.text }}>{toast}</span>
-          </>
-        ) : null}
+        {toast && (
+          <ActionFeedback
+            error={toastTone === "error"}
+            className="bg-white border-hairline border-zinc-300 rounded-md p-4"
+          >
+            {toast}
+          </ActionFeedback>
+        )}
       </div>{" "}
-    </div>
+    </UiSurface>
   );
 }
 
@@ -684,22 +614,38 @@ const NOTICE_ALERT_REASONS = new Set(["apply_failed", "sender_unverified"]);
 // Dropdown order: exact-amount + name match first, then exact amount, then
 // the near-amount leads; stable within each band. Exported for the vitest.
 export function orderNoticeCandidates(candidates = []) {
-  const rank = (c) => (c.exact_amount && c.name_match ? 0 : c.exact_amount ? 1 : c.name_match ? 2 : 3);
+  const rank = (c) =>
+    c.exact_amount && c.name_match
+      ? 0
+      : c.exact_amount
+        ? 1
+        : c.name_match
+          ? 2
+          : 3;
   return (Array.isArray(candidates) ? candidates : [])
-    .map((c, i) => ({ c, i }))
+    .map((c, i) => ({
+      c,
+      i,
+    }))
     .sort((a, b) => rank(a.c) - rank(b.c) || a.i - b.i)
     .map(({ c }) => c);
 }
 export function noticeCandidateLabel(c = {}) {
-  const due = Number.isFinite(Number(c.amount_due_cents)) ? `$${(Number(c.amount_due_cents) / 100).toFixed(2)}` : "";
-  const flags = [c.exact_amount && "exact amount", c.name_match && "name match"].filter(Boolean).join(", ");
+  const due = Number.isFinite(Number(c.amount_due_cents))
+    ? `$${(Number(c.amount_due_cents) / 100).toFixed(2)}`
+    : "";
+  const flags = [c.exact_amount && "exact amount", c.name_match && "name match"]
+    .filter(Boolean)
+    .join(", ");
   return `${c.invoice_number || c.invoice_id} · ${c.customer_name || "—"} · ${due}${flags ? ` (${flags})` : ""}`;
 }
 function noticeAmount(n) {
-  return n?.amount_cents == null ? "—" : `$${(n.amount_cents / 100).toFixed(2)}`;
+  return n?.amount_cents == null
+    ? "—"
+    : `$${(n.amount_cents / 100).toFixed(2)}`;
 }
-
 function ZelleNoticesCard({ showToast, onRefresh, isMobile }) {
+  const busyRef = useRef(false);
   const [notices, setNotices] = useState([]);
   const [choice, setChoice] = useState({});
   // id of the notice whose Apply/Ignore is in flight; every row's controls
@@ -710,20 +656,24 @@ function ZelleNoticesCard({ showToast, onRefresh, isMobile }) {
   const [error, setError] = useState("");
   const load = useCallback(async () => {
     try {
-      const data = await adminFetch("/admin/invoices/payment-notices?status=parked&limit=100");
+      const data = await adminFetch(
+        "/admin/invoices/payment-notices?status=parked&limit=100",
+      );
       setNotices(Array.isArray(data?.notices) ? data.notices : []);
       setError("");
     } catch (err) {
       // 404 = the lane's routes are not deployed yet; stay hidden quietly.
-      if (err?.status !== 404) setError(err.message || "Could not load Zelle notices");
+      if (err?.status !== 404)
+        setError(err.message || "Could not load Zelle notices");
       setNotices([]);
     }
   }, []);
-  useEffect(() => { load(); }, [load]);
-
+  useEffect(() => {
+    load();
+  }, [load]);
   if (!notices.length && !error) return null;
-
   const apply = async (n) => {
+    if (busyRef.current) return;
     const ordered = orderNoticeCandidates(n.candidates);
     const invoiceId = choice[n.id] || ordered[0]?.invoice_id;
     if (!invoiceId) return;
@@ -732,18 +682,39 @@ function ZelleNoticesCard({ showToast, onRefresh, isMobile }) {
     // dropdown context, recorded from the invoice itself.
     if (!picked?.exact_amount || pending) return;
     const label = picked.invoice_number;
-    if (!window.confirm(`Mark ${label} paid via Zelle (${noticeAmount(n)} from ${n.payer_name || "unknown payer"}) and send the receipt (email + SMS)?`)) return;
-    setBusy(n.id);
+    if (
+      !window.confirm(
+        `Mark ${label} paid via Zelle (${noticeAmount(n)} from ${n.payer_name || "unknown payer"}) and send the receipt (email + SMS)?`,
+      )
+    )
+      return;
+    busyRef.current = true;
+    setBusy({ id: n.id, action: "apply" });
     try {
-      const res = await adminFetch(`/admin/invoices/payment-notices/${encodeURIComponent(n.id)}/apply`, {
-        method: "POST",
-        body: JSON.stringify({ invoiceId }),
-      });
+      const res = await adminFetch(
+        `/admin/invoices/payment-notices/${encodeURIComponent(n.id)}/apply`,
+        {
+          method: "POST",
+          body: JSON.stringify({
+            invoiceId,
+          }),
+        },
+      );
       // receipt: { email, sms } from the send, or null when the invoice
       // settled but a later step threw (server closes the notice as applied
       // and cannot say whether the receipt went out).
-      const legs = [res?.receipt?.email?.ok && "email", res?.receipt?.sms?.ok && "SMS"].filter(Boolean).join(" + ");
-      const receiptNote = res?.receipt == null ? " — receipt unknown, check the invoice" : legs ? ` — receipt sent (${legs})` : " — receipt not delivered";
+      const legs = [
+        res?.receipt?.email?.ok && "email",
+        res?.receipt?.sms?.ok && "SMS",
+      ]
+        .filter(Boolean)
+        .join(" + ");
+      const receiptNote =
+        res?.receipt == null
+          ? " — receipt unknown, check the invoice"
+          : legs
+            ? ` — receipt sent (${legs})`
+            : " — receipt not delivered";
       showToast(`${label} marked paid via Zelle${receiptNote}`);
       await load();
       onRefresh?.();
@@ -756,15 +727,28 @@ function ZelleNoticesCard({ showToast, onRefresh, isMobile }) {
       await load();
       onRefresh?.();
     } finally {
+      busyRef.current = false;
       setBusy(null);
     }
   };
   const ignore = async (n) => {
+    if (busyRef.current) return;
     if (pending) return;
-    if (!window.confirm(`Ignore this Zelle notice (${noticeAmount(n)} from ${n.payer_name || "unknown payer"})? It will not be recorded.`)) return;
-    setBusy(n.id);
+    if (
+      !window.confirm(
+        `Ignore this Zelle notice (${noticeAmount(n)} from ${n.payer_name || "unknown payer"})? It will not be recorded.`,
+      )
+    )
+      return;
+    busyRef.current = true;
+    setBusy({ id: n.id, action: "ignore" });
     try {
-      await adminFetch(`/admin/invoices/payment-notices/${encodeURIComponent(n.id)}/ignore`, { method: "POST" });
+      await adminFetch(
+        `/admin/invoices/payment-notices/${encodeURIComponent(n.id)}/ignore`,
+        {
+          method: "POST",
+        },
+      );
       showToast("Zelle notice ignored");
       await load();
     } catch (err) {
@@ -773,178 +757,228 @@ function ZelleNoticesCard({ showToast, onRefresh, isMobile }) {
       // lost, or another operator may have resolved it — show its state.
       await load();
     } finally {
+      busyRef.current = false;
       setBusy(null);
     }
   };
-
   return (
-    <div style={{ ...sCard, borderColor: D.amber }} data-testid="zelle-notices-card">
-      <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between", gap: 12, marginBottom: 12, flexWrap: "wrap" }}>
-        <div style={{ fontSize: 15, fontWeight: 600, color: D.heading }}>
+    <Card
+      style={{
+        borderColor: "#52525B",
+      }}
+      data-testid="zelle-notices-card"
+      className="p-4 mb-5"
+    >
+      <div
+        style={{
+          display: "flex",
+          alignItems: "baseline",
+          justifyContent: "space-between",
+          gap: 12,
+          marginBottom: 12,
+          flexWrap: "wrap",
+        }}
+      >
+        <div className="text-ui-field font-medium text-zinc-900">
           Zelle payments to review{notices.length ? ` (${notices.length})` : ""}
         </div>
-        <div style={{ fontSize: 12, color: D.muted }}>
-          Capital One notices the portal could not match to one invoice on its own.
+        <div className="text-ui-body text-ink-secondary">
+          Capital One notices the portal could not match to one invoice on its
+          own.
         </div>
       </div>
-      {error && <div style={{ fontSize: 13, color: D.red, marginBottom: 10 }}>{error}</div>}
+      {error && (
+        <div
+          style={{
+            marginBottom: 10,
+          }}
+          className="text-ui-body text-alert-fg"
+        >
+          {error}
+        </div>
+      )}
       {notices.map((n) => {
         const ordered = orderNoticeCandidates(n.candidates);
         const selected = choice[n.id] || ordered[0]?.invoice_id || "";
-        const selectedExact = Boolean(ordered.find((c) => c.invoice_id === selected)?.exact_amount);
+        const selectedExact = Boolean(
+          ordered.find((c) => c.invoice_id === selected)?.exact_amount,
+        );
         const alert = NOTICE_ALERT_REASONS.has(n.park_reason);
         return (
           <div
             key={n.id}
             style={{
               display: "grid",
-              gridTemplateColumns: isMobile ? "1fr" : "minmax(0, 1.4fr) minmax(0, 1.6fr) auto",
+              gridTemplateColumns: isMobile
+                ? "1fr"
+                : "minmax(0, 1.4fr) minmax(0, 1.6fr) auto",
               gap: 12,
               alignItems: "center",
               padding: "12px 0",
-              borderTop: `1px solid ${D.border}`,
+              borderTop: "1px solid #E4E4E7",
             }}
           >
-            <div style={{ minWidth: 0 }}>
-              <div style={{ fontSize: 14, fontWeight: 600, color: D.text }}>
+            <div
+              style={{
+                minWidth: 0,
+              }}
+            >
+              <div className="text-ui-body font-medium text-zinc-900">
                 {n.payer_name || "Unknown payer"} · {noticeAmount(n)}
               </div>
-              <div style={{ fontSize: 13, color: D.muted, marginTop: 2, overflowWrap: "anywhere" }}>
+              <div
+                style={{
+                  marginTop: 2,
+                  overflowWrap: "anywhere",
+                }}
+                className="text-ui-body text-ink-secondary"
+              >
                 {n.memo ? `Memo: ${n.memo}` : "No memo"}
-                {n.received_at ? ` · ${formatETDate(n.received_at, { month: "short", day: "numeric" })}` : ""}
+                {n.received_at
+                  ? ` · ${formatETDate(n.received_at, {
+                      month: "short",
+                      day: "numeric",
+                    })}`
+                  : ""}
               </div>
-              <div style={{ marginTop: 6 }}>
-                <span style={sBadge(alert ? "#FEE2E2" : "#FEF3C7", alert ? D.red : D.amber)}>
-                  {NOTICE_REASON_LABELS[n.park_reason] || n.park_reason || "Needs review"}
-                </span>
-                {n.apply_error && <span style={{ fontSize: 12, color: D.red, marginLeft: 8 }}>{n.apply_error}</span>}
+              <div
+                style={{
+                  marginTop: 6,
+                }}
+              >
+                <Badge
+                  className="max-w-full whitespace-normal"
+                  tone={alert ? "alert" : "neutral"}
+                >
+                  {NOTICE_REASON_LABELS[n.park_reason] ||
+                    n.park_reason ||
+                    "Needs review"}
+                </Badge>
+                {n.apply_error && (
+                  <span
+                    style={{
+                      marginLeft: 8,
+                    }}
+                    className="text-ui-body text-alert-fg"
+                  >
+                    {n.apply_error}
+                  </span>
+                )}
               </div>
             </div>
-            <div style={{ minWidth: 0 }}>
+            <div
+              style={{
+                minWidth: 0,
+              }}
+            >
               {ordered.length ? (
-                <select
-                  aria-label={`Invoice for ${n.payer_name || "payer"} ${noticeAmount(n)}`}
-                  value={selected}
-                  onChange={(e) => setChoice((prev) => ({ ...prev, [n.id]: e.target.value }))}
-                  style={sInput(isMobile)}
-                  disabled={pending}
+                <Field
+                  className="min-w-0"
+                  label={`Invoice for ${n.payer_name || "payer"} ${noticeAmount(n)}`}
                 >
-                  {ordered.map((c) => (
-                    <option key={c.invoice_id} value={c.invoice_id}>{noticeCandidateLabel(c)}</option>
-                  ))}
-                </select>
+                  <Select
+                    aria-label={`Invoice for ${n.payer_name || "payer"} ${noticeAmount(n)}`}
+                    value={selected}
+                    onChange={(e) =>
+                      setChoice((prev) => ({
+                        ...prev,
+                        [n.id]: e.target.value,
+                      }))
+                    }
+                    disabled={pending}
+                  >
+                    {ordered.map((c) => (
+                      <option key={c.invoice_id} value={c.invoice_id}>
+                        {noticeCandidateLabel(c)}
+                      </option>
+                    ))}
+                  </Select>
+                </Field>
               ) : (
-                <div style={{ fontSize: 13, color: D.muted }}>No candidate invoices — record it from the invoice if it exists, or ignore.</div>
+                <div className="text-ui-body text-ink-secondary">
+                  No candidate invoices — record it from the invoice if it
+                  exists, or ignore.
+                </div>
               )}
               {ordered.length > 0 && !selectedExact && (
-                <div style={{ fontSize: 13, color: D.muted, marginTop: 4 }}>Near-amount lead — record the payment from that invoice, then ignore this notice.</div>
+                <div
+                  style={{
+                    marginTop: 4,
+                  }}
+                  className="text-ui-body text-ink-secondary"
+                >
+                  Near-amount lead — record the payment from that invoice, then
+                  ignore this notice.
+                </div>
               )}
             </div>
-            <div style={{ display: "flex", gap: 8, justifyContent: isMobile ? "stretch" : "flex-end" }}>
-              <button
+            <div
+              style={{
+                display: "flex",
+                gap: 8,
+                justifyContent: isMobile ? "stretch" : "flex-end",
+              }}
+            >
+              <Button
                 type="button"
-                style={{ ...sBtn(D.heading, D.white, isMobile), flex: isMobile ? 1 : undefined, opacity: !selectedExact || pending ? 0.5 : 1 }}
+                style={{
+                  flex: isMobile ? 1 : undefined,
+                }}
                 disabled={!selectedExact || pending}
                 onClick={() => apply(n)}
+                variant="secondary"
+                loading={busy?.id === n.id && busy.action === "apply"}
+                onClickCapture={(event) =>
+                  event.currentTarget.focus({
+                    preventScroll: true,
+                  })
+                }
+                className="min-w-11"
               >
                 Apply &amp; send receipt
-              </button>
-              <button
+              </Button>
+              <Button
                 type="button"
-                style={{ ...sBtn(D.card, D.text, isMobile), border: `1px solid ${D.border}`, flex: isMobile ? 1 : undefined, opacity: pending ? 0.5 : 1 }}
+                style={{
+                  flex: isMobile ? 1 : undefined,
+                }}
                 disabled={pending}
                 onClick={() => ignore(n)}
+                loading={busy?.id === n.id && busy.action === "ignore"}
+                variant={"secondary"}
+                onClickCapture={(event) =>
+                  event.currentTarget.focus({
+                    preventScroll: true,
+                  })
+                }
+                className="min-w-11"
               >
                 Ignore
-              </button>
+              </Button>
             </div>
           </div>
         );
       })}
-    </div>
+    </Card>
   );
 }
 
 // ── Filter pill with dropdown ──
-function FilterPill({ label, value, options, onChange, isMobile }) {
-  const [open, setOpen] = useState(false);
-  const ref = useRef(null);
-  useEffect(() => {
-    if (!open) return;
-    const close = (e) => {
-      if (ref.current && !ref.current.contains(e.target)) setOpen(false);
-    };
-    document.addEventListener("mousedown", close);
-    return () => document.removeEventListener("mousedown", close);
-  }, [open]);
-  const current = options.find((o) => o.key === value) || options[0];
+function InvoiceFilter({ label, value, options, onChange, disabled }) {
   return (
-    <div ref={ref} style={{ position: "relative" }}>
-      {" "}
-      <button
-        onClick={() => setOpen((o) => !o)}
-        style={{
-          padding: "10px 16px",
-          borderRadius: 999,
-          border: `1px solid ${D.border}`,
-          background: D.card,
-          color: D.text,
-          fontSize: 14,
-          fontWeight: 400,
-          cursor: "pointer",
-          minHeight: 40,
-          display: "inline-flex",
-          alignItems: "center",
-          gap: 6,
-        }}
+    <Field label={label} className="min-w-[140px] flex-1">
+      <Select
+        value={value}
+        onChange={(event) => onChange(event.target.value)}
+        disabled={disabled}
       >
-        {" "}
-        <span style={{ color: D.muted }}>{label}</span>{" "}
-        <span style={{ fontWeight: 700, color: D.heading }}>
-          {current.label}
-        </span>{" "}
-      </button>
-      {open && (
-        <div
-          style={{
-            position: "absolute",
-            top: "calc(100% + 4px)",
-            left: 0,
-            zIndex: 20,
-            background: D.card,
-            border: `1px solid ${D.border}`,
-            borderRadius: 10,
-            boxShadow: "0 8px 24px rgba(0,0,0,0.08)",
-            minWidth: 180,
-            overflow: "hidden",
-          }}
-        >
-          {options.map((o) => (
-            <button
-              key={o.key}
-              onClick={() => {
-                onChange(o.key);
-                setOpen(false);
-              }}
-              style={{
-                display: "block",
-                width: "100%",
-                textAlign: "left",
-                padding: isMobile ? "12px 14px" : "10px 14px",
-                border: "none",
-                background: o.key === value ? "#F4F4F5" : D.card,
-                color: D.heading,
-                fontSize: 14,
-                cursor: "pointer",
-                fontWeight: o.key === value ? 600 : 400,
-              }}
-            >
-              {o.label}
-            </button>
-          ))}
-        </div>
-      )}
-    </div>
+        {options.map((option) => (
+          <option key={option.key} value={option.key}>
+            {option.label}
+          </option>
+        ))}
+      </Select>
+    </Field>
   );
 }
 
@@ -959,6 +993,10 @@ function InvoiceList({
   promptResendId,
   onPromptResendHandled,
 }) {
+  const rowActionBusyRef = useRef(false);
+  const reversingIdRef = useRef(false);
+  const cancellingPlanInvoiceIdRef = useRef(false);
+  const batchSendingRef = useRef(false);
   const [searchParams, setSearchParams] = useSearchParams();
   const customerFilterId =
     searchParams.get("customer") || searchParams.get("customerId") || "";
@@ -983,6 +1021,9 @@ function InvoiceList({
   const [debouncedQuery, setDebouncedQuery] = useState("");
   const [listLoading, setListLoading] = useState(true);
   const [listError, setListError] = useState(false);
+  const [moreError, setMoreError] = useState(false);
+  const [deepLinkError, setDeepLinkError] = useState("");
+  const [deepLinkAttempt, setDeepLinkAttempt] = useState(0);
   const listReqIdRef = useRef(0);
   useEffect(() => {
     const t = setTimeout(() => setDebouncedQuery(query), 300);
@@ -1005,11 +1046,11 @@ function InvoiceList({
   // rowActionBusy scalar can be overwritten and cleared by a sibling
   // action mid-flight, which would re-enable the button early.
   const [reversingId, setReversingId] = useState(null);
-  const [annualPrepayModalInvoice, setAnnualPrepayModalInvoice] = useState(null);
+  const [annualPrepayModalInvoice, setAnnualPrepayModalInvoice] =
+    useState(null);
   const [applyCreditInvoice, setApplyCreditInvoice] = useState(null);
   const [cardOnFileInvoice, setCardOnFileInvoice] = useState(null);
   const sendReceiptEnabled = useFeatureFlag("ff_invoice_send_receipt", true);
-
   const load = useCallback(
     async ({ append = false, pageNo = 1 } = {}) => {
       const params = buildInvoiceListParams({
@@ -1026,6 +1067,7 @@ function InvoiceList({
       // current one, so it can never invalidate a filter/sort/date reload
       // and is itself discarded if such a reload started meanwhile.
       const reqId = append ? listReqIdRef.current : ++listReqIdRef.current;
+      setMoreError(false);
       if (!append) {
         setListLoading(true);
         setListError(false);
@@ -1042,6 +1084,8 @@ function InvoiceList({
           setInvoices([]);
           setTotal(0);
           setSelected(new Set());
+        } else {
+          setMoreError(true);
         }
         return;
       }
@@ -1049,9 +1093,16 @@ function InvoiceList({
       // Dedupe by id: a deep-linked invoice fetched ahead of its page
       // (?invoice=) must not appear twice once pagination reaches it
       // (Codex PR r6 P2 — duplicate keys, doubled expanded rows).
-      setInvoices((prev) => (append
-        ? [...prev, ...rows.filter((r) => !prev.some((p) => String(p.id) === String(r.id)))]
-        : rows));
+      setInvoices((prev) =>
+        append
+          ? [
+              ...prev,
+              ...rows.filter(
+                (r) => !prev.some((p) => String(p.id) === String(r.id)),
+              ),
+            ]
+          : rows,
+      );
       setTotal(Number(data.total ?? rows.length) || 0);
       setPage(Number(data.page || pageNo));
       if (!append) {
@@ -1071,23 +1122,26 @@ function InvoiceList({
   // lands ON the row instead of a generic list (Codex PR r5 P2).
   useEffect(() => {
     const invoiceId = searchParams.get("invoice");
+    setDeepLinkError("");
     if (!invoiceId) {
       setExpanded(null);
       setDeepLinkedInvoice(null);
       return;
     }
-    const match = invoices.find(
-      (inv) => String(inv.id) === String(invoiceId),
-    );
+    const match = invoices.find((inv) => String(inv.id) === String(invoiceId));
     if (match) {
       setExpanded(match.id);
       // The separately fetched row is only for OUT-OF-PAGE targets —
       // clear a stale one so it stops rendering outside the active
       // filters (Codex PR r10 P2).
-      setDeepLinkedInvoice((prev) => (prev && String(prev.id) !== String(invoiceId) ? null : prev));
+      setDeepLinkedInvoice((prev) =>
+        prev && String(prev.id) !== String(invoiceId) ? null : prev,
+      );
       return;
     }
-    setDeepLinkedInvoice((prev) => (prev && String(prev.id) !== String(invoiceId) ? null : prev));
+    setDeepLinkedInvoice((prev) =>
+      prev && String(prev.id) !== String(invoiceId) ? null : prev,
+    );
     let cancelled = false;
     adminFetch(`/admin/invoices/${encodeURIComponent(invoiceId)}`)
       .then((row) => {
@@ -1106,26 +1160,33 @@ function InvoiceList({
         setDeepLinkedInvoice(flat);
         setExpanded(row.id);
       })
-      .catch(() => setExpanded(null));
-    return () => { cancelled = true; };
-  }, [invoices, searchParams]);
-
+      .catch((error) => {
+        if (cancelled) return;
+        setExpanded(null);
+        setDeepLinkError(`Could not load the linked invoice: ${error.message}`);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [invoices, searchParams, deepLinkAttempt]);
   const toggleExpanded = (invoiceId) => {
     const isOpen = String(expanded) === String(invoiceId);
     const next = new URLSearchParams(searchParams);
     if (isOpen) next.delete("invoice");
     else next.set("invoice", String(invoiceId));
-    setSearchParams(next, { replace: isOpen });
-    setExpanded(isOpen ? null : invoiceId);
+    setSearchParams(next, {
+      replace: isOpen,
+    });
+    // The URL effect owns expansion, including deferred route updates and Back.
   };
-
   const clearCustomerFilter = () => {
     const next = new URLSearchParams(searchParams);
     next.delete("customer");
     next.delete("customerId");
-    setSearchParams(next, { replace: true });
+    setSearchParams(next, {
+      replace: true,
+    });
   };
-
   const handleSend = (invoice) => {
     setSendModalInvoice(invoice);
   };
@@ -1172,43 +1233,51 @@ function InvoiceList({
   // was an unhandled rejection (no toast, no refresh) and the button stayed
   // clickable mid-flight (double-fire).
   const [rowActionBusy, setRowActionBusy] = useState(null);
-
   const handleVoid = async (id) => {
+    if (rowActionBusyRef.current) return;
     if (!confirm("Void this invoice?")) return;
+    rowActionBusyRef.current = true;
     setRowActionBusy(id);
     try {
-      await adminFetch(`/admin/invoices/${id}/void`, { method: "POST" });
+      await adminFetch(`/admin/invoices/${id}/void`, {
+        method: "POST",
+      });
       showToast("Invoice voided");
       load();
       onRefresh();
     } catch (err) {
       showToast(`Void failed: ${err.message}`, "error");
     } finally {
+      rowActionBusyRef.current = false;
       setRowActionBusy(null);
     }
   };
-
   const handleUnvoid = async (id) => {
+    if (rowActionBusyRef.current) return;
     if (
       !confirm(
         "Restore this voided invoice to a draft? It becomes editable and collectible again.",
       )
     )
       return;
+    rowActionBusyRef.current = true;
     setRowActionBusy(id);
     try {
-      await adminFetch(`/admin/invoices/${id}/unvoid`, { method: "POST" });
+      await adminFetch(`/admin/invoices/${id}/unvoid`, {
+        method: "POST",
+      });
       showToast("Invoice restored to draft");
       load();
       onRefresh();
     } catch (err) {
       showToast(`Unvoid failed: ${err.message}`, "error");
     } finally {
+      rowActionBusyRef.current = false;
       setRowActionBusy(null);
     }
   };
-
   const handleReversePrepaid = async (id) => {
+    if (reversingIdRef.current) return;
     if (reversingId) return;
     if (
       !confirm(
@@ -1216,6 +1285,7 @@ function InvoiceList({
       )
     )
       return;
+    reversingIdRef.current = true;
     setReversingId(id);
     try {
       const res = await adminFetch(`/admin/invoices/${id}/reverse-prepaid`, {
@@ -1229,23 +1299,30 @@ function InvoiceList({
     } catch (err) {
       showToast(`Reverse failed: ${err.message}`, "error");
     } finally {
+      reversingIdRef.current = false;
       setReversingId(null);
     }
   };
-
   const handleCancelPaymentPlan = async (id, planId) => {
+    if (cancellingPlanInvoiceIdRef.current) return;
     if (
       !confirm(
         "Cancel this payment plan? The invoice reopens for normal collection and editing.",
       )
     )
       return;
+    cancellingPlanInvoiceIdRef.current = true;
     setCancellingPlanInvoiceId(id);
     try {
-      const res = await adminFetch(`/admin/invoices/${id}/payment-plan/cancel`, {
-        method: "POST",
-        body: JSON.stringify({ paymentPlanId: planId }),
-      });
+      const res = await adminFetch(
+        `/admin/invoices/${id}/payment-plan/cancel`,
+        {
+          method: "POST",
+          body: JSON.stringify({
+            paymentPlanId: planId,
+          }),
+        },
+      );
       // Settlement can win the cancel race — the server then COMPLETES the
       // plan instead. Surface what actually happened; a "cancelled" toast
       // would misrepresent the collection state.
@@ -1260,17 +1337,19 @@ function InvoiceList({
     } catch (err) {
       showToast(`Cancel plan failed: ${err.message}`, "error");
     } finally {
+      cancellingPlanInvoiceIdRef.current = false;
       setCancellingPlanInvoiceId(null);
     }
   };
-
   const handleArchive = async (id) => {
+    if (rowActionBusyRef.current) return;
     if (
       !confirm(
         "Archive this voided invoice? It stays accessible under the Archived filter.",
       )
     )
       return;
+    rowActionBusyRef.current = true;
     setRowActionBusy(id);
     try {
       await adminFetch(`/admin/invoices/${id}/archive`, {
@@ -1282,24 +1361,28 @@ function InvoiceList({
     } catch (err) {
       showToast(`Archive failed: ${err.message}`, "error");
     } finally {
+      rowActionBusyRef.current = false;
       setRowActionBusy(null);
     }
   };
-
   const handleUnarchive = async (id) => {
+    if (rowActionBusyRef.current) return;
+    rowActionBusyRef.current = true;
     setRowActionBusy(id);
     try {
-      await adminFetch(`/admin/invoices/${id}/unarchive`, { method: "POST" });
+      await adminFetch(`/admin/invoices/${id}/unarchive`, {
+        method: "POST",
+      });
       showToast("Invoice restored");
       load();
       onRefresh();
     } catch (err) {
       showToast(`Restore failed: ${err.message}`, "error");
     } finally {
+      rowActionBusyRef.current = false;
       setRowActionBusy(null);
     }
   };
-
   const toggleSelect = (id) => {
     const next = new Set(selected);
     if (next.has(id)) next.delete(id);
@@ -1339,6 +1422,7 @@ function InvoiceList({
     );
   const clearSelection = () => setSelected(new Set());
   const handleBatchSend = async () => {
+    if (batchSendingRef.current) return;
     const ids = Array.from(selected);
     if (ids.length === 0) return;
     if (receiptMode) {
@@ -1358,6 +1442,7 @@ function InvoiceList({
       )
     )
       return;
+    batchSendingRef.current = true;
     setBatchSending(true);
     try {
       const endpoint = receiptMode
@@ -1365,7 +1450,9 @@ function InvoiceList({
         : "/admin/invoices/batch/send";
       const result = await adminFetch(endpoint, {
         method: "POST",
-        body: JSON.stringify({ invoiceIds: ids }),
+        body: JSON.stringify({
+          invoiceIds: ids,
+        }),
       });
       const noun = receiptMode ? "receipt" : "invoice";
       showToast(
@@ -1377,60 +1464,117 @@ function InvoiceList({
     } catch (err) {
       showToast(`Batch send failed: ${err.message}`, "error");
     } finally {
+      batchSendingRef.current = false;
       setBatchSending(false);
     }
   };
-
   const domain = typeof window !== "undefined" ? window.location.origin : "";
 
   // Derive display status: overdue when unpaid + past due
   const getDisplayStatus = (inv) => {
     if (inv.status === "paid")
-      return { key: "paid", label: "Paid", color: D.green };
+      return {
+        key: "paid",
+        label: "Paid",
+        color: "#52525B",
+      };
     if (inv.status === "prepaid")
-      return { key: "prepaid", label: "Prepaid", color: D.green };
+      return {
+        key: "prepaid",
+        label: "Prepaid",
+        color: "#52525B",
+      };
     if (inv.status === "void")
-      return { key: "void", label: "Void", color: D.muted };
+      return {
+        key: "void",
+        label: "Void",
+        color: "#52525B",
+      };
     if (inv.status === "processing")
-      return { key: "processing", label: "Processing", color: D.amber };
+      return {
+        key: "processing",
+        label: "Processing",
+        color: "#52525B",
+      };
     if (inv.status === "refunded")
-      return { key: "refunded", label: "Refunded", color: D.muted };
+      return {
+        key: "refunded",
+        label: "Refunded",
+        color: "#52525B",
+      };
     if (inv.status === "canceled" || inv.status === "cancelled")
-      return { key: "canceled", label: "Canceled", color: D.muted };
+      return {
+        key: "canceled",
+        label: "Canceled",
+        color: "#52525B",
+      };
     if (inv.status === "scheduled") {
       // A recovered crashed-send claim is parked here with NO send date
       // (delivery unverified — the cron must not retry it). Without its own
       // signal it would read as an ordinary "Scheduled" invoice forever.
       if (inv.scheduled_send_error && !inv.scheduled_send_at)
-        return { key: "send_review", label: "Needs review", color: D.red };
+        return {
+          key: "send_review",
+          label: "Needs review",
+          color: "#C8312F",
+        };
       // The send cron stops retrying after 5 attempts — without this the
       // invoice would sit as "Scheduled" forever with no visible signal.
-      if (
-        inv.scheduled_send_error &&
-        Number(inv.scheduled_send_attempts) >= 5
-      )
-        return { key: "send_failed", label: "Send failed", color: D.red };
-      return { key: "scheduled", label: "Scheduled", color: D.amber };
+      if (inv.scheduled_send_error && Number(inv.scheduled_send_attempts) >= 5)
+        return {
+          key: "send_failed",
+          label: "Send failed",
+          color: "#C8312F",
+        };
+      return {
+        key: "scheduled",
+        label: "Scheduled",
+        color: "#52525B",
+      };
     }
     if (inv.status === "sending")
-      return { key: "sending", label: "Sending", color: D.amber };
+      return {
+        key: "sending",
+        label: "Sending",
+        color: "#52525B",
+      };
     if (inv.status === "draft")
-      return { key: "draft", label: "Draft", color: D.muted };
+      return {
+        key: "draft",
+        label: "Draft",
+        color: "#52525B",
+      };
     // ET wall-clock, like the server's list filter — the old browser-local
     // check flipped rows a day early/late for anyone outside ET.
     if (isInvoiceDueDateOverdue(inv.due_date))
-      return { key: "overdue", label: "Overdue", color: D.red };
+      return {
+        key: "overdue",
+        label: "Overdue",
+        color: "#C8312F",
+      };
     if (inv.status === "overdue")
-      return { key: "overdue", label: "Overdue", color: D.red };
+      return {
+        key: "overdue",
+        label: "Overdue",
+        color: "#C8312F",
+      };
     if (inv.status === "viewed")
-      return { key: "viewed", label: "Viewed", color: D.text };
-    return { key: "sent", label: "Sent", color: D.text };
+      return {
+        key: "viewed",
+        label: "Viewed",
+        color: "#18181B",
+      };
+    return {
+      key: "sent",
+      label: "Sent",
+      color: "#18181B",
+    };
   };
-
-  const rows = deepLinkedInvoice
-    && !invoices.some((inv) => String(inv.id) === String(deepLinkedInvoice.id))
-    ? [deepLinkedInvoice, ...invoices]
-    : invoices;
+  const rows =
+    deepLinkedInvoice &&
+    !invoices.some((inv) => String(inv.id) === String(deepLinkedInvoice.id))
+      ? [deepLinkedInvoice, ...invoices]
+      : invoices;
 
   // Group by day — date header matches "Saturday, April 18, 2026"
   const groups = [];
@@ -1449,54 +1593,45 @@ function InvoiceList({
             year: "numeric",
           })
         : "Unknown date";
-      const g = { key, label, items: [] };
+      const g = {
+        key,
+        label,
+        items: [],
+      };
       groupMap.set(key, g);
       groups.push(g);
     }
     groupMap.get(key).items.push(inv);
   }
-
-  const rowPad = isMobile ? "18px 16px" : "16px 18px";
-
   return (
     <div>
       {/* Search */}
-      <div style={{ padding: isMobile ? "4px 16px 12px" : "4px 0 12px" }}>
+      <div
+        style={{
+          padding: "4px 0 12px",
+        }}
+      >
         {" "}
-        <div style={{ position: "relative" }}>
+        <div
+          style={{
+            position: "relative",
+          }}
+        >
           {" "}
-          <span
-            style={{
-              position: "absolute",
-              left: 18,
-              top: "50%",
-              transform: "translateY(-50%)",
-              color: D.muted,
-              fontSize: 16,
-              pointerEvents: "none",
-            }}
-          >
-            ⌕
-          </span>{" "}
-          <input
-            id="admin-invoice-search"
-            name="admin_invoice_search"
-            value={query}
-            onChange={(e) => setQuery(e.target.value)}
-            placeholder="Search"
-            style={{
-              width: "100%",
-              padding: "14px 18px 14px 44px",
-              background: D.card,
-              border: `1px solid ${D.border}`,
-              borderRadius: 999,
-              fontSize: 16,
-              color: D.text,
-              outline: "none",
-              boxSizing: "border-box",
-              minHeight: 48,
-            }}
-          />{" "}
+          <Field className="min-w-0" label="Search invoices">
+            <Input
+              id="admin-invoice-search"
+              name="admin_invoice_search"
+              value={query}
+              disabled={batchSending}
+              onChange={(e) => setQuery(e.target.value)}
+              placeholder="Search"
+              style={{
+                width: "100%",
+                boxSizing: "border-box",
+              }}
+            />
+          </Field>{" "}
         </div>{" "}
       </div>
       {customerFilterId && (
@@ -1504,34 +1639,29 @@ function InvoiceList({
           style={{
             margin: isMobile ? "0 16px 12px" : "0 0 12px",
             padding: "10px 12px",
-            border: `1px solid ${D.border}`,
-            borderRadius: 8,
-            background: D.card,
+            border: "1px solid #E4E4E7",
             display: "flex",
             alignItems: "center",
             justifyContent: "space-between",
             gap: 12,
-            fontSize: 13,
           }}
+          className="rounded-md bg-white text-ui-body"
         >
           <span>Customer invoices only</span>
-          <button
+          <Button
             type="button"
             onClick={clearCustomerFilter}
             aria-label="Clear customer invoice filter"
-            style={{
-              minHeight: 44,
-              padding: "0 14px",
-              borderRadius: 999,
-              border: `1px solid ${D.border}`,
-              background: D.bg,
-              color: D.text,
-              cursor: "pointer",
-              fontSize: 13,
-            }}
+            variant={"secondary"}
+            onClickCapture={(event) =>
+              event.currentTarget.focus({
+                preventScroll: true,
+              })
+            }
+            className="min-w-11"
           >
             Show all
-          </button>
+          </Button>
         </div>
       )}
       {/* Filter pills */}
@@ -1539,79 +1669,134 @@ function InvoiceList({
         style={{
           display: "flex",
           gap: 10,
-          padding: isMobile ? "4px 16px 16px" : "4px 0 16px",
-          alignItems: "center",
+          padding: "4px 0 16px",
+          alignItems: "flex-end",
           flexWrap: "wrap",
         }}
       >
         {" "}
-        <FilterPill
+        <InvoiceFilter
           label="Filter"
+          disabled={batchSending}
           value={filter}
           onChange={setFilter}
-          isMobile={isMobile}
           options={[
-            { key: "all", label: "All" },
-            { key: "overdue", label: "Overdue" },
-            { key: "unpaid", label: "Unpaid" },
-            { key: "paid", label: "Paid" },
-            { key: "prepaid", label: "Prepaid" },
-            { key: "needs_receipt", label: "Needs receipt" },
-            { key: "draft", label: "Draft" },
-            { key: "archived", label: "Archived" },
+            {
+              key: "all",
+              label: "All",
+            },
+            {
+              key: "overdue",
+              label: "Overdue",
+            },
+            {
+              key: "unpaid",
+              label: "Unpaid",
+            },
+            {
+              key: "paid",
+              label: "Paid",
+            },
+            {
+              key: "prepaid",
+              label: "Prepaid",
+            },
+            {
+              key: "needs_receipt",
+              label: "Needs receipt",
+            },
+            {
+              key: "draft",
+              label: "Draft",
+            },
+            {
+              key: "archived",
+              label: "Archived",
+            },
           ]}
         />{" "}
-        <FilterPill
+        <InvoiceFilter
           label="Date"
+          disabled={batchSending}
           value={datePeriod}
           onChange={setDatePeriod}
-          isMobile={isMobile}
           options={[
-            { key: "all", label: "All" },
-            { key: "today", label: "Today" },
-            { key: "7d", label: "Last 7 days" },
-            { key: "30d", label: "Last 30 days" },
-            { key: "month", label: "This month" },
+            {
+              key: "all",
+              label: "All",
+            },
+            {
+              key: "today",
+              label: "Today",
+            },
+            {
+              key: "7d",
+              label: "Last 7 days",
+            },
+            {
+              key: "30d",
+              label: "Last 30 days",
+            },
+            {
+              key: "month",
+              label: "This month",
+            },
           ]}
         />{" "}
-        <FilterPill
+        <InvoiceFilter
           label="Sort"
+          disabled={batchSending}
           value={sort}
           onChange={setSort}
-          isMobile={isMobile}
           options={[
-            { key: "newest", label: "Newest" },
-            { key: "oldest", label: "Oldest" },
-            { key: "amount_high", label: "Amount ↓" },
-            { key: "amount_low", label: "Amount ↑" },
+            {
+              key: "newest",
+              label: "Newest",
+            },
+            {
+              key: "oldest",
+              label: "Oldest",
+            },
+            {
+              key: "amount_high",
+              label: "Amount ↓",
+            },
+            {
+              key: "amount_low",
+              label: "Amount ↑",
+            },
           ]}
         />
         {sendableInvoices.length > 0 && (
-          <button
+          <Button
             onClick={selectAllSendable}
-            style={{
-              padding: "10px 16px",
-              borderRadius: 999,
-              border: `1px solid ${D.border}`,
-              background: D.card,
-              color: D.muted,
-              fontSize: 13,
-              cursor: "pointer",
-            }}
+            disabled={batchSending}
+            variant={"secondary"}
+            onClickCapture={(event) =>
+              event.currentTarget.focus({
+                preventScroll: true,
+              })
+            }
+            className="min-w-11"
           >
             {receiptMode
               ? `Select ${Math.min(sendableInvoices.length, BATCH_RECEIPT_MAX)} to receipt`
               : `Select sendable (${sendableInvoices.length})`}
-          </button>
+          </Button>
         )}
         {stats && !isMobile && (
-          <span style={{ marginLeft: "auto", fontSize: 12, color: D.muted }}>
+          <span
+            style={{
+              marginLeft: "auto",
+            }}
+            className="text-ui-body text-ink-secondary"
+          >
             {stats.paid} paid · {stats.outstanding} outstanding ·{" "}
             {stats.overdue} overdue
             {Number(stats.deposits?.onHand) > 0 && (
               <>
                 {" · "}
-                <span style={{ color: D.green }}>
+                <span className="text-ink-secondary">
                   ${Number(stats.deposits.onHand).toFixed(2)} deposits on hand
                   {stats.deposits.onHandCount > 1
                     ? ` (${stats.deposits.onHandCount})`
@@ -1623,39 +1808,86 @@ function InvoiceList({
         )}
       </div>
       {/* List */}
+      {deepLinkError && (
+        <ActionFeedback
+          error
+          onRetry={() => setDeepLinkAttempt((attempt) => attempt + 1)}
+          className="mb-4"
+        >
+          {deepLinkError}
+        </ActionFeedback>
+      )}
+      {listLoading && rows.length > 0 && (
+        <ActionFeedback className="mb-4">Refreshing invoices…</ActionFeedback>
+      )}
+      {listError && rows.length > 0 && (
+        <ActionFeedback error onRetry={() => load()} className="mb-4">
+          Could not load the invoice list.
+        </ActionFeedback>
+      )}
       {rows.length === 0 ? (
         <div
           style={{
             padding: 48,
             textAlign: "center",
-            color: listError ? D.red : D.muted,
-            fontSize: 15,
           }}
+          className={cn(
+            listError ? "text-alert-fg" : "text-ink-secondary",
+            "text-ui-field min-h-[240px] box-border",
+          )}
         >
           {listError ? (
             <>
               <div role="alert">Could not load invoices</div>
-              <button
+              <Button
                 type="button"
                 onClick={() => load()}
-                style={{ ...sBtn(D.heading, D.white, isMobile), marginTop: 12 }}
+                style={{
+                  marginTop: 12,
+                }}
+                variant={"secondary"}
+                onClickCapture={(event) =>
+                  event.currentTarget.focus({
+                    preventScroll: true,
+                  })
+                }
+                className="min-w-11"
               >
                 Retry
-              </button>
+              </Button>
             </>
           ) : listLoading ? (
             "Loading invoices…"
           ) : (
-            "No invoices match"
+            <>
+              <div>
+                {query || filter !== "all" || datePeriod !== "all"
+                  ? "No invoices match"
+                  : "No invoices yet. Create an invoice to get started."}
+              </div>
+              {(query || filter !== "all" || datePeriod !== "all") && (
+                <Button
+                  variant="secondary"
+                  className="mt-3"
+                  onClick={() => {
+                    setQuery("");
+                    setFilter("all");
+                    setDatePeriod("all");
+                  }}
+                >
+                  Clear filters
+                </Button>
+              )}
+            </>
           )}
         </div>
       ) : (
         <div
           style={{
-            background: D.card,
-            borderTop: `1px solid ${D.border}`,
-            borderBottom: `1px solid ${D.border}`,
+            borderTop: "1px solid #E4E4E7",
+            borderBottom: "1px solid #E4E4E7",
           }}
+          className="bg-white"
         >
           {groups.map((g) => (
             <div key={g.key}>
@@ -1663,11 +1895,9 @@ function InvoiceList({
               <div
                 style={{
                   padding: isMobile ? "16px 16px 10px" : "16px 18px 10px",
-                  fontSize: 15,
-                  fontWeight: 700,
-                  color: D.heading,
-                  borderBottom: `1px solid ${D.border}`,
+                  borderBottom: "1px solid #E4E4E7",
                 }}
+                className="text-ui-field font-medium text-zinc-900"
               >
                 {g.label}
               </div>
@@ -1700,106 +1930,116 @@ function InvoiceList({
                 return (
                   <div
                     key={inv.id}
-                    style={{ borderBottom: `1px solid ${D.border}` }}
+                    style={{
+                      borderBottom: "1px solid #E4E4E7",
+                    }}
                   >
                     {" "}
-                    <button
-                      onClick={() => toggleExpanded(inv.id)}
-                      style={{
-                        width: "100%",
-                        textAlign: "left",
-                        border: "none",
-                        background: isSelected ? "#FAFAFA" : D.card,
-                        padding: rowPad,
-                        cursor: "pointer",
-                        display: "flex",
-                        alignItems: "center",
-                        gap: 12,
-                      }}
-                    >
+                    <div className="flex items-center gap-3 px-4 py-3">
                       {canSelect ? (
-                        <input
+                        <Checkbox
                           id={`invoice-row-select-${inv.id}`}
+                          disabled={batchSending}
                           name="invoice_row_select"
-                          type="checkbox"
                           checked={isSelected}
                           onChange={() => toggleSelect(inv.id)}
                           onClick={(e) => e.stopPropagation()}
+                          aria-label={`Select invoice ${inv.invoice_number}`}
+                          label={
+                            <span className="sr-only">
+                              Select invoice {inv.invoice_number}
+                            </span>
+                          }
+                        />
+                      ) : anyRowSelectable ? (
+                        <span
+                          aria-hidden
                           style={{
                             width: 18,
                             height: 18,
                             flexShrink: 0,
-                            cursor: "pointer",
-                            accentColor: D.heading,
                           }}
                         />
-                      ) : anyRowSelectable ? (
-                        <span aria-hidden style={{ width: 18, height: 18, flexShrink: 0 }} />
                       ) : null}
-                      <div style={{ flex: 1, minWidth: 0 }}>
-                        {" "}
-                        <div
-                          style={{
-                            fontSize: 17,
-                            fontWeight: 700,
-                            color: D.heading,
-                            lineHeight: 1.25,
-                            whiteSpace: "nowrap",
-                            overflow: "hidden",
-                            textOverflow: "ellipsis",
-                          }}
-                        >
-                          {inv.first_name} {inv.last_name}
-                        </div>{" "}
-                        <div
-                          style={{ fontSize: 14, color: D.muted, marginTop: 4 }}
-                        >
-                          #{inv.invoice_number}
-                        </div>{" "}
-                      </div>{" "}
-                      <div style={{ textAlign: "right" }}>
-                        {" "}
-                        <div
-                          style={{
-                            fontSize: 17,
-                            fontWeight: 700,
-                            color: D.heading,
-                            fontFamily: "'Roboto', Arial, sans-serif",
-                          }}
-                        >
-                          ${parseFloat(inv.total).toFixed(2)}
-                        </div>{" "}
-                        <div
-                          style={{
-                            fontSize: 14,
-                            fontWeight: 500,
-                            color: display.color,
-                            marginTop: 4,
-                          }}
-                        >
-                          {display.label}
-                        </div>{" "}
-                      </div>{" "}
-                      <span
-                        aria-hidden
-                        style={{
-                          color: D.muted,
-                          fontSize: 18,
-                          marginLeft: 4,
-                          transform: isOpen ? "rotate(90deg)" : "none",
-                          transition: "transform .15s",
-                        }}
+                      <Button
+                        onClick={() => toggleExpanded(inv.id)}
+                        onClickCapture={(event) =>
+                          event.currentTarget.focus({
+                            preventScroll: true,
+                          })
+                        }
+                        variant="ghost"
+                        className="min-w-0 flex-1 justify-start text-left whitespace-normal"
+                        aria-expanded={isOpen}
+                        aria-controls={`invoice-detail-${inv.id}`}
                       >
-                        ›
-                      </span>{" "}
-                    </button>
+                        <div
+                          style={{
+                            flex: 1,
+                            minWidth: 0,
+                          }}
+                        >
+                          {" "}
+                          <div
+                            style={{
+                              lineHeight: 1.25,
+                              whiteSpace: "nowrap",
+                              overflow: "hidden",
+                              textOverflow: "ellipsis",
+                            }}
+                            className="text-ui-field font-medium text-zinc-900"
+                          >
+                            {inv.first_name} {inv.last_name}
+                          </div>{" "}
+                          <div
+                            style={{
+                              marginTop: 4,
+                            }}
+                            className="text-ui-body text-ink-secondary"
+                          >
+                            #{inv.invoice_number}
+                          </div>{" "}
+                        </div>{" "}
+                        <div
+                          style={{
+                            textAlign: "right",
+                          }}
+                        >
+                          {" "}
+                          <div className="text-ui-field font-medium text-zinc-900">
+                            ${parseFloat(inv.total).toFixed(2)}
+                          </div>{" "}
+                          <div
+                            style={{
+                              color: display.color,
+                              marginTop: 4,
+                            }}
+                            className="text-ui-body font-medium"
+                          >
+                            {display.label}
+                          </div>{" "}
+                        </div>{" "}
+                        <span
+                          aria-hidden
+                          style={{
+                            marginLeft: 4,
+                            transform: isOpen ? "rotate(90deg)" : "none",
+                            transition: "transform .15s",
+                          }}
+                          className="text-ink-secondary text-18"
+                        >
+                          ›
+                        </span>{" "}
+                      </Button>
+                    </div>
                     {isOpen && (
                       <div
+                        id={`invoice-detail-${inv.id}`}
                         style={{
                           padding: isMobile ? "0 16px 18px" : "0 18px 18px",
-                          background: "#FAFAFA",
-                          borderTop: `1px solid ${D.border}`,
+                          borderTop: "1px solid #E4E4E7",
                         }}
+                        className="bg-zinc-50"
                       >
                         {" "}
                         <div
@@ -1808,9 +2048,8 @@ function InvoiceList({
                             flexWrap: "wrap",
                             gap: 12,
                             padding: "14px 0",
-                            fontSize: 13,
-                            color: D.muted,
                           }}
+                          className="text-ui-body text-ink-secondary"
                         >
                           {" "}
                           <span>
@@ -1819,23 +2058,22 @@ function InvoiceList({
                               "Service"}
                           </span>
                           {inv.waveguard_tier && (
-                            <span style={sBadge(`${D.amber}22`, D.amber)}>
+                            <Badge className="max-w-full whitespace-normal">
                               {inv.waveguard_tier}
-                            </span>
+                            </Badge>
                           )}
                           {annualPrepayInvoiceLabel(inv) && (
-                            <span style={sBadge(
-                              inv.annual_prepay_status === "active" ? `${D.green}22` : `${D.amber}22`,
-                              inv.annual_prepay_status === "active" ? D.green : D.amber,
-                            )}>
+                            <Badge className="max-w-full whitespace-normal">
                               {annualPrepayInvoiceLabel(inv)}
-                              {inv.annual_prepay_term_end ? ` · through ${formatInvoiceDate(inv.annual_prepay_term_end)}` : ""}
-                            </span>
+                              {inv.annual_prepay_term_end
+                                ? ` · through ${formatInvoiceDate(inv.annual_prepay_term_end)}`
+                                : ""}
+                            </Badge>
                           )}
                           {depositApplied > 0 && (
-                            <span style={sBadge(`${D.green}22`, D.green)}>
+                            <Badge className="max-w-full whitespace-normal">
                               ${depositApplied.toFixed(2)} deposit applied
-                            </span>
+                            </Badge>
                           )}
                           {cardOnFile && canCollect && (
                             <span>
@@ -1844,13 +2082,13 @@ function InvoiceList({
                             </span>
                           )}
                           {inv.active_payment_plan && (
-                            <span style={sBadge("#E0F2FE", "#075985")}>
+                            <Badge className="max-w-full whitespace-normal">
                               Plan $
                               {Number(
                                 inv.active_payment_plan.payment_amount || 0,
                               ).toFixed(2)}{" "}
                               {inv.active_payment_plan.payment_frequency}
-                            </span>
+                            </Badge>
                           )}
                         </div>{" "}
                         <InvoiceTimeline invoice={inv} />{" "}
@@ -1861,17 +2099,27 @@ function InvoiceList({
                           isMobile={isMobile}
                         />
                         <div
-                          style={{ display: "flex", gap: 8, flexWrap: "wrap" }}
+                          style={{
+                            display: "flex",
+                            gap: 8,
+                            flexWrap: "wrap",
+                          }}
                         >
                           {(inv.status === "draft" ||
                             inv.status === "scheduled") && (
-                            <button
+                            <Button
                               onClick={() => handleSend(inv)}
-                              style={sBtn(D.heading, D.white, isMobile)}
                               title="Send invoice via SMS + email"
+                              variant={"secondary"}
+                              onClickCapture={(event) =>
+                                event.currentTarget.focus({
+                                  preventScroll: true,
+                                })
+                              }
+                              className="min-w-11"
                             >
                               Send
-                            </button>
+                            </Button>
                           )}
                           {(inv.status === "draft" ||
                             inv.status === "scheduled" ||
@@ -1881,99 +2129,153 @@ function InvoiceList({
                             !inv.stripe_payment_intent_id &&
                             !inv.active_payment_plan &&
                             !inv.annual_prepay_term_id && (
-                              <button
+                              <Button
                                 onClick={() => onEdit?.(inv)}
-                                style={sBtn(D.card, D.text, isMobile)}
                                 title={
                                   inv.status === "draft" ||
                                   inv.status === "scheduled"
                                     ? "Edit line items, notes, and due date before sending"
                                     : "Edit line items, notes, and due date — resend after saving so the customer sees the new version"
                                 }
+                                variant={"secondary"}
+                                onClickCapture={(event) =>
+                                  event.currentTarget.focus({
+                                    preventScroll: true,
+                                  })
+                                }
+                                className="min-w-11"
                               >
                                 Edit
-                              </button>
+                              </Button>
                             )}
                           {(inv.status === "sent" ||
                             inv.status === "viewed" ||
                             inv.status === "overdue") && (
-                            <button
+                            <Button
                               onClick={() => handleSend(inv)}
-                              style={sBtn(D.heading, D.white, isMobile)}
                               title="Resend invoice via SMS + email"
+                              variant={"secondary"}
+                              onClickCapture={(event) =>
+                                event.currentTarget.focus({
+                                  preventScroll: true,
+                                })
+                              }
+                              className="min-w-11"
                             >
                               Resend
-                            </button>
+                            </Button>
                           )}
                           {canCollect && (
-                            <button
+                            <Button
                               onClick={() => {
                                 navigator.clipboard.writeText(
                                   `${domain}/pay/${inv.token}`,
                                 );
                                 showToast("Pay link copied");
                               }}
-                              style={sBtn(D.card, D.text, isMobile)}
+                              variant={"secondary"}
+                              onClickCapture={(event) =>
+                                event.currentTarget.focus({
+                                  preventScroll: true,
+                                })
+                              }
+                              className="min-w-11"
                             >
-                              Copy Link
-                            </button>
+                              Copy link
+                            </Button>
                           )}
                           {canCollect && (
-                            <button
+                            <Button
                               onClick={async () => {
                                 try {
                                   await launchTapToPay(inv.id);
                                 } catch (e) {
-                                  showToast(`Tap to Pay failed: ${e.message}`, "error");
+                                  showToast(
+                                    `Tap to Pay failed: ${e.message}`,
+                                    "error",
+                                  );
                                 }
                               }}
-                              style={sBtn(D.heading, D.white, isMobile)}
                               title="Open Waves Tech app to tap customer's card/phone"
+                              variant={"secondary"}
+                              onClickCapture={(event) =>
+                                event.currentTarget.focus({
+                                  preventScroll: true,
+                                })
+                              }
+                              className="min-w-11"
                             >
                               Charge in person
-                            </button>
+                            </Button>
                           )}
                           {/* Payer-billed invoices collect from the payer's AP
                               inbox — the saved card belongs to the homeowner,
                               so the charge endpoint rejects them. */}
-                          {isAdminUser && canCollect && cardOnFile && !inv.payer_id && (
-                            <button
-                              onClick={() => setCardOnFileInvoice(inv)}
-                              style={sBtn(D.heading, D.white, isMobile)}
-                              title="Charge the customer's saved card or bank on file — collects now, no send needed"
-                            >
-                              Charge card on file
-                            </button>
-                          )}
+                          {isAdminUser &&
+                            canCollect &&
+                            cardOnFile &&
+                            !inv.payer_id && (
+                              <Button
+                                onClick={() => setCardOnFileInvoice(inv)}
+                                title="Charge the customer's saved card or bank on file — collects now, no send needed"
+                                variant={"secondary"}
+                                onClickCapture={(event) =>
+                                  event.currentTarget.focus({
+                                    preventScroll: true,
+                                  })
+                                }
+                                className="min-w-11"
+                              >
+                                Charge card on file
+                              </Button>
+                            )}
                           {canCollect && (
-                            <button
+                            <Button
                               onClick={() => setPaymentModalInvoice(inv)}
-                              style={sBtn(D.heading, D.white, isMobile)}
                               title="Record cash, check, Zelle, Venmo, or PayPal payment and close the invoice"
+                              variant={"secondary"}
+                              onClickCapture={(event) =>
+                                event.currentTarget.focus({
+                                  preventScroll: true,
+                                })
+                              }
+                              className="min-w-11"
                             >
                               Add payment
-                            </button>
+                            </Button>
                           )}
                           {canCollect && (
-                            <button
+                            <Button
                               onClick={() => setApplyCreditInvoice(inv)}
-                              style={sBtn(D.card, D.text, isMobile)}
                               title="Apply the customer's account credit — covers the invoice and marks it prepaid"
+                              variant={"secondary"}
+                              onClickCapture={(event) =>
+                                event.currentTarget.focus({
+                                  preventScroll: true,
+                                })
+                              }
+                              className="min-w-11"
                             >
                               Apply credit
-                            </button>
+                            </Button>
                           )}
                           {canCollect && !inv.active_payment_plan && (
-                            <button
+                            <Button
                               onClick={() => setPaymentPlanModalInvoice(inv)}
-                              style={sBtn(D.card, D.text, isMobile)}
                               title="Create a payment plan and send the confirmation email"
+                              variant={"secondary"}
+                              onClickCapture={(event) =>
+                                event.currentTarget.focus({
+                                  preventScroll: true,
+                                })
+                              }
+                              className="min-w-11"
                             >
                               Payment plan
-                            </button>
+                            </Button>
                           )}
                           {isAdminUser && inv.active_payment_plan && (
-                            <button
+                            <Button
                               onClick={() =>
                                 handleCancelPaymentPlan(
                                   inv.id,
@@ -1981,28 +2283,36 @@ function InvoiceList({
                                 )
                               }
                               disabled={cancellingPlanInvoiceId === inv.id}
-                              style={sBtn(D.card, D.text, isMobile)}
                               title="Cancel the active payment plan — the invoice reopens for normal collection and editing"
+                              variant={"secondary"}
+                              onClickCapture={(event) =>
+                                event.currentTarget.focus({
+                                  preventScroll: true,
+                                })
+                              }
+                              className="min-w-11"
                             >
                               {cancellingPlanInvoiceId === inv.id
                                 ? "Cancelling…"
                                 : "Cancel plan"}
-                            </button>
+                            </Button>
                           )}
                           {inv.status !== "void" && (
-                            <button
+                            <Button
                               onClick={() => setAnnualPrepayModalInvoice(inv)}
-                              style={sBtn(
-                                inv.annual_prepay_term_id ? D.heading : D.card,
-                                inv.annual_prepay_term_id ? D.white : D.text,
-                                isMobile,
-                              )}
                               title="Flag this invoice as a full-year prepayment — adds the coverage banner to the customer's invoice"
+                              variant={"secondary"}
+                              onClickCapture={(event) =>
+                                event.currentTarget.focus({
+                                  preventScroll: true,
+                                })
+                              }
+                              className="min-w-11"
                             >
                               {inv.annual_prepay_term_id
                                 ? "Annual prepay ✓"
                                 : "Annual prepay"}
-                            </button>
+                            </Button>
                           )}
                           {inv.status !== "void" && inv.token && (
                             <a
@@ -2014,7 +2324,6 @@ function InvoiceList({
                               target="_blank"
                               rel="noopener noreferrer"
                               style={{
-                                ...sBtn(D.card, D.text, isMobile),
                                 textDecoration: "none",
                                 display: "inline-flex",
                                 alignItems: "center",
@@ -2024,92 +2333,115 @@ function InvoiceList({
                                   ? "Download the receipt PDF"
                                   : "Download the invoice PDF"
                               }
+                              className={cn(
+                                buttonStyles({
+                                  variant: "secondary",
+                                  density: "comfortable",
+                                }),
+                              )}
                             >
                               Download PDF
                             </a>
                           )}
                           {canCollect && (
-                            <button
+                            <Button
                               onClick={() => handleVoid(inv.id)}
                               disabled={rowActionBusy === inv.id}
-                              style={{
-                                ...sBtn("transparent", D.red, isMobile),
-                                opacity: rowActionBusy === inv.id ? 0.5 : 1,
-                              }}
+                              onClickCapture={(event) =>
+                                event.currentTarget.focus({
+                                  preventScroll: true,
+                                })
+                              }
+                              className="min-w-11"
+                              variant="danger"
                             >
                               Void
-                            </button>
+                            </Button>
                           )}
                           {inv.status === "prepaid" && (
-                            <button
+                            <Button
                               onClick={() => handleReversePrepaid(inv.id)}
                               disabled={reversingId !== null}
-                              style={{
-                                ...sBtn("transparent", D.red, isMobile),
-                                opacity: reversingId !== null ? 0.5 : 1,
-                              }}
                               title="Return the applied account credit to the customer and reopen this invoice"
+                              onClickCapture={(event) =>
+                                event.currentTarget.focus({
+                                  preventScroll: true,
+                                })
+                              }
+                              className="min-w-11"
+                              variant="danger"
                             >
                               Reverse prepaid
-                            </button>
+                            </Button>
                           )}
                           {isAdminUser && inv.status === "void" && (
-                            <button
+                            <Button
                               onClick={() => handleUnvoid(inv.id)}
                               disabled={rowActionBusy === inv.id}
-                              style={{
-                                ...sBtn(D.heading, D.white, isMobile),
-                                opacity: rowActionBusy === inv.id ? 0.5 : 1,
-                              }}
                               title="Restore this voided invoice to an editable draft"
+                              variant={"secondary"}
+                              onClickCapture={(event) =>
+                                event.currentTarget.focus({
+                                  preventScroll: true,
+                                })
+                              }
+                              className="min-w-11"
                             >
                               Unvoid
-                            </button>
+                            </Button>
                           )}
                           {inv.status === "void" && !inv.archived_at && (
-                            <button
+                            <Button
                               onClick={() => handleArchive(inv.id)}
                               disabled={rowActionBusy === inv.id}
-                              style={{
-                                ...sBtn(D.heading, D.white, isMobile),
-                                opacity: rowActionBusy === inv.id ? 0.5 : 1,
-                              }}
                               title="Tuck this voided invoice out of the default list"
+                              variant={"secondary"}
+                              onClickCapture={(event) =>
+                                event.currentTarget.focus({
+                                  preventScroll: true,
+                                })
+                              }
+                              className="min-w-11"
                             >
                               Archive
-                            </button>
+                            </Button>
                           )}
                           {inv.archived_at && (
-                            <button
+                            <Button
                               onClick={() => handleUnarchive(inv.id)}
                               disabled={rowActionBusy === inv.id}
-                              style={{
-                                ...sBtn("transparent", D.text, isMobile),
-                                opacity: rowActionBusy === inv.id ? 0.5 : 1,
-                              }}
                               title="Restore to the default list"
+                              variant={"secondary"}
+                              onClickCapture={(event) =>
+                                event.currentTarget.focus({
+                                  preventScroll: true,
+                                })
+                              }
+                              className="min-w-11"
                             >
                               Unarchive
-                            </button>
+                            </Button>
                           )}
                           {sendReceiptEnabled && inv.status === "paid" && (
-                            <button
+                            <Button
                               onClick={() => setReceiptModalInvoice(inv)}
-                              style={sBtn(
-                                inv.receipt_sent_at ? D.card : D.heading,
-                                inv.receipt_sent_at ? D.text : D.white,
-                                isMobile,
-                              )}
                               title={
                                 inv.receipt_sent_at
                                   ? "Resend receipt + log another touch"
                                   : "Email + SMS the receipt and close the service"
                               }
+                              variant={"secondary"}
+                              onClickCapture={(event) =>
+                                event.currentTarget.focus({
+                                  preventScroll: true,
+                                })
+                              }
+                              className="min-w-11"
                             >
                               {inv.receipt_sent_at
                                 ? "Resend receipt"
                                 : "Send receipt"}
-                            </button>
+                            </Button>
                           )}
                         </div>
                         {canCollect && inv.status !== "draft" && (
@@ -2129,6 +2461,11 @@ function InvoiceList({
         </div>
       )}
 
+      {moreError && (
+        <ActionFeedback error className="mt-4">
+          Could not load more invoices. Use Load more to retry.
+        </ActionFeedback>
+      )}
       {invoices.length < total && (
         <div
           style={{
@@ -2137,26 +2474,30 @@ function InvoiceList({
           }}
         >
           {" "}
-          <button
+          <Button
             onClick={async () => {
               setLoadingMore(true);
               try {
-                await load({ append: true, pageNo: page + 1 });
+                await load({
+                  append: true,
+                  pageNo: page + 1,
+                });
               } finally {
                 setLoadingMore(false);
               }
             }}
             disabled={loadingMore || listLoading}
-            style={{
-              ...sBtn(D.card, D.text, isMobile),
-              border: `1px solid ${D.border}`,
-              opacity: loadingMore || listLoading ? 0.6 : 1,
-            }}
+            variant={"secondary"}
+            onClickCapture={(event) =>
+              event.currentTarget.focus({
+                preventScroll: true,
+              })
+            }
+            className="min-w-11"
+            loading={loadingMore}
           >
-            {loadingMore
-              ? "Loading..."
-              : `Load more (${invoices.length} of ${total})`}
-          </button>{" "}
+            {`Load more (${invoices.length} of ${total})`}
+          </Button>{" "}
         </div>
       )}
 
@@ -2164,46 +2505,53 @@ function InvoiceList({
         <div
           style={{
             position: "fixed",
+            width: "max-content",
             bottom: isMobile
               ? "calc(72px + env(safe-area-inset-bottom, 0px))"
               : 20,
             left: "50%",
             transform: "translateX(-50%)",
-            background: D.heading,
-            color: D.white,
-            borderRadius: 10,
             padding: "12px 20px",
             display: "flex",
             alignItems: "center",
             gap: 14,
-            boxShadow: "0 8px 32px rgba(0,0,0,0.3)",
             zIndex: 50,
           }}
+          className="bg-zinc-900 text-white rounded-md max-w-[calc(100%-2rem)] flex-wrap justify-center"
         >
           {" "}
-          <span style={{ fontWeight: 500, fontSize: 14 }}>
+          <span className="font-medium text-ui-body">
             {selected.size} selected
           </span>{" "}
-          <button
+          <Button
             onClick={handleBatchSend}
             disabled={batchSending}
-            style={{
-              ...sBtn(D.white, D.heading, isMobile),
-              opacity: batchSending ? 0.6 : 1,
-            }}
+            variant={"secondary"}
+            onClickCapture={(event) =>
+              event.currentTarget.focus({
+                preventScroll: true,
+              })
+            }
+            className="min-w-11"
+            loading={batchSending}
           >
-            {batchSending
-              ? "Sending…"
-              : receiptMode
-                ? `Send ${selected.size} receipt${selected.size === 1 ? "" : "s"}`
-                : `Send ${selected.size}`}
-          </button>{" "}
-          <button
+            {receiptMode
+              ? `Send ${selected.size} receipt${selected.size === 1 ? "" : "s"}`
+              : `Send ${selected.size}`}
+          </Button>{" "}
+          <Button
             onClick={clearSelection}
-            style={sBtn("transparent", D.white, isMobile)}
+            disabled={batchSending}
+            variant={"secondary"}
+            onClickCapture={(event) =>
+              event.currentTarget.focus({
+                preventScroll: true,
+              })
+            }
+            className="min-w-11"
           >
             Clear
-          </button>{" "}
+          </Button>{" "}
         </div>
       )}
 
@@ -2216,11 +2564,10 @@ function InvoiceList({
             setSendModalInvoice(null);
             const channels = [
               res?.sms?.ok && "SMS",
-              res?.email?.ok && (
-                res.email.recipient?.email
+              res?.email?.ok &&
+                (res.email.recipient?.email
                   ? `email to ${res.email.recipient.email}`
-                  : "email"
-              ),
+                  : "email"),
             ].filter(Boolean);
             showToast(
               channels.length
@@ -2311,6 +2658,7 @@ function InvoiceList({
 
       {cardOnFileInvoice && (
         <MobileCardOnFileSheet
+          presentation="admin"
           desktopVisible
           invoiceId={cardOnFileInvoice.id}
           customerId={cardOnFileInvoice.customer_id}
@@ -2331,7 +2679,8 @@ function InvoiceList({
               );
             } else {
               const brand = r?.brand
-                ? r.brand.charAt(0).toUpperCase() + r.brand.slice(1).toLowerCase()
+                ? r.brand.charAt(0).toUpperCase() +
+                  r.brand.slice(1).toLowerCase()
                 : "Card";
               showToast(
                 `Charged $${Number(r?.amount || 0).toFixed(2)} to ${brand}${r?.last4 ? ` •${r.last4}` : ""} on file`,
@@ -2351,7 +2700,11 @@ function InvoiceList({
 // Newest event on top so the current state is the first thing you read.
 function buildInvoiceTimeline(inv) {
   const events = [];
-  if (inv.status === "scheduled" && !inv.scheduled_send_at && inv.scheduled_send_error) {
+  if (
+    inv.status === "scheduled" &&
+    !inv.scheduled_send_at &&
+    inv.scheduled_send_error
+  ) {
     // Parked recovery state: a crashed send claim was released with its
     // send date cleared (delivery unverified, no automatic retry) — the
     // operator has to verify and resend/re-schedule by hand.
@@ -2360,7 +2713,7 @@ function buildInvoiceTimeline(inv) {
       at: inv.updated_at || inv.created_at,
       label: "Send interrupted — needs review",
       detail: inv.scheduled_send_error,
-      color: D.red,
+      color: "#C8312F",
       emphasis: true,
     });
   }
@@ -2376,7 +2729,7 @@ function buildInvoiceTimeline(inv) {
           ? `Scheduled to send (${attempts} failed attempt${attempts === 1 ? "" : "s"})`
           : "Scheduled to send",
       detail: inv.scheduled_send_error || null,
-      color: exhausted ? D.red : D.amber,
+      color: exhausted ? "#C8312F" : "#52525B",
       emphasis: Boolean(exhausted),
     });
   }
@@ -2386,7 +2739,7 @@ function buildInvoiceTimeline(inv) {
       at: inv.sent_at || inv.sms_sent_at,
       label: "Invoice sent",
       detail: "SMS + email",
-      color: D.text,
+      color: "#18181B",
     });
   }
   if (inv.viewed_at) {
@@ -2396,7 +2749,7 @@ function buildInvoiceTimeline(inv) {
       at: inv.viewed_at,
       label: "Customer opened the invoice",
       detail: count > 1 ? `${count} total views` : null,
-      color: D.text,
+      color: "#18181B",
     });
   }
   const reminderCount = Number(inv.sms_reminder_count) || 0;
@@ -2408,7 +2761,7 @@ function buildInvoiceTimeline(inv) {
         reminderCount === 1
           ? "Reminder sent"
           : `Reminder sent (${reminderCount} total)`,
-      color: D.amber,
+      color: "#52525B",
     });
   }
   if (inv.paid_at) {
@@ -2450,7 +2803,7 @@ function buildInvoiceTimeline(inv) {
       at: inv.paid_at,
       label: `Paid $${parseFloat(inv.total).toFixed(2)}`,
       detail: method || null,
-      color: D.green,
+      color: "#52525B",
       emphasis: true,
     });
   }
@@ -2460,7 +2813,7 @@ function buildInvoiceTimeline(inv) {
       at: inv.receipt_sent_at,
       label: "Receipt sent",
       detail: inv.receipt_memo ? `“${inv.receipt_memo}”` : null,
-      color: D.green,
+      color: "#52525B",
     });
   }
   if (inv.status === "void") {
@@ -2468,7 +2821,7 @@ function buildInvoiceTimeline(inv) {
       kind: "void",
       at: inv.updated_at,
       label: "Voided",
-      color: D.muted,
+      color: "#52525B",
     });
   }
   if (inv.archived_at) {
@@ -2476,12 +2829,11 @@ function buildInvoiceTimeline(inv) {
       kind: "archived",
       at: inv.archived_at,
       label: "Archived",
-      color: D.muted,
+      color: "#52525B",
     });
   }
   return events.sort((a, b) => new Date(b.at) - new Date(a.at));
 }
-
 function formatTimelineWhen(iso) {
   if (!iso) return "";
   const d = new Date(iso);
@@ -2500,11 +2852,19 @@ function formatTimelineWhen(iso) {
   return d.toLocaleDateString(
     "en-US",
     sameYear
-      ? { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" }
-      : { month: "short", day: "numeric", year: "numeric" },
+      ? {
+          month: "short",
+          day: "numeric",
+          hour: "numeric",
+          minute: "2-digit",
+        }
+      : {
+          month: "short",
+          day: "numeric",
+          year: "numeric",
+        },
   );
 }
-
 function InvoiceTimeline({ invoice }) {
   const events = buildInvoiceTimeline(invoice);
   if (events.length === 0) return null;
@@ -2513,66 +2873,78 @@ function InvoiceTimeline({ invoice }) {
       style={{
         margin: "4px 0 16px",
         paddingTop: 12,
-        borderTop: `1px solid ${D.border}`,
+        borderTop: "1px solid #E4E4E7",
       }}
     >
       {" "}
       <div
         style={{
-          fontSize: 11,
-          fontWeight: 700,
-          letterSpacing: "0.06em",
-          color: D.muted,
-          textTransform: "uppercase",
           marginBottom: 12,
         }}
+        className="text-ui-body font-medium text-ink-secondary"
       >
         Activity
       </div>{" "}
-      <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+      <div
+        style={{
+          display: "flex",
+          flexDirection: "column",
+          gap: 12,
+        }}
+      >
         {events.map((e, i) => (
           <div
             key={`${e.kind}-${i}`}
-            style={{ display: "flex", gap: 12, alignItems: "flex-start" }}
+            style={{
+              display: "flex",
+              gap: 12,
+              alignItems: "flex-start",
+            }}
           >
             {" "}
             <div
               style={{
                 width: 8,
                 height: 8,
-                borderRadius: 999,
                 background: e.color,
                 marginTop: 6,
                 flexShrink: 0,
-                boxShadow: e.emphasis ? `0 0 0 3px ${e.color}22` : undefined,
               }}
+              className={cn("rounded-md", "")}
             />{" "}
-            <div style={{ flex: 1, minWidth: 0 }}>
+            <div
+              style={{
+                flex: 1,
+                minWidth: 0,
+              }}
+            >
               {" "}
               <div
                 style={{
-                  fontSize: 14,
-                  color: D.heading,
-                  fontWeight: e.emphasis ? 700 : 500,
                   lineHeight: 1.3,
                 }}
+                className={cn("text-ui-body", "text-zinc-900", "font-medium")}
               >
                 {e.label}
               </div>
               {e.detail && (
                 <div
                   style={{
-                    fontSize: 13,
-                    color: D.muted,
                     marginTop: 2,
                     lineHeight: 1.35,
                     wordBreak: "break-word",
                   }}
+                  className="text-ui-body text-ink-secondary"
                 >
                   {e.detail}
                 </div>
               )}
-              <div style={{ fontSize: 12, color: D.muted, marginTop: 2 }}>
+              <div
+                style={{
+                  marginTop: 2,
+                }}
+                className="text-ui-body text-ink-secondary"
+              >
                 {formatTimelineWhen(e.at)}
               </div>{" "}
             </div>{" "}
@@ -2582,38 +2954,34 @@ function InvoiceTimeline({ invoice }) {
     </div>
   );
 }
-
 function InvoiceAttachmentsPanel({ invoiceId, showToast, isMobile }) {
+  const uploadingRef = useRef(false);
+  const deletingIdRef = useRef(false);
   const [attachments, setAttachments] = useState([]);
   const [loading, setLoading] = useState(true);
+  const [readError, setReadError] = useState("");
   const [uploading, setUploading] = useState(false);
   const [deletingId, setDeletingId] = useState(null);
   const fileRef = useRef(null);
-  const showToastRef = useRef(showToast);
   const helpId = `invoice-attachments-${invoiceId}-help`;
   const statusId = `invoice-attachments-${invoiceId}-status`;
-
-  useEffect(() => {
-    showToastRef.current = showToast;
-  }, [showToast]);
-
   const load = useCallback(async () => {
     setLoading(true);
+    setReadError("");
     try {
       const data = await adminFetch(`/admin/invoices/${invoiceId}/attachments`);
       setAttachments(data.attachments || []);
     } catch (err) {
-      showToastRef.current(`Attachments failed to load: ${err.message}`);
+      setReadError(`Attachments failed to load: ${err.message}`);
     } finally {
       setLoading(false);
     }
   }, [invoiceId]);
-
   useEffect(() => {
     load();
   }, [load]);
-
   const handleFiles = async (event) => {
+    if (uploadingRef.current) return;
     const files = Array.from(event.target.files || []);
     event.target.value = "";
     if (!files.length || uploading) return;
@@ -2622,18 +2990,21 @@ function InvoiceAttachmentsPanel({ invoiceId, showToast, isMobile }) {
       showToast(validation);
       return;
     }
+    uploadingRef.current = true;
     setUploading(true);
     try {
       await uploadInvoiceAttachments(invoiceId, files);
-      showToast(`${files.length} attachment${files.length === 1 ? "" : "s"} uploaded`);
+      showToast(
+        `${files.length} attachment${files.length === 1 ? "" : "s"} uploaded`,
+      );
       await load();
     } catch (err) {
       showToast(`Attachment upload failed: ${err.message}`, "error");
     } finally {
+      uploadingRef.current = false;
       setUploading(false);
     }
   };
-
   const openAttachment = async (attachment) => {
     try {
       const data = await adminFetch(
@@ -2644,32 +3015,40 @@ function InvoiceAttachmentsPanel({ invoiceId, showToast, isMobile }) {
       showToast(`Attachment open failed: ${err.message}`, "error");
     }
   };
-
   const deleteAttachment = async (attachment) => {
+    if (deletingIdRef.current) return;
     if (!confirm(`Remove ${attachment.file_name}?`)) return;
+    deletingIdRef.current = true;
     setDeletingId(attachment.id);
     try {
       await adminFetch(
         `/admin/invoices/${invoiceId}/attachments/${attachment.id}`,
-        { method: "DELETE" },
+        {
+          method: "DELETE",
+        },
       );
       showToast("Attachment removed");
       await load();
     } catch (err) {
       showToast(`Attachment delete failed: ${err.message}`, "error");
     } finally {
+      deletingIdRef.current = false;
       setDeletingId(null);
     }
   };
-
   const canAdd = canAddInvoiceAttachments(attachments);
-
+  if (readError)
+    return (
+      <ActionFeedback error onRetry={load} className="my-4">
+        {readError}
+      </ActionFeedback>
+    );
   return (
     <div
       style={{
         margin: "4px 0 16px",
         paddingTop: 12,
-        borderTop: `1px solid ${D.border}`,
+        borderTop: "1px solid #E4E4E7",
       }}
     >
       <div
@@ -2682,24 +3061,30 @@ function InvoiceAttachmentsPanel({ invoiceId, showToast, isMobile }) {
           flexWrap: "wrap",
         }}
       >
-        <div style={{ minWidth: 0 }}>
+        <div
+          style={{
+            minWidth: 0,
+          }}
+        >
           <div
             style={{
               display: "flex",
               alignItems: "center",
               gap: 6,
-              fontSize: 11,
-              fontWeight: 700,
-              letterSpacing: "0.06em",
-              color: D.muted,
-              textTransform: "uppercase",
               marginBottom: 4,
             }}
+            className="text-ui-body font-medium text-ink-secondary"
           >
             <Paperclip size={13} strokeWidth={2.2} />
             Attachments
           </div>
-          <div id={helpId} style={{ fontSize: 12, color: D.muted, lineHeight: 1.4 }}>
+          <div
+            id={helpId}
+            style={{
+              lineHeight: 1.4,
+            }}
+            className="text-ui-body text-ink-secondary"
+          >
             {ATTACHMENT_HELP_TEXT}
             <br />
             {ATTACHMENT_VISIBILITY_TEXT}
@@ -2714,33 +3099,59 @@ function InvoiceAttachmentsPanel({ invoiceId, showToast, isMobile }) {
           accept={ATTACHMENT_ACCEPT}
           onChange={handleFiles}
           aria-describedby={`${helpId} ${statusId}`}
-          style={{ display: "none" }}
+          style={{
+            display: "none",
+          }}
         />
-        <button
+        <Button
           type="button"
           onClick={() => fileRef.current?.click()}
           disabled={!canAdd || uploading}
           aria-describedby={`${helpId} ${statusId}`}
           style={{
-            ...sBtn(D.card, D.text, isMobile),
-            border: `1px solid ${D.border}`,
             display: "inline-flex",
             alignItems: "center",
             gap: 6,
-            opacity: !canAdd || uploading ? 0.55 : 1,
           }}
+          variant={"secondary"}
+          onClickCapture={(event) =>
+            event.currentTarget.focus({
+              preventScroll: true,
+            })
+          }
+          className="min-w-11"
+          loading={uploading}
         >
           <Upload size={14} strokeWidth={2.2} />
-          {uploading ? "Uploading..." : "Add files"}
-        </button>
+          {"Add files"}
+        </Button>
       </div>
 
       {loading ? (
-        <div id={statusId} role="status" aria-live="polite" style={{ fontSize: 12, color: D.muted }}>Loading attachments...</div>
+        <div
+          id={statusId}
+          role="status"
+          aria-live="polite"
+          className="text-ui-body text-ink-secondary"
+        >
+          Loading attachments...
+        </div>
       ) : attachments.length === 0 ? (
-        <div id={statusId} role="status" aria-live="polite" style={{ fontSize: 12, color: D.muted }}>No files attached.</div>
+        <div
+          id={statusId}
+          role="status"
+          aria-live="polite"
+          className="text-ui-body text-ink-secondary"
+        >
+          No files attached.
+        </div>
       ) : (
-        <div style={{ display: "grid", gap: 8 }}>
+        <div
+          style={{
+            display: "grid",
+            gap: 8,
+          }}
+        >
           {attachments.map((attachment) => (
             <div
               key={attachment.id}
@@ -2750,26 +3161,26 @@ function InvoiceAttachmentsPanel({ invoiceId, showToast, isMobile }) {
                 alignItems: "center",
                 gap: 8,
                 padding: "9px 10px",
-                border: `1px solid ${D.border}`,
-                borderRadius: 8,
-                background: D.card,
+                border: "1px solid #E4E4E7",
               }}
+              className="rounded-md bg-white"
             >
-              <button
+              <Button
                 type="button"
                 onClick={() => openAttachment(attachment)}
                 style={{
-                  minWidth: 0,
                   display: "flex",
                   alignItems: "center",
                   gap: 8,
-                  border: "none",
-                  background: "transparent",
-                  color: D.heading,
-                  cursor: "pointer",
-                  padding: 0,
                   textAlign: "left",
                 }}
+                variant={"secondary"}
+                onClickCapture={(event) =>
+                  event.currentTarget.focus({
+                    preventScroll: true,
+                  })
+                }
+                className="min-w-11"
               >
                 <FileText size={15} strokeWidth={2.1} />
                 <span
@@ -2778,59 +3189,76 @@ function InvoiceAttachmentsPanel({ invoiceId, showToast, isMobile }) {
                     overflow: "hidden",
                     textOverflow: "ellipsis",
                     whiteSpace: "nowrap",
-                    fontSize: 13,
-                    fontWeight: 500,
                   }}
+                  className="text-ui-body font-medium"
                 >
                   {attachment.file_name}
                 </span>
-              </button>
-              <span style={{ fontSize: 12, color: D.muted, whiteSpace: "nowrap" }}>
+              </Button>
+              <span
+                style={{
+                  whiteSpace: "nowrap",
+                }}
+                className="text-ui-body text-ink-secondary"
+              >
                 {formatFileSize(attachment.file_size_bytes)}
               </span>
-              <div style={{ display: "flex", gap: 4 }}>
-                <button
+              <div
+                style={{
+                  display: "flex",
+                  gap: 4,
+                }}
+              >
+                <Button
                   type="button"
                   onClick={() => openAttachment(attachment)}
                   aria-label={`Open ${attachment.file_name}`}
                   style={{
-                    border: "none",
-                    background: "transparent",
-                    color: D.muted,
-                    cursor: "pointer",
                     width: 32,
-                    height: 32,
                     display: "inline-flex",
                     alignItems: "center",
                     justifyContent: "center",
                   }}
+                  variant={"secondary"}
+                  onClickCapture={(event) =>
+                    event.currentTarget.focus({
+                      preventScroll: true,
+                    })
+                  }
+                  className="min-w-11"
                 >
                   <ExternalLink size={15} strokeWidth={2.2} />
-                </button>
-                <button
+                </Button>
+                <Button
                   type="button"
                   onClick={() => deleteAttachment(attachment)}
                   disabled={deletingId === attachment.id}
                   aria-label={`Remove ${attachment.file_name}`}
                   style={{
-                    border: "none",
-                    background: "transparent",
-                    color: D.red,
-                    cursor: deletingId === attachment.id ? "wait" : "pointer",
                     width: 32,
-                    height: 32,
                     display: "inline-flex",
                     alignItems: "center",
                     justifyContent: "center",
-                    opacity: deletingId === attachment.id ? 0.55 : 1,
                   }}
+                  onClickCapture={(event) =>
+                    event.currentTarget.focus({
+                      preventScroll: true,
+                    })
+                  }
+                  className="min-w-11"
+                  variant="danger"
                 >
                   <Trash2 size={15} strokeWidth={2.2} />
-                </button>
+                </Button>
               </div>
             </div>
           ))}
-          <div id={statusId} role="status" aria-live="polite" style={{ fontSize: 11, color: D.muted }}>
+          <div
+            id={statusId}
+            role="status"
+            aria-live="polite"
+            className="text-ui-body text-ink-secondary"
+          >
             {invoiceAttachmentLimitLabel(attachments)}
           </div>
         </div>
@@ -2838,18 +3266,15 @@ function InvoiceAttachmentsPanel({ invoiceId, showToast, isMobile }) {
     </div>
   );
 }
-
 function contactRoleLabel(role) {
   if (role === "billing_contact") return "Billing recipient";
   if (role === "invoice_override") return "One-time invoice recipient";
   if (role === "service_contact") return "Service contact";
   return "Primary customer";
 }
-
 function isEmailLike(value) {
   return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(value || "").trim());
 }
-
 function DeliveryRow({ label, value, detail, missing }) {
   return (
     <div
@@ -2859,33 +3284,34 @@ function DeliveryRow({ label, value, detail, missing }) {
         gap: 12,
         alignItems: "start",
         padding: "12px 0",
-        borderBottom: `1px solid ${D.border}`,
+        borderBottom: "1px solid #E4E4E7",
       }}
     >
+      <div className="text-ui-body font-medium text-ink-secondary">{label}</div>
       <div
         style={{
-          fontSize: 11,
-          fontWeight: 700,
-          color: D.muted,
-          textTransform: "uppercase",
-          letterSpacing: "0.04em",
+          minWidth: 0,
         }}
       >
-        {label}
-      </div>
-      <div style={{ minWidth: 0 }}>
         <div
           style={{
-            fontSize: 14,
-            fontWeight: 700,
-            color: missing ? D.red : D.heading,
             overflowWrap: "anywhere",
           }}
+          className={cn(
+            "text-ui-body",
+            "font-medium",
+            missing ? "text-alert-fg" : "text-zinc-900",
+          )}
         >
           {value}
         </div>
         {detail && (
-          <div style={{ marginTop: 3, fontSize: 12, color: D.muted }}>
+          <div
+            style={{
+              marginTop: 3,
+            }}
+            className="text-ui-body text-ink-secondary"
+          >
             {detail}
           </div>
         )}
@@ -2897,7 +3323,19 @@ function DeliveryRow({ label, value, detail, missing }) {
 // ── Send Invoice Modal ──
 // Shows the resolved payment-link recipients before delivery. SMS stays on
 // the primary account phone; email can be routed once or saved as billing.
-function SendInvoiceModal({ invoice, isMobile, onClose, onSent, onError }) {
+function SendInvoiceModal({
+  invoice,
+  isMobile,
+  onClose,
+  onSent,
+  onError: reportError,
+}) {
+  const sendingRef = useRef(false);
+  const [actionError, setActionError] = useState("");
+  const onError = (message) => {
+    setActionError(message);
+    reportError(message);
+  };
   const [loading, setLoading] = useState(true);
   const [recipients, setRecipients] = useState(null);
   const [loadError, setLoadError] = useState("");
@@ -2906,7 +3344,6 @@ function SendInvoiceModal({ invoice, isMobile, onClose, onSent, onError }) {
   const [recipientEmail, setRecipientEmail] = useState("");
   const [saveAsDefault, setSaveAsDefault] = useState(false);
   const [sending, setSending] = useState(false);
-
   useEffect(() => {
     let alive = true;
     setLoading(true);
@@ -2931,7 +3368,6 @@ function SendInvoiceModal({ invoice, isMobile, onClose, onSent, onError }) {
       alive = false;
     };
   }, [invoice.id]);
-
   const defaultEmail = recipients?.emailRecipient?.email || "";
   const defaultEmailRole = recipients?.emailRecipient?.role || "primary";
   const smsPhone = recipients?.smsRecipient?.phone || "";
@@ -2944,9 +3380,11 @@ function SendInvoiceModal({ invoice, isMobile, onClose, onSent, onError }) {
     !sending &&
     (sendWithServerRecipients || emailChannel || !!smsPhone) &&
     overrideValid;
-
   const send = async () => {
+    if (sendingRef.current) return;
     if (!canSend) return;
+    sendingRef.current = true;
+    setActionError("");
     setSending(true);
     try {
       const body = {};
@@ -2963,116 +3401,81 @@ function SendInvoiceModal({ invoice, isMobile, onClose, onSent, onError }) {
     } catch (err) {
       onError(`Invoice send failed: ${err.message}`);
     } finally {
+      sendingRef.current = false;
       setSending(false);
     }
   };
-
   const customerName =
     recipients?.customerName ||
     [invoice.first_name, invoice.last_name].filter(Boolean).join(" ").trim() ||
     "Customer";
-
-  return createPortal(
-    <div
-      onClick={onClose}
-      style={{
-        position: "fixed",
-        inset: 0,
-        background: "rgba(0,0,0,0.45)",
-        zIndex: 400,
-        fontFamily: "'Roboto', Arial, sans-serif",
-        color: D.text,
-        display: "flex",
-        alignItems: isMobile ? "flex-end" : "center",
-        justifyContent: "center",
-        padding: isMobile ? 0 : 20,
-      }}
-    >
-      <div
-        onClick={(e) => e.stopPropagation()}
-        style={{
-          background: D.card,
-          borderRadius: isMobile ? "16px 16px 0 0" : 14,
-          width: "100%",
-          maxWidth: 540,
-          padding: isMobile ? "24px 20px 28px" : 28,
-          // Bottom sheet sits over the home indicator once portaled above the
-          // tab bar - keep the last controls above it.
-          paddingBottom: isMobile ? "calc(28px + env(safe-area-inset-bottom, 0px))" : 28,
-          boxShadow: "0 20px 60px rgba(0,0,0,0.28)",
-          ...(isMobile
-            ? {
-                width: "100%",
-                maxWidth: "none",
-                height: "100%",
-                maxHeight: "none",
-                borderRadius: 0,
-                boxSizing: "border-box",
-                overflowY: "auto",
-                paddingTop: "calc(24px + env(safe-area-inset-top, 0px))",
-                paddingBottom: "calc(28px + env(safe-area-inset-bottom, 0px))",
-                paddingLeft: "calc(28px + env(safe-area-inset-left, 0px))",
-                paddingRight: "calc(28px + env(safe-area-inset-right, 0px))",
-              }
-            : {}),
-        }}
-      >
-        <div
-          style={{
-            fontSize: 20,
-            fontWeight: 500,
-            color: D.heading,
-            marginBottom: 4,
-          }}
-        >
+  return (
+    <Dialog open={true} onClose={sending ? undefined : onClose} layer={400}>
+      <DialogBody className="space-y-4 text-ui-body text-zinc-900">
+        <DialogTitle>
           {invoice.status === "draft" || invoice.status === "scheduled"
             ? "Send invoice"
             : "Resend invoice"}
-        </div>
-        <div style={{ fontSize: 13, color: D.muted, marginBottom: 18 }}>
+        </DialogTitle>
+        {actionError && <ActionFeedback error>{actionError}</ActionFeedback>}
+        <div
+          style={{
+            marginBottom: 18,
+          }}
+          className="text-ui-body text-ink-secondary"
+        >
           Invoice #{invoice.invoice_number} · $
           {parseFloat(invoice.total).toFixed(2)} · {customerName}
         </div>
-
         {loading ? (
-          <div style={{ padding: "18px 0", fontSize: 14, color: D.muted }}>
+          <div
+            style={{
+              padding: "18px 0",
+            }}
+            className="text-ui-body text-ink-secondary"
+          >
             Loading recipients...
           </div>
         ) : loadError ? (
           <div
             style={{
               padding: "12px 14px",
-              border: `1px solid ${D.red}`,
-              borderRadius: 8,
-              color: D.red,
-              fontSize: 13,
+              border: "1px solid #C8312F",
               lineHeight: 1.45,
             }}
+            className="rounded-md text-alert-fg text-ui-body"
           >
-            {loadError}. You can still send using the saved invoice delivery settings.
+            {loadError}. You can still send using the saved invoice delivery
+            settings.
           </div>
         ) : (
           <>
-            <div style={{ borderTop: `1px solid ${D.border}` }}>
+            <div
+              style={{
+                borderTop: "1px solid #E4E4E7",
+              }}
+            >
               <DeliveryRow
                 label="SMS pay link"
                 value={smsPhone || "No phone on primary customer"}
-                detail={smsPhone ? "Primary customer phone" : "SMS will be skipped"}
+                detail={
+                  smsPhone ? "Primary customer phone" : "SMS will be skipped"
+                }
                 missing={!smsPhone}
               />
               <DeliveryRow
                 label="Invoice email"
                 value={
                   useOverride
-                    ? (overrideEmail || "Enter one-time recipient email")
-                    : (defaultEmail || "No invoice email configured")
+                    ? overrideEmail || "Enter one-time recipient email"
+                    : defaultEmail || "No invoice email configured"
                 }
                 detail={
                   useOverride
                     ? "One-time recipient for this send"
-                    : (defaultEmail
+                    : defaultEmail
                       ? contactRoleLabel(defaultEmailRole)
-                      : "Email will be skipped unless you add a recipient")
+                      : "Email will be skipped unless you add a recipient"
                 }
                 missing={
                   useOverride
@@ -3088,22 +3491,23 @@ function SendInvoiceModal({ invoice, isMobile, onClose, onSent, onError }) {
                 alignItems: "center",
                 gap: 10,
                 marginTop: 18,
-                fontSize: 14,
-                fontWeight: 700,
-                color: D.text,
                 cursor: "pointer",
               }}
+              className="ui-choice-label flex items-center gap-2 text-ui-body text-zinc-900"
             >
-              <input
+              <Checkbox
                 id={`invoice-recipient-override-${invoice.id}`}
                 name="invoice_recipient_override"
-                type="checkbox"
                 checked={useOverride}
                 onChange={(e) => {
                   setUseOverride(e.target.checked);
                   if (!e.target.checked) setSaveAsDefault(false);
                 }}
-                style={{ width: 16, height: 16, accentColor: D.heading }}
+                style={{
+                  width: 16,
+                  accentColor: "#18181B",
+                }}
+                disabled={sending}
               />
               Send invoice email to someone else
             </label>
@@ -3118,61 +3522,37 @@ function SendInvoiceModal({ invoice, isMobile, onClose, onSent, onError }) {
                 }}
               >
                 <div>
-                  <label
-                    htmlFor={`invoice-recipient-name-${invoice.id}`}
-                    style={{
-                      display: "block",
-                      fontSize: 11,
-                      fontWeight: 500,
-                      color: D.muted,
-                      textTransform: "uppercase",
-                      letterSpacing: "0.04em",
-                      marginBottom: 6,
-                    }}
-                  >
-                    Name
-                  </label>
-                  <input
-                    id={`invoice-recipient-name-${invoice.id}`}
-                    name="invoice_recipient_name"
-                    autoComplete="name"
-                    value={recipientName}
-                    onChange={(e) => setRecipientName(e.target.value)}
-                    placeholder="Accounts payable"
-                    style={sInput(isMobile)}
-                  />
+                  <Field label={<>Name</>} className="min-w-0">
+                    <Input
+                      id={`invoice-recipient-name-${invoice.id}`}
+                      name="invoice_recipient_name"
+                      autoComplete="name"
+                      value={recipientName}
+                      onChange={(e) => setRecipientName(e.target.value)}
+                      placeholder="Accounts payable"
+                      disabled={sending}
+                    />
+                  </Field>
                 </div>
                 <div>
-                  <label
-                    htmlFor={`invoice-recipient-email-${invoice.id}`}
-                    style={{
-                      display: "block",
-                      fontSize: 11,
-                      fontWeight: 500,
-                      color: D.muted,
-                      textTransform: "uppercase",
-                      letterSpacing: "0.04em",
-                      marginBottom: 6,
-                    }}
-                  >
-                    Email
-                  </label>
-                  <input
-                    id={`invoice-recipient-email-${invoice.id}`}
-                    name="invoice_recipient_email"
-                    type="email"
-                    autoComplete="email"
-                    value={recipientEmail}
-                    onChange={(e) => setRecipientEmail(e.target.value)}
-                    placeholder="billing@example.com"
-                    style={{
-                      ...sInput(isMobile),
-                      borderColor:
-                        overrideEmail && !isEmailLike(overrideEmail)
-                          ? D.red
-                          : D.border,
-                    }}
-                  />
+                  <Field label={<>Email</>} className="min-w-0">
+                    <Input
+                      id={`invoice-recipient-email-${invoice.id}`}
+                      name="invoice_recipient_email"
+                      type="email"
+                      autoComplete="email"
+                      value={recipientEmail}
+                      onChange={(e) => setRecipientEmail(e.target.value)}
+                      placeholder="billing@example.com"
+                      style={{
+                        borderColor:
+                          overrideEmail && !isEmailLike(overrideEmail)
+                            ? "#C8312F"
+                            : "#E4E4E7",
+                      }}
+                      disabled={sending}
+                    />
+                  </Field>
                 </div>
               </div>
             )}
@@ -3184,24 +3564,22 @@ function SendInvoiceModal({ invoice, isMobile, onClose, onSent, onError }) {
                   alignItems: "flex-start",
                   gap: 10,
                   marginTop: 12,
-                  fontSize: 13,
                   lineHeight: 1.45,
-                  color: D.text,
                   cursor: "pointer",
                 }}
+                className="ui-choice-label flex items-center gap-2 text-ui-body text-zinc-900"
               >
-                <input
+                <Checkbox
                   id={`invoice-recipient-save-${invoice.id}`}
                   name="invoice_recipient_save_default"
-                  type="checkbox"
                   checked={saveAsDefault}
                   onChange={(e) => setSaveAsDefault(e.target.checked)}
                   style={{
                     width: 16,
-                    height: 16,
-                    accentColor: D.heading,
+                    accentColor: "#18181B",
                     marginTop: 2,
                   }}
+                  disabled={sending}
                 />
                 <span>
                   Save as this customer's billing recipient for future invoices
@@ -3210,7 +3588,6 @@ function SendInvoiceModal({ invoice, isMobile, onClose, onSent, onError }) {
             )}
           </>
         )}
-
         <div
           style={{
             display: "flex",
@@ -3219,34 +3596,55 @@ function SendInvoiceModal({ invoice, isMobile, onClose, onSent, onError }) {
             marginTop: 22,
           }}
         >
-          <button
+          <Button
             onClick={onClose}
             disabled={sending}
-            style={sBtn("transparent", D.text, isMobile)}
+            variant={"secondary"}
+            onClickCapture={(event) =>
+              event.currentTarget.focus({
+                preventScroll: true,
+              })
+            }
+            className="min-w-11"
           >
             Cancel
-          </button>
-          <button
+          </Button>
+          <Button
             onClick={send}
             disabled={!canSend}
-            style={{
-              ...sBtn(D.heading, D.white, isMobile),
-              opacity: canSend ? 1 : 0.5,
-            }}
+            variant={"primary"}
+            onClickCapture={(event) =>
+              event.currentTarget.focus({
+                preventScroll: true,
+              })
+            }
+            className="min-w-11"
+            loading={sending}
           >
-            {sending ? "Sending..." : "Send invoice"}
-          </button>
+            {"Send invoice"}
+          </Button>
         </div>
-      </div>
-    </div>,
-    document.body,
+      </DialogBody>
+    </Dialog>
   );
 }
 
 // ── Send Receipt Modal ──
 // Per-invoice action for paid invoices. Memo is ephemeral (stored on the
 // invoice row as receipt_memo for audit) — not a customer preference.
-function SendReceiptModal({ invoice, isMobile, onClose, onSent, onError }) {
+function SendReceiptModal({
+  invoice,
+  isMobile,
+  onClose,
+  onSent,
+  onError: reportError,
+}) {
+  const sendingRef = useRef(false);
+  const [actionError, setActionError] = useState("");
+  const onError = (message) => {
+    setActionError(message);
+    reportError(message);
+  };
   const [memo, setMemo] = useState("");
   const [sendEmail, setSendEmail] = useState(!!invoice.email);
   const [sendSms, setSendSms] = useState(!!invoice.phone);
@@ -3254,7 +3652,6 @@ function SendReceiptModal({ invoice, isMobile, onClose, onSent, onError }) {
   const [recipientsLoading, setRecipientsLoading] = useState(true);
   const [recipientLookupError, setRecipientLookupError] = useState("");
   const [sending, setSending] = useState(false);
-
   useEffect(() => {
     let alive = true;
     setRecipientsLoading(true);
@@ -3282,7 +3679,6 @@ function SendReceiptModal({ invoice, isMobile, onClose, onSent, onError }) {
       alive = false;
     };
   }, [invoice.id, invoice.email, invoice.phone]);
-
   const receiptEmail = recipientLookup
     ? recipientLookup.emailRecipient?.email || ""
     : invoice.email || "";
@@ -3293,17 +3689,22 @@ function SendReceiptModal({ invoice, isMobile, onClose, onSent, onError }) {
   const hasEmail = !!receiptEmail;
   const hasPhone = !!receiptPhone;
   const anyChannel = sendEmail || sendSms;
-
   const handleSend = async () => {
+    if (sendingRef.current) return;
     if (!anyChannel || sending || recipientsLoading) return;
     const via = sendEmail && sendSms ? "both" : sendEmail ? "email" : "sms";
+    sendingRef.current = true;
+    setActionError("");
     setSending(true);
     try {
       const res = await adminFetch(
         `/admin/invoices/${invoice.id}/send-receipt`,
         {
           method: "POST",
-          body: JSON.stringify({ memo: memo.trim() || undefined, via }),
+          body: JSON.stringify({
+            memo: memo.trim() || undefined,
+            via,
+          }),
         },
       );
       if (!res.ok) {
@@ -3317,120 +3718,56 @@ function SendReceiptModal({ invoice, isMobile, onClose, onSent, onError }) {
     } catch (err) {
       onError(`Receipt send failed: ${err.message}`);
     } finally {
+      sendingRef.current = false;
       setSending(false);
     }
   };
-
-  return createPortal(
-    <div
-      onClick={onClose}
-      style={{
-        position: "fixed",
-        inset: 0,
-        background: "rgba(0,0,0,0.45)",
-        zIndex: 400,
-        fontFamily: "'Roboto', Arial, sans-serif",
-        color: D.text,
-        display: "flex",
-        alignItems: isMobile ? "flex-end" : "center",
-        justifyContent: "center",
-        padding: isMobile ? 0 : 20,
-      }}
-    >
-      {" "}
-      <div
-        onClick={(e) => e.stopPropagation()}
-        style={{
-          background: D.card,
-          borderRadius: isMobile ? "16px 16px 0 0" : 14,
-          width: "100%",
-          maxWidth: 440,
-          padding: isMobile ? "24px 20px 28px" : 28,
-          // Bottom sheet sits over the home indicator once portaled above the
-          // tab bar - keep the last controls above it.
-          paddingBottom: isMobile ? "calc(28px + env(safe-area-inset-bottom, 0px))" : 28,
-          boxShadow: "0 20px 60px rgba(0,0,0,0.28)",
-          ...(isMobile
-            ? {
-                width: "100%",
-                maxWidth: "none",
-                height: "100%",
-                maxHeight: "none",
-                borderRadius: 0,
-                boxSizing: "border-box",
-                overflowY: "auto",
-                paddingTop: "calc(24px + env(safe-area-inset-top, 0px))",
-                paddingBottom: "calc(28px + env(safe-area-inset-bottom, 0px))",
-                paddingLeft: "calc(28px + env(safe-area-inset-left, 0px))",
-                paddingRight: "calc(28px + env(safe-area-inset-right, 0px))",
-              }
-            : {}),
-        }}
-      >
-        {" "}
+  return (
+    <Dialog open={true} onClose={sending ? undefined : onClose} layer={400}>
+      <DialogBody className="space-y-4 text-ui-body text-zinc-900">
+        <DialogTitle>Send receipt & close</DialogTitle>
+        {actionError && <ActionFeedback error>{actionError}</ActionFeedback>}
         <div
           style={{
-            fontSize: 20,
-            fontWeight: 500,
-            color: D.heading,
-            marginBottom: 4,
+            marginBottom: 20,
           }}
+          className="text-ui-body text-ink-secondary"
         >
-          Send receipt & close
-        </div>{" "}
-        <div style={{ fontSize: 13, color: D.muted, marginBottom: 20 }}>
           Invoice #{invoice.invoice_number} · $
           {parseFloat(invoice.total).toFixed(2)} · {invoice.first_name}{" "}
           {invoice.last_name}
-        </div>{" "}
-        <label
-          style={{
-            display: "block",
-            fontSize: 12,
-            fontWeight: 500,
-            color: D.text,
-            marginBottom: 6,
-            textTransform: "uppercase",
-            letterSpacing: "0.06em",
-          }}
-        >
-          Optional memo
-        </label>{" "}
-        <textarea
-          value={memo}
-          onChange={(e) => setMemo(e.target.value.slice(0, 400))}
-          placeholder="e.g. Left a spare trap in the garage — rebait in 2 weeks."
-          rows={3}
-          style={{
-            ...sInput(isMobile),
-            resize: "vertical",
-            minHeight: 72,
-            fontFamily: "inherit",
-          }}
-        />{" "}
+        </div>
+        <Field label={<>Optional memo</>} className="min-w-0">
+          <Textarea
+            value={memo}
+            onChange={(e) => setMemo(e.target.value.slice(0, 400))}
+            placeholder="e.g. Left a spare trap in the garage — rebait in 2 weeks."
+            rows={3}
+            style={{
+              resize: "vertical",
+            }}
+            disabled={sending}
+          />
+        </Field>
         <div
           style={{
-            fontSize: 11,
-            color: D.muted,
             textAlign: "right",
             marginTop: 4,
             marginBottom: 18,
           }}
+          className="text-ui-body text-ink-secondary"
         >
           {memo.length}/400
-        </div>{" "}
+        </div>
         {recipientLookupError && (
           <div
             style={{
               marginBottom: 12,
               padding: "10px 12px",
-              background: "#FEF3C7",
-              border: `1px solid ${D.amber}`,
-              borderRadius: 8,
-              fontSize: 12,
-              color: D.text,
+              border: "1px solid #52525B",
               lineHeight: 1.45,
             }}
+            className="bg-zinc-100 rounded-md text-ui-body text-zinc-900"
           >
             Recipient lookup failed. Receipt delivery will use the invoice
             contact shown below.
@@ -3454,25 +3791,33 @@ function SendReceiptModal({ invoice, isMobile, onClose, onSent, onError }) {
                 hasEmail && !recipientsLoading ? "pointer" : "not-allowed",
               opacity: hasEmail && !recipientsLoading ? 1 : 0.5,
             }}
+            className="ui-choice-label flex items-center gap-2 text-ui-body text-zinc-900"
           >
             {" "}
-            <input
-              type="checkbox"
+            <Checkbox
               checked={sendEmail && hasEmail}
-              disabled={!hasEmail || recipientsLoading}
               onChange={(e) => setSendEmail(e.target.checked)}
-              style={{ width: 16, height: 16, accentColor: D.heading }}
+              style={{
+                width: 16,
+                accentColor: "#18181B",
+              }}
+              disabled={sending || !hasEmail || recipientsLoading}
             />{" "}
-            <span style={{ fontSize: 14, color: D.text }}>
+            <span className="text-ui-body text-zinc-900">
               Email{" "}
               {recipientsLoading ? (
-                <span style={{ color: D.muted }}>· loading recipient</span>
+                <span className="text-ink-secondary">· loading recipient</span>
               ) : receiptEmail ? (
-                <span style={{ color: D.muted }}>
+                <span className="text-ink-secondary">
                   · {receiptEmail} · {contactRoleLabel(receiptEmailRole)}
                 </span>
               ) : (
-                <span style={{ color: D.muted, fontStyle: "italic" }}>
+                <span
+                  style={{
+                    fontStyle: "italic",
+                  }}
+                  className="text-ink-secondary"
+                >
                   · no email on file
                 </span>
               )}
@@ -3487,23 +3832,31 @@ function SendReceiptModal({ invoice, isMobile, onClose, onSent, onError }) {
                 hasPhone && !recipientsLoading ? "pointer" : "not-allowed",
               opacity: hasPhone && !recipientsLoading ? 1 : 0.5,
             }}
+            className="ui-choice-label flex items-center gap-2 text-ui-body text-zinc-900"
           >
             {" "}
-            <input
-              type="checkbox"
+            <Checkbox
               checked={sendSms && hasPhone}
-              disabled={!hasPhone || recipientsLoading}
               onChange={(e) => setSendSms(e.target.checked)}
-              style={{ width: 16, height: 16, accentColor: D.heading }}
+              style={{
+                width: 16,
+                accentColor: "#18181B",
+              }}
+              disabled={sending || !hasPhone || recipientsLoading}
             />{" "}
-            <span style={{ fontSize: 14, color: D.text }}>
+            <span className="text-ui-body text-zinc-900">
               SMS{" "}
               {recipientsLoading ? (
-                <span style={{ color: D.muted }}>· loading recipient</span>
+                <span className="text-ink-secondary">· loading recipient</span>
               ) : receiptPhone ? (
-                <span style={{ color: D.muted }}>· {receiptPhone}</span>
+                <span className="text-ink-secondary">· {receiptPhone}</span>
               ) : (
-                <span style={{ color: D.muted, fontStyle: "italic" }}>
+                <span
+                  style={{
+                    fontStyle: "italic",
+                  }}
+                  className="text-ink-secondary"
+                >
                   · no phone on file
                 </span>
               )}
@@ -3515,13 +3868,10 @@ function SendReceiptModal({ invoice, isMobile, onClose, onSent, onError }) {
             style={{
               marginTop: 14,
               padding: "10px 12px",
-              background: "#FEF3C7",
-              border: `1px solid ${D.amber}`,
-              borderRadius: 8,
-              fontSize: 12,
-              color: D.text,
+              border: "1px solid #52525B",
               lineHeight: 1.45,
             }}
+            className="bg-zinc-100 rounded-md text-ui-body text-zinc-900"
           >
             A receipt was already sent on{" "}
             {new Date(invoice.receipt_sent_at).toLocaleString()}. Sending again
@@ -3537,27 +3887,36 @@ function SendReceiptModal({ invoice, isMobile, onClose, onSent, onError }) {
           }}
         >
           {" "}
-          <button
+          <Button
             onClick={onClose}
             disabled={sending}
-            style={sBtn("transparent", D.text, isMobile)}
+            variant={"secondary"}
+            onClickCapture={(event) =>
+              event.currentTarget.focus({
+                preventScroll: true,
+              })
+            }
+            className="min-w-11"
           >
             Cancel
-          </button>{" "}
-          <button
+          </Button>{" "}
+          <Button
             onClick={handleSend}
             disabled={!anyChannel || sending || recipientsLoading}
-            style={{
-              ...sBtn(D.heading, D.white, isMobile),
-              opacity: !anyChannel || sending || recipientsLoading ? 0.5 : 1,
-            }}
+            variant={"primary"}
+            onClickCapture={(event) =>
+              event.currentTarget.focus({
+                preventScroll: true,
+              })
+            }
+            className="min-w-11"
+            loading={sending}
           >
-            {sending ? "Sending…" : "Send receipt"}
-          </button>{" "}
-        </div>{" "}
-      </div>{" "}
-    </div>,
-    document.body,
+            {"Send receipt"}
+          </Button>{" "}
+        </div>
+      </DialogBody>
+    </Dialog>
   );
 }
 
@@ -3568,15 +3927,30 @@ function SendReceiptModal({ invoice, isMobile, onClose, onSent, onError }) {
 // issued from Customer 360. Partial application is deliberately not offered —
 // a remaining balance would still be charged in full by the Stripe/Terminal
 // pay paths, so credit must cover the whole invoice.
-function ApplyCreditModal({ invoice, isMobile, onClose, onApplied, onError }) {
+function ApplyCreditModal({
+  invoice,
+  isMobile,
+  onClose,
+  onApplied,
+  onError: reportError,
+}) {
+  const savingRef = useRef(false);
+  const [actionError, setActionError] = useState("");
+  const onError = (message) => {
+    setActionError(message);
+    reportError(message);
+  };
   const [loading, setLoading] = useState(true);
   const [ctx, setCtx] = useState(null);
+  const [readError, setReadError] = useState("");
+  const [readAttempt, setReadAttempt] = useState(0);
   const [waiveSetupFee, setWaiveSetupFee] = useState(false);
   const [note, setNote] = useState("");
   const [saving, setSaving] = useState(false);
-
   useEffect(() => {
     let alive = true;
+    setLoading(true);
+    setReadError("");
     (async () => {
       try {
         const data = await adminFetch(
@@ -3585,7 +3959,7 @@ function ApplyCreditModal({ invoice, isMobile, onClose, onApplied, onError }) {
         if (!alive) return;
         setCtx(data);
       } catch (err) {
-        if (alive) onError(`Couldn't load account credit: ${err.message}`);
+        if (alive) setReadError(`Couldn't load account credit: ${err.message}`);
       } finally {
         if (alive) setLoading(false);
       }
@@ -3593,16 +3967,17 @@ function ApplyCreditModal({ invoice, isMobile, onClose, onApplied, onError }) {
     return () => {
       alive = false;
     };
-  }, [invoice.id]);
-
+  }, [invoice.id, readAttempt]);
   const balance = Number(ctx?.balance || 0);
   const amountDue = Number(ctx?.amount_due || 0);
   const canCover = amountDue > 0 && balance + 0.005 >= amountDue;
   const shortfall = Math.max(0, amountDue - balance);
-  const canApply = !loading && !saving && canCover;
-
+  const canApply = !loading && !readError && !saving && canCover;
   const handleApply = async () => {
+    if (savingRef.current) return;
     if (!canApply) return;
+    savingRef.current = true;
+    setActionError("");
     setSaving(true);
     try {
       const res = await adminFetch(
@@ -3621,81 +3996,40 @@ function ApplyCreditModal({ invoice, isMobile, onClose, onApplied, onError }) {
     } catch (err) {
       onError(`Apply credit failed: ${err.message}`);
     } finally {
+      savingRef.current = false;
       setSaving(false);
     }
   };
-
-  const fieldLabel = {
-    display: "block",
-    fontSize: 12,
-    fontWeight: 500,
-    color: D.text,
-    marginBottom: 8,
-    textTransform: "uppercase",
-    letterSpacing: "0.06em",
-  };
-
-  return createPortal(
-    <div
-      onClick={onClose}
-      style={{
-        position: "fixed",
-        inset: 0,
-        background: "rgba(0,0,0,0.45)",
-        zIndex: 400,
-        fontFamily: "'Roboto', Arial, sans-serif",
-        color: D.text,
-        display: "flex",
-        alignItems: isMobile ? "flex-end" : "center",
-        justifyContent: "center",
-        padding: isMobile ? 0 : 20,
-      }}
-    >
-      <div
-        onClick={(e) => e.stopPropagation()}
-        style={{
-          background: D.card,
-          borderRadius: isMobile ? "16px 16px 0 0" : 14,
-          width: "100%",
-          maxWidth: 460,
-          padding: isMobile ? "24px 20px 28px" : 28,
-          // Bottom sheet sits over the home indicator once portaled above the
-          // tab bar - keep the last controls above it.
-          paddingBottom: isMobile ? "calc(28px + env(safe-area-inset-bottom, 0px))" : 28,
-          boxShadow: "0 20px 60px rgba(0,0,0,0.28)",
-          maxHeight: "92vh",
-          overflowY: "auto",
-          ...(isMobile
-            ? {
-                width: "100%",
-                maxWidth: "none",
-                height: "100%",
-                maxHeight: "none",
-                borderRadius: 0,
-                boxSizing: "border-box",
-                overflowY: "auto",
-                paddingTop: "calc(24px + env(safe-area-inset-top, 0px))",
-                paddingBottom: "calc(28px + env(safe-area-inset-bottom, 0px))",
-                paddingLeft: "calc(28px + env(safe-area-inset-left, 0px))",
-                paddingRight: "calc(28px + env(safe-area-inset-right, 0px))",
-              }
-            : {}),
-        }}
-      >
+  return (
+    <Dialog open={true} onClose={saving ? undefined : onClose} layer={400}>
+      <DialogBody className="space-y-4 text-ui-body text-zinc-900">
+        <DialogTitle>Apply account credit</DialogTitle>
+        {actionError && <ActionFeedback error>{actionError}</ActionFeedback>}
         <div
-          style={{ fontSize: 20, fontWeight: 500, color: D.heading, marginBottom: 4 }}
+          style={{
+            marginBottom: 20,
+          }}
+          className="text-ui-body text-ink-secondary"
         >
-          Apply account credit
-        </div>
-        <div style={{ fontSize: 13, color: D.muted, marginBottom: 20 }}>
           Invoice #{invoice.invoice_number} · {invoice.first_name}{" "}
           {invoice.last_name}
         </div>
-
         {loading ? (
-          <div style={{ fontSize: 14, color: D.muted, padding: "20px 0" }}>
+          <div
+            style={{
+              padding: "20px 0",
+            }}
+            className="text-ui-body text-ink-secondary"
+          >
             Loading account credit…
           </div>
+        ) : readError ? (
+          <ActionFeedback
+            error
+            onRetry={() => setReadAttempt((attempt) => attempt + 1)}
+          >
+            {readError}
+          </ActionFeedback>
         ) : (
           <>
             <div
@@ -3705,37 +4039,52 @@ function ApplyCreditModal({ invoice, isMobile, onClose, onApplied, onError }) {
                 gap: 12,
                 marginBottom: 16,
                 padding: "12px 14px",
-                background: "#F4F4F5",
-                border: `1px solid ${D.border}`,
-                borderRadius: 8,
+                border: "1px solid #E4E4E7",
               }}
+              className="bg-zinc-100 rounded-md"
             >
               <div>
-                <div style={{ fontSize: 11, color: D.muted, textTransform: "uppercase", letterSpacing: "0.06em" }}>
+                <div className="text-ui-body text-ink-secondary">
                   Available credit
                 </div>
-                <div style={{ fontSize: 18, fontWeight: 500, color: balance > 0 ? D.heading : D.muted }}>
+                <div
+                  className={cn(
+                    "text-18",
+                    "font-medium",
+                    balance > 0 ? "text-zinc-900" : "text-ink-secondary",
+                  )}
+                >
                   ${balance.toFixed(2)}
                 </div>
               </div>
-              <div style={{ textAlign: "right" }}>
-                <div style={{ fontSize: 11, color: D.muted, textTransform: "uppercase", letterSpacing: "0.06em" }}>
+              <div
+                style={{
+                  textAlign: "right",
+                }}
+              >
+                <div className="text-ui-body text-ink-secondary">
                   Amount due
                 </div>
-                <div style={{ fontSize: 18, fontWeight: 500, color: D.heading }}>
+                <div className="text-18 font-medium text-zinc-900">
                   ${amountDue.toFixed(2)}
                 </div>
               </div>
             </div>
 
             {!canCover ? (
-              <div style={{ fontSize: 13, color: D.muted, marginBottom: 8, lineHeight: 1.5 }}>
+              <div
+                style={{
+                  marginBottom: 8,
+                  lineHeight: 1.5,
+                }}
+                className="text-ui-body text-ink-secondary"
+              >
                 {balance <= 0
                   ? "This customer has no account credit. "
                   : `Available credit ($${balance.toFixed(2)}) doesn't cover the $${amountDue.toFixed(2)} due — $${shortfall.toFixed(2)} short. `}
-                Credit must cover the invoice in full. Issue more credit from the
-                customer's profile (Customer 360 → Account credit), or lower the
-                invoice, then try again.
+                Credit must cover the invoice in full. Issue more credit from
+                the customer's profile (Customer 360 → Account credit), or lower
+                the invoice, then try again.
               </div>
             ) : (
               <>
@@ -3747,52 +4096,54 @@ function ApplyCreditModal({ invoice, isMobile, onClose, onApplied, onError }) {
                     marginBottom: 16,
                     cursor: "pointer",
                   }}
+                  className="ui-choice-label flex items-center gap-2 text-ui-body text-zinc-900"
                 >
-                  <input
-                    type="checkbox"
+                  <Checkbox
                     checked={waiveSetupFee}
                     onChange={(e) => setWaiveSetupFee(e.target.checked)}
-                    style={{ width: 16, height: 16, accentColor: D.heading }}
+                    style={{
+                      width: 16,
+                      accentColor: "#18181B",
+                    }}
+                    disabled={saving}
                   />
-                  <span style={{ fontSize: 14, color: D.text }}>
+                  <span className="text-ui-body text-zinc-900">
                     Waive initial / setup fee
-                    <span style={{ color: D.muted, marginLeft: 6, fontStyle: "italic" }}>
+                    <span
+                      style={{
+                        marginLeft: 6,
+                        fontStyle: "italic",
+                      }}
+                      className="text-ink-secondary"
+                    >
                       · records the waiver on this invoice
                     </span>
                   </span>
                 </label>
 
-                <label style={fieldLabel}>Note (optional)</label>
-                <textarea
-                  value={note}
-                  onChange={(e) => setNote(e.target.value)}
-                  rows={2}
-                  placeholder="e.g. Q3 prepay collected by phone"
-                  style={{
-                    width: "100%",
-                    padding: "10px 12px",
-                    background: D.bg,
-                    color: D.text,
-                    border: `1px solid ${D.border}`,
-                    borderRadius: 8,
-                    fontSize: 14,
-                    boxSizing: "border-box",
-                    resize: "vertical",
-                    fontFamily: "inherit",
-                  }}
-                />
+                <Field className="min-w-0" label={<>Note (optional)</>}>
+                  <Textarea
+                    value={note}
+                    onChange={(e) => setNote(e.target.value)}
+                    rows={2}
+                    placeholder="e.g. Q3 prepay collected by phone"
+                    style={{
+                      width: "100%",
+                      boxSizing: "border-box",
+                      resize: "vertical",
+                    }}
+                    disabled={saving}
+                  />
+                </Field>
 
                 <div
                   style={{
                     marginTop: 14,
                     padding: "10px 12px",
-                    background: "#F4F4F5",
-                    border: `1px solid ${D.border}`,
-                    borderRadius: 8,
-                    fontSize: 12,
-                    color: D.muted,
+                    border: "1px solid #E4E4E7",
                     lineHeight: 1.45,
                   }}
+                  className="bg-zinc-100 rounded-md text-ui-body text-ink-secondary"
                 >
                   Applies ${amountDue.toFixed(2)} from account credit, marks the
                   invoice prepaid, and stops automated reminders.
@@ -3801,28 +4152,44 @@ function ApplyCreditModal({ invoice, isMobile, onClose, onApplied, onError }) {
             )}
           </>
         )}
-
         <div
-          style={{ display: "flex", gap: 8, justifyContent: "flex-end", marginTop: 20 }}
+          style={{
+            display: "flex",
+            gap: 8,
+            justifyContent: "flex-end",
+            marginTop: 20,
+          }}
         >
-          <button
+          <Button
             onClick={onClose}
             disabled={saving}
-            style={sBtn("transparent", D.text, isMobile)}
+            variant={"secondary"}
+            onClickCapture={(event) =>
+              event.currentTarget.focus({
+                preventScroll: true,
+              })
+            }
+            className="min-w-11"
           >
             Cancel
-          </button>
-          <button
+          </Button>
+          <Button
             onClick={handleApply}
             disabled={!canApply}
-            style={{ ...sBtn(D.heading, D.white, isMobile), opacity: canApply ? 1 : 0.5 }}
+            variant={"primary"}
+            onClickCapture={(event) =>
+              event.currentTarget.focus({
+                preventScroll: true,
+              })
+            }
+            className="min-w-11"
+            loading={saving}
           >
-            {saving ? "Applying…" : "Apply & mark prepaid"}
-          </button>
+            {"Apply & mark prepaid"}
+          </Button>
         </div>
-      </div>
-    </div>,
-    document.body,
+      </DialogBody>
+    </Dialog>
   );
 }
 
@@ -3835,8 +4202,14 @@ function RecordPaymentModal({
   isMobile,
   onClose,
   onRecorded,
-  onError,
+  onError: reportError,
 }) {
+  const savingRef = useRef(false);
+  const [actionError, setActionError] = useState("");
+  const onError = (message) => {
+    setActionError(message);
+    reportError(message);
+  };
   const [method, setMethod] = useState("cash");
   const [reference, setReference] = useState("");
   const [note, setNote] = useState("");
@@ -3845,7 +4218,6 @@ function RecordPaymentModal({
   const [recipientsLoading, setRecipientsLoading] = useState(true);
   const [recipientLookupError, setRecipientLookupError] = useState("");
   const [saving, setSaving] = useState(false);
-
   useEffect(() => {
     let alive = true;
     setRecipientsLoading(true);
@@ -3867,7 +4239,6 @@ function RecordPaymentModal({
       alive = false;
     };
   }, [invoice.id]);
-
   const referenceLabel =
     method === "check"
       ? "Check number"
@@ -3880,7 +4251,6 @@ function RecordPaymentModal({
             : method === "other"
               ? "Reference"
               : "Reference (optional)";
-
   const referencePlaceholder =
     method === "check"
       ? "e.g. 1042"
@@ -3893,7 +4263,6 @@ function RecordPaymentModal({
             : method === "other"
               ? "e.g. money order #"
               : "";
-
   const receiptEmail = recipientLookup
     ? recipientLookup.emailRecipient?.email || ""
     : invoice.email || "";
@@ -3909,9 +4278,11 @@ function RecordPaymentModal({
     hasPhone && "SMS",
   ].filter(Boolean);
   const recordDisabled = saving || (sendReceipt && recipientsLoading);
-
   const handleRecord = async () => {
+    if (savingRef.current) return;
     if (recordDisabled) return;
+    savingRef.current = true;
+    setActionError("");
     setSaving(true);
     try {
       const res = await adminFetch(
@@ -3939,111 +4310,55 @@ function RecordPaymentModal({
     } catch (err) {
       onError(`Record payment failed: ${err.message}`);
     } finally {
+      savingRef.current = false;
       setSaving(false);
     }
   };
-
   const methodChoice = (key, label) => (
-    <button
+    <Button
       key={key}
       type="button"
       onClick={() => setMethod(key)}
       style={{
         flex: 1,
-        padding: "12px 10px",
-        background: method === key ? D.heading : D.card,
-        color: method === key ? D.white : D.text,
-        border: `1px solid ${method === key ? D.heading : D.border}`,
-        borderRadius: 8,
-        fontSize: 14,
-        fontWeight: 500,
-        cursor: "pointer",
-        textTransform: "uppercase",
-        letterSpacing: "0.04em",
-        minHeight: 44,
       }}
+      variant={method === key ? "primary" : "secondary"}
+      onClickCapture={(event) =>
+        event.currentTarget.focus({
+          preventScroll: true,
+        })
+      }
+      className="min-w-11"
+      aria-pressed={method === key}
+      disabled={saving}
     >
       {label}
-    </button>
+    </Button>
   );
-
-  return createPortal(
-    <div
-      onClick={onClose}
-      style={{
-        position: "fixed",
-        inset: 0,
-        background: "rgba(0,0,0,0.45)",
-        zIndex: 400,
-        fontFamily: "'Roboto', Arial, sans-serif",
-        color: D.text,
-        display: "flex",
-        alignItems: isMobile ? "flex-end" : "center",
-        justifyContent: "center",
-        padding: isMobile ? 0 : 20,
-      }}
-    >
-      {" "}
-      <div
-        onClick={(e) => e.stopPropagation()}
-        style={{
-          background: D.card,
-          borderRadius: isMobile ? "16px 16px 0 0" : 14,
-          width: "100%",
-          maxWidth: 460,
-          padding: isMobile ? "24px 20px 28px" : 28,
-          // Bottom sheet sits over the home indicator once portaled above the
-          // tab bar - keep the last controls above it.
-          paddingBottom: isMobile ? "calc(28px + env(safe-area-inset-bottom, 0px))" : 28,
-          boxShadow: "0 20px 60px rgba(0,0,0,0.28)",
-          maxHeight: "92vh",
-          overflowY: "auto",
-          ...(isMobile
-            ? {
-                width: "100%",
-                maxWidth: "none",
-                height: "100%",
-                maxHeight: "none",
-                borderRadius: 0,
-                boxSizing: "border-box",
-                overflowY: "auto",
-                paddingTop: "calc(24px + env(safe-area-inset-top, 0px))",
-                paddingBottom: "calc(28px + env(safe-area-inset-bottom, 0px))",
-                paddingLeft: "calc(28px + env(safe-area-inset-left, 0px))",
-                paddingRight: "calc(28px + env(safe-area-inset-right, 0px))",
-              }
-            : {}),
-        }}
-      >
-        {" "}
+  return (
+    <Dialog open={true} onClose={saving ? undefined : onClose} layer={400}>
+      <DialogBody className="space-y-4 text-ui-body text-zinc-900">
+        <DialogTitle>Add payment</DialogTitle>
+        {actionError && <ActionFeedback error>{actionError}</ActionFeedback>}
         <div
           style={{
-            fontSize: 20,
-            fontWeight: 500,
-            color: D.heading,
-            marginBottom: 4,
+            marginBottom: 20,
           }}
+          className="text-ui-body text-ink-secondary"
         >
-          Add payment
-        </div>{" "}
-        <div style={{ fontSize: 13, color: D.muted, marginBottom: 20 }}>
           Invoice #{invoice.invoice_number} · $
           {parseFloat(invoice.total).toFixed(2)} · {invoice.first_name}{" "}
           {invoice.last_name}
-        </div>{" "}
+        </div>
         <label
           style={{
             display: "block",
-            fontSize: 12,
-            fontWeight: 500,
-            color: D.text,
             marginBottom: 8,
-            textTransform: "uppercase",
-            letterSpacing: "0.06em",
           }}
+          className="text-ui-body font-medium text-zinc-900"
         >
           Payment method
-        </label>{" "}
+        </label>
         <div
           style={{
             display: "flex",
@@ -4058,74 +4373,46 @@ function RecordPaymentModal({
           {methodChoice("venmo", "Venmo")}
           {methodChoice("paypal", "PayPal")}
           {methodChoice("other", "Other")}
-        </div>{" "}
-        <label
-          style={{
-            display: "block",
-            fontSize: 12,
-            fontWeight: 500,
-            color: D.text,
-            marginBottom: 6,
-            textTransform: "uppercase",
-            letterSpacing: "0.06em",
-          }}
-        >
-          {referenceLabel}
-        </label>{" "}
-        <input
-          value={reference}
-          onChange={(e) => setReference(e.target.value.slice(0, 200))}
-          placeholder={referencePlaceholder}
-          style={sInput(isMobile)}
-        />{" "}
-        <label
-          style={{
-            display: "block",
-            fontSize: 12,
-            fontWeight: 500,
-            color: D.text,
-            margin: "16px 0 6px",
-            textTransform: "uppercase",
-            letterSpacing: "0.06em",
-          }}
-        >
-          Note (optional)
-        </label>{" "}
-        <textarea
-          value={note}
-          onChange={(e) => setNote(e.target.value.slice(0, 400))}
-          placeholder="e.g. Customer dropped check off at the office"
-          rows={2}
-          style={{
-            ...sInput(isMobile),
-            resize: "vertical",
-            minHeight: 56,
-            fontFamily: "inherit",
-          }}
-        />{" "}
+        </div>
+        <Field label={<>{referenceLabel}</>} className="min-w-0">
+          <Input
+            value={reference}
+            onChange={(e) => setReference(e.target.value.slice(0, 200))}
+            placeholder={referencePlaceholder}
+            disabled={saving}
+          />
+        </Field>
+        <Field label={<>Note (optional)</>} className="min-w-0">
+          <Textarea
+            value={note}
+            onChange={(e) => setNote(e.target.value.slice(0, 400))}
+            placeholder="e.g. Customer dropped check off at the office"
+            rows={2}
+            style={{
+              resize: "vertical",
+            }}
+            disabled={saving}
+          />
+        </Field>
         <div
           style={{
-            fontSize: 11,
-            color: D.muted,
             textAlign: "right",
             marginTop: 4,
             marginBottom: 14,
           }}
+          className="text-ui-body text-ink-secondary"
         >
           {note.length}/400
-        </div>{" "}
+        </div>
         {recipientLookupError && (
           <div
             style={{
               marginBottom: 12,
               padding: "10px 12px",
-              background: "#FEF3C7",
-              border: `1px solid ${D.amber}`,
-              borderRadius: 8,
-              fontSize: 12,
-              color: D.text,
+              border: "1px solid #52525B",
               lineHeight: 1.45,
             }}
+            className="bg-zinc-100 rounded-md text-ui-body text-zinc-900"
           >
             Recipient lookup failed. Receipt delivery will use the invoice
             contact shown below.
@@ -4140,49 +4427,63 @@ function RecordPaymentModal({
               hasContact && !recipientsLoading ? "pointer" : "not-allowed",
             opacity: hasContact && !recipientsLoading ? 1 : 0.5,
           }}
+          className="ui-choice-label flex items-center gap-2 text-ui-body text-zinc-900"
         >
           {" "}
-          <input
-            type="checkbox"
+          <Checkbox
             checked={sendReceipt && hasContact}
-            disabled={!hasContact || recipientsLoading}
             onChange={(e) => setSendReceipt(e.target.checked)}
-            style={{ width: 16, height: 16, accentColor: D.heading }}
+            style={{
+              width: 16,
+              accentColor: "#18181B",
+            }}
+            disabled={saving || !hasContact || recipientsLoading}
           />{" "}
-          <span style={{ fontSize: 14, color: D.text }}>
+          <span className="text-ui-body text-zinc-900">
             Send receipt now
             {recipientsLoading ? (
-              <span style={{ color: D.muted, marginLeft: 6 }}>
+              <span
+                style={{
+                  marginLeft: 6,
+                }}
+                className="text-ink-secondary"
+              >
                 · loading recipients
               </span>
             ) : hasContact ? (
-              <span style={{ color: D.muted, marginLeft: 6 }}>
+              <span
+                style={{
+                  marginLeft: 6,
+                }}
+                className="text-ink-secondary"
+              >
                 · {receiptChannels.join(" + ")}
               </span>
             ) : (
               <span
-                style={{ color: D.muted, marginLeft: 6, fontStyle: "italic" }}
+                style={{
+                  marginLeft: 6,
+                  fontStyle: "italic",
+                }}
+                className="text-ink-secondary"
               >
                 · no email or phone on file
               </span>
             )}
           </span>{" "}
-        </label>{" "}
+        </label>
         <div
           style={{
             marginTop: 14,
             padding: "10px 12px",
-            background: "#F4F4F5",
-            border: `1px solid ${D.border}`,
-            borderRadius: 8,
-            fontSize: 12,
-            color: D.muted,
+            border: "1px solid #E4E4E7",
             lineHeight: 1.45,
           }}
+          className="bg-zinc-100 rounded-md text-ui-body text-ink-secondary"
         >
           Marks this invoice paid and stops automated reminders. Use only after
           the money has actually arrived.
-        </div>{" "}
+        </div>
         <div
           style={{
             display: "flex",
@@ -4192,33 +4493,40 @@ function RecordPaymentModal({
           }}
         >
           {" "}
-          <button
+          <Button
             onClick={onClose}
             disabled={saving}
-            style={sBtn("transparent", D.text, isMobile)}
+            variant={"secondary"}
+            onClickCapture={(event) =>
+              event.currentTarget.focus({
+                preventScroll: true,
+              })
+            }
+            className="min-w-11"
           >
             Cancel
-          </button>{" "}
-          <button
+          </Button>{" "}
+          <Button
             onClick={handleRecord}
             disabled={recordDisabled}
-            style={{
-              ...sBtn(D.heading, D.white, isMobile),
-              opacity: recordDisabled ? 0.5 : 1,
-            }}
+            variant={"primary"}
+            onClickCapture={(event) =>
+              event.currentTarget.focus({
+                preventScroll: true,
+              })
+            }
+            className="min-w-11"
+            loading={saving}
           >
-            {saving
-              ? "Recording…"
-              : sendReceipt && recipientsLoading
-                ? "Loading recipients…"
-                : sendReceipt && hasContact
-                  ? "Record & send receipt"
-                  : "Record payment"}
-          </button>{" "}
-        </div>{" "}
-      </div>{" "}
-    </div>,
-    document.body,
+            {sendReceipt && recipientsLoading
+              ? "Loading recipients…"
+              : sendReceipt && hasContact
+                ? "Record & send receipt"
+                : "Record payment"}
+          </Button>{" "}
+        </div>
+      </DialogBody>
+    </Dialog>
   );
 }
 
@@ -4226,16 +4534,47 @@ function RecordPaymentModal({
 // (and the server's coverageCadence normalization). Picking a cadence presets
 // the visit count; the operator can still override it.
 const ANNUAL_PREPAY_CADENCE_OPTIONS = [
-  { value: "monthly", label: "Monthly", visits: 12 },
-  { value: "bimonthly", label: "Every 2 months", visits: 6 },
-  { value: "quarterly", label: "Quarterly", visits: 4 },
-  { value: "triannual", label: "Every 4 months", visits: 3 },
-  { value: "semiannual", label: "Semiannual", visits: 2 },
-  { value: "every_6_weeks", label: "Every 6 weeks", visits: 9 },
-  { value: "annual", label: "Annual", visits: 1 },
+  {
+    value: "monthly",
+    label: "Monthly",
+    visits: 12,
+  },
+  {
+    value: "bimonthly",
+    label: "Every 2 months",
+    visits: 6,
+  },
+  {
+    value: "quarterly",
+    label: "Quarterly",
+    visits: 4,
+  },
+  {
+    value: "triannual",
+    label: "Every 4 months",
+    visits: 3,
+  },
+  {
+    value: "semiannual",
+    label: "Semiannual",
+    visits: 2,
+  },
+  {
+    value: "every_6_weeks",
+    label: "Every 6 weeks",
+    visits: 9,
+  },
+  {
+    value: "annual",
+    label: "Annual",
+    visits: 1,
+  },
 ];
 const ANNUAL_PREPAY_CADENCE_VISITS = Object.fromEntries(
-  ANNUAL_PREPAY_CADENCE_OPTIONS.map((option) => [option.value, String(option.visits)]),
+  ANNUAL_PREPAY_CADENCE_OPTIONS.map((option) => [
+    option.value,
+    String(option.visits),
+  ]),
 );
 
 // Flags an existing invoice as an annual prepayment so the customer-facing
@@ -4244,7 +4583,21 @@ const ANNUAL_PREPAY_CADENCE_VISITS = Object.fromEntries(
 // prepaid (so completing them doesn't re-invoice the prepaid customer).
 // Prefills from the linked term when one already exists (edit mode), otherwise
 // from the invoice itself.
-function AnnualPrepayModal({ invoice, isMobile, onClose, onSaved, onError }) {
+function AnnualPrepayModal({
+  invoice,
+  isMobile,
+  onClose,
+  onSaved,
+  onError: reportError,
+}) {
+  const [readError, setReadError] = useState("");
+  const [readAttempt, setReadAttempt] = useState(0);
+  const savingRef = useRef(false);
+  const [actionError, setActionError] = useState("");
+  const onError = (message) => {
+    setActionError(message);
+    reportError(message);
+  };
   const [loading, setLoading] = useState(true);
   const [existing, setExisting] = useState(null);
   const [start, setStart] = useState(
@@ -4266,9 +4619,9 @@ function AnnualPrepayModal({ invoice, isMobile, onClose, onSaved, onError }) {
   const [visitCount, setVisitCount] = useState("4");
   const [saving, setSaving] = useState(false);
   const [removing, setRemoving] = useState(false);
-
   useEffect(() => {
     let alive = true;
+    setReadError("");
     setLoading(true);
     adminFetch(`/admin/invoices/${invoice.id}`)
       .then((data) => {
@@ -4280,7 +4633,8 @@ function AnnualPrepayModal({ invoice, isMobile, onClose, onSaved, onError }) {
         const suggested = data?.suggested_coverage || null;
         if (term) {
           setExisting(term);
-          if (term.termStart) setStart(invoiceDateOnly(term.termStart) || start);
+          if (term.termStart)
+            setStart(invoiceDateOnly(term.termStart) || start);
           if (term.coverageMonths) setMonths(term.coverageMonths);
           if (term.planLabel) setPlanLabel(term.planLabel);
           if (term.prepayAmount != null) {
@@ -4316,14 +4670,17 @@ function AnnualPrepayModal({ invoice, isMobile, onClose, onSaved, onError }) {
           }
         }
       })
-      .catch(() => {})
+      .catch((error) => {
+        if (alive)
+          setReadError(`Could not load annual prepay: ${error.message}`);
+      })
       .finally(() => {
         if (alive) setLoading(false);
       });
     return () => {
       alive = false;
     };
-  }, [invoice.id]);
+  }, [invoice.id, readAttempt]);
 
   // Picking a cadence presets its standard visit count (operator can override).
   const handleCadenceChange = (value) => {
@@ -4332,7 +4689,6 @@ function AnnualPrepayModal({ invoice, isMobile, onClose, onSaved, onError }) {
     const preset = ANNUAL_PREPAY_CADENCE_VISITS[value];
     if (preset) setVisitCount(preset);
   };
-
   const trimmedService = serviceType.trim();
   const parsedVisits = parseInt(visitCount, 10);
   const coverageVisitsValid =
@@ -4341,9 +4697,12 @@ function AnnualPrepayModal({ invoice, isMobile, onClose, onSaved, onError }) {
   // would store the service type but skip stamping (which needs both), leaving
   // an invoice that still re-bills its visits. Block the save in that state.
   const coverageInvalid = trimmedService !== "" && !coverageVisitsValid;
-
   const handleSave = async () => {
+    if (loading || readError) return;
+    if (savingRef.current) return;
     if (saving || coverageInvalid) return;
+    savingRef.current = true;
+    setActionError("");
     setSaving(true);
     try {
       await adminFetch(`/admin/invoices/${invoice.id}/annual-prepay`, {
@@ -4356,25 +4715,30 @@ function AnnualPrepayModal({ invoice, isMobile, onClose, onSaved, onError }) {
           // Coverage: send the service type + visits so payment auto-marks the
           // scheduled visits prepaid. Empty service type → display-only flag.
           coverageServiceType: trimmedService,
-          coverageVisitCount: trimmedService && coverageVisitsValid ? parsedVisits : undefined,
+          coverageVisitCount:
+            trimmedService && coverageVisitsValid ? parsedVisits : undefined,
           // For a NEW term, send the visible cadence so what the form shows is
           // what gets seeded (the server's label-first inference would otherwise
           // override the displayed default). For an EXISTING term, omit it
           // unless explicit, so an unrelated edit never overwrites a legacy
           // null-cadence term's inferred schedule with the default.
           coverageCadence:
-            trimmedService && (!existing || cadenceExplicit) ? cadence : undefined,
+            trimmedService && (!existing || cadenceExplicit)
+              ? cadence
+              : undefined,
         }),
       });
       onSaved(existing ? "Annual prepay updated" : "Marked as annual prepay");
     } catch (err) {
       onError(`Annual prepay failed: ${err.message}`);
     } finally {
+      savingRef.current = false;
       setSaving(false);
     }
   };
-
   const handleRemove = async () => {
+    if (loading || readError) return;
+    if (savingRef.current) return;
     if (removing) return;
     if (
       !confirm(
@@ -4382,6 +4746,8 @@ function AnnualPrepayModal({ invoice, isMobile, onClose, onSaved, onError }) {
       )
     )
       return;
+    savingRef.current = true;
+    setActionError("");
     setRemoving(true);
     try {
       await adminFetch(`/admin/invoices/${invoice.id}/annual-prepay`, {
@@ -4391,185 +4757,175 @@ function AnnualPrepayModal({ invoice, isMobile, onClose, onSaved, onError }) {
     } catch (err) {
       onError(`Remove failed: ${err.message}`);
     } finally {
+      savingRef.current = false;
       setRemoving(false);
     }
   };
-
-  const labelStyle = {
-    display: "block",
-    fontSize: 12,
-    fontWeight: 500,
-    color: D.text,
-    margin: "16px 0 6px",
-    textTransform: "uppercase",
-    letterSpacing: "0.06em",
-  };
-
-  return createPortal(
-    <div
-      onClick={onClose}
-      style={{
-        position: "fixed",
-        inset: 0,
-        background: "rgba(0,0,0,0.45)",
-        zIndex: 400,
-        fontFamily: "'Roboto', Arial, sans-serif",
-        color: D.text,
-        display: "flex",
-        alignItems: isMobile ? "flex-end" : "center",
-        justifyContent: "center",
-        padding: isMobile ? 0 : 20,
-      }}
+  return (
+    <Dialog
+      open={true}
+      layer={400}
+      onClose={saving || removing ? undefined : onClose}
     >
-      <div
-        onClick={(e) => e.stopPropagation()}
-        style={{
-          background: D.card,
-          borderRadius: isMobile ? "16px 16px 0 0" : 14,
-          width: "100%",
-          maxWidth: 460,
-          padding: isMobile ? "24px 20px 28px" : 28,
-          // Bottom sheet sits over the home indicator once portaled above the
-          // tab bar - keep the last controls above it.
-          paddingBottom: isMobile ? "calc(28px + env(safe-area-inset-bottom, 0px))" : 28,
-          boxShadow: "0 20px 60px rgba(0,0,0,0.28)",
-          maxHeight: "92vh",
-          overflowY: "auto",
-          ...(isMobile
-            ? {
-                width: "100%",
-                maxWidth: "none",
-                height: "100%",
-                maxHeight: "none",
-                borderRadius: 0,
-                boxSizing: "border-box",
-                overflowY: "auto",
-                paddingTop: "calc(24px + env(safe-area-inset-top, 0px))",
-                paddingBottom: "calc(28px + env(safe-area-inset-bottom, 0px))",
-                paddingLeft: "calc(28px + env(safe-area-inset-left, 0px))",
-                paddingRight: "calc(28px + env(safe-area-inset-right, 0px))",
-              }
-            : {}),
-        }}
-      >
+      <DialogBody className="space-y-4 text-ui-body text-zinc-900">
+        <DialogTitle>
+          {existing ? "Annual prepay" : "Mark as annual prepay"}
+        </DialogTitle>
+        {loading ? (
+          <ActionFeedback>Loading annual prepay…</ActionFeedback>
+        ) : readError ? (
+          <ActionFeedback
+            error
+            onRetry={() => setReadAttempt((attempt) => attempt + 1)}
+          >
+            {readError}
+          </ActionFeedback>
+        ) : null}
+        {actionError && <ActionFeedback error>{actionError}</ActionFeedback>}
         <div
           style={{
-            fontSize: 20,
-            fontWeight: 500,
-            color: D.heading,
-            marginBottom: 4,
+            marginBottom: 16,
           }}
+          className="text-ui-body text-ink-secondary"
         >
-          {existing ? "Annual prepay" : "Mark as annual prepay"}
-        </div>
-        <div style={{ fontSize: 13, color: D.muted, marginBottom: 16 }}>
           Invoice #{invoice.invoice_number} · {invoice.first_name}{" "}
           {invoice.last_name}
         </div>
-
         <div
           style={{
             padding: "10px 12px",
-            background: "#F4F4F5",
-            border: `1px solid ${D.border}`,
-            borderRadius: 8,
-            fontSize: 12,
-            color: D.muted,
+            border: "1px solid #E4E4E7",
             lineHeight: 1.45,
           }}
+          className="bg-zinc-100 rounded-md text-ui-body text-ink-secondary"
         >
           Adds the "Annual prepayment" coverage banner to the customer's invoice
           (pay page + PDF), showing the dates this payment covers. Use it for a
-          customer paying a full year up front. With a service type + visit count
-          set below, paying this invoice also auto-marks that many scheduled
-          visits prepaid, so completing them won't re-bill the customer.
+          customer paying a full year up front. With a service type + visit
+          count set below, paying this invoice also auto-marks that many
+          scheduled visits prepaid, so completing them won't re-bill the
+          customer.
         </div>
-
-        <label style={labelStyle}>Coverage start</label>
-        <input
-          type="date"
-          value={start}
-          onChange={(e) => setStart(e.target.value)}
-          style={sInput(isMobile)}
-        />
-
-        <label style={labelStyle}>Term length (months)</label>
-        <input
-          type="number"
-          min={1}
-          max={60}
-          value={months}
-          onChange={(e) => setMonths(e.target.value)}
-          style={sInput(isMobile)}
-        />
-
-        <label style={labelStyle}>Service type covered</label>
-        <input
-          value={serviceType}
-          onChange={(e) => setServiceType(e.target.value.slice(0, 100))}
-          placeholder="e.g. Quarterly Pest Control"
-          style={sInput(isMobile)}
-        />
-        <div style={{ fontSize: 11, color: D.muted, marginTop: 4 }}>
+        <Field label={<>Coverage start</>} className="min-w-0">
+          <Input
+            type="date"
+            value={start}
+            onChange={(e) => setStart(e.target.value)}
+            disabled={loading || !!readError || saving || removing}
+          />
+        </Field>
+        <Field label={<>Term length (months)</>} className="min-w-0">
+          <Input
+            type="number"
+            min={1}
+            max={60}
+            value={months}
+            onChange={(e) => setMonths(e.target.value)}
+            disabled={loading || !!readError || saving || removing}
+          />
+        </Field>
+        <Field label={<>Service type covered</>} className="min-w-0">
+          <Input
+            value={serviceType}
+            onChange={(e) => setServiceType(e.target.value.slice(0, 100))}
+            placeholder="e.g. Quarterly Pest Control"
+            disabled={loading || !!readError || saving || removing}
+          />
+        </Field>
+        <div
+          style={{
+            marginTop: 4,
+          }}
+          className="text-ui-body text-ink-secondary"
+        >
           Match the scheduled visits this covers. Leave blank for a display-only
           flag (no auto-prepaid visits).
         </div>
-
-        <div style={{ display: "flex", gap: 12 }}>
-          <div style={{ flex: 1 }}>
-            <label style={labelStyle}>Cadence</label>
-            <select
-              value={cadence}
-              onChange={(e) => handleCadenceChange(e.target.value)}
-              style={sInput(isMobile)}
-            >
-              {ANNUAL_PREPAY_CADENCE_OPTIONS.map((option) => (
-                <option key={option.value} value={option.value}>
-                  {option.label}
-                </option>
-              ))}
-            </select>
+        <div
+          style={{
+            display: "flex",
+            gap: 12,
+          }}
+        >
+          <div
+            style={{
+              flex: 1,
+            }}
+          >
+            <Field label={<>Cadence</>} className="min-w-0">
+              <Select
+                value={cadence}
+                onChange={(e) => handleCadenceChange(e.target.value)}
+                disabled={
+                  loading ||
+                  !!readError ||
+                  saving ||
+                  removing ||
+                  saving ||
+                  removing
+                }
+              >
+                {ANNUAL_PREPAY_CADENCE_OPTIONS.map((option) => (
+                  <option key={option.value} value={option.value}>
+                    {option.label}
+                  </option>
+                ))}
+              </Select>
+            </Field>
           </div>
-          <div style={{ flex: 1 }}>
-            <label style={labelStyle}>Visits covered</label>
-            <input
-              type="number"
-              min={1}
-              max={24}
-              value={visitCount}
-              onChange={(e) => setVisitCount(e.target.value)}
-              style={{
-                ...sInput(isMobile),
-                border: coverageInvalid ? `1px solid ${D.red}` : sInput(isMobile).border,
-              }}
-            />
+          <div
+            style={{
+              flex: 1,
+            }}
+          >
+            <Field label={<>Visits covered</>} className="min-w-0">
+              <Input
+                type="number"
+                min={1}
+                max={24}
+                value={visitCount}
+                onChange={(e) => setVisitCount(e.target.value)}
+                disabled={
+                  loading ||
+                  !!readError ||
+                  saving ||
+                  removing ||
+                  saving ||
+                  removing
+                }
+              />
+            </Field>
           </div>
         </div>
         {coverageInvalid && (
-          <div style={{ fontSize: 11, color: D.red, marginTop: 4 }}>
+          <div
+            style={{
+              marginTop: 4,
+            }}
+            className="text-ui-body text-alert-fg"
+          >
             Enter a visit count (1–24) for this service type, or clear the
             service type for a display-only flag.
           </div>
         )}
-
-        <label style={labelStyle}>Plan label</label>
-        <input
-          value={planLabel}
-          onChange={(e) => setPlanLabel(e.target.value.slice(0, 120))}
-          placeholder="e.g. WaveGuard Bronze Annual Prepay"
-          style={sInput(isMobile)}
-        />
-
-        <label style={labelStyle}>Prepay amount</label>
-        <input
-          type="number"
-          min={0}
-          step="0.01"
-          value={amount}
-          onChange={(e) => setAmount(e.target.value)}
-          style={sInput(isMobile)}
-        />
-
+        <Field label={<>Plan label</>} className="min-w-0">
+          <Input
+            value={planLabel}
+            onChange={(e) => setPlanLabel(e.target.value.slice(0, 120))}
+            placeholder="e.g. WaveGuard Bronze Annual Prepay"
+            disabled={loading || !!readError || saving || removing}
+          />
+        </Field>
+        <Field label={<>Prepay amount</>} className="min-w-0">
+          <Input
+            type="number"
+            min={0}
+            step="0.01"
+            value={amount}
+            onChange={(e) => setAmount(e.target.value)}
+            disabled={loading || !!readError || saving || removing}
+          />
+        </Field>
         <div
           style={{
             display: "flex",
@@ -4581,45 +4937,76 @@ function AnnualPrepayModal({ invoice, isMobile, onClose, onSaved, onError }) {
         >
           <div>
             {existing && (
-              <button
+              <Button
                 onClick={handleRemove}
-                disabled={removing || saving}
-                style={{
-                  ...sBtn("transparent", D.red, isMobile),
-                  opacity: removing ? 0.5 : 1,
-                }}
+                onClickCapture={(event) =>
+                  event.currentTarget.focus({
+                    preventScroll: true,
+                  })
+                }
+                className="min-w-11"
+                disabled={
+                  loading ||
+                  !!readError ||
+                  saving ||
+                  removing ||
+                  removing ||
+                  saving
+                }
+                variant="danger"
               >
                 {removing ? "Removing…" : "Remove"}
-              </button>
+              </Button>
             )}
           </div>
-          <div style={{ display: "flex", gap: 8 }}>
-            <button
+          <div
+            style={{
+              display: "flex",
+              gap: 8,
+            }}
+          >
+            <Button
               onClick={onClose}
               disabled={saving || removing}
-              style={sBtn("transparent", D.text, isMobile)}
+              variant={"secondary"}
+              onClickCapture={(event) =>
+                event.currentTarget.focus({
+                  preventScroll: true,
+                })
+              }
+              className="min-w-11"
             >
               Cancel
-            </button>
-            <button
+            </Button>
+            <Button
               onClick={handleSave}
-              disabled={saving || removing || loading || coverageInvalid}
-              style={{
-                ...sBtn(D.heading, D.white, isMobile),
-                opacity: saving || loading || coverageInvalid ? 0.5 : 1,
-                cursor: coverageInvalid ? "not-allowed" : "pointer",
-              }}
+              variant={"primary"}
+              onClickCapture={(event) =>
+                event.currentTarget.focus({
+                  preventScroll: true,
+                })
+              }
+              className="min-w-11"
+              loading={saving}
+              disabled={
+                loading ||
+                !!readError ||
+                saving ||
+                removing ||
+                saving ||
+                removing ||
+                loading ||
+                coverageInvalid
+              }
             >
-              {saving ? "Saving…" : existing ? "Update" : "Mark prepaid"}
-            </button>
+              {existing ? "Update" : "Mark prepaid"}
+            </Button>
           </div>
         </div>
-      </div>
-    </div>,
-    document.body,
+      </DialogBody>
+    </Dialog>
   );
 }
-
 function todayDateInput() {
   const parts = new Intl.DateTimeFormat("en-US", {
     timeZone: "America/New_York",
@@ -4630,37 +5017,47 @@ function todayDateInput() {
   const get = (type) => parts.find((part) => part.type === type)?.value;
   return `${get("year")}-${get("month")}-${get("day")}`;
 }
-
 function addDaysDateInput(dateString, days) {
   const date = new Date(`${dateString}T12:00:00Z`);
   date.setUTCDate(date.getUTCDate() + days);
   return date.toISOString().slice(0, 10);
 }
-
 function PaymentPlanModal({
   invoice,
   isMobile,
   onClose,
   onCreated,
-  onError,
+  onError: reportError,
 }) {
+  const savingRef = useRef(false);
+  const [actionError, setActionError] = useState("");
+  const onError = (message) => {
+    setActionError(message);
+    reportError(message);
+  };
   const total = Number(invoice.total || 0);
   const startDate = todayDateInput();
   const [paymentAmount, setPaymentAmount] = useState(
-    Number.isFinite(total) && total > 0 ? (Math.ceil((total / 3) * 100) / 100).toFixed(2) : "",
+    Number.isFinite(total) && total > 0
+      ? (Math.ceil((total / 3) * 100) / 100).toFixed(2)
+      : "",
   );
   const [paymentFrequency, setPaymentFrequency] = useState("monthly");
   const [planStartDate, setPlanStartDate] = useState(startDate);
-  const [nextPaymentDate, setNextPaymentDate] = useState(addDaysDateInput(startDate, 30));
+  const [nextPaymentDate, setNextPaymentDate] = useState(
+    addDaysDateInput(startDate, 30),
+  );
   const [notes, setNotes] = useState("");
   const [saving, setSaving] = useState(false);
-
   const amount = Number(paymentAmount);
   const validAmount = Number.isFinite(amount) && amount > 0 && amount <= total;
-  const createDisabled = saving || !validAmount || !nextPaymentDate || !planStartDate;
-
+  const createDisabled =
+    saving || !validAmount || !nextPaymentDate || !planStartDate;
   const createPlan = async () => {
+    if (savingRef.current) return;
     if (createDisabled) return;
+    savingRef.current = true;
+    setActionError("");
     setSaving(true);
     try {
       await adminFetch(`/admin/invoices/${invoice.id}/payment-plan`, {
@@ -4678,142 +5075,86 @@ function PaymentPlanModal({
     } catch (err) {
       onError(`Payment plan failed: ${err.message}`);
     } finally {
+      savingRef.current = false;
       setSaving(false);
     }
   };
-
   const frequencyChoice = (key, label) => (
-    <button
+    <Button
       key={key}
       type="button"
       onClick={() => setPaymentFrequency(key)}
       style={{
         flex: 1,
-        padding: "12px 10px",
-        background: paymentFrequency === key ? D.heading : D.card,
-        color: paymentFrequency === key ? D.white : D.text,
-        border: `1px solid ${paymentFrequency === key ? D.heading : D.border}`,
-        borderRadius: 8,
-        fontSize: 13,
-        fontWeight: 500,
-        cursor: "pointer",
-        textTransform: "uppercase",
-        letterSpacing: "0.04em",
-        minHeight: 44,
       }}
+      variant={paymentFrequency === key ? "primary" : "secondary"}
+      onClickCapture={(event) =>
+        event.currentTarget.focus({
+          preventScroll: true,
+        })
+      }
+      className="min-w-11"
+      disabled={saving}
+      aria-pressed={paymentFrequency === key}
     >
       {label}
-    </button>
+    </Button>
   );
-
-  return createPortal(
-    <div
-      onClick={onClose}
-      style={{
-        position: "fixed",
-        inset: 0,
-        background: "rgba(0,0,0,0.45)",
-        zIndex: 400,
-        fontFamily: "'Roboto', Arial, sans-serif",
-        color: D.text,
-        display: "flex",
-        alignItems: isMobile ? "flex-end" : "center",
-        justifyContent: "center",
-        padding: isMobile ? 0 : 20,
-      }}
-    >
-      <div
-        onClick={(e) => e.stopPropagation()}
-        style={{
-          background: D.card,
-          borderRadius: isMobile ? "16px 16px 0 0" : 14,
-          width: "100%",
-          maxWidth: 500,
-          padding: isMobile ? "24px 20px 28px" : 28,
-          // Bottom sheet sits over the home indicator once portaled above the
-          // tab bar - keep the last controls above it.
-          paddingBottom: isMobile ? "calc(28px + env(safe-area-inset-bottom, 0px))" : 28,
-          boxShadow: "0 20px 60px rgba(0,0,0,0.28)",
-          maxHeight: "92vh",
-          overflowY: "auto",
-          ...(isMobile
-            ? {
-                width: "100%",
-                maxWidth: "none",
-                height: "100%",
-                maxHeight: "none",
-                borderRadius: 0,
-                boxSizing: "border-box",
-                overflowY: "auto",
-                paddingTop: "calc(24px + env(safe-area-inset-top, 0px))",
-                paddingBottom: "calc(28px + env(safe-area-inset-bottom, 0px))",
-                paddingLeft: "calc(28px + env(safe-area-inset-left, 0px))",
-                paddingRight: "calc(28px + env(safe-area-inset-right, 0px))",
-              }
-            : {}),
-        }}
-      >
+  return (
+    <Dialog open={true} onClose={saving ? undefined : onClose} layer={400}>
+      <DialogBody className="space-y-4 text-ui-body text-zinc-900">
+        <DialogTitle>Create payment plan</DialogTitle>
+        {actionError && <ActionFeedback error>{actionError}</ActionFeedback>}
         <div
           style={{
-            fontSize: 20,
-            fontWeight: 500,
-            color: D.heading,
-            marginBottom: 4,
+            marginBottom: 20,
           }}
+          className="text-ui-body text-ink-secondary"
         >
-          Create payment plan
-        </div>
-        <div style={{ fontSize: 13, color: D.muted, marginBottom: 20 }}>
           Invoice #{invoice.invoice_number} · ${total.toFixed(2)} ·{" "}
           {invoice.first_name} {invoice.last_name}
         </div>
-
-        <label
-          style={{
-            display: "block",
-            fontSize: 12,
-            fontWeight: 500,
-            color: D.text,
-            marginBottom: 6,
-            textTransform: "uppercase",
-            letterSpacing: "0.06em",
-          }}
-        >
-          Payment amount
-        </label>
-        <input
-          type="number"
-          min="0.01"
-          step="0.01"
-          value={paymentAmount}
-          onChange={(e) => setPaymentAmount(e.target.value)}
-          style={sInput(isMobile)}
-        />
+        <Field label={<>Payment amount</>} className="min-w-0">
+          <Input
+            type="number"
+            min="0.01"
+            step="0.01"
+            value={paymentAmount}
+            onChange={(e) => setPaymentAmount(e.target.value)}
+            disabled={saving}
+          />
+        </Field>
         {!validAmount && (
-          <div style={{ color: D.red, fontSize: 12, marginTop: 6 }}>
-            Enter an amount greater than $0 and no more than ${total.toFixed(2)}.
+          <div
+            style={{
+              marginTop: 6,
+            }}
+            className="text-alert-fg text-ui-body"
+          >
+            Enter an amount greater than $0 and no more than ${total.toFixed(2)}
+            .
           </div>
         )}
-
         <label
           style={{
             display: "block",
-            fontSize: 12,
-            fontWeight: 500,
-            color: D.text,
             margin: "16px 0 8px",
-            textTransform: "uppercase",
-            letterSpacing: "0.06em",
           }}
+          className="text-ui-body font-medium text-zinc-900"
         >
           Frequency
         </label>
-        <div style={{ display: "flex", gap: 6, marginBottom: 16 }}>
+        <div
+          style={{
+            display: "flex",
+            gap: 6,
+            marginBottom: 16,
+          }}
+        >
           {frequencyChoice("weekly", "Weekly")}
           {frequencyChoice("biweekly", "Biweekly")}
           {frequencyChoice("monthly", "Monthly")}
         </div>
-
         <div
           style={{
             display: "grid",
@@ -4822,91 +5163,50 @@ function PaymentPlanModal({
           }}
         >
           <div>
-            <label
-              style={{
-                display: "block",
-                fontSize: 12,
-                fontWeight: 500,
-                color: D.text,
-                marginBottom: 6,
-                textTransform: "uppercase",
-                letterSpacing: "0.06em",
-              }}
-            >
-              Start date
-            </label>
-            <input
-              type="date"
-              value={planStartDate}
-              onChange={(e) => setPlanStartDate(e.target.value)}
-              style={sInput(isMobile)}
-            />
+            <Field label={<>Start date</>} className="min-w-0">
+              <Input
+                type="date"
+                value={planStartDate}
+                onChange={(e) => setPlanStartDate(e.target.value)}
+                disabled={saving}
+              />
+            </Field>
           </div>
           <div>
-            <label
-              style={{
-                display: "block",
-                fontSize: 12,
-                fontWeight: 500,
-                color: D.text,
-                marginBottom: 6,
-                textTransform: "uppercase",
-                letterSpacing: "0.06em",
-              }}
-            >
-              Next payment
-            </label>
-            <input
-              type="date"
-              value={nextPaymentDate}
-              onChange={(e) => setNextPaymentDate(e.target.value)}
-              style={sInput(isMobile)}
-            />
+            <Field label={<>Next payment</>} className="min-w-0">
+              <Input
+                type="date"
+                value={nextPaymentDate}
+                onChange={(e) => setNextPaymentDate(e.target.value)}
+                disabled={saving}
+              />
+            </Field>
           </div>
         </div>
-
-        <label
-          style={{
-            display: "block",
-            fontSize: 12,
-            fontWeight: 500,
-            color: D.text,
-            margin: "16px 0 6px",
-            textTransform: "uppercase",
-            letterSpacing: "0.06em",
-          }}
-        >
-          Note (optional)
-        </label>
-        <textarea
-          value={notes}
-          onChange={(e) => setNotes(e.target.value.slice(0, 500))}
-          placeholder="e.g. Customer requested three monthly payments"
-          rows={3}
-          style={{
-            ...sInput(isMobile),
-            resize: "vertical",
-            minHeight: 72,
-            fontFamily: "inherit",
-          }}
-        />
-
+        <Field label={<>Note (optional)</>} className="min-w-0">
+          <Textarea
+            value={notes}
+            onChange={(e) => setNotes(e.target.value.slice(0, 500))}
+            placeholder="e.g. Customer requested three monthly payments"
+            rows={3}
+            style={{
+              resize: "vertical",
+            }}
+            disabled={saving}
+          />
+        </Field>
         <div
           style={{
             marginTop: 14,
             padding: "10px 12px",
-            background: "#F4F4F5",
-            border: `1px solid ${D.border}`,
-            borderRadius: 8,
-            fontSize: 12,
-            color: D.muted,
+            border: "1px solid #E4E4E7",
             lineHeight: 1.45,
           }}
+          className="bg-zinc-100 rounded-md text-ui-body text-ink-secondary"
         >
           Creates the plan, adds an invoice timeline entry, and sends the
           customer the payment plan confirmation email.
         </div>
-
         <div
           style={{
             display: "flex",
@@ -4915,32 +5215,67 @@ function PaymentPlanModal({
             marginTop: 20,
           }}
         >
-          <button
+          <Button
             onClick={onClose}
             disabled={saving}
-            style={sBtn("transparent", D.text, isMobile)}
+            variant={"secondary"}
+            onClickCapture={(event) =>
+              event.currentTarget.focus({
+                preventScroll: true,
+              })
+            }
+            className="min-w-11"
           >
             Cancel
-          </button>
-          <button
+          </Button>
+          <Button
             onClick={createPlan}
             disabled={createDisabled}
-            style={{
-              ...sBtn(D.heading, D.white, isMobile),
-              opacity: createDisabled ? 0.5 : 1,
-            }}
+            variant={"primary"}
+            onClickCapture={(event) =>
+              event.currentTarget.focus({
+                preventScroll: true,
+              })
+            }
+            className="min-w-11"
+            loading={saving}
           >
-            {saving ? "Creating…" : "Create plan"}
-          </button>
+            {"Create plan"}
+          </Button>
         </div>
-      </div>
-    </div>,
-    document.body,
+      </DialogBody>
+    </Dialog>
   );
 }
 
 // ── Create Invoice ──
-function CreateInvoice({ showToast, onCreated, editInvoice, isMobile }) {
+function CreateInvoice({
+  showToast: reportToast,
+  onCreated,
+  editInvoice,
+  isMobile,
+  onPendingChange,
+}) {
+  const [discountsLoading, setDiscountsLoading] = useState(true);
+  const [discountsError, setDiscountsError] = useState("");
+  const [discountsAttempt, setDiscountsAttempt] = useState(0);
+  const [customerSearchLoading, setCustomerSearchLoading] = useState(false);
+  const [customerSearchError, setCustomerSearchError] = useState("");
+  const [customerSearchAttempt, setCustomerSearchAttempt] = useState(0);
+  const [serviceRecordsError, setServiceRecordsError] = useState("");
+  const [serviceRecordsAttempt, setServiceRecordsAttempt] = useState(0);
+  const [serviceSearchLoading, setServiceSearchLoading] = useState(false);
+  const [serviceSearchError, setServiceSearchError] = useState("");
+  const [serviceSearchAttempt, setServiceSearchAttempt] = useState(0);
+  const [actionError, setActionError] = useState("");
+  const showToast = (message, tone = "ok") => {
+    if (tone === "error" || message.startsWith("Error:"))
+      setActionError(message);
+    reportToast(message, tone);
+  };
+  const savingRef = useRef(false);
+  const aiNotesLoadingRef = useRef(false);
+  const aiMessageLoadingRef = useRef(false);
   // Set ({ invoice, reason }) when POST /admin/invoices succeeded but
   // /schedule-send failed: the invoice row EXISTS, so the editable builder
   // must not render for it again — every editable-retry variant leaked
@@ -5017,16 +5352,34 @@ function CreateInvoice({ showToast, onCreated, editInvoice, isMobile }) {
 
   // Load active, invoice-visible discounts once. Tier discounts are included here
   // for explicit line-level selection; customer tier never applies a hidden discount.
+  const builderBusy = saving || aiNotesLoading || aiMessageLoading;
   useEffect(() => {
+    onPendingChange(saving || aiNotesLoading || aiMessageLoading);
+    return () => onPendingChange(false);
+  }, [saving, aiNotesLoading, aiMessageLoading, onPendingChange]);
+  useEffect(() => {
+    let alive = true;
+    setDiscountsLoading(true);
+    setDiscountsError("");
     adminFetch("/admin/discounts")
-      .then((d) => {
-        const list = (Array.isArray(d) ? d : d.discounts || []).filter(
-          (x) => x.is_active && x.show_in_invoices,
-        );
-        setAvailableDiscounts(list);
+      .then((data) => {
+        if (alive)
+          setAvailableDiscounts(
+            (Array.isArray(data) ? data : data.discounts || []).filter(
+              (discount) => discount.is_active && discount.show_in_invoices,
+            ),
+          );
       })
-      .catch(() => {});
-  }, []);
+      .catch((error) => {
+        if (alive) setDiscountsError(error.message || "Discounts unavailable");
+      })
+      .finally(() => {
+        if (alive) setDiscountsLoading(false);
+      });
+    return () => {
+      alive = false;
+    };
+  }, [discountsAttempt]);
 
   // Edit mode: prefill the builder from the existing draft. Only the fields
   // the PUT /admin/invoices/:id route actually persists are loaded into editable
@@ -5084,53 +5437,98 @@ function CreateInvoice({ showToast, onCreated, editInvoice, isMobile }) {
   // Customer search
   useEffect(() => {
     if (editMode) return;
+    let alive = true;
+    setCustomerSearchError("");
+    setCustomers([]);
     if (customerQuery.length < 2) {
-      setCustomers([]);
+      setCustomerSearchLoading(false);
       return;
     }
-    const t = setTimeout(() => {
+    setCustomerSearchLoading(true);
+    const timer = setTimeout(() => {
       adminFetch(
-        `/admin/invoices/customers/search?q=${encodeURIComponent(customerQuery)}`,
+        "/admin/invoices/customers/search?q=" +
+          encodeURIComponent(customerQuery),
       )
-        .then((d) => setCustomers(d.customers || []))
-        .catch(() => {});
+        .then((data) => {
+          if (alive) setCustomers(data.customers || []);
+        })
+        .catch((error) => {
+          if (alive)
+            setCustomerSearchError(
+              error.message || "Customer search unavailable",
+            );
+        })
+        .finally(() => {
+          if (alive) setCustomerSearchLoading(false);
+        });
     }, 300);
-    return () => clearTimeout(t);
-  }, [customerQuery]);
+    return () => {
+      alive = false;
+      clearTimeout(timer);
+    };
+  }, [customerQuery, customerSearchAttempt, editMode]);
 
   // Load service records when customer selected (skip in edit mode — the
   // service-history linker is hidden and the update route can't relink it).
   useEffect(() => {
-    if (editMode || !selectedCustomer) {
-      setServiceRecords([]);
-      return;
-    }
-    adminFetch(`/admin/invoices/service-records/${selectedCustomer.id}`)
-      .then((d) => setServiceRecords(d.records || []))
-      .catch(() => {});
-  }, [selectedCustomer]);
+    let alive = true;
+    setServiceRecords([]);
+    setServiceRecordsError("");
+    if (editMode || !selectedCustomer) return;
+    adminFetch("/admin/invoices/service-records/" + selectedCustomer.id)
+      .then((data) => {
+        if (alive) setServiceRecords(data.records || []);
+      })
+      .catch((error) => {
+        if (alive)
+          setServiceRecordsError(
+            error.message || "Service history unavailable",
+          );
+      });
+    return () => {
+      alive = false;
+    };
+  }, [selectedCustomer, serviceRecordsAttempt, editMode]);
 
   // Service library search for active line item
   useEffect(() => {
-    if (serviceSearchIdx === null) {
-      setServiceResults([]);
+    let alive = true;
+    setServiceResults([]);
+    setServiceSearchError("");
+    const query =
+      serviceSearchIdx === null
+        ? ""
+        : lineItems[serviceSearchIdx]?.description || "";
+    if (query.length < 2) {
+      setServiceSearchLoading(false);
       return;
     }
-    const q = lineItems[serviceSearchIdx]?.description || "";
-    if (q.length < 2) {
-      setServiceResults([]);
-      return;
-    }
-    const t = setTimeout(() => {
+    setServiceSearchLoading(true);
+    const timer = setTimeout(() => {
       adminFetch(
-        `/admin/services?search=${encodeURIComponent(q)}&is_active=true&limit=10`,
+        "/admin/services?search=" +
+          encodeURIComponent(query) +
+          "&is_active=true&limit=10",
       )
-        .then((d) => setServiceResults(d.services || []))
-        .catch(() => setServiceResults([]));
+        .then((data) => {
+          if (alive) setServiceResults(data.services || []);
+        })
+        .catch((error) => {
+          if (alive)
+            setServiceSearchError(
+              error.message || "Service catalog unavailable",
+            );
+        })
+        .finally(() => {
+          if (alive) setServiceSearchLoading(false);
+        });
     }, 250);
-    return () => clearTimeout(t);
-  }, [serviceSearchIdx, lineItems]);
-
+    return () => {
+      alive = false;
+      clearTimeout(timer);
+    };
+  }, [serviceSearchIdx, lineItems, serviceSearchAttempt]);
   const pickService = (i, svc) => {
     const updated = [...lineItems];
     updated[i] = {
@@ -5143,7 +5541,6 @@ function CreateInvoice({ showToast, onCreated, editInvoice, isMobile }) {
     setServiceSearchIdx(null);
     setServiceResults([]);
   };
-
   const isCustomAmountDiscount = (d) =>
     d.discount_type === "variable_amount" ||
     (d.discount_type === "fixed_amount" &&
@@ -5152,7 +5549,6 @@ function CreateInvoice({ showToast, onCreated, editInvoice, isMobile }) {
     d.discount_type === "variable_percentage" ||
     (d.discount_type === "percentage" &&
       (d.discount_key === "custom_percent" || !(Number(d.amount) > 0)));
-
   const formatDiscountLabel = (d) =>
     d.discount_type === "percentage" ||
     d.discount_type === "variable_percentage"
@@ -5167,9 +5563,7 @@ function CreateInvoice({ showToast, onCreated, editInvoice, isMobile }) {
         : d.discount_type === "free_service"
           ? "free"
           : "";
-
   const roundMoney = (value) => Math.round((Number(value) || 0) * 100) / 100;
-
   const getCustomDiscountValue = (discount, parent, baseAmount) => {
     if (isCustomAmountDiscount(discount)) {
       const raw = window.prompt(
@@ -5207,7 +5601,10 @@ function CreateInvoice({ showToast, onCreated, editInvoice, isMobile }) {
           baseAmount,
           roundMoney(
             previewDiscount(
-              { ...discount, amount: customPercentage },
+              {
+                ...discount,
+                amount: customPercentage,
+              },
               baseAmount,
             ),
           ),
@@ -5217,7 +5614,6 @@ function CreateInvoice({ showToast, onCreated, editInvoice, isMobile }) {
     }
     return null;
   };
-
   const matchingDiscounts = (lineIdx) => {
     const lineKey = lineItems[lineIdx]?.client_id || lineIdx;
     const q = (discountQueries[lineKey] || "").trim().toLowerCase();
@@ -5230,7 +5626,6 @@ function CreateInvoice({ showToast, onCreated, editInvoice, isMobile }) {
       )
       .slice(0, 10);
   };
-
   const addDiscountToLine = (lineIdx, discount) => {
     const parent = lineItems[lineIdx];
     if (!parent || parent._kind === "discount") return;
@@ -5267,10 +5662,14 @@ function CreateInvoice({ showToast, onCreated, editInvoice, isMobile }) {
       amount: -dollars,
       is_waveguard_tier_discount: !!discount.is_waveguard_tier_discount,
       ...(custom?.custom_discount_amount
-        ? { custom_discount_amount: custom.custom_discount_amount }
+        ? {
+            custom_discount_amount: custom.custom_discount_amount,
+          }
         : {}),
       ...(custom?.custom_discount_percentage
-        ? { custom_discount_percentage: custom.custom_discount_percentage }
+        ? {
+            custom_discount_percentage: custom.custom_discount_percentage,
+          }
         : {}),
     };
     const updated = [...lineItems];
@@ -5288,7 +5687,6 @@ function CreateInvoice({ showToast, onCreated, editInvoice, isMobile }) {
       [parent.client_id || lineIdx]: "",
     }));
   };
-
   const addLineItem = () => setLineItems([...lineItems, newLineItem()]);
   const removeLineItem = (i) => {
     const id = lineItems[i]?.client_id;
@@ -5305,7 +5703,6 @@ function CreateInvoice({ showToast, onCreated, editInvoice, isMobile }) {
     };
     setLineItems(updated);
   };
-
   const lineAmount = (item) =>
     Math.round(
       (Number(item.quantity) || 1) * (Number(item.unit_price) || 0) * 100,
@@ -5342,7 +5739,6 @@ function CreateInvoice({ showToast, onCreated, editInvoice, isMobile }) {
     return 0;
   };
   const totalDiscountAmt = Math.min(subtotal, lineDiscountAmt);
-
   const afterDiscount = subtotal - totalDiscountAmt;
   const isCommercial =
     selectedCustomer?.property_type === "commercial" ||
@@ -5362,7 +5758,6 @@ function CreateInvoice({ showToast, onCreated, editInvoice, isMobile }) {
   const tax = afterDiscount * taxRate;
   const total = afterDiscount + tax;
   const cardCharge = computeCardTotal(total);
-
   const dateOnly = (date) => {
     const parts = new Intl.DateTimeFormat("en-US", {
       timeZone: "America/New_York",
@@ -5394,7 +5789,6 @@ function CreateInvoice({ showToast, onCreated, editInvoice, isMobile }) {
     }
     return sendCustomAt || null;
   };
-
   const reviewDelayMinutes = () => {
     if (!requestReview) return null;
     if (reviewTiming === "now") return 0;
@@ -5409,8 +5803,8 @@ function CreateInvoice({ showToast, onCreated, editInvoice, isMobile }) {
   // in create mode, or carried on the invoice row in edit mode.
   const linkedServiceRecordId =
     selectedService?.id || editInvoice?.service_record_id || null;
-
   const handleWriteNotesWithAI = async () => {
+    if (aiNotesLoadingRef.current) return;
     const usableLines = lineItems.filter(
       (i) => i._kind !== "discount" && i.description,
     );
@@ -5419,6 +5813,7 @@ function CreateInvoice({ showToast, onCreated, editInvoice, isMobile }) {
       showToast("Add notes or services first");
       return;
     }
+    aiNotesLoadingRef.current = true;
     setAiNotesLoading(true);
     try {
       const result = await adminFetch("/admin/invoices/notes/ai", {
@@ -5435,7 +5830,10 @@ function CreateInvoice({ showToast, onCreated, editInvoice, isMobile }) {
             quantity: Number(item.quantity) || 1,
           })),
           ...(canPullVisit
-            ? { serviceRecordId: linkedServiceRecordId, sources: aiSources }
+            ? {
+                serviceRecordId: linkedServiceRecordId,
+                sources: aiSources,
+              }
             : {}),
         }),
       });
@@ -5448,10 +5846,11 @@ function CreateInvoice({ showToast, onCreated, editInvoice, isMobile }) {
     } catch (e) {
       showToast(`AI summary failed: ${e.message}`, "error");
     }
+    aiNotesLoadingRef.current = false;
     setAiNotesLoading(false);
   };
-
   const handleWriteThankYouWithAI = async () => {
+    if (aiMessageLoadingRef.current) return;
     const customerName = selectedCustomer
       ? `${selectedCustomer.first_name || ""} ${selectedCustomer.last_name || ""}`.trim()
       : "";
@@ -5461,11 +5860,16 @@ function CreateInvoice({ showToast, onCreated, editInvoice, isMobile }) {
       showToast("Select a customer first");
       return;
     }
+    aiMessageLoadingRef.current = true;
     setAiMessageLoading(true);
     try {
       const result = await adminFetch("/admin/invoices/email-message/ai", {
         method: "POST",
-        body: JSON.stringify({ customerName, serviceType, input: emailMessage }),
+        body: JSON.stringify({
+          customerName,
+          serviceType,
+          input: emailMessage,
+        }),
       });
       if (result.message) {
         setEmailMessage(result.message);
@@ -5476,9 +5880,9 @@ function CreateInvoice({ showToast, onCreated, editInvoice, isMobile }) {
     } catch (e) {
       showToast(`AI message failed: ${e.message}`, "error");
     }
+    aiMessageLoadingRef.current = false;
     setAiMessageLoading(false);
   };
-
   const handleQueuedAttachments = (event) => {
     const files = Array.from(event.target.files || []);
     event.target.value = "";
@@ -5490,12 +5894,11 @@ function CreateInvoice({ showToast, onCreated, editInvoice, isMobile }) {
     }
     setQueuedAttachments((prev) => [...prev, ...files]);
   };
-
   const removeQueuedAttachment = (idx) => {
     setQueuedAttachments((prev) => prev.filter((_, i) => i !== idx));
   };
-
   const handleCreate = async () => {
+    if (savingRef.current) return;
     if (!selectedCustomer) {
       showToast("Select a customer");
       return;
@@ -5527,8 +5930,9 @@ function CreateInvoice({ showToast, onCreated, editInvoice, isMobile }) {
       showToast("Choose a review request time");
       return;
     }
+    savingRef.current = true;
+    setActionError("");
     setSaving(true);
-
     try {
       const body = {
         customerId: selectedCustomer.id,
@@ -5544,12 +5948,10 @@ function CreateInvoice({ showToast, onCreated, editInvoice, isMobile }) {
         emailMessage: emailMessage || null,
         dueDate,
       };
-
       const invoice = await adminFetch("/admin/invoices", {
         method: "POST",
         body: JSON.stringify(body),
       });
-
       if (queuedAttachments.length > 0 && invoice.id) {
         try {
           await uploadInvoiceAttachments(invoice.id, queuedAttachments);
@@ -5558,11 +5960,11 @@ function CreateInvoice({ showToast, onCreated, editInvoice, isMobile }) {
             `Invoice created, but attachments failed: ${attachmentErr.message}`,
           );
           onCreated();
+          savingRef.current = false;
           setSaving(false);
           return;
         }
       }
-
       if (sendTiming === "now" && invoice.id) {
         let sendRes;
         try {
@@ -5602,7 +6004,9 @@ function CreateInvoice({ showToast, onCreated, editInvoice, isMobile }) {
                 sendErr,
               ),
             );
-            onCreated({ promptResendId: invoice.id });
+            onCreated({
+              promptResendId: invoice.id,
+            });
           } else if (disposition === "committed") {
             showToast(
               `Invoice created: ${invoice.invoice_number} — the send went through (status: ${persisted.status}) despite a network error`,
@@ -5614,6 +6018,7 @@ function CreateInvoice({ showToast, onCreated, editInvoice, isMobile }) {
             );
             onCreated();
           }
+          savingRef.current = false;
           setSaving(false);
           return;
         }
@@ -5649,6 +6054,7 @@ function CreateInvoice({ showToast, onCreated, editInvoice, isMobile }) {
               "Pick a new time to retry, send now, or keep it as a draft.",
             ),
           );
+          savingRef.current = false;
           setSaving(false);
           return;
         }
@@ -5660,6 +6066,7 @@ function CreateInvoice({ showToast, onCreated, editInvoice, isMobile }) {
     } catch (e) {
       showToast(`Error: ${e.message}`);
     }
+    savingRef.current = false;
     setSaving(false);
   };
 
@@ -5668,6 +6075,7 @@ function CreateInvoice({ showToast, onCreated, editInvoice, isMobile }) {
   // subtotal, discounts, tax, and total from the line items, so we never send
   // money totals.
   const handleSave = async () => {
+    if (savingRef.current) return;
     if (
       !lineItems.some(
         (i) => i._kind !== "discount" && i.description && i.unit_price > 0,
@@ -5681,6 +6089,8 @@ function CreateInvoice({ showToast, onCreated, editInvoice, isMobile }) {
       showToast("Choose a due date");
       return;
     }
+    savingRef.current = true;
+    setActionError("");
     setSaving(true);
     try {
       const body = {
@@ -5721,14 +6131,18 @@ function CreateInvoice({ showToast, onCreated, editInvoice, isMobile }) {
           : `Invoice updated: ${editInvoice.invoice_number || "draft"}`,
       );
       onCreated(
-        deliveredAfterSave ? { promptResendId: editInvoice.id } : undefined,
+        deliveredAfterSave
+          ? {
+              promptResendId: editInvoice.id,
+            }
+          : undefined,
       );
     } catch (e) {
       showToast(`Error: ${e.message}`);
     }
+    savingRef.current = false;
     setSaving(false);
   };
-
   const sectionHeader = (title, action = null) => (
     <div
       style={{
@@ -5750,51 +6164,31 @@ function CreateInvoice({ showToast, onCreated, editInvoice, isMobile }) {
         }}
       >
         {" "}
-        <div style={{ minWidth: 0 }}>
+        <div
+          style={{
+            minWidth: 0,
+          }}
+        >
           {" "}
-          <div style={{ fontSize: 15, fontWeight: 700, color: D.heading }}>
+          <h2 className="m-0 text-18 font-medium text-zinc-900">
             {title}
-          </div>{" "}
+          </h2>{" "}
         </div>{" "}
       </div>
       {action}
     </div>
   );
-
   const lineRowGrid = (item) => ({
     display: "grid",
     gridTemplateColumns: isMobile
       ? "minmax(0, 1fr) 76px"
-      : "minmax(260px, 1fr) 84px 132px 36px",
+      : "minmax(0, 1fr) 84px 132px 44px",
     gap: 8,
     alignItems: "start",
     padding: item._kind === "discount" ? "8px 0 8px 18px" : "12px 0",
-    borderTop: `1px solid ${D.border}`,
+    borderTop: "1px solid #E4E4E7",
     background: item._kind === "discount" ? "#F0FDF4" : "transparent",
     borderRadius: item._kind === "discount" ? 8 : 0,
-  });
-
-  const fieldLabel = (label, align = "left") => (
-    <div
-      style={{
-        fontSize: 11,
-        color: D.muted,
-        textTransform: "uppercase",
-        letterSpacing: 0.6,
-        marginBottom: 5,
-        textAlign: align,
-      }}
-    >
-      {label}
-    </div>
-  );
-
-  const panelStyle = (style) => ({
-    ...sCard,
-    padding: isMobile ? 14 : 18,
-    marginBottom: 0,
-    borderRadius: 10,
-    ...style,
   });
   // Recovery-panel actions: each one targets ONLY the already-persisted row.
   const retryReviewBody = () => ({
@@ -5803,10 +6197,12 @@ function CreateInvoice({ showToast, onCreated, editInvoice, isMobile }) {
     reviewTiming,
     reviewScheduledFor: reviewTiming === "custom" ? reviewCustomAt : null,
   });
-
   const retrySchedule = async () => {
+    if (savingRef.current) return;
     const pInv = pendingScheduleInvoice?.invoice;
     if (!pInv || !retryScheduleAt || saving) return;
+    savingRef.current = true;
+    setActionError("");
     setSaving(true);
     try {
       await adminFetch(`/admin/invoices/${pInv.id}/schedule-send`, {
@@ -5819,15 +6215,21 @@ function CreateInvoice({ showToast, onCreated, editInvoice, isMobile }) {
       showToast(`Invoice scheduled: ${pInv.invoice_number}`);
       onCreated();
     } catch (err) {
-      setPendingScheduleInvoice({ invoice: pInv, reason: err.message });
+      setPendingScheduleInvoice({
+        invoice: pInv,
+        reason: err.message,
+      });
       showToast(`Still not scheduled: ${err.message}`);
     }
+    savingRef.current = false;
     setSaving(false);
   };
-
   const retrySendNow = async () => {
+    if (savingRef.current) return;
     const pInv = pendingScheduleInvoice?.invoice;
     if (!pInv || saving) return;
+    savingRef.current = true;
+    setActionError("");
     setSaving(true);
     try {
       const res = await adminFetch(`/admin/invoices/${pInv.id}/send`, {
@@ -5850,7 +6252,10 @@ function CreateInvoice({ showToast, onCreated, editInvoice, isMobile }) {
       }
       const disposition = persistedSendDisposition(persisted);
       if (disposition === "unsent") {
-        setPendingScheduleInvoice({ invoice: pInv, reason: err.message });
+        setPendingScheduleInvoice({
+          invoice: pInv,
+          reason: err.message,
+        });
         showToast(`Send failed: ${err.message}`, "error");
       } else if (disposition === "committed") {
         showToast(
@@ -5864,12 +6269,15 @@ function CreateInvoice({ showToast, onCreated, editInvoice, isMobile }) {
         onCreated();
       }
     }
+    savingRef.current = false;
     setSaving(false);
   };
-
   const keepAsDraft = async () => {
+    if (savingRef.current) return;
     const pInv = pendingScheduleInvoice?.invoice;
     if (!pInv || saving) return;
+    savingRef.current = true;
+    setActionError("");
     setSaving(true);
     // The schedule request may have COMMITTED even though its response was
     // lost (that's how this panel can appear over an actually-scheduled
@@ -5881,6 +6289,7 @@ function CreateInvoice({ showToast, onCreated, editInvoice, isMobile }) {
     } catch {
       persisted = null;
     }
+    savingRef.current = false;
     setSaving(false);
     const status = String(persisted?.status || "").toLowerCase();
     if (status === "scheduled") {
@@ -5902,112 +6311,178 @@ function CreateInvoice({ showToast, onCreated, editInvoice, isMobile }) {
     }
     onCreated();
   };
-
   const primaryActionLabel = editMode
-    ? saving
-      ? "Saving..."
-      : "Save Changes"
-    : saving
-      ? "Creating..."
-      : sendTiming === "now"
-        ? "Send Invoice"
-        : sendTiming === "draft"
-          ? "Create Draft"
-          : "Schedule Invoice";
+    ? "Save changes"
+    : sendTiming === "now"
+      ? "Send invoice"
+      : sendTiming === "draft"
+        ? "Create draft"
+        : "Schedule invoice";
   const canAddQueuedAttachments = canAddInvoiceAttachments(queuedAttachments);
   const queuedAttachmentHelpId = "invoice-create-attachments-help";
   const queuedAttachmentStatusId = "invoice-create-attachments-status";
-  const lineTableColumns = "minmax(260px, 1fr) 84px 132px 36px";
   const summaryRowStyle = (size = 12, weight = 400) => ({
     display: "grid",
     gridTemplateColumns: "minmax(0, 1fr) max-content",
     gap: 12,
     alignItems: "baseline",
-    fontSize: size,
-    fontWeight: weight,
-    color: D.text,
+    fontSize: Math.max(14, size),
+    fontWeight: Math.min(500, weight),
+    color: "#18181B",
     marginBottom: 4,
   });
-  const summaryLabelStyle = { minWidth: 0, overflowWrap: "anywhere" };
+  const summaryLabelStyle = {
+    minWidth: 0,
+    overflowWrap: "anywhere",
+  };
   const summaryAmountStyle = {
-    fontFamily: "'Roboto', Arial, sans-serif",
     textAlign: "right",
     whiteSpace: "nowrap",
   };
-
   if (pendingScheduleInvoice && !editMode) {
     const pInv = pendingScheduleInvoice.invoice;
     return (
-      <div style={panelStyle({ padding: isMobile ? 14 : 16, maxWidth: 560 })}>
-        <div style={{ fontSize: 18, fontWeight: 800, color: D.heading }}>
+      <Card
+        style={{
+          padding: isMobile ? 14 : 16,
+          maxWidth: 560,
+        }}
+        className="p-4"
+      >
+        {actionError && (
+          <ActionFeedback error className="col-span-full">
+            {actionError}
+          </ActionFeedback>
+        )}
+        <div className="text-18 font-medium text-zinc-900">
           Invoice {pInv.invoice_number} created — scheduling failed
         </div>
-        <div style={{ color: D.muted, marginTop: 6, marginBottom: 12 }}>
+        <div
+          style={{
+            marginTop: 6,
+            marginBottom: 12,
+          }}
+          className="text-ink-secondary"
+        >
           {pendingScheduleInvoice.reason}
         </div>
-        <label style={{ display: "block", marginBottom: 12 }}>
-          <span style={{ display: "block", marginBottom: 4 }}>
+        <label
+          style={{
+            display: "block",
+            marginBottom: 12,
+          }}
+        >
+          <span
+            style={{
+              display: "block",
+              marginBottom: 4,
+            }}
+          >
             New send time
           </span>
-          <input
+          <Input
             type="datetime-local"
             value={retryScheduleAt}
             onChange={(e) => setRetryScheduleAt(e.target.value)}
-            style={{ padding: 8 }}
+            disabled={builderBusy}
           />
         </label>
-        <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-          <button
+        <div
+          style={{
+            display: "flex",
+            gap: 8,
+            flexWrap: "wrap",
+          }}
+        >
+          <Button
             onClick={retrySchedule}
-            disabled={saving || !retryScheduleAt}
-            style={{
-              ...sBtn(D.heading, D.white, isMobile),
-              opacity: saving || !retryScheduleAt ? 0.5 : 1,
-            }}
+            variant={"primary"}
+            onClickCapture={(event) =>
+              event.currentTarget.focus({
+                preventScroll: true,
+              })
+            }
+            className="min-w-11"
+            loading={saving}
+            disabled={builderBusy || !retryScheduleAt}
           >
-            {saving ? "Working..." : "Retry schedule"}
-          </button>
-          <button
+            {"Retry schedule"}
+          </Button>
+          <Button
             onClick={retrySendNow}
-            disabled={saving}
-            style={{
-              ...sBtn("#111", D.white, isMobile),
-              opacity: saving ? 0.5 : 1,
-            }}
+            variant={"secondary"}
+            onClickCapture={(event) =>
+              event.currentTarget.focus({
+                preventScroll: true,
+              })
+            }
+            className="min-w-11"
+            disabled={builderBusy}
           >
             Send now
-          </button>
-          <button
+          </Button>
+          <Button
             onClick={keepAsDraft}
-            disabled={saving}
-            style={sBtn("transparent", D.text, isMobile)}
+            variant={"secondary"}
+            onClickCapture={(event) =>
+              event.currentTarget.focus({
+                preventScroll: true,
+              })
+            }
+            className="min-w-11"
+            disabled={builderBusy}
           >
             Keep as draft
-          </button>
+          </Button>
         </div>
-        <div style={{ color: D.muted, fontSize: 13, marginTop: 10 }}>
+        <div
+          style={{
+            marginTop: 10,
+          }}
+          className="text-ink-secondary text-ui-body"
+        >
           Need to change the invoice itself? Keep it as a draft, then edit it
           from the list.
         </div>
-      </div>
+      </Card>
     );
   }
-
   return (
-    <div
-      style={{
-        display: "grid",
-        gridTemplateColumns: isMobile ? "1fr" : "minmax(0, 1fr) 340px",
-        gap: 16,
-        alignItems: "start",
-        fontFamily: "'Roboto', Arial, sans-serif",
-        color: D.text,
-      }}
-    >
-      {" "}
-      <div style={{ display: "grid", gap: 12, minWidth: 0 }}>
-        {" "}
-        <div style={panelStyle({ padding: isMobile ? 14 : 16 })}>
+    <div className="grid grid-cols-1 xl:grid-cols-[minmax(0,1fr)_340px] gap-4 items-start text-zinc-900">
+      {actionError && (
+        <ActionFeedback error className="col-span-full">
+          {actionError}
+        </ActionFeedback>
+      )}{" "}
+      <div
+        style={{
+          display: "grid",
+          gap: 12,
+          minWidth: 0,
+        }}
+      >
+        {discountsError && (
+          <ActionFeedback
+            error
+            onRetry={() => setDiscountsAttempt((attempt) => attempt + 1)}
+          >
+            Discounts could not be loaded: {discountsError}
+          </ActionFeedback>
+        )}
+        {serviceRecordsError && (
+          <ActionFeedback
+            error
+            onRetry={() => setServiceRecordsAttempt((attempt) => attempt + 1)}
+          >
+            Service history could not be loaded: {serviceRecordsError}
+          </ActionFeedback>
+        )}{" "}
+        <Card
+          style={{
+            padding: isMobile ? 14 : 16,
+          }}
+          className="p-4"
+        >
           {" "}
           <div
             style={{
@@ -6021,21 +6496,26 @@ function CreateInvoice({ showToast, onCreated, editInvoice, isMobile }) {
             {" "}
             <div>
               {" "}
-              <div style={{ fontSize: 18, fontWeight: 700, color: D.heading }}>
+              <div className="text-18 font-medium text-zinc-900">
                 {editMode
                   ? `Edit Invoice ${editInvoice.invoice_number || ""}`.trim()
-                  : "Invoice Builder"}
+                  : "Invoice builder"}
               </div>{" "}
               {editingDelivered && (
-                <div style={{ fontSize: 14, color: D.muted, marginTop: 2 }}>
-                  Already sent to the customer — resend after saving so they
-                  see the updated version
+                <div
+                  style={{
+                    marginTop: 2,
+                  }}
+                  className="text-ui-body text-ink-secondary"
+                >
+                  Already sent to the customer — resend after saving so they see
+                  the updated version
                 </div>
               )}{" "}
             </div>{" "}
           </div>{" "}
-        </div>{" "}
-        <div style={panelStyle()}>
+        </Card>{" "}
+        <Card className="p-4">
           {sectionHeader("Customer")}
           {selectedCustomer ? (
             <div
@@ -6043,65 +6523,74 @@ function CreateInvoice({ showToast, onCreated, editInvoice, isMobile }) {
                 display: "flex",
                 justifyContent: "space-between",
                 alignItems: "center",
-                background: D.input,
-                borderRadius: 8,
                 padding: "10px 12px",
-                border: `1px solid ${D.teal}`,
+                border: "1px solid #18181B",
                 flexWrap: "wrap",
                 gap: 8,
               }}
+              className="bg-white rounded-md"
             >
               {" "}
               <div>
                 {" "}
-                <span style={{ color: D.heading, fontWeight: 500 }}>
+                <span className="text-zinc-900 font-medium">
                   {selectedCustomer.first_name} {selectedCustomer.last_name}
                 </span>{" "}
-                <span style={{ color: D.muted, fontSize: 12, marginLeft: 8 }}>
+                <span
+                  style={{
+                    marginLeft: 8,
+                  }}
+                  className="text-ink-secondary text-ui-body"
+                >
                   {selectedCustomer.phone}
                 </span>
                 {selectedCustomer.waveguard_tier && (
-                  <span
+                  <Badge
                     style={{
-                      ...sBadge(`${D.amber}22`, D.amber),
                       marginLeft: 8,
                     }}
+                    className="max-w-full whitespace-normal"
                   >
                     {selectedCustomer.waveguard_tier}
-                  </span>
+                  </Badge>
                 )}
               </div>{" "}
               {!editMode && (
-                <button
+                <Button
                   onClick={() => {
                     setSelectedCustomer(null);
                     setSelectedService(null);
                     setCustomerQuery("");
                   }}
-                  style={{
-                    background: "none",
-                    border: "none",
-                    color: D.muted,
-                    cursor: "pointer",
-                    fontSize: 18,
-                    padding: isMobile ? "10px 12px" : "4px 8px",
-                    minHeight: isMobile ? 44 : undefined,
-                    minWidth: isMobile ? 44 : undefined,
-                  }}
+                  variant={"secondary"}
+                  onClickCapture={(event) =>
+                    event.currentTarget.focus({
+                      preventScroll: true,
+                    })
+                  }
+                  className="min-w-11"
+                  aria-label="Clear selected customer"
+                  disabled={builderBusy}
                 >
                   x
-                </button>
+                </Button>
               )}{" "}
             </div>
           ) : (
-            <div style={{ position: "relative" }}>
+            <div
+              style={{
+                position: "relative",
+              }}
+            >
               {" "}
-              <input
-                value={customerQuery}
-                onChange={(e) => setCustomerQuery(e.target.value)}
-                placeholder="Search by name, phone, or email..."
-                style={sInput(isMobile)}
-              />
+              <Field className="min-w-0" label="Find customer">
+                <Input
+                  value={customerQuery}
+                  onChange={(e) => setCustomerQuery(e.target.value)}
+                  placeholder="Search by name, phone, or email..."
+                  disabled={builderBusy}
+                />
+              </Field>
               {customers.length > 0 && (
                 <div
                   style={{
@@ -6109,17 +6598,16 @@ function CreateInvoice({ showToast, onCreated, editInvoice, isMobile }) {
                     top: "100%",
                     left: 0,
                     right: 0,
-                    background: D.card,
-                    border: `1px solid ${D.border}`,
-                    borderRadius: 8,
+                    border: "1px solid #E4E4E7",
                     zIndex: 10,
                     maxHeight: 200,
                     overflow: "auto",
                     marginTop: 4,
                   }}
+                  className="bg-white rounded-md"
                 >
                   {customers.map((c) => (
-                    <div
+                    <Button
                       key={c.id}
                       onClick={() => {
                         setSelectedCustomer(c);
@@ -6133,128 +6621,162 @@ function CreateInvoice({ showToast, onCreated, editInvoice, isMobile }) {
                       style={{
                         padding: "10px 12px",
                         cursor: "pointer",
-                        borderBottom: `1px solid ${D.border}`,
-                        fontSize: 13,
+                        borderBottom: "1px solid #E4E4E7",
                       }}
+                      variant="ghost"
+                      className="w-full justify-start text-left whitespace-normal"
+                      disabled={builderBusy}
                     >
                       {" "}
-                      <span style={{ color: D.heading }}>
+                      <span className="text-zinc-900">
                         {c.first_name} {c.last_name}
                       </span>{" "}
-                      <span style={{ color: D.muted, marginLeft: 8 }}>
+                      <span
+                        style={{
+                          marginLeft: 8,
+                        }}
+                        className="text-ink-secondary"
+                      >
                         {c.phone}
                       </span>
                       {c.waveguard_tier && (
-                        <span
+                        <Badge
                           style={{
-                            ...sBadge(`${D.amber}22`, D.amber),
                             marginLeft: 8,
                           }}
+                          className="max-w-full whitespace-normal"
                         >
                           {c.waveguard_tier}
-                        </span>
+                        </Badge>
                       )}
-                    </div>
+                    </Button>
                   ))}
                 </div>
               )}
+              {customerQuery.length >= 2 &&
+                (customerSearchLoading ? (
+                  <ActionFeedback className="mt-2">
+                    Searching customers…
+                  </ActionFeedback>
+                ) : customerSearchError ? (
+                  <ActionFeedback
+                    error
+                    onRetry={() =>
+                      setCustomerSearchAttempt((attempt) => attempt + 1)
+                    }
+                    className="mt-2"
+                  >
+                    {customerSearchError}
+                  </ActionFeedback>
+                ) : customers.length === 0 ? (
+                  <ActionFeedback className="mt-2">
+                    No customers match this search.
+                  </ActionFeedback>
+                ) : null)}
             </div>
           )}
-        </div>
+        </Card>
         {!editMode && serviceRecords.length > 0 && (
-          <div style={panelStyle()}>
+          <Card className="p-4">
             {sectionHeader("Service History")}
-            <select
-              value={selectedService?.id || ""}
-              onChange={(e) => {
-                const sr = serviceRecords.find((r) => r.id === e.target.value);
-                setSelectedService(sr || null);
-                if (sr?.service_date) setServiceDate(sr.service_date);
-                if (sr && lineItems.length === 1 && !lineItems[0].description) {
-                  setLineItems([
-                    {
-                      ...lineItems[0],
-                      _kind: "service",
-                      description: sr.service_type,
-                      quantity: 1,
-                      unit_price: 0,
-                    },
-                  ]);
-                }
-              }}
-              style={sInput(isMobile)}
-            >
-              {" "}
-              <option value="">No service linked</option>
-              {serviceRecords.map((r) => (
-                <option key={r.id} value={r.id}>
-                  {r.service_type} --{" "}
-                  {new Date(r.service_date + "T12:00:00").toLocaleDateString()}{" "}
-                  -- {r.tech_name || "Unknown tech"}
-                </option>
-              ))}
-            </select>{" "}
-          </div>
+            <Field className="min-w-0" label="Link a completed service">
+              <Select
+                value={selectedService?.id || ""}
+                onChange={(e) => {
+                  const sr = serviceRecords.find(
+                    (r) => r.id === e.target.value,
+                  );
+                  setSelectedService(sr || null);
+                  if (sr?.service_date) setServiceDate(sr.service_date);
+                  if (
+                    sr &&
+                    lineItems.length === 1 &&
+                    !lineItems[0].description
+                  ) {
+                    setLineItems([
+                      {
+                        ...lineItems[0],
+                        _kind: "service",
+                        description: sr.service_type,
+                        quantity: 1,
+                        unit_price: 0,
+                      },
+                    ]);
+                  }
+                }}
+                disabled={builderBusy}
+              >
+                {" "}
+                <option value="">No service linked</option>
+                {serviceRecords.map((r) => (
+                  <option key={r.id} value={r.id}>
+                    {r.service_type} --{" "}
+                    {new Date(
+                      r.service_date + "T12:00:00",
+                    ).toLocaleDateString()}{" "}
+                    -- {r.tech_name || "Unknown tech"}
+                  </option>
+                ))}
+              </Select>
+            </Field>{" "}
+          </Card>
         )}
         {!editMode && (
-          <div style={panelStyle()}>
-            {sectionHeader("Service Date")}
-            <input
-              type="date"
-              value={serviceDate}
-              onChange={(e) => setServiceDate(e.target.value)}
-              style={sInput(isMobile)}
-            />{" "}
-          </div>
+          <Card className="p-4">
+            <Field className="min-w-0" label="Service date">
+              <Input
+                type="date"
+                value={serviceDate}
+                onChange={(e) => setServiceDate(e.target.value)}
+                disabled={builderBusy}
+              />
+            </Field>{" "}
+          </Card>
         )}{" "}
-        <div style={panelStyle()}>
+        <Card className="p-4">
           {sectionHeader("Services")}
-          {!isMobile && (
-            <div
-              style={{
-                display: "grid",
-                gridTemplateColumns: lineTableColumns,
-                gap: 8,
-                padding: "0 0 8px",
-                borderBottom: `1px solid ${D.border}`,
-                color: D.muted,
-                fontSize: 11,
-                textTransform: "uppercase",
-                letterSpacing: 0.6,
-              }}
-            >
-              {" "}
-              <div>Item</div> <div style={{ textAlign: "center" }}>Qty</div>{" "}
-              <div>Rate</div> <div />{" "}
-            </div>
-          )}
           {lineItems.map((item, i) => (
             <div key={item.client_id || i} style={lineRowGrid(item)}>
               {" "}
-              <div style={{ position: "relative", minWidth: 0 }}>
-                {isMobile &&
-                  fieldLabel(
-                    item._kind === "discount" ? "Discount" : "Service",
-                  )}
-                <input
-                  value={item.description}
-                  onChange={(e) =>
-                    updateLineItem(i, "description", e.target.value)
-                  }
-                  onFocus={() => {
-                    if (item._kind !== "discount") setServiceSearchIdx(i);
-                  }}
-                  onBlur={() =>
-                    setTimeout(() => {
-                      setServiceSearchIdx((prev) => (prev === i ? null : prev));
-                    }, 150)
-                  }
-                  placeholder={
-                    item._kind === "discount" ? "Discount" : "Search services"
-                  }
-                  style={{ ...sInput(isMobile), color: D.text }}
-                  readOnly={item._kind === "discount"}
-                />
+              <div
+                style={{
+                  position: "relative",
+                  minWidth: 0,
+                }}
+              >
+                <Field
+                  className="min-w-0"
+                  label={item._kind === "discount" ? "Discount" : "Service"}
+                >
+                  <Input
+                    value={item.description}
+                    onChange={(e) =>
+                      updateLineItem(i, "description", e.target.value)
+                    }
+                    onFocus={() => {
+                      if (item._kind !== "discount") setServiceSearchIdx(i);
+                    }}
+                    onBlur={(event) => {
+                      if (
+                        event.relatedTarget &&
+                        event.currentTarget.parentElement.parentElement.contains(
+                          event.relatedTarget,
+                        )
+                      )
+                        return;
+                      setTimeout(() => {
+                        setServiceSearchIdx((prev) =>
+                          prev === i ? null : prev,
+                        );
+                      }, 150);
+                    }}
+                    placeholder={
+                      item._kind === "discount" ? "Discount" : "Search services"
+                    }
+                    readOnly={item._kind === "discount"}
+                    disabled={builderBusy}
+                  />
+                </Field>
                 {serviceSearchIdx === i &&
                   (lineItems[i]?.description || "").length >= 2 && (
                     <div
@@ -6263,29 +6785,40 @@ function CreateInvoice({ showToast, onCreated, editInvoice, isMobile }) {
                         top: "100%",
                         left: 0,
                         right: 0,
-                        background: D.card,
-                        border: `1px solid ${D.border}`,
-                        borderRadius: 8,
+                        border: "1px solid #E4E4E7",
                         zIndex: 20,
                         maxHeight: 240,
                         overflow: "auto",
                         marginTop: 4,
-                        boxShadow: "0 4px 12px rgba(0,0,0,0.08)",
                       }}
+                      className="bg-white rounded-md"
                     >
-                      {serviceResults.length === 0 ? (
+                      {serviceSearchLoading ? (
+                        <ActionFeedback className="p-3">
+                          Searching services…
+                        </ActionFeedback>
+                      ) : serviceSearchError ? (
+                        <ActionFeedback
+                          error
+                          onRetry={() =>
+                            setServiceSearchAttempt((attempt) => attempt + 1)
+                          }
+                          className="p-3"
+                        >
+                          {serviceSearchError}
+                        </ActionFeedback>
+                      ) : serviceResults.length === 0 ? (
                         <div
                           style={{
                             padding: "10px 12px",
-                            color: D.muted,
-                            fontSize: 12,
                           }}
+                          className="text-ink-secondary text-ui-body"
                         >
                           No services match. Check Services catalog.
                         </div>
                       ) : (
                         serviceResults.map((svc) => (
-                          <div
+                          <Button
                             key={svc.id}
                             onMouseDown={(e) => {
                               e.preventDefault();
@@ -6294,25 +6827,38 @@ function CreateInvoice({ showToast, onCreated, editInvoice, isMobile }) {
                             style={{
                               padding: "10px 12px",
                               cursor: "pointer",
-                              borderBottom: `1px solid ${D.border}`,
-                              fontSize: 13,
+                              borderBottom: "1px solid #E4E4E7",
                               display: "flex",
                               justifyContent: "space-between",
                               gap: 8,
                               alignItems: "center",
                             }}
+                            variant="ghost"
+                            className="w-full justify-start text-left whitespace-normal"
+                            onClick={(event) => {
+                              if (event.detail === 0)
+                                ((e) => {
+                                  e.preventDefault();
+                                  pickService(i, svc);
+                                })(event);
+                            }}
+                            disabled={builderBusy}
                           >
                             {" "}
-                            <div style={{ minWidth: 0, flex: 1 }}>
+                            <div
+                              style={{
+                                minWidth: 0,
+                                flex: 1,
+                              }}
+                            >
                               {" "}
                               <div
                                 style={{
-                                  color: D.heading,
-                                  fontWeight: 500,
                                   whiteSpace: "nowrap",
                                   overflow: "hidden",
                                   textOverflow: "ellipsis",
                                 }}
+                                className="text-zinc-900 font-medium"
                               >
                                 {svc.name}
                               </div>
@@ -6320,10 +6866,9 @@ function CreateInvoice({ showToast, onCreated, editInvoice, isMobile }) {
                                 svc.short_name !== svc.name && (
                                   <div
                                     style={{
-                                      color: D.muted,
-                                      fontSize: 11,
                                       marginTop: 2,
                                     }}
+                                    className="text-ink-secondary text-ui-body"
                                   >
                                     {svc.short_name}
                                   </div>
@@ -6333,82 +6878,77 @@ function CreateInvoice({ showToast, onCreated, editInvoice, isMobile }) {
                               Number(svc.base_price) > 0 && (
                                 <span
                                   style={{
-                                    color: D.text,
-                                    fontFamily: "'Roboto', Arial, sans-serif",
-                                    fontSize: 12,
                                     whiteSpace: "nowrap",
                                   }}
+                                  className="text-zinc-900 text-ui-body"
                                 >
                                   ${Number(svc.base_price).toFixed(2)}
                                 </span>
                               )}
-                          </div>
+                          </Button>
                         ))
                       )}
                     </div>
                   )}
               </div>{" "}
               <div>
-                {isMobile && fieldLabel("Qty", "center")}
-                <input
-                  type="number"
-                  value={item.quantity}
-                  onChange={(e) =>
-                    updateLineItem(i, "quantity", e.target.value)
-                  }
-                  min="1"
-                  readOnly={item._kind === "discount"}
-                  style={{ ...sInput(isMobile), textAlign: "center" }}
-                />{" "}
+                <Field className="min-w-0" label="Quantity">
+                  <Input
+                    type="number"
+                    value={item.quantity}
+                    onChange={(e) =>
+                      updateLineItem(i, "quantity", e.target.value)
+                    }
+                    min="1"
+                    readOnly={item._kind === "discount"}
+                    style={{
+                      textAlign: "center",
+                    }}
+                    disabled={builderBusy}
+                  />
+                </Field>{" "}
               </div>{" "}
-              <div style={{ position: "relative" }}>
-                {isMobile &&
-                  fieldLabel(item._kind === "discount" ? "Credit" : "Price")}
-                <span
-                  style={{
-                    position: "absolute",
-                    left: 10,
-                    top: isMobile ? 43 : 20,
-                    transform: "translateY(-50%)",
-                    color: D.muted,
-                    fontSize: isMobile ? 16 : 13,
-                  }}
+              <div
+                style={{
+                  position: "relative",
+                }}
+              >
+                {" "}
+                <Field
+                  className="min-w-0"
+                  label={item._kind === "discount" ? "Credit ($)" : "Price ($)"}
                 >
-                  $
-                </span>{" "}
-                <input
-                  type="number"
-                  value={item.unit_price || ""}
-                  onChange={(e) =>
-                    updateLineItem(i, "unit_price", e.target.value)
-                  }
-                  placeholder="0.00"
-                  step="0.01"
-                  readOnly={item._kind === "discount"}
-                  style={{
-                    ...sInput(isMobile),
-                    paddingLeft: 22,
-                    color: D.text,
-                  }}
-                />{" "}
+                  <Input
+                    type="number"
+                    value={item.unit_price || ""}
+                    onChange={(e) =>
+                      updateLineItem(i, "unit_price", e.target.value)
+                    }
+                    placeholder="0.00"
+                    step="0.01"
+                    readOnly={item._kind === "discount"}
+                    style={{
+                      paddingLeft: 22,
+                    }}
+                    disabled={builderBusy}
+                  />
+                </Field>{" "}
               </div>
               {lineItems.length > 1 && (
-                <button
+                <Button
                   onClick={() => removeLineItem(i)}
                   aria-label="Remove line item"
-                  style={{
-                    background: "none",
-                    border: "none",
-                    color: D.red,
-                    cursor: "pointer",
-                    fontSize: 18,
-                    padding: isMobile ? "30px 12px 10px" : "6px 4px",
-                    minHeight: isMobile ? 44 : undefined,
-                    minWidth: isMobile ? 44 : undefined,
-                  }}
+                  variant={"secondary"}
+                  onClickCapture={(event) =>
+                    event.currentTarget.focus({
+                      preventScroll: true,
+                    })
+                  }
+                  className="min-w-11"
+                  disabled={builderBusy}
                 >
                   x
-                </button>
+                </Button>
               )}
               {item._kind !== "discount" && (
                 <div
@@ -6418,42 +6958,45 @@ function CreateInvoice({ showToast, onCreated, editInvoice, isMobile }) {
                     padding: "0 0 2px",
                   }}
                 >
-                  {fieldLabel("Discount")}
-                  <input
-                    value={discountQueries[item.client_id || i] || ""}
-                    onChange={(e) => {
-                      setDiscountQueries((prev) => ({
-                        ...prev,
-                        [item.client_id || i]: e.target.value,
-                      }));
-                      if (availableDiscounts.length > 0)
-                        setDiscountSearchIdx(i);
-                    }}
-                    onFocus={() => {
-                      if (availableDiscounts.length > 0)
-                        setDiscountSearchIdx(i);
-                    }}
-                    onBlur={() =>
-                      setTimeout(() => {
-                        setDiscountSearchIdx((prev) =>
-                          prev === i ? null : prev,
-                        );
-                      }, 150)
-                    }
-                    placeholder={
-                      availableDiscounts.length === 0
-                        ? "No invoice discounts are available"
-                        : `Search discounts${item.description ? ` for ${item.description}` : ""}...`
-                    }
-                    disabled={availableDiscounts.length === 0}
-                    style={{
-                      ...sInput(isMobile),
-                      fontSize: isMobile ? 15 : 12,
-                      minHeight: isMobile ? 42 : 36,
-                      padding: isMobile ? "10px 12px" : "8px 10px",
-                      opacity: availableDiscounts.length === 0 ? 0.65 : 1,
-                    }}
-                  />
+                  <Field className="min-w-0" label="Add a discount">
+                    <Input
+                      value={discountQueries[item.client_id || i] || ""}
+                      onChange={(e) => {
+                        setDiscountQueries((prev) => ({
+                          ...prev,
+                          [item.client_id || i]: e.target.value,
+                        }));
+                        if (availableDiscounts.length > 0)
+                          setDiscountSearchIdx(i);
+                      }}
+                      onFocus={() => {
+                        if (availableDiscounts.length > 0)
+                          setDiscountSearchIdx(i);
+                      }}
+                      onBlur={() =>
+                        setTimeout(() => {
+                          setDiscountSearchIdx((prev) =>
+                            prev === i ? null : prev,
+                          );
+                        }, 150)
+                      }
+                      placeholder={
+                        discountsLoading
+                          ? "Loading discounts…"
+                          : discountsError
+                            ? "Discounts unavailable"
+                            : availableDiscounts.length === 0
+                              ? "No invoice discounts are available"
+                              : `Search discounts${item.description ? ` for ${item.description}` : ""}...`
+                      }
+                      disabled={
+                        builderBusy ||
+                        discountsLoading ||
+                        !!discountsError ||
+                        availableDiscounts.length === 0
+                      }
+                    />
+                  </Field>
                   {discountSearchIdx === i && (
                     <div
                       style={{
@@ -6461,29 +7004,26 @@ function CreateInvoice({ showToast, onCreated, editInvoice, isMobile }) {
                         top: "100%",
                         left: 0,
                         right: 0,
-                        background: D.card,
-                        border: `1px solid ${D.border}`,
-                        borderRadius: 8,
+                        border: "1px solid #E4E4E7",
                         zIndex: 18,
                         maxHeight: 220,
                         overflow: "auto",
                         marginTop: 4,
-                        boxShadow: "0 4px 12px rgba(0,0,0,0.08)",
                       }}
+                      className="bg-white rounded-md"
                     >
                       {matchingDiscounts(i).length === 0 ? (
                         <div
                           style={{
                             padding: "10px 12px",
-                            color: D.muted,
-                            fontSize: 12,
                           }}
+                          className="text-ink-secondary text-ui-body"
                         >
                           No discounts match.
                         </div>
                       ) : (
                         matchingDiscounts(i).map((d) => (
-                          <div
+                          <Button
                             key={d.id}
                             onMouseDown={(e) => {
                               e.preventDefault();
@@ -6492,38 +7032,44 @@ function CreateInvoice({ showToast, onCreated, editInvoice, isMobile }) {
                             style={{
                               padding: "10px 12px",
                               cursor: "pointer",
-                              borderBottom: `1px solid ${D.border}`,
-                              fontSize: 13,
+                              borderBottom: "1px solid #E4E4E7",
                               display: "flex",
                               justifyContent: "space-between",
                               gap: 8,
                               alignItems: "center",
                             }}
+                            variant="ghost"
+                            className="w-full justify-start text-left whitespace-normal"
+                            onClick={(event) => {
+                              if (event.detail === 0)
+                                ((e) => {
+                                  e.preventDefault();
+                                  addDiscountToLine(i, d);
+                                })(event);
+                            }}
+                            disabled={builderBusy}
                           >
                             {" "}
                             <span
                               style={{
-                                color: D.heading,
-                                fontWeight: 500,
                                 minWidth: 0,
                                 overflow: "hidden",
                                 textOverflow: "ellipsis",
                                 whiteSpace: "nowrap",
                               }}
+                              className="text-zinc-900 font-medium"
                             >
                               {d.name}
                             </span>{" "}
                             <span
                               style={{
-                                color: D.text,
-                                fontFamily: "'Roboto', Arial, sans-serif",
-                                fontSize: 12,
                                 whiteSpace: "nowrap",
                               }}
+                              className="text-zinc-900 text-ui-body"
                             >
                               {formatDiscountLabel(d)}
                             </span>{" "}
-                          </div>
+                          </Button>
                         ))
                       )}
                     </div>
@@ -6532,128 +7078,174 @@ function CreateInvoice({ showToast, onCreated, editInvoice, isMobile }) {
               )}
             </div>
           ))}
-          <button
+          <Button
             onClick={addLineItem}
             style={{
-              ...sBtn("transparent", D.teal, isMobile),
-              padding: isMobile ? "12px 14px" : "8px 12px",
-              fontSize: isMobile ? 14 : 12,
               marginTop: 10,
             }}
+            variant={"secondary"}
+            onClickCapture={(event) =>
+              event.currentTarget.focus({
+                preventScroll: true,
+              })
+            }
+            className="min-w-11"
+            disabled={builderBusy}
           >
             + Add service
-          </button>{" "}
-        </div>{" "}
+          </Button>{" "}
+        </Card>{" "}
         {!editMode && (
-        <div style={panelStyle()}>
-          {sectionHeader("Attachments")}
-          <input
-            ref={attachmentInputRef}
-            type="file"
-            multiple
-            accept={ATTACHMENT_ACCEPT}
-            onChange={handleQueuedAttachments}
-            aria-describedby={`${queuedAttachmentHelpId} ${queuedAttachmentStatusId}`}
-            style={{ display: "none" }}
-          />
-          <div id={queuedAttachmentHelpId} style={{ fontSize: 12, color: D.muted, lineHeight: 1.45, marginBottom: 12 }}>
-            {ATTACHMENT_HELP_TEXT}
-            <br />
-            {ATTACHMENT_VISIBILITY_TEXT}
-          </div>
-          <button
-            type="button"
-            onClick={() => attachmentInputRef.current?.click()}
-            disabled={!canAddQueuedAttachments}
-            aria-describedby={`${queuedAttachmentHelpId} ${queuedAttachmentStatusId}`}
-            style={{
-              ...sBtn(D.card, D.text, isMobile),
-              border: `1px solid ${D.border}`,
-              display: "inline-flex",
-              alignItems: "center",
-              gap: 6,
-              opacity: canAddQueuedAttachments ? 1 : 0.55,
-            }}
-          >
-            <Upload size={14} strokeWidth={2.2} />
-            Add files
-          </button>
-          {queuedAttachments.length > 0 ? (
-            <div style={{ display: "grid", gap: 8, marginTop: 12 }}>
-              {queuedAttachments.map((file, idx) => (
-                <div
-                  key={`${file.name}-${file.size}-${idx}`}
-                  style={{
-                    display: "grid",
-                    gridTemplateColumns: "minmax(0, 1fr) auto auto",
-                    alignItems: "center",
-                    gap: 8,
-                    padding: "9px 10px",
-                    border: `1px solid ${D.border}`,
-                    borderRadius: 8,
-                    background: "#FAFAFA",
-                  }}
-                >
+          <Card className="p-4">
+            {sectionHeader("Attachments")}
+            <input
+              ref={attachmentInputRef}
+              type="file"
+              multiple
+              accept={ATTACHMENT_ACCEPT}
+              onChange={handleQueuedAttachments}
+              aria-describedby={`${queuedAttachmentHelpId} ${queuedAttachmentStatusId}`}
+              style={{
+                display: "none",
+              }}
+            />
+            <div
+              id={queuedAttachmentHelpId}
+              style={{
+                lineHeight: 1.45,
+                marginBottom: 12,
+              }}
+              className="text-ui-body text-ink-secondary"
+            >
+              {ATTACHMENT_HELP_TEXT}
+              <br />
+              {ATTACHMENT_VISIBILITY_TEXT}
+            </div>
+            <Button
+              type="button"
+              onClick={() => attachmentInputRef.current?.click()}
+              aria-describedby={`${queuedAttachmentHelpId} ${queuedAttachmentStatusId}`}
+              style={{
+                display: "inline-flex",
+                alignItems: "center",
+                gap: 6,
+              }}
+              variant={"secondary"}
+              onClickCapture={(event) =>
+                event.currentTarget.focus({
+                  preventScroll: true,
+                })
+              }
+              className="min-w-11"
+              disabled={builderBusy || !canAddQueuedAttachments}
+            >
+              <Upload size={14} strokeWidth={2.2} />
+              Add files
+            </Button>
+            {queuedAttachments.length > 0 ? (
+              <div
+                style={{
+                  display: "grid",
+                  gap: 8,
+                  marginTop: 12,
+                }}
+              >
+                {queuedAttachments.map((file, idx) => (
                   <div
+                    key={`${file.name}-${file.size}-${idx}`}
                     style={{
-                      display: "flex",
+                      display: "grid",
+                      gridTemplateColumns: "minmax(0, 1fr) auto auto",
                       alignItems: "center",
                       gap: 8,
-                      minWidth: 0,
+                      padding: "9px 10px",
+                      border: "1px solid #E4E4E7",
                     }}
+                    className="rounded-md bg-zinc-50"
                   >
-                    <Paperclip size={15} strokeWidth={2.1} />
-                    <span
+                    <div
                       style={{
+                        display: "flex",
+                        alignItems: "center",
+                        gap: 8,
                         minWidth: 0,
-                        overflow: "hidden",
-                        textOverflow: "ellipsis",
-                        whiteSpace: "nowrap",
-                        fontSize: 13,
-                        fontWeight: 500,
-                        color: D.heading,
                       }}
                     >
-                      {file.name}
+                      <Paperclip size={15} strokeWidth={2.1} />
+                      <span
+                        style={{
+                          minWidth: 0,
+                          overflow: "hidden",
+                          textOverflow: "ellipsis",
+                          whiteSpace: "nowrap",
+                        }}
+                        className="text-ui-body font-medium text-zinc-900"
+                      >
+                        {file.name}
+                      </span>
+                    </div>
+                    <span
+                      style={{
+                        whiteSpace: "nowrap",
+                      }}
+                      className="text-ui-body text-ink-secondary"
+                    >
+                      {formatFileSize(file.size)}
                     </span>
+                    <Button
+                      type="button"
+                      onClick={() => removeQueuedAttachment(idx)}
+                      aria-label={`Remove ${file.name}`}
+                      style={{
+                        width: 32,
+                        display: "inline-flex",
+                        alignItems: "center",
+                        justifyContent: "center",
+                      }}
+                      variant={"secondary"}
+                      onClickCapture={(event) =>
+                        event.currentTarget.focus({
+                          preventScroll: true,
+                        })
+                      }
+                      className="min-w-11"
+                      disabled={builderBusy}
+                    >
+                      <Trash2 size={15} strokeWidth={2.2} />
+                    </Button>
                   </div>
-                  <span style={{ fontSize: 12, color: D.muted, whiteSpace: "nowrap" }}>
-                    {formatFileSize(file.size)}
-                  </span>
-                  <button
-                    type="button"
-                    onClick={() => removeQueuedAttachment(idx)}
-                    aria-label={`Remove ${file.name}`}
-                    style={{
-                      border: "none",
-                      background: "transparent",
-                      color: D.red,
-                      cursor: "pointer",
-                      width: 32,
-                      height: 32,
-                      display: "inline-flex",
-                      alignItems: "center",
-                      justifyContent: "center",
-                    }}
-                  >
-                    <Trash2 size={15} strokeWidth={2.2} />
-                  </button>
+                ))}
+                <div
+                  id={queuedAttachmentStatusId}
+                  role="status"
+                  aria-live="polite"
+                  className="text-ui-body text-ink-secondary"
+                >
+                  {invoiceAttachmentLimitLabel(queuedAttachments)}
                 </div>
-              ))}
-              <div id={queuedAttachmentStatusId} role="status" aria-live="polite" style={{ fontSize: 11, color: D.muted }}>
-                {invoiceAttachmentLimitLabel(queuedAttachments)}
               </div>
-            </div>
-          ) : (
-            <div id={queuedAttachmentStatusId} role="status" aria-live="polite" style={{ fontSize: 12, color: D.muted, marginTop: 10 }}>
-              No files selected.
-            </div>
-          )}
-        </div>
+            ) : (
+              <div
+                id={queuedAttachmentStatusId}
+                role="status"
+                aria-live="polite"
+                style={{
+                  marginTop: 10,
+                }}
+                className="text-ui-body text-ink-secondary"
+              >
+                No files selected.
+              </div>
+            )}
+          </Card>
         )}{" "}
-        <div style={panelStyle()}>
+        <Card className="p-4">
           {sectionHeader("Delivery")}
-          <div style={{ marginBottom: 14 }}>
+          <div
+            style={{
+              marginBottom: 14,
+            }}
+          >
             {" "}
             <div
               style={{
@@ -6665,17 +7257,6 @@ function CreateInvoice({ showToast, onCreated, editInvoice, isMobile }) {
               }}
             >
               {" "}
-              <label
-                style={{
-                  fontSize: 11,
-                  color: D.muted,
-                  textTransform: "uppercase",
-                  letterSpacing: 0.8,
-                  display: "block",
-                }}
-              >
-                Notes (optional)
-              </label>{" "}
             </div>{" "}
             {aiSummaryEnabled && linkedServiceRecordId && (
               <div
@@ -6687,13 +7268,22 @@ function CreateInvoice({ showToast, onCreated, editInvoice, isMobile }) {
                   marginBottom: 8,
                 }}
               >
-                <span style={{ fontSize: 11, color: D.muted }}>
+                <span className="text-ui-body text-ink-secondary">
                   Pull from visit:
                 </span>
                 {[
-                  { key: "jobSummary", label: "Job summary" },
-                  { key: "forms", label: "Field observations" },
-                  { key: "lineItems", label: "Line items" },
+                  {
+                    key: "jobSummary",
+                    label: "Job summary",
+                  },
+                  {
+                    key: "forms",
+                    label: "Field observations",
+                  },
+                  {
+                    key: "lineItems",
+                    label: "Line items",
+                  },
                 ].map(({ key, label }) => (
                   <label
                     key={key}
@@ -6701,13 +7291,11 @@ function CreateInvoice({ showToast, onCreated, editInvoice, isMobile }) {
                       display: "flex",
                       alignItems: "center",
                       gap: 6,
-                      fontSize: 12,
-                      color: D.text,
                       cursor: "pointer",
                     }}
+                    className="ui-choice-label flex items-center gap-2 text-ui-body text-zinc-900"
                   >
-                    <input
-                      type="checkbox"
+                    <Checkbox
                       checked={aiSources[key]}
                       onChange={(e) =>
                         setAiSources((prev) => ({
@@ -6715,47 +7303,56 @@ function CreateInvoice({ showToast, onCreated, editInvoice, isMobile }) {
                           [key]: e.target.checked,
                         }))
                       }
+                      disabled={builderBusy}
                     />
                     {label}
                   </label>
                 ))}
               </div>
             )}
-            <div style={{ position: "relative" }}>
-              <textarea
-                value={notes}
-                onChange={(e) => setNotes(e.target.value)}
-                rows={2}
-                placeholder=""
-                style={{ ...sInput(isMobile), resize: "vertical", paddingRight: 76 }}
-              />
-              <div
-                style={{
-                  position: "absolute",
-                  top: 8,
-                  right: 8,
-                  display: "flex",
-                  alignItems: "center",
-                  gap: 6,
-                }}
-              >
+            <div
+              style={{
+                position: "relative",
+              }}
+            >
+              <Field className="min-w-0" label="Notes (optional)">
+                <Textarea
+                  value={notes}
+                  onChange={(e) => setNotes(e.target.value)}
+                  rows={2}
+                  placeholder=""
+                  style={{
+                    resize: "vertical",
+                  }}
+                  disabled={builderBusy}
+                />
+              </Field>
+              <div className="mt-2 flex items-center justify-end gap-2">
                 <AiWriteButton
+                  disabled={builderBusy}
                   loading={aiNotesLoading}
                   onClick={handleWriteNotesWithAI}
                   title={notes.trim() ? "Rewrite with AI" : "Write with AI"}
                 />
                 <DictationButton
-                  onAppend={(t) =>
-                    setNotes((prev) => appendDictation(prev, t))
-                  }
-                  palette={DICTATION_PALETTE}
+                  presentation="admin"
+                  disabled={builderBusy}
+                  onAppend={(t) => {
+                    if (!builderBusy)
+                      setNotes((prev) => appendDictation(prev, t));
+                  }}
                   title="Dictate notes"
+                  size={44}
                 />
               </div>
             </div>{" "}
           </div>{" "}
           {emailMessageEnabled && (
-            <div style={{ marginBottom: 14 }}>
+            <div
+              style={{
+                marginBottom: 14,
+              }}
+            >
               {" "}
               <div
                 style={{
@@ -6769,35 +7366,35 @@ function CreateInvoice({ showToast, onCreated, editInvoice, isMobile }) {
                 {" "}
                 <label
                   style={{
-                    fontSize: 11,
-                    color: D.muted,
-                    textTransform: "uppercase",
-                    letterSpacing: 0.8,
                     display: "block",
                   }}
+                  className="text-ui-body text-ink-secondary"
                 >
                   Email thank-you (optional)
                 </label>{" "}
               </div>{" "}
-              <div style={{ position: "relative" }}>
-                <textarea
-                  value={emailMessage}
-                  onChange={(e) => setEmailMessage(e.target.value.slice(0, 800))}
-                  rows={2}
-                  placeholder="A short, warm thank-you note for the invoice email."
-                  style={{ ...sInput(isMobile), resize: "vertical", paddingRight: 76 }}
-                />
-                <div
-                  style={{
-                    position: "absolute",
-                    top: 8,
-                    right: 8,
-                    display: "flex",
-                    alignItems: "center",
-                    gap: 6,
-                  }}
-                >
+              <div
+                style={{
+                  position: "relative",
+                }}
+              >
+                <Field className="min-w-0" label="Email message (optional)">
+                  <Textarea
+                    value={emailMessage}
+                    onChange={(e) =>
+                      setEmailMessage(e.target.value.slice(0, 800))
+                    }
+                    rows={2}
+                    placeholder="A short, warm thank-you note for the invoice email."
+                    style={{
+                      resize: "vertical",
+                    }}
+                    disabled={builderBusy}
+                  />
+                </Field>
+                <div className="mt-2 flex items-center justify-end gap-2">
                   <AiWriteButton
+                    disabled={builderBusy}
                     loading={aiMessageLoading}
                     onClick={handleWriteThankYouWithAI}
                     title={
@@ -6805,30 +7402,39 @@ function CreateInvoice({ showToast, onCreated, editInvoice, isMobile }) {
                     }
                   />
                   <DictationButton
+                    presentation="admin"
+                    disabled={builderBusy}
                     onAppend={(t) =>
+                      !builderBusy &&
                       setEmailMessage((prev) => appendDictation(prev, t, 800))
                     }
-                    palette={DICTATION_PALETTE}
                     title="Dictate thank-you"
+                    size={44}
                   />
                 </div>
               </div>{" "}
-              <div style={{ fontSize: 11, color: D.muted, marginTop: 4 }}>
+              <div
+                style={{
+                  marginTop: 4,
+                }}
+                className="text-ui-body text-ink-secondary"
+              >
                 Appears in the invoice email, below the service summary — not on
                 the PDF.
               </div>{" "}
             </div>
           )}{" "}
-          <div style={{ marginBottom: 14 }}>
+          <div
+            style={{
+              marginBottom: 14,
+            }}
+          >
             {" "}
             <div
               style={{
-                fontSize: 11,
-                color: D.muted,
-                textTransform: "uppercase",
-                letterSpacing: 0.8,
                 marginBottom: 6,
               }}
+              className="text-ui-body text-ink-secondary"
             >
               {editMode ? "Due date" : "Schedule"}
             </div>{" "}
@@ -6843,53 +7449,37 @@ function CreateInvoice({ showToast, onCreated, editInvoice, isMobile }) {
               {!editMode && (
                 <div>
                   {" "}
-                  <label
-                    style={{
-                      fontSize: 12,
-                      color: D.text,
-                      display: "block",
-                      marginBottom: 4,
-                    }}
-                  >
-                    Send
-                  </label>{" "}
-                  <select
-                    value={sendTiming}
-                    onChange={(e) => setSendTiming(e.target.value)}
-                    style={sInput(isMobile)}
-                  >
-                    {" "}
-                    <option value="now">Immediately</option>{" "}
-                    <option value="tomorrow_8">Tomorrow at 8 AM</option>{" "}
-                    <option value="custom">Custom time</option>{" "}
-                    <option value="draft">Save draft</option>{" "}
-                  </select>{" "}
+                  <Field label={<>Send</>} className="min-w-0">
+                    <Select
+                      value={sendTiming}
+                      onChange={(e) => setSendTiming(e.target.value)}
+                      disabled={builderBusy}
+                    >
+                      {" "}
+                      <option value="now">Immediately</option>{" "}
+                      <option value="tomorrow_8">Tomorrow at 8 AM</option>{" "}
+                      <option value="custom">Custom time</option>{" "}
+                      <option value="draft">Save draft</option>{" "}
+                    </Select>
+                  </Field>{" "}
                 </div>
               )}{" "}
               <div>
                 {" "}
-                <label
-                  style={{
-                    fontSize: 12,
-                    color: D.text,
-                    display: "block",
-                    marginBottom: 4,
-                  }}
-                >
-                  Due
-                </label>{" "}
-                <select
-                  value={dueTiming}
-                  onChange={(e) => setDueTiming(e.target.value)}
-                  style={sInput(isMobile)}
-                >
-                  {" "}
-                  <option value="today">Today</option>{" "}
-                  <option value="tomorrow">Tomorrow</option>{" "}
-                  <option value="7">In 7 days</option>{" "}
-                  <option value="30">In 30 days</option>{" "}
-                  <option value="custom">Custom date</option>{" "}
-                </select>{" "}
+                <Field label={<>Due</>} className="min-w-0">
+                  <Select
+                    value={dueTiming}
+                    onChange={(e) => setDueTiming(e.target.value)}
+                    disabled={builderBusy}
+                  >
+                    {" "}
+                    <option value="today">Today</option>{" "}
+                    <option value="tomorrow">Tomorrow</option>{" "}
+                    <option value="7">In 7 days</option>{" "}
+                    <option value="30">In 30 days</option>{" "}
+                    <option value="custom">Custom date</option>{" "}
+                  </Select>
+                </Field>{" "}
               </div>{" "}
             </div>
             {(sendTiming === "custom" || dueTiming === "custom") && (
@@ -6903,22 +7493,26 @@ function CreateInvoice({ showToast, onCreated, editInvoice, isMobile }) {
               >
                 {!editMode &&
                   (sendTiming === "custom" ? (
-                    <input
-                      type="datetime-local"
-                      value={sendCustomAt}
-                      onChange={(e) => setSendCustomAt(e.target.value)}
-                      style={sInput(isMobile)}
-                    />
+                    <Field className="min-w-0" label="Send date and time">
+                      <Input
+                        type="datetime-local"
+                        value={sendCustomAt}
+                        onChange={(e) => setSendCustomAt(e.target.value)}
+                        disabled={builderBusy}
+                      />
+                    </Field>
                   ) : (
                     <div />
                   ))}
                 {dueTiming === "custom" ? (
-                  <input
-                    type="date"
-                    value={dueCustomDate}
-                    onChange={(e) => setDueCustomDate(e.target.value)}
-                    style={sInput(isMobile)}
-                  />
+                  <Field className="min-w-0" label="Due date">
+                    <Input
+                      type="date"
+                      value={dueCustomDate}
+                      onChange={(e) => setDueCustomDate(e.target.value)}
+                      disabled={builderBusy}
+                    />
+                  </Field>
                 ) : (
                   <div />
                 )}
@@ -6926,72 +7520,68 @@ function CreateInvoice({ showToast, onCreated, editInvoice, isMobile }) {
             )}
           </div>{" "}
           {!editMode && (
-          <div
-            style={{
-              marginBottom: 16,
-              opacity: sendTiming !== "draft" ? 1 : 0.5,
-            }}
-          >
-            {" "}
             <div
               style={{
-                display: "flex",
-                alignItems: "center",
-                gap: 8,
-                marginBottom: requestReview ? 8 : 0,
+                marginBottom: 16,
+                opacity: sendTiming !== "draft" ? 1 : 0.5,
               }}
             >
               {" "}
-              <input
-                type="checkbox"
-                checked={requestReview}
-                onChange={(e) => setRequestReview(e.target.checked)}
-                disabled={sendTiming === "draft"}
-                id="review-toggle"
-              />{" "}
-              <label
-                htmlFor="review-toggle"
-                style={{ fontSize: 13, color: D.text }}
-              >
-                Send review request
-              </label>{" "}
-            </div>
-            {requestReview && (
               <div
                 style={{
-                  display: "grid",
-                  gridTemplateColumns: isMobile ? "1fr" : "1fr 1fr",
+                  display: "flex",
+                  alignItems: "center",
                   gap: 8,
-                  paddingLeft: 22,
+                  marginBottom: requestReview ? 8 : 0,
                 }}
               >
                 {" "}
-                <select
-                  value={reviewTiming}
-                  onChange={(e) => setReviewTiming(e.target.value)}
-                  disabled={sendTiming === "draft"}
-                  style={sInput(isMobile)}
+                <Checkbox
+                  checked={requestReview}
+                  onChange={(e) => setRequestReview(e.target.checked)}
+                  id="review-toggle"
+                  label="Send review request"
+                  disabled={builderBusy || sendTiming === "draft"}
+                />{" "}
+              </div>
+              {requestReview && (
+                <div
+                  style={{
+                    display: "grid",
+                    gridTemplateColumns: isMobile ? "1fr" : "1fr 1fr",
+                    gap: 8,
+                    paddingLeft: 22,
+                  }}
                 >
                   {" "}
-                  <option value="now">Now</option>{" "}
-                  <option value="120">In 2 hours</option>{" "}
-                  <option value="tomorrow_8">Tomorrow at 8 AM</option>{" "}
-                  <option value="custom">Custom time</option>{" "}
-                </select>
-                {reviewTiming === "custom" && (
-                  <input
-                    type="datetime-local"
-                    value={reviewCustomAt}
-                    onChange={(e) => setReviewCustomAt(e.target.value)}
-                    disabled={sendTiming === "draft"}
-                    style={sInput(isMobile)}
-                  />
-                )}
-              </div>
-            )}
-          </div>
+                  <Field className="min-w-0" label="Review timing">
+                    <Select
+                      value={reviewTiming}
+                      onChange={(e) => setReviewTiming(e.target.value)}
+                      disabled={builderBusy || sendTiming === "draft"}
+                    >
+                      {" "}
+                      <option value="now">Now</option>{" "}
+                      <option value="120">In 2 hours</option>{" "}
+                      <option value="tomorrow_8">Tomorrow at 8 AM</option>{" "}
+                      <option value="custom">Custom time</option>{" "}
+                    </Select>
+                  </Field>
+                  {reviewTiming === "custom" && (
+                    <Field className="min-w-0" label="Review date and time">
+                      <Input
+                        type="datetime-local"
+                        value={reviewCustomAt}
+                        onChange={(e) => setReviewCustomAt(e.target.value)}
+                        disabled={builderBusy || sendTiming === "draft"}
+                      />
+                    </Field>
+                  )}
+                </div>
+              )}
+            </div>
           )}{" "}
-        </div>{" "}
+        </Card>{" "}
       </div>{" "}
       <div
         style={{
@@ -7001,19 +7591,22 @@ function CreateInvoice({ showToast, onCreated, editInvoice, isMobile }) {
         }}
       >
         {" "}
-        <div style={sCard}>
+        <Card className="p-4">
           {" "}
           <div
             style={{
-              fontSize: 14,
-              fontWeight: 700,
-              color: D.heading,
               marginBottom: 4,
             }}
+            className="text-ui-body font-medium text-zinc-900"
           >
-            Invoice Summary
+            Invoice summary
           </div>{" "}
-          <div style={{ fontSize: 12, color: D.muted, marginBottom: 12 }}>
+          <div
+            style={{
+              marginBottom: 12,
+            }}
+            className="text-ui-body text-ink-secondary"
+          >
             {selectedCustomer
               ? `${selectedCustomer.first_name} ${selectedCustomer.last_name}`
               : "No customer selected"}
@@ -7022,32 +7615,31 @@ function CreateInvoice({ showToast, onCreated, editInvoice, isMobile }) {
             style={{
               display: "grid",
               gap: 6,
-              fontSize: 12,
-              color: D.text,
               marginBottom: 14,
             }}
+            className="text-ui-body text-zinc-900"
           >
             {" "}
             {!editMode && (
-            <div
-              style={{
-                display: "flex",
-                justifyContent: "space-between",
-                gap: 8,
-              }}
-            >
-              {" "}
-              <span style={{ color: D.muted }}>Send</span>{" "}
-              <span>
-                {sendTiming === "now"
-                  ? "Immediately"
-                  : sendTiming === "draft"
-                    ? "Draft"
-                    : sendTiming === "tomorrow_8"
-                      ? "Tomorrow 8 AM"
-                      : "Custom"}
-              </span>{" "}
-            </div>
+              <div
+                style={{
+                  display: "flex",
+                  justifyContent: "space-between",
+                  gap: 8,
+                }}
+              >
+                {" "}
+                <span className="text-ink-secondary">Send</span>{" "}
+                <span>
+                  {sendTiming === "now"
+                    ? "Immediately"
+                    : sendTiming === "draft"
+                      ? "Draft"
+                      : sendTiming === "tomorrow_8"
+                        ? "Tomorrow 8 AM"
+                        : "Custom"}
+                </span>{" "}
+              </div>
             )}{" "}
             <div
               style={{
@@ -7057,7 +7649,7 @@ function CreateInvoice({ showToast, onCreated, editInvoice, isMobile }) {
               }}
             >
               {" "}
-              <span style={{ color: D.muted }}>Due</span>{" "}
+              <span className="text-ink-secondary">Due</span>{" "}
               <span>
                 {dueTiming === "today"
                   ? "Today"
@@ -7078,7 +7670,7 @@ function CreateInvoice({ showToast, onCreated, editInvoice, isMobile }) {
               }}
             >
               {" "}
-              <span style={{ color: D.muted }}>Sales tax</span>{" "}
+              <span className="text-ink-secondary">Sales tax</span>{" "}
               <span>
                 {editMode
                   ? taxRate > 0
@@ -7090,20 +7682,24 @@ function CreateInvoice({ showToast, onCreated, editInvoice, isMobile }) {
               </span>{" "}
             </div>{" "}
           </div>{" "}
-          <button
+          <Button
             onClick={editMode ? handleSave : handleCreate}
-            disabled={saving}
             style={{
-              ...sBtn("#111", D.white, isMobile),
               width: "100%",
-              padding: 14,
-              minHeight: isMobile ? 48 : undefined,
-              opacity: saving ? 0.5 : 1,
               marginBottom: 14,
             }}
+            onClickCapture={(event) =>
+              event.currentTarget.focus({
+                preventScroll: true,
+              })
+            }
+            className="min-w-11"
+            disabled={builderBusy}
+            loading={saving}
+            variant="primary"
           >
             {primaryActionLabel}
-          </button>
+          </Button>
           {lineItems
             .filter((i) => i.description)
             .map((item, i) => {
@@ -7129,7 +7725,7 @@ function CreateInvoice({ showToast, onCreated, editInvoice, isMobile }) {
             })}
           <div
             style={{
-              borderTop: `1px solid ${D.border}`,
+              borderTop: "1px solid #E4E4E7",
               marginTop: 12,
               paddingTop: 12,
             }}
@@ -7165,7 +7761,7 @@ function CreateInvoice({ showToast, onCreated, editInvoice, isMobile }) {
                 ...summaryRowStyle(18, 700),
                 marginTop: 8,
                 paddingTop: 8,
-                borderTop: `2px solid ${D.teal}`,
+                borderTop: "2px solid #18181B",
               }}
             >
               {" "}
@@ -7173,18 +7769,21 @@ function CreateInvoice({ showToast, onCreated, editInvoice, isMobile }) {
               <span style={summaryAmountStyle}>${total.toFixed(2)}</span>{" "}
             </div>
             {cardCharge.surcharge > 0 && (
-              <div style={{ ...summaryRowStyle(), marginTop: 6 }}>
+              <div
+                style={{
+                  ...summaryRowStyle(),
+                  marginTop: 6,
+                }}
+              >
                 {" "}
-                <span style={summaryLabelStyle}>
-                  Credit Card Surcharge
-                </span>
+                <span style={summaryLabelStyle}>Credit card surcharge</span>
                 <span style={summaryAmountStyle}>
                   ${cardCharge.surcharge.toFixed(2)}
                 </span>{" "}
               </div>
             )}
           </div>{" "}
-        </div>{" "}
+        </Card>{" "}
       </div>{" "}
     </div>
   );
@@ -7192,20 +7791,24 @@ function CreateInvoice({ showToast, onCreated, editInvoice, isMobile }) {
 
 // ── Follow-up Sequence Panel (per-invoice) ──
 function FollowupPanel({ invoiceId, showToast, isMobile }) {
+  const busyRef = useRef(false);
   const [data, setData] = useState(null);
   const [busy, setBusy] = useState(false);
-
+  const [readError, setReadError] = useState(false);
   const load = useCallback(async () => {
+    setReadError(false);
     const d = await adminFetch(`/admin/invoices/${invoiceId}/followup`).catch(
       () => null,
     );
     setData(d);
+    setReadError(!d);
   }, [invoiceId]);
   useEffect(() => {
     load();
   }, [load]);
-
   const act = async (path, body) => {
+    if (busyRef.current) return;
+    busyRef.current = true;
     setBusy(true);
     try {
       await adminFetch(`/admin/invoices/${invoiceId}/followup/${path}`, {
@@ -7217,39 +7820,39 @@ function FollowupPanel({ invoiceId, showToast, isMobile }) {
     } catch {
       showToast("Action failed");
     } finally {
+      busyRef.current = false;
       setBusy(false);
     }
   };
-
+  if (readError)
+    return (
+      <ActionFeedback error onRetry={load} className="my-4">
+        Could not load invoice follow-up.
+      </ActionFeedback>
+    );
   if (!data)
     return (
-      <div style={{ marginTop: 10, fontSize: 12, color: D.muted }}>
+      <div
+        style={{
+          marginTop: 10,
+        }}
+        className="text-ui-body text-ink-secondary"
+      >
         Loading follow-up…
       </div>
     );
-
   const seq = data.sequence;
   const steps = data.steps || [];
-
-  const STATUS_COLOR = {
-    active: D.green,
-    paused: D.amber,
-    stopped: D.muted,
-    completed: D.muted,
-    autopay_hold: D.teal,
-  };
-
   const nextStep = seq ? steps[seq.step_index] : null;
-
   return (
     <div
       style={{
         marginTop: 12,
         padding: 12,
         background: "#F8FAFC",
-        border: `1px solid ${D.border}`,
-        borderRadius: 8,
+        border: "1px solid #E4E4E7",
       }}
+      className="rounded-md"
     >
       {" "}
       <div
@@ -7263,47 +7866,34 @@ function FollowupPanel({ invoiceId, showToast, isMobile }) {
         }}
       >
         {" "}
-        <div
-          style={{
-            fontSize: 12,
-            fontWeight: 500,
-            color: D.heading,
-            textTransform: "uppercase",
-            letterSpacing: 0.5,
-          }}
-        >
-          Automated Follow-ups
+        <div className="text-ui-body font-medium text-zinc-900">
+          Automated follow-ups
         </div>
         {seq ? (
-          <span
-            style={sBadge(
-              `${STATUS_COLOR[seq.status] || D.muted}22`,
-              STATUS_COLOR[seq.status] || D.muted,
-            )}
-          >
+          <Badge className="max-w-full whitespace-normal">
             {seq.status.replace("_", " ")}
-          </span>
+          </Badge>
         ) : (
-          <span style={sBadge(`${D.muted}22`, D.muted)}>not scheduled</span>
+          <Badge className="max-w-full whitespace-normal">not scheduled</Badge>
         )}
       </div>
       {seq && (
         <div
           style={{
-            fontSize: 12,
-            color: D.muted,
             marginBottom: 10,
             lineHeight: 1.6,
           }}
+          className="text-ui-body text-ink-secondary"
         >
           {" "}
           <div>
-            Touches sent: <b style={{ color: D.heading }}>{seq.touches_sent}</b>
+            Touches sent:{" "}
+            <span className="font-medium">{seq.touches_sent}</span>
             of {steps.length}
           </div>
           {nextStep && seq.next_touch_at && seq.status === "active" && (
             <div>
-              Next: <b style={{ color: D.heading }}>{nextStep.label}</b>on{" "}
+              Next: <span className="font-medium">{nextStep.label}</span>on{" "}
               {new Date(seq.next_touch_at).toLocaleString()}
             </div>
           )}
@@ -7327,66 +7917,108 @@ function FollowupPanel({ invoiceId, showToast, isMobile }) {
           )}
         </div>
       )}
-      <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+      <div
+        style={{
+          display: "flex",
+          gap: 6,
+          flexWrap: "wrap",
+        }}
+      >
         {seq && seq.status === "active" && (
           <>
             {" "}
-            <button
+            <Button
               disabled={busy}
               onClick={() => {
                 const reason = prompt(
                   'Why pause? (e.g. "customer said they\'ll pay Friday")',
                 );
-                if (reason !== null) act("pause", { reason });
+                if (reason !== null)
+                  act("pause", {
+                    reason,
+                  });
               }}
-              style={sBtn(D.amber, D.white, isMobile)}
+              variant={"secondary"}
+              onClickCapture={(event) =>
+                event.currentTarget.focus({
+                  preventScroll: true,
+                })
+              }
+              className="min-w-11"
             >
               Pause
-            </button>{" "}
-            <button
+            </Button>{" "}
+            <Button
               disabled={busy}
               onClick={() => {
                 if (confirm("Send the next follow-up SMS right now?"))
                   act("send-now");
               }}
-              style={sBtn(D.teal, D.white, isMobile)}
+              variant={"primary"}
+              onClickCapture={(event) =>
+                event.currentTarget.focus({
+                  preventScroll: true,
+                })
+              }
+              className="min-w-11"
             >
-              Send Next Now
-            </button>{" "}
-            <button
+              Send next now
+            </Button>{" "}
+            <Button
               disabled={busy}
               onClick={() => {
                 const reason = prompt(
                   'Why stop? (e.g. "waived", "customer disputed")',
                 );
-                if (reason !== null) act("stop", { reason });
+                if (reason !== null)
+                  act("stop", {
+                    reason,
+                  });
               }}
-              style={sBtn("transparent", D.red, isMobile)}
+              variant={"secondary"}
+              onClickCapture={(event) =>
+                event.currentTarget.focus({
+                  preventScroll: true,
+                })
+              }
+              className="min-w-11"
             >
               Stop
-            </button>{" "}
+            </Button>{" "}
           </>
         )}
         {seq && (seq.status === "paused" || seq.status === "autopay_hold") && (
           <>
             {" "}
-            <button
+            <Button
               disabled={busy}
               onClick={() => act("resume")}
-              style={sBtn(D.green, D.white, isMobile)}
+              variant={"secondary"}
+              onClickCapture={(event) =>
+                event.currentTarget.focus({
+                  preventScroll: true,
+                })
+              }
+              className="min-w-11"
             >
               Resume
-            </button>{" "}
-            <button
+            </Button>{" "}
+            <Button
               disabled={busy}
               onClick={() => {
                 if (confirm("Send the next follow-up SMS right now?"))
                   act("send-now");
               }}
-              style={sBtn(D.teal, D.white, isMobile)}
+              variant={"primary"}
+              onClickCapture={(event) =>
+                event.currentTarget.focus({
+                  preventScroll: true,
+                })
+              }
+              className="min-w-11"
             >
-              Send Now
-            </button>{" "}
+              Send now
+            </Button>{" "}
           </>
         )}
       </div>{" "}

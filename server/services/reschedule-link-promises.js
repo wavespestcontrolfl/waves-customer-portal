@@ -24,25 +24,44 @@ const snapshot = (v) => ({ id: v.id, customer_id: v.customer_id, date: dateOnly(
 const sameVisitSnapshot = (a, b) => ['id', 'customer_id', 'date', 'start', 'end', 'property_id']
   .every((key) => (a[key] ?? null) === (b[key] ?? null));
 
+// The kind label alone never proves the promised link MOVES this
+// appointment — "I'll text you a link" fits a website or a new-booking link
+// just as well, and an account with one eligible visit would then be sent a
+// live reschedule link for a conversation that never asked for one (codex
+// #4293 r1 P1). Either the promise quote itself speaks about moving an
+// existing appointment, or the commitment carries a grounded subject that
+// names the visit; anything else is office-review work.
+const RESCHEDULE_INTENT = /\breschedul\w*\b|\bre schedul\w*\b|\b(?:move|moving|change|changing|switch|switching|push|pushing|pick|picking|choose|choosing|select|selecting)\b[a-z0-9 ]{0,40}\b(?:time|times|day|days|date|dates|slot|slots|window|appointment|appt|visit|service)\b|\b(?:new|another|different|better) (?:time|day|date|slot|window)\b/;
+
 function selectDiscussedVisit({ commitment, call, customer, candidates = [], now = new Date() }) {
   const skip = (reason) => ({ reason });
   if (!call?.customer_id || call.customer_id !== customer?.id || !normalizePhone(customer.phone)
     || !phoneMatchDigits(customer.phone).length
     || normalizePhone(customer.phone) !== normalizePhone(String(call.direction || '').startsWith('outbound') ? call.to_phone : call.from_phone)) return skip('customer_identity');
+  // /reschedule/:token refuses a non-active account (accountInactive), so a
+  // link promising a cancelled customer a new time is a dead end — hold the
+  // same explicit `active === true` the page requires (codex #4293 r1 P1).
+  if (customer.active !== true) return skip('customer_inactive');
   if (call.v2_extraction_status !== 'valid' || call.ai_extraction_enriched?.meta?.is_spam
     || call.ai_extraction_enriched?.meta?.is_voicemail || call.processing_token) return skip('call_not_ready');
   const { speakerTurns } = require('./call-commitments');
   const turns = speakerTurns(call.transcription);
   const conditional = /\b(?:not|never|unless|if|until|once|maybe|might|cannot)\b|\b(?:don|won|can) t\b/;
   const revoked = (turns?.caller || []).some((turn) => /\b(?:don t|do not|no need|never mind)\b/.test(turn) && /\b(?:link|text|send|email)\b/.test(turn));
-  const promised = (commitment.evidence || []).some((e) => e.speaker === 'agent' && turns?.agent.some((t) => t.includes(norm(e.quote)) && !conditional.test(t))
+  const promisedQuotes = (commitment.evidence || []).filter((e) => e.speaker === 'agent' && turns?.agent.some((t) => t.includes(norm(e.quote)) && !conditional.test(t))
     && /\blink\b/.test(norm(e.quote)) && /\b(send|text|email|sending|texting)\b/.test(norm(e.quote))
-    && /\b(?:i|we) (?:ll|will|am going to|are going to|am sending|m sending)\b|\blet me\b/.test(norm(e.quote)));
-  if (revoked || !promised || !Number.isFinite(Number(commitment.confidence)) || Number(commitment.confidence) < 0.9) return skip('promise_needs_review');
-  let selected = candidates;
+    && /\b(?:i|we) (?:ll|will|am going to|are going to|am sending|m sending)\b|\blet me\b/.test(norm(e.quote))).map((e) => norm(e.quote));
   const subject = commitment.subject;
   if (subject && (!subject.quote || !norm(call.transcription).includes(norm(subject.quote))
     || [subject.service, subject.address].some((value) => value && !norm(subject.quote).includes(norm(value))))) return skip('subject_not_grounded');
+  // A subject is grounded only when it NAMES the visit — a bare quote with no
+  // date/service/address binds nothing, so it cannot stand in for
+  // rescheduling language.
+  const groundedSubject = !!subject && [subject.visit_date, subject.service, subject.address].some(Boolean);
+  const aboutThisAppointment = groundedSubject || promisedQuotes.some((quote) => RESCHEDULE_INTENT.test(quote));
+  if (revoked || !promisedQuotes.length || !aboutThisAppointment
+    || !Number.isFinite(Number(commitment.confidence)) || Number(commitment.confidence) < 0.9) return skip('promise_needs_review');
+  let selected = candidates;
   if (subject?.visit_date) {
     const { quoteBindsConfirmedSlot, normalizeCommitmentText } = require('./call-triage-flags');
     selected = selected.filter((v) => dateOnly(v.scheduled_date) === subject.visit_date
@@ -175,45 +194,41 @@ async function stagePromises(conn) {
   return rows.length;
 }
 
-async function runOne(conn, row, { now = new Date(), send = null, buildLink = null, render = null } = {}) {
-  if (mode() === 'off') return;
-  // Another sweep may have completed this item since it was listed.
-  row = await conn('outbox_messages').where({ id: row.id }).first();
-  if (!row || ['delivered', 'cancelled'].includes(row.status)) return;
-  // Reconcile accepted/ambiguous attempts before planning any new send.
-  if (row.provider_message_id) {
-    const sms = await conn('sms_log').where({ twilio_sid: row.provider_message_id }).first('id', 'twilio_sid', 'status', 'created_at', 'customer_id', 'to_phone', 'message_body');
-    if (sms && ['failed', 'undelivered'].includes(sms.status) && row.status !== 'review') return parkReview(conn, row, 'delivery_failed');
-    if (sms && ['delivered', 'read'].includes(sms.status)) return settleDelivery(conn, row, sms);
-    if (row.status !== 'review' && new Date(row.sent_at || row.last_attempt_at).getTime() + 24 * 3600000 < now.getTime()) return parkReview(conn, row, 'delivery_receipt_unavailable');
-    if (sms && !['failed', 'undelivered'].includes(sms.status) && row.status !== 'review') return settleDelivery(conn, row, sms);
-    if (row.status !== 'review') return conn('outbox_messages').where({ id: row.id }).update({ updated_at: now });
-  }
-  const context = await contextFor(conn, row.commitment_id, now);
-  if (context.reason) {
-    if (context.reason === 'promise_closed') return conn('outbox_messages').where({ id: row.id }).whereNotIn('status', ['delivered', 'cancelled'])
-      .update({ status: 'cancelled', updated_at: now });
-    if (mode() === 'shadow') return conn('outbox_messages').where({ id: row.id }).whereIn('status', ['pending', 'shadow'])
-      .update({ status: 'shadow', last_error: context.reason, updated_at: now });
-    return parkReview(conn, row, context.reason);
-  }
+// An attempt that already reached the provider OWNS the row until its
+// outcome is known: delivery settles it, a failure or a receipt that never
+// arrives parks it for the office, and an accepted-but-undecided send waits
+// for the next sweep. Returns false when the row is still the worker's to
+// plan. Never resends — the claim is what survives process death.
+async function reconcileAttempt(conn, row, now) {
+  const sms = await conn('sms_log').where({ twilio_sid: row.provider_message_id })
+    .first('id', 'twilio_sid', 'status', 'created_at', 'customer_id', 'to_phone', 'message_body');
+  const failed = sms && ['failed', 'undelivered'].includes(sms.status);
+  const unparked = row.status !== 'review';
+  if (failed && unparked) await parkReview(conn, row, 'delivery_failed');
+  else if (sms && ['delivered', 'read'].includes(sms.status)) await settleDelivery(conn, row, sms);
+  else if (unparked && new Date(row.sent_at || row.last_attempt_at).getTime() + 24 * 3600000 < now.getTime()) await parkReview(conn, row, 'delivery_receipt_unavailable');
+  else if (sms && !failed && unparked) await settleDelivery(conn, row, sms);
+  else if (unparked) await conn('outbox_messages').where({ id: row.id }).update({ updated_at: now });
+  else return false;
+  return true;
+}
+
+// The promise is no longer sendable: a closed promise cancels the row, shadow
+// mode records the reason without touching the customer, and live mode hands
+// the promise to the office.
+async function applyContextSkip(conn, row, reason, now) {
+  if (reason === 'promise_closed') return conn('outbox_messages').where({ id: row.id }).whereNotIn('status', ['delivered', 'cancelled'])
+    .update({ status: 'cancelled', updated_at: now });
+  if (mode() === 'shadow') return conn('outbox_messages').where({ id: row.id }).whereIn('status', ['pending', 'shadow'])
+    .update({ status: 'shadow', last_error: reason, updated_at: now });
+  return parkReview(conn, row, reason);
+}
+
+// The one customer handoff: render, claim, hand to the central send pipeline
+// with a final source recheck at both the dispatch and provider boundaries,
+// then record what the provider said. Anything unknown parks.
+async function dispatch(conn, row, context, { now, send, buildLink, render, planned, evidenceSince }) {
   const { commitment, call, customer, visit } = context;
-  const prior = await matchingSend(conn, context, call.created_at);
-  if (prior) return settleDelivery(conn, row, prior, context);
-  if (row.status === 'review') return conn('outbox_messages').where({ id: row.id }).update({ updated_at: now });
-  if (row.status === 'sending') {
-    if (new Date(row.last_attempt_at).getTime() + 20 * 60000 <= now.getTime()) return parkReview(conn, row, 'provider_outcome_unknown');
-    return;
-  }
-  const planned = snapshot(visit);
-  if (row.payload.visit_snapshot && !sameVisitSnapshot(row.payload.visit_snapshot, planned)) return parkReview(conn, row, 'appointment_changed');
-  if (mode() === 'shadow') {
-    await conn('outbox_messages').where({ id: row.id }).whereIn('status', ['pending', 'shadow']).update({ status: 'shadow', last_error: null,
-      related_scheduled_service_id: visit.id, payload: { ...row.payload, call_generation: call.processing_generation, visit_snapshot: planned, would_send_at: (isWithinSendWindowET(now) ? now : nextSendWindowOpenET(now)).toISOString() }, updated_at: now });
-    return;
-  }
-  if (!isWithinSendWindowET(now)) return conn('outbox_messages').where({ id: row.id }).whereIn('status', ['pending', 'shadow']).update({ status: 'pending',
-    related_scheduled_service_id: visit.id, payload: { ...row.payload, call_generation: call.processing_generation, visit_snapshot: planned }, available_at: nextSendWindowOpenET(now), updated_at: now });
   const link = await (buildLink || require('./reschedule-link').buildRescheduleLink)(visit.id, { customerId: customer.id });
   if (!link?.url) return parkReview(conn, row, 'link_unavailable');
   const body = await (render || require('../routes/admin-sms-templates').getTemplate)('reschedule_link_promise', {
@@ -233,7 +248,7 @@ async function runOne(conn, row, { now = new Date(), send = null, buildLink = nu
     if (!isWithinSendWindowET()) return { ok: false, code: 'LINK_QUIET_HOURS', reason: 'Waiting for the next send window' };
     const live = await contextFor(conn, commitment.id, new Date());
     if (live.reason || !sameVisitSnapshot(snapshot(live.visit), planned)) return { ok: false, code: 'LINK_SOURCE_CHANGED', reason: 'The discussed visit changed' };
-    manual = await matchingSend(conn, live, call.created_at);
+    manual = await matchingSend(conn, live, evidenceSince);
     return manual ? { ok: false, code: 'LINK_ALREADY_SENT', reason: 'The link was already sent' } : { ok: true };
   };
   try {
@@ -245,9 +260,8 @@ async function runOne(conn, row, { now = new Date(), send = null, buildLink = nu
     });
     if (manual) return settleDelivery(conn, row, manual, context);
     if (result.sent && /^SM[0-9a-f]{32}$/i.test(result.providerMessageId || '')) {
-      await conn('outbox_messages').where({ id: row.id, status: 'sending' }).update({ status: 'sent',
+      return conn('outbox_messages').where({ id: row.id, status: 'sending' }).update({ status: 'sent',
         provider_message_id: result.providerMessageId, sent_at: new Date(), updated_at: new Date() });
-      return;
     }
     if (result.blocked && ['LINK_QUIET_HOURS', 'QUIET_HOURS_HOLD', 'LINK_GATE_OFF'].includes(result.code)) return conn('outbox_messages').where({ id: row.id, status: 'sending' })
       .update({ status: 'pending', available_at: nextSendWindowOpenET(new Date()), last_error: result.code, updated_at: new Date() });
@@ -257,13 +271,68 @@ async function runOne(conn, row, { now = new Date(), send = null, buildLink = nu
   }
 }
 
+// Every reason this promise does NOT hand off to the customer on this pass:
+// the office already owns it, an in-flight claim has not timed out, the
+// discussed visit changed under the plan, shadow mode only records, or the
+// send window is closed. Returns true when the row is settled for now.
+async function holdBeforeSend(conn, row, context, planned, now) {
+  const { call, visit } = context;
+  const plan = { ...row.payload, call_generation: call.processing_generation, visit_snapshot: planned };
+  if (row.status === 'review') {
+    await conn('outbox_messages').where({ id: row.id }).update({ updated_at: now });
+    return true;
+  }
+  if (row.status === 'sending') {
+    if (new Date(row.last_attempt_at).getTime() + 20 * 60000 <= now.getTime()) await parkReview(conn, row, 'provider_outcome_unknown');
+    return true;
+  }
+  if (row.payload.visit_snapshot && !sameVisitSnapshot(row.payload.visit_snapshot, planned)) {
+    await parkReview(conn, row, 'appointment_changed');
+    return true;
+  }
+  if (mode() === 'shadow') {
+    await conn('outbox_messages').where({ id: row.id }).whereIn('status', ['pending', 'shadow']).update({ status: 'shadow', last_error: null,
+      related_scheduled_service_id: visit.id, payload: { ...plan, would_send_at: (isWithinSendWindowET(now) ? now : nextSendWindowOpenET(now)).toISOString() }, updated_at: now });
+    return true;
+  }
+  if (!isWithinSendWindowET(now)) {
+    await conn('outbox_messages').where({ id: row.id }).whereIn('status', ['pending', 'shadow']).update({ status: 'pending',
+      related_scheduled_service_id: visit.id, payload: plan, available_at: nextSendWindowOpenET(now), updated_at: now });
+    return true;
+  }
+  return false;
+}
+
+async function runOne(conn, row, { now = new Date(), send = null, buildLink = null, render = null } = {}) {
+  if (mode() === 'off') return;
+  // Another sweep may have completed this item since it was listed.
+  row = await conn('outbox_messages').where({ id: row.id }).first();
+  if (!row || ['delivered', 'cancelled'].includes(row.status)) return;
+  // Reconcile accepted/ambiguous attempts before planning any new send.
+  if (row.provider_message_id && await reconcileAttempt(conn, row, now)) return;
+  const context = await contextFor(conn, row.commitment_id, now);
+  if (context.reason) return applyContextSkip(conn, row, context.reason, now);
+  const { call, visit } = context;
+  // Evidence starts at the END of the call: an exact link sent while the
+  // caller was still on the line cannot keep a promise made later in that
+  // same call — the boundary the commitment ledger already uses (codex
+  // #4293 r1 P2).
+  const evidenceSince = require('./call-commitments').callEndedAt(call) || call.created_at;
+  const prior = await matchingSend(conn, context, evidenceSince);
+  if (prior) return settleDelivery(conn, row, prior, context);
+  const planned = snapshot(visit);
+  if (await holdBeforeSend(conn, row, context, planned, now)) return;
+  return dispatch(conn, row, context, { now, send, buildLink, render, planned, evidenceSince });
+}
+
 async function sweep(conn = db, options = {}) {
   if (mode() === 'off') return { processed: 0 };
   await stagePromises(conn);
   const rows = await conn('outbox_messages').whereNotNull('commitment_id').whereIn('status', ['pending', 'shadow', 'sending', 'sent', 'review'])
     .where(function due() { this.whereNull('available_at').orWhere('available_at', '<=', options.now || new Date()); }).orderBy('updated_at').limit(100);
   for (const row of rows) await runOne(conn, row, options);
-  return { processed: rows.length, mode: mode() };
+  const reconciled = await reconcileUsedLinks(conn);
+  return { processed: rows.length, reconciled, mode: mode() };
 }
 
 // The automatic promise send and manual Comms send serialize for this
@@ -305,10 +374,52 @@ async function withSendLock(input, sendCore) {
   }
 }
 
-async function resolveUsedLink(conn, visitId) {
-  const rows = await conn('outbox_messages').where({ related_scheduled_service_id: visitId }).whereNotNull('commitment_id')
-    .whereIn('status', ['sent', 'delivered']).select('related_call_log_id');
-  for (const row of rows) await require('./triage-auto-resolve').resolveRescheduleCards(conn, row.related_call_log_id, 'Customer chose a new time using the promised reschedule link.');
+const USED_LINK_NOTE = 'Customer chose a new time using the promised reschedule link.';
+// The mover stamps every /reschedule/:token commit with this initiator — the
+// durable proof that the customer, not the office, moved the visit.
+const SELF_SERVE_INITIATOR = 'customer_self_serve';
+const SETTLED_STATUSES = ['sent', 'delivered'];
+
+// At-most-once per promise row: the stamp is what makes the reconciliation
+// safe to retry from anywhere.
+async function markLinkUsed(conn, row) {
+  await require('./triage-auto-resolve').resolveRescheduleCards(conn, row.related_call_log_id, USED_LINK_NOTE, row.related_scheduled_service_id);
+  await conn('outbox_messages').where({ id: row.id })
+    .update({ payload: conn.raw("COALESCE(payload, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ link_used_reconciled_at: new Date().toISOString() })]), updated_at: new Date() });
 }
 
-module.exports = { mode, selectDiscussedVisit, snapshot, stagePromises, runOne, sweep, withSendLock, resolveUsedLink };
+function unreconciledPromiseRows(conn) {
+  return conn('outbox_messages').whereNotNull('commitment_id').whereIn('status', SETTLED_STATUSES)
+    .whereNotNull('related_scheduled_service_id').whereNotNull('related_call_log_id')
+    .whereRaw("(payload->>'link_used_reconciled_at') IS NULL");
+}
+
+async function resolveUsedLink(conn, visitId) {
+  const rows = await unreconciledPromiseRows(conn).where({ related_scheduled_service_id: visitId })
+    .select('id', 'related_call_log_id', 'related_scheduled_service_id');
+  for (const row of rows) await markLinkUsed(conn, row);
+}
+
+// The post-commit hook in reschedule-public is best-effort: a transient DB
+// failure or a process death after the move commits would otherwise leave the
+// linked triage cards open forever, because a delivered row has left the
+// worker sweep and a client retry returns from the idempotent-replay branch
+// (codex #4293 r1 P2). This re-derives the same verdict from the mover's own
+// reschedule_log row, so the reconciliation is retried until it lands.
+async function reconcileUsedLinks(conn) {
+  const rows = await unreconciledPromiseRows(conn).orderBy('updated_at')
+    .limit(100).select('id', 'related_call_log_id', 'related_scheduled_service_id', 'sent_at');
+  let reconciled = 0;
+  for (const row of rows) {
+    const used = await conn('reschedule_log')
+      .where({ scheduled_service_id: row.related_scheduled_service_id, initiated_by: SELF_SERVE_INITIATOR })
+      .modify((q) => { if (row.sent_at) q.where('created_at', '>=', row.sent_at); })
+      .first('id');
+    if (!used) continue;
+    await markLinkUsed(conn, row);
+    reconciled += 1;
+  }
+  return reconciled;
+}
+
+module.exports = { mode, selectDiscussedVisit, snapshot, stagePromises, runOne, sweep, withSendLock, resolveUsedLink, reconcileUsedLinks };

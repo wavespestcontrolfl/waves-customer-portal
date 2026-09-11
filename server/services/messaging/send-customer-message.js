@@ -530,12 +530,13 @@ async function sendCustomerMessageCore(input) {
     return {
       sent: false,
       blocked: false,
-      code: 'PROVIDER_FAILURE',
+      code: providerOutcome.code === 'APP_PROVIDER_RETRY' ? providerOutcome.code : 'PROVIDER_FAILURE',
       reason: providerOutcome.error || 'provider returned no message id',
       retryable: !!providerOutcome.retryable,
       deferred: !!providerOutcome.retryable,
       terminal: providerOutcome.terminal === true,
       nextAllowedAt: retryAt ? retryAt.toISOString() : undefined,
+      ...(providerOutcome.code === 'APP_PROVIDER_RETRY' ? { retryAfterMs: providerOutcome.retryAfterMs } : {}),
       providerErrorCode: providerOutcome.providerErrorCode,
       providerHttpStatus: providerOutcome.providerHttpStatus,
       // true = the provider layer already raised twilio_failure for this event.

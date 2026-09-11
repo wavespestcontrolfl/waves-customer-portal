@@ -963,6 +963,11 @@
           "format": "date-time",
           "description": "ISO 8601 datetime with the Eastern Time offset (never UTC 'Z'). Set when status='confirmed' AND both specific date AND specific time agreed, or when a reschedule concluded with a new agreed date+time (status='reschedule_requested' — carries the NEW slot for the office to move the existing visit to)."
         },
+        "proposed_start_at": {
+          "type": ["string", "null"],
+          "format": "date-time",
+          "description": "The caller's one specifically requested NEW reschedule date and time, ISO 8601 with Eastern offset. Not an agreement. Null for vague or competing alternatives. Pin the caller's date/time quote to /scheduling/proposed_start_at."
+        },
         "agent_committed_booking": {
           "type": [
             "boolean",

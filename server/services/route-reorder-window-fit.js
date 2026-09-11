@@ -123,11 +123,11 @@ function sequenceCount(total, timed, groupSizes) {
   return count;
 }
 
-function workDuration(stop) {
+function workDuration(stop, fallback = 60) {
   const start = stop.window_start ? hhmmToMin(String(stop.window_start).slice(0, 5)) : null;
   const end = stop.window_end ? hhmmToMin(String(stop.window_end).slice(0, 5)) : null;
   const span = Number.isFinite(start) && Number.isFinite(end) ? Math.max(0, end - start) : 0;
-  return Math.max(span, Number(stop.estimated_duration_minutes) || 0) || 60;
+  return Math.max(span, Number(stop.estimated_duration_minutes) || 0) || fallback;
 }
 
 /**
@@ -137,24 +137,63 @@ function workDuration(stop) {
  * making prefixes prunable: the clock only moves forward, so no suffix can
  * rescue a missed window.
  */
-function advanceSim(RouteOptimizer, effectiveWindowRange, state, stop, reportLate = false) {
+function advanceSim(RouteOptimizer, effectiveWindowRange, state, stop, {
+  legMinutes, bufferMinutes = 0, blockedIntervals = [], reportLate = false,
+} = {}) {
   const lat = parseFloat(stop.lat);
   const lng = parseFloat(stop.lng);
   let travel = 0;
   let prev = state.prev;
+  let departMin = state.clock;
   if (lat && lng) {
-    travel = RouteOptimizer.fallbackLegMetrics(
-      RouteOptimizer.haversine(prev.lat, prev.lng, lat, lng),
-    ).minutes || 0;
+    for (let attempt = 0; attempt <= blockedIntervals.length; attempt++) {
+      travel = legMinutes ? legMinutes(prev, stop, departMin) : RouteOptimizer.fallbackLegMetrics(
+        RouteOptimizer.haversine(prev.lat, prev.lng, lat, lng),
+      ).minutes || 0;
+      if (!Number.isFinite(travel) || travel < 0) return null;
+      if (state.visited && (prev.lat !== lat || prev.lng !== lng)) travel += bufferMinutes;
+      const blocked = blockedIntervals.find(block => departMin < block.endMin && departMin + travel > block.startMin);
+      if (!blocked) break;
+      departMin = blocked.endMin;
+    }
     prev = { lat, lng };
   }
-  let startMin = state.clock + travel;
+  let startMin = departMin + travel;
   const range = effectiveWindowRange(stop);
-  if (range) {
-    if (startMin > range.endMin && !reportLate) return null;
-    startMin = Math.max(startMin, range.startMin);
+  if (range) startMin = Math.max(startMin, range.startMin);
+  for (const block of blockedIntervals) {
+    if (startMin < block.endMin && startMin + workDuration(stop) > block.startMin) startMin = block.endMin;
   }
-  return { clock: startMin + workDuration(stop), prev, travelMin: state.travelMin + travel, arrivalMin: startMin, waitingMin: (state.waitingMin || 0) + Math.max(0, startMin - state.clock - travel) };
+  if (range && startMin > range.endMin && !reportLate) return null;
+  return { clock: startMin + workDuration(stop), prev, visited: true, travelMin: state.travelMin + travel, arrivalMin: startMin, waitingMin: (state.waitingMin || 0) + Math.max(0, startMin - state.clock - travel) };
+}
+
+/** Repair the demonstrated null-position insertion defect. Keep the relative
+ * order of every already-positioned stop, including ties. Only a fully timed,
+ * ungrouped, unpinned route with a chronological backbone qualifies. A repair
+ * must turn an infeasible baseline into a feasible route; no distance saving
+ * is needed to correct that defect. The caller owns gates and fenced writes. */
+function computeChronologicalRepair(RouteOptimizer, stops) {
+  if (stops.some(stop => {
+    const duration = workDuration(stop, 0);
+    return stop.visit_id || stop.auto_dispatch_locked || stop.auto_dispatch_excluded
+      || !Number.isFinite(effectiveWindowRange(stop)?.startMin)
+      || !Number.isFinite(Number(stop.lat)) || !Number.isFinite(Number(stop.lng))
+      || !Number(stop.lat) || !Number(stop.lng) || !Number.isFinite(duration) || duration <= 0;
+  })) return null;
+  const ordered = currentOrder(stops);
+  const backbone = ordered.filter(stop => stop.route_order != null);
+  const additions = ordered.filter(stop => stop.route_order == null);
+  if (!backbone.length || !additions.length) return null;
+  if (backbone.some((stop, i) => i > 0 && effectiveWindowRange(stop).startMin < effectiveWindowRange(backbone[i - 1]).startMin)) return null;
+  if (simulateArrivalRoute(RouteOptimizer, effectiveWindowRange, ordered)) return null;
+  const candidate = [...backbone];
+  for (const stop of additions) {
+    const index = candidate.findIndex(other => effectiveWindowRange(other).startMin > effectiveWindowRange(stop).startMin);
+    candidate.splice(index === -1 ? candidate.length : index, 0, stop);
+  }
+  const simulation = simulateArrivalRoute(RouteOptimizer, effectiveWindowRange, candidate);
+  return simulation ? { orderedStops: candidate, simulation } : null;
 }
 
 /** Simulate the complete route under the promised ARRIVAL windows. Work may
@@ -163,20 +202,35 @@ function advanceSim(RouteOptimizer, effectiveWindowRange, state, stop, reportLat
  * null means at least one promise (or the requested day end) cannot be kept. */
 function simulateArrivalRoute(RouteOptimizer, rangeForStop, seq, {
   startMin = 8 * 60, origin = RouteOptimizer.HQ, dayEndMin = Infinity, reportLate = false,
+  includeReturnInFinish = false, legMinutes, bufferMinutes = 0, blockedIntervals = [],
 } = {}) {
+  if (blockedIntervals.some(block => !Number.isFinite(block.startMin) || !Number.isFinite(block.endMin) || block.endMin <= block.startMin)) return null;
+  blockedIntervals = [...blockedIntervals].sort((a, b) => a.startMin - b.startMin);
   let state = { clock: startMin, prev: origin, travelMin: 0, waitingMin: 0 };
   const arrivals = [];
   for (const stop of seq) {
-    state = advanceSim(RouteOptimizer, rangeForStop, state, stop, reportLate);
+    state = advanceSim(RouteOptimizer, rangeForStop, state, stop, { legMinutes, bufferMinutes, blockedIntervals, reportLate });
     if (!state || state.clock > dayEndMin) return null;
     arrivals.push({ id: stop.id, arrivalMin: state.arrivalMin, departureMin: state.clock,
       ...(reportLate ? { lateMinutes: Math.max(0, state.arrivalMin - (rangeForStop(stop)?.endMin ?? Infinity)) } : {}),
     });
   }
-  const returnMin = RouteOptimizer.fallbackLegMetrics(
-    RouteOptimizer.haversine(state.prev.lat, state.prev.lng, RouteOptimizer.HQ.lat, RouteOptimizer.HQ.lng),
-  ).minutes || 0;
-  return { arrivals, travelMin: state.travelMin + returnMin, waitingMin: state.waitingMin, finishMin: state.clock, returnAtMin: state.clock + returnMin };
+  let returnDeparture = state.clock;
+  let returnMin;
+  for (let attempt = 0; attempt <= blockedIntervals.length; attempt++) {
+    returnMin = legMinutes ? legMinutes(state.prev, RouteOptimizer.HQ, returnDeparture) : RouteOptimizer.fallbackLegMetrics(
+      RouteOptimizer.haversine(state.prev.lat, state.prev.lng, RouteOptimizer.HQ.lat, RouteOptimizer.HQ.lng),
+    ).minutes || 0;
+    if (!Number.isFinite(returnMin) || returnMin < 0) return null;
+    const blocked = blockedIntervals.find(block => returnDeparture < block.endMin && returnDeparture + returnMin > block.startMin);
+    if (!blocked) break;
+    returnDeparture = blocked.endMin;
+  }
+  const returnFinishMin = returnDeparture + returnMin;
+  if (includeReturnInFinish && returnFinishMin > dayEndMin) return null;
+  return { arrivals, travelMin: state.travelMin + returnMin, waitingMin: state.waitingMin + returnDeparture - state.clock,
+    finishMin: includeReturnInFinish ? returnFinishMin : state.clock,
+    serviceFinishMin: state.clock, returnFinishMin, returnAtMin: returnFinishMin };
 }
 
 /** Exhaustive backbone-preserving interleaving search with prefix pruning.
@@ -351,6 +405,7 @@ module.exports = {
   effectiveWindowRange,
   currentOrder,
   simulateArrivalRoute,
+  computeChronologicalRepair,
   workDuration,
   _internals: { sequenceCount, exhaustiveSearch, greedyInsertion, EXHAUSTIVE_SEQUENCE_CAP },
 };
