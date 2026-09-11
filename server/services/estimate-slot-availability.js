@@ -37,7 +37,7 @@ const {
   violatesTravelGap, travelGapEnabled, travelBufferMinutes, customerFacingBufferMinutes,
 } = require('./scheduling/travel-gap');
 const { addETDays, etDateString, etParts, parseETDateTime } = require('../utils/datetime-et');
-const { signSlotOffer, appendOfferToSlotId } = require('../utils/slot-offer-token');
+const { signSlotOffer, appendOfferToSlotId, CAPACITY_OFFER_POLICY } = require('../utils/slot-offer-token');
 const { resolveEstimateZone, zoneSlugOf } = require('./slot-zone');
 const { getZoneFunnelDays, applyZoneDayFunnel, fallbackCenterZoneName } = require('./scheduling/zone-day-funnel');
 const { isEnabled } = require('../config/feature-gates');
@@ -1570,6 +1570,7 @@ function signCustomerFacingSlots(slots, estimateId) {
       startMinutes: timeToMinutes(slot.windowStart),
       technicianId: slot.techId || null,
       durationMinutes: slot.durationMinutes,
+      policy: capacityEnabled() ? CAPACITY_OFFER_POLICY : undefined,
     });
     const publicSlot = { ...slot, slotId: appendOfferToSlotId(slot.slotId, offer) };
     delete publicSlot.routeMode;

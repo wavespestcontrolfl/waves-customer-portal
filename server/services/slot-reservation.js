@@ -35,7 +35,7 @@ const logger = require('./logger');
 const { applyAssignable, assertAssignableTechnician, NOT_ASSIGNABLE } = require('./technician-eligibility');
 const estimateSlotAvailability = require('./estimate-slot-availability');
 const { addETDays, etParts, etDateString } = require('../utils/datetime-et');
-const { splitSignedSlotId, verifySlotOffer, isRealCalendarDate } = require('../utils/slot-offer-token');
+const { splitSignedSlotId, verifySlotOffer, isRealCalendarDate, CAPACITY_OFFER_POLICY } = require('../utils/slot-offer-token');
 const { resolveEstimateZone, zoneSlugOf } = require('./slot-zone');
 // Rung 1 of the global scheduling lock order — see the ORDERING CONTRACT in
 // scheduling/occupancy.js for why both write paths here take it first, and
@@ -706,25 +706,25 @@ async function reserveSlot({
     logger.warn(`[slot-reservation] hold coords resolve skipped for estimate ${estimateId}: ${geoErr.message}`);
   }
 
-  let preparedCapacity = null;
-  if (useCapacity) {
-    const estimateForCapacity = await db('estimates').where({ id: estimateId }).first();
-    if (!estimateForCapacity || !holdCoords) throw capacityError('missing_coordinates');
-    const profile = await estimateSlotAvailability.resolveCatalogSlotProfile(estimateForCapacity, {
-      serviceMode, selectedFrequency, serviceCadences, durationMinutes,
-    });
-    // Authenticate the offered tuple before spending the shared traffic budget.
-    // The transaction repeats this check against the locked estimate profile.
-    if (!verifySlotOffer({ surface: 'estimate', scopeId: String(estimateId), date,
-      startMinutes: slotStartMinutes, technicianId: techId, durationMinutes: profile.durationMinutes,
-      exp: offerExp }, offerSig)) throw capacityError('invalid_offer');
-    preparedCapacity = await prepareArrivalCapacity({ date, technicianId: techId, excludeEstimateId: estimateId,
-      prospective: { ...holdCoords, estimated_duration_minutes: profile.durationMinutes,
-        service_type: profile.services.map(service => service.service).join(' ') },
-      windowStart, windowEnd: addMinutesToTime(windowStart, profile.durationMinutes), durationMinutes: profile.durationMinutes });
-  }
-
   try {
+    let preparedCapacity = null;
+    if (useCapacity) {
+      const estimateForCapacity = await db('estimates').where({ id: estimateId }).first();
+      if (!estimateForCapacity || !holdCoords) throw capacityError('missing_coordinates');
+      const profile = await estimateSlotAvailability.resolveCatalogSlotProfile(estimateForCapacity, {
+        serviceMode, selectedFrequency, serviceCadences, durationMinutes,
+      });
+      // Authenticate the offered tuple before spending the shared traffic budget.
+      // The transaction repeats this check against the locked estimate profile.
+      if (!verifySlotOffer({ surface: 'estimate', scopeId: String(estimateId), date,
+        startMinutes: slotStartMinutes, technicianId: techId, durationMinutes: profile.durationMinutes,
+        exp: offerExp, policy: CAPACITY_OFFER_POLICY }, offerSig)) throw capacityError('invalid_offer');
+      preparedCapacity = await prepareArrivalCapacity({ date, technicianId: techId, excludeEstimateId: estimateId,
+        prospective: { ...holdCoords, estimated_duration_minutes: profile.durationMinutes,
+          service_type: profile.services.map(service => service.service).join(' ') },
+        windowStart, windowEnd: addMinutesToTime(windowStart, profile.durationMinutes), durationMinutes: profile.durationMinutes });
+    }
+
     const reserved = await db.transaction(async (trx) => {
       // RUNG 1 — date-wide occupancy lock, FIRST, before ANY row lock this
       // txn takes (ORDERING CONTRACT, scheduling/occupancy.js — the
@@ -902,6 +902,7 @@ async function reserveSlot({
         technicianId: techId,
         durationMinutes: effectiveDurationMinutes,
         exp: offerExp,
+        policy: useCapacity ? CAPACITY_OFFER_POLICY : undefined,
       }, offerSig)) {
         const err = new Error('slot was not offered for this estimate');
         err.code = 'SLOT_UNAVAILABLE';
