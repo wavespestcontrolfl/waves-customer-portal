@@ -563,10 +563,15 @@ async function recordTrackingNotice(trx, { visitId, technicianId, stage, dedupeK
       .returning('id');
     row = revived;
   }
-  const headline = stage === 2 ? 'A visit needs an arrival check' : 'A visit window is underway';
-  // Named on the push too (codex P1) — a tech with more than one open stop
-  // can't tell which visit a bare headline is about until they open the app.
-  const pushTitle = payload?.customer_name ? `${headline} — ${payload.customer_name}` : headline;
+  // GENERIC on the push, like every PUSH_TITLE_BY_KIND line above: a push
+  // lands on a lock screen, and this module's owner ruling (see the header)
+  // keeps identifying detail out of it — the tech opens the app for the who
+  // and when. The customer name and promised window ride on the durable card
+  // instead (payload.customer_name / payload.when, rendered by the feed), so
+  // a tech with more than one open stop still knows which visit this is as
+  // soon as they are authenticated (codex P1 round 5, correcting the round-1
+  // fix that put the name in the push title).
+  const pushTitle = stage === 2 ? 'A visit needs an arrival check' : 'A visit window is underway';
   return row ? { technicianId, visitId, pushTitle } : null;
 }
 

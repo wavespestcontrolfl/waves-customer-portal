@@ -581,6 +581,21 @@ describe('recordTrackingNotice (dedupe_key revival for an auto-superseded row)',
   // ORIGINAL created_at — a stage-2 tracking card re-alerted days after its
   // first occurrence would still sort/classify as stale, not the fresh
   // occurrence it actually is.
+  // The module's owner ruling (header, 2026-09-05) keeps push copy generic —
+  // a push lands on a lock screen, and the who/when wait inside the
+  // authenticated app. Round 1 put the customer's name in the tracking
+  // push title; round 5 took it back out and left it on the durable card.
+  test('the push title stays generic — the customer name rides the card, not the lock screen', async () => {
+    const mocks = fakeTrx({ insertRows: [{ id: 'row-1' }] });
+    const stage2 = await recordTrackingNotice(mocks.trx, args);
+    expect(stage2.pushTitle).toBe('A visit needs an arrival check');
+    expect(stage2.pushTitle).not.toMatch(/Test Customer/);
+    const stage1 = await recordTrackingNotice(fakeTrx({ insertRows: [{ id: 'row-2' }] }).trx, { ...args, stage: 1 });
+    expect(stage1.pushTitle).toBe('A visit window is underway');
+    // The identifying detail is still written to the row the tech feed renders.
+    expect(mocks.insert.mock.calls[0][0].payload).toEqual(args.payload);
+  });
+
   test('a revive refreshes created_at, not just updated_at — the row reads as a fresh occurrence', async () => {
     const mocks = fakeTrx({ insertRows: [], reviveRows: [{ id: 'row-1' }] });
     await recordTrackingNotice(mocks.trx, args);

@@ -1346,6 +1346,18 @@ const gates = {
   // READ-ONLY replay CLI (ops/agents/replay-no-show-detector.js) still runs
   // regardless of this gate. Staff alerts only — no customer comms.
   noShowDetector: gateEnvValue('GATE_NOSHOW_DETECTOR'),
+  // Promise EVIDENCE capture for the detector above, deliberately a separate
+  // switch: an agent-committed booking or applied reschedule is the only
+  // promise class that leaves no customer-facing text/email of its own, so
+  // if capture were coupled to the alert gate, every such call handled while
+  // the detector was dark would activate with its PRE-MOVE reminder standing
+  // as the latest promise — and the detector would then alert against a
+  // window the customer was already told had changed (codex P1 round 5).
+  // Turn this on first, let evidence accumulate, then turn the detector on.
+  // Writes one visit_window_promised audit row and nothing else; raises no
+  // alert, sends nothing to a customer. GATE_NOSHOW_DETECTOR implies it, so
+  // an already-activated environment needs no second variable.
+  noShowPromiseCapture: gateEnvValue('GATE_NOSHOW_PROMISE_CAPTURE') || gateEnvValue('GATE_NOSHOW_DETECTOR'),
   // Unrecorded-call alert: the "Twilio has no recording either" step of the
   // existing 5-min missing-recording sweep (call-recording-processor
   // .recoverMissingRecentRecordings). Rings an admin bell for any answered

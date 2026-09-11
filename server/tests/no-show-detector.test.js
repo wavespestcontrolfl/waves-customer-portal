@@ -1,6 +1,7 @@
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../services/dispatch-alerts', () => ({ resolveAlert: jest.fn().mockResolvedValue({ id: 'resolved' }) }));
+jest.mock('../services/audit-log', () => ({ recordAuditEvent: jest.fn().mockResolvedValue({ id: 'audit' }) }));
 const { evaluateNoShow, latestPromises, trackingKey, resolveLegacyCollision, alreadyHasOpenAlert, callerIdentityMatches, loadPromiseEvents, noticeStillCurrent } = require('../services/no-show-detector');
 const { resolveAlert } = require('../services/dispatch-alerts');
 const { replay } = require('../../ops/agents/replay-no-show-detector');
@@ -525,6 +526,94 @@ describe('loadPromiseEvents: an UNLINKED sms_log row is neutral, a sentinel sid 
     expect(pattern.test('template-disabled')).toBe(false);
     expect(pattern.test('internal-redirect')).toBe(false);
     expect(pattern.test('push:delivered')).toBe(false);
+  });
+});
+
+describe('callCommitmentInstant (when the customer heard the promise) (round-5 P2)', () => {
+  const { callCommitmentInstant } = require('../services/no-show-detector');
+  // Dated at the call's START, a promise the agent made 20 minutes into a
+  // long reschedule call looked OLDER to latestPromises than an automated
+  // reminder that went out mid-call — and the applied-reschedule path sends
+  // no confirmation of its own, so the stale window kept being enforced.
+  test('uses the call end (created_at + duration), which outranks a reminder sent during the call', () => {
+    const call = { created_at: '2026-09-10T10:00:00-04:00', duration_seconds: 1500 };
+    expect(callCommitmentInstant(call).toISOString()).toBe('2026-09-10T14:25:00.000Z');
+    const midCallReminder = { visit_id: 'visit', start_at: '2026-09-11T09:00:00-04:00', communicated_at: '2026-09-10T10:10:00-04:00', source: 'message' };
+    const callPromise = { visit_id: 'visit', start_at: '2026-09-12T13:00:00-04:00', communicated_at: callCommitmentInstant(call).toISOString(), source: 'call' };
+    const latest = latestPromises([midCallReminder, callPromise], new Date('2026-09-10T12:00:00-04:00')).get('visit');
+    expect(latest.source).toBe('call');
+  });
+  test('a recording duration wins over the reported one, and no usable duration falls back to the call start', () => {
+    expect(callCommitmentInstant({ created_at: '2026-09-10T10:00:00Z', recording_duration_seconds: 60, duration_seconds: 5 }).toISOString())
+      .toBe('2026-09-10T10:01:00.000Z');
+    expect(callCommitmentInstant({ created_at: '2026-09-10T10:00:00Z' }).toISOString()).toBe('2026-09-10T10:00:00.000Z');
+    expect(callCommitmentInstant({ created_at: '2026-09-10T10:00:00Z', duration_seconds: -5 }).toISOString()).toBe('2026-09-10T10:00:00.000Z');
+  });
+});
+
+describe('recordSeriesSupersession (one series text supersedes every moved occurrence) (round-5 P1)', () => {
+  const { recordSeriesSupersession } = require('../services/no-show-detector');
+  const { recordAuditEvent } = require('../services/audit-log');
+
+  function fakeConn({ priorIds = [] } = {}) {
+    const seen = [];
+    const conn = (table) => {
+      expect(table).toBe('audit_log');
+      const chain = {};
+      let resource = null;
+      chain.where = (args) => { resource = args.resource_id; seen.push(args); return chain; };
+      chain.whereRaw = () => chain;
+      chain.first = async () => (priorIds.includes(resource) ? { id: 'prior' } : undefined);
+      return chain;
+    };
+    return { conn, seen };
+  }
+
+  beforeEach(() => { recordAuditEvent.mockClear(); process.env.GATE_NOSHOW_DETECTOR = 'true'; });
+  afterEach(() => { delete process.env.GATE_NOSHOW_DETECTOR; });
+
+  test('writes an UNKNOWN-window promise for every moved sibling, skipping the anchor the text actually names', async () => {
+    const { conn } = fakeConn();
+    const written = await recordSeriesSupersession(conn, { visitIds: ['anchor', 'sib-1', 'sib-2'], excludeVisitId: 'anchor',
+      seriesMoveId: 'move-1', communicatedAt: new Date('2026-09-11T18:00:00Z') });
+    expect(written).toBe(2);
+    const resources = recordAuditEvent.mock.calls.map(([event]) => event.resource_id);
+    expect(resources).toEqual(['sib-1', 'sib-2']);
+    for (const [event] of recordAuditEvent.mock.calls) {
+      expect(event.action).toBe('visit_window_promised');
+      // Unknown, not a window: the text quoted only the anchor's new slot.
+      // latestPromises keeps this as the latest promise and promisedStartAt
+      // reads it as unusable, so the stale pre-move reminder stops driving
+      // alerts without asserting a window we were never told.
+      expect(event.metadata.start_at).toBeNull();
+      expect(event.metadata.communicated_at).toBe('2026-09-11T18:00:00.000Z');
+      expect(event.metadata.series_move_id).toBe('move-1');
+    }
+  });
+
+  test('a retried notification pass writes nothing new (dedupe per visit + series move)', async () => {
+    const { conn } = fakeConn({ priorIds: ['sib-1', 'sib-2'] });
+    const written = await recordSeriesSupersession(conn, { visitIds: ['sib-1', 'sib-2'], seriesMoveId: 'move-1' });
+    expect(written).toBe(0);
+    expect(recordAuditEvent).not.toHaveBeenCalled();
+  });
+
+  test('capture off entirely -> no evidence rows', async () => {
+    delete process.env.GATE_NOSHOW_DETECTOR;
+    const { conn } = fakeConn();
+    expect(await recordSeriesSupersession(conn, { visitIds: ['sib-1'], seriesMoveId: 'move-1' })).toBe(0);
+    expect(recordAuditEvent).not.toHaveBeenCalled();
+  });
+
+  test('the capture gate alone is enough — evidence accrues while alerting stays dark (round-5 P1)', async () => {
+    delete process.env.GATE_NOSHOW_DETECTOR;
+    process.env.GATE_NOSHOW_PROMISE_CAPTURE = 'true';
+    const { captureEnabled, enabled } = require('../services/no-show-detector');
+    expect(enabled()).toBe(false);
+    expect(captureEnabled()).toBe(true);
+    const { conn } = fakeConn();
+    expect(await recordSeriesSupersession(conn, { visitIds: ['sib-1'], seriesMoveId: 'move-1' })).toBe(1);
+    delete process.env.GATE_NOSHOW_PROMISE_CAPTURE;
   });
 });
 

@@ -4402,6 +4402,22 @@ async function applySeriesMoveEffects({ result, serviceId, newDate, newWindow, n
     // close that fails must leave notified_at NULL for the reconciler to
     // redo the close — and only the close: a row with customer_notified
     // already true never sends again (hook r16 P1).
+    // The one series text supersedes the promise on EVERY occurrence it
+    // moved, not just the anchor it names (codex P1 round 5) — siblings get
+    // an unknown-window promise row so the no-show detector stops enforcing
+    // their pre-move reminders. Non-blocking, like every other bookkeeping
+    // effect here: a failure must never fail a move the customer was already
+    // told about, and a retry pass re-runs it (the write dedupes per move).
+    const recordSeriesPromiseSupersession = async () => {
+      try {
+        await require('../services/no-show-detector').recordSeriesSupersession(db, {
+          visitIds: ownedOccurrences().map((occurrence) => occurrence.id),
+          communicatedAt: new Date(), seriesMoveId, excludeVisitId: serviceId,
+        });
+      } catch (err) {
+        logger.warn(`[dispatch] series promise supersession failed for ${seriesMoveId || serviceId}: ${err.message}`);
+      }
+    };
     const recordCustomerNotified = async () => {
       if (!seriesMoveId) return;
       try {
@@ -4568,6 +4584,7 @@ async function applySeriesMoveEffects({ result, serviceId, newDate, newWindow, n
             // pass that dies or fails between the two is redone as a
             // close-only pass, never as a second text.
             await recordCustomerNotified();
+            await recordSeriesPromiseSupersession();
             await closeSeriesReminders();
           }
         } catch (err) {
@@ -4580,6 +4597,7 @@ async function applySeriesMoveEffects({ result, serviceId, newDate, newWindow, n
             notificationSent = true;
             notificationError = null;
             await recordCustomerNotified();
+            await recordSeriesPromiseSupersession();
             await closeSeriesReminders();
           }
         }

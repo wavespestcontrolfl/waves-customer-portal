@@ -282,8 +282,35 @@ function agreedWindowStart({ call, visit, customer }) {
   return callSpeaksForVisit({ call, visit, customer }) ? agentCommittedStart(call) : null;
 }
 
+// Gated on CAPTURE, not on alerting (codex P1 round 5). A trusted call
+// commitment is the one promise class with no customer-facing text or email
+// of its own — the applied-reschedule path deliberately sends nothing — so a
+// call handled while the detector was dark leaves the PRE-MOVE reminder as
+// the latest promise forever. Activate the detector afterwards and it alerts
+// against a window the customer was already told had changed. Capture runs
+// ahead of activation instead: it writes one visit_window_promised audit row,
+// raises nothing, and sends nothing. GATE_NOSHOW_DETECTOR implies it.
+const captureEnabled = () => gateEnvValue('GATE_NOSHOW_PROMISE_CAPTURE') || enabled();
+
+// When the customer heard the commitment. The transcript carries no
+// per-utterance timestamps (call-triage-flags.js grounds against bare
+// "Agent:"/"Caller:" turns), so the call's END — created_at plus its own
+// recorded duration — is the closest defensible instant, and the only one
+// that orders correctly against an automated reminder sent DURING a long
+// call: dated at the call's START, the promise the agent made minutes later
+// looked OLDER than that reminder to latestPromises, and since the applied-
+// reschedule path sends no confirmation of its own, the detector went on
+// enforcing the stale window (codex P2 round 5). The end never precedes the
+// commitment, and a call with no usable duration falls back to created_at.
+function callCommitmentInstant(call) {
+  const started = instant(call?.created_at);
+  const seconds = Number(call?.recording_duration_seconds || call?.duration_seconds || 0);
+  if (!Number.isFinite(started)) return new Date();
+  return new Date(Number.isFinite(seconds) && seconds > 0 ? started + seconds * 1000 : started);
+}
+
 async function recordAgreedWindow(conn, { callId, visitId } = {}) {
-  if (!enabled() || !callId || !visitId) return false;
+  if (!captureEnabled() || !callId || !visitId) return false;
   return conn.transaction(async (trx) => {
     await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?))', ['promised-call-window', `${callId}:${visitId}`]);
     const call = await trx('call_log').where({ id: callId, v2_extraction_status: 'valid' }).first();
@@ -295,9 +322,40 @@ async function recordAgreedWindow(conn, { callId, visitId } = {}) {
       .whereRaw("metadata->>'call_log_id' = ?", [callId]).first('id');
     if (prior) return false;
     await recordAuditEvent({ actor_type: 'system', action: 'visit_window_promised', resource_type: 'scheduled_service', resource_id: visitId,
-      metadata: { call_log_id: callId, start_at: new Date(target).toISOString(), communicated_at: new Date(call.created_at).toISOString() }, critical: true, trx });
+      metadata: { call_log_id: callId, start_at: new Date(target).toISOString(), communicated_at: callCommitmentInstant(call).toISOString() }, critical: true, trx });
     return true;
   });
+}
+
+// A series move notifies the customer with ONE text, and that text names
+// only the anchor occurrence's new date — so the anchor gets ordinary
+// message evidence (rendered_slot_ms), while every SIBLING the operation
+// moved is left with whatever reminder it had for its OLD slot standing as
+// its latest promise. Activated, the detector would then raise missing-
+// tracking alerts against windows the customer was already told had changed
+// (codex P1 round 5). Each moved sibling therefore gets an UNKNOWN-window
+// promise row stamped at the send time: unknown is the honest record (the
+// text did not quote that sibling's new slot), it outranks the stale
+// reminder, and latestPromises + promisedStartAt read it as "no usable
+// window" — no alert until that sibling's own new reminder communicates one.
+// Dedupe is per (visit, series move), so a retried notification pass writes
+// nothing new. Returns the number of rows written.
+async function recordSeriesSupersession(conn, { visitIds = [], communicatedAt = new Date(), seriesMoveId = null, excludeVisitId = null } = {}) {
+  if (!captureEnabled()) return 0;
+  const at = new Date(communicatedAt);
+  if (!Number.isFinite(at.getTime())) return 0;
+  const skip = excludeVisitId == null ? null : String(excludeVisitId);
+  const marker = seriesMoveId ? String(seriesMoveId) : `at:${at.toISOString()}`;
+  let written = 0;
+  for (const id of new Set(visitIds.map((visitId) => String(visitId)).filter((visitId) => visitId && visitId !== skip))) {
+    const prior = await conn('audit_log').where({ action: 'visit_window_promised', resource_id: id })
+      .whereRaw("metadata->>'series_supersession' = ?", [marker]).first('id');
+    if (prior) continue;
+    await recordAuditEvent({ actor_type: 'system', action: 'visit_window_promised', resource_type: 'scheduled_service', resource_id: id,
+      metadata: { series_move_id: seriesMoveId, series_supersession: marker, start_at: null, communicated_at: at.toISOString() }, critical: true });
+    written += 1;
+  }
+  return written;
 }
 
 async function listNoShows(conn, { now = new Date(), limit = 100, offset = 0, actorId = null, admin = true } = {}) {
@@ -555,4 +613,4 @@ async function sweep(conn, { now = new Date() } = {}) {
   return { alerted, active: rows.length };
 }
 
-module.exports = { enabled, evaluateNoShow, promisedStartAt, trackingStage, agreedWindowStart, LIVE_STATUSES, latestPromises, loadPromiseEvents, recordAgreedWindow, listNoShows, sweep, trackingKey, resolveLegacyCollision, alreadyHasOpenAlert, callerIdentityMatches, noticeStillCurrent };
+module.exports = { enabled, captureEnabled, evaluateNoShow, promisedStartAt, trackingStage, agreedWindowStart, callCommitmentInstant, LIVE_STATUSES, latestPromises, loadPromiseEvents, recordAgreedWindow, recordSeriesSupersession, listNoShows, sweep, trackingKey, resolveLegacyCollision, alreadyHasOpenAlert, callerIdentityMatches, noticeStillCurrent };

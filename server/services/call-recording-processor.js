@@ -6436,7 +6436,7 @@ async function applyRescheduleFollowUps({ call, callSid, result }) {
   // trusted-speaker gate that other path already requires — result.newDate/
   // newWindow (the plan this step just applied) exist for logging/future use
   // but are never a second source of truth.
-  if (result.visitId && isEnabled('noShowDetector')) {
+  if (result.visitId && isEnabled('noShowPromiseCapture')) {
     await require('./no-show-detector').recordAgreedWindow(db, { callId: call.id, visitId: result.visitId })
       .catch((err) => logger.warn(`[call-proc] reschedule-apply promise-window capture failed for ${maskSid(callSid)}: ${err.message}`));
   }
@@ -16445,7 +16445,7 @@ const CallRecordingProcessor = {
       // No customer comms. Generation-fenced, never blocking.
       await applyCallRescheduleStep({ call, callSid, customerId, extracted, v2Result, appointmentResult, procGeneration });
 
-      if (appointmentResult?.scheduledServiceId && isEnabled('noShowDetector')) {
+      if (appointmentResult?.scheduledServiceId && isEnabled('noShowPromiseCapture')) {
         try {
           await require('./no-show-detector').recordAgreedWindow(db, { callId: call.id, visitId: appointmentResult.scheduledServiceId });
         } catch (err) {

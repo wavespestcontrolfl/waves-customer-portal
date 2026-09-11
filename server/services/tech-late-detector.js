@@ -102,14 +102,18 @@ async function runInner() {
   // under the new gate; there is no competing overdue scan while enabled.
   const tracking = require('./no-show-detector');
   if (tracking.enabled()) {
-    const { runExclusive, recordJobStart, recordJobEnd } = require('../utils/cron-lock');
+    const { runExclusive } = require('../utils/cron-lock');
     const result = await runExclusive('no-show-detector', () => tracking.sweep(db));
+    // Surface the failed tick, but do NOT record it: every path that returns
+    // no_connection (no lock slot, a lease taken past the tick deadline, a
+    // deadline crossed before the body) has already written that failed
+    // occurrence itself through cron-lock's own recordMissedTick/
+    // recordJobEnd. Recording it a second time here overwrote the original
+    // timing and error and counted ONE skipped tick as TWO consecutive
+    // failures in job health (codex P2 round 5). lease_held is another
+    // instance holding the job — normal, not a failure.
     if (result?.skipped && result.reason !== 'lease_held') {
-      const error = new Error(`tracking tick skipped: ${result.reason || 'no_connection'}`);
-      const started = Date.now();
-      await recordJobStart('no-show-detector').catch(() => {});
-      await recordJobEnd('no-show-detector', started, error).catch(() => {});
-      throw error;
+      throw new Error(`tracking tick skipped: ${result.reason || 'no_connection'}`);
     }
     return result;
   }

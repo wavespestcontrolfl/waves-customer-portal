@@ -110,12 +110,20 @@ describe('tech-late detector tuning', () => {
     expect(db.raw).not.toHaveBeenCalled();
     expect(await require('../services/unassigned-overdue-detector').runUnassignedOverdueCheck()).toMatchObject({ skipped: true });
     expect(db.raw).not.toHaveBeenCalled();
+    // A skipped tick surfaces as a throw, but health recording belongs to
+    // cron-lock: every no_connection path (no lock slot, a lease taken past
+    // the deadline, a deadline crossed before the body) already wrote that
+    // failed occurrence itself, so recording it again here overwrote the
+    // original timing/error and counted ONE skipped tick as TWO consecutive
+    // failures (codex P2 round 5).
     locks.runExclusive.mockResolvedValueOnce({ skipped: true, reason: 'no_connection' });
     await expect(detector.runTechLateCheck()).rejects.toThrow('no_connection');
-    expect(locks.recordJobEnd).toHaveBeenCalledWith('no-show-detector', expect.any(Number), expect.any(Error));
+    expect(locks.recordJobStart).not.toHaveBeenCalled();
+    expect(locks.recordJobEnd).not.toHaveBeenCalled();
+    // Another instance holding the lease is normal, not a failed tick.
     locks.runExclusive.mockResolvedValueOnce({ skipped: true, reason: 'lease_held' });
     await detector.runTechLateCheck();
-    expect(locks.recordJobEnd).toHaveBeenCalledTimes(1);
+    expect(locks.recordJobEnd).not.toHaveBeenCalled();
   });
 
 });
