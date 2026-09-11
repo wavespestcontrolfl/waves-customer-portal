@@ -108,6 +108,7 @@ async function getScheduleQualityMeasurements(input = {}, conn = require('../../
     const date = etDateString(addETDays(parseETDateTime(`${from}T12:00`), index));
     const stops = await dayStopsQuery(conn, { dateStr: date, excludeStatuses: QUALITY_EXCLUDED_STATUSES,
       select: ['scheduled_services.id', 'scheduled_services.technician_id', 'scheduled_services.route_order',
+        'scheduled_services.customer_id',
         'scheduled_services.window_start', 'scheduled_services.window_end', 'scheduled_services.time_window',
         'scheduled_services.status', 'scheduled_services.reservation_expires_at',
         'scheduled_services.created_at', 'scheduled_services.visit_id', 'scheduled_services.estimated_duration_minutes',

@@ -44,7 +44,7 @@ const { etDateString, addETDays, parseETDateTime, validCalendarDate } = require(
 const { dayStopsQuery, guardedCoordSelects } = require('./scheduling/day-stops');
 const { toDateStr } = require('./auto-dispatch/dates');
 const { loadReminderFreeze, FREEZE_HOURS, TIER2_MIN_DAYS_OUT } = require('./auto-dispatch/route-tiers');
-const { computeWindowFitOrder, effectiveWindowRange, currentOrder, computeChronologicalRepair, workDuration } = require('./route-reorder-window-fit');
+const { computeWindowFitOrder, effectiveWindowRange, currentOrder, computeChronologicalRepair, workDuration, isCoVisitPair } = require('./route-reorder-window-fit');
 
 const GOOGLE_WAYPOINT_CAP = 25;
 // The reorder pass models future days, where en_route/on_site can't occur;
@@ -143,6 +143,8 @@ function violatesWindowFeasibility(RouteOptimizer, orderedStops, sourceStops, le
     && legs.slice(0, geocodedCount).every((l) => Number.isFinite(l?.durationMinutes));
   let clock = 8 * 60; // minute-of-day, ET day open
   let prev = RouteOptimizer.HQ;
+  let prevStop = null; // for the co-visit check below (route-reorder-window-fit.js)
+  let prevArrivalMin = null;
   let geoIdx = 0;
   for (const stop of orderedStops) {
     const s = byId.get(stop.id) || stop;
@@ -150,20 +152,39 @@ function violatesWindowFeasibility(RouteOptimizer, orderedStops, sourceStops, le
     const lng = parseFloat(s.lng);
     let travelMin = 0;
     if (lat && lng) {
+      // Still consumed even for a co-visit continuation below: legs[] is
+      // Google's ACTUAL per-waypoint sequence (it drove the co-visit's
+      // second waypoint too, typically a ~0 leg since the coords match) —
+      // skipping the index here would misalign every leg after it.
       travelMin = useLegs
         ? legs[geoIdx].durationMinutes
         : (RouteOptimizer.fallbackLegMetrics(RouteOptimizer.haversine(prev.lat, prev.lng, lat, lng)).minutes || 0);
       geoIdx += 1;
       prev = { lat, lng };
     }
-    let startMin = clock + travelMin;
-    const range = effectiveWindowRange(s);
-    if (range) {
-      if (startMin > range.endMin) return true; // provably misses the promise
-      startMin = Math.max(startMin, range.startMin); // waiting for open is fine
+    // PHANTOM-HOUR FIX (Sat 2026-09-12, two same-slot pest+lawn pairs):
+    // one customer's two same-slot service rows were each charged a full
+    // workDuration and summed, simulating 2h on site for a 1h promise —
+    // mirrors advanceSim's co-visit branch in route-reorder-window-fit.js.
+    // No new leg is consumed for TIMING (travelMin above is computed only
+    // to keep geoIdx aligned); arrival stays pinned to the sibling's
+    // already-proven arrival, and the clock takes the LONGER duration.
+    const coVisit = prevStop && isCoVisitPair(effectiveWindowRange, prevStop, s);
+    let startMin;
+    if (coVisit) {
+      startMin = prevArrivalMin;
+    } else {
+      startMin = clock + travelMin;
+      const range = effectiveWindowRange(s);
+      if (range) {
+        if (startMin > range.endMin) return true; // provably misses the promise
+        startMin = Math.max(startMin, range.startMin); // waiting for open is fine
+      }
     }
     const dur = workDuration(s);
-    clock = startMin + dur;
+    clock = coVisit ? Math.max(clock, startMin + dur) : startMin + dur;
+    prevStop = s;
+    prevArrivalMin = startMin;
   }
   return false;
 }
@@ -261,6 +282,7 @@ async function runRouteReorder(opts = {}, conn = db) {
           excludeStatuses: EXCLUDE_STATUSES,
           select: [
             'scheduled_services.id', 'scheduled_services.technician_id',
+            'scheduled_services.customer_id',
             'scheduled_services.route_order', 'scheduled_services.window_start',
             'scheduled_services.window_end', 'scheduled_services.visit_id',
             'scheduled_services.time_window',

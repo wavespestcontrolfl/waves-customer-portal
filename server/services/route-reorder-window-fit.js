@@ -131,15 +131,89 @@ function workDuration(stop, fallback = 60) {
 }
 
 /**
+ * PHANTOM-HOUR FIX (prod, Sat 2026-09-12): two customers each had TWO
+ * scheduled_services rows (pest + lawn) promised the
+ * SAME arrival window at the SAME property — one physical stop, `visit_id`
+ * NULL (GATE_VISIT_GROUPS is dark in prod, so these rows never went through
+ * visit-groups.js's proper grouping — see the veto note on
+ * computeChronologicalRepair below). Simulated as two independent stops each
+ * charged their own workDuration, the pair cost 2 hours of on-site time for
+ * a 1-hour promise — enough by itself to make the day simulate infeasible
+ * (computeChronologicalRepair returned null, NO_SAFE_INSERTION) and to make
+ * violatesWindowFeasibility reject a legal Google order for the same
+ * phantom hour.
+ *
+ * True when `stop` is a continuation of the SAME physical stop as
+ * `prevStop`: identical customer, identical promised arrival window
+ * (effectiveWindowRange), and BOTH rows geocoded to identical coordinates.
+ * A coordless side never matches: a multi-property customer (commercial
+ * chain, rental owner) with one ungeocoded row in the same auto-templated
+ * slot is two addresses, and merging them would under-count real work —
+ * the inverse of the phantom hour. Failing closed there keeps that day
+ * byte-for-byte what it was before this fix (the nightly pass rejects
+ * coordless days before it gets here anyway). BOTH stops must carry
+ * `customer_id` — a caller whose select list drops the column (or a stop
+ * with no customer_id at all, e.g. an unlinked estimate hold) never matches,
+ * so the simulation for it is unchanged too. A stop carrying a
+ * `visit_id` on EITHER side never matches either: a service_visits group is
+ * arrival-route.js's SUM-of-durations contract, and collapsing it to MAX
+ * here would under-count genuine extra work (the veto note on
+ * computeChronologicalRepair below). This guard is what enforces that veto
+ * on the shared simulation paths (computeWindowFitOrder,
+ * violatesWindowFeasibility) that have no ungrouped-only gate of their own.
+ */
+function isCoVisitPair(effectiveWindowRange, prevStop, stop) {
+  if (prevStop.visit_id != null || stop.visit_id != null) return false;
+  if (prevStop.customer_id == null || stop.customer_id == null) return false;
+  if (String(prevStop.customer_id) !== String(stop.customer_id)) return false;
+  const prevRange = effectiveWindowRange(prevStop);
+  const range = effectiveWindowRange(stop);
+  if (!prevRange || !range) return false;
+  if (prevRange.startMin !== range.startMin || prevRange.endMin !== range.endMin) return false;
+  const prevLat = parseFloat(prevStop.lat);
+  const prevLng = parseFloat(prevStop.lng);
+  const lat = parseFloat(stop.lat);
+  const lng = parseFloat(stop.lng);
+  if (!(lat && lng && prevLat && prevLng)) return false;
+  return lat === prevLat && lng === prevLng;
+}
+
+/**
  * Advance the day simulation by one stop. state = { clock (minute-of-day),
- * prev ({lat,lng}), travelMin (cumulative) }. Returns the next state, or
- * null when the stop provably misses its promised arrival deadline —
- * making prefixes prunable: the clock only moves forward, so no suffix can
- * rescue a missed window.
+ * prev ({lat,lng}), prevStop (the full previous stop, for the co-visit
+ * check above), travelMin (cumulative) }. Returns the next state, or null
+ * when the stop provably misses its promised arrival deadline — making
+ * prefixes prunable: the clock only moves forward, so no suffix can rescue
+ * a missed window.
  */
 function advanceSim(RouteOptimizer, effectiveWindowRange, state, stop, {
   legMinutes, bufferMinutes = 0, blockedIntervals = [], reportLate = false,
 } = {}) {
+  // Co-visit continuation: no new leg, arrival pinned to the sibling's
+  // arrival (already proven inside the promise), clock takes the LONGER of
+  // the two durations rather than their sum — see isCoVisitPair above.
+  if (state.prevStop && isCoVisitPair(effectiveWindowRange, state.prevStop, stop)) {
+    // The sibling's own span was already checked against blockedIntervals
+    // on the normal path below; only the EXTRA minutes this row adds past
+    // the sibling's departure are new, and they obey the same rule — work
+    // that would overlap a block starts after it (blocks arrive sorted).
+    const extra = Math.max(0, state.arrivalMin + workDuration(stop) - state.clock);
+    let extraStart = state.clock;
+    if (extra > 0) {
+      for (const block of blockedIntervals) {
+        if (extraStart < block.endMin && extraStart + extra > block.startMin) extraStart = block.endMin;
+      }
+    }
+    return {
+      clock: extraStart + extra,
+      prev: state.prev,
+      prevStop: stop,
+      visited: true,
+      travelMin: state.travelMin,
+      arrivalMin: state.arrivalMin,
+      waitingMin: state.waitingMin || 0,
+    };
+  }
   const lat = parseFloat(stop.lat);
   const lng = parseFloat(stop.lng);
   let travel = 0;
@@ -165,14 +239,32 @@ function advanceSim(RouteOptimizer, effectiveWindowRange, state, stop, {
     if (startMin < block.endMin && startMin + workDuration(stop) > block.startMin) startMin = block.endMin;
   }
   if (range && startMin > range.endMin && !reportLate) return null;
-  return { clock: startMin + workDuration(stop), prev, visited: true, travelMin: state.travelMin + travel, arrivalMin: startMin, waitingMin: (state.waitingMin || 0) + Math.max(0, startMin - state.clock - travel) };
+  return { clock: startMin + workDuration(stop), prev, prevStop: stop, visited: true, travelMin: state.travelMin + travel, arrivalMin: startMin, waitingMin: (state.waitingMin || 0) + Math.max(0, startMin - state.clock - travel) };
 }
 
 /** Repair the demonstrated null-position insertion defect. Keep the relative
  * order of every already-positioned stop, including ties. Only a fully timed,
  * ungrouped, unpinned route with a chronological backbone qualifies. A repair
  * must turn an infeasible baseline into a feasible route; no distance saving
- * is needed to correct that defect. The caller owns gates and fenced writes. */
+ * is needed to correct that defect. The caller owns gates and fenced writes.
+ *
+ * `visit_id` VETO (deliberate, not extended to the co-visit rule above):
+ * a `service_visits` row is visit-groups.js's OWN mechanism for "N
+ * scheduled_services sharing one physical stop" (its combined duration is
+ * the SUM of members' real work estimates plus a shared/offset arrival
+ * range — see arrival-route.js's groupRouteStops, which pre-groups visit_id
+ * members into one stop BEFORE simulating). That is a different, and
+ * correct, model from this fix's co-visit rule: co-visit rows are
+ * INDEPENDENT scheduled_services whose window span alone (not a real work
+ * estimate) makes them look like they each cost a full promised hour, so
+ * the honest fix is the MAX of the two, not the sum. Collapsing a real
+ * multi-service visit_id group to MAX here would under-count genuine extra
+ * work and is out of scope for a phantom-hour fix — this module has no
+ * visit_id-aware pre-grouping step (sum durations, union/offset windows,
+ * shared technician) to replicate arrival-route.js's contract, so the veto
+ * stays: a visit_id day is left for the (dark, GATE_VISIT_GROUPS) group
+ * path or a human, never silently mis-simulated here.
+ */
 function computeChronologicalRepair(RouteOptimizer, stops) {
   if (stops.some(stop => {
     const duration = workDuration(stop, 0);
@@ -189,7 +281,23 @@ function computeChronologicalRepair(RouteOptimizer, stops) {
   if (simulateArrivalRoute(RouteOptimizer, effectiveWindowRange, ordered)) return null;
   const candidate = [...backbone];
   for (const stop of additions) {
-    const index = candidate.findIndex(other => effectiveWindowRange(other).startMin > effectiveWindowRange(stop).startMin);
+    const range = effectiveWindowRange(stop);
+    // Phantom-hour fix: a same-customer, same-window addition MUST land
+    // immediately next to its sibling (co-visit merge only fires for
+    // CONSECUTIVE stops), never split from it by a same-window addition
+    // from a different customer that happens to sort between them by
+    // currentOrder's created_at/id tiebreak. When a sibling is already
+    // placed (backbone or an earlier addition), insert right after it —
+    // pest before lawn falls out naturally from currentOrder's processing
+    // order; otherwise fall through to the general window-start insertion.
+    // Same predicate the simulation merges on — a pair that would not
+    // merge (different address, visit_id) gets the plain window-start slot.
+    const siblingIndex = candidate.findIndex(other => isCoVisitPair(effectiveWindowRange, other, stop));
+    if (siblingIndex !== -1) {
+      candidate.splice(siblingIndex + 1, 0, stop);
+      continue;
+    }
+    const index = candidate.findIndex(other => effectiveWindowRange(other).startMin > range.startMin);
     candidate.splice(index === -1 ? candidate.length : index, 0, stop);
   }
   const simulation = simulateArrivalRoute(RouteOptimizer, effectiveWindowRange, candidate);
@@ -407,5 +515,6 @@ module.exports = {
   simulateArrivalRoute,
   computeChronologicalRepair,
   workDuration,
+  isCoVisitPair,
   _internals: { sequenceCount, exhaustiveSearch, greedyInsertion, EXHAUSTIVE_SEQUENCE_CAP },
 };

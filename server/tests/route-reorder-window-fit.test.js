@@ -37,7 +37,10 @@ const { dayStopsQuery } = require('../services/scheduling/day-stops');
 const RouteOptimizer = require('../services/route-optimizer');
 const routeTiers = require('../services/auto-dispatch/route-tiers');
 const { runRouteReorder, _internals } = require('../services/route-reorder');
-const { computeWindowFitOrder, _internals: wfInternals } = require('../services/route-reorder-window-fit');
+const {
+  computeWindowFitOrder, computeChronologicalRepair, simulateArrivalRoute, effectiveWindowRange,
+  _internals: wfInternals,
+} = require('../services/route-reorder-window-fit');
 
 // Fixed clock: 2026-08-13 04:10 ET (08:10Z). Band = 2026-08-14 .. 2026-08-19.
 // 08-17 is ~4 days out — inside the reorder band, outside every freeze.
@@ -367,4 +370,131 @@ test('unit: above the cap, greedy still permutes equal-window ties — infeasibl
 
 test('unit: fewer than 2 stops is not a reorder problem', () => {
   expect(computeWindowFitOrder(FAKE_RO, [stop('only')], GUARDS)).toBeNull();
+});
+
+// ── PHANTOM-HOUR FIX (Sat 2026-09-12: customers A + B,
+// each with a same-slot pest+lawn pair, visit_id NULL): one customer's two
+// same-slot rows must be charged as ONE stop (the LONGER of the two
+// durations), never the sum. Zero-travel model (RouteOptimizer mock above)
+// isolates the effect to windows + durations: a pair that fits the day
+// under the fix but blows a downstream 120-minute arrival deadline under the
+// old sum-of-durations model. ──
+describe('co-visit pair collapse', () => {
+  // Both rows promised 13:00 (deadline 15:00 = startMin + 120). Merged
+  // duration = max(45, 40) = 45 → departs 825, comfortably under an 830
+  // cutoff. Summed (the pre-fix behavior) = 85 → departs 865, past it.
+  const pair = (customerId2) => [
+    stop('pest', { customer_id: 'cust_b', window_start: '13:00', estimated_duration_minutes: 45, lat: 1, lng: 1 }),
+    stop('lawn', { customer_id: customerId2, window_start: '13:00', estimated_duration_minutes: 40, lat: 1, lng: 1 }),
+  ];
+
+  test('(a) same-customer same-slot pair: infeasible under sum-of-durations, feasible under the co-visit max', () => {
+    const sim = simulateArrivalRoute(RouteOptimizer, effectiveWindowRange, pair('cust_b'), { dayEndMin: 830 });
+    expect(sim).not.toBeNull();
+    expect(sim.arrivals).toEqual([
+      { id: 'pest', arrivalMin: 780, departureMin: 825 },
+      { id: 'lawn', arrivalMin: 780, departureMin: 825 }, // pinned to the sibling's arrival — same stop
+    ]);
+  });
+
+  test('(b) different customers in the identical slot are still charged BOTH durations (no merge)', () => {
+    const sim = simulateArrivalRoute(RouteOptimizer, effectiveWindowRange, pair('someone_else'), { dayEndMin: 830 });
+    expect(sim).toBeNull(); // 780 + 45 + 40 = 865 > the 830 cutoff
+  });
+
+  test('(d) a stop missing customer_id never merges — same numbers, behavior unchanged', () => {
+    const stops = pair('cust_b').map(({ customer_id, ...s }) => s);
+    const sim = simulateArrivalRoute(RouteOptimizer, effectiveWindowRange, stops, { dayEndMin: 830 });
+    expect(sim).toBeNull(); // identical to the different-customer case above
+  });
+
+  test('(e) a visit_id on either row never merges — a real service_visits group keeps its SUM contract', () => {
+    for (const idx of [0, 1]) {
+      const stops = pair('cust_b');
+      stops[idx] = { ...stops[idx], visit_id: 'sv_1' };
+      const sim = simulateArrivalRoute(RouteOptimizer, effectiveWindowRange, stops, { dayEndMin: 830 });
+      expect(sim).toBeNull(); // 780 + 45 + 40 = 865 > 830, exactly as pre-fix
+    }
+  });
+
+  test('(f) a coordless side never merges — a multi-property customer is two addresses, not one stop', () => {
+    for (const idx of [0, 1]) {
+      const stops = pair('cust_b');
+      stops[idx] = { ...stops[idx], lat: null, lng: null };
+      const sim = simulateArrivalRoute(RouteOptimizer, effectiveWindowRange, stops, { dayEndMin: 830 });
+      expect(sim).toBeNull(); // 780 + 45 + 40 = 865 > 830, exactly as pre-fix
+    }
+  });
+
+  test('(g) the extra minutes a co-visit adds past its sibling still respect blockedIntervals', () => {
+    // pest departs 825; lawn (60 min) adds 15 extra minutes 825→840, but a
+    // block covers 830–850, so the extra work starts after it: clock 865.
+    const stops = [
+      stop('pest', { customer_id: 'cust_b', window_start: '13:00', estimated_duration_minutes: 45, lat: 1, lng: 1 }),
+      stop('lawn', { customer_id: 'cust_b', window_start: '13:00', estimated_duration_minutes: 60, lat: 1, lng: 1 }),
+    ];
+    const blockedIntervals = [{ startMin: 830, endMin: 850 }];
+    const sim = simulateArrivalRoute(RouteOptimizer, effectiveWindowRange, stops, { blockedIntervals });
+    expect(sim).not.toBeNull();
+    expect(sim.arrivals).toEqual([
+      { id: 'pest', arrivalMin: 780, departureMin: 825 },
+      { id: 'lawn', arrivalMin: 780, departureMin: 865 },
+    ]);
+    // Without the block the same pair departs at 840 — the block costs exactly its 20 minutes plus the 5 already elapsed before it.
+    const free = simulateArrivalRoute(RouteOptimizer, effectiveWindowRange, stops, {});
+    expect(free.arrivals[1].departureMin).toBe(840);
+  });
+
+  // (c) Saturday shape: backbone 10:00 (ro=3) + 11:00 (ro=7); additions =
+  // 11:00 lawn (customer A's co-visit twin of the 11:00 backbone stop), a
+  // 13:00 pest+lawn pair (customer B, both additions) SEPARATED in the natural
+  // id/window-start ordering by a third customer's own 13:00 addition
+  // (proving the adjacency fix — without it the pair is split and the
+  // merge never fires), a 15:00 single, and a 16:00–18:00 120-minute job.
+  // Every number below needs BOTH fixes to pass: the co-visit duration
+  // merge (A: 90 vs 80, B: 70 vs 65) AND the sibling-adjacency
+  // insertion (b_x_other sorts between b_pest/b_z_lawn by id).
+  test('(c) repair keeps every co-visit pair adjacent and returns an order for the Saturday shape', () => {
+    const stops = [
+      stop('b10', { customer_id: 'c_other', route_order: 3, window_start: '10:00', estimated_duration_minutes: 60, lat: 1, lng: 1 }),
+      stop('a_pest', { customer_id: 'cust_a', route_order: 7, window_start: '11:00', estimated_duration_minutes: 90, lat: 2, lng: 2 }),
+      stop('a_lawn', { customer_id: 'cust_a', route_order: null, window_start: '11:00', estimated_duration_minutes: 80, lat: 2, lng: 2 }),
+      stop('b_pest', { customer_id: 'cust_b', route_order: null, window_start: '13:00', estimated_duration_minutes: 70, lat: 3, lng: 3 }),
+      // Sorts between b_pest and b_z_lawn by id alone (no route_order,
+      // no created_at — currentOrder's final tiebreak) unless the sibling
+      // adjacency fix pulls b_z_lawn ahead of it.
+      stop('b_x_other', { customer_id: 'c_other2', route_order: null, window_start: '13:00', estimated_duration_minutes: 100, lat: 4, lng: 4 }),
+      stop('b_z_lawn', { customer_id: 'cust_b', route_order: null, window_start: '13:00', estimated_duration_minutes: 65, lat: 3, lng: 3 }),
+      stop('sam_15', { customer_id: 'sam', route_order: null, window_start: '15:00', estimated_duration_minutes: 30, lat: 5, lng: 5 }),
+      stop('pat_16', { customer_id: 'pat', route_order: null, window_start: '16:00', window_end: '18:00', lat: 6, lng: 6 }),
+    ];
+    const repair = computeChronologicalRepair(RouteOptimizer, stops);
+    expect(repair).not.toBeNull();
+    // The adjacency fix pulls b_z_lawn ahead of b_x_other (its
+    // id-only tiebreak position); every other stop keeps its natural
+    // window-start order.
+    expect(repair.orderedStops.map((s) => s.id)).toEqual([
+      'b10', 'a_pest', 'a_lawn', 'b_pest', 'b_z_lawn', 'b_x_other', 'sam_15', 'pat_16',
+    ]);
+  });
+});
+
+// ── computeWindowFitOrder: same-start GROUP permutation must not split a
+// co-visit pair away from its sibling — separating them costs (or here,
+// genuinely BREAKS) the promise the merge exists to protect. FAKE_RO gives
+// real travel (10 min/mile); P/L coincide so the pair costs 0 to traverse
+// together, and visiting the 3rd stop X (a "spur" off-axis) BEFORE or
+// BETWEEN P/L blows P or L's own 120-minute deadline — only X-after-the-pair
+// is feasible at all, which keeps P and L adjacent by construction. ──
+test('unit: computeWindowFitOrder never splits a co-visit pair away from its sibling', () => {
+  const stops = [
+    stop('P', { customer_id: 'cust_b', window_start: '09:00', lat: 1, lng: 5 }),
+    stop('L', { customer_id: 'cust_b', window_start: '09:00', lat: 1, lng: 5 }),
+    stop('X', { lat: 5, lng: 2 }), // untimed — no deadline of its own (lng ≠ 0: modelDistanceMeters treats a 0 coordinate as missing)
+  ];
+  const out = computeWindowFitOrder(FAKE_RO, stops, GUARDS);
+  expect(out).not.toBeNull();
+  const ids = out.orderedStops.map((s) => s.id);
+  expect(Math.abs(ids.indexOf('P') - ids.indexOf('L'))).toBe(1);
+  expect(out.afterMeters).toBe(18000);
 });

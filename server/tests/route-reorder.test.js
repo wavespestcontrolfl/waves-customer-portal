@@ -535,6 +535,31 @@ test('feasibility uses the optimizer\'s ACTUAL leg durations when aligned (fallb
   expect(violatesWindowFeasibility(RO, [a, b], [a, b], [legs[0]])).toBe(false);
 });
 
+test('feasibility guard: a same-customer same-slot pair merges into one stop (phantom-hour fix, Sat 2026-09-12); a different customer does not', () => {
+  // Mirrors advanceSim's co-visit branch (route-reorder-window-fit.js) but
+  // exercises violatesWindowFeasibility's OWN inline simulation loop
+  // directly — it does not call simulateArrivalRoute, so it needed its own
+  // co-visit check. a+b share the 09:00 promise (deadline 11:00); b's huge
+  // duration (200) would blow c's own 10:30 deadline (12:30) if summed —
+  // merged (same customer_id), it fits; unmerged (different customer_id,
+  // i.e. two genuinely different visits), it doesn't.
+  const { violatesWindowFeasibility } = require('../services/route-reorder')._internals;
+  const RO = require('../services/route-optimizer');
+  const a = stop('a', { customer_id: 'cust_b', window_start: '09:00', estimated_duration_minutes: 90, lat: 1, lng: 1 });
+  const b = stop('b', { customer_id: 'cust_b', window_start: '09:00', estimated_duration_minutes: 200, lat: 1, lng: 1 });
+  const c = stop('c', { window_start: '10:30' });
+  expect(violatesWindowFeasibility(RO, [a, b, c], [a, b, c])).toBe(false);
+  const bOtherCustomer = { ...b, customer_id: 'someone_else' };
+  expect(violatesWindowFeasibility(RO, [a, bOtherCustomer, c], [a, bOtherCustomer, c])).toBe(true);
+});
+
+test('the day load selects customer_id — required for the co-visit collapse (phantom-hour fix)', async () => {
+  stopsByDate['2026-08-18'] = backtrackDay();
+  await runRouteReorder({ now: NOW });
+  const [, args] = dayStopsQuery.mock.calls.find(([, a]) => a.dateStr === '2026-08-18');
+  expect(args.select).toContain('scheduled_services.customer_id');
+});
+
 test('effectiveWindowRange: arrival deadline is ALWAYS start+120 (stored window_end = service end, ignored), real band ends', () => {
   const { effectiveWindowRange } = require('../services/route-reorder')._internals;
   // A 3-hour 09:00 job has a noon window_end, but the promised ARRIVAL
