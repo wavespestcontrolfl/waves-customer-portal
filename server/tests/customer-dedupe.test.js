@@ -2294,6 +2294,16 @@ describe('predictWinnerBackfills (pure — the executor\'s rule, disclosed by th
     expect(winnerPriorValues).toEqual({ city: 'Bradenton', state: 'FL', zip: '34207' });
   });
 
+  it('carries a loser-side rented-termite-station flag onto the winner with OR semantics — the flag is the only ownership evidence when no stations were ever mapped, and clearing it makes a later cancellation report no_rented_stations (Codex r15 P1)', () => {
+    const winner = { id: 'W', termite_stations_rented: false };
+    const loser = { id: 'L', termite_stations_rented: true };
+    expect(dedupe.predictWinnerBackfills(winner, loser).backfills.termite_stations_rented).toBe(true);
+    // Nothing to carry when the survivor already rents, or when neither does —
+    // the backfill must not churn the row or the fingerprint.
+    expect(dedupe.predictWinnerBackfills({ id: 'W', termite_stations_rented: true }, loser).backfills.termite_stations_rented).toBeUndefined();
+    expect(dedupe.predictWinnerBackfills(winner, { id: 'L', termite_stations_rented: false }).backfills.termite_stations_rented).toBeUndefined();
+  });
+
   it('a street-only winner absorbing a same-street unit-bearing loser keeps the unit; loser-only billing mode + fee and payer transfer', () => {
     const winner = { id: 'W', address_line1: '100 Test St', address_line2: null, billing_mode: null, per_application_fee: null, payer_id: null };
     const loser = { id: 'L', address_line1: '100 Test St Apt 4B', address_line2: null, billing_mode: 'per_application', per_application_fee: '85.00', payer_id: 'payer-1' };

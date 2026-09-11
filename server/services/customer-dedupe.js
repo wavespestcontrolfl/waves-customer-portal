@@ -1064,6 +1064,21 @@ function predictWinnerBackfills(winner, loser, { derivedStripeCustomerId = null 
     if (!isEmptyValue(winner.accepted_terms_version)) winnerPriorValues.accepted_terms_version = winner.accepted_terms_version;
     backfills.accepted_terms_version = loser.accepted_terms_version;
   }
+  // Rented termite stations are physical equipment in the ground: whichever
+  // customer record survives, Waves still owns them. When no station rows
+  // were ever pinned this flag is the ONLY evidence — cancellation-processor
+  // `rentedTermiteStationState` falls back to it and otherwise reports
+  // `no_rented_stations`, so the retrieval task is never raised and the
+  // stations are abandoned (codex #4348 r15 P1). It is not a BACKFILL_FIELDS
+  // candidate because `false` is not an empty value, so the generic rule
+  // would never copy it and retiring the loser cleared it silently. OR
+  // semantics, and deliberately fail-safe in that direction: a retrieval task
+  // raised for stations already collected is one an admin closes, whereas the
+  // miss leaves Waves equipment on a former customer's property. The same
+  // flag decides `owned_by` for stations mapped later (termite-stations.js).
+  if (loser.termite_stations_rented === true && winner.termite_stations_rented !== true) {
+    backfills.termite_stations_rented = true;
+  }
   return { backfills, winnerPriorValues };
 }
 
