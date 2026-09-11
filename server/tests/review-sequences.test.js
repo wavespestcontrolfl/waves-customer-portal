@@ -3562,6 +3562,38 @@ describe('cadence scheduling + post-service enrollment (2026-07-30 revamp)', () 
     expect(mock.__state.rows.review_sequences[0].stop_reason).toBe('manual_ask_recent');
   });
 
+  test('a reservation opened just before enrollment but confirmed sent afterward still retires the cadence (codex review-request.js:1476 P1)', async () => {
+    const startedAt = new Date(Date.now() - 3 * 86400000);
+    // Communications opened the reservation moments before post-service
+    // enrollment ran — includeReservations: false missed it there because
+    // it was still 'sending'. The provider then confirmed delivery a
+    // moment AFTER the sequence started; the reservation's created_at
+    // still predates started_at (the placeholder is opened before the
+    // send), but its confirmation (updated_at) does not.
+    const reservedAt = new Date(startedAt.getTime() - 30000);
+    const confirmedAt = new Date(startedAt.getTime() + 45000);
+    const mock = makeMock({
+      customers: [{ id: 'ma-5', first_name: 'Reserved', last_name: 'K', phone: '+19410000051', nearest_location_id: 'bradenton' }],
+      review_sequences: [{
+        id: 'seq-ma-reserve', customer_id: 'ma-5', status: 'active', current_step: 1, touches_sent: 1,
+        plan: JSON.stringify([{ day: 0, channel: 'sms', templateKey: 'friendly_ask' }, { day: 4, channel: 'sms', templateKey: 'soft_reminder', weekdaysOnly: true }]),
+        started_at: startedAt, next_run_at: new Date(Date.now() - 60000),
+      }],
+      sms_log: [{
+        id: 'sms-5', customer_id: 'ma-5', direction: 'outbound', status: 'sent',
+        message_body: 'https://wavespest.co/l/abc123', metadata: { review_ask_reservation: true },
+        created_at: reservedAt, updated_at: confirmedAt,
+      }],
+    });
+    db.mockImplementation(mock);
+
+    const out = await ReviewService.processReviewSequences();
+
+    expect(mockSendCustomerMessage).not.toHaveBeenCalled();
+    expect(out.stopped).toBe(1);
+    expect(mock.__state.rows.review_sequences[0].stop_reason).toBe('manual_ask_recent');
+  });
+
   test('a booked follow-up child via followup_source_service_id drives the multi-treatment plans (canonical CTA linkage)', async () => {
     mockGates.reviewSequences = true;
     const future = new Date(Date.now() + 14 * 86400000).toISOString().slice(0, 10);
@@ -4275,6 +4307,38 @@ describe('shared ask history foundation', () => {
     expect(await history.lastManualAskAt('history-customer', {
       since: new Date(base - 1), includeReservations: true,
     })).toEqual(new Date(base));
+  });
+
+  test('a reservation confirmed after the boundary is evidence via its confirmation time, even though its placeholder predates the boundary (codex review-request.js:1476 P1)', async () => {
+    const reservedAt = new Date(base - 300000);
+    const confirmedAt = new Date(base + 120000);
+    const mock = makeMock({
+      sms_log: [{
+        customer_id: 'history-customer', direction: 'outbound', status: 'sent',
+        message_body: 'https://wavespest.co/l/abc123', metadata: { review_ask_reservation: true },
+        created_at: reservedAt, updated_at: confirmedAt,
+      }],
+    });
+    db.mockImplementation(mock);
+
+    expect(await history.lastManualAskAt('history-customer', {
+      since: new Date(base), includeReservations: false,
+    })).toEqual(confirmedAt);
+
+    // An unconfirmed (still 'sending') reservation opened before the
+    // boundary is NOT evidence — only a resolved confirmation anchors past
+    // its placeholder's created_at.
+    const stillSending = makeMock({
+      sms_log: [{
+        customer_id: 'history-customer', direction: 'outbound', status: 'sending',
+        message_body: 'https://wavespest.co/l/abc123', metadata: { review_ask_reservation: true },
+        created_at: reservedAt, updated_at: reservedAt,
+      }],
+    });
+    db.mockImplementation(stillSending);
+    expect(await history.lastManualAskAt('history-customer', {
+      since: new Date(base), includeReservations: false,
+    })).toBeNull();
   });
 
   test('ordinary in-flight messages do not count as accepted review asks', async () => {

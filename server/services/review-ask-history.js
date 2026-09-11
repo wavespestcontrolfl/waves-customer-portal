@@ -62,14 +62,21 @@ async function lastDeliveredAskAt(customerId, options) {
 // The enrollment standdown retains its explicit fail-open wrapper.
 async function lastManualAskAt(customerId, { since, includeReservations = true } = {}) {
   const sinceAt = since ? new Date(since) : new Date(Date.now() - 30 * 86400000);
+  const fetchFloor = new Date(sinceAt.getTime() - 90000);
   const outbound = await db('sms_log')
     .where({ customer_id: customerId, direction: 'outbound' })
     // Include correspondence just before the boundary so its timestamp
     // cannot instead be assigned to a manual ask just after the boundary.
-    .where('created_at', '>=', new Date(sinceAt.getTime() - 90000))
+    // A resolved review-ask reservation is fetched by EITHER timestamp:
+    // Communications can open it (created_at) before a same-moment
+    // enrollment misses it while still 'sending' (includeReservations:
+    // false), and only confirm delivery (updated_at) afterward — the
+    // confirmation must not be lost just because the placeholder predates
+    // the boundary (codex P1, review-request.js:1476).
+    .whereRaw('(created_at >= ? OR updated_at >= ?)', [fetchFloor, fetchFloor])
     .whereNotIn('status', ['scheduled', 'canceled', 'cancelled', 'failed', 'undelivered', 'blocked'])
     .orderBy('created_at', 'desc')
-    .select('message_body', 'created_at', 'status', 'metadata');
+    .select('message_body', 'created_at', 'updated_at', 'status', 'metadata');
   const isReviewReservation = row => row.metadata?.review_ask_reservation === true;
   // An unresolved provider attempt conservatively holds the same 72-hour
   // window only when the caller includes reservations. A confirmed marker
@@ -86,6 +93,16 @@ async function lastManualAskAt(customerId, { since, includeReservations = true }
   }, null);
   const candidates = outbound.filter(row => row.status !== 'sending'
     && (isReviewReservation(row) || looksLikeReviewAsk(row.message_body)));
+  // A resolved reservation's real ask-evidence time is its provider
+  // confirmation (updated_at), not the placeholder's created_at: the
+  // reservation is opened before the send, so its created_at can land
+  // before a since-boundary (typically a sequence's started_at) that the
+  // confirmation itself falls after. An ordinary manual send (never a
+  // reservation) keeps created_at — it is typed and sent in the same
+  // moment, so there is no earlier placeholder to anchor past.
+  const effectiveAskAt = row => (row.status !== 'sending' && isReviewReservation(row) && row.updated_at
+    ? new Date(Math.max(new Date(row.created_at).getTime(), new Date(row.updated_at).getTime()))
+    : new Date(row.created_at));
   if (!candidates.length) return reservedAt;
   const sends = await db('review_requests')
     .where({ customer_id: customerId })
@@ -111,8 +128,8 @@ async function lastManualAskAt(customerId, { since, includeReservations = true }
     matchedRows.add(pair.rowIndex);
   }
   const manual = candidates.find((row, index) => !matchedRows.has(index)
-    && new Date(row.created_at) >= sinceAt);
-  const manualAt = manual ? new Date(manual.created_at) : null;
+    && effectiveAskAt(row) >= sinceAt);
+  const manualAt = manual ? effectiveAskAt(manual) : null;
   return reservedAt && (!manualAt || reservedAt > manualAt) ? reservedAt : manualAt;
 }
 
