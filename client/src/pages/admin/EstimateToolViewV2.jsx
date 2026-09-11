@@ -26,6 +26,7 @@ import {
   termiteBaitSystemLabel,
 } from "../../lib/estimateEngine";
 import { useNavigate } from "react-router-dom";
+import { useIntelligenceBarActions, usePublishIntelligenceBarPageData } from "../../hooks/useIntelligenceBarPageData";
 import { Button, Badge, Card, cn } from "../../components/ui";
 import PestProductionDiagnosticsPanel from "../../components/admin/PestProductionDiagnosticsPanel";
 import { ExternalLink } from "lucide-react";
@@ -1800,6 +1801,7 @@ export default function EstimateToolViewV2({
   // contact fields only and the operator rebuilds the quote before saving.
   const [editMode, setEditMode] = useState(null);
   const [editLoadError, setEditLoadError] = useState(null);
+  const [editLoadAttempt, setEditLoadAttempt] = useState(0);
   useEffect(() => {
     if (!editMode || !/^#estimate-(customer|services|pricing|review)$/.test(window.location.hash)) return;
     requestAnimationFrame(() => document.querySelector(window.location.hash)?.scrollIntoView({ block: "start" }));
@@ -1811,6 +1813,19 @@ export default function EstimateToolViewV2({
   const formRef = useRef(form);
   formRef.current = form;
   const dirty = JSON.stringify(form) !== savedFormRef.current;
+  const { lastMutation } = useIntelligenceBarActions();
+  // PostgreSQL returns canonical lowercase UUIDs; the route may carry uppercase.
+  const sameEstimateId = (a, b) => String(a || "").toLowerCase() === String(b || "").toLowerCase();
+  const [latestEstimateMutation, setLatestEstimateMutation] = useState(null);
+  useEffect(() => {
+    if (lastMutation?.domain === "estimate" && sameEstimateId(lastMutation.estimate_id, editEstimateId)) setLatestEstimateMutation(lastMutation);
+  }, [lastMutation, editEstimateId]);
+  const estimateRefresh = sameEstimateId(latestEstimateMutation?.estimate_id, editEstimateId) ? latestEstimateMutation?.id : null;
+  const loadedEstimateRefresh = useRef(null);
+  const viewedEstimateReady = !editEstimateId || sameEstimateId(editMode?.id, editEstimateId);
+  usePublishIntelligenceBarPageData({ customer_id: viewedEstimateReady ? form.customerId || null : null,
+    property_id: viewedEstimateReady ? form.propertyId || null : null,
+    estimate_id: viewedEstimateReady ? savedId || editMode?.id || editEstimateId || null : null });
   const openMessages = useCustomerSms();
   useEffect(() => {
     if (!dirty) return undefined;
@@ -1934,7 +1949,15 @@ export default function EstimateToolViewV2({
   }, [activeLeadId, groupAnchorId]);
 
   useEffect(() => {
-    if (!editEstimateId || editEstimateId === editMode?.id) return undefined;
+    if (!editEstimateId || (sameEstimateId(editEstimateId, editMode?.id) && (!estimateRefresh || loadedEstimateRefresh.current === estimateRefresh))) return undefined;
+    const refreshing = sameEstimateId(editEstimateId, editMode?.id);
+    if (refreshing && dirty) {
+      loadedEstimateRefresh.current = estimateRefresh;
+      setEditLoadError(null);
+      setSaveError("This estimate changed in the Intelligence Bar. Your unsaved edits are still here. Reload this page to review the saved version.");
+      return undefined;
+    }
+    const observedForm = JSON.stringify(formRef.current);
     let cancelled = false;
     (async () => {
       setEditLoadError(null);
@@ -1951,6 +1974,11 @@ export default function EstimateToolViewV2({
         const d = await r.json().catch(() => ({}));
         if (!r.ok) throw new Error(d.error || `HTTP ${r.status}`);
         if (cancelled) return;
+        if (refreshing && JSON.stringify(formRef.current) !== observedForm) {
+          loadedEstimateRefresh.current = estimateRefresh;
+          setSaveError("This estimate changed in the Intelligence Bar. Your unsaved edits are still here. Reload this page to review the saved version.");
+          return;
+        }
         if (!d.editable) {
           setEditMode(null);
           setEditLoadError(
@@ -1959,6 +1987,7 @@ export default function EstimateToolViewV2({
           return;
         }
         const seeded = formFromEditSource(d);
+        loadedEstimateRefresh.current = estimateRefresh;
         // Reopening the SAME job must not trip the per-job rodent-guarantee
         // confirmation reset (it fires on identity change vs this ref).
         rgIdentityRef.current = `${seeded.address || ""}|${seeded.customerId || ""}|${seeded.customerName || ""}|${seeded.customerEmail || ""}`;
@@ -1987,7 +2016,7 @@ export default function EstimateToolViewV2({
         setExistingCustomerMatch(d.customer || null);
       } catch (e) {
         if (!cancelled) {
-          setEditMode(null);
+          if (!refreshing) setEditMode(null);
           setEditLoadError(e.message);
         }
       }
@@ -1995,7 +2024,7 @@ export default function EstimateToolViewV2({
     return () => {
       cancelled = true;
     };
-  }, [editEstimateId]);
+  }, [editEstimateId, estimateRefresh, editLoadAttempt]);
 
   function exitEditMode() {
     if (dirty && !window.confirm("Start a new estimate with unsaved changes?")) return;
@@ -4325,17 +4354,18 @@ export default function EstimateToolViewV2({
           <div className="mb-4 flex items-start justify-between gap-4 border-hairline border-zinc-300 rounded-xs bg-zinc-50 px-4 py-3">
             <div className="text-14 text-zinc-700">
               <span className="font-medium text-zinc-900">
-                Couldn&apos;t open the estimate for editing.
+                {editMode ? "Couldn’t refresh the saved estimate. Your current edits are still here." : "Couldn’t open the estimate for editing."}
               </span>{" "}
               {editLoadError}
             </div>
-            <Button
-              variant="secondary"
-              size="sm"
-              onClick={() => setEditLoadError(null)}
-            >
-              Dismiss
-            </Button>
+            <div className="flex flex-wrap gap-2">
+              <Button variant="secondary" size="sm" onClick={() => setEditLoadAttempt(attempt => attempt + 1)}>
+                Retry
+              </Button>
+              <Button variant="secondary" size="sm" onClick={() => setEditLoadError(null)}>
+                Dismiss
+              </Button>
+            </div>
           </div>
         )}
         {editMode && (

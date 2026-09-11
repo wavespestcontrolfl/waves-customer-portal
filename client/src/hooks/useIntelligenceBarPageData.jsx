@@ -11,17 +11,17 @@ export function IntelligenceBarPageDataProvider({ children, open = null }) {
 }
 
 // Only identifiers and the viewed date belong here, never cached customer facts.
-export function usePublishIntelligenceBarPageData({ customer_id = null, appointment_id = null, viewed_date = null, overlay = false }) {
+export function usePublishIntelligenceBarPageData({ customer_id = null, property_id = null, estimate_id = null, appointment_id = null, product_id = null, viewed_date = null, overlay = false }) {
   const setScopes = useContext(PageDataContext)?.setScopes;
   const owner = useRef({});
   useEffect(() => {
     if (!setScopes) return undefined;
-    const scope = { owner: owner.current, overlay, data: { customer_id, appointment_id, viewed_date } };
+    const scope = { owner: owner.current, overlay, data: { customer_id, property_id, estimate_id, appointment_id, product_id, viewed_date } };
     setScopes(current => [...current.filter(item => item.owner !== scope.owner), scope]);
     // Closing a record overlay restores the still-mounted page context. A
     // departed page is removed, so stale identifiers cannot be resurrected.
     return () => setScopes(current => current.filter(item => item.owner !== scope.owner));
-  }, [setScopes, customer_id, appointment_id, viewed_date, overlay]);
+  }, [setScopes, customer_id, property_id, estimate_id, appointment_id, product_id, viewed_date, overlay]);
 }
 
 export function useIntelligenceBarPageData() {

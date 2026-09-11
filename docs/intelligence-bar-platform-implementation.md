@@ -154,6 +154,11 @@ transport calls remain recorded after their frontend sites changed. Registration
 has deliberately not been relabeled as verified application parity.
 The dependent property branch adds two UI sites and verifies four property
 operations: 1,748 retained sites, seven transport exceptions, and 1,737 unverified.
+The inventory branch adds its retained request site and four partially verified
+admin inventory scopes; the technician and other remaining scopes continue to
+count as unsupported/unverified. Its final census retains 1,750 sites: four
+verified property sites, eight transport/navigation exceptions, and 1,738
+unsupported/unverified sites including the four partial inventory entries.
 
 ## Verification evidence
 
@@ -285,8 +290,12 @@ communication was performed. `GATE_IB_PLATFORM` defaults off.
 ## Outstanding implementation
 
 Phase 2 saved-property creation, labels/occupancy and primary switching are
-implemented in `intelligence-bar-property-workflows.md`. Shared inventory
-operations and existing-customer estimates remain next. Phase 3 remaining domain operations
+implemented in `intelligence-bar-property-workflows.md`. Shared admin inventory
+stock/request/receive operations are verified in `intelligence-bar-inventory-workflows.md`,
+with technician coverage explicitly incomplete. Administrator existing-customer
+residential lawn creation/revision is implemented in
+`intelligence-bar-estimate-workflows.md`; the other estimate programs and lifecycle
+remain incomplete. Phase 3 remaining domain operations
 are enumerated in `intelligence-bar-remaining-capabilities.md`; this is engineering
 work, not a credential blocker. Compound workflow and comprehensive adversarial
 verification remain incomplete.
