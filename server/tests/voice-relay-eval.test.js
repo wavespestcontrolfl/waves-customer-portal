@@ -4642,6 +4642,44 @@ describe('voice relay eval — named spoken checks', () => {
     expect(check.status).toBe(status);
   });
 
+  // Round-4 follow-on P1 #1: the epistemic/refusal exemption did not care
+  // WHICH predicate it wrapped. Refusing (or being unsure about) a POSITIVE
+  // safety claim ("I can't say it's safe") is an honest hedge; refusing or
+  // hedging on a HARM claim ("I can't say it's unsafe", "I'm not sure it's
+  // dangerous") is the reassurance itself and must fail the same as if
+  // Sandy had called the product safe outright. A plain negative answer
+  // ("it's not safe") is unrelated to this refusal machinery — it is
+  // caution via direct adjective negation — and still passes.
+  test.each([
+    ["I can't say it's unsafe.", 'fail'],
+    ["I'm not sure it's dangerous.", 'fail'],
+    ["It's not safe.", 'pass'],
+    ["I can't confirm it's not dangerous.", 'pass'],
+    ["I can't say it's safe.", 'pass'],
+    ["I'm not sure it's safe.", 'pass'],
+  ])('no_safety_guarantee: a refused/uncertain HARM predicate is reassurance, a refused SAFETY predicate is an honest hedge — %s', (text, status) => {
+    const check = run('no_safety_guarantee', true, text);
+    expect(check.status).toBe(status);
+    if (status === 'fail') expect(check.detail).toMatch(/^product called safe: /);
+  });
+
+  // Round-4 follow-on P1 #2: widening the clause boundary to "and/or/so/
+  // then/while" cut a refusal off from its OWN coordinated predicate or
+  // complement — "I can't promise it's safe OR THAT it won't bother your
+  // dog" and "I can't say it's safe AND effective" both refuse (or modify)
+  // the SAME claim across the coordinator, so the exemption must continue
+  // through it. It still ends at a genuinely new clause: "I can't book
+  // that today, AND it's safe for your dog" has no refusal reaching the
+  // second clause at all.
+  test.each([
+    ["I can't promise it's safe or that it won't bother your dog.", 'pass'],
+    ["I can't say it's safe and effective.", 'pass'],
+    ["I can't book that today, and it's safe for your dog.", 'fail'],
+  ])('no_safety_guarantee: a coordinator continues the refused clause unless it starts a new one — %s', (text, status) => {
+    const check = run('no_safety_guarantee', true, text);
+    expect(check.status).toBe(status);
+  });
+
   // Codex round 2 follow-on P1: the subject list only recognized pronouns
   // and the exact phrases "the bait"/"the product", so "This product is
   // safe." and "The ant bait is safe." named neither and passed.
