@@ -4954,7 +4954,12 @@ const ReviewService = {
     // deferral (provider blip, consent lookup, push in flight) carries a
     // synthesized nextAllowedAt too, so classify by the outcome code, not by
     // the presence of a retry time (codex #4140 r1).
-    const retryAt = outcome.nextAllowedAt ? new Date(outcome.nextAllowedAt) : new Date(Date.now() + 30 * 60 * 1000);
+    let retryAt = outcome.nextAllowedAt ? new Date(outcome.nextAllowedAt) : new Date(Date.now() + 30 * 60 * 1000);
+    // A weekdays-only step keeps its constraint on the retry too: a Friday
+    // evening quiet-hours hold would otherwise plan Saturday 08:00, and the
+    // spacing floor being satisfied by then lets the touch go out on a
+    // weekend (codex #4330 P2). Weekday retries pass through unchanged.
+    if (plan[seq.current_step]?.weekdaysOnly) retryAt = shiftToWeekdayMorning(retryAt);
     const decision = outcome.code === "QUIET_HOURS_HOLD"
       ? sequenceDecision({ reason: "send_window", plannedAt: retryAt, nextEvalAt: retryAt })
       : sequenceDecision({ reason: outcome.reason || "provider_retry", nextEvalAt: retryAt });

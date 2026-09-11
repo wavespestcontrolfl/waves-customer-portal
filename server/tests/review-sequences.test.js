@@ -959,6 +959,31 @@ describe('cadence scheduling + post-service enrollment (2026-07-30 revamp)', () 
       expect(mockSendCustomerMessage).toHaveBeenCalledTimes(1);
     });
 
+    test('a weekdays-only step whose quiet-hours hold names Saturday morning retries Monday morning instead (codex #4330 P2)', async () => {
+      // Friday 19:30 ET: the 72h floor is satisfied, the provider defers to
+      // the next send window — Saturday 08:00. weekdaysOnly must reapply.
+      const fri = new Date('2026-08-07T19:30:00-04:00');
+      const realNow = Date.now;
+      Date.now = () => fri.getTime();
+      try {
+        const mock = makeMock(fixture('seq-wk-sat', { lastAskAgoMs: 80 * 3600000, step: { day: 4, channel: 'sms', templateKey: 'soft_reminder', weekdaysOnly: true } }));
+        db.mockImplementation(mock);
+        const sat8 = new Date('2026-08-08T08:00:00-04:00');
+        mockSendCustomerMessage.mockResolvedValueOnce({ sent: false, blocked: true, deferred: true, retryable: true, code: 'QUIET_HOURS_HOLD', nextAllowedAt: sat8.toISOString() });
+
+        const out = await ReviewService.processReviewSequences();
+
+        expect(out.sent).toBe(0);
+        const seq = mock.__state.rows.review_sequences[0];
+        expect(seq.status).toBe('active');
+        const { etParts } = require('../utils/datetime-et');
+        expect(etParts(seq.next_run_at)).toMatchObject({ dayOfWeek: 1, hour: 10 });
+        expect(parse(seq.decision).reason).toBe('send_window');
+      } finally {
+        Date.now = realNow;
+      }
+    });
+
     test('a weekdays-only follow-up held by the rule lands on a weekday morning', async () => {
       // Force lastSent + 72h onto a Saturday: pick lastSent = Wednesday 09:00 ET.
       const wed = new Date('2026-08-05T09:00:00-04:00');
