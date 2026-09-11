@@ -10,10 +10,12 @@ function LevelForm({ setup, view, disabled, onBusy, onError, onSaved }) {
   // saveLevel accepts only active employees (409 otherwise); former employees keep their history read-only.
   const inactive = view.person.employment_status !== 'active';
   // Levels are append-only: the next one must be dated after the newest retained level.
-  const newest = view.levels.map(row => date(row.effective_date)).sort().at(-1);
+  // view.level is the level effective today; a future-dated record is newer, and the draft follows it (date and role).
+  const newestRow = [...view.levels].sort((a, b) => date(a.effective_date) < date(b.effective_date) ? 1 : -1)[0];
+  const newest = newestRow ? date(newestRow.effective_date) : undefined;
   const earliest = newest ? addDays(newest, 1) : undefined;
   const today = etDateString(new Date());
-  const [level, setLevel] = useState(() => ({ id: crypto.randomUUID(), role_key: view.level?.role_key || 'technician_i', effective_date: earliest && earliest > today ? earliest : today }));
+  const [level, setLevel] = useState(() => ({ id: crypto.randomUUID(), role_key: newestRow?.role_key || view.level?.role_key || 'technician_i', effective_date: earliest && earliest > today ? earliest : today }));
   const [saving, setSaving] = useState(false);
   async function saveLevel(event) {
     event.preventDefault(); setSaving(true); onBusy('level'); onError('');

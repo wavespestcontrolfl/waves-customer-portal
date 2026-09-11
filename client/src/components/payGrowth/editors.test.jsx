@@ -148,6 +148,33 @@ describe('EvidenceEditor', () => {
     expect(lastCallBody('/service-evidence').ordinal).toBeNull();
   });
 
+  it('keeps a retained allocation on a revision after the visit is reclassified as a callback', async () => {
+    const detail = baseDetail({
+      visit: { ...baseDetail().visit, is_callback: true, forced_exclusion: 'corrective' },
+      revisions: [{
+        id: 'rev-1', allocation_id: 'alloc-1', ordinal: 2,
+        facts: { participants: [{ technician_id: 'tech-a', share_bps: 10000 }], provenance: 'verified', source_reference: 'Previously confirmed.', exclusion: 'none', cutoff_at: null, complete_at_cutoff: null, repair_reason: 'unresolved', repair_reference: '', rework_outcome: 'unobserved', return_service_id: null, same_issue_confirmed: false, rework_reference: '' },
+      }],
+    });
+    request.mockImplementation((path, options = {}) => {
+      if (options.method === 'POST') return Promise.resolve({});
+      if (path.startsWith('/visits?')) return Promise.resolve(visitsResult);
+      if (path === '/services/visit-1/evidence') return Promise.resolve(detail);
+      return Promise.reject(new Error(`unexpected path ${path}`));
+    });
+    render(<EvidenceEditor technicianId="tech-a" month="2026-04" people={people} onCancel={vi.fn()} onSaved={vi.fn()} />);
+    await selectVisit();
+    await screen.findByText(/Callback visits are corrective/);
+    expect(screen.queryByRole('button', { name: 'Add accepted value allocation' })).not.toBeInTheDocument();
+    expect(screen.getByLabelText('Service-value allocation')).toBeDisabled();
+    expect(screen.getByLabelText('Production exclusion')).toHaveValue('corrective');
+    fireEvent.click(screen.getByRole('button', { name: 'Retain service evidence' }));
+    await waitFor(() => expect(lastCallBody('/service-evidence')).toBeTruthy());
+    expect(lastCallBody('/service-evidence').allocation_id).toBe('alloc-1');
+    expect(lastCallBody('/service-evidence').ordinal).toBe(2);
+    expect(lastCallBody('/service-evidence').base_id).toBe('rev-1');
+  });
+
   it('locks the service selector while an allocation save is pending and selects the saved allocation', async () => {
     const detail = baseDetail({ allocations: [] });
     let resolveAllocation;
@@ -308,8 +335,9 @@ describe('ProgramSetup', () => {
     const today = etDateString(new Date());
     const shift = (day, count) => { const next = new Date(`${day}T12:00:00Z`); next.setUTCDate(next.getUTCDate() + count); return next.toISOString().slice(0, 10); };
     const newest = shift(today, 10);
-    const levels = [{ id: 'l1', role_key: 'technician_ii', effective_date: newest }];
+    const levels = [{ id: 'l0', role_key: 'technician_i', effective_date: '2026-01-15' }, { id: 'l1', role_key: 'technician_ii', effective_date: newest }];
     const { rerender } = render(<ProgramSetup setup={setup} view={view({ levels, level: levels[0] })} onSaved={vi.fn()} />);
+    expect(screen.getByLabelText('Simulation role')).toHaveValue('technician_ii');
     expect(screen.getByLabelText('Level effective date')).toHaveValue(shift(newest, 1));
     expect(screen.getByLabelText('Level effective date')).toHaveAttribute('min', shift(newest, 1));
     fireEvent.change(screen.getByLabelText('Simulation role'), { target: { value: 'service_manager' } });
