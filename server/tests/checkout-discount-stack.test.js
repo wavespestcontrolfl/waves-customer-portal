@@ -36,7 +36,25 @@ describe('checkout discount stacking', () => {
 
   test('an operator-entered rate on a variable / custom row is bounded before it reaches the stack', () => {
     expect(src).toMatch(/function boundCheckoutDiscountAmount\(row, amount\) \{[\s\S]{0,320}Math\.min\(100, value\)/);
-    expect(src).toMatch(/amount: boundCheckoutDiscountAmount\(\s*\n\s*discount,\s*\n\s*normalizeDiscountAmount\(discount, e\.discount_amount\),/);
+    expect(src).toMatch(/const checkoutDiscountAmountOf = \(discount, e\) => \(checkoutStacking\s*\n\s*\? boundCheckoutDiscountAmount\(discount, normalizeDiscountAmount\(discount, e\.discount_amount\)\)/);
+    expect(src).toMatch(/amount: checkoutDiscountAmountOf\(discount, e\),\s*\n\s*maxDiscountDollars: discount\.max_discount_dollars,/);
+    expect(src).toMatch(/discount_amount: checkoutDiscountAmountOf\(discount, e\),\s*\n\s*discount_dollars: dollars,/);
+  });
+
+  test('gate off, a catalog row resolves from its own amount only — the posted rate is never read', () => {
+    // Before this lane the mint passed `discount.amount` as the client amount
+    // and stamped `Number(discount.amount) || 0`, so a custom_percent /
+    // custom_dollar preset (DB amount 0) resolved to $0 and was skipped. That
+    // is a pre-existing bug, and it stays dark on purpose: honoring the
+    // operator-entered rate rides GATE_DISCOUNT_STACKING with the rest of the
+    // lane, so gate off is byte-identical to main.
+    expect(src).toMatch(/const checkoutDiscountAmountOf = \(discount, e\) => \(checkoutStacking\s*\n[^\n]*\n\s*: Number\(discount\.amount\) \|\| 0\);/);
+    // The only reads of the posted rate on a catalog row go through that
+    // helper — no bare `normalizeDiscountAmount(discount, e.discount_amount)`
+    // survives outside it.
+    const bareReads = src.match(/normalizeDiscountAmount\(discount, e\.discount_amount\)/g) || [];
+    expect(bareReads).toHaveLength(1);
+    expect(src).toMatch(/const checkoutDiscountAmountOf[^\n]*\n[^\n]*normalizeDiscountAmount\(discount, e\.discount_amount\)/);
   });
 
   test('a custom (id-less) percentage keeps its shape so it compounds like a catalog row', () => {

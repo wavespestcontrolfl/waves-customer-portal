@@ -12431,6 +12431,17 @@ router.post('/:id/invoice', async (req, res, next) => {
     // Gate off: each discount resolves against the full base on its own and
     // tier combinations are accepted, exactly as before this lane.
     const checkoutStacking = isEnabled('discountStacking');
+    // Where a catalog row's rate comes from. Stacking on: the operator-entered
+    // rate on a variable / custom row (bounded) — that is what makes "Custom %"
+    // work at the terminal. Gate off: the catalog row's own amount and nothing
+    // else, exactly as before this lane — a custom preset ships with DB amount
+    // 0, so it still resolves to $0 and is skipped. That is a pre-existing
+    // bug, and it stays dark here on purpose: gate off means every surface
+    // computes byte-for-byte as before, so the fix rides the gate rather than
+    // slipping in ungated.
+    const checkoutDiscountAmountOf = (discount, e) => (checkoutStacking
+      ? boundCheckoutDiscountAmount(discount, normalizeDiscountAmount(discount, e.discount_amount))
+      : Number(discount.amount) || 0);
     const discountLines = extraLines.filter((e) => Number(e.amount) < 0);
     const discountCatalogRows = new Map();
     for (const e of discountLines) {
@@ -12451,10 +12462,7 @@ router.post('/:id/invoice', async (req, res, next) => {
       if (discount) {
         return {
           discountType: discount.discount_type,
-          amount: boundCheckoutDiscountAmount(
-            discount,
-            normalizeDiscountAmount(discount, e.discount_amount),
-          ),
+          amount: checkoutDiscountAmountOf(discount, e),
           maxDiscountDollars: discount.max_discount_dollars,
         };
       }
@@ -12494,10 +12502,7 @@ router.post('/:id/invoice', async (req, res, next) => {
             category: e.category,
             discount_id: discount.id,
             discount_type: discount.discount_type,
-            discount_amount: boundCheckoutDiscountAmount(
-              discount,
-              normalizeDiscountAmount(discount, e.discount_amount),
-            ),
+            discount_amount: checkoutDiscountAmountOf(discount, e),
             discount_dollars: dollars,
             use_stored_discount: true,
             stored_discount_source: 'validated_checkout',
