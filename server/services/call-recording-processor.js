@@ -8307,6 +8307,13 @@ const CallRecordingProcessor = {
           address_as_heard: rawStreetBeforeAdopt,
           address_candidates: addressRecovery.candidates || [],
           recovery_method: addressRecovery.method || null,
+          // Stamped on every ATTEMPT, not just the ones that recovered (codex
+          // #4437 r2 P1). A failed attempt is evidence too: under a different
+          // phonetic prompt that same call might have recovered and auto-routed,
+          // so its triage outcome belongs to the prompt that produced it. Without
+          // the stamp on this side, the promotion cohort silently mixes calls
+          // whose recovery ran under incompatible behavior.
+          recovery_prompt_version: RECOVERY_PROMPT_VERSION,
         }
         : null);
 

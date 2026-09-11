@@ -75,6 +75,14 @@ export function addressAskNotice(asks) {
     if (ADDRESS_READBACK_REASONS.has(i.reason_code)) return 1;
     return 0;
   };
+  // The two read-back cards are NOT the same claim. address_recovered means a
+  // garbled street was reconstructed; address_readback means Address Validation
+  // accepted the premise but the extractor's own confidence in it was low, and
+  // no recovery need have happened. Saying "pieced back together" for the
+  // latter tells the operator something untrue about the record.
+  const readbackReason = (i) => (i.reason_code === 'address_recovered'
+    ? 'the street was pieced back together from a garbled recording and has not been read back'
+    : 'the street validated, but it was heard with low confidence and has not been read back');
   const sorted = [...open].sort((a, b) => rank(a) - rank(b));
   // Among equals, prefer a card that actually carries recovery evidence.
   const worst = rank(sorted[0]);
@@ -89,7 +97,7 @@ export function addressAskNotice(asks) {
     reason: kind === 2
       ? 'the caller gave the building but no unit number'
       : kind === 1
-        ? 'the street was pieced back together from a garbled recording and has not been read back'
+        ? readbackReason(card)
         : 'the address from the call did not validate',
     heard: card.payload?.address_as_heard || null,
     candidates: [...new Set(candidates)].slice(0, 5),

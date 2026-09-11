@@ -129,8 +129,20 @@ describe('read-back cards (validated premise, unconfirmed street)', () => {
     expect(notice.reason).toMatch(/read back/i);
   });
 
-  it('warns on a low-confidence street the extractor flagged for read-back', () => {
-    expect(addressAskNotice([ask('address_readback')])).toMatchObject({ readbackOnly: true });
+  // address_readback is NOT a reconstructed street: AV accepted the premise and
+  // only the extractor's confidence was low. Claiming recovery would tell the
+  // operator something untrue about the record.
+  it('warns on a low-confidence street WITHOUT claiming it was reconstructed', () => {
+    const notice = addressAskNotice([ask('address_readback')]);
+
+    expect(notice.readbackOnly).toBe(true);
+    expect(notice.reason).toBe('the street validated, but it was heard with low confidence and has not been read back');
+    expect(notice.reason).not.toMatch(/pieced back together/);
+  });
+
+  it('a recovered street says so explicitly', () => {
+    expect(addressAskNotice([ask('address_recovered')]).reason)
+      .toMatch(/pieced back together from a garbled recording/);
   });
 
   // A card that did not validate at all is the worse problem — it wins the copy.

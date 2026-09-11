@@ -144,9 +144,39 @@ async function main() {
       console.log('⚠️  No cohort boundary found. If you swapped primary/fallback WITHIN the current model pair, historical rows are misattributed — re-run with --since <flip time> before trusting this verdict.');
     }
   }
-  const boundedRouteRows = cohortSince
+  const cohortRows = cohortSince
     ? allRouteRows.filter((r) => new Date(r.created_at) > cohortSince)
     : allRouteRows;
+
+  // Recovery-prompt cohort boundary (codex #4437 r2 P1). The extraction prompt
+  // hash resets the cohort when the extraction contract changes, but the
+  // PHONETIC RECOVERY prompt is a second contract on the same rows: it decides
+  // which unresolvable streets recover, and therefore which calls auto-route
+  // instead of triaging. A call whose recovery ATTEMPT ran under an older
+  // recovery prompt is evidence for that prompt's behavior, whether it
+  // recovered (excluded below by the card stamp) or failed (excluded here) —
+  // under the current prompt the same call might route the other way. Both
+  // outcomes carry the stamp, so the attempt is attributable either way.
+  const attemptCards = await db('triage_items')
+    .whereIn('call_log_id', cohortRows.map((r) => r.id))
+    .whereIn('reason_code', ['address_recovered', 'address_unverified'])
+    .select('call_log_id', 'payload');
+  const staleRecoveryPromptCalls = new Set();
+  let unattributableRecoveryAttempts = 0;
+  for (const card of attemptCards) {
+    let p = {};
+    try { p = parseJson(card.payload) || {}; } catch { p = {}; }
+    if (p.recovery_prompt_version) {
+      if (p.recovery_prompt_version !== RECOVERY_PROMPT_VERSION) staleRecoveryPromptCalls.add(card.call_log_id);
+      continue;
+    }
+    // Pre-stamp cards: an enforce-path card written before the stamp shipped
+    // recorded no recovery evidence at all, so "attempted" cannot be recovered
+    // from it. Counted and reported rather than guessed at — `--since` past the
+    // stamp's deploy is the clean way to read a gate free of them.
+    if (p.address_candidates || p.recovery_method || p.address_as_heard) unattributableRecoveryAttempts++;
+  }
+  const boundedRouteRows = cohortRows.filter((r) => !staleRecoveryPromptCalls.has(r.id));
 
   // Effective-verdict reconstruction for RECOVERED addresses (codex round-11
   // P2): the processor deliberately persists the ORIGINAL unresolvable
@@ -414,6 +444,9 @@ async function main() {
   }
   if (unstampedRecoveryCards || staleRecoveryCards || staleRecoveryPromptCards) {
     console.log(`   ↳ address_recovered cards NOT used to reconstruct a verdict: ${unstampedRecoveryCards} unstamped (pre-2026-08-01 history), ${staleRecoveryCards} from a different extraction pass, ${staleRecoveryPromptCards} from a different recovery prompt (current: ${RECOVERY_PROMPT_VERSION}).`);
+  }
+  if (staleRecoveryPromptCalls.size || unattributableRecoveryAttempts) {
+    console.log(`   ↳ recovery-prompt cohort: ${staleRecoveryPromptCalls.size} call(s) dropped (attempt ran under an older recovery prompt), ${unattributableRecoveryAttempts} pre-stamp card(s) that cannot be attributed — re-run with --since past the stamp deploy to read the gate without them.`);
   }
   console.log(`6. Disagreements reviewed           : ${disagreements.length === 0 ? 'none ✅' : disagreements.length + ' need manual review ⚠️'}`);
 
