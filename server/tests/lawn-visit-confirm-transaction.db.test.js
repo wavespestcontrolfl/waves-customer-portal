@@ -161,6 +161,7 @@ const SCORING = {
     expect(await loadRun(assessment.id, db.knex)).toEqual(run);
     await db.knex('lawn_assessment_runs').where({ id: run.id }).del();
     await expect(save(assessment.id, { persistChecks })).rejects.toMatchObject({ status: 409 });
+    expect(persistChecks).not.toHaveBeenCalled();
   });
 
   // Every throw in this flow carries `{ status }` — the shape the assertions
@@ -169,16 +170,22 @@ const SCORING = {
   // property-history path reaches the caller with no `.status` and surfaces
   // as a 500.
   test('a delegated baseline error surfaces with this flow\'s error shape', async () => {
-    const { assessment } = await seed(COMPLETE);
+    const { assessment, run } = await seed(COMPLETE);
+    const persistChecks = jest.fn();
     const lawnAssessment = require('../services/lawn-assessment');
     const spy = jest.spyOn(lawnAssessment, 'installConfirmedBaseline')
       .mockRejectedValueOnce(Object.assign(new Error('Assessment ownership changed'), { statusCode: 409 }));
     try {
-      await expect(save(assessment.id, { propertyHistoryEnabled: true })).rejects.toMatchObject({ status: 409, statusCode: 409 });
+      await expect(save(assessment.id, { propertyHistoryEnabled: true, persistChecks }))
+        .rejects.toMatchObject({ status: 409, statusCode: 409 });
     } finally {
       spy.mockRestore();
     }
+    // The failure rolls the transaction back and short-circuits before any
+    // protocol write, exactly like the other failure paths above.
     expect(persistChecks).not.toHaveBeenCalled();
+    expect(await read(assessment.id)).toEqual(assessment);
+    expect(await loadRun(assessment.id, db.knex)).toEqual(run);
   });
 
   test('property history installs only a completed row and preserves the existing property baseline', async () => {
