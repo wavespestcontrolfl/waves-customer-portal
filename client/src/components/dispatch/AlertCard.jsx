@@ -208,6 +208,19 @@ function RouteQualityBody({ alert }) {
 // this generator never sets, so without this renderer a tracking card
 // would show "Unknown tech running late" with no way to tell which visit
 // needs attention (codex P1 — af4925f71).
+// "9:00–11:00 AM" (shared meridiem compressed onto the end time only) /
+// "11:00 AM–1:00 PM" (both kept when they differ) — same compression style
+// tech-visit-notifications.js's formatPromisedWindow uses server-side.
+function formatWindowRange(startAt, endAt) {
+  if (!startAt) return null;
+  const start = formatETTime(startAt);
+  if (!endAt) return start;
+  const end = formatETTime(endAt);
+  const meridiem = (s) => s.slice(-2);
+  const clock = (s) => s.slice(0, -3);
+  return meridiem(start) === meridiem(end) ? `${clock(start)}–${end}` : `${start}–${end}`;
+}
+
 function TrackingBody({ alert }) {
   const payload = alert.payload || {};
   const window = payload.promised_window;
@@ -215,8 +228,10 @@ function TrackingBody({ alert }) {
   // are the visit's current, mutable fields, and stage 2 is enforced
   // against the promise. A shorter service block or an uncommunicated
   // internal move must not repaint the card with a different date/time
-  // than the one the message is judging (codex P1).
-  const windowLabel = window?.start_at ? formatETTime(window.start_at) : null;
+  // than the one the message is judging (codex P1). Both ends of the
+  // window render — a bare start time doesn't tell the dispatcher how
+  // long the promised arrival slot actually runs (codex P2).
+  const windowLabel = formatWindowRange(window?.start_at, window?.end_at);
   const dateLabel = window?.start_at ? formatETDate(window.start_at) : null;
   const when = [dateLabel, windowLabel].filter(Boolean).join(' · ');
   // The dispatch:alert socket broadcast carries the bare inserted row (no
