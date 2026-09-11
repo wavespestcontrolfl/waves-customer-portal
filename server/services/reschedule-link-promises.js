@@ -530,7 +530,7 @@ async function sweep(conn = db, options = {}) {
       await runOne(conn, row, options);
     } catch (err) {
       failed += 1;
-      require('./logger').warn(`[reschedule-link-promises] row ${row.id} failed (${err.code || err.message || 'error'})`);
+      require('./logger').warn(`[reschedule-link-promises] row ${row.id} failed (${err.code || err.name || 'error'})`);
       await parkReview(conn, row, 'worker_error').catch((parkErr) => {
         require('./logger').warn(`[reschedule-link-promises] row ${row.id} could not be parked (${parkErr.code || parkErr.name || 'error'})`);
       });
@@ -557,16 +557,75 @@ async function manualDuplicateOfPromisedLink(customerId, body, started) {
 // Take the customer's advisory interlock, or say so. statement_timeout aborts
 // the wait rather than queueing behind a slow unrelated send — no provider
 // attempt has been made at that point, so the caller retries instead of
-// treating it as an unknown outcome (codex #4293 r2 P2).
-async function acquireSendLock(connection, customerId) {
+// treating it as an unknown outcome (codex #4293 r2 P2). A failed query on
+// this connection also means the interlock is not held, so `held` records it.
+async function acquireSendLock(connection, customerId, held) {
   try {
     await connection.query("SET statement_timeout = '10s'");
     await connection.query('SELECT pg_advisory_lock(hashtext($1), hashtext($2))', ['reschedule-link-send', String(customerId)]);
-    return true;
+    return !held.lost;
   } catch (err) {
+    held.lost = true;
     require('./logger').warn(`[reschedule-link-promises] send interlock not acquired for ${customerId} (${err.code || err.name || 'error'})`);
     return false;
   }
+}
+
+// Whether this session STILL holds the interlock, tracked by us. The previous
+// guard read knex's private `__knex__disposed`, which simply does not exist on
+// another knex or pool build: there it reads undefined, the guard fails OPEN,
+// and a send goes to the provider on exactly the lost-interlock race the guard
+// was written for (local codex audit P1). An unpooled connection's own
+// error/end/close events are the authority instead — and listening for 'error'
+// also keeps a dead raw connection from taking the process down with it.
+function trackInterlockLoss(connection, held) {
+  if (typeof connection?.on !== 'function') return;
+  const lost = () => { held.lost = true; };
+  for (const event of ['error', 'end', 'close']) connection.on(event, lost);
+}
+
+// The interlock runs OUTSIDE the pool, so it has to be bounded in both time
+// and count: with the gate on, every operator text reaches withSendLock, and
+// one unpooled connection per send would exhaust the database's slots and hang
+// the admin messaging pipeline behind a connect that never returns (local
+// codex audit P1). Returns null when the interlock cannot be taken cheaply —
+// the caller decides whether that is a retry or an ordinary send.
+const INTERLOCK_CONNECT_MS = 5000;
+const MAX_OPEN_INTERLOCKS = 4;
+let openInterlocks = 0;
+
+async function openInterlockConnection() {
+  if (openInterlocks >= MAX_OPEN_INTERLOCKS) {
+    require('./logger').warn(`[reschedule-link-promises] send interlock at its connection cap (${MAX_OPEN_INTERLOCKS})`);
+    return null;
+  }
+  openInterlocks += 1;
+  let timer = null;
+  let opening = null;
+  try {
+    opening = Promise.resolve(db.client.acquireRawConnection());
+    return await Promise.race([
+      opening,
+      new Promise((_, reject) => { timer = setTimeout(() => reject(new Error('interlock connect timed out')), INTERLOCK_CONNECT_MS); }),
+    ]);
+  } catch (err) {
+    openInterlocks -= 1;
+    // A connection that lands after the race was lost still has to be closed,
+    // or the timeout leaks the very slot it was protecting.
+    if (opening) opening.then((late) => closeInterlockConnection(late, false), () => {});
+    require('./logger').warn(`[reschedule-link-promises] send interlock connection unavailable (${err.code || err.name || 'error'})`);
+    return null;
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
+async function closeInterlockConnection(connection, counted = true) {
+  if (counted) openInterlocks -= 1;
+  if (!connection) return;
+  await db.client.destroyRawConnection(connection).catch((err) => {
+    require('./logger').warn(`[reschedule-link-promises] send interlock close failed (${err.code || err.name || 'error'})`);
+  });
 }
 
 const LOCK_BUSY = Object.freeze({ sent: false, blocked: true, retryable: true, code: 'LINK_LOCK_BUSY',
@@ -584,31 +643,61 @@ function sendLockRole(input) {
   };
 }
 
+// A promised link this worker could put on the wire for this customer right
+// now: in flight, or waiting for the next sweep. Rows already sent, delivered,
+// parked or cancelled are nothing to serialize against — manualDuplicateOf-
+// PromisedLink only cares about rows that land after the operator started.
+const LIVE_PROMISE_STATUSES = ['pending', 'shadow', 'sending'];
+
+// Does this send need the interlock AT ALL? With the gate on, EVERY staff text
+// to EVERY customer reaches withSendLock, and paying an unpooled connection
+// plus an advisory lock for customers who have no promised link is a new
+// failure mode across the whole admin messaging pipeline (local codex audit
+// P1). One cheap pooled lookup decides; if the lookup itself fails, the send
+// goes out as it does today, because this interlock must never be the reason
+// an ordinary admin message does not send.
+async function needsSendInterlock(input, { automatic, manual }) {
+  if (mode() !== 'true' || !input?.customerId || (!automatic && !manual)) return false;
+  if (sendContext.getStore()?.customerId === input.customerId) return false;
+  if (automatic) return true;
+  try {
+    const live = await db('outbox_messages').where({ related_customer_id: input.customerId })
+      .whereNotNull('commitment_id').whereIn('status', LIVE_PROMISE_STATUSES).first('id');
+    return !!live;
+  } catch (err) {
+    require('./logger').warn(`[reschedule-link-promises] promise pre-check failed for ${input.customerId} (${err.code || err.name || 'error'})`);
+    return false;
+  }
+}
+
 // The automatic promise send and manual Comms send serialize for this
 // customer. A manual message already underway wins; the automated final
 // check sees its receipt. An overlapping manual duplicate is held visibly.
 async function withSendLock(input, sendCore) {
-  const { automatic, manual } = sendLockRole(input);
-  if (mode() !== 'true' || !input?.customerId || (!automatic && !manual)
-    || sendContext.getStore()?.customerId === input.customerId) return sendCore(input);
+  const role = sendLockRole(input);
+  if (!(await needsSendInterlock(input, role))) return sendCore(input);
   const started = new Date();
   // This session holds only the advisory interlock. The provider pipeline
   // needs the normal pool for consent/audit; holding a pool transaction
   // here deadlocks two simultaneous sends when that pool has two slots.
-  const connection = await db.client.acquireRawConnection();
+  const connection = await openInterlockConnection();
+  // No interlock available: the worker retries its own send, an operator's
+  // message goes out rather than failing on a lock it does not own.
+  if (!connection) return role.automatic ? LOCK_BUSY : sendCore(input);
+  const held = { lost: false };
+  trackInterlockLoss(connection, held);
   try {
-    if (!(await acquireSendLock(connection, input.customerId))) return LOCK_BUSY;
-    if (manual && !automatic && await manualDuplicateOfPromisedLink(input.customerId, input.body, started)) return LINK_IN_PROGRESS;
+    if (!(await acquireSendLock(connection, input.customerId, held))) return LOCK_BUSY;
+    if (role.manual && !role.automatic && await manualDuplicateOfPromisedLink(input.customerId, input.body, started)) return LINK_IN_PROGRESS;
     const lockedInput = { ...input, preProviderCheck: async (args) => {
       const verdict = typeof input.preProviderCheck === 'function' ? await input.preProviderCheck(args) : { ok: true };
-      if (connection.__knex__disposed) return { ok: false, code: 'LINK_LOCK_LOST', reason: 'The send interlock was lost. Refresh before retrying.' };
+      if (held.lost) return { ok: false, code: 'LINK_LOCK_LOST', reason: 'The send interlock was lost. Refresh before retrying.' };
       return verdict;
     } };
     return await sendContext.run({ customerId: input.customerId }, () => sendCore(lockedInput));
   } finally {
-    await db.client.destroyRawConnection(connection).catch((err) => {
-      require('./logger').warn(`[reschedule-link-promises] send interlock close failed (${err.code || err.name || 'error'})`);
-    });
+    held.lost = true;
+    await closeInterlockConnection(connection);
   }
 }
 

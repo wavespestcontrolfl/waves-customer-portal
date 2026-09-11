@@ -179,7 +179,8 @@ function fakeConn({ outbox = [], selfServe = null, cards = [], throwOn = null } 
       first: async () => {
         if (name === 'outbox_messages') {
           if (throwOn && state.eq.id === throwOn) throw new Error('Promised-link delivery evidence is truncated');
-          return outbox.find((row) => row.id === state.eq.id) || null;
+          if (state.eq.id !== undefined) return outbox.find((row) => row.id === state.eq.id) || null;
+          return outbox[0] || null;
         }
         if (name === 'reschedule_log') { seen.logFilters.push({ eq: { ...state.eq }, ranges: [...state.ranges] }); return selfServe; }
         if (name === 'triage_items') return openCards()[0] || null;
@@ -314,6 +315,86 @@ test('a busy send interlock is a retryable block, and the gate off is a pass-thr
     if (priorClient === undefined) delete db.client; else db.client = priorClient;
     if (prior === undefined) delete process.env.GATE_RESCHEDULE_LINK_ON_PROMISE; else process.env.GATE_RESCHEDULE_LINK_ON_PROMISE = prior;
     gates.callCommitments = priorCommitments;
+  }
+});
+
+// Run one send with the gate live and the module-level db answering from a
+// fake, restoring both afterwards.
+async function withLiveGate({ outbox = [], client }, fn) {
+  const prior = process.env.GATE_RESCHEDULE_LINK_ON_PROMISE, priorCommitments = gates.callCommitments;
+  const priorClient = db.client;
+  try {
+    gates.callCommitments = true;
+    process.env.GATE_RESCHEDULE_LINK_ON_PROMISE = 'true';
+    db.client = client;
+    db.mockImplementation(fakeConn({ outbox }).conn);
+    return await fn();
+  } finally {
+    db.mockReset();
+    if (priorClient === undefined) delete db.client; else db.client = priorClient;
+    if (prior === undefined) delete process.env.GATE_RESCHEDULE_LINK_ON_PROMISE; else process.env.GATE_RESCHEDULE_LINK_ON_PROMISE = prior;
+    gates.callCommitments = priorCommitments;
+  }
+}
+
+const fakeInterlock = () => {
+  const handlers = {};
+  const connection = { query: jest.fn(async () => ({})), on: jest.fn((event, fn) => { handlers[event] = fn; }) };
+  const client = { acquireRawConnection: jest.fn(async () => connection), destroyRawConnection: jest.fn(async () => {}) };
+  return { handlers, connection, client };
+};
+
+test('an operator text only pays for the interlock when a promised link is live', async () => {
+  const core = jest.fn(async () => ({ sent: true }));
+  const admin = { customerId: 'customer', body: 'On our way.', metadata: { adminUserId: 'admin' } };
+
+  // With the gate on, EVERY staff text reaches withSendLock. A customer with
+  // no live promise must never pay for an unpooled connection or an advisory
+  // lock — one cheap pooled lookup decides.
+  const quiet = fakeInterlock();
+  expect(await withLiveGate({ outbox: [], client: quiet.client }, () => links.withSendLock(admin, core))).toEqual({ sent: true });
+  expect(quiet.client.acquireRawConnection).not.toHaveBeenCalled();
+  expect(core).toHaveBeenCalledWith(admin);
+
+  // A promise still waiting for the sweep does serialize.
+  const live = fakeInterlock();
+  expect(await withLiveGate({ outbox: [promiseRow('outbox', 'commitment')], client: live.client },
+    () => links.withSendLock(admin, core))).toEqual({ sent: true });
+  expect(live.client.acquireRawConnection).toHaveBeenCalledTimes(1);
+  expect(live.connection.query).toHaveBeenCalledWith(expect.stringContaining('statement_timeout'));
+  expect(live.client.destroyRawConnection).toHaveBeenCalledWith(live.connection);
+});
+
+test('an interlock that dies mid-send blocks at the provider boundary', async () => {
+  const { handlers, client } = fakeInterlock();
+  const input = { customerId: 'customer', body: 'x', metadata: { adminUserId: 'admin' }, preProviderCheck: async () => ({ ok: true }) };
+  let healthy, afterLoss;
+  await withLiveGate({ outbox: [promiseRow('outbox', 'commitment')], client }, () => links.withSendLock(input, async (locked) => {
+    healthy = await locked.preProviderCheck({});
+    // The unpooled connection dies while the provider call is being prepared.
+    handlers.error(new Error('connection terminated unexpectedly'));
+    afterLoss = await locked.preProviderCheck({});
+    return { sent: true };
+  }));
+  expect(healthy).toEqual({ ok: true });
+  // Reading knex's private __knex__disposed returned undefined here on any
+  // other pool build, and the send went to the provider anyway.
+  expect(afterLoss).toMatchObject({ ok: false, code: 'LINK_LOCK_LOST' });
+});
+
+test('an interlock connection that never arrives does not block an admin send', async () => {
+  const core = jest.fn(async () => ({ sent: true }));
+  const client = { acquireRawConnection: jest.fn(() => new Promise(() => {})), destroyRawConnection: jest.fn(async () => {}) };
+  jest.useFakeTimers({ doNotFake: ['nextTick', 'setImmediate'] });
+  try {
+    const admin = { customerId: 'customer', body: 'On our way.', metadata: { adminUserId: 'admin' } };
+    const sending = withLiveGate({ outbox: [promiseRow('outbox', 'commitment')], client }, () => links.withSendLock(admin, core));
+    await Promise.resolve();
+    await jest.advanceTimersByTimeAsync(6000);
+    expect(await sending).toEqual({ sent: true });
+    expect(core).toHaveBeenCalledWith(admin);
+  } finally {
+    jest.useRealTimers();
   }
 });
 
