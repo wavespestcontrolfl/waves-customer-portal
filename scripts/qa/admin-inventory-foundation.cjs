@@ -82,7 +82,7 @@ function responseFor(url) {
       scrapeJobs: { completed: 1 },
     };
   if (pathname === "/api/admin/inventory/label-pipeline")
-    return { enabled: false };
+    return { enabled: true };
   if (pathname === "/api/admin/inventory/vendors") return { vendors: [vendor] };
   if (pathname === "/api/admin/inventory/price-sync/vendors")
     return { vendors: [vendor] };
@@ -116,7 +116,7 @@ function responseFor(url) {
       },
     };
   if (pathname === "/api/admin/inventory/unit-review")
-    return { products: [], forecastRows: [], counts: {} };
+    return { products: [{ ...product, inventoryUnit: "unknown", suggestedUnit: "fl_oz", reasons: [{ code: "unsupported", message: "Choose a supported unit" }] }], forecastRows: [], counts: {} };
   if (pathname === "/api/admin/inventory/restock-requests")
     return { requests: [] };
   if (pathname === "/api/admin/inventory/approvals")
@@ -188,6 +188,8 @@ function responseFor(url) {
         },
       ],
     };
+  if (pathname === `/api/admin/inventory/${product.id}/label-review`)
+    return { review: { draft: { id: "candidate-1", source: { productName: product.name, registration: "TEST-100", url: "https://example.invalid/label.pdf" }, facts: Object.fromEntries(["minTempF", "maxTempF", "maxWindMph", "rainFreeHours"].map(key => [key, { status: "not_stated" }])) } } };
   if (pathname === `/api/admin/inventory/${product.id}/movements`)
     return { movements: [] };
   if (pathname === "/api/admin/inventory")
@@ -298,6 +300,15 @@ async function main() {
             body: JSON.stringify({ product: { id: "new-product" } }),
           });
         }
+        if (url.pathname === "/api/admin/inventory/unit-review/product-1/fix" && request.method() === "POST") {
+          report.requests.push(record);
+          return route.fulfill({ status: 200, contentType: "application/json", body: "{}" });
+        }
+        if (url.pathname === "/api/admin/inventory/product-1/label-review/decision" && request.method() === "POST") {
+          assert.deepEqual(record.body, { candidateId: "candidate-1", decision: "approve", identityConfirmed: true });
+          report.requests.push(record);
+          return route.fulfill({ status: 200, contentType: "application/json", body: "{}" });
+        }
         const body = responseFor(url);
         if (body == null) {
           report.unmatched.push(
@@ -371,6 +382,17 @@ async function main() {
         fullPage: true,
       });
 
+      const labelReview = page.getByRole("region", { name: "Label weather review" });
+      await labelReview.getByRole("button", { name: "Approve weather facts" }).waitFor();
+      await labelReview.scrollIntoViewIfNeeded();
+      assert.ok((await labelReview.boundingBox()).width <= (hasTouch ? 390 : 1440) - 64 + 1, "Label review remains within its viewport cap inside the expanded table row");
+      await page.screenshot({ path: path.join(output, `${name}-label-review.png`), fullPage: true });
+      assert.equal(await labelReview.getByRole("button", { name: "Approve weather facts" }).isDisabled(), true);
+      await labelReview.getByRole("checkbox").check();
+      await labelReview.getByRole("button", { name: "Approve weather facts" }).click();
+      await labelReview.getByText("Review saved. Reopen the Job Card to use the current evidence.", { exact: true }).waitFor();
+      assert.equal(await labelReview.getByRole("checkbox").isChecked(), false);
+
       if (!hasTouch) {
         await page.getByRole("button", { name: "Add Product" }).click();
         await page.getByLabel("Product name").fill("Synthetic new product");
@@ -408,6 +430,19 @@ async function main() {
             .first()
             .click();
           await page.waitForTimeout(75);
+          if (leaf === "Unit Review") {
+            await page.getByRole("button", { name: "fl_oz · suggested", exact: true }).waitFor();
+            await page.getByText("Apply unit: fl_oz", { exact: true }).waitFor();
+            const fixPath = "/api/admin/inventory/unit-review/product-1/fix";
+            await Promise.all([page.waitForResponse(response => response.url().includes(fixPath)), page.getByRole("button", { name: "Apply", exact: true }).click()]);
+            assert.deepEqual(report.requests.filter(request => request.path === fixPath).at(-1).body, { inventoryUnit: "fl_oz", convertExistingStock: true });
+            await page.getByLabel(`Custom unit for ${product.name}`).fill("gal");
+            await page.getByText("Apply unit: gal", { exact: true }).waitFor();
+            await page.getByRole("checkbox", { name: "Convert existing stock and low-stock threshold" }).uncheck();
+            await Promise.all([page.waitForResponse(response => response.url().includes(fixPath)), page.getByRole("button", { name: "Apply", exact: true }).click()]);
+            assert.deepEqual(report.requests.filter(request => request.path === fixPath).at(-1).body, { inventoryUnit: "gal", convertExistingStock: false });
+            await page.screenshot({ path: path.join(output, `${name}-unit-review.png`), fullPage: true });
+          }
           assert.equal(await surface.count(), 1);
           report.leaves.push({ name, leaf });
         }

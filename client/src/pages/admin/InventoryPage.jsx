@@ -2066,14 +2066,15 @@ function UnitReviewTab({ showToast }) {
                                 key={unit}
                                 onClick={() => fixUnit(product, unit)}
                                 disabled={savingId === product.id}
-                                variant="secondary"
+                                variant={unit === product.suggestedUnit ? "primary" : "secondary"}
                               >
-                                {unit}
+                                {unit}{unit === product.suggestedUnit ? " · suggested" : ""}
                               </Button>
                             ))}
                           </div>
                           <div className="flex gap-[6px]">
                             <Input
+                              aria-label={`Custom unit for ${product.name}`}
                               value={draft.inventoryUnit ?? ""}
                               onChange={(e) =>
                                 setDrafts((prev) => ({
@@ -2095,6 +2096,9 @@ function UnitReviewTab({ showToast }) {
                             >
                               Apply
                             </Button>
+                          </div>
+                          <div className="text-ui-body text-ink-secondary">
+                            Apply unit: <strong className="text-zinc-900">{draft.inventoryUnit || product.suggestedUnit || "Choose a unit"}</strong>
                           </div>
                           <Checkbox
                             label="Convert existing stock and low-stock threshold"
