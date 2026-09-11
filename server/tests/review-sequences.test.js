@@ -1510,6 +1510,27 @@ describe('cadence scheduling + post-service enrollment (2026-07-30 revamp)', () 
       expect(mock.__state.rows.review_requests[0].status).toBe('suppressed');
     });
 
+    test('an ask refused before the provider is reported unsent by its reason, never sent (codex #4331 P1)', async () => {
+      const mock = makeMock({
+        customers: [{ id: 'rf-1', first_name: 'Ona', last_name: 'P', phone: '+19410000168', nearest_location_id: 'venice' }],
+        review_requests: [{ id: 'rr-rf1', customer_id: 'rf-1', service_record_id: 'sr-rf1', status: 'pending', channel: 'sms', template_key: 'day0_ask', token: 'trf1', location_id: 'venice', triggered_by: 'tech', created_at: new Date(Date.now() - 600000) }],
+        // The enrollment's supersede write lands in the recheck window.
+      }, { onUpdate: (table, patch, state) => {
+        if (table === 'review_requests' && patch.status === 'pending') {
+          state.rows.review_requests[0].status = 'suppressed';
+        }
+      } });
+      db.mockImplementation(mock);
+
+      const request = await ReviewService.create({ customerId: 'rf-1', serviceRecordId: 'sr-rf1', triggeredBy: 'tech' });
+
+      // The provider was never called, so /tech-trigger must not report a
+      // send. Only approved_phone_drift skips this, because its callers turn
+      // it into a thrown 409 instead.
+      expect(mockSendCustomerMessage).not.toHaveBeenCalled();
+      expect(request.sendOutcome).toEqual({ sent: false, failed: 'request_not_sendable', nextAllowedAt: null });
+    });
+
     test('an immediate ask with no consented recipient is reported unsent (suppressed), never sent (codex #4156 r2 P2)', async () => {
       const mock = makeMock({
         customers: [{ id: 'nc-1', first_name: 'Uma', last_name: 'P', phone: null, nearest_location_id: 'venice' }],

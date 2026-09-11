@@ -691,11 +691,21 @@ async function retryReviewRequestAfterTemplateMiss(requestId) {
 function unsentOutcome(outcome) {
   if (!outcome) return { sent: false, failed: "suppressed", nextAllowedAt: null };
   if (outcome.blocked) return { sent: false, failed: "blocked", code: outcome.code || null, nextAllowedAt: null };
+  // A refusal never reached the provider, so it is reported by its own
+  // reason rather than as a held send (codex #4331 P1). approved_phone_drift
+  // is the exception only because its callers throw immediately below.
+  if (outcome.refused) return { sent: false, failed: outcome.refused, nextAllowedAt: null };
   return outcome.failed
     ? { sent: false, failed: outcome.failed, nextAllowedAt: null }
     : { sent: false, deferred: outcome.deferred, nextAllowedAt: outcome.nextAllowedAt || null };
 }
-const deliveredOrRefused = (outcome) => !!outcome && (outcome.sent === true || !!outcome.refused);
+// Only a real send, or the drift refusal its callers convert into a thrown
+// 409, may skip the unsent-outcome assignment. Every other refusal
+// (send_fence_unstored, request_not_sendable, send_state_unverified) means
+// the provider was never called — reporting those as delivered told
+// /tech-trigger sent:true for a text that never left (codex #4331 P1).
+const deliveredOrDrifted = (outcome) => !!outcome
+  && (outcome.sent === true || outcome.refused === "approved_phone_drift");
 
 // Callers must check isExplicitlyUncertainOutcome(result) BEFORE this: an
 // uncertain provider handoff (no SID, or an unrecognized post-handoff
@@ -889,7 +899,7 @@ const ReviewService = {
       const fresh = (await db("review_requests").where({ id: existing.id }).first()) || existing;
       // Same truth as the fresh-row path (codex #4141 r4 P2): a resend held
       // by the 3-day rule / send window / provider retry is queued, not sent.
-      if (!deliveredOrRefused(resendOutcome)) fresh.sendOutcome = unsentOutcome(resendOutcome);
+      if (!deliveredOrDrifted(resendOutcome)) fresh.sendOutcome = unsentOutcome(resendOutcome);
       return fresh;
     }
 
@@ -1002,7 +1012,7 @@ const ReviewService = {
       // A failure that could not even be queued (codex #4156 r1 P2), a
       // policy block or a suppression (r2 P2) are reported as such — never
       // as a held send some job will pick up, never as sent.
-      if (!deliveredOrRefused(outcome)) request.sendOutcome = unsentOutcome(outcome);
+      if (!deliveredOrDrifted(outcome)) request.sendOutcome = unsentOutcome(outcome);
       if (outcome && outcome.refused === "approved_phone_drift") {
         // Remove the row this very call created (pre-push r15 P1): left in
         // place it would later be sent by the scheduler to the unapproved
