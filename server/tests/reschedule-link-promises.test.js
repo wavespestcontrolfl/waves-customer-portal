@@ -26,6 +26,20 @@ test('an explicit promise with one available visit identifies it; multiple visit
   expect(select({ candidates: [visit, { ...visit, id: 'other' }] }).reason).toBe('ambiguous_visit');
 });
 
+test.each([
+  "I'm going to text you a reschedule link for that appointment.",
+  "We're going to text you a reschedule link for that appointment.",
+])('a contracted future-tense promise (%s) is recognized, not parked as promise_needs_review (codex #4293 P2 r4)', (phrasing) => {
+  // norm() strips the apostrophe to a bare space — "I'm going to" reads as
+  // "i m going to" and "We're going to" as "we re going to". Neither
+  // spelled-out form ("I am going to" / "we are going to") appears verbatim
+  // in real transcripts nearly as often as the contraction does, so missing
+  // it dropped a high-confidence, uniquely-grounded promise from
+  // promisedQuotes and parked it for review instead of sending.
+  const transcription = `Agent: ${phrasing}\nCaller: Thank you.`;
+  expect(select({ call: { ...call, transcription }, commitment: { ...commitment, evidence: [{ quote: phrasing, speaker: 'agent' }] } }).visit?.id).toBe('visit');
+});
+
 test.each([undefined, NaN, 0.89])('invalid or low promise confidence stays in review: %s', confidence => {
   expect(select({ commitment: { ...commitment, confidence } }).reason).toBe('promise_needs_review');
 });
@@ -337,7 +351,11 @@ function fakeConn({ outbox = [], selfServe = null, selfServeVisitIds = null, car
         state.whereIn.push({ col, values });
       }),
       where: pass((first, op, value) => {
-        if (typeof first === 'function') first.call(b);
+        // knex passes the sub-builder as BOTH `this` and the first argument
+        // — real code in this codebase already relies on the arrow-function
+        // form (e.g. admin-estimate-persistence.js's `.where((q) => ...)`),
+        // so the mock has to support it too, not just the `this`-only style.
+        if (typeof first === 'function') first.call(b, b);
         else if (first && typeof first === 'object') Object.assign(state.eq, first);
         else state.ranges.push({ col: first, op, value });
       }),
@@ -439,7 +457,12 @@ test('promised-link delivery evidence requires the provider\'s own id, not merel
 function fakeStageConn({ commitments = [], outbox = [] } = {}) {
   const inserts = [];
   const state = { generationAware: false };
-  const base = (cc) => cc.kind === 'send_reschedule_link' && cc.party === 'waves' && cc.status === 'open' && cc.human_state == null;
+  // A staff Confirm ('confirmed') is an affirmative review, not a claim —
+  // it stays eligible for staging exactly like a never-touched (NULL) row;
+  // only a genuinely terminal human_state ('dismissed', say) excludes it
+  // (codex #4293 P1 r4).
+  const base = (cc) => cc.kind === 'send_reschedule_link' && cc.party === 'waves' && cc.status === 'open'
+    && (cc.human_state == null || cc.human_state === 'confirmed');
   // If the query never asks a generation-aware question at all (whereRaw
   // mentioning commitment_generation), fall back to the OLD "any existing
   // row at all counts as staged" reading — the exact bug: this excludes a
@@ -533,6 +556,111 @@ test('the same generation already staged is never restaged', async () => {
   }
 });
 
+describe('a staff Confirm is an affirmative review, not a claim (codex #4293 P1 r4)', () => {
+  test('stagePromises still stages a confirmed commitment exactly like an untouched one', async () => {
+    const prior = process.env.GATE_RESCHEDULE_LINK_ON_PROMISE, priorCommitments = gates.callCommitments;
+    try {
+      gates.callCommitments = true;
+      process.env.GATE_RESCHEDULE_LINK_ON_PROMISE = 'shadow';
+      const confirmed = { id: 'commitment', call_log_id: 'call', customer_id: 'customer', created_at: new Date('2030-01-08T00:00:00Z'),
+        processing_generation: 1, kind: 'send_reschedule_link', party: 'waves', status: 'open', human_state: 'confirmed' };
+      const { conn, inserts } = fakeStageConn({ commitments: [confirmed], outbox: [] });
+      expect(await links.stagePromises(conn)).toBe(1);
+      expect(inserts.find((i) => i.table === 'outbox_messages')).toBeDefined();
+
+      // A genuinely terminal human_state stays excluded.
+      const dismissed = { ...confirmed, human_state: 'dismissed' };
+      const { conn: dismissedConn, inserts: dismissedInserts } = fakeStageConn({ commitments: [dismissed], outbox: [] });
+      expect(await links.stagePromises(dismissedConn)).toBe(0);
+      expect(dismissedInserts).toEqual([]);
+    } finally {
+      if (prior === undefined) delete process.env.GATE_RESCHEDULE_LINK_ON_PROMISE; else process.env.GATE_RESCHEDULE_LINK_ON_PROMISE = prior;
+      gates.callCommitments = priorCommitments;
+    }
+  });
+
+  // A minimal call_commitments-only fake, distinct from the shared fakeConn
+  // above (shaped around outbox_messages/triage_items) — contextFor's first
+  // gate is judged entirely against the commitment row itself, before any
+  // call/customer/visit lookup runs.
+  function fakeContextConn(commitment) {
+    const conn = (table) => {
+      const name = String(table).split(' ')[0];
+      const b = {};
+      const pass = () => (...a) => b;
+      Object.assign(b, {
+        where: pass(), whereNull: pass(), leftJoin: pass(), join: pass(), select: pass(), whereIn: pass(),
+        first: async () => (name === 'call_commitments' ? commitment : null),
+      });
+      return b;
+    };
+    return conn;
+  }
+
+  test('contextFor keeps a confirmed promise eligible; a genuinely terminal human_state still closes it', async () => {
+    const open = { id: 'commitment', call_log_id: 'call', status: 'open', human_state: null, source: 'ai', last_seen_generation: 1, evidence: '[]', subject: null };
+    // With no call_log row behind either, both null and 'confirmed' fall
+    // through the human_state gate to the NEXT check (stale_extraction) —
+    // never 'promise_closed'.
+    expect((await links.contextFor(fakeContextConn(open), 'commitment', new Date())).reason).toBe('stale_extraction');
+    expect((await links.contextFor(fakeContextConn({ ...open, human_state: 'confirmed' }), 'commitment', new Date())).reason).toBe('stale_extraction');
+    expect((await links.contextFor(fakeContextConn({ ...open, human_state: 'dismissed' }), 'commitment', new Date())).reason).toBe('promise_closed');
+    // A non-open status is terminal regardless of human_state.
+    expect((await links.contextFor(fakeContextConn({ ...open, status: 'fulfilled', human_state: 'confirmed' }), 'commitment', new Date())).reason).toBe('promise_closed');
+  });
+
+  // A minimal call_commitments-only fake for fulfilPromise: the row lives in
+  // `state`, mutated in place by a matching update — an unmatched update
+  // (the exact WHERE-filter bug this proves) returns 0 and leaves it alone.
+  function fakeFulfilConn(commitment) {
+    const state = { ...commitment };
+    function commitmentsBuilder() {
+      const eq = {};
+      const orMatchers = [];
+      const b = {
+        where(a) {
+          if (typeof a === 'function') {
+            const sub = {
+              whereNull: (col) => { orMatchers.push((row) => row[col] == null); return sub; },
+              orWhere: (col, val) => { orMatchers.push((row) => row[col] === val); return sub; },
+            };
+            a(sub, sub);
+          } else Object.assign(eq, a);
+          return b;
+        },
+        update: async (patch) => {
+          const eqMatches = Object.entries(eq).every(([k, v]) => state[k] === v);
+          const orMatches = orMatchers.length === 0 || orMatchers.some((fn) => fn(state));
+          if (!eqMatches || !orMatches) return 0;
+          Object.assign(state, patch);
+          return 1;
+        },
+      };
+      return b;
+    }
+    function noopBuilder() {
+      const b = {};
+      const pass = () => (...a) => b;
+      Object.assign(b, { where: pass(), whereIn: pass(), whereNotIn: pass(), forUpdate: pass(), forShare: pass(),
+        select: async () => [], first: async () => null, update: async () => 0 });
+      return b;
+    }
+    const conn = (table) => (String(table).split(' ')[0] === 'call_commitments' ? commitmentsBuilder() : noopBuilder());
+    return { conn, state };
+  }
+
+  test.each([
+    [null, 'fulfilled'],
+    ['confirmed', 'fulfilled'],
+    ['dismissed', 'open'],
+  ])('fulfilPromise on a delivery receipt racing a Confirm: human_state=%p -> %s', async (humanState, expectedStatus) => {
+    const { conn, state } = fakeFulfilConn({ id: 'commitment', status: 'open', human_state: humanState });
+    await links.fulfilPromise(conn, { id: 'outbox', commitment_id: 'commitment', related_call_log_id: 'call' },
+      { id: 'sms1' }, { id: 'call' });
+    expect(state.status).toBe(expectedStatus);
+  });
+});
+
 test('a customer relink between staging and dispatch rebinds the row under the claim transaction', async () => {
   // The office relinked this call to a different customer after the row was
   // staged but before it was planned — contextFor already resolved the
@@ -607,6 +735,25 @@ test('a link used after the row was parked still closes its cards and the call',
   // The promise's own exception card closes, and review_status resyncs.
   expect(seen.updates).toContainEqual(expect.objectContaining({ table: 'triage_items', patch: expect.objectContaining({ status: 'resolved' }) }));
   expect(seen.updates).toContainEqual(expect.objectContaining({ table: 'call_log', patch: expect.objectContaining({ review_status: 'resolved' }) }));
+});
+
+test('markLinkUsed re-reads the row status FRESH under the lock — a stale caller snapshot cannot skip the card cleanup (codex #4293 P2 r4)', async () => {
+  // The caller's own `row` argument still says 'sent' — that snapshot was
+  // taken before this call started — but a concurrent sweep pass has since
+  // parked the row to 'review' in the store this shares one call-locked
+  // transaction with. Trusting the stale argument (the old code's `if
+  // (row.status === 'review')`) would skip clearPromiseException and leave
+  // the recreated exception card open forever.
+  const stale = { ...sentRow, status: 'sent' };
+  const currentlyParked = { ...sentRow, status: 'review' };
+  const { conn, seen } = fakeConn({ outbox: [currentlyParked],
+    cards: [{ id: 'card', payload: { reschedule_link_promise: { commitment_id: 'commitment', commitment_ids: ['commitment'] } } }] });
+  await links.markLinkUsed(conn, stale);
+  expect(resolveRescheduleCards).toHaveBeenCalledWith(conn, 'call', expect.any(String), 'visit');
+  expect(seen.updates).toContainEqual(expect.objectContaining({ table: 'triage_items', patch: expect.objectContaining({ status: 'resolved' }) }));
+  expect(seen.updates).toContainEqual(expect.objectContaining({ table: 'call_log', patch: expect.objectContaining({ review_status: 'resolved' }) }));
+  // The reconciliation stamp still lands, in the SAME transaction.
+  expect(seen.updates.some((u) => u.table === 'outbox_messages' && u.eq.id === 'outbox')).toBe(true);
 });
 
 test('a visit with no self-serve move on record is never scanned by the reconcile sweep', async () => {

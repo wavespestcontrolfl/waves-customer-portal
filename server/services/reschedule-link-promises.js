@@ -23,6 +23,21 @@ function mode() {
   return isEnabled('callCommitments') && ['shadow', 'true'].includes(value) ? value : 'off';
 }
 
+// A human 'confirm' (or 'reopen') on this commitment stamps human_state
+// 'confirmed' while deliberately leaving status 'open' — an affirmative
+// review, not a fulfilment or a dismissal. Every place that judges whether
+// this promise is still live must read it the same way: null (never
+// touched) or 'confirmed' (touched and affirmed) keep it eligible; anything
+// else ('dismissed', an edited description that is a NEW obligation) is
+// genuinely terminal or superseded and stays excluded (codex #4293 P1 r4).
+// Before this, contextFor's bare `commitment.human_state` truthiness check
+// treated a Confirm exactly like a Dismiss — closed for good, never staged;
+// stagePromises and fulfilPromise carried the identical bug at their own
+// human_state filters.
+function humanStateBlocksPromise(humanState) {
+  return humanState != null && humanState !== 'confirmed';
+}
+
 // The extractor has been building send_reschedule_link commitments the
 // whole time GATE_CALL_COMMITMENTS was on, independent of whether THIS
 // delivery gate was live — days of them can sit open before anyone flips
@@ -78,19 +93,20 @@ async function activationBoundary(conn) {
 // processed between the gate flip and the next five-minute tick recorded a
 // legitimate live promise; that first tick then wrote now() as the boundary
 // and cancelled all of them as pre_activation, silently (codex #4293 P1 r3).
-// call-commitments.recordCallCommitments calls this ahead of its upsert
-// whenever this gate is live, so the stored instant is the EARLIER of the
-// first live extraction and the first live sweep: insert-if-absent means
-// whichever runs first fixes it and nothing later moves it. Shadow and off
-// are no-ops exactly as in activationBoundary. Never throws — a settings
-// hiccup must not cost the call its commitments, and the sweep's own
-// persist remains the fallback.
+// call-commitments.upsertCommitments calls this FIRST, inside the very same
+// transaction that writes the commitment row, whenever this gate is live —
+// so the stored instant is the EARLIER of the first live extraction and the
+// first live sweep: insert-if-absent means whichever runs first fixes it and
+// nothing later moves it. Shadow and off are no-ops exactly as in
+// activationBoundary. THROWS on a genuine write failure — swallowing it here
+// used to let the commitment upsert still commit un-boundaried; a later
+// healthy sweep would then persist a LATER boundary and silently cancel that
+// legitimate live promise as pre_activation, with no card and no send (codex
+// #4293 P2 r4). Sharing the transaction means the failure now rolls the
+// commitment write back with it instead: nothing is left half-recorded, and
+// the next pass retries both together.
 async function recordLiveActivation(conn = db) {
-  try {
-    await activationBoundary(conn);
-  } catch (err) {
-    require('./logger').warn(`[reschedule-link-promises] activation boundary not recorded (${err.code || err.name || 'error'})`);
-  }
+  await activationBoundary(conn);
 }
 const norm = (s) => String(s || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
 const dateOnly = (v) => v instanceof Date ? v.toISOString().slice(0, 10) : String(v || '').slice(0, 10);
@@ -168,11 +184,20 @@ function unsendableChannel(commitment, promisedQuotes) {
 // The agent quotes that still STAND as a promise to text a link: spoken by
 // the agent, unconditional in their own turn, and not withdrawn later in the
 // call.
+// norm() strips apostrophes to a bare space, so "I'll" reads as "i ll",
+// "I'm going to" as "i m going to", and "we're going to" as "we re going
+// to". The alternation below has to spell out every contracted form
+// norm() can produce for these tenses, not just the uncontracted ones —
+// "i m going to" and "we re going to" were missing outright, dropping a
+// high-confidence, uniquely-grounded standing promise into
+// promise_needs_review for wording that means exactly the same thing as
+// "I am going to" (codex #4293 P2 r4).
+const STANDING_PROMISE_TENSE = /\b(?:i|we) (?:ll|will|am going to|m going to|are going to|re going to|am sending|m sending|are sending|re sending)\b|\blet me\b/;
 function standingPromiseQuotes(commitment, turns) {
   if (!turns?.agent?.length) return [];
   return (commitment.evidence || []).filter((e) => e.speaker === 'agent').map((e) => norm(e.quote))
     .filter((quote) => /\blink\b/.test(quote) && /\b(send|text|email|sending|texting)\b/.test(quote)
-      && /\b(?:i|we) (?:ll|will|am going to|are going to|am sending|m sending)\b|\blet me\b/.test(quote))
+      && STANDING_PROMISE_TENSE.test(quote))
     .filter((quote) => {
       const spokenAt = turns.agent.findIndex((turn) => turn.includes(quote) && !CONDITIONAL.test(turn));
       return spokenAt >= 0 && !turns.agent.slice(spokenAt + 1).some((turn) => AGENT_RETRACTION.test(turn));
@@ -424,7 +449,7 @@ function selectDiscussedVisit({ commitment, call, customer, candidates = [], now
 async function contextFor(conn, commitmentId, now) {
   const raw = await conn('call_commitments').where({ id: commitmentId, kind: KIND, party: 'waves' }).first();
   const commitment = raw ? require('./call-commitments').normalizeRow(raw) : null;
-  if (!commitment?.call_log_id || commitment.status !== 'open' || commitment.human_state) return { reason: 'promise_closed' };
+  if (!commitment?.call_log_id || commitment.status !== 'open' || humanStateBlocksPromise(commitment.human_state)) return { reason: 'promise_closed' };
   const call = await conn('call_log').where({ id: commitment.call_log_id }).first();
   if (!call || (commitment.source === 'ai' && Number(commitment.last_seen_generation) !== Number(call.processing_generation))) return { reason: 'stale_extraction' };
   const customer = call.customer_id ? await conn('customers').where({ id: call.customer_id }).whereNull('deleted_at').first() : null;
@@ -514,6 +539,45 @@ function promiseCommitmentIds(payload) {
   return ids.length ? ids : [promise.commitment_id].filter(Boolean);
 }
 
+// admin-triage.js's specialized-card hook, exactly like property_role_confirm
+// (applyPropertyRoleProposals) and the email review cards (first_touch_holds
+// release): a triage action on THIS reason code is not a call-routing
+// judgment, and closing the card without settling the promise it names left
+// the call_commitments row open and the outbox row parked in 'review'
+// forever, with nothing left to ever raise a card for it again — parkReview
+// only (re)creates one when the outbox row's own status or last_error
+// actually changes (codex #4293 P1). Called from transitionCore INSIDE the
+// same transaction that flips the card's own status, for both terminal
+// actions: 'resolved' ("office handled it") and 'dismissed' ("not needed").
+// Settlement rides the SAME human-verdict mechanism every other commitment
+// action uses (call-commitments.applyHumanUpdate) rather than a second
+// status writer (AGENTS.md L417-L422), so the audit trail and human_state
+// semantics stay one path. Only a commitment STILL open is touched — one an
+// actual delivery already fulfilled in the interim is left exactly as
+// delivery left it, and its own card-clearing already ran through
+// clearPromiseException.
+async function settleParkedPromiseCard(trx, item, { action, reviewedBy = null, note = null } = {}) {
+  const ids = promiseCommitmentIds(item.payload);
+  if (!ids.length) return;
+  const openIds = await trx('call_commitments')
+    .where({ call_log_id: item.call_log_id, kind: KIND, party: 'waves', status: 'open' })
+    .whereIn('id', ids).pluck('id');
+  const { applyHumanUpdate } = require('./call-commitments');
+  for (const id of openIds) {
+    await applyHumanUpdate(trx, id, { action: action === 'dismissed' ? 'dismiss' : 'fulfill', reviewedBy, note, renewalAudit: false });
+  }
+  // Every outbox row this card still speaks for, whatever lane it is
+  // sitting in (review, or — a card can be reviewed before a send is even
+  // attempted — pending/shadow) and not already terminal, stops here: no
+  // further sweep may retry, park, or re-park it once the office has ruled.
+  await trx('outbox_messages').where({ related_call_log_id: item.call_log_id }).whereIn('commitment_id', ids)
+    .whereNotIn('status', ['delivered', 'cancelled'])
+    .update({ status: 'cancelled', last_error: action === 'dismissed' ? 'dismissed_by_office' : 'resolved_by_office', updated_at: new Date() });
+  await recordAuditEvent({ actor_type: reviewedBy ? 'technician' : 'system', actor_id: reviewedBy,
+    action: action === 'dismissed' ? 'reschedule_link_promise_dismissed' : 'reschedule_link_promise_resolved',
+    resource_type: 'triage_item', resource_id: item.id, metadata: { commitment_ids: ids, settled_ids: openIds }, critical: true, trx });
+}
+
 // The card this promise's own exceptions raise. One promise reaching a
 // terminal state — delivered, or closed by the office — drops only ITS id;
 // the card resolves when the last parked promise on the call is gone, so a
@@ -568,9 +632,14 @@ function deliveryIdentityMatches({ call, commitment, current, visit, customer, s
     && (context?.visit?.id === visitId || (current.provider_message_id && current.provider_message_id === sms.twilio_sid) || (link && String(sms.message_body).includes(link.replace(/^https?:\/\//, ''))));
 }
 
-// Delivery — and only delivery — keeps the promise.
+// Delivery — and only delivery — keeps the promise. A staff Confirm racing
+// this receipt must not block it: human_state 'confirmed' is an affirmative
+// review, not a claim on the row (codex #4293 P1 r4) — excluding only
+// 'confirmed' with whereNotIn (rather than requiring NULL) still refuses a
+// genuinely terminal human_state ('dismissed').
 async function fulfilPromise(trx, row, sms, call) {
-  const updated = await trx('call_commitments').where({ id: row.commitment_id, status: 'open' }).whereNull('human_state')
+  const updated = await trx('call_commitments').where({ id: row.commitment_id, status: 'open' })
+    .where((q) => q.whereNull('human_state').orWhere('human_state', 'confirmed'))
     .update({ status: 'fulfilled', fulfilled_at: new Date(), updated_at: new Date(), fulfillment: {
       kind: 'reschedule_link_delivered', strength: 'direct', record_type: 'sms_log', record_id: sms.id,
       matched_at: new Date().toISOString(), basis: 'linked_visit_reschedule_link_delivered',
@@ -628,7 +697,12 @@ async function settleDelivery(conn, row, sms, context = null) {
 async function stagePromises(conn) {
   if (mode() === 'off') return 0;
   const rows = await conn('call_commitments as cc').join('call_log as cl', 'cl.id', 'cc.call_log_id')
-    .where({ 'cc.kind': KIND, 'cc.party': 'waves', 'cc.status': 'open' }).whereNull('cc.human_state')
+    .where({ 'cc.kind': KIND, 'cc.party': 'waves', 'cc.status': 'open' })
+    // A staff Confirm ('confirmed') is an affirmative review, not a claim
+    // on the row — it must stay eligible for staging exactly like a
+    // never-touched (NULL) commitment; only a genuinely terminal
+    // human_state stays excluded (codex #4293 P1 r4).
+    .where((q) => q.whereNull('cc.human_state').orWhere('cc.human_state', 'confirmed'))
     .whereRaw(`NOT EXISTS (
       SELECT 1 FROM outbox_messages o
       WHERE o.commitment_id = cc.id
@@ -1168,22 +1242,36 @@ const ATTEMPTED_STATUSES = ['sent', 'delivered', 'review'];
 // safe to retry from anywhere. It is also the row's terminal marker for
 // runOne's send-sweep path (codex #4293 P1 r4) — set it only once the promise
 // truly needs no further planning or re-parking.
+//
+// Everything below runs in ONE call-locked transaction — not three separate
+// operations — because a concurrent five-minute sweep pass (runOne /
+// settleDelivery / parkReview) takes the SAME advisory lock: without it, the
+// sweep can observe the cards resolved but the stamp not yet written (or the
+// reverse), see the moved appointment as unaccounted for, and call
+// parkReview again — recreating the very exception this reconciliation just
+// closed, this time for good, since the stamp then makes every later pass
+// skip the row outright (codex #4293 P2 r4). The status check also reads the
+// row FRESH under the lock rather than trusting the caller's snapshot: a row
+// the caller observed as 'sent' can have been parked to 'review' by a
+// concurrent pass in the gap since that read, and the stale value used to
+// skip clearPromiseException for a card that, right now, is actually open.
 async function markLinkUsed(conn, row) {
-  await require('./triage-auto-resolve').resolveRescheduleCards(conn, row.related_call_log_id, USED_LINK_NOTE, row.related_scheduled_service_id);
-  // A row parked for a missing carrier receipt raised this promise's own
-  // exception card, and classifyTriageItem keeps that card out of the
-  // generic sweep. The customer following the same link answers it: there
-  // is no office work left to chase. The card closes; the promise's own
-  // status does NOT move, because a missing receipt is still not proof of
-  // delivery (codex #4293 r2 P2).
-  if (row.status === 'review') {
-    await conn.transaction(async (trx) => {
-      await lockTriageCall(trx, row.related_call_log_id);
+  await conn.transaction(async (trx) => {
+    await lockTriageCall(trx, row.related_call_log_id);
+    await require('./triage-auto-resolve').resolveRescheduleCards(trx, row.related_call_log_id, USED_LINK_NOTE, row.related_scheduled_service_id);
+    // A row parked for a missing carrier receipt raised this promise's own
+    // exception card, and classifyTriageItem keeps that card out of the
+    // generic sweep. The customer following the same link answers it: there
+    // is no office work left to chase. The card closes; the promise's own
+    // status does NOT move, because a missing receipt is still not proof of
+    // delivery (codex #4293 r2 P2).
+    const current = await trx('outbox_messages').where({ id: row.id }).first('status');
+    if (current?.status === 'review') {
       await clearPromiseException(trx, row.related_call_log_id, row.commitment_id, USED_LINK_NOTE);
-    });
-  }
-  await conn('outbox_messages').where({ id: row.id })
-    .update({ payload: conn.raw("COALESCE(payload, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ link_used_reconciled_at: new Date().toISOString() })]), updated_at: new Date() });
+    }
+    await trx('outbox_messages').where({ id: row.id })
+      .update({ payload: trx.raw("COALESCE(payload, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ link_used_reconciled_at: new Date().toISOString() })]), updated_at: new Date() });
+  });
 }
 
 function unreconciledPromiseRows(conn) {
@@ -1257,4 +1345,4 @@ async function reconcileUsedLinks(conn, now = new Date()) {
   return reconcileRows(conn, rows);
 }
 
-module.exports = { mode, selectDiscussedVisit, snapshot, stagePromises, matchingSend, claimForDispatch, runOne, sweep, withSendLock, resolveUsedLink, reconcileUsedLinks, recordLiveActivation };
+module.exports = { mode, selectDiscussedVisit, snapshot, stagePromises, matchingSend, claimForDispatch, runOne, sweep, withSendLock, resolveUsedLink, reconcileUsedLinks, recordLiveActivation, settleParkedPromiseCard, contextFor, fulfilPromise, markLinkUsed };

@@ -591,6 +591,15 @@ async function upsertCommitments(conn, callLogId, items, { generation = null, ex
   const rows = [...dedupedByKey.values()].map((item) => toRow(callLogId, item, { generation, extractorVersion, recordingSid }));
 
   return conn.transaction(async (trx) => {
+    // Fixes the promised-link worker's live-activation boundary, in this
+    // SAME transaction, before anything else writes — a send_reschedule_link
+    // row this pass inserts is judged later against that instant, and a
+    // transient failure recording it must take the whole write down with it
+    // rather than leave the row committed with no boundary on record (codex
+    // #4293 P2 r4; see reschedule-link-promises.recordLiveActivation). A
+    // no-op for every other commitment kind and whenever that gate isn't
+    // live.
+    await require('./reschedule-link-promises').recordLiveActivation(trx);
     // The fence also names the AUDIO this pass heard: an adopted or
     // replaced recording swaps recording_sid without moving the generation,
     // and a pass still enriching the superseded audio must not persist its
@@ -716,12 +725,9 @@ async function recordCallCommitments({
       ...item,
       evidence: anchorEvidence(item.evidence, { segments, transcript }),
     }));
-    // A send_reschedule_link row this pass writes is judged later against
-    // the promised-link worker's live-activation instant; that instant has
-    // to be on record BEFORE the row exists, or the worker's first sweep
-    // reads the promise as pre-activation history and cancels it. No-op
-    // unless that gate is live; never throws.
-    await require('./reschedule-link-promises').recordLiveActivation(conn);
+    // upsertCommitments fixes the promised-link activation boundary inside
+    // its own write transaction (see there) — atomic with the commitment
+    // row a live send_reschedule_link promise needs it recorded against.
     const result = await upsertCommitments(conn, call.id, items, { generation: procGeneration, procToken, procGeneration, recordingSid: call?.recording_sid || null });
     summary.written = result.written;
     summary.ownershipLost = result.ownershipLost;
