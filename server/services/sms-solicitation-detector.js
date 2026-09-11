@@ -6,7 +6,13 @@
  */
 
 const SOLICITATION_MARKERS = [
-  { key: 'leads_pitch', strong: true, re: /\b(?:exclusive|qualified|unlimited)\s+(?:\w+\s+){0,3}leads?\b/i },
+  // Strong on its own ("exclusive/qualified/unlimited leads"), but a
+  // sender's own neighbors/neighborhood/friends/family establishes referral
+  // context across the whole message — a homeowner referring people they
+  // know is ordinary intake, not a vendor pitch, even when the phrasing
+  // happens to land on this wording (codex P1, 2026-09-11). Needs
+  // independent vendor evidence (another marker) before it can be a pitch.
+  { key: 'leads_pitch', strong: true, re: /^(?![\s\S]*\b(?:my|our)\s+(?:neighbou?r(?:s|hood)?|friends?|family)\b)[\s\S]*\b(?:exclusive|qualified|unlimited)\s+(?:\w+\s+){0,3}leads?\b/i },
   // Referring neighbors is ordinary intake; more leads or "leads for you"
   // needs independent vendor evidence, such as a supplier offer or footer.
   { key: 'lead_referral', strong: false, re: /\b(?:more|extra)\s+(?:[\w-]+\s+){0,3}leads?\b|\bleads?\s+for\s+(?:you|your)\b/i },

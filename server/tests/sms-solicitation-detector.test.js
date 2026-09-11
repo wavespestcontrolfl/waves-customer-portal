@@ -44,6 +44,12 @@ describe('shared SMS vendor-pitch detector', () => {
     'Can I get termite service with no upfront cost? Would you like more details?',
     'Can you handle more lawn jobs or handle extra pest estimates?',
     'I need pest control Tuesday; reply NO if you cannot make it.',
+    // Codex P1, 2026-09-11: a strong marker ("qualified/exclusive/unlimited
+    // leads") had no neighbor-context veto, so a genuine referral phrased
+    // with that wording was misread as a confident vendor pitch.
+    'I have three qualified leads for you—my neighbors all need pest control. Can you quote them?',
+    'My neighbors all need pest control. I have three qualified leads for you. Can you quote them?',
+    'I have unlimited leads for you from our neighbors who need lawn care.',
   ])('ambiguous customer wording does not establish a pitch: %s', (body) => {
     expect(isSolicitationPitch(body)).toBe(false);
   });

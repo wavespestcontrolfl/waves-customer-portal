@@ -55,6 +55,17 @@ const STOP_CONFIRMATION_TEMPLATE =
 // removed; narrated attempts and requests elsewhere must still win.
 const REPLY_OPT_OUT_INSTRUCTION = /(^|[.!?;\r\n])\s*(?:reply|respond|text|say)\s+(?:with\s+)?["'\u2018\u2019\u201C\u201D]?(?:no|stop|unsubscribe)["'\u2018\u2019\u201C\u201D]?\s+(?:if\s+you\s+(?:want|need)(?:\s+(?:me|us))?\s+to\s+|to\s+)(?:stop\s+(?:texting|messaging|texts?|messages?|sms)(?:\s+(?:you|me))?|unsubscribe|opt\s*out)\b(?=\s*(?:[.!?;\r\n]|$))/gi;
 
+// Same shape, but for a vendor footer that invites a STOP/NO reply keyed on
+// "wrong number" or "sent in error" rather than "stop texting" \u2014 e.g. "Reply
+// STOP if this is the wrong number." / "Text STOP if wrong number." / "Reply
+// STOP if you received this in error." Left unstripped, WRONG_NUMBER_PATTERNS
+// below reads the footer's own "wrong number" as the recipient's own reply
+// and the classifier treats a vendor pitch as a real wrong-number opt-out
+// (codex P0, 2026-09-11). A genuine human reply ("sorry wrong number", "you
+// have the wrong number") never matches this reply-instruction shape, so it
+// still falls through to WRONG_NUMBER_PATTERNS untouched.
+const REPLY_WRONG_NUMBER_FOOTER = /(^|[.!?;\r\n])\s*(?:reply|respond|text|say)\s+(?:with\s+)?["'\u2018\u2019\u201C\u201D]?(?:no|stop|unsubscribe)["'\u2018\u2019\u201C\u201D]?\s+if\s+(?:this\s+is\s+)?(?:you(?:'re|\s+are)\s+)?(?:not\s+the\s+intended\s+recipient|(?:the\s+)?wrong\s+number|you\s+(?:received|got)\s+this\s+(?:in\s+error|by\s+mistake))\b(?=\s*(?:[.!?;\r\n]|$))/gi;
+
 function normalizeBody(body) {
   return String(body || '')
     .replace(/[\u2018\u2019]/g, "'")
@@ -78,7 +89,10 @@ function compactKeyword(body) {
 
 function detectSmsOptCommand(body, { ignoreReplyInstructions = false } = {}) {
   const normalized = normalizeBody(ignoreReplyInstructions
-    ? String(body || '').replace(REPLY_OPT_OUT_INSTRUCTION, '$1') : body);
+    ? String(body || '')
+      .replace(REPLY_OPT_OUT_INSTRUCTION, '$1')
+      .replace(REPLY_WRONG_NUMBER_FOOTER, '$1')
+    : body);
   if (!normalized) return { action: null };
 
   const tapbackStripped = stripTapbackPrefix(normalized);

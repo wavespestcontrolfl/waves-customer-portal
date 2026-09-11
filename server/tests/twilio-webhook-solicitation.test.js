@@ -1,17 +1,23 @@
 // Exercise the real webhook, carrier-command detector, and solicitation screen.
 // Persistence and providers are mocked; no SMS or customer record is touched.
 const mockWrites = [];
+const mockWhereRawCalls = [];
+// The /sms handler's only reachable db('sms_log')...first() call in an
+// unknown-sender flow is the repeat-sender alert-quota check — queueing a
+// row here simulates "a prior sms_log row exists" for that one check.
+const mockSmsLogFirstQueue = [];
 function mockDb(table) {
   const query = { rows: [] };
-  for (const method of ['where', 'whereNull', 'whereRaw', 'whereNot', 'orderBy', 'limit']) {
+  for (const method of ['where', 'whereNull', 'whereNot', 'orderBy', 'limit']) {
     query[method] = () => query;
   }
+  query.whereRaw = (...args) => { mockWhereRawCalls.push({ table, args }); return query; };
   query.insert = (row) => {
     mockWrites.push({ table, row });
     query.rows = [{ id: '00000000-0000-4000-8000-000000000001', created_at: new Date(), ...row }];
     return query;
   };
-  query.first = async () => null;
+  query.first = async () => (table === 'sms_log' && mockSmsLogFirstQueue.length ? mockSmsLogFirstQueue.shift() : null);
   query.returning = async () => query.rows;
   query.then = (resolve, reject) => Promise.resolve(query.rows).then(resolve, reject);
   query.catch = (reject) => Promise.resolve(query.rows).catch(reject);
@@ -27,7 +33,7 @@ jest.mock('../config/feature-gates', () => ({
 jest.mock('../services/llm/call', () => ({ dispatchWithFallback: jest.fn() }));
 jest.mock('../config/models', () => ({ TEXT_POLICIES: { fastStructured: 'test-policy' } }));
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));
-jest.mock('../services/twilio', () => ({ sendSMS: jest.fn(async () => ({})) }));
+jest.mock('../services/twilio', () => ({ sendSMS: jest.fn(async () => ({})), isKnownOwnerPhone: jest.fn(() => false) }));
 jest.mock('../services/messaging/validators/suppression', () => ({
   recordSuppression: jest.fn(async () => ({})), clearSuppression: jest.fn(async () => ({})),
 }));
@@ -50,7 +56,15 @@ jest.mock('../middleware/spam-block', () => ({ checkInboundBlock: jest.fn(async 
 jest.mock('../services/contact-correction', () => ({ detectContactCorrectionIntent: jest.fn(() => false) }));
 jest.mock('../services/contact-correction-queue', () => ({}));
 jest.mock('../services/recipient-optin', () => ({ markRecipientOptin: jest.fn(async () => true) }));
-jest.mock('../utils/known-caller-phone', () => ({ knownCallerPhoneExists: jest.fn(async () => false) }));
+jest.mock('../utils/known-caller-phone', () => ({
+  knownCallerPhoneExists: jest.fn(async () => false),
+  // The STOP/HELP/START compliance gate (twilio-webhook.js, merged from
+  // fix/sms-compliance-known-senders) also calls this — unrelated to this
+  // file's solicitation-classifier scenarios, but a missing export makes
+  // that gate's `.catch()` handler unreachable (a synchronous throw on a
+  // non-function skips it), erroring every request through this handler.
+  findKnownCallerCustomer: jest.fn(async () => null),
+}));
 jest.mock('../services/estimate-clarify-asks', () => ({ handleClarifyReply: jest.fn(async () => ({ handled: false })) }));
 jest.mock('../services/estimator-engine/sms-thread', () => ({ smsThreadDraftsEnabled: () => true, startSmsThreadDraft: jest.fn(async () => ({})) }));
 jest.mock('../services/estimate-conversion-agent', () => ({ processInboundSms: jest.fn(async () => ({})) }));
@@ -91,6 +105,8 @@ async function receive(body, to = numbers.locations.parrish.number) {
 beforeEach(() => {
   jest.clearAllMocks();
   mockWrites.length = 0;
+  mockWhereRawCalls.length = 0;
+  mockSmsLogFirstQueue.length = 0;
   process.env.GATE_SMS_SPAM_CLASSIFIER = 'shadow';
   process.env.ADAM_PHONE = '+12025550199';
   dispatchWithFallback.mockResolvedValue({ ok: true, json: { solicitation: false, confidence: 0.97 } });
@@ -290,6 +306,7 @@ test.each([
   'We can provide you with more lawn leads from our neighbors who need service.',
   'My neighbors need service. I can send you more pest-control leads; can you quote them?',
   'I can provide you with more lawn leads. They are my neighbors and need quotes.',
+  'I have three qualified leads for you—my neighbors all need pest control. Can you quote them?',
 ])('a genuine referral remains unread and reaches ordinary handling in enforcement mode: %s', async (body) => {
   process.env.GATE_SMS_SPAM_CLASSIFIER = 'true';
   await receive(body);
@@ -335,4 +352,32 @@ test('shadow mode still honors a reply footer exactly as before the enforcement 
   const res = await receive(PITCH);
   expect(res.body).toContain('unsubscribed');
   expect(recordSuppression).toHaveBeenCalledTimes(1);
+});
+
+// Codex P1, 2026-09-11: an enforced pitch's own sms_log row was counted as a
+// "prior inbound" by the repeat-unknown-sender alert-quota check, so a
+// genuine request from the same unknown number within the 4h window lost its
+// owner alert to a text that had already been silently screened out.
+test('the repeat-sender alert-quota check excludes enforced solicitation rows from its window', async () => {
+  // An enforced pitch (like PITCH) returns before this check ever runs for
+  // ITS OWN message — the bug, and this exclusion, only matter for the next
+  // genuine message from the same unknown sender, which is what this covers.
+  process.env.GATE_SMS_SPAM_CLASSIFIER = 'true';
+  await receive('Can we schedule for Tuesday?');
+  const call = mockWhereRawCalls.find(({ table, args }) => table === 'sms_log' && /spam_verdict/.test(args[0]));
+  expect(call).toBeDefined();
+  expect(call.args[0]).toMatch(/enforced/);
+});
+
+test('a genuine prior inbound (not an enforced verdict) still suppresses the repeat owner alert', async () => {
+  mockSmsLogFirstQueue.push({ id: 'prior-row' });
+  const res = await receive('Can we schedule for Tuesday?');
+  expect(res.body).toBe('<Response></Response>');
+  expect(sendSMS).not.toHaveBeenCalledWith(process.env.ADAM_PHONE, expect.stringContaining('📩 New SMS'), expect.anything());
+});
+
+test('a first-contact unknown sender with no prior row still gets the owner alert', async () => {
+  const res = await receive('Can we schedule for Tuesday?');
+  expect(res.body).toBe('<Response></Response>');
+  expect(sendSMS).toHaveBeenCalledWith(process.env.ADAM_PHONE, expect.stringContaining('📩 New SMS'), expect.anything());
 });

@@ -50,4 +50,31 @@ describe('SMS opt-out detector', () => {
   ])('preserves a real opt-out even when reply instructions are excluded: %s', (body) => {
     expect(detectSmsOptCommand(body, { ignoreReplyInstructions: true }).action).toBe('opt_out');
   });
+
+  test.each([
+    'We have exclusive pest leads. Reply STOP if this is the wrong number.',
+    'We have exclusive pest leads for you. Text STOP if wrong number.',
+    'Exclusive leads available in your area\nReply NO if this is the wrong number',
+  ])('can exclude a vendor wrong-number footer while keeping legacy detection: %s', (body) => {
+    expect(detectSmsOptCommand(body).action).toBe('opt_out');
+    expect(detectSmsOptCommand(body, { ignoreReplyInstructions: true }).action).toBeNull();
+  });
+
+  test('strips an "in error" footer variant that carries no other opt-out signal', () => {
+    const body = 'I found your info online. Reply STOP if you received this in error.';
+    expect(detectSmsOptCommand(body).action).toBeNull();
+    expect(detectSmsOptCommand(body, { ignoreReplyInstructions: true }).action).toBeNull();
+  });
+
+  test.each([
+    'wrong number',
+    'sorry wrong number',
+    'you have the wrong number',
+    'Sorry, you have the wrong number.',
+  ])('keeps a genuine human wrong-number reply working even when reply instructions are excluded: %s', (body) => {
+    expect(detectSmsOptCommand(body, { ignoreReplyInstructions: true })).toMatchObject({
+      action: 'opt_out',
+      reason: 'wrong_number',
+    });
+  });
 });
