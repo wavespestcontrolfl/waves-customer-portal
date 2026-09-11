@@ -17689,16 +17689,24 @@ router.put('/blackout-dates/weekly', requireAdmin, async (req, res, next) => {
     if (!raw) return res.status(400).json({ error: 'daysOff (array of day-of-week ints 0-6) required' });
     const days = [...new Set(raw.map(Number).filter((d) => Number.isInteger(d) && d >= 0 && d <= 6))]
       .sort((a, b) => a - b);
-    const { WEEKLY_DAYS_OFF_KEY } = require('../services/scheduling/blackout-dates');
-    await db('system_settings')
-      .insert({
-        key: WEEKLY_DAYS_OFF_KEY,
-        value: JSON.stringify(days),
-        category: 'scheduling',
-        description: 'JS day-of-week ints (0=Sun…6=Sat) removed from every customer-facing offer surface',
-      })
-      .onConflict('key')
-      .merge({ value: JSON.stringify(days), updated_at: db.fn.now() });
+    const { WEEKLY_DAYS_OFF_KEY, lockClosureState } = require('../services/scheduling/blackout-dates');
+    // Exclusive closure-state lock before the write — serializes against a
+    // capacity reservation transaction's shared read (arrival-route.js
+    // assertCapacityEligibility) so a hold cannot commit for a day this
+    // write is about to close (codex #4346 P2). See blackout-dates.js for
+    // lock order.
+    await db.transaction(async (trx) => {
+      await lockClosureState(trx, { exclusive: true });
+      await trx('system_settings')
+        .insert({
+          key: WEEKLY_DAYS_OFF_KEY,
+          value: JSON.stringify(days),
+          category: 'scheduling',
+          description: 'JS day-of-week ints (0=Sun…6=Sat) removed from every customer-facing offer surface',
+        })
+        .onConflict('key')
+        .merge({ value: JSON.stringify(days), updated_at: trx.fn.now() });
+    });
     logger.info(`[schedule] weekly days off set to [${days.join(',')}]`);
     flushEstimateSlotCaches();
     res.json({ success: true, weeklyDaysOff: days });
@@ -17714,11 +17722,18 @@ router.post('/blackout-dates', requireAdmin, async (req, res, next) => {
     }
     // Upsert keeps the button idempotent — re-adding a date just updates
     // the reason instead of tripping the unique constraint.
-    const [row] = await db('schedule_blackout_dates')
-      .insert({ date, reason: reason || null })
-      .onConflict('date')
-      .merge({ reason: reason || null })
-      .returning(['id', 'date', 'reason']);
+    const { lockClosureState } = require('../services/scheduling/blackout-dates');
+    // Exclusive closure-state lock before the write — see the weekly-days-off
+    // handler above / blackout-dates.js for why and the lock order.
+    const row = await db.transaction(async (trx) => {
+      await lockClosureState(trx, { exclusive: true });
+      const [inserted] = await trx('schedule_blackout_dates')
+        .insert({ date, reason: reason || null })
+        .onConflict('date')
+        .merge({ reason: reason || null })
+        .returning(['id', 'date', 'reason']);
+      return inserted;
+    });
     // Reason is free-form admin text — never log it (PII rule): a staffer
     // may type a name/phone/address into it. Date + presence only.
     logger.info(`[schedule] blackout date ${date} set${reason ? ' (with reason)' : ''}`);
@@ -17729,7 +17744,13 @@ router.post('/blackout-dates', requireAdmin, async (req, res, next) => {
 
 router.delete('/blackout-dates/:id', requireAdmin, async (req, res, next) => {
   try {
-    const deleted = await db('schedule_blackout_dates').where({ id: req.params.id }).del();
+    const { lockClosureState } = require('../services/scheduling/blackout-dates');
+    // Exclusive closure-state lock before the write — see the weekly-days-off
+    // handler above / blackout-dates.js for why and the lock order.
+    const deleted = await db.transaction(async (trx) => {
+      await lockClosureState(trx, { exclusive: true });
+      return trx('schedule_blackout_dates').where({ id: req.params.id }).del();
+    });
     if (!deleted) return res.status(404).json({ error: 'Not found' });
     flushEstimateSlotCaches();
     res.json({ success: true });

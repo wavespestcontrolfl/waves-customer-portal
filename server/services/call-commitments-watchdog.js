@@ -42,7 +42,7 @@ const MAX_PAGES = 25;
 async function listAllOpenWaves(now) {
   const all = [];
   for (let page = 0; page < MAX_PAGES; page += 1) {
-    const rows = await listOpenCommitments(db, { party: 'waves', limit: SCAN_LIMIT, offset: page * SCAN_LIMIT, includeHints: true, now });
+    const rows = await listOpenCommitments(db, { party: 'waves', limit: SCAN_LIMIT, offset: page * SCAN_LIMIT, includeHints: true, prepare: true, now });
     all.push(...rows);
     if (rows.length < SCAN_LIMIT) break;
   }
@@ -107,7 +107,7 @@ async function runInner({ now = new Date() } = {}) {
   const unverified = unverifiedCalls.size;
   // The snapshot is minutes old by now (one refresh per candidate call):
   // a promise the office marked done or dismissed meanwhile must not ring.
-  const liveIds = await stillOpenIds(db, candidates.map((r) => r.id));
+  const liveIds = await stillOpenIds(db, candidates.map((r) => r.id), { now });
   const overdue = candidates.filter((r) => liveIds.has(r.id));
   if (!overdue.length) return { skipped: false, scanned: rows.length, overdue: 0, alerted: 0, unverified };
 
