@@ -55,6 +55,12 @@ const SLOT_OFFER_TTL_MS = 45 * 60 * 1000;
 // clock skew between app instances that mint and verify.
 const EXP_SKEW_MS = 60 * 1000;
 
+// Capacity offers are minted and redeemed under this policy tag; it rides in
+// the HMAC so an offer produced by one scheduling policy cannot be redeemed
+// under another (gate flipped or a mixed rolling deploy). Omitted for legacy
+// offers, whose canonical string is unchanged.
+const CAPACITY_OFFER_POLICY = 'capacity_2026_09_09';
+
 function canonicalOfferString(payload = {}) {
   return [
     // v2: serviceKey + locationKey joined the signed scope (round 3). The tag
@@ -70,6 +76,7 @@ function canonicalOfferString(payload = {}) {
     String(payload.technicianId || ''),
     String(Number(payload.durationMinutes)),
     String(Number(payload.exp)),
+    ...(payload.policy ? [String(payload.policy)] : []),
   ].join('|');
 }
 
@@ -177,6 +184,7 @@ function generateConfirmationCode() {
 }
 
 module.exports = {
+  CAPACITY_OFFER_POLICY,
   SLOT_OFFER_TTL_MS,
   signSlotOffer,
   verifySlotOffer,

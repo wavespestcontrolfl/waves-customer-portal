@@ -138,6 +138,11 @@
 .tech-visit-mark-frame { position: relative; border-radius: 9px; overflow: hidden; line-height: 0; cursor: pointer; margin-bottom: 12px; }
 .tech-visit-mark-image { width: 100%; display: block; touch-action: manipulation; }
 .tech-visit-mark-pin { position: absolute; transform: translate(-50%, -50%); cursor: pointer; }
+/* The pin box itself has no size (the dot and badge are positioned off its
+   centre), so give the long-press a Tech-contract 48px hit area centred on the
+   pin without moving the dot or the badge offsets, which are measured from the
+   pin box. */
+.tech-visit-mark-pin::before { content: ''; position: absolute; left: 0; top: 0; width: 48px; height: 48px; transform: translate(-50%, -50%); }
 .tech-visit-mark-dot {
   position: absolute; left: 50%; top: 50%;
   width: 7px; height: 7px; margin: -3.5px 0 0 -3.5px;
