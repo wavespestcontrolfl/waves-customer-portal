@@ -929,7 +929,16 @@ async function claimInvoiceForSend(invoiceId, { allowClaimed = false, firstDeliv
   // of the 'sending' claim, and this call holds it now — so any live queue
   // row seen here was inserted before this claim and owns the delivery:
   // give the claim back and refuse.
-  const queuedUnderClaim = await queuedPayLinkText(invoiceId, { adoptsQueuedInvoiceSend });
+  // A lookup that THROWS gives the claim back too (pre-push P1 r5 ×3): the
+  // caller never receives it, so nothing else could release it and the row
+  // would sit 'sending' until stale-claim recovery parked it.
+  let queuedUnderClaim;
+  try {
+    queuedUnderClaim = await queuedPayLinkText(invoiceId, { adoptsQueuedInvoiceSend });
+  } catch (lookupErr) {
+    await restoreSendClaim(invoiceId, current.status, true);
+    throw lookupErr;
+  }
   if (queuedUnderClaim) {
     await restoreSendClaim(invoiceId, current.status, true);
     throw queuedPayLinkError(queuedUnderClaim);

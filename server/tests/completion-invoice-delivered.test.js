@@ -129,6 +129,34 @@ describe('the shared send claim (claimInvoiceForSend) under interleaving', () =>
     }
   });
 
+  test('a post-claim queue lookup that THROWS gives the claim back and rethrows — the row never sits under a claim nobody holds', async () => {
+    const db = require('../models/db');
+    const { claimInvoiceForSend } = require('../services/invoice');
+    db.__state.status = 'draft';
+    db.__state.sent_at = null;
+    db.__state.queuedCompletionText = null;
+    let smsLogReads = 0;
+    const original = db.getMockImplementation();
+    db.mockImplementation((table) => {
+      const q = original(table);
+      if (table === 'sms_log') {
+        q.first = jest.fn(async () => {
+          smsLogReads += 1;
+          if (smsLogReads === 2) throw new Error('sms_log read failed');
+          return null;
+        });
+      }
+      return q;
+    });
+    try {
+      await expect(claimInvoiceForSend('inv-1')).rejects.toThrow('sms_log read failed');
+      expect(smsLogReads).toBe(2);
+      expect(db.__state.status).toBe('draft');
+    } finally {
+      db.mockImplementation(original);
+    }
+  });
+
   test('behavioral: an admin send whose SMS leg was queued for the window (row back to draft) followed by the completion — the completion is refused and goes report-only; the admin retry still adopts its queue', async () => {
     const db = require('../models/db');
     const { claimInvoiceForSend } = require('../services/invoice');
