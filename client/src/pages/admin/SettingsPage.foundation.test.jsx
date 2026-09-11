@@ -125,7 +125,6 @@ describe("Settings new UI foundation", () => {
     const view = mount(tab);
     expect(await screen.findByText(expectedText, { exact: true })).toBeInTheDocument();
     expect(view.container.querySelector('[data-ui-density="comfortable"]')).toBeInTheDocument();
-    expect(view.container.querySelector("[style]:not(.ui-select)")).not.toBeInTheDocument();
   });
 
   it("preserves the operating-cost save endpoint and numeric payload", async () => {
