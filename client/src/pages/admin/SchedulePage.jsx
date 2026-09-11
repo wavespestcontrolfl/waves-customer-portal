@@ -12928,6 +12928,12 @@ export function CompletionPanel({
     recapSource,
     areasServiced,
     lawnDefaultsEnabled,
+    // The area-only draft condition above is flag-derived: with a cold flag
+    // cache completionImprovements starts false and no other listed
+    // dependency changes when it resolves, so a draft the autosave deleted
+    // while cold was never re-minted once the flag came true under a plan
+    // outage (Codex #4365 r2 P2). Re-evaluate on the flag itself.
+    completionImprovements,
     lawnAreaOverride,
     lawnRemovedDefaultIds,
     lawnDefaultsSeedSuppressed,

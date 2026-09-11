@@ -1094,6 +1094,15 @@ describe('PATCH /:serviceId/time-on-site — behavioral', () => {
     expect(laneAt).toBeGreaterThan(tierAt);
   });
 
+  test('the closeout stamps lawn_protocol_* assignment fields only when the plan attributes a program — a legacy tier on an explicit per_visit / one_time lane cannot mint an assignment (codex #4365 r2 P2)', () => {
+    const source = fs.readFileSync(path.join(__dirname, '../services/complete-scheduled-service.js'), 'utf8');
+    expect(source).toMatch(/require\('\.\.\/services\/lawn-completion-defaults'\)/);
+    expect(source).toMatch(/const \{ [^}]*lawnPlanProgramApplies[^}]* \} = require\('\.\.\/services\/lawn-completion-defaults'\);/);
+    expect(source).toMatch(/if \(!isIncompleteVisit && isWaveGuardLawnCompletion\(svc\) && waveguardPlan\?\.protocol\?\.structured\s*&& lawnPlanProgramApplies\(waveguardPlan\)\) \{\s*const structured = waveguardPlan\.protocol\.structured;[\s\S]{0,400}scheduledServiceUpdate\.lawn_protocol_key = /);
+    // No other stamp of the assignment fields bypasses the predicate.
+    expect(source.match(/scheduledServiceUpdate\.lawn_protocol_assignment_source = /g)).toHaveLength(1);
+  });
+
   test('a ledgered visit whose planner fails drops assignment-derived equipment IDs instead of recording the unverified rig (codex #4113 P2)', () => {
     const source = fs.readFileSync(path.join(__dirname, '../services/complete-scheduled-service.js'), 'utf8');
     // The IDs copied from the appointment assignment are tracked...

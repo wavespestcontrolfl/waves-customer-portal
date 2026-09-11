@@ -18,7 +18,7 @@ const { publicPortalUrl } = require('../utils/portal-url');
 const { countSegments } = require('../services/messaging/segment-counter');
 const { recordServiceProductNutrients, amountToPounds, nutrientTreatedSqft, ledgerRowCoverage } = require('../services/nutrient-ledger');
 const { buildPlanForService, isDateInWindow } = require('../services/waveguard-plan-engine');
-const { lawnCompletionDefaultsEnabled, lawnPlanAttributesVisit } = require('../services/lawn-completion-defaults');
+const { lawnCompletionDefaultsEnabled, lawnPlanProgramApplies, lawnPlanAttributesVisit } = require('../services/lawn-completion-defaults');
 const { evaluateWaveGuardManagerApprovals, managerApprovalSummary } = require('../services/waveguard-approval-engine');
 const { shortenOrPassthrough, invoiceShortCodePrefix } = require('../services/short-url');
 const { customerOnAutopay } = require('../services/autopay-eligibility');
@@ -6539,7 +6539,15 @@ async function completeScheduledService(completionInput, packetContext = null) {
         // owns status + updated_at; we own the service timing columns
         // on the same row.
         const scheduledServiceUpdate = { ...lifecycleUpdates };
-        if (!isIncompleteVisit && isWaveGuardLawnCompletion(svc) && waveguardPlan?.protocol?.structured) {
+        // The closeout stamp follows the same program-attribution predicate
+        // as the ledger (Codex #4365 r2 P2): a per_visit / one_time customer
+        // keeping a legacy tier is a WaveGuard closeout for the completion
+        // lockouts, but the calendar-resolved plan is not a protocol the
+        // technician was assigned. Stamping it would mint a COMPLETE
+        // explicit assignment on the appointment, which lawnPlanProgramApplies
+        // then accepts as a program on every later plan build.
+        if (!isIncompleteVisit && isWaveGuardLawnCompletion(svc) && waveguardPlan?.protocol?.structured
+          && lawnPlanProgramApplies(waveguardPlan)) {
           const structured = waveguardPlan.protocol.structured;
           const window = structured.window || {};
           scheduledServiceUpdate.lawn_protocol_key = structured.protocolKey || null;
