@@ -1094,6 +1094,7 @@ function GeoGridTab() {
               return (
                 <div
                   key={i}
+                  data-geo-grid-cell
                   title={
                     p ? `(${p.latitude}, ${p.longitude}) — rank ${c.label}` : ""
                   }

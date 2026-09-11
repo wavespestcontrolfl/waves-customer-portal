@@ -26,6 +26,15 @@ const prospect = {
   outreach_subject: 'Waves resource suggestion',
   outreach_body: 'A concise, synthetic outreach draft.',
 };
+const geoPins = Array.from({ length: 25 }, (_, index) => ({
+  pin_row: Math.floor(index / 5),
+  pin_col: index % 5,
+  latitude: 27.49 + Math.floor(index / 5) * 0.002,
+  longitude: -82.57 + (index % 5) * 0.002,
+  map_pack_rank: (index % 20) + 1,
+  address_label: `Synthetic grid point ${index + 1}`,
+  top_competitors: [],
+}));
 
 function seoFixture(api, method) {
   if (api === '/admin/seo/ai-overview') return {
@@ -51,7 +60,7 @@ function seoFixture(api, method) {
   if (api === '/admin/seo/refresh-audit?limit=200') return { items: [], pages: [] };
   if (api.startsWith('/admin/seo/rankings-monitor?period=')) return { rows: [], annotations: [], summary: {} };
   if (api === '/admin/seo/geo-grid') return { offices: [{ id: 'bradenton', name: 'Bradenton' }], keywords: ['pest control'], gridSize: 5, scanning: false };
-  if (api.startsWith('/admin/seo/geo-grid/heatmap?')) return { pins: [], center: { lat: 27.49, lng: -82.57 }, gridSize: 5 };
+  if (api.startsWith('/admin/seo/geo-grid/heatmap?')) return { pins: geoPins, center: { lat: 27.49, lng: -82.57 }, gridSize: 5 };
   if (api === '/admin/seo/llm-mentions') return {
     summary: { queriesTracked: 0, platforms: [] }, benchmark: null, entity: null,
     byPlatform: [], trend: [], citedPages: [], competitors: [], grid: [],
@@ -148,13 +157,18 @@ async function main() {
         .filter((node) => !node.closest('nav[aria-label="SEO section"], nav[aria-label$="SEO view"]'))
         .filter((node) => !node.classList.contains('ui-control') && !node.classList.contains('u-touch-hit'))
         .map((node) => ({ tag: node.tagName, type: node.getAttribute('type'), name: node.getAttribute('aria-label') || node.textContent.trim().slice(0, 60) }));
+      const nonSquareGridCells = [...rootElement.querySelectorAll('[data-geo-grid-cell]')]
+        .filter(visible)
+        .map((node) => ({ width: node.getBoundingClientRect().width, height: node.getBoundingClientRect().height }))
+        .filter((box) => Math.abs(box.width - box.height) > 1);
       const h1 = rootElement.querySelector('h1');
-      return { smallText, shortControls, unsharedControls, overflow: document.documentElement.scrollWidth > innerWidth + 1, titleSize: parseFloat(getComputedStyle(h1).fontSize) };
+      return { smallText, shortControls, unsharedControls, nonSquareGridCells, overflow: document.documentElement.scrollWidth > innerWidth + 1, titleSize: parseFloat(getComputedStyle(h1).fontSize) };
     });
     report.geometry.push({ name, viewport: page.viewportSize(), ...result });
     assert.deepEqual(result.smallText, [], `${name}: readable text below 14px`);
     assert.deepEqual(result.shortControls, [], `${name}: controls below 44px`);
     assert.deepEqual(result.unsharedControls, [], `${name}: controls must use shared UI primitives`);
+    assert.deepEqual(result.nonSquareGridCells, [], `${name}: geo-grid cells must remain square`);
     assert.equal(result.overflow, false, `${name}: page overflow`);
     assert.equal(result.titleSize, 22, `${name}: page title size`);
     const file = path.join(output, `${name}.png`);
@@ -234,6 +248,7 @@ async function main() {
     assert.deepEqual(report.consoleErrors, []);
     assert.deepEqual(report.pageErrors, []);
     assert.deepEqual(report.blockedExternal, []);
+    assert.deepEqual(report.fallbackFixtures, []);
     report.finishedAt = new Date().toISOString();
     fs.writeFileSync(path.join(output, 'report.json'), `${JSON.stringify(report, null, 2)}\n`);
     console.log(`Evidence: ${path.relative(root, path.join(output, 'report.json'))}`);
