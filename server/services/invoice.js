@@ -3548,6 +3548,14 @@ const InvoiceService = {
     }
 
     const ok = sms.ok || email.ok;
+    // The SMS leg's queue obligation is decided PER-CHANNEL, independently
+    // of the overall `ok` (Codex round 15 P1 #4131): a queue row this
+    // claim's adoption cancelled represented a PROMISED SMS delivery, and
+    // an overall-successful send driven by email ALONE does not discharge
+    // it — restoring (or leaving cancelled when a fresh replacement,
+    // sms.scheduled, already secures it) must key on whether the SMS leg
+    // itself reached provider accept, not on whether email also succeeded.
+    const smsQueueRowsNeedRestore = !sms.ok && !sms.scheduled;
     if (ok) {
       await db("invoices")
         .where({ id: invoiceId })
@@ -3563,6 +3571,12 @@ const InvoiceService = {
           scheduled_review_delay_minutes: null,
           updated_at: new Date(),
         });
+      // Email alone finalized the invoice — the claim itself is correctly
+      // released (finalized 'sent'), but the SMS leg specifically did NOT
+      // deliver: restore the queue row it cancelled instead of leaving it
+      // stranded cancelled forever (Codex round 15 P1 #4131). The invoice
+      // claim release is unchanged by this — only the queue row.
+      if (smsQueueRowsNeedRestore) await restoreConsumedQueuedSend(consumedQueuedSendRows);
       // First send finalized on SMS and/or email — convert the originating lead.
       // Covers the email-only case the inner sendViaSMS hook can't (it skips when
       // allowClaimed). Resend-safe via the priorStatus gate.
@@ -3586,7 +3600,7 @@ const InvoiceService = {
       // order, before releasing the invoice) so no channel delivered here
       // never silently drops a customer's already-scheduled pay-link text
       // (Codex r12 follow-on P1 #4131).
-      await restoreSendClaim(invoiceId, previousStatus, claimed, sms.scheduled ? [] : consumedQueuedSendRows);
+      await restoreSendClaim(invoiceId, previousStatus, claimed, smsQueueRowsNeedRestore ? consumedQueuedSendRows : []);
       // No channel delivered — reverse the credit this seam auto-applied before
       // the send so we don't consume the customer's credit and edit-lock an
       // invoice whose pay link never went out. Reverse ONLY when WE own the claim:

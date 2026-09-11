@@ -46,11 +46,15 @@ jest.mock('../services/messaging/send-customer-message', () => ({
 jest.mock('../config/twilio-numbers', () => ({
   getOutboundNumber: jest.fn(() => '+19410000000'),
 }));
+jest.mock('../services/invoice-email', () => ({
+  sendInvoiceEmail: jest.fn(),
+}));
 
 const db = require('../models/db');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
 const { shortenOrPassthrough } = require('../services/short-url');
 const { isTemplateActive, getTemplate } = require('../routes/admin-sms-templates');
+const { sendInvoiceEmail } = require('../services/invoice-email');
 const InvoiceService = require('../services/invoice');
 
 const NEXT_WINDOW_OPEN = '2026-09-12T12:00:00.000Z'; // 8:00 AM ET
@@ -361,5 +365,88 @@ describe('claimInvoiceForSend (allowClaimed): the preclaimed branch still reconc
 
     await expect(InvoiceService.claimInvoiceForSend('inv-1', { allowClaimed: true, adoptsQueuedInvoiceSend: true }))
       .rejects.toMatchObject({ code: 'queued_pay_link' });
+  });
+});
+
+// Codex round 15 P1 #4131: sendViaSMSAndEmail's restore decision keyed on
+// the OVERALL `ok` (sms.ok || email.ok) — when email alone succeeded, the
+// SMS-specific queue row this claim's adoption cancelled was never
+// restored, even though the SMS leg itself never reached provider accept.
+// The queue-restore decision must be per-channel, independent of the
+// invoice claim release (which stays keyed on the overall `ok`).
+describe('sendViaSMSAndEmail: the SMS queue restore decision is per-channel, not per-overall-ok', () => {
+  const draftWithCustomer = { ...draftInvoice, customer_id: 'cust-1', scheduled_service_id: null };
+  const accrualRow = { payer_statement_id: null, status: 'draft', total: 117, credit_applied: 0, scheduled_service_id: null };
+  const CONSUMED_ROW = { id: 'sms-queued-1', scheduled_for: new Date('2026-09-11T09:00:00.000Z') };
+
+  test('email ok + SMS fails (no phone on file): the consumed SMS queue row IS restored even though the send overall succeeds', async () => {
+    jest.clearAllMocks();
+    const sendingInvoice = { ...draftWithCustomer, status: 'sending' };
+    const restoreQueueChain = chain();
+    const fallback = chain();
+    db
+      .mockReturnValueOnce(chain({ first: accrualRow })) // accrual pre-check
+      .mockReturnValueOnce(chain({ first: draftWithCustomer })) // outer claim read
+      .mockReturnValueOnce(chain({ first: undefined })) // outer pre-claim queued check
+      .mockReturnValueOnce(chain({ returning: [sendingInvoice] })) // outer claim flip
+      .mockReturnValueOnce(chain({ first: undefined })) // outer reconcile pre-consume check
+      .mockReturnValueOnce(chain({ returning: [CONSUMED_ROW] })) // outer adoption consumes the pre-existing row
+      .mockReturnValueOnce(chain({ first: undefined })) // outer strict re-check
+      .mockReturnValueOnce(chain({ first: sendingInvoice })) // inner sendViaSMS's own claim read (allowClaimed)
+      .mockReturnValueOnce(chain({ first: undefined })) // inner pre-check
+      .mockReturnValueOnce(chain({ returning: [] })) // inner consume — nothing left, outer already took it
+      .mockReturnValueOnce(chain({ first: undefined })) // inner strict re-check
+      .mockReturnValueOnce(chain({ first: { id: 'cust-1', phone: null } })) // customer lookup — NO PHONE, the SMS leg fails
+      .mockReturnValueOnce(chain()) // outer finalize update (email succeeded)
+      .mockReturnValueOnce(restoreQueueChain) // THE TARGET: restoreConsumedQueuedSend for the SMS-specific failure
+      .mockReturnValue(fallback); // lead conversion / follow-ups / anything else
+
+    sendInvoiceEmail.mockResolvedValueOnce({ ok: true, payUrl: 'https://pay.example/xyz' });
+
+    const result = await InvoiceService.sendViaSMSAndEmail('inv-1', {});
+
+    expect(result.ok).toBe(true);
+    expect(result.email.ok).toBe(true);
+    expect(result.sms.ok).toBe(false);
+    // The invoice claim released normally (finalized 'sent') — unchanged.
+    // The SMS-specific queue obligation was restored despite that.
+    expect(restoreQueueChain.whereIn.mock.calls[0]).toEqual(['id', ['sms-queued-1']]);
+    const restoreUpdate = restoreQueueChain.update.mock.calls[0][0];
+    expect(restoreUpdate.status).toBe('scheduled');
+    expect(restoreUpdate.scheduled_for).toBeUndefined();
+  });
+
+  test('email ok + SMS accepted by the provider: the consumed SMS queue row stays cancelled', async () => {
+    jest.clearAllMocks();
+    const sendingInvoice = { ...draftWithCustomer, status: 'sending' };
+    const fallback = chain();
+    db
+      .mockReturnValueOnce(chain({ first: accrualRow })) // accrual pre-check
+      .mockReturnValueOnce(chain({ first: draftWithCustomer })) // outer claim read
+      .mockReturnValueOnce(chain({ first: undefined })) // outer pre-claim queued check
+      .mockReturnValueOnce(chain({ returning: [sendingInvoice] })) // outer claim flip
+      .mockReturnValueOnce(chain({ first: undefined })) // outer reconcile pre-consume check
+      .mockReturnValueOnce(chain({ returning: [CONSUMED_ROW] })) // outer adoption consumes the pre-existing row
+      .mockReturnValueOnce(chain({ first: undefined })) // outer strict re-check
+      .mockReturnValueOnce(chain({ first: sendingInvoice })) // inner sendViaSMS's own claim read
+      .mockReturnValueOnce(chain({ first: undefined })) // inner pre-check
+      .mockReturnValueOnce(chain({ returning: [] })) // inner consume — nothing left
+      .mockReturnValueOnce(chain({ first: undefined })) // inner strict re-check
+      .mockReturnValueOnce(chain({ first: { id: 'cust-1', phone: '+19415550123', first_name: 'Pat' } })) // customer lookup — has a phone
+      .mockReturnValue(fallback); // provider-accepted send's own finalize, activity_log, follow-ups, the outer finalize, lead conversion — none of them matter here
+
+    sendCustomerMessage.mockResolvedValueOnce({ sent: true });
+    sendInvoiceEmail.mockResolvedValueOnce({ ok: true, payUrl: 'https://pay.example/xyz' });
+
+    const result = await InvoiceService.sendViaSMSAndEmail('inv-1', {});
+
+    expect(result.ok).toBe(true);
+    expect(result.sms.ok).toBe(true);
+    expect(result.email.ok).toBe(true);
+    // Nothing anywhere in the flow ever restored the consumed row to
+    // 'scheduled' — the SMS leg itself delivered, so the row correctly
+    // stays cancelled regardless of the email leg's own outcome.
+    const anyRestoredToScheduled = fallback.update.mock.calls.some((c) => c[0]?.status === 'scheduled');
+    expect(anyRestoredToScheduled).toBe(false);
   });
 });
