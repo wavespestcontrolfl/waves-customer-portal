@@ -680,6 +680,15 @@ async function runRouteReorder(opts = {}, conn = db) {
     logger.error(`[route-reorder] run fatal: ${fatal.message}`);
   }
 
+  // The existing nightly pass refreshes unresolved future-route cards.
+  // Change-triggered repairs are followed by this check in their caller.
+  if (!opts.repairOnly && qualityEnabled && gateEnvValue('GATE_SCHEDULE_QUALITY_ALERTS')) {
+    const alerts = await require('./scheduling/quality-alerts').refreshScheduleQualityAlerts({ dates, now: opts.now }, conn);
+    if (alerts.status === 'failed') {
+      if (status === 'completed') status = 'completed_with_errors';
+      summary.failed.push({ reason: 'QUALITY_ALERT_REFRESH_FAILED' });
+    }
+  }
   // ── Ledger: one route_optimization_planner_runs row per run. ──
   const ledger = await writeLedgerRow({ status, today, bandStart, bandEnd, techIds, config, summary }, conn);
   // A lost ledger row means the promised audit record is missing — the run
@@ -783,6 +792,25 @@ async function runRouteReorderIfEnabled() {
   return runRouteReorder();
 }
 
+/**
+ * With GATE_ROUTE_REORDER off, runRouteReorder (and the nightly alert
+ * reconciliation folded into it, just above) never runs at all — so with
+ * the measurement + alert gates ON but reorder off, existing route-quality
+ * defects never get an initial card and no card ever expires (codex #4295
+ * r2 P2). This is the standalone nightly trigger for that case: same
+ * six-date band as the full pass, no repair, no distance optimization, no
+ * route_optimization_planner_runs row — just the alert reconciliation.
+ * The scheduler calls this INSTEAD OF the reorder pass, never alongside
+ * it, so a date is never reconciled twice by the same tick.
+ */
+async function runScheduleQualityAlertsOnly(now = new Date(), conn = db) {
+  if (!gateEnvValue('GATE_SCHEDULE_QUALITY_MEASUREMENTS') || !gateEnvValue('GATE_SCHEDULE_QUALITY_ALERTS')) {
+    return { status: 'gate_off' };
+  }
+  const dates = Array.from({ length: TIER2_MIN_DAYS_OUT - 1 }, (_, index) => etDateString(addETDays(now, index + 1)));
+  return require('./scheduling/quality-alerts').refreshScheduleQualityAlerts({ dates, now }, conn);
+}
+
 /** Same fenced writer, limited to narrow repairs on affected future dates. */
 async function runRouteRepairAfterChange({ dates, now } = {}, conn = db) {
   return runRouteReorder({ dates, now, repairOnly: true }, conn);
@@ -824,6 +852,7 @@ module.exports = {
   runRouteReorder,
   runRouteReorderIfEnabled,
   runRouteRepairAfterChange,
+  runScheduleQualityAlertsOnly,
   recordSkippedTick,
   getRouteReorderConfig,
   _internals: { currentOrder, effectiveWindowStart, effectiveWindowRange, violatesWindowFeasibility, withinFreezeClock, violatesWindowChronology, modelDistanceMeters, loadAutoDispatchSummary, EXCLUDE_STATUSES, GOOGLE_WAYPOINT_CAP },
