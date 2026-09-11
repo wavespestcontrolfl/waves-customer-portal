@@ -9,7 +9,7 @@ const logger = require('./logger');
 const { isSolicitationPitch } = require('./sms-solicitation-detector');
 const { detectSmsOptCommand, detectHelp } = require('./messaging/opt-out-detector');
 
-const CLASSIFIER_VERSION = 'sms-solicitation-v2';
+const CLASSIFIER_VERSION = 'sms-solicitation-v3';
 const TIMEOUT_MS = 3500;
 
 const SCHEMA = {
@@ -32,12 +32,29 @@ function classifierMode() {
 /**
  * @param {object} args
  * @param {string} args.body  — the inbound text
+ * @param {'shadow'|'enforce'} [args.mode] — classifierMode() at the call site.
+ *   Only shadow evidence may take the regex fast path; enforce always reaches
+ *   the model (see the comment above the regex check).
  * @returns {Promise<{solicitation:boolean, confidence:number, method:'regex'|'model'|'model_failed'|'empty', version:string}>}
  */
-async function classifySolicitation({ body }) {
+async function classifySolicitation({ body, mode }) {
   const text = String(body || '').replace(/\s+/g, ' ').trim();
   if (!text) return { solicitation: false, confidence: 1, method: 'empty', version: CLASSIFIER_VERSION };
-  if (isSolicitationPitch(text)) {
+  // A regex marker is confident SHADOW evidence — recorded with no side
+  // effect on the sender — but it is NOT a terminal ENFORCE verdict on its
+  // own (codex P1 chokepoint fix, 2026-09-11). Four consecutive rounds each
+  // added one more SERVICE_REQUEST_OR_REFERRAL_VETO phrasing in
+  // sms-solicitation-detector.js to plug a newly named message that reached
+  // this fast path while enforcing, instead of the actual invariant the
+  // reviewer kept citing: a deterministic marker alone must not enforce
+  // without the model confirming it (AGENTS.md:121-124). So in enforce
+  // mode a regex hit is advisory only — it still reaches the model below
+  // like every other message, and only the model's OWN verdict can set
+  // `enforced` (in screenInboundSms). A model failure already returns
+  // solicitation:false (`model_failed`), so an unavailable model never
+  // enforces either — the alert/lead path proceeds, same as any other
+  // fail-open path in this screen.
+  if (isSolicitationPitch(text) && mode !== 'enforce') {
     return { solicitation: true, confidence: 1, method: 'regex', version: CLASSIFIER_VERSION };
   }
   try {
@@ -82,7 +99,7 @@ async function screenInboundSms({ body, hasCustomer, isReaction, isAiLine = fals
   // Consent commands outrank classification. Shadow records only deterministic
   // pitch evidence for natural-language commands, never a model wait.
   if (command.action && (mode === 'enforce' || /keyword$/.test(command.detectionMethod) || !isSolicitationPitch(text))) return null;
-  const verdict = await classifySolicitation({ body });
+  const verdict = await classifySolicitation({ body, mode });
   const enforced = mode === 'enforce' && verdict.solicitation && verdict.confidence >= 0.85;
   logger.info(`[sms-solicitation] ${verdict.method} solicitation=${verdict.solicitation} confidence=${verdict.confidence.toFixed(2)} mode=${mode}`);
   return { ...verdict, mode, enforced };

@@ -15,7 +15,13 @@
 // wording, e.g. "qualified leads" or "qualified jobs available", kept
 // enforcing genuine referrals and multi-property service requests because
 // earlier fixes only vetoed individual markers instead of the whole class).
-const SERVICE_REQUEST_OR_REFERRAL_VETO = /\bcan\s+(?:you|we)\s+(?:get\s+)?(?:a\s+)?quotes?\b|\bquotes?\s+(?:them|us|all|it|this|me)\b|\bneed\s+(?:a\s+)?quotes?\b|\bneed\s+service\b|\bwe\s+manage\b|\b(?:my|our)\s+(?:rentals?|propert(?:y|ies)|homes?|units?|neighbou?r(?:s|hood)?|friends?|family)\b|\bproperty\s+manager\b/i;
+// Codex P1 follow-up, 2026-09-11: a property manager's own scheduling
+// request ("Can you schedule them?") wasn't recognized as service-request
+// wording (only "quote" was), first-person "I manage" wasn't recognized
+// (only "we manage" was), and "buildings" wasn't in the possessive
+// property-noun list — so "I manage five apartment buildings... Can you
+// schedule them?" still enforced on a strong vendor marker.
+const SERVICE_REQUEST_OR_REFERRAL_VETO = /\bcan\s+(?:you|we)\s+(?:get\s+)?(?:a\s+)?(?:quotes?|schedule)\b|\b(?:quotes?|schedule)\s+(?:them|us|all|it|this|me)\b|\bneed\s+(?:a\s+)?quotes?\b|\bneed\s+service\b|\b(?:we|i)\s+manage\b|\b(?:my|our)\s+(?:rentals?|propert(?:y|ies)|homes?|units?|buildings?|neighbou?r(?:s|hood)?|friends?|family)\b|\bproperty\s+manager\b/i;
 
 const SOLICITATION_MARKERS = [
   { key: 'leads_pitch', strong: true, re: /\b(?:exclusive|qualified|unlimited)\s+(?:\w+\s+){0,3}leads?\b/i },

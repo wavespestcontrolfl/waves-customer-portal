@@ -61,6 +61,11 @@ describe('shared SMS vendor-pitch detector', () => {
     'We have qualified pest control jobs available at five rental homes we manage. Can you quote all of them?',
     "I'm the property manager for three units; can you quote pest control for all of them?",
     'We manage several rental properties and need service for all of them. Can we get unlimited estimates?',
+    // Codex P1 follow-up, 2026-09-11: first-person "I manage" (not just
+    // "we manage") and scheduling language (not just "quote") are also
+    // service-request wording, not vendor-pitch evidence.
+    'I manage five apartment buildings; we have qualified pest-control jobs available. Can you schedule them?',
+    'I manage this property. We have exclusive pest-control jobs available. Can we schedule service?',
   ])('ambiguous customer wording does not establish a pitch: %s', (body) => {
     expect(isSolicitationPitch(body)).toBe(false);
   });

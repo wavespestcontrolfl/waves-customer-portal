@@ -63,65 +63,81 @@ function maskPhone(phone) {
 //     must clear that row (codex P0).
 // Domestic formatting variants share an identity; international numbers keep
 // their full country code. Query errors preserve real consent handling.
-async function hasOutboundHistory(phone) {
+// Split from the fail-open wrapper below (codex P0 follow-up, 2026-09-11):
+// the wrapper's "true" on a query error is the right default for compliance
+// ELIGIBILITY (never silently refuse a real STOP), but the exact same
+// unresolved-error "true" is the WRONG default for a known-RELATIONSHIP
+// signal — it would let an unrelated DB hiccup mark a first-contact vendor
+// pitch as "known" and disable the footer-stripping protection. A caller
+// that needs to tell a genuine match apart from a fail-open default awaits
+// this directly instead of the wrapper.
+async function queryOutboundHistory(phone) {
   const variants = phoneMatchDigits(phone);
   if (!variants.length) return false;
   const fullDigits = (col) => db.raw(`regexp_replace(coalesce(${col}, ''), '[^0-9]', '', 'g')`);
-  try {
-    // Reuse the outbound service's operator identity so an untyped/manual
-    // office alert cannot establish customer-facing SMS history. An existing
-    // suppression still counts below, allowing an operator's START to clear it.
-    // This CURRENT-phone check is a fast path only — it correctly excludes a
-    // number that is STILL the operator's, but it re-derives from live env
-    // vars, so it stops recognizing a number that WAS the operator's before
-    // ADAM_PHONE changed and the number was reassigned. The
-    // `to_owner_phone_at_send` metadata flag (stamped durably in
-    // TwilioService.sendSMS at the moment of send, codex #4211 P2) covers
-    // that case regardless of what the operator's phone is today.
-    const operator = TwilioService.isKnownOwnerPhone(phone)
-      || phoneMatchDigits(process.env.ADMIN_ALERT_PHONE).some((value) => variants.includes(value));
-    // Excludes internal/admin alerts (never customer-facing) AND the AI
-    // assistant's own auto-replies ('ai_assistant' on the direct send,
-    // 'ai_assistant_reply' on its provider-retry queue row). The toll-free
-    // AI number answers first-contact strangers by design (isAiNumber makes
-    // them compliance-eligible unconditionally above) — including ones whose
-    // "message" is actually an unrelated vendor robotext. Without this
-    // exclusion, that auto-reply becomes a real outbound sms_log/messages
-    // row, which then makes the robotexter's number look like a genuine
-    // Waves relationship to every OTHER line's compliance check too,
-    // legitimizing its next footer-bearing text there (codex #4211 P1).
-    const notInternal = (col) => function notInternalAlert() {
-      this.whereNotIn(col, ['internal_alert', 'admin_alert', 'ai_assistant', 'ai_assistant_reply']).orWhereNull(col);
-    };
-    const notStampedOwnerPhone = (metaCol) => `COALESCE(${metaCol}->>'to_owner_phone_at_send', 'false') <> 'true'`;
-    if (!operator) {
-      const sent = await db('sms_log')
-        .where({ direction: 'outbound' })
-        .whereIn('status', ['queued', 'sent', 'delivered'])
-        .whereIn(fullDigits('to_phone'), variants)
-        .whereRaw("COALESCE(from_phone, '') <> 'push' AND COALESCE(metadata->>'channel', '') <> 'push'")
-        .where(notInternal('message_type'))
-        .whereRaw(notStampedOwnerPhone('metadata'))
-        .first('id');
-      if (sent) return true;
-      // A push-only unified touchpoint is deliberately threaded as SMS but
-      // has no Twilio SID. Require actual provider evidence for this fallback.
-      const unified = await db('messages')
-        .join('conversations', 'conversations.id', 'messages.conversation_id')
-        .where({ 'messages.channel': 'sms', 'messages.direction': 'outbound' })
-        .whereIn(fullDigits('conversations.contact_phone'), variants)
-        .whereRaw("messages.twilio_sid ~ '^(SM|MM)[0-9a-fA-F]{32}$'")
-        .where(function accepted() { this.whereNotIn('messages.delivery_status', ['failed', 'undelivered', 'blocked', 'canceled']).orWhereNull('messages.delivery_status'); })
-        .where(notInternal('messages.message_type'))
-        .whereRaw(notStampedOwnerPhone('messages.metadata'))
-        .first('messages.id');
-      if (unified) return true;
-    }
-    const suppressed = await db('messaging_suppression')
-      .where({ active: true })
-      .whereIn(fullDigits('phone'), variants)
+  // Reuse the outbound service's operator identity so an untyped/manual
+  // office alert cannot establish customer-facing SMS history. An existing
+  // suppression still counts below, allowing an operator's START to clear it.
+  // This CURRENT-phone check is a fast path only — it correctly excludes a
+  // number that is STILL the operator's, but it re-derives from live env
+  // vars, so it stops recognizing a number that WAS the operator's before
+  // ADAM_PHONE changed and the number was reassigned. The
+  // `to_owner_phone_at_send` metadata flag (stamped durably in
+  // TwilioService.sendSMS at the moment of send, codex #4211 P2) covers
+  // that case regardless of what the operator's phone is today.
+  const operator = TwilioService.isKnownOwnerPhone(phone)
+    || phoneMatchDigits(process.env.ADMIN_ALERT_PHONE).some((value) => variants.includes(value));
+  // Excludes internal/admin alerts (never customer-facing) AND the AI
+  // assistant's own auto-replies ('ai_assistant' on the direct send,
+  // 'ai_assistant_reply' on its provider-retry queue row). The toll-free
+  // AI number answers first-contact strangers by design (isAiNumber makes
+  // them compliance-eligible unconditionally above) — including ones whose
+  // "message" is actually an unrelated vendor robotext. Without this
+  // exclusion, that auto-reply becomes a real outbound sms_log/messages
+  // row, which then makes the robotexter's number look like a genuine
+  // Waves relationship to every OTHER line's compliance check too,
+  // legitimizing its next footer-bearing text there (codex #4211 P1).
+  const notInternal = (col) => function notInternalAlert() {
+    this.whereNotIn(col, ['internal_alert', 'admin_alert', 'ai_assistant', 'ai_assistant_reply']).orWhereNull(col);
+  };
+  const notStampedOwnerPhone = (metaCol) => `COALESCE(${metaCol}->>'to_owner_phone_at_send', 'false') <> 'true'`;
+  if (!operator) {
+    const sent = await db('sms_log')
+      .where({ direction: 'outbound' })
+      .whereIn('status', ['queued', 'sent', 'delivered'])
+      .whereIn(fullDigits('to_phone'), variants)
+      .whereRaw("COALESCE(from_phone, '') <> 'push' AND COALESCE(metadata->>'channel', '') <> 'push'")
+      .where(notInternal('message_type'))
+      .whereRaw(notStampedOwnerPhone('metadata'))
       .first('id');
-    return Boolean(suppressed);
+    if (sent) return true;
+    // A push-only unified touchpoint is deliberately threaded as SMS but
+    // has no Twilio SID. Require actual provider evidence for this fallback.
+    const unified = await db('messages')
+      .join('conversations', 'conversations.id', 'messages.conversation_id')
+      .where({ 'messages.channel': 'sms', 'messages.direction': 'outbound' })
+      .whereIn(fullDigits('conversations.contact_phone'), variants)
+      .whereRaw("messages.twilio_sid ~ '^(SM|MM)[0-9a-fA-F]{32}$'")
+      .where(function accepted() { this.whereNotIn('messages.delivery_status', ['failed', 'undelivered', 'blocked', 'canceled']).orWhereNull('messages.delivery_status'); })
+      .where(notInternal('messages.message_type'))
+      .whereRaw(notStampedOwnerPhone('messages.metadata'))
+      .first('messages.id');
+    if (unified) return true;
+  }
+  const suppressed = await db('messaging_suppression')
+    .where({ active: true })
+    .whereIn(fullDigits('phone'), variants)
+    .first('id');
+  return Boolean(suppressed);
+}
+
+// Fail-open wrapper: never silently refuses a real STOP over a query error.
+// See the comment above `queryOutboundHistory` for why a caller that needs
+// to distinguish a genuine match from this fail-open default should await
+// the raw query instead.
+async function hasOutboundHistory(phone) {
+  try {
+    return await queryOutboundHistory(phone);
   } catch (err) {
     logger.warn('[sms-compliance] outbound-history check failed; treating sender as eligible', { code: err.code || 'unknown' });
     return true;
@@ -407,58 +423,59 @@ router.post('/sms', async (req, res) => {
 
     // ── STOP / UNSUBSCRIBE / HELP / START keyword handling ──
     // Only a number Waves has actually messaged can be opting out of, asking
-    // about, or re-joining Waves texts: a matched customer, or any number
-    // with an outbound sms_log row. A first-contact stranger's body is NOT
-    // scanned. The opt-out detector matches phrases inside a message ("stop
-    // texting", "no more texts"), and lead-gen robotexts carry that phrasing
-    // in their own compliance footer — on 2026-07-23 a vendor pitch ending
-    // "Reply NO if you need me to stop texting" earned a "You've been
-    // unsubscribed" text back from a Waves line and a suppression row for
-    // the vendor's number (audit 2026-09-09). Fails OPEN to eligible on a
-    // query error so a real STOP is always honored. The AI assistant line
-    // texts strangers by design, so every sender on it stays eligible. A
-    // stored service contact (spouse / tenant / manager slot) is a known
-    // recipient whose sends may sit on the account's conversation with a
-    // null contact_phone — the relationship check covers them (codex r2).
-    // Captured (not just Boolean-and-discarded) so the successful record can
-    // also feed `knownRelationship` below — codex P1 follow-up, 2026-09-11:
-    // a classifier bypass (recordTouchpoint failure, mode off, a reaction)
-    // leaves `known` at its default, but this lookup runs unconditionally
-    // for every inbound message regardless of any of that, so its result is
-    // the one known-relationship signal always available. `complianceEligible`
-    // itself is untouched — same immediate fail-OPEN to eligible on a query
-    // error via the try/catch, so a real STOP is still always honored.
+    // about, or re-joining Waves texts: a matched customer, any known
+    // service-contact/secondary slot, the AI line, an unlinked prospect
+    // with an accepted outbound send on file, or an active suppression row.
+    // A first-contact stranger's body is NOT scanned. The opt-out detector
+    // matches phrases inside a message ("stop texting", "no more texts"),
+    // and lead-gen robotexts carry that phrasing in their own compliance
+    // footer — on 2026-07-23 a vendor pitch ending "Reply NO if you need me
+    // to stop texting" earned a "You've been unsubscribed" text back from a
+    // Waves line and a suppression row for the vendor's number (audit
+    // 2026-09-09). Fails OPEN to eligible on a query error so a real STOP
+    // is always honored.
     let knownCallerRecord = null;
     let knownCallerLookupFailed = false;
     try {
       knownCallerRecord = await require('../utils/known-caller-phone').findKnownCallerCustomer(db, From);
     } catch { knownCallerLookupFailed = true; }
+    // The outbound-history check is queried directly (not through the
+    // `hasOutboundHistory` fail-open wrapper) so a genuine positive MATCH
+    // can be told apart from the wrapper's fail-open default — codex P0
+    // follow-up, 2026-09-11: an unlinked prospect with an accepted outbound
+    // send on file is compliance-eligible, but was missing from the
+    // footer-stripping population below, so their own "Reply STOP to stop
+    // messages" was stripped and neither suppressed nor confirmed.
+    let outboundHistoryMatch = false;
+    let outboundHistoryLookupFailed = false;
+    try {
+      outboundHistoryMatch = await queryOutboundHistory(From);
+    } catch (err) {
+      outboundHistoryLookupFailed = true;
+      logger.warn('[sms-compliance] outbound-history check failed; treating sender as eligible', { code: err.code || 'unknown' });
+    }
     const complianceEligible = isAiNumber
       || Boolean(knownCallerLookupFailed || knownCallerRecord)
-      || await hasOutboundHistory(From);
+      || outboundHistoryMatch
+      || outboundHistoryLookupFailed;
     // Enforcement mode also strips a vendor's own reply-instruction footer
     // before matching (see the comment above `solicitationMode`), so an
     // unknown sender's pitch can't earn a false opt-out from its own
-    // compliance text. Scoped to exactly the population screenInboundSms
-    // actually screens (!customer && !isAiNumber) — codex fallback P1,
-    // 2026-09-11: `complianceEligible` also covers matched customers and
-    // the AI line, neither of which is ever enforced, so stripping their
-    // reply-instruction-shaped wording risked silently dropping a real
-    // customer's own genuine opt-out.
-    // `customer` alone under-covers that population: it is
-    // findSingleCustomerByPhone, a primary-`customers.phone` match only,
-    // while a spouse/tenant/service-contact stored solely in one of the
-    // other identity columns is just as known — the same recognition set
-    // knownCallerPhoneExists already uses for the classifier gate above.
-    // Left keyed on `customer`, their own "Reply STOP to stop messages"
-    // got stripped and silently dropped, same as a spoofed vendor footer
-    // (codex P0, 2026-09-11). `known` is the classifier gate's own
-    // knownCallerPhoneExists result when that gate ran; `knownCallerRecord`
-    // is the always-on compliance lookup just above, which stays populated
-    // even on a classifier bypass (codex P1 follow-up, 2026-09-11) — a
-    // failed lookup on BOTH fails toward stripping (treated as not known)
-    // so an unresolved relationship can never let a spoofed footer through.
-    const knownRelationship = Boolean(customer) || known || Boolean(knownCallerRecord);
+    // compliance text. `knownRelationship` is the same known-sender
+    // population `complianceEligible` recognizes — a matched customer, any
+    // service-contact/secondary-phone slot, or a genuine outbound-history
+    // match — but deliberately does NOT inherit complianceEligible's two
+    // lookup-failure fail-opens: those exist so a real STOP is never
+    // silently refused, but reused here they would do the opposite of what
+    // this guard exists for, letting an unrelated DB hiccup disable
+    // footer-stripping for a genuinely unknown vendor pitch (the 2026-07-23
+    // incident). A failed lookup here fails toward stripping (treated as
+    // not known) so an unresolved relationship can never let a spoofed
+    // footer through. Keep this in sync with `complianceEligible` above —
+    // codex has flagged one more missing population here on each of the
+    // last three rounds (customer-only → service-contact-only →
+    // classifier-bypass → outbound-history-only).
+    const knownRelationship = Boolean(customer) || known || Boolean(knownCallerRecord) || outboundHistoryMatch;
     const ignoreReplyInstructions = solicitationMode === 'enforce' && !knownRelationship && !isAiNumber;
     const optCommand = complianceEligible
       ? detectSmsOptCommand(Body, { ignoreReplyInstructions })

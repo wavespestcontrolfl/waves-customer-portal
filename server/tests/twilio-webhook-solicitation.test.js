@@ -248,6 +248,11 @@ test.each([
 ])(
   'an enforced pitch on a %s line persists read without replies or downstream work: %s', async (type, body) => {
     process.env.GATE_SMS_SPAM_CLASSIFIER = 'true';
+    // Codex P1 chokepoint fix, 2026-09-11: a regex marker alone is never a
+    // terminal enforce verdict — `body` matches the regex fast path (see
+    // isSolicitationPitch), but in enforce mode that only routes it to the
+    // model below; only the model's OWN confident verdict may enforce.
+    dispatchWithFallback.mockResolvedValue({ ok: true, json: { solicitation: true, confidence: 0.95 } });
     const line = numbers.allNumbers.find((entry) => entry.type === (type === 'domain_tracking' ? 'pest_domain' : type));
     // Turn on tech-line routing only inside this test, using its actual registry.
     const savedTechGate = process.env.GATE_TECH_LINES;
@@ -255,6 +260,10 @@ test.each([
     try {
       const res = await receive(body, line.number);
       expect(res.body).toBe('<Response></Response>');
+      // The regex fast path never terminates enforcement on its own — the
+      // model is always consulted in enforce mode, and the persisted
+      // verdict method is 'model', not 'regex'.
+      expect(dispatchWithFallback).toHaveBeenCalledTimes(1);
       expect(recordTouchpoint).toHaveBeenCalledWith(expect.objectContaining({
         isRead: false,
       }));
@@ -263,12 +272,12 @@ test.each([
       // only the verdict metadata, with no is_read) — a crash between the
       // two calls must never leave a read unified copy with no legacy row.
       expect(updateByTwilioSid.mock.calls[0][1].is_read).toBeUndefined();
-      expect(JSON.parse(updateByTwilioSid.mock.calls[0][1].metadata.bindings[0]).spam_verdict.enforced).toBe(true);
+      expect(JSON.parse(updateByTwilioSid.mock.calls[0][1].metadata.bindings[0]).spam_verdict).toMatchObject({ enforced: true, method: 'model' });
       expect(updateByTwilioSid.mock.calls[1][1]).toMatchObject({ is_read: true, read_at: expect.any(Date) });
       const writes = mockWrites.filter(({ table }) => table === 'sms_log');
       expect(writes).toHaveLength(1);
       expect(writes[0].row.is_read).toBe(true);
-      expect(JSON.parse(writes[0].row.metadata).spam_verdict.enforced).toBe(true);
+      expect(JSON.parse(writes[0].row.metadata).spam_verdict).toMatchObject({ enforced: true, method: 'model' });
       expect(mockWrites.some(({ table }) => ['customers', 'activity_log'].includes(table))).toBe(false);
       expect(recordSuppression).not.toHaveBeenCalled();
       expect(handleClarifyReply).not.toHaveBeenCalled();
@@ -282,6 +291,25 @@ test.each([
     }
   },
 );
+
+// Codex P1 chokepoint fix, 2026-09-11: the invariant is structural, not
+// per-phrasing — a regex-only verdict must never reach the enforce
+// threshold on its own, even when the model is never reached because it
+// is unavailable. `body` matches the regex fast path; the model call
+// fails, so the message stays actionable exactly like any other
+// model-unavailable path in this screen.
+test('a regex-strength pitch never enforces when the model is unavailable', async () => {
+  process.env.GATE_SMS_SPAM_CLASSIFIER = 'true';
+  dispatchWithFallback.mockRejectedValue(new Error('timeout'));
+  await receive(PITCH);
+  expect(dispatchWithFallback).toHaveBeenCalledTimes(1);
+  expect(recordTouchpoint.mock.calls[0][0].isRead).toBe(false);
+  const row = mockWrites.find(({ table }) => table === 'sms_log').row;
+  expect(row.is_read).not.toBe(true);
+  expect(JSON.parse(row.metadata).spam_verdict).toMatchObject({ solicitation: false, method: 'model_failed', enforced: false });
+  expect(startSmsThreadDraft).toHaveBeenCalledTimes(1);
+  expect(sendSMS).toHaveBeenCalledTimes(1);
+});
 
 test.each([
   "Please stop texting me. I don't have any leads for you.",
@@ -404,6 +432,11 @@ test('a first-contact unknown sender with no prior row still gets the owner aler
 // the legacy row is durably persisted.
 test('the unified copy is marked read only after the legacy sms_log row is persisted', async () => {
   process.env.GATE_SMS_SPAM_CLASSIFIER = 'true';
+  // Codex P1 chokepoint fix, 2026-09-11: PITCH matches the regex fast path,
+  // but enforce mode routes it through the model regardless — only the
+  // model's own confident verdict enforces (and reaches the read-mark path
+  // this test exercises).
+  dispatchWithFallback.mockResolvedValue({ ok: true, json: { solicitation: true, confidence: 0.95 } });
   const callOrder = [];
   updateByTwilioSid.mockImplementation(async (sid, patch) => {
     callOrder.push({

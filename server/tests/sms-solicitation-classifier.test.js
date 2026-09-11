@@ -76,7 +76,7 @@ test.each([
 test('model confidence is recorded without taking an enforcement action', async () => {
   mockDispatch.mockResolvedValue({ ok: true, json: { solicitation: true, confidence: 0.93 } });
   expect(await screenInboundSms({ body: SOFT_PITCH })).toEqual({
-    solicitation: true, confidence: 0.93, method: 'model', mode: 'shadow', enforced: false, version: 'sms-solicitation-v2',
+    solicitation: true, confidence: 0.93, method: 'model', mode: 'shadow', enforced: false, version: 'sms-solicitation-v3',
   });
 });
 
@@ -109,6 +109,33 @@ test.each([
   expect(await screenInboundSms({ body: SOFT_PITCH })).toMatchObject({ mode: 'enforce', enforced });
 });
 
+// Codex P1 chokepoint fix, 2026-09-11: a regex marker alone must never be a
+// terminal enforce verdict — in enforce mode a regex-strength pitch (PITCH
+// itself, confidence-1 by the fast path in shadow mode below) still reaches
+// the model, and only the model's OWN verdict may set `enforced`.
+test('a regex-strength pitch in enforce mode reaches the model instead of enforcing on the regex alone', async () => {
+  process.env.GATE_SMS_SPAM_CLASSIFIER = 'true';
+  mockDispatch.mockResolvedValue({ ok: true, json: { solicitation: false, confidence: 0.9 } });
+  const verdict = await screenInboundSms({ body: PITCH });
+  expect(mockDispatch).toHaveBeenCalledTimes(1);
+  expect(verdict).toMatchObject({ solicitation: false, method: 'model', enforced: false });
+});
+
+test('a regex-strength pitch in enforce mode still enforces once the model itself confirms it', async () => {
+  process.env.GATE_SMS_SPAM_CLASSIFIER = 'true';
+  mockDispatch.mockResolvedValue({ ok: true, json: { solicitation: true, confidence: 0.9 } });
+  const verdict = await screenInboundSms({ body: PITCH });
+  expect(mockDispatch).toHaveBeenCalledTimes(1);
+  expect(verdict).toMatchObject({ solicitation: true, method: 'model', enforced: true });
+});
+
+test('an unavailable model never lets a regex-strength pitch enforce', async () => {
+  process.env.GATE_SMS_SPAM_CLASSIFIER = 'true';
+  mockDispatch.mockRejectedValue(new Error('timeout'));
+  const verdict = await screenInboundSms({ body: PITCH });
+  expect(verdict).toMatchObject({ solicitation: false, method: 'model_failed', enforced: false });
+});
+
 test.each([
   "Please stop texting me. I don't have any leads for you.",
   'We have exclusive leads. Please remove me from your list.',
@@ -139,6 +166,7 @@ test.each([
   'I have three qualified leads for you—my neighbors all need pest control. Can you quote them?',
   'I can provide you with more pest-control leads. They are my friends who need quotes. Can you quote them?',
   'We have qualified pest control jobs available at five rental homes we manage. Can you quote all of them?',
+  'I manage five apartment buildings; we have qualified pest-control jobs available. Can you schedule them?',
 ])('a neighbor referral reaches the model before any enforcement: %s', async (body) => {
   process.env.GATE_SMS_SPAM_CLASSIFIER = 'true';
   mockDispatch.mockResolvedValue({ ok: true, json: { solicitation: false, confidence: 0.97 } });
