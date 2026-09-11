@@ -10100,6 +10100,12 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
     // acceptance back (a committed accepted-but-unconverted estimate is
     // unrecoverable — retries short-circuit on status='accepted' and no
     // sweep re-runs conversion).
+    const capacityHold = reservationRow || (existingAppointmentRow && isReservationHeldAppointment(existingAppointmentRow) ? existingAppointmentRow : null);
+    const preparedReservationCapacity = capacityHold
+      ? await slotReservation.prepareReservationCommit(capacityHold.id, { estimate: {
+        ...estimate, estimate_data: acceptedEstDataForPricing || estimate.estimate_data },
+        serviceMode: treatAsOneTime ? 'one_time' : serviceMode,
+        selectedFrequency: acceptedSchedulingFrequencyKey, serviceCadences }) : null;
     const txResult = await db.transaction(async (trx) => {
       // RUNG 1 FIRST (ORDERING CONTRACT, services/scheduling/occupancy.js —
       // the row-lock rule). When this accept will graduate a held slot,
@@ -10122,6 +10128,7 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
       // RESERVATION_NOT_FOUND from its pre-read, BEFORE taking any lock of
       // its own (hold ids are never reused), so no inversion opens.
       let acceptPreLockedDate = null;
+      let acceptPreLockedTechId = null;
       {
         const acceptHoldRow = reservationRow
           || (existingAppointmentRow && isReservationHeldAppointment(existingAppointmentRow)
@@ -10130,9 +10137,12 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
         if (acceptHoldRow) {
           const holdDateRow = await trx('scheduled_services')
             .where({ id: acceptHoldRow.id })
-            .first('scheduled_date');
+            .first('scheduled_date', 'technician_id');
           acceptPreLockedDate = holdDateRow ? (dateOnly(holdDateRow.scheduled_date) || null) : null;
           if (acceptPreLockedDate) await acquireOccupancyLock(trx, acceptPreLockedDate);
+          acceptPreLockedTechId = holdDateRow?.technician_id || null;
+          if (preparedReservationCapacity) await require('../services/scheduling/tech-day-lock').lockTechDays(trx,
+            [{ techId: acceptPreLockedTechId, date: acceptPreLockedDate }, { techId: null, date: acceptPreLockedDate }]);
           // The shared invoice MINT lock joins the pre-row-lock rung too
           // (PR #3476 r22 P1): scheduled-invoice writers lock advisory →
           // customer KEY SHARE → visit row, while this txn locks customer
@@ -10733,6 +10743,8 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
             // Rung 1 was pre-acquired on this key at the top of this txn —
             // commitReservation re-checks the hold still sits on it.
             preLockedDate: acceptPreLockedDate,
+            preLockedTechId: acceptPreLockedTechId,
+            preparedCapacity: preparedReservationCapacity,
             trx,
           });
           reservationCommitted = true;
@@ -10744,6 +10756,7 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
               selectedFrequency,
               estData: acceptedEstDataForPricing,
               rowServiceType: committedAppointment.service_type,
+              reservation: committedAppointment,
             });
             if (tierStamp) {
               await trx('scheduled_services').where({ id: committedAppointment.id }).update(tierStamp);
@@ -10790,6 +10803,8 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
               // Rung 1 was pre-acquired on this key at the top of this txn —
               // commitReservation re-checks the hold still sits on it.
               preLockedDate: acceptPreLockedDate,
+              preLockedTechId: acceptPreLockedTechId,
+              preparedCapacity: preparedReservationCapacity,
               trx,
             });
             reservationCommitted = true;
@@ -10800,6 +10815,7 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
                 selectedFrequency,
                 estData: acceptedEstDataForPricing,
                 rowServiceType: committedAppointment.service_type,
+                reservation: committedAppointment,
               });
               if (tierStamp) {
                 await trx('scheduled_services').where({ id: committedAppointment.id }).update(tierStamp);
@@ -20380,7 +20396,7 @@ function selectedTreeShrubServiceRow(existing = {}, frequency = {}) {
 // ALL THREE adoption paths must stamp: fresh slotId reservation, held
 // existing appointment, and the direct-update branch). Returns null for
 // non-T&S rows; seeded follow-ups copy service_id from the parent.
-async function treeShrubTierCatalogStamp(trx, { selectedFrequency = null, estData = null, rowServiceType = '' } = {}) {
+async function treeShrubTierCatalogStamp(trx, { selectedFrequency = null, estData = null, rowServiceType = '', reservation = null } = {}) {
   // Only a row that IS the T&S visit gets stamped — in a split bundle
   // (pest + T&S) the adopted slot can be the pest visit (codex P2 r5).
   if (recurringServiceKey({ name: rowServiceType, service_type: rowServiceType }) !== 'tree_shrub') return null;
@@ -20406,11 +20422,25 @@ async function treeShrubTierCatalogStamp(trx, { selectedFrequency = null, estDat
   }
   if (!serviceKey) return null;
   const stamp = serviceName ? { service_type: serviceName } : {};
-  const catalogRow = await trx('services')
-    .where({ service_key: serviceKey })
-    .first('id', 'name')
-    .catch(() => null);
+  const capacity = require('../services/combined-visit-capacity').capacityFromReservation(reservation);
+  const preserveCapacity = reservation?.reservation_policy_version === 2 || capacity?.version === 2;
+  const query = trx('services').where({ service_key: serviceKey });
+  if (preserveCapacity) query.forShare();
+  const catalogRow = await query.first('id', 'name', ...(preserveCapacity
+    ? ['default_duration_minutes', 'scheduling_duration_policy'] : [])).catch((cause) => {
+    if (preserveCapacity) throw Object.assign(require('../services/scheduling/arrival-route').capacityError('catalog_unavailable'), { cause });
+    return null;
+  });
   if (catalogRow) {
+    if (preserveCapacity) {
+      const allocatedMinutes = Number(capacity?.version === 2
+        ? capacity.durations[capacity.services.indexOf('tree_shrub')]
+        : reservation.estimated_duration_minutes);
+      if (!Number.isFinite(allocatedMinutes) || allocatedMinutes <= 0
+        || require('../services/service-library').serviceDurationMinutes(catalogRow, 60, { preserveCapacity: true }) > allocatedMinutes) {
+        throw require('../services/scheduling/arrival-route').capacityError('service_duration_changed');
+      }
+    }
     stamp.service_id = catalogRow.id;
     if (!stamp.service_type && catalogRow.name) stamp.service_type = catalogRow.name;
   }

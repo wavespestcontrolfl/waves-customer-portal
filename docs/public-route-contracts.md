@@ -108,8 +108,15 @@ remain locked through persistence; a busy completion yields recoverable
 `SLOT_UNAVAILABLE`. Unrelated assigned technicians do not invalidate the proof;
 a concurrent move to unassigned is fenced. Completed stops retain their prefix.
 Capacity offers preserve the enabled south-zone day funnel and omit speculative
-ASAP expansion. Acceptance revalidation and independent-companion conversion
-belong to the following stages; capacity remains off until those are integrated.
+ASAP expansion. Public acceptance and one-tap prepare route traffic before opening their write
+transaction, then acquire the date, selected-technician and unassigned fences
+before their first row lock. Commit verifies the prepared date/technician,
+current catalog allowance, live route, eligibility and closures; changed state
+returns recoverable `SLOT_UNAVAILABLE` without acceptance writes. One-tap
+preparation failures retain its existing pick-a-time recovery. Version-1 holds
+keep their legacy path, while version-2 holds retain certification and allowance
+checks after gate shutdown. Independent-companion conversion/allocation remains
+the following stage; capacity stays off until it and the other writers integrate.
 Activation also requires the remaining booking writers: phone-booking primary
 and follow-up inserts retain the owner's lock-free book-and-flag contract.
 Existing-row locks do not fence those inserts, and their post-commit conflict
