@@ -1224,7 +1224,6 @@ class SmartRebooker {
       }
     };
     await moveTrx(async (trx) => {
-      if (typeof options.beforeMove === 'function') await options.beforeMove(trx);
       // The kept technician's route is real — writing 'confirmed' on top
       // of an overlapping job double-books them deterministically (the
       // customer picked from offers that never checked the route).
@@ -1251,6 +1250,14 @@ class SmartRebooker {
           ['slot-reserve', `${keptTechId || 'unassigned'}:${newDateStr}`],
         );
       }
+      // Caller-supplied pre-move guard (the call applier's customer/property/
+      // call row locks) — AFTER rung 1, BEFORE this transaction's first row
+      // lock. Running it at transaction entry inverted the ORDERING CONTRACT
+      // above: a staff create takes date-occupancy -> customer rows while this
+      // side held the customer row and waited on date-occupancy, a direct
+      // deadlock cycle that aborted the non-retried call application (GH codex
+      // #4204 r5 P1). Nothing here writes, so the later CAS is unaffected.
+      if (typeof options.beforeMove === 'function') await options.beforeMove(trx);
       if (soloVisitRecheck) {
         // AFTER rung 1 / the tech lock and BEFORE every row lock (the
         // 'visit.stop' key is outside the occupancy ORDERING CONTRACT; the
@@ -1887,7 +1894,17 @@ class SmartRebooker {
       await preloadServiceLocations(db, arrivalRows.map(row => row.id));
     }
     const occurrencesRescheduled = await db.transaction(async (trx) => {
-      if (typeof options.beforeMove === 'function') await options.beforeMove(trx);
+      // Same ORDERING CONTRACT as the single path (GH codex #4204 r5 P1): the
+      // caller's guard takes customer/property/call locks, so it runs after
+      // rung 1 and before this transaction's first row lock. Idempotent — the
+      // rung-1 site fires it, and the no-projected-dates path falls through to
+      // the call below, whichever comes first.
+      let beforeMoveRan = false;
+      const runBeforeMove = async () => {
+        if (beforeMoveRan) return;
+        beforeMoveRan = true;
+        if (typeof options.beforeMove === 'function') await options.beforeMove(trx);
+      };
       const preservedFutureIds = new Set();
       // NOTE (lock order): the month-based parent's recurrence-anchor UPDATE
       // is deliberately NOT here. It is the series path's first ROW lock and
@@ -2081,6 +2098,7 @@ class SmartRebooker {
           });
           const followUpDays = followUpPlan.map((k) => k.new_day);
           await acquireOccupancyLocks(trx, [...projectedDates, ...followUpDays]);
+          await runBeforeMove();
           // Visit stop locks for EVERY swept occurrence, right after
           // rung 1 — the same occupancy-then-stop order the single-row
           // writers take (codex #3609 r31 P1 + uncapped audit):
@@ -2323,6 +2341,7 @@ class SmartRebooker {
         }
       }
 
+      await runBeforeMove();
       // The call/proposal guard runs on the locked series before its first write.
       if (typeof options.moveGuard === 'function') {
         const guardedService = await trx('scheduled_services').where({ id: serviceId }).forUpdate().first();

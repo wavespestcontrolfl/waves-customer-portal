@@ -94,6 +94,21 @@ describe('planRescheduleFromCall', () => {
     expect(planRescheduleFromCall({ v2: v2({ scheduling: { confirmed_start_at } }), call: call(), customer: customer(), candidates: [visit()], now: NOW }).reason).toBe('off_grid_start_time');
   });
 
+  // The linker matches a caller on any of the five identity columns, so the
+  // applier's own identity check must accept the same set (GH codex r5 P2).
+  test.each(['secondary_phone', 'service_contact_phone', 'service_contact2_phone', 'service_contact3_phone'])(
+    'a caller on file through %s is still the customer', (col) => {
+      const cust = customer({ phone: '+15555550199', [col]: '(555) 555-0101' });
+      expect(planRescheduleFromCall({ v2: v2(), call: call(), customer: cust, candidates: [visit()], now: NOW }))
+        .toMatchObject({ action: 'apply', visitId: VISIT_ID });
+    });
+
+  test('a number on no identity column is still refused', () => {
+    const cust = customer({ phone: '+15555550199', service_contact2_phone: '+15555550198' });
+    expect(planRescheduleFromCall({ v2: v2(), call: call(), customer: cust, candidates: [visit()], now: NOW }).reason)
+      .toBe('caller_phone_not_on_file');
+  });
+
   test('inferred speaker labels cannot authorize a move', () => {
     expect(planWithLabelTrust({ v2: v2(), call: call(), customer: customer(), candidates: [visit()], now: NOW }).reason).toBe('untrusted_speaker_labels');
   });
@@ -213,6 +228,7 @@ function makeConn({ owned = true, prior = null, cust = customer(), visits = [vis
     const q = {
       where(...a) { state.where.push(a); return q; },
       whereIn(...a) { state.whereIn.push(a); return q; },
+      whereNotIn(...a) { (state.whereNotIn ||= []).push(a); return q; },
       whereNull() { return q; },
       whereRaw() { return q; },
       orderBy() { return q; },
@@ -221,7 +237,7 @@ function makeConn({ owned = true, prior = null, cust = customer(), visits = [vis
       forShare() { return q; },
       modify(fn) { fn(q); return q; },
       select() { return q; },
-      update(arg) { state.updateArg = arg; writes.updates.push({ table, arg, where: state.where, whereIn: state.whereIn }); return q; },
+      update(arg) { state.updateArg = arg; writes.updates.push({ table, arg, where: state.where, whereIn: state.whereIn, whereNotIn: state.whereNotIn || [] }); return q; },
       returning() { return Promise.resolve(Array.from({ length: table === 'triage_items' ? openCards : 1 }, (_, i) => ({ id: `card-${i}` }))); },
       insert(row) { writes.inserts.push({ table, row }); return Promise.resolve([{ id: 'act-1' }]); },
       first() {
@@ -404,6 +420,60 @@ describe('applyCallReschedule', () => {
     const result = await applyCallReschedule({ conn, call: call(), now: NOW, rebooker });
     expect(result).toMatchObject({ outcome: 'noop', reason: 'already_at_requested_time', cardsResolved: 1 });
     expect(rebooker.reschedule).not.toHaveBeenCalled();
+  });
+
+  // A row parked at 'rescheduled' is OUT of dispatch until someone rebooks it
+  // (routes/schedule.js legacy flip). Carrying that status onto the agreed
+  // slot would record a time nobody works (GH codex r5 P1).
+  test('a parked rescheduled row lands back on the books instead of keeping its status', async () => {
+    const conn = makeConn({ visits: [visit({ status: 'rescheduled' })] });
+    const rebooker = { reschedule: jest.fn(async (_id, _date, _win, _reason, _by, opts) => {
+      await opts.moveGuard({ trx: conn, service: conn.visits[0] });
+      return { success: true };
+    }) };
+    const result = await applyCallReschedule({ conn, call: call(), now: NOW, rebooker });
+    expect(result.outcome).toBe('applied');
+    expect(rebooker.reschedule.mock.calls[0][5].keepStatus).toBe(false);
+  });
+
+  test('a pending row still keeps its status', async () => {
+    const conn = makeConn();
+    const rebooker = { reschedule: jest.fn(async (_id, _date, _win, _reason, _by, opts) => {
+      await opts.moveGuard({ trx: conn, service: conn.visits[0] });
+      return { success: true };
+    }) };
+    await applyCallReschedule({ conn, call: call(), now: NOW, rebooker });
+    expect(rebooker.reschedule.mock.calls[0][5].keepStatus).toBe(true);
+  });
+
+  test('a parked row already at the agreed time is restored without a move', async () => {
+    const conn = makeConn({ extraction: v2({ scheduling: { confirmed_start_at: '2026-09-24T09:00:00-04:00' } }),
+      visits: [visit({ status: 'rescheduled' })] });
+    const rebooker = { reschedule: jest.fn() };
+    const result = await applyCallReschedule({ conn, call: call(), now: NOW, rebooker });
+    expect(result).toMatchObject({ outcome: 'noop', reason: 'already_at_requested_time' });
+    expect(rebooker.reschedule).not.toHaveBeenCalled();
+    const restore = conn.writes.updates.find((u) => u.table === 'scheduled_services' && u.arg.status === 'confirmed');
+    expect(restore.where).toContainEqual([{ id: VISIT_ID, status: 'rescheduled' }]);
+  });
+
+  // The customer's portal reschedule request is the same ask the caller just
+  // settled; leaving it open makes staff work an applied move (r5 P2).
+  test('the open portal reschedule request for the visit is resolved in the same transaction', async () => {
+    const conn = makeConn();
+    const rebooker = { reschedule: jest.fn(async (_id, _date, _win, _reason, _by, opts) => {
+      await opts.moveGuard({ trx: conn, service: conn.visits[0] });
+      return { success: true };
+    }) };
+    await applyCallReschedule({ conn, call: call(), now: NOW, rebooker });
+    const req = conn.writes.updates.find((u) => u.table === 'service_requests');
+    expect(req.arg).toMatchObject({ status: 'resolved' });
+    expect(req.arg.resolved_at).toBeInstanceOf(Date);
+    expect(req.where).toContainEqual([{ customer_id: CUSTOMER_ID, category: 'schedule_change' }]);
+    expect(req.where).toContainEqual(['description', 'like', `Appointment ${VISIT_ID}:%`]);
+    expect(req.whereNotIn).toContainEqual(['status', ['resolved', 'closed', 'cancelled']]);
+    // Still nothing customer-facing: the status email lives in the admin route.
+    expect(conn.writes.inserts.map((i) => i.table)).toEqual(['activity_log']);
   });
 
   test('a rebooker refusal propagates (the processor step logs it non-blocking) and no activity row is written', async () => {
