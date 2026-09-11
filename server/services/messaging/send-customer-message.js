@@ -62,7 +62,7 @@ async function recordReceiptSmsDelivery(input, outcome) {
   const receipt = (input.purpose === 'payment_receipt' && input.metadata?.original_message_type === 'receipt')
     || (input.purpose === 'appointment' && input.metadata?.original_message_type === 'service_complete_paid_receipt');
   if (!receipt || input.channel !== 'sms' || !input.invoiceId || !input.customerId
-    || outcome.sent !== true || outcome.provider !== 'twilio'
+    || outcome.sent !== true || outcome.deliveryOutcome !== 'accepted' || outcome.provider !== 'twilio'
     || !/^(SM|MM)[a-f0-9]{32}$/i.test(outcome.providerMessageId || '')) return;
   try {
     const db = require('../../models/db');
@@ -165,6 +165,7 @@ function normalizeRecipient(phone) {
  *   code?: string,
  *   retryable?: boolean,
  *   deferred?: boolean,
+ *   deliveryOutcome: 'accepted' | 'not_sent' | 'uncertain',
  *   nextAllowedAt?: string,
  *   providerMessageId?: string,
  *   auditLogId?: string | null,
@@ -180,11 +181,13 @@ async function sendCustomerMessage(input) {
 }
 
 async function sendCustomerMessageCore(input) {
+  let providerOutcome = { sent: false, deliveryOutcome: 'not_sent' };
+  try {
   // 1. Contract validation
   const contractCheck = validateContract(input);
   if (!contractCheck.ok) {
     logger.warn(`[send_customer_message] contract violation: ${contractCheck.reason}`);
-    return { sent: false, blocked: true, code: 'CONTRACT_VIOLATION', reason: contractCheck.reason };
+    return { sent: false, blocked: true, deliveryOutcome: 'not_sent', code: 'CONTRACT_VIOLATION', reason: contractCheck.reason };
   }
 
   // 2. Resolve policy
@@ -193,7 +196,7 @@ async function sendCustomerMessageCore(input) {
     policy = policyModule.resolvePolicy(input.audience, input.purpose);
   } catch (err) {
     logger.warn(`[send_customer_message] unknown policy: ${err.message}`);
-    return { sent: false, blocked: true, code: 'UNKNOWN_POLICY', reason: err.message };
+    return { sent: false, blocked: true, deliveryOutcome: 'not_sent', code: 'UNKNOWN_POLICY', reason: err.message };
   }
 
   // 3. Normalize recipient + clone input so downstream sees the canonical
@@ -214,7 +217,7 @@ async function sendCustomerMessageCore(input) {
       && input.metadata?.original_message_type === 'visit_summary'
       && ['visit_closeout_summary', 'scheduled_sms_cron'].includes(input.entryPoint));
   if (withSmsHandoff && (typeof withSmsHandoff !== 'function' || sendInput.channel !== 'sms' || !smsHandoffAllowed)) {
-    return { sent: false, blocked: true, code: 'UNSUPPORTED_SMS_HANDOFF', reason: 'Locked SMS handoff is restricted to immediate lead replies and visit summaries' };
+    return { sent: false, blocked: true, deliveryOutcome: 'not_sent', code: 'UNSUPPORTED_SMS_HANDOFF', reason: 'Locked SMS handoff is restricted to immediate lead replies and visit summaries' };
   }
   // SMS link schemes are removed before audit counting, matching the final
   // Twilio boundary for direct callers.
@@ -332,6 +335,7 @@ async function sendCustomerMessageCore(input) {
     return {
       sent: false,
       blocked: true,
+      deliveryOutcome: 'not_sent',
       code: blockedBy.code,
       reason: blockedBy.reason,
       ...(blockedBy.retryable ? { retryable: true } : {}),
@@ -369,6 +373,7 @@ async function sendCustomerMessageCore(input) {
       return {
         sent: false,
         blocked: true,
+        deliveryOutcome: 'not_sent',
         code: blocked.code,
         reason: blocked.reason,
         auditLogId: audit.id,
@@ -411,6 +416,7 @@ async function sendCustomerMessageCore(input) {
       return {
         sent: false,
         blocked: true,
+        deliveryOutcome: 'not_sent',
         code: blocked.code,
         reason: blocked.reason,
         ...(verdict?.retryable === true ? { retryable: true } : {}),
@@ -431,7 +437,10 @@ async function sendCustomerMessageCore(input) {
   // entered the pipeline at 19:59 can't reach Twilio at 20:01. Same
   // deferral contract as the pipeline block; cheap (pure clock math) and a
   // no-op for exempt inputs.
-  const providerOutcome = await dispatchToProvider(sendInput, {
+  // Until the adapter returns, a thrown transport call has crossed the SDK
+  // handoff boundary but has no definitive acceptance/rejection result.
+  providerOutcome = { sent: false, deliveryOutcome: 'uncertain' };
+  providerOutcome = await dispatchToProvider(sendInput, {
     // The caller's handoff receives (trx, onProviderStart): the callback fires
     // immediately before the provider request, after the rechecks below, so a
     // caller can tell a failed recheck (nothing sent) from a failed request.
@@ -491,6 +500,7 @@ async function sendCustomerMessageCore(input) {
     return {
       sent: false,
       blocked: true,
+      deliveryOutcome: providerOutcome.deliveryOutcome,
       code: providerOutcome.code,
       reason: providerOutcome.error,
       ...(providerOutcome.retryable ? { retryable: true } : {}),
@@ -527,13 +537,13 @@ async function sendCustomerMessageCore(input) {
 
   if (!providerOutcome.sent && sendInput.channel === 'push' && providerOutcome.appUnavailable) {
     if (sendInput.metadata?.appOnly === true) {
-      return { sent: false, blocked: true, code: 'APP_UNAVAILABLE', reason: providerOutcome.error, auditLogId: audit.id };
+      return { sent: false, blocked: true, deliveryOutcome: providerOutcome.deliveryOutcome, code: 'APP_UNAVAILABLE', reason: providerOutcome.error, auditLogId: audit.id };
     }
     if (providerOutcome.error === 'preference_changed'
       && ['appointment_reminder_72h', 'appointment_reminder_24h'].includes(sendInput.purpose)) {
       // The scan captured App; Email/Both now require a different set of
       // legs. Leave its reminder open so the next scan reads that choice.
-      return { sent: false, blocked: true, code: 'REMINDER_PREFERENCES_HOLD', reason: 'Reminder channel changed', retryable: true, deferred: true, auditLogId: audit.id };
+      return { sent: false, blocked: true, deliveryOutcome: providerOutcome.deliveryOutcome, code: 'REMINDER_PREFERENCES_HOLD', reason: 'Reminder channel changed', retryable: true, deferred: true, auditLogId: audit.id };
     }
     // Re-enter the complete pipeline for an allowed backup, using fresh
     // consent/suppression state. Never clear an opt-out to enable fallback.
@@ -550,6 +560,7 @@ async function sendCustomerMessageCore(input) {
     return {
       sent: false,
       blocked: false,
+      deliveryOutcome: providerOutcome.deliveryOutcome,
       code: providerOutcome.code === 'APP_PROVIDER_RETRY' ? providerOutcome.code : 'PROVIDER_FAILURE',
       reason: providerOutcome.error || 'provider returned no message id',
       retryable: !!providerOutcome.retryable,
@@ -570,12 +581,18 @@ async function sendCustomerMessageCore(input) {
   return {
     sent: true,
     blocked: false,
+    deliveryOutcome: providerOutcome.deliveryOutcome,
     providerMessageId: providerOutcome.providerMessageId,
     channel: providerOutcome.provider === 'push' ? 'push' : sendInput.channel,
     auditLogId: audit.id,
     segmentCount: segmentMeta.segmentCount,
     encoding: segmentMeta.encoding,
   };
+  } catch (err) {
+    // A recursive fallback may already carry its more specific outcome.
+    if (!err.providerOutcome) err.providerOutcome = providerOutcome;
+    throw err;
+  }
 }
 
 function validateContract(input) {
@@ -630,6 +647,7 @@ async function dispatchToProvider(input, hooks = {}) {
   }
   return {
     sent: false,
+    deliveryOutcome: 'not_sent',
     error: `Provider for channel "${input.channel}" not yet wired in send_customer_message`,
   };
 }
