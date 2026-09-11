@@ -1634,9 +1634,12 @@ function restatesOnFileAddress(sa, knownCustomer) {
   const { unit: leadingUnit, rest: rawAddress = raw } = splitUnitFirstLine(raw) || {};
   const parsed = parseRawAddress(rawAddress);
   const structured = statedValues([sa.street_line_1, sa.line1, sa.street]).map(splitStreetLineUnit);
-  const rawUnit = leadingUnit || unitAnywhereOnLine(rawAddress) || unitAnywhereOnLine(parsed.line1);
+  // EVERY unit the raw phrase names is compared ("Apt 4, 500 Main St Apt 5"
+  // against on-file Apt 4 is a contradiction, not a restatement — codex
+  // r11 P1); a first-match pick let the later unit vanish.
+  const rawUnits = [leadingUnit, unitAnywhereOnLine(rawAddress), unitAnywhereOnLine(parsed.line1)].filter(Boolean);
   const savedUnit = unitKey(saved.addressLine2 || onFile.unit);
-  const units = statedValues([sa.street_line_2, sa.line2, sa.unit, sa.apt, rawUnit, ...structured.map(part => part.unit)]);
+  const units = statedValues([sa.street_line_2, sa.line2, sa.unit, sa.apt, ...rawUnits, ...structured.map(part => part.unit)]);
   const cities = statedValues([sa.city, sa.locality]).map(cityKey);
   const zips = statedValues([sa.postal_code, sa.zip, sa.zip_code, parsed.zip]).map(zip5Of);
   const states = statedValues([sa.state, parsed.state]).map(normalizeState);
@@ -1657,7 +1660,7 @@ function restatesOnFileAddress(sa, knownCustomer) {
   const rawIsLocality = raw === savedZip || rawIsPureLocalityPhrase(raw, savedCity, savedZip);
   const acknowledgment = /^(?:yes|(?:the )?same (?:place|address|as before|as always))\.?$/i.test(raw);
   const rawCity = cityKey(parsed.city);
-  const cityIsUnit = Boolean(rawUnit) && unitKey(parsed.city) === unitKey(rawUnit);
+  const cityIsUnit = rawUnits.some(unit => unitKey(parsed.city) === unitKey(unit));
   const tailAgrees = [!rawCity, rawCity === savedCity, cityIsUnit].some(Boolean);
   const streets = structured.map(part => part.street);
   if (raw && !rawIsLocality && !acknowledgment) streets.push(tailAgrees ? splitStreetLineUnit(parsed.line1).street : rawAddress);

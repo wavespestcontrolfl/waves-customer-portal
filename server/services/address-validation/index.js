@@ -147,8 +147,22 @@ const SERVICE_STATE = 'FL';
 
 async function validateAddress({ addressLines, regionCode = 'US', administrativeArea = null } = {}) {
   const lines = (addressLines || []).filter(Boolean);
+  // Geography comes from locality/state tails only. A line that starts
+  // with a house number ("100 Main St Apt CT") carries a state only when the
+  // parse also found a locality or ZIP — otherwise the state-shaped token
+  // is a unit value or a street suffix, not Connecticut (codex r11 P1).
+  const UNIT_WORD = /^(?:#|apt|apartment|unit|ste|suite|bldg|building|fl|floor|lot|spc|space|rm|room)$/i;
+  const geographyState = (line) => {
+    const parsed = parseRawAddress(line);
+    if (!parsed.state) return '';
+    // The comma-free parser reads "100 Main St Apt CT" as city "Apt" +
+    // state CT — a unit designator is not a locality either.
+    const locality = parsed.city && !UNIT_WORD.test(parsed.city) ? parsed.city : '';
+    if (/^\d/.test(String(line).trim()) && !locality && !parsed.zip) return '';
+    return parsed.state;
+  };
   const statedState = [lines.join(' ').replace(/,/g, ' '), ...lines]
-    .map(line => parseRawAddress(line).state).filter(Boolean).pop();
+    .map(geographyState).filter(Boolean).pop();
   const regionHint = statedState || administrativeArea;
   if (!ENABLED() || lines.length === 0) {
     return { status: STATUSES.NOT_ATTEMPTED, inServiceArea: null, county: null, granularity: null, normalized: null, hasInferred: false, hasReplaced: false, hasUnconfirmed: false, missingComponents: [] };

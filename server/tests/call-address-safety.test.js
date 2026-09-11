@@ -83,6 +83,16 @@ describe('stated geography takes precedence over a service-area hint', () => {
     expect(JSON.parse(global.fetch.mock.calls[0][1].body).address.administrativeArea).toBe('FL');
     expect(statesNewAddress(v2({ property: { service_address: sa } }), { hasAddress: true, addressLine1: street, addressCity: 'Bradenton' })).toBe(false);
   });
+  // codex r11 P1: a unit value that is also a state code ("Apt CT") sits on
+  // the STREET line and is not geography.
+  test('an alphabetic unit value that is also a state code is not an explicit state', async () => {
+    const lines = buildAddressLines({ street_line_1: '100 Main St', street_line_2: 'Apt CT', city: 'Bradenton' });
+    expect(lines).toEqual(['100 Main St Apt CT', 'Bradenton']);
+    const av = await validateAddress({ addressLines: lines, administrativeArea: 'FL' });
+    expect(JSON.parse(global.fetch.mock.calls[0][1].body).address.administrativeArea).toBe('FL');
+    expect(av.status).not.toBe('out_of_service_area');
+  });
+
   test.each(['123 Main Street, Lincoln NE', '123 Main Street Lincoln NE'])('a state in a locality tail remains explicit: %s', async raw_text => {
     const lines = buildAddressLines({ street_line_1: '123 Main Street', city: 'Lincoln', state: 'FL', raw_text });
     expect(lines).toEqual(['123 Main Street', 'Lincoln NE']);
@@ -293,6 +303,15 @@ describe('finding 3 — address fragments and on-file restatements', () => {
 });
 
 describe('regressions', () => {
+  // codex r11 P1: every unit the raw phrase names is compared, not just
+  // the first one found.
+  test('a raw phrase naming two units is a new address when either differs from the saved unit', () => {
+    const condo = { hasAddress: true, addressLine1: '500 Main St', addressLine2: 'Apt 4', addressCity: 'Sarasota', addressZip: '34240' };
+    const stated = raw_text => v2({ property: { service_address: { raw_text } } });
+    expect(statesNewAddress(stated('Apt 4, 500 Main St Apt 5'), condo)).toBe(true);
+    expect(statesNewAddress(stated('Apt 4, 500 Main St'), condo)).toBe(false);
+  });
+
   // codex r10 P1: a hyphen between two digits is a real separator.
   test('a digit-digit hyphen in a unit is not formatting: Apt 4-5 is not Apt 45, but 4-5 restates 4-5', () => {
     const condo = { hasAddress: true, addressLine1: '500 Sample Tower Blvd', addressLine2: 'Apt 4-5', addressCity: 'Sarasota', addressZip: '34240' };
