@@ -22,25 +22,18 @@ const path = require('path');
 // What to scan
 // =========================================================================
 const ROOT = path.join(__dirname, '..');
+// The policy is repo-wide — "nothing under 14px on a glass surface" (waves-design
+// hard lines). The gate used to name seven directories, which meant the rule was
+// only enforced where someone had remembered to add a path: SecurePlanChoice
+// shipped 13px on /secure and the 09-07 audit's NotificationBell / InstallPrompt
+// / NewsletterSignup findings were invisible to CI. Owner ruling C8
+// (DECISIONS 2026-09-11) makes the scan repo-wide, so a NEW customer file is
+// covered the moment it is written rather than when someone widens this list.
+// What is genuinely not a customer surface is excluded below by name, and the
+// legacy debt that this widening exposed is enumerated in LEGACY_BASELINE —
+// visible and counted, instead of hidden behind a missing directory.
 const SCAN_DIRS = [
-  path.join(ROOT, 'client/src/pages'),
-  path.join(ROOT, 'client/src/components/billing'),
-  path.join(ROOT, 'client/src/components/customer'),
-  path.join(ROOT, 'client/src/components/brand'),
-  // The cookie notice on /book and /pay lives here (UI audit F0107).
-  path.join(ROOT, 'client/src/components/analytics'),
-  // Customer-facing /book widgets — the 13px chips fixed on the 07-07 portal
-  // audit (F-057) lived here unscanned. components/estimate is NOT listed:
-  // it carries ~35 legacy violations (13px labels, star glyphs, W tokens)
-  // that need their own cleanup pass before the gate can cover it.
-  path.join(ROOT, 'client/src/components/booking'),
-  // The V2 report bodies (lawn / pest / mosquito / cockroach / tree & shrub)
-  // and the gauge primitives — swept onto the sheet with #3895.
-  path.join(ROOT, 'client/src/components/report'),
-  // Portal-only components (cancel flow, cancelled plan): the button-weight
-  // rule removal on #3971 exposed 800/850 weights here that the gate could
-  // not see.
-  path.join(ROOT, 'client/src/components/portal'),
+  path.join(ROOT, 'client/src'),
 ];
 // Files explicitly excluded — dev-only demos, theme tokens themselves, etc.
 const EXCLUDED_FILES = new Set([
@@ -56,13 +49,73 @@ const EXCLUDED_FILES = new Set([
   'EstimateProposalDocument.jsx',
   'AdminLoginPage.jsx', // admin surface that happens to live in pages/
   'TechCapturePreview.jsx', // tech-portal preview harness in pages/
+  // The token module the rules point AT. It declares the palette that
+  // `local-palette` tells every other file to import, and carries the
+  // admin/marketing weights and sizes those surfaces legitimately use.
+  'theme-brand.js',
 ]);
 // Filename prefixes that belong to the admin/tech surfaces — separate design
 // system (D palette + DM Sans + density-first, per admin brief), NOT subject
 // to the customer brand rules this script enforces.
 const NON_CUSTOMER_FILENAME_PREFIXES = ['Admin', 'Tech', 'Dispatch', 'Inventory', 'Revenue', 'Compliance', 'Protocol'];
 // Any file inside these dirs is out of scope.
-const EXCLUDED_DIR_HINTS = ['/admin/', '/tech/', '/dispatch/', '/equipment/'];
+const EXCLUDED_DIR_HINTS = [
+  '/admin/', '/tech/', '/dispatch/', '/equipment/',
+  // Imported only by pages/admin/* — the Dispatch calendar, its mobile sheets
+  // and the scheduling modals. Admin design system (D palette + DM Sans +
+  // density-first), same as the prefixes above.
+  '/schedule/',
+  '/dashboard/',
+  // Staff document library, mounted on a staff route and authored on D.
+  '/staffDocuments/',
+  // Developer visual-QA harnesses, never shipped to a customer — the same
+  // exemption ButtonExamples.jsx already has by name.
+  '/dev-preview/',
+];
+
+// =========================================================================
+// Legacy baseline — the debt the repo-wide scan exposed (owner ruling C8)
+// =========================================================================
+// Widening SCAN_DIRS to `client/src` surfaced 76 pre-existing violations in 21
+// customer files. Excluding their directories is what hid them in the first
+// place, so they are enumerated here instead, with the count each file is
+// allowed to carry. The gate fails if a file exceeds its number, so this list
+// can only shrink: you may not add a violation to a file that already has
+// some, and a file not listed here gets zero tolerance. It also fails on a
+// stale entry — clean up a file and the gate tells you to delete its line.
+//
+// These are NOT exemptions. They are R3 and R4 work in the Liquid Glass audit:
+// - estimate/* is the ~35-item legacy cluster the old SCAN_DIRS comment
+//   described (13px labels, ★ glyphs, the local W palette in tokens.js);
+//   ReportShowcaseCard's 8.5–13px is a scaled-down phone mockup.
+// - NotificationBell / InstallPrompt / NewsletterSignup are the 09-07 audit's
+//   own findings, invisible to CI until now.
+// - BrandFooter and AppShowcaseCard's 7.5px is App Store / Google Play badge
+//   artwork reproduced as inline SVG — fixed proportions, not page type.
+// - ServiceRecapModal and Icon carry emoji the Icon sweep has not reached.
+const LEGACY_BASELINE = {
+  'client/src/App.jsx': 9,
+  'client/src/components/ActivityCard.jsx': 1,
+  'client/src/components/BrandFooter.jsx': 2,
+  'client/src/components/GlassNewsletterCard.jsx': 2,
+  'client/src/components/Icon.jsx': 1,
+  'client/src/components/InstallPrompt.jsx': 1,
+  'client/src/components/NewsletterSignup.jsx': 3,
+  'client/src/components/NotificationBell.jsx': 11,
+  'client/src/components/PestPressureCard.jsx': 6,
+  'client/src/components/ServiceRecapModal.jsx': 8,
+  'client/src/components/StationMapCard.jsx': 4,
+  'client/src/components/VanScene.jsx': 1,
+  'client/src/components/estimate/AppShowcaseCard.jsx': 2,
+  'client/src/components/estimate/CustomerReviews.jsx': 1,
+  'client/src/components/estimate/GoogleProfilesCard.jsx': 1,
+  'client/src/components/estimate/InlineAutoPayCapture.jsx': 2,
+  'client/src/components/estimate/PriceCard.jsx': 1,
+  'client/src/components/estimate/ProposalDetailCard.jsx': 1,
+  'client/src/components/estimate/ReportShowcaseCard.jsx': 14,
+  'client/src/components/estimate/glass/GlassEstimateExtras.jsx': 4,
+  'client/src/components/estimate/tokens.js': 1,
+};
 
 // =========================================================================
 // Rules
@@ -242,30 +295,54 @@ function main() {
   for (const d of SCAN_DIRS) files = files.concat(walk(d));
 
   const perFile = [];
-  let total = 0;
   for (const f of files) {
     const v = checkFile(f);
-    if (v.length) {
-      perFile.push({ file: path.relative(ROOT, f), violations: v });
-      total += v.length;
-    }
+    if (v.length) perFile.push({ file: path.relative(ROOT, f), violations: v });
   }
 
-  if (!total) {
-    console.log(`[check-portal-brand] clean — scanned ${files.length} files, zero violations.`);
+  // A file's allowance is its baseline entry, or zero if it has none. Anything
+  // at or under its allowance is known debt; anything over it is new and fails.
+  const regressions = [];
+  let carried = 0;
+  for (const entry of perFile) {
+    const allowed = LEGACY_BASELINE[entry.file] || 0;
+    if (entry.violations.length > allowed) regressions.push({ ...entry, allowed });
+    else carried += entry.violations.length;
+  }
+
+  // A baseline entry for a file that is now clean (or gone) is stale. Failing
+  // on it is what makes the list shrink instead of ossifying.
+  const seen = new Set(perFile.map((e) => e.file));
+  const stale = Object.keys(LEGACY_BASELINE).filter((f) => !seen.has(f));
+
+  if (!regressions.length && !stale.length) {
+    const debt = carried
+      ? ` — ${carried} baselined violation${carried === 1 ? '' : 's'} in ${Object.keys(LEGACY_BASELINE).length} legacy file${Object.keys(LEGACY_BASELINE).length === 1 ? '' : 's'} still to clear`
+      : '';
+    console.log(`[check-portal-brand] clean — scanned ${files.length} files, no new violations${debt}.`);
     process.exit(0);
   }
 
-  console.error(`[check-portal-brand] FAIL — ${total} violation${total === 1 ? '' : 's'} across ${perFile.length} file${perFile.length === 1 ? '' : 's'}:\n`);
-  for (const { file, violations } of perFile) {
-    console.error(`  ${file}`);
-    for (const v of violations) {
-      console.error(`    ${file}:${v.line}  [${v.rule}]  ${v.msg}`);
-      console.error(`      > ${v.snippet}`);
+  if (regressions.length) {
+    const total = regressions.reduce((a, e) => a + e.violations.length, 0);
+    console.error(`[check-portal-brand] FAIL — ${total} violation${total === 1 ? '' : 's'} across ${regressions.length} file${regressions.length === 1 ? '' : 's'} over baseline:\n`);
+    for (const { file, violations, allowed } of regressions) {
+      console.error(`  ${file}  (${violations.length} found, ${allowed} allowed)`);
+      for (const v of violations) {
+        console.error(`    ${file}:${v.line}  [${v.rule}]  ${v.msg}`);
+        console.error(`      > ${v.snippet}`);
+      }
+      console.error('');
     }
-    console.error('');
+    console.error('Fix the violations above. Do not raise a LEGACY_BASELINE number to make this pass —');
+    console.error('the list exists to shrink, and a customer surface has no floor under 14px or weight over 700.');
   }
-  console.error(`Fix the violations above, or justify with a per-line disable if the codebase adopts one.`);
+
+  if (stale.length) {
+    console.error(`\n[check-portal-brand] stale baseline — ${stale.length} entr${stale.length === 1 ? 'y is' : 'ies are'} clean now. Delete ${stale.length === 1 ? 'this line' : 'these lines'} from LEGACY_BASELINE:`);
+    for (const f of stale) console.error(`  '${f}',`);
+  }
+
   process.exit(1);
 }
 
