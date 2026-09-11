@@ -8851,13 +8851,15 @@ const CallRecordingProcessor = {
                   extraPayload: flag === 'missing_last_name' ? {
                     heard_name_v1: { first_name: extracted?.first_name ?? null, last_name: extracted?.last_name ?? null },
                   } : (isAddressFlag && addressRecovery?.attempted) ? {
-                    address_as_heard: rawStreetBeforeAdopt,
+                    // Built from the SAME helper the enforce sites use, so the
+                    // recovery prompt version rides on FAILED attempts here too
+                    // (codex #4437 r3 P1). This is the site that files in SHADOW
+                    // mode — exactly the cohort the promotion gate audits — so an
+                    // unstamped failure HERE is the one that pools calls whose
+                    // recovery ran under incompatible behavior.
+                    ...addressRecoveryPayload(flag),
                     address_recovered: flag === 'address_recovered' ? extracted.address_line1 : null,
-                    address_candidates: addressRecovery.candidates || [],
-                    recovery_method: addressRecovery.method || null,
-                    // Same pass stamp the enforce site writes — this is the
-                    // site that files the card in SHADOW mode, which is
-                    // exactly the cohort the promotion gate audits.
+                    // Same pass stamp the enforce site writes.
                     ...(flag === 'address_recovered' ? recoveryPassStamp : {}),
                     ...(contactDictation?.addresses?.[0]?.confirmation_question
                       ? { confirmation_question: contactDictation.addresses[0].confirmation_question } : {}),
@@ -8865,6 +8867,10 @@ const CallRecordingProcessor = {
                 }))
                 .onConflict(db.raw('(call_log_id, reason_code) WHERE status IN (\'open\', \'in_progress\')'))
                 .ignore();
+              // Same reprocess gap the enforce sites close: an already-open card
+              // keeps its first payload, so the stamp and candidates would never
+              // reach it.
+              await mergeAddressRecoveryEvidence(flag);
             } catch (triageErr) {
               logger.warn(`[call-proc-bridge] triage_items insert failed for ${maskSid(callSid)}: ${triageErr.message}`);
             }

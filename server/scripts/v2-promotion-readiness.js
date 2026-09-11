@@ -162,7 +162,7 @@ async function main() {
     .whereIn('reason_code', ['address_recovered', 'address_unverified'])
     .select('call_log_id', 'payload');
   const staleRecoveryPromptCalls = new Set();
-  let unattributableRecoveryAttempts = 0;
+  const unattributableRecoveryCalls = new Set();
   for (const card of attemptCards) {
     let p = {};
     try { p = parseJson(card.payload) || {}; } catch { p = {}; }
@@ -170,13 +170,16 @@ async function main() {
       if (p.recovery_prompt_version !== RECOVERY_PROMPT_VERSION) staleRecoveryPromptCalls.add(card.call_log_id);
       continue;
     }
-    // Pre-stamp cards: an enforce-path card written before the stamp shipped
-    // recorded no recovery evidence at all, so "attempted" cannot be recovered
-    // from it. Counted and reported rather than guessed at — `--since` past the
-    // stamp's deploy is the clean way to read a gate free of them.
-    if (p.address_candidates || p.recovery_method || p.address_as_heard) unattributableRecoveryAttempts++;
+    // A card that RECORDS an attempt but predates the stamp cannot say which
+    // prompt ran, so it is dropped too — same fail-closed rule, not merely
+    // counted (codex #4437 r3 P1: counting it left pre-stamp failures pooled
+    // into the current prompt's metrics). Cards with no recovery evidence at
+    // all are not attempts and stay: the prompt never touched them.
+    if (p.address_candidates || p.recovery_method || p.address_as_heard) unattributableRecoveryCalls.add(card.call_log_id);
   }
-  const boundedRouteRows = cohortRows.filter((r) => !staleRecoveryPromptCalls.has(r.id));
+  const boundedRouteRows = cohortRows.filter(
+    (r) => !staleRecoveryPromptCalls.has(r.id) && !unattributableRecoveryCalls.has(r.id),
+  );
 
   // Effective-verdict reconstruction for RECOVERED addresses (codex round-11
   // P2): the processor deliberately persists the ORIGINAL unresolvable
@@ -445,8 +448,8 @@ async function main() {
   if (unstampedRecoveryCards || staleRecoveryCards || staleRecoveryPromptCards) {
     console.log(`   ↳ address_recovered cards NOT used to reconstruct a verdict: ${unstampedRecoveryCards} unstamped (pre-2026-08-01 history), ${staleRecoveryCards} from a different extraction pass, ${staleRecoveryPromptCards} from a different recovery prompt (current: ${RECOVERY_PROMPT_VERSION}).`);
   }
-  if (staleRecoveryPromptCalls.size || unattributableRecoveryAttempts) {
-    console.log(`   ↳ recovery-prompt cohort: ${staleRecoveryPromptCalls.size} call(s) dropped (attempt ran under an older recovery prompt), ${unattributableRecoveryAttempts} pre-stamp card(s) that cannot be attributed — re-run with --since past the stamp deploy to read the gate without them.`);
+  if (staleRecoveryPromptCalls.size || unattributableRecoveryCalls.size) {
+    console.log(`   ↳ recovery-prompt cohort: ${staleRecoveryPromptCalls.size} call(s) dropped (attempt ran under an older recovery prompt), ${unattributableRecoveryCalls.size} dropped as pre-stamp attempts that cannot be attributed. Current recovery prompt: ${RECOVERY_PROMPT_VERSION}.`);
   }
   console.log(`6. Disagreements reviewed           : ${disagreements.length === 0 ? 'none ✅' : disagreements.length + ' need manual review ⚠️'}`);
 
