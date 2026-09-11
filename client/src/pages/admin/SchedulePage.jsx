@@ -12373,6 +12373,12 @@ export function CompletionPanel({
     (calibrationRequired || treeShrubCloseoutRequired) && !isIncompleteVisit;
   const baseCompletionCtaLabel = submitting
     ? "Completing..."
+    : draftLoading
+      // The form renders before the IndexedDB draft lookup settles; a
+      // completed visit's photo-recovery draft (or a Restore prompt) may
+      // still be on its way. No submission until discovery settles
+      // (pre-push Codex P1 on 705d7acad).
+      ? "Loading saved draft…"
     : committedReplayReady
       ? "Resume Closeout"
       : completionPricingPending
@@ -14744,6 +14750,9 @@ export function CompletionPanel({
     // #3187 r18: the guard silently swallowed the resume POST and left the
     // button disabled forever).
     if (submitting && !resumingPoll) return;
+    // Draft discovery still settling (see baseCompletionCtaLabel): the button
+    // is disabled, but a keyboard/programmatic submit must not race it.
+    if (draftLoading) return;
     // A committed chain replays the pinned body byte-for-byte — the stored
     // body already passed every pre-submit gate when it committed, and the
     // reopened panel's form is empty (drafts never persist photos), so none
@@ -18629,6 +18638,7 @@ export function CompletionPanel({
               onClick={() => handleSubmit()}
               disabled={
                 submitting ||
+                draftLoading ||
                 generating ||
                 (!committedReplayReady &&
                   (completionPricingPending || closeoutAdvisoriesPending ||
@@ -18639,6 +18649,7 @@ export function CompletionPanel({
                 ...primaryPill,
                 opacity:
                   submitting ||
+                  draftLoading ||
                   (!committedReplayReady &&
                     (completionPricingPending || closeoutAdvisoriesPending ||
                       treeShrubCompletionBlocked ||
@@ -20795,6 +20806,7 @@ export function CompletionPanel({
             onClick={() => handleSubmit()}
             disabled={
               submitting ||
+              draftLoading ||
               generating ||
               (!committedReplayReady &&
                 (completionPricingPending || closeoutAdvisoriesPending ||
@@ -20813,6 +20825,7 @@ export function CompletionPanel({
               height: 52,
               opacity:
                 submitting ||
+                draftLoading ||
                 (!committedReplayReady &&
                   (completionPricingPending || closeoutAdvisoriesPending ||
                     treeShrubCompletionBlocked ||
