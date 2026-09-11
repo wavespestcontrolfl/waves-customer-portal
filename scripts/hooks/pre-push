@@ -688,6 +688,10 @@ claude_env_args() {
 #     outright rather than followed
 #   - required to be IN THAT COMMIT'S TREE, which is what actually keeps an
 #     untracked .env or a dropped credentials file out however it is spelled
+#   - excluded when the diff changes it, with the changed set taken from git
+#     metadata rather than the patch text — a binary-rendered file has no
+#     `+++` header, and reading the text would let a CHANGED file be inlined
+#     as unchanged and skip review
 #   - required to be a source extension, and never under node_modules
 #   - capped in count and bytes, so a diff cannot inflate its own prompt
 # No python3 → no context section, and the audit runs exactly as before.
@@ -700,12 +704,13 @@ write_referenced_context_script() {
 import os, re, sys
 
 # argv: <diff file> <tree listing from `git ls-tree -r <sha>`>
+#       <changed paths, one per line, from `git diff --name-only`>
 # Everything is resolved against that listing — the audited commit — and the
 # filesystem is never touched. That is deliberate: the working tree can hold
 # uncommitted edits, or be on another branch entirely, and inlining THAT
 # content while labelling it authoritative context for this diff would hide
 # the very defect the audit is looking for.
-diff_path, tree_path = sys.argv[1], sys.argv[2]
+diff_path, tree_path, changed_path = sys.argv[1], sys.argv[2], sys.argv[3]
 SPEC = re.compile(r"""(?:require\(|import\()\s*['"](\.[^'"]+)['"]|\bfrom\s+['"](\.[^'"]+)['"]""")
 EXT = ('.js', '.jsx', '.mjs', '.cjs', '.ts', '.tsx')
 SYMLINK_MODE = '120000'
@@ -719,16 +724,30 @@ with open(tree_path, encoding='utf-8', errors='replace') as fh:
             continue
         tree[path] = meta.split(' ', 1)[0]
 
-changed, refs, cur = set(), [], None
+# The changed set comes from git's own metadata, NEVER from the `+++`
+# headers. A file git renders as binary — one NUL byte, or a `-diff`
+# attribute — is emitted as "Binary files a/x and b/x differ" with no `+++`
+# header at all. Reading the headers would leave that file out of `changed`,
+# and its NEW contents would then be inlined under a heading that tells the
+# reviewer it is unchanged and not to report on it: a changed file would
+# evade review entirely.
+changed = set()
+with open(changed_path, encoding='utf-8', errors='replace') as fh:
+    for line in fh:
+        line = line.rstrip('\n')
+        if line:
+            changed.add(line)
+
+refs, cur = [], None
 with open(diff_path, encoding='utf-8', errors='replace') as fh:
     for line in fh:
         if line.startswith('+++ '):
             path = line[4:].strip()
             if path.startswith('b/'):
                 path = path[2:]
+            # Only ever used to attribute the added lines below to the file
+            # they came from — never to decide what counts as changed.
             cur = None if path == '/dev/null' else path
-            if cur:
-                changed.add(cur)
             continue
         if line.startswith('---') or not line.startswith('+') or cur is None:
             continue
@@ -766,25 +785,32 @@ print('\n'.join(out))
 PYEOF
 }
 collect_referenced_context() {
-  # $1 = file holding the diff, $2 = output file, $3 = the audited commit.
-  # Writes a prompt section, or leaves the output empty when there is
-  # nothing safe and useful to add.
-  local diff_file="$1" out="$2" audit_sha="$3"
+  # $1 = file holding the diff, $2 = output file, $3 = the audited commit,
+  # $4 = the base it is diffed against. Writes a prompt section, or leaves
+  # the output empty when there is nothing safe and useful to add.
+  local diff_file="$1" out="$2" audit_sha="$3" base="$4"
   local candidates rel size bytes=0 count=0
   local pyfile="$TMPDIR_RUN/referenced-context.py"
   local treefile="$TMPDIR_RUN/referenced-context-tree.txt"
+  local changedfile="$TMPDIR_RUN/referenced-context-changed.txt"
   local body="$TMPDIR_RUN/referenced-context-body.txt"
   : > "$out"
+  # Both are required, and missing either FAILS CLOSED to no context at all.
+  # Without the base there is no authoritative changed-file list, and the
+  # only other source for it is the diff text — which is exactly the thing
+  # that cannot see a binary-rendered file.
   [ -n "$audit_sha" ] || return 0
+  [ -n "$base" ] || return 0
   [ "$CLAUDE_CONTEXT_MAX_FILES" -gt 0 ] 2>/dev/null || return 0
   command -v python3 >/dev/null 2>&1 || return 0
 
   # The audited commit's own file list — not the working tree's.
   git ls-tree -r "$audit_sha" > "$treefile" 2>/dev/null || return 0
   [ -s "$treefile" ] || return 0
+  git diff --name-only "$base...$audit_sha" > "$changedfile" 2>/dev/null || return 0
 
   write_referenced_context_script "$pyfile" || return 0
-  candidates="$(python3 "$pyfile" "$diff_file" "$treefile" 2>/dev/null)" || return 0
+  candidates="$(python3 "$pyfile" "$diff_file" "$treefile" "$changedfile" 2>/dev/null)" || return 0
   [ -n "$candidates" ] || return 0
 
   : > "$body"
@@ -827,8 +853,9 @@ REFEOF
 CLAUDE_DISALLOWED_TOOLS="Bash Edit Write NotebookEdit WebFetch WebSearch Task Agent Read Grep Glob ToolSearch Skill Workflow ListAgents SendMessage Monitor TaskOutput TaskStop CronCreate CronDelete CronList EnterWorktree ExitWorktree PushNotification RemoteTrigger DesignSync Artifact SlashCommand KillShell BashOutput TodoWrite ExitPlanMode EnterPlanMode ScheduleWakeup ReportFindings SendUserFile SendFeedback AskUserQuestion EndConversation"
 run_claude_audit() {
   # $1 = ref index, $2 = out file, $3 = prompt file, $4 = label, $5 = short
-  # sha, $6 = the full audited sha (referenced files are read from it)
-  local idx="$1" out_file="$2" prompt_file="$3" label="$4" short_sha="$5" audit_sha="${6:-}"
+  # sha, $6 = the full audited sha (referenced files are read from it),
+  # $7 = the base it is diffed against
+  local idx="$1" out_file="$2" prompt_file="$3" label="$4" short_sha="$5" audit_sha="${6:-}" audit_base="${7:-}"
   local envelope="$TMPDIR_RUN/claude-$idx.stdout"
   local claude_prompt="$TMPDIR_RUN/claude-prompt-$idx.txt"
   local child_pid watchdog_pid child_status=0
@@ -844,7 +871,7 @@ run_claude_audit() {
   # fixed.
   local base_prompt="$TMPDIR_RUN/claude-base-$idx.txt"
   local context_file="$TMPDIR_RUN/claude-context-$idx.txt"
-  collect_referenced_context "$prompt_file" "$context_file" "$audit_sha"
+  collect_referenced_context "$prompt_file" "$context_file" "$audit_sha" "$audit_base"
   {
     cat "$prompt_file"
     [ -s "$context_file" ] && cat "$context_file"
@@ -1283,7 +1310,7 @@ for i in "${!REF_SHAS[@]}"; do
   # pass-through must never read like a clean review in a scrollback.
   if [ "$CODEX_OK" = "1" ]; then
     AUDITOR="codex"
-  elif run_claude_audit "$i" "$OUT_FILE" "$PROMPT_FILE" "$AUDIT_LABEL" "$SHORT_SHA" "$AUDIT_SHA"; then
+  elif run_claude_audit "$i" "$OUT_FILE" "$PROMPT_FILE" "$AUDIT_LABEL" "$SHORT_SHA" "$AUDIT_SHA" "$BASE"; then
     AUDITOR="claude"
     FALLBACK_USED=1
     persist_ref_artifacts "$i"

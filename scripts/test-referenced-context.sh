@@ -54,27 +54,40 @@ pass() { echo "  PASS  $1"; }
 fail() { echo "  FAIL  $1"; FAILURES=$((FAILURES + 1)); }
 
 # ── A throwaway repo to resolve against ──────────────────────────────────
+# The changed set now comes from `git diff --name-only BASE...SHA`, so the
+# fixture has to be real history rather than one commit: a referenced file
+# must be present in BASE and untouched by the push to count as unchanged.
 REPO="$WORK/repo"
-mkdir -p "$REPO/server/services" "$REPO/server/config" "$REPO/node_modules/pkg"
+mkdir -p "$REPO/server/services/mod" "$REPO/server/config" "$REPO/node_modules/pkg"
 cd "$REPO" || exit 1
 git init -q .
 git config user.email t@t.t; git config user.name t
 
-echo "module.exports = { POLICY: 1 };"      > server/config/models.js
-echo "module.exports = { helper: 1 };"      > server/services/helper.js
-echo "module.exports = { data: 1 };"        > server/services/data.json
-echo "module.exports = { dep: 1 };"         > node_modules/pkg/index.js
-mkdir -p server/services/mod
+echo "module.exports = { POLICY: 1 };"       > server/config/models.js
+echo "module.exports = { helper: 1 };"       > server/services/helper.js
+echo "module.exports = { data: 1 };"         > server/services/data.json
+echo "module.exports = { dep: 1 };"          > node_modules/pkg/index.js
 echo "module.exports = { from_index: 1 };"   > server/services/mod/index.js
 printf 'module.exports = { big: "%s" };\n' "$(head -c 4000 < /dev/zero | tr '\0' 'x')" > server/services/big.js
 ln -s /etc/passwd server/services/link.js
 git add -A >/dev/null 2>&1
-git commit -qm init >/dev/null 2>&1
-AUDIT_SHA="$(git rev-parse HEAD)"
-# Deliberately NOT committed — this is the .env-shaped case.
+git commit -qm support >/dev/null 2>&1
+BASE_SHA="$(git rev-parse HEAD)"
+
+# The push under test: it adds a caller and touches nothing else, so every
+# support file above is tracked-and-unchanged.
+echo "module.exports = {};" > server/services/caller.js
+git add -A >/dev/null 2>&1
+git commit -qm push >/dev/null 2>&1
+PUSH_SHA="$(git rev-parse HEAD)"
+
+# Deliberately NOT committed yet — the .env-shaped case.
 echo "module.exports = { SECRET: 'sk_live_do_not_leak' };" > server/services/secrets.js
 
-# $1 = the added source line(s), $2 = path the diff claims to change
+AUDIT_BASE="$BASE_SHA"
+AUDIT_SHA="$PUSH_SHA"
+
+# $1 = the added source line, $2 = path the diff claims to change
 make_diff() {
   local added="$1" path="${2:-server/services/caller.js}"
   {
@@ -87,14 +100,14 @@ make_diff() {
   } > "$WORK/diff.txt"
 }
 
-run_collect() { collect_referenced_context "$WORK/diff.txt" "$WORK/out.txt" "$AUDIT_SHA"; }
+run_collect() { collect_referenced_context "$WORK/diff.txt" "$WORK/out.txt" "$AUDIT_SHA" "$AUDIT_BASE"; }
 
 # $1 = label, $2 = added line, $3 = "includes"|"excludes", $4 = needle
 expect() {
   local label="$1" added="$2" mode="$3" needle="$4"
   make_diff "$added"
   run_collect
-  if grep -q -- "$needle" "$WORK/out.txt" 2>/dev/null; then
+  if grep -qa -- "$needle" "$WORK/out.txt" 2>/dev/null; then
     [ "$mode" = "includes" ] && pass "$label" || fail "$label — LEAKED: $needle is in the prompt"
   else
     [ "$mode" = "excludes" ] && pass "$label" || fail "$label — missing: $needle"
@@ -121,11 +134,16 @@ expect "drops an UNTRACKED file (the .env / dropped-credential case)" \
   "const s = require('./secrets');" excludes "sk_live_do_not_leak"
 git add server/services/secrets.js >/dev/null 2>&1
 git commit -qm secrets >/dev/null 2>&1
-SECRETS_SHA="$AUDIT_SHA"; AUDIT_SHA="$(git rev-parse HEAD)"
-expect "  ...and accepts that very file once it is committed" \
+SECRETS_BASE="$(git rev-parse HEAD)"
+echo "module.exports = {};" > server/services/later.js
+git add -A >/dev/null 2>&1
+git commit -qm later >/dev/null 2>&1
+SAVED_SHA="$AUDIT_SHA"; SAVED_BASE="$AUDIT_BASE"
+AUDIT_SHA="$(git rev-parse HEAD)"; AUDIT_BASE="$SECRETS_BASE"
+expect "  ...and accepts that very file once it is committed and unchanged" \
   "const s = require('./secrets');" includes "sk_live_do_not_leak"
-AUDIT_SHA="$SECRETS_SHA"
-expect "  ...and drops it again when auditing the commit that predates it" \
+AUDIT_SHA="$SAVED_SHA"; AUDIT_BASE="$SAVED_BASE"
+expect "  ...and drops it again when auditing a commit that predates it" \
   "const s = require('./secrets');" excludes "sk_live_do_not_leak"
 
 # Symlink escape — containment is checked after resolution.
@@ -141,13 +159,20 @@ expect "drops a non-source extension" \
   "const d = require('./data.json');" excludes '"data"'
 
 # Already in the diff — no point paying tokens twice.
+git checkout -q -B changed-models "$PUSH_SHA" >/dev/null 2>&1
+echo "module.exports = { POLICY: 2 };" > server/config/models.js
+git add -A >/dev/null 2>&1; git commit -qm touch-models >/dev/null 2>&1
+SAVED_SHA="$AUDIT_SHA"; SAVED_BASE="$AUDIT_BASE"
+AUDIT_SHA="$(git rev-parse HEAD)"; AUDIT_BASE="$PUSH_SHA"
 make_diff "const m = require('../config/models');" "server/config/models.js"
 run_collect
 if [ -s "$WORK/out.txt" ]; then
-  fail "re-inlines a file that is already in the diff"
+  fail "re-inlines a file the push actually changes"
 else
-  pass "skips a file that is already in the diff"
+  pass "skips a file the push actually changes"
 fi
+AUDIT_SHA="$SAVED_SHA"; AUDIT_BASE="$SAVED_BASE"
+git checkout -q - >/dev/null 2>&1
 
 # Bare specifiers are not paths.
 expect "ignores a bare package specifier" \
@@ -160,36 +185,69 @@ echo "reads the audited commit, not the working tree:"
 echo "module.exports = { POLICY: 'DIRTY_WORKTREE' };" > server/config/models.js
 make_diff "const m = require('../config/models');"
 run_collect
-if grep -q "DIRTY_WORKTREE" "$WORK/out.txt"; then
+if grep -qa "DIRTY_WORKTREE" "$WORK/out.txt"; then
   fail "inlines the DIRTY WORKING TREE instead of the audited commit"
 else
-  grep -q "POLICY" "$WORK/out.txt" \
+  grep -qa "POLICY" "$WORK/out.txt" \
     && pass "ignores uncommitted edits and inlines the committed content" \
     || fail "inlined nothing at all with a dirty tree"
 fi
 git checkout -q -- server/config/models.js
 
 # Auditing a ref that is not the checked-out branch.
-git checkout -q -b other >/dev/null 2>&1
+git checkout -q -B other "$BASE_SHA" >/dev/null 2>&1
 echo "module.exports = { POLICY: 'OTHER_BRANCH' };" > server/config/models.js
 git commit -qam other >/dev/null 2>&1
+OTHER_BASE="$(git rev-parse HEAD)"
+echo "module.exports = {};" > server/services/other-caller.js
+git add -A >/dev/null 2>&1; git commit -qm other2 >/dev/null 2>&1
 OTHER_SHA="$(git rev-parse HEAD)"
 git checkout -q - >/dev/null 2>&1
-SAVED_SHA="$AUDIT_SHA"; AUDIT_SHA="$OTHER_SHA"
+SAVED_SHA="$AUDIT_SHA"; SAVED_BASE="$AUDIT_BASE"
+AUDIT_SHA="$OTHER_SHA"; AUDIT_BASE="$OTHER_BASE"
 make_diff "const m = require('../config/models');"
 run_collect
-if grep -q "OTHER_BRANCH" "$WORK/out.txt"; then
+if grep -qa "OTHER_BRANCH" "$WORK/out.txt"; then
   pass "audits a ref that is not checked out from that ref's own tree"
 else
   fail "did not read the pushed ref's content when it is not checked out"
 fi
-AUDIT_SHA="$SAVED_SHA"
+AUDIT_SHA="$SAVED_SHA"; AUDIT_BASE="$SAVED_BASE"
 
 # No sha, no context — never a silent fall-back to the working tree.
 SAVED_SHA="$AUDIT_SHA"; AUDIT_SHA=""
 expect "emits nothing when given no commit" \
   "const m = require('../config/models');" excludes "POLICY"
 AUDIT_SHA="$SAVED_SHA"
+
+# A file git renders as BINARY has no `+++` header, so a parser that reads
+# the patch text does not see it as changed and will inline its NEW contents
+# under the "UNCHANGED, do not report findings" heading — a changed file that
+# skips review. The changed set therefore comes from git metadata.
+git checkout -q -B binmain "$PUSH_SHA" >/dev/null 2>&1
+printf '\000module.exports={SECRET:"binary_payload_evaded_review"};\n' > server/services/helper.js
+printf "const h = require('./helper');\n" > server/services/binary-caller.js
+git add -A >/dev/null 2>&1
+git commit -qm binary >/dev/null 2>&1
+BIN_SHA="$(git rev-parse HEAD)"
+git diff "$PUSH_SHA...$BIN_SHA" > "$WORK/diff.txt" 2>/dev/null
+SAVED_SHA="$AUDIT_SHA"; SAVED_BASE="$AUDIT_BASE"
+AUDIT_SHA="$BIN_SHA"; AUDIT_BASE="$PUSH_SHA"
+run_collect
+if grep -qa "binary_payload_evaded_review" "$WORK/out.txt"; then
+  fail "inlines a CHANGED binary-rendered file as unchanged — it skips review"
+else
+  pass "a changed file git renders as binary is not inlined as unchanged"
+fi
+AUDIT_SHA="$SAVED_SHA"; AUDIT_BASE="$SAVED_BASE"
+git checkout -q - >/dev/null 2>&1
+
+# No base, no authoritative changed set — fail closed rather than fall back
+# to reading the patch text.
+SAVED_BASE="$AUDIT_BASE"; AUDIT_BASE=""
+expect "emits nothing when given no base to diff against" \
+  "const m = require('../config/models');" excludes "POLICY"
+AUDIT_BASE="$SAVED_BASE"
 
 echo ""
 echo "caps and framing:"
@@ -206,7 +264,7 @@ CLAUDE_CONTEXT_MAX_FILES=5
 
 make_diff "const m = require('../config/models');"
 run_collect
-if grep -q "NOT part of the diff" "$WORK/out.txt" && grep -q "Do NOT raise findings" "$WORK/out.txt"; then
+if grep -qa "NOT part of the diff" "$WORK/out.txt" && grep -qa "Do NOT raise findings" "$WORK/out.txt"; then
   pass "labels the section as unchanged and off-limits for findings"
 else
   fail "the section does not tell the model these files are unchanged"
