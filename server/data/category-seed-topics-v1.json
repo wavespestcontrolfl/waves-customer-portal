@@ -1911,7 +1911,7 @@
         "Article",
         "FAQPage"
       ],
-      "thesis": "Lizards living inside a Southwest Florida lanai are most often anoles or house geckos — occasionally another species such as a curly-tailed lizard — that slipped through a screen or door gap chasing the insects the cage lights attract; the honest fix is a gap-and-light audit plus shrinking the bug supply, not lizard sprays, mothballs or glue boards, and once the buffet is gone they leave on their own.",
+      "thesis": "Lizards living inside a Southwest Florida lanai are most often anoles or house geckos — occasionally another species such as a curly-tailed lizard — that slipped through a screen or door gap chasing the insects the cage lights attract; the honest response is a gap-and-light audit plus reducing the insects they are hunting, not lizard sprays, mothballs or glue boards, and a lanai with fewer insects is a less attractive place for them to hunt.",
       "outline": [
         "Quick answer (5 steps): find and patch the gap they came through, herd out the ones already inside, change the lights that feed them, cut the bug supply, keep the screens tight",
         "Which lizard is on your lanai: brown anole, green anole, Mediterranean and tropical house geckos, curly-tailed lizard, one line each from UF/IFAS (size, color, day vs night) and which are native vs introduced; none are venomous and none bite unless picked up",
@@ -1926,7 +1926,7 @@
         "https://gardeningsolutions.ifas.ufl.edu/care/wildlife/anoles.html",
         "https://edis.ifas.ufl.edu/publication/UW070",
         "Locate the UF/IFAS or FWC species profiles for the brown anole (Anolis sagrei, introduced), green anole (Anolis carolinensis, native), Mediterranean house gecko and tropical house gecko (both introduced) and the northern curly-tailed lizard (introduced); verify size, coloring, activity time and native/introduced status against those pages; snapshot at draft.",
-        "For the what-not-to-do section, cite the EPA or FDACS position that using a registered pesticide (mothballs/naphthalene) in a manner inconsistent with its label is a violation; if no citable page is found, drop the legal framing and keep only 'not labeled for this, does not work'.",
+        "For the what-not-to-do section, cite an authoritative source for EACH claim you make: the EPA or FDACS position that using a registered pesticide (mothballs/naphthalene) inconsistently with its label is a violation, and, separately, any efficacy or label-status statement about retail lizard repellents. If no citable source is found for a given product, OMIT that product entirely from the section rather than asserting it is unlabeled or ineffective; the section may still cover glue boards on humane/non-target grounds, which needs no efficacy claim.",
         "https://www.merckvetmanual.com/digestive-system/hepatic-disease-in-small-animals/hepatobiliary-fluke-infection-in-small-animals"
       ],
       "internal_links": [
@@ -1939,7 +1939,8 @@
         "No health claims beyond what the source supports. Nonvenomous and does-not-bite-unless-handled is the ceiling for PEOPLE. Do NOT write that these lizards are harmless to pets as a blanket statement: bite/venom risk and ingestion risk are different questions, and a cat that eats a lizard can pick up liver flukes. State the ingestion point ONLY if the cited veterinary source supports it, keep it to one factual sentence, and refer pet-health questions to a veterinarian. If it cannot be verified, OMIT the whole ingestion point rather than replacing it with a reassurance.",
         "How-to post, not an identification reference: the existing /pest-control/lizard-faeces-swfl-guide/ already owns droppings ID — link it once and keep this page on exclusion, herding, lighting and bug-supply reduction.",
         "Waves treats insects, not lizards. Never imply we remove, trap, relocate or poison lizards, and never describe any pesticide as \"safe\" or \"pet-safe\" or give re-entry minutes. Do not name a product for lizard control; no such labeled product is part of our service. NO WILDLIFE-TRAPPING CONTENT of any kind (owner rule, waves-content skill): do not recommend, name or describe a trapper, removal service or relocation, and do not add an iguana-removal aside.",
-        "Southwest Florida framing throughout (Sarasota, Bradenton, Venice, Lakewood Ranch, North Port, Palmetto, Parrish, Port Charlotte); no statewide-only framing in title or H2s."
+        "Southwest Florida framing throughout (Sarasota, Bradenton, Venice, Lakewood Ranch, North Port, Palmetto, Parrish, Port Charlotte); no statewide-only framing in title or H2s.",
+        "Never promise elimination or that the lizards will leave (writer-agent-config PREVENTION_PROMISE). Reduced attractiveness only, always conditional: fewer insects means a lanai that offers them less to hunt. Do not write that they will leave, move on, relocate or stop coming back. The deterministic guardrail does not cover lizards, so this rule has to hold in the brief."
       ]
     }
   ]
