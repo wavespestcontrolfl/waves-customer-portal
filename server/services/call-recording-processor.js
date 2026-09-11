@@ -6359,6 +6359,15 @@ async function applyCallRescheduleStep({ call, callSid, customerId, extracted, v
     if (result.outcome !== 'skipped' || result.reason !== 'not_a_reschedule') {
       logger.info(`[call-proc] reschedule-apply for ${maskSid(callSid)}: ${result.outcome}${result.reason ? ` (${result.reason})` : ''}${result.visitId ? ` visit=${result.visitId}` : ''}`);
     }
+    // recordCommitmentsStep ran BEFORE this step, so a schedule_visit promise
+    // the move just kept was written open and its proof did not exist yet.
+    // Re-run the fulfillment lookup now that the activity row exists, or the
+    // watchdog reports an overdue promise this pass already kept (GH codex
+    // #4204 r6 P2). Non-blocking, like every other line in this step.
+    if (result.outcome === 'applied' && isEnabled('callCommitments')) {
+      await require('./call-commitments').refreshFulfillment(db, call.id)
+        .catch((err) => logger.warn(`[call-proc] post-reschedule fulfillment refresh failed for ${maskSid(callSid)}: ${err.message}`));
+    }
   } catch (err) {
     logger.warn(`[call-proc] reschedule-apply step failed (non-blocking) for ${maskSid(callSid)}: ${err.message}`);
   }

@@ -109,6 +109,13 @@ describe('planRescheduleFromCall', () => {
       .toBe('caller_phone_not_on_file');
   });
 
+  test.each(['outbound', 'outbound-api', 'outbound-dial'])(
+    'an %s call is identified by the dialed party, not the Waves line', (direction) => {
+      const outbound = call({ direction, from_phone: '+15555550100', to_phone: PHONE });
+      expect(planRescheduleFromCall({ v2: v2(), call: outbound, customer: customer(), candidates: [visit()], now: NOW }))
+        .toMatchObject({ action: 'apply', visitId: VISIT_ID });
+    });
+
   test('inferred speaker labels cannot authorize a move', () => {
     expect(planWithLabelTrust({ v2: v2(), call: call(), customer: customer(), candidates: [visit()], now: NOW }).reason).toBe('untrusted_speaker_labels');
   });
@@ -221,8 +228,9 @@ describe('planRescheduleFromCall', () => {
 });
 
 // ── applier against a mocked connection ─────────────────────────────────
-function makeConn({ owned = true, prior = null, cust = customer(), visits = [visit()], properties = [], extraction = v2(), settledCall = {}, handled = false, moved = false, openCards = 1, remaining = 0 } = {}) {
+function makeConn({ owned = true, prior = null, cust = customer(), visits = [visit()], properties = [], extraction = v2(), settledCall = {}, handled = false, moved = false, openCards = 1, remaining = 0, portalRequest = null } = {}) {
   const writes = { updates: [], inserts: [] };
+  let openRequest = portalRequest;
   const builder = (table) => {
     const state = { table, where: [], whereIn: [], updateArg: null };
     const q = {
@@ -246,6 +254,7 @@ function makeConn({ owned = true, prior = null, cust = customer(), visits = [vis
         if (table === 'customers') return Promise.resolve(cust);
         if (table === 'triage_items') return Promise.resolve(state.counted ? { n: remaining } : (handled ? { id: 'handled-card' } : undefined));
         if (table === 'reschedule_log') return Promise.resolve(moved ? { id: 'later-move' } : undefined);
+        if (table === 'service_requests') return Promise.resolve(openRequest || undefined);
         if (table === 'scheduled_services') return Promise.resolve(visits[0]);
         return Promise.resolve(undefined);
       },
@@ -263,6 +272,8 @@ function makeConn({ owned = true, prior = null, cust = customer(), visits = [vis
   conn.transaction = async (fn) => fn(conn);
   conn.writes = writes;
   conn.visits = visits;
+  // A request the customer files between the pre-apply check and the move.
+  conn.setPortalRequest = (row) => { openRequest = row; };
   return conn;
 }
 
@@ -423,17 +434,16 @@ describe('applyCallReschedule', () => {
   });
 
   // A row parked at 'rescheduled' is OUT of dispatch until someone rebooks it
-  // (routes/schedule.js legacy flip). Carrying that status onto the agreed
-  // slot would record a time nobody works (GH codex r5 P1).
-  test('a parked rescheduled row lands back on the books instead of keeping its status', async () => {
+  // (routes/schedule.js legacy flip). Reviving one reaches into the card-hold
+  // park and the AI office-review supersession rule, so it stays a card.
+  test('a parked rescheduled row is never moved automatically', async () => {
     const conn = makeConn({ visits: [visit({ status: 'rescheduled' })] });
-    const rebooker = { reschedule: jest.fn(async (_id, _date, _win, _reason, _by, opts) => {
-      await opts.moveGuard({ trx: conn, service: conn.visits[0] });
-      return { success: true };
-    }) };
+    const rebooker = { reschedule: jest.fn() };
     const result = await applyCallReschedule({ conn, call: call(), now: NOW, rebooker });
-    expect(result.outcome).toBe('applied');
-    expect(rebooker.reschedule.mock.calls[0][5].keepStatus).toBe(false);
+    expect(result).toMatchObject({ outcome: 'skipped', reason: 'visit_parked_for_rebook', visitId: VISIT_ID });
+    expect(rebooker.reschedule).not.toHaveBeenCalled();
+    const stamp = conn.writes.updates.find((u) => u.table === 'triage_items');
+    expect(stamp.arg.payload.bindings[0]).toMatch(/"skipped":"visit_parked_for_rebook"/);
   });
 
   test('a pending row still keeps its status', async () => {
@@ -446,34 +456,31 @@ describe('applyCallReschedule', () => {
     expect(rebooker.reschedule.mock.calls[0][5].keepStatus).toBe(true);
   });
 
-  test('a parked row already at the agreed time is restored without a move', async () => {
-    const conn = makeConn({ extraction: v2({ scheduling: { confirmed_start_at: '2026-09-24T09:00:00-04:00' } }),
-      visits: [visit({ status: 'rescheduled' })] });
+  // The customer's portal reschedule request is a staff-owned track with its
+  // own preferred date, lifecycle and (legacy flow) parked card hold — the
+  // automation stands down rather than resolving it from here (r6 P1).
+  test('an open portal reschedule request for the visit stands the automation down', async () => {
+    const conn = makeConn({ portalRequest: { id: 'req-1' } });
     const rebooker = { reschedule: jest.fn() };
     const result = await applyCallReschedule({ conn, call: call(), now: NOW, rebooker });
-    expect(result).toMatchObject({ outcome: 'noop', reason: 'already_at_requested_time' });
+    expect(result).toMatchObject({ outcome: 'skipped', reason: 'portal_request_open', visitId: VISIT_ID });
     expect(rebooker.reschedule).not.toHaveBeenCalled();
-    const restore = conn.writes.updates.find((u) => u.table === 'scheduled_services' && u.arg.status === 'confirmed');
-    expect(restore.where).toContainEqual([{ id: VISIT_ID, status: 'rescheduled' }]);
+    const req = conn.writes.updates.find((u) => u.table === 'service_requests');
+    expect(req).toBeUndefined();
+    const stamp = conn.writes.updates.find((u) => u.table === 'triage_items');
+    expect(stamp.arg.payload.bindings[0]).toMatch(/"skipped":"portal_request_open"/);
   });
 
-  // The customer's portal reschedule request is the same ask the caller just
-  // settled; leaving it open makes staff work an applied move (r5 P2).
-  test('the open portal reschedule request for the visit is resolved in the same transaction', async () => {
+  test('a portal request opened during the move is caught on the move transaction', async () => {
     const conn = makeConn();
     const rebooker = { reschedule: jest.fn(async (_id, _date, _win, _reason, _by, opts) => {
+      conn.setPortalRequest({ id: 'req-2' });
       await opts.moveGuard({ trx: conn, service: conn.visits[0] });
       return { success: true };
     }) };
-    await applyCallReschedule({ conn, call: call(), now: NOW, rebooker });
-    const req = conn.writes.updates.find((u) => u.table === 'service_requests');
-    expect(req.arg).toMatchObject({ status: 'resolved' });
-    expect(req.arg.resolved_at).toBeInstanceOf(Date);
-    expect(req.where).toContainEqual([{ customer_id: CUSTOMER_ID, category: 'schedule_change' }]);
-    expect(req.where).toContainEqual(['description', 'like', `Appointment ${VISIT_ID}:%`]);
-    expect(req.whereNotIn).toContainEqual(['status', ['resolved', 'closed', 'cancelled']]);
-    // Still nothing customer-facing: the status email lives in the admin route.
-    expect(conn.writes.inserts.map((i) => i.table)).toEqual(['activity_log']);
+    const result = await applyCallReschedule({ conn, call: call(), now: NOW, rebooker });
+    expect(result).toMatchObject({ outcome: 'skipped', reason: 'handled_after_call' });
+    expect(conn.writes.inserts).toHaveLength(0);
   });
 
   test('a rebooker refusal propagates (the processor step logs it non-blocking) and no activity row is written', async () => {

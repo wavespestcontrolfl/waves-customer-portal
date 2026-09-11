@@ -18,7 +18,8 @@
  *     scheduling_window confidence clears MIN_SCHEDULING_CONFIDENCE, and
  *     the existing trusted-speaker-label gate is enabled
  *   - confirmed_start_at is a real future instant exactly on the hour
- *   - exactly ONE live visit (pending/confirmed/rescheduled, not dispatch-
+ *   - exactly ONE live visit (pending or confirmed — a row parked at
+ *     'rescheduled' awaits a real rebook and stays a card; not dispatch-
  *     owned pending, not grouped) of that customer's named service at the
  *     identified property sits within
  *     CANDIDATE_SPAN_DAYS of the target date — two candidates is ambiguous,
@@ -27,14 +28,14 @@
  *     grouped visit needs the whole-visit mover's
  *     disclosure a phone call never gave
  *   - the pipeline did not itself create an appointment from this call
+ *   - the customer has no open portal reschedule request for that same
+ *     appointment — that is a staff-owned track with its own preferred date,
+ *     lifecycle and (legacy flow) parked card hold
  *
  * Apply: SmartRebooker.reschedule (same choke point the admin editor and the
  * customer self-serve reschedule use — occupancy probe, reminder resync,
  * reschedule_log, CAS pin on the row as read) with keepStatus so a pending
- * visit stays pending — except a row parked at 'rescheduled', which lands
- * 'confirmed' so the agreed slot is actually on the dispatch board; the
- * customer's open portal reschedule request for that visit is resolved in the
- * same transaction; the caller's interior/access request is appended to
+ * visit stays pending; the caller's interior/access request is appended to
  * the visit's internal_notes; an activity_log row records the move with the
  * call id (and doubles as the idempotency marker for a reprocess); the
  * call's open reschedule_or_cancel / existing_appointment_coordination
@@ -65,6 +66,11 @@ const MIN_SCHEDULING_CONFIDENCE = 0.8;
 // proximity never identifies an occurrence among multiple recurring visits.
 const CANDIDATE_SPAN_DAYS = 14;
 const LIVE_STATUSES = ['pending', 'confirmed', 'rescheduled'];
+// Automatic moves take ONLY these. A row parked at 'rescheduled' is out of
+// dispatch awaiting a real rebook, and reviving it reaches into the card-hold
+// park, the AI office-review supersession rule and job history — none of which
+// this path is the authority for (GH codex #4204 r6 P1 x2). It stays a card.
+const MOVABLE_STATUSES = ['pending', 'confirmed'];
 const CARD_REASON_CODES = ['reschedule_or_cancel', 'existing_appointment_coordination'];
 const ACTIVITY_ACTION = 'call_reschedule_applied';
 const RESCHEDULE_REASON_CODE = 'ai_call_reschedule'; // reschedule_log.reason_code varchar(30)
@@ -93,9 +99,14 @@ function calendarDaysBetween(a, b) {
 
 // The number the customer spoke from: the caller on an inbound call, the
 // dialed party on an outbound one.
+// `direction` keeps Twilio's native values on some paths ('outbound-api',
+// 'outbound-dial'), so classify by prefix the way the processor's canonical
+// isOutboundCall does — an exact 'outbound' match read those as inbound and
+// compared the Waves number instead of the customer's (GH codex #4204 r6 P2).
 function counterpartPhone(call) {
   if (!call) return null;
-  return call.direction === 'outbound' ? (call.to_phone || null) : (call.from_phone || null);
+  const outbound = String(call.direction || '').toLowerCase().startsWith('outbound');
+  return outbound ? (call.to_phone || null) : (call.from_phone || null);
 }
 
 function skip(reason, extra = {}) {
@@ -181,6 +192,7 @@ function planRescheduleFromCall({ v2, call, customer, properties = [], candidate
   if (nearby.length === 0) return skip('no_visit_on_books');
   const visit = nearby[0];
   if (!LIVE_STATUSES.includes(visit.status)) return skip('visit_not_live', { visitId: visit.id });
+  if (!MOVABLE_STATUSES.includes(visit.status)) return skip('visit_parked_for_rebook', { visitId: visit.id });
   if (visit.visit_id) return skip('grouped_visit', { visitId: visit.id });
   if (visit.source_action && DISPATCH_OWNED_PENDING_SOURCE_ACTIONS.includes(visit.source_action) && visit.status === 'pending') {
     return skip('dispatch_owned_pending', { visitId: visit.id });
@@ -297,6 +309,18 @@ async function applyCallReschedule({ conn, call, procGeneration = null, appointm
       return { outcome: 'skipped', reason: 'already_applied', cardsResolved };
     });
   }
+  // The customer's own portal reschedule request for the SAME appointment is a
+  // second, staff-owned track for the same ask: it carries its own preferred
+  // date, its own lifecycle (acknowledged/scheduled) and, on the legacy flow,
+  // a parked card hold. Resolving it from here raced the office and could bury
+  // a newer customer preference (GH codex #4204 r6 P1); the automation stands
+  // down and leaves the whole request to staff. Predicate mirrors the dedup
+  // lookup routes/schedule.js runs against its own rows.
+  const openPortalRequest = (trx, serviceId) => trx('service_requests')
+    .where({ customer_id: settled.customer_id, category: 'schedule_change' })
+    .whereNotIn('status', ['resolved', 'closed', 'cancelled'])
+    .where('description', 'like', `Appointment ${serviceId}:%`)
+    .first('id');
   const newerMove = (trx) => trx('reschedule_log')
     .whereIn('scheduled_service_id', trx('scheduled_services').where({ customer_id: settled.customer_id }).select('id'))
     .where('created_at', '>', settled.created_at).first('id');
@@ -310,6 +334,10 @@ async function applyCallReschedule({ conn, call, procGeneration = null, appointm
     return { outcome: 'skipped', reason: plan.reason, visitId: plan.visitId || null };
   }
   const visit = candidates.find((r) => r.id === plan.visitId);
+  if (await openPortalRequest(conn, plan.visitId)) {
+    await stampSkipOnCards(conn, call.id, { reason: 'portal_request_open', visitId: plan.visitId });
+    return { outcome: 'skipped', reason: 'portal_request_open', visitId: plan.visitId };
+  }
   let cardsResolved = 0;
   const note = `Applied from the call: visit ${plan.visitId} at ${plan.newDate} ${plan.newWindow.start}. No customer message sent.`;
   // beforeMove established the customer/call locks before the mover locked
@@ -332,7 +360,8 @@ async function applyCallReschedule({ conn, call, procGeneration = null, appointm
       .where((q) => q.where('status', 'in_progress').orWhere((closed) => closed
         .where('resolution_source', 'human').whereIn('status', ['resolved', 'dismissed']))).first('id');
     const moved = await newerMove(trx);
-    if (handled || moved) throw Object.assign(new Error('The request was handled after this call'), { code: 'CALL_RESCHEDULE_HANDLED' });
+    const portalRequest = await openPortalRequest(trx, visit.id);
+    if (handled || moved || portalRequest) throw Object.assign(new Error('The request was handled after this call'), { code: 'CALL_RESCHEDULE_HANDLED' });
     const latestCustomer = await trx('customers').where({ id: settled.customer_id }).forShare().first();
     const latestProperties = await trx('customer_properties').where({ customer_id: settled.customer_id, active: true }).forShare().select('*');
     const latestCandidates = await loadCandidates(trx, settled.customer_id, now);
@@ -350,22 +379,6 @@ async function applyCallReschedule({ conn, call, procGeneration = null, appointm
           [plan.interiorNote, `Call ${etCalendarDayOf(settled.created_at)}: ${plan.interiorNote}`]),
       });
     }
-    // The portal reschedule request for THIS appointment (routes/schedule.js
-    // mints one per ask) is the same request the caller just settled by phone.
-    // Left open, the Requests queue keeps presenting it and staff act on an
-    // already-applied move (GH codex #4204 r5 P2). Same predicate the route's
-    // own dedup lookup uses. DB write only — the customer-facing status email
-    // lives in the admin PATCH handler, never here (no-customer-comms).
-    await trx('service_requests')
-      .where({ customer_id: settled.customer_id, category: 'schedule_change' })
-      .whereNotIn('status', ['resolved', 'closed', 'cancelled'])
-      .where('description', 'like', `Appointment ${visit.id}:%`)
-      .update({
-        status: 'resolved',
-        resolved_at: new Date(),
-        updated_at: new Date(),
-        admin_notes: trx.raw("concat_ws(E'\\n', NULLIF(admin_notes, ''), ?::text)", [note]),
-      });
     await trx('activity_log').insert({ customer_id: settled.customer_id, action: ACTIVITY_ACTION, description: note,
       metadata: JSON.stringify({ call_log_id: String(call.id), scheduled_service_id: String(visit.id),
         from: plan.from || null, to: { date: plan.newDate, ...plan.newWindow }, interior_note_added: !!plan.interiorNote,
@@ -378,26 +391,11 @@ async function applyCallReschedule({ conn, call, procGeneration = null, appointm
         await beforeMove(trx);
         const service = await trx('scheduled_services').where({ id: visit.id }).forUpdate().first();
         await writeDecision({ trx, service });
-        // Same parked-row rule as the move above: the visit already sits at
-        // the agreed slot, so nothing moves — but if it is out of dispatch at
-        // 'rescheduled', closing the cards without restoring it would leave
-        // the customer with a confirmed time and no visit. Status only, same
-        // slot, so no occupancy changes and the rebooker is not needed.
-        if (service && service.status === 'rescheduled') {
-          await trx('scheduled_services').where({ id: visit.id, status: 'rescheduled' })
-            .update({ status: 'confirmed', updated_at: new Date() });
-        }
       });
       return { outcome: 'noop', reason: 'already_at_requested_time', visitId: visit.id, cardsResolved };
     }
     const result = await (rebooker || require('./rebooker')).reschedule(visit.id, plan.newDate, plan.newWindow, RESCHEDULE_REASON_CODE, INITIATED_BY, {
-      // keepStatus keeps a pending visit pending — but NOT for a row parked at
-      // 'rescheduled': routes/schedule.js's legacy flip uses that status to
-      // take a visit OUT of dispatch until someone rebooks it, so carrying it
-      // onto the new slot would record a time nobody is scheduled to work
-      // (GH codex #4204 r5 P1). Letting keepStatus fall away lands the
-      // rebooker's canonical 'confirmed' — the slot the caller just agreed to.
-      keepStatus: visit.status !== 'rescheduled', beforeMove, ...(plan.dateMove ? {} : { seriesPolicy: 'single' }), moveGuard: writeDecision,
+      keepStatus: true, beforeMove, ...(plan.dateMove ? {} : { seriesPolicy: 'single' }), moveGuard: writeDecision,
       sourceSurface: 'call_reschedule', notifyRequested: false,
       expect: { scheduled_date: dateOnly(visit.scheduled_date), window_start: visit.window_start, window_end: visit.window_end,
         estimated_duration_minutes: visit.estimated_duration_minutes, customer_id: visit.customer_id,
@@ -424,6 +422,7 @@ module.exports = {
   MIN_SCHEDULING_CONFIDENCE,
   CANDIDATE_SPAN_DAYS,
   CARD_REASON_CODES,
+  MOVABLE_STATUSES,
   ACTIVITY_ACTION,
   RESCHEDULE_REASON_CODE,
   INITIATED_BY,
