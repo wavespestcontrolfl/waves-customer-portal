@@ -23,7 +23,7 @@ import {
   XAxis,
   YAxis,
 } from 'recharts';
-import { Badge, Button, Card, CardBody, CardHeader, CardTitle, cn } from '../ui';
+import { Badge, Button, Card, CardBody, CardHeader, CardTitle, UiSurface, cn } from '../ui';
 
 // ─── Palette ──────────────────────────────────────────────────────
 //
@@ -81,9 +81,12 @@ export function fmtInt(n) {
 
 // ─── Chart-card wrapper ───────────────────────────────────────────
 
+// ChartCard is the density surface for the chart kit: every shared control
+// inside a card renders at the documented comfortable density rather than
+// inheriting `legacy` from an unmigrated page root.
 export function ChartCard({ title, sub, action, children, className }) {
   return (
-    <Card className={className}>
+    <UiSurface as={Card} density="comfortable" className={className}>
       <CardHeader className="flex items-start justify-between gap-3 flex-wrap">
         <div>
           <CardTitle>{title}</CardTitle>
@@ -92,7 +95,7 @@ export function ChartCard({ title, sub, action, children, className }) {
         {action}
       </CardHeader>
       <CardBody>{children}</CardBody>
-    </Card>
+    </UiSurface>
   );
 }
 
@@ -249,7 +252,10 @@ export function KpiRing({ value, max = 100, target = null, lowerIsBetter = false
   const v = value == null || value === '' ? NaN : Number(value);
   const present = Number.isFinite(v);
   const frac = present && max > 0 ? Math.max(0, Math.min(1, v / max)) : 0;
-  const size = 58;
+  // Long labels (CSAT's "10.0/10") widen the ring rather than shrinking the
+  // text below the 14px floor: the 58px ring's ~46px opening only fits four
+  // characters at 14px/500.
+  const size = String(display ?? '').length > 4 ? 72 : 58;
   const stroke = 6;
   const r = (size - stroke) / 2;
   const c = 2 * Math.PI * r;
@@ -958,7 +964,7 @@ export function RetentionCohortGrid({ cohorts = [], maxOffset = 0 }) {
     };
   };
   return (
-    <div>
+    <UiSurface density="comfortable">
       {mrrAvailable && (
         <div className="flex items-center gap-2 mb-3">
           <div className="inline-flex border-hairline border-zinc-300 rounded-sm overflow-hidden">
@@ -996,7 +1002,7 @@ export function RetentionCohortGrid({ cohorts = [], maxOffset = 0 }) {
                 <div className="w-12 shrink-0 text-right u-nums text-ui-caption text-ink-secondary">{fmtInt(c.size)}</div>
                 {cols.map((m) => {
                   const pct = series?.[m];
-                  if (pct == null) return <div key={m} className="w-10 h-7 shrink-0" />;
+                  if (pct == null) return <div key={m} className="h-11 w-12 shrink-0" />;
                   const title = byMrr
                     ? `${c.label} · month ${m}: ${pct}% net revenue retention vs ${fmtMoney(c.baseMrr)} at signup${pct > 100 ? ' (expansion)' : ''}`
                     : `${c.label} · month ${m}: ${pct}% of ${c.size} retained`;
@@ -1016,7 +1022,7 @@ export function RetentionCohortGrid({ cohorts = [], maxOffset = 0 }) {
           })}
         </div>
       </div>
-    </div>
+    </UiSurface>
   );
 }
 
@@ -1098,7 +1104,7 @@ function fmtPaybackShort(m) {
 // Visible small-sample pill — the warning IS the badge, never a tooltip.
 function LowSamplePill({ n }) {
   return (
-    <Badge tone="neutral" className="shrink-0 whitespace-nowrap">
+    <Badge tone="warn" className="shrink-0 whitespace-nowrap">
       Low sample · n={fmtInt(n)}
     </Badge>
   );
@@ -1116,7 +1122,7 @@ export function CapitalAllocationCard({ data }) {
   const blendedLow = hasBlend && h.blendedConfidence === 'low';
   const blendedPayback = fmtPaybackShort(h.blendedPaybackMonths);
   return (
-    <div>
+    <UiSurface density="comfortable">
       <div className="flex items-end justify-between gap-3">
         <div style={{ opacity: blendedLow ? 0.55 : 1 }}>
           <div className="ui-label text-ink-secondary">Blended LTV : CAC</div>
@@ -1197,7 +1203,7 @@ export function CapitalAllocationCard({ data }) {
         marketing cost — ad spend + retainers + referral rewards (no separate sales
         payroll exists to include). ≥30:1 pour cash in; under 3:1 fix or cut.
       </div>
-    </div>
+    </UiSurface>
   );
 }
 
@@ -1478,7 +1484,7 @@ export function AttributionScorecard({ callsBySource, leadsBySource, channelMix,
       : {};
 
   return (
-    <div>
+    <UiSurface density="comfortable">
       <AttributionFunnel
         calls={callsBySource?.total_inbound_calls ?? null}
         leads={leadsBySource?.total_leads ?? null}
@@ -1622,6 +1628,6 @@ export function AttributionScorecard({ callsBySource, leadsBySource, channelMix,
       )}
 
       <ChannelMixBar channels={channelMix?.channels || []} />
-    </div>
+    </UiSurface>
   );
 }

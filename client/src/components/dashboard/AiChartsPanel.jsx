@@ -144,12 +144,17 @@ function AiChart({ chartType, spec, rows, fields }) {
     const finiteX = rows.filter((_, i) => series.some((s) => Number.isFinite(s[i]))).length;
     if (finiteX < 2) return <AiChart chartType="bar" spec={spec} rows={rows} fields={fields} />;
     const max = Math.max(...allVals), min = Math.min(...allVals, 0);
-    const W = 600, H = 180, padL = 56, padR = 8, padT = 10, padB = 22;
+    const W = 600, H = 180, padR = 8, padT = 10, padB = 22;
     const span = max - min || 1;
     const n = rows.length;
+    const ticks = [max, (max + min) / 2, min];
+    // Reserve the left gutter for the widest tick label: currency values such
+    // as "$100,000" run ~8.5px per character at 14px, and a fixed 56px gutter
+    // sized for the old 10px font clipped them off the viewBox.
+    const tickLabels = ticks.map((t) => fmtVal(t, fmt));
+    const padL = Math.max(56, 12 + Math.ceil(8.5 * Math.max(...tickLabels.map((l) => l.length))));
     const xAt = (i) => padL + (n > 1 ? i / (n - 1) : 0.5) * (W - padL - padR);
     const yAt = (v) => padT + (1 - (v - min) / span) * (H - padT - padB);
-    const ticks = [max, (max + min) / 2, min];
     const xIdx = n > 2 ? [0, Math.floor((n - 1) / 2), n - 1] : [0, n - 1];
     // Split each series into contiguous runs of finite points, so a NULL bucket
     // (e.g. a NULLIF rate with no leads that month) reads as a GAP — not a drop
@@ -170,7 +175,7 @@ function AiChart({ chartType, spec, rows, fields }) {
           {ticks.map((t, i) => (
             <g key={`t${i}`}>
               <line x1={padL} x2={W - padR} y1={yAt(t)} y2={yAt(t)} stroke="#E4E4E7" strokeWidth="1" />
-              <text x={padL - 6} y={yAt(t) + 3} textAnchor="end" fontSize="14" fill="#71717A">{fmtVal(t, fmt)}</text>
+              <text x={padL - 6} y={yAt(t) + 3} textAnchor="end" fontSize="14" fill="#71717A">{tickLabels[i]}</text>
             </g>
           ))}
           {series.map((s, si) => {
@@ -377,14 +382,18 @@ export default function AiChartsPanel() {
           {images.map((im, i) => (
             <div key={i} className="relative">
               <img src={im.preview} alt={im.name} className="h-14 w-14 object-cover rounded-sm border-hairline border-zinc-200" />
+              {/* The 44px hit target stays for touch, but only a small badge is
+                  painted so the thumbnail underneath remains inspectable. */}
               <Button
                 type="button"
                 onClick={() => removeImage(i)}
                 aria-label={`Remove ${im.name}`}
-                variant="primary"
-                className="ui-icon-action absolute -right-2 -top-2 min-h-11 w-11 p-0"
+                variant="ghost"
+                className="ui-icon-action absolute -right-4 -top-4 min-h-11 w-11 p-0"
               >
-                <X size={16} aria-hidden />
+                <span className="flex h-5 w-5 items-center justify-center rounded-full bg-zinc-900 text-white shadow-sm" aria-hidden>
+                  <X size={12} />
+                </span>
               </Button>
             </div>
           ))}
