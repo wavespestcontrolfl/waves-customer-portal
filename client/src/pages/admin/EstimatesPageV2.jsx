@@ -2249,7 +2249,7 @@ function EstimatePipelineViewV2({
                             }}
                             aria-label={`Call ${e.customerName || "customer"} via Waves`}
                             title="Call via Waves — rings your phone first, press 1 to connect"
-                            className="inline-flex items-center justify-center h-11 w-11 sm:h-9 sm:w-9"
+                            className="ui-icon-action inline-flex h-11 w-11 items-center justify-center sm:h-9 sm:w-9"
                           >
                             {" "}
                             <Phone size={16} strokeWidth={1.75} />{" "}
@@ -2264,7 +2264,7 @@ function EstimatePipelineViewV2({
                             }}
                             aria-label={`Message ${e.customerName || "customer"}`}
                             title={`Message ${e.customerPhone}`}
-                            className="inline-flex items-center justify-center h-11 w-11 sm:h-9 sm:w-9"
+                            className="ui-icon-action inline-flex h-11 w-11 items-center justify-center sm:h-9 sm:w-9"
                           >
                             {" "}
                             <MessageSquare size={16} strokeWidth={1.75} />{" "}
@@ -2292,7 +2292,7 @@ function EstimatePipelineViewV2({
                             }}
                             aria-label={`Create new estimate for ${e.customerName || "customer"}`}
                             title="Create a new estimate for this customer"
-                            className="inline-flex items-center justify-center h-11 w-11 sm:h-9 sm:w-9"
+                            className="ui-icon-action inline-flex h-11 w-11 items-center justify-center sm:h-9 sm:w-9"
                           >
                             {" "}
                             <FilePlus2 size={16} strokeWidth={1.75} />{" "}
@@ -2317,7 +2317,7 @@ function EstimatePipelineViewV2({
                                   ? "Review recipient and send estimate"
                                   : "Review recipient and resend estimate"
                               }
-                              className="inline-flex items-center justify-center h-11 w-11 sm:h-9 sm:w-9"
+                              className="ui-icon-action inline-flex h-11 w-11 items-center justify-center sm:h-9 sm:w-9"
                             >
                               {" "}
                               <Send size={16} strokeWidth={1.75} />{" "}
@@ -3252,7 +3252,7 @@ export function MobileEstimateRow({
           }}
           aria-label="Call via Waves"
           title="Call via Waves — rings your phone first, press 1 to connect"
-          className="inline-flex items-center justify-center h-11 w-11 sm:h-9 sm:w-9"
+          className="ui-icon-action inline-flex h-11 w-11 items-center justify-center sm:h-9 sm:w-9"
         >
           {" "}
           <Phone size={16} strokeWidth={1.75} />{" "}
@@ -3266,7 +3266,7 @@ export function MobileEstimateRow({
             void openEstimateMessages(estimate, openMessages);
           }}
           aria-label="SMS"
-          className="inline-flex items-center justify-center h-11 w-11 sm:h-9 sm:w-9"
+          className="ui-icon-action inline-flex h-11 w-11 items-center justify-center sm:h-9 sm:w-9"
         >
           {" "}
           <MessageSquare size={16} strokeWidth={1.75} />{" "}

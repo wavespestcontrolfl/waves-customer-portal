@@ -51,9 +51,10 @@ describe("MobileEstimateRow accessibility", () => {
     expect(row).not.toHaveAttribute("role");
     expect(row).not.toHaveAttribute("tabindex");
     expect(summary.querySelector("button, a")).toBeNull();
-    expect(screen.getByRole("button", { name: "Call via Waves" })).toBeInTheDocument();
+    const call = screen.getByRole("button", { name: "Call via Waves" });
+    expect(call).toHaveClass("ui-icon-action");
     const message = screen.getByRole("button", { name: "SMS" });
-    expect(message).toBeInTheDocument();
+    expect(message).toHaveClass("ui-icon-action");
     fireEvent.click(message);
     await waitFor(() => expect(openMessages).toHaveBeenCalledWith({ id: "customer-1", firstName: "QA", lastName: "Current", phone: "+19415550199" }));
     expect(fetch).toHaveBeenCalledWith("/api/admin/customers/customer-1/estimates-summary", expect.any(Object));
