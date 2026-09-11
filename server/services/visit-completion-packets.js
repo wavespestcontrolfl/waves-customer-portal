@@ -574,6 +574,15 @@ function officeReviewState({ payment, delivery = null, reason = null, payerId = 
   return { payment, ...(delivery ? { delivery } : {}), ...(reason ? { reason, payerId } : {}) };
 }
 
+// The packet's error column also carries plain sentinels (the review
+// enrollment retry marker, a failure message), so a non-JSON value reads as
+// no office-review state rather than throwing inside the caller's transaction.
+function parseOfficeReviewState(error) {
+  if (!error) return null;
+  if (typeof error !== 'string') return error;
+  try { return JSON.parse(error); } catch { return null; }
+}
+
 // Every Bill-To transition that can turn a withdrawn invoice self-pay again
 // (a payer deactivated, a customer's or a job's payer link cleared, a self-pay
 // override set) reconciles here, inside the writer's own transaction: each
@@ -634,7 +643,7 @@ async function releaseWithdrawnPacketInvoice(trx, invoice) {
 // Only the payer portion of the office-review state is lifted: an uncertain
 // summary delivery recorded beside it keeps its error and alert.
 async function liftPayerOfficeReview(trx, packet) {
-  const state = packet.error ? (typeof packet.error === 'string' ? JSON.parse(packet.error) : packet.error) : null;
+  const state = parseOfficeReviewState(packet.error);
   if (packet.status === 'done' && state?.reason === 'payer_assigned') {
     const remaining = state.delivery === 'delivery_review' ? JSON.stringify(officeReviewState({ payment: 'payment_needed', delivery: 'delivery_review' })) : null;
     await trx('visit_completion_packets').where({ id: packet.id }).update({ error: remaining, updated_at: trx.fn.now() });
@@ -879,4 +888,4 @@ async function resumePendingVisitCompletions({ limit = 3 } = {}) {
   return { checked: packets.length };
 }
 
-module.exports = { packetPayload, resolvePacketOwnershipLocked, withdrawPacketInvoiceForPayer, reconcileWithdrawnPacketInvoices, withdrawPacketInvoicesForOwner, packetInvoiceSendInFlight, lockPacketPayerRows, liveThirdPartyPayerForPacket, enrollVisitCompletionReviewForInvoice, saveVisitCompletionPacket, runVisitCompletionPacketMemberEffects, runVisitCompletionPacketEffects, enrollVisitCompletionReview, resumePendingVisitCompletions };
+module.exports = { packetPayload, parseOfficeReviewState, resolvePacketOwnershipLocked, withdrawPacketInvoiceForPayer, reconcileWithdrawnPacketInvoices, withdrawPacketInvoicesForOwner, packetInvoiceSendInFlight, lockPacketPayerRows, liveThirdPartyPayerForPacket, enrollVisitCompletionReviewForInvoice, saveVisitCompletionPacket, runVisitCompletionPacketMemberEffects, runVisitCompletionPacketEffects, enrollVisitCompletionReview, resumePendingVisitCompletions };

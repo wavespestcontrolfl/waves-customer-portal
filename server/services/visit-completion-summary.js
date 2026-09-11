@@ -866,7 +866,7 @@ async function reconcileSummaryEmailRecovery(message, database = db) {
       // invoice, the visit is on billing hold) owes no review enrollment:
       // reopening it would only re-record the payer alert it already holds.
       const closed = await trx('visit_completion_packets').where({ visit_id: visitId, status: 'done' }).first('id', 'error');
-      const state = closed?.error ? (() => { try { return typeof closed.error === 'string' ? JSON.parse(closed.error) : closed.error; } catch { return null; } })() : null;
+      const state = require('./visit-completion-packets').parseOfficeReviewState(closed?.error);
       if (closed && state?.payment !== 'office_required') {
         await trx('visit_completion_packets').where({ id: closed.id, status: 'done' })
           .update({ status: 'processing', error: 'review_enrollment_pending', updated_at: trx.fn.now() });

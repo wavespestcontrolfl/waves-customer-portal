@@ -2848,6 +2848,25 @@ postgres('visit summary recipient recovery', () => {
     }
   });
 
+  // The packet error column also carries the plain review-enrollment retry
+  // sentinel; a release must read it as "no office-review state", not throw
+  // and abort the Bill-To writer's transaction with the invoice still withdrawn.
+  test('a withdrawal released on a packet holding the plain review-retry sentinel requeues the invoice', async () => {
+    const Packets = require('../services/visit-completion-packets');
+    const payerId = randomUUID();
+    const invoiceId = randomUUID();
+    await mockPg('visit_completion_packets').where({ id: fixture.packetId }).update({ status: 'processing', error: 'review_enrollment_pending' });
+    await mockPg('invoices').insert({ id: invoiceId, token: randomUUID().replace(/-/g, ''), invoice_number: `FIX-${invoiceId.slice(0, 8)}`,
+      customer_id: fixture.customerId, status: 'draft', visit_completion_packet_id: fixture.packetId, scheduled_send_error: `payer_billed:${payerId}` });
+    try {
+      expect(await mockPg.transaction((trx) => Packets.reconcileWithdrawnPacketInvoices(trx, { payerId }))).toBe(1);
+      expect(await mockPg('invoices').where({ id: invoiceId }).first()).toMatchObject({ status: 'scheduled', scheduled_send_error: null });
+      expect(await mockPg('visit_completion_packets').where({ id: fixture.packetId }).first()).toMatchObject({ status: 'processing', error: 'review_enrollment_pending' });
+    } finally {
+      await mockPg('invoices').where({ id: invoiceId }).del();
+    }
+  });
+
   test('a withdrawal on a visit already held for another reason leaves that hold when the payer is removed', async () => {
     const Packets = require('../services/visit-completion-packets');
     const payerId = randomUUID();
