@@ -120,8 +120,6 @@ async function runState({ browser, baseUrl, scenario, state, width, report }) {
     // Contrast: sample the full-page screenshot around small text (<=16px) and every control.
     try {
       const png = decode(fs.readFileSync(shot));
-      const targets = [];
-      for (const t of rec.metrics.text.under14) targets.push({ kind: 'text<14', ...t });
       const items = await page.evaluate(() => {
         const out = [];
         // Same-origin iframes (newsletter archive article) are walked too; their boxes are translated
@@ -137,6 +135,21 @@ async function runState({ browser, baseUrl, scenario, state, width, report }) {
             const cs = getComputedStyle(el); const size = parseFloat(cs.fontSize); if (size >= 24) continue; // large-text (3:1) threshold applies from 24px; 18.66+/700 handled below
             const r = el.getBoundingClientRect();
             out.push({ sel: d.tag + el.tagName.toLowerCase() + (el.getAttribute('data-glass') != null ? `[data-glass=${el.getAttribute('data-glass')}]` : '') + (el.hasAttribute('data-glass-accent') ? '[accent]' : ''), text: n.textContent.trim().slice(0, 40), size, weight: parseInt(cs.fontWeight, 10), color: cs.color, box: { x: r.left + d.dx, y: r.top + d.dy + window.scrollY, w: r.width, h: r.height } });
+          }
+          // Text painted by form controls is not a DOM text node: an input's current value and its
+          // ::placeholder (login, booking, quote, payment fields) are sampled explicitly.
+          for (const el of d.doc.querySelectorAll('input:not([type=hidden]):not([type=checkbox]):not([type=radio]):not([type=submit]):not([type=button]):not([type=range]):not([type=color]), textarea, select')) {
+            if (!vis(el) || el.closest('[aria-hidden="true"]')) continue;
+            const cs = getComputedStyle(el); const size = parseFloat(cs.fontSize); if (size >= 24) continue;
+            const r = el.getBoundingClientRect();
+            const box = { x: r.left + d.dx, y: r.top + d.dy + window.scrollY, w: r.width, h: r.height };
+            const tag = d.tag + el.tagName.toLowerCase() + (el.type ? `[type=${el.type}]` : '');
+            const value = el.tagName === 'SELECT' ? (el.selectedOptions[0] ? el.selectedOptions[0].text : '') : (el.value || '');
+            if (value.trim()) out.push({ sel: tag + '[value]', text: value.trim().slice(0, 40), size, weight: parseInt(cs.fontWeight, 10), color: cs.color, box });
+            else if (el.placeholder && el.placeholder.trim()) {
+              let ph = null; try { ph = getComputedStyle(el, '::placeholder'); } catch (e) { ph = null; }
+              out.push({ sel: tag + '::placeholder', text: el.placeholder.trim().slice(0, 40), size: ph ? parseFloat(ph.fontSize) || size : size, weight: parseInt((ph && ph.fontWeight) || cs.fontWeight, 10), color: (ph && ph.color) || cs.color, box });
+            }
           }
         }
         return out;
@@ -162,8 +175,12 @@ async function runState({ browser, baseUrl, scenario, state, width, report }) {
       try {
         await page.evaluate(() => {
           window.__glassResting = new Map();
-          for (const el of document.querySelectorAll('a, button, input, select, textarea, [tabindex], [contenteditable]')) {
-            const cs = getComputedStyle(el);
+          // Same-origin iframes (newsletter archive article) are in the Tab order too: their controls are
+          // snapshotted so a focused link inside the frame is judged against its own resting style.
+          const docs = [document];
+          for (const f of document.querySelectorAll('iframe')) { try { if (f.contentDocument && f.contentDocument.body) docs.push(f.contentDocument); } catch (e) { /* cross-origin */ } }
+          for (const d of docs) for (const el of d.querySelectorAll('a, button, input, select, textarea, [tabindex], [contenteditable]')) {
+            const cs = d.defaultView.getComputedStyle(el);
             window.__glassResting.set(el, { shadow: cs.boxShadow, outline: `${cs.outlineStyle} ${cs.outlineWidth}` });
           }
           if (document.activeElement && document.activeElement.blur) document.activeElement.blur();
@@ -176,14 +193,22 @@ async function runState({ browser, baseUrl, scenario, state, width, report }) {
         for (let i = 0; i < 25; i++) {
           await page.keyboard.press('Tab');
           const row = await page.evaluate(() => {
-            const el = document.activeElement;
+            // Once Tab enters a same-origin iframe the top document's activeElement stays the IFRAME while
+            // focus advances inside it; descend to the innermost focused element so the frame's controls
+            // are inspected instead of the repeated IFRAME reading as wrap-around.
+            let el = document.activeElement; let depth = '';
+            while (el && el.tagName === 'IFRAME') {
+              let inner = null; try { inner = el.contentDocument && el.contentDocument.activeElement; } catch (e) { inner = null; }
+              if (!inner || inner === el.contentDocument.body) break;
+              el = inner; depth += 'iframe>';
+            }
             if (!el || el === document.body) return { end: true, active: el ? el.tagName : null, hasFocus: document.hasFocus() };
-            const cs = getComputedStyle(el);
+            const cs = el.ownerDocument.defaultView.getComputedStyle(el);
             const resting = window.__glassResting.get(el) || { shadow: cs.boxShadow, outline: '' };
             const outlineVisible = cs.outlineStyle !== 'none' && parseFloat(cs.outlineWidth) > 0;
             const shadowChanged = cs.boxShadow !== resting.shadow && cs.boxShadow !== 'none';
-            el.__glassProbeId = el.__glassProbeId || `${el.tagName}#${Math.random().toString(36).slice(2, 8)}`;
-            return { id: el.__glassProbeId, sel: el.tagName.toLowerCase() + (el.className && typeof el.className === 'string' ? '.' + el.className.split(' ')[0] : ''), name: (el.getAttribute('aria-label') || el.innerText || el.placeholder || '').trim().slice(0, 30), outline: `${cs.outlineStyle} ${cs.outlineWidth} ${cs.outlineColor}`, restingOutline: resting.outline, shadow: cs.boxShadow.slice(0, 60), restingShadow: resting.shadow.slice(0, 60), shadowChanged, ring: outlineVisible || shadowChanged };
+            el.__glassProbeId = el.__glassProbeId || `${depth}${el.tagName}#${Math.random().toString(36).slice(2, 8)}`;
+            return { id: el.__glassProbeId, sel: depth + el.tagName.toLowerCase() + (el.className && typeof el.className === 'string' ? '.' + el.className.split(' ')[0] : ''), name: (el.getAttribute('aria-label') || el.innerText || el.placeholder || '').trim().slice(0, 30), outline: `${cs.outlineStyle} ${cs.outlineWidth} ${cs.outlineColor}`, restingOutline: resting.outline, shadow: cs.boxShadow.slice(0, 60), restingShadow: resting.shadow.slice(0, 60), shadowChanged, ring: outlineVisible || shadowChanged };
           });
           if (row.end || seen.has(row.id)) { if (!out.length) rec.focusProbeNote = JSON.stringify(row); break; } // focus left the document or wrapped around
           seen.add(row.id); delete row.id; out.push(row);
@@ -243,6 +268,20 @@ function ensureServerHtml(scenarios) {
   if (still.length) throw new Error(`server HTML not rendered for: ${still.map((s) => s.id).join(', ')}`);
 }
 
+// Which engine's captures a run directory already holds: summary.json (written before the first capture
+// and again at the end) or, failing that, any per-capture record's `engine` field.
+function existingRunEngine(dir) {
+  try { const prev = JSON.parse(fs.readFileSync(path.join(dir, 'summary.json'), 'utf8')); if (prev.engine) return prev.engine; } catch (e) { if (e.code !== 'ENOENT') throw e; }
+  let entries = [];
+  try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch (e) { if (e.code === 'ENOENT') return null; throw e; }
+  for (const d of entries.filter((x) => x.isDirectory())) {
+    for (const f of fs.readdirSync(path.join(dir, d.name)).filter((x) => x.endsWith('.json'))) {
+      try { const rec = JSON.parse(fs.readFileSync(path.join(dir, d.name, f), 'utf8')); if (rec.engine) return rec.engine; } catch (e) { /* unreadable partial record */ }
+    }
+  }
+  return null;
+}
+
 async function main() {
   const report = { ...evidence(root), engine: engineName, widths: widths.concat(extraWidths), started: new Date().toISOString(), results: [] };
   const registry = loadScenarios();
@@ -259,11 +298,12 @@ async function main() {
   // A run directory belongs to ONE engine: capture files are named <state>-<width>.*, so a WebKit
   // pass into a run that already holds Chromium captures (or vice versa) would overwrite that
   // engine's evidence. Refuse instead of silently replacing it; pick another --run name.
-  try {
-    const prev = JSON.parse(fs.readFileSync(path.join(outRoot, 'summary.json'), 'utf8'));
-    if (prev.engine && prev.engine !== engineName) throw new Error(`run "${runName}" already holds ${prev.engine} captures; use a different --run for ${engineName}`);
-  } catch (e) { if (e.code !== 'ENOENT') throw e; }
+  // The engine is persisted BEFORE any capture (a summary skeleton), and an interrupted run that never
+  // wrote a summary is still recognised from its per-capture records, which each carry `engine`.
+  const heldEngine = existingRunEngine(outRoot);
+  if (heldEngine && heldEngine !== engineName) throw new Error(`run "${runName}" already holds ${heldEngine} captures; use a different --run for ${engineName}`);
   fs.mkdirSync(outRoot, { recursive: true });
+  if (!heldEngine) fs.writeFileSync(path.join(outRoot, 'summary.json'), JSON.stringify({ ...report, partial: true }, null, 2));
   console.log(`glass-audit: ${scenarios.length} scenarios → ${path.relative(root, outRoot)}`);
   ensureServerHtml(scenarios);
   let server; let browser;

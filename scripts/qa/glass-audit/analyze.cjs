@@ -59,14 +59,17 @@ for (const [k, rs] of Object.entries(byScenario)) {
 }
 lines.push('');
 
-// 2. Detail lists (deduped by scenario + selector + text)
-function section(title, getter, fmt, limitPer = 12) {
+// 2. Detail lists (deduped by scenario + ENGINE + selector + text: the same issue seen in Chromium and
+//    WebKit is listed once per engine, so the /webkit suffix can show a cross-engine reproduction).
+//    `source` defaults to the current successful captures; error sections pass the latest records
+//    INCLUDING failed ones, because a failed interaction / page error is exactly what fails a capture.
+function section(title, getter, fmt, limitPer = 12, source = withMetrics) {
   lines.push(`## ${title}`, '');
   const seen = new Set();
   const grouped = {};
-  for (const r of withMetrics.filter((x) => x.width === 390 || x.width === 1440)) {
+  for (const r of source.filter((x) => x.width === 390 || x.width === 1440)) {
     for (const it of getter(r) || []) {
-      const id = `${r.scenario}|${fmt(it)}`;
+      const id = `${r.scenario}|${engineOf(r)}|${fmt(it)}`;
       if (seen.has(id)) continue; seen.add(id);
       (grouped[r.scenario] = grouped[r.scenario] || []).push(`${fmt(it)} @${r.width}${engineOf(r) !== 'chromium' ? '/' + engineOf(r) : ''}`);
     }
@@ -94,9 +97,10 @@ section('Icon-only controls without a name', (r) => r.metrics.controls.iconOnlyU
 section('Focus probe: focusable controls with no visible ring', (r) => (r.focusProbe || []).filter((f) => f.focusable !== false && !f.ring), (f) => `${f.sel} “${(f.name || '').slice(0, 20)}” outline:${f.outline}`);
 section('Dialogs / overlays captured', (r) => r.interactions.flatMap((i) => (i.metrics ? i.metrics.overlays.dialogs.map((d) => ({ ...d, ix: i.name })) : [])), (d) => `${d.ix}: ${d.sel} glass=${d.glass} r${d.radius} label=${d.label}`);
 section('Scrims captured', (r) => r.interactions.flatMap((i) => (i.metrics ? i.metrics.overlays.scrims.map((s) => ({ ...s, ix: i.name })) : [])), (s) => `${s.ix}: ${s.bg} ${s.backdrop}`);
-section('Interaction failures', (r) => r.interactions.filter((i) => !i.ok), (i) => `${i.name}: ${(i.error || '').slice(0, 80)}`);
-section('Unmatched API calls', (r) => r.unmatched.map((u) => ({ u })), (x) => x.u);
-section('Page errors', (r) => r.pageErrors.map((u) => ({ u })), (x) => x.u.slice(0, 100));
+const latestAll = [...latest.values()];
+section('Interaction failures', (r) => (r.interactions || []).filter((i) => !i.ok), (i) => `${i.name}: ${(i.error || '').slice(0, 80)}`, 12, latestAll);
+section('Unmatched API calls', (r) => (r.unmatched || []).map((u) => ({ u })), (x) => x.u, 12, latestAll);
+section('Page errors', (r) => (r.pageErrors || []).map((u) => ({ u })), (x) => x.u.slice(0, 100), 12, latestAll);
 
 // 3. Cross-scenario distributions
 lines.push('## Glass tier radius by scenario (390)', '');

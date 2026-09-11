@@ -31,10 +31,13 @@ const extractions = [
 
 async function main() {
   fs.mkdirSync(outDir, { recursive: true });
-  const server = await previewServer(root, urlArg);
-  const browser = await launchBrowser();
+  // Browser launch lives INSIDE the protected block: if Playwright's binary is missing the server
+  // must still be closed, or the child Vite keeps the checkout's port and breaks the next QA run.
+  let server; let browser;
   const failures = [];
   try {
+    server = await previewServer(root, urlArg);
+    browser = await launchBrowser();
     for (const ex of extractions) {
       const page = await browser.newPage({ viewport: { width: 1200, height: 900 } });
       await page.route('**/*', (route) => { const u = new URL(route.request().url()); return u.origin === server.baseUrl && !u.pathname.startsWith('/api/') ? route.continue() : route.abort(); });
@@ -53,7 +56,7 @@ async function main() {
       else { fs.writeFileSync(path.join(outDir, `${ex.name}.json`), JSON.stringify(result, null, 2)); console.log(`${ex.name}: ${Object.entries(result).map(([k, v]) => `${k} → ${v.status}`).join(', ')}`); }
       await page.close();
     }
-  } finally { await browser.close(); await server.close(); }
+  } finally { if (browser) await browser.close(); if (server) await server.close(); }
   if (failures.length) { console.error(`${failures.length} extraction(s) failed; existing fixtures left untouched.`); process.exitCode = 1; }
 }
 main().catch((e) => { console.error(e); process.exit(1); });

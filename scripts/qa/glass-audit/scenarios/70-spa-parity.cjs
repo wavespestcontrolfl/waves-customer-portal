@@ -11,6 +11,25 @@ const first = (obj) => Object.values(obj)[0].body;
 // The tracker renders "Updated Ns ago" from Date.now() - vehicle.lastReportedAt, so a fixed fixture
 // timestamp goes stale on every rerun; the en-route payload is stamped relative to the run instead.
 const liveTrack = (body) => ({ ...body, vehicle: { ...body.vehicle, lastReportedAt: new Date(Date.now() - 45 * 1000).toISOString() } });
+// The reschedule fixture is a one-off extraction whose availability window is literal dates; once they
+// are in the past the page still renders "Our best times for you" with slots production could never
+// return. Every date is re-based so `rangeFrom` = today (ET calendar days, see 40-diagnostics-booking).
+const { addETDays, etDateString } = require('../../../../server/utils/datetime-et');
+const liveReschedule = (body) => {
+  const from = body.availability && body.availability.rangeFrom;
+  if (!from) return body;
+  const dayNumber = (ymd) => Math.round(Date.UTC(...ymd.split('-').map((n, i) => (i === 1 ? Number(n) - 1 : Number(n)))) / 86400000);
+  const base = dayNumber(from);
+  const shift = (ymd) => (typeof ymd === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(ymd) ? etDateString(addETDays(new Date(), dayNumber(ymd) - base)) : ymd);
+  const fullDate = (ymd) => new Date(`${ymd}T12:00:00Z`).toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric', timeZone: 'UTC' });
+  const slot = (s) => ({ ...s, date: shift(s.date) });
+  const day = (d) => { const date = shift(d.date); return { ...d, date, fullDate: d.fullDate ? fullDate(date) : d.fullDate, slots: (d.slots || []).map(slot) }; };
+  return {
+    ...body,
+    current: body.current ? { ...body.current, date: shift(body.current.date) } : body.current,
+    availability: { ...body.availability, rangeFrom: shift(body.availability.rangeFrom), rangeTo: shift(body.availability.rangeTo), days: (body.availability.days || []).map(day) },
+  };
+};
 const T = (c) => c.repeat(64);
 
 function reportHandle(payload) {
@@ -51,5 +70,5 @@ module.exports = [
     handle: ({ method, path: p }) => (method === 'GET' && p === `/api/public/secure-card/${T('a')}` ? { body: first(fx('secure-pest')) } : null) },
   { id: 'spa-reschedule', family: 'flow', surface: 'customer', role: 'public token', route: '/reschedule/:token (real route)',
     url: `/reschedule/${T('a')}`, ready: 'Our best times for you', settle: 900,
-    handle: ({ method, path: p }) => (method === 'GET' && p === `/api/public/reschedule/${T('a')}` ? { body: first(fx('schedule-flow-reschedule')) } : null) },
+    handle: ({ method, path: p }) => (method === 'GET' && p === `/api/public/reschedule/${T('a')}` ? { body: liveReschedule(first(fx('schedule-flow-reschedule'))) } : null) },
 ];

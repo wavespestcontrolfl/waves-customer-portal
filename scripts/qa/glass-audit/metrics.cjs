@@ -14,7 +14,7 @@ function collectMetrics(opts) {
   // and overflow all include their content, with boxes translated into the top page's coordinates
   // through the frame's rect. Cross-origin frames are opaque and skipped. Landmarks (main / header /
   // footer / sticky bars) stay top-document: an iframe is not a page shell.
-  const frames = Array.from(document.querySelectorAll('iframe')).map((f) => { try { const d = f.contentDocument; if (!d || !d.body) return null; const r = f.getBoundingClientRect(); return { doc: d, dx: r.left + f.clientLeft, dy: r.top + f.clientTop }; } catch (e) { return null; } }).filter(Boolean);
+  const frames = Array.from(document.querySelectorAll('iframe')).map((f) => { try { const d = f.contentDocument; if (!d || !d.body) return null; const r = f.getBoundingClientRect(); return { doc: d, dx: r.left + f.clientLeft, dy: r.top + f.clientTop, w: f.clientWidth }; } catch (e) { return null; } }).filter(Boolean);
   const docs = [{ doc: document, dx: 0, dy: 0 }, ...frames];
   const offsetOf = (el) => (el.ownerDocument === document ? { dx: 0, dy: 0 } : (frames.find((f) => f.doc === el.ownerDocument) || { dx: 0, dy: 0 }));
   const rect = (el) => { const r = el.getBoundingClientRect(); const o = offsetOf(el); return { left: r.left + o.dx, top: r.top + o.dy, right: r.right + o.dx, bottom: r.bottom + o.dy, width: r.width, height: r.height }; };
@@ -157,7 +157,8 @@ function collectMetrics(opts) {
     const inFooter = !!c.closest('footer, [role="contentinfo"]');
     return { sel: sel(c), kind, inline, inFooter, h: round(r.height), w: round(r.width), size: parseFloat(cs.fontSize), weight: parseInt(cs.fontWeight, 10), radius: cs.borderTopLeftRadius, color: cs.color, bg: cs.backgroundColor, name: name.slice(0, 40), outline: cs.outlineStyle, tt: cs.textTransform, box: box(c) };
   });
-  const smallControls = controlRows.filter((c) => !c.inline && c.h < 44 && c.h > 0);
+  // 44×44 is the target: a 20×44 icon control is as undersized as a 44×20 one.
+  const smallControls = controlRows.filter((c) => !c.inline && c.h > 0 && c.w > 0 && (c.h < 44 || c.w < 44));
   const inputs = qsa('input:not([type=hidden]):not([type=checkbox]):not([type=radio]), select, textarea').filter(visible).map((i) => {
     const cs = cstyle(i);
     let ph = null;
@@ -176,16 +177,21 @@ function collectMetrics(opts) {
   const stickyTop = Array.from(document.querySelectorAll('*')).filter((el) => { const cs = cstyle(el); return (cs.position === 'sticky' || cs.position === 'fixed') && parseFloat(cs.top) === 0 && visible(el) && el.getBoundingClientRect().width > vw * 0.5; }).map((el) => ({ sel: sel(el), h: round(el.getBoundingClientRect().height), pt: cstyle(el).paddingTop, position: cstyle(el).position }));
   const fixedBottom = Array.from(document.querySelectorAll('*')).filter((el) => { const cs = cstyle(el); return cs.position === 'fixed' && parseFloat(cs.bottom) === 0 && visible(el) && el.getBoundingClientRect().width > vw * 0.5; }).map((el) => ({ sel: sel(el), h: round(el.getBoundingClientRect().height), pb: cstyle(el).paddingBottom }));
   // Elements that extend past the right edge of the viewport (clipped by overflow-x: clip on html).
+  // Children of a same-origin iframe are measured against THEIR frame's right edge: at desktop widths
+  // the article frame is far narrower than the page, so page-level `vw` would hide internal overflow.
   const overflowers = [];
+  const rightLimit = (el) => { const f = el.ownerDocument === document ? null : frames.find((x) => x.doc === el.ownerDocument); return f ? f.dx + f.w : vw; };
   for (const el of all) {
     if (el.closest('.glass-scene-orbs, .glass-scene-grain, svg, .gc-proof, .gc-marquee, .waves-chip-strip--drift')) continue;
     const r = rect(el);
-    if (r.width > 0 && r.right > vw + 1 && visible(el)) overflowers.push({ sel: sel(el), right: round(r.right), w: round(r.width), y: round(r.top + window.scrollY) });
+    if (r.width > 0 && r.right > rightLimit(el) + 1 && visible(el)) overflowers.push({ sel: sel(el), right: round(r.right), w: round(r.width), y: round(r.top + window.scrollY), limit: round(rightLimit(el)) });
     if (overflowers.length >= 15) break;
   }
+  // Each frame document's own horizontal overflow (html.scrollWidth of the top page cannot see it).
+  const frameOverflow = frames.map((f) => ({ w: round(f.w), scrollWidth: f.doc.documentElement.scrollWidth, overflowX: f.doc.documentElement.scrollWidth - f.w }));
   const layout = {
     vw, vh, overflowers,
-    scrollWidth: html.scrollWidth, overflowX: html.scrollWidth - vw,
+    scrollWidth: html.scrollWidth, overflowX: html.scrollWidth - vw, frameOverflow,
     docHeight: html.scrollHeight,
     mainWidth: main ? round(main.getBoundingClientRect().width) : null,
     mainCount: document.querySelectorAll('main').length,
