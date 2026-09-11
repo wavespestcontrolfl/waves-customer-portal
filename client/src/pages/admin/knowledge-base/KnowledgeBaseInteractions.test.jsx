@@ -92,6 +92,23 @@ describe("Knowledge base interactions", () => {
     ));
   });
 
+  it("stacks the browse filters once an entry opens beside the list", async () => {
+    adminFetch.mockImplementation(async (path) => {
+      if (path === "/admin/kb?limit=50") return { entries: [ENTRY], total: 1 };
+      return {};
+    });
+    surface(<BrowseTab showFeedback={vi.fn()} onRefresh={vi.fn()} isMobile={false} />);
+
+    const search = await screen.findByLabelText("Search knowledge base");
+    const filterGrid = search.closest(".grid");
+    expect(filterGrid.className).toMatch(/md:grid-cols-\[minmax\(0,1fr\)/);
+
+    fireEvent.click(screen.getByRole("button", { name: /Rodent exclusion protocol/ }));
+    await screen.findByRole("button", { name: "Delete" });
+    expect(filterGrid.className).not.toMatch(/md:grid-cols-\[/);
+    expect(search.closest(".col-span-2").className).not.toMatch(/md:col-span-1/);
+  });
+
   it("guards create against two synchronous submissions", async () => {
     let finishRequest;
     const request = new Promise((resolve) => { finishRequest = resolve; });

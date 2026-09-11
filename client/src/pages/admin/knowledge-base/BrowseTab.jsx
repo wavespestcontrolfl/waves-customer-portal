@@ -347,8 +347,15 @@ export default function BrowseTab({ showFeedback, onRefresh, isMobile }) {
     <>
       <div className={`grid gap-4 ${selected ? "md:grid-cols-2" : "grid-cols-1"}`}>
         <div className="min-w-0">
-          <div className="mb-3 grid grid-cols-2 gap-3 md:grid-cols-[minmax(200px,1fr)_180px_160px]">
-            <Field label="Search knowledge base" className="col-span-2 md:col-span-1">
+          <div
+            className={`mb-3 grid grid-cols-2 gap-3 ${
+              selected ? "" : "md:grid-cols-[minmax(0,1fr)_minmax(0,180px)_minmax(0,160px)]"
+            }`}
+          >
+            <Field
+              label="Search knowledge base"
+              className={selected ? "col-span-2" : "col-span-2 md:col-span-1"}
+            >
               <Input
                 value={searchQuery}
                 onChange={(event) => setSearchQuery(event.target.value)}
