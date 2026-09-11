@@ -55,6 +55,17 @@ function shellAssetUrls(html) {
 // per entry would put megabytes of header text into the cache index that
 // WebKit reads on the first open — the very cost this worker is removing.
 const BUILD_HEADER = 'x-waves-build';
+// An installing worker and the active one share the cache but not their
+// navigation order (module state is per instance). The installer records
+// when its precache began; an active navigation that began earlier must
+// not commit its (older) shell over the installer's.
+const INSTALL_MARK_URL = '/__waves/install-commit';
+const INSTALL_STARTED_HEADER = 'x-waves-install-started';
+async function installCommittedAfter(cache, startedAt) {
+  const mark = await cache.match(INSTALL_MARK_URL);
+  const installStarted = Number(mark && mark.headers.get(INSTALL_STARTED_HEADER));
+  return Number.isFinite(installStarted) && installStarted > startedAt;
+}
 function buildIdOf(assets) {
   const key = [...assets].sort().join('|');
   let a = 5381; let b = 0;
@@ -181,18 +192,21 @@ const shellRefreshChain = { promise: Promise.resolve() };
 function withShellRefresh(fn) {
   return serializeOn(SHELL_REFRESH_LOCK, shellRefreshChain, fn);
 }
-async function cacheCompleteShellResponse(shellResponse, enqueuedSeq = navigationSeq, { supersedable = true } = {}) {
-  return withShellRefresh(() => replaceCompleteShell(shellResponse, enqueuedSeq, supersedable));
+async function cacheCompleteShellResponse(shellResponse, enqueuedSeq = navigationSeq, { supersedable = true, startedAt = Date.now() } = {}) {
+  return withShellRefresh(() => replaceCompleteShell(shellResponse, enqueuedSeq, supersedable, startedAt));
 }
 
-async function replaceCompleteShell(shellResponse, enqueuedSeq, supersedable) {
+async function replaceCompleteShell(shellResponse, enqueuedSeq, supersedable, startedAt = Date.now()) {
   const cache = await caches.open(CACHE_NAME);
+  // Superseded by a newer navigation of this worker, or by an installing
+  // worker whose precache began after this request did.
+  const isSuperseded = async () => supersedable && (enqueuedSeq < liveBuildSeq || await installCommittedAfter(cache, startedAt));
   // A navigation that began before a newer one can still finish after it
   // (its network response was slower); its shell is the older deploy's and
   // must not replace the newer shell already cached — nor its build be
   // retained over the newer one at the next prune. The install precache
   // is never superseded: the worker needs a shell.
-  if (supersedable && enqueuedSeq < liveBuildSeq) throw new Error('Shell refresh superseded by a newer navigation');
+  if (await isSuperseded()) throw new Error('Shell refresh superseded by a newer navigation');
   if (!shellResponse.ok) throw new Error(`Shell request failed (${shellResponse.status})`);
 
   const html = await shellResponse.clone().text();
@@ -210,7 +224,7 @@ async function replaceCompleteShell(shellResponse, enqueuedSeq, supersedable) {
   }));
   // The asset fetches above take time; a newer navigation may have landed
   // meanwhile. Check again before committing anything.
-  if (supersedable && enqueuedSeq < liveBuildSeq) throw new Error('Shell refresh superseded by a newer navigation');
+  if (await isSuperseded()) throw new Error('Shell refresh superseded by a newer navigation');
   // Read the previous build BEFORE overwriting its shell: a different id
   // means a deploy shipped, and everything older than that build is dead weight.
   const previousBuildId = await cachedBuildId(cache);
@@ -225,7 +239,14 @@ async function replaceCompleteShell(shellResponse, enqueuedSeq, supersedable) {
   // the lock is released.
   const commitGeneration = async () => {
     const created = [];
-    const rollBackCreated = () => Promise.allSettled(created.map(assetUrl => cache.delete(assetUrl)));
+    // Undo only what is still solely this generation's: once the batch
+    // released the write lock, a newer page may have loaded an entry it
+    // created and claimed it for its own build — it is that build's now.
+    const rollBackCreated = () => Promise.allSettled(created.map(async assetUrl => {
+      const current = await cache.match(assetUrl);
+      if (current && buildTagsOf(current).some(tag => tag !== buildId)) return;
+      await cache.delete(assetUrl);
+    }));
     await withAssetWrites(async () => {
       const results = await Promise.allSettled(assetResponses.map(async ([assetUrl, response]) => {
         const existing = await cache.match(assetUrl);
@@ -247,7 +268,7 @@ async function replaceCompleteShell(shellResponse, enqueuedSeq, supersedable) {
     // that page loads get tagged with the older build and are pruned at
     // the next deploy. Check once more, right before the write that
     // commits, and give back what this batch created.
-    if (supersedable && enqueuedSeq < liveBuildSeq) {
+    if (await isSuperseded()) {
       await withAssetWrites(rollBackCreated);
       throw new Error('Shell refresh superseded by a newer navigation');
     }
@@ -278,6 +299,11 @@ async function replaceCompleteShell(shellResponse, enqueuedSeq, supersedable) {
   }
   cachedShellSeq += 1;
   knownCachedBuild = buildId;
+  // The install commit leaves its start time for the active worker's
+  // in-flight navigations to compare against (see installCommittedAfter).
+  if (!supersedable) {
+    await cache.put(INSTALL_MARK_URL, new Response('', { headers: { [INSTALL_STARTED_HEADER]: String(startedAt) } })).catch(() => {});
+  }
   // Refreshes are queued, so an older one can finish after a newer
   // navigation already advanced the live build — writing its own build back
   // would mis-tag the newer page's chunks. Only claim the memo if no
@@ -314,10 +340,11 @@ async function precacheOnce() {
   // cache with the active one but not its ordering state, so fetching
   // only after any in-flight commit guarantees the shell it stores is at
   // least as new as the one cached.
+  const startedAt = Date.now();
   await withShellRefresh(async () => {
     const shellRequest = new Request(OFFLINE_URL, { cache: 'reload' });
     const shellResponse = await fetch(shellRequest);
-    await replaceCompleteShell(shellResponse, navigationSeq, false);
+    await replaceCompleteShell(shellResponse, navigationSeq, false, startedAt);
   });
 }
 
@@ -393,6 +420,7 @@ self.addEventListener('fetch', event => {
     // an earlier request can be answered by the older deploy yet resolve
     // after a later request answered by the newer one.
     const navSeq = ++navigationSeq;
+    const startedAt = Date.now();
     event.respondWith((async () => {
       try {
         const response = await fetch(event.request);
@@ -408,7 +436,7 @@ self.addEventListener('fetch', event => {
             if (!assets.length) return;
             advanceLiveBuild(buildIdOf(assets), navSeq);
           }).catch(() => {}));
-          event.waitUntil(cacheCompleteShellResponse(response.clone(), navSeq).catch(() => {}));
+          event.waitUntil(cacheCompleteShellResponse(response.clone(), navSeq, { startedAt }).catch(() => {}));
         }
         return response;
       } catch {

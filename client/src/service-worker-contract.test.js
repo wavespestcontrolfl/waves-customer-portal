@@ -18,8 +18,10 @@ function fakeCache() {
     async match(key) { if (this.matchGate) await this.matchGate; const hit = store.get(asRequest(key).url); return hit && hit.clone(); },
     deleteGate: null, // a test may park delete() (the prune's last step)
     failPut: null, // a test may make put() reject for some URLs (quota)
+    putGate: null, // a test may park put() for some URLs on a promise
     async put(key, response) {
       const url = asRequest(key).url;
+      if (this.putGate) { const gate = this.putGate(url); if (gate) await gate; }
       if (this.failPut && this.failPut(url)) { const e = new Error('Quota exceeded'); e.name = 'QuotaExceededError'; throw e; }
       store.set(url, response);
     },
@@ -125,13 +127,13 @@ const cachedAssets = async (cache) => (await cache.keys()).map(r => new URL(r.ur
 
 describe('customer service-worker update contract', () => {
   it('preloads hashed shell assets before storing the replacement HTML', () => {
-    expect(source).toContain('async function cacheCompleteShellResponse(shellResponse, enqueuedSeq = navigationSeq, { supersedable = true } = {})');
+    expect(source).toContain('async function cacheCompleteShellResponse(shellResponse, enqueuedSeq = navigationSeq, { supersedable = true, startedAt = Date.now() } = {})');
     expect(source).toContain('async function precacheCompleteShell()');
     expect(source).toContain("new Request(assetUrl, { cache: 'reload' })");
     expect(source).toContain('await Promise.allSettled(assetResponses.map');
     expect(source.indexOf('await Promise.allSettled(assetResponses.map'))
       .toBeLessThan(source.indexOf('await cache.put(OFFLINE_URL, shellResponse.clone())'));
-    expect(source).toContain('event.waitUntil(cacheCompleteShellResponse(response.clone(), navSeq).catch(() => {}))');
+    expect(source).toContain('event.waitUntil(cacheCompleteShellResponse(response.clone(), navSeq, { startedAt }).catch(() => {}))');
     expect(source).not.toContain('cache.put(OFFLINE_URL, clone)');
   });
 
@@ -904,6 +906,65 @@ describe('service-worker shell refresh keeps the asset cache bounded to two buil
 
     expect(await (await cache.match('/')).text()).toBe(shell000); // neither A (superseded) nor B (failed)
     expect(await cachedAssets(cache)).toEqual(['/assets/index-000.js']); // A's batch rolled back
+  });
+
+  it('keeps a rolled-back entry that a newer page claimed after the batch released the lock', async () => {
+    // Codex #4335 r9 P1: refresh A creates Shared-XYZ, then its shell write
+    // fails (quota). Between the batch and the rollback a page loaded the
+    // entry and claimed it for the cached build; deleting it would leave
+    // that page without the chunk offline or after the next deploy.
+    const cache = fakeCache();
+    const { cacheCompleteShellResponse, dispatchFetch } = loadWorker(cache);
+    await cacheCompleteShellResponse(fakeResponse(shellHtml(['/assets/index-000.js'])));
+
+    let releaseShellPut;
+    const shellGate = new Promise(resolve => { releaseShellPut = resolve; });
+    cache.putGate = (url) => (url === 'https://portal.test/' ? shellGate : null);
+    cache.failPut = (url) => url === 'https://portal.test/';
+    const refreshA = cacheCompleteShellResponse(fakeResponse(shellHtml(['/assets/index-AAA.js', '/assets/Shared-XYZ.js']))).catch(err => err);
+    await tick(); await tick(); // batch committed, shell write parked
+    await dispatchFetch('/assets/Shared-XYZ.js'); // a page loads A's new entry: claimed for the cached build
+    releaseShellPut();
+    expect((await refreshA).message).toMatch(/Quota/);
+
+    expect(await cache.match('/assets/Shared-XYZ.js')).toBeTruthy(); // claimed since: kept
+    expect(await cache.match('/assets/index-AAA.js')).toBeUndefined(); // solely A's: rolled back
+  });
+
+  it('does not let an active navigation that began before an install replace the installed shell (two instances)', async () => {
+    // Codex #4335 r9 P1: the active worker's navigation fetch runs outside
+    // the shell-refresh lock, so an installing worker can commit B while
+    // that (older) request is still pending; its response must then not
+    // replace B. Instance state cannot order this; the install leaves a
+    // mark in the cache.
+    const cache = fakeCache();
+    const locks = fakeLocks();
+    const active = loadWorker(cache, { locks });
+    await active.cacheCompleteShellResponse(fakeResponse(shellHtml(['/assets/index-000.js'])));
+    let releaseA;
+    const gateA = new Promise(resolve => { releaseA = resolve; });
+    active.setFetch(async (request) => {
+      if (request.mode === 'navigate') { await gateA; return fakeResponse(shellHtml(['/assets/index-AAA.js'])); }
+      return fakeResponse(`asset:${request.url}`);
+    });
+    const navA = active.dispatchFetch('/admin/', { mode: 'navigate' }); // began first, response parked
+    await new Promise(resolve => setTimeout(resolve, 5)); // the install begins measurably later
+
+    const installer = loadWorker(cache, { locks });
+    installer.setFetch(async (request) => (request.url === '/' ? fakeResponse(shellHtml(['/assets/index-BBB.js'])) : fakeResponse(`asset:${request.url}`)));
+    await installer.dispatchInstall(); // commits B
+    expect(await (await cache.match('/')).text()).toBe(shellHtml(['/assets/index-BBB.js']));
+
+    releaseA();
+    await navA;
+    expect(await (await cache.match('/')).text()).toBe(shellHtml(['/assets/index-BBB.js']));
+    expect(await cachedAssets(cache)).toEqual(['/assets/index-000.js', '/assets/index-BBB.js']); // A's batch rolled back
+
+    // A navigation that begins after the install may still move the shell on.
+    await new Promise(resolve => setTimeout(resolve, 5));
+    active.setFetch(async (request) => (request.mode === 'navigate' ? fakeResponse(shellHtml(['/assets/index-CCC.js'])) : fakeResponse(`asset:${request.url}`)));
+    await active.dispatchFetch('/admin/', { mode: 'navigate' });
+    expect(await (await cache.match('/')).text()).toBe(shellHtml(['/assets/index-CCC.js']));
   });
 
   it('skips a superseded refresh: an earlier navigation whose response lands after a newer one', async () => {
