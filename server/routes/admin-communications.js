@@ -754,18 +754,29 @@ router.post('/sms', async (req, res, next) => {
             const reservationMetadata = JSON.stringify({ manual_send_reservation: true, review_ask_reservation: true });
             const useManualReservation = !!manualReservationId && !claimedDecisionId && parkedThreadIds.length === 0;
             let reservationId;
-            if (useManualReservation) {
-              const [reserved] = await db('sms_log').where({ id: manualReservationId })
-                .update({ metadata: reservationMetadata, customer_id: trustedCustomerId }).returning('id');
-              reservationId = reserved?.id;
-            } else {
-              const [reservation] = await db('sms_log').insert({
-                customer_id: trustedCustomerId, direction: 'outbound',
-                from_phone: fromNumber || TWILIO_NUMBERS.getOutboundNumber(), to_phone: to,
-                message_body: cleanBody, status: 'sending', message_type: 'manual',
-                admin_user_id: req.technicianId || null, metadata: reservationMetadata,
-              }).returning('id');
-              reservationId = reservation?.id;
+            try {
+              if (useManualReservation) {
+                const [reserved] = await db('sms_log').where({ id: manualReservationId })
+                  .update({ metadata: reservationMetadata, customer_id: trustedCustomerId }).returning('id');
+                reservationId = reserved?.id;
+              } else {
+                const [reservation] = await db('sms_log').insert({
+                  customer_id: trustedCustomerId, direction: 'outbound',
+                  from_phone: fromNumber || TWILIO_NUMBERS.getOutboundNumber(), to_phone: to,
+                  message_body: cleanBody, status: 'sending', message_type: 'manual',
+                  admin_user_id: req.technicianId || null, metadata: reservationMetadata,
+                }).returning('id');
+                reservationId = reservation?.id;
+              }
+            } catch (reserveErr) {
+              // A THROWN reservation write is the same no-reservation outcome
+              // as an empty returning — the claim must be handed back here,
+              // inside the lock, because the outer claimErr handler only
+              // knows about a claim once this seam has returned it (Codex
+              // #4331 P2). Cleanup failure is logged, not rethrown: the
+              // caller's 503 already tells the operator to retry.
+              logger.warn(`[communications] inline review reservation write failed (requestId=${rr.id}): ${reserveErr.message}`);
+              reservationId = null;
             }
             if (!reservationId) {
               // The claim already won this lock's slot — hand it back so the

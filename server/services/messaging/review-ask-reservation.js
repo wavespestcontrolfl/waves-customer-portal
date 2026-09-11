@@ -10,11 +10,17 @@
 // separately-logged provider row was found, flips this same row's status
 // to 'sent' in place (admin-communications.js's settleReviewReservation).
 //
+// A Communications reply reservation (sms-suggest-mode's
+// createReplyHoldingReservation, marker manual_send_reservation) is the same
+// kind of placeholder: inserted 'sending' before the provider call and only
+// settled — stamped sent, deleted, or held for reconciliation — afterward.
+//
 // General readers of sms_log — conversation history, outbound counts,
-// message context fed to composers — must not treat the still-unresolved
-// placeholder as a message Waves definitely sent: the provider may never
-// have received it (Codex #4331 P2). Once the row resolves to a real
-// status it IS a real message like any other row and must not be hidden.
+// message context fed to composers, unanswered-thread checks — must not
+// treat either still-unresolved placeholder as a message Waves definitely
+// sent: the provider may never have received it (Codex #4331 P2; pre-push
+// P1 on the reply marker). Once the row resolves to a real status it IS a
+// real message like any other row and must not be hidden.
 //
 // review-ask-history.js's own spacing-evidence reader already tests exactly
 // this (status === 'sending' + the marker) — this module is the one place
@@ -31,10 +37,12 @@ function parseMetadata(value) {
 // True only while the reservation is still in flight/unconfirmed. A row
 // that has since resolved to any other status (sent, delivered, failed,
 // undelivered, blocked, canceled…) is a real message and returns false.
+const RESERVATION_MARKERS = ['review_ask_reservation', 'manual_send_reservation'];
+
 function isUnresolvedReviewAskReservation(row) {
   if (!row || row.status !== 'sending') return false;
   const metadata = typeof row.metadata === 'string' ? parseMetadata(row.metadata) : row.metadata;
-  return metadata?.review_ask_reservation === true;
+  return RESERVATION_MARKERS.some(marker => metadata?.[marker] === true);
 }
 
 // Excludes unresolved review-ask reservations at the SQL level (metadata is
@@ -43,9 +51,8 @@ function isUnresolvedReviewAskReservation(row) {
 // history window. `table` lets a caller that aliases or joins sms_log
 // qualify the column; default matches a bare `db('sms_log')` query.
 function excludeUnresolvedReviewAskReservations(query, table = 'sms_log') {
-  return query.whereRaw(
-    `NOT (${table}.status = 'sending' AND COALESCE(${table}.metadata->>'review_ask_reservation', 'false') = 'true')`,
-  );
+  const markers = RESERVATION_MARKERS.map(marker => `COALESCE(${table}.metadata->>'${marker}', 'false') = 'true'`).join(' OR ');
+  return query.whereRaw(`NOT (${table}.status = 'sending' AND (${markers}))`);
 }
 
 module.exports = { isUnresolvedReviewAskReservation, excludeUnresolvedReviewAskReservations };

@@ -3,6 +3,7 @@ const logger = require('../logger');
 const MODELS = require('../../config/models');
 const { dispatchWithFallback } = require('../llm/call');
 const { etDateString, etParts, addETDays, parseETDateTime } = require('../../utils/datetime-et');
+const { excludeUnresolvedReviewAskReservations } = require('../messaging/review-ask-reservation');
 
 
 let TwilioService;
@@ -223,8 +224,11 @@ Score the call, grade the lead, and generate a follow-up task if applicable.`,
         continue;
       }
 
-      // Check for outbound SMS
-      const matchingSms = await db('sms_log')
+      // Check for outbound SMS. An unresolved review-ask / reply reservation
+      // is a 'sending' placeholder the provider may never have received — it
+      // must not read as staff having completed this follow-up (Codex #4331
+      // P2); the shared exclusion keeps that rule in one place.
+      const matchingSms = await excludeUnresolvedReviewAskReservations(db('sms_log'))
         .where('customer_id', task.customer_id)
         .where('direction', 'outbound')
         .where('created_at', '>', task.created_at)
