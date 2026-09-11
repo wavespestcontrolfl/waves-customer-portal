@@ -101,16 +101,31 @@ function perApplicationFor(f) {
   return pt > 0 && Number.isFinite(visits) && visits > 0 ? money(pt) : null;
 }
 
+// PriceCard bands the DISPLAYED cadence price, not the raw monthly figure:
+// a quarterly or bi-monthly cadence first multiplies monthly by its interval
+// (quarterly ×3, bi_monthly ×2) and shows/bands that per-period number — a
+// $100/mo quarterly line reads "$240–$360/quarter" on the customer page, not
+// "$80–$120". The annual band is unaffected (annual is already annual).
+const CADENCE_INTERVAL_MONTHS = { quarterly: 3, bi_monthly: 2 };
+function cadenceIntervalMonths(f) {
+  const key = f.billingFrequencyKey || f.key;
+  return CADENCE_INTERVAL_MONTHS[key] || 1;
+}
+
 // A LOW-confidence commercial cadence carries a range, not a price: the
 // composer stamps lowConfidenceRangePct + lowConfidenceFraction and the
-// customer page shows price ± price × fraction × pct (PriceCard).
+// customer page shows cadencePrice ± cadencePrice × fraction × pct
+// (PriceCard), where cadencePrice is the interval-scaled figure above.
 function lowConfidenceRange(f) {
   const pct = f.quoteRequired === true ? 0 : Number(f.lowConfidenceRangePct);
   if (!(pct > 0) || !(Number(f.monthly) > 0)) return null;
   const rawFraction = Number(f.lowConfidenceFraction);
   const fraction = Number.isFinite(rawFraction) && rawFraction > 0 ? Math.min(rawFraction, 1) : 1;
   const band = (price) => (price == null ? null : [money(price - price * fraction * pct), money(price + price * fraction * pct)]);
-  return { pct, fraction, monthly: band(money(f.monthly)), annual: band(money(f.annual)) };
+  const intervalMonths = cadenceIntervalMonths(f);
+  const cadencePrice = money(Number(f.monthly) * intervalMonths);
+  const rangeUnit = intervalMonths === 3 ? 'quarterly' : intervalMonths === 2 ? 'bi_monthly' : 'monthly';
+  return { pct, fraction, range_unit: rangeUnit, cadence: band(cadencePrice), annual: band(money(f.annual)) };
 }
 
 // On a ranged LOW-confidence cadence PriceCard suppresses the treatment rows
@@ -179,6 +194,13 @@ function comboEntry(c) {
     per_service_treatments: c.perServiceTreatments && typeof c.perServiceTreatments === 'object' ? c.perServiceTreatments : null,
     manual_discount: c.manualDiscount || null,
   };
+  // The matched combo's stamped flag takes precedence over the top-level
+  // frequency's on the customer page (EstimateViewPage annualPrepayEligibleEffective)
+  // — it can both RESTORE prepay a seasonal-default estimate's flag alone
+  // would hide, and hard-disable it for a multi-service mosquito-axis combo.
+  // Drop it here and the bar reads the wrong eligibility for any combo whose
+  // stamp disagrees with the section ladder.
+  if (c.annualPrepayEligible != null) entry.annual_prepay_eligible = c.annualPrepayEligible === true;
   if (c.manualDiscountSuppressed === true) entry.manual_discount_suppressed = true;
   return entry;
 }
@@ -315,10 +337,28 @@ async function offeredPricing(row, data) {
   }
   if (!bundle || typeof bundle !== 'object') return { offered_pricing: null, offered_pricing_unavailable: 'no pricing bundle for this estimate' };
   const fees = upfrontFees(bundle);
+  // The route stamps snapshotHit ONLY on its fast path (estimate-public.js
+  // buildPricingBundleInner) — its absence means the frozen columns were
+  // rejected (retired/below-floor lawn cadence, stale termite pricing,
+  // missing setup fee) and this bundle was rebuilt under today's rules, same
+  // signal resolveLivePricing in estimate-proposal-billing.js reads. Resolve
+  // the rebuilt bundle's own default sellable cadence — through the route's
+  // own defaultFrequencyFromList, so this never names a cadence acceptance
+  // itself would price differently — for totalsFor to prefer over the
+  // (now stale) monthly_total/annual_total columns.
+  const snapshotHit = bundle.snapshotHit === true;
+  let rebuiltDefaultFrequency = null;
+  if (!snapshotHit) {
+    const sellable = list(bundle.frequencies).filter((f) => f && f.quoteRequired !== true);
+    const candidate = sellable.length ? lazy.publicRoute().defaultFrequencyFromList(sellable) : null;
+    if (candidate) rebuiltDefaultFrequency = { key: candidate.key || null, monthly: money(candidate.monthly), annual: money(candidate.annual) };
+  }
   return {
     offered_pricing: {
       default_service_mode: bundle.defaultServiceMode || null,
       waveguard_tier: bundle.waveGuardTier || null,
+      snapshot_hit: snapshotHit,
+      ...(rebuiltDefaultFrequency ? { rebuilt_default_frequency: rebuiltDefaultFrequency } : {}),
       plan_frequencies: list(bundle.frequencies).map(frequencyEntry),
       services: list(bundle.services).map((s) => ({
         key: s.key || null,
@@ -399,10 +439,15 @@ function resolveInvoiceMode(row, data) {
 }
 
 // Authored proposal: its computed totals ARE the quote. Otherwise monthly /
-// annual are the stored totals the send path wrote (after reconciliation) and
-// one-time is the composer's corrected figure when the bundle built (it is
-// what the page shows), the stored column otherwise. Withheld entirely when
-// membership could not be verified.
+// annual are the stored totals the send path wrote (after reconciliation),
+// UNLESS the bundle was rejected and rebuilt (offered.snapshot_hit === false
+// — retired/below-floor lawn cadence, stale termite pricing, missing setup
+// fee: estimate-proposal-billing.js:148-169), in which case the frozen
+// columns no longer describe what this bundle offers and the rebuilt
+// default sellable cadence is used instead. One-time is the composer's
+// corrected figure when the bundle built (it is what the page shows), the
+// stored column otherwise. Withheld entirely when membership could not be
+// verified.
 function totalsFor(row, pricing, reconciliation_error) {
   if (reconciliation_error) return { monthly: null, annual: null, one_time: null, withheld: true };
   const offered = pricing.offered_pricing;
@@ -410,7 +455,12 @@ function totalsFor(row, pricing, reconciliation_error) {
     const t = offered.totals;
     return { monthly: t.monthly_equivalent, annual: t.annual_recurring, one_time: t.one_time, total_tax: t.total_tax, first_year_total: t.first_year_total, source: 'authored_proposal' };
   }
-  return { monthly: money(row.monthly_total), annual: money(row.annual_total), one_time: offered?.one_time_total ?? money(row.onetime_total) };
+  const oneTime = offered?.one_time_total ?? money(row.onetime_total);
+  if (offered && offered.snapshot_hit === false && offered.rebuilt_default_frequency) {
+    const d = offered.rebuilt_default_frequency;
+    return { monthly: d.monthly, annual: d.annual, one_time: oneTime, source: 'rebuilt_bundle_default' };
+  }
+  return { monthly: money(row.monthly_total), annual: money(row.annual_total), one_time: oneTime };
 }
 
 // Deposits: amount is the FACE value requested; card_surcharge is the extra

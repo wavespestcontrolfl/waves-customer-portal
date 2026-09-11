@@ -27,6 +27,12 @@ jest.mock('../routes/estimate-public', () => {
     resolveEstimateInvoiceMode: (e, data) => e.bill_by_invoice === true || data?.rodentGuaranteeOnly === true,
     isEstimateCustomerViewable: (e) => !e.archived_at && !unpublished.includes(e.status) && !['expired', 'send_failed'].includes(e.status),
     adminDraftPreviewEligible: (e, p) => p === '1' && !e.archived_at && unpublished.includes(e.status),
+    // Real defaultFrequencyFromList: selected/recommended row first, else the
+    // first entry — same fallback order the route itself uses.
+    defaultFrequencyFromList: (frequencies = []) => {
+      if (!Array.isArray(frequencies) || frequencies.length === 0) return null;
+      return frequencies.find((f) => f?.selected === true || f?.recommended === true || f?.isRecommended === true) || frequencies[0] || null;
+    },
   };
 });
 const mockBillingContext = jest.fn(async () => ({ billsPerApplication: false, livePricing: null }));
@@ -122,6 +128,12 @@ test('offered pricing is the public bundle verbatim in shape: cadences, ladders,
   expect(shaped.offered_pricing).toEqual({
     default_service_mode: 'recurring',
     waveguard_tier: 'Silver',
+    // BUNDLE never sets snapshotHit (the route only stamps it on the frozen-
+    // snapshot fast path) — its absence means this bundle was rebuilt, so
+    // the rebuilt bundle's own default sellable cadence rides here too
+    // (Codex r-head P1: totals must come from it, not the stale columns).
+    snapshot_hit: false,
+    rebuilt_default_frequency: { key: 'quarterly', monthly: 92, annual: 1104 },
     plan_frequencies: [{
       key: 'quarterly', label: 'Quarterly', monthly: 92, annual: 1104, visits_per_year: 4, billing_unit: 'per_application',
       per_application: 131, // the single treatment row's net displayPrice, not the outer 141 anchor (PriceCard rule)
@@ -141,7 +153,7 @@ test('offered pricing is the public bundle verbatim in shape: cadences, ladders,
         // per_application is null: the page shows the RANGE and no exact per-application headline (PriceCard perAppNet rule, Codex r7 P1)
         { key: 'monthly', label: 'Monthly', monthly: 200, annual: 2400, visits_per_year: 12, billing_unit: 'per_application', per_application: null, ...noRows,
           // price ± price × fraction × pct (PriceCard): 200 × 0.5 × 0.2 = 20
-          low_confidence_range: { pct: 0.2, fraction: 0.5, monthly: [180, 220], annual: [2160, 2640] } },
+          low_confidence_range: { pct: 0.2, fraction: 0.5, range_unit: 'monthly', cadence: [180, 220], annual: [2160, 2640] } },
       ] },
     ],
     combos: [{
@@ -172,8 +184,11 @@ test('offered pricing is the public bundle verbatim in shape: cadences, ladders,
     quote_required_items: [],
     source: 'engine_invocation',
   });
-  // totals.one_time is the composer's corrected page figure, not the raw column
-  expect(shaped.totals).toEqual({ monthly: 47, annual: 564, one_time: 125 });
+  // totals.one_time is the composer's corrected page figure, not the raw
+  // column; monthly/annual come from the rebuilt bundle's own default
+  // cadence too (92/1104), not the stale row columns (47/564) — a rebuilt
+  // bundle's prices no longer match the frozen columns (Codex r-head P1).
+  expect(shaped.totals).toEqual({ monthly: 92, annual: 1104, one_time: 125, source: 'rebuilt_bundle_default' });
   expect(shaped.requote_required).toBe(false);
   expect(shaped.offered_pricing_unavailable).toBeUndefined();
   // No hand-itemized reading of estimate_data rides on the response.
@@ -220,7 +235,7 @@ test('a lapsed membership is reconciled BEFORE totals and the bundle, on the sam
     estimate.estimate_data = JSON.stringify({ ...JSON.parse(estimate.estimate_data), membershipSnapshot: null, membershipLapsedRequote: true });
   });
   mockBuildPricingBundle.mockImplementation(async (estimate) => ({
-    frequencies: [{ key: 'quarterly', monthly: Number(estimate.monthly_total) }],
+    frequencies: [{ key: 'quarterly', monthly: Number(estimate.monthly_total), annual: Number(estimate.annual_total) }],
     quoteRequired: JSON.parse(estimate.estimate_data).membershipLapsedRequote === true,
     quoteRequiredReason: 'membership_lapsed_requote',
     quoteRequiredItems: [],
@@ -229,7 +244,10 @@ test('a lapsed membership is reconciled BEFORE totals and the bundle, on the sam
   const shaped = await shapeEstimate(row);
   expect(calls).toEqual(['reconcile', 'bundle']);
   expect(mockReconcile).toHaveBeenCalledWith(row);
-  expect(shaped.totals).toEqual({ monthly: 61, annual: 732, one_time: 125 });
+  // No sendSnapshot on this row's estimate_data → the bundle is rebuilt
+  // (snapshot_hit false), so totals come from its own reconciled frequency,
+  // which happens to equal the just-reconciled columns here.
+  expect(shaped.totals).toEqual({ monthly: 61, annual: 732, one_time: 125, source: 'rebuilt_bundle_default' });
   expect(shaped.offered_pricing.plan_frequencies[0].monthly).toBe(61);
   // Quote-required state is the bundle's verdict, surfaced twice: on offered_pricing and as the top-level flag + reason.
   expect(shaped.offered_pricing).toMatchObject({ quote_required: true, quote_required_reason: 'membership_lapsed_requote', quote_required_items: [] });
@@ -270,7 +288,9 @@ test('the real reconciler never throws — it REPORTS { ok: false }: pricing and
     const ok = await shapeEstimate(estimateRow());
     expect(ok.reconciliation_error).toBeUndefined();
     expect(ok.offered_pricing.plan_frequencies[0].per_application).toBe(131);
-    expect(ok.totals).toEqual({ monthly: 47, annual: 564, one_time: 125 });
+    // BUNDLE has no snapshotHit → rebuilt; totals follow its own default
+    // cadence (92/1104), not the stale row columns (47/564).
+    expect(ok.totals).toEqual({ monthly: 92, annual: 1104, one_time: 125, source: 'rebuilt_bundle_default' });
   }
 });
 
@@ -282,7 +302,8 @@ test('a ranged LOW-confidence cadence reports the range and NO exact per-applica
     { key: 'quarterly', monthly: 47, annual: 564, perTreatment: 141, visitsPerYear: 4, billedPerApplication: true, quoteRequired: true },
   ] });
   const [ranged, rangedQuote, zero, quoteOnly] = (await shapeEstimate(estimateRow())).offered_pricing.plan_frequencies;
-  expect(ranged).toMatchObject({ per_application: null, low_confidence_range: { pct: 0.2, fraction: 1, monthly: [160, 240], annual: [1920, 2880] } });
+  // key 'monthly' → interval ×1, so the cadence band equals the raw monthly band.
+  expect(ranged).toMatchObject({ per_application: null, low_confidence_range: { pct: 0.2, fraction: 1, range_unit: 'monthly', cadence: [160, 240], annual: [1920, 2880] } });
   // treatment rows on a ranged cadence: PriceCard hides them, so no exact amount rides here either (Codex r8 P1)
   mockBuildPricingBundle.mockResolvedValue({ frequencies: [
     { key: 'monthly', monthly: 200, annual: 2400, perTreatment: 200, visitsPerYear: 12, billedPerApplication: true, lowConfidenceRangePct: 0.2,
@@ -302,6 +323,57 @@ test('a ranged LOW-confidence cadence reports the range and NO exact per-applica
   expect(rangedQuote.quote_required).toBe(true);
   expect(zero.low_confidence_range).toBeUndefined();
   expect(quoteOnly.per_application).toBeNull();
+});
+
+test('a narrow low-confidence range on a quarterly or bi-monthly cadence bands the DISPLAYED cadence price (monthly × interval), matching PriceCard, not the raw monthly figure (Codex r-head P1)', async () => {
+  mockBuildPricingBundle.mockResolvedValue({ frequencies: [
+    // $100/mo quarterly: PriceCard shows/bands $300/quarter (100 × 3), not $100/mo.
+    { key: 'quarterly', monthly: 100, annual: 1200, perTreatment: 100, visitsPerYear: 4, billedPerApplication: true, lowConfidenceRangePct: 0.2, lowConfidenceFraction: 1 },
+    // $60/mo bi_monthly: PriceCard shows/bands $120/bi-monthly (60 × 2).
+    { key: 'bi_monthly', monthly: 60, annual: 720, perTreatment: 60, visitsPerYear: 6, billedPerApplication: true, lowConfidenceRangePct: 0.5, lowConfidenceFraction: 1 },
+  ] });
+  const [quarterly, biMonthly] = (await shapeEstimate(estimateRow())).offered_pricing.plan_frequencies;
+  // cadencePrice = 100 × 3 = 300; band = 300 × 1 × 0.2 = 60 → [240, 360], not [80, 120].
+  expect(quarterly.low_confidence_range).toEqual({ pct: 0.2, fraction: 1, range_unit: 'quarterly', cadence: [240, 360], annual: [960, 1440] });
+  // cadencePrice = 60 × 2 = 120; band = 120 × 1 × 0.5 = 60 → [60, 180], not [30, 90].
+  expect(biMonthly.low_confidence_range).toEqual({ pct: 0.5, fraction: 1, range_unit: 'bi_monthly', cadence: [60, 180], annual: [360, 1080] });
+});
+
+test('a combo carries its OWN annualPrepayEligible boolean, taking precedence over the section ladder on the customer page (EstimateViewPage annualPrepayEligibleEffective, Codex r-head P2)', async () => {
+  mockBuildPricingBundle.mockResolvedValue({ frequencies: [], serviceCadenceCombos: [
+    // finalizePricingBundle hard-disables prepay on a mosquito-axis combo
+    // (multi-service prepay is unsupported) even when the section ladder alone allows it.
+    { key: 'lawn_care:enhanced|mosquito:monthly12', selection: { lawn_care: 'enhanced', mosquito: 'monthly12' }, monthly: 150, annual: 1800, annualPrepayEligible: false },
+    // A combo can also RESTORE eligibility the estimate-level flag alone would hide.
+    { key: 'lawn_care:enhanced|pest_control:quarterly', selection: { lawn_care: 'enhanced', pest_control: 'quarterly' }, monthly: 90, annual: 1080, annualPrepayEligible: true },
+    // No flag at all (not a mosquito-axis combo, composer never stamped it): key omitted, not defaulted to false.
+    { key: 'lawn_care:enhanced|tree_shrub:quarterly', selection: { lawn_care: 'enhanced', tree_shrub: 'quarterly' }, monthly: 80, annual: 960 },
+  ] });
+  const [mosquitoAxis, restored, unstamped] = (await shapeEstimate(estimateRow())).offered_pricing.combos;
+  expect(mosquitoAxis.annual_prepay_eligible).toBe(false);
+  expect(restored.annual_prepay_eligible).toBe(true);
+  expect(unstamped.annual_prepay_eligible).toBeUndefined();
+});
+
+test('a VALID snapshot (snapshotHit true) keeps the stored monthly_total/annual_total columns — only a rejected-and-rebuilt bundle overrides them (Codex r-head P1)', async () => {
+  mockBuildPricingBundle.mockResolvedValue({
+    frequencies: [{ key: 'quarterly', monthly: 999, annual: 11988 }], // deliberately different from the row columns
+    snapshotHit: true,
+  });
+  const shaped = await shapeEstimate(estimateRow({ monthly_total: '47.00', annual_total: '564.00' }));
+  expect(shaped.offered_pricing.snapshot_hit).toBe(true);
+  expect(shaped.offered_pricing.rebuilt_default_frequency).toBeUndefined();
+  expect(shaped.totals).toEqual({ monthly: 47, annual: 564, one_time: 125 });
+});
+
+test('a rebuilt bundle (snapshotHit not true) with no sellable cadence — every frequency quote_required — falls back to the stored columns rather than reporting no total at all (Codex r-head P1)', async () => {
+  mockBuildPricingBundle.mockResolvedValue({
+    frequencies: [{ key: 'quarterly', monthly: 999, annual: 11988, quoteRequired: true }],
+  });
+  const shaped = await shapeEstimate(estimateRow({ monthly_total: '47.00', annual_total: '564.00' }));
+  expect(shaped.offered_pricing.snapshot_hit).toBe(false);
+  expect(shaped.offered_pricing.rebuilt_default_frequency).toBeUndefined();
+  expect(shaped.totals).toEqual({ monthly: 47, annual: 564, one_time: 125 });
 });
 
 test('section-level price selectors ride the service section with the composer\'s amounts: bond terms, station rental, the commercial interior toggle (Codex r7 P1)', async () => {
