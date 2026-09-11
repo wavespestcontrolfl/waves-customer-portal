@@ -16,6 +16,7 @@ import {
   TH,
   THead,
   TR,
+  UiSurface,
 } from "../ui";
 
 const WINDOWS = [
@@ -129,7 +130,7 @@ export default function PortalUsageTab({ canAdmin }) {
   }, [pages]);
 
   return (
-    <div className="space-y-5">
+    <UiSurface className="space-y-5">
       <div>
         <h2 className="text-18 leading-[1.35] font-medium text-zinc-900">Portal usage</h2>
         <p className="mt-1 max-w-2xl text-ui-body text-ink-secondary">
@@ -246,6 +247,6 @@ export default function PortalUsageTab({ canAdmin }) {
           </p>
         </>
       )}
-    </div>
+    </UiSurface>
   );
 }
