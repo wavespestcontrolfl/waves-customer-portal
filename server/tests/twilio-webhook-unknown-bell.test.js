@@ -520,6 +520,31 @@ test('an unknown loud reaction rings exactly one alert — not also the legacy o
   }
 });
 
+test('an unknown loud reaction whose thread was read before the bell is HANDLED — no legacy owner forward on the alreadyRead outcome (claude pre-push audit P1 on f5d8a2cf4)', async () => {
+  mockState.ai = false;
+  // Staff opened the thread while the dispatch was in flight: ringSmsReplyBell
+  // throws { alreadyRead } instead of writing a bell.
+  mockState.read = true;
+  const originalAdamPhone = process.env.ADAM_PHONE;
+  process.env.ADAM_PHONE = '+19415993489';
+  try {
+    await receive('Disliked "We will treat inside"', numbers.locations.parrish.number);
+    // Nothing delivered, nothing to deliver — and NOT a reason to fall
+    // through to the retired internal_alert forward. Before the fix
+    // dispatchUnknownSenderAlert reported this outcome as `false`, the
+    // reaction branch read that as "not handled", and the owner got a
+    // '📩 New SMS' text for a thread someone had already opened.
+    expect(require('../services/twilio').sendSMS).not.toHaveBeenCalled();
+    // The claim is released (nothing to confirm) so a later message from the
+    // same sender gets its own fresh attempt.
+    expect(mockState.claims.get(sender)).toBeUndefined();
+  } finally {
+    mockState.read = false;
+    if (originalAdamPhone === undefined) delete process.env.ADAM_PHONE;
+    else process.env.ADAM_PHONE = originalAdamPhone;
+  }
+});
+
 test('a deliberately suppressed alert releases the claim, stamps a terminal marker (not sms_reply_alerted), and still skips the legacy owner forward (codex #4210 round-17 P1)', async () => {
   mockState.ai = false;
   const originalAdamPhone = process.env.ADAM_PHONE;

@@ -2192,7 +2192,7 @@ async function ringSmsReplyBell({ customer, From, MessageSid, message }) {
         await require('../services/inbound-sms-read').retargetOrClearUnknownSenderBell(From, new Date());
       }
     }
-  } catch (e) { logger.warn(`[notifications] sms_reply post-check failed: ${e.message}`); }
+  } catch (e) { logger.warn('[notifications] sms_reply post-check failed', { code: e.code || 'unknown' }); }
   return stats;
 }
 
@@ -2285,12 +2285,22 @@ async function dispatchUnknownSenderAlert({ From, MessageSid, message }) {
   // preferences happened to change — working exactly as designed against
   // a decision that was never accidental.
   let suppressed = false;
+  // "Thread read before the bell" is the third HANDLED outcome (claude
+  // pre-push audit P1 on f5d8a2cf4): staff opened the thread while this
+  // dispatch was in flight, so there is nothing left to alert about. The
+  // known-customer loud-reaction branch already treats its own alreadyRead
+  // as landed; without the same here the caller saw `false`, and a raced
+  // loud reaction from a stranger fell through to the retired
+  // internal_alert owner forward. The claim is still released below (nothing
+  // was delivered) and the message is read, so the recovery sweep — which
+  // only looks at unread rows — never retries it either.
+  let alreadyRead = false;
   try {
     const stats = await ringSmsReplyBell({ customer: null, From, MessageSid, message });
     delivered = Boolean(stats && !stats.error && (stats.bellWritten || Number(stats.push?.sent || 0) > 0));
     suppressed = Boolean(stats && (stats.suppressed || stats.policySilenced));
   } catch (e) {
-    if (e.alreadyRead) logger.info('[notifications] sms_reply skipped — thread read before the bell');
+    if (e.alreadyRead) { alreadyRead = true; logger.info('[notifications] sms_reply skipped — thread read before the bell'); }
     else logger.error('[notifications] unknown-sender sms_reply trigger failed', { code: e.code || 'unknown' });
   }
   if (delivered) {
@@ -2314,7 +2324,7 @@ async function dispatchUnknownSenderAlert({ From, MessageSid, message }) {
   // round-17 P1) — the loud-reaction branch uses this to skip its legacy
   // internal_alert owner forward, and falling back to that would undo the
   // exact suppression triggerNotification was just asked to honor.
-  return delivered || suppressed;
+  return delivered || suppressed || alreadyRead;
 }
 
 async function lastOutboundAskedQuestion(toPhone, ourNumber) {
