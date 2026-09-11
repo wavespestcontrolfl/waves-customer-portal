@@ -56,7 +56,7 @@ function KnowledgeEntryDetail({
             <Badge>{sentenceCase(selected.confidence)}</Badge>
             <Badge tone={statusTone(selected.status)}>{sentenceCase(selected.status)}</Badge>
             <span className="text-ui-caption text-ink-secondary">
-              Source: {selected.source || "Unknown"}
+              src: {selected.source}
             </span>
           </div>
         </div>
@@ -101,14 +101,9 @@ function KnowledgeEntryDetail({
             </div>
           </div>
         ) : (
-          <section aria-labelledby={`entry-content-${selected.id}`}>
-            <h3 id={`entry-content-${selected.id}`} className="mb-2 text-ui-body font-medium">
-              Content
-            </h3>
-            <div className="max-h-[400px] overflow-auto whitespace-pre-wrap rounded-md border-hairline border-zinc-200 bg-zinc-50 p-4 text-ui-body leading-relaxed">
-              {selected.content}
-            </div>
-          </section>
+          <div className="max-h-[400px] overflow-auto whitespace-pre-wrap rounded-md border-hairline border-zinc-200 bg-zinc-50 p-4 text-ui-body leading-relaxed">
+            {selected.content}
+          </div>
         )}
 
         <dl className="mt-4 flex flex-wrap gap-x-5 gap-y-1 text-ui-caption text-ink-secondary">
@@ -117,7 +112,7 @@ function KnowledgeEntryDetail({
             <dd className="inline">
               {selected.last_verified_at
                 ? `${formatDate(selected.last_verified_at)} by ${selected.verified_by}`
-                : "Never"}
+                : "never"}
             </dd>
           </div>
           <div>
@@ -131,8 +126,9 @@ function KnowledgeEntryDetail({
         )}
       </CardBody>
 
-      {!editing && (
-        <CardFooter className="ui-record-actions">
+      {/* Always rendered, editing included: the pre-migration panel kept
+          Verify / Flag / Delete beside the editor. */}
+      <CardFooter className="ui-record-actions">
           <Button
             onClick={() => {
               setEditing(true);
@@ -161,8 +157,7 @@ function KnowledgeEntryDetail({
           >
             Delete
           </Button>
-        </CardFooter>
-      )}
+      </CardFooter>
     </Card>
   );
 }
@@ -428,7 +423,7 @@ export default function BrowseTab({ showFeedback, onRefresh, isMobile }) {
                         </span>
                       </span>
                       <span className="shrink-0 text-ui-caption text-ink-secondary u-nums">
-                        {formatDate(entry.last_verified_at)}
+                        {entry.last_verified_at ? formatDate(entry.last_verified_at) : "never"}
                       </span>
                     </span>
                   </Button>
