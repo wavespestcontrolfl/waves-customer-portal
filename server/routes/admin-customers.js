@@ -4358,19 +4358,22 @@ router.put('/:id/notification-prefs', requireAdmin, async (req, res, next) => {
     }
     dbUpdates.updated_at = new Date();
 
-    if (existing) {
-      await db('notification_prefs')
+    // Row → address key, like every customer address writer: a billing
+    // address assigned here contends with a bearer-link handoff that read
+    // it as unowned, so the handoff commits first or re-judges ownership.
+    await db.transaction(async (trx) => {
+      if (!existing) {
+        // Create through the canonical helper (marketing flags NULL), then
+        // apply exactly the admin-named fields — a bare insert would take the
+        // legacy true defaults and mint marketing consent as a side effect.
+        await createDefaultCustomerRows(trx, req.params.id);
+      }
+      await trx('notification_prefs').where({ customer_id: req.params.id }).forUpdate().first('customer_id');
+      await require('../utils/customer-comms-lock').lockAssignedCustomerEmails(trx, dbUpdates);
+      await trx('notification_prefs')
         .where({ customer_id: req.params.id })
         .update(dbUpdates);
-    } else {
-      // Create through the canonical helper (marketing flags NULL), then
-      // apply exactly the admin-named fields — a bare insert would take the
-      // legacy true defaults and mint marketing consent as a side effect.
-      await createDefaultCustomerRows(db, req.params.id);
-      await db('notification_prefs')
-        .where({ customer_id: req.params.id })
-        .update(dbUpdates);
-    }
+    });
 
     const prefs = await db('notification_prefs')
       .where({ customer_id: req.params.id })

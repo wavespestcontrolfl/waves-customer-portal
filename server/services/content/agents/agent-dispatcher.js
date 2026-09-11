@@ -261,6 +261,10 @@ class AgentDispatcher {
       return {
         ok: false,
         reason: `streaming_failed: ${err.message}`,
+        // Machine-readable exit class (session_stream_eof / session_timeout /
+        // session_error_event) so the runner can decide what is retryable
+        // without parsing the message.
+        code: err.code || 'streaming_failed',
         session_id: sessionId,
         agent_id: route.agent_id,
         partial_draft: partial || null,

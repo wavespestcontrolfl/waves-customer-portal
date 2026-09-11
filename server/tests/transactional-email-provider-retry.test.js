@@ -40,6 +40,8 @@ describe('transactional email provider retry classification', () => {
   beforeEach(() => {
     jest.clearAllMocks();
     db.raw = jest.fn((sql) => sql);
+    // Uncertain settlements commit with their summary reconciliation.
+    db.transaction = jest.fn(async (cb) => cb(db));
   });
 
   test('recognizes both SendGrid provider-block event shapes', () => {
@@ -160,7 +162,7 @@ describe('transactional email provider retry classification', () => {
     expect(chain.update).not.toHaveBeenCalledWith(expect.objectContaining({ provider_retry_next_at: expect.any(Date) }));
     // The uncertain settlement reopens the summary for office review, like an exhausted retry.
     expect(require('../services/visit-completion-summary').reconcileSummaryEmailBounce)
-      .toHaveBeenCalledWith(expect.objectContaining({ id: 'message-1', template_key: 'service.visit_summary' }));
+      .toHaveBeenCalledWith(expect.objectContaining({ id: 'message-1', template_key: 'service.visit_summary' }), db);
   });
 
   test('a failure clearing the provider block before the visit summary request keeps the ordinary retry schedule', async () => {
@@ -212,7 +214,29 @@ describe('transactional email provider retry classification', () => {
     const stored = message({ template_key: 'service.visit_summary', trigger_event_id: 'visit_summary:00000000-0000-4000-8000-000000000001', send_attempt_token: 'attempt-7' });
     expect(await retry.retryOne(stored)).toMatchObject({ sent: false, stopped: true });
     expect(sendgrid.sendOne).not.toHaveBeenCalled();
-    expect(summary.reconcileSummaryEmailRecovery).toHaveBeenCalledWith(expect.objectContaining({ id: stored.id, status: 'blocked' }));
+    // The ledger terminalization and the summary settlement commit
+    // together (Codex #4303 r6 P2): the reconcile call now rides the same
+    // transaction as the email_messages update, not a call of its own.
+    expect(summary.reconcileSummaryEmailRecovery).toHaveBeenCalledWith(expect.objectContaining({ id: stored.id, status: 'blocked' }), db);
+  });
+
+  test('a stopped visit summary retry never reports terminalized when its summary reconcile fails, so the transaction has something to roll back', async () => {
+    const chain = {};
+    chain.where = jest.fn(() => chain);
+    chain.update = jest.fn(() => chain);
+    chain.then = (res, rej) => Promise.resolve(1).then(res, rej);
+    chain.returning = jest.fn(async () => [{ id: 'message-1', status: 'blocked', template_key: 'service.visit_summary' }]);
+    db.mockReturnValue(chain);
+    emailTemplates.loadTemplateByKey.mockResolvedValue({ template: { template_key: 'service.visit_summary' } });
+    emailTemplates.activeSuppressionFor.mockResolvedValue({ suppression_type: 'do_not_email' });
+    const summary = require('../services/visit-completion-summary');
+    summary.reconcileSummaryEmailRecovery.mockRejectedValueOnce(new Error('reconcile down'));
+    const stored = message({ template_key: 'service.visit_summary', trigger_event_id: 'visit_summary:00000000-0000-4000-8000-000000000001', send_attempt_token: 'attempt-10' });
+    // Never terminalizes the ledger row silently: a failed reconcile must
+    // surface so the transaction wrapping both writes has something to
+    // fail on (the real db.transaction rolls back; this mock only proves
+    // the error is no longer swallowed by a standalone .catch).
+    await expect(retry.retryOne(stored)).rejects.toThrow('reconcile down');
   });
 
   test('a failed uncertain settlement after an ambiguous provider throw is retried once and never requeued', async () => {
@@ -270,6 +294,7 @@ describe('transactional email provider retry classification', () => {
     expect(chain.update.mock.invocationCallOrder[marker]).toBeLessThan(sendgrid.sendOne.mock.invocationCallOrder[0]);
     // Recovery: a started handoff settles as uncertain; other stale claims requeue.
     chain.update.mockClear();
+    chain.select = jest.fn(async () => [{ id: 'message-1', send_attempt_token: 'attempt-8' }]);
     await retry.recoverStaleClaims();
     expect(chain.update).toHaveBeenCalledWith(expect.objectContaining({ provider_retry_next_at: null, provider_retry_exhausted_at: expect.any(Date),
       error_message: expect.stringMatching(/^Provider outcome unknown/) }));
@@ -313,7 +338,8 @@ describe('transactional email provider retry classification', () => {
     chain.whereNull = jest.fn(() => chain);
     chain.update = jest.fn(() => chain);
     chain.then = (res, rej) => Promise.resolve(1).then(res, rej);
-    // The uncertain settlement returns its rows: one interrupted summary handoff.
+    // The uncertain settlement selects its claims and settles each in its own transaction.
+    chain.select = jest.fn(async () => [{ id: 'stale-summary', send_attempt_token: 'attempt-9' }]);
     chain.returning = jest.fn(async () => [{ id: 'stale-summary', status: 'failed', template_key: 'service.visit_summary' }]);
     db.mockReturnValue(chain);
     const now = new Date('2026-07-16T12:30:00Z');
@@ -322,7 +348,8 @@ describe('transactional email provider retry classification', () => {
     // rest requeue); the fake yields one row for each.
     await expect(retry.recoverStaleClaims(now)).resolves.toBe(2);
     expect(require('../services/visit-completion-summary').reconcileSummaryEmailBounce)
-      .toHaveBeenCalledWith(expect.objectContaining({ id: 'stale-summary' }));
+      .toHaveBeenCalledWith(expect.objectContaining({ id: 'stale-summary' }), db);
+    expect(db.transaction).toHaveBeenCalled();
 
     expect(chain.where).toHaveBeenCalledWith({ status: 'queued' });
     expect(chain.where).toHaveBeenCalledWith('provider_retry_count', '>', 0);

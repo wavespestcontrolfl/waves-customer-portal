@@ -913,6 +913,10 @@ export default function ScheduleFlowPage({ flow }) {
   // superseding a still-running load also keeps responses in issue order.
   const loadAbortRef = useRef(null);
 
+  const laneQuery = flow === 'reservice' && selectedLane && (data?.lanes || []).filter(lane => !lane.alreadyBooked).length > 1
+    ? `?lane=${selectedLane}` : '';
+  const availabilityUrl = `${API_BASE}/public/${cfg.endpoint}/${token}${laneQuery}`;
+
   const load = useCallback(async () => {
     loadAbortRef.current?.abort();
     const controller = new AbortController();
@@ -921,7 +925,8 @@ export default function ScheduleFlowPage({ flow }) {
     setNotFound(false);
     setLoadError(false);
     try {
-      const res = await fetch(`${API_BASE}/public/${cfg.endpoint}/${token}`, { signal: controller.signal });
+      const res = await fetch(availabilityUrl, { signal: controller.signal });
+      if (controller.signal.aborted) return;
       if (res.status === 404) {
         setNotFound(true);
         return;
@@ -936,7 +941,7 @@ export default function ScheduleFlowPage({ flow }) {
     } finally {
       if (!controller.signal.aborted) setLoading(false);
     }
-  }, [cfg.endpoint, token]);
+  }, [availabilityUrl]);
 
   useEffect(() => {
     load();
@@ -966,12 +971,15 @@ export default function ScheduleFlowPage({ flow }) {
   // (same shape the GET returns) and hands the summary line back to the
   // card. Throwing lets the card show its own call-us fallback line.
   const runAiSearch = async (query) => {
+    const signal = loadAbortRef.current?.signal;
     const res = await fetch(`${API_BASE}/public/${cfg.endpoint}/${token}/find-slots`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ query }),
+      body: JSON.stringify({ query, ...(flow === 'reservice' ? { lane: selectedLane } : {}) }),
+      signal,
     });
     const body = await res.json().catch(() => ({}));
+    if (signal?.aborted) throw new Error('search superseded');
     if (!res.ok) throw new Error(body.error || 'search failed');
     if (body.availability) {
       setData((prev) => (prev ? { ...prev, availability: body.availability } : prev));
@@ -988,10 +996,13 @@ export default function ScheduleFlowPage({ flow }) {
   // still what's on screen, so the reset link must survive for another try.
   const showAllTimes = async () => {
     setSelectedSlot(null);
+    const signal = loadAbortRef.current?.signal;
     try {
-      const res = await fetch(`${API_BASE}/public/${cfg.endpoint}/${token}`);
+      const res = await fetch(availabilityUrl, { signal });
       if (!res.ok) return;
-      setData(await res.json());
+      const body = await res.json();
+      if (signal?.aborted) return;
+      setData(body);
       setAiFiltered(false);
       setAiSession((n) => n + 1); // remount the card → clears its recap/query
     } catch { /* keep the filtered calendar + reset link */ }
@@ -1074,43 +1085,55 @@ export default function ScheduleFlowPage({ flow }) {
         selectedSlot={selectedSlot}
         bookableLanes={bookableLanes}
         selectedLane={selectedLane}
-        onSelectLane={setSelectedLane}
+        onSelectLane={(lane) => {
+          if (lane === selectedLane) return;
+          loadAbortRef.current?.abort();
+          setSelectedSlot(null);
+          setSubmitError(null);
+          setAiFiltered(false);
+          setAiSession((n) => n + 1);
+          setSelectedLane(lane);
+        }}
         details={details}
         onDetails={setDetails}
       />
       {blockedLanes.map((lane) => (
         <AlreadyBookedCard key={lane.key} lane={lane} />
       ))}
-      <AskCard key={aiSession} onSearch={runAiSearch} aiFiltered={aiFiltered} onShowAll={showAllTimes} />
-      <SchedulePicker
-        availability={data?.availability}
-        rankedSlots={aiFiltered ? null : data?.availability?.slots}
-        selectedDate={selectedDay?.date || null}
-        onSelectDay={(date) => {
-          setSelectedDate(date);
-          setSelectedSlot(null);
-          setSubmitError(null);
-        }}
-        selectedSlot={selectedSlot}
-        onSelectSlot={(slot) => { setSelectedSlot(slot); setSubmitError(null); }}
-        submitError={submitError}
-        pickedAction
-        pickedExtra={(slot) => (
-          <>
-            <button
-              type="button"
-              data-glass-accent=""
-              className="wpk-action-btn"
-              onClick={confirm}
-              disabled={submitting || !cfg.canConfirm({ lane: selectedLane })}
-            >
-              {actionLabel}
-            </button>
-            {cfg.pickedNote(data, slot)}
-          </>
-        )}
-        empty={<EmptyTimesCard aiFiltered={aiFiltered} />}
-      />
+      {flow === 'reservice' && !selectedLane ? (
+        <Card><p style={{ margin: 0, fontSize: 14, color: S.body }}>Choose a service above to see available times.</p></Card>
+      ) : (<>
+        <AskCard key={aiSession} onSearch={runAiSearch} aiFiltered={aiFiltered} onShowAll={showAllTimes} />
+        <SchedulePicker
+          availability={data?.availability}
+          rankedSlots={aiFiltered ? null : data?.availability?.slots}
+          selectedDate={selectedDay?.date || null}
+          onSelectDay={(date) => {
+            setSelectedDate(date);
+            setSelectedSlot(null);
+            setSubmitError(null);
+          }}
+          selectedSlot={selectedSlot}
+          onSelectSlot={(slot) => { setSelectedSlot(slot); setSubmitError(null); }}
+          submitError={submitError}
+          pickedAction
+          pickedExtra={(slot) => (
+            <>
+              <button
+                type="button"
+                data-glass-accent=""
+                className="wpk-action-btn"
+                onClick={confirm}
+                disabled={submitting || !cfg.canConfirm({ lane: selectedLane })}
+              >
+                {actionLabel}
+              </button>
+              {cfg.pickedNote(data, slot)}
+            </>
+          )}
+          empty={<EmptyTimesCard aiFiltered={aiFiltered} />}
+        />
+      </>)}
       <HelpCard>Don&apos;t see a time that works? Text or call {WAVES_SUPPORT_PHONE_DISPLAY} and our team will fit you in.</HelpCard>
     </Page>
   );

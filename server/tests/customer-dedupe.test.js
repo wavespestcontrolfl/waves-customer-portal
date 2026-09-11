@@ -721,6 +721,30 @@ describe('executeMerge', () => {
       .rejects.toThrow(/deferred — a collection call is in flight/);
   });
 
+  it('takes the invoice-issued-closeout gate lock right after the property-preferences pair, sorted, before any customer row lock (GitHub r7 P2 #4127)', async () => {
+    const winner = { id: WINNER, first_name: 'Diana', last_name: 'Blowers', phone: '+19995550003' };
+    const loser = { id: LOSER, first_name: 'Diana', last_name: null, phone: '9995550003' };
+    const { trx } = buildTrx({ winner, loser, fkRows: FK_ROWS });
+    db.transaction.mockImplementation(async (fn) => fn(trx));
+    await dedupe.executeMerge({ winnerId: WINNER, loserId: LOSER, performedBy: 'test' });
+    // Order: collections_case[0,1], property-preferences[0,1], THEN the
+    // invoice-issued-closeout gate[0,1] — the same lock the invoice-issued
+    // closeout (complete-scheduled-service.js) takes before it touches the
+    // invoice row, so whichever transaction gets here first runs to
+    // completion before the other takes any row lock (no ABBA is
+    // reachable between this merge's customer-first order and the
+    // closeout's invoice-first order).
+    const sortedParties = [WINNER, LOSER].map(String).sort();
+    const calls = trx.raw.mock.calls;
+    expect(calls.length).toBeGreaterThanOrEqual(6);
+    for (const [i, args] of [[0, ['collections_case', sortedParties[0]]], [1, ['collections_case', sortedParties[1]]],
+      [2, ['property-preferences', sortedParties[0]]], [3, ['property-preferences', sortedParties[1]]],
+      [4, ['invoice-issued-closeout', sortedParties[0]]], [5, ['invoice-issued-closeout', sortedParties[1]]]]) {
+      expect(String(calls[i][0])).toContain('pg_advisory_xact_lock');
+      expect(calls[i][1]).toEqual(args);
+    }
+  });
+
   it('gh-r12: a collection-case reconcile failure FAILS the merge (atomic) — except undefined_table', async () => {
     const build = () => buildTrx({
       winner: { id: WINNER, first_name: 'Diana', last_name: 'Blowers', phone: '+19995550003' },

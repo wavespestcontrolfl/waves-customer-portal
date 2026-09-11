@@ -3,12 +3,12 @@
 import React from 'react';
 import '@testing-library/jest-dom/vitest';
 import { MemoryRouter } from 'react-router-dom';
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import TurfHeightReviewPage from './TurfHeightReviewPage';
 
-const ITEM2 = { id: 8, customer: 'Sam Customer', grass: 'Zoysia', band: 'ok', gauge: 3.0, measured: '2026-09-02', manual: false, verification: 'pending' };
-const ITEM = { id: 7, customer: 'Pat Customer', grass: 'St. Augustine', band: 'ok', gauge: 3.5, measured: '2026-09-01', manual: false, verification: 'pending' };
+const ITEM = { id: 7, customerName: 'Pat Customer', grassType: 'st_augustine', band: { min: 3, max: 4 }, manualHeightIn: 3.5, ocrHeightIn: 2, ocrConfidence: 0.9, measuredAt: '2026-09-01T16:00:00Z', verificationStatus: 'discrepancy', gaugePhotoUrl: null };
+const ITEM2 = { ...ITEM, id: 8, customerName: 'Sam Customer', verificationStatus: 'ocr_failed', ocrHeightIn: null };
 
 beforeEach(() => {
   localStorage.setItem('waves_admin_token', 'test-token');
@@ -59,9 +59,56 @@ describe('TurfHeightReviewPage confirm reading', () => {
     const buttons = await screen.findAllByRole('button', { name: 'Confirm reading' });
     fireEvent.click(buttons[0]);
     expect(await screen.findByRole('alert')).toHaveTextContent('Row 7 locked');
-    fireEvent.click((await screen.findAllByRole('button', { name: 'Confirm reading' })).find((b) => !b.disabled));
+    fireEvent.click(within(screen.getByRole('heading', { name: 'Sam Customer' }).closest('.bg-white')).getByRole('button', { name: 'Confirm reading' }));
     await waitFor(() => expect(patches).toBe(2));
     await waitFor(() => expect(screen.queryByText('Sam Customer')).not.toBeInTheDocument());
     expect(screen.getByRole('alert')).toHaveTextContent('Row 7 locked');
+  });
+});
+
+
+describe('Turf height shared controls', () => {
+  it('keeps concurrent pending rows disabled and sends one unchanged request per reading', async () => {
+    const pending = {};
+    vi.stubGlobal('fetch', vi.fn(async (url, options = {}) => {
+      if (options.method === 'PATCH') return new Promise((resolve) => { pending[url] = resolve; });
+      return { ok: true, json: async () => ({ items: [ITEM, ITEM2] }) };
+    }));
+    render(<MemoryRouter><TurfHeightReviewPage /></MemoryRouter>);
+    const [first, second] = await screen.findAllByRole('button', { name: 'Confirm reading' });
+    fireEvent.click(first);
+    fireEvent.click(second);
+    fireEvent.click(first);
+    expect(first).toBeDisabled();
+    expect(second).toBeDisabled();
+    expect(first).toHaveAccessibleName('Confirm reading');
+    const patches = fetch.mock.calls.filter(([, options]) => options.method === 'PATCH');
+    expect(patches).toHaveLength(2);
+    expect(patches[0]).toEqual(['/api/admin/turf-height/7/resolve', expect.objectContaining({
+      method: 'PATCH', body: JSON.stringify({ status: 'verified' }),
+      headers: expect.objectContaining({ Authorization: 'Bearer test-token' }),
+    })]);
+    pending['/api/admin/turf-height/8/resolve']({ ok: true });
+    await waitFor(() => expect(screen.queryByText('Sam Customer')).not.toBeInTheDocument());
+    expect(first).toBeDisabled();
+    pending['/api/admin/turf-height/7/resolve']({ ok: false, status: 409, json: async () => ({ error: 'Reading is locked' }) });
+    expect(await screen.findByRole('alert')).toHaveTextContent('Reading is locked');
+    expect(first).not.toBeDisabled();
+  });
+
+  it('keeps missing readings distinct from zero and refreshes a failed queue read', async () => {
+    let reads = 0;
+    vi.stubGlobal('fetch', vi.fn(async () => {
+      reads += 1;
+      if (reads === 1) return { ok: false, status: 500 };
+      return { ok: true, json: async () => ({ items: [{ ...ITEM, manualHeightIn: 0, ocrHeightIn: null }] }) };
+    }));
+    render(<MemoryRouter><TurfHeightReviewPage /></MemoryRouter>);
+    expect(await screen.findByRole('alert')).toHaveTextContent('Failed to load');
+    expect(screen.queryByText(/Nothing to review/)).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Refresh' }));
+    expect(await screen.findByText('0″')).toBeInTheDocument();
+    expect(screen.getByText('—')).toBeInTheDocument();
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
   });
 });

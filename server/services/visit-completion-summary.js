@@ -303,8 +303,17 @@ async function terminalDeferredSummarySms(meta) {
   const effect = await db('visit_effects').where({ visit_id: meta.visit_id, effect_type: 'completion_sms',
     claim_token: meta.visit_summary_claim_token }).first('status');
   if (!effect || ['sent', 'suppressed'].includes(effect.status)) return;
+  // The handoff's pre-provider marker clears before the provider request, so
+  // a throw from the request itself (the only way this hook's row reaches
+  // 'unknown_delivery' straight from the claim) leaves the effect reading
+  // unknown even when the scheduler already knows better: a synchronous
+  // Twilio rejection with a terminal code (21610/21211/21614/...) proves
+  // nothing was accepted. Carry that proof in and settle definitively
+  // instead of leaving a proven-unsent leg parked for the office.
+  const status = effect.status === 'unknown_delivery' && meta.provider_terminal_rejection !== true
+    ? 'unknown_delivery' : 'suppressed';
   const result = await VisitGroups.finalizeVisitNotification(meta.visit_id, 'completion_sms',
-    effect.status === 'unknown_delivery' ? 'unknown_delivery' : 'suppressed', new Date(), meta.visit_summary_claim_token);
+    status, new Date(), meta.visit_summary_claim_token);
   if (!result.ok) throw new Error('Visit summary terminal state could not be saved');
 }
 
@@ -379,7 +388,14 @@ function summaryEmailOptOutDrop(reason) {
 
 function summaryEmailState(message) {
   if (!message) return 'retry';
-  if (['sent', 'delivered', 'opened', 'clicked'].includes(message.status)) return 'sent';
+  // unsubscribed/spam_report are recipient-generated events that land only
+  // AFTER the recipient received the message — the same sent evidence as
+  // opened/clicked. Without this a multi-recipient summary where one leg
+  // unsubscribes and the other bounces can never fully settle: this row
+  // reads unknown_delivery forever, so reconcileSummaryEmailRecovery's
+  // "every recipient row settled" gate never closes even after the bounced
+  // leg is corrected.
+  if (['sent', 'delivered', 'opened', 'clicked', 'unsubscribed', 'spam_report'].includes(message.status)) return 'sent';
   if (message.status === 'blocked') return 'suppressed';
   if (message.status === 'dropped' && summaryEmailOptOutDrop(message.error_message)) return 'suppressed';
   if (message.status === 'failed' && !message.sent_at && !message.provider_message_id
@@ -460,11 +476,24 @@ async function settleAbandonedSummaryEmailRow(visitId, database) {
   if (!effect || !VisitGroups.isHandoffPending(effect.last_error)) return null;
   if (new Date(effect.claimed_at).getTime() > Date.now() - VisitGroups.NOTIFICATION_CLAIM_LEASE_MS) return null;
   const messageId = effect.last_error.split(':')[1] || null;
+  const marker = effect.last_error;
+  // The settlement re-reads the marker under the effect row FOR UPDATE: a
+  // still-live owner delayed past the lease clears that marker on its own
+  // connection right before its provider request (markVisitNotificationProviderStart),
+  // and that clear either committed first — the proof is gone and the row
+  // is left alone — or waits for this transaction and finds the row
+  // already settled. The proof and the settlement cannot cross.
   return async () => {
     if (!messageId) return 0;
-    return database('email_messages').where({ id: messageId, status: 'queued', trigger_event_id: `visit_summary:${visitId}` })
-      .whereNull('provider_message_id').whereNull('sent_at')
-      .update({ status: 'failed', error_message: require('./email-template-library').ABORTED_BEFORE_DISPATCH, updated_at: database.fn.now() });
+    const settle = async (trx) => {
+      const held = await trx('visit_effects').where({ visit_id: visitId, effect_type: 'completion_email', status: 'unknown_delivery' })
+        .forUpdate().first('last_error');
+      if (!held || held.last_error !== marker) return 0;
+      return trx('email_messages').where({ id: messageId, status: 'queued', trigger_event_id: `visit_summary:${visitId}` })
+        .whereNull('provider_message_id').whereNull('sent_at')
+        .update({ status: 'failed', error_message: require('./email-template-library').ABORTED_BEFORE_DISPATCH, updated_at: trx.fn.now() });
+    };
+    return database.isTransaction ? settle(database) : database.transaction(settle);
   };
 }
 
@@ -735,7 +764,6 @@ async function reviewSendThroughSummaryHandoff(serviceRecordId, dispatch, databa
   if (marked && verdict && verdict.ok === false) await release();
   return verdict;
 }
-
 // The retry rail's provider request runs while the customer and preference
 // rows are held, so the recipient the fence approved is the recipient the
 // provider receives. `dispatch()` performs the request.
@@ -775,7 +803,7 @@ async function reconcileSummaryEmailRecovery(message, database = db) {
   const match = /^visit_summary:([0-9a-f-]{36})$/.exec(String(message?.trigger_event_id || ''));
   if (!match || message.template_key !== 'service.visit_summary') return { reconciled: false };
   const visitId = match[1];
-  return database.transaction(async (trx) => {
+  const run = async (trx) => {
     // provider_bounce: a bounce reopened a sent aggregate. provider_outcome_unknown:
     // the bounce landed before the initial send returned, or the handoff was
     // ambiguous — a delivery event is the proof either lacked.
@@ -833,7 +861,12 @@ async function reconcileSummaryEmailRecovery(message, database = db) {
       }
     }
     return { reconciled: true };
-  });
+  };
+  // Composable with a caller's own transaction (the retry rail's stopRetry
+  // commits the ledger's terminal update and this settlement together), or
+  // opens its own when called standalone (the webhook and the recovery
+  // handoff's post-commit best-effort call).
+  return database.isTransaction ? run(database) : database.transaction(run);
 }
 
 async function deliverVisitCompletionSummary(packetId, token, database = db) {
@@ -876,4 +909,5 @@ module.exports = { VISIT_SUMMARY_TOKEN_RE, ensureVisitSummaryToken, packetHasPub
   deliverVisitCompletionSummary, reconcileSummaryEmailBounce, reconcileSummaryEmailRecovery, summaryRetryAuthorized,
   recheckDeferredSummarySms, beginDeferredSummarySms, finalizeDeferredSummarySms, terminalDeferredSummarySms,
   retrySummaryThroughHandoff, parkVisitReviewOutreach, resumeVisitReviewOutreach, visitSummaryUncertainForRecord,
-  reviewSendThroughSummaryHandoff, PARKED_REVIEW_REASON, PACKET_OWNED_REVIEW_TRIGGERS, summaryEmailOptOutDrop };
+  reviewSendThroughSummaryHandoff, PARKED_REVIEW_REASON, PACKET_OWNED_REVIEW_TRIGGERS, summaryEmailOptOutDrop,
+  _settleAbandonedSummaryEmailRow: settleAbandonedSummaryEmailRow };

@@ -122,16 +122,28 @@ async function recoverStaleClaims(now = new Date()) {
     .whereNull('provider_message_id')
     .whereNull('sent_at')
     .where('queued_at', '<=', staleBefore);
-  const uncertain = await stale().where({ error_message: HANDOFF_STARTED }).update({
-    status: 'failed',
-    provider_retry_next_at: null,
-    provider_retry_exhausted_at: now,
-    error_message: 'Provider outcome unknown: interrupted after the provider handoff began',
-    updated_at: now,
-  }).returning('*');
   // A summary interrupted after its handoff began has no known provider
-  // outcome: terminal for the office, exactly like an exhausted retry.
-  for (const row of uncertain) await reconcileExhaustedSummary(row);
+  // outcome: terminal for the office, exactly like an exhausted retry. The
+  // row's settlement and the summary's transition commit together, per
+  // row, so a failure between them leaves the row queued for this sweep to
+  // find again instead of exhausted with the summary still reading as sent.
+  const started = await stale().where({ error_message: HANDOFF_STARTED }).select('id', 'send_attempt_token');
+  let uncertain = 0;
+  for (const claim of started) {
+    uncertain += await db.transaction(async (trx) => {
+      const [row] = await trx('email_messages').where({ id: claim.id, send_attempt_token: claim.send_attempt_token, status: 'queued', error_message: HANDOFF_STARTED })
+        .update({
+          status: 'failed',
+          provider_retry_next_at: null,
+          provider_retry_exhausted_at: now,
+          error_message: 'Provider outcome unknown: interrupted after the provider handoff began',
+          updated_at: now,
+        }).returning('*');
+      if (!row) return 0;
+      await reconcileExhaustedSummary(row, trx);
+      return 1;
+    });
+  }
   const requeued = await stale()
     .where((q) => q.whereNull('error_message').orWhereNot('error_message', HANDOFF_STARTED))
     .update({
@@ -144,17 +156,20 @@ async function recoverStaleClaims(now = new Date()) {
       error_message: 'Interrupted provider retry claim recovered',
       updated_at: now,
     });
-  return Number(requeued || 0) + uncertain.length;
+  return Number(requeued || 0) + uncertain;
 }
 
 // A summary whose retries ended without a delivery — the provider block
 // never cleared, or the last request's outcome is unknown — is a terminal
 // failure for the office, exactly like a hard bounce: the sent effect
-// reopens for delivery review.
-async function reconcileExhaustedSummary(updated) {
+// reopens for delivery review. On a transaction the reconciliation commits
+// with the row's settlement (a failure rolls both back); on the root
+// handle a failure is logged, the exhausted-retry path's contract.
+async function reconcileExhaustedSummary(updated, database = null) {
   if (updated?.template_key !== 'service.visit_summary') return;
-  await require('./visit-completion-summary').reconcileSummaryEmailBounce(updated)
-    .catch((err) => logger.warn(`[email-provider-retry] visit summary bounce not reconciled for ${updated.id}: ${err.message}`));
+  const reconcile = require('./visit-completion-summary').reconcileSummaryEmailBounce(updated, database || undefined);
+  if (database) { await reconcile; return; }
+  await reconcile.catch((err) => logger.warn(`[email-provider-retry] visit summary bounce not reconciled for ${updated.id}: ${err.message}`));
 }
 
 async function alertExhausted(message, reason) {
@@ -217,29 +232,44 @@ async function markRetryFailure(message, err, now = new Date()) {
 // pre-dispatch abort marker), and the exhausted alert names it.
 async function markRetryUncertain(message, err, now = new Date()) {
   const reason = `Provider outcome unknown: ${emailTemplates.redactEmailAddresses(String(err?.message || 'SendGrid retry failed'))}`.slice(0, 1000);
-  const [updated] = await db('email_messages')
-    .where({ id: message.id, send_attempt_token: message.send_attempt_token, status: 'queued' })
-    .update({ status: 'failed', error_message: reason, provider_retry_next_at: null, provider_retry_exhausted_at: now, updated_at: now })
-    .returning('*');
-  if (updated) {
-    await alertExhausted(updated, reason);
-    await reconcileExhaustedSummary(updated);
-  }
-  return updated || null;
+  // The row's settlement and the summary's transition commit together: a
+  // failure between them leaves the row queued for stale-claim recovery
+  // (which settles it the same way) instead of exhausted beside a summary
+  // that still reads as delivered.
+  const updated = await db.transaction(async (trx) => {
+    const [row] = await trx('email_messages')
+      .where({ id: message.id, send_attempt_token: message.send_attempt_token, status: 'queued' })
+      .update({ status: 'failed', error_message: reason, provider_retry_next_at: null, provider_retry_exhausted_at: now, updated_at: now })
+      .returning('*');
+    if (row) await reconcileExhaustedSummary(row, trx);
+    return row || null;
+  });
+  if (updated) await alertExhausted(updated, reason);
+  return updated;
 }
 
 // A row stopped before any provider request: terminal for the rail, and a
 // summary's aggregate is settled from the ledger since no webhook follows.
 async function stopRetry(message, { status, reason, exhaustedAlert = false }) {
-  const [updated] = await db('email_messages')
-    .where({ id: message.id, send_attempt_token: message.send_attempt_token, status: 'queued' })
-    .update({ status, error_message: reason, provider_retry_next_at: null, provider_retry_exhausted_at: new Date(), updated_at: new Date() })
-    .returning('*');
+  const isSummary = message.template_key === 'service.visit_summary';
+  const settle = async (trx) => {
+    const [row] = await trx('email_messages')
+      .where({ id: message.id, send_attempt_token: message.send_attempt_token, status: 'queued' })
+      .update({ status, error_message: reason, provider_retry_next_at: null, provider_retry_exhausted_at: new Date(), updated_at: new Date() })
+      .returning('*');
+    if (row && isSummary) {
+      // The ledger terminalization and the summary settlement commit
+      // together, the same posture markRetryUncertain already holds: a
+      // failure reconciling the aggregate must not leave a terminalized
+      // ledger row with no queued row and no future webhook left to retry
+      // the transition, stranding the effect at 'sent' while closeout
+      // keeps reporting delivery.
+      await require('./visit-completion-summary').reconcileSummaryEmailRecovery({ ...message, ...row, status: row.status || status }, trx);
+    }
+    return row || null;
+  };
+  const updated = isSummary ? await db.transaction(settle) : await settle(db);
   if (updated && exhaustedAlert) await alertExhausted(updated, reason);
-  if (message.template_key === 'service.visit_summary') {
-    await require('./visit-completion-summary').reconcileSummaryEmailRecovery({ ...message, ...(updated || {}), status: updated?.status || status })
-      .catch((err) => logger.warn(`[email-provider-retry] visit summary suppression not reconciled for ${message.id}: ${err.message}`));
-  }
   return { sent: false, stopped: true, reason };
 }
 

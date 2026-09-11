@@ -108,15 +108,41 @@ describe("termite station rental — client fallback engine", () => {
     expect(rentalRow(rent).perTreatment).toBe(Math.round(own.results.tmBait.ti / 20));
     // Per-system spacing (owner 2026-07-28): Trelona installs FEWER stations
     // (label 15-ft vs Advance 10-ft), so despite the pricier per-station
-    // hardware ($22.05 vs $13.16) its install can undercut Advance. Pin the
+    // hardware ($24.00 vs $13.16) its install can undercut Advance. Pin the
     // structure — each system priced off its OWN station count — instead of
     // the retired "Trelona always costs more" ordering.
     const perim = own.results.tmBait.perim;
     const staTre = Math.max(8, Math.ceil(perim / 15));
     const staAdv = Math.max(8, Math.ceil(perim / 10));
     expect(own.results.tmBait.sta).toBe(staTre);
-    expect(own.results.tmBait.ti).toBe(Math.round(staTre * (22.05 + 5.25 + 0.75) * 1.45));
+    expect(own.results.tmBait.ti).toBe(Math.round(staTre * (24.00 + 5.25 + 0.75) * 1.45));
     expect(own.results.tmBait.ai).toBe(Math.round(staAdv * (13.16 + 5.25 + 0.75) * 1.45));
+    // Quote-time stamp (plan §A1 replay rule): a CLIENT_FALLBACK save
+    // carries the station cost it priced under, so the server reader never
+    // mistakes a new $24 quote for a pre-A1 $22.05 one.
+    expect(own.results.tmBait.pricingKnobs).toEqual({ system: 'trelona', stationCost: 24, stationCostSource: 'config', laborMaterial: 5.25, misc: 0.75, installMultiplier: 1.45, minStations: 8 });
+    expect(own.results.tmBait.materialCostSource).toEqual({ station: 'config', cartridge: 'config' });
+  });
+
+  it("prices and stamps the server's EFFECTIVE (catalog-linked) station cost when the config applier has it", async () => {
+    const { applyServerTermiteInstallPricingConfig } = await import("./estimateEngine");
+    try {
+      applyServerTermiteInstallPricingConfig(
+        { multiplier: 1.45, trelona_bait: 24 },
+        { trelona_station_cost: 22.5, trelona_station_cost_source: 'catalog', cartridge_cost_source: 'catalog', labor_material_per_station: 5.25, misc_per_station: 0.75, install_multiplier: 1.45 },
+      );
+      const own = calculateEstimate(termiteInput({ termiteBaitSystem: "trelona" }));
+      const staTre = Math.max(8, Math.ceil(own.results.tmBait.perim / 15));
+      expect(own.results.tmBait.ti).toBe(Math.round(staTre * (22.5 + 5.25 + 0.75) * 1.45));
+      expect(own.results.tmBait.pricingKnobs).toEqual({ system: 'trelona', stationCost: 22.5, stationCostSource: 'catalog', laborMaterial: 5.25, misc: 0.75, installMultiplier: 1.45, minStations: 8 });
+      expect(own.results.tmBait.materialCostSource).toEqual({ station: 'catalog', cartridge: 'catalog' });
+      // Row-only (no effective block) reads the row; null resets the default.
+      applyServerTermiteInstallPricingConfig({ multiplier: 1.45, trelona_bait: 23 }, null);
+      expect(calculateEstimate(termiteInput({ termiteBaitSystem: "trelona" })).results.tmBait.pricingKnobs.stationCost).toBe(23);
+    } finally {
+      applyServerTermiteInstallPricingConfig(null, null);
+    }
+    expect(calculateEstimate(termiteInput({ termiteBaitSystem: "trelona" })).results.tmBait.pricingKnobs.stationCost).toBe(24);
   });
 
   it("station-check monthly follows the 5-station brackets and the server config applier", async () => {
