@@ -225,6 +225,57 @@ describe('the shared send claim (claimInvoiceForSend) under interleaving', () =>
     }
   });
 
+  test('the CLAIM refuses a visit-linked invoice whose recorded cash/Zelle prepayment already covers the balance — the interleaving where the office\'s direct scheduled_services write lands moments AFTER this invoice\'s mint, invisible to the mint\'s own eligibility check (round-17 P1 #4131 finding 1)', async () => {
+    const db = require('../models/db');
+    const InvoiceService = require('../services/invoice');
+    const { claimInvoiceForSend } = InvoiceService;
+    const original = db.getMockImplementation();
+    const readRow = { id: 'inv-1', status: 'draft', total: 117, credit_applied: 0, scheduled_service_id: 'svc-1', service_record_id: null };
+    let visitPrepaidAmount = 0;
+    db.mockImplementation((table) => {
+      const q = original(table);
+      if (table === 'invoices') {
+        q.first = jest.fn(async () => ({ ...readRow, status: db.__state.status }));
+        q.update = jest.fn((values) => ({
+          returning: jest.fn(async () => {
+            if (db.__state.status !== q.where.mock.calls[q.where.mock.calls.length - 1][0].status) return [];
+            db.__state.status = values.status;
+            return [{ ...readRow, status: values.status }];
+          }),
+          catch: jest.fn(async () => { db.__state.status = values.status; }),
+        }));
+      }
+      if (table === 'scheduled_services') q.first = jest.fn(async () => ({ id: 'svc-1', status: 'confirmed', prepaid_amount: visitPrepaidAmount }));
+      return q;
+    });
+    try {
+      // The office's direct scheduled_services.prepaid_amount write has
+      // NO row lock of its own — it can commit right after this SAME
+      // invoice's mint, which never saw it. By the time an Immediate send
+      // takes this claim, the visit is already fully covered: refuse
+      // rather than text the full-balance link for money already in hand.
+      db.__state.status = 'draft';
+      visitPrepaidAmount = 117;
+      await expect(claimInvoiceForSend('inv-1')).rejects.toMatchObject({ code: 'visit_prepaid_covered', message: expect.stringMatching(/Invoice is not sendable/) });
+      expect(db.__state.status).toBe('draft'); // claim taken then given straight back
+      // A prepayment that covers MORE than the balance due also refuses.
+      visitPrepaidAmount = 200;
+      await expect(claimInvoiceForSend('inv-1')).rejects.toMatchObject({ code: 'visit_prepaid_covered' });
+      expect(db.__state.status).toBe('draft');
+      // A prepayment that only PARTIALLY covers the balance does not
+      // trip the guard — the remaining balance is genuinely still owed.
+      visitPrepaidAmount = 50;
+      expect(await claimInvoiceForSend('inv-1')).toMatchObject({ claimed: true, previousStatus: 'draft' });
+      db.__state.status = 'draft';
+      // Control: no recorded prepayment claims normally.
+      visitPrepaidAmount = 0;
+      expect(await claimInvoiceForSend('inv-1')).toMatchObject({ claimed: true, previousStatus: 'draft' });
+      db.__state.status = 'draft';
+    } finally {
+      db.mockImplementation(original);
+    }
+  });
+
   test('adoption consumes the send\'s own still-scheduled held SMS leg under the claim, then re-checks strictly: a row the worker claimed meanwhile keeps the delivery and the claim is given back (Codex P1 r6 #4131)', async () => {
     const db = require('../models/db');
     const { claimInvoiceForSend } = require('../services/invoice');

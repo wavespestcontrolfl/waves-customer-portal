@@ -41,7 +41,14 @@ jest.mock('../sockets', () => ({ getIo: jest.fn(() => null) }));
 jest.mock('../services/service-report/application-conditions', () => ({ fetchApplicationConditions: jest.fn(async () => null) }));
 jest.mock('../services/recap-visit-context', () => ({ buildRecapVisitContext: jest.fn(async () => '') }));
 jest.mock('../services/messaging/send-customer-message', () => ({ sendCustomerMessage: jest.fn() }));
-jest.mock('../services/stripe', () => ({ chargeInvoiceWithSavedCard: jest.fn() }));
+jest.mock('../services/stripe', () => ({
+  // Real savedCardChargeSuppressesAlternateCollection/NeedsReconciliation
+  // (pure classifiers complete-scheduled-service.js calls on the mocked
+  // charge's rejection) — round-17 finding-3 fixture needs the real decline
+  // classification; only the network-calling charge itself is mocked.
+  ...jest.requireActual('../services/stripe'),
+  chargeInvoiceWithSavedCard: jest.fn(),
+}));
 jest.mock('../services/feature-flags', () => ({ isUserFeatureEnabled: jest.fn(async () => false) }));
 jest.mock('../services/invoice-email', () => ({ sendInvoiceEmail: jest.fn(async () => ({ ok: false, error: 'email disabled in test' })) }));
 jest.mock('../services/review-request', () => {
@@ -74,6 +81,7 @@ const knex = require('knex');
 const { randomUUID } = require('crypto');
 const { etDateString, addETDays } = require('../utils/datetime-et');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
+const { chargeInvoiceWithSavedCard } = require('../services/stripe');
 const InvoiceService = require('../services/invoice');
 const { completeScheduledService } = require('../services/complete-scheduled-service');
 const connection = process.env.VISIT_PACKET_TEST_DATABASE_URL;
@@ -118,6 +126,24 @@ postgres('the shared send claim on a migrated database', () => {
     await mockPg('scheduled_services').insert({ id: f.serviceId, customer_id: f.customerId, technician_id: f.techId, service_id: f.catalogId,
       service_type: serviceType, scheduled_date: day, window_start: '09:00', window_end: '10:00', status: 'confirmed',
       estimated_price: 117, estimated_duration_minutes: 60, create_invoice_on_complete: true });
+    return f;
+  }
+
+  // The same visit, on Auto Pay with a chargeable saved card — the charge
+  // attempted at completion is mocked to DECLINE, arming paymentFailedSmsContext
+  // and this visit's payment_failed decline notice (round-17 #4131 finding 3).
+  async function autopayDeclineVisitFixture() {
+    await visitFixture();
+    const methodId = randomUUID();
+    await mockPg('payment_methods').insert({ id: methodId, customer_id: f.customerId, processor: 'stripe',
+      method_type: 'card', stripe_payment_method_id: 'pm_fixture_decline', is_default: true, autopay_enabled: true,
+      exp_month: 12, exp_year: new Date().getUTCFullYear() + 1 });
+    await mockPg('customers').where({ id: f.customerId }).update({ autopay_enabled: true, autopay_payment_method_id: methodId });
+    const declineErr = Object.assign(new Error('Your card was declined.'), {
+      type: 'StripeCardError', code: 'card_declined', decline_code: 'generic_decline',
+      wavesCardDecline: { attemptedAmount: 117, cardBrand: 'visa', cardLast4: '4242', declineCode: 'generic_decline' },
+    });
+    chargeInvoiceWithSavedCard.mockRejectedValue(declineErr);
     return f;
   }
 
@@ -230,6 +256,55 @@ postgres('the shared send claim on a migrated database', () => {
       // A real previous status still restores exactly as before.
       await InvoiceService.restoreSendClaim(f.invoiceId, 'scheduled', true);
       expect((await readInvoice(f.invoiceId)).status).toBe('scheduled');
+    });
+  });
+
+  describe('the autopay decline notice acquires the shared claim too (round-17 P1 #4131 finding 3)', () => {
+    test('control: with nobody racing, the decline notice claims the invoice, texts the pay link, and finalizes it sent — the later completion-SMS block goes report-only', async () => {
+      await autopayDeclineVisitFixture();
+      const result = await complete();
+      expect(result.status).toBe(200);
+      const [invoice] = await mockPg('invoices').where({ customer_id: f.customerId });
+      expect(invoice).toBeTruthy();
+      // Exactly ONE pay-link text — the decline notice's — even though the
+      // completion-SMS block runs right after it in the same request.
+      expect(payLinkTexts()).toHaveLength(1);
+      expect(String(payLinkTexts()[0][0].purpose)).toBe('payment_failure');
+      expect(invoice.status).toBe('sent');
+      expect(invoice.sms_sent_at).not.toBeNull();
+    });
+
+    test('an admin send that claims the invoice between the mint and the decline notice owns it: the decline notice is skipped (no pay link, no notes stamp), the completion-SMS block also goes report-only, and the admin claim is untouched', async () => {
+      await autopayDeclineVisitFixture();
+      let adminClaim = null;
+      // shortenOrPassthrough for this invoice fires once, right after the
+      // mint, well before the autopay charge attempt (and therefore well
+      // before the decline notice) — the admin claims it in that gap.
+      mockRace.afterMint = async (invoiceId) => {
+        adminClaim = await InvoiceService.claimInvoiceForSend(invoiceId, { operatorInitiated: true });
+        expect(adminClaim).toMatchObject({ previousStatus: 'draft', claimed: true });
+        expect((await readInvoice(invoiceId)).status).toBe('sending');
+      };
+
+      const result = await complete();
+      expect(adminClaim).not.toBeNull();
+      expect(chargeInvoiceWithSavedCard).toHaveBeenCalled(); // the decline still happens — claiming doesn't block the charge attempt
+      // Neither the decline notice nor the completion-SMS block could
+      // acquire the claim the admin is holding — the whole completion
+      // texts NO pay link at all, from either sender.
+      expect(payLinkTexts()).toHaveLength(0);
+      expect([200, 503]).toContain(result.status);
+
+      // The admin's claim is untouched — still 'sending', never restored
+      // to draft and never finalized to sent by either sender that lost
+      // the race for it.
+      const invoice = await readInvoice(adminClaim.invoice.id);
+      expect(invoice.status).toBe('sending');
+      expect(invoice.sent_at).toBeNull();
+      expect(invoice.sms_sent_at).toBeNull();
+      // …and the admin send finishes its delivery exactly once.
+      await InvoiceService.markDeliverySent(adminClaim.invoice.id, { sms: true, source: 'admin_send_now' });
+      expect((await readInvoice(adminClaim.invoice.id)).status).toBe('sent');
     });
   });
 });

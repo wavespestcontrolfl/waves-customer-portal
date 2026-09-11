@@ -1040,10 +1040,26 @@ async function zeroDueOpenVisitSendOutcome(row, invoiceId) {
 async function visitInvoiceRefusalUnderClaim(claimedRow, claimedFromStatus) {
   if (!claimedRow?.scheduled_service_id) return null;
   if (zeroDueVisitInvoice({ ...claimedRow, status: claimedFromStatus })) return { kind: "zero_due" };
-  const visit = await db("scheduled_services").where({ id: claimedRow.scheduled_service_id }).first("id", "status");
+  const visit = await db("scheduled_services").where({ id: claimedRow.scheduled_service_id }).first("id", "status", "prepaid_amount");
   const visitStatus = String(visit?.status || "").trim().toLowerCase();
-  const { VISIT_NEVER_RAN_STATUSES } = require("./invoice-helpers");
+  const { VISIT_NEVER_RAN_STATUSES, invoiceAmountDue } = require("./invoice-helpers");
   if (VISIT_NEVER_RAN_STATUSES.includes(visitStatus)) return { kind: "visit_never_ran", visitStatus };
+  // Round-17 P1 (#4131 finding 1): a direct scheduled_services.prepaid_amount
+  // write (the office's cash/Zelle-at-the-door stamp, admin-schedule.js POST
+  // /:id/prepaid) is not transactional with this invoice's mint — it takes
+  // NO row lock of its own, so it can commit moments AFTER a linked
+  // full-balance invoice was minted (the mint's own row lock only made the
+  // write WAIT, then apply right after commit; nothing at mint time ever
+  // saw the payment). admin-schedule.js's own reconciler applies the
+  // payment to a still-open linked invoice when it catches up, but this is
+  // the fail-closed backstop: never hand out a claim that would text a pay
+  // link for a balance already covered by recorded cash, whether or not
+  // that reconciler has run yet.
+  if (visit && Number(visit.prepaid_amount) > 0) {
+    const dueCents = Math.round(invoiceAmountDue(claimedRow) * 100);
+    const prepaidCents = Math.round(Number(visit.prepaid_amount) * 100);
+    if (dueCents > 0 && prepaidCents >= dueCents) return { kind: "visit_prepaid_covered" };
+  }
   return null;
 }
 
@@ -1059,6 +1075,18 @@ function visitNeverRanError(invoiceId, visitStatus) {
 function queuedPayLinkError(queued) {
   const e = new Error(`Invoice send already in progress — a text carrying this pay link is queued for the send window${queued.scheduled_for ? ` (${new Date(queued.scheduled_for).toISOString()})` : ""}; it delivers then`);
   e.code = "queued_pay_link";
+  return e;
+}
+
+// Round-17 P1 (#4131 finding 1): report-only, matching visitNeverRanError's
+// shape — the completion's classifier reads "Invoice is not sendable" as
+// nothing-left-to-deliver, and an office Immediate send surfaces the same
+// refusal rather than a scary error. The office reconciles the invoice by
+// hand (or admin-schedule.js's own reconciler settles it moments later).
+function visitPrepaidCoveredError(invoiceId) {
+  logger.warn(`[invoice] ${invoiceId}: send refused — the linked visit's recorded cash/Zelle prepayment already covers this balance`);
+  const e = new Error("Invoice is not sendable — the linked visit's recorded prepayment already covers this balance; nothing was sent");
+  e.code = "visit_prepaid_covered";
   return e;
 }
 
@@ -1141,6 +1169,7 @@ async function reverifyClaimedVisitInvoice(invoiceId, invoice, previousStatus) {
   if (!underClaim) return;
   await restoreSendClaim(invoiceId, previousStatus, true);
   if (underClaim.kind === "zero_due") await throwForZeroDueVisitInvoice(invoiceId, invoice);
+  if (underClaim.kind === "visit_prepaid_covered") throw visitPrepaidCoveredError(invoiceId);
   throw visitNeverRanError(invoiceId, underClaim.visitStatus);
 }
 
@@ -3571,26 +3600,41 @@ const InvoiceService = {
     // itself reached provider accept, not on whether email also succeeded.
     const smsQueueRowsNeedRestore = !sms.ok && !sms.scheduled;
     if (ok) {
-      await db("invoices")
-        .where({ id: invoiceId })
-        .whereIn("status", SEND_FINALIZABLE_STATUSES)
-        .update({
-          status: db.raw(
-            "CASE WHEN status IN ('draft', 'scheduled', 'sending') THEN 'sent' ELSE status END",
-          ),
-          sent_at: new Date(),
-          scheduled_send_at: null,
-          scheduled_send_error: null,
-          scheduled_request_review: false,
-          scheduled_review_delay_minutes: null,
-          updated_at: new Date(),
-        });
-      // Email alone finalized the invoice — the claim itself is correctly
-      // released (finalized 'sent'), but the SMS leg specifically did NOT
-      // deliver: restore the queue row it cancelled instead of leaving it
-      // stranded cancelled forever (Codex round 15 P1 #4131). The invoice
-      // claim release is unchanged by this — only the queue row.
-      if (smsQueueRowsNeedRestore) await restoreConsumedQueuedSend(consumedQueuedSendRows);
+      // Round-17 P1 (#4131 finding 2): the per-channel queue restore below
+      // used to run only AFTER this finalize update returned — a retry that
+      // consumed an existing invoice_send_deferred row, whose SMS leg then
+      // failed while email succeeded, would strand that row 'cancelled'
+      // forever if THIS update throws post-provider-accept (a DB blip after
+      // the email already delivered): the function exits, the invoice is
+      // left 'sending' for stale-claim recovery to park, and the promised
+      // SMS is never recovered. try/finally (the round-14 sendViaSMS
+      // chokepoint's shape) guarantees the restore runs whether this
+      // update succeeds or throws; the throw itself still propagates —
+      // finalizing the invoice is a separate, still-unresolved problem
+      // stale-claim recovery already owns.
+      try {
+        await db("invoices")
+          .where({ id: invoiceId })
+          .whereIn("status", SEND_FINALIZABLE_STATUSES)
+          .update({
+            status: db.raw(
+              "CASE WHEN status IN ('draft', 'scheduled', 'sending') THEN 'sent' ELSE status END",
+            ),
+            sent_at: new Date(),
+            scheduled_send_at: null,
+            scheduled_send_error: null,
+            scheduled_request_review: false,
+            scheduled_review_delay_minutes: null,
+            updated_at: new Date(),
+          });
+      } finally {
+        // Email alone finalized the invoice — the claim itself is correctly
+        // released (finalized 'sent'), but the SMS leg specifically did NOT
+        // deliver: restore the queue row it cancelled instead of leaving it
+        // stranded cancelled forever (Codex round 15 P1 #4131). The invoice
+        // claim release is unchanged by this — only the queue row.
+        if (smsQueueRowsNeedRestore) await restoreConsumedQueuedSend(consumedQueuedSendRows);
+      }
       // First send finalized on SMS and/or email — convert the originating lead.
       // Covers the email-only case the inner sendViaSMS hook can't (it skips when
       // allowClaimed). Resend-safe via the priorStatus gate.

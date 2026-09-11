@@ -470,4 +470,53 @@ describe('sendViaSMSAndEmail: the SMS queue restore decision is per-channel, not
     const anyRestoredToScheduled = fallback.update.mock.calls.some((c) => c[0]?.status === 'scheduled');
     expect(anyRestoredToScheduled).toBe(false);
   });
+
+  // A .then that rejects instead of resolving — a chain() this suite's
+  // update-count convention can't express (chain()'s .then always resolves).
+  function throwingChain(err) {
+    const q = {};
+    for (const m of ['where', 'whereIn', 'whereNotNull', 'whereNull', 'whereRaw', 'orWhere', 'orderBy', 'limit', 'update', 'insert']) {
+      q[m] = jest.fn(() => q);
+    }
+    q.then = (resolve, reject) => Promise.reject(err).then(resolve, reject);
+    q.catch = jest.fn((fn) => Promise.reject(err).catch(fn));
+    return q;
+  }
+
+  test('round-17 P1 (#4131 finding 2): SMS fails, email is provider-accepted, and the invoice finalize update THROWS — the consumed SMS queue row is still restored (try/finally), and the throw still propagates', async () => {
+    jest.clearAllMocks();
+    const sendingInvoice = { ...draftWithCustomer, status: 'sending' };
+    const restoreQueueChain = chain();
+    const fallback = chain();
+    const finalizeErr = new Error('synthetic finalize DB failure (post-provider-accept)');
+    db
+      .mockReturnValueOnce(chain({ first: accrualRow })) // accrual pre-check
+      .mockReturnValueOnce(chain({ first: draftWithCustomer })) // outer claim read
+      .mockReturnValueOnce(chain({ first: undefined })) // outer pre-claim queued check
+      .mockReturnValueOnce(chain({ returning: [sendingInvoice] })) // outer claim flip
+      .mockReturnValueOnce(chain({ first: undefined })) // outer reconcile pre-consume check
+      .mockReturnValueOnce(chain({ returning: [CONSUMED_ROW] })) // outer adoption consumes the pre-existing row
+      .mockReturnValueOnce(chain({ first: undefined })) // outer strict re-check
+      .mockReturnValueOnce(chain({ first: sendingInvoice })) // inner sendViaSMS's own claim read (allowClaimed)
+      .mockReturnValueOnce(chain({ first: undefined })) // inner pre-check
+      .mockReturnValueOnce(chain({ returning: [] })) // inner consume — nothing left, outer already took it
+      .mockReturnValueOnce(chain({ first: undefined })) // inner strict re-check
+      .mockReturnValueOnce(chain({ first: { id: 'cust-1', phone: null } })) // customer lookup — NO PHONE, the SMS leg fails
+      .mockReturnValueOnce(throwingChain(finalizeErr)) // THE TARGET: outer finalize update throws AFTER email already delivered
+      .mockReturnValueOnce(restoreQueueChain) // the SMS-specific restore must still run, from the finally
+      .mockReturnValue(fallback);
+
+    sendInvoiceEmail.mockResolvedValueOnce({ ok: true, payUrl: 'https://pay.example/xyz' });
+
+    await expect(InvoiceService.sendViaSMSAndEmail('inv-1', {})).rejects.toThrow(finalizeErr);
+
+    // The promised SMS delivery is recovered even though the finalize that
+    // would have flipped the invoice to 'sent' never completed — a stale
+    // 'sending' invoice is a separate, already-owned problem (stale-claim
+    // recovery); losing the customer's queued pay-link text is not.
+    expect(restoreQueueChain.whereIn.mock.calls[0]).toEqual(['id', ['sms-queued-1']]);
+    const restoreUpdate = restoreQueueChain.update.mock.calls[0][0];
+    expect(restoreUpdate.status).toBe('scheduled');
+    expect(restoreUpdate.scheduled_for).toBeUndefined();
+  });
 });
