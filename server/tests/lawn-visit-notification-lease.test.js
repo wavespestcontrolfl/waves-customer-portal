@@ -50,6 +50,15 @@ describe('sendAssessmentNotification lease check', () => {
     expect(updates).toEqual([['lawn_assessments', expect.objectContaining({ notification_sent: true })]]);
   });
 
+  test('a service-linked assessment never gets the standalone text, whoever calls', async () => {
+    rows.lawn_assessments.service_id = 'svc-1';
+    try {
+      await expect(LawnIntel.sendAssessmentNotification('a-1')).resolves.toBeNull();
+    } finally { delete rows.lawn_assessments.service_id; }
+    expect(NotificationDispatcher.notify).not.toHaveBeenCalled();
+    expect(updates).toEqual([]);
+  });
+
   test('other send failures are still swallowed as before', async () => {
     NotificationDispatcher.notify.mockRejectedValueOnce(new Error('carrier down'));
     await expect(LawnIntel.sendAssessmentNotification('a-1')).resolves.toBeNull();

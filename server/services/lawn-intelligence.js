@@ -186,7 +186,8 @@ const LawnIntelligence = {
   async sendAssessmentNotification(assessmentId, options) {
     try {
       const assessment = await db('lawn_assessments').where({ id: assessmentId, confirmed_by_tech: true }).first();
-      if (!assessment || assessment.notification_sent) return null;
+      // service_id set → the visit's completion text carries the report link.
+      if (!assessment || assessment.notification_sent || assessment.service_id) return null;
 
       const customer = await db('customers').where({ id: assessment.customer_id }).first();
       if (!customer) return null;
