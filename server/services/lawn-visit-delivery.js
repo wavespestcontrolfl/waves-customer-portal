@@ -34,7 +34,12 @@ async function deliverConfirmedAssessment({ assessmentId }, deps = {}) {
     // snapshot is the VISIT's conditions and feeds later reports and outcome
     // analysis, so a recovery hours or days later must not overwrite it with
     // recovery-time weather — it is attached once, not refreshed per attempt.
-    const attachWeatherOnce = async (assessment) => (assessment?.fawn_snapshot ? null : LawnIntel.attachWeather(assessmentId));
+    const attachWeatherOnce = async (assessment) => {
+      if (assessment?.fawn_snapshot) return null;
+      const weather = await LawnIntel.attachWeather(assessmentId);
+      await guard(); // The lease covers every effect in the pipeline, this one included.
+      return weather;
+    };
     await attachWeatherOnce((await runs.deliveryState(assessmentId, knex)).assessment);
     const actions = [
       ['calibration', async (state) => {

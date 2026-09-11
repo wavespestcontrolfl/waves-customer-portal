@@ -426,7 +426,11 @@ const LawnIntelligence = {
       const report = await db.transaction(async (trx) => {
         const row = insertData ? (await trx('service_reports').insert(insertData).returning('*'))[0] : null;
         const update = {};
-        if (assessmentCols.report_auto_generated) update.report_auto_generated = true;
+        // Only a real report row is proof: stamping the marker when nothing was
+        // inserted (no table, no matching columns) would tell delivery recovery
+        // the report step is durably done and stop it retrying once the schema
+        // catches up.
+        if (row && assessmentCols.report_auto_generated) update.report_auto_generated = true;
         if (row?.id && assessmentCols.report_id) update.report_id = row.id;
         if (assessmentCols.updated_at) update.updated_at = new Date();
         if (Object.keys(update).length > 0) await trx('lawn_assessments').where({ id: assessmentId }).update(update);
