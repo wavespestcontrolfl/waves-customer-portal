@@ -170,6 +170,14 @@ router.post('/', darkUnlessConfigured, ingestAuth, async (req, res) => {
       bell: true,
       dedupeKey: `${SOURCE}:${key}`,
       dedupeWindowMs: DEDUPE_WINDOW_MS,
+      // A recurrence inside the window (a NEW run re-raising the key) must
+      // refresh the standing row — above all its observedAt, or a later
+      // /resolve from an older clean run would compare against the stale
+      // observation and clear a live failure (codex P1 r2 on #4397).
+      // dedupeVersion = observedAt: the same run re-posting (run.sh retry)
+      // is a plain dedupe; a later run's recurrence rewrites and re-bells.
+      refreshOnDedupe: true,
+      dedupeVersion: observedAt,
       metadata: { ...metadata, opsKey: key, subject: title, kind, source: SOURCE, observedAt },
     });
   } catch (err) {
