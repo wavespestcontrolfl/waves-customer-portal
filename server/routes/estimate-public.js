@@ -10864,9 +10864,11 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
           // one that targets this very visit. A lock_timeout maps to the same
           // recoverable catalog_unavailable the resolver raises.
           {
+            // Whole row: naming reservation_policy_version breaks the
+            // golden-master schemas that predate the capacity columns.
             const adoptPolicy = await trx('scheduled_services')
               .where({ id: existingAppointmentRow.id })
-              .first('reservation_policy_version');
+              .first();
             if (require('../services/scheduling/policy').capacityEnabled() || adoptPolicy?.reservation_policy_version === 2) {
               try {
                 await require('../services/scheduling/catalog-lock').lockCatalogIdentity(trx);

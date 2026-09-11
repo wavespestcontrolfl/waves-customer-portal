@@ -224,8 +224,12 @@ describe('the one row-prelocking catalog writer takes its table lock first (code
 
   test('commitReservation pre-reads reservation_policy_version so a persisted V2 hold keeps the early lock after gate shutdown (source-level)', () => {
     const src = fs.readFileSync(path.join(__dirname, '../services/slot-reservation.js'), 'utf8');
-    expect(src).toContain(".first('scheduled_date', 'technician_id', 'reservation_policy_version')");
-    const pre = src.indexOf(".first('scheduled_date', 'technician_id', 'reservation_policy_version')");
+    // Whole-row pre-read (a named column list would break the golden-master
+    // schemas that predate the capacity columns), consulted by the early lock.
+    const pre = src.indexOf("const preRow = await client('scheduled_services')");
+    expect(pre).toBeGreaterThan(-1);
+    expect(src.slice(pre, pre + 200)).toMatch(/\.where\(\{ id: scheduledServiceId \}\)\s+\.first\(\);/);
+    expect(src.slice(pre, pre + 200)).not.toContain("'reservation_policy_version'");
     const decision = src.indexOf('preRow.reservation_policy_version === 2', pre);
     expect(decision).toBeGreaterThan(pre);
   });
