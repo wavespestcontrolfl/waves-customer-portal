@@ -9249,7 +9249,12 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
         // A job Bill-To edit (payer cleared, self-pay override set) that makes a
         // withdrawn combined-visit invoice self-pay again requeues it here.
         if (updates.payer_id !== undefined || updates.self_pay_override !== undefined) {
-          await require('../services/visit-completion-packets').reconcileWithdrawnPacketInvoices(trx, { scheduledServiceId: req.params.id });
+          const Packets = require('../services/visit-completion-packets');
+          await Packets.reconcileWithdrawnPacketInvoices(trx, { scheduledServiceId: req.params.id });
+          // The opposite transition (a job payer assigned, an override
+          // cleared) withdraws the self-pay combined-visit invoice this job
+          // now owes to AP, including one already with the homeowner.
+          if (activatesPayer) await Packets.withdrawPacketInvoicesForOwner(trx, { scheduledServiceId: req.params.id });
         }
         // A row ACTIVATED to recurring becomes a series root NOW (codex
         // #3591 r88 P1): a phone-booked catalog bait visit (the call

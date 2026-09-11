@@ -4102,7 +4102,12 @@ router.put('/:id', requireAdmin, async (req, res, next) => {
           // self-pay again (payer cleared) requeues it through the shared
           // reconciliation, inside this same transaction.
           if (updates.payer_id !== undefined) {
-            await require('../services/visit-completion-packets').reconcileWithdrawnPacketInvoices(trx, { customerId: req.params.id });
+            const Packets = require('../services/visit-completion-packets');
+            await Packets.reconcileWithdrawnPacketInvoices(trx, { customerId: req.params.id });
+            // The opposite transition (a payer assigned) withdraws every
+            // self-pay combined-visit invoice this customer now owes to AP,
+            // including one the homeowner already holds a pay link for.
+            if (updates.payer_id) await Packets.withdrawPacketInvoicesForOwner(trx, { customerId: req.params.id });
           }
           // Coordinates cleared ATOMICALLY with the address (and the move
           // stamp the fan-out writes in this same transaction): a committed

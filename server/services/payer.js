@@ -194,7 +194,29 @@ async function updatePayer(id, body) {
         return { error: 'A combined-visit invoice for a customer or job billed to this payer is being sent; try again in a moment.',
           conflict: true, code: 'invoice_send_in_flight' };
       }
+      // A reactivation moves every referencing customer's debt to this
+      // payer without touching their rows: the same fence the payer_id
+      // writers apply runs for each of them — an unconfirmed combined
+      // pay-page session is released, and in-flight combined money defers
+      // the activation (its settlement never re-resolves ownership).
+      if (activating) {
+        const referencing = [...new Set([
+          ...await trx('customers').where({ payer_id: pid }).whereNull('deleted_at').pluck('id'),
+          ...await trx('scheduled_services').where({ payer_id: pid }).whereNotNull('customer_id').pluck('customer_id'),
+        ].map(String))];
+        const PayCombined = require('./pay-combined');
+        for (const customerId of referencing) {
+          const release = await PayCombined.releaseUnconfirmedCombinedSessionsForCustomer(trx, customerId);
+          if (release.inFlight > 0) {
+            return { error: 'A combined bank payment for a customer billed to this payer is still in flight; retry the activation after it settles or fails.',
+              conflict: true, code: 'combined_payment_in_flight' };
+          }
+        }
+      }
       const [row] = await trx('payers').where({ id: pid }).update(dbUpdates).returning('*');
+      // With the payer live again, every self-pay combined-visit invoice of a
+      // referencing customer or job is withdrawn to it.
+      if (activating) await require('./visit-completion-packets').withdrawPacketInvoicesForOwner(trx, { payerId: pid });
       // A deactivation that waited on a send claim's payer lock arrives after
       // that claim withdrew the homeowner invoice to this payer: with the
       // payer inactive, live ownership is self-pay again, so the withdrawn

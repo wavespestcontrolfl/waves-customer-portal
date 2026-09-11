@@ -641,6 +641,10 @@ async function parkVisitReviewOutreach(packetId, database = db) {
 // schedule or now, whichever is later, unless the customer has since gained
 // another active sequence. Returns how many resumed.
 async function resumeVisitReviewOutreach(packetId, database = db) {
+  // With the cadence gate off the sequence cron advances nothing: a parked
+  // cadence stays parked, and the enrollment that follows takes the
+  // documented legacy single-ask path instead.
+  if (!require('../config/feature-gates').isEnabled('reviewSequences')) return 0;
   const packet = await database('visit_completion_packets').where({ id: packetId }).first('visit_id');
   const records = await database('visit_completion_packet_items').where({ packet_id: packetId })
     .whereNotNull('service_record_id').pluck('service_record_id');

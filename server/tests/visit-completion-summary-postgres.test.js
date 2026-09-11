@@ -82,6 +82,14 @@ function deferredHandoff(meta, dispatch = async () => ({ ok: true })) {
   return require('../services/messaging/deferred-replay-registry').deferredSmsHandoff('visit_summary_deferred', meta)(dispatch);
 }
 
+// The cadence gate is off in the test environment; a test that expects a
+// parked cadence to resume turns it on for the sequence gate only.
+function cadenceGateOn() {
+  const gates = require('../config/feature-gates');
+  const original = gates.isEnabled;
+  jest.spyOn(gates, 'isEnabled').mockImplementation((name) => (name === 'reviewSequences' ? true : original(name)));
+}
+
 function providerFailure(providerHttpStatus) {
   return Object.assign(new Error('provider failure'), { providerHttpStatus });
 }
@@ -1902,6 +1910,7 @@ postgres('visit summary recipient recovery', () => {
   });
 
   test('a summary that bounces after the review was enrolled parks the outreach until the recovery settles it', async () => {
+    cadenceGateOn();
     fixture.payload.items.forEach((item) => { item.body.requestReview = true; });
     await mockPg('visit_completion_packets').where({ id: fixture.packetId }).update({ payload: JSON.stringify(fixture.payload) });
     await mockPg('service_records').whereIn('id', fixture.recordIds).update({
@@ -2281,6 +2290,7 @@ postgres('visit summary recipient recovery', () => {
   });
 
   test('recovery resumes one parked sequence per customer and retires the rest', async () => {
+    cadenceGateOn();
     const first = randomUUID();
     const second = randomUUID();
     await mockPg('review_sequences').insert([
@@ -2706,6 +2716,75 @@ postgres('visit summary recipient recovery', () => {
       await mockPg('dispatch_alerts').where({ tech_id: otherTech }).del();
       await mockPg('scheduled_services').where({ id: fixture.serviceIds[0] }).update({ technician_id: fixture.techId });
       await mockPg('technicians').where({ id: otherTech }).del();
+    }
+  });
+
+  test('a payer assignment withdraws a self-pay invoice the homeowner already holds', async () => {
+    const Packets = require('../services/visit-completion-packets');
+    const invoiceId = randomUUID();
+    const [payer] = await mockPg('payers').insert({ display_name: 'Fixture Property Management', ap_email: `${randomUUID()}@example.invalid`, active: true }).returning('id');
+    await mockPg('invoices').insert({ id: invoiceId, token: randomUUID().replace(/-/g, ''), invoice_number: `FIX-${invoiceId.slice(0, 8)}`,
+      customer_id: fixture.customerId, status: 'sent', total: 120, visit_completion_packet_id: fixture.packetId });
+    await mockPg('visit_completion_packets').where({ id: fixture.packetId }).update({ status: 'done', error: null });
+    try {
+      // Self-pay: nothing to withdraw.
+      expect(await mockPg.transaction((trx) => Packets.withdrawPacketInvoicesForOwner(trx, { customerId: fixture.customerId }))).toBe(0);
+      // The customer's default payer assigned in the same transaction as the withdrawal.
+      expect(await mockPg.transaction(async (trx) => {
+        await trx('customers').where({ id: fixture.customerId }).forUpdate().first('id');
+        await trx('customers').where({ id: fixture.customerId }).update({ payer_id: payer.id });
+        return Packets.withdrawPacketInvoicesForOwner(trx, { customerId: fixture.customerId });
+      })).toBe(1);
+      expect(await mockPg('invoices').where({ id: invoiceId }).first()).toMatchObject({ status: 'sent', scheduled_send_error: `payer_billed:${payer.id}:hold` });
+      expect(await mockPg('service_visits').where({ id: fixture.visitId }).first()).toMatchObject({ billing_hold: true });
+      expect(await mockPg('dispatch_alerts').where({ tech_id: fixture.techId, type: 'visit_closeout_review' }).whereNull('resolved_at')).toHaveLength(1);
+      // Already withdrawn: not withdrawn twice.
+      expect(await mockPg.transaction((trx) => Packets.withdrawPacketInvoicesForOwner(trx, { customerId: fixture.customerId }))).toBe(0);
+    } finally {
+      await mockPg('customers').where({ id: fixture.customerId }).update({ payer_id: null });
+      await mockPg('invoices').where({ id: invoiceId }).del();
+      await mockPg('payers').where({ id: payer.id }).del();
+    }
+  });
+
+  test('reactivating a payer fences combined payments of every referencing customer and withdraws their self-pay invoices', async () => {
+    const Payer = require('../services/payer');
+    const PayCombined = require('../services/pay-combined');
+    const invoiceId = randomUUID();
+    const [payer] = await mockPg('payers').insert({ display_name: 'Fixture Property Management', ap_email: `${randomUUID()}@example.invalid`, active: false }).returning('id');
+    await mockPg('customers').where({ id: fixture.customerId }).update({ payer_id: payer.id });
+    await mockPg('invoices').insert({ id: invoiceId, token: randomUUID().replace(/-/g, ''), invoice_number: `FIX-${invoiceId.slice(0, 8)}`,
+      customer_id: fixture.customerId, status: 'draft', total: 120, visit_completion_packet_id: fixture.packetId });
+    const fence = jest.spyOn(PayCombined, 'releaseUnconfirmedCombinedSessionsForCustomer').mockResolvedValue({ released: 0, inFlight: 1 });
+    try {
+      expect(await Payer.updatePayer(payer.id, { active: true })).toMatchObject({ conflict: true, code: 'combined_payment_in_flight' });
+      expect(fence).toHaveBeenCalledWith(expect.anything(), String(fixture.customerId));
+      expect(await mockPg('payers').where({ id: payer.id }).first()).toMatchObject({ active: false });
+      fence.mockResolvedValue({ released: 0, inFlight: 0 });
+      expect(await Payer.updatePayer(payer.id, { active: true })).toMatchObject({ payer: { active: true } });
+      expect(await mockPg('invoices').where({ id: invoiceId }).first()).toMatchObject({ status: 'draft', scheduled_send_error: `payer_billed:${payer.id}:hold` });
+      expect(await mockPg('service_visits').where({ id: fixture.visitId }).first()).toMatchObject({ billing_hold: true });
+    } finally {
+      fence.mockRestore();
+      await mockPg('customers').where({ id: fixture.customerId }).update({ payer_id: null });
+      await mockPg('invoices').where({ id: invoiceId }).del();
+      await mockPg('payers').where({ id: payer.id }).del();
+    }
+  });
+
+  test('a parked cadence is not resumed while the sequence gate is off', async () => {
+    const gates = require('../config/feature-gates');
+    await mockPg('review_sequences').insert({ id: randomUUID(), customer_id: fixture.customerId, service_record_id: fixture.recordIds[0],
+      status: 'stopped', stop_reason: 'visit_summary_bounced', plan: JSON.stringify([]) });
+    const gate = jest.spyOn(gates, 'isEnabled').mockImplementation((name) => name !== 'reviewSequences');
+    try {
+      expect(await Summary.resumeVisitReviewOutreach(fixture.packetId)).toBe(0);
+      expect(await mockPg('review_sequences').where({ customer_id: fixture.customerId }).first()).toMatchObject({ status: 'stopped', stop_reason: 'visit_summary_bounced' });
+      gate.mockImplementation(() => true);
+      expect(await Summary.resumeVisitReviewOutreach(fixture.packetId)).toBe(1);
+    } finally {
+      gate.mockRestore();
+      await mockPg('review_sequences').where({ customer_id: fixture.customerId }).del();
     }
   });
 
