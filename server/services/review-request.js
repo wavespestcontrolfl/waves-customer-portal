@@ -2435,6 +2435,16 @@ const ReviewService = {
    * provider cannot answer (unknown is not "not sent").
    */
   async _inlineSendEvidence(row) {
+    // The durable linkage first: the sender stamps sms_log.metadata with the
+    // review_request_id at handoff, so a logged send is provable without
+    // reading the copy at all. This is the only evidence that works for a
+    // template carrying no review link.
+    const stamped = await db("sms_log")
+      .where("direction", "outbound")
+      .whereNotIn("status", ["sending", "failed", "undelivered", "blocked", "canceled"])
+      .whereRaw("metadata->>'review_request_id' = ?", [String(row.id)])
+      .first("id");
+    if (stamped) return { found: true };
     // Any outbound sms_log row carrying this ask's link (long token or its
     // short URL) is proof the ask reached the provider — excluding
     // in-flight/reservation ('sending') and failure rows, which are not
@@ -2488,6 +2498,14 @@ const ReviewService = {
         if (provider.found) return { found: true };
       }
     }
+    // A private check-in (resolution_check / satisfaction_confirm) renders
+    // with NO review link, so neither search above could ever match it and
+    // their silence is not evidence of absence. Only the stamp can prove
+    // such a touch, and it was not found — the sms_log write may simply
+    // have been lost (twilio.js swallows that failure). Report UNKNOWN, not
+    // "none": releasing the row here would re-text a customer who already
+    // got the check-in. The row stays `sending` for a later pass.
+    if (!OUTREACH.isAskTemplate(row.template_key)) return { unavailable: true };
     return { found: false };
   },
 
@@ -2857,7 +2875,7 @@ const ReviewService = {
       })
       .orderBy("claimed_at")
       .limit(20)
-      .select("id", "customer_id", "token", "claimed_at", "sequence_id", "sequence_step", "channel");
+      .select("id", "customer_id", "token", "claimed_at", "sequence_id", "sequence_step", "channel", "template_key");
     let finished = 0;
     let released = 0;
     for (const row of stranded) {
@@ -2970,13 +2988,34 @@ const ReviewService = {
   async _parkAskAtProviderBoundary(request) {
     const Summary = require("./visit-completion-summary");
     if (Summary.PACKET_OWNED_REVIEW_TRIGGERS.includes(request.triggered_by)) {
-      await db("review_requests").whereIn("status", ["pending", "sending"]).where({ id: request.id }).del().catch(() => {});
+      // 0 rows = the row is already gone, which is the state this wants.
+      const removed = await db("review_requests").whereIn("status", ["pending", "sending"]).where({ id: request.id })
+        .del().then((n) => Number(n)).catch(() => null);
+      if (removed === null) {
+        logger.error(`[review] Parking the request at the provider FAILED (requestId=${request.id}) — the row may still be sendable`);
+        return false;
+      }
       logger.info(`[review] Parked request at the provider (requestId=${request.id} reason=visit_summary_bounced)`);
-      return;
+      return true;
     }
-    await db("review_requests").whereIn("status", ["pending", "sending"]).where({ id: request.id })
-      .update({ status: "pending", scheduled_for: new Date(Date.now() + 30 * 60 * 1000), claimed_at: null }).catch(() => {});
+    // A manual ask keeps its copy and waits, so the deferral IS the retry:
+    // packet recovery does not re-create manual asks, and processScheduled
+    // only selects rows with a non-null scheduled_for. A swallowed failure
+    // here would leave the row pending with no schedule and no owner — and
+    // the caller would still report a durable deferral. Report the write.
+    // Only a FAILED write is the broken promise. Matching 0 rows means the row
+    // is not pending/sending (already terminal, or never durable — a composer
+    // ask parks a row the caller owns), so nothing was left behind with a null
+    // schedule and the deferral the caller reports is accurate.
+    const deferred = await db("review_requests").whereIn("status", ["pending", "sending"]).where({ id: request.id })
+      .update({ status: "pending", scheduled_for: new Date(Date.now() + 30 * 60 * 1000), claimed_at: null })
+      .then(() => true).catch(() => false);
+    if (!deferred) {
+      logger.error(`[review] Deferring the manual request at the provider FAILED (requestId=${request.id}) — no retry is scheduled`);
+      return false;
+    }
     logger.info(`[review] Deferred manual request at the provider (requestId=${request.id} reason=visit_summary_bounced)`);
+    return true;
   },
 
   async processScheduled() {
@@ -3264,7 +3303,18 @@ const ReviewService = {
       }
 
       try {
-        const result = await sendCustomerMessage({
+        // The follow-up is review outreach like the initial ask, so it goes
+        // through the same handoff the initial SMS and the cadence use: the
+        // packet row is held FOR SHARE across the delivery-state read AND
+        // the provider request, so a summary bounce committing after the
+        // check cannot overtake the send. The unlocked pre-check above stays
+        // as the cheap early exit (it also skips rows whose state cannot be
+        // read, which the handoff does not judge); this is the authoritative
+        // recheck. No `requestId` is marked: a follow-up row is not a
+        // `pending` ask, so there is no claim to take or release — a refusal
+        // returns a verdict with no `sent`, which falls through to the
+        // unmarked `continue` below and is judged again next run.
+        const dispatch = async () => sendCustomerMessage({
           to: contact.phone,
           body,
           channel: "sms",
@@ -3278,6 +3328,11 @@ const ReviewService = {
             review_request_id: request.id,
           },
         });
+        // A row with no service record is not part of a combined visit, so
+        // there is no summary to serialize against and no packet row to hold
+        // (the handoff itself dispatches such a send unfenced).
+        const result = request.service_record_id ? await require("./visit-completion-summary")
+          .reviewSendThroughSummaryHandoff(request.service_record_id, dispatch) : await dispatch();
         if (!result.sent) {
           logger.warn(
             `[review] Follow-up SMS blocked/failed (customerId=${customer.id} requestId=${request.id} auditLogId=${result.auditLogId || "n/a"} code=${result.code || "UNKNOWN"})`,
@@ -3801,7 +3856,12 @@ const ReviewService = {
         purpose: "review_request",
         customerId: customer.id,
         entryPoint: "review_outreach_touch",
-        metadata: request.sequence_id ? { review_sequence_id: request.sequence_id } : {},
+        metadata: {
+          ...(request.sequence_id ? { review_sequence_id: request.sequence_id } : {}),
+          // Stamped onto the sms_log row at send time so the stranded-send
+          // reconciliation can prove this touch left regardless of template.
+          review_request_id: request.id,
+        },
         preDispatchCheck: () => this._visitSummaryPreDispatch(request.service_record_id),
         withSmsHandoff: (dispatch) => require("./visit-completion-summary").reviewSendThroughSummaryHandoff(request.service_record_id, dispatch, undefined, { requestId: request.id }),
       });
@@ -3832,8 +3892,10 @@ const ReviewService = {
       // row; unreadable: keep the ask pending for a later pass.
       if (summaryVerdict.reason === "summary_state_unavailable") {
         await db("review_requests").where({ id: request.id }).update({ status: "pending", scheduled_for: new Date(summaryVerdict.nextAllowedAt) }).catch(() => {});
-      } else {
-        await this._parkAskAtProviderBoundary(request);
+      } else if (!await this._parkAskAtProviderBoundary(request)) {
+        // Nothing durable was written: no cron will pick this row up, so the
+        // caller must retry now rather than trust a scheduled retry.
+        return { ...summaryVerdict, deferred: false, reason: "visit_summary_park_failed" };
       }
       return summaryVerdict;
     }
@@ -4037,8 +4099,8 @@ const ReviewService = {
     if (summaryVerdict) {
       if (summaryVerdict.reason === "summary_state_unavailable") {
         await db("review_requests").where({ id: request.id }).update({ status: "pending", scheduled_for: new Date(summaryVerdict.nextAllowedAt) }).catch(() => {});
-      } else {
-        await this._parkAskAtProviderBoundary(request);
+      } else if (!await this._parkAskAtProviderBoundary(request)) {
+        return { ...summaryVerdict, channel: "email", deferred: false, reason: "visit_summary_park_failed" };
       }
       return { ...summaryVerdict, channel: "email" };
     }

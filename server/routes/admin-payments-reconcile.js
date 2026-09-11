@@ -119,7 +119,7 @@ router.post('/reconcile', requireAdmin, async (req, res, next) => {
     // reconciled — 'processing' especially: an ACH payment in flight will
     // settle on its own, so a cash/check reconcile would double-collect.
     try {
-      assertInvoiceCollectible(invoice.status);
+      assertInvoiceCollectible(invoice);
     } catch (e) {
       return res.status(409).json({ error: e.message });
     }

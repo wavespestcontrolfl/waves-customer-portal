@@ -89,8 +89,34 @@ function isInvoiceCollectibleStatus(status) {
   return !INVOICE_UNCOLLECTIBLE_STATUSES.includes(invoiceStatusKey(status));
 }
 
-function assertInvoiceCollectible(currentStatus) {
-  const status = invoiceStatusKey(currentStatus);
+// A combined-visit packet invoice whose Bill-To moved to a third-party payer
+// AFTER the homeowner already held a pay link (sent / viewed / overdue) cannot
+// be recalled: withdrawPacketInvoiceForPayer leaves the status collectible and
+// payer_id NULL, and records the withdrawal ONLY in this stamp
+// (`payer_billed:<payerId>[:hold]`, cleared by reconcileWithdrawnPacketInvoices
+// when ownership returns to self-pay).
+//
+// Collectibility is therefore not a property of `status` alone. Rather than ask
+// every money seam to re-derive it — the public pay routes, the saved-card
+// charges, admin manual payment, credit application — the one gate they all
+// already share reads the stamp here. That keeps the invariant in a single
+// place instead of a convention each new collection path has to remember.
+const PACKET_WITHDRAWN_SEND_ERROR = /^payer_billed:/;
+
+function invoiceWithdrawnFromCustomer(invoice) {
+  return !!invoice
+    && typeof invoice === 'object'
+    && PACKET_WITHDRAWN_SEND_ERROR.test(String(invoice.scheduled_send_error || ''));
+}
+
+// Accepts the invoice ROW (preferred — it can see the withdrawal stamp) or,
+// for compatibility with any caller that only holds a status, the status
+// string. A string argument keeps exactly the pre-existing behavior, so a
+// caller that has not been converted is never silently weakened; it simply
+// does not get the withdrawal check.
+function assertInvoiceCollectible(invoiceOrStatus) {
+  const row = invoiceOrStatus && typeof invoiceOrStatus === 'object' ? invoiceOrStatus : null;
+  const status = invoiceStatusKey(row ? row.status : invoiceOrStatus);
   if (status === 'paid') {
     throw new Error('Invoice already paid');
   }
@@ -108,6 +134,12 @@ function assertInvoiceCollectible(currentStatus) {
   }
   if (status === 'canceled' || status === 'cancelled') {
     throw new Error('Invoice is canceled and cannot be paid');
+  }
+  // Checked last so a terminal status still reports its own, more accurate
+  // reason (a withdrawal never stamps a terminal row, but a row that settled
+  // between the withdrawal and this read can carry both).
+  if (invoiceWithdrawnFromCustomer(row)) {
+    throw new Error('This visit is now billed to a third-party payer and is no longer payable here');
   }
 }
 
@@ -154,6 +186,7 @@ module.exports = {
   assertInvoiceCollectible,
   assertInvoiceVoidable,
   isInvoiceCollectibleStatus,
+  invoiceWithdrawnFromCustomer,
   invoiceAmountDue,
   formatCardLine,
 };

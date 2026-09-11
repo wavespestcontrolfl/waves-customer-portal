@@ -600,7 +600,7 @@ router.post('/:token/setup', async (req, res, next) => {
     // while an off-session charge is active or awaiting reconciliation.
     if (await rejectIfSavedCardCollectionPending(invoice, res)) return;
     try {
-      assertInvoiceCollectible(invoice.status);
+      assertInvoiceCollectible(invoice);
     } catch (err) {
       // The invoice already flipped to `processing` — an ACH debit in flight.
       // This is the same benign in-progress state as the createInvoicePaymentIntent
@@ -755,7 +755,7 @@ router.post('/:token/update-amount', async (req, res, next) => {
     // invoice, not only the route that creates new PIs.
     if (await rejectIfSavedCardCollectionPending(invoice, res)) return;
     try {
-      assertInvoiceCollectible(invoice.status);
+      assertInvoiceCollectible(invoice);
     } catch (err) {
       return res.status(invoice.status === 'processing' ? 409 : 400).json({ error: err.message });
     }
@@ -814,7 +814,7 @@ router.post('/:token/quote', async (req, res, next) => {
     }
     if (await rejectIfSavedCardCollectionPending(invoice, res)) return;
     try {
-      assertInvoiceCollectible(invoice.status);
+      assertInvoiceCollectible(invoice);
     } catch (err) {
       return res.status(invoice.status === 'processing' ? 409 : 400).json({ error: err.message });
     }
@@ -852,7 +852,7 @@ router.post('/:token/finalize', async (req, res, next) => {
     }
     if (await rejectIfSavedCardCollectionPending(invoice, res)) return;
     try {
-      assertInvoiceCollectible(invoice.status);
+      assertInvoiceCollectible(invoice);
     } catch (err) {
       return res.status(invoice.status === 'processing' ? 409 : 400).json({ error: err.message });
     }
@@ -902,7 +902,7 @@ router.post('/:token/confirm', async (req, res, next) => {
     if (await rejectIfSavedCardCollectionPending(invoice, res)) return;
     if (['void', 'refunded', 'canceled', 'cancelled'].includes(String(invoice.status || '').toLowerCase())) {
       try {
-        assertInvoiceCollectible(invoice.status);
+        assertInvoiceCollectible(invoice);
       } catch (err) {
         return res.status(400).json({ error: err.message });
       }

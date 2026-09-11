@@ -135,7 +135,7 @@ async function recordManualPayment(id, {
   // Terminal or in-flight invoices can never be manually marked paid.
   // This shares the same transition guard as Stripe collection paths.
   try {
-    assertInvoiceCollectible(invoice.status);
+    assertInvoiceCollectible(invoice);
   } catch (err) {
     throw refusal(invoice.status === 'processing' ? 409 : 400, err.message);
   }

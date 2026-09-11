@@ -1846,6 +1846,17 @@ async function executeMerge({ winnerId, loserId, performedBy, performedById = nu
     if (Object.keys(backfills).length) {
       await trx('customers').where({ id: winnerId }).update({ ...backfills, updated_at: trx.fn.now() });
     }
+    // The backfill above is a live Bill-To transition like any other: a
+    // payerless winner that just inherited the loser's payer now owns the
+    // repointed self-pay packet invoices, including ones the homeowner
+    // already holds a link for. The fence above only refuses a send in
+    // flight; a `sent`/`viewed`/`overdue` invoice needs the withdrawal, so
+    // the same ownership-adding path every other Bill-To writer runs takes
+    // the winner here, after the payer is applied and the sweep has
+    // repointed the loser's invoices onto it.
+    if (backfills.payer_id) {
+      await require('./visit-completion-packets').withdrawPacketInvoicesForOwner(trx, { customerId: winnerId });
+    }
 
     const [journal] = await trx('customer_merge_journal').insert({
       winner_customer_id: winnerId,

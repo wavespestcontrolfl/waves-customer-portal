@@ -2736,6 +2736,48 @@ postgres('visit summary recipient recovery', () => {
     }
   });
 
+  test('a stranded no-link check-in is proved by its stamp and never released on a silent body search', async () => {
+    // resolution_check / satisfaction_confirm render with NO review link, so
+    // a token/short-URL body search can never match them. Releasing on that
+    // silence re-texts a customer who already got the check-in (round-24 P1).
+    const Review = require('../services/review-request');
+    const askId = randomUUID();
+    const insertStranded = () => mockPg('review_requests').insert({ id: askId, customer_id: fixture.customerId,
+      service_record_id: fixture.recordIds[0], status: 'sending', token: randomUUID().replace(/-/g, ''),
+      claimed_at: new Date(Date.now() - 11 * 60 * 1000), channel: 'sms', template_key: 'resolution_check' });
+    const Twilio = require('../services/twilio');
+    // The provider positively reports none — which for this template proves
+    // nothing, because the body it would search for carries no link.
+    const finder = jest.spyOn(Twilio, 'findOutboundMessageSince').mockResolvedValue({ found: false });
+    await insertStranded();
+    try {
+      // No stamp yet: UNKNOWN, so the row is left alone rather than re-sent.
+      expect(await Review.reconcileStrandedSends()).toEqual({ finished: 0, released: 0 });
+      expect(await mockPg('review_requests').where({ id: askId }).first()).toMatchObject({ status: 'sending' });
+
+      // The send-time stamp proves it left, with no link to search for.
+      await mockPg('sms_log').insert({ customer_id: fixture.customerId, direction: 'outbound', from_phone: '+12025550100',
+        to_phone: '+12025550124', status: 'sent', message_type: 'review_request',
+        message_body: 'Hi Jamie, Adam with Waves. Just making sure everything has been taken care of.',
+        metadata: JSON.stringify({ review_request_id: askId }) });
+      expect(await Review.reconcileStrandedSends()).toEqual({ finished: 1, released: 0 });
+      expect(await mockPg('review_requests').where({ id: askId }).first()).toMatchObject({ status: 'sent' });
+
+      // An ASK template is unchanged: no link found anywhere is still a
+      // positive none, and the row goes back to the scheduler.
+      await mockPg('review_requests').where({ id: askId }).del();
+      await mockPg('sms_log').whereRaw("metadata->>'review_request_id' = ?", [askId]).del();
+      await insertStranded();
+      await mockPg('review_requests').where({ id: askId }).update({ template_key: 'friendly_ask' });
+      expect(await Review.reconcileStrandedSends()).toEqual({ finished: 0, released: 1 });
+      expect(await mockPg('review_requests').where({ id: askId }).first()).toMatchObject({ status: 'pending' });
+    } finally {
+      finder.mockRestore();
+      await mockPg('sms_log').whereRaw("metadata->>'review_request_id' = ?", [askId]).del();
+      await mockPg('review_requests').where({ id: askId }).del();
+    }
+  });
+
   test('a one-off email touch positively unsent fails for the operator instead of waiting on the text scheduler', async () => {
     const Review = require('../services/review-request');
     const askId = randomUUID();
@@ -2884,6 +2926,53 @@ postgres('visit summary recipient recovery', () => {
       expect(await mockPg('dispatch_alerts').where({ tech_id: fixture.techId, type: 'visit_closeout_review' }).whereNull('resolved_at')).toHaveLength(1);
       // Already withdrawn: not withdrawn twice.
       expect(await mockPg.transaction((trx) => Packets.withdrawPacketInvoicesForOwner(trx, { customerId: fixture.customerId }))).toBe(0);
+    } finally {
+      await mockPg('customers').where({ id: fixture.customerId }).update({ payer_id: null });
+      await mockPg('invoices').where({ id: invoiceId }).del();
+      await mockPg('payers').where({ id: payer.id }).del();
+    }
+  });
+
+  test('a withdrawn invoice the homeowner still holds is no longer collectible at any money seam', async () => {
+    // The withdrawal cannot recall a pay link already in the customer's
+    // hands: the row keeps a collectible status and a NULL payer_id, and
+    // records the withdrawal only in its stamp. Every collection path funnels
+    // through assertInvoiceCollectible, so the stamp is read there once
+    // rather than re-derived by each seam (round-24 P1: POST
+    // /api/pay/:token/setup checked neither the stamp nor the billing hold).
+    const Packets = require('../services/visit-completion-packets');
+    const { assertInvoiceCollectible } = require('../services/invoice-helpers');
+    const invoiceId = randomUUID();
+    const [payer] = await mockPg('payers').insert({ display_name: 'Fixture Property Management', ap_email: `${randomUUID()}@example.invalid`, active: true }).returning('id');
+    await mockPg('invoices').insert({ id: invoiceId, token: randomUUID().replace(/-/g, ''), invoice_number: `FIX-${invoiceId.slice(0, 8)}`,
+      customer_id: fixture.customerId, status: 'sent', total: 120, visit_completion_packet_id: fixture.packetId });
+    await mockPg('visit_completion_packets').where({ id: fixture.packetId }).update({ status: 'done', error: null });
+    try {
+      // Before the withdrawal the homeowner's link collects normally.
+      const beforeWithdrawal = await mockPg('invoices').where({ id: invoiceId }).first();
+      expect(() => assertInvoiceCollectible(beforeWithdrawal)).not.toThrow();
+      expect(await mockPg.transaction(async (trx) => {
+        await trx('customers').where({ id: fixture.customerId }).forUpdate().first('id');
+        await trx('customers').where({ id: fixture.customerId }).update({ payer_id: payer.id });
+        return Packets.withdrawPacketInvoicesForOwner(trx, { customerId: fixture.customerId });
+      })).toBe(1);
+      const withdrawn = await mockPg('invoices').where({ id: invoiceId }).first();
+      // Still `sent` with no payer_id — the state every seam used to read as payable.
+      expect(withdrawn).toMatchObject({ status: 'sent', payer_id: null, scheduled_send_error: `payer_billed:${payer.id}:hold` });
+      expect(() => assertInvoiceCollectible(withdrawn)).toThrow(/third-party payer/);
+      // A caller holding only the status keeps the old behavior — never
+      // silently strengthened OR weakened by the widened signature.
+      expect(() => assertInvoiceCollectible(withdrawn.status)).not.toThrow();
+
+      // Ownership back to self-pay: the reconciliation clears the stamp and
+      // the same seam collects again.
+      await mockPg.transaction(async (trx) => {
+        await trx('customers').where({ id: fixture.customerId }).update({ payer_id: null });
+        return Packets.reconcileWithdrawnPacketInvoices(trx, { customerId: fixture.customerId });
+      });
+      const released = await mockPg('invoices').where({ id: invoiceId }).first();
+      expect(released.scheduled_send_error).toBeNull();
+      expect(() => assertInvoiceCollectible(released)).not.toThrow();
     } finally {
       await mockPg('customers').where({ id: fixture.customerId }).update({ payer_id: null });
       await mockPg('invoices').where({ id: invoiceId }).del();

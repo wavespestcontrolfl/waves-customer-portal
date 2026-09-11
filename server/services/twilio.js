@@ -951,6 +951,7 @@ const TwilioService = {
               ? { parked_decision_ids: options.parkedDecisionIds }
               : {}),
             ...(options.scheduledSmsLogId ? { scheduled_sms_log_id: options.scheduledSmsLogId } : {}),
+            ...(options.reviewRequestId ? { review_request_id: options.reviewRequestId } : {}),
           }),
         });
       } catch (logErr) {

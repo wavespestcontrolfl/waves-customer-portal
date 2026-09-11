@@ -1401,6 +1401,41 @@ describe('executeMerge', () => {
     }
   });
 
+  it('withdraws the surviving record\'s packet invoices when the merge inherits a payer', async () => {
+    // The in-flight fence above only refuses a send mid-dispatch. An invoice
+    // the homeowner already holds a link for needs the withdrawal, and the
+    // merge is the ownership writer that must run it (round-24 P1).
+    const Packets = require('../services/visit-completion-packets');
+    const inFlight = jest.spyOn(Packets, 'packetInvoiceSendInFlight').mockResolvedValue(false);
+    const withdraw = jest.spyOn(Packets, 'withdrawPacketInvoicesForOwner').mockResolvedValue(1);
+    try {
+      const { trx } = buildTrx({
+        winner: { id: WINNER, first_name: 'A', last_name: 'B', phone: '+19995550003', payer_id: null },
+        loser: { id: LOSER, first_name: 'A', last_name: 'B', phone: '9995550003', payer_id: 5 },
+        fkRows: FK_ROWS,
+      });
+      db.transaction.mockImplementation(async (fn) => fn(trx));
+      await dedupe.executeMerge({ winnerId: WINNER, loserId: LOSER, performedBy: 'test' });
+      // The WINNER, in the merge's own transaction: after the sweep repointed
+      // the loser's invoices onto it, its ownership covers them too.
+      expect(withdraw).toHaveBeenCalledWith(trx, { customerId: WINNER });
+
+      // A merge that changes nothing about Bill-To runs no withdrawal.
+      withdraw.mockClear();
+      const { trx: noPayer } = buildTrx({
+        winner: { id: WINNER, first_name: 'A', last_name: 'B', phone: '+19995550003', payer_id: null },
+        loser: { id: LOSER, first_name: 'A', last_name: 'B', phone: '9995550003', payer_id: null },
+        fkRows: FK_ROWS,
+      });
+      db.transaction.mockImplementation(async (fn) => fn(noPayer));
+      await dedupe.executeMerge({ winnerId: WINNER, loserId: LOSER, performedBy: 'test' });
+      expect(withdraw).not.toHaveBeenCalled();
+    } finally {
+      inFlight.mockRestore();
+      withdraw.mockRestore();
+    }
+  });
+
   it('transfers a loser-only payer default and clears it on the retired row', async () => {
     const winner = { id: WINNER, first_name: 'A', last_name: 'B', phone: '+19995550003', payer_id: null };
     const loser = { id: LOSER, first_name: 'A', last_name: 'B', phone: '9995550003', payer_id: 5 };

@@ -2195,7 +2195,7 @@ router.post('/:id/apply-credit', requireAdmin, async (req, res, next) => {
       return res.status(400).json({ error: 'Invoice is billed to a third-party payer — account credit cannot be applied to payer invoices' });
     }
     try {
-      assertInvoiceCollectible(invoice.status);
+      assertInvoiceCollectible(invoice);
     } catch (err) {
       return res.status(invoice.status === 'processing' ? 409 : 400).json({ error: err.message });
     }
@@ -2231,7 +2231,7 @@ router.post('/:id/apply-credit', requireAdmin, async (req, res, next) => {
           const err = new Error('Invoice not found'); err.statusCode = 404; err.isOperational = true; throw err;
         }
         try {
-          assertInvoiceCollectible(locked.status);
+          assertInvoiceCollectible(locked);
         } catch (err) {
           err.statusCode = locked.status === 'processing' ? 409 : 400; err.isOperational = true; throw err;
         }
@@ -2538,7 +2538,7 @@ router.post('/:id/payment-plan', requireAdmin, async (req, res, next) => {
       return res.status(400).json({ error: 'Invoice is billed to a third-party payer — payment plans are not supported for payer invoices' });
     }
     try {
-      assertInvoiceCollectible(invoice.status);
+      assertInvoiceCollectible(invoice);
     } catch (err) {
       return res.status(invoice.status === 'processing' ? 409 : 400).json({ error: err.message });
     }
@@ -2602,7 +2602,7 @@ router.post('/:id/payment-plan', requireAdmin, async (req, res, next) => {
         // just-settled invoice would edit-lock it all over again with
         // nothing left to collect (codex r1 P1).
         try {
-          assertInvoiceCollectible(lockedInvoice.status);
+          assertInvoiceCollectible(lockedInvoice);
         } catch (err) {
           err.statusCode = 409; throw err;
         }
