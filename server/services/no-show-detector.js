@@ -10,6 +10,28 @@ const { KNOWN_CALLER_PHONE_COLS } = require('../utils/known-caller-phone');
 const enabled = () => gateEnvValue('GATE_NOSHOW_DETECTOR');
 const LIVE_STATUSES = ['pending', 'confirmed', 'en_route', 'on_site'];
 const NOTICE_PURPOSES = ['appointment_confirmation', 'appointment_reminder_72h', 'appointment_reminder_24h'];
+// purpose='appointment' scheduling notices whose original_message_type
+// names a reschedule/confirmation rung, but predate rendered_slot_ms being
+// written for that rung (or a future rung this list hasn't caught up to
+// yet) — reschedule-sms.js's SMS-reply confirmation ('confirmation', a
+// customer picking a rain-out reschedule option) and admin-dispatch.js's
+// series-move notice ('reschedule_series_confirmation'). Adding
+// rendered_slot_ms to a writer only fixes FUTURE sends; an already-sent
+// row with neither rendered_slot_ms nor this original_message_type match
+// falls out of the query entirely, so latestPromises silently falls back
+// to an OLDER (often the original booking) promise and can raise a
+// critical alert against a window the visit no longer holds (codex P1).
+// Listed here so the row is still fetched — the existing start_at ternary
+// below already renders it as an unknown (null) promise when
+// rendered_slot_ms is absent, which is what makes it win over a stale-but-
+// known-window promise without asserting a window we don't actually have
+// on record. NOT every purpose='appointment' original_message_type
+// belongs here — only ones that supersede a previously promised window;
+// grepped every purpose:'appointment' writer (rain-out.js is already
+// covered by the LIKE 'rain_out_moved%' clause; 'manual' call-requested
+// acks, prep-info texts, the recurring welcome text, and recipient-optin
+// requests never quote a specific arrival slot and must stay excluded).
+const LEGACY_SCHEDULING_MESSAGE_TYPES = ['reschedule_series_confirmation', 'confirmation'];
 const instant = (value) => value == null ? NaN : new Date(value).getTime();
 
 // Pure, also used by the replay. All evidence must exist by the evaluation
@@ -61,7 +83,8 @@ async function loadPromiseEvents(conn, visitIds, { now = new Date() } = {}) {
       // only a scheduling notice can replace the customer's promised window.
       // Legacy move notices without a saved time still count as unknown.
       .whereRaw(`(a.purpose = ANY(?::text[]) OR (a.purpose = 'appointment' AND
-        (a.metadata->>'rendered_slot_ms' IS NOT NULL OR a.metadata->>'original_message_type' LIKE 'rain_out_moved%')))`, [NOTICE_PURPOSES])
+        (a.metadata->>'rendered_slot_ms' IS NOT NULL OR a.metadata->>'original_message_type' LIKE 'rain_out_moved%'
+          OR a.metadata->>'original_message_type' = ANY(?::text[]))))`, [NOTICE_PURPOSES, LEGACY_SCHEDULING_MESSAGE_TYPES])
       .whereBetween('a.sent_at', [since, now]).whereNull('a.blocked_code').whereNull('a.provider_error')
       .where(function delivered() { this.where('a.provider', 'push').orWhereIn('s.status', ['sent', 'delivered', 'read']); })
       .select('a.id', 'a.appointment_id', 'a.metadata', 'a.sent_at'),

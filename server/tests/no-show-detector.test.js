@@ -488,3 +488,79 @@ describe('cancellation -> reopen lifecycle (same key throughout, not just reassi
     expect(blocking).toEqual(rows[0]);
   });
 });
+
+describe('loadPromiseEvents: pre-deploy legacy reschedule/confirmation messages count as unknown, not dropped (round-3 P1)', () => {
+  // rendered_slot_ms only helps FUTURE sends. A row already sent before
+  // that writer fix shipped (or a future rung this list hasn't caught up
+  // to) has purpose='appointment', original_message_type naming a
+  // reschedule/confirmation rung, and NO rendered_slot_ms — the WHERE
+  // clause used to drop it entirely, so latestPromises fell back to an
+  // OLDER (often the original booking) promise and could raise a critical
+  // alert against a window the visit no longer holds.
+  function passthroughChain(result = []) {
+    const chain = {};
+    for (const m of ['leftJoin', 'whereIn', 'whereRaw', 'whereBetween', 'whereNull', 'where']) chain[m] = () => chain;
+    chain.select = () => Promise.resolve(result);
+    return chain;
+  }
+
+  // select()'s filter is driven by the bound params the CODE UNDER TEST
+  // actually passed to whereRaw — not a second, hardcoded copy of the
+  // expected type list. If the fix regresses (the type dropped from the
+  // list, or the whole OR-branch removed), the captured legacyTypes array
+  // no longer contains it and the row is correctly filtered out, exactly
+  // like a real "no such row matched" Postgres result.
+  function fakeConn({ messageRows = [] } = {}) {
+    const calls = {};
+    const conn = (table) => {
+      if (table === 'customer_interactions as ci' || table === 'audit_log') return passthroughChain([]);
+      if (table === 'messaging_audit_log as a') {
+        const chain = {};
+        chain.leftJoin = () => chain;
+        chain.whereIn = () => chain;
+        chain.whereRaw = (sql, bindings) => { calls.purposeSql = sql; calls.purposeBindings = bindings; return chain; };
+        chain.where = () => chain;
+        chain.whereBetween = () => chain;
+        chain.whereNull = () => chain;
+        chain.select = () => {
+          const legacyTypes = (calls.purposeBindings && calls.purposeBindings[1]) || [];
+          const matched = messageRows.filter((r) => r.metadata?.rendered_slot_ms != null
+            || legacyTypes.includes(r.metadata?.original_message_type));
+          return Promise.resolve(matched);
+        };
+        return chain;
+      }
+      throw new Error(`fake conn: unexpected table ${table}`);
+    };
+    conn.raw = (sql, bindings) => ({ sql, bindings });
+    conn.isTransaction = true;
+    return { conn, calls };
+  }
+
+  test('the purpose predicate matches original_message_type reschedule_series_confirmation / confirmation even without rendered_slot_ms', async () => {
+    const { conn, calls } = fakeConn();
+    await loadPromiseEvents(conn, ['visit-1']);
+    expect(calls.purposeSql).toContain("a.metadata->>'original_message_type' = ANY(?::text[])");
+    expect(calls.purposeBindings[1]).toEqual(['reschedule_series_confirmation', 'confirmation']);
+  });
+
+  test.each([
+    ['reschedule_series_confirmation'],
+    ['confirmation'],
+  ])('a legacy %s row without rendered_slot_ms, newer than the booking confirmation, is FETCHED and becomes the latest promise as UNKNOWN (not the stale booking confirmation)', async (originalMessageType) => {
+    const bookingConfirmation = { id: 'm1', appointment_id: 'visit-1',
+      metadata: { rendered_slot_ms: new Date('2026-09-10T13:00:00.000Z').getTime() }, sent_at: '2026-09-01T12:00:00.000Z' };
+    const legacyRow = { id: 'm2', appointment_id: 'visit-1',
+      metadata: { original_message_type: originalMessageType }, sent_at: '2026-09-05T12:00:00.000Z' };
+    const { conn } = fakeConn({ messageRows: [bookingConfirmation, legacyRow] });
+    const now = new Date('2026-09-10T00:00:00.000Z');
+    const events = await loadPromiseEvents(conn, ['visit-1'], { now });
+    // The legacy row was actually returned by the (simulated) query — not
+    // silently dropped — and mapped to a null start_at.
+    expect(events.find((e) => e.source_id === 'm2')).toMatchObject({ start_at: null });
+    const map = latestPromises(events, now);
+    const latest = map.get('visit-1');
+    expect(latest.start_at).toBeNull();
+    expect(latest.source_id).toBe('m2');
+  });
+});
