@@ -151,6 +151,7 @@ describe('prelinkedBackfillGate — identity and trust rules (behavioral)', () =
     ['the phone-match branch already backfilled', { phoneMatchedThisPass: true }],
     ['a voicemail', { extracted: { is_voicemail: true } }],
     ['a third-party call nature', { thirdPartyCallNature: true }],
+    ['an operator unlink', { explicitUnlink: true }],
     ['no usable identity number', { call: { direction: 'inbound', from_phone: null, to_phone: '+15555550199' } }],
   ])('is not eligible: %s', (_label, patch) => {
     expect(prelinkedBackfillGate({ ...base, ...patch }).eligible).toBe(false);
@@ -192,6 +193,7 @@ describe('pre-linked call wiring (placement)', () => {
     expect(block).toMatch(/prelinkedBackfillGate\(/);
     expect(block).toMatch(/linkedCustomerAcceptsBackfill\(linked, prelinkedGate\.identityPhone, extracted\)/);
     expect(block).toMatch(/thirdPartyCallNature: v2ThirdPartyCallNature/);
+    expect(block).toMatch(/explicitUnlink/);
     expect(start).toBeLessThan(src.indexOf('backfillCustomerFromAppointmentContact(customerId, customer, extracted'));
   });
 

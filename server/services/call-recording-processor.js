@@ -4834,9 +4834,16 @@ function prelinkedBackfillIdentityPhone(call = {}) {
 
 function prelinkedBackfillGate({
   call, customerId, createdCustomerFromCall, phoneMatchedThisPass, extracted = {}, thirdPartyCallNature,
+  explicitUnlink = false,
 } = {}) {
   const identityPhone = prelinkedBackfillIdentityPhone(call);
   const eligible = !!customerId
+    // Belt and braces (GH codex #4432 r4 P1): an operator unlink already
+    // nulls call.customer_id, so customerId is falsy here — but this branch
+    // writes to a customer row, and "this call belongs to no customer" is
+    // stated in the override, not inferred from a variable two hundred lines
+    // up. The sibling phone-match branch carries the same predicate.
+    && !explicitUnlink
     && !createdCustomerFromCall     // a fresh row already carries this call's capture
     && !phoneMatchedThisPass        // the phone-match branch already backfilled
     && !!identityPhone
@@ -9455,7 +9462,7 @@ const CallRecordingProcessor = {
     // calls this backfill exists to repair (GH codex #4432 r1 P1).
     // Fail-soft.
     const prelinkedGate = prelinkedBackfillGate({
-      call, customerId, createdCustomerFromCall, phoneMatchedThisPass, extracted,
+      call, customerId, createdCustomerFromCall, phoneMatchedThisPass, extracted, explicitUnlink,
       thirdPartyCallNature: v2ThirdPartyCallNature,
     });
     if (prelinkedGate.eligible) {
