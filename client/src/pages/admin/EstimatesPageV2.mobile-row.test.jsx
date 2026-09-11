@@ -67,9 +67,9 @@ describe("MobileEstimateRow accessibility", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "Actions for Ada Lovelace" }));
 
-    // z-[120] is the modal stacking contract (see ui/Dialog.jsx) — above all
-    // shell chrome (90–100) and the C360 estimates panel (110).
-    expect(screen.getByRole("dialog")).toHaveClass("z-[120]");
+    // The shared Dialog owns the layer as an inline value so callers cannot
+    // accidentally let shell chrome (90–110) cover the action surface.
+    expect(screen.getByRole("dialog")).toHaveStyle({ zIndex: "120" });
   });
   it("does not open the stale snapshot when live contact lookup fails", async () => {
     const alert = vi.spyOn(window, "alert").mockImplementation(() => {});
