@@ -174,6 +174,57 @@ describe('the shared send claim (claimInvoiceForSend) under interleaving', () =>
     }
   });
 
+  test('under the claim: a draft retotalled to $0 between the read and the flip is settled and refused; a visit cancelled since creation refuses (visit_cancelled) — the claim is given back both times (Codex P1 r10 ×2 #4131)', async () => {
+    const db = require('../models/db');
+    const InvoiceService = require('../services/invoice');
+    const { claimInvoiceForSend } = InvoiceService;
+    const original = db.getMockImplementation();
+    let readRow = { id: 'inv-1', status: 'draft', total: 117, credit_applied: 0, scheduled_service_id: 'svc-1', service_record_id: null };
+    let flippedRow = { ...readRow, status: 'sending' };
+    let visitStatus = 'confirmed';
+    db.mockImplementation((table) => {
+      const q = original(table);
+      if (table === 'invoices') {
+        q.first = jest.fn(async () => ({ ...readRow, status: db.__state.status }));
+        q.update = jest.fn((values) => ({
+          returning: jest.fn(async () => {
+            if (db.__state.status !== q.where.mock.calls[q.where.mock.calls.length - 1][0].status) return [];
+            db.__state.status = values.status;
+            return [{ ...flippedRow, status: values.status }];
+          }),
+          catch: jest.fn(async () => { db.__state.status = values.status; }),
+        }));
+      }
+      if (table === 'scheduled_services') q.first = jest.fn(async () => ({ id: 'svc-1', status: visitStatus }));
+      return q;
+    });
+    const settle = jest.spyOn(InvoiceService, 'settleZeroBalance');
+    try {
+      // (a) the row the flip RETURNS is already $0 (admin retotal under the read)
+      db.__state.status = 'draft';
+      flippedRow = { ...readRow, total: 0 };
+      settle.mockResolvedValueOnce({ settled: true, invoice: { ...flippedRow, status: 'prepaid' } });
+      await expect(claimInvoiceForSend('inv-1')).rejects.toThrow(/Cannot send a prepaid invoice/);
+      expect(settle).toHaveBeenCalledWith('inv-1');
+      expect(db.__state.status).toBe('draft'); // claim given back BEFORE settling (settleZeroBalance refuses 'sending')
+      // (b) the linked visit was cancelled since the invoice was created
+      flippedRow = { ...readRow };
+      visitStatus = 'cancelled';
+      settle.mockClear();
+      await expect(claimInvoiceForSend('inv-1')).rejects.toMatchObject({ code: 'visit_cancelled', message: expect.stringMatching(/Invoice is not sendable/) });
+      expect(db.__state.status).toBe('draft');
+      expect(settle).not.toHaveBeenCalled();
+      // control: a live visit with a balance due claims normally
+      visitStatus = 'confirmed';
+      expect(await claimInvoiceForSend('inv-1')).toMatchObject({ claimed: true, previousStatus: 'draft' });
+      expect(db.__state.status).toBe('sending');
+      db.__state.status = 'draft';
+    } finally {
+      settle.mockRestore();
+      db.mockImplementation(original);
+    }
+  });
+
   test('adoption consumes the send\'s own still-scheduled held SMS leg under the claim, then re-checks strictly: a row the worker claimed meanwhile keeps the delivery and the claim is given back (Codex P1 r6 #4131)', async () => {
     const db = require('../models/db');
     const { claimInvoiceForSend } = require('../services/invoice');

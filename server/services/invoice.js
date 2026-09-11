@@ -966,6 +966,31 @@ async function zeroDueOpenVisitSendOutcome(row, invoiceId) {
   return { ok: false, code: err.code, error: err.message, sms: { ok: false, code: err.code }, email: { ok: false, code: err.code } };
 }
 
+// Re-checks that need the CLAIM in hand (Codex P1 r10 ×2 #4131): the flip
+// compares status only, so a draft retotalled to $0 (InvoiceService.update
+// keeps 'draft') or a visit cancelled after the invoice was created (the
+// cancellation's void sweep skips 'sending' rows) both slip past the
+// pre-claim reads. Returns a refusal descriptor, or null when the claim
+// stands; a lookup that throws is the caller's cue to give the claim back.
+async function visitInvoiceRefusalUnderClaim(claimedRow, claimedFromStatus) {
+  if (!claimedRow?.scheduled_service_id) return null;
+  if (zeroDueVisitInvoice({ ...claimedRow, status: claimedFromStatus })) return { kind: "zero_due" };
+  const visit = await db("scheduled_services").where({ id: claimedRow.scheduled_service_id }).first("id", "status");
+  const visitStatus = String(visit?.status || "").trim().toLowerCase();
+  const { VISIT_NEVER_RAN_STATUSES } = require("./invoice-helpers");
+  if (VISIT_NEVER_RAN_STATUSES.includes(visitStatus)) return { kind: "visit_never_ran", visitStatus };
+  return null;
+}
+
+function visitNeverRanError(invoiceId, visitStatus) {
+  logger.warn(`[invoice] ${invoiceId}: send refused — its visit is ${visitStatus}; the cancellation's void sweep owns the row`);
+  // "Invoice is not sendable" is the phrase the completion's classifier
+  // reads as nothing-left-to-deliver (report-only).
+  const e = new Error(`Invoice is not sendable — its visit was ${visitStatus} (the cancellation voids it)`);
+  e.code = "visit_cancelled";
+  return e;
+}
+
 function queuedPayLinkError(queued) {
   const e = new Error(`Invoice send already in progress — a text carrying this pay link is queued for the send window${queued.scheduled_for ? ` (${new Date(queued.scheduled_for).toISOString()})` : ""}; it delivers then`);
   e.code = "queued_pay_link";
@@ -1014,6 +1039,26 @@ async function claimInvoiceForSend(invoiceId, { allowClaimed = false, firstDeliv
       throw invoiceAlreadyDeliveredError(latest);
     }
     throw invoiceNotSendableError(latest);
+  }
+  // Re-checked UNDER the claim (Codex P1 r10 ×2): a retotal to $0 or a
+  // visit cancellation that landed between the read above and the flip.
+  // Either gives the claim straight back (settleZeroBalance refuses a
+  // 'sending' row, and the cancellation's void sweep skips one) and refuses.
+  let underClaim;
+  try {
+    underClaim = await visitInvoiceRefusalUnderClaim(invoice, current.status);
+  } catch (lookupErr) {
+    await restoreSendClaim(invoiceId, current.status, true);
+    throw lookupErr;
+  }
+  if (underClaim) {
+    await restoreSendClaim(invoiceId, current.status, true);
+    if (underClaim.kind === "zero_due") {
+      const settlement = await settleZeroDueVisitInvoice(invoiceId);
+      if (settlement.settled) throw invoiceNotSendableError(settlement.invoice || { ...invoice, status: "prepaid" });
+      throw depositSettlementPendingError(invoiceId, settlement.reason);
+    }
+    throw visitNeverRanError(invoiceId, underClaim.visitStatus);
   }
   // Re-checked UNDER the claim (pre-push P1 r5 ×2): the flip above compares
   // status only, so draft → sending → draft in between (another sender
