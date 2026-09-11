@@ -38,20 +38,23 @@ function capacityFromReservation(row) {
   return capacity;
 }
 
-function windowForCapacityService(anchor, index) {
+function windowForCapacityService(anchor, index, catalogServiceKey) {
   const capacity = capacityFromReservation(anchor);
   const start = parseHHMM(anchor.window_start);
   if (!capacity || !Number.isInteger(index) || index < 0 || index >= capacity.services.length
     || start == null || start % 60 !== 0 || start + capacity.durationMinutes > 24 * 60 - 1) {
     throw capacityUnavailable();
   }
+  const allowanceIndex = capacity.version === 2
+    ? capacity.services.indexOf(serviceKeyFor({ service_key: catalogServiceKey })) : index;
+  if (allowanceIndex < 0) throw capacityUnavailable();
   return {
     ...(capacity.version === 2 ? {
       // One whole-hour customer arrival anchor. The route evaluator groups
       // members into one visit and advances their separate work internally.
       window_start: minutesToHHMM(start),
-      window_end: minutesToHHMM(start + capacity.durations[index]),
-      estimated_duration_minutes: capacity.durations[index],
+      window_end: minutesToHHMM(start + capacity.durations[allowanceIndex]),
+      estimated_duration_minutes: capacity.durations[allowanceIndex],
     } : {
     window_start: minutesToHHMM(start + index * SERVICE_MINUTES),
     window_end: minutesToHHMM(start + (index + 1) * SERVICE_MINUTES),

@@ -1306,6 +1306,9 @@ describe('sendgrid newsletter suppression ledger writes', () => {
       return q;
     });
     client.raw = jest.fn((sql, bindings) => ({ sql, bindings }));
+    // The suppression ledger writes under the per-address lock inside a
+    // transaction; the double runs the callback against itself.
+    client.transaction = jest.fn(async (fn) => fn(client));
     return { client, calls };
   }
 

@@ -1171,6 +1171,9 @@ async function handleStatementPaymentIntentEvent(paymentIntent, eventType, event
     // leave the statement sent/viewed + unpaid (dunning must keep collecting).
     if (settledNow) {
       logger.info(`[stripe-webhook] statement S-${statementId} settled paid via PI ${piId}`);
+      // Every linked child invoice is paid now: close out their open visits,
+      // outside the money txn (GitHub r9 P1 #4127). Best-effort by contract.
+      await require('../services/invoice-issued-closeout').closeOutVisitsForStatement(statementId, { trigger: 'paid' });
       // Stop any statement-level dunning now that it's paid (best-effort, outside
       // the money txn — the eligibility filter already excludes `paid`, so this is
       // just hygiene and never gates settlement).

@@ -293,7 +293,7 @@ describe('POST /batch idempotency (batchKey)', () => {
         batchKey: 'b7f9c2d4-0000-4000-8000-000000000001',
       });
       expect(InvoiceService.sendViaSMS).toHaveBeenCalledTimes(1);
-      expect(InvoiceService.sendViaSMS).toHaveBeenCalledWith('inv-new', { operatorInitiated: true });
+      expect(InvoiceService.sendViaSMS).toHaveBeenCalledWith('inv-new', { operatorInitiated: true, actorTechnicianId: 'tech-1' });
     });
   });
 
@@ -336,7 +336,7 @@ describe('POST /batch idempotency (batchKey)', () => {
       expect(body.skipped[0].sent).toMatchObject({ sent: true });
       // Completed on the EXISTING row — no new invoice minted.
       expect(InvoiceService.create).not.toHaveBeenCalled();
-      expect(InvoiceService.sendViaSMS).toHaveBeenCalledWith('inv-existing', { operatorInitiated: true });
+      expect(InvoiceService.sendViaSMS).toHaveBeenCalledWith('inv-existing', { operatorInitiated: true, actorTechnicianId: 'tech-1' });
     });
   });
 
