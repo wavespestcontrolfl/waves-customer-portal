@@ -11,6 +11,11 @@ export async function request(path, options = {}) {
   if (!response.ok) throw new Error(data.error || `Unable to load pay and growth (${response.status}).`);
   return data;
 }
+// Tech-portal links keep the active visit (?visit=) so TechFieldShell can offer "Return to visit".
+export function withVisit(path, search) {
+  const visit = new URLSearchParams(search || '').get('visit');
+  return visit ? `${path}?visit=${encodeURIComponent(visit)}` : path;
+}
 export const money = cents => cents == null ? 'Not calculated' : new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' }).format(cents / 100);
 export const date = value => value ? (/^\d{4}-\d{2}-\d{2}$/.test(String(value)) ? String(value) : etDateString(new Date(value))) : '';
 export const words = value => String(value || 'not recorded').replaceAll('_', ' ');

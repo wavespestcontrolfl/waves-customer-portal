@@ -3,13 +3,14 @@ const router = express.Router();
 const db = require('../models/db');
 const TwilioService = require('../services/twilio');
 const TWILIO_NUMBERS = require('../config/twilio-numbers');
+const { findKnownCallerCustomer } = require('../utils/known-caller-phone');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
 const { adminAuthenticate, requireTechOrAdmin, requireAdmin } = require('../middleware/admin-auth');
 const { resolveLocation } = require('../config/locations');
 const logger = require('../services/logger');
 const MODELS = require('../config/models');
 const { dispatchWithFallback } = require('../services/llm/call');
-const { normalizePhone, phoneMatchDigits } = require('../utils/phone');
+const { normalizePhone, phoneMatchDigits, phoneIdentityKey } = require('../utils/phone');
 const { mediaFromOutboundAttachments, signMediaForClient } = require('../services/sms-media');
 const { alertTwilioFailure } = require('../services/twilio-failure-alerts');
 const { placeBridgeCall } = require('../services/call-bridge');
@@ -171,15 +172,20 @@ async function customerOfSourceCall(callId, to) {
 }
 
 async function findSingleCustomerForPhone(phone) {
-  // Compare on the last 10 digits so stored formats ('+19415551234',
-  // '9415551234', '(941) 555-1234') all match the same dialable number —
-  // full-digit equality misses customers stored without the country code.
-  const last10 = normalizePhoneLast10(normalizePhone(phone) || phone);
-  if (!last10) return null;
+  // Full-digit match on every stored format the number could plausibly be
+  // ('+19415551234', '9415551234', '(941) 555-1234' all match the same
+  // NANP line), via the same NANP-vs-international candidate set the
+  // exact-contact search above uses (phoneMatchDigits, utils/phone.js) —
+  // NOT a last-10-digit suffix match, which let an international sender
+  // resolve to an unrelated US customer that merely shared its last ten
+  // digits (codex #4213 P2; the wrong-customer-attach incident this rule
+  // exists to prevent).
+  const candidates = phoneMatchDigits(phone);
+  if (!candidates.length) return null;
 
   const matches = await db('customers')
     .whereNull('deleted_at')
-    .whereRaw("RIGHT(regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g'), 10) = ?", [last10])
+    .whereRaw("regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g') = ANY (?::text[])", [candidates])
     .orderBy('updated_at', 'desc')
     .limit(2);
 
@@ -200,7 +206,10 @@ async function resolveSmsLogCustomerFallbacks(rows) {
   for (const row of rows || []) {
     if (row.customer_id || row.first_name) continue;
     const contactPhone = row.contact_phone || row.customer_phone;
-    const key = normalizePhoneLast10(normalizePhone(contactPhone) || contactPhone);
+    // phoneIdentityKey (utils/phone.js) — NOT normalizePhoneLast10 — so an
+    // international contact never buckets under the same key as a US
+    // customer sharing its last ten digits; see findSingleCustomerForPhone.
+    const key = phoneIdentityKey(contactPhone);
     if (key && !phones.has(key)) phones.set(key, contactPhone);
   }
   if (!phones.size) return new Map();
@@ -1437,7 +1446,7 @@ router.get('/log', async (req, res, next) => {
     const messages = await Promise.all(rows.map(async (m) => {
       const initialContact = m.contact_phone || m.customer_phone;
       const fallbackCustomer = !m.customer_id && initialContact
-        ? fallbackCustomers.get(normalizePhoneLast10(normalizePhone(initialContact) || initialContact))
+        ? fallbackCustomers.get(phoneIdentityKey(initialContact))
         : null;
       const customerName = m.first_name
         ? `${m.first_name} ${m.last_name || ''}`.trim()
@@ -3138,10 +3147,46 @@ router.get('/blocked-numbers', async (req, res, next) => {
 
 // POST /api/admin/communications/blocked-numbers — add a number
 // Body: { number, blockType?, reason? }
+// The inbox "Mark spam" action posts here for an unknown-sender thread.
+// The number is stored as E.164 because the spam-block middleware matches
+// the Twilio From value exactly; a thread's contactPhone may carry local
+// formatting. A number that resolves to a live customer (main phone or a
+// service-contact slot) is refused, mirroring the call-disposition guard —
+// blocking it would silently drop that customer's texts.
 router.post('/blocked-numbers', async (req, res, next) => {
   try {
-    const { number, blockType, reason } = req.body;
-    if (!number) return res.status(400).json({ error: 'number required' });
+    const { blockType, reason } = req.body;
+    const number = normalizePhone(req.body.number);
+    if (!phoneMatchDigits(req.body.number).length) return res.status(400).json({ error: 'valid number required' });
+
+    const owner = await findKnownCallerCustomer(db, number);
+    if (owner) {
+      return res.status(409).json({
+        error: 'This number belongs to an existing customer and cannot be blocked. Archive or edit the customer record instead.',
+        code: 'CUSTOMER_NUMBER',
+        customer_id: owner.id,
+        customer_name: [owner.first_name, owner.last_name].filter(Boolean).join(' ') || null,
+      });
+    }
+    // An OPEN lead (a quote requester who has not converted) has no
+    // customer row yet, so its thread looks unknown in the inbox; blocking
+    // it would silently drop the prospect's next text and call (codex
+    // #4213 P1).
+    const { OPEN_LEAD_STATUSES } = require('../services/lead-statuses');
+    // No catch: a failing safety check must refuse the block, not allow it.
+    const openLead = await db('leads')
+      .whereIn('status', OPEN_LEAD_STATUSES)
+      .whereNull('converted_at')
+      .whereNull('deleted_at')
+      .whereIn(db.raw("regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g')"), phoneMatchDigits(number))
+      .first('id', 'first_name', 'last_name');
+    if (openLead) {
+      return res.status(409).json({
+        error: 'This number belongs to an open lead and cannot be blocked. Close or convert the lead first.',
+        code: 'LEAD_NUMBER',
+        lead_id: openLead.id,
+      });
+    }
 
     const existing = await db('blocked_numbers').where({ number }).first();
     if (existing) return res.json({ success: true, alreadyBlocked: true });
