@@ -39,9 +39,23 @@ async function retargetOrClearUnknownSenderBell(phone, cutoff) {
     return await db.transaction(async (trx) => {
       await trx.raw("SET LOCAL lock_timeout = '2s'");
       await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`inbound_sms_bell_retarget:${phone}`]);
+      // Resolved against COALESCE(sms_log.from_phone, contact_phone):
+      // sms_log.from_phone is the durable sender identity (recorded at the
+      // moment the text arrived) — unlike conversations.contact_phone,
+      // which promoteUnknownPhoneThreadWith NULLs on every message's
+      // conversation the instant it promotes or merges an unknown thread
+      // (services/conversations.js). A phone-scoped join through the
+      // conversation alone finds nothing at all for a message that has
+      // since been promoted — stranding the bell rather than protecting it
+      // (codex #4210 round-5 P1). contact_phone stays the fallback for a
+      // message whose sms_log twin is somehow missing.
       const remaining = await trx('messages as m')
         .join('conversations as c', 'c.id', 'm.conversation_id')
-        .where({ 'c.contact_phone': phone, 'm.channel': 'sms', 'm.direction': 'inbound' })
+        .leftJoin('sms_log as l', function join() {
+          this.on('l.twilio_sid', '=', 'm.twilio_sid').andOnVal('l.direction', 'inbound');
+        })
+        .where({ 'm.channel': 'sms', 'm.direction': 'inbound' })
+        .whereRaw('COALESCE(l.from_phone, c.contact_phone) = ?', [phone])
         // Phone-wide, not customer_id-gated (codex #4210 round-2 P2): a
         // promoted thread's still-unread sibling must still be found here
         // so the shared unlinked-style bell retargets to it instead of
@@ -77,7 +91,8 @@ async function retargetOrClearUnknownSenderBell(phone, cutoff) {
           `metadata->'payload'->>'twilioSid' IN (
             SELECT m2.twilio_sid FROM messages m2
             JOIN conversations c2 ON c2.id = m2.conversation_id
-            WHERE c2.contact_phone = ?
+            LEFT JOIN sms_log l2 ON l2.twilio_sid = m2.twilio_sid AND l2.direction = 'inbound'
+            WHERE COALESCE(l2.from_phone, c2.contact_phone) = ?
           )`,
           [phone],
         );
@@ -175,6 +190,14 @@ async function markInboundSmsRead({ messageIds = [], conversationIds = [], readB
       // independent code paths.
       const unknownReadRows = await db('messages as m')
         .join('conversations as c', 'c.id', 'm.conversation_id')
+        // sms_log.from_phone is the durable sender identity — unlike
+        // conversations.contact_phone, promoteUnknownPhoneThreadWith never
+        // clears it (codex #4210 round-5 P1). Left-joined so a message
+        // whose sms_log twin is somehow missing still falls back to
+        // contact_phone via the COALESCE below.
+        .leftJoin('sms_log as l', function join() {
+          this.on('l.twilio_sid', '=', 'm.twilio_sid').andOnVal('l.direction', 'inbound');
+        })
         .whereIn('m.twilio_sid', mirrorSids)
         .where(function scope() {
           this.whereNull('c.customer_id')
@@ -193,7 +216,7 @@ async function markInboundSmsRead({ messageIds = [], conversationIds = [], readB
                 .whereRaw("metadata->'payload'->>'twilioSid' = m.twilio_sid");
             });
         })
-        .select('m.twilio_sid', 'c.contact_phone');
+        .select('m.twilio_sid', db.raw('COALESCE(l.from_phone, c.contact_phone) as contact_phone'));
       const phones = new Set();
       for (const row of unknownReadRows) {
         unknownSenderSids.add(row.twilio_sid);

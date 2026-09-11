@@ -429,18 +429,30 @@ postgres('Customer 360 migrated PostgreSQL reads', () => {
     let bell;
     try {
       // Promoted BEFORE the read: the conversation now carries a
-      // customer_id, even though its bell rang while the sender was still
-      // unknown (link stays '/admin/communications', never rewritten). A
-      // distinct our_endpoint_id avoids the (customer_id, channel,
-      // our_endpoint_id) dedup index colliding with ids[0]'s fixture
-      // conversation from beforeAll.
-      await mockPg('conversations').insert({ id: conversationId, customer_id: ids[0], channel: 'sms', contact_phone: unknownPhone, our_endpoint_id: '+19415550192' });
+      // customer_id AND has contact_phone NULLed — the real shape
+      // promoteUnknownPhoneThreadWith leaves behind
+      // (services/conversations.js clears contact_phone on every promote/
+      // merge path; codex #4210 round-5 P1 caught an earlier version of
+      // this fixture that unrealistically kept it set). The bell rang
+      // while the sender was still unknown (link stays
+      // '/admin/communications', never rewritten). A distinct
+      // our_endpoint_id avoids the (customer_id, channel, our_endpoint_id)
+      // dedup index colliding with ids[0]'s fixture conversation from
+      // beforeAll.
+      await mockPg('conversations').insert({ id: conversationId, customer_id: ids[0], channel: 'sms', contact_phone: null, our_endpoint_id: '+19415550192' });
       await mockPg('messages').insert([
         { id: alertedMessageId, conversation_id: conversationId, channel: 'sms', direction: 'inbound', author_type: 'lead', is_read: false, twilio_sid: alertedSid, body: 'First synthetic text, alerted while unknown', created_at: new Date(Date.now() - 120000) },
         // Arrived after promotion with no bell of its own (the throttled
         // dispatch never rang again for this window) — its only hope is the
         // ORIGINAL, still-live unlinked-style bell.
         { id: laterMessageId, conversation_id: conversationId, channel: 'sms', direction: 'inbound', author_type: 'lead', is_read: false, twilio_sid: laterSid, body: 'Second synthetic text, after promotion', created_at: new Date(Date.now() - 60000) },
+      ]);
+      // The durable sender identity: contact_phone is gone from the
+      // conversation, so the retarget/liveBell queries resolve the phone
+      // through sms_log.from_phone instead.
+      await mockPg('sms_log').insert([
+        { direction: 'inbound', from_phone: unknownPhone, to_phone: '+19415550192', twilio_sid: alertedSid, message_body: 'First synthetic text, alerted while unknown' },
+        { direction: 'inbound', from_phone: unknownPhone, to_phone: '+19415550192', twilio_sid: laterSid, message_body: 'Second synthetic text, after promotion' },
       ]);
       [bell] = await mockPg('notifications').insert({
         recipient_type: 'admin', category: 'inbound_sms', title: 'Synthetic unknown-sender text',
@@ -461,6 +473,7 @@ postgres('Customer 360 migrated PostgreSQL reads', () => {
       expect(refreshedBell.metadata.payload.twilioSid).toBe(laterSid);
     } finally {
       await mockPg('messages').whereIn('id', [alertedMessageId, laterMessageId]).delete();
+      await mockPg('sms_log').whereIn('twilio_sid', [alertedSid, laterSid]).delete();
       if (bell) await mockPg('notifications').where({ id: bell.id }).delete();
       await mockPg('conversations').where({ id: conversationId }).delete();
     }
