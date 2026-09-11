@@ -44,7 +44,7 @@ const { etDateString, addETDays, parseETDateTime, validCalendarDate } = require(
 const { dayStopsQuery, guardedCoordSelects } = require('./scheduling/day-stops');
 const { toDateStr } = require('./auto-dispatch/dates');
 const { loadReminderFreeze, FREEZE_HOURS, TIER2_MIN_DAYS_OUT } = require('./auto-dispatch/route-tiers');
-const { computeWindowFitOrder, effectiveWindowRange, currentOrder, computeChronologicalRepair, workDuration, isCoVisitPair, advanceCoVisit } = require('./route-reorder-window-fit');
+const { computeWindowFitOrder, effectiveWindowRange, currentOrder, computeChronologicalRepair, workDuration, isCoVisitPair, advanceCoVisit, startCoVisitChain } = require('./route-reorder-window-fit');
 
 const GOOGLE_WAYPOINT_CAP = 25;
 // The reorder pass models future days, where en_route/on_site can't occur;
@@ -191,9 +191,7 @@ function violatesWindowFeasibility(RouteOptimizer, orderedStops, sourceStops, le
       if (startMin > range.endMin) return true; // provably misses the promise
       startMin = Math.max(startMin, range.startMin); // waiting for open is fine
     }
-    coFloor = workDuration(s);
-    coEstimates = Number(s.estimated_duration_minutes) || 0;
-    coMerged = Math.max(coFloor, coEstimates);
+    ({ coFloor, coEstimates, coMerged } = startCoVisitChain(s));
     clock = startMin + coMerged;
     prevStop = s;
     prevArrivalMin = startMin;

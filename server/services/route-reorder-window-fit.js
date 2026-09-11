@@ -236,6 +236,16 @@ function rawEstimateMinutes(stop) {
   return Number(raw) || 0;
 }
 
+/** The chain bookkeeping a NON-merged stop starts: one row on its own is a
+ *  one-member co-visit chain. Shared by both simulations' non-merge branches
+ *  so the initialization cannot drift from advanceCoVisit's own arithmetic
+ *  (round-0 fallback audit P1). */
+function startCoVisitChain(stop) {
+  const floor = workDuration(stop);
+  const estimates = rawEstimateMinutes(stop);
+  return { coFloor: floor, coEstimates: estimates, coMerged: Math.max(floor, estimates) };
+}
+
 /**
  * THE co-visit advance — the one place the merge's timing lives, called by
  * both simulations (advanceSim below and violatesWindowFeasibility's own
@@ -323,7 +333,7 @@ function advanceSim(RouteOptimizer, effectiveWindowRange, state, stop, {
     if (startMin < block.endMin && startMin + workDuration(stop) > block.startMin) startMin = block.endMin;
   }
   if (range && startMin > range.endMin && !reportLate) return null;
-  return { clock: startMin + workDuration(stop), prev, prevStop: stop, visited: true, travelMin: state.travelMin + travel, arrivalMin: startMin, waitingMin: (state.waitingMin || 0) + Math.max(0, startMin - state.clock - travel), coFloor: workDuration(stop), coEstimates: rawEstimateMinutes(stop), coMerged: workDuration(stop) };
+  return { clock: startMin + workDuration(stop), prev, prevStop: stop, visited: true, travelMin: state.travelMin + travel, arrivalMin: startMin, waitingMin: (state.waitingMin || 0) + Math.max(0, startMin - state.clock - travel), ...startCoVisitChain(stop) };
 }
 
 /** Repair the demonstrated null-position insertion defect. Keep the relative
@@ -601,5 +611,6 @@ module.exports = {
   workDuration,
   isCoVisitPair,
   advanceCoVisit,
+  startCoVisitChain,
   _internals: { sequenceCount, exhaustiveSearch, greedyInsertion, EXHAUSTIVE_SEQUENCE_CAP },
 };

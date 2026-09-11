@@ -460,8 +460,8 @@ describe('co-visit pair collapse', () => {
   test('(g) the extra minutes a co-visit adds past its sibling respect blockedIntervals and count as waiting', () => {
     // pest departs 840 (its 60-minute span); lawn's real 75-minute estimate
     // adds 15 more, 840→855, but a block covers 845-865, so the extra work
-    // starts after it: clock 880, with 5 minutes of that postponement
-    // recorded as on-site waiting.
+    // starts after it: clock 880, and the whole 25-minute postponement
+    // (840→865) is recorded as on-site waiting.
     const stops = [
       stop('pest', { customer_id: 'cust_b', window_start: '13:00', window_end: '14:00', estimated_duration_minutes: null, lat: 1, lng: 1 }),
       stop('lawn', { customer_id: 'cust_b', window_start: '13:00', window_end: '14:00', estimated_duration_minutes: 75, lat: 1, lng: 1 }),
