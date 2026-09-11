@@ -111,3 +111,11 @@
 .tech-visit-checkbox:focus { --tw-ring-color: var(--tech-accent); }
 .tech-visit-feedback { color: var(--tech-muted); margin: 8px 0 16px; }
 .tech-visit-feedback[role='alert'] { color: #fca5a5; }
+
+.tech-visit-photo-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+.tech-visit-photo-types { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; margin-bottom: 16px; }
+.tech-visit-photo { min-width: 0; border: 1px solid var(--tech-border); border-radius: 10px; overflow: hidden; background: var(--tech-card); }
+.tech-visit-photo-link { display: block; color: var(--tech-text); text-decoration: none; }
+.tech-visit-photo-image { width: 100%; aspect-ratio: 1; object-fit: cover; }
+.tech-visit-photo-label { margin: 0; padding: 8px; font-size: 14px; overflow-wrap: anywhere; }
+.tech-visit-file-input { display: none; }
