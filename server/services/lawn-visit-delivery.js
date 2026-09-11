@@ -83,6 +83,9 @@ async function deliverConfirmedAssessment({ assessmentId }, deps = {}) {
 
 const RECOVERY_RETRY_HORIZON_MS = 7 * 24 * 60 * 60 * 1000;
 
+// Read at call time, like every other customer-send gate.
+const gateOpen = () => require('../config/feature-gates').gateEnvValue('GATE_LAWN_DELIVERY_RECOVERY');
+
 function validateSweepBounds(limit, retryHorizonMs, staleAfterMs) {
   if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100) throw new TypeError('Delivery recovery limit must be from 1 to 100');
   if (!Number.isSafeInteger(retryHorizonMs) || retryHorizonMs <= staleAfterMs) throw new TypeError('Delivery recovery horizon must outlast its lease');
@@ -107,6 +110,8 @@ async function sweepAbandonedDeliveries({ knex = db, limit = 25, staleAfterMs = 
     if (err?.code === '42P01' || err?.code === '42703') return { candidates: 0, resumed: 0, failed: 0, skipped: 'schema_unavailable' };
     throw err;
   }
+  // Fails closed: an ungated environment counts the work and sends nothing.
+  if (!gateOpen()) return { candidates: candidates.length, resumed: 0, failed: 0, skipped: 'gate_closed' };
   let resumed = 0;
   let failed = 0;
   for (const { assessment_id: assessmentId } of candidates) {

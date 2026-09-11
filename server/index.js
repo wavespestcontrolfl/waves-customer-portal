@@ -1356,9 +1356,12 @@ primeCatalogNames.then(() => httpServer.listen(PORT, process.env.WAVES_LOCAL_DEV
     }
 
     // Finish request-path lawn delivery after a process exit, even with the
-    // visit gate or cron master off. Persisted runs and renewable ownership
-    // select the work; the service verifies each step's own completion state.
-    if (config.nodeEnv !== 'test') {
+    // lawn visit gate off: persisted runs and renewable ownership select the
+    // work and the service verifies each step's own completion state. It rides
+    // the cron fleet like every other sweep, and resuming a delivery can send a
+    // real customer SMS, so it is double-gated — cronJobs here, and its own
+    // fail-closed GATE_LAWN_DELIVERY_RECOVERY inside the sweep.
+    if (config.nodeEnv !== 'test' && require('./config/feature-gates').isEnabled('cronJobs')) {
       require('./services/lawn-visit-delivery').scheduleRecovery(require('./utils/scheduled-cron'));
     }
 

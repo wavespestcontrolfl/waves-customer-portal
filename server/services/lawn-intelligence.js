@@ -117,6 +117,19 @@ async function reportInsertData(reportData) {
   return Object.keys(insertData).length > 0 ? insertData : null;
 }
 
+// One customer text per assessment: claimed before the wire, released only when
+// the dispatcher delivered nothing at all. Rows predating the column read null.
+async function claimNotificationSend(assessmentId) {
+  return db('lawn_assessments').where({ id: assessmentId })
+    .where((q) => q.whereNull('notification_sent').orWhere('notification_sent', false))
+    .update({ notification_sent: true, notification_sent_at: new Date() });
+}
+
+async function releaseNotificationSend(assessmentId, result) {
+  logger.warn(`[lawn-intel] assessment ${assessmentId}: no notification channel delivered (${JSON.stringify(result?.results || {})}); released for re-send`);
+  await db('lawn_assessments').where({ id: assessmentId }).update({ notification_sent: false, notification_sent_at: null });
+}
+
 // Delivery recovery's lease check must reach the caller, not the send-failure log.
 const isOwnershipLoss = (err) => err?.code === 'LAWN_DELIVERY_OWNERSHIP_LOST';
 async function runBeforeSend(options) {
@@ -218,6 +231,12 @@ const LawnIntelligence = {
       });
 
       await runBeforeSend(options);
+      // Claim the send BEFORE it reaches the wire. A process exit between the
+      // dispatcher accepting and the stamp committing used to leave the run
+      // looking unsent, and delivery recovery would text the customer a second
+      // time. At-most-once is the right side to fail on here: the report is in
+      // the portal either way, and a duplicate text is not retractable.
+      if (!(await claimNotificationSend(assessmentId))) return null;
       const NotificationDispatcher = require('./notification-dispatcher');
       const result = await NotificationDispatcher.notify(customer.id, 'service_complete', {
         smsMessage,
@@ -225,18 +244,10 @@ const LawnIntelligence = {
         emailBody: smsMessage,
       });
 
-      // Stamp only when a channel actually delivered — an unconditional
-      // stamp recorded "notified" even when the dispatcher sent nothing
-      // (email-preferring customers, blocked SMS), permanently hiding the
-      // miss because the notification_sent guard above never retries.
-      if (result?.sent) {
-        await db('lawn_assessments').where({ id: assessmentId }).update({
-          notification_sent: true,
-          notification_sent_at: new Date(),
-        });
-      } else {
-        logger.warn(`[lawn-intel] assessment ${assessmentId}: no notification channel delivered (${JSON.stringify(result?.results || {})}); left unstamped for re-send`);
-      }
+      // Nothing delivered (email-preferring customer, blocked SMS) is not a
+      // send: release the claim so the miss stays visible and re-sendable
+      // rather than being permanently recorded as "notified".
+      if (!result?.sent) await releaseNotificationSend(assessmentId, result);
 
       return result;
     } catch (err) {

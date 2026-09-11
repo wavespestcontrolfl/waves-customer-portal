@@ -10,7 +10,8 @@ const { etDateString } = require('../utils/datetime-et');
 
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));
 jest.mock('../services/llm/call', () => ({ dispatchWithFallback: jest.fn() }));
-jest.mock('../config/feature-gates', () => ({ gateEnvValue: jest.fn(() => false) }));
+const mockGateEnvValue = jest.fn((name) => name === 'GATE_LAWN_DELIVERY_RECOVERY');
+jest.mock('../config/feature-gates', () => ({ gateEnvValue: (name) => mockGateEnvValue(name) }));
 
 const AI = { turf_density: 80, weed_suppression: 82, color_health: 76, fungus_control: 85, thatch_level: 90, stress_damage: 85 };
 const FINAL = { ...AI, turf_density: 60, stress_damage: 70 };
@@ -247,6 +248,17 @@ const deferred = () => { let resolve; const promise = new Promise((r) => { resol
     await expect(sweepAbandonedDeliveries({ knex: db.knex, retryHorizonMs: 60 })).rejects.toThrow(/horizon must outlast its lease/);
   });
 
+  test('an ungated environment counts recovery candidates and sends nothing', async () => {
+    await db.knex('lawn_assessment_runs').update({ pipeline_completed_at: db.knex.fn.now() });
+    const stuck = await seed();
+    const deliver = jest.fn();
+    mockGateEnvValue.mockReturnValueOnce(false);
+    // A dev box or preview on a production-seeded database must not text anyone.
+    expect(await sweepAbandonedDeliveries({ knex: db.knex, deliver })).toMatchObject({ candidates: 1, resumed: 0, skipped: 'gate_closed' });
+    expect(deliver).not.toHaveBeenCalled();
+    expect((await stored(stuck.id)).pipeline_claimed_at).toBeNull();
+  });
+
   test('completion refuses missing durable steps even with a valid lease', async () => {
     const assessment = await seed();
     const claim = await runs.claimPipeline(assessment.id, db.knex);
@@ -254,7 +266,7 @@ const deferred = () => { let resolve; const promise = new Promise((r) => { resol
     expect((await stored(assessment.id)).pipeline_completed_at).toBeNull();
   });
 
-  test('recovery resumes unclaimed and expired runs with both feature gates off, without a client retry', async () => {
+  test('recovery resumes unclaimed and expired runs with the lawn visit gate off, without a client retry', async () => {
     // Keep the sweep's population local to this test while preserving prior assertions.
     await db.knex('lawn_assessment_runs').update({ pipeline_completed_at: db.knex.fn.now() });
     const unclaimed = await seed(), abandoned = await seed(), pending = await seed({ confirmed: false });

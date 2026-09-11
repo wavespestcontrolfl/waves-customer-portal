@@ -8,13 +8,13 @@ const rows = {
   customers: { id: 'c-1', first_name: 'Pat' },
 };
 jest.mock('../models/db', () => {
-  const table = (name) => ({
-    where: () => ({
-      first: async () => rows[name],
-      update: async (fields) => { updates.push([name, fields]); return 1; },
-    }),
+  const query = (name) => ({
+    first: async () => rows[name],
+    update: async (fields) => { updates.push([name, fields]); return 1; },
+    // The claim's second .where((q) => …) narrows an unsent row; the fixture row is unsent.
+    where: () => query(name),
   });
-  return table;
+  return (name) => ({ where: () => query(name) });
 });
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));
 jest.mock('../services/sms-template-renderer', () => ({ renderRequiredSmsTemplate: jest.fn(async () => 'Your report is ready') }));
@@ -48,6 +48,14 @@ describe('sendAssessmentNotification lease check', () => {
     expect(NotificationDispatcher.notify).toHaveBeenCalledTimes(1);
     expect(NotificationDispatcher.notify.mock.invocationCallOrder[0]).toBeGreaterThan(beforeSend.mock.invocationCallOrder[0]);
     expect(updates).toEqual([['lawn_assessments', expect.objectContaining({ notification_sent: true })]]);
+    // Claimed before the wire, never after: a crash mid-send cannot double-text.
+    expect(updates[0][1].notification_sent_at).toBeInstanceOf(Date);
+  });
+
+  test('a dispatcher that delivered nothing releases the claim for a re-send', async () => {
+    NotificationDispatcher.notify.mockResolvedValueOnce({ sent: false, results: { sms: 'blocked' } });
+    await expect(LawnIntel.sendAssessmentNotification('a-1')).resolves.toMatchObject({ sent: false });
+    expect(updates.map(([, f]) => f.notification_sent)).toEqual([true, false]);
   });
 
   test('a service-linked assessment never gets the standalone text, whoever calls', async () => {
@@ -62,6 +70,7 @@ describe('sendAssessmentNotification lease check', () => {
   test('other send failures are still swallowed as before', async () => {
     NotificationDispatcher.notify.mockRejectedValueOnce(new Error('carrier down'));
     await expect(LawnIntel.sendAssessmentNotification('a-1')).resolves.toBeNull();
-    expect(updates).toEqual([]);
+    // The claim stands: the dispatcher may already have put a text on the wire.
+    expect(updates.map(([, f]) => f.notification_sent)).toEqual([true]);
   });
 });
