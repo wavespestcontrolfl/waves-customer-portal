@@ -1684,11 +1684,12 @@ function WaveGuardForecastTab({ showToast, onUpdate }) {
   const [forecast, setForecast] = useState(null);
   const [loading, setLoading] = useState(true);
   const [creatingId, setCreatingId] = useState("");
-
   const load = useCallback(async () => {
     setLoading(true);
     try {
-      const data = await adminFetch(`/admin/inventory/waveguard-forecast?days=${encodeURIComponent(days)}`);
+      const data = await adminFetch(
+        `/admin/inventory/waveguard-forecast?days=${encodeURIComponent(days)}`,
+      );
       setForecast(data.forecast || null);
     } catch (err) {
       showToast(`Forecast failed: ${err.message}`);
@@ -1696,35 +1697,44 @@ function WaveGuardForecastTab({ showToast, onUpdate }) {
       setLoading(false);
     }
   }, [days, showToast]);
-
   useEffect(() => {
     load();
   }, [load]);
-
   async function createRestock(product) {
-    const qty = Number(product.recommendedOrderQuantity || product.shortfall || 0);
+    const qty = Number(
+      product.recommendedOrderQuantity || product.shortfall || 0,
+    );
     if (!qty || qty <= 0) {
       showToast("No forecasted order quantity for this product");
       return;
     }
     setCreatingId(product.productId);
     try {
-      const data = await adminFetch(`/admin/inventory/waveguard-forecast/${product.productId}/restock-request`, {
-        method: "POST",
-        body: JSON.stringify({
-          requestedQuantity: qty,
-          unit: product.inventoryUnit || product.demandUnit,
-          targetStock: product.targetStock,
-          neededBy: product.firstShortDate || forecast?.endDate || null,
-          priority: product.priority || (product.status === "short" ? "urgent" : "high"),
-          forecastDays: forecast?.days,
-          committedDemand: product.committedDemand,
-          projectedRemaining: product.projectedRemaining,
-          firstShortDate: product.firstShortDate,
-          reason: `${forecast?.days || days}-day WaveGuard forecast needs ${product.committedDemand} ${product.demandUnit || product.inventoryUnit || ""} of ${product.productName}.`,
-        }),
-      });
-      showToast(data.existing ? "Open restock request already exists" : "Forecast restock request created");
+      const data = await adminFetch(
+        `/admin/inventory/waveguard-forecast/${product.productId}/restock-request`,
+        {
+          method: "POST",
+          body: JSON.stringify({
+            requestedQuantity: qty,
+            unit: product.inventoryUnit || product.demandUnit,
+            targetStock: product.targetStock,
+            neededBy: product.firstShortDate || forecast?.endDate || null,
+            priority:
+              product.priority ||
+              (product.status === "short" ? "urgent" : "high"),
+            forecastDays: forecast?.days,
+            committedDemand: product.committedDemand,
+            projectedRemaining: product.projectedRemaining,
+            firstShortDate: product.firstShortDate,
+            reason: `${forecast?.days || days}-day WaveGuard forecast needs ${product.committedDemand} ${product.demandUnit || product.inventoryUnit || ""} of ${product.productName}.`,
+          }),
+        },
+      );
+      showToast(
+        data.existing
+          ? "Open restock request already exists"
+          : "Forecast restock request created",
+      );
       onUpdate && onUpdate();
       await load();
     } catch (err) {
@@ -1733,162 +1743,224 @@ function WaveGuardForecastTab({ showToast, onUpdate }) {
       setCreatingId("");
     }
   }
-
   const products = forecast?.products || [];
   const counts = forecast?.statusCounts || {};
-  const statusColor = (status) => {
-    if (status === "short") return D.red;
-    if (status === "warning" || status === "unit_mismatch") return D.amber;
-    if (status === "not_tracked") return D.muted;
-    return D.green;
-  };
   const statusLabel = (status) => String(status || "ok").replace(/_/g, " ");
-
   return (
-    <div style={sCard}>
-      <div style={{ display: "flex", justifyContent: "space-between", gap: 12, flexWrap: "wrap", marginBottom: 14 }}>
+    <Card className="p-5 mb-3">
+      <div className="flex justify-between gap-[12px] flex-wrap mb-[14px]">
         <div>
-          <h3 style={{ margin: 0, color: D.heading }}>WaveGuard inventory forecast</h3>
-          <p style={{ margin: "4px 0 0", color: D.muted, fontSize: 13 }}>
+          <h3 className="m-0 text-zinc-900">WaveGuard inventory forecast</h3>
+          <p className="text-ink-secondary text-ui-body">
             Upcoming lawn protocol demand compared against live product stock.
           </p>
         </div>
-        <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
-          <select value={days} onChange={(e) => setDays(Number(e.target.value))} style={{ ...sInput, width: 130 }}>
+        <div className="flex gap-[8px] items-center flex-wrap">
+          <Select
+            value={days}
+            onChange={(e) => setDays(Number(e.target.value))}
+            className="w-[130px]"
+          >
             <option value={7}>7 days</option>
             <option value={14}>14 days</option>
             <option value={30}>30 days</option>
             <option value={60}>60 days</option>
-          </select>
-          <button onClick={load} disabled={loading} style={sBtn(D.card, D.text)}>Refresh</button>
+          </Select>
+          <Button onClick={load} disabled={loading} variant="secondary">
+            Refresh
+          </Button>
         </div>
       </div>
 
       {forecast && (
-        <div style={{ display: "flex", gap: 10, flexWrap: "wrap", marginBottom: 14 }}>
+        <div className="flex gap-[10px] flex-wrap mb-[14px]">
           {[
-            { label: "Appointments", value: forecast.serviceCount || 0, color: D.heading },
-            { label: "Products", value: forecast.productCount || 0, color: D.heading },
-            { label: "Short", value: counts.short || 0, color: counts.short ? D.red : D.green },
-            { label: "Warnings", value: counts.warning || 0, color: counts.warning ? D.amber : D.green },
-            { label: "Unit Review", value: counts.unit_mismatch || 0, color: counts.unit_mismatch ? D.amber : D.green },
+            {
+              label: "Appointments",
+              value: forecast.serviceCount || 0,
+            },
+            {
+              label: "Products",
+              value: forecast.productCount || 0,
+            },
+            {
+              label: "Short",
+              value: counts.short || 0,
+              alert: counts.short > 0,
+            },
+            {
+              label: "Warnings",
+              value: counts.warning || 0,
+              alert: counts.warning > 0,
+            },
+            {
+              label: "Unit Review",
+              value: counts.unit_mismatch || 0,
+              alert: counts.unit_mismatch > 0,
+            },
           ].map((item) => (
-            <div key={item.label} style={{ border: `1px solid ${D.border}`, borderRadius: 8, padding: "10px 12px", minWidth: 120 }}>
-              <div style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 20, fontWeight: 700, color: item.color }}>{item.value}</div>
-              <div style={{ color: D.muted, fontSize: 11, textTransform: "uppercase", letterSpacing: 1 }}>{item.label}</div>
-            </div>
+            <Card
+              key={item.label}
+              className={
+                item.alert
+                  ? "min-w-[120px] p-3 border-alert-fg"
+                  : "min-w-[120px] p-3"
+              }
+            >
+              <div className="text-20 font-medium">{item.value}</div>
+              <div className="text-ink-secondary text-ui-body">
+                {item.label}
+              </div>
+            </Card>
           ))}
         </div>
       )}
 
       {loading ? (
-        <div style={{ color: D.muted, fontSize: 13 }}>Building forecast...</div>
+        <ActionFeedback>Building forecast…</ActionFeedback>
       ) : products.length === 0 ? (
-        <div style={{ color: D.muted, fontSize: 13 }}>No forecasted WaveGuard product demand in this window.</div>
+        <div className="text-ink-secondary text-ui-body">
+          No forecasted WaveGuard product demand in this window.
+        </div>
       ) : (
-        <div style={{ overflowX: "auto" }}>
-          <table style={{ width: "100%", borderCollapse: "collapse" }}>
-            <thead>
-              <tr>
-                {["Product", "Demand", "Stock", "Projected", "Status", "Upcoming", "Action"].map((h) => (
-                  <th key={h} style={thS}>{h}</th>
+        <div className="overflow-x-auto">
+          <Table className="w-full">
+            <THead>
+              <TR>
+                {[
+                  "Product",
+                  "Demand",
+                  "Stock",
+                  "Projected",
+                  "Status",
+                  "Upcoming",
+                  "Action",
+                ].map((h) => (
+                  <TH key={h}>{h}</TH>
                 ))}
-              </tr>
-            </thead>
-            <tbody>
+              </TR>
+            </THead>
+            <TBody>
               {products.map((product) => (
-                <tr key={product.productId}>
-                  <td style={tdS}>
+                <TR key={product.productId}>
+                  <TD>
                     <strong>{product.productName}</strong>
-                    <div style={{ color: D.muted, fontSize: 12 }}>{product.category || "Product"}</div>
-                  </td>
-                  <td style={tdS}>
-                    <strong>{product.committedDemand} {product.demandUnit || product.inventoryUnit || ""}</strong>
-                    <div style={{ color: product.conversionConfidence === "needs_review" ? D.amber : D.muted, fontSize: 12 }}>
-                      {String(product.conversionConfidence || "exact_unit").replace(/_/g, " ")}
+                    <div className="text-ink-secondary text-ui-body">
+                      {product.category || "Product"}
+                    </div>
+                  </TD>
+                  <TD>
+                    <strong>
+                      {product.committedDemand}{" "}
+                      {product.demandUnit || product.inventoryUnit || ""}
+                    </strong>
+                    <div className="text-ui-body">
+                      {String(
+                        product.conversionConfidence || "exact_unit",
+                      ).replace(/_/g, " ")}
                     </div>
                     {product.unconvertedDemand > 0 && (
-                      <div style={{ color: D.amber, fontSize: 12 }}>
+                      <div className="text-zinc-900 text-ui-body">
                         {product.unconvertedDemand} unit review
                       </div>
                     )}
-                  </td>
-                  <td style={tdS}>
+                  </TD>
+                  <TD>
                     {product.onHand ?? "—"} {product.inventoryUnit || ""}
                     {product.lowStockThreshold != null && (
-                      <div style={{ color: D.muted, fontSize: 12 }}>Low at {product.lowStockThreshold}</div>
+                      <div className="text-ink-secondary text-ui-body">
+                        Low at {product.lowStockThreshold}
+                      </div>
                     )}
-                  </td>
-                  <td style={tdS}>
-                    {product.projectedRemaining ?? "—"} {product.inventoryUnit || ""}
+                  </TD>
+                  <TD>
+                    {product.projectedRemaining ?? "—"}{" "}
+                    {product.inventoryUnit || ""}
                     {product.shortfall > 0 && (
-                      <div style={{ color: D.red, fontSize: 12 }}>Short {product.shortfall}</div>
+                      <div className="text-alert-fg text-ui-body">
+                        Short {product.shortfall}
+                      </div>
                     )}
-                  </td>
-                  <td style={tdS}>
-                    <span style={{
-                      padding: "4px 8px",
-                      borderRadius: 999,
-                      border: `1px solid ${statusColor(product.status)}`,
-                      color: statusColor(product.status),
-                      fontSize: 11,
-                      fontWeight: 700,
-                      textTransform: "uppercase",
-                    }}>
+                  </TD>
+                  <TD>
+                    <Badge
+                      tone={
+                        ["short", "warning"].includes(product.status)
+                          ? "alert"
+                          : "neutral"
+                      }
+                    >
                       {statusLabel(product.status)}
-                    </span>
+                    </Badge>
                     {product.firstShortDate && (
-                      <div style={{ color: D.red, fontSize: 12, marginTop: 4 }}>Blocks by {product.firstShortDate}</div>
+                      <div className="text-alert-fg text-ui-body mt-[4px]">
+                        Blocks by {product.firstShortDate}
+                      </div>
                     )}
-                  </td>
-                  <td style={tdS}>
+                  </TD>
+                  <TD>
                     {(product.appointments || []).slice(0, 3).map((appt) => (
-                      <div key={`${product.productId}-${appt.serviceId}`} style={{ marginBottom: 4 }}>
-                        <strong>{appt.scheduledDate}</strong> · {appt.customerName}
-                        <div style={{ color: D.muted, fontSize: 12 }}>
+                      <div
+                        key={`${product.productId}-${appt.serviceId}`}
+                        className="mb-[4px]"
+                      >
+                        <strong>{appt.scheduledDate}</strong> ·{" "}
+                        {appt.customerName}
+                        <div className="text-ink-secondary text-ui-body">
                           {appt.amount} {appt.unit}
-                          {appt.inventoryAmount != null && appt.inventoryUnit && appt.inventoryUnit !== appt.unit
+                          {appt.inventoryAmount != null &&
+                          appt.inventoryUnit &&
+                          appt.inventoryUnit !== appt.unit
                             ? ` = ${appt.inventoryAmount} ${appt.inventoryUnit}`
                             : ""}
-                          {" · "}{appt.protocolWindowTitle || appt.serviceType}
+                          {" · "}
+                          {appt.protocolWindowTitle || appt.serviceType}
                         </div>
                       </div>
                     ))}
                     {(product.appointments || []).length > 3 && (
-                      <div style={{ color: D.muted, fontSize: 12 }}>+{product.appointments.length - 3} more</div>
+                      <div className="text-ink-secondary text-ui-body">
+                        +{product.appointments.length - 3} more
+                      </div>
                     )}
-                  </td>
-                  <td style={tdS}>
+                  </TD>
+                  <TD>
                     {["short", "warning"].includes(product.status) ? (
-                      <button
+                      <Button
                         onClick={() => createRestock(product)}
                         disabled={creatingId === product.productId}
-                        style={sBtn(D.green, D.white)}
+                        variant="primary"
                       >
-                        Request {product.recommendedOrderQuantity} {product.inventoryUnit || product.demandUnit || ""}
-                      </button>
+                        Request {product.recommendedOrderQuantity}{" "}
+                        {product.inventoryUnit || product.demandUnit || ""}
+                      </Button>
                     ) : (
-                      <span style={{ color: D.muted }}>No request</span>
+                      <span className="text-ink-secondary">No request</span>
                     )}
-                  </td>
-                </tr>
+                  </TD>
+                </TR>
               ))}
-            </tbody>
-          </table>
+            </TBody>
+          </Table>
         </div>
       )}
 
       {(forecast?.errors || []).length > 0 && (
-        <div style={{ marginTop: 12, borderTop: `1px solid ${D.border}`, paddingTop: 12 }}>
-          <div style={{ color: D.amber, fontWeight: 700, fontSize: 13 }}>Plan errors</div>
+        <div className="mt-[12px] border-t border-solid border-zinc-200 pt-[12px]">
+          <div className="text-zinc-900 font-medium text-ui-body">
+            Plan errors
+          </div>
           {(forecast.errors || []).slice(0, 5).map((err) => (
-            <div key={err.serviceId} style={{ color: D.muted, fontSize: 12, marginTop: 4 }}>
+            <div
+              key={err.serviceId}
+              className="text-ink-secondary text-ui-body mt-[4px]"
+            >
               {err.scheduledDate} · {err.customerName}: {err.message}
             </div>
           ))}
         </div>
       )}
-    </div>
+    </Card>
   );
 }
 
