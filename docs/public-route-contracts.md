@@ -115,8 +115,16 @@ current catalog allowance, live route, eligibility and closures; changed state
 returns recoverable `SLOT_UNAVAILABLE` without acceptance writes. One-tap
 preparation failures retain its existing pick-a-time recovery. Version-1 holds
 keep their legacy path, while version-2 holds retain certification and allowance
-checks after gate shutdown. Independent-companion conversion/allocation remains
-the following stage; capacity stays off until it and the other writers integrate.
+checks after gate shutdown. Without combined allocation, excluded recurring
+companions and their follow-ups remain unassigned and without a promised window;
+they cannot inherit the certified primary trip. Version-2 primary-only holds
+preserve that separation even with `GATE_SEPARATE_COMBO_VISITS` off or capacity
+shut down. Version-2 parent allowances take precedence during follow-up seeding.
+Combined conversion stamps each member before seeding and preserves adjacent
+allocation order at the certified anchor, using a nonblocking day fence for
+callers already holding rows. A busy reorder aborts allocation for recovery.
+Capacity stays off until the other booking/dispatch writers and parent traffic
+prerequisites integrate.
 Activation also requires the remaining booking writers: phone-booking primary
 and follow-up inserts retain the owner's lock-free book-and-flag contract.
 Existing-row locks do not fence those inserts, and their post-commit conflict

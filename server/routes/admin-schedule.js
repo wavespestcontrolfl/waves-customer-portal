@@ -7000,10 +7000,10 @@ router.post('/bulk-action', requireAdmin, async (req, res, next) => {
               // options.expect); deliberately NOT SELECT..FOR UPDATE, which
               // would widen this quick single-row mover's tx shape for no
               // added safety. updated_at stays out of the predicate: knex
-              // never auto-touches it and not every mover stamps it (this
-              // UPDATE doesn't), so it isn't a reliable change marker. Zero
-              // rows matched = the row changed under us; refuse this id (the
-              // batch carries the reason).
+              // never auto-touches it, so it isn't a reliable CAS marker; this
+              // UPDATE does stamp it (the movers' change time, which SMS
+              // follow-up reads). Zero rows matched = the row changed under
+              // us; refuse this id (the batch carries the reason).
               const prevDate = normalizeDateOnly(svc.scheduled_date);
               // Tech-day membership change (bulk board move): shared fence
               // for the leaving and joining day + drop the stale sequence
@@ -7036,7 +7036,7 @@ router.post('/bulk-action', requireAdmin, async (req, res, next) => {
                   }),
                 svc,
               )
-                .update({ ...updates, ...recurringDispatchDuePatch(svc, updates) })
+                .update({ ...updates, ...recurringDispatchDuePatch(svc, updates), updated_at: new Date() })
                 // The technician on the COMMITTED row (the CAS does not pin
                 // technician_id): the move notice below goes to them.
                 .returning(['id', 'technician_id']);
