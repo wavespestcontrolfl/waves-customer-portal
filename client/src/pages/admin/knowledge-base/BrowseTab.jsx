@@ -419,7 +419,8 @@ export default function BrowseTab({ showFeedback, onRefresh, isMobile }) {
                         <span className="mt-2 flex flex-wrap gap-2">
                           <Badge>{sentenceCase(entry.confidence)}</Badge>
                           <Badge>{sentenceCase(entry.category)}</Badge>
-                          {entry.status === "flagged" && <Badge tone="alert">Flagged</Badge>}
+                          {/* Every status is visible, as main's status-coloured row border was. */}
+                          <Badge tone={statusTone(entry.status)}>{sentenceCase(entry.status)}</Badge>
                         </span>
                       </span>
                       <span className="shrink-0 text-ui-caption text-ink-secondary u-nums">
