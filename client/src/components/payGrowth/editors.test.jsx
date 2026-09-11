@@ -27,7 +27,7 @@ const ROLES = [
 
 function view(overrides = {}) {
   return {
-    person: { id: 'tech-a', pay_rate: '22.00', job_title: 'Technician' },
+    person: { id: 'tech-a', pay_rate: '22.00', job_title: 'Technician', employment_status: 'active' },
     month: '2026-04',
     can_manage: true,
     program: { roles: ROLES },
@@ -278,6 +278,16 @@ describe('ProgramSetup', () => {
     expect(body.effective_date).toBe(etDateString(new Date()));
     expect(body).toHaveProperty('id');
   });
+
+  it('keeps simulation levels read-only for an inactive employee', () => {
+    render(<ProgramSetup setup={setup} view={view({ person: { id: 'tech-a', pay_rate: '22.00', job_title: 'Technician', employment_status: 'inactive' } })} onSaved={vi.fn()} />);
+    expect(screen.getByRole('button', { name: 'Save simulation level' })).toBeDisabled();
+    expect(screen.getByLabelText('Simulation role')).toBeDisabled();
+    expect(screen.getByText(/read-only for former employees/)).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Save simulation definition' })).not.toBeDisabled();
+    fireEvent.click(screen.getByRole('button', { name: 'Save simulation level' }));
+    expect(request).not.toHaveBeenCalled();
+  });
 });
 
 describe('Growth', () => {
@@ -326,6 +336,37 @@ describe('Growth', () => {
     expect(screen.getByLabelText('Assess from role')).toHaveValue('');
     expect(screen.getByText(/Record the employee’s simulation level/)).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Retain assessment' })).toBeDisabled();
+  });
+
+  it('blocks a reassessment on dates where the original starting role is no longer in effect', async () => {
+    request.mockImplementation((path, options = {}) => {
+      if (options.method === 'POST') return Promise.resolve({});
+      return Promise.reject(new Error(`unexpected path ${path}`));
+    });
+    const levels = [{ id: 'l2', role_key: 'technician_ii', effective_date: '2026-03-01' }, { id: 'l1', role_key: 'technician_i', effective_date: '2026-01-15' }];
+    const previous = { id: 'a1', previous_id: null, from_role: 'technician_i', to_role: 'technician_ii', assessed_date: '2026-02-10', assessor_name: 'Owner', rubric_version: 'Rubric v2',
+      assessment: { items: [{ label: 'Calibration', critical: true, result: 'needs_work', evidence: 'Missed a dose.' }], sustained_results: 'needs_work', outcome_reference: 'One month.' }, result: { status: 'needs_work', management: false } };
+    render(<Growth view={view({ levels, level: levels[0], assessments: [previous] })} manage onSaved={vi.fn()} />);
+    fireEvent.click(screen.getByRole('button', { name: 'Record reassessment' }));
+    expect(screen.getByLabelText('Assess from role')).toHaveValue('technician_ii');
+    expect(screen.getByLabelText('Next step')).toHaveValue('Technician II');
+    expect(screen.getByText(/simulation level is Technician II, not Technician I/)).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Retain assessment' })).toBeDisabled();
+    expect(screen.getByLabelText('Assessment date')).toHaveAttribute('min', '2026-02-10');
+    fireEvent.change(screen.getByLabelText('Assessment date'), { target: { value: '2026-02-20' } });
+    expect(screen.getByLabelText('Assess from role')).toHaveValue('technician_i');
+    expect(screen.getByLabelText('Next step')).toHaveValue('Technician II');
+    expect(screen.getByRole('button', { name: 'Retain assessment' })).not.toBeDisabled();
+    fireEvent.change(screen.getByLabelText('Rubric version / reference'), { target: { value: 'Rubric v2' } });
+    fireEvent.change(screen.getByLabelText('Item 1 evidence'), { target: { value: 'Calibrated correctly on four stops.' } });
+    fireEvent.change(screen.getByLabelText('Verified outcome evidence / observation period'), { target: { value: 'Two weeks.' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Retain assessment' }));
+    await waitFor(() => expect(lastCallBody('/assessments')).toBeTruthy());
+    const body = lastCallBody('/assessments');
+    expect(body.previous_id).toBe('a1');
+    expect(body.from_role).toBe('technician_i');
+    expect(body.to_role).toBe('technician_ii');
+    expect(body.assessed_date).toBe('2026-02-20');
   });
 });
 

@@ -13,13 +13,17 @@ const PATH_NOTES = {
 
 function AssessmentForm({ view, previous, onCancel, onSaved }) {
   const roles = view.program.roles;
-  // The server accepts only the level in effect on the assessed date as the starting role.
+  const roleTitle = key => roles.find(role => role.key === key)?.title || words(key);
+  // The server accepts only the level in effect on the assessed date as the starting role —
+  // for a reassessment too, which therefore needs a date on which the original step's
+  // starting role was still in effect.
   const roleOn = day => view.levels.find(row => date(row.effective_date) <= day)?.role_key || null;
   const today = etDateString(new Date());
-  const from = previous?.from_role || roleOn(today) || 'trainee';
+  const earliest = previous ? date(previous.assessed_date) : undefined;
+  const nextStep = key => roles[Math.min(roles.findIndex(role => role.key === key) + 1, roles.length - 1)].key;
   const [data, setData] = useState(() => ({
     id: crypto.randomUUID(), technician_id: view.person.id, previous_id: previous?.id || null,
-    from_role: from, to_role: previous?.to_role || roles[Math.min(roles.findIndex(role => role.key === from) + 1, 4)].key,
+    to_role: previous?.to_role || nextStep(roleOn(today) || 'trainee'),
     assessed_date: today, rubric_version: previous?.rubric_version || '',
     items: previous ? previous.assessment.items.map(item => ({ ...item, result: 'not_observed', evidence: '' })) : [{ label: 'Practical assessment', critical: true, result: 'not_observed', evidence: '' }],
     sustained_results: 'not_enough_evidence', outcome_reference: '', paid_development_reference: '', position_available: null,
@@ -28,28 +32,28 @@ function AssessmentForm({ view, previous, onCancel, onSaved }) {
   const [error, setError] = useState('');
   const management = ['service_manager', 'general_manager'].includes(data.to_role);
   const change = (key, value) => setData(current => ({ ...current, [key]: value }));
-  const nextStep = key => roles[Math.min(roles.findIndex(role => role.key === key) + 1, roles.length - 1)].key;
   function changeDate(day) {
     const effective = previous ? null : roleOn(day);
-    setData(current => ({ ...current, assessed_date: day, ...(effective ? { from_role: effective, to_role: nextStep(effective) } : {}) }));
+    setData(current => ({ ...current, assessed_date: day, ...(effective ? { to_role: nextStep(effective) } : {}) }));
   }
-  const effective = previous ? previous.from_role : roleOn(data.assessed_date);
-  const ladderEnd = effective === 'general_manager';
-  const blocked = !effective || ladderEnd;
+  const effective = roleOn(data.assessed_date);
+  const ladderEnd = !previous && effective === 'general_manager';
+  const stepMismatch = Boolean(previous && effective && effective !== previous.from_role);
+  const blocked = !effective || ladderEnd || stepMismatch;
   const itemChange = (index, key, value) => change('items', data.items.map((item, i) => i === index ? { ...item, [key]: value } : item));
   async function save(event) {
     event.preventDefault(); setBusy(true); setError('');
-    try { await request('/assessments', { method: 'POST', body: data }); onSaved('Assessment retained with its rubric, evidence, and assessor.'); }
+    try { await request('/assessments', { method: 'POST', body: { ...data, from_role: effective } }); onSaved('Assessment retained with its rubric, evidence, and assessor.'); }
     catch (failure) { setError(failure.message); }
     finally { setBusy(false); }
   }
   return <form className="pg-card pg-form" onSubmit={save}><h2>{previous ? 'Record reassessment' : 'Record practical assessment'}</h2><p>Use the published rubric and this employee’s verified results. Public reviews and the owner’s historical production do not set promotion thresholds.</p>{error && <p role="alert" className="pg-error">{error}</p>}<fieldset disabled={busy}>
-    <div className="pg-form-grid"><Field label="Assess from role" value={effective || ''} disabled options={[{ value: '', label: 'No simulation level on this date' }, ...roles.map(role => ({ value: role.key, label: role.title }))]} onChange={() => {}} hint="Fixed to the simulation level in effect on the assessment date." /><Field label="Next step" value={roles.find(role => role.key === data.to_role)?.title || ''} readOnly /><Field label="Assessment date" type="date" max={today} required value={data.assessed_date} onChange={event => changeDate(event.target.value)} /><Field label="Rubric version / reference" required maxLength={100} value={data.rubric_version} onChange={event => change('rubric_version', event.target.value)} /></div>
+    <div className="pg-form-grid"><Field label="Assess from role" value={effective || ''} disabled options={[{ value: '', label: 'No simulation level on this date' }, ...roles.map(role => ({ value: role.key, label: role.title }))]} onChange={() => {}} hint="Fixed to the simulation level in effect on the assessment date." /><Field label="Next step" value={roles.find(role => role.key === data.to_role)?.title || ''} readOnly /><Field label="Assessment date" type="date" min={earliest} max={today} required value={data.assessed_date} onChange={event => changeDate(event.target.value)} /><Field label="Rubric version / reference" required maxLength={100} value={data.rubric_version} onChange={event => change('rubric_version', event.target.value)} /></div>
     {data.items.map((item, index) => <div className="pg-form-row" key={index}><Field label={`Practical item ${index + 1}`} required maxLength={250} value={item.label} onChange={event => itemChange(index, 'label', event.target.value)} /><div className="pg-form-grid"><Field label={`Item ${index + 1} result`} value={item.result} options={['not_observed', 'pass', 'needs_work'].map(value => ({ value, label: words(value) }))} onChange={event => itemChange(index, 'result', event.target.value)} /><Field label={`Item ${index + 1} is critical`} value={String(item.critical)} options={[{ value: 'true', label: 'Yes' }, { value: 'false', label: 'No' }]} onChange={event => itemChange(index, 'critical', event.target.value === 'true')} /></div><Field label={`Item ${index + 1} evidence`} multiline required maxLength={2000} value={item.evidence} onChange={event => itemChange(index, 'evidence', event.target.value)} />{data.items.length > 1 && <Button variant="secondary" onClick={() => change('items', data.items.filter((_, i) => i !== index))}>Remove item {index + 1}</Button>}</div>)}
     <Button variant="secondary" disabled={data.items.length >= 50} onClick={() => change('items', [...data.items, { label: '', critical: false, result: 'not_observed', evidence: '' }])}>Add practical item</Button>
     <Field label="Sustained service outcomes" value={data.sustained_results} options={['not_enough_evidence', 'verified', 'needs_work'].map(value => ({ value, label: words(value) }))} onChange={event => change('sustained_results', event.target.value)} /><Field label="Verified outcome evidence / observation period" multiline required maxLength={2000} value={data.outcome_reference} onChange={event => change('outcome_reference', event.target.value)} />
     {management && <><Field label="Paid management-development evidence" multiline maxLength={2000} value={data.paid_development_reference} onChange={event => change('paid_development_reference', event.target.value)} /><Field label="Management position available" value={data.position_available == null ? '' : String(data.position_available)} options={[{ value: '', label: 'Not determined' }, { value: 'true', label: 'Yes' }, { value: 'false', label: 'No' }]} onChange={event => change('position_available', event.target.value === '' ? null : event.target.value === 'true')} /></>}
-    <p className="pg-muted">The signed-in admin is recorded as assessor. Saving records the assessment; title and pay decisions follow the published terms.</p>{!effective && <p className="pg-error">Record the employee’s simulation level for this date before assessing the next step.</p>}{ladderEnd && <p className="pg-error">General Manager is the top of the ladder; there is no next step to assess on this date.</p>}<div className="pg-form-actions"><Button variant="secondary" onClick={onCancel}>Cancel</Button><Button type="submit" disabled={blocked} loading={busy}>Retain assessment</Button></div>
+    <p className="pg-muted">The signed-in admin is recorded as assessor. Saving records the assessment; title and pay decisions follow the published terms.</p>{!effective && <p className="pg-error">Record the employee’s simulation level for this date before assessing the next step.</p>}{ladderEnd && <p className="pg-error">General Manager is the top of the ladder; there is no next step to assess on this date.</p>}{stepMismatch && <p className="pg-error">On this date the employee’s simulation level is {roleTitle(effective)}, not {roleTitle(previous.from_role)}. Choose a date on or after the original assessment while that level was still in effect.</p>}<div className="pg-form-actions"><Button variant="secondary" onClick={onCancel}>Cancel</Button><Button type="submit" disabled={blocked} loading={busy}>Retain assessment</Button></div>
   </fieldset></form>;
 }
 
