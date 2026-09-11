@@ -15,9 +15,24 @@ import { useSearchParams } from "react-router-dom";
 import { UserPlus, Phone, MessageSquare, Mail } from "lucide-react";
 import AdminCommandHeader from "../../components/admin/AdminCommandHeader";
 import {
-  Button, Badge, Card, CardBody,
-  Dialog, DialogHeader, DialogTitle, DialogBody, DialogFooter,
-  Textarea, cn,
+  Button,
+  Badge,
+  Card,
+  CardBody,
+  Dialog,
+  DialogHeader,
+  DialogTitle,
+  DialogBody,
+  DialogFooter,
+  Textarea,
+  Field,
+  UiSurface,
+  Tabs,
+  TabList,
+  Tab,
+  ActionFeedback,
+  buttonStyles,
+  cn,
 } from "../../components/ui";
 
 const API_BASE = import.meta.env.VITE_API_URL || "/api";
@@ -32,7 +47,12 @@ async function adminFetch(path, options = {}) {
   });
   if (!r.ok) {
     let message = `HTTP ${r.status}`;
-    try { const d = await r.clone().json(); message = d.error || d.message || message; } catch { /* noop */ }
+    try {
+      const d = await r.clone().json();
+      message = d.error || d.message || message;
+    } catch {
+      /* noop */
+    }
     const err = new Error(message);
     err.status = r.status;
     throw err;
@@ -50,7 +70,11 @@ export const STATUS_TABS = [
   { key: "withdrawn", label: "Withdrawn" },
 ];
 
-const ROLE_LABELS = { technician: "Technician", sales: "Sales", other: "Other" };
+const ROLE_LABELS = {
+  technician: "Technician",
+  sales: "Sales",
+  other: "Other",
+};
 
 export const ANSWER_LABELS = {
   drivers_license: "FL driver's license / insurable record",
@@ -79,13 +103,18 @@ function formatETDateTime(dateStr) {
   if (Number.isNaN(d.getTime())) return "—";
   return d.toLocaleString("en-US", {
     timeZone: "America/New_York",
-    month: "short", day: "numeric", hour: "numeric", minute: "2-digit",
+    month: "short",
+    day: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
   });
 }
 
 function RecommendationBadge({ recommendation }) {
   if (!recommendation) return <Badge>Unscored</Badge>;
-  const label = { strong: "Strong", possible: "Possible", weak: "Weak" }[recommendation] || recommendation;
+  const label =
+    { strong: "Strong", possible: "Possible", weak: "Weak" }[recommendation] ||
+    recommendation;
   return <Badge>{label}</Badge>;
 }
 
@@ -104,25 +133,34 @@ export default function RecruitingPage() {
   // must never overwrite the current tab's list (codex P2).
   const requestSeq = useRef(0);
 
-  const load = useCallback(async (status, { offset = 0, append = false } = {}) => {
-    const seq = ++requestSeq.current;
-    if (!append) setLoading(true);
-    setError(null);
-    try {
-      const data = await adminFetch(
-        `/admin/careers?status=${encodeURIComponent(status)}&offset=${offset}`,
-      );
-      if (seq !== requestSeq.current) return; // superseded by a newer request
-      setApplications((prev) => (append ? [...prev, ...(data.applications || [])] : (data.applications || [])));
-      setCounts(data.counts || {});
-    } catch (err) {
-      if (seq === requestSeq.current) setError(err.message);
-    } finally {
-      if (seq === requestSeq.current) setLoading(false);
-    }
-  }, []);
+  const load = useCallback(
+    async (status, { offset = 0, append = false } = {}) => {
+      const seq = ++requestSeq.current;
+      if (!append) setLoading(true);
+      setError(null);
+      try {
+        const data = await adminFetch(
+          `/admin/careers?status=${encodeURIComponent(status)}&offset=${offset}`,
+        );
+        if (seq !== requestSeq.current) return; // superseded by a newer request
+        setApplications((prev) =>
+          append
+            ? [...prev, ...(data.applications || [])]
+            : data.applications || [],
+        );
+        setCounts(data.counts || {});
+      } catch (err) {
+        if (seq === requestSeq.current) setError(err.message);
+      } finally {
+        if (seq === requestSeq.current) setLoading(false);
+      }
+    },
+    [],
+  );
 
-  useEffect(() => { load(tab); }, [tab, load]);
+  useEffect(() => {
+    load(tab);
+  }, [tab, load]);
 
   // Same monotonic guard as the list: a slow response for applicant A must
   // not replace an already-opened applicant B (a status/note could land on
@@ -183,34 +221,49 @@ export default function RecruitingPage() {
   const screen = detail?.ai_screen || null;
 
   return (
-    <div className="max-w-[1000px]">
-      <AdminCommandHeader title="Recruiting" icon={UserPlus} />
+    <UiSurface density="comfortable" className="mx-auto max-w-[1300px]">
+      <AdminCommandHeader
+        variant="workspace"
+        title="Recruiting"
+        icon={UserPlus}
+      />
 
-      <div className="flex flex-wrap gap-1.5 mb-4" role="tablist" aria-label="Application status">
-        {STATUS_TABS.map(({ key, label }) => (
-          <Button
-            key={key}
-            role="tab"
-            aria-selected={tab === key}
-            variant={tab === key ? "primary" : "secondary"}
-            size="sm"
-            onClick={() => setTab(key)}
-          >
-            {label}
-            {counts[key] ? <span className="ml-1 tabular-nums">{counts[key]}</span> : null}
-          </Button>
-        ))}
-      </div>
+      <Tabs
+        value={tab}
+        onValueChange={setTab}
+        variant="section"
+        className="mb-5"
+      >
+        <TabList scrollable aria-label="Application status">
+          {STATUS_TABS.map(({ key, label }) => (
+            <Tab key={key} value={key}>
+              {label}
+              {counts[key] ? (
+                <span className="ml-1 u-nums">{counts[key]}</span>
+              ) : null}
+            </Tab>
+          ))}
+        </TabList>
+      </Tabs>
 
-      {error && <div className="text-14 text-alert-fg mb-3">{error}</div>}
+      {error && (
+        <ActionFeedback error className="mb-3">
+          {error}
+        </ActionFeedback>
+      )}
       {loading ? (
-        <div className="text-14 text-zinc-500 p-8 text-center">Loading applications…</div>
+        <div className="text-14 text-zinc-500 p-8 text-center">
+          Loading applications…
+        </div>
       ) : applications.length === 0 ? (
-        <Card><CardBody>
-          <div className="text-14 text-zinc-500 text-center py-6">
-            No {STATUS_TABS.find((t) => t.key === tab)?.label.toLowerCase()} applications.
-          </div>
-        </CardBody></Card>
+        <Card>
+          <CardBody>
+            <div className="text-14 text-zinc-500 text-center py-6">
+              No {STATUS_TABS.find((t) => t.key === tab)?.label.toLowerCase()}{" "}
+              applications.
+            </div>
+          </CardBody>
+        </Card>
       ) : (
         <div className="flex flex-col gap-2">
           {applications.map((app) => {
@@ -220,26 +273,48 @@ export default function RecruitingPage() {
                 <CardBody>
                   <button
                     type="button"
-                    className="w-full text-left appearance-none border-0 bg-transparent p-0 cursor-pointer"
-                    onClick={() => openDetail(app.id)}
+                    className="min-h-11 w-full text-left appearance-none border-0 bg-transparent p-0 cursor-pointer rounded-md u-focus-ring"
+                    onClick={(event) => {
+                      event.currentTarget.focus({ preventScroll: true });
+                      openDetail(app.id);
+                    }}
                   >
-                    <div className="flex items-center justify-between gap-3">
+                    <div className="flex flex-col items-start justify-between gap-3 lg:flex-row lg:items-center">
                       <div className="min-w-0">
                         <div className="text-14 font-medium text-zinc-900 truncate">
                           {c.name || "Unknown"}
-                          <span className="text-zinc-400 font-normal"> · {ROLE_LABELS[app.role] || app.role}</span>
-                          {app.language === "es" && <span className="text-zinc-400 font-normal"> · ES</span>}
+                          <span className="text-zinc-400 font-normal">
+                            {" "}
+                            · {ROLE_LABELS[app.role] || app.role}
+                          </span>
+                          {app.language === "es" && (
+                            <span className="text-zinc-400 font-normal">
+                              {" "}
+                              · ES
+                            </span>
+                          )}
                         </div>
                         {app.ai_summary && (
-                          <div className="text-14 text-zinc-500 mt-0.5 truncate">{app.ai_summary}</div>
+                          <div className="text-14 text-zinc-500 mt-0.5 truncate">
+                            {app.ai_summary}
+                          </div>
                         )}
                       </div>
-                      <div className="flex items-center gap-3 shrink-0">
-                        <RecommendationBadge recommendation={app.ai_recommendation} />
-                        <span className={cn("text-16 tabular-nums font-medium", scoreTone(app.ai_score))}>
+                      <div className="flex flex-wrap items-center gap-3">
+                        <RecommendationBadge
+                          recommendation={app.ai_recommendation}
+                        />
+                        <span
+                          className={cn(
+                            "text-16 tabular-nums font-medium",
+                            scoreTone(app.ai_score),
+                          )}
+                        >
                           {app.ai_score != null ? app.ai_score : "—"}
                         </span>
-                        <span className="text-14 text-zinc-400">{formatETDateTime(app.created_at)}</span>
+                        <span className="text-14 text-zinc-400">
+                          {formatETDateTime(app.created_at)}
+                        </span>
                       </div>
                     </div>
                   </button>
@@ -252,7 +327,9 @@ export default function RecruitingPage() {
               <Button
                 size="sm"
                 variant="secondary"
-                onClick={() => load(tab, { offset: applications.length, append: true })}
+                onClick={() =>
+                  load(tab, { offset: applications.length, append: true })
+                }
               >
                 Load more ({applications.length} of {counts[tab]})
               </Button>
@@ -266,45 +343,89 @@ export default function RecruitingPage() {
           <>
             <DialogHeader>
               <DialogTitle>
-                {contact.name || "Applicant"} — {ROLE_LABELS[detail.role] || detail.role}
+                {contact.name || "Applicant"} —{" "}
+                {ROLE_LABELS[detail.role] || detail.role}
               </DialogTitle>
             </DialogHeader>
             <DialogBody>
               <div className="flex flex-wrap items-center gap-3 mb-4">
                 {contact.phone && (
                   <>
-                    <a className="inline-flex items-center gap-1 text-14 text-zinc-700 underline" href={`tel:${contact.phone}`}>
-                      <Phone className="w-4 h-4" />{contact.phone}
+                    <a
+                      className={buttonStyles({
+                        variant: "ghost",
+                        density: "comfortable",
+                        className: "max-w-full break-all whitespace-normal",
+                      })}
+                      href={`tel:${contact.phone}`}
+                    >
+                      <Phone className="w-4 h-4" />
+                      {contact.phone}
                     </a>
-                    <a className="inline-flex items-center gap-1 text-14 text-zinc-700 underline" href={`sms:${contact.phone}`}>
-                      <MessageSquare className="w-4 h-4" />Text
+                    <a
+                      className={buttonStyles({
+                        variant: "ghost",
+                        density: "comfortable",
+                        className: "max-w-full break-all whitespace-normal",
+                      })}
+                      href={`sms:${contact.phone}`}
+                    >
+                      <MessageSquare className="w-4 h-4" />
+                      Text
                     </a>
                   </>
                 )}
                 {contact.email && (
-                  <a className="inline-flex items-center gap-1 text-14 text-zinc-700 underline" href={`mailto:${contact.email}`}>
-                    <Mail className="w-4 h-4" />{contact.email}
+                  <a
+                    className={buttonStyles({
+                      variant: "ghost",
+                      density: "comfortable",
+                      className: "max-w-full break-all whitespace-normal",
+                    })}
+                    href={`mailto:${contact.email}`}
+                  >
+                    <Mail className="w-4 h-4" />
+                    {contact.email}
                   </a>
                 )}
-                {contact.city && <span className="text-14 text-zinc-500">{contact.city}</span>}
+                {contact.city && (
+                  <span className="text-14 text-zinc-500">{contact.city}</span>
+                )}
                 <Badge>{detail.status}</Badge>
               </div>
 
               {screen && (
                 <div className="mb-4 border-hairline border rounded p-3">
                   <div className="flex items-center gap-3 mb-1.5">
-                    <span className={cn("text-20 tabular-nums font-medium", scoreTone(detail.ai_score))}>
+                    <span
+                      className={cn(
+                        "text-20 tabular-nums font-medium",
+                        scoreTone(detail.ai_score),
+                      )}
+                    >
                       {detail.ai_score}
                     </span>
-                    <RecommendationBadge recommendation={detail.ai_recommendation} />
-                    <span className="text-14 text-zinc-400">AI screen — ranking assist only</span>
+                    <RecommendationBadge
+                      recommendation={detail.ai_recommendation}
+                    />
+                    <span className="text-14 text-zinc-400">
+                      AI screen — ranking assist only
+                    </span>
                   </div>
-                  {screen.summary && <div className="text-14 text-zinc-700 mb-1.5">{screen.summary}</div>}
+                  {screen.summary && (
+                    <div className="text-14 text-zinc-700 mb-1.5">
+                      {screen.summary}
+                    </div>
+                  )}
                   {screen.strengths?.length > 0 && (
-                    <div className="text-14 text-zinc-600">Strengths: {screen.strengths.join(" · ")}</div>
+                    <div className="text-14 text-zinc-600">
+                      Strengths: {screen.strengths.join(" · ")}
+                    </div>
                   )}
                   {screen.flags?.length > 0 && (
-                    <div className="text-14 text-amber-700 mt-0.5">Probe: {screen.flags.join(" · ")}</div>
+                    <div className="text-ui-body text-ink-secondary mt-0.5">
+                      Probe: {screen.flags.join(" · ")}
+                    </div>
                   )}
                 </div>
               )}
@@ -314,32 +435,51 @@ export default function RecruitingPage() {
                   .filter(([key]) => detail.answers?.[key])
                   .map(([key, label]) => (
                     <div key={key}>
-                      <div className="text-14 uppercase tracking-label text-zinc-500">{label}</div>
-                      <div className="text-14 text-zinc-800 whitespace-pre-wrap">{detail.answers[key]}</div>
+                      <div className="text-ui-caption font-medium text-ink-secondary">
+                        {label}
+                      </div>
+                      <div className="text-14 text-zinc-800 whitespace-pre-wrap">
+                        {detail.answers[key]}
+                      </div>
                     </div>
                   ))}
               </div>
 
-              <Textarea
-                value={note}
-                onChange={(e) => setNote(e.target.value)}
-                placeholder="Optional note for this status change…"
-                rows={2}
-              />
+              <Field
+                label="Status change note"
+                help="Optional note for this status change."
+              >
+                <Textarea
+                  value={note}
+                  onChange={(e) => setNote(e.target.value)}
+                  placeholder="Optional note for this status change…"
+                  rows={2}
+                />
+              </Field>
             </DialogBody>
             <DialogFooter>
               <div className="flex flex-wrap gap-1.5">
-                {STATUS_TABS.filter(({ key }) => key !== detail.status).map(({ key, label }) => (
-                  <Button key={key} size="sm" variant="secondary" disabled={busy} onClick={() => setStatus(detail.id, key)}>
-                    {label}
-                  </Button>
-                ))}
-                <Button size="sm" variant="ghost" onClick={closeDetail}>Close</Button>
+                {STATUS_TABS.filter(({ key }) => key !== detail.status).map(
+                  ({ key, label }) => (
+                    <Button
+                      key={key}
+                      size="sm"
+                      variant="secondary"
+                      disabled={busy}
+                      onClick={() => setStatus(detail.id, key)}
+                    >
+                      {label}
+                    </Button>
+                  ),
+                )}
+                <Button size="sm" variant="ghost" onClick={closeDetail}>
+                  Close
+                </Button>
               </div>
             </DialogFooter>
           </>
         )}
       </Dialog>
-    </div>
+    </UiSurface>
   );
 }
