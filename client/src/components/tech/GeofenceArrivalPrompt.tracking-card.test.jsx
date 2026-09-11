@@ -12,9 +12,9 @@ function notification(type, payload, id = `n-${type}`) {
   return { id, type, message: 'server message', payload, created_at: '2026-09-08T18:41:00Z' };
 }
 
-const STAGE1 = notification('follow_through_tracking', { stage: 1, customer_name: 'Ichi', when: 'Thu Sep 10, 9–11 AM' }, 'n-track-1');
+const STAGE1 = notification('follow_through_tracking', { stage: 1, customer_name: 'Customer One', when: 'Thu Sep 10, 9–11 AM' }, 'n-track-1');
 STAGE1.message = 'No departure or arrival is recorded for this window yet.';
-const STAGE2 = notification('follow_through_tracking', { stage: 2, customer_name: 'Magno', when: 'Thu Sep 10, 9–11 AM' }, 'n-track-2');
+const STAGE2 = notification('follow_through_tracking', { stage: 2, customer_name: 'Customer Two', when: 'Thu Sep 10, 9–11 AM' }, 'n-track-2');
 STAGE2.message = 'The promised window ended over 30 minutes ago; no arrival is recorded.';
 
 function stubFeed(notifications, { failPosts = false } = {}) {
@@ -50,7 +50,7 @@ describe('GeofenceArrivalPrompt — missing-tracking cards', () => {
     expect(card).toHaveTextContent('No departure or arrival is recorded for this window yet.');
     // Identifies the visit — a tech with more than one open stop can't tell
     // which one a bare stage message is about (codex P1).
-    expect(card).toHaveTextContent('Ichi');
+    expect(card).toHaveTextContent('Customer One');
     expect(card).toHaveTextContent('Thu Sep 10, 9–11 AM');
     expect(screen.getByRole('button', { name: 'Got it' })).toBeInTheDocument();
   });
