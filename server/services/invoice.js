@@ -586,10 +586,24 @@ function stackInvoiceDocumentDiscounts(serviceLines, entries, manualDiscountRows
       : lineItemDiscountTerm(row, item)));
     return { ordered, terms, parentAmount };
   });
-  const documentStoredTerms = documentDiscountEntries.map(({ item }) => ({
-    discountType: "fixed_amount",
-    amount: storedDiscountDollars(item),
-  }));
+  // A stamp narrowed to one service reaches only the lines carrying that
+  // service key; an unscoped one reaches every line (eligibleLines absent).
+  // A scope that matches NO line leaves the term with an empty pool, so it
+  // takes $0 rather than silently spreading everywhere.
+  const documentStoredTerms = documentDiscountEntries.map(({ item }) => {
+    const scopeKey = item.document_scope_service_key || null;
+    return {
+      discountType: "fixed_amount",
+      amount: storedDiscountDollars(item),
+      ...(scopeKey
+        ? {
+          eligibleLines: serviceLines
+            .map((line, i) => (String(line.service_key || "") === String(scopeKey) ? i : -1))
+            .filter((i) => i >= 0),
+        }
+        : {}),
+    };
+  });
   const documentManualTerms = manualDiscountRows.map((d) => ({
     discountType: d.discount_type,
     amount: Number(d.amount) || 0,
@@ -678,6 +692,7 @@ function buildDiscountLineItem({
   discountType,
   discountAmount,
   discountDollars,
+  documentScopeServiceKey = null,
 }) {
   if (!hasNumericValue(discountDollars)) return null;
   const dollars = roundMoney(discountDollars);
@@ -695,6 +710,11 @@ function buildDiscountLineItem({
     // pure arithmetic top-up, not a discount term, and is built inline
     // rather than through this function (so it never gets this flag).
     document_discount: !parentClientId,
+    // A scheduled appointment discount can be narrowed to one service
+    // (scheduled_services.discount_service_key_filter). The invoice replay
+    // has to carry that, or the document stack spreads a scoped credit over
+    // every line (Codex #4405 r3 P1). Null/absent = reaches every line.
+    document_scope_service_key: !parentClientId ? (documentScopeServiceKey || null) : undefined,
     description: discountName || "Line item discount",
     quantity: 1,
     unit_price: -dollars,
@@ -802,6 +822,9 @@ async function buildScheduledServiceInvoiceLines(
       unit_price: roundMoney(primaryBase),
       amount: roundMoney(primaryBase),
       category: scheduled.service_type || fallbackDescription,
+      // Identity the document stack matches a scoped appointment stamp
+      // against; absent on hand-built invoice lines, which are never scoped.
+      service_key: scheduled.service_key_snapshot || null,
     });
     const lineDiscount = primaryBaseKnown
       ? buildDiscountLineItem({
@@ -830,6 +853,7 @@ async function buildScheduledServiceInvoiceLines(
       unit_price: roundMoney(addonBase),
       amount: roundMoney(addonBase),
       category: addon.service_name || null,
+      service_key: addon.service_key_snapshot || null,
     });
     const addonDiscount = addonBaseKnown
       ? buildDiscountLineItem({
@@ -851,6 +875,7 @@ async function buildScheduledServiceInvoiceLines(
         discountType: scheduled.discount_type,
         discountAmount: scheduled.discount_amount,
         discountDollars: scheduled.discount_dollars,
+        documentScopeServiceKey: scheduled.discount_service_key_filter || null,
       })
     : null;
   if (appointmentDiscount) lineItems.push(appointmentDiscount);

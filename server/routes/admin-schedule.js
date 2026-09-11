@@ -2921,31 +2921,42 @@ function moneyValuesDiffer(a, b) {
 // trust the STORED amount as-is (Codex #4405 r2 P1: a stored custom 10% on
 // $100 plus a new $30 fixed appointment discount must preview AND save
 // $63, not collapse to a frozen $10 credit and save $60).
-async function reconstructPrimaryLineSlot({ stacking, existing, conn = db }) {
-  if (stacking && existing?.line_discount_type
-    && existing.line_discount_amount != null && existing.line_discount_amount !== ''
-    && Number(existing.line_discount_amount) > 0) {
-    const catalogRow = existing.line_discount_id
-      ? await conn('discounts').where({ id: existing.line_discount_id })
+async function reconstructStoredLineSlot({ stacking, discountId, storedType, storedAmount, storedDollars, conn = db }) {
+  if (stacking && storedType
+    && storedAmount != null && storedAmount !== '' && Number(storedAmount) > 0) {
+    const catalogRow = discountId
+      ? await conn('discounts').where({ id: discountId })
         .first('discount_type', 'amount', 'discount_key', 'max_discount_dollars')
         .catch(() => null)
       : null;
-    const catalogTypeMatches = !!(catalogRow && catalogRow.discount_type === existing.line_discount_type);
+    const catalogTypeMatches = !!(catalogRow && catalogRow.discount_type === storedType);
     const capConfirmed = catalogTypeMatches
       && (isVariableOrCustomDiscountPreset(catalogRow)
-        || !moneyValuesDiffer(catalogRow.amount, existing.line_discount_amount));
+        || !moneyValuesDiffer(catalogRow.amount, storedAmount));
     if (capConfirmed) {
       return {
-        discountType: existing.line_discount_type,
-        discountAmount: Number(existing.line_discount_amount),
+        discountType: storedType,
+        discountAmount: Number(storedAmount),
         maxDiscountDollars: catalogRow.max_discount_dollars != null ? Number(catalogRow.max_discount_dollars) : null,
       };
     }
   }
-  const storedDollars = (existing?.line_discount_dollars != null && existing.line_discount_dollars !== '')
-    ? Math.max(0, Number(existing.line_discount_dollars))
+  const frozen = (storedDollars != null && storedDollars !== '')
+    ? Math.max(0, Number(storedDollars))
     : 0;
-  return storedDollars > 0 ? { discountType: 'fixed_amount', discountAmount: storedDollars } : null;
+  return frozen > 0 ? { discountType: 'fixed_amount', discountAmount: frozen } : null;
+}
+
+// The primary line's stored slot, by the shared rule above.
+async function reconstructPrimaryLineSlot({ stacking, existing, conn = db }) {
+  return reconstructStoredLineSlot({
+    stacking,
+    discountId: existing?.line_discount_id,
+    storedType: existing?.line_discount_type,
+    storedAmount: existing?.line_discount_amount,
+    storedDollars: existing?.line_discount_dollars,
+    conn,
+  });
 }
 
 // update-details, multi-line save: is a posted add-on discount id the SAME
@@ -3209,12 +3220,25 @@ async function propagatePriceServiceToFollowingSiblings(conn, {
     ? await conn.schema.hasTable('scheduled_service_addons')
     : false;
   const updatedIds = [];
+  // A TYPED line-discount slot (gate on) resolves to different DOLLARS on
+  // different siblings: when a fixed appointment credit shares the visit,
+  // the primary line's share of it depends on that occurrence's own add-on
+  // mix, so a 10% primary discount after a $30 credit is $7 on a
+  // primary-only visit and $8.50 where a $100 add-on shares the credit.
+  // Copying the edited visit's frozen dollars misbills every sibling whose
+  // add-ons differ (Codex #4405 r3 P1), so the dollars are re-derived per
+  // sibling below — the same restatement the child/booster spawn paths
+  // already do from their own calculateVisitFinancialsForAddons.
+  const restackLineDiscountPerSibling = isEnabled('discountStacking')
+    && cols.line_discount_dollars
+    && (fields.line_discount_type || null) !== null;
   for (const sibling of targets) {
     const siblingUpdates = { updated_at: new Date() };
     for (const [key, value] of Object.entries(fields)) {
       if (!cols[key]) continue;
       // Re-derived per sibling below — never copied from the edited visit.
       if (key === 'estimated_price' || key === 'discount_dollars') continue;
+      if (restackLineDiscountPerSibling && key === 'line_discount_dollars') continue;
       siblingUpdates[key] = value;
     }
     if (serviceChanged && fields.service_type !== undefined) {
@@ -3267,6 +3291,44 @@ async function propagatePriceServiceToFollowingSiblings(conn, {
           : (fields.estimated_price === 0 ? 0 : financials.price);
       }
       if (cols.discount_dollars) siblingUpdates.discount_dollars = financials.appointmentDiscountDollars;
+      if (restackLineDiscountPerSibling) {
+        // Restack THIS sibling from its own gross + add-ons through the
+        // type-aware visit stack, then take the primary line's restated
+        // dollars. calculateStoredVisitFinancials (above) subtracts
+        // line_discount_dollars as a frozen number, so the value it is
+        // handed has to be this sibling's own.
+        const siblingStacked = calculateVisitFinancialsForAddons({
+          primaryGross: overlaid.primary_line_price != null ? Number(overlaid.primary_line_price) : null,
+          primaryLineDiscount: {
+            discountType: overlaid.line_discount_type || null,
+            discountAmount: overlaid.line_discount_amount != null ? Number(overlaid.line_discount_amount) : null,
+          },
+          primaryServiceKey: overlaid.service_key_snapshot || null,
+          primaryServiceCategory: overlaid.service_category_snapshot || null,
+          appointmentDiscount: overlaid.discount_type ? {
+            discountType: overlaid.discount_type,
+            discountAmount: overlaid.discount_amount != null ? Number(overlaid.discount_amount) : null,
+            maxDiscountDollars: overlaid.discount_max_dollars ?? null,
+            serviceKeyFilter: overlaid.discount_service_key_filter || null,
+            serviceCategoryFilter: overlaid.discount_service_category_filter || null,
+          } : null,
+        }, siblingAddons.map((addon) => ({
+          base: addon.base_price != null ? Number(addon.base_price) : null,
+          price: addon.estimated_price != null ? Number(addon.estimated_price) : 0,
+          serviceKey: addon.service_key_snapshot || null,
+          serviceCategory: addon.service_category_snapshot || null,
+          discount: addon.discount_type ? {
+            discountType: addon.discount_type,
+            discountAmount: addon.discount_amount != null ? Number(addon.discount_amount) : null,
+          } : null,
+        })));
+        const restated = siblingStacked.lines?.[0];
+        // No restatement available (no gross to ride) → keep the edited
+        // visit's value rather than writing a guess.
+        siblingUpdates.line_discount_dollars = restated
+          ? restated.lineDiscountDollars
+          : fields.line_discount_dollars;
+      }
     }
     await conn('scheduled_services').where({ id: sibling.id }).update(siblingUpdates);
     updatedIds.push(sibling.id);
@@ -8889,15 +8951,50 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
             net = Math.max(0, Math.round((gross - (lineDiscount.discountDollars || 0)) * 100) / 100);
           }
         } else if (gross != null && lineType && lineAmount != null && !isNaN(lineAmount)) {
-          net = applyDiscount(gross, lineType, lineAmount);
-          const dollars = Math.max(0, Math.round((gross - net) * 100) / 100);
-          lineDiscount = {
-            discountId: a.discountId || null,
-            discountName: a.discountName || null,
-            discountType: lineType,
-            discountAmount: lineAmount,
-            discountDollars: dollars > 0 ? dollars : null,
-          };
+          // Gate ON and this stamp is UNTOUCHED (an unrelated edit took the
+          // preservedStamp branch): reconstruct it the same cap-aware way the
+          // primary line does. scheduled_service_addons has no
+          // max_discount_dollars column, so replaying type+amount here
+          // replays a capped percentage UNCAPPED — a stored 50%-off capped
+          // at $20 takes $50 off a $100 add-on (Codex #4405 r3 P1). One
+          // shared reconstructStoredLineSlot, so the primary and add-on
+          // slots can't drift apart again; an unconfirmable cap falls back
+          // to the frozen dollars rather than guessing.
+          const preservedSlot = (stacking && preservedStamp)
+            ? await reconstructStoredLineSlot({
+              stacking,
+              discountId: a.discountId,
+              storedType: lineType,
+              storedAmount: lineAmount,
+              storedDollars: stored?.discount_dollars,
+            })
+            : null;
+          if (preservedSlot) {
+            const dollars = stackDiscounts(gross, [{
+              discountType: preservedSlot.discountType,
+              amount: preservedSlot.discountAmount,
+              maxDiscountDollars: preservedSlot.maxDiscountDollars ?? null,
+            }], { compound: true }).totalDollars;
+            net = Math.max(0, Math.round((gross - dollars) * 100) / 100);
+            lineDiscount = {
+              discountId: a.discountId || null,
+              discountName: a.discountName || null,
+              discountType: preservedSlot.discountType,
+              discountAmount: preservedSlot.discountAmount,
+              maxDiscountDollars: preservedSlot.maxDiscountDollars ?? null,
+              discountDollars: dollars > 0 ? dollars : null,
+            };
+          } else {
+            net = applyDiscount(gross, lineType, lineAmount);
+            const dollars = Math.max(0, Math.round((gross - net) * 100) / 100);
+            lineDiscount = {
+              discountId: a.discountId || null,
+              discountName: a.discountName || null,
+              discountType: lineType,
+              discountAmount: lineAmount,
+              discountDollars: dollars > 0 ? dollars : null,
+            };
+          }
         }
         normalizedAddons.push({
           serviceId: a.serviceId || catalogService?.id || null,
@@ -18791,6 +18888,7 @@ router._test = {
   calculateStoredVisitFinancials,
   applyStoredVisitFinancials,
   reconstructPrimaryLineSlot,
+  reconstructStoredLineSlot,
   addonDiscountStampPreserved,
   resolveLineDiscount,
   loadStoredDiscountScope,

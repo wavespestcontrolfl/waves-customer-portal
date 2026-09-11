@@ -112,8 +112,9 @@ const SERVICE_LINE = {
 // The appointment-level stamp exactly as buildDiscountLineItem mints it with
 // no parentClientId: `_appointment` scope in the client_id, discount_for
 // null, document_discount true, and the frozen dollars already resolved.
-function appointmentStamp({ discountId = null, dollars = 10, type = 'percentage', amount = 10 } = {}) {
+function appointmentStamp({ discountId = null, dollars = 10, type = 'percentage', amount = 10, scopeKey = null } = {}) {
   return {
+    ...(scopeKey ? { document_scope_service_key: scopeKey } : {}),
     client_id: `discount_${discountId || 'custom'}_appointment`,
     _kind: 'discount',
     discount_id: discountId,
@@ -282,5 +283,86 @@ describe('finding 4 — the document pool takes every positive line, keyed or no
     // 10% of the full $200 subtotal, not 10% of the one keyed line.
     expect(invoice.discount_amount).toBe(20);
     expect(invoice.total).toBe(180);
+  });
+});
+
+
+/**
+ * Round 3, P1 — a scheduled appointment discount narrowed to one service
+ * (`discount_service_key_filter`) must not spread across every invoice line.
+ * Round 2 made every no-parent stamp document-wide; a scoped one then moved
+ * the base the OTHER lines' percentages compound on.
+ */
+describe('r3 — a SCOPED appointment stamp reaches only its own lines', () => {
+  const PRIMARY = {
+    client_id: 'line-1', description: 'Pest Control', quantity: 1, unit_price: 100, amount: 100,
+    service_key: 'pest_general_quarterly',
+  };
+  const ADDON = {
+    client_id: 'line-2', description: 'Lawn Care', quantity: 1, unit_price: 100, amount: 100,
+    service_key: 'lawn_fert_monthly',
+  };
+  const LINE_10 = {
+    id: 'line10-id', name: 'Line 10%', discount_type: 'percentage', amount: 10,
+    is_active: true, show_in_invoices: true, is_stackable: true,
+  };
+  const primaryPick = {
+    client_id: 'd-line10', _kind: 'discount', discount_id: LINE_10.id, discount_for: 'line-1',
+    description: LINE_10.name, quantity: 1, unit_price: -1, amount: -1,
+  };
+
+  test('a $30 add-on-only credit leaves the primary line’s 10% at $10, not $8.50', async () => {
+    setupDb({ customer: CUSTOMER, discounts: [LINE_10] });
+    const result = await calculateUpdateFinancials({
+      lineItems: [
+        PRIMARY,
+        ADDON,
+        appointmentStamp({ dollars: 30, type: 'fixed_amount', amount: 30, scopeKey: 'lawn_fert_monthly' }),
+        primaryPick,
+      ],
+      customer: CUSTOMER,
+      invoice: { id: 'invoice-1' },
+      taxRate: 0,
+    });
+    // $30 off the lawn line only; the pest line still carries its full $100
+    // when its own 10% resolves. Removed = $30 + $10 = $40 of $200.
+    expect(result.discount_amount).toBe(40);
+    expect(result.total).toBe(160);
+  });
+
+  test('the same stamp UNSCOPED spreads and drops the 10% to $8.50 — the behavior scoping must avoid', async () => {
+    setupDb({ customer: CUSTOMER, discounts: [LINE_10] });
+    const result = await calculateUpdateFinancials({
+      lineItems: [
+        PRIMARY,
+        ADDON,
+        appointmentStamp({ dollars: 30, type: 'fixed_amount', amount: 30 }),
+        primaryPick,
+      ],
+      customer: CUSTOMER,
+      invoice: { id: 'invoice-1' },
+      taxRate: 0,
+    });
+    // $15 off each line, then 10% of the primary's remaining $85 = $8.50.
+    expect(result.discount_amount).toBe(38.5);
+  });
+
+  test('a scope naming no line on the invoice takes $0 rather than spreading', async () => {
+    setupDb({ customer: CUSTOMER, discounts: [LINE_10] });
+    const result = await calculateUpdateFinancials({
+      lineItems: [
+        PRIMARY,
+        ADDON,
+        appointmentStamp({ dollars: 30, type: 'fixed_amount', amount: 30, scopeKey: 'termite_bond' }),
+        primaryPick,
+      ],
+      customer: CUSTOMER,
+      invoice: { id: 'invoice-1' },
+      taxRate: 0,
+    });
+    // The stamp's own frozen $30 is still subtracted by the caller (it is a
+    // real stored charge adjustment), but it consumes no line's balance, so
+    // the primary's 10% stays $10.
+    expect(result.discount_amount).toBe(40);
   });
 });

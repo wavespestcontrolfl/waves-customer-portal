@@ -111,9 +111,19 @@ function stackOrder(discounts) {
 function allocateProRata(poolLines, pool, weightOf, totalDollars, apply) {
   let allocated = 0;
   poolLines.forEach((line, i) => {
+    // Each preliminary share rounds independently, so several can round UP
+    // and together exceed the amount being split — $0.03 over weights
+    // 3/1/1/1 rounds to $0.02/$0.01/$0.01 and leaves the last line
+    // -$0.01. A negative share is not a discount: downstream it lands as a
+    // negative appointment share on a visit line, and addonOnlyTotal drops
+    // it, misbilling a covered-series add-on by a cent (Codex #4405 r3).
+    // Clamping every share to what is still undistributed keeps the
+    // remainder method honest — shares stay >= 0 and still sum to exactly
+    // totalDollars, with the last line absorbing whatever is left.
+    const undistributed = cents(totalDollars - allocated);
     const share = i === poolLines.length - 1
-      ? cents(totalDollars - allocated)
-      : cents(totalDollars * (weightOf(line) / pool));
+      ? Math.max(0, undistributed)
+      : Math.max(0, Math.min(undistributed, cents(totalDollars * (weightOf(line) / pool))));
     allocated = cents(allocated + share);
     apply(line, share);
   });
@@ -300,13 +310,31 @@ function stackDocumentDiscounts({ lines, documentTerms }) {
   const docFixedIdx = docTerms
     .map((t, i) => (isFixedDiscountType(t?.discountType) ? i : -1))
     .filter((i) => i >= 0);
-  const fixedPool = state.filter((line) => line.remaining > 0);
-  const fixedPoolTotal = cents(fixedPool.reduce((sum, line) => sum + line.remaining, 0));
-  const docFixedStacked = stackDiscounts(fixedPoolTotal, docFixedIdx.map((i) => docTerms[i]), { compound: true });
-  docFixedIdx.forEach((termIdx, i) => { docDollars[termIdx] = docFixedStacked.items[i].dollars; });
-  allocateProRata(fixedPool, fixedPoolTotal, (line) => line.remaining, docFixedStacked.totalDollars, (line, share) => {
-    line.remaining = cents(Math.max(0, line.remaining - share));
-  });
+  // A document term normally reaches EVERY line. `eligibleLines` (an array
+  // of line indexes) restricts one to a subset — the invoice replay of a
+  // scheduled appointment discount narrowed to one service through
+  // discount_service_key_filter. Spreading such a credit over every line
+  // moves the base the OTHER lines' percentages compound on, so a $30
+  // add-on-only credit on two $100 lines turned a 10% primary-line discount
+  // from $10 into $8.50 (Codex #4405 r3 P1). Terms are resolved one at a
+  // time against their own pool: for unscoped terms that is exactly the
+  // compounding stackDiscounts gave (stackOrder keeps input order within a
+  // homogeneous fixed list), and a scoped term now only consumes the
+  // balance of the lines it actually reaches.
+  const termReachesLine = (term, lineIdx) => (
+    !Array.isArray(term?.eligibleLines) || term.eligibleLines.includes(lineIdx)
+  );
+  for (const termIdx of docFixedIdx) {
+    const term = docTerms[termIdx];
+    const pool = state.filter((line, i) => line.remaining > 0 && termReachesLine(term, i));
+    const poolTotal = cents(pool.reduce((sum, line) => sum + line.remaining, 0));
+    const dollars = discountStepDollars(term, poolTotal);
+    docDollars[termIdx] = dollars;
+    if (!pool.length) continue;
+    allocateProRata(pool, poolTotal, (line) => line.remaining, dollars, (line, share) => {
+      line.remaining = cents(Math.max(0, line.remaining - share));
+    });
+  }
 
   // 3. LINE percent/free_service terms, on what's left after steps 1-2.
   for (const line of state) {
@@ -321,7 +349,10 @@ function stackDocumentDiscounts({ lines, documentTerms }) {
   // 4. DOCUMENT percent/free_service terms, on the total remainder across
   // every line (no per-line allocation — no consumer needs a document
   // percentage's per-line share today, unlike the fixed pass above whose
-  // allocation step 3 depends on).
+  // allocation step 3 depends on). `eligibleLines` is deliberately NOT
+  // honored here: the only scoped document term today is a frozen
+  // appointment stamp, which is always fixed_amount and so never reaches
+  // this pass. A scoped document PERCENTAGE would need its own pool here.
   const docNonFixedIdx = docTerms
     .map((t, i) => (!isFixedDiscountType(t?.discountType) ? i : -1))
     .filter((i) => i >= 0);
