@@ -208,6 +208,65 @@ describe('address normalizer', () => {
     });
   });
 
+  // Owner ruling 2026-09-11 (Florida-only): a trailing suffix-shaped state
+  // code with no city found before it is ALWAYS the street reading. Another
+  // state needs explicit geography (a comma tail or a recognized city).
+  test('a suffix-shaped trailing token after an unparsed street is a street ending, not a state', () => {
+    expect(parseRawAddress('123 Route 12 Groton CT')).toMatchObject({
+      line1: '123 Route 12 Groton Ct',
+      state: '',
+    });
+    expect(parseRawAddress('123 Broadway Groton CT')).toMatchObject({
+      line1: '123 Broadway Groton Ct',
+      state: '',
+    });
+    expect(parseRawAddress('123 Broadway, Groton, CT')).toMatchObject({
+      line1: '123 Broadway',
+      city: 'Groton',
+      state: 'CT',
+    });
+  });
+
+  test('"123 Main Ct" still reads as a bare house-number + street, no state', () => {
+    expect(parseRawAddress('123 Main Ct')).toMatchObject({
+      line1: '123 Main Ct',
+      state: '',
+    });
+  });
+
+  test('"123 Main St NE" still reads NE as a post-directional, no state', () => {
+    expect(parseRawAddress('123 Main St NE')).toMatchObject({
+      line1: '123 Main St NE',
+      state: '',
+    });
+  });
+
+  test('a long street whose own last word is a suffix still keeps a trailing directional ("Gulf of Mexico Dr NE")', () => {
+    expect(parseRawAddress('1234 Gulf of Mexico Dr NE')).toMatchObject({
+      line1: '1234 Gulf Of Mexico Dr NE',
+      state: '',
+    });
+  });
+
+  test('a real locality before a directional-shaped state code keeps the state ("Lincoln NE")', () => {
+    expect(parseRawAddress('123 Main Street Lincoln NE')).toMatchObject({
+      city: 'Lincoln',
+      state: 'NE',
+    });
+  });
+
+  // codex r8 P1: an ordinary multiword street name must keep its Court.
+  test('a multiword street ending in Ct is a street, not Connecticut ("Royal Palm Ct")', () => {
+    expect(parseRawAddress('123 Royal Palm Ct')).toMatchObject({
+      line1: '123 Royal Palm Ct',
+      state: '',
+    });
+    expect(parseRawAddress('12 Lakewood Ranch Blvd Ct')).toMatchObject({
+      line1: '12 Lakewood Ranch Blvd Ct',
+      state: '',
+    });
+  });
+
   test('normalizes full state names to DB-safe two-letter codes', () => {
     expect(normalizeLeadAddress({
       line1: '123 Main St',
