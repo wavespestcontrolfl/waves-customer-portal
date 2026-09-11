@@ -15,6 +15,8 @@ describe('retireIfClean', () => {
     expect(resolveOpsDigest).toHaveBeenCalledWith({ key: 'lead-to-cash-invariants', source: null, resolvedBy: 'lead-to-cash-invariants:clean-run' });
     await retireIfClean('gbp-sync-health', { resolvedBy: 'gbp:hourly' });
     expect(resolveOpsDigest).toHaveBeenLastCalledWith({ key: 'gbp-sync-health', source: null, resolvedBy: 'gbp:hourly' });
+    await retireIfClean('call-extraction-eval', { alsoRetire: { category: 'eval_regression', field: 'evalKey' } });
+    expect(resolveOpsDigest).toHaveBeenLastCalledWith({ key: 'call-extraction-eval', source: null, resolvedBy: 'call-extraction-eval:clean-run', alsoRetire: { category: 'eval_regression', field: 'evalKey' } });
   });
 
   test('a stubbed digest module without resolveOpsDigest is a no-op', async () => {

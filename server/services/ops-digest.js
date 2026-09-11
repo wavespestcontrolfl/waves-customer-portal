@@ -160,7 +160,12 @@ async function deliverOpsDigest({ key, subject, text, html, link = null, metadat
 // passes 'ops-crons'); `null` matches rows with NO source — the in-process
 // senders, which never set one (ops-digest-fall-off.js); `undefined`
 // (omitted) matches any. A key can therefore never retire another seam's rows.
-async function resolveOpsDigest({ key, source, resolvedBy = 'ops-crons', lockKey = null, notAfter = null } = {}) {
+// `alsoRetire: { category, field }` — a companion admin bell the same sender
+// raises beside its digest (the evals' eval_regression rows, keyed by
+// metadata.evalKey). It retires in the same call so a scheduled pass never
+// clears the digest and leaves the primary bell standing (codex P1 r2 on
+// #4397). Unread rows only: the owner's own read stands.
+async function resolveOpsDigest({ key, source, resolvedBy = 'ops-crons', lockKey = null, notAfter = null, alsoRetire = null } = {}) {
   const opsKey = String(key || '').trim();
   if (!opsKey) return 0;
   const db = require('../models/db');
@@ -183,6 +188,18 @@ async function resolveOpsDigest({ key, source, resolvedBy = 'ops-crons', lockKey
       metadata: conn.raw("(COALESCE(metadata, '{}'::jsonb) - 'dedupeKey') || ?::jsonb", [JSON.stringify({ resolved: true, resolvedAt: stamp, resolvedBy: String(resolvedBy) })]),
     });
   };
+  const retireCompanion = async (conn) => {
+    if (!alsoRetire?.category || !alsoRetire?.field) return 0;
+    const stamp = new Date().toISOString();
+    return conn('notifications')
+      .where({ recipient_type: 'admin', category: String(alsoRetire.category) })
+      .whereNull('read_at')
+      .whereRaw('metadata->>? = ?', [String(alsoRetire.field), opsKey])
+      .update({
+        read_at: conn.fn.now(),
+        metadata: conn.raw("COALESCE(metadata, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ resolved: true, resolvedAt: stamp, resolvedBy: String(resolvedBy) })]),
+      });
+  };
   try {
     const count = lockKey
       ? await db.transaction(async (trx) => {
@@ -190,7 +207,8 @@ async function resolveOpsDigest({ key, source, resolvedBy = 'ops-crons', lockKey
         return retire(trx);
       })
       : await retire(db);
-    logger.info(`[ops-digest] ${opsKey}: retired ${count} standing row(s) (${resolvedBy})`);
+    const companion = await retireCompanion(db);
+    logger.info(`[ops-digest] ${opsKey}: retired ${count} standing row(s)${companion ? ` + ${companion} ${alsoRetire.category} bell(s)` : ''} (${resolvedBy})`);
     return Number(count) || 0;
   } catch (err) {
     logger.warn(`[ops-digest] ${opsKey}: retire failed: ${err.message}`);

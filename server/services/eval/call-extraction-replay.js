@@ -200,6 +200,7 @@ async function notifyFailure({ notify, sendEmail, finalAttempt, attempts, fixtur
       icon: '\u{1F9EA}',
       link: '/admin/dashboard',
       metadata: JSON.stringify({
+        evalKey: 'call-extraction-eval', // the fall-off retires this bell with the digest
         fixturePath,
         summary: compactSummary(finalRun?.summary),
         failures: lines,
@@ -233,6 +234,7 @@ async function notifyInconclusive({ notify, sendEmail, attempt, fixturePath }) {
       icon: '\u{1F9EA}',
       link: '/admin/dashboard',
       metadata: JSON.stringify({
+        evalKey: 'call-extraction-eval',
         fixturePath,
         error: attempt.error || null,
       }),
@@ -297,7 +299,7 @@ async function runCallExtractionReplayEval(opts = {}) {
     // "not fail and not inconclusive" (a skip / crash status must leave the
     // bell standing; pre-push P1 on #4397). `notifyOnFailure` is already
     // true on this branch (the manual-run case returned above).
-    await retireIfClean('call-extraction-eval');
+    await retireIfClean('call-extraction-eval', { alsoRetire: { category: 'eval_regression', field: 'evalKey' } });
   }
 
   const run = finalAttempt.run || {};

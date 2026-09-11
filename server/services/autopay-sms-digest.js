@@ -25,7 +25,6 @@
 const sendgrid = require('./sendgrid-mail');
 const logger = require('./logger');
 const { deliverOpsDigest } = require('./ops-digest');
-const { retireIfClean } = require('./ops-digest-fall-off');
 const db = require('../models/db');
 const { isInternalEmailRecipient } = require('../utils/internal-email-recipients');
 const { MONTHLY_LANE_SQL } = require('./billing-lane');
@@ -249,10 +248,11 @@ async function runAutopaySmsDigest(opts = {}) {
   }
 
   const composed = composeAutopaySmsDigest(rows);
-  if (!composed) {
-    await retireIfClean('autopay-sms-digest'); // fall-off: a quiet day clears the last activity digest
-    return { skipped: 'nothing_found' };
-  }
+  // No fall-off here on purpose (codex P1 r2 on #4397): an empty incremental
+  // send window means no autopay text went out since the watermark — it is
+  // not evidence that a reported billing-lane mismatch was corrected. The
+  // FIX stays until the owner clears it.
+  if (!composed) return { skipped: 'nothing_found' };
 
   if (digestDisabled()) {
     logger.info(`[autopay-sms-digest] disabled — would report ${composed.count} text(s)`);
@@ -274,7 +274,6 @@ async function runAutopaySmsDigest(opts = {}) {
 
   try {
     await deliverOpsDigest({
-      fallOff: true, // retired by retireIfClean on the clean run
       key: 'autopay-sms-digest',
       subject: composed.subject,
       html: composed.html,

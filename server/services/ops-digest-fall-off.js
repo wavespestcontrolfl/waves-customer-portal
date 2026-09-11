@@ -13,14 +13,16 @@
  * reads as a no-op). Never throws, never blocks the sender: a failed retire
  * is logged inside resolveOpsDigest and retried on the next clean tick.
  */
-async function retireIfClean(key, { resolvedBy } = {}) {
+async function retireIfClean(key, { resolvedBy, alsoRetire } = {}) {
   try {
     const opsDigest = require('./ops-digest');
     if (typeof opsDigest.resolveOpsDigest !== 'function') return 0;
     // source: null — only rows the in-process seam wrote (they carry no
     // source); the ops-cron ingest rows are scoped to 'ops-crons' and are
-    // retired by their own /resolve path, never from here.
-    return await opsDigest.resolveOpsDigest({ key, source: null, resolvedBy: resolvedBy || `${key}:clean-run` });
+    // retired by their own /resolve path, never from here. alsoRetire names
+    // a companion bell category (+ metadata field holding this key) that
+    // retires in the same call.
+    return await opsDigest.resolveOpsDigest({ key, source: null, resolvedBy: resolvedBy || `${key}:clean-run`, ...(alsoRetire ? { alsoRetire } : {}) });
   } catch {
     return 0;
   }

@@ -102,3 +102,14 @@ test('notAfter: only rows observed at or before the clean run retire (metadata.o
   expect(q.whereRaw).toHaveBeenCalledWith("COALESCE(NULLIF(metadata->>'observedAt', '')::timestamptz, created_at) <= ?::timestamptz", ['2026-09-11T11:10:00.000Z']);
 });
 
+test('alsoRetire: the companion bell category keyed by a metadata field retires in the same call (unread rows only)', async () => {
+  const main = chain(1); const companion = chain(2);
+  mockDb.mockReturnValueOnce(main).mockReturnValueOnce(companion);
+  const n = await resolveOpsDigest({ key: 'call-extraction-eval', source: null, alsoRetire: { category: 'eval_regression', field: 'evalKey' } });
+  expect(n).toBe(1);
+  expect(companion.where).toHaveBeenCalledWith({ recipient_type: 'admin', category: 'eval_regression' });
+  expect(companion.whereNull).toHaveBeenCalledWith('read_at');
+  expect(companion.whereRaw).toHaveBeenCalledWith('metadata->>? = ?', ['evalKey', 'call-extraction-eval']);
+  expect(companion.update).toHaveBeenCalledTimes(1);
+});
+

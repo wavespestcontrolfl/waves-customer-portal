@@ -1751,7 +1751,7 @@ async function notifyFailure({ notify, sendEmail, finalAttempt, attempts, fixtur
       body,
       icon: '\u{1F9EA}',
       link: '/admin/dashboard',
-      metadata: JSON.stringify({ fixturePath, summary, failures: lines, attempts: attempts.map(compactAttempt) }),
+      metadata: JSON.stringify({ evalKey: OPS_KEY, fixturePath, summary, failures: lines, attempts: attempts.map(compactAttempt) }),
     });
   } catch (err) {
     notifyError = err;
@@ -1773,7 +1773,7 @@ async function notifyInconclusive({ notify, sendEmail, attempt, fixturePath }) {
       body,
       icon: '\u{1F9EA}',
       link: '/admin/dashboard',
-      metadata: JSON.stringify({ fixturePath, error: attempt.error || null }),
+      metadata: JSON.stringify({ evalKey: OPS_KEY, fixturePath, error: attempt.error || null }),
     });
   } catch (err) {
     notifyError = err;
@@ -1805,7 +1805,7 @@ async function notifyOutcome({ notifyOnFailure, notify, sendEmail, finalAttempt,
   // (fixture missing / sandbox untested) must leave the bell standing
   // (pre-push P1 on #4397). `notifyOnFailure` is already true here (the
   // manual-run case returned above).
-  if (notifyOnFailure && finalAttempt.status === 'pass') await retireIfClean(OPS_KEY);
+  if (notifyOnFailure && finalAttempt.status === 'pass') await retireIfClean(OPS_KEY, { alsoRetire: { category: 'eval_regression', field: 'evalKey' } });
   return null;
 }
 
