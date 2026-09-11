@@ -7,16 +7,27 @@ function mockDb(table) {
   // synthetic Map standing in for the DB-atomic INSERT ... ON CONFLICT ...
   // RETURNING in claimUnknownSenderAlertWindow — release deletes the entry.
   if (table === 'sms_reply_alert_claims') {
-    const q = { _phone: undefined };
-    q.where = (key) => { q._phone = key && typeof key === 'object' ? key.phone : undefined; return q; };
+    // Ownership-scoped (codex #4210 round-3 P1): confirm/release now filter
+    // by {phone, expires_at: token} — the exact lease value the claim
+    // returned — so a dispatch whose token no longer matches the row's
+    // CURRENT expires_at (another dispatch already reclaimed the phone) is
+    // a safe no-op, mirroring the real WHERE phone = ? AND expires_at = ?.
+    const q = { _phone: undefined, _token: undefined };
+    q.where = (key) => {
+      q._phone = key && typeof key === 'object' ? key.phone : undefined;
+      q._token = key && typeof key === 'object' ? key.expires_at : undefined;
+      return q;
+    };
+    const owns = () => Boolean(q._phone) && mockState.claims.has(q._phone)
+      && (q._token === undefined || mockState.claims.get(q._phone)?.getTime() === q._token?.getTime());
     q.del = async () => {
-      if (q._phone) { mockState.claims.delete(q._phone); return 1; }
+      if (owns()) { mockState.claims.delete(q._phone); return 1; }
       return 0;
     };
     // Confirm step: extends an existing (short-lease) claim row to the full
     // window — standing in for confirmUnknownSenderAlertWindow's UPDATE.
     q.update = async (patch) => {
-      if (q._phone && mockState.claims.has(q._phone) && patch?.expires_at) {
+      if (owns() && patch?.expires_at) {
         mockState.claims.set(q._phone, patch.expires_at);
         return 1;
       }
@@ -127,7 +138,9 @@ const { processMessage } = require('../services/ai-assistant/assistant');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
 const { uploadTwilioMedia } = require('../services/sms-media');
 const numbers = require('../config/twilio-numbers');
-const handler = require('../routes/twilio-webhook').stack.find((l) => l.route?.path === '/sms').route.stack[0].handle;
+const webhookRouter = require('../routes/twilio-webhook');
+const handler = webhookRouter.stack.find((l) => l.route?.path === '/sms').route.stack[0].handle;
+const { claimUnknownSenderAlertWindow, confirmUnknownSenderAlertWindow, releaseUnknownSenderAlertClaim } = webhookRouter._internals;
 const aiLine = '+18559260203';
 const sender = '+12025550101';
 async function receive(body = 'What services do you offer?', to = aiLine) {
@@ -361,6 +374,68 @@ test('an expired, unconfirmed lease is reclaimed by the next message instead of 
   expect(triggerNotification).toHaveBeenCalledTimes(1);
   // And the winning claim itself gets confirmed to the full window.
   expect(mockState.claims.get(sender).getTime() - Date.now()).toBeGreaterThan(3 * 60 * 60 * 1000);
+});
+
+test('a dispatch that outlasts its lease cannot confirm or release a claim a later message has since reclaimed (codex #4210 round-3 P1)', async () => {
+  // A controlled clock so A's and B's leases land on distinct, deterministic
+  // timestamps rather than relying on real wall-clock drift between two
+  // synchronous awaits (which can otherwise land in the same millisecond).
+  const start = Date.now();
+  jest.useFakeTimers({ doNotFake: ['nextTick', 'setImmediate'] });
+  try {
+    jest.setSystemTime(start);
+    // Dispatch A claims first.
+    const a = await claimUnknownSenderAlertWindow(sender);
+    expect(a.claimed).toBe(true);
+    expect(a.token).toBeDefined();
+
+    // Simulate A's lease (2 minutes) expiring — a slow network/DB, not a
+    // failure — before A ever confirms or releases: the row is now
+    // reclaimable by whoever checks next.
+    jest.setSystemTime(start + 3 * 60 * 1000);
+    // Dispatch B, for a LATER message from the same sender, reclaims the
+    // now-expired lease and gets its OWN token.
+    const b = await claimUnknownSenderAlertWindow(sender);
+    expect(b.claimed).toBe(true);
+    expect(b.token.getTime()).not.toBe(a.token.getTime());
+    const bOwnedExpiry = mockState.claims.get(sender);
+
+    // A finally finishes (its own network/DB was just slow, not failed) and
+    // tries to confirm/release using its STALE token — this must be a
+    // no-op against B's now-live claim, not overwrite or delete it.
+    await confirmUnknownSenderAlertWindow(sender, a.token);
+    expect(mockState.claims.get(sender)).toBe(bOwnedExpiry);
+    await releaseUnknownSenderAlertClaim(sender, a.token);
+    expect(mockState.claims.has(sender)).toBe(true);
+    expect(mockState.claims.get(sender)).toBe(bOwnedExpiry);
+
+    // B's own token, by contrast, correctly confirms B's claim.
+    await confirmUnknownSenderAlertWindow(sender, b.token);
+    expect(mockState.claims.get(sender).getTime() - start).toBeGreaterThan(3 * 60 * 60 * 1000);
+  } finally {
+    jest.useRealTimers();
+  }
+});
+
+test('a fail-open (unfenced) dispatch never confirms or releases a claim it does not own (codex #4210 round-3 P1)', async () => {
+  // A genuine claim is held by some other in-flight dispatch.
+  const owned = await claimUnknownSenderAlertWindow(sender);
+  expect(owned.claimed).toBe(true);
+
+  // A claim ATTEMPT that fails (DB error) returns a null token — it must
+  // never touch the row above, even though it "proceeds unfenced" and
+  // rings its own bell.
+  mockClaim.fail = true;
+  const unfenced = await claimUnknownSenderAlertWindow(sender);
+  mockClaim.fail = false;
+  expect(unfenced.claimed).toBe(true);
+  expect(unfenced.token).toBeNull();
+
+  await confirmUnknownSenderAlertWindow(sender, unfenced.token);
+  await releaseUnknownSenderAlertClaim(sender, unfenced.token);
+  // The genuinely owned claim is untouched — still present, still on its
+  // original lease.
+  expect(mockState.claims.get(sender)).toBe(owned.token);
 });
 
 test('an unknown loud reaction rings exactly one alert — not also the legacy owner forward (codex #4210 round-2 P1)', async () => {

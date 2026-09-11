@@ -1939,6 +1939,17 @@ const UNKNOWN_SENDER_ALERT_WINDOW_MS = 4 * 60 * 60 * 1000;
 // attempt's `WHERE expires_at < now`, so it's reclaimed within minutes
 // instead of hours.
 const UNKNOWN_SENDER_ALERT_LEASE_MS = 2 * 60 * 1000;
+// Returns { claimed, token }. `token` is the exact lease `expires_at` this
+// call just wrote — the row's ownership marker for the confirm/release
+// calls below (codex #4210 round-3 P1). Without it, a dispatch that
+// outlasts its own 2-minute lease (slow network/DB) could have the phone
+// reclaimed by a LATER message's dispatch, and then — mutating by phone
+// alone — confirm or delete THAT newer claim out from under it: extending a
+// window nothing delivered for, or deleting one that's still legitimately
+// held. `token` is null when the row was never actually won by THIS call
+// (the fail-open error path, or losing the race) — callers must never
+// confirm/release without a token, since there is no claim of theirs left
+// to touch.
 async function claimUnknownSenderAlertWindow(From) {
   try {
     const now = new Date();
@@ -1951,10 +1962,11 @@ async function claimUnknownSenderAlertWindow(From) {
        RETURNING phone`,
       [From, leaseExpiresAt, now],
     );
-    return (result?.rows || []).length > 0;
+    const claimed = (result?.rows || []).length > 0;
+    return { claimed, token: claimed ? leaseExpiresAt : null };
   } catch (e) {
     logger.warn('[twilio-webhook] alert-window claim failed; proceeding unfenced', { code: e.code || 'unknown' });
-    return true;
+    return { claimed: true, token: null };
   }
 }
 
@@ -1962,11 +1974,16 @@ async function claimUnknownSenderAlertWindow(From) {
 // been delivered (codex #4210 round-2 P1) — the second half of the
 // claim/confirm two-step. Until this runs the row only carries the short
 // lease above, so a crash between claim and confirm self-heals instead of
-// wedging the sender behind a silent 4h window.
-async function confirmUnknownSenderAlertWindow(From) {
+// wedging the sender behind a silent 4h window. `token` (the lease
+// `expires_at` claimUnknownSenderAlertWindow returned) scopes the UPDATE to
+// the exact row this call won — if another dispatch has since reclaimed the
+// phone, its `expires_at` no longer matches and this is a safe no-op
+// (codex #4210 round-3 P1).
+async function confirmUnknownSenderAlertWindow(From, token) {
+  if (!token) return;
   try {
     const now = new Date();
-    await db('sms_reply_alert_claims').where({ phone: From })
+    await db('sms_reply_alert_claims').where({ phone: From, expires_at: token })
       .update({ expires_at: new Date(now.getTime() + UNKNOWN_SENDER_ALERT_WINDOW_MS) });
   } catch (e) {
     logger.warn('[twilio-webhook] alert-window claim confirm failed', { code: e.code || 'unknown' });
@@ -1976,10 +1993,12 @@ async function confirmUnknownSenderAlertWindow(From) {
 // Release a won claim that never actually delivered (thread already read
 // before the bell, or the trigger reported no bell/push) so a later message
 // in the same window gets another chance — mirrors the release-on-failure
-// half of the voicemail/dropped-call claim contract.
-async function releaseUnknownSenderAlertClaim(From) {
+// half of the voicemail/dropped-call claim contract. `token` scopes the
+// DELETE the same way confirm's does (codex #4210 round-3 P1).
+async function releaseUnknownSenderAlertClaim(From, token) {
+  if (!token) return;
   try {
-    await db('sms_reply_alert_claims').where({ phone: From }).del();
+    await db('sms_reply_alert_claims').where({ phone: From, expires_at: token }).del();
   } catch (e) {
     logger.warn('[twilio-webhook] alert-window claim release failed', { code: e.code || 'unknown' });
   }
@@ -2061,8 +2080,11 @@ async function hasRecentUnknownSenderReceipt(From, excludeSid) {
 async function dispatchUnknownSenderAlert({ From, MessageSid, message }) {
   // Claim the window atomically FIRST — no transaction held across the
   // check or the dispatch (codex #4210 head-round P1). Losing the claim
-  // means another delivery already owns this sender's window.
-  const claimed = await claimUnknownSenderAlertWindow(From);
+  // means another delivery already owns this sender's window. `token` is
+  // this call's OWN proof of ownership (codex #4210 round-3 P1) — every
+  // confirm/release below passes it along so a dispatch that outlasts its
+  // lease can never mutate a claim a later message has since won.
+  const { claimed, token } = await claimUnknownSenderAlertWindow(From);
   if (!claimed) return true;
   // Secondary guard: a row stamped sms_reply_alerted by any other writer
   // still counts — but this claim was just freshly stamped expiring in a
@@ -2072,7 +2094,7 @@ async function dispatchUnknownSenderAlert({ From, MessageSid, message }) {
   // correct (possibly much sooner) cutoff instead of this claim's own
   // (codex pre-push audit P1).
   if (await hasRecentUnknownSenderReceipt(From, MessageSid)) {
-    await releaseUnknownSenderAlertClaim(From);
+    await releaseUnknownSenderAlertClaim(From, token);
     return true;
   }
   let delivered = false;
@@ -2086,12 +2108,12 @@ async function dispatchUnknownSenderAlert({ From, MessageSid, message }) {
   if (delivered) {
     // Confirm the claim to the full 4h window only now that delivery is
     // proven (codex #4210 round-2 P1) — see claimUnknownSenderAlertWindow.
-    await confirmUnknownSenderAlertWindow(From);
+    await confirmUnknownSenderAlertWindow(From, token);
   } else {
     // Nothing actually delivered — release so a later message in this
     // window gets another chance (mirrors the voicemail/dropped-call claim
     // contract's release-on-non-delivery half).
-    await releaseUnknownSenderAlertClaim(From);
+    await releaseUnknownSenderAlertClaim(From, token);
   }
   return delivered;
 }
@@ -2127,6 +2149,9 @@ router._internals = {
   hasOutboundHistory,
   intakeOutcome,
   shouldReserveCorrectionJob,
+  claimUnknownSenderAlertWindow,
+  confirmUnknownSenderAlertWindow,
+  releaseUnknownSenderAlertClaim,
 };
 
 module.exports = router;
