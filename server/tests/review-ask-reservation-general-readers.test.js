@@ -35,6 +35,11 @@ describe('isUnresolvedReviewAskReservation — the shared predicate', () => {
     }
   });
 
+  test('a Communications reply reservation (manual_send_reservation) is the same kind of placeholder', () => {
+    expect(isUnresolvedReviewAskReservation({ status: 'sending', metadata: { manual_send_reservation: true } })).toBe(true);
+    expect(isUnresolvedReviewAskReservation({ status: 'sent', metadata: { manual_send_reservation: true } })).toBe(false);
+  });
+
   test('false for an ordinary sending row without the marker', () => {
     expect(isUnresolvedReviewAskReservation({ status: 'sending', metadata: {} })).toBe(false);
     expect(isUnresolvedReviewAskReservation({ status: 'sending', metadata: null })).toBe(false);
@@ -52,6 +57,7 @@ describe('excludeUnresolvedReviewAskReservations — SQL-level exclusion', () =>
     const { sql } = excludeUnresolvedReviewAskReservations(knex('sms_log')).toSQL();
     expect(sql).toContain("NOT (sms_log.status = 'sending'");
     expect(sql).toContain("sms_log.metadata->>'review_ask_reservation'");
+    expect(sql).toContain("sms_log.metadata->>'manual_send_reservation'");
   });
 
   test('qualifies an aliased/joined table when given', () => {
@@ -328,5 +334,65 @@ describe('admin-communications ai-draft context — excludes only the unresolved
     expect(matched.length).toBe(5);
     expect(matched.some((r) => r.message_body.includes('Please leave a Google review'))).toBe(false);
     for (let i = 0; i < 5; i++) expect(matched.some((r) => r.message_body === `real-${i}`)).toBe(true);
+  });
+});
+
+describe('csr-coach verifyFollowUps — an unresolved reservation is not proof staff completed the follow-up', () => {
+  jest.mock('../services/llm/call', () => ({ dispatchWithFallback: jest.fn() }));
+  const csrCoach = require('../services/csr/csr-coach');
+
+  function installDb({ sms, tasks }) {
+    const updates = [];
+    const smsQuery = (rows) => {
+      let excludeReservations = false;
+      let customerId;
+      const q = {
+        where(col, val) { if (col === 'customer_id') customerId = val; return q; },
+        whereRaw(sql) { if (/review_ask_reservation/.test(sql)) excludeReservations = true; return q; },
+        async first() {
+          let out = rows.filter((r) => r.customer_id === customerId && r.direction === 'outbound');
+          if (excludeReservations) out = out.filter((r) => !isUnresolvedReviewAskReservation(r));
+          return out[0] ?? null;
+        },
+      };
+      return q;
+    };
+    db.mockImplementation((table) => {
+      if (table === 'sms_log') return smsQuery(sms);
+      if (table === 'ai_follow_up_tasks') {
+        const q = {
+          whereIn: () => q,
+          where: (col, val) => (col === 'id' ? { update: async (patch) => { updates.push({ id: val, ...patch }); return 1; } } : q),
+          then: (resolve, reject) => Promise.resolve(tasks).then(resolve, reject),
+        };
+        return q;
+      }
+      if (table === 'customer_interactions') {
+        const q = { where: () => q, whereIn: () => q, first: async () => null };
+        return q;
+      }
+      return genericQuery([]);
+    });
+    return updates;
+  }
+
+  const task = { id: 'task-1', customer_id: 'cust-csr-1', created_at: new Date('2026-09-01T00:00:00Z') };
+
+  test('a still-unresolved reservation after the task does NOT verify it', async () => {
+    const updates = installDb({
+      tasks: [task],
+      sms: [{ customer_id: 'cust-csr-1', direction: 'outbound', status: 'sending', metadata: { review_ask_reservation: true }, created_at: new Date('2026-09-02T00:00:00Z') }],
+    });
+    await csrCoach.verifyFollowUps();
+    expect(updates.filter((u) => u.status === 'verified')).toHaveLength(0);
+  });
+
+  test('a real outbound text after the task still verifies it', async () => {
+    const updates = installDb({
+      tasks: [task],
+      sms: [{ customer_id: 'cust-csr-1', direction: 'outbound', status: 'sent', metadata: { review_ask_reservation: true }, created_at: new Date('2026-09-02T00:00:00Z') }],
+    });
+    await csrCoach.verifyFollowUps();
+    expect(updates.filter((u) => u.status === 'verified')).toHaveLength(1);
   });
 });
