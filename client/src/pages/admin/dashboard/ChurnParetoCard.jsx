@@ -20,6 +20,7 @@ import {
 import { churnParetoVerdict } from "./scorecard-metrics";
 import Verdict from "./Verdict";
 import FormulaNote from "./FormulaNote";
+import { Badge } from "../../../components/ui";
 
 // Churn Pareto (/admin/dashboard/churn-reasons): WHY recurring customers
 // leave, as descending lost-MRR bars with a cumulative-% line — the classic
@@ -30,7 +31,7 @@ const TOOLTIP_STYLE = {
   border: "0.5px solid #E4E4E7",
   borderRadius: 6,
   color: "#18181B",
-  fontSize: 12,
+  fontSize: 14,
   padding: "6px 10px",
 };
 
@@ -45,15 +46,15 @@ export default function ChurnParetoCard({ data }) {
       <div className="flex items-baseline justify-between gap-3 mb-2">
         <div>
           <span className="u-nums text-22 font-medium tracking-tight">{fmtMoney(total.mrr || 0)}</span>
-          <span className="text-12 text-ink-secondary ml-1.5">
+          <span className="ml-1.5 text-ui-caption text-ink-secondary">
             recurring lost · {fmtInt(total.customers)} customer{total.customers === 1 ? "" : "s"}
           </span>
         </div>
         {/* Unclassified share is the card's honesty metric — always visible. */}
         {data.unclassifiedShare > 0 && (
-          <span className="text-11 px-1.5 py-0.5 rounded-sm border border-amber-300 bg-amber-50 text-amber-700 whitespace-nowrap shrink-0">
+          <Badge tone="neutral" className="shrink-0 whitespace-nowrap">
             {data.unclassifiedShare}% unclassified
-          </span>
+          </Badge>
         )}
       </div>
 
@@ -63,7 +64,7 @@ export default function ChurnParetoCard({ data }) {
             <CartesianGrid stroke={CHART_GRID} strokeWidth={0.5} vertical={false} />
             <XAxis
               dataKey="label"
-              tick={{ fontSize: 10, fill: CHART_TICK }}
+              tick={{ fontSize: 14, fill: CHART_TICK }}
               interval={0}
               angle={-28}
               textAnchor="end"
@@ -73,7 +74,7 @@ export default function ChurnParetoCard({ data }) {
             />
             <YAxis
               yAxisId="mrr"
-              tick={{ fontSize: 10, fill: CHART_TICK }}
+              tick={{ fontSize: 14, fill: CHART_TICK }}
               tickFormatter={(v) => `$${v}`}
               width={44}
               tickLine={false}
@@ -83,7 +84,7 @@ export default function ChurnParetoCard({ data }) {
               yAxisId="pct"
               orientation="right"
               domain={[0, 100]}
-              tick={{ fontSize: 10, fill: CHART_TICK }}
+              tick={{ fontSize: 14, fill: CHART_TICK }}
               tickFormatter={(v) => `${v}%`}
               width={36}
               tickLine={false}
