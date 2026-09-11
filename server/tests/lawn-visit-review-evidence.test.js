@@ -24,6 +24,9 @@ describe('technician lawn evidence and reconciliation', () => {
     ['Chinch ruled out and no drought either', NO_STRESS_LABEL],
     ['Drought ruled out and chinch bugs confirmed by float test', 'chinch bug activity'],
     ['Drought ruled out, chinch bugs confirmed by float test', 'chinch bug activity'],
+    // Oxford comma: adjacent separators leave an empty segment between them,
+    // which must not disable splitting and let "ruled out" reach the next cause.
+    ['Drought ruled out, and chinch bugs confirmed by float test', 'chinch bug activity'],
     ['Grubs found, drought ruled out', 'grub activity'],
     ['No chinch bugs, grubs found', 'grub activity'],
     ['Chinch bugs and grubs ruled out', NO_STRESS_LABEL],
@@ -33,6 +36,25 @@ describe('technician lawn evidence and reconciliation', () => {
     ['Checked for chinch bugs and grubs; none found', NO_STRESS_LABEL],
     ['Grubs found and drought ruled out', 'grub activity'],
     ['Chinch bugs confirmed by float test', 'chinch bug activity'],
+    // An unrelated negative observation after a confirmed cause must not negate
+    // it, and ruling one cause out must not erase another observed condition.
+    ['Chinch bugs confirmed by float test; no irrigation today', 'chinch bug activity'],
+    ['No chinch bugs but weeds present', 'weed pressure'],
+    ['Dollar spot confirmed. No pets on site today', 'dollar spot'],
+    ['Checked for chinch bugs; none found, weeds present', 'weed pressure'],
+    // Comma-joined segments: a generic condition is not a governed cause, so the
+    // clause has to split on condition-bearing segments, not cause mentions.
+    ['Chinch bugs confirmed, no weeds present', 'chinch bug activity'],
+    ['No chinch bugs, weeds present', 'weed pressure'],
+    // An answer-shaped clause that rules out a SECOND cause is not an answer to
+    // the first; it has to stay independently scoped.
+    ['Chinch bugs confirmed by float test; no signs of drought', 'chinch bug activity'],
+    // A leading negation carries across or/nor but stops at a comma or "and".
+    ['No chinch bugs or weeds present', NO_STRESS_LABEL],
+    ['Checked for chinch bugs; none found and weeds present', 'weed pressure'],
+    // "not confirmed" strips to nothing, so it names no condition and still
+    // answers the clause before it rather than leaving that cause positive.
+    ['Checked for chinch bugs; not confirmed', NO_STRESS_LABEL],
   ])('resolves cause polarity: %s', (text, label) => {
     const built = review(run({ findings: [] }), { addedDetails: [{ text }] });
     expect(built.added_details[0]).toMatchObject({

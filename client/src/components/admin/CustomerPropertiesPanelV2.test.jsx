@@ -1,12 +1,13 @@
 // @vitest-environment jsdom
 import React from 'react';
 import '@testing-library/jest-dom/vitest';
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import CustomerPropertiesPanelV2 from './CustomerPropertiesPanelV2';
 
 const PRIMARY = { id: 'p1', address_line1: '10 Palm Ave', city: 'Naples', state: 'FL', zip: '34102', is_primary: true, occupancy_type: 'rental_investment', label: null };
 const SECOND = { id: 'p2', address_line1: '20 Oak St', city: 'Naples', state: 'FL', zip: '34103', is_primary: false, occupancy_type: 'rental_investment', label: 'Vacation rental' };
+const ELIGIBLE = { ...SECOND, occupancy_type: 'owner_occupied', primary_change_eligible: true, primary_change_unavailable: null };
 
 function jsonResponse(body, status = 200) {
   return Promise.resolve(new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } }));
@@ -16,6 +17,93 @@ describe('CustomerPropertiesPanelV2', () => {
   afterEach(() => {
     cleanup();
     vi.unstubAllGlobals();
+  });
+
+  it('previews primary impacts, confirms the version and refreshes the parent after saving', async () => {
+    const preview = { _version: 'opaque-version', primary_property: { address: '20 Oak St' },
+      effects: ['Keeps existing appointment locations.', 'Keeps existing invoice addresses.'] };
+    const onChanged = vi.fn();
+    const fetchMock = vi.fn((url, opts = {}) => {
+      if (url.endsWith('/primary-preview')) return jsonResponse(preview);
+      if (opts.method === 'POST') return jsonResponse({ properties: [{ ...PRIMARY, is_primary: false }, { ...SECOND, is_primary: true }] });
+      return jsonResponse({ properties: [PRIMARY, ELIGIBLE], canChangePrimary: true });
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    render(<CustomerPropertiesPanelV2 customerId="c1" canEdit onChanged={onChanged} />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Make primary' }));
+    expect(await screen.findByText('Keeps existing invoice addresses.')).toBeInTheDocument();
+    expect(screen.getByRole('dialog')).toHaveStyle({ zIndex: 1100 });
+    expect(fetchMock.mock.calls.some(([, o]) => o?.method === 'POST')).toBe(false);
+    fireEvent.click(screen.getByRole('button', { name: 'Confirm primary property' }));
+    await waitFor(() => expect(onChanged).toHaveBeenCalledOnce());
+    const post = fetchMock.mock.calls.find(([, o]) => o?.method === 'POST');
+    expect(post[0]).toBe('/api/admin/customers/c1/properties/p2/primary');
+    expect(JSON.parse(post[1].body)).toEqual({ expectedVersion: 'opaque-version' });
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+    expect(screen.getAllByTestId('customer-property-row')[1]).toHaveTextContent('Primary');
+  });
+
+  it('drops a late primary preview after switching customers', async () => {
+    let finishPreview;
+    vi.stubGlobal('fetch', vi.fn((url) => {
+      if (url.endsWith('/primary-preview')) return new Promise(resolve => { finishPreview = resolve; });
+      return jsonResponse({ properties: [PRIMARY, ELIGIBLE], canChangePrimary: true });
+    }));
+    const view = render(<CustomerPropertiesPanelV2 customerId="c1" canEdit />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Make primary' }));
+    view.rerender(<CustomerPropertiesPanelV2 customerId="c2" canEdit />);
+    finishPreview(await jsonResponse({ _version: 'old', primary_property: { address: 'Old customer address' }, effects: [] }));
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Make primary' })).toBeEnabled());
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+  });
+
+  it.each(['success', 'error'])('discards a preview %s from before a same-customer refresh without releasing the new request', async outcome => {
+    const pending = [];
+    vi.stubGlobal('fetch', vi.fn(url => {
+      if (url.endsWith('/primary-preview')) return new Promise(resolve => { pending.push(resolve); });
+      return jsonResponse({ properties: [PRIMARY, ELIGIBLE], canChangePrimary: true });
+    }));
+    const view = render(<CustomerPropertiesPanelV2 customerId="c1" canEdit refreshToken="before" />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Make primary' }));
+    view.rerender(<CustomerPropertiesPanelV2 customerId="c1" canEdit refreshToken="after" />);
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Make primary' })).toBeEnabled());
+    fireEvent.click(screen.getByRole('button', { name: 'Make primary' }));
+    await act(async () => {
+      pending[0](await jsonResponse(outcome === 'success'
+        ? { _version: 'old', primary_property: { address: 'Old preview address' }, effects: [] }
+        : { error: 'Old preview failed' }, outcome === 'success' ? 200 : 503));
+    });
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+    expect(screen.queryByText('Old preview failed')).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Make primary' })).toBeDisabled();
+    await act(async () => {
+      pending[1](await jsonResponse({ _version: 'new', primary_property: { address: '20 Oak St' }, effects: ['Fresh property version.'] }));
+    });
+    expect(await screen.findByText('Fresh property version.')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Confirm primary property' })).toBeEnabled();
+  });
+
+  it('a hung preview for the previous customer neither blocks the new customer nor clears its busy state later', async () => {
+    const pending = {};
+    vi.stubGlobal('fetch', vi.fn((url) => {
+      if (url.endsWith('/primary-preview')) return new Promise(resolve => { pending[url] = resolve; });
+      return jsonResponse({ properties: [PRIMARY, ELIGIBLE], canChangePrimary: true });
+    }));
+    const view = render(<CustomerPropertiesPanelV2 customerId="c1" canEdit />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Make primary' }));
+    expect(screen.getByRole('button', { name: 'Make primary' })).toBeDisabled();
+    view.rerender(<CustomerPropertiesPanelV2 customerId="c2" canEdit />);
+    // c1's preview never settled, yet c2's controls are usable at once.
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Make primary' })).toBeEnabled());
+    fireEvent.click(screen.getByRole('button', { name: 'Make primary' }));
+    expect(screen.getByRole('button', { name: 'Make primary' })).toBeDisabled();
+    // The stale c1 request settling cannot release c2's in-flight preview.
+    pending['/api/admin/customers/c1/properties/p2/primary-preview'](await jsonResponse({ _version: 'old', primary_property: { address: 'Old customer address' }, effects: [] }));
+    await new Promise(resolve => setTimeout(resolve, 0));
+    expect(screen.getByRole('button', { name: 'Make primary' })).toBeDisabled();
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+    pending['/api/admin/customers/c2/properties/p2/primary-preview'](await jsonResponse({ _version: 'new', primary_property: { address: '20 Oak St' }, effects: ['Keeps existing invoice addresses.'] }));
+    expect(await screen.findByText('Keeps existing invoice addresses.')).toBeInTheDocument();
   });
 
   it('lists properties and labels the primary as the DEFAULT address for a property manager', async () => {
@@ -31,6 +119,22 @@ describe('CustomerPropertiesPanelV2', () => {
     expect(screen.queryByText('Primary')).not.toBeInTheDocument();
     expect(screen.getByText(/not a residence/)).toBeInTheDocument();
     expect(fetchMock.mock.calls[0][0]).toBe('/api/admin/customers/c1/properties');
+  });
+
+  it('shows server eligibility and refreshes it after an occupancy edit', async () => {
+    const reason = 'Primary requires an owner-occupied or unclassified residential property.';
+    const fetchMock = vi.fn((url, opts = {}) => jsonResponse({ properties: [PRIMARY,
+      opts.method === 'PATCH' ? ELIGIBLE : { ...SECOND, primary_change_eligible: false, primary_change_unavailable: reason }], canChangePrimary: true }));
+    vi.stubGlobal('fetch', fetchMock);
+    render(<CustomerPropertiesPanelV2 customerId="c1" canEdit />);
+    const button = await screen.findByRole('button', { name: 'Make primary' });
+    expect(button).toBeDisabled();
+    expect(screen.getByText(reason)).toBeVisible();
+    fireEvent.click(button);
+    expect(fetchMock.mock.calls.some(([url]) => url.endsWith('/primary-preview'))).toBe(false);
+    fireEvent.change(screen.getByLabelText('Occupancy for 20 Oak St'), { target: { value: 'owner_occupied' } });
+    await waitFor(() => expect(button).toBeEnabled());
+    expect(screen.queryByText(reason)).not.toBeInTheDocument();
   });
 
   it('labels the primary as PRIMARY for an owner and hides editing for non-admins', async () => {
@@ -182,6 +286,51 @@ describe('CustomerPropertiesPanelV2 — review-round behaviours', () => {
     expect(fetchMock.mock.calls.filter(([, o]) => o && o.method === 'PATCH')).toHaveLength(1);
     resolvePatch();
     await waitFor(() => expect(second).not.toBeDisabled());
+  });
+
+  it.each(['edit', 'primary change'])('keeps an in-flight %s locked across a same-customer profile refresh', async operation => {
+    const pending = [];
+    vi.stubGlobal('fetch', vi.fn((url, opts = {}) => {
+      if (opts.method === 'PATCH' || opts.method === 'POST') return new Promise(resolve => { pending.push(resolve); });
+      if (url.endsWith('/primary-preview')) return jsonResponse({ _version: 'current', primary_property: { address: '20 Oak St' }, effects: [] });
+      return jsonResponse({ properties: [PRIMARY, ELIGIBLE], canChangePrimary: true });
+    }));
+    const view = render(<CustomerPropertiesPanelV2 customerId="c1" canEdit refreshToken="before" />);
+    await screen.findByLabelText('Occupancy for 20 Oak St');
+    if (operation === 'edit') fireEvent.change(screen.getByLabelText('Occupancy for 20 Oak St'), { target: { value: 'seasonal' } });
+    else {
+      fireEvent.click(screen.getByRole('button', { name: 'Make primary' }));
+      fireEvent.click(await screen.findByRole('button', { name: 'Confirm primary property' }));
+    }
+    expect(pending).toHaveLength(1);
+    view.rerender(<CustomerPropertiesPanelV2 customerId="c1" canEdit refreshToken="after" />);
+    const select = await screen.findByLabelText('Occupancy for 20 Oak St');
+    expect(select).toBeDisabled();
+    fireEvent.change(select, { target: { value: 'vacant' } });
+    expect(pending).toHaveLength(1);
+    await act(async () => { pending[0](await jsonResponse({ properties: [PRIMARY, { ...ELIGIBLE, occupancy_type: 'seasonal' }] })); });
+    await waitFor(() => expect(select).toBeEnabled());
+    expect(select).toHaveValue('seasonal');
+  });
+
+  it('ignores an old row edit after switching away and back while a new edit is pending', async () => {
+    const pending = [];
+    vi.stubGlobal('fetch', vi.fn((url, opts = {}) => opts.method === 'PATCH'
+      ? new Promise(resolve => { pending.push(resolve); })
+      : jsonResponse({ properties: [PRIMARY, ELIGIBLE], canChangePrimary: true })));
+    const view = render(<CustomerPropertiesPanelV2 customerId="c1" canEdit />);
+    fireEvent.change(await screen.findByLabelText('Occupancy for 20 Oak St'), { target: { value: 'seasonal' } });
+    view.rerender(<CustomerPropertiesPanelV2 customerId="c2" canEdit />);
+    await screen.findByLabelText('Occupancy for 20 Oak St');
+    view.rerender(<CustomerPropertiesPanelV2 customerId="c1" canEdit />);
+    const select = await screen.findByLabelText('Occupancy for 20 Oak St');
+    fireEvent.change(select, { target: { value: 'vacant' } });
+    await act(async () => { pending[0](await jsonResponse({ properties: [PRIMARY, { ...ELIGIBLE, occupancy_type: 'seasonal' }] })); });
+    expect(select).toBeDisabled();
+    expect(select).toHaveValue('owner_occupied');
+    await act(async () => { pending[1](await jsonResponse({ properties: [PRIMARY, { ...ELIGIBLE, occupancy_type: 'vacant' }] })); });
+    await waitFor(() => expect(select).toBeEnabled());
+    expect(select).toHaveValue('vacant');
   });
 
   it('constrains state to a two-letter code client-side', async () => {

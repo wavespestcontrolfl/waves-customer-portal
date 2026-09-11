@@ -800,6 +800,70 @@ it('a governed draft restored under an initial plan outage still submits its sav
   expect(submit.mock.calls[0][1].lawnProtocolCompletion).toEqual({ treatedSqft: 1000 });
 });
 
+it('an area-only governed draft (no default rows, nothing removed) restored under a plan outage is not deleted when a typed field is erased again', async () => {
+  withdrawDefaults = true;
+  enableDefaults();
+  const view = mount();
+  await waitFor(() => expect(screen.getByLabelText('Area for this visit (sq ft)')).toBeTruthy());
+  fireEvent.change(screen.getByLabelText('Area for this visit (sq ft)'), { target: { value: '1000' } });
+  const key = `waves_completion_draft_${service.id}`;
+  await waitFor(() => expect(JSON.parse(localStorage.getItem(key)).lawnAreaOverride).toBe('1000'));
+  view.unmount();
+  failPlan = true;
+  mount();
+  await screen.findByText('Lawn plan unavailable.');
+  fireEvent.click(await screen.findByRole('button', { name: 'Restore', exact: true }));
+  // Typing mints this mount's snapshot; erasing it again re-evaluates the
+  // draft. With no live defaults and nothing removed, the restored visit
+  // area alone must keep the draft alive — before the fix the form read as
+  // empty and the autosave deleted the draft, so a reload or billing detour
+  // lost the measured area and the ledger recorded it as null.
+  const notes = screen.getByPlaceholderText(/Notes about this service/);
+  fireEvent.change(notes, { target: { value: 'x' } });
+  await waitFor(() => expect(JSON.parse(localStorage.getItem(key)).notes).toBe('x'), { timeout: 3000 });
+  fireEvent.change(notes, { target: { value: '' } });
+  await new Promise((resolve) => setTimeout(resolve, 1500));
+  expect(localStorage.getItem(key)).not.toBeNull();
+  expect(JSON.parse(localStorage.getItem(key)).lawnAreaOverride).toBe('1000');
+});
+
+it('an area-only draft restored while the completion flag is still cold keeps its area once the flag resolves under a plan outage', async () => {
+  withdrawDefaults = true;
+  enableDefaults();
+  const view = mount();
+  await waitFor(() => expect(screen.getByLabelText('Area for this visit (sq ft)')).toBeTruthy());
+  fireEvent.change(screen.getByLabelText('Area for this visit (sq ft)'), { target: { value: '1000' } });
+  const key = `waves_completion_draft_${service.id}`;
+  await waitFor(() => expect(JSON.parse(localStorage.getItem(key)).lawnAreaOverride).toBe('1000'));
+  view.unmount();
+  failPlan = true;
+  delayFlags = true;
+  refetchFlags();
+  mount();
+  await waitFor(() => expect(flagResolvers).toHaveLength(1));
+  fireEvent.click(await screen.findByRole('button', { name: 'Restore', exact: true }));
+  // While the flag is cold the flag-derived area clause reads false, so
+  // the autosave's verdict on this draft is provisional. Typing and erasing
+  // a field re-evaluates it in that state.
+  const notes = screen.getByPlaceholderText(/Notes about this service/);
+  fireEvent.change(notes, { target: { value: 'x' } });
+  await waitFor(() => expect(JSON.parse(localStorage.getItem(key)).notes).toBe('x'), { timeout: 3000 });
+  fireEvent.change(notes, { target: { value: '' } });
+  await new Promise((resolve) => setTimeout(resolve, 1500));
+  // The flag resolves true while the plan request fails. The autosave
+  // re-evaluates on the flag itself (a dependency since Codex #4365 r2):
+  // the measured area is draft content under the resolved flag, so a later
+  // erase cycle, unmount or reload cannot lose it.
+  await act(async () => { flagResolvers[0](); });
+  await screen.findByText('Lawn plan unavailable.');
+  await waitFor(() => expect(JSON.parse(localStorage.getItem(key) || 'null')?.lawnAreaOverride).toBe('1000'), { timeout: 3000 });
+  fireEvent.change(notes, { target: { value: 'y' } });
+  await waitFor(() => expect(JSON.parse(localStorage.getItem(key)).notes).toBe('y'), { timeout: 3000 });
+  fireEvent.change(notes, { target: { value: '' } });
+  await new Promise((resolve) => setTimeout(resolve, 1500));
+  expect(JSON.parse(localStorage.getItem(key) || 'null')?.lawnAreaOverride).toBe('1000');
+}, 15000);
+
 it('changing visits after a governed draft was restored under a plan outage drops the first visit\'s area and rows', async () => {
   enableDefaults();
   const view = mount();
