@@ -4,7 +4,6 @@ import { TIMEZONE } from '../../lib/timezone';
 
 const API = '/admin/call-recordings';
 const PAGE = 100;
-const post = (path, body) => adminFetch(path, { method: 'POST', body: JSON.stringify(body) });
 const patch = (path, body) => adminFetch(path, { method: 'PATCH', body: JSON.stringify(body) });
 const when = (value) => value ? new Date(value).toLocaleString('en-US', {
   timeZone: TIMEZONE, weekday: 'short', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit',
@@ -19,6 +18,7 @@ const phone = (r) => r.phone || r.customer_phone || (String(r.direction || '').s
 const dueAt = (r) => r.effective_due_at || r.due_at || null;
 
 const DEFAULT_POLL_MS = 30000;
+const EMPTY_TEXT = { true: 'Loading follow-through…', false: 'No follow-through needs attention.' };
 
 // One behavior layer; the admin and tech adapters supply their own native
 // style systems. Both read and settle the same server records: open callback
@@ -30,11 +30,13 @@ const DEFAULT_POLL_MS = 30000;
 //   of tech tabs polls far less often than the office queue; onSummary reports
 //   whether the cards loaded enabled, their open/overdue counts, and whether
 //   more pages remain, so a host can fold them into its own summary.
-export default function FollowThroughCards({ ui, onCallbacksEnabled, onSummary, hints = true, pollMs = DEFAULT_POLL_MS }) {
+export default function FollowThroughCards({ ui, onSummary, hints = true, pollMs = DEFAULT_POLL_MS }) {
   const [data, setData] = useState(null);
   const [error, setError] = useState('');
   const [notice, setNotice] = useState('');
   const [busy, setBusy] = useState(null);
+  // Overdue and snooze presentation follows the clock, not the (slow) poll.
+  const [now, setNow] = useState(() => Date.now());
   const busyRef = useRef(false);
   const request = useRef(0);
   const mounted = useRef(true);
@@ -64,10 +66,9 @@ export default function FollowThroughCards({ ui, onCallbacksEnabled, onSummary, 
         pages.current = Math.max(1, Math.ceil(rows.length / PAGE) || 1);
         setData({ ...next, commitments: rows });
       }
-      onCallbacksEnabled?.(next.callbacks_enabled === true);
       setError('');
     } catch (err) { if (mounted.current && seq === request.current) setError(err.message || 'Could not load follow-through.'); }
-  }, [fetchPage, onCallbacksEnabled]);
+  }, [fetchPage]);
   const refresh = useCallback(() => load({ count: pages.current }), [load]);
   // Actions resolve their post-action refresh through the latest filter, not
   // the closure they were started under (a hints change mid-flight would
@@ -82,12 +83,13 @@ export default function FollowThroughCards({ ui, onCallbacksEnabled, onSummary, 
     // the old filter's cards; there is no stale "Load more" to mix pages).
     // The enabled flag carries over so the host does not flip its own list
     // while the replacement read is pending.
-    setData((old) => old ? { callbacks_enabled: old.callbacks_enabled, commitments: [], has_more: false, pending: true } : null);
+    setData((old) => ({ callbacks_enabled: old?.callbacks_enabled, commitments: [], has_more: false, pending: true }));
     load({ page: 0 });
     const tick = () => { if (!document.hidden && !busyRef.current) refresh(); };
     const timer = setInterval(tick, pollMs);
+    const clock = setInterval(() => setNow(Date.now()), 60000);
     window.addEventListener('focus', tick);
-    return () => { mounted.current = false; request.current += 1; clearInterval(timer); window.removeEventListener('focus', tick); };
+    return () => { mounted.current = false; request.current += 1; clearInterval(timer); clearInterval(clock); window.removeEventListener('focus', tick); };
   }, [load, refresh, pollMs]);
   const act = async (id, action, success = '') => {
     if (busyRef.current) return;
@@ -111,10 +113,10 @@ export default function FollowThroughCards({ ui, onCallbacksEnabled, onSummary, 
   const hasMore = enabled && data?.has_more === true;
   useEffect(() => { onSummary?.({ enabled, open, overdue: overdueCount, hasMore }); }, [onSummary, enabled, open, overdueCount, hasMore]);
   if (!enabled && !error) return null;
-  const snoozed = callbacks.filter((r) => r.snoozed_until && new Date(r.snoozed_until).getTime() > Date.now());
+  const snoozed = callbacks.filter((r) => r.snoozed_until && new Date(r.snoozed_until).getTime() > now);
   const renderCallback = (r) => {
     const due = dueAt(r);
-    const overdue = r.overdue === true || (!!due && new Date(due).getTime() < Date.now());
+    const overdue = r.overdue === true || (!!due && new Date(due).getTime() < now);
     return <Card key={r.id}>
       <Text tone="title">Call {who(r)}</Text>
       <Text tone={overdue || !due ? 'alert' : 'muted'}>{overdue ? 'Overdue · ' : 'Due '}{when(due)}</Text>
@@ -123,9 +125,9 @@ export default function FollowThroughCards({ ui, onCallbacksEnabled, onSummary, 
       <Text tone="muted">{phone(r)} · Call {when(r.call_started_at)}{r.owner_name ? ` · ${r.owner_name}` : ''}</Text>
       {snoozed.includes(r) && <Text tone="muted">Snoozed until {when(r.snoozed_until)}</Text>}
       <div className="flex flex-wrap gap-2">
-        <Button disabled={!!busy || !phone(r)} onClick={() => act(r.id, () => post('/admin/communications/call', {
+        <Button disabled={!!busy || !phone(r)} onClick={() => act(r.id, () => adminFetch('/admin/communications/call', { method: 'POST', body: JSON.stringify({
           to: phone(r), customerId: r.customer_id || undefined, relatedCommitmentId: r.id, expected_at: r.updated_at,
-        }), 'The staff phone is ringing. Press 1 to connect.')}>Call</Button>
+        }) }), 'The staff phone is ringing. Press 1 to connect.')}>Call</Button>
         <Button secondary disabled={!!busy} onClick={() => act(r.id, () => patch(`${API}/commitments/${r.id}`, { action: 'fulfill', expected_at: r.updated_at }))}>Done</Button>
         <Select aria-label={`Snooze callback for ${who(r)}`} value="" disabled={!!busy} onChange={(e) => {
           const snooze = e.target.value;
@@ -141,7 +143,7 @@ export default function FollowThroughCards({ ui, onCallbacksEnabled, onSummary, 
     {notice && <div role="status"><Text>{notice}</Text></div>}
     {callbacks.filter((r) => !snoozed.includes(r)).map(renderCallback)}
     {snoozed.length > 0 && <details><summary className="cursor-pointer py-2">{snoozed.length} snoozed callback{snoozed.length === 1 ? '' : 's'}</summary><div className="space-y-3">{snoozed.map(renderCallback)}</div></details>}
-    {enabled && !callbacks.length && <Text tone="muted">{data?.pending ? 'Loading follow-through…' : 'No follow-through needs attention.'}</Text>}
+    {enabled && !callbacks.length && <Text tone="muted">{EMPTY_TEXT[String(data.pending === true)]}</Text>}
     {data?.has_more && <Button secondary disabled={!!busy} onClick={() => load({ page: pages.current })}>Load more</Button>}
   </section>;
 }

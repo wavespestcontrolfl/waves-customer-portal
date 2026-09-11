@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import '@testing-library/jest-dom/vitest';
 import FollowThroughCards from './FollowThroughCards';
 import { adminFetch } from '../../utils/admin-fetch';
@@ -25,10 +25,27 @@ describe('callback cards', () => {
   });
   it('renders nothing while callback cards are off', async () => {
     adminFetch.mockResolvedValue({ ...feed, callbacks_enabled: false, commitments: [] });
-    const enabled = vi.fn();
-    const { container } = render(<FollowThroughCards ui={ui} onCallbacksEnabled={enabled} />);
-    await waitFor(() => expect(enabled).toHaveBeenCalledWith(false));
+    const onSummary = vi.fn();
+    const { container } = render(<FollowThroughCards ui={ui} onSummary={onSummary} />);
+    await waitFor(() => expect(adminFetch).toHaveBeenCalledTimes(1));
+    expect(onSummary).toHaveBeenLastCalledWith({ enabled: false, open: 0, overdue: 0, hasMore: false });
     expect(container).toBeEmptyDOMElement();
+  });
+  it('surfaces a callback whose snooze or deadline expires between polls', async () => {
+    const soon = new Date(Date.now() + 30000).toISOString();
+    adminFetch.mockResolvedValue({ ...feed, commitments: [
+      { ...row, id: 'rest', description: 'Snoozed callback', effective_due_at: soon, snoozed_until: soon },
+    ] });
+    vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval', 'Date'] });
+    try {
+      render(<FollowThroughCards ui={ui} pollMs={600000} />);
+      await screen.findByText('1 snoozed callback');
+      expect(screen.getByText(/^Due /)).toBeInTheDocument();
+      vi.setSystemTime(Date.now() + 61000);
+      act(() => { vi.advanceTimersByTime(60000); });
+      expect(screen.queryByText('1 snoozed callback')).not.toBeInTheDocument();
+      expect(screen.getByText(/^Overdue · /)).toBeInTheDocument();
+    } finally { vi.useRealTimers(); }
   });
   it('marks a card the ledger judged overdue and lists a snoozed card separately', async () => {
     const past = new Date(Date.now() - 3600000).toISOString();
