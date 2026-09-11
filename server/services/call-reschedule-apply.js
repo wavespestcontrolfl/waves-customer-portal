@@ -360,6 +360,12 @@ async function applyCallReschedule({ conn, call, procGeneration = null, appointm
       .where((q) => q.where('status', 'in_progress').orWhere((closed) => closed
         .where('resolution_source', 'human').whereIn('status', ['resolved', 'dismissed']))).first('id');
     const moved = await newerMove(trx);
+    // Under the visit's OWN row lock: routes/schedule.js holds that lock while
+    // it inserts the request, so locking here makes a portal submission either
+    // visible to this check or forced to start after the move. Its transaction
+    // touches only notes/updated_at, neither of which is in this path's CAS,
+    // so an unserialized check could be overwritten (GH codex #4204 r7 P2).
+    await trx('scheduled_services').where({ id: visit.id }).forUpdate().first('id');
     const portalRequest = await openPortalRequest(trx, visit.id);
     if (handled || moved || portalRequest) throw Object.assign(new Error('The request was handled after this call'), { code: 'CALL_RESCHEDULE_HANDLED' });
     const latestCustomer = await trx('customers').where({ id: settled.customer_id }).forShare().first();

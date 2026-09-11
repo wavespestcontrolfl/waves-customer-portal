@@ -341,6 +341,9 @@ maybeDescribe('call_commitments (live Postgres)', () => {
         metadata: JSON.stringify({ call_log_id: String(callId), scheduled_service_id: String(visit.id) }) }).returning('id');
       expect(await cc.resolveFulfillment(db, { kind: 'schedule_visit' }, { ...call, customer_id: null }))
         .toMatchObject({ kind: 'appointment_rescheduled', record_id: String(visit.id), strength: 'direct' });
+      // A moved visit is NOT proof a promised technician follow-up happened —
+      // closing that owed work on this evidence would drop it silently (r7 P2).
+      expect(await cc.resolveFulfillment(db, { kind: 'technician_follow_up' }, { ...call, customer_id: null })).toBeNull();
       await db('activity_log').whereIn('id', [strayAct.id, movedAct.id]).del();
       await db('scheduled_services').where({ id: visit.id }).update({ created_at: new Date(Date.now() - 30 * 1000) });
       expect(await cc.resolveFulfillment(db, { kind: 'schedule_visit' }, { ...call, customer_id: null })).toMatchObject({ kind: 'appointment_booked', record_id: visit.id, strength: 'direct' });

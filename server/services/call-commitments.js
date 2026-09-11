@@ -1284,8 +1284,12 @@ async function resolveFulfillment(conn, commitment, call) {
       // watchdog reported the promise overdue (GH codex #4204 r6 P2). The
       // applier's own activity row names this call and the visit it moved —
       // direct proof, same standard as a booking from this call.
+      // schedule_visit ONLY. A moved visit proves an existing appointment
+      // changed time; it says nothing about a promised technician follow-up,
+      // and closing that owed work on this evidence would drop it silently
+      // (GH codex #4204 r7 P2).
       const { ACTIVITY_ACTION: RESCHEDULE_APPLIED } = require("./call-reschedule-apply");
-      const movedRow = await conn("activity_log")
+      const movedRow = commitment.kind !== "schedule_visit" ? null : await conn("activity_log")
         .where({ action: RESCHEDULE_APPLIED })
         .whereRaw("metadata->>'call_log_id' = ?", [String(call.id)])
         .orderBy("created_at", "asc")
