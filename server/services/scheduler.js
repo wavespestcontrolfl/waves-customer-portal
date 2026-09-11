@@ -742,7 +742,7 @@ function initScheduledJobs() {
         }
       });
     } catch (err) {
-      logger.error(`[sms-reply-alert-sweep] tick failed: ${err.message}`);
+      logger.error('[sms-reply-alert-sweep] tick failed', { code: err.code || 'unknown' });
     }
   };
   cron.scheduleTimeout(smsReplyAlertSweepTick, 30 * 1000);
