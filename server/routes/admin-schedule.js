@@ -13452,11 +13452,13 @@ router.post('/optimize', requireAdmin, async (req, res, next) => {
       byTech.get(s.technician_id).push(s);
     }
     // Google's legs describe the FLAT sequence — they only line up with a
-    // technician's extracted slice when that tech is the only one on the
-    // call (the common case: this business runs one field technician).
-    // Misaligned legs are never trusted (see violatesWindowFeasibility) —
+    // technician's extracted slice when that slice IS the flat sequence:
+    // one tech on the call AND no unassigned stops interleaved (an
+    // unassigned stop shifts every leg after it, and the feasibility guard's
+    // length check is >=, so a longer flat list would be indexed
+    // positionally — pre-push audit P1). Misaligned legs are never trusted —
     // pass null and let the guard use the shared fallback leg model instead.
-    const legsAlignToTech = byTech.size <= 1 ? result.legs : null;
+    const legsAlignToTech = byTech.size <= 1 && services.every((s) => s.technician_id) ? result.legs : null;
     let rejection = null;
     const resolvedByTech = new Map();
     for (const [techId, techStops] of byTech) {

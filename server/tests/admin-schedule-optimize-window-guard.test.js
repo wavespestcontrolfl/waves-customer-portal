@@ -268,6 +268,26 @@ describe('POST /schedule/optimize (multi tech-day)', () => {
     expect(body.savedDistanceMeters).toBe(2000);
   });
 
+  test('one tech + unassigned stops: Google legs are NOT trusted for the tech slice (misaligned)', async () => {
+    // Flat Google order N,A,B with N unassigned: legs[0]=HQ→N, legs[1]=N→A,
+    // legs[2]=A→B. Sliced to the tech (A,B) those legs no longer line up.
+    // If trusted positionally, the 1000-minute HQ→N leg would land on A and
+    // blow its 09:00 window → a 409 for an order that is perfectly legal
+    // under the shared model. Nothing may be repaired or refused here.
+    process.env.GATE_ROUTE_REORDER_WINDOW_FIT = 'true';
+    process.env.GATE_DRIVE_TIME_CALIBRATION = 'true';
+    stopsByDate[DATE] = [
+      stop('N', { technician_id: null, lng: 3, route_order: 1 }),
+      stop('A', { technician_id: 't1', window_start: '09:00', lng: 1, route_order: 2 }),
+      stop('B', { technician_id: 't1', lng: 2, route_order: 3 }),
+    ];
+    mockOptimizerOrder(['N', 'A', 'B'], { legs: [{ durationMinutes: 1000 }, { durationMinutes: 1000 }, { durationMinutes: 1000 }] });
+    const { status, body } = await optimizeAll({ date: DATE });
+    expect(status).toBe(200);
+    expect(body.source).toBe('google_routes_api');
+    expect(body.order.map((o) => o.id)).toEqual(['N', 'A', 'B']);
+  });
+
   test('one unrepairable tech-day fails the WHOLE request — no partial write of the other tech', async () => {
     // t1 legal (two untimed stops); t2 has a chronology conflict and the
     // window-fit gate is off — the whole call must refuse, not write t1 alone.
