@@ -96,8 +96,9 @@ old list).
   `customer-dedupe.js`'s canonical `duplicatePairEligibility` (never
   re-derived in task-context.js) — a red-tier, out-of-queue, or
   address-conflicted pairing is refused like any other foreign record, and so
-  is a pairing where neither id is the task's customer.
-  `archive_customer` takes a plain `customer_id` and is bound normally.
+  is a pairing where neither id is the task's customer. An unreadable
+  dismissals table answers `dismissals_unreadable` (fail-closed) — never an
+  admitted pair.
 - Operations and provider readers whose text can echo customer identifiers
   (`get_twilio_alerts`, `get_scheduled_job_health`, `get_railway_logs`, the
   three Sentry readers, the two GrowthBook readers, `get_managed_agent_runs`,
