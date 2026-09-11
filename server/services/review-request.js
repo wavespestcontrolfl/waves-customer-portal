@@ -699,13 +699,24 @@ function unsentOutcome(outcome) {
     ? { sent: false, failed: outcome.failed, nextAllowedAt: null }
     : { sent: false, deferred: outcome.deferred, nextAllowedAt: outcome.nextAllowedAt || null };
 }
-// Only a real send, or the drift refusal its callers convert into a thrown
-// 409, may skip the unsent-outcome assignment. Every other refusal
+// Only a real send, the drift refusal its callers convert into a thrown 409,
+// or the discovery that an earlier attempt already delivered this ask, may
+// skip the unsent-outcome assignment. Every other refusal
 // (send_fence_unstored, request_not_sendable, send_state_unverified) means
 // the provider was never called — reporting those as delivered told
 // /tech-trigger sent:true for a text that never left (codex #4331 P1).
+// already_delivered is the opposite error: the customer HAS the ask (the row
+// was only just repaired to say so), and reporting it as an unsent failure
+// sends staff chasing the customer through another channel over a text that
+// already landed (pre-push P1 on this merge).
 const deliveredOrDrifted = (outcome) => !!outcome
-  && (outcome.sent === true || outcome.refused === "approved_phone_drift");
+  && (outcome.sent === true
+    || outcome.refused === "approved_phone_drift"
+    || outcome.refused === "already_delivered");
+
+// The caller-facing shape for that discovery: delivered, but on an earlier
+// attempt, so staff copy can say so rather than implying a text just left.
+const alreadyDeliveredOutcome = () => ({ sent: true, alreadyDelivered: true });
 
 // Callers must check isExplicitlyUncertainOutcome(result) BEFORE this: an
 // uncertain provider handoff (no SID, or an unrecognized post-handoff
@@ -944,7 +955,8 @@ const ReviewService = {
       const fresh = (await db("review_requests").where({ id: existing.id }).first()) || existing;
       // Same truth as the fresh-row path (codex #4141 r4 P2): a resend held
       // by the 3-day rule / send window / provider retry is queued, not sent.
-      if (!deliveredOrDrifted(resendOutcome)) fresh.sendOutcome = unsentOutcome(resendOutcome);
+      if (resendOutcome?.refused === "already_delivered") fresh.sendOutcome = alreadyDeliveredOutcome();
+      else if (!deliveredOrDrifted(resendOutcome)) fresh.sendOutcome = unsentOutcome(resendOutcome);
       return fresh;
     }
 
@@ -1057,7 +1069,8 @@ const ReviewService = {
       // A failure that could not even be queued (codex #4156 r1 P2), a
       // policy block or a suppression (r2 P2) are reported as such — never
       // as a held send some job will pick up, never as sent.
-      if (!deliveredOrDrifted(outcome)) request.sendOutcome = unsentOutcome(outcome);
+      if (outcome?.refused === "already_delivered") request.sendOutcome = alreadyDeliveredOutcome();
+      else if (!deliveredOrDrifted(outcome)) request.sendOutcome = unsentOutcome(outcome);
       if (outcome && outcome.refused === "approved_phone_drift") {
         // Remove the row this very call created (pre-push r15 P1): left in
         // place it would later be sent by the scheduler to the unapproved
@@ -3219,16 +3232,31 @@ const ReviewService = {
       // skip the row this tick (it's picked up next tick, or was superseded).
       // recordHealth: false — per-customer mutual-exclusion lock, not a
       // scheduled job; recording it would grow job_health per customer.
-      const out = await runExclusive(`review-send:${request.customer_id}`, async () => {
-        const outcome = await this.sendSMS(request.id);
-        if (outcome?.refused === "approved_phone_drift") {
-          // Keep refusal cleanup under the lock so it cannot suppress a newer
-          // operator-approved resend after another caller acquires the lock.
-          const parked = await this._parkRequestVerified(request.id);
-          logger.warn(`[review] Scheduled request refused for recipient drift (requestId=${request.id} parked=${parked})`);
-        }
-        return outcome;
-      }, { recordHealth: false });
+      let out;
+      try {
+        out = await runExclusive(`review-send:${request.customer_id}`, async () => {
+          const outcome = await this.sendSMS(request.id);
+          if (outcome?.refused === "approved_phone_drift") {
+            // Keep refusal cleanup under the lock so it cannot suppress a newer
+            // operator-approved resend after another caller acquires the lock.
+            const parked = await this._parkRequestVerified(request.id);
+            logger.warn(`[review] Scheduled request refused for recipient drift (requestId=${request.id} parked=${parked})`);
+          }
+          return outcome;
+        }, { recordHealth: false });
+      } catch (rowErr) {
+        // One row must never take the batch down with it. sendSMS now has
+        // throw paths of its own — _askSpacingHold raises
+        // REVIEW_RETRY_PERSISTENCE_FAILED when both the 3-day-rule hold write
+        // and its fallback retry write fail, and the pin-persistence write
+        // throws likewise — so a single row's DB trouble used to abort this
+        // loop and leave every later due request unprocessed for the tick
+        // (pre-push P1 on this merge). Count it held: nothing was delivered,
+        // and the row keeps whatever retry ownership it had.
+        held++;
+        logger.error(`[review] Scheduled send threw (requestId=${request.id} code=${rowErr?.code || "n/a"} errType=${rowErr?.name || "Error"}): ${rowErr?.message}`);
+        continue;
+      }
       // Only a delivered send counts (codex #4156 r1 P2): a 3-day-rule or
       // send-window hold, a lookup deferral, a suppression or a skipped
       // lock left the customer without a message.

@@ -122,6 +122,9 @@ router.post('/tech-trigger', async (req, res, next) => {
     // will pick it up, so "will go out automatically" would be false.
     // Additive fields.
     const unsent = request.sendOutcome && request.sendOutcome.sent === false ? request.sendOutcome : null;
+    // Delivered, but by an earlier attempt whose row never recorded it — say
+    // so instead of implying a text just went out on this tap.
+    const alreadyDelivered = request.sendOutcome?.alreadyDelivered === true;
     // A block or suppression (opt-out, no consented recipient) will not clear
     // by retrying; only the unqueued provider failure is worth another try.
     const unsentFields = !unsent ? {}
@@ -133,6 +136,7 @@ router.post('/tech-trigger', async (req, res, next) => {
     res.json({
       sent: !unsent,
       ...unsentFields,
+      ...(alreadyDelivered ? { alreadyDelivered: true, message: 'This review request was already texted to the customer — nothing new was sent.' } : {}),
       // The gate-respecting tokenized link — same helper the SMS paths use
       // (/go behind GATE_REVIEW_DIRECT_LINK; with the gate off /go is a rate-
       // page alias, so main's hardcoded /go form and this resolve identically

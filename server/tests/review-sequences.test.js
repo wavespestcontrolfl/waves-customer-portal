@@ -1605,6 +1605,60 @@ describe('cadence scheduling + post-service enrollment (2026-07-30 revamp)', () 
       expect(request.sendOutcome).toEqual({ sent: false, failed: 'request_not_sendable', nextAllowedAt: null });
     });
 
+    test('a repaired already-delivered ask is reported DELIVERED to /tech-trigger, not as an unsent failure', async () => {
+      // The opposite error from the unsent-outcome rule above: the earlier
+      // attempt WAS accepted, so the customer holds this ask. Reporting it
+      // as a failure ('this customer cannot receive review texts right now')
+      // sends a tech chasing the same customer through another channel over
+      // a text that already landed (pre-push P1 on the main merge).
+      const acceptedAt = new Date(Date.now() - 80 * 3600000);
+      const mock = makeMock({
+        customers: [{ id: 'adr-1', first_name: 'Ida', phone: '+19410000164', nearest_location_id: 'venice' }],
+        review_requests: [{ id: 'rr-adr1', customer_id: 'adr-1', service_record_id: 'sr-adr1', status: 'pending', channel: 'sms', template_key: 'day0_ask', token: 'tadr1', location_id: 'venice', triggered_by: 'tech', created_at: acceptedAt, scheduled_for: new Date(Date.now() - 60000) }],
+        sms_log: [{ id: 'res-adr1', customer_id: 'adr-1', direction: 'outbound', status: 'sent', message_body: 'Would you leave us a quick review?', created_at: acceptedAt, updated_at: acceptedAt, metadata: JSON.stringify({ review_ask_reservation: true, review_request_id: 'rr-adr1' }) }],
+      });
+      db.mockImplementation(mock);
+
+      const request = await ReviewService.create({ customerId: 'adr-1', serviceRecordId: 'sr-adr1', triggeredBy: 'tech' });
+
+      expect(mockSendCustomerMessage).not.toHaveBeenCalled();
+      expect(request.sendOutcome).toEqual({ sent: true, alreadyDelivered: true });
+      expect(request.sendOutcome.failed).toBeUndefined();
+    });
+
+    test('one row that THROWS does not abort the rest of the scheduled batch', async () => {
+      // sendSMS has throw paths of its own now (_askSpacingHold's
+      // REVIEW_RETRY_PERSISTENCE_FAILED, the pin-persistence write). Before
+      // the per-row guard, the first such row ended the tick and every later
+      // due request went unprocessed (pre-push P1 on the main merge).
+      const due = new Date(Date.now() - 60000);
+      const mock = makeMock({
+        customers: [
+          { id: 'batch-1', first_name: 'Ann', phone: '+19410000181', nearest_location_id: 'venice' },
+          { id: 'batch-2', first_name: 'Bea', phone: '+19410000182', nearest_location_id: 'venice' },
+        ],
+        review_requests: [
+          { id: 'rr-b1', customer_id: 'batch-1', status: 'pending', channel: 'sms', template_key: 'day0_ask', token: 'tb1', location_id: 'venice', scheduled_for: due, created_at: due },
+          { id: 'rr-b2', customer_id: 'batch-2', status: 'pending', channel: 'sms', template_key: 'day0_ask', token: 'tb2', location_id: 'venice', scheduled_for: due, created_at: due },
+        ],
+      });
+      db.mockImplementation(mock);
+      const realSend = ReviewService.sendSMS.bind(ReviewService);
+      const sendSpy = jest.spyOn(ReviewService, 'sendSMS').mockImplementation(async (id) => {
+        if (id === 'rr-b1') throw Object.assign(new Error('spacing hold could not be stored'), { code: 'review_retry_persistence_failed' });
+        return realSend(id);
+      });
+      mockSendCustomerMessage.mockResolvedValue({ sent: true, deliveryOutcome: 'accepted', providerMessageId: 'SM-b2', auditLogId: 'audit-b2' });
+
+      try {
+        const out = await ReviewService.processScheduled();
+        expect(sendSpy).toHaveBeenCalledTimes(2); // the throw did not end the loop
+        expect(out.sent).toBe(1);
+        expect(out.held).toBe(1);
+        expect(mock.__state.rows.review_requests.find(row => row.id === 'rr-b2').status).toBe('sent');
+      } finally { sendSpy.mockRestore(); }
+    });
+
     test('an immediate ask with no consented recipient is reported unsent (suppressed), never sent (codex #4156 r2 P2)', async () => {
       const mock = makeMock({
         customers: [{ id: 'nc-1', first_name: 'Uma', last_name: 'P', phone: null, nearest_location_id: 'venice' }],
