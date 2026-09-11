@@ -26,6 +26,7 @@ postgres('solicitation evidence in the unanswered digest (PostgreSQL)', () => {
       CREATE TEMP TABLE sms_log (id uuid, customer_id uuid, direction text, from_phone text, to_phone text,
         message_body text, metadata jsonb, created_at timestamptz, message_type text, status text);
       CREATE TEMP TABLE message_drafts (sms_log_id uuid, customer_id uuid, flags jsonb, sent_at timestamptz);
+      CREATE TEMP TABLE blocked_numbers (id uuid PRIMARY KEY, number varchar(32));
     `);
   });
   afterAll(async () => { await mockPg?.rollback(); await database?.destroy(); });
