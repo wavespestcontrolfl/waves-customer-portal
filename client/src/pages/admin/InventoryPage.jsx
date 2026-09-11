@@ -1097,11 +1097,9 @@ function PriceSyncTab({ showToast }) {
   const [loginDiscoveryResult, setLoginDiscoveryResult] = useState(null);
   const [autoMapIds, setAutoMapIds] = useState(() => new Set());
   const showToastRef = useRef(showToast);
-
   useEffect(() => {
     showToastRef.current = showToast;
   }, [showToast]);
-
   const load = useCallback(async () => {
     setLoading(true);
     try {
@@ -1119,11 +1117,9 @@ function PriceSyncTab({ showToast }) {
       setLoading(false);
     }
   }, []);
-
   useEffect(() => {
     load();
   }, [load]);
-
   const loadCsv = async (type) => {
     try {
       const path =
@@ -1138,13 +1134,11 @@ function PriceSyncTab({ showToast }) {
       showToast?.(`CSV failed: ${e.message}`);
     }
   };
-
   const copyCsv = async () => {
     if (!csvPreview) return;
     await navigator.clipboard.writeText(csvPreview);
     showToast?.(`${csvName} copied`);
   };
-
   const importMappings = async () => {
     if (!mappingImportCsv.trim()) {
       showToast?.("Paste mapping CSV first");
@@ -1155,7 +1149,9 @@ function PriceSyncTab({ showToast }) {
         "/admin/inventory/price-sync/mappings/import",
         {
           method: "POST",
-          body: JSON.stringify({ csv: mappingImportCsv }),
+          body: JSON.stringify({
+            csv: mappingImportCsv,
+          }),
         },
       );
       setImportResult(result);
@@ -1165,16 +1161,20 @@ function PriceSyncTab({ showToast }) {
       showToast?.(`Import failed: ${e.message}`);
     }
   };
-
   const autoMapVendor = async (vendorId) => {
     if (autoMapIds.has(vendorId)) return;
     setAutoMapIds((prev) => new Set(prev).add(vendorId));
     try {
       const result = await adminFetch("/admin/inventory/price-sync/auto-map", {
         method: "POST",
-        body: JSON.stringify({ vendorId, limit: 8 }),
+        body: JSON.stringify({
+          vendorId,
+          limit: 8,
+        }),
       });
-      showToast?.(result.message || `Auto-mapped ${result.mapped || 0} products`);
+      showToast?.(
+        result.message || `Auto-mapped ${result.mapped || 0} products`,
+      );
       await load();
     } catch (e) {
       showToast?.(`Auto-map failed: ${e.message}`);
@@ -1186,17 +1186,19 @@ function PriceSyncTab({ showToast }) {
       });
     }
   };
-
   const queueLoginDiscovery = async () => {
     setLoginDiscoveryQueueing(true);
     try {
-      const result = await adminFetch("/admin/inventory/price-sync/hermes-login-discovery", {
-        method: "POST",
-        body: JSON.stringify({
-          limit: loginDiscoveryLimit,
-          includePublic: false,
-        }),
-      });
+      const result = await adminFetch(
+        "/admin/inventory/price-sync/hermes-login-discovery",
+        {
+          method: "POST",
+          body: JSON.stringify({
+            limit: loginDiscoveryLimit,
+            includePublic: false,
+          }),
+        },
+      );
       setLoginDiscoveryResult(result);
       showToast?.(result.message || "Hermes login discovery queued");
       await load();
@@ -1206,15 +1208,9 @@ function PriceSyncTab({ showToast }) {
       setLoginDiscoveryQueueing(false);
     }
   };
-
   if (loading) {
-    return (
-      <div style={{ color: D.muted, padding: 40, textAlign: "center" }}>
-        Loading price sync...
-      </div>
-    );
+    return <ActionFeedback>Loading price sync…</ActionFeedback>;
   }
-
   const totalConnections = vendors.reduce(
     (sum, vendor) => sum + (vendor.connections?.length || 0),
     0,
@@ -1230,86 +1226,89 @@ function PriceSyncTab({ showToast }) {
   const loginDiscoveryVendors = vendors.filter(
     (vendor) => vendor.loginDiscoveryNeeded || vendor.loginDiscoveryStatus,
   );
-
   return (
     <div>
-      <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
+      <div className="flex gap-[10px] flex-wrap">
         {[
-          { label: "Vendors", value: vendors.length },
-          { label: "Connections", value: totalConnections },
-          { label: "Needs Mapping", value: needsMapping.length },
-          { label: "Verified Maps", value: verifiedMappings },
-          { label: "Current Prices", value: currentPrices },
-          { label: "Needs Login", value: loginDiscoveryVendors.length },
-          { label: "Pending Review", value: reviewQueue.length },
+          {
+            label: "Vendors",
+            value: vendors.length,
+          },
+          {
+            label: "Connections",
+            value: totalConnections,
+          },
+          {
+            label: "Needs Mapping",
+            value: needsMapping.length,
+          },
+          {
+            label: "Verified Maps",
+            value: verifiedMappings,
+          },
+          {
+            label: "Current Prices",
+            value: currentPrices,
+          },
+          {
+            label: "Needs Login",
+            value: loginDiscoveryVendors.length,
+          },
+          {
+            label: "Pending Review",
+            value: reviewQueue.length,
+          },
         ].map((item) => (
-          <div
+          <Card
             key={item.label}
-            style={{
-              ...sCard,
-              flex: "1 1 130px",
-              minWidth: 130,
-              marginBottom: 12,
-              textAlign: "center",
-            }}
+            className="p-5 mb-3 flex-[1_1_130px] min-w-[130px] mb-[12px] text-center"
           >
-            <div
-              style={{
-                fontFamily: "'JetBrains Mono', monospace",
-                fontSize: 22,
-                fontWeight: 700,
-                color: item.value ? D.heading : D.muted,
-              }}
-            >
-              {item.value}
-            </div>
-            <div
-              style={{
-                fontSize: 11,
-                color: D.muted,
-                textTransform: "uppercase",
-                letterSpacing: 1,
-                marginTop: 2,
-              }}
-            >
+            <div className="text-22 font-medium">{item.value}</div>
+            <div className="text-ui-body text-ink-secondary mt-[2px]">
               {item.label}
             </div>
-          </div>
+          </Card>
         ))}
       </div>
 
-      <div style={{ display: "flex", gap: 6, marginBottom: 12, flexWrap: "wrap" }}>
+      <div className="flex gap-[6px] mb-[12px] flex-wrap">
         {[
-          { key: "vendors", label: "Vendor Sync Status" },
-          { key: "mapping", label: "Needs Mapping" },
-          { key: "login", label: "Login Discovery" },
-          { key: "csv", label: "CSV Import / Export" },
-          { key: "review", label: "Price Review Queue" },
+          {
+            key: "vendors",
+            label: "Vendor Sync Status",
+          },
+          {
+            key: "mapping",
+            label: "Needs Mapping",
+          },
+          {
+            key: "login",
+            label: "Login Discovery",
+          },
+          {
+            key: "csv",
+            label: "CSV Import / Export",
+          },
+          {
+            key: "review",
+            label: "Price Review Queue",
+          },
         ].map((tab) => (
-          <button
+          <Button
             key={tab.key}
             onClick={() => setView(tab.key)}
-            style={{
-              padding: "7px 14px",
-              borderRadius: 20,
-              border: "none",
-              fontSize: 12,
-              fontWeight: 500,
-              cursor: "pointer",
-              background: view === tab.key ? D.teal : D.card,
-              color: view === tab.key ? D.white : D.muted,
-            }}
+            variant="secondary"
           >
             {tab.label}
-          </button>
+          </Button>
         ))}
       </div>
 
       {view === "vendors" && (
-        <div style={{ overflowX: "auto" }}>
-          <table style={{ width: "100%", borderCollapse: "collapse" }}>
-            <thead>
-              <tr>
+        <div className="overflow-x-auto">
+          <Table className="w-full">
+            <THead>
+              <TR>
                 {[
                   "Vendor",
                   "Connections",
@@ -1320,76 +1319,60 @@ function PriceSyncTab({ showToast }) {
                   "Pending",
                   "Next Action",
                 ].map((h) => (
-                  <th key={h} style={thS}>
-                    {h}
-                  </th>
+                  <TH key={h}>{h}</TH>
                 ))}
-              </tr>
-            </thead>
-            <tbody>
+              </TR>
+            </THead>
+            <TBody>
               {vendors.map((vendor) => (
-                <tr key={vendor.id}>
-                  <td style={{ ...tdS, fontWeight: 700, color: D.heading }}>
-                    {vendor.name}
-                  </td>
-                  <td style={tdS}>
-                    <div style={{ display: "flex", gap: 4, flexWrap: "wrap" }}>
+                <TR key={vendor.id}>
+                  <TD className="font-medium text-zinc-900">{vendor.name}</TD>
+                  <TD>
+                    <div className="flex gap-[4px] flex-wrap">
                       {(vendor.connections || []).map((connection) => (
-                        <span
+                        <Badge
                           key={connection.id}
-                          style={sBadge(
-                            connection.credentialStatus === "missing"
-                              ? `${D.amber}22`
-                              : `${D.green}22`,
-                            connection.credentialStatus === "missing"
-                              ? D.amber
-                              : D.green,
-                          )}
                           title={`${connection.approvalStatus} / ${connection.credentialStatus}`}
+                          tone="neutral"
                         >
                           {connection.type}
-                        </span>
+                        </Badge>
                       ))}
                     </div>
-                  </td>
-                  <td style={tdS}>{vendor.mappedProducts}</td>
-                  <td style={tdS}>{vendor.verifiedMappings}</td>
-                  <td style={tdS}>{vendor.currentPrices}</td>
-                  <td style={tdS}>{vendor.bestPrices}</td>
-                  <td style={tdS}>{vendor.pendingApprovals}</td>
-                  <td style={{ ...tdS, color: D.muted }}>
-                    <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+                  </TD>
+                  <TD>{vendor.mappedProducts}</TD>
+                  <TD>{vendor.verifiedMappings}</TD>
+                  <TD>{vendor.currentPrices}</TD>
+                  <TD>{vendor.bestPrices}</TD>
+                  <TD>{vendor.pendingApprovals}</TD>
+                  <TD className="text-ink-secondary">
+                    <div className="flex items-center gap-[8px] flex-wrap">
                       <span>{vendor.nextAction}</span>
-                      {(vendor.nextAction === "Needs mapping" || vendor.nextAction === "Verify mappings") && (
-                        <button
+                      {(vendor.nextAction === "Needs mapping" ||
+                        vendor.nextAction === "Verify mappings") && (
+                        <Button
                           onClick={() => autoMapVendor(vendor.id)}
                           disabled={autoMapIds.has(vendor.id)}
                           title="AI-propose vendor SKUs/URLs for this vendor's unmapped products (writes unverified — review before pricing)"
-                          style={{
-                            ...sBtn(D.teal, D.white),
-                            padding: "4px 10px",
-                            fontSize: 11,
-                            opacity: autoMapIds.has(vendor.id) ? 0.6 : 1,
-                            cursor: autoMapIds.has(vendor.id) ? "default" : "pointer",
-                          }}
+                          variant="primary"
                         >
                           {autoMapIds.has(vendor.id) ? "Mapping…" : "Auto-map"}
-                        </button>
+                        </Button>
                       )}
                     </div>
-                  </td>
-                </tr>
+                  </TD>
+                </TR>
               ))}
-            </tbody>
-          </table>
+            </TBody>
+          </Table>
         </div>
       )}
 
       {view === "mapping" && (
-        <div style={{ overflowX: "auto" }}>
-          <table style={{ width: "100%", borderCollapse: "collapse" }}>
-            <thead>
-              <tr>
+        <div className="overflow-x-auto">
+          <Table className="w-full">
+            <THead>
+              <TR>
                 {[
                   "Product",
                   "Category",
@@ -1400,250 +1383,236 @@ function PriceSyncTab({ showToast }) {
                   "Verified",
                   "Package Maps",
                 ].map((h) => (
-                  <th key={h} style={thS}>
-                    {h}
-                  </th>
+                  <TH key={h}>{h}</TH>
                 ))}
-              </tr>
-            </thead>
-            <tbody>
+              </TR>
+            </THead>
+            <TBody>
               {needsMapping.map((product) => (
-                <tr key={product.id}>
-                  <td style={{ ...tdS, fontWeight: 700, color: D.heading }}>
-                    {product.name}
-                  </td>
-                  <td style={tdS}>{product.category || "—"}</td>
-                  <td style={tdS}>{product.sku || "—"}</td>
-                  <td style={tdS}>{product.containerSize || "—"}</td>
-                  <td style={tdS}>
-                    <span style={sBadge(`${D.amber}22`, D.amber)}>
+                <TR key={product.id}>
+                  <TD className="font-medium text-zinc-900">{product.name}</TD>
+                  <TD>{product.category || "—"}</TD>
+                  <TD>{product.sku || "—"}</TD>
+                  <TD>{product.containerSize || "—"}</TD>
+                  <TD>
+                    <Badge tone="neutral">
                       {product.bestPriceStatus || "needs_mapping"}
-                    </span>
-                  </td>
-                  <td style={tdS}>{product.mappedVendors}</td>
-                  <td style={tdS}>{product.verifiedMappings}</td>
-                  <td style={tdS}>{product.completePackageMaps}</td>
-                </tr>
+                    </Badge>
+                  </TD>
+                  <TD>{product.mappedVendors}</TD>
+                  <TD>{product.verifiedMappings}</TD>
+                  <TD>{product.completePackageMaps}</TD>
+                </TR>
               ))}
-            </tbody>
-          </table>
+            </TBody>
+          </Table>
           {needsMapping.length === 0 && (
-            <div style={{ ...sCard, color: D.muted, textAlign: "center" }}>
+            <Card className="p-5 mb-3 text-ink-secondary text-center">
               All active products have verified mappings.
-            </div>
+            </Card>
           )}
         </div>
       )}
 
       {view === "login" && (
-        <div style={sCard}>
-          <div style={{ display: "flex", justifyContent: "space-between", gap: 12, flexWrap: "wrap", alignItems: "flex-end", marginBottom: 14 }}>
+        <Card className="p-5 mb-3">
+          <div className="flex justify-between gap-[12px] flex-wrap items-end mb-[14px]">
             <div>
-              <h3 style={{ margin: "0 0 4px", color: D.heading, fontSize: 18 }}>Hermes vendor login discovery</h3>
-              <div style={{ color: D.muted, fontSize: 13 }}>
-                Queue active vendors missing login setup so Hermes can find portal, registration, and rep-contact paths.
+              <h3 className="text-zinc-900 text-18">
+                Hermes vendor login discovery
+              </h3>
+              <div className="text-ink-secondary text-ui-body">
+                Queue active vendors missing login setup so Hermes can find
+                portal, registration, and rep-contact paths.
               </div>
             </div>
-            <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "flex-end" }}>
-              <label>
-                <div style={{ fontSize: 11, color: D.muted, textTransform: "uppercase", letterSpacing: 1, marginBottom: 4 }}>Vendor cap</div>
-                <input
+            <div className="flex gap-[8px] flex-wrap items-end">
+              <Field label="Vendor cap">
+                <Input
                   type="number"
                   min="1"
                   max="200"
                   value={loginDiscoveryLimit}
                   onChange={(e) => setLoginDiscoveryLimit(e.target.value)}
-                  style={{ ...sInput, width: 110 }}
+                  className="w-[110px]"
                 />
-              </label>
-              <button
+              </Field>
+              <Button
                 type="button"
                 onClick={queueLoginDiscovery}
                 disabled={loginDiscoveryQueueing}
-                style={sBtn(loginDiscoveryQueueing ? D.card : D.green, loginDiscoveryQueueing ? D.muted : D.white)}
+                variant="secondary"
               >
                 {loginDiscoveryQueueing ? "Queueing..." : "Queue Hermes"}
-              </button>
+              </Button>
             </div>
           </div>
 
           {loginDiscoveryResult && (
-            <div style={{ border: `1px solid ${D.border}`, borderRadius: 8, padding: 10, marginBottom: 12, color: D.text, fontSize: 12, background: D.input }}>
-              Queued {loginDiscoveryResult.queued || 0}; skipped open jobs {loginDiscoveryResult.duplicates || 0}; candidates {loginDiscoveryResult.candidateCount || 0}.
-            </div>
+            <ActionFeedback className="mb-[12px]">
+              Queued {loginDiscoveryResult.queued || 0}; skipped open jobs{" "}
+              {loginDiscoveryResult.duplicates || 0}; candidates{" "}
+              {loginDiscoveryResult.candidateCount || 0}.
+            </ActionFeedback>
           )}
 
-          <div style={{ overflowX: "auto" }}>
-            <table style={{ width: "100%", borderCollapse: "collapse" }}>
-              <thead>
-                <tr>
-                  {["Vendor", "Website", "Login URL", "Credentials", "Status", "Hermes"].map((h) => (
-                    <th key={h} style={thS}>{h}</th>
+          <div className="overflow-x-auto">
+            <Table className="w-full">
+              <THead>
+                <TR>
+                  {[
+                    "Vendor",
+                    "Website",
+                    "Login URL",
+                    "Credentials",
+                    "Status",
+                    "Hermes",
+                  ].map((h) => (
+                    <TH key={h}>{h}</TH>
                   ))}
-                </tr>
-              </thead>
-              <tbody>
+                </TR>
+              </THead>
+              <TBody>
                 {loginDiscoveryVendors.map((vendor) => {
                   const websiteHref = safeExternalHref(vendor.website);
                   const loginHref = safeExternalHref(vendor.loginUrl);
                   return (
-                    <tr key={vendor.id}>
-                      <td style={{ ...tdS, fontWeight: 700, color: D.heading }}>{vendor.name}</td>
-                      <td style={tdS}>
+                    <TR key={vendor.id}>
+                      <TD className="font-medium text-zinc-900">
+                        {vendor.name}
+                      </TD>
+                      <TD>
                         {websiteHref ? (
-                          <a href={websiteHref} target="_blank" rel="noopener noreferrer" style={{ color: D.teal }}>
+                          <a
+                            href={websiteHref}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="text-zinc-900"
+                          >
                             {vendor.website}
                           </a>
-                        ) : (vendor.website || "—")}
-                      </td>
-                      <td style={tdS}>
+                        ) : (
+                          vendor.website || "—"
+                        )}
+                      </TD>
+                      <TD>
                         {loginHref ? (
-                          <a href={loginHref} target="_blank" rel="noopener noreferrer" style={{ color: D.teal }}>
+                          <a
+                            href={loginHref}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="text-zinc-900"
+                          >
                             {vendor.loginUrl}
                           </a>
-                        ) : (vendor.loginUrl || "—")}
-                      </td>
-                      <td style={tdS}>{vendor.hasCredentials ? "Saved login metadata" : "Missing"}</td>
-                      <td style={tdS}>
-                        <span style={sBadge(vendor.loginDiscoveryNeeded ? `${D.amber}22` : `${D.green}22`, vendor.loginDiscoveryNeeded ? D.amber : D.green)}>
+                        ) : (
+                          vendor.loginUrl || "—"
+                        )}
+                      </TD>
+                      <TD>
+                        {vendor.hasCredentials
+                          ? "Saved login metadata"
+                          : "Missing"}
+                      </TD>
+                      <TD>
+                        <Badge tone="neutral">
                           {vendor.credentialStatus || "needs_login"}
-                        </span>
-                      </td>
-                      <td style={tdS}>{vendor.loginDiscoveryStatus || "not queued"}</td>
-                    </tr>
+                        </Badge>
+                      </TD>
+                      <TD>{vendor.loginDiscoveryStatus || "not queued"}</TD>
+                    </TR>
                   );
                 })}
-              </tbody>
-            </table>
+              </TBody>
+            </Table>
             {loginDiscoveryVendors.length === 0 && (
-              <div style={{ color: D.muted, textAlign: "center", padding: 18 }}>
+              <div className="text-ink-secondary text-center p-[18px]">
                 No vendors currently need login discovery.
               </div>
             )}
           </div>
-        </div>
+        </Card>
       )}
 
       {view === "csv" && (
-        <div style={sCard}>
-          <div
-            style={{
-              display: "flex",
-              gap: 8,
-              flexWrap: "wrap",
-              marginBottom: 12,
-            }}
-          >
-            <button onClick={() => loadCsv("needs_mapping")} style={sBtn(D.teal, D.white)}>
+        <Card className="p-5 mb-3">
+          <div className="flex gap-[8px] flex-wrap mb-[12px]">
+            <Button onClick={() => loadCsv("needs_mapping")} variant="primary">
               Needs Mapping Export
-            </button>
-            <button onClick={() => loadCsv("existing")} style={sBtn(D.teal, D.white)}>
+            </Button>
+            <Button onClick={() => loadCsv("existing")} variant="primary">
               Existing Mappings Export
-            </button>
-            <button onClick={() => loadCsv("manual_seed")} style={sBtn(D.teal, D.white)}>
+            </Button>
+            <Button onClick={() => loadCsv("manual_seed")} variant="primary">
               Manual Seed Template
-            </button>
-            <button
+            </Button>
+            <Button
               onClick={copyCsv}
               disabled={!csvPreview}
-              style={sBtn(csvPreview ? D.green : D.card, csvPreview ? D.white : D.muted)}
+              variant="secondary"
             >
               Copy CSV
-            </button>
+            </Button>
           </div>
-          <div style={{ fontSize: 12, color: D.muted, marginBottom: 8 }}>
+          <div className="text-ui-body text-ink-secondary mb-[8px]">
             Mapping import writes verified product mappings only. Manual seed
             price import remains disabled until the pricing approval worker is
             built.
           </div>
-          <textarea
+          <Textarea
             readOnly
             value={csvPreview}
             placeholder="Choose an export/template..."
-            style={{
-              ...sInput,
-              width: "100%",
-              minHeight: 260,
-              fontFamily: "'JetBrains Mono', monospace",
-              fontSize: 11,
-            }}
+            className="w-full min-h-[260px]"
           />
-          <div
-            style={{
-              marginTop: 16,
-              borderTop: `1px solid ${D.border}`,
-              paddingTop: 14,
-            }}
-          >
-            <div
-              style={{
-                fontSize: 11,
-                color: D.muted,
-                textTransform: "uppercase",
-                letterSpacing: 1,
-                marginBottom: 8,
-              }}
-            >
+
+          <div className="mt-[16px] border-t border-solid border-zinc-200 pt-[14px]">
+            <div className="text-ui-body text-ink-secondary mb-[8px]">
               Mapping Import
             </div>
-            <textarea
+            <Textarea
               value={mappingImportCsv}
               onChange={(e) => setMappingImportCsv(e.target.value)}
               placeholder="Paste mapping CSV here..."
-              style={{
-                ...sInput,
-                width: "100%",
-                minHeight: 180,
-                fontFamily: "'JetBrains Mono', monospace",
-                fontSize: 11,
-              }}
+              className="w-full min-h-[180px]"
             />
-            <div style={{ display: "flex", gap: 8, marginTop: 8 }}>
-              <button onClick={importMappings} style={sBtn(D.green, D.white)}>
+
+            <div className="flex gap-[8px] mt-[8px]">
+              <Button onClick={importMappings} variant="primary">
                 Import Mappings
-              </button>
-              <button
+              </Button>
+              <Button
                 onClick={() => {
                   setMappingImportCsv("");
                   setImportResult(null);
                 }}
-                style={sBtn(D.card, D.muted)}
+                variant="secondary"
               >
                 Clear
-              </button>
+              </Button>
             </div>
             {importResult && (
-              <div
-                style={{
-                  marginTop: 10,
-                  padding: 10,
-                  border: `1px solid ${D.border}`,
-                  borderRadius: 8,
-                  fontSize: 12,
-                  color: D.text,
-                  background: D.input,
-                }}
-              >
+              <ActionFeedback className="mt-[10px]">
                 <div>
                   Imported {importResult.imported || 0} of{" "}
                   {importResult.rowsReceived || 0} rows.
                 </div>
                 {(importResult.rowErrors || []).slice(0, 8).map((err) => (
-                  <div key={err.row} style={{ color: D.red, marginTop: 4 }}>
+                  <div key={err.row} className="text-alert-fg mt-[4px]">
                     Row {err.row}: {(err.errors || []).join("; ")}
                   </div>
                 ))}
-              </div>
+              </ActionFeedback>
             )}
           </div>
-        </div>
+        </Card>
       )}
 
       {view === "review" && (
-        <div style={{ overflowX: "auto" }}>
-          <table style={{ width: "100%", borderCollapse: "collapse" }}>
-            <thead>
-              <tr>
+        <div className="overflow-x-auto">
+          <Table className="w-full">
+            <THead>
+              <TR>
                 {[
                   "Product",
                   "Vendor",
@@ -1655,34 +1624,54 @@ function PriceSyncTab({ showToast }) {
                   "Reason",
                   "Captured",
                 ].map((h) => (
-                  <th key={h} style={thS}>
-                    {h}
-                  </th>
+                  <TH key={h}>{h}</TH>
                 ))}
-              </tr>
-            </thead>
-            <tbody>
+              </TR>
+            </THead>
+            <TBody>
               {reviewQueue.map((approval) => (
-                <tr key={approval.id}>
-                  <td style={{ ...tdS, fontWeight: 700, color: D.heading }}>
+                <TR key={approval.id}>
+                  <TD className="font-medium text-zinc-900">
                     {approval.productName}
-                  </td>
-                  <td style={tdS}>{approval.vendorName}</td>
-                  <td style={tdS}>{approval.oldPrice != null ? `$${approval.oldPrice.toFixed(2)}` : "—"}</td>
-                  <td style={tdS}>{approval.newPrice != null ? `$${approval.newPrice.toFixed(2)}` : "—"}</td>
-                  <td style={tdS}>{approval.changePercent != null ? `${approval.changePercent.toFixed(1)}%` : "—"}</td>
-                  <td style={tdS}>{approval.sourceType || "—"}</td>
-                  <td style={tdS}>{approval.confidence != null ? `${Math.round(approval.confidence * 100)}%` : "—"}</td>
-                  <td style={{ ...tdS, color: D.muted }}>{approval.approvalReason || "—"}</td>
-                  <td style={tdS}>{approval.capturedAt ? new Date(approval.capturedAt).toLocaleDateString() : "—"}</td>
-                </tr>
+                  </TD>
+                  <TD>{approval.vendorName}</TD>
+                  <TD>
+                    {approval.oldPrice != null
+                      ? `$${approval.oldPrice.toFixed(2)}`
+                      : "—"}
+                  </TD>
+                  <TD>
+                    {approval.newPrice != null
+                      ? `$${approval.newPrice.toFixed(2)}`
+                      : "—"}
+                  </TD>
+                  <TD>
+                    {approval.changePercent != null
+                      ? `${approval.changePercent.toFixed(1)}%`
+                      : "—"}
+                  </TD>
+                  <TD>{approval.sourceType || "—"}</TD>
+                  <TD>
+                    {approval.confidence != null
+                      ? `${Math.round(approval.confidence * 100)}%`
+                      : "—"}
+                  </TD>
+                  <TD className="text-ink-secondary">
+                    {approval.approvalReason || "—"}
+                  </TD>
+                  <TD>
+                    {approval.capturedAt
+                      ? new Date(approval.capturedAt).toLocaleDateString()
+                      : "—"}
+                  </TD>
+                </TR>
               ))}
-            </tbody>
-          </table>
+            </TBody>
+          </Table>
           {reviewQueue.length === 0 && (
-            <div style={{ ...sCard, color: D.muted, textAlign: "center" }}>
+            <Card className="p-5 mb-3 text-ink-secondary text-center">
               No pending price approvals.
-            </div>
+            </Card>
           )}
         </div>
       )}
