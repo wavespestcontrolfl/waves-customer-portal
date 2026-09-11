@@ -5792,6 +5792,7 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
   if (commercialProposal && featureGates.isEnabled('estimateCommercialGlass')) {
     try {
       const { normalizeProposal, computeProposalTotals } = require('../services/estimate-proposal');
+      const { formatLineBasis, showsLineBasis } = require('../../shared/proposal-bid.cjs');
       // renderPage carries the parsed estimate_data separately — hand the
       // normalizer the estData it already trusts, not whatever serialization
       // rides the row object.
@@ -5809,7 +5810,7 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
         ${building.note ? `<div class="proposal-building-note">${escapeHtml(building.note)}</div>` : ''}
         ${(building.lineItems || []).map((item) => `
         <div class="proposal-line">
-          <span class="proposal-line-desc">${escapeHtml(item.description || 'Service')}${item.quantity > 1 ? ` &times; ${item.quantity}` : ''}</span>
+          <span class="proposal-line-desc">${escapeHtml(item.description || 'Service')}${showsLineBasis(item) ? `<span class="proposal-line-basis">${escapeHtml(formatLineBasis(item))}</span>` : ''}</span>
           <span class="proposal-line-amt">${fmtMoney(item.amount)}${item.taxable === true ? ' *' : ''}${item.frequencyLabel ? ` <span class="proposal-line-freq">${escapeHtml(String(item.frequencyLabel).toLowerCase())}</span>` : ''}</span>
         </div>`).join('')}
       </div>`).join('');
@@ -6124,6 +6125,7 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
   .proposal-building-note{font-size:14px;color:#475569;margin-bottom:6px;line-height:1.5}
   .proposal-line{display:flex;justify-content:space-between;gap:16px;padding:9px 0;border-bottom:1px solid #E2DCCB;font-size:16px;color:#3F4A65;line-height:1.45}
   .proposal-line-desc{min-width:0}
+  .proposal-line-basis{display:block;font-size:14px;color:#6B7280}
   .proposal-line-amt{font-weight:700;color:#1B2C5B;white-space:nowrap;font-variant-numeric:tabular-nums}
   .proposal-line-freq{font-weight:500;color:#6B7280}
   .proposal-totals{margin-top:14px}
@@ -25385,6 +25387,7 @@ router.get('/:token/data', dataLimiter, async (req, res, next) => {
             lineItems: (building.lineItems || []).map((item) => ({
               description: item.description,
               quantity: item.quantity,
+              ...(item.unit ? { unit: item.unit } : {}),
               unitPrice: item.unitPrice,
               amount: item.amount,
               frequency: item.frequency,
