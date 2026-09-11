@@ -95,3 +95,82 @@ test('unsafe numeric references cannot produce duplicate or nonnumeric technicia
   expect(technicianFindingIds([{ text: 'one' }, { text: 'two' }], [], 3)).toEqual({ ids: ['T4', 'T5'], highWater: 5 });
   expect(() => technicianFindingIds([{ text: 'new' }], [], Number.MAX_SAFE_INTEGER)).toThrow(/exhausted/);
 });
+
+test('products may only address IDs this run issued, so invented ids cannot poison the high-water mark', () => {
+  // Model findings (F1/F2) and persisted technician details (T1) are addressable.
+  expect(validateReview({ appliedProducts: [{ product_name: 'Celsius', addresses_findings: ['F2', 'T1'] }] }, run).errors).toEqual([]);
+
+  // A typo or client-invented id is rejected outright rather than silently
+  // dropped by buildTreatmentRationale as an unmapped treatment.
+  const invented = validateReview({ appliedProducts: [{ product_name: 'Celsius', addresses_findings: ['F1', 'T999'] }] }, run);
+  expect(invented.errors).toEqual(['appliedProducts[0].addresses_findings is not a finding of this run: T999']);
+  expect(invented.review.appliedProducts).toEqual([]);
+
+  // The exhaustion case: T<MAX_SAFE_INTEGER> is a safe integer, so before this
+  // guard it raised the high-water mark to the ceiling and every later detail
+  // threw 'Technician finding IDs exhausted'.
+  const ceiling = `T${Number.MAX_SAFE_INTEGER}`;
+  expect(validateReview({ appliedProducts: [{ product_name: 'Bifen', addresses_findings: [ceiling] }] }, run).errors)
+    .toEqual([`appliedProducts[0].addresses_findings is not a finding of this run: ${ceiling}`]);
+  expect(storedTechnicianHighWater({ products: [{ addresses_findings: [ceiling] }] })).toBe(Number.MAX_SAFE_INTEGER);
+  expect(() => technicianFindingIds([{ text: 'New detail', zone: null }], [], Number.MAX_SAFE_INTEGER))
+    .toThrow('Technician finding IDs exhausted');
+
+  // A run with no persisted details has no addressable technician ids at all.
+  expect(validateReview({ appliedProducts: [{ product_name: 'Celsius', addresses_findings: ['T1'] }] }, { findings: run.findings }).errors)
+    .toEqual(['appliedProducts[0].addresses_findings is not a finding of this run: T1']);
+});
+
+test('a product may map to a detail added in the same review, but a poisoned reference cannot widen the range that accepts it', () => {
+  const fresh = { findings: JSON.stringify([{ finding_id: 'F1' }]) };
+
+  // The IDs are assigned server-side during this same call, so mapping a product
+  // onto T1/T2 while sending two details is the ordinary technician flow.
+  expect(validateReview({
+    addedDetails: [{ text: 'Chinch confirmed' }, { text: 'Dog run' }],
+    appliedProducts: [{ product_name: 'Bifen', addresses_findings: ['F1', 'T1', 'T2'] }],
+  }, fresh).errors).toEqual([]);
+
+  // One detail can only issue one ID, so T2 is past what this review can reach.
+  expect(validateReview({
+    addedDetails: [{ text: 'Chinch confirmed' }],
+    appliedProducts: [{ product_name: 'Bifen', addresses_findings: ['T2'] }],
+  }, fresh).errors).toEqual(['appliedProducts[0].addresses_findings is not a finding of this run: T2']);
+
+  // The ceiling is read from the persisted mark and stored detail IDs only. A
+  // stored product already carrying an invented reference must not raise it.
+  const poisoned = {
+    findings: JSON.stringify([{ finding_id: 'F1' }]),
+    added_details: JSON.stringify([{ finding_id: 'T1', name: 'Dog run' }]),
+    reconciliation: JSON.stringify({ products: [{ addresses_findings: ['T900'] }], technician_finding_high_water: 1 }),
+  };
+  expect(validateReview({ appliedProducts: [{ product_name: 'Bifen', addresses_findings: ['T900'] }] }, poisoned).errors)
+    .toEqual(['appliedProducts[0].addresses_findings is not a finding of this run: T900']);
+  expect(validateReview({ appliedProducts: [{ product_name: 'Bifen', addresses_findings: ['T1'] }] }, poisoned).errors).toEqual([]);
+});
+
+test('references are checked against the IDs the allocator actually assigns, not an upper bound', () => {
+  const stored = {
+    findings: JSON.stringify([{ finding_id: 'F1' }]),
+    added_details: JSON.stringify([{ finding_id: 'T1', name: 'Grubs found' }]),
+    reconciliation: JSON.stringify({ products: [], technician_finding_high_water: 1 }),
+  };
+  // Resubmitting an unchanged detail keeps its stored T1, so T2 is never
+  // assigned: an upper bound of "one new ID per detail sent" would have let a
+  // product point at a detail that does not exist and report it as untreated.
+  expect(validateReview({
+    addedDetails: [{ text: 'Grubs found' }],
+    appliedProducts: [{ product_name: 'Bifen', addresses_findings: ['T2'] }],
+  }, stored).errors).toEqual(['appliedProducts[0].addresses_findings is not a finding of this run: T2']);
+
+  expect(validateReview({
+    addedDetails: [{ text: 'Grubs found' }],
+    appliedProducts: [{ product_name: 'Bifen', addresses_findings: ['T1'] }],
+  }, stored).errors).toEqual([]);
+
+  // A genuinely new detail does allocate the next ID, so T2 is addressable.
+  expect(validateReview({
+    addedDetails: [{ text: 'Grubs found' }, { text: 'Dog run' }],
+    appliedProducts: [{ product_name: 'Bifen', addresses_findings: ['T1', 'T2'] }],
+  }, stored).errors).toEqual([]);
+});

@@ -4214,7 +4214,7 @@ async function revertMerge({ journalId, performedBy, performedById }) {
       // proportion to the risk, and a brand-new signup claiming exactly the
       // restored address in that window is vanishingly rare and self-heals
       // (the undo simply refuses on the next attempt).
-      await trx.raw('SELECT pg_advisory_xact_lock(hashtextextended(?, 0))', [`customer-email:${emailKeyNorm}`]);
+      await require('../utils/customer-comms-lock').lockCustomerEmail(trx, emailKeyNorm);
       // Serialization ONLY — no claimant refusal (r29, same product ruling
       // as the operator writers): customers.email is deliberately
       // non-unique (20260417000010 — spouses and shared household/business

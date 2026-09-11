@@ -15,8 +15,7 @@
 const db = require('../../models/db');
 const logger = require('../logger');
 const MODELS = require('../../config/models');
-const { describeInventoryConversion, unitDefinition } = require('../inventory-units');
-const { findLiveRestockRequest } = require('../procurement/live-restock-request');
+const inventory = require('../inventory-operations');
 
 const PROCUREMENT_TOOLS = [
   {
@@ -56,9 +55,9 @@ Use for: "compare SiteOne vs LESCO on Bifen IT", "where's the cheapest Demand CS
       type: 'object',
       properties: {
         product_name: { type: 'string', description: 'Product name to compare (partial match OK)' },
-        product_id: { type: 'string', description: 'Or use exact product UUID' },
+        product_id: { type: 'string', format: 'uuid', description: 'Or use exact product UUID' },
       },
-      required: ['product_name'],
+      anyOf: [{ required: ['product_name'] }, { required: ['product_id'] }],
     },
   },
   {
@@ -168,7 +167,7 @@ Use for: "where did the Talstar go?", "when did we last restock Prodiamine?", "s
       type: 'object',
       properties: {
         product_name: { type: 'string', description: 'Product name (partial match OK)' },
-        product_id: { type: 'string', description: 'Or exact product UUID' },
+        product_id: { type: 'string', format: 'uuid', description: 'Or exact product UUID' },
         days_back: { type: 'number', description: 'Only movements from the last N days' },
         limit: { type: 'number', description: 'Max entries (default 20, max 100)' },
       },
@@ -182,7 +181,8 @@ Use for: "what's on the restock list?", "anything ordered but not received?", "s
       type: 'object',
       properties: {
         status: { type: 'string', enum: ['open', 'ordered', 'active', 'received', 'cancelled', 'all'], description: 'Filter by status (default: active = open + ordered)' },
-        limit: { type: 'number' },
+        limit: { type: 'integer', minimum: 1, maximum: 200 },
+        request_id: { type: 'string', format: 'uuid', description: 'Optional exact request ID. Use status all to recover a closed request.' },
       },
     },
   },
@@ -194,31 +194,33 @@ Use for: "we have 64 oz of Bifen on the shelf", "add the 2 gallons I bought toda
       type: 'object',
       properties: {
         product_name: { type: 'string', description: 'Product name (partial match OK)' },
-        product_id: { type: 'string', description: 'Or exact product UUID' },
+        product_id: { type: 'string', format: 'uuid', description: 'Or exact product UUID' },
         movement_type: { type: 'string', enum: ['restock', 'correction', 'damaged_lost'], description: 'restock = stock purchased/added; correction = physical count fix (signed quantity or set_total); damaged_lost = write-off' },
         quantity: { type: 'number', description: 'Amount to add (restock), remove (damaged_lost), or signed delta (correction)' },
         set_total: { type: 'number', description: 'Correction only: set the absolute on-hand amount (what is physically on the shelf). Pass this OR quantity, not both.' },
         unit: { type: 'string', description: 'Unit of the entered amount (fl_oz, gal, qt, oz, lb, g, kg...). Defaults to the product inventory unit; required for a first count.' },
         lot_number: { type: 'string' },
-        reason: { type: 'string', description: 'Why — e.g. "garage shelf count 2026-07-04"' },
+        reason: { type: 'string', description: 'Why the physical stock count changed' },
+        note: { type: 'string' },
       },
       required: ['movement_type'],
     },
   },
   {
     name: 'create_restock_request',
-    description: `Add a product to the restock queue (a purchase to make). Your call returns a preview; the operator confirms in the UI.
-Use for: "put Bifen on the shopping list", "order 2 bags of Prodiamine before Tuesday"`,
+    description: `Save an open restock request. This does not place a vendor order or increase stock. Resolve the exact product/formulation and inventory unit first; use saved catalog fields and the stock/forecast readers. Include a requested deadline as needed_by in YYYY-MM-DD form. Your call returns a preview; the operator confirms in the UI.
+Use for: "put Bifen on the restock list", "request 2 lb of Prodiamine before Tuesday"`,
     input_schema: {
       type: 'object',
       properties: {
         product_name: { type: 'string', description: 'Product name (partial match OK)' },
-        product_id: { type: 'string', description: 'Or exact product UUID' },
+        product_id: { type: 'string', format: 'uuid', description: 'Or exact product UUID' },
         quantity: { type: 'number', description: 'How much to order' },
         unit: { type: 'string', description: 'Unit of the requested amount. Defaults to the product inventory unit.' },
         priority: { type: 'string', enum: ['low', 'normal', 'high', 'urgent'] },
         vendor: { type: 'string', description: 'Where to buy. Defaults to the product best-price vendor.' },
-        needed_by: { type: 'string', description: 'YYYY-MM-DD deadline' },
+        needed_by: { type: 'string', format: 'date', description: 'YYYY-MM-DD deadline' },
+        allow_duplicate: { type: 'boolean', description: 'Only true when staff explicitly request another manual request for this same product; never duplicates an automatic reorder.' },
         reason: { type: 'string' },
       },
       required: ['quantity'],
@@ -226,12 +228,12 @@ Use for: "put Bifen on the shopping list", "order 2 bags of Prodiamine before Tu
   },
   {
     name: 'update_restock_request',
-    description: `Act on a restock request: mark_ordered (placed the order), receive (arrived — ADDS the stock and logs a restock movement), or cancel. Your call returns a preview; the operator confirms in the UI. Use get_restock_queue first to find the request id.
+    description: `Record a staff action on a restock request: mark_ordered (staff already placed the order; this tool does not buy), receive (arrived — ADDS the stock and logs a restock movement), or cancel. Your call returns a preview; the operator confirms in the UI. Use get_restock_queue first to find the request id.
 Use for: "I ordered the Bifen", "the SiteOne order arrived", "cancel that Prodiamine request"`,
     input_schema: {
       type: 'object',
       properties: {
-        request_id: { type: 'string', description: 'Restock request UUID (from get_restock_queue)' },
+        request_id: { type: 'string', format: 'uuid', description: 'Restock request UUID (from get_restock_queue)' },
         action: { type: 'string', enum: ['mark_ordered', 'receive', 'cancel'] },
         quantity: { type: 'number', description: 'Receive only: actual amount received, if different from requested' },
         unit: { type: 'string', description: 'Receive only: unit of the received amount' },
@@ -245,7 +247,7 @@ Use for: "I ordered the Bifen", "the SiteOne order arrived", "cancel that Prodia
 
 // ─── EXECUTION ──────────────────────────────────────────────────
 
-async function executeProcurementTool(toolName, input) {
+async function executeProcurementTool(toolName, input, actionContext = {}) {
   try {
     switch (toolName) {
       case 'query_products': return await queryProducts(input);
@@ -260,15 +262,15 @@ async function executeProcurementTool(toolName, input) {
       case 'get_unpriced_summary': return await getUnpricedSummary();
       case 'query_stock': return await queryStock(input);
       case 'get_stock_movements': return await getStockMovements(input);
-      case 'get_restock_queue': return await getRestockQueue(input);
-      case 'adjust_stock': return await adjustStock(input);
-      case 'create_restock_request': return await createRestockRequest(input);
-      case 'update_restock_request': return await updateRestockRequest(input);
+      case 'get_restock_queue': return await getRestockQueue(input, actionContext);
+      case 'adjust_stock': return await adjustStock(input, actionContext);
+      case 'create_restock_request': return await createRestockRequest(input, actionContext);
+      case 'update_restock_request': return await updateRestockRequest(input, actionContext);
       default: return { error: `Unknown procurement tool: ${toolName}` };
     }
   } catch (err) {
     logger.error(`[intelligence-bar:procurement] Tool ${toolName} failed:`, err);
-    return { error: err.message };
+    return { error: err.message, code: err.code, preview_changed: err.code === 'preview_changed' };
   }
 }
 
@@ -862,10 +864,6 @@ function toNumber(value) {
   return Number.isFinite(n) ? n : null;
 }
 
-function round4(n) {
-  return Number(n.toFixed(4));
-}
-
 function stockFields(p) {
   const onHand = toNumber(p.inventory_on_hand);
   const threshold = toNumber(p.low_stock_threshold);
@@ -890,77 +888,96 @@ async function resolveProduct(input) {
   }
   const name = String(input.product_name || '').trim();
   if (!name) return { error: 'product_name or product_id is required' };
-  const matches = await db('products_catalog').whereILike('name', `%${name}%`).limit(6);
+  const exact = await db('products_catalog').whereRaw('lower(btrim(name)) = ?', [name.toLowerCase()]).limit(2);
+  if (exact.length === 1) return { product: exact[0] };
+  const literal = name.replace(/[\\%_]/g, '\\$&');
+  const matches = exact.length ? exact : await db('products_catalog').whereILike('name', `%${literal}%`).limit(6);
   if (!matches.length) return { error: `Product "${name}" not found in catalog` };
   if (matches.length > 1) {
-    const exact = matches.find(m => String(m.name).toLowerCase() === name.toLowerCase());
-    if (exact) return { product: exact };
     return {
       error: `Multiple products match "${name}" — retry with product_id`,
-      candidates: matches.map(m => ({ id: m.id, name: m.name, category: m.category })),
+      candidates: matches.map(inventory.productIdentity),
     };
   }
   return { product: matches[0] };
 }
 
-// Shared math for adjust_stock: entered amount → delta in the product's
-// inventory unit. Run once for the preview and again inside the confirmed
-// transaction against the locked row — preview numbers are never trusted.
-function computeStockChange(product, { movementType, qty, setTotal, unit }) {
-  const enteredUnit = unit || product.inventory_unit;
-  if (!enteredUnit) {
-    return { error: 'This product has no inventory unit yet — pass unit (fl_oz, gal, qt, oz, lb, g, kg...)' };
+// Inventory noun slots come from the current operator request, never a model
+// selector, note body, attachment, or transcript. Keep formulation punctuation
+// intact: `10% SC` and `20% SC` are different products.
+async function resolveInventoryWriteTarget({ toolName, prompt, pageData = {}, preview }) {
+  const { targetClause, UUID_RE } = require('./task-context');
+  // A colon/quote can be part of a catalog identity. Never turn a qualified
+  // product into the shorter base product by applying the contact-body split.
+  // The anchored inventory grammar below excludes communication/note intents.
+  const clause = String(toolName === 'update_restock_request' ? targetClause(prompt, true) : prompt)
+    .trim().replace(/^(?:(?:please|can you|could you|would you)\s+)+/i, '');
+  const unavailable = { error: 'Choose the exact product or restock request for this action.', code: 'target_clarification_required' };
+  const inventoryPage = /^\/admin\/inventory(?:[/?]|$)/.test(pageData.route || '');
+  const query = new URLSearchParams(typeof pageData.search === 'string' ? pageData.search : '');
+  const quantity = '(?:[0-9]+(?:\\.[0-9]+)?|one|two|three|four|five|six|seven|eight|nine|ten|zero)';
+  const unit = '(?:lb|lbs|pounds?|oz|ounces?|fl_oz|fluid ounces?|gal|gallons?|liters?|ml|grams?|kg|each|items?|bottles?|bags?|containers?|cases?|jugs?)';
+  if (toolName === 'update_restock_request') {
+    const requestClause = clause.replace(new RegExp(`^receive\\s+(?:the\\s+)?(?:${quantity}\\s+${unit}(?:\\s+that arrived)?|(?:actual\\s+)?(?:packaged\\s+)?shipment)\\s+for\\s+`, 'i'), 'receive ');
+    const referenceMatch = requestClause.match(/^(?:mark|record|cancel|receive)\s+(?:(this|that|current|selected|viewed|open|the)\s+)?(?:restock\s+)?request(?:\s+([0-9a-f-]{36}))?(?:\s+as\s+(?:ordered|received|cancelled))?[.!]?$/i);
+    if (referenceMatch) {
+      const reference = referenceMatch[2] || (referenceMatch[1] && referenceMatch[1].toLowerCase() !== 'the' && inventoryPage
+        ? pageData.requestId || pageData.request_id || query.get('requestId') : null);
+      if (!UUID_RE.test(String(reference || '')) || reference.toLowerCase() !== preview.request?.id) return unavailable;
+      return { productId: preview.product.id, requestId: preview.request.id };
+    }
+    // Named request selectors also retain the complete product identity.
+    const namedClause = String(prompt).trim().replace(/^(?:(?:please|can you|could you|would you)\s+)+/i, '');
+    const productName = namedClause.match(/^(?:mark|record|cancel|receive)\s+(?:the\s+)?restock request for\s+(.+?)(?:\s+as\s+(?:ordered|received|cancelled))?$/i)?.[1]
+      || namedClause.match(/^I ordered (?:the\s+)?(.+)$/i)?.[1]
+      || namedClause.match(/^cancel (?:that|the)\s+(.+?)\s+request$/i)?.[1];
+    if (!productName) return unavailable;
+    const resolved = await resolveProduct({ product_name: productName });
+    if (resolved.error) return { ...resolved, code: 'target_clarification_required' };
+    const { requests } = await require('../inventory-restock-queue').listRestockRequests({
+      productId: resolved.product.id, status: 'active', limit: 2,
+    });
+    if (requests.length !== 1 || requests[0].id !== preview.request?.id || resolved.product.id !== preview.product?.id) return unavailable;
+    return { productId: preview.product.id, requestId: preview.request.id };
   }
-  if (!unitDefinition(enteredUnit)) {
-    return { error: `Unsupported unit "${enteredUnit}". Supported: fl_oz, gal, qt, pt, ml, l, oz, lb, g, kg` };
+  if (toolName === 'create_restock_request' && preview.allow_duplicate === true
+    && !/^(?:save|create)\s+another\s+(?:(?:restock|reorder)\s+)?request\s+for\s+/i.test(clause)) {
+    return { error: 'Explicitly request another restock request to create a duplicate.', code: 'duplicate_intent_required' };
   }
-  const inventoryUnit = product.inventory_unit || enteredUnit;
-  const stockBefore = toNumber(product.inventory_on_hand) ?? 0;
-
-  let conversionConfidence = 'exact_unit';
-  let conversionNote = null;
-  const convertMagnitude = (amount) => {
-    const conv = describeInventoryConversion(amount, enteredUnit, inventoryUnit);
-    if (!conv.convertible || conv.amount == null) {
-      return { error: `Cannot convert ${enteredUnit} to the product's inventory unit (${inventoryUnit})` };
+  const amount = `(?:the\\s+)?${quantity}\\s+${unit}\\s+of\\s+`;
+  const patterns = [
+    /^write off the (?:spilled|damaged) (?:bag|bottle|container|case|jug) of\s+(.+)$/i,
+    new RegExp(`^(?:add|record|request|receive|write off)\\s+${amount}(.+)$`, 'i'),
+    new RegExp(`^(?:save|create)\\s+(?:a|an|another|the)\\s+(?:(?:restock|reorder)\\s+)?request\\s+for\\s+${amount}(.+)$`, 'i'),
+    /^(?:set\s+)?(?:the\s+)?(?:physical\s+)?shelf count for\s+(.+?)\s+(?:is|to)\s+.+$/i,
+    new RegExp(`^we have\\s+${amount}(.+?)\\s+on the shelf$`, 'i'),
+    /^(?:put|add)\s+(.+?)\s+(?:on|to)\s+(?:the\s+)?(?:restock|reorder)\s+list$/i,
+    /^(?:restock|reorder)\s+(.+)$/i,
+  ];
+  const selected = patterns.map(pattern => clause.match(pattern)?.[1]).find(Boolean);
+  if (!selected) return unavailable;
+  let name = selected.replace(/\s+(?:to\s+(?:the\s+)?(?:restock|reorder)\s+list|that\s+(?:physically\s+)?arrived|on the shelf)[.!]?$/i, '').trim();
+  let literal = null;
+  const deadline = toolName === 'create_restock_request' && name.match(/^(.+?)\s+(?:before|by)\s+(?:(?:this|next)\s+)?(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday|today|tomorrow|\d{4}-\d{2}-\d{2})[.!]?$/i);
+  if (deadline) {
+    // A deadline-looking suffix can still belong to a complete catalog name.
+    // Only split it after that lookup misses, and never drop the preview date.
+    literal = await resolveProduct({ product_name: name });
+    if (!literal.product && !literal.candidates) {
+      if (!preview.needed_by) return unavailable;
+      name = deadline[1].trim();
+      literal = null;
     }
-    conversionConfidence = conv.confidence;
-    if (conv.confidence !== 'exact_unit') {
-      conversionNote = `${amount} ${enteredUnit} = ${conv.amount} ${inventoryUnit}`
-        + (conv.confidence === 'converted_ambiguous_oz' ? ' (ambiguous oz — verify weight vs volume)' : '');
-    }
-    return { amount: conv.amount };
-  };
-
-  let delta;
-  if (setTotal != null) {
-    let totalInInventoryUnit = 0;
-    if (setTotal > 0) {
-      const conv = convertMagnitude(setTotal);
-      if (conv.error) return conv;
-      totalInInventoryUnit = conv.amount;
-    }
-    delta = round4(totalInInventoryUnit - stockBefore);
-    // A zero-delta count is still meaningful for an UNTRACKED product —
-    // writing on_hand (even 0) turns tracking on. Only reject true no-ops.
-    if (delta === 0 && toNumber(product.inventory_on_hand) != null) {
-      return { error: `Stock is already ${stockBefore} ${inventoryUnit} — nothing to adjust` };
-    }
-  } else {
-    const conv = convertMagnitude(Math.abs(qty));
-    if (conv.error) return conv;
-    delta = (movementType === 'damaged_lost' || qty < 0) ? -conv.amount : conv.amount;
   }
-
-  return {
-    stockBefore,
-    stockAfter: round4(stockBefore + delta),
-    delta,
-    inventoryUnit,
-    enteredUnit,
-    conversionConfidence,
-    conversionNote,
-  };
+  const deictic = /^(?:this|that|current|selected|viewed|open)\s+product$/i.test(name);
+  const productId = deictic && inventoryPage ? pageData.productId || pageData.product_id || query.get('productId')
+    : name.replace(/^product\s+/i, '');
+  const selector = UUID_RE.test(String(productId || '')) ? { product_id: productId } : { product_name: name };
+  if (deictic && !selector.product_id) return unavailable;
+  const resolved = literal || await resolveProduct(selector);
+  if (resolved.error) return { ...resolved, code: 'target_clarification_required' };
+  if (resolved.product.id !== preview.product?.id) return { ...unavailable, code: 'target_relationship_mismatch' };
+  return { productId: resolved.product.id };
 }
 
 async function queryStock(input) {
@@ -1055,444 +1072,79 @@ async function getStockMovements(input) {
   };
 }
 
-async function getRestockQueue(input) {
-  const status = String(input.status || 'active').toLowerCase();
-  const limit = Math.min(input.limit || 50, 200);
-
-  let query = db('product_restock_requests as prr')
-    .leftJoin('products_catalog as pc', 'prr.product_id', 'pc.id')
-    .select('prr.*', 'pc.name as product_name', 'pc.category as product_category',
-      'pc.inventory_on_hand', 'pc.inventory_unit', 'pc.best_vendor')
-    .orderByRaw("case prr.priority when 'urgent' then 0 when 'high' then 1 when 'normal' then 2 else 3 end")
-    .orderByRaw('prr.needed_by asc nulls last')
-    .orderBy('prr.created_at', 'desc')
-    .limit(limit);
-  if (status !== 'all') query = query.whereIn('prr.status', status === 'active' ? ['open', 'ordered'] : [status]);
-
-  const rows = await query;
-  return {
-    requests: rows.map(r => ({
-      id: r.id,
-      product: r.product_name,
-      category: r.product_category,
-      status: r.status,
-      priority: r.priority,
-      requested_quantity: toNumber(r.requested_quantity),
-      unit: r.unit,
-      current_stock: toNumber(r.inventory_on_hand),
-      inventory_unit: r.inventory_unit,
-      vendor: r.vendor || r.best_vendor || null,
-      needed_by: r.needed_by,
-      reason: r.reason,
-      source: r.source,
-      created: r.created_at,
-    })),
-    total: rows.length,
-    status_filter: status,
-  };
+async function getRestockQueue(input, actionContext) {
+  const status = input.status || 'active';
+  const { requests } = await require('../inventory-restock-queue').listRestockRequests({
+    status, limit: input.limit || 50, showSpend: actionContext.isAdmin === true, requestId: input.request_id,
+  });
+  return { requests: requests.map(row => ({
+    id: row.id, product_id: row.productId, product: row.productName, category: row.productCategory,
+    status: row.status, priority: row.priority, requested_quantity: row.requestedQuantity, unit: row.unit,
+    current_stock: row.liveStock, inventory_unit: row.inventoryUnit, vendor: row.vendor,
+    vendor_sku: row.vendorSku, vendor_product_url: row.vendorProductUrl, order: row.order,
+    needed_by: row.neededBy, reason: row.reason, source: row.source, created: row.createdAt,
+  })), total: requests.length, status_filter: status,
+  note: 'Request status records staff workflow. The separate order field is the actual known vendor-order state.' };
 }
 
-async function adjustStock(input) {
-  const movementType = input.movement_type;
-  if (!['restock', 'correction', 'damaged_lost'].includes(movementType)) {
-    return { error: 'movement_type must be restock, correction, or damaged_lost' };
+// The only approval authority is the server execution context and its fresh
+// preview version. Model fields cannot supply actor or approval credentials.
+function inventoryWriteOptions(input, actionContext, source) {
+  if (!actionContext.isAdmin || !input._verified_inventory_version) {
+    throw Object.assign(new Error('A fresh administrator confirmation is required'), { code: 'approval_required' });
   }
-  const qty = toNumber(input.quantity);
-  const setTotal = toNumber(input.set_total);
-  if (qty == null && setTotal == null) return { error: 'quantity or set_total is required' };
-  if (qty != null && setTotal != null) return { error: 'Pass quantity or set_total, not both' };
-  if (setTotal != null && movementType !== 'correction') return { error: 'set_total is only valid with movement_type "correction"' };
-  if (setTotal != null && setTotal < 0) return { error: 'set_total cannot be negative' };
-  if (qty === 0) return { error: 'quantity cannot be zero' };
-  if (qty != null && qty < 0 && movementType !== 'correction') {
-    return { error: 'quantity must be positive for restock and damaged_lost' };
-  }
+  return { actorId: actionContext.technicianId, expectedVersion: input._verified_inventory_version, source };
+}
 
+async function adjustStock(input, actionContext) {
   const resolved = await resolveProduct(input);
   if (resolved.error) return resolved;
-  const { product } = resolved;
-
-  const change = computeStockChange(product, { movementType, qty, setTotal, unit: input.unit });
-  if (change.error) return change;
-
-  if (input.confirmed !== true) {
-    const threshold = toNumber(product.low_stock_threshold);
-    return {
-      preview: true,
-      tool: 'adjust_stock',
-      product: { id: product.id, name: product.name, category: product.category },
-      movement_type: movementType,
-      was_untracked: toNumber(product.inventory_on_hand) == null,
-      stock_before: change.stockBefore,
-      change: change.delta,
-      stock_after: change.stockAfter,
-      unit: change.inventoryUnit,
-      ...(change.conversionNote ? { conversion: change.conversionNote } : {}),
-      ...(change.stockAfter < 0 ? { warning: 'This takes stock NEGATIVE — double-check the numbers before confirming.' } : {}),
-      ...(change.stockAfter >= 0 && threshold != null && change.stockAfter <= threshold
-        ? { low_stock_after: true } : {}),
-    };
-  }
-
-  return db.transaction(async (trx) => {
-    const fresh = await trx('products_catalog').where('id', product.id).forUpdate().first();
-    if (!fresh) return { error: 'Product not found' };
-    const locked = computeStockChange(fresh, { movementType, qty, setTotal, unit: input.unit });
-    if (locked.error) return locked;
-
-    // The card's approved before/after totals bind under THIS lock (GH r12
-    // P1, same contract as the receive pin): the movement is re-derived
-    // from the freshly locked balance, so a concurrent inventory change
-    // must refuse rather than land totals the operator never saw.
-    const approvedAdjustment = input._verified_adjustment;
-    if (approvedAdjustment && (round4(locked.stockBefore) !== round4(toNumber(approvedAdjustment.stock_before) ?? NaN)
-      || round4(locked.stockAfter) !== round4(toNumber(approvedAdjustment.stock_after) ?? NaN)
-      || String(locked.inventoryUnit) !== String(approvedAdjustment.unit))) {
-      return {
-        error: 'The stock numbers changed after the card was shown (product or inventory level edited) — nothing was adjusted. Ask again for a fresh confirmation card.',
-        preview_changed: true,
-      };
-    }
-
-    await trx('products_catalog').where('id', fresh.id).update({
-      inventory_on_hand: locked.stockAfter,
-      inventory_unit: locked.inventoryUnit,
-      updated_at: new Date(),
-    });
-
-    const [movement] = await trx('product_inventory_movements').insert({
-      product_id: fresh.id,
-      movement_type: movementType,
-      // Corrections keep their sign (the history UI renders quantity as-is);
-      // restock/damaged_lost store the positive magnitude like the admin
-      // adjust endpoint, with direction carried by the movement type.
-      quantity: movementType === 'correction' ? locked.delta : Math.abs(locked.delta),
-      unit: locked.inventoryUnit,
-      stock_before: locked.stockBefore,
-      stock_after: locked.stockAfter,
-      lot_number: input.lot_number || null,
-      metadata: {
-        source: 'intelligence_bar_adjust_stock',
-        reason: input.reason || null,
-        delta: locked.delta,
-        setTotal: setTotal != null ? setTotal : null,
-        enteredQuantity: qty != null ? qty : setTotal,
-        enteredUnit: locked.enteredUnit,
-        conversionConfidence: locked.conversionConfidence,
-      },
-    }).returning('*');
-
-    return {
-      success: true,
-      product: { id: fresh.id, name: fresh.name },
-      movement_type: movementType,
-      stock_before: locked.stockBefore,
-      change: locked.delta,
-      stock_after: locked.stockAfter,
-      unit: locked.inventoryUnit,
-      movement_id: movement?.id || null,
-    };
-  });
+  const fields = { movementType: input.movement_type, quantity: input.quantity, setTotal: input.set_total,
+    unit: input.unit, lotNumber: input.lot_number, reason: input.reason, note: input.note };
+  if (!actionContext.confirmed) return inventory.previewStockAdjustment(resolved.product.id, fields);
+  const result = await inventory.adjustStock(resolved.product.id, fields,
+    inventoryWriteOptions(input, actionContext, 'intelligence_bar_adjust_stock'));
+  return { success: true, state: 'completed', product: inventory.productIdentity(result.product),
+    movement_type: result.movement.movement_type, stock_before: toNumber(result.movement.stock_before),
+    stock_after: toNumber(result.movement.stock_after), change: toNumber(result.movement.metadata.delta),
+    unit: result.movement.unit, movement_id: result.movement.id, verification: result.verification,
+    receipt: { label: 'Stock updated', summary: `${result.product.name}: ${toNumber(result.movement.stock_after)} ${result.movement.unit} on hand.`, href: result.href } };
 }
 
-async function createRestockRequest(input) {
-  const qty = toNumber(input.quantity);
-  if (qty == null || qty <= 0) return { error: 'quantity must be a positive number' };
-  const priority = input.priority || 'normal';
-  if (!['low', 'normal', 'high', 'urgent'].includes(priority)) {
-    return { error: 'priority must be low, normal, high, or urgent' };
-  }
-  let neededBy = null;
-  if (input.needed_by) {
-    if (!/^\d{4}-\d{2}-\d{2}$/.test(String(input.needed_by))) return { error: 'needed_by must be YYYY-MM-DD' };
-    neededBy = input.needed_by;
-  }
-
+async function createRestockRequest(input, actionContext) {
   const resolved = await resolveProduct(input);
   if (resolved.error) return resolved;
-  const { product } = resolved;
-
-  const unit = input.unit || product.inventory_unit;
-  if (!unit) return { error: 'unit is required — this product has no inventory unit set' };
-  if (!unitDefinition(unit)) return { error: `Unsupported unit "${unit}". Supported: fl_oz, gal, qt, pt, ml, l, oz, lb, g, kg` };
-
-  const vendor = input.vendor || product.best_vendor || null;
-  const currentStock = toNumber(product.inventory_on_hand);
-
-  if (input.confirmed !== true) {
-    return {
-      preview: true,
-      tool: 'create_restock_request',
-      product: { id: product.id, name: product.name, category: product.category },
-      requested_quantity: qty,
-      unit,
-      priority,
-      vendor,
-      needed_by: neededBy,
-      current_stock: currentStock,
-      reason: input.reason || null,
-    };
-  }
-
-  // The stored snapshot fields (current_stock, product-derived unit, vendor
-  // fallback) came from an unlocked read — re-derive them under the product
-  // row lock and, when a card approved this request, refuse if they no
-  // longer match what the operator saw (GH r12 P1, same contract as the
-  // receive pin). The SHARED any-source live-request check runs under the
-  // same lock: a request that committed meanwhile (the sweep's, or staff's)
-  // is reported, never twinned (Codex r9 P1).
-  return db.transaction(async (trx) => {
-    const fresh = await trx('products_catalog').where('id', product.id).forUpdate().first();
-    if (!fresh) return { error: 'Product not found' };
-    // An automatic order already claimed/placed for this product: refuse —
-    // the Restock tab carries the order line (pre-push P0). Checked BEFORE
-    // the shared live-request read so the order-specific message wins.
-    try { await require('../procurement/order-dispatch').assertNoLiveAutoOrder(trx, product.id); }
-    catch (err) { if (err.code === 'auto_order_live') return { error: err.message, auto_order_live: true }; throw err; }
-    const live = await findLiveRestockRequest(trx, fresh.id);
-    if (live) {
-      return {
-        error: `A restock request for ${fresh.name} is already ${live.status} — nothing was requested. Update that request instead.`,
-        existing_request: { id: live.id, status: live.status, source: live.source, requested_quantity: toNumber(live.requested_quantity), unit: live.unit },
-      };
-    }
-    const lockedUnit = input.unit || fresh.inventory_unit;
-    if (!lockedUnit) return { error: 'unit is required — this product has no inventory unit set' };
-    if (!unitDefinition(lockedUnit)) return { error: `Unsupported unit "${lockedUnit}". Supported: fl_oz, gal, qt, pt, ml, l, oz, lb, g, kg` };
-    const lockedVendor = input.vendor || fresh.best_vendor || null;
-    const lockedStock = toNumber(fresh.inventory_on_hand);
-
-    const approvedRequest = input._verified_request;
-    const sameStock = (a, b) => (a == null && b == null) || (a != null && b != null && round4(a) === round4(b));
-    if (approvedRequest && (!sameStock(lockedStock, toNumber(approvedRequest.current_stock))
-      || String(lockedUnit) !== String(approvedRequest.unit)
-      || String(lockedVendor ?? '') !== String(approvedRequest.vendor ?? ''))) {
-      return {
-        error: 'This product changed after the card was shown (stock level, unit, or vendor) — nothing was requested. Ask again for a fresh confirmation card.',
-        preview_changed: true,
-      };
-    }
-
-    const [request] = await trx('product_restock_requests').insert({
-      product_id: product.id,
-      status: 'open',
-      priority,
-      requested_quantity: qty,
-      unit: lockedUnit,
-      current_stock: lockedStock,
-      vendor: lockedVendor,
-      needed_by: neededBy,
-      reason: input.reason || null,
-      source: 'intelligence_bar',
-      created_by_name: 'Intelligence Bar',
-    }).returning('*');
-
-    return {
-      success: true,
-      request: {
-        id: request?.id || null,
-        product: product.name,
-        status: 'open',
-        requested_quantity: qty,
-        unit: lockedUnit,
-        priority,
-        vendor: lockedVendor,
-        needed_by: neededBy,
-      },
-    };
-  });
+  const fields = { requestedQuantity: input.quantity, unit: input.unit, priority: input.priority || 'normal',
+    vendor: input.vendor, neededBy: input.needed_by, reason: input.reason, allowDuplicate: input.allow_duplicate };
+  if (!actionContext.confirmed) return inventory.previewRestockRequest(resolved.product.id, fields);
+  const result = await inventory.createRestockRequest(resolved.product.id, fields,
+    inventoryWriteOptions(input, actionContext, 'intelligence_bar'));
+  const row = result.restockRequest;
+  if (result.existing) return { success: false, blocked: true, code: 'request_exists',
+    error: 'An active restock request already exists. Review that request before continuing.',
+    existing_request: { id: row.id, product_id: row.product_id, status: row.status, source: row.source, requested_quantity: toNumber(row.requested_quantity), unit: row.unit } };
+  return { success: true, state: 'completed', existing: result.existing,
+    request: { id: row.id, product_id: row.product_id, product: resolved.product.name, status: row.status,
+      requested_quantity: toNumber(row.requested_quantity), unit: row.unit, priority: row.priority, vendor: row.vendor, needed_by: row.needed_by },
+    verification: result.verification,
+    receipt: { label: 'Restock request saved',
+      summary: `${resolved.product.name}: ${toNumber(row.requested_quantity)} ${row.unit}; request ${row.status}. No vendor order was submitted.`, href: result.href } };
 }
 
-
-// The two non-receive transitions, under the request lock (Codex r10 P2:
-// action routing is its own stage, apart from the locked receive).
-async function transitionRestockRequest(trx, { request, product, action }) {
-  if (action === 'mark_ordered') {
-    await trx('product_restock_requests').where('id', request.id).update({ status: 'ordered', updated_at: new Date() });
-    return { success: true, request_id: request.id, product: product.name, status: 'ordered' };
-  }
-  if (action === 'cancel') {
-    await trx('product_restock_requests').where('id', request.id).update({
-      status: 'cancelled', closed_at: new Date(), updated_at: new Date(),
-    });
-    return { success: true, request_id: request.id, product: product.name, status: 'cancelled' };
-  }
+async function updateRestockRequest(input, actionContext) {
+  const fields = { action: input.action, quantity: input.quantity, unit: input.unit, note: input.note };
+  if (!actionContext.confirmed) return inventory.previewRestockAction(input.request_id, fields);
+  const result = await inventory.updateRestockRequest(input.request_id, fields,
+    inventoryWriteOptions(input, actionContext, 'intelligence_bar_restock_receive'));
+  const labels = { mark_ordered: 'Recorded as ordered', receive: 'Stock received', cancel: 'Request canceled' };
+  const summary = result.movement
+    ? `${toNumber(result.movement.quantity)} ${result.movement.unit} received; ${toNumber(result.movement.stock_after)} ${result.movement.unit} on hand.`
+    : { mark_ordered: 'Recorded the staff-placed order. Stock is unchanged.', cancel: 'The restock request is closed. No vendor order was canceled.' }[input.action];
+  return { success: true, state: 'completed', request_id: result.request.id, product_id: result.request.product_id,
+    status: result.request.status, verification: result.verification,
+    ...(result.movement ? { movement_id: result.movement.id, stock_before: toNumber(result.movement.stock_before),
+      added: toNumber(result.movement.quantity), stock_after: toNumber(result.movement.stock_after), unit: result.movement.unit } : {}),
+    receipt: { label: labels[input.action], summary, href: result.href } };
 }
 
-// The locked receive: quantity re-derived under the request + product locks,
-// the approved card's exact delta re-asserted, stock + movement + close.
-async function receiveRestockLocked(trx, { request, lockedRequest, input, receivePlan, secondReceive = false }) {
-  // receive — recompute against the locked product row, never the preview.
-  // When the operator gave no quantity, the default is re-derived HERE,
-  // under the request lock: an automatic order that went placing → placed
-  // between the preview and this transaction must receive what it actually
-  // bought, not the requested figure (pre-push P0).
-  const fresh = await trx('products_catalog').where('id', request.product_id).forUpdate().first();
-  if (!fresh) return { error: 'Product not found' };
-  const enteredQuantity = toNumber(input.quantity)
-    ?? await require('../procurement/order-dispatch').orderedQuantityFor(trx, request.id)
-    ?? toNumber(lockedRequest.requested_quantity);
-  if (!enteredQuantity || enteredQuantity <= 0) return { error: 'Receive quantity is required' };
-  const inventoryUnit = fresh.inventory_unit || receivePlan.enteredUnit;
-  const received = describeInventoryConversion(enteredQuantity, receivePlan.enteredUnit, inventoryUnit);
-  if (!received.convertible || received.amount == null) {
-    return { error: `Cannot convert receive unit ${receivePlan.enteredUnit} to inventory unit ${inventoryUnit}` };
-  }
-  const stockBefore = toNumber(fresh.inventory_on_hand) ?? 0;
-  const stockAfter = round4(stockBefore + received.amount);
-
-  // The card approved an EXACT stock delta (GH r11 P1): re-assert it
-  // here, under the request + product row locks — the entered quantity
-  // and unit were derived from unlocked reads, so a request or product
-  // edited after the confirm-time preview could otherwise add a
-  // different amount than the operator saw.
-  const approvedReceive = input._verified_receive;
-  if (approvedReceive && (round4(received.amount) !== round4(toNumber(approvedReceive.adds) ?? NaN)
-    || String(inventoryUnit) !== String(approvedReceive.unit)
-    // The card shows exact before/after totals — the starting balance
-    // binds too (pre-push r11 P1), so a concurrent movement refuses
-    // rather than landing an unapproved final balance.
-    || round4(stockBefore) !== round4(toNumber(approvedReceive.stock_before) ?? NaN))) {
-    return {
-      error: 'The receive amounts changed after the card was shown (request, product, or stock level edited) — nothing was received. Ask again for a fresh confirmation card.',
-      preview_changed: true,
-    };
-  }
-
-  await trx('products_catalog').where('id', fresh.id).update({
-    inventory_on_hand: stockAfter,
-    inventory_unit: inventoryUnit,
-    updated_at: new Date(),
-  });
-  const [movement] = await trx('product_inventory_movements').insert({
-    product_id: fresh.id,
-    movement_type: 'restock',
-    quantity: received.amount,
-    unit: inventoryUnit,
-    stock_before: stockBefore,
-    stock_after: stockAfter,
-    metadata: {
-      source: 'intelligence_bar_restock_receive',
-      restockRequestId: request.id,
-      note: input.note || null,
-      enteredQuantity: enteredQuantity,
-      enteredUnit: receivePlan.enteredUnit,
-      conversionConfidence: received.confidence,
-      ...(secondReceive ? { secondReceive: true } : {}),
-    },
-  }).returning('*');
-  // The late order's own receipt: the marker that kept the live-order
-  // guards closed comes off in this transaction (Codex r27 P1).
-  if (secondReceive) await require('../procurement/order-dispatch').settleLandedAfterReceive(trx, request.id);
-  await trx('product_restock_requests').where('id', request.id).update({
-    status: 'received', closed_at: new Date(), updated_at: new Date(),
-  });
-
-  return {
-    success: true,
-    request_id: request.id,
-    product: fresh.name,
-    status: 'received',
-    stock_before: stockBefore,
-    added: received.amount,
-    stock_after: stockAfter,
-    unit: inventoryUnit,
-    movement_id: movement?.id || null,
-  };
-}
-
-async function updateRestockRequest(input) {
-  const action = String(input.action || '').toLowerCase();
-  if (!['mark_ordered', 'receive', 'cancel'].includes(action)) {
-    return { error: 'action must be mark_ordered, receive, or cancel' };
-  }
-  if (!input.request_id) return { error: 'request_id is required — get_restock_queue shows the ids' };
-
-  const request = await db('product_restock_requests').where('id', input.request_id).first();
-  if (!request) return { error: 'Restock request not found' };
-  // ONE more receive on a received request whose automatic order landed
-  // after that receipt (ledger evidence.landedAfterReceive — Codex r27 P1);
-  // the locked guard below re-derives it before anything is written.
-  const secondReceive = action === 'receive' && request.status === 'received'
-    && await require('../procurement/order-dispatch').landedAfterReceiveFor(db, request.id);
-  if ((request.status === 'received' && !secondReceive) || request.status === 'cancelled') {
-    return { error: `This request is already ${request.status} — no further actions allowed` };
-  }
-  const product = await db('products_catalog').where('id', request.product_id).first();
-  if (!product) return { error: 'Product for this request not found' };
-
-  let receivePlan = null;
-  if (action === 'receive') {
-    // Default = what the automatic order actually bought (packages round
-    // up), else the requested figure (Codex r2 P1).
-    const orderedQuantity = await require('../procurement/order-dispatch').orderedQuantityFor(db, request.id);
-    const qty = toNumber(input.quantity) ?? orderedQuantity ?? toNumber(request.requested_quantity);
-    const enteredUnit = input.unit || request.unit || product.inventory_unit;
-    if (!qty || qty <= 0 || !enteredUnit) return { error: 'Receive quantity and unit are required' };
-    const inventoryUnit = product.inventory_unit || enteredUnit;
-    const received = describeInventoryConversion(qty, enteredUnit, inventoryUnit);
-    if (!received.convertible || received.amount == null) {
-      return { error: `Cannot convert receive unit ${enteredUnit} to inventory unit ${inventoryUnit}` };
-    }
-    const stockBefore = toNumber(product.inventory_on_hand) ?? 0;
-    receivePlan = { enteredQuantity: qty, enteredUnit, stockBefore, stockAfter: round4(stockBefore + received.amount), amount: received.amount };
-  }
-
-  if (input.confirmed !== true) {
-    return {
-      preview: true,
-      tool: 'update_restock_request',
-      request: {
-        id: request.id,
-        product: product.name,
-        status: request.status,
-        requested_quantity: toNumber(request.requested_quantity),
-        unit: request.unit,
-      },
-      action,
-      new_status: action === 'mark_ordered' ? 'ordered' : action === 'cancel' ? 'cancelled' : 'received',
-      ...(receivePlan ? {
-        stock_before: receivePlan.stockBefore,
-        adds: receivePlan.amount,
-        stock_after: receivePlan.stockAfter,
-        unit: product.inventory_unit || receivePlan.enteredUnit,
-      } : {}),
-    };
-  }
-
-  const result = await db.transaction(async (trx) => {
-    // LOCK ORDER: the request's ledger row first, then the request — the
-    // order the dispatcher's record transaction and the revoke CLI use, so
-    // a receive racing a revoke waits instead of deadlocking (hook r27 P1).
-    await trx('vendor_orders').where('restock_request_id', request.id).forUpdate().first('id');
-    // Re-check under lock: a concurrent confirm can close this request
-    // between the unlocked pre-check above and this transaction. Without
-    // the request-row lock, two receives would both add stock.
-    const lockedRequest = await trx('product_restock_requests').where('id', request.id).forUpdate().first();
-    if (!lockedRequest) return { error: 'Restock request not found' };
-    // Automatic-order guard (pre-push P0s): no action while the order is
-    // placing; no cancel while a dispatched order is unreceived and unrevoked.
-    let guard;
-    try { guard = await require('../procurement/order-dispatch').assertManualActionAllowed(trx, request.id, action); }
-    catch (err) { if (err.code === 'auto_order_placing' || err.code === 'auto_order_out') return { error: err.message, [err.code]: true }; throw err; }
-    const lockedSecondReceive = secondReceive && lockedRequest.status === 'received' && !!guard.landedAfterReceive;
-    if ((lockedRequest.status === 'received' && !lockedSecondReceive) || lockedRequest.status === 'cancelled') {
-      return { error: `This request is already ${lockedRequest.status} — no further actions allowed` };
-    }
-
-    const outcome = action !== 'receive'
-      ? await transitionRestockRequest(trx, { request, product, action })
-      : await receiveRestockLocked(trx, { request, lockedRequest, input, receivePlan, secondReceive: lockedSecondReceive });
-    // A completed action resolves the request's ledger bell ("order
-    // manually" / "receive or revoke"): retired in the same transaction so
-    // no one follows it (Codex r28 P2) — only after the action succeeded; a
-    // receive that returns an error (preview changed, unit unconvertible)
-    // received nothing and keeps its bell (hook P1).
-    if (outcome?.success) await require('../procurement/order-dispatch').settleRequestLedgerBells(trx, request.id);
-    return outcome;
-  });
-
-  return result;
-}
-
-module.exports = { PROCUREMENT_TOOLS, executeProcurementTool };
+module.exports = { PROCUREMENT_TOOLS, executeProcurementTool, resolveInventoryWriteTarget };

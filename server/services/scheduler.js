@@ -30,6 +30,7 @@ function purposeForScheduledMessageType(messageType, { hasCustomer = true } = {}
   // for customer-linked rows; lead rows have no customerId so they replay
   // under the transactional-grade conversational policy with the forwarded
   // consent basis — payment_receipt would hard-require a customerId.
+  if (type === 'visit_summary') return 'service_completion';
   if (type === 'deposit_receipt') return hasCustomer ? 'payment_receipt' : 'conversational';
   // Deferred completion texts (service_complete*, service_report_v1*) replay
   // under the appointment purpose the immediate dispatch send enforced.
@@ -1164,7 +1165,29 @@ function initScheduledJobs() {
     // Call-time read (NOT the baked isEnabled snapshot) so a Railway var flip
     // takes effect on the next tick without a redeploy — matching the
     // documented gate contract and the service's own internal check.
-    if (!gateEnvValue('GATE_ROUTE_REORDER')) return;
+    if (!gateEnvValue('GATE_ROUTE_REORDER')) {
+      // The reorder pass below is also the ONLY nightly trigger for the
+      // route-quality alert reconciliation folded into it — with reorder
+      // off, existing defects never got an initial card and no card ever
+      // expired, even with the measurement + alert gates on (codex #4295
+      // r2 P2). Run just that reconciliation, under its own gates, over the
+      // same six-date band; skip repair and distance optimization entirely.
+      // No runExclusive: unlike the reorder pass, this never writes
+      // route_order, so it needs none of that writer-serialization, and
+      // the reconciler already self-serializes on its own advisory lock.
+      try {
+        const { runScheduleQualityAlertsOnly } = require('./route-reorder');
+        const result = await runScheduleQualityAlertsOnly();
+        if (result.status === 'failed') {
+          logger.error('[route-reorder] quality-alerts-only cron run failed');
+        } else if (result.status === 'reconciled') {
+          logger.info(`[route-reorder] quality-alerts-only cron run: created=${result.created} resolved=${result.resolved}`);
+        }
+      } catch (err) {
+        logger.error(`[route-reorder] quality-alerts-only cron run failed: ${err.message}`);
+      }
+      return;
+    }
     logger.info('Running: Route-Tiers nightly reorder');
     try {
       // runExclusive x2: 'route-tiers-nightly' guards against deploy-overlap
@@ -3741,6 +3764,10 @@ function initScheduledJobs() {
             customerId: msg.customer_id || undefined,
             identityTrustLevel: msg.customer_id ? 'phone_matches_customer' : 'phone_provided_unverified',
             entryPoint: 'scheduled_sms_cron',
+            withSmsHandoff: require('./messaging/deferred-replay-registry')
+              .deferredSmsHandoff(claimMeta.entry_point, { ...claimMeta,
+                customer_id: msg.customer_id || claimMeta.customer_id || null,
+                to_phone: msg.to_phone || null }),
             // Send-window operator provenance: only rows an operator
             // actually composed/scheduled keep the operator exemption — the
             // composer dispatches at the exact minute the operator picked,
@@ -4027,7 +4054,14 @@ function initScheduledJobs() {
                 // standalone review fallback, flip referral/report state into
                 // the admin retry lane). Armed ONLY here, never on timers,
                 // so fallbacks can't race a still-retryable replay.
-                await runTerminalHookDurably(msg.id, claimMeta.entry_point, claimMeta);
+                // provider_terminal_rejection carries the adapter's proof of
+                // a synchronous, definitive provider rejection (a terminal
+                // Twilio code) into the hook — visit_summary_deferred's
+                // onTerminal uses it to settle an unknown_delivery effect as
+                // suppressed instead of leaving it parked as unknown; other
+                // entry points ignore the field.
+                await runTerminalHookDurably(msg.id, claimMeta.entry_point,
+                  { ...claimMeta, provider_terminal_rejection: smsResult.terminal === true });
               }
               // The customer was never answered — used + parked cards return.
               const blockedMeta = await readFreshMeta();
