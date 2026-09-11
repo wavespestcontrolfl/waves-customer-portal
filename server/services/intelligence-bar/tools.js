@@ -166,7 +166,7 @@ Only returns active customers with prior service history in that category.`,
   },
   {
     name: 'find_duplicates',
-    description: 'Find potential duplicate customers by phone, email, or name+address. match_on phone also returns queue: the canonical duplicate-review queue (winner customer_id, each candidate customer_id, tier, reasons) — the ids merge_customers takes. If the queue cannot be read, queue is [] and queue_error says why; if there are more groups than fit, queue_truncated says how many were held back.',
+    description: 'Find potential duplicate customers by phone, email, or name+address. match_on phone also returns queue: the canonical duplicate-review queue (winner customer_id, each candidate customer_id, tier, reasons) — the ids merge_customers takes. If the queue cannot be read, queue is [] and queue_error says why; if there are more groups than fit, queue_truncated says how many were held back, and a group with more candidates than fit carries candidates_truncated.',
     input_schema: {
       type: 'object',
       properties: {
@@ -374,6 +374,11 @@ Use for: "build the report for the customer we just finished", "who did we finis
 // raw phone grouping and the canonical queue built from findDuplicateGroups,
 // whose own query has no cap (codex #4348 r11 P2).
 const DUPLICATE_QUEUE_LIMIT = 50;
+// Per-group cap on the candidates find_duplicates returns: one normalized
+// phone shared by many imported / placeholder / business records would
+// otherwise emit every member and exhaust the next model round's context
+// even with the group count capped (codex #4348 r14 P2).
+const DUPLICATE_CANDIDATE_LIMIT = 10;
 
 async function executeTool(toolName, input, actionContext = {}) {
   try {
@@ -946,11 +951,15 @@ async function findDuplicates(input) {
       if (groups.length > capped.length) {
         queueTruncated = { returned: capped.length, total: groups.length, note: `Showing the first ${capped.length} of ${groups.length} duplicate groups — work these, then call find_duplicates again.` };
       }
-      queue = capped.map((g) => ({
-        phone: g.phone10 || null,
-        winner: { customer_id: g.winner.id, name: name(g.winner) },
-        candidates: g.candidates.map((c) => ({ customer_id: c.loser.id, name: name(c.loser), tier: c.tier, reasons: c.reasons })),
-      }));
+      queue = capped.map((g) => {
+        const candidates = g.candidates.slice(0, DUPLICATE_CANDIDATE_LIMIT)
+          .map((c) => ({ customer_id: c.loser.id, name: name(c.loser), tier: c.tier, reasons: c.reasons }));
+        const group = { phone: g.phone10 || null, winner: { customer_id: g.winner.id, name: name(g.winner) }, candidates };
+        if (g.candidates.length > candidates.length) {
+          group.candidates_truncated = { returned: candidates.length, total: g.candidates.length, note: `Showing the first ${candidates.length} of ${g.candidates.length} candidates in this group — merge these, then call find_duplicates again.` };
+        }
+        return group;
+      });
     } catch (err) {
       queueError = `duplicate queue unavailable: ${err.message}`;
     }

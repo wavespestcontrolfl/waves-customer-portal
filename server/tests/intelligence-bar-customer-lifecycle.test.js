@@ -85,9 +85,41 @@ beforeEach(() => {
   db.__qb.update.mockResolvedValue(1);
   mockDuplicatePairEligibility.mockResolvedValue(ELIGIBLE);
   mockDescribeMergeEffects.mockResolvedValue(EFFECTS);
+  // Default-off capability gate (Codex r14 P1): on for every test below
+  // except the one that proves it refuses.
+  process.env.GATE_IB_MERGE_CUSTOMERS = 'true';
 });
+afterAll(() => { delete process.env.GATE_IB_MERGE_CUSTOMERS; });
 
 describe('merge_customers', () => {
+  test('GATE_IB_MERGE_CUSTOMERS off: the tool refuses before touching the database — preview and confirmed call alike (Codex r14 P1)', async () => {
+    delete process.env.GATE_IB_MERGE_CUSTOMERS;
+    const preview = await executeCustomerLifecycleTool('merge_customers', { winner_customer_id: WINNER_ID, loser_customer_id: LOSER_ID }, {});
+    expect(preview).toEqual({ error: expect.stringMatching(/not enabled \(GATE_IB_MERGE_CUSTOMERS\)/), code: 'gate_off' });
+    const commit = await executeCustomerLifecycleTool('merge_customers', { winner_customer_id: WINNER_ID, loser_customer_id: LOSER_ID }, { confirmed: true, technicianId: 'admin-1' });
+    expect(commit).toMatchObject({ code: 'gate_off' });
+    expect(db.__qb.select).not.toHaveBeenCalled();
+    expect(mockExecuteMerge).not.toHaveBeenCalled();
+    process.env.GATE_IB_MERGE_CUSTOMERS = 'false';
+    expect(await executeCustomerLifecycleTool('merge_customers', { winner_customer_id: WINNER_ID, loser_customer_id: LOSER_ID }, {})).toMatchObject({ code: 'gate_off' });
+  });
+
+  test('the card states the loser state the merge discards — the rate both sides, the survivor\'s billing from now on, the login — and every predicted fold (Codex r14 P1 + P2)', async () => {
+    db.__qb.select.mockResolvedValueOnce([winnerRow, loserRow]);
+    mockDescribeMergeEffects.mockResolvedValueOnce({ ...EFFECTS, financial_effects: { ...FINANCIAL,
+      loser_state_discarded: { monthly_rate: { loser: 122, winner: 98 }, membership_tier: { loser: 'gold', winner: null }, portal_login: { loser: true, winner: false } },
+      predicted_collision_handlers: ['customer_tags', 'notification_prefs'],
+      predicted_collision_folds: { notification_prefs: 'both records have a row: the fields merge into the surviving row and the archived record\'s row is dropped', customer_tags: { shared: ['vip'] } },
+      revertible_from_queue: false } });
+    const card = await executeCustomerLifecycleTool('merge_customers', { winner_customer_id: WINNER_ID, loser_customer_id: LOSER_ID }, {});
+    expect(card.note_to_operator).toMatch(/DISCARDED with the archived record — the merge never copies these onto the survivor: the monthly rate \$122\.00 \(the surviving record's rate is \$98\.00 — every moved visit bills at the survivor's rate from now on\); the membership tier gold \(survivor: none\); its portal login \(the survivor has none — the customer must be re-invited\)\./);
+    expect(card.note_to_operator).toMatch(/Folds the undo cannot split apart: notification_prefs: both records have a row.*; tags shared by both records \(vip\) are dropped from the archived side\./);
+    expect(card.note_to_operator).toMatch(/EXCEPT that this merge folds customer_tags, notification_prefs/);
+    // The snapshot the card shows carries the never-copied columns both-sided, and never the hash.
+    expect(card.billing_and_contacts.loser).toEqual(expect.objectContaining({ monthly_rate: null, waveguard_tier: null, pipeline_stage: null, has_portal_login: false }));
+    expect(card.billing_and_contacts.loser.password_hash).toBeUndefined();
+  });
+
   test('a model-supplied confirmed:true CANNOT commit — only the server-derived action context can (pre-push audit P0)', async () => {
     db.__qb.select.mockResolvedValueOnce([winnerRow, loserRow]);
     // The model puts confirmed:true (and forged pins) in its own tool input

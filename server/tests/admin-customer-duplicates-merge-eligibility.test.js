@@ -90,6 +90,28 @@ describe('merge eligibility gate', () => {
     expect(mockExecuteMerge).toHaveBeenCalledTimes(1);
   });
 
+  test('the executor\'s locked re-decision is an expected stale-queue race: 409, or 503 when the dismissal verdicts could not be read — never 500 (Codex r14 P2)', async () => {
+    for (const [code, status] of [['not_in_queue', 409], ['red_pair', 409], ['dismissals_unreadable', 503]]) {
+      mockEligibility.mockResolvedValueOnce({ eligible: true, code: 'eligible', reason: null, candidate: { tier: 'green', reasons: [] } });
+      const err = new Error(`executeMerge: the pair is no longer mergeable (${code}) — review a fresh proposal`);
+      err.previewChanged = true;
+      mockExecuteMerge.mockRejectedValueOnce(err);
+      const res = await post('/merge', body);
+      expect(res.status).toBe(status);
+      expect(res.body.error).toMatch(new RegExp(`no longer mergeable \\(${code}\\)`));
+    }
+    // A fingerprint drift refusal is the same class.
+    mockEligibility.mockResolvedValueOnce({ eligible: true, code: 'eligible', reason: null, candidate: { tier: 'green', reasons: [] } });
+    const drift = new Error('executeMerge: the rows that would move changed since this merge was approved — review a fresh proposal');
+    drift.previewChanged = true;
+    mockExecuteMerge.mockRejectedValueOnce(drift);
+    expect((await post('/link-as-property', body)).status).toBe(409);
+    // An unexplained executor failure is still a 500.
+    mockEligibility.mockResolvedValueOnce({ eligible: true, code: 'eligible', reason: null, candidate: { tier: 'green', reasons: [] } });
+    mockExecuteMerge.mockRejectedValueOnce(new Error('executeMerge: repoint failed on invoices.customer_id: boom'));
+    expect((await post('/merge', body)).status).toBe(500);
+  });
+
   test('eligible pair merges with the admin actor identity', async () => {
     mockEligibility.mockResolvedValueOnce({ eligible: true, code: 'eligible', reason: null, candidate: { tier: 'green', reasons: [] } });
     const res = await post('/merge', body);

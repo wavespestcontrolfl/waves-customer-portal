@@ -120,6 +120,17 @@ async function queryToolNames(baseUrl, token, context) {
 describe('email tools are admin-only in the intelligence bar', () => {
   beforeEach(() => {
     jest.clearAllMocks();
+    process.env.GATE_IB_MERGE_CUSTOMERS = 'true';
+  });
+  afterAll(() => { delete process.env.GATE_IB_MERGE_CUSTOMERS; });
+
+  test('GATE_IB_MERGE_CUSTOMERS off: merge_customers is offered in NO admin context — including the comms/email branches that rebuild their lists (Codex r14 P1)', async () => {
+    delete process.env.GATE_IB_MERGE_CUSTOMERS;
+    await withServer(async (baseUrl) => {
+      for (const context of ['dispatch', 'customers', 'comms', 'email']) {
+        expect(await queryToolNames(baseUrl, 'admin', context)).not.toContain('merge_customers');
+      }
+    });
   });
 
   test('admin tool lists include the shared email subset (but not email-page-only tools outside the email context)', async () => {

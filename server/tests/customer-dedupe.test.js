@@ -2323,6 +2323,23 @@ describe('predictWinnerBackfills (pure — the executor\'s rule, disclosed by th
   });
 });
 
+describe('predictLoserStateDiscarded (the loser state the merge never copies — Codex r14 P1)', () => {
+  it('names the rate, tier, live stage and portal login the archived record carries and the survivor will not, both-sided', () => {
+    const winner = { monthly_rate: '98.00', waveguard_tier: null, pipeline_stage: 'active_customer', password_hash: null };
+    const loser = { monthly_rate: '122.00', waveguard_tier: 'gold', pipeline_stage: 'won', password_hash: 'x' };
+    expect(dedupe.predictLoserStateDiscarded(winner, loser)).toEqual({
+      monthly_rate: { loser: 122, winner: 98 },
+      membership_tier: { loser: 'gold', winner: null },
+      pipeline_stage: { loser: 'won', winner: 'active_customer' },
+      portal_login: { loser: true, winner: false },
+    });
+  });
+  it('is null when the loser carries nothing the winner would not keep anyway (same rate, no tier, a lead stage, no login)', () => {
+    expect(dedupe.predictLoserStateDiscarded({ monthly_rate: '98', pipeline_stage: 'active_customer' }, { monthly_rate: '98.00', pipeline_stage: 'new_lead' })).toBeNull();
+    expect(dedupe.predictLoserStateDiscarded({ monthly_rate: null }, { monthly_rate: '0', waveguard_tier: null })).toBeNull();
+  });
+});
+
 describe('describeMergeEffects (the card\'s disclosure + fingerprint, engine-owned)', () => {
   const FK_ROWS = { rows: [{ table_name: 'invoices', column_name: 'customer_id' }] };
   const winner = { id: 'W', first_name: 'Real', last_name: 'Customer', billing_mode: null, per_application_fee: null, account_credits: '0', address_line1: '100 Test St', email: null };
@@ -2330,10 +2347,13 @@ describe('describeMergeEffects (the card\'s disclosure + fingerprint, engine-own
   // `defaults`: { W: true } plants a winner default card; `flagged`:
   // { L: [{ id, is_default, autopay_enabled }] } are the loser cards the
   // demotion reader lists (predictSavedCardDemotions).
-  function install(counts = {}, { sessions = {}, cards = {}, defaults = {}, flagged = {} } = {}) {
+  function install(counts = {}, { sessions = {}, cards = {}, defaults = {}, flagged = {}, collisions = {} } = {}) {
     db.raw = jest.fn(async () => FK_ROWS);
     installDb((table, q) => {
       if (table === 'referral_promoters') return null;
+      // The collision-fold prediction reads both sides' rows of each
+      // unique-keyed table (predictCollisionFolds).
+      if (['notification_prefs', 'property_preferences', 'customer_tags', 'conversations'].includes(table)) return collisions[table] || [];
       if (table === 'payment_methods') {
         const owner = q.args('where')[0].customer_id;
         if (q.called('first')) return defaults[owner] ? { id: `${owner}-default` } : null;
@@ -2345,6 +2365,34 @@ describe('describeMergeEffects (the card\'s disclosure + fingerprint, engine-own
       return { n: counts[table] || 0 };
     });
   }
+  it('predicts every deterministic collision fold from the current rows — singleton prefs on both sides, shared tags, shared conversation threads — pins them and turns the undo state off (Codex r14 P2)', async () => {
+    install({}, { collisions: {
+      notification_prefs: [{ customer_id: 'W' }, { customer_id: 'L' }],
+      property_preferences: [{ customer_id: 'L' }],
+      customer_tags: [{ customer_id: 'W', tag: 'vip' }, { customer_id: 'W', tag: 'lawn' }, { customer_id: 'L', tag: 'vip' }, { customer_id: 'L', tag: 'pets' }],
+      conversations: [{ customer_id: 'W', channel: 'sms', our_endpoint_id: 'ep1' }, { customer_id: 'L', channel: 'sms', our_endpoint_id: 'ep1' }, { customer_id: 'L', channel: 'email', our_endpoint_id: null }],
+    } });
+    const out = await dedupe.describeMergeEffects(db, winner, loser);
+    expect(out.financial_effects.predicted_collision_handlers).toEqual(['conversations', 'customer_tags', 'notification_prefs']);
+    expect(out.financial_effects.predicted_collision_folds).toEqual({
+      notification_prefs: expect.stringMatching(/both records have a row/),
+      customer_tags: { shared: ['vip'] },
+      conversations: { shared_threads: ['sms:ep1'] },
+    });
+    expect(out.financial_effects.revertible_from_queue).toBe(false);
+    expect(JSON.parse(out.fingerprint).financial_effects.predicted_collision_folds).toEqual(out.financial_effects.predicted_collision_folds);
+    // A pref row on ONE side only, tags that do not overlap, threads on different endpoints: nothing folds.
+    install({}, { collisions: { property_preferences: [{ customer_id: 'L' }], customer_tags: [{ customer_id: 'W', tag: 'a' }, { customer_id: 'L', tag: 'b' }], conversations: [{ customer_id: 'W', channel: 'sms', our_endpoint_id: 'ep1' }, { customer_id: 'L', channel: 'sms', our_endpoint_id: 'ep2' }] } });
+    expect((await dedupe.describeMergeEffects(db, winner, loser)).financial_effects.predicted_collision_handlers).toEqual([]);
+  });
+
+  it('discloses and pins the loser state the merge never copies (Codex r14 P1)', async () => {
+    install({});
+    const out = await dedupe.describeMergeEffects(db, { ...winner, monthly_rate: '98.00' }, { ...loser, monthly_rate: '122.00', password_hash: 'h' });
+    expect(out.financial_effects.loser_state_discarded).toEqual({ monthly_rate: { loser: 122, winner: 98 }, portal_login: { loser: true, winner: false } });
+    expect(JSON.parse(out.fingerprint).financial_effects.loser_state_discarded).toEqual(out.financial_effects.loser_state_discarded);
+  });
+
   it('states moving counts, money effects, inherited restrictions, predicted backfills (row-derived, with the Stripe caveat) and the undo state, key-sorted in one fingerprint', async () => {
     install({ invoices: 2, customer_plan_rates: 1 });
     const out = await dedupe.describeMergeEffects(db, winner, loser);
@@ -2363,7 +2411,9 @@ describe('describeMergeEffects (the card\'s disclosure + fingerprint, engine-own
       saved_card_demotions: { winner_has_default: false, cards: [] },
       combined_payment_sessions: { winner: [], loser: [] },
       collection_cases: { available: true, live: [], demoted_to_proposed: [], defers_on_dialing: false },
+      loser_state_discarded: null,
       predicted_collision_handlers: [],
+      predicted_collision_folds: {},
       revertible_from_queue: expect.stringMatching(/unless the sweep has to fold/),
     });
     const parsed = JSON.parse(out.fingerprint);
@@ -2571,6 +2621,7 @@ describe('describeMergeEffects (the card\'s disclosure + fingerprint, engine-own
     const route = (counts) => (table, q) => {
       if (table === 'referral_promoters') return null;
       if (table === 'payment_methods') return q.called('first') ? null : [];
+      if (['notification_prefs', 'property_preferences', 'customer_tags', 'conversations'].includes(table)) return [];
       if (table === 'invoices' && !q.called('count')) return [];
       if (table === 'customer_plan_rates') return { n: 0 };
       return { n: counts[table] || 0 };
@@ -2667,6 +2718,7 @@ describe('previewCollectionCaseReconciliation (the executor\'s reconcile rule, d
     installDb((table, q) => {
       if (table === 'referral_promoters') return null;
       if (table === 'payment_methods') return [];
+      if (['notification_prefs', 'property_preferences', 'customer_tags', 'conversations'].includes(table)) return [];
       if (table === 'invoices' && !q.called('count')) return [];
       return { n: 0 };
     });

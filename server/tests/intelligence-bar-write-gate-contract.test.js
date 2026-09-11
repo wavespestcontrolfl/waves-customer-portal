@@ -63,8 +63,10 @@ beforeAll(() => {
   delete process.env.GATE_DRIVE_TIME_CALIBRATION;
   process.env.GATE_CANCEL_FLOW_V2 = 'true';
   process.env.GATE_IB_PLATFORM = 'true';
+  process.env.GATE_IB_MERGE_CUSTOMERS = 'true';
 });
 afterAll(() => {
+  delete process.env.GATE_IB_MERGE_CUSTOMERS;
   if (ORIGINAL_PLATFORM_GATE === undefined) delete process.env.GATE_IB_PLATFORM;
   else process.env.GATE_IB_PLATFORM = ORIGINAL_PLATFORM_GATE;
   if (ORIGINAL_DRIVE_GATE === undefined) delete process.env.GATE_DRIVE_TIME_CALIBRATION;

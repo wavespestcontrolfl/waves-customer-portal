@@ -58,7 +58,7 @@ const { MANAGED_AGENTS_OPS_TOOLS, executeManagedAgentsOpsTool } = require('../se
 const { JOB_HEALTH_TOOLS, executeJobHealthTool } = require('../services/intelligence-bar/job-health-tools');
 const { CLOSEOUT_TOOLS, executeCloseoutTool } = require('../services/intelligence-bar/closeout-tools');
 const { CALL_RESEARCH_TOOLS, executeCallResearchTool } = require('../services/intelligence-bar/call-research-tools');
-const { CUSTOMER_LIFECYCLE_TOOLS, executeCustomerLifecycleTool } = require('../services/intelligence-bar/customer-lifecycle-tools');
+const { CUSTOMER_LIFECYCLE_TOOLS, executeCustomerLifecycleTool, mergeCustomersEnabled } = require('../services/intelligence-bar/customer-lifecycle-tools');
 const { UI_GATED_WRITE_TOOL_NAMES, WRITE_TWO_STEP_TOOL_NAMES, CONFIRMED_ENDPOINT_WRITE_TOOL_NAMES } = require('../services/intelligence-bar/write-gates');
 const PendingActions = require('../services/intelligence-bar/pending-actions');
 const { isToolFailure, executionOutcome } = require('../services/intelligence-bar/outcomes');
@@ -1817,7 +1817,16 @@ The portal runs on Railway behind Cloudflare; errors report to Sentry; SMS/voice
 - You CANNOT restart, redeploy, purge caches, resolve issues, or change configuration — never claim otherwise. Point the operator to the relevant dashboard for any change.`;
 
 
+// Default-off capability gates applied to EVERY context's list in one place
+// (codex #4348 r14 P1): merge_customers is offered only while
+// GATE_IB_MERGE_CUSTOMERS is on. The executor refuses at execution time
+// too, so a forced call fails closed with the list.
 function getToolsForContext(context, isAdmin = false) {
+  const tools = toolsForContextUngated(context, isAdmin);
+  return mergeCustomersEnabled() ? tools : tools.filter(t => t.name !== 'merge_customers');
+}
+
+function toolsForContextUngated(context, isAdmin = false) {
   // Tech portal stays isolated — no base, no infra, tech-tools only.
   if (context === 'tech') {
     return TECH_TOOLS;

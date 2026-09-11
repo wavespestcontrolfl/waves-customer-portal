@@ -4899,6 +4899,69 @@ function stableStringify(value) {
 // preview reads it unlocked at card time, executeMerge recomputes it over
 // the locked rows and refuses on any difference (expectedEffectsFingerprint).
 // `winner` / `loser` are full customer rows (select *).
+// The loser-row state the merge DELIBERATELY never copies onto the winner
+// (BACKFILL_FIELDS excludes money/tier/stage; password_hash is never moved):
+// a positive monthly_rate, a membership tier, a live pipeline stage, a
+// portal login. Retiring the loser drops each of these silently — after the
+// merge every moved visit bills at the WINNER's rate — so the card states
+// both sides' values and pins them (codex #4348 r14 P1). null when the
+// loser carries nothing the winner would not keep anyway.
+function predictLoserStateDiscarded(winner, loser) {
+  const num = (v) => (v == null || v === '' || Number.isNaN(Number(v)) ? null : Number(v));
+  const tier = (row) => row.waveguard_tier ?? row.tier ?? null;
+  const out = {};
+  const loserRate = num(loser.monthly_rate);
+  if (loserRate > 0 && loserRate !== num(winner.monthly_rate)) {
+    out.monthly_rate = { loser: loserRate, winner: num(winner.monthly_rate) };
+  }
+  if (tier(loser) && tier(loser) !== tier(winner)) {
+    out.membership_tier = { loser: tier(loser), winner: tier(winner) };
+  }
+  if (loser.pipeline_stage && REAL_CUSTOMER_STAGES.has(loser.pipeline_stage) && loser.pipeline_stage !== winner.pipeline_stage) {
+    out.pipeline_stage = { loser: loser.pipeline_stage, winner: winner.pipeline_stage || null };
+  }
+  if (loser.password_hash) out.portal_login = { loser: true, winner: !!winner.password_hash };
+  return Object.keys(out).length ? out : null;
+}
+
+// The unique-key collisions the sweep will hit that the CURRENT rows make
+// predictable — each one runs its UNIQUE_COLLISION_HANDLERS entry, which
+// merges or deletes rows the journal cannot replay backwards, so the queue
+// undo refuses the merge (codex #4348 r14 P2). Read from the same rows the
+// executor sweeps: singleton pref rows on both sides, tags both records
+// carry, conversation threads on the same (channel, endpoint). Sorted so
+// the fingerprint is stable; a table that does not exist yet (42P01) is
+// simply not predicted.
+async function predictCollisionFolds(database, winnerId, loserId) {
+  const ids = [winnerId, loserId];
+  const details = {};
+  const read = async (table, columns) => {
+    try {
+      return await database(table).whereIn('customer_id', ids).select(...columns);
+    } catch (e) {
+      if (e && e.code === '42P01') return [];
+      throw e;
+    }
+  };
+  for (const table of ['notification_prefs', 'property_preferences']) {
+    const rows = await read(table, ['customer_id']);
+    const owners = new Set(rows.map((r) => String(r.customer_id)));
+    if (owners.has(String(winnerId)) && owners.has(String(loserId))) {
+      details[table] = 'both records have a row: the fields merge into the surviving row and the archived record\'s row is dropped';
+    }
+  }
+  const tagRows = await read('customer_tags', ['customer_id', 'tag']);
+  const winnerTags = new Set(tagRows.filter((r) => String(r.customer_id) === String(winnerId)).map((r) => r.tag));
+  const sharedTags = [...new Set(tagRows.filter((r) => String(r.customer_id) === String(loserId) && winnerTags.has(r.tag)).map((r) => r.tag))].sort();
+  if (sharedTags.length) details.customer_tags = { shared: sharedTags };
+  const convRows = await read('conversations', ['customer_id', 'channel', 'our_endpoint_id']);
+  const key = (r) => `${r.channel}\u0000${r.our_endpoint_id}`;
+  const winnerThreads = new Set(convRows.filter((r) => String(r.customer_id) === String(winnerId) && r.channel != null && r.our_endpoint_id != null).map(key));
+  const sharedThreads = [...new Set(convRows.filter((r) => String(r.customer_id) === String(loserId) && r.channel != null && r.our_endpoint_id != null && winnerThreads.has(key(r))).map((r) => `${r.channel}:${r.our_endpoint_id}`))].sort();
+  if (sharedThreads.length) details.conversations = { shared_threads: sharedThreads };
+  return { tables: Object.keys(details).sort(), details };
+}
+
 async function describeMergeEffects(database, winner, loser) {
   const { moving, referral } = await previewMergeEffects(database, winner.id, loser.id);
   // Non-FK rewrites (jsonb-embedded ids, trigger-id identities, address
@@ -4938,7 +5001,8 @@ async function describeMergeEffects(database, winner, loser) {
   // Collection cases landing under the winner: the executor's reconcile
   // can revoke surplus approvals — stated and pinned (state + version).
   const collection_cases = await previewCollectionCaseReconciliation(database, winner.id, loser.id);
-  const predictedCollisionHandlers = referral?.folded_into_winner_promoter ? ['referral_promoters'] : [];
+  const collisionFolds = await predictCollisionFolds(database, winner.id, loser.id);
+  const predictedCollisionHandlers = [...(referral?.folded_into_winner_promoter ? ['referral_promoters'] : []), ...collisionFolds.tables];
   const financial_effects = {
     account_credits_moved_to_winner: credits,
     billing_mode_adopted_from_loser: adoptsBillingMode ? loser.billing_mode : null,
@@ -4959,11 +5023,17 @@ async function describeMergeEffects(database, winner, loser) {
     note_appends: predictNoteAppends(winner, loser),
     combined_payment_sessions,
     collection_cases,
+    // The loser state the merge never copies (rate, tier, live stage,
+    // portal login) — both sides' values, pinned.
+    loser_state_discarded: predictLoserStateDiscarded(winner, loser),
     predicted_collision_handlers: predictedCollisionHandlers,
-    // Predicted from what can be read ahead (the referral fold); other
-    // unique-key collisions (tags, singleton prefs, conversations) are only
-    // discovered by the sweep itself, journaled as collision_handlers, and
-    // make the queue undo refuse — stated, never promised away.
+    predicted_collision_folds: collisionFolds.details,
+    // Predicted from what can be read ahead (the referral fold and every
+    // unique-key collision the current rows make deterministic — singleton
+    // prefs, shared tags, shared conversation threads); a collision that
+    // only appears from rows inserted after the card is still discovered by
+    // the sweep itself, journaled as collision_handlers, and makes the
+    // queue undo refuse — stated, never promised away.
     revertible_from_queue: predictedCollisionHandlers.length ? false : 'unless the sweep has to fold colliding rows (journaled; the undo then refuses)',
   };
   // Key-sorted at EVERY depth, not just the two top-level objects (codex
@@ -4999,6 +5069,8 @@ module.exports = {
   predictWinnerBackfills,
   deriveSavedCardStripeCustomer,
   predictSavedCardDemotions,
+  predictLoserStateDiscarded,
+  predictCollisionFolds,
   nonFkMergeRewrites,
   rowLevelMergeConflict,
   inheritedAutopayRestrictions,

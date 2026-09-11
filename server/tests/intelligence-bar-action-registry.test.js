@@ -106,6 +106,24 @@ test('restricted owner actions remain in their existing workflow and do not beco
 });
 
 
+test('merge_customers is allowed on the platform path only while GATE_IB_MERGE_CUSTOMERS is on (Codex r14 P1)', async () => {
+  const action = registry.actions.get('merge_customers');
+  expect(action).toBeTruthy();
+  const scope = { role: 'admin', context: 'customers' };
+  const original = process.env.GATE_IB_MERGE_CUSTOMERS;
+  try {
+    delete process.env.GATE_IB_MERGE_CUSTOMERS;
+    expect(registry.allowed(action, scope)).toBe(false);
+    expect(registry.initialTools('customers', scope).map(t => t.name)).not.toContain('merge_customers');
+    expect(await registry.execute('merge_customers', { winner_customer_id: '10000000-0000-4000-8000-000000000001', loser_customer_id: '10000000-0000-4000-8000-000000000002' }, { ...scope, actionContext: { confirmed: true } }))
+      .toMatchObject({ code: 'permission_denied' });
+    process.env.GATE_IB_MERGE_CUSTOMERS = 'true';
+    expect(registry.allowed(action, scope)).toBe(true);
+  } finally {
+    if (original === undefined) delete process.env.GATE_IB_MERGE_CUSTOMERS; else process.env.GATE_IB_MERGE_CUSTOMERS = original;
+  }
+});
+
 test('dedicated estimate cabinet excludes every unrelated write and admin discovery', async () => {
   const scope = { role: 'admin', context: 'agent_estimate' };
   const names = require('../services/intelligence-bar/agent-estimate-policy');

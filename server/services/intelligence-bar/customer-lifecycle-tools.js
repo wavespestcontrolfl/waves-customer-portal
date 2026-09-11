@@ -24,6 +24,19 @@
 
 const db = require('../../models/db');
 const logger = require('../logger');
+const { gateEnvValue } = require('../../config/feature-gates');
+
+// Default-off capability gate (codex #4348 r14 P1): merge_customers is an
+// irreversible admin write and must not go live in every admin context the
+// moment the code deploys. Call-time read (a flip needs no redeploy);
+// registered in config/feature-gates.js (`ibMergeCustomers`). Enforced in
+// THREE places so no path offers what another refuses: the legacy tool
+// list (routes/admin-intelligence-bar.js getToolsForContext), the platform
+// action registry (action-registry.js allowed), and the executor below —
+// so a forced /execute or /confirm-action call fails closed too.
+function mergeCustomersEnabled() {
+  return gateEnvValue('GATE_IB_MERGE_CUSTOMERS');
+}
 
 // The transferred columns executeMerge backfills between winner and loser
 // (customer-dedupe.js predictWinnerBackfills: stripe_customer_id/billing_mode/
@@ -40,12 +53,49 @@ const BILLING_CONTACT_COLUMNS = [
   'per_application_fee', 'account_credits',
   'autopay_paused_until', 'autopay_pause_reason', 'auto_apply_account_credit',
   'address_line1', 'address_line2', 'city', 'state', 'zip',
+  // The account state the merge never copies (codex #4348 r14 P1) — shown
+  // both-sided so the operator sees what the archived record carried.
+  'monthly_rate', 'waveguard_tier', 'pipeline_stage',
 ];
 
 function billingSnapshot(row) {
   const snapshot = {};
   for (const col of BILLING_CONTACT_COLUMNS) snapshot[col] = row[col] ?? null;
+  // Never the hash itself — only whether a portal login exists.
+  snapshot.has_portal_login = !!row.password_hash;
   return snapshot;
+}
+
+const money = (n) => (n == null ? 'none' : `$${Number(n).toFixed(2)}`);
+
+function discardedStateNote(discarded) {
+  if (!discarded) return '';
+  const parts = [];
+  if (discarded.monthly_rate) {
+    parts.push(`the monthly rate ${money(discarded.monthly_rate.loser)} (the surviving record's rate is ${money(discarded.monthly_rate.winner)} — every moved visit bills at the survivor's rate from now on)`);
+  }
+  if (discarded.membership_tier) {
+    parts.push(`the membership tier ${discarded.membership_tier.loser} (survivor: ${discarded.membership_tier.winner || 'none'})`);
+  }
+  if (discarded.pipeline_stage) {
+    parts.push(`the ${discarded.pipeline_stage.loser} pipeline stage (survivor: ${discarded.pipeline_stage.winner || 'none'})`);
+  }
+  if (discarded.portal_login) {
+    parts.push(discarded.portal_login.winner
+      ? 'its portal login (the survivor keeps its own)'
+      : 'its portal login (the survivor has none — the customer must be re-invited)');
+  }
+  return ` DISCARDED with the archived record — the merge never copies these onto the survivor: ${parts.join('; ')}.`;
+}
+
+function collisionFoldsNote(folds) {
+  if (!folds || !Object.keys(folds).length) return '';
+  const parts = Object.entries(folds).map(([table, detail]) => {
+    if (table === 'customer_tags') return `tags shared by both records (${detail.shared.join(', ')}) are dropped from the archived side`;
+    if (table === 'conversations') return `${detail.shared_threads.length} conversation thread(s) both records hold on the same channel (${detail.shared_threads.join(', ')}) merge into the survivor's thread`;
+    return `${table}: ${detail}`;
+  });
+  return ` Folds the undo cannot split apart: ${parts.join('; ')}.`;
 }
 
 function customerName(row) {
@@ -237,7 +287,7 @@ async function previewMergeCustomers(winnerId, loserId) {
     financial_effects,
     moving,
     effects_fingerprint: fingerprint,
-    note_to_operator: `${loserName} will be archived (soft-deleted) and folded into ${winnerName}: every appointment, service record, invoice, estimate, message, and every other row listed above repoints onto ${winnerName} in one transaction.${paymentSessionsNote(financial_effects.combined_payment_sessions)}${collectionCasesNote(financial_effects.collection_cases)}${savedCardDemotionsNote(financial_effects.saved_card_demotions)}${noteAppendsNote(financial_effects.note_appends)}${nonFkRewritesNote(moving.non_fk_rewrites)} The merge is journaled and reviewable from the duplicates queue afterward; it is revertible from there ${financial_effects.predicted_collision_handlers.length ? `EXCEPT that this merge folds ${financial_effects.predicted_collision_handlers.join(', ')} (colliding rows the undo cannot split apart — restore by hand from the journal snapshot)` : 'unless the sweep has to fold colliding rows (e.g. duplicate tags), which the journal records and the undo refuses'}. Nothing was changed — the operator confirms from the card.`,
+    note_to_operator: `${loserName} will be archived (soft-deleted) and folded into ${winnerName}: every appointment, service record, invoice, estimate, message, and every other row listed above repoints onto ${winnerName} in one transaction.${paymentSessionsNote(financial_effects.combined_payment_sessions)}${collectionCasesNote(financial_effects.collection_cases)}${savedCardDemotionsNote(financial_effects.saved_card_demotions)}${noteAppendsNote(financial_effects.note_appends)}${discardedStateNote(financial_effects.loser_state_discarded)}${nonFkRewritesNote(moving.non_fk_rewrites)}${collisionFoldsNote(financial_effects.predicted_collision_folds)} The merge is journaled and reviewable from the duplicates queue afterward; it is revertible from there ${financial_effects.predicted_collision_handlers.length ? `EXCEPT that this merge folds ${financial_effects.predicted_collision_handlers.join(', ')} (colliding rows the undo cannot split apart — restore by hand from the journal snapshot)` : 'unless the sweep has to fold colliding rows (e.g. duplicate tags), which the journal records and the undo refuses'}. Nothing was changed — the operator confirms from the card.`,
   };
 }
 
@@ -296,6 +346,9 @@ async function commitMergeCustomers(winnerId, loserId, actionContext, approvedVe
 }
 
 async function mergeCustomers(input, actionContext = {}) {
+  if (!mergeCustomersEnabled()) {
+    return { error: 'Merging customers from the Intelligence Bar is not enabled (GATE_IB_MERGE_CUSTOMERS) — use the duplicates queue in the admin portal.', code: 'gate_off' };
+  }
   // Postgres accepts an uppercase UUID and returns the row's canonical
   // lowercase id; the pair is matched by string, so normalize at the boundary.
   const uuid = (v) => (v == null ? v : String(v).trim().toLowerCase());
@@ -358,6 +411,7 @@ async function executeCustomerLifecycleTool(toolName, input, actionContext = {})
 
 module.exports = {
   CUSTOMER_LIFECYCLE_TOOLS,
+  mergeCustomersEnabled,
   executeCustomerLifecycleTool,
   // exported for tests
   _test: { customerName },

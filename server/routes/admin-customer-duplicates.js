@@ -153,6 +153,15 @@ async function handleMerge(req, res, { linkAsProperty }) {
     logger.error(`[admin-customer-duplicates] merge failed: ${err.message}`);
     // "refresh the queue" covers the executor's under-lock rechecks (phone no
     // longer shared, pair now red) — stale-queue races are conflicts, not 500s.
+    // The executor's locked re-decision (pair dismissed / left the queue /
+    // rows moved between the gate above and the transaction) is an expected
+    // stale-queue race, not a server failure: 409 like the gate's own
+    // refusals, 503 when the dismissal verdicts could not be read (codex
+    // #4348 r14 P2).
+    if (err.previewChanged === true) {
+      const status = /\(dismissals_unreadable\)/.test(err.message) ? 503 : 409;
+      return res.status(status).json({ error: err.message });
+    }
     const conflict = /Stripe profile|third-party payers|billing modes|per-application fees|multi-property account|not found|deleted customer|refresh the queue/.test(err.message);
     res.status(conflict ? 409 : 500).json({ error: err.message });
   }
