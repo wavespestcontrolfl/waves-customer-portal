@@ -211,9 +211,17 @@ Known primary/secondary/service-contact numbers, reactions, empty bodies,
 standalone carrier commands, and the AI assistant line bypass the classifier.
 The unified inbox message is durably saved before screening. Failed unified
 saves or relationship lookups bypass screening. Model failures record a failed
-non-solicitation verdict. Natural-language consent never waits on the model;
-shadow can record deterministic pitch evidence for vendor footers. The
-3.5-second model budget uses the shared dispatcher.
+non-solicitation verdict. Sender relationship (compliance eligibility) is
+resolved once, up front, before any consent handling or screening — a
+compliance-eligible sender's consent (keyword or natural-language, on the
+full untouched text) is honored before the classifier and never waits on the
+model; a non-eligible sender's opt-out-shaped phrasing is not treated as
+consent at all and reaches the classifier like any other message (only a
+standalone carrier command such as a bare STOP bypasses the model for them
+too — natural-language phrasing and a footer never do). Shadow can still
+record deterministic pitch evidence via the regex fast path for any
+solicitation-shaped text, consent-related or not. The 3.5-second model
+budget uses the shared dispatcher.
 Verdicts (`solicitation`, `confidence`, `method`, `version`, `mode`, `enforced`)
 are stored under `metadata.spam_verdict` on unified messages and ordinary or
 natural-language opt-out `sms_log` rows. Read state, opt-out suppression,
@@ -221,13 +229,16 @@ TwiML replies, notifications and estimator routing retain their existing
 behavior in shadow mode. Enforced pitches remain in both message stores,
 are marked read when the verdict is attached, and return empty TwiML before
 lead creation, quoting, alerts or
-auto-replies. Genuine consent commands (including natural-language opt-outs
-and wrong-number reports) bypass enforcement and retain suppression and
-their existing responses. Explicit vendor reply instructions such as
-`Reply NO if you need me to stop texting` do not count as the sender's
-own opt-out when enforcing; a separate opt-out in the same message still
-wins. The unanswered digest omits a thread only when its latest eligible
-inbound has an enforced verdict, so a later genuine message resurfaces.
+auto-replies. A compliance-eligible sender's genuine consent command
+(including a natural-language opt-out or a wrong-number report) bypasses
+enforcement — decided before the classifier ever runs — and retains
+suppression and its existing responses. A non-eligible sender's opt-out-
+shaped phrasing, including a vendor's own reply-instruction footer such as
+`Reply NO if you need me to stop texting`, is never treated as the sender's
+own opt-out: only the classifier's model verdict governs enforcement for
+them, and an enforced verdict never creates a suppression row. The
+unanswered digest omits a thread only when its latest eligible inbound has
+an enforced verdict, so a later genuine message resurfaces.
 Verdict attachment merges metadata without replacing unrelated fields. Failed
 verdict attachment bypasses enforcement. Provider request/auth contracts are unchanged. The SMS operational extension
 runs after acknowledgment under
