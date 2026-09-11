@@ -36,6 +36,7 @@
 const express = require('express');
 const rateLimit = require('express-rate-limit');
 const logger = require('../services/logger');
+const db = require('../models/db');
 const NotificationService = require('../services/notification-service');
 const { safeEqual } = require('../middleware/hermes-auth');
 const { notFoundBody } = require('../middleware/errors');
@@ -94,6 +95,28 @@ function ingestAuth(req, res, next) {
 
 function isPlainObject(v) {
   return !!v && typeof v === 'object' && !Array.isArray(v);
+}
+
+// The observation already stored for this dedupe key, if a row still stands
+// inside the rolling window. Mirrors notification-service.js's own dedupe
+// probe (recipient_type + metadata->>'dedupeKey' + the window, .first()
+// without ordering) so it reads the row notifyAdmin will find.
+async function standingObservation(trx, dedupeKey) {
+  const row = await trx('notifications')
+    .where({ recipient_type: 'admin' })
+    .whereRaw("metadata->>'dedupeKey' = ?", [dedupeKey])
+    .where('created_at', '>', trx.raw("NOW() - (? * interval '1 millisecond')", [DEDUPE_WINDOW_MS]))
+    .first('created_at', trx.raw("metadata->>'observedAt' as observed_at"));
+  if (!row) return null;
+  return row.observed_at || row.created_at || null;
+}
+
+// The later of a stored observation and the incoming one, as an ISO string.
+// An unparsable or absent stored value never wins.
+function laterOf(stored, incoming) {
+  const storedMs = stored === null || stored === undefined ? NaN : new Date(stored).getTime();
+  if (!Number.isFinite(storedMs)) return incoming;
+  return storedMs > Date.parse(incoming) ? new Date(storedMs).toISOString() : incoming;
 }
 
 // Returns { error } or { value } — pure, so the tests can pin every branch.
@@ -160,25 +183,42 @@ router.post('/', darkUnlessConfigured, ingestAuth, async (req, res) => {
 
   const { key, kind, subject, text, link, metadata, observedAt } = value;
   const title = `${kind}: ${subject}`;
+  const dedupeKey = `${SOURCE}:${key}`;
   let row = null;
   try {
-    // Same row shape as services/ops-digest.js deliverOpsDigest (opsKey +
-    // subject in metadata, bell:true past the bell policy — this row is the
-    // only copy once the email is skipped), plus the rolling-day dedupe.
-    row = await NotificationService.notifyAdmin(CATEGORY, title, text, {
-      link,
-      bell: true,
-      dedupeKey: `${SOURCE}:${key}`,
-      dedupeWindowMs: DEDUPE_WINDOW_MS,
-      // A recurrence inside the window (a NEW run re-raising the key) must
-      // refresh the standing row — above all its observedAt, or a later
-      // /resolve from an older clean run would compare against the stale
-      // observation and clear a live failure (codex P1 r2 on #4397).
-      // dedupeVersion = observedAt: the same run re-posting (run.sh retry)
-      // is a plain dedupe; a later run's recurrence rewrites and re-bells.
-      refreshOnDedupe: true,
-      dedupeVersion: observedAt,
-      metadata: { ...metadata, opsKey: key, subject: title, kind, source: SOURCE, observedAt },
+    // ONE transaction under the dedupe's advisory lock — the same lock
+    // /resolve takes, and the one notifyAdmin takes on the caller's trx
+    // (pg advisory xact locks are re-entrant in a transaction). Taking it
+    // FIRST lets the standing observation be read before notifyAdmin's
+    // merge can overwrite it, and keeps a resolve from observing any
+    // in-between state.
+    row = await db.transaction(async (trx) => {
+      await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`admin:${dedupeKey}`]);
+      // MONOTONIC observation, decided BEFORE the write. notifyAdmin's
+      // refresh merge takes the incoming metadata verbatim (pinned by
+      // notification-dedupe-refresh-semantics.test.js), so a delayed
+      // re-post from an EARLIER run would otherwise lower observedAt below
+      // a recurrence that already raised it — and a clean run landing in
+      // between would retire a live finding. Clamping AFTER the write
+      // cannot help: read-your-own-write makes it compare the value
+      // against itself (pre-push P1 ×3). The standing probe mirrors
+      // notification-service's own dedupe probe so it reads the row that
+      // call will find.
+      const standing = await standingObservation(trx, dedupeKey);
+      const effectiveObservedAt = laterOf(standing, observedAt);
+      // dedupeVersion = the EFFECTIVE observation: an older re-post leaves
+      // it unchanged (plain dedupe, no rewrite), a later run's recurrence
+      // changes it and so rewrites the standing row and re-bells it.
+      return NotificationService.notifyAdmin(CATEGORY, title, text, {
+        link,
+        bell: true,
+        dedupeKey,
+        dedupeWindowMs: DEDUPE_WINDOW_MS,
+        refreshOnDedupe: true,
+        dedupeVersion: effectiveObservedAt,
+        metadata: { ...metadata, opsKey: key, subject: title, kind, source: SOURCE, observedAt: effectiveObservedAt },
+        trx,
+      });
     });
   } catch (err) {
     logger.error(`[ops-digest-ingest] ${key}: bell write threw: ${err.message}`);
@@ -236,4 +276,4 @@ const ingestPreParsers = [noStore, darkUnlessConfigured, ingestLimiter, ingestAu
 
 module.exports = router;
 module.exports.ingestPreParsers = ingestPreParsers;
-module.exports._private = { validateDigest, ingestAuth, darkUnlessConfigured, ingestBodyErrorHandler, genericNotFound, observedAtFrom, KINDS, RESERVED_METADATA_KEYS };
+module.exports._private = { validateDigest, ingestAuth, darkUnlessConfigured, ingestBodyErrorHandler, genericNotFound, observedAtFrom, standingObservation, laterOf, KINDS, RESERVED_METADATA_KEYS };

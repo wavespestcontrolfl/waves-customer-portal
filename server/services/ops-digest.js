@@ -152,10 +152,18 @@ async function deliverOpsDigest({ key, subject, text, html, link = null, metadat
 // is being resolved" nor "fresh failure resolved by the clean run" (codex
 // P1 r6 on #4392). Without it the update runs on the shared connection.
 // `notAfter`: the clean observation's timestamp. Only rows whose own
-// observation (metadata.observedAt, else created_at) is not newer than it
-// retire — the advisory lock serializes requests, not observations, so a
-// later failure whose ingest won the lock first must survive an earlier
-// clean run's resolve (codex P1 r7 on #4392).
+// observation is not newer than it retire — the advisory lock serializes
+// requests, not observations, so a later failure whose ingest won the lock
+// first must survive an earlier clean run's resolve (codex P1 r7 on #4392).
+// The row's observation is GREATEST(metadata.observedAt, created_at).
+// observedAt is kept MONOTONIC by the ingest route: under the same advisory
+// lock, it reads the standing observation BEFORE writing and stores the
+// later of the two — necessary because notifyAdmin's refreshOnDedupe merge
+// takes the INCOMING metadata verbatim (pinned by
+// notification-dedupe-refresh-semantics.test.js), so a delayed re-post from
+// an earlier run would otherwise lower it. created_at stays in the
+// comparison as a floor for rows written by any other path, so the cutoff
+// fails safe (a bell stays up) rather than clearing a live failure.
 // `source` scoping: a string matches rows that seam wrote (the ingest route
 // passes 'ops-crons'); `null` matches rows with NO source — the in-process
 // senders, which never set one (ops-digest-fall-off.js); `undefined`
@@ -163,8 +171,7 @@ async function deliverOpsDigest({ key, subject, text, html, link = null, metadat
 // `alsoRetire: { category, field }` — a companion admin bell the same sender
 // raises beside its digest (the evals' eval_regression rows, keyed by
 // metadata.evalKey). It retires in the same call so a scheduled pass never
-// clears the digest and leaves the primary bell standing (codex P1 r2 on
-// #4397). Unread rows only: the owner's own read stands.
+// clears the digest and leaves the primary bell standing. Unread rows only.
 async function resolveOpsDigest({ key, source, resolvedBy = 'ops-crons', lockKey = null, notAfter = null, alsoRetire = null } = {}) {
   const opsKey = String(key || '').trim();
   if (!opsKey) return 0;
@@ -177,7 +184,7 @@ async function resolveOpsDigest({ key, source, resolvedBy = 'ops-crons', lockKey
       .whereRaw("metadata->>'opsKey' = ?", [opsKey]);
     if (source === null) q = q.whereRaw("metadata->>'source' IS NULL");
     else if (source) q = q.whereRaw("metadata->>'source' = ?", [String(source)]);
-    if (notAfter) q = q.whereRaw("COALESCE(NULLIF(metadata->>'observedAt', '')::timestamptz, created_at) <= ?::timestamptz", [notAfter]);
+    if (notAfter) q = q.whereRaw("GREATEST(COALESCE(NULLIF(metadata->>'observedAt', '')::timestamptz, created_at), created_at) <= ?::timestamptz", [notAfter]);
     return q.update({
       read_at: conn.raw('COALESCE(read_at, NOW())'),
       // Drop the dedupeKey with the resolve stamp: a resolved row must never
