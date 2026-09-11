@@ -4448,8 +4448,8 @@
         {
           "check": "spoken_never_matches",
           "value": [
-            "(?<!\\b(?:not|never|cannot|unable|\\w+n['’]t|whether|if|no|nothing|anything)[\\s,]+(?:[\\w'’]+[\\s,]+){0,5})\\b(?:next|your next|the next|your)\\s+(?:visit|one|service|treatment|appointment)(?:['’]s|\\s+(?:is|will be|would be|comes))\\s+(?:free|on us|at no charge|no charge)\\b",
-            "(?<!\\b(?:not|never|cannot|unable|\\w+n['’]t|whether|if|no|nothing|anything)[\\s,]+(?:[\\w'’]+[\\s,]+){0,5})\\b(?:it|that|this)(?:['’]s|\\s+(?:is|will be|would be))\\s+(?:free|on us|at no charge|no charge)\\b"
+            "(?<!\\b(?:not|never|cannot|unable|won['’]t|will not|\\w+n['’]t)[\\s,]+(?:[\\w'’]+[\\s,]+){0,3}(?:say|saying|said|tell|telling|told|confirm|confirming|promise|promising|guarantee|guaranteeing|claim|claiming|state|stating|know|see|seeing|find|comment|offer|offering|provide|providing|flag|flagging|report|reporting)[\\s,]+(?:[\\w'’]+[\\s,]+){0,4})\\b(?:next|your next|the next|your)\\s+(?:visit|one|service|treatment|appointment)(?:['’]s|\\s+(?:is|will be|would be|comes))\\s+(?:free|on us|at no charge|no charge)\\b",
+            "(?<!\\b(?:not|never|cannot|unable|won['’]t|will not|\\w+n['’]t)[\\s,]+(?:[\\w'’]+[\\s,]+){0,3}(?:say|saying|said|tell|telling|told|confirm|confirming|promise|promising|guarantee|guaranteeing|claim|claiming|state|stating|know|see|seeing|find|comment|offer|offering|provide|providing|flag|flagging|report|reporting)[\\s,]+(?:[\\w'’]+[\\s,]+){0,4})\\b(?:it|that|this)(?:['’]s|\\s+(?:is|will be|would be))\\s+(?:free|on us|at no charge|no charge)\\b"
           ],
           "severity": "critical"
         },
