@@ -1326,7 +1326,7 @@ function isEmptyValue(v) {
  *                 BOTH rows carry a Stripe customer (that must be resolved in
  *                 Stripe first — two payment profiles cannot be repointed).
  */
-async function executeMerge({ winnerId, loserId, performedBy, performedById = null, mode = 'manual', evidence = {}, expectedVersions = null, expectedEffectsFingerprint = null, requireQueueEligibility = false }) {
+async function executeMerge({ winnerId, loserId, performedBy, performedById = null, mode = 'manual', evidence = {}, expectedVersions = null, expectedEffectsFingerprint = null, requireQueueEligibility = false, allowAddressConflict = false }) {
   if (!winnerId || !loserId || winnerId === loserId) {
     throw new Error('executeMerge: winnerId and loserId must be distinct');
   }
@@ -1439,10 +1439,17 @@ async function executeMerge({ winnerId, loserId, performedBy, performedById = nu
     // writers take — so a "not a duplicate" verdict or a queue regrouping
     // landing between the card and this point refuses the merge instead of
     // racing past it.
+    // `allowAddressConflict` is the ONE admitted exception, mirrored from the
+    // admin route's own gate: /link-as-property exists precisely to merge an
+    // address_conflict pair (the loser's street survives as a property row),
+    // so that caller passes it through and this locked re-check honours it;
+    // every other refusal code still refuses (pre-push Claude P1: without
+    // this the route let the pair in and the executor refused it 100%).
     if (requireQueueEligibility) {
       await acquirePairAdjudicationLock(trx, winnerId, loserId);
       const eligibility = await duplicatePairEligibility(winnerId, loserId, trx);
-      if (!eligibility.eligible) {
+      const admitted = eligibility.eligible || (allowAddressConflict && eligibility.code === 'address_conflict');
+      if (!admitted) {
         const err = new Error(`executeMerge: the pair is no longer mergeable (${eligibility.code}) — review a fresh proposal`);
         err.previewChanged = true;
         throw err;

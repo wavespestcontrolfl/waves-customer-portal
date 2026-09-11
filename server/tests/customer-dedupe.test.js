@@ -624,7 +624,7 @@ describe('executeMerge', () => {
   const WINNER = 'bbbbbbbb-0000-0000-0000-000000000001';
   const LOSER = 'bbbbbbbb-0000-0000-0000-000000000002';
 
-  function buildTrx({ winner, loser, fkRows, updates = {}, journalId = 'j1', prefsConflict = false, sessions = null }) {
+  function buildTrx({ winner, loser, fkRows, updates = {}, journalId = 'j1', prefsConflict = false, sessions = null, queueCustomers = null }) {
     // `events` is an ORDERED log (the stamped-session reads and every repoint
     // update) so a test can assert what the executor does before the sweep.
     const state = { repointUpdates: [], retired: null, backfilled: null, journal: null, prefsDeleted: false, prefsMerged: null, events: [] };
@@ -641,7 +641,9 @@ describe('executeMerge', () => {
           state.backfilled = payload;
           return 1;
         }
-        return [];
+        // The unlocked scan behind requireQueueEligibility (findDuplicateGroups):
+        // tests that need a live queue plant its rows here; default = empty.
+        return queueCustomers || [];
       }
       if (table === 'customer_merge_journal') {
         state.journal = q.args('insert')[0];
@@ -858,6 +860,25 @@ describe('executeMerge', () => {
     const lockCall = trx.raw.mock.calls.find(([sql]) => /pg_advisory_xact_lock\(hashtext\(\?\)\)/.test(String(sql)));
     expect(lockCall).toBeTruthy();
     expect(lockCall[1]).toEqual([`customer-duplicate-pair:${[WINNER, LOSER].sort().join(':')}`]);
+  });
+
+  it('requireQueueEligibility + allowAddressConflict: an address_conflict pair merges ONLY when the caller admits it (link-as-property), and still refuses without the flag', async () => {
+    // A live yellow candidate whose only refusal is the loser's different
+    // street — exactly the pair /link-as-property exists for. The winner's
+    // Stripe profile pins it as the cluster winner in the scan.
+    const winner = { id: WINNER, first_name: 'Synthetic', last_name: 'Winner', phone: '+19995550003', address_line1: '100 Test Street', zip: '34207', stripe_customer_id: 'cus_winner', pipeline_stage: 'active_customer', created_at: '2026-07-08' };
+    const loser = { id: LOSER, first_name: 'Synthetic', last_name: null, phone: '9995550003', address_line1: '999 Different St', zip: '34211', pipeline_stage: 'new_lead', created_at: '2026-07-09' };
+    const build = () => buildTrx({ winner, loser, fkRows: FK_ROWS, queueCustomers: [winner, loser] });
+    db.transaction.mockImplementation(async (fn) => fn(build().trx));
+    await expect(dedupe.executeMerge({ winnerId: WINNER, loserId: LOSER, performedBy: 'test', requireQueueEligibility: true }))
+      .rejects.toMatchObject({ previewChanged: true, message: expect.stringMatching(/no longer mergeable \(address_conflict\)/) });
+    db.transaction.mockImplementation(async (fn) => fn(build().trx));
+    await expect(dedupe.executeMerge({ winnerId: WINNER, loserId: LOSER, performedBy: 'test', requireQueueEligibility: true, allowAddressConflict: true }))
+      .resolves.toBeTruthy();
+    // The flag admits address_conflict and nothing else: an empty queue is still not_in_queue.
+    db.transaction.mockImplementation(async (fn) => fn(buildTrx({ winner, loser, fkRows: FK_ROWS }).trx));
+    await expect(dedupe.executeMerge({ winnerId: WINNER, loserId: LOSER, performedBy: 'test', requireQueueEligibility: true, allowAddressConflict: true }))
+      .rejects.toMatchObject({ previewChanged: true, message: expect.stringMatching(/no longer mergeable \(not_in_queue\)/) });
   });
 
   it('refuses when both rows have Stripe profiles', async () => {

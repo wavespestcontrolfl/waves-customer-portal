@@ -79,6 +79,10 @@ describe('merge eligibility gate', () => {
     const ok = await post('/link-as-property', body);
     expect(ok.status).toBe(200);
     expect(mockExecuteMerge).toHaveBeenCalledTimes(1);
+    // The executor re-decides eligibility inside its transaction; it must be
+    // told this caller admits address_conflict or it refuses what the gate
+    // above just let through (pre-push Claude P1).
+    expect(mockExecuteMerge).toHaveBeenCalledWith(expect.objectContaining({ requireQueueEligibility: true, allowAddressConflict: true }));
 
     mockEligibility.mockResolvedValueOnce({ eligible: false, code: 'dismissals_unreadable', reason: 'Operator dismissal verdicts could not be read', candidate: null });
     const refused = await post('/link-as-property', body);
@@ -90,7 +94,7 @@ describe('merge eligibility gate', () => {
     mockEligibility.mockResolvedValueOnce({ eligible: true, code: 'eligible', reason: null, candidate: { tier: 'green', reasons: [] } });
     const res = await post('/merge', body);
     expect(res.status).toBe(200);
-    expect(mockExecuteMerge).toHaveBeenCalledWith(expect.objectContaining({ winnerId: WINNER, loserId: LOSER, mode: 'manual', performedBy: 'admin:Admin', performedById: 'admin-1' }));
+    expect(mockExecuteMerge).toHaveBeenCalledWith(expect.objectContaining({ winnerId: WINNER, loserId: LOSER, mode: 'manual', performedBy: 'admin:Admin', performedById: 'admin-1', requireQueueEligibility: true, allowAddressConflict: false }));
   });
 });
 

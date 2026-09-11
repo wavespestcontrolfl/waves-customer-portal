@@ -102,6 +102,10 @@ async function handleMerge(req, res, { linkAsProperty }) {
       // dismissal writers take — so this admin path gets the serialization
       // the Intelligence Bar path already had (pre-push audit P1).
       requireQueueEligibility: true,
+      // The locked re-check must admit the same exception the gate above
+      // does, or every link-as-property merge on an address-conflicted pair
+      // passes the gate and then refuses inside the transaction.
+      allowAddressConflict: linkAsProperty,
     });
     let propertyLinked = false;
     if (linkAsProperty) {
