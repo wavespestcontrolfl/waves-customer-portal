@@ -9,7 +9,7 @@ const ok = body => ({ ok: true, json: async () => body });
 const eq = { id: 'v1', name: 'Service truck', category: 'vehicle', status: 'active', condition: 'good', assigned_tech_name: 'Sam', current_miles: 1000 };
 const detail = {
  equipment: eq,
- schedules: [{ id: 's1', task_name: 'Oil change', interval_miles: 5000, next_due_at: '2026-10-01T00:00:00Z', priority: 'normal', estimated_cost: 89.5 }],
+ schedules: [{ id: 's1', task_name: 'Oil change', interval_miles: 5000, next_due_at: '2026-10-01T00:00:00Z', priority: 'high', estimated_cost: 89.5 }],
  recentRecords: [{ id: 'r1', performed_at: '2026-09-01T12:00:00Z', task_name: 'Tire rotation', maintenance_type: 'scheduled', total_cost: 60 }],
  costOfOwnership: {}
 };
@@ -43,6 +43,7 @@ it('names the card opener from its visible details and the expanded state', asyn
  expect(opener).toHaveAccessibleName(/Collapse/);
  expect(opener).toHaveAccessibleName(/Service truck/);
  expect(opener).toHaveAccessibleName(/Assigned: Sam/);
+ expect(opener).toHaveAccessibleName(/vehicle/); // category icon keeps the emoji's accessible text
  expect(opener).toHaveAttribute('aria-expanded', 'true');
  fireEvent.click(opener);
  expect(opener).toHaveAccessibleName(/Expand/);
@@ -50,6 +51,7 @@ it('names the card opener from its visible details and the expanded state', asyn
 });
 it('keeps date and amount cells on one line in the detail tables', async () => {
  await expandCard();
+ expect(screen.getByText('high').className).toContain('text-alert-fg'); // priority keeps its urgency tone
  const nowrapCells = text => screen.getByText(text).closest('tr').querySelectorAll('td.whitespace-nowrap').length;
  expect(nowrapCells('Oil change')).toBe(2); // next due + estimated cost
  expect(nowrapCells('Tire rotation')).toBe(2); // performed date + total cost

@@ -88,7 +88,7 @@ function EquipmentCategoryIcon({
   size = 16
 }) {
   const Icon = CAT_ICONS[category] || Wrench;
-  return <Icon size={size} aria-hidden="true" className="inline-block shrink-0 align-middle" />;
+  return <Icon size={size} role="img" aria-label={category || "equipment"} className="inline-block shrink-0 align-middle" />;
 }
 const FLEET_SECTIONS = [{
   key: "fleet",
@@ -747,7 +747,7 @@ function EquipmentCard({
                           {s.next_due_hours ? ` / ${s.next_due_hours} hrs` : ""}
                         </TD>
                         <TD>
-                          <Badge tone="neutral">{s.priority}</Badge>
+                          <Badge tone={SEVERITY_TONES[s.priority] || "neutral"}>{s.priority}</Badge>
                         </TD>
                         <TD className="whitespace-nowrap" style={{
                     color: "#27272A",
