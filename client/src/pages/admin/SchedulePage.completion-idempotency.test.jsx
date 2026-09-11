@@ -1,4 +1,6 @@
 import { describe, expect, it } from "vitest";
+import { readFileSync } from "node:fs";
+import { parse } from "@babel/parser";
 
 import {
   CROSS_KEY_COMPLETED_MESSAGE,
@@ -374,11 +376,37 @@ describe("completion status-poll plan", () => {
 // one of them, not just the original invoice-mint code (codex P1 #3745 r3 —
 // service_report_token_mint_failed fell to the generic error path).
 describe("completionResumeOwedError", () => {
+  it("covers every server 503 carrying a committed service record", () => {
+    const source = readFileSync(new URL('../../../../server/services/complete-scheduled-service.js', import.meta.url), 'utf8');
+    const ast = parse(source, { sourceType: 'script' });
+    const codes = new Set();
+    const property = (node, name) => node?.properties?.find((entry) => entry.key?.name === name)?.value;
+    function visit(node) {
+      if (!node || typeof node !== 'object') return;
+      if (node.type === 'ObjectExpression' && property(node, 'status')?.value === 503) {
+        const body = property(node, 'body');
+        if (property(body, 'serviceRecordId')) codes.add(property(body, 'code')?.value);
+      }
+      Object.values(node).forEach((value) => {
+        if (Array.isArray(value)) value.forEach(visit);
+        else if (value && typeof value === 'object') visit(value);
+      });
+    }
+    visit(ast);
+    expect(codes.size).toBeGreaterThan(0);
+    for (const code of codes) expect(completionResumeOwedError({ status: 503, code }), code).toBe(true);
+  });
+
   it("recognises every committed-but-not-finalized 503 the route emits", () => {
     for (const code of [
       "backfill_invoice_mint_failed",
       "service_report_token_mint_failed",
       "completion_sms_send_failed",
+      "terminal_invoice_lookup_failed",
+      "historic_setup_fee_alert_failed",
+      "unminted_setup_fee_lookup_failed",
+      "terminal_invoice_manual_billing_alert_failed",
+      "unminted_setup_fee_alert_failed",
     ]) {
       expect(completionResumeOwedError({ status: 503, code })).toBe(true);
     }

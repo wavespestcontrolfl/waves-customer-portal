@@ -271,23 +271,32 @@ router.get('/commitments/sms', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+// The one commitments feed for every staff view, callback cards included:
+// `kind=callback` narrows it to the callback lane and the rows carry their
+// owner projection (callback-cards.decorateCallbackRows).
 router.get('/commitments/open', async (req, res, next) => {
   try {
-    const { party, customer_id: customerId, lead_id: leadId, limit, offset, hints } = req.query;
+    const { party, kind, customer_id: customerId, lead_id: leadId, limit, offset, hints } = req.query;
     if (party && party !== 'waves' && party !== 'customer') return res.status(400).json({ error: 'party must be waves or customer' });
     if (customerId && !UUID_RE.test(String(customerId))) return res.status(400).json({ error: 'customer_id must be a UUID' });
     if (leadId && !UUID_RE.test(String(leadId))) return res.status(400).json({ error: 'lead_id must be a UUID' });
     if (offset !== undefined && !/^\d{1,9}$/.test(String(offset))) return res.status(400).json({ error: 'offset must be a non-negative integer' });
-    const { listOpenCommitments, refreshFulfillment, OVERDUE_IMPLICIT_DAYS, OVERDUE_IMPLICIT_ESTIMATE_HOURS } = require('../services/call-commitments');
+    const { listOpenCommitments, refreshFulfillment, COMMITMENT_KINDS, OVERDUE_IMPLICIT_DAYS, OVERDUE_IMPLICIT_ESTIMATE_HOURS } = require('../services/call-commitments');
+    if (kind && !COMMITMENT_KINDS.includes(String(kind))) return res.status(400).json({ error: 'kind must be a commitment kind' });
     // Pages: the client walks the queue with offset; the read asks for ONE
     // row past the page so the response can say has_more instead of a
     // 200-row page passing as the whole worklist (Codex #3725 r17 P2).
     const pageLimit = Math.max(1, Math.min(200, Number(limit) || 100));
     const pageOffset = Number(offset) || 0;
-    const opts = { party: party || null, customerId: customerId || null, leadId: leadId || null, limit: pageLimit + 1, offset: pageOffset, includeHints: hints !== '0' };
+    const opts = { party: party || null, kind: kind || null, customerId: customerId || null, leadId: leadId || null, limit: pageLimit + 1, offset: pageOffset, includeHints: hints !== '0', prepare: true };
     const { isEnabled } = require('../config/feature-gates');
     const enabled = isEnabled('callCommitments');
     let rows = await listOpenCommitments(db, opts);
+    // Undated callbacks are prepared by the first read only: a second
+    // preparation within the request could staff deadlines that reorder
+    // rows ahead of the page already selected, and a later offset would
+    // then skip or repeat callbacks.
+    const reread = { ...opts, prepare: false };
     // Refresh at most REFRESH_CALLS_PER_READ distinct calls per read — cheap
     // indexed lookups, rotating window across reads (see above) —
     // then re-list whenever ANY fulfillment field moved (a row kept, a
@@ -304,22 +313,25 @@ router.get('/commitments/open', async (req, res, next) => {
       // the unfiltered page at the same offset is a different logical page,
       // so a call the operator is looking at could otherwise never be
       // refreshed (Codex #3725 r18 P2).
-      const candidates = opts.includeHints ? rows : [...rows, ...await listOpenCommitments(db, { ...opts, includeHints: true })];
+      const candidates = opts.includeHints ? rows : [...rows, ...await listOpenCommitments(db, { ...reread, includeHints: true })];
       const callIds = rotatingRefreshWindow([...new Set(candidates.map((r) => r.call_log_id))]);
       let changed = 0;
       for (const id of callIds) {
         const r = await refreshFulfillment(db, id).catch(() => ({}));
         changed += (r.fulfilled || 0) + (r.hinted || 0) + (r.cleared || 0);
       }
-      if (changed > 0) rows = await listOpenCommitments(db, opts);
+      if (changed > 0) rows = await listOpenCommitments(db, reread);
     }
     const hasMore = rows.length > pageLimit;
+    const cards = require('../services/callback-cards');
     res.json({
-      commitments: hasMore ? rows.slice(0, pageLimit) : rows,
+      commitments: await cards.decorateCallbackRows(db, hasMore ? rows.slice(0, pageLimit) : rows),
       has_more: hasMore,
       next_offset: hasMore ? pageOffset + pageLimit : null,
       overdue_implicit_days: OVERDUE_IMPLICIT_DAYS,
       overdue_implicit_estimate_hours: OVERDUE_IMPLICIT_ESTIMATE_HOURS,
+      callbacks_enabled: cards.enabled(),
+      actor_id: req.technicianId,
       enabled,
     });
   } catch (err) { next(err); }
@@ -359,7 +371,7 @@ router.patch('/commitments/:id', async (req, res, next) => {
     if (!isEnabled('callCommitments') && !smsCommitmentsEnabled()) {
       return res.status(409).json({ error: 'Commitments are disabled', code: 'COMMITMENTS_DISABLED' });
     }
-    const existing = await db('call_commitments').where({ id: req.params.id }).first('call_log_id', 'sms_log_id');
+    const existing = await db('call_commitments').where({ id: req.params.id }).first('call_log_id', 'sms_log_id', 'kind', 'party');
     if (!existing) return res.status(404).json({ error: 'Commitment not found' });
     if (existing.sms_log_id) {
       if (!UUID_RE.test(String(req.body?.customer_id || ''))) return res.status(400).json({ error: 'customer_id must be a UUID' });
@@ -369,6 +381,14 @@ router.patch('/commitments/:id', async (req, res, next) => {
       return res.json({ commitment: row });
     }
     if (!isEnabled('callCommitments')) return res.status(409).json({ error: 'Call commitments are disabled', code: 'COMMITMENTS_DISABLED' });
+    const callbacks = require('../services/callback-cards');
+    if (callbacks.enabled() && existing.kind === 'callback' && existing.party === 'waves') {
+      const commitment = await callbacks.actOnCallback(db, req.params.id, {
+        action: req.body?.action, actorId: req.technicianId, expectedAt: req.body?.expected_at,
+        description: req.body?.description, due_at: req.body?.due_at, note: req.body?.note, snooze: req.body?.snooze,
+      });
+      return res.json({ commitment });
+    }
     const { applyHumanUpdate } = require('../services/call-commitments');
     const row = await applyHumanUpdate(db, req.params.id, {
       action: req.body?.action,

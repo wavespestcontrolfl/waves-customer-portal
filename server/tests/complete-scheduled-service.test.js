@@ -79,6 +79,71 @@ const withLawnGates = async (run) => {
   }
 };
 
+test.each([
+  'front', [{ productId: '00000000-0000-4000-8000-000000000201' }], [{ productName: 'Iron' }],
+  [{ productId: '00000000-0000-4000-8000-000000000201', productName: 'Iron', extra: true }], [{ productId: true, productName: 'Iron' }],
+  [{ productId: 'p1', productName: 'Iron' }], [{ productId: 42, productName: 'Iron' }],
+  [{ productId: '00000000-0000-4000-8000-000000000201', productName: 'Iron' }, { productId: '00000000-0000-4000-8000-000000000201', productName: 'Iron', reason: 'again' }],
+  // A case-variant pair is the same PostgreSQL uuid: canonicalized before uniqueness (codex #4113 P2).
+  [{ productId: '0000ABCD-0000-4000-8000-000000000201', productName: 'Iron' }, { productId: '0000abcd-0000-4000-8000-000000000201', productName: 'Iron' }],
+])('malformed skipped plan defaults %j are rejected before a completion claim or database read, whatever the UI gates', async skippedProducts => {
+  delete process.env.GATE_LAWN_COMPLETION_DEFAULTS;
+  delete process.env.GATE_LAWN_PROPERTY_HISTORY;
+  const result = await complete({ lawnProtocolCompletion: { treatedSqft: 2500, skippedProducts } });
+  expect(result).toMatchObject({ status: 400, body: { code: 'lawn_skipped_products_invalid' } });
+  expect(db).not.toHaveBeenCalled();
+  expect(attempts.claimCompletionAttempt).not.toHaveBeenCalled();
+});
+
+test('skipped-default names are measured after trimming: padding around 180 characters is accepted, a 181-character name is rejected', async () => {
+  delete process.env.GATE_LAWN_COMPLETION_DEFAULTS;
+  delete process.env.GATE_LAWN_PROPERTY_HISTORY;
+  process.env.GATE_LAWN_ACTUALS_LEDGER = 'true';
+  const productId = '00000000-0000-4000-8000-000000000201';
+  const payload = { success: true, serviceRecordId: 'fixture-record' };
+  attempts.claimCompletionAttempt.mockResolvedValue({ action: 'replay', payload });
+  try {
+    const padded = `${' '.repeat(40)}${'x'.repeat(180)}${' '.repeat(40)}`;
+    await expect(complete({ lawnProtocolCompletion: { treatedSqft: 2500, skippedProducts: [{ productId, productName: padded }] } }))
+      .resolves.toEqual({ status: 200, body: payload });
+    const result = await complete({ lawnProtocolCompletion: { treatedSqft: 2500, skippedProducts: [{ productId, productName: 'x'.repeat(181) }] } });
+    expect(result).toMatchObject({ status: 400, body: { code: 'lawn_skipped_products_invalid' } });
+  } finally {
+    delete process.env.GATE_LAWN_ACTUALS_LEDGER;
+  }
+});
+
+const withLedgerGateAlone = async (run) => {
+  delete process.env.GATE_LAWN_COMPLETION_DEFAULTS;
+  delete process.env.GATE_LAWN_PROPERTY_HISTORY;
+  process.env.GATE_LAWN_ACTUALS_LEDGER = 'true';
+  try {
+    await run();
+  } finally {
+    delete process.env.GATE_LAWN_ACTUALS_LEDGER;
+  }
+};
+
+test.each([-1, 2500.5, 10000001, 'front'])('invalid lawn visit area %j fails a fresh completion attempt after the claim under the ledger gate alone (defaults gates off)', async treatedSqft => {
+  const completionAttempt = { id: 'fixture-attempt' };
+  attempts.claimCompletionAttempt.mockResolvedValue({ action: 'proceed', attempt: completionAttempt });
+  await withLedgerGateAlone(async () => {
+    const result = await complete({ lawnProtocolCompletion: { treatedSqft } });
+    expect(result).toMatchObject({ status: 400, body: { code: 'lawn_completion_area_invalid' } });
+  });
+  expect(attempts.claimCompletionAttempt).toHaveBeenCalled();
+  expect(attempts.markCompletionAttemptFailed).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ message: 'lawn_completion_area_invalid' }), expect.anything());
+});
+
+test.each([2500.5, 'front'])('lawn visit area %j never blocks a committed completion from replaying under the ledger gate alone', async treatedSqft => {
+  const payload = { success: true, serviceRecordId: 'fixture-record' };
+  attempts.claimCompletionAttempt.mockResolvedValue({ action: 'replay', payload });
+  await withLedgerGateAlone(async () => {
+    await expect(complete({ lawnProtocolCompletion: { treatedSqft } })).resolves.toEqual({ status: 200, body: payload });
+  });
+  expect(attempts.markCompletionAttemptFailed).not.toHaveBeenCalled();
+});
+
 test.each([undefined, null, 2500, '2500', ...INVALID_AREAS])('lawn visit area %j never blocks a committed completion from replaying', async treatedSqft => {
   const payload = { success: true, serviceRecordId: 'fixture-record' };
   attempts.claimCompletionAttempt.mockResolvedValue({ action: 'replay', payload });
