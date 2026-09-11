@@ -189,19 +189,6 @@ function MoneyModelTab({ dashboard, loading }) {
           ))}
         </CardBody>
       </Card>
-      {(data.upsellOpportunities || []).length > 0 && (
-        <Card>
-          <CardHeader><CardTitle className="text-16">Top upsell opportunities</CardTitle></CardHeader>
-          <CardBody className="divide-y divide-zinc-200">
-            {data.upsellOpportunities.slice(0, 5).map((opportunity) => (
-              <div key={opportunity.customerId || opportunity.customerName} className="flex min-h-14 flex-wrap items-center justify-between gap-3 py-3">
-                <div><div className="font-medium text-zinc-900">{opportunity.customerName}</div><div className="text-ui-caption text-ink-secondary">Currently: {opportunity.currentTier} ({opportunity.serviceCount} services)</div></div>
-                <div className="flex flex-wrap items-center gap-2"><span className="font-medium text-zinc-900 u-nums">+{formatMoney(opportunity.potentialAdd)}/mo</span><Badge>{opportunity.suggestedService}</Badge></div>
-              </div>
-            ))}
-          </CardBody>
-        </Card>
-      )}
     </div>
   );
 }
