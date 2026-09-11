@@ -1,4 +1,4 @@
-import { ActionFeedback, Button, UiSurface } from "../../components/ui";
+import { ActionFeedback, Badge, Button, Card, Input, Select, Table, TBody, TD, TH, THead, TR, Textarea, UiSurface, Field } from "../../components/ui";
 import { useState, useEffect, useCallback, useRef } from "react";
 import { useOutletContext, useSearchParams } from "react-router-dom";
 import useRenderedTabBeacon from "../../hooks/useRenderedTabBeacon";
@@ -469,7 +469,6 @@ function LawnFactsTab({ showToast }) {
   const [editing, setEditing] = useState(null);
   const [form, setForm] = useState({});
   const [statusFilter, setStatusFilter] = useState("all");
-
   const load = useCallback(() => {
     setLoading(true);
     adminFetch("/admin/inventory/lawn-outline-facts")
@@ -480,17 +479,19 @@ function LawnFactsTab({ showToast }) {
       .catch((err) => showToast(`Load failed: ${err.message}`))
       .finally(() => setLoading(false));
   }, [showToast]);
-
   useEffect(() => {
     load();
   }, [load]);
-
   const startEdit = (row) => {
     const p = row.product || {};
     const suggestion = row.suggestedCopy || {};
     setEditing(row);
     setForm({
-      productType: p.productType || row.readiness?.productType || suggestion.productType || "",
+      productType:
+        p.productType ||
+        row.readiness?.productType ||
+        suggestion.productType ||
+        "",
       customerVisibility: p.customerVisibility || "internal_only",
       contentStatus: p.contentStatus || "draft",
       epaRegNumber: p.epaRegNumber || "",
@@ -501,11 +502,12 @@ function LawnFactsTab({ showToast }) {
       petKidGuidanceText: p.petKidGuidanceText || "",
       reentrySummary: p.reentrySummary || p.reentryText || "",
       labelSourceUrl: p.labelSourceUrl || p.labelUrl || "",
-      labelVerifiedAt: p.labelVerifiedAt ? String(p.labelVerifiedAt).slice(0, 10) : "",
+      labelVerifiedAt: p.labelVerifiedAt
+        ? String(p.labelVerifiedAt).slice(0, 10)
+        : "",
       labelVersion: p.labelVersion || "",
     });
   };
-
   const applySuggestedCopy = () => {
     if (!editing?.suggestedCopy) return;
     const suggestion = editing.suggestedCopy;
@@ -513,60 +515,75 @@ function LawnFactsTab({ showToast }) {
       ...current,
       productType: current.productType || suggestion.productType || "",
       publicSummary: current.publicSummary || suggestion.publicSummary || "",
-      customerPrecautionSummary: current.customerPrecautionSummary || suggestion.customerPrecautionSummary || "",
+      customerPrecautionSummary:
+        current.customerPrecautionSummary ||
+        suggestion.customerPrecautionSummary ||
+        "",
       reentrySummary: current.reentrySummary || suggestion.reentrySummary || "",
     }));
   };
-
   const save = async (approve = false) => {
     if (!editing?.product?.id) return;
     try {
-      await adminFetch(`/admin/inventory/lawn-outline-facts/${editing.product.id}`, {
-        method: "PATCH",
-        body: JSON.stringify({ ...form, approve }),
-      });
-      showToast(approve ? "Product fact approved for estimate packets" : "Product fact saved");
+      await adminFetch(
+        `/admin/inventory/lawn-outline-facts/${editing.product.id}`,
+        {
+          method: "PATCH",
+          body: JSON.stringify({
+            ...form,
+            approve,
+          }),
+        },
+      );
+      showToast(
+        approve
+          ? "Product fact approved for estimate packets"
+          : "Product fact saved",
+      );
       setEditing(null);
       load();
     } catch (err) {
       showToast(err.message || "Save failed");
     }
   };
-
   const approveRow = async (row) => {
     if (!row?.product?.id) return;
     try {
-      await adminFetch(`/admin/inventory/lawn-outline-facts/${row.product.id}`, {
-        method: "PATCH",
-        body: JSON.stringify({ approve: true }),
-      });
+      await adminFetch(
+        `/admin/inventory/lawn-outline-facts/${row.product.id}`,
+        {
+          method: "PATCH",
+          body: JSON.stringify({
+            approve: true,
+          }),
+        },
+      );
       showToast("Product fact approved for estimate packets");
       load();
     } catch (err) {
       showToast(err.message || "Approve failed");
     }
   };
-
   const badge = (status) => {
-    const colors = {
-      approved: [D.green, "#DCFCE7"],
-      ready_to_approve: [D.teal, "#E0F2FE"],
-      needs_facts: [D.amber, "#FEF3C7"],
-      missing_product: [D.red, "#FEE2E2"],
-    };
-    const [fg, bg] = colors[status] || [D.muted, "#F4F4F5"];
-    return <span style={sBadge(bg, fg)}>{String(status || "unknown").replaceAll("_", " ")}</span>;
+    const alert = ["needs_facts", "missing_product"].includes(status);
+    return (
+      <Badge tone={alert ? "alert" : "neutral"}>
+        {String(status || "unknown").replaceAll("_", " ")}
+      </Badge>
+    );
   };
-
-  if (loading) return <div style={sCard}>Loading lawn product facts...</div>;
-  const visibleFacts = statusFilter === "all"
-    ? facts
-    : facts.filter((row) => row.readiness?.status === statusFilter);
-  const missingFieldEntries = Object.entries(summary?.missingFields || {}).sort((a, b) => b[1] - a[1]).slice(0, 6);
-
+  if (loading)
+    return <ActionFeedback>Loading lawn product facts…</ActionFeedback>;
+  const visibleFacts =
+    statusFilter === "all"
+      ? facts
+      : facts.filter((row) => row.readiness?.status === statusFilter);
+  const missingFieldEntries = Object.entries(summary?.missingFields || {})
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, 6);
   return (
     <div>
-      <div style={{ ...sCard, display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(130px, 1fr))", gap: 12 }}>
+      <Card className="p-5 mb-3 grid gap-[12px]">
         {[
           ["Protocol Products", summary?.total || 0],
           ["Approved", summary?.approved || 0],
@@ -575,121 +592,187 @@ function LawnFactsTab({ showToast }) {
           ["Missing", summary?.missing_product || 0],
         ].map(([label, value]) => (
           <div key={label}>
-            <div style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 22, fontWeight: 700, color: D.heading }}>{value}</div>
-            <div style={{ fontSize: 11, color: D.muted, textTransform: "uppercase", letterSpacing: 1 }}>{label}</div>
+            <div className="text-22 font-medium text-zinc-900">{value}</div>
+            <div className="text-ui-body text-ink-secondary">{label}</div>
           </div>
         ))}
-      </div>
+      </Card>
 
       {missingFieldEntries.length > 0 && (
-        <div style={sCard}>
-          <div style={{ fontSize: 15, fontWeight: 700, color: D.heading, marginBottom: 10 }}>Most Common Readiness Gaps</div>
-          <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+        <Card className="p-5 mb-3">
+          <div className="text-ui-body font-medium text-zinc-900 mb-[10px]">
+            Most Common Readiness Gaps
+          </div>
+          <div className="flex gap-[8px] flex-wrap">
             {missingFieldEntries.map(([field, count]) => (
-              <span key={field} style={sBadge("#FEF3C7", D.amber)}>{field} · {count}</span>
+              <Badge key={field} tone="neutral">
+                {field} · {count}
+              </Badge>
             ))}
           </div>
-        </div>
+        </Card>
       )}
 
-      <div style={sCard}>
-        <div style={{ display: "flex", justifyContent: "space-between", gap: 12, flexWrap: "wrap", alignItems: "center", marginBottom: 16 }}>
+      <Card className="p-5 mb-3">
+        <div className="flex justify-between gap-[12px] flex-wrap items-center mb-[16px]">
           <div>
-            <div style={{ fontSize: 18, fontWeight: 700, color: D.heading, marginBottom: 6 }}>Lawn Estimate Product Facts</div>
-            <div style={{ fontSize: 13, color: D.muted }}>
-              Product cards in lawn service outlines only render from products approved here. Draft or incomplete products stay hidden.
+            <div className="text-18 font-medium text-zinc-900 mb-[6px]">
+              Lawn Estimate Product Facts
+            </div>
+            <div className="text-ui-body text-ink-secondary">
+              Product cards in lawn service outlines only render from products
+              approved here. Draft or incomplete products stay hidden.
             </div>
           </div>
-          <select value={statusFilter} onChange={(e) => setStatusFilter(e.target.value)} style={{ ...sInput, minWidth: 190 }}>
+          <Select
+            value={statusFilter}
+            onChange={(e) => setStatusFilter(e.target.value)}
+            className="min-w-[190px]"
+          >
             <option value="all">All statuses</option>
             <option value="missing_product">Missing product</option>
             <option value="needs_facts">Needs facts</option>
             <option value="ready_to_approve">Ready to approve</option>
             <option value="approved">Approved</option>
-          </select>
+          </Select>
         </div>
-        <div style={{ overflowX: "auto" }}>
-          <table style={{ width: "100%", borderCollapse: "collapse" }}>
-            <thead>
-              <tr>
-                <th style={thS}>Protocol item</th>
-                <th style={thS}>Used In</th>
-                <th style={thS}>Catalog match</th>
-                <th style={thS}>Status</th>
-                <th style={thS}>Missing</th>
-                <th style={thS}>Actions</th>
-              </tr>
-            </thead>
-            <tbody>
+        <div className="overflow-x-auto">
+          <Table className="w-full">
+            <THead>
+              <TR>
+                <TH>Protocol item</TH>
+                <TH>Used In</TH>
+                <TH>Catalog match</TH>
+                <TH>Status</TH>
+                <TH>Missing</TH>
+                <TH>Actions</TH>
+              </TR>
+            </THead>
+            <TBody>
               {visibleFacts.map((row) => (
-                <tr key={row.key || row.needle}>
-                  <td style={tdS}>
-                    <div style={{ fontWeight: 700, color: D.heading }}>{row.needle}</div>
-                    <div style={{ fontSize: 11, color: D.muted }}>{row.expectedCategory}</div>
-                  </td>
-                  <td style={tdS}>
-                    <div style={{ fontSize: 12, color: D.heading }}>{(row.turfTracks || []).join(", ")}</div>
-                    <div style={{ fontSize: 11, color: D.muted }}>{(row.months || []).join(", ")} · {row.referenceCount || 0} refs</div>
-                  </td>
-                  <td style={tdS}>
+                <TR key={row.key || row.needle}>
+                  <TD>
+                    <div className="font-medium text-zinc-900">
+                      {row.needle}
+                    </div>
+                    <div className="text-ui-body text-ink-secondary">
+                      {row.expectedCategory}
+                    </div>
+                  </TD>
+                  <TD>
+                    <div className="text-ui-body text-zinc-900">
+                      {(row.turfTracks || []).join(", ")}
+                    </div>
+                    <div className="text-ui-body text-ink-secondary">
+                      {(row.months || []).join(", ")} ·{" "}
+                      {row.referenceCount || 0} refs
+                    </div>
+                  </TD>
+                  <TD>
                     {row.product ? (
                       <>
-                        <div style={{ fontWeight: 700, color: D.heading }}>{row.product.name}</div>
-                        <div style={{ fontSize: 11, color: D.muted }}>
-                          {row.product.productType || row.readiness?.productType || "type pending"} · {row.product.contentStatus} · {row.product.customerVisibility}
+                        <div className="font-medium text-zinc-900">
+                          {row.product.name}
+                        </div>
+                        <div className="text-ui-body text-ink-secondary">
+                          {row.product.productType ||
+                            row.readiness?.productType ||
+                            "type pending"}{" "}
+                          · {row.product.contentStatus} ·{" "}
+                          {row.product.customerVisibility}
                         </div>
                       </>
                     ) : (
-                      <span style={{ color: D.red }}>No product match</span>
+                      <span className="text-alert-fg">No product match</span>
                     )}
-                  </td>
-                  <td style={tdS}>{badge(row.readiness?.status)}</td>
-                  <td style={tdS}>
+                  </TD>
+                  <TD>{badge(row.readiness?.status)}</TD>
+                  <TD>
                     {(row.readiness?.missing || []).length ? (
-                      <ul style={{ margin: 0, paddingLeft: 18, maxWidth: 360 }}>
-                        {row.readiness.missing.map((m) => <li key={m}>{m}</li>)}
+                      <ul className="m-0 pl-[18px] max-w-[360px]">
+                        {row.readiness.missing.map((m) => (
+                          <li key={m}>{m}</li>
+                        ))}
                       </ul>
                     ) : (
-                      <span style={{ color: D.green }}>Complete</span>
+                      <span className="text-zinc-900">Complete</span>
                     )}
-                  </td>
-                  <td style={tdS}>
+                  </TD>
+                  <TD>
                     {row.product && (
-                      <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-                        <button type="button" style={sBtn(D.card, D.heading)} onClick={() => startEdit(row)}>Edit</button>
-                        {row.readiness?.eligible && row.readiness?.status !== "approved" && (
-                          <button type="button" style={sBtn(D.green, D.white)} onClick={() => approveRow(row)}>Approve</button>
-                        )}
+                      <div className="flex gap-[8px] flex-wrap">
+                        <Button
+                          type="button"
+                          onClick={() => startEdit(row)}
+                          variant="secondary"
+                        >
+                          Edit
+                        </Button>
+                        {row.readiness?.eligible &&
+                          row.readiness?.status !== "approved" && (
+                            <Button
+                              type="button"
+                              onClick={() => approveRow(row)}
+                              variant="primary"
+                            >
+                              Approve
+                            </Button>
+                          )}
                       </div>
                     )}
-                  </td>
-                </tr>
+                  </TD>
+                </TR>
               ))}
-            </tbody>
-          </table>
-          {visibleFacts.length === 0 && <div style={{ padding: 18, color: D.muted }}>No products match this status.</div>}
-        </div>
-      </div>
-
-      {editing && (
-        <div style={{ ...sCard, borderColor: D.heading }}>
-          <div style={{ display: "flex", justifyContent: "space-between", gap: 12, alignItems: "center", marginBottom: 14 }}>
-            <div>
-              <div style={{ fontSize: 18, fontWeight: 700, color: D.heading }}>Edit Product Fact</div>
-              <div style={{ fontSize: 13, color: D.muted }}>{editing.product?.name}</div>
-            </div>
-            <button type="button" style={sBtn(D.card, D.heading)} onClick={() => setEditing(null)}>Close</button>
-          </div>
-          {editing.suggestedCopy && (
-            <div style={{ border: `1px solid ${D.border}`, borderRadius: 8, padding: 12, marginBottom: 14, background: D.bg }}>
-              <div style={{ fontSize: 13, fontWeight: 700, color: D.heading }}>Starter copy</div>
-              <div style={{ fontSize: 12, color: D.muted, lineHeight: 1.6, marginTop: 4 }}>
-                This is draft customer-safe language from the protocol item category. It does not approve EPA numbers, label claims, or product eligibility.
-              </div>
-              <button type="button" style={{ ...sBtn(D.card, D.heading), marginTop: 10 }} onClick={applySuggestedCopy}>Fill empty copy fields</button>
+            </TBody>
+          </Table>
+          {visibleFacts.length === 0 && (
+            <div className="p-[18px] text-ink-secondary">
+              No products match this status.
             </div>
           )}
-          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(240px, 1fr))", gap: 12 }}>
+        </div>
+      </Card>
+
+      {editing && (
+        <Card className="p-5 mb-3">
+          <div className="flex justify-between gap-[12px] items-center mb-[14px]">
+            <div>
+              <div className="text-18 font-medium text-zinc-900">
+                Edit Product Fact
+              </div>
+              <div className="text-ui-body text-ink-secondary">
+                {editing.product?.name}
+              </div>
+            </div>
+            <Button
+              type="button"
+              onClick={() => setEditing(null)}
+              variant="secondary"
+            >
+              Close
+            </Button>
+          </div>
+          {editing.suggestedCopy && (
+            <Card className="p-3 mb-[14px] bg-zinc-50">
+              <div className="text-ui-body font-medium text-zinc-900">
+                Starter copy
+              </div>
+              <div className="text-ui-body text-ink-secondary mt-[4px]">
+                This is draft customer-safe language from the protocol item
+                category. It does not approve EPA numbers, label claims, or
+                product eligibility.
+              </div>
+              <Button
+                type="button"
+                onClick={applySuggestedCopy}
+                variant="secondary"
+                className="mt-[10px]"
+              >
+                Fill empty copy fields
+              </Button>
+            </Card>
+          )}
+          <div className="grid gap-[12px]">
             {[
               ["productType", "Product type"],
               ["customerVisibility", "Visibility"],
@@ -699,15 +782,19 @@ function LawnFactsTab({ showToast }) {
               ["labelVerifiedAt", "Label verified date"],
               ["labelVersion", "Label version"],
             ].map(([key, label]) => (
-              <label key={key} style={{ display: "block" }}>
-                <div style={{ fontSize: 11, color: D.muted, textTransform: "uppercase", letterSpacing: 1, marginBottom: 4 }}>{label}</div>
-                <input
+              <Field label={label} key={key} className="block">
+                <Input
                   type={key === "labelVerifiedAt" ? "date" : "text"}
                   value={form[key] || ""}
-                  onChange={(e) => setForm((f) => ({ ...f, [key]: e.target.value }))}
-                  style={{ ...sInput, width: "100%" }}
+                  onChange={(e) =>
+                    setForm((f) => ({
+                      ...f,
+                      [key]: e.target.value,
+                    }))
+                  }
+                  className="w-full"
                 />
-              </label>
+              </Field>
             ))}
           </div>
           {[
@@ -718,20 +805,28 @@ function LawnFactsTab({ showToast }) {
             ["petKidGuidanceText", "Pet/child guidance"],
             ["reentrySummary", "Re-entry summary"],
           ].map(([key, label]) => (
-            <label key={key} style={{ display: "block", marginTop: 12 }}>
-              <div style={{ fontSize: 11, color: D.muted, textTransform: "uppercase", letterSpacing: 1, marginBottom: 4 }}>{label}</div>
-              <textarea
+            <Field label={label} key={key} className="block mt-[12px]">
+              <Textarea
                 value={form[key] || ""}
-                onChange={(e) => setForm((f) => ({ ...f, [key]: e.target.value }))}
-                style={{ ...sInput, width: "100%", minHeight: 72, resize: "vertical" }}
+                onChange={(e) =>
+                  setForm((f) => ({
+                    ...f,
+                    [key]: e.target.value,
+                  }))
+                }
+                className="w-full min-h-[72px] resize-y"
               />
-            </label>
+            </Field>
           ))}
-          <div style={{ display: "flex", gap: 10, marginTop: 16, flexWrap: "wrap" }}>
-            <button type="button" style={sBtn(D.heading, D.white)} onClick={() => save(false)}>Save</button>
-            <button type="button" style={sBtn(D.green, D.white)} onClick={() => save(true)}>Save + Approve</button>
+          <div className="flex gap-[10px] mt-[16px] flex-wrap">
+            <Button type="button" onClick={() => save(false)} variant="primary">
+              Save
+            </Button>
+            <Button type="button" onClick={() => save(true)} variant="primary">
+              Save + Approve
+            </Button>
           </div>
-        </div>
+        </Card>
       )}
     </div>
   );
