@@ -4941,19 +4941,20 @@ router.post('/:serviceId/reschedule', async (req, res, next) => {
       });
       // Grouped siblings moved singly by moveVisitAsUnit are outside the
       // series effects' broadcast scope — other boards need them too
-      // (codex #3609 r6).
-      const groupedQualityDates = new Set();
+      // (codex #3609 r6). Same Set as the rebooker call and the series
+      // effects above: this branch owns it, one flush covers the whole
+      // collective move (codex #4295 r4 P2).
       for (const movedId of (result.visitMove?.moved || []).map(String).filter((id) => id !== String(req.params.serviceId))) {
         try {
-          await emitDispatchJobUpdate({ jobId: movedId, actorId: req.technicianId, qualityDates: groupedQualityDates });
+          await emitDispatchJobUpdate({ jobId: movedId, actorId: req.technicianId, qualityDates });
         } catch (err) {
           logger.error(`[dispatch] series reschedule board broadcast failed for grouped member ${movedId}: ${err.message}`);
         }
       }
       try {
-        await flushDispatchQualityDates(groupedQualityDates);
+        await flushDispatchQualityDates(qualityDates);
       } catch (err) {
-        logger.error(`[dispatch] series grouped-member route quality refresh failed: ${err.message}`);
+        logger.error(`[dispatch] collective move route quality refresh failed: ${err.message}`);
       }
       const { rescheduledOccurrences, ...response } = result;
       return res.json({

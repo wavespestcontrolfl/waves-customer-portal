@@ -942,6 +942,18 @@ describe('update-details wiring (source guards)', () => {
     expect(dispatchSrc).toMatch(/if \(ownsFlush\) \{\s+try \{\s+await flushDispatchQualityDates\(seriesQualityDates\);/);
   });
 
+  test('the collective-move branch and the tech Quick Move flush the shared route-quality Set (codex #4295 r4 P2)', () => {
+    const dispatchSrc = fs.readFileSync(path.join(__dirname, '../routes/admin-dispatch.js'), 'utf8');
+    expect(dispatchSrc).not.toContain('groupedQualityDates');
+    const start = dispatchSrc.indexOf('if (result.seriesMoveId) {');
+    const branch = dispatchSrc.slice(start, dispatchSrc.indexOf('return res.json({', start));
+    expect(branch).toContain('emitDispatchJobUpdate({ jobId: movedId, actorId: req.technicianId, qualityDates })');
+    expect(branch).toContain('await flushDispatchQualityDates(qualityDates);');
+    const techSrc = fs.readFileSync(path.join(__dirname, '../routes/tech-track.js'), 'utf8');
+    expect(techSrc).toContain("flushDispatchQualityDates(new Set(result.qualityDates))");
+    expect(techSrc.indexOf('flushDispatchQualityDates(new Set(result.qualityDates))')).toBeGreaterThan(techSrc.indexOf('RainOut.commit({'));
+  });
+
   test('top-up visits get the post-registration terminal re-check (Codex #3337 r2 P1)', () => {
     // A series cancel landing between this commit and the reminder insert
     // would otherwise leave an armed reminder on a cancelled visit.

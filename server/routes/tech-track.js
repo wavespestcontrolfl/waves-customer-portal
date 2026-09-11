@@ -654,6 +654,16 @@ router.post('/:id/rain-out', async (req, res, next) => {
       // the 8AM-8PM send window (operator-initiated, not machine-initiated).
       operatorInitiated: true,
     });
+    // commit() collects every moved row's route-quality dates for its caller
+    // to flush once (codex #4295 r4 P2) — without this a Quick Move from the
+    // tech portal refreshed nothing. Best-effort, after the move committed.
+    if (result.ok && Array.isArray(result.qualityDates) && result.qualityDates.length) {
+      try {
+        await require('../services/dispatch-assignment').flushDispatchQualityDates(new Set(result.qualityDates));
+      } catch (err) {
+        logger.error(`[tech-track] quick move route quality refresh failed: ${err.message}`);
+      }
+    }
 
     if (!result.ok) {
       const code = result.reason === 'not_found' ? 404

@@ -470,6 +470,47 @@ describe('live-status reschedule override (allowLive)', () => {
     refreshSpy.mockRestore();
   });
 
+  // An operation-key replay never reaches the live path's refresh; the
+  // durable prior move carries both sides of every row (codex #4295 r4 P2).
+  describe('replaySeriesMoveWithQuality', () => {
+    const prior = {
+      id: 'sm-1', original_date: BASE, new_date: TARGET, notify_requested: false,
+      rows: [
+        { id: 'svc-1', before: { scheduled_date: BASE }, after: { scheduled_date: TARGET } },
+        { id: 'svc-2', before: { scheduled_date: '2026-06-20' }, after: { scheduled_date: '2026-06-27' } },
+      ],
+    };
+    test('hands every vacated and destination date to the caller-supplied Set', async () => {
+      const { replaySeriesMoveWithQuality } = require('../services/rebooker');
+      const quality = require('../services/scheduling/quality-after-change');
+      const refreshSpy = jest.spyOn(quality, 'refreshScheduleQualityAfterChange').mockResolvedValue({ status: 'gate_off' });
+      const qualityDates = new Set();
+      const result = await replaySeriesMoveWithQuality(prior, TARGET, 'svc-1', { qualityDates });
+      expect(result).toMatchObject({ replayed: true, seriesMoveId: 'sm-1', occurrencesRescheduled: 2 });
+      expect([...qualityDates].sort()).toEqual([BASE, TARGET, '2026-06-20', '2026-06-27'].sort());
+      expect(refreshSpy).not.toHaveBeenCalled();
+      refreshSpy.mockRestore();
+    });
+    test('refreshes inline when no batch owns the refresh', async () => {
+      const { replaySeriesMoveWithQuality } = require('../services/rebooker');
+      const quality = require('../services/scheduling/quality-after-change');
+      const refreshSpy = jest.spyOn(quality, 'refreshScheduleQualityAfterChange').mockResolvedValue({ status: 'gate_off' });
+      await replaySeriesMoveWithQuality(prior, TARGET, 'svc-1', {});
+      expect(refreshSpy).toHaveBeenCalledTimes(1);
+      expect(refreshSpy.mock.calls[0][0].jobId).toBe('svc-1');
+      expect([...refreshSpy.mock.calls[0][0].dates].sort()).toEqual([BASE, TARGET, '2026-06-20', '2026-06-27'].sort());
+      refreshSpy.mockRestore();
+    });
+    test('a key reused for a different move still throws before any refresh', async () => {
+      const { replaySeriesMoveWithQuality } = require('../services/rebooker');
+      const quality = require('../services/scheduling/quality-after-change');
+      const refreshSpy = jest.spyOn(quality, 'refreshScheduleQualityAfterChange').mockResolvedValue({ status: 'gate_off' });
+      await expect(replaySeriesMoveWithQuality(prior, '2026-07-01', 'svc-1', {})).rejects.toMatchObject({ code: 'OPERATION_KEY_REUSED' });
+      expect(refreshSpy).not.toHaveBeenCalled();
+      refreshSpy.mockRestore();
+    });
+  });
+
   test('a failed follow-up shift is swallowed — the reschedule still succeeds', async () => {
     const { shiftCallFollowUpsForParentMove } = require('../services/call-booking-catalog');
     shiftCallFollowUpsForParentMove.mockRejectedValueOnce(new Error('boom'));

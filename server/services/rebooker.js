@@ -466,6 +466,27 @@ function replaySeriesMoveResult(prior, requestedDate) {
   return { ...base, seriesMoveId: prior.id, replayed: true, notifyRequested: prior.notify_requested === true };
 }
 
+// An operation-key replay returns before the live path's quality refresh,
+// so the vacated and destination tech-days of the durable prior move would
+// stay stale whenever the original process died between its commit and its
+// refresh — exactly the recovery these replays exist for (codex #4295 r4
+// P2). Derive both sides of every row from the prior move and hand them to
+// the caller's Set, or refresh inline when no batch owns the refresh.
+async function replaySeriesMoveWithQuality(prior, requestedDate, serviceId, options = {}) {
+  const result = replaySeriesMoveResult(prior, requestedDate);
+  const rows = Array.isArray(prior.rows) ? prior.rows : [];
+  const dates = [...new Set([
+    dateOnly(prior.original_date), dateOnly(prior.new_date),
+    ...rows.flatMap((r) => [dateOnly(r.before?.scheduled_date), dateOnly(r.after?.scheduled_date)]),
+  ].filter(Boolean))];
+  if (options.qualityDates) {
+    for (const date of dates) options.qualityDates.add(date);
+  } else if (dates.length) {
+    await require('./scheduling/quality-after-change').refreshScheduleQualityAfterChange({ jobId: serviceId, dates });
+  }
+  return result;
+}
+
 // Telemetry + audit for a series shift that did NOT commit (written outside
 // the rolled-back transaction, best-effort): the un-gate review reads
 // rollback/failure counts from the same table as the successes.
@@ -1044,7 +1065,7 @@ class SmartRebooker {
       const prior = await findPriorSeriesMove(db, serviceId, opKey, service, newDate, options.expect || null);
       if (prior) {
         await replaySeriesMoveCleanup(prior);
-        return replaySeriesMoveResult(prior, newDate);
+        return replaySeriesMoveWithQuality(prior, newDate, serviceId, options);
       }
       if (dateOnly(newDate) !== dateOnly(service.scheduled_date)) {
         const { seriesPolicy: _policy, expect, excludeServiceIds: _exclude, ...seriesOptions } = options;
@@ -1851,7 +1872,7 @@ class SmartRebooker {
       const prior = await findPriorSeriesMove(db, serviceId, opKey, service, newDate, options.expectAnchor || null, observedPrior);
       if (prior) {
         await replaySeriesMoveCleanup(prior);
-        return replaySeriesMoveResult(prior, newDate);
+        return replaySeriesMoveWithQuality(prior, newDate, serviceId, options);
       }
     }
     const {
@@ -2924,7 +2945,7 @@ class SmartRebooker {
     });
     if (occurrencesRescheduled && occurrencesRescheduled.replayedFrom) {
       await replaySeriesMoveCleanup(occurrencesRescheduled.replayedFrom);
-      return replaySeriesMoveResult(occurrencesRescheduled.replayedFrom, newDate);
+      return replaySeriesMoveWithQuality(occurrencesRescheduled.replayedFrom, newDate, serviceId, options);
     }
 
     // Live-anchor post-commit cleanup — same pattern as the single-job
@@ -3206,6 +3227,7 @@ module.exports = new SmartRebooker();
 // Shared with the IB schedule tools + bulk admin movers so every reschedule
 // path applies the same live-lifecycle rewind (see comment on the constant).
 module.exports.LIVE_LIFECYCLE_RESET = LIVE_LIFECYCLE_RESET;
+module.exports.replaySeriesMoveWithQuality = replaySeriesMoveWithQuality;
 module.exports.needsLifecycleRewind = needsLifecycleRewind;
 module.exports.applyTrackLifecycleCas = applyTrackLifecycleCas;
 module.exports.applyLiveMoveSideEffects = applyLiveMoveSideEffects;
