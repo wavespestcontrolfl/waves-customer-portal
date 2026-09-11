@@ -53,14 +53,18 @@ module.exports = {
   // its pricing, so the walk is short: this file's own column reads, plus
   // the small helpers it still calls with the row
   // (reconcileFrozenMembershipSnapshot, isEstimateCustomerViewable,
-  // adminDraftPreviewEligible, estimateIsPriceLocked → price_locked_at).
+  // adminDraftPreviewEligible, estimateIsPriceLocked → price_locked_at)
+  // and the link gate's own provenance lookup
+  // (estimate-claim-sql callSideBlockForEstimateData → call_log + leads;
+  // pre-push audit P1 — it was missing from the first cut's contract too,
+  // so a rename in that read went unmonitored for this tool).
   // composeEstimateDataPayload itself is deliberately NOT walked, for the
   // same reason buildPricingBundle never was: it is the public route's
   // whole rendering pipeline, exercised by that route's own tests and
   // contract — re-deriving its column surface here would just be a second,
   // hand-maintained copy of a schema the route already owns.
   get_estimate_detail: {
-    tables: ['estimates', 'estimate_deposits'],
+    tables: ['estimates', 'estimate_deposits', 'call_log', 'leads'],
     columns: {
       // select('*') plus every estimates.<column> read off the row: by
       // getEstimateDetail/shapeEstimate directly (where/orderBy/whereNull
@@ -85,6 +89,15 @@ module.exports = {
         'estimate_id', 'amount', 'card_surcharge', 'credited_amount', 'refunded_amount', 'refunded_surcharge',
         'status', 'received_at', 'created_at',
       ],
+      // callSideBlockForEstimateData's own reads, reached from estimateLinks
+      // for an engine-drafted row (estimatorEngine.callLogId): the blocking
+      // verdict + in-flight markers off call_log, then the sid-owned /
+      // stamped lead resolution when the draft is durably lead-linked.
+      call_log: [
+        'id', 'metadata', 'processing_token', 'processing_status', 'extraction_attempts',
+        'created_at', 'twilio_call_sid',
+      ],
+      leads: ['id', 'twilio_call_sid', 'deleted_at', 'created_at'],
     },
     reason: 'get_estimate_detail\'s DB reads live in estimate-detail.js, not its registered sourcePath (estimate-tools.js) — the automatic scan can\'t see them.',
   },
