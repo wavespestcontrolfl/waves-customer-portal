@@ -262,6 +262,61 @@ describe('review request follow-up flow', () => {
     expect(updateQuery.update).not.toHaveBeenCalled();
   });
 
+  test('an uncertain follow-up handoff is held, not left retryable (codex #4338 P1)', async () => {
+    const updateQuery = chain();
+    const reviewRequestQueries = [
+      chain(), // deleted-customer follow-up close-out pre-pass
+      collection([]),
+      collection([
+        {
+          id: 'rr-uncertain',
+          customer_id: 'cust-1',
+          sms_sent_at: '2026-05-30T15:00:00.000Z',
+          status: 'sent',
+          score: null,
+        },
+      ]),
+      chain({ first: jest.fn().mockResolvedValue(null) }),
+      updateQuery,
+    ];
+    const customerQuery = chain({
+      first: jest.fn().mockResolvedValue({
+        id: 'cust-1',
+        first_name: 'Jamie',
+        last_name: 'Rios',
+        phone: '+19415550123',
+        city: 'Sarasota',
+        has_left_google_review: false,
+      }),
+    });
+
+    db.mockImplementation((table) => {
+      if (table === 'review_requests') return reviewRequestQueries.shift();
+      if (table === 'customers') return customerQuery;
+      throw new Error(`Unexpected table query: ${table}`);
+    });
+    getServiceContact.mockReturnValue({ phone: '+19415550123', name: 'Jamie' });
+    getServiceContactSmsRecipient.mockReturnValue({ phone: '+19415550123', name: 'Jamie' });
+    renderSmsTemplate.mockResolvedValue('Please review us');
+    // No SID, no thrown error — the provider handoff never confirmed
+    // accept/reject. retryable is unset, exactly the shape Codex flagged.
+    sendCustomerMessage.mockResolvedValue({
+      sent: false,
+      blocked: false,
+      deliveryOutcome: 'uncertain',
+      code: 'PROVIDER_FAILURE',
+      auditLogId: 'audit-1',
+    });
+
+    const result = await ReviewService.processFollowups();
+
+    // Held, not left retryable for the next run to duplicate-send.
+    expect(result).toEqual({ sent: 0, suppressed: 1, internalFollowups: 0 });
+    expect(updateQuery.update).toHaveBeenCalledWith(expect.objectContaining({
+      followup_sent: true,
+    }));
+  });
+
   test('creates inline review rows as pending until the bundled completion SMS is delivered', async () => {
     const existingQuery = chain({ first: jest.fn().mockResolvedValue(null) });
     const serviceRecordQuery = chain({

@@ -49,6 +49,16 @@ describe.each(["call", "sms"])("OwedCommitmentsSummary %s", (source) => {
   });
 });
 
+it("shows the effective callback deadline on the customer summary", async () => {
+  vi.stubGlobal("fetch", vi.fn(async () => ({ ok: true, status: 200, json: async () => ({
+    commitments: [{ ...rowFor("A"), effective_due_at: "2040-09-05T17:00:00Z" }], enabled: true,
+  }) })));
+  try {
+    render(<OwedCommitmentsSummary customerId="A" />);
+    expect(await screen.findByText(/Due Sep 5.*1:00/)).toBeInTheDocument();
+  } finally { cleanup(); vi.unstubAllGlobals(); }
+});
+
 describe("SMS follow-up controls", () => {
   const response = (body, status = 200) => ({ ok: status === 200, status, json: async () => body, text: async () => JSON.stringify(body) });
   const report = { ...rowFor("report"), sms_log_id: "sms-1", sms_started_at: "2040-09-01T14:00:00Z",

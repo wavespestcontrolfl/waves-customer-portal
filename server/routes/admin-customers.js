@@ -4052,12 +4052,11 @@ router.put('/:id', requireAdmin, async (req, res, next) => {
           // customer-dedupe.js and intelligence-bar/tools.js — extend ALL
           // in the same commit): pg_advisory_xact_lock(hashtextextended(
           //   'customer-email:' || lower(trim(<email>)), 0)).
+          // Every assigned address (the primary and the service-contact
+          // slots) takes the key: the bounce recovery's ownership check reads
+          // all of them (utils/customer-comms-lock.js lockAssignedCustomerEmails).
+          await require('../utils/customer-comms-lock').lockAssignedCustomerEmails(trx, updates);
           if (updates.email) {
-            const emailLc = String(updates.email).trim().toLowerCase();
-            await trx.raw(
-              'SELECT pg_advisory_xact_lock(hashtextextended(?, 0))',
-              [`customer-email:${emailLc}`],
-            );
             // Serialization ONLY — deliberately NO claimant refusal (r23):
             // customers.email is intentionally non-unique (migration
             // 20260417000010 dropped the constraint so spouses and shared
@@ -4338,19 +4337,22 @@ router.put('/:id/notification-prefs', requireAdmin, async (req, res, next) => {
     }
     dbUpdates.updated_at = new Date();
 
-    if (existing) {
-      await db('notification_prefs')
+    // Row → address key, like every customer address writer: a billing
+    // address assigned here contends with a bearer-link handoff that read
+    // it as unowned, so the handoff commits first or re-judges ownership.
+    await db.transaction(async (trx) => {
+      if (!existing) {
+        // Create through the canonical helper (marketing flags NULL), then
+        // apply exactly the admin-named fields — a bare insert would take the
+        // legacy true defaults and mint marketing consent as a side effect.
+        await createDefaultCustomerRows(trx, req.params.id);
+      }
+      await trx('notification_prefs').where({ customer_id: req.params.id }).forUpdate().first('customer_id');
+      await require('../utils/customer-comms-lock').lockAssignedCustomerEmails(trx, dbUpdates);
+      await trx('notification_prefs')
         .where({ customer_id: req.params.id })
         .update(dbUpdates);
-    } else {
-      // Create through the canonical helper (marketing flags NULL), then
-      // apply exactly the admin-named fields — a bare insert would take the
-      // legacy true defaults and mint marketing consent as a side effect.
-      await createDefaultCustomerRows(db, req.params.id);
-      await db('notification_prefs')
-        .where({ customer_id: req.params.id })
-        .update(dbUpdates);
-    }
+    });
 
     const prefs = await db('notification_prefs')
       .where({ customer_id: req.params.id })

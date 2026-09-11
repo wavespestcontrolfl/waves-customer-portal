@@ -4,6 +4,7 @@ import {
   Button, Input, Select, Switch, Textarea, Badge,
 } from '../ui';
 import { Plus, Trash2, Download, Building2, Loader2 } from 'lucide-react';
+import { proposalLineAmount } from '@proposal-bid';
 
 // Commercial proposal builder — authors the multi-building, per-line-item
 // view of an estimate (e.g. two towers + N lake houses) that renders the
@@ -33,7 +34,7 @@ function computeTotals(buildings, taxRate) {
   let annualRecurring = 0, oneTime = 0, taxableAnnual = 0, taxableOneTime = 0;
   for (const b of buildings) {
     for (const li of b.lineItems) {
-      const amount = (Number(li.quantity) || 0) * (Number(li.unitPrice) || 0);
+      const amount = proposalLineAmount(li);
       if (li.frequency === 'one_time') {
         oneTime += amount;
         if (li.taxable) taxableOneTime += amount;
@@ -60,6 +61,7 @@ export default function CommercialProposalModal({ estimate, adminFetch, onClose,
   const [downloading, setDownloading] = useState(false);
   const [error, setError] = useState(null);
   const [savedOnce, setSavedOnce] = useState(false);
+  const loadedProposalRef = React.useRef({});
 
   const [title, setTitle] = useState('Commercial Service Proposal');
   const [preparedFor, setPreparedFor] = useState('');
@@ -78,6 +80,7 @@ export default function CommercialProposalModal({ estimate, adminFetch, onClose,
       .then((data) => {
         if (!alive) return;
         const p = data.proposal || {};
+        loadedProposalRef.current = p;
         setTitle(p.title || 'Commercial Service Proposal');
         setPreparedFor(p.preparedFor || estimate.customerName || '');
         setPropertyAddress(p.propertyAddress || estimate.address || '');
@@ -89,6 +92,8 @@ export default function CommercialProposalModal({ estimate, adminFetch, onClose,
                 name: b.name || '',
                 note: b.note || '',
                 lineItems: (b.lineItems || []).map((li) => ({
+                  id: li.id,
+                  unit: li.unit,
                   description: li.description || '',
                   quantity: li.quantity ?? 1,
                   unitPrice: li.unitPrice ?? 0,
@@ -127,6 +132,7 @@ export default function CommercialProposalModal({ estimate, adminFetch, onClose,
 
   const buildPayload = () => ({
     proposal: {
+      ...loadedProposalRef.current,
       title: title.trim() || 'Commercial Service Proposal',
       preparedFor: preparedFor.trim(),
       propertyAddress: propertyAddress.trim(),
@@ -138,9 +144,11 @@ export default function CommercialProposalModal({ estimate, adminFetch, onClose,
         lineItems: b.lineItems
           .filter((l) => l.description.trim())
           .map((l) => ({
+            id: l.id,
+            unit: l.unit,
             description: l.description.trim(),
-            quantity: Math.max(1, Math.round(Number(l.quantity) || 1)),
-            unitPrice: Number(l.unitPrice) || 0,
+            quantity: l.quantity,
+            unitPrice: l.unitPrice,
             frequency: l.frequency,
             taxable: l.taxable === true,
           })),
@@ -283,12 +291,12 @@ export default function CommercialProposalModal({ estimate, adminFetch, onClose,
                         onChange={(e) => updateLine(bi, lii, { description: e.target.value })}
                       />
                       <Input
-                        className="col-span-1" size="sm" type="number" min="1" title="Quantity"
+                        className="col-span-1" size="sm" type="number" min="0.0001" step="0.0001" title="Quantity"
                         value={li.quantity}
                         onChange={(e) => updateLine(bi, lii, { quantity: e.target.value })}
                       />
                       <Input
-                        className="col-span-2" size="sm" type="number" min="0" step="0.01" title="Unit price"
+                        className="col-span-2" size="sm" type="number" min="0" step="0.0001" title="Unit price"
                         value={li.unitPrice}
                         onChange={(e) => updateLine(bi, lii, { unitPrice: e.target.value })}
                       />

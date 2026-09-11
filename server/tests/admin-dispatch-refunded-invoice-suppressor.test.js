@@ -396,9 +396,11 @@ describe('completion route: terminal invoice → no mint, no pay link, manual-bi
   });
 
   test('the pre-minted lookup cannot resurrect the older live row once the refunded invoice won', () => {
-    const at = src.indexOf("preMintedInvoice = await completionSuppressorInvoiceLookup(db, { scheduled_service_id: svc.id });");
+    // The issued-invoice closeout pins its own invoice (#4127); every other
+    // completion still asks the helper for the newest linked row.
+    const at = src.search(/preMintedInvoice = issuedInvoiceCloseout\s*\n\s*\? existingCompletionInvoice\s*\n\s*: await completionSuppressorInvoiceLookup\(db, \{ scheduled_service_id: svc\.id \}\);/);
     expect(at).toBeGreaterThan(-1);
-    expect(src.slice(at, at + 600)).toContain('if (terminalCompletionInvoice) preMintedInvoice = null;');
+    expect(src.slice(at, at + 800)).toContain('if (terminalCompletionInvoice) preMintedInvoice = null;');
   });
 
   test('the terminal invoice is NEVER reused as the completion invoice / pay link', () => {
@@ -543,7 +545,7 @@ describe('completion route wiring (source contract)', () => {
   test('both suppressor lookups route through the helper — no bare whereNot(void) invoice filter in the completion route', () => {
     expect(completeRoute).toMatch(/existingCompletionInvoice = await completionSuppressorInvoiceLookup\(db, \{ service_record_id: record\.id \}\)/);
     expect(completeRoute).toMatch(/existingCompletionInvoice = await completionSuppressorInvoiceLookup\(db, \{ scheduled_service_id: svc\.id \}\)/);
-    expect(completeRoute).toMatch(/preMintedInvoice = await completionSuppressorInvoiceLookup\(db, \{ scheduled_service_id: svc\.id \}\)/);
+    expect(completeRoute).toMatch(/preMintedInvoice = issuedInvoiceCloseout\s*\n\s*\? existingCompletionInvoice\s*\n\s*: await completionSuppressorInvoiceLookup\(db, \{ scheduled_service_id: svc\.id \}\)/);
     expect(completeRoute).not.toMatch(/db\('invoices'\)[\s\S]{0,200}\.whereNot\('status', 'void'\)/);
   });
 

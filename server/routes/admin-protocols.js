@@ -1220,13 +1220,18 @@ router.get('/lawn/command-center', async (req, res, next) => {
     if (await db.schema.hasTable('lawn_protocol_service_completions')) {
       const since = new Date();
       since.setDate(since.getDate() - 30);
+      // Protocol compliance counts only protocol-attributed rows: under
+      // GATE_LAWN_ACTUALS_LEDGER the table also holds one-time / commercial
+      // lawn visits with no protocol, which are not protocol completions.
       const [totalRow, missingRow] = await Promise.all([
         db('lawn_protocol_service_completions')
           .where('created_at', '>=', since)
+          .whereNotNull('protocol_key')
           .count('id as count')
           .first(),
         db('lawn_protocol_service_completions')
           .where('created_at', '>=', since)
+          .whereNotNull('protocol_key')
           .whereRaw("jsonb_array_length(coalesce(missing_required_tasks, '[]'::jsonb)) > 0")
           .count('id as count')
           .first()
@@ -1235,12 +1240,14 @@ router.get('/lawn/command-center', async (req, res, next) => {
       const skippedRow = await db('lawn_protocol_product_actuals as lppa')
         .join('lawn_protocol_service_completions as lpsc', 'lppa.lawn_protocol_service_completion_id', 'lpsc.id')
         .where('lpsc.created_at', '>=', since)
+        .whereNotNull('lpsc.protocol_key')
         .where('lppa.status', 'skipped')
         .count('lppa.id as count')
         .first()
         .catch(() => ({ count: 0 }));
       const recent = await db('lawn_protocol_service_completions')
         .select('id', 'service_record_id', 'window_title', 'treated_sqft', 'carrier_gal_per_1000', 'missing_required_tasks', 'created_at')
+        .whereNotNull('protocol_key')
         .orderBy('created_at', 'desc')
         .limit(5)
         .catch(() => []);

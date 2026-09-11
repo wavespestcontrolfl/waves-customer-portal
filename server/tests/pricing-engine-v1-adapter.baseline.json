@@ -435,24 +435,24 @@
       "mq": [],
       "tmBait": {
         "ai": null,
-        "ti": 691,
+        "ti": 740,
         "bmo": 29,
         "pmo": 29
       }
     },
     "oneTime": {
-      "total": 691,
-      "tmInstall": 691,
+      "total": 740,
+      "tmInstall": 740,
       "items": [
         {
           "name": "Trelona Installation",
-          "price": 691
+          "price": 740
         }
       ],
       "specItems": []
     },
     "totals": {
-      "year1": 1039,
+      "year1": 1088,
       "year2": 348
     }
   },

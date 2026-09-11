@@ -48,3 +48,48 @@ correction. No live charge, send or database operation was performed.
 
 The manifest still records 1,757 sites with 1,735 unsupported/unverified sites;
 none became verified or excepted. All 18 changed rows remain unsupported.
+
+## Finance
+
+PR #4324 source reviewed at `a81f137a403e962ebc18a5a82073391a12093967`,
+against the same main baseline above. Of 24 changed/new census sites, 11
+request/export expressions have identical normalized ASTs. Twelve GET call
+sites preserve existing URLs and response projections while extracting retry
+loaders or changing literal syntax; the remaining site is the generic
+`useTaxRead` GET adapter. Four new census IDs reflect moved handlers and the
+new adapter, not new endpoints. All write expressions remain unchanged.
+
+| Action ID | Handler | Method / endpoint | Expression review |
+| --- | --- | --- | --- |
+| `01f5105c8ebbbb0e30e187c1` | `setVehicleMethod` | `PUT /admin/revenue/settings` | Identical normalized AST |
+| `02381658f96b87ad492cea92` | `loadTransactions` | `GET /admin/banking/payouts/:param` | Existing payout-detail GET moved from toggleExpand to loadTransactions with the same payoutId interpolation and transactions response projection; the extracted loader exposes retry/error state. |
+| `0ffb0e228205a283090789ca` | `TaxPage` | `GET /admin/tax/accounts-receivable` | Existing /admin/tax/accounts-receivable GET is routed through useTaxRead with the same URL/query and response projection. The helper invokes adminFetch(path) without options and exposes loading/error/retry state; handler extraction changes the census location but introduces no write or endpoint. |
+| `18f34113495448196ffd02fb` | `TaxRatesTab` | `GET /admin/tax/rates` | Existing /admin/tax/rates GET is routed through useTaxRead with the same URL/query and response projection. The helper invokes adminFetch(path) without options and exposes loading/error/retry state; handler extraction changes the census location but introduces no write or endpoint. |
+| `2bf2f0db99d038c8231e4898` | `handleRunAdvisor` | `POST /admin/tax/advisor/run` | Identical normalized AST |
+| `31c0181cab361be69b459329` | `act` | `POST dynamic/local` | Identical normalized AST |
+| `453d3a8b92660b51109f41c4` | `AdvisorTab` | `GET /admin/tax/advisor/reports` | Existing /admin/tax/advisor/reports GET is routed through useTaxRead with the same URL/query and response projection. The helper invokes adminFetch(path) without options and exposes loading/error/retry state; handler extraction changes the census location but introduces no write or endpoint. |
+| `54c9e5210aa634e7510e6346` | `confirmVehicleUse` | `PUT /admin/tax/equipment/:param` | Identical normalized AST |
+| `6cb6dfcfb209d14b59c7335c` | `toggleTaxable` | `PUT /admin/tax/service-taxability/:param` | Identical normalized AST |
+| `7dad9f6e74407d2d69c6d6ae` | `AccountsReceivableTab` | `GET /admin/tax/accounts-receivable` | Existing /admin/tax/accounts-receivable GET is routed through useTaxRead with the same URL/query and response projection. The helper invokes adminFetch(path) without options and exposes loading/error/retry state; handler extraction changes the census location but introduces no write or endpoint. |
+| `931156f5b71e00d254c4eb00` | `BankImportTab` | `GET /admin/tax/bank-import/:param/expense-candidates` | Identical normalized AST |
+| `99bc4a37701bd26e3187d23f` | `AdvisorTab` | `GET /admin/tax/advisor/alerts` | Existing /admin/tax/advisor/alerts GET is routed through useTaxRead with the same URL/query and response projection. The helper invokes adminFetch(path) without options and exposes loading/error/retry state; handler extraction changes the census location but introduces no write or endpoint. |
+| `9e1d5968fb45dcd05bd36cda` | `handleAdd` | `POST /admin/tax/expenses` | Identical normalized AST |
+| `a25eac570cbcf064c5dd1e56` | `TaxPage` | `GET /admin/tax/pnl` | Existing /admin/tax/pnl GET is routed through useTaxRead with the same URL/query and response projection. The helper invokes adminFetch(path) without options and exposes loading/error/retry state; handler extraction changes the census location but introduces no write or endpoint. |
+| `a75a926448fe92be78ee3eb6` | `FilingCalendarTab` | `GET /admin/tax/filings` | Existing /admin/tax/filings GET is routed through useTaxRead with the same URL/query and response projection. The helper invokes adminFetch(path) without options and exposes loading/error/retry state; handler extraction changes the census location but introduces no write or endpoint. |
+| `ae07a82b11ad27ae9bdd2e48` | `ExemptionsTab` | `GET /admin/tax/exemptions` | Existing /admin/tax/exemptions GET is routed through useTaxRead with the same URL/query and response projection. The helper invokes adminFetch(path) without options and exposes loading/error/retry state; handler extraction changes the census location but introduces no write or endpoint. |
+| `b1b78e8e2ffb3994dc33040f` | `bulkClassify` | `POST /admin/tax/mileage/bulk-classify` | Identical normalized AST |
+| `becd52cfa36878f285f8bef2` | `BankImportTab` | `GET /admin/tax/bank-import/:param/refund-candidates` | Identical normalized AST |
+| `c020d2157337e58db6c10aa9` | `handleAlertAction` | `PUT /admin/tax/advisor/alerts/:param` | Identical normalized AST |
+| `cd294d67d2572a0f0f3f88e3` | `EquipmentTab` | `GET /admin/tax/equipment` | Existing /admin/tax/equipment GET is routed through useTaxRead with the same URL/query and response projection. The helper invokes adminFetch(path) without options and exposes loading/error/retry state; handler extraction changes the census location but introduces no write or endpoint. |
+| `e7dd8153aed82cf6325c208e` | `useTaxRead` | `GET dynamic/local` | The extracted useTaxRead helper calls the existing authenticated adminFetch(path) with no options (GET). Its callers supply the existing tax read endpoints; it retains their response projections and adds loading/error/retry state and an unmount/stale-response guard. No write or new endpoint is introduced. |
+| `f2c4f9ca170e4a97b2b39f08` | `BankImportTab` | `GET /admin/tax/bank-import/:param/payout-candidates` | Identical normalized AST |
+| `f30f23f95af16b4aacad2729` | `handleRunAdvisor` | `GET /admin/tax/advisor/alerts` | The no-interpolation template literal becomes a string literal with the identical /admin/tax/advisor/alerts?status=new GET URL. |
+| `f96791400cd99a8610aa7fba` | `ServiceTaxabilityTab` | `GET /admin/tax/service-taxability` | Existing /admin/tax/service-taxability GET is routed through useTaxRead with the same URL/query and response projection. The helper invokes adminFetch(path) without options and exposes loading/error/retry state; handler extraction changes the census location but introduces no write or endpoint. |
+
+Validation: the coverage gate reports zero drift and its eight existing unit
+tests pass. The manifest adds four unsupported census records (1,761 recorded,
+1,739 unsupported); all 24 reviewed records remain `reviewed_unmapped`.
+The Invoice records and every unrelated record are byte-equivalent as JSON
+objects to the parent commit. Existing 34 finance tests, 322 synthetic browser
+cases, and the full-stack 96-test/build run cover the UI behavior. This
+correction changes only the census manifest and this evidence document.

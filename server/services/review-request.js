@@ -19,6 +19,20 @@ const { renderSmsTemplate } = require("./sms-template-renderer");
 const { firstNameFrom } = require("./customer-contact");
 const TWILIO_NUMBERS = require("../config/twilio-numbers");
 
+// An explicit 'uncertain' deliveryOutcome (the provider handoff crossed the
+// SDK boundary with no definitive accept/reject) is never safe to release
+// for an automatic retry — the customer may already hold the text. Checked
+// as its own predicate, NOT via sms-auto-send's isAmbiguousProviderOutcome:
+// that helper's legacy fallback treats a bare retryable/deferred result (no
+// deliveryOutcome at all) as ambiguous too, which would flip this file's own
+// pre-tri-state convention — retryable here has always meant "requeue for
+// cron retry", not "hold for reconciliation" — into a silent regression. A
+// missing/undefined deliveryOutcome must keep exactly its old
+// retryable-or-deferred handling (codex #4338 P1).
+function isExplicitlyUncertainOutcome(result) {
+  return !!result && result.deliveryOutcome === "uncertain";
+}
+
 // Neutral technician labels for customer copy when no name resolves — never a
 // person's name (Field Team Program: the visiting tech is whoever the row says).
 // The SMS form is 9 characters so every {tech}-bearing template stays inside
@@ -683,6 +697,12 @@ function unsentOutcome(outcome) {
 }
 const deliveredOrRefused = (outcome) => !!outcome && (outcome.sent === true || !!outcome.refused);
 
+// Callers must check isExplicitlyUncertainOutcome(result) BEFORE this: an
+// uncertain provider handoff (no SID, or an unrecognized post-handoff
+// error) must never fall through to an automatic retry here even when
+// retryable happens to be unset — the customer may already hold the text.
+// This stays keyed on the legacy retryable/deferred flags for a definitive
+// not_sent result (a 429 etc.), matching the tri-state contract.
 function retryAtForDeferredSend(result) {
   if (!result || !(result.retryable || result.deferred)) {
     return null;
@@ -1998,6 +2018,22 @@ const ReviewService = {
         }
         await releaseReviewSmsReservation(reservation);
         reservation = null;
+        if (isExplicitlyUncertainOutcome(result)) {
+          // No reservation held this send (a non-ask template never takes
+          // one), but the handoff still crossed the SDK boundary with no
+          // definitive accept/reject — the customer may already hold the
+          // text. Park the row out of the retry sweep rather than schedule
+          // a resend that could duplicate it (codex #4338 P1). Ask
+          // templates never reach here: their reservation branch above
+          // holds the full 72-hour spacing window instead.
+          await db("review_requests").where({ id: requestId }).update({
+            status: "deferred",
+          });
+          logger.error(
+            `[review] SMS outcome UNCERTAIN (customerId=${customer.id} requestId=${requestId} auditLogId=${result.auditLogId || "n/a"} code=${result.code}) — held, not retried automatically`,
+          );
+          return { deferred: "provider_uncertain", nextAllowedAt: null };
+        }
         const deferredRetryAt = retryAtForDeferredSend(result);
         if (deferredRetryAt) {
           await db("review_requests").where({ id: requestId }).update({
@@ -3237,6 +3273,17 @@ const ReviewService = {
           logger.warn(
             `[review] Follow-up SMS blocked/failed (customerId=${customer.id} requestId=${request.id} auditLogId=${result.auditLogId || "n/a"} code=${result.code || "UNKNOWN"})`,
           );
+          if (isExplicitlyUncertainOutcome(result)) {
+            // The handoff never confirmed accept/reject — the customer may
+            // already hold this follow-up. Mark it attempted so the next
+            // run does not risk a duplicate text (codex #4338 P1).
+            await db("review_requests").where({ id: request.id }).update({
+              followup_sent: true,
+              followup_sent_at: new Date(),
+            });
+            suppressed++;
+            continue;
+          }
           if (
             result.blocked &&
             result.code !== "CONSENT_LOOKUP_FAILED" &&
@@ -3797,6 +3844,15 @@ const ReviewService = {
         status: "sent",
       });
       return { ok: true, sent: true, channel, requestId: request.id, auditLogId: result.auditLogId };
+    }
+    if (isExplicitlyUncertainOutcome(result)) {
+      // The provider handoff crossed the SDK boundary with no definitive
+      // accept/reject (no SID, or an error thrown after acceptance) — the
+      // customer may already hold this touch. Hold it out of
+      // processScheduled rather than schedule an automatic resend, which
+      // could duplicate a text that already landed (codex #4338 P1).
+      await db("review_requests").where({ id: request.id }).update({ status: "deferred" });
+      return { ok: false, deferred: true, channel, requestId: request.id, code: result?.code };
     }
     const deferredRetryAt = retryAtForDeferredSend(result);
     if (deferredRetryAt) {
@@ -5652,10 +5708,17 @@ const ReviewService = {
       if (parked && map[r.customer_id] && !map[r.customer_id].parked) return;
       const plan = Array.isArray(r.plan) ? r.plan : JSON.parse(r.plan || "[]");
       const nextFrom = r.next_run_at ? new Date(Math.max(new Date(r.next_run_at).getTime(), Date.now())) : null;
+      // An active row overdue by more than 7 days is retired as `stale` by
+      // _runSequenceStep at its next pickup, never sent — promising a tick
+      // for it would advertise a delivery that cannot occur (codex #4140
+      // r24 P2). Same predicate as the runner's guard.
+      const staleRetire = !parked && nextFrom != null
+        && Date.now() - new Date(r.next_run_at).getTime() > 7 * 86400000;
 
       map[r.customer_id] = {
         id: r.id,
         parked,
+        staleRetire,
         currentStep: r.current_step,
         totalSteps: plan.length,
         nextRunAt: r.next_run_at,
@@ -5663,7 +5726,7 @@ const ReviewService = {
         // runner holds the claim). An overdue row (missed tick, gate re-enabled
         // between ticks) is picked up at the next tick from NOW, not at a tick
         // that has already passed (codex #4140 r8).
-        nextSendTickAt: nextFrom ? (parked ? nextCadenceTickAt(nextFrom) : nextSendTickFor(plan[r.current_step], nextFrom)) : null,
+        nextSendTickAt: nextFrom && !staleRetire ? (parked ? nextCadenceTickAt(nextFrom) : nextSendTickFor(plan[r.current_step], nextFrom)) : null,
         // An ask step can swap channel at send time (sendOutreachTouch: the
         // intended channel unavailable, the other allowed) — email→SMS then
         // meets the send window, SMS→email escapes it — so the page shows the
@@ -5897,6 +5960,7 @@ const ReviewService = {
 ReviewService.__private = {
   lastDeliveredAskAt,
   retryAtForDeferredSend,
+  isExplicitlyUncertainOutcome,
   calculateReviewSendPlan,
   nextCadenceTickAt,
   REVIEW_CADENCE_TICK_MINUTES,
