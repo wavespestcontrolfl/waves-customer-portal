@@ -1270,13 +1270,7 @@ router.post('/sms', async (req, res) => {
     const alertEligible = (Body || inboundMedia.length) && !smsReaction && !courtesyOnly && !isTrackingLeadInbound && !aiAnswered && !knownInboundNotified && !(process.env.ADAM_PHONE && From === process.env.ADAM_PHONE && To === process.env.ADAM_PHONE);
 
     if (alertEligible) {
-      if (!customer && smsLogEntry?.created_at) {
-        // Claim + throttle-check + dispatch, shared with the loud-reaction
-        // path above (claude pre-push audit P1: a second unthrottled unknown-
-        // sender alert path defeats the same per-sender throttle both exist
-        // to enforce).
-        await dispatchUnknownSenderAlert({ From, MessageSid, message: Body || `${inboundMedia.length} photo${inboundMedia.length === 1 ? '' : 's'}` });
-      } else {
+      if (customer) {
         // Known customer whose thread bell above did not land — not
         // throttled; every one of their messages may alert.
         try {
@@ -1285,6 +1279,16 @@ router.post('/sms', async (req, res) => {
           if (e.alreadyRead) logger.info('[notifications] sms_reply skipped — thread read before the bell');
           else logger.error(`[notifications] unknown-sender sms_reply trigger failed: ${e.message}`);
         }
+      } else {
+        // Unknown sender — ALWAYS through the throttled claim/dispatch path,
+        // shared with the loud-reaction path above, regardless of whether
+        // smsLogEntry itself carries a created_at (its insert is
+        // best-effort/.catch()-guarded — claude pre-push audit P1, round 2:
+        // a failed or malformed sms_log insert must not fall through to an
+        // unthrottled ringSmsReplyBell call; hasRecentUnknownSenderReceipt no
+        // longer reads smsLogEntry at all since the ordering cutoff it once
+        // needed was removed, so this gate was never load-bearing).
+        await dispatchUnknownSenderAlert({ From, MessageSid, message: Body || `${inboundMedia.length} photo${inboundMedia.length === 1 ? '' : 's'}` });
       }
     }
 

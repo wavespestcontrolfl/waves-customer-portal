@@ -19,6 +19,10 @@ function mockDb(table) {
     const q = mockPg(table);
     const insert = q.insert.bind(q);
     q.insert = (row) => insert({ created_at: new Date(Date.now() + ++mockState.sequence), ...row });
+    if (mockState.omitSmsLogCreatedAt) {
+      const ret = q.returning?.bind(q);
+      if (ret) q.returning = (...args) => ret(...args).then((rows) => rows.map((r) => ({ ...r, created_at: undefined })));
+    }
     for (const method of ['first', 'update']) {
       const run = q[method].bind(q);
       q[method] = (...args) => {
@@ -42,7 +46,15 @@ function mockDb(table) {
   const matches = () => mockState.sms.filter((r) => filters.every((f) => f(r)));
   q.insert = (row) => {
     const stored = { id: `synthetic-${++mockState.sequence}`, created_at: new Date(Date.now() + mockState.sequence), ...row };
-    if (table === 'sms_log') mockState.sms.push(stored);
+    if (table === 'sms_log') {
+      mockState.sms.push(stored);
+      // Seam for the "sms_log insert succeeded but returned a row without
+      // created_at" scenario (claude pre-push audit P1, round 2): the
+      // stored row (read by hasRecentUnknownSenderReceipt) keeps its real
+      // created_at; only what's handed back as `smsLogEntry` loses it.
+      q.rows = [mockState.omitSmsLogCreatedAt ? { ...stored, created_at: undefined } : stored];
+      return q;
+    }
     q.rows = [stored]; return q;
   };
   q.update = async (patch) => {
@@ -150,7 +162,7 @@ async function storedMetadata() {
 beforeEach(async () => {
   if (mockPg) await mockPg.raw('TRUNCATE sms_log');
   jest.clearAllMocks();
-  mockState.sms = []; mockState.sequence = 0; mockState.ai = true; mockState.read = false; mockState.claims = new Map();
+  mockState.sms = []; mockState.sequence = 0; mockState.ai = true; mockState.read = false; mockState.claims = new Map(); mockState.omitSmsLogCreatedAt = false;
   mockClaim.calls = []; mockClaim.fail = false;
   processMessage.mockResolvedValue({ reply: 'Synthetic answer', escalated: false });
   sendCustomerMessage.mockResolvedValue({ sent: true });
@@ -300,5 +312,20 @@ test('a loud reaction consumes the window for a later ordinary text from the sam
   await receive('Disliked "We will treat inside"', numbers.locations.parrish.number);
   expect(triggerNotification).toHaveBeenCalledTimes(1);
   await receive('Please quote pest control.', numbers.locations.parrish.number);
+  expect(triggerNotification).toHaveBeenCalledTimes(1);
+});
+
+test('an unknown sender still throttles through dispatchUnknownSenderAlert when smsLogEntry carries no created_at (claude pre-push audit P1, round 2)', async () => {
+  mockState.ai = false;
+  mockState.omitSmsLogCreatedAt = true;
+  // Fixed: the ordinary-text branch used to route on `!customer &&
+  // smsLogEntry?.created_at`, so a falsy/malformed smsLogEntry (its insert
+  // is best-effort) fell through to an UNTHROTTLED ringSmsReplyBell call for
+  // an unknown sender — the exact bypass this PR's throttle exists to close.
+  // It now routes purely on `customer` truthiness; a second message from
+  // the same unknown sender must still be suppressed.
+  await receive('Please quote pest control.', numbers.locations.parrish.number);
+  expect(triggerNotification).toHaveBeenCalledTimes(1);
+  await receive('Second message, same sender.', numbers.locations.parrish.number);
   expect(triggerNotification).toHaveBeenCalledTimes(1);
 });
