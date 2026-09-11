@@ -936,6 +936,23 @@ async function executeMerge({ winnerId, loserId, performedBy, performedById = nu
         ['property-preferences', custId],
       );
     }
+    // The invoice-issued-closeout gate lock, BEFORE the customer row lock
+    // (GitHub r7 P2 #4127): that closeout takes the invoice row lock FIRST
+    // and the customer row lock LAST (required there to match the
+    // void/reversal paths' invoice → customer order), while this merge
+    // takes the customer row lock FIRST and its FK sweep below repoints
+    // that same invoice's customer_id — two different row-lock orders on
+    // the same two rows, an ABBA hazard no single order can fix. The
+    // closeout takes this identical lock (same namespace, the visit's
+    // customer id) before it touches the invoice row, so whichever
+    // transaction gets here first runs to completion before the other
+    // takes any row lock.
+    for (const custId of [winnerId, loserId].map(String).sort()) {
+      await trx.raw(
+        'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
+        ['invoice-issued-closeout', custId],
+      );
+    }
     // Combined-session locks BEFORE any customer row locks, UNCONDITIONALLY
     // (codex #3427 r16/r18 P1): the payer-activation release helper later
     // waits on pay.combined.customer, and a payer-presence peek here is a
@@ -2656,6 +2673,17 @@ async function revertMerge({ journalId, performedBy, performedById }) {
     // the journal → comms → customers order cannot cycle. The later
     // email/name-guard acquisitions of this same key are reentrant no-ops.
     await lockCustomerComms(trx, winnerId);
+    // The invoice-issued-closeout gate lock, sorted, BEFORE the customer
+    // rows (GitHub r7 P2 #4127) — the same reason as executeMerge: this undo
+    // locks the customers first and later the journaled invoices FOR
+    // UPDATE, while the closeout locks invoice → customer; the shared gate
+    // serializes the two before either takes a row lock.
+    for (const custId of [winnerId, loserId].map(String).sort()) {
+      await trx.raw(
+        'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
+        ['invoice-issued-closeout', custId],
+      );
+    }
     const locked = await trx('customers').whereIn('id', [winnerId, loserId]).forUpdate().select('*');
     const winner = locked.find((r) => r.id === winnerId);
     const loserRow = locked.find((r) => r.id === loserId);

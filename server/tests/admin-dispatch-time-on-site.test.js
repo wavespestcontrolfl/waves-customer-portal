@@ -1137,7 +1137,10 @@ describe('PATCH /:serviceId/time-on-site — behavioral', () => {
     // pricing reads retain their existing relative lock order,
     // matching acceptance and customer-dedupe ordering. No visit mutation or
     // timer snapshot may precede the visit lock that serializes corrections.
-    expect(source).toMatch(/const persistRecord = async \(trx\) => \{\s*\n(?:\s*\/\/[^\n]*\n)*\s*if \(propertyHistoryEnabled && canLinkLawnAssessmentRecord\) \{\s*await require\('\.\/lawn-assessment'\)\.lockCustomerBaseline\(svc\.customer_id, trx\);\s*\}\s*(?:\s*\/\/[^\n]*\n)*\s*if \(completionPricingPlan\) \{\s*await require\('\.\.\/services\/completion-pricing'\)\.lockCompletionPricingEstimate\(trx, completionPricingPlan\);\s*\}\s*(?:\s*\/\/[^\n]*\n)*\s*const snapshotCustomerRow = await trx\('customers'\)[^;]*;\s*if \(completionPricingPlan\) \{\s*await require\('\.\.\/services\/completion-pricing'\)\.lockCompletionPricingParent\(trx, completionPricingPlan\);\s*\}\s*const lockedSvcRow = await trx\('scheduled_services'\)\.where\(\{ id: svc\.id \}\)\.forUpdate\(\)\.first\(\);/);
+    // The invoice-issued closeout (#4127) may take its gate lock, the mint
+    // advisory lock and the issued invoice row FIRST — ahead of every lock
+    // below, matching the invoice → customer order of the reversal paths.
+    expect(source).toMatch(/const persistRecord = async \(trx\) => \{\s*\n(?:\s*\/\/[^\n]*\n)*(?:\s*if \(issuedInvoiceCloseout\) \{[\s\S]*?\n\s*\}\s*\n)?(?:\s*\/\/[^\n]*\n)*\s*if \(propertyHistoryEnabled && canLinkLawnAssessmentRecord\) \{\s*await require\('\.\/lawn-assessment'\)\.lockCustomerBaseline\(svc\.customer_id, trx\);\s*\}\s*(?:\s*\/\/[^\n]*\n)*\s*if \(completionPricingPlan\) \{\s*await require\('\.\.\/services\/completion-pricing'\)\.lockCompletionPricingEstimate\(trx, completionPricingPlan\);\s*\}\s*(?:\s*\/\/[^\n]*\n)*\s*const snapshotCustomerRow = await trx\('customers'\)[^;]*;\s*if \(completionPricingPlan\) \{\s*await require\('\.\.\/services\/completion-pricing'\)\.lockCompletionPricingParent\(trx, completionPricingPlan\);\s*\}\s*const lockedSvcRow = await trx\('scheduled_services'\)\.where\(\{ id: svc\.id \}\)\.forUpdate\(\)\.first\(\);/);
     expect(source).toContain('else await db.transaction(persistRecord);');
   });
 

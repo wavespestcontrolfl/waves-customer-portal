@@ -8706,6 +8706,19 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
       } else if (occupancyRouteTouched && occupancyDateKey) {
         await acquireOccupancyLock(trx, occupancyDateKey);
       }
+      // A zero-price re-service conversion voids this visit's invoices below
+      // (voidConversionInvoicesRestoringCredits) AFTER locking the visit row,
+      // while the issued-invoice closeout locks the invoice FIRST and the
+      // visit row after it — an ABBA deadlock (GitHub r10 P2 #4127). The
+      // closeout serializes on the scheduled-service invoice-mint advisory
+      // lock ahead of its invoice lock; the conversion takes the same lock
+      // here — after the occupancy rung (slot-reservation's order) and
+      // before any row lock — so the two run strictly one after the other
+      // whichever starts first.
+      if (reServiceConversionZeroPrice) {
+        const { acquireScheduledInvoiceMintLock } = require('../services/scheduled-invoice-mint');
+        await acquireScheduledInvoiceMintLock(trx, req.params.id);
+      }
       // Regrouping can adopt a destination partner's technician. Include all
       // destination rows (eligibility may change during this save), then
       // revalidate after locking: an assignment may finish while we wait.
@@ -11101,7 +11114,13 @@ async function sendPrepaidReceiptForInvoice(invoice, { operatorInitiated = false
 // atomic paid transition; open PaymentIntent cancelled/refused first), then send
 // the receipt. Never throws to the route: every non-send path returns a typed
 // reason the modal can explain.
-async function generatePrepaidReceiptForService(serviceId, { operatorInitiated = false } = {}) {
+// actorTechnicianId: the operator recording the prepayment — the actor of
+// the invoice-issued closeout's visit transition (GitHub r4 P1 #4127).
+// actorRole: their AUTHENTICATED staff role (req.techRole) — this route
+// admits technicians (requireTechOrAdmin), so the closeout's own audit
+// must record 'technician' rather than folding every non-null actor into
+// 'admin' (GitHub r7 P2 #4127).
+async function generatePrepaidReceiptForService(serviceId, { operatorInitiated = false, actorTechnicianId = null, actorRole = null } = {}) {
   const svc = await db('scheduled_services')
     .where('scheduled_services.id', serviceId)
     .leftJoin('customers', 'scheduled_services.customer_id', 'customers.id')
@@ -11134,9 +11153,21 @@ async function generatePrepaidReceiptForService(serviceId, { operatorInitiated =
   const invoice = minted.invoice;
   if (invoice.payer_id) return { sent: false, reason: 'payer_billed' };
 
+  // Invoice issued ⇒ visit completed (owner ruling 2026-09-07, dark behind
+  // GATE_INVOICE_ISSUED_CLOSES_VISIT): cash taken at the visit and applied
+  // to its invoice is money received by hand — the same proof
+  // recordManualPayment closes the visit on (GitHub r4 P1 #4127). Runs
+  // after the paid flip commits (and again on the already-paid resend, the
+  // operator's reachable retry); a completed visit refuses quietly.
+  const closeOutOnPaid = async () => {
+    const { closeOutVisitForIssuedInvoice } = require('../services/invoice-issued-closeout');
+    await closeOutVisitForIssuedInvoice({ invoiceId: invoice.id, trigger: 'paid', actorTechnicianId, actorRole });
+  };
+
   // Already settled (a prior mark-prepaid, or a card/ACH payment landed): just
   // (idempotently) send the receipt for the existing paid invoice.
   if (['paid', 'prepaid'].includes(invoice.status)) {
+    await closeOutOnPaid();
     return sendPrepaidReceiptForInvoice(invoice, { operatorInitiated });
   }
 
@@ -11250,6 +11281,10 @@ async function generatePrepaidReceiptForService(serviceId, { operatorInitiated =
     }
   }
 
+  // The visit-linked invoice is paid (this call, or a race winner's): close
+  // the visit it bills out quietly.
+  await closeOutOnPaid();
+
   return sendPrepaidReceiptForInvoice(outcome.invoice, { operatorInitiated });
 }
 
@@ -11338,7 +11373,7 @@ router.post('/:id/prepaid', async (req, res, next) => {
     if (decision.attempt) {
       // Authenticated operator action with an explicit receipt request —
       // operator provenance for the 8AM-8PM send window.
-      receipt = await generatePrepaidReceiptForService(req.params.id, { operatorInitiated: true }).catch((err) => {
+      receipt = await generatePrepaidReceiptForService(req.params.id, { operatorInitiated: true, actorTechnicianId: req.technicianId || null, actorRole: req.techRole || null }).catch((err) => {
         logger.error(`[schedule] prepaid receipt failed for ${req.params.id}: ${err.message}`);
         return { sent: false, reason: 'error' };
       });

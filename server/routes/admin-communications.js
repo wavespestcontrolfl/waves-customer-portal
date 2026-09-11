@@ -879,7 +879,7 @@ router.post('/sms', async (req, res, next) => {
     if (statementLinkIds && result?.sent) {
       try {
         const { isRealProviderSend } = require('../services/sms-auto-send');
-        if (isRealProviderSend(result)) await require('../services/composer-customer-links').markStatementsSent(statementLinkIds);
+        if (isRealProviderSend(result)) await require('../services/composer-customer-links').markStatementsSent(statementLinkIds, { actorTechnicianId: req.technicianId || null, actorRole: req.techRole || null });
       } catch (stampErr) {
         logger.warn(`[communications] statement sent stamp failed (text already sent): ${stampErr.message}`);
       }
@@ -1050,7 +1050,7 @@ router.post('/sms', async (req, res, next) => {
     // accepted-then-thrown send DID deliver the statement.
     if (statementLinkIds && err?.providerOutcome?.sent === true) {
       try {
-        await require('../services/composer-customer-links').markStatementsSent(statementLinkIds);
+        await require('../services/composer-customer-links').markStatementsSent(statementLinkIds, { actorTechnicianId: req.technicianId || null, actorRole: req.techRole || null });
       } catch (stampErr) {
         logger.warn(`[communications] statement sent stamp failed after a throw: ${stampErr.message}`);
       }
