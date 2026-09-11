@@ -641,7 +641,7 @@ postgres('customer app preferences and push ledger (PostgreSQL)', () => {
       expect(await require('../services/messaging/push-channel-routing').attemptPushFirst({
         customerId: property, to: '+19415550101', body: 'Your invoice is ready.', messageType: 'invoice',
         explicitPushOnly: true, invoiceId, notificationEventKey: `qa:${invoiceId}`,
-      })).toMatchObject({ delivered: false, retryable: true, reason: 'invoice_lookup_failed' });
+      })).toMatchObject({ delivered: false, retryable: true, deliveryOutcome: 'not_sent', reason: 'invoice_lookup_failed' });
       expect(apns.send).not.toHaveBeenCalled();
       expect(await mockPg('notifications')).toHaveLength(0);
     } finally {
