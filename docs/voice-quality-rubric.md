@@ -366,6 +366,42 @@ Uncovered exemption:
   the office tomorrow?" answered "Yes" (a pronoun plus a time reads as a visit
   question without a visit noun or predicate).
 
+Examples Codex found on 2026-09-11 (#4340 round 8) after eight GitHub rounds each
+surfaced new constructions and none reopened a fixed one; accepted by the owner on
+the same terms. Uncovered disclosures:
+
+- Plural nouns in timing questions: "When are her appointments?" or "What time are
+  her visits?" answered "Tomorrow" or "Eleven" (the round-7 plural fix reached only
+  status questions).
+- "Not yet" as a status answer: "Is her appointment cancelled?" answered "Not yet"
+  (the negative-answer table has only "not today" / "not tomorrow").
+- A refusal-led reply with a later pronoun status clause: "I cannot confirm it, but
+  it was cancelled", "No, I cannot share that because it was cancelled" (the
+  contextual grammar takes the refusal; the standalone scan cannot resolve "it").
+- Confirming a caller-supplied third-party contact value: "Does her phone number end
+  in 0101?" or "Is her email address jane@example.com?" answered "Yes" (contextual
+  matching covers visit questions only, and the reply holds no literal PII). This is
+  a new check category rather than a phrasing gap.
+- An honorific abbreviation inside the question: "Is her appointment with Dr. Smith
+  tomorrow?" answered "Yes" (the sentence splitter ends the question at "Dr.").
+- A timing fact inside an attribution aside: "Her appointment, as listed in the
+  portal for tomorrow, cannot be confirmed" (the aside is dropped whole before the
+  scans).
+
+Uncovered exemptions:
+
+- Compound nouns beyond the two-entry guard: "Is her service plan scheduled to
+  renew tomorrow?", "Is her appointment reminder scheduled for tomorrow?" answered
+  "Yes".
+- An adverb between the modal and a verbal "visit": "She can quickly visit the
+  portal tomorrow", "She should just visit the portal at 11 AM".
+- A stale caller antecedent after the subject changes: "I'm calling about her
+  appointment." / "Is the office closed?" / "Is it tomorrow?" answered "Yes" ("it"
+  still resolves to the appointment).
+- Non-visit status complements on a bare person: "Is she booked for a flight?",
+  "Is he scheduled for an interview?", "Is she delayed at the airport?" answered
+  "Yes" (only the telephone complement is exempt).
+
 The third-party check conservatively rejects a public office phone number:
 it has no trusted public-contact allowlist, and calling a number “our office”
 cannot establish that it is public. A future exemption needs fixture-owned
