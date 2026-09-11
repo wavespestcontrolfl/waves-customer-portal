@@ -87,6 +87,7 @@ import { useParams, useNavigate, useLocation } from 'react-router-dom';
 import Icon from '../components/Icon';
 import {
   WavesShell,
+  CustomerColumn,
   BrandCard,
   BrandButton,
   SerifHeading,
@@ -2643,7 +2644,7 @@ export default function PayPageV2() {
           header, footer, .waves-no-print { display: none !important; }
         }
       `}</style>
-      <div className="waves-customer-page waves-receipt-page">
+      <CustomerColumn>
         {isOverdue && (
           <div style={{
             marginBottom: SP.md,
@@ -3034,7 +3035,7 @@ export default function PayPageV2() {
           </BrandCard>
 
         {/* "Questions about this invoice?" help line removed (owner 2026-07-09). */}
-      </div>
+      </CustomerColumn>
     </WavesShell>
   );
 }
