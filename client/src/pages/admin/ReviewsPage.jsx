@@ -267,6 +267,17 @@ function autoReplyLabel(a) {
       return `Auto-reply: ${a.status}`;
   }
 }
+// Best-effort mapping onto the kit's 3 Badge tones (neutral | strong | alert —
+// no warn/positive tone exists). Main distinguished 7 statuses by color;
+// "posted" (done) gets strong, "failed"/"parked" (need staff attention —
+// main colored both the same amber) get alert, everything else stays neutral.
+// Kit-level gap: a distinct "needs attention" (amber) tone would let failed
+// and parked read differently again.
+function autoReplyTone(a) {
+  if (a.status === "posted") return "strong";
+  if (a.status === "failed" || a.status === "parked") return "alert";
+  return "neutral";
+}
 function autoReplyTitle(a) {
   const bits = [];
   if (a.reason) bits.push(`reason: ${a.reason.replace(/_/g, " ")}`);
@@ -432,7 +443,7 @@ function ReviewCard({ review, onReplySubmit, onDismiss, onAutoReplyAction }) {
               {autoReply && !review.missingSince && (
                 <Badge
                   title={autoReplyTitle(autoReply)}
-                  tone="neutral"
+                  tone={autoReplyTone(autoReply)}
                 >
                   {autoReplyLabel(autoReply)}
                 </Badge>

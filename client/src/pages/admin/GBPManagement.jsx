@@ -1284,6 +1284,13 @@ function ChangeHistoryTab({
   const locName = (id) => locations.find((l) => l.id === id)?.name || id;
   const fieldLabel = (f) =>
     f.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
+  // Best-effort mapping onto the kit's 3 Badge tones (neutral | strong |
+  // alert — no distinct amber/green tone exists). Main colored pending
+  // amber, approved green, rejected red; approved (done) gets strong,
+  // rejected keeps the genuine-alert tone, pending stays neutral. Kit-level
+  // gap: a distinct amber/green tone would restore full 3-way parity.
+  const statusTone = (status) =>
+    status === "approved" ? "strong" : status === "rejected" ? "alert" : "neutral";
   useEffect(() => {
     loadUpdates(filter);
   }, [filter, loadUpdates]);
@@ -1334,7 +1341,7 @@ function ChangeHistoryTab({
                 <Badge tone="neutral">{u.source}</Badge>
               </TD>
               <TD>
-                <Badge tone="neutral">{u.status}</Badge>
+                <Badge tone={statusTone(u.status)}>{u.status}</Badge>
               </TD>
               <TD className="text-ink-secondary max-w-[250px] overflow-hidden whitespace-nowrap">
                 {(u.old_value || "").substring(0, 30)} →{" "}
