@@ -31,8 +31,16 @@ describe('callback rollout policy', () => {
       expect(snoozed.effective_due_at).toBe(cardGate && commitmentGate ? '2099-01-01T00:00:00Z' : '2020-01-01T00:00:00Z');
       expect(snoozed.due_at).toBe('2020-01-01T00:00:00Z');
       expect(require('../services/call-commitments').isOverdue(snoozed)).toBe(!(cardGate && commitmentGate));
-      const deadline = require('../services/call-commitments').implicitDueAt(row);
-      expect(deadline?.toISOString() || null).toBe(cardGate && commitmentGate ? null : '2026-09-10T04:00:00.000Z');
+      // An undated callback keeps the legacy implicit deadline (the end of the
+      // call's ET day) under both gate states; a persisted staffed deadline is
+      // honoured only while cards are on. The projected effective_due_at of an
+      // undated card follows the same rule.
+      const ledger = require('../services/call-commitments');
+      expect(ledger.implicitDueAt(row).toISOString()).toBe('2026-09-10T04:00:00.000Z');
+      expect(ledger.implicitDueAt({ ...row, callback_due_at: callbackDue }).toISOString())
+        .toBe(cardGate && commitmentGate ? '2026-09-09T20:00:00.000Z' : '2026-09-10T04:00:00.000Z');
+      const undated = normalizeRow({ ...row, due_at: null, callback_due_at: null }).effective_due_at;
+      expect(undated ? new Date(undated).toISOString() : null).toBe(cardGate && commitmentGate ? '2026-09-10T04:00:00.000Z' : null);
     },
   );
 });

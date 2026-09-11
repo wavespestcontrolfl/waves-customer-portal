@@ -317,7 +317,14 @@ async function checkArrivalPlacement({ windowStart, windowEnd, durationMinutes, 
   return evaluateArrivalPlacement(context, { windowStart, windowEnd, durationMinutes, allowInsertion: false });
 }
 
+function capacityError(reason = 'route_changed') {
+  return Object.assign(new Error('This time is no longer available. Please choose another appointment.'), {
+    code: 'SLOT_UNAVAILABLE', reason, status: 409, statusCode: 409, isOperational: true,
+  });
+}
+
 module.exports = {
+  capacityError,
   arrivalWindowRoutingEnabled, loadArrivalRouteContext, evaluateArrivalPlacement, checkArrivalPlacement,
   enumerateArrivalPlacements,
   groupRouteStops, workDuration,
