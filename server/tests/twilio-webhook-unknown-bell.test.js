@@ -47,6 +47,16 @@ function mockDb(table) {
   return q;
 }
 mockDb.raw = (sql, values) => mockPg ? mockPg.raw(sql, values) : ({ sql, merge: values?.[0] ? JSON.parse(values[0]) : {} });
+// Seam for the per-sender alert-window lock: record what the route asks for
+// and whether it let the lock go.
+const mockLock = { calls: [], released: 0, fail: false };
+mockDb.transaction = async () => {
+  if (mockLock.fail) throw Object.assign(new Error('synthetic pool exhaustion'), { code: 'synthetic' });
+  return {
+    raw: async (sql, bindings) => { mockLock.calls.push({ sql: String(sql), bindings }); return { rows: [] }; },
+    rollback: async () => { mockLock.released++; },
+  };
+};
 jest.mock('../models/db', () => mockDb);
 jest.mock('../config/feature-gates', () => ({ isEnabled: (key) => key === 'webhooks' || (key === 'aiAssistantAutoReply' && mockState.ai) }));
 jest.mock('../services/twilio', () => ({ sendSMS: jest.fn(async () => ({})) }));
@@ -118,6 +128,7 @@ beforeEach(async () => {
   if (mockPg) await mockPg.raw('TRUNCATE sms_log');
   jest.clearAllMocks();
   mockState.sms = []; mockState.sequence = 0; mockState.ai = true; mockState.read = false;
+  mockLock.calls = []; mockLock.released = 0; mockLock.fail = false;
   processMessage.mockResolvedValue({ reply: 'Synthetic answer', escalated: false });
   sendCustomerMessage.mockResolvedValue({ sent: true });
   triggerNotification.mockResolvedValue({ bellWritten: true, push: { sent: 1 } });
@@ -170,6 +181,27 @@ test('ordinary location-line unknown texts ring the SMS bell', async () => {
   await receive('Please quote pest control.', numbers.locations.parrish.number);
   expect(triggerNotification).toHaveBeenCalledTimes(1);
   expect(processMessage).not.toHaveBeenCalled();
+});
+
+test('the alert window is serialized per sender across the check and the bell', async () => {
+  mockState.ai = false;
+  await receive('Please quote pest control.', numbers.locations.parrish.number);
+  const lock = mockLock.calls.find(({ sql }) => sql.includes('pg_advisory_xact_lock'));
+  expect(lock).toBeDefined();
+  expect(lock.bindings).toEqual([`sms_reply_alert:${sender}`]);
+  // Bounded, so a stuck peer cannot stall the webhook.
+  expect(mockLock.calls.some(({ sql }) => sql.includes('lock_timeout'))).toBe(true);
+  expect(triggerNotification).toHaveBeenCalledTimes(1);
+  // Held across the dispatch, then let go exactly once.
+  expect(mockLock.released).toBe(1);
+});
+
+test('an unavailable window lock rings unfenced rather than dropping first contact', async () => {
+  mockState.ai = false;
+  mockLock.fail = true;
+  await receive('Please quote pest control.', numbers.locations.parrish.number);
+  expect(triggerNotification).toHaveBeenCalledTimes(1);
+  expect(mockLock.released).toBe(0);
 });
 
 test('a consumed START or a courtesy row does not consume the first alert window', async () => {

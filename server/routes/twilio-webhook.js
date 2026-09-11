@@ -1154,28 +1154,49 @@ router.post('/sms', async (req, res) => {
     // suppress (leaving a new thread with no alert at all) — with a strict
     // created_at ordering, at most the later one suppresses. An exact
     // timestamp tie fails open to two alerts, the safe direction.
-    let repeatUnknownSender = false;
-    if (!customer && (Body || inboundMedia.length) && smsLogEntry?.created_at) {
-      try {
-        const prior = await db('sms_log')
-          .where({ direction: 'inbound', from_phone: From })
-          // Only a prior delivered bell/push consumes the throttle window.
-          // Commands, courtesy replies and successful AI turns do not alert.
-          .whereRaw("metadata->>'sms_reply_alerted' = 'true'")
-          .where('created_at', '>', new Date(Date.now() - 4 * 60 * 60 * 1000))
-          .where('created_at', '<', smsLogEntry.created_at)
-          .whereNot('twilio_sid', MessageSid)
-          .first('id');
-        repeatUnknownSender = Boolean(prior);
-      } catch (e) { logger.warn('[twilio-webhook] repeat-sender check failed', { code: e.code || 'unknown' }); }
-    }
+    const alertEligible = (Body || inboundMedia.length) && !smsReaction && !courtesyOnly && !isTrackingLeadInbound && !aiAnswered && !knownInboundNotified && !(process.env.ADAM_PHONE && From === process.env.ADAM_PHONE && To === process.env.ADAM_PHONE);
 
-    if ((Body || inboundMedia.length) && !smsReaction && !courtesyOnly && !isTrackingLeadInbound && !aiAnswered && !knownInboundNotified && !repeatUnknownSender && !(process.env.ADAM_PHONE && From === process.env.ADAM_PHONE && To === process.env.ADAM_PHONE)) {
-      try {
-        await ringSmsReplyBell({ customer, From, MessageSid, message: Body || `${inboundMedia.length} photo${inboundMedia.length === 1 ? '' : 's'}` });
-      } catch (e) {
-        if (e.alreadyRead) logger.info('[notifications] sms_reply skipped — thread read before the bell');
-        else logger.error(`[notifications] unknown-sender sms_reply trigger failed: ${e.message}`);
+    if (alertEligible) {
+      const ringNow = async () => {
+        try {
+          await ringSmsReplyBell({ customer, From, MessageSid, message: Body || `${inboundMedia.length} photo${inboundMedia.length === 1 ? '' : 's'}` });
+        } catch (e) {
+          if (e.alreadyRead) logger.info('[notifications] sms_reply skipped — thread read before the bell');
+          else logger.error(`[notifications] unknown-sender sms_reply trigger failed: ${e.message}`);
+        }
+      };
+      const windowHeld = async () => {
+        try {
+          const prior = await db('sms_log')
+            .where({ direction: 'inbound', from_phone: From })
+            // Only a prior delivered bell/push consumes the throttle window.
+            // Commands, courtesy replies and successful AI turns do not alert.
+            .whereRaw("metadata->>'sms_reply_alerted' = 'true'")
+            .where('created_at', '>', new Date(Date.now() - 4 * 60 * 60 * 1000))
+            .where('created_at', '<', smsLogEntry.created_at)
+            .whereNot('twilio_sid', MessageSid)
+            .first('id');
+          return Boolean(prior);
+        } catch (e) {
+          logger.warn('[twilio-webhook] repeat-sender check failed', { code: e.code || 'unknown' });
+          return false; // fail open: a missed alert is worse than a duplicate
+        }
+      };
+      if (!customer && smsLogEntry?.created_at) {
+        // The window check and the bell must not interleave for one sender.
+        // Read-then-dispatch let two texts arriving together both observe an
+        // empty window and both ring — the exact burst this throttle damps,
+        // since neither had stamped `sms_reply_alerted` yet. A per-sender
+        // advisory lock held across BOTH the check and the dispatch serializes
+        // them, so the second caller sees the first caller's receipt. The
+        // receipt still lands only after a delivered bell, so an undelivered
+        // one does not consume the window.
+        await withUnknownSenderAlertLock(From, async () => {
+          if (await windowHeld()) return;
+          await ringNow();
+        });
+      } else {
+        await ringNow();
       }
     }
 
@@ -1791,6 +1812,28 @@ router.post('/status', async (req, res) => {
 // customer may be null (unknown sender): the bell then carries the masked
 // phone as its name and links to the inbox list — there is no thread id
 // to deep-link and no customer-scoped read mark to write.
+// Serialize the unknown-sender alert window per sender. The lock lives on a
+// short-lived transaction (pg_advisory_xact_lock releases on rollback), is
+// bounded by lock_timeout so a stuck peer cannot stall the webhook, and falls
+// back to running UNFENCED rather than skipping the alert: a duplicate bell is
+// recoverable, a silently dropped first contact is not.
+async function withUnknownSenderAlertLock(From, fn) {
+  let trx = null;
+  try {
+    trx = await db.transaction();
+    await trx.raw("SET LOCAL lock_timeout = '2s'");
+    await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`sms_reply_alert:${From}`]);
+  } catch (e) {
+    if (trx) { await trx.rollback().catch(() => {}); trx = null; }
+    logger.warn('[twilio-webhook] alert-window lock unavailable; proceeding unfenced', { code: e.code || 'unknown' });
+  }
+  try {
+    return await fn();
+  } finally {
+    if (trx) await trx.rollback().catch(() => {});
+  }
+}
+
 async function ringSmsReplyBell({ customer, From, MessageSid, message }) {
   const { triggerNotification } = require('../services/notification-triggers');
   const unifiedStillUnread = () => db('messages').where({ channel: 'sms', twilio_sid: MessageSid }).first('is_read')

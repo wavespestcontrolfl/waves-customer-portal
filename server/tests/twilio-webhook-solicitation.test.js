@@ -11,6 +11,7 @@ function mockDb(table) {
     query.rows = [{ id: '00000000-0000-4000-8000-000000000001', created_at: new Date(), ...row }];
     return query;
   };
+  query.update = (row) => { mockWrites.push({ table, row, op: 'update' }); return Promise.resolve(1); };
   query.first = async () => null;
   query.returning = async () => query.rows;
   query.then = (resolve, reject) => Promise.resolve(query.rows).then(resolve, reject);
@@ -52,6 +53,7 @@ jest.mock('../services/estimate-clarify-asks', () => ({ handleClarifyReply: jest
 jest.mock('../services/estimator-engine/sms-thread', () => ({ smsThreadDraftsEnabled: () => true, startSmsThreadDraft: jest.fn(async () => ({})) }));
 jest.mock('../services/estimate-conversion-agent', () => ({ processInboundSms: jest.fn(async () => ({})) }));
 jest.mock('../services/tech-line', () => ({ notifyTechLineText: jest.fn(async () => ({})) }));
+jest.mock('../services/notification-triggers', () => ({ triggerNotification: jest.fn(async () => ({ bellWritten: true, push: { sent: 1 } })) }));
 
 const { EventEmitter } = require('node:events');
 const { dispatchWithFallback } = require('../services/llm/call');
@@ -62,6 +64,7 @@ const { startSmsThreadDraft } = require('../services/estimator-engine/sms-thread
 const { processInboundSms } = require('../services/estimate-conversion-agent');
 const { sendSMS } = require('../services/twilio');
 const { knownCallerPhoneExists } = require('../utils/known-caller-phone');
+const { triggerNotification } = require('../services/notification-triggers');
 const numbers = require('../config/twilio-numbers');
 const router = require('../routes/twilio-webhook');
 const handler = router.stack.find((layer) => layer.route?.path === '/sms').route.stack[0].handle;
@@ -92,6 +95,7 @@ beforeEach(() => {
   process.env.ADAM_PHONE = '+12025550199';
   dispatchWithFallback.mockResolvedValue({ ok: true, json: { solicitation: false, confidence: 0.97 } });
   knownCallerPhoneExists.mockResolvedValue(false);
+  triggerNotification.mockResolvedValue({ bellWritten: true, push: { sent: 1 } });
 });
 afterAll(() => {
   if (savedGate === undefined) delete process.env.GATE_SMS_SPAM_CLASSIFIER;
@@ -111,14 +115,18 @@ test('a shadow pitch stays unread, records its verdict, and follows ordinary est
   expect(JSON.parse(updateByTwilioSid.mock.calls[0][1].metadata.bindings[0]).spam_verdict)
     .toMatchObject({ solicitation: true, mode: 'shadow' });
   expect(updateByTwilioSid.mock.calls[0][1].is_read).toBeUndefined();
-  const writes = mockWrites.filter(({ table }) => table === 'sms_log');
+  // Inserts only — the sms_reply bell adds a receipt UPDATE on the same table.
+  const writes = mockWrites.filter(({ table, op }) => table === 'sms_log' && op !== 'update');
   expect(writes).toHaveLength(1);
   expect(writes[0].row.is_read).not.toBe(true);
   expect(JSON.parse(writes[0].row.metadata).spam_verdict).toMatchObject({ solicitation: true, mode: 'shadow', method: 'regex' });
   expect(handleClarifyReply).toHaveBeenCalledTimes(1);
   expect(startSmsThreadDraft).toHaveBeenCalledTimes(1);
   expect(processInboundSms).toHaveBeenCalledTimes(1);
-  expect(sendSMS).toHaveBeenCalledTimes(1);
+  // Ordinary alert handling for an unknown sender is the sms_reply bell. The
+  // legacy owner SMS forward it replaced is retired and must not come back.
+  expect(triggerNotification).toHaveBeenCalledWith('sms_reply', expect.objectContaining({ fromPhone: '+12025550101' }), expect.any(Object));
+  expect(sendSMS).not.toHaveBeenCalled();
 });
 
 test.each([[PITCH, true], ["Please stop texting me. I don't have any leads for you.", null]])(
@@ -152,7 +160,8 @@ test('known service contacts keep ordinary handling without a verdict', async ()
   expect(recordTouchpoint.mock.calls[0][0].metadata.spam_verdict).toBeUndefined();
   expect(recordTouchpoint.mock.calls[0][0].isRead).toBe(false);
   expect(dispatchWithFallback).not.toHaveBeenCalled();
-  expect(sendSMS).toHaveBeenCalledTimes(1);
+  expect(triggerNotification).toHaveBeenCalledWith('sms_reply', expect.objectContaining({ fromPhone: '+12025550101' }), expect.any(Object));
+  expect(sendSMS).not.toHaveBeenCalled();
 });
 
 test('a failed relationship lookup bypasses classification and keeps the message actionable', async () => {
