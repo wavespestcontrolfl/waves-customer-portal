@@ -5,7 +5,7 @@
 // recurring service has no fixed term).
 import { useState, useEffect } from 'react';
 import { useParams } from 'react-router-dom';
-import { WavesShell } from '../components/brand';
+import { WavesShell, CustomerColumn } from '../components/brand';
 import DocumentActionBar from '../components/DocumentActionBar';
 import PublicLoadError from '../components/PublicLoadError';
 import { WAVES_SUPPORT_PHONE_DISPLAY, WAVES_SUPPORT_PHONE_TEL } from '../constants/business';
@@ -14,7 +14,6 @@ import {
   DOC,
   DOC_FONT,
   DOC_FONT_SERIF,
-  DOC_COLUMN_MAX,
   FS,
   FW,
   LH,
@@ -48,12 +47,12 @@ const PRINT_STYLE = `
 
 function LoadingSkeleton() {
   return (
-    <div style={{ padding: `${SP.xl}px ${SP.md}px 40px`, maxWidth: DOC_COLUMN_MAX, width: '100%', margin: '0 auto' }}>
+    <CustomerColumn>
       <div style={{ height: 28, width: '70%', background: SURFACE.border, borderRadius: RADIUS.tag, marginBottom: SP.md }} />
       <div style={{ height: 96, background: SURFACE.border, borderRadius: RADIUS.input, marginBottom: SP.lg }} />
       <div style={{ height: 16, width: '90%', background: SURFACE.border, borderRadius: 4, marginBottom: SP.sm }} />
       <div style={{ height: 16, width: '80%', background: SURFACE.border, borderRadius: 4 }} />
-    </div>
+    </CustomerColumn>
   );
 }
 
@@ -109,7 +108,7 @@ export default function PriceChangeNoticePage() {
     : error === 'notfound' || !data
       ? <NotFound />
       : (
-        <div style={{ padding: `${SP.xl}px ${SP.md}px 40px`, maxWidth: DOC_COLUMN_MAX, width: '100%', margin: '0 auto', fontFamily: DOC_FONT, color: SURFACE.text }}>
+        <CustomerColumn style={{ fontFamily: DOC_FONT, color: SURFACE.text }}>
           <DocumentActionBar shareTitle="Waves service pricing update" />
           <div
             className="pcn-card"
@@ -191,7 +190,7 @@ export default function PriceChangeNoticePage() {
               </p>
             </div>
           </div>
-        </div>
+        </CustomerColumn>
       );
 
   return (

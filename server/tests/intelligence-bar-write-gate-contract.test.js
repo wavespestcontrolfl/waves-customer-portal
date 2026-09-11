@@ -63,8 +63,10 @@ beforeAll(() => {
   delete process.env.GATE_DRIVE_TIME_CALIBRATION;
   process.env.GATE_CANCEL_FLOW_V2 = 'true';
   process.env.GATE_IB_PLATFORM = 'true';
+  process.env.GATE_IB_MERGE_CUSTOMERS = 'true';
 });
 afterAll(() => {
+  delete process.env.GATE_IB_MERGE_CUSTOMERS;
   if (ORIGINAL_PLATFORM_GATE === undefined) delete process.env.GATE_IB_PLATFORM;
   else process.env.GATE_IB_PLATFORM = ORIGINAL_PLATFORM_GATE;
   if (ORIGINAL_DRIVE_GATE === undefined) delete process.env.GATE_DRIVE_TIME_CALIBRATION;
@@ -137,6 +139,7 @@ const WRITE_TWO_STEP = [
   'create_restock_request',
   'update_restock_request',
   'cancel_plan',
+  'merge_customers',
 ];
 
 // Writes blocked in the /query tool loop and executable only via /execute
@@ -541,6 +544,18 @@ describe('two-step writes do not mutate without confirmed (behavioral)', () => {
     ['procurement-tools', 'executeProcurementTool', 'adjust_stock', { product_name: 'Bifen', movement_type: 'restock', quantity: 32 }],
     ['procurement-tools', 'executeProcurementTool', 'create_restock_request', { product_name: 'Bifen', quantity: 128, unit: 'fl_oz' }],
     ['procurement-tools', 'executeProcurementTool', 'update_restock_request', { request_id: 'req-1', action: 'receive' }],
+    // merge_customers carries its own `customers` seed (the shared SEED
+    // deliberately leaves `customers` unseeded for create_customer's
+    // duplicate-miss check).
+    ['customer-lifecycle-tools', 'executeCustomerLifecycleTool', 'merge_customers', {
+      winner_customer_id: '00000000-0000-0000-0000-00000000a001',
+      loser_customer_id: '00000000-0000-0000-0000-00000000a002',
+    }, {
+      customers: [
+        { id: '00000000-0000-0000-0000-00000000a001', first_name: 'Real', last_name: 'Winner', phone: '9415550100', email: 'winner@example.com', deleted_at: null },
+        { id: '00000000-0000-0000-0000-00000000a002', first_name: 'Unknown', last_name: '', phone: '9415550100', email: null, deleted_at: null },
+      ],
+    }],
     // cancel_plan's preview needs the customer to EXIST (create_customer's
     // duplicate check needs it to be missing), so it carries its own seed —
     // merged on top of SEED for this call only.
