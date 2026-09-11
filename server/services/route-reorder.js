@@ -248,7 +248,12 @@ function relaxElapsedWindows(sourceStops, startMin) {
   return sourceStops.map((s) => {
     const range = effectiveWindowRange(s);
     if (!range || range.endMin > startMin) return s;
-    return { ...s, window_start: null, window_end: null, time_window: null };
+    // Only the ARRIVAL constraint is relaxed. workDuration falls back to the
+    // window SPAN when a row has no estimate (or a shorter one), so clearing
+    // the window fields would also shrink a 09:00-12:00 job to an hour and
+    // let the repair declare a later promise reachable that is not (codex
+    // round 2 P1). Carry the span forward as the stop's duration first.
+    return { ...s, estimated_duration_minutes: workDuration(s), window_start: null, window_end: null, time_window: null };
   });
 }
 
@@ -280,7 +285,10 @@ function relaxElapsedWindows(sourceStops, startMin) {
  * day-open) is the admin-only "day already in progress" simulation clock —
  * pass the caller's actual ET minute-of-day only when the requested date IS
  * today; leave it null for every future-day call (nightly and admin alike),
- * which reproduces today's behavior exactly.
+ * which reproduces today's behavior exactly. It is used two ways, and they
+ * are NOT the same number: the simulation clock is floored at the 08:00 day
+ * open, while whether a promise has already elapsed is judged on the raw
+ * minute.
  *
  * Returns one of:
  *   { orderedStops, source, conflict: null }                    — write it
@@ -312,7 +320,13 @@ function chooseWindowSafeOrder({
   // route (pre-push audit P1 — the exact "wrong savings number" defect
   // class this whole change exists to close).
   const beforeMeters = modelDistanceMeters(RouteOptimizer, currentOrder(sourceStops));
-  const simStart = startMin == null ? 8 * 60 : startMin;
+  // The simulation clock never runs EARLIER than the 08:00 day open — a
+  // 07:00 request must not be told the truck can spend that hour driving and
+  // mark an 08:00 promise reachable (codex round 2 P1). The elapsed-window
+  // test below deliberately keeps the RAW minute instead: a 06:00-07:30
+  // promise is not elapsed at 07:00 just because the model's day starts at
+  // 08:00.
+  const simStart = startMin == null ? 8 * 60 : Math.max(8 * 60, startMin);
   const guardStops = relaxElapsedWindows(sourceStops, startMin);
   // Every guard AND every figure below reads windows through this, never
   // through effectiveWindowRange directly: a stop whose promise already

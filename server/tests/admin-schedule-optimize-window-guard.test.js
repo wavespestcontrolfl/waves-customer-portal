@@ -425,3 +425,75 @@ test('a manual reorder landing between the day load and the lock aborts the writ
   expect(body.error).toMatch(/reload and retry/i);
   expect(trxUpdates).toEqual([]);
 });
+
+// ── Codex round 2 ────────────────────────────────────────────────────────
+describe('round-2 in-progress clock guards', () => {
+  beforeEach(() => {
+    // Earlier describes leave a mutating lockTechDays implementation behind
+    // (clearAllMocks keeps implementations).
+    require('../services/scheduling/tech-day-lock').lockTechDays.mockImplementation(async () => {});
+    process.env.GATE_ROUTE_REORDER_WINDOW_FIT = 'true';
+    process.env.GATE_DRIVE_TIME_CALIBRATION = 'true';
+  });
+  afterEach(() => { jest.useRealTimers(); });
+
+  test('before 08:00 ET, today simulates from the day open — not from the current minute', async () => {
+    jest.useFakeTimers({ doNotFake: ['nextTick', 'setImmediate'] });
+    jest.setSystemTime(new Date('2026-09-20T11:00:00Z')); // 07:00 ET
+    const TODAY = '2026-09-20';
+    // X is 150 minutes of untimed work; Y is promised 08:00 (arrival
+    // deadline 10:00 = 600). Simulated from an unavailable 07:00 the truck
+    // finishes X at 570 and Y "fits"; from the real 08:00 day open it
+    // finishes at 630 and Y's promise is blown — so X-first must be refused.
+    stopsByDate[TODAY] = [
+      stop('X', { estimated_duration_minutes: 150, lng: 2, route_order: 1 }),
+      stop('Y', { window_start: '08:00', window_end: '09:00', estimated_duration_minutes: 30, lng: 1, route_order: 2 }),
+    ];
+    mockOptimizerOrder(['X', 'Y']);
+    const { status, body } = await optimizeRoute({ technicianId: 't1' });
+    expect(status).toBe(200);
+    expect(body.source).toBe('window_constrained');
+    expect(trxUpdates.map((u) => u.id)).toEqual(['Y', 'X']);
+  });
+
+  test('a promise that has NOT elapsed at the real clock still binds, even before 08:00', async () => {
+    jest.useFakeTimers({ doNotFake: ['nextTick', 'setImmediate'] });
+    jest.setSystemTime(new Date('2026-09-20T11:00:00Z')); // 07:00 ET
+    const TODAY = '2026-09-20';
+    // A 06:00-07:30 promise (arrival deadline 08:00) is still keepable at
+    // 07:00: judging "elapsed" on the clamped 08:00 clock instead of the raw
+    // minute would throw it away. Google's order breaks it; the repair must
+    // still put it first rather than treating it as unconstrained.
+    stopsByDate[TODAY] = [
+      stop('LATE', { window_start: '09:00', window_end: '10:00', estimated_duration_minutes: 30, lng: 5, route_order: 1 }),
+      stop('EARLY', { window_start: '06:00', window_end: '07:30', estimated_duration_minutes: 30, lng: 1, route_order: 2 }),
+    ];
+    mockOptimizerOrder(['LATE', 'EARLY']);
+    const { status, body } = await optimizeRoute({ technicianId: 't1' });
+    expect(status).toBe(200);
+    expect(body.source).toBe('window_constrained');
+    expect(trxUpdates.map((u) => u.id)).toEqual(['EARLY', 'LATE']);
+  });
+
+  test('an elapsed window keeps its service duration — only the arrival deadline is relaxed', () => {
+    const { chooseWindowSafeOrder } = require('../services/route-reorder');
+    // A 09:00-12:00 job with no estimate: workDuration is its 180-minute
+    // span. Overdue at 12:30, its ARRIVAL deadline stops binding — but the
+    // job is still three hours of work, and clearing the window fields
+    // would shrink it to the 60-minute default and let the guard call a
+    // later promise reachable that is not.
+    const stops = [
+      { id: 'OVERDUE', technician_id: 't1', route_order: 1, window_start: '09:00', window_end: '12:00', estimated_duration_minutes: null, lat: 1, lng: 1 },
+      { id: 'LATER', technician_id: 't1', route_order: 2, window_start: '13:00', window_end: '14:00', estimated_duration_minutes: 30, lat: 1, lng: 1 },
+    ];
+    const out = chooseWindowSafeOrder({
+      RouteOptimizer, googleOrder: stops, sourceStops: stops, googleSource: 'google_routes_api', startMin: 12 * 60 + 30,
+    });
+    // The still-keepable 13:00 promise is served first; the overdue job
+    // follows, carrying its full 180 minutes rather than a shrunken hour.
+    expect(out.orderedStops.map((s) => s.id)).toEqual(['LATER', 'OVERDUE']);
+    const relaxed = out.orderedStops.find((s) => s.id === 'OVERDUE');
+    expect(relaxed.window_start).toBeNull(); // arrival constraint relaxed
+    expect(relaxed.estimated_duration_minutes).toBe(180); // work preserved
+  });
+});
