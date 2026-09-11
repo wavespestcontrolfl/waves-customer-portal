@@ -541,6 +541,10 @@ const VISIT_POSSESSOR_NAMED = `${NAMED_SUBJECT}[\\x27\\u2019]s`;
 // form passes one — NAMED_SUBJECT — so a directly-named or relationship
 // subject asks the same status question as "the technician"/"she" already
 // does: "Is Ruth scheduled?", "Is my mother coming today?").
+// The visit noun itself is VISIT_NOUN_WORD — plural-aware ("Are her
+// appointments scheduled?") and compound-guarded, so "Is her service animal
+// scheduled?" names the animal, not a visit, the same as the "does X have"
+// branches below already distinguish.
 // The gap between subject and predicate excludes an apostrophe: a bare
 // named subject ("Ruth", added via subjectExtra) stops right at the name,
 // so without this, the same wildcard that lets "coming" reach past filler
@@ -549,7 +553,7 @@ const VISIT_POSSESSOR_NAMED = `${NAMED_SUBJECT}[\\x27\\u2019]s`;
 // Ruth herself being cancelled) — the possessor determiner above already
 // consumes a genuine "Ruth's" before the noun; nothing legitimate needs an
 // apostrophe in the gap after it.
-const visitStatusQuestionSource = (possessor, leadVerb = '(?:is|are|was|were|will|has|have|did)', subjectExtra = '') => `${leadVerb}(?:n[\\x27\\u2019]t)?\\s+(?:(?:the|${possessor}|an?)\\s+)?(?:technician|tech|she|he|they|you|appointment|visit|service${subjectExtra})\\b[^.!?\\x27\\u2019]*\\b(?:coming|arriv\\w*|on (?:the|their|his|her|our) way|on the schedule|en route|${VISIT_STATUS}|${VISIT_STATUS_IDIOM}|due|${VISIT_TIME_RE.source})\\b(?!${TELEPHONE_COMPLEMENT})`;
+const visitStatusQuestionSource = (possessor, leadVerb = '(?:is|are|was|were|will|has|have|did)', subjectExtra = '') => `${leadVerb}(?:n[\\x27\\u2019]t)?\\s+(?:(?:the|${possessor}|an?)\\s+)?(?:technician|tech|she|he|they|you|${VISIT_NOUN_WORD}${subjectExtra})\\b[^.!?\\x27\\u2019]*\\b(?:coming|arriv\\w*|on (?:the|their|his|her|our) way|on the schedule|en route|${VISIT_STATUS}|${VISIT_STATUS_IDIOM}|due|${VISIT_TIME_RE.source})\\b(?!${TELEPHONE_COMPLEMENT})`;
 const visitActiveCancelQuestionSource = (possessor, leadVerb = '(?:did|do|will)') => `${leadVerb}(?:n[\\x27\\u2019]t)?\\s+(?:they|we|you|the office)\\s+(?:cancel|reschedule|move|confirm)\\s+(?:${possessor}|the|${THIRD_PARTY_MARK}(?:[\\x27\\u2019]s)?)\\s+(?:appointment|visit|service)s?\\b`;
 // A status question can also be phrased as a declarative assertion with a
 // trailing tag ("Her appointment is cancelled, right?", "The technician is
@@ -558,7 +562,7 @@ const visitActiveCancelQuestionSource = (possessor, leadVerb = '(?:did|do|will)'
 // visitStatusQuestionSource draws on, just in assertion word order with a
 // confirmation tag closing the clause instead of an opening auxiliary.
 const VISIT_TAG_RE_SOURCE = '(?:right|is(?:n[\\x27\\u2019]t)?\\s+(?:he|she|it)|are(?:n[\\x27\\u2019]t)?\\s+they|was(?:n[\\x27\\u2019]t)?\\s+(?:he|she|it)|were(?:n[\\x27\\u2019]t)?\\s+they|does(?:n[\\x27\\u2019]t)?\\s+(?:he|she|it)|do(?:n[\\x27\\u2019]t)?\\s+they|has(?:n[\\x27\\u2019]t)?\\s+(?:he|she|it)|have(?:n[\\x27\\u2019]t)?\\s+they)';
-const visitTagQuestionSource = (possessor) => `(?:(?:the|${possessor}|an?)\\s+)?(?:technician|tech|she|he|they|you|appointment|visit|service)\\b[^.!?]*\\b(?:coming|arriv\\w*|on (?:the|their|his|her|our) way|on the schedule|en route|${VISIT_STATUS}|${VISIT_STATUS_IDIOM}|due|${VISIT_TIME_RE.source})\\b(?!${TELEPHONE_COMPLEMENT})[^.!?]*,\\s*${VISIT_TAG_RE_SOURCE}\\s*$`;
+const visitTagQuestionSource = (possessor) => `(?:(?:the|${possessor}|an?)\\s+)?(?:technician|tech|she|he|they|you|${VISIT_NOUN_WORD})\\b[^.!?]*\\b(?:coming|arriv\\w*|on (?:the|their|his|her|our) way|on the schedule|en route|${VISIT_STATUS}|${VISIT_STATUS_IDIOM}|due|${VISIT_TIME_RE.source})\\b(?!${TELEPHONE_COMPLEMENT})[^.!?]*,\\s*${VISIT_TAG_RE_SOURCE}\\s*$`;
 const VISIT_QUESTION_RE = new RegExp(`(?:^|[—–:])\\s*(?:so[,\\s]+)?(?:${visitStatusQuestionSource(VISIT_POSSESSOR)}|(?:does|do|did)(?:n[\\x27\\u2019]t)?\\s+(?:(?:she|he|they|(?:my|our|your|her|his|their|the)\\s+${RELATION_NOUN})\\s+(?:not\\s+)?have\\b[^.!?]*\\b${VISIT_NOUN_WORD}|you\\s+(?:not\\s+)?have\\b[^.!?]*\\b(?:${THIRD_PARTY_MARK}(?:[\\x27\\u2019]s)?\\s+${VISIT_NOUN_WORD}|(?:appointment|visit|service)s?\\s+for\\s+${THIRD_PARTY_MARK}\\b))|(?:is|are|was|were)(?:n[\\x27\\u2019]t)?\\s+there\\b[^.!?]*\\b${VISIT_NOUN_WORD}|(?:she|he|they|you)\\s+(?:has|have)(?:n[\\x27\\u2019]t)?\\b[^.!?]*\\b${VISIT_NOUN_WORD}|${visitActiveCancelQuestionSource(VISIT_POSSESSOR)}|${visitTagQuestionSource(VISIT_POSSESSOR)})`, 'i');
 // The same status, still-on/idiom, active-cancel and "does X have" forms,
 // matched case-sensitively so a capitalised proper name (never a common
@@ -764,7 +768,11 @@ const VISIT_DISCLOSURE_RES = Object.freeze([
 // status predicate ("someone is coming") — an office offer ("someone is
 // available") is not a third party's appointment, the same as "a team member
 // is available" already passes.
-const VISIT_SUBJECT_RE = new RegExp(`\\b(?:${VISIT_NOUN}|technician|tech|she|he|they|(?:someone|somebody)(?=\\s+(?:is|are|was|were)(?:n[\\x27\\u2019]t)?\\s+(?:${VISIT_STATUS}|${VISIT_ARRIVAL}))|arrival|window|slot|eta)\\b`, 'i');
+// A verbal "visit" ("she can visit the portal", "please visit our site")
+// is an action, not the visit noun: after a modal, "to", or "please" it
+// never names an appointment, so the pronoun before it stays the subject.
+const VERBAL_VISIT_LOOKBEHIND = '(?<!\\b(?:can|could|may|might|will|would|should|shall|must|to|please)\\s)';
+const VISIT_SUBJECT_RE = new RegExp(`\\b(?:${VERBAL_VISIT_LOOKBEHIND}${VISIT_NOUN}|technician|tech|she|he|they|(?:someone|somebody)(?=\\s+(?:is|are|was|were)(?:n[\\x27\\u2019]t)?\\s+(?:${VISIT_STATUS}|${VISIT_ARRIVAL}))|arrival|window|slot|eta)\\b`, 'i');
 const CONTACT_SUBJECT_RE = /\b(?:call|calls|calling|callback|callbacks|follow[ -]up|speak|speaks|speaking|talk|talks|talking|reach|contact|open|opens|opened|closes?|closed|hours|line|number)\b/i;
 const DISCLOSURE_SUBJECT_RE = new RegExp(`${VISIT_SUBJECT_RE.source}|${CONTACT_SUBJECT_RE.source}`, 'gi');
 // Number labels distinguish a disclosed fragment from a count or menu option.
@@ -795,6 +803,11 @@ function hasPhoneFragment(text) {
 // "and twelve" continues an hour range; "and her visit" begins a new fact.
 const VISIT_CLAUSE_BOUNDARY_RE = new RegExp(`[.!?;,]|(?<!\\d):|:(?!\\d)|\\b(?:but|however|though|although|yet|so|then|because|since|while|whilst|whereas|as(?=\\s+(?:her|his|their|your|[a-z]+[\\x27\\u2019]s)\\s+(?:appointment|visit|service)s?\\b)|and(?!\\s+(?:\\d|${NUMBER_WORD_EN_STRICT}|zero)\\b))\\b`, 'i');
 
+// "Her appointment, according to the portal, is tomorrow": the aside
+// between the visit noun and its predicate is an attribution (according to /
+// per / as listed in / based on / from what I see in ...), never a fact of
+// its own, so it is dropped before either scan splits on commas.
+const VISIT_ATTRIBUTION_ASIDE_RE = new RegExp(`\\b((?:her|his|their|your|[a-z]+[\\x27\\u2019]s|the)\\s+${VISIT_NOUN})\\s*,\\s*(?:according to|per|based on|as (?:listed|shown|noted|recorded|displayed|reflected|it appears|it shows|far as I can (?:see|tell))(?:\\s+(?:in|on|by))?|from what (?:I|we) (?:can )?(?:see|tell))\\b[^,.!?;]*,\\s*`, 'gi');
 const VISIT_COORDINATION_RE = new RegExp(`\\b(?:and(?!\\s+(?:\\d|${NUMBER_WORD_EN_STRICT}|zero)\\b)|or)(?!\\s+(?:whether|if|not|when)\\b)\\b`, 'gi');
 // Generic scheduling process language right after a time that otherwise
 // qualifies the visit noun ("11 AM appointments can be booked online",
@@ -872,6 +885,10 @@ function no_third_party_disclosure(value, record, { spoken }) {
     // Time abbreviations and a parenthetical "if, or when," are not new facts.
     const text = stripPlaceholders(normalizeTimeAbbreviations(raw))
       .replace(/,\s*(?:as requested|unfortunately|fortunately|in fact|of course|apparently)\s*,/gi, ' ')
+      // A comma-set attribution right after the visit noun ("her
+      // appointment, according to the portal, is tomorrow") qualifies the
+      // noun, not a new clause: keep the noun as the predicate's subject.
+      .replace(VISIT_ATTRIBUTION_ASIDE_RE, '$1 ')
       .replace(/\b(if|whether),\s*or when,/gi, '$1 or when')
       // Direct "whether A and/or B" alternatives remain uncertain until a clause break.
       .replace(/\b(?:if|whether)\b(?:(?!\b(?:but|however|though|although|yet|so|then|because|since|while)\b)[^.!?;,])*/gi,
@@ -970,7 +987,7 @@ function no_third_party_disclosure(value, record, { spoken }) {
           subject = following.find((s) => !/^(?:she|he|they|someone|somebody)$/i.test(s[0])) || following[0];
         }
         if (!subject) return false;
-        const portalCheck = /\b(?:check|see|view|use|access|log (?:into|in to))\b[^.!?;]{0,80}\bportal\b/i.exec(subjectBeforeTime ? prefix + sentence.slice(m.index).split(VISIT_CLAUSE_BOUNDARY_RE)[0] : context);
+        const portalCheck = /\b(?:check|see|view|use|access|visit|open|log (?:into|in to))\b[^.!?;]{0,80}\bportal\b/i.exec(subjectBeforeTime ? prefix + sentence.slice(m.index).split(VISIT_CLAUSE_BOUNDARY_RE)[0] : context);
         const redirect = /^(?:she|he|they|someone|somebody)$/i.test(subject[0])
           && [portalCheck && subject.index < portalCheck.index, /\bcan\s+help\b/i.test(context)].some(Boolean);
         const inquiry = isVisitInquiry(context.slice(0, subject.index))
