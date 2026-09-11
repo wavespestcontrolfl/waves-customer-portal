@@ -240,6 +240,17 @@ async function replaceCompleteShell(shellResponse, enqueuedSeq, supersedable) {
         throw failed.reason;
       }
     });
+    // The asset batch waits on the write lock and then on every write; a
+    // newer navigation can advance the live build meanwhile. Committing
+    // this older shell now would leave the cache describing a generation
+    // behind the page (if the newer refresh then fails), so the chunks
+    // that page loads get tagged with the older build and are pruned at
+    // the next deploy. Check once more, right before the write that
+    // commits, and give back what this batch created.
+    if (supersedable && enqueuedSeq < liveBuildSeq) {
+      await withAssetWrites(rollBackCreated);
+      throw new Error('Shell refresh superseded by a newer navigation');
+    }
     // The shell write can hit the quota too; the generation is only
     // committed once '/' points at it, so undo its new entries as well.
     try {

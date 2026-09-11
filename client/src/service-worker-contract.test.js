@@ -14,7 +14,8 @@ function fakeCache() {
     gate: null, // a test may park keys() (the prune's first step) on a promise
     // Like the browser, every match hands out a fresh Response over the
     // stored body — the caller's text()/clone() never lock the stored copy.
-    async match(key) { const hit = store.get(asRequest(key).url); return hit && hit.clone(); },
+    matchGate: null, // a test may park match() (the asset batch's first step)
+    async match(key) { if (this.matchGate) await this.matchGate; const hit = store.get(asRequest(key).url); return hit && hit.clone(); },
     deleteGate: null, // a test may park delete() (the prune's last step)
     failPut: null, // a test may make put() reject for some URLs (quota)
     async put(key, response) {
@@ -868,6 +869,41 @@ describe('service-worker shell refresh keeps the asset cache bounded to two buil
 
     expect(await (await cache.match('/')).text()).toBe(shellHtml(['/assets/index-AAA.js', '/assets/Shared-XYZ.js']));
     expect(await cachedAssets(cache)).toEqual(['/assets/Shared-XYZ.js', '/assets/index-AAA.js']);
+  });
+
+  it('abandons an older refresh that is superseded while its asset batch is being written', async () => {
+    // Codex #4335 r8 P1: refresh A passes the pre-commit order check, then
+    // spends time in the asset-write batch; navigation B lands meanwhile
+    // and advances the live build. If A still commits its shell and B's
+    // own refresh then fails, the cache describes A while the page runs
+    // B, and B's chunks get tagged with A's build — pruned next deploy.
+    const cache = fakeCache();
+    const { cacheCompleteShellResponse, dispatchFetch, setFetch } = loadWorker(cache);
+    const shell000 = shellHtml(['/assets/index-000.js']);
+    await cacheCompleteShellResponse(fakeResponse(shell000));
+
+    let navs = 0;
+    setFetch(async (request) => {
+      if (request.mode === 'navigate') {
+        navs += 1;
+        return fakeResponse(shellHtml([navs === 1 ? '/assets/index-AAA.js' : '/assets/index-BBB.js']));
+      }
+      if (request.url.endsWith('/assets/index-BBB.js')) return fakeResponse('gone', false); // B's refresh fails
+      return fakeResponse(`asset:${request.url}`);
+    });
+
+    let releaseBatch;
+    cache.matchGate = new Promise(resolve => { releaseBatch = resolve; });
+    const navAPromise = dispatchFetch('/admin/', { mode: 'navigate' }); // A's batch parks on its first match()
+    await tick(); await tick();
+    const navBPromise = dispatchFetch('/admin/', { mode: 'navigate' }); // B lands: live build moves on
+    await tick();
+    cache.matchGate = null;
+    releaseBatch();
+    await Promise.all([navAPromise, navBPromise]);
+
+    expect(await (await cache.match('/')).text()).toBe(shell000); // neither A (superseded) nor B (failed)
+    expect(await cachedAssets(cache)).toEqual(['/assets/index-000.js']); // A's batch rolled back
   });
 
   it('skips a superseded refresh: an earlier navigation whose response lands after a newer one', async () => {
