@@ -966,6 +966,97 @@ export function completionResumeOwedError(error) {
   return Number(error?.status) === 503 && COMPLETION_RESUME_OWED_CODES.has(error?.code);
 }
 
+// Whether a completion result still owes photo work, and — when it does —
+// the draft snapshot finishCompletionSuccess should persist so the panel can
+// resume the upload later. The server can report every photo attached but
+// the report still owed a reconciliation pass (its parked-summary restore
+// failed): that carries the SAME recovery marker a client-side upload
+// failure uses, just with no photos to re-upload (server pre-push Codex P1
+// on 19acd4765).
+//
+// Keeping the draftId is a single rule: only a photo set that differs from
+// the autosave mints a new one. localStorage names the revision
+// synchronously while the IndexedDB write is still in flight; a page killed
+// in that window must find the still-valid stored photos under the SAME id,
+// or the loader refuses them and the recovery has nothing to upload (Codex
+// r-63b2098 P1).
+export function buildPhotoRecoveryOutcome({
+  completion,
+  result,
+  prior,
+  servicePhotos,
+  lastSubmitBody,
+  serviceId,
+}) {
+  const reconcileOwed = completion.completionPhotoUpload?.reconcileOwed === true
+    && !(completion.completionPhotoUpload?.failed > 0);
+  const photosOwed = completion.completionPhotoUpload?.failed > 0 || reconcileOwed;
+  if (!photosOwed) return { photosOwed: false, draft: null };
+  const photos = reconcileOwed ? [] : (lastSubmitBody?.completionPhotos || servicePhotos);
+  const samePhotoSet = !!prior?.draftId
+    && prior.serviceId === serviceId
+    && prior.servicePhotos === servicePhotos
+    && photos.length === servicePhotos.length
+    && photos.every((photo, index) => photo.data === servicePhotos[index]?.data);
+  return {
+    photosOwed: true,
+    draft: {
+      serviceId,
+      owner: completionDraftScope(),
+      draftId: samePhotoSet ? prior.draftId : crypto.randomUUID(),
+      savedAt: new Date().toISOString(),
+      servicePhotos: photos,
+      generationPhotoCount: photos.length,
+      reconcileOwed,
+      pendingPhotoCompletion: result,
+    },
+  };
+}
+
+// Whether the success overlay should auto-dismiss, and after how long. A
+// required follow-up suggestion keeps it open so the tech can act on the
+// CTA — it dismisses via the Done button. Keep the panel open when a pest
+// recap is pending too — it renders async and the tech approves/sends it
+// from the success overlay (the approve UI is otherwise unreachable once the
+// panel auto-closes). Completion advisories also hold the overlay open
+// (codex P2 r2 on #3179): the 1.2s auto-dismiss isn't enough to read even
+// one shortfall message — the tech dismisses via the Done button instead.
+// Photo work still owed holds it open the same way. Otherwise it
+// auto-closes, later when the SMS status needs a glance.
+export function completionAutoCloseDelay(completion, photosOwed, recapEligible) {
+  const smsNeedsAttention = ["blocked", "failed"].includes(completion.completionSmsStatus);
+  const advisoriesNeedReading =
+    Array.isArray(completion.completionAdvisories) &&
+    completion.completionAdvisories.length > 0;
+  if (
+    completion.followupSuggestion?.required ||
+    recapEligible ||
+    advisoriesNeedReading ||
+    photosOwed
+  ) {
+    return null;
+  }
+  return smsNeedsAttention ? 3200 : 1200;
+}
+
+// The multipart form body for one photo retry (retryCompletionPhotos),
+// keeping the same fields the completion route accepts. Photos recovered
+// from the autosave revision (see buildPhotoRecoveryOutcome above) carry the
+// panel's shape, not the completion body's: derive the body fields the same
+// way.
+export function buildPhotoRetryFormBody(photo, index) {
+  const [header, encoded] = photo.data.split(",");
+  const bytes = Uint8Array.from(atob(encoded), (character) => character.charCodeAt(0));
+  const form = new FormData();
+  form.append("photo", new Blob([bytes], { type: header.slice(5, header.indexOf(";")) }), photo.name || "service-photo.jpg");
+  form.append("photoType", photo.photoType || "after");
+  form.append("sortOrder", String(photo.sortOrder ?? index));
+  if (photo.caption) form.append("caption", photo.caption);
+  const aiTags = photo.aiTags || (photo.captionSource === "ai" ? { captionSource: "ai" } : null);
+  if (aiTags) form.append("aiTags", JSON.stringify(aiTags));
+  return form;
+}
+
 // Station edits a completion would silently DROP while the registry is
 // loading or failed to load: the payload posts no station entries in that
 // state (an unloaded registry is unavailable, not empty), but a
@@ -14589,38 +14680,15 @@ export function CompletionPanel({
   // submitting state on the stale mount), else "done".
   async function finishCompletionSuccess(result) {
     const completion = result || {};
-    // The server may report every photo attached but the report still owed
-    // a reconciliation (its parked-summary restore failed): keep the same
-    // recovery marker the client-side reconcile failure uses, with no
-    // photos to re-upload (server pre-push Codex P1 on 19acd4765).
-    const reconcileOwed = completion.completionPhotoUpload?.reconcileOwed === true
-      && !(completion.completionPhotoUpload?.failed > 0);
-    const photosOwed = completion.completionPhotoUpload?.failed > 0 || reconcileOwed;
+    const { photosOwed, draft } = buildPhotoRecoveryOutcome({
+      completion,
+      result,
+      prior: draftSnapshotRef.current,
+      servicePhotos,
+      lastSubmitBody: lastSubmitBodyRef.current,
+      serviceId: service.id,
+    });
     if (photosOwed) {
-      const photos = reconcileOwed ? [] : (lastSubmitBodyRef.current?.completionPhotos || servicePhotos);
-      // Keep the autosaved photo revision when this is the same photo set.
-      // localStorage names the revision synchronously while the IndexedDB
-      // write is still in flight; a page killed in that window must find
-      // the still-valid stored photos under the SAME id, or the loader
-      // refuses them and the recovery has nothing to upload (Codex
-      // r-63b2098 P1). Only a photo set that differs from the autosave
-      // mints a new revision.
-      const prior = draftSnapshotRef.current;
-      const samePhotoSet = !!prior?.draftId
-        && prior.serviceId === service.id
-        && prior.servicePhotos === servicePhotos
-        && photos.length === servicePhotos.length
-        && photos.every((photo, index) => photo.data === servicePhotos[index]?.data);
-      const draft = {
-        serviceId: service.id,
-        owner: completionDraftScope(),
-        draftId: samePhotoSet ? prior.draftId : crypto.randomUUID(),
-        savedAt: new Date().toISOString(),
-        servicePhotos: photos,
-        generationPhotoCount: photos.length,
-        reconcileOwed,
-        pendingPhotoCompletion: result,
-      };
       draftSnapshotRef.current = draft;
       await saveDraftSnapshot(draft);
       await persistCompletionResumeOwed(service.id, lastSubmitBodyRef.current);
@@ -14658,27 +14726,9 @@ export function CompletionPanel({
     }
     setCompletionResult(result || null);
     setSuccess(true);
-    const smsNeedsAttention = ["blocked", "failed"].includes(
-      completion.completionSmsStatus,
-    );
-    // A required follow-up suggestion keeps the success overlay open so
-    // the tech can act on the CTA — it dismisses via the Done button.
-    // Keep the panel open when a pest recap is pending — it renders async and the
-    // tech approves/sends it from the success overlay (the approve UI is otherwise
-    // unreachable once the panel auto-closes).
-    // Completion advisories also hold the overlay open (codex P2 r2 on
-    // #3179): the 1.2s auto-dismiss isn't enough to read even one
-    // shortfall message — the tech dismisses via the Done button instead.
-    const advisoriesNeedReading =
-      Array.isArray(completion.completionAdvisories) &&
-      completion.completionAdvisories.length > 0;
-    if (
-      !completion.followupSuggestion?.required &&
-      !recapEligible &&
-      !advisoriesNeedReading &&
-      !photosOwed
-    ) {
-      setTimeout(() => onClose(true), smsNeedsAttention ? 3200 : 1200);
+    const autoCloseDelay = completionAutoCloseDelay(completion, photosOwed, recapEligible);
+    if (autoCloseDelay !== null) {
+      setTimeout(() => onClose(true), autoCloseDelay);
     }
     return "done";
   }
@@ -14694,18 +14744,7 @@ export function CompletionPanel({
     try {
       for (const [index, photo] of (draft.servicePhotos || []).entries()) {
         try {
-          const [header, encoded] = photo.data.split(",");
-          const bytes = Uint8Array.from(atob(encoded), (character) => character.charCodeAt(0));
-          const form = new FormData();
-          form.append("photo", new Blob([bytes], { type: header.slice(5, header.indexOf(";")) }), photo.name || "service-photo.jpg");
-          form.append("photoType", photo.photoType || "after");
-          // Photos recovered from the autosave revision (see
-          // finishCompletionSuccess) carry the panel's shape, not the
-          // completion body's: derive the body fields the same way.
-          form.append("sortOrder", String(photo.sortOrder ?? index));
-          if (photo.caption) form.append("caption", photo.caption);
-          const aiTags = photo.aiTags || (photo.captionSource === "ai" ? { captionSource: "ai" } : null);
-          if (aiTags) form.append("aiTags", JSON.stringify(aiTags));
+          const form = buildPhotoRetryFormBody(photo, index);
           // Existing attachment route dedupes by image hash. A lost response
           // can safely retry the same bytes without repeating closeout.
           await adminFetch(`/tech/services/${service.id}/photos`, {
