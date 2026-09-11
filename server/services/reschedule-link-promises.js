@@ -434,9 +434,19 @@ function promiseCommitmentIds(payload) {
 async function clearPromiseException(trx, callLogId, commitmentId, note) {
   const cards = await trx('triage_items').where({ call_log_id: callLogId, reason_code: 'reschedule_link_promise' })
     .whereIn('status', ['open', 'in_progress']).select('id', 'payload');
+  // A normal, never-parked delivery calls this too (fulfilPromise runs on
+  // EVERY successful send, not only a recovered one) — with no card ever
+  // raised for this commitment, there is nothing to clear, and the
+  // unconditional resync below used to force review_status to 'resolved'
+  // regardless, clobbering an intentional null (never touched) or a
+  // 'dismissed' the office set independently of this promise's own card
+  // (codex #4293 P2). Only a card THIS commitment actually changed may
+  // resync the call's aggregate status.
+  let changed = false;
   for (const card of cards) {
     const parked = promiseCommitmentIds(card.payload);
     if (!parked.includes(commitmentId)) continue;
+    changed = true;
     const rest = parked.filter((id) => id !== commitmentId);
     if (rest.length) {
       await trx('triage_items').where({ id: card.id }).update({
@@ -448,6 +458,7 @@ async function clearPromiseException(trx, callLogId, commitmentId, note) {
         .update({ status: 'resolved', resolution_source: 'auto', resolution_note: note, resolved_at: new Date(), updated_at: new Date() });
     }
   }
+  if (!changed) return;
   const remaining = await trx('triage_items').where({ call_log_id: callLogId }).whereIn('status', ['open', 'in_progress']).first('id');
   await trx('call_log').where({ id: callLogId }).update({ review_status: remaining ? 'open' : 'resolved', updated_at: new Date() });
 }
@@ -635,8 +646,42 @@ async function applyContextSkip(conn, row, reason, now) {
 // The one customer handoff: render, claim, hand to the central send pipeline
 // with a final source recheck at both the dispatch and provider boundaries,
 // then record what the provider said. Anything unknown parks.
+// An operator can relink the call to a different customer between staging
+// and this claim (e.g. correcting a call-ingest mismatch by hand) —
+// contextFor already re-derives the visit from the REVALIDATED customer, but
+// related_customer_id on the row was stamped at staging time against the OLD
+// one. Left stale, the SMS still reaches the right (new) customer, but
+// settleDelivery's own identity check compares the call's CURRENT
+// customer_id against this row's related_customer_id and fails — a
+// delivered promise parks as delivery_scope_changed for no reason the
+// office can act on (codex #4293 P2). Rebinding happens under the SAME
+// transaction as the claim itself (a locked re-read, then the claim update),
+// so a row is never claimed without also carrying the identity it was
+// actually claimed for; a rebind that cannot complete atomically refuses
+// the claim entirely rather than dispatch on a half-updated row.
+async function claimForDispatch(conn, row, context, { now, planned, link }) {
+  const { call, customer, visit } = context;
+  try {
+    return await conn.transaction(async (trx) => {
+      const current = await trx('outbox_messages').where({ id: row.id }).whereIn('status', ['pending', 'shadow'])
+        .forUpdate().first('id', 'payload', 'related_customer_id');
+      if (!current) return { claimed: 0 };
+      const relinked = current.related_customer_id !== customer.id;
+      const claimed = await trx('outbox_messages').where({ id: row.id }).whereIn('status', ['pending', 'shadow'])
+        .update({ status: 'sending', attempts: trx.raw('attempts + 1'), last_attempt_at: now, updated_at: now,
+          related_scheduled_service_id: visit.id, related_customer_id: customer.id,
+          payload: { ...current.payload, call_generation: call.processing_generation, visit_snapshot: planned, link: link.url,
+            ...(relinked ? { rebound_from_customer_id: current.related_customer_id, rebound_at: now.toISOString() } : {}) } });
+      return { claimed, relinked };
+    });
+  } catch (err) {
+    require('./logger').warn(`[reschedule-link-promises] send claim failed for ${row.id} (${err.code || err.name || 'error'})`);
+    return { claimed: 0, error: err };
+  }
+}
+
 async function dispatch(conn, row, context, { now, send, buildLink, render, planned, evidenceSince }) {
-  const { commitment, call, customer, visit } = context;
+  const { commitment, customer, visit } = context;
   const link = await (buildLink || require('./reschedule-link').buildRescheduleLink)(visit.id, { customerId: customer.id });
   if (!link?.url) return parkReview(conn, row, 'link_unavailable');
   const body = await (render || require('../routes/admin-sms-templates').getTemplate)('reschedule_link_promise', {
@@ -645,11 +690,11 @@ async function dispatch(conn, row, context, { now, send, buildLink, render, plan
   if (!body) return parkReview(conn, row, 'template_unavailable');
   // A committed claim survives process death. Unknown provider outcomes are
   // reconciled from delivery evidence or parked, never blindly resent.
-  const claimed = await conn('outbox_messages').where({ id: row.id }).whereIn('status', ['pending', 'shadow'])
-    .update({ status: 'sending', attempts: conn.raw('attempts + 1'), last_attempt_at: now, updated_at: now,
-      related_scheduled_service_id: visit.id, payload: { ...row.payload, call_generation: call.processing_generation, visit_snapshot: planned, link: link.url } });
+  const { claimed, error } = await claimForDispatch(conn, row, context, { now, planned, link });
+  if (error) return parkReview(conn, row, 'claim_rebind_failed');
   if (!claimed) return;
   row.related_scheduled_service_id = visit.id;
+  row.related_customer_id = customer.id;
   let manual = null;
   const check = async () => {
     if (mode() !== 'true') return { ok: false, code: 'LINK_GATE_OFF', reason: 'Reschedule link automation is off' };
@@ -799,6 +844,13 @@ async function stampScanned(conn, rows, now) {
 
 async function sweep(conn = db, options = {}) {
   if (mode() === 'off') return { processed: 0 };
+  // Live mode must fix the activation boundary on its OWN first tick,
+  // whether or not there happens to be anything to stage yet — otherwise an
+  // empty queue defers the write to whatever LATER sweep finally sees a
+  // row, and every commitment created between gate-on and that later sweep
+  // reads as pre_activation against a boundary that arrived too late
+  // (codex #4293 P1, folded into round 2 on baa4cf295).
+  if (mode() === 'true') await activationBoundary(conn);
   await stagePromises(conn);
   const now = options.now || new Date();
   const rows = await conn('outbox_messages').whereNotNull('commitment_id').whereIn('status', ['pending', 'shadow', 'sending', 'sent', 'review'])
@@ -1099,4 +1151,4 @@ async function reconcileUsedLinks(conn, now = new Date()) {
   return reconcileRows(conn, rows);
 }
 
-module.exports = { mode, selectDiscussedVisit, snapshot, stagePromises, matchingSend, runOne, sweep, withSendLock, resolveUsedLink, reconcileUsedLinks };
+module.exports = { mode, selectDiscussedVisit, snapshot, stagePromises, matchingSend, claimForDispatch, runOne, sweep, withSendLock, resolveUsedLink, reconcileUsedLinks };

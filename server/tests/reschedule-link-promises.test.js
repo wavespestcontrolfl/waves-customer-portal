@@ -462,6 +462,53 @@ test('the same generation already staged is never restaged', async () => {
   }
 });
 
+test('a customer relink between staging and dispatch rebinds the row under the claim transaction', async () => {
+  // The office relinked this call to a different customer after the row was
+  // staged but before it was planned — contextFor already resolved the
+  // NEW customer's visit, but related_customer_id on the row still names
+  // the OLD one. Without the rebind, the send goes out fine but a later
+  // carrier receipt fails deliveryIdentityMatches (call.customer_id no
+  // longer equals the row's stale related_customer_id) and the delivered
+  // promise parks as delivery_scope_changed for no reason the office can
+  // act on (codex #4293 P2).
+  const row = promiseRow('outbox', 'commitment', { related_customer_id: 'old-customer', payload: { kind: 'send_reschedule_link' } });
+  const { conn, seen } = fakeConn({ outbox: [row] });
+  const context = { call: { processing_generation: 3 }, customer: { id: 'new-customer' }, visit: { id: 'visit' } };
+  const now = new Date('2030-01-07T12:00:00Z');
+  const link = { url: 'https://example.com/reschedule/token' };
+  const result = await links.claimForDispatch(conn, row, context, { now, planned: { id: 'visit' }, link });
+  expect(result).toMatchObject({ claimed: 1, relinked: true });
+  const claim = seen.updates.find((u) => u.table === 'outbox_messages' && u.eq.id === 'outbox');
+  expect(claim.patch).toMatchObject({ status: 'sending', related_customer_id: 'new-customer', related_scheduled_service_id: 'visit' });
+  // The rebind is recorded, not silent — an auditor can see the row moved.
+  expect(claim.patch.payload).toMatchObject({ rebound_from_customer_id: 'old-customer', link: link.url });
+  expect(claim.patch.payload.rebound_at).toBeDefined();
+});
+
+test('no rebind marker when the staged and revalidated customer already match', async () => {
+  const row = promiseRow('outbox', 'commitment', { related_customer_id: 'customer', payload: {} });
+  const { conn, seen } = fakeConn({ outbox: [row] });
+  const context = { call: { processing_generation: 1 }, customer: { id: 'customer' }, visit: { id: 'visit' } };
+  const result = await links.claimForDispatch(conn, row, context,
+    { now: new Date('2030-01-07T12:00:00Z'), planned: { id: 'visit' }, link: { url: 'https://example.com/x' } });
+  expect(result).toMatchObject({ claimed: 1, relinked: false });
+  const claim = seen.updates.find((u) => u.table === 'outbox_messages');
+  expect(claim.patch.related_customer_id).toBe('customer');
+  expect(claim.patch.payload.rebound_from_customer_id).toBeUndefined();
+});
+
+test('a claim that cannot rebind atomically refuses dispatch with a distinct reason, not a half-updated row', async () => {
+  const row = promiseRow('outbox', 'commitment', { related_customer_id: 'old-customer' });
+  const { conn, seen } = fakeConn({ outbox: [row], throwOn: 'outbox' });
+  const context = { call: { processing_generation: 1 }, customer: { id: 'new-customer' }, visit: { id: 'visit' } };
+  const result = await links.claimForDispatch(conn, row, context,
+    { now: new Date('2030-01-07T12:00:00Z'), planned: { id: 'visit' }, link: { url: 'https://example.com/x' } });
+  expect(result.claimed).toBe(0);
+  expect(result.error).toBeInstanceOf(Error);
+  // Nothing was left half-claimed — no update was ever recorded for this row.
+  expect(seen.updates).toEqual([]);
+});
+
 test('a replay that moved nothing closes no cards; a real self-serve move does', async () => {
   const none = fakeConn({ outbox: [sentRow], selfServe: null });
   expect(await links.resolveUsedLink(none.conn, 'visit')).toBe(0);
@@ -616,16 +663,18 @@ test('a reconciled row with a pending receipt still settles it, without re-parki
     patch: expect.objectContaining({ status: 'delivered' }) }));
   // ...and, being a genuine delivery, fulfils the commitment exactly as the
   // normal settleDelivery path does (fulfilPromise, reused not copied) —
-  // but nothing about it REOPENS office work: no triage insert, and no
-  // triage_items update ever moves a card away from resolved. A call_log
-  // resync to review_status: 'resolved' is fulfilPromise's own
-  // clearPromiseException doing exactly what it always does; it is not a
-  // re-park.
+  // but nothing about it REOPENS office work: no triage insert, no
+  // triage_items update. This promise was never parked (no card was ever
+  // raised for it), so clearPromiseException's card-clear query matches
+  // nothing — and, per the fix below, that means it must NOT touch
+  // call_log.review_status at all: forcing it to 'resolved' regardless
+  // would clobber an intentional null or a 'dismissed' the office set for
+  // reasons of its own (codex #4293 P2).
   expect(seen.updates).toContainEqual(expect.objectContaining({ table: 'call_commitments',
     patch: expect.objectContaining({ status: 'fulfilled' }) }));
   expect(seen.inserts).toEqual([]);
   expect(seen.updates.some((u) => u.table === 'triage_items')).toBe(false);
-  expect(seen.updates).toContainEqual(expect.objectContaining({ table: 'call_log', patch: expect.objectContaining({ review_status: 'resolved' }) }));
+  expect(seen.updates.some((u) => u.table === 'call_log')).toBe(false);
 });
 
 test('a failed receipt on a reconciled row stays bookkeeping — the commitment is not fulfilled', async () => {
@@ -761,6 +810,31 @@ test('a shadow sweep never touches the persisted boundary or cancels anything as
   expect(systemSettings.reschedule_link_promise_activated_at).toBeDefined();
   expect(live.seen.updates).toContainEqual(expect.objectContaining({ table: 'outbox_messages', eq: { id: 'stale' },
     patch: expect.objectContaining({ status: 'cancelled', last_error: 'pre_activation' }) }));
+});
+
+test('an empty first live sweep still fixes the activation boundary; a promise made after it is staged normally next tick', async () => {
+  // stagePromises' own query can come back empty on the very first live
+  // tick (nothing has been extracted since the gate went on yet) — if the
+  // boundary were only established as a side effect of judging a row, an
+  // empty queue would defer the write to whatever LATER sweep finally sees
+  // one, and every commitment made in between reads as pre_activation
+  // against a boundary that arrived too late (codex #4293 P1, folded into
+  // round 2 on baa4cf295).
+  const systemSettings = {};
+  const empty = await sweepWith({ outbox: [], selfServeVisitIds: [], systemSettings }, 'true');
+  expect(empty.result.processed).toBe(0);
+  expect(empty.seen.inserts).toContainEqual(expect.objectContaining({ table: 'system_settings',
+    data: expect.objectContaining({ key: 'reschedule_link_promise_activated_at' }) }));
+  expect(systemSettings.reschedule_link_promise_activated_at).toBeDefined();
+
+  // A promise created any time after the now-persisted boundary must NOT
+  // read as pre-activation on the very next sweep.
+  const boundary = new Date(systemSettings.reschedule_link_promise_activated_at);
+  const after = new Date(boundary.getTime() + 60000).toISOString();
+  const fresh = promiseRow('fresh', 'first', { payload: { kind: 'send_reschedule_link', commitment_created_at: after } });
+  const next = await sweepWith({ outbox: [fresh], selfServeVisitIds: [], systemSettings }, 'true');
+  const freshUpdate = next.seen.updates.find((u) => u.table === 'outbox_messages' && u.eq.id === 'fresh');
+  expect(freshUpdate.patch.last_error).not.toBe('pre_activation');
 });
 
 test('one call-level card speaks for every promise parked against the call', async () => {
