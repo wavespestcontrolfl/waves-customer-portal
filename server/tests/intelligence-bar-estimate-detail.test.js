@@ -82,6 +82,10 @@ const PAGE_PAYLOAD = {
   },
   cta: { canAccept: true, quoteRequired: false, quoteRequiredReason: null, monthlyBilled: false },
   proposal: null,
+  propertyGroup: [
+    { token: 'sib-a', address: '100 Test St', status: 'sent', monthlyTotal: 92, annualTotal: 1104, onetimeTotal: 0, isCurrent: true },
+    { token: 'sib-b', address: '200 Test St', status: 'sent', monthlyTotal: 0, annualTotal: 0, onetimeTotal: 450, isCurrent: false },
+  ],
   depositPolicy: { required: false },
   showYourWork: { steps: ['internal only'] },
   meta: { generatedAt: '2026-09-11T22:00:00Z', engineVersion: 'v2', cacheHit: false },
@@ -105,6 +109,8 @@ test('tool definition points at the page projection, takes either selector, and 
   expect(GET_ESTIMATE_DETAIL_TOOL.description).toMatch(/page\.cta/);
   expect(GET_ESTIMATE_DETAIL_TOOL.description).toMatch(/page_unavailable/);
   expect(GET_ESTIMATE_DETAIL_TOOL.description).toMatch(/committed_totals/);
+  expect(GET_ESTIMATE_DETAIL_TOOL.description).toMatch(/withheld = quote_required/);
+  expect(GET_ESTIMATE_DETAIL_TOOL.description).toMatch(/page\.propertyGroup/);
   expect(GET_ESTIMATE_DETAIL_TOOL.input_schema.properties.estimate_id.format).toBe('uuid');
   expect(GET_ESTIMATE_DETAIL_TOOL.input_schema.properties.customer_id.format).toBe('uuid');
   expect(GET_ESTIMATE_DETAIL_TOOL.input_schema.required).toBeUndefined();
@@ -148,6 +154,43 @@ test('no hand projection survives: the tool exposes no re-derived pricing keys o
   expect(shaped.requote_required).toBeUndefined();
   expect(shaped.bill_by_invoice).toBeUndefined();
   expect(shaped.recurring_services).toBeUndefined();
+});
+
+// ── Where the payload is not the pixels (round 6) ───────────────────
+test('a quote-required bundle reports NO amounts: the page exits to the terminal card before rendering pricing', async () => {
+  mockCompose.mockResolvedValue({
+    ...JSON.parse(JSON.stringify(PAGE_PAYLOAD)),
+    cta: { canAccept: false, quoteRequired: true, quoteRequiredReason: 'manager_approval', monthlyBilled: false },
+  });
+  const shaped = await shapeEstimate(estimateRow());
+  expect(shaped.page.pricing).toEqual({
+    withheld: 'quote_required',
+    reason: 'manager_approval',
+    note: expect.stringMatching(/shows no amounts/),
+  });
+  expect(JSON.stringify(shaped.page.pricing)).not.toMatch(/1104|455\.5|99/);
+  // …and the verdict itself still rides along, so the bar can say why.
+  expect(shaped.page.cta).toMatchObject({ quoteRequired: true, quoteRequiredReason: 'manager_approval' });
+});
+
+test('an authored proposal is quote-required by design and keeps its proposal block — that IS the billed quote', async () => {
+  mockCompose.mockResolvedValue({
+    ...JSON.parse(JSON.stringify(PAGE_PAYLOAD)),
+    cta: { canAccept: false, quoteRequired: true, quoteRequiredReason: 'commercial_proposal', monthlyBilled: false },
+    proposal: { enabled: true, totals: { firstYearTotal: 9600 }, lines: [{ label: 'Monthly service', amount: 800 }] },
+  });
+  const shaped = await shapeEstimate(estimateRow());
+  expect(shaped.page.proposal).toEqual({ enabled: true, totals: { firstYearTotal: 9600 }, lines: [{ label: 'Monthly service', amount: 800 }] });
+  expect(shaped.page.pricing.withheld).toBe('quote_required');
+});
+
+test('sibling estimates report only the one-time figure the switcher displays, never their stored recurring totals', async () => {
+  const shaped = await shapeEstimate(estimateRow());
+  expect(shaped.page.propertyGroup).toEqual([
+    { token: 'sib-a', address: '100 Test St', status: 'sent', isCurrent: true, displayed_one_time_total: null, has_recurring_plan: true },
+    { token: 'sib-b', address: '200 Test St', status: 'sent', isCurrent: false, displayed_one_time_total: 450, has_recurring_plan: false },
+  ]);
+  expect(JSON.stringify(shaped.page.propertyGroup)).not.toMatch(/1104/);
 });
 
 // ── Membership: strict here, never for the page ─────────────────────
@@ -197,21 +240,30 @@ test('an unlocked row has no committed figure at all — the stored columns are 
 });
 
 // ── Disclosure gates ────────────────────────────────────────────────
-test('a call-side block withholds the projection: unverified provenance is not laundered into a staff answer', async () => {
+test('a call-side block suppresses the WHOLE record — identity and money may belong to another customer', async () => {
   mockCallSideBlock.mockResolvedValue('wrong_identity');
-  const shaped = await shapeEstimate(estimateRow());
-  expect(shaped.link_state).toBe('blocked');
-  expect(shaped.customer_link).toBeNull();
-  expect(shaped.page).toBeNull();
-  expect(shaped.page_unavailable).toMatch(/call-side block/);
+  const shaped = await shapeEstimate(estimateRow({ status: 'accepted', accepted_at: '2026-09-06T12:00:00Z' }), [
+    { status: 'received', amount: '100.00', card_surcharge: '3.00', credited_amount: null, refunded_amount: null, refunded_surcharge: null, received_at: '2026-09-06T00:00:00Z' },
+  ]);
+  expect(shaped).toEqual({
+    id: 'est-1',
+    withheld: 'provenance_blocked',
+    page: null,
+    page_unavailable: expect.stringMatching(/call-side block/),
+    customer_link: null,
+    staff_preview_link: null,
+    link_state: 'blocked',
+  });
+  // Nothing attributable survives: no name, address, notes, deposits or committed figure.
+  expect(JSON.stringify(shaped)).not.toMatch(/Avery Example|100 Test St|perimeter|103|564/);
   expect(mockCompose).not.toHaveBeenCalled();
 });
 
-test('an unverifiable call-side block fails closed', async () => {
+test('an unverifiable call-side block fails closed the same way', async () => {
   mockCallSideBlock.mockRejectedValue(new Error('call_log unreachable'));
   const shaped = await shapeEstimate(estimateRow());
-  expect(shaped.link_state).toBe('blocked');
-  expect(shaped.page).toBeNull();
+  expect(shaped.withheld).toBe('provenance_blocked');
+  expect(shaped.customer).toBeUndefined();
 });
 
 test('an EXPIRED estimate still reports its amounts — the page\'s 404 is a customer-surface rule, not a staff-disclosure one', async () => {

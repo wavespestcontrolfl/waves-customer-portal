@@ -22,12 +22,31 @@
 // So this tool no longer projects anything. It calls
 // estimate-public.composeEstimateDataPayload — the exact function that
 // builds the JSON body of GET /:token/data, the payload the React estimate
-// page renders — and passes the priced sections through VERBATIM. Every
-// withholding rule, every band, every quote-required verdict is applied
-// once, by the page's own composer, upstream of this file. If the page
-// starts withholding something new, this tool withholds it the same day
-// with no change here; if it exposes something new, the bar can answer
-// about it the same day. There is no second copy to drift.
+// page renders — and passes the priced sections through VERBATIM. Bands,
+// ladders, combos, selectors, breakdowns and their per-field withholding
+// are all applied once, by the page's own composer, upstream of this file.
+// If the page reshapes one of them, this tool follows the same day with no
+// change here. There is no second copy to drift.
+//
+// WHERE THE PAYLOAD IS NOT THE PIXELS (codex round 6). The composer is the
+// page's INPUT, not its render. Two disclosure decisions provably live in
+// the client, not in the payload, and this file has to make them or it
+// would report amounts no customer ever saw:
+//   quote-required — finalizePricingBundle only STAMPS quoteRequired /
+//                    reason / items; the numeric bundle is still spread
+//                    into pricing. EstimateViewPage exits to the terminal
+//                    card before rendering any pricing when canAccept is
+//                    false, so a manager-approval / wide-low-confidence /
+//                    custom-item quote shows no figure at all. One coarse
+//                    gate keyed off the composer's OWN verdict, not a
+//                    re-derivation of its per-field rules.
+//   sibling totals — propertyGroup carries each sibling's STORED
+//                    monthly/annual/one-time columns; those siblings are
+//                    never individually composed, so their own
+//                    quote-required state is unknown. PropertyGroupSwitcher
+//                    renders no recurring aggregate at all and names a
+//                    one-time total only when there is no monthly — the one
+//                    figure it actually displays is the only one kept.
 //
 // What this file still owns, and why each one is not a re-projection:
 //   membership   — reconcileFrozenMembershipSnapshot with strictMembership,
@@ -106,6 +125,24 @@ const DROPPED_ESTIMATE_KEYS = new Set([
   'askToken', 'token', 'intelligence', 'satelliteUrl', 'licenseNumber', 'notes',
 ]);
 
+// The one-time figure the switcher actually displays, for one sibling:
+// PropertyGroupSwitcher shows "$X one-time" only when the sibling has a
+// one-time total and NO monthly (EstimateViewPage.jsx priceLabel), and shows
+// no recurring aggregate ever. The raw stored columns behind that decision
+// are dropped: a sibling is never individually composed, so nothing here
+// knows whether its own page would have withheld them.
+function siblingEntry(sibling) {
+  const { monthlyTotal, annualTotal, onetimeTotal, ...rest } = sibling || {};
+  const displayed = Number(onetimeTotal) > 0 && !(Number(monthlyTotal) > 0) ? Number(onetimeTotal) : null;
+  return {
+    ...rest,
+    displayed_one_time_total: displayed,
+    // Enough for the operator to know a sibling is a plan without giving a
+    // figure its own page may have withheld.
+    has_recurring_plan: Number(monthlyTotal) > 0,
+  };
+}
+
 function stripPayload(payload) {
   const out = {};
   for (const [key, value] of Object.entries(payload || {})) {
@@ -120,6 +157,20 @@ function stripPayload(payload) {
       continue;
     }
     out[key] = value;
+  }
+  if (Array.isArray(out.propertyGroup)) out.propertyGroup = out.propertyGroup.map(siblingEntry);
+  // The page renders NO pricing for a quote-required bundle — the client
+  // exits to the terminal card first — so neither does this tool. The
+  // composer's own verdict decides it; the reason rides along because that
+  // is the answer to "why is there no price yet". An authored proposal is
+  // quote-required BY DESIGN and its page does show the proposal (that is
+  // the billed quote), so `proposal` is untouched here.
+  if (out.cta && out.cta.quoteRequired === true) {
+    out.pricing = {
+      withheld: 'quote_required',
+      reason: out.cta.quoteRequiredReason || null,
+      note: 'the customer page shows no amounts for this estimate — it exits to the quote-required card before rendering any pricing',
+    };
   }
   return out;
 }
@@ -222,24 +273,36 @@ function depositEntry(d) {
   };
 }
 
+// A call-side BLOCK suppresses the WHOLE record, not just its pricing
+// (codex round 6 P1). That block means the row's provenance is in doubt —
+// wrong-identity draft, changed linkage, a rejected or in-flight call — so
+// the customer name, address, notes, deposits and any committed total may
+// belong to someone else entirely. The public route answers a bare 404 for
+// exactly this condition; a staff reader gets the block and nothing to
+// misattribute.
+function blockedRecord(row) {
+  return {
+    id: row.id,
+    withheld: 'provenance_blocked',
+    page: null,
+    page_unavailable: 'withheld: a call-side block is on this estimate — its provenance is unverified, so the page serves it to no one and its contents may belong to another customer',
+    customer_link: null,
+    staff_preview_link: null,
+    link_state: 'blocked',
+  };
+}
+
 async function shapeEstimate(row, deposits = []) {
   const data = parseStoredJson(row.estimate_data);
   const reconciliation_error = await reconcileMembership(row);
   const links = await estimateLinks(row, data);
+  if (links.link_state === 'blocked') return blockedRecord(row);
   // Withheld outright when the live membership state could not be verified:
   // the row is then the stale frozen-member snapshot, and a page composed
   // from it would quote a discount that may no longer be given.
-  //
-  // A call-side BLOCK withholds it too, and for a different reason: that
-  // block means the estimate's own provenance is in doubt (wrong-identity
-  // draft, rejected or in-flight call), so its amounts may belong to another
-  // customer entirely. The page 404s it for exactly that reason; a staff
-  // answer must not launder it back out.
   const projection = reconciliation_error
     ? { page: null, page_unavailable: `withheld: ${reconciliation_error}` }
-    : links.link_state === 'blocked'
-      ? { page: null, page_unavailable: 'withheld: a call-side block is on this estimate — its provenance is unverified, so the page will not serve it to anyone' }
-      : await pageProjection(row, links.link_state);
+    : await pageProjection(row, links.link_state);
   // The committed deal, for a row whose price is locked (accepted, declined,
   // or explicitly stamped). These are the columns the send/accept path wrote
   // and the composer does not recompute them, so they are the answer to
@@ -323,7 +386,7 @@ async function getEstimateDetail({ estimate_id, customer_id, limit } = {}) {
 
 const GET_ESTIMATE_DETAIL_TOOL = {
   name: 'get_estimate_detail',
-  description: `Read what an estimate offered, as the customer's own estimate page prices it. Returns that page's projection verbatim under \`page\`: \`page.pricing\` carries the plan cadences with their monthly / annual prices and per-application figures, each service's cadence ladder with its selectable additions (termite bond terms, station rental, commercial interior service), the priced cadence combinations on a mixed estimate, the one-time breakdown and upfront fees; \`page.cta\` carries the page's quote-required verdict and reason, whether it can still be self-accepted, and whether it bills monthly; \`page.estimate\` carries status, membership, effective invoice mode and acceptance; a formal commercial proposal arrives under \`page.proposal\` (that is the billed quote, not the engine rows). The page's own withholding applies before you see it — a low-confidence commercial price arrives as its range, a quote-required bundle arrives with no amounts — so quote whatever \`page\` says and nothing more. Also returns deposits (face amount + card surcharge; a pending or failed intent collected nothing), status and timestamps, and which link (customer or staff preview) can actually be opened. A lapsed membership is reconciled first so the amounts match the live page; when the live membership state cannot be verified, \`page\` is null and page_unavailable says so — never quote from a withheld projection. An accepted or declined estimate also reports committed_totals: what was actually committed, which is not the same as what the page would price today.
+  description: `Read what an estimate offered, as the customer's own estimate page prices it. Returns that page's projection verbatim under \`page\`: \`page.pricing\` carries the plan cadences with their monthly / annual prices and per-application figures, each service's cadence ladder with its selectable additions (termite bond terms, station rental, commercial interior service), the priced cadence combinations on a mixed estimate, the one-time breakdown and upfront fees; \`page.cta\` carries the page's quote-required verdict and reason, whether it can still be self-accepted, and whether it bills monthly; \`page.estimate\` carries status, membership, effective invoice mode and acceptance; a formal commercial proposal arrives under \`page.proposal\` (that is the billed quote, not the engine rows). The page's own withholding applies before you see it — a low-confidence commercial price arrives as its range, and a quote-required bundle arrives as \`page.pricing.withheld = quote_required\` with the reason and no amounts at all, because that page shows the customer no figure — so quote whatever \`page\` says and nothing more. A grouped multi-property estimate lists its siblings under \`page.propertyGroup\` with only the one-time figure their switcher displays; each sibling's own page has to be read for its plan pricing. Also returns deposits (face amount + card surcharge; a pending or failed intent collected nothing), status and timestamps, and which link (customer or staff preview) can actually be opened. A lapsed membership is reconciled first so the amounts match the live page; when the live membership state cannot be verified, \`page\` is null and page_unavailable says so — never quote from a withheld projection. An accepted or declined estimate also reports committed_totals: what was actually committed, which is not the same as what the page would price today.
 Use for: "what did we quote him for quarterly pest", "what is the per-application price on her estimate", "what would monthly have cost", "what did the 9/5 estimate say" — anything about the amounts inside a sent estimate. Prefer this over guessing from monthly_rate or from the SMS thread. Pass estimate_id for one estimate or customer_id for that customer's latest estimates (newest first).`,
   input_schema: {
     type: 'object',

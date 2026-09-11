@@ -58,13 +58,19 @@ module.exports = {
   // (estimate-claim-sql callSideBlockForEstimateData → call_log + leads;
   // pre-push audit P1 — it was missing from the first cut's contract too,
   // so a rename in that read went unmonitored for this tool).
-  // composeEstimateDataPayload itself is deliberately NOT walked, for the
-  // same reason buildPricingBundle never was: it is the public route's
-  // whole rendering pipeline, exercised by that route's own tests and
-  // contract — re-deriving its column surface here would just be a second,
-  // hand-maintained copy of a schema the route already owns.
+  // composeEstimateDataPayload's own pricing pipeline is deliberately NOT
+  // walked, for the same reason buildPricingBundle never was: it is the
+  // public route's whole rendering engine, exercised by that route's own
+  // tests — re-deriving its column surface here would just be a second,
+  // hand-maintained copy of a schema the route already owns. But the reads
+  // it makes for EVERY estimate are declared (codex round 6 P2, since a
+  // manual contract disables the automatic source scan entirely):
+  // findLinkedUpcomingAppointment's scheduled_services + left-joined
+  // services catalog identity, the property-group sibling lookup
+  // (estimates, already listed), and resolveProposalBillingContext's
+  // customers + annual_prepay_terms reads on an authored proposal.
   get_estimate_detail: {
-    tables: ['estimates', 'estimate_deposits', 'call_log', 'leads'],
+    tables: ['estimates', 'estimate_deposits', 'call_log', 'leads', 'scheduled_services', 'services', 'customers', 'annual_prepay_terms'],
     columns: {
       // select('*') plus every estimates.<column> read off the row: by
       // getEstimateDetail/shapeEstimate directly (where/orderBy/whereNull
@@ -98,6 +104,19 @@ module.exports = {
         'created_at', 'twilio_call_sid',
       ],
       leads: ['id', 'twilio_call_sid', 'deleted_at', 'created_at'],
+      // composeEstimateDataPayload's per-estimate appointment adoption read
+      // (findLinkedUpcomingAppointment): the filtered columns plus the
+      // catalog identity it left-joins for.
+      scheduled_services: [
+        'id', 'status', 'scheduled_date', 'customer_id', 'reservation_expires_at',
+        'is_callback', 'service_id', 'source_estimate_id',
+      ],
+      services: ['id', 'service_key', 'name'],
+      // resolveProposalBillingContext, reached only for an authored
+      // proposal: the customer row it prices against and the prepay term
+      // minted from this estimate.
+      customers: ['id'],
+      annual_prepay_terms: ['source_estimate_id'],
     },
     reason: 'get_estimate_detail\'s DB reads live in estimate-detail.js, not its registered sourcePath (estimate-tools.js) — the automatic scan can\'t see them.',
   },
