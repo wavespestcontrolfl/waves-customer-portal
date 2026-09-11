@@ -116,11 +116,22 @@ export default function PricingStrategyPage({ embedded = false, onSecondaryNav }
   );
 }
 
-function MetricCard({ label, value }) {
+// Main coloured these KPI values by health: green healthy, amber watch, red bad.
+// The shared kit has no success tone (see the batch's deferred kit gap), so a
+// healthy value keeps the default ink and only the warning and alert bands —
+// which the kit does have — are restored. ratioTone() is main's threshold.
+const METRIC_TONES = { warn: "text-warn-fg", alert: "text-alert-fg" };
+function ratioTone(ratio) {
+  if (!ratio) return undefined;
+  if (ratio >= 3) return undefined;
+  return ratio >= 2 ? "warn" : "alert";
+}
+
+function MetricCard({ label, value, tone }) {
   return (
     <Card>
       <CardBody className="text-center">
-        <div className="text-22 leading-tight font-medium text-zinc-900 u-nums">{value}</div>
+        <div className={`text-22 leading-tight font-medium u-nums ${METRIC_TONES[tone] || "text-zinc-900"}`}>{value}</div>
         <div className="mt-1 text-ui-caption text-ink-secondary">{label}</div>
       </CardBody>
     </Card>
@@ -141,7 +152,7 @@ function MoneyModelTab({ dashboard, loading }) {
     { label: "Total customers", value: overview.totalCustomers || 0 },
     { label: "Avg LTV", value: formatMoney(overview.avgLTV) },
     { label: "Avg CAC", value: formatMoney(overview.avgCAC) },
-    { label: "LTV:CAC ratio", value: overview.ltvToCacRatio ? `${overview.ltvToCacRatio.toFixed(1)}x` : "—" },
+    { label: "LTV:CAC ratio", value: overview.ltvToCacRatio ? `${overview.ltvToCacRatio.toFixed(1)}x` : "—", tone: ratioTone(overview.ltvToCacRatio) },
     { label: "Monthly recurring", value: formatMoney(overview.monthlyRecurringRevenue) },
   ];
   // Only Core carries a money figure in the contract; the other three stages
@@ -199,7 +210,7 @@ function ValueSlider({ label, desc, value, onChange, increaseLabel, decreaseLabe
       <label className="text-ui-body font-medium text-zinc-900">{label}</label>
       <p className="mt-1 text-ui-caption text-ink-secondary">{desc}</p>
       <div className="mt-2 rounded-md border-hairline border-zinc-200 p-3">
-        <div className="mb-2 flex items-center justify-between gap-3"><span className="text-ui-caption text-ink-secondary">{decreaseLabel || "Low"}</span><Badge tone="strong">{value}</Badge><span className="text-ui-caption text-ink-secondary">{increaseLabel || "High"}</span></div>
+        <div className="mb-2 flex items-center justify-between gap-3"><span className="text-ui-caption text-ink-secondary">{decreaseLabel || "Low"}</span><Badge tone={value >= 7 ? "strong" : value >= 4 ? "warn" : "alert"}>{value}</Badge><span className="text-ui-caption text-ink-secondary">{increaseLabel || "High"}</span></div>
         <Input aria-label={label} type="range" min={1} max={10} value={value} onChange={(event) => onChange(parseInt(event.target.value, 10))} className="h-11 border-0 bg-transparent p-0 accent-zinc-900" />
       </div>
     </div>
@@ -362,7 +373,7 @@ function LTVAnalysisTab() {
   const retention12mo = data.retentionCurve?.["12mo"]?.pct;
   const metrics = [
     { label: "Avg LTV", value: formatMoney(summary.avgLTV) }, { label: "Avg CAC", value: formatMoney(summary.avgCAC) },
-    { label: "LTV:CAC", value: ltvCacRatio ? `${ltvCacRatio.toFixed(1)}x` : "—" },
+    { label: "LTV:CAC", value: ltvCacRatio ? `${ltvCacRatio.toFixed(1)}x` : "—", tone: ratioTone(ltvCacRatio) },
     { label: "Best channel", value: bestChannel || "—" }, { label: "12mo retention", value: retention12mo != null ? `${retention12mo}%` : "—" },
   ];
   return (

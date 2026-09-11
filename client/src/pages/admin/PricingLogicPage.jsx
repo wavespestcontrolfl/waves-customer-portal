@@ -214,12 +214,18 @@ function PestCalibrationPanel() {
   const summaryMetrics = [
     { label: "Samples", value: summary.count || 0 },
     { label: "Avg miss", value: formatMinutes(summary.avgDelta || 0), tone: calibrationDeltaTone(summary.avgDelta || 0) },
-    { label: "Avg abs miss", value: formatMinutes(summary.avgAbsDelta || 0) }, { label: "15+ min outliers", value: summary.outlierCount || 0 },
+    { label: "Avg abs miss", value: formatMinutes(summary.avgAbsDelta || 0), tone: (summary.avgAbsDelta || 0) >= 12 ? "text-warn-fg" : undefined },
+    { label: "15+ min outliers", value: summary.outlierCount || 0, tone: (summary.outlierCount || 0) > 0 ? "text-alert-fg" : undefined },
   ];
+  // A nonzero "missing" count is a sample-quality warning — main painted those
+  // three amber and left the descriptive counts plain.
+  const missingTone = (count) => (count || 0) > 0 ? "text-warn-fg" : undefined;
   const healthMetrics = [
     { label: "Jobs synced", value: sampleHealth.jobsEvaluated || 0 }, { label: "Materialized", value: sampleHealth.materializedCount || 0 },
-    { label: "Fallback matched", value: sampleHealth.fallbackMatchedCount || 0 }, { label: "No est. link", value: sampleHealth.missingEstimateLinkCount || 0 },
-    { label: "No timer", value: sampleHealth.missingTimerCount || 0 }, { label: "No diagnostics", value: sampleHealth.missingDiagnosticsCount || 0 },
+    { label: "Fallback matched", value: sampleHealth.fallbackMatchedCount || 0 },
+    { label: "No est. link", value: sampleHealth.missingEstimateLinkCount || 0, tone: missingTone(sampleHealth.missingEstimateLinkCount) },
+    { label: "No timer", value: sampleHealth.missingTimerCount || 0, tone: missingTone(sampleHealth.missingTimerCount) },
+    { label: "No diagnostics", value: sampleHealth.missingDiagnosticsCount || 0, tone: missingTone(sampleHealth.missingDiagnosticsCount) },
   ];
 
   return (
@@ -229,7 +235,7 @@ function PestCalibrationPanel() {
         {error && <ActionFeedback error>{error}</ActionFeedback>}
         {data?.sync?.unavailable && <ActionFeedback>Calibration table is not migrated yet. Run database migrations before collecting samples.</ActionFeedback>}
         <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">{summaryMetrics.map((metric) => <Card key={metric.label}><CardBody><div className={`text-18 font-medium u-nums ${metric.tone || "text-zinc-900"}`}>{metric.value}</div><div className="mt-1 text-ui-caption text-ink-secondary">{metric.label}</div></CardBody></Card>)}</div>
-        <div className="grid grid-cols-2 gap-3 lg:grid-cols-6">{healthMetrics.map((metric) => <div key={metric.label} className="rounded-md bg-zinc-50 p-3"><div className="text-16 font-medium text-zinc-900 u-nums">{metric.value}</div><div className="mt-1 text-ui-caption text-ink-secondary">{metric.label}</div></div>)}</div>
+        <div className="grid grid-cols-2 gap-3 lg:grid-cols-6">{healthMetrics.map((metric) => <div key={metric.label} className="rounded-md bg-zinc-50 p-3"><div className={`text-16 font-medium u-nums ${metric.tone || "text-zinc-900"}`}>{metric.value}</div><div className="mt-1 text-ui-caption text-ink-secondary">{metric.label}</div></div>)}</div>
         <div className="grid gap-3 lg:grid-cols-2"><CalibrationGroup title="By pool cage size" rows={summary.byPoolCageSize || []} /><CalibrationGroup title="By lot band" rows={summary.byLotBand || []} /></div>
         {reviewQueue.length > 0 && <div><div className="mb-2 flex flex-wrap justify-between gap-2"><h3 className="font-medium text-zinc-900">Needs calibration review</h3><Badge tone="alert">{summary.reviewQueueCount || reviewQueue.length} flagged</Badge></div><Table className="min-w-[720px]" aria-label="Calibration review queue"><THead><TR><TH>Date</TH><TH>Customer</TH><TH align="right">Delta</TH><TH align="right">Pool</TH><TH align="right">Lot</TH><TH>Why</TH></TR></THead><TBody>{reviewQueue.slice(0, 8).map((row) => <TR key={`review-${row.id || row.scheduled_service_id}`}><TD nums>{String(row.service_date || "").slice(0, 10) || "-"}</TD><TD className="font-medium">{row.customer_name || row.address_line1 || "Unknown"}</TD><TD align="right" nums className="text-alert-fg">{formatMinutes(row.delta_minutes || 0)}</TD><TD align="right">{row.pool_cage_size || "-"}</TD><TD align="right" nums>{row.lot_sqft ? Number(row.lot_sqft).toLocaleString() : "-"}</TD><TD className="text-ink-secondary">{Array.isArray(row.calibration_review_reasons) ? row.calibration_review_reasons.join(", ") : "-"}</TD></TR>)}</TBody></Table></div>}
         <Table className="min-w-[900px]" aria-label="Pest calibration samples"><THead><TR><TH>Date</TH><TH>Customer</TH><TH align="right">Pool</TH><TH align="right">Lot</TH><TH align="right">Pred</TH><TH align="right">Actual</TH><TH align="right">Delta</TH><TH align="right">Confidence</TH><TH>Reasons</TH></TR></THead><TBody>{records.slice(0, 50).map((row) => { const reasons = Array.isArray(row.review_reasons) ? row.review_reasons.join(", ") : ""; const delta = Number(row.delta_minutes || 0); return <TR key={row.id || row.scheduled_service_id}><TD nums>{String(row.service_date || "").slice(0, 10) || "-"}</TD><TD className="font-medium">{row.customer_name || row.address_line1 || "Unknown"}</TD><TD align="right">{row.pool_cage_size || "-"}</TD><TD align="right" nums>{row.lot_sqft ? Number(row.lot_sqft).toLocaleString() : "-"}</TD><TD align="right" nums>{Number(row.predicted_minutes || 0).toFixed(1)}</TD><TD align="right" nums>{Number(row.actual_minutes || 0).toFixed(1)}</TD><TD align="right" nums className={calibrationDeltaTone(delta)}>{formatMinutes(delta)}</TD><TD align="right">{row.pricing_confidence || "-"}</TD><TD className="max-w-[220px] truncate text-ink-secondary" title={reasons}>{reasons || "-"}</TD></TR>; })}{!loading && records.length === 0 && <TR><TD colSpan="9" className="py-6 text-center text-ink-secondary">No calibration samples yet. Completed pest jobs need an accepted estimate link and a completed job timer.</TD></TR>}</TBody></Table>
