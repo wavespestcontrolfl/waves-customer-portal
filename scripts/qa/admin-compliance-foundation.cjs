@@ -24,6 +24,7 @@ async function main() {
     safari = await webkit.launch();
 
     for (const [name, browser, hasTouch] of [['desktop', chrome, false], ['mobile', safari, true]]) {
+      let failLicenseSave = true;
       let credentials = [{
         id: credentialId,
         slug: 'synthetic-license',
@@ -85,6 +86,7 @@ async function main() {
           assert.equal(request.method(), 'PUT');
           assert.deepEqual(request.postDataJSON(), { fl_applicator_license: 'NEW-2', license_expiry: '2027-02-01', license_categories: ['General Household Pest'] });
           report.requests.push(requestRecord);
+          if (failLicenseSave) return route.fulfill({ status: 503, contentType: 'application/json', body: JSON.stringify({ error: 'Synthetic license save failure. Retry after checking this draft.' }) });
           body = { success: true };
         } else if (url.pathname === '/api/admin/credentials' && request.method() === 'GET') {
           body = { credentials };
@@ -158,8 +160,19 @@ async function main() {
       await page.getByRole('dialog', { name: 'Edit license' }).waitFor();
       await page.getByLabel('License #').fill('NEW-2');
       await page.screenshot({ path: path.join(output, `${name}-license-dialog.png`), fullPage: true });
-      await page.getByRole('button', { name: 'Save' }).click();
-      await page.getByRole('dialog', { name: 'Edit license' }).waitFor({ state: 'detached' });
+      await page.setViewportSize({ width: 820, height: 360 });
+      await page.getByRole('button', { name: 'Save', exact: true }).click();
+      await page.getByRole('alert').filter({ hasText: "Couldn't save the license — HTTP 503" }).waitFor();
+      const licenseDialog = page.getByRole('dialog', { name: 'Edit license' });
+      assert.equal(await page.getByLabel('License #').inputValue(), 'NEW-2');
+      const footer = await licenseDialog.getByRole('button', { name: 'Save', exact: true }).boundingBox();
+      assert.ok(footer.y >= 0 && footer.y + footer.height <= 360, 'Save remains inside short viewport');
+      await page.getByLabel('License #').scrollIntoViewIfNeeded();
+      await page.screenshot({ path: path.join(output, `${name}-license-error-landscape.png`) });
+      failLicenseSave = false;
+      await page.getByRole('button', { name: 'Save', exact: true }).click();
+      await licenseDialog.waitFor({ state: 'detached' });
+      await page.setViewportSize({ width: hasTouch ? 390 : 1440, height: 900 });
 
       await page.getByRole('button', { name: 'Credentials' }).click();
       await page.getByText('Synthetic operating license', { exact: true }).waitFor();

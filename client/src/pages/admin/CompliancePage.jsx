@@ -274,7 +274,7 @@ function LicensesTab({ token }) {
     </Table></CardBody></Card>
     <Dialog open={editing !== null} onClose={closeEditor} size="sm">
       <DialogHeader><DialogTitle>Edit license</DialogTitle></DialogHeader>
-      <form onSubmit={save}>
+      <form onSubmit={save} className="flex min-h-0 flex-col">
         <DialogBody className="space-y-4">
           <p className="text-ui-body font-medium text-zinc-900">{editingTechnician?.name}</p>
           <Field label="License #"><Input value={form.fl_applicator_license || ""} onChange={(event) => setForm((current) => ({ ...current, fl_applicator_license: event.target.value }))} /></Field>
