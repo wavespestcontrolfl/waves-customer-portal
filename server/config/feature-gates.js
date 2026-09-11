@@ -1324,6 +1324,16 @@ const gates = {
   // Off → nothing is written; the Calls tab still renders rows already
   // recorded. Kill switch: unset. See services/call-commitments.js.
   callCommitments: process.env.GATE_CALL_COMMITMENTS === 'true',
+  // Call reschedule apply: a matched existing customer's agent-committed move
+  // of a visit already on the books (V2 reschedule_requested + confirmed
+  // start) is applied to that visit through the rebooker, the access note
+  // lands on the visit, and the call's reschedule cards resolve as 'auto'.
+  // Fail-closed on identity, confidence, and a single unambiguous visit.
+  // Sends NO customer communication (owner directive 2026-09-08); the
+  // reminder cron simply reads the new time. Off → cards stay open as
+  // before. See services/call-reschedule-apply.js.
+  // Automatic moves also require GATE_CALL_AGENT_COMMIT_TRUSTED_LABELS.
+  callRescheduleApply: process.env.GATE_CALL_RESCHEDULE_APPLY === 'true',
   callbackCard: gateEnvValue('GATE_CALLBACK_CARD'),
   smsAdditionalProperty: gateEnvValue('GATE_SMS_ADDITIONAL_PROPERTY'),
   // Unrecorded-call alert: the "Twilio has no recording either" step of the
@@ -2009,6 +2019,11 @@ const gates = {
   // Planned route measurements and candidate-specific gap checks in the
   // existing Intelligence Bar. Read-only and explicitly opt-in everywhere.
   scheduleQualityMeasurements: gateEnvValue('GATE_SCHEDULE_QUALITY_MEASUREMENTS'),
+
+  // Existing Dispatch queue: unresolved future-route locations, durations,
+  // modeled lateness, closures and unallocated work. Requires measurements;
+  // separate opt-in so collection can stay observational.
+  scheduleQualityAlerts: gateEnvValue('GATE_SCHEDULE_QUALITY_ALERTS'),
 
   // Drive-Time Calibration — swaps the straight-line drive-time approximation
   // (haversine × 1.4 road factor @ 30 mph) for a two-term model fitted against

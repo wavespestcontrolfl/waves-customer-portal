@@ -566,7 +566,15 @@ describe('booking route wiring (source contracts)', () => {
     expect(seedAt).toBeGreaterThan(stampAt);
     // Children inherit the identity from the parent row (seeder contract).
     const seeder = require('fs').readFileSync(require('path').join(__dirname, '..', 'services', 'recurring-appointment-seeder.js'), 'utf8');
-    expect(seeder).toMatch(/copyIfPresent\(row, parent, \[\s*\n\s*'create_invoice_on_complete',[\s\S]{0,400}'service_id',/);
+    // Assert MEMBERSHIP of the copy list, not the distance between two of
+    // its entries: the previous form budgeted 400 characters between
+    // 'create_invoice_on_complete' and 'service_id', so adding a field or a
+    // comment to the list broke a guard that has nothing to say about
+    // either (prepay coverage inheritance, 2026-09-11).
+    const copyList = seeder.match(/copyIfPresent\(row, parent, \[([\s\S]*?)\]\);/);
+    expect(copyList).not.toBeNull();
+    expect(copyList[1]).toMatch(/'create_invoice_on_complete',/);
+    expect(copyList[1]).toMatch(/'service_id',/);
   });
 
   test('every seeded family stamps its cadence catalog identity (shared slot-reservation resolver)', () => {
