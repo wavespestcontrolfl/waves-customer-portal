@@ -551,6 +551,11 @@ describe('PayOverview', () => {
     expect(screen.getByLabelText('Accepted net value, including baseline ($)')).toHaveValue(null);
   });
 
+  it('carries the active visit into the technician documents link', () => {
+    render(<MemoryRouter initialEntries={['/tech/pay-growth?visit=visit%2F42']}><PayOverview view={view()} manage={false} onSaved={vi.fn()} /></MemoryRouter>);
+    expect(screen.getByRole('link', { name: 'Staff documents' })).toHaveAttribute('href', '/tech/documents?visit=visit%2F42');
+  });
+
   it('hides manager-only actions for a non-manager', () => {
     render(withRouter(<PayOverview view={view()} manage={false} onSaved={vi.fn()} />));
     expect(screen.queryByRole('button', { name: 'Save simulation statement' })).not.toBeInTheDocument();

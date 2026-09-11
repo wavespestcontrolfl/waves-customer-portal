@@ -104,6 +104,9 @@ import {
   describeCardRequestResult,
   canSendCardRequest,
 } from "../../components/schedule/cardLinkStatus";
+import ServiceScore from "../../components/payGrowth/ServiceScore";
+import { request as payGrowthRequest } from "../../components/payGrowth/common";
+import usePayGrowthAvailable from "../../hooks/usePayGrowthAvailable";
 const { TERMITE_PERIMETER_METHODS } = termiteTreatmentMethods;
 const TREATMENT_AREA_FIELD_KEYS = ["areas_treated", "spot_treatment_areas", "treatment_zones"];
 // Area fields that changed from free text to chips in this PR: restored legacy
@@ -5330,6 +5333,33 @@ export function ProtocolPanel({ service, onClose }) {
   const [jobCardError, setJobCardError] = useState(false);
   const [loadErrors, setLoadErrors] = useState([]);
   const [loadAttempt, setLoadAttempt] = useState(0);
+  const payGrowthAvailable = usePayGrowthAvailable();
+  // Score is admin-only, or the assigned technician viewing their own
+  // service — /admin/dispatch is reachable by technician-role staff too,
+  // and a tech must never see (or manage) another tech's score.
+  const currentStaffUser = (() => {
+    try { return JSON.parse(localStorage.getItem("waves_admin_user") || "null"); }
+    catch { return null; }
+  })();
+  const isAdmin = currentStaffUser?.role === "admin";
+  const currentTechId = currentStaffUser?.id;
+  const serviceTechnicianId = service.technicianId ?? service.technician_id;
+  const isAssignedTech = currentTechId != null && serviceTechnicianId != null && String(currentTechId) === String(serviceTechnicianId);
+  // A technician who is not the assignee may still be a retained participant
+  // (shared crew, reassigned visit). Only the score service knows that, so
+  // probe it once and show the tab only when the server returns a score.
+  const probeScore = payGrowthAvailable === true && !isAdmin && !isAssignedTech && currentTechId != null;
+  const [participantScore, setParticipantScore] = useState(null);
+  useEffect(() => {
+    setParticipantScore(null);
+    if (!probeScore) return undefined;
+    const controller = new AbortController();
+    payGrowthRequest(`/services/${service.id}/score`, { signal: controller.signal })
+      .then((result) => { if (!controller.signal.aborted) setParticipantScore(result); })
+      .catch(() => { if (!controller.signal.aborted) setParticipantScore(false); });
+    return () => controller.abort();
+  }, [probeScore, service.id]);
+  const canScore = payGrowthAvailable === true && (isAdmin || isAssignedTech || Boolean(participantScore));
   // Classify from the RAW service type when the payload carries it: the
   // schedule day view sends a normalized display name ("Lawn + Tree & Shrub"
   // becomes "Tree & Shrub Care") while the server's line-scoped fields are
@@ -5534,6 +5564,7 @@ export function ProtocolPanel({ service, onClose }) {
     { id: "photos", label: " ID Guide", count: photos.length },
     { id: "scripts", label: " Scripts", count: scripts.length },
     { id: "equipment", label: " Equipment", count: equipment.length },
+    ...(canScore ? [{ id: "score", label: "Score", count: null }] : []),
   ];
 
   const activeSection = SECTIONS.some((section) => section.id === requestedSection)
@@ -5695,7 +5726,9 @@ export function ProtocolPanel({ service, onClose }) {
             </button>
           </div>
         )}
-        {activeSection === "job_card" && jobCardEnabled ? (
+        {activeSection === "score" && canScore ? (
+          <ServiceScore key={service.id} serviceId={service.id} manage={isAdmin} initialData={participantScore || null} />
+        ) : activeSection === "job_card" && jobCardEnabled ? (
           <JobCardTab card={jobCard} loading={jobCardLoading} error={jobCardError} D={D} />
         ) : activeSection === "visit_protocol" && protocolEnabled ? (
           <VisitProtocol key={jobCard.serviceId} card={jobCard} D={D} onJobCard={() => setActiveSection("job_card")} />

@@ -4,7 +4,7 @@ import '@testing-library/jest-dom/vitest';
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { TeamTab } from './TimeTrackingPage';
+import { TeamTab, resolveStaffTab } from './TimeTrackingPage';
 
 function apiResponse(body) {
   return {
@@ -97,5 +97,21 @@ describe('TimeTrackingPage team account actions', () => {
     ));
     expect(showToast).toHaveBeenCalledWith('River Tech activated');
     expect(await screen.findByRole('button', { name: 'Deactivate' })).toBeInTheDocument();
+  });
+});
+
+describe('TimeTrackingPage pay-growth deep-link resolution', () => {
+  it('withholds the tab while an admin availability probe is pending, then resolves it', () => {
+    expect(resolveStaffTab('pay-growth', null, 'admin')).toBeNull();
+    expect(resolveStaffTab('pay-growth', true, 'admin')).toBe('pay-growth');
+    expect(resolveStaffTab('pay-growth', false, 'admin')).toBe('team');
+  });
+
+  it('falls back to Team immediately for non-admins and leaves other tabs alone', () => {
+    expect(resolveStaffTab('pay-growth', null, 'technician')).toBe('team');
+    expect(resolveStaffTab('pay-growth', true, 'technician')).toBe('team');
+    expect(resolveStaffTab('pay-growth', true, null)).toBe('team');
+    expect(resolveStaffTab('documents', null, 'admin')).toBe('documents');
+    expect(resolveStaffTab('dashboard', false, 'technician')).toBe('dashboard');
   });
 });

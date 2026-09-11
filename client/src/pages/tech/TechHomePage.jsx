@@ -193,7 +193,7 @@ const QUICK_ACTIONS = [
 
 export default function TechHomePage({ section = 'today' }) {
   const navigate = useNavigate();
-  const { fieldWorkspace = false, documentsAvailable = false, setNavigationBusy } = useOutletContext() || {};
+  const { fieldWorkspace = false, documentsAvailable = false, payGrowthAvailable = false, setNavigationBusy } = useOutletContext() || {};
   const [searchParams, setSearchParams] = useSearchParams();
   const selectedVisitKey = fieldWorkspace ? searchParams.get('visit') : null;
   const visitSearch = selectedVisitKey ? `?visit=${encodeURIComponent(selectedVisitKey)}` : '';
@@ -647,6 +647,7 @@ export default function TechHomePage({ section = 'today' }) {
             <div className="tf-existing"><TechTimeTrackingCard nextStop={fieldNextStop?.primary} /><TimecardSignoffCard techName={techName} /></div>
             <div className="tf-existing"><TechIntelligenceBar /></div>
             {documentsAvailable && <div className="tf-actions"><Link className="tf-button" to={`/tech/documents${visitSearch}`}>Staff documents</Link></div>}
+            {payGrowthAvailable && <div className="tf-actions"><Link className="tf-button" to={`/tech/pay-growth${visitSearch}`}>My Pay & Growth</Link></div>}
           </>}
           visit={selectedVisitKey && section === 'today' ? (
             <TechFieldVisit
