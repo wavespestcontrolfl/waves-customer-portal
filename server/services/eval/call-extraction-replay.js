@@ -292,10 +292,11 @@ async function runCallExtractionReplayEval(opts = {}) {
     await notifyFailure({ notify, sendEmail, finalAttempt, attempts, fixturePath });
   } else if (finalAttempt.status === 'inconclusive') {
     await notifyInconclusive({ notify, sendEmail, attempt: finalAttempt, fixturePath });
-  } else if (notifyOnFailure) {
-    // Fall-off: a SCHEDULED pass clears the standing FIX. `notifyOnFailure`
-    // is already true on this branch (the manual-run case returned above);
-    // restated here so the guard is visible at the call, not two branches up.
+  } else if (notifyOnFailure && finalAttempt.status === 'pass') {
+    // Fall-off: an explicit SCHEDULED PASS clears the standing FIX — never
+    // "not fail and not inconclusive" (a skip / crash status must leave the
+    // bell standing; pre-push P1 on #4397). `notifyOnFailure` is already
+    // true on this branch (the manual-run case returned above).
     await retireIfClean('call-extraction-eval');
   }
 
