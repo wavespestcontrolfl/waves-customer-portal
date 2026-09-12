@@ -451,6 +451,27 @@ async function runVisitCompletionPacketEffects(packetId, database = db) {
         // Outreach enrolled a moment ago, before the bounce, is parked too.
         await Summary.parkVisitReviewOutreach(packet.id, trx);
       }
+      // The PAYMENT verdict is re-derived under the closing locks too (Codex
+      // #4311 r39 P1): a Bill-To assignment can commit while the summary
+      // delivery is awaited, and the withdrawal it performs stamps the
+      // invoice and holds the visit WITHOUT alerting — a packet still
+      // `processing` has no office review to record against. Closing on the
+      // stale verdict would mark the packet done with error=null and drop
+      // withdrawn debt out of the recovery sweep with no billing alert.
+      const closingInvoice = payment.invoiceId
+        ? await trx('invoices').where({ id: payment.invoiceId }).first('id', 'payer_id', 'scheduled_send_error')
+        : null;
+      if (closingInvoice
+        && (closingInvoice.payer_id || require('./invoice-helpers').invoiceWithdrawnFromCustomer(closingInvoice))
+        && payment.state !== 'office_required') {
+        const [, stampedPayer] = String(closingInvoice.scheduled_send_error || '').split(':');
+        payment = {
+          ...payment,
+          state: 'office_required',
+          reason: 'payer_assigned',
+          payerId: closingInvoice.payer_id || (stampedPayer ? Number(stampedPayer) : null) || payment.payerId || null,
+        };
+      }
       const closeReview = payment.state === 'office_required' || delivery.state === 'delivery_review';
       const alreadyAlerted = closeReview && await trx('dispatch_alerts').where({ type: 'visit_closeout_review' }).whereNull('resolved_at')
         .whereRaw("payload->>'packetId' = ?", [packet.id]).first('id');

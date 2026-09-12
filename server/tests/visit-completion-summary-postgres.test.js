@@ -3420,6 +3420,48 @@ postgres('visit summary recipient recovery', () => {
     }
   });
 
+  test('a Bill-To assignment during delivery closes the packet for office review', async () => {
+    // The withdrawal stamps the invoice and holds the visit, but a packet
+    // still `processing` has no office review to record against — so the
+    // close must re-derive the payment verdict under its own locks or the
+    // packet completes clean and the withdrawn debt leaves the sweep with no
+    // billing alert.
+    const Packets = require('../services/visit-completion-packets');
+    const { invoiceWithdrawnFromCustomer } = require('../services/invoice-helpers');
+    const invoiceId = randomUUID();
+    const [payer] = await mockPg('payers').insert({ display_name: 'Fixture Property Management', ap_email: `${randomUUID()}@example.invalid`, active: true }).returning('id');
+    await mockPg('invoices').insert({ id: invoiceId, token: randomUUID().replace(/-/g, ''), invoice_number: `FIX-${invoiceId.slice(0, 8)}`,
+      customer_id: fixture.customerId, status: 'draft', total: 120, visit_completion_packet_id: fixture.packetId });
+    try {
+      await mockPg.transaction(async (trx) => {
+        await trx('customers').where({ id: fixture.customerId }).update({ payer_id: payer.id });
+        return Packets.withdrawPacketInvoicesForOwner(trx, { customerId: fixture.customerId });
+      });
+      expect(invoiceWithdrawnFromCustomer(await mockPg('invoices').where({ id: invoiceId }).first())).toBe(true);
+      // The withdrawal on a still-processing packet records no alert…
+      await mockPg('dispatch_alerts').where({ type: 'visit_closeout_review' })
+        .whereRaw("payload->>'packetId' = ?", [fixture.packetId]).del();
+      await mockPg('visit_completion_packets').where({ id: fixture.packetId }).update({ status: 'processing', error: null });
+
+      // …so the close is what has to notice it.
+      const result = await runVisitCompletionPacketEffects(fixture.packetId);
+      expect(result.body.state).toBe('office_required');
+      const closed = await mockPg('visit_completion_packets').where({ id: fixture.packetId }).first('status', 'error');
+      expect(closed.status).toBe('done');
+      expect(JSON.parse(closed.error)).toMatchObject({ payment: 'office_required', reason: 'payer_assigned' });
+      const alert = await mockPg('dispatch_alerts').where({ type: 'visit_closeout_review' }).whereNull('resolved_at')
+        .whereRaw("payload->>'packetId' = ?", [fixture.packetId]).first('payload');
+      expect(alert).toBeDefined();
+    } finally {
+      await mockPg('customers').where({ id: fixture.customerId }).update({ payer_id: null });
+      await mockPg('service_visits').where({ id: fixture.visitId }).update({ billing_hold: false });
+      await mockPg('visit_completion_packets').where({ id: fixture.packetId }).update({ error: null });
+      await mockPg('dispatch_alerts').where({ type: 'visit_closeout_review' }).whereRaw("payload->>'packetId' = ?", [fixture.packetId]).del();
+      await mockPg('invoices').where({ id: invoiceId }).del();
+      await mockPg('payers').where({ id: payer.id }).del();
+    }
+  });
+
   test('a payer-to-payer handoff moves the office review to the payer that owes it now', async () => {
     // The stamp, the packet error and the open alert all name the AP account
     // the office must bill; a second payer taking the packet over has to move
