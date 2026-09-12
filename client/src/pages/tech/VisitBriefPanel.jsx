@@ -33,6 +33,7 @@ import {
   prepaidLine,
   quotedLineLabel,
   quotedTermsLabel,
+  recordlessVisitNeedsCloseout,
   smsHref,
   telHref,
   visitMoneySummary,
@@ -471,7 +472,8 @@ function LastVisitSection({ service, visitBrief, facts, showType }) {
 // Per-service actions keep terminal reports read-only and preserve the
 // trace-eligibility guard — one row per member service on a grouped stop.
 function ServiceActions({ service, showType, onPhotos, onProject, onZone, onLead }) {
-  const reportDisabled = !service.visitCloseoutPacket
+  const closeoutAvailable = !!service.visitCloseoutPacket || recordlessVisitNeedsCloseout(service);
+  const reportDisabled = !closeoutAvailable
     && (TERMINAL_STATUSES.has(service.status) || ['sent', 'closed'].includes(service.linkedProject?.status));
   const btn = {
     minHeight: 48, minWidth: 48, padding: '8px 10px', borderRadius: 6, fontSize: 14, fontWeight: 600,
@@ -500,7 +502,7 @@ function ServiceActions({ service, showType, onPhotos, onProject, onZone, onLead
           {/* A visit with an existing linked report continues it (in-place
               editor) instead of creating a duplicate; a sent/closed report
               or completed visit is terminal (openProjectOrContinue no-ops). */}
-          {service.visitCloseoutPacket ? 'Open closeout' : service.linkedProject?.status === 'sent'
+          {closeoutAvailable ? 'Open closeout' : service.linkedProject?.status === 'sent'
             ? '🗂️ Sent'
             : service.linkedProject?.status === 'closed' || service.status === 'completed'
               ? '🗂️ Completed'

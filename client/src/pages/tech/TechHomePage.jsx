@@ -62,7 +62,7 @@ import { useFeatureFlag } from '../../hooks/useFeatureFlag';
 import { getAdminAuthToken, getAdminDisplayName, getAdminUser } from '../../lib/adminAuth';
 import { etDateString } from '../../lib/timezone';
 import VisitBriefPanel from './VisitBriefPanel';
-import { fmtMoney, shortAddress, stopAccessIndicator, stopCollectSummary } from './visitBrief';
+import { fmtMoney, recordlessVisitNeedsCloseout, shortAddress, stopAccessIndicator, stopCollectSummary } from './visitBrief';
 
 // In-place report editor for project-backed visits (WDO, pre-treat cert —
 // owner ask 2026-07-13): tapping a visit whose report already exists opens
@@ -111,7 +111,7 @@ function usesDispatchCompletion(service) {
 const TERMINAL_SERVICE_STATUSES = new Set(["completed", "cancelled", "skipped", "no_show"]);
 function openTypedCompletion(service) {
   const status = String(service?.status || "");
-  if (TERMINAL_SERVICE_STATUSES.has(status) && !service?.visitCloseoutPacket) {
+  if (TERMINAL_SERVICE_STATUSES.has(status) && !service?.visitCloseoutPacket && !recordlessVisitNeedsCloseout(service)) {
     alert(`This visit is already ${status} — nothing to complete.`);
     return;
   }
@@ -581,7 +581,10 @@ export default function TechHomePage({ section = 'today' }) {
     openProjectForService(service);
   }, [openProjectForService]);
   const projectServices = fieldWorkspace
-    ? (selectedVisitKey ? (selectedVisit?.services || []) : myServices).filter((service) => !TERMINAL_STATUSES_VISIT.has(service.status) && !['sent', 'closed'].includes(service.linkedProject?.status))
+    ? (selectedVisitKey ? (selectedVisit?.services || []) : myServices).filter((service) => (
+        (!TERMINAL_STATUSES_VISIT.has(service.status) || recordlessVisitNeedsCloseout(service))
+        && !['sent', 'closed'].includes(service.linkedProject?.status)
+      ))
     : myServices;
   const handleProjectQuickAction = useCallback(() => {
     if (projectServices.length === 1) {
@@ -609,7 +612,7 @@ export default function TechHomePage({ section = 'today' }) {
     setSearchParams((params) => { params.delete('visit'); return params; });
   };
   const openServiceReport = (service) => {
-    if (TERMINAL_STATUSES_VISIT.has(service.status) && !service.visitCloseoutPacket) return;
+    if (TERMINAL_STATUSES_VISIT.has(service.status) && !service.visitCloseoutPacket && !recordlessVisitNeedsCloseout(service)) return;
     if (usesDispatchCompletion(service)) openTypedCompletion(service);
     else if (isPestControlService(service)) setRecapService(service);
     else openProjectOrContinue(service);

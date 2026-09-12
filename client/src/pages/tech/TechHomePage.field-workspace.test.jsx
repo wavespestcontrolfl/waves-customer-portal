@@ -182,6 +182,18 @@ describe('Tech field workspace uses the existing route workflow', () => {
     expect(screen.queryByText('Existing recap form')).not.toBeInTheDocument();
   });
 
+  it.each([
+    [false, false],
+    [true, true],
+  ])('Tools exposes completed combined closeout only when has_service_record is %s (disabled=%s)', async (hasRecord, disabled) => {
+    rows = [row('one', { status: 'completed', visit: { id: 'group' }, visitId: 'group',
+      visitCloseoutEnabled: true, has_service_record: hasRecord })];
+    await act(async () => { mount('/tech/tools?visit=visit%3Agroup'); });
+    const report = await screen.findByRole('button', { name: /Project Report/ });
+    if (disabled) expect(report).toBeDisabled();
+    else expect(report).toBeEnabled();
+  });
+
   it.each(['sent', 'closed', 'draft'])('Tools only offers editable linked reports (%s)', async status => {
     rows = [row('one', { linkedProject: { id: 'existing-report', status } })];
     await act(async () => { mount('/tech/tools'); });
