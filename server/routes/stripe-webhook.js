@@ -5134,6 +5134,10 @@ async function handleSetupIntentSucceeded(setupIntent, { eventCreatedAt = null }
         details: { via: 'covered_capture_webhook', setup_intent_id: setupIntent.id },
         authorizedAt: setupIntent.created ? new Date(setupIntent.created * 1000) : null,
         scheduledServiceId: coveredScopeSsId,
+        // The withdrawal and the packet's live owner, re-judged inside the
+        // enrollment's own transaction (Codex #4311 r38 P1) — this completion
+        // can land days after the pre-check above.
+        invoiceId: coveredInvoiceId,
       });
       // Capture done → apply the HELD credit coverage (Codex #2507
       // round-7 P1): under the hold flow the invoice stayed collectible

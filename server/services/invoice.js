@@ -915,8 +915,14 @@ async function enrollPacketReviewAfterCredit(invoiceId, packetId) {
   // told. The settlement stands; the office enrolls the review by hand.
   if (result && result.enrolled === false && result.recorded === false) {
     logger.error(`[invoice] review enrollment after credit coverage unrecorded for ${invoiceId} (packet ${packetId}): ${result.error || result.reason}`);
+    // notifyAdmin swallows its own insert failure and returns null (Codex
+    // #4311 r38 P1), so its result is checked and a SECOND durable signal —
+    // the same visit_closeout_review alert the other settlement rails raise —
+    // is written when it could not land. Credit coverage has no webhook to
+    // redeliver, so this is the last chance to leave a record.
+    let notified = null;
     try {
-      await require("./notification-service").notifyAdmin(
+      notified = await require("./notification-service").notifyAdmin(
         "alert",
         "Visit review not enrolled after credit coverage",
         `Invoice ${invoiceId} was settled by account credit, but the completed visit's review request could not be recorded. Enroll the review from the visit if it is still wanted.`,
@@ -924,6 +930,29 @@ async function enrollPacketReviewAfterCredit(invoiceId, packetId) {
       );
     } catch (err) {
       logger.warn(`[invoice] unrecorded review enrollment alert failed for ${invoiceId}: ${err.message}`);
+    }
+    if (!notified) {
+      try {
+        const open = await db("dispatch_alerts").where({ type: "visit_closeout_review" }).whereNull("resolved_at")
+          .whereRaw("payload->>'reason' = 'review_enrollment_unrecorded'")
+          .whereRaw("payload->>'invoiceIds' LIKE ?", [`%${invoiceId}%`])
+          .first("id");
+        if (!open) {
+          await require("./dispatch-alerts").createAlert({
+            type: "visit_closeout_review",
+            severity: "warn",
+            payload: {
+              reason: "review_enrollment_unrecorded",
+              source: "credit_covered",
+              invoiceIds: [invoiceId],
+              packetId,
+              detail: "This credit-settled invoice owes a review ask that could not be recorded — enroll it from the visit or ask manually.",
+            },
+          });
+        }
+      } catch (alertErr) {
+        logger.error(`[invoice] BOTH unrecorded-enrollment signals failed for ${invoiceId} (packet ${packetId}): ${alertErr.message}`);
+      }
     }
   }
   return result;

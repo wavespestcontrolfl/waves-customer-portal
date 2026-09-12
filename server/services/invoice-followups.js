@@ -861,6 +861,15 @@ async function fireTouch(row, { operatorInitiated = false } = {}) {
     const fresh = await db('invoices').where({ id: row.invoice_id })
       .first('total', 'credit_applied', 'status', 'title', 'token', 'due_date', 'invoice_number',
         'payer_id', 'scheduled_send_error');
+    // FAIL CLOSED on an unreadable row (Codex #4311 r38 P1): this read is the
+    // last-minute ownership backstop, and it sits inside a refresh block that
+    // was written to fail OPEN for the price fields. Continuing on stale batch
+    // data is exactly the case the backstop exists for, so a missing row stops
+    // the touch and the sweep re-judges it next run.
+    if (!fresh) {
+      logger.warn(`[invoice-followups] skipped sequence ${row.id} — invoice ${row.invoice_id} could not be re-read before the send`);
+      return;
+    }
     // OWNERSHIP AGAIN, on this last read before the provider (local audit):
     // the policy, credit and ledger work above is all awaited, and a Bill-To
     // assignment landing in that window would otherwise be invisible to this
@@ -883,7 +892,13 @@ async function fireTouch(row, { operatorInitiated = false } = {}) {
       }
     }
   } catch (refreshErr) {
-    logger.warn(`[invoice-followups] invoice refresh before dun failed for ${row.invoice_id}: ${refreshErr.message}`);
+    // FAIL CLOSED (Codex #4311 r38 P1): this block carries the last-minute
+    // ownership backstop now, so an unreadable refresh can no longer fall
+    // through to the provider on stale batch data — precisely when a Bill-To
+    // change may have landed. The sequence keeps its schedule and the next
+    // sweep re-judges it.
+    logger.warn(`[invoice-followups] skipped sequence ${row.id} — invoice refresh before dun failed for ${row.invoice_id}: ${refreshErr.message}`);
+    return;
   }
   // Dun for amount DUE (total − applied account credit), not the pre-credit total.
   const amount = invoiceAmountDue(row).toFixed(2);
