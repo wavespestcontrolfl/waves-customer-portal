@@ -468,12 +468,15 @@ function fakeStageConn({ commitments = [], outbox = [] } = {}) {
   // (codex #4293 P1 r4).
   const base = (cc) => cc.kind === 'send_reschedule_link' && cc.party === 'waves' && cc.status === 'open'
     && (cc.human_state == null || cc.human_state === 'confirmed');
-  // An older-generation row whose own send outcome is still genuinely
-  // unknown ('sending', or parked 'review' with last_error
-  // 'provider_outcome_unknown') blocks a fresh dispatch — it might already
-  // have reached the customer with no evidence recorded yet (codex #4293 P1).
+  // An older-generation row's own send outcome is "genuinely unknown" ONLY
+  // when its payload carries the dedicated delivery_outcome_uncertain flag —
+  // never inferred from status/last_error, which a context error (a
+  // stale_extraction reprocess, say) churns on every unrelated pass and
+  // would otherwise erase the very signal this predicate exists to protect
+  // (codex #4293 P1). It might already have reached the customer with no
+  // evidence recorded yet.
   const uncertain = (cc) => outbox.some((o) => o.commitment_id === cc.id && (o.commitment_generation ?? -1) < (cc.processing_generation ?? 0)
-    && (o.status === 'sending' || (o.status === 'review' && o.last_error === 'provider_outcome_unknown')));
+    && o.payload?.delivery_outcome_uncertain === true);
   // If the query never asks a generation-aware question at all (whereRaw
   // mentioning commitment_generation), fall back to the OLD "any existing
   // row at all counts as staged" reading — the exact bug: this excludes a
@@ -495,7 +498,10 @@ function fakeStageConn({ commitments = [], outbox = [] } = {}) {
       join: pass(), leftJoin: pass(), where: pass(), whereNull: pass(), whereIn: pass(), limit: pass(), select: pass(),
       whereRaw: (sql) => {
         if (name === 'call_commitments' && /commitment_generation/.test(sql)) {
-          if (/status = 'sending'/.test(sql) || /provider_outcome_unknown/.test(sql)) state.uncertaintyAware = true;
+          // The predicate must read the payload flag itself, never
+          // status/last_error — a regression back to inferring uncertainty
+          // from those two churny fields is exactly codex #4293 P1's bug.
+          if (/delivery_outcome_uncertain/.test(sql)) state.uncertaintyAware = true;
           else state.generationAware = true;
         }
         return b;
@@ -588,7 +594,13 @@ describe('a reprocess must not double up on an older attempt whose outcome is un
   test.each([
     ['sending', null],
     ['review', 'provider_outcome_unknown'],
-  ])('an older-generation row still %s blocks a fresh dispatch', async (status, last_error) => {
+    // The exact regression this round fixes: a stale_extraction (or any
+    // other context error) reprocess overwrites last_error on its way
+    // through parkReview, but the row is STILL genuinely uncertain — only
+    // the dedicated payload flag says so now, and it is what the guard must
+    // actually read.
+    ['review', 'stale_extraction'],
+  ])('an older-generation row still %s (last_error %s) blocks a fresh dispatch while delivery_outcome_uncertain is set', async (status, last_error) => {
     const prior = process.env.GATE_RESCHEDULE_LINK_ON_PROMISE, priorCommitments = gates.callCommitments;
     try {
       gates.callCommitments = true;
@@ -602,12 +614,35 @@ describe('a reprocess must not double up on an older attempt whose outcome is un
         processing_generation: 2, kind: 'send_reschedule_link', party: 'waves', status: 'open', human_state: null };
       const { conn, inserts, updates } = fakeStageConn({
         commitments: [reopened],
-        outbox: [{ commitment_id: 'commitment', commitment_generation: 1, status, last_error }],
+        outbox: [{ commitment_id: 'commitment', commitment_generation: 1, status, last_error, payload: { delivery_outcome_uncertain: true } }],
       });
       expect(await links.stagePromises(conn)).toBe(0);
       expect(inserts).toEqual([]);
       // The uncertain row is left exactly as it was — held, not touched.
       expect(updates).toEqual([]);
+    } finally {
+      if (prior === undefined) delete process.env.GATE_RESCHEDULE_LINK_ON_PROMISE; else process.env.GATE_RESCHEDULE_LINK_ON_PROMISE = prior;
+      gates.callCommitments = priorCommitments;
+    }
+  });
+
+  test('a pre-fix older-generation row with no delivery_outcome_uncertain flag does not retroactively block, even mid-"sending"', async () => {
+    // A row already in flight when this fix deploys never got the flag
+    // stamped at claim time — behaves exactly as it did before this round,
+    // not as a NEW hold (codex #4293 P1 requirement: no retroactive
+    // blocking of historical rows).
+    const prior = process.env.GATE_RESCHEDULE_LINK_ON_PROMISE, priorCommitments = gates.callCommitments;
+    try {
+      gates.callCommitments = true;
+      process.env.GATE_RESCHEDULE_LINK_ON_PROMISE = 'shadow';
+      const reopened = { id: 'commitment', call_log_id: 'call', customer_id: 'customer', created_at: new Date('2030-01-08T00:00:00Z'),
+        processing_generation: 2, kind: 'send_reschedule_link', party: 'waves', status: 'open', human_state: null };
+      const { conn, inserts } = fakeStageConn({
+        commitments: [reopened],
+        outbox: [{ commitment_id: 'commitment', commitment_generation: 1, status: 'sending', last_error: null, payload: {} }],
+      });
+      expect(await links.stagePromises(conn)).toBe(1);
+      expect(inserts.find((i) => i.table === 'outbox_messages')).toMatchObject({ data: { commitment_id: 'commitment', commitment_generation: 2 } });
     } finally {
       if (prior === undefined) delete process.env.GATE_RESCHEDULE_LINK_ON_PROMISE; else process.env.GATE_RESCHEDULE_LINK_ON_PROMISE = prior;
       gates.callCommitments = priorCommitments;
@@ -886,6 +921,10 @@ test('a customer relink between staging and dispatch rebinds the row under the c
   // The rebind is recorded, not silent — an auditor can see the row moved.
   expect(claim.patch.payload).toMatchObject({ rebound_from_customer_id: 'old-customer', link: link.url });
   expect(claim.patch.payload.rebound_at).toBeDefined();
+  // From the moment of claim, this attempt might reach the provider with no
+  // persisted trace — the payload flag stagePromises later blocks a
+  // duplicate generation on (codex #4293 P1).
+  expect(claim.patch.payload.delivery_outcome_uncertain).toBe(true);
 });
 
 test('no rebind marker when the staged and revalidated customer already match', async () => {
@@ -1034,6 +1073,36 @@ async function sweepWith(options, mode = 'shadow') {
     gates.callCommitments = priorCommitments;
   }
 }
+
+describe('delivery uncertainty is retired only by definitive provider evidence or an office verdict (codex #4293 P1)', () => {
+  test('a real twilio_sid-bearing sms_log row showing the send failed clears the flag', async () => {
+    // The row reached the provider (status 'sending', a real SID already
+    // assigned) and was left genuinely uncertain — until reconcileAttempt's
+    // own sms_log lookup comes back with a definitive 'failed' outcome.
+    const row = promiseRow('outbox', 'commitment', { status: 'sending', provider_message_id: 'SM123',
+      sent_at: now, payload: { delivery_outcome_uncertain: true } });
+    const { seen } = await sweepWith({ outbox: [row], smsLog: { id: 'sms1', status: 'failed' } });
+    const patch = seen.updates.find((u) => u.table === 'outbox_messages' && u.eq.id === 'outbox');
+    expect(patch.patch).toMatchObject({ status: 'review', last_error: 'delivery_failed' });
+    expect(patch.patch.payload.delivery_outcome_uncertain).toBe(false);
+  });
+
+  test('an office verdict (the commitment itself closed) clears the flag on the outbox row it cancels', async () => {
+    // contextFor reads 'promise_closed' straight off the commitment row —
+    // simulate a commitment the office already dismissed by hand, with no
+    // provider id yet on this row (so reconcileAttempt is skipped and
+    // applyContextSkip's own cancel path runs).
+    const row = promiseRow('outbox', 'commitment', { status: 'review', last_error: 'provider_outcome_unknown',
+      payload: { delivery_outcome_uncertain: true } });
+    const { seen } = await sweepWith({ outbox: [row], cards: [], filterStatus: false });
+    // This generic fakeConn always resolves call_commitments to no row,
+    // which contextFor itself already reads as 'promise_closed' — exactly
+    // the office-verdict branch this test targets.
+    const patch = seen.updates.find((u) => u.table === 'outbox_messages' && u.eq.id === 'outbox' && u.patch.status === 'cancelled');
+    expect(patch).toBeDefined();
+    expect(patch.patch.payload.delivery_outcome_uncertain).toBe(false);
+  });
+});
 
 test('one unprocessable row cannot starve the rest of the sweep', async () => {
   // matchingSend throws outright for a customer with more than 200 matching

@@ -22,6 +22,28 @@ const COMMITMENT_GENERATION_CONFLICT_TARGET = '(commitment_id, commitment_genera
 // (see markLinkUsed), and a write racing behind it on stale, pre-stamp data
 // must lose instead of undoing that closure.
 const LINK_NOT_YET_RECONCILED = "(payload->>'link_used_reconciled_at') IS NULL";
+// Delivery uncertainty ("a provider may already have accepted THIS specific
+// commitment_generation's attempt, with no persisted evidence yet") and a
+// context error ("we could not evaluate this row on THIS pass") are
+// different kinds of knowledge with different lifetimes — the first is a
+// permanent fact about one outbox attempt that only definitive provider
+// evidence or an explicit office verdict may retire, the second is
+// transient and re-derivable on the very next sweep. Overloading last_error
+// with both let a stale_extraction or call_not_ready reprocess erase the
+// uncertainty the moment it re-parked the row for an unrelated reason, and
+// let it silently vanish from a 'sending' row too (codex #4293 P1). Storing
+// it under its OWN payload key sidesteps that by construction: parkReview's
+// ordinary status/last_error UPDATE never names this key, so every write
+// path that does not explicitly ask to touch it leaves it alone.
+const DELIVERY_UNCERTAIN_KEY = 'delivery_outcome_uncertain';
+// A jsonb-merge fragment for `.update({ payload: ... })` wherever the
+// current payload has not already been fetched into JS (a bulk update
+// across more than one row, or a caller with no in-hand snapshot) — merges
+// under the row's own lock, exactly like markLinkUsed's reconciliation
+// stamp, so it can never clobber a sibling payload key written elsewhere.
+function deliveryUncertainPatch(conn, value) {
+  return conn.raw("COALESCE(payload, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ [DELIVERY_UNCERTAIN_KEY]: value })]);
+}
 const sendContext = new AsyncLocalStorage();
 function mode() {
   const value = String(process.env.GATE_RESCHEDULE_LINK_ON_PROMISE || '').toLowerCase();
@@ -518,7 +540,14 @@ async function matchingSend(conn, context, since) {
   return messages.find((sms) => carriesVisitLink(sms.message_body, needles)) || null;
 }
 
-async function parkReview(conn, row, reason) {
+// clearDeliveryUncertain is for the ONE class of park reason that is itself
+// definitive provider evidence — reconcileAttempt's 'delivery_failed' (a
+// real twilio_sid-bearing sms_log row proved this exact attempt did NOT
+// reach the customer, so there is no duplicate risk left to hold against).
+// Every other reason (a context error, a claim failure, a worker exception)
+// must NOT pass this — the default leaves the payload, and therefore the
+// flag, untouched.
+async function parkReview(conn, row, reason, { clearDeliveryUncertain = false } = {}) {
   await conn.transaction(async (trx) => {
     await lockTriageCall(trx, row.related_call_log_id);
     // runOne reads row.payload.link_used_reconciled_at (its "already
@@ -535,7 +564,8 @@ async function parkReview(conn, row, reason) {
     const changed = await trx('outbox_messages').where({ id: row.id }).whereNotIn('status', ['delivered', 'cancelled'])
       .whereRaw(LINK_NOT_YET_RECONCILED)
       .whereRaw("(status <> 'review' OR last_error IS DISTINCT FROM ?)", [reason])
-      .update({ status: 'review', last_error: reason, updated_at: new Date() });
+      .update({ status: 'review', last_error: reason, updated_at: new Date(),
+        ...(clearDeliveryUncertain ? { payload: { ...row.payload, [DELIVERY_UNCERTAIN_KEY]: false } } : {}) });
     if (!changed) return;
     // One card per CALL, but it has to name every promise parked against that
     // call. A card carrying only the first commitment id was resolved the
@@ -602,9 +632,14 @@ async function settleParkedPromiseCard(trx, item, { action, reviewedBy = null, n
   // sitting in (review, or — a card can be reviewed before a send is even
   // attempted — pending/shadow) and not already terminal, stops here: no
   // further sweep may retry, park, or re-park it once the office has ruled.
+  // This IS an explicit office verdict, so it also retires any delivery
+  // uncertainty those rows were carrying — a bulk update over however many
+  // rows this card names, so the jsonb merge (not an in-hand payload spread)
+  // is what keeps each row's OTHER payload keys intact.
   await trx('outbox_messages').where({ related_call_log_id: item.call_log_id }).whereIn('commitment_id', ids)
     .whereNotIn('status', ['delivered', 'cancelled'])
-    .update({ status: 'cancelled', last_error: action === 'dismissed' ? 'dismissed_by_office' : 'resolved_by_office', updated_at: new Date() });
+    .update({ status: 'cancelled', last_error: action === 'dismissed' ? 'dismissed_by_office' : 'resolved_by_office', updated_at: new Date(),
+      payload: deliveryUncertainPatch(trx, false) });
   await recordAuditEvent({ actor_type: reviewedBy ? 'technician' : 'system', actor_id: reviewedBy,
     action: action === 'dismissed' ? 'reschedule_link_promise_dismissed' : 'reschedule_link_promise_resolved',
     resource_type: 'triage_item', resource_id: item.id, metadata: { commitment_ids: ids, settled_ids: openIds }, critical: true, trx });
@@ -703,14 +738,19 @@ async function fulfilPromise(trx, row, sms, call) {
 
 // What the row looks like once the provider's own record is attached:
 // delivery closes it, anything else keeps the lane it is already in, so a
-// parked row stays parked for the office.
+// parked row stays parked for the office. Reaching this function AT ALL
+// means `sms` came from a real, twilio_sid-bearing sms_log row (matchingSend
+// and reconcileAttempt's own lookups both require one) — the exact
+// definitive-provider-evidence rule that retires delivery uncertainty, so
+// every call here clears the flag regardless of the delivered/sent split.
 function settledOutboxPatch(current, sms, context, { delivered, visitId, generation }) {
   const parked = current.status === 'review';
   return {
     status: delivered ? 'delivered' : (parked ? 'review' : 'sent'),
     ...(delivered ? { last_error: null } : {}),
     related_scheduled_service_id: visitId, provider_message_id: sms.twilio_sid, sent_at: sms.created_at,
-    payload: { ...current.payload, call_generation: generation, visit_snapshot: current.payload?.visit_snapshot || (context?.visit ? snapshot(context.visit) : null) },
+    payload: { ...current.payload, call_generation: generation, visit_snapshot: current.payload?.visit_snapshot || (context?.visit ? snapshot(context.visit) : null),
+      [DELIVERY_UNCERTAIN_KEY]: false },
     updated_at: new Date(),
   };
 }
@@ -762,21 +802,37 @@ async function stagePromises(conn) {
     // An older-generation attempt whose own outcome is still genuinely
     // unknown — mid-claim ('sending', the process could have died between
     // the claim and the provider call) or parked specifically because the
-    // provider never confirmed one way or the other ('review' with
-    // last_error 'provider_outcome_unknown') — may already have reached
-    // Twilio. Staging a second row here risks a literal duplicate send of
-    // the same promised link if that uncertain attempt in fact went
+    // provider never confirmed one way or the other — may already have
+    // reached Twilio. Staging a second row here risks a literal duplicate
+    // send of the same promised link if that uncertain attempt in fact went
     // through with no sms_log evidence ever landing. This is distinct from
     // an attempt that was simply never made (still 'pending'/'shadow',
     // handled below by explicit retirement, not a hold): only a row that
     // MIGHT have reached the customer blocks a fresh dispatch, until
     // reconcileAttempt resolves it from delivery evidence or the office
     // rules on it via the review lane (codex #4293 P1).
+    //
+    // This reads the DELIVERY_UNCERTAIN_KEY payload flag, never status or
+    // last_error: an attempt without a provider id falls through to
+    // contextFor on every sweep, and a stale_extraction or call_not_ready
+    // context error during call reprocessing calls parkReview for that
+    // unrelated reason — overwriting last_error (and, for a 'sending' row,
+    // status too) with no idea an uncertain attempt was recorded underneath
+    // it. Inferring uncertainty from those two churny fields let that
+    // context error erase it, silently reopening this exact hole on the
+    // very next generation bump (codex #4293 P1). The flag is immune: it is
+    // set only at claim time and cleared only by settledOutboxPatch,
+    // reconcileAttempt's own definitive 'delivery_failed' evidence, or an
+    // explicit office verdict (settleParkedPromiseCard, applyContextSkip's
+    // promise_closed branch) — nothing else ever names this payload key, so
+    // a plain status/last_error UPDATE (parkReview's ordinary case) cannot
+    // touch it. A row that predates this flag simply has none set, which
+    // reads as NOT uncertain — no retroactive blocking of historical rows.
     .whereRaw(`NOT EXISTS (
       SELECT 1 FROM outbox_messages o
       WHERE o.commitment_id = cc.id
         AND COALESCE(o.commitment_generation, -1) < COALESCE(cc.processing_generation, 0)
-        AND (o.status = 'sending' OR (o.status = 'review' AND o.last_error = 'provider_outcome_unknown'))
+        AND (o.payload->>'${DELIVERY_UNCERTAIN_KEY}') = 'true'
     )`)
     .select('cc.id', 'cc.call_log_id', 'cc.created_at', 'cc.processing_generation', 'cl.customer_id').limit(200);
   // commitment_created_at rides along on the outbox row itself so runOne can
@@ -825,7 +881,11 @@ async function reconcileAttempt(conn, row, now) {
     .first('id', 'twilio_sid', 'status', 'created_at', 'customer_id', 'to_phone', 'message_body');
   const failed = sms && ['failed', 'undelivered'].includes(sms.status);
   const unparked = row.status !== 'review';
-  if (failed && unparked) await parkReview(conn, row, 'delivery_failed');
+  // A real twilio_sid-bearing sms_log row saying the provider itself
+  // rejected this exact attempt IS the definitive evidence that retires
+  // delivery uncertainty: the message never reached the customer, so
+  // staging a fresh generation afterward carries no duplicate risk.
+  if (failed && unparked) await parkReview(conn, row, 'delivery_failed', { clearDeliveryUncertain: true });
   else if (sms && ['delivered', 'read'].includes(sms.status)) await settleDelivery(conn, row, sms);
   else if (unparked && new Date(row.sent_at || row.last_attempt_at).getTime() + 24 * 3600000 < now.getTime()) await parkReview(conn, row, 'delivery_receipt_unavailable');
   else if (sms && !failed && unparked) await settleDelivery(conn, row, sms);
@@ -851,6 +911,9 @@ async function settleReconciledReceipt(conn, row) {
   if (!row.provider_message_id) return;
   const sms = await conn('sms_log').where({ twilio_sid: row.provider_message_id }).first('id', 'status');
   if (!sms) return;
+  // Either branch below is definitive provider evidence for THIS attempt —
+  // the twilio_sid lookup just above only ever matches a real sms_log row —
+  // so both retire whatever delivery uncertainty this row was carrying.
   if (['delivered', 'read'].includes(sms.status)) {
     // A delivered receipt still means the promise was KEPT — fulfilPromise
     // is the one step of settleDelivery that belongs here too, reused
@@ -859,12 +922,12 @@ async function settleReconciledReceipt(conn, row) {
     await conn.transaction(async (trx) => {
       await lockTriageCall(trx, row.related_call_log_id);
       const changed = await trx('outbox_messages').where({ id: row.id }).whereNotIn('status', ['delivered', 'cancelled'])
-        .update({ status: 'delivered', last_error: null, updated_at: new Date() });
+        .update({ status: 'delivered', last_error: null, updated_at: new Date(), payload: { ...row.payload, [DELIVERY_UNCERTAIN_KEY]: false } });
       if (changed) await fulfilPromise(trx, row, sms, { id: row.related_call_log_id });
     });
   } else if (['failed', 'undelivered'].includes(sms.status)) {
     await conn('outbox_messages').where({ id: row.id }).whereNotIn('status', ['delivered', 'cancelled'])
-      .update({ status: 'failed', last_error: sms.status, updated_at: new Date() });
+      .update({ status: 'failed', last_error: sms.status, updated_at: new Date(), payload: { ...row.payload, [DELIVERY_UNCERTAIN_KEY]: false } });
   }
 }
 
@@ -876,11 +939,13 @@ async function applyContextSkip(conn, row, reason, now) {
   // row alone would leave this promise's own exception card open forever —
   // classifyTriageItem deliberately keeps it out of the generic sweep, so the
   // call would sit in review against a decision already made (codex #4293 r2
-  // P2).
+  // P2). An explicit office verdict is also the OTHER thing (besides
+  // definitive provider evidence) allowed to retire delivery uncertainty —
+  // the office has ruled, so no future sweep will ever act on this row again.
   if (reason === 'promise_closed') return conn.transaction(async (trx) => {
     await lockTriageCall(trx, row.related_call_log_id);
     await trx('outbox_messages').where({ id: row.id }).whereNotIn('status', ['delivered', 'cancelled'])
-      .update({ status: 'cancelled', updated_at: now });
+      .update({ status: 'cancelled', updated_at: now, payload: { ...row.payload, [DELIVERY_UNCERTAIN_KEY]: false } });
     await clearPromiseException(trx, row.related_call_log_id, row.commitment_id, 'The promise was closed by the office.');
   });
   if (mode() === 'shadow') return conn('outbox_messages').where({ id: row.id }).whereIn('status', ['pending', 'shadow'])
@@ -915,7 +980,13 @@ async function claimForDispatch(conn, row, context, { now, planned, link }) {
       const claimed = await trx('outbox_messages').where({ id: row.id }).whereIn('status', ['pending', 'shadow'])
         .update({ status: 'sending', attempts: trx.raw('attempts + 1'), last_attempt_at: now, updated_at: now,
           related_scheduled_service_id: visit.id, related_customer_id: customer.id,
+          // From this instant until definitive provider evidence or an
+          // office verdict says otherwise, THIS attempt might reach Twilio
+          // with no persisted trace if the process dies mid-send — the
+          // window stagePromises must never stage a duplicate generation
+          // into (codex #4293 P1).
           payload: { ...current.payload, call_generation: call.processing_generation, visit_snapshot: planned, link: link.url,
+            [DELIVERY_UNCERTAIN_KEY]: true,
             ...(relinked ? { rebound_from_customer_id: current.related_customer_id, rebound_at: now.toISOString() } : {}) } });
       return { claimed, relinked };
     });
@@ -1054,6 +1125,17 @@ async function runOne(conn, row, { now = new Date(), send = null, buildLink = nu
   if (await isPreActivationRow(conn, row)) return cancelPreActivation(conn, row);
   // Reconcile accepted/ambiguous attempts before planning any new send.
   if (row.provider_message_id && await reconcileAttempt(conn, row, now)) return;
+  // A row still 'sending' with no provider id yet (the process died between
+  // the claim and the provider call), or already parked with delivery
+  // uncertain, falls straight through to here on every sweep. A context
+  // error below (stale_extraction during call reprocessing, call_not_ready,
+  // etc.) is transient and re-derivable next pass, so applyContextSkip's
+  // ordinary parkReview call must not — and, being a plain status/last_error
+  // UPDATE that never names DELIVERY_UNCERTAIN_KEY, does not — touch
+  // whatever the payload flag already recorded (codex #4293 P1: this exact
+  // fall-through used to overwrite provider_outcome_unknown, or replace
+  // 'sending', with the unrelated context reason, silently losing the only
+  // signal stagePromises had to hold back a duplicate generation).
   const context = await contextFor(conn, row.commitment_id, now);
   if (context.reason) return applyContextSkip(conn, row, context.reason, now);
   const { call, visit } = context;

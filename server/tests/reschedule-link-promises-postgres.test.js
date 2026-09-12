@@ -34,7 +34,7 @@ const outboxCommitmentGenerationMigration = require('../models/migrations/202609
 const connection = process.env.RESCHEDULE_LINK_TEST_DATABASE_URL;
 const postgres = connection ? describe : describe.skip;
 const schema = `reschedule_link_${randomUUID().replaceAll('-', '')}`;
-const TABLES = ['customers', 'call_log', 'call_commitments', 'outbox_messages', 'system_settings', 'triage_items', 'audit_log', 'sms_templates'];
+const TABLES = ['customers', 'call_log', 'call_commitments', 'outbox_messages', 'system_settings', 'triage_items', 'audit_log', 'sms_templates', 'sms_log'];
 let admin;
 let mockPg;
 jest.setTimeout(30000);
@@ -194,5 +194,145 @@ postgres('reschedule-link-promises against PostgreSQL', () => {
       if (priorGate === undefined) delete process.env.GATE_RESCHEDULE_LINK_ON_PROMISE; else process.env.GATE_RESCHEDULE_LINK_ON_PROMISE = priorGate;
       gates.callCommitments = priorCallCommitments;
     }
+  });
+
+  /**
+   * codex #4293 P1 (this round): delivery uncertainty ("a provider may
+   * already have accepted this attempt") and a context error ("we could not
+   * evaluate this row right now") used to share the same last_error/status
+   * fields, so an unrelated context error re-parking the row erased the
+   * uncertainty underneath it. The fix stores uncertainty under its own
+   * jsonb payload key, cleared ONLY by definitive provider evidence or an
+   * explicit office verdict. These three tests exercise the real jsonb
+   * merge (`COALESCE(payload, '{}'::jsonb) || ...`) and the real UPDATE
+   * predicates end to end — a mocked knex would only prove the JS shape,
+   * not that the merge actually survives a genuine Postgres round trip.
+   */
+  describe('delivery uncertainty survives context churn and is retired only by real provider evidence or an office verdict', () => {
+    test('a stale_extraction context error does not clear the flag, and a fresh generation stays blocked', async () => {
+      const priorGate = process.env.GATE_RESCHEDULE_LINK_ON_PROMISE;
+      const priorCallCommitments = gates.callCommitments;
+      try {
+        process.env.GATE_RESCHEDULE_LINK_ON_PROMISE = 'true';
+        gates.callCommitments = true;
+
+        const callId = randomUUID();
+        // last_seen_generation (1) deliberately mismatches call_log's
+        // processing_generation (5) so contextFor deterministically returns
+        // 'stale_extraction' on every pass — the exact reprocess churn that
+        // used to overwrite last_error out from under an uncertain attempt.
+        await mockPg('call_log').insert({ id: callId, direction: 'inbound', processing_generation: 5 });
+        const [commitment] = await mockPg('call_commitments').insert({
+          call_log_id: callId, commitment_key: 'send_reschedule_link:1', party: 'waves', kind: 'send_reschedule_link',
+          description: 'send a reschedule link', source: 'ai', status: 'open', last_seen_generation: 1, processing_generation: 2,
+        }).returning('id');
+        const outboxId = randomUUID();
+        // Generation 1's own attempt reached the provider with no persisted
+        // trace — parked exactly as an earlier sweep would have left it.
+        await mockPg('outbox_messages').insert({ id: outboxId, channel: 'sms', status: 'review', last_error: 'provider_outcome_unknown',
+          payload: { delivery_outcome_uncertain: true }, commitment_id: commitment.id, commitment_generation: 1,
+          related_call_log_id: callId, related_customer_id: randomUUID(), related_scheduled_service_id: randomUUID() });
+
+        const row = await mockPg('outbox_messages').where({ id: outboxId }).first();
+        await links.runOne(mockPg, row, { now: new Date() });
+
+        const afterPark = await mockPg('outbox_messages').where({ id: outboxId }).first();
+        // The unrelated context error DID overwrite last_error, as before —
+        // but the flag underneath it must be untouched.
+        expect(afterPark.status).toBe('review');
+        expect(afterPark.last_error).toBe('stale_extraction');
+        expect(afterPark.payload.delivery_outcome_uncertain).toBe(true);
+
+        // upsertCommitments would bump processing_generation to 2 on a real
+        // reprocess; it is already 2 here. A fresh dispatch must still be
+        // held back — the older generation-1 attempt is still uncertain.
+        const staged = await links.stagePromises(mockPg);
+        expect(staged).toBe(0);
+        const rows = await mockPg('outbox_messages').where({ commitment_id: commitment.id });
+        expect(rows).toHaveLength(1);
+      } finally {
+        if (priorGate === undefined) delete process.env.GATE_RESCHEDULE_LINK_ON_PROMISE; else process.env.GATE_RESCHEDULE_LINK_ON_PROMISE = priorGate;
+        gates.callCommitments = priorCallCommitments;
+      }
+    });
+
+    test('a real twilio_sid-bearing sms_log row proving the send failed clears the flag, and staging then proceeds', async () => {
+      const priorGate = process.env.GATE_RESCHEDULE_LINK_ON_PROMISE;
+      const priorCallCommitments = gates.callCommitments;
+      try {
+        process.env.GATE_RESCHEDULE_LINK_ON_PROMISE = 'true';
+        gates.callCommitments = true;
+
+        const callId = randomUUID();
+        const customerId = randomUUID();
+        const twilioSid = `SM${randomUUID().replaceAll('-', '').slice(0, 32)}`;
+        await mockPg('call_log').insert({ id: callId, direction: 'inbound', processing_generation: 2 });
+        const [commitment] = await mockPg('call_commitments').insert({
+          call_log_id: callId, commitment_key: 'send_reschedule_link:1', party: 'waves', kind: 'send_reschedule_link',
+          description: 'send a reschedule link', source: 'ai', status: 'open', last_seen_generation: 2, processing_generation: 2,
+        }).returning('id');
+        const outboxId = randomUUID();
+        // Still 'sending' (no process-death gap needed for this test) with a
+        // real provider id already on the row — reconcileAttempt owns it.
+        await mockPg('outbox_messages').insert({ id: outboxId, channel: 'sms', status: 'sending', provider_message_id: twilioSid,
+          sent_at: new Date(), payload: { delivery_outcome_uncertain: true }, commitment_id: commitment.id, commitment_generation: 1,
+          related_call_log_id: callId, related_customer_id: customerId, related_scheduled_service_id: randomUUID() });
+        await mockPg('sms_log').insert({ id: randomUUID(), customer_id: customerId, direction: 'outbound',
+          from_phone: '+15555550100', to_phone: '+15555550199', twilio_sid: twilioSid, status: 'failed', message_body: 'reschedule link' });
+
+        const row = await mockPg('outbox_messages').where({ id: outboxId }).first();
+        await links.runOne(mockPg, row, { now: new Date() });
+
+        const afterFailure = await mockPg('outbox_messages').where({ id: outboxId }).first();
+        expect(afterFailure.status).toBe('review');
+        expect(afterFailure.last_error).toBe('delivery_failed');
+        // Real provider evidence — the ONLY thing besides an office verdict
+        // allowed to clear the flag.
+        expect(afterFailure.payload.delivery_outcome_uncertain).toBe(false);
+
+        const staged = await links.stagePromises(mockPg);
+        expect(staged).toBe(1);
+        const rows = await mockPg('outbox_messages').where({ commitment_id: commitment.id }).orderBy('commitment_generation');
+        expect(rows).toHaveLength(2);
+        expect(rows[1]).toMatchObject({ commitment_generation: 2, status: 'pending' });
+      } finally {
+        if (priorGate === undefined) delete process.env.GATE_RESCHEDULE_LINK_ON_PROMISE; else process.env.GATE_RESCHEDULE_LINK_ON_PROMISE = priorGate;
+        gates.callCommitments = priorCallCommitments;
+      }
+    });
+
+    test('an office verdict (the commitment closed) also clears the flag on the row it cancels', async () => {
+      const priorGate = process.env.GATE_RESCHEDULE_LINK_ON_PROMISE;
+      const priorCallCommitments = gates.callCommitments;
+      try {
+        process.env.GATE_RESCHEDULE_LINK_ON_PROMISE = 'true';
+        gates.callCommitments = true;
+
+        const callId = randomUUID();
+        await mockPg('call_log').insert({ id: callId, direction: 'inbound', processing_generation: 1 });
+        // human_state 'dismissed' is a genuinely terminal office verdict —
+        // contextFor reads it straight off the commitment row as
+        // 'promise_closed', independent of any generation bookkeeping.
+        const [commitment] = await mockPg('call_commitments').insert({
+          call_log_id: callId, commitment_key: 'send_reschedule_link:1', party: 'waves', kind: 'send_reschedule_link',
+          description: 'send a reschedule link', source: 'ai', status: 'open', human_state: 'dismissed',
+          last_seen_generation: 1, processing_generation: 1,
+        }).returning('id');
+        const outboxId = randomUUID();
+        await mockPg('outbox_messages').insert({ id: outboxId, channel: 'sms', status: 'review', last_error: 'provider_outcome_unknown',
+          payload: { delivery_outcome_uncertain: true }, commitment_id: commitment.id, commitment_generation: 1,
+          related_call_log_id: callId, related_customer_id: randomUUID(), related_scheduled_service_id: randomUUID() });
+
+        const row = await mockPg('outbox_messages').where({ id: outboxId }).first();
+        await links.runOne(mockPg, row, { now: new Date() });
+
+        const after = await mockPg('outbox_messages').where({ id: outboxId }).first();
+        expect(after.status).toBe('cancelled');
+        expect(after.payload.delivery_outcome_uncertain).toBe(false);
+      } finally {
+        if (priorGate === undefined) delete process.env.GATE_RESCHEDULE_LINK_ON_PROMISE; else process.env.GATE_RESCHEDULE_LINK_ON_PROMISE = priorGate;
+        gates.callCommitments = priorCallCommitments;
+      }
+    });
   });
 });
