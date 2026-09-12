@@ -848,6 +848,12 @@ async function reconcileSummaryEmailRecovery(message, database = db) {
   if (!match || message.template_key !== 'service.visit_summary') return { reconciled: false };
   const visitId = match[1];
   const run = async (trx) => {
+    // PACKET ROW FIRST, then the effect (local audit): the bounce
+    // reconciliation takes them in exactly that order, and this path updates
+    // the packet below — holding the effect first is the inverse order, and
+    // a bounce and a recovery running side by side deadlock-abort one
+    // reconciliation.
+    await trx('visit_completion_packets').where({ visit_id: visitId }).forUpdate().first('id');
     // provider_bounce: a bounce reopened a sent aggregate. provider_outcome_unknown:
     // the bounce landed before the initial send returned, or the handoff was
     // ambiguous — a delivery event is the proof either lacked.

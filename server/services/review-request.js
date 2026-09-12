@@ -1974,8 +1974,12 @@ const ReviewService = {
           // re-created when the summary settles; a manual one waits).
           await this._parkAskAtProviderBoundary(request);
         } else if (result.blocked && result.code === "VISIT_SUMMARY_STATE_UNAVAILABLE") {
+          // The pending-only helper (local audit): this verdict can come from
+          // the UNLOCKED pre-dispatch check, and resetting a `sending` row
+          // here would hand another sender's provider-accepted ask back to
+          // the scheduler for a second send.
           const retryAt = new Date(Date.now() + 30 * 60 * 1000);
-          await db("review_requests").where({ id: requestId }).update({ status: "pending", scheduled_for: retryAt });
+          await this._deferAskForUnavailableSummary({ id: requestId }, retryAt);
           logger.info(`[review] SMS deferred: summary state unavailable (requestId=${requestId}) (queued for retry at ${retryAt.toISOString()})`);
         } else if (result.blocked && result.code === "CONSENT_LOOKUP_FAILED") {
           // Transient lookup failure inside the wrapper (DB error during
