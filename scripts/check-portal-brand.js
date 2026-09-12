@@ -234,17 +234,43 @@ const acorn = require('acorn');
 const jsx = require('acorn-jsx');
 const JsxParser = acorn.Parser.extend(jsx());
 
+// CSS comment spans, respecting strings. A regex cannot do this: the `/*` in
+// `content: "/*"` is a string, not a comment opener, and treating it as one
+// blanks every rule until the next `*/` -- masking real violations in between.
+// CSS has no `//` comment, and only two string delimiters, so a small scanner
+// covers it. An unterminated `/*` runs to EOF, which is what browsers do too.
+function cssCommentRanges(text) {
+  const out = [];
+  let i = 0;
+  let quote = null;
+  while (i < text.length) {
+    const c = text[i];
+    if (quote) {
+      if (c === '\\') { i += 2; continue; }
+      if (c === quote) quote = null;
+      i += 1;
+      continue;
+    }
+    if (c === '"' || c === "'") { quote = c; i += 1; continue; }
+    if (c === '/' && text[i + 1] === '*') {
+      const close = text.indexOf('*/', i + 2);
+      const end = close === -1 ? text.length : close + 2;
+      out.push([i, end]);
+      i = end;
+      continue;
+    }
+    i += 1;
+  }
+  return out;
+}
+
 function commentLineSet(text, isCss) {
   const lines = text.split('\n');
   const covered = new Set();
   const ranges = [];
 
   if (isCss) {
-    // CSS has no `//` comment. Only /* ... */ -- and a bare `* {` line is the
-    // universal selector, code that a prefix test mistakes for a docblock.
-    const rx = /\/\*[\s\S]*?\*\//g;
-    let m;
-    while ((m = rx.exec(text))) ranges.push([m.index, m.index + m[0].length]);
+    for (const r of cssCommentRanges(text)) ranges.push(r);
   } else {
     const comments = [];
     try {

@@ -127,3 +127,22 @@ test('commentLineSet reports only whole-comment lines', () => {
   ].join('\n');
   assert.deepEqual([...commentLineSet(text, false)], [2]);
 });
+
+test('a `/*` inside a CSS string does not open a comment', () => {
+  // Regression: the regex version blanked every rule between content: "/*"
+  // and the next "*/", hiding real violations in between.
+  const hits = scan('sample.css', [
+    '.a::before { content: "/*"; }',
+    '.b { font-size: 12px; }',
+    '.c::after { content: "*/"; }',
+  ].join('\n'));
+  assert.deepEqual(hits, ['banned-font-size:2']);
+});
+
+test('a real CSS comment is still skipped', () => {
+  const hits = scan('sample.css', [
+    '/* font-size: 12px in prose */',
+    '.a { color: red; }',
+  ].join('\n'));
+  assert.deepEqual(hits, []);
+});

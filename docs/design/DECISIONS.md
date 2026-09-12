@@ -2376,6 +2376,11 @@ scanned in full, in both directions — a trailing `// note` after code, and cod
 trailing a `*/` on a block's closing line. That second direction was itself a
 masking bug in the first cut (`*/ const label = '🔒';` vanished).
 
+The CSS side needs the same care for the same reason: the `/*` in
+`content: "/*"` is a string, not a comment opener, and a regex that ignores
+strings blanks every rule until the next `*/`. A small string-aware scanner
+handles it — CSS has one comment form and two string delimiters.
+
 **A parse failure skips nothing.** Scanning a comment costs a false positive;
 skipping code costs a miss, and a miss is the worse failure — so an unparseable
 file is scanned in full. That also retires a quieter hole: an unterminated `/*`
