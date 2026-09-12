@@ -2427,8 +2427,16 @@ conflict, so a valid `.ts` construct like `const n = <number>1` parsed as JSX
 and sent the file down the failure path permanently; plugins are now chosen by
 extension. And `<style>{`…`}</style>` — the repo's embedded-CSS pattern — is
 template-string data to Babel, so its `/* … */` never reached `ast.comments`;
-those quasis get the postcss pass, scoped to `<style>` children specifically so
-that ordinary template text which happens to read like a comment is not skipped.
+those quasis get the postcss pass — but only when the template has **no
+interpolation**, because a quasi is not independently valid CSS. With
+`prefix = 'url(foo'`, the template `.a { background: ${prefix}/*); }` has its
+`/*` inside URL data once combined, while the quasi after the interpolation
+begins at `/*` and reads as a comment running to the next `*/`, masking every
+live rule between. Reconstructing lexer state across interpolations is not
+worth it; an interpolated style template simply keeps every line scanned. The
+same pass is scoped to `<style>` children for a second reason: over every
+template literal, a line of ordinary template TEXT that happens to read
+`/* … */` would be skipped, which also masks.
 
 **A parse failure skips nothing.** Scanning a comment costs a false positive;
 skipping code costs a miss, and a miss is the worse failure — so an unparseable

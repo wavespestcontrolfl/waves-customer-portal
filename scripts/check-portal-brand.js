@@ -286,26 +286,39 @@ function cssCommentRanges(text, offset = 0) {
 // `<style>{`...`}</style>` is the repo's embedded-CSS pattern, and Babel treats
 // the CSS inside as template-string data -- its `/* ... */` never reaches
 // `ast.comments`, so a whole-line note in there was reported as live debt.
-// Scoped deliberately to <style> children: running CSS comment detection over
-// every template literal would let a line of ordinary template TEXT that
-// happens to read `/* ... */` be skipped, which would mask.
+//
+// Only templates with NO interpolation qualify. A quasi is not independently
+// valid CSS: with `prefix = 'url(foo'`, the template `.a { background:
+// ${prefix}/*); }` has its `/*` inside URL data once combined, but the quasi
+// after the interpolation starts at `/*` and postcss reads a comment running
+// to the next `*/` -- masking every live rule in between. Reconstructing the
+// lexer state across interpolations is not worth it: an interpolated style
+// template simply keeps every line scanned.
+//
+// Scoped to <style> children for a second reason: running CSS comment
+// detection over every template literal would let a line of ordinary template
+// TEXT that happens to read `/* ... */` be skipped, which would also mask.
+function styleTemplateNode(node) {
+  if (node.type !== 'JSXElement') return null;
+  const name = node.openingElement && node.openingElement.name;
+  if (!name || name.type !== 'JSXIdentifier' || name.name !== 'style') return null;
+  for (const child of node.children || []) {
+    const expr = child && child.type === 'JSXExpressionContainer' ? child.expression : null;
+    if (expr && expr.type === 'TemplateLiteral' && (expr.expressions || []).length === 0) return expr;
+  }
+  return null;
+}
+
 function styleTemplateRanges(node, out) {
   if (!node || typeof node !== 'object') return;
   if (Array.isArray(node)) {
     for (const n of node) styleTemplateRanges(n, out);
     return;
   }
-  if (node.type === 'JSXElement') {
-    const name = node.openingElement && node.openingElement.name;
-    if (name && name.type === 'JSXIdentifier' && name.name === 'style') {
-      for (const child of node.children || []) {
-        const expr = child && child.type === 'JSXExpressionContainer' ? child.expression : null;
-        if (expr && expr.type === 'TemplateLiteral') {
-          for (const q of expr.quasis || []) {
-            if (typeof q.start === 'number' && typeof q.end === 'number') out.push([q.start, q.end]);
-          }
-        }
-      }
+  const tpl = node.type ? styleTemplateNode(node) : null;
+  if (tpl) {
+    for (const q of tpl.quasis || []) {
+      if (typeof q.start === 'number' && typeof q.end === 'number') out.push([q.start, q.end]);
     }
   }
   for (const key of Object.keys(node)) {

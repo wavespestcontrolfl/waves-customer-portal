@@ -263,3 +263,23 @@ test('.ts parses with the TypeScript grammar, not JSX', () => {
   ].join('\n'));
   assert.deepEqual(hits, []);
 });
+
+test('an interpolated <style> template keeps every line scanned', () => {
+  // A quasi is not independently valid CSS. With prefix = 'url(foo', the `/*`
+  // below is URL data once combined, but the quasi after the interpolation
+  // starts at `/*` and would read as a comment running to the next `*/`,
+  // masking the live rule between them.
+  const hits = scan('Sample.jsx', [
+    'const prefix = "url(foo";',
+    'export default function S() {',
+    '  return (',
+    '    <style>{`',
+    '      .a { background: ${prefix}/*); }',
+    '      .b { font-size: 12px; }',
+    '      /* real comment */',
+    '    `}</style>',
+    '  );',
+    '}',
+  ].join('\n'));
+  assert.ok(hits.includes('banned-font-size:6'), `expected the live 12px rule, got ${JSON.stringify(hits)}`);
+});
