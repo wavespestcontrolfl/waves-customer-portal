@@ -17,7 +17,12 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
 jest.mock('../sockets', () => ({ getIo: jest.fn(() => null) }));
 jest.mock('../services/customer-card', () => ({ ensureCardForCompletion: jest.fn(async () => null) }));
 jest.mock('../services/referral-engine', () => ({ creditReferralOnFirstService: jest.fn(async () => null) }));
-jest.mock('../services/sendgrid-mail', () => ({ sendOne: jest.fn(), clearBlockedAddress: jest.fn(async () => {}), serviceGroupId: () => null, newsletterGroupId: () => null }));
+jest.mock('../services/sendgrid-mail', () => ({
+  sendOne: jest.fn(), clearBlockedAddress: jest.fn(async () => {}), serviceGroupId: () => null, newsletterGroupId: () => null,
+  // The real rule: a 4xx the provider answered with is a proven refusal,
+  // everything else (5xx, network) is ambiguous.
+  isDefiniteRejection: (err) => [400, 401, 403, 404, 405, 413, 415, 422, 429].includes(Number(err?.status)),
+}));
 jest.mock('../services/messaging/send-customer-message', () => ({ sendCustomerMessage: jest.fn() }));
 
 const knex = require('knex');
@@ -3146,6 +3151,28 @@ postgres('visit summary recipient recovery', () => {
       await mockPg('dispatch_alerts').where({ type: 'visit_closeout_review' }).whereRaw("payload->>'packetId' = ?", [fixture.packetId]).del();
       await mockPg('invoices').where({ id: invoiceId }).del();
       await mockPg('payers').where({ id: payer.id }).del();
+    }
+  });
+
+  test('a definitively rejected sequence email releases its claim instead of stranding it', async () => {
+    // A 4xx SendGrid refusal proves the message was not accepted. Left
+    // `sending`, the row is stranded for good: the evidence reader treats the
+    // failed email record as unavailable, so the reconciliation never
+    // releases it and the sequence step keeps a NULL next_run_at.
+    const Review = require('../services/review-request');
+    const askId = randomUUID();
+    await mockPg('review_requests').insert({ id: askId, customer_id: fixture.customerId, service_record_id: fixture.recordIds[0],
+      status: 'sending', token: randomUUID().replace(/-/g, ''), claimed_at: new Date(), channel: 'email', triggered_by: 'sequence' });
+    try {
+      const rejection = Object.assign(new Error('Bad Request'), { status: 400 });
+      const outcome = await Review._outreachEmailThrowOutcome({ request: { id: askId }, manageRetryVia: 'sequence', dispatched: true, err: rejection });
+      expect(outcome).toMatchObject({ ok: false, retryable: true, channel: 'email' });
+      expect(outcome.uncertain).toBeUndefined();
+      const row = await mockPg('review_requests').where({ id: askId }).first('status', 'claimed_at');
+      expect(row.status).not.toBe('sending');
+      expect(row.claimed_at).toBeNull();
+    } finally {
+      await mockPg('review_requests').where({ id: askId }).del();
     }
   });
 

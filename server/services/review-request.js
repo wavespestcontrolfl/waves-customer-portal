@@ -4197,10 +4197,24 @@ const ReviewService = {
   },
 
   async _outreachEmailThrowOutcome({ request, manageRetryVia, dispatched, err }) {
+    // A DEFINITE provider rejection (a 4xx SendGrid refusal) is proof the
+    // message was not accepted — it is not the ambiguous outcome the
+    // reconciliation exists for (local audit on r29). Leaving such a row
+    // `sending` strands it for good: _emailSendEvidence reads the failed
+    // email record as `unavailable`, so the reconciliation never releases it
+    // and a sequence step sits with a NULL next_run_at forever. The claim
+    // this sender owns is released here and the ordinary failure bookkeeping
+    // below applies; only ambiguous outcomes keep the `sending` mark.
+    const definiteRejection = dispatched && isDefiniteProviderRejection(err);
+    if (definiteRejection) {
+      await db("review_requests").where({ id: request.id, status: "sending" })
+        .update({ status: "pending", claimed_at: null })
+        .catch((releaseErr) => logger.error(`[review] releasing a definitively rejected email claim failed (requestId=${request.id}): ${releaseErr.message}`));
+    }
     // A cadence touch whose request was made stays `sending` for the
     // reconciliation, which advances or releases the sequence on evidence;
     // the runner leaves the step claimed rather than retrying it.
-    if (dispatched && manageRetryVia === "sequence" && await this._providerOutcomeUnknown(request.id)) {
+    if (!definiteRejection && dispatched && manageRetryVia === "sequence" && await this._providerOutcomeUnknown(request.id)) {
       return { ok: false, retryable: false, uncertain: true, reason: "provider_uncertain", channel: "email", requestId: request.id };
     }
     // A definite 4xx rejection after dispatch is a plain failure, never an
