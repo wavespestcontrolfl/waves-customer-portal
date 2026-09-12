@@ -70,6 +70,27 @@ jest.setTimeout(120000);
 
 const slotReservation = require('../services/slot-reservation');
 
+// A date the scheduling calendar actually allows. extendReservation and the
+// in-grace commit both re-check blackout dates, so a fixture date the calendar
+// refuses fails the suite for a reason that has nothing to do with holds — a
+// bare `today + 14` did exactly that on Sat 2026-09-12 ("that day is no longer
+// available"). Asking isBlackoutDate itself honours BOTH halves of the
+// calendar (the weekly days-off set and one-off blackout rows) and stays
+// correct when an admin closes a weekday, which a hardcoded weekend rule did
+// not (codex #4449 r1). Read through the test's own transaction, and via the
+// ET helpers — never a process-local `new Date(...).getDay()`.
+async function bookableDate(conn) {
+  const { isBlackoutDate } = require('../services/scheduling/blackout-dates');
+  let d = addETDays(new Date(), 14);
+  for (let i = 0; i < 30; i += 1) {
+    const dateStr = etDateString(d);
+     
+    if (!await isBlackoutDate(dateStr, conn)) return dateStr;
+    d = addETDays(d, 1);
+  }
+  throw new Error('no bookable date within 30 days of the fixture anchor — check the QA calendar');
+}
+
 /** One estimate + one hold row, inside a rolled-back transaction. */
 async function withHold({ expiresInSeconds = 900, createdMinutesAgo = 0, committed = false }, run) {
   const pool = mockPg;
@@ -79,7 +100,7 @@ async function withHold({ expiresInSeconds = 900, createdMinutesAgo = 0, committ
     const estimateId = randomUUID();
     const holdId = randomUUID();
     const customerId = randomUUID();
-    const date = etDateString(addETDays(new Date(), 14));
+    const date = await bookableDate(trx);
     await trx('customers').insert({
       id: customerId, first_name: 'Synthetic', last_name: 'Hold',
       email: `${customerId}@example.invalid`, phone: '+19415550111', active: true,
