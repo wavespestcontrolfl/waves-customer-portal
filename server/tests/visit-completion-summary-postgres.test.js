@@ -17,7 +17,12 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
 jest.mock('../sockets', () => ({ getIo: jest.fn(() => null) }));
 jest.mock('../services/customer-card', () => ({ ensureCardForCompletion: jest.fn(async () => null) }));
 jest.mock('../services/referral-engine', () => ({ creditReferralOnFirstService: jest.fn(async () => null) }));
-jest.mock('../services/sendgrid-mail', () => ({ sendOne: jest.fn(), clearBlockedAddress: jest.fn(async () => {}), serviceGroupId: () => null, newsletterGroupId: () => null }));
+jest.mock('../services/sendgrid-mail', () => ({
+  sendOne: jest.fn(), clearBlockedAddress: jest.fn(async () => {}), serviceGroupId: () => null, newsletterGroupId: () => null,
+  // The real rule: a 4xx the provider answered with is a proven refusal,
+  // everything else (5xx, network) is ambiguous.
+  isDefiniteRejection: (err) => [400, 401, 403, 404, 405, 413, 415, 422, 429].includes(Number(err?.status)),
+}));
 jest.mock('../services/messaging/send-customer-message', () => ({ sendCustomerMessage: jest.fn() }));
 
 const knex = require('knex');
@@ -2711,8 +2716,15 @@ postgres('visit summary recipient recovery', () => {
     const askId = randomUUID();
     await mockPg('review_requests').insert({ id: askId, customer_id: fixture.customerId, service_record_id: fixture.recordIds[0], status: 'pending', token: randomUUID().replace(/-/g, '') });
     try {
-      await expect(Summary.reviewSendThroughSummaryHandoff(fixture.recordIds[0], async () => { throw new Error('socket hang up'); }, undefined, { requestId: askId }))
-        .rejects.toThrow('socket hang up');
+      // The dispatch reports the PROVIDER BOUNDARY (the callback the send
+      // layer fires immediately before the Twilio request) and then throws —
+      // the outcome the reconciliation exists for.
+      await expect(Summary.reviewSendThroughSummaryHandoff(
+        fixture.recordIds[0],
+        async (trx, onProviderStart) => { onProviderStart(); throw new Error('socket hang up'); },
+        undefined,
+        { requestId: askId },
+      )).rejects.toThrow('socket hang up');
       // The provider may hold the message: the row stays marked for the reconciliation.
       const marked = await mockPg('review_requests').where({ id: askId }).first();
       expect(marked).toMatchObject({ status: 'sending' });
@@ -2811,19 +2823,30 @@ postgres('visit summary recipient recovery', () => {
     const Review = require('../services/review-request');
     const autoId = randomUUID();
     const manualId = randomUUID();
+    const claimedId = randomUUID();
+    const claimedAt = new Date();
     await mockPg('review_requests').insert([
       { id: autoId, customer_id: fixture.customerId, service_record_id: fixture.recordIds[0], status: 'pending', triggered_by: 'auto', token: randomUUID().replace(/-/g, '') },
-      { id: manualId, customer_id: fixture.customerId, service_record_id: fixture.recordIds[0], status: 'sending', triggered_by: 'tech', token: randomUUID().replace(/-/g, ''), claimed_at: new Date() },
+      { id: manualId, customer_id: fixture.customerId, service_record_id: fixture.recordIds[0], status: 'pending', triggered_by: 'tech', token: randomUUID().replace(/-/g, '') },
+      // Another sender's live claim: a park must not touch it.
+      { id: claimedId, customer_id: fixture.customerId, service_record_id: fixture.recordIds[0], status: 'sending', triggered_by: 'auto', token: randomUUID().replace(/-/g, ''), claimed_at: claimedAt },
     ]);
     try {
       await Review._parkAskAtProviderBoundary({ id: autoId, triggered_by: 'auto' });
       await Review._parkAskAtProviderBoundary({ id: manualId, triggered_by: 'tech' });
+      await Review._parkAskAtProviderBoundary({ id: claimedId, triggered_by: 'auto' });
       expect(await mockPg('review_requests').where({ id: autoId }).first()).toBeUndefined();
       const manual = await mockPg('review_requests').where({ id: manualId }).first();
-      expect(manual).toMatchObject({ status: 'pending', claimed_at: null });
+      expect(manual).toMatchObject({ status: 'pending' });
       expect(new Date(manual.scheduled_for).getTime()).toBeGreaterThan(Date.now() + 20 * 60 * 1000);
+      // The claimed row survives: its own sender parks it after the handoff
+      // has returned it to `pending`, and the stranded reconciliation owns it
+      // if that sender is lost.
+      const claimed = await mockPg('review_requests').where({ id: claimedId }).first();
+      expect(claimed).toMatchObject({ status: 'sending' });
+      expect(new Date(claimed.claimed_at).getTime()).toBe(claimedAt.getTime());
     } finally {
-      await mockPg('review_requests').whereIn('id', [autoId, manualId]).del();
+      await mockPg('review_requests').whereIn('id', [autoId, manualId, claimedId]).del();
     }
   });
 
@@ -2949,18 +2972,18 @@ postgres('visit summary recipient recovery', () => {
     await mockPg('visit_completion_packets').where({ id: fixture.packetId }).update({ status: 'done', error: null });
     try {
       // Self-pay: nothing to withdraw.
-      expect(await mockPg.transaction((trx) => Packets.withdrawPacketInvoicesForOwner(trx, { customerId: fixture.customerId }))).toBe(0);
+      expect(await mockPg.transaction((trx) => Packets.withdrawPacketInvoicesForOwner(trx, { customerId: fixture.customerId }))).toEqual([]);
       // The customer's default payer assigned in the same transaction as the withdrawal.
       expect(await mockPg.transaction(async (trx) => {
         await trx('customers').where({ id: fixture.customerId }).forUpdate().first('id');
         await trx('customers').where({ id: fixture.customerId }).update({ payer_id: payer.id });
         return Packets.withdrawPacketInvoicesForOwner(trx, { customerId: fixture.customerId });
-      })).toBe(1);
+      })).toHaveLength(1);
       expect(await mockPg('invoices').where({ id: invoiceId }).first()).toMatchObject({ status: 'sent', scheduled_send_error: `payer_billed:${payer.id}:hold` });
       expect(await mockPg('service_visits').where({ id: fixture.visitId }).first()).toMatchObject({ billing_hold: true });
       expect(await mockPg('dispatch_alerts').where({ tech_id: fixture.techId, type: 'visit_closeout_review' }).whereNull('resolved_at')).toHaveLength(1);
       // Already withdrawn: not withdrawn twice.
-      expect(await mockPg.transaction((trx) => Packets.withdrawPacketInvoicesForOwner(trx, { customerId: fixture.customerId }))).toBe(0);
+      expect(await mockPg.transaction((trx) => Packets.withdrawPacketInvoicesForOwner(trx, { customerId: fixture.customerId }))).toEqual([]);
     } finally {
       await mockPg('customers').where({ id: fixture.customerId }).update({ payer_id: null });
       await mockPg('invoices').where({ id: invoiceId }).del();
@@ -2990,7 +3013,7 @@ postgres('visit summary recipient recovery', () => {
         await trx('customers').where({ id: fixture.customerId }).forUpdate().first('id');
         await trx('customers').where({ id: fixture.customerId }).update({ payer_id: payer.id });
         return Packets.withdrawPacketInvoicesForOwner(trx, { customerId: fixture.customerId });
-      })).toBe(1);
+      })).toHaveLength(1);
       const withdrawn = await mockPg('invoices').where({ id: invoiceId }).first();
       // Still `sent` with no payer_id — the state every seam used to read as payable.
       expect(withdrawn).toMatchObject({ status: 'sent', payer_id: null, scheduled_send_error: `payer_billed:${payer.id}:hold` });
@@ -3106,6 +3129,423 @@ postgres('visit summary recipient recovery', () => {
     }
   });
 
+  test('scheduling a send cannot clear a withdrawal stamp', async () => {
+    // The stamp is the ONLY record that this invoice's Bill-To moved to a
+    // payer while the homeowner already held its link. A scheduler write that
+    // cleared it would make the invoice collectible from the homeowner again
+    // and queue it for delivery to them.
+    const Packets = require('../services/visit-completion-packets');
+    const { invoiceWithdrawnFromCustomer } = require('../services/invoice-helpers');
+    const invoiceId = randomUUID();
+    const [payer] = await mockPg('payers').insert({ display_name: 'Fixture Property Management', ap_email: `${randomUUID()}@example.invalid`, active: true }).returning('id');
+    await mockPg('invoices').insert({ id: invoiceId, token: randomUUID().replace(/-/g, ''), invoice_number: `FIX-${invoiceId.slice(0, 8)}`,
+      customer_id: fixture.customerId, status: 'draft', total: 120, visit_completion_packet_id: fixture.packetId });
+    try {
+      await mockPg.transaction(async (trx) => {
+        await trx('customers').where({ id: fixture.customerId }).update({ payer_id: payer.id });
+        return Packets.withdrawPacketInvoicesForOwner(trx, { customerId: fixture.customerId });
+      });
+      expect(invoiceWithdrawnFromCustomer(await mockPg('invoices').where({ id: invoiceId }).first())).toBe(true);
+
+      // The schedule-send predicate refuses a stamped row outright.
+      const scheduled = await mockPg('invoices').where({ id: invoiceId })
+        .whereIn('status', ['draft', 'scheduled'])
+        .whereRaw("(scheduled_send_error IS NULL OR scheduled_send_error NOT LIKE 'payer_billed:%')")
+        .update({ status: 'scheduled', scheduled_send_at: new Date(), scheduled_send_error: null });
+      expect(scheduled).toBe(0);
+
+      // …and a writer that DOES clear the column keeps the stamp.
+      const { preserveWithdrawalStamp } = require('../services/invoice-helpers');
+      await mockPg('invoices').where({ id: invoiceId }).update({ scheduled_send_error: preserveWithdrawalStamp(mockPg) });
+      expect(invoiceWithdrawnFromCustomer(await mockPg('invoices').where({ id: invoiceId }).first())).toBe(true);
+      // A row with an ordinary send error still clears to NULL.
+      await mockPg('invoices').where({ id: invoiceId }).update({ scheduled_send_error: 'Twilio 30003 unreachable' });
+      await mockPg('invoices').where({ id: invoiceId }).update({ scheduled_send_error: preserveWithdrawalStamp(mockPg) });
+      expect((await mockPg('invoices').where({ id: invoiceId }).first()).scheduled_send_error).toBeNull();
+    } finally {
+      await mockPg('customers').where({ id: fixture.customerId }).update({ payer_id: null });
+      await mockPg('service_visits').where({ id: fixture.visitId }).update({ billing_hold: false });
+      await mockPg('visit_completion_packets').where({ id: fixture.packetId }).update({ error: null });
+      await mockPg('dispatch_alerts').where({ type: 'visit_closeout_review' }).whereRaw("payload->>'packetId' = ?", [fixture.packetId]).del();
+      await mockPg('invoices').where({ id: invoiceId }).del();
+      await mockPg('payers').where({ id: payer.id }).del();
+    }
+  });
+
+  test('a definitively rejected sequence email releases its claim instead of stranding it', async () => {
+    // A 4xx SendGrid refusal proves the message was not accepted. Left
+    // `sending`, the row is stranded for good: the evidence reader treats the
+    // failed email record as unavailable, so the reconciliation never
+    // releases it and the sequence step keeps a NULL next_run_at.
+    const Review = require('../services/review-request');
+    const askId = randomUUID();
+    await mockPg('review_requests').insert({ id: askId, customer_id: fixture.customerId, service_record_id: fixture.recordIds[0],
+      status: 'sending', token: randomUUID().replace(/-/g, ''), claimed_at: new Date(), channel: 'email', triggered_by: 'sequence' });
+    try {
+      const rejection = Object.assign(new Error('Bad Request'), { status: 400 });
+      const outcome = await Review._outreachEmailThrowOutcome({ request: { id: askId }, manageRetryVia: 'sequence', dispatched: true, err: rejection });
+      expect(outcome).toMatchObject({ ok: false, retryable: true, channel: 'email' });
+      expect(outcome.uncertain).toBeUndefined();
+      const row = await mockPg('review_requests').where({ id: askId }).first('status', 'claimed_at');
+      expect(row.status).not.toBe('sending');
+      expect(row.claimed_at).toBeNull();
+    } finally {
+      await mockPg('review_requests').where({ id: askId }).del();
+    }
+  });
+
+  test('the stranded-send sweep pages past claims whose evidence never resolves', async () => {
+    // An ask with no provable evidence is left alone by design. Taking only
+    // the oldest 20 meant a head of such rows monopolized every sweep and no
+    // later stranded send was ever examined.
+    const Review = require('../services/review-request');
+    const base = Date.now() - 60 * 60 * 1000;
+    // More than one run's budget (5 pages of 20) so the second run has
+    // somewhere new to go.
+    const rows = Array.from({ length: 110 }, (unused, i) => ({
+      id: randomUUID(), customer_id: fixture.customerId, service_record_id: fixture.recordIds[0],
+      status: 'sending', token: randomUUID().replace(/-/g, ''), claimed_at: new Date(base + i * 1000),
+      channel: 'sms', triggered_by: 'auto',
+    }));
+    const ids = rows.map((row) => row.id);
+    try {
+      await mockPg('review_requests').insert(rows);
+      const seen = [];
+      const evidence = jest.spyOn(Review, '_inlineSendEvidence').mockImplementation(async (row) => {
+        seen.push(row.id);
+        return { unavailable: true };
+      });
+      try {
+        await Review.reconcileStrandedSends();
+      } finally {
+        evidence.mockRestore();
+      }
+      // A full run's budget was spent paging, not stuck on the first 20.
+      expect(seen).toHaveLength(100);
+      expect(seen.slice(0, 100)).toEqual(ids.slice(0, 100));
+
+      // …and the NEXT run resumes past what this one judged rather than
+      // re-reading the same unresolvable head forever.
+      seen.length = 0;
+      const evidenceAgain = jest.spyOn(Review, '_inlineSendEvidence').mockImplementation(async (row) => {
+        seen.push(row.id);
+        return { unavailable: true };
+      });
+      try {
+        await Review.reconcileStrandedSends();
+      } finally {
+        evidenceAgain.mockRestore();
+      }
+      expect(seen[0]).toBe(ids[100]);
+      expect(seen).toHaveLength(10);
+
+      // The backlog ended, so the cursor resets and the run after that starts
+      // from the front again — nothing is examined only once.
+      seen.length = 0;
+      const evidenceThird = jest.spyOn(Review, '_inlineSendEvidence').mockImplementation(async (row) => {
+        seen.push(row.id);
+        return { unavailable: true };
+      });
+      try {
+        await Review.reconcileStrandedSends();
+      } finally {
+        evidenceThird.mockRestore();
+      }
+      expect(seen[0]).toBe(ids[0]);
+    } finally {
+      await mockPg('review_requests').whereIn('id', ids).del();
+    }
+  });
+
+  test('restoring a voided withdrawn invoice re-judges its stamp against live ownership', async () => {
+    // A withdrawn invoice that was voided is invisible to the Bill-To
+    // reconciliation (void is terminal), so a payer cleared while it was void
+    // would leave the restored draft stamped — unpayable and unschedulable.
+    const Packets = require('../services/visit-completion-packets');
+    const { invoiceWithdrawnFromCustomer } = require('../services/invoice-helpers');
+    const InvoiceService = require('../services/invoice');
+    const invoiceId = randomUUID();
+    const [payer] = await mockPg('payers').insert({ display_name: 'Fixture Property Management', ap_email: `${randomUUID()}@example.invalid`, active: true }).returning('id');
+    await mockPg('invoices').insert({ id: invoiceId, token: randomUUID().replace(/-/g, ''), invoice_number: `FIX-${invoiceId.slice(0, 8)}`,
+      customer_id: fixture.customerId, status: 'draft', total: 120, visit_completion_packet_id: fixture.packetId });
+    try {
+      await mockPg.transaction(async (trx) => {
+        await trx('customers').where({ id: fixture.customerId }).update({ payer_id: payer.id });
+        return Packets.withdrawPacketInvoicesForOwner(trx, { customerId: fixture.customerId });
+      });
+      expect(invoiceWithdrawnFromCustomer(await mockPg('invoices').where({ id: invoiceId }).first())).toBe(true);
+
+      // Voided while withdrawn, then the Bill-To is cleared: the
+      // reconciliation cannot see a terminal row.
+      await mockPg('invoices').where({ id: invoiceId }).update({ status: 'void' });
+      await mockPg('customers').where({ id: fixture.customerId }).update({ payer_id: null });
+
+      await InvoiceService.unvoidInvoice(invoiceId);
+      const restored = await mockPg('invoices').where({ id: invoiceId }).first();
+      expect(restored.status).toBe('scheduled');
+      expect(invoiceWithdrawnFromCustomer(restored)).toBe(false);
+
+      // …and the opposite sequence: voided BEFORE any payer existed, so the
+      // withdrawal skipped the terminal row and no stamp was ever written.
+      // Restoring it while a payer owns the packet must withdraw it now, not
+      // hand the homeowner a collectible link (local audit P0).
+      await mockPg('invoices').where({ id: invoiceId }).update({ status: 'void', scheduled_send_error: null });
+      await mockPg('customers').where({ id: fixture.customerId }).update({ payer_id: payer.id });
+      await InvoiceService.unvoidInvoice(invoiceId);
+      const rejudged = await mockPg('invoices').where({ id: invoiceId }).first();
+      expect(invoiceWithdrawnFromCustomer(rejudged)).toBe(true);
+    } finally {
+      await mockPg('customers').where({ id: fixture.customerId }).update({ payer_id: null });
+      await mockPg('service_visits').where({ id: fixture.visitId }).update({ billing_hold: false });
+      await mockPg('visit_completion_packets').where({ id: fixture.packetId }).update({ error: null });
+      await mockPg('dispatch_alerts').where({ type: 'visit_closeout_review' }).whereRaw("payload->>'packetId' = ?", [fixture.packetId]).del();
+      await mockPg('invoices').where({ id: invoiceId }).del();
+      await mockPg('payers').where({ id: payer.id }).del();
+    }
+  });
+
+  test('a withdrawal pauses dunning and drops the invoice from the reminder sweep', async () => {
+    // The follow-up sequence and the legacy overdue reminder both text/email
+    // the homeowner a pay link, and both guard on payer_id — which a
+    // withdrawal deliberately leaves NULL.
+    const Packets = require('../services/visit-completion-packets');
+    const invoiceId = randomUUID();
+    const [payer] = await mockPg('payers').insert({ display_name: 'Fixture Property Management', ap_email: `${randomUUID()}@example.invalid`, active: true }).returning('id');
+    await mockPg('invoices').insert({ id: invoiceId, token: randomUUID().replace(/-/g, ''), invoice_number: `FIX-${invoiceId.slice(0, 8)}`,
+      customer_id: fixture.customerId, status: 'sent', total: 120, visit_completion_packet_id: fixture.packetId,
+      due_date: new Date(Date.now() - 30 * 86400000) });
+    await mockPg('invoice_followup_sequences').insert({ invoice_id: invoiceId, customer_id: fixture.customerId,
+      status: 'active', step_index: 0, next_touch_at: new Date() });
+    try {
+      await mockPg.transaction(async (trx) => {
+        await trx('customers').where({ id: fixture.customerId }).update({ payer_id: payer.id });
+        return Packets.withdrawPacketInvoicesForOwner(trx, { customerId: fixture.customerId });
+      });
+      const sequence = await mockPg('invoice_followup_sequences').where({ invoice_id: invoiceId }).first('status', 'next_touch_at');
+      expect(sequence).toMatchObject({ status: 'paused' });
+      expect(sequence.next_touch_at).toBeNull();
+      // …and the legacy overdue sweep's own predicate no longer matches it.
+      const overdue = await mockPg('invoices').where({ id: invoiceId })
+        .whereIn('status', ['sent', 'viewed', 'overdue'])
+        .whereNull('payer_id')
+        .where(function whereNotWithdrawn() {
+          this.whereNull('scheduled_send_error').orWhereNot('scheduled_send_error', 'like', 'payer_billed:%');
+        })
+        .first('id');
+      expect(overdue).toBeUndefined();
+
+      // Ownership back to self-pay: the debt is collectible again, so the
+      // pause the withdrawal set is lifted (an admin pause would not be).
+      await mockPg.transaction(async (trx) => {
+        await trx('customers').where({ id: fixture.customerId }).update({ payer_id: null });
+        return Packets.reconcileWithdrawnPacketInvoices(trx, { customerId: fixture.customerId });
+      });
+      const resumed = await mockPg('invoice_followup_sequences').where({ invoice_id: invoiceId }).first('status', 'paused_reason', 'next_touch_at');
+      expect(resumed).toMatchObject({ status: 'active', paused_reason: null });
+      expect(resumed.next_touch_at).not.toBeNull();
+    } finally {
+      await mockPg('invoice_followup_sequences').where({ invoice_id: invoiceId }).del();
+      await mockPg('customers').where({ id: fixture.customerId }).update({ payer_id: null });
+      await mockPg('service_visits').where({ id: fixture.visitId }).update({ billing_hold: false });
+      await mockPg('visit_completion_packets').where({ id: fixture.packetId }).update({ error: null });
+      await mockPg('dispatch_alerts').where({ type: 'visit_closeout_review' }).whereRaw("payload->>'packetId' = ?", [fixture.packetId]).del();
+      await mockPg('invoices').where({ id: invoiceId }).del();
+      await mockPg('payers').where({ id: payer.id }).del();
+    }
+  });
+
+  test('a withdrawal returns the homeowner credit already applied to the invoice', async () => {
+    // The payer-attach path refuses to transfer ownership without returning
+    // applied credit; a withdrawal is the same transfer by another route.
+    const Packets = require('../services/visit-completion-packets');
+    const invoiceId = randomUUID();
+    const [payer] = await mockPg('payers').insert({ display_name: 'Fixture Property Management', ap_email: `${randomUUID()}@example.invalid`, active: true }).returning('id');
+    await mockPg('invoices').insert({ id: invoiceId, token: randomUUID().replace(/-/g, ''), invoice_number: `FIX-${invoiceId.slice(0, 8)}`,
+      customer_id: fixture.customerId, status: 'draft', total: 120, credit_applied: 20, visit_completion_packet_id: fixture.packetId });
+    try {
+      await mockPg.transaction(async (trx) => {
+        await trx('customers').where({ id: fixture.customerId }).update({ payer_id: payer.id });
+        return Packets.withdrawPacketInvoicesForOwner(trx, { customerId: fixture.customerId });
+      });
+      const withdrawn = await mockPg('invoices').where({ id: invoiceId }).first('credit_applied', 'scheduled_send_error');
+      expect(Number(withdrawn.credit_applied || 0)).toBe(0);
+      expect(withdrawn.scheduled_send_error).toMatch(/^payer_billed:/);
+      // …and the customer's balance carries the returned credit.
+      const ledger = await mockPg('customer_credit_ledger').where({ customer_id: fixture.customerId, invoice_id: invoiceId })
+        .orderBy('created_at', 'desc').first('delta', 'source');
+      expect(Number(ledger?.delta || 0)).toBe(20);
+    } finally {
+      await mockPg('customer_credit_ledger').where({ customer_id: fixture.customerId }).del();
+      await mockPg('customers').where({ id: fixture.customerId }).update({ account_credits: 0 });
+      await mockPg('customers').where({ id: fixture.customerId }).update({ payer_id: null });
+      await mockPg('service_visits').where({ id: fixture.visitId }).update({ billing_hold: false });
+      await mockPg('visit_completion_packets').where({ id: fixture.packetId }).update({ error: null });
+      await mockPg('dispatch_alerts').where({ type: 'visit_closeout_review' }).whereRaw("payload->>'packetId' = ?", [fixture.packetId]).del();
+      await mockPg('invoices').where({ id: invoiceId }).del();
+      await mockPg('payers').where({ id: payer.id }).del();
+    }
+  });
+
+  test('the public save-a-method predicate sees a payer on ANY billed member', async () => {
+    // /consent and /setup-complete call this before they persist anything:
+    // the representative-service resolver cannot see a payer assigned to a
+    // sibling member of a combined packet, and a withdrawn invoice keeps a
+    // NULL payer_id.
+    const Packets = require('../services/visit-completion-packets');
+    const invoiceId = randomUUID();
+    const [payer] = await mockPg('payers').insert({ display_name: 'Fixture Property Management', ap_email: `${randomUUID()}@example.invalid`, active: true }).returning('id');
+    await mockPg('invoices').insert({ id: invoiceId, token: randomUUID().replace(/-/g, ''), invoice_number: `FIX-${invoiceId.slice(0, 8)}`,
+      customer_id: fixture.customerId, status: 'sent', total: 120, visit_completion_packet_id: fixture.packetId,
+      // anchored to the FIRST member; the payer lands on the second.
+      scheduled_service_id: fixture.serviceIds[0] });
+    try {
+      expect(await Packets.invoicePayerOwnedNow(invoiceId)).toBe(false);
+
+      // A payer on a SIBLING billed member is what the representative-service
+      // resolver misses.
+      await mockPg('scheduled_services').where({ id: fixture.serviceIds[fixture.serviceIds.length - 1] }).update({ payer_id: payer.id });
+      expect(await Packets.invoicePayerOwnedNow(invoiceId)).toBe(true);
+      await mockPg('scheduled_services').where({ id: fixture.serviceIds[fixture.serviceIds.length - 1] }).update({ payer_id: null });
+
+      // …and the withdrawal stamp, on a row whose payer_id stays NULL.
+      await mockPg('invoices').where({ id: invoiceId }).update({ scheduled_send_error: `payer_billed:${payer.id}:hold` });
+      expect(await Packets.invoicePayerOwnedNow(invoiceId)).toBe(true);
+
+      // An unreadable invoice is never "self-pay".
+      expect(await Packets.invoicePayerOwnedNow(randomUUID())).toBe(true);
+    } finally {
+      await mockPg('scheduled_services').whereIn('id', fixture.serviceIds).update({ payer_id: null });
+      await mockPg('invoices').where({ id: invoiceId }).del();
+      await mockPg('payers').where({ id: payer.id }).del();
+    }
+  });
+
+  test('a Bill-To assignment during delivery closes the packet for office review', async () => {
+    // The withdrawal stamps the invoice and holds the visit, but a packet
+    // still `processing` has no office review to record against — so the
+    // close must re-derive the payment verdict under its own locks or the
+    // packet completes clean and the withdrawn debt leaves the sweep with no
+    // billing alert.
+    const Packets = require('../services/visit-completion-packets');
+    const { invoiceWithdrawnFromCustomer } = require('../services/invoice-helpers');
+    const invoiceId = randomUUID();
+    const [payer] = await mockPg('payers').insert({ display_name: 'Fixture Property Management', ap_email: `${randomUUID()}@example.invalid`, active: true }).returning('id');
+    await mockPg('invoices').insert({ id: invoiceId, token: randomUUID().replace(/-/g, ''), invoice_number: `FIX-${invoiceId.slice(0, 8)}`,
+      customer_id: fixture.customerId, status: 'draft', total: 120, visit_completion_packet_id: fixture.packetId });
+    try {
+      await mockPg.transaction(async (trx) => {
+        await trx('customers').where({ id: fixture.customerId }).update({ payer_id: payer.id });
+        return Packets.withdrawPacketInvoicesForOwner(trx, { customerId: fixture.customerId });
+      });
+      expect(invoiceWithdrawnFromCustomer(await mockPg('invoices').where({ id: invoiceId }).first())).toBe(true);
+      // The withdrawal on a still-processing packet records no alert…
+      await mockPg('dispatch_alerts').where({ type: 'visit_closeout_review' })
+        .whereRaw("payload->>'packetId' = ?", [fixture.packetId]).del();
+      await mockPg('visit_completion_packets').where({ id: fixture.packetId }).update({ status: 'processing', error: null });
+
+      // …so the close is what has to notice it.
+      const result = await runVisitCompletionPacketEffects(fixture.packetId);
+      expect(result.body.state).toBe('office_required');
+      const closed = await mockPg('visit_completion_packets').where({ id: fixture.packetId }).first('status', 'error');
+      expect(closed.status).toBe('done');
+      expect(JSON.parse(closed.error)).toMatchObject({ payment: 'office_required', reason: 'payer_assigned' });
+      const alert = await mockPg('dispatch_alerts').where({ type: 'visit_closeout_review' }).whereNull('resolved_at')
+        .whereRaw("payload->>'packetId' = ?", [fixture.packetId]).first('payload');
+      expect(alert).toBeDefined();
+    } finally {
+      await mockPg('customers').where({ id: fixture.customerId }).update({ payer_id: null });
+      await mockPg('service_visits').where({ id: fixture.visitId }).update({ billing_hold: false });
+      await mockPg('visit_completion_packets').where({ id: fixture.packetId }).update({ error: null });
+      await mockPg('dispatch_alerts').where({ type: 'visit_closeout_review' }).whereRaw("payload->>'packetId' = ?", [fixture.packetId]).del();
+      await mockPg('invoices').where({ id: invoiceId }).del();
+      await mockPg('payers').where({ id: payer.id }).del();
+    }
+  });
+
+  test('a blocked or bounced review email is not evidence the ask was sent', async () => {
+    // The library's dedupe set answers "would a re-send duplicate?", which is
+    // true for blocked/dropped/bounced — none of which reached the customer.
+    // Marking those sent would advance the cadence and spend the ask
+    // allowance on an email nobody received.
+    const Review = require('../services/review-request');
+    const askId = randomUUID();
+    const sequenceId = randomUUID();
+    const key = `review_seq:${sequenceId}:0`;
+    await mockPg('review_requests').insert({ id: askId, customer_id: fixture.customerId, service_record_id: fixture.recordIds[0],
+      status: 'sending', token: randomUUID().replace(/-/g, ''), claimed_at: new Date(), channel: 'email',
+      triggered_by: 'sequence', sequence_id: sequenceId, sequence_step: 0 });
+    const row = { id: askId, sequence_id: sequenceId, sequence_step: 0, channel: 'email' };
+    try {
+      for (const status of ['blocked', 'dropped', 'bounced']) {
+        await mockPg('email_messages').where({ idempotency_key: key }).del();
+        await mockPg('email_messages').insert({ idempotency_key: key, status,
+          recipient_email_snapshot: fixture.primaryEmail, template_key: 'review.outreach' });
+        expect(await Review._emailSendEvidence(row)).toEqual({ found: false });
+      }
+      // Delivery — or a recipient ACTION on the delivered mail — is evidence.
+      for (const status of ['delivered', 'opened', 'unsubscribed']) {
+        await mockPg('email_messages').where({ idempotency_key: key }).del();
+        await mockPg('email_messages').insert({ idempotency_key: key, status,
+          recipient_email_snapshot: fixture.primaryEmail, template_key: 'review.outreach' });
+        expect(await Review._emailSendEvidence(row)).toEqual({ found: true });
+      }
+    } finally {
+      await mockPg('email_messages').where({ idempotency_key: key }).del();
+      await mockPg('review_requests').where({ id: askId }).del();
+    }
+  });
+
+  test('a withdrawal on a packet already in payment review keeps that review when the payer leaves', async () => {
+    // The visit is already held for a NON-payer billing problem. Relabelling
+    // the review `payer_assigned` and then lifting it on a Bill-To clear would
+    // leave the office a held visit with no signal for the original problem.
+    const Packets = require('../services/visit-completion-packets');
+    const invoiceId = randomUUID();
+    const [payer] = await mockPg('payers').insert({ display_name: 'Fixture Property Management', ap_email: `${randomUUID()}@example.invalid`, active: true }).returning('id');
+    await mockPg('invoices').insert({ id: invoiceId, token: randomUUID().replace(/-/g, ''), invoice_number: `FIX-${invoiceId.slice(0, 8)}`,
+      customer_id: fixture.customerId, status: 'sent', total: 120, visit_completion_packet_id: fixture.packetId });
+    // Closed for a payment problem of its own, with the visit already held.
+    await mockPg('visit_completion_packets').where({ id: fixture.packetId }).update({
+      status: 'done',
+      error: JSON.stringify({ payment: 'office_required', reason: 'charge_failed' }),
+    });
+    await mockPg('service_visits').where({ id: fixture.visitId }).update({ billing_hold: true });
+    try {
+      await mockPg.transaction(async (trx) => {
+        await trx('customers').where({ id: fixture.customerId }).update({ payer_id: payer.id });
+        return Packets.withdrawPacketInvoicesForOwner(trx, { customerId: fixture.customerId });
+      });
+      const withdrawn = await mockPg('visit_completion_packets').where({ id: fixture.packetId }).first('error');
+      // The payer verdict is recorded, and the original provenance survives.
+      expect(JSON.parse(withdrawn.error)).toMatchObject({ reason: 'payer_assigned', priorPaymentReason: 'charge_failed' });
+
+      // A REPEATED withdrawal (a coordinator replay) keeps it too: by now the
+      // original reason lives in priorPaymentReason, not in `reason`.
+      await mockPg.transaction((trx) => Packets.withdrawPacketInvoicesForOwner(trx, { customerId: fixture.customerId }));
+      expect(JSON.parse((await mockPg('visit_completion_packets').where({ id: fixture.packetId }).first('error')).error))
+        .toMatchObject({ reason: 'payer_assigned', priorPaymentReason: 'charge_failed' });
+
+      // Bill-To cleared: the payer verdict lifts, the original one does not.
+      await mockPg.transaction(async (trx) => {
+        await trx('customers').where({ id: fixture.customerId }).update({ payer_id: null });
+        return Packets.reconcileWithdrawnPacketInvoices(trx, { customerId: fixture.customerId });
+      });
+      const lifted = await mockPg('visit_completion_packets').where({ id: fixture.packetId }).first('error');
+      expect(JSON.parse(lifted.error)).toMatchObject({ payment: 'office_required', reason: 'charge_failed' });
+      const alert = await mockPg('dispatch_alerts').where({ type: 'visit_closeout_review' }).whereNull('resolved_at')
+        .whereRaw("payload->>'packetId' = ?", [fixture.packetId]).first('payload');
+      const payload = typeof alert?.payload === 'string' ? JSON.parse(alert.payload) : alert?.payload;
+      expect(payload?.reason).toBe('charge_failed');
+    } finally {
+      await mockPg('customers').where({ id: fixture.customerId }).update({ payer_id: null });
+      await mockPg('service_visits').where({ id: fixture.visitId }).update({ billing_hold: false });
+      await mockPg('visit_completion_packets').where({ id: fixture.packetId }).update({ status: 'done', error: null });
+      await mockPg('dispatch_alerts').where({ type: 'visit_closeout_review' }).whereRaw("payload->>'packetId' = ?", [fixture.packetId]).del();
+      await mockPg('invoices').where({ id: invoiceId }).del();
+      await mockPg('payers').where({ id: payer.id }).del();
+    }
+  });
+
   test('a payer-to-payer handoff moves the office review to the payer that owes it now', async () => {
     // The stamp, the packet error and the open alert all name the AP account
     // the office must bill; a second payer taking the packet over has to move
@@ -3149,6 +3589,39 @@ postgres('visit summary recipient recovery', () => {
       await mockPg('service_visits').where({ id: fixture.visitId }).update({ billing_hold: false });
       await mockPg('visit_completion_packets').where({ id: fixture.packetId }).update({ error: null });
       await mockPg('payers').whereIn('id', [first.id, second.id]).del();
+    }
+  });
+
+  test('a resumed cadence keeps an empty schedule while its step is still sending', async () => {
+    // The parked sequence can hold a request the sender left `sending` with
+    // its outcome unproven. Scheduling it now would let the runner build a
+    // SECOND request for the same step (a no-link check-in bypasses ask
+    // spacing) and strand the first, which the stranded-send reconciliation
+    // can only advance while the sequence has no schedule.
+    cadenceGateOn();
+    const sequenceId = randomUUID();
+    const askId = randomUUID();
+    await mockPg('review_sequences').insert({ id: sequenceId, customer_id: fixture.customerId, service_record_id: fixture.recordIds[0],
+      status: 'stopped', stop_reason: Summary.PARKED_REVIEW_REASON, current_step: 1, next_run_at: null, plan: JSON.stringify([{ day: 0 }, { day: 4 }]) });
+    await mockPg('review_requests').insert({ id: askId, customer_id: fixture.customerId, service_record_id: fixture.recordIds[0],
+      status: 'sending', token: randomUUID().replace(/-/g, ''), claimed_at: new Date(), channel: 'sms',
+      triggered_by: 'sequence', sequence_id: sequenceId, sequence_step: 1 });
+    try {
+      expect(await Summary.resumeVisitReviewOutreach(fixture.packetId)).toBe(1);
+      const held = await mockPg('review_sequences').where({ id: sequenceId }).first('status', 'next_run_at');
+      expect(held).toMatchObject({ status: 'active' });
+      expect(held.next_run_at).toBeNull();
+
+      // Once that send resolves, a later resume schedules normally.
+      await mockPg('review_requests').where({ id: askId }).update({ status: 'sent', sms_sent_at: new Date() });
+      await mockPg('review_sequences').where({ id: sequenceId }).update({ status: 'stopped', stop_reason: Summary.PARKED_REVIEW_REASON });
+      expect(await Summary.resumeVisitReviewOutreach(fixture.packetId)).toBe(1);
+      const scheduled = await mockPg('review_sequences').where({ id: sequenceId }).first('status', 'next_run_at');
+      expect(scheduled.status).toBe('active');
+      expect(scheduled.next_run_at).not.toBeNull();
+    } finally {
+      await mockPg('review_requests').where({ id: askId }).del();
+      await mockPg('review_sequences').where({ id: sequenceId }).del();
     }
   });
 
@@ -3488,6 +3961,34 @@ postgres('visit summary recipient recovery', () => {
     } finally {
       releaseLock();
       await blocker.catch(() => {});
+      await mockPg('review_requests').where({ id: askId }).del();
+    }
+  });
+
+  test('a sender without the claim is told so even when the summary is uncertain', async () => {
+    // Two workers loaded the same pending ask: the first marked it `sending`.
+    // If the summary turns uncertain before the second reaches its handoff,
+    // reporting a PARK would let the loser delete the winner's durable
+    // marker — and the winner may already have reached the provider.
+    const askId = randomUUID();
+    await mockPg('review_requests').insert({ id: askId, customer_id: fixture.customerId, service_record_id: fixture.recordIds[0],
+      status: 'sending', token: randomUUID().replace(/-/g, ''), claimed_at: new Date(), channel: 'sms', triggered_by: 'auto' });
+    await mockPg('visit_effects').insert({ visit_id: fixture.visitId, effect_type: 'completion_sms',
+      dedupe_key: `${fixture.visitId}:completion_sms:claimtest`, status: 'unknown_delivery', attempts: 1 });
+    try {
+      let dispatched = false;
+      const verdict = await Summary.reviewSendThroughSummaryHandoff(
+        fixture.recordIds[0],
+        async () => { dispatched = true; return { ok: true }; },
+        undefined,
+        { requestId: askId },
+      );
+      expect(verdict).toMatchObject({ ok: false, code: 'REVIEW_CLAIM_LOST' });
+      expect(dispatched).toBe(false);
+      // The winner's claim is untouched — not released, not deleted.
+      expect(await mockPg('review_requests').where({ id: askId }).first('status')).toMatchObject({ status: 'sending' });
+    } finally {
+      await mockPg('visit_effects').where({ visit_id: fixture.visitId, effect_type: 'completion_sms' }).del();
       await mockPg('review_requests').where({ id: askId }).del();
     }
   });

@@ -98,6 +98,7 @@ function resetMockState() {
     // What the settle-time re-read sees (null = same as the pre-lock read).
     settleReadInvoice: null,
     settleReadThrows: false,
+    updates: [],
   });
 }
 
@@ -139,10 +140,13 @@ function mockMakeBuilder(table, { inTrx } = {}) {
   // the fallback transaction that LOCKS the invoice and inserts the
   // payment, which is the path under test. The invoice link update must
   // report a row so the handler proceeds to that insert.
-  b.update = async () => (table === 'payments' ? mockState.processingPaymentsUpdated : 1);
+  b.update = async (payload) => {
+    mockState.updates.push({ table, payload, inTrx: !!inTrx });
+    return table === 'payments' ? mockState.processingPaymentsUpdated : 1;
+  };
   b.del = async () => 1;
   b.insert = (payload) => {
-    mockState.inserts.push({ table, payload });
+    mockState.inserts.push({ table, payload, inTrx: !!inTrx });
     // Thenable so `await insert(...)` still yields the row, with the
     // upsert chain the orphan-quarantine recorder uses.
     const result = Promise.resolve([{ id: 'new-row' }]);
@@ -255,7 +259,16 @@ describe('the withdrawal is re-read under the settlement lock', () => {
     await handlePaymentIntentSucceeded(succeededPI());
 
     expect(mockState.inserts.find((i) => i.table === 'payments')).toBeFalsy();
-    expect(mockState.inserts.find((i) => i.table === 'stripe_orphan_charges')).toBeTruthy();
+    const orphan = mockState.inserts.find((i) => i.table === 'stripe_orphan_charges');
+    expect(orphan).toBeTruthy();
+    // Written through the HELD transaction: a root-connection insert would
+    // wait on this transaction's own FOR UPDATE lock (the FK takes KEY SHARE
+    // on the locked invoice) and the quarantine could never commit.
+    expect(orphan.inTrx).toBe(true);
+    // …and the WHOLE handler stops: the quarantine's `return` leaves only the
+    // transaction callback, so without an explicit outcome the invoice-paid
+    // update below would mark a quarantined invoice paid with no payments row.
+    expect(mockState.updates.find((u) => u.table === 'invoices' && u.payload?.status === 'paid')).toBeFalsy();
   });
 
   test('a withdrawal visible on the FIRST read still settles an in-flight ACH', async () => {

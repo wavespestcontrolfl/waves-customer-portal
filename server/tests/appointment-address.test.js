@@ -296,6 +296,11 @@ test('combined-payment locking precedes address customer and stop locks on payer
   const addressLocks = handler.indexOf('await lockAppointmentAddress(trx,');
   expect(combined).toBeGreaterThan(comms);
   expect(combined).toBeLessThan(addressLocks);
-  expect(handler.slice(comms, combined)).toContain("Object.prototype.hasOwnProperty.call(updates, 'payer_id') && updates.payer_id");
-  expect(handler.slice(comms, combined)).toContain("Object.prototype.hasOwnProperty.call(updates, 'self_pay_override') && !updates.self_pay_override");
+  // EVERY Bill-To edit takes the combined lock here, in both directions:
+  // clearing a payer reconciles withdrawn invoices, which takes the same lock
+  // later, so gating only the activating direction left the clearing one
+  // taking the customer row first and that advisory lock afterwards — the
+  // inversion a concurrent customer-payer assignment deadlocks against.
+  expect(handler.slice(comms, combined)).toContain("Object.prototype.hasOwnProperty.call(updates, 'payer_id')");
+  expect(handler.slice(comms, combined)).toContain("Object.prototype.hasOwnProperty.call(updates, 'self_pay_override')");
 });

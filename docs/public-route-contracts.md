@@ -64,7 +64,27 @@ payment URL from the payload. FAQ flag (2026-09-03): with
 GATE_PAY_PAGE_FAQ=true the GET payload carries `payFaq: true` — a display
 flag for the copy-only "Common questions" accordion under the Pay button;
 no other field changes, no customer or invoice data rides it, and gate off
-⇒ key absent, payload byte-identical — unset the gate to kill it),
+⇒ key absent, payload byte-identical — unset the gate to kill it. THIRD-PARTY
+BILL-TO WITHDRAWAL (2026-09-12): a combined-visit invoice whose Bill-To moved
+to a payer AFTER the homeowner already held this link keeps a collectible
+status and a NULL `payer_id` — the move is recorded only in its withdrawal
+stamp — so every money seam on this surface reads the invoice ROW, not its
+status. `/setup`, `/quote`, `/finalize`, `/confirm` and `/update-amount`
+refuse such an invoice through the shared collectibility gate, and `/consent`,
+`/capture-setup` and `/setup-complete` refuse it with
+`409 { error, code: 'invoice_withdrawn_from_customer' }`. What that refusal
+guarantees, precisely: no consent is recorded and no Auto Pay enrollment
+happens for a withdrawn invoice — the authorization row and the ownership
+judgement commit in ONE transaction, and the enrollment re-judges ownership
+inside its own. A Bill-To change that lands mid-request, after the Stripe
+`attach` but before that fence, can leave the method attached to the
+customer's Stripe record; it is inert (no consent, not enrolled, not
+default) and the request still answers 409. The attach cannot join a database
+transaction, and the customer did ask to save the card. A
+withdrawn invoice is also absent from the authenticated portal's balance and
+Pay Now list, and carries no `manualPayOptions`. Nothing else in the payload
+changes; an invoice that returns to self-pay is released by the Bill-To
+reconciliation and collects normally again),
 `/api/pay/statement/:token` (+ `/setup`, `/quote`, `/finalize`) — payer NET
 statement self-serve pay, **gated behind GATE_PAYER_STATEMENTS** (404 when off),
 64-hex `payer_statements.token` format gate + public-route rate limit; resolves
@@ -1081,7 +1101,17 @@ gate, 24h expiry with 410, access-count audit, 30/15min limiter,
 `no-store`).
 `POST /api/stripe/terminal/validate-handoff` (machine-to-machine burn of
 the 60s single-use handoff JWT — the token IS the auth; see the atomic
-terminal-handoff burn rule in AGENTS.md).
+terminal-handoff burn rule in AGENTS.md. THIRD-PARTY BILL-TO WITHDRAWAL
+(2026-09-12): a combined-visit invoice whose Bill-To moved to a payer after
+the handoff was minted keeps a collectible status and a NULL `payer_id` —
+the move is recorded only in its withdrawal stamp — so this route treats a
+withdrawn invoice exactly like a terminal status change and refuses with the
+existing `invoice_changed` outcome after the burn, rather than handing the
+technician a card-present session for debt now owed by AP. `/handoff` refuses
+to mint one for the same reason, and `/payment-intent` refuses with
+`409 { code: 'invoice_withdrawn_from_customer' }` — including a re-read under
+the invoice row lock at the final bind, so a Bill-To change committing during
+the mint is caught).
 `/api/admin/push/vapid-key` (GET; deliberate — the VAPID public key is
 public by protocol).
 `/api/health` (GET; liveness probe, no data).

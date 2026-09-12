@@ -2160,6 +2160,17 @@ async function executeMerge({ winnerId, loserId, performedBy, performedById = nu
       if (winnerPlan.inFlight > 0 && !winner.payer_id && loser.payer_id) {
         throw new Error('A combined payment for the surviving record is still in flight and this merge would change its billing owner — retry after it settles');
       }
+      // The SEND fence belongs with the other defers, ahead of the Stripe
+      // writes (Codex #4311 r40 P1): a cancel is an external effect this
+      // transaction cannot roll back, so a merge that is about to be refused
+      // for an in-flight combined-visit send must not already have cancelled
+      // the customer's checkout session. The post-sweep fence below still
+      // covers the repointed loser invoices; this one covers the winner's own
+      // before anything is cancelled.
+      if (backfills.payer_id && !winner.payer_id
+        && await require('./visit-completion-packets').packetInvoiceSendInFlight({ customerId: winnerId }, trx)) {
+        throw new Error('A combined-visit invoice for the surviving record is being sent and this merge would change its billing owner — retry after it settles');
+      }
       // Past every defer: now the Stripe writes.
       await PayCombined.applyStampedSessionRelease(trx, winnerPlan);
       await PayCombined.applyStampedSessionRelease(trx, loserPlan);
@@ -2197,7 +2208,53 @@ async function executeMerge({ winnerId, loserId, performedBy, performedById = nu
     // Both directions are fenced against a send in flight (the loser-side check
     // before the sweep, the winner-side one just above).
     if (backfills.payer_id || winner.payer_id) {
-      await require('./visit-completion-packets').withdrawPacketInvoicesForOwner(trx, { customerId: winnerId });
+      // Only invoices REPOINTED FROM THE LOSER can carry undo-relevant
+      // reversals (local audit on r42): journaling the winner's own ledger
+      // rows would have the undo hand them to the loser while the invoices
+      // stayed with the winner. A count-only sweep record cannot name them,
+      // so nothing is journaled and the table is marked non-replayable.
+      const sweptInvoiceIds = repointedIds['invoices.customer_id'];
+      const inheritedInvoiceIds = new Set(Array.isArray(sweptInvoiceIds) ? sweptInvoiceIds.map(String) : []);
+      // …and only the reversal rows this withdrawal creates: a snapshot taken
+      // before it runs is what makes the diff precise.
+      const ledgerBefore = inheritedInvoiceIds.size
+        ? new Set((await trx('customer_credit_ledger').where({ customer_id: winnerId })
+          .whereIn('invoice_id', [...inheritedInvoiceIds]).pluck('id')).map(String))
+        : new Set();
+      const withdrawnInvoiceIds = await require('./visit-completion-packets')
+        .withdrawPacketInvoicesForOwner(trx, { customerId: winnerId });
+      // The withdrawal RETURNS the homeowner's applied credit, and it runs
+      // AFTER the FK sweep — so the ledger rows it writes belong to the
+      // winner and are not in the sweep's id record (Codex #4311 r42 P1). An
+      // undo would then return the invoice to the loser while the returned
+      // credit stayed with the winner. Journal them with the rest so the undo
+      // repoints them too.
+      const inheritedWithdrawn = withdrawnInvoiceIds.filter((id) => inheritedInvoiceIds.has(String(id)));
+      if (inheritedWithdrawn.length) {
+        const reversalIds = (await trx('customer_credit_ledger')
+          .where({ customer_id: winnerId })
+          .whereIn('invoice_id', inheritedWithdrawn)
+          .pluck('id')).map(String).filter((id) => !ledgerBefore.has(id));
+        if (reversalIds.length) {
+          const key = 'customer_credit_ledger.customer_id';
+          const existing = repointedIds[key];
+          if (Array.isArray(existing)) {
+            repointedIds[key] = [...new Set([...existing, ...reversalIds])];
+          } else if (!existing) {
+            repointedIds[key] = reversalIds;
+          } else {
+            // The sweep already fell back to count-only for this table, so an
+            // id-precise undo is not available for it either way; keep the
+            // existing record and mark the table as not replayable backwards,
+            // the same signal a unique-collision handler raises.
+            if (!collisionHandlers.includes('customer_credit_ledger')) collisionHandlers.push('customer_credit_ledger');
+          }
+        }
+      } else if (withdrawnInvoiceIds.length && !Array.isArray(sweptInvoiceIds) && sweptInvoiceIds) {
+        // Invoices were repointed but the sweep recorded only a count, so a
+        // reversal among them cannot be named for the undo.
+        if (!collisionHandlers.includes('customer_credit_ledger')) collisionHandlers.push('customer_credit_ledger');
+      }
     }
 
     const [journal] = await trx('customer_merge_journal').insert({

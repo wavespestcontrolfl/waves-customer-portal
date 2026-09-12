@@ -108,6 +108,38 @@ const PACKET_WITHDRAWN_SEND_ERROR = /^payer_billed:/;
 // the operator's evidence. A withdrawal has to preserve that state — the row
 // may already have reached the customer — instead of turning it into a fresh
 // draft the release would re-queue.
+// Every writer that CLEARS scheduled_send_error must keep a `payer_billed:`
+// withdrawal stamp: the stamp is the only record that a combined-visit
+// invoice's Bill-To moved to a third-party payer while the homeowner already
+// held its pay link, and clearing it makes the invoice collectible from the
+// homeowner again (Codex #4311 r29 P0). Use in place of `scheduled_send_error:
+// null`; a row with no stamp still ends up NULL.
+/**
+ * The freshest ownership verdict, as a sendCustomerMessage preDispatchCheck:
+ * the canonical sender runs it immediately before provider preparation, which
+ * is the last point a dunning rail can abort without holding a lock across
+ * provider I/O (Codex #4311 r42 P1). Fail closed — an unreadable row blocks
+ * the send, because "cannot tell" and "self-pay" are not the same answer.
+ */
+function selfPayAtDispatch(invoiceId, database) {
+  return async () => {
+    try {
+      const live = await database('invoices').where({ id: invoiceId }).first('payer_id', 'scheduled_send_error');
+      if (!live) return { ok: false, code: 'INVOICE_UNREADABLE', reason: 'invoice could not be re-read before dispatch' };
+      if (live.payer_id || invoiceWithdrawnFromCustomer(live)) {
+        return { ok: false, code: 'INVOICE_PAYER_BILLED', reason: 'invoice is billed to a third-party payer' };
+      }
+      return { ok: true };
+    } catch (err) {
+      return { ok: false, code: 'INVOICE_UNREADABLE', reason: err.message };
+    }
+  };
+}
+
+function preserveWithdrawalStamp(database) {
+  return database.raw("CASE WHEN scheduled_send_error LIKE 'payer_billed:%' THEN scheduled_send_error ELSE NULL END");
+}
+
 const STALE_SEND_PARK_ERROR = 'Recovered from stale sending claim — delivery unverified; check whether the customer received it, then resend or re-schedule manually';
 
 function invoiceWithdrawnFromCustomer(invoice) {
@@ -204,6 +236,8 @@ function formatCardLine(brand, last4) {
 module.exports = {
   INVOICE_UPDATE_ALLOWED_FIELDS,
   STALE_SEND_PARK_ERROR,
+  preserveWithdrawalStamp,
+  selfPayAtDispatch,
   INVOICE_UNCOLLECTIBLE_STATUSES,
   VISIT_NEVER_RAN_STATUSES,
   visitRefusesSettlement,
