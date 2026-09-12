@@ -598,6 +598,10 @@ async function loadPromiseEvents(conn, visitIds, { now = new Date() } = {}) {
   const noticeEvents = [
     ...messages.map((r) => ({ visit_id: r.appointment_id || r.metadata?.scheduled_service_id,
       start_at: slotOf(r.metadata), tier: reminderTier(r.purpose || r.metadata?.original_message_type),
+      // notificationEventKey is the visit-effect claim the GROUPED send was
+      // made under (appointment-reminders.js): it marks copy that speaks for
+      // the whole stop, not just this member's own service.
+      grouped: !!r.metadata?.notificationEventKey,
       communicated_at: r.sent_at, source: 'message', source_id: r.id })),
     ...emails.map((r) => ({ visit_id: r.metadata?.scheduled_service_id, start_at: slotOf(r.metadata),
       tier: reminderTier(r.metadata?.event_type),
@@ -670,7 +674,7 @@ async function loadPromiseEvents(conn, visitIds, { now = new Date() } = {}) {
     // fallback there keeps the real window (codex P1 round 12). A genuinely
     // NEWER unknown promise (the legacy move-notice case) still wins, because
     // this only defers to known evidence at or after the fallback's own time.
-    ...groupedFallbacks,
+    ...groupedFallbacks.map((event) => ({ ...event, grouped: true })),
     // The per-service recovery is NOT suppressed: it carries the same window
     // the interaction row does (both come from the same send), but it is
     // dated by the message row's live sent_at — which, after a successful
@@ -992,15 +996,20 @@ function stopPromise(members = [], promises = new Map(), now = new Date()) {
   // heard: that is the legacy move-notice rule — coverage became unknown and
   // nothing has replaced it.
   const newest = own.reduce((a, b) => (instant(a.communicated_at) >= instant(b.communicated_at) ? a : b));
-  if (newest.start_at == null) return newest;
-  // Otherwise the EARLIEST promised window across the members, not the most
-  // recently communicated one. Staff can group already-confirmed
-  // appointments (admin-visits) without sending replacement copy, so each
-  // member still holds its own confirmation — and picking by recency let a
-  // later-sent 11 AM confirmation override a sibling's still-standing 9 AM
-  // promise, delaying both tracking stages for a stop the customer expects
-  // at 9 (codex P1 round 24). The stop is one truck visit: the first window
-  // any member was promised is the one it has to meet.
+  // The newest communication wins outright when it SPEAKS FOR THE STOP — an
+  // unknown window (the legacy move-notice rule: coverage became unknown and
+  // nothing replaced it), or a GROUPED send, whose copy quotes one window for
+  // every member and therefore supersedes each member's own older
+  // confirmation (codex P1 round 24, second pass).
+  if (newest.start_at == null || newest.grouped) return newest;
+  // Otherwise each member still holds its own confirmation — staff can group
+  // already-confirmed appointments (admin-visits) without sending replacement
+  // copy — so the stop must meet the EARLIEST window any member was promised.
+  // Picking the most recently communicated one let a later-sent 11 AM
+  // confirmation override a sibling's still-standing 9 AM promise and delay
+  // both stages for a stop the customer expects at 9 (codex P1 round 24).
+  // Anything communicated before a grouped send is already excluded by the
+  // branch above.
   return own.filter((promise) => promise.start_at != null)
     .reduce((a, b) => (instant(a.start_at) <= instant(b.start_at) ? a : b));
 }
@@ -1390,8 +1399,11 @@ async function cleanupAfterDisable(conn) {
 
 // Is this notice's stop still overdue, and still this technician's? Checked
 // between the committed card and the push, which is the one effect the next
-// sweep cannot undo (codex P2 round 24). Read-only and outside the
-// transaction: the card already stands either way.
+// sweep cannot undo (codex P2 round 24). On a clock taken NOW, not the
+// tick's: the point of the check is what is true at the moment the push
+// leaves, and the sweep may have been running for minutes (codex P1 round
+// 24). Read-only and outside the transaction: the card already stands either
+// way.
 async function stillOverdue(conn, notice, { now = new Date() } = {}) {
   try {
     const { visit, live } = await lockedStop(conn, notice.visitId, { now, ignoreHorizon: true });
@@ -1500,7 +1512,7 @@ async function sweep(conn, { now = new Date() } = {}) {
     // missing-tracking push for a visit that has already arrived or moved on:
     // the next sweep dismisses the durable card, but nothing retracts a push
     // (codex P2 round 24).
-    if (notice && await stillOverdue(conn, notice, { now })) await techNotices.pushTrackingNotice(notice);
+    if (notice && await stillOverdue(conn, notice, { now: new Date() })) await techNotices.pushTrackingNotice(notice);
   }
   // The same rows the evidence preload above was built from.
   for (const alert of openAlerts) await withRow(alert.job_id, () => conn.transaction(async (trx) => {

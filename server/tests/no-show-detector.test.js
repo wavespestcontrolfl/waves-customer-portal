@@ -482,6 +482,19 @@ describe('grouped stops are evaluated as one visit (round-10 P1)', () => {
     expect(stopState([solo], opts)).toBe(solo);
   });
 
+  test('a GROUPED send supersedes every member\'s own confirmation', () => {
+    const now = new Date('2026-09-10T12:00:00Z');
+    // A grouped reminder quotes ONE window for the whole stop, so it replaces
+    // each member's older per-service confirmation — the earliest-window rule
+    // applies only between confirmations that each speak for one service
+    // (round-24 P1, second pass).
+    const promises = new Map([
+      ['aaa', { visit_id: 'aaa', start_at: '2026-09-10T09:00:00Z', communicated_at: '2026-09-08T12:00:00Z', source: 'message' }],
+      ['bbb', { visit_id: 'bbb', start_at: '2026-09-10T13:00:00Z', communicated_at: '2026-09-09T12:00:00Z', source: 'message', grouped: true }],
+    ]);
+    expect(stopPromise([a, b], promises, now)).toMatchObject({ visit_id: 'bbb', start_at: '2026-09-10T13:00:00Z' });
+  });
+
   test('stopPromise takes the EARLIEST promised window across members, not the latest sent', () => {
     const now = new Date('2026-09-10T12:00:00Z');
     const promises = new Map([
@@ -609,7 +622,9 @@ describe('lockedStop: creation and both reconcile passes see the same stop (roun
     // An arrival/completion/reassignment waiting on the row lock can commit
     // the moment this transaction releases it, and nothing retracts a push
     // (round-24 P2).
-    expect(detector).toContain('if (notice && await stillOverdue(conn, notice, { now })) await techNotices.pushTrackingNotice(notice);');
+    // On a clock taken NOW, not the tick's: the check is about what is true
+    // at the moment the push leaves (round-24 P1).
+    expect(detector).toContain('if (notice && await stillOverdue(conn, notice, { now: new Date() })) await techNotices.pushTrackingNotice(notice);');
     expect(detector).toContain('async function stillOverdue(conn, notice, { now = new Date() } = {}) {');
     // And a tech's own dismissal clears any supersession stamp the sweep
     // wrote in the meantime, or the next cycle resurrects the card it cleared.
