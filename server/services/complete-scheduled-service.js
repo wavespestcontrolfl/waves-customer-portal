@@ -11102,10 +11102,27 @@ async function completeScheduledService(completionInput, packetContext = null) {
           // invocation — the notes stay unmarked so a resumed/retried
           // completion tries again, and the completion-SMS block (which
           // takes its OWN claim) or the other sender already covers it.
+          //
+          // firstDeliveryOnly (round 20 P1 #4131, same defect as the payer
+          // AP email two rounds ago): this notice only ever performs a
+          // FIRST delivery of the pay link — it fires once, from the
+          // decline handler, before anything has told this invoice it was
+          // ever sent. Without firstDeliveryOnly, claimInvoiceForSend's
+          // default mode treats 'sent'/'viewed'/'overdue' as claimable (the
+          // deliberate resend allowance every genuine resend caller needs),
+          // so an office Immediate send that finalizes to 'sent' between
+          // this decline handler's own read and this claim would still be
+          // granted here as an "intentional resend" and text the SAME pay
+          // link a second time. firstDeliveryOnly closes that gap by
+          // refusing the claim outright once the row shows any
+          // first-delivery evidence; the resulting already_delivered
+          // throw lands in the catch below exactly like any other
+          // claim-unavailable outcome — delivery owned elsewhere, skip,
+          // never an error.
           const InvoiceServiceForDeclineClaim = require('../services/invoice');
           let paymentFailedDeclineClaim = null;
           try {
-            paymentFailedDeclineClaim = await InvoiceServiceForDeclineClaim.claimInvoiceForSend(invoice.id);
+            paymentFailedDeclineClaim = await InvoiceServiceForDeclineClaim.claimInvoiceForSend(invoice.id, { firstDeliveryOnly: true });
           } catch (claimErr) {
             logger.info(`[dispatch] payment-failed notice for invoice ${invoice.id} skipped this attempt — delivery claim unavailable (${claimErr.message})`);
           }

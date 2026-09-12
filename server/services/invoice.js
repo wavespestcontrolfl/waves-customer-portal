@@ -3296,21 +3296,29 @@ const InvoiceService = {
       // the technician arrives, P1 #4131 pre-push audit) must not fall through
       // to invoice_sent's "...completed on {service_date}" claim just because
       // "today" isn't "future". Date alone can't tell completed from open on
-      // the service date itself — only the visit's own status can. Reuses the
-      // SAME null-tolerant isLiveVisitStatus predicate as the closeout
-      // resolver (never a second status list) so this can't drift from what
-      // "still open" means elsewhere. Never checked for a future/past date:
-      // future already selects pre-service copy on the date alone, and a
-      // past-dated linked visit reaching send is completed by every existing
-      // invariant, so a status lookup there would be a no-op at best.
+      // the service date itself — only the visit's own status can.
+      //
+      // isVisitIncompleteForInvoiceCopy (round-2 P1 #4131), NOT
+      // invoice-issued-closeout's isLiveVisitStatus: that predicate governs
+      // quiet-closeout eligibility — a different concern — and deliberately
+      // EXCLUDES en_route/on_site (a technician mid-visit owns its own
+      // completion). Copy selection has no such conflict: an en_route/
+      // on_site visit simply hasn't finished, so it must still read as
+      // "open" here or the send tells the customer the work is done while
+      // the tech is still at the property. See invoice-helpers.js for the
+      // full comment on why this is its own predicate rather than a widened
+      // isLiveVisitStatus. Never checked for a future/past date: future
+      // already selects pre-service copy on the date alone, and a past-dated
+      // linked visit reaching send is completed by every existing invariant,
+      // so a status lookup there would be a no-op at best.
       let linkedVisitOpenToday = false;
       if (serviceDateIsTodayET && invoice.scheduled_service_id) {
         try {
-          const { isLiveVisitStatus } = require("./invoice-issued-closeout");
+          const { isVisitIncompleteForInvoiceCopy } = require("./invoice-helpers");
           const linkedVisit = await db("scheduled_services")
             .where({ id: invoice.scheduled_service_id })
             .first("status");
-          linkedVisitOpenToday = isLiveVisitStatus(linkedVisit?.status);
+          linkedVisitOpenToday = isVisitIncompleteForInvoiceCopy(linkedVisit?.status);
         } catch (err) {
           // Unknown beats a false "completed" claim: a lookup failure defaults
           // to the pre-service copy (no completion assertion either way)

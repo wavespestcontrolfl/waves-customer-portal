@@ -169,8 +169,37 @@ function completionInvoiceAlreadyDelivered(invoice) {
   return ['sent', 'paid', 'prepaid'].includes(String(invoice.status || ''));
 }
 
+// A linked visit still INCOMPLETE for invoice-COPY purposes (round-2 P1
+// #4131): the same-day office picker can invoice a visit whose technician
+// is en route or already on site, and the send copy must not claim the
+// service is done while that is true.
+//
+// This is deliberately its OWN predicate, not a reuse of
+// invoice-issued-closeout's isLiveVisitStatus, even though both read
+// scheduled_services.status and both admit null/pending/confirmed. That
+// predicate governs quiet-closeout eligibility — a different concern — and
+// EXCLUDES en_route/on_site on purpose: a technician who has started the
+// visit owns its completion (a running time_entries timer, a report of
+// their own coming), so the closeout must back off rather than complete
+// over them. Invoice copy has no such conflict — an en_route/on_site visit
+// simply hasn't finished, so the pre-service copy is exactly right. A
+// predicate that exists to gate one concern is not automatically correct
+// for another, even when the names/inputs read alike (this is the second
+// time that shape has bitten this PR — see claimInvoiceForSend's
+// firstDeliveryOnly for the first). Do not widen isLiveVisitStatus to
+// include these statuses: its own callers (the closeout resolver and the
+// locked re-check in complete-scheduled-service.js) depend on the
+// narrower set. Matches the admin-invoices.js open-visit-link picker's own
+// OPEN_VISIT_STATUSES, which independently arrived at the same four
+// statuses for the same "still open" question.
+const INVOICE_COPY_OPEN_VISIT_STATUSES = Object.freeze(['pending', 'confirmed', 'en_route', 'on_site']);
+function isVisitIncompleteForInvoiceCopy(status) {
+  return status == null || INVOICE_COPY_OPEN_VISIT_STATUSES.includes(String(status));
+}
+
 module.exports = {
   completionInvoiceAlreadyDelivered,
+  isVisitIncompleteForInvoiceCopy,
   INVOICE_UPDATE_ALLOWED_FIELDS,
   INVOICE_UNCOLLECTIBLE_STATUSES,
   VISIT_NEVER_RAN_STATUSES,

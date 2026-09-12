@@ -360,6 +360,50 @@ postgres('the shared send claim on a migrated database', () => {
       expect((await readInvoice(adminClaim.invoice.id)).status).toBe('sent');
     });
 
+    // Round-20 P1 (#4131, second claim-mode bug — same shape as the payer AP
+    // email two rounds ago): the decline claim used to call
+    // claimInvoiceForSend with NO mode at all. Default mode treats
+    // 'sent'/'viewed'/'overdue' as claimable (the deliberate resend
+    // allowance every genuine resend caller needs), so an office Immediate
+    // send that finalizes to 'sent' between the mint and the decline
+    // notice's own claim attempt would still be granted here as an
+    // "intentional resend" and text the SAME pay link a second time.
+    // firstDeliveryOnly closes that gap.
+    test('an office send that finalizes the invoice to sent BEFORE the decline notice claims it: the decline notice is skipped, not treated as a resend — exactly ONE pay-link text goes out, from the office send', async () => {
+      await autopayDeclineVisitFixture();
+      let officeSendResult = null;
+      // shortenOrPassthrough for this invoice fires once, right after the
+      // mint, well before the autopay charge attempt (and therefore well
+      // before the decline notice) — the office send completes end-to-end
+      // in that gap, exactly like a real Immediate send racing the
+      // completion.
+      mockRace.afterMint = async (invoiceId) => {
+        officeSendResult = await InvoiceService.sendViaSMS(invoiceId, { operatorInitiated: true });
+        expect(officeSendResult.sent).toBe(true);
+        const delivered = await readInvoice(invoiceId);
+        expect(delivered.status).toBe('sent');
+        expect(delivered.sms_sent_at).not.toBeNull();
+      };
+
+      const result = await complete();
+      expect(officeSendResult).not.toBeNull();
+      expect([200, 503]).toContain(result.status);
+      // THE bug: without firstDeliveryOnly, the decline claim's default mode
+      // reads the now-'sent' row as a resendable claim and texts the pay
+      // link again — payLinkTexts() would be 2 (office send + decline
+      // notice). The fix refuses the decline claim outright
+      // (already_delivered) and skips the notice for this attempt.
+      expect(payLinkTexts()).toHaveLength(1);
+      expect(String(payLinkTexts()[0][0].purpose)).not.toBe('payment_failure');
+
+      const [invoice] = await mockPg('invoices').where({ customer_id: f.customerId });
+      expect(invoice.status).toBe('sent');
+      // The decline notice never marked itself sent — it was skipped, not
+      // delivered.
+      const [record] = await mockPg('service_records').where({ scheduled_service_id: f.serviceId });
+      expect(record?.structured_notes?.paymentFailedNoticeStatus).not.toBe('sent');
+    });
+
     test('the provider ACCEPTS the decline notice but the post-send audit-row write then throws (providerOutcome.sent === true): recorded delivered — the invoice finalizes sent, not restored to draft (pre-push Codex P1 #4131, third instance of the send-then-bookkeeping-throw shape)', async () => {
       await autopayDeclineVisitFixture();
       sendCustomerMessage.mockImplementation(async (input) => {

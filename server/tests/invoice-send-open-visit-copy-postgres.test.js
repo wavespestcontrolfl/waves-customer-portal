@@ -9,11 +9,23 @@
  * generic `invoice_sent` copy, which asserts "...completed on {date}" to a
  * customer who has not been visited yet.
  *
- * The fix reads the linked visit's own completion state (isLiveVisitStatus,
- * the SAME null-tolerant predicate the closeout resolver uses) for a
- * same-day service date, not the date alone. This suite drives all four
- * combinations against a migrated database: only today+open must select the
- * pre-service copy; the other three keep their pre-existing behavior.
+ * The fix reads the linked visit's own completion state for a same-day
+ * service date, not the date alone. This suite drives all six combinations
+ * against a migrated database: only today+open (including today+en_route
+ * and today+on_site, added round 2) must select the pre-service copy; the
+ * rest keep their pre-existing behavior.
+ *
+ * Round 2 (#4131 P1): the original fix reused isLiveVisitStatus from
+ * invoice-issued-closeout.js — a predicate that exists to gate quiet-
+ * closeout eligibility, a DIFFERENT concern, and deliberately excludes
+ * en_route/on_site (a technician mid-visit owns that visit's own
+ * completion, so the closeout must back off). Borrowed here, that same
+ * narrower list let a same-day invoice send for a visit whose technician is
+ * en route or already on site fall through to the completed-service copy —
+ * the exact bug this suite exists to catch, just for two more statuses. The
+ * fix is a copy-specific predicate (isVisitIncompleteForInvoiceCopy,
+ * invoice-helpers.js) that includes en_route/on_site; isLiveVisitStatus
+ * itself is untouched; see that file for the full comment.
  *
  * `invoice_sent_upfront` never asserts a date or service completion ("...to
  * get started with {service_type} is ready") while the standard
@@ -101,6 +113,26 @@ postgres('invoice_sent copy selection for a linked visit (pre-push P1 #4131)', (
     const result = await InvoiceService.sendViaSMS(invoiceId, { operatorInitiated: true });
     expect(result.sent).toBe(true);
     expect(sentBody()).not.toMatch(/get started/i);
+  });
+
+  test('today + EN_ROUTE visit: selects the pre-service copy — technician is still on the way, not done', async () => {
+    const { invoiceId } = await fixture({ visitStatus: 'en_route', serviceYmd: etDateString() });
+    const result = await InvoiceService.sendViaSMS(invoiceId, { operatorInitiated: true });
+    expect(result.sent).toBe(true);
+    // THE round-2 bug: isLiveVisitStatus (borrowed from the closeout
+    // resolver) reads en_route as NOT live/open, so without the fix this
+    // falls through to the standard invoice_sent copy — telling the
+    // customer the service is done while the tech is still en route.
+    expect(sentBody()).toMatch(/get started/i);
+  });
+
+  test('today + ON_SITE visit: selects the pre-service copy — technician is on site, service not yet complete', async () => {
+    const { invoiceId } = await fixture({ visitStatus: 'on_site', serviceYmd: etDateString() });
+    const result = await InvoiceService.sendViaSMS(invoiceId, { operatorInitiated: true });
+    expect(result.sent).toBe(true);
+    // Same round-2 bug as en_route: on_site also reads as NOT live/open
+    // under isLiveVisitStatus, wrongly selecting the completed-service copy.
+    expect(sentBody()).toMatch(/get started/i);
   });
 
   test('future + OPEN visit: keeps the existing pre-service (upfront) copy', async () => {

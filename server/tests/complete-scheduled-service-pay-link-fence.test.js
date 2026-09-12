@@ -22,7 +22,7 @@ describe('complete-scheduled-service.js pay-link senders acquire the shared clai
     expect(start).toBeGreaterThan(-1);
     expect(end).toBeGreaterThan(start);
     const block = source.slice(start, end);
-    const claimAt = block.indexOf('paymentFailedDeclineClaim = await InvoiceServiceForDeclineClaim.claimInvoiceForSend(invoice.id);');
+    const claimAt = block.indexOf('paymentFailedDeclineClaim = await InvoiceServiceForDeclineClaim.claimInvoiceForSend(invoice.id, { firstDeliveryOnly: true });');
     const sendAt = block.indexOf('const failResult = await sendCustomerMessage({');
     const restoreAt = block.indexOf('await InvoiceServiceForDeclineClaim.restoreSendClaim(invoice.id, paymentFailedDeclineClaim.previousStatus, paymentFailedDeclineClaim.claimed)');
     expect(claimAt).toBeGreaterThan(-1);
@@ -31,6 +31,21 @@ describe('complete-scheduled-service.js pay-link senders acquire the shared clai
     // The restore only fires on a non-delivered exit — a delivered notice
     // finalizes through markDeliverySent's own CAS instead.
     expect(block).toMatch(/if \(!paymentFailedNoticeDelivered\) \{\s*\n\s*await InvoiceServiceForDeclineClaim\.restoreSendClaim\(/);
+  });
+
+  // Round-20 P1 (#4131, second claim-mode bug — same shape as the payer AP
+  // email two rounds ago): this notice only ever performs a FIRST delivery
+  // of the pay link. The default claim mode treats 'sent'/'viewed'/
+  // 'overdue' as claimable (the deliberate resend allowance every genuine
+  // resend caller needs), so an office Immediate send that finalizes to
+  // 'sent' between this handler's own read and this claim would still be
+  // granted here as an "intentional resend" and text the SAME pay link a
+  // second time. firstDeliveryOnly closes that gap.
+  test('the decline notice claim uses firstDeliveryOnly — this sender never treats an already-delivered row as a resendable claim', () => {
+    const start = source.indexOf("if (paymentFailedBody) {");
+    const end = source.indexOf('} catch (failErr) {', start);
+    const block = source.slice(start, end);
+    expect(block).toMatch(/claimInvoiceForSend\(invoice\.id, \{ firstDeliveryOnly: true \}\)/);
   });
 
   test('the payer AP invoice email claims the invoice BEFORE sendInvoiceEmail, and restores on every non-delivered exit', () => {
