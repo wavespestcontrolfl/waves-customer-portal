@@ -766,3 +766,56 @@ describe('round-5 origin guards', () => {
     expect(body.source).toBe('window_constrained');
   });
 });
+
+// Codex round 5 P1 follow-ons: Google measures its legs FROM HQ, and the
+// truck's position is wherever its LATEST completion was — not wherever it
+// last had a pin.
+test('a truck origin discards Google’s HQ-measured legs', async () => {
+  process.env.GATE_ROUTE_REORDER_WINDOW_FIT = 'true';
+  process.env.GATE_DRIVE_TIME_CALIBRATION = 'true';
+  jest.useFakeTimers({ doNotFake: ['nextTick', 'setImmediate'] });
+  jest.setSystemTime(new Date('2026-09-20T13:00:00Z')); // 09:00 ET
+  const realLegs = RouteOptimizer.fallbackLegMetrics;
+  RouteOptimizer.fallbackLegMetrics = (miles) => ({ meters: Math.round(miles * 1000), minutes: Math.round(miles * 2) });
+  try {
+    const TODAY = '2026-09-20';
+    stopsByDate[TODAY] = [
+      stop('A', { window_start: '09:00', window_end: '10:00', estimated_duration_minutes: 30, lng: 1, route_order: 1 }),
+      stop('B', { window_start: '10:00', window_end: '11:00', estimated_duration_minutes: 30, lng: 2, route_order: 2 }),
+    ];
+    // The truck finished 400 units away — hours from A's 11:00 deadline.
+    // Google's legs claim a free first drive because it measured from HQ.
+    completedByDate[TODAY] = [{ id: 'DONE', technician_id: 't1', route_order: 0, lat: 1, lng: 400, check_out_time: '2026-09-20T12:55:00Z' }];
+    mockOptimizerOrder(['A', 'B'], { legs: [{ durationMinutes: 0 }, { durationMinutes: 0 }] });
+    const { status, body } = await optimizeRoute({ technicianId: 't1' });
+    // Trusting those legs would have written this day as perfectly fine.
+    expect(status).toBe(409);
+    expect(body.reason).toBe('NO_FEASIBLE_IMPROVEMENT');
+    expect(trxUpdates).toEqual([]);
+  } finally {
+    RouteOptimizer.fallbackLegMetrics = realLegs;
+    jest.useRealTimers();
+  }
+});
+
+test('the truck is at its LATEST completion — an older pinned stop is not a fallback', async () => {
+  process.env.GATE_ROUTE_REORDER_WINDOW_FIT = 'true';
+  process.env.GATE_DRIVE_TIME_CALIBRATION = 'true';
+  jest.useFakeTimers({ doNotFake: ['nextTick', 'setImmediate'] });
+  jest.setSystemTime(new Date('2026-09-20T13:00:00Z'));
+  try {
+    const TODAY = '2026-09-20';
+    stopsByDate[TODAY] = chronologyDay();
+    completedByDate[TODAY] = [
+      { id: 'EARLIER', technician_id: 't1', route_order: 0, lat: 1, lng: 5, check_out_time: '2026-09-20T12:00:00Z' },
+      // Most recent, and unpinned: the truck's position is unknown.
+      { id: 'LATEST', technician_id: 't1', route_order: 1, lat: null, lng: null, check_out_time: '2026-09-20T12:50:00Z' },
+    ];
+    mockOptimizerOrder(['T2', 'T1', 'U']);
+    const { status, body } = await optimizeRoute({ technicianId: 't1' });
+    expect(status).toBe(409);
+    expect(body.reason).toBe('PROGRESS_ORIGIN_UNKNOWN');
+  } finally {
+    jest.useRealTimers();
+  }
+});

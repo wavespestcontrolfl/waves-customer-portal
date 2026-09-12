@@ -387,6 +387,10 @@ function chooseWindowSafeOrder({
   // another's (codex round 4 P1) — the same rule the per-tech resolver
   // applies when a slice is not the flat sequence.
   if (googleOrder.length !== rawGoogleOrder.length) legs = null;
+  // They are also measured FROM HQ. Simulating from the truck's real position
+  // makes the first one wrong — a stop near HQ would read as reachable when
+  // it is not (codex round 5 P1) — so a moved origin discards them too.
+  if (origin) legs = null;
   // beforeMeters (current running order, same model as the nightly ledger's
   // before_distance_meters) rides on EVERY return — a caller aggregating
   // several tech-days in one response (the multi-tech /optimize endpoint)
@@ -554,9 +558,16 @@ async function loadTechDayOrigins(conn, dateStr, { technicianId = null, now = ne
       if (fb) return -1;
       return (Number(a.route_order) || 0) - (Number(b.route_order) || 0);
     });
-    const last = [...ordered].reverse().find((r) => parseFloat(r.lat) && parseFloat(r.lng));
-    if (last) origins.set(techId, { lat: parseFloat(last.lat), lng: parseFloat(last.lng) });
-    else unknown.add(techId);
+    // The LATEST completion is where the truck is. If that row has no pin the
+    // position is unknown — an earlier stop is where it USED to be, and
+    // driving from there is a guess the guard must not make (codex round 5
+    // P1).
+    const last = ordered[ordered.length - 1];
+    if (last && parseFloat(last.lat) && parseFloat(last.lng)) {
+      origins.set(techId, { lat: parseFloat(last.lat), lng: parseFloat(last.lng) });
+    } else {
+      unknown.add(techId);
+    }
   }
   return { origins, unknown };
 }

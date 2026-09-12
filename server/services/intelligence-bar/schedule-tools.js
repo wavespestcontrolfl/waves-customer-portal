@@ -316,6 +316,9 @@ async function applyApprovedRouteOrder({ date, approvedIds, services, lockKeys, 
     const revalidated = resolveWindowSafeOrderByTechDay({
       RouteOptimizer, orderedStops: approvedOrder, sourceStops: services,
       googleSource: 'approved_card', startMin: inProgressStartMin(date),
+      // From the truck's real position, exactly as the preview did — the
+      // day has moved on since the card was drawn (codex round 5 P1).
+      techDayOrigins: await loadTechDayOrigins(db, date),
     });
     if (revalidated.refusal) {
       return { error: routeGuardMessage(revalidated.refusal.reason), reason: revalidated.refusal.reason, preview_changed: true };
