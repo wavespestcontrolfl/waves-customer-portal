@@ -219,6 +219,16 @@ async function metricsFor(page, surface) {
   }));
 }
 
+function assertMetrics(metrics, label) {
+  assert.equal(metrics.overflow, false, `${label} overflow`);
+  for (const control of metrics.controls) {
+    assert.ok(control.height >= 44, `${label} control ${control.height}px`);
+    assert.ok(control.font >= 14, `${label} control font ${control.font}px`);
+  }
+  for (const font of metrics.readable)
+    assert.ok(font >= 14, `${label} readable font ${font}px`);
+}
+
 async function main() {
   fs.mkdirSync(output, { recursive: true });
   const report = {
@@ -342,26 +352,7 @@ async function main() {
         for (const height of [900, 500]) {
           await page.setViewportSize({ width, height });
           const metrics = await metricsFor(page, surface);
-          assert.equal(
-            metrics.overflow,
-            false,
-            `${name} overflow at ${width}x${height}`,
-          );
-          for (const control of metrics.controls) {
-            assert.ok(
-              control.height >= 44,
-              `${name} control ${control.height}px at ${width}x${height}`,
-            );
-            assert.ok(
-              control.font >= 14,
-              `${name} control font ${control.font}px at ${width}x${height}`,
-            );
-          }
-          for (const font of metrics.readable)
-            assert.ok(
-              font >= 14,
-              `${name} readable font ${font}px at ${width}x${height}`,
-            );
+          assertMetrics(metrics, `${name} Products at ${width}x${height}`);
           report.sizes.push({
             name,
             width,
@@ -455,6 +446,7 @@ async function main() {
             await page.screenshot({ path: path.join(output, `${name}-unit-review.png`), fullPage: true });
           }
           assert.equal(await surface.count(), 1);
+          assertMetrics(await metricsFor(page, surface), `${name} ${leaf}`);
           report.leaves.push({ name, leaf });
         }
         await page.screenshot({

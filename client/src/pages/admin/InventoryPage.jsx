@@ -35,6 +35,7 @@ import {
   Textarea,
   UiSurface,
   Field,
+  cn,
 } from "../../components/ui";
 const API_BASE = import.meta.env.VITE_API_URL || "/api";
 function adminFetch(path, options = {}) {
@@ -464,7 +465,7 @@ export default function InventoryPage() {
       {tab === "margins" && <MarginsTab showToast={showToast} />}
       {tab === "scrape" && <ScrapeTab showToast={showToast} />}
       {toast && (
-        <ActionFeedback className="fixed bottom-[calc(20px+env(safe-area-inset-bottom,0px))] right-[calc(20px+env(safe-area-inset-right,0px))] z-[300] max-w-[calc(100vw-40px)] pointer-events-none">
+        <ActionFeedback className="fixed bottom-[calc(20px+env(safe-area-inset-bottom,0px))] right-[calc(20px+env(safe-area-inset-right,0px))] z-[300] max-w-[calc(100vw-40px)] pointer-events-none rounded-md border-hairline border-zinc-200 bg-white px-3.5 py-3 shadow-lg">
           {" "}
           {toast}
         </ActionFeedback>
@@ -564,9 +565,10 @@ function LawnFactsTab({ showToast }) {
     }
   };
   const badge = (status) => {
-    const alert = ["needs_facts", "missing_product"].includes(status);
+    const tone =
+      status === "missing_product" ? "alert" : status === "needs_facts" ? "warn" : "neutral";
     return (
-      <Badge tone={alert ? "alert" : "neutral"}>
+      <Badge tone={tone}>
         {String(status || "unknown").replaceAll("_", " ")}
       </Badge>
     );
@@ -591,7 +593,7 @@ function LawnFactsTab({ showToast }) {
           ["Missing", summary?.missing_product || 0],
         ].map(([label, value]) => (
           <div key={label}>
-            <div className="text-22 font-medium text-zinc-900">{value}</div>
+            <div className="text-22 font-medium text-zinc-900 u-nums">{value}</div>
             <div className="text-ui-body text-ink-secondary">{label}</div>
           </div>
         ))}
@@ -943,7 +945,7 @@ function LawnContentModulesTab({ showToast }) {
                     <Badge tone="neutral">{module.status}</Badge>
                   </TD>
                   <TD className="max-w-[460px]">
-                    <div className="overflow-hidden">{module.plain_text}</div>
+                    <div className="line-clamp-3 overflow-hidden">{module.plain_text}</div>
                   </TD>
                   <TD>
                     <Button
@@ -1247,7 +1249,7 @@ function PriceSyncTab({ showToast }) {
             key={item.label}
             className="p-5 mb-3 flex-[1_1_130px] min-w-[130px] mb-[12px] text-center"
           >
-            <div className="text-22 font-medium">{item.value}</div>
+            <div className="text-22 font-medium u-nums">{item.value}</div>
             <div className="text-ui-body text-ink-secondary mt-[2px]">
               {item.label}
             </div>
@@ -1325,11 +1327,11 @@ function PriceSyncTab({ showToast }) {
                       ))}
                     </div>
                   </TD>
-                  <TD>{vendor.mappedProducts}</TD>
-                  <TD>{vendor.verifiedMappings}</TD>
-                  <TD>{vendor.currentPrices}</TD>
-                  <TD>{vendor.bestPrices}</TD>
-                  <TD>{vendor.pendingApprovals}</TD>
+                  <TD nums>{vendor.mappedProducts}</TD>
+                  <TD nums>{vendor.verifiedMappings}</TD>
+                  <TD nums>{vendor.currentPrices}</TD>
+                  <TD nums>{vendor.bestPrices}</TD>
+                  <TD nums>{vendor.pendingApprovals}</TD>
                   <TD className="text-ink-secondary">
                     <div className="flex items-center gap-[8px] flex-wrap">
                       <span>{vendor.nextAction}</span>
@@ -1384,9 +1386,9 @@ function PriceSyncTab({ showToast }) {
                       {product.bestPriceStatus || "needs_mapping"}
                     </Badge>
                   </TD>
-                  <TD>{product.mappedVendors}</TD>
-                  <TD>{product.verifiedMappings}</TD>
-                  <TD>{product.completePackageMaps}</TD>
+                  <TD nums>{product.mappedVendors}</TD>
+                  <TD nums>{product.verifiedMappings}</TD>
+                  <TD nums>{product.completePackageMaps}</TD>
                 </TR>
               ))}
             </TBody>
@@ -1403,7 +1405,7 @@ function PriceSyncTab({ showToast }) {
         <Card className="p-5 mb-3">
           <div className="flex justify-between gap-[12px] flex-wrap items-end mb-[14px]">
             <div>
-              <h3 className="text-zinc-900 text-18">
+              <h3 className="m-0 mb-1 text-zinc-900 text-18">
                 Hermes vendor login discovery
               </h3>
               <div className="text-ink-secondary text-ui-body">
@@ -1472,7 +1474,7 @@ function PriceSyncTab({ showToast }) {
                             href={websiteHref}
                             target="_blank"
                             rel="noopener noreferrer"
-                            className="text-zinc-900"
+                            className="text-zinc-900 underline underline-offset-2"
                           >
                             {vendor.website}
                           </a>
@@ -1486,7 +1488,7 @@ function PriceSyncTab({ showToast }) {
                             href={loginHref}
                             target="_blank"
                             rel="noopener noreferrer"
-                            className="text-zinc-900"
+                            className="text-zinc-900 underline underline-offset-2"
                           >
                             {vendor.loginUrl}
                           </a>
@@ -1620,23 +1622,23 @@ function PriceSyncTab({ showToast }) {
                     {approval.productName}
                   </TD>
                   <TD>{approval.vendorName}</TD>
-                  <TD>
+                  <TD nums>
                     {approval.oldPrice != null
                       ? `$${approval.oldPrice.toFixed(2)}`
                       : "—"}
                   </TD>
-                  <TD>
+                  <TD nums>
                     {approval.newPrice != null
                       ? `$${approval.newPrice.toFixed(2)}`
                       : "—"}
                   </TD>
-                  <TD>
+                  <TD nums>
                     {approval.changePercent != null
                       ? `${approval.changePercent.toFixed(1)}%`
                       : "—"}
                   </TD>
                   <TD>{approval.sourceType || "—"}</TD>
-                  <TD>
+                  <TD nums>
                     {approval.confidence != null
                       ? `${Math.round(approval.confidence * 100)}%`
                       : "—"}
@@ -1644,7 +1646,7 @@ function PriceSyncTab({ showToast }) {
                   <TD className="text-ink-secondary">
                     {approval.approvalReason || "—"}
                   </TD>
-                  <TD>
+                  <TD nums>
                     {approval.capturedAt
                       ? new Date(approval.capturedAt).toLocaleDateString()
                       : "—"}
@@ -1736,7 +1738,7 @@ function WaveGuardForecastTab({ showToast, onUpdate, refreshId }) {
       <div className="flex justify-between gap-[12px] flex-wrap mb-[14px]">
         <div>
           <h3 className="m-0 text-zinc-900">WaveGuard inventory forecast</h3>
-          <p className="text-ink-secondary text-ui-body">
+          <p className="[margin:4px_0_0] text-ink-secondary text-ui-body">
             Upcoming lawn protocol demand compared against live product stock.
           </p>
         </div>
@@ -1771,28 +1773,37 @@ function WaveGuardForecastTab({ showToast, onUpdate, refreshId }) {
             {
               label: "Short",
               value: counts.short || 0,
-              alert: counts.short > 0,
+              // Main: red when short, green (no kit equivalent) otherwise.
+              tone: counts.short > 0 ? "alert" : "neutral",
             },
             {
               label: "Warnings",
               value: counts.warning || 0,
-              alert: counts.warning > 0,
+              tone: counts.warning > 0 ? "warn" : "neutral",
             },
             {
               label: "Unit Review",
               value: counts.unit_mismatch || 0,
-              alert: counts.unit_mismatch > 0,
+              tone: counts.unit_mismatch > 0 ? "warn" : "neutral",
             },
           ].map((item) => (
             <Card
               key={item.label}
-              className={
-                item.alert
-                  ? "min-w-[120px] p-3 border-alert-fg"
-                  : "min-w-[120px] p-3"
-              }
+              className={cn(
+                "min-w-[120px] p-3",
+                item.tone === "alert" && "border-alert-fg",
+                item.tone === "warn" && "border-warn-fg",
+              )}
             >
-              <div className="text-20 font-medium">{item.value}</div>
+              <div
+                className={cn(
+                  "text-20 font-medium u-nums",
+                  item.tone === "alert" && "text-alert-fg",
+                  item.tone === "warn" && "text-warn-fg",
+                )}
+              >
+                {item.value}
+              </div>
               <div className="text-ink-secondary text-ui-body">
                 {item.label}
               </div>
@@ -1834,7 +1845,7 @@ function WaveGuardForecastTab({ showToast, onUpdate, refreshId }) {
                       {product.category || "Product"}
                     </div>
                   </TD>
-                  <TD>
+                  <TD nums>
                     <strong>
                       {product.committedDemand}{" "}
                       {product.demandUnit || product.inventoryUnit || ""}
@@ -1850,7 +1861,7 @@ function WaveGuardForecastTab({ showToast, onUpdate, refreshId }) {
                       </div>
                     )}
                   </TD>
-                  <TD>
+                  <TD nums>
                     {product.onHand ?? "—"} {product.inventoryUnit || ""}
                     {product.lowStockThreshold != null && (
                       <div className="text-ink-secondary text-ui-body">
@@ -1858,7 +1869,7 @@ function WaveGuardForecastTab({ showToast, onUpdate, refreshId }) {
                       </div>
                     )}
                   </TD>
-                  <TD>
+                  <TD nums>
                     {product.projectedRemaining ?? "—"}{" "}
                     {product.inventoryUnit || ""}
                     {product.shortfall > 0 && (
@@ -1870,9 +1881,11 @@ function WaveGuardForecastTab({ showToast, onUpdate, refreshId }) {
                   <TD>
                     <Badge
                       tone={
-                        ["short", "warning"].includes(product.status)
+                        product.status === "short"
                           ? "alert"
-                          : "neutral"
+                          : ["warning", "unit_mismatch"].includes(product.status)
+                            ? "warn"
+                            : "neutral"
                       }
                     >
                       {statusLabel(product.status)}
@@ -2004,7 +2017,7 @@ function UnitReviewTab({ showToast }) {
       <div className="flex justify-between gap-[12px] flex-wrap mb-[14px]">
         <div>
           <h3 className="m-0 text-zinc-900">Inventory unit review</h3>
-          <p className="text-ink-secondary text-ui-body">
+          <p className="[margin:4px_0_0] text-ink-secondary text-ui-body">
             Clean up unsupported, missing, and ambiguous inventory units before
             they affect forecast or closeout math.
           </p>
@@ -2043,7 +2056,7 @@ function UnitReviewTab({ showToast }) {
                           {product.formulation || "unspecified"}
                         </div>
                       </TD>
-                      <TD>
+                      <TD nums>
                         {product.inventoryOnHand ?? "—"}{" "}
                         {product.inventoryUnit || "no unit"}
                         {product.lowStockThreshold != null && (
@@ -2056,7 +2069,10 @@ function UnitReviewTab({ showToast }) {
                         {(product.reasons || []).map((reason) => (
                           <div
                             key={reason.code}
-                            className="text-ui-body mb-[3px]"
+                            className={cn(
+                              "text-ui-body mb-[3px]",
+                              reason.severity === "block" ? "text-alert-fg" : "text-warn-fg",
+                            )}
                           >
                             {reason.message}
                           </div>
@@ -2137,7 +2153,7 @@ function UnitReviewTab({ showToast }) {
 
           {forecastRows.length > 0 && (
             <div className="mt-[16px] border-t border-solid border-zinc-200 pt-[12px]">
-              <h4 className="text-zinc-900">Forecast Unit Review</h4>
+              <h4 className="[margin:0_0_8px] text-zinc-900">Forecast Unit Review</h4>
               {forecastRows.map((row) => (
                 <div
                   key={row.productId}
@@ -2587,6 +2603,10 @@ export function ProductsTab({
                   onClick={() =>
                     !isEditing && setExpanded(expanded === p.id ? null : p.id)
                   }
+                  className={cn(
+                    isEditing ? "cursor-default" : "cursor-pointer",
+                    isEditing ? "bg-zinc-100" : isExpanded ? "bg-zinc-50" : undefined,
+                  )}
                 >
                   <TD className="font-medium text-zinc-900">
                     {isEditing ? (
@@ -2673,7 +2693,7 @@ export function ProductsTab({
                       p.containerSize || "—"
                     )}
                   </TD>
-                  <TD>
+                  <TD nums>
                     {isEditing ? (
                       <div
                         onClick={(e) => e.stopPropagation()}
@@ -2731,8 +2751,8 @@ export function ProductsTab({
                       </span>
                     )}
                   </TD>
-                  <TD>{formatMoney(p.bestPrice)}</TD>
-                  <TD>
+                  <TD nums>{formatMoney(p.bestPrice)}</TD>
+                  <TD nums>
                     {formatUnitPriceList(p.unitPrices) ||
                       formatUnitCost(p.costPerUnit, p.costUnit)}
                   </TD>
@@ -3002,7 +3022,7 @@ function RestockRequestsTab({
       <div className="flex justify-between gap-[12px] flex-wrap mb-[14px]">
         <div>
           <h3 className="m-0 text-zinc-900">Restock requests</h3>
-          <p className="text-ink-secondary text-ui-body">
+          <p className="[margin:4px_0_0] text-ink-secondary text-ui-body">
             Product requests for inventory needs.
           </p>
         </div>
@@ -3065,7 +3085,7 @@ function RestockRequestsTab({
                         {request.inventoryUnit || request.unit || ""}
                       </div>
                     </TD>
-                    <TD>
+                    <TD nums>
                       <strong>
                         {request.requestedQuantity ?? "—"} {request.unit || ""}
                       </strong>
@@ -3086,7 +3106,7 @@ function RestockRequestsTab({
                           href={safeExternalHref(request.vendorProductUrl)}
                           target="_blank"
                           rel="noopener noreferrer"
-                          className="text-zinc-900 text-ui-body"
+                          className="text-zinc-900 text-ui-body underline underline-offset-2"
                         >
                           Open order page ↗
                         </a>
@@ -3204,7 +3224,7 @@ function RestockStatusCell({
         {request.status}
       </Badge>
       {order && (
-        <div className={`mt-[6px] text-ui-body ${summary.tone || ""}`}>
+        <div className={`mt-[6px] text-ui-body u-nums ${summary.tone || ""}`}>
           {summary.label}
           {order.status !== "placed" && order.error && (
             <div className="text-ink-secondary mt-[2px] max-w-[260px]">
@@ -3222,7 +3242,7 @@ function RestockStatusCell({
                       href={s.url}
                       target="_blank"
                       rel="noopener noreferrer"
-                      className="text-zinc-900"
+                      className="text-zinc-900 underline underline-offset-2"
                     >
                       {s.label} ↗
                     </a>
@@ -3703,9 +3723,9 @@ function ExpandedProduct({
                 <span className="text-zinc-900 font-medium min-w-[140px]">
                   {vp.vendorName}
                 </span>{" "}
-                <span>${vp.price.toFixed(2)}</span>
+                <span className="u-nums">${vp.price.toFixed(2)}</span>
                 {vp.quantity && (
-                  <span className="text-ink-secondary">{vp.quantity}</span>
+                  <span className="text-ink-secondary u-nums">{vp.quantity}</span>
                 )}
                 {(() => {
                   const unitLabel =
@@ -3748,7 +3768,7 @@ function ExpandedProduct({
                     href={vp.url}
                     target="_blank"
                     rel="noopener noreferrer"
-                    className="text-zinc-900 text-ui-body"
+                    className="text-zinc-900 text-ui-body underline underline-offset-2"
                   >
                     Open
                   </a>
@@ -3936,7 +3956,7 @@ function ExpandedProduct({
                 <TBody>
                   {movements.map((m) => (
                     <TR key={m.id}>
-                      <TD className="text-ink-secondary">
+                      <TD nums className="text-ink-secondary">
                         {m.createdAt
                           ? new Date(m.createdAt).toLocaleDateString()
                           : "—"}
@@ -3952,10 +3972,10 @@ function ExpandedProduct({
                           {m.movementType}
                         </Badge>
                       </TD>
-                      <TD>
+                      <TD nums>
                         {m.quantity ?? "—"} {m.unit || ""}
                       </TD>
-                      <TD>
+                      <TD nums>
                         {m.stockBefore ?? "—"} → {m.stockAfter ?? "—"}
                       </TD>
                       <TD className="text-ink-secondary">
@@ -4373,7 +4393,7 @@ function VendorsTab({ showToast }) {
               href={v.website}
               target="_blank"
               rel="noopener noreferrer"
-              className="text-ui-body text-zinc-900 block mt-[4px]"
+              className="text-ui-body text-zinc-900 underline underline-offset-2 block mt-[4px]"
             >
               {v.website}
             </a>
@@ -4584,7 +4604,7 @@ function ApprovalsTab({ showToast, onUpdate }) {
                 </div>{" "}
                 <div className="text-center min-w-[80px]">
                   {a.old_price && (
-                    <div className="text-ui-body text-ink-secondary">
+                    <div className="text-ui-body text-ink-secondary line-through">
                       ${parseFloat(a.old_price).toFixed(2)}
                     </div>
                   )}
@@ -4917,17 +4937,22 @@ function ProtocolsTab({
               const label = lineLabel(line.serviceLine);
               const needsCogs = line.cogsRows === 0;
               const needsCosts = line.missingCostRows > 0;
+              // Main colored these by line.status (healthy/warning/missing),
+              // not by the needsCogs/needsCosts booleans — a "warning" line
+              // was amber, only "missing" was red.
+              const lineTone =
+                line.status === "warning" ? "warn" : line.status === "healthy" ? "neutral" : "alert";
               return (
                 <Card
                   key={line.serviceLine}
                   title={(line.warnings || [])
                     .map((w) => `${w.serviceType}: ${w.warning}`)
                     .join("\n")}
-                  className={
-                    needsCogs || needsCosts
-                      ? "text-left p-3 border-alert-fg"
-                      : "text-left p-3"
-                  }
+                  className={cn(
+                    "text-left p-3",
+                    lineTone === "alert" && "border-alert-fg",
+                    lineTone === "warn" && "border-warn-fg",
+                  )}
                 >
                   {" "}
                   <div className="flex justify-between items-center gap-[8px]">
@@ -4935,7 +4960,7 @@ function ProtocolsTab({
                     <div className="text-ui-body font-medium text-zinc-900">
                       {label}
                     </div>{" "}
-                    <Badge tone={needsCogs || needsCosts ? "alert" : "neutral"}>
+                    <Badge tone={lineTone}>
                       {line.status}
                     </Badge>{" "}
                   </div>{" "}
@@ -5188,12 +5213,12 @@ function ProtocolsTab({
                             className="w-[70px]"
                           />
                         </TD>
-                        <TD>
+                        <TD nums>
                           {p.bestPrice
                             ? `$${parseFloat(p.bestPrice).toFixed(2)}`
                             : "—"}
                         </TD>
-                        <TD className="text-zinc-900">
+                        <TD nums className="text-zinc-900">
                           {p.costPerApp ? `$${p.costPerApp.toFixed(2)}` : "—"}
                         </TD>
                         <TD className="text-ink-secondary">
@@ -5249,23 +5274,23 @@ function ProtocolsTab({
                           {p.productName}{" "}
                           {p.isPrimary && <Badge tone="neutral">Primary</Badge>}
                         </TD>
-                        <TD>
+                        <TD nums>
                           {p.usageAmount} {p.usageUnit}
                         </TD>
-                        <TD>{p.usagePer1000sf || "—"}</TD>
-                        <TD>
+                        <TD nums>{p.usagePer1000sf || "—"}</TD>
+                        <TD nums>
                           {p.bestPrice
                             ? `$${parseFloat(p.bestPrice).toFixed(2)}`
                             : "—"}
                         </TD>
-                        <TD className="text-zinc-900">
+                        <TD nums className="text-zinc-900">
                           {p.costPerApp ? `$${p.costPerApp.toFixed(2)}` : "—"}
                         </TD>
                         <TD title={p.costWarning || ""}>
                           {costSourceLabel(p)}
                         </TD>
                         <TD>{p.isPrimary ? "" : ""}</TD>
-                        <TD className="text-ink-secondary max-w-[200px] overflow-hidden whitespace-nowrap">
+                        <TD className="text-ink-secondary max-w-[200px] overflow-hidden whitespace-nowrap text-ellipsis">
                           {p.notes || "—"}
                         </TD>
                         <TD className="w-[80px]">
@@ -5485,16 +5510,16 @@ function MarginsTab({ showToast }) {
                         {p.productName}{" "}
                         {p.isPrimary && <Badge tone="neutral">Primary</Badge>}
                       </TD>
-                      <TD>
+                      <TD nums>
                         {p.usageAmount} {p.usageUnit}
                       </TD>
-                      <TD>{p.usagePer1000sf || "—"}</TD>
-                      <TD>
+                      <TD nums>{p.usagePer1000sf || "—"}</TD>
+                      <TD nums>
                         {p.bestPrice
                           ? `$${parseFloat(p.bestPrice).toFixed(2)}`
                           : "—"}
                       </TD>
-                      <TD className="text-zinc-900">
+                      <TD nums className="text-zinc-900">
                         {p.costPerApp ? `$${p.costPerApp.toFixed(2)}` : "—"}
                       </TD>
                       <TD title={p.costWarning || ""}>{costSourceLabel(p)}</TD>
@@ -5612,16 +5637,16 @@ function ScrapeTab({ showToast }) {
                       {j.status}
                     </Badge>
                   </TD>
-                  <TD>{j.products_found}</TD>
-                  <TD>{j.prices_updated}</TD>
-                  <TD>{j.prices_new}</TD>
-                  <TD>{j.errors}</TD>
-                  <TD>
+                  <TD nums>{j.products_found}</TD>
+                  <TD nums>{j.prices_updated}</TD>
+                  <TD nums>{j.prices_new}</TD>
+                  <TD nums>{j.errors}</TD>
+                  <TD nums>
                     {j.duration_ms
                       ? `${(j.duration_ms / 1000).toFixed(1)}s`
                       : "—"}
                   </TD>
-                  <TD className="text-ink-secondary">
+                  <TD nums className="text-ink-secondary">
                     {new Date(j.created_at).toLocaleString()}
                   </TD>
                 </TR>
