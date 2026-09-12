@@ -540,7 +540,7 @@ function routeWriteGuardSignature(stop) {
  * rather than pretend the truck is at HQ. Empty for any date but today, where
  * every route starts at HQ by definition.
  */
-async function loadTechDayOrigins(conn, dateStr, { technicianId = null, now = new Date() } = {}) {
+async function loadTechDayOrigins(conn, dateStr, { technicianId = null, now = new Date(), lock = false } = {}) {
   const origins = new Map();
   const unknown = new Set();
   if (dateStr !== etDateString(now)) return { origins, unknown };
@@ -552,7 +552,13 @@ async function loadTechDayOrigins(conn, dateStr, { technicianId = null, now = ne
     .modify((q) => (technicianId ? q.where('scheduled_services.technician_id', technicianId) : q))
     .select('scheduled_services.id', 'scheduled_services.technician_id', 'scheduled_services.route_order',
       'scheduled_services.check_out_time', 'scheduled_services.actual_end_time', 'scheduled_services.completed_at',
-      ...guardedCoordSelects(conn));
+      ...guardedCoordSelects(conn))
+    // Inside the write transaction the completed rows are LOCKED and stay
+    // locked through the route_order writes: the time-on-site correction
+    // endpoint takes only that row's lock, not the tech-day advisory lock, so
+    // an unlocked re-read could still be overtaken between check and commit
+    // (codex round 5 P1).
+    .modify((q) => (lock ? q.forUpdate('scheduled_services') : q));
   const byTech = new Map();
   for (const row of rows) {
     if (!byTech.has(row.technician_id)) byTech.set(row.technician_id, []);
@@ -593,7 +599,7 @@ async function loadTechDayOrigins(conn, dateStr, { technicianId = null, now = ne
  */
 async function assertTechDayOriginsFresh(trx, dateStr, techDayOrigins, { technicianId = null, now = new Date(), stale } = {}) {
   if (!techDayOrigins || (techDayOrigins.origins.size === 0 && techDayOrigins.unknown.size === 0)) return;
-  const fresh = await loadTechDayOrigins(trx, dateStr, { technicianId, now });
+  const fresh = await loadTechDayOrigins(trx, dateStr, { technicianId, now, lock: true });
   const same = (a, b) => (!a && !b)
     || Boolean(a && b && a.id === b.id && a.completionTime === b.completionTime
       && a.lat === b.lat && a.lng === b.lng);

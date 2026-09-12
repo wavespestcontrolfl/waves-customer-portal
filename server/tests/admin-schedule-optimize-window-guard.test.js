@@ -111,7 +111,8 @@ function trxTable() {
   // mutates a row inside the lockTechDays mock is mutating it in the same gap
   // the fence exists to catch.
   c.whereNotNull = () => c;
-  c.select = async () => {
+  c.forUpdate = () => c;
+  const rows = () => {
     // The completed-origin re-read inside the transaction (see
     // assertTechDayOriginsFresh) reads the same fixtures the pre-lock load did.
     if (filters.status === 'completed') {
@@ -121,6 +122,9 @@ function trxTable() {
     return (stopsByDate[filters.scheduled_date] || [])
       .filter((row) => !idsIn || idsIn.has(row.id));
   };
+  // Chainable AND thenable, as knex's builder is.
+  c.select = () => c;
+  c.then = (resolve, reject) => Promise.resolve(rows()).then(resolve, reject);
   return c;
 }
 
@@ -155,8 +159,12 @@ beforeEach(() => {
     c.where = (a, b) => { if (typeof a === 'object') Object.assign(filters, a); else filters[String(a).replace('scheduled_services.', '')] = b; return c; };
     c.whereNotNull = () => c;
     c.modify = (fn) => { fn(c); return c; };
-    c.select = async () => (completedByDate[filters.scheduled_date] || [])
-      .filter((r) => !filters.technician_id || r.technician_id === filters.technician_id);
+    c.forUpdate = () => c;
+    // knex's .select() returns the BUILDER (the loader chains .modify() after
+    // it and awaits the result), so the mock stays chainable and thenable.
+    c.select = () => c;
+    c.then = (resolve, reject) => Promise.resolve((completedByDate[filters.scheduled_date] || [])
+      .filter((r) => !filters.technician_id || r.technician_id === filters.technician_id)).then(resolve, reject);
     return c;
   });
   // dayStopsQuery returns a knex builder in production — the post-lock fence
