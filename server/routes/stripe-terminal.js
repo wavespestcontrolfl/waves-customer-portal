@@ -19,7 +19,7 @@ const {
   planCardPresentSurcharge,
   SURCHARGE_API_VERSION,
 } = require('../services/stripe-pricing');
-const { invoiceAmountDue } = require('../services/invoice-helpers');
+const { invoiceAmountDue, invoiceWithdrawnFromCustomer } = require('../services/invoice-helpers');
 const {
   assertNoInvoiceChargeReconciliationPending,
   parkInvoiceForSavedCardReconciliation,
@@ -175,7 +175,13 @@ router.post('/handoff', adminAuthenticate, async (req, res) => {
     // Third-party Bill-To: never mint an in-person collection handoff for a
     // payer-billed invoice — the tech must not collect the AP's invoice from the
     // service recipient. AR routes to the payer AP inbox.
-    if (invoice.payer_id) return res.status(400).json({ error: 'Invoice is billed to a third-party payer — do not collect in person' });
+    if (invoice.payer_id || invoiceWithdrawnFromCustomer(invoice)) {
+      // A WITHDRAWN combined-visit invoice keeps payer_id NULL and a
+      // collectible status — the Bill-To move is recorded only in its stamp
+      // (Codex #4311 r31 P1) — so a payer_id-only guard let a technician mint
+      // a card-present charge against debt the payer now owes.
+      return res.status(400).json({ error: 'Invoice is billed to a third-party payer — do not collect in person' });
+    }
 
     // Apply available account credit before pricing the handoff so the tech
     // collects amount due (total − applied credit), not the gross total — on this
@@ -489,7 +495,10 @@ router.post('/validate-handoff', async (req, res) => {
     // From here on the DB row is the authoritative source for invoice_id,
     // amount_cents, and tech_user_id. Stop reading from `claims` for those.
     const invoice = await db('invoices').where({ id: handoffRow.invoice_id }).first();
-    if (!invoice || ['paid', 'prepaid', 'processing', 'void', 'refunded'].includes(invoice.status)) {
+    // A Bill-To move committed between the mint and this validation is the
+    // same refusal as a status change (r31 P1): the stamp is the only record.
+    if (!invoice || invoiceWithdrawnFromCustomer(invoice)
+      || ['paid', 'prepaid', 'processing', 'void', 'refunded'].includes(invoice.status)) {
       auditTerminalHandoffValidate({
         tech_user_id: handoffRow.tech_user_id || null,
         invoice_id: handoffRow.invoice_id || null,
@@ -728,6 +737,12 @@ router.post('/payment-intent', terminalAuthenticate, async (req, res) => {
         code: 'invoice_status_changed',
       });
     }
+    if (invoiceWithdrawnFromCustomer(invoice)) {
+      return res.status(409).json({
+        error: 'Invoice is billed to a third-party payer — do not collect in person',
+        code: 'invoice_withdrawn_from_customer',
+      });
+    }
     const currentAmountCents = Math.round(invoiceAmountDue(invoice) * 100);
     if (currentAmountCents !== Number(handoff.amount_cents)) {
       return res.status(409).json({
@@ -794,6 +809,11 @@ router.post('/payment-intent', terminalAuthenticate, async (req, res) => {
       const locked = await trx('invoices').where({ id: invoice.id }).forUpdate().first();
       if (!locked || ['paid', 'prepaid', 'processing', 'void', 'refunded'].includes(locked.status)) {
         return { ok: false, status: locked ? locked.status : null };
+      }
+      // The withdrawal re-read UNDER THE LOCK, like every other money seam:
+      // a Bill-To assignment can commit while this transaction waits here.
+      if (invoiceWithdrawnFromCustomer(locked)) {
+        return { ok: false, withdrawn: true, status: locked.status };
       }
       // Amount agreement under the lock. Partial account credit can land between
       // the unlocked pre-create check and here WITHOUT flipping the invoice
@@ -880,6 +900,12 @@ router.post('/payment-intent', terminalAuthenticate, async (req, res) => {
       }
       if (bound.chargeFence) {
         return res.status(409).json({ ...bound.chargeFence, newHandoffRequired: true });
+      }
+      if (bound.withdrawn) {
+        return res.status(409).json({
+          error: 'Invoice is billed to a third-party payer — do not collect in person',
+          code: 'invoice_withdrawn_from_customer',
+        });
       }
       return res.status(409).json({
         error: bound.status ? `Invoice is ${bound.status}` : 'Invoice not found',

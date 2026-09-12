@@ -3287,6 +3287,46 @@ postgres('visit summary recipient recovery', () => {
     }
   });
 
+  test('a withdrawal pauses dunning and drops the invoice from the reminder sweep', async () => {
+    // The follow-up sequence and the legacy overdue reminder both text/email
+    // the homeowner a pay link, and both guard on payer_id — which a
+    // withdrawal deliberately leaves NULL.
+    const Packets = require('../services/visit-completion-packets');
+    const invoiceId = randomUUID();
+    const [payer] = await mockPg('payers').insert({ display_name: 'Fixture Property Management', ap_email: `${randomUUID()}@example.invalid`, active: true }).returning('id');
+    await mockPg('invoices').insert({ id: invoiceId, token: randomUUID().replace(/-/g, ''), invoice_number: `FIX-${invoiceId.slice(0, 8)}`,
+      customer_id: fixture.customerId, status: 'sent', total: 120, visit_completion_packet_id: fixture.packetId,
+      due_date: new Date(Date.now() - 30 * 86400000) });
+    await mockPg('invoice_followup_sequences').insert({ invoice_id: invoiceId, customer_id: fixture.customerId,
+      status: 'active', step_index: 0, next_touch_at: new Date() });
+    try {
+      await mockPg.transaction(async (trx) => {
+        await trx('customers').where({ id: fixture.customerId }).update({ payer_id: payer.id });
+        return Packets.withdrawPacketInvoicesForOwner(trx, { customerId: fixture.customerId });
+      });
+      const sequence = await mockPg('invoice_followup_sequences').where({ invoice_id: invoiceId }).first('status', 'next_touch_at');
+      expect(sequence).toMatchObject({ status: 'paused' });
+      expect(sequence.next_touch_at).toBeNull();
+      // …and the legacy overdue sweep's own predicate no longer matches it.
+      const overdue = await mockPg('invoices').where({ id: invoiceId })
+        .whereIn('status', ['sent', 'viewed', 'overdue'])
+        .whereNull('payer_id')
+        .where(function whereNotWithdrawn() {
+          this.whereNull('scheduled_send_error').orWhereNot('scheduled_send_error', 'like', 'payer_billed:%');
+        })
+        .first('id');
+      expect(overdue).toBeUndefined();
+    } finally {
+      await mockPg('invoice_followup_sequences').where({ invoice_id: invoiceId }).del();
+      await mockPg('customers').where({ id: fixture.customerId }).update({ payer_id: null });
+      await mockPg('service_visits').where({ id: fixture.visitId }).update({ billing_hold: false });
+      await mockPg('visit_completion_packets').where({ id: fixture.packetId }).update({ error: null });
+      await mockPg('dispatch_alerts').where({ type: 'visit_closeout_review' }).whereRaw("payload->>'packetId' = ?", [fixture.packetId]).del();
+      await mockPg('invoices').where({ id: invoiceId }).del();
+      await mockPg('payers').where({ id: payer.id }).del();
+    }
+  });
+
   test('a payer-to-payer handoff moves the office review to the payer that owes it now', async () => {
     // The stamp, the packet error and the open alert all name the AP account
     // the office must bill; a second payer taking the packet over has to move

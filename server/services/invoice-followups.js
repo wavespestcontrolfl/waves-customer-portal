@@ -26,6 +26,7 @@
  */
 
 const db = require('../models/db');
+const { invoiceWithdrawnFromCustomer } = require('./invoice-helpers');
 const logger = require('./logger');
 const { invoiceAmountDue } = require('./invoice-helpers');
 const smsTemplatesRouter = require('../routes/admin-sms-templates');
@@ -300,7 +301,12 @@ async function scheduleForInvoice(invoiceId) {
   // homeowner with the pay link, but a payer-billed invoice's AR rolls to the
   // payer's AP inbox — never chase the homeowner for it. Phase 1 has no payer
   // dunning sequence, so we simply don't arm follow-ups for payer invoices.
-  if (preview.payer_id) return null;
+  // The withdrawal stamp is the same signal in the other direction (Codex
+  // #4311 r31 P1): a combined-visit invoice whose Bill-To moved AFTER the
+  // homeowner already held its pay link keeps `payer_id` NULL and a
+  // collectible status, so a payer_id-only guard would arm dunning that
+  // chases the homeowner for debt the payer now owes.
+  if (preview.payer_id || invoiceWithdrawnFromCustomer(preview)) return null;
 
   // OWNERSHIP IS DERIVED UNDER THE INVOICE LOCK (r19 P1).
   //
@@ -327,7 +333,7 @@ async function scheduleForInvoice(invoiceId) {
     // Re-verify post-lock: an edit or payment that committed while we waited
     // can have made this invoice non-schedulable or payer-billed.
     if (!isSchedulableInvoice(invoice)) return null;
-    if (invoice.payer_id) return null;
+    if (invoice.payer_id || invoiceWithdrawnFromCustomer(invoice)) return null;
 
     // Existing-row check moved under the lock too: it and the INSERT must be
     // one atomic decision, or two concurrent arms race the unique(invoice_id).
@@ -514,10 +520,14 @@ async function runPending() {
     // payer invoices issued, or an older/manual sequence); exclude them here and
     // guard fireStep too.
     .whereNull('i.payer_id')
+    // …and the withdrawal stamp, which records exactly the same ownership
+    // move on a row whose payer_id stays NULL (Codex #4311 r31 P1).
+    .where((q) => q.whereNull('i.scheduled_send_error').orWhereNot('i.scheduled_send_error', 'like', 'payer_billed:%'))
     .select(
       's.*',
       'i.id as invoice_id', 'i.token', 'i.title', 'i.total', 'i.credit_applied', 'i.status as invoice_status',
-      'i.payer_id as invoice_payer_id', 'i.stripe_payment_intent_id as invoice_stripe_pi',
+      'i.payer_id as invoice_payer_id', 'i.scheduled_send_error as invoice_send_error',
+      'i.stripe_payment_intent_id as invoice_stripe_pi',
       'i.service_date', 'i.due_date', 'i.invoice_number',
       'i.sent_at as invoice_sent_at', 'i.sms_sent_at as invoice_sms_sent_at',
       'i.created_at as invoice_created_at',
@@ -765,11 +775,13 @@ async function fireTouch(row, { operatorInitiated = false } = {}) {
   // return) so a later re-arm can't fire a stale touch. Prefer the selected
   // invoice_payer_id; fall back to a lookup when the caller didn't select it.
   let payerId = row.invoice_payer_id;
-  if (payerId === undefined) {
-    const inv = await db('invoices').where({ id: row.invoice_id }).first('payer_id').catch(() => null);
-    payerId = inv?.payer_id ?? null;
+  let sendError = row.invoice_send_error;
+  if (payerId === undefined || sendError === undefined) {
+    const inv = await db('invoices').where({ id: row.invoice_id }).first('payer_id', 'scheduled_send_error').catch(() => null);
+    payerId = payerId === undefined ? (inv?.payer_id ?? null) : payerId;
+    sendError = sendError === undefined ? (inv?.scheduled_send_error ?? null) : sendError;
   }
-  if (payerId) {
+  if (payerId || invoiceWithdrawnFromCustomer({ scheduled_send_error: sendError })) {
     await db('invoice_followup_sequences').where({ id: row.id }).update({
       updated_at: db.fn.now(),
       status: 'paused',

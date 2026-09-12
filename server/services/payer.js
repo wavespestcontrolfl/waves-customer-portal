@@ -225,6 +225,21 @@ async function updatePayer(id, body) {
       }
       const current = await trx('payers').where({ id: pid }).forUpdate().first();
       if (!current) return { error: 'Payer not found', notFound: true };
+      // The reference set is RE-READ under the payer lock (Codex #4311 r31
+      // P2): a customer or job assigned to this payer between the prelock and
+      // the lock would be withdrawn below while its ownership rows were never
+      // prelocked — the same payer↔ownership inversion, one reference later.
+      // A grown set refuses rather than proceeding on a partial prelock; the
+      // caller retries and the new reference is prelocked from the start.
+      const referencesUnderLock = [...new Set([
+        ...await trx('customers').where({ payer_id: pid }).whereNull('deleted_at').pluck('id'),
+        ...await trx('scheduled_services').where({ payer_id: pid }).whereNotNull('customer_id').pluck('customer_id'),
+      ].map(String))].sort();
+      if (dbUpdates.active === true && current.active !== true
+        && referencesUnderLock.some((id) => !referencingCustomerIds.includes(id))) {
+        return { error: 'A Bill-To change landed while this payer was being activated — try again.',
+          conflict: true, code: 'payer_references_changed' };
+      }
       const activating = dbUpdates.active === true && current.active !== true;
       if (activating && await require('./visit-completion-packets').packetInvoiceSendInFlight({ payerId: pid }, trx)) {
         return { error: 'A combined-visit invoice for a customer or job billed to this payer is being sent; try again in a moment.',

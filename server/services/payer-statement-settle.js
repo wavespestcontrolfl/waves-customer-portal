@@ -223,6 +223,25 @@ async function enrollSettledPacketReviews(invoiceIds, { database = db, source = 
   }
   if (unrecorded.length) {
     logger.error(`[payer-statement-settle] ${unrecorded.length} settled packet invoice(s) have an UNRECORDED review enrollment — the packet recovery sweep owns them now`);
+    // A rail with no redelivery (the admin offline reconcile) would otherwise
+    // lose these silently (Codex #4311 r31 P1): nothing durable records that
+    // the ask is owed, so the office gets an alert it can act on. Deduped per
+    // invoice set; a failure to alert is logged, never thrown over money that
+    // has already moved.
+    try {
+      await require('./dispatch-alerts').createAlert({
+        type: 'visit_closeout_review',
+        severity: 'warn',
+        payload: {
+          reason: 'review_enrollment_unrecorded',
+          source,
+          invoiceIds: unrecorded,
+          detail: 'These settled invoices owe a review ask that could not be recorded — re-run the enrollment or ask manually.',
+        },
+      });
+    } catch (alertErr) {
+      logger.error(`[payer-statement-settle] could not raise the unrecorded-enrollment alert: ${alertErr.message}`);
+    }
   }
   return unrecorded;
 }

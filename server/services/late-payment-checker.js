@@ -180,6 +180,13 @@ const LatePaymentService = {
         // path (which texts/emails the customer a pay link). Payer dunning is
         // Phase 2.
         .whereNull('payer_id')
+        // A combined-visit invoice WITHDRAWN to a payer keeps payer_id NULL and
+        // a collectible status — the move is recorded only in the stamp (Codex
+        // #4311 r31 P1), so a payer_id-only filter would keep reminding the
+        // homeowner about debt the payer now owes.
+        .where(function () {
+          this.whereNull('scheduled_send_error').orWhereNot('scheduled_send_error', 'like', 'payer_billed:%');
+        })
         .where(function () {
           this.where('due_date', '<=', cutoff)
             .orWhere(function () {

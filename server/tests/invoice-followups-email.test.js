@@ -93,9 +93,11 @@ function followupRow(overrides = {}) {
     due_date: '2026-05-19',
     invoice_number: 'WPC-2026-1042',
     invoice_created_at: '2026-05-20T12:00:00.000Z',
-    // runPending() selects `i.payer_id as invoice_payer_id`; mirror it so
-    // fireStep's payer guard reads the row instead of an extra lookup.
+    // runPending() selects `i.payer_id as invoice_payer_id` and
+    // `i.scheduled_send_error as invoice_send_error`; mirror both so
+    // fireStep's Bill-To guard reads the row instead of an extra lookup.
     invoice_payer_id: null,
+    invoice_send_error: null,
     ...overrides,
   };
 }

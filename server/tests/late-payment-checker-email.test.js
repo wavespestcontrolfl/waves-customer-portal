@@ -48,6 +48,11 @@ function chain({ result = [], first } = {}) {
   q.whereIn = jest.fn(() => q);
   q.whereNull = jest.fn(() => q);
   q.whereRaw = jest.fn(() => q);
+  // The withdrawal-stamp exclusion (a payer-billed combined-visit invoice
+  // keeps payer_id NULL) uses these.
+  q.whereNot = jest.fn(() => q);
+  q.orWhereNot = jest.fn(() => q);
+  q.orWhereNull = jest.fn(() => q);
   q.andWhere = jest.fn(() => q);
   q.orWhere = jest.fn((arg) => {
     if (typeof arg === 'function') arg.call(q);

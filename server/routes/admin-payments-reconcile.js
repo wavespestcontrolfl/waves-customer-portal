@@ -451,6 +451,18 @@ router.post('/reconcile', requireAdmin, async (req, res, next) => {
         const outcome = await require('../services/review-request').enrollForPaidInvoice(settled, { source: 'payments_reconcile' });
         if (outcome && outcome.recorded === false) {
           logger.error(`[reconcile] invoice ${settled.invoice_number || invoiceId} settled with an UNRECORDED review enrollment — the packet recovery sweep owns it`);
+          // No redelivery owns this rail (Codex #4311 r31 P1): without a
+          // durable record the ask is simply lost, so the office is told.
+          await require('../services/dispatch-alerts').createAlert({
+            type: 'visit_closeout_review',
+            severity: 'warn',
+            payload: {
+              reason: 'review_enrollment_unrecorded',
+              source: 'payments_reconcile',
+              invoiceIds: [invoiceId],
+              detail: 'This settled invoice owes a review ask that could not be recorded — re-run the enrollment or ask manually.',
+            },
+          }).catch((alertErr) => logger.error(`[reconcile] could not raise the unrecorded-enrollment alert: ${alertErr.message}`));
         }
       }
     } catch (enrollErr) {

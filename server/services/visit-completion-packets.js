@@ -563,6 +563,14 @@ async function withdrawPacketInvoiceForPayer(trx, { packetId, invoiceId, visit, 
   // no stamp for the reconciliation to clear, so no hold or office review
   // is recorded either; the caller decides on the invoice as it is now.
   if (!stamped) return false;
+  // An ARMED dunning sequence chases the homeowner with the pay link, and
+  // its guards read payer_id — which a withdrawal deliberately leaves NULL
+  // (Codex #4311 r31 P1). Pause it here, inside the withdrawal, so the next
+  // touch cannot go out before the cron's own stamp-aware filter sees it. The
+  // release re-arms nothing: the reconciliation restores self-pay and the
+  // ordinary lifecycle arms the sequence again.
+  await trx('invoice_followup_sequences').where({ invoice_id: invoiceId }).whereIn('status', ['active', 'autopay_hold'])
+    .update({ status: 'paused', next_touch_at: null, paused_reason: 'payer_billed', updated_at: trx.fn.now() });
   // The hold is the withdrawal's own only when the visit was not already
   // held for another office-owned reason; the stamp records that
   // (`:hold`), and the reconciliation lifts only a hold it created.
