@@ -12,9 +12,9 @@ The September 8, 2026 foundation revision promotes the accepted Customer workspa
 
 ## Explicitly promoted admin scopes
 
-The following scopes use the full shared admin component foundation rather than the older redesign spec's token-only treatment:
+The following scopes use the full shared admin component foundation rather than the older redesign spec's token-only treatment. These entries are additive to previously accepted migrations; they are not an exhaustive route inventory:
 
-- `/admin/services`: catalog and service editors, Discounts tools, and the separate mobile service/category screens.
+- `/admin/service-library`: catalog and service editors, Discounts tools, and the separate mobile service/category screens.
 - `/admin/agents`: Triage & Decisions, Shadow Drafts (including voice profiles, sealed exams and pathology review), and Data Hygiene.
 - `/admin/lawn-assessments?tab=field`: the assessment hub's field panel, photo/scoring review and turf-profile editor.
 
