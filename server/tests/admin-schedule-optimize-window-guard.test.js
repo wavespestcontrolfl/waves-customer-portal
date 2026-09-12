@@ -1171,3 +1171,69 @@ test('model-derived legs do not satisfy the calibration requirement', async () =
   expect(live.status).toBe(200);
   expect(trxUpdates.map((u) => u.id)).toEqual(['A', 'B']);
 });
+
+// Codex round 5 P1: the commit-time recheck advances the CLOCK but must keep
+// the elapsed-window cutoff the decision was made under — otherwise a promise
+// lost while waiting for locks quietly becomes unconstrained and passes.
+test('a promise that expires during lock contention is not silently relaxed', async () => {
+  const { lockTechDays } = require('../services/scheduling/tech-day-lock');
+  process.env.GATE_ROUTE_REORDER_WINDOW_FIT = 'true';
+  process.env.GATE_DRIVE_TIME_CALIBRATION = 'true';
+  jest.useFakeTimers({ doNotFake: ['nextTick', 'setImmediate'] });
+  jest.setSystemTime(new Date('2026-09-20T17:00:00Z')); // 13:00 ET
+  try {
+    const TODAY = '2026-09-20';
+    // PROMISE is 13:00-14:00 (arrival deadline 15:00) and LONG is five hours
+    // of work: at 13:00 only promise-first is legal, which is what Google
+    // returns and what gets approved.
+    stopsByDate[TODAY] = [
+      stop('PROMISE', { window_start: '13:00', window_end: '14:00', estimated_duration_minutes: 30, lng: 2, route_order: 1 }),
+      stop('LONG', { estimated_duration_minutes: 300, lng: 1, route_order: 2 }),
+    ];
+    mockOptimizerOrder(['PROMISE', 'LONG']);
+    // Two hours vanish waiting for the lock. PROMISE's deadline (15:00) is
+    // now gone; judged at the LATER cutoff it would look unconstrained and
+    // the stale order would sail through.
+    lockTechDays.mockImplementation(async () => {
+      jest.setSystemTime(new Date('2026-09-20T19:30:00Z')); // 15:30 ET
+    });
+    const { status } = await optimizeRoute({ technicianId: 't1' });
+    expect(status).toBe(409);
+    expect(trxUpdates).toEqual([]);
+  } finally {
+    lockTechDays.mockImplementation(async () => {});
+    jest.useRealTimers();
+  }
+});
+
+// Codex round 5 P1: /optimize-route's order is terminal-filtered while the
+// board-wide resolver keeps those ids in place, so the commit-time recheck
+// has to compare the DRIVEN subsequence — otherwise every minute boundary
+// turns an unchanged, feasible route into a 409.
+test('a terminal stop does not make the commit-time recheck reject a good route', async () => {
+  const { lockTechDays } = require('../services/scheduling/tech-day-lock');
+  process.env.GATE_ROUTE_REORDER_WINDOW_FIT = 'true';
+  process.env.GATE_DRIVE_TIME_CALIBRATION = 'true';
+  jest.useFakeTimers({ doNotFake: ['nextTick', 'setImmediate'] });
+  jest.setSystemTime(new Date('2026-09-20T17:00:00Z')); // 13:00 ET
+  try {
+    const TODAY = '2026-09-20';
+    stopsByDate[TODAY] = [
+      stop('A', { lng: 1, route_order: 1 }),
+      stop('GHOST', { status: 'skipped', lng: 9, route_order: 2 }),
+      stop('B', { lng: 2, route_order: 3 }),
+    ];
+    mockOptimizerOrder(['A', 'GHOST', 'B']);
+    // One minute passes — enough to trigger the recheck, not enough to change
+    // anything real.
+    lockTechDays.mockImplementation(async () => {
+      jest.setSystemTime(new Date('2026-09-20T17:01:00Z'));
+    });
+    const { status } = await optimizeRoute({ technicianId: 't1' });
+    expect(status).toBe(200);
+    expect(trxUpdates.map((u) => u.id)).toEqual(['A', 'B']);
+  } finally {
+    lockTechDays.mockImplementation(async () => {});
+    jest.useRealTimers();
+  }
+});

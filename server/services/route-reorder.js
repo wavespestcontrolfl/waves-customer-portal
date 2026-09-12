@@ -481,7 +481,7 @@ function uncertifiableReason({ sourceStops, startMin, googleSource, legs, requir
  */
 function chooseWindowSafeOrder({
   RouteOptimizer, googleOrder: rawGoogleOrder, sourceStops: rawSourceStops, googleSource, legs: rawLegs = null,
-  startMin = null, origin = null, requireCalibratedModel = false,
+  startMin = null, origin = null, requireCalibratedModel = false, elapsedCutoffMin,
 }) {
   const { sourceStops, googleOrder, legs } = driveableInputs({ rawGoogleOrder, rawSourceStops, rawLegs, origin });
   // beforeMeters (current running order, same model as the nightly ledger's
@@ -501,7 +501,10 @@ function chooseWindowSafeOrder({
   // promise is not elapsed at 07:00 just because the model's day starts at
   // 08:00.
   const simStart = startMin == null ? 8 * 60 : Math.max(8 * 60, startMin);
-  const guardStops = relaxElapsedWindows(sourceStops, startMin);
+  // A promise that expires WHILE we wait for locks must not become
+  // unconstrained: a commit-time recheck advances the simulation clock but
+  // keeps the cutoff the decision was made under (codex round 5 P1).
+  const guardStops = relaxElapsedWindows(sourceStops, elapsedCutoffMin === undefined ? startMin : elapsedCutoffMin);
   // Every guard AND every figure below reads windows through this, never
   // through effectiveWindowRange directly: a stop whose promise already
   // elapsed was accepted under the relaxed range, so re-simulating it under
@@ -739,7 +742,7 @@ async function assertTechDayOriginsFresh(trx, dateStr, techDayOrigins, { technic
  * than half-writing another tech's fine segment.
  */
 function resolveWindowSafeOrderByTechDay({ RouteOptimizer, orderedStops, sourceStops, googleSource, legs = null,
-  startMin = null, techDayOrigins = null, requireCalibratedModel = true }) {
+  startMin = null, techDayOrigins = null, requireCalibratedModel = true, elapsedCutoffMin }) {
   const sourceById = new Map(sourceStops.map((s) => [s.id, s]));
   const byTech = new Map();
   for (const s of sourceStops) {
@@ -768,7 +771,7 @@ function resolveWindowSafeOrderByTechDay({ RouteOptimizer, orderedStops, sourceS
     const outcome = chooseWindowSafeOrder({
       RouteOptimizer, googleOrder: slice, sourceStops: techStops, googleSource, legs: legsAlign, startMin,
       origin: techDayOrigins ? techDayOrigins.origins.get(techId) || null : null,
-      requireCalibratedModel,
+      requireCalibratedModel, elapsedCutoffMin,
     });
     if (!outcome.orderedStops) return { refusal: { technicianId: techId, ...outcome } };
     resolvedByTech.set(techId, outcome);

@@ -13395,9 +13395,22 @@ function assertStillFeasibleNow({ dateStr, RouteOptimizer, result, services, sta
   if (recheckStart == null || recheckStart === startMin) return;
   const again = resolveWindowSafeOrderByTechDay({
     RouteOptimizer, orderedStops: result.orderedStops, sourceStops: services,
-    googleSource: result.source, legs: result.legs, startMin: recheckStart, techDayOrigins,
+    googleSource: result.source, legs: result.legs, startMin: recheckStart,
+    // The clock moves; the cutoff that decided which promises were already
+    // elapsed does not, or a promise lost while waiting for locks would
+    // simply become unconstrained and pass (codex round 5 P1).
+    elapsedCutoffMin: startMin, techDayOrigins,
   });
-  if (again.refusal || again.orderedIds.join(',') !== expected.join(',')) {
+  if (again.refusal) {
+    throw Object.assign(new Error('schedule changed while optimizing'), { code: 'STALE_OPTIMIZE' });
+  }
+  // Compare the DRIVEN subsequence on both sides: /optimize-route's expected
+  // ids are already terminal-filtered while the resolver keeps those ids in
+  // place, so an unfiltered comparison would differ on every minute boundary
+  // (codex round 5 P1).
+  const driveable = new Set(services.filter(driveableStop).map((svc) => svc.id));
+  const seen = (ids) => ids.filter((id) => driveable.has(id)).join(',');
+  if (seen(again.orderedIds) !== seen(expected)) {
     throw Object.assign(new Error('schedule changed while optimizing'), { code: 'STALE_OPTIMIZE' });
   }
 }

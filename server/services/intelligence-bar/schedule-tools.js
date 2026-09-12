@@ -316,14 +316,15 @@ async function applyApprovedRouteOrder({ date, approvedIds, services, lockKeys, 
   // change while confirmation waits for locks, and completed rows are outside
   // loadEligibleIds' own freshness check (codex #4430 r5 P1).
   let techDayOrigins = null;
+  const preLockNow = new Date();
   if (RouteOptimizer) {
     const approvedOrder = approvedIds.map((id) => byId.get(id));
     // From the truck's real position, exactly as the preview did — the day
     // has moved on since the card was drawn.
-    techDayOrigins = await loadTechDayOrigins(db, date);
+    techDayOrigins = await loadTechDayOrigins(db, date, { now: preLockNow });
     const revalidated = resolveWindowSafeOrderByTechDay({
       RouteOptimizer, orderedStops: approvedOrder, sourceStops: services,
-      googleSource: 'approved_card', startMin: inProgressStartMin(date),
+      googleSource: 'approved_card', startMin: inProgressStartMin(date, preLockNow),
       techDayOrigins,
     });
     if (revalidated.refusal) {
@@ -372,7 +373,9 @@ async function applyApprovedRouteOrder({ date, approvedIds, services, lockKeys, 
       if (recheckStart != null) {
         const again = resolveWindowSafeOrderByTechDay({
           RouteOptimizer, orderedStops: approvedIds.map((id) => byId.get(id)), sourceStops: services,
-          googleSource: 'approved_card', startMin: recheckStart, techDayOrigins: freshOrigins,
+          googleSource: 'approved_card', startMin: recheckStart,
+          // Clock advances, elapsed cutoff does not — see the admin recheck.
+          elapsedCutoffMin: inProgressStartMin(date, preLockNow), techDayOrigins: freshOrigins,
         });
         if (again.refusal || again.orderedIds.map(String).join(',') !== approvedIds.join(',')) {
           throw Object.assign(new Error('route no longer reachable'), { code: 'STALE_OPTIMIZE_SET' });
