@@ -370,6 +370,16 @@ function relaxElapsedWindows(sourceStops, startMin) {
   });
 }
 
+/** True only when the optimizer returned REAL road durations: a Google
+ *  source, a non-empty leg list, and a finite duration on every leg. The
+ *  nearest-neighbour and single_stop paths return model-derived legs, which
+ *  are exactly what the calibration gate exists to distrust. */
+function hasLiveLegs(googleSource, legs) {
+  return String(googleSource || '').startsWith('google')
+    && Array.isArray(legs) && legs.length > 0
+    && legs.every((leg) => Number.isFinite(leg?.durationMinutes));
+}
+
 /**
  * What the guard is actually allowed to reason about: the stops that will be
  * DRIVEN, and the travel numbers that describe them.
@@ -388,6 +398,34 @@ function driveableInputs({ rawGoogleOrder, rawSourceStops, rawLegs, origin }) {
   const googleOrder = rawGoogleOrder.filter((s) => liveIds.has(s.id));
   const aligned = googleOrder.length === rawGoogleOrder.length && !origin;
   return { sourceStops, googleOrder, legs: aligned ? rawLegs : null };
+}
+
+/** Which gate stands the window-fit repair down, or null when both are on.
+ *  WINDOW_FIT is reported first: it is the switch for the repair itself,
+ *  while CALIBRATION is the model the repair's safety case rests on. */
+function gateOffReason() {
+  if (!gateEnvValue('GATE_ROUTE_REORDER_WINDOW_FIT')) return 'WINDOW_FIT';
+  if (!gateEnvValue('GATE_DRIVE_TIME_CALIBRATION')) return 'CALIBRATION';
+  return null;
+}
+
+/**
+ * Reasons a day cannot be certified at all — checked before any order is
+ * accepted or repaired, because none of them are about the ORDER:
+ *  - a tech-day already being driven has a real truck position and unknown
+ *    remaining work, and every order here would renumber the live stop (the
+ *    same call arrival-route.js's own route check makes);
+ *  - an ungeocoded stop's travel counts as zero in both the simulation and
+ *    the distance model, so "feasible" is not knowable;
+ *  - a pass without LIVE road durations rests on the in-house model, which
+ *    the fallback's owner ruling requires to be calibrated.
+ */
+function uncertifiableReason({ sourceStops, startMin, googleSource, legs, requireCalibratedModel }) {
+  if (startMin != null && sourceStops.some(isLiveStop)) return 'LIVE_STOP_IN_PROGRESS';
+  if (sourceStops.some((s) => !(parseFloat(s.lat) && parseFloat(s.lng)))) return 'COORDLESS_STOPS';
+  if (requireCalibratedModel && !hasLiveLegs(googleSource, legs)
+    && !gateEnvValue('GATE_DRIVE_TIME_CALIBRATION')) return 'MODEL_UNCALIBRATED';
+  return null;
 }
 
 /**
@@ -474,37 +512,26 @@ function chooseWindowSafeOrder({
   const relaxedById = new Map(guardStops.map((s) => [s.id, s]));
   const sourceById = new Map(sourceStops.map((s) => [s.id, s]));
   const guardRange = (s) => effectiveWindowRange(relaxedById.get(s.id) || s);
+  const relaxed = (order) => order.map((stop) => relaxedById.get(stop.id) || stop);
   const chronoConflict = violatesWindowChronology(googleOrder, guardStops);
   const fitConflict = !chronoConflict && violatesWindowFeasibility(RouteOptimizer, googleOrder, guardStops, legs, simStart, from);
   const conflict = chronoConflict ? 'WINDOW_ORDER_CONFLICT' : (fitConflict ? 'WINDOW_FIT_CONFLICT' : null);
-  // A pass certified WITHOUT Google's real legs rests entirely on the
+  // A pass certified WITHOUT live road durations rests entirely on the
   // in-house model, which the fallback's own ruling requires to be
   // calibrated: the legacy 30 mph constant is documented as underestimating,
   // so an uncalibrated "legal" can be a promise the truck cannot keep (codex
-  // round 5 P1). Legs get discarded for a multi-tech slice, a filtered
-  // sequence, or a moved origin — exactly the cases the admin and
-  // Intelligence Bar buttons hit. Those callers ask for this; the nightly
-  // pass keeps its own long-standing contract (it only ever SKIPS a day).
-  if (requireCalibratedModel && !legs && !gateEnvValue('GATE_DRIVE_TIME_CALIBRATION')) {
+  // round 5 P1). "Live" means Google actually measured them — the
+  // nearest-neighbour fallback and single_stop return MODEL legs, and an
+  // empty array is truthy — so provenance is checked, not mere presence.
+  // These callers ask for this; the nightly pass keeps its own long-standing
+  // contract, since it only ever SKIPS a day.
+  if (requireCalibratedModel && !hasLiveLegs(googleSource, legs)
+    && !gateEnvValue('GATE_DRIVE_TIME_CALIBRATION')) {
     return { orderedStops: null, reason: 'MODEL_UNCALIBRATED', conflict, beforeMeters };
   }
-  // A tech-day already being driven cannot be simulated from HQ at the day
-  // open: the truck has a real position, the live stop's remaining work is
-  // unknown, and every order here would renumber it. Refuse rather than write
-  // an order computed from a fiction — the same call the staff picker's
-  // route check makes (codex round 3 P1). Only for today: startMin is null on
-  // every other date, and `status` need not even be selected there.
-  if (startMin != null && sourceStops.some(isLiveStop)) {
-    return { orderedStops: null, reason: 'LIVE_STOP_IN_PROGRESS', conflict, beforeMeters };
-  }
-  // BEFORE the legal-order return, not just before a repair: both simulations
-  // count an ungeocoded stop's travel as ZERO, so a chronologically fine order
-  // containing one can pass the feasibility guard while the unknown trip makes
-  // a later promise unreachable (codex round 3 P1). Whatever the guards said,
-  // a day we cannot simulate is a day we do not rewrite.
-  if (sourceStops.some((s) => !(parseFloat(s.lat) && parseFloat(s.lng)))) {
-    return { orderedStops: null, reason: 'COORDLESS_STOPS', conflict, beforeMeters };
-  }
+  // Reasons this day cannot be certified AT ALL, whatever the order says.
+  const blocked = uncertifiableReason({ sourceStops, startMin, googleSource, legs, requireCalibratedModel });
+  if (blocked) return { orderedStops: null, reason: blocked, conflict, beforeMeters };
   if (!chronoConflict && !fitConflict) {
     // Google's order is legal — still score it under the shared model (NOT
     // Google's own road-routed numbers) so a caller that has to AGGREGATE
@@ -516,8 +543,7 @@ function chooseWindowSafeOrder({
     // identity off the stop objects it is handed, so simulating the originals
     // makes an overdue bundle look like separate visits, and a null sim is
     // reported as zero drive time for that whole truck (codex round 5 P1).
-    const sim = simulateArrivalRoute(RouteOptimizer, guardRange,
-      googleOrder.map((stop) => relaxedById.get(stop.id) || stop), { startMin: simStart, origin: from });
+    const sim = simulateArrivalRoute(RouteOptimizer, guardRange, relaxed(googleOrder), { startMin: simStart, origin: from });
     return {
       orderedStops: googleOrder,
       source: googleSource,
@@ -529,13 +555,9 @@ function chooseWindowSafeOrder({
       afterSeconds: sim ? Math.round(sim.travelMin * 60) : null,
     };
   }
-  const windowFitFlagOn = gateEnvValue('GATE_ROUTE_REORDER_WINDOW_FIT');
-  const calibrationFlagOn = gateEnvValue('GATE_DRIVE_TIME_CALIBRATION');
-  if (!windowFitFlagOn || !calibrationFlagOn) {
-    return {
-      orderedStops: null, reason: 'WINDOW_FIT_GATE_OFF', conflict, beforeMeters,
-      gateOff: !windowFitFlagOn ? 'WINDOW_FIT' : 'CALIBRATION',
-    };
+  const gatesOff = gateOffReason();
+  if (gatesOff) {
+    return { orderedStops: null, reason: 'WINDOW_FIT_GATE_OFF', conflict, beforeMeters, gateOff: gatesOff };
   }
   const fallback = computeWindowFitOrder(RouteOptimizer, currentOrder(guardStops), {
     effectiveWindowStart, effectiveWindowRange: guardRange, violatesWindowChronology, violatesWindowFeasibility, modelDistanceMeters,

@@ -195,7 +195,10 @@ const mockOptimizerOrder = (ids, extra = {}) => {
     totalDistanceMeters: 12345,
     totalDurationSeconds: 600,
     unoptimizedDistanceMeters: 99999,
-    legs: [],
+    // Google returns a real duration per leg; the guard only lets live road
+    // durations stand in for the calibrated model, so the default fixture
+    // supplies them (zero minutes, matching this harness's travel model).
+    legs: ids.map(() => ({ durationMinutes: 0 })),
     source: 'google_routes_api',
     ...extra,
   }));
@@ -1139,4 +1142,32 @@ test("today's order is re-checked at the current minute under the write locks", 
     lockTechDays.mockImplementation(async () => {});
     jest.useRealTimers();
   }
+});
+
+// Codex round 5 P1: presence of a `legs` array does not mean Google measured
+// it — the nearest-neighbour fallback and single_stop return MODEL legs, and
+// an empty array is truthy. Only live road durations may stand in for the
+// calibrated model.
+test('model-derived legs do not satisfy the calibration requirement', async () => {
+  process.env.GATE_ROUTE_REORDER_WINDOW_FIT = 'true';
+  delete process.env.GATE_DRIVE_TIME_CALIBRATION;
+  stopsByDate[DATE] = [stop('A', { lng: 1, route_order: 1 }), stop('B', { lng: 2, route_order: 2 })];
+
+  // Nearest-neighbour fallback: legs look real, but the optimizer modelled them.
+  mockOptimizerOrder(['A', 'B'], { source: 'nearest_neighbor' });
+  const modelled = await optimizeRoute({ technicianId: 't1', date: DATE });
+  expect(modelled.status).toBe(409);
+  expect(modelled.body.reason).toBe('MODEL_UNCALIBRATED');
+
+  // An EMPTY leg list from Google is not live data either.
+  mockOptimizerOrder(['A', 'B'], { legs: [] });
+  const empty = await optimizeRoute({ technicianId: 't1', date: DATE });
+  expect(empty.status).toBe(409);
+  expect(empty.body.reason).toBe('MODEL_UNCALIBRATED');
+
+  // Real Google durations: the day is certified without the gate.
+  mockOptimizerOrder(['A', 'B']);
+  const live = await optimizeRoute({ technicianId: 't1', date: DATE });
+  expect(live.status).toBe(200);
+  expect(trxUpdates.map((u) => u.id)).toEqual(['A', 'B']);
 });

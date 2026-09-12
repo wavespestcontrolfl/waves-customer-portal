@@ -361,9 +361,23 @@ async function applyApprovedRouteOrder({ date, approvedIds, services, lockKeys, 
         throw Object.assign(new Error('guard inputs changed'), { code: 'STALE_OPTIMIZE_SET' });
       }
       // The completed rows the origin came from are outside that set.
-      await assertTechDayOriginsFresh(trx, date, techDayOrigins, {
+      const freshOrigins = await assertTechDayOriginsFresh(trx, date, techDayOrigins, {
         stale: () => Object.assign(new Error('completed-stop origin changed'), { code: 'STALE_OPTIMIZE_SET' }),
       });
+      // And time has passed while this waited for locks: re-run today's
+      // decision at the CURRENT minute and refuse if the approved order is no
+      // longer the one it yields (codex #4430 r5 P1, as both admin endpoints
+      // already do).
+      const recheckStart = RouteOptimizer ? inProgressStartMin(date) : null;
+      if (recheckStart != null) {
+        const again = resolveWindowSafeOrderByTechDay({
+          RouteOptimizer, orderedStops: approvedIds.map((id) => byId.get(id)), sourceStops: services,
+          googleSource: 'approved_card', startMin: recheckStart, techDayOrigins: freshOrigins,
+        });
+        if (again.refusal || again.orderedIds.map(String).join(',') !== approvedIds.join(',')) {
+          throw Object.assign(new Error('route no longer reachable'), { code: 'STALE_OPTIMIZE_SET' });
+        }
+      }
       for (let i = 0; i < approvedIds.length; i++) {
         const expectTech = expectTechFor(byId.get(approvedIds[i])) || null;
         const updated = await trx('scheduled_services')
