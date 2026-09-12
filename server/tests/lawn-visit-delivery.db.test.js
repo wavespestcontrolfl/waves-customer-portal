@@ -343,6 +343,25 @@ const deferred = () => { let resolve; const promise = new Promise((r) => { resol
     expect(new Set(sweptOver)).toEqual(new Set([...poison, transient.id]));
   });
 
+  test('a run with no confirmation snapshot stays owed instead of completing without calibration', async () => {
+    const assessment = await seed();
+    await db.knex('lawn_assessment_runs').where({ assessment_id: assessment.id })
+      .update({ reconciliation: JSON.stringify({}) });
+    const deps = dependencies();
+    await expect(deliver(assessment.id, deps)).rejects.toMatchObject({ code: 'LAWN_DELIVERY_STEP_INCOMPLETE' });
+    expect(deps.LawnIntel.recordTechCalibration).not.toHaveBeenCalled();
+    // Completing here would silently discard the technician's corrections.
+    expect((await stored(assessment.id)).pipeline_completed_at).toBeNull();
+  });
+
+  test('a snapshot that says the visit was not calibration-eligible owes nothing', async () => {
+    const assessment = await seed({ calibration: false });
+    const deps = dependencies();
+    expect(await deliver(assessment.id, deps)).toMatchObject({ gaps: [] });
+    expect(deps.LawnIntel.recordTechCalibration).not.toHaveBeenCalled();
+    expect((await stored(assessment.id)).pipeline_completed_at).toBeInstanceOf(Date);
+  });
+
   test('an ungated environment counts recovery candidates and sends nothing', async () => {
     await db.knex('lawn_assessment_runs').update({ pipeline_completed_at: db.knex.fn.now() });
     const stuck = await seed();

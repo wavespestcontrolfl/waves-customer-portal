@@ -81,6 +81,9 @@ async function deliverConfirmedAssessment({ assessmentId }, deps = {}) {
     await attachWeatherOnce((await runs.deliveryState(assessmentId, knex)).assessment);
     const actions = [
       ['calibration', async (state) => {
+        // No snapshot, no recoverable comparison: stay owed rather than complete
+        // a run that quietly dropped the technician's corrections.
+        if (!state.calibration) throw stepIncomplete('calibration');
         const { aiScores, finalScores, technicianId } = state.calibration;
         await LawnIntel.recordTechCalibration(assessmentId, aiScores, finalScores, { knex, strict: true, technicianId });
       }],

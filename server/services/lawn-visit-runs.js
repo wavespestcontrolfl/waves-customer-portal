@@ -325,6 +325,15 @@ function calibrationForRun(assessment, run) {
   return { aiScores: snapshot.ai_scores, finalScores: snapshot.final_scores, technicianId };
 }
 
+// A confirmation snapshot is the only record of what the technician changed, so
+// a run without one cannot prove its calibration either way. Completing such a
+// run would silently discard the AI-versus-technician comparison; an absent
+// snapshot is therefore an OWED step, distinct from a snapshot that says the
+// visit was not calibration-eligible, which owes nothing.
+function calibrationEvidenceMissing(run) {
+  return !parseObject(run?.reconciliation)?.confirmation;
+}
+
 function completedRecommendations(value) {
   const parsed = parseObject(value);
   return !!parsed && ((typeof parsed.summary === 'string' && parsed.summary.trim().length > 0)
@@ -339,7 +348,8 @@ async function deliveryState(assessmentId, knex) {
   if (!assessment?.confirmed_by_tech || !run) return { assessment, run, gaps: ['assessment'], calibration: null };
   const calibration = calibrationForRun(assessment, run);
   const gaps = [];
-  if (calibration && !(await knex('tech_calibration').where({ assessment_id: assessmentId }).first('id'))) gaps.push('calibration');
+  const calibrationRecorded = await knex('tech_calibration').where({ assessment_id: assessmentId }).first('id');
+  if (!calibrationRecorded && (calibration || calibrationEvidenceMissing(run))) gaps.push('calibration');
   if (!completedRecommendations(assessment.recommendations)) gaps.push('recommendations');
   if (!run.pipeline_health_completed_at) gaps.push('health');
   if (!assessment.service_id && !assessment.notification_sent) gaps.push('notification');
