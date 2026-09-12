@@ -1064,7 +1064,7 @@ async function outOfBandPrepaidCreditApplied(invoiceId, scheduledServiceId) {
 async function visitInvoiceRefusalUnderClaim(claimedRow, claimedFromStatus) {
   if (!claimedRow?.scheduled_service_id) return null;
   if (zeroDueVisitInvoice({ ...claimedRow, status: claimedFromStatus })) return { kind: "zero_due" };
-  const visit = await db("scheduled_services").where({ id: claimedRow.scheduled_service_id }).first("id", "status", "prepaid_amount");
+  const visit = await db("scheduled_services").where({ id: claimedRow.scheduled_service_id }).first("id", "status", "customer_id", "service_type", "prepaid_amount", "prepaid_method", "annual_prepay_term_id");
   const visitStatus = String(visit?.status || "").trim().toLowerCase();
   const { VISIT_NEVER_RAN_STATUSES, invoiceAmountDue } = require("./invoice-helpers");
   if (VISIT_NEVER_RAN_STATUSES.includes(visitStatus)) return { kind: "visit_never_ran", visitStatus };
@@ -1098,11 +1098,45 @@ async function visitInvoiceRefusalUnderClaim(claimedRow, claimedFromStatus) {
   // applyPrepaidCreditToInvoice) and reduces the balance due — at which
   // point the credited-payments-row marker below flips this open and a
   // send proceeds for the genuinely remaining amount.
-  if (visit && Number(visit.prepaid_amount) > 0) {
-    const dueCents = Math.round(invoiceAmountDue(claimedRow) * 100);
-    if (dueCents > 0) {
-      const credited = await outOfBandPrepaidCreditApplied(claimedRow.id, claimedRow.scheduled_service_id);
-      if (!credited) return { kind: "visit_prepaid_covered" };
+  //
+  // Round-19's widening (above) was itself over-broad (Codex P1 #4131,
+  // pre-push audit): it keyed only on `prepaid_amount > 0`, which is also
+  // true for two shapes the office invoice-CREATION path deliberately
+  // never refuses on (services/visit-prepaid-coverage.js
+  // prepaidRefusesOfficeInvoice) — neither of them a not-yet-reconciled
+  // cash/Zelle payment against THIS invoice, so this send-time backstop
+  // must not treat them as one either:
+  //   - a PAYER-billed visit: the homeowner's own prepaid_amount says
+  //     nothing about the payer's AP invoice, which is what this claim is
+  //     sending — mirrors prepaidRefusesOfficeInvoice's `payerBilled`
+  //     exemption exactly.
+  //   - an annual-prepay stamp (`prepaid_method ===
+  //     ANNUAL_PREPAY_PREPAID_METHOD`): governed entirely by
+  //     annualPrepayCoversVisit on the create path, not by this
+  //     out-of-band payments-row marker — an annual stamp never writes a
+  //     `scheduled_service_prepaid` payments row, so `outOfBandPrepaidCreditApplied`
+  //     could never see it as "reconciled" and a stale (or even current)
+  //     stamp would refuse every send forever. Reuse the create path's own
+  //     classification (prepaidRefusesOfficeInvoice) rather than inventing
+  //     a parallel annual rule here: a stamp that genuinely still covers
+  //     the visit refuses like the create path does; a stale one refuses
+  //     nothing, whatever its recorded amount says.
+  if (visit && !claimedRow.payer_id && Number(visit.prepaid_amount) > 0) {
+    const { ANNUAL_PREPAY_PREPAID_METHOD } = require("./annual-prepay-renewals");
+    if (visit.prepaid_method === ANNUAL_PREPAY_PREPAID_METHOD) {
+      const { prepaidRefusesOfficeInvoice } = require("./visit-prepaid-coverage");
+      // Reuses the create path's own STRICT posture unchanged: an
+      // unverifiable stamp throws, which the caller here already treats as
+      // "give the claim back" (reverifyClaimedVisitInvoice's lookup-failure
+      // branch) — the same fail-closed direction as create's "don't offer
+      // it", so no separate strict handling is needed here.
+      if (await prepaidRefusesOfficeInvoice(visit, { payerBilled: false })) return { kind: "visit_prepaid_covered" };
+    } else {
+      const dueCents = Math.round(invoiceAmountDue(claimedRow) * 100);
+      if (dueCents > 0) {
+        const credited = await outOfBandPrepaidCreditApplied(claimedRow.id, claimedRow.scheduled_service_id);
+        if (!credited) return { kind: "visit_prepaid_covered" };
+      }
     }
   }
   return null;
@@ -1265,7 +1299,17 @@ async function claimInvoiceForSend(invoiceId, { allowClaimed = false, firstDeliv
 
   if (allowClaimed) {
     if (!SEND_FINALIZABLE_STATUSES.includes(current.status)) {
-      throw invoiceNotSendableError(current);
+      const e = invoiceNotSendableError(current);
+      // Pre-push audit P1 (#4131 finding 2): every exit in this whole
+      // `if (allowClaimed)` branch runs BEFORE any provider is ever
+      // contacted — it never touches the invoice row (see the comment
+      // below), so a caller catching this knows for certain nothing was
+      // sent and it is safe to retry. processScheduledSends' catch reads
+      // this flag to decide retry vs. review-hold; every other throw
+      // reaching it (in particular a post-delivery finalize failure) is
+      // left unmarked on purpose.
+      e.deliveryNeverAttempted = true;
+      throw e;
     }
     // A preclaimed row (processScheduledSends flips 'scheduled' → 'sending'
     // itself, then calls in here with allowClaimed:true) still needs the
@@ -1283,7 +1327,14 @@ async function claimInvoiceForSend(invoiceId, { allowClaimed = false, firstDeliv
     // would invalidate the caller's claim token, so its own restore after
     // the throw below would match zero rows and strand the row under
     // 'sending'). Only the consumed queue rows, if any, are restored.
-    const consumedQueuedSendRows = await reconcileQueuedSendUnderClaim(invoiceId, current.status, adoptsQueuedInvoiceSend);
+    let consumedQueuedSendRows;
+    try {
+      consumedQueuedSendRows = await reconcileQueuedSendUnderClaim(invoiceId, current.status, adoptsQueuedInvoiceSend);
+    } catch (err) {
+      // Same guarantee as above — this whole branch is pre-delivery.
+      err.deliveryNeverAttempted = true;
+      throw err;
+    }
     return { invoice: current, previousStatus: current.status, claimed: false, consumedQueuedSendRows };
   }
 
@@ -4130,13 +4181,44 @@ const InvoiceService = {
         // allowClaimed branch (Codex round 14 P1 #4131) can now refuse a
         // preclaimed row outright (a live queue this send does not own —
         // e.g. a completion-deferred text) instead of only ever
-        // succeeding or returning an ok:false result. Synthesize the same
-        // failure shape sendViaSMSAndEmail itself returns on an ordinary
-        // send failure so the existing deferred/failed handling below runs
-        // unchanged, and one row's refusal never aborts the rest of this
-        // batch. No credit was ever applied — the throw happens before
-        // sendViaSMSAndEmail's own credit-apply step runs.
-        result = { ok: false, sms: { error: err.message, code: err.code }, email: { error: null }, creditApplied: 0 };
+        // succeeding or returning an ok:false result. That refusal is
+        // marked `deliveryNeverAttempted` right at its throw site — it is
+        // the ONE exit here verified to run before any provider contact,
+        // exactly where processScheduledSends' own preclaim left the row
+        // (claimInvoiceForSend's allowClaimed branch never touches the
+        // invoice row itself) — so synthesizing the same failure shape
+        // sendViaSMSAndEmail returns on an ordinary send failure and
+        // letting the existing deferred/failed handling below retry it is
+        // safe: no credit was ever applied and nothing was sent.
+        //
+        // Pre-push audit P1 (#4131 finding 2): every OTHER throw reaching
+        // here — sendViaSMSAndEmail's own post-delivery finalize UPDATE
+        // throwing after the email (and/or SMS) already reached a
+        // provider (round-17 P1, invoice-send-adoption-restore.test.js),
+        // or the invoice-issued closeout call right after it, or any
+        // future throw between the claim and the finalize — used to hit
+        // this same synthesis and get restored to 'scheduled' with the
+        // attempt counter bumped, so the NEXT tick emailed/texted the
+        // customer the same invoice again: a delivered attempt was
+        // silently converted into an undelivered one. DB state cannot
+        // distinguish "delivered, then the bookkeeping update failed"
+        // from "crashed before delivery" once we're past the verified
+        // pre-delivery checks, so anything unmarked is ambiguous and must
+        // be held for operator review exactly like the stale-claim
+        // recovery at the top of this function, never auto-resent.
+        if (err.deliveryNeverAttempted) {
+          result = { ok: false, sms: { error: err.message, code: err.code }, email: { error: null }, creditApplied: 0 };
+        } else {
+          logger.error(`[invoice] Scheduled send for ${inv.invoice_number} threw past its pre-delivery checks — delivery unverified, parking for review instead of retrying: ${err.message}`);
+          await restoreClaimedInvoice({
+            status: "scheduled",
+            scheduled_send_at: null,
+            scheduled_send_error: `${STALE_CLAIM_REVIEW_HOLD_PREFIX} — ${err.message}`,
+            updated_at: new Date(),
+          }, "review-hold");
+          failed += 1;
+          continue;
+        }
       }
       if (result.ok) {
         sent += 1;

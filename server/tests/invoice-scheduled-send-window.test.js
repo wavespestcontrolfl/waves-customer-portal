@@ -442,6 +442,11 @@ describe('processScheduledSends send-window handling', () => {
       .mockReturnValueOnce(failUpdate);
     const thrown = new Error('Invoice send already in progress — a text carrying this pay link is queued for the send window');
     thrown.code = 'queued_pay_link';
+    // Set by claimInvoiceForSend's allowClaimed branch itself (pre-push
+    // audit P1 #4131 finding 2) — every exit in that branch runs BEFORE any
+    // provider is contacted, so this is the ONE marker that tells
+    // processScheduledSends' catch it is safe to retry.
+    thrown.deliveryNeverAttempted = true;
     sendSpy.mockRejectedValue(thrown);
 
     const result = await InvoiceService.processScheduledSends();
@@ -450,6 +455,55 @@ describe('processScheduledSends send-window handling', () => {
     const updateArgs = failUpdate.update.mock.calls[0][0];
     expect(updateArgs.scheduled_send_attempts).toBe(3);
     expect(updateArgs.scheduled_send_error).toContain('queued for the send window');
+  });
+
+  // Pre-push audit P1 (#4131 finding 2): a throw reaching this catch WITHOUT
+  // the deliveryNeverAttempted marker — sendViaSMSAndEmail's own post-
+  // delivery finalize UPDATE can throw AFTER the email (and/or SMS) already
+  // reached a provider (round-17 P1, invoice-send-adoption-restore.test.js)
+  // — used to hit the exact same synthesis as the queued_pay_link refusal
+  // above and get restored to 'scheduled' with the attempt counter bumped,
+  // so the NEXT tick emailed/texted the customer the SAME invoice again. A
+  // delivered (or merely ambiguous) failure must instead be parked under
+  // the same review hold the stale-claim recovery uses — never retried.
+  test('sendViaSMSAndEmail throwing WITHOUT deliveryNeverAttempted (a post-delivery finalize failure, or any other unverified throw) parks the row for review instead of retrying it', async () => {
+    isWithinSendWindowET.mockReturnValue(true);
+    const staleRecovery = chain();
+    const dueQuery = chain({ rows: [dueRow] });
+    const claim = chain({ returning: [{ id: 'inv-1', scheduled_request_review: false, scheduled_review_delay_minutes: null }] });
+    const holdUpdate = chain();
+    db
+      .mockReturnValueOnce(staleRecovery)
+      .mockReturnValueOnce(dueQuery)
+      .mockReturnValueOnce(claim)
+      .mockReturnValueOnce(holdUpdate);
+    const finalizeErr = new Error('synthetic finalize DB failure (post-provider-accept)');
+    sendSpy.mockRejectedValue(finalizeErr);
+
+    const result = await InvoiceService.processScheduledSends();
+
+    expect(result).toEqual({ sent: 0, failed: 1, deferred: 0 });
+    const updateArgs = holdUpdate.update.mock.calls[0][0];
+    // Parked exactly like the stale-claim recovery block: back to
+    // 'scheduled' but with scheduled_send_at cleared (out of the due
+    // query) and NO attempt burned — this is a hold, not a retry.
+    expect(updateArgs.status).toBe('scheduled');
+    expect(updateArgs.scheduled_send_at).toBeNull();
+    expect(updateArgs.scheduled_send_attempts).toBeUndefined();
+    expect(updateArgs.scheduled_send_error).toMatch(/^Recovered from stale sending claim/);
+    expect(updateArgs.scheduled_send_error).toContain('synthetic finalize DB failure');
+
+    // Next tick: with scheduled_send_at cleared, the real due query's
+    // whereNotNull('scheduled_send_at') excludes this row — simulate that
+    // by returning nothing due, and confirm sendViaSMSAndEmail is never
+    // called on it again. The customer never gets a duplicate email/SMS.
+    sendSpy.mockClear();
+    const staleRecovery2 = chain();
+    const dueQueryNextTick = chain({ rows: [] });
+    db.mockReturnValueOnce(staleRecovery2).mockReturnValueOnce(dueQueryNextTick);
+    const secondResult = await InvoiceService.processScheduledSends();
+    expect(secondResult).toEqual({ sent: 0, failed: 0, deferred: 0 });
+    expect(sendSpy).not.toHaveBeenCalled();
   });
 
   // Codex round 16 P1 #4131: the generic failure branch's restore used to be

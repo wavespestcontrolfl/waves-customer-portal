@@ -42,6 +42,15 @@ jest.mock('../models/db', () => {
   return db;
 });
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
+// Real prepaidRefusesOfficeInvoice (services/visit-prepaid-coverage.js) runs
+// unmocked below — it's the classification the send-guard fix reuses. Only
+// its own deep dependency (the real coverage query against annual_prepay_terms)
+// is stubbed, so a "stale annual stamp" is simulated by resolving `false`
+// (not covering) rather than standing up a real annual-prepay-terms fixture.
+jest.mock('../services/annual-prepay-renewals', () => ({
+  ...jest.requireActual('../services/annual-prepay-renewals'),
+  annualPrepayCoversVisit: jest.fn(async () => false),
+}));
 
 describe('the shared send claim (claimInvoiceForSend) under interleaving', () => {
   test('the first deliverer wins the claim; a second is refused; releasing restores the row', async () => {
@@ -250,7 +259,7 @@ describe('the shared send claim (claimInvoiceForSend) under interleaving', () =>
           catch: jest.fn(async () => { db.__state.status = values.status; }),
         }));
       }
-      if (table === 'scheduled_services') q.first = jest.fn(async () => ({ id: 'svc-1', status: 'confirmed', prepaid_amount: visitPrepaidAmount }));
+      if (table === 'scheduled_services') q.first = jest.fn(async () => ({ id: 'svc-1', status: 'confirmed', prepaid_amount: visitPrepaidAmount, prepaid_method: 'cash' }));
       if (table === 'payments') q.first = jest.fn(async () => (creditApplied ? { id: 'pmt-1' } : null));
       return q;
     });
@@ -294,6 +303,92 @@ describe('the shared send claim (claimInvoiceForSend) under interleaving', () =>
       db.__state.status = 'draft';
     } finally {
       db.mockImplementation(original);
+    }
+  });
+
+  test('the CLAIM does NOT refuse a PAYER-billed visit on the homeowner\'s own recorded prepayment — the payer\'s AP invoice is what this claim sends, mirroring prepaidRefusesOfficeInvoice\'s payerBilled exemption on the create path (pre-push audit P1 #4131 finding 2, fixing round-19\'s over-broad widening)', async () => {
+    const db = require('../models/db');
+    const InvoiceService = require('../services/invoice');
+    const { claimInvoiceForSend } = InvoiceService;
+    const original = db.getMockImplementation();
+    // The homeowner's own scheduled_services.prepaid_amount is positive —
+    // exactly the shape round 19 started refusing on ANY positive amount —
+    // but this invoice is billed to a third-party PAYER (payer_id set), so
+    // it must send regardless: the homeowner's cash says nothing about
+    // whether the payer's AP invoice is settled.
+    const readRow = { id: 'inv-1', status: 'draft', total: 117, credit_applied: 0, scheduled_service_id: 'svc-1', service_record_id: null, payer_id: 'payer-1' };
+    db.mockImplementation((table) => {
+      const q = original(table);
+      if (table === 'invoices') {
+        q.first = jest.fn(async () => ({ ...readRow, status: db.__state.status }));
+        q.update = jest.fn((values) => ({
+          returning: jest.fn(async () => {
+            if (db.__state.status !== q.where.mock.calls[q.where.mock.calls.length - 1][0].status) return [];
+            db.__state.status = values.status;
+            return [{ ...readRow, status: values.status }];
+          }),
+          catch: jest.fn(async () => { db.__state.status = values.status; }),
+        }));
+      }
+      if (table === 'scheduled_services') q.first = jest.fn(async () => ({ id: 'svc-1', status: 'confirmed', prepaid_amount: 117, prepaid_method: 'cash' }));
+      if (table === 'payments') q.first = jest.fn(async () => null);
+      return q;
+    });
+    try {
+      db.__state.status = 'draft';
+      expect(await claimInvoiceForSend('inv-1')).toMatchObject({ claimed: true, previousStatus: 'draft' });
+      expect(db.__state.status).toBe('sending');
+    } finally {
+      db.mockImplementation(original);
+      db.__state.status = 'draft';
+    }
+  });
+
+  test('the CLAIM does NOT refuse a visit whose prepaid_method is the annual-prepay stamp when the stamp is stale (no live covering term) — governed by annualPrepayCoversVisit\'s own classification, not the out-of-band payments-row marker (pre-push audit P1 #4131 finding 2, fixing round-19\'s over-broad widening)', async () => {
+    const db = require('../models/db');
+    const InvoiceService = require('../services/invoice');
+    const { claimInvoiceForSend } = InvoiceService;
+    const { ANNUAL_PREPAY_PREPAID_METHOD, annualPrepayCoversVisit } = require('../services/annual-prepay-renewals');
+    const original = db.getMockImplementation();
+    const readRow = { id: 'inv-1', status: 'draft', total: 117, credit_applied: 0, scheduled_service_id: 'svc-1', service_record_id: null, payer_id: null };
+    db.mockImplementation((table) => {
+      const q = original(table);
+      if (table === 'invoices') {
+        q.first = jest.fn(async () => ({ ...readRow, status: db.__state.status }));
+        q.update = jest.fn((values) => ({
+          returning: jest.fn(async () => {
+            if (db.__state.status !== q.where.mock.calls[q.where.mock.calls.length - 1][0].status) return [];
+            db.__state.status = values.status;
+            return [{ ...readRow, status: values.status }];
+          }),
+          catch: jest.fn(async () => { db.__state.status = values.status; }),
+        }));
+      }
+      // A stamped visit — carries a positive prepaid_amount AND the annual
+      // method, but no LIVE covering term (annualPrepayCoversVisit mocked
+      // to resolve false at module scope — a stale stamp left by a
+      // best-effort void/refund clear). Never writes a
+      // `scheduled_service_prepaid` payments row, so the out-of-band
+      // credited-marker check could never see this as "reconciled" even
+      // in principle — this must be governed by the annual classification
+      // alone, exactly like prepaidRefusesOfficeInvoice on create.
+      if (table === 'scheduled_services') {
+        q.first = jest.fn(async () => ({
+          id: 'svc-1', status: 'confirmed', customer_id: 'cust-1', service_type: 'Fixture Quarterly Pest Control Service',
+          prepaid_amount: 400, prepaid_method: ANNUAL_PREPAY_PREPAID_METHOD, annual_prepay_term_id: 'term-1',
+        }));
+      }
+      if (table === 'payments') q.first = jest.fn(async () => null);
+      return q;
+    });
+    try {
+      db.__state.status = 'draft';
+      expect(await claimInvoiceForSend('inv-1')).toMatchObject({ claimed: true, previousStatus: 'draft' });
+      expect(db.__state.status).toBe('sending');
+      expect(annualPrepayCoversVisit).toHaveBeenCalled();
+    } finally {
+      db.mockImplementation(original);
+      db.__state.status = 'draft';
     }
   });
 
