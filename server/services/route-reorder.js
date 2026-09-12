@@ -322,6 +322,26 @@ function relaxElapsedWindows(sourceStops, startMin) {
 }
 
 /**
+ * What the guard is actually allowed to reason about: the stops that will be
+ * DRIVEN, and the travel numbers that describe them.
+ *
+ * Terminal rows ride along in every caller's day query but are not driven, so
+ * they are filtered out entirely — not guarded, not scored, not reordered.
+ * Google's legs are POSITIONAL against the sequence it returned and measured
+ * FROM HQ, so either dropping a stop from that sequence (codex round 4 P1) or
+ * simulating from the truck's real position (round 5 P1) makes them describe
+ * a drive nobody takes; in both cases the shared fallback leg model is the
+ * honest answer.
+ */
+function driveableInputs({ rawGoogleOrder, rawSourceStops, rawLegs, origin }) {
+  const sourceStops = rawSourceStops.filter(onRoute);
+  const liveIds = new Set(sourceStops.map((s) => s.id));
+  const googleOrder = rawGoogleOrder.filter((s) => liveIds.has(s.id));
+  const aligned = googleOrder.length === rawGoogleOrder.length && !origin;
+  return { sourceStops, googleOrder, legs: aligned ? rawLegs : null };
+}
+
+/**
  * Shared "never write an order that breaks a promise" decision — pulled out
  * so the trusted admin buttons (POST /optimize, /optimize-route in
  * admin-schedule.js) apply the EXACT SAME chronology + feasibility guards
@@ -376,21 +396,7 @@ function chooseWindowSafeOrder({
   RouteOptimizer, googleOrder: rawGoogleOrder, sourceStops: rawSourceStops, googleSource, legs: rawLegs = null,
   startMin = null, origin = null,
 }) {
-  let legs = rawLegs;
-  // Terminal rows ride along in every caller's day query but are not driven.
-  const sourceStops = rawSourceStops.filter(onRoute);
-  const liveIds = new Set(sourceStops.map((s) => s.id));
-  const googleOrder = rawGoogleOrder.filter((s) => liveIds.has(s.id));
-  // Legs are POSITIONAL against the sequence the optimizer returned. Dropping
-  // a terminal stop shifts every leg after it, so a filtered sequence must
-  // fall back to the shared leg model rather than read one stop's travel as
-  // another's (codex round 4 P1) — the same rule the per-tech resolver
-  // applies when a slice is not the flat sequence.
-  if (googleOrder.length !== rawGoogleOrder.length) legs = null;
-  // They are also measured FROM HQ. Simulating from the truck's real position
-  // makes the first one wrong — a stop near HQ would read as reachable when
-  // it is not (codex round 5 P1) — so a moved origin discards them too.
-  if (origin) legs = null;
+  const { sourceStops, googleOrder, legs } = driveableInputs({ rawGoogleOrder, rawSourceStops, rawLegs, origin });
   // beforeMeters (current running order, same model as the nightly ledger's
   // before_distance_meters) rides on EVERY return — a caller aggregating
   // several tech-days in one response (the multi-tech /optimize endpoint)

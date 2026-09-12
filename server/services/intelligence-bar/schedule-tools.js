@@ -445,7 +445,10 @@ async function optimizeAllRoutes(input) {
         excludeStatuses: ['cancelled', 'completed', 'rescheduled'],
         select: ['scheduled_services.id',
           ...ROUTE_WRITE_GUARD_COLUMNS.map((c) => `scheduled_services.${c}`), ...guardedCoordSelects(trx)],
-      })),
+      // FOR UPDATE: a status transition can otherwise commit en_route/on_site
+      // between this check and the writes, which constrain only id/date/tech
+      // (codex #4430 r5 P1) — the same fence the admin endpoints take.
+      }).forUpdate('scheduled_services')),
     });
   }
 
@@ -610,7 +613,10 @@ async function optimizeTechRoute(input) {
         excludeStatuses: ['cancelled', 'completed', 'rescheduled'],
         select: ['scheduled_services.id',
           ...ROUTE_WRITE_GUARD_COLUMNS.map((c) => `scheduled_services.${c}`), ...guardedCoordSelects(trx)],
-      })),
+      // FOR UPDATE: a status transition can otherwise commit en_route/on_site
+      // between this check and the writes, which constrain only id/date/tech
+      // (codex #4430 r5 P1) — the same fence the admin endpoints take.
+      }).forUpdate('scheduled_services')),
     });
     return applied.success ? { ...applied, tech: tech.name } : applied;
   }

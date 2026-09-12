@@ -368,3 +368,18 @@ test('unit: above the cap, greedy still permutes equal-window ties — infeasibl
 test('unit: fewer than 2 stops is not a reorder problem', () => {
   expect(computeWindowFitOrder(FAKE_RO, [stop('only')], GUARDS)).toBeNull();
 });
+
+// ── Codex #4430 round 5 P1 ───────────────────────────────────────────────
+// The repair ranks candidate orders by distance. Ranking them from HQ while
+// the feasibility check and the reported figures start at the truck's real
+// position picks a longer route over a shorter feasible one.
+test('unit: candidate orders are scored from the supplied origin, not HQ', () => {
+  const st = (id, lng) => stop(id, { technician_id: 't1', lng, estimated_duration_minutes: 30 });
+  // From HQ (lng 0) visiting NEAR (lng 1) first is cheaper; from a truck
+  // parked at lng 20 the cheaper loop starts with FAR (lng 19).
+  const stops = [st('NEAR', 1), st('FAR', 19)];
+  const fromHq = computeWindowFitOrder(RouteOptimizer, stops, GUARDS);
+  const fromTruck = computeWindowFitOrder(RouteOptimizer, stops, GUARDS, { origin: { lat: 1, lng: 20 } });
+  expect(fromHq.orderedStops.map((s) => s.id)).toEqual(['NEAR', 'FAR']);
+  expect(fromTruck.orderedStops.map((s) => s.id)).toEqual(['FAR', 'NEAR']);
+});

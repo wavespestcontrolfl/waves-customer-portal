@@ -256,7 +256,7 @@ function exhaustiveSearch(RouteOptimizer, guards, groups, untimed, startMin = 8 
   const seq = [];
   const recurse = (groupIdx, groupRemaining, state) => {
     if (seq.length === total) {
-      const meters = guards.modelDistanceMeters(RouteOptimizer, seq);
+      const meters = guards.modelDistanceMeters(RouteOptimizer, seq, origin);
       if (meters < bestMeters) {
         bestMeters = meters;
         best = [...seq];
@@ -307,7 +307,7 @@ function greedyInsertion(RouteOptimizer, guards, backbone, untimed, startMin = 8
       for (let pos = 0; pos <= seq.length; pos++) {
         const candidate = [...seq.slice(0, pos), remaining[r], ...seq.slice(pos)];
         if (simulateArrivalRoute(RouteOptimizer, guards.effectiveWindowRange, candidate, { startMin, origin }) == null) continue;
-        const meters = guards.modelDistanceMeters(RouteOptimizer, candidate);
+        const meters = guards.modelDistanceMeters(RouteOptimizer, candidate, origin);
         if (!bestPick || meters < bestPick.meters) bestPick = { r, candidate, meters };
       }
     }
