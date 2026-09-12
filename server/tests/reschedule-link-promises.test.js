@@ -460,13 +460,20 @@ test('promised-link delivery evidence requires the provider\'s own id, not merel
 // subquery encodes.
 function fakeStageConn({ commitments = [], outbox = [] } = {}) {
   const inserts = [];
-  const state = { generationAware: false };
+  const updates = [];
+  const state = { generationAware: false, uncertaintyAware: false };
   // A staff Confirm ('confirmed') is an affirmative review, not a claim —
   // it stays eligible for staging exactly like a never-touched (NULL) row;
   // only a genuinely terminal human_state ('dismissed', say) excludes it
   // (codex #4293 P1 r4).
   const base = (cc) => cc.kind === 'send_reschedule_link' && cc.party === 'waves' && cc.status === 'open'
     && (cc.human_state == null || cc.human_state === 'confirmed');
+  // An older-generation row whose own send outcome is still genuinely
+  // unknown ('sending', or parked 'review' with last_error
+  // 'provider_outcome_unknown') blocks a fresh dispatch — it might already
+  // have reached the customer with no evidence recorded yet (codex #4293 P1).
+  const uncertain = (cc) => outbox.some((o) => o.commitment_id === cc.id && (o.commitment_generation ?? -1) < (cc.processing_generation ?? 0)
+    && (o.status === 'sending' || (o.status === 'review' && o.last_error === 'provider_outcome_unknown')));
   // If the query never asks a generation-aware question at all (whereRaw
   // mentioning commitment_generation), fall back to the OLD "any existing
   // row at all counts as staged" reading — the exact bug: this excludes a
@@ -474,17 +481,34 @@ function fakeStageConn({ commitments = [], outbox = [] } = {}) {
   // proving a regression back to that shape would leave it unstaged again.
   const eligible = () => commitments.filter((cc) => base(cc) && (state.generationAware
     ? !outbox.some((o) => o.commitment_id === cc.id && (o.commitment_generation ?? -1) >= (cc.processing_generation ?? 0))
-    : !outbox.some((o) => o.commitment_id === cc.id)));
+    : !outbox.some((o) => o.commitment_id === cc.id))
+    // If the query never asks the uncertainty question either, nothing is
+    // held back on that basis — a regression that dropped the second
+    // whereRaw entirely would still stage over an uncertain older attempt,
+    // which is exactly the bug this predicate exists to catch.
+    && (!state.uncertaintyAware || !uncertain(cc)));
   const conn = (table) => {
     const name = String(table).split(' ')[0];
     const b = {};
     const pass = () => (...args) => b;
     Object.assign(b, {
-      join: pass(), leftJoin: pass(), where: pass(), whereNull: pass(), limit: pass(), select: pass(),
-      whereRaw: (sql) => { if (name === 'call_commitments' && /commitment_generation/.test(sql)) state.generationAware = true; return b; },
+      join: pass(), leftJoin: pass(), where: pass(), whereNull: pass(), whereIn: pass(), limit: pass(), select: pass(),
+      whereRaw: (sql) => {
+        if (name === 'call_commitments' && /commitment_generation/.test(sql)) {
+          if (/status = 'sending'/.test(sql) || /provider_outcome_unknown/.test(sql)) state.uncertaintyAware = true;
+          else state.generationAware = true;
+        }
+        return b;
+      },
       then: (resolve, reject) => Promise.resolve()
         .then(() => (name === 'call_commitments' ? eligible().map((cc) => ({ ...cc })) : []))
         .then(resolve, reject),
+      update: async (patch) => {
+        // The retire step (unattempted older-generation rows, cancelled
+        // before the fresh row for the same commitment is inserted).
+        updates.push({ table: name, patch });
+        return 0;
+      },
       insert: (data) => {
         inserts.push({ table: name, data });
         return {
@@ -505,7 +529,7 @@ function fakeStageConn({ commitments = [], outbox = [] } = {}) {
     return b;
   };
   conn.raw = (sql) => ({ __raw: sql });
-  return { conn, inserts, outbox };
+  return { conn, inserts, updates, outbox };
 }
 
 test('a replacement recording reopening a delivered commitment stages a fresh outbox row', async () => {
@@ -558,6 +582,62 @@ test('the same generation already staged is never restaged', async () => {
     if (prior === undefined) delete process.env.GATE_RESCHEDULE_LINK_ON_PROMISE; else process.env.GATE_RESCHEDULE_LINK_ON_PROMISE = prior;
     gates.callCommitments = priorCommitments;
   }
+});
+
+describe('a reprocess must not double up on an older attempt whose outcome is unknown (codex #4293 P1)', () => {
+  test.each([
+    ['sending', null],
+    ['review', 'provider_outcome_unknown'],
+  ])('an older-generation row still %s blocks a fresh dispatch', async (status, last_error) => {
+    const prior = process.env.GATE_RESCHEDULE_LINK_ON_PROMISE, priorCommitments = gates.callCommitments;
+    try {
+      gates.callCommitments = true;
+      process.env.GATE_RESCHEDULE_LINK_ON_PROMISE = 'shadow';
+      // upsertCommitments bumped this commitment to generation 2 on a
+      // reprocess pass, but generation 1's own attempt never reached a
+      // known outcome — it might already have reached the customer with no
+      // sms_log evidence recorded. Staging a second row here would risk
+      // sending the same promised link twice.
+      const reopened = { id: 'commitment', call_log_id: 'call', customer_id: 'customer', created_at: new Date('2030-01-08T00:00:00Z'),
+        processing_generation: 2, kind: 'send_reschedule_link', party: 'waves', status: 'open', human_state: null };
+      const { conn, inserts, updates } = fakeStageConn({
+        commitments: [reopened],
+        outbox: [{ commitment_id: 'commitment', commitment_generation: 1, status, last_error }],
+      });
+      expect(await links.stagePromises(conn)).toBe(0);
+      expect(inserts).toEqual([]);
+      // The uncertain row is left exactly as it was — held, not touched.
+      expect(updates).toEqual([]);
+    } finally {
+      if (prior === undefined) delete process.env.GATE_RESCHEDULE_LINK_ON_PROMISE; else process.env.GATE_RESCHEDULE_LINK_ON_PROMISE = prior;
+      gates.callCommitments = priorCommitments;
+    }
+  });
+
+  test('an older-generation row that was NEVER attempted is retired and the new one proceeds', async () => {
+    const prior = process.env.GATE_RESCHEDULE_LINK_ON_PROMISE, priorCommitments = gates.callCommitments;
+    try {
+      gates.callCommitments = true;
+      process.env.GATE_RESCHEDULE_LINK_ON_PROMISE = 'shadow';
+      const reopened = { id: 'commitment', call_log_id: 'call', customer_id: 'customer', created_at: new Date('2030-01-08T00:00:00Z'),
+        processing_generation: 2, kind: 'send_reschedule_link', party: 'waves', status: 'open', human_state: null };
+      // Generation 1's row never got past claimForDispatch — still
+      // 'pending' — so it is stale, not uncertain: the reprocess superseded
+      // it before it ever reached the provider.
+      const { conn, inserts, updates } = fakeStageConn({
+        commitments: [reopened],
+        outbox: [{ commitment_id: 'commitment', commitment_generation: 1, status: 'pending', last_error: null }],
+      });
+      expect(await links.stagePromises(conn)).toBe(1);
+      const retire = updates.find((u) => u.table === 'outbox_messages');
+      expect(retire).toMatchObject({ patch: { status: 'cancelled', last_error: 'superseded_generation' } });
+      const staging = inserts.find((i) => i.table === 'outbox_messages');
+      expect(staging).toMatchObject({ data: { commitment_id: 'commitment', commitment_generation: 2 } });
+    } finally {
+      if (prior === undefined) delete process.env.GATE_RESCHEDULE_LINK_ON_PROMISE; else process.env.GATE_RESCHEDULE_LINK_ON_PROMISE = prior;
+      gates.callCommitments = priorCommitments;
+    }
+  });
 });
 
 describe('a staff Confirm is an affirmative review, not a claim (codex #4293 P1 r4)', () => {
@@ -632,6 +712,8 @@ describe('a staff Confirm is an affirmative review, not a claim (codex #4293 P1 
           } else Object.assign(eq, a);
           return b;
         },
+        forUpdate: () => b,
+        first: async () => (Object.entries(eq).every(([k, v]) => state[k] === v) ? { ...state } : null),
         update: async (patch) => {
           const eqMatches = Object.entries(eq).every(([k, v]) => state[k] === v);
           const orMatches = orMatchers.length === 0 || orMatchers.some((fn) => fn(state));
@@ -662,6 +744,124 @@ describe('a staff Confirm is an affirmative review, not a claim (codex #4293 P1 
     await links.fulfilPromise(conn, { id: 'outbox', commitment_id: 'commitment', related_call_log_id: 'call' },
       { id: 'sms1' }, { id: 'call' });
     expect(state.status).toBe(expectedStatus);
+  });
+
+  // A minimal call_commitments + triage_items/call_log stand-in for
+  // clearPromiseException's own resync, distinct from fakeFulfilConn's
+  // commitments-only noop tables — the P1-2 tests below need to prove the
+  // card is left INTACT, not merely that the commitment status is
+  // untouched.
+  function fakeFulfilConnWithCard(commitment, card) {
+    const state = { ...commitment };
+    const cardState = card ? { ...card } : null;
+    function commitmentsBuilder() {
+      const eq = {};
+      const orMatchers = [];
+      const b = {
+        where(a) {
+          if (typeof a === 'function') {
+            const sub = {
+              whereNull: (col) => { orMatchers.push((row) => row[col] == null); return sub; },
+              orWhere: (col, val) => { orMatchers.push((row) => row[col] === val); return sub; },
+            };
+            a(sub, sub);
+          } else Object.assign(eq, a);
+          return b;
+        },
+        forUpdate: () => b,
+        first: async (...cols) => {
+          if (!Object.entries(eq).every(([k, v]) => state[k] === v)) return null;
+          if (!cols.length) return { ...state };
+          const picked = {};
+          for (const col of cols) picked[col] = state[col];
+          return picked;
+        },
+        update: async (patch) => {
+          const eqMatches = Object.entries(eq).every(([k, v]) => state[k] === v);
+          const orMatches = orMatchers.length === 0 || orMatchers.some((fn) => fn(state));
+          if (!eqMatches || !orMatches) return 0;
+          Object.assign(state, patch);
+          return 1;
+        },
+      };
+      return b;
+    }
+    function triageBuilder() {
+      const eq = {};
+      const inFilters = [];
+      const b = {
+        where(a) { Object.assign(eq, a); return b; },
+        whereIn(col, vals) { inFilters.push([col, vals]); return b; },
+        select: async (...cols) => {
+          if (!cardState) return [];
+          if (!Object.entries(eq).every(([k, v]) => cardState[k] === v)) return [];
+          if (!inFilters.every(([col, vals]) => vals.includes(cardState[col]))) return [];
+          const picked = {};
+          for (const col of cols) picked[col] = cardState[col];
+          return [picked];
+        },
+        update: async (patch) => { if (cardState) Object.assign(cardState, patch); return cardState ? 1 : 0; },
+        first: async () => (cardState && cardState.status && ['open', 'in_progress'].includes(cardState.status) ? { id: cardState.id } : null),
+      };
+      return b;
+    }
+    function callLogBuilder() {
+      const b = {};
+      const pass = () => (...a) => b;
+      Object.assign(b, { where: pass(), update: async () => 1 });
+      return b;
+    }
+    function noopBuilder() {
+      const b = {};
+      const pass = () => (...a) => b;
+      Object.assign(b, { where: pass(), whereIn: pass(), whereNotIn: pass(), forUpdate: pass(), forShare: pass(),
+        select: async () => [], first: async () => null, update: async () => 0 });
+      return b;
+    }
+    const conn = (table) => {
+      const name = String(table).split(' ')[0];
+      if (name === 'call_commitments') return commitmentsBuilder();
+      if (name === 'triage_items') return triageBuilder();
+      if (name === 'call_log') return callLogBuilder();
+      return noopBuilder();
+    };
+    return { conn, state, cardState };
+  }
+
+  test('a late delivery receipt for a SUPERSEDED generation settles its own outbox row but leaves the replacement commitment open with its card intact (codex #4293 P1)', async () => {
+    // A replacement recording reopened this same commitment under
+    // generation 2 after the customer used the generation-1 link — the
+    // outbox row's own payload still carries the generation it was
+    // actually claimed and settled under.
+    const { conn, state, cardState } = fakeFulfilConnWithCard(
+      { id: 'commitment', status: 'open', human_state: null, last_seen_generation: 2 },
+      { id: 'card', call_log_id: 'call', reason_code: 'reschedule_link_promise', status: 'open', payload: { reschedule_link_promise: { commitment_ids: ['commitment'] } } },
+    );
+    await links.fulfilPromise(conn, { id: 'outbox', commitment_id: 'commitment', related_call_log_id: 'call', payload: { call_generation: 1 } },
+      { id: 'sms1' }, { id: 'call' });
+    // The commitment (the REPLACEMENT obligation) is untouched — still open.
+    expect(state.status).toBe('open');
+    expect(state.fulfilled_at).toBeUndefined();
+    // ...and its exception card is still intact, not cleared.
+    expect(cardState.status).toBe('open');
+  });
+
+  test('a late delivery receipt for the CURRENT generation still fulfils the commitment and clears its card', async () => {
+    const { conn, state, cardState } = fakeFulfilConnWithCard(
+      { id: 'commitment', status: 'open', human_state: null, last_seen_generation: 1 },
+      { id: 'card', call_log_id: 'call', reason_code: 'reschedule_link_promise', status: 'open', payload: { reschedule_link_promise: { commitment_ids: ['commitment'] } } },
+    );
+    await links.fulfilPromise(conn, { id: 'outbox', commitment_id: 'commitment', related_call_log_id: 'call', payload: { call_generation: 1 } },
+      { id: 'sms1' }, { id: 'call' });
+    expect(state.status).toBe('fulfilled');
+    expect(cardState.status).toBe('resolved');
+  });
+
+  test('a row with no recorded generation falls back to the old, ungated behavior', async () => {
+    const { conn, state } = fakeFulfilConnWithCard({ id: 'commitment', status: 'open', human_state: null, last_seen_generation: 9 }, null);
+    await links.fulfilPromise(conn, { id: 'outbox', commitment_id: 'commitment', related_call_log_id: 'call', payload: {} },
+      { id: 'sms1' }, { id: 'call' });
+    expect(state.status).toBe('fulfilled');
   });
 });
 

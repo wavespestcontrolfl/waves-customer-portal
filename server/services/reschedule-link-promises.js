@@ -669,7 +669,26 @@ function deliveryIdentityMatches({ call, commitment, current, visit, customer, s
 // review, not a claim on the row (codex #4293 P1 r4) — excluding only
 // 'confirmed' with whereNotIn (rather than requiring NULL) still refuses a
 // genuinely terminal human_state ('dismissed').
+//
+// settleDelivery's own caller already proved this attempt's generation
+// still matches the live commitment (deliveryIdentityMatches, before this
+// function is ever reached). settleReconciledReceipt's late-receipt path
+// does not: a replacement recording can reopen the SAME commitment_id under
+// a NEW generation between when this row's link was used and when its
+// carrier receipt finally arrives, so a stale receipt must not be trusted
+// to speak for whatever the commitment has become. Re-checking here, rather
+// than trusting every caller to have already checked, is what stops a late
+// receipt for a SUPERSEDED generation from fulfilling the REPLACEMENT
+// commitment's live obligation and clearing its still-open exception card
+// (codex #4293 P1). A row with no recorded generation (older data, or a
+// caller that never stamped one) falls through to the old, ungated
+// behavior rather than block on data that was never captured.
 async function fulfilPromise(trx, row, sms, call) {
+  const generation = row.payload?.call_generation;
+  const commitment = generation == null ? null
+    : await trx('call_commitments').where({ id: row.commitment_id }).forUpdate().first('id', 'last_seen_generation');
+  const ownsCurrentGeneration = generation == null || !commitment || Number(commitment.last_seen_generation) === Number(generation);
+  if (!ownsCurrentGeneration) return;
   const updated = await trx('call_commitments').where({ id: row.commitment_id, status: 'open' })
     .where((q) => q.whereNull('human_state').orWhere('human_state', 'confirmed'))
     .update({ status: 'fulfilled', fulfilled_at: new Date(), updated_at: new Date(), fulfillment: {
@@ -740,6 +759,25 @@ async function stagePromises(conn) {
       WHERE o.commitment_id = cc.id
         AND COALESCE(o.commitment_generation, -1) >= COALESCE(cc.processing_generation, 0)
     )`)
+    // An older-generation attempt whose own outcome is still genuinely
+    // unknown — mid-claim ('sending', the process could have died between
+    // the claim and the provider call) or parked specifically because the
+    // provider never confirmed one way or the other ('review' with
+    // last_error 'provider_outcome_unknown') — may already have reached
+    // Twilio. Staging a second row here risks a literal duplicate send of
+    // the same promised link if that uncertain attempt in fact went
+    // through with no sms_log evidence ever landing. This is distinct from
+    // an attempt that was simply never made (still 'pending'/'shadow',
+    // handled below by explicit retirement, not a hold): only a row that
+    // MIGHT have reached the customer blocks a fresh dispatch, until
+    // reconcileAttempt resolves it from delivery evidence or the office
+    // rules on it via the review lane (codex #4293 P1).
+    .whereRaw(`NOT EXISTS (
+      SELECT 1 FROM outbox_messages o
+      WHERE o.commitment_id = cc.id
+        AND COALESCE(o.commitment_generation, -1) < COALESCE(cc.processing_generation, 0)
+        AND (o.status = 'sending' OR (o.status = 'review' AND o.last_error = 'provider_outcome_unknown'))
+    )`)
     .select('cc.id', 'cc.call_log_id', 'cc.created_at', 'cc.processing_generation', 'cl.customer_id').limit(200);
   // commitment_created_at rides along on the outbox row itself so runOne can
   // judge pre-activation without a second call_commitments query per row —
@@ -749,19 +787,31 @@ async function stagePromises(conn) {
   // earlier one staged for the same commitment_id — see the composite
   // (commitment_id, commitment_generation) uniqueness in migration
   // 20260911000030_outbox_messages_commitment_generation.js.
-  for (const row of rows) await conn('outbox_messages').insert({ channel: 'sms', status: mode() === 'shadow' ? 'shadow' : 'pending',
-    payload: { kind: KIND, commitment_created_at: row.created_at }, commitment_id: row.id, commitment_generation: row.processing_generation ?? 0,
-    related_call_log_id: row.call_log_id, related_customer_id: row.customer_id, available_at: new Date() })
-    // The index this must match (migration 20260911000030) is PARTIAL —
-    // WHERE commitment_id IS NOT NULL, to keep it off the many ordinary
-    // outbox rows with no commitment at all. Postgres accepts an ON
-    // CONFLICT target only when it names the SAME columns AND the SAME
-    // predicate as an existing unique index; a bare column-list conflict
-    // target here does not match a partial index at all, so every insert
-    // would raise "no unique or exclusion constraint matching the ON
-    // CONFLICT specification" instead of silently no-op'ing a duplicate
-    // (codex #4293 P1, round 2 on baa4cf295).
-    .onConflict(conn.raw(COMMITMENT_GENERATION_CONFLICT_TARGET)).ignore();
+  for (const row of rows) {
+    // The unattempted counterpart to the uncertain-attempt hold above: an
+    // older-generation row that never got past claimForDispatch (still
+    // 'pending'/'shadow') is not uncertain — it never reached the provider
+    // at all — just stale. Retiring it explicitly here, rather than leaving
+    // it to rot in the sweep beside the fresh row this loop is about to
+    // insert, is what keeps the two cases from being collapsed into one
+    // handling (codex #4293 P1).
+    await conn('outbox_messages').where({ commitment_id: row.id }).whereIn('status', ['pending', 'shadow'])
+      .whereRaw('COALESCE(commitment_generation, -1) < ?', [row.processing_generation ?? 0])
+      .update({ status: 'cancelled', last_error: 'superseded_generation', updated_at: new Date() });
+    await conn('outbox_messages').insert({ channel: 'sms', status: mode() === 'shadow' ? 'shadow' : 'pending',
+      payload: { kind: KIND, commitment_created_at: row.created_at }, commitment_id: row.id, commitment_generation: row.processing_generation ?? 0,
+      related_call_log_id: row.call_log_id, related_customer_id: row.customer_id, available_at: new Date() })
+      // The index this must match (migration 20260911000030) is PARTIAL —
+      // WHERE commitment_id IS NOT NULL, to keep it off the many ordinary
+      // outbox rows with no commitment at all. Postgres accepts an ON
+      // CONFLICT target only when it names the SAME columns AND the SAME
+      // predicate as an existing unique index; a bare column-list conflict
+      // target here does not match a partial index at all, so every insert
+      // would raise "no unique or exclusion constraint matching the ON
+      // CONFLICT specification" instead of silently no-op'ing a duplicate
+      // (codex #4293 P1, round 2 on baa4cf295).
+      .onConflict(conn.raw(COMMITMENT_GENERATION_CONFLICT_TARGET)).ignore();
+  }
   return rows.length;
 }
 
