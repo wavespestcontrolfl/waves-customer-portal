@@ -1944,6 +1944,7 @@ const ReviewService = {
           await db("review_requests").where({ id: requestId, status: "sending", claimed_at: sendClaim.claimedAt })
             .update({ status: "pending", claimed_at: null })
             .catch((releaseErr) => logger.error(`[review] releasing a proven-unsent SMS claim failed (requestId=${requestId}): ${releaseErr.message}`));
+          sendClaim.marked = false;
         }
       }
       if (result.sent) { /* handled above */ } else if (!["VISIT_SUMMARY_UNCERTAIN", "VISIT_SUMMARY_STATE_UNAVAILABLE", "REVIEW_CLAIM_LOST"].includes(result.code)
@@ -4268,6 +4269,11 @@ const ReviewService = {
       await db("review_requests").where({ id: request.id, status: "sending", claimed_at: sendClaim.claimedAt })
         .update({ status: "pending", claimed_at: null })
         .catch((releaseErr) => logger.error(`[review] releasing a proven-unsent SMS claim failed (requestId=${request.id}): ${releaseErr.message}`));
+      // Released means NO LONGER OWNED (local audit on r45, the same rule the
+      // handoff applies): another worker can claim the pending row before the
+      // bookkeeping below runs, and writing by id alone would reset or
+      // suppress that replacement's live `sending` claim.
+      sendClaim.marked = false;
     }
     if (!provenNotSent && result?.sent === false && await this._providerOutcomeUnknown(request.id)) {
       logger.error(`[review] outreach SMS outcome unknown after a returned provider failure (requestId=${request.id} code=${result.code || "none"})`);
