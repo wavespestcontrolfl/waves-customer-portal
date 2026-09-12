@@ -67,12 +67,33 @@ function deliveryUncertainPatch(conn, value) {
 // toward sending later, never earlier, the same call-booking-precedence
 // principle already ruled for the agent's spoken word (codex #4293 P1).
 const DEADLINE_PHRASING_RE = /\b(?:by|before|within|no later than|prior to)\b/i;
+// DEADLINE_PHRASING_RE matching ANYWHERE in the agent's evidence used to be
+// enough, but a deadline word can qualify something other than the send:
+// "I will text you the reschedule link tomorrow morning SO you can move
+// your appointment BEFORE Friday" — that "before" bounds the *appointment*,
+// not the text. Read whole, the quote tripped DEADLINE_PHRASING_RE,
+// isPromisedFloor waved the floor off, and the customer was texted
+// immediately — the exact early-send bug the floor exists to prevent. The
+// deadline word only counts when it sits in the SAME CLAUSE as the send
+// commitment itself, so the quote is first split at its clause boundaries —
+// sentence enders plus the coordinators/subordinators that open a new
+// clause ("so"/"so that", "and", "but", "then", "because", "while") — and
+// only a clause that also carries the promise's own first-person send tense
+// (STANDING_PROMISE_TENSE, the same "I'll/I will/I'm going to" anchor
+// standingPromiseQuotes already uses to find the send commitment itself) is
+// read for deadline phrasing. A clause with no tense marker — "so you can
+// move your appointment before Friday" — is never about the send and is
+// skipped outright, whatever it names.
+const CLAUSE_START_RE = /[.!?]+|\b(?:so(?:\s+that)?|and|but|then|because|while)\b/i;
+function splitClauses(text) {
+  return String(text).split(CLAUSE_START_RE).map((c) => c.trim()).filter(Boolean);
+}
 function isDeadlinePromise(commitment) {
   const quotes = (commitment?.evidence || [])
     .filter((e) => e?.speaker === 'agent')
     .map((e) => String(e?.quote || ''))
     .join(' \n ');
-  return DEADLINE_PHRASING_RE.test(quotes);
+  return splitClauses(quotes).some((clause) => STANDING_PROMISE_TENSE.test(norm(clause)) && DEADLINE_PHRASING_RE.test(clause));
 }
 
 // FOLLOW-UP NEEDED: this infers the floor/deadline shape from free-text

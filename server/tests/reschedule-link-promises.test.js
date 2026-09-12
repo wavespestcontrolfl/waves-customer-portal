@@ -1894,4 +1894,28 @@ describe('a stated due_at is a floor unless its own evidence names a deadline (c
     const commitment = commitmentWith("I'll get that to you by Friday.");
     expect(links.promisedFloorAt(commitment, new Date('2030-01-07T14:00:00Z'))).toBeNull();
   });
+
+  // codex #4293 P1 (round 2): a deadline word only counts when it qualifies
+  // the SEND itself, not something else the same sentence happens to
+  // mention. "so you can move your appointment before Friday" names a
+  // deadline for the APPOINTMENT, not the text — reading the whole quote
+  // flat let that stray "before" wave off the floor and send the link
+  // immediately, the exact bug the floor exists to prevent.
+  test('a deadline word that qualifies the appointment, not the send, does not turn a floor into a deadline', () => {
+    const commitment = commitmentWith('I will text you the reschedule link tomorrow morning so you can move your appointment before Friday.');
+    expect(links.isPromisedFloor(commitment)).toBe(true);
+    expect(links.promisedFloorAt(commitment, new Date('2030-01-07T14:00:00Z'))).toEqual(dueAt);
+  });
+
+  test('the same deadline word in the clause that actually carries the send commitment IS a deadline', () => {
+    expect(links.isPromisedFloor(commitmentWith("I'll get the link to you by Friday."))).toBe(false);
+  });
+
+  test('a deadline word in a clause with no send tense of its own is skipped, whatever it names', () => {
+    // "and it should arrive by Friday" has no "I'll/I will/I'm going to" of
+    // its own — it is not readable as the clause making the send promise,
+    // so it stays a floor rather than being credited as a deadline.
+    const commitment = commitmentWith("I'll text you the link tomorrow morning and it should arrive by Friday.");
+    expect(links.isPromisedFloor(commitment)).toBe(true);
+  });
 });
