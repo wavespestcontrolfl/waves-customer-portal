@@ -192,3 +192,21 @@ test('TypeScript still reports real violations', () => {
   ].join('\n'));
   assert.deepEqual(hits, ['banned-font-size:2']);
 });
+
+test('a `/*` inside an unquoted url() does not open a comment', () => {
+  // URL data, not CSS syntax — the previous cut swallowed every rule until
+  // the next `*/`.
+  const hits = scan('sample.css', [
+    '.a { background: url(data:image/svg+xml,/*); }',
+    '.b { font-size: 12px; }',
+  ].join('\n'));
+  assert.deepEqual(hits, ['banned-font-size:2']);
+});
+
+test('a quoted url() still goes through the string path', () => {
+  const hits = scan('sample.css', [
+    '.a { background: url("data:image/svg+xml,/*"); }',
+    '.b { font-size: 12px; }',
+  ].join('\n'));
+  assert.deepEqual(hits, ['banned-font-size:2']);
+});

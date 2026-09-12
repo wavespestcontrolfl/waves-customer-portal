@@ -270,6 +270,18 @@ function cssCommentRanges(text) {
       continue;
     }
     if (c === '"' || c === "'") { quote = c; i += 1; continue; }
+    // An unquoted url() token is URL data, not CSS syntax: the `/*` in
+    // `url(data:image/svg+xml,/*)` opens nothing. Skipping to the closing
+    // paren keeps it from swallowing every rule until the next `*/`. A quoted
+    // url() falls through to the quote handling above.
+    if ((c === 'u' || c === 'U') && /^url\(/i.test(text.slice(i, i + 4))) {
+      let j = i + 4;
+      while (j < text.length && /\s/.test(text[j])) j += 1;
+      if (text[j] === '"' || text[j] === "'") { i = j; continue; }
+      const close = text.indexOf(')', j);
+      i = close === -1 ? text.length : close + 1;
+      continue;
+    }
     if (c === '/' && text[i + 1] === '*') {
       const close = text.indexOf('*/', i + 2);
       const end = close === -1 ? text.length : close + 2;
