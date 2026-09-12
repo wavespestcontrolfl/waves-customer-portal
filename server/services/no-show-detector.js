@@ -235,8 +235,23 @@ async function loadPromiseEvents(conn, visitIds, { now = new Date() } = {}) {
     // not requiring positive proof of delivery.
     () => conn('customer_interactions as ci')
       .leftJoin('email_messages as em', function joinOnStableMessageId() {
+        // Third branch for rows written before email_message_id existed
+        // (codex P1 round 7): their provider-id link BREAKS the moment the
+        // retry worker claims the message — it clears provider_message_id and
+        // later writes a different one, while the interaction keeps the
+        // original — after which the join returns em.id IS NULL forever and
+        // the row's frozen 'sent' snapshot is read as neutral evidence even
+        // while the retry sits queued or failed. email_messages.idempotency_key
+        // is immutable and, for every appointment email, is built as
+        // `<event_type>:<scheduled_service_id>:<appointment stamp>:<recipient
+        // token>` (appointment-email.js), so the interaction's own metadata
+        // reconstructs its prefix exactly. A fan-out matches each recipient's
+        // row; one delivered recipient is delivery, same as the SMS side.
         this.on(conn.raw(`em.id::text = (ci.metadata->>'email_message_id')
-          OR (ci.metadata->>'email_message_id' IS NULL AND em.provider_message_id = (ci.metadata->>'provider_message_id'))`));
+          OR (ci.metadata->>'email_message_id' IS NULL AND em.provider_message_id = (ci.metadata->>'provider_message_id'))
+          OR (ci.metadata->>'email_message_id' IS NULL AND ci.metadata->>'event_type' IS NOT NULL
+            AND ci.metadata->>'scheduled_service_id' IS NOT NULL
+            AND em.idempotency_key LIKE (ci.metadata->>'event_type') || ':' || (ci.metadata->>'scheduled_service_id') || ':%')`));
       })
       .where('ci.interaction_type', 'email_outbound').where('ci.created_at', '<=', now)
       .whereRaw("ci.metadata->>'scheduled_service_id' = ANY(?::text[])", [visitIds])
@@ -293,7 +308,20 @@ async function loadPromiseEvents(conn, visitIds, { now = new Date() } = {}) {
       // the moment the customer was told, not when the effects pass stamped
       // its marker.
       .join('messaging_audit_log as a', function joinOnSeriesMove() {
-        this.on(conn.raw("a.metadata->>'series_move_id' = sm.id::text"));
+        // Second branch for moves notified before the id was stamped on the
+        // text (codex P1 round 7): admin-dispatch's series confirmation has
+        // always carried series_move_id, but Quick Move's anchor-only
+        // moved-SMS — which doubles as the series confirmation — only starts
+        // carrying it in this PR, so every historical quick move would leave
+        // its siblings holding pre-move reminders. customer_notified already
+        // asserts a text went out for the move, and the pass that sends it is
+        // the one that committed the move (its reconciler retries inside a
+        // 5-minute lease), so the anchor's own delivered notice within the
+        // hour after the move IS that text. Bounded on both sides so an
+        // ordinary later reminder to the anchor can never stand in for it.
+        this.on(conn.raw(`a.metadata->>'series_move_id' = sm.id::text
+          OR (a.metadata->>'series_move_id' IS NULL AND a.appointment_id = sm.anchor_service_id
+            AND a.sent_at >= sm.created_at AND a.sent_at < sm.created_at + interval '1 hour')`));
       })
       .leftJoin('sms_log as s', 's.twilio_sid', 'a.provider_message_id')
       .where('sm.customer_notified', true)
@@ -335,9 +363,14 @@ async function loadPromiseEvents(conn, visitIds, { now = new Date() } = {}) {
 // communicated — until the sibling's own new reminder does.
 //
 // The ANCHOR is excluded: its new slot IS in the text, and its own
-// messaging_audit_log row carries the rendered_slot_ms that says so. A
-// date_exception occurrence is excluded too — the move deliberately left it
-// where it was, so its existing promise still stands.
+// messaging_audit_log row carries the rendered_slot_ms that says so. Nothing
+// else is: a date_exception sibling is NOT left where it was — rebooker.js's
+// projectOccurrenceDate shifts its exceptional date by the anchor delta and
+// stores the shifted row with exception: true — so its old-slot reminder is
+// just as stale as any other sibling's, and dropping it here left it able to
+// raise an alert on the very date the customer was told the series moved
+// (codex P1 round 7). series_moves.rows carries only occurrences the move
+// actually moved; genuinely preserved ones are recorded separately.
 function seriesSupersessions(rows = [], candidates = new Set()) {
   // One row per DELIVERED recipient of the move's text (a fan-out to two
   // appointment contacts writes two audit rows), so keep the earliest
@@ -347,7 +380,7 @@ function seriesSupersessions(rows = [], candidates = new Set()) {
     const moved = Array.isArray(move.rows) ? move.rows : JSON.parse(move.rows || '[]');
     for (const occurrence of moved) {
       const visitId = String(occurrence?.id || '');
-      if (!visitId || !candidates.has(visitId) || occurrence.anchor === true || occurrence.exception === true) continue;
+      if (!visitId || !candidates.has(visitId) || occurrence.anchor === true) continue;
       if (String(move.anchor_service_id || '') === visitId) continue;
       const key = `${visitId}:${move.id}`;
       const prior = earliest.get(key);

@@ -467,6 +467,12 @@ describe('loadPromiseEvents: email promise evidence checks the LIVE delivery sta
     const [{ sql: joinSql }] = onClause.on.mock.calls[0];
     expect(joinSql).toContain("em.id::text = (ci.metadata->>'email_message_id')");
     expect(joinSql).toContain("ci.metadata->>'email_message_id' IS NULL AND em.provider_message_id = (ci.metadata->>'provider_message_id')");
+    // Third branch for rows written before email_message_id existed: their
+    // provider-id link breaks the moment a retry claim clears that id, after
+    // which the row reads as unlinked-and-therefore-neutral forever, even
+    // while the retry sits queued or failed (round-7 P1). idempotency_key is
+    // immutable and encodes <event_type>:<scheduled_service_id>:.
+    expect(joinSql).toContain("em.idempotency_key LIKE (ci.metadata->>'event_type') || ':' || (ci.metadata->>'scheduled_service_id') || ':%'");
 
     // Both grouped predicates in this read pass a function to `.where(...)`
     // (every other call passes a string/object filter). Replay each against a
@@ -649,6 +655,7 @@ describe('seriesSupersessions: one series text supersedes every moved sibling (r
     expect(seriesSupersessions([move], all)).toEqual([
       { visit_id: 'sib-1', start_at: null, communicated_at: move.sent_at, source: 'series_move', source_id: 'move-1' },
       { visit_id: 'sib-2', start_at: null, communicated_at: move.sent_at, source: 'series_move', source_id: 'move-1' },
+      { visit_id: 'sib-x', start_at: null, communicated_at: move.sent_at, source: 'series_move', source_id: 'move-1' },
     ]);
   });
 
@@ -660,8 +667,13 @@ describe('seriesSupersessions: one series text supersedes every moved sibling (r
     expect(seriesSupersessions([unflagged], all).map((e) => e.visit_id)).toEqual(['sib-1']);
   });
 
-  test('a date_exception occurrence is excluded — the move deliberately left it where it was', () => {
-    expect(seriesSupersessions([move], all).map((e) => e.visit_id)).not.toContain('sib-x');
+  // rebooker.js's projectOccurrenceDate SHIFTS an exceptional date by the
+  // anchor delta and stores the shifted row with exception: true — the move
+  // did not leave it where it was. Dropping it here left its old-slot
+  // reminder standing as its latest promise, able to raise an alert on the
+  // very date the customer was told the series had moved (round-7 P1).
+  test('a shifted date_exception occurrence is superseded like any other moved sibling', () => {
+    expect(seriesSupersessions([move], all).map((e) => e.visit_id)).toContain('sib-x');
   });
 
   // Both surfaces that notify a customer of a series move stamp the move id
@@ -670,6 +682,30 @@ describe('seriesSupersessions: one series text supersedes every moved sibling (r
   // the read joins on. Without the Quick Move half, every sibling a quick
   // move touched kept its pre-move reminder as its latest promise (round-6
   // P1); this asserts the sender still stamps it.
+  test('a historical series move whose text carries no move id is matched by its anchor notice (round-7 P1)', async () => {
+    // Quick Move's moved-SMS only starts carrying series_move_id in this PR,
+    // so every quick move already in the database needs the fallback: the
+    // anchor's own delivered notice inside the hour after the move committed
+    // IS the text that told the customer, bounded on both sides so a later
+    // ordinary reminder can never stand in for it.
+    let joinSql = null;
+    const chain = {};
+    for (const m of ['leftJoin', 'whereIn', 'whereRaw', 'whereNull', 'whereNotNull', 'where']) chain[m] = () => chain;
+    chain.join = (table, cb) => {
+      const onClause = { on: (arg) => { joinSql = arg.sql; return onClause; } };
+      cb.call(onClause);
+      return chain;
+    };
+    chain.select = () => Promise.resolve([]);
+    const conn = () => chain;
+    conn.raw = (sql) => ({ sql });
+    conn.isTransaction = true;
+    await loadPromiseEvents(conn, ['visit-1']);
+    expect(joinSql).toContain("a.metadata->>'series_move_id' = sm.id::text");
+    expect(joinSql).toContain("a.metadata->>'series_move_id' IS NULL AND a.appointment_id = sm.anchor_service_id");
+    expect(joinSql).toContain("a.sent_at >= sm.created_at AND a.sent_at < sm.created_at + interval '1 hour'");
+  });
+
   test('the Quick Move moved-SMS carries the series move id it is the notification of', () => {
     const rainOut = require('fs').readFileSync(require('path').join(__dirname, '..', 'services', 'rain-out.js'), 'utf8');
     expect(rainOut).toContain("...(seriesMoveId ? { series_move_id: String(seriesMoveId) } : {}),");
@@ -679,13 +715,13 @@ describe('seriesSupersessions: one series text supersedes every moved sibling (r
   test('a fan-out to two contacts (two delivered audit rows) yields ONE event, at the earliest send', () => {
     const late = { ...move, sent_at: '2026-09-11T18:04:00.000Z' };
     const events = seriesSupersessions([late, move], all);
-    expect(events).toHaveLength(2);
+    expect(events).toHaveLength(3);
     for (const event of events) expect(event.communicated_at).toBe('2026-09-11T18:00:00.000Z');
   });
 
   test('rows outside the candidate set are dropped, and a JSON-encoded rows column is parsed', () => {
     expect(seriesSupersessions([move], new Set(['sib-2'])).map((e) => e.visit_id)).toEqual(['sib-2']);
-    expect(seriesSupersessions([{ ...move, rows: JSON.stringify(move.rows) }], all).map((e) => e.visit_id)).toEqual(['sib-1', 'sib-2']);
+    expect(seriesSupersessions([{ ...move, rows: JSON.stringify(move.rows) }], all).map((e) => e.visit_id)).toEqual(['sib-1', 'sib-2', 'sib-x']);
     expect(seriesSupersessions([{ ...move, rows: null }], all)).toEqual([]);
   });
 
