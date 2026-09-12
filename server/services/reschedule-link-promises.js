@@ -286,19 +286,23 @@ function refusedChannel(match) {
   return refusalChannelWord(match[1] || match[2] || '');
 }
 
-// Whether the caller's refusal of the TEXT still stands once the agent has
-// promised it. Only turns AFTER the promise count — a caller who opened with
-// "don't email me the link" and then asked for a text has refused nothing the
-// agent went on to promise — and the refusal has to reach this channel:
-// "don't email it, text it" refuses the email and asks for the text in one
-// breath, and a later "text it to me" withdraws an earlier refusal of the
-// text. A whole-call, channel-blind scan parked every one of those as
-// promise_needs_review (codex #4293 P2 r3). Events are replayed in spoken
-// order, so the last word on the text wins; the agent's own retraction is
-// standingPromiseQuotes' business and unchanged.
-function callerRefusedText(ordered, promiseAt) {
+// Whether the caller's refusal of the TEXT still stands at the END of the
+// call. This has nothing to do with when the agent spoke — the agent's
+// promise is not a consent event, and scanning only the turns AFTER it was
+// itself the bug (codex #4293 P1 r5): a caller who opens with "don't text me
+// any links" has refused before the agent ever promises anything, and an
+// agent's promise does not un-refuse a customer who never withdrew it.
+// Round 4 got the ORDER-AWARENESS right — a later caller request can
+// supersede an earlier refusal, and "don't email it, text it" refuses only
+// the channel it names — but wired it to the wrong clock (the promise turn)
+// instead of the right one (the caller's own words, start to end of the
+// call). The model here is that same order-awareness applied to the WHOLE
+// call: replay the caller's refusal and request events in spoken order and
+// fold them to one final state — a refusal stands until the CALLER
+// subsequently requests the text, full stop.
+function callerRefusedText(ordered) {
   let refused = false;
-  for (const turn of ordered.slice(promiseAt + 1)) {
+  for (const turn of ordered) {
     if (turn.speaker !== 'caller') continue;
     // Both refusal shapes this turn might carry — CALLER_REFUSAL's own
     // negation prefixes, and the bare "no text(s)" shape it never covered —
@@ -316,7 +320,12 @@ function callerRefusedText(ordered, promiseAt) {
       // clause can never supply the token that reverses it (codex #4293 P1).
       if (!events.some((e) => m.index >= e.at && m.index < e.end)) events.push({ at: m.index, requests: true });
     }
-    for (const event of events.sort((a, b) => a.at - b.at)) {
+    // Ties are not reachable with the current vocabulary — CALLER_REFUSAL /
+    // NO_CHANNEL_REFUSAL and TEXT_REQUEST all anchor on distinct lead words,
+    // so two events can never share the same `at` in practice — but the
+    // comparator still resolves one on principle (err toward not sending):
+    // a request never wins a same-position tie against a refusal.
+    for (const event of events.sort((a, b) => (a.at - b.at) || (a.requests ? 1 : -1))) {
       if (event.requests) refused = false;
       else if (event.refuses !== 'email') refused = true;
     }
@@ -497,15 +506,6 @@ function extractedDateUngrounded({ subject, call, candidates, callCommitments })
     && !quoteGroundsVisitDate(subject.quote, subject.visit_date, callCommitments.callEndedAt(call) || call.created_at, candidates);
 }
 
-// Whether the caller ever refused the SMS channel AFTER the agent's own
-// promise turn — split out of selectDiscussedVisit so that function's own
-// branch count stays where a reviewer can still take it in at a glance.
-function revokedAfterPromise(promisedQuotes, ordered) {
-  const promiseAt = ordered.findIndex((turn) => turn.speaker === 'agent' && !CONDITIONAL.test(turn.text)
-    && promisedQuotes.some((quote) => turn.text.includes(quote)));
-  return promiseAt >= 0 && callerRefusedText(ordered, promiseAt);
-}
-
 function selectDiscussedVisit({ commitment, call, customer, candidates = [], now = new Date() }) {
   const skip = (reason) => ({ reason });
   const identity = callerIdentityReason(call, customer);
@@ -513,7 +513,10 @@ function selectDiscussedVisit({ commitment, call, customer, candidates = [], now
   const callCommitments = require('./call-commitments');
   const turns = callCommitments.speakerTurns(call.transcription);
   const promisedQuotes = standingPromiseQuotes(commitment, turns);
-  const revoked = revokedAfterPromise(promisedQuotes, turns?.ordered || []);
+  // The caller's consent to the TEXT channel, folded across the WHOLE call —
+  // see callerRefusedText. Where the agent's promise falls in the
+  // conversation plays no part in it.
+  const revoked = callerRefusedText(turns?.ordered || []);
   const subject = commitment.subject;
   if (subjectNotGrounded(subject, call)) return skip('subject_not_grounded');
   const groundedSubject = !!subject && [subject.visit_date, subject.service, subject.address].some(Boolean);

@@ -277,11 +277,10 @@ test('an agent who takes the promise back later in the call stops the send', () 
   expect(select({ call: { ...call, transcription: `Agent: I cannot send that link yet.\nAgent: ${quote}` } }).visit?.id).toBe('visit');
 });
 
-test('only a caller refusal spoken AFTER the accepted promise counts, and it revokes only the channel it names', () => {
-  // An early "don't email me anything" spoken BEFORE the agent ever promises
-  // to TEXT the link refuses nothing the agent went on to promise — a whole-
-  // call, order-blind scan read it as a revocation anyway (codex #4293 P2
-  // r3).
+test('a caller refusal revokes only the channel it names, wherever in the call it falls', () => {
+  // An early "don't email me anything" refuses only email — it never touches
+  // the SMS channel the agent goes on to promise, regardless of where in the
+  // call it falls.
   const early = `Caller: Don't email me anything, please.\nAgent: ${quote}\nCaller: Thank you.`;
   expect(select({ call: { ...call, transcription: early } }).visit?.id).toBe('visit');
 
@@ -299,6 +298,28 @@ test('only a caller refusal spoken AFTER the accepted promise counts, and it rev
   // negative control).
   const stillRefused = `Agent: ${quote}\nCaller: Do not text me that.`;
   expect(select({ call: { ...call, transcription: stillRefused } }).reason).toBe('promise_needs_review');
+});
+
+test('a refusal spoken before the promise still stands (codex #4293 P1 r5)', () => {
+  // A refusal spoken BEFORE the agent's promise is not withdrawn by the
+  // agent going on to promise the very thing the caller refused — the
+  // agent's promise is not a consent event at all, and scanning only the
+  // turns after it (round 4's fix) quietly made the agent's own words the
+  // cutoff for the customer's wishes (codex #4293 P1 r5). This is the
+  // consent bug itself: without the whole-call fold, a pre-promise refusal
+  // is silently discarded and the link goes out.
+  const transcription = `Caller: Do not text me any links.\nAgent: ${quote}`;
+  expect(select({ call: { ...call, transcription } }).reason).toBe('promise_needs_review');
+});
+
+test('a pre-promise refusal is still lifted by a later caller request for the text (codex #4293 P1 r5)', () => {
+  const transcription = `Caller: Do not text me any links.\nAgent: ${quote}\nCaller: Actually, text it to me.`;
+  expect(select({ call: { ...call, transcription } }).visit?.id).toBe('visit');
+});
+
+test('a caller request for the text followed by a later refusal still refuses (codex #4293 P1 r5)', () => {
+  const transcription = `Caller: Text it to me.\nAgent: ${quote}\nCaller: Actually, do not text me that.`;
+  expect(select({ call: { ...call, transcription } }).reason).toBe('promise_needs_review');
 });
 
 test.each([
