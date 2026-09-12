@@ -37,6 +37,7 @@ import useIsMobile from "../../hooks/useIsMobile";
 import CompletionPricingCard from "../../components/schedule/CompletionPricingCard";
 import VisitProtocol from "../../components/admin/VisitProtocol";
 import { createPortal } from "react-dom";
+import RescheduleDialogView from "../../components/schedule/RescheduleDialogView";
 
 import { addETDays, etDateString, etDatetimeLocalToISO, etParts, formatETDateOnly, formatETDateTime } from "../../lib/timezone";
 import { completionDraftKey } from "../../lib/completion-drafts";
@@ -7303,8 +7304,6 @@ export function ProtocolPanel({ service, onClose }) {
 }
 
 export function RescheduleModal({ service, onClose, onRescheduled }) {
-  // Reactive (rotation-safe) — the module-level snapshot never recomputes.
-  const isMobile = useIsMobile(640);
   const [options, setOptions] = useState([]);
   const [reason, setReason] = useState("customer_request");
   const [notes, setNotes] = useState("");
@@ -7552,416 +7551,39 @@ export function RescheduleModal({ service, onClose, onRescheduled }) {
     { value: "route_overload", label: "Route Overload" },
   ];
 
-  const inputSt = {
-    width: "100%",
-    padding: "10px 14px",
-    borderRadius: 10,
-    border: `1px solid ${D.border}`,
-    background: D.input,
-    color: D.heading,
-    fontSize: 16,
-    outline: "none",
-    boxSizing: "border-box",
-  };
-
-  return createPortal(
-    <div
-      onClick={onClose}
-      style={{
-        position: "fixed",
-        inset: 0,
-        background: "rgba(0,0,0,0.6)",
-        zIndex: 1000,
-        display: "flex",
-        alignItems: "center",
-        justifyContent: "center",
-        padding: isMobile ? 0 : 20,
-      }}
-    >
-      {" "}
-      <div
-        onClick={(e) => e.stopPropagation()}
-        style={{
-          background: D.card,
-          borderRadius: 16,
-          padding: 24,
-          maxWidth: 480,
-          width: "100%",
-          border: `1px solid ${D.border}`,
-          maxHeight: "80vh",
-          overflowY: "auto",
-          ...(isMobile
-            ? {
-                width: "100%",
-                maxWidth: "none",
-                height: "100%",
-                maxHeight: "none",
-                borderRadius: 0,
-                boxSizing: "border-box",
-                overflowY: "auto",
-                paddingTop: "calc(24px + env(safe-area-inset-top, 0px))",
-                paddingBottom: "calc(24px + env(safe-area-inset-bottom, 0px))",
-                paddingLeft: "calc(24px + env(safe-area-inset-left, 0px))",
-                paddingRight: "calc(24px + env(safe-area-inset-right, 0px))",
-              }
-            : {}),
-        }}
-      >
-        {" "}
-        <div
-          style={{
-            fontSize: 18,
-            fontWeight: 500,
-            color: D.heading,
-            marginBottom: 4,
-          }}
-        >
-          Reschedule Service
-        </div>{" "}
-        <div style={{ fontSize: 13, color: D.muted, marginBottom: 16 }}>
-          {service.customerName} — {service.serviceType}
-        </div>{" "}
-        <div style={{ marginBottom: 14 }}>
-          {" "}
-          <div
-            style={{
-              fontSize: 12,
-              fontWeight: 500,
-              color: D.muted,
-              marginBottom: 6,
-            }}
-          >
-            Reason
-          </div>{" "}
-          <select
-            value={reason}
-            onChange={(e) => setReason(e.target.value)}
-            style={inputSt}
-          >
-            {REASONS.map((r) => (
-              <option key={r.value} value={r.value}>
-                {r.label}
-              </option>
-            ))}
-          </select>{" "}
-        </div>{" "}
-        <div style={{ marginBottom: 14 }}>
-          {" "}
-          <div
-            style={{
-              fontSize: 12,
-              fontWeight: 500,
-              color: D.muted,
-              marginBottom: 6,
-            }}
-          >
-            Notes (optional)
-          </div>{" "}
-          <input
-            value={notes}
-            onChange={(e) => setNotes(e.target.value)}
-            placeholder="Additional context..."
-            style={inputSt}
-          />{" "}
-        </div>{" "}
-        <div style={{ marginBottom: 14 }}>
-          {" "}
-          <div
-            style={{
-              fontSize: 12,
-              fontWeight: 500,
-              color: D.muted,
-              marginBottom: 6,
-            }}
-          >
-            Client booking notifications
-          </div>{" "}
-          <select
-            value={notificationType}
-            onChange={(e) => setNotificationType(e.target.value)}
-            disabled={sending}
-            style={inputSt}
-          >
-            <option value="none">Don&rsquo;t send a notification</option>
-            <option value="sms">Text message</option>
-          </select>{" "}
-          <div style={{ fontSize: 12, color: D.muted, marginTop: 6 }}>
-            This controls the immediate reschedule text. Automated reminders
-            will follow the new appointment time.
-          </div>{" "}
-        </div>{" "}
-        {seriesConfirm && (
-          <div
-            data-testid="series-move-confirm"
-            style={{
-              marginBottom: 14,
-              padding: 12,
-              borderRadius: 10,
-              border: `1px solid ${D.border}`,
-              background: D.bg,
-            }}
-          >
-            <div style={{ fontSize: 13, fontWeight: 500, color: D.heading, marginBottom: 8 }}>
-              Move to {seriesConfirmDate || seriesConfirm.body.newDate}?
-            </div>
-            <SeriesMoveNotice
-              tone="inline"
-              preview={seriesConfirm.preview}
-              stale={seriesConfirm.stale}
-              style={{ background: D.card }}
-            />
-            <div style={{ display: "flex", gap: 10, marginTop: 10 }}>
-              <button
-                onClick={confirmSeriesMove}
-                disabled={sending}
-                style={{
-                  padding: "10px 16px",
-                  borderRadius: 10,
-                  border: "none",
-                  cursor: "pointer",
-                  background: D.teal,
-                  color: "#fff",
-                  fontSize: 13,
-                  fontWeight: 500,
-                  opacity: sending ? 0.6 : 1,
-                }}
-              >
-                {sending ? "Moving…" : "Move visit + later visits"}
-              </button>
-              <button
-                onClick={() => setSeriesConfirm(null)}
-                disabled={sending}
-                style={{
-                  padding: "10px 16px",
-                  borderRadius: 10,
-                  border: `1px solid ${D.border}`,
-                  background: "transparent",
-                  color: D.muted,
-                  fontSize: 13,
-                  cursor: "pointer",
-                }}
-              >
-                Back
-              </button>
-            </div>
-          </div>
-        )}
-        <div
-          style={{
-            fontSize: 13,
-            fontWeight: 500,
-            color: D.teal,
-            marginBottom: 10,
-          }}
-        >
-          Suggested Dates (on route)
-        </div>
-        {loading ? (
-          <div
-            style={{
-              color: D.muted,
-              fontSize: 13,
-              padding: 20,
-              textAlign: "center",
-            }}
-          >
-            Finding best dates...
-          </div>
-        ) : (
-          <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-            {options.map((opt, i) => (
-              <div
-                key={i}
-                style={{
-                  display: "flex",
-                  justifyContent: "space-between",
-                  alignItems: "center",
-                  padding: "12px 14px",
-                  borderRadius: 10,
-                  background: D.bg,
-                  border: `1px solid ${D.border}`,
-                  cursor: "pointer",
-                  transition: "border-color 0.15s",
-                }}
-                onMouseEnter={(e) =>
-                  (e.currentTarget.style.borderColor = D.teal)
-                }
-                onMouseLeave={(e) =>
-                  (e.currentTarget.style.borderColor = D.border)
-                }
-              >
-                {" "}
-                <div>
-                  {" "}
-                  <div
-                    style={{ fontSize: 14, fontWeight: 500, color: D.heading }}
-                  >
-                    {opt.displayDate}
-                  </div>{" "}
-                  <div style={{ fontSize: 12, color: D.muted }}>
-                    {/* Show the block Select actually books (duration-derived),
-                        not the server's wider 2-3h span. */}
-                    {windowFor(opt.suggestedWindow?.start)?.display ||
-                      opt.suggestedWindow?.display}{" "}
-                    · {opt.currentLoad} jobs ·{" "}
-                    {opt.sameAreaServices} same area
-                  </div>{" "}
-                </div>{" "}
-                <button
-                  onClick={() => handleReschedule(opt)}
-                  disabled={sending}
-                  style={{
-                    padding: "8px 14px",
-                    borderRadius: 8,
-                    border: "none",
-                    cursor: "pointer",
-                    background: D.teal,
-                    color: "#fff",
-                    fontSize: 12,
-                    fontWeight: 500,
-                    opacity: sending ? 0.6 : 1,
-                  }}
-                >
-                  Select
-                </button>{" "}
-              </div>
-            ))}
-          </div>
-        )}
-        {/* Manual date/time picker */}
-        <div
-          style={{
-            marginTop: 16,
-            borderTop: `1px solid ${D.border}`,
-            paddingTop: 14,
-          }}
-        >
-          {" "}
-          <button
-            onClick={() => setShowManual(!showManual)}
-            style={{
-              background: "transparent",
-              border: "none",
-              color: D.teal,
-              fontSize: 13,
-              fontWeight: 500,
-              cursor: "pointer",
-              padding: 0,
-              display: "flex",
-              alignItems: "center",
-              gap: 6,
-            }}
-          >
-            {showManual ? "\u25BC" : "\u25B6"} Pick Custom Date & Time
-          </button>
-          {showManual && (
-            <div style={{ marginTop: 12, display: "flex", gap: 10 }}>
-              {" "}
-              <div style={{ flex: 1 }}>
-                {" "}
-                <div style={{ fontSize: 11, color: D.muted, marginBottom: 4 }}>
-                  Date
-                </div>{" "}
-                <input
-                  type="date"
-                  value={manualDate}
-                  onChange={(e) => setManualDate(e.target.value)}
-                  style={inputSt}
-                />{" "}
-              </div>{" "}
-              <div style={{ flex: 1 }}>
-                {" "}
-                <div style={{ fontSize: 11, color: D.muted, marginBottom: 4 }}>
-                  Start Time
-                </div>{" "}
-                {/* Appointment windows ALWAYS start on the hour (owner
-                    directive) — an hour select instead of a free time input
-                    so an off-hour start can't be submitted. From 06:00 up to
-                    the last hour whose window still ends by 20:00, the admin
-                    day end (window-rules) — the save rejects a later end, and
-                    the arrival-window hints never recommend one, so every
-                    option is savable and every recommendation is an option
-                    (Codex #4120 r6 P1). */}
-                <select
-                  value={manualTime}
-                  onChange={(e) => setManualTime(e.target.value)}
-                  style={inputSt}
-                >
-                  {Array.from({ length: 14 }, (_, i) => i + 6)
-                    .filter((h) => h * 60 + durationMinutes <= 20 * 60)
-                    .map((h) => {
-                    const value = `${String(h).padStart(2, "0")}:00`;
-                    const label = `${h % 12 || 12}:00 ${h >= 12 ? "PM" : "AM"}`;
-                    return (
-                      <option key={value} value={value}>
-                        {label}
-                      </option>
-                    );
-                  })}
-                </select>{" "}
-              </div>{" "}
-              <div style={{ display: "flex", alignItems: "flex-end" }}>
-                {" "}
-                <button
-                  onClick={handleManualReschedule}
-                  disabled={sending || !manualDate}
-                  style={{
-                    padding: "10px 16px",
-                    borderRadius: 10,
-                    border: "none",
-                    cursor: "pointer",
-                    background: manualDate ? D.teal : D.border,
-                    color: D.heading,
-                    fontSize: 13,
-                    fontWeight: 500,
-                    opacity: sending ? 0.6 : 1,
-                    whiteSpace: "nowrap",
-                  }}
-                >
-                  Reschedule
-                </button>{" "}
-              </div>{" "}
-            </div>
-          )}
-          {showManual && (
-            <SlotConflictNotice
-              conflicts={manualConflicts}
-              style={{ marginTop: 10 }}
-            />
-          )}
-          {showManual && (
-            <BestTimeHint
-              bestTimes={manualBestTimes}
-              picked={manualPicked}
-              bestInRange={manualBestInRange}
-              currentStart={manualTime}
-              currentDate={manualDate}
-              currentTechnicianId={service.technicianId || service.technician_id}
-              onPick={(slot) => setManualTime(slot.start)}
-              onPickDate={(slot) => { setManualDate(slot.date); setManualTime(slot.start); }}
-              style={{ marginTop: 10 }}
-            />
-          )}
-        </div>{" "}
-        <button
-          onClick={onClose}
-          style={{
-            width: "100%",
-            marginTop: 14,
-            padding: "10px 14px",
-            borderRadius: 10,
-            background: "transparent",
-            border: `1px solid ${D.border}`,
-            color: D.muted,
-            fontSize: 13,
-            cursor: "pointer",
-          }}
-        >
-          Cancel
-        </button>{" "}
-      </div>{" "}
-    </div>,
-    document.body,
+  return (
+    <RescheduleDialogView
+      service={service}
+      reason={reason}
+      setReason={setReason}
+      notes={notes}
+      setNotes={setNotes}
+      notificationType={notificationType}
+      setNotificationType={setNotificationType}
+      sending={sending}
+      seriesConfirm={seriesConfirm}
+      seriesConfirmDate={seriesConfirmDate}
+      confirmSeriesMove={confirmSeriesMove}
+      clearSeriesConfirm={() => setSeriesConfirm(null)}
+      reasons={REASONS}
+      loading={loading}
+      options={options}
+      windowFor={windowFor}
+      handleReschedule={handleReschedule}
+      showManual={showManual}
+      setShowManual={setShowManual}
+      manualDate={manualDate}
+      setManualDate={setManualDate}
+      manualTime={manualTime}
+      setManualTime={setManualTime}
+      durationMinutes={durationMinutes}
+      handleManualReschedule={handleManualReschedule}
+      manualConflicts={manualConflicts}
+      manualBestTimes={manualBestTimes}
+      manualPicked={manualPicked}
+      manualBestInRange={manualBestInRange}
+      onClose={onClose}
+    />
   );
 }
 
