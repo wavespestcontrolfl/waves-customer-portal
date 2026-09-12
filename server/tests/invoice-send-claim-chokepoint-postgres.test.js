@@ -259,6 +259,59 @@ postgres('the shared send claim on a migrated database', () => {
     });
   });
 
+  describe('a preclaimed scheduled send re-checks the visit billing guards too (pre-push Codex P1 #4131, this round)', () => {
+    async function scheduledZeroDueVisitInvoice() {
+      f = { customerId: randomUUID(), visitId: randomUUID(), invoiceId: randomUUID() };
+      await mockPg('customers').insert({ id: f.customerId, first_name: 'Fixture', last_name: 'ZeroDue', phone: '+12025550127',
+        email: `${f.customerId}@example.invalid`, property_type: 'residential', autopay_enabled: false, billing_mode: 'per_application' });
+      await mockPg('scheduled_services').insert({ id: f.visitId, customer_id: f.customerId,
+        service_type: 'Fixture Quarterly Pest Control Service', scheduled_date: etDateString(), status: 'confirmed' });
+      await mockPg('invoices').insert({ id: f.invoiceId, customer_id: f.customerId, scheduled_service_id: f.visitId,
+        invoice_number: `TST-${f.invoiceId.slice(0, 8)}`, token: randomUUID().replace(/-/g, ''), status: 'scheduled',
+        total: 0, subtotal: 0, credit_applied: 0,
+        scheduled_send_at: new Date(Date.now() - 60 * 1000), scheduled_send_attempts: 0,
+        line_items: JSON.stringify([]) });
+      return f;
+    }
+
+    test('a visit-linked invoice retotalled to $0 before its scheduled send tick: no pay link, no follow-ups armed, and the scheduler keeps its own claim/token handling', async () => {
+      await scheduledZeroDueVisitInvoice();
+
+      const summary = await InvoiceService.processScheduledSends({ limit: 5 });
+      expect(summary).toMatchObject({ sent: 0, failed: 1 });
+      // THE bug: without the fix, processScheduledSends' own preclaim
+      // ('scheduled' -> 'sending') makes both the pre-check in
+      // sendViaSMSAndEmail (zeroDueOpenVisitSendOutcome) and claimInvoiceForSend's
+      // allowClaimed branch skip the zero-due guard (SEND_CLAIMABLE_STATUSES
+      // excludes 'sending'), and a live $0 pay-link text goes out.
+      expect(sendCustomerMessage).not.toHaveBeenCalled();
+      expect(payLinkTexts()).toHaveLength(0);
+
+      const invoice = await readInvoice(f.invoiceId);
+      // The scheduler's own token-matched restore recovered its row exactly
+      // like any other pre-delivery refusal in the allowClaimed branch —
+      // back to 'scheduled', still due, one attempt consumed — never
+      // stranded under 'sending' for the 10-minute stale sweep to park, and
+      // never silently re-armed either.
+      expect(invoice.status).toBe('scheduled');
+      expect(invoice.scheduled_send_at).not.toBeNull();
+      expect(invoice.scheduled_send_attempts).toBe(1);
+      expect(invoice.scheduled_send_error).toMatch(/not sent/i);
+      expect(invoice.sent_at).toBeNull();
+      expect(invoice.sms_sent_at).toBeNull();
+    });
+
+    test('control: a visit-linked invoice with a real balance due still sends normally through the same preclaimed path', async () => {
+      await scheduledZeroDueVisitInvoice();
+      await mockPg('invoices').where({ id: f.invoiceId }).update({ total: 117, subtotal: 117 });
+
+      const summary = await InvoiceService.processScheduledSends({ limit: 5 });
+      expect(summary).toMatchObject({ sent: 1 });
+      expect(payLinkTexts()).toHaveLength(1);
+      expect((await readInvoice(f.invoiceId)).status).toBe('sent');
+    });
+  });
+
   describe('the autopay decline notice acquires the shared claim too (round-17 P1 #4131 finding 3)', () => {
     test('control: with nobody racing, the decline notice claims the invoice, texts the pay link, and finalizes it sent — the later completion-SMS block goes report-only', async () => {
       await autopayDeclineVisitFixture();

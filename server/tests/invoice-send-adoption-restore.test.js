@@ -224,6 +224,51 @@ describe('claimInvoiceForSend adoption survives a failed replacement delivery', 
     const anyRestoredToScheduled = fallback.update.mock.calls.some((c) => c[0]?.status === 'scheduled');
     expect(anyRestoredToScheduled).toBe(false);
   });
+
+  test('the provider ACCEPTS the replacement SMS but the post-send audit-row write then throws (providerOutcome.sent === true): the consumed queue row stays cancelled and the claim is never released back to draft (pre-push Codex P1 #4131, fourth instance of the send-then-bookkeeping-throw shape)', async () => {
+    const fallback = chain();
+    db
+      .mockReturnValueOnce(chain({ first: draftInvoice })) // claim read
+      .mockReturnValueOnce(chain({ first: undefined })) // pre-claim queued check (none)
+      .mockReturnValueOnce(chain({ returning: [{ ...draftInvoice, status: 'sending' }] })) // claim flip
+      .mockReturnValueOnce(chain({ first: undefined })) // reconcile: queued-under-claim check (none)
+      .mockReturnValueOnce(chain({ returning: [{ id: 'sms-queued-1', scheduled_for: new Date('2026-09-11T09:00:00.000Z') }] })) // adoption consumes the pre-existing row
+      .mockReturnValueOnce(chain({ first: undefined })) // strict re-check after the consume (none live)
+      .mockReturnValueOnce(chain({ first: { id: 'cust-1', phone: '+19415550123', first_name: 'Pat' } })) // customer lookup
+      .mockReturnValue(fallback); // finalize retry + every post-delivery best-effort step
+
+    // sendCustomerMessage attaches providerOutcome to the error it throws
+    // when the provider ACCEPTED the message but the post-send audit write
+    // failed — smsDelivered is never assigned true on this path (it is only
+    // set after sendCustomerMessage RETURNS), so without the fix the catch
+    // falls into the "NOT delivered" branch and the outer finally restores
+    // the queue row this claim's adoption cancelled — even though the
+    // replacement text it cancelled that row FOR was already accepted by
+    // the provider, so the "restored" row would go on to deliver a SECOND
+    // pay-link SMS for the same invoice.
+    const acceptedErr = Object.assign(new Error('audit row insert failed (injected)'), {
+      providerOutcome: { sent: true, providerMessageId: 'SM_injected' },
+    });
+    sendCustomerMessage.mockRejectedValueOnce(acceptedErr);
+
+    const result = await InvoiceService.sendViaSMS('inv-1');
+
+    // Recorded as delivered (recoverPostDeliverySmsBookkeeping's shape),
+    // not thrown as a failed send.
+    expect(result).toMatchObject({ sent: true, finalizeError: expect.stringContaining('audit row insert failed') });
+
+    // THE bug: nothing anywhere in the flow may restore the queue row this
+    // claim's adoption cancelled — a live send actually superseded it.
+    const anyRestoredToScheduled = fallback.update.mock.calls.some((c) => c[0]?.status === 'scheduled');
+    expect(anyRestoredToScheduled).toBe(false);
+    // ...and the invoice claim itself was never released back to 'draft' —
+    // it finalizes 'sent' through the retried finalize instead (or, if that
+    // retry also fails, stays parked under its claim for stale-claim review
+    // — never reopened for an automatic resend that would duplicate the
+    // delivered text).
+    const anyReleasedToDraft = fallback.update.mock.calls.some((c) => c[0]?.status === 'draft');
+    expect(anyReleasedToDraft).toBe(false);
+  });
 });
 
 // Codex r12 follow-on P1 #4131 round 3: EVERY pre-delivery exit in

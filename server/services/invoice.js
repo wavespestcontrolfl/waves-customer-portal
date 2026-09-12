@@ -1253,6 +1253,20 @@ async function throwForZeroDueVisitInvoice(invoiceId, fallbackRow) {
 // the claim back — nothing is texted either way. A cancellation that lands
 // AFTER this read is caught by the void sweep instead, which voids the
 // claimed row out from under this send.
+// Shared tail of a visit-invoice-under-claim refusal: dispatches to the
+// right throw for the descriptor visitInvoiceRefusalUnderClaim returned.
+// Split out (Codex pre-push audit P1 #4131, this round) so the PRECLAIMED
+// (allowClaimed) branch of claimInvoiceForSend below can reuse the exact
+// same dispatch without duplicating it: that branch's claim-restoration is
+// different (its whole point is to never touch the invoice row — see its
+// own comment), so it cannot share reverifyClaimedVisitInvoice's
+// restoreSendClaim call, only this part.
+async function throwVisitInvoiceRefusal(invoiceId, invoice, underClaim) {
+  if (underClaim.kind === "zero_due") await throwForZeroDueVisitInvoice(invoiceId, invoice);
+  if (underClaim.kind === "visit_prepaid_covered") throw visitPrepaidCoveredError(invoiceId);
+  throw visitNeverRanError(invoiceId, underClaim.visitStatus);
+}
+
 async function reverifyClaimedVisitInvoice(invoiceId, invoice, previousStatus) {
   let underClaim;
   try {
@@ -1262,9 +1276,7 @@ async function reverifyClaimedVisitInvoice(invoiceId, invoice, previousStatus) {
   }
   if (!underClaim) return;
   await restoreSendClaim(invoiceId, previousStatus, true);
-  if (underClaim.kind === "zero_due") await throwForZeroDueVisitInvoice(invoiceId, invoice);
-  if (underClaim.kind === "visit_prepaid_covered") throw visitPrepaidCoveredError(invoiceId);
-  throw visitNeverRanError(invoiceId, underClaim.visitStatus);
+  await throwVisitInvoiceRefusal(invoiceId, invoice, underClaim);
 }
 
 // Queue-adoption / reconciliation UNDER the claim (pre-push P1 r5, Codex P1
@@ -1337,6 +1349,47 @@ async function claimInvoiceForSend(invoiceId, { allowClaimed = false, firstDeliv
     // would invalidate the caller's claim token, so its own restore after
     // the throw below would match zero rows and strand the row under
     // 'sending'). Only the consumed queue rows, if any, are restored.
+    // Zero-due / visit-cancellation / prepaid-covered guards, now applied to
+    // a PRECLAIMED row too (Codex pre-push audit P1 #4131, this round):
+    // processScheduledSends flips 'scheduled' → 'sending' itself BEFORE
+    // calling in here, so BOTH sendViaSMSAndEmail's own pre-claim check
+    // (zeroDueOpenVisitSendOutcome, which reads the invoice AFTER that
+    // flip) and the freshly-claimed path's post-claim re-check
+    // (reverifyClaimedVisitInvoice, below) see a row already sitting at
+    // 'sending' — a status SEND_CLAIMABLE_STATUSES excludes — and silently
+    // no-op. A visit-linked invoice retotalled to $0, or whose visit was
+    // cancelled, between the schedule and this send tick therefore slipped
+    // every existing guard: the scheduled send proceeded and texted a live
+    // $0 pay link, arming follow-ups on nothing owed.
+    //
+    // Reuses visitInvoiceRefusalUnderClaim — the SAME lookup
+    // reverifyClaimedVisitInvoice runs for a freshly-claimed row — passing
+    // 'scheduled' as the reconstructed prior status: the only caller that
+    // ever sets allowClaimed (processScheduledSends) always preclaims from
+    // exactly that status, so this recreates the check that would have run
+    // had the flip happened here instead. Checked BEFORE the queue
+    // reconcile below so a refusal here never has to unwind a consumed
+    // queue row. Any throw — including a lookup failure — is pre-delivery
+    // (same guarantee as the branch above) and, per the comment on this
+    // whole `if (allowClaimed)` branch, must never touch the invoice row:
+    // current.status IS the caller's own 'sending' preclaim, and only the
+    // preclaimer's own claim-token restore may move it.
+    let underClaim;
+    try {
+      underClaim = await visitInvoiceRefusalUnderClaim(current, "scheduled");
+    } catch (lookupErr) {
+      lookupErr.deliveryNeverAttempted = true;
+      throw lookupErr;
+    }
+    if (underClaim) {
+      try {
+        await throwVisitInvoiceRefusal(invoiceId, current, underClaim);
+      } catch (refusalErr) {
+        refusalErr.deliveryNeverAttempted = true;
+        throw refusalErr;
+      }
+    }
+
     let consumedQueuedSendRows;
     try {
       consumedQueuedSendRows = await reconcileQueuedSendUnderClaim(invoiceId, current.status, adoptsQueuedInvoiceSend);
@@ -3451,7 +3504,26 @@ const InvoiceService = {
 
         return { sent: true, payUrl };
       } catch (err) {
-        if (smsDelivered) {
+        // sendCustomerMessage attaches providerOutcome to the error it
+        // throws when Twilio ACCEPTED the message but its own post-send
+        // audit write failed (send-customer-message.js auditErr) — Codex
+        // pre-push audit P1 #4131, fourth instance of the pattern: a
+        // delivery fact recorded after bookkeeping that a throw between the
+        // two erases. smsDelivered is set ONLY on the success path above
+        // (after sendCustomerMessage RETURNS), so it is still false here —
+        // without this check the "NOT delivered" branch below runs, and the
+        // `finally` guard (keyed on `delivered`, not `smsDelivered`) then
+        // restores the queued SMS this claim adopted-and-cancelled and
+        // releases the claim, even though the replacement text this claim
+        // sent was already accepted — so the "restored" queued text goes on
+        // to deliver a SECOND pay-link SMS for the same invoice. Mirrors
+        // complete-scheduled-service.js's completion-decline path
+        // (`providerAccepted`): mark delivery accepted BEFORE any
+        // bookkeeping runs, so both `smsDelivered` and `delivered` read true
+        // exactly as the success path leaves them.
+        if (smsDelivered || err.providerOutcome?.sent === true) {
+          smsDelivered = true;
+          delivered = true;
           // The customer HAS the pay-link text — this is a post-delivery
           // bookkeeping failure (invoice finalize, follow-up scheduling, lead
           // conversion), NOT a failed send. `delivered` is already true (set
