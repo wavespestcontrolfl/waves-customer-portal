@@ -67,6 +67,7 @@ const REASON_LABELS = {
   email_invalid: "Email couldn't be captured",
   secondary_contact_captured: "Second contact named — confirm",
   property_role_confirm: "Property roles",
+  reschedule_link_promise: "Promised reschedule link",
 };
 
 // Human-readable occupancy names for property-role proposal rows.
@@ -606,6 +607,11 @@ export default function TriageInboxTabV2() {
                 // click instead of an accept/deny verdict (the server rejects
                 // verdicts on them, same as bounce cards).
                 const isPropertyRoleCard = isTriage && item.reason_code === "property_role_confirm";
+                // Parked reschedule-link promises aren't call verdicts either —
+                // the server 400s /verdict on them (settling the underlying
+                // commitment needs the single-card Resolve/Dismiss transition,
+                // same as bounce and property-role cards above).
+                const isPromiseCard = isTriage && item.reason_code === "reschedule_link_promise";
                 // While the re-transcription is still running the card is a
                 // placeholder — resolving it would bury the candidates the
                 // worker is about to write (the worker reopens a card closed
@@ -639,7 +645,7 @@ export default function TriageInboxTabV2() {
                               on the call's ROUTING card would render here as if
                               it judged this still-pending property card — the
                               two resolve independently. */}
-                          {!isPropertyRoleCard && (
+                          {!isPropertyRoleCard && !isPromiseCard && (
                             <VerdictBadge verdict={item.feedback_verdict} wrongFields={item.feedback_wrong_fields} />
                           )}
                         </div>
@@ -684,6 +690,22 @@ export default function TriageInboxTabV2() {
                             >
                               <CheckCircle2 size={13} strokeWidth={1.75} className="mr-1" aria-hidden />
                               {isAnalyzing ? "Analyzing…" : actioning === busyKey ? "Saving…" : "Resolve"}
+                            </Button>
+                          ) : isPromiseCard ? (
+                            // Two ways to settle a parked promise: it was
+                            // handled some other way (Mark handled → /resolve,
+                            // settles the commitment as fulfilled), or the
+                            // obligation no longer applies (the generic
+                            // Dismiss button above → void). Neither is a call
+                            // verdict, so neither posts to /verdict.
+                            <Button
+                              size="sm"
+                              variant="primary"
+                              disabled={actioning === busyKey}
+                              onClick={() => resolveItem(item)}
+                            >
+                              <CheckCircle2 size={13} strokeWidth={1.75} className="mr-1" aria-hidden />
+                              {actioning === busyKey ? "Saving…" : "Mark handled"}
                             </Button>
                           ) : (
                             <>
