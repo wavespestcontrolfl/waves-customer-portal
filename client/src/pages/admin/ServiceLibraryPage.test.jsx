@@ -121,4 +121,68 @@ describe("ServiceLibraryPage hub", () => {
       );
     });
   });
+
+  it("keeps recurring and one-time views in the stacked catalog", () => {
+    renderServices();
+
+    expect(
+      screen.getByRole("button", { name: /Recurring/ }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: /One-Time/ }),
+    ).toBeInTheDocument();
+  });
+
+  it("keeps unsaved detail fields mounted during a catalog refresh", async () => {
+    const service = {
+      id: "fixture-service",
+      name: "Fixture Pest Service",
+      category: "pest_control",
+      billing_type: "recurring",
+      is_active: true,
+    };
+    let catalogRequests = 0;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((url, options) => {
+        if (options?.method === "PUT") {
+          return Promise.resolve({ ok: true, json: async () => ({}) });
+        }
+        if (String(url).includes("/admin/services")) {
+          catalogRequests += 1;
+          if (catalogRequests > 1) return new Promise(() => {});
+          return Promise.resolve({
+            ok: true,
+            json: async () => ({ services: [service] }),
+          });
+        }
+        throw new Error(`Unexpected request: ${url}`);
+      }),
+    );
+    renderServices();
+    fireEvent.click(await screen.findByText(service.name));
+    fireEvent.change(screen.getByRole("textbox", { name: "Name" }), {
+      target: { value: "Unsaved service name" },
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Active" }));
+    await waitFor(() => expect(catalogRequests).toBe(2));
+
+    expect(screen.getByRole("textbox", { name: "Name" })).toHaveValue(
+      "Unsaved service name",
+    );
+  });
+
+  it("keeps the existing catalog retry label and request", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => Promise.reject(new Error("down"))));
+    renderServices();
+
+    const retry = await screen.findByRole("button", { name: "Retry" });
+    expect(
+      screen.queryByRole("button", { name: "Try again" }),
+    ).not.toBeInTheDocument();
+    fireEvent.click(retry);
+
+    await waitFor(() => expect(fetch).toHaveBeenCalledTimes(2));
+  });
 });

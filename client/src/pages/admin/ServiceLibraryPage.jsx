@@ -663,7 +663,7 @@ function ServiceRows({
   onSelect,
   renderDetail,
 }) {
-  if (loading) {
+  if (loading && services.length === 0) {
     return (
       <div className="p-8 text-center text-ink-secondary">
         Loading services…
@@ -976,6 +976,8 @@ function CompactCategoryChips({ counts, selectedView, onChange }) {
       }),
     ),
     { key: "view:waveguard", label: "WaveGuard", count: counts.waveguard },
+    { key: "view:recurring", label: "Recurring", count: counts.recurring },
+    { key: "view:onetime", label: "One-Time", count: counts.onetime },
     ...(counts.inactive > 0
       ? [{ key: "view:inactive", label: "Inactive", count: counts.inactive }]
       : []),
@@ -1210,10 +1212,13 @@ export default function ServiceLibraryPage() {
       )}
       {tab === "catalog" && loadError && (
         <Card className="mb-3">
-          <CardBody>
-            <ActionFeedback error onRetry={loadServices}>
+          <CardBody className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+            <ActionFeedback error className="flex-1">
               Service catalog unavailable: {loadError}
             </ActionFeedback>
+            <Button variant="secondary" onClick={loadServices}>
+              Retry
+            </Button>
           </CardBody>
         </Card>
       )}
