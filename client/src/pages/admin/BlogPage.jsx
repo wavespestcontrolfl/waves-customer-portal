@@ -1,4 +1,4 @@
-import { useState, useEffect, lazy, Suspense } from "react";
+import React, { useState, useEffect, lazy, Suspense } from "react";
 import { useLocation, useNavigate, useSearchParams } from "react-router-dom";
 import useRenderedTabBeacon from "../../hooks/useRenderedTabBeacon";
 import {
@@ -24,26 +24,51 @@ const AutonomousContentReviewPage = lazy(
 const ContentRegistryPage = lazy(() => import("./ContentRegistryPage"));
 
 const API_BASE = import.meta.env.VITE_API_URL || "/api";
-// V2 token pass: `teal` folded to zinc-900, `purple`/`orange` fold too.
-// Semantic green/amber/red preserved for SEO score / status accents.
+// Tier 2 token pass: preserve the existing inline-style architecture while
+// folding every non-alert accent into the shared zinc palette.
 const D = {
   bg: "#F4F4F5",
   card: "#FFFFFF",
-  border: "#E4E4E7",
-  teal: "#18181B",
-  green: "#15803D",
-  amber: "#A16207",
-  red: "#991B1B",
-  orange: "#18181B",
-  text: "#27272A",
+  border: "rgba(9, 9, 11, 0.06)",
+  teal: "#09090B",
+  green: "#52525B",
+  amber: "#52525B",
+  red: "#A32D2D",
+  orange: "#52525B",
+  text: "#52525B",
   muted: "#71717A",
   white: "#FFFFFF",
-  purple: "#18181B",
+  purple: "#09090B",
   heading: "#09090B",
-  inputBorder: "#D4D4D8",
+  inputBorder: "rgba(9, 9, 11, 0.1)",
 };
 const MONO = "'JetBrains Mono', monospace";
 const HUB_BLOG_TARGET_SITES = ["wavespestcontrol.com"];
+const BLOG_TOKEN_STYLES = `
+  .admin-blog-token-scope button {
+    text-transform: uppercase;
+    letter-spacing: 0.06em !important;
+    font-weight: 500;
+    font-size: 14px;
+  }
+  .admin-blog-token-scope .admin-blog-generate:disabled {
+    border-color: ${D.border} !important;
+    background: ${D.bg} !important;
+    color: ${D.text} !important;
+  }
+  @media (max-width: 639px) {
+    .admin-blog-token-scope button,
+    .admin-blog-token-scope input,
+    .admin-blog-token-scope select {
+      min-height: 44px;
+    }
+  }
+`;
+const TOKEN_SCOPED_TABS = new Set(["posts", "generate", "audit"]);
+
+function blogTokenScopeClass(tab) {
+  return TOKEN_SCOPED_TABS.has(tab) ? "admin-blog-token-scope" : undefined;
+}
 
 async function parseAdminResponse(response) {
   const text = await response.text();
@@ -149,9 +174,7 @@ function Card({ children, style }) {
 
 function seoColor(score) {
   if (!score) return D.muted;
-  if (score >= 70) return D.green;
-  if (score >= 50) return D.amber;
-  return D.red;
+  return score < 50 ? D.red : D.text;
 }
 
 // =========================================================================
@@ -187,7 +210,9 @@ function PostList({ status, onSelectPost }) {
         setError(requestError.message || "Request failed");
         setLoading(false);
       });
-    return () => { active = false; };
+    return () => {
+      active = false;
+    };
   }, [status, filterTag, filterCity, search, retry]);
 
   const tags = [...new Set(posts.map((p) => p.tag).filter(Boolean))].sort();
@@ -222,7 +247,7 @@ function PostList({ status, onSelectPost }) {
             border: `1px solid ${D.border}`,
             background: D.bg,
             color: D.text,
-            fontSize: 12,
+            fontSize: 14,
             width: 180,
           }}
         />{" "}
@@ -235,7 +260,7 @@ function PostList({ status, onSelectPost }) {
             border: `1px solid ${D.border}`,
             background: D.bg,
             color: D.text,
-            fontSize: 12,
+            fontSize: 14,
           }}
         >
           {" "}
@@ -255,7 +280,7 @@ function PostList({ status, onSelectPost }) {
             border: `1px solid ${D.border}`,
             background: D.bg,
             color: D.text,
-            fontSize: 12,
+            fontSize: 14,
           }}
         >
           {" "}
@@ -266,7 +291,7 @@ function PostList({ status, onSelectPost }) {
             </option>
           ))}
         </select>{" "}
-        <span style={{ fontSize: 12, color: D.muted, marginLeft: "auto" }}>
+        <span style={{ fontSize: 14, color: D.muted, marginLeft: "auto" }}>
           {error ? "Posts unavailable" : `${posts.length} posts`}
         </span>{" "}
       </div>
@@ -274,8 +299,19 @@ function PostList({ status, onSelectPost }) {
       {error ? (
         <div role="alert" style={{ color: D.red, padding: 16, fontSize: 14 }}>
           <p>Couldn't load posts — {error}</p>
-          <button type="button" onClick={() => setRetry((value) => value + 1)}
-            style={{ minHeight: 44, padding: "8px 16px", border: `1px solid ${D.border}`, borderRadius: 4, background: D.card, color: D.text, fontSize: 14 }}>
+          <button
+            type="button"
+            onClick={() => setRetry((value) => value + 1)}
+            style={{
+              minHeight: 44,
+              padding: "8px 16px",
+              border: `1px solid ${D.border}`,
+              borderRadius: 4,
+              background: D.card,
+              color: D.text,
+              fontSize: 14,
+            }}
+          >
             Try again
           </button>
         </div>
@@ -331,7 +367,7 @@ function PostList({ status, onSelectPost }) {
                 {p.seo_score != null && p.seo_score < 50 && (
                   <div
                     style={{
-                      fontSize: 11,
+                      fontSize: 14,
                       color: D.red,
                       fontWeight: 500,
                       marginBottom: 4,
@@ -344,7 +380,7 @@ function PostList({ status, onSelectPost }) {
                   style={{
                     display: "flex",
                     gap: 12,
-                    fontSize: 11,
+                    fontSize: 14,
                     color: D.muted,
                     flexWrap: "wrap",
                   }}
@@ -362,26 +398,52 @@ function PostList({ status, onSelectPost }) {
                 {status === "queued" && !p.content && (
                   <span
                     style={{
-                      fontSize: 10,
-                      padding: "3px 8px",
-                      borderRadius: 4,
-                      background: D.teal + "22",
-                      color: D.teal,
+                      display: "inline-flex",
+                      alignItems: "center",
+                      gap: 6,
+                      fontSize: 14,
+                      color: D.text,
+                      textTransform: "uppercase",
+                      letterSpacing: "0.06em",
                     }}
                   >
+                    <span
+                      aria-hidden="true"
+                      data-qa="blog-status-dot"
+                      style={{
+                        width: 5,
+                        height: 5,
+                        boxSizing: "border-box",
+                        borderRadius: "50%",
+                        border: `1px solid ${D.text}`,
+                      }}
+                    />
                     Needs Content
                   </span>
                 )}
                 {status === "queued" && p.content && (
                   <span
                     style={{
-                      fontSize: 10,
-                      padding: "3px 8px",
-                      borderRadius: 4,
-                      background: D.green + "22",
-                      color: D.green,
+                      display: "inline-flex",
+                      alignItems: "center",
+                      gap: 6,
+                      fontSize: 14,
+                      color: D.muted,
+                      textTransform: "uppercase",
+                      letterSpacing: "0.06em",
                     }}
                   >
+                    <span
+                      aria-hidden="true"
+                      data-qa="blog-status-dot"
+                      style={{
+                        width: 5,
+                        height: 5,
+                        boxSizing: "border-box",
+                        borderRadius: "50%",
+                        border: `1px solid ${D.muted}`,
+                      }}
+                    />
                     Content Ready
                   </span>
                 )}
@@ -712,7 +774,7 @@ function PostEditor({ post, onBack, onUpdate }) {
           border: `1px solid ${D.border}`,
           background: "transparent",
           color: D.muted,
-          fontSize: 12,
+          fontSize: 14,
           cursor: "pointer",
         }}
       >
@@ -727,7 +789,7 @@ function PostEditor({ post, onBack, onUpdate }) {
             {" "}
             <label
               style={{
-                fontSize: 11,
+                fontSize: 14,
                 color: D.muted,
                 display: "block",
                 marginBottom: 4,
@@ -766,7 +828,7 @@ function PostEditor({ post, onBack, onUpdate }) {
               {" "}
               <label
                 style={{
-                  fontSize: 11,
+                  fontSize: 14,
                   color: D.muted,
                   display: "block",
                   marginBottom: 4,
@@ -786,7 +848,7 @@ function PostEditor({ post, onBack, onUpdate }) {
                   border: `1px solid ${D.border}`,
                   background: D.bg,
                   color: D.text,
-                  fontSize: 12,
+                  fontSize: 14,
                 }}
               />{" "}
             </div>{" "}
@@ -794,7 +856,7 @@ function PostEditor({ post, onBack, onUpdate }) {
               {" "}
               <label
                 style={{
-                  fontSize: 11,
+                  fontSize: 14,
                   color: D.muted,
                   display: "block",
                   marginBottom: 4,
@@ -812,7 +874,7 @@ function PostEditor({ post, onBack, onUpdate }) {
                   border: `1px solid ${D.border}`,
                   background: D.bg,
                   color: D.muted,
-                  fontSize: 12,
+                  fontSize: 14,
                 }}
               />{" "}
             </div>{" "}
@@ -820,7 +882,7 @@ function PostEditor({ post, onBack, onUpdate }) {
               {" "}
               <label
                 style={{
-                  fontSize: 11,
+                  fontSize: 14,
                   color: D.muted,
                   display: "block",
                   marginBottom: 4,
@@ -840,7 +902,7 @@ function PostEditor({ post, onBack, onUpdate }) {
                   border: `1px solid ${D.border}`,
                   background: D.bg,
                   color: D.text,
-                  fontSize: 12,
+                  fontSize: 14,
                   cursor: "pointer",
                 }}
               >
@@ -871,7 +933,7 @@ function PostEditor({ post, onBack, onUpdate }) {
               {" "}
               <label
                 style={{
-                  fontSize: 11,
+                  fontSize: 14,
                   color: D.muted,
                   display: "block",
                   marginBottom: 4,
@@ -879,7 +941,29 @@ function PostEditor({ post, onBack, onUpdate }) {
               >
                 Status
               </label>{" "}
-              <div style={{ padding: "6px 10px", fontSize: 12, color: D.teal }}>
+              <div
+                style={{
+                  padding: "6px 10px",
+                  display: "inline-flex",
+                  alignItems: "center",
+                  gap: 6,
+                  fontSize: 14,
+                  color: D.text,
+                  textTransform: "uppercase",
+                  letterSpacing: "0.06em",
+                }}
+              >
+                <span
+                  aria-hidden="true"
+                  data-qa="blog-status-dot"
+                  style={{
+                    width: 5,
+                    height: 5,
+                    boxSizing: "border-box",
+                    borderRadius: "50%",
+                    border: `1px solid ${D.text}`,
+                  }}
+                />
                 {editing.status}
               </div>{" "}
             </div>{" "}
@@ -888,7 +972,7 @@ function PostEditor({ post, onBack, onUpdate }) {
             {" "}
             <label
               style={{
-                fontSize: 11,
+                fontSize: 14,
                 color: D.muted,
                 display: "block",
                 marginBottom: 4,
@@ -911,12 +995,12 @@ function PostEditor({ post, onBack, onUpdate }) {
                 border: `1px solid ${D.border}`,
                 background: D.bg,
                 color: D.text,
-                fontSize: 12,
+                fontSize: 14,
               }}
             />{" "}
             <div
               style={{
-                fontSize: 10,
+                fontSize: 14,
                 color:
                   (editing.meta_description || "").length > 0 &&
                   ((editing.meta_description || "").length < 115 ||
@@ -936,7 +1020,7 @@ function PostEditor({ post, onBack, onUpdate }) {
         {" "}
         <div
           style={{
-            fontSize: 13,
+            fontSize: 14,
             fontWeight: 500,
             color: D.heading,
             marginBottom: 10,
@@ -956,7 +1040,7 @@ function PostEditor({ post, onBack, onUpdate }) {
             {" "}
             <label
               style={{
-                fontSize: 11,
+                fontSize: 14,
                 color: D.muted,
                 display: "block",
                 marginBottom: 4,
@@ -976,7 +1060,7 @@ function PostEditor({ post, onBack, onUpdate }) {
                 border: `1px solid ${D.border}`,
                 background: D.bg,
                 color: D.text,
-                fontSize: 12,
+                fontSize: 14,
                 cursor: "pointer",
               }}
             >
@@ -994,7 +1078,7 @@ function PostEditor({ post, onBack, onUpdate }) {
             {" "}
             <label
               style={{
-                fontSize: 11,
+                fontSize: 14,
                 color: D.muted,
                 display: "block",
                 marginBottom: 4,
@@ -1017,7 +1101,7 @@ function PostEditor({ post, onBack, onUpdate }) {
                 border: `1px solid ${D.border}`,
                 background: D.bg,
                 color: D.text,
-                fontSize: 12,
+                fontSize: 14,
                 cursor: "pointer",
               }}
             >
@@ -1036,7 +1120,7 @@ function PostEditor({ post, onBack, onUpdate }) {
             {" "}
             <label
               style={{
-                fontSize: 11,
+                fontSize: 14,
                 color: D.muted,
                 display: "block",
                 marginBottom: 4,
@@ -1060,7 +1144,7 @@ function PostEditor({ post, onBack, onUpdate }) {
                 border: `1px solid ${D.border}`,
                 background: D.bg,
                 color: D.text,
-                fontSize: 12,
+                fontSize: 14,
               }}
             />{" "}
           </div>{" "}
@@ -1068,7 +1152,7 @@ function PostEditor({ post, onBack, onUpdate }) {
             {" "}
             <label
               style={{
-                fontSize: 11,
+                fontSize: 14,
                 color: D.muted,
                 display: "block",
                 marginBottom: 4,
@@ -1092,7 +1176,7 @@ function PostEditor({ post, onBack, onUpdate }) {
                 border: `1px solid ${D.border}`,
                 background: D.bg,
                 color: D.text,
-                fontSize: 12,
+                fontSize: 14,
               }}
             />{" "}
           </div>{" "}
@@ -1100,7 +1184,7 @@ function PostEditor({ post, onBack, onUpdate }) {
             {" "}
             <label
               style={{
-                fontSize: 11,
+                fontSize: 14,
                 color: D.muted,
                 display: "block",
                 marginBottom: 4,
@@ -1120,7 +1204,7 @@ function PostEditor({ post, onBack, onUpdate }) {
                 border: `1px solid ${D.border}`,
                 background: D.bg,
                 color: D.text,
-                fontSize: 12,
+                fontSize: 14,
                 cursor: "pointer",
               }}
             >
@@ -1137,7 +1221,7 @@ function PostEditor({ post, onBack, onUpdate }) {
             {" "}
             <label
               style={{
-                fontSize: 11,
+                fontSize: 14,
                 color: D.muted,
                 display: "block",
                 marginBottom: 4,
@@ -1157,7 +1241,7 @@ function PostEditor({ post, onBack, onUpdate }) {
                 border: `1px solid ${D.border}`,
                 background: D.bg,
                 color: D.text,
-                fontSize: 12,
+                fontSize: 14,
                 cursor: "pointer",
               }}
             >
@@ -1174,7 +1258,7 @@ function PostEditor({ post, onBack, onUpdate }) {
             {" "}
             <label
               style={{
-                fontSize: 11,
+                fontSize: 14,
                 color: D.muted,
                 display: "block",
                 marginBottom: 4,
@@ -1197,7 +1281,7 @@ function PostEditor({ post, onBack, onUpdate }) {
                 border: `1px solid ${D.border}`,
                 background: D.bg,
                 color: D.text,
-                fontSize: 12,
+                fontSize: 14,
               }}
             />{" "}
           </div>{" "}
@@ -1206,7 +1290,7 @@ function PostEditor({ post, onBack, onUpdate }) {
           {" "}
           <label
             style={{
-              fontSize: 11,
+              fontSize: 14,
               color: D.muted,
               display: "block",
               marginBottom: 6,
@@ -1224,8 +1308,8 @@ function PostEditor({ post, onBack, onUpdate }) {
                   onClick={() => toggleServiceArea(sa.city)}
                   style={{
                     padding: "4px 10px",
-                    borderRadius: 999,
-                    fontSize: 11,
+                    borderRadius: 4,
+                    fontSize: 14,
                     cursor: "pointer",
                     border: `1px solid ${active ? D.teal : D.border}`,
                     background: active ? D.teal : "transparent",
@@ -1242,7 +1326,7 @@ function PostEditor({ post, onBack, onUpdate }) {
           {" "}
           <label
             style={{
-              fontSize: 11,
+              fontSize: 14,
               color: D.muted,
               display: "block",
               marginBottom: 6,
@@ -1250,12 +1334,19 @@ function PostEditor({ post, onBack, onUpdate }) {
           >
             Publish target
           </label>
-          <div style={{ display: "flex", flexWrap: "wrap", gap: 8, alignItems: "center" }}>
+          <div
+            style={{
+              display: "flex",
+              flexWrap: "wrap",
+              gap: 8,
+              alignItems: "center",
+            }}
+          >
             <span
               style={{
                 padding: "4px 10px",
-                borderRadius: 999,
-                fontSize: 11,
+                borderRadius: 3,
+                fontSize: 14,
                 border: `1px solid ${D.green}`,
                 background: D.green,
                 color: D.white,
@@ -1264,8 +1355,9 @@ function PostEditor({ post, onBack, onUpdate }) {
             >
               Hub — wavespestcontrol.com
             </span>
-            <span style={{ color: D.muted, fontSize: 12 }}>
-              Blog posts publish only on the Waves hub. Use service/location pages for spoke domains.
+            <span style={{ color: D.muted, fontSize: 14 }}>
+              Blog posts publish only on the Waves hub. Use service/location
+              pages for spoke domains.
             </span>
           </div>
         </div>{" "}
@@ -1295,8 +1387,8 @@ function PostEditor({ post, onBack, onUpdate }) {
                   borderRadius: 6,
                   border: "none",
                   background: D.teal,
-                  color: D.heading,
-                  fontSize: 12,
+                  color: D.white,
+                  fontSize: 14,
                   fontWeight: 500,
                   cursor: "pointer",
                   opacity: generating ? 0.5 : 1,
@@ -1317,7 +1409,7 @@ function PostEditor({ post, onBack, onUpdate }) {
                     border: `1px solid ${D.border}`,
                     background: "transparent",
                     color: D.muted,
-                    fontSize: 12,
+                    fontSize: 14,
                     cursor: "pointer",
                     opacity: generating ? 0.5 : 1,
                   }}
@@ -1333,7 +1425,7 @@ function PostEditor({ post, onBack, onUpdate }) {
                     border: `1px solid ${D.amber}`,
                     background: "transparent",
                     color: D.amber,
-                    fontSize: 12,
+                    fontSize: 14,
                     cursor: "pointer",
                     opacity: optimizing ? 0.5 : 1,
                   }}
@@ -1356,7 +1448,7 @@ function PostEditor({ post, onBack, onUpdate }) {
             }}
           >
             {" "}
-            <label style={{ fontSize: 11, color: D.muted }}>
+            <label style={{ fontSize: 14, color: D.muted }}>
               Featured Image (AI-generated)
             </label>{" "}
             <button
@@ -1366,7 +1458,7 @@ function PostEditor({ post, onBack, onUpdate }) {
               style={{
                 padding: "4px 10px",
                 borderRadius: 6,
-                fontSize: 11,
+                fontSize: 14,
                 fontWeight: 500,
                 border: `1px solid ${D.teal}`,
                 background: "transparent",
@@ -1402,7 +1494,7 @@ function PostEditor({ post, onBack, onUpdate }) {
                 background: `${D.amber}15`,
                 border: `1px solid ${D.amber}66`,
                 color: D.amber,
-                fontSize: 12,
+                fontSize: 14,
                 lineHeight: 1.5,
               }}
             >
@@ -1413,7 +1505,7 @@ function PostEditor({ post, onBack, onUpdate }) {
                     marginTop: 6,
                     color: D.red,
                     fontFamily: MONO,
-                    fontSize: 11,
+                    fontSize: 14,
                   }}
                 >
                   Last attempt: {imageError}
@@ -1436,7 +1528,7 @@ function PostEditor({ post, onBack, onUpdate }) {
               border: `1px solid ${D.border}`,
               background: D.bg,
               color: D.text,
-              fontSize: 13,
+              fontSize: 14,
               lineHeight: 1.7,
               fontFamily: "'Roboto', Arial, sans-serif",
               resize: "vertical",
@@ -1461,7 +1553,7 @@ function PostEditor({ post, onBack, onUpdate }) {
               display: "flex",
               gap: 16,
               marginTop: 8,
-              fontSize: 12,
+              fontSize: 14,
               color: D.muted,
             }}
           >
@@ -1509,10 +1601,10 @@ function PostEditor({ post, onBack, onUpdate }) {
               }}
             >
               {" "}
-              <div style={{ fontSize: 11, color: D.muted }}>
+              <div style={{ fontSize: 14, color: D.muted }}>
                 Suggested Title
               </div>{" "}
-              <div style={{ fontSize: 13, color: D.heading }}>
+              <div style={{ fontSize: 14, color: D.heading }}>
                 {optimization.suggested_title}
               </div>{" "}
             </div>
@@ -1527,10 +1619,10 @@ function PostEditor({ post, onBack, onUpdate }) {
               }}
             >
               {" "}
-              <div style={{ fontSize: 11, color: D.muted }}>
+              <div style={{ fontSize: 14, color: D.muted }}>
                 Suggested Meta
               </div>{" "}
-              <div style={{ fontSize: 13, color: D.text }}>
+              <div style={{ fontSize: 14, color: D.text }}>
                 {optimization.suggested_meta}
               </div>{" "}
             </div>
@@ -1545,10 +1637,10 @@ function PostEditor({ post, onBack, onUpdate }) {
               }}
             >
               {" "}
-              <div style={{ fontSize: 11, color: D.muted }}>
+              <div style={{ fontSize: 14, color: D.muted }}>
                 Suggested Keyword
               </div>{" "}
-              <div style={{ fontSize: 13, color: D.teal }}>
+              <div style={{ fontSize: 14, color: D.teal }}>
                 {optimization.suggested_keyword}
               </div>{" "}
             </div>
@@ -1563,13 +1655,13 @@ function PostEditor({ post, onBack, onUpdate }) {
               }}
             >
               {" "}
-              <div style={{ fontSize: 11, color: D.muted, marginBottom: 4 }}>
+              <div style={{ fontSize: 14, color: D.muted, marginBottom: 4 }}>
                 SEO Improvements
               </div>
               {optimization.seo_improvements.map((s, i) => (
                 <div
                   key={i}
-                  style={{ fontSize: 12, color: D.text, marginBottom: 2 }}
+                  style={{ fontSize: 14, color: D.text, marginBottom: 2 }}
                 >
                   {"•"} {s}
                 </div>
@@ -1586,13 +1678,13 @@ function PostEditor({ post, onBack, onUpdate }) {
               }}
             >
               {" "}
-              <div style={{ fontSize: 11, color: D.muted, marginBottom: 4 }}>
+              <div style={{ fontSize: 14, color: D.muted, marginBottom: 4 }}>
                 Add Internal Links
               </div>
               {optimization.missing_internal_links.map((l, i) => (
                 <div
                   key={i}
-                  style={{ fontSize: 12, color: D.text, marginBottom: 2 }}
+                  style={{ fontSize: 14, color: D.text, marginBottom: 2 }}
                 >
                   "<span style={{ color: D.teal }}>{l.anchor_text}</span>" →{" "}
                   {l.url}
@@ -1603,7 +1695,7 @@ function PostEditor({ post, onBack, onUpdate }) {
           {optimization.estimated_new_score && (
             <div
               style={{
-                fontSize: 13,
+                fontSize: 14,
                 color: D.green,
                 marginTop: 8,
                 fontWeight: 500,
@@ -1618,9 +1710,9 @@ function PostEditor({ post, onBack, onUpdate }) {
               padding: "8px 16px",
               borderRadius: 6,
               border: "none",
-              background: D.amber,
-              color: D.bg,
-              fontSize: 12,
+              background: D.heading,
+              color: D.white,
+              fontSize: 14,
               fontWeight: 500,
               cursor: "pointer",
               marginTop: 12,
@@ -1655,7 +1747,7 @@ function PostEditor({ post, onBack, onUpdate }) {
             border: "none",
             background: D.teal,
             color: D.white,
-            fontSize: 13,
+            fontSize: 14,
             fontWeight: 500,
             cursor: "pointer",
           }}
@@ -1675,7 +1767,7 @@ function PostEditor({ post, onBack, onUpdate }) {
               border: `1px solid ${D.purple}`,
               background: "transparent",
               color: D.purple,
-              fontSize: 13,
+              fontSize: 14,
               fontWeight: 500,
               cursor: "pointer",
               opacity: sharing ? 0.5 : 1,
@@ -1724,34 +1816,35 @@ function AstroPublishPanel({
             display: "inline-flex",
             alignItems: "center",
             gap: 6,
-            padding: "4px 10px",
-            borderRadius: 999,
-            fontSize: 11,
+            fontSize: 14,
             fontWeight: 500,
-            background: pill.bg,
             color: pill.fg,
-            border: `1px solid ${pill.border}`,
+            textTransform: "uppercase",
+            letterSpacing: "0.06em",
           }}
         >
           {" "}
           <span
+            data-qa="blog-status-dot"
             style={{
-              width: 6,
-              height: 6,
+              width: 5,
+              height: 5,
+              boxSizing: "border-box",
               borderRadius: 999,
-              background: pill.fg,
+              background: pill.filled ? pill.dot : "transparent",
+              border: pill.filled ? "none" : `1px solid ${pill.dot}`,
               display: "inline-block",
             }}
           />
           {pill.label}
         </div>
         {post.astro_pr_number && (
-          <div style={{ fontSize: 11, color: D.muted }}>
+          <div style={{ fontSize: 14, color: D.muted }}>
             PR #{post.astro_pr_number}
           </div>
         )}
         {post.astro_branch_name && (
-          <div style={{ fontSize: 11, color: D.muted, fontFamily: MONO }}>
+          <div style={{ fontSize: 14, color: D.muted, fontFamily: MONO }}>
             {post.astro_branch_name}
           </div>
         )}
@@ -1766,7 +1859,7 @@ function AstroPublishPanel({
               border: "none",
               background: D.green,
               color: D.white,
-              fontSize: 13,
+              fontSize: 14,
               fontWeight: 500,
               cursor: "pointer",
               opacity: publishing ? 0.5 : 1,
@@ -1787,7 +1880,7 @@ function AstroPublishPanel({
                   borderRadius: 8,
                   border: `1px solid ${D.border}`,
                   color: D.text,
-                  fontSize: 12,
+                  fontSize: 14,
                   textDecoration: "none",
                 }}
               >
@@ -1803,7 +1896,7 @@ function AstroPublishPanel({
                 border: `1px solid ${D.border}`,
                 background: "transparent",
                 color: D.muted,
-                fontSize: 12,
+                fontSize: 14,
                 cursor: "pointer",
                 opacity: refreshing ? 0.5 : 1,
               }}
@@ -1820,7 +1913,7 @@ function AstroPublishPanel({
                   border: "none",
                   background: D.green,
                   color: D.white,
-                  fontSize: 13,
+                  fontSize: 14,
                   fontWeight: 500,
                   cursor: "pointer",
                   opacity: merging ? 0.5 : 1,
@@ -1839,7 +1932,7 @@ function AstroPublishPanel({
                   border: `1px solid ${D.red}`,
                   background: "transparent",
                   color: D.red,
-                  fontSize: 13,
+                  fontSize: 14,
                   fontWeight: 500,
                   cursor: "pointer",
                   opacity: publishing ? 0.5 : 1,
@@ -1853,7 +1946,7 @@ function AstroPublishPanel({
         {status === "merged" && (
           <>
             {" "}
-            <div style={{ fontSize: 12, color: D.muted }}>
+            <div style={{ fontSize: 14, color: D.muted }}>
               Merged. Live build in progress.
             </div>
             {post.astro_live_url && (
@@ -1866,7 +1959,7 @@ function AstroPublishPanel({
                   borderRadius: 8,
                   border: `1px solid ${D.green}`,
                   color: D.green,
-                  fontSize: 12,
+                  fontSize: 14,
                   textDecoration: "none",
                   fontWeight: 500,
                 }}
@@ -1883,7 +1976,7 @@ function AstroPublishPanel({
                 border: `1px solid ${D.border}`,
                 background: "transparent",
                 color: D.muted,
-                fontSize: 12,
+                fontSize: 14,
                 cursor: "pointer",
                 opacity: refreshing ? 0.5 : 1,
               }}
@@ -1896,10 +1989,10 @@ function AstroPublishPanel({
               style={{
                 padding: "8px 14px",
                 borderRadius: 8,
-                border: "1px solid #d6d3d1",
-                background: "#fafaf9",
-                color: "#991B1B",
-                fontSize: 12,
+                border: `1px solid ${D.border}`,
+                background: D.card,
+                color: D.red,
+                fontSize: 14,
                 fontWeight: 500,
                 cursor: "pointer",
                 opacity: unpublishing ? 0.5 : 1,
@@ -1921,7 +2014,7 @@ function AstroPublishPanel({
                   borderRadius: 8,
                   border: `1px solid ${D.green}`,
                   color: D.green,
-                  fontSize: 12,
+                  fontSize: 14,
                   textDecoration: "none",
                   fontWeight: 500,
                 }}
@@ -1935,10 +2028,10 @@ function AstroPublishPanel({
               style={{
                 padding: "8px 14px",
                 borderRadius: 8,
-                border: "1px solid #d6d3d1",
-                background: "#fafaf9",
-                color: "#991B1B",
-                fontSize: 12,
+                border: `1px solid ${D.border}`,
+                background: D.card,
+                color: D.red,
+                fontSize: 14,
                 fontWeight: 500,
                 cursor: "pointer",
                 opacity: unpublishing ? 0.5 : 1,
@@ -1960,7 +2053,7 @@ function AstroPublishPanel({
                 border: `1px solid ${D.border}`,
                 background: "transparent",
                 color: D.muted,
-                fontSize: 12,
+                fontSize: 14,
                 cursor: "pointer",
                 opacity: refreshing ? 0.5 : 1,
               }}
@@ -1974,9 +2067,9 @@ function AstroPublishPanel({
                 padding: "10px 18px",
                 borderRadius: 8,
                 border: "none",
-                background: "#991B1B",
+                background: D.red,
                 color: D.white,
-                fontSize: 13,
+                fontSize: 14,
                 fontWeight: 500,
                 cursor: "pointer",
                 opacity: merging ? 0.5 : 1,
@@ -1996,7 +2089,7 @@ function AstroPublishPanel({
               border: "none",
               background: D.red,
               color: D.white,
-              fontSize: 13,
+              fontSize: 14,
               fontWeight: 500,
               cursor: "pointer",
               opacity: publishing ? 0.5 : 1,
@@ -2013,9 +2106,9 @@ function AstroPublishPanel({
               marginTop: 10,
               padding: 10,
               borderRadius: 6,
-              background: "#FEF2F2",
+              background: "#FCEBEB",
               color: D.red,
-              fontSize: 11,
+              fontSize: 14,
               fontFamily: MONO,
             }}
           >
@@ -2027,32 +2120,32 @@ function AstroPublishPanel({
 }
 
 const ASTRO_PILLS = {
-  draft: { label: "DRAFT", bg: "#f5f5f4", fg: "#57534e", border: "#e7e5e4" },
+  draft: { label: "DRAFT", fg: D.muted, dot: D.muted, filled: false },
   pr_open: {
     label: "PREVIEW OPEN",
-    bg: "#EFF6FF",
-    fg: "#1D4ED8",
-    border: "#BFDBFE",
+    fg: D.heading,
+    dot: D.heading,
+    filled: true,
   },
   build_failed: {
     label: "BUILD FAILED",
-    bg: "#FEF2F2",
-    fg: "#991B1B",
-    border: "#FECACA",
+    fg: D.red,
+    dot: D.red,
+    filled: true,
   },
-  merged: { label: "MERGED", bg: "#ECFDF5", fg: "#065F46", border: "#A7F3D0" },
-  live: { label: "LIVE", bg: "#ECFDF5", fg: "#15803D", border: "#86EFAC" },
+  merged: { label: "MERGED", fg: D.muted, dot: D.muted, filled: false },
+  live: { label: "LIVE", fg: D.muted, dot: D.muted, filled: false },
   publish_failed: {
     label: "PUBLISH FAILED",
-    bg: "#FEF2F2",
-    fg: "#991B1B",
-    border: "#FECACA",
+    fg: D.red,
+    dot: D.red,
+    filled: true,
   },
   unpublish_pending: {
     label: "UNPUBLISH PENDING",
-    bg: "#fafaf9",
-    fg: "#991B1B",
-    border: "#e7e5e4",
+    fg: D.text,
+    dot: D.text,
+    filled: false,
   },
 };
 
@@ -2108,7 +2201,7 @@ function AuditTab() {
         <div
           style={{
             fontSize: 16,
-            fontWeight: 700,
+            fontWeight: 500,
             color: D.heading,
             marginBottom: 12,
           }}
@@ -2149,18 +2242,18 @@ function AuditTab() {
               {" "}
               <div
                 style={{
-                  fontSize: 11,
+                  fontSize: 14,
                   color: prioColor,
-                  fontWeight: 700,
+                  fontWeight: 500,
                   marginBottom: 2,
                 }}
               >
                 {prioLabel}
               </div>{" "}
-              <div style={{ fontSize: 13, fontWeight: 500, color: D.heading }}>
+              <div style={{ fontSize: 14, fontWeight: 500, color: D.heading }}>
                 {rec.title}
               </div>{" "}
-              <div style={{ fontSize: 12, color: D.muted }}>
+              <div style={{ fontSize: 14, color: D.muted }}>
                 {rec.action}
               </div>{" "}
             </div>
@@ -2198,7 +2291,7 @@ function AuditTab() {
                 <div
                   style={{
                     width: 120,
-                    fontSize: 12,
+                    fontSize: 14,
                     color: isLow ? D.amber : D.text,
                     textAlign: "right",
                   }}
@@ -2221,7 +2314,7 @@ function AuditTab() {
                 <div
                   style={{
                     width: 30,
-                    fontSize: 12,
+                    fontSize: 14,
                     color: D.muted,
                     fontFamily: MONO,
                   }}
@@ -2230,7 +2323,7 @@ function AuditTab() {
                 </div>
                 {isLow && (
                   <span
-                    style={{ fontSize: 10, color: D.amber, fontWeight: 500 }}
+                    style={{ fontSize: 14, color: D.amber, fontWeight: 500 }}
                   >
                     LOW
                   </span>
@@ -2250,7 +2343,7 @@ function AuditTab() {
             {" "}
             <div
               style={{
-                fontSize: 12,
+                fontSize: 14,
                 fontWeight: 500,
                 color: D.amber,
                 marginBottom: 6,
@@ -2261,7 +2354,7 @@ function AuditTab() {
             {audit.topicDistribution.gaps.map((g, i) => (
               <div
                 key={i}
-                style={{ fontSize: 12, color: D.text, marginBottom: 2 }}
+                style={{ fontSize: 14, color: D.text, marginBottom: 2 }}
               >
                 {"•"} {g}
               </div>
@@ -2303,7 +2396,7 @@ function AuditTab() {
                 <div
                   style={{
                     width: 130,
-                    fontSize: 12,
+                    fontSize: 14,
                     color: isHigh ? D.amber : D.text,
                     textAlign: "right",
                   }}
@@ -2326,7 +2419,7 @@ function AuditTab() {
                 <div
                   style={{
                     width: 30,
-                    fontSize: 12,
+                    fontSize: 14,
                     color: D.muted,
                     fontFamily: MONO,
                   }}
@@ -2335,13 +2428,13 @@ function AuditTab() {
                 </div>
                 {isHigh && (
                   <span
-                    style={{ fontSize: 10, color: D.amber, fontWeight: 500 }}
+                    style={{ fontSize: 14, color: D.amber, fontWeight: 500 }}
                   >
                     overweight
                   </span>
                 )}
                 {isLow && (
-                  <span style={{ fontSize: 10, color: D.red, fontWeight: 500 }}>
+                  <span style={{ fontSize: 14, color: D.red, fontWeight: 500 }}>
                     LOW
                   </span>
                 )}
@@ -2371,7 +2464,7 @@ function AuditTab() {
                 background: D.bg,
                 borderRadius: 6,
                 marginBottom: 6,
-                fontSize: 12,
+                fontSize: 14,
               }}
             >
               {" "}
@@ -2383,7 +2476,7 @@ function AuditTab() {
                 2. "{d.post2.title}"{" "}
                 <span style={{ color: D.muted }}>({d.post2.status})</span>
               </div>{" "}
-              <div style={{ color: D.amber, fontSize: 11 }}>
+              <div style={{ color: D.amber, fontSize: 14 }}>
                 Match: {d.matchType}
               </div>{" "}
             </div>
@@ -2422,7 +2515,7 @@ function AuditTab() {
               {" "}
               <span
                 style={{
-                  fontSize: 12,
+                  fontSize: 14,
                   fontFamily: MONO,
                   color: D.green,
                   width: 50,
@@ -2430,7 +2523,7 @@ function AuditTab() {
               >
                 {p.score}/100
               </span>{" "}
-              <span style={{ fontSize: 12, color: D.text }}>
+              <span style={{ fontSize: 14, color: D.text }}>
                 {p.title}
               </span>{" "}
             </div>
@@ -2612,14 +2705,14 @@ function GenerateTab({ onGenerated }) {
                 {" "}
                 <div
                   style={{
-                    fontSize: 13,
+                    fontSize: 14,
                     fontWeight: 500,
                     color: contentType === ct.id ? D.teal : D.heading,
                   }}
                 >
                   {ct.label}
                 </div>{" "}
-                <div style={{ fontSize: 11, color: D.muted, marginTop: 2 }}>
+                <div style={{ fontSize: 14, color: D.muted, marginTop: 2 }}>
                   {ct.desc}
                 </div>{" "}
               </div>
@@ -2660,7 +2753,7 @@ function GenerateTab({ onGenerated }) {
           />{" "}
           <div
             style={{
-              fontSize: 11,
+              fontSize: 14,
               color: D.muted,
               marginTop: 8,
               marginBottom: 6,
@@ -2679,7 +2772,7 @@ function GenerateTab({ onGenerated }) {
                   border: `1px solid ${D.border}`,
                   background: topic === s ? D.teal + "22" : "transparent",
                   color: topic === s ? D.teal : D.muted,
-                  fontSize: 11,
+                  fontSize: 14,
                   cursor: "pointer",
                   textAlign: "left",
                   lineHeight: 1.3,
@@ -2710,13 +2803,13 @@ function GenerateTab({ onGenerated }) {
                 onClick={() => setCity(c)}
                 style={{
                   padding: "6px 14px",
-                  borderRadius: 20,
+                  borderRadius: 4,
                   border: "none",
                   cursor: "pointer",
-                  fontSize: 12,
+                  fontSize: 14,
                   fontWeight: 500,
                   background: city === c ? D.teal : D.bg,
-                  color: city === c ? D.white : D.muted,
+                  color: city === c ? D.white : D.text,
                   transition: "all 0.15s",
                 }}
               >
@@ -2727,18 +2820,18 @@ function GenerateTab({ onGenerated }) {
         </Card>
         {/* E) Generate button */}
         <button
+          className="admin-blog-generate"
           onClick={handleGenerate}
           disabled={generating || !topic.trim()}
           style={{
             padding: "14px 24px",
             borderRadius: 10,
-            border: "none",
-            background: generating ? D.border : D.teal,
-            color: D.heading,
+            border: `1px solid ${D.teal}`,
+            background: D.teal,
+            color: D.white,
             fontSize: 15,
-            fontWeight: 700,
+            fontWeight: 500,
             cursor: generating ? "default" : "pointer",
-            opacity: !topic.trim() ? 0.4 : 1,
             display: "flex",
             alignItems: "center",
             justifyContent: "center",
@@ -2776,7 +2869,7 @@ function GenerateTab({ onGenerated }) {
           {" "}
           <div
             style={{
-              fontSize: 13,
+              fontSize: 14,
               fontWeight: 500,
               color: D.heading,
               marginBottom: 10,
@@ -2785,7 +2878,7 @@ function GenerateTab({ onGenerated }) {
             FAWN Weather
           </div>
           {weather ? (
-            <div style={{ fontSize: 12, color: D.text, lineHeight: 1.7 }}>
+            <div style={{ fontSize: 14, color: D.text, lineHeight: 1.7 }}>
               {weather.temp && (
                 <div>
                   Temp:{" "}
@@ -2813,7 +2906,7 @@ function GenerateTab({ onGenerated }) {
                 </div>
               )}
               {weather.station && (
-                <div style={{ fontSize: 10, color: D.muted, marginTop: 4 }}>
+                <div style={{ fontSize: 14, color: D.muted, marginTop: 4 }}>
                   Station: {weather.station}
                 </div>
               )}
@@ -2824,7 +2917,7 @@ function GenerateTab({ onGenerated }) {
               )}
             </div>
           ) : (
-            <div style={{ fontSize: 12, color: D.muted }}>
+            <div style={{ fontSize: 14, color: D.muted }}>
               Weather data loads when API is connected
             </div>
           )}
@@ -2835,7 +2928,7 @@ function GenerateTab({ onGenerated }) {
             {" "}
             <div
               style={{
-                fontSize: 13,
+                fontSize: 14,
                 fontWeight: 500,
                 color: D.amber,
                 marginBottom: 8,
@@ -2847,7 +2940,7 @@ function GenerateTab({ onGenerated }) {
               <div
                 key={i}
                 style={{
-                  fontSize: 12,
+                  fontSize: 14,
                   color: D.text,
                   marginBottom: 4,
                   paddingLeft: 8,
@@ -2864,7 +2957,7 @@ function GenerateTab({ onGenerated }) {
           {" "}
           <div
             style={{
-              fontSize: 13,
+              fontSize: 14,
               fontWeight: 500,
               color: D.heading,
               marginBottom: 10,
@@ -2883,9 +2976,10 @@ function GenerateTab({ onGenerated }) {
               }}
             >
               {" "}
-              <span style={{ fontSize: 11, color: D.green, fontWeight: 500 }}>
-                </span>{" "}
-              <span style={{ fontSize: 11, color: D.text }}>
+              <span
+                style={{ fontSize: 14, color: D.green, fontWeight: 500 }}
+              ></span>{" "}
+              <span style={{ fontSize: 14, color: D.text }}>
                 {item.label}
               </span>{" "}
             </div>
@@ -2954,7 +3048,6 @@ export default function BlogPage() {
   const postStatus = VALID_POST_STATUSES.includes(paramStatus)
     ? paramStatus
     : legacyPostStatus || "published";
-
   const postId = searchParams.get("post");
 
   // Usage beacon for the leaf that actually RENDERS — legacy status deep
@@ -3028,9 +3121,13 @@ export default function BlogPage() {
           if (!data.post) throw new Error("Post not found");
           setSelectedPost(data.post);
         })
-        .catch((error) => { if (active) setPostError(error.message || "Request failed"); });
+        .catch((error) => {
+          if (active) setPostError(error.message || "Request failed");
+        });
     }
-    return () => { active = false; };
+    return () => {
+      active = false;
+    };
   }, [postId, postRetry]);
   const [counts, setCounts] = useState({});
   const [generatingIdeas, setGeneratingIdeas] = useState(false);
@@ -3065,26 +3162,52 @@ export default function BlogPage() {
 
   if (postId) {
     return (
-      <div>
+      <div className="admin-blog-token-scope">
+        <style>{BLOG_TOKEN_STYLES}</style>
         <AdminCommandHeader title="Content editor" icon={Newspaper} />
         {postError ? (
           <div role="alert" style={{ padding: 20, fontSize: 14, color: D.red }}>
             <p>Couldn't load this post — {postError}</p>
             <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
-              <button type="button" onClick={() => setPostRetry((value) => value + 1)} style={{ minHeight: 44, padding: "8px 16px" }}>Try again</button>
-              <button type="button" onClick={() => openPost(null)} style={{ minHeight: 44, padding: "8px 16px" }}>Back to list</button>
+              <button
+                type="button"
+                onClick={() => setPostRetry((value) => value + 1)}
+                style={{ minHeight: 44, padding: "8px 16px" }}
+              >
+                Try again
+              </button>
+              <button
+                type="button"
+                onClick={() => openPost(null)}
+                style={{ minHeight: 44, padding: "8px 16px" }}
+              >
+                Back to list
+              </button>
             </div>
           </div>
-        ) : selectedPost && String(selectedPost.id).toLowerCase() === postId.toLowerCase() ? (
-          <PostEditor key={postId} post={selectedPost} onBack={() => openPost(null)} onUpdate={() => openPost(null)} />
-        ) : <p role="status" style={{ padding: 20, fontSize: 14, color: D.muted }}>Loading post…</p>}
+        ) : selectedPost &&
+          String(selectedPost.id).toLowerCase() === postId.toLowerCase() ? (
+          <PostEditor
+            key={postId}
+            post={selectedPost}
+            onBack={() => openPost(null)}
+            onUpdate={() => openPost(null)}
+          />
+        ) : (
+          <p
+            role="status"
+            style={{ padding: 20, fontSize: 14, color: D.muted }}
+          >
+            Loading post…
+          </p>
+        )}
       </div>
     );
   }
 
   return (
-    <div>
-      {" "}
+    <div className={blogTokenScopeClass(tab)}>
+      <style>{BLOG_TOKEN_STYLES}</style>{" "}
       <AdminCommandHeader
         title="Blog"
         icon={Newspaper}
@@ -3159,8 +3282,8 @@ export default function BlogPage() {
                     height: 36,
                     padding: "0 14px",
                     borderRadius: 6,
-                    fontSize: 12,
-                    fontWeight: 700,
+                    fontSize: 14,
+                    fontWeight: 500,
                     textTransform: "uppercase",
                     letterSpacing: "0.04em",
                     cursor: "pointer",

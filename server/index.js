@@ -555,6 +555,7 @@ app.use('/api/tracking', trackingRoutes);
 app.use('/api/admin/auth', adminAuthRoutes);
 app.use('/api/admin/push', adminPushRoutes);
 app.use('/api/admin/visits', adminVisitsRoutes);
+app.use('/api/admin/visit-closeouts', require('./routes/admin-visit-closeouts'));
 app.use('/api/admin/intelligence-bar', adminIntelligenceBarRoutes);
 app.use('/api/admin/agent-estimate', adminAgentEstimateRoutes);
 app.use('/api/admin/tool-health', toolHealthRoutes);

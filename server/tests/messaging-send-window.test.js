@@ -304,6 +304,24 @@ describe('sendCustomerMessage send-window integration', () => {
     expect(lateVerdict.nextAllowedAt).toBe('2026-08-07T12:00:00.000Z');
   });
 
+  test('the final window check catches an async caller guard that crosses 20:00 ET', async () => {
+    jest.useFakeTimers({ now: LAST_MINUTE, doNotFake: ['nextTick', 'setImmediate'] });
+    const callerGuard = jest.fn(async () => {
+      jest.setSystemTime(WINDOW_CLOSE);
+      return { ok: true };
+    });
+    await sendCustomerMessage({ ...INPUT, preSendCheck: callerGuard });
+
+    const verdict = await sendViaTwilio.mock.calls[0][1].preSendCheck();
+    expect(callerGuard).toHaveBeenCalledWith({ channel: 'sms' });
+    expect(verdict).toMatchObject({
+      ok: false,
+      code: 'QUIET_HOURS_HOLD',
+      retryable: true,
+      deferred: true,
+    });
+  });
+
   test('a provider-handoff block maps back onto the QUIET_HOURS_HOLD deferral contract', async () => {
     jest.useFakeTimers({ now: LAST_MINUTE, doNotFake: ['nextTick', 'setImmediate'] });
     sendViaTwilio.mockResolvedValueOnce({

@@ -194,7 +194,7 @@ async function sendCustomerMessage(input) {
 
   // 3. Normalize recipient + clone input so downstream sees the canonical
   //    form. Caller closures stay outside message state and audit payloads.
-  const { preDispatchCheck, withSmsHandoff, ...inputRest } = input;
+  const { preDispatchCheck, preSendCheck, withSmsHandoff, ...inputRest } = input;
   const normalizedTo = normalizeRecipient(input.to);
   const sendInput = { ...inputRest, to: normalizedTo };
   // Request lifecycle email companions have no text leg. Keep their App
@@ -436,6 +436,32 @@ async function sendCustomerMessage(input) {
   // no-op for exempt inputs.
   // Until the adapter returns, a thrown transport call has crossed the SDK
   // handoff boundary but has no definitive acceptance/rejection result.
+  let providerBoundaryBlock = null;
+  const rememberBoundaryBlock = (verdict, validator) => {
+    if (!verdict || verdict.ok === true) return verdict;
+    providerBoundaryBlock = { ...verdict, validator };
+    return verdict;
+  };
+  const runCallerPreSendCheck = async () => {
+    if (typeof preSendCheck !== 'function') return { ok: true };
+    try {
+      const verdict = await preSendCheck({ channel: sendInput.channel });
+      if (verdict?.ok === true) return verdict;
+      return {
+        ok: false,
+        code: verdict?.code || 'PRE_SEND_CHECK_FAILED',
+        reason: verdict?.reason || 'pre-send check did not pass',
+        retryable: verdict?.retryable === true,
+      };
+    } catch (err) {
+      return {
+        ok: false,
+        code: err?.code || 'PRE_SEND_CHECK_FAILED',
+        reason: err?.message || 'pre-send check failed',
+        retryable: err?.retryable === true,
+      };
+    }
+  };
   providerOutcome = { sent: false, deliveryOutcome: 'uncertain' };
   providerOutcome = await dispatchToProvider(sendInput, {
     // The caller's handoff receives (trx, onProviderStart): the callback fires
@@ -466,17 +492,45 @@ async function sendCustomerMessage(input) {
     })),
     preSendCheck: async () => {
       const windowVerdict = checkSendWindow(sendInput, policy, contactState);
-      if (!windowVerdict || windowVerdict.ok !== true) return windowVerdict;
+      if (!windowVerdict || windowVerdict.ok !== true) {
+        return rememberBoundaryBlock(windowVerdict, 'check_send_window_boundary');
+      }
       // Move-hold boundary re-check at the ACTUAL Twilio handoff (uncapped
       // codex audit P1): the step-6.4 check runs before the provider's own
       // internal awaits — a unit move stamping during them must still hold
       // the send. Same deferral contract as the window hold.
       if (appointmentMoveHoldApplies(sendInput) && await appointmentMoveHeld(sendInput)) {
-        return { ok: false, code: 'MOVE_HOLD', reason: 'grouped unit move in progress — appointment notice held', retryable: true };
+        return rememberBoundaryBlock(
+          { ok: false, code: 'MOVE_HOLD', reason: 'grouped unit move in progress — appointment notice held', retryable: true },
+          'move_hold_boundary',
+        );
       }
-      return { ok: true };
+      const callerVerdict = await runCallerPreSendCheck();
+      if (!callerVerdict.ok) return rememberBoundaryBlock(callerVerdict, 'pre_send_check_boundary');
+      // The awaited caller guard may itself straddle 20:00 ET. Keep this pure
+      // clock check as the final operation before returning to the provider.
+      const finalWindowVerdict = checkSendWindow(sendInput, policy, contactState);
+      return finalWindowVerdict?.ok === true
+        ? finalWindowVerdict
+        : rememberBoundaryBlock(finalWindowVerdict, 'check_send_window_boundary');
     },
   });
+
+  // Push fan-out consumes the provider hook as a boolean and therefore loses
+  // its code. Restore that boundary refusal only when the provider proves no
+  // leg was sent. An accepted or uncertain outcome remains authoritative.
+  if (providerBoundaryBlock && providerOutcome.deliveryOutcome === 'not_sent') {
+    providerOutcome = {
+      ...providerOutcome,
+      blocked: true,
+      code: providerBoundaryBlock.code,
+      error: providerBoundaryBlock.reason,
+      validator: providerBoundaryBlock.validator,
+      retryable: providerBoundaryBlock.retryable === true,
+      deferred: providerBoundaryBlock.deferred === true,
+      nextAllowedAt: providerBoundaryBlock.nextAllowedAt,
+    };
+  }
 
   // 7.5 Provider-handoff block (preSendCheck said no): map back onto the
   // same blocked/deferral contract as a pipeline validator, with a

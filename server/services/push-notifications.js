@@ -61,7 +61,7 @@ try {
 // for immediate delivery; low-priority pushes stay deferrable on purpose.
 const URGENCY_BY_PRIORITY = { urgent: 'high', high: 'high', normal: 'normal', low: 'low' };
 
-async function sendSubscription(sub, notification) {
+async function sendSubscription(sub, notification, options) {
   // iOS (Capacitor) subscriptions deliver via APNs, not web-push. Routing here
   // keeps every caller (sendToCustomer / sendToAdmins / sendToAdminUsers)
   // platform-agnostic — they just iterate active rows.
@@ -82,7 +82,7 @@ async function sendSubscription(sub, notification) {
 
   // Android (Capacitor) subscriptions deliver via FCM, same routing shape as iOS.
   if (sub.platform === 'android') {
-    const result = await fcm.send(sub.device_token, notification);
+    const result = await fcm.send(sub.device_token, notification, { shouldContinue: options?.shouldContinue });
     if (result.skipped) return { sent: false, skipped: true, reason: result.reason };
     if (result.expired) {
       await db('push_subscriptions').where({ id: sub.id }).update({ active: false }).catch(() => {});
@@ -219,6 +219,13 @@ class PushNotificationService {
     const results = [];
     let claimLost = false;
     for (const sub of subs) {
+      if (opts.notificationId) {
+        // A paused old worker cannot hand off another device after a newer
+        // worker reclaimed its expired lease.
+        const owned = await db('notifications').where({ id: opts.notificationId })
+          .whereRaw("metadata->>'pushAttemptToken' = ? AND (metadata->>'pushLeaseUntil')::timestamptz > now()", [attemptToken]).first('id').catch(() => null);
+        if (!owned) { claimLost = true; break; }
+      }
       if (typeof opts.shouldContinue === 'function') {
         let go = false;
         try { go = await opts.shouldContinue(); } catch { go = false; }
@@ -227,14 +234,8 @@ class PushNotificationService {
           continue;
         }
       }
-      if (opts.notificationId) {
-        // A paused old worker cannot hand off another device after a newer
-        // worker reclaimed its expired lease.
-        const owned = await db('notifications').where({ id: opts.notificationId })
-          .whereRaw("metadata->>'pushAttemptToken' = ? AND (metadata->>'pushLeaseUntil')::timestamptz > now()", [attemptToken]).first('id').catch(() => null);
-        if (!owned) { claimLost = true; break; }
-      }
-      const result = await sendSubscription(sub, notification).catch(() => ({ sent: false, failed: true, reason: 'provider_failure' }));
+      const result = await sendSubscription(sub, notification, { shouldContinue: opts.shouldContinue })
+        .catch(() => ({ sent: false, failed: true, reason: 'provider_failure' }));
       results.push(result);
       if (result.sent && opts.notificationId) {
         // Persist the first acceptance before walking another device, so a

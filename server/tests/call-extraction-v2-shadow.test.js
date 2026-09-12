@@ -78,8 +78,8 @@ describe('v2 extraction prompt', () => {
   });
 
   test('prompt version and hash are stable', () => {
-    expect(PROMPT_VERSION).toBe('v6');
-    expect(PROMPT_HASH).toMatch(/^v6-[a-f0-9]{12}$/);
+    expect(PROMPT_VERSION).toBe('v7');
+    expect(PROMPT_HASH).toMatch(/^v7-[a-f0-9]{12}$/);
   });
 
   test('extractionPromptVersion appends an order-sensitive catalog hash', () => {

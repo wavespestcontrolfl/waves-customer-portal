@@ -16,7 +16,7 @@ const db = require('../models/db');
 const { hashCompletionRequest, withoutPhotoBytes } = require('./completion-attempts');
 const { dateOnly, lockStop, stopBaseKey } = require('./visit-groups');
 const { parseETDateTime } = require('../utils/datetime-et');
-const { TERMINAL_ROW_STATUSES } = require('./visit-context/statuses');
+const { RETAINED_HISTORY_STATUSES } = require('./visit-context/statuses');
 const { cleanupUploadedServicePhotoObjects } = require('./service-photos');
 
 // A packet's stored payload, parsed once: pg returns json columns as
@@ -29,12 +29,16 @@ function failure(status, code, error) {
   return { status, body: { code, error } };
 }
 
+// A visit records a handful of members; the cap rejects an implausible
+// array before the save acquires a per-item invoice-mint lock for each id.
+const MAX_PACKET_ITEMS = 50;
+
 function packetRequest({ visitId, idempotencyKey, items }) {
   if (!isUuid(visitId) || typeof idempotencyKey !== 'string'
       || !idempotencyKey.trim() || idempotencyKey.length > 120) {
     return { error: failure(400, 'visit_closeout_invalid', 'A visit and an idempotency key are required.') };
   }
-  if (!Array.isArray(items) || items.length < 1 || items.some((item) => (
+  if (!Array.isArray(items) || items.length < 1 || items.length > MAX_PACKET_ITEMS || items.some((item) => (
     !isUuid(item?.serviceId) || !item.body || typeof item.body !== 'object' || Array.isArray(item.body)
   )) || new Set(items.map((item) => item.serviceId.toLowerCase())).size !== items.length) {
     return { error: failure(400, 'visit_closeout_members_invalid', 'Submit each visit service once with its completion form.') };
@@ -56,10 +60,24 @@ function packetRequest({ visitId, idempotencyKey, items }) {
   return { visitId: canonicalVisitId, key: idempotencyKey.trim(), items: ordered, hash };
 }
 
+// The schedule's status-only completion path can leave no canonical record.
+// Read that evidence for both staff access and the locked packet snapshot.
+function visitCloseoutMemberQuery(visitId, database = db) {
+  return database('scheduled_services').where({ visit_id: visitId }).select('scheduled_services.*', database.raw(
+    'EXISTS (SELECT 1 FROM service_records r WHERE r.scheduled_service_id = scheduled_services.id AND r.customer_id = scheduled_services.customer_id) AS has_service_record',
+  ));
+}
+
+function retainedCloseoutMembers(members, packet) {
+  if (packet) return packet.payload.retainedMembers || [];
+  return members.filter((member) => RETAINED_HISTORY_STATUSES.includes(member.status)
+    || (member.status === 'completed' && member.has_service_record === true))
+    .map((member) => ({ serviceId: member.id, status: member.status }));
+}
+
 function packetSnapshot(request, actor, members, existing) {
   if (existing) return { ...existing.payload, retainedMembers: existing.payload.retainedMembers || [] };
-  const retainedMembers = members.filter((member) => TERMINAL_ROW_STATUSES.includes(member.status))
-    .map((member) => ({ serviceId: member.id, status: member.status }));
+  const retainedMembers = retainedCloseoutMembers(members, null);
   // The packet-level request hash still covers the original photo bytes (a
   // save-time replay must resend the same photos); each member's attempt hash
   // covers this stripped form. Uploaded objects belong to each service record;
@@ -135,14 +153,22 @@ async function saveVisitCompletionPacket(input, database = db) {
         .where({ id: peek.id, stop_base_key: peek.stop_base_key, customer_id: peek.customer_id })
         .forUpdate().first();
       if (!visit) return failure(409, 'visit_changed', 'The visit moved. Refresh before closing it.');
-      const members = await trx('scheduled_services').where({ visit_id: visit.id }).orderBy('id').forUpdate();
-      const ownership = members.map((member) => completionOwnershipError({
-        role: actor.techRole, actorTechnicianId: actor.technicianId, assignedTechnicianId: member.technician_id,
-      })).find(Boolean);
-      if (ownership) return { status: ownership.status, body: ownership.payload };
+      const members = await visitCloseoutMemberQuery(visit.id, trx).orderBy('id').forUpdate();
       const existing = await trx('visit_completion_packets').where({ visit_id: visit.id }).first();
       const snapshot = packetSnapshot(request, actor, members, existing);
       const retainedIds = new Set(snapshot.retainedMembers.map((member) => member.serviceId));
+      // Retained history (a cancelled child, its assignment cleared) is not
+      // the technician's work; ownership is judged on the members recorded.
+      const ownership = members.filter((member) => !retainedIds.has(member.id)).map((member) => completionOwnershipError({
+        role: actor.techRole, actorTechnicianId: actor.technicianId, assignedTechnicianId: member.technician_id,
+      })).find(Boolean);
+      if (ownership) return { status: ownership.status, body: ownership.payload };
+      // The route's current-assignment scope is re-applied on the locked rows:
+      // a whole-visit reschedule that committed after the preflight read must
+      // not let a technician close a visit outside their current window.
+      if (members.filter((member) => !retainedIds.has(member.id)).some((member) => !memberInTechnicianScope(member, actor))) {
+        return failure(409, 'visit_out_of_scope', 'This visit is no longer in your current schedule. Refresh the schedule.');
+      }
       // Frozen visits retain terminal children as history. Only live children
       // need forms on the first submit. Replays use saved form membership,
       // since recording those services has already made them terminal too.
@@ -152,7 +178,8 @@ async function saveVisitCompletionPacket(input, database = db) {
           || frozenMemberIds.join() !== members.map((member) => member.id).join()) {
         return failure(409, 'visit_members_changed', 'The visit service list changed. Refresh all service forms.');
       }
-      if (members.some((member) => member.customer_id !== visit.customer_id
+      // Retained history keeps the visit's identity but not its assignment.
+      if (members.filter((member) => !retainedIds.has(member.id)).some((member) => member.customer_id !== visit.customer_id
           || (member.property_id || null) !== (visit.property_id || null)
           || dateOnly(member.scheduled_date) !== dateOnly(visit.scheduled_date)
           || member.technician_id !== visit.technician_id
@@ -172,6 +199,12 @@ async function saveVisitCompletionPacket(input, database = db) {
         return recordsResult(existing, saved, billing, true);
       }
       if (visit.status !== 'open') return failure(409, 'visit_not_open', 'This visit is no longer open for closeout.');
+      if (Number(visit.behavior_version) < 2 && !require('../config/feature-gates').isEnabled('visitCloseout')) {
+        return failure(404, 'visit_closeout_disabled', 'Visit closeout is unavailable.');
+      }
+      if (!process.env.DATA_HYGIENE_VAULT_KEY) {
+        return failure(503, 'visit_closeout_unavailable', 'Visit closeout is temporarily unavailable. No services were completed.');
+      }
       const keyOwner = await trx('visit_completion_packets').where({ idempotency_key: request.key }).first('id');
       if (keyOwner) return failure(409, 'visit_closeout_key_reused', 'The idempotency key belongs to another visit.');
       const [packet] = await trx('visit_completion_packets').insert({
@@ -300,6 +333,26 @@ async function runVisitCompletionPacketMemberEffects(packetId, database = db) {
     });
   }
   return { status: 202, body: { visitId: packet.visit_id, packetId: packet.id, state: 'member_effects_ready' } };
+}
+
+// The canonical technician scope (technician-visit-scope.js), judged on a
+// locked member row; administrators are unscoped.
+function memberInTechnicianScope(member, actor) {
+  return require('./technician-visit-scope').technicianVisitRowInScope(actor, member);
+}
+
+// The resume boundary re-applies the actor's scope on the locked member rows,
+// exactly as the save does: a reassignment or reschedule that committed after
+// the route's unlocked preflight must not let the former technician trigger
+// billing and customer-summary effects. Retained history is not judged.
+async function packetInTechnicianScope(packetId, actor, database) {
+  return database.transaction(async (trx) => {
+    const packet = await trx('visit_completion_packets').where({ id: packetId }).first('id', 'visit_id', 'payload');
+    if (!packet) return true;
+    const members = await visitCloseoutMemberQuery(packet.visit_id, trx).orderBy('id').forShare();
+    const retainedIds = new Set(retainedCloseoutMembers(members, { payload: packetPayload(packet) }).map((member) => member.serviceId));
+    return members.filter((member) => !retainedIds.has(member.id)).every((member) => memberInTechnicianScope(member, actor));
+  });
 }
 
 // How a member effect's non-success result is treated: a live conflict with
@@ -497,7 +550,10 @@ async function closeVisitCompletionPacket(database, { packet, memberId, payment,
 }
 
 /** Run summary and financial effects only after every member is ready. */
-async function runVisitCompletionPacketEffects(packetId, database = db) {
+async function runVisitCompletionPacketEffects(packetId, database = db, { actor = null } = {}) {
+  if (actor && require('./technician-visit-scope').isTechnicianRequest(actor) && !await packetInTechnicianScope(packetId, actor, database)) {
+    return failure(409, 'visit_out_of_scope', 'This visit is no longer in your current schedule. Refresh the schedule.');
+  }
   const members = await runVisitCompletionPacketMemberEffects(packetId, database);
   if (members.body.state !== 'member_effects_ready') return members;
   const packet = await database('visit_completion_packets').where({ id: packetId }).first();
@@ -1225,4 +1281,4 @@ async function resumePendingVisitCompletions({ limit = 3 } = {}) {
   return { checked: packets.length };
 }
 
-module.exports = { invoicePayerOwnedNow, packetPayload, parseOfficeReviewState, resolvePacketOwnershipLocked, withdrawPacketInvoiceForPayer, reconcileWithdrawnPacketInvoices, withdrawPacketInvoicesForOwner, packetInvoiceSendInFlight, lockPacketPayerRows, liveThirdPartyPayerForPacket, enrollVisitCompletionReviewForInvoice, saveVisitCompletionPacket, runVisitCompletionPacketMemberEffects, runVisitCompletionPacketEffects, enrollVisitCompletionReview, resumePendingVisitCompletions };
+module.exports = { invoicePayerOwnedNow, memberInTechnicianScope, visitCloseoutMemberQuery, retainedCloseoutMembers, packetPayload, parseOfficeReviewState, resolvePacketOwnershipLocked, withdrawPacketInvoiceForPayer, reconcileWithdrawnPacketInvoices, withdrawPacketInvoicesForOwner, packetInvoiceSendInFlight, lockPacketPayerRows, liveThirdPartyPayerForPacket, enrollVisitCompletionReviewForInvoice, saveVisitCompletionPacket, runVisitCompletionPacketMemberEffects, runVisitCompletionPacketEffects, enrollVisitCompletionReview, resumePendingVisitCompletions };

@@ -3571,7 +3571,9 @@ async function completeScheduledService(completionInput, packetContext = null) {
           // The guard must precede replay/resume too: a saved packet member
           // has a resumable single-service attempt, whose legacy side effects
           // would otherwise invoice and message the customer independently.
-          const member = await lockTrx('scheduled_services').where({ id: svc.id }).first('visit_id');
+          const member = await lockTrx('scheduled_services as member')
+            .leftJoin('service_visits as visit', 'visit.id', 'member.visit_id')
+            .where('member.id', svc.id).first('member.visit_id', 'visit.behavior_version');
           // Invoice-issued closeout: the grouped-stop refusal ran unlocked
           // in invoice-issued-closeout.js; a createOrJoinVisit that grouped
           // this row since would otherwise let a packet-less open group
@@ -3597,7 +3599,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
               derived_idempotency_key: idempotencyKey,
             }).first('id', 'service_record_id', 'attempt_count')
             : null;
-          if (((packet || packetContext) && !ownedItem) || (packetEffects && !ownedItem.service_record_id)) {
+          if (((packet || packetContext || Number(member?.behavior_version) >= 2) && !ownedItem) || (packetEffects && !ownedItem.service_record_id)) {
             return { action: 'conflict', status: 409, payload: {
               error: 'This service is owned by a visit closeout. Resume the visit closeout.',
               code: 'visit_grouped', visitId: member?.visit_id || null,
@@ -3694,6 +3696,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
         if (!parent) return { blockedBy: lockedRow.visit_id }; // orphan: fail closed
         if (ownedPacketVisitId === parent.id) return parent.status === 'closing' ? null : { blockedBy: parent.id };
         if (String(parent.status) === 'dissolved') return null;
+        if (Number(parent.behavior_version) >= 2) return { blockedBy: parent.id };
         // READ-ONLY (codex #3590 r4: later validators can still 422, and a
         // rejected completion must not have dissolved anything): an open
         // packet-less visit is allowed through and remembered — the
