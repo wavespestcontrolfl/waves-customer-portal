@@ -484,7 +484,7 @@ describe('loadPromiseEvents: email promise evidence checks the LIVE delivery sta
   function fakeConn() {
     const calls = {};
     const conn = (table) => {
-      if (table === 'messaging_audit_log as a' || table === 'audit_log' || table === 'activity_log' || table === 'series_moves as sm') return passthroughChain([]);
+      if (table === 'messaging_audit_log as a' || table === 'audit_log as al' || table === 'activity_log' || table === 'series_moves as sm') return passthroughChain([]);
       if (table === 'customer_interactions as ci') {
         const chain = {};
         chain.leftJoin = (joinTable, cb) => { calls.leftJoinTable = joinTable; calls.leftJoinCb = cb; return chain; };
@@ -594,7 +594,7 @@ describe('loadPromiseEvents: an UNLINKED sms_log row is neutral, a sentinel sid 
   function fakeConn() {
     const calls = {};
     const conn = (table) => {
-      if (table === 'customer_interactions as ci' || table === 'audit_log' || table === 'activity_log' || table === 'series_moves as sm') return passthroughChain([]);
+      if (table === 'customer_interactions as ci' || table === 'audit_log as al' || table === 'activity_log' || table === 'series_moves as sm') return passthroughChain([]);
       if (table === 'messaging_audit_log as a') {
         const chain = {};
         for (const m of ['leftJoin', 'whereIn', 'whereRaw', 'whereBetween', 'whereNull']) chain[m] = () => chain;
@@ -700,9 +700,46 @@ describe('recordSentWindowFallback (the audit row failed, the text went out) (ro
   });
 
   // The sender calls it on exactly the path that loses the promise.
+  test('the carrier\'s later verdict still governs a fallback row', async () => {
+    // The row carries the sid it was accepted under, so the audit_log read
+    // left-joins sms_log on it and drops the promise if that message is now
+    // undelivered/failed/blocked — the same live-delivery discipline an
+    // ordinary audit row gets. A call-evidence row carries no sid.
+    let joined = null;
+    const captured = [];
+    const chain = {};
+    for (const m of ['join', 'leftJoin', 'whereIn', 'whereRaw', 'whereNull', 'whereNotNull']) chain[m] = () => chain;
+    chain.leftJoin = (table, col, raw) => { joined = { table, col, raw: raw?.sql }; return chain; };
+    chain.where = (...args) => { captured.push(args); return chain; };
+    chain.select = () => Promise.resolve([]);
+    const conn = (table) => {
+      if (table !== 'audit_log as al') { const other = {}; for (const m of ['join', 'leftJoin', 'whereIn', 'whereRaw', 'whereBetween', 'whereNull', 'whereNotNull', 'where']) other[m] = () => other; other.select = () => Promise.resolve([]); return other; }
+      return chain;
+    };
+    conn.raw = (sql) => ({ sql });
+    conn.isTransaction = true;
+    await loadPromiseEvents(conn, ['visit-1']);
+    expect(joined).toMatchObject({ table: 'sms_log as fs', col: 'fs.twilio_sid' });
+    expect(joined.raw).toContain("al.metadata->>'provider_sid'");
+    const grouped = captured.find(([arg]) => typeof arg === 'function');
+    const seen = [];
+    const qb = {};
+    for (const m of ['whereRaw', 'orWhereNull', 'orWhereNotIn']) qb[m] = (...args) => { seen.push([m, ...args]); return qb; };
+    grouped[0](qb);
+    expect(seen).toEqual([
+      ['whereRaw', "al.metadata->>'provider_sid' IS NULL"],
+      ['orWhereNull', 'fs.id'],
+      ['orWhereNotIn', 'fs.status', ['undelivered', 'failed', 'blocked']],
+    ]);
+  });
+
   test('send-customer-message calls it when the audit row could not be written', () => {
     const sender = require('fs').readFileSync(require('path').join(__dirname, '..', 'services', 'messaging', 'send-customer-message.js'), 'utf8');
-    expect(sender).toContain('if (!audit.id && sendInput.appointmentId && sendInput.renderedSlotMs != null');
+    expect(sender).toContain('if (!audit.id && deliverable && sendInput.appointmentId && sendInput.renderedSlotMs != null');
+    // ...and only for a send that actually reached someone: a real Twilio
+    // SM/MM sid or a proven push, never a success-shaped sentinel.
+    expect(sender).toContain("/^(SM|MM)[a-f0-9]{32}$/i.test(providerSid)");
+    expect(sender).toContain("providerOutcome.provider === 'push' && providerOutcome.deliveryOutcome === 'accepted'");
     expect(sender).toContain("require('../no-show-detector').recordSentWindowFallback(");
   });
 });
@@ -954,7 +991,7 @@ describe('loadPromiseEvents: pre-deploy legacy reschedule/confirmation messages 
   function fakeConn({ messageRows = [] } = {}) {
     const calls = {};
     const conn = (table) => {
-      if (table === 'customer_interactions as ci' || table === 'audit_log' || table === 'activity_log' || table === 'series_moves as sm') return passthroughChain([]);
+      if (table === 'customer_interactions as ci' || table === 'audit_log as al' || table === 'activity_log' || table === 'series_moves as sm') return passthroughChain([]);
       if (table === 'messaging_audit_log as a') {
         const chain = {};
         chain.leftJoin = () => chain;
@@ -1049,7 +1086,7 @@ describe('loadPromiseEvents: no fixed lookback — confirmations older than 100 
   // function" instead of silently passing.
   function fakeConn({ messageRows = [] } = {}) {
     const conn = (table) => {
-      if (table === 'customer_interactions as ci' || table === 'audit_log' || table === 'activity_log' || table === 'series_moves as sm') return passthroughChain([]);
+      if (table === 'customer_interactions as ci' || table === 'audit_log as al' || table === 'activity_log' || table === 'series_moves as sm') return passthroughChain([]);
       if (table === 'messaging_audit_log as a') return passthroughChain(messageRows);
       throw new Error(`fake conn: unexpected table ${table}`);
     };

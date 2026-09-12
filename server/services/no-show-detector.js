@@ -293,8 +293,19 @@ async function loadPromiseEvents(conn, visitIds, { now = new Date() } = {}) {
       // attempt. Selected so the mapping below can order promises by when the
       // customer actually heard this window (codex P1 round 6).
       .select('ci.id', 'ci.metadata', 'ci.created_at', 'em.sent_at as provider_sent_at'),
-    () => conn('audit_log').where({ action: 'visit_window_promised', resource_type: 'scheduled_service' })
-      .whereIn('resource_id', visitIds).where('created_at', '<=', now).select('id', 'resource_id', 'metadata', 'created_at'),
+    () => conn('audit_log as al')
+      // A fallback row minted when the messaging audit insert failed carries
+      // the provider sid it was accepted under, so the carrier's LATER word
+      // still governs: if sms_log now reports that message undelivered/
+      // failed/blocked, the promise is dropped, exactly as it would be for an
+      // ordinary audit row (codex P1 round 9). A call-evidence row carries no
+      // sid and is unaffected.
+      .leftJoin('sms_log as fs', 'fs.twilio_sid', conn.raw("al.metadata->>'provider_sid'"))
+      .where({ 'al.action': 'visit_window_promised', 'al.resource_type': 'scheduled_service' })
+      .whereIn('al.resource_id', visitIds).where('al.created_at', '<=', now)
+      .where((qb) => qb.whereRaw("al.metadata->>'provider_sid' IS NULL").orWhereNull('fs.id')
+        .orWhereNotIn('fs.status', ['undelivered', 'failed', 'blocked']))
+      .select('al.id', 'al.resource_id', 'al.metadata', 'al.created_at'),
     // A series move sends ONE text, and that text names only the anchor
     // occurrence's new date — every SIBLING it moved is left with whatever
     // reminder it held for its OLD slot as its latest promise. DERIVED here
@@ -561,7 +572,7 @@ async function recordAgreedWindow(conn, { callId, visitId } = {}) {
 // when the primary ledger failed, and its whole purpose is to still be there
 // whenever the feature is switched on. Best-effort itself — a send must
 // never fail because its bookkeeping did.
-async function recordSentWindowFallback(conn, { visitId, startAtMs, communicatedAt = new Date(), reason = 'messaging_audit_unavailable' } = {}) {
+async function recordSentWindowFallback(conn, { visitId, startAtMs, communicatedAt = new Date(), providerSid = null, reason = 'messaging_audit_unavailable' } = {}) {
   // null BEFORE the Number conversion: Number(null) is 0, a finite instant
   // (the epoch), so a bare isFinite check would stamp a 1970 window as the
   // promise — the same null-before-conversion trap `instant` guards above.
@@ -570,7 +581,8 @@ async function recordSentWindowFallback(conn, { visitId, startAtMs, communicated
   if (!Number.isFinite(at.getTime())) return false;
   try {
     await recordAuditEvent({ actor_type: 'system', action: 'visit_window_promised', resource_type: 'scheduled_service', resource_id: String(visitId),
-      metadata: { start_at: new Date(Number(startAtMs)).toISOString(), communicated_at: at.toISOString(), fallback_reason: reason }, critical: true });
+      metadata: { start_at: new Date(Number(startAtMs)).toISOString(), communicated_at: at.toISOString(),
+        ...(providerSid ? { provider_sid: String(providerSid) } : {}), fallback_reason: reason }, critical: true });
     return true;
   } catch (err) {
     require('./logger').warn(`[no-show-detector] promised-window fallback failed for ${visitId}: ${err.message}`);
