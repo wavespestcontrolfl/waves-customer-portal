@@ -849,7 +849,12 @@ async function enrollVisitCompletionReviewForInvoice(invoiceId, database = db) {
     try {
       packetId = (await database('invoices').where({ id: invoiceId }).first('visit_completion_packet_id'))?.visit_completion_packet_id;
     } catch (again) {
-      return { enrolled: false, retryable: true, reason: 'error', error: again.message, reopened: false };
+      // NOTHING was marked for recovery here: the first lookup failed, the
+      // reopen touched no row, and this re-read failed too (Codex #4311 r32
+      // P1). `recorded: false` is what makes the Stripe rail rethrow and
+      // redeliver; without it the paid event is acknowledged and the
+      // requested review is lost.
+      return { enrolled: false, retryable: true, reason: 'error', error: again.message, reopened: false, recorded: false };
     }
     if (!packetId) return null;
     const owner = await database('visit_completion_packets').where({ id: packetId }).first('status');

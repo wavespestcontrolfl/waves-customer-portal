@@ -159,8 +159,9 @@ describe('invoice follow-up email sidecar', () => {
       // again for the eligibility check — two reads per fired step.
       // Claim-txn row lock read + the credit path's own invoice read (it
       // bails at its payment_plans probe in this harness) + the pre-dun
-      // refresh + the email-eligibility read.
-      invoices: [chain({ first: invoice() }), chain({ first: invoice() }), chain({ first: invoice() }), chain({ first: invoice() })],
+      // refresh + fireTouch's live ownership re-read + the email-eligibility
+      // read.
+      invoices: [chain({ first: invoice() }), chain({ first: invoice() }), chain({ first: invoice() }), chain({ first: invoice() }), chain({ first: invoice() })],
       notification_prefs: [chain({ first: { email_enabled: true } })],
       customer_interactions: [emailInteraction, finalInteraction],
       // fireStep now claims the sequence (touch_claimed_at) before sending
@@ -369,7 +370,7 @@ describe('invoice follow-up email sidecar', () => {
       // Claim-txn row lock read + the credit path's own invoice read (it
       // bails at its payment_plans probe in this harness) + the pre-dun
       // refresh + the email-eligibility read.
-      invoices: [chain({ first: invoice() }), chain({ first: invoice() }), chain({ first: invoice() }), chain({ first: invoice() })],
+      invoices: [chain({ first: invoice() }), chain({ first: invoice() }), chain({ first: invoice() }), chain({ first: invoice() }), chain({ first: invoice() })],
       notification_prefs: [chain({ first: { email_enabled: true } })],
       customer_interactions: [emailInteraction, finalInteraction],
       // Claim → cadence advance → claim clear (see the sidecar test above).
@@ -412,7 +413,7 @@ describe('invoice follow-up email sidecar', () => {
     setDbQueues({
       'invoice_followup_sequences as s': [chain({ result: [followupRow()] })],
       customers: [chain({ first: customer() })],
-      invoices: [chain({ first: invoice() }), chain({ first: invoice() }), chain({ first: invoice() }), chain({ first: invoice() })],
+      invoices: [chain({ first: invoice() }), chain({ first: invoice() }), chain({ first: invoice() }), chain({ first: invoice() }), chain({ first: invoice() })],
       notification_prefs: [chain({ first: { email_enabled: true } })],
       customer_interactions: [emailInteraction],
       sms_log: [failingSmsLog],

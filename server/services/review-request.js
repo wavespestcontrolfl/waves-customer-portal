@@ -2616,6 +2616,22 @@ const ReviewService = {
         if (provider.found) return { found: true };
       }
     }
+    // The destinations above are the numbers the customer holds NOW. A
+    // contact correction or a merge after the claim means the send used a
+    // number none of them names, and Twilio would answer "no such message" —
+    // releasing an ask the customer already received (Codex #4311 r32 P1).
+    // One last pass over the same window without a recipient filter: the ask
+    // token in the body is unique to this request, so a match is still exact,
+    // and a truncated page reports unavailable rather than "none".
+    for (const frag of frags) {
+      const anyDestination = await TwilioService.findOutboundMessageSince({
+        to: null,
+        sentAfter: row.claimed_at,
+        bodyFragment: frag,
+      });
+      if (anyDestination.unavailable) return { unavailable: true };
+      if (anyDestination.found) return { found: true };
+    }
     // A private check-in (resolution_check / satisfaction_confirm) renders
     // with NO review link, so neither search above could ever match it and
     // their silence is not evidence of absence. Only the stamp can prove

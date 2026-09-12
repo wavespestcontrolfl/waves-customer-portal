@@ -774,13 +774,23 @@ async function fireTouch(row, { operatorInitiated = false } = {}) {
   // this covers sendNextTouchNow's direct call too. Pause terminally (not a bare
   // return) so a later re-arm can't fire a stale touch. Prefer the selected
   // invoice_payer_id; fall back to a lookup when the caller didn't select it.
-  let payerId = row.invoice_payer_id;
-  let sendError = row.invoice_send_error;
-  if (payerId === undefined || sendError === undefined) {
-    const inv = await db('invoices').where({ id: row.invoice_id }).first('payer_id', 'scheduled_send_error').catch(() => null);
-    payerId = payerId === undefined ? (inv?.payer_id ?? null) : payerId;
-    sendError = sendError === undefined ? (inv?.scheduled_send_error ?? null) : sendError;
+  // RE-READ, always (Codex #4311 r32 P1). The batch select happens before the
+  // sequence claim and the provider request; a Bill-To change committing in
+  // that window stamps the invoice and pauses the sequence, and this worker —
+  // already claimed — would text the homeowner a pay link for debt that now
+  // belongs to AP. The selected columns are only a fast path for what the
+  // fence used to read; ownership itself is judged on the live row.
+  const liveInvoice = await db('invoices').where({ id: row.invoice_id })
+    .first('payer_id', 'scheduled_send_error').catch(() => undefined);
+  if (liveInvoice === undefined) {
+    // Unreadable ownership is not "self-pay": pause rather than send.
+    await db('invoice_followup_sequences').where({ id: row.id })
+      .update({ updated_at: db.fn.now(), status: 'paused', next_touch_at: null });
+    logger.warn(`[invoice-followups] paused sequence ${row.id} — could not re-read invoice ${row.invoice_id} ownership before the touch`);
+    return;
   }
+  const payerId = liveInvoice.payer_id ?? null;
+  const sendError = liveInvoice.scheduled_send_error ?? null;
   if (payerId || invoiceWithdrawnFromCustomer({ scheduled_send_error: sendError })) {
     await db('invoice_followup_sequences').where({ id: row.id }).update({
       updated_at: db.fn.now(),

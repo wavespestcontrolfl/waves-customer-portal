@@ -424,7 +424,14 @@ const TwilioService = {
    */
   async findOutboundMessageSince({ to, sentAfter, bodyFragment, limit = 1000 }) {
     const twilioClient = getClient();
-    if (!twilioClient || !to) return { unavailable: true };
+    if (!twilioClient) return { unavailable: true };
+    // `to` may be omitted deliberately (Codex #4311 r32 P1): a recipient that
+    // changed or merged after the claim means the number this send actually
+    // used is no longer on the customer, so the caller asks about the whole
+    // window and relies on the body fragment — a unique ask token — to
+    // identify the message. A truncated page still reports `unavailable`, so
+    // the wider search can only fail closed.
+    if (!to && !bodyFragment) return { unavailable: true };
     try {
       // The SDK serializes dateSentAfter to whole seconds as a STRICT
       // DateSent> filter, so an acceptance in the same second as the claim
@@ -432,7 +439,7 @@ const TwilioService = {
       // body-fragment checks below keep the match exact.
       const from = sentAfter ? new Date(new Date(sentAfter).getTime() - 60 * 1000) : undefined;
       const messages = await twilioClient.messages.list({
-        to,
+        ...(to ? { to } : {}),
         dateSentAfter: from,
         limit,
       });

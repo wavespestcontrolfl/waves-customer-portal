@@ -214,6 +214,20 @@ const LatePaymentService = {
       // "stop dunning this invoice" instruction (e.g. customer is mailing a check);
       // honoring it only in the per-invoice engine but not here would let this
       // legacy reminder keep texting them after follow-ups were turned off.
+      // Ownership RE-READ immediately before the dispatch decision (Codex
+      // #4311 r32 P1): a Bill-To change committing between the batch query
+      // above and this send stamps the invoice and moves the debt to AP,
+      // and the batch row still carries the old, empty stamp. FAIL CLOSED on
+      // an unreadable row, like every other customer-comms guard here.
+      try {
+        const live = await db('invoices').where({ id: inv.id }).first('payer_id', 'scheduled_send_error');
+        if (!live || live.payer_id
+          || require('./invoice-helpers').invoiceWithdrawnFromCustomer(live)) { skipped++; continue; }
+      } catch (ownershipErr) {
+        logger.warn(`[late-payment] ownership re-read failed for invoice ${inv.id} — skipping this run (fail closed): ${ownershipErr.message}`);
+        skipped++;
+        continue;
+      }
       try {
         const InvoiceFollowUps = require('./invoice-followups');
         if (await InvoiceFollowUps.hasActiveSequence(inv.id)) { skipped++; continue; }

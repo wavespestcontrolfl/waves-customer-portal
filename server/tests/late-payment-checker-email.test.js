@@ -110,7 +110,9 @@ describe('late-payment checker email sidecar', () => {
     };
 
     setDbQueues({
-      invoices: [chain({ result: [invoice] })],
+      // The batch query, then the per-invoice ownership re-read immediately
+      // before dispatch (a Bill-To change can land in between).
+      invoices: [chain({ result: [invoice] }), chain({ first: { payer_id: null, scheduled_send_error: null } })],
       activity_log: [chain({ first: null }), chain()],
       customers: [chain({ first: customer })],
     });
@@ -166,7 +168,9 @@ describe('late-payment checker email sidecar', () => {
     });
 
     setDbQueues({
-      invoices: [chain({ result: [invoice] })],
+      // The batch query, then the per-invoice ownership re-read immediately
+      // before dispatch (a Bill-To change can land in between).
+      invoices: [chain({ result: [invoice] }), chain({ first: { payer_id: null, scheduled_send_error: null } })],
       activity_log: [chain({ first: null }), chain()],
       customers: [chain({ first: customer })],
     });
@@ -211,7 +215,9 @@ describe('late-payment checker email sidecar', () => {
     insertChain.insert = dedupeInsertSpy;
 
     setDbQueues({
-      invoices: [chain({ result: [invoice] })],
+      // The batch query, then the per-invoice ownership re-read immediately
+      // before dispatch (a Bill-To change can land in between).
+      invoices: [chain({ result: [invoice] }), chain({ first: { payer_id: null, scheduled_send_error: null } })],
       activity_log: [chain({ first: null }), insertChain],
       customers: [chain({ first: customer })],
     });
@@ -245,7 +251,9 @@ describe('late-payment checker email sidecar', () => {
     });
 
     setDbQueues({
-      invoices: [chain({ result: [invoice] })],
+      // The batch query, then the per-invoice ownership re-read immediately
+      // before dispatch (a Bill-To change can land in between).
+      invoices: [chain({ result: [invoice] }), chain({ first: { payer_id: null, scheduled_send_error: null } })],
       activity_log: [chain({ first: null })],
       customers: [chain({ first: customer })],
     });
@@ -279,7 +287,9 @@ describe('late-payment checker email sidecar', () => {
     });
 
     setDbQueues({
-      invoices: [chain({ result: [invoice] })],
+      // The batch query, then the per-invoice ownership re-read immediately
+      // before dispatch (a Bill-To change can land in between).
+      invoices: [chain({ result: [invoice] }), chain({ first: { payer_id: null, scheduled_send_error: null } })],
       activity_log: [chain({ first: null })],
       customers: [chain({ first: customer })],
     });
@@ -311,7 +321,9 @@ describe('late-payment checker email sidecar', () => {
     InvoiceFollowUps.isDunningStopped.mockResolvedValueOnce(true);
 
     setDbQueues({
-      invoices: [chain({ result: [invoice] })],
+      // The batch query, then the per-invoice ownership re-read immediately
+      // before dispatch (a Bill-To change can land in between).
+      invoices: [chain({ result: [invoice] }), chain({ first: { payer_id: null, scheduled_send_error: null } })],
     });
 
     await LatePaymentChecker.checkAndNotify();
