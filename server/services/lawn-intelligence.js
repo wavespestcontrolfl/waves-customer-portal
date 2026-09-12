@@ -317,7 +317,7 @@ const LawnIntelligence = {
         ...(typeof options?.beforeSend === 'function' ? {
           preSendCheck: async () => {
             const authority = await runBeforeSend(options);
-            return { ok: true, validUntil: authority?.validUntil };
+            return { ...authority, ok: true };
           },
         } : {}),
         ...(options?.scheduledSmsLogId ? { scheduledSmsLogId: options.scheduledSmsLogId } : {}),
