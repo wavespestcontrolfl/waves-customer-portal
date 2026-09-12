@@ -857,7 +857,17 @@ async function fireTouch(row, { operatorInitiated = false } = {}) {
   // state) — a credit-helper failure above must not bypass it.
   try {
     const fresh = await db('invoices').where({ id: row.invoice_id })
-      .first('total', 'credit_applied', 'status', 'title', 'token', 'due_date', 'invoice_number');
+      .first('total', 'credit_applied', 'status', 'title', 'token', 'due_date', 'invoice_number',
+        'payer_id', 'scheduled_send_error');
+    // OWNERSHIP AGAIN, on this last read before the provider (local audit):
+    // the policy, credit and ledger work above is all awaited, and a Bill-To
+    // assignment landing in that window would otherwise be invisible to this
+    // already-claimed worker. The pause it wrote is authoritative; this send
+    // simply stops.
+    if (fresh && (fresh.payer_id || invoiceWithdrawnFromCustomer(fresh))) {
+      logger.info(`[invoice-followups] dropped touch for sequence ${row.id} — invoice ${row.invoice_id} moved to a third-party payer during this run`);
+      return;
+    }
     if (fresh) {
       row.total = fresh.total;
       row.credit_applied = fresh.credit_applied;

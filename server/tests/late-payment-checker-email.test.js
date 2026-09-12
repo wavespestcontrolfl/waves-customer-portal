@@ -110,9 +110,14 @@ describe('late-payment checker email sidecar', () => {
     };
 
     setDbQueues({
-      // The batch query, then the per-invoice ownership re-read immediately
-      // before dispatch (a Bill-To change can land in between).
-      invoices: [chain({ result: [invoice] }), chain({ first: { payer_id: null, scheduled_send_error: null } })],
+      // The batch query, then TWO ownership re-reads: one before the dunning
+      // guards and one on the last read before the provider (a Bill-To change
+      // can land in either window).
+      invoices: [
+        chain({ result: [invoice] }),
+        chain({ first: { payer_id: null, scheduled_send_error: null } }),
+        chain({ first: { payer_id: null, scheduled_send_error: null } }),
+      ],
       activity_log: [chain({ first: null }), chain()],
       customers: [chain({ first: customer })],
     });
@@ -168,9 +173,14 @@ describe('late-payment checker email sidecar', () => {
     });
 
     setDbQueues({
-      // The batch query, then the per-invoice ownership re-read immediately
-      // before dispatch (a Bill-To change can land in between).
-      invoices: [chain({ result: [invoice] }), chain({ first: { payer_id: null, scheduled_send_error: null } })],
+      // The batch query, then TWO ownership re-reads: one before the dunning
+      // guards and one on the last read before the provider (a Bill-To change
+      // can land in either window).
+      invoices: [
+        chain({ result: [invoice] }),
+        chain({ first: { payer_id: null, scheduled_send_error: null } }),
+        chain({ first: { payer_id: null, scheduled_send_error: null } }),
+      ],
       activity_log: [chain({ first: null }), chain()],
       customers: [chain({ first: customer })],
     });
@@ -215,9 +225,14 @@ describe('late-payment checker email sidecar', () => {
     insertChain.insert = dedupeInsertSpy;
 
     setDbQueues({
-      // The batch query, then the per-invoice ownership re-read immediately
-      // before dispatch (a Bill-To change can land in between).
-      invoices: [chain({ result: [invoice] }), chain({ first: { payer_id: null, scheduled_send_error: null } })],
+      // The batch query, then TWO ownership re-reads: one before the dunning
+      // guards and one on the last read before the provider (a Bill-To change
+      // can land in either window).
+      invoices: [
+        chain({ result: [invoice] }),
+        chain({ first: { payer_id: null, scheduled_send_error: null } }),
+        chain({ first: { payer_id: null, scheduled_send_error: null } }),
+      ],
       activity_log: [chain({ first: null }), insertChain],
       customers: [chain({ first: customer })],
     });
@@ -251,9 +266,14 @@ describe('late-payment checker email sidecar', () => {
     });
 
     setDbQueues({
-      // The batch query, then the per-invoice ownership re-read immediately
-      // before dispatch (a Bill-To change can land in between).
-      invoices: [chain({ result: [invoice] }), chain({ first: { payer_id: null, scheduled_send_error: null } })],
+      // The batch query, then TWO ownership re-reads: one before the dunning
+      // guards and one on the last read before the provider (a Bill-To change
+      // can land in either window).
+      invoices: [
+        chain({ result: [invoice] }),
+        chain({ first: { payer_id: null, scheduled_send_error: null } }),
+        chain({ first: { payer_id: null, scheduled_send_error: null } }),
+      ],
       activity_log: [chain({ first: null })],
       customers: [chain({ first: customer })],
     });
@@ -287,9 +307,14 @@ describe('late-payment checker email sidecar', () => {
     });
 
     setDbQueues({
-      // The batch query, then the per-invoice ownership re-read immediately
-      // before dispatch (a Bill-To change can land in between).
-      invoices: [chain({ result: [invoice] }), chain({ first: { payer_id: null, scheduled_send_error: null } })],
+      // The batch query, then TWO ownership re-reads: one before the dunning
+      // guards and one on the last read before the provider (a Bill-To change
+      // can land in either window).
+      invoices: [
+        chain({ result: [invoice] }),
+        chain({ first: { payer_id: null, scheduled_send_error: null } }),
+        chain({ first: { payer_id: null, scheduled_send_error: null } }),
+      ],
       activity_log: [chain({ first: null })],
       customers: [chain({ first: customer })],
     });
@@ -321,9 +346,14 @@ describe('late-payment checker email sidecar', () => {
     InvoiceFollowUps.isDunningStopped.mockResolvedValueOnce(true);
 
     setDbQueues({
-      // The batch query, then the per-invoice ownership re-read immediately
-      // before dispatch (a Bill-To change can land in between).
-      invoices: [chain({ result: [invoice] }), chain({ first: { payer_id: null, scheduled_send_error: null } })],
+      // The batch query, then TWO ownership re-reads: one before the dunning
+      // guards and one on the last read before the provider (a Bill-To change
+      // can land in either window).
+      invoices: [
+        chain({ result: [invoice] }),
+        chain({ first: { payer_id: null, scheduled_send_error: null } }),
+        chain({ first: { payer_id: null, scheduled_send_error: null } }),
+      ],
     });
 
     await LatePaymentChecker.checkAndNotify();

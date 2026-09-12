@@ -322,6 +322,18 @@ const LatePaymentService = {
       }
       const dateClause = formattedDate ? ` completed on ${formattedDate}` : '';
 
+      // Ownership ONE more time, on the last read before the provider (local
+      // audit): every check above is awaited, and a Bill-To assignment
+      // landing in that window would otherwise still text the homeowner.
+      try {
+        const stillSelfPay = await db('invoices').where({ id: inv.id }).first('payer_id', 'scheduled_send_error');
+        if (!stillSelfPay || stillSelfPay.payer_id
+          || require('./invoice-helpers').invoiceWithdrawnFromCustomer(stillSelfPay)) { skipped++; continue; }
+      } catch (ownershipErr) {
+        logger.warn(`[late-payment] pre-send ownership re-read failed for invoice ${inv.id} — skipping (fail closed): ${ownershipErr.message}`);
+        skipped++;
+        continue;
+      }
       const templateKey = templateKeyForOverdue(daysSince);
       const body = await renderSmsTemplate(templateKey, {
         first_name: name,
