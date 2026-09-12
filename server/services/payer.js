@@ -196,11 +196,19 @@ async function updatePayer(id, body) {
       // Taking the referencing rows FOR SHARE here — before the payer row —
       // puts this transaction on the established order; the set is re-read
       // under the payer lock below, and the withdrawal re-locks per packet.
+      // ADVISORY LOCKS FIRST, then ownership rows (local audit): the
+      // combined-session fences take `pay.combined.customer` per customer, and
+      // the job Bill-To writer takes it before it touches member rows. Taking
+      // rows first here and the advisory lock later is the inverse order, and
+      // the two writers deadlock. The set is re-checked under the payer lock
+      // below; a reference that appears after this point refuses rather than
+      // proceeding on a partial prelock.
       const referencingCustomerIds = [...new Set([
         ...await trx('customers').where({ payer_id: pid }).whereNull('deleted_at').pluck('id'),
         ...await trx('scheduled_services').where({ payer_id: pid }).whereNotNull('customer_id').pluck('customer_id'),
       ].map(String))].sort();
       if (referencingCustomerIds.length) {
+        await require('./pay-combined').lockCombinedCustomers(trx, referencingCustomerIds);
         await trx('customers').whereIn('id', referencingCustomerIds).orderBy('id').forShare().select('id');
         // EVERY member of a packet this payer reaches, not only the members
         // that name it (Codex #4311 r29 P2): the withdrawal resolves

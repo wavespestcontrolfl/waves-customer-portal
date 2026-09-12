@@ -9399,6 +9399,14 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
         // edit rejected for an in-flight send must not already have destroyed
         // the customer's live pay-page session.
         if (updates.payer_id !== undefined || updates.self_pay_override !== undefined) {
+          // The combined-session advisory lock BEFORE this row lock (local
+          // audit): the payer-activation writer takes it first too, so both
+          // Bill-To writers acquire advisory locks then ownership rows and
+          // cannot deadlock against each other.
+          const billToOwner = await trx('scheduled_services').where({ id: req.params.id }).first('customer_id');
+          if (billToOwner?.customer_id) {
+            await require('../services/pay-combined').lockCombinedCustomers(trx, [String(billToOwner.customer_id)]);
+          }
           await trx('scheduled_services').where({ id: req.params.id }).forNoKeyUpdate().first('id');
           if (await require('../services/visit-completion-packets').packetInvoiceSendInFlight({ scheduledServiceId: req.params.id }, trx)) {
             throw Object.assign(new Error('The combined-visit invoice for this service is being delivered. Retry the Bill-To change in a moment.'), {
