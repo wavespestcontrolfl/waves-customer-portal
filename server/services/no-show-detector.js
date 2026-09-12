@@ -139,6 +139,20 @@ function latestPromises(events, now = new Date()) {
   return byVisit;
 }
 
+// The delivery half of the SMS evidence rule, shared by the two reads that
+// need it (a visit's own scheduling notices, and the series text that
+// supersedes its siblings' windows) so they can never drift apart: a LINKED
+// sms_log row must currently read sent/delivered/read, a push row is proof in
+// itself, and an UNLINKED row counts only for a real Twilio SM/MM sid — see
+// the long note on the messaging_audit_log read for why unlinked is neutral
+// and why the success-shaped sentinels are not.
+function textActuallyWentOut() {
+  this.where('a.provider', 'push').orWhereIn('s.status', ['sent', 'delivered', 'read'])
+    .orWhere(function unlinkedRealSend() {
+      this.whereNull('s.id').whereRaw(`a.provider_message_id ~* '^(SM|MM)[a-f0-9]{32}$'`);
+    });
+}
+
 // Read the immutable time rendered into the communication. The current
 // scheduled time is deliberately never used as proof of what we promised.
 async function loadPromiseEvents(conn, visitIds, { now = new Date() } = {}) {
@@ -185,12 +199,7 @@ async function loadPromiseEvents(conn, visitIds, { now = new Date() } = {}) {
       // success-shaped sentinels ('owner-silence', gate-/template-/
       // internal-) mean NO text reached the customer and never get an
       // sms_log row, so they must stay excluded.
-      .where(function delivered() {
-        this.where('a.provider', 'push').orWhereIn('s.status', ['sent', 'delivered', 'read'])
-          .orWhere(function unlinkedRealSend() {
-            this.whereNull('s.id').whereRaw(`a.provider_message_id ~* '^(SM|MM)[a-f0-9]{32}$'`);
-          });
-      })
+      .where(textActuallyWentOut)
       .select('a.id', 'a.appointment_id', 'a.metadata', 'a.sent_at'),
     // appointment-email.js's own send-time customer_interactions row is
     // never updated afterward (it stays status:'sent' forever) — the LIVE
@@ -219,7 +228,16 @@ async function loadPromiseEvents(conn, visitIds, { now = new Date() } = {}) {
       })
       .where('ci.interaction_type', 'email_outbound').where('ci.created_at', '<=', now)
       .whereRaw("ci.metadata->>'scheduled_service_id' = ANY(?::text[])", [visitIds])
-      .whereRaw("ci.metadata->>'status' IN ('sent','delivered')")
+      // The interaction row is a write-once snapshot of the FIRST attempt, so
+      // a send that failed and was later RETRIED SUCCESSFULLY still reads
+      // 'failed' here forever — the retry worker reuses the email_messages
+      // row and writes no new interaction row. Taking the snapshot alone
+      // would discard a window the customer really received on the retry,
+      // leaving an older promise standing as the latest (codex P1 round 6).
+      // The live email_messages status decides whenever the row is linked;
+      // the snapshot still decides for an unlinked/legacy row.
+      .where((qb) => qb.whereRaw("ci.metadata->>'status' IN ('sent','delivered')")
+        .orWhereIn('em.status', DELIVERED_EMAIL_STATUSES))
       .whereRaw("ci.metadata->>'event_type' IN ('appointment.confirmation','appointment.reminder_72h','appointment.reminder_24h','appointment.rescheduled')")
       // A LINKED row must currently show a delivery the customer actually
       // received: an allowlist, not "anything but the terminal failures"
@@ -249,10 +267,24 @@ async function loadPromiseEvents(conn, visitIds, { now = new Date() } = {}) {
     // reading it needs no second write to keep consistent, no retry marker
     // for a write that failed after the text went out, and no backfill —
     // every move made BEFORE this feature existed derives the same way.
-    () => conn('series_moves as sm').where('sm.customer_notified', true)
-      .whereNotNull('sm.notified_at').where('sm.notified_at', '<=', now)
+    () => conn('series_moves as sm')
+      // The move's own series text, joined by the series_move_id its metadata
+      // carries, and held to the SAME delivery bar as any other promise
+      // evidence (codex P1 round 6): series_moves.customer_notified says the
+      // sender accepted a handoff, not that the carrier delivered it. A text
+      // the customer never got supersedes nothing — the sibling's existing
+      // promise still stands. a.sent_at is also the honest communicated_at:
+      // the moment the customer was told, not when the effects pass stamped
+      // its marker.
+      .join('messaging_audit_log as a', function joinOnSeriesMove() {
+        this.on(conn.raw("a.metadata->>'series_move_id' = sm.id::text"));
+      })
+      .leftJoin('sms_log as s', 's.twilio_sid', 'a.provider_message_id')
+      .where('sm.customer_notified', true)
+      .where('a.sent_at', '<=', now).whereNull('a.blocked_code').whereNull('a.provider_error')
+      .where(textActuallyWentOut)
       .where((qb) => { for (const id of visitIds) qb.orWhereRaw('sm.rows @> ?::jsonb', [JSON.stringify([{ id }])]); })
-      .select('sm.id', 'sm.notified_at', 'sm.anchor_service_id', 'sm.rows'),
+      .select('sm.id', 'sm.anchor_service_id', 'sm.rows', 'a.sent_at'),
   ];
   const results = [];
   if (conn.isTransaction) {
@@ -285,17 +317,23 @@ async function loadPromiseEvents(conn, visitIds, { now = new Date() } = {}) {
 // date_exception occurrence is excluded too — the move deliberately left it
 // where it was, so its existing promise still stands.
 function seriesSupersessions(rows = [], candidates = new Set()) {
-  const events = [];
+  // One row per DELIVERED recipient of the move's text (a fan-out to two
+  // appointment contacts writes two audit rows), so keep the earliest
+  // delivered send per (visit, move) — that is when the customer was told.
+  const earliest = new Map();
   for (const move of rows) {
     const moved = Array.isArray(move.rows) ? move.rows : JSON.parse(move.rows || '[]');
     for (const occurrence of moved) {
       const visitId = String(occurrence?.id || '');
       if (!visitId || !candidates.has(visitId) || occurrence.anchor === true || occurrence.exception === true) continue;
       if (String(move.anchor_service_id || '') === visitId) continue;
-      events.push({ visit_id: visitId, start_at: null, communicated_at: move.notified_at, source: 'series_move', source_id: move.id });
+      const key = `${visitId}:${move.id}`;
+      const prior = earliest.get(key);
+      if (prior && instant(prior.communicated_at) <= instant(move.sent_at)) continue;
+      earliest.set(key, { visit_id: visitId, start_at: null, communicated_at: move.sent_at, source: 'series_move', source_id: move.id });
     }
   }
-  return events;
+  return [...earliest.values()];
 }
 
 // Pure, exported for tests. Same caller-identity rule

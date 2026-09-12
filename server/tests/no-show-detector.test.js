@@ -433,7 +433,7 @@ describe('loadPromiseEvents: email promise evidence checks the LIVE delivery sta
   // (codex P1).
   function passthroughChain(result = []) {
     const chain = {};
-    for (const m of ['leftJoin', 'whereIn', 'whereRaw', 'whereBetween', 'whereNull', 'whereNotNull', 'where']) chain[m] = () => chain;
+    for (const m of ['join', 'leftJoin', 'whereIn', 'whereRaw', 'whereBetween', 'whereNull', 'whereNotNull', 'where']) chain[m] = () => chain;
     chain.select = () => Promise.resolve(result);
     return chain;
   }
@@ -475,25 +475,44 @@ describe('loadPromiseEvents: email promise evidence checks the LIVE delivery sta
     expect(joinSql).toContain("em.id::text = (ci.metadata->>'email_message_id')");
     expect(joinSql).toContain("ci.metadata->>'email_message_id' IS NULL AND em.provider_message_id = (ci.metadata->>'provider_message_id')");
 
-    // The exclusion predicate is the one `.where(...)` call whose first arg
-    // is a function (every other `.where(...)` call in this read passes a
-    // string/object filter).
-    const exclusionCall = (calls.whereCalls || []).find(([arg]) => typeof arg === 'function');
-    expect(exclusionCall).toBeTruthy();
-    const qb = { whereNull: jest.fn(() => qb), orWhereIn: jest.fn(() => qb) };
-    exclusionCall[0](qb);
-    expect(qb.whereNull).toHaveBeenCalledWith('em.id');
-    // An ALLOWLIST, not "anything but the terminal failures" (round-6 P1):
-    // the retry worker flips a failed row back to 'queued' before any new
-    // provider handoff, and a deny-list read that interval as evidence for a
-    // send that had already failed. Only states meaning the recipient got it
-    // count — accepted/delivered, plus the reactions SendGrid reports solely
-    // for a delivered message.
-    expect(qb.orWhereIn).toHaveBeenCalledWith('em.status',
-      ['sent', 'processed', 'delivered', 'complained', 'spam_report', 'unsubscribed']);
-    const [, allowed] = qb.orWhereIn.mock.calls[0];
-    for (const inFlightOrFailed of ['queued', 'processing', 'failed', 'bounced', 'dropped', 'blocked']) {
-      expect(allowed).not.toContain(inFlightOrFailed);
+    // Both grouped predicates in this read pass a function to `.where(...)`
+    // (every other call passes a string/object filter). Replay each against a
+    // recorder and assert on what it called.
+    const grouped = (calls.whereCalls || []).filter(([arg]) => typeof arg === 'function');
+    expect(grouped).toHaveLength(2);
+    const replay = (fn) => {
+      const seen = [];
+      const qb = {};
+      for (const method of ['where', 'whereRaw', 'whereNull', 'whereIn', 'orWhere', 'orWhereRaw', 'orWhereNull', 'orWhereIn']) {
+        qb[method] = (...args) => { seen.push([method, ...args]); return qb; };
+      }
+      fn(qb);
+      return seen;
+    };
+    const flat = grouped.map(([fn]) => replay(fn));
+    const calledWith = (method, first) => flat.some((seen) => seen.some(([m, arg]) => m === method && arg === first));
+
+    // (a) A send that FAILED and was later retried successfully still reads
+    // 'failed' in its own write-once interaction row — the retry worker
+    // reuses the email_messages row and writes no new interaction row. The
+    // live linked status counts too, or the window the customer really got on
+    // the retry would be discarded and an older promise would stand as the
+    // latest (round-6 P1).
+    expect(calledWith('whereRaw', "ci.metadata->>'status' IN ('sent','delivered')")).toBe(true);
+
+    // (b) Unlinked stays neutral; a LINKED row must show a delivery the
+    // recipient actually got — an ALLOWLIST, not "anything but the terminal
+    // failures", because the retry worker flips a failed row back to 'queued'
+    // before any new provider handoff and a deny-list read that interval as
+    // evidence for a send that had already failed (round-6 P1).
+    expect(calledWith('whereNull', 'em.id')).toBe(true);
+    const statusAllowlists = flat.flat().filter(([m, arg]) => m === 'orWhereIn' && arg === 'em.status');
+    expect(statusAllowlists.length).toBeGreaterThan(0);
+    for (const [, , allowed] of statusAllowlists) {
+      expect(allowed).toEqual(['sent', 'processed', 'delivered', 'complained', 'spam_report', 'unsubscribed']);
+      for (const inFlightOrFailed of ['queued', 'processing', 'failed', 'bounced', 'dropped', 'blocked']) {
+        expect(allowed).not.toContain(inFlightOrFailed);
+      }
     }
   });
 });
@@ -510,7 +529,7 @@ describe('loadPromiseEvents: an UNLINKED sms_log row is neutral, a sentinel sid 
   // text went out and never get an sms_log row either.
   function passthroughChain(result = []) {
     const chain = {};
-    for (const m of ['leftJoin', 'whereIn', 'whereRaw', 'whereBetween', 'whereNull', 'whereNotNull', 'where']) chain[m] = () => chain;
+    for (const m of ['join', 'leftJoin', 'whereIn', 'whereRaw', 'whereBetween', 'whereNull', 'whereNotNull', 'where']) chain[m] = () => chain;
     chain.select = () => Promise.resolve(result);
     return chain;
   }
@@ -589,16 +608,20 @@ describe('seriesSupersessions: one series text supersedes every moved sibling (r
   // written at notification time: nothing to retry when a write fails after
   // the text went out, and every move made before this feature existed reads
   // the same way (no backfill).
+  // sent_at, not the move's notified_at marker: the moment the customer was
+  // actually told. The read that produces these rows already held the text to
+  // the same delivery bar as any other promise evidence (round-6 P1), so a
+  // series text the carrier never delivered never reaches this function.
   const move = {
-    id: 'move-1', notified_at: '2026-09-11T18:00:00.000Z', anchor_service_id: 'anchor',
+    id: 'move-1', sent_at: '2026-09-11T18:00:00.000Z', anchor_service_id: 'anchor',
     rows: [{ id: 'anchor', anchor: true }, { id: 'sib-1' }, { id: 'sib-2' }, { id: 'sib-x', exception: true }],
   };
   const all = new Set(['anchor', 'sib-1', 'sib-2', 'sib-x', 'other']);
 
   test('every moved sibling gets an UNKNOWN window stamped when the customer was told', () => {
     expect(seriesSupersessions([move], all)).toEqual([
-      { visit_id: 'sib-1', start_at: null, communicated_at: move.notified_at, source: 'series_move', source_id: 'move-1' },
-      { visit_id: 'sib-2', start_at: null, communicated_at: move.notified_at, source: 'series_move', source_id: 'move-1' },
+      { visit_id: 'sib-1', start_at: null, communicated_at: move.sent_at, source: 'series_move', source_id: 'move-1' },
+      { visit_id: 'sib-2', start_at: null, communicated_at: move.sent_at, source: 'series_move', source_id: 'move-1' },
     ]);
   });
 
@@ -612,6 +635,13 @@ describe('seriesSupersessions: one series text supersedes every moved sibling (r
 
   test('a date_exception occurrence is excluded — the move deliberately left it where it was', () => {
     expect(seriesSupersessions([move], all).map((e) => e.visit_id)).not.toContain('sib-x');
+  });
+
+  test('a fan-out to two contacts (two delivered audit rows) yields ONE event, at the earliest send', () => {
+    const late = { ...move, sent_at: '2026-09-11T18:04:00.000Z' };
+    const events = seriesSupersessions([late, move], all);
+    expect(events).toHaveLength(2);
+    for (const event of events) expect(event.communicated_at).toBe('2026-09-11T18:00:00.000Z');
   });
 
   test('rows outside the candidate set are dropped, and a JSON-encoded rows column is parsed', () => {
@@ -709,7 +739,7 @@ describe('loadPromiseEvents: pre-deploy legacy reschedule/confirmation messages 
   // alert against a window the visit no longer holds.
   function passthroughChain(result = []) {
     const chain = {};
-    for (const m of ['leftJoin', 'whereIn', 'whereRaw', 'whereBetween', 'whereNull', 'whereNotNull', 'where']) chain[m] = () => chain;
+    for (const m of ['join', 'leftJoin', 'whereIn', 'whereRaw', 'whereBetween', 'whereNull', 'whereNotNull', 'where']) chain[m] = () => chain;
     chain.select = () => Promise.resolve(result);
     return chain;
   }
@@ -808,7 +838,7 @@ describe('noticeStillCurrent: an ineligible technician\'s tracking notice is dis
 describe('loadPromiseEvents: no fixed lookback — confirmations older than 100 days still count (round-3 P2-B)', () => {
   function passthroughChain(result = []) {
     const chain = {};
-    for (const m of ['leftJoin', 'whereIn', 'whereRaw', 'whereNull', 'whereNotNull', 'where']) chain[m] = () => chain;
+    for (const m of ['join', 'leftJoin', 'whereIn', 'whereRaw', 'whereNull', 'whereNotNull', 'where']) chain[m] = () => chain;
     chain.select = () => Promise.resolve(result);
     return chain;
   }
