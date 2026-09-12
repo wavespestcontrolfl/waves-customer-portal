@@ -1153,12 +1153,14 @@ describe('the call-booking promise derives from the visit\'s own call link (roun
     // force-reprocess rewrites ai_extraction_enriched on the same row, and a
     // changed commitment would move or erase a promise the customer was given
     // at booking time with no new communication behind it (round-19 P1).
-    expect(detector).toContain("cl.updated_at <= sv.created_at + interval '1 hour'");
+    expect(detector).toContain("COALESCE(cl.processing_generation, 0) <= 1");
+    expect(detector).not.toContain('cl.updated_at <=');
     // ...and the extraction must still predate the booking it produced: a
     // force-reprocess rewrites ai_extraction_enriched on the same row, and a
     // changed commitment would move or erase a promise the customer was given
     // at booking time with no new communication behind it (round-19 P1).
-    expect(detector).toContain("cl.updated_at <= sv.created_at + interval '1 hour'");
+    expect(detector).toContain("COALESCE(cl.processing_generation, 0) <= 1");
+    expect(detector).not.toContain('cl.updated_at <=');
     expect(promise).toMatchObject({ visit_id: 'visit-1', source: 'call', source_id: 'call-1',
       communicated_at: '2026-09-10T14:05:00.000Z' });
     spy.mockRestore();

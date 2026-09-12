@@ -479,11 +479,16 @@ async function loadPromiseEvents(conn, visitIds, { now = new Date() } = {}) {
       // ai_extraction_enriched on the same call row, and a changed
       // agent_committed_booking or confirmed_start_at would then move — or
       // erase — a promise the customer was given at booking time, with no new
-      // communication behind it (codex P1 round 19). Only an extraction that
-      // still predates the booking it produced counts; a later reprocess
-      // simply stops answering, leaving the customer-facing confirmation as
-      // the evidence, which is the better record anyway.
-      .whereRaw("cl.updated_at <= sv.created_at + interval '1 hour'")
+      // communication behind it (codex P1 round 19). processing_generation is
+      // the provenance for that: the processor increments it once per pass, so
+      // a call still on its first pass carries the extraction the booking was
+      // made from. updated_at is NOT usable here — any unrelated write to the
+      // row (a status callback, a linkage update) moves it, and a guard on it
+      // would drop good evidence wholesale (codex P1 round 19, second pass).
+      // A re-processed call simply stops answering, leaving the
+      // customer-facing confirmation as the evidence, which is the better
+      // record anyway.
+      .whereRaw('COALESCE(cl.processing_generation, 0) <= 1')
       .select('sv.id as visit_id', 'sv.created_at as booked_at', 'cl.id as call_id', 'cl.ai_extraction_enriched',
         'cl.transcription', 'cl.processing_token', 'cl.created_at as call_created_at', 'cl.direction as call_direction', 'cl.bridged_at as call_bridged_at',
         'cl.duration_seconds', 'cl.recording_duration_seconds'),
