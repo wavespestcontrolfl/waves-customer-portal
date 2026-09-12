@@ -116,7 +116,10 @@ async function deliverConfirmedAssessment({ assessmentId }, deps = {}) {
       done.push(step);
     }
     await guard();
-    const { assessment } = await runs.deliveryState(assessmentId, knex);
+    const { assessment, notificationUnsettled } = await runs.deliveryState(assessmentId, knex);
+    // Completing over an unsettled claim is the one outcome nobody can verify:
+    // name the assessment so a person can check the messaging audit for it.
+    if (notificationUnsettled) logger.warn('[lawn-visit-delivery] completing with an unsettled notification claim', { assessmentId });
     const tracked = await LawnIntel.trackAssessmentCompletion(assessment.service_date);
     if (tracked?.error) throw stepIncomplete('tracking');
     const completed = await runs.completePipeline(assessmentId, owner, knex, { staleAfterMs });

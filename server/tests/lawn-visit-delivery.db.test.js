@@ -375,6 +375,20 @@ const deferred = () => { let resolve; const promise = new Promise((r) => { resol
     expect((await stored(assessment.id)).pipeline_completed_at).toBeInstanceOf(Date);
   });
 
+  test('an unsettled send claim is neither re-sent nor taken as proof of delivery', async () => {
+    const assessment = await seed();
+    const deps = dependencies();
+    // The release could not be written, or the worker died mid-flight: claimed,
+    // outcome never recorded.
+    deps.LawnIntel.sendAssessmentNotification.mockImplementation((id) => db.knex('lawn_assessments').where({ id }).update({ notification_sent: true, notification_sent_at: null }));
+    const logger = require('../services/logger');
+    logger.warn.mockClear();
+    await deliver(assessment.id, deps);
+    expect(logger.warn).toHaveBeenCalledWith('[lawn-visit-delivery] completing with an unsettled notification claim', { assessmentId: assessment.id });
+    expect(deps.LawnIntel.sendAssessmentNotification).toHaveBeenCalledTimes(1);
+    expect((await stored(assessment.id)).pipeline_completed_at).toBeInstanceOf(Date);
+  });
+
   test('an ungated environment counts recovery candidates and sends nothing', async () => {
     await db.knex('lawn_assessment_runs').update({ pipeline_completed_at: db.knex.fn.now() });
     const stuck = await seed();

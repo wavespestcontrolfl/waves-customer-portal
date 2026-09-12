@@ -47,9 +47,11 @@ describe('sendAssessmentNotification lease check', () => {
     expect(beforeSend).toHaveBeenCalledTimes(1);
     expect(NotificationDispatcher.notify).toHaveBeenCalledTimes(1);
     expect(NotificationDispatcher.notify.mock.invocationCallOrder[0]).toBeGreaterThan(beforeSend.mock.invocationCallOrder[0]);
-    expect(updates).toEqual([['lawn_assessments', expect.objectContaining({ notification_sent: true })]]);
-    // Claimed before the wire, never after: a crash mid-send cannot double-text.
-    expect(updates[0][1].notification_sent_at).toBeInstanceOf(Date);
+    // Claimed before the wire (no settle mark), settled only once it is known.
+    expect(updates.map(([, f]) => f)).toEqual([
+      expect.objectContaining({ notification_sent: true, notification_sent_at: null }),
+      expect.objectContaining({ notification_sent_at: expect.any(Date) }),
+    ]);
   });
 
   test('a dispatcher that definitely delivered nothing releases the claim for a re-send', async () => {
@@ -62,7 +64,11 @@ describe('sendAssessmentNotification lease check', () => {
     // Twilio may already hold the message; recovery must not send again to find out.
     NotificationDispatcher.notify.mockResolvedValueOnce({ sent: false, deliveryOutcome, results: { sms: 'error: audit write failed' } });
     await LawnIntel.sendAssessmentNotification('a-1');
-    expect(updates.map(([, f]) => f.notification_sent)).toEqual([true]);
+    // Claim then settle: never retried, and never mistaken for an open claim.
+    expect(updates.map(([, f]) => f)).toEqual([
+      expect.objectContaining({ notification_sent: true, notification_sent_at: null }),
+      expect.objectContaining({ notification_sent_at: expect.any(Date) }),
+    ]);
   });
 
   test('a service-linked assessment never gets the standalone text, whoever calls', async () => {
@@ -79,5 +85,6 @@ describe('sendAssessmentNotification lease check', () => {
     await expect(LawnIntel.sendAssessmentNotification('a-1')).resolves.toBeNull();
     // Provider failures arrive in the result; a throw means nothing was sent.
     expect(updates.map(([, f]) => f.notification_sent)).toEqual([true, false]);
+    expect(updates[1][1].notification_sent_at).toBeNull();
   });
 });

@@ -118,17 +118,28 @@ async function reportInsertData(reportData) {
 
 // One customer text per assessment: claimed before the wire, released only when
 // the dispatcher delivered nothing at all. Rows predating the column read null.
+// The claim and the outcome are separate marks, so the row always says which
+// state it is in: notification_sent with a NULL notification_sent_at is a claim
+// still in flight, a timestamp is a settled send (delivered, accepted, or an
+// ambiguous handoff that must never be retried), and false is owed. A release
+// that cannot be written therefore leaves an in-flight claim, not delivery
+// evidence, and callers can tell the difference.
 async function claimNotificationSend(assessmentId) {
   return db('lawn_assessments').where({ id: assessmentId })
     .where((q) => q.whereNull('notification_sent').orWhere('notification_sent', false))
-    .update({ notification_sent: true, notification_sent_at: new Date() });
+    .update({ notification_sent: true, notification_sent_at: null });
+}
+
+async function settleNotificationSend(assessmentId) {
+  await db('lawn_assessments').where({ id: assessmentId }).update({ notification_sent_at: new Date() });
 }
 
 // Only a definite non-delivery frees the claim.
 async function resolveUnsentClaim(assessmentId, result) {
   const outcome = result?.deliveryOutcome || 'not_sent';
   if (outcome !== 'not_sent') {
-    logger.warn(`[lawn-intel] assessment ${assessmentId}: notification outcome ${outcome}; claim kept, not re-sent`);
+    logger.warn(`[lawn-intel] assessment ${assessmentId}: notification outcome ${outcome}; claim settled, never re-sent`);
+    await settleNotificationSend(assessmentId);
     return;
   }
   await releaseNotificationSend(assessmentId, result);
@@ -255,6 +266,7 @@ const LawnIntelligence = {
         emailBody: smsMessage,
       });
 
+      if (result?.sent) await settleNotificationSend(assessmentId);
       // Nothing delivered (email-preferring customer, blocked SMS) is not a
       // send: release the claim so the miss stays visible and re-sendable
       // rather than being permanently recorded as "notified". An accepted or

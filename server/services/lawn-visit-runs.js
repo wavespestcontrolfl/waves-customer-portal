@@ -353,8 +353,14 @@ async function deliveryState(assessmentId, knex) {
   if (!completedRecommendations(assessment.recommendations)) gaps.push('recommendations');
   if (!run.pipeline_health_completed_at) gaps.push('health');
   if (!assessment.service_id && !assessment.notification_sent) gaps.push('notification');
+  // A claim with no settle mark is a send whose outcome was never recorded — the
+  // release could not be written, or the worker died mid-flight. It is NOT owed
+  // (the carrier may hold the message) and it is NOT proof of delivery either,
+  // so surface it rather than letting completion read it as a delivered text.
+  const notificationUnsettled = !assessment.service_id
+    && assessment.notification_sent === true && !assessment.notification_sent_at;
   if (!(assessment.report_auto_generated === true || assessment.report_id)) gaps.push('report');
-  return { assessment, run, gaps, calibration };
+  return { assessment, run, gaps, calibration, notificationUnsettled };
 }
 
 async function markPipelineHealthComplete(assessmentId, ownerToken, knex, { staleAfterMs = PIPELINE_STALE_MS } = {}) {
