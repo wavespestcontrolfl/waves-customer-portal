@@ -88,6 +88,7 @@ import Icon from '../components/Icon';
 import {
   WavesShell,
   CustomerColumn,
+  PublicStateCard,
   BrandCard,
   BrandButton,
   SerifHeading,
@@ -2420,14 +2421,13 @@ export default function PayPageV2() {
   if (error?.status === 404) {
     return (
       <WavesShell variant="customer" topBar="solid">
-        <div style={{ maxWidth: 560, margin: '48px auto', padding: '0 16px' }}>
-          <BrandCard>
-            <SerifHeading style={{ marginBottom: SP.sm }}>We couldn't find that invoice</SerifHeading>
-            <p style={{ margin: 0, fontSize: FS.lead, color: DOC.ink, lineHeight: LH.body }}>
-              The link may have expired or been mistyped. Give us a call and we'll sort it out — <HelpPhoneLink tone="dark" inline />.
-            </p>
-          </BrandCard>
-        </div>
+        <CustomerColumn>
+          {/* contact="none": the affordance here has always been the phone
+              number inside the sentence, not a button pair. */}
+          <PublicStateCard state="not-found" title="We couldn't find that invoice" contact="none">
+            The link may have expired or been mistyped. Give us a call and we'll sort it out — <HelpPhoneLink tone="dark" inline />.
+          </PublicStateCard>
+        </CustomerColumn>
       </WavesShell>
     );
   }
@@ -2435,15 +2435,15 @@ export default function PayPageV2() {
   if (error || !data) {
     return (
       <WavesShell variant="customer" topBar="solid">
-        <div style={{ maxWidth: 560, margin: '48px auto', padding: '0 16px' }}>
-          <BrandCard>
-            <SerifHeading style={{ marginBottom: SP.sm }}>We couldn't load that invoice</SerifHeading>
-            <p style={{ margin: '0 0 16px', fontSize: FS.lead, color: DOC.ink, lineHeight: LH.body }}>
-              This looks temporary. Your link is still valid—try again in a moment.
-            </p>
-            <BrandButton onClick={() => setLoadAttempt((attempt) => attempt + 1)}>Try again</BrandButton>
-          </BrandCard>
-        </div>
+        <CustomerColumn>
+          <PublicStateCard
+            state="error"
+            title="We couldn't load that invoice"
+            onRetry={() => setLoadAttempt((attempt) => attempt + 1)}
+          >
+            This looks temporary. Your link is still valid&mdash;try again in a moment.
+          </PublicStateCard>
+        </CustomerColumn>
       </WavesShell>
     );
   }

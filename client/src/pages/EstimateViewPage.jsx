@@ -687,10 +687,13 @@ function NotFoundCard({ token = null, extensionEligible = false, onExtended = nu
 
   return (
     <div style={estimateCard({ padding: 32, textAlign: 'center', marginTop: 40 })}>
-      <div style={{ fontSize: 34 }}></div>
-      <div style={{ fontSize: 18, fontWeight: 600, marginTop: 8 }}>
+      {/* An h1, not a styled div (G-07 measured h1Count === 0 here). This card
+          is deliberately NOT a PublicStateCard: it doubles as the extension
+          request flow and flips to a success headline, so role="alert" would
+          be wrong on it. It needs the right heading element, not the card. */}
+      <h1 style={{ fontSize: 18, fontWeight: 600, marginTop: 8 }}>
         {extendedNow ? "You're all set" : 'Estimate unavailable'}
-      </div>
+      </h1>
       {!extendedNow ? (
         <div style={{ fontSize: 16, color: ESTIMATE_BODY, marginTop: 12, lineHeight: 1.5 }}>
           This link may have expired or isn't valid. Call us at{' '}
@@ -783,7 +786,11 @@ const HEADER_EYEBROW_STYLE = {
   fontWeight: 700,
 };
 
-function Header({ customerFirstName, customerName, customerEmail, customerPhone, address, serviceLabel, headline, eyebrowOverride = null, subline = null, createdAt = null, expiresAt = null, slug = null }) {
+// `headingAs` lets a state that already owns the page's h1 keep this framing
+// without a second one. It is presentation-identical -- only the element
+// changes -- and exists because the load-error state below renders its own h1
+// on the state card.
+function Header({ customerFirstName, customerName, customerEmail, customerPhone, address, serviceLabel, headline, eyebrowOverride = null, subline = null, createdAt = null, expiresAt = null, slug = null, headingAs: HeadingTag = 'h1' }) {
   const firstName = customerFirstName || 'there';
   const headlineText = String(headline || UNIVERSAL_HEADLINE).replace('{first}', firstName);
   const phoneDisplay = formatCustomerPhone(customerPhone);
@@ -818,7 +825,7 @@ function Header({ customerFirstName, customerName, customerEmail, customerPhone,
             "· {service}" suffix instead of stacking both. */}
         {eyebrowOverride || `Your estimate${serviceLabel ? ` · ${serviceLabel}` : ''}`}
       </div>
-      <h1 style={{
+      <HeadingTag style={{
                 fontSize: 'clamp(34px, 5vw, 48px)',
         fontWeight: 500,
         letterSpacing: '-0.01em',
@@ -827,7 +834,7 @@ function Header({ customerFirstName, customerName, customerEmail, customerPhone,
         margin: 0,
       }}>
         {headlineText}
-      </h1>
+      </HeadingTag>
       {subline ? (
         <p style={{ margin: '16px 0 0', fontSize: 16, color: ESTIMATE_BODY, lineHeight: 1.5, maxWidth: '62ch' }}>
           {subline}
@@ -6787,8 +6794,14 @@ function EstimateViewPageInner({ websiteMode = false }) {
   }
   if (loadError) {
     return (
+      // The header stays: it is NOT blank on a failed load — Header falls back
+      // to "there" for the name and to UNIVERSAL_HEADLINE, so removing it
+      // deleted the page's framing from the outage state. What it must not do
+      // is render a second `h1`, since the state card now carries one (the
+      // `r2b` evidence run measured h1:2 here), so it renders the same copy as
+      // a <p>.
       <Page website={websiteMode}>
-        <Header customerFirstName={null} address={null} />
+        <Header customerFirstName={null} address={null} headingAs="p" />
         <PublicLoadError resource="estimate" onRetry={() => loadEstimate().catch(() => {
           setLoadError(true);
           setLoading(false);
