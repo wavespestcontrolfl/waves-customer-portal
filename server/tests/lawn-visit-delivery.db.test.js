@@ -411,7 +411,9 @@ const deferred = () => { let resolve; const promise = new Promise((r) => { resol
     expect((await stored(assessment.id)).pipeline_claimed_at).toBeNull();
     deps.KnowledgeBridge.sealRecommendationsForSend.mockResolvedValue(true);
     expect(await deliver(assessment.id, deps)).toMatchObject({ gaps: [] });
-    expect(deps.KnowledgeBridge.releaseRecommendationSendSeal).toHaveBeenCalledWith(assessment.id);
+    const sealOwner = deps.KnowledgeBridge.sealRecommendationsForSend.mock.calls.at(-1)[3];
+    expect(sealOwner).toMatch(/^lawn-recovery:/);
+    expect(deps.KnowledgeBridge.releaseRecommendationSendSeal).toHaveBeenCalledWith(assessment.id, sealOwner);
   });
 
   test('the customer send runs inside a seal taken at the version it renders', async () => {
@@ -443,6 +445,28 @@ const deferred = () => { let resolve; const promise = new Promise((r) => { resol
     expect((await db.knex('lawn_assessments').where({ id: assessment.id }).first()).notification_sent).toBe(false);
     expect((await stored(assessment.id)).pipeline_completed_at).toBeNull();
     expect((await stored(assessment.id)).pipeline_claimed_at).toBeNull();
+  });
+
+  test('the immediate pre-send seal renewal can stop dispatch before the heartbeat runs', async () => {
+    const assessment = await seed();
+    const deps = dependencies();
+    const providerDispatch = jest.fn(async (id) => db.knex('lawn_assessments').where({ id }).update({ notification_sent: true }));
+    // Exercise the real sender contract: its callback is the last operation
+    // before the irreversible provider call. A large interval proves this loss
+    // is found by assertHeld's awaited renewal rather than the background timer.
+    deps.KnowledgeBridge.renewRecommendationSendSeal.mockResolvedValue(false);
+    deps.LawnIntel.sendAssessmentNotification.mockImplementation(async (id, { beforeSend }) => {
+      await beforeSend();
+      return providerDispatch(id);
+    });
+
+    await expect(deliver(assessment.id, deps, { sealRenewMs: 60_000 }))
+      .rejects.toMatchObject({ code: 'LAWN_COPY_SEAL_LOST' });
+
+    expect(deps.KnowledgeBridge.renewRecommendationSendSeal).toHaveBeenCalledTimes(1);
+    expect(providerDispatch).not.toHaveBeenCalled();
+    expect((await db.knex('lawn_assessments').where({ id: assessment.id }).first()).notification_sent).toBe(false);
+    expect((await stored(assessment.id)).pipeline_completed_at).toBeNull();
   });
 
   test('an ungated environment counts recovery candidates and sends nothing', async () => {

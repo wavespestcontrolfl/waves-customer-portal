@@ -44,7 +44,7 @@ async function sealRefused(seal, needsSeal) {
   return !(await seal.ensure());
 }
 
-function sendSeal(KnowledgeBridge, knex, assessmentId, renewMs = SEAL_RENEW_MS) {
+function sendSeal(KnowledgeBridge, knex, assessmentId, renewMs = SEAL_RENEW_MS, owner = null) {
   const versionOf = (row) => (row ? JSON.stringify([row.recommendations, row.ai_summary, row.updated_at]) : null);
   let timer = null;
   let taken = false;
@@ -57,11 +57,11 @@ function sendSeal(KnowledgeBridge, knex, assessmentId, renewMs = SEAL_RENEW_MS) 
       if (taken) return true;
       if (typeof KnowledgeBridge.sealRecommendationsForSend !== 'function') return true;
       const row = await knex('lawn_assessments').where({ id: assessmentId }).first('recommendations', 'ai_summary', 'updated_at');
-      taken = await KnowledgeBridge.sealRecommendationsForSend(assessmentId, versionOf(row), versionOf);
+      taken = await KnowledgeBridge.sealRecommendationsForSend(assessmentId, versionOf(row), versionOf, owner);
       if (!taken) return false;
       // A slow step must not outlive a fixed TTL.
       timer = setInterval(() => {
-        void KnowledgeBridge.renewRecommendationSendSeal(assessmentId)
+        void KnowledgeBridge.renewRecommendationSendSeal(assessmentId, owner)
           .then((renewed) => { if (!renewed) lost = true; })
           .catch((err) => {
             // Unverifiable is lost: a generator may already hold the copy.
@@ -73,14 +73,17 @@ function sendSeal(KnowledgeBridge, knex, assessmentId, renewMs = SEAL_RENEW_MS) 
       return true;
     },
     // Checked immediately before the customer dispatch, like the lease.
-    assertHeld() {
+    async assertHeld() {
+      if (taken && !lost) {
+        lost = !(await KnowledgeBridge.renewRecommendationSendSeal(assessmentId, owner).catch(() => false));
+      }
       if (!taken || lost) throw Object.assign(new Error('Lawn delivery copy seal lost'), { code: 'LAWN_COPY_SEAL_LOST' });
     },
     async release() {
       if (timer) { clearInterval(timer); timer = null; }
       if (!taken || typeof KnowledgeBridge.releaseRecommendationSendSeal !== 'function') return;
       taken = false;
-      await KnowledgeBridge.releaseRecommendationSendSeal(assessmentId)
+      await KnowledgeBridge.releaseRecommendationSendSeal(assessmentId, owner)
         .catch((err) => logger.warn('[lawn-visit-delivery] send-seal release failed, expires by TTL', { assessmentId, message: err.message }));
     },
   };
@@ -144,7 +147,9 @@ async function deliverConfirmedAssessment({ assessmentId }, deps = {}) {
       return { skipped: 'generation_in_flight', done: [], gaps: [] };
     }
     await attachWeatherOnce((await runs.deliveryState(assessmentId, knex)).assessment);
-    seal = sendSeal(KnowledgeBridge, knex, assessmentId, deps.sealRenewMs ?? SEAL_RENEW_MS);
+    // Scoped to this worker's lease, so a concurrent report delivery's seal is
+    // never renewed or released by this run, nor this run's by it.
+    seal = sendSeal(KnowledgeBridge, knex, assessmentId, deps.sealRenewMs ?? SEAL_RENEW_MS, `lawn-recovery:${owner}`);
     const actions = [
       ['calibration', async (state) => {
         const { aiScores, finalScores, technicianId } = state.calibration;
@@ -169,7 +174,7 @@ async function deliverConfirmedAssessment({ assessmentId }, deps = {}) {
       ['notification', () => LawnIntel.sendAssessmentNotification(assessmentId, {
         // The lease says this worker still owns the run; the seal says the copy
         // it is about to read is still the copy it sealed.
-        beforeSend: async () => { await guard(); seal.assertHeld(); },
+        beforeSend: async () => { await guard(); await seal.assertHeld(); },
       }), true],
     ];
     for (const [step, action, needsSeal] of actions) {
