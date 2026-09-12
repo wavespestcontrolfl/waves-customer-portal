@@ -231,8 +231,8 @@ const LawnIntelligence = {
   // assessments only (service_id null — no completion text ever follows), by
   // the confirm route and by delivery recovery (lawn-visit-delivery.js); never
   // for a service-linked assessment. options.beforeSend runs right before the
-  // dispatcher call; recovery passes its lease check so a worker that lost
-  // ownership mid-step never sends.
+  // claim and at the provider handoff; recovery passes its lease/copy check
+  // so provider preparation cannot outlive ownership and still send.
   async sendAssessmentNotification(assessmentId, options) {
     let claimed = false;
     let handedOff = false;
@@ -274,6 +274,9 @@ const LawnIntelligence = {
         smsMessage,
         emailSubject: `Your Lawn Health Report — Score: ${overall}/100`,
         emailBody: smsMessage,
+        ...(typeof options?.beforeSend === 'function' ? {
+          preSendCheck: async () => { await runBeforeSend(options); return { ok: true }; },
+        } : {}),
       });
       // Past this line the dispatcher has run, so a later throw — a failed
       // settle write, say — says nothing about whether a text went out. Only a

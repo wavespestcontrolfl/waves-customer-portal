@@ -65,6 +65,19 @@ describe('sendAssessmentNotification lease check', () => {
     expect(updates.map(([, f]) => f.notification_sent)).toEqual([true, false]);
   });
 
+  test('ownership lost during provider preparation releases the unsent claim', async () => {
+    const beforeSend = jest.fn().mockResolvedValueOnce(undefined).mockRejectedValueOnce(ownershipLost());
+    NotificationDispatcher.notify.mockImplementationOnce(async (_customerId, _type, { preSendCheck }) => {
+      // The canonical provider normalizes a refused/throwing final guard to
+      // proven non-delivery; no provider request has started.
+      await expect(preSendCheck()).rejects.toMatchObject({ code: 'LAWN_DELIVERY_OWNERSHIP_LOST' });
+      return { sent: false, deliveryOutcome: 'not_sent', results: { sms: 'blocked' } };
+    });
+    await expect(LawnIntel.sendAssessmentNotification('a-1', { beforeSend })).resolves.toMatchObject({ sent: false });
+    expect(beforeSend).toHaveBeenCalledTimes(2);
+    expect(updates.map(([, f]) => f.notification_sent)).toEqual([true, false]);
+  });
+
   test.each(['uncertain', 'accepted'])('a %s handoff keeps its claim rather than risking a second text', async (deliveryOutcome) => {
     // Twilio may already hold the message; recovery must not send again to find out.
     NotificationDispatcher.notify.mockResolvedValueOnce({ sent: false, deliveryOutcome, results: { sms: 'error: audit write failed' } });
