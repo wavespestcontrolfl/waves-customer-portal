@@ -108,17 +108,17 @@ describe("AdminDispatchPage", () => {
     expect(screen.getByText("Dispatch board workspace")).toBeInTheDocument();
   });
 
-  it("keeps the phone workspace focused on mobile-capable sections", () => {
+  it("exposes every Schedule section in the mobile tab strip", () => {
     renderSchedule("/admin/dispatch?tab=schedule");
 
     for (const label of ["Board", "Schedule", "Protocols"]) {
       expect(screen.getByRole("button", { name: label })).not.toHaveClass("hidden");
     }
     for (const label of ["Tech Match", "CSR Booking", "Job Scores", "Insights"]) {
-      expect(screen.getByRole("button", { name: label })).toHaveClass(
-        "hidden",
-        "md:inline-flex",
-      );
+      const button = screen.getByRole("button", { name: label });
+      expect(button).not.toHaveClass("hidden");
+      fireEvent.click(button);
+      expect(button).toHaveAttribute("aria-current", "page");
     }
   });
 });

@@ -51,3 +51,26 @@ it.each([
   (await screen.findAllByRole('button', {name:mode, exact:true}))[0];
   expect(adminFetch).toHaveBeenCalledWith('/admin/schedule?date='+nextDate);
 });
+
+vi.mock('../../components/schedule/MobileDayStrip', () => ({ default: () => <div>Day strip</div> }));
+vi.mock('../../components/dispatch/TechMatchPanelV2', () => ({ default: () => <div>Tech Match tools</div> }));
+vi.mock('../../components/dispatch/CSRPanelV2', () => ({ default: () => <div>CSR Booking tools</div> }));
+vi.mock('../../components/dispatch/RevenuePanelV2', () => ({ default: () => <div>Job Scores tools</div> }));
+vi.mock('../../components/dispatch/InsightsPanelV2', () => ({ default: () => <div>Insights tools</div> }));
+
+it.each([['match', 'Tech Match tools'], ['csr', 'CSR Booking tools'], ['revenue', 'Job Scores tools'], ['insights', 'Insights tools']])('keeps board-only view switches out of mobile %s', async (tab, content) => {
+  vi.stubGlobal('innerWidth', 390);
+  vi.mocked(adminFetch).mockResolvedValue({ services: [], technicians: [], products: [], types: [] });
+  render(<MemoryRouter><DispatchPageV2 activeTab={tab} /></MemoryRouter>);
+  expect(await screen.findByText(content)).toBeInTheDocument();
+  expect(screen.queryByRole('button', { name: 'Week', exact: true })).not.toBeInTheDocument();
+  expect(screen.queryByRole('button', { name: 'Day', exact: true })).not.toBeInTheDocument();
+});
+
+it('keeps the mobile board Day and Week switches available', async () => {
+  vi.stubGlobal('innerWidth', 390);
+  vi.mocked(adminFetch).mockResolvedValue({ services: [], technicians: [], products: [], types: [] });
+  render(<MemoryRouter><DispatchPageV2 activeTab="board" /></MemoryRouter>);
+  expect(await screen.findByRole('button', { name: 'Week', exact: true })).toBeInTheDocument();
+  expect(screen.getByRole('button', { name: 'Day', exact: true })).toBeInTheDocument();
+});
