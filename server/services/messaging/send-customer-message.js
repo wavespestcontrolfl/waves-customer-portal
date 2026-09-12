@@ -578,25 +578,7 @@ async function sendCustomerMessage(input) {
   // round 9). Land the promise in the durable audit_log ledger instead.
   // Only for a send that actually quotes a slot for a known visit, and never
   // blocking: the text is already out.
-  // Held to the SAME delivery bar the detector applies to an ordinary audit
-  // row (codex P1 round 9): a REAL Twilio SM/MM sid, or a push the routing
-  // layer proved. sent:true alone is not enough — the success-shaped
-  // sentinels ('owner-silence', gate-/template-/internal-) report a send
-  // that reached nobody, and minting promise evidence from one would assert
-  // a window the customer was never told. The sid rides along in the row so
-  // the detector can still drop the promise if the carrier later reports the
-  // message undelivered.
-  const providerSid = String(providerOutcome.providerMessageId || '');
-  const deliverable = /^(SM|MM)[a-f0-9]{32}$/i.test(providerSid)
-    || (providerOutcome.provider === 'push' && providerOutcome.deliveryOutcome === 'accepted');
-  if (!audit.id && deliverable && sendInput.appointmentId && sendInput.renderedSlotMs != null
-    && Number.isFinite(Number(sendInput.renderedSlotMs))) {
-    await require('../no-show-detector').recordSentWindowFallback(require('../../models/db'), {
-      visitId: sendInput.appointmentId, startAtMs: sendInput.renderedSlotMs,
-      communicatedAt: providerOutcome.sentAt || new Date(),
-      providerSid: providerOutcome.provider === 'push' ? null : providerSid,
-    }).catch(() => {});
-  }
+  await recordPromiseEvidenceFallback(sendInput, providerOutcome, audit);
 
   return {
     sent: true,
@@ -613,6 +595,35 @@ async function sendCustomerMessage(input) {
     if (!err.providerOutcome) err.providerOutcome = providerOutcome;
     throw err;
   }
+}
+
+// The audit row is where a scheduling notice's promised window lives, and
+// persistAudit is best-effort: when its insert fails after the provider
+// accepted the message, the customer holds a window nothing records, the
+// reminder is marked sent and never retried, and the no-show detector later
+// reads an OLDER window as the latest promise (codex P1, PR #4403 round 9).
+// Land the promise in the durable audit_log ledger instead.
+//
+// Held to the same delivery bar the detector applies to an ordinary audit
+// row: a real Twilio SM/MM sid, or a push the routing layer proved. sent:true
+// alone is not enough — the success-shaped sentinels ('owner-silence',
+// gate-/template-/internal-) report a send that reached nobody, and minting
+// promise evidence from one would assert a window the customer was never
+// told. The sid rides along in the row so the detector can still drop the
+// promise if the carrier later reports the message undelivered. Never
+// blocking: the text is already out.
+async function recordPromiseEvidenceFallback(sendInput, providerOutcome, audit) {
+  if (audit.id || !sendInput.appointmentId) return;
+  if (sendInput.renderedSlotMs == null || !Number.isFinite(Number(sendInput.renderedSlotMs))) return;
+  const providerSid = String(providerOutcome.providerMessageId || '');
+  const deliverable = /^(SM|MM)[a-f0-9]{32}$/i.test(providerSid)
+    || (providerOutcome.provider === 'push' && providerOutcome.deliveryOutcome === 'accepted');
+  if (!deliverable) return;
+  await require('../no-show-detector').recordSentWindowFallback({
+    visitId: sendInput.appointmentId, startAtMs: sendInput.renderedSlotMs,
+    communicatedAt: providerOutcome.sentAt || new Date(),
+    providerSid: providerOutcome.provider === 'push' ? null : providerSid,
+  }).catch(() => {});
 }
 
 function validateContract(input) {

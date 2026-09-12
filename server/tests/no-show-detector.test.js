@@ -941,7 +941,7 @@ describe('an appointment email with no interaction row still yields its promise 
       start_at: new Date(slot).toISOString(), communicated_at: '2026-09-10T12:00:00.000Z' });
     const scoped = captured.whereIn.map(([col, values]) => [col, values]);
     expect(scoped).toEqual(expect.arrayContaining([
-      ["split_part(idempotency_key, ':', 1)", ['appointment.confirmation', 'appointment.reminder_72h', 'appointment.reminder_24h', 'appointment.rescheduled']],
+      ["split_part(idempotency_key, ':', 1)", ['appointment.confirmation', 'appointment.reminder_72h', 'appointment.reminder_24h']],
       ["split_part(idempotency_key, ':', 2)", ['visit-1']],
       ['status', ['sent', 'processed', 'delivered', 'complained', 'spam_report', 'unsubscribed']],
     ]));
@@ -1059,7 +1059,7 @@ describe('recordSentWindowFallback (the audit row failed, the text went out) (ro
   // the customer was already moved off.
   test('lands the promised window in the durable ledger this file already reads', async () => {
     const startAtMs = Date.parse('2026-09-11T13:00:00.000Z');
-    expect(await recordSentWindowFallback({}, { visitId: 'visit-1', startAtMs, communicatedAt: '2026-09-10T12:00:00.000Z' })).toBe(true);
+    expect(await recordSentWindowFallback({ visitId: 'visit-1', startAtMs, communicatedAt: '2026-09-10T12:00:00.000Z' })).toBe(true);
     const [[event]] = recordAuditEvent.mock.calls;
     expect(event).toMatchObject({ action: 'visit_window_promised', resource_type: 'scheduled_service', resource_id: 'visit-1', critical: true });
     expect(event.metadata).toMatchObject({ start_at: '2026-09-11T13:00:00.000Z', communicated_at: '2026-09-10T12:00:00.000Z',
@@ -1067,15 +1067,15 @@ describe('recordSentWindowFallback (the audit row failed, the text went out) (ro
   });
 
   test('a send with no visit or no rendered slot writes nothing', async () => {
-    expect(await recordSentWindowFallback({}, { visitId: null, startAtMs: 1 })).toBe(false);
-    expect(await recordSentWindowFallback({}, { visitId: 'visit-1', startAtMs: null })).toBe(false);
-    expect(await recordSentWindowFallback({}, { visitId: 'visit-1', startAtMs: 1, communicatedAt: 'not a date' })).toBe(false);
+    expect(await recordSentWindowFallback({ visitId: null, startAtMs: 1 })).toBe(false);
+    expect(await recordSentWindowFallback({ visitId: 'visit-1', startAtMs: null })).toBe(false);
+    expect(await recordSentWindowFallback({ visitId: 'visit-1', startAtMs: 1, communicatedAt: 'not a date' })).toBe(false);
     expect(recordAuditEvent).not.toHaveBeenCalled();
   });
 
   test('it never throws into the send path', async () => {
     recordAuditEvent.mockRejectedValueOnce(new Error('ledger down'));
-    expect(await recordSentWindowFallback({}, { visitId: 'visit-1', startAtMs: Date.now() })).toBe(false);
+    expect(await recordSentWindowFallback({ visitId: 'visit-1', startAtMs: Date.now() })).toBe(false);
   });
 
   // The sender calls it on exactly the path that loses the promise.
@@ -1118,7 +1118,8 @@ describe('recordSentWindowFallback (the audit row failed, the text went out) (ro
 
   test('send-customer-message calls it when the audit row could not be written', () => {
     const sender = require('fs').readFileSync(require('path').join(__dirname, '..', 'services', 'messaging', 'send-customer-message.js'), 'utf8');
-    expect(sender).toContain('if (!audit.id && deliverable && sendInput.appointmentId && sendInput.renderedSlotMs != null');
+    expect(sender).toContain('await recordPromiseEvidenceFallback(sendInput, providerOutcome, audit);');
+    expect(sender).toContain('if (audit.id || !sendInput.appointmentId) return;');
     // ...and only for a send that actually reached someone: a real Twilio
     // SM/MM sid or a proven push, never a success-shaped sentinel.
     expect(sender).toContain("/^(SM|MM)[a-f0-9]{32}$/i.test(providerSid)");
@@ -1181,8 +1182,8 @@ describe('callCommitmentInstant (when the customer heard the promise) (round-5 P
     expect(callCommitmentInstant({ created_at: created, duration_seconds: 600 },
       { notAfter: '2026-08-01T00:00:00Z' }).toISOString()).toBe('2026-09-10T10:10:00.000Z');
   });
-  test('a recording duration wins over the reported one, and no usable duration falls back to the call start', () => {
-    expect(callCommitmentInstant({ created_at: '2026-09-10T10:00:00Z', recording_duration_seconds: 60, duration_seconds: 5 }).toISOString())
+  test('the reported duration wins over the recording, and no usable duration falls back to the call start', () => {
+    expect(callCommitmentInstant({ created_at: '2026-09-10T10:00:00Z', recording_duration_seconds: 5, duration_seconds: 60 }).toISOString())
       .toBe('2026-09-10T10:01:00.000Z');
     expect(callCommitmentInstant({ created_at: '2026-09-10T10:00:00Z' }).toISOString()).toBe('2026-09-10T10:00:00.000Z');
     expect(callCommitmentInstant({ created_at: '2026-09-10T10:00:00Z', duration_seconds: -5 }).toISOString()).toBe('2026-09-10T10:00:00.000Z');

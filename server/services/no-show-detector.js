@@ -60,9 +60,13 @@ const DELIVERED_EMAIL_STATUSES = ['sent', 'processed', 'delivered', 'complained'
 const DELIVERED_SMS_STATUSES = ['sent', 'delivered', 'read'];
 // The appointment email event types that quote an arrival window — the same
 // list the interaction read filters on, and the first segment of the
-// idempotency key appointment-email.js builds for each of them.
+// idempotency key appointment-email.js builds for each of them. Only the
+// three that actually have a sender: there is no appointment.rescheduled
+// producer, and listing it would widen what counts as promise evidence (and
+// the supporting index) for a workflow that does not exist (codex P2 round
+// 13).
 const APPOINTMENT_EMAIL_EVENTS = ['appointment.confirmation', 'appointment.reminder_72h',
-  'appointment.reminder_24h', 'appointment.rescheduled'];
+  'appointment.reminder_24h'];
 const instant = (value) => value == null ? NaN : new Date(value).getTime();
 // Stamps that prove the tech reached the stop, in the order job-status.js
 // writes them. Any one of them clears the card.
@@ -263,13 +267,26 @@ async function loadPromiseEvents(conn, visitIds, { now = new Date() } = {}) {
         // vouch for an earlier one the customer never received (codex P1
         // round 7). A row with no rendered_slot_ms cannot be pinned to an
         // occurrence, so it stays unlinked and neutral rather than guessing.
+        // Fourth branch for a GROUPED reminder, whose key is
+        // `<event_type>:visit:<service_visits id>:…` — the per-service shape
+        // above cannot match it, so a grouped interaction written before
+        // email_message_id existed had NO usable link once a retry replaced
+        // the provider id, and its frozen 'sent' snapshot was read as neutral
+        // evidence while the retry sat queued or failed (codex P1 round 13).
+        // Relinked through the stop the interaction's own service belongs to.
         // A fan-out matches each recipient's row; one delivered recipient is
         // delivery, same as the SMS side.
         this.on(conn.raw(`em.id::text = (ci.metadata->>'email_message_id')
           OR (ci.metadata->>'email_message_id' IS NULL AND em.provider_message_id = (ci.metadata->>'provider_message_id'))
           OR (ci.metadata->>'email_message_id' IS NULL AND ci.metadata->>'event_type' IS NOT NULL
             AND ci.metadata->>'scheduled_service_id' IS NOT NULL AND ci.metadata->>'rendered_slot_ms' IS NOT NULL
-            AND em.idempotency_key LIKE (ci.metadata->>'event_type') || ':' || (ci.metadata->>'scheduled_service_id') || ':' || (ci.metadata->>'rendered_slot_ms') || ':%')`));
+            AND em.idempotency_key LIKE (ci.metadata->>'event_type') || ':' || (ci.metadata->>'scheduled_service_id') || ':' || (ci.metadata->>'rendered_slot_ms') || ':%')
+          OR (ci.metadata->>'email_message_id' IS NULL AND ci.metadata->>'event_type' IS NOT NULL
+            AND ci.metadata->>'scheduled_service_id' ~ '^[0-9a-f-]{36}$'
+            AND em.idempotency_key LIKE (ci.metadata->>'event_type') || ':visit:%'
+            AND split_part(em.idempotency_key, ':', 3) = (
+              SELECT sv2.visit_id::text FROM scheduled_services sv2
+              WHERE sv2.id = (ci.metadata->>'scheduled_service_id')::uuid))`));
       })
       .where('ci.interaction_type', 'email_outbound').where('ci.created_at', '<=', now)
       .whereRaw("ci.metadata->>'scheduled_service_id' = ANY(?::text[])", [visitIds])
@@ -621,7 +638,12 @@ function seriesSupersessions(rows = [], candidates = new Set()) {
 // instant.
 function callCommitmentInstant(call, { notAfter = null } = {}) {
   const started = instant(call?.created_at);
-  const seconds = Number(call?.recording_duration_seconds || call?.duration_seconds || 0);
+  // duration_seconds first, the same precedence call-commitments.js's
+  // callEndedAt uses: the recording can start after ringing/connection setup,
+  // so preferring it dates the commitment before the call actually ended and
+  // a reminder sent in the omitted interval would outrank it (codex P2 round
+  // 13).
+  const seconds = Number(call?.duration_seconds || call?.recording_duration_seconds || 0);
   if (!Number.isFinite(started)) return new Date();
   // Not every call_log row is inserted before the call: a recovery/ingest
   // path can write one AFTER it ended, and adding the duration to that
@@ -675,7 +697,7 @@ function agentCommittedStart(call) {
 // when the primary ledger failed, and its whole purpose is to still be there
 // whenever the feature is switched on. Best-effort itself — a send must
 // never fail because its bookkeeping did.
-async function recordSentWindowFallback(conn, { visitId, startAtMs, communicatedAt = new Date(), providerSid = null, reason = 'messaging_audit_unavailable' } = {}) {
+async function recordSentWindowFallback({ visitId, startAtMs, communicatedAt = new Date(), providerSid = null, reason = 'messaging_audit_unavailable' } = {}) {
   // null BEFORE the Number conversion: Number(null) is 0, a finite instant
   // (the epoch), so a bare isFinite check would stamp a 1970 window as the
   // promise — the same null-before-conversion trap `instant` guards above.

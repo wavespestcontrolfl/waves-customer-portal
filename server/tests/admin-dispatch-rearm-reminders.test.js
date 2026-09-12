@@ -400,19 +400,24 @@ describe('reschedule route sync→capture→emit ordering (source)', () => {
     // (purpose='appointment' AND rendered_slot_ms IS NOT NULL) never picks
     // up the series-move confirmation, and latestPromises keeps enforcing
     // the pre-move window after a customer-notified series move.
-    expect(seriesBlock).toContain("'appointment', { scheduled_service_id: serviceId, series_move_id: seriesMoveId, reasonText,");
-    expect(seriesBlock).toContain("...(renderedSlotMs ? { rendered_slot_ms: renderedSlotMs } : {}) }");
-    // ...and only when the text actually quoted a range: a windowless anchor
-    // must not record an 08:00 slot the customer was never given (round-12
-    // P1), and a placement confirmation must not be recorded as the series
-    // confirmation that supersedes every sibling's promise (round-12 P1).
-    expect(seriesBlock).toContain("const renderedSlotMs = startForText");
-    expect(seriesBlock).toContain("placementConfirmed ? 'appointment_recurring_placement_confirmed' : 'reschedule_series_confirmation',");
+    expect(seriesBlock).toContain("{ scheduled_service_id: serviceId, series_move_id: seriesMoveId, reasonText, ...notice.slotMeta }");
+    // The notice's identity is decided once, outside this already oversized
+    // handler (round-13 P2): a windowless anchor records no slot at all —
+    // never the 08:00 default rescheduleReminderTime would supply for a time
+    // the customer was never given — and a placement confirmation is recorded
+    // under its own message type, not as the series confirmation that
+    // supersedes every sibling's promise (both round-12 P1).
+    expect(seriesBlock).toContain('const notice = seriesNoticeIdentity({ result, newDate, startForText });');
+    expect(seriesBlock).toContain('notice.messageType');
+    const identity = src.slice(src.indexOf('function seriesNoticeIdentity('), src.indexOf('async function applySeriesMoveEffects('));
+    expect(identity).toContain('const renderedSlotMs = startForText');
+    expect(identity).toContain("messageType: placement ? 'appointment_recurring_placement_confirmed' : 'reschedule_series_confirmation',");
+    expect(identity).toContain('slotMeta: renderedSlotMs ? { rendered_slot_ms: renderedSlotMs } : {},');
     // Computed the same way the neighboring cadence-row rendered_slot_ms
     // calls already do in this file (rescheduleReminderTime + parseETDateTime),
     // from the exact slot the notice text itself quotes (startForText).
-    expect(seriesBlock).toContain("? parseETDateTime(rescheduleReminderTime(String(newDate).split('T')[0], { start: startForText })).getTime()");
-    expect(seriesBlock).toContain(': null;');
+    expect(identity).toContain("? parseETDateTime(rescheduleReminderTime(String(newDate).split('T')[0], { start: startForText })).getTime()");
+    expect(identity).toContain(': null;');
   });
 
   test('single path: notice routes through the shared helper after the sync — no inline send, capture, or rearm remains', () => {
