@@ -422,6 +422,41 @@ function chooseWindowSafeOrder({
   };
 }
 
+/**
+ * Guard-input columns EVERY route_order writer loads and re-reads under the
+ * tech-day lock, and the signature over them. Kept as one list so the
+ * day-load snapshot and the post-lock re-read can never disagree about which
+ * columns exist (a column present on one side only would read as a permanent
+ * "changed" and abort every write).
+ */
+const ROUTE_WRITE_GUARD_COLUMNS = ['window_start', 'window_end', 'time_window',
+  'estimated_duration_minutes', 'auto_dispatch_locked', 'auto_dispatch_excluded', 'visit_id',
+  // status: a stop that goes en_route/on_site mid-optimize makes the order
+  // unwritable (chooseWindowSafeOrder refuses a live tech-day for today).
+  'status',
+  // route_order too, exactly as the nightly fence snapshots it: the CURRENT
+  // running order is a guard input, not just a thing being overwritten — it
+  // is the window-fit repair's backbone and the `unoptimizedDistanceMeters`
+  // the response reports. An operator drag landing in the gap would
+  // otherwise be clobbered by an order computed against the sequence it
+  // replaced (round-0 fallback audit P1).
+  'route_order'];
+
+/**
+ * The signature a route_order writer snapshots at day-load and compares under
+ * the tech-day lock: the window guard's own inputs plus the running order,
+ * the live status, and the effective pin. An appointment re-promised, dragged,
+ * started, or re-geocoded in that gap invalidates the order computed for it.
+ */
+function routeWriteGuardSignature(stop) {
+  // Effective coordinates too, exactly as the nightly fence snapshots them:
+  // an address edit or a fresh geocode landing in the lock gap changes both
+  // the distance the response reports and the arrival feasibility the guard
+  // just certified (codex round 3 P2).
+  const num = (v) => (v == null || v === '' ? '' : parseFloat(v));
+  return [windowGuardSignature(stop), stop.route_order == null ? '' : Number(stop.route_order),
+    stop.status ?? '', num(stop.lat), num(stop.lng)].join('|');
+}
 
 /**
  * THE per-tech-day application of chooseWindowSafeOrder — one mechanism for
@@ -1157,6 +1192,8 @@ async function recordSkippedTick(reason, now = new Date()) {
 
 module.exports = {
   inProgressStartMin,
+  ROUTE_WRITE_GUARD_COLUMNS,
+  routeWriteGuardSignature,
   resolveWindowSafeOrderByTechDay,
   windowSafeFigures,
   runRouteReorder,

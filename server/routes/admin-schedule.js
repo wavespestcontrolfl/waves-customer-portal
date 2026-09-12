@@ -15,7 +15,8 @@ const { collectiveMoveGateOn, dateExceptionStamp } = require('../services/rebook
 const { stampedDivergesSql, stampedLine2Sql } = require('../services/stamped-address');
 const { dayStopsQuery, guardedCoordSelects } = require('../services/scheduling/day-stops');
 const { chooseWindowSafeOrder, windowGuardSignature, inProgressStartMin,
-  resolveWindowSafeOrderByTechDay, windowSafeFigures } = require('../services/route-reorder');
+  resolveWindowSafeOrderByTechDay, windowSafeFigures,
+  ROUTE_WRITE_GUARD_COLUMNS, routeWriteGuardSignature } = require('../services/route-reorder');
 const {
   assertAdminAppointmentWindow, probeSlotOverlap, slotOverlapWarning, ADMIN_OCCUPANCY_EXCLUDE_STATUSES,
 } = require('../services/scheduling/window-rules');
@@ -13383,45 +13384,6 @@ router.put('/:id/status', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
-// Guard-input columns both optimize endpoints load and re-read under the
-// tech-day lock — the inputs windowGuardSignature() hashes. Kept as one list
-// so the day-load snapshot and the post-lock re-read can never disagree about
-// which columns exist (a column present on one side only would read as a
-// permanent "changed" and abort every write).
-const OPTIMIZE_GUARD_COLUMNS = ['window_start', 'window_end', 'time_window',
-  'estimated_duration_minutes', 'auto_dispatch_locked', 'auto_dispatch_excluded', 'visit_id',
-  // status: a stop that goes en_route/on_site mid-optimize makes the order
-  // unwritable (chooseWindowSafeOrder refuses a live tech-day for today).
-  'status',
-  // route_order too, exactly as the nightly fence snapshots it: the CURRENT
-  // running order is a guard input, not just a thing being overwritten — it
-  // is the window-fit repair's backbone and the `unoptimizedDistanceMeters`
-  // the response reports. An operator drag landing in the gap would
-  // otherwise be clobbered by an order computed against the sequence it
-  // replaced (round-0 fallback audit P1).
-  'route_order'];
-
-/**
- * Post-lock staleness fence for the guard inputs (codex round 1 P2). The
- * per-row update below already refuses a stop that changed tech-day, but the
- * ORDER itself was computed against windows and durations read before the
- * tech-day lock was acquired: an appointment re-promised in that gap would
- * commit an order validated against a promise that no longer exists. Same
- * signature the nightly pass fences its own commit with
- * (route-reorder.js's windowGuardSignature), so the two writers agree on
- * what counts as a change. Throws STALE_OPTIMIZE — the caller's 409 —
- * leaving the transaction untouched.
- */
-function optimizeGuardSignature(stop) {
-  // Effective coordinates too, exactly as the nightly fence snapshots them:
-  // an address edit or a fresh geocode landing in the lock gap changes both
-  // the distance the response reports and the arrival feasibility the guard
-  // just certified (codex round 3 P2).
-  const num = (v) => (v == null || v === '' ? '' : parseFloat(v));
-  return [windowGuardSignature(stop), stop.route_order == null ? '' : Number(stop.route_order),
-    stop.status ?? '', num(stop.lat), num(stop.lng)].join('|');
-}
-
 /** Operator-facing copy for each refusal the shared decision can return. */
 function optimizeRefusalMessage(reason) {
   if (reason === 'WINDOW_FIT_GATE_OFF') return 'Google\'s route breaks a promised arrival window and the window-fit repair is off — nothing was changed.';
@@ -13430,6 +13392,14 @@ function optimizeRefusalMessage(reason) {
   return 'No legal stop order keeps every promised arrival window — nothing was changed.';
 }
 
+/**
+ * Post-lock staleness fence (codex round 1 P2, round 3 P1). The per-row
+ * update below already refuses a stop that changed tech-day, but the ORDER
+ * was computed against inputs read before the lock: an appointment
+ * re-promised, dragged, started or re-geocoded in that gap — or a booking
+ * ADDED to the day — invalidates it. Throws STALE_OPTIMIZE, the caller's 409,
+ * leaving the transaction untouched.
+ */
 async function assertGuardInputsFresh(trx, dateStr, technicianId, snapshot) {
   // The whole eligible tech-day, not just the ids we optimized: a booking
   // ADDED to (or moved onto) the day in the lock gap is invisible to an
@@ -13440,11 +13410,11 @@ async function assertGuardInputsFresh(trx, dateStr, technicianId, snapshot) {
     dateStr,
     technicianId: technicianId || null,
     excludeStatuses: ['cancelled', 'completed'],
-    select: ['scheduled_services.id', ...OPTIMIZE_GUARD_COLUMNS.map((c) => `scheduled_services.${c}`),
+    select: ['scheduled_services.id', ...ROUTE_WRITE_GUARD_COLUMNS.map((c) => `scheduled_services.${c}`),
       ...guardedCoordSelects(trx)],
   });
   const changed = fresh.length !== snapshot.size
-    || fresh.some((row) => optimizeGuardSignature(row) !== snapshot.get(row.id));
+    || fresh.some((row) => routeWriteGuardSignature(row) !== snapshot.get(row.id));
   if (changed) throw Object.assign(new Error('schedule changed while optimizing'), { code: 'STALE_OPTIMIZE' });
 }
 
@@ -13494,7 +13464,7 @@ router.post('/optimize', requireAdmin, async (req, res, next) => {
     if (!services.length) {
       return res.json({ success: true, order: [], totalDistanceMeters: 0, totalDurationMinutes: 0, legs: [], source: 'empty' });
     }
-    const guardSnapshot = new Map(services.map((s) => [s.id, optimizeGuardSignature(s)]));
+    const guardSnapshot = new Map(services.map((s) => [s.id, routeWriteGuardSignature(s)]));
 
     // Assign zone from customer city/zip if not already set
     for (const svc of services) {
@@ -13674,7 +13644,7 @@ router.post('/optimize-route', requireAdmin, async (req, res, next) => {
     if (!services.length) {
       return res.json({ success: true, order: [], totalDistanceMeters: 0, totalDurationMinutes: 0, legs: [], source: 'empty' });
     }
-    const guardSnapshot = new Map(services.map((s) => [s.id, optimizeGuardSignature(s)]));
+    const guardSnapshot = new Map(services.map((s) => [s.id, routeWriteGuardSignature(s)]));
 
     // Assign zone
     for (const svc of services) {

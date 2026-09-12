@@ -14,7 +14,8 @@ const { assertAssignableTechnician, applyAssignable } = require('../technician-e
 const { scheduledServiceTrackTokenExpiry } = require('../track-token-expiry');
 const { etDateString, addETDays, validScheduleDate, sameDayWindowElapsed } = require('../../utils/datetime-et');
 const { dayStopsQuery, guardedCoordSelects } = require('../scheduling/day-stops');
-const { resolveWindowSafeOrderByTechDay, windowSafeFigures, inProgressStartMin } = require('../route-reorder');
+const { resolveWindowSafeOrderByTechDay, windowSafeFigures, inProgressStartMin,
+  ROUTE_WRITE_GUARD_COLUMNS, routeWriteGuardSignature } = require('../route-reorder');
 const { probeSlotOverlap, slotOverlapWarning } = require('../scheduling/window-rules');
 
 const SCHEDULE_TOOLS = [
@@ -299,11 +300,32 @@ function getZone(city) {
 // any miss (row moved or reassigned since) aborts the whole rewrite
 // untouched, and an approved id missing from the fresh day set refuses with
 // preview_changed.
-async function applyApprovedRouteOrder({ date, approvedIds, services, lockKeys, expectTechFor, loadEligibleIds }) {
+async function applyApprovedRouteOrder({ date, approvedIds, services, lockKeys, expectTechFor, loadEligibleIds, RouteOptimizer }) {
   const byId = new Map(services.map((s) => [String(s.id), s]));
   if (approvedIds.some((id) => !byId.has(id))) {
     return { error: "The day's stops changed after the card was shown — nothing was reordered. Ask again for a fresh card.", preview_changed: true };
   }
+  // The approved plan must still be window-safe against the rows as they are
+  // NOW, not only as they were when the card was drawn: a window, duration,
+  // pin or live status changed since then can make the approved sequence
+  // illegal, and this path applies it verbatim (codex #4430 r3 P1). The guard
+  // is asked to validate the APPROVED order — if it would rather write a
+  // different one, the card is stale.
+  if (RouteOptimizer) {
+    const approvedOrder = approvedIds.map((id) => byId.get(id));
+    const revalidated = resolveWindowSafeOrderByTechDay({
+      RouteOptimizer, orderedStops: approvedOrder, sourceStops: services,
+      googleSource: 'approved_card', startMin: inProgressStartMin(date),
+    });
+    if (revalidated.refusal) {
+      return { error: routeGuardMessage(revalidated.refusal.reason), reason: revalidated.refusal.reason, preview_changed: true };
+    }
+    if (revalidated.orderedIds.join(',') !== approvedIds.join(',')) {
+      return { error: "The day's promised windows changed after the card was shown — nothing was reordered. Ask again for a fresh card.", preview_changed: true };
+    }
+  }
+  // Guard inputs as the card saw them; compared again under the lock below.
+  const guardSnapshot = new Map(services.map((s) => [String(s.id), routeWriteGuardSignature(s)]));
   const { lockTechDays } = require('../scheduling/tech-day-lock');
   try {
     await db.transaction(async (trx) => {
@@ -313,10 +335,17 @@ async function applyApprovedRouteOrder({ date, approvedIds, services, lockKeys, 
       // added since the confirm preflight would sit ungoverned beside (or
       // collide with) the approved 1..N sequence, so the eligible set must
       // match the approved set exactly under the locks.
-      const eligible = (await loadEligibleIds(trx)).map(String);
+      const eligibleRows = await loadEligibleIds(trx);
+      const eligible = eligibleRows.map((row) => String(row.id ?? row));
       const approvedSet = new Set(approvedIds);
       if (eligible.length !== approvedIds.length || eligible.some((id) => !approvedSet.has(id))) {
         throw Object.assign(new Error('stop set changed'), { code: 'STALE_OPTIMIZE_SET' });
+      }
+      // Guard inputs too, not just membership: the same fence the admin
+      // endpoints apply (codex #4430 r3 P1).
+      if (eligibleRows.some((row) => row && typeof row === 'object' && row.window_start !== undefined
+        && routeWriteGuardSignature(row) !== guardSnapshot.get(String(row.id)))) {
+        throw Object.assign(new Error('guard inputs changed'), { code: 'STALE_OPTIMIZE_SET' });
       }
       for (let i = 0; i < approvedIds.length; i++) {
         const expectTech = expectTechFor(byId.get(approvedIds[i])) || null;
@@ -402,11 +431,13 @@ async function optimizeAllRoutes(input) {
       services,
       lockKeys: services.map((s) => ({ techId: s.technician_id, date })),
       expectTechFor: (s) => s.technician_id || null,
+      RouteOptimizer,
       loadEligibleIds: async (trx) => (await dayStopsQuery(trx, {
         dateStr: date,
         excludeStatuses: ['cancelled', 'completed', 'rescheduled'],
-        select: ['scheduled_services.id', ...guardedCoordSelects(trx)],
-      })).filter((s) => s.lat && s.lng).map((s) => s.id),
+        select: ['scheduled_services.id',
+          ...ROUTE_WRITE_GUARD_COLUMNS.map((c) => `scheduled_services.${c}`), ...guardedCoordSelects(trx)],
+      })).filter((s) => s.lat && s.lng),
     });
   }
 
@@ -559,12 +590,14 @@ async function optimizeTechRoute(input) {
       services,
       lockKeys: [{ techId: tech.id, date }],
       expectTechFor: () => tech.id,
+      RouteOptimizer,
       loadEligibleIds: async (trx) => (await dayStopsQuery(trx, {
         dateStr: date,
         technicianId: tech.id,
         excludeStatuses: ['cancelled', 'completed', 'rescheduled'],
-        select: ['scheduled_services.id', ...guardedCoordSelects(trx)],
-      })).filter((s) => s.lat && s.lng).map((s) => s.id),
+        select: ['scheduled_services.id',
+          ...ROUTE_WRITE_GUARD_COLUMNS.map((c) => `scheduled_services.${c}`), ...guardedCoordSelects(trx)],
+      })).filter((s) => s.lat && s.lng),
     });
     return applied.success ? { ...applied, tech: tech.name } : applied;
   }
