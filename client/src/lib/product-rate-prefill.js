@@ -85,13 +85,23 @@ export function promoteTankOwner(rows = []) {
 // as the closing step of every row update, so a handler that blanks a derived
 // total it cannot express does not have to know about tanks.
 export function applyTankDose(row) {
-  if (row.totalAmountManual || !isPerGallonUnit(row.rateUnit)) return row;
+  if (!isPerGallonUnit(row.rateUnit)) return row;
+  // A SEEDED total is a house default, not a technician entry: it is marked
+  // manual only so a rate or area edit cannot recompute it. Stating the
+  // carrier volume is the technician saying what actually went out, so the
+  // seed gives way and the row becomes derived from here on — otherwise a
+  // seeded 4 oz stands while the rate and gallons say 8 (Codex r5 P1).
+  if (row.totalAmountManual && !row.totalAmountSeeded) return row;
+  const dose = derivedTankTotal(row.rate, row.carrierGallons);
+  if (row.totalAmountSeeded && dose === "") return row;
   // Clearing the gallons clears the dose: derivedTankTotal returns "" without
   // a volume, so this one call covers both halves of the rule.
   return {
     ...row,
     amountUnit: String(row.rateUnit).split("/")[0],
-    totalAmount: derivedTankTotal(row.rate, row.carrierGallons),
+    totalAmount: dose,
+    totalAmountManual: false,
+    totalAmountSeeded: false,
   };
 }
 

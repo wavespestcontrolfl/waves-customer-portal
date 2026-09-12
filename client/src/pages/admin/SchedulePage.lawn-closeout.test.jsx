@@ -755,6 +755,23 @@ it('a row converted to per-gallon joins the tank, and clearing the tank frees it
   expect(totals()[2].value).toBe('8');
 });
 
+// The recurring-pest default mix seeds house totals marked manual so a rate or
+// area edit cannot recompute them. Stating the carrier volume is the tech
+// saying what actually went out, so the seed gives way (Codex r5 P1).
+it('gallons replace a seeded pest-mix total', async () => {
+  const pest = { ...service, serviceType: 'Quarterly Pest Control', completionProfile: { serviceKey: 'pest', requiresProducts: true }, waveguardTier: null };
+  const surfactant = { id: 'mix-surf', name: 'Non-ionic surfactant', category: 'adjuvant', default_unit: 'fl_oz/gal', default_rate: '0.5' };
+  render(<CompletionPanel service={pest} products={[surfactant]} onClose={() => {}} onSubmit={submit} />);
+  // Seeded at the house total of 0.25, with a per-gallon rate.
+  await waitFor(() => expect(totals()).toHaveLength(1));
+  expect(totals()[0].value).toBe('0.25');
+  fireEvent.change(screen.getAllByPlaceholderText('Gal')[0], { target: { value: '10' } });
+  await waitFor(() => expect(totals()[0].value).toBe('5'));
+  // Derived from here on: a correction tracks rather than sticking at 5.
+  fireEvent.change(screen.getAllByPlaceholderText('Gal')[0], { target: { value: '20' } });
+  await waitFor(() => expect(totals()[0].value).toBe('10'));
+});
+
 it('a rate unit moving off per-gallon does not strand the tank total', async () => {
   enableDefaults();
   const added = { id: 'manual-taurus', name: 'Fixture termiticide', category: 'insecticide', default_unit: 'fl_oz/gal', default_rate: '0.8' };

@@ -103,3 +103,15 @@ it('clearing an override rejoins the active tank at once', () => {
   expect(markTankEntry(row({ productId: 'a', carrierGallons: '', tankOwner: true }), owner))
     .toMatchObject({ carrierGallons: '', tankOwner: false, carrierGallonsManual: false });
 });
+
+it('a stated carrier volume replaces a seeded house total, but never an entered one', () => {
+  const seeded = row({ totalAmount: 4, totalAmountManual: true, totalAmountSeeded: true });
+  // No volume yet: the house default stands.
+  expect(applyTankDose(seeded)).toMatchObject({ totalAmount: 4, totalAmountSeeded: true });
+  // With one, the seed gives way and the row is derived from here on.
+  expect(applyTankDose({ ...seeded, carrierGallons: '10' })).toMatchObject({
+    totalAmount: 8, totalAmountManual: false, totalAmountSeeded: false,
+  });
+  // A total the technician typed is untouchable either way.
+  expect(applyTankDose(row({ carrierGallons: '10', totalAmount: 4, totalAmountManual: true })).totalAmount).toBe(4);
+});

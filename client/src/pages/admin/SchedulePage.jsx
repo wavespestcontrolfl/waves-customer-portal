@@ -12243,6 +12243,10 @@ export function CompletionPanel({
       ...buildSelectedProduct(product),
       totalAmount,
       totalAmountManual: true,
+      // Marked manual so a rate or area edit cannot recompute the house
+      // default — but it is a seed, not the tech's own number, so stating a
+      // carrier volume replaces it (Codex r5 P1).
+      totalAmountSeeded: true,
     }));
     if (!rows.length) return;
     pestDefaultMixSnapshotRef.current = JSON.stringify(rows);
@@ -14901,6 +14905,7 @@ export function CompletionPanel({
         // in the rate's unit, so a rate-unit change moves the total unit too.
         if (field === "totalAmount") {
           next.totalAmountManual = true;
+          next.totalAmountSeeded = false;
         } else if (governed && field === "amountUnit") {
           // A still-derived total is the plan's quantity in the plan's unit:
           // a unit change alone withdraws it (never keeps the number under
