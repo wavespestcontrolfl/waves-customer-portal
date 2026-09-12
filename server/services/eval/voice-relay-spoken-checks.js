@@ -1447,7 +1447,7 @@ function firstUnexemptGuarantee(text) {
     re.lastIndex = 0;
     let m = re.exec(text);
     while (m) {
-      if (!insideAnySpan(spans, m.index)) return m;
+      if (!insideAnySpan(spans, m.index) && !SAFETY_ONCE_DRY_RE.test(clauseOf(text, m.index))) return m;
       m = re.exec(text);
     }
   }
@@ -1541,7 +1541,7 @@ const HARM_ADJECTIVE = vocabAlt(HARM_WORDS);
 // sanctioned idiom to make the eval pass — a compliance regression the
 // check would be causing, not catching. Scoped to the adjective it
 // follows, so a bare "it's safe" is untouched.
-const SAFETY_ONCE_DRY_IDIOM = `(?!\\s+once\\s+(?:it\\x27s\\s+|it\\u2019s\\s+|it\\s+is\\s+|they\\x27re\\s+|they\\u2019re\\s+|they\\s+are\\s+)?dry\\b)`;
+const SAFETY_ONCE_DRY_RE = /\bonce\s+(?:it|they)?(?:\x27s|\u2019s|\s+is|\s+are|\x27re|\u2019re)?\s*dry\b/i;
 const SAFETY_ADJECTIVE_NEGATION = `(?<!\\b(?:not|isn[\\x27\\u2019]t|is not|never|no longer)\\s+${SAFETY_INTENSIFIER})`;
 // Every pattern is global with NO embedded refusal lookbehind (see
 // safetyExemptSpans above) so firstUnexemptGuarantee can walk ALL of a
@@ -1550,7 +1550,7 @@ const SAFETY_GUARANTEE_RES = Object.freeze([
   // STRONG adjectives ("safe", "harmless", "pet-safe"…) only ever describe
   // a product, so they fire on any SAFETY_SUBJECT shape, bare pronoun
   // included — "It's safe.".
-  new RegExp(`\\b${SAFETY_SUBJECT}${SAFETY_SUBJECT_VERB}\\s+${SAFETY_ADJECTIVE_NEGATION}${SAFETY_INTENSIFIER}${SAFETY_STRONG_ADJECTIVE}\\b${SAFETY_ONCE_DRY_IDIOM}`, 'gi'),
+  new RegExp(`\\b${SAFETY_SUBJECT}${SAFETY_SUBJECT_VERB}\\s+${SAFETY_ADJECTIVE_NEGATION}${SAFETY_INTENSIFIER}${SAFETY_STRONG_ADJECTIVE}\\b`, 'gi'),
   // P1 follow-up: FILLER adjectives ("fine", "ok", "okay", "alright") are
   // ordinary conversational acknowledgements as often as safety synonyms —
   // "That's fine, let me check that for you." says nothing about a product
