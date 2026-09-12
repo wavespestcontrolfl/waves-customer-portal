@@ -1417,7 +1417,7 @@ export default function DispatchPageV2({
           onEdit={(svc) => {
             // A row wearing the "Closeout owed" chip resumes through the
             // completion panel, same as the day grid and the mobile list.
-            if (completionResumeMarked(svc) || svc.visitCloseoutEnabled === true || svc.visitCloseoutPacket) {
+            if (completionResumeMarked(svc) || (svc.visitId && svc.visitCloseoutEnabled === true) || svc.visitCloseoutPacket) {
               handleComplete(svc);
             } else {
               setEditingService(svc);
@@ -1448,7 +1448,7 @@ export default function DispatchPageV2({
           onEdit={(svc) => {
             // A row wearing the "Closeout owed" chip resumes through the
             // completion panel, same as the day grid and the mobile list.
-            if (completionResumeMarked(svc) || svc.visitCloseoutEnabled === true || svc.visitCloseoutPacket) {
+            if (completionResumeMarked(svc) || (svc.visitId && svc.visitCloseoutEnabled === true) || svc.visitCloseoutPacket) {
               handleComplete(svc);
             } else {
               setEditingService(svc);
@@ -1725,7 +1725,7 @@ export default function DispatchPageV2({
                 // A block wearing the "Closeout owed" chip must open the
                 // completion panel (resume), not the appointment editor —
                 // same routing the mobile list uses.
-                if (completionResumeMarked(svc) || svc.visitCloseoutEnabled === true || svc.visitCloseoutPacket) {
+                if (completionResumeMarked(svc) || (svc.visitId && svc.visitCloseoutEnabled === true) || svc.visitCloseoutPacket) {
                   handleComplete(svc);
                 } else {
                   setEditingService(svc);

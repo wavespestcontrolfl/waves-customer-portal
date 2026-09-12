@@ -9,7 +9,18 @@ import { adminFetch } from '../../utils/admin-fetch';
 
 vi.mock('../../utils/admin-fetch', () => ({ adminFetch: vi.fn(), isRateLimitError: () => false }));
 const enabledVisit = { id: 'service-one', visitId: 'visit-one', visitCloseoutEnabled: true, visitCloseoutPacket: null };
-vi.mock('../../components/schedule/TimeGridDay', () => ({ default: ({ onEdit }) => <div>Schedule visits<button onClick={() => onEdit(enabledVisit)}>Open day visit</button></div> }));
+const enabledStandalone = { id: 'service-standalone', visitId: null, visitCloseoutEnabled: true, visitCloseoutPacket: null };
+vi.mock('./SchedulePage', () => ({
+  CompletionPanel: () => null,
+  RescheduleModal: () => null,
+  EditServiceModal: ({ service }) => <div>Editing service {service.id}</div>,
+  ProtocolPanel: () => null,
+  completionResumeOwed: () => false,
+}));
+vi.mock('../../components/schedule/TimeGridDay', () => ({ default: ({ onEdit }) => <div>Schedule visits
+  <button onClick={() => onEdit(enabledVisit)}>Open day visit</button>
+  <button onClick={() => onEdit(enabledStandalone)}>Open standalone day</button>
+</div> }));
 vi.mock('../../components/schedule/MobileDispatchList', () => ({ default: () => null }));
 vi.mock('../../hooks/useFeatureFlag', () => ({ useFeatureFlag: () => false }));
 vi.mock('../../components/admin/VisitCloseoutSheet', () => ({ default: ({ visitId }) => <div>Visit closeout {visitId}</div> }));
@@ -64,4 +75,12 @@ it.each([
   fireEvent.click((await screen.findAllByRole('button', { name: mode, exact: true }))[0]);
   fireEvent.click(await screen.findByRole('button', { name: entryName }));
   expect(await screen.findByText('Visit closeout visit-one')).toBeInTheDocument();
+});
+
+it('keeps a standalone row in the normal editor when the legacy gate marks every row enabled', async () => {
+  vi.mocked(adminFetch).mockResolvedValue({ services: [enabledStandalone], technicians: [], products: [], types: [] });
+  render(<MemoryRouter initialEntries={['/admin/dispatch?tab=schedule&date=2026-09-12']}><DispatchPageV2 activeTab="board" /></MemoryRouter>);
+  fireEvent.click(await screen.findByRole('button', { name: 'Open standalone day' }));
+  expect(await screen.findByText('Editing service service-standalone')).toBeInTheDocument();
+  expect(screen.queryByText(/Visit closeout/)).not.toBeInTheDocument();
 });
