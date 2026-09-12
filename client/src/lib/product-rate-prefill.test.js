@@ -1,7 +1,7 @@
 import { expect, it } from 'vitest';
 import {
   applyTankDose, clearTankOnUnitChange, derivedTankTotal, followTank, isPerGallonUnit,
-  isTankCalculation, markTankEntry, promoteTankOwner, tankOwnerRow, tankPropagates,
+  isTankCalculation, joinTankOnUnitChange, markTankEntry, promoteTankOwner, tankOwnerRow, tankPropagates,
 } from './product-rate-prefill';
 
 const row = (over = {}) => ({ productId: 'p', rateUnit: 'fl_oz/gal', rate: '0.8', carrierGallons: '', amountUnit: 'fl_oz', ...over });
@@ -48,8 +48,9 @@ it('only the tank owner propagates, and only followers take the volume', () => {
 });
 
 it('marks an entry, claims a free owner slot, and retires the tank with the unit', () => {
-  expect(markTankEntry(row(), null)).toMatchObject({ carrierGallonsManual: true, tankOwner: true });
-  expect(markTankEntry(row(), row({ productId: 'a' })).tankOwner).toBeUndefined();
+  expect(markTankEntry(row({ carrierGallons: '25' }), null)).toMatchObject({ carrierGallonsManual: true, tankOwner: true });
+  // Someone already owns the tank: this row detaches, it does not take over.
+  expect(markTankEntry(row({ carrierGallons: '10' }), row({ productId: 'a' }))).toMatchObject({ carrierGallonsManual: true, tankOwner: false });
   expect(clearTankOnUnitChange(row({ rateUnit: 'g', carrierGallons: '25', tankOwner: true }), 'fl_oz/gal'))
     .toMatchObject({ carrierGallons: '', carrierGallonsManual: false, tankOwner: false });
   // Still per-gallon, or never was: nothing to retire.
@@ -67,4 +68,26 @@ it('the tank outlives its owner, but a detached row never inherits it', () => {
   expect(promoteTankOwner([detached]).map((r) => !!r.tankOwner)).toEqual([false]);
   const owned = row({ productId: 'a', carrierGallons: '25', tankOwner: true });
   expect(promoteTankOwner([owned, follower])).toEqual([owned, follower]);
+});
+
+it('an owner with no volume owns nothing, so the next entry establishes the tank', () => {
+  const empty = row({ productId: 'a', carrierGallons: '', tankOwner: true, carrierGallonsManual: true });
+  const other = row({ productId: 'b', rate: '2' });
+  expect(tankOwnerRow([empty, other])).toBeNull();
+  // So an entry on another row propagates rather than detaching against it.
+  expect(tankPropagates([empty, other], 'b', 'carrierGallons')).toBe(true);
+  expect(markTankEntry(row({ carrierGallons: '25' }), null).tankOwner).toBe(true);
+  // Clearing your own gallons gives up both the claim and the independence.
+  expect(markTankEntry(row({ productId: 'a', carrierGallons: '', tankOwner: true, carrierGallonsManual: true }), null))
+    .toMatchObject({ tankOwner: false, carrierGallonsManual: false });
+});
+
+it('a row converted into a per-gallon rate joins the tank already mixed', () => {
+  const owner = row({ productId: 'a', carrierGallons: '25', tankOwner: true, carrierGallonsManual: true });
+  const converted = joinTankOnUnitChange(row({ productId: 'b', rateUnit: 'fl_oz/gal', rate: '2', amountUnit: 'fl_oz' }), 'fl_oz', owner);
+  expect(converted).toMatchObject({ carrierGallons: '25', carrierGallonsManual: false, totalAmount: 50 });
+  // No tank yet, or not a conversion into one: nothing to join.
+  expect(joinTankOnUnitChange(row({ rateUnit: 'fl_oz/gal' }), 'fl_oz', null).carrierGallons).toBe('');
+  expect(joinTankOnUnitChange(row({ rateUnit: 'fl_oz' }), 'fl_oz/gal', owner).carrierGallons).toBe('');
+  expect(joinTankOnUnitChange(row({ rateUnit: 'oz/gal', carrierGallons: '10' }), 'fl_oz/gal', owner).carrierGallons).toBe('10');
 });

@@ -53,6 +53,7 @@ import {
   tankPropagates,
   followTank,
   clearTankOnUnitChange,
+  joinTankOnUnitChange,
   normalizeApplicationMethod,
   resolveRatePrefill,
 } from "../../lib/product-rate-prefill";
@@ -14841,6 +14842,9 @@ export function CompletionPanel({
         // a pest perimeter or tree/shrub row never reaches the rate-unit
         // branch below, so a hidden volume would survive the round-trip back.
         Object.assign(next, clearTankOnUnitChange(next, p.rateUnit));
+        // And its mirror: a row converted into a per-gallon rate joins the
+        // mix already in the tank rather than asking for it again.
+        Object.assign(next, joinTankOnUnitChange(next, p.rateUnit, tankOwner));
         // Provenance is per row: a governed row restored while the initial
         // plan request failed (`lawnDefaultsEnabled` false, no defaults
         // loaded) still records which fields the tech edited, or a successful

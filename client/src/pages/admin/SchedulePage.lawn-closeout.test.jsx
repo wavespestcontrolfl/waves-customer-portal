@@ -715,6 +715,39 @@ it('the tank survives its owner changing rate unit, and a detached row still can
   expect(totals()[4].value).toBe('100');
 });
 
+// Converting a row into a per-gallon rate joins the mix already in the tank,
+// and clearing the tank lets the next entry establish it again (Codex r3 P2).
+it('a row converted to per-gallon joins the tank, and clearing the tank frees it', async () => {
+  enableDefaults();
+  const mk = (id, rate, unit) => ({ id, name: `Fixture join ${id}`, category: 'insecticide', ...(unit === 'gal' ? { default_unit: 'fl_oz/gal', default_rate: rate } : { rate_unit: 'fl_oz', default_rate_per_1000: rate }) });
+  const [a, b] = [mk('join-a', '0.8', 'gal'), mk('join-b', '2')];
+  render(<CompletionPanel service={service} products={[...catalog, a, b]} onClose={() => {}} onSubmit={submit} />);
+  await waitFor(() => expect(totals()).toHaveLength(2), { timeout: 5000 });
+  let count = 2;
+  for (const product of [a, b]) {
+    fireEvent.change(screen.getByPlaceholderText('Search products...'), { target: { value: product.name } });
+    fireEvent.click(screen.getByText(product.name));
+    count += 1;
+    await waitFor(() => expect(totals()).toHaveLength(count));
+  }
+  fireEvent.change(screen.getAllByPlaceholderText('Gal')[0], { target: { value: '25' } });
+  await waitFor(() => expect(totals()[2].value).toBe('20'));
+  // B is a per-1k product; switching it to a tank concentration joins the mix.
+  fireEvent.change(within(totals()[3].parentElement).getAllByRole('combobox')[0], { target: { value: 'fl_oz/gal' } });
+  await waitFor(() => expect(screen.getAllByPlaceholderText('Gal')).toHaveLength(2));
+  expect(screen.getAllByPlaceholderText('Gal')[1].value).toBe('25');
+  expect(totals()[3].value).toBe('50');
+  // Clearing the tank clears both doses and frees the owner slot, so an entry
+  // on the other row establishes the tank again rather than detaching.
+  fireEvent.change(screen.getAllByPlaceholderText('Gal')[0], { target: { value: '' } });
+  await waitFor(() => expect(totals()[2].value).toBe(''));
+  expect(totals()[3].value).toBe('');
+  fireEvent.change(screen.getAllByPlaceholderText('Gal')[1], { target: { value: '10' } });
+  await waitFor(() => expect(totals()[3].value).toBe('20'));
+  expect(screen.getAllByPlaceholderText('Gal')[0].value).toBe('10');
+  expect(totals()[2].value).toBe('8');
+});
+
 it('a rate unit moving off per-gallon does not strand the tank total', async () => {
   enableDefaults();
   const added = { id: 'manual-taurus', name: 'Fixture termiticide', category: 'insecticide', default_unit: 'fl_oz/gal', default_rate: '0.8' };

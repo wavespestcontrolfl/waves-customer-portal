@@ -59,7 +59,11 @@ export function derivedTankTotal(rate, gallons) {
 // row the technician has since edited (a detached row's second keystroke must
 // not start driving its old siblings again — typing "12" is two edits).
 export function tankOwnerRow(rows = []) {
-  return rows.find((row) => isPerGallonUnit(row.rateUnit) && row.tankOwner) || null;
+  // An owner with no usable volume owns nothing: once the technician clears
+  // the tank, the next entry on any row establishes it again rather than
+  // detaching against an empty owner (Codex r3 P2).
+  return rows.find((row) => isPerGallonUnit(row.rateUnit) && row.tankOwner
+    && Number(row.carrierGallons) > 0) || null;
 }
 
 // Removing the owner leaves its followers holding the same mix: promote one so
@@ -109,7 +113,26 @@ export function followTank(row, gallons) {
 // The technician typed this row's own gallons: it stops following the tank,
 // and if no row owned the tank yet it becomes the owner.
 export function markTankEntry(row, owner) {
-  return { ...row, carrierGallonsManual: true, ...(owner ? {} : { tankOwner: true }) };
+  const hasVolume = Number(row.carrierGallons) > 0;
+  return {
+    ...row,
+    // A row holds its own gallons only while it HAS gallons: clearing them
+    // leaves nothing to protect, so the row rejoins the shared tank instead
+    // of sitting blank while the rest of the mix has a volume (Codex r3 P2).
+    carrierGallonsManual: hasVolume,
+    // Claim the tank only with a volume to share, and give it up when that
+    // volume is cleared.
+    tankOwner: hasVolume && (!owner || owner.productId === row.productId),
+  };
+}
+
+// The mirror of clearTankOnUnitChange: a row converted INTO a per-gallon rate
+// joins the mix already in the tank, exactly as adding a per-gallon product
+// does, instead of asking for a volume the visit has already recorded
+// (Codex r3 P2).
+export function joinTankOnUnitChange(row, previousRateUnit, owner) {
+  if (isPerGallonUnit(previousRateUnit) || !isPerGallonUnit(row.rateUnit)) return row;
+  return applyTankDose({ ...row, carrierGallons: owner?.carrierGallons ?? "", carrierGallonsManual: false });
 }
 
 // Leaving a per-gallon rate retires the tank with it: the volume is cleared so
