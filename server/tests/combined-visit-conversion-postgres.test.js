@@ -10,11 +10,16 @@ jest.mock('../services/account-membership-email', () => ({ sendMembershipStarted
 jest.mock('../services/tech-visit-notifications', () => ({ notifyTechVisitChange: async () => {} }));
 jest.mock('../services/notification-service', () => ({ notifyAdmin: async () => {} }));
 jest.mock('../services/inspection-credit', () => ({ markBookingForInspectionCredit: async () => {} }));
-jest.mock('../services/scheduling/blackout-dates', () => ({ isBlackoutDate: async () => false }));
+jest.mock('../services/scheduling/blackout-dates', () => ({
+  isBlackoutDate: async () => false, getBlackoutLayers: async () => ({ dates: new Set() }),
+  // Real advisory lock: capacity certification serializes closure reads
+  // against admin closure writes on the same PostgreSQL connection.
+  lockClosureState: jest.requireActual('../services/scheduling/blackout-dates').lockClosureState,
+}));
 jest.mock('../services/slot-zone', () => ({ resolveEstimateZone: async () => null, zoneSlugOf: () => null }));
 jest.mock('../services/estimate-slot-availability', () => ({
   ...jest.requireActual('../services/estimate-slot-availability'),
-  resolveEstimateCoords: async () => null,
+  resolveEstimateCoords: jest.fn(async () => null),
 }));
 
 const knex = require('knex');
@@ -24,7 +29,7 @@ const { capacityForServices } = require('../services/combined-visit-capacity');
 const converter = require('../services/estimate-converter');
 const { reserveSlot, commitReservation } = require('../services/slot-reservation');
 const { resolveEstimateSlotProfile } = require('../services/estimate-slot-availability');
-const { signSlotOffer, appendOfferToSlotId } = require('../utils/slot-offer-token');
+const { signSlotOffer, appendOfferToSlotId, CAPACITY_OFFER_POLICY } = require('../utils/slot-offer-token');
 const AppointmentReminders = require('../services/appointment-reminders');
 const connection = process.env.COMBINED_VISIT_TEST_DATABASE_URL;
 const postgres = connection ? describe : describe.skip;
@@ -37,6 +42,10 @@ const lines = [
   { service: 'tree_shrub', name: 'Tree & Shrub', visitsPerYear: 9, frequency: 'every_6_weeks', catalog: 'tree_shrub_6week', pattern: 'every_6_weeks' },
   { service: 'mosquito', name: 'Monthly Mosquito Control', visitsPerYear: 12, frequency: 'monthly', catalog: 'mosquito_monthly', pattern: 'monthly' },
 ];
+const termiteLine = {
+  service: 'termite_bait', name: 'Termite Bait', visitsPerYear: 4,
+  frequency: 'quarterly', catalog: 'termite_bait', pattern: 'quarterly',
+};
 
 async function fixture(trx, selected) {
   const customerId = randomUUID();
@@ -87,6 +96,286 @@ postgres('combined capacity conversion on the migrated application schema', () =
     delete process.env.GATE_VISIT_COMBINED_CAPACITY;
     delete process.env.GATE_SEPARATE_COMBO_VISITS;
     if (mockPg) await mockPg.destroy();
+  });
+
+  test.each([
+    {
+      name: 'lawn while capacity remains enabled', companionLine: lines[1],
+      disabledCategory: 'lawn', capacityAtConversion: 'true', expectedDuration: 40,
+    },
+    {
+      name: 'termite after capacity shuts down', companionLine: termiteLine,
+      disabledCategory: 'termite', capacityAtConversion: 'false', expectedDuration: 60,
+    },
+  ])('a primary-only pest offer keeps $name as an independent program', async ({
+    companionLine, disabledCategory, capacityAtConversion, expectedDuration,
+  }) => {
+    const pool = mockPg;
+    const trx = await pool.transaction();
+    const gate = process.env.GATE_SCHEDULING_CAPACITY;
+    const combinedGate = process.env.GATE_VISIT_COMBINED_CAPACITY;
+    const separateGate = process.env.GATE_SEPARATE_COMBO_VISITS;
+    const availability = require('../services/estimate-slot-availability');
+    const pin = require('../services/route-optimizer').HQ;
+    const selected = [lines[0], companionLine];
+    mockPg = trx;
+    process.env.GATE_SCHEDULING_CAPACITY = 'true';
+    process.env.GATE_VISIT_COMBINED_CAPACITY = 'false';
+    process.env.GATE_SEPARATE_COMBO_VISITS = 'false';
+    availability.resolveEstimateCoords.mockResolvedValue(pin);
+    try {
+      for (const [index, line] of selected.entries()) {
+        let catalog = await trx('services').where({ service_key: line.catalog }).first('id');
+        if (!catalog) {
+          [catalog] = await trx('services').insert({ id: randomUUID(), service_key: line.catalog, name: line.name,
+            category: line.service, billing_type: 'recurring', is_active: true, default_duration_minutes: 60 }).returning('id');
+        }
+        await trx('services').where({ id: catalog.id }).update({ scheduling_duration_policy: {
+          version: 1, default_duration_minutes: index ? 40 : 30, min_duration_minutes: 30, max_duration_minutes: 40,
+        } });
+      }
+      const f = await fixture(trx, selected);
+      await trx('scheduled_services').where({ id: f.anchor.id }).del();
+      await trx('estimates').where({ id: f.estimateId }).update({ status: 'sent' });
+      await trx('technician_capabilities').insert({
+        technician_id: f.anchor.technician_id,
+        service_category: disabledCategory,
+        active: false,
+      });
+      const estimate = await trx('estimates').where({ id: f.estimateId }).first();
+      const profile = await availability.resolveCatalogSlotProfile(estimate, {}, trx);
+      expect(profile.durationMinutes).toBe(30);
+      const offers = await require('../services/scheduling/find-time').findAvailableSlots({ ...pin,
+        dateFrom: f.date, dateTo: f.date, technicianId: f.anchor.technician_id,
+        durationMinutes: profile.durationMinutes, serviceType: 'pest_control', includeWeekends: true, topN: 99 });
+      expect(offers.slots.some(slot => slot.start_time === '09:00')).toBe(true);
+      const offer = signSlotOffer({ surface: 'estimate', scopeId: f.estimateId, date: f.date,
+        startMinutes: 540, technicianId: f.anchor.technician_id, durationMinutes: profile.durationMinutes, policy: CAPACITY_OFFER_POLICY });
+      const held = await reserveSlot({ estimateId: f.estimateId,
+        slotId: appendOfferToSlotId(`${f.date}_09-00_${f.anchor.technician_id}`, offer) });
+      const preparedCapacity = await require('../services/slot-reservation').prepareReservationCommit(held.scheduledServiceId);
+      await commitReservation({ scheduledServiceId: held.scheduledServiceId, customerId: f.customerId, preparedCapacity, trx });
+      await trx('estimates').where({ id: f.estimateId }).update({ status: 'accepted' });
+      process.env.GATE_SCHEDULING_CAPACITY = capacityAtConversion;
+      await converter.convertEstimate(f.estimateId, { ...options, database: trx });
+      const parents = await trx('scheduled_services').where({ source_estimate_id: f.estimateId }).whereNull('recurring_parent_id');
+      expect(parents).toHaveLength(2);
+      const primary = parents.find(row => row.id === held.scheduledServiceId);
+      expect(primary).toMatchObject({
+        technician_id: f.anchor.technician_id,
+        window_start: '09:00:00',
+        estimated_duration_minutes: 30,
+        reservation_policy_version: 2,
+        service_key_snapshot: lines[0].catalog,
+      });
+      const companion = parents.find(row => row.id !== primary.id);
+      const companionCatalog = await trx('services').where({ service_key: companionLine.catalog }).first('id');
+      expect(companion).toMatchObject({
+        service_id: companionCatalog.id,
+        technician_id: null,
+        window_start: null,
+        window_end: null,
+        estimated_duration_minutes: expectedDuration,
+      });
+      const children = await trx('scheduled_services').where({ recurring_parent_id: companion.id });
+      expect(children.length).toBeGreaterThan(0);
+      expect(children.every(row => row.technician_id == null && row.window_start == null && row.window_end == null)).toBe(true);
+    } finally {
+      availability.resolveEstimateCoords.mockResolvedValue(null);
+      mockPg = pool;
+      await trx.rollback();
+      if (gate === undefined) delete process.env.GATE_SCHEDULING_CAPACITY;
+      else process.env.GATE_SCHEDULING_CAPACITY = gate;
+      if (combinedGate === undefined) delete process.env.GATE_VISIT_COMBINED_CAPACITY;
+      else process.env.GATE_VISIT_COMBINED_CAPACITY = combinedGate;
+      if (separateGate === undefined) delete process.env.GATE_SEPARATE_COMBO_VISITS;
+      else process.env.GATE_SEPARATE_COMBO_VISITS = separateGate;
+    }
+  });
+
+  test.each([
+    ['one program', lines.slice(0, 1), [30]],
+    ['two programs', lines.slice(0, 2), [30, 40]],
+    // A retired two-program route (lawn + tree & shrub) held as a combined
+    // version-2 allocation must keep both members even when the
+    // separate-visits gate is off at conversion (codex #4351 P0).
+    ['a retired lawn and tree pair', [lines[1], lines[2]], [30, 40]],
+    ['bait with retained bond', [termiteLine], [90]],
+  ])('version-2 conversion preserves %s allowances after capacity shutdown', async (_, selected, durations) => {
+    const trx = await mockPg.transaction();
+    const gate = process.env.GATE_SCHEDULING_CAPACITY;
+    const separateGate = process.env.GATE_SEPARATE_COMBO_VISITS;
+    delete process.env.GATE_SCHEDULING_CAPACITY;
+    process.env.GATE_SEPARATE_COMBO_VISITS = 'false';
+    try {
+      const count = selected.length;
+      const withBond = selected[0].service === 'termite_bait';
+      // The task-private database may contain schema without catalog seeds.
+      // These rows live only in this test's rolled-back transaction.
+      for (const line of selected) {
+        if (!await trx('services').where({ service_key: line.catalog }).first('id')) {
+          await trx('services').insert({ id: randomUUID(), service_key: line.catalog, name: line.name,
+            category: line.service, billing_type: 'recurring', is_active: true, default_duration_minutes: 60 });
+        }
+        // A valid held allowance covers the catalog policy, including the
+        // lawn member's larger explicit 40-minute floor after shutdown.
+        await trx('services').where({ service_key: line.catalog }).update({ scheduling_duration_policy: {
+          version: 1, default_duration_minutes: 30, min_duration_minutes: 30, max_duration_minutes: 120,
+        } });
+      }
+      const f = await fixture(trx, selected);
+      if (withBond) {
+        const estimate = await trx('estimates').where({ id: f.estimateId }).first();
+        estimate.estimate_data.result.recurring.services.push({ service: 'termite_bond_1yr',
+          name: 'Termite Bond', visitsPerYear: 4, frequency: 'quarterly', annual: 120, mo: 10, perTreatment: 30 });
+        await trx('estimates').where({ id: f.estimateId }).update({ estimate_data: estimate.estimate_data });
+      }
+      const mix = count > 1 ? capacityForServices(selected, durations) : null;
+      await trx('scheduled_services').where({ id: f.anchor.id }).update({ customer_id: f.customerId,
+        reservation_expires_at: null, reservation_policy_version: 2, reservation_service_mix: mix,
+        estimated_duration_minutes: durations.reduce((a, b) => a + b, 0),
+        window_end: withBond ? '10:30' : count === 1 ? '09:30' : '10:10' });
+      await converter.convertEstimate(f.estimateId, { ...options, database: trx });
+      const parents = await trx('scheduled_services').where({ source_estimate_id: f.estimateId })
+        .whereNull('recurring_parent_id');
+      expect(parents).toHaveLength(count);
+      if (withBond) expect(parents[0].service_type).toContain('Termite Bond');
+      for (const [index, line] of selected.entries()) {
+        const catalog = await trx('services').where({ service_key: line.catalog }).first('id');
+        const parent = parents.find(row => row.service_id === catalog.id);
+        expect(parent).toMatchObject({ reservation_policy_version: 2, estimated_duration_minutes: durations[index] });
+        const children = await trx('scheduled_services').where({ recurring_parent_id: parent.id });
+        expect(children).toHaveLength(line.visitsPerYear - 1);
+        expect(children.every(row => row.estimated_duration_minutes === durations[index])).toBe(true);
+      }
+    } finally {
+      await trx.rollback();
+      if (gate === undefined) delete process.env.GATE_SCHEDULING_CAPACITY;
+      else process.env.GATE_SCHEDULING_CAPACITY = gate;
+      if (separateGate === undefined) delete process.env.GATE_SEPARATE_COMBO_VISITS;
+      else process.env.GATE_SEPARATE_COMBO_VISITS = separateGate;
+    }
+  });
+
+  test.each([
+    ['scalar primary', [lines[0]], false, true],
+    ['combined companion', lines.slice(0, 2), true, true],
+    ['scalar primary with inactive identity', [lines[0]], false, false],
+    ['combined companion with inactive identity', lines.slice(0, 2), true, false],
+    ['scalar primary with failed lookup', [lines[0]], false, true, 'query_failure'],
+    ['combined companion with failed lookup', lines.slice(0, 2), true, true, 'query_failure'],
+    ['scalar primary without pinned allowance', [lines[0]], false, true, 'missing_allowance'],
+    ['scalar bait with retained bond', [termiteLine], false, true, undefined, true],
+    ['scalar bait with retained bond and failed lookup', [termiteLine], false, true, 'query_failure', true],
+  ])('version-2 %s rejects an uncertified late catalog identity', async (_, selected, combined, activate, failure = null, withBond = false) => {
+    const pool = mockPg;
+    const gate = process.env.GATE_SCHEDULING_CAPACITY;
+    const combinedGate = process.env.GATE_VISIT_COMBINED_CAPACITY;
+    const separateGate = process.env.GATE_SEPARATE_COMBO_VISITS;
+    const availability = require('../services/estimate-slot-availability');
+    const pin = require('../services/route-optimizer').HQ;
+    const lateLine = selected[selected.length - 1];
+    let f;
+    let catalogQuerySpy;
+    process.env.GATE_SCHEDULING_CAPACITY = 'true';
+    process.env.GATE_VISIT_COMBINED_CAPACITY = combined ? 'true' : 'false';
+    process.env.GATE_SEPARATE_COMBO_VISITS = 'true';
+    availability.resolveEstimateCoords.mockResolvedValue(pin);
+    try {
+      await expect(pool.transaction(async (trx) => {
+        mockPg = trx;
+        for (const line of selected) {
+          if (!await trx('services').where({ service_key: line.catalog }).first('id')) {
+            await trx('services').insert({
+              id: randomUUID(), service_key: line.catalog, name: line.name,
+              category: line.service, billing_type: 'recurring', is_active: true,
+              default_duration_minutes: 60,
+            });
+          }
+          await trx('services').where({ service_key: line.catalog }).update({
+            is_active: true, default_duration_minutes: 60,
+            scheduling_duration_policy: {
+              version: 1, default_duration_minutes: 60,
+              min_duration_minutes: 30, max_duration_minutes: 120,
+            },
+          });
+        }
+        f = await fixture(trx, selected);
+        await trx('scheduled_services').where({ id: f.anchor.id }).del();
+        await trx('estimates').where({ id: f.estimateId }).update({ status: 'sent' });
+        await trx('services').where({ service_key: lateLine.catalog }).update({
+          is_active: false,
+          default_duration_minutes: 90,
+          scheduling_duration_policy: {
+            version: 1, default_duration_minutes: 90,
+            min_duration_minutes: 30, max_duration_minutes: 120,
+          },
+        });
+
+        const estimate = await trx('estimates').where({ id: f.estimateId }).first();
+        if (withBond) {
+          estimate.estimate_data.result.recurring.services.push({ service: 'termite_bond_1yr',
+            name: 'Termite Bond', visitsPerYear: 4, frequency: 'quarterly', annual: 120, mo: 10, perTreatment: 30 });
+          await trx('estimates').where({ id: f.estimateId }).update({ estimate_data: estimate.estimate_data });
+        }
+        const profile = await require('../services/estimate-slot-availability')
+          .resolveCatalogSlotProfile(estimate, {}, trx);
+        const lateProfile = profile.services.find((service) => service.service === lateLine.service);
+        expect(lateProfile.durationMinutes).toBe(60);
+        expect(profile.durationMinutes).toBe(selected.length * 60);
+        const offer = signSlotOffer({
+          surface: 'estimate', scopeId: f.estimateId, date: f.date,
+          startMinutes: 540, technicianId: f.anchor.technician_id,
+          durationMinutes: profile.durationMinutes, policy: CAPACITY_OFFER_POLICY,
+        });
+        const held = await reserveSlot({ estimateId: f.estimateId,
+          slotId: appendOfferToSlotId(`${f.date}_09-00_${f.anchor.technician_id}`, offer) });
+        const preparedCapacity = await require('../services/slot-reservation')
+          .prepareReservationCommit(held.scheduledServiceId);
+        await commitReservation({ scheduledServiceId: held.scheduledServiceId,
+          customerId: f.customerId, preparedCapacity, trx });
+
+        // The converter's exact-key lookup can choose this row even if it
+        // remains inactive. Either way, 90 exceeds this member's 60-minute
+        // allowance even though it fits within the combined 120-minute total.
+        if (activate) await trx('services').where({ service_key: lateLine.catalog }).update({ is_active: true });
+        if (failure === 'missing_allowance') {
+          await trx('scheduled_services').where({ id: held.scheduledServiceId }).update({ estimated_duration_minutes: null });
+        }
+        if (failure === 'query_failure') {
+          const query = trx.client._query;
+          catalogQuerySpy = jest.spyOn(trx.client, '_query').mockImplementation(function (connection, statement) {
+            // The protected catalog reads are fenced by the services table
+            // SHARE lock (scheduling/catalog-lock.js) instead of a row FOR
+            // SHARE; failing that statement is the synthetic lookup failure.
+            // convertEstimate takes the same lock first thing (before any
+            // visit row lock), so the failure surfaces there — mapped to the
+            // same recoverable catalog_unavailable 409.
+            if (/lock table services in share mode/i.test(statement.sql)) {
+              return Promise.reject(new Error('Synthetic catalog query failure'));
+            }
+            return query.call(this, connection, statement);
+          });
+        }
+        await trx('estimates').where({ id: f.estimateId }).update({ status: 'accepted' });
+        process.env.GATE_SCHEDULING_CAPACITY = 'false';
+        await converter.convertEstimate(f.estimateId, { ...options, database: trx });
+      })).rejects.toMatchObject({ code: 'SLOT_UNAVAILABLE',
+        reason: failure === 'query_failure' ? 'catalog_unavailable' : 'service_duration_changed' });
+      mockPg = pool;
+      expect(await pool('scheduled_services').where({ source_estimate_id: f.estimateId })).toHaveLength(0);
+      expect(await pool('customers').where({ id: f.customerId })).toHaveLength(0);
+    } finally {
+      catalogQuerySpy?.mockRestore();
+      mockPg = pool;
+      availability.resolveEstimateCoords.mockResolvedValue(null);
+      if (gate === undefined) delete process.env.GATE_SCHEDULING_CAPACITY;
+      else process.env.GATE_SCHEDULING_CAPACITY = gate;
+      if (combinedGate === undefined) delete process.env.GATE_VISIT_COMBINED_CAPACITY;
+      else process.env.GATE_VISIT_COMBINED_CAPACITY = combinedGate;
+      if (separateGate === undefined) delete process.env.GATE_SEPARATE_COMBO_VISITS;
+      else process.env.GATE_SEPARATE_COMBO_VISITS = separateGate;
+    }
   });
 
   test.each([

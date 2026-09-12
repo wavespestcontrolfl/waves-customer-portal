@@ -288,6 +288,11 @@ async function propagateCustomerEmailChange({
       .where((q) => q.whereNull('status').orWhereNotIn('status', TERMINAL_LEAD_STATUSES))
       .update({ email: newEmail, updated_at: now });
 
+    // The propagated address is an ownership source for the bounce recovery
+    // (estimates.customer_email, notification_prefs.billing_email): its key
+    // is held while these rows change (re-entrant when the caller's claim
+    // guard already took it).
+    await require('../utils/customer-comms-lock').lockCustomerEmail(conn, newEmail);
     counts.estimates += await conn('estimates')
       .where({ customer_id: customerId })
       .whereRaw('LOWER(customer_email) = ?', [oldEmail])

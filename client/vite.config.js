@@ -24,6 +24,22 @@ const capShimAlias = capShim ? {
 
 export default defineConfig({
   plugins: [react(), {
+    // Every production build writes the list of hashed files it emitted. The
+    // service worker caches this beside that build's shell, so it can tell
+    // which chunks a retained generation actually owns. An /assets/ request
+    // cannot reveal that on its own — the worker has no way to know which
+    // tab asked — so without this list it has to guess, and a guess either
+    // keeps dead chunks or drops live ones.
+    name: 'waves-build-assets-manifest',
+    apply: 'build',
+    generateBundle(_options, bundle) {
+      const assets = Object.keys(bundle)
+        .filter(fileName => fileName.startsWith('assets/'))
+        .map(fileName => `/${fileName}`)
+        .sort();
+      this.emitFile({ type: 'asset', fileName: 'build-assets.json', source: JSON.stringify(assets) });
+    },
+  }, {
     name: 'waves-preview-checkout',
     apply: 'serve',
     configureServer(server) {
@@ -34,7 +50,7 @@ export default defineConfig({
       });
     },
   }],
-  resolve: { alias: { ...capShimAlias, '@lawn-scores': fileURLToPath(new URL('../shared/lawn-scores.cjs', import.meta.url)) } },
+  resolve: { alias: { ...capShimAlias, '@proposal-bid': fileURLToPath(new URL('../shared/proposal-bid.cjs', import.meta.url)), '@lawn-scores': fileURLToPath(new URL('../shared/lawn-scores.cjs', import.meta.url)) } },
   // Vitest reads this block. The global setup shims window.matchMedia (jsdom
   // omits it) so tests can mount the liquid-glass scene, which now renders on
   // every customer surface.
@@ -115,7 +131,7 @@ export default defineConfig({
   // Rollup's static analysis to fail with "X is not exported by …" errors.
   // See: https://vitejs.dev/config/dep-optimization-options#optimizedeps-include
   optimizeDeps: {
-    include: ['@lawn-scores', '@waves/irrigation-runtime', '@waves/lawn-cost-floor', '@waves/report-redaction'],
+    include: ['@proposal-bid', '@lawn-scores', '@waves/irrigation-runtime', '@waves/lawn-cost-floor', '@waves/report-redaction'],
   },
   build: {
     outDir: 'dist',
@@ -127,7 +143,7 @@ export default defineConfig({
     // Ensure @rollup/plugin-commonjs also processes the linked CJS package
     // during production builds, complementing the optimizeDeps.include above.
     commonjsOptions: {
-      include: [/shared\/lawn-scores\.cjs$/, /irrigation-runtime/, /lawn-cost-floor/, /report-redaction/, /node_modules/],
+      include: [/shared\/proposal-bid\.cjs$/, /shared\/lawn-scores\.cjs$/, /irrigation-runtime/, /lawn-cost-floor/, /report-redaction/, /node_modules/],
     },
   },
 });

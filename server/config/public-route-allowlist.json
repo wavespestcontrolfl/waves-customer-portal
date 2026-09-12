@@ -72,7 +72,7 @@
         "GET <re:^\\/recap\\/[a-f0-9]{32}\\/?$/i> [conditional: config.nodeEnv === 'production' [with config.nodeEnv=process.env.NODE_ENV || 'development']]",
         "GET <re:^\\/report\\/[a-f0-9]{32}\\/?$/i> [conditional: config.nodeEnv === 'production' [with config.nodeEnv=process.env.NODE_ENV || 'development']]",
         "GET <re:^\\/visit\\/[a-f0-9]{64}\\/?$> [conditional: config.nodeEnv === 'production' [with config.nodeEnv=process.env.NODE_ENV || 'development']]",
-        "STATIC / (clientBuild = path.join(__dirname, '..', 'client', 'dist'), { maxAge: '1y', // Cache hashed assets (/assets/*) for 1 year immutable: true, s…#fe82cc51) [conditional: config.nodeEnv === 'production' [with config.nodeEnv=process.env.NODE_ENV || 'development']]",
+        "STATIC / (clientBuild = path.join(__dirname, '..', 'client', 'dist'), { maxAge: '1y', // Cache hashed assets (/assets/*) for 1 year immutable: true, s…#b5ade038) [conditional: config.nodeEnv === 'production' [with config.nodeEnv=process.env.NODE_ENV || 'development']]",
         "STATIC / (path.join(__dirname, '..', 'client', 'public'), { index: false, maxAge: config.nodeEnv === 'production' ? '1h' : 0, })"
       ]
     },

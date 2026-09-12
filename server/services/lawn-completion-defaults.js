@@ -37,13 +37,32 @@ async function loadLawnCompletionContext(service, knex) {
   const current = currentHistory?.current || null;
   // The turf profile is still customer-owned. Until property templates land,
   // its area/grass can seed only the proven current home, never a second lawn.
-  const propertyMatchesProfile = !!(scope.propertyId && service.address_line1
-    && scope.propertyAddressKey === addressKey(service));
+  // The proof compares the VISIT's address: the plan query joins the
+  // customers row onto the unprefixed address fields, so an appointment
+  // stamped to a second address (service_address_*) must be keyed by that
+  // stamp, not by the account address the sole saved property matches. The
+  // scope resolver already withholds a property under conflicting stamped
+  // evidence; this keeps the direct check honest on its own (Codex #4113 P1).
+  const visitAddress = service.service_address_line1 ? {
+    address_line1: service.service_address_line1, address_line2: service.service_address_line2,
+    city: service.service_address_city, zip: service.service_address_zip,
+  } : service;
+  const propertyMatchesProfile = !!(scope.propertyId && visitAddress.address_line1
+    && scope.propertyAddressKey === addressKey(visitAddress));
   const attempts = await history.assessmentQuery(service.customer_id, knex, { confirmed: false })
     .where('ss.id', service.id).orderBy('la.created_at', 'desc').orderBy('la.id', 'desc');
   const latestAssessment = scope.propertyId ? attempts.find((row) => history.isEligible(row, scope)) || resolvedHistory.previous : null;
   return {
     propertyId: scope.propertyId, propertyMatchesProfile, latestAssessment,
+    // The two keys the proof compared, so the completion transaction can
+    // rebuild them from the LOCKED customer/visit/property rows and abort
+    // when an address edit committed after the plan was built (Codex #4113 P2).
+    addressProof: {
+      // The scope keeps the candidate key after withholding its id; the proof carries a key only for a proven id.
+      propertyId: scope.propertyId, propertyAddressKey: scope.propertyId ? scope.propertyAddressKey : null,
+      visitAddressKey: visitAddress.address_line1 ? addressKey(visitAddress) : null,
+      stamped: !!service.service_address_line1,
+    },
     isLawn: detectServiceLine(service.service_type) === 'lawn',
     history: {
       available: !!scope.propertyId,
@@ -129,9 +148,14 @@ function archivedLawnRecipeMatches(protocol, items) {
     });
 }
 
-function completionItem(item, protocolProduct, amountsAllowed) {
-  const amountAvailable = amountsAllowed && item.product?.labelVerifiedAt
-    && Number(item.mix?.amount) > 0 && !String(item.mix?.amountUnit || '').includes('/');
+// The planned quantity is the tech's starting point whenever the planner
+// produced one (owner ruling 2026-09-11): an unverified label stamp or a plan
+// block (inventory, blackout, budget, approval) no longer withholds it —
+// those still show in the plan banner, and the amount stays the tech's
+// actual to confirm or edit. Only a missing quantity or a per-basis unit
+// ("fl oz/acre" is a concentration, not an applied amount) leaves it blank.
+function completionItem(item, protocolProduct) {
+  const amountAvailable = Number(item.mix?.amount) > 0 && !String(item.mix?.amountUnit || '').includes('/');
   return {
     ...item,
     applicationMethod: completionMethod(item, protocolProduct),
@@ -142,27 +166,61 @@ function completionItem(item, protocolProduct, amountsAllowed) {
       amount: null, amountUnit: String(item.mix?.amountUnit || '').split('/')[0] || null,
       ratePer1000: null, rateUnit: item.mix?.rateUnit || null,
     },
-    amountReason: amountAvailable ? null : 'Enter the actual amount; a verified suggestion is unavailable.',
+    amountReason: amountAvailable ? null : 'Enter the actual amount; a suggested quantity is unavailable.',
   };
+}
+
+// A lawn plan attributes the visit only when a program actually applies: a
+// WaveGuard tier or a COMPLETE explicit appointment assignment (key, version
+// and window). The planner can still resolve an active protocol by grass
+// track for anyone; that resolution must not become a one-time or commercial
+// visit's protocol — and a partial assignment (window only) must not let the
+// matcher's wildcards adopt the calendar-resolved protocol either.
+// An EXPLICIT non-membership billing lane defeats the tier fallback: a
+// customer reclassified to per_visit / one_time can legitimately keep a
+// legacy Bronze–Platinum tier on the row, and billing-lane already rules
+// that such a lane is authoritative over lingering tier fields (a per_visit
+// / one_time customer is never dues-covered). Attribution follows the same
+// classifier so a nonmember visit's applied products are not recorded as
+// seasonal protocol actuals. per_application and annual_prepay are
+// membership lanes; null / inferred keeps the tier rule.
+const NON_PROGRAM_BILLING_MODES = new Set(['per_visit', 'one_time']);
+
+function lawnPlanProgramApplies(plan) {
+  const assigned = plan?.appointmentAssignment || {};
+  const tierApplies = ['Bronze', 'Silver', 'Gold', 'Platinum'].includes(plan?.propertyGate?.serviceTier)
+    && !NON_PROGRAM_BILLING_MODES.has(plan?.propertyGate?.billingMode);
+  return tierApplies || !!(assigned.protocolKey && assigned.protocolVersion && assigned.windowKey);
+}
+
+// The ledger stamps a visit's protocol only when a program applies, the
+// saved turf profile PROVES this service property (the plan's protocol,
+// grass and products come from that profile — another property's profile
+// must not be stamped onto this one), AND the plan the completion built
+// actually resolved that visit's assignment (key / version / window, exact
+// archived version included). With the completion-defaults gates off the
+// planner neither proves the property nor resolves the assignment, so
+// attribution is withheld — the honest record.
+function lawnPlanAttributesVisit(plan) {
+  return lawnPlanProgramApplies(plan)
+    && plan?.propertyGate?.propertyMatchesProfile === true
+    && matchesLawnCompletionProtocol(plan?.protocol?.structured, plan?.appointmentAssignment || {}, plan?.propertyGate?.trackKey);
 }
 
 function buildLawnCompletionDefaults(plan, context) {
   const protocol = plan.protocol.structured;
   const assigned = plan.appointmentAssignment;
-  const programApplies = ['Bronze', 'Silver', 'Gold', 'Platinum'].includes(plan.propertyGate.serviceTier)
-    || !!assigned.windowKey;
+  const programApplies = lawnPlanProgramApplies(plan);
   const protocolMatches = matchesLawnCompletionProtocol(protocol, assigned, plan.propertyGate.trackKey);
   const eligible = context.isLawn && context.propertyMatchesProfile && programApplies && protocolMatches;
-  const amountsAllowed = eligible && plan.propertyGate.blocks.length === 0;
   const products = protocol?.products || [];
   const protocolProductFor = (item) => products.find((row) => row.productId === (item.substitution?.originalProductId || item.product?.id));
   const items = eligible ? plan.mixCalculator.items.filter((item) => {
     const product = protocolProductFor(item);
     // defaultInPlan distinguishes defaults from opt-in rows. Gates can also
-    // carry annual counters or safety metadata on a selected base product;
-    // the planner's blocks still withhold any unavailable suggested quantity.
+    // carry annual counters or safety metadata on a selected base product.
     return item.selected === true && item.product?.active !== false && product?.defaultInPlan;
-  }).map((item) => completionItem(item, protocolProductFor(item), amountsAllowed)) : [];
+  }).map((item) => completionItem(item, protocolProductFor(item))) : [];
   // The planner's recipe comes from the field reference (protocols.json);
   // the defaults list is the owner-edited operating layer. When a live
   // window registers none of the recipe's selected products as defaults,
@@ -192,4 +250,4 @@ function buildLawnCompletionDefaults(plan, context) {
   };
 }
 
-module.exports = { lawnCompletionDefaultsEnabled, loadLawnCompletionContext, buildLawnCompletionDefaults, matchesLawnCompletionProtocol, archivedLawnRecipeMatches };
+module.exports = { lawnCompletionDefaultsEnabled, lawnPlanProgramApplies, lawnPlanAttributesVisit, loadLawnCompletionContext, buildLawnCompletionDefaults, matchesLawnCompletionProtocol, archivedLawnRecipeMatches };

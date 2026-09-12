@@ -119,12 +119,26 @@ function googleMailboxIdentity(normalized) {
   return mailbox ? `${mailbox}@gmail.com` : null;
 }
 
-async function lockCustomerEmail(trx, email) {
+// The keys one address takes: its exact key and, for a Google address, its
+// mailbox-identity key. Every taker acquires keys in one global order
+// (sorted: all `customer-email:` keys before all `customer-mailbox:` keys),
+// so a multi-address writer and a single-address handoff — or two
+// multi-address writers sharing a mailbox — can never wait on each other.
+function customerEmailLockKeys(email) {
   const normalized = String(email || '').trim().toLowerCase();
   if (!normalized) throw new Error('Email authority requires an address');
-  await trx.raw('SELECT pg_advisory_xact_lock(hashtextextended(?, 0))', [`customer-email:${normalized}`]);
   const mailbox = googleMailboxIdentity(normalized);
-  if (mailbox) await trx.raw('SELECT pg_advisory_xact_lock(hashtextextended(?, 0))', [`customer-mailbox:${mailbox}`]);
+  return [`customer-email:${normalized}`, ...(mailbox ? [`customer-mailbox:${mailbox}`] : [])];
+}
+
+async function lockCustomerEmailKeys(trx, keys) {
+  for (const key of [...new Set(keys)].sort()) {
+    await trx.raw('SELECT pg_advisory_xact_lock(hashtextextended(?, 0))', [key]);
+  }
+}
+
+async function lockCustomerEmail(trx, email) {
+  await lockCustomerEmailKeys(trx, customerEmailLockKeys(email));
 }
 
 // Every column a customer's email can be recorded in — the same set the
@@ -134,13 +148,17 @@ async function lockCustomerEmail(trx, email) {
 // established order), in a fixed order so two multi-address writers cannot
 // deadlock on each other. A recovery that found an address unowned then
 // either commits before the assignment or re-judges ownership after it.
-const CUSTOMER_EMAIL_COLUMNS = ['email', 'service_contact_email', 'service_contact2_email', 'service_contact3_email'];
+// billing_email (notification_prefs) is the fourth ownership source the
+// recovery consults; its writers pass their prefs update through here too.
+// Every key of every address is collected first and taken in the one
+// global order (customerEmailLockKeys), never address by address.
+const CUSTOMER_EMAIL_COLUMNS = ['email', 'service_contact_email', 'service_contact2_email', 'service_contact3_email', 'billing_email'];
 async function lockAssignedCustomerEmails(trx, updates = {}) {
   const addresses = [...new Set(CUSTOMER_EMAIL_COLUMNS
     .map((column) => String(updates[column] || '').trim().toLowerCase()).filter(Boolean))].sort();
-  for (const address of addresses) await lockCustomerEmail(trx, address);
+  await lockCustomerEmailKeys(trx, addresses.flatMap(customerEmailLockKeys));
   return addresses;
 }
 
 module.exports = { lockCustomerComms, tryLockCustomerComms, withCustomerCommsLock, lockSmsPhone, withSmsConsentLock, lockCustomerEmail,
-  lockAssignedCustomerEmails, CUSTOMER_EMAIL_COLUMNS };
+  lockAssignedCustomerEmails, customerEmailLockKeys, CUSTOMER_EMAIL_COLUMNS };

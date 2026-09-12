@@ -141,13 +141,18 @@ function namesRequested(prompt, filterWords = null) {
   return references.length > 0;
 }
 
-// Bare "for <word>" is also how schedule and route reads take a place or a
-// technician ("the schedule for Sarasota", "the route for Adam"). A word is a
-// filter only when the database verifies it as a customer city or an active
-// technician's name AND no customer carries it as a first or last name; an
-// unverified or shared word stays a person reference, so a misspelled name
-// still fails closed. The row check repeats the predicate so the verdict comes
-// from the returned rows themselves.
+// Bare "for <word>" is also how schedule, route and analytics reads take a
+// place, a technician, a vendor or a marketing channel ("the schedule for
+// Sarasota", "the route for Adam", "expenses for SiteOne", "attribution for
+// Facebook"). A word is a filter only when the database verifies it as a
+// customer city, an active technician's name, a vendor or expense vendor
+// name, a lead source name or channel, or it is a known marketing channel,
+// AND no customer carries it as a first or last name; an unverified or
+// shared word stays a person reference, so a misspelled name still fails
+// closed. The row checks repeat the predicate so the verdict comes from the
+// returned rows themselves.
+const MARKETING_CHANNEL_WORDS = new Set(['facebook', 'instagram', 'meta', 'google', 'gbp', 'yelp', 'nextdoor', 'tiktok', 'youtube', 'linkedin',
+  'referral', 'referrals', 'website', 'organic', 'seo', 'ppc', 'ads', 'adwords', 'thumbtack', 'angi', 'homeadvisor', 'bing']);
 async function verifiedFilterWords(prompt) {
   const normalized = normalizeName(targetClause(prompt));
   const words = [...new Set([...normalized.matchAll(/\bfor\s+([\p{L}'-]+)\b/gu)].map(m => m[1]))]
@@ -155,14 +160,25 @@ async function verifiedFilterWords(prompt) {
   if (!words.length) return new Set();
   const technicians = await db('technicians').whereRaw('coalesce(active, true)').select('name');
   const technicianWords = new Set(technicians.flatMap(technician => normalizeName(technician.name).split(' ')));
+  const hasWord = (value, word) => normalizeName(value).split(' ').includes(word);
   const filters = new Set();
   for (const word of words) {
-    const rows = await db('customers').whereNull('deleted_at')
-      .whereRaw('? = ? OR ? = ? OR ? = ?', [normalizedStoredName('city'), word, normalizedStoredName('first_name'), word, normalizedStoredName('last_name'), word])
-      .select('first_name', 'last_name', 'city');
+    const pattern = `%${word}%`;
+    const [rows, expenseVendors, vendors, sources] = await Promise.all([
+      db('customers').whereNull('deleted_at')
+        .whereRaw('? = ? OR ? = ? OR ? = ?', [normalizedStoredName('city'), word, normalizedStoredName('first_name'), word, normalizedStoredName('last_name'), word])
+        .select('first_name', 'last_name', 'city'),
+      db('expenses').whereRaw('? LIKE ?', [normalizedStoredName('vendor_name'), pattern]).select('vendor_name').limit(5),
+      db('vendors').whereRaw('? LIKE ?', [normalizedStoredName('name'), pattern]).select('name').limit(5),
+      db('lead_sources').whereRaw('? LIKE ? OR ? LIKE ?', [normalizedStoredName('name'), pattern, normalizedStoredName('channel'), pattern]).select('name', 'channel').limit(5),
+    ]);
     const person = rows.some(row => normalizeName(row.first_name) === word || normalizeName(row.last_name) === word);
-    const city = rows.some(row => normalizeName(row.city) === word);
-    if (!person && (city || technicianWords.has(word))) filters.add(word);
+    const verified = rows.some(row => normalizeName(row.city) === word)
+      || technicianWords.has(word) || MARKETING_CHANNEL_WORDS.has(word)
+      || expenseVendors.some(row => hasWord(row.vendor_name, word))
+      || vendors.some(row => hasWord(row.name, word))
+      || sources.some(row => hasWord(row.name, word) || hasWord(row.channel, word));
+    if (!person && verified) filters.add(word);
   }
   return filters;
 }
@@ -500,28 +516,131 @@ function bulkLeadSelection(toolName, records, params) {
   });
 }
 
-// Writers that act on every stop for a date or technician and carry no record
-// identifiers. A customer-scoped task cannot mint an approval for them: the
-// stored action would have no references for the confirm-time recheck. An
-// explicitly named customer who did not resolve keeps the task customer-scoped
-// (as for the broad readers), so a misspelling never widens a request to a
-// whole date or technician.
-const ROUTE_WIDE_WRITERS = new Set(['optimize_all_routes', 'optimize_tech_route', 'swap_tech_assignments']);
+// Per-tool data scope comes from action-policy.json (see scope-policy.js).
+// A tool whose scope is missing or invalid is refused here as well as by the
+// registry, so no caller can reach an unclassified reader or writer.
+const { validScope, scopeOf, UNCLASSIFIED } = require('./scope-policy');
+
+// A request about one customer: a resolved target, an unresolved name, or a
+// phone/email literal that identifies the customer.
+const customerSpecific = context => Boolean(context.targets?.length || context.namesRequested || context.contactRequested);
+
+// Readers whose appointment selector is not named appointment_id: the
+// closeout readers take service_id and the gap reader tests candidate_service_id
+// (it loads that appointment's customer preferences, plan holds and location).
+const APPOINTMENT_SELECTORS = { get_closeout_status: 'service_id', get_stop_details: 'service_id', find_schedule_gaps: 'candidate_service_id' };
+// Writers whose customer records ride under role-named ids: both halves of a
+// merge are customer records, read as the customer collection (readReferences
+// loads and version-stamps every one). The task must own ONE half directly;
+// the other is admitted only as an eligible duplicate-queue candidate under
+// that exact pairing (see the CUSTOMER_PAIR_SELECTORS use in validateRecordTarget).
+const CUSTOMER_PAIR_SELECTORS = { merge_customers: ['winner_customer_id', 'loser_customer_id'] };
+const customerPairIds = (params, toolName) => (CUSTOMER_PAIR_SELECTORS[toolName] || []).map(key => params[key]).filter(Boolean);
+
+// Address-bound readers (lookup_property, and find_available_slots inside a
+// customer-scoped task) take a model-supplied address. It must be one of the
+// task customers' ACTIVE saved properties (the customer address or a service
+// property), compared as a full address with the estimator's canonical
+// comparer: same street and exact unit, and no conflicting city or ZIP. The
+// reader then receives the saved property's own full address, never the
+// supplied text, so "123 Main St, Tampa" cannot ride a customer saved at
+// "123 Main St, Bradenton" and a bare street line cannot resolve a
+// different parcel on a repeated street name. A saved row with neither city
+// nor ZIP cannot verify any locality (the comparer treats a missing side as
+// compatible), so it never binds; rows carrying both are tried first. Every
+// locality component the supplied text carries (city, state, ZIP) must be
+// present on the saved row and equal to it: the comparer ignores state and
+// a missing side, so "99 Beach Rd, Venice CA" or a ZIP the saved row lacks
+// would otherwise bind and be rewritten to the saved parcel.
+// Returns the saved row's full address and its stored coordinates (null when
+// the row has none).
+function unrecognizedStateSegment(text, parsed, suppliedState, cityKey, normalizeState) {
+  // A trailing country is not a state segment whether or not a comma precedes
+  // it (the parser strips the comma form; "FL 34285 USA" reaches its state
+  // read intact and would otherwise leave "FL USA" here).
+  const parts = text.replace(/[\s,]+(?:u\.?s\.?a?\.?|united states(?: of america)?)\.?\s*$/i, '').split(',').map(part => part.trim()).filter(Boolean);
+  const cityIndex = parts.findIndex(part => cityKey(part) === cityKey(parsed.city));
+  if (parts.length < 3 || cityIndex < 1) return false;
+  const letters = parts.slice(cityIndex + 1).join(' ').replace(/[^a-z\s]/gi, ' ').replace(/\s+/g, ' ').trim();
+  return Boolean(letters) && (!suppliedState || (normalizeState(letters) || '') !== suppliedState);
+}
+
+async function bindSavedAddress(supplied, targets) {
+  const { sameStreetAddress } = require('../estimator-engine/address-compare');
+  const { formatAddress, parseRawAddress, normalizeState } = require('../../utils/address-normalizer');
+  const text = String(supplied || '').trim();
+  if (!text) return null;
+  const parsed = parseRawAddress(text);
+  const cityKey = value => String(value || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+  const zip5 = value => String(value || '').replace(/\D/g, '').slice(0, 5);
+  // A comma-free numbered route or post-directional leaves a bare number or
+  // direction in the parsed city; neither is a locality.
+  const BARE_DIRECTIONAL = new Set(['n', 's', 'e', 'w', 'ne', 'nw', 'se', 'sw', 'north', 'south', 'east', 'west']);
+  const suppliedCity = /[a-z]{2,}/i.test(parsed.city || '') && !BARE_DIRECTIONAL.has(String(parsed.city).toLowerCase()) ? cityKey(parsed.city) : '';
+  const suppliedState = normalizeState(parsed.state || '') || '';
+  const suppliedZip = zip5(parsed.zip);
+  // The parser drops a state segment it cannot recognise ("ZZ", "Ontario"),
+  // which would read as "no state supplied" and let the saved state stand in
+  // for it. Any letters left after the city segment that are not the parsed
+  // state are an unverifiable locality, so the text binds to nothing.
+  if (unrecognizedStateSegment(text, parsed, suppliedState, cityKey, normalizeState)) return null;
+  const localityVerified = row => (!suppliedCity || cityKey(row.city) === suppliedCity)
+    && (!suppliedState || (normalizeState(row.state || '') || '') === suppliedState)
+    && (!suppliedZip || zip5(row.zip) === suppliedZip);
+  const ids = targets.map(target => target.customer_id);
+  const fields = ['address_line1', 'address_line2', 'city', 'state', 'zip', 'latitude', 'longitude'];
+  const [customers, properties] = await Promise.all([
+    db('customers').whereIn('id', ids).whereNull('deleted_at').select(fields),
+    db('customer_properties').whereIn('customer_id', ids).where('active', true).select(fields),
+  ]);
+  const coordinate = value => (value == null || value === '' || Number.isNaN(Number(value)) ? null : Number(value));
+  const present = value => Boolean(String(value || '').trim());
+  const saved = [...customers, ...properties]
+    .filter(row => present(row.address_line1) && (present(row.city) || present(row.zip)))
+    .sort((a, b) => Number(present(b.city) && present(b.zip)) - Number(present(a.city) && present(a.zip)))
+    .map(row => ({
+      row,
+      address: formatAddress({ line1: row.address_line1, line2: row.address_line2, city: row.city, state: row.state, zip: row.zip }),
+      lat: coordinate(row.latitude), lng: coordinate(row.longitude),
+    }));
+  // A bare street line that matches two different saved parcels (the same
+  // street and unit in two cities) names neither; the caller must supply the
+  // locality. Duplicate rows for one parcel (customer row + property row)
+  // are one match.
+  const matches = saved.filter(({ row, address }) => localityVerified(row) && sameStreetAddress(text, address, { requireExactUnit: true }));
+  const { addressKey } = require('../customer-properties');
+  const parcels = new Set(matches.map(({ row }) => addressKey(row)));
+  const match = parcels.size === 1 ? matches[0] : null;
+  return match ? { address: match.address, lat: match.lat, lng: match.lng } : null;
+}
 
 async function validateRecordTarget(params, context = {}, { toolName, forApproval = false } = {}) {
   // A refused cohort or unresolved name stops here too; explicit record IDs
   // inside "both appointment A and appointment B" do not reopen it.
   if (context.ambiguous) return { error: 'Name one customer for this action', code: 'target_clarification_required' };
+  // Every caller names the tool; a call without one has no reviewed scope
+  // and is refused like an unclassified tool rather than admitted.
+  const scope = scopeOf(toolName);
+  if (!scope) return UNCLASSIFIED;
   const policy = require('./action-policy.json')[toolName];
-  if ((context.targets?.length || context.namesRequested) && ROUTE_WIDE_WRITERS.has(toolName)) {
+  // Route-wide writers act on every stop for a date or technician and carry no
+  // record identifiers. A customer-scoped task cannot mint an approval for
+  // them: the stored action would have no references for the confirm-time
+  // recheck. An explicitly named customer who did not resolve keeps the task
+  // customer-scoped (as for the broad readers), so a misspelling never widens
+  // a request to a whole date or technician.
+  if (scope === 'route_wide' && customerSpecific(context)) {
     return { error: 'This action changes every stop for the date or technician. Run it from a request that does not name a customer, or move that customer\'s own stops by id.', code: 'customer_scope_required' };
   }
-  if (policy && policy.kind !== 'read' && [['customer_name', 'customer_id'], ['lead_name', 'lead_id']].some(([name, id]) => params[name] && !params[id])) {
+  if (policy.kind !== 'read' && [['customer_name', 'customer_id'], ['lead_name', 'lead_id']].some(([name, id]) => params[name] && !params[id])) {
     return { error: 'Resolve the named target to its canonical record identifier before proposing this action', code: 'target_clarification_required' };
   }
   const references = { ...params };
-  if (['get_closeout_status', 'get_stop_details'].includes(toolName) && params.service_id) references.appointment_id = params.service_id;
+  const appointmentSelector = params[APPOINTMENT_SELECTORS[toolName]];
+  if (appointmentSelector) references.appointment_id = appointmentSelector;
   if (params.estimate_identifier) references.estimate_id = params.estimate_identifier;
+  const pair = customerPairIds(params, toolName);
+  if (pair.length) references.customer_ids = [...(Array.isArray(params.customer_ids) ? params.customer_ids : []), ...pair];
   const resolved = await readReferences(references);
   if (resolved.error) return resolved;
   const { records } = resolved;
@@ -553,6 +672,26 @@ async function validateRecordTarget(params, context = {}, { toolName, forApprova
       if (record.kind === 'email_id' && context.explicitEmails?.includes(normalizeEmail(record.from_address))) permitted.add(record.customer_id);
     }
   }
+  // Pair authority: the task establishes at most ONE customer target, so a
+  // merge naming a duplicate pair otherwise always fails missingTarget below
+  // — the operator's task could equally be on the stub page (the loser) or
+  // the real customer's page (the winner). Admit the OTHER half only when it
+  // is a live, eligible duplicate-queue candidate under this EXACT
+  // winner/loser pairing — the canonical check customer-dedupe.js owns
+  // (never re-derived here). Neither permitted, or the pair ineligible: the
+  // missingTarget refusal below stands unchanged.
+  const pairSelectors = CUSTOMER_PAIR_SELECTORS[toolName];
+  if (pairSelectors) {
+    // Canonical lowercase (codex #4348 r5 P2): task targets and record ids
+    // are stored lowercase; an uppercase-but-valid UUID pair must reach the
+    // eligibility check, not fall through to missingTarget.
+    const [winnerId, loserId] = pairSelectors.map(key => (params[key] ? String(params[key]).trim().toLowerCase() : params[key]));
+    if (winnerId && loserId && permitted.has(winnerId) !== permitted.has(loserId)) {
+      const { duplicatePairEligibility } = require('../customer-dedupe');
+      const eligibility = await duplicatePairEligibility(winnerId, loserId);
+      if (eligibility.eligible) permitted.add(permitted.has(winnerId) ? loserId : winnerId);
+    }
+  }
   const missingTarget = customerIds(records).some(id => !permitted.has(id));
   const unlinkedTarget = (await Promise.all(records.map(r => unlinkedRecordIsReferenced(r, context)))).some(allowed => !allowed);
   if (missingTarget || unlinkedTarget) return {
@@ -572,118 +711,148 @@ async function validateRecordTarget(params, context = {}, { toolName, forApprova
 // Resolve name/phone selectors to one of the task's known customers, then pass
 // the immutable ID to existing readers. Broad searches without a selector stay
 // broad. No fuzzy result or model-selected alternate contact becomes authority.
-// Readers that list customer rows (names, phones, addresses, balances,
-// message bodies) without a customer selector and without consuming the
-// task's read scope. Inside a customer-scoped task they would hand every
-// matching customer to the model, so they are refused there; the scoped
-// readers (query_customers, query_leads, get_schedule_view, search_emails …)
-// remain available for the task customer.
-const BROAD_CUSTOMER_ROW_READERS = new Set([
-  'get_csr_overview', 'get_unanswered_threads', 'list_call_partners',
-  'find_duplicates', 'find_overdue_customers', 'get_recent_completions',
-  'get_day_summary', 'get_zone_density', 'cancel_and_reschedule_far_out',
-  'get_outreach_candidates', 'get_unresponded_reviews', 'search_reviews',
-  'get_top_revenue_customers', 'get_outstanding_balances', 'get_ar_aging', 'get_inbox_summary',
-  'get_churn_analysis', 'get_revenue_breakdown', 'get_today_briefing', 'get_stock_movements', 'find_similar_estimates',
-  'get_email_suppressions', 'get_twilio_failed_messages', 'get_stripe_payment_intents', 'get_payer_ar_aging', 'get_blocked_senders',
-  'get_my_route', 'get_payout_details', 'export_payouts',
-  // The open-closeout sweep walks every completed visit of the day and
-  // returns other customers' ids and closeout facts; it takes no selector.
-  'list_open_closeouts',
-]);
+// The read scope classes are defined once, in scope-policy.js; the guards
+// below enforce them. A customer selector or a record identifier is checked
+// against the task's authority further down, so only a selector-free call is
+// broad. `service_id` is the closeout readers' appointment identifier and
+// `candidate_service_id` the gap reader's (both mapped in validateRecordTarget).
+const hasRecordReference = params => Object.keys(RECORDS).some(kind => params[kind] || params[ALIASES[kind]] || params[COLLECTIONS[kind]]);
+const hasOwnSelector = params => Boolean(params.customer_id || params.customer_name || params.phone || params.service_id || params.candidate_service_id)
+  || hasRecordReference(params);
+// Record readers whose selector-free mode reads no customer-identifying rows:
+// the gap reader without a candidate returns per-technician minute budgets
+// only (the executor strips appointment ids). Such a call has nothing to
+// inherit from the task customer, so an unresolved name does not close it.
+const SELECTOR_FREE_READS_NO_CUSTOMER_ROWS = new Set(['find_schedule_gaps']);
 
-// Readers that confine themselves to the task's read scope (readCustomerIds).
-// That scope is empty when an explicitly named customer did not resolve, so
-// they would read every customer's rows; they fail closed until it resolves.
-// Readers with an optional customer selector fail closed the same way when
-// the model supplies no selector at all (see hasOwnSelector).
-const SCOPED_CUSTOMER_ROW_READERS = new Set(['query_customers', 'query_leads', 'get_stale_leads', 'get_schedule_view',
-  'search_emails', 'get_email_thread', 'draft_email_reply', 'match_existing_customer']);
-// A customer selector or a record identifier: either one is checked against
-// the task's authority further down, so only a selector-free call is broad.
-const hasOwnSelector = params => Boolean(params.customer_id || params.customer_name || params.phone)
-  || Object.keys(RECORDS).some(kind => params[kind] || params[ALIASES[kind]] || params[COLLECTIONS[kind]]);
+// Scope admission for a read inside a customer-specific request. A request
+// about one customer — a resolved target, an unresolved name, or a
+// phone/email literal that identifies the customer — never widens into a
+// reader that lists every customer; one whose customer did not resolve gives
+// the scoped readers an empty read scope, the record readers no customer to
+// inherit, and the keyed readers nobody to bind their key to. A scoped
+// reader that names a record (an email id for a reply draft) reaches
+// validateRecordTarget instead, where the explicitly addressed sender's
+// unique unlinked thread is the only thing that admits it; a name or phone
+// selector does not reopen a scoped reader.
+const SCOPE_REFUSALS = {
+  broad: 'This lookup lists every customer. Inside a task for a specific customer, use a reader that takes the task customer (customer detail, scoped customer, lead, schedule or email searches).',
+  actor_wide: 'Past-conversation search returns verbatim exchanges about any customer and cannot be limited to the task customer, so it is unavailable inside a task for a specific customer.',
+};
+function readScopeRefusal(scope, params, context, { toolName, schema }) {
+  if (!customerSpecific(context)) return null;
+  if (SCOPE_REFUSALS[scope]) return { error: SCOPE_REFUSALS[scope], code: 'customer_scope_required' };
+  if (context.targets?.length || SELECTOR_FREE_READS_NO_CUSTOMER_ROWS.has(toolName)) return null;
+  if (['phone_keyed', 'email_keyed', 'address_keyed'].includes(scope)) {
+    return { error: 'The named customer did not match anyone on file, so this lookup has no customer to verify its phone, email or address against. Correct the name before reading by contact or address.', code: 'customer_scope_required' };
+  }
+  const selectorFree = scope === 'scoped' ? !hasRecordReference(params) : (scope === 'record' || schema.properties?.customer_id) && !hasOwnSelector(params);
+  return selectorFree ? { error: 'The named customer or contact did not match anyone on file, so this lookup has no customer scope. Correct the name or contact before reading that customer\'s records.', code: 'customer_scope_required' } : null;
+}
 
-// The operator's own past conversations quote every customer verbatim, and a
-// stored thread carries no customer association to filter on, so the search
-// is refused inside a customer-scoped task rather than narrowed.
-const ACTOR_WIDE_READERS = new Set(['search_ib_history']);
+// Keyed readers without a customer selector: the phone or email must belong
+// to a task customer, so a model-supplied key cannot read another party's
+// call history or suppression state.
+const KEYED_READERS = {
+  phone_keyed: { field: 'phone', column: 'phone', key: value => String(value || '').replace(/\D/g, '').slice(-10), error: 'Use the task customer\'s own phone number for this call history' },
+  email_keyed: { field: 'email', column: 'email', key: normalizeEmail, error: 'Use the task customer\'s own email address for this suppression check' },
+};
+async function keyedOwnerRefusal(scope, params, context) {
+  const keyed = KEYED_READERS[scope];
+  if (!keyed) return null;
+  const supplied = keyed.key(params[keyed.field]);
+  const owners = await db('customers').whereIn('id', context.targets.map(target => target.customer_id)).whereNull('deleted_at').select(keyed.column);
+  return supplied && owners.some(owner => keyed.key(owner[keyed.column]) === supplied) ? null : { error: keyed.error, code: 'target_clarification_required' };
+}
 
-const PHONE_KEYED_READERS = new Set(['get_partner_call_history']);
-const EMAIL_KEYED_READERS = new Set(['check_email_suppression']);
+// Address-bound readers inside a customer-scoped task. lookup_property's
+// address must be one of the task customers' own active saved addresses and
+// the reader receives that saved address, so a substituted or partial address
+// cannot expose or price another property. The slot finder's destination is
+// the task customer: supplied coordinates are dropped (the reader resolves
+// the customer's own) and a supplied address is bound the same way, carrying
+// that property's stored coordinates so a secondary property is searched
+// around itself rather than the primary address. Otherwise the neighbouring
+// stops it returns would describe whatever location the model chose.
+async function bindReadAddress(scope, params, input, context, toolName) {
+  const slotSearch = toolName === 'find_available_slots';
+  if (slotSearch) {
+    delete input.lat;
+    delete input.lng;
+  }
+  if (scope !== 'address_keyed' && !(slotSearch && params.address !== undefined)) return null;
+  const bound = await bindSavedAddress(params.address, context.targets);
+  if (!bound) {
+    return { error: slotSearch ? 'Use the task customer\'s own saved address as the slot-search destination' : 'Use the task customer\'s own saved address for this property lookup', code: 'target_clarification_required' };
+  }
+  input.address = bound.address;
+  if (slotSearch && bound.lat != null && bound.lng != null) Object.assign(input, { lat: bound.lat, lng: bound.lng });
+  return null;
+}
+
+// Resolve a name or phone selector to one of the task's known customers and
+// pass the immutable id to the reader. A current-request phone may establish
+// a unique read target only: it stays out of the task's write authority and
+// a model substitute is never accepted.
+// The single selected customer must carry the supplied phone and match any
+// supplied id; anything else is a substitute the task never authorised.
+function selectorMismatch(customer, params, digits) {
+  if (!customer) return true;
+  if (params.phone && digits(customer.phone) !== digits(params.phone)) return true;
+  return Boolean(params.customer_id) && String(params.customer_id).toLowerCase() !== customer.id;
+}
+
+async function resolveCustomerSelector(params, input, context, schema) {
+  const digits = value => String(value || '').replace(/\D/g, '').slice(-10);
+  const permitted = new Set(context.targets.map(target => target.customer_id));
+  const named = params.customer_name ? await namedCustomers(`for ${params.customer_name}`) : null;
+  if (named?.complete === false) return { error: 'The customer name lookup is incomplete. Select the task customer by identifier.', code: 'target_clarification_required' };
+  const matches = named ? named.matches : await db('customers').whereNull('deleted_at')
+    .whereRaw("RIGHT(REGEXP_REPLACE(phone, '[^0-9]', '', 'g'), 10) = ?", [digits(params.phone)])
+    .select(CUSTOMER_FIELDS);
+  const explicitRead = !permitted.size && params.phone && !params.customer_name && context.explicitReadPhones?.includes(digits(params.phone));
+  const selected = explicitRead ? matches : matches.filter(customer => permitted.has(customer.id));
+  const customer = selected.length === 1 ? await customerById(selected[0].id) : null;
+  if (selectorMismatch(customer, params, digits)) return { error: 'Use the resolved task customer for this record lookup', code: 'target_clarification_required' };
+  input.customer_id = customer.id;
+  delete input.customer_name;
+  if (params.phone && schema.properties.phone && customer.phone) input.phone = customer.phone;
+  else delete input.phone;
+  return { readContext: explicitRead ? { ...context, targets: [customerTarget(customer, 'current_request_read_lookup')] } : context };
+}
+
+// A selector-free reader that takes customer_id inherits the single task
+// customer; two task customers need an explicit choice.
+function inheritTaskCustomer(input, context, schema) {
+  if (!schema.properties?.customer_id || input.customer_id || !context.targets?.length) return null;
+  if (context.targets.length !== 1) return { error: 'Select one of the task customers for this record lookup', code: 'target_clarification_required' };
+  input.customer_id = context.targets[0].customer_id;
+  return null;
+}
 
 async function prepareReadInput(params, context, { toolName, schema }) {
   // A refused cohort never widens into an unscoped read; an unresolved
-  // explicit name is handled by the scope guards below, which still admit a
+  // explicit name is handled by readScopeRefusal, which still admits a
   // reader that carries its own selector or record identifier.
   if (context.ambiguous) return { error: 'Name one customer for this record lookup', code: 'target_clarification_required' };
+  const policy = require('./action-policy.json')[toolName];
+  const scope = validScope(policy) ? policy.scope : null;
+  if (!scope) return UNCLASSIFIED;
+  const refused = readScopeRefusal(scope, params, context, { toolName, schema });
+  if (refused) return refused;
   const input = { ...params };
-  // A request about one customer — a resolved target, an unresolved name, or
-  // a phone/email literal that identifies the customer — never widens into
-  // a reader that lists every customer.
-  const customerSpecific = Boolean(context.targets?.length || context.namesRequested || context.contactRequested);
-  if (customerSpecific && BROAD_CUSTOMER_ROW_READERS.has(toolName)) {
-    return { error: 'This lookup lists every customer. Inside a task for a specific customer, use a reader that takes the task customer (customer detail, scoped customer, lead, schedule or email searches).', code: 'customer_scope_required' };
-  }
-  if (customerSpecific && ACTOR_WIDE_READERS.has(toolName)) {
-    return { error: 'Past-conversation search returns verbatim exchanges about any customer and cannot be limited to the task customer, so it is unavailable inside a task for a specific customer.', code: 'customer_scope_required' };
-  }
-  if (context.namesRequested && !context.targets?.length
-    && (SCOPED_CUSTOMER_ROW_READERS.has(toolName) || (schema.properties?.customer_id && !hasOwnSelector(params)))) {
-    return { error: 'The named customer did not match anyone on file, so this lookup has no customer scope. Correct the name before reading that customer\'s records.', code: 'customer_scope_required' };
-  }
-  // Keyed readers bind their phone or email to a task customer. A request
-  // about a customer who did not resolve has nobody to bind the key to, so a
-  // model-supplied key cannot read another party's history or suppression.
-  if (customerSpecific && !context.targets?.length && (PHONE_KEYED_READERS.has(toolName) || EMAIL_KEYED_READERS.has(toolName))) {
-    return { error: 'The named customer did not match anyone on file, so this lookup has no customer to verify its phone or email against. Correct the name before reading by contact.', code: 'customer_scope_required' };
-  }
-  // Phone-keyed readers without a customer selector: the phone must belong to
-  // a task customer, so a model-supplied number cannot read another party.
-  if (context.targets?.length && PHONE_KEYED_READERS.has(toolName)) {
-    const digits = String(params.phone || '').replace(/\D/g, '').slice(-10);
-    const owners = await db('customers').whereIn('id', context.targets.map(target => target.customer_id)).whereNull('deleted_at').select('phone');
-    if (!digits || !owners.some(owner => String(owner.phone || '').replace(/\D/g, '').slice(-10) === digits)) {
-      return { error: 'Use the task customer\'s own phone number for this call history', code: 'target_clarification_required' };
-    }
-  }
-  if (context.targets?.length && EMAIL_KEYED_READERS.has(toolName)) {
-    const email = String(params.email || '').trim().toLowerCase();
-    const owners = await db('customers').whereIn('id', context.targets.map(target => target.customer_id)).whereNull('deleted_at').select('email');
-    if (!email || !owners.some(owner => String(owner.email || '').trim().toLowerCase() === email)) {
-      return { error: 'Use the task customer\'s own email address for this suppression check', code: 'target_clarification_required' };
-    }
+  if (context.targets?.length) {
+    const bound = await keyedOwnerRefusal(scope, params, context) || await bindReadAddress(scope, params, input, context, toolName);
+    if (bound) return bound;
   }
   let readContext = context;
   if (schema.properties?.customer_id && (params.customer_name || params.phone)) {
-    const permitted = new Set(context.targets.map(target => target.customer_id));
-    const named = params.customer_name ? await namedCustomers(`for ${params.customer_name}`) : null;
-    if (named?.complete === false) return { error: 'The customer name lookup is incomplete. Select the task customer by identifier.', code: 'target_clarification_required' };
-    const matches = named ? named.matches : await db('customers').whereNull('deleted_at')
-        .whereRaw("RIGHT(REGEXP_REPLACE(phone, '[^0-9]', '', 'g'), 10) = ?", [String(params.phone).replace(/\D/g, '').slice(-10)])
-        .select(CUSTOMER_FIELDS);
-    // A current-request phone may establish a unique read target only. Keep
-    // it out of the task's write authority and never accept a model substitute.
-    const explicitRead = !permitted.size && params.phone && !params.customer_name
-      && context.explicitReadPhones?.includes(String(params.phone).replace(/\D/g, '').slice(-10));
-    const selected = explicitRead ? matches : matches.filter(customer => permitted.has(customer.id));
-    const customer = selected.length === 1 ? await customerById(selected[0].id) : null;
-    const phoneMatches = !params.phone || (customer && String(customer.phone || '').replace(/\D/g, '').slice(-10) === String(params.phone).replace(/\D/g, '').slice(-10));
-    if (!customer || !phoneMatches || (params.customer_id && String(params.customer_id).toLowerCase() !== customer.id)) {
-      return { error: 'Use the resolved task customer for this record lookup', code: 'target_clarification_required' };
-    }
-    input.customer_id = customer.id;
-    if (explicitRead) readContext = { ...context, targets: [customerTarget(customer, 'current_request_read_lookup')] };
-    delete input.customer_name;
-    if (params.phone && schema.properties.phone && customer.phone) input.phone = customer.phone;
-    else delete input.phone;
+    const resolved = await resolveCustomerSelector(params, input, context, schema);
+    if (resolved.error) return resolved;
+    readContext = resolved.readContext;
   }
-  if (schema.properties?.customer_id && !input.customer_id && context.targets?.length) {
-    if (context.targets.length !== 1) {
-      return { error: 'Select one of the task customers for this record lookup', code: 'target_clarification_required' };
-    }
-    input.customer_id = context.targets[0].customer_id;
-  }
+  const inherited = inheritTaskCustomer(input, context, schema);
+  if (inherited) return inherited;
   const invalid = await validateRecordTarget(input, readContext, { toolName });
   return invalid || { input };
 }
@@ -704,4 +873,4 @@ async function validateSenderBlock(params, context) {
   return null;
 }
 
-module.exports = { UUID_RE, BROAD_CUSTOMER_ROW_READERS, pageIds, resolve, validateRecordTarget, validateSenderBlock, prepareReadInput, customerById, customerTarget, namedCustomers, namesRequested, bulkLeadSelection };
+module.exports = { UUID_RE, pageIds, targetClause, resolve, validateRecordTarget, validateSenderBlock, prepareReadInput, customerById, customerTarget, namedCustomers, namesRequested, bulkLeadSelection };

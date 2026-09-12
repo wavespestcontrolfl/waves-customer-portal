@@ -134,6 +134,7 @@ export default function EmailComposer({ active, editor, onSent }) {
             <Textarea rows={8} value={composeForm.body} onChange={(event) => setComposeForm((form) => ({ ...form, body: event.target.value }))} />
           </Field>
           {!composeSending && <EmailSendOutcome attempt={editor.sendAttempts.compose} onResolve={outcome => editor.reconcileSend("compose", outcome)} />}
+          {editor.sendFeedback.compose && <ActionFeedback error={editor.sendFeedback.compose.error}>{editor.sendFeedback.compose.message}</ActionFeedback>}
           <ActionFeedback error={storageError}>{recoveryNotice}</ActionFeedback>
           <EmailQuickLinks active={visible} recipient={composeForm.to} disabled={composeSending}
             onInsert={(link) => setComposeForm((form) => ({ ...form, body: appendStaticLinkClause(form.body, link) }))} />

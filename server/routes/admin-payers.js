@@ -189,7 +189,7 @@ router.post('/:id/statements/:statementId/close', async (req, res, next) => {
       // dedupes on the base key instead of going keyless.
       const freshClose = frozen?.status === 'finalized' && !frozen?.sent_at;
       delivery = freshClose
-        ? await sendStatementEmail(statement.id, { dryRun: !!req.body?.dryRun, firstDelivery: true })
+        ? await sendStatementEmail(statement.id, { dryRun: !!req.body?.dryRun, firstDelivery: true, actorTechnicianId: req.technicianId || null, actorRole: req.techRole || null })
         : { ok: true, skipped: 'already_delivered', status: frozen?.status };
     }
     // Log the ACTUAL send outcome — a failed AP delivery must not read as sent.
@@ -227,7 +227,7 @@ router.post('/:id/statements/:statementId/send', async (req, res, next) => {
     if (!statement) return res.status(404).json({ error: 'Statement not found' });
     if (statement.status === 'open') return res.status(409).json({ error: 'Statement must be closed before sending' });
 
-    const delivery = await sendStatementEmail(statement.id, { dryRun: !!req.body?.dryRun, forceResend: !!req.body?.force });
+    const delivery = await sendStatementEmail(statement.id, { dryRun: !!req.body?.dryRun, forceResend: !!req.body?.force, actorTechnicianId: req.technicianId || null, actorRole: req.techRole || null });
     if (!delivery.ok) return res.status(422).json({ error: delivery.error || 'send_failed', delivery });
     res.json({ delivery });
   } catch (err) {
@@ -297,6 +297,10 @@ router.post('/:id/statements/:statementId/reconcile', async (req, res, next) => 
       }, { database: trx, allowedStatuses: PAYABLE_STATEMENT_STATUSES });
     });
 
+    // Settled → every linked child invoice is paid: close out their open
+    // visits, AFTER the money transaction committed (the closeout takes its
+    // own row locks; GitHub r9 P1 #4127). Best-effort by contract.
+    await require('../services/invoice-issued-closeout').closeOutVisitsForStatement(owned.id, { trigger: 'paid', actorTechnicianId: req.technicianId || null, actorRole: req.techRole || null });
     // Paid offline → stop dunning (best-effort, outside the settle txn; the
     // eligibility filter already excludes `paid`, so this is just hygiene).
     await StatementFollowups.stopOnStatementSettled(owned.id)

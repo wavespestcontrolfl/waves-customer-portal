@@ -15,7 +15,7 @@ const stripeConfig = require('../config/stripe-config');
 const { generateInvoicePDF } = require('../services/pdf/invoice-pdf');
 const ConsentService = require('../services/payment-method-consents');
 const logger = require('../services/logger');
-const { assertInvoiceCollectible, isInvoiceCollectibleStatus, invoiceAmountDue } = require('../services/invoice-helpers');
+const { assertInvoiceCollectible, assertInvoiceNotWithdrawnFromCustomer, invoiceWithdrawnFromCustomer, isInvoiceCollectibleStatus, invoiceAmountDue } = require('../services/invoice-helpers');
 const ReceiptDeliveryQueue = require('../services/receipt-delivery-queue');
 const BillPaymentErrorAlerts = require('../services/bill-payment-error-alerts');
 const { shouldSkipClientPaymentErrorAlert, manualPayOptionsFromEnv } = require('./pay-v2-helpers');
@@ -381,7 +381,12 @@ router.get('/:token', async (req, res, next) => {
     // the COMBINED total but a transfer + record-payment settles only the
     // anchor — the siblings would stay open while the customer believes
     // they paid "Total due today". No manual tenders whenever siblings ride.
-    let manualPayOptions = isInvoiceCollectibleStatus(data.status) && !getSaveRequired && !creditWillCoverAnchor && !previousBalance
+    // …nor on a WITHDRAWN packet invoice (codex r25 P1): the guarded POST
+    // routes can refuse a card, but a Zelle/Venmo/PayPal transfer happens
+    // entirely off-platform — advertising an amount here is the one collection
+    // rail this application cannot claw back. Collectibility is not a property
+    // of `status` alone for these rows, so the status-only read is not enough.
+    let manualPayOptions = isInvoiceCollectibleStatus(data.status) && !invoiceWithdrawnFromCustomer(data) && !getSaveRequired && !creditWillCoverAnchor && !previousBalance
       ? manualPayOptionsFromEnv()
       : null;
     if (manualPayOptions) {
@@ -600,7 +605,7 @@ router.post('/:token/setup', async (req, res, next) => {
     // while an off-session charge is active or awaiting reconciliation.
     if (await rejectIfSavedCardCollectionPending(invoice, res)) return;
     try {
-      assertInvoiceCollectible(invoice.status);
+      assertInvoiceCollectible(invoice);
     } catch (err) {
       // The invoice already flipped to `processing` — an ACH debit in flight.
       // This is the same benign in-progress state as the createInvoicePaymentIntent
@@ -755,7 +760,7 @@ router.post('/:token/update-amount', async (req, res, next) => {
     // invoice, not only the route that creates new PIs.
     if (await rejectIfSavedCardCollectionPending(invoice, res)) return;
     try {
-      assertInvoiceCollectible(invoice.status);
+      assertInvoiceCollectible(invoice);
     } catch (err) {
       return res.status(invoice.status === 'processing' ? 409 : 400).json({ error: err.message });
     }
@@ -814,7 +819,7 @@ router.post('/:token/quote', async (req, res, next) => {
     }
     if (await rejectIfSavedCardCollectionPending(invoice, res)) return;
     try {
-      assertInvoiceCollectible(invoice.status);
+      assertInvoiceCollectible(invoice);
     } catch (err) {
       return res.status(invoice.status === 'processing' ? 409 : 400).json({ error: err.message });
     }
@@ -852,7 +857,7 @@ router.post('/:token/finalize', async (req, res, next) => {
     }
     if (await rejectIfSavedCardCollectionPending(invoice, res)) return;
     try {
-      assertInvoiceCollectible(invoice.status);
+      assertInvoiceCollectible(invoice);
     } catch (err) {
       return res.status(invoice.status === 'processing' ? 409 : 400).json({ error: err.message });
     }
@@ -902,13 +907,27 @@ router.post('/:token/confirm', async (req, res, next) => {
     if (await rejectIfSavedCardCollectionPending(invoice, res)) return;
     if (['void', 'refunded', 'canceled', 'cancelled'].includes(String(invoice.status || '').toLowerCase())) {
       try {
-        assertInvoiceCollectible(invoice.status);
+        assertInvoiceCollectible(invoice);
       } catch (err) {
         return res.status(400).json({ error: err.message });
       }
     }
     if (invoice.status === 'paid') return res.status(400).json({ error: 'Invoice already paid' });
     if (invoice.status === 'prepaid') return res.status(400).json({ error: 'Invoice is already prepaid' });
+    // UNCONDITIONAL (codex r25 P1): the assertion above runs only for the
+    // terminal statuses, and a withdrawn invoice is by construction not one of
+    // them — it keeps `sent`/`viewed`/`overdue` so the homeowner's existing
+    // link stays resolvable. Making assertInvoiceCollectible row-aware
+    // therefore did nothing here, and a PaymentIntent minted before Bill-To
+    // moved could still settle customer funds against payer-owned debt.
+    // Checked after the paid/prepaid replies so a settled row keeps reporting
+    // its own reason (and confirmInvoicePayment keeps returning the recorded
+    // payment for a replayed PI).
+    try {
+      assertInvoiceNotWithdrawnFromCustomer(invoice);
+    } catch (err) {
+      return res.status(400).json({ error: err.message });
+    }
     if (invoice.stripe_payment_intent_id
       && String(invoice.stripe_payment_intent_id) !== String(paymentIntentId)) {
       return res.status(409).json({ error: 'Invoice has a different active payment' });

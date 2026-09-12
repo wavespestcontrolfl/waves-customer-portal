@@ -258,9 +258,18 @@ async function switchAppointmentProperty(input, actionContext) {
     void refreshAppointmentAddressBriefs(db, result.updated_service_ids).catch(err => {
       logger.error(`[intelligence-bar] address brief refresh failed: ${err.message}`);
     });
-    const { emitDispatchJobUpdate } = require('../dispatch-assignment');
+    const { emitDispatchJobUpdate, flushDispatchQualityDates } = require('../dispatch-assignment');
+    // A property switch restamps every future appointment at once. Each one
+    // changes where its route goes, so the dates need remeasuring — but as a
+    // single pass, not one concurrent route scan per row (codex #4295 r1 P2).
+    const qualityDates = new Set();
     const broadcasts = await Promise.allSettled(result.updated_service_ids.map(jobId =>
-      emitDispatchJobUpdate({ jobId, actorId: actionContext.technicianId })));
+      emitDispatchJobUpdate({ jobId, actorId: actionContext.technicianId, qualityDates })));
+    try {
+      await flushDispatchQualityDates(qualityDates);
+    } catch (err) {
+      logger.error(`[intelligence-bar] route quality refresh failed: ${err.message}`);
+    }
     if (broadcasts.some(item => item.status === 'rejected')) {
       logger.warn('[intelligence-bar] address saved but dispatch refresh broadcast failed');
       result.warning = 'Address saved. Live refresh failed; refresh the technician schedule to see the new destination.';
@@ -326,6 +335,14 @@ async function applyApprovedRouteOrder({ date, approvedIds, services, lockKeys, 
     }
     if (e.code === 'STALE_OPTIMIZE') return { error: 'Schedule changed while optimizing — please retry' };
     throw e;
+  }
+  // A manual reorder writes route_order directly, outside the batched
+  // dispatch/rebooker paths — without this the day's card stays stale
+  // after an operator applies the approved plan (codex #4295 r2 P2).
+  try {
+    await require('../scheduling/quality-after-change').refreshScheduleQualityAfterChange({ dates: [date] });
+  } catch (e) {
+    logger.error(`[intelligence-bar:schedule] route quality refresh failed for ${date}: ${e.message}`);
   }
   logger.info(`[intelligence-bar:schedule] Applied approved route order for ${date}: ${approvedIds.length} stops`);
   return {
@@ -1525,9 +1542,27 @@ async function swapTechAssignments(input, actionContext = {}) {
 }
 
 
+// The measurement result is shared with the route-performance ledger, which
+// needs every planned stop's id. The Intelligence Bar does not: inside a
+// task about one customer the other stops on the route are other customers'
+// appointments, so their ids and arrival windows are reduced to counts, the
+// diagnostic id lists (missing coordinates, default durations) become
+// counts, and the late-visit rows lose their ids before the model sees them.
+function withoutStopIdentifiers(result) {
+  if (!Array.isArray(result?.days)) return result;
+  const count = list => (Array.isArray(list) ? list.length : null);
+  return { ...result, days: result.days.map(day => ({ ...day, byTech: (day.byTech || []).map(({ plannedStops, modeledLateVisits, missingCoordinates, defaultDurations, ...tech }) => ({
+    ...tech,
+    plannedStopCount: count(plannedStops),
+    missingCoordinateCount: count(missingCoordinates),
+    defaultDurationCount: count(defaultDurations),
+    modeledLateVisits: Array.isArray(modeledLateVisits) ? modeledLateVisits.map(({ id, visitId, ...late }) => late) : modeledLateVisits,
+  })) })) };
+}
+
 async function findScheduleGaps(input) {
   if (require('../../config/feature-gates').gateEnvValue('GATE_SCHEDULE_QUALITY_MEASUREMENTS')) {
-    return require('../scheduling/day-quality').getScheduleQualityMeasurements(input, db);
+    return withoutStopIdentifiers(await require('../scheduling/day-quality').getScheduleQualityMeasurements(input, db));
   }
   const { date, date_from, date_to, service_type } = input;
   const MAX_STOPS_PER_DAY = 10;
@@ -1722,8 +1757,11 @@ async function findAvailableSlotsTool(input) {
   const { findAvailableSlots } = require('../scheduling/find-time');
   let { customer_id, address, lat, lng, duration_minutes, date_from, date_to, technician_name, top_n } = input;
 
-  // Resolve customer → lat/lng if provided
-  if (customer_id && (!lat || !lng)) {
+  // Resolve customer → lat/lng if provided. An explicit address is the
+  // destination: it is geocoded below rather than replaced by the customer's
+  // primary coordinates, so a search for a customer's other property is
+  // run around that property.
+  if (customer_id && !address && (!lat || !lng)) {
     const c = await db('customers').where('id', customer_id).select('latitude', 'longitude', 'address_line1', 'city', 'state', 'zip').first();
     if (c?.latitude && c?.longitude) { lat = parseFloat(c.latitude); lng = parseFloat(c.longitude); }
     else if (c && !address) address = [c.address_line1, c.city, c.state, c.zip].filter(Boolean).join(', ');

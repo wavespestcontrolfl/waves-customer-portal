@@ -230,6 +230,13 @@ function makeKnex(store) {
           // Lock-time scheduled_date — lets a test simulate a reschedule
           // committing while this submit waited on the lock.
           scheduled_date: store.lockedScheduledDate || CUSTOMER.scheduled_date,
+          // Lock-time ownership columns — a test simulates a property /
+          // customer / catalog reassignment committing before the lock.
+          customer_id: store.lockedCustomerId || CUSTOMER.customer_id,
+          service_type: CUSTOMER.service_type,
+          property_id: store.lockedPropertyId ?? null,
+          service_id: store.lockedCatalogServiceId ?? null,
+          ...(store.lockedStamp || {}),
         })),
       }));
       return base;
@@ -1366,5 +1373,47 @@ describe('pest-recap: freeze identity (GH codex r2 P2)', () => {
     store.recordUpdates = [];
     expect((await submitRecap(args)).ok).toBe(true);
     expect(store.recordUpdates.some((u) => Object.prototype.hasOwnProperty.call(u, 'service_line'))).toBe(false);
+  });
+});
+
+describe('recap ownership identity under the lock (codex P1 #4249)', () => {
+  beforeEach(() => jest.clearAllMocks());
+  const identity = {
+    customerId: 'cust-1', propertyId: 'property-a', catalogServiceId: 'cat-1',
+    serviceType: 'Quarterly Pest Control', scheduledDate: '2026-05-29',
+    address: { line1: '200 Palm Ave', line2: null, city: 'Parrish', state: 'FL', zip: '34219' },
+  };
+  const customerRow = { first_name: 'Pat', last_name: 'Jones', address_line1: '200 Palm Ave', city: 'Parrish', state: 'FL', zip: '34219' };
+  const submit = (store, expectedVisit) => submitRecap({
+    serviceId: SERVICE_ID, actorType: 'tech', actorId: 'tech-1', technicianNotes: 'Treated.',
+    products: [{ product_name: 'Termidor' }], customerRecap: 'Service complete.', sendSms: false, expectedVisit, knex: makeKnex(store),
+  });
+
+  test('a matching identity completes the visit', async () => {
+    const store = { serviceStatus: 'scheduled', records: [], customerRow, lockedPropertyId: 'property-a', lockedCatalogServiceId: 'cat-1' };
+    const result = await submit(store, identity);
+    expect(result.ok).toBe(true);
+    expect(store.records).toHaveLength(1);
+  });
+
+  test.each([
+    ['property', { lockedPropertyId: 'property-b' }],
+    ['customer', { lockedCustomerId: 'cust-2' }],
+    ['catalog service', { lockedCatalogServiceId: 'cat-2' }],
+    ['service type', { lockedStamp: { service_type: 'Mosquito Control' } }],
+    ['scheduled date', { lockedScheduledDate: '2026-05-30' }],
+    ['stamped address', { lockedStamp: { service_address_line1: '300 Palm Ave', service_address_city: 'Parrish', service_address_state: 'FL', service_address_zip: '34219' } }],
+  ])('a %s reassignment committing before the lock rejects the recap without writing', async (_label, lockedChange) => {
+    const store = { serviceStatus: 'scheduled', records: [], customerRow, lockedPropertyId: 'property-a', lockedCatalogServiceId: 'cat-1', ...lockedChange };
+    const result = await submit(store, identity);
+    expect(result).toEqual({ ok: false, reason: 'visit_identity_changed' });
+    expect(store.records).toHaveLength(0);
+    expect(transitionJobStatus).not.toHaveBeenCalled();
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+  });
+
+  test('a legacy submit without an expected identity keeps the previous behavior', async () => {
+    const store = { serviceStatus: 'scheduled', records: [], customerRow, lockedPropertyId: 'property-b' };
+    expect((await submit(store, undefined)).ok).toBe(true);
   });
 });

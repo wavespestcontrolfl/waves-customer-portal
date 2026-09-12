@@ -30,7 +30,7 @@ const {
 } = require('../services/stripe-invoice-state');
 const { computeChargeAmount } = require('../services/stripe-pricing');
 const { isEnabled } = require('../config/feature-gates');
-const { INVOICE_UNCOLLECTIBLE_STATUSES, invoiceAmountDue } = require('../services/invoice-helpers');
+const { INVOICE_UNCOLLECTIBLE_STATUSES, invoiceAmountDue, invoiceWithdrawnFromCustomer } = require('../services/invoice-helpers');
 const { publicPortalUrl } = require('../utils/portal-url');
 const PaymentLifecycleEmail = require('../services/payment-lifecycle-email');
 const ReceiptDeliveryQueue = require('../services/receipt-delivery-queue');
@@ -1171,6 +1171,9 @@ async function handleStatementPaymentIntentEvent(paymentIntent, eventType, event
     // leave the statement sent/viewed + unpaid (dunning must keep collecting).
     if (settledNow) {
       logger.info(`[stripe-webhook] statement S-${statementId} settled paid via PI ${piId}`);
+      // Every linked child invoice is paid now: close out their open visits,
+      // outside the money txn (GitHub r9 P1 #4127). Best-effort by contract.
+      await require('../services/invoice-issued-closeout').closeOutVisitsForStatement(statementId, { trigger: 'paid' });
       // Stop any statement-level dunning now that it's paid (best-effort, outside
       // the money txn — the eligibility filter already excludes `paid`, so this is
       // just hygiene and never gates settlement).
@@ -1421,9 +1424,18 @@ async function handleCombinedPaymentIntentSucceeded(paymentIntent, eventCreated 
   // intent — the combined early-return must not cost customers their
   // review invitation.
   if (combinedSettleOutcome?.paymentStatus === 'paid') {
+    // Every settled invoice gets its attempt before an unrecorded review
+    // hands the event back to Stripe for redelivery.
+    let reviewNotRecorded = null;
     for (const settledId of combinedSettleOutcome.invoiceIds || []) {
-      await scheduleReviewAfterPaidInvoice(piId, { invoiceId: settledId });
+      try {
+        await scheduleReviewAfterPaidInvoice(piId, { invoiceId: settledId });
+      } catch (err) {
+        if (!err.reviewNotRecorded) throw err;
+        reviewNotRecorded = reviewNotRecorded || err;
+      }
     }
+    if (reviewNotRecorded) throw reviewNotRecorded;
     // A settled invoice may be gating a payment-held WDO report — nudge
     // the release sweep like the single-invoice path does (codex r22 P3);
     // the 60s interval remains the fallback.
@@ -1524,6 +1536,39 @@ async function handlePaymentIntentSucceeded(paymentIntent, eventCreated = null) 
     hasMatchingSavedCardAttempt: !!savedCardAttemptForTenderGuard,
   })) {
     const reason = `Late saved-card PI ${piId} succeeded after invoice ${invoiceForTenderGuard.id} was already ${invoiceForTenderGuardStatus}`;
+    logger.error(`[stripe-webhook] Quarantining ${reason}`);
+    await recordOrphanSucceededPaymentIntent(
+      paymentIntent,
+      chargedTotal ?? centsToDollars(paymentIntent.amount),
+      reason,
+    );
+    return;
+  }
+  // A PaymentIntent the customer minted BEFORE Bill-To moved is confirmed
+  // client-side at Stripe and never re-enters our routes, so no server-side
+  // route guard can refuse it — this webhook is the first place we see the
+  // money (pre-push P0). Settling it would mark an invoice now owned by
+  // third-party AP as paid with the homeowner's funds, so the charge is
+  // quarantined for manual refund/review the same way every other
+  // must-not-settle success is. Only a CUSTOMER-initiated intent: an
+  // office-initiated saved-card charge that was already in flight when the
+  // withdrawal committed is the office's own collection and settles normally.
+  // …unless a payments row for this PI is already sitting in `processing`
+  // (audit P0): that ACH was accepted server-side while the invoice was still
+  // self-pay, the funds are captured, and quarantining here would return
+  // before the settle path below and leave the row stuck in `processing`
+  // forever. Those settle with the durable alert instead.
+  const processingPaymentForIntent = invoiceForTenderGuard && !savedCardAttemptForTenderGuard
+    && invoiceWithdrawnFromCustomer(invoiceForTenderGuard)
+    // No catch: a failed read cannot tell "nothing in flight" from "cannot
+    // see it", and both wrong answers move or strand money. Let it throw so
+    // Stripe redelivers, the way the statement rail handles an unresolved
+    // lookup.
+    ? await db('payments').where({ stripe_payment_intent_id: piId, status: 'processing' }).first('id')
+    : null;
+  if (invoiceForTenderGuard && !savedCardAttemptForTenderGuard && !processingPaymentForIntent
+    && invoiceWithdrawnFromCustomer(invoiceForTenderGuard)) {
+    const reason = `PI ${piId} succeeded on invoice ${invoiceForTenderGuard.id} after its Bill-To moved to a third-party payer — customer funds must not settle payer-owned debt`;
     logger.error(`[stripe-webhook] Quarantining ${reason}`);
     await recordOrphanSucceededPaymentIntent(
       paymentIntent,
@@ -1737,9 +1782,45 @@ async function handlePaymentIntentSucceeded(paymentIntent, eventCreated = null) 
   if (details.cardBrand) paymentUpdates.card_brand = details.cardBrand;
   if (details.cardLastFour) paymentUpdates.card_last_four = details.cardLastFour;
   let fallbackLinkedInvoiceId = null;
-  const updated = await db('payments')
-    .where({ stripe_payment_intent_id: piId, status: 'processing' })
-    .update(paymentUpdates);
+  // The processing → paid flip and its withdrawal check commit together: a
+  // payment already sitting in `processing` was accepted server-side while
+  // the invoice was still self-pay — our own guards would have refused it
+  // otherwise — so a withdrawal that committed during the ACH wait cannot be
+  // quarantined: the money is captured and the payments row exists. Settling
+  // is right, but the office has to act (refund the homeowner or re-bill AP),
+  // so the anomaly gets a durable alert instead of a silent paid invoice
+  // (audit P0). The re-read happens at settle time — the pre-lock check
+  // earlier in this handler ran before the withdrawal could commit — and it
+  // is deliberately uncaught, as is the alert insert: a failure rolls the
+  // flip back so Stripe's redelivery repeats the whole check, instead of a
+  // swallowed read leaving the invoice paid with no alert (audit P1).
+  const updated = await db.transaction(async (trx) => {
+    const flipped = await trx('payments')
+      .where({ stripe_payment_intent_id: piId, status: 'processing' })
+      .update(paymentUpdates);
+    if (flipped > 0 && invoiceForTenderGuard?.id) {
+      // FOR UPDATE, not a plain read (fallback audit P1): an unlocked SELECT
+      // under READ COMMITTED sees a racing withdrawal only once it has
+      // committed, so a withdrawal still in flight here would read as absent
+      // and the anomaly alert would be skipped on a payment that settles
+      // against payer-owned debt. The lock waits for that transaction to
+      // finish and then reads its outcome.
+      const settledInvoice = await trx('invoices').where({ id: invoiceForTenderGuard.id })
+        .forUpdate().first('id', 'invoice_number', 'customer_id', 'scheduled_send_error');
+      if (invoiceWithdrawnFromCustomer(settledInvoice)) {
+        logger.error(`[stripe-webhook] PI ${piId} settled on invoice ${settledInvoice.id} whose Bill-To moved to a third-party payer mid-payment`);
+        await trx('customer_health_alerts').insert({
+          customer_id: settledInvoice.customer_id || paymentIntent.metadata?.waves_customer_id || null,
+          alert_type: 'wh_payer_billed_settled',
+          severity: 'high',
+          title: 'Customer payment settled on payer-billed debt',
+          description: "This invoice's Bill-To moved to a third-party payer while the payment was in flight. The funds are captured and the invoice is paid — refund the customer or re-bill AP.",
+          trigger_data: JSON.stringify({ stripe_payment_intent_id: paymentIntent.id, invoice_number: settledInvoice.invoice_number }),
+        });
+      }
+    }
+    return flipped;
+  });
 
   if (updated > 0) {
     logger.info(`[stripe-webhook] Updated ${updated} payment(s) to paid for PI: ${piId}`);
@@ -1785,6 +1866,21 @@ async function handlePaymentIntentSucceeded(paymentIntent, eventCreated = null) 
         paymentIntent,
         { lock: true },
       );
+      // The withdrawal read UNDER THE ROW LOCK (audit P0): the pre-lock check
+      // earlier in this handler can be overtaken by a Bill-To transaction that
+      // commits while this webhook waits here, and this branch is the one that
+      // CREATES the payment row. An office-initiated saved-card charge still
+      // settles — that is the office's own collection, not the customer's.
+      if (!matchingAmbiguousAttempt && invoiceWithdrawnFromCustomer(lockedInvoice)) {
+        const reason = `PI ${piId} succeeded on invoice ${lockedInvoice.id} after its Bill-To moved to a third-party payer — customer funds must not settle payer-owned debt`;
+        logger.error(`[stripe-webhook] Quarantining ${reason}`);
+        await recordOrphanSucceededPaymentIntent(
+          paymentIntent,
+          chargedTotal ?? centsToDollars(paymentIntent.amount),
+          reason,
+        );
+        return;
+      }
       if (invoicePaymentIntentBlocksFallback({
         invoiceStatus: lockedInvoice.status,
         activePaymentIntentId: activePi,
@@ -2414,8 +2510,20 @@ async function scheduleReviewAfterPaidInvoice(piId, { invoiceId = null } = {}) {
     const outcome = await ReviewService.enrollForPaidInvoice(paidInvoice, { source: 'stripe_webhook' });
     if (outcome.enrolled) {
       logger.info(`[stripe-webhook] Queued review outreach after invoice ${paidInvoice.invoice_number || paidInvoice.id} payment`);
+    } else if (outcome.retryable && outcome.recorded === false) {
+      // Nothing durable holds the packet's review for recovery (the reopen
+      // itself failed): this paid event is the only signal, so it goes back
+      // to Stripe for redelivery. The settle above is status-guarded and the
+      // enrollment idempotent, so the retry re-runs safely.
+      const lost = new Error(`review enrollment for invoice ${paidInvoice.id} was not recorded for recovery: ${outcome.error}`);
+      lost.reviewNotRecorded = true;
+      throw lost;
     }
   } catch (err) {
+    if (err.reviewNotRecorded) {
+      logger.error(`[stripe-webhook] ${err.message} — rethrowing for Stripe retry (PI ${piId})`);
+      throw err;
+    }
     logger.error(`[stripe-webhook] Paid-invoice review request schedule failed for PI ${piId}: ${err.message}`);
   }
 }
