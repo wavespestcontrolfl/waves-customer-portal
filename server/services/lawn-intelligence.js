@@ -156,8 +156,11 @@ async function releaseNotificationSend(assessmentId, result) {
   await db('lawn_assessments').where({ id: assessmentId }).update({ notification_sent: false, notification_sent_at: null });
 }
 
-// Delivery recovery's lease check must reach the caller, not the send-failure log.
-const isOwnershipLoss = (err) => err?.code === 'LAWN_DELIVERY_OWNERSHIP_LOST';
+// Delivery recovery's own preconditions — the lease and the copy seal — must
+// reach the caller rather than the send-failure log, and must not release a
+// claim: they say the send should not happen now, not that it failed.
+const DELIVERY_CONTROL_CODES = new Set(['LAWN_DELIVERY_OWNERSHIP_LOST', 'LAWN_COPY_SEAL_LOST']);
+const isOwnershipLoss = (err) => DELIVERY_CONTROL_CODES.has(err?.code);
 async function runBeforeSend(options) {
   if (options?.beforeSend) await options.beforeSend();
 }

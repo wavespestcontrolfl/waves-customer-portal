@@ -75,7 +75,7 @@ const deferred = () => { let resolve; const promise = new Promise((r) => { resol
       },
     };
   }
-  const deliver = (id, deps) => deliverConfirmedAssessment({ assessmentId: id }, deps);
+  const deliver = (id, deps, extra = {}) => deliverConfirmedAssessment({ assessmentId: id }, { ...deps, ...extra });
 
   test('completes only after actual calibration and health success, then retries do no work', async () => {
     const assessment = await seed();
@@ -425,6 +425,24 @@ const deferred = () => { let resolve; const promise = new Promise((r) => { resol
     expect(releaseCall).toBeGreaterThan(sendCall);
     // Sealed once for both copy-rendering steps, not once per step.
     expect(deps.KnowledgeBridge.sealRecommendationsForSend).toHaveBeenCalledTimes(1);
+  });
+
+  test('a seal that lapses mid-run stops the customer send', async () => {
+    const assessment = await seed();
+    const deps = dependencies();
+    // Renewal answers false: the seal is gone and a generator may hold the copy.
+    deps.KnowledgeBridge.renewRecommendationSendSeal.mockResolvedValue(false);
+    deps.LawnIntel.generateServiceReport.mockImplementation(async (id) => {
+      await new Promise((resolve) => setTimeout(resolve, 60));
+      return db.knex('lawn_assessments').where({ id }).update({ report_auto_generated: true });
+    });
+    // The lapse is caught before the send: the run defers, keeping the report it
+    // already made, and a later sweep starts again on settled copy.
+    expect(await deliver(assessment.id, deps, { sealRenewMs: 20 })).toMatchObject({ skipped: 'copy_unsettled', gaps: ['notification'] });
+    expect(deps.LawnIntel.sendAssessmentNotification).not.toHaveBeenCalled();
+    expect((await db.knex('lawn_assessments').where({ id: assessment.id }).first()).notification_sent).toBe(false);
+    expect((await stored(assessment.id)).pipeline_completed_at).toBeNull();
+    expect((await stored(assessment.id)).pipeline_claimed_at).toBeNull();
   });
 
   test('an ungated environment counts recovery candidates and sends nothing', async () => {
