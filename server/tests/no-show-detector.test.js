@@ -484,7 +484,7 @@ describe('loadPromiseEvents: email promise evidence checks the LIVE delivery sta
   function fakeConn() {
     const calls = {};
     const conn = (table) => {
-      if (table === 'messaging_audit_log as a' || table === 'audit_log as al' || table === 'activity_log' || table === 'series_moves as sm') return passthroughChain([]);
+      if (table === 'messaging_audit_log as a' || table === 'audit_log as al' || table === 'activity_log as al' || table === 'series_moves as sm') return passthroughChain([]);
       if (table === 'customer_interactions as ci') {
         const chain = {};
         chain.leftJoin = (joinTable, cb) => { calls.leftJoinTable = joinTable; calls.leftJoinCb = cb; return chain; };
@@ -594,7 +594,7 @@ describe('loadPromiseEvents: an UNLINKED sms_log row is neutral, a sentinel sid 
   function fakeConn() {
     const calls = {};
     const conn = (table) => {
-      if (table === 'customer_interactions as ci' || table === 'audit_log as al' || table === 'activity_log' || table === 'series_moves as sm') return passthroughChain([]);
+      if (table === 'customer_interactions as ci' || table === 'audit_log as al' || table === 'activity_log as al' || table === 'series_moves as sm') return passthroughChain([]);
       if (table === 'messaging_audit_log as a') {
         const chain = {};
         for (const m of ['leftJoin', 'whereIn', 'whereRaw', 'whereBetween', 'whereNull']) chain[m] = () => chain;
@@ -665,6 +665,58 @@ describe('loadPromiseEvents: an UNLINKED sms_log row is neutral, a sentinel sid 
     const [, legacySql, bindings] = scopeCall.find(([m]) => m === 'orWhereRaw');
     expect(legacySql).toContain("a.appointment_id IS NULL AND a.metadata->>'scheduled_service_id' = ANY(?::text[])");
     expect(bindings).toEqual([['visit-1']]);
+  });
+});
+
+describe('the applied-reschedule promise is dated by the CALL, not the processing pass (round-9 P1)', () => {
+  // call-reschedule-apply.js sends the customer nothing — the agent already
+  // said it on the call — so this derived promise is the only record of that
+  // window. The activity row is written when the recording pass ran, which
+  // can be long after the call; dating the promise there lets a reminder
+  // sent in between outrank a window the customer heard first.
+  function fakeConn(activityRows) {
+    const passthrough = () => {
+      const chain = {};
+      for (const m of ['join', 'leftJoin', 'whereIn', 'whereRaw', 'whereBetween', 'whereNull', 'whereNotNull', 'where']) chain[m] = () => chain;
+      chain.select = () => Promise.resolve([]);
+      return chain;
+    };
+    const conn = (table) => {
+      if (table !== 'activity_log as al') return passthrough();
+      const chain = {};
+      for (const m of ['leftJoin', 'whereIn', 'whereRaw', 'whereNull', 'whereNotNull', 'where']) chain[m] = () => chain;
+      chain.select = () => Promise.resolve(activityRows);
+      return chain;
+    };
+    conn.raw = (sql) => ({ sql });
+    conn.isTransaction = true;
+    return conn;
+  }
+
+  const row = {
+    id: 'act-1', created_at: '2026-09-10T16:30:00.000Z',
+    metadata: { call_log_id: 'call-1', scheduled_service_id: 'visit-1', to: { date: '2026-09-12', start: '13:00', end: '15:00' } },
+    call_created_at: '2026-09-10T14:00:00.000Z', duration_seconds: 600,
+  };
+
+  test('communicated_at is the call end (start + duration), so a reminder sent after the call cannot outrank it', async () => {
+    const [promise] = await loadPromiseEvents(fakeConn([row]), ['visit-1']);
+    expect(promise).toMatchObject({ visit_id: 'visit-1', source: 'call', source_id: 'act-1',
+      communicated_at: '2026-09-10T14:10:00.000Z' });
+    expect(promise.start_at).toBe(new Date('2026-09-12T13:00:00-04:00').toISOString());
+    // A reminder sent BEFORE the call still loses; the derived promise wins.
+    const reminder = { visit_id: 'visit-1', start_at: '2026-09-11T13:00:00.000Z', communicated_at: '2026-09-10T14:05:00.000Z', source: 'message' };
+    expect(latestPromises([reminder, promise], new Date('2026-09-10T18:00:00.000Z')).get('visit-1').source).toBe('call');
+  });
+
+  test('with the call gone (purged/legacy), it falls back to the activity row timestamp', async () => {
+    const [promise] = await loadPromiseEvents(fakeConn([{ ...row, call_created_at: null, duration_seconds: null }]), ['visit-1']);
+    expect(promise.communicated_at).toBe('2026-09-10T16:30:00.000Z');
+  });
+
+  test('an unparseable applied window becomes an UNKNOWN promise, not a guess', async () => {
+    const [promise] = await loadPromiseEvents(fakeConn([{ ...row, metadata: { ...row.metadata, to: {} } }]), ['visit-1']);
+    expect(promise.start_at).toBeNull();
   });
 });
 
@@ -991,7 +1043,7 @@ describe('loadPromiseEvents: pre-deploy legacy reschedule/confirmation messages 
   function fakeConn({ messageRows = [] } = {}) {
     const calls = {};
     const conn = (table) => {
-      if (table === 'customer_interactions as ci' || table === 'audit_log as al' || table === 'activity_log' || table === 'series_moves as sm') return passthroughChain([]);
+      if (table === 'customer_interactions as ci' || table === 'audit_log as al' || table === 'activity_log as al' || table === 'series_moves as sm') return passthroughChain([]);
       if (table === 'messaging_audit_log as a') {
         const chain = {};
         chain.leftJoin = () => chain;
@@ -1086,7 +1138,7 @@ describe('loadPromiseEvents: no fixed lookback — confirmations older than 100 
   // function" instead of silently passing.
   function fakeConn({ messageRows = [] } = {}) {
     const conn = (table) => {
-      if (table === 'customer_interactions as ci' || table === 'audit_log as al' || table === 'activity_log' || table === 'series_moves as sm') return passthroughChain([]);
+      if (table === 'customer_interactions as ci' || table === 'audit_log as al' || table === 'activity_log as al' || table === 'series_moves as sm') return passthroughChain([]);
       if (table === 'messaging_audit_log as a') return passthroughChain(messageRows);
       throw new Error(`fake conn: unexpected table ${table}`);
     };

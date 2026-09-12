@@ -332,9 +332,19 @@ async function loadPromiseEvents(conn, visitIds, { now = new Date() } = {}) {
     // gate was off. recordAgreedWindow still writes its audit row for the
     // booking path; a duplicate promise for the same window is harmless —
     // latestPromises keeps one.
-    () => conn('activity_log').where({ action: 'call_reschedule_applied' })
-      .whereRaw("metadata->>'scheduled_service_id' = ANY(?::text[])", [visitIds])
-      .where('created_at', '<=', now).select('id', 'metadata', 'created_at'),
+    () => conn('activity_log as al')
+      // The CALL is joined for its own clock: the activity row is written
+      // when the pass processed the recording, which can be long after the
+      // customer actually heard the commitment, and dating the promise there
+      // lets a reminder sent in between outrank it — the same ordering the
+      // round-5 fix made for directly captured call promises (codex P1 round
+      // 9). callCommitmentInstant below reads the call's end from these.
+      .leftJoin('call_log as cl', conn.raw("cl.id::text = al.metadata->>'call_log_id'"))
+      .where({ 'al.action': 'call_reschedule_applied' })
+      .whereRaw("al.metadata->>'scheduled_service_id' = ANY(?::text[])", [visitIds])
+      .where('al.created_at', '<=', now)
+      .select('al.id', 'al.metadata', 'al.created_at', 'cl.created_at as call_created_at',
+        'cl.duration_seconds', 'cl.recording_duration_seconds'),
     () => conn('series_moves as sm')
       // The move's own series text, joined by the series_move_id its metadata
       // carries, and held to the SAME delivery bar as any other promise
@@ -408,9 +418,16 @@ async function loadPromiseEvents(conn, visitIds, { now = new Date() } = {}) {
       // rather than a guess — the customer was still told the visit moved.
       const to = r.metadata?.to || {};
       const at = to.date ? parseETDateTime(`${String(to.date).slice(0, 10)}T${String(to.start || '08:00').slice(0, 5)}`) : null;
+      // When the customer heard it: the call's end, not the moment the
+      // recording pass wrote this row. Falls back to the activity row's own
+      // timestamp when the call is gone (a purge, a legacy row).
+      const heard = r.call_created_at
+        ? callCommitmentInstant({ created_at: r.call_created_at, duration_seconds: r.duration_seconds,
+          recording_duration_seconds: r.recording_duration_seconds })
+        : null;
       return { visit_id: r.metadata?.scheduled_service_id,
         start_at: at && Number.isFinite(at.getTime()) ? at.toISOString() : null,
-        communicated_at: r.created_at, source: 'call', source_id: r.id };
+        communicated_at: heard ? heard.toISOString() : r.created_at, source: 'call', source_id: r.id };
     }),
     ...seriesSupersessions(seriesMoves, candidates),
   ];
