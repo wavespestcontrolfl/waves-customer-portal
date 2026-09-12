@@ -128,7 +128,7 @@ export function MarginCalculator() {
     // and provides no UiSurface, so the density boundary belongs here rather
     // than only around PricingLogicPage's returns — otherwise these fields drop
     // to the legacy 13px on that caller.
-    <UiSurface as={Card} density="comfortable">
+    <UiSurface as={Card} density="comfortable" className="mb-5">
       <CardHeader className="flex flex-wrap items-start justify-between gap-3"><CardTitle className="text-16">Margin calculator</CardTitle><Button onClick={fetchMargins} loading={loading}>{loading ? "Calculating..." : "Calculate"}</Button></CardHeader>
       <CardBody className="space-y-4">
         <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-5">
@@ -281,7 +281,9 @@ export default function PricingLogicPage({ embedded = false, onSecondaryNav } = 
 
   const content = (
     <div className="space-y-5">
-      {focus === "margin" && <ActionFeedback error>Review margin rules{serviceLabel ? ` for ${serviceLabel}` : ""}. The estimate audit flagged this service below the pricing floor.</ActionFeedback>}
+      {/* A below-floor review prompt from the estimate audit is a warning; main
+          painted it amber, and alert red is for request failures. */}
+      {focus === "margin" && <ActionFeedback className="!text-warn-fg">Review margin rules{serviceLabel ? ` for ${serviceLabel}` : ""}. The estimate audit flagged this service below the pricing floor.</ActionFeedback>}
       <section id="pricing-margins"><MarginCalculator /></section>
       <section id="pricing-calibration"><PestCalibrationPanel /></section>
       <section id="pricing-specs"><SpecServicesPanel /></section>

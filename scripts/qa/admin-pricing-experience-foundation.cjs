@@ -221,6 +221,10 @@ async function main() {
         desktop.waitForRequest((request) => request.url().endsWith('/api/admin/pricing/calculate-value') && request.postDataJSON().dreamOutcome === 9),
         desktop.keyboard.press('ArrowRight'),
       ]);
+      // The request alone proves nothing — a frozen result panel would still
+      // satisfy it. Wait for the recalculated score the fixture returns for
+      // dreamOutcome 9 before leaving the tab.
+      await desktop.getByText('7', { exact: true }).waitFor();
       await desktop.getByRole('button', { name: 'Offer builder', exact: true }).click();
       await desktop.getByText('Synthetic package', { exact: true }).waitFor();
       await desktop.getByRole('button', { name: 'Upsell engine', exact: true }).click();
