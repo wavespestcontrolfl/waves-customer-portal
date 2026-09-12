@@ -47,6 +47,11 @@ const NOTICE_PURPOSES = ['appointment_confirmation', 'appointment_reminder_72h',
 // acks, prep-info texts, the recurring welcome text, and recipient-optin
 // requests never quote a specific arrival slot and must stay excluded).
 const LEGACY_SCHEDULING_MESSAGE_TYPES = ['reschedule_series_confirmation', 'confirmation'];
+// email_messages.status values that mean the recipient actually got it —
+// webhooks-sendgrid.js's own vocabulary. 'processed'/'sent' are SendGrid's
+// accept states, 'delivered' its confirmation, and the last three are
+// reactions it reports only for a delivered message.
+const DELIVERED_EMAIL_STATUSES = ['sent', 'processed', 'delivered', 'complained', 'spam_report', 'unsubscribed'];
 const instant = (value) => value == null ? NaN : new Date(value).getTime();
 // Stamps that prove the tech reached the stop, in the order job-status.js
 // writes them. Any one of them clears the card.
@@ -216,24 +221,45 @@ async function loadPromiseEvents(conn, visitIds, { now = new Date() } = {}) {
       .whereRaw("ci.metadata->>'scheduled_service_id' = ANY(?::text[])", [visitIds])
       .whereRaw("ci.metadata->>'status' IN ('sent','delivered')")
       .whereRaw("ci.metadata->>'event_type' IN ('appointment.confirmation','appointment.reminder_72h','appointment.reminder_24h','appointment.rescheduled')")
-      // whereNull('em.status') is not redundant with whereNull('em.id'):
-      // status is nullable (20260518000001_email_template_library.js writes a
-      // 'queued' DEFAULT, not NOT NULL), and under three-valued logic
-      // `NULL NOT IN (...)` is NULL — so a LINKED row with no status would be
-      // excluded, i.e. read as a CONFIRMED bad delivery. That is the opposite
-      // of this read's rule: only a known-bad status is bad evidence,
-      // everything unknown stays neutral (pre-push audit, round 5).
-      .where((qb) => qb.whereNull('em.id').orWhereNull('em.status')
-        .orWhereNotIn('em.status', ['bounced', 'dropped', 'blocked', 'failed']))
+      // A LINKED row must currently show a delivery the customer actually
+      // received: an allowlist, not "anything but the terminal failures"
+      // (codex P1 round 6). transactional-email-provider-retry.js flips a
+      // failed row back to 'queued' when it claims a retry — before any new
+      // provider handoff, and for as long as a crashed worker's claim takes
+      // stale-recovery to clear — so a deny-list read that interval as usable
+      // evidence for a send that had already failed. DELIVERED_EMAIL_STATUSES
+      // therefore lists only states that mean the message reached the
+      // recipient: SendGrid's accepted/delivered states, plus the post-
+      // delivery reactions ('complained', 'spam_report', 'unsubscribed'),
+      // which the provider reports only for a message it delivered. queued/
+      // processing (in flight), the four terminal failures, and a NULL status
+      // are all excluded. An UNLINKED row (em.id IS NULL) stays neutral —
+      // that is a legacy or unlinked send, not a known-bad one.
+      .where((qb) => qb.whereNull('em.id').orWhereIn('em.status', DELIVERED_EMAIL_STATUSES))
       .select('ci.id', 'ci.metadata', 'ci.created_at'),
     () => conn('audit_log').where({ action: 'visit_window_promised', resource_type: 'scheduled_service' })
       .whereIn('resource_id', visitIds).where('created_at', '<=', now).select('id', 'resource_id', 'metadata', 'created_at'),
+    // A series move sends ONE text, and that text names only the anchor
+    // occurrence's new date — every SIBLING it moved is left with whatever
+    // reminder it held for its OLD slot as its latest promise. DERIVED here
+    // rather than written at notification time (codex P1 round 6, replacing
+    // the round-5 writer): series_moves already records, durably and in one
+    // committed row, which occurrences the move touched (`rows`) and whether
+    // the customer was actually told (`customer_notified`/`notified_at`), so
+    // reading it needs no second write to keep consistent, no retry marker
+    // for a write that failed after the text went out, and no backfill —
+    // every move made BEFORE this feature existed derives the same way.
+    () => conn('series_moves as sm').where('sm.customer_notified', true)
+      .whereNotNull('sm.notified_at').where('sm.notified_at', '<=', now)
+      .where((qb) => { for (const id of visitIds) qb.orWhereRaw('sm.rows @> ?::jsonb', [JSON.stringify([{ id }])]); })
+      .select('sm.id', 'sm.notified_at', 'sm.anchor_service_id', 'sm.rows'),
   ];
   const results = [];
   if (conn.isTransaction) {
     for (const read of reads) results.push(await read());
   } else results.push(...await Promise.all(reads.map((read) => read())));
-  const [messages, emails, calls] = results;
+  const [messages, emails, calls, seriesMoves] = results;
+  const candidates = new Set(visitIds.map(String));
   return [
     ...messages.map((r) => ({ visit_id: r.appointment_id, start_at: Number.isFinite(Number(r.metadata?.rendered_slot_ms)) && r.metadata?.rendered_slot_ms != null
       ? new Date(Number(r.metadata.rendered_slot_ms)).toISOString() : null, communicated_at: r.sent_at, source: 'message', source_id: r.id })),
@@ -241,7 +267,35 @@ async function loadPromiseEvents(conn, visitIds, { now = new Date() } = {}) {
       ? new Date(Number(r.metadata.rendered_slot_ms)).toISOString() : null, communicated_at: r.metadata?.sent_at || r.created_at, source: 'email', source_id: r.id })),
     ...calls.map((r) => ({ visit_id: r.resource_id, start_at: r.metadata?.start_at,
       communicated_at: r.metadata?.communicated_at || r.created_at, source: 'call', source_id: r.id })),
+    ...seriesSupersessions(seriesMoves, candidates),
   ];
+}
+
+// Pure, exported for tests. One customer-notified series move -> an UNKNOWN
+// window (start_at: null) for each moved SIBLING, stamped at the moment the
+// customer was told. Unknown is the honest record: the text quoted only the
+// anchor's new slot, so we know the sibling's old window no longer stands but
+// were never told the new one. latestPromises keeps it as that visit's latest
+// promise and promisedStartAt reads it as unusable, so the stale pre-move
+// reminder stops driving alerts without asserting a window nobody
+// communicated — until the sibling's own new reminder does.
+//
+// The ANCHOR is excluded: its new slot IS in the text, and its own
+// messaging_audit_log row carries the rendered_slot_ms that says so. A
+// date_exception occurrence is excluded too — the move deliberately left it
+// where it was, so its existing promise still stands.
+function seriesSupersessions(rows = [], candidates = new Set()) {
+  const events = [];
+  for (const move of rows) {
+    const moved = Array.isArray(move.rows) ? move.rows : JSON.parse(move.rows || '[]');
+    for (const occurrence of moved) {
+      const visitId = String(occurrence?.id || '');
+      if (!visitId || !candidates.has(visitId) || occurrence.anchor === true || occurrence.exception === true) continue;
+      if (String(move.anchor_service_id || '') === visitId) continue;
+      events.push({ visit_id: visitId, start_at: null, communicated_at: move.notified_at, source: 'series_move', source_id: move.id });
+    }
+  }
+  return events;
 }
 
 // Pure, exported for tests. Same caller-identity rule
@@ -347,52 +401,6 @@ async function recordAgreedWindow(conn, { callId, visitId } = {}) {
       metadata: { call_log_id: callId, start_at: new Date(target).toISOString(), communicated_at: callCommitmentInstant(call).toISOString() }, critical: true, trx });
     return true;
   });
-}
-
-// A series move notifies the customer with ONE text, and that text names
-// only the anchor occurrence's new date — so the anchor gets ordinary
-// message evidence (rendered_slot_ms), while every SIBLING the operation
-// moved is left with whatever reminder it had for its OLD slot standing as
-// its latest promise. Activated, the detector would then raise missing-
-// tracking alerts against windows the customer was already told had changed
-// (codex P1 round 5). Each moved sibling therefore gets an UNKNOWN-window
-// promise row stamped at the send time: unknown is the honest record (the
-// text did not quote that sibling's new slot), it outranks the stale
-// reminder, and latestPromises + promisedStartAt read it as "no usable
-// window" — no alert until that sibling's own new reminder communicates one.
-// Dedupe is per (visit, series move), so a retried notification pass writes
-// nothing new. Returns the number of rows written.
-async function recordSeriesSupersession(conn, { visitIds = [], communicatedAt = new Date(), seriesMoveId = null, excludeVisitId = null } = {}) {
-  if (!captureEnabled()) return 0;
-  const at = new Date(communicatedAt);
-  // seriesMoveId is REQUIRED, not optional: it is the identity a retried
-  // notification pass dedupes against, and a timestamp fallback would be
-  // unique per call — the dedupe could never match and every retry would
-  // write another row (pre-push audit, round 5). admin-dispatch.js's own
-  // recordCustomerNotified already skips its bookkeeping without one, so an
-  // operation with no series move id is simply not a series move to record.
-  if (!seriesMoveId || !Number.isFinite(at.getTime())) return 0;
-  const skip = excludeVisitId == null ? null : String(excludeVisitId);
-  const marker = String(seriesMoveId);
-  let written = 0;
-  for (const id of new Set(visitIds.map((visitId) => String(visitId)).filter((visitId) => visitId && visitId !== skip))) {
-    // Same advisory-lock discipline as recordAgreedWindow: the check and the
-    // write are one transaction keyed on (visit, series move), so two passes
-    // racing — a retry overlapping the original, or a double-submitted series
-    // move — cannot both read "no prior row" and both insert (pre-push audit,
-    // round 5). audit_log has no unique constraint to lean on instead.
-    const wrote = await conn.transaction(async (trx) => {
-      await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?))', ['promised-series-supersession', `${id}:${marker}`]);
-      const prior = await trx('audit_log').where({ action: 'visit_window_promised', resource_id: id })
-        .whereRaw("metadata->>'series_supersession' = ?", [marker]).first('id');
-      if (prior) return false;
-      await recordAuditEvent({ actor_type: 'system', action: 'visit_window_promised', resource_type: 'scheduled_service', resource_id: id,
-        metadata: { series_move_id: marker, series_supersession: marker, start_at: null, communicated_at: at.toISOString() }, critical: true, trx });
-      return true;
-    });
-    if (wrote) written += 1;
-  }
-  return written;
 }
 
 async function listNoShows(conn, { now = new Date(), limit = 100, offset = 0, actorId = null, admin = true } = {}) {
@@ -650,4 +658,4 @@ async function sweep(conn, { now = new Date() } = {}) {
   return { alerted, active: rows.length };
 }
 
-module.exports = { enabled, captureEnabled, evaluateNoShow, promisedStartAt, trackingStage, agreedWindowStart, callCommitmentInstant, LIVE_STATUSES, latestPromises, loadPromiseEvents, recordAgreedWindow, recordSeriesSupersession, listNoShows, sweep, trackingKey, resolveLegacyCollision, alreadyHasOpenAlert, callerIdentityMatches, noticeStillCurrent };
+module.exports = { enabled, captureEnabled, evaluateNoShow, promisedStartAt, trackingStage, agreedWindowStart, callCommitmentInstant, LIVE_STATUSES, latestPromises, loadPromiseEvents, seriesSupersessions, recordAgreedWindow, listNoShows, sweep, trackingKey, resolveLegacyCollision, alreadyHasOpenAlert, callerIdentityMatches, noticeStillCurrent };

@@ -433,7 +433,7 @@ describe('loadPromiseEvents: email promise evidence checks the LIVE delivery sta
   // (codex P1).
   function passthroughChain(result = []) {
     const chain = {};
-    for (const m of ['leftJoin', 'whereIn', 'whereRaw', 'whereBetween', 'whereNull', 'where']) chain[m] = () => chain;
+    for (const m of ['leftJoin', 'whereIn', 'whereRaw', 'whereBetween', 'whereNull', 'whereNotNull', 'where']) chain[m] = () => chain;
     chain.select = () => Promise.resolve(result);
     return chain;
   }
@@ -441,7 +441,7 @@ describe('loadPromiseEvents: email promise evidence checks the LIVE delivery sta
   function fakeConn() {
     const calls = {};
     const conn = (table) => {
-      if (table === 'messaging_audit_log as a' || table === 'audit_log') return passthroughChain([]);
+      if (table === 'messaging_audit_log as a' || table === 'audit_log' || table === 'series_moves as sm') return passthroughChain([]);
       if (table === 'customer_interactions as ci') {
         const chain = {};
         chain.leftJoin = (joinTable, cb) => { calls.leftJoinTable = joinTable; calls.leftJoinCb = cb; return chain; };
@@ -458,7 +458,7 @@ describe('loadPromiseEvents: email promise evidence checks the LIVE delivery sta
     return { conn, calls };
   }
 
-  test('joins email_messages on provider_message_id and excludes a currently bounced/dropped/blocked/failed match', async () => {
+  test('joins email_messages on the stable id and counts only a currently delivered row', async () => {
     const { conn, calls } = fakeConn();
     await loadPromiseEvents(conn, ['visit-1']);
 
@@ -480,17 +480,21 @@ describe('loadPromiseEvents: email promise evidence checks the LIVE delivery sta
     // string/object filter).
     const exclusionCall = (calls.whereCalls || []).find(([arg]) => typeof arg === 'function');
     expect(exclusionCall).toBeTruthy();
-    const qb = { whereNull: jest.fn(() => qb), orWhereNull: jest.fn(() => qb), orWhereNotIn: jest.fn(() => qb) };
+    const qb = { whereNull: jest.fn(() => qb), orWhereIn: jest.fn(() => qb) };
     exclusionCall[0](qb);
     expect(qb.whereNull).toHaveBeenCalledWith('em.id');
-    // A linked row with a NULL status is unknown, not bad: status is
-    // nullable, and `NULL NOT IN (...)` is NULL, so without this branch such
-    // a row would be excluded as a confirmed bad delivery (pre-push audit).
-    expect(qb.orWhereNull).toHaveBeenCalledWith('em.status');
-    // A bounced/dropped/blocked/failed email_messages match is excluded —
-    // exactly the status vocabulary webhooks-sendgrid.js's
-    // computeEmailMessageEventUpdates writes for those terminal outcomes.
-    expect(qb.orWhereNotIn).toHaveBeenCalledWith('em.status', ['bounced', 'dropped', 'blocked', 'failed']);
+    // An ALLOWLIST, not "anything but the terminal failures" (round-6 P1):
+    // the retry worker flips a failed row back to 'queued' before any new
+    // provider handoff, and a deny-list read that interval as evidence for a
+    // send that had already failed. Only states meaning the recipient got it
+    // count — accepted/delivered, plus the reactions SendGrid reports solely
+    // for a delivered message.
+    expect(qb.orWhereIn).toHaveBeenCalledWith('em.status',
+      ['sent', 'processed', 'delivered', 'complained', 'spam_report', 'unsubscribed']);
+    const [, allowed] = qb.orWhereIn.mock.calls[0];
+    for (const inFlightOrFailed of ['queued', 'processing', 'failed', 'bounced', 'dropped', 'blocked']) {
+      expect(allowed).not.toContain(inFlightOrFailed);
+    }
   });
 });
 
@@ -506,14 +510,14 @@ describe('loadPromiseEvents: an UNLINKED sms_log row is neutral, a sentinel sid 
   // text went out and never get an sms_log row either.
   function passthroughChain(result = []) {
     const chain = {};
-    for (const m of ['leftJoin', 'whereIn', 'whereRaw', 'whereBetween', 'whereNull', 'where']) chain[m] = () => chain;
+    for (const m of ['leftJoin', 'whereIn', 'whereRaw', 'whereBetween', 'whereNull', 'whereNotNull', 'where']) chain[m] = () => chain;
     chain.select = () => Promise.resolve(result);
     return chain;
   }
   function fakeConn() {
     const calls = {};
     const conn = (table) => {
-      if (table === 'customer_interactions as ci' || table === 'audit_log') return passthroughChain([]);
+      if (table === 'customer_interactions as ci' || table === 'audit_log' || table === 'series_moves as sm') return passthroughChain([]);
       if (table === 'messaging_audit_log as a') {
         const chain = {};
         for (const m of ['leftJoin', 'whereIn', 'whereRaw', 'whereBetween', 'whereNull']) chain[m] = () => chain;
@@ -579,90 +583,52 @@ describe('callCommitmentInstant (when the customer heard the promise) (round-5 P
   });
 });
 
-describe('recordSeriesSupersession (one series text supersedes every moved occurrence) (round-5 P1)', () => {
-  const { recordSeriesSupersession } = require('../services/no-show-detector');
-  const { recordAuditEvent } = require('../services/audit-log');
+describe('seriesSupersessions: one series text supersedes every moved sibling (round-6 P1, derived not written)', () => {
+  const { seriesSupersessions } = require('../services/no-show-detector');
+  // Derived from the series_moves row the operation already committed, not
+  // written at notification time: nothing to retry when a write fails after
+  // the text went out, and every move made before this feature existed reads
+  // the same way (no backfill).
+  const move = {
+    id: 'move-1', notified_at: '2026-09-11T18:00:00.000Z', anchor_service_id: 'anchor',
+    rows: [{ id: 'anchor', anchor: true }, { id: 'sib-1' }, { id: 'sib-2' }, { id: 'sib-x', exception: true }],
+  };
+  const all = new Set(['anchor', 'sib-1', 'sib-2', 'sib-x', 'other']);
 
-  function fakeConn({ priorIds = [] } = {}) {
-    const locks = [];
-    const trx = (table) => {
-      expect(table).toBe('audit_log');
-      const chain = {};
-      let resource = null;
-      chain.where = (args) => { resource = args.resource_id; return chain; };
-      chain.whereRaw = () => chain;
-      chain.first = async () => (priorIds.includes(resource) ? { id: 'prior' } : undefined);
-      return chain;
-    };
-    trx.raw = async (sql, bindings) => { locks.push({ sql, bindings }); };
-    const conn = () => { throw new Error('every write must go through conn.transaction'); };
-    conn.transaction = (work) => work(trx);
-    return { conn, locks };
-  }
-
-  beforeEach(() => { recordAuditEvent.mockClear(); process.env.GATE_NOSHOW_DETECTOR = 'true'; });
-  afterEach(() => { delete process.env.GATE_NOSHOW_DETECTOR; });
-
-  test('writes an UNKNOWN-window promise for every moved sibling, skipping the anchor the text actually names', async () => {
-    const { conn, locks } = fakeConn();
-    const written = await recordSeriesSupersession(conn, { visitIds: ['anchor', 'sib-1', 'sib-2'], excludeVisitId: 'anchor',
-      seriesMoveId: 'move-1', communicatedAt: new Date('2026-09-11T18:00:00Z') });
-    expect(written).toBe(2);
-    const resources = recordAuditEvent.mock.calls.map(([event]) => event.resource_id);
-    expect(resources).toEqual(['sib-1', 'sib-2']);
-    // Check and write are one locked transaction per (visit, series move) —
-    // two racing passes cannot both read "no prior row" and both insert.
-    expect(locks.map((lock) => lock.bindings)).toEqual([
-      ['promised-series-supersession', 'sib-1:move-1'],
-      ['promised-series-supersession', 'sib-2:move-1'],
+  test('every moved sibling gets an UNKNOWN window stamped when the customer was told', () => {
+    expect(seriesSupersessions([move], all)).toEqual([
+      { visit_id: 'sib-1', start_at: null, communicated_at: move.notified_at, source: 'series_move', source_id: 'move-1' },
+      { visit_id: 'sib-2', start_at: null, communicated_at: move.notified_at, source: 'series_move', source_id: 'move-1' },
     ]);
-    for (const lock of locks) expect(lock.sql).toContain('pg_advisory_xact_lock');
-    for (const [event] of recordAuditEvent.mock.calls) {
-      expect(event.action).toBe('visit_window_promised');
-      // Unknown, not a window: the text quoted only the anchor's new slot.
-      // latestPromises keeps this as the latest promise and promisedStartAt
-      // reads it as unusable, so the stale pre-move reminder stops driving
-      // alerts without asserting a window we were never told.
-      expect(event.metadata.start_at).toBeNull();
-      expect(event.metadata.communicated_at).toBe('2026-09-11T18:00:00.000Z');
-      expect(event.metadata.series_move_id).toBe('move-1');
-    }
   });
 
-  test('a retried notification pass writes nothing new (dedupe per visit + series move)', async () => {
-    const { conn } = fakeConn({ priorIds: ['sib-1', 'sib-2'] });
-    const written = await recordSeriesSupersession(conn, { visitIds: ['sib-1', 'sib-2'], seriesMoveId: 'move-1' });
-    expect(written).toBe(0);
-    expect(recordAuditEvent).not.toHaveBeenCalled();
+  test('the anchor is excluded (its new slot IS in the text, with a rendered_slot_ms of its own)', () => {
+    const byId = Object.fromEntries(seriesSupersessions([move], all).map((e) => [e.visit_id, e]));
+    expect(byId.anchor).toBeUndefined();
+    // Even when the row does not carry the anchor flag, anchor_service_id does.
+    const unflagged = { ...move, rows: [{ id: 'anchor' }, { id: 'sib-1' }] };
+    expect(seriesSupersessions([unflagged], all).map((e) => e.visit_id)).toEqual(['sib-1']);
   });
 
-  // Without a series move id there is nothing stable to dedupe against, and
-  // a timestamp marker would be unique per call — every retried notification
-  // pass would write another row. admin-dispatch's own recordCustomerNotified
-  // skips its bookkeeping the same way (pre-push audit).
-  test('no series move id -> nothing written, rather than a marker that can never dedupe', async () => {
-    const { conn, locks } = fakeConn();
-    expect(await recordSeriesSupersession(conn, { visitIds: ['sib-1'], seriesMoveId: null })).toBe(0);
-    expect(recordAuditEvent).not.toHaveBeenCalled();
-    expect(locks).toEqual([]);
+  test('a date_exception occurrence is excluded — the move deliberately left it where it was', () => {
+    expect(seriesSupersessions([move], all).map((e) => e.visit_id)).not.toContain('sib-x');
   });
 
-  test('capture off entirely -> no evidence rows', async () => {
-    delete process.env.GATE_NOSHOW_DETECTOR;
-    const { conn } = fakeConn();
-    expect(await recordSeriesSupersession(conn, { visitIds: ['sib-1'], seriesMoveId: 'move-1' })).toBe(0);
-    expect(recordAuditEvent).not.toHaveBeenCalled();
+  test('rows outside the candidate set are dropped, and a JSON-encoded rows column is parsed', () => {
+    expect(seriesSupersessions([move], new Set(['sib-2'])).map((e) => e.visit_id)).toEqual(['sib-2']);
+    expect(seriesSupersessions([{ ...move, rows: JSON.stringify(move.rows) }], all).map((e) => e.visit_id)).toEqual(['sib-1', 'sib-2']);
+    expect(seriesSupersessions([{ ...move, rows: null }], all)).toEqual([]);
   });
 
-  test('the capture gate alone is enough — evidence accrues while alerting stays dark (round-5 P1)', async () => {
-    delete process.env.GATE_NOSHOW_DETECTOR;
-    process.env.GATE_NOSHOW_PROMISE_CAPTURE = 'true';
-    const { captureEnabled, enabled } = require('../services/no-show-detector');
-    expect(enabled()).toBe(false);
-    expect(captureEnabled()).toBe(true);
-    const { conn } = fakeConn();
-    expect(await recordSeriesSupersession(conn, { visitIds: ['sib-1'], seriesMoveId: 'move-1' })).toBe(1);
-    delete process.env.GATE_NOSHOW_PROMISE_CAPTURE;
+  test('it outranks the sibling\'s stale pre-move reminder, and its own next reminder outranks it', () => {
+    const staleReminder = { visit_id: 'sib-1', start_at: '2026-09-11T13:00:00.000Z', communicated_at: '2026-09-10T12:00:00.000Z', source: 'message' };
+    const [supersession] = seriesSupersessions([move], all);
+    const now = new Date('2026-09-11T19:00:00.000Z');
+    expect(latestPromises([staleReminder, supersession], now).get('sib-1')).toMatchObject({ source: 'series_move', start_at: null });
+    // Unknown window -> nothing to alert against.
+    expect(evaluateNoShow({ visit: { id: 'sib-1', status: 'pending' }, promise: latestPromises([staleReminder, supersession], now).get('sib-1'), now })).toBeNull();
+    const newReminder = { visit_id: 'sib-1', start_at: '2026-09-12T13:00:00.000Z', communicated_at: '2026-09-11T18:30:00.000Z', source: 'message' };
+    expect(latestPromises([staleReminder, supersession, newReminder], now).get('sib-1')).toMatchObject({ source: 'message', start_at: '2026-09-12T13:00:00.000Z' });
   });
 });
 
@@ -743,7 +709,7 @@ describe('loadPromiseEvents: pre-deploy legacy reschedule/confirmation messages 
   // alert against a window the visit no longer holds.
   function passthroughChain(result = []) {
     const chain = {};
-    for (const m of ['leftJoin', 'whereIn', 'whereRaw', 'whereBetween', 'whereNull', 'where']) chain[m] = () => chain;
+    for (const m of ['leftJoin', 'whereIn', 'whereRaw', 'whereBetween', 'whereNull', 'whereNotNull', 'where']) chain[m] = () => chain;
     chain.select = () => Promise.resolve(result);
     return chain;
   }
@@ -757,7 +723,7 @@ describe('loadPromiseEvents: pre-deploy legacy reschedule/confirmation messages 
   function fakeConn({ messageRows = [] } = {}) {
     const calls = {};
     const conn = (table) => {
-      if (table === 'customer_interactions as ci' || table === 'audit_log') return passthroughChain([]);
+      if (table === 'customer_interactions as ci' || table === 'audit_log' || table === 'series_moves as sm') return passthroughChain([]);
       if (table === 'messaging_audit_log as a') {
         const chain = {};
         chain.leftJoin = () => chain;
@@ -842,7 +808,7 @@ describe('noticeStillCurrent: an ineligible technician\'s tracking notice is dis
 describe('loadPromiseEvents: no fixed lookback — confirmations older than 100 days still count (round-3 P2-B)', () => {
   function passthroughChain(result = []) {
     const chain = {};
-    for (const m of ['leftJoin', 'whereIn', 'whereRaw', 'whereNull', 'where']) chain[m] = () => chain;
+    for (const m of ['leftJoin', 'whereIn', 'whereRaw', 'whereNull', 'whereNotNull', 'where']) chain[m] = () => chain;
     chain.select = () => Promise.resolve(result);
     return chain;
   }
@@ -852,7 +818,7 @@ describe('loadPromiseEvents: no fixed lookback — confirmations older than 100 
   // function" instead of silently passing.
   function fakeConn({ messageRows = [] } = {}) {
     const conn = (table) => {
-      if (table === 'customer_interactions as ci' || table === 'audit_log') return passthroughChain([]);
+      if (table === 'customer_interactions as ci' || table === 'audit_log' || table === 'series_moves as sm') return passthroughChain([]);
       if (table === 'messaging_audit_log as a') return passthroughChain(messageRows);
       throw new Error(`fake conn: unexpected table ${table}`);
     };
