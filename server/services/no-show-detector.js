@@ -186,6 +186,16 @@ function textActuallyWentOut() {
     });
 }
 
+// One canonical name for a reminder tier however the sender spelled it:
+// messaging metadata carries `appointment_reminder_72h`, the email event type
+// `appointment.reminder_72h`, and the grouped key's first segment matches the
+// latter. Used to match a recovered email to the SEND it belongs to, so the
+// 72h window never answers for the 24h send.
+function reminderTier(value) {
+  const name = String(value || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+  return name.replace(/^appointment/, '') || null;
+}
+
 // Read the immutable time rendered into the communication. The current
 // scheduled time is deliberately never used as proof of what we promised.
 async function loadPromiseEvents(conn, visitIds, { now = new Date() } = {}) {
@@ -582,8 +592,10 @@ async function loadPromiseEvents(conn, visitIds, { now = new Date() } = {}) {
   // survive as an unknown-window fallback and outrank it (codex P1 round 21).
   const noticeEvents = [
     ...messages.map((r) => ({ visit_id: r.appointment_id || r.metadata?.scheduled_service_id,
-      start_at: slotOf(r.metadata), communicated_at: r.sent_at, source: 'message', source_id: r.id })),
+      start_at: slotOf(r.metadata), tier: reminderTier(r.metadata?.original_message_type),
+      communicated_at: r.sent_at, source: 'message', source_id: r.id })),
     ...emails.map((r) => ({ visit_id: r.metadata?.scheduled_service_id, start_at: slotOf(r.metadata),
+      tier: reminderTier(r.metadata?.event_type),
       // The retry's send time when there is one (see the select above), then
       // the interaction row's own snapshot, then its insert time. A promise
       // the customer heard on a retry must not be ordered at the moment the
@@ -616,16 +628,23 @@ async function loadPromiseEvents(conn, visitIds, { now = new Date() } = {}) {
     // sends its SMS BEFORE the email, so the known window is timestamped
     // EARLIER than the email fan-out it covers, and a time comparison could
     // never see it (codex P1 round 21, second pass).
-    const knownOccurrences = new Set(noticeEvents
-      .filter((event) => event.visit_id && event.start_at != null)
-      .map((event) => `${event.visit_id}:${etDateString(new Date(event.start_at))}`));
+    // Same visit, same occurrence, SAME TIER: identity, so the SMS leg of a
+    // `both` reminder (sent before its email, therefore timestamped earlier)
+    // still covers it, while the 72h reminder's window does not cover the 24h
+    // send — a different message the customer received later (codex P1 round
+    // 21, rounds 17 and 21 pulling in opposite directions until both are
+    // expressed as identity rather than order).
+    const knownSends = new Set(noticeEvents
+      .filter((event) => event.visit_id && event.start_at != null && event.tier)
+      .map((event) => `${event.visit_id}:${etDateString(new Date(event.start_at))}:${event.tier}`));
     const stopMembersOf = new Map();
     for (const r of groupedEmails) {
       if (!stopMembersOf.has(r.stop_id)) stopMembersOf.set(r.stop_id, new Set());
       stopMembersOf.get(r.stop_id).add(String(r.visit_id));
     }
     const recoveredSends = new Set(groupedEmails
-      .filter((r) => [...stopMembersOf.get(r.stop_id)].some((memberId) => knownOccurrences.has(`${memberId}:${r.occurrence}`)))
+      .filter((r) => [...stopMembersOf.get(r.stop_id)]
+        .some((memberId) => knownSends.has(`${memberId}:${r.occurrence}:${reminderTier(r.tier)}`)))
       .map(sendKey));
     return groupedEmails
       .filter((r) => !recoveredSends.has(sendKey(r)))
@@ -1485,4 +1504,4 @@ async function sweep(conn, { now = new Date() } = {}) {
   return { alerted, active: rows.length };
 }
 
-module.exports = { enabled, cleanupAfterDisable, evaluateNoShow, promisedStartAt, trackingStage, callCommitmentInstant, LIVE_STATUSES, latestPromises, loadPromiseEvents, seriesSupersessions, promisedVisitIds, knownWindowAtOrAfter, groupedStops, representativeOf, stopState, stopPromise, lockedStop, recordSentWindowFallback, listNoShows, sweep, trackingKey, resolveLegacyCollision, alreadyHasOpenAlert, noticeStillCurrent };
+module.exports = { enabled, cleanupAfterDisable, evaluateNoShow, promisedStartAt, trackingStage, callCommitmentInstant, LIVE_STATUSES, latestPromises, loadPromiseEvents, seriesSupersessions, reminderTier, promisedVisitIds, knownWindowAtOrAfter, groupedStops, representativeOf, stopState, stopPromise, lockedStop, recordSentWindowFallback, listNoShows, sweep, trackingKey, resolveLegacyCollision, alreadyHasOpenAlert, noticeStillCurrent };
