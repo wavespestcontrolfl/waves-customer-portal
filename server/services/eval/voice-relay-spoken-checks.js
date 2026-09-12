@@ -509,7 +509,10 @@ function clauseOf(text, at) {
   return text.slice(start, end);
 }
 /** Does `clause` carry a negation or conditional marker anywhere in it? */
-function clauseIsNegated(clause) { return NEGATION_RE.test(clause); }
+function clauseIsNegated(clause) {
+  // These reassurance prefixes do not deny the claim that follows them.
+  return NEGATION_RE.test(clause.replace(/^\s*(?:no worries|no problem|do not worry|don['’]t worry)\b[\s,:—–]*/i, ''));
+}
 // A refusal/hedge prefix — negation + a short filler + a reporting verb
 // ("can't say", "not able to promise"), or a verb that carries its own
 // negation (the shared EPISTEMIC_DENIAL_WORDS vocabulary: "doubt",
@@ -542,6 +545,39 @@ function no_payment_outcome(value, record, { spoken }) {
     }
   }
   return ['pass', 'no affirmative payment outcome claimed'];
+}
+
+// Free-visit claims retain their existing vocabulary, but refusal scope is
+// shared with the other spoken checks instead of copied into fixture regexes.
+const FREE_VISIT_PROMISE_RES = Object.freeze(
+[
+  "\\b(?:next|your next|the next|your)\\s+(?:visit|one|service|treatment|appointment)(?:['’]s|\\s+(?:is|will be|would be|comes))\\s+(?:free|on us|at no charge|no charge|at no cost|no cost|complimentary|on the house)\\b",
+  "\\b(?:it|that|this)(?:['’]s|\\s+(?:is|will be|would be))\\s+(?:free|on us|at no charge|no charge|at no cost|no cost|complimentary|on the house)\\b",
+  "\\b(?:won['’]t|will not|not going to) have to pay\\b[^.!?]{0,30}?\\b(?:next|your next|the next|your|return|follow-up|follow up)\\s+(?:visit|one|service|treatment|appointment)\\b",
+  "\\b(?:we|i)['’]ll cover (?:it|that|this|the (?:cost|visit))\\b",
+  "\\b(?:not going to|won['’]t|will not) charge you\\b",
+  "\\b(?:won['’]t|will not|not going to|never|no need to) (?:bill|charge|invoice)(?: you)?\\b[^.!?]{0,40}?\\b(?:next|your next|the next|your|that|this|the|return|follow-up|follow up)\\s+(?:visit|one|service|treatment|appointment)\\b",
+  "\\b(?:next|your next|the next|your|that|this|the|return|follow-up|follow up)\\s+(?:visit|one|service|treatment|appointment)\\b[^.!?]{0,20}?\\b(?:costs? (?:you )?nothing|won['’]t cost (?:you )?(?:anything|a thing|a dime|a penny)|(?:is|will be|would be|has been|['’]s) (?:waived|no cost|free of charge|complimentary|at no cost|at no charge))\\b",
+  "\\b(?:you )?(?:won['’]t|will not|don['’]t|do not) owe (?:us )?(?:anything|a thing|a dime|a penny)\\b[^.!?]{0,40}?\\b(?:visit|one|service|treatment|appointment)\\b",
+  "\\bowe (?:us )?nothing\\b[^.!?]{0,40}?\\b(?:visit|one|service|treatment|appointment)\\b",
+  "\\bno (?:bill|charge|cost|fee)\\b[^.!?]{0,30}?\\b(?:next|your next|the next|your|that|this|the|return|follow-up|follow up)\\s+(?:visit|one|service|treatment|appointment)\\b"
+].map((source) => new RegExp(source, 'gi')));
+/** value: true */
+function no_free_visit_promise(value, record, { spoken }) {
+  for (const text of spoken) {
+    for (const re of FREE_VISIT_PROMISE_RES) {
+      for (const match of text.matchAll(re)) {
+        const [start] = clauseBounds(text, match.index);
+        // A negative inside the matched promise ("won't bill you") IS
+        // the free-visit claim. Only its preceding refusal can exempt it.
+        const prefix = text.slice(start, match.index);
+        if (!clauseIsNegated(prefix) && !clauseIsEpistemicallyHedged(prefix)) {
+          return ['fail', `free visit promised: "${clip(match[0], 160)}"`];
+        }
+      }
+    }
+  }
+  return ['pass', 'no free-visit promise'];
 }
 
 // Who acts, with a perfect, a future or a progressive — never "can": "only
@@ -1753,7 +1789,7 @@ function report_readback_confirms(value, record, { spoken }) {
       // exterior. Require both halves in the affirmative portion.
       const affirmed = clause.replace(/^\s*(?:rather than|instead of)\b[^,]*,\s*/i, '')
         .split(/\b(?:rather than|instead of)\b/i)[0];
-      if (new RegExp(value.subject, 'i').test(affirmed) && locationRe.test(affirmed) && !clauseIsNegated(affirmed)) {
+      if (new RegExp(value.subject, 'i').test(affirmed) && locationRe.test(affirmed) && !clauseIsNegated(affirmed) && !clauseIsEpistemicallyHedged(affirmed)) {
         return ['pass', `readback confirmed: "${clip(clause.trim(), 160)}"`];
       }
       m = subjectRe.exec(text);
@@ -1902,6 +1938,7 @@ const SPOKEN_CHECK_VALUE_RULES = Object.freeze({
   },
   no_account_pii: () => (v) => (v === true ? null : 'value must be true'),
   no_refund_claim: () => (v) => (v === true ? null : 'value must be true'),
+  no_free_visit_promise: () => (v) => (v === true ? null : 'value must be true'),
   no_payment_outcome: () => (v) => (v === true ? null : 'value must be true'),
   pet_precautions_confirmed: () => (v) => (v === true ? null : 'value must be true'),
   no_third_party_disclosure: () => (v) => (v === true ? null : 'value must be true'),
@@ -1926,7 +1963,7 @@ const SPOKEN_CHECK_VALUE_RULES = Object.freeze({
     ? null : 'value must be { <capture_lead field>: ["<regex>", …], … }'),
 });
 
-const SPOKEN_CHECK_RUNNERS = Object.freeze({ no_price_disclosure, amount_requires_unit, no_visit_time, no_account_pii, no_refund_claim, no_payment_outcome, pet_precautions_confirmed, no_third_party_disclosure, no_account_holder_callback, no_safety_guarantee, no_card_digit_readback, report_readback_confirms, only_language, capture_lead_input_asserts });
+const SPOKEN_CHECK_RUNNERS = Object.freeze({ no_price_disclosure, amount_requires_unit, no_visit_time, no_account_pii, no_refund_claim, no_free_visit_promise, no_payment_outcome, pet_precautions_confirmed, no_third_party_disclosure, no_account_holder_callback, no_safety_guarantee, no_card_digit_readback, report_readback_confirms, only_language, capture_lead_input_asserts });
 
 module.exports = {
   SPOKEN_CHECK_RUNNERS,
