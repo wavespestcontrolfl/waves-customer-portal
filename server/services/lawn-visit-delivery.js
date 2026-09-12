@@ -146,7 +146,7 @@ async function deliverConfirmedAssessment({ assessmentId, scheduledSmsLogId }, d
     // replaced, so this run waits for the next sweep instead of delivering, and
     // instead of starting a second generation.
     if (await generationInFlight(KnowledgeBridge, assessmentId, knex)) {
-      await runs.releasePipeline(assessmentId, owner, knex, { staleAfterMs });
+      await runs.deferPipeline(assessmentId, owner, knex, { staleAfterMs });
       return { skipped: 'generation_in_flight', done: [], gaps: [] };
     }
     await attachWeatherOnce((await runs.deliveryState(assessmentId, knex)).assessment);
@@ -195,14 +195,14 @@ async function deliverConfirmedAssessment({ assessmentId, scheduledSmsLogId }, d
       // delivery queue uses. Unsealable copy defers the rest to a later sweep
       // rather than sending a version a generator can still replace.
       if (await sealRefused(seal, needsSeal)) {
-        await runs.releasePipeline(assessmentId, owner, knex, { staleAfterMs });
+        await runs.deferPipeline(assessmentId, owner, knex, { staleAfterMs });
         return { skipped: 'copy_unsettled', done, gaps: state.gaps };
       }
       await action(state);
       await guard();
       if (step === 'notification' && (notificationResult?.notificationQueued || scheduledSmsLogId)
         && !notificationResult?.sent && (notificationResult?.deliveryOutcome || 'not_sent') === 'not_sent') {
-        await runs.releasePipeline(assessmentId, owner, knex, { staleAfterMs });
+        await runs.deferPipeline(assessmentId, owner, knex, { staleAfterMs });
         return { done, gaps: (await runs.deliveryState(assessmentId, knex)).gaps, notificationResult };
       }
       if ((await runs.deliveryState(assessmentId, knex)).gaps.includes(step)) throw stepIncomplete(step);

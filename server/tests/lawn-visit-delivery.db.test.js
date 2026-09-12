@@ -309,8 +309,13 @@ const deferred = () => { let resolve; const promise = new Promise((r) => { resol
     expect(await deliver(assessment.id, deps)).toMatchObject({ skipped: 'generation_in_flight' });
     expect(deps.LawnIntel.sendAssessmentNotification).not.toHaveBeenCalled();
     expect(deps.KnowledgeBridge.generateAssessmentRecommendations).not.toHaveBeenCalled();
-    // The claim is handed back, so the next sweep can pick the run up at once.
-    expect((await stored(assessment.id)).pipeline_claimed_at).toBeNull();
+    // Ownership is dropped but the attempt remains recent, so a hot deferral
+    // cannot immediately refill the next sweep batch.
+    expect(await stored(assessment.id)).toMatchObject({
+      pipeline_owner_token: null, pipeline_claimed_at: expect.any(Date),
+    });
+    expect(await runs.claimPipeline(assessment.id, db.knex)).toBeNull();
+    await expire(assessment.id);
     expect(await deliver(assessment.id, deps)).toMatchObject({ gaps: [] });
   });
 
@@ -331,6 +336,30 @@ const deferred = () => { let resolve; const promise = new Promise((r) => { resol
     // Oldest-first alone would have picked a poison row ahead of this one.
     expect(deliver.mock.calls.map(([arg]) => arg.assessmentId)).toEqual([fresh.id]);
     expect(failing).toHaveLength(2);
+  });
+
+  test('twenty-five intentionally deferred runs cannot refill the sweep ahead of fresh work', async () => {
+    await db.knex('lawn_assessment_runs').update({ pipeline_completed_at: db.knex.fn.now() });
+    const deferredRuns = [];
+    for (let i = 0; i < 25; i += 1) {
+      const older = await seed();
+      await db.knex('lawn_assessments').where({ id: older.id })
+        .update({ confirmed_at: db.knex.raw("clock_timestamp() - interval '2 days'") });
+      const deps = dependencies();
+      deps.KnowledgeBridge.treatmentGuard.isGenerationInFlight.mockResolvedValue(true);
+      await expect(deliver(older.id, deps)).resolves.toMatchObject({ skipped: 'generation_in_flight' });
+      const deferredRun = await stored(older.id);
+      expect(deferredRun.pipeline_owner_token).toBeNull();
+      expect(deferredRun.pipeline_claimed_at).toBeInstanceOf(Date);
+      expect(await runs.claimPipeline(older.id, db.knex)).toBeNull();
+      deferredRuns.push(older.id);
+    }
+    const fresh = await seed();
+    const resume = jest.fn(async () => ({ done: [], gaps: [] }));
+    expect(await sweepAbandonedDeliveries({ knex: db.knex, limit: 25, deliver: resume }))
+      .toMatchObject({ candidates: 1 });
+    expect(resume.mock.calls.map(([arg]) => arg.assessmentId)).toEqual([fresh.id]);
+    expect(deferredRuns).toHaveLength(25);
   });
 
   test('a transient failure gets another attempt even behind older poison runs', async () => {
@@ -424,10 +453,13 @@ const deferred = () => { let resolve; const promise = new Promise((r) => { resol
     expect(await deliver(assessment.id, deps)).toMatchObject({ skipped: 'copy_unsettled' });
     expect(deps.LawnIntel.generateServiceReport).not.toHaveBeenCalled();
     expect(deps.LawnIntel.sendAssessmentNotification).not.toHaveBeenCalled();
-    // Earlier steps still stand, and the claim is handed back for the next pass.
+    // Earlier steps still stand, and the deferred attempt backs off one lease.
     expect(deps.LawnIntel.emitHealthSignal).toHaveBeenCalledTimes(1);
-    expect((await stored(assessment.id)).pipeline_claimed_at).toBeNull();
+    expect(await stored(assessment.id)).toMatchObject({
+      pipeline_owner_token: null, pipeline_claimed_at: expect.any(Date),
+    });
     deps.KnowledgeBridge.sealRecommendationsForSend.mockResolvedValue(true);
+    await expire(assessment.id);
     expect(await deliver(assessment.id, deps)).toMatchObject({ gaps: [] });
     const sealOwner = deps.KnowledgeBridge.sealRecommendationsForSend.mock.calls.at(-1)[3];
     expect(sealOwner).toMatch(/^lawn-recovery:/);
@@ -462,7 +494,9 @@ const deferred = () => { let resolve; const promise = new Promise((r) => { resol
     expect(deps.LawnIntel.sendAssessmentNotification).not.toHaveBeenCalled();
     expect((await db.knex('lawn_assessments').where({ id: assessment.id }).first()).notification_sent).toBe(false);
     expect((await stored(assessment.id)).pipeline_completed_at).toBeNull();
-    expect((await stored(assessment.id)).pipeline_claimed_at).toBeNull();
+    expect(await stored(assessment.id)).toMatchObject({
+      pipeline_owner_token: null, pipeline_claimed_at: expect.any(Date),
+    });
   });
 
   test('the immediate pre-send seal renewal can stop dispatch before the heartbeat runs', async () => {

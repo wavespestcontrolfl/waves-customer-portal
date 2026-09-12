@@ -21,10 +21,14 @@ jest.mock('../config/twilio-numbers', () => ({ getOutboundNumber: jest.fn(() => 
 jest.mock('../services/sms-template-renderer', () => ({
   renderRequiredSmsTemplate: (...args) => mockRenderRequiredSmsTemplate(...args),
 }));
-jest.mock('../services/notification-dispatcher', () => ({ notify: (...args) => mockNotify(...args) }));
+jest.mock('../services/notification-dispatcher', () => ({
+  ...jest.requireActual('../services/notification-dispatcher'),
+  notify: (...args) => mockNotify(...args),
+}));
 
 const LawnIntel = require('../services/lawn-intelligence');
 const { replayDeferredNotification } = require('../services/lawn-visit-delivery');
+const { recheckDeferredReplay } = require('../services/messaging/deferred-replay-registry');
 
 const DATABASE_URL = process.env.DATABASE_URL;
 const postgres = DATABASE_URL ? describe : describe.skip;
@@ -43,7 +47,7 @@ postgres('deferred standalone lawn assessment notification (real PostgreSQL)', (
   beforeAll(async () => {
     fixture = await createLawnVisitDb();
     mockKnex = fixture.knex;
-    for (const table of ['sms_log', 'tech_calibration']) {
+    for (const table of ['sms_log', 'tech_calibration', 'notification_prefs']) {
       await fixture.knex.raw('CREATE TABLE ??.?? (LIKE public.?? INCLUDING ALL)', [fixture.schema, table, table]);
     }
     await pipelineMigration.up(fixture.knex);
@@ -54,7 +58,7 @@ postgres('deferred standalone lawn assessment notification (real PostgreSQL)', (
 
   beforeEach(async () => {
     jest.clearAllMocks();
-    for (const table of ['sms_log', 'tech_calibration', 'lawn_assessment_runs', 'lawn_assessments', 'technicians', 'customers']) {
+    for (const table of ['sms_log', 'notification_prefs', 'tech_calibration', 'lawn_assessment_runs', 'lawn_assessments', 'technicians', 'customers']) {
       await fixture.knex(table).del();
     }
   });
@@ -141,6 +145,38 @@ postgres('deferred standalone lawn assessment notification (real PostgreSQL)', (
 
     await LawnIntel.sendAssessmentNotification(seeded.assessment.id, { beforeSend: jest.fn() });
     expect(await fixture.knex('sms_log').where({ customer_id: seeded.customerId })).toHaveLength(1);
+  });
+
+  test('registry replay rechecks service-complete preferences and waits until customer quiet hours end', async () => {
+    const seeded = await seed();
+    await fixture.knex('notification_prefs').insert({
+      customer_id: seeded.customerId,
+      service_completed: true,
+      service_complete_channel: 'sms',
+      quiet_hours_start: '22:00:00',
+      quiet_hours_end: '09:00:00',
+    });
+    jest.useFakeTimers().setSystemTime(new Date('2026-09-12T12:00:00Z')); // 08:00 ET
+    try {
+      const waiting = await recheckDeferredReplay('lawn_assessment_notification_deferred', {
+        customer_id: seeded.customerId,
+      });
+      expect(waiting).toMatchObject({
+        eligible: false, reason: 'customer_quiet_hours', retryable: true,
+      });
+      expect(waiting.retryAt.toISOString()).toBe('2026-09-12T13:00:00.000Z');
+
+      await fixture.knex('notification_prefs').where({ customer_id: seeded.customerId }).update({
+        service_completed: false,
+        quiet_hours_start: null,
+        quiet_hours_end: null,
+      });
+      await expect(recheckDeferredReplay('lawn_assessment_notification_deferred', {
+        customer_id: seeded.customerId,
+      })).resolves.toEqual({ eligible: false, reason: 'type_disabled' });
+    } finally {
+      jest.useRealTimers();
+    }
   });
 
   test('an enqueue failure rolls back without falsely releasing the in-flight send claim', async () => {
@@ -266,10 +302,15 @@ postgres('deferred standalone lawn assessment notification (real PostgreSQL)', (
     });
     const meta = replayMeta(seeded, queued);
     expect(await replayDeferredNotification(meta, replayDeps())).toMatchObject(replayHold);
+    expect(await replayDeferredNotification(meta, replayDeps())).toMatchObject({
+      sent: false, code: 'LAWN_NOTIFICATION_BUSY', retryable: true,
+    });
+    await fixture.knex('lawn_assessment_runs').where({ id: seeded.run.id })
+      .update({ pipeline_claimed_at: fixture.knex.raw("clock_timestamp() - interval '16 minutes'") });
     expect(await replayDeferredNotification(meta, replayDeps())).toMatchObject(replayHold);
     expect(await fixture.knex('sms_log').where({ customer_id: seeded.customerId })).toHaveLength(1);
     expect(await fixture.knex('lawn_assessment_runs').where({ id: seeded.run.id }).first())
-      .toMatchObject({ pipeline_claimed_at: null, pipeline_owner_token: null, pipeline_completed_at: null });
+      .toMatchObject({ pipeline_claimed_at: expect.any(Date), pipeline_owner_token: null, pipeline_completed_at: null });
   });
 
   test('an uncertain replay retains the durable claim and cannot dispatch a second time', async () => {

@@ -318,6 +318,17 @@ async function releasePipeline(assessmentId, ownerToken, knex, { staleAfterMs = 
   return rows.length === 1;
 }
 
+// An intentional wait is not a never-attempted run. Drop exclusive ownership
+// while retaining a recent attempt timestamp, so the normal lease interval is
+// its retry backoff and the sweep's NULL-first ordering cannot let a batch of
+// deferred old runs starve fresh confirmation work.
+async function deferPipeline(assessmentId, ownerToken, knex, { staleAfterMs = PIPELINE_STALE_MS } = {}) {
+  const rows = await ownedPipelineQuery(assessmentId, ownerToken, knex, staleAfterMs)
+    .update({ pipeline_owner_token: null, pipeline_claimed_at: knex.raw('clock_timestamp()'), updated_at: knex.raw('clock_timestamp()') })
+    .returning('id');
+  return rows.length === 1;
+}
+
 function calibrationForRun(assessment, run) {
   const snapshot = parseObject(run?.reconciliation)?.confirmation;
   const technicianId = snapshot?.technician_id || assessment?.technician_id;
@@ -402,6 +413,6 @@ function replayContextForRun(run) {
 
 module.exports = {
   billedUsage, runRowFor, recordRun, attachRunPhotos, loadRun, priorAssessmentCount, responseForRun,
-  reviewRun, confirmRun, replayContextForRun, PIPELINE_STALE_MS, claimPipeline, renewPipeline, ownsPipeline, releasePipeline,
+  reviewRun, confirmRun, replayContextForRun, PIPELINE_STALE_MS, claimPipeline, renewPipeline, ownsPipeline, releasePipeline, deferPipeline,
   calibrationForRun, deliveryState, markPipelineHealthComplete, completePipeline,
 };
