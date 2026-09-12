@@ -548,7 +548,7 @@ function LeadDialog({ title, onClose, children }) {
   return (
     <Dialog open onClose={onClose}>
       <DialogHeader className="flex items-center justify-between gap-3">
-        <DialogTitle>{title}</DialogTitle>
+        <DialogTitle className="m-0">{title}</DialogTitle>
         <Button variant="ghost" onClick={onClose} aria-label="Close">
           ×
         </Button>
