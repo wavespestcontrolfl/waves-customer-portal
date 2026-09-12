@@ -24,10 +24,12 @@ createRoot(document.getElementById('root')).render(React.createElement(BrowserRo
 async function main() {
   fs.mkdirSync(output, { recursive: true });
   const report = { ...evidence(root), passed: false, requests: [], errors: [], unmatched: [], screenshots: [] };
-  const server = await previewServer(root), browser = await launchBrowser();
+  let server, browser;
   try {
+    server = await previewServer(root);
+    browser = await launchBrowser();
     for (const width of [1440, 390]) {
-      const context = await browser.newContext({ viewport: { width, height: 900 }, serviceWorkers: 'block' });
+      const context = await browser.newContext({ viewport: { width, height: 900 }, timezoneId: 'America/New_York', serviceWorkers: 'block' });
       const page = await context.newPage();
       page.setDefaultTimeout(20000);
       page.on('pageerror', error => report.errors.push(error.message));
@@ -151,7 +153,7 @@ async function main() {
         await capture('service-categories');
       } else {
         await page.goto(`${server.baseUrl}/qa-services?tab=discounts`);
-        await page.getByRole('button', { name: 'New Discount', exact: true }).click();
+        await page.getByRole('button', { name: '+ New Discount', exact: true }).click();
         await capture('discount-editor');
       }
       await page.goto(`${server.baseUrl}/qa-staff`);
@@ -183,7 +185,11 @@ async function main() {
     report.passed = true;
   } finally {
     fs.writeFileSync(path.join(output, 'report.json'), JSON.stringify(report, null, 2));
-    await browser.close(); await server.close();
+    try {
+      if (browser) await browser.close();
+    } finally {
+      if (server) await server.close();
+    }
   }
   console.log('Admin recovery desktop/mobile fixture passed.');
 }
