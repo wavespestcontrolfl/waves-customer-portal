@@ -3296,6 +3296,39 @@ postgres('visit summary recipient recovery', () => {
     }
   });
 
+  test('a resumed cadence keeps an empty schedule while its step is still sending', async () => {
+    // The parked sequence can hold a request the sender left `sending` with
+    // its outcome unproven. Scheduling it now would let the runner build a
+    // SECOND request for the same step (a no-link check-in bypasses ask
+    // spacing) and strand the first, which the stranded-send reconciliation
+    // can only advance while the sequence has no schedule.
+    cadenceGateOn();
+    const sequenceId = randomUUID();
+    const askId = randomUUID();
+    await mockPg('review_sequences').insert({ id: sequenceId, customer_id: fixture.customerId, service_record_id: fixture.recordIds[0],
+      status: 'stopped', stop_reason: Summary.PARKED_REVIEW_REASON, current_step: 1, next_run_at: null, plan: JSON.stringify([{ day: 0 }, { day: 4 }]) });
+    await mockPg('review_requests').insert({ id: askId, customer_id: fixture.customerId, service_record_id: fixture.recordIds[0],
+      status: 'sending', token: randomUUID().replace(/-/g, ''), claimed_at: new Date(), channel: 'sms',
+      triggered_by: 'sequence', sequence_id: sequenceId, sequence_step: 1 });
+    try {
+      expect(await Summary.resumeVisitReviewOutreach(fixture.packetId)).toBe(1);
+      const held = await mockPg('review_sequences').where({ id: sequenceId }).first('status', 'next_run_at');
+      expect(held).toMatchObject({ status: 'active' });
+      expect(held.next_run_at).toBeNull();
+
+      // Once that send resolves, a later resume schedules normally.
+      await mockPg('review_requests').where({ id: askId }).update({ status: 'sent', sms_sent_at: new Date() });
+      await mockPg('review_sequences').where({ id: sequenceId }).update({ status: 'stopped', stop_reason: Summary.PARKED_REVIEW_REASON });
+      expect(await Summary.resumeVisitReviewOutreach(fixture.packetId)).toBe(1);
+      const scheduled = await mockPg('review_sequences').where({ id: sequenceId }).first('status', 'next_run_at');
+      expect(scheduled.status).toBe('active');
+      expect(scheduled.next_run_at).not.toBeNull();
+    } finally {
+      await mockPg('review_requests').where({ id: askId }).del();
+      await mockPg('review_sequences').where({ id: sequenceId }).del();
+    }
+  });
+
   test('a parked cadence is not resumed while the sequence gate is off', async () => {
     const gates = require('../config/feature-gates');
     await mockPg('review_sequences').insert({ id: randomUUID(), customer_id: fixture.customerId, service_record_id: fixture.recordIds[0],

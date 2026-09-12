@@ -708,9 +708,22 @@ async function resumeVisitReviewOutreach(packetId, database = db) {
     await database('review_sequences').whereIn('id', others).where({ status: 'stopped', stop_reason: PARKED_REVIEW_REASON })
       .update({ stop_reason: PARKED_SUPERSEDED_REASON, updated_at: database.fn.now() });
   }
+  // A step whose send is still UNRESOLVED keeps its empty schedule (local
+  // audit): the parked sequence may hold a request left `sending` by a send
+  // whose outcome was never proven, and scheduling it now would let the
+  // runner build a second request for the same step — a no-link check-in
+  // bypasses ask spacing, so the customer could get two. It would also strand
+  // the original, since _advanceStrandedSequenceStep only advances a sequence
+  // with no schedule. The stranded-send reconciliation owns that row: it
+  // advances the step on proof of delivery, or releases it and schedules the
+  // retry itself.
+  const seq = await database('review_sequences').where({ id: chosen }).first('id', 'current_step');
+  const unresolved = await database('review_requests').where({ sequence_id: chosen, status: 'sending' })
+    .modify((q) => { if (seq?.current_step !== null && seq?.current_step !== undefined) q.where({ sequence_step: seq.current_step }); })
+    .first('id');
   const resumed = await database('review_sequences').where({ id: chosen, status: 'stopped', stop_reason: PARKED_REVIEW_REASON })
     .update({ status: 'active', stop_reason: null, completed_at: null, updated_at: database.fn.now(),
-      next_run_at: database.raw('GREATEST(COALESCE(next_run_at, NOW()), NOW())') });
+      ...(unresolved ? {} : { next_run_at: database.raw('GREATEST(COALESCE(next_run_at, NOW()), NOW())') }) });
   return Number(resumed || 0);
 }
 
