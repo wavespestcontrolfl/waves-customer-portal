@@ -1033,6 +1033,11 @@ describe('callCommitmentInstant (when the customer heard the promise) (round-5 P
       { notAfter: '2026-09-10T10:02:00Z' }).toISOString()).toBe('2026-09-10T10:02:00.000Z');
     expect(callCommitmentInstant({ created_at: created, duration_seconds: 600 },
       { notAfter: '2026-09-10T23:00:00Z' }).toISOString()).toBe('2026-09-10T10:10:00.000Z');
+    // An anchor from BEFORE the call is ignored: source_call_log_id can be
+    // attached to a visit that already existed, and clamping to its creation
+    // time would drag the promise back before it was spoken (round-10 P1).
+    expect(callCommitmentInstant({ created_at: created, duration_seconds: 600 },
+      { notAfter: '2026-08-01T00:00:00Z' }).toISOString()).toBe('2026-09-10T10:10:00.000Z');
   });
   test('a recording duration wins over the reported one, and no usable duration falls back to the call start', () => {
     expect(callCommitmentInstant({ created_at: '2026-09-10T10:00:00Z', recording_duration_seconds: 60, duration_seconds: 5 }).toISOString())

@@ -545,7 +545,13 @@ function callCommitmentInstant(call, { notAfter = null } = {}) {
   // round 10). Each caller passes the anchor it already has (the row written
   // by the pass that processed this call), which is by construction at or
   // after the call ended.
-  const ceiling = instant(notAfter);
+  // The anchor is only usable when it is itself at or after the call began:
+  // source_call_log_id can be ATTACHED to a visit that already existed, whose
+  // created_at long predates the call, and clamping to that would drag the
+  // promise back before it was spoken (codex P1 round 10). A pre-call anchor
+  // is simply ignored.
+  const anchor = instant(notAfter);
+  const ceiling = Number.isFinite(anchor) && anchor >= started ? anchor : NaN;
   const clamp = (ms) => (Number.isFinite(ceiling) ? Math.min(ms, ceiling) : ms);
   const talkEnd = clamp(Number.isFinite(seconds) && seconds > 0 ? started + seconds * 1000 : started);
   // call-bridge.js inserts the row BEFORE Twilio rings the staff phone and
