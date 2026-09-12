@@ -168,6 +168,49 @@ describe('addressAskNotice', () => {
     expect(addressAskNotice([ask('address_unverified', { address_candidates: 'nope' })]).candidates)
       .toEqual([]);
   });
+
+  it('falls back to the filing-time heard-address snapshot', () => {
+    const notice = addressAskNotice([ask('address_unverified', {
+      heard_address: {
+        street_line_1: '100 4th Avenue East',
+        street_line_2: 'Suite 2',
+        city: 'Palmetto',
+        postal_code: '34221',
+        raw_text: 'raw fallback should not replace structured fields',
+      },
+    })]);
+
+    expect(notice.heard).toBe('100 4th Avenue East, Suite 2, Palmetto, 34221');
+  });
+
+  it('uses raw snapshot text when no structured heard-address fields exist', () => {
+    const notice = addressAskNotice([ask('address_unverified', {
+      heard_address: {
+        street_line_1: null,
+        city: 'Palmetto',
+        postal_code: '34221',
+        raw_text: '100 fourth avenue east near the marina',
+      },
+    })]);
+
+    expect(notice.heard).toBe('100 fourth avenue east near the marina');
+  });
+
+  it('keeps snapshot evidence and candidates on the same card', () => {
+    const notice = addressAskNotice([
+      ask('address_unverified', {
+        heard_address: { street_line_1: '100 First Card Way' },
+        address_candidates: ['100 First Candidate Way'],
+      }, 'call-a'),
+      ask('address_unverified', {
+        heard_address: { street_line_1: '200 Second Card Way' },
+        address_candidates: ['200 Second Candidate Way'],
+      }, 'call-b'),
+    ]);
+
+    expect(notice.heard).toBe('100 First Card Way');
+    expect(notice.candidates).toEqual(['100 First Candidate Way']);
+  });
 });
 
 // address_recovered / address_readback never block routing, so a call carrying
@@ -291,6 +334,7 @@ describe('missing unit number alongside its companion hold', () => {
     const notice = addressAskNotice([
       ask('missing_unit_number', {
         address_as_heard: 'synthetic transcription',
+        heard_address: { street_line_1: 'snapshot must also stay out of heard copy' },
         unit_ask_building: { street_line_1: '44 Harbor Way' },
       }, 'call-1'),
     ]);

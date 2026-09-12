@@ -82,6 +82,76 @@ function adminFetch(path, options = {}) {
 // read settles fail-open, matching this warning's advisory contract.
 export const ADDRESS_ASK_LOOKUP_TIMEOUT_MS = 10_000;
 
+export function addressAskNoticesMatch(left, right) {
+  const evidence = (notice) => notice ? [
+    !!notice.unitOnly,
+    !!notice.readbackOnly,
+    notice.reason || null,
+    notice.heard || null,
+    notice.building || null,
+    Array.isArray(notice.candidates) ? notice.candidates : [],
+  ] : null;
+  return JSON.stringify(evidence(left)) === JSON.stringify(evidence(right));
+}
+
+export function requestAddressAskNotice({
+  customerId,
+  fetcher = adminFetch,
+  timeoutMs = ADDRESS_ASK_LOOKUP_TIMEOUT_MS,
+  signal,
+}) {
+  const customerKey = customerId == null ? '' : String(customerId);
+  if (!customerKey || signal?.aborted) {
+    return Promise.resolve({ status: 'cancelled', notice: null });
+  }
+
+  return new Promise((resolve) => {
+    const controller = new AbortController();
+    let settled = false;
+    let timeout;
+    const finish = (result) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeout);
+      signal?.removeEventListener('abort', cancel);
+      resolve(result);
+    };
+    const cancel = () => {
+      controller.abort();
+      finish({ status: 'cancelled', notice: null });
+    };
+    signal?.addEventListener('abort', cancel, { once: true });
+    timeout = setTimeout(() => {
+      controller.abort();
+      finish({ status: 'error', notice: null });
+    }, timeoutMs);
+
+    let request;
+    try {
+      request = fetcher(
+        `/admin/triage?address_confirmation=true&status=active&customer_id=${encodeURIComponent(customerKey)}`,
+        { signal: controller.signal },
+      );
+    } catch {
+      finish({ status: 'error', notice: null });
+    }
+    Promise.resolve(request)
+      .then((data) => finish({ status: 'ready', notice: addressAskNotice(data?.items) }))
+      .catch(() => finish(signal?.aborted
+        ? { status: 'cancelled', notice: null }
+        : { status: 'error', notice: null }));
+  });
+}
+
+export async function recheckAddressAskAtSubmit(options) {
+  const result = await requestAddressAskNotice(options);
+  return {
+    ...result,
+    changed: result.status === 'ready'
+      && !addressAskNoticesMatch(options.seenNotice, result.notice),
+  };
+}
+
 export function useAddressAskLookup(
   customerId,
   fetcher = adminFetch,
@@ -96,43 +166,16 @@ export function useAddressAskLookup(
       return undefined;
     }
     let cancelled = false;
-    let settled = false;
-    let timeout;
     const controller = new AbortController();
     setLookup({ customerId: customerKey, status: 'loading', notice: null });
-    const settleError = () => {
-      if (cancelled || settled) return;
-      settled = true;
-      clearTimeout(timeout);
-      setLookup({ customerId: customerKey, status: 'error', notice: null });
-    };
-    timeout = setTimeout(() => {
-      controller.abort();
-      settleError();
-    }, timeoutMs);
-    // active = open OR in_progress: a card the office already claimed is
-    // still an owed callback.
-    let request;
-    try {
-      request = fetcher(
-        `/admin/triage?status=active&customer_id=${encodeURIComponent(customerKey)}`,
-        { signal: controller.signal },
-      );
-    } catch {
-      settleError();
-    }
-    Promise.resolve(request)
-      .then((data) => {
-        if (!cancelled && !settled) {
-          settled = true;
-          clearTimeout(timeout);
-          setLookup({ customerId: customerKey, status: 'ready', notice: addressAskNotice(data?.items) });
+    requestAddressAskNotice({ customerId: customerKey, fetcher, timeoutMs, signal: controller.signal })
+      .then((result) => {
+        if (!cancelled && result.status !== 'cancelled') {
+          setLookup({ customerId: customerKey, status: result.status, notice: result.notice });
         }
-      })
-      .catch(settleError);
+      });
     return () => {
       cancelled = true;
-      clearTimeout(timeout);
       controller.abort();
     };
   }, [customerKey, fetcher, timeoutMs]);
@@ -142,6 +185,9 @@ export function useAddressAskLookup(
     addressAsk: resultIsCurrent ? lookup.notice : null,
     addressAskPending: !!customerKey && (!resultIsCurrent || lookup.status === 'loading'),
     addressAskStatus: resultIsCurrent ? lookup.status : (customerKey ? 'loading' : 'idle'),
+    setAddressAsk: (notice) => {
+      if (customerKey) setLookup({ customerId: customerKey, status: 'ready', notice });
+    },
   };
 }
 
@@ -1011,6 +1057,27 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
   // the operator creates one (prefilled from the quote — see the estimate-load
   // effect) rather than booking against a null id.
   const [selectedCustomer, setSelectedCustomer] = useState(defaultCustomer?.id ? defaultCustomer : null);
+  const selectedCustomerIdRef = useRef('');
+  const addressSubmitRecheckRef = useRef(null);
+  const modalMountedRef = useRef(true);
+  selectedCustomerIdRef.current = selectedCustomer?.id == null ? '' : String(selectedCustomer.id);
+  useEffect(() => {
+    modalMountedRef.current = true;
+    return () => {
+      modalMountedRef.current = false;
+      addressSubmitRecheckRef.current?.controller.abort();
+    };
+  }, []);
+  useEffect(() => {
+    const customerId = selectedCustomer?.id == null ? '' : String(selectedCustomer.id);
+    return () => {
+      // A response for the previously selected customer cannot authorize or
+      // alter a submit for the next one.
+      if (addressSubmitRecheckRef.current?.customerId === customerId) {
+        addressSubmitRecheckRef.current.controller.abort();
+      }
+    };
+  }, [selectedCustomer?.id]);
   // Live server quote for a blank-priced one-time mosquito line:
   // { customerId, status: 'loading' | 'ready' | 'error', price } — price is
   // null only on an authoritative 'ready' response for a customer with no
@@ -1043,7 +1110,8 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
   // warning is advisory — the operator may well be booking the fix — but the
   // lookup must settle before submit is enabled so a slow warning cannot land
   // just after the booking. A lookup failure settles fail-open.
-  const { addressAsk, addressAskPending } = useAddressAskLookup(selectedCustomer?.id);
+  const { addressAsk, addressAskPending, setAddressAsk } = useAddressAskLookup(selectedCustomer?.id);
+  const addressAskNoticeRef = useRef(null);
   const propertyPickerActive = bookingPropertyState === 'ready';
   const selectedBookingProperty = propertyPickerActive
     ? bookingProperties.find((p) => String(p.id) === String(selectedPropertyId)) || null
@@ -1420,6 +1488,17 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
   // during the awaited re-quote and booked twice; the ref is synchronous.
   const submittingRef = useRef(false);
   const [toast, setToast] = useState('');
+  const toastRef = useRef(null);
+  const [addressAskHoldVersion, setAddressAskHoldVersion] = useState(0);
+  useEffect(() => {
+    if (!addressAskHoldVersion) return undefined;
+    const frame = requestAnimationFrame(() => {
+      const target = addressAsk ? addressAskNoticeRef.current : toastRef.current;
+      target?.scrollIntoView?.({ block: 'center', behavior: 'auto' });
+      target?.focus?.({ preventScroll: true });
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [addressAskHoldVersion, addressAsk]);
   const [duplicateConflict, setDuplicateConflict] = useState(null);
   const [separateProgramReason, setSeparateProgramReason] = useState('');
   const duplicateConflictRef = useRef(null);
@@ -1836,10 +1915,19 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
   };
 
   const selectCustomer = (c) => {
+    if (submittingRef.current || createdGroupKeysRef.current.size > 0) return false;
     setSelectedCustomer(c);
     const label = c.profileLabel && c.profileLabel !== 'Primary' ? ` - ${c.profileLabel}` : '';
     setCustomerSearch(`${c.firstName} ${c.lastName}${label}`);
     setCustomerResults([]);
+    return true;
+  };
+
+  const clearSelectedCustomer = () => {
+    if (submittingRef.current || createdGroupKeysRef.current.size > 0) return false;
+    setSelectedCustomer(null);
+    setCustomerSearch('');
+    return true;
   };
 
   // Quick add customer. `submitQuickAdd` takes explicit confirm flags;
@@ -2284,8 +2372,9 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
     setSaving(true);
     const releaseSubmit = () => {
       submittingRef.current = false;
-      setSaving(false);
+      if (modalMountedRef.current) setSaving(false);
     };
+    const submitCustomerId = String(selectedCustomer.id);
     // An auto-priced mosquito line must not be booked until the live server
     // quote resolved, and a cached quote is re-verified at the moment of
     // booking (lot data or pricing config may have changed while the modal
@@ -2296,6 +2385,13 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
       mosquitoQuote,
       customerId: selectedCustomer.id,
     });
+    // The quote check can await the network. A customer switch or close while
+    // it is pending invalidates the old closure before it updates state or
+    // reaches the final address check.
+    if (!modalMountedRef.current || selectedCustomerIdRef.current !== submitCustomerId) {
+      releaseSubmit();
+      return;
+    }
     if (mosquitoHold) {
       if (mosquitoHold.clearQuote) {
         mosquitoQuoteReqRef.current = null;
@@ -2309,9 +2405,45 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
       releaseSubmit();
       return;
     }
+    // Keep this as the FINAL await before request-body assembly and the first
+    // appointment POST. A card filed while pricing was rechecked must be seen
+    // by the operator before booking.
+    const recheckController = new AbortController();
+    addressSubmitRecheckRef.current?.controller.abort();
+    addressSubmitRecheckRef.current = { customerId: submitCustomerId, controller: recheckController };
+    const freshAddressAsk = await recheckAddressAskAtSubmit({
+      customerId: submitCustomerId,
+      seenNotice: addressAsk,
+      signal: recheckController.signal,
+    });
+    if (addressSubmitRecheckRef.current?.controller === recheckController) {
+      addressSubmitRecheckRef.current = null;
+    }
+    // Selection/unmount during the await cancels this attempt. Never let an
+    // old customer's response update the current warning or reach a POST.
+    if (!modalMountedRef.current
+      || freshAddressAsk.status === 'cancelled'
+      || selectedCustomerIdRef.current !== submitCustomerId) {
+      releaseSubmit();
+      return;
+    }
+    // A newly filed card, cleared card, or changed evidence must be read in
+    // the modal before booking. Once the operator sees this exact notice, the
+    // next click may proceed after its own fresh check.
+    if (freshAddressAsk.changed) {
+      setAddressAsk(freshAddressAsk.notice);
+      setToast('Address review changed — read the latest notice, then submit again.');
+      setAddressAskHoldVersion((version) => version + 1);
+      setTimeout(() => {
+        if (modalMountedRef.current) setToast('');
+      }, 4000);
+      releaseSubmit();
+      return;
+    }
     const groups = groupServicesForAppointmentSubmit(services);
     const results = [];
     let firstError = null;
+    let submitCancelled = false;
     // Annual-prepay-on-book rides exactly ONE recurring group's POST — if a
     // one-time group also carried it, whichever request landed first would
     // accept the estimate (possibly as standard) and strand the prepay.
@@ -2327,6 +2459,10 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
       // Skip groups already created in a prior attempt of this submit
       // session — a retry after partial failure shouldn't duplicate them.
       if (createdGroupKeysRef.current.has(key)) continue;
+      if (!modalMountedRef.current || selectedCustomerIdRef.current !== submitCustomerId) {
+        submitCancelled = true;
+        break;
+      }
       try {
         const [primary, ...extras] = group.lines;
         const groupSubtotal = group.lines.reduce((sum, s) => sum + lineEffectiveNetAmount(s), 0);
@@ -2427,6 +2563,13 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
           prepaySeriesId = r.id;
         }
         results.push(r);
+        // A request already accepted by the server stays recorded, but a
+        // customer switch/close during that await must stop every later group
+        // and any follow-up invoice POST from the stale closure.
+        if (!modalMountedRef.current || selectedCustomerIdRef.current !== submitCustomerId) {
+          submitCancelled = true;
+          break;
+        }
       } catch (e) {
         const decision = classifySubmitGroupFailure(e, {
           group, linkedEstimate, separateProgram, key, groupLabelText: groupLabel(group),
@@ -2444,6 +2587,12 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
       }
     }
     releaseSubmit();
+    if (submitCancelled) {
+      if (modalMountedRef.current && results.length > 0) {
+        setToast(`${results.length} of ${groups.length} appointment series saved before the customer changed. Review the customer and submit the remaining work again.`);
+      }
+      return;
+    }
     if (firstError) {
       const created = createdGroupKeysRef.current.size;
       const total = groups.length;
@@ -2724,7 +2873,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
         <div style={mobileContentStyle}>
 
         {/* Toast */}
-        {toast && <div style={{ background: '#FFFFFF', border: `1px solid ${D.border}`, borderRadius: 6, padding: '10px 14px', marginBottom: 12, color: D.text, fontSize: 13, fontWeight: 500 }}>{toast}</div>}
+        {toast && <div ref={toastRef} tabIndex={-1} style={{ background: '#FFFFFF', border: `1px solid ${D.border}`, borderRadius: 6, padding: '10px 14px', marginBottom: 12, color: D.text, fontSize: 13, fontWeight: 500 }}>{toast}</div>}
 
         {/* Section 1: Customer */}
         <div style={sectionStyle}>
@@ -2860,7 +3009,24 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
                 {selectedCustomer.phone && <div style={{ fontSize: 12, color: D.muted }}>{selectedCustomer.phone}</div>}
               </div>
               {selectedCustomer.tier && <span style={{ fontSize: 11, padding: '3px 8px', borderRadius: 6, background: `${TIER_COLORS[selectedCustomer.tier] || D.teal}22`, color: TIER_COLORS[selectedCustomer.tier] || D.teal, fontWeight: 500 }}>{selectedCustomer.tier}</span>}
-              <button onClick={() => { setSelectedCustomer(null); setCustomerSearch(''); }} style={{ background: 'none', border: 'none', color: D.muted, cursor: 'pointer', fontSize: 16, minWidth: 48, minHeight: 48, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>✕</button>
+              <button
+                type="button"
+                aria-label="Clear selected customer"
+                disabled={saving || createdGroupKeysRef.current.size > 0}
+                onClick={clearSelectedCustomer}
+                style={{
+                  background: 'none', border: 'none', color: D.muted,
+                  cursor: saving || createdGroupKeysRef.current.size > 0 ? 'default' : 'pointer',
+                  opacity: saving || createdGroupKeysRef.current.size > 0 ? 0.45 : 1,
+                  fontSize: 16, minWidth: 48, minHeight: 48,
+                  display: 'flex', alignItems: 'center', justifyContent: 'center',
+                }}
+              >✕</button>
+            </div>
+          )}
+          {selectedCustomer && createdGroupKeysRef.current.size > 0 && (
+            <div role="status" style={{ fontSize: 14, color: D.muted, marginTop: 10 }}>
+              Part of this booking is already saved for this customer. Close and start a new appointment to change customers.
             </div>
           )}
           {selectedCustomer && propertyPickerActive && (
@@ -2940,7 +3106,9 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
           )}
           {selectedCustomer && addressAsk && (
             <div
+              ref={addressAskNoticeRef}
               role="alert"
+              tabIndex={-1}
               style={{
                 marginTop: 10, padding: '8px 10px', borderRadius: 4,
                 border: `1px solid ${D.red}`, fontSize: 14, color: D.red,

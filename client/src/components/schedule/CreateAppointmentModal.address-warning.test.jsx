@@ -1,7 +1,12 @@
 // @vitest-environment jsdom
 import { act, cleanup, renderHook, waitFor } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { ADDRESS_ASK_LOOKUP_TIMEOUT_MS, useAddressAskLookup } from './CreateAppointmentModal.jsx';
+import {
+  ADDRESS_ASK_LOOKUP_TIMEOUT_MS,
+  addressAskNoticesMatch,
+  recheckAddressAskAtSubmit,
+  useAddressAskLookup,
+} from './CreateAppointmentModal.jsx';
 
 afterEach(() => {
   cleanup();
@@ -129,5 +134,99 @@ describe('useAddressAskLookup', () => {
     expect(signal.aborted).toBe(false);
     unmount();
     expect(signal.aborted).toBe(true);
+  });
+});
+
+describe('submission-time address review', () => {
+  const notice = (heard) => ({
+    unitOnly: false,
+    readbackOnly: false,
+    reason: 'the address from the call did not validate',
+    heard,
+    building: null,
+    candidates: [],
+  });
+
+  it('holds when a card is filed after the initial lookup', async () => {
+    const request = deferred();
+    const check = recheckAddressAskAtSubmit({
+      customerId: 'customer-a',
+      seenNotice: null,
+      fetcher: () => request.promise,
+      timeoutMs: 100,
+    });
+
+    request.resolve({
+      items: [{ reason_code: 'address_unverified', payload: { address_as_heard: 'new evidence' } }],
+    });
+    await expect(check).resolves.toMatchObject({
+      status: 'ready',
+      changed: true,
+      notice: { heard: 'new evidence' },
+    });
+  });
+
+  it('holds when displayed evidence changes and allows the same notice', async () => {
+    const changed = await recheckAddressAskAtSubmit({
+      customerId: 'customer-a',
+      seenNotice: notice('old evidence'),
+      fetcher: async () => ({
+        items: [{ reason_code: 'address_unverified', payload: { address_as_heard: 'new evidence' } }],
+      }),
+    });
+    const same = await recheckAddressAskAtSubmit({
+      customerId: 'customer-a',
+      seenNotice: changed.notice,
+      fetcher: async () => ({
+        items: [{ reason_code: 'address_unverified', payload: { address_as_heard: 'new evidence' } }],
+      }),
+    });
+
+    expect(changed.changed).toBe(true);
+    expect(same).toMatchObject({ status: 'ready', changed: false });
+    expect(addressAskNoticesMatch(changed.notice, same.notice)).toBe(true);
+  });
+
+  it('holds with a cleared notice so the operator sees that the prior warning is gone', async () => {
+    await expect(recheckAddressAskAtSubmit({
+      customerId: 'customer-a',
+      seenNotice: notice('previous evidence'),
+      fetcher: async () => ({ items: [] }),
+    })).resolves.toMatchObject({ status: 'ready', changed: true, notice: null });
+  });
+
+  it('fails open on error or timeout', async () => {
+    const failed = await recheckAddressAskAtSubmit({
+      customerId: 'customer-a',
+      seenNotice: null,
+      fetcher: async () => { throw new Error('offline'); },
+    });
+    expect(failed).toMatchObject({ status: 'error', changed: false, notice: null });
+
+    vi.useFakeTimers();
+    const timedOutCheck = recheckAddressAskAtSubmit({
+      customerId: 'customer-a',
+      seenNotice: null,
+      fetcher: () => new Promise(() => {}),
+      timeoutMs: 100,
+    });
+    await vi.advanceTimersByTimeAsync(100);
+    await expect(timedOutCheck).resolves.toMatchObject({ status: 'error', changed: false, notice: null });
+  });
+
+  it('cancels a stale-customer check and ignores its late completion', async () => {
+    const request = deferred();
+    const controller = new AbortController();
+    const check = recheckAddressAskAtSubmit({
+      customerId: 'customer-a',
+      seenNotice: null,
+      fetcher: () => request.promise,
+      signal: controller.signal,
+    });
+
+    controller.abort();
+    await expect(check).resolves.toMatchObject({ status: 'cancelled', changed: false, notice: null });
+    request.resolve({ items: [{ reason_code: 'address_unverified' }] });
+    await request.promise;
   });
 });

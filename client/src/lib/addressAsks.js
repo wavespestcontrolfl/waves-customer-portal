@@ -157,6 +157,19 @@ export function addressAskNotice(asks) {
   const building = unitBuilding?.street_line_1
     ? [unitBuilding.street_line_1, unitBuilding.city, unitBuilding.postal_code].filter(Boolean).join(', ')
     : null;
+  const heardSnapshot = card.payload?.heard_address;
+  const snapshotParts = heardSnapshot && typeof heardSnapshot === 'object'
+    ? [
+      heardSnapshot.street_line_1,
+      heardSnapshot.street_line_2,
+      heardSnapshot.city,
+      heardSnapshot.postal_code,
+    ].map((part) => String(part || '').trim()).filter(Boolean)
+    : [];
+  const heard = card.payload?.address_as_heard
+    || (heardSnapshot?.street_line_1 ? snapshotParts.join(', ') : heardSnapshot?.raw_text)
+    || (snapshotParts.length > 0 ? snapshotParts.join(', ') : null)
+    || null;
   return {
     unitOnly: askKind === 2,
     readbackOnly: askKind === 1,
@@ -169,7 +182,7 @@ export function addressAskNotice(asks) {
           : 'the address from the call did not validate',
     // unit_ask_building is validated premise data, not a transcription. Keep
     // it out of the "heard as" copy even if a future payload carries both.
-    heard: askKind === 2 ? null : card.payload?.address_as_heard || null,
+    heard: askKind === 2 ? null : heard,
     building,
     candidates: [...new Set(candidates)].slice(0, 5),
   };
