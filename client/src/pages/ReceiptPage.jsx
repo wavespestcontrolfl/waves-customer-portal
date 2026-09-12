@@ -45,6 +45,7 @@ import {
   BrandCard,
   SerifHeading,
   HelpPhoneLink,
+  PublicStateCard,
 } from '../components/brand';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
@@ -219,14 +220,13 @@ export default function ReceiptPage() {
   if (error?.status === 404) {
     return (
       <WavesShell variant="customer" topBar="solid">
-        <div style={{ maxWidth: 560, margin: '48px auto', padding: '0 16px' }}>
-          <BrandCard>
-            <SerifHeading style={{ marginBottom: SP.sm }}>We couldn't find that receipt</SerifHeading>
-            <p style={{ margin: 0, fontSize: FS.lead, color: DOC.ink, lineHeight: LH.body }}>
-              The link may be mistyped. Give us a call and we'll pull up your records — <HelpPhoneLink tone="dark" inline />.
-            </p>
-          </BrandCard>
-        </div>
+        <CustomerColumn>
+          {/* contact="none": the affordance here has always been the phone
+              number inside the sentence, not a button pair. */}
+          <PublicStateCard state="not-found" title="We couldn't find that receipt" contact="none">
+            The link may be mistyped. Give us a call and we'll pull up your records — <HelpPhoneLink tone="dark" inline />.
+          </PublicStateCard>
+        </CustomerColumn>
       </WavesShell>
     );
   }
@@ -234,21 +234,15 @@ export default function ReceiptPage() {
   if (error || !data) {
     return (
       <WavesShell variant="customer" topBar="solid">
-        <div style={{ maxWidth: 560, margin: '48px auto', padding: '0 16px' }}>
-          <BrandCard>
-            <SerifHeading style={{ marginBottom: SP.sm }}>We couldn't load that receipt</SerifHeading>
-            <p style={{ margin: '0 0 16px', fontSize: FS.lead, color: DOC.ink, lineHeight: LH.body }}>
-              This looks temporary. Your link is still valid—try again in a moment.
-            </p>
-            <button
-              type="button"
-              onClick={() => setLoadAttempt((attempt) => attempt + 1)}
-              style={{ border: 0, borderRadius: RADIUS.input, padding: '11px 16px', background: DOC.ink, color: '#fff', font: 'inherit', fontWeight: FW.bold, cursor: 'pointer' }}
-            >
-              Try again
-            </button>
-          </BrandCard>
-        </div>
+        <CustomerColumn>
+          <PublicStateCard
+            state="error"
+            title="We couldn't load that receipt"
+            onRetry={() => setLoadAttempt((attempt) => attempt + 1)}
+          >
+            This looks temporary. Your link is still valid&mdash;try again in a moment.
+          </PublicStateCard>
+        </CustomerColumn>
       </WavesShell>
     );
   }

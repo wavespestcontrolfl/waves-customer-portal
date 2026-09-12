@@ -2364,8 +2364,32 @@ describe('public estimate one-time breakdown', () => {
         windowDisplay: '9:00 AM - 11:00 AM',
         serviceType: 'Initial Pest Control',
         status: 'confirmed',
+        // A genuinely committed appointment is never a hold. The flags exist
+        // because a RELOAD mid-checkout re-offers the customer's OWN
+        // uncommitted hold through this same contract (owner case
+        // 2026-09-11), and the client must be able to tell the two apart —
+        // one runs a countdown, the other must not. A committed visit carries
+        // NEITHER field (codex r14 P0): the public contract promises its
+        // payload is byte-identical to the pre-hold-grace shape, so a client
+        // that distinguishes an absent property is unaffected.
       },
     });
+  });
+
+  test('a committed appointment carries neither hold field', () => {
+    const { appointment } = buildEstimateAcceptanceContract({
+      quoteRequirement: { quoteRequired: false },
+      existingAppointment: {
+        id: 'appt-committed',
+        customer_id: 'cust-1',
+        scheduled_date: '2026-09-16',
+        window_start: '09:00:00',
+        service_type: 'Lawn Care',
+        status: 'confirmed',
+      },
+    });
+    expect(appointment).not.toHaveProperty('isHold');
+    expect(appointment).not.toHaveProperty('reservationExpiresAt');
   });
 
   test('stored window_display is the fallback only when window_start is unparseable', () => {

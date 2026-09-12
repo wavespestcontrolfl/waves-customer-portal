@@ -775,6 +775,10 @@ describe('review request follow-up flow', () => {
 
   test('stale claim, provider confirms nothing left → pre-provider crash, claim released', async () => {
     const { findOutboundMessageSince } = require('../services/twilio');
+    // The numbers the customer holds now, then the recipient-less pass that
+    // covers a number changed or merged since the claim — "nothing left"
+    // means both came back empty.
+    findOutboundMessageSince.mockResolvedValueOnce({ found: false });
     findOutboundMessageSince.mockResolvedValueOnce({ found: false });
     const { rrQuery } = wireStaleClaimNoLocalEvidence();
     rrQuery.update.mockResolvedValueOnce(1); // the reclaim
@@ -874,6 +878,7 @@ describe('review request follow-up flow', () => {
         if (table === 'customers') return customersQuery;
         throw new Error(`Unexpected table query: ${table}`);
       });
+      require('../services/twilio').findOutboundMessageSince.mockResolvedValueOnce({ found: false });
       require('../services/twilio').findOutboundMessageSince.mockResolvedValueOnce({ found: false });
       expect(await ReviewService.findInlineAwaitingEmail('cust-1')).toBeNull();
       expect(rrQuery.update).not.toHaveBeenCalled();

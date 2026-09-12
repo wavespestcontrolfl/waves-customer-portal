@@ -468,7 +468,7 @@
     {
       "router": "server/routes/estimate-slots-public.js",
       "mount": "/api/public/estimates",
-      "reason": "Estimate scheduling/deposit flow by unguessable estimate token (ask/find-slots carry the signed askToken contract from AGENTS.md); the USE entry is the router's no-cache header stamp (always next())",
+      "reason": "Estimate scheduling/deposit flow by unguessable estimate token (ask/find-slots carry the signed askToken contract from AGENTS.md); the /reserve/:id/extend leg pushes an EXISTING hold's expiry out under the same token gate, uuid-gates the hold id, and answers the same generic 404 for an unknown/foreign/committed/past-grace hold (owner case 2026-09-11); the USE entry is the router's no-cache header stamp (always next())",
       "routes": [
         "USE /api/public/estimates (inline function#d652afe9)",
         "DELETE /api/public/estimates/:token/reserve/:scheduledServiceId",
@@ -481,7 +481,8 @@
         "POST /api/public/estimates/:token/deposit-reset [conditional: loop over ['deposit-intent', 'deposit-quote', 'deposit-finalize', 'deposit-reset']]",
         "POST /api/public/estimates/:token/find-slots",
         "POST /api/public/estimates/:token/recurring-card-intent",
-        "POST /api/public/estimates/:token/reserve"
+        "POST /api/public/estimates/:token/reserve",
+        "POST /api/public/estimates/:token/reserve/:scheduledServiceId/extend"
       ]
     },
     {

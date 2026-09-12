@@ -1388,7 +1388,13 @@ function selectCustomerFacingSlots(slots, limit, { routeFirst = false } = {}) {
 //      the same predicate reserveSlot/commitReservation enforce via
 //      findConflictingVisits' `travel` option. `coords` = the estimate's pin
 //      (null on the no-coords branch → buffer-only).
-async function filterCollidingSlots(slots, { dateFrom, dateTo, estimateZone = null, coords = null, serviceMix = null }) {
+// `ownEstimateId`: the estimate whose slots these are. Its OWN live hold must
+// not remove its own window from the offer (codex r8 P1) — a customer who
+// reserved and then reloaded was shown the window as taken, so the legacy
+// page could report no times at all and leave a still-live reservation
+// unconfirmable, and the React page forced a needless re-pick. Another
+// estimate's hold still blocks, exactly as before.
+async function filterCollidingSlots(slots, { dateFrom, dateTo, estimateZone = null, coords = null, serviceMix = null, ownEstimateId = null }) {
   if (!Array.isArray(slots) || slots.length === 0) return slots;
   let inactiveTechs = new Set();
   if (serviceMix) {
@@ -1404,13 +1410,28 @@ async function filterCollidingSlots(slots, { dateFrom, dateTo, estimateZone = nu
     return slots.filter(slot => slot.routeMode === 'arrival_windows' && slot.techId
       && !inactiveTechs.has(String(slot.techId)) && slotWindowFitsDay(slot.windowStart, slot.windowEnd));
   }
-  const rows = await db('scheduled_services')
+  let collisionQuery = db('scheduled_services')
     .leftJoin('customers', 'scheduled_services.customer_id', 'customers.id')
     .whereBetween('scheduled_services.scheduled_date', [dateFrom, dateTo])
     .whereNotIn('scheduled_services.status', NOT_A_ROUTE_STOP_STATUSES)
     .andWhere((q) => {
       q.whereNull('scheduled_services.reservation_expires_at').orWhereRaw('scheduled_services.reservation_expires_at > NOW()');
-    })
+    });
+  if (ownEstimateId) {
+    // This estimate's own UNCOMMITTED hold is not a collision for itself
+    // (codex r8 P1). Narrow on purpose: a COMMITTED visit of this estimate
+    // still blocks (customer_id is set), and only an id the caller supplied
+    // is excluded. Chained conditionally rather than through .modify() so the
+    // builder stays the bare sequence this module's unit doubles implement.
+    collisionQuery = collisionQuery.andWhere((q) => {
+      q.whereNot((own) => {
+        own.where('scheduled_services.source_estimate_id', ownEstimateId)
+          .whereNull('scheduled_services.customer_id')
+          .whereNotNull('scheduled_services.reservation_expires_at');
+      });
+    });
+  }
+  const rows = await collisionQuery
     .select(
       'scheduled_services.technician_id',
       'scheduled_services.scheduled_date',
@@ -1778,7 +1799,7 @@ async function getAvailableSlots(estimateId, userOpts = {}) {
       includeWeekends: opts.includeWeekends,
       minimumLeadMinutes: opts.minimumLeadMinutes,
     })))).flat();
-    const asap = await filterCollidingSlots(asapRaw, { dateFrom, dateTo, estimateZone, coords, serviceMix: serviceProfile.reservationServiceMix });
+    const asap = await filterCollidingSlots(asapRaw, { dateFrom, dateTo, estimateZone, coords, serviceMix: serviceProfile.reservationServiceMix, ownEstimateId: estimateId });
     const filtered = dedupeSlots(asap).sort(compareCustomerFacingSlots);
     const bookable = filterSeasonalSlots(
       filterPastSlotsForToday(filtered, { minimumLeadMinutes: opts.minimumLeadMinutes }),
@@ -1834,6 +1855,10 @@ async function getAvailableSlots(estimateId, userOpts = {}) {
       serviceType: serviceProfile.services.map(service => service.label || service.service).join(' '),
       serviceTypes: serviceProfile.services.map(service => service.label || service.service),
       capacityPlacement: true,
+      // This estimate's own uncommitted hold must not occupy the route it is
+      // asking about (codex r16 P1) — the non-capacity collision query
+      // already excludes it; capacity generation needs the same.
+      excludeEstimateId: estimateId,
       // Travel gap (GATE_SLOT_TRAVEL_GAP): customer-facing turnaround buffer.
       bufferMinutes: customerFacingBufferMinutes(),
       dateFrom: segFrom,
@@ -1856,12 +1881,12 @@ async function getAvailableSlots(estimateId, userOpts = {}) {
     .map((s) => classifySlot(s, opts.proximityDriveMinutes, serviceProfile.durationMinutes));
   // Drop candidates whose rounded display window collides with a real
   // existing booking on the same tech/date — see filterCollidingSlots.
-  const classified = await filterCollidingSlots(classifiedRaw, { dateFrom, dateTo, estimateZone, coords, serviceMix: serviceProfile.reservationServiceMix });
+  const classified = await filterCollidingSlots(classifiedRaw, { dateFrom, dateTo, estimateZone, coords, serviceMix: serviceProfile.reservationServiceMix, ownEstimateId: estimateId });
 
   // Target: always show the soonest upcoming customer-facing windows first,
   // even when those windows are not route-optimal. Route-optimality remains
   // a per-slot badge/copy signal, not a reason to bury sooner dates.
-  const asap = await filterCollidingSlots(asapRaw, { dateFrom, dateTo, estimateZone, coords, serviceMix: serviceProfile.reservationServiceMix });
+  const asap = await filterCollidingSlots(asapRaw, { dateFrom, dateTo, estimateZone, coords, serviceMix: serviceProfile.reservationServiceMix, ownEstimateId: estimateId });
   const sortedPool = dedupeSlots([...asap, ...classified]).sort(compareCustomerFacingSlots);
   // Preserve the collision-checked windows while choosing the displayed options.
   const bookable = filterSeasonalSlots(
@@ -2039,6 +2064,9 @@ async function getSlotDebug(estimateId, userOpts = {}) {
     durationMinutes: serviceProfile.durationMinutes,
     serviceTypes: serviceProfile.services.map(service => service.label || service.service),
     capacityPlacement: true,
+    // Same own-hold exclusion as the live path, so the debug surface
+    // reflects what the customer is actually offered (codex r16 P1).
+    excludeEstimateId: estimateId,
     bufferMinutes: customerFacingBufferMinutes(),
     dateFrom,
     dateTo,

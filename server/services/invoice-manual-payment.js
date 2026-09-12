@@ -414,7 +414,24 @@ async function recordManualPayment(id, {
   if (updatedInvoice.status === 'paid') {
     try {
       const ReviewService = require('./review-request');
-      await ReviewService.enrollForPaidInvoice(updatedInvoice, { source: 'record_payment' });
+      const outcome = await ReviewService.enrollForPaidInvoice(updatedInvoice, { source: 'record_payment' });
+      // No webhook redelivers this rail (Codex #4311 r32 P1): when the
+      // enrollment AND its recovery marker both failed, nothing durable says
+      // the ask is still owed, so the office is told instead of the outcome
+      // being discarded.
+      if (outcome && outcome.recorded === false) {
+        logger.error(`[admin-invoices:record-payment] review enrollment for invoice ${updatedInvoice.id} is UNRECORDED — no retry marker exists`);
+        await require('./dispatch-alerts').createAlert({
+          type: 'visit_closeout_review',
+          severity: 'warn',
+          payload: {
+            reason: 'review_enrollment_unrecorded',
+            source: 'record_payment',
+            invoiceIds: [updatedInvoice.id],
+            detail: 'This manually settled invoice owes a review ask that could not be recorded — re-run the enrollment or ask manually.',
+          },
+        }).catch((alertErr) => logger.error(`[admin-invoices:record-payment] could not raise the unrecorded-enrollment alert: ${alertErr.message}`));
+      }
     } catch (err) {
       logger.warn(`[admin-invoices:record-payment] review enrollment failed: ${err.message}`);
     }

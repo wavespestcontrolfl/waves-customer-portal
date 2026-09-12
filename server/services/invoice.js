@@ -915,8 +915,14 @@ async function enrollPacketReviewAfterCredit(invoiceId, packetId) {
   // told. The settlement stands; the office enrolls the review by hand.
   if (result && result.enrolled === false && result.recorded === false) {
     logger.error(`[invoice] review enrollment after credit coverage unrecorded for ${invoiceId} (packet ${packetId}): ${result.error || result.reason}`);
+    // notifyAdmin swallows its own insert failure and returns null (Codex
+    // #4311 r38 P1), so its result is checked and a SECOND durable signal —
+    // the same visit_closeout_review alert the other settlement rails raise —
+    // is written when it could not land. Credit coverage has no webhook to
+    // redeliver, so this is the last chance to leave a record.
+    let notified = null;
     try {
-      await require("./notification-service").notifyAdmin(
+      notified = await require("./notification-service").notifyAdmin(
         "alert",
         "Visit review not enrolled after credit coverage",
         `Invoice ${invoiceId} was settled by account credit, but the completed visit's review request could not be recorded. Enroll the review from the visit if it is still wanted.`,
@@ -924,6 +930,29 @@ async function enrollPacketReviewAfterCredit(invoiceId, packetId) {
       );
     } catch (err) {
       logger.warn(`[invoice] unrecorded review enrollment alert failed for ${invoiceId}: ${err.message}`);
+    }
+    if (!notified) {
+      try {
+        const open = await db("dispatch_alerts").where({ type: "visit_closeout_review" }).whereNull("resolved_at")
+          .whereRaw("payload->>'reason' = 'review_enrollment_unrecorded'")
+          .whereRaw("payload->>'invoiceIds' LIKE ?", [`%${invoiceId}%`])
+          .first("id");
+        if (!open) {
+          await require("./dispatch-alerts").createAlert({
+            type: "visit_closeout_review",
+            severity: "warn",
+            payload: {
+              reason: "review_enrollment_unrecorded",
+              source: "credit_covered",
+              invoiceIds: [invoiceId],
+              packetId,
+              detail: "This credit-settled invoice owes a review ask that could not be recorded — enroll it from the visit or ask manually.",
+            },
+          });
+        }
+      } catch (alertErr) {
+        logger.error(`[invoice] BOTH unrecorded-enrollment signals failed for ${invoiceId} (packet ${packetId}): ${alertErr.message}`);
+      }
     }
   }
   return result;
@@ -2680,7 +2709,7 @@ const InvoiceService = {
         sent_at: new Date(),
         sms_sent_at: new Date(),
         scheduled_send_at: null,
-        scheduled_send_error: null,
+        scheduled_send_error: require("./invoice-helpers").preserveWithdrawalStamp(db),
         scheduled_request_review: false,
         scheduled_review_delay_minutes: null,
         updated_at: new Date(),
@@ -3103,7 +3132,7 @@ const InvoiceService = {
           ),
           sent_at: new Date(),
           scheduled_send_at: null,
-          scheduled_send_error: null,
+          scheduled_send_error: require("./invoice-helpers").preserveWithdrawalStamp(db),
           scheduled_request_review: false,
           scheduled_review_delay_minutes: null,
           updated_at: new Date(),
@@ -3249,7 +3278,7 @@ const InvoiceService = {
       ),
       sent_at: db.raw("COALESCE(sent_at, ?)", [now]),
       scheduled_send_at: null,
-      scheduled_send_error: null,
+      scheduled_send_error: require("./invoice-helpers").preserveWithdrawalStamp(db),
       scheduled_request_review: false,
       scheduled_review_delay_minutes: null,
       updated_at: now,
@@ -4966,6 +4995,24 @@ const InvoiceService = {
     // obligation durable: the registry sweep re-runs it if we crash first).
     const cancelledHookRows = [];
     await db.transaction(async (trx) => {
+      // OWNERSHIP ROWS FIRST, before this transaction touches the invoice
+      // (local audit P0 + the earlier lock-order P1): the restore must decide
+      // live Bill-To ownership ATOMICALLY — a collectible draft committed
+      // ahead of a separate reconciliation can be paid by the homeowner in
+      // between, and a swallowed failure would leave it collectible for good
+      // — and the withdrawal it may need takes customer and member rows,
+      // which every Bill-To writer takes before the invoice. Taking them here
+      // puts this restore on that same order; the reconciliation below is
+      // then re-entrant on rows this transaction already holds.
+      if (current.visit_completion_packet_id && current.customer_id) {
+        await trx("customers").where({ id: current.customer_id }).forShare().first("id");
+        const billedMembers = await trx("visit_completion_packet_items")
+          .where({ packet_id: current.visit_completion_packet_id })
+          .pluck("scheduled_service_id");
+        if (billedMembers.length) {
+          await trx("scheduled_services").whereIn("id", billedMembers.filter(Boolean)).orderBy("id").forShare().select("id");
+        }
+      }
       // Statement re-check under lock (a concurrent close could finalize it
       // between the fast pre-check above and this write).
       if (current.payer_statement_id) {
@@ -4990,7 +5037,7 @@ const InvoiceService = {
           stripe_payment_intent_id: null,
           scheduled_send_at: null,
           scheduled_send_attempts: 0,
-          scheduled_send_error: null,
+          scheduled_send_error: require("./invoice-helpers").preserveWithdrawalStamp(db),
           scheduled_request_review: false,
           scheduled_review_delay_minutes: null,
           updated_at: new Date(),
@@ -4998,6 +5045,30 @@ const InvoiceService = {
         .returning("*");
       if (!updated) {
         throw new Error("Invoice status changed while unvoiding — re-check and retry");
+      }
+      // The preserved withdrawal stamp is re-judged against LIVE ownership
+      // (Codex #4311 r30 P1): a withdrawn invoice that was voided is skipped
+      // by the Bill-To reconciliation (void is terminal), so a payer cleared
+      // in the meantime would leave the restored self-pay draft stamped —
+      // unpayable and unschedulable for good. The shared reconciliation
+      // releases it when the packet is self-pay again and keeps the stamp
+      // (re-pointed if the payer changed) while a payer still owes it.
+      // EVERY restored packet invoice is re-judged HERE, stamped or not, and
+      // the verdict commits with the restore (local audit P0): an invoice
+      // voided BEFORE a payer was assigned carries no stamp — the withdrawal
+      // skips terminal rows — so the unvoid would otherwise hand the
+      // homeowner a collectible link for debt that is now payer-owned, and a
+      // payer sitting on a SIBLING billed member escapes the payment rail's
+      // representative-service lookup entirely. The ownership rows were taken
+      // at the top of this transaction, so both calls are re-entrant on the
+      // established order.
+      if (updated.visit_completion_packet_id) {
+        const Packets = require("./visit-completion-packets");
+        // A stamp that outlived the void is re-pointed or released…
+        await Packets.reconcileWithdrawnPacketInvoices(trx, { customerId: updated.customer_id });
+        // …and a restored row whose live owner is a payer is withdrawn before
+        // it can ever be collected.
+        await Packets.withdrawPacketInvoicesForOwner(trx, { customerId: updated.customer_id });
       }
       // Term-link TOCTOU re-check on the FRESH row under the lock (Codex
       // #3493 r2): a concurrent /annual-prepay can create the term and
