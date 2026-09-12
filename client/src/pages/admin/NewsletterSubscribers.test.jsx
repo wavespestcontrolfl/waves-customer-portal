@@ -66,7 +66,8 @@ describe('Newsletter subscriber dialogs', () => {
       target: { value: 'new@example.com' },
     });
     const addButton = within(dialog).getByRole('button', { name: 'Add subscriber' });
-    fireEvent.click(addButton);
+    expect(addButton).toHaveAttribute('type', 'submit');
+    fireEvent.submit(addButton.closest('form'));
     fireEvent.click(addButton);
 
     await waitFor(() => expect(fetchMock).toHaveBeenCalledWith(

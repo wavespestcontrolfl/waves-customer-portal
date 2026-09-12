@@ -3662,26 +3662,28 @@ export function SubscribersView() {
         <DialogHeader>
           <DialogTitle>Add subscriber</DialogTitle>
         </DialogHeader>
-        <DialogBody className="space-y-3">
-          <Field label="Email address" required>
-            <Input
-              autoFocus
-              type="text"
-              inputMode="email"
-              value={addEmail}
-              onChange={(event) => setAddEmail(event.target.value)}
-            />
-          </Field>
-          {addError && <ActionFeedback error>{addError}</ActionFeedback>}
-        </DialogBody>
-        <DialogFooter>
-          <Button variant="secondary" onClick={closeAddDialog} disabled={adding}>
-            Cancel
-          </Button>
-          <Button onClick={addSubscriber} loading={adding} disabled={!addEmail}>
-            Add subscriber
-          </Button>
-        </DialogFooter>
+        <form onSubmit={(event) => { event.preventDefault(); addSubscriber(); }}>
+          <DialogBody className="space-y-3">
+            <Field label="Email address" required>
+              <Input
+                autoFocus
+                type="text"
+                inputMode="email"
+                value={addEmail}
+                onChange={(event) => setAddEmail(event.target.value)}
+              />
+            </Field>
+            {addError && <ActionFeedback error>{addError}</ActionFeedback>}
+          </DialogBody>
+          <DialogFooter>
+            <Button variant="secondary" onClick={closeAddDialog} disabled={adding}>
+              Cancel
+            </Button>
+            <Button type="submit" loading={adding} disabled={!addEmail}>
+              Add subscriber
+            </Button>
+          </DialogFooter>
+        </form>
       </Dialog>
       <Dialog
         open={Boolean(importConfirmation)}
