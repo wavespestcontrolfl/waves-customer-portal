@@ -78,11 +78,17 @@ describe("MobileServiceLibrary", () => {
   });
 
   it("does not expose custom category creation for the fixed taxonomy", async () => {
+    const service = {
+      id: "fixture-service",
+      name: "Fixture Pest Service",
+      category: "pest_control",
+      is_active: true,
+    };
     vi.stubGlobal(
       "fetch",
       vi.fn(async () => ({
         ok: true,
-        json: async () => ({ services: [] }),
+        json: async () => ({ services: [service] }),
       })),
     );
     render(<MobileServiceLibrary />);
@@ -99,6 +105,13 @@ describe("MobileServiceLibrary", () => {
     expect(
       screen.queryByRole("button", { name: "Add" }),
     ).not.toBeInTheDocument();
+
+    fireEvent.click(
+      await screen.findByRole("button", { name: /Pest Control/i }),
+    );
+    expect(screen.getByText("All Services").parentElement).toHaveTextContent(
+      "Categories are set per service. Edit a service from All Servicesto move it.",
+    );
   });
 
   it("keeps the original empty category state when loading fails", async () => {
