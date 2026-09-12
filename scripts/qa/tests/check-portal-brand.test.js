@@ -5,7 +5,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 
-const { checkFile, commentLineSet } = require('../../check-portal-brand.js');
+const { checkFile } = require('../../check-portal-brand.js');
 
 function scan(name, source) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'brand-gate-'));
@@ -119,13 +119,13 @@ test('an unparseable file is scanned in full rather than skipped', () => {
   assert.ok(hits.includes('banned-font-size:3'));
 });
 
-test('commentLineSet reports only whole-comment lines', () => {
-  const text = [
+test('a trailing comment after code does not make the line a comment', () => {
+  const hits = scan('Sample.jsx', [
     'const a = 1; // trailing',
     '/* whole */',
     'const b = { fontSize: 12 };',
-  ].join('\n');
-  assert.deepEqual([...commentLineSet(text, false)], [2]);
+  ].join('\n'));
+  assert.deepEqual(hits, ['banned-font-size:3']);
 });
 
 test('a `/*` inside a CSS string does not open a comment', () => {
@@ -209,4 +209,57 @@ test('a quoted url() still goes through the string path', () => {
     '.b { font-size: 12px; }',
   ].join('\n'));
   assert.deepEqual(hits, ['banned-font-size:2']);
+});
+
+test('an escaped paren inside url() does not end the token', () => {
+  // postcss knows url() escapes; the hand-written scanner did not.
+  const hits = scan('sample.css', [
+    '.a { background: url(foo\\)/*); }',
+    '.b { font-size: 12px; }',
+  ].join('\n'));
+  assert.deepEqual(hits, ['banned-font-size:2']);
+});
+
+test('a CSS file postcss rejects is scanned in full, never skipped', () => {
+  const hits = scan('sample.css', [
+    '.a { --token: \\/*; }',
+    '.b { font-size: 12px; }',
+  ].join('\n'));
+  assert.deepEqual(hits, ['banned-font-size:2']);
+});
+
+test('comments inside a <style> template are classified as comments', () => {
+  // Babel sees the CSS as template-string data, so its comments never reach
+  // ast.comments; the style-template pass is what finds them.
+  const hits = scan('Sample.jsx', [
+    'export default function S() {',
+    '  return (',
+    '    <style>{`',
+    '      /* font-size: 12px was retired here */',
+    '      .a { color: red; }',
+    '    `}</style>',
+    '  );',
+    '}',
+  ].join('\n'));
+  assert.deepEqual(hits, []);
+});
+
+test('live CSS inside a <style> template is still scanned', () => {
+  const hits = scan('Sample.jsx', [
+    'export default function S() {',
+    '  return <style>{`.a { font-size: 12px; }`}</style>;',
+    '}',
+  ].join('\n'));
+  assert.deepEqual(hits, ['banned-font-size:2']);
+});
+
+test('.ts parses with the TypeScript grammar, not JSX', () => {
+  // `<number>1` is a valid TS assertion and invalid JSX; with both plugins on
+  // the file was rejected and its comments scanned.
+  const hits = scan('Sample.ts', [
+    '// a note about \u{1F512}',
+    'const n = <number>1;',
+    'export default n;',
+  ].join('\n'));
+  assert.deepEqual(hits, []);
 });

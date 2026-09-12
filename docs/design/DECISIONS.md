@@ -2411,10 +2411,24 @@ scanned in full, in both directions — a trailing `// note` after code, and cod
 trailing a `*/` on a block's closing line. That second direction was itself a
 masking bug in the first cut (`*/ const label = '🔒';` vanished).
 
-The CSS side needs the same care for the same reason: the `/*` in
-`content: "/*"` is a string, not a comment opener, and a regex that ignores
-strings blanks every rule until the next `*/`. A small string-aware scanner
-handles it — CSS has one comment form and two string delimiters.
+**The CSS side is postcss**, the parser this project's own build uses, so it
+defines what this repo's CSS means. That replaced a hand-written scanner which
+took four review findings in three rounds — a quoted `content: "/*"`, an
+unquoted `url(data:…,/*)`, an escaped `url(foo\)/*)`, an escaped `\/*` — every
+one a variant of "something that looks like a comment delimiter and is not".
+The count was rising rather than falling, which is the signal to replace a
+mechanism instead of patching it again. postcss knows strings, `url()` tokens
+and escapes by construction. Where it disagrees (`\/*`, which it reads as an
+unclosed comment) it throws, which lands on the scan-everything path — the
+conservative direction.
+
+Two grammars needed splitting apart as well. Babel's TypeScript and JSX plugins
+conflict, so a valid `.ts` construct like `const n = <number>1` parsed as JSX
+and sent the file down the failure path permanently; plugins are now chosen by
+extension. And `<style>{`…`}</style>` — the repo's embedded-CSS pattern — is
+template-string data to Babel, so its `/* … */` never reached `ast.comments`;
+those quasis get the postcss pass, scoped to `<style>` children specifically so
+that ordinary template text which happens to read like a comment is not skipped.
 
 **A parse failure skips nothing.** Scanning a comment costs a false positive;
 skipping code costs a miss, and a miss is the worse failure — so an unparseable

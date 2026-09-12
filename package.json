@@ -90,7 +90,8 @@
     "eslint-plugin-react": "^7.37.5",
     "globals": "^17.7.0",
     "lint-staged": "^15.5.2",
-    "pngjs": "^5.0.0"
+    "pngjs": "^5.0.0",
+    "postcss": "^8.5.19"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.82.0",

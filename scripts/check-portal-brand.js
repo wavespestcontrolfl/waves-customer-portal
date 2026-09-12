@@ -236,18 +236,13 @@ function relKey(filePath) {
 // skipped, but it also means comment prose in it is reported as debt. One
 // parser with the jsx + typescript plugins covers every extension accepted.
 const { parse: babelParse } = require('@babel/parser');
+const postcss = require('postcss');
 
-// CSS comment spans, respecting strings. A regex cannot do this: the `/*` in
-// `content: "/*"` is a string, not a comment opener, and treating it as one
-// blanks every rule until the next `*/` -- masking real violations in between.
-// CSS has no `//` comment, and only two string delimiters, so a small scanner
-// covers it. An unterminated `/*` runs to EOF, which is what browsers do too.
 // `{/* ... */}` is THE way to write a comment in JSX children, and the parser's
 // range covers only the `/* ... */`. The braces are left over as non-whitespace,
-// so the line reads as code and the comment gets scanned -- which is how a note
-// mentioning a banned size or an emoji could still fail the gate even though
-// nothing renders. When a comment is wrapped by braces holding nothing else,
-// the braces are part of the comment for our purposes.
+// so the line reads as code and the comment gets scanned. When braces wrap a
+// comment and nothing else, they are part of it; `{/* note */ x}` is an
+// expression and stays scanned.
 function expandJsxWrapper(text, start, end) {
   let a = start;
   let b = end;
@@ -257,49 +252,83 @@ function expandJsxWrapper(text, start, end) {
   return [start, end];
 }
 
-function cssCommentRanges(text) {
+// CSS comment spans, from postcss -- the parser this project's own build uses,
+// so it defines what this repo's CSS means.
+//
+// This replaced a hand-written scanner. That scanner took four review findings
+// in three rounds, every one a variant of "something that looks like a comment
+// delimiter and is not": a quoted `content: "/*"`, an unquoted
+// `url(data:...,/*)`, an escaped `url(foo\)/*)`, an escaped `\/*`. The count
+// was rising, not falling, which is the signal to replace the mechanism rather
+// than patch it again. postcss knows strings, url() tokens and escapes by
+// construction.
+//
+// A file postcss rejects yields no ranges, so nothing is skipped and every
+// line is scanned. That is the safe direction, and it is what happens to the
+// one case postcss itself disagrees about (`\/*`, which it reads as an
+// unclosed comment): conservative, never masking.
+function cssCommentRanges(text, offset = 0) {
   const out = [];
-  let i = 0;
-  let quote = null;
-  while (i < text.length) {
-    const c = text[i];
-    if (quote) {
-      if (c === '\\') { i += 2; continue; }
-      if (c === quote) quote = null;
-      i += 1;
-      continue;
-    }
-    if (c === '"' || c === "'") { quote = c; i += 1; continue; }
-    // An unquoted url() token is URL data, not CSS syntax: the `/*` in
-    // `url(data:image/svg+xml,/*)` opens nothing. Skipping to the closing
-    // paren keeps it from swallowing every rule until the next `*/`. A quoted
-    // url() falls through to the quote handling above.
-    if ((c === 'u' || c === 'U') && /^url\(/i.test(text.slice(i, i + 4))) {
-      let j = i + 4;
-      while (j < text.length && /\s/.test(text[j])) j += 1;
-      if (text[j] === '"' || text[j] === "'") { i = j; continue; }
-      const close = text.indexOf(')', j);
-      i = close === -1 ? text.length : close + 1;
-      continue;
-    }
-    if (c === '/' && text[i + 1] === '*') {
-      const close = text.indexOf('*/', i + 2);
-      const end = close === -1 ? text.length : close + 2;
-      out.push([i, end]);
-      i = end;
-      continue;
-    }
-    i += 1;
+  let root;
+  try {
+    root = postcss.parse(text);
+  } catch {
+    return out;
   }
+  root.walkComments((c) => {
+    const a = c.source && c.source.start && c.source.start.offset;
+    const b = c.source && c.source.end && c.source.end.offset;
+    if (typeof a === 'number' && typeof b === 'number') out.push([a + offset, b + offset]);
+  });
   return out;
 }
 
-function commentLineSet(text, isCss) {
+// `<style>{`...`}</style>` is the repo's embedded-CSS pattern, and Babel treats
+// the CSS inside as template-string data -- its `/* ... */` never reaches
+// `ast.comments`, so a whole-line note in there was reported as live debt.
+// Scoped deliberately to <style> children: running CSS comment detection over
+// every template literal would let a line of ordinary template TEXT that
+// happens to read `/* ... */` be skipped, which would mask.
+function styleTemplateRanges(node, out) {
+  if (!node || typeof node !== 'object') return;
+  if (Array.isArray(node)) {
+    for (const n of node) styleTemplateRanges(n, out);
+    return;
+  }
+  if (node.type === 'JSXElement') {
+    const name = node.openingElement && node.openingElement.name;
+    if (name && name.type === 'JSXIdentifier' && name.name === 'style') {
+      for (const child of node.children || []) {
+        const expr = child && child.type === 'JSXExpressionContainer' ? child.expression : null;
+        if (expr && expr.type === 'TemplateLiteral') {
+          for (const q of expr.quasis || []) {
+            if (typeof q.start === 'number' && typeof q.end === 'number') out.push([q.start, q.end]);
+          }
+        }
+      }
+    }
+  }
+  for (const key of Object.keys(node)) {
+    if (key === 'loc' || key === 'leadingComments' || key === 'trailingComments') continue;
+    styleTemplateRanges(node[key], out);
+  }
+}
+
+// Babel's TypeScript and JSX grammars conflict: with both on, a valid `.ts`
+// construct like `const n = <number>1` parses as JSX and the file is rejected,
+// sending it down the scan-everything path forever. Pick by extension.
+function pluginsFor(filePath) {
+  if (/\.tsx$/.test(filePath)) return ['jsx', 'typescript'];
+  if (/\.ts$/.test(filePath)) return ['typescript'];
+  return ['jsx'];
+}
+
+function commentLineSet(text, filePath) {
   const lines = text.split('\n');
   const covered = new Set();
   const ranges = [];
 
-  if (isCss) {
+  if (/\.css$/.test(filePath)) {
     for (const r of cssCommentRanges(text)) ranges.push(r);
   } else {
     let ast;
@@ -307,12 +336,17 @@ function commentLineSet(text, isCss) {
       ast = babelParse(text, {
         sourceType: 'unambiguous',
         allowReturnOutsideFunction: true,
-        plugins: ['jsx', 'typescript'],
+        plugins: pluginsFor(filePath),
       });
     } catch {
       return covered; // unparseable: skip nothing, scan everything
     }
     for (const c of ast.comments || []) ranges.push(expandJsxWrapper(text, c.start, c.end));
+    const styleQuasis = [];
+    styleTemplateRanges(ast.program, styleQuasis);
+    for (const [a, b] of styleQuasis) {
+      for (const r of cssCommentRanges(text.slice(a, b), a)) ranges.push(r);
+    }
   }
   if (!ranges.length) return covered;
 
@@ -355,7 +389,7 @@ function checkFile(filePath) {
   // a trailing `// note` after code, and code trailing a `*/` on the closing
   // line of a block. The rule is never to mask, so where the two overlap the
   // scanner wins and we accept the odd false positive on comment prose.
-  const commentLines = commentLineSet(text, /\.css$/.test(filePath));
+  const commentLines = commentLineSet(text, filePath);
   lines.forEach((line, i) => {
     const n = i + 1;
     if (commentLines.has(n)) return;
