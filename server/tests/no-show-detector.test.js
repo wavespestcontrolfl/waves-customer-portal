@@ -10,6 +10,16 @@ describe('missing tracking stages', () => {
   const promise = { visit_id: 'visit', start_at: '2026-09-10T09:00:00-04:00', communicated_at: '2026-09-09T12:00:00-04:00', source: 'message' };
   const visit = { id: 'visit', status: 'pending', scheduled_date: '2026-09-10' };
   const at = (time, extra = {}) => evaluateNoShow({ visit: { ...visit, ...extra }, promise, now: new Date(`2026-09-10T${time}:00-04:00`) });
+  test('an en_route STATUS stops stage 1 even with no stamp yet (round-14 P2)', () => {
+    // admin-dispatch commits transitionJobStatus before calling
+    // trackTransitions.markEnRoute, and a failure there is caught — so a
+    // visit can sit at status 'en_route' with no en_route_at, and stage 1
+    // ("no departure recorded") would be a false warning about a tech who is
+    // already driving.
+    expect(at('09:45', { status: 'en_route' })).toBeNull();
+    // Stage 2 still fires: departure is not arrival.
+    expect(at('11:30', { status: 'en_route' })).toMatchObject({ stage: 2 });
+  });
   test('45 minutes warns; an en-route stamp stops stage 1 but cannot stop stage 2', () => {
     expect(at('09:44')).toBeNull();
     expect(at('09:45')?.stage).toBe(1);
@@ -1168,13 +1178,17 @@ describe('callCommitmentInstant (when the customer heard the promise) (round-5 P
     // bridge + talk time, measured rather than guessed (round-11 P2).
     expect(callCommitmentInstant({ created_at: created, duration_seconds: 600, direction: 'outbound-api',
       bridged_at: '2026-09-10T10:01:30Z' }).toISOString()).toBe('2026-09-10T10:11:30.000Z');
-    // No bridge stamp (inbound, or a row recovered near the end): created_at
-    // remains the floor.
+    // Inbound with no bridge: created_at + duration.
     expect(callCommitmentInstant({ created_at: created, duration_seconds: 600, direction: 'inbound' }).toISOString())
       .toBe('2026-09-10T10:10:00.000Z');
+    // OUTBOUND with no bridge is a recovered row, inserted near the END of
+    // the call — adding the duration would push the commitment past the call
+    // itself, so created_at stands (call-commitments.js's callEndedAt
+    // convention, round-14 P2).
     expect(callCommitmentInstant({ created_at: created, duration_seconds: 600, direction: 'outbound-api' }).toISOString())
-      .toBe('2026-09-10T10:10:00.000Z');
-    // A bridge stamp from before the row was created is ignored.
+      .toBe('2026-09-10T10:00:00.000Z');
+    // A bridge stamp from before the row was created is ignored (this row has
+    // no direction, so it keeps the created_at + duration reading).
     expect(callCommitmentInstant({ created_at: created, duration_seconds: 600, bridged_at: '2026-09-10T09:00:00Z' }).toISOString())
       .toBe('2026-09-10T10:10:00.000Z');
     // Deterministic: updated_at is NOT consulted, so later processing writes
@@ -1186,8 +1200,9 @@ describe('callCommitmentInstant (when the customer heard the promise) (round-5 P
     // otherwise land past the real end; each caller passes the row its own
     // processing pass wrote, which is at or after the call ended (round-10
     // P1).
-    expect(callCommitmentInstant({ created_at: created, duration_seconds: 600, direction: 'outbound-api' },
-      { notAfter: '2026-09-10T10:02:00Z' }).toISOString()).toBe('2026-09-10T10:02:00.000Z');
+    expect(callCommitmentInstant({ created_at: created, duration_seconds: 600, direction: 'outbound-api',
+      bridged_at: '2026-09-10T10:01:00Z' }, { notAfter: '2026-09-10T10:02:00Z' }).toISOString())
+      .toBe('2026-09-10T10:02:00.000Z');
     expect(callCommitmentInstant({ created_at: created, duration_seconds: 600 },
       { notAfter: '2026-09-10T23:00:00Z' }).toISOString()).toBe('2026-09-10T10:10:00.000Z');
     // An anchor from BEFORE the call is ignored: source_call_log_id can be

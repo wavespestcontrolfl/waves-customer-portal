@@ -115,7 +115,12 @@ function trackingStage({ visit, start, nowMs, stage1Minutes }) {
   const dayStart = parseETDateTime(`${etDateString(new Date(start))}T00:00`).getTime();
   const observed = (stamp) => Number.isFinite(instant(stamp)) && instant(stamp) >= dayStart && instant(stamp) <= nowMs;
   if (visit.status === 'on_site' || ARRIVAL_STAMPS.some((key) => observed(visit[key]))) return null;
-  const departed = observed(visit.en_route_at);
+  // The STATUS counts as departure too: admin-dispatch commits
+  // transitionJobStatus before calling trackTransitions.markEnRoute, and a
+  // failure there is caught — so a visit can sit at status 'en_route' with no
+  // en_route_at stamp, and stage 1 ("no departure recorded") would be a false
+  // warning about a tech who is already driving (codex P2 round 14).
+  const departed = visit.status === 'en_route' || observed(visit.en_route_at);
   if (nowMs >= start + 150 * 60000) return { stage: 2, departed };
   return !departed && nowMs >= start + stage1Minutes * 60000 ? { stage: 1, departed } : null;
 }
@@ -691,8 +696,16 @@ function callCommitmentInstant(call, { notAfter = null } = {}) {
   // inbound call, or one recovered near the end by a status callback) keep
   // created_at as the floor.
   const bridged = instant(call?.bridged_at);
-  const floor = Number.isFinite(bridged) && bridged >= started ? bridged : started;
-  const talkEnd = clamp(Number.isFinite(seconds) && seconds > 0 ? floor + seconds * 1000 : floor);
+  const usableBridge = Number.isFinite(bridged) && bridged >= started;
+  // The whole convention, not half of it: a bridged call ends at bridge +
+  // duration, an INBOUND row at created_at + duration, and an outbound row
+  // with NO bridge stamp at created_at — those are recovered rows, inserted
+  // near the end of the call, so adding the duration would push the
+  // commitment past the call itself (call-commitments.js's callEndedAt, codex
+  // P2 round 14).
+  const outboundNoBridge = !usableBridge && String(call?.direction || '').startsWith('outbound');
+  const floor = usableBridge ? bridged : started;
+  const talkEnd = clamp(!outboundNoBridge && Number.isFinite(seconds) && seconds > 0 ? floor + seconds * 1000 : floor);
   return new Date(talkEnd);
 }
 
@@ -721,7 +734,7 @@ function agentCommittedStart(call) {
 // when the primary ledger failed, and its whole purpose is to still be there
 // whenever the feature is switched on. Best-effort itself — a send must
 // never fail because its bookkeeping did.
-async function recordSentWindowFallback({ visitId, startAtMs, communicatedAt = new Date(), providerSid = null, reason = 'messaging_audit_unavailable' } = {}) {
+async function recordSentWindowFallback({ visitId, startAtMs, communicatedAt = new Date(), providerSid = null } = {}) {
   // null BEFORE the Number conversion: Number(null) is 0, a finite instant
   // (the epoch), so a bare isFinite check would stamp a 1970 window as the
   // promise — the same null-before-conversion trap `instant` guards above.
@@ -731,7 +744,8 @@ async function recordSentWindowFallback({ visitId, startAtMs, communicatedAt = n
   try {
     await recordAuditEvent({ actor_type: 'system', action: 'visit_window_promised', resource_type: 'scheduled_service', resource_id: String(visitId),
       metadata: { start_at: new Date(Number(startAtMs)).toISOString(), communicated_at: at.toISOString(),
-        ...(providerSid ? { provider_sid: String(providerSid) } : {}), fallback_reason: reason }, critical: true });
+        ...(providerSid ? { provider_sid: String(providerSid) } : {}),
+        fallback_reason: 'messaging_audit_unavailable' }, critical: true });
     return true;
   } catch (err) {
     require('./logger').warn(`[no-show-detector] promised-window fallback failed for ${visitId}: ${err.message}`);

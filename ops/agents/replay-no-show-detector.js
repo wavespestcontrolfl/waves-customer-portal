@@ -164,7 +164,12 @@ function collapseStops(visits = []) {
     // describe the same physical visit).
     return { id: base.id, initial: base.initial, events: base.events, promises: base.promises, members: ordered,
       outcome: ordered.find((m) => m.outcome && m.outcome !== 'unknown')?.outcome || base.outcome,
-      complaint_at: ordered.map((m) => m.complaint_at).filter(Boolean).sort()[0] || null };
+      // Earliest by INSTANT, not by string: equivalent times written with
+      // different offsets ('…-04:00' vs '…Z') do not sort chronologically as
+      // text, which would overstate warning_minutes_before_complaint (codex
+      // P2 round 14).
+      complaint_at: ordered.map((m) => m.complaint_at).filter((at) => Number.isFinite(new Date(at).getTime()))
+        .sort((a, b) => new Date(a) - new Date(b))[0] || null };
   });
 }
 
