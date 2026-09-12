@@ -783,10 +783,15 @@ async function fireTouch(row, { operatorInitiated = false } = {}) {
   const liveInvoice = await db('invoices').where({ id: row.invoice_id })
     .first('payer_id', 'scheduled_send_error').catch(() => undefined);
   if (liveInvoice === undefined) {
-    // Unreadable ownership is not "self-pay": pause rather than send.
-    await db('invoice_followup_sequences').where({ id: row.id })
-      .update({ updated_at: db.fn.now(), status: 'paused', next_touch_at: null });
-    logger.warn(`[invoice-followups] paused sequence ${row.id} — could not re-read invoice ${row.invoice_id} ownership before the touch`);
+    // Unreadable ownership is not "self-pay" — but it is not a Bill-To change
+    // either (local audit): pausing here would retire the sequence over a
+    // transient DB blip, and neither this engine nor the legacy sweep would
+    // ever pick it up again. Skip THIS touch and keep a schedule, so the next
+    // sweep re-judges it.
+    await db('invoice_followup_sequences').where({ id: row.id }).where({ status: 'active' })
+      .update({ updated_at: db.fn.now(), next_touch_at: new Date(Date.now() + 30 * 60 * 1000) })
+      .catch(() => {});
+    logger.warn(`[invoice-followups] skipped sequence ${row.id} — could not re-read invoice ${row.invoice_id} ownership before the touch; retrying in 30m`);
     return;
   }
   const payerId = liveInvoice.payer_id ?? null;
