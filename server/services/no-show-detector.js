@@ -347,7 +347,7 @@ async function loadPromiseEvents(conn, visitIds, { now = new Date() } = {}) {
       .whereIn('sv.id', visitIds).where('cl.v2_extraction_status', 'valid')
       .where('cl.created_at', '<=', now)
       .select('sv.id as visit_id', 'cl.id as call_id', 'cl.ai_extraction_enriched', 'cl.transcription',
-        'cl.processing_token', 'cl.created_at as call_created_at', 'cl.updated_at as call_updated_at',
+        'cl.processing_token', 'cl.created_at as call_created_at', 'cl.direction as call_direction',
         'cl.duration_seconds', 'cl.recording_duration_seconds'),
     () => conn('activity_log as al')
       // The CALL is joined for its own clock: the activity row is written
@@ -361,7 +361,7 @@ async function loadPromiseEvents(conn, visitIds, { now = new Date() } = {}) {
       .whereRaw("al.metadata->>'scheduled_service_id' = ANY(?::text[])", [visitIds])
       .where('al.created_at', '<=', now)
       .select('al.id', 'al.metadata', 'al.created_at', 'cl.created_at as call_created_at',
-        'cl.updated_at as call_updated_at', 'cl.duration_seconds', 'cl.recording_duration_seconds'),
+        'cl.direction as call_direction', 'cl.duration_seconds', 'cl.recording_duration_seconds'),
     () => conn('series_moves as sm')
       // The move's own series text, joined by the series_move_id its metadata
       // carries, and held to the SAME delivery bar as any other promise
@@ -440,7 +440,7 @@ async function loadPromiseEvents(conn, visitIds, { now = new Date() } = {}) {
       });
       if (target == null) return null;
       return { visit_id: r.visit_id, start_at: new Date(target).toISOString(),
-        communicated_at: callCommitmentInstant({ created_at: r.call_created_at, updated_at: r.call_updated_at,
+        communicated_at: callCommitmentInstant({ created_at: r.call_created_at, direction: r.call_direction,
           duration_seconds: r.duration_seconds, recording_duration_seconds: r.recording_duration_seconds }).toISOString(),
         source: 'call', source_id: r.call_id };
     }).filter(Boolean),
@@ -455,7 +455,7 @@ async function loadPromiseEvents(conn, visitIds, { now = new Date() } = {}) {
       // recording pass wrote this row. Falls back to the activity row's own
       // timestamp when the call is gone (a purge, a legacy row).
       const heard = r.call_created_at
-        ? callCommitmentInstant({ created_at: r.call_created_at, updated_at: r.call_updated_at,
+        ? callCommitmentInstant({ created_at: r.call_created_at, direction: r.call_direction,
           duration_seconds: r.duration_seconds, recording_duration_seconds: r.recording_duration_seconds })
         : null;
       return { visit_id: r.metadata?.scheduled_service_id,
@@ -524,15 +524,25 @@ function seriesSupersessions(rows = [], candidates = new Set()) {
 // allowance past the talk time. Under-stating is the harmful direction: a
 // reminder sent during the call would then look newer than the window the
 // agent gave, and the detector would enforce the stale one.
-const RING_ALLOWANCE_MS = 10 * 60000;
+// A FIXED allowance, and only for the direction that needs it. updated_at is
+// deliberately not used: later processing writes (extraction, transcription,
+// enrichment) move it, so the same promise would drift later every time it is
+// read — a promise whose timestamp advances after the fact can leapfrog a
+// reminder that really was newer (codex P1 round 10). direction is immutable,
+// so this stays deterministic: every read of the same call returns the same
+// instant.
+const OUTBOUND_RING_ALLOWANCE_MS = 60000;
 function callCommitmentInstant(call) {
   const started = instant(call?.created_at);
   const seconds = Number(call?.recording_duration_seconds || call?.duration_seconds || 0);
   if (!Number.isFinite(started)) return new Date();
   const talkEnd = Number.isFinite(seconds) && seconds > 0 ? started + seconds * 1000 : started;
-  const stamped = instant(call?.updated_at);
-  if (!Number.isFinite(stamped) || stamped <= talkEnd) return new Date(talkEnd);
-  return new Date(Math.min(stamped, talkEnd + RING_ALLOWANCE_MS));
+  // call-bridge.js inserts the row BEFORE Twilio rings the staff phone and
+  // then the customer, so an outbound call's talk time omits setup and
+  // ringing and its end can otherwise land before the commitment was spoken
+  // (codex P2 round 10).
+  const outbound = String(call?.direction || '').startsWith('outbound');
+  return new Date(outbound ? talkEnd + OUTBOUND_RING_ALLOWANCE_MS : talkEnd);
 }
 
 // "What window, if any, did the AGENT commit to on this call?" — the
@@ -653,11 +663,28 @@ async function listNoShows(conn, { now = new Date(), limit = 100, offset = 0, ac
     .modify((q) => { if (!admin && actorId) q.where('s.technician_id', actorId); })
     .select('s.*', 'c.first_name', 'c.last_name', 'c.phone');
   const liveRows = rows.filter((r) => !require('./internal-test-customers').isInternalTestCustomerId(r.customer_id));
-  const events = await loadPromiseEvents(conn, liveRows.map((r) => String(r.id)), { now });
+  // Pull in every member of the stops these candidates belong to, even the
+  // ones this query could not return — a sibling already completed, outside
+  // the date window, or filtered out by the tech scope. The grouped reminder
+  // links its evidence to whichever member won the claim, so a stop whose
+  // promise sits on an unfetched sibling would otherwise read as having none
+  // (codex P1 round 10). Cards are still raised only for candidate stops.
+  const stopIds = [...new Set(liveRows.map((r) => r.visit_id).filter(Boolean))];
+  const siblings = stopIds.length
+    ? await conn('scheduled_services as s').join('customers as c', 'c.id', 's.customer_id')
+      .whereIn('s.visit_id', stopIds).whereNotIn('s.id', liveRows.map((r) => r.id))
+      .select('s.*', 'c.first_name', 'c.last_name', 'c.phone')
+    : [];
+  const events = await loadPromiseEvents(conn, [...liveRows, ...siblings].map((r) => String(r.id)), { now });
   const promises = latestPromises(events, now);
-  const cards = groupedStops(liveRows).map(({ representative, members }) => {
+  const candidateIds = new Set(liveRows.map((r) => String(r.id)));
+  const cards = groupedStops([...liveRows, ...siblings]).map(({ members }) => {
+    // The representative must be a row this scan actually returned — the
+    // card, its tracking key and the office alert's job_id all hang off it —
+    // so a stop pulled in only through a sibling raises no card of its own.
+    const r = members.find((m) => candidateIds.has(String(m.id)));
+    if (!r) return null;
     const alert = evaluateNoShow({ visit: stopState(members), promise: stopPromise(members, promises, now), now });
-    const r = representative;
     return alert ? { id: r.id, customer_id: r.customer_id, technician_id: r.technician_id, first_name: r.first_name,
       last_name: r.last_name, phone: r.phone, scheduled_date: r.scheduled_date,
       ...(members.length > 1 ? { grouped_service_ids: members.map((m) => String(m.id)) } : {}), ...alert } : null;

@@ -943,16 +943,18 @@ describe('callCommitmentInstant (when the customer heard the promise) (round-5 P
   // updated_at is the closest stored terminal stamp, trusted up to a bounded
   // ringing allowance past the talk time — later processing writes move it
   // too (round-10 P2).
-  test('the status stamp is used when it is later than the talk time, capped at ten minutes', () => {
+  test('an OUTBOUND call gets a fixed ringing allowance, and the result never drifts', () => {
     const created = '2026-09-10T10:00:00Z';
-    // Rang 90s, then a 10-minute call: the stamp is the honest end.
-    expect(callCommitmentInstant({ created_at: created, duration_seconds: 600, updated_at: '2026-09-10T10:11:30Z' }).toISOString())
-      .toBe('2026-09-10T10:11:30.000Z');
-    // A stamp moved much later by processing writes is capped.
+    // call-bridge inserts the row before Twilio rings anyone, so talk time
+    // alone omits setup and ringing (round-10 P2).
+    expect(callCommitmentInstant({ created_at: created, duration_seconds: 600, direction: 'outbound-api' }).toISOString())
+      .toBe('2026-09-10T10:11:00.000Z');
+    expect(callCommitmentInstant({ created_at: created, duration_seconds: 600, direction: 'inbound' }).toISOString())
+      .toBe('2026-09-10T10:10:00.000Z');
+    // Deterministic: updated_at is NOT consulted, so later processing writes
+    // cannot advance a promise after the fact and leapfrog a reminder that
+    // really was newer (round-10 P1).
     expect(callCommitmentInstant({ created_at: created, duration_seconds: 600, updated_at: '2026-09-10T18:00:00Z' }).toISOString())
-      .toBe('2026-09-10T10:20:00.000Z');
-    // A stamp at or before the talk end changes nothing.
-    expect(callCommitmentInstant({ created_at: created, duration_seconds: 600, updated_at: '2026-09-10T10:05:00Z' }).toISOString())
       .toBe('2026-09-10T10:10:00.000Z');
   });
   test('a recording duration wins over the reported one, and no usable duration falls back to the call start', () => {
