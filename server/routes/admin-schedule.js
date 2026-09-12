@@ -1713,21 +1713,16 @@ function customerEligibleForFreeCallback(customer = {}) {
 }
 
 function normalizeDiscountAmount(row, clientAmount) {
-  const dbAmount = Number(row?.amount);
   // Honor the operator-supplied amount for the variable_* types AND for the
   // seeded custom presets (custom_percent / custom_dollar — percentage /
-  // fixed_amount rows that ship with DB amount 0). Without the custom-preset
-  // branch these resolve back to 0 on save and the line discount is dropped,
-  // so the saved appointment/invoice would charge full price despite the
-  // discounted modal preview. Mirrors the canonical detection in
-  // server/services/invoice.js lineItemDiscountTerm.
-  const honorsClientAmount =
-    row?.discount_type === 'variable_amount' ||
-    row?.discount_type === 'variable_percentage' ||
-    (row?.discount_type === 'percentage' &&
-      (row?.discount_key === 'custom_percent' || !(dbAmount > 0))) ||
-    (row?.discount_type === 'fixed_amount' &&
-      (row?.discount_key === 'custom_dollar' || !(dbAmount > 0)));
+  // fixed_amount rows that ship with DB amount 0). Without that these resolve
+  // back to 0 on save and the line discount is dropped, so the saved
+  // appointment/invoice charges full price despite the discounted preview.
+  //
+  // THE shared predicate (discount-stack.js), not a local copy. This was the
+  // third hand-written copy on the server and the class of drift that has cost
+  // this PR two review rounds already — see isVariableOrCustomDiscountPreset.
+  const honorsClientAmount = isVariableOrCustomDiscountPreset(row);
   const raw = honorsClientAmount && clientAmount !== null && clientAmount !== undefined && clientAmount !== ''
     ? clientAmount
     : row?.amount;
@@ -18889,6 +18884,7 @@ router._test = {
   applyStoredVisitFinancials,
   reconstructPrimaryLineSlot,
   reconstructStoredLineSlot,
+  normalizeDiscountAmount,
   addonDiscountStampPreserved,
   resolveLineDiscount,
   loadStoredDiscountScope,

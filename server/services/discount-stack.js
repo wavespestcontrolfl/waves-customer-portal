@@ -20,11 +20,15 @@
  * Any non-stackable catalog group follows the same rule.
  *
  * The client mirror is client/src/lib/discountStack.js — keep the two in
- * step (both test suites run the same worked examples) for stackDiscounts
- * and stackVisitDiscounts. stackDocumentDiscounts (the invoice-level
- * discountIds path) is server-to-server only and deliberately NOT
- * mirrored: no client code sends invoice-level discountIds, and the
- * client preview only ever stacks line-attached discounts.
+ * step (both test suites run the same worked examples). That now includes
+ * stackDocumentDiscounts and its allocateProRata: it WAS server-only, on the
+ * reasoning that no client code sends invoice-level discountIds and the
+ * preview only stacked line-attached discounts, but a stored
+ * appointment-level stamp reaches the whole document and the invoice
+ * preview has to stack it the same way (AdminInvoicesPage's
+ * invoiceDiscountDollars calls the mirror). Change the algorithm here and
+ * the client copy must change with it, or the preview and the saved total
+ * disagree again — the failure Codex #4405 r3 found.
  */
 
 function isPercentDiscountType(type) {
