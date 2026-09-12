@@ -14,7 +14,7 @@ const { completeScheduledServiceInsert } = require('../services/booking/create-s
 const { collectiveMoveGateOn, dateExceptionStamp } = require('../services/rebooker');
 const { stampedDivergesSql, stampedLine2Sql } = require('../services/stamped-address');
 const { dayStopsQuery, guardedCoordSelects } = require('../services/scheduling/day-stops');
-const { chooseWindowSafeOrder, inProgressStartMin,
+const { chooseWindowSafeOrder, inProgressStartMin, loadTechDayOrigins,
   resolveWindowSafeOrderByTechDay, windowSafeFigures,
   ROUTE_WRITE_GUARD_COLUMNS, routeWriteGuardSignature } = require('../services/route-reorder');
 const {
@@ -13389,6 +13389,7 @@ function optimizeRefusalMessage(reason) {
   if (reason === 'WINDOW_FIT_GATE_OFF') return 'Google\'s route breaks a promised arrival window and the window-fit repair is off — nothing was changed.';
   if (reason === 'LIVE_STOP_IN_PROGRESS') return 'A stop on this route is already in progress — reorder it once that visit is complete.';
   if (reason === 'COORDLESS_STOPS') return 'A stop on this route has no map location, so its arrival window cannot be verified — nothing was changed.';
+  if (reason === 'PROGRESS_ORIGIN_UNKNOWN') return 'This route is already under way and the last completed stop has no map location, so the remaining drive cannot be verified — nothing was changed.';
   return 'No legal stop order keeps every promised arrival window — nothing was changed.';
 }
 
@@ -13406,13 +13407,18 @@ async function assertGuardInputsFresh(trx, dateStr, technicianId, snapshot) {
   // id-filtered re-read, and the order we are about to write has no position
   // for it — the nightly fence compares membership for the same reason
   // (codex round 3 P1).
+  // FOR UPDATE, not just a read: the advisory tech-day lock does not stop a
+  // status transition (transitionJobStatus takes no such lock), so without
+  // row locks a visit could go en_route AFTER this check and still receive
+  // the sequence the live-stop guard approved for its old status (codex
+  // round 5 P2). The rows stay locked for the route_order writes below.
   const fresh = await dayStopsQuery(trx, {
     dateStr,
     technicianId: technicianId || null,
     excludeStatuses: ['cancelled', 'completed'],
     select: ['scheduled_services.id', ...ROUTE_WRITE_GUARD_COLUMNS.map((c) => `scheduled_services.${c}`),
       ...guardedCoordSelects(trx)],
-  });
+  }).forUpdate('scheduled_services');
   const changed = fresh.length !== snapshot.size
     || fresh.some((row) => routeWriteGuardSignature(row) !== snapshot.get(row.id));
   if (changed) throw Object.assign(new Error('schedule changed while optimizing'), { code: 'STALE_OPTIMIZE' });
@@ -13485,9 +13491,11 @@ router.post('/optimize', requireAdmin, async (req, res, next) => {
     // board-wide route_order writer uses (route-reorder.js). Stops with no
     // technician_id have no tech-day to validate against and pass through
     // untouched, same as the nightly pass's treatment of unassigned stops.
+    // Where each truck actually is, for a day already under way.
+    const techDayOrigins = await loadTechDayOrigins(db, dateStr, { technicianId: technicianId || null, now });
     const guarded = resolveWindowSafeOrderByTechDay({
       RouteOptimizer, orderedStops: result.orderedStops, sourceStops: services,
-      googleSource: result.source, legs: result.legs, startMin,
+      googleSource: result.source, legs: result.legs, startMin, techDayOrigins,
     });
     const rejection = guarded.refusal;
     const resolvedByTech = guarded.resolvedByTech || new Map();
@@ -13557,7 +13565,7 @@ router.post('/optimize', requireAdmin, async (req, res, next) => {
     // audit P1). Unassigned stops have no tech-day and are left out of the
     // sum, same as they are left out of the guards.
     const { totalDurationMinutes, totalDistanceMeters, unoptimizedDistanceMeters,
-      savedDistanceMeters, savedPercent } = windowSafeFigures(result, resolvedByTech, anyWindowConstrained, guarded.unassigned);
+      savedDistanceMeters, savedPercent, addedDistanceMeters } = windowSafeFigures(result, resolvedByTech, anyWindowConstrained, guarded.unassigned);
 
     const response = {
       success: true,
@@ -13573,6 +13581,9 @@ router.post('/optimize', requireAdmin, async (req, res, next) => {
       totalDurationMinutes,
       unoptimizedDistanceMeters,
       savedDistanceMeters,
+      // Non-zero only when a legal repair is LONGER than the infeasible order
+      // it replaces — the operator is told, not shown a flat "saved 0".
+      addedDistanceMeters,
       savedPercent,
       // Model-path legs are a same-truck-consecutive-stop breakdown Google
       // never computed for a repaired order (computeWindowFitOrder scores
@@ -13663,8 +13674,16 @@ router.post('/optimize-route', requireAdmin, async (req, res, next) => {
     // Window-safety guard chain (single tech-day — no slicing needed here;
     // Google's legs align 1:1 with `services`, unlike the multi-tech
     // /optimize call, so they ride straight into the feasibility guard).
+    const techDayOrigins = await loadTechDayOrigins(db, dateStr, { technicianId, now });
+    if (techDayOrigins.unknown.has(technicianId)) {
+      return res.status(409).json({
+        success: false, reason: 'PROGRESS_ORIGIN_UNKNOWN',
+        error: optimizeRefusalMessage('PROGRESS_ORIGIN_UNKNOWN'),
+      });
+    }
     const outcome = chooseWindowSafeOrder({
       RouteOptimizer, googleOrder: result.orderedStops, sourceStops: services, googleSource: result.source, legs: result.legs, startMin,
+      origin: techDayOrigins.origins.get(technicianId) || null,
     });
     if (!outcome.orderedStops) {
       return res.status(409).json({

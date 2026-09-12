@@ -143,7 +143,7 @@ function effectiveWindowStart(stop) {
  * impossibility — and rejection only SKIPS the day (safe direction), never
  * writes.
  */
-function violatesWindowFeasibility(RouteOptimizer, orderedStops, sourceStops, legs, startMin = 8 * 60) {
+function violatesWindowFeasibility(RouteOptimizer, orderedStops, sourceStops, legs, startMin = 8 * 60, origin = RouteOptimizer.HQ) {
   const byId = new Map(sourceStops.map((s) => [s.id, s]));
   const geocodedCount = orderedStops.filter((o) => {
     const s = byId.get(o.id) || o;
@@ -156,7 +156,7 @@ function violatesWindowFeasibility(RouteOptimizer, orderedStops, sourceStops, le
     && legs.length >= geocodedCount
     && legs.slice(0, geocodedCount).every((l) => Number.isFinite(l?.durationMinutes));
   let clock = startMin; // minute-of-day, caller-supplied day open
-  let prev = RouteOptimizer.HQ;
+  let prev = origin; // HQ, or the truck's real position on a day in progress
   let geoIdx = 0;
   for (const stop of orderedStops) {
     const s = byId.get(stop.id) || stop;
@@ -193,8 +193,8 @@ function violatesWindowFeasibility(RouteOptimizer, orderedStops, sourceStops, le
  * model decides whether that order is worth writing. Coordless stops
  * contribute nothing on either side.
  */
-function modelDistanceMeters(RouteOptimizer, orderedStops) {
-  let prev = RouteOptimizer.HQ;
+function modelDistanceMeters(RouteOptimizer, orderedStops, origin = RouteOptimizer.HQ) {
+  let prev = origin;
   let total = 0;
   for (const s of orderedStops) {
     const lat = parseFloat(s.lat);
@@ -211,8 +211,8 @@ function modelDistanceMeters(RouteOptimizer, orderedStops) {
  *  model — the duration mirror of modelDistanceMeters, so a caller that sums
  *  a bucket's mileage can report its driving time from the same legs rather
  *  than charging it zero (codex round 4 P1). */
-function modelDriveMinutes(RouteOptimizer, orderedStops) {
-  let prev = RouteOptimizer.HQ;
+function modelDriveMinutes(RouteOptimizer, orderedStops, origin = RouteOptimizer.HQ) {
+  let prev = origin;
   let total = 0;
   for (const s of orderedStops) {
     const lat = parseFloat(s.lat);
@@ -373,7 +373,8 @@ function relaxElapsedWindows(sourceStops, startMin) {
  * runRouteReorder).
  */
 function chooseWindowSafeOrder({
-  RouteOptimizer, googleOrder: rawGoogleOrder, sourceStops: rawSourceStops, googleSource, legs: rawLegs = null, startMin = null,
+  RouteOptimizer, googleOrder: rawGoogleOrder, sourceStops: rawSourceStops, googleSource, legs: rawLegs = null,
+  startMin = null, origin = null,
 }) {
   let legs = rawLegs;
   // Terminal rows ride along in every caller's day query but are not driven.
@@ -394,7 +395,8 @@ function chooseWindowSafeOrder({
   // truck-blind list that conflates separate trucks into one fictitious
   // route (pre-push audit P1 — the exact "wrong savings number" defect
   // class this whole change exists to close).
-  const beforeMeters = modelDistanceMeters(RouteOptimizer, currentOrder(sourceStops));
+  const from = origin || RouteOptimizer.HQ;
+  const beforeMeters = modelDistanceMeters(RouteOptimizer, currentOrder(sourceStops), from);
   // The simulation clock never runs EARLIER than the 08:00 day open — a
   // 07:00 request must not be told the truck can spend that hour driving and
   // mark an 08:00 promise reachable (codex round 2 P1). The elapsed-window
@@ -413,7 +415,7 @@ function chooseWindowSafeOrder({
   const relaxedById = new Map(guardStops.map((s) => [s.id, s]));
   const guardRange = (s) => effectiveWindowRange(relaxedById.get(s.id) || s);
   const chronoConflict = violatesWindowChronology(googleOrder, guardStops);
-  const fitConflict = !chronoConflict && violatesWindowFeasibility(RouteOptimizer, googleOrder, guardStops, legs, simStart);
+  const fitConflict = !chronoConflict && violatesWindowFeasibility(RouteOptimizer, googleOrder, guardStops, legs, simStart, from);
   const conflict = chronoConflict ? 'WINDOW_ORDER_CONFLICT' : (fitConflict ? 'WINDOW_FIT_CONFLICT' : null);
   // A tech-day already being driven cannot be simulated from HQ at the day
   // open: the truck has a real position, the live stop's remaining work is
@@ -439,13 +441,13 @@ function chooseWindowSafeOrder({
     // a single-tech caller that wants Google's own reported numbers for an
     // unrepaired day keeps using its own `result.*` fields, unaffected by
     // these — see admin-schedule.js's two callers.
-    const sim = simulateArrivalRoute(RouteOptimizer, guardRange, googleOrder, { startMin: simStart });
+    const sim = simulateArrivalRoute(RouteOptimizer, guardRange, googleOrder, { startMin: simStart, origin: from });
     return {
       orderedStops: googleOrder,
       source: googleSource,
       conflict,
       beforeMeters,
-      afterMeters: modelDistanceMeters(RouteOptimizer, googleOrder),
+      afterMeters: modelDistanceMeters(RouteOptimizer, googleOrder, from),
       // null only if a legal order somehow fails the same-model simulation
       // the guards themselves already vetted — belt and suspenders.
       afterSeconds: sim ? Math.round(sim.travelMin * 60) : null,
@@ -461,7 +463,7 @@ function chooseWindowSafeOrder({
   }
   const fallback = computeWindowFitOrder(RouteOptimizer, currentOrder(guardStops), {
     effectiveWindowStart, effectiveWindowRange: guardRange, violatesWindowChronology, violatesWindowFeasibility, modelDistanceMeters,
-  }, { startMin: simStart });
+  }, { startMin: simStart, origin: from });
   if (!fallback) {
     return { orderedStops: null, reason: 'NO_FEASIBLE_IMPROVEMENT', conflict, beforeMeters };
   }
@@ -512,6 +514,54 @@ function routeWriteGuardSignature(stop) {
 }
 
 /**
+ * Where each technician's truck ACTUALLY is when a day already in progress is
+ * re-optimized. A completed stop is excluded from every caller's day query, so
+ * without this the guard would model the first remaining leg from HQ and could
+ * certify an order that cannot make its next promise (codex round 5 P1).
+ *
+ * Returns { origins, unknown }: the last completed stop's coordinates per
+ * technician, and the technicians whose day has started but whose position
+ * cannot be established (completed rows exist, none geocoded) — those refuse
+ * rather than pretend the truck is at HQ. Empty for any date but today, where
+ * every route starts at HQ by definition.
+ */
+async function loadTechDayOrigins(conn, dateStr, { technicianId = null, now = new Date() } = {}) {
+  const origins = new Map();
+  const unknown = new Set();
+  if (dateStr !== etDateString(now)) return { origins, unknown };
+  const rows = await conn('scheduled_services')
+    .leftJoin('customers', 'scheduled_services.customer_id', 'customers.id')
+    .where('scheduled_services.scheduled_date', dateStr)
+    .where('scheduled_services.status', 'completed')
+    .whereNotNull('scheduled_services.technician_id')
+    .modify((q) => (technicianId ? q.where('scheduled_services.technician_id', technicianId) : q))
+    .select('scheduled_services.id', 'scheduled_services.technician_id', 'scheduled_services.route_order',
+      'scheduled_services.check_out_time', 'scheduled_services.actual_end_time', 'scheduled_services.completed_at',
+      ...guardedCoordSelects(conn));
+  const finishedAt = (r) => r.check_out_time || r.actual_end_time || r.completed_at || null;
+  const byTech = new Map();
+  for (const row of rows) {
+    if (!byTech.has(row.technician_id)) byTech.set(row.technician_id, []);
+    byTech.get(row.technician_id).push(row);
+  }
+  for (const [techId, techRows] of byTech) {
+    // Latest finish wins; with no timestamps, the furthest along the board.
+    const ordered = [...techRows].sort((a, b) => {
+      const fa = finishedAt(a);
+      const fb = finishedAt(b);
+      if (fa && fb) return String(fa).localeCompare(String(fb));
+      if (fa) return 1;
+      if (fb) return -1;
+      return (Number(a.route_order) || 0) - (Number(b.route_order) || 0);
+    });
+    const last = [...ordered].reverse().find((r) => parseFloat(r.lat) && parseFloat(r.lng));
+    if (last) origins.set(techId, { lat: parseFloat(last.lat), lng: parseFloat(last.lng) });
+    else unknown.add(techId);
+  }
+  return { origins, unknown };
+}
+
+/**
  * THE per-tech-day application of chooseWindowSafeOrder — one mechanism for
  * every writer that hands Google a whole board and writes route_order back
  * (the two admin optimize endpoints and the Intelligence Bar's two route
@@ -528,7 +578,8 @@ function routeWriteGuardSignature(stop) {
  * One unrepairable tech-day refuses the WHOLE request ({ refusal }) rather
  * than half-writing another tech's fine segment.
  */
-function resolveWindowSafeOrderByTechDay({ RouteOptimizer, orderedStops, sourceStops, googleSource, legs = null, startMin = null }) {
+function resolveWindowSafeOrderByTechDay({ RouteOptimizer, orderedStops, sourceStops, googleSource, legs = null,
+  startMin = null, techDayOrigins = null }) {
   const sourceById = new Map(sourceStops.map((s) => [s.id, s]));
   const byTech = new Map();
   for (const s of sourceStops) {
@@ -549,8 +600,14 @@ function resolveWindowSafeOrderByTechDay({ RouteOptimizer, orderedStops, sourceS
   for (const [techId, techStops] of byTech) {
     const ids = new Set(techStops.map((s) => s.id));
     const slice = orderedStops.filter((s) => ids.has(s.id)).map((s) => sourceById.get(s.id));
+    if (techDayOrigins && techDayOrigins.unknown.has(techId)) {
+      // The day has started but the truck cannot be located — see
+      // loadTechDayOrigins.
+      return { refusal: { technicianId: techId, orderedStops: null, reason: 'PROGRESS_ORIGIN_UNKNOWN', conflict: null, beforeMeters: 0 } };
+    }
     const outcome = chooseWindowSafeOrder({
       RouteOptimizer, googleOrder: slice, sourceStops: techStops, googleSource, legs: legsAlign, startMin,
+      origin: techDayOrigins ? techDayOrigins.origins.get(techId) || null : null,
     });
     if (!outcome.orderedStops) return { refusal: { technicianId: techId, ...outcome } };
     resolvedByTech.set(techId, outcome);
@@ -607,12 +664,21 @@ function windowSafeFigures(result, resolvedByTech, anyWindowConstrained, unassig
   const totalDurationMinutes = Math.round(anyWindowConstrained
     ? outcomes.reduce((sum, o) => sum + (o.afterSeconds || 0), 0) / 60 + unassignedMinutes
     : result.totalDurationSeconds / 60);
-  const savedDistanceMeters = Math.max(0, unoptimizedDistanceMeters - totalDistanceMeters);
+  // SIGNED: the admin paths apply any legal repair without a savings floor,
+  // so a board whose current order is itself infeasible can be repaired into
+  // a LONGER route. Clamping that to "saving ~0 miles" hides an increase from
+  // the operator being asked to confirm it (codex round 5 P2). savedDistance
+  // stays clamped for the existing response contract; distanceChange carries
+  // the truth.
+  const distanceChangeMeters = totalDistanceMeters - unoptimizedDistanceMeters;
+  const savedDistanceMeters = Math.max(0, -distanceChangeMeters);
   return {
     totalDurationMinutes,
     totalDistanceMeters,
     unoptimizedDistanceMeters,
     savedDistanceMeters,
+    distanceChangeMeters,
+    addedDistanceMeters: Math.max(0, distanceChangeMeters),
     savedPercent: unoptimizedDistanceMeters > 0
       ? Math.round((savedDistanceMeters / unoptimizedDistanceMeters) * 100) : 0,
   };
@@ -1266,6 +1332,7 @@ async function recordSkippedTick(reason, now = new Date()) {
 
 module.exports = {
   inProgressStartMin,
+  loadTechDayOrigins,
   ROUTE_WRITE_GUARD_COLUMNS,
   routeWriteGuardSignature,
   resolveWindowSafeOrderByTechDay,

@@ -14,7 +14,7 @@ const { assertAssignableTechnician, applyAssignable } = require('../technician-e
 const { scheduledServiceTrackTokenExpiry } = require('../track-token-expiry');
 const { etDateString, addETDays, validScheduleDate, sameDayWindowElapsed } = require('../../utils/datetime-et');
 const { dayStopsQuery, guardedCoordSelects } = require('../scheduling/day-stops');
-const { resolveWindowSafeOrderByTechDay, windowSafeFigures, inProgressStartMin,
+const { resolveWindowSafeOrderByTechDay, windowSafeFigures, inProgressStartMin, loadTechDayOrigins,
   ROUTE_WRITE_GUARD_COLUMNS, routeWriteGuardSignature } = require('../route-reorder');
 const { probeSlotOverlap, slotOverlapWarning } = require('../scheduling/window-rules');
 
@@ -394,6 +394,7 @@ function routeGuardMessage(reason) {
   if (reason === 'WINDOW_FIT_GATE_OFF') return 'The shortest route breaks a promised arrival window and the window-fit repair is off — nothing was changed.';
   if (reason === 'LIVE_STOP_IN_PROGRESS') return 'A stop on this route is already in progress — reorder it once that visit is complete.';
   if (reason === 'COORDLESS_STOPS') return 'A stop on this route has no map location, so its arrival window cannot be verified — nothing was changed.';
+  if (reason === 'PROGRESS_ORIGIN_UNKNOWN') return 'This route is already under way and the last completed stop has no map location, so the remaining drive cannot be verified — nothing was changed.';
   return 'No legal stop order keeps every promised arrival window — nothing was changed.';
 }
 
@@ -469,6 +470,7 @@ async function optimizeAllRoutes(input) {
   const guarded = resolveWindowSafeOrderByTechDay({
     RouteOptimizer, orderedStops: result.orderedStops, sourceStops: services,
     googleSource: result.source, legs: result.legs, startMin: inProgressStartMin(date),
+    techDayOrigins: await loadTechDayOrigins(db, date),
   });
   if (guarded.refusal) {
     return { blocked: true, date, reason: guarded.refusal.reason, conflict: guarded.refusal.conflict,
@@ -487,6 +489,7 @@ async function optimizeAllRoutes(input) {
   result.totalDurationSeconds = figures.totalDurationMinutes * 60;
   if (guarded.anyWindowConstrained) result.source = 'window_constrained';
   const savedMiles = Math.round(figures.savedDistanceMeters / 1609.34);
+  const addedMiles = Math.round(figures.addedDistanceMeters / 1609.34);
   const savedPct = figures.savedPercent;
 
   const summary = {
@@ -495,6 +498,7 @@ async function optimizeAllRoutes(input) {
     total_miles_before: Math.round(result.unoptimizedDistanceMeters / 1609.34),
     total_miles_after: Math.round(result.totalDistanceMeters / 1609.34),
     miles_saved: savedMiles,
+    miles_added: addedMiles,
     percent_saved: savedPct,
     total_drive_minutes: Math.round((result.totalDurationSeconds || 0) / 60),
     source: result.source, // 'google_routes' or 'nearest_neighbor'
@@ -513,7 +517,9 @@ async function optimizeAllRoutes(input) {
     return {
       proposal: true,
       ...summary,
-      note: `Would reorder ${stopsWithCoords.length} stops, saving ~${savedMiles} miles. Re-call with confirmed:true to apply.`,
+      note: addedMiles > 0
+        ? `Would reorder ${stopsWithCoords.length} stops to keep every promised arrival window — this ADDS ~${addedMiles} miles. Re-call with confirmed:true to apply.`
+        : `Would reorder ${stopsWithCoords.length} stops, saving ~${savedMiles} miles. Re-call with confirmed:true to apply.`,
     };
   }
 
@@ -619,6 +625,7 @@ async function optimizeTechRoute(input) {
   const guarded = resolveWindowSafeOrderByTechDay({
     RouteOptimizer, orderedStops: result.orderedStops, sourceStops: services,
     googleSource: result.source, legs: result.legs, startMin: inProgressStartMin(date),
+    techDayOrigins: await loadTechDayOrigins(db, date, { technicianId: tech.id }),
   });
   if (guarded.refusal) {
     return { blocked: true, date, tech: tech.name, reason: guarded.refusal.reason,
@@ -633,6 +640,7 @@ async function optimizeTechRoute(input) {
   result.totalDurationSeconds = figures.totalDurationMinutes * 60;
   if (guarded.anyWindowConstrained) result.source = 'window_constrained';
   const savedMiles = Math.round(figures.savedDistanceMeters / 1609.34);
+  const addedMiles = Math.round(figures.addedDistanceMeters / 1609.34);
 
   const summary = {
     tech: tech.name,
@@ -641,6 +649,7 @@ async function optimizeTechRoute(input) {
     miles_before: Math.round(result.unoptimizedDistanceMeters / 1609.34),
     miles_after: Math.round(result.totalDistanceMeters / 1609.34),
     miles_saved: savedMiles,
+    miles_added: addedMiles,
     drive_minutes: Math.round((result.totalDurationSeconds || 0) / 60),
     ordered_stops: (result.orderedStops || []).map((s, i) => ({
       position: i + 1,
@@ -657,7 +666,9 @@ async function optimizeTechRoute(input) {
     return {
       proposal: true,
       ...summary,
-      note: `Would reorder ${tech.name}'s ${stopsWithCoords.length} stops, saving ~${savedMiles} miles. Re-call with confirmed:true to apply.`,
+      note: addedMiles > 0
+        ? `Would reorder ${tech.name}'s ${stopsWithCoords.length} stops to keep every promised arrival window — this ADDS ~${addedMiles} miles. Re-call with confirmed:true to apply.`
+        : `Would reorder ${tech.name}'s ${stopsWithCoords.length} stops, saving ~${savedMiles} miles. Re-call with confirmed:true to apply.`,
     };
   }
 

@@ -94,6 +94,7 @@ function infeasibleDay(techId = 't1') {
 }
 
 let stopsByDate;
+let completedByDate;
 let trxUpdates;
 
 function trxTable() {
@@ -135,8 +136,28 @@ beforeEach(() => {
   stopsByDate = {};
   trxUpdates = [];
   db.raw = jest.fn((sql) => sql);
-  dayStopsQuery.mockImplementation(async (_db, { dateStr, technicianId }) => (stopsByDate[dateStr] || [])
-    .filter((s) => !technicianId || s.technician_id === technicianId));
+  completedByDate = {};
+  // The origin loader reads today's COMPLETED stops directly (they are
+  // excluded from every day query) — a thin chain over the same fixtures.
+  db.mockImplementation(() => {
+    const filters = {};
+    const c = {};
+    c.leftJoin = () => c;
+    c.where = (a, b) => { if (typeof a === 'object') Object.assign(filters, a); else filters[String(a).replace('scheduled_services.', '')] = b; return c; };
+    c.whereNotNull = () => c;
+    c.modify = (fn) => { fn(c); return c; };
+    c.select = async () => (completedByDate[filters.scheduled_date] || [])
+      .filter((r) => !filters.technician_id || r.technician_id === filters.technician_id);
+    return c;
+  });
+  // dayStopsQuery returns a knex builder in production — the post-lock fence
+  // chains .forUpdate() onto it, so the mock has to be thenable AND chainable.
+  dayStopsQuery.mockImplementation((_db, { dateStr, technicianId }) => {
+    const rows = (stopsByDate[dateStr] || []).filter((s) => !technicianId || s.technician_id === technicianId);
+    const builder = Promise.resolve(rows);
+    builder.forUpdate = () => builder;
+    return builder;
+  });
   db.transaction.mockImplementation(async (cb) => cb((table) => trxTable(table)));
 });
 
@@ -682,4 +703,66 @@ test('a repaired day counts the unassigned stop’s drive minutes too', async ()
   } finally {
     RouteOptimizer.fallbackLegMetrics = realLegs;
   }
+});
+
+// ── Codex round 5 ────────────────────────────────────────────────────────
+describe('round-5 origin guards', () => {
+  const TODAY = '2026-09-20';
+  beforeEach(() => {
+    require('../services/scheduling/tech-day-lock').lockTechDays.mockImplementation(async () => {});
+    process.env.GATE_ROUTE_REORDER_WINDOW_FIT = 'true';
+    process.env.GATE_DRIVE_TIME_CALIBRATION = 'true';
+    jest.useFakeTimers({ doNotFake: ['nextTick', 'setImmediate'] });
+    jest.setSystemTime(new Date('2026-09-20T13:00:00Z')); // 09:00 ET
+  });
+  afterEach(() => { jest.useRealTimers(); });
+
+  test("the remaining route is simulated from the truck's last completed stop, not HQ", async () => {
+    // A repaired day reports OUR model's figures, so they expose the origin.
+    // Same board twice: once with the truck still at HQ, once after it has
+    // finished a stop 30 "miles" out.
+    stopsByDate[TODAY] = chronologyDay();
+    mockOptimizerOrder(['T2', 'T1', 'U']);
+    const fromHq = (await optimizeRoute({ technicianId: 't1' })).body;
+
+    trxUpdates.length = 0;
+    stopsByDate[TODAY] = chronologyDay();
+    completedByDate[TODAY] = [{ id: 'DONE', technician_id: 't1', route_order: 0, lat: 1, lng: 30, check_out_time: '2026-09-20T12:50:00Z' }];
+    mockOptimizerOrder(['T2', 'T1', 'U']);
+    const fromTruck = (await optimizeRoute({ technicianId: 't1' })).body;
+
+    expect(fromHq.source).toBe('window_constrained');
+    expect(fromTruck.source).toBe('window_constrained');
+    // The first leg now starts 30 units away instead of at HQ, so both the
+    // before and after figures grow by that real distance.
+    expect(fromTruck.unoptimizedDistanceMeters).toBeGreaterThan(fromHq.unoptimizedDistanceMeters);
+    expect(fromTruck.totalDistanceMeters).toBeGreaterThan(fromHq.totalDistanceMeters);
+  });
+
+  test('a started day whose last completed stop has no pin is refused, not modelled from HQ', async () => {
+    stopsByDate[TODAY] = chronologyDay();
+    completedByDate[TODAY] = [{ id: 'DONE', technician_id: 't1', route_order: 0, lat: null, lng: null }];
+    mockOptimizerOrder(['T2', 'T1', 'U']);
+    const single = await optimizeRoute({ technicianId: 't1' });
+    expect(single.status).toBe(409);
+    expect(single.body.reason).toBe('PROGRESS_ORIGIN_UNKNOWN');
+    // The board-wide endpoint refuses through the shared resolver too.
+    trxUpdates.length = 0;
+    mockOptimizerOrder(['T2', 'T1', 'U']);
+    const board = await optimizeAll({ date: TODAY });
+    expect(board.status).toBe(409);
+    expect(board.body.reason).toBe('PROGRESS_ORIGIN_UNKNOWN');
+    expect(trxUpdates).toEqual([]);
+  });
+
+  test('a future date never loads an origin — every route starts at HQ', async () => {
+    // DATE is today under this block's clock, so use a genuinely later day.
+    const FUTURE = '2026-09-21';
+    stopsByDate[FUTURE] = chronologyDay();
+    completedByDate[FUTURE] = [{ id: 'DONE', technician_id: 't1', route_order: 0, lat: null, lng: null }];
+    mockOptimizerOrder(['T2', 'T1', 'U']);
+    const { status, body } = await optimizeRoute({ technicianId: 't1', date: FUTURE });
+    expect(status).toBe(200);
+    expect(body.source).toBe('window_constrained');
+  });
 });
