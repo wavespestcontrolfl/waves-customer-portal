@@ -771,7 +771,7 @@ function LawnFactsTab({ showToast }) {
               </Button>
             </Card>
           )}
-          <div className="grid gap-[12px]">
+          <div className="grid grid-cols-[repeat(auto-fit,minmax(240px,1fr))] gap-[12px]">
             {[
               ["productType", "Product type"],
               ["customerVisibility", "Visibility"],
@@ -980,7 +980,7 @@ function LawnContentModulesTab({ showToast }) {
               Close
             </Button>
           </div>
-          <div className="grid gap-[12px]">
+          <div className="grid grid-cols-[repeat(auto-fit,minmax(220px,1fr))] gap-[12px]">
             <Field label="Title">
               <Input
                 value={form.title || ""}
@@ -3141,15 +3141,20 @@ function autoOrderSummary(order) {
       order.amountCents != null
         ? ` · $${(order.amountCents / 100).toFixed(2)}`
         : "";
+    // Main carried a colour with each outcome. The kit has no success tone, so a
+    // placed order reads in the default ink, but "failed"/"needs review" keeps
+    // its amber and the in-progress state its muted ink.
     return {
       label: `Ordered automatically${number}${total}`,
     };
   }
   if (order.status === "placing")
     return {
+      tone: "text-ink-secondary",
       label: "Auto-order in progress",
     };
   return {
+    tone: "text-warn-fg",
     label: `Auto-order ${order.status === "failed" ? "failed" : "needs review"}`,
   };
 }
@@ -3189,7 +3194,7 @@ function RestockStatusCell({
         {request.status}
       </Badge>
       {order && (
-        <div className="mt-[6px] text-ui-body">
+        <div className={`mt-[6px] text-ui-body ${summary.tone || ""}`}>
           {summary.label}
           {order.status !== "placed" && order.error && (
             <div className="text-ink-secondary mt-[2px] max-w-[260px]">
@@ -3273,7 +3278,7 @@ function RestockActionCell({
   return (
     <TD>
       <div className="grid gap-[6px] min-w-[220px]">
-        <div className="grid gap-[6px]">
+        <div className="grid grid-cols-[1fr_80px] gap-[6px]">
           <Input
             value={
               draft.quantity ??
@@ -3799,14 +3804,14 @@ function ExpandedProduct({
           Add Price
         </Button>{" "}
       </div>{" "}
-      <div className="grid gap-[12px] mt-[14px]">
+      <div className="grid grid-cols-[minmax(260px,380px)_1fr] gap-[12px] mt-[14px]">
         {" "}
         <Card className="p-3">
           {" "}
           <div className="text-ui-body text-ink-secondary mb-[8px]">
             Manual Adjustment
           </div>{" "}
-          <div className="grid gap-[8px]">
+          <div className="grid grid-cols-2 gap-[8px]">
             {" "}
             <Select
               value={adjustForm.movementType}
@@ -4137,7 +4142,7 @@ function RegistryTab({ showToast }) {
 
               {isEditing && (
                 <div className="grid gap-[10px]">
-                  <div className="grid gap-[8px]">
+                  <div className="grid grid-cols-3 gap-[8px]">
                     <Field label="Visibility">
                       <Select
                         value={form.customerVisibility}
@@ -4186,7 +4191,7 @@ function RegistryTab({ showToast }) {
                     </Field>
                   </div>
 
-                  <div className="grid gap-[8px]">
+                  <div className="grid grid-cols-2 gap-[8px]">
                     <Field label="Target Pests (comma-separated)">
                       <Input
                         value={form.targetPests}
@@ -4243,7 +4248,7 @@ function RegistryTab({ showToast }) {
                     />
                   </Field>
 
-                  <div className="grid gap-[8px]">
+                  <div className="grid grid-cols-2 gap-[8px]">
                     <Field label="Customer Safety Summary">
                       <Textarea
                         value={form.customerSafetySummary}
@@ -4331,7 +4336,7 @@ function VendorsTab({ showToast }) {
   };
   if (loading) return <ActionFeedback>Loading vendors…</ActionFeedback>;
   return (
-    <div className="grid gap-[12px]">
+    <div className="grid grid-cols-[repeat(auto-fill,minmax(280px,1fr))] gap-[12px]">
       {vendors.map((v) => (
         <Card key={v.id} className="p-5 mb-3 mb-[0px]">
           {" "}
@@ -4897,7 +4902,7 @@ function ProtocolsTab({
               Refresh
             </Button>{" "}
           </div>{" "}
-          <div className="grid gap-[8px]">
+          <div className="grid grid-cols-[repeat(auto-fit,minmax(155px,1fr))] gap-[8px]">
             {health.lines.map((line) => {
               const label = lineLabel(line.serviceLine);
               const needsCogs = line.cogsRows === 0;
@@ -4924,7 +4929,7 @@ function ProtocolsTab({
                       {line.status}
                     </Badge>{" "}
                   </div>{" "}
-                  <div className="grid gap-[6px] mt-[8px]">
+                  <div className="grid grid-cols-3 gap-[6px] mt-[8px]">
                     {" "}
                     <div>
                       <div className="text-ui-body text-zinc-900">
@@ -5533,7 +5538,7 @@ function ScrapeTab({ showToast }) {
       <div className="text-ui-body font-medium text-zinc-900 mb-[16px]">
         Vendor Scrape Status
       </div>{" "}
-      <div className="grid gap-[10px] mb-[24px]">
+      <div className="grid grid-cols-[repeat(auto-fill,minmax(220px,1fr))] gap-[10px] mb-[24px]">
         {vendors.map((v) => {
           return (
             <Card key={v.id} className="p-5 mb-3 mb-[0px] text-center">
