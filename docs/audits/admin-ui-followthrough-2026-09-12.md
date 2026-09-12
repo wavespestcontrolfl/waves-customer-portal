@@ -30,6 +30,18 @@ Base: `86d67e9510fe9de03eb70e35621c7d291cb5842b`
 - Field Assessment evidence: `.tmp/admin-assessment-foundation/report.json`, passing select/profile/photo/scoring flows at 1440px, 390px and 320px. Score controls are checked for tile containment, overlap and 44px targets. Reproduce with `scripts/qa/admin-assessment-foundation.cjs`.
 - Browser viewport emulation was used; physical-device keyboards and installed-app safe areas were not tested.
 
+## Combined PR verification
+
+The focused branches were combined in an isolated local integration checkout
+(`e8b8f7137a8dea798a8b34a71775ada36e37bbf2`, based on main
+`85c70fcb647b63351326b8a47bb8d28dd4def08f`). The combined run passed
+379 tests across 38 files, the production build, and the capability census
+with zero new or changed unmapped sites. Recovery, Assessment, and Newsletter
+browser fixtures also passed with synthetic data and no page errors.
+The local QA server allowed the installed dependency directory so fonts
+could load through worktree symlinks; tracked application code was clean.
+Individual PR review and CI remain the release gates.
+
 ## Remaining work and integration boundaries
 
 - Schedule edit, protocol and completion overlay migrations remain coordinated with closeout continuation PR #4315; this branch migrates Reschedule only.
