@@ -7878,6 +7878,21 @@ function PropertyTab({ customer, wateringPlanCustomerId, onOpenWateringProperty 
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState('');
   const [saveStatus, setSaveStatus] = useState(null); // null | 'saving' | 'saved' | 'error'
+  // Per-field messages for values the server rejected as permanently
+  // invalid (e.g. a malformed HOA email) — keyed by the camelCase field
+  // name the server names in its `rejected` list. Never re-queued: see
+  // flushAllPendingSaves. Surfaced under the offending input so the
+  // customer can act on it instead of a generic "error" banner (prod
+  // incident 2026-09-11).
+  const [fieldErrors, setFieldErrors] = useState({});
+  // The rejections the CURRENT banner is about — kept per flush, never read
+  // off cumulative fieldErrors (pre-push audit P1): a stale message from an
+  // earlier batch would otherwise make a later transport failure read as a
+  // validation problem. The banner names the messages itself rather than
+  // saying "see below", because not every field on this tab renders through
+  // the textInput() helper that shows an inline message (pre-push audit P1) —
+  // an enumerated or numeric control would have left "below" empty.
+  const [lastFlushRejections, setLastFlushRejections] = useState([]);
   const debounceRef = useRef(null);
   const pendingRef = useRef({});
   const lastSavedRef = useRef(null);
@@ -7962,19 +7977,86 @@ function PropertyTab({ customer, wateringPlanCustomerId, onOpenWateringProperty 
         try {
           const result = await api.updatePropertyPreferences(toSave);
           if (result && result.preferences) lastSavedRef.current = result.preferences;
+          const rejectedFields = Array.isArray(result?.rejected) ? result.rejected : [];
+          // A field the server validated and saved THIS round clears any
+          // stale message from an earlier rejection of the same field; a
+          // field the server names here gets (or keeps) its message.
+          const rejectedByField = new Map(rejectedFields.map((r) => [r.field, r.message]));
+          setFieldErrors(prev => {
+            const next = { ...prev };
+            for (const key of Object.keys(toSave)) {
+              if (key === 'confirmed_as_of') continue;
+              if (rejectedByField.has(key)) next[key] = rejectedByField.get(key);
+              else delete next[key];
+            }
+            return next;
+          });
           // The server stamps irrigation_system=true on any irrigation
           // write, so suppression ends when THIS batch — the one that
           // actually carried an irrigation field — succeeds. Never a shared
           // flag: an older non-irrigation PUT resolving must not clear it.
-          if (Object.keys(toSave).some((k) => IRRIGATION_EDIT_FIELDS.has(k))) {
-            setIrrigationSuppressed(false);
+          // A partial save whose IRRIGATION field is the rejected one did not
+          // store that value (pre-push audit P1): before per-field
+          // validation such a batch always 400'd, so this branch never ran
+          // on bad irrigation data, and confirming it now would tell the
+          // watering plan a setting was saved that the server dropped. Any
+          // OTHER field's rejection still leaves the irrigation write
+          // confirmed — it landed.
+          // Suppression and the watering-plan revision answer DIFFERENT
+          // questions (codex r1 P2), so a mixed batch splits them: any
+          // irrigation field that LANDED means the server stamped
+          // irrigation_system=true, so the "not being counted" note must go
+          // — leaving it up tells the customer a setting she did save is
+          // being ignored. The revision, which claims the plan reflects THIS
+          // edit, is withheld while any irrigation field in the batch was
+          // rejected.
+          const submittedIrrigation = Object.keys(toSave).filter((k) => IRRIGATION_EDIT_FIELDS.has(k));
+          const rejectedIrrigation = rejectedFields.filter((r) => IRRIGATION_EDIT_FIELDS.has(r.field));
+          if (submittedIrrigation.length > rejectedIrrigation.length) setIrrigationSuppressed(false);
+          if (submittedIrrigation.length && rejectedIrrigation.length === 0) {
             setSavedWateringRevision(savingIrrigationRevision);
           }
+          // Resolve with THIS flush's rejections — never a shared ref
+          // (codex r1 P2): with a slow save still in flight, a ref reset at
+          // enqueue time let one request's rejection decide another
+          // request's banner.
+          return rejectedFields;
         } catch (err) {
-          // Re-queue UNDER newer edits (a field re-edited since this PUT left
-          // wins) so the next flush retries these without clobbering fresher
-          // input. The UI is not reverted, so queue and screen agree.
-          pendingRef.current = { ...toSave, ...pendingRef.current };
+          // Fields the server names as rejected (bad format, out of range)
+          // are permanently invalid — retrying them can never succeed, and
+          // re-queuing them would poison every OTHER field's autosave behind
+          // them forever (prod incident 2026-09-11: one bad hoaEmail 400'd —
+          // and then endlessly re-400'd — the whole batch). Drop exactly
+          // those fields and re-queue the rest UNDER newer edits, same as
+          // before. A genuine transport/5xx failure (no per-field detail)
+          // still re-queues the whole batch, unchanged.
+          const rejectedFields = Array.isArray(err?.rejected) ? err.rejected : [];
+          if (rejectedFields.length) {
+            setFieldErrors(prev => {
+              const next = { ...prev };
+              for (const r of rejectedFields) next[r.field] = r.message;
+              return next;
+            });
+            const rejectedSet = new Set(rejectedFields.map((r) => r.field));
+            // `confirmed_as_of` is metadata this function synthesizes, not a
+            // customer edit (codex r1 P1). Left in the retry payload, a
+            // batch whose every REAL field was rejected re-queues a
+            // metadata-only request that the server 400s with no `rejected`
+            // list — which re-queues it again, forever, and every
+            // property-switch flush keeps failing on it.
+            const retryable = Object.fromEntries(
+              Object.entries(toSave).filter(([k]) => k !== 'confirmed_as_of' && !rejectedSet.has(k)),
+            );
+            if (Object.keys(retryable).length) {
+              pendingRef.current = { ...retryable, ...pendingRef.current };
+            }
+          } else {
+            // Re-queue UNDER newer edits (a field re-edited since this PUT
+            // left wins) so the next flush retries these without clobbering
+            // fresher input. The UI is not reverted, so queue and screen
+            // agree.
+            pendingRef.current = { ...toSave, ...pendingRef.current };
+          }
           throw err;
         }
       });
@@ -7987,6 +8069,10 @@ function PropertyTab({ customer, wateringPlanCustomerId, onOpenWateringProperty 
 
   const updateField = useCallback((field, value) => {
     setPrefs(prev => ({ ...prev, [field]: value }));
+    // Re-typing a rejected field clears its stale message immediately — the
+    // next autosave re-validates it and will re-set the message if it's
+    // still invalid.
+    setFieldErrors(prev => (field in prev ? Object.fromEntries(Object.entries(prev).filter(([k]) => k !== field)) : prev));
     if (IRRIGATION_EDIT_FIELDS.has(field)) {
       irrigationEditRevision.current += 1;
       setWateringPlanRevision(irrigationEditRevision.current);
@@ -7999,7 +8085,17 @@ function PropertyTab({ customer, wateringPlanCustomerId, onOpenWateringProperty 
     debounceRef.current = setTimeout(() => {
       setSaveStatus('saving');
       flushAllPendingSaves()
-        .then(() => {
+        .then((rejections) => {
+          // A flush that saved SOME fields and had others rejected resolves,
+          // but must not claim success — its own resolved value carries the
+          // rejections, so a concurrent flush can never decide this banner.
+          const rejected = Array.isArray(rejections) ? rejections : [];
+          if (rejected.length) {
+            setLastFlushRejections(rejected);
+            setSaveStatus('error');
+            return;
+          }
+          setLastFlushRejections([]);
           setSaveStatus('saved');
           setTimeout(() => setSaveStatus(prev => (prev === 'saved' ? null : prev)), 2000);
         })
@@ -8011,6 +8107,8 @@ function PropertyTab({ customer, wateringPlanCustomerId, onOpenWateringProperty 
           // would recreate the divergence (UI shows old, queue holds new)
           // that let a later flush silently persist hidden values. Just
           // surface the failure.
+          // The 400-with-detail case throws, carrying its own list.
+          setLastFlushRejections(Array.isArray(err?.rejected) ? err.rejected : []);
           setSaveStatus('error');
         });
     }, 1000);
@@ -8135,23 +8233,28 @@ function PropertyTab({ customer, wateringPlanCustomerId, onOpenWateringProperty 
     tel: { inputMode: 'tel' },
     email: { inputMode: 'email', autoCapitalize: 'none' },
   };
-  const textInput = (field, placeholder, label, type = 'text') => (
-    <div>
-      {label && <label style={labelStyle}>{label}</label>}
-      <input
-        type={type}
-        {...(TYPE_HINTS[type] || {})}
-        value={prefs[field] || ''}
-        onChange={e => updateField(field, e.target.value)}
-        placeholder={placeholder}
-        aria-label={label || placeholder}
-        className="waves-focus-ring"
-        style={inputStyle}
-        onFocus={focusBorder}
-        onBlur={blurBorder}
-      />
-    </div>
-  );
+  const textInput = (field, placeholder, label, type = 'text') => {
+    const fieldError = fieldErrors[field];
+    return (
+      <div>
+        {label && <label style={labelStyle}>{label}</label>}
+        <input
+          type={type}
+          {...(TYPE_HINTS[type] || {})}
+          value={prefs[field] || ''}
+          onChange={e => updateField(field, e.target.value)}
+          placeholder={placeholder}
+          aria-label={label || placeholder}
+          aria-invalid={fieldError ? true : undefined}
+          className="waves-focus-ring"
+          style={fieldError ? { ...inputStyle, borderColor: B.red } : inputStyle}
+          onFocus={focusBorder}
+          onBlur={blurBorder}
+        />
+        {fieldError && <div role="alert" style={{ marginTop: 4, fontSize: 14, color: B.red }}>{fieldError}</div>}
+      </div>
+    );
+  };
 
   const irrigationInchesInput = () => (
     <div>
@@ -8353,7 +8456,25 @@ function PropertyTab({ customer, wateringPlanCustomerId, onOpenWateringProperty 
           fontSize: 14,
           fontWeight: 700,
         }}>
-          {saveStatus === 'saving' ? 'Saving property details...' : saveStatus === 'error' ? 'Could not save. Please check your connection and try again.' : 'Property details saved.'}
+          {saveStatus === 'saving'
+            ? 'Saving property details...'
+            : saveStatus === 'error'
+              // Named field errors mean the server understood the request and
+              // rejected specific values — that is not a connection problem,
+              // so don't tell the customer to check their connection. The
+              // messages are listed here, not merely "below": an enumerated
+              // or numeric control has no inline message slot.
+              ? (lastFlushRejections.length
+                ? (
+                  <>
+                    Some details couldn&apos;t be saved:
+                    <ul style={{ margin: '6px 0 0', paddingLeft: 20, fontWeight: 400 }}>
+                      {lastFlushRejections.map((r) => <li key={r.field}>{r.message}</li>)}
+                    </ul>
+                  </>
+                )
+                : 'Could not save. Please check your connection and try again.')
+              : 'Property details saved.'}
         </div>
       )}
 
@@ -16149,10 +16270,30 @@ export default function PortalPage() {
     window.dispatchEvent(new CustomEvent('waves:property-switching', { detail: { waiters } }));
     // Also await saves already in flight — e.g. one started by PropertyTab's
     // unmount flush after tab navigation removed its event listener.
-    const saves = await Promise.allSettled([...waiters, ...inFlightPropertyPrefSaves]);
+    // One Set: PropertyTab's switch listener pushes the save it starts into
+    // `waiters`, and flushAllPendingSaves tracks that SAME promise in
+    // inFlightPropertyPrefSaves, so a plain concat settles it twice and
+    // repeats every rejection message in the alert below (codex r2 P3).
+    const saves = await Promise.allSettled([...new Set([...waiters, ...inFlightPropertyPrefSaves])]);
     if (saves.some(result => result.status === 'rejected')) {
       setSwitchingPropertyId(null);
       showCustomerAlert('Your latest property edits could not be saved, so we kept this property open. Try saving again before switching.');
+      return;
+    }
+    // A partial save RESOLVES — with the list of values the server refused
+    // (codex r1 P1). Switching away on that would unmount the per-field
+    // messages before the customer ever saw them, so this reads the
+    // fulfilled value too and keeps the property open, naming the values
+    // that did not stick. The valid fields in that batch DID save, and the
+    // refused ones are deliberately not queued for retry, so this is the
+    // only chance to tell her.
+    const switchRejections = saves.flatMap((result) => (
+      result.status === 'fulfilled' && Array.isArray(result.value) ? result.value : []
+    ));
+    if (switchRejections.length) {
+      setSwitchingPropertyId(null);
+      const detail = switchRejections.map((r) => r.message).filter(Boolean).join(' ');
+      showCustomerAlert(`We kept this property open — some details couldn't be saved. ${detail}`.trim());
       return;
     }
     // A saved-property entry switches by its (profile, property) pair; a

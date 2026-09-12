@@ -98,6 +98,33 @@ async function runTechLateCheck() {
 }
 
 async function runInner() {
+  // The same cron and dispatch-alert lifecycle use communication evidence
+  // under the new gate; there is no competing overdue scan while enabled.
+  const tracking = require('./no-show-detector');
+  if (tracking.enabled()) {
+    const { runExclusive } = require('../utils/cron-lock');
+    const result = await runExclusive('no-show-detector', () => tracking.sweep(db));
+    // Surface the failed tick, but do NOT record it: every path that returns
+    // no_connection (no lock slot, a lease taken past the tick deadline, a
+    // deadline crossed before the body) has already written that failed
+    // occurrence itself through cron-lock's own recordMissedTick/
+    // recordJobEnd. Recording it a second time here overwrote the original
+    // timing and error and counted ONE skipped tick as TWO consecutive
+    // failures in job health (codex P2 round 5). lease_held is another
+    // instance holding the job — normal, not a failure.
+    if (result?.skipped && result.reason !== 'lease_held') {
+      throw new Error(`tracking tick skipped: ${result.reason || 'no_connection'}`);
+    }
+    return result;
+  }
+  // Gate OFF: clear anything the detector left behind before the legacy scan
+  // runs. sweep() is the only pass that resolves a detector office alert or
+  // dismisses a tracking notice, so without this a disabled feature leaves
+  // stale critical cards on the dispatch board — and an unresolved detector
+  // row suppresses the very legacy alert this branch is about to raise
+  // (codex P1, PR #4403 round 10). Best-effort: a cleanup failure must not
+  // stop the fallback scan.
+  await tracking.cleanupAfterDisable(db).catch((err) => logger.warn(`[tech-late-detector] tracking cleanup failed: ${err.message}`));
   let rows;
   try {
     const result = await db.raw(`
@@ -147,7 +174,23 @@ async function runInner() {
             AND (
               a.resolved_at IS NULL
               OR (
-                LEFT(a.payload->>'scheduled_date', 10) = c.scheduled_date::text
+                -- RESOLVED rows suppress a re-raise only when THIS scanner
+                -- raised them. no-show-detector.js writes the same
+                -- scheduled_date/window_start/window_end onto its own
+                -- tracking alerts, so without this source check a tracking
+                -- alert resolved while GATE_NOSHOW_DETECTOR was on would
+                -- permanently suppress the legacy scanner for that visit
+                -- after the gate is switched back off — the kill switch
+                -- would come back to a poisoned fallback (codex P2, PR #4403
+                -- round 9). An unresolved row of either source still
+                -- suppresses: that is a live alert, whoever raised it.
+                COALESCE(a.payload->>'source', '') <> 'no_show_detector'
+                -- ...and not a row the detector's legacy handoff resolved on
+                -- its way to raising its own card: that stamp means "replaced
+                -- by an automatic action", never "a dispatcher acknowledged
+                -- this schedule" (codex P2, PR #4403 round 12).
+                AND a.payload->>'superseded_at' IS NULL
+                AND LEFT(a.payload->>'scheduled_date', 10) = c.scheduled_date::text
                 AND a.payload->>'window_start' = c.window_start::text
                 AND COALESCE(a.payload->>'window_end', '') = COALESCE(c.window_end::text, '')
               )

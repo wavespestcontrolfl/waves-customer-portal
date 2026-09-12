@@ -135,15 +135,25 @@ async function getBlackoutLayers(fromStr, toStr, conn = db) {
 // YYYY-MM-DD strings OR JS Date values (pg DATE columns arrive as either
 // depending on the caller) — String() on a Date is a locale string that
 // would silently never match.
-async function isBlackoutDate(dateVal) {
+// `conn`: a transaction to read through. A caller already inside a txn must
+// pass it (codex r10/r11 P2) — reading through the module-global `db` checks
+// out a SECOND pooled connection while the first is held, so enough
+// concurrent callers wait on connections each other holds until acquisition
+// times out and this lookup fails open. getWeeklyDaysOff has always taken a
+// conn; this is the other half.
+async function isBlackoutDate(dateVal, conn = db) {
   const dateStr = toDateStr(dateVal);
   if (!dateStr) return false;
-  const weekly = await getWeeklyDaysOff();
+  const weekly = await getWeeklyDaysOff(conn);
   if (weekly.has(dowOfDateStr(dateStr))) return true;
   try {
-    const row = await db('schedule_blackout_dates')
+    // Through readOptional's savepoint, like its siblings (codex r12 P2): a
+    // failed query inside a CALLER'S transaction aborts that transaction, so
+    // returning false here would leave the next statement to fail 25P02 —
+    // turning documented fail-open behaviour into a failed accept/extend.
+    const row = await readOptional(conn, (dbh) => dbh('schedule_blackout_dates')
       .where('date', dateStr)
-      .first('id');
+      .first('id'));
     return !!row;
   } catch (err) {
     logger.warn(`[blackout-dates] date lookup failed (failing open): ${err.message}`);

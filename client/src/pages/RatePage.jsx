@@ -5,6 +5,7 @@ import { useParams } from 'react-router-dom';
 import { Button } from '../components/Button';
 import Icon from '../components/Icon';
 import PublicLoadError from '../components/PublicLoadError';
+import { CustomerColumn } from '../components/brand';
 import { useGlassSurface } from '../glass/glass-engine';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
@@ -355,7 +356,15 @@ export default function RatePage() {
   );
 
   if (error === 'temporary') return (
-    <Page><PublicLoadError resource="feedback request" onRetry={() => setLoadAttempt(a => a + 1)} /></Page>
+    // CustomerColumn, not a hand-rolled wrapper: my first pass at un-nesting
+    // this kept the page card's `calc(100% - 24px)` / 420 cap, which capped the
+    // state card at 420 with 12px gutters and defeated its own 560 / 16. A
+    // parent constraint bypasses the component's prop filtering entirely.
+    <Scene>
+      <CustomerColumn style={{ position: 'relative', zIndex: 1 }}>
+        <PublicLoadError resource="feedback request" onRetry={() => setLoadAttempt(a => a + 1)} />
+      </CustomerColumn>
+    </Scene>
   );
 
   if (error === 'notfound') return (
@@ -710,9 +719,22 @@ export default function RatePage() {
   );
 }
 
-function Page({ children }) {
+// The page scene, without the card. Split out because PublicLoadError now owns
+// a card of its own: rendering it inside <Page> nested one glass card in
+// another, with duplicate material and padding, on the one production path
+// that shows it.
+function Scene({ children }) {
   return (
     <div data-glass-clear="" style={{ flex: 1, paddingBottom: 40, background: PAGE_BG, display: 'flex', flexDirection: 'column', alignItems: 'center', fontFamily: FONTS.body, position: 'relative', overflow: 'hidden' }}>
+      {children}
+      {/* Anton / Montserrat / Inter load globally via client/index.html */}
+    </div>
+  );
+}
+
+function Page({ children }) {
+  return (
+    <Scene>
       <div data-glass="card" style={{ position: 'relative', zIndex: 1, width: 'calc(100% - 24px)', maxWidth: 420, background: COLORS.white, borderRadius: 8, border: `1px solid ${CARD_BORDER}`, boxShadow: 'none', overflow: 'hidden', marginTop: 'clamp(20px, 8dvh, 64px)' }}>
         <div style={{ padding: '16px 20px', borderBottom: `1px solid ${CARD_BORDER}`, display: 'flex', justifyContent: 'center' }}>
           <img src="/waves-logo.png" alt="Waves" style={{ height: 34, display: 'block' }} />
@@ -721,7 +743,6 @@ function Page({ children }) {
           {children}
         </div>
       </div>
-      {/* Anton / Montserrat / Inter load globally via client/index.html */}
-    </div>
+    </Scene>
   );
 }

@@ -15,7 +15,7 @@ const stripeConfig = require('../config/stripe-config');
 const { generateInvoicePDF } = require('../services/pdf/invoice-pdf');
 const ConsentService = require('../services/payment-method-consents');
 const logger = require('../services/logger');
-const { assertInvoiceCollectible, isInvoiceCollectibleStatus, invoiceAmountDue } = require('../services/invoice-helpers');
+const { assertInvoiceCollectible, assertInvoiceNotWithdrawnFromCustomer, invoiceWithdrawnFromCustomer, isInvoiceCollectibleStatus, invoiceAmountDue } = require('../services/invoice-helpers');
 const ReceiptDeliveryQueue = require('../services/receipt-delivery-queue');
 const BillPaymentErrorAlerts = require('../services/bill-payment-error-alerts');
 const { shouldSkipClientPaymentErrorAlert, manualPayOptionsFromEnv } = require('./pay-v2-helpers');
@@ -381,7 +381,12 @@ router.get('/:token', async (req, res, next) => {
     // the COMBINED total but a transfer + record-payment settles only the
     // anchor — the siblings would stay open while the customer believes
     // they paid "Total due today". No manual tenders whenever siblings ride.
-    let manualPayOptions = isInvoiceCollectibleStatus(data.status) && !getSaveRequired && !creditWillCoverAnchor && !previousBalance
+    // …nor on a WITHDRAWN packet invoice (codex r25 P1): the guarded POST
+    // routes can refuse a card, but a Zelle/Venmo/PayPal transfer happens
+    // entirely off-platform — advertising an amount here is the one collection
+    // rail this application cannot claw back. Collectibility is not a property
+    // of `status` alone for these rows, so the status-only read is not enough.
+    let manualPayOptions = isInvoiceCollectibleStatus(data.status) && !invoiceWithdrawnFromCustomer(data) && !getSaveRequired && !creditWillCoverAnchor && !previousBalance
       ? manualPayOptionsFromEnv()
       : null;
     if (manualPayOptions) {
@@ -600,7 +605,7 @@ router.post('/:token/setup', async (req, res, next) => {
     // while an off-session charge is active or awaiting reconciliation.
     if (await rejectIfSavedCardCollectionPending(invoice, res)) return;
     try {
-      assertInvoiceCollectible(invoice.status);
+      assertInvoiceCollectible(invoice);
     } catch (err) {
       // The invoice already flipped to `processing` — an ACH debit in flight.
       // This is the same benign in-progress state as the createInvoicePaymentIntent
@@ -755,7 +760,7 @@ router.post('/:token/update-amount', async (req, res, next) => {
     // invoice, not only the route that creates new PIs.
     if (await rejectIfSavedCardCollectionPending(invoice, res)) return;
     try {
-      assertInvoiceCollectible(invoice.status);
+      assertInvoiceCollectible(invoice);
     } catch (err) {
       return res.status(invoice.status === 'processing' ? 409 : 400).json({ error: err.message });
     }
@@ -814,7 +819,7 @@ router.post('/:token/quote', async (req, res, next) => {
     }
     if (await rejectIfSavedCardCollectionPending(invoice, res)) return;
     try {
-      assertInvoiceCollectible(invoice.status);
+      assertInvoiceCollectible(invoice);
     } catch (err) {
       return res.status(invoice.status === 'processing' ? 409 : 400).json({ error: err.message });
     }
@@ -852,7 +857,7 @@ router.post('/:token/finalize', async (req, res, next) => {
     }
     if (await rejectIfSavedCardCollectionPending(invoice, res)) return;
     try {
-      assertInvoiceCollectible(invoice.status);
+      assertInvoiceCollectible(invoice);
     } catch (err) {
       return res.status(invoice.status === 'processing' ? 409 : 400).json({ error: err.message });
     }
@@ -902,13 +907,27 @@ router.post('/:token/confirm', async (req, res, next) => {
     if (await rejectIfSavedCardCollectionPending(invoice, res)) return;
     if (['void', 'refunded', 'canceled', 'cancelled'].includes(String(invoice.status || '').toLowerCase())) {
       try {
-        assertInvoiceCollectible(invoice.status);
+        assertInvoiceCollectible(invoice);
       } catch (err) {
         return res.status(400).json({ error: err.message });
       }
     }
     if (invoice.status === 'paid') return res.status(400).json({ error: 'Invoice already paid' });
     if (invoice.status === 'prepaid') return res.status(400).json({ error: 'Invoice is already prepaid' });
+    // UNCONDITIONAL (codex r25 P1): the assertion above runs only for the
+    // terminal statuses, and a withdrawn invoice is by construction not one of
+    // them — it keeps `sent`/`viewed`/`overdue` so the homeowner's existing
+    // link stays resolvable. Making assertInvoiceCollectible row-aware
+    // therefore did nothing here, and a PaymentIntent minted before Bill-To
+    // moved could still settle customer funds against payer-owned debt.
+    // Checked after the paid/prepaid replies so a settled row keeps reporting
+    // its own reason (and confirmInvoicePayment keeps returning the recorded
+    // payment for a replayed PI).
+    try {
+      assertInvoiceNotWithdrawnFromCustomer(invoice);
+    } catch (err) {
+      return res.status(400).json({ error: err.message });
+    }
     if (invoice.stripe_payment_intent_id
       && String(invoice.stripe_payment_intent_id) !== String(paymentIntentId)) {
       return res.status(409).json({ error: 'Invoice has a different active payment' });
@@ -997,6 +1016,11 @@ router.post('/:token/consent', async (req, res, next) => {
 
     invoice = await db('invoices').where({ token: req.params.token }).first();
     if (!invoice) return res.status(404).json({ error: 'Invoice not found' });
+    if (invoiceWithdrawnFromCustomer(invoice)) {
+      // Same rule as the collection seams (Codex #4311 r33 P1): a withdrawn
+      // invoice must not enroll the homeowner's method for the debt.
+      return res.status(409).json({ error: 'This invoice is billed to a third-party payer', code: 'invoice_withdrawn_from_customer' });
+    }
     if (!invoice.customer_id) {
       return respondWithPaymentError(req, res, {
         invoice,
@@ -1147,6 +1171,18 @@ router.post('/:token/consent', async (req, res, next) => {
         statusCode: 409,
       });
     }
+    // OWNERSHIP IMMEDIATELY BEFORE THE WRITES (Codex #4311 r39 P0): the check
+    // at the top of this route ran several awaits and a Stripe round-trip
+    // ago. Packet-aware, so a payer on a sibling billed member counts, and
+    // fail-closed on an unreadable row. The CONSENT row below is written in
+    // one transaction with this judgement (local audit): a withdrawal that
+    // commits mid-request cannot leave a recorded authorization behind.
+    if (await require('../services/visit-completion-packets').invoicePayerOwnedNow(invoice.id)) {
+      return res.status(409).json({
+        error: 'This invoice is billed to a third-party payer',
+        code: 'invoice_withdrawn_from_customer',
+      });
+    }
     if (!saved) {
       saved = await StripeService.savePaymentMethod(invoice.customer_id, verifiedStripePmId, {
         enableAutopay: false,
@@ -1156,16 +1192,14 @@ router.post('/:token/consent', async (req, res, next) => {
       });
     }
 
-    const row = await ConsentService.recordConsent({
-      customerId: invoice.customer_id,
-      paymentMethodId: saved.id,
-      stripePaymentMethodId: verifiedStripePmId,
-      source: 'pay_page',
-      methodType: verifiedMethodType,
-      ip: req.ip,
-      userAgent: req.get('user-agent') || null,
-    });
-
+    // The consent row and the ownership judgement share ONE transaction
+    // (local audit on r39): a Bill-To assignment committing between an
+    // unlocked check and this insert would otherwise leave a recorded
+    // authorization against payer-owned debt. The Stripe attach above cannot
+    // join a database transaction — an attached-but-unconsented,
+    // unenrolled method is inert — so the fence is drawn here, around the
+    // authorization itself.
+    const Packets = require('../services/visit-completion-packets');
     // An ACH debit that is still PROCESSING must not enroll yet (Codex
     // #2507 round-9 P2): the status guard above deliberately admits
     // 'processing' so the consent snapshot is recorded while the customer
@@ -1176,32 +1210,96 @@ router.post('/:token/consent', async (req, res, next) => {
     // webhook's save-card mirror finds it (hasConsentFor) and completes
     // enrollment after the money actually lands. Cards never sit in
     // 'processing', so this defers bank tenders only.
-    if (verifiedMethodType === 'us_bank_account' && pi.status !== 'succeeded') {
+    const enrollmentDeferred = verifiedMethodType === 'us_bank_account' && pi.status !== 'succeeded';
+    // CONSENT *AND* ENROLLMENT UNDER ONE OWNERSHIP JUDGEMENT (Codex #4311
+    // r46 P0): they used to commit in separate transactions, so a Bill-To
+    // assignment landing between them left the immutable consent row behind
+    // while the request answered 409. enrollConsentedMethod runs in savepoint
+    // mode on this transaction, so a `payer_billed` refusal rolls the consent
+    // back with it. (The Stripe attach above cannot join a database
+    // transaction — an attached-but-unconsented, unenrolled method is inert.)
+    const PAYER_BILLED_ROLLBACK = Symbol('payer_billed_rollback');
+    let consentRefusedForPayer = false;
+    let enrollment = null;
+    let row;
+    try {
+      row = await db.transaction(async (trx) => {
+        // The customer row FOR UPDATE first (local audit on r46): the
+        // ownership check takes it FOR SHARE and the enrollment then upgrades
+        // the same row to FOR UPDATE — two of these transactions holding
+        // SHARE would deadlock on that upgrade. Taking the stronger lock up
+        // front keeps the customer-before-member order intact.
+        await trx('customers').where({ id: invoice.customer_id }).forUpdate().first('id');
+        if (await Packets.invoicePayerOwnedNow(invoice.id, trx)) throw PAYER_BILLED_ROLLBACK;
+        const created = await ConsentService.recordConsent({
+          customerId: invoice.customer_id,
+          paymentMethodId: saved.id,
+          stripePaymentMethodId: verifiedStripePmId,
+          source: 'pay_page',
+          methodType: verifiedMethodType,
+          ip: req.ip,
+          userAgent: req.get('user-agent') || null,
+          database: trx,
+        });
+        if (enrollmentDeferred) return created;
+        const { enrollConsentedMethod } = require('../services/autopay-enrollment');
+        enrollment = await enrollConsentedMethod({
+          customerId: invoice.customer_id,
+          paymentMethodId: saved.id,
+          source: 'save_card_consent',
+          // The invoice's visit scopes the in-lock payer check (#3395 r14 P1):
+          // a self_pay_override visit on a payer-billed account is
+          // customer-paid — the account-level fallback would refuse.
+          scheduledServiceId: invoice.scheduled_service_id || null,
+          // …and the invoice itself, so the enrollment re-judges the
+          // withdrawal and the PACKET's live owner under this transaction.
+          invoiceId: invoice.id,
+          dbh: trx,
+        });
+        if (enrollment?.reason === 'payer_billed') throw PAYER_BILLED_ROLLBACK;
+        return created;
+      });
+    } catch (txErr) {
+      if (txErr !== PAYER_BILLED_ROLLBACK) throw txErr;
+      consentRefusedForPayer = true;
+    }
+    if (consentRefusedForPayer) {
+      return res.status(409).json({
+        error: 'This invoice is billed to a third-party payer',
+        code: 'invoice_withdrawn_from_customer',
+      });
+    }
+    if (enrollmentDeferred) {
       logger.info(`[pay-v2] Consent recorded for processing ACH PI ${pi.id} (invoice ${invoice.id}) — enrollment deferred to the succeeded webhook`);
       return res.json({ success: true, consentId: row.id, version: row.consent_text_version, enrollmentDeferred: true });
     }
 
     // Complete consent-gated autopay enrollment (Codex #2507 P1): when
     // Stripe's payment_intent.succeeded beat this POST the method sits
-    // saved-but-unenrolled — this call is then the ONLY path that flips
-    // the autopay flags, so an enrollment failure must FAIL the request
-    // (Codex #2507 round-5 P1): the client retries /consent once and
-    // flags consent_failed on the receipt, exactly like a consent-record
-    // failure — never a silent success with no Auto Pay. With the mirror
-    // above, method_not_found is no longer a normal outcome (round-7 P1)
-    // — the row was just ensured, so it too fails the request.
-    const { enrollConsentedMethod } = require('../services/autopay-enrollment');
-    const enrollment = await enrollConsentedMethod({
-      customerId: invoice.customer_id,
-      paymentMethodId: saved.id,
-      source: 'save_card_consent',
-      // The invoice's visit scopes the in-lock payer check (#3395 r14 P1):
-      // a self_pay_override visit on a payer-billed account is
-      // customer-paid — the account-level fallback would refuse.
-      scheduledServiceId: invoice.scheduled_service_id || null,
-    });
+    // saved-but-unenrolled — the enrollment above (inside the consent
+    // transaction) is then the ONLY path that flips the autopay flags, so an
+    // enrollment failure must FAIL the request (Codex #2507 round-5 P1): the
+    // client retries /consent once and flags consent_failed on the receipt,
+    // exactly like a consent-record failure — never a silent success with no
+    // Auto Pay. With the mirror above, method_not_found is no longer a normal
+    // outcome (round-7 P1) — the row was just ensured, so it too fails.
+    // The enrollment ran in savepoint mode, so its confirmation email is
+    // handed back for the caller to fire AFTER the commit (local audit on
+    // r46) — inside the transaction it could have outlived a rollback.
+    if (typeof enrollment?.sendEnrollmentConfirmation === 'function') {
+      await enrollment.sendEnrollmentConfirmation();
+    }
     if (enrollment?.reason === 'method_not_found') {
       throw new Error('Saved payment method could not be enrolled');
+    }
+    // A Bill-To change that beat the enrollment refuses the REQUEST (Codex
+    // #4311 r39 P0): reporting success here would tell the customer Auto Pay
+    // is on for an invoice that is no longer theirs.
+    if (enrollment?.reason === 'payer_billed') {
+      return res.status(409).json({
+        error: 'This invoice is billed to a third-party payer',
+        code: 'invoice_withdrawn_from_customer',
+      });
     }
 
     res.json({ success: true, consentId: row.id, version: row.consent_text_version });
@@ -1231,6 +1329,13 @@ router.post('/:token/capture-setup', async (req, res) => {
     invoice = await db('invoices').where({ token: req.params.token }).first();
     if (!invoice) return res.status(404).json({ error: 'Invoice not found' });
     if (!invoice.customer_id) return res.status(400).json({ error: 'Invoice has no customer' });
+    // A WITHDRAWN invoice funds nothing (Codex #4311 r33 P1): it keeps a
+    // collectible status and a NULL payer_id, so the required-save check
+    // still approves it and the homeowner's method would be saved — and
+    // enrolled for Auto Pay — against debt that now belongs to AP.
+    if (invoiceWithdrawnFromCustomer(invoice)) {
+      return res.status(409).json({ error: 'This invoice is billed to a third-party payer', code: 'invoice_withdrawn_from_customer' });
+    }
     // Fail closed: capture exists solely for the required-save +
     // credit-covered state — any other invoice/token must not be usable to
     // start attaching methods to the account.
@@ -1310,6 +1415,9 @@ router.post('/:token/setup-complete', async (req, res) => {
     invoice = await db('invoices').where({ token: req.params.token }).first();
     if (!invoice) return res.status(404).json({ error: 'Invoice not found' });
     if (!invoice.customer_id) return res.status(400).json({ error: 'Invoice has no customer' });
+    if (invoiceWithdrawnFromCustomer(invoice)) {
+      return res.status(409).json({ error: 'This invoice is billed to a third-party payer', code: 'invoice_withdrawn_from_customer' });
+    }
     // Fail closed: this endpoint exists solely to satisfy the required-save
     // rule — a non-required invoice token must not be usable to attach
     // methods to the account.
@@ -1342,6 +1450,14 @@ router.post('/:token/setup-complete', async (req, res) => {
       logger.warn(`[pay-v2] setup-complete pm ownership mismatch: pm ${stripePmId} belongs to ${saved.customer_id}, invoice customer ${invoice.customer_id}`);
       return res.status(409).json({ error: 'Payment method belongs to another account' });
     }
+    // Ownership immediately before the first write, for the same reason as
+    // /consent: this route's own check ran before the Stripe round-trip.
+    if (await require('../services/visit-completion-packets').invoicePayerOwnedNow(invoice.id)) {
+      return res.status(409).json({
+        error: 'This invoice is billed to a third-party payer',
+        code: 'invoice_withdrawn_from_customer',
+      });
+    }
     if (!saved) {
       saved = await StripeService.savePaymentMethod(invoice.customer_id, stripePmId, {
         enableAutopay: false,
@@ -1351,26 +1467,62 @@ router.post('/:token/setup-complete', async (req, res) => {
       });
     }
     const methodType = (typeof pmObject === 'object' && pmObject?.type) || saved.method_type || 'card';
-    if (!(await ConsentService.hasConsentFor(invoice.customer_id, stripePmId))) {
-      await ConsentService.recordConsent({
-        customerId: invoice.customer_id,
-        paymentMethodId: saved.id,
-        stripePaymentMethodId: stripePmId,
-        source: 'pay_page',
-        methodType,
-        ip: req.ip,
-        userAgent: req.get('user-agent') || null,
+    const PacketsForConsent = require('../services/visit-completion-packets');
+    // A consent row is written only when the method has none yet; the
+    // ownership judgement and the enrollment below run either way.
+    const needsConsentRow = !(await ConsentService.hasConsentFor(invoice.customer_id, stripePmId));
+    // CONSENT *AND* ENROLLMENT UNDER ONE OWNERSHIP JUDGEMENT (local audit on
+    // r46, the same pattern /consent uses): committing the authorization
+    // first left it recorded when a Bill-To assignment landed before the
+    // enrollment and the request answered 409.
+    const SETUP_PAYER_BILLED_ROLLBACK = Symbol('setup_payer_billed_rollback');
+    let refusedForPayer = false;
+    let enrollment = null;
+    try {
+      await db.transaction(async (trx) => {
+        // Customer FOR UPDATE before the SHARE-taking ownership check, so the
+        // enrollment's own upgrade cannot deadlock against a sibling request.
+        await trx('customers').where({ id: invoice.customer_id }).forUpdate().first('id');
+        if (await PacketsForConsent.invoicePayerOwnedNow(invoice.id, trx)) throw SETUP_PAYER_BILLED_ROLLBACK;
+        if (needsConsentRow) {
+          await ConsentService.recordConsent({
+            customerId: invoice.customer_id,
+            paymentMethodId: saved.id,
+            stripePaymentMethodId: stripePmId,
+            source: 'pay_page',
+            methodType,
+            ip: req.ip,
+            userAgent: req.get('user-agent') || null,
+            database: trx,
+          });
+        }
+        const { enrollConsentedMethod } = require('../services/autopay-enrollment');
+        enrollment = await enrollConsentedMethod({
+          customerId: invoice.customer_id,
+          paymentMethodId: saved.id,
+          source: 'save_card_consent',
+          details: { via: 'covered_by_credit_setup', invoice_id: invoice.id },
+          // Invoice visit scope for the in-lock payer check (#3395 r14 P1).
+          scheduledServiceId: invoice.scheduled_service_id || null,
+          invoiceId: invoice.id,
+          dbh: trx,
+        });
+        if (enrollment?.reason === 'payer_billed') throw SETUP_PAYER_BILLED_ROLLBACK;
+      });
+    } catch (txErr) {
+      if (txErr !== SETUP_PAYER_BILLED_ROLLBACK) throw txErr;
+      refusedForPayer = true;
+    }
+    if (refusedForPayer) {
+      return res.status(409).json({
+        error: 'This invoice is billed to a third-party payer',
+        code: 'invoice_withdrawn_from_customer',
       });
     }
-    const { enrollConsentedMethod } = require('../services/autopay-enrollment');
-    const enrollment = await enrollConsentedMethod({
-      customerId: invoice.customer_id,
-      paymentMethodId: saved.id,
-      source: 'save_card_consent',
-      details: { via: 'covered_by_credit_setup', invoice_id: invoice.id },
-      // Invoice visit scope for the in-lock payer check (#3395 r14 P1).
-      scheduledServiceId: invoice.scheduled_service_id || null,
-    });
+    // Savepoint mode hands the confirmation email back for after the commit.
+    if (typeof enrollment?.sendEnrollmentConfirmation === 'function') {
+      await enrollment.sendEnrollmentConfirmation();
+    }
     // A REFUSED enrollment must leave the invoice collectible (Codex
     // #2507 round-8 P2): settling here would complete the required-save
     // signup prepaid with nothing chargeable enrolled. ach_blocked =
@@ -1382,6 +1534,14 @@ router.post('/:token/setup-complete', async (req, res) => {
     // already_enrolled is the benign incumbent case.
     if (!enrollment.enrolled && enrollment.reason !== 'already_enrolled') {
       logger.warn(`[pay-v2] setup-complete enrollment refused (${enrollment.reason}) for invoice ${invoice.id} pm ${saved.id} — held coverage NOT settled`);
+      // A Bill-To change that beat the enrollment gets the ownership refusal,
+      // not the bank-verification copy (Codex #4311 r39 P0).
+      if (enrollment.reason === 'payer_billed') {
+        return res.status(409).json({
+          error: 'This invoice is billed to a third-party payer',
+          code: 'invoice_withdrawn_from_customer',
+        });
+      }
       return res.status(409).json({
         error: 'This bank account can’t power Auto Pay until its verification clears — please use a card instead.',
         enrollReason: enrollment.reason,

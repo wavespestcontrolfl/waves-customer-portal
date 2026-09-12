@@ -31,7 +31,7 @@ const logger = require('./logger');
 const { stampedLine2Sql } = require('./stamped-address');
 const { gateEnvValue } = require('../config/feature-gates');
 const { isAssignable } = require('./technician-eligibility');
-const { parseETDateTime, TZ } = require('../utils/datetime-et');
+const { parseETDateTime, TZ, etParts, etDateString } = require('../utils/datetime-et');
 const { VOICE_AGENT_BOOKING_SOURCE_ACTION } = require('./call-booking-source-actions');
 
 const GATE = 'GATE_TECH_VISIT_NOTIFICATIONS';
@@ -116,6 +116,27 @@ function formatWhen(date, windowStart, windowEnd) {
     ? `${start.text}–${end.text} ${end.meridiem}`
     : `${start.text} ${start.meridiem}–${end.text} ${end.meridiem}`;
   return `${dayLabel}, ${window}`;
+}
+
+// Same "day, window" text as formatWhen, but read off the PROMISED window
+// (an ISO instant pair) instead of the visit's current, mutable
+// scheduled_date/window_start/window_end. A stage-2 tracking card is
+// enforced against the promise, so its "when" must render the promise too
+// — an uncommunicated internal move (or a service block shorter than the
+// arrival window) otherwise shows the wrong time next to a message that's
+// judging the old one (codex P1).
+function formatPromisedWindow(startAt, endAt) {
+  if (!startAt) return null;
+  const start = new Date(startAt);
+  if (Number.isNaN(start.getTime())) return null;
+  const clock = (iso) => {
+    if (!iso) return null;
+    const d = new Date(iso);
+    if (Number.isNaN(d.getTime())) return null;
+    const { hour, minute } = etParts(d);
+    return `${String(hour).padStart(2, '0')}:${String(minute).padStart(2, '0')}`;
+  };
+  return formatWhen(etDateString(start), clock(startAt), clock(endAt));
 }
 
 // Who made the change, as the tech should read it. A technicians.id names
@@ -505,7 +526,63 @@ function notifyVisitCancelled({ visitId, technicianId = null, actorId = null, sn
   }, visitId);
 }
 
+// Follow-through shares the staff notification and push paths. Its live
+// card is rendered by the shared feed, so it needs no separate Got it tap.
+async function recordTrackingNotice(trx, { visitId, technicianId, stage, dedupeKey, message, payload }) {
+  if (!gateEnvValue('GATE_NOSHOW_DETECTOR') || !technicianId) return null;
+  const tech = await trx('technicians').where({ id: technicianId }).first('id', 'employment_status', 'field_dispatchable');
+  if (!isAssignable(tech)) return null;
+  const [inserted] = await trx('tech_notifications').insert({ technician_id: technicianId,
+    type: 'follow_through_tracking', dedupe_key: dedupeKey, message, payload })
+    .onConflict('dedupe_key').ignore().returning('id');
+  let row = inserted;
+  if (!row) {
+    // dedupe_key carries a GLOBAL unique index (not scoped to dismissed_at
+    // like dispatch_alerts' partial one), so a DISMISSED row under this
+    // exact key permanently blocks a plain insert. trackingKey is
+    // deterministic, so an A -> B -> A visit reassignment across sweeps
+    // reuses A's original key — its own auto-dismissal from the B handover
+    // (sweep()'s reconcile loop below) must not silence a fresh occurrence
+    // forever. Revive that SAME row in place, but only when it was
+    // dismissed by OUR OWN reconcile (payload.superseded_at stamped there) —
+    // a row the tech actually acted on (routes/tech-notifications.js
+    // /dismiss, /confirm-start — no stamp) stays quiet. Same
+    // supersession-stamp discipline as the dispatch_alerts `already` check
+    // (codex P1, pre-push audit on f32a48e35).
+    const revivedAt = new Date();
+    const [revived] = await trx('tech_notifications').where({ dedupe_key: dedupeKey })
+      .whereNotNull('dismissed_at').whereRaw("payload->>'superseded_at' IS NOT NULL")
+      // created_at is refreshed too (codex P1, pre-push audit on
+      // bb2ff6752): the tech feed (routes/tech-notifications.js) classifies
+      // freshness and orders its 20-row window by created_at — this IS a
+      // new occurrence (a fresh sweep tick re-alerted the same visit under
+      // the same key), and no other reader keys off this row's original
+      // created_at, so a revived notice must not sit in the stale bucket
+      // wearing its first occurrence's timestamp.
+      .update({ technician_id: technicianId, message, payload, read: false, dismissed_at: null, created_at: revivedAt, updated_at: revivedAt })
+      .returning('id');
+    row = revived;
+  }
+  // GENERIC on the push, like every PUSH_TITLE_BY_KIND line above: a push
+  // lands on a lock screen, and this module's owner ruling (see the header)
+  // keeps identifying detail out of it — the tech opens the app for the who
+  // and when. The customer name and promised window ride on the durable card
+  // instead (payload.customer_name / payload.when, rendered by the feed), so
+  // a tech with more than one open stop still knows which visit this is as
+  // soon as they are authenticated (codex P1 round 5, correcting the round-1
+  // fix that put the name in the push title).
+  const pushTitle = stage === 2 ? 'A visit needs an arrival check' : 'A visit window is underway';
+  return row ? { technicianId, visitId, pushTitle } : null;
+}
+
 module.exports = {
+  recordTrackingNotice,
+  pushTrackingNotice: pushCard,
+  // Reused by no-show-detector.js so a tracking notice reads the same "who
+  // / when" a visit_* card does, instead of a second date formatter.
+  formatWhen,
+  formatPromisedWindow,
+  customerLabel,
   GATE,
   KINDS,
   isEnabled: enabled,

@@ -121,8 +121,9 @@ router.post('/', async (req, res, next) => {
 // PUT /api/admin/payers/:id
 router.put('/:id', async (req, res, next) => {
   try {
-    const { payer, error, notFound } = await PayerService.updatePayer(req.params.id, req.body || {});
+    const { payer, error, notFound, conflict, code } = await PayerService.updatePayer(req.params.id, req.body || {});
     if (notFound) return res.status(404).json({ error });
+    if (conflict) return res.status(409).json({ error, code });
     if (error) return res.status(400).json({ error });
     res.json({ payer });
   } catch (err) {
@@ -300,13 +301,36 @@ router.post('/:id/statements/:statementId/reconcile', async (req, res, next) => 
     // visits, AFTER the money transaction committed (the closeout takes its
     // own row locks; GitHub r9 P1 #4127). Best-effort by contract.
     await require('../services/invoice-issued-closeout').closeOutVisitsForStatement(owned.id, { trigger: 'paid', actorTechnicianId: req.technicianId || null, actorRole: req.techRole || null });
+    // …and the reviews those packet-owned children deferred behind their
+    // unpaid invoice, which that closeout refuses to touch. After the commit,
+    // so enrollment reads the settled status.
+    const reviewsUnrecorded = await require('../services/payer-statement-settle')
+      .enrollSettledPacketReviews(result?.packetInvoiceIds, { source: 'payer_statement_reconcile' });
     // Paid offline → stop dunning (best-effort, outside the settle txn; the
     // eligibility filter already excludes `paid`, so this is just hygiene).
     await StatementFollowups.stopOnStatementSettled(owned.id)
       .catch((e) => logger.warn(`[payers] stopOnStatementSettled failed for S-${owned.id}: ${e.message}`));
 
     logger.info(`[payers] statement ${owned.id} reconciled offline via ${method} ($${settledAmount.toFixed(2)})`);
-    res.json({ ok: true, statement: result.statement, alreadyPaid: !!result.alreadyPaid, childrenSettled: result.childrenSettled || 0 });
+    // The unrecorded ids RIDE THE RESPONSE (Codex #4311 r36 P1): this rail has
+    // no redelivery, and the durable alert is itself best-effort — during the
+    // same outage that lost the enrollment it can fail too, and the settlement
+    // cannot be replayed (the statement is paid). Telling the operator here is
+    // the last signal that survives: the money is settled either way, so this
+    // is reported alongside the success, never as a failure.
+    if (reviewsUnrecorded?.length) {
+      logger.error(`[payers] statement ${owned.id} settled with ${reviewsUnrecorded.length} UNRECORDED review enrollment(s): ${reviewsUnrecorded.join(', ')}`);
+    }
+    res.json({
+      ok: true,
+      statement: result.statement,
+      alreadyPaid: !!result.alreadyPaid,
+      childrenSettled: result.childrenSettled || 0,
+      ...(reviewsUnrecorded?.length ? {
+        reviewsUnrecorded,
+        warning: 'The statement is settled, but the review ask for one or more visits could not be recorded — re-run the enrollment or send those asks manually.',
+      } : {}),
+    });
   } catch (err) {
     if (err.statusCode === 409) return res.status(409).json({ error: err.message });
     if (err.statusCode === 400) return res.status(400).json({ error: err.message });
