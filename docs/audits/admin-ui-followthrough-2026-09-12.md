@@ -50,6 +50,7 @@ Individual PR review and CI remain the release gates.
 - Shadow Drafts still uses existing native confirmations for consequential actions; replacing these remains a separate UI finishing item.
 - Contact import, custom category authoring and retention-message editing still need complete product/backend workflows before exposing their entry points again.
 - Recruiting Hired → Staff onboarding remains a separate product decision; no account provisioning was added.
+- Mobile category loading still falls back to an empty list on read failure. Error/retry behavior was excluded from the visual migration to keep that PR behavior-preserving and remains a separate recovery follow-up.
 - Expanded secondary-page indexing in the page finder remains an optional enhancement.
 - Follow the admin consistency contract when publishing: separate visual, information-architecture, content and endpoint PRs. The original implementation is preserved in local snapshot `b01c166fd919cf1ef5f5a6f9679784e87d43bf18`; the PRs below carry the reviewable changes. Validation of that snapshot is not a claim that every PR has shipped.
 
