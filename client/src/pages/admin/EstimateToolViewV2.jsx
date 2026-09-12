@@ -29,6 +29,7 @@ import { useNavigate } from "react-router-dom";
 import { useIntelligenceBarActions, usePublishIntelligenceBarPageData } from "../../hooks/useIntelligenceBarPageData";
 import { ActionFeedback, Button, Badge, Card, Checkbox, Field, Input, Select, Textarea, UiSurface, cn } from "../../components/ui";
 import "../../styles/estimate-workflow.css";
+import { filterAddressAsks } from "../../lib/addressAsks";
 import PestProductionDiagnosticsPanel from "../../components/admin/PestProductionDiagnosticsPanel";
 import { ExternalLink } from "lucide-react";
 import { useEstimateSend } from "../../components/admin/EstimateSendDialog";
@@ -328,18 +329,6 @@ function buildAiProviderWarnings({ sources, errors = [], providerStatus = {} } =
   }
   return warnings;
 }
-
-// Triage reason codes that mean the lead's address itself is still owed
-// or unverified (call-routing-gates address_review lane, validation half).
-const ADDRESS_ASK_REASONS = new Set([
-  "missing_unit_number",
-  "address_unverified",
-  "missing_service_address",
-  "low_confidence_address",
-  "address_validation_unavailable",
-  "address_unverifiable",
-  "address_not_validated",
-]);
 
 // A dwelling unit designator anywhere in a typed address (the server's
 // unit-scope model reads the same forms; "#" alone counts).
@@ -2352,9 +2341,7 @@ export default function EstimateToolViewV2({
         // Validation-ask cards only: the address_review lane also files
         // multi-property / second-address / property-role / dropped-call
         // cards, which are not "this address may be wrong" (codex r1 P2).
-        setOpenAddressAsks(
-          (Array.isArray(d.items) ? d.items : []).filter((i) => ADDRESS_ASK_REASONS.has(i.reason_code)),
-        );
+        setOpenAddressAsks(filterAddressAsks(d.items));
       } catch {
         if (!cancelled) setOpenAddressAsks([]);
       }
