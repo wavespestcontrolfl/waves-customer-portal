@@ -385,7 +385,7 @@ async function loadPromiseEvents(conn, visitIds, { now = new Date() } = {}) {
       .whereIn('sv.id', visitIds)
       .whereIn('em.status', DELIVERED_EMAIL_STATUSES)
       .whereNotNull('em.sent_at').where('em.sent_at', '<=', now)
-      .select('em.id', 'em.sent_at', 'sv.id as visit_id'),
+      .select('em.id', 'em.sent_at', 'sv.id as visit_id', 'sv.visit_id as stop_id'),
     // A call-created booking: the visit row itself carries source_call_log_id
     // (a FK written in the booking transaction), so the window the agent
     // committed on that call is derivable from durable state — no separate
@@ -459,6 +459,20 @@ async function loadPromiseEvents(conn, visitIds, { now = new Date() } = {}) {
   // The per-service recovery keeps its own window (the key carries the slot),
   // so it is only dropped when the interaction row already provided one for
   // the same send.
+  // A grouped email belongs to the STOP, and its interaction row is keyed to
+  // whichever member owned the claim — so the "already recovered" check has
+  // to be stop-wide. Per member, a sibling would see no interaction evidence
+  // of its own and keep an unknown-window fallback that then outranks the
+  // owner's known window for the whole stop (codex P1 round 12).
+  const groupedFallbacks = (() => {
+    const recoveredStops = new Set(groupedEmails
+      .filter((r) => knownWindowAtOrAfter(emails, { visit_id: r.visit_id, communicated_at: r.sent_at }))
+      .map((r) => `${r.stop_id}:${instant(r.sent_at)}`));
+    return groupedEmails
+      .filter((r) => !recoveredStops.has(`${r.stop_id}:${instant(r.sent_at)}`))
+      .map((r) => ({ visit_id: r.visit_id, start_at: null, communicated_at: r.sent_at,
+        source: 'email', source_id: r.id }));
+  })();
   const directEmailFallbacks = directEmails.map((r) => ({ visit_id: r.visit_id,
     start_at: new Date(Number(r.slot_ms)).toISOString(), communicated_at: r.sent_at,
     source: 'email', source_id: r.id }));
@@ -482,9 +496,7 @@ async function loadPromiseEvents(conn, visitIds, { now = new Date() } = {}) {
     // fallback there keeps the real window (codex P1 round 12). A genuinely
     // NEWER unknown promise (the legacy move-notice case) still wins, because
     // this only defers to known evidence at or after the fallback's own time.
-    ...groupedEmails.map((r) => ({ visit_id: r.visit_id, start_at: null, communicated_at: r.sent_at,
-      source: 'email', source_id: r.id }))
-      .filter((fallback) => !knownWindowAtOrAfter(emails, fallback)),
+    ...groupedFallbacks,
     ...directEmailFallbacks.filter((fallback) => !knownWindowAtOrAfter(emails, fallback)),
     ...bookings.map((r) => {
       // The call's own start is passed EXPLICITLY: the row aliases it to
