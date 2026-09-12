@@ -3386,6 +3386,40 @@ postgres('visit summary recipient recovery', () => {
     }
   });
 
+  test('the public save-a-method predicate sees a payer on ANY billed member', async () => {
+    // /consent and /setup-complete call this before they persist anything:
+    // the representative-service resolver cannot see a payer assigned to a
+    // sibling member of a combined packet, and a withdrawn invoice keeps a
+    // NULL payer_id.
+    const Packets = require('../services/visit-completion-packets');
+    const invoiceId = randomUUID();
+    const [payer] = await mockPg('payers').insert({ display_name: 'Fixture Property Management', ap_email: `${randomUUID()}@example.invalid`, active: true }).returning('id');
+    await mockPg('invoices').insert({ id: invoiceId, token: randomUUID().replace(/-/g, ''), invoice_number: `FIX-${invoiceId.slice(0, 8)}`,
+      customer_id: fixture.customerId, status: 'sent', total: 120, visit_completion_packet_id: fixture.packetId,
+      // anchored to the FIRST member; the payer lands on the second.
+      scheduled_service_id: fixture.serviceIds[0] });
+    try {
+      expect(await Packets.invoicePayerOwnedNow(invoiceId)).toBe(false);
+
+      // A payer on a SIBLING billed member is what the representative-service
+      // resolver misses.
+      await mockPg('scheduled_services').where({ id: fixture.serviceIds[fixture.serviceIds.length - 1] }).update({ payer_id: payer.id });
+      expect(await Packets.invoicePayerOwnedNow(invoiceId)).toBe(true);
+      await mockPg('scheduled_services').where({ id: fixture.serviceIds[fixture.serviceIds.length - 1] }).update({ payer_id: null });
+
+      // …and the withdrawal stamp, on a row whose payer_id stays NULL.
+      await mockPg('invoices').where({ id: invoiceId }).update({ scheduled_send_error: `payer_billed:${payer.id}:hold` });
+      expect(await Packets.invoicePayerOwnedNow(invoiceId)).toBe(true);
+
+      // An unreadable invoice is never "self-pay".
+      expect(await Packets.invoicePayerOwnedNow(randomUUID())).toBe(true);
+    } finally {
+      await mockPg('scheduled_services').whereIn('id', fixture.serviceIds).update({ payer_id: null });
+      await mockPg('invoices').where({ id: invoiceId }).del();
+      await mockPg('payers').where({ id: payer.id }).del();
+    }
+  });
+
   test('a payer-to-payer handoff moves the office review to the payer that owes it now', async () => {
     // The stamp, the packet error and the open alert all name the AP account
     // the office must bill; a second payer taking the packet over has to move

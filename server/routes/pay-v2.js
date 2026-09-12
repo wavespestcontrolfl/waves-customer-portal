@@ -1171,6 +1171,17 @@ router.post('/:token/consent', async (req, res, next) => {
         statusCode: 409,
       });
     }
+    // OWNERSHIP IMMEDIATELY BEFORE THE FIRST WRITE (Codex #4311 r39 P0): the
+    // documented contract is that a withdrawn invoice saves and enrolls
+    // NOTHING, and the check at the top of this route ran several awaits and
+    // a Stripe round-trip ago. Packet-aware, so a payer on a sibling billed
+    // member counts, and fail-closed on an unreadable row.
+    if (await require('../services/visit-completion-packets').invoicePayerOwnedNow(invoice.id)) {
+      return res.status(409).json({
+        error: 'This invoice is billed to a third-party payer',
+        code: 'invoice_withdrawn_from_customer',
+      });
+    }
     if (!saved) {
       saved = await StripeService.savePaymentMethod(invoice.customer_id, verifiedStripePmId, {
         enableAutopay: false,
@@ -1232,6 +1243,15 @@ router.post('/:token/consent', async (req, res, next) => {
     });
     if (enrollment?.reason === 'method_not_found') {
       throw new Error('Saved payment method could not be enrolled');
+    }
+    // A Bill-To change that beat the enrollment refuses the REQUEST (Codex
+    // #4311 r39 P0): reporting success here would tell the customer Auto Pay
+    // is on for an invoice that is no longer theirs.
+    if (enrollment?.reason === 'payer_billed') {
+      return res.status(409).json({
+        error: 'This invoice is billed to a third-party payer',
+        code: 'invoice_withdrawn_from_customer',
+      });
     }
 
     res.json({ success: true, consentId: row.id, version: row.consent_text_version });
@@ -1382,6 +1402,14 @@ router.post('/:token/setup-complete', async (req, res) => {
       logger.warn(`[pay-v2] setup-complete pm ownership mismatch: pm ${stripePmId} belongs to ${saved.customer_id}, invoice customer ${invoice.customer_id}`);
       return res.status(409).json({ error: 'Payment method belongs to another account' });
     }
+    // Ownership immediately before the first write, for the same reason as
+    // /consent: this route's own check ran before the Stripe round-trip.
+    if (await require('../services/visit-completion-packets').invoicePayerOwnedNow(invoice.id)) {
+      return res.status(409).json({
+        error: 'This invoice is billed to a third-party payer',
+        code: 'invoice_withdrawn_from_customer',
+      });
+    }
     if (!saved) {
       saved = await StripeService.savePaymentMethod(invoice.customer_id, stripePmId, {
         enableAutopay: false,
@@ -1423,6 +1451,14 @@ router.post('/:token/setup-complete', async (req, res) => {
     // already_enrolled is the benign incumbent case.
     if (!enrollment.enrolled && enrollment.reason !== 'already_enrolled') {
       logger.warn(`[pay-v2] setup-complete enrollment refused (${enrollment.reason}) for invoice ${invoice.id} pm ${saved.id} — held coverage NOT settled`);
+      // A Bill-To change that beat the enrollment gets the ownership refusal,
+      // not the bank-verification copy (Codex #4311 r39 P0).
+      if (enrollment.reason === 'payer_billed') {
+        return res.status(409).json({
+          error: 'This invoice is billed to a third-party payer',
+          code: 'invoice_withdrawn_from_customer',
+        });
+      }
       return res.status(409).json({
         error: 'This bank account can’t power Auto Pay until its verification clears — please use a card instead.',
         enrollReason: enrollment.reason,

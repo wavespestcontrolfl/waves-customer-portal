@@ -526,6 +526,30 @@ async function packetInvoiceSendInFlight({ customerId = null, scheduledServiceId
   return Boolean(await query.first('id'));
 }
 
+/**
+ * Is this invoice payer-owned RIGHT NOW? Three ways it can be, checked under
+ * held rows: an attached payer_id, the withdrawal stamp, and — for a
+ * combined-visit invoice — a payer on ANY billed member of its packet, which
+ * the representative-service resolver cannot see. Used by the public
+ * save-a-method seams before they persist anything, so the documented "a
+ * withdrawn invoice saves and enrolls nothing" contract holds on the write
+ * side too, not only at enrollment (Codex #4311 r39 P0).
+ */
+async function invoicePayerOwnedNow(invoiceId, database = db) {
+  if (!invoiceId) return false;
+  const run = async (trx) => {
+    const invoice = await trx('invoices').where({ id: invoiceId })
+      .first('id', 'payer_id', 'scheduled_send_error', 'visit_completion_packet_id');
+    if (!invoice) return true; // unreadable ownership is never "self-pay"
+    if (invoice.payer_id) return true;
+    if (require('./invoice-helpers').invoiceWithdrawnFromCustomer(invoice)) return true;
+    if (!invoice.visit_completion_packet_id) return false;
+    const { payerId } = await resolvePacketOwnershipLocked(invoice.visit_completion_packet_id, trx);
+    return Boolean(payerId);
+  };
+  return database.isTransaction ? run(database) : database.transaction(run);
+}
+
 // The live Bill-To decision for a packet, made under held rows: the customer
 // and the billed members FOR SHARE and every payer row the resolver consults,
 // so a payer assignment, activation or deactivation serializes behind the
@@ -1026,4 +1050,4 @@ async function resumePendingVisitCompletions({ limit = 3 } = {}) {
   return { checked: packets.length };
 }
 
-module.exports = { packetPayload, parseOfficeReviewState, resolvePacketOwnershipLocked, withdrawPacketInvoiceForPayer, reconcileWithdrawnPacketInvoices, withdrawPacketInvoicesForOwner, packetInvoiceSendInFlight, lockPacketPayerRows, liveThirdPartyPayerForPacket, enrollVisitCompletionReviewForInvoice, saveVisitCompletionPacket, runVisitCompletionPacketMemberEffects, runVisitCompletionPacketEffects, enrollVisitCompletionReview, resumePendingVisitCompletions };
+module.exports = { invoicePayerOwnedNow, packetPayload, parseOfficeReviewState, resolvePacketOwnershipLocked, withdrawPacketInvoiceForPayer, reconcileWithdrawnPacketInvoices, withdrawPacketInvoicesForOwner, packetInvoiceSendInFlight, lockPacketPayerRows, liveThirdPartyPayerForPacket, enrollVisitCompletionReviewForInvoice, saveVisitCompletionPacket, runVisitCompletionPacketMemberEffects, runVisitCompletionPacketEffects, enrollVisitCompletionReview, resumePendingVisitCompletions };
