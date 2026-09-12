@@ -140,14 +140,16 @@ function Stars({ count, size = 16 }) {
 }
 
 // --- Stat Card ---
-function StatCard({ label, value, sub }) {
+function StatCard({ label, value, sub, color }) {
   return (
     <Card className="min-w-[150px] flex-1 p-5">
       {" "}
       <div className="text-ink-secondary text-ui-body mb-[8px]">
         {label}
       </div>{" "}
-      <div className="text-[28px] font-medium">{value}</div>
+      <div className={`text-[28px] font-medium${color ? ` ${color}` : ""}`}>
+        {value}
+      </div>
       {sub && (
         <div className="text-ink-secondary text-ui-body mt-[4px]">{sub}</div>
       )}
@@ -807,7 +809,7 @@ function fmtDateTime(value) {
 function PolicyInfoCard({ Icon, label, value, sub, color }) {
   return (
     <Card className="p-[14px] grid grid-cols-[20px_minmax(0,1fr)] items-start gap-[10px]">
-      <Icon size={18} className="mt-[1px]" />
+      <Icon size={18} className={`mt-[1px]${color ? ` ${color}` : ""}`} />
       <div className="min-w-[0px]">
         <div className="text-ui-body font-medium text-ink-secondary mb-[4px]">
           {label}
@@ -1166,12 +1168,14 @@ function ReviewIncentivesPanel() {
               label="Payout trigger"
               value="Confirmed public Google reviews after activation"
               sub="A bonus row is created only after the review is synced from Google and matched to a technician."
+              color="text-green-700"
             />
             <PolicyInfoCard
               Icon={Search}
               label="Attribution context"
               value="Rate page and review requests are not payout triggers"
               sub="They only help connect a confirmed Google review to the right customer and technician."
+              color="text-warn-fg"
             />
           </div>
 
@@ -1206,16 +1210,21 @@ function ReviewIncentivesPanel() {
               label="Pending Payroll"
               value={money(summary.pendingCents)}
               sub={`${summary.pendingCount || 0} unpaid bonuses`}
+              color={
+                summary.pendingCents > 0 ? "text-warn-fg" : "text-green-700"
+              }
             />
             <StatCard
               label="Paid"
               value={money(summary.paidCents)}
               sub={`${summary.paidCount || 0} closed bonuses`}
+              color="text-green-700"
             />
             <StatCard
               label="Needs Attribution"
               value={needsAttributionCount}
               sub="post-launch reviews missing a customer or technician match"
+              color="text-alert-fg"
             />
           </div>
 
@@ -2007,6 +2016,7 @@ export default function ReviewsPage() {
                 <StatCard
                   label="No Portal Reply"
                   value={unresponded}
+                  color={unresponded > 0 ? "text-warn-fg" : "text-green-700"}
                   sub={
                     unresponded > 0 ? "reply via AI Reply below" : "all replied"
                   }
@@ -2015,6 +2025,13 @@ export default function ReviewsPage() {
                 <StatCard
                   label="Response Rate"
                   value={`${responseRate}%`}
+                  color={
+                    responseRate >= 90
+                      ? "text-green-700"
+                      : responseRate >= 70
+                        ? "text-warn-fg"
+                        : "text-alert-fg"
+                  }
                   sub={`${respondedCount} of ${ratedTotal} replied`}
                 />{" "}
               </div>
