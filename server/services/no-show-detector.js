@@ -975,6 +975,10 @@ async function promisedVisitIds(conn, { now }) {
   // this bounded.
   const windowFrom = now.getTime() - HORIZON_MS;
   const windowTo = now.getTime();
+  // ET date strings for the two date-text lookups below, widened by a day so
+  // a window near midnight cannot fall outside the band.
+  const recallFromDate = etDateString(new Date(windowFrom - 86400000));
+  const recallToDate = etDateString(new Date(windowTo + 86400000));
   const [notices, emails, calls, appliedMoves, bookings, messages] = await Promise.all([
     conn('messaging_audit_log')
       .whereRaw("(metadata->>'rendered_slot_ms')::bigint BETWEEN ? AND ?", [windowFrom, windowTo])
@@ -998,14 +1002,19 @@ async function promisedVisitIds(conn, { now }) {
     // anything of its own), so leaving them out of recall let exactly those
     // visits vanish when staff moved them out of the date window (codex P1
     // round 20, second pass).
+    // Matched on the DATE TEXT each row already stores, not on a converted
+    // timestamp: `::timestamptz` and `AT TIME ZONE` are not immutable in
+    // Postgres, so an index over them cannot be built and the lookup would
+    // scan the table whole (codex P1 round 20, third pass). Recall only has
+    // to pull the visit into the candidate set — a day of slack on either
+    // side costs a few extra candidates, and evaluateNoShow applies the real
+    // window to every one of them.
     conn('activity_log').where({ action: 'call_reschedule_applied' })
-      .whereRaw(`((metadata->'to'->>'date')::date
-        + COALESCE(NULLIF(metadata->'to'->>'start', ''), '08:00')::time) AT TIME ZONE 'America/New_York'
-        BETWEEN ? AND ?`, [new Date(windowFrom).toISOString(), new Date(windowTo).toISOString()])
+      .whereBetween(conn.raw("metadata->'to'->>'date'"), [recallFromDate, recallToDate])
       .select(conn.raw("metadata->>'scheduled_service_id' as meta_visit_id")),
     conn('scheduled_services as sv').join('call_log as cl', 'cl.id', 'sv.source_call_log_id')
-      .whereRaw(`(cl.ai_extraction_enriched->'scheduling'->>'confirmed_start_at')::timestamptz BETWEEN ? AND ?`,
-        [new Date(windowFrom).toISOString(), new Date(windowTo).toISOString()])
+      .whereBetween(conn.raw("substr(cl.ai_extraction_enriched->'scheduling'->>'confirmed_start_at', 1, 10)"),
+        [recallFromDate, recallToDate])
       .select('sv.id as meta_visit_id'),
     conn('email_messages')
       .whereIn(conn.raw("split_part(idempotency_key, ':', 1)"), APPOINTMENT_EMAIL_EVENTS)
