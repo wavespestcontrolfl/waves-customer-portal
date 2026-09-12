@@ -464,7 +464,7 @@ export default function InventoryPage() {
       {tab === "margins" && <MarginsTab showToast={showToast} />}
       {tab === "scrape" && <ScrapeTab showToast={showToast} />}
       {toast && (
-        <ActionFeedback className="fixed bottom-[calc(20px+env(safe-area-inset-bottom,0px))] right-[calc(20px+env(safe-area-inset-right,0px))] z-[300] max-w-[calc(100vw-40px)]">
+        <ActionFeedback className="fixed bottom-[calc(20px+env(safe-area-inset-bottom,0px))] right-[calc(20px+env(safe-area-inset-right,0px))] z-[300] max-w-[calc(100vw-40px)] pointer-events-none">
           {" "}
           {toast}
         </ActionFeedback>
@@ -535,16 +535,10 @@ function LawnFactsTab({ showToast }) {
   const save = async (approve = false) => {
     if (!editing?.product?.id) return;
     try {
-      await adminFetch(
-        `/admin/inventory/lawn-outline-facts/${editing.product.id}`,
-        {
-          method: "PATCH",
-          body: JSON.stringify({
-            ...form,
-            approve,
-          }),
-        },
-      );
+      await adminFetch(`/admin/inventory/lawn-outline-facts/${editing.product.id}`, {
+        method: "PATCH",
+        body: JSON.stringify({ ...form, approve }),
+      });
       showToast(
         approve
           ? "Product fact approved for estimate packets"
@@ -559,15 +553,10 @@ function LawnFactsTab({ showToast }) {
   const approveRow = async (row) => {
     if (!row?.product?.id) return;
     try {
-      await adminFetch(
-        `/admin/inventory/lawn-outline-facts/${row.product.id}`,
-        {
-          method: "PATCH",
-          body: JSON.stringify({
-            approve: true,
-          }),
-        },
-      );
+      await adminFetch(`/admin/inventory/lawn-outline-facts/${row.product.id}`, {
+        method: "PATCH",
+        body: JSON.stringify({ approve: true }),
+      });
       showToast("Product fact approved for estimate packets");
       load();
     } catch (err) {
@@ -593,7 +582,7 @@ function LawnFactsTab({ showToast }) {
     .slice(0, 6);
   return (
     <div>
-      <Card className="p-5 mb-3 grid gap-[12px]">
+      <Card className="p-5 mb-3 grid grid-cols-[repeat(auto-fit,minmax(130px,1fr))] gap-[12px]">
         {[
           ["Protocol Products", summary?.total || 0],
           ["Approved", summary?.approved || 0],
@@ -882,16 +871,10 @@ function LawnContentModulesTab({ showToast }) {
   const save = async (status = form.status) => {
     if (!editing?.id) return;
     try {
-      await adminFetch(
-        `/admin/service-outlines/content-modules/${editing.id}`,
-        {
-          method: "PATCH",
-          body: JSON.stringify({
-            ...form,
-            status,
-          }),
-        },
-      );
+      await adminFetch(`/admin/service-outlines/content-modules/${editing.id}`, {
+        method: "PATCH",
+        body: JSON.stringify({ ...form, status }),
+      });
       showToast(
         status === "approved"
           ? "Content module approved"
@@ -1158,9 +1141,7 @@ function PriceSyncTab({ showToast }) {
         "/admin/inventory/price-sync/mappings/import",
         {
           method: "POST",
-          body: JSON.stringify({
-            csv: mappingImportCsv,
-          }),
+          body: JSON.stringify({ csv: mappingImportCsv }),
         },
       );
       setImportResult(result);
@@ -1176,10 +1157,7 @@ function PriceSyncTab({ showToast }) {
     try {
       const result = await adminFetch("/admin/inventory/price-sync/auto-map", {
         method: "POST",
-        body: JSON.stringify({
-          vendorId,
-          limit: 8,
-        }),
+        body: JSON.stringify({ vendorId, limit: 8 }),
       });
       showToast?.(
         result.message || `Auto-mapped ${result.mapped || 0} products`,
@@ -1198,16 +1176,13 @@ function PriceSyncTab({ showToast }) {
   const queueLoginDiscovery = async () => {
     setLoginDiscoveryQueueing(true);
     try {
-      const result = await adminFetch(
-        "/admin/inventory/price-sync/hermes-login-discovery",
-        {
-          method: "POST",
-          body: JSON.stringify({
-            limit: loginDiscoveryLimit,
-            includePublic: false,
-          }),
-        },
-      );
+      const result = await adminFetch("/admin/inventory/price-sync/hermes-login-discovery", {
+        method: "POST",
+        body: JSON.stringify({
+          limit: loginDiscoveryLimit,
+          includePublic: false,
+        }),
+      });
       setLoginDiscoveryResult(result);
       showToast?.(result.message || "Hermes login discovery queued");
       await load();
@@ -1699,9 +1674,7 @@ function WaveGuardForecastTab({ showToast, onUpdate, refreshId }) {
     const sequence = ++loadSequence.current;
     setLoading(true);
     try {
-      const data = await adminFetch(
-        `/admin/inventory/waveguard-forecast?days=${encodeURIComponent(days)}`,
-      );
+      const data = await adminFetch(`/admin/inventory/waveguard-forecast?days=${encodeURIComponent(days)}`);
       if (sequence === loadSequence.current) setForecast(data.forecast || null);
     } catch (err) {
       if (sequence === loadSequence.current)
@@ -1727,26 +1700,21 @@ function WaveGuardForecastTab({ showToast, onUpdate, refreshId }) {
     }
     setCreatingId(product.productId);
     try {
-      const data = await adminFetch(
-        `/admin/inventory/waveguard-forecast/${product.productId}/restock-request`,
-        {
-          method: "POST",
-          body: JSON.stringify({
-            requestedQuantity: qty,
-            unit: product.inventoryUnit || product.demandUnit,
-            targetStock: product.targetStock,
-            neededBy: product.firstShortDate || forecast?.endDate || null,
-            priority:
-              product.priority ||
-              (product.status === "short" ? "urgent" : "high"),
-            forecastDays: forecast?.days,
-            committedDemand: product.committedDemand,
-            projectedRemaining: product.projectedRemaining,
-            firstShortDate: product.firstShortDate,
-            reason: `${forecast?.days || days}-day WaveGuard forecast needs ${product.committedDemand} ${product.demandUnit || product.inventoryUnit || ""} of ${product.productName}.`,
-          }),
-        },
-      );
+      const data = await adminFetch(`/admin/inventory/waveguard-forecast/${product.productId}/restock-request`, {
+        method: "POST",
+        body: JSON.stringify({
+          requestedQuantity: qty,
+          unit: product.inventoryUnit || product.demandUnit,
+          targetStock: product.targetStock,
+          neededBy: product.firstShortDate || forecast?.endDate || null,
+          priority: product.priority || (product.status === "short" ? "urgent" : "high"),
+          forecastDays: forecast?.days,
+          committedDemand: product.committedDemand,
+          projectedRemaining: product.projectedRemaining,
+          firstShortDate: product.firstShortDate,
+          reason: `${forecast?.days || days}-day WaveGuard forecast needs ${product.committedDemand} ${product.demandUnit || product.inventoryUnit || ""} of ${product.productName}.`,
+        }),
+      });
       showToast(
         data.existing
           ? "Open restock request already exists"
@@ -2109,9 +2077,6 @@ function UnitReviewTab({ showToast }) {
                                 }
                               >
                                 {unit}
-                                {unit === product.suggestedUnit
-                                  ? " · suggested"
-                                  : ""}
                               </Button>
                             ))}
                           </div>
@@ -2819,11 +2784,9 @@ export function ProductsTab({
                                   onClick={async () => {
                                     try {
                                       await adminFetch(
-                                        `/admin/inventory/${p.id}`,
-                                        {
-                                          method: "DELETE",
-                                        },
-                                      );
+                                      `/admin/inventory/${p.id}`,
+                                      { method: "DELETE" },
+                                    );
                                       showToast("Deleted");
                                       load();
                                     } catch {
@@ -2964,9 +2927,7 @@ function RestockRequestsTab({
   }, [evidence]);
   const loadEvidence = async (requestId) => {
     try {
-      const data = await adminFetch(
-        `/admin/inventory/restock-requests/${requestId}/order-evidence`,
-      );
+      const data = await adminFetch(`/admin/inventory/restock-requests/${requestId}/order-evidence`);
       const screenshots = data.screenshots || [];
       setEvidence((e) => ({
         ...e,
@@ -2985,9 +2946,7 @@ function RestockRequestsTab({
     const sequence = ++loadSequence.current;
     setLoading(true);
     try {
-      const data = await adminFetch(
-        `/admin/inventory/restock-requests?status=${encodeURIComponent(queueStatus)}${requestId ? `&requestId=${encodeURIComponent(requestId)}` : ""}`,
-      );
+      const data = await adminFetch(`/admin/inventory/restock-requests?status=${encodeURIComponent(queueStatus)}${requestId ? `&requestId=${encodeURIComponent(requestId)}` : ""}`);
       if (sequence === loadSequence.current) setRequests(data.requests || []);
     } catch (err) {
       if (sequence === loadSequence.current)
@@ -3008,21 +2967,18 @@ function RestockRequestsTab({
     setReceivingId(request.id);
     try {
       const draft = receiveDrafts[request.id] || {};
-      await adminFetch(
-        `/admin/inventory/restock-requests/${request.id}/action`,
-        {
-          method: "POST",
-          body: JSON.stringify({
-            action,
-            // Only what the admin actually typed: with no draft the server's locked read picks the
-            // figure the automatic order actually bought (packages round up), else the requested
-            // amount — a row loaded before the order placed must not send a stale quantity.
-            quantity: draft.quantity || null,
-            unit: draft.unit || null,
-            note: draft.note || null,
-          }),
-        },
-      );
+      await adminFetch(`/admin/inventory/restock-requests/${request.id}/action`, {
+        method: "POST",
+        body: JSON.stringify({
+          action,
+          // Only what the admin actually typed: with no draft the server's locked read picks the
+          // figure the automatic order actually bought (packages round up), else the requested
+          // amount — a row loaded before the order placed must not send a stale quantity.
+          quantity: draft.quantity || null,
+          unit: draft.unit || null,
+          note: draft.note || null,
+        }),
+      });
       if (action === "receive") {
         showToast("Stock received.");
       } else {
@@ -3657,9 +3613,7 @@ function ExpandedProduct({
         `/admin/inventory/${product.id}/pricing/refresh`,
         {
           method: "POST",
-          body: JSON.stringify({
-            vendorId: vendorPricing.vendorId,
-          }),
+          body: JSON.stringify({ vendorId: vendorPricing.vendorId }),
         },
       );
       showToast?.(data.message || "Refresh queued");
@@ -4526,10 +4480,7 @@ function ApprovalsTab({ showToast, onUpdate }) {
       // ids selected for a retry.
       const result = await adminFetch("/admin/inventory/approvals/bulk", {
         method: "POST",
-        body: JSON.stringify({
-          ids: [...selected],
-          action,
-        }),
+        body: JSON.stringify({ ids: [...selected], action }),
       });
       const failed = result?.failed || [];
       const skipped = result?.skipped || [];
@@ -5567,9 +5518,7 @@ function ScrapeTab({ showToast }) {
     try {
       const r = await adminFetch(
         `/admin/inventory/scrape-jobs/${vendorId}/trigger`,
-        {
-          method: "POST",
-        },
+        { method: "POST" },
       );
       showToast(r.message || "Scrape triggered");
       load();

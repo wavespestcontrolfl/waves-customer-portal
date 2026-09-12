@@ -442,7 +442,7 @@ async function main() {
             assert.equal(await initialButton.getAttribute("aria-pressed"), "false");
           }
           if (leaf === "Unit Review") {
-            await page.getByRole("button", { name: "fl_oz · suggested", exact: true }).waitFor();
+            await page.getByRole("button", { name: "fl_oz", exact: true }).waitFor();
             await page.getByText("Apply unit: fl_oz", { exact: true }).waitFor();
             const fixPath = "/api/admin/inventory/unit-review/product-1/fix";
             await Promise.all([page.waitForResponse(response => response.url().includes(fixPath)), page.getByRole("button", { name: "Apply", exact: true }).click()]);
