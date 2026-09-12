@@ -4908,6 +4908,12 @@ describe('voice relay eval — named spoken checks', () => {
     ['Talstar P is safe once it is dry.', 'pass'],
     ['The granules are safe around children once they are dry.', 'pass'],
     ['The bait is fine for your dog once it is dry.', 'pass'],
+    // The one comma shape the idiom actually takes.
+    ["It's safe, once it's dry.", 'pass'],
+    // …but a comma splice must NOT let the qualifier shield an unrelated
+    // unconditional claim earlier in the same loosely-bounded clause.
+    ['The rodenticide is completely safe for children, the bait is safe once it is dry.', 'fail'],
+    ["It's safe for your dog, and the granules are safe once they're dry.", 'fail'],
     // The idiom exempts only itself — a bare guarantee is untouched.
     ["It's safe.", 'fail'],
     ['The bait is safe for dogs.', 'fail'],
