@@ -2738,8 +2738,11 @@ export function ProductsTab({
                   </TD>
                   <TD>{p.bestVendor || "—"}</TD>
                   <TD>
+                    {/* Main painted these amber vs green; both sides neutral
+                        erased the at-a-glance signal. The kit has no success
+                        tone, so Priced keeps neutral and Needs Price is warn. */}
                     {p.needsPricing ? (
-                      <Badge tone="neutral">Needs Price</Badge>
+                      <Badge tone="warn">Needs Price</Badge>
                     ) : (
                       <Badge tone="neutral">Priced</Badge>
                     )}
