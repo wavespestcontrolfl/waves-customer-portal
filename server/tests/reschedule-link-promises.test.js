@@ -258,6 +258,41 @@ test('a numeric subject date (9/20) grounds the pick exactly like a spelled-out 
   }
 });
 
+test('a spoken date grounds the pick even when the extractor supplied no visit_date at all (codex #4293 P1 r9)', () => {
+  // Date grounding used to run ONLY inside extractedDateUngrounded, which
+  // requires subject.visit_date — so when the model's own extraction simply
+  // omitted the date, narrowBySubject applied no date filter and the quote's
+  // own explicit date went unchecked against whatever visit narrowBySubject
+  // (or the sole-candidate fallback) landed on.
+  const sept21 = { ...visit, id: 'sept-21', scheduled_date: '2030-09-21' };
+  const subject = { quote: 'My September 20 appointment.' };
+  const source = { ...call, transcription: `${call.transcription}\nCaller: ${subject.quote}` };
+  // The quote names September 20; the customer's only open visit is
+  // September 21 — the mismatch must park for review, not send.
+  expect(select({ call: source, commitment: { ...commitment, subject }, candidates: [sept21] }).reason).toBe('date_not_grounded');
+  // The identical quote DOES ground a visit that actually falls on Sept 20.
+  const sept20 = { ...visit, id: 'sept-20', scheduled_date: '2030-09-20' };
+  expect(select({ call: source, commitment: { ...commitment, subject }, candidates: [sept20] }).visit?.id).toBe('sept-20');
+  // The numeric form resolves the same way, reusing the same parser.
+  const numericSubject = { quote: 'My 9/20 appointment.' };
+  const numericSource = { ...call, transcription: `${call.transcription}\nCaller: ${numericSubject.quote}` };
+  expect(select({ call: numericSource, commitment: { ...commitment, subject: numericSubject }, candidates: [sept21] }).reason)
+    .toBe('date_not_grounded');
+  // A quote naming NO date at all has nothing to check the pick against —
+  // today's behavior (sole-candidate trust) is unchanged.
+  const noDateSubject = { quote: 'My appointment, please.' };
+  const noDateSource = { ...call, transcription: `${call.transcription}\nCaller: ${noDateSubject.quote}` };
+  expect(select({ call: noDateSource, commitment: { ...commitment, subject: noDateSubject }, candidates: [sept21] }).visit?.id)
+    .toBe('sept-21');
+  // An ambiguous numeric shape still fails closed even with no extracted
+  // date to check it against.
+  const ambiguousSubject = { quote: 'My 9/10 appointment.' };
+  const ambiguousSource = { ...call, transcription: `${call.transcription}\nCaller: ${ambiguousSubject.quote}` };
+  const sept10 = { ...visit, id: 'sept-10', scheduled_date: '2030-09-10' };
+  expect(select({ call: ambiguousSource, commitment: { ...commitment, subject: ambiguousSubject }, candidates: [sept10] }).reason)
+    .toBe('date_not_grounded');
+});
+
 test('an ambiguous numeric subject date fails closed rather than guessing M/D vs D/M (codex #4293 P1)', () => {
   // "9/10" reads as September 10 under M/D, October 9 under D/M — the two
   // conventions disagree on which date it names. Guessing either way risks

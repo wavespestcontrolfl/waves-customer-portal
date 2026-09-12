@@ -692,6 +692,29 @@ function extractedDateUngrounded({ subject, call, candidates, callCommitments })
     && !quoteGroundsVisitDate(subject.quote, subject.visit_date, callCommitments.callEndedAt(call) || call.created_at, candidates);
 }
 
+// The invariant every date-grounding fix in this file keeps rediscovering,
+// made unconditional: if the grounding quote names an explicit date, that
+// date must agree with the visit about to receive a link — regardless of
+// whether the extractor populated subject.visit_date at all.
+// extractedDateUngrounded (quoteGroundsVisitDate) only runs when
+// subject.visit_date is present; when the model omits it, narrowBySubject
+// applies no date filter, so "I will text you a link for your September 20
+// appointment" bound whatever visit narrowBySubject selected on service /
+// address alone (or the sole remaining candidate when it selected on
+// nothing) — sending the wrong appointment's link the moment the customer's
+// only open visit fell on a different date (codex #4293 P1 r9). This reuses
+// the same explicitQuoteDate parser (numeric dates and AMBIGUOUS_DATE_CLAIM
+// included) against the visit actually SELECTED, not the extracted date, so
+// it catches the mismatch even with no extraction to check in the first
+// place. A quote naming no date at all has nothing to check the pick
+// against and is left alone, exactly as before.
+function quoteDateContradictsSelectedVisit(quote, ymd, reference) {
+  const q = ` ${norm(quote)} `;
+  const explicit = explicitQuoteDate(q, reference, quote);
+  if (explicit === AMBIGUOUS_DATE_CLAIM) return true; // fail closed — see numericQuoteDate
+  return !!explicit && !claimFitsDate(explicit, ymd);
+}
+
 function selectDiscussedVisit({ commitment, call, customer, candidates = [], now = new Date() }) {
   const skip = (reason) => ({ reason });
   const identity = callerIdentityReason(call, customer);
@@ -714,6 +737,8 @@ function selectDiscussedVisit({ commitment, call, customer, candidates = [], now
   if (extractedDateUngrounded({ subject, call, candidates, callCommitments })) return skip('date_not_grounded');
   const selected = narrowBySubject(candidates, subject);
   if (selected.length !== 1) return skip(selected.length ? 'ambiguous_visit' : 'discussed_visit_unavailable');
+  if (subject?.quote && quoteDateContradictsSelectedVisit(subject.quote, dateOnly(selected[0].scheduled_date),
+    callCommitments.callEndedAt(call) || call.created_at)) return skip('date_not_grounded');
   const notReady = visitNotSelfServiceReason(selected[0], now);
   return notReady ? skip(notReady) : { visit: selected[0] };
 }
