@@ -656,7 +656,7 @@ export default function LawnAssessmentPanel({ embedded = false }) {
                   </div>{" "}
                   <div className="text-ui-caption text-ink-secondary">
                     Tiles below marked{" "}
-                    <span className="font-medium text-warn-fg">DIVERGENCE</span>
+                    <span className="font-medium text-warn-fg">DIVERGENCE</span>{" "}
                     are where Claude and Gemini gave scores that differed by
                     more than 20 points. Verify by eye before confirming.
                   </div>{" "}
