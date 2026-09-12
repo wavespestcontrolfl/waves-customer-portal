@@ -14690,8 +14690,13 @@ export function CompletionPanel({
     // One tank, one carrier volume (updateProduct shares it across rows):
     // a per-gallon product added AFTER the tech typed gallons starts from
     // the same tank rather than waiting to be told again.
+    // Strictly from the tank's OWNER, never the first row that happens to
+    // carry a number: a row that detached onto its own mix would otherwise
+    // seed the new product with a volume it never shared, and the next owner
+    // correction would move it anyway (pre-push audit P1). A blank owner
+    // value seeds blank.
     const sharedGallons = isPerGallonUnit(prefillRateUnit)
-      ? selectedProducts.find((p) => isPerGallonUnit(p.rateUnit) && Number(p.carrierGallons) > 0)?.carrierGallons ?? ""
+      ? selectedProducts.find((p) => isPerGallonUnit(p.rateUnit) && p.tankOwner)?.carrierGallons ?? ""
       : "";
     const prefillTotal =
       isPerGallonUnit(prefillRateUnit)

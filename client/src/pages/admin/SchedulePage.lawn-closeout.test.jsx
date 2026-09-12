@@ -565,6 +565,32 @@ it('a fractional tank dose keeps its precision', async () => {
   await waitFor(() => expect(totals()[2].value).toBe('0.015'));
 });
 
+// A product added while one row sits on its own mix takes the TANK's volume,
+// not the detached row's (pre-push audit P1).
+it('a new product seeds from the tank owner, not a detached row', async () => {
+  enableDefaults();
+  const mk = (id, rate) => ({ id, name: `Fixture seed ${id}`, category: 'insecticide', default_unit: 'fl_oz/gal', default_rate: rate });
+  const [a, b, c] = [mk('seed-a', '1'), mk('seed-b', '2'), mk('seed-c', '4')];
+  render(<CompletionPanel service={service} products={[...catalog, a, b, c]} onClose={() => {}} onSubmit={submit} />);
+  await waitFor(() => expect(totals()).toHaveLength(2), { timeout: 5000 });
+  const add = async (product, expected) => {
+    fireEvent.change(screen.getByPlaceholderText('Search products...'), { target: { value: product.name } });
+    fireEvent.click(screen.getByText(product.name));
+    await waitFor(() => expect(totals()).toHaveLength(expected));
+  };
+  await add(a, 3);
+  await add(b, 4);
+  const gal = () => screen.getAllByPlaceholderText('Gal');
+  // B sets the tank; A then goes on its own mix and detaches.
+  fireEvent.change(gal()[1], { target: { value: '25' } });
+  await waitFor(() => expect(totals()[2].value).toBe('25'));
+  fireEvent.change(gal()[0], { target: { value: '10' } });
+  await waitFor(() => expect(totals()[2].value).toBe('10'));
+  await add(c, 5);
+  expect(gal()[2].value).toBe('25');
+  expect(totals()[4].value).toBe('100');
+});
+
 it('a rate unit moving off per-gallon does not strand the tank total', async () => {
   enableDefaults();
   const added = { id: 'manual-taurus', name: 'Fixture termiticide', category: 'insecticide', default_unit: 'fl_oz/gal', default_rate: '0.8' };
