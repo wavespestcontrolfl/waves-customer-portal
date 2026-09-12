@@ -45,78 +45,45 @@ function deliveryUncertainPatch(conn, value) {
   return conn.raw("COALESCE(payload, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ [DELIVERY_UNCERTAIN_KEY]: value })]);
 }
 
-// A stated delivery time is one of two English shapes, and they cut the
-// opposite way on whether an early send keeps the promise:
-//   - a REQUESTED time ("I'll text you the link tomorrow morning", "this
-//     evening", "on Monday") means the customer was told not to expect it
-//     any sooner — sending early breaks the very promise being kept;
-//   - a DEADLINE ("by Friday", "before the weekend", "within a couple of
-//     days") only bounds how LATE the send may be — sending earlier still
-//     keeps it.
-// call-commitments.js does not persist this distinction: toRow only keeps
-// the model's literal wording (due_text) in the row's description, and
-// only when due_at was NOT pinned — a STATED due_at (due_basis 'stated')
-// carries no record of which shape produced it. Properly fixing that needs
-// a schema/extractor change beyond this file (a persisted due_type
-// alongside due_basis, populated at extraction time) — see the follow-up
-// note on isPromisedFloor below. What IS already persisted verbatim is the
-// grounding evidence quote the promise was extracted from, so the deadline
-// shape is read back out of THAT text instead: a quote that names its own
-// upper bound in so many words is a deadline, and anything else that
-// carries a due_at is treated as the customer's own requested time — err
-// toward sending later, never earlier, the same call-booking-precedence
-// principle already ruled for the agent's spoken word (codex #4293 P1).
-const DEADLINE_PHRASING_RE = /\b(?:by|before|within|no later than|prior to)\b/i;
-// DEADLINE_PHRASING_RE matching ANYWHERE in the agent's evidence used to be
-// enough, but a deadline word can qualify something other than the send:
-// "I will text you the reschedule link tomorrow morning SO you can move
-// your appointment BEFORE Friday" — that "before" bounds the *appointment*,
-// not the text. Read whole, the quote tripped DEADLINE_PHRASING_RE,
-// isPromisedFloor waved the floor off, and the customer was texted
-// immediately — the exact early-send bug the floor exists to prevent. The
-// deadline word only counts when it sits in the SAME CLAUSE as the send
-// commitment itself, so the quote is first split at its clause boundaries —
-// sentence enders plus the coordinators/subordinators that open a new
-// clause ("so"/"so that", "and", "but", "then", "because", "while") — and
-// only a clause that also carries the promise's own first-person send tense
-// (STANDING_PROMISE_TENSE, the same "I'll/I will/I'm going to" anchor
-// standingPromiseQuotes already uses to find the send commitment itself) is
-// read for deadline phrasing. A clause with no tense marker — "so you can
-// move your appointment before Friday" — is never about the send and is
-// skipped outright, whatever it names.
-const CLAUSE_START_RE = /[.!?]+|\b(?:so(?:\s+that)?|and|but|then|because|while)\b/i;
-function splitClauses(text) {
-  return String(text).split(CLAUSE_START_RE).map((c) => c.trim()).filter(Boolean);
-}
-function isDeadlinePromise(commitment) {
-  const quotes = (commitment?.evidence || [])
-    .filter((e) => e?.speaker === 'agent')
-    .map((e) => String(e?.quote || ''))
-    .join(' \n ');
-  return splitClauses(quotes).some((clause) => STANDING_PROMISE_TENSE.test(norm(clause)) && DEADLINE_PHRASING_RE.test(clause));
-}
-
-// FOLLOW-UP NEEDED: this infers the floor/deadline shape from free-text
-// evidence as a stand-in for a real schema field, because the extractor
-// (call-commitments.js) throws the literal wording away the moment due_at
-// is stated (see toRow's due_text comment). The durable fix is a persisted
-// due_type ('floor' | 'deadline') set by the model at extraction time,
-// alongside due_basis, so no downstream reader has to re-derive it from
-// prose. Until that lands, a stated due_at with no evidence quote naming a
-// deadline is treated as a floor — conservative in the direction of
-// sending later, never earlier.
+// A stated delivery time used to be read as one of two English shapes —
+// a REQUESTED time ("tomorrow morning") the customer should not expect it
+// any sooner than, versus a DEADLINE ("by Friday") only bounding how LATE
+// it may go — with the shape inferred from the agent's free-text evidence
+// quote, because call-commitments.js never persisted which one the model
+// meant (toRow keeps due_text only when due_at was NOT pinned). That
+// inference went through three Codex rounds and was wrong a third distinct
+// way each time: a deadline word qualifying something other than the send
+// ("...so you can move your appointment before Friday", r2), then fixed by
+// requiring the deadline word share a clause with the promise's own send
+// tense — only for a SECOND clause with its own send tense to turn out to
+// be about a phone call, not the link ("I'll text the reschedule link
+// tomorrow morning, and I'll call you before Friday", r3). A fourth patch
+// buys a fourth failure of the same shape: free text cannot reliably tell
+// "the customer's own requested time" apart from "the latest they'll
+// accept" without knowing which the model meant, and the model's answer to
+// that was never captured.
+//
+// So the distinction is removed rather than patched again. Every stated
+// due_at is now a FLOOR, full stop — never send before the promised
+// instant. The cost is explicit and small: a genuine "get it to me by
+// Friday" now waits until Friday instead of possibly going out sooner, and
+// it fails in the only safe direction — we never text a customer earlier
+// than we told them we would. Recovering true deadline semantics (letting
+// an early send honour a genuine deadline) needs a persisted due_type
+// ('floor' | 'deadline') set by the model at extraction time, alongside
+// due_basis — tracked as a follow-up in the PR body — so no downstream
+// reader has to re-derive intent from prose ever again.
 function isPromisedFloor(commitment) {
-  return Boolean(commitment?.due_at) && !isDeadlinePromise(commitment);
+  return Boolean(commitment?.due_at);
 }
 
-// The instant before which a floor promise may not be sent, or null when
-// there is none to honour (no stated due_at, a deadline rather than a
-// floor, or a floor already in the past). Callers recompute this fresh
-// from the commitment's CURRENT due_at/evidence every time — at staging
-// AND again immediately before every dispatch attempt (holdBeforeSend) —
-// rather than trusting whatever staging computed once, so a commitment
-// edited to a later due_at after staging cannot slip out on the row's
-// original available_at.
+// The instant before which a promised delivery may not be sent, or null
+// when there is none to honour (no stated due_at, or a floor already in
+// the past). Callers recompute this fresh from the commitment's CURRENT
+// due_at every time — at staging AND again immediately before every
+// dispatch attempt (holdBeforeSend) — rather than trusting whatever
+// staging computed once, so a commitment edited to a later due_at after
+// staging cannot slip out on the row's original available_at.
 function promisedFloorAt(commitment, now) {
   if (!isPromisedFloor(commitment)) return null;
   const due = new Date(commitment.due_at);
@@ -467,7 +434,45 @@ function quoteContradictsVisitDate(quote, ymd) {
 // Jan 8 AND Jan 15 (also a Tuesday): the bare "Tuesday" matched before
 // "tomorrow" (which actually resolves to Jan 8) ever got a look (codex #4293
 // P1 r2).
-function explicitQuoteDate(q, reference) {
+// A numeric date shape ("9/20", "09/20", "9-20", "9/20/26") carries no
+// month name for the loop below to find, and by the time this function
+// sees `q` it has already been through norm() — which strips the "/" or
+// "-" separator to a bare space, throwing away the very thing that marks
+// these two digits as a DATE rather than two unrelated numbers. So this
+// reads the quote's ORIGINAL, unnormalized text instead.
+//
+// Sole-candidate trust used to be quoteGroundsVisitDate's fallback for any
+// quote with no recognized date token at all — "my 9/20 appointment"
+// recognized none, so a matching sole visit went out unchecked even when
+// it was the WRONG one and the quote plainly named a different date (codex
+// #4293 P1).
+const NUMERIC_DATE_RE = /\b(\d{1,2})[/-](\d{1,2})(?:[/-](\d{2,4}))?\b/;
+// A sentinel distinct from "no explicit claim at all" (null): an ambiguous
+// numeric shape is not nothing to check the pick against — it is a claim
+// this text cannot resolve on its own (9/10 reads as September 10 under
+// M/D, October 9 under D/M, and the two conventions disagree). Guessing
+// either way risks sending the wrong visit's link, so this must fail
+// CLOSED — quoteGroundsVisitDate treats it as ungrounded outright, never
+// falling through to the no-claim/weekday/sole-candidate path an absent
+// claim gets.
+const AMBIGUOUS_DATE_CLAIM = Symbol('ambiguous_numeric_date');
+function numericQuoteDate(rawQuote) {
+  const m = String(rawQuote || '').match(NUMERIC_DATE_RE);
+  if (!m) return null;
+  const a = Number(m[1]);
+  const b = Number(m[2]);
+  if (a > 31 || b > 31 || (a > 12 && b > 12)) return null; // not a calendar date either way
+  const yearRaw = m[3] == null ? null : Number(m[3]);
+  const year = yearRaw == null ? null : (yearRaw < 100 ? 2000 + yearRaw : yearRaw);
+  if (a > 12) return { month: b, day: a, year }; // only D/M is a valid reading
+  if (b > 12) return { month: a, day: b, year }; // only M/D is a valid reading
+  if (a === b) return { month: a, day: b, year }; // both readings land on the same date
+  return AMBIGUOUS_DATE_CLAIM; // both <=12 and differ — M/D and D/M disagree
+}
+
+function explicitQuoteDate(q, reference, rawQuote) {
+  const numeric = numericQuoteDate(rawQuote);
+  if (numeric) return numeric; // an object, or AMBIGUOUS_DATE_CLAIM — the caller handles both
   for (const [index, name] of MONTH_NAMES.entries()) {
     const spoken = q.match(new RegExp(`\\b${name}\\b\\s*(\\d{1,2})?`));
     // "may" is an ordinary verb too — it only reads as a month with a day on it.
@@ -536,7 +541,8 @@ function quoteGroundsVisitDate(quote, ymd, reference, candidates = []) {
   const q = ` ${norm(quote)} `;
   const [year, month, day] = String(ymd).split('-').map(Number);
   if (![year, month, day].every(Number.isFinite)) return false;
-  const explicit = explicitQuoteDate(q, reference);
+  const explicit = explicitQuoteDate(q, reference, quote);
+  if (explicit === AMBIGUOUS_DATE_CLAIM) return false; // fail closed — see numericQuoteDate
   if (explicit) {
     if (!claimFitsDate(explicit, ymd)) return false;
     const fitting = new Set(candidates.map((v) => dateOnly(v.scheduled_date)).filter((date) => claimFitsDate(explicit, date)));
@@ -1861,7 +1867,29 @@ async function needsSendInterlock(input, { automatic, manual }) {
   try {
     const live = await db('outbox_messages').where({ related_customer_id: input.customerId })
       .whereNotNull('commitment_id').whereIn('status', LIVE_PROMISE_STATUSES).first('id');
-    return !!live;
+    if (live) return true;
+    // A promise can be OPEN and already eligible for staging with no
+    // outbox row at all yet — stagePromises runs on its own sweep cadence,
+    // so a manual send landing in the gap between the office's promise
+    // being recorded (call_commitments written) and the next staging pass
+    // would otherwise see nothing above and skip the interlock entirely,
+    // racing the worker's own uncontended lock once it stages and
+    // dispatches minutes later — the same link goes out twice (codex
+    // #4293 P1). Checking the commitment directly, not only its derived
+    // outbox row, closes that pre-staging window. This is deliberately
+    // narrower than stagePromises' own full eligibility predicate (no
+    // generation/delivery-uncertainty NOT EXISTS check): every commitment
+    // this misses is one stagePromises would also refuse to stage right
+    // now, so it needs no interlock either — a false positive here only
+    // costs one unneeded pooled lookup plus an uncontended advisory lock,
+    // never a missed serialization.
+    const callIds = await db('call_log').where({ customer_id: input.customerId }).pluck('id');
+    if (!callIds.length) return false;
+    const openPromise = await db('call_commitments').where({ kind: KIND, party: 'waves', status: 'open' })
+      .whereIn('call_log_id', callIds)
+      .where((q) => q.whereNull('human_state').orWhere('human_state', 'confirmed'))
+      .first('id');
+    return !!openPromise;
   } catch (err) {
     require('./logger').warn(`[reschedule-link-promises] promise pre-check failed for ${input.customerId} (${err.code || err.name || 'error'})`);
     return false;
@@ -2028,4 +2056,4 @@ async function reconcileUsedLinks(conn, now = new Date()) {
   return reconcileRows(conn, rows);
 }
 
-module.exports = { mode, selectDiscussedVisit, snapshot, stagePromises, matchingSend, claimForDispatch, runOne, sweep, withSendLock, resolveUsedLink, reconcileUsedLinks, recordLiveActivation, settleParkedPromiseCard, contextFor, fulfilPromise, markLinkUsed, renewPromiseOnOfficeVerdict, retireAttemptsOnLedgerVerdict, humanStateBlocksPromise, isDeadlinePromise, isPromisedFloor, promisedFloorAt };
+module.exports = { mode, selectDiscussedVisit, snapshot, stagePromises, matchingSend, claimForDispatch, runOne, sweep, withSendLock, resolveUsedLink, reconcileUsedLinks, recordLiveActivation, settleParkedPromiseCard, contextFor, fulfilPromise, markLinkUsed, renewPromiseOnOfficeVerdict, retireAttemptsOnLedgerVerdict, humanStateBlocksPromise, isPromisedFloor, promisedFloorAt };

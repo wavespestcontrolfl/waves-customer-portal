@@ -1685,16 +1685,18 @@ postgres('reschedule-link-promises against PostgreSQL', () => {
    * codex #4293 P1: neither stagePromises nor runOne's own final check ever
    * read commitment.due_at — a grounded promise like "I'll text you the
    * link tomorrow morning" was staged with available_at = now and sent on
-   * whatever sweep found it, a day early. A REQUESTED time ("tomorrow
-   * morning") is a floor: do not send before it. A DEADLINE ("by Friday")
-   * only bounds how late the send may be: sending earlier still keeps it.
-   * The extractor does not persist which shape produced a given due_at
-   * (see the doc comment on isPromisedFloor in reschedule-link-promises.js),
-   * so the distinction is read back out of the grounding evidence quote —
-   * these tests exercise that classification through the real staging and
-   * dispatch path, against genuine Postgres rows.
+   * whatever sweep found it, a day early. An earlier version of this fix
+   * tried to read a REQUESTED time ("tomorrow morning") apart from a
+   * DEADLINE ("by Friday") out of the grounding evidence quote's own
+   * wording, since the extractor never persists which shape a given due_at
+   * came from. That inference was wrong a third distinct way on its third
+   * Codex round (see the doc comment on isPromisedFloor in
+   * reschedule-link-promises.js) and was removed rather than patched
+   * again: EVERY stated due_at is now a floor, deadline wording included —
+   * these tests exercise that through the real staging and dispatch path,
+   * against genuine Postgres rows.
    */
-  describe('a stated delivery time is honoured as a floor, a deadline is not (codex #4293 P1)', () => {
+  describe('a stated delivery time is honoured as a floor, deadline wording included (codex #4293 P1)', () => {
     const fakeSid = `SM${'0'.repeat(32)}`;
     const stubBuildLink = async () => ({ url: 'https://example.com/reschedule/token' });
     const stubRender = async () => 'Your reschedule link: https://example.com/reschedule/token';
@@ -1770,19 +1772,36 @@ postgres('reschedule-link-promises against PostgreSQL', () => {
       expect(sent.provider_message_id).toBe(fakeSid);
     });
 
-    test('"by Friday" is a deadline, not a floor — it may send on the very next sweep', async () => {
-      const dueAt = new Date('2030-01-11T14:00:00Z'); // Friday, well after `now` below
-      const now = new Date('2030-01-07T14:00:00Z'); // Monday, 9:00 AM ET
+    test('"by Friday" is now held to Friday too — the deadline/floor distinction is gone, not re-patched', async () => {
+      // Before this round, "by Friday" read as a deadline and could send on
+      // the very next sweep well ahead of Friday. That heuristic produced a
+      // third distinct false positive (a second clause about an unrelated
+      // commitment misread as the link's own deadline) and was removed: the
+      // due_at this quote produces is now honoured as a floor exactly like
+      // "tomorrow morning" — the cost of never guessing wrong in the unsafe
+      // direction is a deadline promise waiting the full distance too.
+      const dueAt = new Date('2030-01-11T14:00:00Z'); // Friday
+      const beforeFriday = new Date('2030-01-07T14:00:00Z'); // Monday, 9:00 AM ET — before due_at
+      const onFriday = new Date('2030-01-11T15:00:00Z'); // Friday, 10:00 AM ET — after due_at
 
       const commitmentId = await seedPromise({ quote: 'I will text you the reschedule link by Friday.', dueAt });
 
+      // Staging: the row's available_at is the promised floor, not now.
       const staged = await links.stagePromises(mockPg);
       expect(staged).toBe(1);
-      // Staging itself never delays a deadline promise past now.
       const afterStaging = await mockPg('outbox_messages').where({ commitment_id: commitmentId }).first();
-      expect(new Date(afterStaging.available_at).getTime()).toBeLessThan(dueAt.getTime());
+      expect(new Date(afterStaging.available_at).getTime()).toBe(dueAt.getTime());
 
-      await links.runOne(mockPg, afterStaging, { now, send: successfulSend, buildLink: stubBuildLink, render: stubRender });
+      // Monday's sweep: due_at has not passed — nothing is sent.
+      const sendSpy = jest.fn(successfulSend);
+      await links.runOne(mockPg, afterStaging, { now: beforeFriday, send: sendSpy, buildLink: stubBuildLink, render: stubRender });
+      expect(sendSpy).not.toHaveBeenCalled();
+      const stillPending = await mockPg('outbox_messages').where({ commitment_id: commitmentId }).first();
+      expect(stillPending.status).toBe('pending');
+
+      // Friday's sweep: due_at has passed — the promise is kept.
+      await links.runOne(mockPg, stillPending, { now: onFriday, send: sendSpy, buildLink: stubBuildLink, render: stubRender });
+      expect(sendSpy).toHaveBeenCalledTimes(1);
       const sent = await mockPg('outbox_messages').where({ commitment_id: commitmentId }).first();
       expect(sent.status).toBe('sent');
     });

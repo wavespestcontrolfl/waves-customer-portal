@@ -235,6 +235,49 @@ test('a bare ordinal date names a day only, not a month — two visits sharing i
     candidates: [feb20] }).visit?.id).toBe('feb20');
 });
 
+test('a numeric subject date (9/20) grounds the pick exactly like a spelled-out month, and refuses a mismatched sole candidate (codex #4293 P1)', () => {
+  // explicitQuoteDate only recognized month names, ordinals, and relative
+  // words — "my 9/20 appointment" matched none of them, fell through to the
+  // no-explicit-claim/sole-candidate path, and let a mistaken extraction
+  // send whatever visit happened to be the only one open, even when the
+  // quote plainly named a DIFFERENT date.
+  const nineTwenty = { ...visit, id: 'nine-twenty', scheduled_date: '2030-09-20' };
+  const nineTwentyOne = { ...visit, id: 'nine-twenty-one', scheduled_date: '2030-09-21' };
+  const subject = { quote: 'My 9/20 appointment.', visit_date: '2030-09-21' };
+  const source = { ...call, transcription: `${call.transcription}\nCaller: ${subject.quote}` };
+  // The model's extraction (9/21) is the customer's only open visit, but the
+  // quote names 9/20 — the sole-candidate exemption must not paper over the
+  // mismatch just because there is nothing else on file.
+  expect(select({ call: source, commitment: { ...commitment, subject }, candidates: [nineTwentyOne] }).reason).toBe('date_not_grounded');
+  // The identical quote DOES ground a visit that actually falls on 9/20 —
+  // "09/20" and "9-20" resolve the same way.
+  for (const quote of ['My 9/20 appointment.', 'My 09/20 appointment.', 'My 9-20 appointment.']) {
+    const src = { ...call, transcription: `${call.transcription}\nCaller: ${quote}` };
+    expect(select({ call: src, commitment: { ...commitment, subject: { quote, visit_date: '2030-09-20' } },
+      candidates: [nineTwenty] }).visit?.id).toBe('nine-twenty');
+  }
+});
+
+test('an ambiguous numeric subject date fails closed rather than guessing M/D vs D/M (codex #4293 P1)', () => {
+  // "9/10" reads as September 10 under M/D, October 9 under D/M — the two
+  // conventions disagree on which date it names. Guessing either way risks
+  // sending the wrong visit's link, so this must never ground a pick, even
+  // against a sole open visit that happens to match one of the readings.
+  const sept10 = { ...visit, id: 'sept-10', scheduled_date: '2030-09-10' };
+  const subject = { quote: 'My 9/10 appointment.', visit_date: '2030-09-10' };
+  const source = { ...call, transcription: `${call.transcription}\nCaller: ${subject.quote}` };
+  expect(select({ call: source, commitment: { ...commitment, subject }, candidates: [sept10] }).reason).toBe('date_not_grounded');
+  // A shape where one component is out of month range (13-31) is NOT
+  // ambiguous — only one reading is a valid calendar date at all (the
+  // number over 12 can only be a day), so it resolves unambiguously even
+  // though it leads with what would be the day under M/D: "25/12" can only
+  // be December 25.
+  const dec25 = { ...visit, id: 'dec-25', scheduled_date: '2030-12-25' };
+  const dmSubject = { quote: 'My 25/12 appointment.', visit_date: '2030-12-25' };
+  const dmSource = { ...call, transcription: `${call.transcription}\nCaller: ${dmSubject.quote}` };
+  expect(select({ call: dmSource, commitment: { ...commitment, subject: dmSubject }, candidates: [dec25] }).visit?.id).toBe('dec-25');
+});
+
 test('an inactive account cannot be promised a link the reschedule page refuses', () => {
   for (const active of [false, null, undefined]) {
     expect(select({ customer: { ...customer, active } }).reason).toBe('customer_inactive');
@@ -1840,15 +1883,24 @@ test('the commitment gate and explicit shadow/true modes are required', () => {
   }
 });
 
-// codex #4293 P1: a requested delivery time ("tomorrow morning", "this
-// evening", "on Monday") is a floor customers were told not to expect the
-// text before; a deadline ("by Friday", "before the weekend", "within a
-// couple of days") only bounds how LATE it may go. The extractor persists
-// both shapes identically (due_at + due_basis 'stated', see toRow), so the
-// distinction is read back out of the grounding evidence quote instead —
-// these pin the exact wording examples the finding names, independent of
-// any database round trip.
-describe('a stated due_at is a floor unless its own evidence names a deadline (codex #4293 P1)', () => {
+// codex #4293 P1: this used to try to tell a REQUESTED time ("tomorrow
+// morning") apart from a DEADLINE ("by Friday") by reading the shape back
+// out of the agent's free-text evidence quote, because the extractor never
+// persists which one the model meant. That inference went through three
+// rounds and was wrong a third distinct way each time — round 2's stray
+// "before Friday" qualifying the appointment, not the send, then round 3's
+// SECOND clause with its own send tense that was about a phone CALL, not
+// the link ("I'll text the reschedule link tomorrow morning, and I'll call
+// you before Friday" — the second clause's "I'll" and "before Friday" are
+// about the call, but the old clause-scoped check still read it as the
+// link's own deadline and allowed an immediate send). A fourth regex patch
+// buys a fourth failure of the same shape, so the distinction is removed
+// instead: every stated due_at is now a FLOOR, full stop — never send
+// before the promised instant. Recovering true deadline semantics needs a
+// persisted due_type set by the model at extraction time (see the doc
+// comment on isPromisedFloor); until then this is a deliberate, safe-side
+// simplification, not a bug.
+describe('every stated due_at is a floor — the deadline/floor distinction is gone, not re-patched (codex #4293 P1)', () => {
   const dueAt = new Date('2030-01-08T14:00:00Z');
   const commitmentWith = (quote) => ({ due_at: dueAt.toISOString(), evidence: [{ quote, speaker: 'agent' }] });
 
@@ -1856,32 +1908,30 @@ describe('a stated due_at is a floor unless its own evidence names a deadline (c
     "I'll text you the link tomorrow morning.",
     "I'll send that over this evening.",
     "I'll get you that link on Monday.",
-  ])('a requested time (%s) is a floor', (quote) => {
-    expect(links.isPromisedFloor(commitmentWith(quote))).toBe(true);
-  });
-
-  test.each([
     "I'll get that to you by Friday.",
     "I'll send it before the weekend.",
     "I'll have that over within a couple of days.",
-  ])('a deadline (%s) is NOT a floor', (quote) => {
-    expect(links.isPromisedFloor(commitmentWith(quote))).toBe(false);
+  ])('any stated delivery time (%s) is a floor — requested time and deadline wording are no longer distinguished', (quote) => {
+    expect(links.isPromisedFloor(commitmentWith(quote))).toBe(true);
+  });
+
+  // The exact third-round failure: a second clause carries its own
+  // first-person send tense, but about a PHONE CALL rather than the link.
+  // The old clause-scoped deadline check still credited "before Friday" as
+  // the link's own deadline and waved the floor off — with the distinction
+  // gone entirely there is nothing left for that clause to mis-qualify.
+  test("a second clause about an unrelated commitment (a phone call) does not stop the link's due_at from being a floor", () => {
+    const commitment = commitmentWith("I'll text the reschedule link tomorrow morning, and I'll call you before Friday.");
+    expect(links.isPromisedFloor(commitment)).toBe(true);
+    expect(links.promisedFloorAt(commitment, new Date('2030-01-07T14:00:00Z'))).toEqual(dueAt);
   });
 
   test('no stated due_at is never a floor, regardless of wording', () => {
     expect(links.isPromisedFloor({ due_at: null, evidence: [{ quote: 'tomorrow morning', speaker: 'agent' }] })).toBe(false);
   });
 
-  test('a due_at with no evidence at all defaults to a floor — ambiguous errs toward sending later', () => {
+  test('a due_at with no evidence at all is still a floor', () => {
     expect(links.isPromisedFloor({ due_at: dueAt.toISOString(), evidence: [] })).toBe(true);
-  });
-
-  test('only the AGENT\'s own words are read for deadline phrasing — a caller line saying "by Friday" does not turn the agent\'s floor into a deadline', () => {
-    const commitment = { due_at: dueAt.toISOString(), evidence: [
-      { quote: "I'll text you the link tomorrow morning.", speaker: 'agent' },
-      { quote: 'Can you get that to me by Friday?', speaker: 'caller' },
-    ] };
-    expect(links.isPromisedFloor(commitment)).toBe(true);
   });
 
   test('promisedFloorAt is null once the floor has already passed, and equals due_at while it is still ahead', () => {
@@ -1890,32 +1940,11 @@ describe('a stated due_at is a floor unless its own evidence names a deadline (c
     expect(links.promisedFloorAt(commitment, new Date('2030-01-09T00:00:00Z'))).toBeNull();
   });
 
-  test('promisedFloorAt is null for a deadline even while it is still ahead of now', () => {
+  // A promise phrased as a deadline now waits until due_at too — the small,
+  // deliberate cost of removing the heuristic: sending later than strictly
+  // necessary is always safe, sending earlier than promised never is.
+  test('a promise phrased as a deadline ("by Friday") is now held to due_at exactly like a requested time', () => {
     const commitment = commitmentWith("I'll get that to you by Friday.");
-    expect(links.promisedFloorAt(commitment, new Date('2030-01-07T14:00:00Z'))).toBeNull();
-  });
-
-  // codex #4293 P1 (round 2): a deadline word only counts when it qualifies
-  // the SEND itself, not something else the same sentence happens to
-  // mention. "so you can move your appointment before Friday" names a
-  // deadline for the APPOINTMENT, not the text — reading the whole quote
-  // flat let that stray "before" wave off the floor and send the link
-  // immediately, the exact bug the floor exists to prevent.
-  test('a deadline word that qualifies the appointment, not the send, does not turn a floor into a deadline', () => {
-    const commitment = commitmentWith('I will text you the reschedule link tomorrow morning so you can move your appointment before Friday.');
-    expect(links.isPromisedFloor(commitment)).toBe(true);
     expect(links.promisedFloorAt(commitment, new Date('2030-01-07T14:00:00Z'))).toEqual(dueAt);
-  });
-
-  test('the same deadline word in the clause that actually carries the send commitment IS a deadline', () => {
-    expect(links.isPromisedFloor(commitmentWith("I'll get the link to you by Friday."))).toBe(false);
-  });
-
-  test('a deadline word in a clause with no send tense of its own is skipped, whatever it names', () => {
-    // "and it should arrive by Friday" has no "I'll/I will/I'm going to" of
-    // its own — it is not readable as the clause making the send promise,
-    // so it stays a floor rather than being credited as a deadline.
-    const commitment = commitmentWith("I'll text you the link tomorrow morning and it should arrive by Friday.");
-    expect(links.isPromisedFloor(commitment)).toBe(true);
   });
 });
