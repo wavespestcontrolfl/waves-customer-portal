@@ -876,7 +876,17 @@ function invoiceAlreadyDeliveredError(invoice) {
 // in-progress conflict below, and the client verifies the row afterwards.
 const DELIVERED_FOR_FIRST_SEND_STATUSES = ["sent", "viewed", "overdue", "paid", "prepaid"];
 function alreadyDeliveredForFirstSend(invoice) {
-  return !!invoice && (!!invoice.sent_at || DELIVERED_FOR_FIRST_SEND_STATUSES.includes(invoice.status));
+  // email_sent_at is sendInvoiceEmail's own durable stamp, written the
+  // moment the provider ACCEPTS the message — before any bookkeeping that
+  // could throw and leave the row's status looking claimable again (a
+  // failed finalize restoring 'draft', say). It means the payer/customer
+  // already has the email in their inbox regardless of what the status
+  // column currently reads, so a first-delivery check that only reads
+  // sent_at + status is a second, independent path to a duplicate send
+  // (pre-push Codex P1 #4131, third instance of the same shape). Checked
+  // here rather than relying solely on each caller's own pre-claim guard —
+  // this is the ONE chokepoint every firstDeliveryOnly claimant shares.
+  return !!invoice && (!!invoice.sent_at || !!invoice.email_sent_at || DELIVERED_FOR_FIRST_SEND_STATUSES.includes(invoice.status));
 }
 
 // A text that carries THIS invoice's pay link and is queued for the send

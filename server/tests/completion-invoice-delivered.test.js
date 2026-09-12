@@ -14,7 +14,7 @@ const { completionInvoiceAlreadyDelivered } = require('../services/invoice-helpe
 // flipped it to 'sending', and the loser is refused — so an admin "send
 // now" and the completion can never both text the pay link.
 jest.mock('../models/db', () => {
-  const state = { status: 'draft', sent_at: null, queuedCompletionText: null };
+  const state = { status: 'draft', sent_at: null, email_sent_at: null, queuedCompletionText: null };
   const chain = (table) => {
     const q = {};
     q.where = jest.fn(() => q);
@@ -22,7 +22,7 @@ jest.mock('../models/db', () => {
     q.whereRaw = jest.fn(() => q);
     q.first = jest.fn(async () => (table === 'sms_log'
       ? state.queuedCompletionText
-      : { id: 'inv-1', status: state.status, sent_at: state.sent_at }));
+      : { id: 'inv-1', status: state.status, sent_at: state.sent_at, email_sent_at: state.email_sent_at }));
     q.update = jest.fn((values) => ({
       returning: jest.fn(async () => {
         const expected = q.where.mock.calls[q.where.mock.calls.length - 1][0].status;
@@ -82,6 +82,23 @@ describe('the shared send claim (claimInvoiceForSend) under interleaving', () =>
     const resend = await claimInvoiceForSend('inv-1');
     expect(resend).toMatchObject({ previousStatus: 'sent', claimed: true });
     db.__state.status = 'draft';
+    db.__state.sent_at = null;
+  });
+
+  test('a FIRST delivery is refused as already_delivered when only email_sent_at is stamped, even though status reads draft and sent_at is null (pre-push Codex P1 #4131: the AP email accept stamps email_sent_at before any status transition, and a bookkeeping failure that restores the claim to draft must not un-hide that stamp from a firstDeliveryOnly claimant)', async () => {
+    const db = require('../models/db');
+    const { claimInvoiceForSend } = require('../services/invoice');
+    db.__state.status = 'draft';
+    db.__state.sent_at = null;
+    db.__state.email_sent_at = new Date();
+    await expect(claimInvoiceForSend('inv-1', { firstDeliveryOnly: true })).rejects.toMatchObject({ code: 'already_delivered' });
+    expect(db.__state.status).toBe('draft');
+    // The operator's own resend (no flag) is unaffected — email_sent_at only
+    // gates the FIRST-delivery claimants, never an intentional resend.
+    const resend = await claimInvoiceForSend('inv-1');
+    expect(resend).toMatchObject({ previousStatus: 'draft', claimed: true });
+    db.__state.status = 'draft';
+    db.__state.email_sent_at = null;
   });
 
   test('a queued pay-link text (send-window hold) owns the delivery: every other claim is refused (queued_pay_link) until it delivers or terminally fails; the invoice-send path adopts its own queue and is blocked only by the completion-owned ones (GitHub r5 P1 + pre-push P1)', async () => {

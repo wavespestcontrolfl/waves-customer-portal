@@ -11215,6 +11215,44 @@ async function completeScheduledService(completionInput, packetContext = null) {
               }
             }
             paymentFailedNoticeDelivered = !!failResult.sent;
+          } catch (sendErr) {
+            // sendCustomerMessage attaches providerOutcome to the error it
+            // throws when the provider ACCEPTED this exact pay-link body but
+            // the post-send audit-row write then failed (same shape as the
+            // completion SMS's own accepted-but-unaudited catch below —
+            // GitHub Codex r2-r4 P1s on that sibling path, and the third
+            // instance of this pattern in tonight's pre-push audit #4131):
+            // the customer most likely already has the notice, so record it
+            // delivered — before any further write can throw — rather than
+            // let this outer catch fall through to the generic swallow,
+            // which would erase the fact, restore the claim to draft, and
+            // let the completion SMS below (paymentFailedNoticeSent still
+            // false) duplicate the SAME pay link on a fresh claim.
+            const providerAccepted = sendErr?.providerOutcome?.sent === true;
+            if (!providerAccepted) throw sendErr;
+            paymentFailedNoticeDelivered = true;
+            paymentFailedNoticeSent = true;
+            recordStructuredNotes.paymentFailedNoticeStatus = 'sent';
+            recordStructuredNotes.paymentFailedNoticeSentAt = new Date().toISOString();
+            recordStructuredNotes.paymentFailedNoticeAuditError = sendErr.message || 'post-send write failed';
+            const acceptedNotes = { ...recordStructuredNotes };
+            await mergeRecordNotesKeys(record.id, {
+              paymentFailedNoticeStatus: recordStructuredNotes.paymentFailedNoticeStatus,
+              paymentFailedNoticeSentAt: recordStructuredNotes.paymentFailedNoticeSentAt,
+              paymentFailedNoticeAuditError: recordStructuredNotes.paymentFailedNoticeAuditError,
+            }).catch((updateErr) => logger.error(`[dispatch] payment-failed notice accepted-state update failed: ${updateErr.message}`));
+            record.structured_notes = acceptedNotes;
+            try {
+              const InvoiceService = require('../services/invoice');
+              invoice = await InvoiceService.markDeliverySent(invoice.id, {
+                sms: true,
+                source: 'payment_failed_notice',
+                payUrl,
+              });
+            } catch (statusErr) {
+              logger.warn(`[dispatch] invoice delivery status sync after accepted payment-failed notice failed for ${invoice?.id}: ${statusErr.message}`);
+            }
+            logger.warn(`[dispatch] Payment-failed notice for invoice ${invoice?.id} was accepted by the provider but a post-send write failed (${sendErr.message}) — recorded as sent, no failure bell, do not re-send`);
           } finally {
             // A non-delivered exit (failed, deferred, or a throw anywhere
             // above) must give the claim back — a delivered notice instead
@@ -11414,6 +11452,11 @@ async function completeScheduledService(completionInput, packetContext = null) {
             const InvoiceEmail = require('../services/invoice-email');
             const payerSend = await InvoiceEmail.sendInvoiceEmail(invoice.id);
             if (payerSend?.ok) {
+              // DELIVERED the moment the provider accepted it (pre-push Codex
+              // P1 #4131) — recorded BEFORE markDeliverySent below, so its
+              // throw can't erase the fact: the row stays 'sending', parked
+              // for review, instead of a resumed attempt mailing it again.
+              payerApDelivered = true;
               // markDeliverySent's own CAS (status IN SEND_FINALIZABLE_STATUSES,
               // which includes 'sending') releases this claim by flipping
               // it straight to 'sent' — the same mechanism every other
@@ -11422,7 +11465,6 @@ async function completeScheduledService(completionInput, packetContext = null) {
                 email: true,
                 source: 'dispatch_completion_payer',
               });
-              payerApDelivered = true;
             } else {
               logger.warn(`[dispatch] Payer invoice ${invoice.id} not delivered to AP (${payerSend?.error || 'unknown'}) — left unfinalized for operator correction`);
             }

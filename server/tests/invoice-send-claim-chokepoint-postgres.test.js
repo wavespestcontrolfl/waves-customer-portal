@@ -306,6 +306,34 @@ postgres('the shared send claim on a migrated database', () => {
       await InvoiceService.markDeliverySent(adminClaim.invoice.id, { sms: true, source: 'admin_send_now' });
       expect((await readInvoice(adminClaim.invoice.id)).status).toBe('sent');
     });
+
+    test('the provider ACCEPTS the decline notice but the post-send audit-row write then throws (providerOutcome.sent === true): recorded delivered — the invoice finalizes sent, not restored to draft (pre-push Codex P1 #4131, third instance of the send-then-bookkeeping-throw shape)', async () => {
+      await autopayDeclineVisitFixture();
+      sendCustomerMessage.mockImplementation(async (input) => {
+        if (input.purpose === 'payment_failure') {
+          const err = new Error('audit row insert failed (injected)');
+          err.providerOutcome = { sent: true, providerMessageId: `SM${randomUUID().slice(0, 8)}` };
+          throw err;
+        }
+        return { sent: true, channel: 'sms', providerMessageId: `SM${randomUUID().slice(0, 8)}` };
+      });
+
+      const result = await complete();
+      expect([200, 503]).toContain(result.status);
+      const [invoice] = await mockPg('invoices').where({ customer_id: f.customerId });
+      expect(invoice).toBeTruthy();
+      // Exactly ONE call carried the pay link — the decline notice's, which
+      // THREW but was still accepted by the provider. Not erased, not
+      // restored to draft: the claim finalizes sent, same as the control.
+      expect(payLinkTexts()).toHaveLength(1);
+      expect(String(payLinkTexts()[0][0].purpose)).toBe('payment_failure');
+      expect(invoice.status).toBe('sent');
+      expect(invoice.sms_sent_at).not.toBeNull();
+
+      const [record] = await mockPg('service_records').where({ scheduled_service_id: f.serviceId });
+      expect(record?.structured_notes?.paymentFailedNoticeStatus).toBe('sent');
+      expect(record?.structured_notes?.paymentFailedNoticeAuditError).toMatch(/audit row insert failed/);
+    });
   });
 
   describe('a PARTIAL cash/Zelle prepayment against a visit with an already-linked draft (round-19 P1 #4131 finding 1, partial-payment follow-on)', () => {
@@ -369,6 +397,49 @@ postgres('the shared send claim on a migrated database', () => {
       // Paid is no longer send-claimable at all — no pay link ever goes out.
       await expect(InvoiceService.claimInvoiceForSend(f.invoiceId, { operatorInitiated: true })).rejects.toThrow(/paid/i);
       expect(payLinkTexts()).toHaveLength(0);
+    });
+  });
+
+  describe('the payer AP invoice email records delivery before markDeliverySent (pre-push Codex P1 #4131 — third instance of the send-then-bookkeeping-throw shape)', () => {
+    async function payerVisitFixture() {
+      await visitFixture();
+      const [payerId] = await mockPg('payers').insert({
+        display_name: 'Fixture GC', company_name: 'Fixture GC LLC',
+        ap_email: 'ap@fixture-gc.example.invalid', active: true,
+      }).returning('id').then((r) => r.map((x) => x.id ?? x));
+      await mockPg('scheduled_services').where({ id: f.serviceId }).update({ payer_id: payerId });
+      f.payerId = payerId;
+      return f;
+    }
+
+    test('sendInvoiceEmail succeeds, then markDeliverySent throws: the invoice is NOT restored to a state that permits another first delivery, and a following attempt does not email the payer again', async () => {
+      await payerVisitFixture();
+      const { sendInvoiceEmail } = require('../services/invoice-email');
+      sendInvoiceEmail.mockResolvedValueOnce({ ok: true, recipient: { email: 'ap@fixture-gc.example.invalid' } });
+      const markDeliverySentSpy = jest.spyOn(InvoiceService, 'markDeliverySent')
+        .mockRejectedValueOnce(new Error('injected finalize failure'));
+
+      const result = await complete();
+      expect([200, 503]).toContain(result.status);
+      expect(sendInvoiceEmail).toHaveBeenCalledTimes(1);
+
+      const minted = await mockPg('invoices').where({ customer_id: f.customerId }).first();
+      expect(minted).toBeTruthy();
+      expect(minted.payer_id).toBe(f.payerId);
+      // NOT restored to draft (or any other claimable status) — the accepted
+      // send stays parked under its 'sending' claim for operator review,
+      // exactly like the completion SMS's own accepted-but-unaudited path.
+      expect(minted.status).toBe('sending');
+
+      markDeliverySentSpy.mockRestore();
+
+      // A following first-delivery attempt on this same invoice (a resumed
+      // completion, or the Invoices-page immediate send) must be refused —
+      // never a second AP email, whether refused for still being claimed or
+      // for already carrying first-delivery evidence.
+      await expect(InvoiceService.claimInvoiceForSend(minted.id, { firstDeliveryOnly: true })).rejects.toThrow();
+      expect(sendInvoiceEmail).toHaveBeenCalledTimes(1);
+      expect((await readInvoice(minted.id)).status).toBe('sending');
     });
   });
 });
