@@ -344,7 +344,10 @@ function relaxElapsedWindows(sourceStops, startMin) {
   if (startMin == null) return sourceStops;
   return sourceStops.map((s) => {
     const range = effectiveWindowRange(s);
-    if (!range || range.endMin > startMin) return s;
+    // STRICTLY past: the feasibility rule lets a stop START at endMin, so a
+    // promise is still keepable at its deadline minute itself (codex round 5
+    // P2) — relaxing it there would let another stop take its place.
+    if (!range || range.endMin >= startMin) return s;
     // Only the ARRIVAL constraint is relaxed. workDuration falls back to the
     // window SPAN when a row has no estimate (or a shorter one), so clearing
     // the window fields would also shrink a 09:00-12:00 job to an hour and

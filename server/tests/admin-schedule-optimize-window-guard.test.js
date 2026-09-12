@@ -1237,3 +1237,30 @@ test('a terminal stop does not make the commit-time recheck reject a good route'
     jest.useRealTimers();
   }
 });
+
+// Codex round 5 P2: a promise is still keepable AT its deadline minute (the
+// feasibility rule lets a stop START at endMin), so relaxing it there would
+// hand its slot to another stop and commit a late arrival.
+test('a promise is not relaxed on its deadline minute', () => {
+  process.env.GATE_ROUTE_REORDER_WINDOW_FIT = 'true';
+  process.env.GATE_DRIVE_TIME_CALIBRATION = 'true';
+  const { chooseWindowSafeOrder } = require('../services/route-reorder');
+  const at = (id, ro, over = {}) => ({
+    id, technician_id: 't1', status: 'confirmed', route_order: ro,
+    customer_id: `c_${id}`, service_address_line1: `${id} St`, customer_address_line1: `${id} St`,
+    visit_id: null, time_window: null, lat: 1, lng: 1, estimated_duration_minutes: 30, ...over,
+  });
+  // DUE is promised 09:00-10:00, arrival deadline 11:00. At exactly 11:00 it
+  // still binds, so Google's attempt to put the untimed stop first is a
+  // chronology/feasibility problem rather than a free choice.
+  const stops = [at('FREE', 1), at('DUE', 2, { window_start: '09:00', window_end: '10:00' })];
+  const out = chooseWindowSafeOrder({
+    RouteOptimizer, googleOrder: stops, sourceStops: stops, googleSource: 'google_routes_api',
+    startMin: 11 * 60, requireCalibratedModel: false,
+  });
+  // Still constrained: Google's untimed-first order is a conflict, and the
+  // repair puts the promised stop back in front. Relaxed, it would simply be
+  // accepted as written.
+  expect(out.conflict).not.toBeNull();
+  expect(out.orderedStops.map((s) => s.id)).toEqual(['DUE', 'FREE']);
+});

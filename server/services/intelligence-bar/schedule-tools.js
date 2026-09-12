@@ -301,7 +301,7 @@ function getZone(city) {
 // any miss (row moved or reassigned since) aborts the whole rewrite
 // untouched, and an approved id missing from the fresh day set refuses with
 // preview_changed.
-async function applyApprovedRouteOrder({ date, approvedIds, services, lockKeys, expectTechFor, loadEligibleIds, RouteOptimizer }) {
+async function applyApprovedRouteOrder({ date, approvedIds, services, lockKeys, expectTechFor, loadEligibleIds, RouteOptimizer, technicianId = null }) {
   const byId = new Map(services.map((s) => [String(s.id), s]));
   if (approvedIds.some((id) => !byId.has(id))) {
     return { error: "The day's stops changed after the card was shown — nothing was reordered. Ask again for a fresh card.", preview_changed: true };
@@ -321,7 +321,7 @@ async function applyApprovedRouteOrder({ date, approvedIds, services, lockKeys, 
     const approvedOrder = approvedIds.map((id) => byId.get(id));
     // From the truck's real position, exactly as the preview did — the day
     // has moved on since the card was drawn.
-    techDayOrigins = await loadTechDayOrigins(db, date, { now: preLockNow });
+    techDayOrigins = await loadTechDayOrigins(db, date, { technicianId, now: preLockNow });
     const revalidated = resolveWindowSafeOrderByTechDay({
       RouteOptimizer, orderedStops: approvedOrder, sourceStops: services,
       googleSource: 'approved_card', startMin: inProgressStartMin(date, preLockNow),
@@ -362,7 +362,11 @@ async function applyApprovedRouteOrder({ date, approvedIds, services, lockKeys, 
         throw Object.assign(new Error('guard inputs changed'), { code: 'STALE_OPTIMIZE_SET' });
       }
       // The completed rows the origin came from are outside that set.
+      // Scoped to the technician this card covers: an unrelated tech
+      // finishing a stop must not reject it, and their completed rows have no
+      // business being locked here (codex round 5 P2).
       const freshOrigins = await assertTechDayOriginsFresh(trx, date, techDayOrigins, {
+        technicianId,
         stale: () => Object.assign(new Error('completed-stop origin changed'), { code: 'STALE_OPTIMIZE_SET' }),
       });
       // And time has passed while this waited for locks: re-run today's
@@ -506,7 +510,12 @@ async function optimizeAllRoutes(input) {
   // passes leaves their route_order untouched.
   const guarded = resolveWindowSafeOrderByTechDay({
     RouteOptimizer, orderedStops: result.orderedStops, sourceStops: services,
-    googleSource: result.source, legs: result.legs, startMin: inProgressStartMin(date),
+    googleSource: result.source,
+    // No live-leg shortcut here: the confirmation re-validates the APPROVED
+    // order, which has no legs of its own, so a preview certified on Google's
+    // legs would produce a card that could never be applied (codex round 5
+    // P2). Judge it the way it will be judged.
+    legs: null, startMin: inProgressStartMin(date),
     techDayOrigins: await loadTechDayOrigins(db, date),
   });
   if (guarded.refusal) {
@@ -640,6 +649,7 @@ async function optimizeTechRoute(input) {
       lockKeys: [{ techId: tech.id, date }],
       expectTechFor: () => tech.id,
       RouteOptimizer,
+      technicianId: tech.id,
       loadEligibleIds: async (trx) => (await dayStopsQuery(trx, {
         dateStr: date,
         technicianId: tech.id,
@@ -667,7 +677,9 @@ async function optimizeTechRoute(input) {
   // optimize_all_routes above.
   const guarded = resolveWindowSafeOrderByTechDay({
     RouteOptimizer, orderedStops: result.orderedStops, sourceStops: services,
-    googleSource: result.source, legs: result.legs, startMin: inProgressStartMin(date),
+    googleSource: result.source,
+    // Judged as the confirmation will judge it — see optimize_all_routes.
+    legs: null, startMin: inProgressStartMin(date),
     techDayOrigins: await loadTechDayOrigins(db, date, { technicianId: tech.id }),
   });
   if (guarded.refusal) {

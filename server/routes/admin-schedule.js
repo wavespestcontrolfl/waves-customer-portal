@@ -13755,7 +13755,11 @@ router.post('/optimize-route', requireAdmin, async (req, res, next) => {
     {
       const { lockTechDays } = require('../services/scheduling/tech-day-lock');
       await db.transaction(async (trx) => {
-        await lockTechDays(trx, [{ techId: technicianId, date: dateStr }]);
+        // techKey, not the raw request value: Postgres canonicalizes an
+        // uppercase UUID for row matching, so hashing the raw one takes a
+        // DIFFERENT advisory lock than concurrent writers hold (codex round
+        // 5 P2).
+        await lockTechDays(trx, [{ techId: techKey, date: dateStr }]);
         await assertGuardInputsFresh(trx, dateStr, technicianId || null, guardSnapshot);
         // The completed rows the origin came from are outside that fence.
         const freshOrigins = await assertTechDayOriginsFresh(trx, dateStr, techDayOrigins, { technicianId: technicianId || null, now });
