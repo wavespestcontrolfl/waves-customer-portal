@@ -78,7 +78,8 @@ by packet and customer identity. Unrelated visits and payer-billed invoices
 never expose homeowner credit terms), `/api/contracts/:token`, `/api/booking/*`,
 `/api/public/estimates/:token/ask`,
 `/api/public/estimates/:token/find-slots`,
-`/api/public/estimates/:token/available-slots` and `/reserve` (the recurring
+`/api/public/estimates/:token/available-slots`, `/reserve` and
+`/reserve/:scheduledServiceId/extend` (the recurring
 service profile uses the converter's canonical stored/engine service rows.
 Generated or saved tier selections replace the listed service cadences and
 retain omitted companion programs; choosing a tier is not a service removal.
@@ -1019,6 +1020,35 @@ customer's last selection once the route writes it back (validation audit
 SEC-001, 2026-09-02; before it the ceiling applied only to opted-out
 estimates). A membership reconcile that reprices the mix refreshes the
 opt-out stamp with the row tier.
+Slot-hold lifetime (owner case 2026-09-11 — a customer confirmed 34 seconds
+after her 15-minute hold lapsed, was refused, and believed she had paid).
+`POST /reserve/:scheduledServiceId/extend` pushes an EXISTING hold's expiry
+out by the standard hold window: same `reserveLimiter` budget and token-format
+gate as `/reserve`, same call-side-blocked and ineligible-estimate refusals,
+and the same generic 404 for an unknown token, an unknown hold, a hold
+belonging to ANOTHER estimate, an already-committed row, or a hold past the
+grace — the route is not an enumeration oracle for hold ids. It never creates
+a hold, never changes the slot, and never touches price, customer or estimate
+state. A hold may not live past `MAX_HOLD_MINUTES` (60) from its own
+`created_at` however many times it is extended (409 `HOLD_LIMIT_REACHED` with
+the unchanged `expiresAt`); the same ceiling binds `/reserve`'s same-slot
+refresh, so re-POSTing `/reserve` is not a way around it. An extension whose
+window a COMMITTED visit has since taken supersedes the hold and answers 409
+`SLOT_UNAVAILABLE` rather than keeping a hold the accept is guaranteed to
+refuse — and the supersede is committed, never rolled back with the refusal.
+Reviving a hold that has ALREADY LAPSED (inside the grace) arbitrates against
+live HOLDS as well as committed visits — a lapsed row stopped occupying its
+window, so another customer may hold it — and is refused outright under
+`GATE_SCHEDULING_CAPACITY`, where arrival allocation has no equivalent probe. Commit-time grace:
+`/accept` graduates a hold expired by less than `RESERVATION_COMMIT_GRACE_MINUTES`
+(default 10, clamped 0-30, 0 disables) — every conflict re-check still runs
+under the date lock, so an in-grace commit cannot double-book, and the expiry
+sweep holds the same row for the same window. The grace widens adoption ONLY
+for the estimate's own unclaimed hold, never another customer's row, and the
+VIEW path never OFFERS a lapsed hold. Every hold-expiry refusal on `/accept`
+carries `code: RESERVATION_EXPIRED` so the client names the real cause instead
+of reporting a taken slot.
+
 Appointment reminders registered by `/accept` derive their date and arrival
 from the committed service row. A server-owned `reservation_service_mix`
 allocation can preserve one booked arrival across sequential member work
@@ -1030,8 +1060,18 @@ is internal and adds no request field or public payload field.
 `/accept` existing-appointment adoption (`existingAppointmentId` in the
 body, offered by the view contract instead of the slot picker): the row
 must belong to this customer, be unclaimed or claimed by THIS estimate,
-never a reservation hold or a callback visit, dated today or later, and
-in an adoptable status. Adoptable statuses are `pending`/`confirmed`;
+never a callback visit, dated today or later, and in an adoptable status.
+The estimate's OWN uncommitted reservation hold IS offered through this
+shape (a customer who picked a slot and then reloaded), and the payload
+says so: `isHold` is true and `reservationExpiresAt` carries the hold's
+expiry as an ISO instant. Both fields are ABSENT for a genuinely
+committed visit — not `false`/`null`, so a client that distinguishes an
+absent property keeps the exact pre-2026-09 payload — including one carrying a stray
+`reservation_expires_at`, which `releaseExpiredReservations` exists to
+rescue — so a countdown never starts on a real appointment. Another
+estimate's hold is still never offered. The page uses the two fields to
+run the hold timer and the extend action described below; a client that
+ignores them sees the previous committed-appointment shape. Adoptable statuses are `pending`/`confirmed`;
 behind `GATE_ESTIMATE_ADOPT_IN_PROGRESS_VISIT` (fail-closed in every
 environment — off unless the var is a `gateEnvValue` true: `true`, `1`
 or `on`, case-insensitive; re-read per accept request, so a flip is a
