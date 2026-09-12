@@ -37,7 +37,7 @@ import useIsMobile from "../../hooks/useIsMobile";
 import CompletionPricingCard from "../../components/schedule/CompletionPricingCard";
 import VisitProtocol from "../../components/admin/VisitProtocol";
 import { createPortal } from "react-dom";
-import { ActionFeedback, Button, Card, CardBody, Dialog, DialogBody, DialogFooter, DialogHeader, DialogTitle, Field, Input, Select, UiSurface } from "../../components/ui";
+import RescheduleDialogView from "../../components/schedule/RescheduleDialogView";
 
 import { addETDays, etDateString, etDatetimeLocalToISO, etParts, formatETDateOnly, formatETDateTime } from "../../lib/timezone";
 import { completionDraftKey } from "../../lib/completion-drafts";
@@ -7552,85 +7552,38 @@ export function RescheduleModal({ service, onClose, onRescheduled }) {
   ];
 
   return (
-    <UiSurface density="comfortable">
-      <Dialog open onClose={onClose} layer={1000} aria-label="Reschedule service">
-        <DialogHeader><DialogTitle>Reschedule service</DialogTitle></DialogHeader>
-        <DialogBody className="space-y-4">
-          <p className="text-ui-body text-ink-secondary">{service.customerName} — {service.serviceType}</p>
-          <Field label="Reason">
-            <Select value={reason} onChange={(e) => setReason(e.target.value)}>
-              {REASONS.map((r) => <option key={r.value} value={r.value}>{r.label}</option>)}
-            </Select>
-          </Field>
-          <Field label="Notes (optional)">
-            <Input value={notes} onChange={(e) => setNotes(e.target.value)} placeholder="Additional context..." />
-          </Field>
-          <Field label="Client booking notifications" help="This controls the immediate reschedule text. Automated reminders will follow the new appointment time.">
-            <Select value={notificationType} onChange={(e) => setNotificationType(e.target.value)} disabled={sending}>
-              <option value="none">Don&rsquo;t send a notification</option>
-              <option value="sms">Text message</option>
-            </Select>
-          </Field>
-          {seriesConfirm && (
-            <Card data-testid="series-move-confirm"><CardBody>
-              <h3 className="text-ui-body font-medium mb-2">Move to {seriesConfirmDate || seriesConfirm.body.newDate}?</h3>
-              <SeriesMoveNotice tone="inline" preview={seriesConfirm.preview} stale={seriesConfirm.stale} />
-              <div className="ui-record-actions mt-3">
-                <Button onClick={confirmSeriesMove} disabled={sending}>{sending ? "Moving…" : "Move visit + later visits"}</Button>
-                <Button variant="secondary" onClick={() => setSeriesConfirm(null)} disabled={sending}>Back</Button>
-              </div>
-            </CardBody></Card>
-          )}
-          <h3 className="text-18 font-medium">Suggested dates (on route)</h3>
-          {loading ? <ActionFeedback>Finding best dates...</ActionFeedback> : (
-            <div className="space-y-2">
-              {options.map((opt, i) => (
-                <Card key={i}><CardBody className="flex flex-wrap items-center justify-between gap-3">
-                  <div className="min-w-0">
-                    <div className="text-ui-body font-medium">{opt.displayDate}</div>
-                    <div className="text-ui-body text-ink-secondary">
-                      {windowFor(opt.suggestedWindow?.start)?.display || opt.suggestedWindow?.display}{" "}
-                      · {opt.currentLoad} jobs · {opt.sameAreaServices} same area
-                    </div>
-                  </div>
-                  <Button onClick={() => handleReschedule(opt)} disabled={sending}>Select</Button>
-                </CardBody></Card>
-              ))}
-            </div>
-          )}
-          <div className="border-t border-hairline border-zinc-200 pt-3">
-            <Button variant="ghost" onClick={() => setShowManual(!showManual)} aria-expanded={showManual}>
-              {showManual ? "\u25BC" : "\u25B6"} Pick Custom Date &amp; Time
-            </Button>
-            {showManual && (
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 mt-3">
-                <Field label="Date"><Input type="date" value={manualDate} onChange={(e) => setManualDate(e.target.value)} /></Field>
-                <Field label="Start Time">
-                  <Select value={manualTime} onChange={(e) => setManualTime(e.target.value)}>
-                    {Array.from({ length: 14 }, (_, i) => i + 6)
-                      .filter((h) => h * 60 + durationMinutes <= 20 * 60)
-                      .map((h) => {
-                        const value = `${String(h).padStart(2, "0")}:00`;
-                        const label = `${h % 12 || 12}:00 ${h >= 12 ? "PM" : "AM"}`;
-                        return <option key={value} value={value}>{label}</option>;
-                      })}
-                  </Select>
-                </Field>
-                <Button className="sm:col-span-2" onClick={handleManualReschedule} disabled={sending || !manualDate}>Reschedule</Button>
-              </div>
-            )}
-            {showManual && <SlotConflictNotice conflicts={manualConflicts} style={{ marginTop: 10 }} />}
-            {showManual && (
-              <BestTimeHint bestTimes={manualBestTimes} picked={manualPicked} bestInRange={manualBestInRange}
-                currentStart={manualTime} currentDate={manualDate} currentTechnicianId={service.technicianId || service.technician_id}
-                onPick={(slot) => setManualTime(slot.start)} onPickDate={(slot) => { setManualDate(slot.date); setManualTime(slot.start); }}
-                style={{ marginTop: 10 }} />
-            )}
-          </div>
-        </DialogBody>
-        <DialogFooter><Button variant="secondary" onClick={onClose}>Cancel</Button></DialogFooter>
-      </Dialog>
-    </UiSurface>
+    <RescheduleDialogView
+      service={service}
+      reason={reason}
+      setReason={setReason}
+      notes={notes}
+      setNotes={setNotes}
+      notificationType={notificationType}
+      setNotificationType={setNotificationType}
+      sending={sending}
+      seriesConfirm={seriesConfirm}
+      seriesConfirmDate={seriesConfirmDate}
+      confirmSeriesMove={confirmSeriesMove}
+      clearSeriesConfirm={() => setSeriesConfirm(null)}
+      reasons={REASONS}
+      loading={loading}
+      options={options}
+      windowFor={windowFor}
+      handleReschedule={handleReschedule}
+      showManual={showManual}
+      setShowManual={setShowManual}
+      manualDate={manualDate}
+      setManualDate={setManualDate}
+      manualTime={manualTime}
+      setManualTime={setManualTime}
+      durationMinutes={durationMinutes}
+      handleManualReschedule={handleManualReschedule}
+      manualConflicts={manualConflicts}
+      manualBestTimes={manualBestTimes}
+      manualPicked={manualPicked}
+      manualBestInRange={manualBestInRange}
+      onClose={onClose}
+    />
   );
 }
 
