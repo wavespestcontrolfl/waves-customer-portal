@@ -93,6 +93,10 @@ describe("MobileServiceLibrary", () => {
       await screen.findByRole("heading", { name: "Categories" }),
     ).toBeInTheDocument();
     expect(
+      screen.getByRole("searchbox", { name: "Search Categories" }),
+    ).toHaveAttribute("placeholder", "Search Categories");
+    expect(screen.queryByText("Search Categories")).not.toBeInTheDocument();
+    expect(
       screen.queryByRole("button", { name: "Add" }),
     ).not.toBeInTheDocument();
   });

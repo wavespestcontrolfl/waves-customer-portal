@@ -74,15 +74,15 @@ const editPanelChrome =
 
 function SearchBar({ value, onChange, placeholder }) {
   return (
-    <Field label={placeholder} className="mb-3">
-      <Input
-        type="search"
-        inputMode="search"
-        value={value}
-        onChange={(e) => onChange(e.target.value)}
-        placeholder={placeholder}
-      />
-    </Field>
+    <Input
+      type="search"
+      inputMode="search"
+      value={value}
+      onChange={(e) => onChange(e.target.value)}
+      placeholder={placeholder}
+      aria-label={placeholder}
+      className="mb-3"
+    />
   );
 }
 
