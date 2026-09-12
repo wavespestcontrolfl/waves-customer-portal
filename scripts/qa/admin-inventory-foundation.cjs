@@ -432,6 +432,22 @@ async function main() {
         ["Content", ["Registry", "Lawn Facts", "Lawn Content"]],
         ["Protocols", ["Protocols", "Service Margins"]],
       ];
+      // A stable, leaf-specific element to wait for before measuring — the
+      // fixture's actual rendered data (or its known empty state) rather
+      // than a fixed delay, so a slow render can't be measured mid-loading-
+      // placeholder. Price Sync, Registry, and Unit Review already wait on
+      // their own distinctive controls further down and aren't listed here.
+      const leafReady = {
+        Approvals: () => page.getByText("Synthetic review", { exact: true }).waitFor(),
+        Vendors: () => page.getByText(vendor.name, { exact: true }).first().waitFor(),
+        "Scrape Health": () => page.getByText(vendor.name, { exact: true }).first().waitFor(),
+        Forecast: () => page.getByText("No forecasted WaveGuard product demand in this window.", { exact: true }).waitFor(),
+        Restock: () => page.getByText("No restock requests in this view.", { exact: true }).waitFor(),
+        "Lawn Facts": () => page.getByText("No products match this status.", { exact: true }).waitFor(),
+        "Lawn Content": () => page.getByText("Lawn Outline Content Library", { exact: true }).waitFor(),
+        Protocols: () => page.getByText("Templates", { exact: true }).waitFor(),
+        "Service Margins": () => page.getByText("Exterior perimeter", { exact: true }).waitFor(),
+      };
       for (const [group, leaves] of navigation) {
         await page
           .getByRole("button", {
@@ -447,6 +463,7 @@ async function main() {
             .first()
             .click();
           await page.waitForTimeout(75);
+          if (leafReady[leaf]) await leafReady[leaf]();
           if (leaf === "Price Sync" || leaf === "Registry") {
             const initial = leaf === "Price Sync" ? "Vendor Sync Status" : "All Products";
             const next = leaf === "Price Sync" ? "Needs Mapping" : "Public";

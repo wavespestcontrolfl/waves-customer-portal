@@ -576,7 +576,7 @@ function LawnFactsTab({ showToast }) {
     );
   };
   if (loading)
-    return <ActionFeedback>Loading lawn product facts…</ActionFeedback>;
+    return <ActionFeedback>Loading lawn product facts...</ActionFeedback>;
   const visibleFacts =
     statusFilter === "all"
       ? facts
@@ -891,7 +891,7 @@ function LawnContentModulesTab({ showToast }) {
     }
   };
   if (loading)
-    return <ActionFeedback>Loading lawn content modules…</ActionFeedback>;
+    return <ActionFeedback>Loading lawn content modules...</ActionFeedback>;
   return (
     <div>
       <Card className="p-5 mb-3">
@@ -1203,7 +1203,7 @@ function PriceSyncTab({ showToast }) {
     }
   };
   if (loading) {
-    return <ActionFeedback>Loading price sync…</ActionFeedback>;
+    return <ActionFeedback>Loading price sync...</ActionFeedback>;
   }
   const totalConnections = vendors.reduce(
     (sum, vendor) => sum + (vendor.connections?.length || 0),
@@ -1586,8 +1586,15 @@ function PriceSyncTab({ showToast }) {
                 Clear
               </Button>
             </div>
+            {/* Structured, multi-row result — ActionFeedback wraps children
+                in a <span>, which can't hold these block-level divs without
+                producing invalid DOM/nesting warnings. Use a plain surfaced
+                container with the same neutral feedback styling instead. */}
             {importResult && (
-              <ActionFeedback className="mt-[10px]">
+              <div
+                role="status"
+                className="mt-[10px] rounded-lg border border-solid border-zinc-200 bg-zinc-50 p-[10px] text-ui-caption text-zinc-900"
+              >
                 <div>
                   Imported {importResult.imported || 0} of{" "}
                   {importResult.rowsReceived || 0} rows.
@@ -1597,7 +1604,7 @@ function PriceSyncTab({ showToast }) {
                     Row {err.row}: {(err.errors || []).join("; ")}
                   </div>
                 ))}
-              </ActionFeedback>
+              </div>
             )}
           </div>
         </Card>
@@ -1821,7 +1828,7 @@ function WaveGuardForecastTab({ showToast, onUpdate, refreshId }) {
       )}
 
       {loading ? (
-        <ActionFeedback>Building forecast…</ActionFeedback>
+        <ActionFeedback>Building forecast...</ActionFeedback>
       ) : products.length === 0 ? (
         <div className="text-ink-secondary text-ui-body">
           No forecasted WaveGuard product demand in this window.
@@ -2036,7 +2043,7 @@ function UnitReviewTab({ showToast }) {
       </div>
 
       {loading ? (
-        <ActionFeedback>Loading unit review…</ActionFeedback>
+        <ActionFeedback>Loading unit review...</ActionFeedback>
       ) : products.length === 0 && forecastRows.length === 0 ? (
         <div className="text-zinc-900 text-ui-body">
           No inventory unit issues found.
@@ -2343,7 +2350,7 @@ export function ProductsTab({
         </Button>
       </ActionFeedback>
     );
-  if (loading) return <ActionFeedback>Loading products…</ActionFeedback>;
+  if (loading) return <ActionFeedback>Loading products...</ActionFeedback>;
   return (
     <div>
       {" "}
@@ -3057,7 +3064,7 @@ function RestockRequestsTab({
         )}
       </div>
       {loading ? (
-        <ActionFeedback>Loading restock requests…</ActionFeedback>
+        <ActionFeedback>Loading restock requests...</ActionFeedback>
       ) : requests.length === 0 ? (
         <div className="text-ink-secondary text-ui-body">
           No restock requests in this view.
@@ -4103,7 +4110,7 @@ function RegistryTab({ showToast }) {
     return true;
   });
   if (loading)
-    return <ActionFeedback>Loading product registry…</ActionFeedback>;
+    return <ActionFeedback>Loading...</ActionFeedback>;
   return (
     <div>
       <div className="flex gap-[6px] mb-[12px] flex-wrap">
@@ -4368,7 +4375,7 @@ function VendorsTab({ showToast }) {
       showToast("Failed: " + e.message);
     }
   };
-  if (loading) return <ActionFeedback>Loading vendors…</ActionFeedback>;
+  if (loading) return <ActionFeedback>Loading vendors...</ActionFeedback>;
   return (
     <div className="grid grid-cols-[repeat(auto-fill,minmax(280px,1fr))] gap-[12px]">
       {vendors.map((v) => (
@@ -4548,7 +4555,7 @@ function ApprovalsTab({ showToast, onUpdate }) {
       else n.add(id);
       return n;
     });
-  if (loading) return <ActionFeedback>Loading approvals…</ActionFeedback>;
+  if (loading) return <ActionFeedback>Loading approvals...</ActionFeedback>;
   return (
     <div>
       {selected.size > 0 && (
@@ -4850,7 +4857,7 @@ function ProtocolsTab({
       showToast(`Failed: ${e.message}`);
     }
   };
-  if (loading) return <ActionFeedback>Loading protocols…</ActionFeedback>;
+  if (loading) return <ActionFeedback>Loading protocols...</ActionFeedback>;
   const unitOpts = [
     "oz",
     "ml",
@@ -5465,7 +5472,7 @@ function MarginsTab({ showToast }) {
       })
       .catch(() => setLoading(false));
   }, []);
-  if (loading) return <ActionFeedback>Loading service margins…</ActionFeedback>;
+  if (loading) return <ActionFeedback>Loading service margins...</ActionFeedback>;
   return (
     <div>
       {" "}
@@ -5570,7 +5577,7 @@ function ScrapeTab({ showToast }) {
       showToast(`Failed: ${e.message}`);
     }
   };
-  if (loading) return <ActionFeedback>Loading scrape data…</ActionFeedback>;
+  if (loading) return <ActionFeedback>Loading scrape data...</ActionFeedback>;
   return (
     <div>
       {" "}
