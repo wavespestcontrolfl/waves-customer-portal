@@ -1128,15 +1128,20 @@ async function resetAppointmentReminderForScheduleRewrite(trx, scheduledServiceI
 // Stop-wide identity for a notice that speaks for a whole grouped stop, in
 // the shape no-show-detector.js reads (the notification event key). Its own
 // function so the already-oversized sender gains no decisions from it.
-function stopWideMeta(stopWideFor) {
-  return stopWideFor ? { notificationEventKey: `visit:${stopWideFor}` } : {};
+function stopWideMeta(stopWideFor, dateStr, startHHMM) {
+  // DISTINCT per notice, not per stop: two successive stop-wide moves would
+  // otherwise share a key, and the detector's "same send" identity — which
+  // decides what supersedes what, and which recovery stands in for which
+  // send — would conflate them (codex P1, PR #4403 round 26). The landed
+  // slot is what makes each move its own event.
+  return stopWideFor ? { notificationEventKey: `visit:${stopWideFor}:${dateStr}:${startHHMM || ''}` } : {};
 }
 
 // The caller's optional pins, read in one place: destructuring them in the
 // signature with defaults added decision points to a function already far
 // over the complexity budget (codex QUALITY_WARN discipline).
-function noticeOptions(options = {}) {
-  return { expectedPhone: options.expectedPhone, stopWide: stopWideMeta(options.stopWideFor) };
+function noticeOptions(options = {}, dateStr, startHHMM) {
+  return { expectedPhone: options.expectedPhone, stopWide: stopWideMeta(options.stopWideFor, dateStr, startHHMM) };
 }
 
 // `stopWideFor`: the service_visits id when this ONE notice speaks for a
@@ -1147,7 +1152,7 @@ function noticeOptions(options = {}) {
 // it, each sibling kept its pre-move window and could raise a false alert
 // against it (codex P1, PR #4403 round 26).
 async function sendRescheduleNoticeForVisit(serviceId, dateStr, startHHMM, options = {}) {
-  const { expectedPhone, stopWide } = noticeOptions(options);
+  const { expectedPhone, stopWide } = noticeOptions(options, dateStr, startHHMM);
   // Shared belt for every notice path (update-details, bulk reschedule, IB
   // schedule tools): a LEGACY outbound-review row (pending before the
   // 2026-08-11 review-hold removal) must be activated — reminders armed,
