@@ -428,6 +428,34 @@ describe('lockedStop: creation and both reconcile passes see the same stop (roun
     expect(current.live).toMatchObject({ stage: 2 });
   });
 
+  // Evidence is read ONCE per sweep tick and handed to every lockedStop call:
+  // re-reading it per row meant nine queries per card, each while holding the
+  // stop's row locks (round-16 P2).
+  test('pre-loaded evidence is used instead of re-reading it under the lock', async () => {
+    let evidenceReads = 0;
+    const trx = (table) => {
+      const chain = {};
+      for (const m of ['join', 'leftJoin', 'whereIn', 'whereRaw', 'whereBetween', 'whereNull', 'whereNotNull', 'forUpdate', 'orderBy']) chain[m] = () => chain;
+      if (table === 'scheduled_services') {
+        chain.where = (args) => { chain._rows = args?.visit_id ? members : members.filter((r) => String(r.id) === String(args?.id)); return chain; };
+        chain.first = async () => chain._rows[0];
+        chain.select = async () => chain._rows;
+        return chain;
+      }
+      chain.where = () => chain;
+      chain.select = () => { evidenceReads += 1; return Promise.resolve([]); };
+      return chain;
+    };
+    trx.raw = (sql) => ({ sql });
+    trx.isTransaction = true;
+    const preloaded = new Map([['bbb', { visit_id: 'bbb', start_at: '2026-09-10T13:00:00Z',
+      communicated_at: '2026-09-09T12:00:00Z', source: 'message' }]]);
+    const { promise, live } = await lockedStop(trx, 'aaa', { now, promises: preloaded });
+    expect(evidenceReads).toBe(0);
+    expect(promise).toMatchObject({ visit_id: 'bbb' });
+    expect(live).toMatchObject({ stage: 2 });
+  });
+
   test('a missing row yields nothing, not a throw', async () => {
     const trx = fakeTrx([]);
     trx.raw = (sql) => ({ sql });
@@ -952,7 +980,7 @@ describe('an appointment email with no interaction row still yields its promise 
     // ...and to the OCCURRENCE: the claim dedupe key ends in the occurrence
     // date, so a reminder for the stop's next occurrence cannot mint an
     // unknown-window promise for today's visit (round-13 P1).
-    expect(captured.join[1]).toContain("split_part(em.idempotency_key, ':', 5) = to_char(sv.scheduled_date, 'YYYY-MM-DD')");
+    expect(captured.join[1]).toContain("split_part(em.idempotency_key, ':', 5) <= to_char(sv.scheduled_date, 'YYYY-MM-DD')");
     expect(promise).toMatchObject({ visit_id: 'visit-1', source: 'email', source_id: 'em-9', start_at: null,
       communicated_at: '2026-09-10T12:00:00.000Z' });
   });
@@ -1004,7 +1032,7 @@ describe('the call-booking promise derives from the visit\'s own call link (roun
     const conn = (table) => {
       if (table !== 'scheduled_services as sv') return passthrough();
       const chain = {};
-      for (const m of ['join', 'whereIn', 'whereRaw', 'where']) chain[m] = () => chain;
+      for (const m of ['join', 'whereIn', 'whereRaw', 'where', 'whereNull', 'whereNotNull']) chain[m] = () => chain;
       chain.select = () => Promise.resolve(bookingRows);
       return chain;
     };
@@ -1025,6 +1053,11 @@ describe('the call-booking promise derives from the visit\'s own call link (roun
     const spy = jest.spyOn(flags, 'hasAgentCommittedEvidence').mockReturnValue(true);
     const [promise] = await loadPromiseEvents(fakeConn([row]), ['visit-1']);
     expect(spy).toHaveBeenCalledWith(row.ai_extraction_enriched, row.transcription, row.call_created_at);
+    // A follow-up child the same call spawned carries source_call_log_id too
+    // but has no confirmed time of its own — the primary's window must not be
+    // mapped onto it (round-16 P1).
+    const detector = require('fs').readFileSync(require('path').join(__dirname, '..', 'services', 'no-show-detector.js'), 'utf8');
+    expect(detector).toContain(".whereNull('sv.followup_source_service_id').whereNull('sv.parent_service_id')");
     expect(promise).toMatchObject({ visit_id: 'visit-1', source: 'call', source_id: 'call-1',
       communicated_at: '2026-09-10T14:05:00.000Z' });
     spy.mockRestore();

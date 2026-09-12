@@ -424,8 +424,17 @@ async function loadPromiseEvents(conn, visitIds, { now = new Date() } = {}) {
       // unknown-window promise for today's visit and silence its alert
       // (codex P1 round 13).
       .join('scheduled_services as sv', function joinOnStopOccurrence() {
+        // The key's occurrence date must not be in the visit's FUTURE — that
+        // is the next occurrence of a recurring stop, whose reminder says
+        // nothing about this one (codex P1 round 13). It may well be in its
+        // past: visit-groups carries reminder state when a service splits off
+        // a stop without sending another notice, and a whole-stop move keeps
+        // the visit id while changing the date — in both cases the customer
+        // still holds the promise that reminder communicated, and requiring
+        // equality made the evidence vanish exactly when the schedule moved
+        // under it (codex P1 round 16).
         this.on(conn.raw(`sv.visit_id::text = split_part(em.idempotency_key, ':', 3)
-          AND split_part(em.idempotency_key, ':', 5) = to_char(sv.scheduled_date, 'YYYY-MM-DD')`));
+          AND split_part(em.idempotency_key, ':', 5) <= to_char(sv.scheduled_date, 'YYYY-MM-DD')`));
       })
       .whereIn(conn.raw("split_part(em.idempotency_key, ':', 1)"), APPOINTMENT_EMAIL_EVENTS)
       .whereRaw("split_part(em.idempotency_key, ':', 2) = 'visit'")
@@ -444,6 +453,14 @@ async function loadPromiseEvents(conn, visitIds, { now = new Date() } = {}) {
     // commitment, a finite confirmed_start_at, and the trusted-labels gate.
     () => conn('scheduled_services as sv').join('call_log as cl', 'cl.id', 'sv.source_call_log_id')
       .whereIn('sv.id', visitIds).where('cl.v2_extraction_status', 'valid')
+      // The call's confirmed_start_at belongs to the visit the caller BOOKED,
+      // not to a follow-up treatment the same call spawned: that child
+      // carries source_call_log_id too but deliberately has no confirmed time
+      // of its own (dispatch settles it), and mapping the primary's window
+      // onto it could raise a critical missing-arrival alert before the
+      // child's own window even begins (codex P1 round 16). The child is
+      // marked by followup_source_service_id / parent_service_id at creation.
+      .whereNull('sv.followup_source_service_id').whereNull('sv.parent_service_id')
       .where('cl.created_at', '<=', now)
       .select('sv.id as visit_id', 'sv.created_at as booked_at', 'cl.id as call_id', 'cl.ai_extraction_enriched',
         'cl.transcription', 'cl.processing_token', 'cl.created_at as call_created_at', 'cl.direction as call_direction', 'cl.bridged_at as call_bridged_at',
@@ -1071,7 +1088,7 @@ async function reconcileOfficeAlert(trx, { card, visit, live, key, type, recipie
 // created the alert and notice and then immediately resolved and dismissed
 // them, re-notifying the tech every five minutes (codex P1 round 10).
 // Members are locked in id order, the same order every pass takes them in.
-async function lockedStop(trx, serviceId, { now = new Date(), ignoreHorizon = false } = {}) {
+async function lockedStop(trx, serviceId, { now = new Date(), ignoreHorizon = false, promises = null } = {}) {
   // The first read takes NO lock: it only answers "which stop is this?".
   // Locking the representative and then the group would take row locks in
   // two different orders (this row first, then every member in id order),
@@ -1085,8 +1102,15 @@ async function lockedStop(trx, serviceId, { now = new Date(), ignoreHorizon = fa
     : await trx('scheduled_services').where({ id: serviceId }).forUpdate().select('*');
   if (!members.length) return { visit: null, members: [], promise: null, live: null };
   const visit = members.find((m) => String(m.id) === String(serviceId)) || row;
-  const events = await loadPromiseEvents(trx, members.map((m) => String(m.id)), { now });
-  const promise = stopPromise(members, latestPromises(events, now), now);
+  // Evidence can be handed in, pre-loaded for the whole tick. Re-reading it
+  // per row meant nine queries per card — a backlog of 50 stage-2 visits ran
+  // roughly 900 evidence queries every five minutes, each one WHILE holding
+  // the stop's row locks, because transaction-backed reads run sequentially
+  // (codex P2 round 16). The lock still protects the schedule rows, which are
+  // what the decision writes against; evidence a few seconds old cannot make
+  // a card appear or vanish that the next tick would not correct.
+  const known = promises || latestPromises(await loadPromiseEvents(trx, members.map((m) => String(m.id)), { now }), now);
+  const promise = stopPromise(members, known, now);
   const live = evaluateNoShow({ visit: stopState(members, { now, since: promise?.start_at }), promise, now, ignoreHorizon });
   // A card belongs to the stop's representative. If this row is no longer it
   // — the previous representative completed or cancelled and the stop moved
@@ -1130,6 +1154,27 @@ async function sweep(conn, { now = new Date() } = {}) {
   const dispatch = require('./dispatch-alerts');
   const techNotices = require('./tech-visit-notifications');
   let alerted = 0;
+  // One evidence read for the whole tick, shared by the per-card loop and
+  // both reconcile passes (codex P2 round 16). Built from every visit this
+  // sweep will touch: the cards' own members, plus the visits behind any open
+  // alert or active notice, which may no longer be candidates.
+  const openAlerts = await conn('dispatch_alerts').whereIn('type', dispatch.OVERDUE_ALERT_TYPES)
+    .whereNull('resolved_at').whereRaw("payload->>'source' = 'no_show_detector'").select('id', 'job_id', 'payload');
+  const activeNotices = await conn('tech_notifications').where({ type: 'follow_through_tracking' })
+    .whereNull('dismissed_at').select('id', 'technician_id', 'payload');
+  const touched = [...new Set([
+    ...rows.flatMap((card) => card.grouped_service_ids || [String(card.id)]),
+    ...openAlerts.map((alert) => String(alert.job_id)),
+    ...activeNotices.map((notice) => String(notice.payload?.visit_id || '')),
+  ].filter(Boolean))];
+  const stopsTouched = touched.length
+    ? (await conn('scheduled_services').whereIn('visit_id',
+      (await conn('scheduled_services').whereIn('id', touched).whereNotNull('visit_id').distinct('visit_id')).map((r) => r.visit_id))
+      .select('id')).map((r) => String(r.id))
+    : [];
+  const evidenceIds = [...new Set([...touched, ...stopsTouched])];
+  const tickPromises = evidenceIds.length
+    ? latestPromises(await loadPromiseEvents(conn, evidenceIds, { now }), now) : new Map();
   for (const card of rows) {
     const notice = await conn.transaction(async (trx) => {
       // Re-read the WHOLE stop under the lock, not just the representative:
@@ -1137,7 +1182,7 @@ async function sweep(conn, { now = new Date() } = {}) {
       // confirmation here must use the same members, the same shared promise
       // and the same merged arrival state, or a sibling's arrival stamp
       // recorded since listNoShows ran would be missed (codex P1 round 10).
-      const { visit, live } = await lockedStop(trx, card.id, { now });
+      const { visit, live } = await lockedStop(trx, card.id, { now, promises: tickPromises });
       if (!enabled() || !visit) return null;
       if (!live || live.stage !== card.stage || live.promised_window.start_at !== card.promised_window.start_at) return null;
       const recipientTech = visit.technician_id ? await trx('technicians').where({ id: visit.technician_id,
@@ -1169,11 +1214,10 @@ async function sweep(conn, { now = new Date() } = {}) {
     // Deliver each committed notice before another row or cleanup can fail.
     if (notice) await techNotices.pushTrackingNotice(notice);
   }
-  const active = await conn('dispatch_alerts').whereIn('type', dispatch.OVERDUE_ALERT_TYPES)
-    .whereRaw("payload->>'source' = 'no_show_detector'").whereNull('resolved_at').select('id', 'job_id', 'payload');
-  for (const alert of active) await conn.transaction(async (trx) => {
+  // The same rows the evidence preload above was built from.
+  for (const alert of openAlerts) await conn.transaction(async (trx) => {
     if (!enabled()) return;
-    const { live } = await lockedStop(trx, alert.job_id, { now, ignoreHorizon: true });
+    const { live } = await lockedStop(trx, alert.job_id, { now, ignoreHorizon: true, promises: tickPromises });
     // ignoreHorizon: true — past the 48h horizon this alert's own visit
     // would no longer appear in listNoShows' candidate set at all (the
     // horizon gates CREATION, not retention — see evaluateNoShow), and
@@ -1204,12 +1248,10 @@ async function sweep(conn, { now = new Date() } = {}) {
   // is scoped to the technician_id it was written for), or superseded by a
   // later stage (dedupeKey differs per stage, so the old stage-1 row would
   // otherwise sit next to the new stage-2 one forever) all dismiss it.
-  const activeNotices = await conn('tech_notifications').where({ type: 'follow_through_tracking' })
-    .whereNull('dismissed_at').select('id', 'technician_id', 'payload');
   for (const notice of activeNotices) await conn.transaction(async (trx) => {
     if (!enabled()) return;
     const visitId = notice.payload?.visit_id;
-    const { visit, live } = visitId ? await lockedStop(trx, visitId, { now, ignoreHorizon: true })
+    const { visit, live } = visitId ? await lockedStop(trx, visitId, { now, ignoreHorizon: true, promises: tickPromises })
       : { visit: null, live: null };
     // ignoreHorizon: true for the same reason as the dispatch_alerts pass
     // above — elapsed time alone must not dismiss a notice for a visit
