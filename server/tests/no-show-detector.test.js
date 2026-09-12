@@ -313,6 +313,7 @@ describe('candidates come from the promise as well as the schedule (deferred P2,
       const chain = {};
       chain.where = () => chain;
       chain.whereIn = () => chain;
+      chain.join = () => chain;
       chain.whereRaw = (sql, bindings) => { seen.push([table, sql, bindings]); return chain; };
       chain.whereBetween = (col, range) => { seen.push([table, col?.sql || col, range]); return chain; };
       chain.select = () => Promise.resolve([]);
@@ -336,27 +337,32 @@ describe('candidates come from the promise as well as the schedule (deferred P2,
     expect(auditRange[2]).toEqual(['2026-09-10T12:00:00.000Z', '2026-09-12T12:00:00.000Z']);
   });
 
-  test('ids come from all four evidence linkages, deduped', async () => {
+  test('ids come from every evidence linkage, deduped', async () => {
     const conn = (table) => {
       const chain = {};
-      for (const m of ['where', 'whereRaw', 'whereBetween', 'whereIn']) chain[m] = () => chain;
+      for (const m of ['where', 'whereRaw', 'whereBetween', 'whereIn', 'join']) chain[m] = () => chain;
       chain.select = () => Promise.resolve(({
         messaging_audit_log: [{ appointment_id: 'v1', meta_visit_id: null }, { appointment_id: null, meta_visit_id: 'v2' }],
         customer_interactions: [{ meta_visit_id: 'v2' }, { meta_visit_id: 'v3' }],
         audit_log: [{ resource_id: 'v4' }],
         email_messages: [{ meta_visit_id: 'v5' }],
+        activity_log: [{ meta_visit_id: 'v6' }],
+        'scheduled_services as sv': [{ meta_visit_id: 'v7' }],
       })[table] || []);
       return chain;
     };
     conn.raw = (sql) => ({ sql });
     const ids = await promisedVisitIds(conn, { now: new Date('2026-09-12') });
-    expect(ids.sort()).toEqual(['v1', 'v2', 'v3', 'v4', 'v5']);
+    // Including the two DERIVED call promises, which are the only evidence
+    // their visits have — neither path sends the customer anything of its
+    // own (round-20 P1).
+    expect(ids.sort()).toEqual(['v1', 'v2', 'v3', 'v4', 'v5', 'v6', 'v7']);
   });
 
   test('nothing communicated recently -> no extra candidates', async () => {
     const conn = () => {
       const chain = {};
-      for (const m of ['where', 'whereRaw', 'whereBetween', 'whereIn']) chain[m] = () => chain;
+      for (const m of ['where', 'whereRaw', 'whereBetween', 'whereIn', 'join']) chain[m] = () => chain;
       chain.select = () => Promise.resolve([]);
       return chain;
     };

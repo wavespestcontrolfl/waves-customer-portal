@@ -975,7 +975,7 @@ async function promisedVisitIds(conn, { now }) {
   // this bounded.
   const windowFrom = now.getTime() - HORIZON_MS;
   const windowTo = now.getTime();
-  const [notices, emails, calls, messages] = await Promise.all([
+  const [notices, emails, calls, appliedMoves, bookings, messages] = await Promise.all([
     conn('messaging_audit_log')
       .whereRaw("(metadata->>'rendered_slot_ms')::bigint BETWEEN ? AND ?", [windowFrom, windowTo])
       .select('appointment_id', conn.raw("metadata->>'scheduled_service_id' as meta_visit_id")),
@@ -992,6 +992,21 @@ async function promisedVisitIds(conn, { now }) {
     // case the recovery exists for (codex P1 round 20). Per-service keys
     // only; a grouped key carries no slot, and its promise is unknown-window,
     // which never alerts.
+    // The two DERIVED call promises too, by the window they carry: an applied
+    // reschedule's activity row and a booking's own call extraction are the
+    // only evidence those visits have (neither path sends the customer
+    // anything of its own), so leaving them out of recall let exactly those
+    // visits vanish when staff moved them out of the date window (codex P1
+    // round 20, second pass).
+    conn('activity_log').where({ action: 'call_reschedule_applied' })
+      .whereRaw(`((metadata->'to'->>'date')::date
+        + COALESCE(NULLIF(metadata->'to'->>'start', ''), '08:00')::time) AT TIME ZONE 'America/New_York'
+        BETWEEN ? AND ?`, [new Date(windowFrom).toISOString(), new Date(windowTo).toISOString()])
+      .select(conn.raw("metadata->>'scheduled_service_id' as meta_visit_id")),
+    conn('scheduled_services as sv').join('call_log as cl', 'cl.id', 'sv.source_call_log_id')
+      .whereRaw(`(cl.ai_extraction_enriched->'scheduling'->>'confirmed_start_at')::timestamptz BETWEEN ? AND ?`,
+        [new Date(windowFrom).toISOString(), new Date(windowTo).toISOString()])
+      .select('sv.id as meta_visit_id'),
     conn('email_messages')
       .whereIn(conn.raw("split_part(idempotency_key, ':', 1)"), APPOINTMENT_EMAIL_EVENTS)
       .whereRaw("split_part(idempotency_key, ':', 2) <> 'visit'")
@@ -1004,6 +1019,8 @@ async function promisedVisitIds(conn, { now }) {
     ...notices.flatMap((r) => [r.appointment_id, r.meta_visit_id]),
     ...emails.map((r) => r.meta_visit_id),
     ...calls.map((r) => r.resource_id),
+    ...appliedMoves.map((r) => r.meta_visit_id),
+    ...bookings.map((r) => r.meta_visit_id),
     ...messages.map((r) => r.meta_visit_id),
   ].filter(Boolean).map(String))];
 }
