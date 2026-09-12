@@ -169,8 +169,19 @@ beforeEach(() => {
   });
   // dayStopsQuery returns a knex builder in production — the post-lock fence
   // chains .forUpdate() onto it, so the mock has to be thenable AND chainable.
-  dayStopsQuery.mockImplementation((_db, { dateStr, technicianId }) => {
-    const rows = (stopsByDate[dateStr] || []).filter((s) => !technicianId || s.technician_id === technicianId);
+  dayStopsQuery.mockImplementation((_db, { dateStr, technicianId, select }) => {
+    // PROJECT to the requested select list, as the real query does: a column
+    // the production code forgets to ask for must be missing here too, or the
+    // harness silently proves nothing (the co-visit identity columns are the
+    // case in point).
+    const keys = new Set(['id', 'lat', 'lng', 'city', 'zip', 'customer_name']);
+    for (const entry of select || []) {
+      if (typeof entry === 'string') keys.add(entry.split('.').pop());
+      else if (entry && typeof entry === 'object' && !entry.sql) Object.keys(entry).forEach((k) => keys.add(k));
+    }
+    const rows = (stopsByDate[dateStr] || [])
+      .filter((s) => !technicianId || s.technician_id === technicianId)
+      .map((s) => Object.fromEntries(Object.entries(s).filter(([k]) => keys.has(k))));
     const builder = Promise.resolve(rows);
     builder.forUpdate = () => builder;
     return builder;
@@ -919,4 +930,38 @@ test('an unstamped completion makes the origin unprovable — the day refuses', 
   } finally {
     jest.useRealTimers();
   }
+});
+
+// Post-merge with #4435: the admin path must feed the co-visit merge its
+// identity inputs, or a customer's two same-slot rows at one property count
+// as two full visits and a legal day is refused.
+test('a same-property bundled-service day is not counted as separate visits', async () => {
+  process.env.GATE_ROUTE_REORDER_WINDOW_FIT = 'true';
+  process.env.GATE_DRIVE_TIME_CALIBRATION = 'true';
+  const bundled = (id, over = {}) => stop(id, {
+    customer_id: 'cust_pair', service_address_line1: '100 Main St',
+    customer_address_line1: '100 Main St', customer_city: 'Bradenton', customer_zip: '34205',
+    visit_id: null, window_start: '13:00', window_end: '14:00',
+    estimated_duration_minutes: null, lat: 1, lng: 1, ...over,
+  });
+  // Pest + lawn + mosquito in ONE promised hour at one property, then a
+  // different customer promised the same 13:00-14:00 slot (arrival deadline
+  // 15:00). Counted separately the bundle eats three hours and that last
+  // promise is provably missed; as one physical stop it is one hour.
+  stopsByDate[DATE] = [
+    bundled('PEST', { route_order: 1 }),
+    bundled('LAWN', { route_order: 2 }),
+    bundled('MOSQ', { route_order: 3 }),
+    stop('OTHER', {
+      customer_id: 'cust_other', service_address_line1: '900 Other Rd',
+      customer_address_line1: '900 Other Rd', customer_city: 'Bradenton', customer_zip: '34205',
+      visit_id: null, window_start: '13:00', window_end: '14:00',
+      estimated_duration_minutes: null, lng: 1, route_order: 4,
+    }),
+  ];
+  mockOptimizerOrder(['PEST', 'LAWN', 'MOSQ', 'OTHER']);
+  const { status, body } = await optimizeRoute({ technicianId: 't1', date: DATE });
+  expect(status).toBe(200);
+  expect(body.reason).toBeUndefined();
+  expect(trxUpdates.map((u) => u.id)).toEqual(['PEST', 'LAWN', 'MOSQ', 'OTHER']);
 });

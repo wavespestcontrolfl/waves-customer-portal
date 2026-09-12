@@ -16,7 +16,7 @@ const { stampedDivergesSql, stampedLine2Sql } = require('../services/stamped-add
 const { dayStopsQuery, guardedCoordSelects } = require('../services/scheduling/day-stops');
 const { chooseWindowSafeOrder, inProgressStartMin, loadTechDayOrigins, assertTechDayOriginsFresh, driveableStop,
   resolveWindowSafeOrderByTechDay, windowSafeFigures,
-  ROUTE_WRITE_GUARD_COLUMNS, routeWriteGuardSignature } = require('../services/route-reorder');
+  ROUTE_WRITE_GUARD_COLUMNS, CUSTOMER_PREMISE_ALIASES, routeWriteGuardSignature } = require('../services/route-reorder');
 const {
   assertAdminAppointmentWindow, probeSlotOverlap, slotOverlapWarning, ADMIN_OCCUPANCY_EXCLUDE_STATUSES,
 } = require('../services/scheduling/window-rules');
@@ -13417,7 +13417,7 @@ async function assertGuardInputsFresh(trx, dateStr, technicianId, snapshot) {
     technicianId: technicianId || null,
     excludeStatuses: ['cancelled', 'completed'],
     select: ['scheduled_services.id', ...ROUTE_WRITE_GUARD_COLUMNS.map((c) => `scheduled_services.${c}`),
-      ...guardedCoordSelects(trx)],
+      ...CUSTOMER_PREMISE_ALIASES, ...guardedCoordSelects(trx)],
   }).forUpdate('scheduled_services');
   const changed = fresh.length !== snapshot.size
     || fresh.some((row) => routeWriteGuardSignature(row) !== snapshot.get(row.id));
@@ -13453,13 +13453,12 @@ router.post('/optimize', requireAdmin, async (req, res, next) => {
         // shortest loop even when it put a 16:00-promised stop first and a
         // 10:00 stop sixth. These four plus route_order/created_at are what
         // the chronology/feasibility guards and the window-fit fallback read.
-        'scheduled_services.window_start', 'scheduled_services.window_end',
-        'scheduled_services.estimated_duration_minutes',
-        'scheduled_services.route_order', 'scheduled_services.created_at',
-        // The remaining windowGuardSignature inputs, so the post-lock
-        // freshness fence hashes the same columns on both sides.
-        'scheduled_services.auto_dispatch_locked', 'scheduled_services.auto_dispatch_excluded',
-        'scheduled_services.visit_id', 'scheduled_services.status',
+        'scheduled_services.created_at',
+        // EVERY guard/fence input from one list — the co-visit identity and
+        // premise included — so the day load and the post-lock re-read can
+        // never disagree (codex round 5 P1).
+        ...ROUTE_WRITE_GUARD_COLUMNS.map((c) => `scheduled_services.${c}`),
+        ...CUSTOMER_PREMISE_ALIASES,
         ...guardedCoordSelects(db),
         db.raw('COALESCE(scheduled_services.service_address_city, customers.city) as city'),
         db.raw('COALESCE(scheduled_services.service_address_zip, customers.zip) as zip'),
@@ -13646,11 +13645,10 @@ router.post('/optimize-route', requireAdmin, async (req, res, next) => {
         'scheduled_services.zone', 'scheduled_services.service_type',
         'scheduled_services.technician_id',
         'scheduled_services.window_start', 'scheduled_services.window_end',
-        'scheduled_services.estimated_duration_minutes',
-        'scheduled_services.route_order', 'scheduled_services.created_at',
-        // The remaining windowGuardSignature inputs — see /optimize above.
-        'scheduled_services.auto_dispatch_locked', 'scheduled_services.auto_dispatch_excluded',
-        'scheduled_services.visit_id', 'scheduled_services.status',
+        'scheduled_services.created_at',
+        // Same complete guard/fence input set as /optimize above.
+        ...ROUTE_WRITE_GUARD_COLUMNS.map((c) => `scheduled_services.${c}`),
+        ...CUSTOMER_PREMISE_ALIASES,
         ...guardedCoordSelects(db),
         db.raw('COALESCE(scheduled_services.service_address_city, customers.city) as city'),
         db.raw('COALESCE(scheduled_services.service_address_zip, customers.zip) as zip'),

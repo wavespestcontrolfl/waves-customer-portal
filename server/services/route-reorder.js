@@ -547,7 +547,26 @@ const ROUTE_WRITE_GUARD_COLUMNS = ['window_start', 'window_end', 'time_window',
   // the response reports. An operator drag landing in the gap would
   // otherwise be clobbered by an order computed against the sequence it
   // replaced (round-0 fallback audit P1).
-  'route_order'];
+  'route_order',
+  // The co-visit merge's own identity inputs (#4435's isCoVisitPair): without
+  // them the guard counts a customer's two same-slot rows at one property as
+  // two full visits and can refuse a legal day — and a signature that hashes
+  // them must find them on BOTH sides of the lock, or every write aborts as
+  // stale (codex round 5 P1).
+  'customer_id', 'service_address_line1', 'service_address_line2',
+  'service_address_city', 'service_address_zip'];
+
+/** The customer's primary premise, aliased the way effectiveServiceAddress
+ *  (and stampedAddressDiverges) expect. An UNSTAMPED row resolves its premise
+ *  through these, so every query feeding the guard or the fence selects them
+ *  alongside ROUTE_WRITE_GUARD_COLUMNS. */
+const CUSTOMER_PREMISE_ALIASES = [{
+  customer_address_line1: 'customers.address_line1',
+  customer_address_line2: 'customers.address_line2',
+  customer_city: 'customers.city',
+  customer_state: 'customers.state',
+  customer_zip: 'customers.zip',
+}];
 
 /**
  * The signature a route_order writer snapshots at day-load and compares under
@@ -1483,6 +1502,7 @@ module.exports = {
   assertTechDayOriginsFresh,
   driveableStop: onRoute,
   ROUTE_WRITE_GUARD_COLUMNS,
+  CUSTOMER_PREMISE_ALIASES,
   routeWriteGuardSignature,
   resolveWindowSafeOrderByTechDay,
   windowSafeFigures,

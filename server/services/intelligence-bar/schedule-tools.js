@@ -16,7 +16,7 @@ const { etDateString, addETDays, validScheduleDate, sameDayWindowElapsed } = req
 const { dayStopsQuery, guardedCoordSelects } = require('../scheduling/day-stops');
 const { resolveWindowSafeOrderByTechDay, windowSafeFigures, inProgressStartMin, loadTechDayOrigins,
   assertTechDayOriginsFresh,
-  ROUTE_WRITE_GUARD_COLUMNS, routeWriteGuardSignature } = require('../route-reorder');
+  ROUTE_WRITE_GUARD_COLUMNS, CUSTOMER_PREMISE_ALIASES, routeWriteGuardSignature } = require('../route-reorder');
 const { probeSlotOverlap, slotOverlapWarning } = require('../scheduling/window-rules');
 
 const SCHEDULE_TOOLS = [
@@ -428,6 +428,8 @@ async function optimizeAllRoutes(input) {
       'scheduled_services.*',
       'customers.first_name', 'customers.last_name',
       'customers.address_line1', 'customers.city', 'customers.state', 'customers.zip',
+      // The co-visit merge resolves an unstamped row's premise through these.
+      ...CUSTOMER_PREMISE_ALIASES,
       ...guardedCoordSelects(db),
     ],
   });
@@ -454,7 +456,8 @@ async function optimizeAllRoutes(input) {
         dateStr: date,
         excludeStatuses: ['cancelled', 'completed', 'rescheduled'],
         select: ['scheduled_services.id',
-          ...ROUTE_WRITE_GUARD_COLUMNS.map((c) => `scheduled_services.${c}`), ...guardedCoordSelects(trx)],
+          ...ROUTE_WRITE_GUARD_COLUMNS.map((c) => `scheduled_services.${c}`),
+          ...CUSTOMER_PREMISE_ALIASES, ...guardedCoordSelects(trx)],
       // FOR UPDATE: a status transition can otherwise commit en_route/on_site
       // between this check and the writes, which constrain only id/date/tech
       // (codex #4430 r5 P1) — the same fence the admin endpoints take.
@@ -599,6 +602,7 @@ async function optimizeTechRoute(input) {
       'scheduled_services.*',
       'customers.first_name', 'customers.last_name',
       'customers.city',
+      ...CUSTOMER_PREMISE_ALIASES,
       ...guardedCoordSelects(db),
     ],
   });
@@ -623,7 +627,8 @@ async function optimizeTechRoute(input) {
         technicianId: tech.id,
         excludeStatuses: ['cancelled', 'completed', 'rescheduled'],
         select: ['scheduled_services.id',
-          ...ROUTE_WRITE_GUARD_COLUMNS.map((c) => `scheduled_services.${c}`), ...guardedCoordSelects(trx)],
+          ...ROUTE_WRITE_GUARD_COLUMNS.map((c) => `scheduled_services.${c}`),
+          ...CUSTOMER_PREMISE_ALIASES, ...guardedCoordSelects(trx)],
       // FOR UPDATE: a status transition can otherwise commit en_route/on_site
       // between this check and the writes, which constrain only id/date/tech
       // (codex #4430 r5 P1) — the same fence the admin endpoints take.
