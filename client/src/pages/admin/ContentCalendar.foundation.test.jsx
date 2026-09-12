@@ -15,8 +15,12 @@ it('groups timestamps in Eastern time and preserves date-only entries and month 
   render(<ContentCalendar/>);
   const dateButton = await screen.findByRole('button',{name:/12, .*2 scheduled items/});
   fireEvent.click(dateButton);
-  expect(screen.getAllByText('ET overnight')).toHaveLength(2);
-  expect(screen.getAllByText('Date only')).toHaveLength(2);
+  // Each item shows twice: once in the month cell, once in the selected-day
+  // list. The cell prefixes the content type so it is readable without colour.
+  expect(screen.getByText('ET overnight')).toBeInTheDocument();
+  expect(screen.getByTitle('Social: ET overnight')).toHaveTextContent('Social · ET overnight');
+  expect(screen.getByText('Date only')).toBeInTheDocument();
+  expect(screen.getByTitle('Blog: Date only')).toHaveTextContent('Blog · Date only');
   fireEvent.click(screen.getByRole('button',{name:'Next month'}));
   const next = new Date(now.getFullYear(),now.getMonth()+1,1);
   await waitFor(()=>expect(fetch).toHaveBeenCalledWith(expect.stringContaining(`start=${next.getFullYear()}-${String(next.getMonth()+1).padStart(2,'0')}-01`),expect.anything()));

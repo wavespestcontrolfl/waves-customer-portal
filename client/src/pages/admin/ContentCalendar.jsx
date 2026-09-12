@@ -7,9 +7,9 @@ function adminFetch(path, options = {}) {
   return fetch(`${API_BASE}${path}`, {
     headers: {
       Authorization: `Bearer ${localStorage.getItem("waves_admin_token")}`,
-      "Content-Type": "application/json"
+      "Content-Type": "application/json",
     },
-    ...options
+    ...options,
   }).then(r => {
     if (!r.ok) throw new Error(`HTTP ${r.status}`);
     return r.json();
@@ -17,6 +17,8 @@ function adminFetch(path, options = {}) {
 }
 const DAYS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
 const TYPE_LABELS = { blog: "Blog", social: "Social", rss: "RSS Auto" };
+// Compact form for the month cells, where a full "RSS Auto" would eat the row.
+const TYPE_SHORT = { blog: "Blog", social: "Social", rss: "RSS" };
 const DATE_ONLY = /^\d{4}-\d{2}-\d{2}$/;
 function calendarDateKey(value) {
   if (!value) return "";
@@ -36,6 +38,9 @@ export default function ContentCalendar() {
   const [items, setItems] = useState([]);
   const [selectedDay, setSelectedDay] = useState(null);
   const [showSchedule, setShowSchedule] = useState(false);
+  // A scheduling POST is a write: Escape and backdrop clicks must not unmount
+  // the form while it is in flight, which would leave the result ambiguous.
+  const [scheduling, setScheduling] = useState(false);
   const [scheduleForm, setScheduleForm] = useState({
     type: "blog",
     blogPostId: "",
@@ -51,7 +56,9 @@ export default function ContentCalendar() {
     const start = etDateString(new Date(month.year, month.month, 1, 12));
     const end = etDateString(new Date(month.year, month.month + 1, 0, 12));
     try {
-      const data = await adminFetch(`/admin/content/calendar?start=${start}&end=${end}`);
+      const data = await adminFetch(
+        `/admin/content/calendar?start=${start}&end=${end}`,
+      );
       setItems(data.calendar || data.items || []);
     } catch {
       setItems([]);
@@ -67,7 +74,9 @@ export default function ContentCalendar() {
   useEffect(() => {
     if (!showSchedule || scheduleForm.type !== "blog") return;
     setLoadingDrafts(true);
-    adminFetch("/admin/content/blog?status=draft&limit=100&sort=updated_at&order=desc").then(data => setDraftPosts(data.posts || [])).catch(() => setDraftPosts([])).finally(() => setLoadingDrafts(false));
+    adminFetch(
+      "/admin/content/blog?status=draft&limit=100&sort=updated_at&order=desc",
+    ).then(data => setDraftPosts(data.posts || [])).catch(() => setDraftPosts([])).finally(() => setLoadingDrafts(false));
   }, [showSchedule, scheduleForm.type]);
   const shiftMonth = dir => {
     setMonth(prev => {
@@ -126,25 +135,36 @@ export default function ContentCalendar() {
     }));
     setShowSchedule(true);
   };
+  const closeSchedule = () => {
+    if (scheduling) return;
+    setShowSchedule(false);
+  };
+
   const handleSchedule = async () => {
+    if (scheduling) return;
     if (!scheduleForm.date) {
       showToast("Pick a date");
       return;
     }
     const publishAt = `${scheduleForm.date}T${scheduleForm.time}:00`;
+    setScheduling(true);
     try {
       if (scheduleForm.type === "blog") {
         if (!scheduleForm.blogPostId) {
           showToast("Pick a blog draft");
+          setScheduling(false);
           return;
         }
-        await adminFetch(`/admin/content/schedule-blog/${scheduleForm.blogPostId}`, {
-          method: "POST",
-          body: JSON.stringify({
-            publishAt,
-            autoShareSocial: scheduleForm.autoShare
-          })
-        });
+        await adminFetch(
+          `/admin/content/schedule-blog/${scheduleForm.blogPostId}`,
+          {
+            method: "POST",
+            body: JSON.stringify({
+              publishAt,
+              autoShareSocial: scheduleForm.autoShare,
+            }),
+          },
+        );
       } else {
         if (!scheduleForm.title.trim()) {
           showToast("Add a title");
@@ -157,8 +177,8 @@ export default function ContentCalendar() {
             description: "",
             link: "",
             scheduledFor: publishAt,
-            platforms: []
-          })
+            platforms: [],
+          }),
         });
       }
       showToast("Scheduled!");
@@ -166,6 +186,8 @@ export default function ContentCalendar() {
       loadCalendar();
     } catch (e) {
       showToast(`Failed: ${e.message}`);
+    } finally {
+      setScheduling(false);
     }
   };
   return (
@@ -197,8 +219,13 @@ export default function ContentCalendar() {
                   className={`flex flex-col items-stretch justify-start min-w-0 min-h-[100px] border-0 border-r border-hairline border-zinc-200 last:border-r-0 p-1 text-ui-body text-left align-top cursor-pointer u-focus-ring ${day === selectedDay ? "bg-zinc-100" : isToday(day) ? "bg-zinc-50" : "bg-white"}`}>
                   <span className={`block px-1 py-0.5 text-ui-body ${isToday(day) ? "font-medium text-zinc-900" : "text-ink-secondary"}`}>{day}</span>
                   {dayItems.slice(0, 3).map((item, ii) => (
+                    // The type has to be readable in the cell, not only in a
+                    // hover title: main distinguished blog/social/rss by colour,
+                    // and colour alone is not a sanctioned cue (and is no cue at
+                    // all on touch). The short label also makes the legend mean
+                    // something.
                     <span key={ii} title={`${TYPE_LABELS[item.type] || item.type}: ${item.title || ""}`} className="mb-0.5 block truncate rounded-xs bg-zinc-100 px-1 py-0.5 text-ui-body text-zinc-900">
-                      {item.title?.substring(0, 25)}
+                      <span className="font-medium text-ink-secondary">{TYPE_SHORT[item.type] || item.type}</span>{" · "}{item.title?.substring(0, 25)}
                     </span>
                   ))}
                   {dayItems.length > 3 && <span className="block px-1 text-ui-body text-ink-secondary">+{dayItems.length - 3} more</span>}
@@ -226,10 +253,10 @@ export default function ContentCalendar() {
           ))}
         </Card>
       )}
-      <Dialog open={showSchedule} onClose={() => setShowSchedule(false)} layer={250}>
+      <Dialog open={showSchedule} onClose={closeSchedule} layer={250}>
         <DialogHeader className="flex items-center justify-between gap-3">
           <DialogTitle>Schedule Content</DialogTitle>
-          <Button variant="ghost" aria-label="Close schedule" onClick={() => setShowSchedule(false)}><X size={18} /></Button>
+          <Button variant="ghost" aria-label="Close schedule" onClick={closeSchedule} disabled={scheduling}><X size={18} /></Button>
         </DialogHeader>
         <DialogBody className="space-y-3">
           <Field label="Type">
@@ -252,11 +279,11 @@ export default function ContentCalendar() {
           {scheduleForm.type === "blog" && <Checkbox label="Share to social after the post is live" checked={scheduleForm.autoShare} onChange={e => setScheduleForm(prev => ({ ...prev, autoShare: e.target.checked }))} />}
         </DialogBody>
         <DialogFooter>
-          <Button variant="secondary" onClick={() => setShowSchedule(false)}>Cancel</Button>
-          <Button onClick={handleSchedule}>Schedule</Button>
+          <Button variant="secondary" onClick={closeSchedule} disabled={scheduling}>Cancel</Button>
+          <Button onClick={handleSchedule} loading={scheduling}>Schedule</Button>
         </DialogFooter>
       </Dialog>
-      {toast && <ActionFeedback className="fixed bottom-5 right-5 z-[300] max-w-[calc(100%-40px)] rounded-md border-hairline border-zinc-200 bg-white p-3 shadow-sm">{toast}</ActionFeedback>}
+      {toast && <ActionFeedback className="pointer-events-none fixed bottom-5 right-5 z-[300] max-w-[calc(100%-40px)] rounded-md border-hairline border-zinc-200 bg-white p-3 shadow-sm">{toast}</ActionFeedback>}
     </UiSurface>
   );
 }
