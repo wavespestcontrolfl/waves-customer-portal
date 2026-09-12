@@ -245,14 +245,27 @@ const deferred = () => { let resolve; const promise = new Promise((r) => { resol
 
   test('a run recovered long after the visit leaves the weather unset, not wrong', async () => {
     const assessment = await seed();
+    // Captured three days ago. Freshness follows capture, not confirmation, so a
+    // visit confirmed late cannot take on the confirming day's weather either.
     await db.knex('lawn_assessments').where({ id: assessment.id })
-      .update({ confirmed_at: db.knex.raw("clock_timestamp() - interval '3 days'") });
+      .update({ created_at: db.knex.raw("clock_timestamp() - interval '3 days'") });
     const deps = dependencies();
     await deliver(assessment.id, deps);
     // Current conditions are not the visit's conditions three days on.
     expect(deps.LawnIntel.attachWeather).not.toHaveBeenCalled();
     expect((await db.knex('lawn_assessments').where({ id: assessment.id }).first()).fawn_snapshot).toBeNull();
     expect((await stored(assessment.id)).pipeline_completed_at).toBeInstanceOf(Date);
+  });
+
+  test('a visit captured yesterday and confirmed today still gets no weather', async () => {
+    const assessment = await seed();
+    await db.knex('lawn_assessments').where({ id: assessment.id }).update({
+      created_at: db.knex.raw("clock_timestamp() - interval '26 hours'"),
+      confirmed_at: db.knex.raw("clock_timestamp() - interval '30 minutes'"),
+    });
+    const deps = dependencies();
+    await deliver(assessment.id, deps);
+    expect(deps.LawnIntel.attachWeather).not.toHaveBeenCalled();
   });
 
   test('recovery stops sweeping a run that has been failing past the retry horizon', async () => {

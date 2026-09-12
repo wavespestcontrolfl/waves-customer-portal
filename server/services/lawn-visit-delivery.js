@@ -4,7 +4,7 @@ const logger = require('./logger');
 const runs = require('./lawn-visit-runs');
 
 // Weather is fetched as CURRENT conditions, so it stands in for the visit's own
-// only while the visit is recent. Past this, a run recovered late leaves the
+// only while the CAPTURE is recent. Past this, a run recovered late leaves the
 // snapshot unset rather than recording recovery-day weather as the visit's.
 const WEATHER_WINDOW_MS = 6 * 60 * 60 * 1000;
 
@@ -21,9 +21,12 @@ async function generationInFlight(KnowledgeBridge, assessmentId, knex) {
 }
 
 function nearTheVisit(assessment, windowMs) {
-  const confirmedAt = assessment?.confirmed_at ? new Date(assessment.confirmed_at).getTime() : NaN;
-  if (!Number.isFinite(confirmedAt)) return false;
-  return Date.now() - confirmedAt <= windowMs;
+  // Anchored to CAPTURE, not confirmation: an assessment taken during the visit
+  // and confirmed the next day would otherwise pass this check and take on the
+  // confirming day's conditions as the visit's.
+  const capturedAt = new Date(assessment?.created_at ?? assessment?.confirmed_at ?? NaN).getTime();
+  if (!Number.isFinite(capturedAt)) return false;
+  return Date.now() - capturedAt <= windowMs;
 }
 
 const ownershipLost = () => Object.assign(new Error('Lawn delivery ownership lost'), { code: 'LAWN_DELIVERY_OWNERSHIP_LOST' });
