@@ -480,20 +480,16 @@ async function loadPromiseEvents(conn, visitIds, { now = new Date() } = {}) {
       // marked by followup_source_service_id / parent_service_id at creation.
       .whereNull('sv.followup_source_service_id').whereNull('sv.parent_service_id')
       .where('cl.created_at', '<=', now)
-      // The extraction this reads is MUTABLE: a force-reprocess rewrites
-      // ai_extraction_enriched on the same call row, and a changed
-      // agent_committed_booking or confirmed_start_at would then move — or
-      // erase — a promise the customer was given at booking time, with no new
-      // communication behind it (codex P1 round 19). processing_generation is
-      // the provenance for that: the processor increments it once per pass, so
-      // a call still on its first pass carries the extraction the booking was
-      // made from. updated_at is NOT usable here — any unrelated write to the
-      // row (a status callback, a linkage update) moves it, and a guard on it
-      // would drop good evidence wholesale (codex P1 round 19, second pass).
-      // A re-processed call simply stops answering, leaving the
-      // customer-facing confirmation as the evidence, which is the better
-      // record anyway.
-      .whereRaw('COALESCE(cl.processing_generation, 0) <= 1')
+      // processing_generation rides along rather than filtering: the
+      // extraction is MUTABLE (a force-reprocess rewrites
+      // ai_extraction_enriched on the same call row), so a later pass must not
+      // be allowed to move the window the customer was given at booking time
+      // — but dropping the row outright erased the only evidence a call-only
+      // booking has, including for an ordinary recovery pass after a partial
+      // first one (codex P1 round 19, P2 round 21). Past the first pass the
+      // promise survives as an UNKNOWN window: the booking still proves the
+      // customer was told something on that call, and the time is no longer
+      // ours to assert.
       .select('sv.id as visit_id', 'sv.created_at as booked_at', 'cl.id as call_id', 'cl.ai_extraction_enriched',
         'cl.transcription', 'cl.processing_token', 'cl.created_at as call_created_at', 'cl.direction as call_direction', 'cl.bridged_at as call_bridged_at',
         'cl.duration_seconds', 'cl.recording_duration_seconds'),
@@ -576,6 +572,24 @@ async function loadPromiseEvents(conn, visitIds, { now = new Date() } = {}) {
   const [messages, emails, calls, directEmails, groupedEmails, bookings, appliedReschedules,
     seriesMoveFallbacks, seriesMoves] = results;
   const candidates = new Set(visitIds.map(String));
+  const slotOf = (metadata) => (Number.isFinite(Number(metadata?.rendered_slot_ms)) && metadata?.rendered_slot_ms != null
+    ? new Date(Number(metadata.rendered_slot_ms)).toISOString() : null);
+  // Built before the fallbacks, because the fallbacks defer to them: a
+  // `both`-channel grouped reminder sends its SMS FIRST, so when the email's
+  // interaction insert fails the KNOWN window is already on the message side,
+  // and a check that looked only at interaction rows let the later email row
+  // survive as an unknown-window fallback and outrank it (codex P1 round 21).
+  const noticeEvents = [
+    ...messages.map((r) => ({ visit_id: r.appointment_id || r.metadata?.scheduled_service_id,
+      start_at: slotOf(r.metadata), communicated_at: r.sent_at, source: 'message', source_id: r.id })),
+    ...emails.map((r) => ({ visit_id: r.metadata?.scheduled_service_id, start_at: slotOf(r.metadata),
+      // The retry's send time when there is one (see the select above), then
+      // the interaction row's own snapshot, then its insert time. A promise
+      // the customer heard on a retry must not be ordered at the moment the
+      // first attempt failed — an intervening reminder would otherwise look
+      // newer than it (codex P1 round 6).
+      communicated_at: r.provider_sent_at || r.metadata?.sent_at || r.created_at, source: 'email', source_id: r.id })),
+  ];
   // The per-service recovery keeps its own window (the key carries the slot),
   // so it is only dropped when the interaction row already provided one for
   // the same send.
@@ -602,7 +616,7 @@ async function loadPromiseEvents(conn, visitIds, { now = new Date() } = {}) {
       if (!earliest.has(sendKey(r)) || at < earliest.get(sendKey(r))) earliest.set(sendKey(r), at);
     }
     const recoveredSends = new Set(groupedEmails
-      .filter((r) => knownWindowAtOrAfter(emails, { visit_id: r.visit_id,
+      .filter((r) => knownWindowAtOrAfter(noticeEvents, { visit_id: r.visit_id,
         communicated_at: new Date(earliest.get(sendKey(r))).toISOString() }))
       .map(sendKey));
     return groupedEmails
@@ -614,16 +628,7 @@ async function loadPromiseEvents(conn, visitIds, { now = new Date() } = {}) {
     start_at: new Date(Number(r.slot_ms)).toISOString(), communicated_at: r.sent_at,
     source: 'email', source_id: r.id }));
   return [
-    ...messages.map((r) => ({ visit_id: r.appointment_id || r.metadata?.scheduled_service_id, start_at: Number.isFinite(Number(r.metadata?.rendered_slot_ms)) && r.metadata?.rendered_slot_ms != null
-      ? new Date(Number(r.metadata.rendered_slot_ms)).toISOString() : null, communicated_at: r.sent_at, source: 'message', source_id: r.id })),
-    ...emails.map((r) => ({ visit_id: r.metadata?.scheduled_service_id, start_at: Number.isFinite(Number(r.metadata?.rendered_slot_ms)) && r.metadata?.rendered_slot_ms != null
-      ? new Date(Number(r.metadata.rendered_slot_ms)).toISOString() : null,
-      // The retry's send time when there is one (see the select above), then
-      // the interaction row's own snapshot, then its insert time. A promise
-      // the customer heard on a retry must not be ordered at the moment the
-      // first attempt failed — an intervening reminder would otherwise look
-      // newer than it (codex P1 round 6).
-      communicated_at: r.provider_sent_at || r.metadata?.sent_at || r.created_at, source: 'email', source_id: r.id })),
+    ...noticeEvents,
     ...calls.map((r) => ({ visit_id: r.resource_id, start_at: r.metadata?.start_at,
       communicated_at: r.metadata?.communicated_at || r.created_at, source: 'call', source_id: r.id })),
 
@@ -653,7 +658,10 @@ async function loadPromiseEvents(conn, visitIds, { now = new Date() } = {}) {
         ai_extraction_enriched: r.ai_extraction_enriched, transcription: r.transcription, created_at: r.call_created_at,
       });
       if (target == null) return null;
-      return { visit_id: r.visit_id, start_at: new Date(target).toISOString(),
+      // Past the first processing pass the window is no longer ours to
+      // assert — see the note on the read above.
+      const firstPass = Number(r.processing_generation || 0) <= 1;
+      return { visit_id: r.visit_id, start_at: firstPass ? new Date(target).toISOString() : null,
         communicated_at: callCommitmentInstant({ created_at: r.call_created_at, direction: r.call_direction, bridged_at: r.call_bridged_at,
           duration_seconds: r.duration_seconds, recording_duration_seconds: r.recording_duration_seconds },
         { notAfter: r.booked_at }).toISOString(),
@@ -682,20 +690,22 @@ async function loadPromiseEvents(conn, visitIds, { now = new Date() } = {}) {
   ];
 }
 
-// True when the interaction-derived evidence already carries a KNOWN window
-// for this visit, communicated at or after the fallback's own send time — in
-// which case the fallback is a duplicate recovery of the same message and
-// must not replace it (an unknown window would silence a real alert).
-function knownWindowAtOrAfter(interactionEvents = [], fallback) {
+// True when the notice-derived evidence — SMS as well as email, since a
+// `both`-channel reminder records the same window on both legs — already
+// carries a KNOWN window for this visit, communicated at or after the
+// fallback's own send time. The fallback is then a duplicate recovery of a
+// message already accounted for, and must not replace it: an unknown window
+// would silence a real alert.
+function knownWindowAtOrAfter(noticeEvents = [], fallback) {
   const at = instant(fallback.communicated_at);
-  return interactionEvents.some((event) => String(event.metadata?.scheduled_service_id || '') === String(fallback.visit_id)
-    && event.metadata?.rendered_slot_ms != null
+  return noticeEvents.some((event) => String(event.visit_id || '') === String(fallback.visit_id)
+    && event.start_at != null
     // The SAME precedence the interaction promise is dated by: after a
     // successful retry its effective send time is the live em.sent_at, not
     // the snapshot frozen at the first attempt, and comparing against the
     // snapshot here made the suppression disagree with the promise it is
     // suppressing for (codex P1 round 12).
-    && instant(event.provider_sent_at || event.metadata?.sent_at || event.created_at) >= at);
+    && instant(event.communicated_at) >= at);
 }
 
 // Pure, exported for tests. One customer-notified series move -> an UNKNOWN
@@ -1242,8 +1252,17 @@ async function lockedStop(trx, serviceId, { now = new Date(), ignoreHorizon = fa
   // first read saw no group and one committed while FOR UPDATE waited (codex
   // P2 round 20). One re-read settles it: the group is now locked, so it
   // cannot change again underneath this transaction.
-  const locked = members.find((m) => String(m.id) === String(serviceId));
-  if (locked && String(locked.visit_id || '') !== String(row.visit_id || '')) {
+  let locked = members.find((m) => String(m.id) === String(serviceId));
+  if (!locked) {
+    // The service LEFT the group between the two reads (splitChild), so the
+    // predicate no longer matches it and the locked set is all siblings. Its
+    // own row has to be read — and locked — or the evaluation would run on
+    // the stale pre-lock copy against a stop it no longer belongs to (codex
+    // P2 round 21).
+    [locked] = await trx('scheduled_services').where({ id: serviceId }).forUpdate().select('*');
+    if (!locked) return { visit: null, members: [], promise: null, live: null };
+  }
+  if (String(locked.visit_id || '') !== String(row.visit_id || '')) {
     members = locked.visit_id
       ? await trx('scheduled_services').where({ visit_id: locked.visit_id }).forUpdate().orderBy('id').select('*')
       : [locked];

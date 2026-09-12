@@ -1115,21 +1115,19 @@ describe('an appointment email with no interaction row still yields its promise 
   test('the fallback never displaces the known window the interaction row already carries', async () => {
     const { knownWindowAtOrAfter } = require('../services/no-show-detector');
     const fallback = { visit_id: 'visit-1', communicated_at: '2026-09-10T12:00:00.000Z' };
-    const withWindow = [{ metadata: { scheduled_service_id: 'visit-1', rendered_slot_ms: 1, sent_at: '2026-09-10T12:00:00.000Z' } }];
-    expect(knownWindowAtOrAfter(withWindow, fallback)).toBe(true);
+    const known = (over = {}) => [{ visit_id: 'visit-1', start_at: '2026-09-10T13:00:00.000Z',
+      communicated_at: '2026-09-10T12:00:00.000Z', source: 'email', ...over }];
+    expect(knownWindowAtOrAfter(known(), fallback)).toBe(true);
+    // The SMS leg counts too: a `both`-channel reminder sends its text first,
+    // so when the email's interaction insert fails the known window is
+    // already on the message side (round-21 P1).
+    expect(knownWindowAtOrAfter(known({ source: 'message' }), fallback)).toBe(true);
     // An OLDER known window does not block it — a genuinely newer unknown
     // promise (the legacy move-notice case) still has to win.
-    const older = [{ metadata: { scheduled_service_id: 'visit-1', rendered_slot_ms: 1, sent_at: '2026-09-09T12:00:00.000Z' } }];
-    expect(knownWindowAtOrAfter(older, fallback)).toBe(false);
-    // A row whose send succeeded on RETRY is dated by the live em.sent_at,
-    // the same precedence the promise itself uses — comparing the frozen
-    // snapshot would make the suppression disagree with it (round-12 P1).
-    const retried = [{ provider_sent_at: '2026-09-10T12:00:00.000Z',
-      metadata: { scheduled_service_id: 'visit-1', rendered_slot_ms: 1, sent_at: '2026-09-09T08:00:00.000Z' } }];
-    expect(knownWindowAtOrAfter(retried, fallback)).toBe(true);
-    // An interaction row for a different visit, or one with no window, never blocks.
-    expect(knownWindowAtOrAfter([{ metadata: { scheduled_service_id: 'other', rendered_slot_ms: 1, sent_at: '2026-09-10T12:00:00.000Z' } }], fallback)).toBe(false);
-    expect(knownWindowAtOrAfter([{ metadata: { scheduled_service_id: 'visit-1', sent_at: '2026-09-10T12:00:00.000Z' } }], fallback)).toBe(false);
+    expect(knownWindowAtOrAfter(known({ communicated_at: '2026-09-09T12:00:00.000Z' }), fallback)).toBe(false);
+    // Another visit, or an unknown window, never blocks.
+    expect(knownWindowAtOrAfter(known({ visit_id: 'other' }), fallback)).toBe(false);
+    expect(knownWindowAtOrAfter(known({ start_at: null }), fallback)).toBe(false);
   });
 
   // One grouped reminder writes an email_messages row per RECIPIENT, and
@@ -1140,7 +1138,8 @@ describe('an appointment email with no interaction row still yields its promise 
   test('an earlier recipient\'s known window covers the whole fan-out', () => {
     const { knownWindowAtOrAfter } = require('../services/no-show-detector');
     const earliest = { visit_id: 'visit-1', communicated_at: '2026-09-10T12:00:00.000Z' };
-    const known = [{ metadata: { scheduled_service_id: 'visit-1', rendered_slot_ms: 1, sent_at: '2026-09-10T12:00:00.000Z' } }];
+    const known = [{ visit_id: 'visit-1', start_at: '2026-09-10T13:00:00.000Z',
+      communicated_at: '2026-09-10T12:00:00.000Z', source: 'email' }];
     expect(knownWindowAtOrAfter(known, earliest)).toBe(true);
     // The later recipient's row, measured on its own send time, would not be
     // covered — which is why the stop is keyed by its earliest row.
@@ -1201,6 +1200,9 @@ describe('the call-booking promise derives from the visit\'s own call link (roun
     const spy = jest.spyOn(flags, 'hasAgentCommittedEvidence').mockReturnValue(true);
     const [promise] = await loadPromiseEvents(fakeConn([row]), ['visit-1']);
     expect(spy).toHaveBeenCalledWith(row.ai_extraction_enriched, row.transcription, row.call_created_at);
+    // A REPROCESSED call keeps the promise, without its window.
+    const [reprocessed] = await loadPromiseEvents(fakeConn([{ ...row, processing_generation: 3 }]), ['visit-1']);
+    expect(reprocessed).toMatchObject({ visit_id: 'visit-1', source: 'call', start_at: null });
     // A follow-up child the same call spawned carries source_call_log_id too
     // but has no confirmed time of its own — the primary's window must not be
     // mapped onto it (round-16 P1).
@@ -1210,13 +1212,12 @@ describe('the call-booking promise derives from the visit\'s own call link (roun
     // force-reprocess rewrites ai_extraction_enriched on the same row, and a
     // changed commitment would move or erase a promise the customer was given
     // at booking time with no new communication behind it (round-19 P1).
-    expect(detector).toContain("COALESCE(cl.processing_generation, 0) <= 1");
-    expect(detector).not.toContain('cl.updated_at <=');
-    // ...and the extraction must still predate the booking it produced: a
-    // force-reprocess rewrites ai_extraction_enriched on the same row, and a
-    // changed commitment would move or erase a promise the customer was given
-    // at booking time with no new communication behind it (round-19 P1).
-    expect(detector).toContain("COALESCE(cl.processing_generation, 0) <= 1");
+    // Past the first processing pass the window is no longer asserted — but
+    // the promise is not dropped either, or a call-only booking would lose
+    // its one piece of evidence to an ordinary recovery pass (round-19 P1,
+    // round-21 P2).
+    expect(detector).toContain('const firstPass = Number(r.processing_generation || 0) <= 1;');
+    expect(detector).toContain('start_at: firstPass ? new Date(target).toISOString() : null,');
     expect(detector).not.toContain('cl.updated_at <=');
     expect(promise).toMatchObject({ visit_id: 'visit-1', source: 'call', source_id: 'call-1',
       communicated_at: '2026-09-10T14:05:00.000Z' });
