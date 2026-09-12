@@ -145,7 +145,7 @@ function LeadOwedPromises({ leadId }) {
   if (!rows.length && !error) return null;
   return (
     <div data-testid="lead-owed" className="mt-[12px]">
-      <h4 className="text-zinc-900 text-ui-body">Owed on this lead</h4>
+      <h4 className="m-0 mb-[8px] text-zinc-900 text-ui-body">Owed on this lead</h4>
       {error && (
         <div role="alert" className="text-alert-fg text-ui-body mb-[8px]">
           {error}{" "}
@@ -368,9 +368,48 @@ function fmtCallDuration(seconds) {
 function roiColorClass(roi) {
   return roi < 0 ? "text-alert-fg" : "text-zinc-900";
 }
+// Main's STATUS_COLORS: only lost/disqualified are a real color (alert
+// red); new/won/estimate_sent are zinc-900/900/700, contacted/
+// estimate_viewed are zinc-600, unresponsive/duplicate are zinc-400 — a
+// weight ladder, not a hue-coded status system. Restored for the stage
+// Select and the Kanban dot so lost/disqualified read as genuine alerts
+// and the other stages keep their relative weight. Full literal class
+// strings per key (not template-interpolated) so Tailwind's static
+// content scan can find and generate them.
+const STATUS_SELECT_CLASS = {
+  new: "!bg-zinc-900/10 !border-zinc-900/25 !text-zinc-900",
+  contacted: "!bg-zinc-600/10 !border-zinc-600/25 !text-zinc-600",
+  estimate_sent: "!bg-zinc-700/10 !border-zinc-700/25 !text-zinc-700",
+  estimate_viewed: "!bg-zinc-600/10 !border-zinc-600/25 !text-zinc-600",
+  won: "!bg-zinc-900/10 !border-zinc-900/25 !text-zinc-900",
+  lost: "!bg-alert-bg !border-alert-fg/40 !text-alert-fg",
+  unresponsive: "!bg-zinc-400/10 !border-zinc-400/25 !text-zinc-400",
+  disqualified: "!bg-alert-bg !border-alert-fg/40 !text-alert-fg",
+  duplicate: "!bg-zinc-400/10 !border-zinc-400/25 !text-zinc-400",
+};
+const STATUS_DOT_CLASS = {
+  new: "bg-zinc-900",
+  contacted: "bg-zinc-600",
+  estimate_sent: "bg-zinc-700",
+  estimate_viewed: "bg-zinc-600",
+  won: "bg-zinc-900",
+  lost: "bg-alert-fg",
+  unresponsive: "bg-zinc-400",
+  disqualified: "bg-alert-fg",
+  duplicate: "bg-zinc-400",
+};
+function statusSelectClass(status) {
+  return STATUS_SELECT_CLASS[status] || "";
+}
+function statusDotClass(status) {
+  return STATUS_DOT_CLASS[status] || "bg-zinc-400";
+}
 function LeadBadge({ label, tone = "neutral", className }) {
+  // The old inline-styled badge had whiteSpace: "nowrap"; the shared Badge
+  // primitive doesn't supply it, so a multiword label (or one squeezed
+  // into a narrow table column) can wrap into a malformed two-line chip.
   return (
-    <Badge tone={tone} className={className}>
+    <Badge tone={tone} className={`whitespace-nowrap ${className || ""}`}>
       {label}
     </Badge>
   );
@@ -1538,6 +1577,7 @@ export function LeadsSection({ newLeadRequest = 0 }) {
                               onChange={(e) =>
                                 updateLeadStatus(lead.id, e.target.value)
                               }
+                              className={statusSelectClass(lead.status)}
                             >
                               {STATUSES.map((s) => (
                                 <option key={s} value={s}>
@@ -1595,7 +1635,7 @@ export function LeadsSection({ newLeadRequest = 0 }) {
                                   {" "}
                                   <div className="flex-[1_1_300px]">
                                     {" "}
-                                    <h4 className="text-zinc-900 text-ui-body">
+                                    <h4 className="m-0 mb-[8px] text-zinc-900 text-ui-body">
                                       Details
                                     </h4>{" "}
                                     <div className="text-ui-body text-ink-secondary">
@@ -1770,7 +1810,7 @@ export function LeadsSection({ newLeadRequest = 0 }) {
                                     <LeadOwedPromises leadId={lead.id} />
                                     {leadCalls.length > 0 && (
                                       <div className="mt-[12px]">
-                                        <h4 className="text-zinc-900 text-ui-body">
+                                        <h4 className="m-0 mb-[8px] text-zinc-900 text-ui-body">
                                           Calls
                                         </h4>
                                         {leadCalls.map((call) => (
@@ -1814,7 +1854,7 @@ export function LeadsSection({ newLeadRequest = 0 }) {
                                   </div>{" "}
                                   <div className="flex-[1_1_300px]">
                                     {" "}
-                                    <h4 className="text-zinc-900 text-ui-body">
+                                    <h4 className="m-0 mb-[8px] text-zinc-900 text-ui-body">
                                       Activity Timeline
                                     </h4>{" "}
                                     <div className="max-h-[200px] overflow-y-auto">
@@ -2640,14 +2680,12 @@ export function LeadsSection({ newLeadRequest = 0 }) {
                   {" "}
                   <div className="flex items-center gap-[8px] mb-[10px]">
                     {" "}
+                    {/* lost/disqualified are a genuine alert (real red)
+                        in main's STATUS_COLORS, not a zinc weight —
+                        statusDotClass keeps that distinct from the other
+                        stages' grayscale ladder. */}
                     <span
-                      className={
-                        stage === "won"
-                          ? "w-2.5 h-2.5 rounded-full inline-block bg-zinc-900"
-                          : ["lost", "disqualified"].includes(stage)
-                            ? "w-2.5 h-2.5 rounded-full inline-block bg-zinc-600"
-                            : "w-2.5 h-2.5 rounded-full inline-block bg-zinc-400"
-                      }
+                      className={`w-2.5 h-2.5 rounded-full inline-block ${statusDotClass(stage)}`}
                     />{" "}
                     <span className="text-zinc-900 text-ui-body font-medium flex-[1]">
                       {stage.replace(/_/g, " ")}
@@ -2695,17 +2733,17 @@ export function LeadsSection({ newLeadRequest = 0 }) {
                         {" "}
                         <div className="flex items-center gap-[8px] mb-[6px]">
                           {" "}
-                          <div className="text-zinc-900 text-ui-body font-medium overflow-hidden whitespace-nowrap flex-[1]">
+                          <div className="text-zinc-900 text-ui-body font-medium overflow-hidden whitespace-nowrap text-ellipsis flex-[1]">
                             {[lead.first_name, lead.last_name]
                               .filter(Boolean)
                               .join(" ") || "Unknown"}
                           </div>{" "}
                           <AgingBadge lead={lead} />{" "}
                         </div>{" "}
-                        <div className="text-ink-secondary text-ui-body mb-[5px] overflow-hidden whitespace-nowrap">
+                        <div className="text-ink-secondary text-ui-body mb-[5px] overflow-hidden whitespace-nowrap text-ellipsis">
                           {lead.phone || lead.email || "--"}
                         </div>{" "}
-                        <div className="text-zinc-900 text-ui-body mb-[8px] overflow-hidden whitespace-nowrap">
+                        <div className="text-zinc-900 text-ui-body mb-[8px] overflow-hidden whitespace-nowrap text-ellipsis">
                           {lead.service_interest || "--"}
                         </div>{" "}
                         <div className="flex items-center gap-[6px] flex-wrap">
@@ -3167,7 +3205,7 @@ export function LeadsSection({ newLeadRequest = 0 }) {
         </div>
         {/* Pipeline status */}
         <div className="mb-[10px]">
-          <h2 className="text-zinc-900 text-ui-body font-medium">
+          <h2 className="m-0 mb-[6px] text-zinc-900 text-ui-body font-medium">
             Pipeline status
           </h2>
           <div className="m-0 text-ink-secondary text-ui-body">
@@ -3186,7 +3224,7 @@ export function LeadsSection({ newLeadRequest = 0 }) {
         {/* Channel Comparison */}
         <Card className="mb-[24px] p-5">
           {" "}
-          <h2 className="text-zinc-900 text-ui-body font-medium">
+          <h2 className="m-0 mb-[16px] text-zinc-900 text-ui-body font-medium">
             Channel comparison
           </h2>
           {byChannel.length === 0 && (
@@ -3247,7 +3285,7 @@ export function LeadsSection({ newLeadRequest = 0 }) {
         {/* Source ROI Matrix */}
         <Card className="mb-[24px] p-5">
           {" "}
-          <h2 className="text-zinc-900 text-ui-body font-medium">
+          <h2 className="m-0 mb-[16px] text-zinc-900 text-ui-body font-medium">
             Source ROI matrix
           </h2>
           {scatterSources.length === 0 ? (
@@ -3384,7 +3422,7 @@ export function LeadsSection({ newLeadRequest = 0 }) {
           {/* Response Time vs Conversion */}
           <Card className="flex-[1_1_400px] p-5">
             {" "}
-            <h2 className="text-zinc-900 text-ui-body font-medium">
+            <h2 className="m-0 mb-[16px] text-zinc-900 text-ui-body font-medium">
               Response time vs conversion
             </h2>
             <div className="text-ink-secondary text-ui-body">Year to date</div>
@@ -3440,7 +3478,7 @@ export function LeadsSection({ newLeadRequest = 0 }) {
           {/* Lost Lead Analysis */}
           <Card className="flex-[1_1_300px] p-5">
             {" "}
-            <h2 className="text-zinc-900 text-ui-body font-medium">
+            <h2 className="m-0 mb-[16px] text-zinc-900 text-ui-body font-medium">
               Lost lead reasons
             </h2>
             <div className="text-ink-secondary text-ui-body">Year to date</div>
@@ -3548,9 +3586,12 @@ export function LeadsSection({ newLeadRequest = 0 }) {
                   <TD className="text-zinc-900">{s.totalLeads}</TD>
                   <TD className="text-zinc-700">{s.conversions}</TD>
                   <TD className="text-zinc-700">{fmtMoney(s.totalRevenue)}</TD>
-                  <TD
-                    className={`font-medium ${s.roi > 0 ? roiColorClass(s.roi) : "text-ink-secondary"}`}
-                  >
+                  {/* Main applied roiColor(s.roi) unconditionally (so a
+                      negative ROI showed red) but only displayed the
+                      percentage text when roi > 0 (otherwise "--") — the
+                      color and the value-guard are independent, not gated
+                      on the same condition. */}
+                  <TD className={`font-medium ${roiColorClass(s.roi)}`}>
                     {s.roi > 0 ? fmtPct(s.roi) : "--"}
                   </TD>
                 </TR>
@@ -3630,7 +3671,7 @@ export function LeadsSection({ newLeadRequest = 0 }) {
           />{" "}
           {contactMatches?.total > 0 && (
             <Card className="mb-[12px] p-[12px]">
-              <p className="text-ui-body">
+              <p className="m-0 mb-[8px] text-ui-body">
                 Possible existing leads with this contact (
                 {contactMatches.total}). Review before creating another record.
               </p>
@@ -4120,7 +4161,7 @@ export function LeadsSection({ newLeadRequest = 0 }) {
   // MAIN RENDER
   // ═════════════════════════════════════════════════════════════════════════
   return (
-    <UiSurface className="min-w-0 max-w-[1400px] text-zinc-900">
+    <UiSurface className="min-w-0 max-w-[1400px] mx-auto text-zinc-900">
       <style>{`
         .lead-queue-table td { overflow-wrap: anywhere; }
         .lead-queue-table :is(td, th) { padding-inline: 8px !important; }
