@@ -69,4 +69,34 @@ describe("DiscountsSection", () => {
       show_in_scheduling: false,
     });
   });
+
+  it("keeps the existing blank statistics state when loading fails", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url) => {
+        if (String(url).endsWith("/admin/discounts/stats")) {
+          throw new Error("down");
+        }
+        return { ok: true, json: async () => [] };
+      }),
+    );
+
+    render(<DiscountsSection />);
+    fireEvent.click(screen.getByRole("tab", { name: "Stats" }));
+
+    await waitFor(() =>
+      expect(
+        fetch.mock.calls.some(([url]) =>
+          String(url).endsWith("/admin/discounts/stats"),
+        ),
+      ).toBe(true),
+    );
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+    expect(
+      screen.queryByText("Loading discount statistics…"),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "Try again" }),
+    ).not.toBeInTheDocument();
+  });
 });

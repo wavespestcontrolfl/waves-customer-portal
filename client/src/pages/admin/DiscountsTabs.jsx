@@ -135,7 +135,6 @@ function DiscountsSection() {
   const [previewSub, setPreviewSub] = useState("");
   const [previewResult, setPreviewResult] = useState(null);
   const [stats, setStats] = useState(null);
-  const [statsError, setStatsError] = useState("");
   const [customers, setCustomers] = useState([]);
   const [custSearch, setCustSearch] = useState("");
 
@@ -250,12 +249,7 @@ function DiscountsSection() {
   };
 
   const loadStats = () => {
-    setStatsError("");
-    return af("/admin/discounts/stats")
-      .then(setStats)
-      .catch((error) =>
-        setStatsError(error?.message || "Failed to load discount statistics"),
-      );
+    af("/admin/discounts/stats").then(setStats).catch(() => {});
   };
 
   useEffect(() => {
@@ -770,21 +764,7 @@ function DiscountsSection() {
         </TabPanel>
 
         <TabPanel value="stats">
-          {statsError ? (
-            <Card>
-              <CardBody>
-                <ActionFeedback error onRetry={loadStats}>
-                  {statsError}
-                </ActionFeedback>
-              </CardBody>
-            </Card>
-          ) : !stats ? (
-            <Card>
-              <CardBody className="py-10 text-center text-ink-secondary">
-                Loading discount statistics…
-              </CardBody>
-            </Card>
-          ) : (
+          {stats && (
             <div className="space-y-4">
               <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
                 <MetricCard
