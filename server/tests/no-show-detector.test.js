@@ -96,6 +96,29 @@ describe('missing tracking stages', () => {
       expect(result.alerts.length).toBeGreaterThan(0);
     }
   });
+  test('an on-time visit completed before the first threshold is NOT counted as missing evidence (round-9 P2)', () => {
+    // 09:00 window, completed 09:30, stage-1 threshold 09:45: no decision
+    // point was ever required, and a valid promise was in hand throughout.
+    // Counting it missing inflated the denominator the rollout report is
+    // read for.
+    const report = replay({ synthetic: true, from: '2026-09-10T07:00:00-04:00', to: '2026-09-10T23:00:00-04:00', visits: [{
+      id: 'visit', initial: visit, outcome: 'on_time',
+      promises: [{ start_at: '2026-09-10T09:00:00-04:00', communicated_at: '2026-09-09T12:00:00-04:00', source: 'message' }],
+      events: [{ at: '2026-09-10T09:30:00-04:00', patch: { status: 'completed' } }],
+    }] });
+    for (const result of report.thresholds) {
+      expect(result.missing_promise_visits).toBe(0);
+      expect(result.alerts).toEqual([]);
+    }
+    // A visit with NO usable window that completes early is still missing
+    // evidence — the fix must not swallow the real case.
+    const unknown = replay({ synthetic: true, from: '2026-09-10T07:00:00-04:00', to: '2026-09-10T23:00:00-04:00', visits: [{
+      id: 'visit', initial: visit, outcome: 'on_time',
+      promises: [{ start_at: null, communicated_at: '2026-09-09T12:00:00-04:00', source: 'message' }],
+      events: [{ at: '2026-09-10T09:30:00-04:00', patch: { status: 'completed' } }],
+    }] });
+    for (const result of unknown.thresholds) expect(result.missing_promise_visits).toBe(1);
+  });
   test('coverage is measured at the decision points, not from the final state at `to` (round-4 P1)', () => {
     // The promise is communicated AFTER the visit is already completed, but
     // before the export window closes. Every production tick that could have
@@ -645,6 +668,45 @@ describe('loadPromiseEvents: an UNLINKED sms_log row is neutral, a sentinel sid 
   });
 });
 
+describe('recordSentWindowFallback (the audit row failed, the text went out) (round-9 P1)', () => {
+  const { recordSentWindowFallback } = require('../services/no-show-detector');
+  const { recordAuditEvent } = require('../services/audit-log');
+  beforeEach(() => recordAuditEvent.mockClear());
+
+  // persistAudit is best-effort: if its insert fails AFTER the provider
+  // accepted the text, the customer holds a window nothing records, the
+  // reminder is marked sent and never retried, and the detector later reads
+  // an OLDER window as the latest promise — a critical alert against a slot
+  // the customer was already moved off.
+  test('lands the promised window in the durable ledger this file already reads', async () => {
+    const startAtMs = Date.parse('2026-09-11T13:00:00.000Z');
+    expect(await recordSentWindowFallback({}, { visitId: 'visit-1', startAtMs, communicatedAt: '2026-09-10T12:00:00.000Z' })).toBe(true);
+    const [[event]] = recordAuditEvent.mock.calls;
+    expect(event).toMatchObject({ action: 'visit_window_promised', resource_type: 'scheduled_service', resource_id: 'visit-1', critical: true });
+    expect(event.metadata).toMatchObject({ start_at: '2026-09-11T13:00:00.000Z', communicated_at: '2026-09-10T12:00:00.000Z',
+      fallback_reason: 'messaging_audit_unavailable' });
+  });
+
+  test('a send with no visit or no rendered slot writes nothing', async () => {
+    expect(await recordSentWindowFallback({}, { visitId: null, startAtMs: 1 })).toBe(false);
+    expect(await recordSentWindowFallback({}, { visitId: 'visit-1', startAtMs: null })).toBe(false);
+    expect(await recordSentWindowFallback({}, { visitId: 'visit-1', startAtMs: 1, communicatedAt: 'not a date' })).toBe(false);
+    expect(recordAuditEvent).not.toHaveBeenCalled();
+  });
+
+  test('it never throws into the send path', async () => {
+    recordAuditEvent.mockRejectedValueOnce(new Error('ledger down'));
+    expect(await recordSentWindowFallback({}, { visitId: 'visit-1', startAtMs: Date.now() })).toBe(false);
+  });
+
+  // The sender calls it on exactly the path that loses the promise.
+  test('send-customer-message calls it when the audit row could not be written', () => {
+    const sender = require('fs').readFileSync(require('path').join(__dirname, '..', 'services', 'messaging', 'send-customer-message.js'), 'utf8');
+    expect(sender).toContain('if (!audit.id && sendInput.appointmentId && sendInput.renderedSlotMs != null');
+    expect(sender).toContain("require('../no-show-detector').recordSentWindowFallback(");
+  });
+});
+
 describe('callCommitmentInstant (when the customer heard the promise) (round-5 P2)', () => {
   const { callCommitmentInstant } = require('../services/no-show-detector');
   // Dated at the call's START, a promise the agent made 20 minutes into a
@@ -740,6 +802,34 @@ describe('seriesSupersessions: one series text supersedes every moved sibling (r
     // reminder landing in the same hour announces no series move.
     expect(joinSql).toContain("a.metadata->>'original_message_type' LIKE 'rain_out_moved%'");
     expect(joinSql).toContain("a.metadata->>'original_message_type' = 'reschedule_series_confirmation'");
+  });
+
+  test('only a text that ANNOUNCES a move can supersede — the placement confirmation cannot (round-9 P1)', async () => {
+    // A customer self-service placement move sends
+    // appointment_recurring_placement_confirmed, whose seeded copy says
+    // existing commitments stay as they are until staff review. Treating it
+    // as a supersession would drop a sibling's still-standing confirmation
+    // and leave a visit the customer expects with no alert at all.
+    let joinSql = null;
+    const chain = {};
+    for (const m of ['leftJoin', 'whereIn', 'whereRaw', 'whereNull', 'whereNotNull', 'where']) chain[m] = () => chain;
+    chain.join = (table, cb) => {
+      const onClause = { on: (arg) => { joinSql = arg.sql; return onClause; } };
+      cb.call(onClause);
+      return chain;
+    };
+    chain.select = () => Promise.resolve([]);
+    const conn = () => chain;
+    conn.raw = (sql) => ({ sql });
+    conn.isTransaction = true;
+    await loadPromiseEvents(conn, ['visit-1']);
+    // The message-type allowlist gates BOTH branches (the id match and the
+    // legacy anchor-notice fallback), so no other message type can qualify.
+    const allowlist = joinSql.slice(0, joinSql.indexOf('AND ('));
+    expect(allowlist).toContain("a.metadata->>'original_message_type' LIKE 'rain_out_moved%'");
+    expect(allowlist).toContain("a.metadata->>'original_message_type' = 'reschedule_series_confirmation'");
+    expect(joinSql).not.toContain('appointment_recurring_placement_confirmed');
+    expect(joinSql.indexOf("a.metadata->>'series_move_id' = sm.id::text")).toBeGreaterThan(joinSql.indexOf('AND ('));
   });
 
   test('the Quick Move moved-SMS carries the series move id it is the notification of', () => {

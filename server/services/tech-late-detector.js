@@ -166,7 +166,18 @@ async function runInner() {
             AND (
               a.resolved_at IS NULL
               OR (
-                LEFT(a.payload->>'scheduled_date', 10) = c.scheduled_date::text
+                -- RESOLVED rows suppress a re-raise only when THIS scanner
+                -- raised them. no-show-detector.js writes the same
+                -- scheduled_date/window_start/window_end onto its own
+                -- tracking alerts, so without this source check a tracking
+                -- alert resolved while GATE_NOSHOW_DETECTOR was on would
+                -- permanently suppress the legacy scanner for that visit
+                -- after the gate is switched back off — the kill switch
+                -- would come back to a poisoned fallback (codex P2, PR #4403
+                -- round 9). An unresolved row of either source still
+                -- suppresses: that is a live alert, whoever raised it.
+                COALESCE(a.payload->>'source', '') <> 'no_show_detector'
+                AND LEFT(a.payload->>'scheduled_date', 10) = c.scheduled_date::text
                 AND a.payload->>'window_start' = c.window_start::text
                 AND COALESCE(a.payload->>'window_end', '') = COALESCE(c.window_end::text, '')
               )

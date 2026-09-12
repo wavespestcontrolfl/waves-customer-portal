@@ -30,6 +30,7 @@ function replayVisit(item, { from, to, threshold }) {
   const emitted = new Set();
   let eventIndex = 0;
   let covered = false;
+  let knownBeforeThreshold = false;
   for (let at = Math.ceil(from.getTime() / 300000) * 300000; at <= to.getTime(); at += 300000) {
     const now = new Date(at);
     while (eventIndex < events.length && events[eventIndex].at <= at) {
@@ -59,9 +60,20 @@ function replayVisit(item, { from, to, threshold }) {
     // what keeps the unknown-window case (a legacy move notice) counted as
     // missing rather than covered (codex P1 af4925f71).
     if (!covered && LIVE_STATUSES.includes(state.status)) {
-      const start = promisedStartAt({ promise, now });
-      if (start != null && at >= start + threshold * 60000) covered = true;
-    }
+      const start = promisedStartAt({ promise, now, ignoreHorizon: true });
+      // A known window held while the visit was still live, but before the
+      // first threshold. On its own that is not coverage — the window can
+      // still be replaced by an unknown one before any decision point (the
+      // case above). It BECOMES coverage if the visit leaves LIVE_STATUSES
+      // before any threshold is reached: an on-time short visit completed at
+      // 09:30 against a 09:00 window never needed a decision at all, and
+      // counting it as missing evidence inflated the very denominator the
+      // rollout report is read for (codex P2 round 9).
+      if (start != null) {
+        if (at >= start + threshold * 60000) covered = true;
+        else knownBeforeThreshold = true;
+      }
+    } else if (!covered && knownBeforeThreshold) covered = true;
     const alert = evaluateNoShow({ visit: state, promise, now, stage1Minutes: threshold });
     if (!alert) continue;
     const key = `${alert.promised_window.start_at}:${alert.stage}`;

@@ -344,17 +344,25 @@ async function loadPromiseEvents(conn, visitIds, { now = new Date() } = {}) {
         // the one that committed the move (its reconciler retries inside a
         // 5-minute lease), so the anchor's own delivered MOVE NOTICE within
         // the hour after the move IS that text. Bounded on both sides in
-        // time, and restricted to the message types that actually announce a
-        // move (Quick Move's rain_out_moved* rungs and the series
-        // confirmation): a 24h reminder or a prep-info text that happens to
-        // land in the same hour announces no series move, and letting one
-        // stand in would supersede every sibling's promise on the strength of
-        // a text that never mentioned them (codex P1 round 7).
-        this.on(conn.raw(`a.metadata->>'series_move_id' = sm.id::text
-          OR (a.metadata->>'series_move_id' IS NULL AND a.appointment_id = sm.anchor_service_id
-            AND a.sent_at >= sm.created_at AND a.sent_at < sm.created_at + interval '1 hour'
-            AND (a.metadata->>'original_message_type' LIKE 'rain_out_moved%'
-              OR a.metadata->>'original_message_type' = 'reschedule_series_confirmation'))`));
+        // time, and BOTH branches are restricted to the message types that
+        // actually announce a move (Quick Move's rain_out_moved* rungs and
+        // the series confirmation): a 24h reminder or a prep-info text that
+        // happens to land in the same hour announces no series move, and
+        // letting one stand in would supersede every sibling's promise on the
+        // strength of a text that never mentioned them (codex P1 round 7).
+        // The allowlist also excludes the OTHER text a series move can send:
+        // `appointment_recurring_placement_confirmed`, the customer
+        // self-service placement notice whose seeded copy says existing
+        // commitments stay as they are until staff review. That text moves
+        // the cadence but deliberately does NOT retract the windows already
+        // promised, so treating it as a supersession would drop a sibling's
+        // still-standing confirmation and leave a visit the customer is
+        // expecting with no missing-tracking alert at all (codex P1 round 9).
+        this.on(conn.raw(`(a.metadata->>'original_message_type' LIKE 'rain_out_moved%'
+            OR a.metadata->>'original_message_type' = 'reschedule_series_confirmation')
+          AND (a.metadata->>'series_move_id' = sm.id::text
+            OR (a.metadata->>'series_move_id' IS NULL AND a.appointment_id = sm.anchor_service_id
+              AND a.sent_at >= sm.created_at AND a.sent_at < sm.created_at + interval '1 hour'))`));
       })
       .leftJoin('sms_log as s', 's.twilio_sid', 'a.provider_message_id')
       .where('sm.customer_notified', true)
@@ -538,6 +546,36 @@ async function recordAgreedWindow(conn, { callId, visitId } = {}) {
       metadata: { call_log_id: callId, start_at: new Date(target).toISOString(), communicated_at: callCommitmentInstant(call).toISOString() }, critical: true, trx });
     return true;
   });
+}
+
+// The messaging audit row is where a text's promised window lives, and
+// persistAudit is best-effort: if its insert fails AFTER Twilio accepted the
+// message, the customer holds a window nothing in the system records. The
+// reminder is marked sent and never retried, so the gap is permanent — the
+// detector then either sees no promise at all or falls back to an OLDER
+// communicated window and raises a critical alert against a slot the
+// customer was already moved off (codex P1 round 9). send-customer-message
+// calls this on exactly that path, so the promise lands in the durable
+// audit_log ledger this file already reads for call evidence. Deliberately
+// NOT gated on the detector or capture gates: it is one row, written only
+// when the primary ledger failed, and its whole purpose is to still be there
+// whenever the feature is switched on. Best-effort itself — a send must
+// never fail because its bookkeeping did.
+async function recordSentWindowFallback(conn, { visitId, startAtMs, communicatedAt = new Date(), reason = 'messaging_audit_unavailable' } = {}) {
+  // null BEFORE the Number conversion: Number(null) is 0, a finite instant
+  // (the epoch), so a bare isFinite check would stamp a 1970 window as the
+  // promise — the same null-before-conversion trap `instant` guards above.
+  if (!visitId || startAtMs == null || !Number.isFinite(Number(startAtMs))) return false;
+  const at = new Date(communicatedAt);
+  if (!Number.isFinite(at.getTime())) return false;
+  try {
+    await recordAuditEvent({ actor_type: 'system', action: 'visit_window_promised', resource_type: 'scheduled_service', resource_id: String(visitId),
+      metadata: { start_at: new Date(Number(startAtMs)).toISOString(), communicated_at: at.toISOString(), fallback_reason: reason }, critical: true });
+    return true;
+  } catch (err) {
+    require('./logger').warn(`[no-show-detector] promised-window fallback failed for ${visitId}: ${err.message}`);
+    return false;
+  }
 }
 
 async function listNoShows(conn, { now = new Date(), limit = 100, offset = 0, actorId = null, admin = true } = {}) {
@@ -795,4 +833,4 @@ async function sweep(conn, { now = new Date() } = {}) {
   return { alerted, active: rows.length };
 }
 
-module.exports = { enabled, captureEnabled, evaluateNoShow, promisedStartAt, trackingStage, agreedWindowStart, callCommitmentInstant, LIVE_STATUSES, latestPromises, loadPromiseEvents, seriesSupersessions, recordAgreedWindow, listNoShows, sweep, trackingKey, resolveLegacyCollision, alreadyHasOpenAlert, callerIdentityMatches, noticeStillCurrent };
+module.exports = { enabled, captureEnabled, evaluateNoShow, promisedStartAt, trackingStage, agreedWindowStart, callCommitmentInstant, LIVE_STATUSES, latestPromises, loadPromiseEvents, seriesSupersessions, recordAgreedWindow, recordSentWindowFallback, listNoShows, sweep, trackingKey, resolveLegacyCollision, alreadyHasOpenAlert, callerIdentityMatches, noticeStillCurrent };

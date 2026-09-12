@@ -570,6 +570,22 @@ async function sendCustomerMessage(input) {
     };
   }
 
+  // The audit row carries the promised window for a scheduling notice, and
+  // persistAudit is best-effort: when its insert fails after the provider
+  // accepted the message, the customer holds a window nothing records, the
+  // reminder is marked sent and never retried, and the no-show detector
+  // later reads an OLDER window as the latest promise (codex P1, PR #4403
+  // round 9). Land the promise in the durable audit_log ledger instead.
+  // Only for a send that actually quotes a slot for a known visit, and never
+  // blocking: the text is already out.
+  if (!audit.id && sendInput.appointmentId && sendInput.renderedSlotMs != null
+    && Number.isFinite(Number(sendInput.renderedSlotMs))) {
+    await require('../no-show-detector').recordSentWindowFallback(require('../../models/db'), {
+      visitId: sendInput.appointmentId, startAtMs: sendInput.renderedSlotMs,
+      communicatedAt: providerOutcome.sentAt || new Date(),
+    }).catch(() => {});
+  }
+
   return {
     sent: true,
     blocked: false,
