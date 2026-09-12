@@ -30,6 +30,19 @@ jest.mock('../models/db', () => {
       };
       return failing;
     }
+    // Fires once, on the SECOND scheduled_services lookup in a
+    // sendViaSMSAndEmail flow — the nested this.sendViaSMS(allowClaimed:true)
+    // call's own visitInvoiceRefusalUnderClaim recheck (pre-push P1 #4131,
+    // finding 1 follow-on). The outer claim's own recheck (the FIRST lookup)
+    // must succeed normally so the claim is taken before this fires.
+    if (table === 'scheduled_services' && mockFault.scheduledServicesLookupOnce) {
+      mockFault.scheduledServicesLookupOnce = false;
+      const failing = {
+        where() { return failing; },
+        first: () => new Promise((_, reject) => setTimeout(() => reject(new Error('transient scheduled_services lookup failure (injected)')), 5)),
+      };
+      return failing;
+    }
     return mockPg(table, ...args);
   };
   for (const name of ['raw', 'transaction', 'queryBuilder', 'ref']) db[name] = (...args) => mockPg[name](...args);
@@ -86,7 +99,7 @@ const InvoiceService = require('../services/invoice');
 const { completeScheduledService } = require('../services/complete-scheduled-service');
 const connection = process.env.VISIT_PACKET_TEST_DATABASE_URL;
 const postgres = connection ? describe : describe.skip;
-const mockFault = { smsLogOnce: false };
+const mockFault = { smsLogOnce: false, scheduledServicesLookupOnce: false };
 let database;
 let mockPg; // the per-test transaction while a test runs; the pool between tests
 jest.setTimeout(90000);
@@ -104,6 +117,7 @@ postgres('the shared send claim on a migrated database', () => {
   beforeEach(async () => {
     jest.clearAllMocks();
     mockFault.smsLogOnce = false;
+    mockFault.scheduledServicesLookupOnce = false;
     mockRace.afterMint = null;
     sendCustomerMessage.mockImplementation(async () => ({ sent: true, channel: 'sms', providerMessageId: `SM${randomUUID().slice(0, 8)}` }));
     mockPg = await database.transaction();
@@ -576,6 +590,47 @@ postgres('the shared send claim on a migrated database', () => {
         // runs anyway, and sendInvoiceEmail has no visit-status guard of its
         // own, so it delivers a full invoice email for a visit that never
         // ran (and would finalize the row 'sent' in the process).
+        expect(sendInvoiceEmail).not.toHaveBeenCalled();
+        const invoice = await readInvoice(f.invoiceId);
+        // The claim is restored, not finalized on the email leg — still
+        // exactly where it started.
+        expect(invoice.status).toBe('draft');
+        expect(invoice.sent_at).toBeNull();
+        expect(invoice.sms_sent_at).toBeNull();
+      } finally {
+        applySpy.mockRestore();
+      }
+    });
+
+    test('the nested coverage-lookup THROWS (not a found refusal) under the inner allowClaimed recheck: both channels are skipped and the claim is restored — WITHOUT the fix this reads as an ordinary SMS failure and the email leg still fires (pre-push P1 #4131, this round, finding 1 follow-on)', async () => {
+      await draftInvoiceFixture();
+      const { sendInvoiceEmail } = require('../services/invoice-email');
+      sendInvoiceEmail.mockClear();
+      const CustomerCredit = require('../services/customer-credit');
+      const applySpy = jest.spyOn(CustomerCredit, 'autoApplyAccountCreditIfEnabled').mockImplementationOnce(async () => {
+        // The race: the outer claim's own under-claim recheck (the FIRST
+        // scheduled_services lookup, inside reverifyClaimedVisitInvoice)
+        // already ran and found nothing wrong. Arm the fault so the NEXT
+        // scheduled_services lookup — the nested this.sendViaSMS's own
+        // allowClaimed recheck — throws instead of returning a status. This
+        // is deliberately NOT a found refusal (visit cancelled, prepaid,
+        // etc.) — it is the check itself failing to complete, which tells
+        // us nothing about whether the customer owes money.
+        mockFault.scheduledServicesLookupOnce = true;
+        return { applied: 0, fullyCovered: false };
+      });
+      try {
+        const result = await InvoiceService.sendViaSMSAndEmail(f.invoiceId);
+        expect(result.ok).toBe(false);
+        expect(result.sms).toMatchObject({ ok: false, invoiceWideRefusal: true });
+        expect(result.sms.error).toMatch(/transient scheduled_services lookup failure/);
+        expect(result.email.ok).toBe(false);
+        // THE bug: without the fix, the lookup failure is marked only
+        // deliveryNeverAttempted (not invoiceWideRefusal), so
+        // sendViaSMSAndEmail's catch reads it as an ordinary channel-specific
+        // SMS failure and falls through to the email leg — which has no
+        // equivalent visit-prepayment/coverage check of its own — instead of
+        // failing the whole send closed.
         expect(sendInvoiceEmail).not.toHaveBeenCalled();
         const invoice = await readInvoice(f.invoiceId);
         // The claim is restored, not finalized on the email leg — still

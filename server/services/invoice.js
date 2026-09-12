@@ -1398,6 +1398,22 @@ async function claimInvoiceForSend(invoiceId, { allowClaimed = false, firstDeliv
     try {
       underClaim = await visitInvoiceRefusalUnderClaim(current, "scheduled");
     } catch (lookupErr) {
+      // Fail closed (Codex pre-push audit P1 #4131, this round, finding
+      // 1 follow-on): this lookup throwing is NOT a channel-specific
+      // failure — it means we could not determine whether the invoice has
+      // anything left to collect. sendViaSMSAndEmail's nested
+      // this.sendViaSMS(allowClaimed:true) call lands here, and its catch
+      // only treats err.invoiceWideRefusal as "skip email too"; a throw
+      // marked with deliveryNeverAttempted alone reads as an ordinary SMS
+      // failure and falls through to the email leg, which has no
+      // equivalent visit-prepayment check (sendInvoiceEmail never checks
+      // it) — a prepayment recorded between this wrapper's outer claim
+      // and this recheck would then get a full-balance invoice EMAILED to
+      // a customer who already paid. A lookup that throws tells us
+      // nothing about whether the customer owes money, so it cannot
+      // license a send on the other channel: mark it invoiceWideRefusal
+      // too, exactly like the found-a-refusal branch below.
+      lookupErr.invoiceWideRefusal = true;
       lookupErr.deliveryNeverAttempted = true;
       throw lookupErr;
     }
