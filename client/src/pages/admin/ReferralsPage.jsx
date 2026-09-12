@@ -1,26 +1,24 @@
 import { useState, useEffect, useCallback } from "react";
-import { Users } from "lucide-react";
-import AdminCommandHeader from "../../components/admin/AdminCommandHeader";
-import {
-  ActionFeedback,
-  Badge,
-  Button,
-  Card,
-  CardBody,
-  CardHeader,
-  CardTitle,
-  Field,
-  Input,
-  Table,
-  THead,
-  TBody,
-  TR,
-  TH,
-  TD,
-  UiSurface,
-  buttonStyles,
-} from "../../components/ui";
+
 const API_BASE = import.meta.env.VITE_API_URL || "/api";
+// V2 token pass: `teal` + `purple` fold to zinc-900. Semantic accents preserved.
+const D = {
+  bg: "#F4F4F5",
+  card: "#FFFFFF",
+  border: "#E4E4E7",
+  teal: "#18181B",
+  green: "#15803D",
+  amber: "#A16207",
+  red: "#991B1B",
+  text: "#27272A",
+  muted: "#71717A",
+  white: "#FFFFFF",
+  purple: "#18181B",
+  heading: "#09090B",
+  inputBorder: "#D4D4D8",
+};
+const MONO = "'JetBrains Mono', monospace";
+
 function adminFetch(path, options = {}) {
   return fetch(`${API_BASE}${path}`, {
     headers: {
@@ -38,22 +36,79 @@ function fmtCents(c) {
   return "$" + (c / 100).toFixed(2);
 }
 
-function StatCard({ label, value, sub }) {
+function StatCard({ label, value, sub, color }) {
   return (
-    <Card>
-      <CardBody>
-        <p className="m-0 text-ui-body text-ink-secondary">{label}</p>
-        <p className="m-0 mt-2 text-[26px] font-medium">{value}</p>
-        {sub && (
-          <p className="m-0 mt-1 text-ui-body text-ink-secondary">{sub}</p>
-        )}
-      </CardBody>
-    </Card>
+    <div
+      style={{
+        background: D.card,
+        border: `1px solid ${D.border}`,
+        borderRadius: 12,
+        padding: "16px 20px",
+        flex: "1 1 0",
+        minWidth: 140,
+      }}
+    >
+      {" "}
+      <div
+        style={{
+          color: D.muted,
+          fontSize: 11,
+          textTransform: "uppercase",
+          letterSpacing: 1,
+          marginBottom: 6,
+        }}
+      >
+        {label}
+      </div>{" "}
+      <div
+        style={{
+          fontFamily: MONO,
+          fontSize: 26,
+          fontWeight: 700,
+          color: color || D.heading,
+        }}
+      >
+        {value}
+      </div>
+      {sub && (
+        <div style={{ fontSize: 12, color: D.muted, marginTop: 4 }}>{sub}</div>
+      )}
+    </div>
   );
 }
+
 function StatusBadge({ status }) {
-  return <Badge>{status}</Badge>;
+  const colors = {
+    pending: D.amber,
+    contacted: D.teal,
+    estimated: D.purple,
+    converted: D.green,
+    rejected: D.red,
+    expired: D.muted,
+    active: D.green,
+    paused: D.amber,
+    applied: D.green,
+  };
+  const c = colors[status] || D.muted;
+  return (
+    <span
+      style={{
+        fontSize: 10,
+        fontFamily: MONO,
+        textTransform: "uppercase",
+        padding: "2px 8px",
+        borderRadius: 6,
+        background: `${c}22`,
+        color: c,
+        letterSpacing: 0.5,
+      }}
+    >
+      {status}
+    </span>
+  );
 }
+
+// =========================================================================
 export default function ReferralsPage() {
   const [tab, setTab] = useState("dashboard");
   const [stats, setStats] = useState(null);
@@ -180,18 +235,66 @@ export default function ReferralsPage() {
 
   if (loading)
     return (
-      <UiSurface density="comfortable">
-        <p className="m-0 p-8 text-ui-body text-ink-secondary" role="status">
-          Loading referral program...
-        </p>
-      </UiSurface>
+      <div style={{ color: D.muted, padding: 60, textAlign: "center" }}>
+        Loading referral program...
+      </div>
     );
+
+  const thSt = {
+    padding: "10px 14px",
+    textAlign: "left",
+    fontSize: 11,
+    fontWeight: 500,
+    color: D.muted,
+    borderBottom: `1px solid ${D.border}`,
+    textTransform: "uppercase",
+    letterSpacing: "0.5px",
+  };
+  const thR = { ...thSt, textAlign: "right" };
+  const tdSt = {
+    padding: "10px 14px",
+    fontSize: 13,
+    color: D.text,
+    borderBottom: `1px solid ${D.border}`,
+  };
+  const tdR = { ...tdSt, textAlign: "right", fontFamily: MONO };
+  const inputSt = {
+    width: "100%",
+    padding: "8px 12px",
+    background: D.bg,
+    border: `1px solid ${D.border}`,
+    borderRadius: 8,
+    color: D.heading,
+    fontSize: 13,
+    outline: "none",
+    boxSizing: "border-box",
+  };
+
   return (
-    <UiSurface density="comfortable" className="space-y-4">
-      <AdminCommandHeader title="Referrals" icon={Users} variant="workspace" />
-      <nav
-        aria-label="Referral workspaces"
-        className="flex gap-2 overflow-x-auto pb-1"
+    <div>
+      {" "}
+      <h1
+        style={{
+          fontSize: 28,
+          fontWeight: 400,
+          color: D.heading,
+          margin: "0 0 24px",
+        }}
+      >
+        Referrals
+      </h1>
+      {/* Tabs */}
+      <div
+        style={{
+          display: "flex",
+          gap: 4,
+          marginBottom: 24,
+          background: D.card,
+          borderRadius: 10,
+          padding: 4,
+          border: `1px solid ${D.border}`,
+          overflowX: "auto",
+        }}
       >
         {[
           { key: "dashboard", label: "Dashboard" },
@@ -200,362 +303,710 @@ export default function ReferralsPage() {
           { key: "payouts", label: "Payouts" },
           { key: "enroll", label: "Enroll" },
         ].map((t) => (
-          <Button
+          <button
             key={t.key}
-            className="shrink-0 whitespace-nowrap"
-            variant={tab === t.key ? "primary" : "secondary"}
-            aria-pressed={tab === t.key}
             onClick={() => setTab(t.key)}
+            style={{
+              padding: "10px 18px",
+              borderRadius: 8,
+              border: "none",
+              cursor: "pointer",
+              fontSize: 13,
+              fontWeight: 500,
+              background: tab === t.key ? D.teal : "transparent",
+              color: tab === t.key ? D.white : D.muted,
+              transition: "all 0.15s",
+              whiteSpace: "nowrap",
+            }}
           >
             {t.label}
-          </Button>
+          </button>
         ))}
-      </nav>
+      </div>
+      {/* ═══ DASHBOARD ═══ */}
       {tab === "dashboard" && stats && (
-        <div className="space-y-4">
-          <div className="grid grid-cols-2 gap-4 xl:grid-cols-6">
-            <StatCard label="Active Promoters" value={stats.activePromoters} />
+        <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+          {" "}
+          <div style={{ display: "flex", gap: 12, flexWrap: "wrap" }}>
+            {" "}
+            <StatCard
+              label="Active Promoters"
+              value={stats.activePromoters}
+              color={D.green}
+            />{" "}
             <StatCard
               label="Total Referrals"
               value={stats.totalReferrals}
               sub={`${stats.convertedReferrals} converted`}
-            />
-            <StatCard label="Pending" value={stats.pendingReferrals} />
-            <StatCard label="Total Clicks" value={stats.totalClicks} />
+              color={D.teal}
+            />{" "}
+            <StatCard
+              label="Pending"
+              value={stats.pendingReferrals}
+              color={D.amber}
+            />{" "}
+            <StatCard
+              label="Total Clicks"
+              value={stats.totalClicks}
+              color={D.purple}
+            />{" "}
             <StatCard
               label="Total Earned"
               value={fmtCents(
                 stats.totalReferralRewards + stats.totalClickRewards,
               )}
-            />
+              color={D.green}
+            />{" "}
             <StatCard
               label="Paid Out"
               value={fmtCents(stats.totalPaidOut)}
               sub={`${stats.pendingPayouts} pending`}
-            />
+            />{" "}
           </div>
-          <Card>
-            <CardHeader>
-              <CardTitle>Recent Referrals</CardTitle>
-            </CardHeader>
-            <CardBody>
-              {queue.length === 0 ? (
-                <p className="m-0 text-ui-body text-ink-secondary">
-                  No referrals yet
-                </p>
-              ) : (
-                queue.slice(0, 10).map((r) => (
-                  <div
-                    key={r.id}
-                    className="flex flex-wrap items-center justify-between gap-3 border-b border-zinc-200 py-3"
-                  >
-                    <div className="min-w-0 break-words">
-                      <p className="m-0 text-ui-body font-medium">
-                        {r.referral_first_name} {r.referral_last_name}
-                      </p>
-                      <p className="m-0 text-ui-body text-ink-secondary">
-                        {r.referral_phone} · from {r.promoter_name || "unknown"}{" "}
-                        · {r.source}
-                      </p>
-                    </div>
-                    <StatusBadge status={r.status} />
-                  </div>
-                ))
-              )}
-            </CardBody>
-          </Card>
-          <Card>
-            <CardHeader>
-              <CardTitle>Top Promoters</CardTitle>
-            </CardHeader>
-            <CardBody>
-              {promoters.slice(0, 10).map((p) => (
+          {/* Recent referrals */}
+          <div
+            style={{
+              background: D.card,
+              borderRadius: 12,
+              padding: 20,
+              border: `1px solid ${D.border}`,
+            }}
+          >
+            {" "}
+            <div
+              style={{
+                fontSize: 16,
+                fontWeight: 500,
+                color: D.heading,
+                marginBottom: 14,
+              }}
+            >
+              Recent Referrals
+            </div>
+            {queue.length === 0 ? (
+              <div
+                style={{
+                  color: D.muted,
+                  fontSize: 13,
+                  padding: 20,
+                  textAlign: "center",
+                }}
+              >
+                No referrals yet
+              </div>
+            ) : (
+              queue.slice(0, 10).map((r) => (
                 <div
-                  key={p.id}
-                  className="flex flex-wrap items-center justify-between gap-3 border-b border-zinc-200 py-3"
+                  key={r.id}
+                  style={{
+                    display: "flex",
+                    justifyContent: "space-between",
+                    alignItems: "center",
+                    padding: "10px 0",
+                    borderBottom: `1px solid ${D.border}33`,
+                  }}
                 >
+                  {" "}
                   <div>
-                    <p className="m-0 text-ui-body font-medium">
-                      {p.first_name} {p.last_name}
-                    </p>
-                    <p className="m-0 text-ui-body text-ink-secondary">
-                      {p.total_referrals_converted} converted · {p.total_clicks}{" "}
-                      clicks
-                    </p>
-                  </div>
-                  <p className="m-0 text-ui-body font-medium">
-                    {fmtCents(p.total_earned_cents)}
-                  </p>
+                    {" "}
+                    <div
+                      style={{
+                        fontSize: 14,
+                        fontWeight: 500,
+                        color: D.heading,
+                      }}
+                    >
+                      {r.referral_first_name} {r.referral_last_name}
+                    </div>{" "}
+                    <div style={{ fontSize: 12, color: D.muted }}>
+                      {r.referral_phone} · from {r.promoter_name || "unknown"} ·{" "}
+                      {r.source}
+                    </div>{" "}
+                  </div>{" "}
+                  <StatusBadge status={r.status} />{" "}
                 </div>
-              ))}
-            </CardBody>
-          </Card>
+              ))
+            )}
+          </div>
+          {/* Top promoters */}
+          <div
+            style={{
+              background: D.card,
+              borderRadius: 12,
+              padding: 20,
+              border: `1px solid ${D.border}`,
+            }}
+          >
+            {" "}
+            <div
+              style={{
+                fontSize: 16,
+                fontWeight: 500,
+                color: D.heading,
+                marginBottom: 14,
+              }}
+            >
+              Top Promoters
+            </div>
+            {promoters.slice(0, 10).map((p) => (
+              <div
+                key={p.id}
+                style={{
+                  display: "flex",
+                  justifyContent: "space-between",
+                  alignItems: "center",
+                  padding: "8px 0",
+                  borderBottom: `1px solid ${D.border}33`,
+                }}
+              >
+                {" "}
+                <div>
+                  {" "}
+                  <div
+                    style={{ fontSize: 14, fontWeight: 500, color: D.heading }}
+                  >
+                    {p.first_name} {p.last_name}
+                  </div>{" "}
+                  <div style={{ fontSize: 12, color: D.muted }}>
+                    {p.total_referrals_converted} converted · {p.total_clicks}{" "}
+                    clicks
+                  </div>{" "}
+                </div>{" "}
+                <div
+                  style={{
+                    fontFamily: MONO,
+                    fontSize: 14,
+                    fontWeight: 700,
+                    color: D.green,
+                  }}
+                >
+                  {fmtCents(p.total_earned_cents)}
+                </div>{" "}
+              </div>
+            ))}
+          </div>{" "}
         </div>
       )}
+      {/* ═══ QUEUE ═══ */}
       {tab === "queue" && (
-        <div className="space-y-4">
-          <Card>
-            <CardHeader>
-              <CardTitle>Submit Referral</CardTitle>
-            </CardHeader>
-            <CardBody className="space-y-4">
-              <div className="grid gap-4 md:grid-cols-3">
-                {[
-                  ["promoterPhone", "Promoter phone"],
-                  ["firstName", "First name *"],
-                  ["lastName", "Last name"],
-                  ["phone", "Phone *"],
-                  ["email", "Email"],
-                  ["address", "Address"],
-                  ["notes", "Notes"],
-                ].map(([key, label]) => (
-                  <Field key={key} label={label}>
-                    <Input
-                      aria-label={label}
-                      value={refForm[key]}
-                      onChange={(e) =>
-                        setRefForm((f) => ({ ...f, [key]: e.target.value }))
-                      }
-                    />
-                  </Field>
-                ))}
+        <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+          {/* Submit referral form */}
+          <div
+            style={{
+              background: D.card,
+              borderRadius: 12,
+              padding: 20,
+              border: `1px solid ${D.border}`,
+            }}
+          >
+            {" "}
+            <div
+              style={{
+                fontSize: 14,
+                fontWeight: 500,
+                color: D.heading,
+                marginBottom: 12,
+              }}
+            >
+              Submit Referral
+            </div>{" "}
+            <div
+              style={{
+                display: "grid",
+                gridTemplateColumns: "1fr 1fr 1fr",
+                gap: 8,
+                marginBottom: 8,
+              }}
+            >
+              {" "}
+              <input
+                placeholder="First name *"
+                value={refForm.firstName}
+                onChange={(e) =>
+                  setRefForm((f) => ({ ...f, firstName: e.target.value }))
+                }
+                style={inputSt}
+              />{" "}
+              <input
+                placeholder="Last name"
+                value={refForm.lastName}
+                onChange={(e) =>
+                  setRefForm((f) => ({ ...f, lastName: e.target.value }))
+                }
+                style={inputSt}
+              />{" "}
+              <input
+                placeholder="Phone *"
+                value={refForm.phone}
+                onChange={(e) =>
+                  setRefForm((f) => ({ ...f, phone: e.target.value }))
+                }
+                style={inputSt}
+              />{" "}
+            </div>{" "}
+            <div
+              style={{
+                display: "grid",
+                gridTemplateColumns: "1fr 1fr 1fr",
+                gap: 8,
+                marginBottom: 8,
+              }}
+            >
+              {" "}
+              <input
+                placeholder="Email"
+                value={refForm.email}
+                onChange={(e) =>
+                  setRefForm((f) => ({ ...f, email: e.target.value }))
+                }
+                style={inputSt}
+              />{" "}
+              <input
+                placeholder="Referred by (phone)"
+                value={refForm.promoterPhone}
+                onChange={(e) =>
+                  setRefForm((f) => ({ ...f, promoterPhone: e.target.value }))
+                }
+                style={inputSt}
+              />{" "}
+              <input
+                placeholder="Address"
+                value={refForm.address}
+                onChange={(e) =>
+                  setRefForm((f) => ({ ...f, address: e.target.value }))
+                }
+                style={inputSt}
+              />{" "}
+            </div>{" "}
+            <div style={{ display: "flex", gap: 8 }}>
+              {" "}
+              <input
+                placeholder="Notes"
+                value={refForm.notes}
+                onChange={(e) =>
+                  setRefForm((f) => ({ ...f, notes: e.target.value }))
+                }
+                style={{ ...inputSt, flex: 1 }}
+              />{" "}
+              <button
+                onClick={handleSubmitReferral}
+                disabled={submitting}
+                style={{
+                  padding: "8px 20px",
+                  borderRadius: 8,
+                  border: "none",
+                  background: D.teal,
+                  color: "#fff",
+                  fontSize: 13,
+                  fontWeight: 500,
+                  cursor: "pointer",
+                  whiteSpace: "nowrap",
+                }}
+              >
+                {submitting ? "Submitting..." : "Submit"}
+              </button>{" "}
+            </div>{" "}
+          </div>
+          {/* Queue table */}
+          <div
+            style={{
+              background: D.card,
+              borderRadius: 12,
+              padding: 20,
+              border: `1px solid ${D.border}`,
+            }}
+          >
+            {" "}
+            <div
+              style={{
+                fontSize: 16,
+                fontWeight: 500,
+                color: D.heading,
+                marginBottom: 14,
+              }}
+            >
+              Referral Queue ({queue.length})
+            </div>
+            {queue.length === 0 ? (
+              <div
+                style={{
+                  color: D.muted,
+                  fontSize: 13,
+                  padding: 20,
+                  textAlign: "center",
+                }}
+              >
+                No pending referrals
               </div>
-              <Button disabled={submitting} onClick={handleSubmitReferral}>
-                {submitting ? "Submitting..." : "Submit Referral"}
-              </Button>
-            </CardBody>
-          </Card>
-          <Card>
-            <CardHeader>
-              <CardTitle>Referral Queue ({queue.length})</CardTitle>
-            </CardHeader>
-            <CardBody>
-              {queue.length === 0 ? (
-                <p className="m-0 text-ui-body text-ink-secondary">
-                  No pending referrals
-                </p>
-              ) : (
-                <Table layout="records">
-                  <THead>
-                    <TR>
-                      {["Referral", "From", "Status", "Notes", "Actions"].map(
-                        (label) => (
-                          <TH key={label}>{label}</TH>
-                        ),
-                      )}
-                    </TR>
-                  </THead>
-                  <TBody>
+            ) : (
+              <div style={{ overflowX: "auto" }}>
+                {" "}
+                <table style={{ width: "100%", borderCollapse: "collapse" }}>
+                  {" "}
+                  <thead>
+                    <tr>
+                      <th style={thSt}>Referral</th>
+                      <th style={thSt}>From</th>
+                      <th style={thSt}>Status</th>
+                      <th style={thSt}>Notes</th>
+                      <th style={thR}>Actions</th>
+                    </tr>
+                  </thead>{" "}
+                  <tbody>
                     {queue.map((r) => (
-                      <TR key={r.id}>
-                        <TD data-label="Referral">
-                          <div className="min-w-0 break-words">
-                            <p className="m-0 font-medium">
-                              {r.referral_first_name} {r.referral_last_name}
-                            </p>
-                            <p className="m-0 text-ink-secondary">
-                              {r.referral_phone}{" "}
-                              {r.referral_email ? `· ${r.referral_email}` : ""}
-                            </p>
-                          </div>
-                        </TD>
-                        <TD data-label="From">
+                      <tr key={r.id}>
+                        {" "}
+                        <td style={tdSt}>
+                          {" "}
+                          <div style={{ fontWeight: 500 }}>
+                            {r.referral_first_name} {r.referral_last_name}
+                          </div>{" "}
+                          <div style={{ fontSize: 11, color: D.muted }}>
+                            {r.referral_phone}{" "}
+                            {r.referral_email ? `· ${r.referral_email}` : ""}
+                          </div>{" "}
+                        </td>{" "}
+                        <td style={tdSt}>
                           {r.promoter_name || r.promoter_phone || "--"}
-                        </TD>
-                        <TD data-label="Status">
+                        </td>{" "}
+                        <td style={tdSt}>
                           <StatusBadge status={r.status} />
-                        </TD>
-                        <TD data-label="Notes">
+                        </td>{" "}
+                        <td style={{ ...tdSt, maxWidth: 200, fontSize: 12 }}>
                           {r.referral_notes || r.referral_address || "--"}
-                        </TD>
-                        <TD data-label="Actions">
-                          <div className="ui-record-actions">
+                        </td>{" "}
+                        <td style={tdR}>
+                          {" "}
+                          <div
+                            style={{
+                              display: "flex",
+                              gap: 4,
+                              justifyContent: "flex-end",
+                            }}
+                          >
                             {r.status === "pending" && (
-                              <Button
-                                variant="secondary"
+                              <button
                                 onClick={() =>
                                   handleStatusChange(r.id, "contacted")
                                 }
+                                style={{
+                                  padding: "3px 8px",
+                                  borderRadius: 4,
+                                  border: `1px solid ${D.teal}`,
+                                  background: "transparent",
+                                  color: D.teal,
+                                  fontSize: 10,
+                                  cursor: "pointer",
+                                }}
                               >
                                 Contacted
-                              </Button>
+                              </button>
                             )}
                             {(r.status === "contacted" ||
                               r.status === "estimated") && (
-                              <Button
+                              <button
                                 onClick={() =>
                                   handleStatusChange(r.id, "converted")
                                 }
+                                style={{
+                                  padding: "3px 8px",
+                                  borderRadius: 4,
+                                  border: "none",
+                                  background: D.green,
+                                  color: "#fff",
+                                  fontSize: 10,
+                                  cursor: "pointer",
+                                }}
                               >
                                 Convert
-                              </Button>
+                              </button>
                             )}
                             {r.status !== "converted" &&
                               r.status !== "rejected" && (
-                                <Button
-                                  variant="secondary"
+                                <button
                                   onClick={() =>
                                     handleStatusChange(r.id, "rejected")
                                   }
+                                  style={{
+                                    padding: "3px 8px",
+                                    borderRadius: 4,
+                                    border: `1px solid ${D.red}33`,
+                                    background: "transparent",
+                                    color: D.red,
+                                    fontSize: 10,
+                                    cursor: "pointer",
+                                  }}
                                 >
                                   Reject
-                                </Button>
+                                </button>
                               )}
-                          </div>
-                        </TD>
-                      </TR>
+                          </div>{" "}
+                        </td>{" "}
+                      </tr>
                     ))}
-                  </TBody>
-                </Table>
-              )}
-            </CardBody>
-          </Card>
+                  </tbody>{" "}
+                </table>{" "}
+              </div>
+            )}
+          </div>{" "}
         </div>
       )}
+      {/* ═══ PROMOTERS ═══ */}
       {tab === "promoters" && (
-        <Card>
-          <CardHeader>
-            <CardTitle>Promoters ({promoters.length})</CardTitle>
-          </CardHeader>
-          <CardBody>
-            <Table layout="records">
-              <THead>
-                <TR>
-                  {[
-                    "Name",
-                    "Phone",
-                    "Clicks",
-                    "Referrals",
-                    "Earned",
-                    "Balance",
-                    "Link",
-                  ].map((label) => (
-                    <TH key={label}>{label}</TH>
-                  ))}
-                </TR>
-              </THead>
-              <TBody>
+        <div
+          style={{
+            background: D.card,
+            borderRadius: 12,
+            padding: 20,
+            border: `1px solid ${D.border}`,
+          }}
+        >
+          {" "}
+          <div
+            style={{
+              fontSize: 16,
+              fontWeight: 500,
+              color: D.heading,
+              marginBottom: 14,
+            }}
+          >
+            Promoters ({promoters.length})
+          </div>{" "}
+          <div style={{ overflowX: "auto" }}>
+            {" "}
+            <table style={{ width: "100%", borderCollapse: "collapse" }}>
+              {" "}
+              <thead>
+                <tr>
+                  <th style={thSt}>Name</th>
+                  <th style={thSt}>Phone</th>
+                  <th style={thSt}>Clicks</th>
+                  <th style={thSt}>Referrals</th>
+                  <th style={thR}>Earned</th>
+                  <th style={thR}>Balance</th>
+                  <th style={thSt}>Link</th>
+                </tr>
+              </thead>{" "}
+              <tbody>
                 {promoters.map((p) => (
-                  <TR key={p.id}>
-                    <TD data-label="Name">
-                      <span className="font-medium">
+                  <tr key={p.id}>
+                    {" "}
+                    <td style={tdSt}>
+                      <span style={{ fontWeight: 500 }}>
                         {p.first_name} {p.last_name}
                       </span>
-                    </TD>
-                    <TD data-label="Phone">{p.customer_phone}</TD>
-                    <TD data-label="Clicks">{p.total_clicks}</TD>
-                    <TD data-label="Referrals">
+                    </td>{" "}
+                    <td style={{ ...tdSt, fontFamily: MONO, fontSize: 12 }}>
+                      {p.customer_phone}
+                    </td>{" "}
+                    <td style={tdR}>{p.total_clicks}</td>{" "}
+                    <td style={tdR}>
                       {p.total_referrals_converted}/{p.total_referrals_sent}
-                    </TD>
-                    <TD data-label="Earned">
+                    </td>{" "}
+                    <td style={{ ...tdR, color: D.green }}>
                       {fmtCents(p.total_earned_cents)}
-                    </TD>
-                    <TD data-label="Balance">
+                    </td>{" "}
+                    <td style={{ ...tdR, color: D.amber }}>
                       {fmtCents(
                         p.click_balance_cents + p.referral_balance_cents,
                       )}
-                    </TD>
-                    <TD data-label="Link">
+                    </td>{" "}
+                    <td style={tdSt}>
                       {p.clicki_referral_link ? (
                         <a
-                          className={buttonStyles({ variant: "secondary" })}
                           href={p.clicki_referral_link}
                           target="_blank"
                           rel="noopener noreferrer"
+                          style={{
+                            color: D.teal,
+                            fontSize: 11,
+                            textDecoration: "none",
+                          }}
                         >
                           Copy
                         </a>
                       ) : (
                         "--"
                       )}
-                    </TD>
-                  </TR>
+                    </td>{" "}
+                  </tr>
                 ))}
-              </TBody>
-            </Table>
-          </CardBody>
-        </Card>
+              </tbody>{" "}
+            </table>{" "}
+          </div>{" "}
+        </div>
       )}
+      {/* ═══ PAYOUTS ═══ */}
       {tab === "payouts" && (
-        <Card>
-          <CardHeader>
-            <CardTitle>Payouts</CardTitle>
-          </CardHeader>
-          <CardBody>
-            {payouts.length === 0 ? (
-              <p className="m-0 text-ui-body text-ink-secondary">
-                No payout requests yet
-              </p>
-            ) : (
-              <Table layout="records">
-                <THead>
-                  <TR>
-                    {["Promoter", "Amount", "Method", "Status", "Actions"].map(
-                      (label) => (
-                        <TH key={label}>{label}</TH>
-                      ),
-                    )}
-                  </TR>
-                </THead>
-                <TBody>
+        <div
+          style={{
+            background: D.card,
+            borderRadius: 12,
+            padding: 20,
+            border: `1px solid ${D.border}`,
+          }}
+        >
+          {" "}
+          <div
+            style={{
+              fontSize: 16,
+              fontWeight: 500,
+              color: D.heading,
+              marginBottom: 14,
+            }}
+          >
+            Payouts
+          </div>
+          {payouts.length === 0 ? (
+            <div
+              style={{
+                color: D.muted,
+                fontSize: 13,
+                padding: 20,
+                textAlign: "center",
+              }}
+            >
+              No payout requests yet
+            </div>
+          ) : (
+            <div style={{ overflowX: "auto" }}>
+              {" "}
+              <table style={{ width: "100%", borderCollapse: "collapse" }}>
+                {" "}
+                <thead>
+                  <tr>
+                    <th style={thSt}>Promoter</th>
+                    <th style={thR}>Amount</th>
+                    <th style={thSt}>Method</th>
+                    <th style={thSt}>Status</th>
+                    <th style={thR}>Actions</th>
+                  </tr>
+                </thead>{" "}
+                <tbody>
                   {payouts.map((p) => (
-                    <TR key={p.id}>
-                      <TD data-label="Promoter">
+                    <tr key={p.id}>
+                      {" "}
+                      <td style={tdSt}>
                         {p.first_name} {p.last_name}
-                      </TD>
-                      <TD data-label="Amount">{fmtCents(p.amount_cents)}</TD>
-                      <TD data-label="Method">{p.method?.replace("_", " ")}</TD>
-                      <TD data-label="Status">
+                      </td>{" "}
+                      <td style={{ ...tdR, color: D.green, fontWeight: 700 }}>
+                        {fmtCents(p.amount_cents)}
+                      </td>{" "}
+                      <td style={tdSt}>{p.method?.replace("_", " ")}</td>{" "}
+                      <td style={tdSt}>
                         <StatusBadge status={p.status} />
-                      </TD>
-                      <TD data-label="Actions">
+                      </td>{" "}
+                      <td style={tdR}>
                         {p.status === "pending" && (
-                          <Button onClick={() => handleApprovePayout(p.id)}>
+                          <button
+                            onClick={() => handleApprovePayout(p.id)}
+                            style={{
+                              padding: "3px 8px",
+                              borderRadius: 4,
+                              border: "none",
+                              background: D.green,
+                              color: "#fff",
+                              fontSize: 10,
+                              cursor: "pointer",
+                            }}
+                          >
                             Approve
-                          </Button>
+                          </button>
                         )}
-                      </TD>
-                    </TR>
+                      </td>{" "}
+                    </tr>
                   ))}
-                </TBody>
-              </Table>
-            )}
-          </CardBody>
-        </Card>
+                </tbody>{" "}
+              </table>{" "}
+            </div>
+          )}
+        </div>
       )}
+      {/* ═══ ENROLL ═══ */}
       {tab === "enroll" && (
-        <Card className="max-w-xl">
-          <CardHeader>
-            <CardTitle>Enroll New Promoter</CardTitle>
-          </CardHeader>
-          <CardBody className="space-y-4">
-            {[
-              ["firstName", "First name *"],
-              ["lastName", "Last name"],
-              ["phone", "Phone *"],
-              ["email", "Email"],
-            ].map(([key, label]) => (
-              <Field key={key} label={label}>
-                <Input
-                  aria-label={label}
-                  value={enrollForm[key]}
-                  onChange={(e) =>
-                    setEnrollForm((f) => ({ ...f, [key]: e.target.value }))
-                  }
-                />
-              </Field>
-            ))}
-            <Button onClick={handleEnroll} disabled={enrolling}>
+        <div
+          style={{
+            background: D.card,
+            borderRadius: 12,
+            padding: 24,
+            border: `1px solid ${D.border}`,
+            maxWidth: 500,
+          }}
+        >
+          {" "}
+          <div
+            style={{
+              fontSize: 16,
+              fontWeight: 500,
+              color: D.heading,
+              marginBottom: 16,
+            }}
+          >
+            Enroll New Promoter
+          </div>{" "}
+          <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+            {" "}
+            <input
+              placeholder="First name *"
+              value={enrollForm.firstName}
+              onChange={(e) =>
+                setEnrollForm((f) => ({ ...f, firstName: e.target.value }))
+              }
+              style={inputSt}
+            />{" "}
+            <input
+              placeholder="Last name"
+              value={enrollForm.lastName}
+              onChange={(e) =>
+                setEnrollForm((f) => ({ ...f, lastName: e.target.value }))
+              }
+              style={inputSt}
+            />{" "}
+            <input
+              placeholder="Phone *"
+              value={enrollForm.phone}
+              onChange={(e) =>
+                setEnrollForm((f) => ({ ...f, phone: e.target.value }))
+              }
+              style={inputSt}
+            />{" "}
+            <input
+              placeholder="Email"
+              value={enrollForm.email}
+              onChange={(e) =>
+                setEnrollForm((f) => ({ ...f, email: e.target.value }))
+              }
+              style={inputSt}
+            />{" "}
+            <button
+              onClick={handleEnroll}
+              disabled={enrolling}
+              style={{
+                padding: "12px 24px",
+                borderRadius: 8,
+                border: "none",
+                background: D.teal,
+                color: "#fff",
+                fontSize: 14,
+                fontWeight: 500,
+                cursor: "pointer",
+              }}
+            >
               {enrolling ? "Enrolling..." : "Enroll Promoter"}
-            </Button>
+            </button>
             {enrollResult && (
-              <ActionFeedback error={enrollResult.includes("Error")}>
+              <div
+                style={{
+                  fontSize: 13,
+                  color: enrollResult.includes("Error") ? D.red : D.green,
+                }}
+              >
                 {enrollResult}
-              </ActionFeedback>
+              </div>
             )}
-          </CardBody>
-        </Card>
+          </div>{" "}
+        </div>
       )}
-    </UiSurface>
+    </div>
   );
 }

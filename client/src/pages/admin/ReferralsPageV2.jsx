@@ -1,5 +1,4 @@
-import { useState, useEffect, useCallback } from "react";
-import { createPortal } from "react-dom";
+import { useCallback, useEffect, useState } from "react";
 import {
   BarChart3,
   DollarSign,
@@ -10,27 +9,35 @@ import {
   Users,
 } from "lucide-react";
 import AdminCommandHeader from "../../components/admin/AdminCommandHeader";
+import {
+  ActionFeedback,
+  Badge,
+  Button,
+  Card,
+  CardBody,
+  CardHeader,
+  CardTitle,
+  Dialog,
+  DialogBody,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+  Field,
+  Input,
+  Select,
+  Switch,
+  Table,
+  TBody,
+  TD,
+  TH,
+  THead,
+  TR,
+  Textarea,
+  UiSurface,
+} from "../../components/ui";
 import { getAdminUser } from "../../lib/adminAuth";
-import useIsMobile from "../../hooks/useIsMobile";
 
 const API = import.meta.env.VITE_API_URL || "/api";
-// V2 token pass: `teal` + `purple` fold to zinc-900. Semantic green/amber/red preserved.
-const D = {
-  bg: "#F4F4F5",
-  card: "#FFFFFF",
-  border: "#E4E4E7",
-  teal: "#18181B",
-  green: "#15803D",
-  amber: "#A16207",
-  red: "#991B1B",
-  text: "#27272A",
-  muted: "#71717A",
-  white: "#FFFFFF",
-  purple: "#18181B",
-  heading: "#09090B",
-  inputBorder: "#D4D4D8",
-};
-const MONO = "'JetBrains Mono', monospace";
 
 function af(path, opts = {}) {
   return fetch(`${API}${path}`, {
@@ -39,183 +46,76 @@ function af(path, opts = {}) {
       "Content-Type": "application/json",
     },
     ...opts,
-  }).then((r) => {
-    if (!r.ok) throw new Error(`HTTP ${r.status}`);
-    return r.json();
+  }).then((response) => {
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    return response.json();
   });
 }
 
 const fc = (c) => "$" + (c / 100).toFixed(2);
 const fd = (d) => "$" + parseFloat(d || 0).toFixed(2);
-
-// Badge colors
-// Zinc ramp — the label carries the milestone, not a colour.
-const MILESTONE_COLORS = {
-  none: D.muted,
-  advocate: "#52525B",
-  ambassador: "#3F3F46",
-  champion: "#18181B",
-};
 const MILESTONE_LABELS = {
   none: "--",
   advocate: "Advocate",
   ambassador: "Ambassador",
   champion: "Champion",
 };
+// Referral status is one of pending/contacted/estimated/sms_failed/
+// signed_up/credited/rejected/lost; payout status is pending/applied. Main
+// colors sms_failed/rejected red (genuine alert) and signed_up/credited/
+// applied green (kept via the kit's "strong" tone — the established
+// substitute across Tier1 migrations; the kit has no green tone), folding
+// everything else (pending/contacted/estimated/lost) to neutral.
+const STATUS_ALERTS = new Set(["sms_failed", "rejected"]);
+const STATUS_STRONG = new Set(["signed_up", "credited", "applied"]);
 
-function Stat({ label, value, sub, color }) {
+function StatusBadge({ status }) {
   return (
-    <div
-      style={{
-        background: D.card,
-        border: `1px solid ${D.border}`,
-        borderRadius: 12,
-        padding: "16px 20px",
-        flex: "1 1 0",
-        minWidth: 130,
-      }}
+    <Badge
+      tone={
+        STATUS_ALERTS.has(status)
+          ? "alert"
+          : STATUS_STRONG.has(status)
+            ? "strong"
+            : "neutral"
+      }
     >
-      {" "}
-      <div
-        style={{
-          color: D.muted,
-          fontSize: 11,
-          textTransform: "uppercase",
-          letterSpacing: 1,
-          marginBottom: 6,
-        }}
-      >
-        {label}
-      </div>{" "}
-      <div
-        style={{
-          fontFamily: MONO,
-          fontSize: 24,
-          fontWeight: 700,
-          color: color || D.heading,
-        }}
-      >
-        {value}
-      </div>
-      {sub && (
-        <div style={{ fontSize: 12, color: D.muted, marginTop: 4 }}>{sub}</div>
-      )}
-    </div>
-  );
-}
-
-function Badge({ status }) {
-  const c =
-    {
-      pending: D.amber,
-      contacted: D.teal,
-      estimated: D.purple,
-      sms_failed: D.red,
-      signed_up: D.green,
-      credited: D.green,
-      rejected: D.red,
-      expired: D.muted,
-      active: D.green,
-      applied: D.green,
-      pending_service: D.amber,
-      earned: D.green,
-      paid: D.green,
-    }[status] || D.muted;
-  return (
-    <span
-      style={{
-        fontSize: 10,
-        fontFamily: MONO,
-        textTransform: "uppercase",
-        padding: "2px 8px",
-        borderRadius: 6,
-        background: `${c}22`,
-        color: c,
-        letterSpacing: 0.5,
-      }}
-    >
-      {status?.replace("_", " ")}
-    </span>
+      {status?.replaceAll("_", " ") || "--"}
+    </Badge>
   );
 }
 
 function MilestoneBadge({ level }) {
-  const c = MILESTONE_COLORS[level] || D.muted;
   const label = MILESTONE_LABELS[level] || level;
-  if (level === "none")
-    return <span style={{ color: D.muted, fontSize: 11 }}>--</span>;
+  if (!level || level === "none")
+    return <span className="text-ink-secondary">--</span>;
   return (
-    <span
-      style={{
-        fontSize: 10,
-        fontWeight: 700,
-        padding: "2px 10px",
-        borderRadius: 10,
-        background: `${c}22`,
-        color: c,
-        textTransform: "uppercase",
-        letterSpacing: 0.5,
-      }}
-    >
-      {label}
-    </span>
+    <Badge tone={level === "champion" ? "strong" : "neutral"}>{label}</Badge>
   );
 }
 
-// Shared styles
-const thSt = {
-  padding: "10px 14px",
-  textAlign: "left",
-  fontSize: 11,
-  fontWeight: 500,
-  color: D.muted,
-  borderBottom: `1px solid ${D.border}`,
-  textTransform: "uppercase",
-  letterSpacing: "0.5px",
-};
-const thR = { ...thSt, textAlign: "right" };
-const tdSt = {
-  padding: "10px 14px",
-  fontSize: 13,
-  color: D.text,
-  borderBottom: `1px solid ${D.border}`,
-};
-const tdR = { ...tdSt, textAlign: "right", fontFamily: MONO };
-const inputSt = {
-  width: "100%",
-  padding: "8px 12px",
-  background: D.bg,
-  border: `1px solid ${D.border}`,
-  borderRadius: 8,
-  color: D.heading,
-  fontSize: 13,
-  outline: "none",
-  boxSizing: "border-box",
-};
-const btnPrimary = {
-  padding: "8px 18px",
-  borderRadius: 8,
-  border: "none",
-  background: D.teal,
-  color: "#fff",
-  fontSize: 13,
-  fontWeight: 500,
-  cursor: "pointer",
-};
-const btnSmall = (color) => ({
-  padding: "3px 10px",
-  borderRadius: 4,
-  border: "none",
-  background: color,
-  color: D.heading,
-  fontSize: 10,
-  fontWeight: 500,
-  cursor: "pointer",
-});
+function Stat({ label, value, sub }) {
+  return (
+    <Card className="min-w-[150px] flex-1 border-0 bg-zinc-50">
+      <CardBody>
+        <div className="text-14 font-medium text-ink-secondary">{label}</div>
+        <div className="mt-1 text-20 font-medium tabular-nums text-zinc-900">
+          {value}
+        </div>
+        {sub && <div className="mt-1 text-14 text-ink-secondary">{sub}</div>}
+      </CardBody>
+    </Card>
+  );
+}
 
-// The flat 6-tab bar is grouped into parent sections, each revealing its leaf
-// tabs in a sub-row. `tab` still holds the LEAF key, so every {tab === "..."}
-// render block below is unchanged.
+function EmptyState({ children }) {
+  return (
+    <p className="m-0 py-5 text-center text-14 text-ink-secondary">
+      {children}
+    </p>
+  );
+}
+
 const REFERRALS_TAB_LEAVES = [
   { key: "dashboard", label: "Dashboard", Icon: LayoutDashboard },
   { key: "queue", label: "Queue", Icon: ListChecks },
@@ -241,11 +141,101 @@ const REFERRALS_TAB_GROUPS = [
   { key: "settings", label: "Settings", Icon: Settings, tabs: ["settings"] },
 ];
 const REFERRALS_LEAF_BY_KEY = Object.fromEntries(
-  REFERRALS_TAB_LEAVES.map((l) => [l.key, l]),
+  REFERRALS_TAB_LEAVES.map((leaf) => [leaf.key, leaf]),
 );
 
+const SETTINGS_FIELDS = [
+  {
+    section: "Rewards",
+    items: [
+      {
+        key: "referrer_reward_cents",
+        label: "Referrer Reward (cents)",
+        type: "number",
+      },
+      {
+        key: "referee_discount_cents",
+        label: "Referee Discount (cents)",
+        type: "number",
+      },
+    ],
+  },
+  {
+    section: "Tier Bonuses",
+    items: [
+      {
+        key: "bonus_silver_cents",
+        label: "Silver Bonus (cents)",
+        type: "number",
+      },
+      { key: "bonus_gold_cents", label: "Gold Bonus (cents)", type: "number" },
+      {
+        key: "bonus_platinum_cents",
+        label: "Platinum Bonus (cents)",
+        type: "number",
+      },
+    ],
+  },
+  {
+    section: "Milestones",
+    items: [
+      {
+        key: "milestone_3_bonus_cents",
+        label: "3 Referrals Bonus (cents)",
+        type: "number",
+      },
+      {
+        key: "milestone_5_bonus_cents",
+        label: "5 Referrals Bonus (cents)",
+        type: "number",
+      },
+      {
+        key: "milestone_10_bonus_cents",
+        label: "10 Referrals Bonus (cents)",
+        type: "number",
+      },
+    ],
+  },
+  {
+    section: "Fraud Prevention",
+    items: [
+      {
+        key: "max_referrals_per_month",
+        label: "Max Referrals / Month",
+        type: "number",
+      },
+      { key: "cooldown_days", label: "Cooldown Days", type: "number" },
+      { key: "min_payout_cents", label: "Min Payout (cents)", type: "number" },
+    ],
+  },
+  {
+    section: "Program",
+    items: [
+      { key: "program_active", label: "Program Active", type: "boolean" },
+      { key: "auto_credit_enabled", label: "Auto Credit", type: "boolean" },
+      {
+        key: "require_service_completion",
+        label: "Require 1st Service",
+        type: "boolean",
+      },
+      { key: "base_url", label: "Base URL", type: "text" },
+    ],
+  },
+  {
+    section: "SMS Templates",
+    items: [
+      { key: "invite_sms_template", label: "Invite SMS", type: "textarea" },
+      { key: "reward_sms_template", label: "Reward SMS", type: "textarea" },
+      {
+        key: "milestone_sms_template",
+        label: "Milestone SMS",
+        type: "textarea",
+      },
+    ],
+  },
+];
+
 export default function ReferralsPageV2() {
-  const isMobile = useIsMobile();
   const [tab, setTab] = useState("dashboard");
   const [stats, setStats] = useState(null);
   const [promoters, setPromoters] = useState([]);
@@ -256,15 +246,29 @@ export default function ReferralsPageV2() {
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState("");
   const [msg, setMsg] = useState(null);
-
-  // Modals
   const [convertModal, setConvertModal] = useState(null);
   const [enrollModal, setEnrollModal] = useState(false);
   const [settingsEditing, setSettingsEditing] = useState(null);
-
-  // Customer search for enroll/convert
   const [custSearch, setCustSearch] = useState("");
   const [custResults, setCustResults] = useState([]);
+  const [submitting, setSubmitting] = useState(false);
+  const [converting, setConverting] = useState(false);
+  const [enrolling, setEnrolling] = useState(false);
+  const [savingSettings, setSavingSettings] = useState(false);
+  const [approvingPayout, setApprovingPayout] = useState(null);
+  const [refForm, setRefForm] = useState({
+    promoterId: "",
+    name: "",
+    phone: "",
+    email: "",
+    address: "",
+    notes: "",
+  });
+
+  const flash = useCallback((message) => {
+    setMsg(message);
+    window.setTimeout(() => setMsg(null), 3000);
+  }, []);
 
   const load = useCallback(() => {
     setLoading(true);
@@ -315,12 +319,8 @@ export default function ReferralsPageV2() {
     }
   };
 
-  const flash = (m) => {
-    setMsg(m);
-    setTimeout(() => setMsg(null), 3000);
-  };
-
   const handleEnroll = async (customerId) => {
+    setEnrolling(true);
     try {
       await af("/admin/referrals/enroll", {
         method: "POST",
@@ -331,15 +331,13 @@ export default function ReferralsPageV2() {
       setCustSearch("");
       setCustResults([]);
       load();
-    } catch (e) {
-      flash("Error: " + e.message);
+    } catch (error) {
+      flash("Error: " + error.message);
+    } finally {
+      setEnrolling(false);
     }
   };
 
-  // Status changes are admin-only server-side (PATCH /:id/status is
-  // requireAdmin); the buttons are hidden for technicians below, and the
-  // catch keeps any refusal (403/409 guard) visible instead of an
-  // unhandled rejection.
   const isAdmin = getAdminUser()?.role === "admin";
   const handleStatusChange = async (id, status) => {
     try {
@@ -348,13 +346,14 @@ export default function ReferralsPageV2() {
         body: JSON.stringify({ status }),
       });
       load();
-    } catch (e) {
-      flash("Error: " + e.message);
+    } catch (error) {
+      flash("Error: " + error.message);
     }
   };
 
   const handleConvert = async () => {
     if (!convertModal) return;
+    setConverting(true);
     try {
       await af(`/admin/referrals/${convertModal.id}/convert`, {
         method: "POST",
@@ -366,51 +365,59 @@ export default function ReferralsPageV2() {
       });
       flash("Referral converted");
       setConvertModal(null);
+      setCustSearch("");
+      setCustResults([]);
       load();
-    } catch (e) {
-      flash("Error: " + e.message);
+    } catch (error) {
+      flash("Error: " + error.message);
+    } finally {
+      setConverting(false);
     }
   };
 
   const handleApprovePayout = async (id) => {
-    await af(`/admin/referrals/payouts/${id}/approve`, {
-      method: "POST",
-      body: JSON.stringify({}),
-    });
-    flash("Payout approved");
-    load();
+    setApprovingPayout(id);
+    try {
+      await af(`/admin/referrals/payouts/${id}/approve`, {
+        method: "POST",
+        body: JSON.stringify({}),
+      });
+      flash("Payout approved");
+      load();
+    } catch (error) {
+      flash("Error: " + error.message);
+    } finally {
+      setApprovingPayout(null);
+    }
   };
 
   const handleSaveSettings = async () => {
     if (!settingsEditing) return;
+    setSavingSettings(true);
     try {
-      const r = await af("/admin/referrals/settings", {
+      const result = await af("/admin/referrals/settings", {
         method: "PUT",
         body: JSON.stringify(settingsEditing),
       });
-      setSettings(r.settings);
+      setSettings(result.settings);
       setSettingsEditing(null);
       flash("Settings saved");
-    } catch (e) {
-      flash("Error: " + e.message);
+    } catch (error) {
+      flash("Error: " + error.message);
+    } finally {
+      setSavingSettings(false);
     }
   };
 
-  const copyLink = (link) => {
-    navigator.clipboard.writeText(link);
-    flash("Copied");
+  const copyLink = async (link) => {
+    try {
+      await navigator.clipboard.writeText(link);
+      flash("Copied");
+    } catch (error) {
+      flash("Error: " + error.message);
+    }
   };
 
-  // Submit referral form state
-  const [refForm, setRefForm] = useState({
-    promoterId: "",
-    name: "",
-    phone: "",
-    email: "",
-    address: "",
-    notes: "",
-  });
-  const [submitting, setSubmitting] = useState(false);
   const handleSubmitRef = async () => {
     if (!refForm.name || !refForm.phone) return;
     setSubmitting(true);
@@ -429,1439 +436,864 @@ export default function ReferralsPageV2() {
       });
       flash("Referral submitted");
       load();
-    } catch (e) {
-      flash("Error: " + e.message);
+    } catch (error) {
+      flash("Error: " + error.message);
+    } finally {
+      setSubmitting(false);
     }
-    setSubmitting(false);
   };
 
-  if (loading) {
-    return (
-      <div>
-        {" "}
-        <AdminCommandHeader title="Referrals" icon={Gift} />{" "}
-        <div style={{ color: D.muted, padding: 60, textAlign: "center" }}>
-          Loading referral program...
-        </div>{" "}
-      </div>
-    );
-  }
-
   const activeGroup =
-    REFERRALS_TAB_GROUPS.find((g) => g.tabs.includes(tab)) ||
+    REFERRALS_TAB_GROUPS.find((group) => group.tabs.includes(tab)) ||
     REFERRALS_TAB_GROUPS[0];
-
+  const secondarySections =
+    activeGroup.tabs.length > 1
+      ? activeGroup.tabs.map((key) => REFERRALS_LEAF_BY_KEY[key])
+      : [];
   const filteredPromoters = search
-    ? promoters.filter((p) =>
-        `${p.first_name} ${p.last_name} ${p.customer_phone} ${p.referral_code}`
+    ? promoters.filter((promoter) =>
+        `${promoter.first_name} ${promoter.last_name} ${promoter.customer_phone} ${promoter.referral_code}`
           .toLowerCase()
           .includes(search.toLowerCase()),
       )
     : promoters;
+  const header = (
+    <AdminCommandHeader
+      title="Referrals"
+      icon={Gift}
+      sections={REFERRALS_TAB_GROUPS.map((group) =>
+        group.key === "queue"
+          ? { ...group, label: `${group.label} (${queue.length})` }
+          : group,
+      )}
+      activeKey={activeGroup.key}
+      onSectionChange={(key) => {
+        const group = REFERRALS_TAB_GROUPS.find((item) => item.key === key);
+        if (group) setTab(group.tabs[0]);
+      }}
+      ariaLabel="Referrals section"
+      secondarySections={secondarySections}
+      secondaryActiveKey={tab}
+      onSecondaryChange={setTab}
+      secondaryAriaLabel={`${activeGroup.label} views`}
+      variant="workspace"
+    />
+  );
+
+  if (loading)
+    return (
+      <UiSurface
+        density="comfortable"
+        className="mx-auto max-w-[1300px] text-ui-body text-ink-primary"
+      >
+        {header}
+        <Card>
+          <CardBody>
+            <EmptyState>Loading referral program...</EmptyState>
+          </CardBody>
+        </Card>
+      </UiSurface>
+    );
 
   return (
-    <div>
-      {" "}
-      <AdminCommandHeader
-        title="Referrals"
-        icon={Gift}
-        sections={REFERRALS_TAB_GROUPS.map((g) =>
-          g.key === "queue"
-            ? { key: g.key, label: `${g.label} (${queue.length})`, Icon: g.Icon }
-            : { key: g.key, label: g.label, Icon: g.Icon },
-        )}
-        activeKey={activeGroup.key}
-        onSectionChange={(key) => {
-          const g = REFERRALS_TAB_GROUPS.find((x) => x.key === key);
-          if (g) setTab(g.tabs[0]);
-        }}
-        ariaLabel="Referrals section"
-        navGridClassName="grid-cols-2 md:grid-cols-4 xl:grid-cols-4"
-      />
-      {activeGroup.tabs.length > 1 && (
-        <div
-          style={{
-            display: "flex",
-            flexWrap: "wrap",
-            gap: 8,
-            marginBottom: 16,
-          }}
-        >
-          {activeGroup.tabs.map((key) => {
-            const leaf = REFERRALS_LEAF_BY_KEY[key];
-            const active = tab === key;
-            const LeafIcon = leaf.Icon;
-            return (
-              <button
-                key={key}
-                type="button"
-                onClick={() => setTab(key)}
-                style={{
-                  display: "inline-flex",
-                  alignItems: "center",
-                  gap: 6,
-                  height: 36,
-                  padding: "0 14px",
-                  borderRadius: 6,
-                  fontSize: 12,
-                  fontWeight: 700,
-                  textTransform: "uppercase",
-                  letterSpacing: "0.04em",
-                  cursor: "pointer",
-                  border: `1px solid ${active ? "#18181B" : "#E4E4E7"}`,
-                  background: active ? "#18181B" : "#FFFFFF",
-                  color: active ? "#fff" : "#27272A",
-                }}
-              >
-                <LeafIcon size={14} strokeWidth={1.9} />
-                {leaf.label}
-              </button>
-            );
-          })}
-        </div>
-      )}
+    <UiSurface
+      density="comfortable"
+      className="mx-auto max-w-[1300px] space-y-4 text-ui-body text-ink-primary"
+    >
+      {header}
       {msg && (
-        <div
-          style={{
-            padding: "8px 14px",
-            borderRadius: 6,
-            background: msg.includes("Error") ? `${D.red}22` : D.bg,
-            border: `1px solid ${msg.includes("Error") ? D.red : D.border}`,
-            color: msg.includes("Error") ? D.red : D.heading,
-            fontSize: 13,
-            marginBottom: 16,
-          }}
-        >
-          {msg}
-        </div>
+        <ActionFeedback error={msg.startsWith("Error:")}>{msg}</ActionFeedback>
       )}
-      {/* DASHBOARD */}
+
       {tab === "dashboard" && stats && (
-        <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
-          {" "}
-          <div style={{ display: "flex", gap: 12, flexWrap: "wrap" }}>
-            {" "}
-            <Stat
-              label="Active Promoters"
-              value={stats.activePromoters}
-              color={D.green}
-            />{" "}
+        <div className="space-y-4">
+          <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-3">
+            <Stat label="Active Promoters" value={stats.activePromoters} />
             <Stat
               label="Referrals"
               value={stats.totalReferrals}
               sub={`${stats.convertedReferrals} converted`}
-              color={D.teal}
-            />{" "}
-            <Stat
-              label="Pending"
-              value={stats.pendingReferrals}
-              color={D.amber}
-            />{" "}
-            <Stat
-              label="Total Rewards"
-              value={fd(stats.totalRewardsDollars)}
-              color={D.green}
-            />{" "}
+            />
+            <Stat label="Pending" value={stats.pendingReferrals} />
+            <Stat label="Total Rewards" value={fd(stats.totalRewardsDollars)} />
             <Stat
               label="Paid Out"
               value={fc(stats.totalPaidOutCents)}
               sub={`${stats.pendingPayouts} pending`}
-            />{" "}
-            <Stat
-              label="Program ROI"
-              value={`${stats.programROI}%`}
-              color={stats.programROI > 0 ? D.green : D.red}
-            />{" "}
-          </div>{" "}
-          <div style={{ display: "flex", gap: 16, flexWrap: "wrap" }}>
-            {" "}
-            <div
-              style={{
-                flex: 1,
-                minWidth: 300,
-                background: D.card,
-                borderRadius: 12,
-                padding: 20,
-                border: `1px solid ${D.border}`,
-              }}
-            >
-              {" "}
-              <div
-                style={{
-                  fontSize: 16,
-                  fontWeight: 500,
-                  color: D.heading,
-                  marginBottom: 14,
-                }}
-              >
-                Recent Activity
-              </div>
-              {queue.length === 0 ? (
-                <div
-                  style={{
-                    color: D.muted,
-                    padding: 20,
-                    textAlign: "center",
-                    fontSize: 13,
-                  }}
-                >
-                  No referrals yet
-                </div>
-              ) : (
-                queue.slice(0, 8).map((r) => (
-                  <div
-                    key={r.id}
-                    style={{
-                      display: "flex",
-                      justifyContent: "space-between",
-                      alignItems: "center",
-                      padding: "8px 0",
-                      borderBottom: `1px solid ${D.border}33`,
-                    }}
-                  >
-                    {" "}
-                    <div>
-                      {" "}
-                      <div
-                        style={{
-                          fontSize: 14,
-                          fontWeight: 500,
-                          color: D.heading,
-                        }}
-                      >
-                        {r.referee_name ||
-                          `${r.referral_first_name || ""} ${r.referral_last_name || ""}`.trim()}
-                      </div>{" "}
-                      <div style={{ fontSize: 11, color: D.muted }}>
-                        from{" "}
-                        {r.promoter_first
-                          ? `${r.promoter_first} ${r.promoter_last}`
-                          : "--"}{" "}
-                        / {r.source || "portal"}
-                      </div>{" "}
-                    </div>{" "}
-                    <Badge status={r.status} />{" "}
-                  </div>
-                ))
-              )}
-            </div>{" "}
-            <div
-              style={{
-                flex: 1,
-                minWidth: 300,
-                background: D.card,
-                borderRadius: 12,
-                padding: 20,
-                border: `1px solid ${D.border}`,
-              }}
-            >
-              {" "}
-              <div
-                style={{
-                  fontSize: 16,
-                  fontWeight: 500,
-                  color: D.heading,
-                  marginBottom: 14,
-                }}
-              >
-                Top Promoters
-              </div>
-              {promoters.filter((p) => p.total_referrals_converted > 0).length === 0 && (
-                <div style={{ fontSize: 14, color: D.muted }}>
-                  No converted referrals yet
-                </div>
-              )}
-              {promoters
-                .filter((p) => p.total_referrals_converted > 0)
-                .slice(0, 8)
-                .map((p) => (
-                  <div
-                    key={p.id}
-                    style={{
-                      display: "flex",
-                      justifyContent: "space-between",
-                      alignItems: "center",
-                      padding: "8px 0",
-                      borderBottom: `1px solid ${D.border}33`,
-                    }}
-                  >
-                    {" "}
+            />
+            <Stat label="Program ROI" value={`${stats.programROI}%`} />
+          </div>
+          <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
+            <Card>
+              <CardHeader>
+                <CardTitle>Recent Activity</CardTitle>
+              </CardHeader>
+              <CardBody>
+                {queue.length === 0 ? (
+                  <EmptyState>No referrals yet</EmptyState>
+                ) : (
+                  queue.slice(0, 8).map((referral) => (
                     <div
-                      style={{ display: "flex", alignItems: "center", gap: 8 }}
+                      key={referral.id}
+                      className="flex flex-wrap items-center justify-between gap-3 border-b border-hairline border-zinc-200 py-3 last:border-0"
                     >
-                      {" "}
-                      <div>
-                        {" "}
-                        <div
-                          style={{
-                            fontSize: 14,
-                            fontWeight: 500,
-                            color: D.heading,
-                          }}
-                        >
-                          {p.first_name} {p.last_name}
-                        </div>{" "}
-                        <div style={{ fontSize: 11, color: D.muted }}>
-                          {p.total_referrals_converted} converted /{" "}
-                          {p.total_referrals_sent} sent
-                        </div>{" "}
-                      </div>{" "}
-                      <MilestoneBadge
-                        level={p.milestone_level || "none"}
-                      />{" "}
-                    </div>{" "}
+                      <div className="min-w-0">
+                        <div className="font-medium text-zinc-900">
+                          {referral.referee_name ||
+                            `${referral.referral_first_name || ""} ${referral.referral_last_name || ""}`.trim()}
+                        </div>
+                        <div className="text-14 text-ink-secondary">
+                          from{" "}
+                          {referral.promoter_first
+                            ? `${referral.promoter_first} ${referral.promoter_last}`
+                            : "--"}{" "}
+                          / {referral.source || "portal"}
+                        </div>
+                      </div>
+                      <StatusBadge status={referral.status} />
+                    </div>
+                  ))
+                )}
+              </CardBody>
+            </Card>
+            <Card>
+              <CardHeader>
+                <CardTitle>Top Promoters</CardTitle>
+              </CardHeader>
+              <CardBody>
+                {promoters.filter(
+                  (promoter) => promoter.total_referrals_converted > 0,
+                ).length === 0 && (
+                  <EmptyState>No converted referrals yet</EmptyState>
+                )}
+                {promoters
+                  .filter((promoter) => promoter.total_referrals_converted > 0)
+                  .slice(0, 8)
+                  .map((promoter) => (
                     <div
-                      style={{
-                        fontFamily: MONO,
-                        fontSize: 14,
-                        fontWeight: 700,
-                        color: D.green,
-                      }}
+                      key={promoter.id}
+                      className="flex flex-wrap items-center justify-between gap-3 border-b border-hairline border-zinc-200 py-3 last:border-0"
                     >
-                      {fc(p.total_earned_cents)}
-                    </div>{" "}
-                  </div>
-                ))}
-            </div>{" "}
-          </div>{" "}
+                      <div className="flex min-w-0 flex-wrap items-center gap-2">
+                        <div>
+                          <div className="font-medium text-zinc-900">
+                            {promoter.first_name} {promoter.last_name}
+                          </div>
+                          <div className="text-14 text-ink-secondary">
+                            {promoter.total_referrals_converted} converted /{" "}
+                            {promoter.total_referrals_sent} sent
+                          </div>
+                        </div>
+                        <MilestoneBadge
+                          level={promoter.milestone_level || "none"}
+                        />
+                      </div>
+                      <div className="font-medium tabular-nums text-zinc-900">
+                        {fc(promoter.total_earned_cents)}
+                      </div>
+                    </div>
+                  ))}
+              </CardBody>
+            </Card>
+          </div>
         </div>
       )}
-      {/* QUEUE */}
+
       {tab === "queue" && (
-        <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
-          {/* Submit form */}
-          <div
-            style={{
-              background: D.card,
-              borderRadius: 12,
-              padding: 20,
-              border: `1px solid ${D.border}`,
-            }}
-          >
-            {" "}
-            <div
-              style={{
-                fontSize: 14,
-                fontWeight: 500,
-                color: D.heading,
-                marginBottom: 12,
-              }}
-            >
-              Submit Referral
-            </div>{" "}
-            <div
-              style={{
-                display: "grid",
-                gridTemplateColumns: "repeat(auto-fill, minmax(160px, 1fr))",
-                gap: 8,
-                marginBottom: 8,
-              }}
-            >
-              {" "}
-              <input
-                placeholder="Friend's name *"
-                value={refForm.name}
-                onChange={(e) =>
-                  setRefForm((f) => ({ ...f, name: e.target.value }))
-                }
-                style={inputSt}
-              />{" "}
-              <input
-                placeholder="Phone *"
-                value={refForm.phone}
-                onChange={(e) =>
-                  setRefForm((f) => ({ ...f, phone: e.target.value }))
-                }
-                style={inputSt}
-              />{" "}
-              <input
-                placeholder="Email"
-                value={refForm.email}
-                onChange={(e) =>
-                  setRefForm((f) => ({ ...f, email: e.target.value }))
-                }
-                style={inputSt}
-              />{" "}
-              <input
-                placeholder="Promoter ID"
-                value={refForm.promoterId}
-                onChange={(e) =>
-                  setRefForm((f) => ({ ...f, promoterId: e.target.value }))
-                }
-                style={inputSt}
-              />{" "}
-            </div>{" "}
-            <div style={{ display: "flex", gap: 8 }}>
-              {" "}
-              <input
-                placeholder="Address"
-                value={refForm.address}
-                onChange={(e) =>
-                  setRefForm((f) => ({ ...f, address: e.target.value }))
-                }
-                style={{ ...inputSt, flex: 1 }}
-              />{" "}
-              <input
-                placeholder="Notes"
-                value={refForm.notes}
-                onChange={(e) =>
-                  setRefForm((f) => ({ ...f, notes: e.target.value }))
-                }
-                style={{ ...inputSt, flex: 1 }}
-              />{" "}
-              <button
-                onClick={handleSubmitRef}
-                disabled={submitting}
-                style={btnPrimary}
-              >
-                {submitting ? "..." : "Submit"}
-              </button>{" "}
-            </div>{" "}
-          </div>
-          {/* Queue table */}
-          <div
-            style={{
-              background: D.card,
-              borderRadius: 12,
-              padding: 20,
-              border: `1px solid ${D.border}`,
-            }}
-          >
-            {" "}
-            <div
-              style={{
-                fontSize: 16,
-                fontWeight: 500,
-                color: D.heading,
-                marginBottom: 14,
-              }}
-            >
-              Referral Queue ({queue.length})
-            </div>
-            {queue.length === 0 ? (
-              <div
-                style={{
-                  color: D.muted,
-                  padding: 20,
-                  textAlign: "center",
-                  fontSize: 13,
-                }}
-              >
-                No pending referrals
+        <div className="space-y-4">
+          <Card>
+            <CardHeader>
+              <CardTitle>Submit Referral</CardTitle>
+            </CardHeader>
+            <CardBody className="space-y-4">
+              <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-4">
+                <Field label="Friend's name" required>
+                  <Input
+                    value={refForm.name}
+                    onChange={(event) =>
+                      setRefForm((form) => ({
+                        ...form,
+                        name: event.target.value,
+                      }))
+                    }
+                  />
+                </Field>
+                <Field label="Phone" required>
+                  <Input
+                    value={refForm.phone}
+                    onChange={(event) =>
+                      setRefForm((form) => ({
+                        ...form,
+                        phone: event.target.value,
+                      }))
+                    }
+                  />
+                </Field>
+                <Field label="Email">
+                  <Input
+                    type="email"
+                    value={refForm.email}
+                    onChange={(event) =>
+                      setRefForm((form) => ({
+                        ...form,
+                        email: event.target.value,
+                      }))
+                    }
+                  />
+                </Field>
+                <Field label="Promoter ID">
+                  <Input
+                    value={refForm.promoterId}
+                    onChange={(event) =>
+                      setRefForm((form) => ({
+                        ...form,
+                        promoterId: event.target.value,
+                      }))
+                    }
+                  />
+                </Field>
               </div>
-            ) : (
-              <div style={{ overflowX: "auto" }}>
-                {" "}
-                <table style={{ width: "100%", borderCollapse: "collapse" }}>
-                  {" "}
-                  <thead>
-                    <tr>
-                      <th style={thSt}>Referral</th>
-                      <th style={thSt}>From</th>
-                      <th style={thSt}>Source</th>
-                      <th style={thSt}>Status</th>
-                      <th style={thR}>Actions</th>
-                    </tr>
-                  </thead>{" "}
-                  <tbody>
-                    {queue.map((r) => (
-                      <tr key={r.id}>
-                        {" "}
-                        <td style={tdSt}>
-                          {" "}
-                          <div style={{ fontWeight: 500 }}>
-                            {r.referee_name ||
-                              `${r.referral_first_name || ""} ${r.referral_last_name || ""}`.trim()}
-                          </div>{" "}
-                          <div style={{ fontSize: 11, color: D.muted }}>
-                            {r.referee_phone || r.referral_phone}{" "}
-                            {r.referee_email || r.referral_email
-                              ? `/ ${r.referee_email || r.referral_email}`
+              <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
+                <Field label="Address">
+                  <Input
+                    value={refForm.address}
+                    onChange={(event) =>
+                      setRefForm((form) => ({
+                        ...form,
+                        address: event.target.value,
+                      }))
+                    }
+                  />
+                </Field>
+                <Field label="Notes">
+                  <Input
+                    value={refForm.notes}
+                    onChange={(event) =>
+                      setRefForm((form) => ({
+                        ...form,
+                        notes: event.target.value,
+                      }))
+                    }
+                  />
+                </Field>
+              </div>
+              <div className="ui-record-actions justify-end">
+                <Button
+                  onClick={handleSubmitRef}
+                  loading={submitting}
+                  disabled={!refForm.name || !refForm.phone}
+                >
+                  Submit
+                </Button>
+              </div>
+            </CardBody>
+          </Card>
+          <Card>
+            <CardHeader>
+              <CardTitle>Referral Queue ({queue.length})</CardTitle>
+            </CardHeader>
+            <CardBody className="p-0">
+              {queue.length === 0 ? (
+                <EmptyState>No pending referrals</EmptyState>
+              ) : (
+                <Table layout="records">
+                  <THead>
+                    <TR>
+                      <TH>Referral</TH>
+                      <TH>From</TH>
+                      <TH>Source</TH>
+                      <TH>Status</TH>
+                      <TH>Actions</TH>
+                    </TR>
+                  </THead>
+                  <TBody>
+                    {queue.map((referral) => (
+                      <TR key={referral.id}>
+                        <TD data-label="Referral">
+                          <div className="font-medium text-zinc-900">
+                            {referral.referee_name ||
+                              `${referral.referral_first_name || ""} ${referral.referral_last_name || ""}`.trim()}
+                          </div>
+                          <div className="text-14 text-ink-secondary">
+                            {referral.referee_phone || referral.referral_phone}
+                            {referral.referee_email || referral.referral_email
+                              ? ` / ${referral.referee_email || referral.referral_email}`
                               : ""}
-                          </div>{" "}
-                        </td>{" "}
-                        <td style={tdSt}>
-                          {r.promoter_first
-                            ? `${r.promoter_first} ${r.promoter_last}`
+                          </div>
+                        </TD>
+                        <TD data-label="From">
+                          {referral.promoter_first
+                            ? `${referral.promoter_first} ${referral.promoter_last}`
                             : "--"}
-                        </td>{" "}
-                        <td style={{ ...tdSt, fontSize: 11 }}>
-                          {r.source || "portal"}
-                        </td>{" "}
-                        <td style={tdSt}>
-                          <Badge status={r.status} />
-                        </td>{" "}
-                        <td style={tdR}>
-                          {" "}
-                          <div
-                            style={{
-                              display: "flex",
-                              gap: 4,
-                              justifyContent: "flex-end",
-                            }}
-                          >
-                            {isAdmin && ["pending", "sms_failed"].includes(r.status) && (
-                              <button
-                                onClick={() =>
-                                  handleStatusChange(r.id, "contacted")
-                                }
-                                style={btnSmall(D.teal)}
-                              >
-                                Contacted
-                              </button>
-                            )}
+                        </TD>
+                        <TD data-label="Source">
+                          {referral.source || "portal"}
+                        </TD>
+                        <TD data-label="Status">
+                          <StatusBadge status={referral.status} />
+                        </TD>
+                        <TD data-label="Actions">
+                          <div className="ui-record-actions">
+                            {isAdmin &&
+                              ["pending", "sms_failed"].includes(
+                                referral.status,
+                              ) && (
+                                <Button
+                                  variant="secondary"
+                                  onClick={() =>
+                                    handleStatusChange(referral.id, "contacted")
+                                  }
+                                >
+                                  Contacted
+                                </Button>
+                              )}
                             {[
                               "contacted",
                               "estimated",
                               "pending",
                               "sms_failed",
-                            ].includes(r.status) && (
-                              <button
-                                onClick={() =>
+                            ].includes(referral.status) && (
+                              <Button
+                                variant="secondary"
+                                onClick={(event) => {
+                                  event.currentTarget.focus({
+                                    preventScroll: true,
+                                  });
                                   setConvertModal({
-                                    id: r.id,
+                                    id: referral.id,
                                     name:
-                                      r.referee_name || r.referral_first_name,
+                                      referral.referee_name ||
+                                      referral.referral_first_name,
                                     customerId: "",
                                     tier: "",
                                     monthlyValue: "",
-                                  })
-                                }
-                                style={btnSmall(D.green)}
+                                  });
+                                }}
                               >
                                 Convert
-                              </button>
+                              </Button>
                             )}
-                            {isAdmin && !["signed_up", "credited", "rejected"].includes(
-                              r.status,
-                            ) && (
-                              <button
-                                onClick={() =>
-                                  handleStatusChange(r.id, "rejected")
-                                }
-                                style={btnSmall(`${D.red}aa`)}
-                              >
-                                Reject
-                              </button>
-                            )}
-                          </div>{" "}
-                        </td>{" "}
-                      </tr>
+                            {isAdmin &&
+                              !["signed_up", "credited", "rejected"].includes(
+                                referral.status,
+                              ) && (
+                                <Button
+                                  variant="danger"
+                                  onClick={() =>
+                                    handleStatusChange(referral.id, "rejected")
+                                  }
+                                >
+                                  Reject
+                                </Button>
+                              )}
+                          </div>
+                        </TD>
+                      </TR>
                     ))}
-                  </tbody>{" "}
-                </table>{" "}
-              </div>
-            )}
-          </div>{" "}
+                  </TBody>
+                </Table>
+              )}
+            </CardBody>
+          </Card>
         </div>
       )}
-      {/* PROMOTERS */}
+
       {tab === "promoters" && (
-        <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
-          {" "}
-          <div style={{ display: "flex", gap: 8 }}>
-            {" "}
-            <input
-              placeholder="Search promoters..."
-              value={search}
-              onChange={(e) => setSearch(e.target.value)}
-              style={{ ...inputSt, maxWidth: 300 }}
-            />{" "}
-            <button onClick={() => setEnrollModal(true)} style={btnPrimary}>
-              Enroll Customer
-            </button>{" "}
-          </div>{" "}
-          <div
-            style={{
-              background: D.card,
-              borderRadius: 12,
-              padding: 20,
-              border: `1px solid ${D.border}`,
-              overflowX: "auto",
-            }}
-          >
-            {" "}
-            <table style={{ width: "100%", borderCollapse: "collapse" }}>
-              {" "}
-              <thead>
-                <tr>
-                  <th style={thSt}>Name</th>
-                  <th style={thSt}>Code</th>
-                  <th style={thSt}>Link</th>
-                  <th style={thR}>Clicks</th>
-                  <th style={thR}>Referrals</th>
-                  <th style={thSt}>Milestone</th>
-                  <th style={thR}>Available</th>
-                  <th style={thR}>Pending</th>
-                </tr>
-              </thead>{" "}
-              <tbody>
-                {filteredPromoters.map((p) => (
-                  <tr key={p.id}>
-                    {" "}
-                    <td style={tdSt}>
-                      <span style={{ fontWeight: 500 }}>
-                        {p.first_name} {p.last_name}
-                      </span>
-                      <br />
-                      <span style={{ fontSize: 11, color: D.muted }}>
-                        {p.customer_phone}
-                      </span>
-                    </td>{" "}
-                    <td style={{ ...tdSt, fontFamily: MONO, fontSize: 12 }}>
-                      {p.referral_code || "--"}
-                    </td>{" "}
-                    <td style={tdSt}>
-                      {p.referral_link ? (
-                        <button
-                          onClick={() => copyLink(p.referral_link)}
-                          style={{
-                            background: "none",
-                            border: `1px solid ${D.teal}33`,
-                            color: D.teal,
-                            fontSize: 10,
-                            padding: "2px 8px",
-                            borderRadius: 4,
-                            cursor: "pointer",
-                          }}
-                        >
-                          Copy Link
-                        </button>
-                      ) : (
-                        "--"
-                      )}
-                    </td>{" "}
-                    <td style={tdR}>{p.total_clicks}</td>{" "}
-                    <td style={tdR}>
-                      {p.total_referrals_converted}/{p.total_referrals_sent}
-                    </td>{" "}
-                    <td style={tdSt}>
-                      <MilestoneBadge level={p.milestone_level || "none"} />
-                    </td>{" "}
-                    <td style={{ ...tdR, color: D.green }}>
-                      {fc(p.available_balance_cents || 0)}
-                    </td>{" "}
-                    <td style={{ ...tdR, color: D.amber }}>
-                      {fc(p.pending_earnings_cents || 0)}
-                    </td>{" "}
-                  </tr>
-                ))}
-              </tbody>{" "}
-            </table>{" "}
-          </div>{" "}
-        </div>
-      )}
-      {/* PAYOUTS */}
-      {tab === "payouts" && (
-        <div
-          style={{
-            background: D.card,
-            borderRadius: 12,
-            padding: 20,
-            border: `1px solid ${D.border}`,
-          }}
-        >
-          {" "}
-          <div
-            style={{
-              fontSize: 16,
-              fontWeight: 500,
-              color: D.heading,
-              marginBottom: 14,
-            }}
-          >
-            Payouts
-          </div>
-          {payouts.length === 0 ? (
-            <div
-              style={{
-                color: D.muted,
-                padding: 20,
-                textAlign: "center",
-                fontSize: 13,
+        <div className="space-y-4">
+          <div className="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
+            <Field label="Search promoters" className="w-full sm:max-w-sm">
+              <Input
+                value={search}
+                onChange={(event) => setSearch(event.target.value)}
+              />
+            </Field>
+            <Button
+              onClick={(event) => {
+                event.currentTarget.focus({ preventScroll: true });
+                setEnrollModal(true);
               }}
             >
-              No payout requests
-            </div>
-          ) : (
-            <div style={{ overflowX: "auto" }}>
-              {" "}
-              <table style={{ width: "100%", borderCollapse: "collapse" }}>
-                {" "}
-                <thead>
-                  <tr>
-                    <th style={thSt}>Promoter</th>
-                    <th style={thR}>Amount</th>
-                    <th style={thSt}>Method</th>
-                    <th style={thSt}>Status</th>
-                    <th style={thSt}>1099</th>
-                    <th style={thR}>Actions</th>
-                  </tr>
-                </thead>{" "}
-                <tbody>
-                  {payouts.map((p) => (
-                    <tr key={p.id}>
-                      {" "}
-                      <td style={tdSt}>
-                        {p.first_name} {p.last_name}
-                      </td>{" "}
-                      <td style={{ ...tdR, color: D.green, fontWeight: 700 }}>
-                        {fc(p.amount_cents)}
-                      </td>{" "}
-                      <td style={tdSt}>
-                        {(p.payout_method || p.method || "").replace("_", " ")}
-                      </td>{" "}
-                      <td style={tdSt}>
-                        <Badge status={p.status} />
-                      </td>{" "}
-                      <td style={tdSt}>
-                        {p.requires_1099 ? (
-                          <span style={{ color: D.amber, fontSize: 11 }}>
-                            Yes
-                          </span>
+              Enroll Customer
+            </Button>
+          </div>
+          <Card>
+            <CardHeader>
+              <CardTitle>Promoters ({filteredPromoters.length})</CardTitle>
+            </CardHeader>
+            <CardBody className="p-0">
+              <Table layout="records">
+                <THead>
+                  <TR>
+                    <TH>Name</TH>
+                    <TH>Code</TH>
+                    <TH>Link</TH>
+                    <TH>Clicks</TH>
+                    <TH>Referrals</TH>
+                    <TH>Milestone</TH>
+                    <TH>Available</TH>
+                    <TH>Pending</TH>
+                  </TR>
+                </THead>
+                <TBody>
+                  {filteredPromoters.map((promoter) => (
+                    <TR key={promoter.id}>
+                      <TD data-label="Name">
+                        <span className="font-medium text-zinc-900">
+                          {promoter.first_name} {promoter.last_name}
+                        </span>
+                        <div className="text-14 text-ink-secondary">
+                          {promoter.customer_phone}
+                        </div>
+                      </TD>
+                      <TD data-label="Code" className="font-mono">
+                        {promoter.referral_code || "--"}
+                      </TD>
+                      <TD data-label="Link">
+                        {promoter.referral_link ? (
+                          <Button
+                            variant="secondary"
+                            onClick={() => copyLink(promoter.referral_link)}
+                          >
+                            Copy Link
+                          </Button>
                         ) : (
                           "--"
                         )}
-                      </td>{" "}
-                      <td style={tdR}>
-                        {p.status === "pending" && (
-                          <button
-                            onClick={() => handleApprovePayout(p.id)}
-                            style={btnSmall(D.green)}
-                          >
-                            Approve
-                          </button>
-                        )}
-                      </td>{" "}
-                    </tr>
+                      </TD>
+                      <TD data-label="Clicks" nums>
+                        {promoter.total_clicks}
+                      </TD>
+                      <TD data-label="Referrals" nums>
+                        {promoter.total_referrals_converted}/
+                        {promoter.total_referrals_sent}
+                      </TD>
+                      <TD data-label="Milestone">
+                        <MilestoneBadge
+                          level={promoter.milestone_level || "none"}
+                        />
+                      </TD>
+                      <TD data-label="Available" nums>
+                        {fc(promoter.available_balance_cents || 0)}
+                      </TD>
+                      <TD data-label="Pending" nums>
+                        {fc(promoter.pending_earnings_cents || 0)}
+                      </TD>
+                    </TR>
                   ))}
-                </tbody>{" "}
-              </table>{" "}
-            </div>
-          )}
+                </TBody>
+              </Table>
+            </CardBody>
+          </Card>
         </div>
       )}
-      {/* SETTINGS */}
-      {tab === "settings" &&
-        settings &&
-        (() => {
-          const s = settingsEditing || settings;
-          const upd = (k, v) =>
-            setSettingsEditing({ ...(settingsEditing || settings), [k]: v });
-          const isEditing = !!settingsEditing;
-          const fields = [
-            {
-              section: "Rewards",
-              items: [
-                {
-                  key: "referrer_reward_cents",
-                  label: "Referrer Reward (cents)",
-                  type: "number",
-                },
-                {
-                  key: "referee_discount_cents",
-                  label: "Referee Discount (cents)",
-                  type: "number",
-                },
-              ],
-            },
-            {
-              section: "Tier Bonuses",
-              items: [
-                {
-                  key: "bonus_silver_cents",
-                  label: "Silver Bonus (cents)",
-                  type: "number",
-                },
-                {
-                  key: "bonus_gold_cents",
-                  label: "Gold Bonus (cents)",
-                  type: "number",
-                },
-                {
-                  key: "bonus_platinum_cents",
-                  label: "Platinum Bonus (cents)",
-                  type: "number",
-                },
-              ],
-            },
-            {
-              section: "Milestones",
-              items: [
-                {
-                  key: "milestone_3_bonus_cents",
-                  label: "3 Referrals Bonus (cents)",
-                  type: "number",
-                },
-                {
-                  key: "milestone_5_bonus_cents",
-                  label: "5 Referrals Bonus (cents)",
-                  type: "number",
-                },
-                {
-                  key: "milestone_10_bonus_cents",
-                  label: "10 Referrals Bonus (cents)",
-                  type: "number",
-                },
-              ],
-            },
-            {
-              section: "Fraud Prevention",
-              items: [
-                {
-                  key: "max_referrals_per_month",
-                  label: "Max Referrals / Month",
-                  type: "number",
-                },
-                {
-                  key: "cooldown_days",
-                  label: "Cooldown Days",
-                  type: "number",
-                },
-                {
-                  key: "min_payout_cents",
-                  label: "Min Payout (cents)",
-                  type: "number",
-                },
-              ],
-            },
-            {
-              section: "Program",
-              items: [
-                {
-                  key: "program_active",
-                  label: "Program Active",
-                  type: "boolean",
-                },
-                {
-                  key: "auto_credit_enabled",
-                  label: "Auto Credit",
-                  type: "boolean",
-                },
-                {
-                  key: "require_service_completion",
-                  label: "Require 1st Service",
-                  type: "boolean",
-                },
-                { key: "base_url", label: "Base URL", type: "text" },
-              ],
-            },
-            {
-              section: "SMS Templates",
-              items: [
-                {
-                  key: "invite_sms_template",
-                  label: "Invite SMS",
-                  type: "textarea",
-                },
-                {
-                  key: "reward_sms_template",
-                  label: "Reward SMS",
-                  type: "textarea",
-                },
-                {
-                  key: "milestone_sms_template",
-                  label: "Milestone SMS",
-                  type: "textarea",
-                },
-              ],
-            },
-          ];
-          return (
-            <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
-              {" "}
-              <div
-                style={{ display: "flex", justifyContent: "flex-end", gap: 8 }}
-              >
-                {!isEditing && (
-                  <button
-                    onClick={() => setSettingsEditing({ ...settings })}
-                    style={btnPrimary}
-                  >
-                    Edit Settings
-                  </button>
-                )}
-                {isEditing && (
-                  <button
-                    onClick={handleSaveSettings}
-                    style={{ ...btnPrimary, background: D.green }}
-                  >
-                    Save
-                  </button>
-                )}
-                {isEditing && (
-                  <button
-                    onClick={() => setSettingsEditing(null)}
-                    style={{
-                      ...btnPrimary,
-                      background: "transparent",
-                      border: `1px solid ${D.border}`,
-                      color: D.muted,
-                    }}
-                  >
-                    Cancel
-                  </button>
-                )}
-              </div>
-              {fields.map((section) => (
-                <div
-                  key={section.section}
-                  style={{
-                    background: D.card,
-                    borderRadius: 12,
-                    padding: 20,
-                    border: `1px solid ${D.border}`,
-                  }}
-                >
-                  {" "}
-                  <div
-                    style={{
-                      fontSize: 14,
-                      fontWeight: 500,
-                      color: D.heading,
-                      marginBottom: 12,
-                    }}
-                  >
-                    {section.section}
-                  </div>{" "}
-                  <div
-                    style={{
-                      display: "grid",
-                      gridTemplateColumns:
-                        section.items[0]?.type === "textarea"
-                          ? "1fr"
-                          : "repeat(auto-fill, minmax(200px, 1fr))",
-                      gap: 12,
-                    }}
-                  >
-                    {section.items.map((f) => (
-                      <div key={f.key}>
-                        {" "}
-                        <div
-                          style={{
-                            fontSize: 11,
-                            color: D.muted,
-                            marginBottom: 4,
-                            textTransform: "uppercase",
-                            letterSpacing: 0.5,
-                          }}
-                        >
-                          {f.label}
-                        </div>
-                        {f.type === "boolean" ? (
-                          <button
-                            onClick={() => isEditing && upd(f.key, !s[f.key])}
-                            disabled={!isEditing}
-                            style={{
-                              padding: "6px 14px",
-                              borderRadius: 6,
-                              border: `1px solid ${D.border}`,
-                              background: s[f.key]
-                                ? `${D.green}33`
-                                : `${D.red}33`,
-                              color: s[f.key] ? D.green : D.red,
-                              fontSize: 12,
-                              cursor: isEditing ? "pointer" : "default",
-                            }}
+
+      {tab === "payouts" && (
+        <Card>
+          <CardHeader>
+            <CardTitle>Payouts</CardTitle>
+          </CardHeader>
+          <CardBody className="p-0">
+            {payouts.length === 0 ? (
+              <EmptyState>No payout requests</EmptyState>
+            ) : (
+              <Table layout="records">
+                <THead>
+                  <TR>
+                    <TH>Promoter</TH>
+                    <TH>Amount</TH>
+                    <TH>Method</TH>
+                    <TH>Status</TH>
+                    <TH>1099</TH>
+                    <TH>Actions</TH>
+                  </TR>
+                </THead>
+                <TBody>
+                  {payouts.map((payout) => (
+                    <TR key={payout.id}>
+                      <TD data-label="Promoter">
+                        {payout.first_name} {payout.last_name}
+                      </TD>
+                      <TD data-label="Amount" nums>
+                        {fc(payout.amount_cents)}
+                      </TD>
+                      <TD data-label="Method">
+                        {(
+                          payout.payout_method ||
+                          payout.method ||
+                          ""
+                        ).replaceAll("_", " ")}
+                      </TD>
+                      <TD data-label="Status">
+                        <StatusBadge status={payout.status} />
+                      </TD>
+                      <TD data-label="1099">
+                        {payout.requires_1099 ? "Yes" : "--"}
+                      </TD>
+                      <TD data-label="Actions">
+                        {payout.status === "pending" && (
+                          <Button
+                            onClick={() => handleApprovePayout(payout.id)}
+                            loading={approvingPayout === payout.id}
                           >
-                            {s[f.key] ? "Enabled" : "Disabled"}
-                          </button>
-                        ) : f.type === "textarea" ? (
-                          <textarea
-                            value={s[f.key] || ""}
-                            onChange={(e) => upd(f.key, e.target.value)}
-                            disabled={!isEditing}
-                            rows={2}
-                            style={{
-                              ...inputSt,
-                              resize: "vertical",
-                              opacity: isEditing ? 1 : 0.6,
-                            }}
-                          />
-                        ) : (
-                          <input
-                            type={f.type}
-                            value={s[f.key] ?? ""}
-                            onChange={(e) =>
-                              upd(
-                                f.key,
-                                f.type === "number"
-                                  ? parseInt(e.target.value) || 0
-                                  : e.target.value,
-                              )
-                            }
-                            disabled={!isEditing}
-                            style={{ ...inputSt, opacity: isEditing ? 1 : 0.6 }}
-                          />
+                            Approve
+                          </Button>
                         )}
-                      </div>
-                    ))}
-                  </div>{" "}
-                </div>
-              ))}
-            </div>
-          );
-        })()}
-      {/* ANALYTICS */}
-      {tab === "analytics" && (
-        <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
-          {!analytics ? (
-            <div style={{ color: D.muted, padding: 40, textAlign: "center" }}>
-              Loading analytics...
-            </div>
-          ) : (
-            <>
-              {/* Funnel */}
-              <div
-                style={{
-                  background: D.card,
-                  borderRadius: 12,
-                  padding: 20,
-                  border: `1px solid ${D.border}`,
-                }}
-              >
-                {" "}
-                <div
-                  style={{
-                    fontSize: 16,
-                    fontWeight: 500,
-                    color: D.heading,
-                    marginBottom: 14,
-                  }}
-                >
-                  Conversion Funnel
-                </div>{" "}
-                <div style={{ display: "flex", gap: 12, flexWrap: "wrap" }}>
-                  {" "}
-                  <Stat
-                    label="Clicks"
-                    value={analytics.funnel.clicks}
-                    sub={`${analytics.funnel.uniqueClicks} unique`}
-                    color={D.purple}
-                  />{" "}
-                  <Stat
-                    label="Referrals"
-                    value={analytics.funnel.referrals}
-                    sub={`${analytics.funnel.clickToReferralRate}% click-to-ref`}
-                    color={D.teal}
-                  />{" "}
-                  <Stat
-                    label="Converted"
-                    value={analytics.funnel.converted}
-                    sub={`${analytics.funnel.conversionRate}% rate`}
-                    color={D.green}
-                  />{" "}
-                  <Stat
-                    label="Lost"
-                    value={analytics.funnel.lost}
-                    color={D.red}
-                  />{" "}
-                  <Stat
-                    label="Pending"
-                    value={analytics.funnel.pending}
-                    color={D.amber}
-                  />{" "}
-                </div>{" "}
-              </div>
-              {/* Financial */}
-              <div
-                style={{
-                  background: D.card,
-                  borderRadius: 12,
-                  padding: 20,
-                  border: `1px solid ${D.border}`,
-                }}
-              >
-                {" "}
-                <div
-                  style={{
-                    fontSize: 16,
-                    fontWeight: 500,
-                    color: D.heading,
-                    marginBottom: 14,
-                  }}
-                >
-                  Financial / ROI
-                </div>{" "}
-                <div style={{ display: "flex", gap: 12, flexWrap: "wrap" }}>
-                  {" "}
-                  <Stat
-                    label="Rewards Issued"
-                    value={fd(analytics.financial.totalRewardsDollars)}
-                    color={D.amber}
-                  />{" "}
-                  <Stat
-                    label="Paid Out"
-                    value={fc(analytics.financial.totalPaidOutCents)}
-                  />{" "}
-                  <Stat
-                    label="Monthly Value"
-                    value={fd(analytics.financial.totalMonthlyValue)}
-                    sub="from converted refs"
-                    color={D.teal}
-                  />{" "}
-                  <Stat
-                    label="Est. Annual Rev"
-                    value={fd(analytics.financial.estimatedAnnualRevenue)}
-                    color={D.green}
-                  />{" "}
-                  <Stat
-                    label="ROI"
-                    value={`${analytics.financial.roi}%`}
-                    color={analytics.financial.roi > 0 ? D.green : D.red}
-                  />{" "}
-                </div>{" "}
-              </div>
-              {/* Top promoters bar chart */}
-              <div
-                style={{
-                  background: D.card,
-                  borderRadius: 12,
-                  padding: 20,
-                  border: `1px solid ${D.border}`,
-                }}
-              >
-                {" "}
-                <div
-                  style={{
-                    fontSize: 16,
-                    fontWeight: 500,
-                    color: D.heading,
-                    marginBottom: 14,
-                  }}
-                >
-                  Top Promoters
-                </div>
-                {analytics.topPromoters.length === 0 ? (
-                  <div style={{ color: D.muted, fontSize: 13 }}>
-                    No conversions yet
+                      </TD>
+                    </TR>
+                  ))}
+                </TBody>
+              </Table>
+            )}
+          </CardBody>
+        </Card>
+      )}
+
+      {tab === "settings" && (
+        <div className="space-y-4">
+          {settings &&
+            (() => {
+              const current = settingsEditing || settings;
+              const update = (key, value) =>
+                setSettingsEditing({
+                  ...(settingsEditing || settings),
+                  [key]: value,
+                });
+              const isEditing = !!settingsEditing;
+              return (
+                <>
+                  <div className="ui-record-actions justify-end">
+                    {!isEditing && (
+                      <Button
+                        onClick={() => setSettingsEditing({ ...settings })}
+                      >
+                        Edit Settings
+                      </Button>
+                    )}
+                    {isEditing && (
+                      <Button
+                        onClick={handleSaveSettings}
+                        loading={savingSettings}
+                      >
+                        Save
+                      </Button>
+                    )}
+                    {isEditing && (
+                      <Button
+                        variant="secondary"
+                        onClick={() => setSettingsEditing(null)}
+                        disabled={savingSettings}
+                      >
+                        Cancel
+                      </Button>
+                    )}
                   </div>
-                ) : (
-                  analytics.topPromoters.map((p, i) => {
-                    const maxConv = analytics.topPromoters[0].conversions || 1;
-                    const pct = Math.round((p.conversions / maxConv) * 100);
-                    return (
-                      <div key={p.id} style={{ marginBottom: 8 }}>
-                        {" "}
-                        <div
-                          style={{
-                            display: "flex",
-                            justifyContent: "space-between",
-                            marginBottom: 2,
-                          }}
+                  <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
+                    {SETTINGS_FIELDS.map((section) => (
+                      <Card
+                        key={section.section}
+                        className={
+                          section.items[0]?.type === "textarea"
+                            ? "lg:col-span-2"
+                            : ""
+                        }
+                      >
+                        <CardHeader>
+                          <CardTitle>{section.section}</CardTitle>
+                        </CardHeader>
+                        <CardBody
+                          className={
+                            section.items[0]?.type === "textarea"
+                              ? "space-y-4"
+                              : "grid grid-cols-1 gap-4 sm:grid-cols-2"
+                          }
                         >
-                          {" "}
-                          <span style={{ fontSize: 13, color: D.text }}>
-                            {i + 1}. {p.name}{" "}
-                            <MilestoneBadge level={p.milestone || "none"} />
-                          </span>{" "}
-                          <span
-                            style={{
-                              fontFamily: MONO,
-                              fontSize: 12,
-                              color: D.green,
-                            }}
-                          >
-                            {p.conversions} conv / {fc(p.earned)}
-                          </span>{" "}
-                        </div>{" "}
-                        <div
-                          style={{
-                            background: D.bg,
-                            borderRadius: 4,
-                            height: 8,
-                          }}
-                        >
-                          {" "}
-                          <div
-                            style={{
-                              width: `${pct}%`,
-                              height: "100%",
-                              borderRadius: 4,
-                              background: `linear-gradient(90deg, ${D.teal}, ${D.green})`,
-                            }}
-                          />{" "}
-                        </div>{" "}
-                      </div>
-                    );
-                  })
-                )}
-              </div>{" "}
+                          {section.items.map((field) =>
+                            field.type === "boolean" ? (
+                              <div key={field.key} className="ui-field">
+                                <span className="ui-label">{field.label}</span>
+                                <Switch
+                                  id={`setting-${field.key}`}
+                                  checked={Boolean(current[field.key])}
+                                  disabled={!isEditing}
+                                  onChange={(value) => update(field.key, value)}
+                                  label={
+                                    current[field.key] ? "Enabled" : "Disabled"
+                                  }
+                                />
+                              </div>
+                            ) : (
+                              <Field key={field.key} label={field.label}>
+                                {field.type === "textarea" ? (
+                                  <Textarea
+                                    value={current[field.key] || ""}
+                                    onChange={(event) =>
+                                      update(field.key, event.target.value)
+                                    }
+                                    disabled={!isEditing}
+                                    rows={3}
+                                  />
+                                ) : (
+                                  <Input
+                                    type={field.type}
+                                    value={current[field.key] ?? ""}
+                                    onChange={(event) =>
+                                      update(
+                                        field.key,
+                                        field.type === "number"
+                                          ? parseInt(event.target.value) || 0
+                                          : event.target.value,
+                                      )
+                                    }
+                                    disabled={!isEditing}
+                                  />
+                                )}
+                              </Field>
+                            ),
+                          )}
+                        </CardBody>
+                      </Card>
+                    ))}
+                  </div>
+                </>
+              );
+            })()}
+        </div>
+      )}
+
+      {tab === "analytics" && (
+        <div className="space-y-4">
+          {analytics && (
+            <>
+              <Card>
+                <CardHeader>
+                  <CardTitle>Conversion Funnel</CardTitle>
+                </CardHeader>
+                <CardBody>
+                  <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-5">
+                    <Stat
+                      label="Clicks"
+                      value={analytics.funnel.clicks}
+                      sub={`${analytics.funnel.uniqueClicks} unique`}
+                    />
+                    <Stat
+                      label="Referrals"
+                      value={analytics.funnel.referrals}
+                      sub={`${analytics.funnel.clickToReferralRate}% click-to-ref`}
+                    />
+                    <Stat
+                      label="Converted"
+                      value={analytics.funnel.converted}
+                      sub={`${analytics.funnel.conversionRate}% rate`}
+                    />
+                    <Stat label="Lost" value={analytics.funnel.lost} />
+                    <Stat label="Pending" value={analytics.funnel.pending} />
+                  </div>
+                </CardBody>
+              </Card>
+              <Card>
+                <CardHeader>
+                  <CardTitle>Financial / ROI</CardTitle>
+                </CardHeader>
+                <CardBody>
+                  <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-5">
+                    <Stat
+                      label="Rewards Issued"
+                      value={fd(analytics.financial.totalRewardsDollars)}
+                    />
+                    <Stat
+                      label="Paid Out"
+                      value={fc(analytics.financial.totalPaidOutCents)}
+                    />
+                    <Stat
+                      label="Monthly Value"
+                      value={fd(analytics.financial.totalMonthlyValue)}
+                      sub="from converted refs"
+                    />
+                    <Stat
+                      label="Est. Annual Rev"
+                      value={fd(analytics.financial.estimatedAnnualRevenue)}
+                    />
+                    <Stat label="ROI" value={`${analytics.financial.roi}%`} />
+                  </div>
+                </CardBody>
+              </Card>
+              <Card>
+                <CardHeader>
+                  <CardTitle>Top Promoters</CardTitle>
+                </CardHeader>
+                <CardBody>
+                  {analytics.topPromoters.length === 0 ? (
+                    <EmptyState>No conversions yet</EmptyState>
+                  ) : (
+                    analytics.topPromoters.map((promoter, index) => {
+                      const maxConversions =
+                        analytics.topPromoters[0].conversions || 1;
+                      const percent = Math.round(
+                        (promoter.conversions / maxConversions) * 100,
+                      );
+                      return (
+                        <div key={promoter.id} className="mb-4 last:mb-0">
+                          <div className="mb-2 flex flex-wrap justify-between gap-2">
+                            <span>
+                              {index + 1}. {promoter.name}{" "}
+                              <MilestoneBadge
+                                level={promoter.milestone || "none"}
+                              />
+                            </span>
+                            <span className="tabular-nums text-ink-secondary">
+                              {promoter.conversions} conv /{" "}
+                              {fc(promoter.earned)}
+                            </span>
+                          </div>
+                          <div className="h-2 overflow-hidden rounded-xs bg-zinc-100">
+                            <div
+                              className="h-full bg-zinc-900"
+                              style={{ width: `${percent}%` }}
+                            />
+                          </div>
+                        </div>
+                      );
+                    })
+                  )}
+                </CardBody>
+              </Card>
             </>
           )}
         </div>
       )}
-      {/* CONVERT MODAL */}
-      {convertModal && createPortal(
-        <div
-          style={{
-            position: "fixed",
-            inset: 0,
-            background: "rgba(0,0,0,0.7)",
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "center",
-            zIndex: 999,
-              }}
-          onClick={() => setConvertModal(null)}
-        >
-          {" "}
-          <div
-            style={{
-              background: D.card,
-              borderRadius: 16,
-              padding: 28,
-              width: 420,
-              border: `1px solid ${D.border}`,
-              ...(isMobile
-                ? {
-                    width: "100%",
-                    maxWidth: "none",
-                    height: "100%",
-                    maxHeight: "none",
-                    borderRadius: 0,
-                    boxSizing: "border-box",
-                    overflowY: "auto",
-                    paddingTop: "calc(28px + env(safe-area-inset-top, 0px))",
-                    paddingBottom: "calc(28px + env(safe-area-inset-bottom, 0px))",
-                    paddingLeft: "calc(28px + env(safe-area-inset-left, 0px))",
-                    paddingRight: "calc(28px + env(safe-area-inset-right, 0px))",
-                  }
-                : {}),
-            }}
-            onClick={(e) => e.stopPropagation()}
-          >
-            {" "}
-            <div
-              style={{
-                fontSize: 18,
-                fontWeight: 700,
-                color: D.heading,
-                marginBottom: 16,
-              }}
-            >
-              Convert Referral
-            </div>{" "}
-            <div style={{ fontSize: 13, color: D.muted, marginBottom: 16 }}>
-              Converting: {convertModal.name}
-            </div>{" "}
-            <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-              {" "}
-              <div>
-                {" "}
-                <div style={{ fontSize: 11, color: D.muted, marginBottom: 4 }}>
-                  Customer Search
-                </div>{" "}
-                <input
-                  placeholder="Search customer name or phone..."
-                  value={custSearch}
-                  onChange={(e) => searchCustomers(e.target.value)}
-                  style={inputSt}
-                />
-                {custResults.length > 0 && (
-                  <div
-                    style={{
-                      background: D.bg,
-                      border: `1px solid ${D.border}`,
-                      borderRadius: 8,
-                      marginTop: 4,
-                      maxHeight: 150,
-                      overflow: "auto",
-                    }}
-                  >
-                    {custResults.map((c) => (
-                      <div
-                        key={c.id}
-                        onClick={() => {
-                          setConvertModal((m) => ({ ...m, customerId: c.id }));
-                          setCustSearch(`${c.first_name} ${c.last_name}`);
-                          setCustResults([]);
-                        }}
-                        style={{
-                          padding: "8px 12px",
-                          cursor: "pointer",
-                          borderBottom: `1px solid ${D.border}33`,
-                          fontSize: 13,
-                          color: D.text,
-                        }}
-                      >
-                        {c.first_name} {c.last_name}{" "}
-                        <span style={{ color: D.muted }}>({c.phone})</span>{" "}
-                      </div>
-                    ))}
-                  </div>
-                )}
-              </div>{" "}
-              <div>
-                {" "}
-                <div style={{ fontSize: 11, color: D.muted, marginBottom: 4 }}>
-                  WaveGuard Tier
-                </div>{" "}
-                <select
-                  value={convertModal.tier}
-                  onChange={(e) =>
-                    setConvertModal((m) => ({ ...m, tier: e.target.value }))
-                  }
-                  style={{ ...inputSt, appearance: "auto" }}
-                >
-                  {" "}
-                  <option value="">Select tier...</option>{" "}
-                  <option value="Platinum">Platinum</option>{" "}
-                  <option value="Gold">Gold</option>{" "}
-                  <option value="Silver">Silver</option>{" "}
-                  <option value="Bronze">Bronze</option>{" "}
-                  <option value="One-Time">One-Time</option>{" "}
-                </select>{" "}
-              </div>{" "}
-              <div>
-                {" "}
-                <div style={{ fontSize: 11, color: D.muted, marginBottom: 4 }}>
-                  Monthly Value ($)
-                </div>{" "}
-                <input
-                  type="number"
-                  placeholder="e.g. 79"
-                  value={convertModal.monthlyValue}
-                  onChange={(e) =>
-                    setConvertModal((m) => ({
-                      ...m,
-                      monthlyValue: e.target.value,
-                    }))
-                  }
-                  style={inputSt}
-                />{" "}
-              </div>{" "}
-              <div style={{ display: "flex", gap: 8, marginTop: 8 }}>
-                {" "}
-                <button
-                  onClick={handleConvert}
-                  style={{ ...btnPrimary, background: D.green, flex: 1 }}
-                >
-                  Convert
-                </button>{" "}
-                <button
-                  onClick={() => setConvertModal(null)}
-                  style={{
-                    ...btnPrimary,
-                    background: "transparent",
-                    border: `1px solid ${D.border}`,
-                    color: D.muted,
+
+      <Dialog
+        open={!!convertModal}
+        onClose={converting ? undefined : () => setConvertModal(null)}
+      >
+        <DialogHeader>
+          <DialogTitle>Convert Referral</DialogTitle>
+        </DialogHeader>
+        <DialogBody className="space-y-4">
+          <p className="m-0 text-14 text-ink-secondary">
+            Converting: {convertModal?.name}
+          </p>
+          <Field label="Customer Search">
+            <Input
+              value={custSearch}
+              onChange={(event) => searchCustomers(event.target.value)}
+              placeholder="Search customer name or phone..."
+            />
+          </Field>
+          {custResults.length > 0 && (
+            <div className="rounded-md border-hairline border-zinc-200 bg-white p-1">
+              {custResults.map((customer) => (
+                <Button
+                  key={customer.id}
+                  variant="ghost"
+                  className="w-full justify-start"
+                  onClick={() => {
+                    setConvertModal((modal) => ({
+                      ...modal,
+                      customerId: customer.id,
+                    }));
+                    setCustSearch(
+                      `${customer.first_name} ${customer.last_name}`,
+                    );
+                    setCustResults([]);
                   }}
                 >
-                  Cancel
-                </button>{" "}
-              </div>{" "}
-            </div>{" "}
-          </div>{" "}
-        </div>,
-        document.body,
-      )}
-      {/* ENROLL MODAL */}
-      {enrollModal && createPortal(
-        <div
-          style={{
-            position: "fixed",
-            inset: 0,
-            background: "rgba(0,0,0,0.7)",
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "center",
-            zIndex: 999,
-              }}
-          onClick={() => setEnrollModal(false)}
-        >
-          {" "}
-          <div
-            style={{
-              background: D.card,
-              borderRadius: 16,
-              padding: 28,
-              width: 400,
-              border: `1px solid ${D.border}`,
-              ...(isMobile
-                ? {
-                    width: "100%",
-                    maxWidth: "none",
-                    height: "100%",
-                    maxHeight: "none",
-                    borderRadius: 0,
-                    boxSizing: "border-box",
-                    overflowY: "auto",
-                    paddingTop: "calc(28px + env(safe-area-inset-top, 0px))",
-                    paddingBottom: "calc(28px + env(safe-area-inset-bottom, 0px))",
-                    paddingLeft: "calc(28px + env(safe-area-inset-left, 0px))",
-                    paddingRight: "calc(28px + env(safe-area-inset-right, 0px))",
-                  }
-                : {}),
-            }}
-            onClick={(e) => e.stopPropagation()}
-          >
-            {" "}
-            <div
-              style={{
-                fontSize: 18,
-                fontWeight: 700,
-                color: D.heading,
-                marginBottom: 16,
-              }}
+                  {customer.first_name} {customer.last_name} ({customer.phone})
+                </Button>
+              ))}
+            </div>
+          )}
+          <Field label="WaveGuard Tier">
+            <Select
+              value={convertModal?.tier || ""}
+              onChange={(event) =>
+                setConvertModal((modal) => ({
+                  ...modal,
+                  tier: event.target.value,
+                }))
+              }
             >
-              Enroll Customer as Promoter
-            </div>{" "}
-            <input
-              placeholder="Search customer name or phone..."
-              value={custSearch}
-              onChange={(e) => searchCustomers(e.target.value)}
-              style={{ ...inputSt, marginBottom: 8 }}
+              <option value="">Select tier...</option>
+              <option value="Platinum">Platinum</option>
+              <option value="Gold">Gold</option>
+              <option value="Silver">Silver</option>
+              <option value="Bronze">Bronze</option>
+              <option value="One-Time">One-Time</option>
+            </Select>
+          </Field>
+          <Field label="Monthly Value ($)">
+            <Input
+              type="number"
+              placeholder="e.g. 79"
+              value={convertModal?.monthlyValue || ""}
+              onChange={(event) =>
+                setConvertModal((modal) => ({
+                  ...modal,
+                  monthlyValue: event.target.value,
+                }))
+              }
             />
-            {custResults.length > 0 && (
-              <div
-                style={{
-                  background: D.bg,
-                  border: `1px solid ${D.border}`,
-                  borderRadius: 8,
-                  maxHeight: 200,
-                  overflow: "auto",
-                }}
-              >
-                {custResults.map((c) => (
-                  <div
-                    key={c.id}
-                    onClick={() => handleEnroll(c.id)}
-                    style={{
-                      padding: "10px 14px",
-                      cursor: "pointer",
-                      borderBottom: `1px solid ${D.border}33`,
-                      fontSize: 13,
-                      color: D.text,
-                    }}
-                  >
-                    {c.first_name} {c.last_name}{" "}
-                    <span style={{ color: D.muted }}>({c.phone})</span>{" "}
-                  </div>
-                ))}
-              </div>
-            )}
-            <button
-              onClick={() => {
-                setEnrollModal(false);
-                setCustSearch("");
-                setCustResults([]);
-              }}
-              style={{
-                ...btnPrimary,
-                background: "transparent",
-                border: `1px solid ${D.border}`,
-                color: D.muted,
-                marginTop: 12,
-                width: "100%",
-              }}
-            >
-              Cancel
-            </button>{" "}
-          </div>{" "}
-        </div>,
-        document.body,
-      )}
-    </div>
+          </Field>
+        </DialogBody>
+        <DialogFooter>
+          <Button
+            variant="secondary"
+            onClick={() => setConvertModal(null)}
+            disabled={converting}
+          >
+            Cancel
+          </Button>
+          <Button onClick={handleConvert} loading={converting}>
+            Convert
+          </Button>
+        </DialogFooter>
+      </Dialog>
+
+      <Dialog
+        open={enrollModal}
+        onClose={enrolling ? undefined : () => setEnrollModal(false)}
+      >
+        <DialogHeader>
+          <DialogTitle>Enroll Customer as Promoter</DialogTitle>
+        </DialogHeader>
+        <DialogBody className="space-y-4">
+          <Field label="Customer Search">
+            <Input
+              value={custSearch}
+              onChange={(event) => searchCustomers(event.target.value)}
+              placeholder="Search customer name or phone..."
+            />
+          </Field>
+          {custResults.length > 0 && (
+            <div className="rounded-md border-hairline border-zinc-200 bg-white p-1">
+              {custResults.map((customer) => (
+                <Button
+                  key={customer.id}
+                  variant="ghost"
+                  className="w-full justify-start"
+                  onClick={() => handleEnroll(customer.id)}
+                  disabled={enrolling}
+                >
+                  {customer.first_name} {customer.last_name} ({customer.phone})
+                </Button>
+              ))}
+            </div>
+          )}
+        </DialogBody>
+        <DialogFooter>
+          <Button
+            variant="secondary"
+            onClick={() => {
+              setEnrollModal(false);
+              setCustSearch("");
+              setCustResults([]);
+            }}
+            disabled={enrolling}
+          >
+            Cancel
+          </Button>
+        </DialogFooter>
+      </Dialog>
+    </UiSurface>
   );
 }

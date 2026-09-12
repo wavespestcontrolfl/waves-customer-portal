@@ -390,6 +390,9 @@ async function main() {
         await page
           .getByRole("button", { name: "Queue (1)", exact: true })
           .click();
+        await page.waitForTimeout(300);
+        fs.writeFileSync(path.join(output, `debug-body-${width}.txt`), await page.evaluate(() => document.body.innerText));
+        await page.screenshot({ path: path.join(output, `debug-queue-${width}.png`), fullPage: true });
         await page
           .getByLabel("Friend's name", { exact: true })
           .fill("Taylor Example");
