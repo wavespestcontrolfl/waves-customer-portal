@@ -97,10 +97,11 @@ function replayVisit(item, { from, to, threshold }) {
     }
     // A SHAPE change while a card is standing is also a supersession in
     // production: the old alert is resolved (stamped) and a new one created,
-    // so a later return to the earlier window/stage is a fresh card, not a
-    // duplicate. Without this, a promise that flip-flops A -> B -> A alerted
-    // once for A and never again (codex P1 round 10).
-    const shape = `${alert.promised_window.start_at}:${alert.stage}`;
+    // so a later return to the earlier shape is a fresh card, not a
+    // duplicate. Shape includes the RECIPIENT, because trackingKey does — an
+    // A -> B -> A reassignment gives A a fresh card in production, and a key
+    // suppressed for the export hid the second one (codex P1 round 10).
+    const shape = `${alert.promised_window.start_at}:${alert.stage}:${state.technician_id || 'unassigned'}`;
     if (alerting && lastShape && shape !== lastShape) lifecycle += 1;
     lastShape = shape;
     alerting = true;
@@ -110,7 +111,7 @@ function replayVisit(item, { from, to, threshold }) {
     // visit that leaves and re-enters LIVE_STATUSES gets a fresh one too.
     // Deduping on window+stage alone suppressed both and understated the
     // alert volume a rollout decision is made on (codex P2 round 10).
-    const key = `${shape}:${state.technician_id || 'unassigned'}:${lifecycle}`;
+    const key = `${shape}:${lifecycle}`;
     if (emitted.has(key)) continue;
     emitted.add(key);
     const complaint = new Date(item.complaint_at).getTime();

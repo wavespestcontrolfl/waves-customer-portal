@@ -346,8 +346,8 @@ async function loadPromiseEvents(conn, visitIds, { now = new Date() } = {}) {
     () => conn('scheduled_services as sv').join('call_log as cl', 'cl.id', 'sv.source_call_log_id')
       .whereIn('sv.id', visitIds).where('cl.v2_extraction_status', 'valid')
       .where('cl.created_at', '<=', now)
-      .select('sv.id as visit_id', 'cl.id as call_id', 'cl.ai_extraction_enriched', 'cl.transcription',
-        'cl.processing_token', 'cl.created_at as call_created_at', 'cl.direction as call_direction',
+      .select('sv.id as visit_id', 'sv.created_at as booked_at', 'cl.id as call_id', 'cl.ai_extraction_enriched',
+        'cl.transcription', 'cl.processing_token', 'cl.created_at as call_created_at', 'cl.direction as call_direction',
         'cl.duration_seconds', 'cl.recording_duration_seconds'),
     () => conn('activity_log as al')
       // The CALL is joined for its own clock: the activity row is written
@@ -441,7 +441,8 @@ async function loadPromiseEvents(conn, visitIds, { now = new Date() } = {}) {
       if (target == null) return null;
       return { visit_id: r.visit_id, start_at: new Date(target).toISOString(),
         communicated_at: callCommitmentInstant({ created_at: r.call_created_at, direction: r.call_direction,
-          duration_seconds: r.duration_seconds, recording_duration_seconds: r.recording_duration_seconds }).toISOString(),
+          duration_seconds: r.duration_seconds, recording_duration_seconds: r.recording_duration_seconds },
+        { notAfter: r.booked_at }).toISOString(),
         source: 'call', source_id: r.call_id };
     }).filter(Boolean),
     ...appliedReschedules.map((r) => {
@@ -456,7 +457,8 @@ async function loadPromiseEvents(conn, visitIds, { now = new Date() } = {}) {
       // timestamp when the call is gone (a purge, a legacy row).
       const heard = r.call_created_at
         ? callCommitmentInstant({ created_at: r.call_created_at, direction: r.call_direction,
-          duration_seconds: r.duration_seconds, recording_duration_seconds: r.recording_duration_seconds })
+          duration_seconds: r.duration_seconds, recording_duration_seconds: r.recording_duration_seconds },
+        { notAfter: r.created_at })
         : null;
       return { visit_id: r.metadata?.scheduled_service_id,
         start_at: at && Number.isFinite(at.getTime()) ? at.toISOString() : null,
@@ -532,17 +534,26 @@ function seriesSupersessions(rows = [], candidates = new Set()) {
 // so this stays deterministic: every read of the same call returns the same
 // instant.
 const OUTBOUND_RING_ALLOWANCE_MS = 60000;
-function callCommitmentInstant(call) {
+function callCommitmentInstant(call, { notAfter = null } = {}) {
   const started = instant(call?.created_at);
   const seconds = Number(call?.recording_duration_seconds || call?.duration_seconds || 0);
   if (!Number.isFinite(started)) return new Date();
-  const talkEnd = Number.isFinite(seconds) && seconds > 0 ? started + seconds * 1000 : started;
+  // Not every call_log row is inserted before the call: a recovery/ingest
+  // path can write one AFTER it ended, and adding the duration to that
+  // created_at lands past the real end — a promise dated later than it was
+  // spoken can leapfrog a reminder that genuinely came after it (codex P1
+  // round 10). Each caller passes the anchor it already has (the row written
+  // by the pass that processed this call), which is by construction at or
+  // after the call ended.
+  const ceiling = instant(notAfter);
+  const clamp = (ms) => (Number.isFinite(ceiling) ? Math.min(ms, ceiling) : ms);
+  const talkEnd = clamp(Number.isFinite(seconds) && seconds > 0 ? started + seconds * 1000 : started);
   // call-bridge.js inserts the row BEFORE Twilio rings the staff phone and
   // then the customer, so an outbound call's talk time omits setup and
   // ringing and its end can otherwise land before the commitment was spoken
   // (codex P2 round 10).
   const outbound = String(call?.direction || '').startsWith('outbound');
-  return new Date(outbound ? talkEnd + OUTBOUND_RING_ALLOWANCE_MS : talkEnd);
+  return new Date(outbound ? clamp(talkEnd + OUTBOUND_RING_ALLOWANCE_MS) : talkEnd);
 }
 
 // "What window, if any, did the AGENT commit to on this call?" — the

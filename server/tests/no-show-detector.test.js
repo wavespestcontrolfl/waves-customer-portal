@@ -81,6 +81,18 @@ describe('missing tracking stages', () => {
     const stage1 = report.thresholds[0].alerts.filter((a) => a.stage === 1);
     expect(stage1).toHaveLength(2);
   });
+  test('an A -> B -> A reassignment gives A a second card in the replay (round-10 P1)', () => {
+    const report = replay({ synthetic: true, from: '2026-09-10T09:00:00-04:00', to: '2026-09-10T13:00:00-04:00', visits: [{
+      id: 'visit', initial: { ...visit, technician_id: 'tech-a' }, outcome: 'late',
+      promises: [{ start_at: '2026-09-10T09:00:00-04:00', communicated_at: '2026-09-09T12:00:00-04:00', source: 'message' }],
+      events: [
+        { at: '2026-09-10T10:30:00-04:00', patch: { technician_id: 'tech-b' } },
+        { at: '2026-09-10T11:00:00-04:00', patch: { technician_id: 'tech-a' } },
+      ],
+    }] });
+    const stage1 = report.thresholds[0].alerts.filter((a) => a.stage === 1);
+    expect(stage1).toHaveLength(3);
+  });
   test('a promise that flip-flops A -> B -> A alerts for A twice (round-10 P1)', () => {
     // Production supersedes the A card when B arrives and allows a fresh one
     // when A returns; a key suppressed for the whole export hid the second.
@@ -1013,6 +1025,14 @@ describe('callCommitmentInstant (when the customer heard the promise) (round-5 P
     // really was newer (round-10 P1).
     expect(callCommitmentInstant({ created_at: created, duration_seconds: 600, updated_at: '2026-09-10T18:00:00Z' }).toISOString())
       .toBe('2026-09-10T10:10:00.000Z');
+    // A row written AFTER the call ended (a recovery/ingest path) would
+    // otherwise land past the real end; each caller passes the row its own
+    // processing pass wrote, which is at or after the call ended (round-10
+    // P1).
+    expect(callCommitmentInstant({ created_at: created, duration_seconds: 600, direction: 'outbound-api' },
+      { notAfter: '2026-09-10T10:02:00Z' }).toISOString()).toBe('2026-09-10T10:02:00.000Z');
+    expect(callCommitmentInstant({ created_at: created, duration_seconds: 600 },
+      { notAfter: '2026-09-10T23:00:00Z' }).toISOString()).toBe('2026-09-10T10:10:00.000Z');
   });
   test('a recording duration wins over the reported one, and no usable duration falls back to the call start', () => {
     expect(callCommitmentInstant({ created_at: '2026-09-10T10:00:00Z', recording_duration_seconds: 60, duration_seconds: 5 }).toISOString())
