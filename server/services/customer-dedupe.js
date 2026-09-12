@@ -1684,6 +1684,15 @@ async function executeMerge({ winnerId, loserId, performedBy, performedById = nu
     // Repoint every FK. Each table gets its own savepoint (knex nested
     // transaction) so a unique-collision on a droppable singleton can be
     // handled without poisoning the outer transaction.
+    // A payer-linked winner absorbing a self-pay loser makes the loser's debt
+    // payer-owned: a self-pay combined-visit invoice of the loser whose send
+    // claim already committed (its provider handoff pending) defers the merge.
+    // Judged here, under the customer locks and BEFORE the FK sweep repoints
+    // those invoices to the winner (the send fence keys on customer_id).
+    if (winner.payer_id && !loser.payer_id
+        && await require('./visit-completion-packets').packetInvoiceSendInFlight({ customerId: loser.id }, trx)) {
+      throw new Error('A combined-visit invoice for the merged-away record is being sent and this merge would change its billing owner — retry after it settles');
+    }
     const fks = await customerFkColumns(trx);
     for (const { table_name: table, column_name: column } of fks) {
       // Capture the moving row keys BEFORE the update, in an own savepoint:
@@ -2151,12 +2160,101 @@ async function executeMerge({ winnerId, loserId, performedBy, performedById = nu
       if (winnerPlan.inFlight > 0 && !winner.payer_id && loser.payer_id) {
         throw new Error('A combined payment for the surviving record is still in flight and this merge would change its billing owner — retry after it settles');
       }
+      // The SEND fence belongs with the other defers, ahead of the Stripe
+      // writes (Codex #4311 r40 P1): a cancel is an external effect this
+      // transaction cannot roll back, so a merge that is about to be refused
+      // for an in-flight combined-visit send must not already have cancelled
+      // the customer's checkout session. The post-sweep fence below still
+      // covers the repointed loser invoices; this one covers the winner's own
+      // before anything is cancelled.
+      if (backfills.payer_id && !winner.payer_id
+        && await require('./visit-completion-packets').packetInvoiceSendInFlight({ customerId: winnerId }, trx)) {
+        throw new Error('A combined-visit invoice for the surviving record is being sent and this merge would change its billing owner — retry after it settles');
+      }
       // Past every defer: now the Stripe writes.
       await PayCombined.applyStampedSessionRelease(trx, winnerPlan);
       await PayCombined.applyStampedSessionRelease(trx, loserPlan);
     }
+    // A payer-changing merge is the same live-ownership writer the customer
+    // and job Bill-To routes are: a self-pay combined-visit invoice whose
+    // send claim already committed (its provider handoff pending) must not
+    // have its debt handed to AP underneath it. After the FK sweep the
+    // winner's ownership covers the repointed loser invoices too, so this
+    // one query fences both records for the loser-payer direction (the
+    // winner-payer direction was fenced before the sweep).
+    if (backfills.payer_id && await require('./visit-completion-packets').packetInvoiceSendInFlight({ customerId: winnerId }, trx)) {
+      throw new Error('A combined-visit invoice for the surviving record is being sent and this merge would change its billing owner — retry after it settles');
+    }
     if (Object.keys(backfills).length) {
       await trx('customers').where({ id: winnerId }).update({ ...backfills, updated_at: trx.fn.now() });
+    }
+    // The backfill above is a live Bill-To transition like any other: a
+    // payerless winner that just inherited the loser's payer now owns the
+    // repointed self-pay packet invoices, including ones the homeowner
+    // already holds a link for. The fence above only refuses a send in
+    // flight; a `sent`/`viewed`/`overdue` invoice needs the withdrawal, so
+    // the same ownership-adding path every other Bill-To writer runs takes
+    // the winner here, after the payer is applied and the sweep has
+    // repointed the loser's invoices onto it.
+    // Direction-independent (codex r25 P1): the withdrawal is owed whenever
+    // the SURVIVING record is payer-owned, not only when the loser supplied
+    // the payer. A payer-linked winner absorbing a self-pay loser writes no
+    // backfill at all, yet the sweep just repointed the loser's
+    // `sent`/`viewed`/`overdue` packet invoices onto that payer-owned winner
+    // — gating on `backfills.payer_id` left exactly that direction
+    // collectible through the homeowner's existing link. Two self-pay records
+    // merging still run nothing — Bill-To did not move, and a per-job payer on
+    // a repointed service was already withdrawn by the writer that assigned it.
+    // Both directions are fenced against a send in flight (the loser-side check
+    // before the sweep, the winner-side one just above).
+    if (backfills.payer_id || winner.payer_id) {
+      // Only invoices REPOINTED FROM THE LOSER can carry undo-relevant
+      // reversals (local audit on r42): journaling the winner's own ledger
+      // rows would have the undo hand them to the loser while the invoices
+      // stayed with the winner. A count-only sweep record cannot name them,
+      // so nothing is journaled and the table is marked non-replayable.
+      const sweptInvoiceIds = repointedIds['invoices.customer_id'];
+      const inheritedInvoiceIds = new Set(Array.isArray(sweptInvoiceIds) ? sweptInvoiceIds.map(String) : []);
+      // …and only the reversal rows this withdrawal creates: a snapshot taken
+      // before it runs is what makes the diff precise.
+      const ledgerBefore = inheritedInvoiceIds.size
+        ? new Set((await trx('customer_credit_ledger').where({ customer_id: winnerId })
+          .whereIn('invoice_id', [...inheritedInvoiceIds]).pluck('id')).map(String))
+        : new Set();
+      const withdrawnInvoiceIds = await require('./visit-completion-packets')
+        .withdrawPacketInvoicesForOwner(trx, { customerId: winnerId });
+      // The withdrawal RETURNS the homeowner's applied credit, and it runs
+      // AFTER the FK sweep — so the ledger rows it writes belong to the
+      // winner and are not in the sweep's id record (Codex #4311 r42 P1). An
+      // undo would then return the invoice to the loser while the returned
+      // credit stayed with the winner. Journal them with the rest so the undo
+      // repoints them too.
+      const inheritedWithdrawn = withdrawnInvoiceIds.filter((id) => inheritedInvoiceIds.has(String(id)));
+      if (inheritedWithdrawn.length) {
+        const reversalIds = (await trx('customer_credit_ledger')
+          .where({ customer_id: winnerId })
+          .whereIn('invoice_id', inheritedWithdrawn)
+          .pluck('id')).map(String).filter((id) => !ledgerBefore.has(id));
+        if (reversalIds.length) {
+          const key = 'customer_credit_ledger.customer_id';
+          const existing = repointedIds[key];
+          if (Array.isArray(existing)) {
+            repointedIds[key] = [...new Set([...existing, ...reversalIds])];
+          } else if (!existing) {
+            repointedIds[key] = reversalIds;
+          } else {
+            // The sweep already fell back to count-only for this table, so an
+            // id-precise undo is not available for it either way; keep the
+            // existing record and mark the table as not replayable backwards,
+            // the same signal a unique-collision handler raises.
+            if (!collisionHandlers.includes('customer_credit_ledger')) collisionHandlers.push('customer_credit_ledger');
+          }
+        }
+      } else if (withdrawnInvoiceIds.length && !Array.isArray(sweptInvoiceIds) && sweptInvoiceIds) {
+        // Invoices were repointed but the sweep recorded only a count, so a
+        // reversal among them cannot be named for the undo.
+        if (!collisionHandlers.includes('customer_credit_ledger')) collisionHandlers.push('customer_credit_ledger');
+      }
     }
 
     const [journal] = await trx('customer_merge_journal').insert({
@@ -4631,6 +4729,28 @@ async function revertMerge({ journalId, performedBy, performedById }) {
           await trx('customers').where({ id: winnerId }).update({ accepted_terms_version: remainingLatest, updated_at: trx.fn.now() });
         }
       }
+    }
+
+    // Ownership-REMOVING side of the undo (codex r25 P2): the merge withdrew
+    // every packet invoice the inherited payer took over, and an undo that
+    // clears or restores `payer_id` hands that debt back to self-pay. Without
+    // this the rows keep their `payer_billed:` stamps, billing holds and payer
+    // alerts forever — their send and payment rails stay blocked. Run for both
+    // records (the loser's invoices moved back to it during the un-repoint
+    // above) and only here, after the winner patch AND the loser restore have
+    // committed, so the resolver reads the post-undo Bill-To. Reconciliation
+    // resolves ownership per packet and releases nothing that still has a live
+    // payer, so an undo that leaves the payer in place is a no-op.
+    // The LOSER runs unconditionally (audit P1): a payer-linked winner
+    // absorbing a self-pay loser withdraws the loser's invoices while writing
+    // no backfill at all, so gating on the winner's payer left exactly that
+    // direction's restored rows stamped and unpayable. Splitting the loser
+    // back out always changes its Bill-To. The WINNER's own invoices are
+    // reconciled only when the undo actually moved its payer.
+    const Packets = require('./visit-completion-packets');
+    await Packets.reconcileWithdrawnPacketInvoices(trx, { customerId: loserId });
+    if (Object.prototype.hasOwnProperty.call(winnerPatch, 'payer_id')) {
+      await Packets.reconcileWithdrawnPacketInvoices(trx, { customerId: winnerId });
     }
 
     await trx('customer_merge_journal').where({ id: journalId }).update({

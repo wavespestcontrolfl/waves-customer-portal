@@ -136,7 +136,12 @@ jest.mock('../services/pnl-report', () => ({
   outflowTransactionsQuery: jest.fn(),
   dateCellStr: jest.requireActual('../services/pnl-report').dateCellStr,
 }));
-jest.mock('../services/invoice-helpers', () => ({ invoiceAmountDue: jest.fn() }));
+jest.mock('../services/invoice-helpers', () => ({
+  invoiceAmountDue: jest.fn(),
+  // The dunning guards read the withdrawal stamp too (a payer-billed
+  // combined-visit invoice keeps payer_id NULL).
+  invoiceWithdrawnFromCustomer: (invoice) => /^payer_billed:/.test(String(invoice?.scheduled_send_error || '')),
+}));
 // unlink reverses a bank-import-authored reconciliation through the same
 // stripe-banking mechanism — stubbed, asserted in the unlink describe
 jest.mock('../services/stripe-banking', () => ({ reconcilePayout: jest.fn(() => Promise.resolve({})) }));

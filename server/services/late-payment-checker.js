@@ -180,6 +180,13 @@ const LatePaymentService = {
         // path (which texts/emails the customer a pay link). Payer dunning is
         // Phase 2.
         .whereNull('payer_id')
+        // A combined-visit invoice WITHDRAWN to a payer keeps payer_id NULL and
+        // a collectible status — the move is recorded only in the stamp (Codex
+        // #4311 r31 P1), so a payer_id-only filter would keep reminding the
+        // homeowner about debt the payer now owes.
+        .where(function () {
+          this.whereNull('scheduled_send_error').orWhereNot('scheduled_send_error', 'like', 'payer_billed:%');
+        })
         .where(function () {
           this.where('due_date', '<=', cutoff)
             .orWhere(function () {
@@ -207,6 +214,20 @@ const LatePaymentService = {
       // "stop dunning this invoice" instruction (e.g. customer is mailing a check);
       // honoring it only in the per-invoice engine but not here would let this
       // legacy reminder keep texting them after follow-ups were turned off.
+      // Ownership RE-READ immediately before the dispatch decision (Codex
+      // #4311 r32 P1): a Bill-To change committing between the batch query
+      // above and this send stamps the invoice and moves the debt to AP,
+      // and the batch row still carries the old, empty stamp. FAIL CLOSED on
+      // an unreadable row, like every other customer-comms guard here.
+      try {
+        const live = await db('invoices').where({ id: inv.id }).first('payer_id', 'scheduled_send_error');
+        if (!live || live.payer_id
+          || require('./invoice-helpers').invoiceWithdrawnFromCustomer(live)) { skipped++; continue; }
+      } catch (ownershipErr) {
+        logger.warn(`[late-payment] ownership re-read failed for invoice ${inv.id} — skipping this run (fail closed): ${ownershipErr.message}`);
+        skipped++;
+        continue;
+      }
       try {
         const InvoiceFollowUps = require('./invoice-followups');
         if (await InvoiceFollowUps.hasActiveSequence(inv.id)) { skipped++; continue; }
@@ -301,6 +322,18 @@ const LatePaymentService = {
       }
       const dateClause = formattedDate ? ` completed on ${formattedDate}` : '';
 
+      // Ownership ONE more time, on the last read before the provider (local
+      // audit): every check above is awaited, and a Bill-To assignment
+      // landing in that window would otherwise still text the homeowner.
+      try {
+        const stillSelfPay = await db('invoices').where({ id: inv.id }).first('payer_id', 'scheduled_send_error');
+        if (!stillSelfPay || stillSelfPay.payer_id
+          || require('./invoice-helpers').invoiceWithdrawnFromCustomer(stillSelfPay)) { skipped++; continue; }
+      } catch (ownershipErr) {
+        logger.warn(`[late-payment] pre-send ownership re-read failed for invoice ${inv.id} — skipping (fail closed): ${ownershipErr.message}`);
+        skipped++;
+        continue;
+      }
       const templateKey = templateKeyForOverdue(daysSince);
       const body = await renderSmsTemplate(templateKey, {
         first_name: name,
@@ -358,6 +391,13 @@ const LatePaymentService = {
               invoiceId: inv.id,
               entryPoint: 'late_payment_checker',
               metadata: { original_message_type: 'late_payment' },
+              // The LAST ownership check, run by the canonical sender
+              // immediately before provider preparation (Codex #4311 r42 P1):
+              // the template render, the policy lookup and the ledger insert
+              // are all awaited after the read above, and this legacy rail
+              // holds no claim a Bill-To writer fences on. Fail-closed, and
+              // no lock is held across provider I/O.
+              preDispatchCheck: require('./invoice-helpers').selfPayAtDispatch(inv.id, db),
             });
             if (sendResult.sent !== true) {
               await ContactLedger.markSendFailed(smsLedger, { code: sendResult.code || 'blocked' });
@@ -407,7 +447,13 @@ const LatePaymentService = {
           if (emailLedger) {
             try {
               const BalanceReminder = require('./workflows/balance-reminder');
-              if (typeof BalanceReminder.sendLatePaymentEmail === 'function') {
+              // The email leg's own last check (Codex #4311 r42 P1): its
+              // handoff is later still than the SMS one, so ownership is
+              // re-read immediately before it too. Fail-closed.
+              const emailOwnership = await require('./invoice-helpers').selfPayAtDispatch(inv.id, db)();
+              if (emailOwnership.ok !== true) {
+                logger.warn(`[late-payment] email reminder skipped for invoice ${inv.id} — ${emailOwnership.reason}`);
+              } else if (typeof BalanceReminder.sendLatePaymentEmail === 'function') {
                 emailResult = await BalanceReminder.sendLatePaymentEmail({
                   customer,
                   invoice: inv,

@@ -3992,6 +3992,22 @@ router.put('/:id', requireAdmin, async (req, res, next) => {
             // — unauthenticated input never gets to claim a live
             // customer's mailbox; an operator can.
           }
+          // EVERY refusal is decided BEFORE the first Stripe cancel (Codex
+          // #4311 r28 P2): the send-in-flight check below used to run after
+          // the session release, so a Bill-To edit rejected for an in-flight
+          // combined-visit send had already cancelled the customer's live
+          // pay-page session — and a Stripe cancel does not roll back with
+          // this transaction. Judged against the LOCKED snapshot, not the
+          // pre-transaction read: a payer cleared by another edit and
+          // restored by this stale request is still a change while a
+          // self-pay send is in flight.
+          if (updates.payer_id !== undefined && String(updates.payer_id ?? '') !== String(lockedBefore.payer_id ?? '')) {
+            if (await require('../services/visit-completion-packets').packetInvoiceSendInFlight({ customerId: req.params.id }, trx)) {
+              throw Object.assign(new Error('A combined-visit invoice for this customer is being delivered. Retry the Bill-To change in a moment.'), {
+                statusCode: 409, isOperational: true, code: 'invoice_send_in_flight',
+              });
+            }
+          }
           // Assigning a DEFAULT payer must first release any unconfirmed
           // combined pay-page session on this customer's invoices (codex
           // #3427 r8 P1, same fence as the scheduled-service payer writer):
@@ -4011,6 +4027,17 @@ router.put('/:id', requireAdmin, async (req, res, next) => {
             }
           }
           await trx('customers').where({ id: req.params.id }).update(updates);
+          // A Bill-To edit that can make a withdrawn combined-visit invoice
+          // self-pay again (payer cleared) requeues it through the shared
+          // reconciliation, inside this same transaction.
+          if (updates.payer_id !== undefined) {
+            const Packets = require('../services/visit-completion-packets');
+            await Packets.reconcileWithdrawnPacketInvoices(trx, { customerId: req.params.id });
+            // The opposite transition (a payer assigned) withdraws every
+            // self-pay combined-visit invoice this customer now owes to AP,
+            // including one the homeowner already holds a pay link for.
+            if (updates.payer_id) await Packets.withdrawPacketInvoicesForOwner(trx, { customerId: req.params.id });
+          }
           // Coordinates cleared ATOMICALLY with the address (and the move
           // stamp the fan-out writes in this same transaction): a committed
           // move must never leave the former home's lat/lng readable beside
