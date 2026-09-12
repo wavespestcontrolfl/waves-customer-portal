@@ -565,7 +565,15 @@ async function parkReview(conn, row, reason, { clearDeliveryUncertain = false } 
       .whereRaw(LINK_NOT_YET_RECONCILED)
       .whereRaw("(status <> 'review' OR last_error IS DISTINCT FROM ?)", [reason])
       .update({ status: 'review', last_error: reason, updated_at: new Date(),
-        ...(clearDeliveryUncertain ? { payload: { ...row.payload, [DELIVERY_UNCERTAIN_KEY]: false } } : {}) });
+        // A JS-spread merge on `row.payload` (a snapshot this function never
+        // re-reads under the lock) would be safe against markLinkUsed only
+        // because the WHERE guard above independently re-checks the one
+        // dangerous key at UPDATE time — but a raw jsonb merge is strictly
+        // safer (proof against ANY concurrent payload writer, not just the
+        // one this WHERE clause happens to guard against today) at zero
+        // extra cost, so it is what every other payload-merge site in this
+        // file uses (codex #4293 P1).
+        ...(clearDeliveryUncertain ? { payload: deliveryUncertainPatch(trx, false) } : {}) });
     if (!changed) return;
     // One card per CALL, but it has to name every promise parked against that
     // call. A card carrying only the first commitment id was resolved the
@@ -779,7 +787,23 @@ async function settleDelivery(conn, row, sms, context = null) {
     await trx('outbox_messages').where({ id: row.id }).update(settledOutboxPatch(current, sms, context, { delivered, visitId, generation }));
     if (delivered) await fulfilPromise(trx, row, sms, call);
     return null;
-  }).then((result) => result?.needsReview ? parkReview(conn, row, 'delivery_scope_changed') : result);
+  // deliveryIdentityMatches failing (context changed — most often reprocessing
+  // advancing the generation before this receipt arrived) says nothing about
+  // whether the PROVIDER delivered THIS attempt: `delivered` above is that
+  // separate, definitive fact about the one outbox row named by this sms's
+  // twilio_sid, independent of what the commitment has since become.
+  // Settling the attempt (retiring delivery_outcome_uncertain) and fulfilling
+  // the commitment are two different questions with two different guards —
+  // conflating them is exactly the bug reconcileAttempt's parallel
+  // delivery_failed branch was already fixed for (codex #4293 P1); this is
+  // that same fix for the delivered/read receipt instead of the failed one.
+  // Leaving the flag true here left stagePromises blocked forever on an
+  // attempt whose outcome was, in fact, known (codex #4293 P1). The
+  // commitment itself stays untouched either way: fulfilPromise was never
+  // reached above (identity mismatch short-circuited before it), so the
+  // generation guard on MUTATING the commitment is exactly as strict as it
+  // was before this fix.
+  }).then((result) => result?.needsReview ? parkReview(conn, row, 'delivery_scope_changed', { clearDeliveryUncertain: delivered }) : result);
 }
 
 // A replacement/adopted recording (call-commitments.js upsertCommitments)
@@ -889,9 +913,19 @@ async function stagePromises(conn) {
 // parkReview — the row's status and its existing review reason (whatever
 // context error actually parked it) are left exactly as they are; only the
 // flag moves.
+//
+// `row` here is the sweep's own pre-lock read — this function takes no
+// transaction and no lockTriageCall, so a JS-spread merge on `row.payload`
+// would blindly overwrite whatever markLinkUsed (or any other writer) had
+// stamped onto this exact row's payload in the gap between that read and
+// this UPDATE, INCLUDING link_used_reconciled_at — silently un-reconciling
+// an already-closed promise for a later sweep to re-park (codex #4293 P1).
+// deliveryUncertainPatch's raw jsonb merge makes the ordering irrelevant:
+// whatever the row's payload actually is at UPDATE time keeps every key
+// except the one this call names.
 async function clearDeliveryUncertainInReview(conn, row) {
   await conn('outbox_messages').where({ id: row.id, status: 'review' })
-    .update({ payload: { ...row.payload, [DELIVERY_UNCERTAIN_KEY]: false }, updated_at: new Date() });
+    .update({ payload: deliveryUncertainPatch(conn, false), updated_at: new Date() });
 }
 
 // An attempt that already reached the provider OWNS the row until its
@@ -945,15 +979,19 @@ async function settleReconciledReceipt(conn, row) {
     // is the one step of settleDelivery that belongs here too, reused
     // rather than copied. Its own clearPromiseException call is a safe
     // no-op (the exception card is already closed); it never re-parks.
+    // `row` is the sweep's own pre-lock read, same as everywhere else in
+    // this file — the raw jsonb merge (not a JS spread on that snapshot)
+    // is what keeps this safe against a concurrent payload writer on the
+    // same row (codex #4293 P1).
     await conn.transaction(async (trx) => {
       await lockTriageCall(trx, row.related_call_log_id);
       const changed = await trx('outbox_messages').where({ id: row.id }).whereNotIn('status', ['delivered', 'cancelled'])
-        .update({ status: 'delivered', last_error: null, updated_at: new Date(), payload: { ...row.payload, [DELIVERY_UNCERTAIN_KEY]: false } });
+        .update({ status: 'delivered', last_error: null, updated_at: new Date(), payload: deliveryUncertainPatch(trx, false) });
       if (changed) await fulfilPromise(trx, row, sms, { id: row.related_call_log_id });
     });
   } else if (['failed', 'undelivered'].includes(sms.status)) {
     await conn('outbox_messages').where({ id: row.id }).whereNotIn('status', ['delivered', 'cancelled'])
-      .update({ status: 'failed', last_error: sms.status, updated_at: new Date(), payload: { ...row.payload, [DELIVERY_UNCERTAIN_KEY]: false } });
+      .update({ status: 'failed', last_error: sms.status, updated_at: new Date(), payload: deliveryUncertainPatch(conn, false) });
   }
 }
 
@@ -970,8 +1008,14 @@ async function applyContextSkip(conn, row, reason, now) {
   // the office has ruled, so no future sweep will ever act on this row again.
   if (reason === 'promise_closed') return conn.transaction(async (trx) => {
     await lockTriageCall(trx, row.related_call_log_id);
+    // Same class as clearDeliveryUncertainInReview and settleReconciledReceipt:
+    // `row` is a pre-lock snapshot, so the payload write has to merge at the
+    // database level rather than replace from it — a customer using the link
+    // (markLinkUsed, serialized behind the SAME lockTriageCall above) could
+    // otherwise have its stamp erased by whichever transaction commits second
+    // (codex #4293 P1).
     await trx('outbox_messages').where({ id: row.id }).whereNotIn('status', ['delivered', 'cancelled'])
-      .update({ status: 'cancelled', updated_at: now, payload: { ...row.payload, [DELIVERY_UNCERTAIN_KEY]: false } });
+      .update({ status: 'cancelled', updated_at: now, payload: deliveryUncertainPatch(trx, false) });
     await clearPromiseException(trx, row.related_call_log_id, row.commitment_id, 'The promise was closed by the office.');
   });
   if (mode() === 'shadow') return conn('outbox_messages').where({ id: row.id }).whereIn('status', ['pending', 'shadow'])

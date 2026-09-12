@@ -416,7 +416,21 @@ function fakeConn({ outbox = [], selfServe = null, selfServeVisitIds = null, car
   // AND as the persistedActivationBoundary's direct `await conn.raw('SELECT
   // now() ...')` — a plain (non-thenable) object just resolves to itself
   // under await, so both callers read what they need off the same value.
-  conn.raw = (sql, bindings) => ({ sql, bindings, rows: [{ now: new Date() }] });
+  // deliveryUncertainPatch's jsonb-merge idiom is a THIRD shape: production
+  // code passes its raw() result straight into `.update({ payload: ... })`
+  // to merge under the row's own lock rather than replace from a JS
+  // snapshot (codex #4293 P1) — genuinely exercising that merge against a
+  // concurrent writer needs the real-PG suite, but a unit test asserting
+  // the resulting FLAG value still needs `patch.payload.<key>` to read
+  // through, so this recognizes the one-binding jsonb-merge call shape and
+  // hands back the parsed patch object directly instead of the opaque
+  // {sql,bindings,rows} wrapper every other raw() caller here still gets.
+  conn.raw = (sql, bindings) => {
+    if (Array.isArray(bindings) && bindings.length === 1 && typeof bindings[0] === 'string' && /COALESCE\(payload/.test(sql)) {
+      try { return JSON.parse(bindings[0]); } catch { /* not the merge idiom after all — fall through */ }
+    }
+    return { sql, bindings, rows: [{ now: new Date() }] };
+  };
   conn.transaction = async (fn) => fn(conn);
   return { conn, seen };
 }
