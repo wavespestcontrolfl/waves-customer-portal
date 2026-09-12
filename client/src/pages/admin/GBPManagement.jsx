@@ -282,7 +282,13 @@ export default function GBPManagement() {
                 <Badge tone="neutral">{l.pendingUpdates} pending</Badge>
               )}
             </div>{" "}
-            <div title={l.authError || ""} className="text-ui-body mt-[4px]">
+            <div
+              title={l.authError || ""}
+              className={
+                "text-ui-body mt-[4px] " +
+                (l.authError ? "text-alert-fg" : "text-ink-secondary")
+              }
+            >
               {l.hasCredentials
                 ? "● API Connected"
                 : l.authError
@@ -334,7 +340,7 @@ export default function GBPManagement() {
         </div>
       )}
       {!loc ? (
-        <Card className="p-5 mb-3 text-center p-[40px] text-ink-secondary">
+        <Card className="mb-3 text-center p-[40px] text-ink-secondary">
           No locations available
         </Card>
       ) : (
@@ -505,7 +511,12 @@ function OverviewTab({ loc, gbp, onSync, onPush, syncing, pushing }) {
           </div>{" "}
           <div className="flex gap-[8px] mt-[16px] justify-center flex-wrap">
             {loc.mapsUrl && (
-              <a href={loc.mapsUrl} target="_blank" rel="noopener noreferrer">
+              <a
+                href={loc.mapsUrl}
+                target="_blank"
+                rel="noopener noreferrer"
+                className={buttonStyles({ variant: "primary", density: "comfortable" })}
+              >
                 View on Maps
               </a>
             )}
@@ -514,6 +525,7 @@ function OverviewTab({ loc, gbp, onSync, onPush, syncing, pushing }) {
                 href={loc.googleReviewUrl}
                 target="_blank"
                 rel="noopener noreferrer"
+                className={buttonStyles({ variant: "secondary", density: "comfortable" })}
               >
                 Review Link
               </a>
@@ -544,7 +556,7 @@ function OverviewTab({ loc, gbp, onSync, onPush, syncing, pushing }) {
               {pushing ? "Pushing..." : "Push to Google"}
             </Button>
             {!loc.hasCredentials && (
-              <div className="text-ui-body text-zinc-900 text-center">
+              <div className="text-ui-body text-alert-fg text-center">
                 OAuth not configured — push disabled
               </div>
             )}
@@ -1121,7 +1133,7 @@ function PhotosTab({ loc, gbp }) {
         </a>{" "}
       </div>
       {photos.length === 0 ? (
-        <Card className="p-5 mb-3 text-center p-[40px] text-ink-secondary">
+        <Card className="mb-3 text-center p-[40px] text-ink-secondary">
           No photos found
         </Card>
       ) : (
@@ -1195,7 +1207,7 @@ function UpdateQueueTab({
         )}
       </div>
       {updates.length === 0 ? (
-        <Card className="p-5 mb-3 text-center p-[40px] text-ink-secondary">
+        <Card className="mb-3 text-center p-[40px] text-ink-secondary">
           {" "}
           <div className="text-[24px] mb-[8px]"></div>{" "}
           <div className="text-ui-body">No pending updates</div>{" "}
@@ -1208,7 +1220,7 @@ function UpdateQueueTab({
           {updates.map((u) => (
             <Card
               key={u.id}
-              className="p-5 mb-3 mb-[0px] flex items-start gap-[12px]"
+              className="p-5 flex items-start gap-[12px]"
             >
               {" "}
               <Checkbox
