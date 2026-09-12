@@ -68,6 +68,7 @@
     "test:dev-workflow": "node --test scripts/dev/tests/*.test.js",
     "qa:previews": "node scripts/qa/previews.js",
     "qa:glass": "node scripts/qa/glass-audit/run.cjs",
+    "qa:glass:dates": "node scripts/qa/glass-audit/check-fixture-dates.cjs",
     "test:qa-workflow": "node --test scripts/qa/tests/*.test.js",
     "qa:e2e": "node scripts/qa/e2e.js",
     "qa:seed": "node scripts/qa/e2e.js --seed",

@@ -86,6 +86,10 @@ describe('service library guardrails', () => {
   });
   beforeEach(() => {
     jest.clearAllMocks();
+    // deactivateService takes the catalog writer table lock as its first
+    // statement (codex #4369 r4 P1); the transaction fake must look like one.
+    db.isTransaction = true;
+    db.raw = db.raw || jest.fn().mockResolvedValue(undefined);
     db.transaction = jest.fn(async (callback) => callback(db));
   });
 

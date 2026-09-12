@@ -665,10 +665,242 @@ claude_env_args() {
   done
   return 0
 }
+# ── Referenced-file context (the Claude fallback only) ───────────────────
+# Codex reviews with repo access. The Claude fallback has NO tools — that is
+# the sandbox and it is not negotiable — so it sees the diff and nothing
+# else, and it cannot resolve a reference the diff makes to a file the diff
+# does not contain.
+#
+# That blindness has a measured cost. On a real review the fallback flagged
+# a model-registry policy as possibly missing and asked the author to
+# confirm it existed, because it could not open server/config/models.js to
+# see that it did. The policy was there. A hedged finding about a file the
+# model is forbidden to read is noise, and it crowds out a real one.
+#
+# So resolve the relative requires/imports the diff ADDS and inline the few
+# that are not themselves in the diff. Every path here is extracted from an
+# UNTRUSTED diff, so none of them is trusted:
+#   - resolved against the AUDITED COMMIT's tree, never the filesystem, so
+#     uncommitted edits or a different checked-out branch cannot substitute
+#     content while it is labelled authoritative
+#   - required to normalize to a path inside the repo, so a spec like
+#     ../../../../.ssh/id_rsa is dropped, and a symlink entry is refused
+#     outright rather than followed
+#   - required to be IN THAT COMMIT'S TREE, which is what actually keeps an
+#     untracked .env or a dropped credentials file out however it is spelled
+#   - excluded when the diff changes it, with the changed set taken from git
+#     metadata rather than the patch text — a binary-rendered file has no
+#     `+++` header, and reading the text would let a CHANGED file be inlined
+#     as unchanged and skip review
+#   - required to be a source extension, and never under node_modules
+#   - capped in count and bytes, so a diff cannot inflate its own prompt
+# No python3 → no context section, and the audit runs exactly as before.
+CLAUDE_CONTEXT_MAX_FILES="${CLAUDE_CONTEXT_MAX_FILES:-5}"
+CLAUDE_CONTEXT_MAX_BYTES="${CLAUDE_CONTEXT_MAX_BYTES:-50000}"
+write_referenced_context_script() {
+  # Kept in its own file rather than a heredoc inside $( ): bash cannot
+  # parse a heredoc nested in a command substitution.
+  cat > "$1" <<'PYEOF'
+import os, re, sys
+
+# argv: <diff file> <tree listing from `git ls-tree -r <sha>`>
+#       <changed paths, one per line, from `git diff --name-only`>
+# Everything is resolved against that listing — the audited commit — and the
+# filesystem is never touched. That is deliberate: the working tree can hold
+# uncommitted edits, or be on another branch entirely, and inlining THAT
+# content while labelling it authoritative context for this diff would hide
+# the very defect the audit is looking for.
+diff_path, tree_path, changed_path = sys.argv[1], sys.argv[2], sys.argv[3]
+SPEC = re.compile(r"""(?:require\(|import\()\s*['"](\.[^'"]+)['"]|\bfrom\s+['"](\.[^'"]+)['"]""")
+EXT = ('.js', '.jsx', '.mjs', '.cjs', '.ts', '.tsx')
+SYMLINK_MODE = '120000'
+
+# `git ls-tree -r` prints: <mode> <type> <object>\t<path>
+tree = {}
+with open(tree_path, encoding='utf-8', errors='replace') as fh:
+    for line in fh:
+        meta, _, path = line.rstrip('\n').partition('\t')
+        if not path:
+            continue
+        tree[path] = meta.split(' ', 1)[0]
+
+# The changed set comes from git's own metadata, NEVER from the `+++`
+# headers. A file git renders as binary — one NUL byte, or a `-diff`
+# attribute — is emitted as "Binary files a/x and b/x differ" with no `+++`
+# header at all. Reading the headers would leave that file out of `changed`,
+# and its NEW contents would then be inlined under a heading that tells the
+# reviewer it is unchanged and not to report on it: a changed file would
+# evade review entirely.
+changed = set()
+with open(changed_path, encoding='utf-8', errors='replace') as fh:
+    for line in fh:
+        line = line.rstrip('\n')
+        if line:
+            changed.add(line)
+
+# A `+++` prefix is only a file header OUTSIDE a hunk. Inside one it is an
+# added line whose source text begins with `++` — `++ counter;` reaches the
+# patch as `+++ counter;`. Treating that as a header repoints `cur` at a
+# garbage path, and every relative import after it then resolves from the
+# repo root: a nested caller's ./helper silently becomes the root helper.js,
+# inlined under the authoritative UNCHANGED heading. So track hunk state and
+# let only a real header move `cur`.
+refs, cur, in_hunk = [], None, False
+with open(diff_path, encoding='utf-8', errors='replace') as fh:
+    for line in fh:
+        if line.startswith('diff --git '):
+            cur, in_hunk = None, False
+            continue
+        if line.startswith('@@'):
+            in_hunk = True
+            continue
+        if not in_hunk:
+            # The file-header region: the only place a `+++` is a header.
+            # Used solely to attribute the added lines below to the file
+            # they came from — never to decide what counts as changed.
+            if line.startswith('+++ '):
+                path = line[4:].strip()
+                if path.startswith('b/'):
+                    path = path[2:]
+                cur = None if path == '/dev/null' else path
+            continue
+        # Inside a hunk, only added lines carry imports worth resolving.
+        if not line.startswith('+') or cur is None:
+            continue
+        for m in SPEC.finditer(line[1:]):
+            spec = m.group(1) or m.group(2)
+            if spec:
+                refs.append((cur, spec))
+
+out, seen = [], set()
+for src, spec in refs:
+    base = os.path.normpath(os.path.join(os.path.dirname(src), spec))
+    # The EXACT path is always the first candidate, whatever it is named.
+    # Node tries it first, so it is the target even when it has no
+    # extension or an unsupported one — and if it is then rejected, the
+    # reference is dropped rather than quietly re-pointed at a sibling.
+    # Generating only EXT candidates would skip a tracked extensionless
+    # `helper` (a symlink, say) and inline `helper.js` in its place.
+    cands = [base]
+    cands += [base + e for e in EXT]
+    cands += [base + '/index' + e for e in EXT]
+    seen_cands = set()
+    cands = [c for c in cands if not (c in seen_cands or seen_cands.add(c))]
+
+    # RESOLUTION FIRST, filtering second, and the two must not be mixed.
+    # Walking the candidate list while filtering lets an excluded target
+    # fall through to the next candidate: if ./helper resolves to helper.js
+    # but that file is changed, the loop would go on to inline
+    # helper/index.js and present it as what the import points at. Pick the
+    # first candidate that exists in the commit — that IS the target — and
+    # then judge it.
+    target = None
+    for rel in cands:
+        # Containment, lexically: normpath has already collapsed the `..`
+        # segments, so anything that escaped the repo now starts with `..`.
+        # Such a path is never in the tree either, so this is belt and
+        # braces rather than the only guard.
+        if os.path.isabs(rel) or rel == '..' or rel.startswith('../'):
+            continue
+        if rel in tree:
+            target = rel
+            break
+    if target is None:
+        continue
+
+    # From here a failed check drops the REFERENCE, never advances to a
+    # different file.
+    if target in seen or target in changed:
+        continue
+    if 'node_modules' in target.split('/'):
+        continue
+    # A symlink entry is refused outright: its blob is a path, and following
+    # it would step outside the commit's own contents.
+    if tree.get(target) == SYMLINK_MODE:
+        continue
+    # The extension is judged on the RESOLVED target, not used to filter the
+    # candidate list. Filtering the list is what let an unsupported exact
+    # match fall through to a same-named .js file.
+    if not target.endswith(EXT):
+        continue
+    seen.add(target)
+    out.append(target)
+
+print('\n'.join(out))
+PYEOF
+}
+collect_referenced_context() {
+  # $1 = file holding the diff, $2 = output file, $3 = the audited commit,
+  # $4 = the base it is diffed against. Writes a prompt section, or leaves
+  # the output empty when there is nothing safe and useful to add.
+  local diff_file="$1" out="$2" audit_sha="$3" base="$4"
+  local candidates rel size bytes=0 count=0
+  local pyfile="$TMPDIR_RUN/referenced-context.py"
+  local treefile="$TMPDIR_RUN/referenced-context-tree.txt"
+  local changedfile="$TMPDIR_RUN/referenced-context-changed.txt"
+  local body="$TMPDIR_RUN/referenced-context-body.txt"
+  : > "$out"
+  # Both are required, and missing either FAILS CLOSED to no context at all.
+  # Without the base there is no authoritative changed-file list, and the
+  # only other source for it is the diff text — which is exactly the thing
+  # that cannot see a binary-rendered file.
+  [ -n "$audit_sha" ] || return 0
+  [ -n "$base" ] || return 0
+  [ "$CLAUDE_CONTEXT_MAX_FILES" -gt 0 ] 2>/dev/null || return 0
+  command -v python3 >/dev/null 2>&1 || return 0
+
+  # The audited commit's own file list — not the working tree's.
+  git ls-tree -r "$audit_sha" > "$treefile" 2>/dev/null || return 0
+  [ -s "$treefile" ] || return 0
+  git diff --name-only "$base...$audit_sha" > "$changedfile" 2>/dev/null || return 0
+
+  write_referenced_context_script "$pyfile" || return 0
+  candidates="$(python3 "$pyfile" "$diff_file" "$treefile" "$changedfile" 2>/dev/null)" || return 0
+  [ -n "$candidates" ] || return 0
+
+  : > "$body"
+  while IFS= read -r rel; do
+    [ -n "$rel" ] || continue
+    [ "$count" -lt "$CLAUDE_CONTEXT_MAX_FILES" ] || break
+    size="$(git cat-file -s "$audit_sha:$rel" 2>/dev/null)" || continue
+    [ -n "$size" ] || continue
+    [ $((bytes + size)) -le "$CLAUDE_CONTEXT_MAX_BYTES" ] || continue
+    {
+      echo ""
+      echo "----- $rel (UNCHANGED, for reference only) -----"
+      git cat-file blob "$audit_sha:$rel" 2>/dev/null
+    } >> "$body"
+    bytes=$((bytes + size))
+    count=$((count + 1))
+  done <<REFEOF
+$candidates
+REFEOF
+
+  [ "$count" -gt 0 ] || return 0
+  {
+    echo ""
+    echo "── Referenced files, NOT part of the diff ($count file(s)) ─────────"
+    echo "The diff above references these files. They are reproduced so you"
+    echo "can resolve those references instead of guessing, because you have"
+    echo "no tools and cannot open them yourself."
+    echo ""
+    echo "They are read from the commit under audit, so they are what this"
+    echo "push would actually ship alongside the diff."
+    echo ""
+    echo "They are NOT changed by this push. Do NOT raise findings about"
+    echo "their contents, and do NOT ask the author to confirm something"
+    echo "that is answered here — read it and decide."
+    cat "$body"
+  } > "$out"
+  return 0
+}
+
 CLAUDE_DISALLOWED_TOOLS="Bash Edit Write NotebookEdit WebFetch WebSearch Task Agent Read Grep Glob ToolSearch Skill Workflow ListAgents SendMessage Monitor TaskOutput TaskStop CronCreate CronDelete CronList EnterWorktree ExitWorktree PushNotification RemoteTrigger DesignSync Artifact SlashCommand KillShell BashOutput TodoWrite ExitPlanMode EnterPlanMode ScheduleWakeup ReportFindings SendUserFile SendFeedback AskUserQuestion EndConversation"
 run_claude_audit() {
-  # $1 = ref index, $2 = out file, $3 = prompt file, $4 = label, $5 = short sha
-  local idx="$1" out_file="$2" prompt_file="$3" label="$4" short_sha="$5"
+  # $1 = ref index, $2 = out file, $3 = prompt file, $4 = label, $5 = short
+  # sha, $6 = the full audited sha (referenced files are read from it),
+  # $7 = the base it is diffed against
+  local idx="$1" out_file="$2" prompt_file="$3" label="$4" short_sha="$5" audit_sha="${6:-}" audit_base="${7:-}"
   local envelope="$TMPDIR_RUN/claude-$idx.stdout"
   local claude_prompt="$TMPDIR_RUN/claude-prompt-$idx.txt"
   local child_pid watchdog_pid child_status=0
@@ -683,8 +915,11 @@ run_claude_audit() {
   # shared part in one file makes that drift impossible rather than merely
   # fixed.
   local base_prompt="$TMPDIR_RUN/claude-base-$idx.txt"
+  local context_file="$TMPDIR_RUN/claude-context-$idx.txt"
+  collect_referenced_context "$prompt_file" "$context_file" "$audit_sha" "$audit_base"
   {
     cat "$prompt_file"
+    [ -s "$context_file" ] && cat "$context_file"
     echo ""
     echo "── AGENTS.md (the repository review rubric, inlined) ──────────────"
     echo "You have NO tools, so you cannot open this file yourself. It is"
@@ -1120,7 +1355,7 @@ for i in "${!REF_SHAS[@]}"; do
   # pass-through must never read like a clean review in a scrollback.
   if [ "$CODEX_OK" = "1" ]; then
     AUDITOR="codex"
-  elif run_claude_audit "$i" "$OUT_FILE" "$PROMPT_FILE" "$AUDIT_LABEL" "$SHORT_SHA"; then
+  elif run_claude_audit "$i" "$OUT_FILE" "$PROMPT_FILE" "$AUDIT_LABEL" "$SHORT_SHA" "$AUDIT_SHA" "$BASE"; then
     AUDITOR="claude"
     FALLBACK_USED=1
     persist_ref_artifacts "$i"
