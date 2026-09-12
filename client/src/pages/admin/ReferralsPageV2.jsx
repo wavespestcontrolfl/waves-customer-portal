@@ -1062,7 +1062,11 @@ export default function ReferralsPageV2() {
 
       {tab === "analytics" && (
         <div className="space-y-4">
-          {analytics && (
+          {!analytics ? (
+            <div className="p-10 text-center text-ink-tertiary">
+              Loading analytics...
+            </div>
+          ) : (
             <>
               <Card>
                 <CardHeader>
