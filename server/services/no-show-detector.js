@@ -362,7 +362,13 @@ async function loadPromiseEvents(conn, visitIds, { now = new Date() } = {}) {
       // retry's, while ci.metadata.sent_at is frozen at the first (failed)
       // attempt. Selected so the mapping below can order promises by when the
       // customer actually heard this window (codex P1 round 6).
-      .select('ci.id', 'ci.metadata', 'ci.created_at', 'em.sent_at as provider_sent_at'),
+      // em.idempotency_key identifies a GROUPED send: appointment-reminders
+      // keys those by the visit-effect claim (`…:visit:<stop>:…`), so the copy
+      // speaks for every member of the stop rather than this one service —
+      // which is what lets it supersede each member's own confirmation
+      // (codex P1 round 24).
+      .select('ci.id', 'ci.metadata', 'ci.created_at', 'em.sent_at as provider_sent_at',
+        'em.idempotency_key as em_key'),
     () => conn('audit_log as al')
       // A fallback row minted when the messaging audit insert failed carries
       // the provider sid it was accepted under, so the carrier's LATER word
@@ -605,6 +611,7 @@ async function loadPromiseEvents(conn, visitIds, { now = new Date() } = {}) {
       communicated_at: r.sent_at, source: 'message', source_id: r.id })),
     ...emails.map((r) => ({ visit_id: r.metadata?.scheduled_service_id, start_at: slotOf(r.metadata),
       tier: reminderTier(r.metadata?.event_type),
+      grouped: String(r.em_key || '').includes(':visit:') || !!r.metadata?.notificationEventKey,
       // The retry's send time when there is one (see the select above), then
       // the interaction row's own snapshot, then its insert time. A promise
       // the customer heard on a retry must not be ordered at the moment the

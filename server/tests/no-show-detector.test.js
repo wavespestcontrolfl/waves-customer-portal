@@ -997,6 +997,10 @@ describe('loadPromiseEvents: email promise evidence checks the LIVE delivery sta
     // moment the first attempt failed, or an intervening reminder would look
     // newer than a window the customer heard afterwards (round-6 P1).
     expect(calls.selected).toContain('em.sent_at as provider_sent_at');
+    // ...and the key, which identifies a GROUPED send (`…:visit:<stop>:…`):
+    // that copy speaks for every member of the stop, so it supersedes each
+    // member's own confirmation (round-24 P1).
+    expect(calls.selected).toContain('em.idempotency_key as em_key');
 
     // (b) Unlinked stays neutral; a LINKED row must show a delivery the
     // recipient actually got — an ALLOWLIST, not "anything but the terminal
