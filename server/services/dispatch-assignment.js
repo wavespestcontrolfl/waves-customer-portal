@@ -237,7 +237,12 @@ async function assignDispatchJob({ jobId, technicianId, actorId, emit = true, tr
         .whereNull('resolved_at')
         .select('id');
       for (const { id } of openAlerts) {
-        await resolveAlert({ id, resolvedBy: actorId, trx: assignmentTrx });
+        // auto: true — assigning a tech is not the dispatcher acknowledging
+        // THIS alert, it's a side effect that makes "unassigned" stale. If
+        // the visit is later unassigned again under the same promise, a
+        // fresh unassigned_overdue alert must still be raisable under the
+        // same tracking_key (codex P1, pre-push audit on 925e9e977).
+        await resolveAlert({ id, resolvedBy: actorId, trx: assignmentTrx, auto: true });
       }
     }
   };

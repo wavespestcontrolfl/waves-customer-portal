@@ -201,9 +201,26 @@ describe('deferred-replay registry', () => {
     expect(payerBilled.eligible).toBe(false);
     expect(payerBilled.reason).toBe('payer-billed');
 
+    // A WITHDRAWN combined-visit invoice keeps payer_id NULL and a collectible
+    // status — the Bill-To move lives only in its stamp — so a reminder queued
+    // before that change must suppress too.
+    db.mockReturnValueOnce(firstChain({ id: 'inv-1', status: 'sent', payer_id: null, scheduled_send_error: 'payer_billed:7:hold' }));
+    const withdrawn = await recheckDeferredReplay('invoice_send_deferred', { invoice_id: 'inv-1' });
+    expect(withdrawn.eligible).toBe(false);
+    expect(withdrawn.reason).toBe('payer-billed-withdrawn');
+
     db.mockReturnValueOnce(firstChain({ id: 'inv-1', status: 'sent', payer_id: null }));
     const selfPay = await recheckDeferredReplay('invoice_send_deferred', { invoice_id: 'inv-1' });
     expect(selfPay.eligible).toBe(true);
+  });
+
+  test('a queued follow-up text suppresses once its invoice is withdrawn to a payer', async () => {
+    // The sequence is paused by the withdrawal, but a text queued BEFORE the
+    // Bill-To change is already claimed — this recheck is what stops it.
+    db.mockReturnValueOnce(firstChain({ id: 'inv-1', status: 'overdue', payer_id: null, scheduled_send_error: 'payer_billed:7:hold' }));
+    const withdrawn = await recheckDeferredReplay('invoice_followup_deferred', { invoice_id: 'inv-1' });
+    expect(withdrawn.eligible).toBe(false);
+    expect(withdrawn.reason).toBe('payer-billed-withdrawn');
   });
 
   test('call-booking contact confirmation (r17): dead or past visits suppress the fan-out replay', async () => {

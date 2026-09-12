@@ -59,7 +59,7 @@ const BANK_ALIASES = ['ach', 'us_bank_account'];
  *   every other caller.
  * @returns {{ enrolled: boolean, reason?: string, methodId?: string, inChargeMethodId?: string, sendEnrollmentConfirmation?: Function }}
  */
-async function enrollConsentedMethod({ customerId, paymentMethodId, stripePaymentMethodId, source, details = {}, authorizedAt = null, scheduledServiceId = null, dbh = db }) {
+async function enrollConsentedMethod({ customerId, paymentMethodId, stripePaymentMethodId, source, details = {}, authorizedAt = null, scheduledServiceId = null, invoiceId = null, dbh = db }) {
   if (!customerId || (!paymentMethodId && !stripePaymentMethodId)) {
     return { enrolled: false, reason: 'missing_args' };
   }
@@ -97,6 +97,28 @@ async function enrollConsentedMethod({ customerId, paymentMethodId, stripePaymen
     });
     if (resolvedPayer?.payerId) {
       return { enrolled: false, reason: 'payer_billed' };
+    }
+    // …and the WITHDRAWAL, judged under this transaction for the invoice the
+    // enrollment is being made for (Codex #4311 r38 P1). resolveForInvoice
+    // reads the representative scheduled service only, so a payer assigned to
+    // a SIBLING member of a combined packet is invisible to it — and a
+    // withdrawn invoice keeps payer_id NULL, so the caller's own unlocked
+    // pre-check cannot speak for the moment of enrollment either.
+    if (invoiceId) {
+      const invoice = await trx('invoices').where({ id: invoiceId })
+        .first('id', 'payer_id', 'scheduled_send_error', 'visit_completion_packet_id');
+      if (!invoice) return { enrolled: false, reason: 'invoice_not_found' };
+      if (invoice.payer_id
+        || require('./invoice-helpers').invoiceWithdrawnFromCustomer(invoice)) {
+        return { enrolled: false, reason: 'payer_billed' };
+      }
+      if (invoice.visit_completion_packet_id) {
+        // The packet's LIVE owner, resolved under the same held rows the
+        // withdrawal uses — this is what sees a payer on a sibling member.
+        const { payerId: packetPayer } = await require('./visit-completion-packets')
+          .resolvePacketOwnershipLocked(invoice.visit_completion_packet_id, trx);
+        if (packetPayer) return { enrolled: false, reason: 'payer_billed' };
+      }
     }
 
     if (authorizedAt instanceof Date && !Number.isNaN(authorizedAt.getTime())) {

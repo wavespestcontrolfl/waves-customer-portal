@@ -78,6 +78,7 @@
  *   GATE_ESTIMATE_RETURN_VISIT=true (estimate page returning-visitor strip: visit number + named changes since the previous visit; read-only projection, no comms; dev-open, prod dark)
  *   GATE_HERMES_WATCHDOG=true (external agent watchdog: GET /api/integrations/watchdog-worker/status serves the PII-free health snapshot to the hermes_watchdog key and the 23-min liveness cron bells when the watchdog stops polling; off = 404 + cron no-op; kill = unset)
  *   GATE_ADMIN_OPS_QUEUE=true (Agents hub "Queue" tab: one read-only view of every long-running lane's pending / parked / failed rows — jobs, call processing, content parks, email approvals, IB confirmations, report delivery, follow-ups, open alerts; off = tab hidden, /api/admin/agents/queue 404)
+ *   GATE_IB_MERGE_CUSTOMERS=true (Intelligence Bar merge_customers: the confirmed duplicate-merge write is offered in admin tool lists and executes; off = the tool is not offered on either the legacy or the platform path and a forced call refuses; the admin duplicates-queue route is unaffected; kill = unset)
  *   GATE_IB_TOOL_ACTIVITY=true (Intelligence Bar answers carry a toolActivity list — one operator-facing line per tool the exchange ran: label, done/error/proposed, duration — rendered above the answer in the ⌘K palette; off = response byte-identical to today)
  *   GATE_CALL_TRANSCRIPT_SYNC=true (admin call log: diarized transcript segments render as a clickable, audio-synced list — click a line to seek the recording; off = today's plain-text transcript)
  *   GATE_TECH_DICTATION_UPLOAD=true (tech completion notes: when the browser has no SpeechRecognition — iOS home-screen PWA, Firefox — the mic records with MediaRecorder and POSTs the clip to /api/tech/services/:id/dictation for server transcription; off = today's behavior, mic hidden without SpeechRecognition)
@@ -1345,6 +1346,16 @@ const gates = {
   callRescheduleApply: process.env.GATE_CALL_RESCHEDULE_APPLY === 'true',
   callbackCard: gateEnvValue('GATE_CALLBACK_CARD'),
   smsAdditionalProperty: gateEnvValue('GATE_SMS_ADDITIONAL_PROPERTY'),
+  // Missing-departure/arrival tracking: flags a scheduled_services row whose
+  // promised window (the last communicated arrival window — SMS/email/call
+  // evidence, never the raw schedule) has passed with no en_route/arrived
+  // evidence. Stage 1 (45 min) notifies the assigned tech; stage 2 (150 min,
+  // or any unassigned visit) also raises an office Action Queue alert
+  // through the existing tech_late/unassigned_overdue dispatch-alert
+  // lifecycle. Off → services/no-show-detector.js#sweep is a no-op; the
+  // READ-ONLY replay CLI (ops/agents/replay-no-show-detector.js) still runs
+  // regardless of this gate. Staff alerts only — no customer comms.
+  noShowDetector: gateEnvValue('GATE_NOSHOW_DETECTOR'),
   // Unrecorded-call alert: the "Twilio has no recording either" step of the
   // existing 5-min missing-recording sweep (call-recording-processor
   // .recoverMissingRecentRecordings). Rings an admin bell for any answered
@@ -2481,6 +2492,13 @@ const gates = {
   // Platform-wide IB discovery/execution. Dark until explicitly enabled;
   // existing confirmation and role gates remain mandatory on every request.
   ibPlatform: gateEnvValue('GATE_IB_PLATFORM'),
+
+  // Intelligence Bar merge_customers (#4348): an irreversible admin customer
+  // write, dark by default like every other new IB capability. Read at CALL
+  // time in services/intelligence-bar/customer-lifecycle-tools.js
+  // (mergeCustomersEnabled) — tool lists on both paths and the executor
+  // itself; this entry is the status/log listing.
+  ibMergeCustomers: gateEnvValue('GATE_IB_MERGE_CUSTOMERS'),
 
   // Tips from your tech (scope + owner decisions 2026-09-01): the completion
   // screen's searchable tip picker (replacing the free-text Observations /

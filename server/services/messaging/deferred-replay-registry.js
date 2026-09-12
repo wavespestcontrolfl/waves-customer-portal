@@ -296,6 +296,13 @@ const REGISTRY = {
         if (!inv) return { eligible: false, reason: 'invoice-missing' };
         if (isTerminalInvoice(inv)) return { eligible: false, reason: `invoice-terminal:${inv.status}` };
         if (inv.payer_id) return { eligible: false, reason: 'payer-billed' };
+        // A combined-visit invoice WITHDRAWN to a payer keeps a collectible
+        // status and a NULL payer_id — the move lives only in its stamp
+        // (local audit) — so a notice queued before the Bill-To change would
+        // still reach the homeowner about debt the payer now owes.
+        if (require('../invoice-helpers').invoiceWithdrawnFromCustomer(inv)) {
+          return { eligible: false, reason: 'payer-billed-withdrawn' };
+        }
         return { eligible: true };
       } catch (err) {
         return failClosed('decline-notice', meta.invoice_id, err);
@@ -1141,6 +1148,13 @@ async function invoiceStillCollectible(meta) {
     // reach the homeowner — same rule the decline-notice recheck and the
     // receipt paths enforce.
     if (inv.payer_id) return { eligible: false, reason: 'payer-billed' };
+    // …and the withdrawal stamp, which records the same ownership move on a
+    // row whose payer_id stays NULL (local audit): a reminder queued before
+    // the Bill-To change would still ask the homeowner to pay payer-owned
+    // debt.
+    if (require('../invoice-helpers').invoiceWithdrawnFromCustomer(inv)) {
+      return { eligible: false, reason: 'payer-billed-withdrawn' };
+    }
     if (meta.followup_sequence_id) {
       const seq = await db('invoice_followup_sequences')
         .where({ id: meta.followup_sequence_id })

@@ -19,7 +19,7 @@ import { useParams } from 'react-router-dom';
 import QRCode from 'qrcode';
 import { SOCIAL_ICON_PATHS, APP_STORE_URL, PLAY_STORE_URL } from '../components/BrandFooter';
 import { WAVES_FL_LICENSE_LINE } from '../constants/business';
-import PublicLoadError from '../components/PublicLoadError';
+import { PublicStateCard } from '../components/brand';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 
@@ -220,21 +220,27 @@ export default function CardPage() {
     return (
       <div style={scene}>
         {status === 'error' && (
-          <div style={{ ...GLASS_MATERIAL, cursor: 'default', borderRadius: 24, maxWidth: 460, marginTop: 60 }}>
-            <PublicLoadError light resource="card" onRetry={() => setLoadAttempt(a => a + 1)} />
-          </div>
+          <PublicStateCard
+            state="error"
+            tone="light"
+            title="We couldn&rsquo;t load that card"
+            onRetry={() => setLoadAttempt(a => a + 1)}
+            style={{ marginTop: 60 }}
+          >
+            This looks temporary. Your link is still valid&mdash;check your connection and try again.
+          </PublicStateCard>
         )}
         {status === 'missing' && (
-          <div style={{
-            ...GLASS_MATERIAL, cursor: 'default', borderRadius: 24,
-            padding: '28px 26px', maxWidth: 420, textAlign: 'center', marginTop: 60,
-          }}>
-            <div style={{ fontSize: 18, fontWeight: 600, marginBottom: 6 }}>This card isn&rsquo;t available</div>
-            <div style={{ fontSize: 14, color: 'rgba(255,255,255,0.75)', lineHeight: 1.5 }}>
-              The link may be incomplete. Reach us any time at{' '}
-              <a href="https://wavespestcontrol.com" style={{ color: AQUA }}>wavespestcontrol.com</a>.
-            </div>
-          </div>
+          <PublicStateCard
+            state="not-found"
+            tone="light"
+            title="This card isn&rsquo;t available"
+            contact="none"
+            style={{ marginTop: 60 }}
+          >
+            The link may be incomplete. Reach us any time at{' '}
+            <a href="https://wavespestcontrol.com" style={{ color: AQUA }}>wavespestcontrol.com</a>.
+          </PublicStateCard>
         )}
       </div>
     );

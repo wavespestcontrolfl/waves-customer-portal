@@ -8,24 +8,26 @@
 import React, { useState } from "react";
 import {
   Button,
+  Checkbox,
   Dialog,
   DialogHeader,
   DialogTitle,
   DialogBody,
   DialogFooter,
+  Field,
+  Input,
+  Radio,
   Textarea,
   cn,
 } from "../ui";
-import { DECLINE_REASONS, declinePayload } from "../../pages/admin/EstimatePage";
+import {
+  DECLINE_REASONS,
+  declinePayload,
+} from "../../pages/admin/EstimatePage";
 // The canonical helper surfaces the server's `error` string (a 409 "held for
 // a re-price" reason, "No phone on file", …) instead of "HTTP 409"; it also
 // redirects on 401 and retries 429 once (UI audit F0076).
 import { adminFetch } from "../../utils/admin-fetch";
-
-// Match the EstimatesPageV2 surface — the estimates page is locked to Roboto
-// per Adam's design call, and these modals only render from that page, so
-// the panel font follows the same body.
-const ROBOTO_STYLE = { fontFamily: "'Roboto', Arial, sans-serif" };
 
 export function FollowUpModalV2({ estimate, onClose, onSent }) {
   const firstName = estimate.customerName?.split(" ")[0] || "there";
@@ -50,29 +52,28 @@ export function FollowUpModalV2({ estimate, onClose, onSent }) {
   };
 
   return (
-    <Dialog open onClose={onClose} size="md" style={ROBOTO_STYLE}>
+    <Dialog open onClose={onClose} size="md">
       {" "}
       <DialogHeader>
         {" "}
         <DialogTitle>Follow Up — {estimate.customerName}</DialogTitle>{" "}
-        <div className="text-12 text-ink-secondary mt-0.5">
+        <div className="text-ui-body text-ink-secondary mt-0.5">
           {estimate.address || "—"}
         </div>{" "}
       </DialogHeader>{" "}
       <DialogBody>
         {" "}
-        <label className="block text-11 font-medium text-ink-secondary uppercase tracking-label mb-1.5">
-          SMS Message
-        </label>{" "}
-        <Textarea
-          value={message}
-          onChange={(ev) => setMessage(ev.target.value)}
-          rows={4}
-          className="min-h-[96px]"
-        />{" "}
-        <div className="text-11 text-ink-tertiary mt-1.5">
-          Delivered via Twilio · replies route to the shared inbox
-        </div>{" "}
+        <Field
+          label="SMS Message"
+          help="Delivered via Twilio · replies route to the shared inbox"
+        >
+          <Textarea
+            value={message}
+            onChange={(ev) => setMessage(ev.target.value)}
+            rows={4}
+            className="min-h-[96px]"
+          />
+        </Field>{" "}
       </DialogBody>{" "}
       <DialogFooter>
         {" "}
@@ -116,19 +117,19 @@ export function DeclineModalV2({ estimate, onClose, onSaved }) {
   };
 
   return (
-    <Dialog open onClose={onClose} size="sm" style={ROBOTO_STYLE}>
+    <Dialog open onClose={onClose} size="sm">
       {" "}
       <DialogHeader>
         {" "}
         <DialogTitle>Mark as lost</DialogTitle>{" "}
-        <div className="text-12 text-ink-secondary mt-0.5">
+        <div className="text-ui-body text-ink-secondary mt-0.5">
           {estimate.customerName}
           {estimate.address ? ` — ${estimate.address.split(",")[0]}` : ""}
         </div>{" "}
       </DialogHeader>{" "}
       <DialogBody>
         {" "}
-        <div className="text-11 font-medium text-ink-secondary uppercase tracking-label mb-2">
+        <div className="text-ui-body font-medium text-ink-secondary uppercase tracking-label mb-2">
           Reason
         </div>{" "}
         <div className="flex flex-col gap-1.5">
@@ -136,62 +137,50 @@ export function DeclineModalV2({ estimate, onClose, onSaved }) {
             const selected = reason === r.code;
             return (
               <React.Fragment key={r.code}>
-              <label
-                className={cn(
-                  "flex items-center gap-2.5 px-3 py-2 rounded-xs cursor-pointer",
-                  "text-13 border-hairline transition-colors",
-                  selected
-                    ? "bg-zinc-50 border-zinc-900 text-zinc-900"
-                    : "bg-white border-zinc-300 text-ink-secondary hover:bg-zinc-50",
-                )}
-              >
-                {" "}
-                <input
-                  type="radio"
-                  name="declineReason"
-                  checked={selected}
-                  onChange={() => setReason(r.code)}
-                  className="sr-only"
-                />{" "}
-                <span
+                <label
                   className={cn(
-                    "inline-block h-3.5 w-3.5 rounded-full border-hairline flex-shrink-0",
+                    "flex items-center gap-2.5 px-3 py-2 rounded-xs cursor-pointer",
+                    "text-ui-body border-hairline transition-colors",
                     selected
-                      ? "bg-zinc-900 border-zinc-900 ring-2 ring-white ring-inset"
-                      : "border-zinc-400",
+                      ? "bg-zinc-50 border-zinc-900 text-zinc-900"
+                      : "bg-white border-zinc-300 text-ink-secondary hover:bg-zinc-50",
                   )}
-                  aria-hidden
-                />
-                {r.label}
-              </label>
-              {selected && r.fields === "competitor" && (
-                <div className="grid grid-cols-2 gap-2 ml-6 mb-1">
-                  <input
-                    value={competitorName}
-                    onChange={(ev) => setCompetitorName(ev.target.value)}
-                    placeholder="Competitor"
-                    aria-label="Competitor"
-                    className="text-13 px-2.5 py-1.5 rounded-xs border-hairline border-zinc-300 bg-white text-zinc-900"
+                >
+                  {" "}
+                  <Radio
+                    type="radio"
+                    name="declineReason"
+                    checked={selected}
+                    onChange={() => setReason(r.code)}
+                  />{" "}
+                  {r.label}
+                </label>
+                {selected && r.fields === "competitor" && (
+                  <div className="grid grid-cols-2 gap-2 ml-6 mb-1">
+                    <Input
+                      value={competitorName}
+                      onChange={(ev) => setCompetitorName(ev.target.value)}
+                      placeholder="Competitor"
+                      aria-label="Competitor"
+                    />
+                    <Input
+                      value={competitorPrice}
+                      onChange={(ev) => setCompetitorPrice(ev.target.value)}
+                      placeholder="Their price ($)"
+                      aria-label="Competitor price"
+                      inputMode="decimal"
+                    />
+                  </div>
+                )}
+                {selected && r.fields === "note" && (
+                  <Input
+                    value={note}
+                    onChange={(ev) => setNote(ev.target.value)}
+                    placeholder="What happened?"
+                    aria-label="Decline note"
+                    className="ml-6 mb-1"
                   />
-                  <input
-                    value={competitorPrice}
-                    onChange={(ev) => setCompetitorPrice(ev.target.value)}
-                    placeholder="Their price ($)"
-                    aria-label="Competitor price"
-                    inputMode="decimal"
-                    className="text-13 px-2.5 py-1.5 rounded-xs border-hairline border-zinc-300 bg-white text-zinc-900"
-                  />
-                </div>
-              )}
-              {selected && r.fields === "note" && (
-                <input
-                  value={note}
-                  onChange={(ev) => setNote(ev.target.value)}
-                  placeholder="What happened?"
-                  aria-label="Decline note"
-                  className="text-13 px-2.5 py-1.5 rounded-xs border-hairline border-zinc-300 bg-white text-zinc-900 ml-6 mb-1"
-                />
-              )}
+                )}
               </React.Fragment>
             );
           })}
@@ -239,9 +228,8 @@ export function ExtendEstimateModalV2({ estimate, onClose, onExtended }) {
   const [silent, setSilent] = useState(false);
   const [sending, setSending] = useState(false);
 
-  const effectiveDays = days === "custom"
-    ? Number.parseInt(customDays, 10) || 0
-    : days;
+  const effectiveDays =
+    days === "custom" ? Number.parseInt(customDays, 10) || 0 : days;
   const valid = effectiveDays >= 1 && effectiveDays <= 180;
   const hasPhone = !!estimate.customerPhone;
 
@@ -264,17 +252,17 @@ export function ExtendEstimateModalV2({ estimate, onClose, onExtended }) {
   };
 
   return (
-    <Dialog open onClose={onClose} size="md" style={ROBOTO_STYLE}>
+    <Dialog open onClose={onClose} size="md">
       {" "}
       <DialogHeader>
         {" "}
         <DialogTitle>Extend estimate</DialogTitle>{" "}
-        <div className="text-12 text-ink-secondary mt-0.5">
+        <div className="text-ui-body text-ink-secondary mt-0.5">
           {estimate.customerName}
           {estimate.address ? ` — ${estimate.address.split(",")[0]}` : ""}
         </div>{" "}
         {estimate.expiresAt && (
-          <div className="text-11 text-ink-tertiary mt-0.5">
+          <div className="text-ui-body text-ink-tertiary mt-0.5">
             Current expiry:{" "}
             {new Date(estimate.expiresAt).toLocaleDateString("en-US", {
               weekday: "short",
@@ -288,44 +276,34 @@ export function ExtendEstimateModalV2({ estimate, onClose, onExtended }) {
       </DialogHeader>{" "}
       <DialogBody>
         {" "}
-        <div className="text-11 font-medium text-ink-secondary uppercase tracking-label mb-2">
+        <div className="text-ui-body font-medium text-ink-secondary uppercase tracking-label mb-2">
           Add time
         </div>{" "}
         <div className="grid grid-cols-2 sm:grid-cols-5 gap-1.5 mb-3">
           {EXTEND_PRESETS.map((d) => {
             const selected = days === d;
             return (
-              <button
+              <Button
                 key={d}
                 type="button"
+                variant={selected ? "primary" : "secondary"}
                 onClick={() => setDays(d)}
-                className={cn(
-                  "h-10 px-3 rounded-sm text-13 font-medium border-hairline u-focus-ring transition-colors",
-                  selected
-                    ? "bg-zinc-900 text-white border-zinc-900"
-                    : "bg-white text-zinc-900 border-zinc-300 hover:bg-zinc-50",
-                )}
               >
                 +{d} days
-              </button>
+              </Button>
             );
           })}{" "}
-          <button
+          <Button
             type="button"
+            variant={days === "custom" ? "primary" : "secondary"}
             onClick={() => setDays("custom")}
-            className={cn(
-              "h-10 px-3 rounded-sm text-13 font-medium border-hairline u-focus-ring transition-colors",
-              days === "custom"
-                ? "bg-zinc-900 text-white border-zinc-900"
-                : "bg-white text-zinc-900 border-zinc-300 hover:bg-zinc-50",
-            )}
           >
             Custom
-          </button>{" "}
+          </Button>{" "}
         </div>
         {days === "custom" && (
           <div className="mb-3">
-            <input
+            <Input
               type="number"
               min={1}
               max={180}
@@ -334,22 +312,20 @@ export function ExtendEstimateModalV2({ estimate, onClose, onExtended }) {
               onChange={(ev) => setCustomDays(ev.target.value)}
               placeholder="Days (1–180)"
               aria-label="Custom days to extend"
-              className="w-full h-10 px-3 text-14 rounded-sm bg-white border-hairline border-zinc-300 u-focus-ring"
             />
           </div>
         )}
         {valid && (
-          <div className="text-12 text-ink-secondary mb-3">
+          <div className="text-ui-body text-ink-secondary mb-3">
             New expiry:{" "}
             <span className="text-zinc-900 font-medium">
               {previewExpiry(estimate.expiresAt, effectiveDays)}
             </span>
           </div>
         )}{" "}
-        <label className="flex items-start gap-2 text-13 text-ink-secondary cursor-pointer">
+        <label className="flex items-start gap-2 text-ui-body text-ink-secondary cursor-pointer">
           {" "}
-          <input
-            type="checkbox"
+          <Checkbox
             checked={silent}
             onChange={(ev) => setSilent(ev.target.checked)}
             className="mt-1"
@@ -357,7 +333,9 @@ export function ExtendEstimateModalV2({ estimate, onClose, onExtended }) {
           <span>
             Skip the customer SMS (just extend silently — Waves voice text is
             sent by default
-            {hasPhone ? "" : "; no phone on file so this would be skipped anyway"}
+            {hasPhone
+              ? ""
+              : "; no phone on file so this would be skipped anyway"}
             ).
           </span>{" "}
         </label>{" "}

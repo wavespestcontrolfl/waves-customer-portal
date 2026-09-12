@@ -1619,6 +1619,9 @@ describe('releaseExpiredReservations', () => {
     const trx = jest.fn(() => trxChain);
     trx.raw = jest.fn(async () => {});
     const delChain = {
+      // The grace-shifted cutoff is SQL, not a JS-computed Date, so app/DB
+      // clock skew can't sweep a hold the DB still considers in-grace.
+      whereRaw: jest.fn(() => delChain),
       where: jest.fn(() => delChain),
       whereNull: jest.fn(() => delChain),
       del: jest.fn(async () => 3),
@@ -1638,6 +1641,10 @@ describe('releaseExpiredReservations', () => {
       expect.objectContaining({ reservation_expires_at: null }),
     );
     expect(trxChain.returning).toHaveBeenCalled();
+    expect(delChain.whereRaw).toHaveBeenCalledWith(
+      'reservation_expires_at < NOW() - make_interval(mins => ?)',
+      [expect.any(Number)],
+    );
 
     // Pass 2: the DELETE is scoped to uncommitted holds only.
     expect(delChain.whereNull).toHaveBeenCalledWith('customer_id');

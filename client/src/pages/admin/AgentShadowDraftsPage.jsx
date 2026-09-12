@@ -6,33 +6,25 @@
  * the nightly judge scores each against the reply a human actually sent.
  * Per-intent score history here is what graduates an intent (Phase E).
  *
- * Tier 2 styling (inline + light D palette) to match the sibling
- * AgentOpsPage; the hub shell stays Tier 1.
+ * Tier 1 admin surface using the shared comfortable foundation.
  */
 import { useCallback, useEffect, useMemo, useState } from "react";
+import {
+  ActionFeedback,
+  Badge,
+  Button,
+  Card,
+  UiSurface,
+} from "../../components/ui";
 import { adminFetch } from "../../utils/admin-fetch";
 
-const D = {
-  bg: "#F4F4F5",
-  card: "#FFFFFF",
-  border: "#E4E4E7",
-  heading: "#09090B",
-  text: "#27272A",
-  muted: "#71717A",
-  green: "#15803D",
-  amber: "#A16207",
-  red: "#B91C1C",
-  blue: "#1D4ED8",
-  zinc: "#3F3F46",
-};
-
 const VERDICT_TONES = {
-  draft_better: { bg: "#DCFCE7", fg: D.green, label: "Draft better" },
-  equivalent: { bg: "#DBEAFE", fg: D.blue, label: "Equivalent" },
-  human_better: { bg: "#FEF3C7", fg: D.amber, label: "Human better" },
-  draft_unsafe: { bg: "#FEE2E2", fg: D.red, label: "Unsafe" },
-  human_no_reply: { bg: D.bg, fg: D.muted, label: "Human silent" },
-  both_no_reply: { bg: "#DBEAFE", fg: D.blue, label: "Both silent" },
+  draft_better: { label: "Draft better" },
+  equivalent: { label: "Equivalent" },
+  human_better: { label: "Human better" },
+  draft_unsafe: { label: "Unsafe", alert: true },
+  human_no_reply: { label: "Human silent" },
+  both_no_reply: { label: "Both silent" },
 };
 
 function intentLabel(intent) {
@@ -40,24 +32,7 @@ function intentLabel(intent) {
 }
 
 function Chip({ children, tone }) {
-  return (
-    <span
-      style={{
-        display: "inline-flex",
-        alignItems: "center",
-        minHeight: 22,
-        padding: "0 8px",
-        borderRadius: 6,
-        background: tone.bg,
-        color: tone.fg,
-        fontSize: 12,
-        fontWeight: 700,
-        whiteSpace: "nowrap",
-      }}
-    >
-      {children}
-    </span>
-  );
+  return <Badge tone={tone?.alert ? "alert" : "neutral"}>{children}</Badge>;
 }
 
 function timeLabel(value) {
@@ -73,24 +48,12 @@ function timeLabel(value) {
   });
 }
 
-function Bubble({ label, text, tone }) {
+function Bubble({ label, text }) {
   return (
-    <div style={{ minWidth: 0 }}>
-      <div style={{ fontSize: 11, fontWeight: 700, color: D.muted, textTransform: "uppercase", letterSpacing: 0.4, marginBottom: 4 }}>{label}</div>
-      <div
-        style={{
-          background: tone || D.bg,
-          border: `1px solid ${D.border}`,
-          borderRadius: 8,
-          padding: "8px 10px",
-          fontSize: 14,
-          color: D.text,
-          lineHeight: 1.45,
-          whiteSpace: "pre-wrap",
-          overflowWrap: "anywhere",
-        }}
-      >
-        {text || <span style={{ color: D.muted }}>(no reply)</span>}
+    <div className="min-w-0">
+      <div className="mb-1 text-14 font-medium text-ink-secondary">{label}</div>
+      <div className="whitespace-pre-wrap break-words rounded-md border-hairline border-zinc-200 bg-zinc-50 p-3 text-ui-body text-zinc-800">
+        {text || <span className="text-ink-secondary">(no reply)</span>}
       </div>
     </div>
   );
@@ -105,11 +68,9 @@ function ScorePills({ scores }) {
     ["Overall", scores.overall],
   ];
   return (
-    <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+    <div className="flex flex-wrap gap-2">
       {entries.map(([label, value]) => (
-        <span key={label} style={{ fontSize: 12, fontWeight: 700, color: D.heading, background: D.bg, border: `1px solid ${D.border}`, borderRadius: 6, padding: "2px 7px" }}>
-          {label} <strong>{value ?? "-"}</strong>
-        </span>
+        <Badge key={label} tone="neutral">{label} <strong className="u-nums">{value ?? "-"}</strong></Badge>
       ))}
     </div>
   );
@@ -119,62 +80,61 @@ function DraftCard({ draft }) {
   const judgment = draft.judgment;
   const tone = judgment ? VERDICT_TONES[judgment.verdict] || VERDICT_TONES.human_no_reply : null;
   return (
-    <div style={{ background: D.card, border: `1px solid ${D.border}`, borderRadius: 8, padding: 14, display: "grid", gap: 10 }}>
-      <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
-        <span style={{ fontSize: 14, fontWeight: 700, color: D.heading }}>{draft.customerName || "Unknown customer"}</span>
-        <Chip tone={{ bg: D.bg, fg: D.zinc }}>{intentLabel(draft.intent)}</Chip>
-        {draft.schedulingIntent && <Chip tone={{ bg: "#FEF3C7", fg: D.amber }}>scheduling</Chip>}
-        {tone ? <Chip tone={tone}>{tone.label}</Chip> : <Chip tone={{ bg: D.bg, fg: D.muted }}>Awaiting judge</Chip>}
-        <span style={{ marginLeft: "auto", fontSize: 12, color: D.muted }}>{timeLabel(draft.createdAt)}</span>
+    <Card className="p-4 space-y-3">
+      <div className="flex flex-wrap items-center gap-2">
+        <span className="text-14 font-medium text-zinc-900">{draft.customerName || "Unknown customer"}</span>
+        <Chip>{intentLabel(draft.intent)}</Chip>
+        {draft.schedulingIntent && <Chip>scheduling</Chip>}
+        {tone ? <Chip tone={tone}>{tone.label}</Chip> : <Chip>Awaiting judge</Chip>}
+        <span className="ml-auto text-ui-caption text-ink-secondary u-nums">{timeLabel(draft.createdAt)}</span>
       </div>
 
-      <div className="shadow-draft-grid">
+      <div className="grid gap-3 lg:grid-cols-3">
         <Bubble label="Customer" text={draft.inboundMessage} />
-        <Bubble label="AI shadow draft" text={draft.draftResponse} tone="#F0F9FF" />
+        <Bubble label="AI shadow draft" text={draft.draftResponse} />
         <Bubble
           label={judgment?.humanReplied ? "Human reply (sent)" : "Human reply"}
           text={judgment ? judgment.humanReplyText : null}
-          tone="#F7FEE7"
         />
       </div>
 
       {judgment?.scores && <ScorePills scores={judgment.scores} />}
       {draft.lintFlags?.length > 0 && (
-        <div style={{ fontSize: 13, color: D.muted, lineHeight: 1.4 }}>
-          <strong style={{ color: D.zinc }}>Comms-lint:</strong>{" "}
+        <div className="text-ui-body text-ink-secondary">
+          <strong className="font-medium text-zinc-900">Comms-lint:</strong>{" "}
           {draft.lintFlags.map((f) => f.detail).join(" · ")}
         </div>
       )}
       {judgment?.notes && (
-        <div style={{ fontSize: 13, color: D.muted, lineHeight: 1.4 }}>
-          <strong style={{ color: D.zinc }}>Judge:</strong> {judgment.notes}
+        <div className="text-ui-body text-ink-secondary">
+          <strong className="font-medium text-zinc-900">Judge:</strong> {judgment.notes}
         </div>
       )}
-    </div>
+    </Card>
   );
 }
 
 function IntentScoreCard({ row }) {
   return (
-    <div style={{ background: D.card, border: `1px solid ${D.border}`, borderRadius: 8, padding: 12 }}>
-      <div style={{ fontSize: 13, fontWeight: 700, color: D.heading, marginBottom: 6, overflowWrap: "anywhere" }}>{intentLabel(row.intent)}</div>
-      <div style={{ display: "flex", gap: 10, flexWrap: "wrap", fontSize: 12, color: D.muted }}>
-        <span><strong style={{ color: D.heading }}>{row.drafts}</strong> drafts</span>
-        <span><strong style={{ color: D.heading }}>{row.judged}</strong> judged</span>
-        {row.avg && <span>overall <strong style={{ color: D.heading }}>{row.avg.overall}</strong>/10</span>}
+    <Card className="p-3">
+      <div className="mb-2 break-words text-14 font-medium text-zinc-900">{intentLabel(row.intent)}</div>
+      <div className="flex flex-wrap gap-2 text-ui-caption text-ink-secondary u-nums">
+        <span><strong className="font-medium text-zinc-900">{row.drafts}</strong> drafts</span>
+        <span><strong className="font-medium text-zinc-900">{row.judged}</strong> judged</span>
+        {row.avg && <span>overall <strong className="font-medium text-zinc-900">{row.avg.overall}</strong>/10</span>}
         {row.verdicts?.draft_unsafe ? (
-          <span style={{ color: D.red, fontWeight: 700 }}>{row.verdicts.draft_unsafe} unsafe</span>
+          <span className="font-medium text-alert-fg">{row.verdicts.draft_unsafe} unsafe</span>
         ) : null}
       </div>
-    </div>
+    </Card>
   );
 }
 
 const MODE_TONES = {
-  shadow: { bg: "#F4F4F5", fg: D.zinc, label: "Shadow" },
-  suggest: { bg: "#DCFCE7", fg: D.green, label: "Suggest" },
-  auto_send: { bg: "#DBEAFE", fg: D.blue, label: "Auto-send" },
-  locked: { bg: "#FEE2E2", fg: D.red, label: "Escalation — always shadow" },
+  shadow: { label: "Shadow" },
+  suggest: { label: "Suggest" },
+  auto_send: { label: "Auto-send" },
+  locked: { label: "Escalation — always shadow", alert: true },
 };
 
 // One step DOWN the ladder shadow → suggest → auto_send, or shadow → suggest
@@ -199,31 +159,29 @@ function GraduationNote({ g }) {
   if (j.priorVersionJudged > 0) context.push(`${j.priorVersionJudged} prior-version excluded`);
 
   return (
-    <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap", fontSize: 12, borderTop: `1px dashed ${D.border}`, paddingTop: 8 }}>
+    <div className="flex flex-wrap items-center gap-2 border-t border-hairline border-zinc-200 pt-2 text-ui-caption text-ink-secondary">
       {g.eligibleFor === "suggest" && (
-        <span style={{ background: "#DCFCE7", color: D.green, fontWeight: 700, borderRadius: 6, padding: "2px 8px" }}>✓ Ready — enable suggest</span>
+        <Badge tone="neutral">Ready — enable suggest</Badge>
       )}
       {g.eligibleFor === "auto_send" && (
-        <span style={{ background: "#DBEAFE", color: "#1D4ED8", fontWeight: 700, borderRadius: 6, padding: "2px 8px" }}>✓ Earned the auto-send rung</span>
+        <Badge tone="neutral">Earned the auto-send rung</Badge>
       )}
       {/* Intent is AT auto_send but the send-time gate is blocking (e.g. a
           prompt bump reset the cohort evidence) — mirror the executor. */}
       {g.autoSendHealth && !g.autoSendHealth.sendReady && (
         <>
-          <span style={{ background: "#FEF3C7", color: "#92400E", fontWeight: 700, borderRadius: 6, padding: "2px 8px" }}>
-            ⚠ Auto-send gated: {g.autoSendHealth.blockers?.[0] || "readiness not met"}
-          </span>
-          <span style={{ color: D.muted }}>
+          <Badge tone="alert">Auto-send gated: {g.autoSendHealth.blockers?.[0] || "readiness not met"}</Badge>
+          <span>
             Sends fall back to review cards; unused cards re-enter the judge pool. Demote to shadow to rebuild evidence faster.
           </span>
         </>
       )}
       {!g.eligibleFor && rungLabel && (
-        <span style={{ color: D.muted }}>
-          <strong style={{ color: D.zinc }}>→ {rungLabel}:</strong> {g.blockers?.[0] || "gathering data"}
+        <span>
+          <strong className="font-medium text-zinc-900">Next: {rungLabel}:</strong> {g.blockers?.[0] || "gathering data"}
         </span>
       )}
-      {context.length > 0 && <span style={{ color: D.muted }}>· {context.join(" · ")}</span>}
+      {context.length > 0 && <span>· {context.join(" · ")}</span>}
     </div>
   );
 }
@@ -236,77 +194,55 @@ function IntentModeCard({ row, busy, onToggle, onPromote, autoSendGateOff }) {
   // one-click promote. The server re-checks eligibility (409 if it slipped).
   const canPromote = !row.locked && row.mode === "suggest" && row.graduation?.eligibleFor === "auto_send";
   return (
-    <div style={{ background: D.card, border: `1px solid ${D.border}`, borderRadius: 8, padding: 12, display: "grid", gap: 8 }}>
-      <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
-        <span style={{ fontSize: 13, fontWeight: 700, color: D.heading, overflowWrap: "anywhere" }}>{intentLabel(row.intent)}</span>
+    <Card className="p-3 space-y-2">
+      <div className="flex flex-wrap items-center gap-2">
+        <span className="break-words text-14 font-medium text-zinc-900">{intentLabel(row.intent)}</span>
         <Chip tone={tone}>{tone.label}</Chip>
         {!row.locked && (
-          <button
+          <Button
             type="button"
             disabled={busy}
             onClick={() => onToggle(row)}
-            style={{
-              marginLeft: "auto",
-              minHeight: 28,
-              borderRadius: 6,
-              border: `1px solid ${D.border}`,
-              background: D.card,
-              // Green = stepping UP from shadow; zinc = stepping down a rung.
-              color: row.mode === "shadow" ? D.green : D.zinc,
-              fontSize: 12,
-              fontWeight: 700,
-              padding: "0 10px",
-              cursor: busy ? "default" : "pointer",
-              opacity: busy ? 0.6 : 1,
-            }}
+            loading={busy}
+            variant="secondary"
+            className="ml-auto"
           >
             {modeToggle(row.mode).label}
-          </button>
+          </Button>
         )}
       </div>
       {hasHistory && (
-        <div style={{ display: "flex", gap: 10, flexWrap: "wrap", fontSize: 12, color: D.muted }}>
-          <span><strong style={{ color: D.heading }}>{s.suggested}</strong> suggested</span>
-          {s.pending ? <span><strong style={{ color: D.heading }}>{s.pending}</strong> pending</span> : null}
-          <span style={{ color: D.green }}><strong>{s.accepted || 0}</strong> accepted</span>
-          <span style={{ color: D.amber }}><strong>{s.corrected || 0}</strong> corrected</span>
-          <span><strong style={{ color: D.heading }}>{s.ignored || 0}</strong> ignored</span>
-          {s.expired ? <span><strong style={{ color: D.heading }}>{s.expired}</strong> expired</span> : null}
+        <div className="flex flex-wrap gap-2 text-ui-caption text-ink-secondary u-nums">
+          <span><strong className="font-medium text-zinc-900">{s.suggested}</strong> suggested</span>
+          {s.pending ? <span><strong className="font-medium text-zinc-900">{s.pending}</strong> pending</span> : null}
+          <span><strong className="font-medium text-zinc-900">{s.accepted || 0}</strong> accepted</span>
+          <span><strong className="font-medium text-zinc-900">{s.corrected || 0}</strong> corrected</span>
+          <span><strong className="font-medium text-zinc-900">{s.ignored || 0}</strong> ignored</span>
+          {s.expired ? <span><strong className="font-medium text-zinc-900">{s.expired}</strong> expired</span> : null}
         </div>
       )}
       {!row.locked && row.graduation && <GraduationNote g={row.graduation} />}
       {canPromote && (
-        <button
+        <Button
           type="button"
           disabled={busy}
           onClick={() => onPromote(row)}
-          style={{
-            minHeight: 30,
-            borderRadius: 6,
-            border: `1px solid #1D4ED8`,
-            background: "#1D4ED8",
-            color: "#FFFFFF",
-            fontSize: 12,
-            fontWeight: 700,
-            padding: "0 12px",
-            cursor: busy ? "default" : "pointer",
-            opacity: busy ? 0.6 : 1,
-          }}
+          loading={busy}
         >
-          {busy ? "Enabling…" : "Enable auto-send →"}
-        </button>
+          Enable auto-send
+        </Button>
       )}
       {(canPromote || row.mode === "auto_send") && autoSendGateOff && (
-        <div style={{ fontSize: 11, color: D.amber }}>
+        <ActionFeedback error>
           GATE_SMS_AUTO_SEND is off — the mode saves, but drafts keep going to the review queue until the gate is enabled.
-        </div>
+        </ActionFeedback>
       )}
       {row.updatedBy && row.updatedBy !== "migration" && (
-        <div style={{ fontSize: 11, color: D.muted }}>
+        <div className="text-ui-caption text-ink-secondary">
           Set by {row.updatedBy} · {timeLabel(row.updatedAt)}{row.reason ? ` · ${row.reason}` : ""}
         </div>
       )}
-    </div>
+    </Card>
   );
 }
 
@@ -327,81 +263,82 @@ function VoiceProfileSection({ profiles, busy, onReview }) {
     } catch { return []; }
   })();
   return (
-    <div style={{ display: "grid", gap: 8 }}>
-      <div style={{ display: "flex", alignItems: "baseline", gap: 10, flexWrap: "wrap" }}>
-        <div style={{ fontSize: 13, fontWeight: 700, color: D.heading }}>Voice profile</div>
-        <div style={{ fontSize: 12, color: D.muted }}>
+    <section className="space-y-3">
+      <div className="flex flex-wrap items-baseline gap-2">
+        <h2 className="text-18 font-medium text-zinc-900">Voice profile</h2>
+        <div className="text-ui-body text-ink-secondary">
           Distilled daily from real Waves calls + texts. Green profiles auto-apply to the phone agent; exceptions park here. Style only, never facts.
         </div>
       </div>
-      <div style={{ background: D.card, border: `1px solid ${D.border}`, borderRadius: 8, padding: 12, display: "grid", gap: 8 }}>
-        <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
-          <span style={{ fontSize: 13, fontWeight: 700, color: D.heading }}>v{row.version}</span>
+      <Card className="p-4 space-y-3">
+        <div className="flex flex-wrap items-center gap-2">
+          <span className="text-14 font-medium text-zinc-900 u-nums">v{row.version}</span>
           {pending ? (
-            <Chip tone={{ bg: "#FEF3C7", fg: "#92400E", label: "Exception" }}>Exception — review needed</Chip>
+            <Badge tone="alert">Exception — review needed</Badge>
           ) : (
-            <Chip tone={{ bg: "#DCFCE7", fg: D.green, label: "Approved" }}>
+            <Badge tone="neutral">
               {row.reviewed_by === "auto:distiller" ? "Live (auto-approved)" : `Approved${row.reviewed_by ? ` by ${row.reviewed_by}` : ""}`}
-            </Chip>
+            </Badge>
           )}
           {flags.length > 0 && (
-            <span style={{ background: "#FEE2E2", color: D.red, fontWeight: 700, borderRadius: 6, padding: "2px 8px", fontSize: 12 }}>
-              ⚠ style-only check flagged: {flags.join(", ")}
-            </span>
+            <Badge tone="alert">Style-only check flagged: {flags.join(", ")}</Badge>
           )}
-          <button
+          <Button
             type="button"
             onClick={() => setExpanded((v) => !v)}
-            style={{ marginLeft: "auto", background: "transparent", border: `1px solid ${D.border}`, color: D.text, borderRadius: 6, padding: "4px 10px", fontSize: 12, cursor: "pointer" }}
+            variant="secondary"
+            className="ml-auto"
           >
             {expanded ? "Collapse" : "Read profile"}
-          </button>
+          </Button>
         </div>
-        <div style={{ fontSize: 12, color: D.muted, whiteSpace: "pre-wrap", overflowWrap: "anywhere", maxHeight: expanded ? "none" : 90, overflow: "hidden" }}>
+        <div className={`whitespace-pre-wrap break-words text-ui-body text-ink-secondary ${expanded ? "" : "max-h-[90px] overflow-hidden"}`}>
           {row.profile_text}
         </div>
         {pending && (
-          <div style={{ display: "flex", gap: 8 }}>
-            <button
+          <div className="ui-record-actions">
+            <Button
               type="button"
               disabled={busy}
               onClick={() => onReview(pending, "approve")}
-              style={{ background: "#DCFCE7", border: `1px solid ${D.green}`, color: D.green, borderRadius: 6, padding: "6px 14px", fontSize: 12, fontWeight: 700, cursor: "pointer" }}
+              loading={busy}
             >
               Approve — make this the live voice
-            </button>
-            <button
+            </Button>
+            <Button
               type="button"
               disabled={busy}
               onClick={() => onReview(pending, "reject")}
-              style={{ background: "transparent", border: `1px solid ${D.border}`, color: D.muted, borderRadius: 6, padding: "6px 14px", fontSize: 12, fontWeight: 700, cursor: "pointer" }}
+              loading={busy}
+              variant="secondary"
             >
               Reject
-            </button>
+            </Button>
           </div>
         )}
-      </div>
+      </Card>
       {/* The LIVE profile's revoke is rendered independently of any pending
           exception — a normal state is "v5 live (auto), v6 parked as an
           exception", and killing the live voice must never wait on resolving
           an unrelated review. */}
       {approved && (
-        <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap", fontSize: 12, color: D.muted }}>
+        <div className="flex flex-wrap items-center gap-2 text-ui-caption text-ink-secondary">
           <span>
-            Live now: <strong style={{ color: D.heading }}>v{approved.version}</strong>
+            Live now: <strong className="font-medium text-zinc-900 u-nums">v{approved.version}</strong>
             {approved.reviewed_by === "auto:distiller" ? " (auto-approved)" : approved.reviewed_by ? ` (approved by ${approved.reviewed_by})` : ""}
           </span>
-          <button
+          <Button
             type="button"
             disabled={busy}
             onClick={() => onReview(approved, "revoke")}
-            style={{ background: "transparent", border: `1px solid ${D.border}`, color: D.muted, borderRadius: 6, padding: "4px 12px", fontSize: 12, fontWeight: 700, cursor: "pointer" }}
+            loading={busy}
+            variant="secondary"
           >
             Revoke — back to base voice
-          </button>
+          </Button>
         </div>
       )}
-    </div>
+    </section>
   );
 }
 
@@ -413,12 +350,12 @@ function VoiceProfileSection({ profiles, busy, onReview }) {
 function significanceChip(sig) {
   if (!sig) return null;
   if (sig.significant && sig.direction === "improved") {
-    return <Chip tone={{ bg: "#DCFCE7", fg: D.green }}>✓ improved (p={sig.pValue})</Chip>;
+    return <Badge tone="neutral">Improved (p={sig.pValue})</Badge>;
   }
   if (sig.significant && sig.direction === "regressed") {
-    return <Chip tone={{ bg: "#FEE2E2", fg: D.red }}>✗ regressed (p={sig.pValue})</Chip>;
+    return <Badge tone="alert">Regressed (p={sig.pValue})</Badge>;
   }
-  return <Chip tone={{ bg: D.bg, fg: D.muted }}>no significant change (p={sig.pValue})</Chip>;
+  return <Badge tone="neutral">No significant change (p={sig.pValue})</Badge>;
 }
 
 // Live legs first, then the measurement-only candidates (owner 07-30 six-
@@ -429,20 +366,20 @@ function SealedRunRow({ run, runsById }) {
   const pct = run.unsafeRate == null ? "-" : `${Math.round(run.unsafeRate * 100)}%`;
   const baseline = run.baselineRunId ? runsById.get(run.baselineRunId) : null;
   return (
-    <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap", fontSize: 12, color: D.muted, borderTop: `1px dashed ${D.border}`, paddingTop: 8 }}>
-      <strong style={{ color: D.heading }}>{run.promptVersion}</strong>
-      <Chip tone={{ bg: D.bg, fg: D.zinc }}>{LEG_LABELS[run.providerLeg] || run.providerLeg}</Chip>
-      {run.status === "running" && <Chip tone={{ bg: "#DBEAFE", fg: D.blue }}>running… {run.itemsJudged}/{run.itemsTotal}</Chip>}
-      {run.status === "failed" && <Chip tone={{ bg: "#FEE2E2", fg: D.red }}>failed</Chip>}
+    <div className="flex flex-wrap items-center gap-2 border-t border-hairline border-zinc-200 pt-2 text-ui-caption text-ink-secondary u-nums">
+      <strong className="font-medium text-zinc-900">{run.promptVersion}</strong>
+      <Chip>{LEG_LABELS[run.providerLeg] || run.providerLeg}</Chip>
+      {run.status === "running" && <Chip>Running… {run.itemsJudged}/{run.itemsTotal}</Chip>}
+      {run.status === "failed" && <Badge tone="alert">Failed</Badge>}
       {run.status === "complete" && (
         <>
-          <span><strong style={{ color: run.unsafeRate > 0.08 ? D.red : D.heading }}>{pct}</strong> unsafe ({run.unsafeCount}/{run.itemsJudged})</span>
-          {run.avgSafety != null && <span>safety <strong style={{ color: D.heading }}>{run.avgSafety}</strong>/10</span>}
+          <span><strong className={run.unsafeRate > 0.08 ? "font-medium text-alert-fg" : "font-medium text-zinc-900"}>{pct}</strong> unsafe ({run.unsafeCount}/{run.itemsJudged})</span>
+          {run.avgSafety != null && <span>safety <strong className="font-medium text-zinc-900">{run.avgSafety}</strong>/10</span>}
           {significanceChip(run.significance)}
           {baseline && <span>vs {baseline.promptVersion}</span>}
         </>
       )}
-      <span style={{ marginLeft: "auto" }}>{timeLabel(run.startedAt)}</span>
+      <span className="ml-auto">{timeLabel(run.startedAt)}</span>
     </div>
   );
 }
@@ -460,65 +397,65 @@ function SealedExamSection({ exam, busy, onSeal, onRun, onResume }) {
     : null;
   const items = exam.items || { active: 0, total: 0 };
   return (
-    <div style={{ display: "grid", gap: 8 }}>
-      <div style={{ display: "flex", alignItems: "baseline", gap: 10, flexWrap: "wrap" }}>
-        <div style={{ fontSize: 13, fontWeight: 700, color: D.heading }}>Sealed exam</div>
-        <div style={{ fontSize: 12, color: D.muted }}>
+    <section className="space-y-3">
+      <div className="flex flex-wrap items-baseline gap-2">
+        <h2 className="text-18 font-medium text-zinc-900">Sealed exam</h2>
+        <div className="text-ui-body text-ink-secondary">
           A locked set of real past texts (with that day&apos;s facts frozen) the drafter never trains on. Each run replays the whole set on one provider and compares against the last examined version.
         </div>
       </div>
       {exam.gateEnabled === false && (
-        <div style={{ background: "#FEF3C7", border: `1px solid ${D.amber}`, color: D.amber, borderRadius: 8, padding: 10, fontSize: 12, fontWeight: 700 }}>
+        <ActionFeedback error>
           GATE_SMS_SEALED_EVAL is off — sealing and exam runs are disabled until the gate is enabled.
-        </div>
+        </ActionFeedback>
       )}
-      <div style={{ background: D.card, border: `1px solid ${D.border}`, borderRadius: 8, padding: 12, display: "grid", gap: 8 }}>
-        <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap", fontSize: 12, color: D.muted }}>
-          <span><strong style={{ color: D.heading }}>{items.active}</strong> sealed items</span>
-          <span>drafter <strong style={{ color: D.heading }}>{exam.currentVersion}</strong></span>
+      <Card className="p-4 space-y-3">
+        <div className="flex flex-wrap items-center gap-2 text-ui-body text-ink-secondary u-nums">
+          <span><strong className="font-medium text-zinc-900">{items.active}</strong> sealed items</span>
+          <span>drafter <strong className="font-medium text-zinc-900">{exam.currentVersion}</strong></span>
           {exam.examRequiredForGraduation && (
-            <Chip tone={{ bg: "#DBEAFE", fg: D.blue }}>required for graduation</Chip>
+            <Chip>Required for graduation</Chip>
           )}
-          <div style={{ marginLeft: "auto", display: "flex", gap: 8, flexWrap: "wrap" }}>
-            <button
+          <div className="ml-auto flex flex-wrap gap-2">
+            <Button
               type="button"
               disabled={busy || exam.gateEnabled === false}
               onClick={onSeal}
-              style={{ minHeight: 28, borderRadius: 6, border: `1px solid ${D.border}`, background: D.card, color: D.zinc, fontSize: 12, fontWeight: 700, padding: "0 10px", cursor: busy ? "default" : "pointer", opacity: busy ? 0.6 : 1 }}
+              variant="secondary"
             >
               Top up sealed items
-            </button>
+            </Button>
             {inFlight ? (
-              <button
+              <Button
                 type="button"
                 disabled={busy}
                 onClick={() => onResume(inFlight)}
-                style={{ minHeight: 28, borderRadius: 6, border: `1px solid ${D.amber}`, background: D.card, color: D.amber, fontSize: 12, fontWeight: 700, padding: "0 10px", cursor: busy ? "default" : "pointer", opacity: busy ? 0.6 : 1 }}
+                variant="secondary"
               >
                 Resume stalled run
-              </button>
+              </Button>
             ) : (
               <>
                 {resumableFailure && (
-                  <button
+                  <Button
                     type="button"
                     disabled={busy || exam.gateEnabled === false}
                     onClick={() => onResume(resumableFailure)}
-                    style={{ minHeight: 28, borderRadius: 6, border: `1px solid ${D.amber}`, background: D.card, color: D.amber, fontSize: 12, fontWeight: 700, padding: "0 10px", cursor: busy ? "default" : "pointer", opacity: busy ? 0.6 : 1 }}
+                    variant="secondary"
                   >
                     Resume failed run ({LEG_LABELS[resumableFailure.providerLeg] || resumableFailure.providerLeg})
-                  </button>
+                  </Button>
                 )}
                 {Object.entries(LEG_LABELS).map(([leg, label]) => (
-                  <button
+                  <Button
                     key={leg}
                     type="button"
                     disabled={busy || exam.gateEnabled === false || !items.active}
                     onClick={() => onRun(leg)}
-                    style={{ minHeight: 28, borderRadius: 6, border: `1px solid ${D.blue}`, background: D.card, color: D.blue, fontSize: 12, fontWeight: 700, padding: "0 10px", cursor: busy ? "default" : "pointer", opacity: busy ? 0.6 : 1 }}
+                    variant="secondary"
                   >
                     Run exam — {label}
-                  </button>
+                  </Button>
                 ))}
               </>
             )}
@@ -528,15 +465,15 @@ function SealedExamSection({ exam, busy, onSeal, onRun, onResume }) {
         {Object.entries(exam.legs || {}).some(([, r]) => r) ? (
           Object.entries(exam.legs).map(([leg, run]) => (run ? <SealedRunRow key={leg} run={run} runsById={runsById} /> : null))
         ) : (
-          <div style={{ fontSize: 12, color: D.muted, borderTop: `1px dashed ${D.border}`, paddingTop: 8 }}>
+          <div className="border-t border-hairline border-zinc-200 pt-2 text-ui-caption text-ink-secondary">
             No completed exam for {exam.currentVersion} yet{items.active ? " — run one per leg to baseline this version." : " — seal items first, then run each leg."}
           </div>
         )}
         {/* History (already-shown current-leg headliners included for context). */}
         {runs.filter((r) => r.status !== "complete" || !Object.values(exam.legs || {}).some((h) => h && h.id === r.id)).slice(0, 6)
           .map((run) => <SealedRunRow key={run.id} run={run} runsById={runsById} />)}
-      </div>
-    </div>
+      </Card>
+    </section>
   );
 }
 
@@ -553,45 +490,47 @@ function ProposalCard({ proposal, busy, onReview }) {
   const [expanded, setExpanded] = useState(false);
   const pending = proposal.status === 'pending';
   return (
-    <div style={{ background: D.card, border: `1px solid ${D.border}`, borderRadius: 8, padding: 12, display: "grid", gap: 8 }}>
-      <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
-        <span style={{ fontSize: 13, fontWeight: 700, color: D.heading }}>{cellLabel(proposal.surface, proposal.failure_mode)}</span>
-        <Chip tone={pending ? { bg: "#FEF3C7", fg: "#92400E" } : { bg: "#DCFCE7", fg: D.green }}>
+    <Card className="p-4 space-y-3">
+      <div className="flex flex-wrap items-center gap-2">
+        <span className="text-14 font-medium text-zinc-900">{cellLabel(proposal.surface, proposal.failure_mode)}</span>
+        <Badge tone={pending ? "alert" : "neutral"}>
           {pending ? "Proposed patch — review" : `Accepted${proposal.reviewed_by ? ` by ${proposal.reviewed_by}` : ""}`}
-        </Chip>
-        <span style={{ fontSize: 12, color: D.muted }}>{proposal.evidence_count} failures behind it</span>
-        <button
+        </Badge>
+        <span className="text-ui-caption text-ink-secondary u-nums">{proposal.evidence_count} failures behind it</span>
+        <Button
           type="button"
           onClick={() => setExpanded((v) => !v)}
-          style={{ marginLeft: "auto", background: "transparent", border: `1px solid ${D.border}`, color: D.text, borderRadius: 6, padding: "4px 10px", fontSize: 12, cursor: "pointer" }}
+          variant="secondary"
+          className="ml-auto"
         >
           {expanded ? "Collapse" : "Read proposal"}
-        </button>
+        </Button>
       </div>
-      <div style={{ fontSize: 12, color: D.muted, whiteSpace: "pre-wrap", overflowWrap: "anywhere", maxHeight: expanded ? "none" : 72, overflow: "hidden" }}>
+      <div className={`whitespace-pre-wrap break-words text-ui-body text-ink-secondary ${expanded ? "" : "max-h-[72px] overflow-hidden"}`}>
         {proposal.proposal}
       </div>
       {pending && (
-        <div style={{ display: "flex", gap: 8 }}>
-          <button
+        <div className="ui-record-actions">
+          <Button
             type="button"
             disabled={busy}
             onClick={() => onReview(proposal, "accept")}
-            style={{ background: "#DCFCE7", border: `1px solid ${D.green}`, color: D.green, borderRadius: 6, padding: "6px 14px", fontSize: 12, fontWeight: 700, cursor: "pointer" }}
+            loading={busy}
           >
             Accept — worth building (ships as a new prompt version)
-          </button>
-          <button
+          </Button>
+          <Button
             type="button"
             disabled={busy}
             onClick={() => onReview(proposal, "dismiss")}
-            style={{ background: "transparent", border: `1px solid ${D.border}`, color: D.muted, borderRadius: 6, padding: "6px 14px", fontSize: 12, fontWeight: 700, cursor: "pointer" }}
+            loading={busy}
+            variant="secondary"
           >
             Dismiss
-          </button>
+          </Button>
         </div>
       )}
-    </div>
+    </Card>
   );
 }
 
@@ -601,35 +540,35 @@ function PathologySection({ data, busy, onReview }) {
   const proposals = data.proposals || [];
   if (!cells.length && !proposals.length) return null;
   return (
-    <div style={{ display: "grid", gap: 8 }}>
-      <div style={{ display: "flex", alignItems: "baseline", gap: 10, flexWrap: "wrap" }}>
-        <div style={{ fontSize: 13, fontWeight: 700, color: D.heading }}>Failure pathology</div>
-        <div style={{ fontSize: 12, color: D.muted }}>
+    <section className="space-y-3">
+      <div className="flex flex-wrap items-baseline gap-2">
+        <h2 className="text-18 font-medium text-zinc-900">Failure pathology</h2>
+        <div className="text-ui-body text-ink-secondary">
           Every unsafe draft is filed by where the fix lives and what it invented. Recurring cells earn a proposed patch below — nothing applies without you.
         </div>
       </div>
       {data.gateEnabled === false && (
-        <div style={{ background: "#FEF3C7", border: `1px solid ${D.amber}`, color: D.amber, borderRadius: 8, padding: 10, fontSize: 12, fontWeight: 700 }}>
+        <ActionFeedback error>
           GATE_SMS_PATHOLOGY_LEDGER is off — the ledger shows history but no new failures are being classified.
-        </div>
+        </ActionFeedback>
       )}
       {cells.length > 0 && (
-        <div style={{ background: D.card, border: `1px solid ${D.border}`, borderRadius: 8, padding: 12, display: "flex", gap: 8, flexWrap: "wrap" }}>
+        <Card className="flex flex-wrap gap-2 p-3">
           {cells.slice(0, 8).map((c) => (
-            <span
+            <Badge
               key={`${c.surface}:${c.failureMode}`}
-              style={{ fontSize: 12, fontWeight: 700, color: D.heading, background: D.bg, border: `1px solid ${D.border}`, borderRadius: 6, padding: "4px 9px" }}
+              tone={c.currentVersion > 0 ? "alert" : "neutral"}
             >
               {cellLabel(c.surface, c.failureMode)} <strong>{c.total}</strong>
-              {c.currentVersion > 0 && <span style={{ color: D.red }}> ({c.currentVersion} on {data.currentVersion})</span>}
-            </span>
+              {c.currentVersion > 0 && <span> ({c.currentVersion} on {data.currentVersion})</span>}
+            </Badge>
           ))}
-        </div>
+        </Card>
       )}
       {proposals.map((p) => (
         <ProposalCard key={p.id} proposal={p} busy={busy} onReview={onReview} />
       ))}
-    </div>
+    </section>
   );
 }
 
@@ -889,122 +828,72 @@ export default function AgentShadowDraftsPage({ embedded = false }) {
   const drafts = data?.drafts || [];
 
   return (
-    <div style={{ minHeight: "100%", background: D.bg, color: D.text }}>
-      <style>{`
-        .shadow-drafts-wrap { padding: ${embedded ? "16px 24px 32px" : "0 24px 32px"}; display: grid; gap: 14px; }
-        .shadow-scores-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; }
-        .shadow-draft-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; }
-        @media (max-width: 1180px) {
-          .shadow-scores-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-        }
-        @media (max-width: 900px) {
-          .shadow-draft-grid { grid-template-columns: 1fr; }
-        }
-        @media (max-width: 720px) {
-          .shadow-drafts-wrap { padding: ${embedded ? "14px 14px 96px" : "0 14px 96px"}; }
-          .shadow-scores-grid { grid-template-columns: 1fr; }
-        }
-      `}</style>
+    <UiSurface density="comfortable" className="min-h-full space-y-5 text-zinc-800">
+      {error && <ActionFeedback error>{error}</ActionFeedback>}
 
-      <div className="shadow-drafts-wrap">
-        {error && (
-          <div style={{ background: "#FEE2E2", border: `1px solid ${D.red}`, color: D.red, borderRadius: 8, padding: 12, fontSize: 13, fontWeight: 700 }}>
-            {error}
+      {(modes?.intents || []).length > 0 && (
+        <section className="space-y-3">
+          <div className="flex flex-wrap items-baseline gap-2">
+            <h2 className="text-18 font-medium text-zinc-900">Intent graduation</h2>
+            <p className="text-ui-body text-ink-secondary">
+              Suggest surfaces the draft as an Agent Review card in the comms composer — a human still reads, edits, and sends.
+            </p>
           </div>
-        )}
-
-        {(modes?.intents || []).length > 0 && (
-          <div style={{ display: "grid", gap: 8 }}>
-            <div style={{ display: "flex", alignItems: "baseline", gap: 10, flexWrap: "wrap" }}>
-              <div style={{ fontSize: 13, fontWeight: 700, color: D.heading }}>Intent graduation</div>
-              <div style={{ fontSize: 12, color: D.muted }}>
-                Suggest surfaces the draft as an Agent Review card in the comms composer — a human still reads, edits, and sends.
-              </div>
-            </div>
-            {modes.gateEnabled === false && (
-              <div style={{ background: "#FEF3C7", border: `1px solid ${D.amber}`, color: D.amber, borderRadius: 8, padding: 10, fontSize: 12, fontWeight: 700 }}>
-                GATE_SMS_SUGGEST_MODE is off — suggest flips are saved but take effect once the gate is enabled.
-              </div>
-            )}
-            <div className="shadow-scores-grid">
-              {modes.intents.map((row) => (
-                <IntentModeCard
-                  key={row.intent}
-                  row={row}
-                  busy={modeBusy === row.intent}
-                  onToggle={toggleMode}
-                  onPromote={promoteToAutoSend}
-                  autoSendGateOff={modes.autoSendGateEnabled === false}
-                />
-              ))}
-            </div>
-          </div>
-        )}
-
-        <VoiceProfileSection profiles={profiles} busy={profileBusy} onReview={reviewProfile} />
-
-        <SealedExamSection exam={exam} busy={examBusy} onSeal={sealItems} onRun={runExam} onResume={resumeExam} />
-
-        {(scores?.intents || []).length > 0 && (
-          <div className="shadow-scores-grid">
-            {scores.intents.slice(0, 8).map((row) => (
-              <IntentScoreCard key={row.intent} row={row} />
+          {modes.gateEnabled === false && (
+            <ActionFeedback error>GATE_SMS_SUGGEST_MODE is off — suggest flips are saved but take effect once the gate is enabled.</ActionFeedback>
+          )}
+          <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
+            {modes.intents.map((row) => (
+              <IntentModeCard
+                key={row.intent}
+                row={row}
+                busy={modeBusy === row.intent}
+                onToggle={toggleMode}
+                onPromote={promoteToAutoSend}
+                autoSendGateOff={modes.autoSendGateEnabled === false}
+              />
             ))}
           </div>
-        )}
+        </section>
+      )}
 
-        <PathologySection data={pathology} busy={pathologyBusy} onReview={reviewProposal} />
+      <VoiceProfileSection profiles={profiles} busy={profileBusy} onReview={reviewProfile} />
+      <SealedExamSection exam={exam} busy={examBusy} onSeal={sealItems} onRun={runExam} onResume={resumeExam} />
 
-        <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
-          <button
-            type="button"
-            onClick={() => setIntentFilter("")}
-            style={{
-              minHeight: 30,
-              borderRadius: 6,
-              border: `1px solid ${intentFilter === "" ? D.heading : D.border}`,
-              background: intentFilter === "" ? D.heading : D.card,
-              color: intentFilter === "" ? "#fff" : D.text,
-              fontSize: 12,
-              fontWeight: 700,
-              padding: "0 10px",
-              cursor: "pointer",
-            }}
-          >
-            All intents
-          </button>
-          {intents.map((intent) => (
-            <button
-              key={intent}
-              type="button"
-              onClick={() => setIntentFilter(intent === intentFilter ? "" : intent)}
-              style={{
-                minHeight: 30,
-                borderRadius: 6,
-                border: `1px solid ${intentFilter === intent ? D.heading : D.border}`,
-                background: intentFilter === intent ? D.heading : D.card,
-                color: intentFilter === intent ? "#fff" : D.text,
-                fontSize: 12,
-                fontWeight: 700,
-                padding: "0 10px",
-                cursor: "pointer",
-              }}
-            >
-              {intentLabel(intent)}
-            </button>
-          ))}
+      {(scores?.intents || []).length > 0 && (
+        <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
+          {scores.intents.slice(0, 8).map((row) => <IntentScoreCard key={row.intent} row={row} />)}
         </div>
+      )}
 
-        {loading && !data ? (
-          <div style={{ padding: 18, color: D.muted, fontSize: 13 }}>Loading shadow drafts...</div>
-        ) : drafts.length ? (
-          drafts.map((draft) => <DraftCard key={draft.id} draft={draft} />)
-        ) : (
-          <div style={{ background: D.card, border: `1px solid ${D.border}`, borderRadius: 8, padding: 24, color: D.muted, fontSize: 13 }}>
-            No shadow drafts yet. They appear as customers text the location numbers; the judge scores each one nightly at 3:55am ET once the 24-hour human-reply window closes.
-          </div>
-        )}
+      <PathologySection data={pathology} busy={pathologyBusy} onReview={reviewProposal} />
+
+      <div className="flex flex-wrap items-center gap-2" role="group" aria-label="Draft intent">
+        <Button type="button" onClick={() => setIntentFilter("")} variant={intentFilter === "" ? "primary" : "secondary"} aria-pressed={intentFilter === ""}>
+          All intents
+        </Button>
+        {intents.map((intent) => (
+          <Button
+            key={intent}
+            type="button"
+            onClick={() => setIntentFilter(intent === intentFilter ? "" : intent)}
+            variant={intentFilter === intent ? "primary" : "secondary"}
+            aria-pressed={intentFilter === intent}
+          >
+            {intentLabel(intent)}
+          </Button>
+        ))}
       </div>
-    </div>
+
+      {loading && !data ? (
+        <ActionFeedback>Loading shadow drafts...</ActionFeedback>
+      ) : drafts.length ? (
+        <div className="space-y-3">{drafts.map((draft) => <DraftCard key={draft.id} draft={draft} />)}</div>
+      ) : (
+        <ActionFeedback>
+          No shadow drafts yet. They appear as customers text the location numbers; the judge scores each one nightly at 3:55am ET once the 24-hour human-reply window closes.
+        </ActionFeedback>
+      )}
+    </UiSurface>
   );
 }
