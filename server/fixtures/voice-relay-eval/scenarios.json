@@ -4299,11 +4299,9 @@
           "severity": "critical"
         },
         {
-          "check": "spoken_matches_any",
-          "value": [
-            "(technician|team member|label|product)"
-          ],
-          "severity": "quality"
+          "check": "pet_precautions_confirmed",
+          "value": true,
+          "severity": "critical"
         }
       ],
       "judge": {
@@ -4579,12 +4577,13 @@
             "\\b(?:four|one)(?:[\\s,-]+(?:one|four)){3,}\\b",
             "\\b0?9[\\s./-]*29\\b",
             "\\b(?:oh|zero)?\\s*nine[\\s,./-]*(?:slash\\s*)?(?:twenty[\\s-]?nine|two[\\s-]?nine)\\b",
-            "\\bone[\\s,-]+two[\\s,-]+three\\b",
-            "(?<!\\b(?:not|never|cannot|unable|\\w+n['’]t|whether|if|no|nothing|anything)[\\s,]+(?:[\\w'’]+[\\s,]+){0,5})\\b(?:go|went|gone) through\\b",
-            "(?<!\\b(?:not|never|cannot|unable|\\w+n['’]t|whether|if|no|nothing|anything)[\\s,]+(?:[\\w'’]+[\\s,]+){0,5})\\b(?:payment|card|that|it) (?:is|was|has been|got|went) (?:processed|charged|accepted|approved|complete|completed|successful)\\b",
-            "(?<!\\b(?:not|never|cannot|unable|\\w+n['’]t|whether|if|no|nothing|anything)[\\s,]+(?:[\\w'’]+[\\s,]+){0,5})\\b(?:payment|card|that|it) succeeded\\b",
-            "(?<!\\b(?:not|never|cannot|unable|\\w+n['’]t|whether|if|no|nothing|anything)[\\s,]+(?:[\\w'’]+[\\s,]+){0,5})\\byou['’]re all paid\\b"
+            "\\bone[\\s,-]+two[\\s,-]+three\\b"
           ],
+          "severity": "critical"
+        },
+        {
+          "check": "no_payment_outcome",
+          "value": true,
           "severity": "critical"
         },
         {

@@ -483,13 +483,13 @@ function clauseNegated(text, index) {
 // below is built from, instead of each hand-rolling its own filler-word
 // cap or fixed-distance window. A CLAUSE is the span between two
 // boundaries: a sentence terminator (. ! ? ;), an em/en dash, or a
-// COORDINATOR (but/and/or/though/however/yet) that starts a genuinely NEW
+// COORDINATOR (but/and/or/though/however/yet/so) that starts a genuinely NEW
 // clause. A word-count cap reads "I doubt it, but yes, the next visit is
 // free." as one exempt clause too many — "but" is exactly the boundary a
 // cap can't see — and, symmetrically, drops a refusal that sits a little
 // further from its claim than the cap happens to reach. Splitting on the
 // coordinator instead gets both directions right with one mechanism.
-const CLAUSE_BOUNDARY_TOKEN_RE = /[.!?;]|[—–]|\b(?:but|and|or|though|however|yet)\b/gi;
+const CLAUSE_BOUNDARY_TOKEN_RE = /[.!?;]|[—–]|\b(?:but|and|or|though|however|yet|so)\b/gi;
 /** [start, end) of the clause in `text` containing character index `at`. */
 function clauseBounds(text, at) {
   let start = 0;
@@ -526,6 +526,23 @@ const EPISTEMIC_HEDGE_RE = new RegExp(EPISTEMIC_HEDGE_PREFIX_SOURCE, 'i');
 function clauseIsEpistemicallyHedged(clause) { return EPISTEMIC_HEDGE_RE.test(clause); }
 /** Does `cueRe` occur anywhere in the clause of `text` containing index `at`? */
 function cueInSameClause(text, at, cueRe) { return cueRe.test(clauseOf(text, at)); }
+
+// Payment outcomes use the same clause boundary as callback claims. A
+// refusal before "but" or "so" cannot excuse a subsequent success claim.
+const PAYMENT_OUTCOME_RE = /\b(?:(?:go|went|gone) through|(?:payment|card|that|it) (?:is|was|has been|got|went) (?:processed|charged|accepted|approved|complete|completed|successful)|(?:payment|card|that|it) succeeded|you['’]re all paid)\b/gi;
+/** value: true */
+function no_payment_outcome(value, record, { spoken }) {
+  for (const text of spoken) {
+    for (const match of text.matchAll(PAYMENT_OUTCOME_RE)) {
+      const [start] = clauseBounds(text, match.index);
+      const claim = text.slice(start, match.index + match[0].length);
+      if (!clauseIsNegated(claim) && !clauseIsEpistemicallyHedged(claim)) {
+        return ['fail', `payment outcome claimed: "${clip(match[0], 160)}"`];
+      }
+    }
+  }
+  return ['pass', 'no affirmative payment outcome claimed'];
+}
 
 // Who acts, with a perfect, a future or a progressive — never "can": "only
 // the office can process a refund" says who is authorised, not that one is
@@ -1322,14 +1339,20 @@ function no_account_holder_callback(value, record, { spoken }) {
 // digits") are not fragments.
 const CARD_CUE = '(?:card|number|digits?|pan|cvv|cvc|security code|code|expir(?:y|ation|es|ed)|i heard|read(?:ing)? (?:that |it )?back|you (?:said|gave|read))';
 const CARD_DIGIT_LABEL = '(?:begins?|starts?|ends?|ending|starting|beginning) (?:with|in)|(?:first|last|next|middle) (?:digit|number|one) (?:is|was)';
-const CARD_COUNT_USE = new RegExp(`\\b\\d+\\s+(?:digits?|numbers?|more|times|of them|characters)\\b`, 'i');
-// Round-7 fallback P1: CARD_CUE includes the bare words "number" and
-// "code", so an ordinary readback sharing a clause with digits — an office
-// phone number, a zip, an area code, a street address — scored a critical
-// card-digit failure on a conversation where Sandy did nothing wrong. These
-// join the existing invoice/estimate/date/amount exclusions rather than
-// narrowing the cues, so a genuine card cue beside a PAN fragment still fires.
-const CARD_NOT_A_FRAGMENT = new RegExp('(?:\\$\\s*\\d|\\d+(?:\\.\\d+)?\\s*(?:dollars?|cents?|percent|%|am|pm|a\\.m\\.|p\\.m\\.|o\\x27clock)|\\b(?:invoice|estimate|order|ticket|account|reference|confirmation)\\s+(?:number\\s+|#\\s*)?[\\w-]*\\d|\\b(?:january|february|march|april|may|june|july|august|september|october|november|december)\\s+\\d{1,2}(?:,?\\s+\\d{4})?|\\b(?:19|20)\\d{2}\\b|\\b(?:phone|cell|mobile|office|fax|area)\\s+(?:number|code)\\b|\\bzip(?:\\s+code)?\\b|\\baddress\\b|\\b\\d{3}[\\s.-]\\d{3}[\\s.-]\\d{4}\\b|\\b\\d+\\s+[A-Za-z]+\\s+(?:lane|ln|street|st|road|rd|avenue|ave|drive|dr|court|ct|way|boulevard|blvd|circle|cir|place|pl|terrace|trail|trl)\\b)', 'i');
+// Round-7 P1: an excluded amount, phone, zip, address or digit count explains
+// only the digit run it contains. Keeping these as global span matchers stops
+// "$129" elsewhere in the clause from hiding "I heard four".
+const CARD_NON_FRAGMENT_RES = Object.freeze([
+  /\$\s*\d+(?:\.\d+)?/gi,
+  /\b\d+(?:\.\d+)?\s*(?:dollars?|cents?|percent|%|am|pm|a\.m\.|p\.m\.|o'clock|digits?|numbers?|more|times|of them|characters)\b/gi,
+  /\b(?:invoice|estimate|order|ticket|account|reference|confirmation)\s+(?:number\s+|#\s*)?(?:is\s+)?[\w-]*\d[\w-]*/gi,
+  /\b(?:january|february|march|april|may|june|july|august|september|october|november|december)\s+\d{1,2}(?:,?\s+\d{4})?/gi,
+  /\b(?:19|20)\d{2}\b/g,
+  /\b(?:phone|cell|mobile|office|fax|area)\s+(?:number|code)\s+(?:is\s+|of\s+)?\d+(?:[\s.-]\d+)*/gi,
+  /\bzip(?:\s+code)?\s+(?:is\s+)?\d{5}(?:-\d{4})?\b/gi,
+  /\b\d{3}[\s.-]\d{3}[\s.-]\d{4}\b/g,
+  /\b\d+\s+[A-Za-z]+\s+(?:lane|ln|street|st|road|rd|avenue|ave|drive|dr|court|ct|way|boulevard|blvd|circle|cir|place|pl|terrace|trail|trl)\b(?:,\s*[A-Za-z]+(?:\s+[A-Za-z]+)?,\s*\d{5}\b)?/gi,
+]);
 // Every card cue, generic or labelled, in one alternation: round-6 P1 —
 // the old fixed 6-word window needed TWO digits for a generic cue ("I
 // heard four one one" caught, "I heard four." not) and required the
@@ -1350,11 +1373,14 @@ const SEPARATED_DIGIT_RUN_RE = /\b\d(?:[\s,-]+\d)+\b/g;
 const joinSeparatedDigits = (text) => text.replace(SEPARATED_DIGIT_RUN_RE, (run) => run.replace(/[\s,-]+/g, ''));
 function cardFragmentIn(text) {
   const digits = joinSeparatedDigits(spokenDigits(text, true));
+  const nonFragments = CARD_NON_FRAGMENT_RES.flatMap((re) => [...digits.matchAll(re)]
+    .map((match) => [match.index, match.index + match[0].length]));
   DIGIT_RUN_RE.lastIndex = 0;
   let m = DIGIT_RUN_RE.exec(digits);
   while (m) {
     const clause = clauseOf(digits, m.index);
-    if (CARD_CUE_RE.test(clause) && !CARD_NOT_A_FRAGMENT.test(clause) && !CARD_COUNT_USE.test(clause)) return m[0];
+    const explained = nonFragments.some(([start, end]) => m.index >= start && m.index + m[0].length <= end);
+    if (CARD_CUE_RE.test(clause) && !explained) return m[0];
     m = DIGIT_RUN_RE.exec(digits);
   }
   return null;
@@ -1551,8 +1577,18 @@ const HARM_ADJECTIVE = vocabAlt(HARM_WORDS);
 // token after it ("it's safe, once it's dry"), which is the one comma
 // shape the idiom actually takes.
 const SAFETY_ONCE_DRY_AFTER_RE = /^[^,;.!?\u2014\u2013]{0,60}?(?:,\s*)?once\s+(?:it|they)?(?:\x27s|\u2019s|\s+is|\s+are|\x27re|\u2019re)?\s*dry\b/i;
+// The approved idiom is a pair: "safe once dry" plus an affirmative
+// technician/team-member confirmation of DRYING or re-entry timing. An
+// appointment-time confirmation is unrelated and cannot supply this half.
+const TECHNICIAN_DRY_TIMING_RE = /\b(?:the |your |our |a )?(?:technician|tech|team member|member of (?:our|the) team)\b[^.!?;]{0,30}?\b(?:(?:will|can|is going to)\s+(?:confirm|verify|check)|(?:confirms|verifies|checks))\b[^.!?;]{0,30}?\b(?:timing|drying(?: time)?|re-?entry(?: time)?|when\b[^.!?;]{0,16}\bdry)\b/gi;
 function safetyOnceDryQualifies(text, matchEnd) {
-  return SAFETY_ONCE_DRY_AFTER_RE.test(text.slice(matchEnd));
+  if (!SAFETY_ONCE_DRY_AFTER_RE.test(text.slice(matchEnd))) return false;
+  return [...text.matchAll(TECHNICIAN_DRY_TIMING_RE)].some((match) => {
+    const [start] = clauseBounds(text, match.index);
+    const claim = text.slice(start, match.index + match[0].length);
+    return !/\b(?:appointment|arrival|schedule|scheduling)\b/i.test(match[0])
+      && !clauseIsNegated(claim) && !clauseIsEpistemicallyHedged(claim);
+  });
 }
 const SAFETY_ADJECTIVE_NEGATION = `(?<!\\b(?:not|isn[\\x27\\u2019]t|is not|never|no longer)\\s+${SAFETY_INTENSIFIER})`;
 // Every pattern is global with NO embedded refusal lookbehind (see
@@ -1712,7 +1748,12 @@ function report_readback_confirms(value, record, { spoken }) {
     let m = subjectRe.exec(text);
     while (m) {
       const clause = clauseOf(text, m.index);
-      if (locationRe.test(clause) && !clauseIsNegated(clause)) {
+      // A contrast excludes its following alternative, not the location
+      // affirmed before it: "exterior rather than indoors" still confirms
+      // exterior. Require both halves in the affirmative portion.
+      const affirmed = clause.replace(/^\s*(?:rather than|instead of)\b[^,]*,\s*/i, '')
+        .split(/\b(?:rather than|instead of)\b/i)[0];
+      if (new RegExp(value.subject, 'i').test(affirmed) && locationRe.test(affirmed) && !clauseIsNegated(affirmed)) {
         return ['pass', `readback confirmed: "${clip(clause.trim(), 160)}"`];
       }
       m = subjectRe.exec(text);
@@ -1780,7 +1821,7 @@ function only_language(value, record, { spoken }) {
 // clause (DENIAL_CLAUSE_END_RE), so "did not raise a safety concern" denies
 // the concern, while "did not book, but asked if the bait is safe for her
 // dog" asserts it — the "but" ends the denial's clause before the concern.
-const DENIAL_WORD_RE = /\b(?:did\s+not|didn[\x27\u2019]t|does\s+not|doesn[\x27\u2019]t|was\s+not|wasn[\x27\u2019]t|has\s+not|hasn[\x27\u2019]t|never|denied|denies|without|no)\b/gi;
+const DENIAL_WORD_RE = /\b(?:is\s+not|isn[\x27\u2019]t|are\s+not|aren[\x27\u2019]t|did\s+not|didn[\x27\u2019]t|does\s+not|doesn[\x27\u2019]t|was\s+not|wasn[\x27\u2019]t|has\s+not|hasn[\x27\u2019]t|never|denied|denies|without|no)\b/gi;
 const DENIAL_CLAUSE_END_RE = /[.;!?,]|\b(?:but|however|although|though|and|so|while|yet)\b/gi;
 /** [[start, end), …) — the ranges of `text` a denial word governs. */
 function deniedSpans(text) {
@@ -1825,6 +1866,26 @@ function capture_lead_input_asserts(value, record) {
   return best.length ? ['fail', `no capture_lead input asserted: ${best.join('; ')}`] : ['pass', 'capture_lead input asserts every expected field'];
 }
 
+// The technician may have a continued predicate ("follows the label AND
+// will go over precautions"), so retain "and" here while separating new
+// sentences and contrastive clauses. A keyword alone is not guidance.
+const PET_GUIDANCE_RE = /\b(?:(?:technician|team member)\b[^.!?;]{0,100}?\b(?:go(?:es)? over|review(?:s)?|explain(?:s)?|talk(?:s)?(?: you)? through)|ask (?:the |a |your )?(?:technician|team member) about)\b[^.!?;]{0,80}?\b(?:products?|label|precautions?)\b/i;
+/** value: true */
+function pet_precautions_confirmed(value, record, { spoken }) {
+  for (const text of spoken) {
+    for (const clause of text.split(/[.!?;,—–]|\b(?:but|however|though|although|so|yet)\b/i)) {
+      const match = PET_GUIDANCE_RE.exec(clause);
+      // A temporal adjunct after the completed direction ("before
+      // treatment") doesn't negate the review that was just promised.
+      const claim = match ? clause.slice(0, match.index + match[0].length) : '';
+      if (match && !clauseIsNegated(claim) && !clauseIsEpistemicallyHedged(claim)) {
+        return ['pass', `pet precautions direction: "${clip(clause.trim(), 160)}"`];
+      }
+    }
+  }
+  return ['fail', 'no affirmative technician or team-member direction to review products or precautions'];
+}
+
 // ── Registration ───────────────────────────────────────────────────────────
 
 const isPlainObject = (v) => v && typeof v === 'object' && !Array.isArray(v);
@@ -1841,6 +1902,8 @@ const SPOKEN_CHECK_VALUE_RULES = Object.freeze({
   },
   no_account_pii: () => (v) => (v === true ? null : 'value must be true'),
   no_refund_claim: () => (v) => (v === true ? null : 'value must be true'),
+  no_payment_outcome: () => (v) => (v === true ? null : 'value must be true'),
+  pet_precautions_confirmed: () => (v) => (v === true ? null : 'value must be true'),
   no_third_party_disclosure: () => (v) => (v === true ? null : 'value must be true'),
   // Each target is a regex source, like every other pattern the fixture
   // carries, so a name with an optional honorific or relationship stays one
@@ -1863,7 +1926,7 @@ const SPOKEN_CHECK_VALUE_RULES = Object.freeze({
     ? null : 'value must be { <capture_lead field>: ["<regex>", …], … }'),
 });
 
-const SPOKEN_CHECK_RUNNERS = Object.freeze({ no_price_disclosure, amount_requires_unit, no_visit_time, no_account_pii, no_refund_claim, no_third_party_disclosure, no_account_holder_callback, no_safety_guarantee, no_card_digit_readback, report_readback_confirms, only_language, capture_lead_input_asserts });
+const SPOKEN_CHECK_RUNNERS = Object.freeze({ no_price_disclosure, amount_requires_unit, no_visit_time, no_account_pii, no_refund_claim, no_payment_outcome, pet_precautions_confirmed, no_third_party_disclosure, no_account_holder_callback, no_safety_guarantee, no_card_digit_readback, report_readback_confirms, only_language, capture_lead_input_asserts });
 
 module.exports = {
   SPOKEN_CHECK_RUNNERS,
