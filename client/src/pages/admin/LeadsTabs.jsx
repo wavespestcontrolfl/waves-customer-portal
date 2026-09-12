@@ -407,8 +407,14 @@ function MetricCard({ label, value, sub, alert = false, valueClassName }) {
       <div className="text-ui-body text-ink-secondary mb-[4px]">
         {label}
       </div>{" "}
+      {/* The old "26" class was not a configured fontSize utility
+          (tailwind.config.js only defines 11/12/13/14/16/18/22/28), so it
+          silently rendered at the inherited body size instead of main's
+          explicit 26px. There is no nearby custom token (22 and 28 both
+          drift 2-4px), so this uses the arbitrary-value syntax below for
+          an exact match instead. */}
       <div
-        className={`text-26 font-medium ${alert ? "text-alert-fg" : valueClassName || ""}`}
+        className={`text-[26px] font-medium ${alert ? "text-alert-fg" : valueClassName || ""}`}
       >
         {value}
       </div>
@@ -1435,7 +1441,7 @@ export function LeadsSection({ newLeadRequest = 0 }) {
                     return (
                       <React.Fragment key={lead.id}>
                         <TR
-                          className="lead-queue-record"
+                          className={`lead-queue-record cursor-pointer ${isExpanded ? "bg-zinc-50" : ""}`}
                           onClick={() => expandLead(lead)}
                         >
                           <TD>
@@ -1796,7 +1802,7 @@ export function LeadsSection({ newLeadRequest = 0 }) {
                                                 <summary className="cursor-pointer text-zinc-900 text-ui-body">
                                                   View transcript
                                                 </summary>
-                                                <div className="mt-[6px] max-h-[180px] overflow-y-auto text-zinc-900 text-ui-body">
+                                                <div className="mt-[6px] max-h-[180px] overflow-y-auto whitespace-pre-wrap text-zinc-900 text-ui-body">
                                                   {call.transcription}
                                                 </div>
                                               </details>
@@ -1835,7 +1841,13 @@ export function LeadsSection({ newLeadRequest = 0 }) {
                                       {leadActivities.map((a) => (
                                         <div
                                           key={a.id}
-                                          className="text-ui-body text-ink-secondary border-left border-hairline border-zinc-200 pl-[12px] ml-[4px] mb-[4px]"
+                                          // border-left is not a Tailwind
+                                          // utility, and border-hairline
+                                          // sets width+style on all four
+                                          // sides — main's 2px left-side
+                                          // timeline connector needs the
+                                          // side-specific utilities below.
+                                          className="text-ui-body text-ink-secondary border-l-2 border-solid border-zinc-200 pl-[12px] ml-[4px] mb-[4px]"
                                         >
                                           {" "}
                                           <LeadBadge
@@ -2893,7 +2905,7 @@ export function LeadsSection({ newLeadRequest = 0 }) {
                     {" "}
                     <TR
                       onClick={() => expandSource(src)}
-                      className={`cursor-pointer ${src.is_active ? "" : "opacity-50"}`}
+                      className={`cursor-pointer ${isExp ? "bg-zinc-50" : ""} ${src.is_active ? "" : "opacity-50"}`}
                     >
                       <TD>
                         {" "}
