@@ -738,7 +738,7 @@ async function resumeVisitReviewOutreach(packetId, database = db) {
 // outreach removes only asks that have not reached a provider, never one
 // whose delivery is about to be recorded (a throw from the request rolls
 // the mark back with the transaction).
-async function reviewSendThroughSummaryHandoff(serviceRecordId, dispatch, database = db, { requestId = null } = {}) {
+async function reviewSendThroughSummaryHandoff(serviceRecordId, dispatch, database = db, { requestId = null, claimRef = null } = {}) {
   // The pre-provider mark is durable BEFORE the held handoff, on the marker
   // connection (never inside the transaction it would roll back with): a
   // worker lost after the provider accepted but before this transaction
@@ -758,6 +758,14 @@ async function reviewSendThroughSummaryHandoff(serviceRecordId, dispatch, databa
   // check, so a park (which removes the row) still reports itself as a park
   // rather than as a lost claim. Nothing is written either way — the row
   // belongs to whoever holds the claim, or to the state that replaced it.
+  // The caller's handle on the claim THIS send took (local audit): any
+  // bookkeeping it does afterwards must name this exact claim, or it can
+  // reset a `sending` marker belonging to another sender — including one that
+  // already reached the provider.
+  if (claimRef) {
+    claimRef.claimedAt = claimedAt;
+    claimRef.marked = marked > 0;
+  }
   let claimLost = !!requestId && !marked;
   const release = () => database('review_requests').where({ id: requestId, status: 'sending', claimed_at: claimedAt })
     .update({ status: 'pending', claimed_at: null });

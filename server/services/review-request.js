@@ -1857,6 +1857,8 @@ const ReviewService = {
     // left, so the due row retries on its own. The mock/knex row object is
     // captured before the fence so the definitive writes restore it.
     const fencedFrom = request.scheduled_for || null;
+    // Filled in by the handoff with the claim this attempt took.
+    const sendClaim = {};
     let fenced = 0;
     try {
       fenced = await db("review_requests").where({ id: requestId, status: "pending" })
@@ -1891,7 +1893,7 @@ const ReviewService = {
         // is shared FOR SHARE so a bounce reconciliation (which takes it FOR
         // UPDATE) serializes with the send.
         preDispatchCheck: () => this._visitSummaryPreDispatch(request.service_record_id),
-        withSmsHandoff: (dispatch) => require("./visit-completion-summary").reviewSendThroughSummaryHandoff(request.service_record_id, dispatch, undefined, { requestId }),
+        withSmsHandoff: (dispatch) => require("./visit-completion-summary").reviewSendThroughSummaryHandoff(request.service_record_id, dispatch, undefined, { requestId, claimRef: sendClaim }),
       });
 
       if (result.sent) {
@@ -1922,11 +1924,17 @@ const ReviewService = {
         return { sent: false, claimLost: true, reason: "review_claim_lost", requestId };
       } else if (result.deliveryOutcome === "not_sent"
         && !["VISIT_SUMMARY_UNCERTAIN", "VISIT_SUMMARY_STATE_UNAVAILABLE", "REVIEW_CLAIM_LOST"].includes(result.code)) {
-        // Proven unsent: release this sender's claim so the ordinary
-        // deferral/failure bookkeeping below can move the row (local audit).
-        await db("review_requests").where({ id: requestId, status: "sending" })
-          .update({ status: "pending", claimed_at: null })
-          .catch((releaseErr) => logger.error(`[review] releasing a proven-unsent SMS claim failed (requestId=${requestId}): ${releaseErr.message}`));
+        // Proven unsent: release THIS SENDER'S claim — named by the exact
+        // token the handoff took (local audit) — so the ordinary
+        // deferral/failure bookkeeping below can move the row. A `not_sent`
+        // that came from a validator BEFORE the handoff ran took no claim at
+        // all, and the `sending` row it would otherwise have reset belongs to
+        // another sender.
+        if (sendClaim.marked) {
+          await db("review_requests").where({ id: requestId, status: "sending", claimed_at: sendClaim.claimedAt })
+            .update({ status: "pending", claimed_at: null })
+            .catch((releaseErr) => logger.error(`[review] releasing a proven-unsent SMS claim failed (requestId=${requestId}): ${releaseErr.message}`));
+        }
       }
       if (result.sent) { /* handled above */ } else if (!["VISIT_SUMMARY_UNCERTAIN", "VISIT_SUMMARY_STATE_UNAVAILABLE", "REVIEW_CLAIM_LOST"].includes(result.code)
         && await this._providerOutcomeUnknown(requestId)) {
@@ -4035,6 +4043,9 @@ const ReviewService = {
   },
 
   async _sendOutreachSms({ request, customer, contact, vars, templateId, customBody, manageRetryVia }) {
+    // Filled in by the handoff with the claim this attempt took, so any
+    // bookkeeping below names THIS sender's claim and never another's.
+    const sendClaim = {};
     const tpl = templateId ? OUTREACH.getOutreachTemplate(templateId) : null;
     let rawBody =
       typeof customBody === "string" && customBody.trim() ? customBody : tpl ? tpl.body : null;
@@ -4117,7 +4128,7 @@ const ReviewService = {
           review_request_id: request.id,
         },
         preDispatchCheck: () => this._visitSummaryPreDispatch(request.service_record_id),
-        withSmsHandoff: (dispatch) => require("./visit-completion-summary").reviewSendThroughSummaryHandoff(request.service_record_id, dispatch, undefined, { requestId: request.id }),
+        withSmsHandoff: (dispatch) => require("./visit-completion-summary").reviewSendThroughSummaryHandoff(request.service_record_id, dispatch, undefined, { requestId: request.id, claimRef: sendClaim }),
       });
     } catch (err) {
       const providerOutcome = err?.providerOutcome || null;
@@ -4196,8 +4207,11 @@ const ReviewService = {
     // read, so the reconciliation would call it unavailable forever and the
     // ask — and its sequence — would never move again.
     const provenNotSent = result?.sent === false && result?.deliveryOutcome === "not_sent";
-    if (provenNotSent) {
-      await db("review_requests").where({ id: request.id, status: "sending" })
+    if (provenNotSent && sendClaim.marked) {
+      // Scoped to the claim THIS attempt took: a `not_sent` decided by a
+      // validator before the handoff ran owns no claim, and the `sending` row
+      // it would reset is another sender's (local audit).
+      await db("review_requests").where({ id: request.id, status: "sending", claimed_at: sendClaim.claimedAt })
         .update({ status: "pending", claimed_at: null })
         .catch((releaseErr) => logger.error(`[review] releasing a proven-unsent SMS claim failed (requestId=${request.id}): ${releaseErr.message}`));
     }
