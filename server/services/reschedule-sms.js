@@ -6,7 +6,7 @@ const { renderSmsTemplate } = require('./sms-template-renderer');
 const { etDateString, etParts, addETDays, parseETDateTime } = require('../utils/datetime-et');
 const { ARRIVAL_WINDOW_MINUTES } = require('../utils/sms-time-format');
 
-async function sendAppointmentSms({ to, body, customerId, messageType }) {
+async function sendAppointmentSms({ to, body, customerId, messageType, appointmentId, renderedSlotMs }) {
   const result = await sendCustomerMessage({
     to,
     body,
@@ -14,6 +14,8 @@ async function sendAppointmentSms({ to, body, customerId, messageType }) {
     audience: 'customer',
     purpose: 'appointment',
     customerId,
+    appointmentId,
+    renderedSlotMs,
     identityTrustLevel: 'phone_matches_customer',
     // Every send in this module answers a customer's OWN inbound reply
     // ("1"/"2"/"call me") — by the time either send fires the appointment
@@ -355,6 +357,8 @@ class RescheduleSMS {
           body: confirmedBody,
           customerId,
           messageType: 'confirmation',
+          appointmentId: pending.scheduled_service_id,
+          renderedSlotMs: parseETDateTime(`${optDate}T${String(selectedOption.window.start).slice(0, 5)}`).getTime(),
         });
       } catch (err) {
         // Covered-window compensation (mirrors reschedule-public.js): the

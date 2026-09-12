@@ -32,16 +32,28 @@ import lawnScores from '@lawn-scores';
 //   (operator double-clicks "Complete" should not double-bill).
 // - RescheduleModal's slot-conflict handling — what happens if the
 //   chosen slot is taken between modal open and submit?
-import { useState, useEffect, useMemo, useRef } from "react";
+import { useState, useEffect, useMemo, useRef, useCallback } from "react";
 import useIsMobile from "../../hooks/useIsMobile";
 import CompletionPricingCard from "../../components/schedule/CompletionPricingCard";
 import VisitProtocol from "../../components/admin/VisitProtocol";
 import { createPortal } from "react-dom";
 
-import { addETDays, etDateString } from "../../lib/timezone";
+import { addETDays, etDateString, etDatetimeLocalToISO, etParts, formatETDateOnly, formatETDateTime } from "../../lib/timezone";
+import { completionDraftKey } from "../../lib/completion-drafts";
 import {
   defaultApplicationMethodForLine,
   isPerBasisUnit,
+  isPerGallonUnit,
+  isTankCalculation,
+  derivedTankTotal,
+  tankOwnerRow,
+  promoteTankOwner,
+  applyTankDose,
+  markTankEntry,
+  tankPropagates,
+  followTank,
+  clearTankOnUnitChange,
+  joinTankOnUnitChange,
   normalizeApplicationMethod,
   resolveRatePrefill,
 } from "../../lib/product-rate-prefill";
@@ -59,15 +71,19 @@ import {
   specialtyCompletionFor,
   specialtyFindingActionConflict,
 } from "../../lib/service-completion-presets";
-import { LAWN_DEFAULT_AREAS, LAWN_FIELD_ACTIONS, isLawnFindingSelection, lawnPlanSelections, previousLawnAssessment } from "../../lib/lawn-completion";
+import { LAWN_DEFAULT_AREAS, LAWN_FIELD_ACTIONS, isLawnFindingSelection, lawnPlanSelections, reconcileLawnPlanSelections, lawnPlanActionOptions, previousLawnAssessment, withdrawLawnPlanSuggestions } from "../../lib/lawn-completion";
 import LawnFindingPicker from "../../components/tech/LawnFindingPicker";
 import { confirmCardHoldFeeChoice } from "../../lib/cardHoldCancel";
 import { useCancelFeeNotice } from "../../components/schedule/CancelFeeNotice";
 import {
   deleteCompletionResumeBody,
   getCompletionResumeBody,
+  pruneCompletionDrafts,
   pruneCompletionResumeBodies,
   putCompletionResumeBody,
+  deleteCompletionDraft,
+  getCompletionDraft,
+  putCompletionDraft,
 } from "../../lib/completion-resume-store";
 import termiteTreatmentMethods from "../../../../shared/termite-treatment-methods.json";
 import AREA_SCOPES from "../../../../shared/treatment-area-scopes.json";
@@ -78,6 +94,7 @@ import { Mic, MicOff } from "lucide-react";
 import ProjectFindingFieldInput from "../../components/tech/ProjectFindingFieldInput";
 import TechTreatmentZoneModal from "../../components/tech/TechTreatmentZoneModal";
 import EstimateProvenanceCard from "../../components/schedule/EstimateProvenanceCard";
+import { showScheduleSaveNotice } from "../../components/schedule/ScheduleSaveNotice";
 import SlotConflictNotice from "../../components/schedule/SlotConflictNotice";
 import { useSlotConflicts } from "../../components/schedule/useSlotConflicts";
 import { appointmentHistory as buildAppointmentHistory } from "../../components/schedule/customerAppointments";
@@ -98,6 +115,9 @@ import {
   describeCardRequestResult,
   canSendCardRequest,
 } from "../../components/schedule/cardLinkStatus";
+import ServiceScore from "../../components/payGrowth/ServiceScore";
+import { request as payGrowthRequest } from "../../components/payGrowth/common";
+import usePayGrowthAvailable from "../../hooks/usePayGrowthAvailable";
 const { TERMITE_PERIMETER_METHODS } = termiteTreatmentMethods;
 const TREATMENT_AREA_FIELD_KEYS = ["areas_treated", "spot_treatment_areas", "treatment_zones"];
 // Area fields that changed from free text to chips in this PR: restored legacy
@@ -317,6 +337,210 @@ const CUSTOMER_INTERACTION_OPTIONS = [
   { value: "not_home_partial_access", label: "Customer not home — partial access" },
   { value: "customer_specific_concern", label: "Customer had specific concern" },
 ];
+// Completion panel review timing (owner decisions 2026-09-07). "Automatic"
+// is the cadence's smart send window — the server's calculateReviewSendPlan,
+// previewed through /admin/reviews/send-time-preview so the panel shows the
+// decision dispatch will make. "Customer asked for the link" is recorded on
+// the sequence (who/when/source) and goes at the next cadence tick; it is
+// never immediate, and the panel says so. The old "Now" / "In 2 hours"
+// values are gone: saved drafts carrying them fall back to Automatic.
+const REVIEW_TIMING_OPTIONS = [
+  { value: "auto", label: "Automatic (recommended)" },
+  { value: "customer_requested", label: "Customer asked for the link" },
+  { value: "tomorrow_8", label: "Tomorrow at 8 AM" },
+  { value: "custom", label: "Custom time" },
+];
+const REVIEW_TIMING_DEFAULT = "auto";
+function normalizeReviewTiming(value) {
+  return REVIEW_TIMING_OPTIONS.some((o) => o.value === value) ? value : REVIEW_TIMING_DEFAULT;
+}
+// What the chosen timing means, from the server preview (never a client
+// approximation of the smart window).
+function reviewTimingHint(options) {
+  const hint = reviewTimingHintDetails(options);
+  if (options.preview?.schedulerEnabled === true && options.reviewTiming !== "customer_requested") {
+    return `For a new eligible enrollment: ${hint} An existing cadence keeps its schedule.`;
+  }
+  return hint;
+}
+function reviewTimingHintDetails({ reviewTiming, reviewCustomAt, preview, bundled, awaitsPayment = false }) {
+  // An unpaid completion invoice holds the ask until payment lands (the
+  // server's invoiceBlocksReview; enrollForPaidInvoice then enrolls). A
+  // relative timing is re-derived from the payment time; an absolute one is
+  // kept if it is still ahead (codex #4140 r10 P2).
+  // The master cron gate is dark: nothing automated sends at all — not the
+  // cadence ticks, not the legacy 15-minute scheduler (codex #4140 r15 P1).
+  // Only a link bundled into the completion text itself still goes.
+  // An UNKNOWN gate state (preview still loading, or failed) is not a
+  // promise either: fail closed and say so until the preview succeeds
+  // (codex #4140 r18 P1) — the same rule the Reviews page applies.
+  if (!(reviewTiming === "customer_requested" && bundled)) {
+    if (preview?.schedulerEnabled === false) return "Automated review texts are paused — the scheduler is off (GATE_CRON_JOBS). Nothing will send until it is turned on; the choice is recorded on this visit.";
+    if (preview?.schedulerEnabled !== true) return "Whether automated review texts can send is not known yet (the send-time preview has not loaded). If the scheduler is off nothing sends; the choice is recorded on this visit.";
+  }
+  // Automatic after payment: enrollForPaidInvoice recovers no explicit
+  // delay, so cadence mode computes the smart window from the payment and
+  // the legacy path substitutes its 120-minute default (codex #4140 r19 P2).
+  // Customer requested stores a zero delay, so it goes at the next tick.
+  if (awaitsPayment && reviewTiming === "auto") {
+    return preview?.reviewSequencesEnabled
+      ? "Review text waits for the invoice to be paid, then goes out at the smart send window computed from the payment."
+      : `Review text waits for the invoice to be paid, then goes out about 2 hours after payment, at the next scheduler tick${preview?.smsSendWindowEnabled ? " the 8 AM–8 PM window allows" : ""}.`;
+  }
+  if (awaitsPayment && reviewTiming === "customer_requested") return "The request is recorded on this visit. New review enrollment waits for invoice payment and visit eligibility. An existing cadence keeps its schedule.";
+  const timed = timedReviewHint({ reviewTiming, reviewCustomAt, preview, bundled });
+  return awaitsPayment && timed ? `Only once the invoice is paid: ${timed} A payment after that time sends at the next tick after payment.` : timed;
+}
+function timedReviewHint({ reviewTiming, reviewCustomAt, preview, bundled }) {
+  if (reviewTiming === "auto") {
+    if (!preview?.at) return "Review text goes out separately at the smart send window.";
+    // In cadence mode `at` is a jitter-free eligibility time: enrollment
+    // adds up to ±15 min (earliestAt..latestAt) and the worker sends on its
+    // ticks, so name the ticks either end lands on (codex #4140 r14 P2).
+    // The legacy path has no jitter but its own worker ticks (the */15
+    // scheduler): the row is eligible just after `at` and texts at the next
+    // tick, so name that tick too (codex #4140 r18 P2).
+    const lo = preview.reviewSequencesEnabled ? nextCadenceTickISO(preview.earliestAt || preview.at, workerTickMinutes(preview)) : null;
+    const hi = nextCadenceTickISO(preview.latestAt || preview.at, workerTickMinutes(preview), { after: true });
+    if (lo && hi && lo !== hi) return `Review text goes out separately at the cadence tick after about ${fmtReviewTime(preview.at)} — between about ${fmtReviewTime(lo)} and ${fmtReviewTime(hi)}.`;
+    // The legacy +120 lands wherever the completion did — an evening visit's
+    // 9:15 PM tick is refused by the send window and the row is re-queued for
+    // the next 8 AM (codex #4140 r19 P2). Cadence mode's plan is already
+    // fenced inside the window by the server.
+    const legacyHeld = !preview.reviewSequencesEnabled && preview.smsSendWindowEnabled === true ? heldToWindowOpenISO(hi || preview.at, preview) : null;
+    if (legacyHeld) return `Review text is held for the 8 AM–8 PM window — it goes out at the next 8 AM after about ${fmtReviewTime(preview.at)}, about ${fmtReviewTime(legacyHeld)}.`;
+    return `Review text goes out separately, about ${fmtReviewTime(hi || preview.at)}.`;
+  }
+  if (reviewTiming === "customer_requested") {
+    // `bundled` is the panel's own bundling condition (legacy path, completion
+    // text going out) — the same shape as dispatch's shouldBundleReview. No
+    // bounded time is promised: the next cadence tick still waits for the
+    // 8 AM–8 PM send window (codex #4140 r2).
+    return bundled
+      ? "Review link is included in the completion text."
+      : "The request is recorded on this visit. An existing cadence keeps its schedule; otherwise an eligible visit queues a separate review text, subject to the send window.";
+  }
+  if (reviewTiming === "tomorrow_8") {
+    // In cadence mode 8:00 is the eligibility time; the worker's first tick
+    // after it is 8:14 (codex #4140 r6).
+    // The legacy path likewise: the target becomes a whole-minute delay and
+    // the eligibility instant is rebuilt from a later Date.now(), so the row
+    // is eligible just after 8:00 and the */15 scheduler sends at 8:15 (r18 P2).
+    const tick = windowOpenTickISO(addETDays(new Date(), 1), preview, { after: true });
+    return tick ? `Review text goes out separately tomorrow at the first ${tickNoun(preview)} after 8:00 AM — about ${fmtReviewTime(tick)}.` : "Review text goes out separately tomorrow at 8:00 AM.";
+  }
+  if (reviewTiming === "custom") return customReviewTimingHint(reviewCustomAt, preview);
+  return "";
+}
+const fmtReviewTime = (d) => formatETDateTime(d, { weekday: "short", hour: "numeric", minute: "2-digit" });
+// The server's MAX_REVIEW_DELAY_MINUTES (complete-scheduled-service.js).
+const MAX_REVIEW_DELAY_MS = 30 * 24 * 60 * 60000;
+// The first cadence tick after the 8 AM send window opens on `day` (an ET
+// date); null with cadences off or when the server did not name the ticks.
+function windowOpenTickISO(day, preview, opts) {
+  const openISO = etDatetimeLocalToISO(`${etDateString(day)}T08:00`);
+  return openISO ? nextCadenceTickISO(openISO, workerTickMinutes(preview), opts) : null;
+}
+// The minutes of the hour the worker that will pick the row up runs on: the
+// cadence ticks (:14/:44) in cadence mode, the legacy scheduler's */15
+// otherwise — both named by the server (codex #4140 r18 P2). Null when it
+// did not name them, so no tick is promised.
+function workerTickMinutes(preview) {
+  if (!preview) return null;
+  return (preview.reviewSequencesEnabled ? preview.cadenceTickMinutesOfHour : preview.legacyTickMinutesOfHour) || null;
+}
+const tickNoun = (preview) => (preview?.reviewSequencesEnabled ? "cadence tick" : "scheduler tick");
+// The worker tick a send at `iso` is held to when it falls outside the
+// 8 AM–8 PM window (8 PM exclusive): the first tick after the window opens
+// that morning, or the next morning after an evening send. Null inside it.
+function heldToWindowOpenISO(iso, preview) {
+  const { hour } = etParts(new Date(iso));
+  if (hour >= 8 && hour < 20) return null;
+  return windowOpenTickISO(addETDays(new Date(iso), hour >= 20 ? 1 : 0), preview);
+}
+// The custom-time mode: the one whose hint parses operator input and has to
+// reconcile it with the send window and the worker's ticks.
+// A spring-forward gap wall clock (2:30 AM on the DST day) does not exist in
+// ET: the client helper and the server's parseETDateTime resolve it to
+// different instants, so the hint would promise a tick an hour off the real
+// send (codex #4140 r24 P2). Reject it instead of guessing.
+const ET_GAP_TIME_MESSAGE = "That time does not exist in Eastern time (clocks spring forward) — choose another time.";
+function etWallClockExists(value, iso) {
+  if (!iso) return false;
+  const [, timePart = ""] = String(value).split("T");
+  const [h, mi] = timePart.split(":").map(Number);
+  const et = etParts(new Date(iso));
+  return et.hour === h && et.minute === mi;
+}
+function customReviewTimingHint(reviewCustomAt, preview) {
+  // The datetime-local value is an ET wall clock (the server parses it with
+  // parseETDateTime) — never `new Date(value)`, which reads it in the
+  // browser's zone (codex #4140 r1).
+  const iso = etDatetimeLocalToISO(reviewCustomAt);
+  if (!iso) return "Choose a time for the review text.";
+  if (!etWallClockExists(reviewCustomAt, iso)) return ET_GAP_TIME_MESSAGE;
+  // The server clamps every review delay to 30 days after completion
+  // (MAX_REVIEW_DELAY_MINUTES): a later date would send ~30 days out, not
+  // on the chosen day. Say so instead of promising the date (codex #4140 r10 P2).
+  if (new Date(iso).getTime() > Date.now() + MAX_REVIEW_DELAY_MS) return `Review times can be at most 30 days after completion (by ${fmtReviewTime(new Date(Date.now() + MAX_REVIEW_DELAY_MS))}) — choose an earlier time.`;
+  // Automated texts only go 8 AM–8 PM ET (the send window): a custom time
+  // outside it is held to the next window (codex #4140 r3) — but only
+  // while GATE_SMS_SEND_WINDOW is on. With the gate dark the server's
+  // checkSendWindow passes everything, so the copy must not promise a
+  // hold it will not get (codex #4140 r4 P2). The preview says which.
+  const windowOn = preview?.smsSendWindowEnabled === true;
+  const { hour } = etParts(new Date(iso));
+  // In cadence mode the custom time is when the row becomes ELIGIBLE; the
+  // worker runs on fixed ticks (:14/:44, sent by the preview), so 4:45 PM
+  // cannot text before 5:14 PM. Say the tick, not the wish (codex #4140 r5).
+  // `after: true`: the server turns the chosen time into a whole-minute delay
+  // and rebuilds the eligibility instant from a later Date.now(), so the row
+  // becomes eligible just AFTER the chosen minute — a time typed exactly on
+  // :14 goes out at :44 (codex #4140 r6).
+  // The legacy */15 scheduler has the same shape (r18 P2).
+  const tick = nextCadenceTickISO(iso, workerTickMinutes(preview), { after: true });
+  // The window is checked on the TICK when there is one: 7:50 PM is inside
+  // the window but its 8:14 PM tick is not, and the validator holds that
+  // send to the next morning (codex #4140 r8). 8:00 PM is exclusive.
+  const sendHour = tick ? etParts(new Date(tick)).hour : hour;
+  if (windowOn && (sendHour < 8 || sendHour >= 20)) {
+    // The window opens at 8:00; in cadence mode the worker's first tick
+    // after that is 8:14 (codex #4140 r7).
+    const openTick = heldToWindowOpenISO(tick || iso, preview);
+    const textHint = openTick
+      ? `Review text is held for the 8 AM–8 PM window — it goes out at the first ${tickNoun(preview)} after 8 AM following ${fmtReviewTime(iso)}, about ${fmtReviewTime(openTick)}.`
+      : `Review text is held for the 8 AM–8 PM window — it goes out at the next 8 AM after ${fmtReviewTime(iso)}.`;
+    if (preview?.reviewSequencesEnabled) {
+      return `${textHint} If the cadence uses email instead, it can send at the next cadence tick${tick ? `, about ${fmtReviewTime(tick)}` : ""}, without waiting for the SMS window.`;
+    }
+    return textHint;
+  }
+  if (tick && tick !== iso) return `Review text goes out separately at the next ${tickNoun(preview)} after ${fmtReviewTime(iso)} — about ${fmtReviewTime(tick)}.`;
+  return `Review text goes out separately ${fmtReviewTime(iso)}.`;
+}
+
+// The first worker tick on or after `iso` (ticks are minutes of the hour; every
+// ET offset is a whole hour, so UTC minutes are the same minutes). Null when
+// the server did not name the ticks.
+function nextCadenceTickISO(iso, tickMinutes, { after = false } = {}) {
+  if (!Array.isArray(tickMinutes) || !tickMinutes.length) return null;
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return null;
+  const minute = d.getUTCMinutes();
+  // `after`: the eligibility instant lands strictly after this minute.
+  const pastTheMinute = after || d.getUTCSeconds() > 0 || d.getUTCMilliseconds() > 0;
+  const next = tickMinutes.find((m) => m > minute || (m === minute && !pastTheMinute));
+  const t = new Date(d.getTime());
+  t.setUTCSeconds(0, 0);
+  if (next != null) t.setUTCMinutes(next);
+  else t.setUTCHours(t.getUTCHours() + 1, tickMinutes[0]);
+  return t.toISOString();
+}
+
+// The key two "Automatic" previews are compared by: the server's `bucket`,
+// the rule behind the time (a relative answer's instant moves every request).
+const reviewPreviewBucket = (preview) => preview?.bucket ?? null;
+
 const CUSTOMER_INTERACTION_ALIASES = {
   spoke: "tech_home_spoke_with_them",
   not_home_full: "not_home_full_access",
@@ -625,6 +849,17 @@ export function derivedTotalAmount(rate, areaSqft) {
   if (!Number.isFinite(r) || r <= 0 || !Number.isFinite(a) || a <= 0) return "";
   return Math.round(r * (a / 1000) * 100) / 100;
 }
+// The derived total is the rate's quantity in the rate's unit. A per-basis
+// rate never derives one, and under lawn defaults neither does a row whose
+// amount unit the tech chose away from the rate's unit (`lawnPlanManualFields`
+// only exists there): 15 fl oz must never stand as 15 gal — the total waits
+// for the actual (Codex r8 P1 on #4086).
+function lawnDerivedTotal(product, areaSqft) {
+  if (isPerBasisUnit(product.rateUnit)) return "";
+  if ((product.lawnPlanManualFields || []).includes("amountUnit")
+    && baseUnitOf(product.amountUnit) !== baseUnitOf(product.rateUnit)) return "";
+  return derivedTotalAmount(product.rate, areaSqft);
+}
 
 export function createCompletionIdempotencyKey(serviceId) {
   const randomPart =
@@ -842,8 +1077,28 @@ export function completionWillReview({
   return (oneTimeRecapOnly || !!requestReview) && !reviewSuppressionReason;
 }
 
-function completionDraftKey(serviceId) {
-  return `waves_completion_draft_${serviceId}`;
+// Durable discard marker: set BEFORE the IndexedDB delete is issued and
+// removed only once that delete commits. A page killed in between leaves
+// the full photo-bearing row behind with no metadata; the loader would
+// otherwise offer that explicitly discarded draft again (Codex #4091 P2).
+// Carries the discarded draftId so a draft minted AFTER the discard (new id)
+// is never suppressed.
+function completionDraftTombstoneKey(serviceId) {
+  return `${completionDraftKey(serviceId)}_discarded`;
+}
+
+// The signed-in admin's id. Unsubmitted drafts (photos, captions, notes) are
+// stored under it so a shared tablet never offers one operator's field work
+// to the next: the IndexedDB row is keyed by it and the localStorage
+// metadata carries it as `owner` (Codex #4091 P2). Read per call — logout
+// removes the stored profile and the next login writes a new one.
+function completionDraftScope() {
+  try {
+    const id = JSON.parse(localStorage.getItem("waves_admin_user") || "null")?.id;
+    return id ? String(id) : "";
+  } catch {
+    return "";
+  }
 }
 
 // A completed visit whose REQUIRED completion-invoice mint failed (503
@@ -914,11 +1169,107 @@ export const COMPLETION_RESUME_OWED_CODES = new Set([
   "backfill_invoice_mint_failed",      // REQUIRED completion invoice did not mint
   "service_report_token_mint_failed",  // report link could not be minted; report text withheld
   "completion_sms_send_failed",        // completion text failed at the provider / requeue
+  "terminal_invoice_lookup_failed",
+  "historic_setup_fee_alert_failed",
+  "unminted_setup_fee_lookup_failed",
+  "terminal_invoice_manual_billing_alert_failed",
+  "unminted_setup_fee_alert_failed",
 ]);
 export function completionResumeOwedError(error) {
   // The 503 is part of the contract: a reused code on any other status is
   // not a committed closeout and must not pin the body or set the marker.
   return Number(error?.status) === 503 && COMPLETION_RESUME_OWED_CODES.has(error?.code);
+}
+
+// Whether a completion result still owes photo work, and — when it does —
+// the draft snapshot finishCompletionSuccess should persist so the panel can
+// resume the upload later. The server can report every photo attached but
+// the report still owed a reconciliation pass (its parked-summary restore
+// failed): that carries the SAME recovery marker a client-side upload
+// failure uses, just with no photos to re-upload (server pre-push Codex P1
+// on 19acd4765).
+//
+// Keeping the draftId is a single rule: only a photo set that differs from
+// the autosave mints a new one. localStorage names the revision
+// synchronously while the IndexedDB write is still in flight; a page killed
+// in that window must find the still-valid stored photos under the SAME id,
+// or the loader refuses them and the recovery has nothing to upload (Codex
+// r-63b2098 P1).
+export function buildPhotoRecoveryOutcome({
+  completion,
+  result,
+  prior,
+  servicePhotos,
+  lastSubmitBody,
+  serviceId,
+}) {
+  const reconcileOwed = completion.completionPhotoUpload?.reconcileOwed === true
+    && !(completion.completionPhotoUpload?.failed > 0);
+  const photosOwed = completion.completionPhotoUpload?.failed > 0 || reconcileOwed;
+  if (!photosOwed) return { photosOwed: false, draft: null };
+  const photos = reconcileOwed ? [] : (lastSubmitBody?.completionPhotos || servicePhotos);
+  const samePhotoSet = !!prior?.draftId
+    && prior.serviceId === serviceId
+    && prior.servicePhotos === servicePhotos
+    && photos.length === servicePhotos.length
+    && photos.every((photo, index) => photo.data === servicePhotos[index]?.data);
+  return {
+    photosOwed: true,
+    draft: {
+      serviceId,
+      owner: completionDraftScope(),
+      draftId: samePhotoSet ? prior.draftId : crypto.randomUUID(),
+      savedAt: new Date().toISOString(),
+      servicePhotos: photos,
+      generationPhotoCount: photos.length,
+      reconcileOwed,
+      pendingPhotoCompletion: result,
+    },
+  };
+}
+
+// Whether the success overlay should auto-dismiss, and after how long. A
+// required follow-up suggestion keeps it open so the tech can act on the
+// CTA — it dismisses via the Done button. Keep the panel open when a pest
+// recap is pending too — it renders async and the tech approves/sends it
+// from the success overlay (the approve UI is otherwise unreachable once the
+// panel auto-closes). Completion advisories also hold the overlay open
+// (codex P2 r2 on #3179): the 1.2s auto-dismiss isn't enough to read even
+// one shortfall message — the tech dismisses via the Done button instead.
+// Photo work still owed holds it open the same way. Otherwise it
+// auto-closes, later when the SMS status needs a glance.
+export function completionAutoCloseDelay(completion, photosOwed, recapEligible) {
+  const smsNeedsAttention = ["blocked", "failed"].includes(completion.completionSmsStatus);
+  const advisoriesNeedReading =
+    Array.isArray(completion.completionAdvisories) &&
+    completion.completionAdvisories.length > 0;
+  if (
+    completion.followupSuggestion?.required ||
+    recapEligible ||
+    advisoriesNeedReading ||
+    photosOwed
+  ) {
+    return null;
+  }
+  return smsNeedsAttention ? 3200 : 1200;
+}
+
+// The multipart form body for one photo retry (retryCompletionPhotos),
+// keeping the same fields the completion route accepts. Photos recovered
+// from the autosave revision (see buildPhotoRecoveryOutcome above) carry the
+// panel's shape, not the completion body's: derive the body fields the same
+// way.
+export function buildPhotoRetryFormBody(photo, index) {
+  const [header, encoded] = photo.data.split(",");
+  const bytes = Uint8Array.from(atob(encoded), (character) => character.charCodeAt(0));
+  const form = new FormData();
+  form.append("photo", new Blob([bytes], { type: header.slice(5, header.indexOf(";")) }), photo.name || "service-photo.jpg");
+  form.append("photoType", photo.photoType || "after");
+  form.append("sortOrder", String(photo.sortOrder ?? index));
+  if (photo.caption) form.append("caption", photo.caption);
+  const aiTags = photo.aiTags || (photo.captionSource === "ai" ? { captionSource: "ai" } : null);
+  if (aiTags) form.append("aiTags", JSON.stringify(aiTags));
+  return form;
 }
 
 // Station edits a completion would silently DROP while the registry is
@@ -2323,7 +2674,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
         }),
       });
       if (notifyOnMove && result?.notificationSent === false) {
-        alert(
+        showScheduleSaveNotice(
           `Appointment saved, but SMS notification failed: ${result.notificationError || "customer was not notified"}`,
         );
       }
@@ -2331,13 +2682,13 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
       // longer block admin edits) — tell the operator what now stacks so
       // the double-booking is a choice, not a surprise.
       if (Array.isArray(result?.warnings) && result.warnings.length) {
-        alert(`Appointment saved.\n\n${result.warnings.join("\n\n")}`);
+        showScheduleSaveNotice(`Appointment saved.\n\n${result.warnings.join("\n\n")}`);
       }
       // A 'following' scope rewrites visits the operator can't see from this
       // modal — report what actually moved rather than closing silently.
       if (result?.priceServiceScope?.scope === "following") {
         const n = Number(result.priceServiceScope.updatedVisits) || 0;
-        alert(
+        showScheduleSaveNotice(
           `Price/service change applied to this visit and ${n} other upcoming visit${n === 1 ? "" : "s"} in the series. Visits the plan schedules later will use the new values too.`,
         );
       }
@@ -2361,7 +2712,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
         // Report what the plan HAS, not what was asked for — the server can
         // place fewer than requested when the cadence runs out of open dates,
         // and silently claiming the target hides missing service.
-        alert(
+        showScheduleSaveNotice(
           shortfall
             ? `Plan now has ${now} visit${now === 1 ? "" : "s"}, not the ${target} requested — ${moves.join(", ")}. The cadence had no open date for the remaining ${shortfall}; add ${shortfall === 1 ? "it" : "them"} by hand. The customer was not notified.`
             : `Plan now has ${now} visit${now === 1 ? "" : "s"} — ${moves.join(", ")}. The customer was not notified.`,
@@ -2388,7 +2739,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
           // still corrected, but the customer report did not. Silence here
           // would read as a full success (codex P2 round 3).
           if (patchResult?.recordUpdated === false) {
-            alert(
+            showScheduleSaveNotice(
               patchResult?.recordAmbiguous
                 ? "Duration corrected on the appointment, but several legacy report records match this visit — the customer report was NOT changed and needs a manual fix."
                 : "Duration corrected on the appointment, but no report record was found for this visit — the customer report was not changed.",
@@ -2419,7 +2770,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
               }
             }
             if (retryNow && retried?.costingUpdated !== true) {
-              alert(
+              showScheduleSaveNotice(
                 "The job-cost refresh failed again — the corrected duration itself is saved; use Job Costs → Recalculate to refresh the labor cost.",
               );
             }
@@ -2441,12 +2792,12 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                   : patchResult?.timeEntryCorrectionBlocked === "multiple_job_entries"
                     ? "several timer entries are linked to this visit"
                     : "it could not be edited automatically";
-            alert(
+            showScheduleSaveNotice(
               `Duration corrected, but the technician's linked job timer was NOT changed (${timerReason}) — it still shows the old span in Timesheets until corrected there.`,
             );
           }
         } catch (patchErr) {
-          alert(
+          showScheduleSaveNotice(
             `Appointment saved, but the time-on-site correction failed: ${patchErr.message}. Reopen the appointment to retry it.`,
           );
         }
@@ -2473,7 +2824,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
             }),
           });
         } catch (patchErr) {
-          alert(
+          showScheduleSaveNotice(
             `Appointment saved, but the re-entry correction failed: ${patchErr.message}. Reopen the appointment to retry it.`,
           );
         }
@@ -5288,6 +5639,33 @@ export function ProtocolPanel({ service, onClose }) {
   const [jobCardError, setJobCardError] = useState(false);
   const [loadErrors, setLoadErrors] = useState([]);
   const [loadAttempt, setLoadAttempt] = useState(0);
+  const payGrowthAvailable = usePayGrowthAvailable();
+  // Score is admin-only, or the assigned technician viewing their own
+  // service — /admin/dispatch is reachable by technician-role staff too,
+  // and a tech must never see (or manage) another tech's score.
+  const currentStaffUser = (() => {
+    try { return JSON.parse(localStorage.getItem("waves_admin_user") || "null"); }
+    catch { return null; }
+  })();
+  const isAdmin = currentStaffUser?.role === "admin";
+  const currentTechId = currentStaffUser?.id;
+  const serviceTechnicianId = service.technicianId ?? service.technician_id;
+  const isAssignedTech = currentTechId != null && serviceTechnicianId != null && String(currentTechId) === String(serviceTechnicianId);
+  // A technician who is not the assignee may still be a retained participant
+  // (shared crew, reassigned visit). Only the score service knows that, so
+  // probe it once and show the tab only when the server returns a score.
+  const probeScore = payGrowthAvailable === true && !isAdmin && !isAssignedTech && currentTechId != null;
+  const [participantScore, setParticipantScore] = useState(null);
+  useEffect(() => {
+    setParticipantScore(null);
+    if (!probeScore) return undefined;
+    const controller = new AbortController();
+    payGrowthRequest(`/services/${service.id}/score`, { signal: controller.signal })
+      .then((result) => { if (!controller.signal.aborted) setParticipantScore(result); })
+      .catch(() => { if (!controller.signal.aborted) setParticipantScore(false); });
+    return () => controller.abort();
+  }, [probeScore, service.id]);
+  const canScore = payGrowthAvailable === true && (isAdmin || isAssignedTech || Boolean(participantScore));
   // Classify from the RAW service type when the payload carries it: the
   // schedule day view sends a normalized display name ("Lawn + Tree & Shrub"
   // becomes "Tree & Shrub Care") while the server's line-scoped fields are
@@ -5492,6 +5870,7 @@ export function ProtocolPanel({ service, onClose }) {
     { id: "photos", label: " ID Guide", count: photos.length },
     { id: "scripts", label: " Scripts", count: scripts.length },
     { id: "equipment", label: " Equipment", count: equipment.length },
+    ...(canScore ? [{ id: "score", label: "Score", count: null }] : []),
   ];
 
   const activeSection = SECTIONS.some((section) => section.id === requestedSection)
@@ -5653,7 +6032,9 @@ export function ProtocolPanel({ service, onClose }) {
             </button>
           </div>
         )}
-        {activeSection === "job_card" && jobCardEnabled ? (
+        {activeSection === "score" && canScore ? (
+          <ServiceScore key={service.id} serviceId={service.id} manage={isAdmin} initialData={participantScore || null} />
+        ) : activeSection === "job_card" && jobCardEnabled ? (
           <JobCardTab card={jobCard} loading={jobCardLoading} error={jobCardError} D={D} />
         ) : activeSection === "visit_protocol" && protocolEnabled ? (
           <VisitProtocol key={jobCard.serviceId} card={jobCard} D={D} onJobCard={() => setActiveSection("job_card")} />
@@ -8404,6 +8785,50 @@ function LawnPreviousVisitCard({ service }) {
   );
 }
 
+function LawnVisitPlanSummary({ defaults, protocol, areaValue, onAreaChange, onReload, loading, error, disabled }) {
+  const history = defaults.history;
+  const score = (row) => row?.overall_score == null ? "—" : `${Math.round(Number(row.overall_score))}/100`;
+  const delta = history.progress.baselineDelta;
+  const latest = history?.current || history?.previous;
+  return (
+    <section aria-label="Lawn visit plan" style={{ margin: "16px 0", padding: 16, background: D.white, border: `1px solid ${D.border}`, borderRadius: 12, color: D.heading }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12 }}>
+        <div style={{ fontSize: 16, fontWeight: 500 }}>{protocol?.window?.title || "Lawn plan"}</div>
+        <button type="button" onClick={onReload} disabled={disabled || loading} style={{ padding: "8px 12px", border: `1px solid ${D.border}`, borderRadius: 8, background: D.white, color: D.heading, fontSize: 14 }}>Refresh plan</button>
+      </div>
+      <label style={{ display: "block", marginTop: 16, fontSize: 14 }}>
+        Area for this visit (sq ft)
+        <input type="number" min="1" max="10000000" step="1" value={areaValue} disabled={disabled}
+          onChange={event => onAreaChange(event.target.value)} placeholder="Enter treated area"
+          style={{ display: "block", marginTop: 6, width: "100%", boxSizing: "border-box", padding: 12, fontSize: 16, border: `1px solid ${D.border}`, borderRadius: 8, color: D.heading, background: D.white }} />
+      </label>
+      <p style={{ fontSize: 14, color: D.muted, lineHeight: 1.5 }}>Starts with saved turf area. For partial coverage, enter the area treated. Edited product amounts stay as entered.</p>
+      {loading && <p role="status" style={{ fontSize: 14 }}>Updating plan suggestions…</p>}
+      {error && <p role="status" style={{ fontSize: 14 }}>Plan could not be refreshed. Enter actual amounts or retry.</p>}
+      {defaults.message && <p style={{ fontSize: 14 }}>{defaults.message}</p>}
+      <div style={{ borderTop: `1px solid ${D.border}`, paddingTop: 14, marginTop: 14 }}>
+        <div style={{ fontSize: 16, fontWeight: 500 }}>Property progress</div>
+        {!history?.available ? <p style={{ fontSize: 14 }}>The service property could not be resolved. Earlier scores are unavailable.</p>
+          : !latest ? <p style={{ fontSize: 14 }}>No installed assessment in the current baseline period.</p>
+            : <>
+              <div style={{ display: "grid", gridTemplateColumns: "repeat(2, minmax(0, 1fr))", gap: 12, marginTop: 12, fontSize: 14 }}>
+                <div>{history.current ? "This visit’s confirmed score" : "Previous visit"}<div style={{ fontSize: 20, marginTop: 4 }}>{score(latest)}</div><div>{formatETDateOnly(latest.date)}</div></div>
+                <div>Baseline<div style={{ fontSize: 20, marginTop: 4 }}>{score(history.baseline)}</div><div>{history.baseline?.date && formatETDateOnly(history.baseline.date)}</div></div>
+              </div>
+              {delta != null && <p style={{ fontSize: 14 }}>{delta > 0 ? "+" : ""}{Math.round(delta)} points from baseline</p>}
+              <details style={{ marginTop: 12, fontSize: 14 }}>
+                <summary style={{ cursor: "pointer", padding: "8px 0" }}>Confirmed visit history</summary>
+                <ol style={{ margin: "8px 0 0", paddingLeft: 20 }}>
+                  {history.rows.map(row => <li key={row.id} style={{ padding: "6px 0" }}>{formatETDateOnly(row.date)} · {score(row)}</li>)}
+                </ol>
+                <p style={{ color: D.muted, lineHeight: 1.5 }}>Scores reflect the photos and conditions recorded at each visit. Seasons and assessment models can affect comparisons.</p>
+              </details>
+            </>}
+      </div>
+    </section>
+  );
+}
+
 function LawnAssessmentCompletionBlock({
   service,
   disabled,
@@ -8901,12 +9326,15 @@ function requiresAreaSqft(method, serviceType = "") {
   );
 }
 
-function requiredApplicationArea(method, serviceType = "") {
+function requiredApplicationArea(method, serviceType = "", includeOptionalLawnArea = false) {
   if (requiresLinearFt(method)) {
     return { unit: "linear_ft", label: "Linear ft", alertLabel: "linear feet" };
   }
   if (requiresAreaSqft(method, serviceType)) {
     return { unit: "sqft", label: "Sq ft", alertLabel: "square feet" };
+  }
+  if (includeOptionalLawnArea && serviceLineFromType(serviceType) === "lawn" && normalizeApplicationMethod(method) === "spot_treatment") {
+    return { unit: "sqft", label: "Treated sq ft", optional: true };
   }
   return null;
 }
@@ -8916,6 +9344,7 @@ function effectiveApplicationMethod(method) {
 }
 
 function productApplicationMethod(product = {}, serviceType = "") {
+  if (product.lawnPlanDefaults && product.applicationMethod === "") return "";
   return normalizeApplicationMethod(product.applicationMethod) ||
     defaultApplicationMethod(product, serviceType);
 }
@@ -10451,7 +10880,11 @@ export function CompletionPanel({
   // including the mobile payment handoff — through this callback.
   onCompletionResult,
 }) {
-  const { enabled: completionImprovements } = useFeatureFlagReady("lawn-completion-improvements");
+  // `ready` gates the first plan request and any legacy seeding: with a cold
+  // flag cache a member lawn visit would otherwise fetch the plan without
+  // completion defaults, seed ungoverned rows when the flag flips, and keep
+  // them as "manual" once the governed defaults arrive (Codex r13 P1).
+  const { enabled: completionImprovements, ready: completionFlagReady } = useFeatureFlagReady("lawn-completion-improvements");
   const [notes, setNotes] = useState("");
   const [completionPricing, setCompletionPricing] = useState(null);
   const [pricingReloadKey, setPricingReloadKey] = useState(0);
@@ -10540,6 +10973,21 @@ export function CompletionPanel({
   // derived Total) when a broadcast/granular lawn product is added. No
   // profile / not a lawn visit → the fields stay manual as before.
   const [lawnSqftForPrefill, setLawnSqftForPrefill] = useState(null);
+  const [lawnCompletionDefaults, setLawnCompletionDefaults] = useState(null);
+  const [lawnPlanReady, setLawnPlanReady] = useState(false);
+  const [lawnAreaOverride, setLawnAreaOverride] = useState(undefined);
+  const [lawnRemovedDefaultIds, setLawnRemovedDefaultIds] = useState([]);
+  // Names of the removed defaults, keyed by catalog id, saved with the draft:
+  // a default removed, then hard-deleted from the catalog before the draft is
+  // restored, has no live lookup left to name it, and an unnamed skip never
+  // reaches the server's unlisted-skip audit (Codex #4113 P2).
+  const lawnRemovedDefaultNamesRef = useRef({});
+  const [lawnDefaultsSeedSuppressed, setLawnDefaultsSeedSuppressed] = useState(false);
+  const [lawnPlanReloadKey, setLawnPlanReloadKey] = useState(0);
+  const lawnDefaultsEnabled = completionImprovements && lawnCompletionDefaults?.enabled === true && lawnCompletionDefaults.serviceId === service.id;
+  const currentLawnPlanReady = lawnPlanReady === service.id;
+  const lawnPlanArea = lawnDefaultsEnabled ? lawnAreaOverride : undefined;
+  const lawnVisitArea = lawnAreaOverride !== undefined ? lawnAreaOverride : lawnCompletionDefaults?.lawnSqft ?? "";
   useEffect(() => {
     let live = true;
     setLawnSqftForPrefill(null);
@@ -10556,6 +11004,15 @@ export function CompletionPanel({
     return () => { live = false; };
   }, [service.customerId, service.customer_id, service.serviceType, service.service_type]);
   const [selectedProducts, setSelectedProducts] = useState([]);
+  // The plan request's failure path runs outside the render that scheduled
+  // it; it withdraws suggestions from the rows as they stand at failure time.
+  const selectedProductsRef = useRef([]);
+  selectedProductsRef.current = selectedProducts;
+  // The visit whose plan this session has resolved at least once. Until then
+  // a governed draft's saved application mode is a suggestion no plan of this
+  // session stands behind, whether the draft is restored after the initial
+  // failure or before a still-pending request fails (pre-push audit P1).
+  const lawnPlanVerifiedRef = useRef(null);
   // Treatment Zone mapper (owner 2026-07-22): the same tracer the tech portal
   // has — admin closeouts can trace where we sprayed without switching apps.
   const [zoneMapOpen, setZoneMapOpen] = useState(false);
@@ -10620,8 +11077,11 @@ export function CompletionPanel({
   // identically.
   const [offerInspectionCredit, setOfferInspectionCredit] = useState(true);
   const [requestReview, setRequestReview] = useState(true);
-  const [reviewTiming, setReviewTiming] = useState("120");
+  const [reviewTiming, setReviewTiming] = useState(REVIEW_TIMING_DEFAULT);
   const [reviewCustomAt, setReviewCustomAt] = useState("");
+  // Server preview of the "Automatic" send time + whether cadence mode owns
+  // the ask (separate text) or the legacy path bundles it.
+  const [reviewSendPreview, setReviewSendPreview] = useState(null);
   const [oneTimeRecapOnly, setOneTimeRecapOnly] = useState(false);
   // Backdated closeout ("backfill") of a past-dated visit: the server records
   // the completion to the visit's scheduled day, sends NO customer messages
@@ -10681,6 +11141,10 @@ export function CompletionPanel({
   const [recapLoading, setRecapLoading] = useState(false);
   const [recapError, setRecapError] = useState("");
   const [submitting, setSubmitting] = useState(false);
+  // Synchronous re-entry guard for the pre-submit "Automatic" preview
+  // re-check: it awaits a request before setSubmitting(true) engages, so a
+  // double-click could otherwise start two completion POSTs (codex #4140 r7).
+  const previewRecheckRef = useRef(false);
   const [generating, setGenerating] = useState(false);
   // F2 (ratified Q13): windowed comms context on the AI report draft — default CHECKED.
   const [aiReportIncludeComms, setAiReportIncludeComms] = useState(true);
@@ -11382,6 +11846,8 @@ export function CompletionPanel({
   const [lawnAssessmentRevision, setLawnAssessmentRevision] = useState(0);
   const [savedDraft, setSavedDraft] = useState(null);
   const [showDraftPrompt, setShowDraftPrompt] = useState(false);
+  const [draftLoading, setDraftLoading] = useState(true);
+  const [draftStorageNotice, setDraftStorageNotice] = useState("");
   // Tree & Shrub AI photo review. Runs silently in the background (owner
   // 2026-07-23: no closeout card, no tech review step) — treeShrubReview holds
   // the signed preview { scores, observations, findings } so the submit body
@@ -11424,11 +11890,14 @@ export function CompletionPanel({
   // awaits this before deciding replay-vs-rebuild so a tap that beats the
   // read still replays.
   // True once a restored body is pinned: the reopened panel's FORM is empty
-  // (drafts never persist photos, the Tree/Shrub and product gates read the
+  // (a draft may not have been restored, and product gates read the
   // live form), so the submit CTA and handleSubmit's pre-submit validation
   // are bypassed for the replay — the stored body already passed them when
   // it committed (Codex r1 P1).
   const [committedReplayReady, setCommittedReplayReady] = useState(false);
+  const [photoRetrying, setPhotoRetrying] = useState(false);
+  const [photoRetryError, setPhotoRetryError] = useState("");
+  const photoRetryLockRef = useRef(false);
   // Synchronous lock for the restore await in handleSubmit: `submitting` is
   // state and may not have re-rendered between two quick taps, so without
   // it both could pass the guard, await the same restore, and issue
@@ -11439,6 +11908,20 @@ export function CompletionPanel({
   // a success path but whose delete never ran (page killed in between).
   useEffect(() => {
     pruneCompletionResumeBodies(completionResumeOwed).catch(() => {});
+    // Abandoned drafts (no reopen within the retention window) go with their
+    // metadata; the row's scope guards another operator's live metadata for
+    // the same visit.
+    pruneCompletionDrafts().then((pruned) => {
+      pruned.forEach(({ serviceId, scope }) => {
+        try {
+          const metadata = JSON.parse(localStorage.getItem(completionDraftKey(serviceId)) || "null");
+          if (metadata && (metadata.owner || "") === (scope || "")) {
+            localStorage.removeItem(completionDraftKey(serviceId));
+            localStorage.removeItem(completionDraftTombstoneKey(serviceId));
+          }
+        } catch { /* unavailable */ }
+      });
+    }).catch(() => {});
   }, []);
   const [resumeBodyLoad] = useState(() => (
     sideEffectsCommittedRef.current
@@ -11458,9 +11941,12 @@ export function CompletionPanel({
   // meanwhile (codex P2 #3187 r7).
   const sideEffectsPollTimerRef = useRef(null);
   const completionPanelClosedRef = useRef(false);
-  useEffect(() => () => {
-    completionPanelClosedRef.current = true;
-    window.clearTimeout(sideEffectsPollTimerRef.current);
+  useEffect(() => {
+    completionPanelClosedRef.current = false;
+    return () => {
+      completionPanelClosedRef.current = true;
+      window.clearTimeout(sideEffectsPollTimerRef.current);
+    };
   }, []);
   const draftReadyRef = useRef(false);
 
@@ -11760,6 +12246,10 @@ export function CompletionPanel({
       ...buildSelectedProduct(product),
       totalAmount,
       totalAmountManual: true,
+      // Marked manual so a rate or area edit cannot recompute the house
+      // default — but it is a seed, not the tech's own number, so stating a
+      // carrier volume replaces it (Codex r5 P1).
+      totalAmountSeeded: true,
     }));
     if (!rows.length) return;
     pestDefaultMixSnapshotRef.current = JSON.stringify(rows);
@@ -11768,8 +12258,52 @@ export function CompletionPanel({
   const lawnDefaultMixSeededRef = useRef(false);
   const lawnDefaultMixSnapshotRef = useRef(null);
   useEffect(() => {
-    if (!completionImprovements || !isLawn || !inventoryAdvisoryTier || treatmentPlanLoading || treatmentPlanError || lawnAssessmentReady === false) return;
+    // Visit-owned lawn state resets on a visit change whenever the previous
+    // visit carried any: loaded defaults for another visit, or a governed
+    // draft restored while its plan request had failed (no defaults loaded to
+    // compare against) — otherwise the first visit's area and rows drive the
+    // next visit's build request and quantities (pre-push audit P1).
+    // Treated zones are visit-owned too: a zone subset left from the previous
+    // visit would seed the next visit's defaults and clear its saved lawn area
+    // through the partial-zone effect (Codex r10 P1).
+    const zonesChanged = lawnAreasInitializedRef.current
+      && (areasServiced.length !== lawnDefaultAreas.length || lawnDefaultAreas.some((area) => !areasServiced.includes(area)));
+    const previousVisitState = (lawnCompletionDefaults?.enabled && lawnCompletionDefaults.serviceId !== service.id)
+      || lawnAreaOverride !== undefined || lawnRemovedDefaultIds.length > 0
+      || selectedProducts.some((product) => product.lawnPlanDefaults) || zonesChanged;
+    if (!previousVisitState) return;
+    setSelectedProducts([]);
+    setLawnAreaOverride(undefined);
+    setLawnRemovedDefaultIds([]);
+    lawnRemovedDefaultNamesRef.current = {};
+    setLawnDefaultsSeedSuppressed(false);
+    setAreasServiced([...lawnDefaultAreas]);
+    lawnAreasInitializedRef.current = true;
+    lawnDefaultMixSeededRef.current = false;
+    lawnDefaultMixSnapshotRef.current = null;
+  }, [service.id]);
+  useEffect(() => {
+    if (!completionFlagReady || !completionImprovements || !isLawn || treatmentPlanLoading || treatmentPlanError || lawnAssessmentReady === false) return;
     if (!products?.length) return;
+    if (lawnDefaultsEnabled) {
+      // Governed defaults must not seed a form whose draft lookup has not
+      // settled: a restored draft carries its own rows and suppressions.
+      if (!draftReadyRef.current || draftLoading || showDraftPrompt) return;
+      const defaults = lawnPlanSelections(lawnCompletionDefaults.items, buildSelectedProduct, products, { areas: areasServiced, governed: true });
+      const activeDefaults = lawnDefaultsSeedSuppressed
+        ? defaults.filter(row => selectedProducts.some(product => String(product.productId) === String(row.productId))) : defaults;
+      const rows = reconcileLawnPlanSelections(selectedProducts, activeDefaults, lawnRemovedDefaultIds);
+      lawnDefaultMixSeededRef.current = true;
+      lawnDefaultMixSnapshotRef.current = JSON.stringify(defaults);
+      if (JSON.stringify(rows) !== JSON.stringify(selectedProducts)) {
+        // A plan refresh that changes the product payload is an edit like any
+        // other: an untouched generated report described the old products.
+        invalidateGeneratedReportOnTypedEdit();
+        setSelectedProducts(rows);
+      }
+      return;
+    }
+    if (!currentLawnPlanReady || !inventoryAdvisoryTier) return;
     const currentSnapshot = JSON.stringify(selectedProducts);
     // Refresh only an untouched seed when today’s assessment changes the plan.
     if (lawnDefaultMixSeededRef.current && currentSnapshot !== lawnDefaultMixSnapshotRef.current) return;
@@ -11780,7 +12314,29 @@ export function CompletionPanel({
     lawnDefaultMixSeededRef.current = true;
     lawnDefaultMixSnapshotRef.current = JSON.stringify(rows);
     setSelectedProducts(rows);
-  }, [completionImprovements, isLawn, inventoryAdvisoryTier, treatmentPlanMixItems, treatmentPlanLoading, treatmentPlanError, lawnAssessmentReady, products, selectedProducts]);
+  }, [completionFlagReady, completionImprovements, isLawn, inventoryAdvisoryTier, treatmentPlanMixItems, treatmentPlanLoading, treatmentPlanError, lawnAssessmentReady, products, selectedProducts, lawnDefaultsEnabled, lawnCompletionDefaults, currentLawnPlanReady, draftLoading, showDraftPrompt, areasServiced, lawnRemovedDefaultIds, lawnDefaultsSeedSuppressed]);
+  useEffect(() => {
+    if (lawnDefaultsEnabled && lawnAreaOverride === undefined && !LAWN_DEFAULT_AREAS.every(area => areasServiced.includes(area))) {
+      // A subset of zones has no known square footage. Do not silently count
+      // the entire saved lawn as treated after a zone is removed.
+      setLawnAreaOverride("");
+    }
+  }, [lawnDefaultsEnabled, lawnAreaOverride, areasServiced]);
+  useEffect(() => {
+    if (!lawnDefaultsEnabled) return;
+    const follows = product => !product.lawnPlanDefaults && product.lawnAreaDefault && String(product.areaValue) !== String(lawnVisitArea);
+    if (!selectedProducts.some(follows)) return;
+    // The visit area can move without a keystroke (a plan refresh changes the
+    // saved area); the quantities it derives are part of the product payload.
+    invalidateGeneratedReportOnTypedEdit();
+    setSelectedProducts(current => current.map(product => follows(product)
+      ? { ...product, areaValue: lawnVisitArea,
+        // A per-gallon row's quantity comes from the tank, not the visit
+        // area: the area still follows, the dose stays (audit P1).
+        totalAmount: product.totalAmountManual || isPerGallonUnit(product.rateUnit)
+          ? product.totalAmount
+          : lawnDerivedTotal(product, lawnVisitArea) } : product));
+  }, [lawnDefaultsEnabled, lawnVisitArea, selectedProducts]);
   useEffect(() => {
     if (!completionImprovements || !isLawn) return;
     const area = areasServiced.join(", ");
@@ -11842,9 +12398,11 @@ export function CompletionPanel({
     service.prepaidAmount != null &&
     Number(service.prepaidAmount) > 0 &&
     Number(service.prepaidAmount) >= invoiceAmount;
+  // paid and prepaid are both settled to the server (invoiceBlocksReview,
+  // report-only completion) — codex #4140 r15 P2.
   const invoiceAlreadyPaid =
-    service.checkoutInvoiceStatus === "paid" ||
-    service.invoiceStatus === "paid";
+    ["paid", "prepaid"].includes(service.checkoutInvoiceStatus) ||
+    ["paid", "prepaid"].includes(service.invoiceStatus);
   const reportOnlyCompletion =
     prepaidCovered ||
     invoiceAlreadyPaid ||
@@ -11903,10 +12461,34 @@ export function CompletionPanel({
   });
   const effectiveSendSms =
     !isIncompleteVisit && !backfillQuietCloseout && (oneTimeRecapOnly || sendSms);
+  // The review link rides inside the completion text ONLY on the legacy
+  // (non-cadence) path with an immediate ask — the server's shouldBundleReview.
+  // In cadence mode the ask is always its own message, so the preview must
+  // not claim "[review link inserted]" (it never was — the Aug 30 2026 ask).
+  // `bundlesImmediateAsk` is the server's own shouldBundleReview verdict as far
+  // as it can be known before the completion exists (legacy path AND no
+  // service-report-v1 delivery) — not a client re-derivation of one of its
+  // predicates (codex #4140 r4 P2). Unknown reads as "not bundled".
+  // The server's invoiceBlocksReview: an UNPAID invoice after completion —
+  // one minted now (willInvoice) or one already sent from dispatch and still
+  // open (completionInvoiceAlreadySent, codex #4140 r12 P2). Prepaid and
+  // paid invoices never hold the ask.
+  const reviewAwaitsPayment = willInvoice || (!!service.completionInvoiceAlreadySent && !invoiceAlreadyPaid);
+  // An unpaid invoice holds the customer-requested ask server-side
+  // (invoiceBlocksReview gates effectiveRequestReview, so shouldBundleReview
+  // is false) — the preview must not promise the link the timing hint says
+  // waits for payment (codex #4140 r22 P2). The one-time recap path is exempt
+  // server-side (recapReviewOnly) and stays exempt here.
   const reviewSendsWithCompletionSms =
     willReview &&
     effectiveSendSms &&
-    (oneTimeRecapOnly || reviewTiming === "now");
+    (oneTimeRecapOnly ||
+      (reviewTiming === "customer_requested" &&
+        reviewSendPreview?.bundlesImmediateAsk === true &&
+        !reviewAwaitsPayment));
+  const reviewTimingHintText = willReview && !oneTimeRecapOnly
+    ? reviewTimingHint({ reviewTiming, reviewCustomAt, preview: reviewSendPreview, bundled: reviewSendsWithCompletionSms, awaitsPayment: reviewAwaitsPayment })
+    : "";
   const smsPreview = [
     smsRecapPreview(customerRecap),
     !isIncompleteVisit && willSendPayLink ? "[pay link inserted]" : "",
@@ -11930,13 +12512,49 @@ export function CompletionPanel({
   };
   const reviewDelayMinutes = () => {
     if (!willReview) return null;
-    if (oneTimeRecapOnly || reviewTiming === "now") return 0;
+    if (oneTimeRecapOnly || reviewTiming === "customer_requested") return 0;
     if (reviewTiming === "custom") {
       const target = new Date(reviewCustomAt);
       return reviewCustomAt && !Number.isNaN(target.getTime()) ? 0 : null;
     }
-    return Number(reviewTiming) || 120;
+    if (reviewTiming === "tomorrow_8") return 0;
+    // Automatic: no explicit delay — the server picks the smart send window.
+    return undefined;
   };
+  const reviewSendPreviewRef = useRef(null);
+  reviewSendPreviewRef.current = reviewSendPreview;
+  // One failed-preview notice per outage at submit (r13 P2 / r18 P1).
+  const previewFailureNoticedRef = useRef(false);
+  const fetchReviewSendPreview = useCallback(() => {
+    const qs = new URLSearchParams({ serviceType: service?.serviceType || "" });
+    return fetch(`${API_BASE}/admin/reviews/send-time-preview?${qs}`, {
+      headers: { Authorization: `Bearer ${localStorage.getItem("waves_admin_token")}` },
+    })
+      .then((r) => (r.ok ? r.json() : null))
+      .catch(() => null);
+  }, [service?.serviceType]);
+  useEffect(() => {
+    if (!willReview || oneTimeRecapOnly) {
+      // Polling stops here; a preview cached from before must not survive
+      // as "known" — the gates can flip while the controls are hidden, and
+      // the submit guard would trust it (codex #4140 r24 P1). Unknown reads
+      // as fail-closed; re-enabling the controls re-fetches.
+      setReviewSendPreview(null);
+      return undefined;
+    }
+    let cancelled = false;
+    const load = () => fetchReviewSendPreview().then((data) => {
+      if (cancelled) return;
+      setReviewSendPreview(data);
+      if (data) previewFailureNoticedRef.current = false;
+    });
+    load();
+    // The smart window is bucketed by time of day, so a panel left open
+    // across a boundary (2:59 → 3:00 PM) must not keep showing the old
+    // answer (codex #4140 r1).
+    const timer = setInterval(load, 60 * 1000);
+    return () => { cancelled = true; clearInterval(timer); };
+  }, [service?.id, fetchReviewSendPreview, willReview, oneTimeRecapOnly]);
   const recapStatusText = recapLoading
     ? "Drafting customer recap..."
     : recapError
@@ -11996,7 +12614,8 @@ export function CompletionPanel({
     (product) =>
       !product.totalAmount ||
       Number(product.totalAmount) <= 0 ||
-      !product.amountUnit,
+      !product.amountUnit ||
+      (product.lawnPlanDefaults && !productApplicationMethod(product, serviceTypeForArea)),
   );
   // The protocol is now a read-only reference (mixing ratios), so the checklist
   // and default-product-disposition no longer gate completion. Real safeguards
@@ -12016,12 +12635,23 @@ export function CompletionPanel({
         (block) => block?.code === "inventory_product_inactive",
       )
     : treatmentPlanInventoryBlocks;
+  // Every applied product needs its actual amount, unit and method on a
+  // WaveGuard closeout AND on any governed-defaults closeout: the server
+  // enables completion defaults for a tierless visit with an explicit
+  // assignment too, and a governed row left without an amount would persist
+  // with no actual and no inventory deduction (Codex r8 P1). A governed row
+  // restored while the initial plan request failed counts as well — the
+  // defaults never loaded, but the row's withdrawn suggestion still needs an
+  // actual (pre-push audit P1). The empty-list and inventory gates stay
+  // tier-scoped.
+  const productActualsRequired = (calibrationRequired || lawnDefaultsEnabled
+    || selectedProducts.some((product) => product.lawnPlanDefaults)) && !isIncompleteVisit;
   const protocolActualsCompletionBlocked =
-    calibrationRequired &&
-    !isIncompleteVisit &&
-    (selectedProducts.length === 0 ||
-      selectedProductsMissingActualAmount.length > 0 ||
-      treatmentPlanGatingInventoryBlocks.length > 0);
+    (calibrationRequired &&
+      !isIncompleteVisit &&
+      (selectedProducts.length === 0 ||
+        treatmentPlanGatingInventoryBlocks.length > 0)) ||
+    (productActualsRequired && selectedProductsMissingActualAmount.length > 0);
   const conditionalProtocolSelectedProducts = treatmentPlanProductIds.length
     ? selectedProducts.filter((p) => {
         const id = String(p.productId);
@@ -12197,6 +12827,12 @@ export function CompletionPanel({
     (calibrationRequired || treeShrubCloseoutRequired) && !isIncompleteVisit;
   const baseCompletionCtaLabel = submitting
     ? "Completing..."
+    : draftLoading
+      // The form renders before the IndexedDB draft lookup settles; a
+      // completed visit's photo-recovery draft (or a Restore prompt) may
+      // still be on its way. No submission until discovery settles
+      // (pre-push Codex P1 on 705d7acad).
+      ? "Loading saved draft…"
     : committedReplayReady
       ? "Resume Closeout"
       : completionPricingPending
@@ -12321,6 +12957,19 @@ export function CompletionPanel({
     setProtocolActions([]);
     setProtocolActionMeta(null);
     setProtocolActionError("");
+    if (completionImprovements && isLawn) {
+      if (!currentLawnPlanReady || lawnCompletionDefaults?.serviceId !== service.id) {
+        setProtocolActionsLoading(false);
+        return () => { cancelled = true; };
+      }
+      if (lawnDefaultsEnabled) {
+        setProtocolActions(lawnPlanActionOptions(lawnCompletionDefaults.options));
+        setProtocolActionMeta({ source: "appointment_plan" });
+        setProtocolActionsLoaded(true);
+        setProtocolActionsLoading(false);
+        return () => { cancelled = true; };
+      }
+    }
     // Typed jobs hide the protocol-actions section entirely — skip the fetch.
     if (!service.serviceType || isTypedFindings || specialtyCompletion)
       return () => {
@@ -12376,6 +13025,7 @@ export function CompletionPanel({
       cancelled = true;
     };
   }, [
+    service.id,
     service.serviceType,
     service.lawnType,
     service.scheduledDate,
@@ -12384,9 +13034,17 @@ export function CompletionPanel({
     isLawn,
     isTypedFindings,
     specialtyCompletion,
+    completionImprovements,
+    lawnDefaultsEnabled,
+    currentLawnPlanReady,
+    treatmentPlanMixItems,
+    lawnCompletionDefaults,
   ]);
 
   useEffect(() => {
+    // The flag decides whether this request carries completion defaults; a
+    // request issued before the flag is known would be answered without them.
+    if (!completionFlagReady) return;
     if (!calibrationRequired && !(completionImprovements && isLawn)) return;
     let cancelled = false;
     setTreatmentPlanError("");
@@ -12394,9 +13052,17 @@ export function CompletionPanel({
     // No equipment/calibration selection in the closeout any more (owner
     // directive 2026-07-29) — the plan endpoint auto-selects the assigned
     // rig server-side when one exists.
-    adminFetch(`/admin/treatment-plans/${service.id}`)
+    const includeCompletionDefaults = completionImprovements && isLawn;
+    const areaEdited = lawnPlanArea !== undefined;
+    const endpoint = `/admin/treatment-plans/${service.id}${areaEdited ? "/build" : includeCompletionDefaults ? "?completionDefaults=1" : ""}`;
+    const request = areaEdited ? {
+      method: "POST", body: JSON.stringify({ completionDefaults: true, lawnSqft: lawnPlanArea === "" ? null : Number(lawnPlanArea) }),
+    } : {};
+    const timer = setTimeout(() => adminFetch(endpoint, request)
       .then((data) => {
         if (cancelled) return;
+        lawnPlanVerifiedRef.current = service.id;
+        setLawnCompletionDefaults({ ...(data?.plan?.completionDefaults || { enabled: false }), serviceId: service.id });
         const blocks =
           data?.plan?.propertyGate?.blocks ||
           data?.plan?.protocol?.blocked ||
@@ -12455,60 +13121,149 @@ export function CompletionPanel({
         ]);
       })
       .catch((err) => {
-        if (!cancelled)
+        if (!cancelled) {
           setTreatmentPlanError(err.message || "Could not load WaveGuard plan");
+          // Withdrawing plan-derived rates, areas and methods changes the
+          // product payload exactly as a successful refresh does: an
+          // untouched generated report described the old quantities and
+          // must not ride along beside the changed rows (Codex r12 P1).
+          const withdrawn = withdrawLawnPlanSuggestions(selectedProductsRef.current, { planUnverified: lawnPlanVerifiedRef.current !== service.id });
+          if (JSON.stringify(withdrawn) !== JSON.stringify(selectedProductsRef.current)) {
+            invalidateGeneratedReportOnTypedEdit();
+            setSelectedProducts(withdrawn);
+          }
+        }
       })
       .finally(() => {
-        if (!cancelled) setTreatmentPlanLoading(false);
-      });
+        if (!cancelled) { setTreatmentPlanLoading(false); setLawnPlanReady(service.id); }
+      }), areaEdited ? 300 : 0);
     return () => {
       cancelled = true;
+      clearTimeout(timer);
     };
-  }, [calibrationRequired, completionImprovements, isLawn, service.id, lawnAssessmentRevision]);
+  }, [completionFlagReady, calibrationRequired, completionImprovements, isLawn, service.id, lawnAssessmentRevision, lawnPlanArea, lawnPlanReloadKey]);
 
   useEffect(() => {
     setTreeShrubCloseout(defaultTreeShrubCloseout(service));
   }, [service.id]);
 
-  // Save the newest edit when Details, checkout, or Close unmounts the panel
-  // before the autosave delay. Discovery below resets the ref for a new visit.
-  useEffect(() => () => {
-    const draft = draftSnapshotRef.current;
-    if (draft?.serviceId === service.id) {
-      localStorage.setItem(completionDraftKey(service.id), JSON.stringify(draft));
-    }
+  function saveDraftSnapshot(draft) {
+    const { servicePhotos: _photos, ...metadata } = draft;
+    try {
+      localStorage.setItem(completionDraftKey(draft.serviceId), JSON.stringify(metadata));
+    } catch { /* IndexedDB can still preserve the full draft. */ }
+    return putCompletionDraft(draft.serviceId, draft, completionDraftScope()).then((saved) => {
+      if (draftSnapshotRef.current === draft && !completionPanelClosedRef.current) {
+        setDraftStorageNotice(saved ? "" : "Draft storage is unavailable. Keep this panel open to retain your photos and latest edits.");
+      }
+    });
+  }
+
+  function clearSavedDraft() {
+    const discardedId = draftSnapshotRef.current?.draftId || savedDraft?.draftId || "";
+    draftSnapshotRef.current = null;
+    try {
+      localStorage.setItem(completionDraftTombstoneKey(service.id), discardedId);
+      localStorage.removeItem(completionDraftKey(service.id));
+    } catch { /* unavailable */ }
+    void deleteCompletionDraft(service.id, completionDraftScope()).then((deleted) => {
+      if (!deleted) return;
+      try { localStorage.removeItem(completionDraftTombstoneKey(service.id)); } catch { /* unavailable */ }
+    });
+  }
+
+  // Also flush on pagehide: browser reload/navigation does not unmount React.
+  useEffect(() => {
+    const flush = () => {
+      const draft = draftSnapshotRef.current;
+      if (draft?.serviceId === service.id) void saveDraftSnapshot(draft);
+    };
+    window.addEventListener("pagehide", flush);
+    return () => {
+      window.removeEventListener("pagehide", flush);
+      flush();
+    };
   }, [service.id]);
 
   useEffect(() => {
+    let cancelled = false;
     draftSnapshotRef.current = null;
     draftReadyRef.current = false;
+    setDraftLoading(true);
     setSavedDraft(null);
     setShowDraftPrompt(false);
+    let metadata = null;
     try {
       const raw = localStorage.getItem(completionDraftKey(service.id));
-      const localDraft = raw ? JSON.parse(raw) : null;
+      if (raw) metadata = JSON.parse(raw);
+    } catch { /* Fall back to the full IndexedDB draft. */ }
+    let tombstone = null;
+    try { tombstone = localStorage.getItem(completionDraftTombstoneKey(service.id)); } catch { /* unavailable */ }
+    const scope = completionDraftScope();
+    // Metadata another operator left on this shared browser is theirs, not
+    // a draft for this session.
+    if (metadata && (metadata.owner || "") !== scope) metadata = null;
+    void getCompletionDraft(service.id, scope).then((loaded) => {
+      if (cancelled) return;
+      let stored = loaded;
+      // A residual row whose delete never committed (page killed mid-discard)
+      // is not a draft: drop it and finish the delete now.
+      if (stored && tombstone !== null && (!tombstone || tombstone === stored.draftId)) {
+        stored = null;
+        void deleteCompletionDraft(service.id, scope).then((deleted) => {
+          if (!deleted) return;
+          try { localStorage.removeItem(completionDraftTombstoneKey(service.id)); } catch { /* unavailable */ }
+        });
+      } else if (tombstone !== null) {
+        try { localStorage.removeItem(completionDraftTombstoneKey(service.id)); } catch { /* unavailable */ }
+      }
+      // Metadata can survive a killed page before its IDB write commits.
+      // Reuse persisted photos only when the photo revision still matches.
+      const draft = metadata?.serviceId === service.id
+        && (!stored || String(metadata.savedAt || "") >= String(stored.savedAt || ""))
+        ? { ...metadata, servicePhotos: metadata.draftId && metadata.draftId === stored?.draftId
+          ? stored.servicePhotos : undefined }
+        : stored || metadata;
       const prepared = preparedDraft?.serviceId === service.id ? preparedDraft : null;
-      const localIsNewer = localDraft?.serviceId === service.id
-        && (!prepared || (Date.parse(localDraft.savedAt) || 0) > (Date.parse(prepared.savedAt) || 0));
-      const draft = localIsNewer
-        ? { ...localDraft, ...(prepared?.servicePhotos ? { servicePhotos: prepared.servicePhotos } : {}) }
-        : prepared;
-      if (draft) {
-        if (draft && draft.serviceId === service.id) {
-          setSavedDraft(draft);
+      const deviceIsNewer = draft?.serviceId === service.id
+        && (!prepared || (Date.parse(draft.savedAt) || 0) > (Date.parse(prepared.savedAt) || 0));
+      const selectedDraft = deviceIsNewer
+        ? {
+            ...draft,
+            ...(!Array.isArray(draft.servicePhotos) && Array.isArray(prepared?.servicePhotos)
+              ? { servicePhotos: prepared.servicePhotos }
+              : {}),
+          }
+        : prepared || draft;
+      if (selectedDraft?.serviceId === service.id) {
+        if (selectedDraft.pendingPhotoCompletion && (selectedDraft.servicePhotos?.length || selectedDraft.reconcileOwed)) {
+          // Closeout already succeeded. Reopen only the outstanding photo
+          // uploads (or the report reconciliation the uploads still owe);
+          // never submit completion or collect payment again.
+          draftSnapshotRef.current = selectedDraft;
+          setCompletionResult(selectedDraft.pendingPhotoCompletion);
+          setSuccess(true);
+        } else {
+          setSavedDraft(selectedDraft);
           setShowDraftPrompt(true);
         }
+        if (selectedDraft.generationPhotoCount > 0 && !selectedDraft.servicePhotos?.length && !selectedDraft.reconcileOwed) {
+          setDraftStorageNotice("The saved photos could not be restored. Reattach them before completing this visit.");
+        }
       }
-    } catch {
-      localStorage.removeItem(completionDraftKey(service.id));
-    } finally {
       draftReadyRef.current = true;
-    }
+      setDraftLoading(false);
+    });
+    return () => { cancelled = true; };
   }, [service.id]);
 
   useEffect(() => {
-    if (!draftReadyRef.current || showDraftPrompt || success) return;
+    if (!draftReadyRef.current || draftLoading || showDraftPrompt || success) return;
+    // Completion has returned, but its durable photo recovery may still be
+    // writing. Late form effects must not turn it back into an ordinary draft.
+    if (draftSnapshotRef.current?.pendingPhotoCompletion) return;
     const hasDraftContent =
+      servicePhotos.length ||
       notes.trim() ||
       customerRecap.trim() ||
       // The untouched default pest tank mix is a starting state, not tech
@@ -12519,6 +13274,15 @@ export function CompletionPanel({
         JSON.stringify(selectedProducts) !== pestDefaultMixSnapshotRef.current &&
         JSON.stringify(selectedProducts) !== lawnDefaultMixSnapshotRef.current) ||
       JSON.stringify(areasServiced) !== JSON.stringify(lawnDefaultAreas) ||
+      // Governed state restored under a plan outage (no live defaults) is
+      // still draft content: the next autosave must not drop it (Codex #4113 P2).
+      // The visit area counts on its own — the same condition under which it
+      // is submitted (lawnAreaSubmitted) — so an area-only draft (a plan with
+      // no default rows, nothing removed) restored during an outage is not
+      // read as empty and cleared by the debounced autosave (Codex #4113
+      // batch 12, follow-up). Shared with the V2 page through CompletionPanel.
+      (completionImprovements && isLawn && lawnAreaOverride !== undefined) ||
+      lawnRemovedDefaultIds.length > 0 ||
       customerInteraction ||
       customerConcern.trim() ||
       selectedProtocolActionLabels.length ||
@@ -12532,13 +13296,14 @@ export function CompletionPanel({
       parkedNext.trim() ||
       nextVisitNote.trim() ||
       oneTimeRecapOnly ||
-      reviewTiming !== "120" ||
+      reviewTiming !== REVIEW_TIMING_DEFAULT ||
       reviewCustomAt.trim() ||
       JSON.stringify(treeShrubCloseout) !== JSON.stringify(defaultTreeShrubCloseout(service)) ||
       Object.keys(findingsValues).length ||
       typedActivityScore != null ||
       typedNextStepChips.length ||
       typedRecommendations.trim() ||
+      typedPhotoSummary.trim() ||
       Object.values(companionState).some(
         (entry) =>
           Object.keys(entry?.values || {}).length ||
@@ -12566,18 +13331,36 @@ export function CompletionPanel({
       // during draft discovery, state updates for the restore prompt have not
       // rendered yet and the form still appears empty here.
       if (draftSnapshotRef.current) {
-        localStorage.removeItem(completionDraftKey(service.id));
+        clearSavedDraft();
       }
       draftSnapshotRef.current = null;
       return;
     }
 
+    const photosChanged = draftSnapshotRef.current?.servicePhotos !== servicePhotos;
+    // A restored draft re-persists at once (same revision) so its savedAt
+    // moves forward with this session's edits; only a real photo change
+    // mints a new revision.
+    const persistNow = photosChanged || draftSnapshotRef.current?.restoredFromStorage === true;
     const draft = {
         serviceId: service.id,
+        owner: completionDraftScope(),
+        // Field-only edits must not invalidate photos already saved to IDB.
+        draftId: photosChanged || !draftSnapshotRef.current.draftId
+          ? crypto.randomUUID() : draftSnapshotRef.current.draftId,
         savedAt: new Date().toISOString(),
+        servicePhotos,
         notes,
         selectedProducts,
         lawnDefaultMixSnapshot: lawnDefaultMixSnapshotRef.current,
+        lawnAreaOverride,
+        // Persisted whenever removed defaults exist, not only while live
+        // defaults are loaded: a draft restored during a plan outage would
+        // otherwise lose its removed defaults on the next autosave, and the
+        // ledger's unlisted-skip audit with them (Codex #4113 P2).
+        lawnRemovedDefaultIds: lawnDefaultsEnabled || lawnRemovedDefaultIds.length > 0 ? lawnRemovedDefaultIds : undefined,
+        lawnRemovedDefaultNames: lawnDefaultsEnabled || lawnRemovedDefaultIds.length > 0 ? lawnRemovedDefaultNamesRef.current : undefined,
+        lawnDefaultsSeedSuppressed,
         sendSms,
         includePayLink,
         requestReview,
@@ -12654,9 +13437,8 @@ export function CompletionPanel({
         // The installed-report identity restores too, so an UNTOUCHED
         // restored draft stays invalidatable on later typed edits (codex r24).
         generatedReportText: generatedReportTextRef.current,
-        // Photos themselves are not persisted — record how many the
-        // installed report was generated against so a restore that can't
-        // bring them back invalidates the prose they grounded (codex r78).
+        // Metadata retains the count so a failed photo write invalidates
+        // prose grounded in photos that could not be restored.
         generationPhotoCount: servicePhotos.length,
         // The lawn-assessment identity the installed report rode (same
         // untouched-draft reasoning as the photo count) — a restore that
@@ -12681,24 +13463,30 @@ export function CompletionPanel({
         typedActivityTouched,
         typedNextStepChips,
         typedRecommendations,
+        // The technician-approved AI photo summary rides with the photo set
+        // it describes — without it a reload or billing detour restores the
+        // photos but submits no `typedPhotoSummary`, silently dropping the
+        // customer narrative the tech reviewed (Codex r-375c002 P1).
+        typedPhotoSummary,
         // Companion section state rides the same draft (and the same
         // billing-409 checkout detour survival).
         companionState,
       };
     // The departure cleanup reads this snapshot before cancelling autosave.
     draftSnapshotRef.current = draft;
+    // Start photo persistence immediately, including a photo-only draft.
+    if (persistNow) void saveDraftSnapshot(draft);
     const timer = setTimeout(() => {
       if (draftSnapshotRef.current !== draft) return;
-      localStorage.setItem(
-        completionDraftKey(service.id),
-        JSON.stringify(draft),
-      );
+      void saveDraftSnapshot(draft);
     }, 700);
     return () => clearTimeout(timer);
   }, [
     service.id,
+    draftLoading,
     showDraftPrompt,
     success,
+    servicePhotos,
     notes,
     selectedProducts,
     sendSms,
@@ -12724,6 +13512,16 @@ export function CompletionPanel({
     customerRecap,
     recapSource,
     areasServiced,
+    lawnDefaultsEnabled,
+    // The area-only draft condition above is flag-derived: with a cold flag
+    // cache completionImprovements starts false and no other listed
+    // dependency changes when it resolves, so a draft the autosave deleted
+    // while cold was never re-minted once the flag came true under a plan
+    // outage (Codex #4365 r2 P2). Re-evaluate on the flag itself.
+    completionImprovements,
+    lawnAreaOverride,
+    lawnRemovedDefaultIds,
+    lawnDefaultsSeedSuppressed,
     stationNew,
     stationMoves,
     stationStatuses,
@@ -12752,6 +13550,7 @@ export function CompletionPanel({
     typedActivityTouched,
     typedNextStepChips,
     typedRecommendations,
+    typedPhotoSummary,
     companionState,
     service.city,
     service.address,
@@ -12761,14 +13560,39 @@ export function CompletionPanel({
 
   function restoreDraft() {
     if (!savedDraft) return;
-    const restoredPhotos = onPrepared && Array.isArray(savedDraft.servicePhotos)
-      ? savedDraft.servicePhotos : servicePhotos;
-    if (onPrepared) setServicePhotos(restoredPhotos);
+    const restoredPhotos = Array.isArray(savedDraft.servicePhotos) ? savedDraft.servicePhotos : [];
+    // Seed the autosave snapshot from the restored draft so the first effect
+    // run compares the SAME photo array and keeps the stored photo revision.
+    // Without this a restore reads as a photo change, mints a new draftId and
+    // overwrites the localStorage metadata before the matching IndexedDB
+    // write commits — a reload in that window rejects the still-valid stored
+    // photos (Codex #4091 P1).
+    draftSnapshotRef.current = { ...savedDraft, servicePhotos: restoredPhotos, restoredFromStorage: true };
+    setServicePhotos(restoredPhotos);
+    // The saved summary describes exactly the restored photo set, so it
+    // comes back verbatim; a draft without one (or without photos) restores
+    // empty and the tech re-analyzes.
+    setTypedPhotoSummary(
+      restoredPhotos.length && typeof savedDraft.typedPhotoSummary === "string"
+        ? savedDraft.typedPhotoSummary
+        : "",
+    );
     lawnAreasInitializedRef.current = true;
     lawnDefaultMixSeededRef.current = true;
     if (savedDraft.lawnDefaultMixSnapshot) lawnDefaultMixSnapshotRef.current = savedDraft.lawnDefaultMixSnapshot;
+    setLawnAreaOverride(savedDraft.lawnAreaOverride);
+    setLawnRemovedDefaultIds(Array.isArray(savedDraft.lawnRemovedDefaultIds) ? [...new Set(savedDraft.lawnRemovedDefaultIds.map(String))] : []);
+    lawnRemovedDefaultNamesRef.current = savedDraft.lawnRemovedDefaultNames && typeof savedDraft.lawnRemovedDefaultNames === 'object' && !Array.isArray(savedDraft.lawnRemovedDefaultNames)
+      ? Object.fromEntries(Object.entries(savedDraft.lawnRemovedDefaultNames).filter(([, name]) => typeof name === 'string' && name.trim()))
+      : {};
+    setLawnDefaultsSeedSuppressed(savedDraft.lawnDefaultsSeedSuppressed === true || !Object.hasOwn(savedDraft, "lawnRemovedDefaultIds"));
     setNotes(savedDraft.notes || "");
-    setSelectedProducts(
+    // A draft restored while the plan request has already failed carries the
+    // suggestions saved under an earlier plan, and the reconcile effect stays
+    // off during a plan error — withdraw them exactly as the failed request
+    // does for rows it can see (Codex r8 P1).
+    const restoreProducts = (rows) => (treatmentPlanError ? withdrawLawnPlanSuggestions(rows, { planUnverified: lawnPlanVerifiedRef.current !== service.id }) : rows);
+    setSelectedProducts(restoreProducts(
       Array.isArray(savedDraft.selectedProducts)
         ? savedDraft.selectedProducts.map((product) => {
             const normalized = normalizeProductArea(product, serviceTypeForArea);
@@ -12786,7 +13610,7 @@ export function CompletionPanel({
             return normalized;
           })
         : [],
-    );
+    ));
     setSendSms(savedDraft.sendSms !== false);
     setIncludePayLink(savedDraft.includePayLink !== false);
     setRequestReview(savedDraft.requestReview !== false);
@@ -12795,7 +13619,7 @@ export function CompletionPanel({
         ? savedDraft.clientPestRating
         : null,
     );
-    setReviewTiming(savedDraft.reviewTiming || "120");
+    setReviewTiming(normalizeReviewTiming(savedDraft.reviewTiming));
     setReviewCustomAt(savedDraft.reviewCustomAt || "");
     // Bed bug hides the recap-only control (typed-era billing parity) — a
     // pre-migration draft must not restore the flag into invisible state
@@ -12997,11 +13821,7 @@ export function CompletionPanel({
     // otherwise adopt the pruned state as original and keep prose that
     // describes facts no longer submitted (codex r64).
     let restorePruned = false;
-    // The draft deliberately does not persist servicePhotos — if the
-    // installed report rode a nonzero photo set the restore couldn't bring
-    // back, the prose is grounded in inputs completion will no longer
-    // submit, so it invalidates like any other pruned generation input
-    // (codex r78).
+    // Legacy drafts or a failed photo transaction may have no photo body.
     if (generatedReportTextRef.current
       && Number.isInteger(savedDraft.generationPhotoCount)
       && savedDraft.generationPhotoCount !== restoredPhotos.length) {
@@ -13162,11 +13982,8 @@ export function CompletionPanel({
   }
 
   function discardDraft() {
-    draftSnapshotRef.current = null;
-    localStorage.removeItem(completionDraftKey(service.id));
-    // Photos live in memory rather than localStorage. A deliberate Discard
-    // must clear them too or old evidence remains attached to the
-    // otherwise-reset completion.
+    clearSavedDraft();
+    setDraftStorageNotice("");
     setServicePhotos([]);
     setSavedDraft(null);
     setShowDraftPrompt(false);
@@ -13809,7 +14626,40 @@ export function CompletionPanel({
     // untouched draft the same way a typed edit does (codex r28).
     invalidateGeneratedReportOnTypedEdit();
     lawnDefaultMixSeededRef.current = true;
-    setSelectedProducts((prev) => [...prev, buildSelectedProduct(product)]);
+    // An "Additional work" option carries { id, name, applicationMethod }
+    // (lawnPlanActionOptions) and an optional protocol row is not among the
+    // defaults, so the row is built from the catalog product — a bare id/name
+    // read Hydretain's fl_oz as oz and broke the inventory conversion (Codex
+    // r6 P1) — under the protocol row's application mode: the catalog
+    // category alone reads a broadcast herbicide (SpeedZone) as spot work, and
+    // method, area requirement and rate prefill all follow the mode (r7 P1).
+    const catalogProduct = lawnDefaultsEnabled
+      ? products.find((row) => String(row.id) === String(product.id)) || product
+      : product;
+    let row = buildSelectedProduct(lawnDefaultsEnabled && product.applicationMethod
+      ? { ...catalogProduct, application_method: product.applicationMethod }
+      : catalogProduct);
+    if (lawnDefaultsEnabled) {
+      const item = lawnCompletionDefaults.items.find(item => String(item.product.id) === String(product.id));
+      const planned = item && lawnPlanSelections([item], buildSelectedProduct, products, { areas: areasServiced, governed: true })[0];
+      // A product the tech adds by hand is not governed by the plan, so it
+      // keeps the catalog label prefill (rate + rate × visit area / 1,000)
+      // exactly as an ungoverned closeout does — a per-1k rate on file is
+      // the tech's starting point, never a withheld blank (owner 2026-09-11:
+      // techs were retyping every rate and total after the gate went live).
+      // The suggestion stays editable and is still the tech's actual to
+      // confirm; a label with no per-1k rate prefills nothing, as before.
+      row = planned || { ...row, applicationArea: areasServiced.join(", "), applicationAreaDefault: true,
+        lawnAreaDefault: row.areaUnit === "sqft",
+        lawnAmountReason: row.totalAmount !== ""
+          ? "Suggested from the label rate for the visit area. Confirm the actual amount."
+          : "Enter the actual amount for this application." };
+    }
+    // A re-added product is no longer a removed default whatever the plan
+    // state — a draft restored under an outage carries removed ids too, and
+    // the skip payload must never list an applied product (pre-push audit P1).
+    setLawnRemovedDefaultIds(ids => ids.filter(id => String(id) !== String(product.id)));
+    setSelectedProducts((prev) => [...prev, row]);
     setProductSearch("");
   }
   // One construction path for a selected-product row — the picker
@@ -13842,8 +14692,8 @@ export function CompletionPanel({
     // (Treatment Zone Mapper) so the tech doesn't retype what the trace
     // already measured. Editable as before.
     const prefillArea =
-      areaRequirement?.unit === "sqft" && Number(lawnSqftForPrefill) > 0
-        ? Number(lawnSqftForPrefill)
+      areaRequirement?.unit === "sqft" && Number(lawnDefaultsEnabled ? lawnVisitArea : lawnSqftForPrefill) > 0
+        ? Number(lawnDefaultsEnabled ? lawnVisitArea : lawnSqftForPrefill)
         : areaRequirement?.unit === "linear_ft" && Number(tracedLinearFt) > 0
           ? Number(tracedLinearFt)
           : "";
@@ -13853,10 +14703,23 @@ export function CompletionPanel({
     // blank for the tech to enter. A linear-ft prefill derives nothing
     // either: the derived Total is a per-1,000-sqft calculation and has no
     // meaning against perimeter footage.
+    // One tank, one carrier volume (updateProduct shares it across rows):
+    // a per-gallon product added AFTER the tech typed gallons starts from
+    // the same tank rather than waiting to be told again.
+    // Strictly from the tank's OWNER, never the first row that happens to
+    // carry a number: a row that detached onto its own mix would otherwise
+    // seed the new product with a volume it never shared, and the next owner
+    // correction would move it anyway (pre-push audit P1). A blank owner
+    // value seeds blank.
+    const sharedGallons = isPerGallonUnit(prefillRateUnit)
+      ? selectedProducts.find((p) => isPerGallonUnit(p.rateUnit) && p.tankOwner)?.carrierGallons ?? ""
+      : "";
     const prefillTotal =
-      perBasisUnit || areaRequirement?.unit === "linear_ft"
-        ? ""
-        : derivedTotalAmount(prefillRate, prefillArea);
+      isPerGallonUnit(prefillRateUnit)
+        ? derivedTankTotal(prefillRate, sharedGallons)
+        : perBasisUnit || areaRequirement?.unit === "linear_ft"
+          ? ""
+          : derivedTotalAmount(prefillRate, prefillArea);
     return {
         productId: product.id,
         name: product.name,
@@ -13898,6 +14761,10 @@ export function CompletionPanel({
           labelMaxRate ??
           null,
         totalAmount: prefillTotal,
+        // Gallons of finished mix for a per-gallon rate; blank for every
+        // other unit and never submitted (a derivation input, like the
+        // treated area is for a per-1,000 rate).
+        carrierGallons: sharedGallons,
         totalAmountManual: false,
         applicationMethod,
         applicationArea: "",
@@ -13961,20 +14828,56 @@ export function CompletionPanel({
   function removeProduct(productId) {
     if (generating) return;
     lawnDefaultMixSeededRef.current = true;
+    // A governed row restored while the plan request failed is still a plan
+    // default: its removal must survive a successful retry (pre-push audit).
+    const governed = lawnDefaultsEnabled || selectedProducts.some((p) => p.productId === productId && p.lawnPlanDefaults);
+    if (governed) {
+      const removedName = selectedProducts.find((p) => p.productId === productId)?.name || (products || []).find((row) => String(row.id) === String(productId))?.name;
+      if (removedName) lawnRemovedDefaultNamesRef.current = { ...lawnRemovedDefaultNamesRef.current, [String(productId)]: removedName };
+      setLawnRemovedDefaultIds(ids => [...new Set([...ids, String(productId)])]);
+    }
     invalidateGeneratedReportOnTypedEdit();
     setSelectedProducts((prev) =>
-      prev.filter((p) => p.productId !== productId),
+      promoteTankOwner(prev.filter((p) => p.productId !== productId)),
     );
   }
   function updateProduct(productId, field, value) {
     if (generating) return;
     lawnDefaultMixSeededRef.current = true;
     invalidateGeneratedReportOnTypedEdit();
-    setSelectedProducts((prev) =>
-      prev.map((p) => {
-        if (p.productId !== productId) return p;
+    setSelectedProducts((prev) => {
+      // One tank, one carrier volume, one owner — the rules and their reasons
+      // live in lib/product-rate-prefill. Only the owner's corrections travel,
+      // so a row given its own gallons detaches alone.
+      const tankOwner = tankOwnerRow(prev);
+      const propagateTank = tankPropagates(prev, productId, field);
+      // An owner that leaves per-gallon frees the slot the same way removing
+      // it does, and the rows still on its mix keep the tank: without an heir
+      // the next gallons edit — a detached row's included — would propagate
+      // over them (pre-push audit P1). Idempotent while an owner remains.
+      return promoteTankOwner(prev.map((p) => {
+        if (p.productId !== productId) return propagateTank ? followTank(p, value) : p;
         const next = { ...p, [field]: value };
+        // Leaving a per-gallon rate retires the tank with it, on every lane —
+        // a pest perimeter or tree/shrub row never reaches the rate-unit
+        // branch below, so a hidden volume would survive the round-trip back.
+        Object.assign(next, clearTankOnUnitChange(next, p.rateUnit));
+        // And its mirror: a row converted into a per-gallon rate joins the
+        // mix already in the tank rather than asking for it again.
+        Object.assign(next, joinTankOnUnitChange(next, p.rateUnit, tankOwner));
+        // Provenance is per row: a governed row restored while the initial
+        // plan request failed (`lawnDefaultsEnabled` false, no defaults
+        // loaded) still records which fields the tech edited, or a successful
+        // retry would overwrite them in reconciliation (pre-push audit P1).
+        const governed = lawnDefaultsEnabled || !!p.lawnPlanDefaults;
+        if (governed && ["areaValue", "applicationMethod", "applicationArea"].includes(field)) next.lawnAreaDefault = false;
+        if (governed) {
+          next.lawnPlanManualFields = [...new Set([...(p.lawnPlanManualFields || []), field])];
+        }
         if (field === "applicationArea") next.applicationAreaDefault = false;
+        // The row the tech typed into owns its gallons from here on, and the
+        // first such row owns the tank.
+        if (field === "carrierGallons") Object.assign(next, markTankEntry(next, tankOwner));
         if (field === "applicationMethod") {
           const areaRequirement = requiredApplicationArea(
             value,
@@ -13994,6 +14897,9 @@ export function CompletionPanel({
             ) {
               next.areaValue = Number(tracedLinearFt);
             }
+          } else if (governed && value === "spot_treatment") {
+            next.areaUnit = "sqft";
+            next.areaValue = "";
           } else {
             next.areaUnit = "";
             next.areaValue = "";
@@ -14002,10 +14908,12 @@ export function CompletionPanel({
           const areaRequirement = requiredApplicationArea(
             productApplicationMethod(next, serviceTypeForArea),
             serviceTypeForArea,
+            governed,
           );
           if (areaRequirement) next.areaUnit = areaRequirement.unit;
         }
-        // A hand-entered Total is the tech's actual and is never recomputed;
+        // A hand-entered Total (or its unit in lawn defaults) is the tech's
+        // actual and is never recomputed;
         // otherwise rate/area edits keep the derived Total (rate × sq ft /
         // 1,000) in sync on area-based applications — including back to blank
         // when the rate/area is cleared or the method stops being area-based,
@@ -14013,15 +14921,33 @@ export function CompletionPanel({
         // in the rate's unit, so a rate-unit change moves the total unit too.
         if (field === "totalAmount") {
           next.totalAmountManual = true;
+          next.totalAmountSeeded = false;
+        } else if (governed && field === "amountUnit") {
+          // A still-derived total is the plan's quantity in the plan's unit:
+          // a unit change alone withdraws it (never keeps the number under
+          // the new unit, never converts) until the tech enters the actual.
+          // An entered total keeps its number under the chosen unit as
+          // before (Codex r8 P1). A derived TANK dose follows the same rule
+          // on any lane: without it, 0.8 fl_oz/gal x 30 recomputes as "24
+          // gal" under a hand-picked unit and deducts the wrong inventory
+          // quantity (Codex r1 P1).
+          if (!p.totalAmountManual) next.totalAmount = "";
         } else if (!next.totalAmountManual) {
-          if (next.areaUnit !== "sqft") {
+          if (field === "rateUnit" && isPerGallonUnit(p.rateUnit)) {
+            // A tank dose is meaningless under the new unit: re-derive from
+            // the treated area where that is what the unit means, else blank
+            // — never relabel 20 fl oz of tank mix as 20 of something else.
+            const perBasis = isPerBasisUnit(value);
+            next.amountUnit = perBasis ? String(value).split("/")[0] : value;
+            next.totalAmount = !perBasis && next.areaUnit === "sqft"
+              ? lawnDerivedTotal(next, next.areaValue)
+              : "";
+          } else if (next.areaUnit !== "sqft") {
             if (field === "applicationMethod" && p.areaUnit === "sqft") {
               next.totalAmount = "";
             }
           } else if (field === "rate" || field === "areaValue") {
-            next.totalAmount = isPerBasisUnit(next.rateUnit)
-              ? ""
-              : derivedTotalAmount(next.rate, next.areaValue);
+            next.totalAmount = lawnDerivedTotal(next, next.areaValue);
           } else if (field === "rateUnit") {
             // Per-basis rate units (mix concentrations, spot placements,
             // per-acre…) keep Total in the base quantity unit, and can't
@@ -14032,9 +14958,40 @@ export function CompletionPanel({
             if (perBasis) next.totalAmount = "";
           }
         }
-        return next;
-      }),
-    );
+        if (governed && field === "applicationArea" && !p.lawnPlanManualFields?.includes("areaValue")) {
+          // Selecting zones alone does not measure a partial application.
+          next.areaValue = "";
+          if (!next.totalAmountManual) next.totalAmount = "";
+          next.lawnPlanManualFields = [...new Set([...(next.lawnPlanManualFields || []), "areaValue"])];
+        }
+        if (governed && field === "applicationMethod") {
+          if (!next.totalAmountManual) next.totalAmount = "";
+          if (p.lawnPlanDefaults && !p.lawnPlanManualFields?.includes("rate")) {
+            next.rate = "";
+            if (!p.lawnPlanManualFields?.includes("rateUnit")) next.rateUnit = "";
+          }
+        }
+        if (governed && field === "rateUnit" && p.lawnPlanDefaults && !p.lawnPlanManualFields?.includes("rate")
+          && value !== p.lawnPlanDefaults.rateUnit) {
+          // A still-derived rate is the plan's quantity in the plan's unit:
+          // changing the unit alone withdraws the rate and its derived total
+          // (3 fl oz must never stand as 3 lb) until the tech enters the
+          // actual or returns to the plan's unit, when reconciliation
+          // restores them. The amount unit followed the rate unit above, so
+          // it is the tech's choice now too (Codex r12 P1).
+          next.rate = "";
+          if (!next.totalAmountManual) {
+            next.totalAmount = "";
+            next.lawnPlanManualFields = [...new Set([...(next.lawnPlanManualFields || []), "amountUnit"])];
+          }
+        }
+        // One closing step: a tank row shows its dose, whatever cleared it
+        // earlier. The governed area and method handlers above blank derived
+        // totals the plan cannot express; none of them has to know about
+        // tanks (Codex r1 P1).
+        return applyTankDose(next);
+      }));
+    });
   }
   function toggleArea(area) {
     if (generating) return;
@@ -14091,75 +15048,123 @@ export function CompletionPanel({
   // POST and a status-poll replay of the stored response. Returns "closed"
   // when the panel unmounted mid-flight (caller stops without touching
   // submitting state on the stale mount), else "done".
-  function finishCompletionSuccess(result) {
-    draftSnapshotRef.current = null;
+  async function finishCompletionSuccess(result) {
+    const completion = result || {};
+    const { photosOwed, draft } = buildPhotoRecoveryOutcome({
+      completion,
+      result,
+      prior: draftSnapshotRef.current,
+      servicePhotos,
+      lastSubmitBody: lastSubmitBodyRef.current,
+      serviceId: service.id,
+    });
+    if (photosOwed) {
+      draftSnapshotRef.current = draft;
+      await saveDraftSnapshot(draft);
+      await persistCompletionResumeOwed(service.id, lastSubmitBodyRef.current);
+    } else {
+      clearSavedDraft();
+      clearCompletionResumeOwed(service.id);
+      lastSubmitBodyRef.current = null;
+    }
     sideEffectsRetryRef.current = 0;
-    sideEffectsCommittedRef.current = false;
-    lastSubmitBodyRef.current = null;
-    setCommittedReplayReady(false);
+    sideEffectsCommittedRef.current = photosOwed;
     // Panel closed while the request was in flight (codex P2 r10): unmount
     // can't abort a fetch. The completion is durable server-side and the
     // parent's bookkeeping already ran (onSubmit / onCompletionResult) —
-    // clear the local artifacts, but never alert or onClose from a stale
+    // settle the local artifacts, but never alert or onClose from a stale
     // mount (they'd target whichever visit the operator opened next).
     if (completionPanelClosedRef.current) {
-      localStorage.removeItem(completionDraftKey(service.id));
-      clearCompletionResumeOwed(service.id);
       return "closed";
     }
-    const photoResult = result?.completionPhotoUpload;
-    if (photoResult?.failed > 0) {
-      alert(
-        `Service completed, but ${photoResult.failed} photo${photoResult.failed === 1 ? "" : "s"} failed to upload.`,
-      );
-    }
+    setCommittedReplayReady(photosOwed);
     // A live time-on-site override syncs the technician's linked job
     // timer server-side; when that sync is blocked the inflated span
     // survives in Timesheets/utilization — say so, since the corrected
     // value seeds the edit modal and no later save will retry it.
-    if (result?.timeEntryCorrected === false) {
-      const timerReason =
-        result?.timeEntryCorrectionBlocked === "exceeds_elapsed"
-          ? "the corrected minutes exceed the time elapsed since its clock-in"
-          : result?.timeEntryCorrectionBlocked === "entry_conflict"
-            ? "it was edited by someone else at the same moment"
-          : result?.timeEntryCorrectionBlocked === "entry_open"
-            ? "its timer is still running"
-          : result?.timeEntryCorrectionBlocked === "approved_week"
-            ? "its week is already approved"
-            : result?.timeEntryCorrectionBlocked === "multiple_job_entries"
-              ? "several timer entries are linked to this visit"
-              : "it could not be edited automatically";
+    if (completion.timeEntryCorrected === false) {
+      const timerReason = {
+        exceeds_elapsed: "the corrected minutes exceed the time elapsed since its clock-in",
+        entry_conflict: "it was edited by someone else at the same moment",
+        entry_open: "its timer is still running",
+        approved_week: "its week is already approved",
+        multiple_job_entries: "several timer entries are linked to this visit",
+      }[completion.timeEntryCorrectionBlocked] || "it could not be edited automatically";
       alert(
         `Service completed with the corrected duration, but the technician's linked job timer was NOT changed (${timerReason}) — it still shows the old span in Timesheets until corrected there.`,
       );
     }
-    localStorage.removeItem(completionDraftKey(service.id));
-    clearCompletionResumeOwed(service.id);
     setCompletionResult(result || null);
     setSuccess(true);
-    const smsNeedsAttention = ["blocked", "failed"].includes(
-      result?.completionSmsStatus,
-    );
-    // A required follow-up suggestion keeps the success overlay open so
-    // the tech can act on the CTA — it dismisses via the Done button.
-    // Keep the panel open when a pest recap is pending — it renders async and the
-    // tech approves/sends it from the success overlay (the approve UI is otherwise
-    // unreachable once the panel auto-closes).
-    // Completion advisories also hold the overlay open (codex P2 r2 on
-    // #3179): the 1.2s auto-dismiss isn't enough to read even one
-    // shortfall message — the tech dismisses via the Done button instead.
-    const advisoriesNeedReading =
-      Array.isArray(result?.completionAdvisories) &&
-      result.completionAdvisories.length > 0;
-    if (
-      !result?.followupSuggestion?.required &&
-      !recapEligible &&
-      !advisoriesNeedReading
-    ) {
-      setTimeout(() => onClose(true), smsNeedsAttention ? 3200 : 1200);
+    const autoCloseDelay = completionAutoCloseDelay(completion, photosOwed, recapEligible);
+    if (autoCloseDelay !== null) {
+      setTimeout(() => onClose(true), autoCloseDelay);
     }
     return "done";
+  }
+
+  async function retryCompletionPhotos() {
+    if (photoRetryLockRef.current) return;
+    const draft = draftSnapshotRef.current;
+    if (!draft?.servicePhotos?.length && !draft?.reconcileOwed) return;
+    photoRetryLockRef.current = true;
+    setPhotoRetrying(true);
+    setPhotoRetryError("");
+    const failedPhotos = [];
+    try {
+      for (const [index, photo] of (draft.servicePhotos || []).entries()) {
+        try {
+          const form = buildPhotoRetryFormBody(photo, index);
+          // Existing attachment route dedupes by image hash. A lost response
+          // can safely retry the same bytes without repeating closeout.
+          await adminFetch(`/tech/services/${service.id}/photos`, {
+            method: "POST", body: form,
+            headers: { Authorization: `Bearer ${localStorage.getItem("waves_admin_token")}` },
+          });
+        } catch {
+          failedPhotos.push(photo);
+        }
+      }
+      if (!failedPhotos.length) {
+        // The attachment route only inserts the photo row. Photo-dependent
+        // artifacts (cached report PDF, Tree & Shrub scoring) were built from
+        // the photos that uploaded at closeout, so recovery is not complete
+        // until the server reconciles them. Keep the marker (photos already
+        // uploaded, reconciliation owed) if that step fails (Codex #4091 P1).
+        try {
+          await adminFetch(`/tech/services/${service.id}/photos/reconcile`, { method: "POST" });
+        } catch {
+          const owed = { ...draft, servicePhotos: [], reconcileOwed: true,
+            pendingPhotoCompletion: { ...draft.pendingPhotoCompletion, completionPhotoUpload: { failed: 0, reconcileOwed: true } } };
+          draftSnapshotRef.current = owed;
+          await saveDraftSnapshot(owed);
+          if (!completionPanelClosedRef.current) {
+            setCompletionResult(owed.pendingPhotoCompletion);
+            setPhotoRetryError("Photos uploaded, but the report could not be updated yet. Retry when connected.");
+          }
+          return;
+        }
+        await finishCompletionSuccess({
+          ...draft.pendingPhotoCompletion,
+          completionPhotoUpload: { failed: 0 },
+        });
+      } else {
+        const result = {
+          ...draft.pendingPhotoCompletion,
+          completionPhotoUpload: { failed: failedPhotos.length },
+        };
+        const remaining = { ...draft, servicePhotos: failedPhotos, reconcileOwed: false, pendingPhotoCompletion: result };
+        draftSnapshotRef.current = remaining;
+        await saveDraftSnapshot(remaining);
+        if (!completionPanelClosedRef.current) {
+          setCompletionResult(result);
+          setPhotoRetryError("Some photos still could not upload. Your copies are retained on this device; retry when connected.");
+        }
+      }
+    } finally {
+      photoRetryLockRef.current = false;
+      if (!completionPanelClosedRef.current) setPhotoRetrying(false);
+    }
   }
 
   // Terminal SUCCESS for a committed chain resolved under ANOTHER key (see
@@ -14167,12 +15172,11 @@ export function CompletionPanel({
   // completed visit stops being reopenable, run the parent-equivalent
   // bookkeeping, and close out — never the generic failure path.
   function resolveCrossKeyCompleted() {
-    draftSnapshotRef.current = null;
+    clearSavedDraft();
     sideEffectsCommittedRef.current = false;
     lastSubmitBodyRef.current = null;
     setCommittedReplayReady(false);
     completionIdempotencyKeyRef.current = null;
-    localStorage.removeItem(completionDraftKey(service.id));
     clearCompletionResumeOwed(service.id);
     // Parent-equivalent success bookkeeping — onSubmit never resolved, so
     // the parent's own status flip / cache refresh never ran.
@@ -14224,7 +15228,7 @@ export function CompletionPanel({
         const result = onCompletionResult
           ? await onCompletionResult(service.id, status.response)
           : status.response;
-        if (finishCompletionSuccess(result || status.response) === "closed") return;
+        if (await finishCompletionSuccess(result || status.response) === "closed") return;
         setSubmitting(false);
         return;
       }
@@ -14265,6 +15269,9 @@ export function CompletionPanel({
     // #3187 r18: the guard silently swallowed the resume POST and left the
     // button disabled forever).
     if (submitting && !resumingPoll) return;
+    // Draft discovery still settling (see baseCompletionCtaLabel): the button
+    // is disabled, but a keyboard/programmatic submit must not race it.
+    if (draftLoading) return;
     // A committed chain replays the pinned body byte-for-byte — the stored
     // body already passed every pre-submit gate when it committed, and the
     // reopened panel's form is empty (drafts never persist photos), so none
@@ -14638,8 +15645,7 @@ export function CompletionPanel({
       return;
     }
     if (
-      calibrationRequired &&
-      !isIncompleteVisit &&
+      productActualsRequired &&
       selectedProductsMissingActualAmount.length
     ) {
       alert(
@@ -14668,6 +15674,56 @@ export function CompletionPanel({
       alert("Choose a review request time.");
       return;
     }
+    // "Automatic" is a server decision bucketed by time of day: re-check it
+    // at submit so the operator never submits against a preview that a
+    // boundary (2:59 → 3:00 PM) just invalidated (codex #4140 r3). Skipped
+    // for a committed chain retry (immutable body).
+    // Every other timing is re-checked only while the scheduler's state is
+    // still unknown (preview not loaded, or failed): the hint promised
+    // nothing in that state, and a submit must not silently accept an ask
+    // that GATE_CRON_JOBS may never send (codex #4140 r18 P1).
+    const schedulerStateKnown = typeof reviewSendPreviewRef.current?.schedulerEnabled === "boolean";
+    if (!sideEffectsCommittedRef.current && !oneTimeRecapOnly && willReview && (reviewTiming === "auto" || !schedulerStateKnown)) {
+      if (previewRecheckRef.current) return;
+      previewRecheckRef.current = true;
+      let fresh;
+      try {
+        fresh = await fetchReviewSendPreview();
+      } finally {
+        previewRecheckRef.current = false;
+      }
+      const shown = reviewSendPreviewRef.current;
+      // Compare the scheduling BUCKET the server names, never the instant
+      // (codex #4140 r4 P1): a relative answer ("90 minutes after
+      // completion", the legacy +120) is re-derived from a new Date() on
+      // every request, so its ISO string never matches twice and a strict
+      // comparison alerted on every submit. Only a rule change — a
+      // different day, an anchored hour, relative → anchored — needs a
+      // second look from the operator.
+      // A successful refresh is always applied — a same-bucket answer can
+      // still carry a later tick range after a tick boundary (codex #4140
+      // r15 P2); only a bucket change needs the operator's confirmation.
+      if (fresh) setReviewSendPreview(fresh);
+      if (reviewTiming === "auto" && fresh && shown && reviewPreviewBucket(fresh) !== reviewPreviewBucket(shown)) {
+        alert(`The automatic review time changed to ${formatETDateTime(fresh.at, { weekday: "short", hour: "numeric", minute: "2-digit" })}. Submit again to confirm.`);
+        return;
+      }
+      // The re-check itself failed (codex #4140 r13 P2, r18 P1): a shown
+      // Automatic time can no longer be vouched for, so drop it, and the
+      // scheduler's state is still unknown, so nothing is promised — stop
+      // ONCE and say so. The next submit proceeds: the server computes the
+      // window itself, and the ask is recorded either way. Completion is
+      // never blocked by the preview endpoint for more than one click; a
+      // later successful load re-arms the notice.
+      if (!fresh && !previewFailureNoticedRef.current) {
+        previewFailureNoticedRef.current = true;
+        if (shown) setReviewSendPreview(null);
+        alert(reviewTiming === "auto" && shown
+          ? "The automatic review time could not be re-checked. The server will pick the smart send window — submit again to continue."
+          : "Whether automated review texts can send could not be checked. If the scheduler is off nothing sends; the choice is still recorded on this visit. Submit again to continue.");
+        return;
+      }
+    }
     // The ONLY time-dependent pre-submit gate — skipped for a committed
     // chain retry: the replayed body is immutable and the server ignores
     // its review timing on replay/resume, so Date.now() advancing past a
@@ -14680,13 +15736,26 @@ export function CompletionPanel({
       willReview &&
       reviewTiming === "custom"
     ) {
-      const target = new Date(reviewCustomAt);
+      // The datetime-local value is an ET wall clock, as the server parses
+      // it (parseCompletionReviewDelayMinutes) — never `new Date(value)`,
+      // which reads it in the browser's zone (codex #4140 r13 P1).
+      const targetISO = etDatetimeLocalToISO(reviewCustomAt);
+      const target = new Date(targetISO || NaN);
       if (
         !reviewCustomAt ||
         Number.isNaN(target.getTime()) ||
         target.getTime() <= Date.now()
       ) {
         alert("Choose a future review request time.");
+        return;
+      }
+      if (!etWallClockExists(reviewCustomAt, targetISO)) {
+        alert(ET_GAP_TIME_MESSAGE);
+        return;
+      }
+      // The server clamps to 30 days; a later time would silently move (codex #4140 r10 P2).
+      if (target.getTime() > Date.now() + MAX_REVIEW_DELAY_MS) {
+        alert("The review request time can be at most 30 days after completion.");
         return;
       }
     }
@@ -14771,6 +15840,22 @@ export function CompletionPanel({
           ? [typedRecommendations.trim()]
           : []),
       ];
+      // A removed default keeps its name from the catalog when the refreshed
+      // plan (or a draft restored under an outage) no longer lists it, so the
+      // server still receives it for its unlisted-skip audit (Codex #4113 P2).
+      // Governed state survives a plan outage: a draft restored while the
+      // plan request failed carries its removed defaults even though no
+      // defaults loaded (`lawnDefaultsEnabled` false), and they still owe the
+      // server's unlisted-skip audit (Codex #4113 P2).
+      const lawnSkippedDefaults = lawnDefaultsEnabled || lawnRemovedDefaultIds.length
+        ? lawnRemovedDefaultIds.filter((id) => !selectedProducts.some((row) => String(row.productId) === String(id))).flatMap((id) => {
+            const item = (lawnCompletionDefaults?.items || []).find((row) => String(row.product.id) === String(id));
+            const catalogProduct = (products || []).find((row) => String(row.id) === String(id));
+            const productName = item?.product?.name || catalogProduct?.name || lawnRemovedDefaultNamesRef.current[String(id)];
+            return productName ? [{ productId: item?.product?.id || id, productName }] : [];
+          })
+        : [];
+      const lawnAreaSubmitted = lawnDefaultsEnabled || (completionImprovements && isLawn && lawnAreaOverride !== undefined);
       const body = {
         ...(reviewedPricing ? { pricingReview: reviewedPricing.review } : {}),
         idempotencyKey: completionIdempotencyKeyRef.current,
@@ -14811,12 +15896,21 @@ export function CompletionPanel({
           areaUnit: p.areaUnit,
           targets: Array.isArray(p.targets) ? p.targets : [],
         })),
-        // The protocol block is now read-only (mixing-ratio reference), so the tech
-        // no longer submits a checklist / treated-sqft / disposition. The server
-        // still records a protocol completion for WaveGuard lawn visits, deriving
-        // treated area + carrier from the plan; what was actually applied comes
-        // through the products list.
-        lawnProtocolCompletion: null,
+        // The existing completion field carries the visit area into the server
+        // planner, protocol record and nutrient ledger. Product-specific actuals
+        // remain on each product row; no saved turf profile is changed. A
+        // governed draft restored while the initial plan request failed still
+        // carries its visit area (`lawnAreaOverride`), and it is serialized
+        // regardless of whether defaults loaded — otherwise the server planner
+        // records the full saved lawn for an entered partial area (pre-push
+        // audit P1). Plan defaults the tech removed ride along as skipped
+        // products for the lawn actuals ledger — id + name only, no reason
+        // demanded.
+        lawnProtocolCompletion: lawnAreaSubmitted || lawnSkippedDefaults.length
+          ? {
+              ...(lawnAreaSubmitted ? { treatedSqft: lawnVisitArea === "" ? null : Number(lawnVisitArea) } : {}),
+              ...(lawnSkippedDefaults.length ? { skippedProducts: lawnSkippedDefaults } : {}),
+            } : null,
         treeShrubCompletion: treeShrubCloseoutRequired
           ? {
               ...treeShrubCloseout,
@@ -15059,7 +16153,7 @@ export function CompletionPanel({
         return;
       }
       const result = await onSubmit(service.id, body);
-      if (finishCompletionSuccess(result) === "closed") return;
+      if (await finishCompletionSuccess(result) === "closed") return;
     } catch (e) {
       return settleCompletionSubmitError(e, reconcileConfirmed);
     }
@@ -15074,7 +16168,7 @@ export function CompletionPanel({
     setSubmitting(true);
     try {
       const result = await onSubmit(service.id, lastSubmitBodyRef.current);
-      if (finishCompletionSuccess(result) === "closed") return;
+      if (await finishCompletionSuccess(result) === "closed") return;
     } catch (e) {
       return settleCompletionSubmitError(e, reconcileConfirmed);
     }
@@ -15639,10 +16733,52 @@ export function CompletionPanel({
     }
     setPhotoAnalyzing(false);
   }
+  const draftStorageStatus = (draftLoading || draftStorageNotice) && (
+    <div role="status" style={{ padding: 14, marginBottom: 16, fontSize: 14, lineHeight: 1.5 }}>
+      {draftLoading ? "Loading saved draft…" : draftStorageNotice}
+    </div>
+  );
+  const photoReconcileOwed = completionResult?.completionPhotoUpload?.reconcileOwed === true;
+  const photoRecoveryNotice = (completionResult?.completionPhotoUpload?.failed > 0 || photoReconcileOwed) && (
+    <div role="status" style={{ marginTop: 16, padding: 16, width: "100%", maxWidth: 360, boxSizing: "border-box",
+      color: "#111111", background: "#FFFFFF", border: "1px solid #E5E5E5", borderRadius: 12, fontSize: 14, lineHeight: 1.5 }}>
+      <p style={{ margin: "0 0 12px" }}>
+        {photoReconcileOwed
+          ? "The visit is saved and the photos are uploaded. The report still needs updating with them."
+          : `The visit is saved. ${completionResult.completionPhotoUpload.failed} ${completionResult.completionPhotoUpload.failed === 1 ? "photo still needs" : "photos still need"} uploading.`}
+      </p>
+      {photoRetryError && <p>{photoRetryError}</p>}
+      {draftStorageStatus}
+      <button type="button" onClick={retryCompletionPhotos} disabled={photoRetrying}
+        style={{ padding: "12px 16px", borderRadius: 24, border: "none", background: "#111111", color: "#FFFFFF", fontSize: 14 }}>
+        {photoRetrying ? (photoReconcileOwed ? "Updating report…" : "Uploading photos…") : (photoReconcileOwed ? "Finish report update" : "Retry photo uploads")}
+      </button>
+      <button type="button" onClick={() => onClose(true)} style={{ marginLeft: 8, padding: 12, border: "none", background: "transparent", color: "#111111", fontSize: 14 }}>
+        Later
+      </button>
+    </div>
+  );
+  // The draft lookup is asynchronous (IndexedDB) but never gates the form:
+  // the panel renders once, with "Loading saved draft…" inline, and the
+  // Restore prompt / photo recovery appear when the lookup settles. Gating
+  // the whole panel double-mounted this component and delayed every fetch
+  // behind the lookup (lawn-closeout suite timeouts on CI). Effects that
+  // must not act on a draft-less form until the lookup settles key off
+  // draftLoading (autosave, governed lawn defaults seeding).
   // ────────────────────────────────────────────────────────────────────
   // Mobile admin render — follows reference_waves_admin_ui_system.md
   // Light mode only. Roboto body. No D.palette.
   // ────────────────────────────────────────────────────────────────────
+  const lawnProgressPanel = completionImprovements && isLawn && (
+    !currentLawnPlanReady ? <p role="status" style={{ fontSize: 14 }}>Loading lawn plan…</p>
+      : lawnCompletionDefaults?.serviceId !== service.id ? <div role="status" style={{ margin: "16px 0", fontSize: 14 }}>Lawn plan unavailable.
+        <button type="button" onClick={() => setLawnPlanReloadKey(key => key + 1)} style={{ marginLeft: 12, padding: 8, fontSize: 14 }}>Retry plan</button></div>
+      : lawnDefaultsEnabled ? <LawnVisitPlanSummary defaults={lawnCompletionDefaults} protocol={treatmentPlanStructuredProtocol}
+        areaValue={lawnVisitArea} loading={treatmentPlanLoading} error={treatmentPlanError} disabled={submitting || generating}
+        onAreaChange={value => { invalidateGeneratedReportOnTypedEdit(); setLawnAreaOverride(value); }}
+        onReload={() => setLawnPlanReloadKey(key => key + 1)} />
+        : <LawnPreviousVisitCard service={service} />
+  );
   if (isMobile) {
     const M = {
       page: "#FAFAFA",
@@ -15854,6 +16990,7 @@ export function CompletionPanel({
                   blackout, annual-N, …) — surfaced here per owner 2026-08-03,
                   reversing the 2026-07-29 minimal-success-screen call; they
                   are also recorded server-side and surface in Customer 360. */}
+              {photoRecoveryNotice}
               {Array.isArray(completionResult?.completionAdvisories) &&
                 completionResult.completionAdvisories.length > 0 && (
                   <div
@@ -16042,6 +17179,7 @@ export function CompletionPanel({
                 <PestRecapCard serviceId={service.id} />
               </div>
             )}
+            {draftStorageStatus}
             {showDraftPrompt && (
               <div
                 style={{
@@ -16264,7 +17402,7 @@ export function CompletionPanel({
                 />
               </Field>
             )}
-            {completionImprovements && isLawn && <LawnPreviousVisitCard service={service} />}
+            {lawnProgressPanel}
             {!completionImprovements && calibrationRequired && treatmentPlanStructuredProtocol?.window && (
               <Field label="Lawn Care Protocol">
                 <ProtocolMixSummary
@@ -17165,6 +18303,7 @@ export function CompletionPanel({
                         }}
                       >
                         {" "}
+                        <option value="" disabled>Unit</option>
                         <option value="oz">oz</option>{" "}
                         <option value="fl_oz">fl oz</option>{" "}
                         <option value="ml">ml</option>{" "}
@@ -17179,6 +18318,22 @@ export function CompletionPanel({
                           ? catalogUnitOption(sp.rateUnit, STANDARD_RATE_UNIT_OPTIONS)
                           : null}{" "}
                       </select>{" "}
+                      {isPerGallonUnit(sp.rateUnit) ? (
+                        <>
+                          <span style={{ fontSize: 12, fontWeight: 500, color: M.ink3 }}>
+                            Gallons mixed
+                          </span>{" "}
+                          <input
+                            type="number"
+                            placeholder="Gal"
+                            value={sp.carrierGallons ?? ""}
+                            onChange={(e) =>
+                              updateProduct(sp.productId, "carrierGallons", e.target.value)
+                            }
+                            style={{ ...mInput, width: 84, height: 40, padding: "0 12px" }}
+                          />{" "}
+                        </>
+                      ) : null}
                       <span style={{ fontSize: 12, fontWeight: 500, color: M.ink3 }}>
                         Total used
                       </span>{" "}
@@ -17201,7 +18356,7 @@ export function CompletionPanel({
                         }}
                       />{" "}
                       <select
-                        value={sp.amountUnit || sp.rateUnit}
+                        value={sp.amountUnit ?? sp.rateUnit ?? ""}
                         onChange={(e) =>
                           updateProduct(
                             sp.productId,
@@ -17217,6 +18372,7 @@ export function CompletionPanel({
                         }}
                       >
                         {" "}
+                        <option value="" disabled>Unit</option>
                         <option value="oz">oz</option>{" "}
                         <option value="fl_oz">fl oz</option>{" "}
                         <option value="ml">ml</option>{" "}
@@ -17294,6 +18450,7 @@ export function CompletionPanel({
                           padding: "0 12px",
                         }}
                       >
+                        <option value="" disabled>Application method</option>
                         <option value="perimeter_spray">Perimeter spray</option>
                         <option value="broadcast_spray">Broadcast spray</option>
                         <option value="spot_treatment">Spot treatment</option>
@@ -17310,6 +18467,7 @@ export function CompletionPanel({
                         const areaRequirement = requiredApplicationArea(
                           productApplicationMethod(sp, serviceTypeForArea),
                           serviceTypeForArea,
+                          lawnDefaultsEnabled,
                         );
                         if (!areaRequirement) return null;
                         return (
@@ -17353,6 +18511,7 @@ export function CompletionPanel({
                       >
                         ×
                       </button>{" "}
+                      {lawnDefaultsEnabled && sp.lawnAmountReason && <p style={{ width: "100%", margin: "4px 0", fontSize: 14, color: M.ink3 }}>{sp.lawnAmountReason}</p>}
                       {(() => {
                         // Fall back to the selected row's serialized category
                         // when the catalog row is absent (protocol- or
@@ -17999,21 +19158,24 @@ export function CompletionPanel({
                     onChange={(e) => setReviewTiming(e.target.value)}
                     style={mInput}
                   >
-                    <option value="now">Now</option>
-                    <option value="120">In 2 hours</option>
-                    <option value="tomorrow_8">Tomorrow at 8 AM</option>
-                    <option value="custom">Custom time</option>
+                    {REVIEW_TIMING_OPTIONS.map((o) => (
+                      <option key={o.value} value={o.value}>{o.label}</option>
+                    ))}
                   </select>
                   {reviewTiming === "custom" ? (
                     <input
                       type="datetime-local"
                       value={reviewCustomAt}
+                      max={`${etDateString(new Date(Date.now() + MAX_REVIEW_DELAY_MS))}T23:59`}
                       onChange={(e) => setReviewCustomAt(e.target.value)}
                       style={mInput}
                     />
                   ) : (
                     <div />
                   )}
+                  <div style={{ gridColumn: "1 / -1", fontFamily: font, fontSize: 14, color: M.ink3 }}>
+                    {reviewTimingHintText}
+                  </div>
                 </div>
               )}
             </Field>
@@ -18105,6 +19267,7 @@ export function CompletionPanel({
               onClick={() => handleSubmit()}
               disabled={
                 submitting ||
+                draftLoading ||
                 generating ||
                 (!committedReplayReady &&
                   (completionPricingPending || closeoutAdvisoriesPending ||
@@ -18115,6 +19278,7 @@ export function CompletionPanel({
                 ...primaryPill,
                 opacity:
                   submitting ||
+                  draftLoading ||
                   (!committedReplayReady &&
                     (completionPricingPending || closeoutAdvisoriesPending ||
                       treeShrubCompletionBlocked ||
@@ -18244,6 +19408,7 @@ export function CompletionPanel({
             )}
             {/* Completion advisories (inventory shortfall, blackout, annual-N,
                 …) — surfaced per owner 2026-08-03; also in Customer 360. */}
+            {photoRecoveryNotice}
             {Array.isArray(completionResult?.completionAdvisories) &&
               completionResult.completionAdvisories.length > 0 && (
                 <div
@@ -18455,6 +19620,7 @@ export function CompletionPanel({
               onReviewChange={setCompletionPricing} reloadKey={pricingReloadKey}
               allowDiscounts={visitOutcome === "completed" && !backfillCloseout}
               disabled={submitting || committedReplayReady || isIncompleteVisit || backfillCloseout} />
+          {draftStorageStatus}
           {showDraftPrompt && (
             <div
               style={{
@@ -18601,7 +19767,7 @@ export function CompletionPanel({
               )}
             </div>
           )}
-          {completionImprovements && isLawn && <LawnPreviousVisitCard service={service} />}
+          {lawnProgressPanel}
           {!completionImprovements && calibrationRequired && treatmentPlanStructuredProtocol?.window && (
             <div style={{ marginBottom: 20 }}>
               <label style={labelStyle}>Lawn Care Protocol</label>
@@ -19526,6 +20692,7 @@ export function CompletionPanel({
                     style={{ ...inputStyle, width: 70, marginBottom: 0 }}
                   >
                     {" "}
+                    <option value="" disabled>Unit</option>
                     <option value="oz">oz</option>{" "}
                     <option value="fl_oz">fl oz</option>{" "}
                     <option value="ml">ml</option> <option value="g">g</option>{" "}
@@ -19539,6 +20706,22 @@ export function CompletionPanel({
                           ? catalogUnitOption(sp.rateUnit, STANDARD_RATE_UNIT_OPTIONS)
                           : null}{" "}
                   </select>{" "}
+                  {isPerGallonUnit(sp.rateUnit) ? (
+                    <>
+                      <span style={{ fontSize: 12, fontWeight: 500, color: D.muted }}>
+                        Gallons mixed
+                      </span>{" "}
+                      <input
+                        type="number"
+                        placeholder="Gal"
+                        value={sp.carrierGallons ?? ""}
+                        onChange={(e) =>
+                          updateProduct(sp.productId, "carrierGallons", e.target.value)
+                        }
+                        style={{ ...inputStyle, width: 70, marginBottom: 0 }}
+                      />{" "}
+                    </>
+                  ) : null}
                   <span style={{ fontSize: 12, fontWeight: 500, color: D.muted }}>
                     Total used
                   </span>{" "}
@@ -19552,13 +20735,14 @@ export function CompletionPanel({
                     style={{ ...inputStyle, width: 70, marginBottom: 0 }}
                   />{" "}
                   <select
-                    value={sp.amountUnit || sp.rateUnit}
+                    value={sp.amountUnit ?? sp.rateUnit ?? ""}
                     onChange={(e) =>
                       updateProduct(sp.productId, "amountUnit", e.target.value)
                     }
                     style={{ ...inputStyle, width: 70, marginBottom: 0 }}
                   >
                     {" "}
+                    <option value="" disabled>Unit</option>
                     <option value="oz">oz</option>{" "}
                     <option value="fl_oz">fl oz</option>{" "}
                     <option value="ml">ml</option> <option value="g">g</option>{" "}
@@ -19649,6 +20833,7 @@ export function CompletionPanel({
                       marginBottom: 0,
                     }}
                   >
+                    <option value="" disabled>Application method</option>
                     <option value="perimeter_spray">Perimeter spray</option>
                     <option value="broadcast_spray">Broadcast spray</option>
                     <option value="spot_treatment">Spot treatment</option>
@@ -19665,6 +20850,7 @@ export function CompletionPanel({
                     const areaRequirement = requiredApplicationArea(
                       productApplicationMethod(sp, serviceTypeForArea),
                       serviceTypeForArea,
+                      lawnDefaultsEnabled,
                     );
                     if (!areaRequirement) return null;
                     return (
@@ -19685,6 +20871,8 @@ export function CompletionPanel({
                     );
                   })()}
                   <button
+                    type="button"
+                    aria-label="Remove product"
                     onClick={() => removeProduct(sp.productId)}
                     style={{
                       background: "none",
@@ -19697,6 +20885,7 @@ export function CompletionPanel({
                   >
                     &times;
                   </button>{" "}
+                  {lawnDefaultsEnabled && sp.lawnAmountReason && <p style={{ width: "100%", margin: "4px 0", fontSize: 14, color: D.muted }}>{sp.lawnAmountReason}</p>}
                   {(() => {
                     // Fall back to the selected row's serialized category when
                     // the catalog row is absent (protocol- or substitution-
@@ -20159,10 +21348,9 @@ export function CompletionPanel({
                 onChange={(e) => setReviewTiming(e.target.value)}
                 style={inputStyle}
               >
-                <option value="now">Now</option>
-                <option value="120">In 2 hours</option>
-                <option value="tomorrow_8">Tomorrow at 8 AM</option>
-                <option value="custom">Custom time</option>
+                {REVIEW_TIMING_OPTIONS.map((o) => (
+                  <option key={o.value} value={o.value}>{o.label}</option>
+                ))}
               </select>
               {reviewTiming === "custom" ? (
                 <input
@@ -20174,6 +21362,9 @@ export function CompletionPanel({
               ) : (
                 <div />
               )}
+              <div style={{ gridColumn: "1 / -1", fontSize: 14, color: D.muted }}>
+                {reviewTimingHintText}
+              </div>
             </div>
           )}
           {/* Next Visit Prompt */}
@@ -20262,6 +21453,7 @@ export function CompletionPanel({
             onClick={() => handleSubmit()}
             disabled={
               submitting ||
+              draftLoading ||
               generating ||
               (!committedReplayReady &&
                 (completionPricingPending || closeoutAdvisoriesPending ||
@@ -20280,6 +21472,7 @@ export function CompletionPanel({
               height: 52,
               opacity:
                 submitting ||
+                draftLoading ||
                 (!committedReplayReady &&
                   (completionPricingPending || closeoutAdvisoriesPending ||
                     treeShrubCompletionBlocked ||

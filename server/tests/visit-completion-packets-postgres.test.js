@@ -1,4 +1,5 @@
 /** Canonical completion writes against a migrated, private nonproduction database. */
+jest.mock('../models/marker-db', () => () => require('../models/db'));
 jest.mock('../models/db', () => {
   const db = (table, ...args) => {
     const query = mockPg(table, ...args);
@@ -17,7 +18,14 @@ jest.mock('../services/weather-forecast', () => ({
 jest.mock('../sockets', () => ({ getIo: jest.fn(() => null) }));
 jest.mock('../services/service-report/application-conditions', () => ({ fetchApplicationConditions: jest.fn(async () => null) }));
 jest.mock('../services/recap-visit-context', () => ({ buildRecapVisitContext: jest.fn(async () => '') }));
-jest.mock('../services/messaging/send-customer-message', () => ({ sendCustomerMessage: jest.fn() }));
+jest.mock('../services/messaging/send-customer-message', () => ({
+  // The canonical sender's locked-handoff contract: the caller's claim runs
+  // inside withSmsHandoff and its verdict decides whether anything sends.
+  sendCustomerMessage: jest.fn(async ({ withSmsHandoff }) => {
+    const verdict = withSmsHandoff ? await withSmsHandoff(async () => ({ ok: true })) : { ok: true };
+    return verdict.ok === true ? { sent: true } : { sent: false, blocked: true, code: verdict.code, retryable: verdict.retryable === true };
+  }),
+}));
 jest.mock('../services/stripe', () => ({ chargeInvoiceWithSavedCard: jest.fn(),
   savedCardChargeSuppressesAlternateCollection: jest.fn((...args) =>
     jest.requireActual('../services/stripe').savedCardChargeSuppressesAlternateCollection(...args)),
@@ -36,7 +44,12 @@ jest.mock('../services/tree-shrub-assessment', () => ({
 }));
 jest.mock('../services/referral-engine', () => ({ creditReferralOnFirstService: jest.fn(async () => {}) }));
 
-jest.mock('../services/email-template-library', () => ({ sendTemplate: jest.fn() }));
+jest.mock('../services/email-template-library', () => ({
+  sendTemplate: jest.fn(),
+  // The summary handoff rechecks the suppression ledger through the library.
+  loadTemplateByKey: jest.fn(async () => ({ template: { template_key: 'service.visit_summary' } })),
+  activeSuppressionFor: jest.fn(async () => null),
+}));
 jest.mock('../services/review-request', () => ({ enrollPostService: jest.fn(async () => ({ started: true })), completionReviewDelay: jest.fn(() => undefined) }));
 
 const knex = require('knex');
@@ -131,13 +144,17 @@ postgres('visit completion packet records on PostgreSQL', () => {
     jest.clearAllMocks();
     chargeInvoiceWithSavedCard.mockReset();
     require('../services/stripe').savedCardChargeSuppressesAlternateCollection.mockImplementation((err) => err?.code === 'STRIPE_AMBIGUOUS_OUTCOME');
+    // The canonical sender's locked handoff: the caller's claim runs inside
+    // withSmsHandoff and its verdict decides whether anything sends.
     sendCustomerMessage.mockImplementation(async (input) => {
-      const allowed = await input.preDispatchCheck();
-      return allowed.ok ? { sent: true, providerMessageId: 'fixture-sms' } : { blocked: true };
+      const allowed = await input.withSmsHandoff(async () => ({ ok: true }));
+      return allowed.ok ? { sent: true, providerMessageId: 'fixture-sms' } : { blocked: true, code: allowed.code };
     });
+    // The email library's equivalent boundary around its provider request.
     require('../services/email-template-library').sendTemplate.mockImplementation(async (input) => {
-      const allowed = await input.onQueued({ id: randomUUID() });
-      return allowed ? { sent: true } : { aborted: true };
+      let dispatched = false;
+      const allowed = await input.withProviderHandoff(async () => { dispatched = true; });
+      return dispatched && allowed.ok ? { sent: true } : { sent: false, aborted: true };
     });
 
     require('../services/notification-triggers').triggerNotification.mockReset().mockResolvedValue({ suppressed: true });
@@ -215,6 +232,34 @@ postgres('visit completion packet records on PostgreSQL', () => {
     });
     expect(sendCustomerMessage).not.toHaveBeenCalled();
     expect(chargeInvoiceWithSavedCard).not.toHaveBeenCalled();
+  });
+
+  test('an implausibly large item array is refused before any per-item lock is taken', async () => {
+    const input = submission();
+    const flood = Array.from({ length: 51 }, () => ({ serviceId: randomUUID(), body: { ...input.items[0].body } }));
+    const execute = mockPg.client.constructor.prototype._query;
+    const spy = jest.spyOn(mockPg.client.constructor.prototype, '_query').mockImplementation(function record(connection, query) {
+      return execute.call(this, connection, query);
+    });
+    try {
+      expect(await saveVisitCompletionPacket({ ...input, items: flood })).toMatchObject({ status: 400, body: { code: 'visit_closeout_members_invalid' } });
+      expect(spy.mock.calls.some(([, query]) => /advisory/i.test(query.sql))).toBe(false);
+    } finally {
+      jest.restoreAllMocks();
+    }
+  });
+
+  test('resuming effects re-applies the technician scope on the locked members', async () => {
+    const saved = await saveVisitCompletionPacket(submission());
+    expect(saved).toMatchObject({ status: 202 });
+    const technician = { techRole: 'technician', technicianId: fixture.techId };
+    // A whole-visit reassignment that committed after the route's preflight.
+    await mockPg('scheduled_services').where({ id: fixture.serviceIds[0] }).update({ technician_id: null });
+    expect(await runVisitCompletionPacketEffects(saved.body.packetId, undefined, { actor: technician }))
+      .toMatchObject({ status: 409, body: { code: 'visit_out_of_scope' } });
+    expect(await mockPg('visit_completion_packets').where({ id: saved.body.packetId }).first()).toMatchObject({ status: 'processing' });
+    await mockPg('scheduled_services').where({ id: fixture.serviceIds[0] }).update({ technician_id: fixture.techId });
+    expect(await runVisitCompletionPacketEffects(saved.body.packetId, undefined, { actor: technician })).toMatchObject({ status: 200 });
   });
 
   test('status-only completed members still require canonical closeout forms', async () => {
@@ -462,6 +507,28 @@ postgres('visit completion packet records on PostgreSQL', () => {
     await expect(createOrJoinVisit({ rows: fixture.serviceIds, createdBy: 'test' })).rejects.toThrow('autopay_enrolled');
     process.env.DATA_HYGIENE_VAULT_KEY = 'synthetic-visit-summary-test-key';
     expect(await createOrJoinVisit({ rows: fixture.serviceIds, createdBy: 'test' })).toMatchObject({ behavior_version: 2 });
+    // The staff grouping route's fast path renders the same decision.
+    const { groupingRefusedByAutopay } = require('../services/visit-groups');
+    expect(await groupingRefusedByAutopay(fixture.customerId)).toBe(false);
+    process.env.GATE_VISIT_CLOSEOUT = 'false';
+    expect(await groupingRefusedByAutopay(fixture.customerId)).toBe(true);
+    process.env.GATE_VISIT_CLOSEOUT = 'true';
+  });
+
+  test('a technician cannot close a visit that left their current window after the preflight read', async () => {
+    const { memberInTechnicianScope } = require('../services/visit-completion-packets');
+    const actor = { techRole: 'technician', technicianId: fixture.techId };
+    const today = etDateString();
+    expect(memberInTechnicianScope({ technician_id: fixture.techId, status: 'on_site', scheduled_date: today }, actor)).toBe(true);
+    expect(memberInTechnicianScope({ technician_id: fixture.techId, status: 'rescheduled', scheduled_date: today }, actor)).toBe(false);
+    expect(memberInTechnicianScope({ technician_id: fixture.techId, status: 'on_site', scheduled_date: '2026-01-01' }, actor)).toBe(false);
+    expect(memberInTechnicianScope({ technician_id: fixture.techId, status: 'on_site', scheduled_date: '2026-01-01' }, { techRole: 'admin' })).toBe(true);
+    // The locked save re-applies the predicate: the whole visit moved to an old date.
+    await mockPg('scheduled_services').whereIn('id', fixture.serviceIds).update({ scheduled_date: '2026-01-01' });
+    await mockPg('service_visits').where({ id: fixture.visitId }).update({ scheduled_date: '2026-01-01',
+      stop_base_key: stopBaseKey({ customerId: fixture.customerId, scheduledDate: '2026-01-01' }) });
+    expect(await saveVisitCompletionPacket(submission({ actor }))).toMatchObject({ status: 409, body: { code: 'visit_out_of_scope' } });
+    expect(await mockPg('visit_completion_packets').where({ visit_id: fixture.visitId })).toHaveLength(0);
   });
 
   test('member recovery keeps forms, reports and operational records without collecting or delivering', async () => {
@@ -1083,7 +1150,7 @@ postgres('visit completion packet records on PostgreSQL', () => {
       expect(options).toMatchObject({ requireAutopayForCustomerId: fixture.customerId, refuseWhenDunningStopped: true });
       await mockPg.transaction(async (trx) => {
         const invoice = await trx('invoices').where({ id: invoiceId }).forUpdate().first();
-        require('../services/invoice-helpers').assertInvoiceCollectible(invoice.status);
+        require('../services/invoice-helpers').assertInvoiceCollectible(invoice);
         await trx('customers').where({ id: fixture.customerId }).forUpdate().first();
         await assertVisitCompletionCharge(trx, invoice, options.requireVisitCompletionPacketId);
         providerSubmissions += 1;

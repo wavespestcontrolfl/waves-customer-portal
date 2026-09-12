@@ -56,6 +56,9 @@ jest.mock('../services/appointment-reminders', () => ({
   // Channel resolution the contact-slot recheck re-runs (r27). Default
   // 'sms' keeps pre-r27 pins untouched; channel pins override with ...Once.
   getReminderPrefs: jest.fn(async () => ({ confirmationChannel: 'sms', reminder72hChannel: 'sms' })),
+  // The visit-aware prefs row the recipient recheck reads (app property
+  // scope, PR 3): a plain row = today's profile answer.
+  visitPrefsRow: jest.fn(async () => ({})),
 }));
 const mockGetAppointmentContacts = jest.fn(() => [{ phone: '+19415557777' }]);
 jest.mock('../services/customer-contact', () => ({
@@ -198,9 +201,26 @@ describe('deferred-replay registry', () => {
     expect(payerBilled.eligible).toBe(false);
     expect(payerBilled.reason).toBe('payer-billed');
 
+    // A WITHDRAWN combined-visit invoice keeps payer_id NULL and a collectible
+    // status — the Bill-To move lives only in its stamp — so a reminder queued
+    // before that change must suppress too.
+    db.mockReturnValueOnce(firstChain({ id: 'inv-1', status: 'sent', payer_id: null, scheduled_send_error: 'payer_billed:7:hold' }));
+    const withdrawn = await recheckDeferredReplay('invoice_send_deferred', { invoice_id: 'inv-1' });
+    expect(withdrawn.eligible).toBe(false);
+    expect(withdrawn.reason).toBe('payer-billed-withdrawn');
+
     db.mockReturnValueOnce(firstChain({ id: 'inv-1', status: 'sent', payer_id: null }));
     const selfPay = await recheckDeferredReplay('invoice_send_deferred', { invoice_id: 'inv-1' });
     expect(selfPay.eligible).toBe(true);
+  });
+
+  test('a queued follow-up text suppresses once its invoice is withdrawn to a payer', async () => {
+    // The sequence is paused by the withdrawal, but a text queued BEFORE the
+    // Bill-To change is already claimed — this recheck is what stops it.
+    db.mockReturnValueOnce(firstChain({ id: 'inv-1', status: 'overdue', payer_id: null, scheduled_send_error: 'payer_billed:7:hold' }));
+    const withdrawn = await recheckDeferredReplay('invoice_followup_deferred', { invoice_id: 'inv-1' });
+    expect(withdrawn.eligible).toBe(false);
+    expect(withdrawn.reason).toBe('payer-billed-withdrawn');
   });
 
   test('call-booking contact confirmation (r17): dead or past visits suppress the fan-out replay', async () => {
@@ -341,17 +361,18 @@ describe('deferred-replay registry', () => {
     // Slot intact (formatting differences aside): replay eligible.
     db.mockReturnValueOnce(firstChain({ status: 'scheduled', scheduled_date: '2099-01-01' }));
     db.mockReturnValueOnce(firstChain({ id: 'cust-1' }));
-    db.mockReturnValueOnce(firstChain({ customer_id: 'cust-1' }));
     mockFilterRecipientsByOptin.mockResolvedValueOnce([{ phone: '941-555-7777' }]);
     const present = await recheckDeferredReplay('call_booking_contact_confirmation_deferred', meta);
     expect(present.eligible).toBe(true);
     expect(mockGetAppointmentContacts).toHaveBeenCalled();
+    // The prefs row is read through the visit (app property scope, PR 3) so a
+    // NON-primary saved property's notify-primary decides the recipients.
+    expect(require('../services/appointment-reminders').visitPrefsRow).toHaveBeenCalledWith('cust-1', 'ss-1');
 
     // Contact removed/replaced overnight: the frozen number no longer
     // occupies a notification slot — suppress, never text a third party.
     db.mockReturnValueOnce(firstChain({ status: 'scheduled', scheduled_date: '2099-01-01' }));
     db.mockReturnValueOnce(firstChain({ id: 'cust-1' }));
-    db.mockReturnValueOnce(firstChain(null));
     mockFilterRecipientsByOptin.mockResolvedValueOnce([{ phone: '+19415550000' }]);
     const removed = await recheckDeferredReplay('call_booking_contact_confirmation_deferred', meta);
     expect(removed.eligible).toBe(false);
@@ -623,7 +644,6 @@ describe('deferred-replay registry', () => {
     // liveness predicate would have dropped it outright).
     db.mockReturnValueOnce(firstChain({ status: 'cancelled' }));
     db.mockReturnValueOnce(firstChain({ id: 'cust-1' }));
-    db.mockReturnValueOnce(firstChain({ customer_id: 'cust-1' }));
     mockFilterRecipientsByOptin.mockResolvedValueOnce([{ phone: '941-555-7777' }]);
     const stillCancelled = await recheckDeferredReplay('appointment_notice_contact_deferred', meta);
     expect(stillCancelled.eligible).toBe(true);
@@ -638,7 +658,6 @@ describe('deferred-replay registry', () => {
     // No-show rows carry their own terminal status.
     db.mockReturnValueOnce(firstChain({ status: 'no_show' }));
     db.mockReturnValueOnce(firstChain({ id: 'cust-1' }));
-    db.mockReturnValueOnce(firstChain({ customer_id: 'cust-1' }));
     mockFilterRecipientsByOptin.mockResolvedValueOnce([{ phone: '941-555-7777' }]);
     const noShow = await recheckDeferredReplay('appointment_notice_contact_deferred', {
       ...meta, required_visit_statuses: ['no_show'],
@@ -809,18 +828,17 @@ describe('deferred-replay registry', () => {
     };
     db.mockReturnValueOnce(firstChain({ status: 'scheduled', scheduled_date: '2099-01-01' }));
     db.mockReturnValueOnce(firstChain({ id: 'cust-1' }));
-    db.mockReturnValueOnce(firstChain({ customer_id: 'cust-1' }));
     mockFilterRecipientsByOptin.mockResolvedValueOnce([{ phone: '941-555-7777' }]);
     getReminderPrefs.mockResolvedValueOnce({ confirmationChannel: 'email', reminder72hChannel: 'sms' });
     const flipped = await recheckDeferredReplay('appointment_notice_contact_deferred', meta);
     expect(flipped.eligible).toBe(false);
     expect(flipped.reason).toBe('channel-email');
+    expect(getReminderPrefs).toHaveBeenCalledWith('cust-1', { scheduledServiceId: 'ss-1' });
 
     // 'both' keeps the SMS leg; purposes without a channel pref never
     // consult the helper.
     db.mockReturnValueOnce(firstChain({ status: 'scheduled', scheduled_date: '2099-01-01' }));
     db.mockReturnValueOnce(firstChain({ id: 'cust-1' }));
-    db.mockReturnValueOnce(firstChain({ customer_id: 'cust-1' }));
     mockFilterRecipientsByOptin.mockResolvedValueOnce([{ phone: '941-555-7777' }]);
     getReminderPrefs.mockResolvedValueOnce({ confirmationChannel: 'both', reminder72hChannel: 'sms' });
     const both = await recheckDeferredReplay('appointment_notice_contact_deferred', meta);
@@ -879,7 +897,6 @@ describe('deferred-replay registry', () => {
     // snapshot (legacy) keep the status-only behavior.
     db.mockReturnValueOnce(firstChain({ status: 'confirmed', scheduled_date: '2099-01-01', window_start: '09:00:00' }));
     db.mockReturnValueOnce(firstChain({ id: 'cust-1' }));
-    db.mockReturnValueOnce(firstChain({ customer_id: 'cust-1' }));
     mockFilterRecipientsByOptin.mockResolvedValueOnce([{ phone: '941-555-7777' }]);
     const stillGood = await recheckDeferredReplay('appointment_notice_contact_deferred', {
       scheduled_service_id: 'ss-1',
@@ -903,14 +920,12 @@ describe('deferred-replay registry', () => {
 
     db.mockReturnValueOnce(firstChain({ status: 'scheduled', scheduled_date: '2099-01-01' }));
     db.mockReturnValueOnce(firstChain({ id: 'cust-1' }));
-    db.mockReturnValueOnce(firstChain({ customer_id: 'cust-1' }));
     mockFilterRecipientsByOptin.mockResolvedValueOnce([{ phone: '941-555-7777' }]);
     const present = await recheckDeferredReplay('appointment_notice_contact_deferred', meta);
     expect(present.eligible).toBe(true);
 
     db.mockReturnValueOnce(firstChain({ status: 'scheduled', scheduled_date: '2099-01-01' }));
     db.mockReturnValueOnce(firstChain({ id: 'cust-1' }));
-    db.mockReturnValueOnce(firstChain(null));
     mockFilterRecipientsByOptin.mockResolvedValueOnce([{ phone: '+19415550000' }]);
     const removed = await recheckDeferredReplay('appointment_notice_contact_deferred', meta);
     expect(removed.eligible).toBe(false);

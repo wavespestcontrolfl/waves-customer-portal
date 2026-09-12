@@ -9,6 +9,9 @@ const token = 'a'.repeat(64);
 const summary = { serviceDate: '2020-01-01', services: [
   { id: 'service-a', serviceType: 'Pest Control', outcome: 'completed', reportUrl: `/report/${'b'.repeat(32)}` },
   { id: 'service-b', serviceType: 'Lawn Care', outcome: 'incomplete', reportUrl: `/report/${'c'.repeat(32)}` },
+  { id: 'service-c', serviceType: 'Tree & Shrub', outcome: 'follow_up_needed', reportUrl: `/report/${'d'.repeat(32)}` },
+  { id: 'service-d', serviceType: 'Mosquito', outcome: 'customer_concern', reportUrl: `/report/${'e'.repeat(32)}` },
+  { id: 'service-e', serviceType: 'Termite', outcome: 'unexpected_value', reportUrl: `/report/${'f'.repeat(32)}` },
 ] };
 const mount = (path = token) => render(<MemoryRouter initialEntries={[`/visit/${path}`]}><Routes><Route path="/visit/:token" element={<VisitSummaryPage />} /></Routes></MemoryRouter>);
 afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
@@ -17,7 +20,10 @@ it('shows each recorded outcome and opens its own report', async () => {
   vi.stubGlobal('fetch', vi.fn(async () => ({ ok: true, json: async () => summary })));
   mount();
   expect(await screen.findByText('Pest Control')).toBeInTheDocument();
+  expect(screen.getByText('Not completed — we will return')).toBeInTheDocument();
   expect(screen.getByText('Follow-up needed')).toBeInTheDocument();
+  expect(screen.getByText('Concern noted — we will follow up')).toBeInTheDocument();
+  expect(screen.getByText('Service recorded')).toBeInTheDocument();
   expect(screen.getAllByRole('link', { name: /View service report/ }).map((link) => link.getAttribute('href'))).toEqual(summary.services.map((service) => service.reportUrl));
 });
 

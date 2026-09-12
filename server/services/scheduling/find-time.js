@@ -10,7 +10,7 @@
  * auto-dispatch scores a visit's current placement with. Both sides MUST use
  * it: auto-dispatch compares a current placement against the candidates this
  * module produces, so a local copy of the constants here would put the two
- * sides on different scales. No API calls per request.
+ * sides on different scales. Capacity reads use one bounded traffic budget.
  */
 
 const { NOT_A_ROUTE_STOP_STATUSES } = require('../stops-ahead');
@@ -20,7 +20,9 @@ const { HQ, driveMin } = require('../auto-dispatch/geo');
 const { etParts, etDateString } = require('../../utils/datetime-et');
 const { stampedDivergesSql } = require('../stamped-address');
 const { applyAssignable } = require('../technician-eligibility');
-const { arrivalWindowRoutingEnabled, loadArrivalRouteContext, enumerateArrivalPlacements } = require('./arrival-route');
+const { arrivalWindowRoutingEnabled, loadArrivalRouteContext, enumerateArrivalPlacements, evaluateArrivalPlacement } = require('./arrival-route');
+const { SHIFT, capacityEnabled, placementFitsShift } = require('./policy');
+const { serviceFamilyPreference } = require('../auto-dispatch/service-category');
 
 const DAY_START_HOUR = 8;   // 8:00 AM
 const DAY_END_HOUR = 17;    // 5:00 PM
@@ -111,6 +113,93 @@ async function findArrivalWindowSlots(opts) {
   return { slots: slots.slice(0, topN).map((slot, i) => ({ rank: i + 1, ...slot })), evaluated, total_feasible: slots.length };
 }
 
+async function findCapacitySlots(opts) {
+  const { dateFrom, dateTo, durationMinutes = 30, technicianId, topN = 10 } = opts;
+  let query = applyAssignable(db('technicians'));
+  if (technicianId) query = query.where('technicians.id', technicianId);
+  const techs = await query.select('id', 'name');
+  const { getBlackoutLayers } = require('./blackout-dates');
+  let requestedServices = (opts.serviceTypes || [opts.serviceType || opts.serviceKey || ''])
+    .filter(Boolean).map(service_type => ({ service_type }));
+  if (!requestedServices.length && opts.excludeServiceIds?.length) {
+    requestedServices = await db('scheduled_services').whereIn('id', opts.excludeServiceIds).select('service_type');
+  }
+  const inactive = opts.arrivalWindow?.serviceId ? []
+    : await require('../technician-capabilities').inactiveCapabilitiesForServices(db, techs.map(tech => tech.id), requestedServices);
+  const inactiveTechs = new Set(inactive.map(row => row.technician_id));
+  const blackout = opts.includeBlackoutDates ? new Set() : (await getBlackoutLayers(dateFrom, dateTo)).dates;
+  const now = new Date();
+  const today = etDateString(now);
+  const parts = etParts(now);
+  const travel = require('../route-optimizer').createSchedulingTravel();
+  const candidates = [];
+  for (const date of enumerateDates(dateFrom, dateTo, { includeWeekends: opts.includeWeekends })) {
+    if (date < today || blackout.has(date)) continue;
+    for (const tech of techs) {
+      if (inactiveTechs.has(tech.id)) continue;
+      const context = await loadArrivalRouteContext({ date, technicianId: tech.id, now, travel,
+        excludeServiceIds: opts.excludeServiceIds,
+        // The requesting estimate's OWN uncommitted hold must not occupy the
+        // route it is asking about (codex r16 P1) — the legacy/SSR page no
+        // longer adopts that hold, so a tight route could otherwise omit the
+        // customer's still-valid held window and leave nothing confirmable.
+        // loadArrivalRouteContext has always taken this option; capacity
+        // generation simply never passed it.
+        excludeEstimateId: opts.excludeEstimateId,
+        ...(opts.arrivalWindow?.serviceId ? {
+          serviceId: opts.arrivalWindow.serviceId, changes: opts.arrivalWindow.changes,
+        } : { prospective: { lat: opts.lat, lng: opts.lng, estimated_duration_minutes: durationMinutes,
+          service_type: opts.serviceType || opts.serviceKey || requestedServices.map(row => row.service_type).join(' ') } }),
+      });
+      if (!context) continue;
+      if (opts.arrivalWindow?.serviceId && (await require('../technician-capabilities')
+        .inactiveCapabilitiesForServices(db, [tech.id], [context.target])).length) continue;
+      const floor = Math.max(SHIFT.startMinutes, opts.earliestStartMin || 0,
+        date === today ? parts.hour * 60 + parts.minute + 30 : 0);
+      for (let start = Math.ceil(floor / 60) * 60; start + SHIFT.arrivalMinutes <= SHIFT.endMinutes; start += 60) {
+        if (!placementFitsShift(start, start + durationMinutes)) continue;
+        candidates.push({ context, date, tech, start, options: {
+          windowStart: minutesToTime(start), windowEnd: minutesToTime(start + durationMinutes),
+          // Owner policy: ordinary setup/closeout is already in the on-site allowance.
+          durationMinutes, bufferMinutes: 0, allowInsertion: opts.capacityPlacement === true,
+        } });
+      }
+    }
+  }
+  // Pairwise matrix estimates generate candidates; repeated simulation asks
+  // for affected legs at their predicted departures. All Google work shares
+  // one bounded, request-local budget across the complete calendar horizon.
+  for (let pass = 0; pass < 3; pass++) {
+    const legs = [];
+    for (const candidate of candidates) evaluateArrivalPlacement(candidate.context, { ...candidate.options, collectLegs: legs });
+    await travel.preload(legs);
+  }
+  const slots = [];
+  for (const candidate of candidates) {
+    const { context, date, tech, start, options } = candidate;
+    const fit = evaluateArrivalPlacement(context, options);
+    if (!fit.feasible) continue;
+    // Existing save probes have no traffic preload; their fallback must fit too.
+    if (!opts.capacityPlacement && !evaluateArrivalPlacement({ ...context, travel: null }, options).feasible) continue;
+    const index = fit.routeOrder.indexOf(context.target.id);
+    const byId = new Map(context.rows.map(row => [row.id, row]));
+    const familyScore = serviceFamilyPreference(context.rows.filter(row => row.technician_id === tech.id),
+      context.target.service_type, { before: byId.get(fit.routeOrder[index - 1]), after: byId.get(fit.routeOrder[index + 1]) });
+    const daysOut = Math.max(0, (new Date(`${date}T12:00:00Z`) - new Date(`${dateFrom}T12:00:00Z`)) / 86400000);
+    slots.push({ date, technician: { id: tech.id, name: tech.name }, start_time: options.windowStart,
+      end_time: options.windowEnd, detour_minutes: fit.detourMinutes, total_drive_minutes: fit.driveMinutes,
+      score: fit.detourMinutes + daysOut * 0.5 - familyScore, service_family_score: familyScore,
+      occupied_minutes: fit.occupiedMinutes, waiting_minutes: fit.waitingMinutes,
+      estimated_arrival: fit.estimatedArrival, route_arrivals: fit.arrivals,
+      route_mode: 'arrival_windows', travel_source: fit.travelSource, travel_reasons: fit.travelReasons,
+      stops_that_day: fit.arrivals.length - 1, latest_start_min: start,
+    });
+  }
+  slots.sort((a, b) => a.score - b.score || a.waiting_minutes - b.waiting_minutes || a.start_time.localeCompare(b.start_time));
+  return { slots: slots.slice(0, topN).map((slot, i) => ({ rank: i + 1, ...slot })),
+    evaluated: candidates.length, total_feasible: slots.length, travel: travel.diagnostics() };
+}
+
 /**
  * Main entry. Returns ranked candidate slots.
  *
@@ -128,6 +217,7 @@ async function findArrivalWindowSlots(opts) {
  * @returns {Promise<{slots: Array, evaluated: number}>}
  */
 async function findAvailableSlots(opts) {
+  if (capacityEnabled()) return findCapacitySlots(opts);
   const {
     lat, lng,
     durationMinutes = DEFAULT_SERVICE_MIN,
@@ -160,6 +250,22 @@ async function findAvailableSlots(opts) {
   } = opts;
   const stopBuffer = Math.max(0, Number(bufferMinutes) || 0);
   const excludeSet = new Set((excludeServiceIds || []).map(String));
+  // The requesting estimate's OWN uncommitted holds are not route stops for
+  // itself (codex r17 P1). The collision filter downstream already excludes
+  // them, but ROUTE GENERATION treated them as occupied anchors — so a held
+  // 08:00 or 12:00 window (neither is a PREFERRED_WINDOWS slot) dropped out
+  // of both the classified and ASAP pools, and the V1 page, which no longer
+  // adopts that hold, could be left with no way to confirm the time the
+  // customer already holds. Resolved to ids here so every downstream
+  // exclusion — dayStops included — honours it through one set.
+  if (opts.excludeEstimateId) {
+    const ownHolds = await db('scheduled_services')
+      .where({ source_estimate_id: opts.excludeEstimateId })
+      .whereNull('customer_id')
+      .whereNotNull('reservation_expires_at')
+      .select('id');
+    for (const row of ownHolds) excludeSet.add(String(row.id));
+  }
 
   if (lat == null || lng == null) {
     return { error: 'lat/lng required', slots: [] };

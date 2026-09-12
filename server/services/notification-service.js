@@ -46,7 +46,10 @@ function scopeAdminFeedToRole(query, role) {
   );
 }
 
-async function customerPreferenceEnabled(customerId, preferenceKey) {
+// `scheduledServiceId` (app property scope, PR 3): the five appointment keys
+// follow the visit's NON-primary saved property (enforced under
+// GATE_APP_PROPERTY_TEXTS, shadow-logged otherwise). Unknown = not sent.
+async function customerPreferenceEnabled(customerId, preferenceKey, { scheduledServiceId = null } = {}) {
   if (!preferenceKey) return true;
   if (!CUSTOMER_PREFERENCE_KEYS.has(preferenceKey)) {
     logger.error(`[notifications] Unknown customer preference key: ${preferenceKey}`);
@@ -54,9 +57,16 @@ async function customerPreferenceEnabled(customerId, preferenceKey) {
   }
 
   try {
-    const prefs = await db('notification_prefs')
+    const PropertyTexts = require('./property-notification-prefs');
+    // Only the five appointment keys are property-owned; the resolver needs
+    // the whole toggle set of the customer row to compare against.
+    const propertyOwned = !!scheduledServiceId && PropertyTexts.APPOINTMENT_TOGGLES.includes(preferenceKey);
+    let prefs = await db('notification_prefs')
       .where({ customer_id: customerId })
-      .first(preferenceKey);
+      .first(...(propertyOwned ? [...new Set([...PropertyTexts.PROPERTY_PREF_COLUMNS, preferenceKey])] : [preferenceKey]));
+    if (propertyOwned) {
+      prefs = await PropertyTexts.prefsForVisit(prefs, customerId, scheduledServiceId, 'bell');
+    }
     return !prefs || prefs[preferenceKey] !== false;
   } catch (err) {
     // Preference lookup uncertainty must not become an unwanted native push.
@@ -183,12 +193,12 @@ const NotificationService = {
     // unread beside the new one). Errors then PROPAGATE — swallowing one
     // inside a caller's transaction would leave it aborted and doom the
     // commit — so the caller owns containment.
-    const { dedupeKey, dedupeWindowMs, refreshOnDedupe = false, trx: callerTrx = null, relayFailureCall = null, ...createOpts } = opts;
+    const { dedupeKey, dedupeWindowMs, dedupeVersion, refreshOnDedupe = false, trx: callerTrx = null, relayFailureCall = null, ...createOpts } = opts;
     if (!dedupeKey) {
       return this.create({ recipientType: 'admin', category, title, body, ...createOpts, ...(callerTrx ? { connection: callerTrx } : {}) });
     }
     const windowMs = Number(dedupeWindowMs);
-    const metadata = { ...createOpts.metadata, dedupeKey };
+    const metadata = { ...createOpts.metadata, dedupeKey, ...(dedupeVersion === undefined ? {} : { dedupeVersion }) };
     const dedupeAndInsert = async (trx) => {
         await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`admin:${dedupeKey}`]);
         let existingQuery = trx('notifications')
@@ -204,10 +214,13 @@ const NotificationService = {
           const nextTitle = stripEmoji(title) || title;
           const nextBody = stripEmoji(body) || null;
           const nextLink = createOpts.link === undefined ? existing.link : createOpts.link || null;
-          if (refreshOnDedupe && (existing.title !== nextTitle || existing.body !== nextBody || existing.link !== nextLink)) {
-            const existingMeta = typeof existing.metadata === 'string'
-              ? (() => { try { return JSON.parse(existing.metadata); } catch { return {}; } })()
-              : (existing.metadata || {});
+          const existingMeta = typeof existing.metadata === 'string'
+            ? (() => { try { return JSON.parse(existing.metadata); } catch { return {}; } })()
+            : (existing.metadata || {});
+          // A same-count backlog can contain new deadlines or reopened work.
+          // Its optional version refreshes the one standing bell as well.
+          const versionChanged = dedupeVersion !== undefined && existingMeta.dedupeVersion !== dedupeVersion;
+          if (refreshOnDedupe && (versionChanged || existing.title !== nextTitle || existing.body !== nextBody || existing.link !== nextLink)) {
             const refreshed = { title: nextTitle, body: nextBody, link: nextLink,
               metadata: JSON.stringify({ ...existingMeta, ...metadata }), read_at: null };
             await trx('notifications').where({ id: existing.id }).update(refreshed);
@@ -289,7 +302,13 @@ const NotificationService = {
   async notifyCustomer(customerId, category, title, body, opts = {}) {
     const { preferenceKey, dedupeKey, push = true, awaitPush = false, pushOptions = {}, ...createOptsRaw } = opts;
 
-    if (!(await customerPreferenceEnabled(customerId, preferenceKey))) {
+    // The visit this notification is about (same sources as the deep-link
+    // qualifier below): its saved property may own the toggle.
+    const preferenceVisitId = createOptsRaw.appointmentId
+      || (createOptsRaw.metadata && typeof createOptsRaw.metadata === 'object'
+        ? (createOptsRaw.metadata.appointmentId || createOptsRaw.metadata.scheduledServiceId) : null)
+      || null;
+    if (!(await customerPreferenceEnabled(customerId, preferenceKey, { scheduledServiceId: preferenceVisitId }))) {
       return { id: null, suppressed: true, reason: 'preference_disabled' };
     }
 

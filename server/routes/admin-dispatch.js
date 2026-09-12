@@ -41,7 +41,7 @@ const { resolveZoneRowsImageDrift } = require('../services/service-report/zone-d
 
 const { customerOnAutopay } = require('../services/autopay-eligibility');
 
-const { assignDispatchJob, emitDispatchJobUpdate } = require('../services/dispatch-assignment');
+const { assignDispatchJob, emitDispatchJobUpdate, flushDispatchQualityDates } = require('../services/dispatch-assignment');
 const { detectServiceLine, getAdvisoryDefaults, SERVICE_LINE_IDS } = require('../services/service-report/service-line-configs');
 
 const { loadActiveConfig: loadPestPressureConfig } = require('../services/pest-pressure/store');
@@ -2787,6 +2787,7 @@ router.put('/:serviceId/reorder', async (req, res, next) => {
   try {
     const { lockTechDays } = require('../services/scheduling/tech-day-lock');
     let found = true;
+    let reorderedDay = null;
     await db.transaction(async (trx) => {
       const prov = await trx('scheduled_services')
         .where({ id: req.params.serviceId })
@@ -2799,7 +2800,18 @@ router.put('/:serviceId/reorder', async (req, res, next) => {
         .modify((q) => (prov.technician_id ? q.where('technician_id', prov.technician_id) : q.whereNull('technician_id')))
         .update({ route_order: req.body.routeOrder });
       if (updated !== 1) throw Object.assign(new Error('schedule changed while reordering'), { code: 'STALE_OPTIMIZE' });
+      reorderedDay = prov.day;
     });
+    // A manual reorder writes route_order directly, outside the batched
+    // dispatch/rebooker paths — without this the day's card stays stale
+    // after an operator fixes the route (codex #4295 r2 P2).
+    if (reorderedDay) {
+      try {
+        await require('../services/scheduling/quality-after-change').refreshScheduleQualityAfterChange({ dates: [reorderedDay] });
+      } catch (e) {
+        logger.error(`[dispatch] reorder route quality refresh failed: ${e.message}`);
+      }
+    }
     res.json({ success: true, ...(found ? {} : { updated: 0 }) });
   } catch (err) {
     if (err.code === 'STALE_OPTIMIZE') return res.status(409).json({ error: 'Schedule changed while reordering — reload and retry' });
@@ -2817,6 +2829,7 @@ router.put('/reorder/bulk', async (req, res, next) => {
   try {
     const { order } = req.body;
     const { lockTechDays } = require('../services/scheduling/tech-day-lock');
+    const reorderedDays = new Set();
     await db.transaction(async (trx) => {
       const rows = await trx('scheduled_services')
         .whereIn('id', (order || []).map((i) => i.serviceId))
@@ -2832,8 +2845,19 @@ router.put('/reorder/bulk', async (req, res, next) => {
           .modify((q) => (prov.technician_id ? q.where('technician_id', prov.technician_id) : q.whereNull('technician_id')))
           .update({ route_order: item.routeOrder });
         if (updated !== 1) throw Object.assign(new Error('schedule changed while reordering'), { code: 'STALE_OPTIMIZE' });
+        reorderedDays.add(prov.day);
       }
     });
+    // One refresh for every date this bulk reorder touched — a manual
+    // reorder writes route_order directly, outside the batched
+    // dispatch/rebooker paths (codex #4295 r2 P2).
+    if (reorderedDays.size) {
+      try {
+        await require('../services/scheduling/quality-after-change').refreshScheduleQualityAfterChange({ dates: [...reorderedDays] });
+      } catch (e) {
+        logger.error(`[dispatch] bulk reorder route quality refresh failed: ${e.message}`);
+      }
+    }
     res.json({ success: true });
   } catch (err) {
     if (err.code === 'STALE_OPTIMIZE') return res.status(409).json({ error: 'Schedule changed while reordering — reload and retry' });
@@ -2887,7 +2911,7 @@ function recapStatusForReason(reason) {
   // Conflict: pest-control gate, a cancelled/skipped visit that can't be
   // recapped, or a stale recap against a job rescheduled to a future day.
   if (reason === 'not_pest_control' || reason === 'service_cancelled' || reason === 'service_skipped'
-    || reason === 'future_scheduled_date') return 409;
+    || reason === 'future_scheduled_date' || reason === 'visit_identity_changed') return 409;
   return 400;
 }
 
@@ -2992,7 +3016,7 @@ router.post('/:serviceId/pest-recap', async (req, res, next) => {
     }
     const { actorType, actorId } = recapActor(req);
     const {
-      technicianNotes, products, productsConfirmed, productsPreserve, customerRecap, sendSms, clientPestRating,
+      technicianNotes, products, productsConfirmed, productsPreserve, customerRecap, sendSms, clientPestRating, expectedVisit,
     } = req.body || {};
     const result = await PestRecap.submitRecap({
       serviceId: req.params.serviceId,
@@ -3005,6 +3029,7 @@ router.post('/:serviceId/pest-recap', async (req, res, next) => {
       customerRecap,
       sendSms: !!sendSms,
       clientPestRating: clientPestRating == null ? null : clientPestRating,
+      expectedVisit: expectedVisit && typeof expectedVisit === 'object' && !Array.isArray(expectedVisit) ? expectedVisit : null,
     });
     if (!result.ok) return res.status(recapStatusForReason(result.reason)).json({ error: result.reason });
     await settleRecapSupplies(req.params.serviceId, result);
@@ -3849,24 +3874,26 @@ router.get('/:serviceId/rain-out-options', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
-// POST /api/admin/dispatch/:serviceId/rain-out/custom-preview
-// body: { message, target: { date, window } }
+// POST /api/admin/dispatch/:serviceId/rain-out/sms-preview
+// body: { reasonCode, message, target: { date, window } }
 //
-// Server-side segment counter for the Quick Move sheet's Custom mode:
-// renders the EXACT body commit() would send (same template row, link
+// Server-side segment counter for the Quick Move sheet's message box:
+// renders the body commit() measures (the Custom rung's exact body, or a
+// preset reason's v3 notice + appended note — same template row, link
 // selection, and renderer normalizations) and returns the 2-segment math —
 // the sheet keeps no client-side render mirrors (codex #3363 r9).
 // Advisory + read-only: never mints short codes, never moves anything;
 // commit() re-renders and enforces.
-router.post('/:serviceId/rain-out/custom-preview', async (req, res, next) => {
+router.post('/:serviceId/rain-out/sms-preview', async (req, res, next) => {
   try {
-    const { message, target } = req.body || {};
+    const { reasonCode, message, target } = req.body || {};
     if (target?.date && !/^\d{4}-\d{2}-\d{2}$/.test(String(target.date))) {
       return res.status(400).json({ error: 'target.date must be YYYY-MM-DD' });
     }
     const RainOut = require('../services/rain-out');
-    const result = await RainOut.previewCustomSms({
+    const result = await RainOut.previewMovedSms({
       serviceId: req.params.serviceId,
+      reasonCode,
       customMessage: message,
       target,
     });
@@ -4051,6 +4078,12 @@ router.post('/:serviceId/rain-out', async (req, res, next) => {
     // due windows (and mark the notice sent) only when that SMS actually went
     // out; otherwise leave the 24h/72h reminder pending so the cron still
     // reminds the customer on the new slot.
+    // Dates this rain-out touched, refreshed once after the loop — a route
+    // -scoped rain-out moves a whole day's stops (codex #4295 r1 P2). Seeded
+    // with the dates commit()'s own per-job rebooker calls already collected
+    // (their shared qualityDates Set, codex #4295 r2 P2) so this one flush
+    // covers those too instead of each rebooker call refreshing inline.
+    const qualityDates = new Set(result.qualityDates || []);
     for (const moved of result.results || []) {
       if (!moved.ok) continue;
       // A member carried by its visit's unit move (coveredByVisit) had its
@@ -4064,10 +4097,15 @@ router.post('/:serviceId/rain-out', async (req, res, next) => {
         }
       }
       try {
-        await emitDispatchJobUpdate({ jobId: moved.id, actorId: req.technicianId });
+        await emitDispatchJobUpdate({ jobId: moved.id, actorId: req.technicianId, qualityDates });
       } catch (err) {
         logger.error(`[dispatch] rain-out board broadcast failed for ${moved.id}: ${err.message}`);
       }
+    }
+    try {
+      await flushDispatchQualityDates(qualityDates);
+    } catch (err) {
+      logger.error(`[dispatch] rain-out route quality refresh failed: ${err.message}`);
     }
 
     logger.info(
@@ -4103,7 +4141,33 @@ router.post('/:serviceId/rain-out', async (req, res, next) => {
 // `notify` is explicit and suppresses ONLY the immediate customer text —
 // reminder re-sync, tracker refresh and board broadcasts always run.
 const SERIES_EFFECTS_LEASE_MS = 5 * 60 * 1000;
-async function applySeriesMoveEffects({ result, serviceId, newDate, newWindow, notify: notifyArg, actorId, reasonText }) {
+// What this series notice IS, decided once: which template renders it, the
+// message type it is recorded under, and whether it carries a promised slot.
+// Separated from applySeriesMoveEffects, which is far over the complexity
+// budget and must not grow with it (codex P2 round 13).
+//
+// The message type is the REAL template identity: a placement confirmation
+// tells the customer their later commitments are unchanged until staff
+// review, so it must not read downstream as the series-move confirmation
+// that supersedes every sibling's promised window. And rendered_slot_ms is
+// recorded ONLY when the text actually quoted an arrival range — with a
+// windowless anchor the copy omits window_text, while rescheduleReminderTime
+// would default the missing start to 08:00, recording a promised time the
+// customer was never given for the no-show detector to alert against (both
+// codex P1, PR #4403 round 12).
+function seriesNoticeIdentity({ result, newDate, startForText }) {
+  const placement = result.futurePlacementDays === 3;
+  const renderedSlotMs = startForText
+    ? parseETDateTime(rescheduleReminderTime(String(newDate).split('T')[0], { start: startForText })).getTime()
+    : null;
+  return {
+    templateKey: placement ? 'appointment_recurring_placement_confirmed' : 'appointment_series_rescheduled',
+    messageType: placement ? 'appointment_recurring_placement_confirmed' : 'reschedule_series_confirmation',
+    slotMeta: renderedSlotMs ? { rendered_slot_ms: renderedSlotMs } : {},
+  };
+}
+
+async function applySeriesMoveEffects({ result, serviceId, newDate, newWindow, notify: notifyArg, actorId, reasonText, qualityDates = null }) {
   const occurrences = Array.isArray(result.rescheduledOccurrences) ? result.rescheduledOccurrences : [];
   // The text is driven by the intent the OPERATION was recorded with
   // (result.notifyRequested — set by the move, carried by a replay, read
@@ -4311,12 +4375,31 @@ async function applySeriesMoveEffects({ result, serviceId, newDate, newWindow, n
         if (!synced) allRemindersSynced = false;
       }
       let allBroadcast = true;
+      // A series move broadcasts every future occurrence; one refresh covers
+      // all of their dates (codex #4295 r1 P2). A caller that already
+      // collected the rebooker's own move dates (codex #4295 r2 P2) hands
+      // its Set in so this reuses it instead of flushing twice; a caller
+      // with none (the reconciler, replaying an already-committed row) gets
+      // its own.
+      // A caller that owns the Set flushes it once itself after every series
+      // effect has settled — a batch (rain-out, Edit Appointment) must not
+      // refresh per series (codex #4295 r3 P2); only a caller with none gets
+      // the flush here.
+      const ownsFlush = !qualityDates;
+      const seriesQualityDates = qualityDates || new Set();
       for (const occurrence of [...occurrences, ...followUps]) {
         try {
-          await emitDispatchJobUpdate({ jobId: occurrence.id, actorId });
+          await emitDispatchJobUpdate({ jobId: occurrence.id, actorId, qualityDates: seriesQualityDates });
         } catch (err) {
           allBroadcast = false;
           logger.error(`[dispatch] series reschedule board broadcast failed for ${occurrence.id}: ${err.message}`);
+        }
+      }
+      if (ownsFlush) {
+        try {
+          await flushDispatchQualityDates(seriesQualityDates);
+        } catch (err) {
+          logger.error(`[dispatch] series reschedule route quality refresh failed: ${err.message}`);
         }
       }
       // Completion means EVERY occurrence's reminder synced AND every board
@@ -4443,6 +4526,15 @@ async function applySeriesMoveEffects({ result, serviceId, newDate, newWindow, n
         const startForText = anchorOcc?.windowStart || parseRescheduleWindow(newWindow).start;
         const arrivalRange = arrivalWindowRange(startForText);
         const windowText = arrivalRange ? `, ${formatSmsTimeRange(arrivalRange)}` : '';
+        // Persist the promised arrival instant the same way the single-visit
+        // reschedule path does (appointment-reminders.js's reschedule notice:
+        // rendered_slot_ms: newApptTime.getTime()) — without it the no-show
+        // detector's promise-evidence predicate (messaging_audit_log rows
+        // with purpose='appointment' need rendered_slot_ms IS NOT NULL to
+        // count as a scheduling notice) never picks this series notice up,
+        // and keeps enforcing the pre-move window after a customer-notified
+        // series move (codex P1).
+        const notice = seriesNoticeIdentity({ result, newDate, startForText });
         // sendOutcome: the sender reports a DEFERRED send (send window,
         // provider hold) separately from a definitive non-send, and
         // providerAccepted once ANY recipient's handoff succeeded — read in
@@ -4451,12 +4543,12 @@ async function applySeriesMoveEffects({ result, serviceId, newDate, newWindow, n
         const sendOutcome = {};
         try {
           const AppointmentReminders = require('../services/appointment-reminders');
-          const { PREFS_UNAVAILABLE } = require('../services/customer-contact');
-          const prefs = await db('notification_prefs').where({ customer_id: customer.id }).first().catch(() => PREFS_UNAVAILABLE);
+          // Visit-aware (app property scope, PR 3): the anchor visit's NON-primary
+          // saved property owns notify-primary for the series notice.
+          const prefs = await AppointmentReminders.visitPrefsRow(customer.id, serviceId);
           notificationSent = await AppointmentReminders.safeSendAppointment(customer, prefs || {}, async (contact) => {
             const firstName = String(contact?.name || '').trim().split(/\s+/)[0] || customer.first_name || 'there';
-            return renderRequiredTemplate(result.futurePlacementDays === 3
-              ? 'appointment_recurring_placement_confirmed' : 'appointment_series_rescheduled', {
+            return renderRequiredTemplate(notice.templateKey, {
               first_name: firstName,
               start_date: displayDate,
               window_text: windowText,
@@ -4465,7 +4557,8 @@ async function applySeriesMoveEffects({ result, serviceId, newDate, newWindow, n
               entity_type: 'scheduled_service',
               entity_id: serviceId,
             });
-          }, 'reschedule_series_confirmation', 'appointment', { scheduled_service_id: serviceId, series_move_id: seriesMoveId, reasonText }, {
+          }, notice.messageType, 'appointment',
+          { scheduled_service_id: serviceId, series_move_id: seriesMoveId, reasonText, ...notice.slotMeta }, {
             // Authenticated staff explicitly asked to notify the customer of
             // the series move — exempt from the 8AM-8PM send window like the
             // neighboring rain-out and quick-move actions. A CUSTOMER-driven
@@ -4560,7 +4653,7 @@ async function applySeriesMoveEffects({ result, serviceId, newDate, newWindow, n
 // effects of every such row from the operation's own recorded result —
 // only for surfaces whose effects run through applySeriesMoveEffects (the
 // customer web page and Quick Move keep their own effect paths).
-const RECONCILE_SURFACES = ['dispatch_board', 'edit_modal', 'sms_reply', 'customer_web', 'quick_move'];
+const RECONCILE_SURFACES = ['dispatch_board', 'edit_modal', 'sms_reply', 'customer_web', 'quick_move', 'call_reschedule'];
 // Surfaces whose series text is an authenticated staff action (quiet-hours
 // exempt); every customer-driven surface stays inside the send window.
 const STAFF_SERIES_SURFACES = new Set(['dispatch_board', 'edit_modal', 'quick_move']);
@@ -4692,6 +4785,11 @@ router.post('/:serviceId/reschedule', async (req, res, next) => {
       const observedAnchor = {};
       await resolveRescheduleWindow(req.params.serviceId, newWindow, observedAnchor);
       await ensureObservedAnchor(req.params.serviceId, observedAnchor);
+      // Shared with applySeriesMoveEffects below: the rebooker collects its
+      // own before/after (+ shifted follow-up) dates into this Set instead
+      // of running its own repair/measurement pass, and the effects call
+      // flushes everything once (codex #4295 r2 P2).
+      const qualityDates = new Set();
       const result = await SmartRebooker.rescheduleSeries(req.params.serviceId, newDate, newWindow, reasonCode || 'admin', 'admin', {
         allowLive: true,
         adminWindowRules: true,
@@ -4711,6 +4809,7 @@ router.post('/:serviceId/reschedule', async (req, res, next) => {
         ...(rescheduleExpectPredicate(observedAnchor)
           ? { expectAnchor: rescheduleExpectPredicate(observedAnchor) }
           : {}),
+        qualityDates,
       });
       const effects = await applySeriesMoveEffects({
         result,
@@ -4720,7 +4819,15 @@ router.post('/:serviceId/reschedule', async (req, res, next) => {
         notify: notifyCustomer !== false,
         actorId: req.technicianId,
         reasonText,
+        qualityDates,
       });
+      // This branch owns the Set (rebooker + every occurrence's broadcast):
+      // one refresh for the whole series move (codex #4295 r3 P2).
+      try {
+        await flushDispatchQualityDates(qualityDates);
+      } catch (err) {
+        logger.error(`[dispatch] series reschedule route quality refresh failed: ${err.message}`);
+      }
       const { rescheduledOccurrences, ...response } = result;
       return res.json({
         ...response,
@@ -4736,7 +4843,13 @@ router.post('/:serviceId/reschedule', async (req, res, next) => {
     // rewinds the tracker lifecycle and frees the tech. Terminal states
     // (completed / cancelled / skipped) still 409. The customer-SMS
     // self-serve path (reschedule-sms.js) does NOT get this override.
-    const rescheduleOptions = { allowLive: true, actorId: req.technicianId || null };
+    // Shared by every quality refresh below (the rebooker's own move dates,
+    // the primary job's board broadcast, and any grouped sibling) so one
+    // flush covers the whole request instead of the rebooker running its
+    // own repair/measurement pass and emitDispatchJobUpdate running another
+    // right after it (codex #4295 r2 P2).
+    const qualityDates = new Set();
+    const rescheduleOptions = { allowLive: true, actorId: req.technicianId || null, qualityDates };
     const hasTechnicianId = Object.prototype.hasOwnProperty.call(req.body || {}, 'technicianId');
     if (hasTechnicianId) {
       if (req.techRole !== 'admin') return res.status(403).json({ error: 'Admin access required' });
@@ -4859,16 +4972,24 @@ router.post('/:serviceId/reschedule', async (req, res, next) => {
         notify: notifyCustomer !== false,
         actorId: req.technicianId,
         reasonText,
+        qualityDates,
       });
       // Grouped siblings moved singly by moveVisitAsUnit are outside the
       // series effects' broadcast scope — other boards need them too
-      // (codex #3609 r6).
+      // (codex #3609 r6). Same Set as the rebooker call and the series
+      // effects above: this branch owns it, one flush covers the whole
+      // collective move (codex #4295 r4 P2).
       for (const movedId of (result.visitMove?.moved || []).map(String).filter((id) => id !== String(req.params.serviceId))) {
         try {
-          await emitDispatchJobUpdate({ jobId: movedId, actorId: req.technicianId });
+          await emitDispatchJobUpdate({ jobId: movedId, actorId: req.technicianId, qualityDates });
         } catch (err) {
           logger.error(`[dispatch] series reschedule board broadcast failed for grouped member ${movedId}: ${err.message}`);
         }
+      }
+      try {
+        await flushDispatchQualityDates(qualityDates);
+      } catch (err) {
+        logger.error(`[dispatch] collective move route quality refresh failed: ${err.message}`);
       }
       const { rescheduledOccurrences, ...response } = result;
       return res.json({
@@ -4889,18 +5010,30 @@ router.post('/:serviceId/reschedule', async (req, res, next) => {
     const willNotify = notifyCustomer !== false && !partialVisitMove;
     await syncRescheduleReminder(req.params.serviceId, newDate, effectiveWindow, { willNotify, preserveMoveHold: partialVisitMove });
     try {
-      await emitDispatchJobUpdate({ jobId: req.params.serviceId, actorId: req.technicianId });
+      // qualityDates: the same Set already passed to the rebooker above —
+      // this just adds the primary job's before/after dates to it instead
+      // of running its own refresh right after the rebooker's (codex #4295
+      // r2 P2); the flush below (shared with the grouped-member loop) is
+      // the one refresh for all of it.
+      await emitDispatchJobUpdate({ jobId: req.params.serviceId, actorId: req.technicianId, qualityDates });
     } catch (err) {
       logger.error(`[dispatch] reschedule board broadcast failed for ${req.params.serviceId}: ${err.message}`);
     }
     // A grouped stop moved as a unit: every sibling that landed is a
     // committed change other open boards must see too (codex #3609 r5).
+    // Reuses the same qualityDates Set as the rebooker call and the primary
+    // job's broadcast above — one flush below covers all three.
     for (const movedId of (result.visitMove?.moved || []).map(String).filter((id) => id !== String(req.params.serviceId))) {
       try {
-        await emitDispatchJobUpdate({ jobId: movedId, actorId: req.technicianId });
+        await emitDispatchJobUpdate({ jobId: movedId, actorId: req.technicianId, qualityDates });
       } catch (err) {
         logger.error(`[dispatch] reschedule board broadcast failed for grouped member ${movedId}: ${err.message}`);
       }
+    }
+    try {
+      await flushDispatchQualityDates(qualityDates);
+    } catch (err) {
+      logger.error(`[dispatch] grouped-member route quality refresh failed: ${err.message}`);
     }
     if (partialVisitMove) {
       const stuck = (result.visitMove.failed || []).map((f) => f.id);
@@ -4937,6 +5070,10 @@ router.post('/:serviceId/reschedule', async (req, res, next) => {
         req.params.serviceId,
         String(newDate).split('T')[0],
         noticeStart,
+        // One notice for the WHOLE stop: recorded as stop-wide so the no-show
+        // detector treats it as superseding every member's own promise rather
+        // than only the tapped service's (codex P1, PR #4403 round 26).
+        { stopWideFor: result.visitMove?.visitId || null },
       );
       return res.json({ ...result, notificationSent: notice.sent, notificationError: notice.error });
     }

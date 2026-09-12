@@ -735,6 +735,25 @@ function initScheduledJobs() {
     }
   }, { timezone: 'America/New_York' });
 
+  // DAILY 3:20 AM ET — primary-property backstop. The same customer-create
+  // paths never create the lazily-backfilled primary customer_properties
+  // row, so a booking for a fresh lead anchored to NULL (prod 2026-09-07:
+  // 144 rows missing). Daily is enough (owner 2026-09-07) once #4115
+  // lands: from then on the booking anchor backfills a missing primary at
+  // booking time and this only has to catch customers nothing read in
+  // between. Until #4115 merges this sweep is the only backstop, so #4115
+  // merges first. Own job_health name so the watchdog reports it apart
+  // from the geocode sweep.
+  cron.schedule('20 3 * * *', async () => {
+    try {
+      const { runExclusive } = require('../utils/cron-lock');
+      const { sweepMissingPrimaryProperties } = require('./customer-properties');
+      await runExclusive('primary-property-backstop', () => sweepMissingPrimaryProperties());
+    } catch (err) {
+      logger.error(`[customer-properties] primary backstop sweep failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
   // =========================================================================
   // DAILY 2:40AM — Knowledge-index sync (hybrid knowledge search, lane A2):
   // re-reads every corpus connector, upserts changed chunks, embeds pending
@@ -1146,7 +1165,29 @@ function initScheduledJobs() {
     // Call-time read (NOT the baked isEnabled snapshot) so a Railway var flip
     // takes effect on the next tick without a redeploy — matching the
     // documented gate contract and the service's own internal check.
-    if (!gateEnvValue('GATE_ROUTE_REORDER')) return;
+    if (!gateEnvValue('GATE_ROUTE_REORDER')) {
+      // The reorder pass below is also the ONLY nightly trigger for the
+      // route-quality alert reconciliation folded into it — with reorder
+      // off, existing defects never got an initial card and no card ever
+      // expired, even with the measurement + alert gates on (codex #4295
+      // r2 P2). Run just that reconciliation, under its own gates, over the
+      // same six-date band; skip repair and distance optimization entirely.
+      // No runExclusive: unlike the reorder pass, this never writes
+      // route_order, so it needs none of that writer-serialization, and
+      // the reconciler already self-serializes on its own advisory lock.
+      try {
+        const { runScheduleQualityAlertsOnly } = require('./route-reorder');
+        const result = await runScheduleQualityAlertsOnly();
+        if (result.status === 'failed') {
+          logger.error('[route-reorder] quality-alerts-only cron run failed');
+        } else if (result.status === 'reconciled') {
+          logger.info(`[route-reorder] quality-alerts-only cron run: created=${result.created} resolved=${result.resolved}`);
+        }
+      } catch (err) {
+        logger.error(`[route-reorder] quality-alerts-only cron run failed: ${err.message}`);
+      }
+      return;
+    }
     logger.info('Running: Route-Tiers nightly reorder');
     try {
       // runExclusive x2: 'route-tiers-nightly' guards against deploy-overlap
@@ -1430,6 +1471,25 @@ function initScheduledJobs() {
       }
     } catch {
       logger.error('[sms-operations] commitment watcher did not complete');
+    }
+  }, { timezone: 'America/New_York' });
+
+  // The same watchdog and persisted identities own reminders before and
+  // after rollback. Cards add a five-minute cadence to the daily sweep.
+  cron.schedule('0 */5 * * * *', async () => {
+    if (!require('./callback-cards').enabled()) return;
+    try {
+      const { runCallCommitmentsWatchdog } = require('./call-commitments-watchdog');
+      const result = await runCallCommitmentsWatchdog();
+      if (result?.skipped === true && result.reason !== 'gated_off' && result.reason !== 'lease_held') {
+        const { recordJobStart, recordJobEnd } = require('../utils/cron-lock');
+        const t0 = Date.now();
+        await recordJobStart('call-commitments-watchdog').catch(() => {});
+        await recordJobEnd('call-commitments-watchdog', t0, new Error(`tick skipped: ${result.reason || 'no_connection'}`)).catch(() => {});
+        throw new Error(`Callback reminder tick skipped: ${result.reason || 'no_connection'}`);
+      }
+    } catch (err) {
+      logger.error(`[callback-cards] tick failed (${err.code || err.name || 'error'})`);
     }
   }, { timezone: 'America/New_York' });
 
@@ -2464,6 +2524,19 @@ function initScheduledJobs() {
     } catch (err) {
       logger.error(`Stripe webhook events purge failed: ${err.message}`);
     }
+    // Same 90-day sweep for property_text_decisions (the ruling-R5 shadow
+    // log for appointment texts by saved property): the review window is a
+    // week; 90 days keeps the flip's evidence around.
+    try {
+      const cutoff = new Date(Date.now() - 90 * 24 * 60 * 60 * 1000);
+      const db = require('../models/db');
+      if (await db.schema.hasTable('property_text_decisions')) {
+        const purged = await db('property_text_decisions').where('created_at', '<', cutoff).del();
+        if (purged > 0) logger.info(`[property-texts-purge] Removed ${purged} property_text_decisions row(s) older than 90 days`);
+      }
+    } catch (err) {
+      logger.error(`property_text_decisions purge failed: ${err.message}`);
+    }
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
@@ -3218,6 +3291,10 @@ function initScheduledJobs() {
         const StatementFollowups = require('./payer-statement-followups');
         const result = await StatementFollowups.runPending();
         logger.info(`Payer statement dunning done: ${result.sent} sent, ${result.skipped} skipped`);
+        // Settled-statement child closeouts that failed or never ran have no
+        // other retry (GitHub r10 P2 #4127); gated on its own flag inside.
+        const sweep = await require('./invoice-issued-closeout').retrySettledStatementCloseouts();
+        if (sweep.retried) logger.info(`Settled-statement closeout retry: ${sweep.retried} retried, ${sweep.closed} closed`);
       });
     } catch (err) {
       logger.error(`Payer statement dunning failed: ${err.message}`);
@@ -3687,8 +3764,8 @@ function initScheduledJobs() {
             customerId: msg.customer_id || undefined,
             identityTrustLevel: msg.customer_id ? 'phone_matches_customer' : 'phone_provided_unverified',
             entryPoint: 'scheduled_sms_cron',
-            preDispatchCheck: () => require('./messaging/deferred-replay-registry')
-              .preDispatchDeferredReplay(claimMeta.entry_point, { ...claimMeta,
+            withSmsHandoff: require('./messaging/deferred-replay-registry')
+              .deferredSmsHandoff(claimMeta.entry_point, { ...claimMeta,
                 customer_id: msg.customer_id || claimMeta.customer_id || null,
                 to_phone: msg.to_phone || null }),
             // Send-window operator provenance: only rows an operator
@@ -3711,6 +3788,10 @@ function initScheduledJobs() {
               ? claimMeta.stamp_receipt_invoice_id
               : claimMeta.invoice_id,
             ...(claimMeta.estimate_id ? { estimateId: claimMeta.estimate_id } : {}),
+            // The visit a deferred appointment notice is about: the consent
+            // validator resolves the per-property toggles from it (app
+            // property scope, PR 3) exactly like the immediate send did.
+            ...(claimMeta.scheduled_service_id ? { appointmentId: claimMeta.scheduled_service_id } : {}),
             // Inbound-reply provenance survives the retry rail: a transient
             // provider failure on an immediate AI reply (Twilio 429/5xx)
             // re-queues here minutes later — still an answer to the
@@ -3896,8 +3977,12 @@ function initScheduledJobs() {
               `, [completedAt]),
             });
             logger.info(`[scheduled-sms] ${msg.id} held outside the 8AM-8PM ET send window — rescheduled for ${holdRetryAt.toISOString()} (attempt refunded)`);
-          } else if ((smsResult.retryable || smsResult.code === 'CONSENT_LOOKUP_FAILED')
+          } else if ((smsResult.retryable || smsResult.code === 'CONSENT_LOOKUP_FAILED' || smsResult.code === 'MOVE_HOLD')
                      && (Number(claimMeta.scheduled_sms_attempts) || 1) < SCHEDULED_SMS_MAX_ATTEMPTS) {
+            // MOVE_HOLD: the replay now names its visit (appointmentId, app
+            // property scope PR 3), so a grouped-move hold stamped on that
+            // visit — or its fail-closed read — answers the send exactly like
+            // the immediate path: a deferral, never a terminal block.
             // Transient provider failure (Twilio 429/5xx/timeout) or a DB
             // blip during the consent lookup (CONSENT_LOOKUP_FAILED carries
             // no retry metadata but is retry-advised by contract): re-queue
@@ -3920,9 +4005,7 @@ function initScheduledJobs() {
               status: 'scheduled',
               scheduled_for: retryAt,
               updated_at: completedAt,
-              // The provider's HTTP status is the replay's proof of a refusal
-              // (408/429/5xx = no message created) versus an ambiguous timeout.
-              metadata: db.raw("COALESCE(metadata, '{}'::jsonb) || jsonb_build_object('provider_retry_at', ?::timestamptz, 'provider_retry_code', ?::text, 'provider_retry_http_status', ?::int)", [completedAt, smsResult.code || null, Number.isInteger(smsResult.providerHttpStatus) ? smsResult.providerHttpStatus : null]),
+              metadata: db.raw("COALESCE(metadata, '{}'::jsonb) || jsonb_build_object('provider_retry_at', ?::timestamptz, 'provider_retry_code', ?::text)", [completedAt, smsResult.code || null]),
             });
             logger.warn(`[scheduled-sms] Retryable failure on ${msg.id} (${smsResult.code}); retry at ${retryAt.toISOString()} (attempt ${Number(claimMeta.scheduled_sms_attempts) || 1}/${SCHEDULED_SMS_MAX_ATTEMPTS})`);
           } else {
@@ -3971,7 +4054,14 @@ function initScheduledJobs() {
                 // standalone review fallback, flip referral/report state into
                 // the admin retry lane). Armed ONLY here, never on timers,
                 // so fallbacks can't race a still-retryable replay.
-                await runTerminalHookDurably(msg.id, claimMeta.entry_point, claimMeta);
+                // provider_terminal_rejection carries the adapter's proof of
+                // a synchronous, definitive provider rejection (a terminal
+                // Twilio code) into the hook — visit_summary_deferred's
+                // onTerminal uses it to settle an unknown_delivery effect as
+                // suppressed instead of leaving it parked as unknown; other
+                // entry points ignore the field.
+                await runTerminalHookDurably(msg.id, claimMeta.entry_point,
+                  { ...claimMeta, provider_terminal_rejection: smsResult.terminal === true });
               }
               // The customer was never answered — used + parked cards return.
               const blockedMeta = await readFreshMeta();

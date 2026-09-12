@@ -44,8 +44,17 @@ const tableResults = {
 jest.mock('../models/db', () => {
   const mkChain = (resolveFn) => {
     const q = {};
-    const passthrough = ['where', 'whereIn', 'whereNot', 'whereNull', 'whereNotNull', 'whereRaw', 'orderBy', 'limit', 'offset'];
-    for (const m of passthrough) q[m] = (...args) => { q._calls = q._calls || []; q._calls.push([m, args]); return q; };
+    const passthrough = ['where', 'whereIn', 'whereNot', 'whereNull', 'whereNotNull', 'whereRaw', 'orWhere', 'orWhereNot', 'orWhereNull', 'orderBy', 'limit', 'offset'];
+    for (const m of passthrough) {
+      q[m] = (...args) => {
+        q._calls = q._calls || [];
+        q._calls.push([m, args]);
+        // Grouped clauses record their nested calls, as knex applies them:
+        // the payer-owned filter matches payer_id OR the withdrawal stamp.
+        if (typeof args[0] === 'function') args[0].call(q);
+        return q;
+      };
+    }
     q.select = (...args) => { q._selected = args; return q; };
     q.first = async () => resolveFn(q, true);
     q.then = (onOk, onErr) => Promise.resolve().then(() => resolveFn(q, false)).then(onOk, onErr);

@@ -41,21 +41,34 @@ export default function useEmailEditor(userId) {
   );
   const { drafts, saved, sending, attempts } = editor;
   const composeForm = drafts.compose;
-  const [showCompose, setShowCompose] = useState(false);
+  const [showCompose, setComposeOpen] = useState(false);
   const [drafting, setDrafting] = useState(false);
   const [draftResult, setDraftResult] = useState(null);
+  const [sendFeedback, setSendFeedback] = useState({});
+  const setShowCompose = (visible) => {
+    if (visible) setSendFeedback((current) => ({ ...current, compose: null }));
+    setComposeOpen(visible);
+  };
   const clearDraftResult = useCallback(() => setDraftResult(null), []);
   const changeDrafts = (update) => updateEmailDrafts(draftSession, update);
-  const setReplyDraft = (id, text) =>
+  const setReplyDraft = (id, text) => {
+    // A new or discarded draft in this conversation must not sit under an
+    // older "Reply sent." banner that reads as if the new text went out.
+    setSendFeedback((current) =>
+      current.reply?.messageId === id ? { ...current, reply: null } : current,
+    );
     changeDrafts((current) => ({
       ...current,
       replies: { ...current.replies, [id]: text },
     }));
-  const setComposeForm = (update) =>
+  };
+  const setComposeForm = (update) => {
+    setSendFeedback((current) => ({ ...current, compose: null }));
     changeDrafts((current) => ({
       ...current,
       compose: update(current.compose),
     }));
+  };
   const hasComposeDraft = Object.values(composeForm).some(Boolean);
   const hasDrafts =
     hasComposeDraft || Object.values(drafts.replies).some(Boolean);
@@ -68,6 +81,7 @@ export default function useEmailEditor(userId) {
     const key = kind === "compose" ? "compose" : `reply:${replyId}`;
     if (draftSession.attempts[key]) return;
     if (!setEmailSending(draftSession, kind, true)) return;
+    setSendFeedback((current) => ({ ...current, [kind]: null }));
     const attempt = { id: crypto.randomUUID(), status: "running", startedAt: new Date().toISOString(), snapshot, replyId };
     if (!updateEmailSendAttempt(draftSession, key, attempt)) {
       setEmailSending(draftSession, kind, false);
@@ -100,13 +114,19 @@ export default function useEmailEditor(userId) {
       if (!response.ok || !result.success || !result.messageId) throw new Error("Email outcome unknown");
       accepted = true;
       updateEmailSendAttempt(draftSession, key, { ...attempt, status: "provider_accepted", messageId: result.messageId }, attempt.id);
-      await onSuccess();
+      // onSuccess reports whether the submitted snapshot was still the draft;
+      // edits made while the send was pending stay behind, unsent, and the
+      // banner must say so instead of labelling that newer text as sent.
+      const submittedCurrent = await onSuccess();
+      const sent = kind === "reply" ? "Reply sent." : "Email sent.";
+      setSendFeedback((current) => ({ ...current, [kind]: { messageId: replyId, message: submittedCurrent ? sent : `${sent} Your newer edits are still here.` } }));
       if (draftSession.saved) updateEmailSendAttempt(draftSession, key, null, attempt.id);
     } catch {
       if (accepted) {
         window.alert("Gmail accepted the email. The inbox could not refresh; do not resend it.");
       } else {
         updateEmailSendAttempt(draftSession, key, { ...attempt, status: "outcome_unknown" }, attempt.id);
+        setSendFeedback((current) => ({ ...current, [kind]: { messageId: replyId, error: true, message: kind === "reply" ? "Reply send was not confirmed. Your draft is still here." : "Email send was not confirmed. Your draft is still here." } }));
       }
     } finally {
       setEmailSending(draftSession, kind, false);
@@ -128,17 +148,18 @@ export default function useEmailEditor(userId) {
       text,
       email.id,
       async () => {
+        const submittedCurrent = (draftSession.replyRevisions[email.id] || 0) === revision;
         changeDrafts((current) => ({
           ...current,
           replies: {
             ...current.replies,
-            [email.id]:
-              (draftSession.replyRevisions[email.id] || 0) === revision
-                ? ""
-                : current.replies[email.id],
+            [email.id]: submittedCurrent ? "" : current.replies[email.id],
           },
         }));
+        const clearedRevision = draftSession.replyRevisions[email.id] || 0;
         await onSent(email);
+        // The thread refresh can be slow; a reply typed during it is newer too.
+        return submittedCurrent && (draftSession.replyRevisions[email.id] || 0) === clearedRevision;
       },
     );
   };
@@ -156,11 +177,14 @@ export default function useEmailEditor(userId) {
       null,
       async () => {
         // Only clear the submitted snapshot; edits can outlive this component.
-        if (draftSession.drafts.compose === composeForm) {
+        const submittedCurrent = draftSession.drafts.compose === composeForm;
+        if (submittedCurrent) {
           setComposeForm(() => ({ to: "", subject: "", body: "" }));
           setShowCompose(false);
         }
+        const cleared = draftSession.drafts.compose;
         await onSent();
+        return submittedCurrent && draftSession.drafts.compose === cleared;
       },
     );
   };
@@ -179,35 +203,42 @@ export default function useEmailEditor(userId) {
       } });
       if (!draftSession.saved) return;
     }
-    updateEmailSendAttempt(draftSession, key, null, attempt.id);
+    if (updateEmailSendAttempt(draftSession, key, null, attempt.id)) {
+      const kind = key === "compose" ? "compose" : "reply";
+      setSendFeedback(current => kind === "reply" && current.reply?.messageId !== attempt.replyId
+        ? current : { ...current, [kind]: null });
+    }
   };
 
   const handleAiDraft = async (email, isSelected) => {
-    if (!email) return;
+    if (!email || drafting || draftSession.sending.reply) return;
     const replyRevision = draftSession.replyRevisions[email.id] || 0;
     setDrafting(true);
     setDraftResult(null);
+    setSendFeedback((current) => ({ ...current, reply: null }));
     try {
       const r = await adminFetch(
         `/api/admin/email/message/${email.id}/ai-draft`,
         { method: "POST" },
       );
+      if (!r.ok) throw new Error(`HTTP ${r.status}`);
       const d = await r.json();
+      if (d?.error || typeof d?.reply_draft !== "string" || !d.reply_draft.trim()) throw new Error("Draft unavailable");
       if (
-        d.reply_draft &&
         (draftSession.replyRevisions[email.id] || 0) === replyRevision
       ) {
         setReplyDraft(email.id, d.reply_draft);
         if (isSelected(email.id)) setDraftResult(d);
       }
     } catch {
-      /* ignore */
+      setSendFeedback((current) => ({ ...current, reply: { messageId: email.id, error: true, message: "Could not create an AI draft. Your text is still here." } }));
     }
     setDrafting(false);
   };
 
   return {
     drafts,
+    sendFeedback,
     composeForm,
     setComposeForm,
     setReplyDraft,

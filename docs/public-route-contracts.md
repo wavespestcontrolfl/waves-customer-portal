@@ -48,6 +48,13 @@ headers" = `Cache-Control: no-store`, `X-Robots-Tag: noindex`,
 
 ## Routes
 
+Invoice/receipt address preservation: a saved `invoices.customer_address_snapshot`
+supplies the displayed customer address on `/api/pay/:token`, `/invoice.pdf`,
+`/api/receipt/:token` and its PDF. Legacy rows retain their existing address
+fallback until an approved manual primary-property change freezes it. Contact
+recipients, third-party Bill-To authority, amounts, and permanent receipt tokens
+are unchanged; snapshots remain authoritative when the rollout gate is off.
+
 `/api/pay/:token`
 (+ `/setup`, `/quote`, `/finalize`, `/confirm`, `/consent`,
 `/capture-setup`, `/setup-complete`, `/update-amount`, `/error`,
@@ -80,7 +87,27 @@ payment URL from the payload. FAQ flag (2026-09-03): with
 GATE_PAY_PAGE_FAQ=true the GET payload carries `payFaq: true` — a display
 flag for the copy-only "Common questions" accordion under the Pay button;
 no other field changes, no customer or invoice data rides it, and gate off
-⇒ key absent, payload byte-identical — unset the gate to kill it),
+⇒ key absent, payload byte-identical — unset the gate to kill it. THIRD-PARTY
+BILL-TO WITHDRAWAL (2026-09-12): a combined-visit invoice whose Bill-To moved
+to a payer AFTER the homeowner already held this link keeps a collectible
+status and a NULL `payer_id` — the move is recorded only in its withdrawal
+stamp — so every money seam on this surface reads the invoice ROW, not its
+status. `/setup`, `/quote`, `/finalize`, `/confirm` and `/update-amount`
+refuse such an invoice through the shared collectibility gate, and `/consent`,
+`/capture-setup` and `/setup-complete` refuse it with
+`409 { error, code: 'invoice_withdrawn_from_customer' }`. What that refusal
+guarantees, precisely: no consent is recorded and no Auto Pay enrollment
+happens for a withdrawn invoice — the authorization row and the ownership
+judgement commit in ONE transaction, and the enrollment re-judges ownership
+inside its own. A Bill-To change that lands mid-request, after the Stripe
+`attach` but before that fence, can leave the method attached to the
+customer's Stripe record; it is inert (no consent, not enrolled, not
+default) and the request still answers 409. The attach cannot join a database
+transaction, and the customer did ask to save the card. A
+withdrawn invoice is also absent from the authenticated portal's balance and
+Pay Now list, and carries no `manualPayOptions`. Nothing else in the payload
+changes; an invoice that returns to self-pay is released by the Bill-To
+reconciliation and collects normally again),
 `/api/pay/statement/:token` (+ `/setup`, `/quote`, `/finalize`) — payer NET
 statement self-serve pay, **gated behind GATE_PAYER_STATEMENTS** (404 when off),
 64-hex `payer_statements.token` format gate + public-route rate limit; resolves
@@ -94,16 +121,81 @@ by packet and customer identity. Unrelated visits and payer-billed invoices
 never expose homeowner credit terms), `/api/contracts/:token`, `/api/booking/*`,
 `/api/public/estimates/:token/ask`,
 `/api/public/estimates/:token/find-slots`,
-`/api/public/estimates/:token/available-slots` and `/reserve` (the recurring
+`/api/public/estimates/:token/available-slots`, `/reserve` and
+`/reserve/:scheduledServiceId/extend` (the recurring
 service profile uses the converter's canonical stored/engine service rows.
 Generated or saved tier selections replace the listed service cadences and
 retain omitted companion programs; choosing a tier is not a service removal.
 The existing pest-only recurring choice on eligible one-time-toggle estimates
 retains its intentional companion exclusion, using the acceptance predicate.
+With default-off `GATE_SCHEDULING_CAPACITY`, these public availability surfaces
+use whole-route feasibility, technician eligibility, existing arrival promises,
+blocked time and return-by-shift-end checks. Only evaluated whole-hour starts
+through 16:00 ET are offered; estimate ASAP and booking open-day expansion
+cannot create additional starts. The estimate cache separates capacity mode
+from legacy mode. Assigned technicians have independent route capacity;
+unassigned work remains a fixed blocker. Public responses expose no full route,
+provider legs or exact route coordinates. Scheduling traffic lookups share a
+40-request/800-element allowance per application process per 15 minutes across
+HTTP requests and fall back to the conservative model when exhausted; response
+data remains request-local. Gate-off availability is unchanged.
+Catalog-sized estimate offers resolve the primary appointment allowance from
+`services.scheduling_duration_policy`; independent recurring companions do not
+enlarge that appointment, while one-time paid add-ons contribute shared work.
+Combined catalog allowances still require `GATE_VISIT_COMBINED_CAPACITY` and
+`GATE_SEPARATE_COMBO_VISITS`. Version-2 combined allowances follow service
+identity; version-1 members keep their 60-minute contract. Public offer/cache
+responses omit catalog identifiers, route internals and allocation stamps.
+Reservation and acceptance re-resolve catalog policies. Transactional catalog
+reads under capacity hold a `services` table SHARE lock (taken inside the
+lookup savepoint, before any catalog read) until the outer transaction ends
+and take no catalog row locks: every catalog insert, update or delete — admin
+edits and pre-deploy migrations alike — conflicts with that lock at the
+database, so neither a matched row's allowance nor an absent match can be
+overtaken by a row edited, activated or mapped after the lookup, and SHARE
+readers never block each other. Commit and conversion take that lock before
+any `scheduled_services` row lock, matching catalog migrations that lock
+`services` first and then update visits. Existing version-2 holds
+reject changed allowances with 409 `SLOT_UNAVAILABLE`, even after gate shutdown.
+Reservation creation prepares bounded route traffic outside the transaction,
+then takes the date occupancy lock and the selected-technician/unassigned day
+fences together in canonical order before row locks. It rechecks the signed
+offer, live route fingerprint, catalog allowance, eligibility and closure state
+before persisting the hold, certified route order and audit. Relevant route rows
+remain locked through persistence; a busy completion yields recoverable
+`SLOT_UNAVAILABLE`. Unrelated assigned technicians do not invalidate the proof;
+a concurrent move to unassigned is fenced. Completed stops retain their prefix.
+Capacity offers preserve the enabled south-zone day funnel and omit speculative
+ASAP expansion. Public acceptance and one-tap prepare route traffic before opening their write
+transaction, then acquire the date, selected-technician and unassigned fences
+before their first row lock. Commit verifies the prepared date/technician,
+current catalog allowance, live route, eligibility and closures; changed state
+returns recoverable `SLOT_UNAVAILABLE` without acceptance writes. One-tap
+preparation failures retain its existing pick-a-time recovery. Version-1 holds
+keep their legacy path, while version-2 holds retain certification and allowance
+checks after gate shutdown. Without combined allocation, excluded recurring
+companions and their follow-ups remain unassigned and without a promised window;
+they cannot inherit the certified primary trip. Version-2 primary-only holds
+preserve that separation even with `GATE_SEPARATE_COMBO_VISITS` off or capacity
+shut down. Version-2 parent allowances take precedence during follow-up seeding.
+Combined conversion stamps each member before seeding and preserves adjacent
+allocation order at the certified anchor, using a nonblocking day fence for
+callers already holding rows. A busy reorder aborts allocation for recovery.
+Capacity stays off until the other booking/dispatch writers and parent traffic
+prerequisites integrate.
+Phone-booking primary and follow-up inserts (owner ruling 2026-09-11, option 1)
+try the shared day fence — rung 1 date occupancy plus the tech-day or
+unassigned-day rung — with a bounded non-blocking wait (`CALL_BOOKING_FENCE_WAIT_MS`,
+default 1500 ms) before each insert. A granted fence makes the phone row visible
+to a concurrent route certification or lands it after that certification commits.
+A missed fence books exactly as before (unfenced, post-commit conflict check
+flags overlaps, the card records which insert missed its fence); the booking
+never fails, waits past the cap, or blocks on a lock. This stage still does
+not authorize enabling capacity.
 Existing request fields, token/signature guards, rate limits and privacy headers
 apply. With strict opt-in `GATE_VISIT_COMBINED_CAPACITY` and prerequisite
-`GATE_SEPARATE_COMBO_VISITS`, multi-service recurring selections reserve 60 minutes
-per physical service program. Termite rental and bond billing riders fold into
+`GATE_SEPARATE_COMBO_VISITS`, version-1 multi-service recurring selections reserve 60 minutes
+per physical service program; capacity-enabled selections use version-2 catalog allowances. Termite rental and bond billing riders fold into
 bait service; legacy supplements use the converter's physical-program rules.
 Unsupported families/cadences, recurring foam and commercial programs return
 409 `COMBINED_VISIT_UNAVAILABLE` before offering or holding combined work.
@@ -112,8 +204,8 @@ remains start plus 120 minutes. One assignable technician must have no selected
 service capability explicitly disabled. The allocation stamp is server-owned
 and excluded from public slot metadata. `/api/estimates/:token/accept` rechecks
 the selection, technician and full occupancy under existing locks, then converts
-the hold into separate sequential 60-minute service windows with independent
-cadences. Missing or unmatched members abort the transaction. A stamped hold
+the hold into independent programs: version-1 members use sequential 60-minute
+windows, and version-2 members use their catalog allowance at one arrival anchor. Missing or unmatched members abort the transaction. A stamped hold
 retains its capacity policy when the creation gate turns off. Shared-arrival
 reminder consumers use the persisted allocation, including with grouping off
 or Auto Pay enabled; invoice and Auto Pay policies remain unchanged), `/api/reports/:token/*` (the
@@ -162,13 +254,64 @@ older cached PDFs to match this evidence rule),
 the SPA `/recap/:token` "Your Visit, in Motion" recap player (token-gated; serves
 only an approved recap, consumes `/api/reports/:token/recap` + `/recap/video`,
 same noindex/no-referrer/no-store headers as `/report/:token`),
-`/api/stripe/webhook`, `/api/webhooks/twilio` (all Twilio inbound; the SMS
-operational extension runs after acknowledgment under
+`/api/stripe/webhook`, `/api/webhooks/twilio` (all Twilio inbound;
+`GATE_SMS_SPAM_CLASSIFIER=shadow` enables a bounded solicitation screen for
+unknown-sender SMS; `true` enables enforcement at confidence >= 0.85.
+Unset or any other value disables screening.
+Known primary/secondary/service-contact numbers, reactions, empty bodies,
+standalone carrier commands, and the AI assistant line bypass the classifier.
+The unified inbox message is durably saved before screening. Failed unified
+saves or relationship lookups bypass screening. Model failures record a failed
+non-solicitation verdict. Sender relationship (compliance eligibility) is
+resolved once, up front, before any consent handling or screening — a
+compliance-eligible sender's consent (keyword or natural-language, on the
+full untouched text) is honored before the classifier and never waits on the
+model; a non-eligible sender's opt-out-shaped phrasing is not treated as
+consent at all and reaches the classifier like any other message (only a
+standalone carrier command such as a bare STOP bypasses the model for them
+too — natural-language phrasing and a footer never do). Shadow can still
+record deterministic pitch evidence via the regex fast path for any
+solicitation-shaped text, consent-related or not. The 3.5-second model
+budget uses the shared dispatcher.
+Verdicts (`solicitation`, `confidence`, `method`, `version`, `mode`, `enforced`)
+are stored under `metadata.spam_verdict` on unified messages and ordinary or
+natural-language opt-out `sms_log` rows. Read state, opt-out suppression,
+TwiML replies, notifications and estimator routing retain their existing
+behavior in shadow mode. Enforced pitches remain in both message stores,
+are marked read when the verdict is attached, and return empty TwiML before
+lead creation, quoting, alerts or
+auto-replies. A compliance-eligible sender's genuine consent command
+(including a natural-language opt-out or a wrong-number report) bypasses
+enforcement — decided before the classifier ever runs — and retains
+suppression and its existing responses. A non-eligible sender's opt-out-
+shaped phrasing, including a vendor's own reply-instruction footer such as
+`Reply NO if you need me to stop texting`, is never treated as the sender's
+own opt-out: only the classifier's model verdict governs enforcement for
+them, and an enforced verdict never creates a suppression row. The
+unanswered digest omits a thread only when its latest eligible inbound has
+an enforced verdict, so a later genuine message resurfaces.
+Verdict attachment merges metadata without replacing unrelated fields. Failed
+verdict attachment bypasses enforcement. Provider request/auth contracts are unchanged. The SMS operational extension
+runs after acknowledgment under
 `GATE_SMS_OPERATIONAL_ACTIONS` plus an explicit activation timestamp;
 it reuses persisted SMS evidence for private profile updates and admin
 notifications, with no additional response fields or customer sends;
+unknown domain/van-tracking SMS stays unlinked in the inbox and does not
+create customer/account rows or guess a customer name from message prose.
+Substantive messages ring a per-message `new_lead` bell/push linking to the
+inbox; reactions, empty messages and courtesy-only replies do not;
 ordinary inbound SMS is persisted before reschedule or lead-intake consumption,
-including replies that return early. Failure to persist that source returns
+including replies that return early. STOP/HELP/START handling (opt-out
+suppression + the `<Message>` confirmation TwiML) applies only to a sender
+Waves has messaged: a matched customer, the AI assistant line, a
+provider-accepted outbound `sms_log`/unified `messages` row (excluding
+operator alerts — by current phone AND by a durable `to_owner_phone_at_send`
+send-time stamp, so a later ADAM_PHONE change can't un-exclude a historical
+alert — the AI assistant's own auto-replies, and push-only touchpoints;
+unified fallback requires a Twilio message SID and phone identities preserve
+country codes), or an active
+`messaging_suppression` row; any other sender's text is ordinary inbound
+(empty TwiML, no reply, no suppression). The eligibility lookup fails open. Failure to persist that source returns
 503 with empty TwiML before either consumer runs; the owned SID claim is
 released before that response. Twilio's configured retry/fallback policy
 governs redelivery),
@@ -176,8 +319,23 @@ governs redelivery),
 `/api/webhooks/twilio/outbound-dial-complete` (POST; machine-to-machine
 callbacks under the existing Twilio-signature-validated mount. The shared
 press-1 `/outbound-connect` bridge adds `<Number machineDetection="Enable">`
-and the `<Dial action>` only with `GATE_OUTBOUND_VOICEMAIL_SMS=true`, excluding
-technician caller-ID lines. Query context is `callLogId`, `customerNumber`,
+with `GATE_OUTBOUND_VOICEMAIL_SMS=true`, excluding technician caller-ID lines.
+The `<Dial action>` is also added only for an actual callback attempt: the
+persisted bridge row links a callback commitment or was placed under the card
+policy (`metadata.callback_policy = card`, stamped on the existing Call Log
+callback action too), read whatever the gate says, so ordinary admin bridges
+keep the pre-lane shape and a card bridge keeps its evidence after rollback
+before staff press 1. Both lanes use this one completion
+route. Signed terminal child-leg results with a valid duration and SID record
+the first `metadata.customer_leg` on an outbound row matching the call-log UUID,
+parent CallSid and a validated callback link (the card's commitment link, or
+the existing call-log callback's source-call link). If its parent SID backfill
+failed, the signed completion atomically adopts the missing SID on that
+server-linked outbound row. An existing different SID cannot be replaced.
+Retries cannot replace that
+evidence; a failed write returns 503 for provider retry. In-flight results
+remain accepted after gate rollback. This records evidence without closing a
+commitment; fulfillment requires a valid non-voicemail extraction as well. Query context is `callLogId`, `customerNumber`,
 and `callerIdNumber`, generated by the bridge and covered by the signature.
 AMD accepts the child `CallSid`, `AnsweredBy`, and `MachineDetectionDuration`.
 It records the verdict and responds 200; only a `machine_*` verdict can
@@ -831,6 +989,9 @@ Router-wide url-safe 15-64 token param gate (generic 404, prod-verified
 against all live tokens 2026-08-07); accept/decline carry a 10/hr
 limiter — the two heaviest public money-adjacent writes; select-tier/
 preferences ride estimateToggleLimiter, data/pdf ride dataLimiter).
+Authored commercial proposals expose reviewed four-decimal quantities and unit
+rates, explicit unit labels and cent-rounded line amounts through the existing
+normalized proposal and document output. These additions do not widen draft access.
 The `/estimate/:token?website=1` SPA uses the website's compact pricing →
 scheduling → Auto Pay presentation over these same APIs. `embed=1` permits
 framing only while `GATE_WEBSITE_QUOTE_BOOKING` is on and only from the
@@ -902,6 +1063,35 @@ customer's last selection once the route writes it back (validation audit
 SEC-001, 2026-09-02; before it the ceiling applied only to opted-out
 estimates). A membership reconcile that reprices the mix refreshes the
 opt-out stamp with the row tier.
+Slot-hold lifetime (owner case 2026-09-11 — a customer confirmed 34 seconds
+after her 15-minute hold lapsed, was refused, and believed she had paid).
+`POST /reserve/:scheduledServiceId/extend` pushes an EXISTING hold's expiry
+out by the standard hold window: same `reserveLimiter` budget and token-format
+gate as `/reserve`, same call-side-blocked and ineligible-estimate refusals,
+and the same generic 404 for an unknown token, an unknown hold, a hold
+belonging to ANOTHER estimate, an already-committed row, or a hold past the
+grace — the route is not an enumeration oracle for hold ids. It never creates
+a hold, never changes the slot, and never touches price, customer or estimate
+state. A hold may not live past `MAX_HOLD_MINUTES` (60) from its own
+`created_at` however many times it is extended (409 `HOLD_LIMIT_REACHED` with
+the unchanged `expiresAt`); the same ceiling binds `/reserve`'s same-slot
+refresh, so re-POSTing `/reserve` is not a way around it. An extension whose
+window a COMMITTED visit has since taken supersedes the hold and answers 409
+`SLOT_UNAVAILABLE` rather than keeping a hold the accept is guaranteed to
+refuse — and the supersede is committed, never rolled back with the refusal.
+Reviving a hold that has ALREADY LAPSED (inside the grace) arbitrates against
+live HOLDS as well as committed visits — a lapsed row stopped occupying its
+window, so another customer may hold it — and is refused outright under
+`GATE_SCHEDULING_CAPACITY`, where arrival allocation has no equivalent probe. Commit-time grace:
+`/accept` graduates a hold expired by less than `RESERVATION_COMMIT_GRACE_MINUTES`
+(default 10, clamped 0-30, 0 disables) — every conflict re-check still runs
+under the date lock, so an in-grace commit cannot double-book, and the expiry
+sweep holds the same row for the same window. The grace widens adoption ONLY
+for the estimate's own unclaimed hold, never another customer's row, and the
+VIEW path never OFFERS a lapsed hold. Every hold-expiry refusal on `/accept`
+carries `code: RESERVATION_EXPIRED` so the client names the real cause instead
+of reporting a taken slot.
+
 Appointment reminders registered by `/accept` derive their date and arrival
 from the committed service row. A server-owned `reservation_service_mix`
 allocation can preserve one booked arrival across sequential member work
@@ -913,8 +1103,18 @@ is internal and adds no request field or public payload field.
 `/accept` existing-appointment adoption (`existingAppointmentId` in the
 body, offered by the view contract instead of the slot picker): the row
 must belong to this customer, be unclaimed or claimed by THIS estimate,
-never a reservation hold or a callback visit, dated today or later, and
-in an adoptable status. Adoptable statuses are `pending`/`confirmed`;
+never a callback visit, dated today or later, and in an adoptable status.
+The estimate's OWN uncommitted reservation hold IS offered through this
+shape (a customer who picked a slot and then reloaded), and the payload
+says so: `isHold` is true and `reservationExpiresAt` carries the hold's
+expiry as an ISO instant. Both fields are ABSENT for a genuinely
+committed visit — not `false`/`null`, so a client that distinguishes an
+absent property keeps the exact pre-2026-09 payload — including one carrying a stray
+`reservation_expires_at`, which `releaseExpiredReservations` exists to
+rescue — so a countdown never starts on a real appointment. Another
+estimate's hold is still never offered. The page uses the two fields to
+run the hold timer and the extend action described below; a client that
+ignores them sees the previous committed-appointment shape. Adoptable statuses are `pending`/`confirmed`;
 behind `GATE_ESTIMATE_ADOPT_IN_PROGRESS_VISIT` (fail-closed in every
 environment — off unless the var is a `gateEnvValue` true: `true`, `1`
 or `on`, case-insensitive; re-read per accept request, so a flip is a
@@ -964,7 +1164,17 @@ gate, 24h expiry with 410, access-count audit, 30/15min limiter,
 `no-store`).
 `POST /api/stripe/terminal/validate-handoff` (machine-to-machine burn of
 the 60s single-use handoff JWT — the token IS the auth; see the atomic
-terminal-handoff burn rule in AGENTS.md).
+terminal-handoff burn rule in AGENTS.md. THIRD-PARTY BILL-TO WITHDRAWAL
+(2026-09-12): a combined-visit invoice whose Bill-To moved to a payer after
+the handoff was minted keeps a collectible status and a NULL `payer_id` —
+the move is recorded only in its withdrawal stamp — so this route treats a
+withdrawn invoice exactly like a terminal status change and refuses with the
+existing `invoice_changed` outcome after the burn, rather than handing the
+technician a card-present session for debt now owed by AP. `/handoff` refuses
+to mint one for the same reason, and `/payment-intent` refuses with
+`409 { code: 'invoice_withdrawn_from_customer' }` — including a re-read under
+the invoice row lock at the final bind, so a Bill-To change committing during
+the mint is caught).
 `/api/admin/push/vapid-key` (GET; deliberate — the VAPID public key is
 public by protocol).
 `/api/health` (GET; liveness probe, no data).
@@ -1179,6 +1389,16 @@ mosquito-, tree-shrub-only and one-time customers get no lane), the
 per-lane open-callback dedupe (an existing open re-service answers with
 that visit's /reschedule link instead of a second booking), and open
 slots from the /book availability engine around the token row's address.
+GET accepts optional `lane=pest|lawn`; find-slots accepts the same optional
+`lane` body field. Both validate it against currently bookable lanes and
+use that lane's duration and technician capability. A single bookable lane
+is implicit. With route capacity enabled, multiple bookable lanes require
+selection: GET returns eligibility with null availability until selected,
+and find-slots returns 400. The page refreshes times and clears the previous
+slot when the selected lane changes. With capacity off, requests omitting
+lane retain the shared longest-duration browse behavior. A recognized selected
+lane that becomes unavailable refreshes eligibility with null availability,
+allowing the page to select the remaining lane; malformed lanes still return 400.
 POST is a WRITE limited to the token's own customer: lane re-validated,
 slot re-validated against a fresh single-day availability build (route
 feasibility, lunch reserve, day caps — the anti-forgery model

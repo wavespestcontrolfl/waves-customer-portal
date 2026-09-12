@@ -5,6 +5,33 @@ import { MemoryRouter } from "react-router-dom";
 import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import EstimatesPageV2 from "./EstimatesPageV2";
+import {
+  IntelligenceBarPageDataProvider,
+  useIntelligenceBarActions,
+} from "../../hooks/useIntelligenceBarPageData";
+
+function SavedAction() {
+  const { notifyMutation } = useIntelligenceBarActions();
+  return (
+    <button
+      onClick={() =>
+        notifyMutation({
+          id: "operation-a",
+          domain: "estimate",
+          estimate_id: active.id,
+        })
+      }
+    >
+      Saved by assistant
+    </button>
+  );
+}
+
+vi.mock("../../components/admin/customer360/CustomerSmsPanel", () => ({
+  useCustomerSms: () => vi.fn(),
+  CustomerSmsProvider: ({ children }) => children,
+  openEstimateMessages: vi.fn(),
+}));
 
 vi.mock("../../hooks/useFeatureFlag", () => ({ useFeatureFlag: () => false }));
 const active = { id: "qa-active", customerId: "qa-customer", customerName: "Synthetic Active", status: "sent", createdAt: new Date().toISOString(), monthlyTotal: 50, serviceLines: [] };
@@ -160,3 +187,27 @@ describe("estimate filter request recovery", () => {
     expect(screen.queryByRole("button", { name: "Retry" })).not.toBeInTheDocument();
   });
 });
+
+it.each([1440, 390])(
+  "refreshes the %i-wide estimate list after a persisted assistant outcome",
+  async (width) => {
+    window.innerWidth = width;
+    render(
+      <MemoryRouter initialEntries={["/admin/pipeline?tab=estimates"]}>
+        <IntelligenceBarPageDataProvider>
+          <SavedAction />
+          <EstimatesPageV2 />
+        </IntelligenceBarPageDataProvider>
+      </MemoryRouter>,
+    );
+    await screen.findByText("Synthetic Active");
+    loadActive.mockResolvedValue(
+      response({
+        estimates: [{ ...active, customerName: "Saved assistant revision" }],
+      }),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Saved by assistant" }));
+    await screen.findByText("Saved assistant revision");
+    expect(screen.queryByText("Synthetic Active")).not.toBeInTheDocument();
+  },
+);

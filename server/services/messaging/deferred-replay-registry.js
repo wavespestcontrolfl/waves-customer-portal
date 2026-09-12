@@ -16,8 +16,11 @@
  *                          bounded re-check (used when the state READ
  *                          failed — fail closed, never send unverified),
  *                          or { eligible:true }.
- *   preDispatch(claimMeta) — final claim fence inside the canonical sender,
- *                          after validation, before the provider handoff.
+ *   smsHandoff(claimMeta, dispatch) — the canonical sender's locked handoff:
+ *                          the entry re-authorizes and claims its dispatch,
+ *                          then runs `dispatch(trx)` while those rows are
+ *                          still held, so nothing can change under the
+ *                          provider request.
  *   finalize(claimMeta, ctx) — AFTER the provider accepts: the state
  *                          transitions the immediate path would have run
  *                          inline (invoice draft→sent, review delivered
@@ -234,7 +237,7 @@ const REGISTRY = {
 
   visit_summary_deferred: {
     recheck: (meta) => require('../visit-completion-summary').recheckDeferredSummarySms(meta),
-    preDispatch: (meta) => require('../visit-completion-summary').beginDeferredSummarySms(meta),
+    smsHandoff: (meta, dispatch) => require('../visit-completion-summary').beginDeferredSummarySms(meta, dispatch),
     finalize: (meta) => require('../visit-completion-summary').finalizeDeferredSummarySms(meta),
     onTerminal: (meta) => require('../visit-completion-summary').terminalDeferredSummarySms(meta),
     durableFinalize: true,
@@ -293,6 +296,13 @@ const REGISTRY = {
         if (!inv) return { eligible: false, reason: 'invoice-missing' };
         if (isTerminalInvoice(inv)) return { eligible: false, reason: `invoice-terminal:${inv.status}` };
         if (inv.payer_id) return { eligible: false, reason: 'payer-billed' };
+        // A combined-visit invoice WITHDRAWN to a payer keeps a collectible
+        // status and a NULL payer_id — the move lives only in its stamp
+        // (local audit) — so a notice queued before the Bill-To change would
+        // still reach the homeowner about debt the payer now owes.
+        if (require('../invoice-helpers').invoiceWithdrawnFromCustomer(inv)) {
+          return { eligible: false, reason: 'payer-billed-withdrawn' };
+        }
         return { eligible: true };
       } catch (err) {
         return failClosed('decline-notice', meta.invoice_id, err);
@@ -1084,7 +1094,13 @@ async function contactSlotStillAuthorized(meta, label) {
     if (!meta.customer_id || !meta.to_phone) return { eligible: true };
     const customer = await db('customers').where({ id: meta.customer_id }).first();
     if (!customer) return { eligible: false, reason: 'customer-missing' };
-    const prefsRow = await db('notification_prefs').where({ customer_id: meta.customer_id }).first() || {};
+    // Visit-aware (app property scope, PR 3): a NON-primary saved property
+    // owns notify-primary, so the recipient recheck follows it; an
+    // unreadable property under enforcement fails closed like any other
+    // recheck error (failClosed) — never texts on the profile row's answer.
+    const { visitPrefsRow, getReminderPrefs } = require('../appointment-reminders');
+    const prefsRow = await visitPrefsRow(meta.customer_id, meta.scheduled_service_id || null) || {};
+    if (prefsRow.__prefsUnavailable === true) throw new Error('notification preferences unavailable for the replay recheck');
     const { getAppointmentContacts } = require('../customer-contact');
     const { filterRecipientsByOptin } = require('../recipient-optin');
     const digits = (v) => String(v || '').replace(/\D/g, '').slice(-10);
@@ -1107,8 +1123,7 @@ async function contactSlotStillAuthorized(meta, label) {
       ? 'reminder72hChannel'
       : (purpose === 'appointment_confirmation' ? 'confirmationChannel' : null);
     if (channelField) {
-      const { getReminderPrefs } = require('../appointment-reminders');
-      const prefs = await getReminderPrefs(meta.customer_id);
+      const prefs = await getReminderPrefs(meta.customer_id, { scheduledServiceId: meta.scheduled_service_id || null });
       if (prefs?.[channelField] === 'email') {
         return { eligible: false, reason: 'channel-email' };
       }
@@ -1133,6 +1148,13 @@ async function invoiceStillCollectible(meta) {
     // reach the homeowner — same rule the decline-notice recheck and the
     // receipt paths enforce.
     if (inv.payer_id) return { eligible: false, reason: 'payer-billed' };
+    // …and the withdrawal stamp, which records the same ownership move on a
+    // row whose payer_id stays NULL (local audit): a reminder queued before
+    // the Bill-To change would still ask the homeowner to pay payer-owned
+    // debt.
+    if (require('../invoice-helpers').invoiceWithdrawnFromCustomer(inv)) {
+      return { eligible: false, reason: 'payer-billed-withdrawn' };
+    }
     if (meta.followup_sequence_id) {
       const seq = await db('invoice_followup_sequences')
         .where({ id: meta.followup_sequence_id })
@@ -1171,14 +1193,13 @@ async function recheckDeferredReplay(entryPoint, claimMeta = {}) {
   }
 }
 
-// Failed reads prove no handoff occurred and stay on the bounded retry rail.
-async function preDispatchDeferredReplay(entryPoint, claimMeta = {}) {
+// undefined = no locked handoff registered: the sender dispatches normally.
+// Errors propagate: the provider wrapper distinguishes a failed read before
+// the handoff (retryable, nothing left) from a failure after acceptance.
+function deferredSmsHandoff(entryPoint, claimMeta = {}) {
   const entry = entryFor(entryPoint);
-  try {
-    return entry?.preDispatch ? await entry.preDispatch(claimMeta) : { ok: true };
-  } catch {
-    return { ok: false, code: 'DEFERRED_RECHECK_FAILED', retryable: true };
-  }
+  if (!entry?.smsHandoff) return undefined;
+  return (dispatch) => entry.smsHandoff(claimMeta, dispatch);
 }
 
 // null = no finalize registered. { ok:false } rides the durable
@@ -1348,7 +1369,7 @@ const DURABLE_FINALIZE_ENTRY_POINTS = Object.entries(REGISTRY)
 
 module.exports = {
   recheckDeferredReplay,
-  preDispatchDeferredReplay,
+  deferredSmsHandoff,
   finalizeDeferredReplay,
   onTerminalDeferredReplay,
   runTerminalHookDurably,

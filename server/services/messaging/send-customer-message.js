@@ -62,7 +62,7 @@ async function recordReceiptSmsDelivery(input, outcome) {
   const receipt = (input.purpose === 'payment_receipt' && input.metadata?.original_message_type === 'receipt')
     || (input.purpose === 'appointment' && input.metadata?.original_message_type === 'service_complete_paid_receipt');
   if (!receipt || input.channel !== 'sms' || !input.invoiceId || !input.customerId
-    || outcome.sent !== true || outcome.provider !== 'twilio'
+    || outcome.sent !== true || outcome.deliveryOutcome !== 'accepted' || outcome.provider !== 'twilio'
     || !/^(SM|MM)[a-f0-9]{32}$/i.test(outcome.providerMessageId || '')) return;
   try {
     const db = require('../../models/db');
@@ -165,6 +165,7 @@ function normalizeRecipient(phone) {
  *   code?: string,
  *   retryable?: boolean,
  *   deferred?: boolean,
+ *   deliveryOutcome: 'accepted' | 'not_sent' | 'uncertain',
  *   nextAllowedAt?: string,
  *   providerMessageId?: string,
  *   auditLogId?: string | null,
@@ -173,11 +174,13 @@ function normalizeRecipient(phone) {
  * }>}
  */
 async function sendCustomerMessage(input) {
+  let providerOutcome = { sent: false, deliveryOutcome: 'not_sent' };
+  try {
   // 1. Contract validation
   const contractCheck = validateContract(input);
   if (!contractCheck.ok) {
     logger.warn(`[send_customer_message] contract violation: ${contractCheck.reason}`);
-    return { sent: false, blocked: true, code: 'CONTRACT_VIOLATION', reason: contractCheck.reason };
+    return { sent: false, blocked: true, deliveryOutcome: 'not_sent', code: 'CONTRACT_VIOLATION', reason: contractCheck.reason };
   }
 
   // 2. Resolve policy
@@ -186,7 +189,7 @@ async function sendCustomerMessage(input) {
     policy = policyModule.resolvePolicy(input.audience, input.purpose);
   } catch (err) {
     logger.warn(`[send_customer_message] unknown policy: ${err.message}`);
-    return { sent: false, blocked: true, code: 'UNKNOWN_POLICY', reason: err.message };
+    return { sent: false, blocked: true, deliveryOutcome: 'not_sent', code: 'UNKNOWN_POLICY', reason: err.message };
   }
 
   // 3. Normalize recipient + clone input so downstream sees the canonical
@@ -197,9 +200,21 @@ async function sendCustomerMessage(input) {
   // Request lifecycle email companions have no text leg. Keep their App
   // intent even when the saved choice or gate changes before dispatch.
   if (sendInput.metadata?.appOnly === true) sendInput.channel = 'push';
-  if (withSmsHandoff && (typeof withSmsHandoff !== 'function' || sendInput.channel !== 'sms'
-    || input.audience !== 'lead' || input.purpose !== 'conversational' || input.entryPoint !== 'lead_response_auto_reply')) {
-    return { sent: false, blocked: true, code: 'UNSUPPORTED_SMS_HANDOFF', reason: 'Locked SMS handoff is restricted to immediate lead replies' };
+  // The locked handoff holds a caller's authority rows through the actual
+  // provider request. Immediate lead replies and the visit-summary bearer
+  // link (its immediate send and its scheduled replay) are the callers whose
+  // recipient may change between validation and the handoff.
+  const smsHandoffAllowed = (input.audience === 'lead' && input.purpose === 'conversational'
+      && input.entryPoint === 'lead_response_auto_reply')
+    || (input.audience === 'customer' && input.purpose === 'service_completion'
+      && input.metadata?.original_message_type === 'visit_summary'
+      && ['visit_closeout_summary', 'scheduled_sms_cron'].includes(input.entryPoint))
+    // A review ask that follows a combined-visit summary shares that
+    // summary's packet row through the request.
+    || (input.audience === 'customer' && input.purpose === 'review_request'
+      && ['review_request_send', 'review_outreach_touch'].includes(input.entryPoint));
+  if (withSmsHandoff && (typeof withSmsHandoff !== 'function' || sendInput.channel !== 'sms' || !smsHandoffAllowed)) {
+    return { sent: false, blocked: true, deliveryOutcome: 'not_sent', code: 'UNSUPPORTED_SMS_HANDOFF', reason: 'Locked SMS handoff is restricted to immediate lead replies and visit summaries' };
   }
   // SMS link schemes are removed before audit counting, matching the final
   // Twilio boundary for direct callers.
@@ -317,6 +332,7 @@ async function sendCustomerMessage(input) {
     return {
       sent: false,
       blocked: true,
+      deliveryOutcome: 'not_sent',
       code: blockedBy.code,
       reason: blockedBy.reason,
       ...(blockedBy.retryable ? { retryable: true } : {}),
@@ -354,6 +370,7 @@ async function sendCustomerMessage(input) {
       return {
         sent: false,
         blocked: true,
+        deliveryOutcome: 'not_sent',
         code: blocked.code,
         reason: blocked.reason,
         auditLogId: audit.id,
@@ -396,6 +413,7 @@ async function sendCustomerMessage(input) {
       return {
         sent: false,
         blocked: true,
+        deliveryOutcome: 'not_sent',
         code: blocked.code,
         reason: blocked.reason,
         ...(verdict?.retryable === true ? { retryable: true } : {}),
@@ -416,8 +434,14 @@ async function sendCustomerMessage(input) {
   // entered the pipeline at 19:59 can't reach Twilio at 20:01. Same
   // deferral contract as the pipeline block; cheap (pure clock math) and a
   // no-op for exempt inputs.
-  const providerOutcome = await dispatchToProvider(sendInput, {
-    withSmsHandoff: withSmsHandoff && (dispatch => withSmsHandoff(async trx => {
+  // Until the adapter returns, a thrown transport call has crossed the SDK
+  // handoff boundary but has no definitive acceptance/rejection result.
+  providerOutcome = { sent: false, deliveryOutcome: 'uncertain' };
+  providerOutcome = await dispatchToProvider(sendInput, {
+    // The caller's handoff receives (trx, onProviderStart): the callback fires
+    // immediately before the provider request, after the rechecks below, so a
+    // caller can tell a failed recheck (nothing sent) from a failed request.
+    withSmsHandoff: withSmsHandoff && (dispatch => withSmsHandoff(async (trx, onProviderStart) => {
       // Lock acquisition may wait past an opt-out commit. Reuse the canonical
       // validators with fresh state on that same connection, before the SDK.
       const currentState = await loadSuppressionState(sendInput, await loadContactState(sendInput, trx), trx);
@@ -429,6 +453,14 @@ async function sendCustomerMessage(input) {
       if (!suppression.ok) return suppression;
       const consent = await checkConsentForPurpose(sendInput, policy, currentState);
       if (!consent.ok) return consent;
+      // Acquiring the handoff's locks can straddle the send-window cutoff:
+      // re-judge the window on the fresh state immediately before the
+      // provider request so a wait across it returns the ordinary hold.
+      const windowVerdict = checkSendWindow(sendInput, policy, currentState);
+      if (!windowVerdict || windowVerdict.ok !== true) return windowVerdict;
+      // Awaited: the caller's durable pre-provider transition must commit
+      // before the SDK request.
+      if (typeof onProviderStart === 'function') await onProviderStart();
       await dispatch();
       return { ok: true };
     })),
@@ -464,6 +496,7 @@ async function sendCustomerMessage(input) {
     return {
       sent: false,
       blocked: true,
+      deliveryOutcome: providerOutcome.deliveryOutcome,
       code: providerOutcome.code,
       reason: providerOutcome.error,
       ...(providerOutcome.retryable ? { retryable: true } : {}),
@@ -500,13 +533,13 @@ async function sendCustomerMessage(input) {
 
   if (!providerOutcome.sent && sendInput.channel === 'push' && providerOutcome.appUnavailable) {
     if (sendInput.metadata?.appOnly === true) {
-      return { sent: false, blocked: true, code: 'APP_UNAVAILABLE', reason: providerOutcome.error, auditLogId: audit.id };
+      return { sent: false, blocked: true, deliveryOutcome: providerOutcome.deliveryOutcome, code: 'APP_UNAVAILABLE', reason: providerOutcome.error, auditLogId: audit.id };
     }
     if (providerOutcome.error === 'preference_changed'
       && ['appointment_reminder_72h', 'appointment_reminder_24h'].includes(sendInput.purpose)) {
       // The scan captured App; Email/Both now require a different set of
       // legs. Leave its reminder open so the next scan reads that choice.
-      return { sent: false, blocked: true, code: 'REMINDER_PREFERENCES_HOLD', reason: 'Reminder channel changed', retryable: true, deferred: true, auditLogId: audit.id };
+      return { sent: false, blocked: true, deliveryOutcome: providerOutcome.deliveryOutcome, code: 'REMINDER_PREFERENCES_HOLD', reason: 'Reminder channel changed', retryable: true, deferred: true, auditLogId: audit.id };
     }
     // Re-enter the complete pipeline for an allowed backup, using fresh
     // consent/suppression state. Never clear an opt-out to enable fallback.
@@ -523,6 +556,7 @@ async function sendCustomerMessage(input) {
     return {
       sent: false,
       blocked: false,
+      deliveryOutcome: providerOutcome.deliveryOutcome,
       code: providerOutcome.code === 'APP_PROVIDER_RETRY' ? providerOutcome.code : 'PROVIDER_FAILURE',
       reason: providerOutcome.error || 'provider returned no message id',
       retryable: !!providerOutcome.retryable,
@@ -540,15 +574,80 @@ async function sendCustomerMessage(input) {
     };
   }
 
+  // The audit row carries the promised window for a scheduling notice, and
+  // persistAudit is best-effort: when its insert fails after the provider
+  // accepted the message, the customer holds a window nothing records, the
+  // reminder is marked sent and never retried, and the no-show detector
+  // later reads an OLDER window as the latest promise (codex P1, PR #4403
+  // round 9). Land the promise in the durable audit_log ledger instead.
+  // Only for a send that actually quotes a slot for a known visit, and never
+  // blocking: the text is already out.
+  await recordPromiseEvidenceFallback(sendInput, providerOutcome, audit);
+
   return {
     sent: true,
     blocked: false,
+    deliveryOutcome: providerOutcome.deliveryOutcome,
     providerMessageId: providerOutcome.providerMessageId,
     channel: providerOutcome.provider === 'push' ? 'push' : sendInput.channel,
     auditLogId: audit.id,
     segmentCount: segmentMeta.segmentCount,
     encoding: segmentMeta.encoding,
   };
+  } catch (err) {
+    // A recursive fallback may already carry its more specific outcome.
+    if (!err.providerOutcome) err.providerOutcome = providerOutcome;
+    throw err;
+  }
+}
+
+// The audit row is where a scheduling notice's promised window lives, and
+// persistAudit is best-effort: when its insert fails after the provider
+// accepted the message, the customer holds a window nothing records, the
+// reminder is marked sent and never retried, and the no-show detector later
+// reads an OLDER window as the latest promise (codex P1, PR #4403 round 9).
+// Land the promise in the durable audit_log ledger instead.
+//
+// Held to the same delivery bar the detector applies to an ordinary audit
+// row: a real Twilio SM/MM sid, or a push the routing layer proved. sent:true
+// alone is not enough — the success-shaped sentinels ('owner-silence',
+// gate-/template-/internal-) report a send that reached nobody, and minting
+// promise evidence from one would assert a window the customer was never
+// told. The sid rides along in the row so the detector can still drop the
+// promise if the carrier later reports the message undelivered. Never
+// blocking: the text is already out.
+async function recordPromiseEvidenceFallback(sendInput, providerOutcome, audit) {
+  if (audit.id || !sendInput.appointmentId) return;
+  // A SERIES confirmation is recorded even with no window of its own: a
+  // date-only move quotes no arrival range, and refusing to write anything
+  // there loses both the anchor's unknown-window promise and the siblings'
+  // supersession proof, leaving every one of those visits on its older
+  // window (codex P1, PR #4403 round 15).
+  const seriesMoveId = sendInput.metadata?.original_message_type === 'reschedule_series_confirmation'
+    ? sendInput.metadata?.series_move_id || null : null;
+  const knownSlot = sendInput.renderedSlotMs != null && Number.isFinite(Number(sendInput.renderedSlotMs));
+  if (!knownSlot && !seriesMoveId) return;
+  const providerSid = String(providerOutcome.providerMessageId || '');
+  const deliverable = /^(SM|MM)[a-f0-9]{32}$/i.test(providerSid)
+    || (providerOutcome.provider === 'push' && providerOutcome.deliveryOutcome === 'accepted');
+  if (!deliverable) return;
+  await require('../no-show-detector').recordSentWindowFallback({
+    visitId: sendInput.appointmentId, startAtMs: knownSlot ? sendInput.renderedSlotMs : null,
+    communicatedAt: providerOutcome.sentAt || new Date(),
+    providerSid: providerOutcome.provider === 'push' ? null : providerSid,
+    // ONLY the series confirmation proves the siblings were superseded, and
+    // only that message type: the placement confirmation carries the same
+    // move id but its copy says later commitments stand until staff review,
+    // and Quick Move's moved-SMS names the anchor alone (codex P1, PR #4403
+    // rounds 12 and 14). The detector reads this proof from the audit row we
+    // just failed to write, so it rides along here.
+    seriesMoveId,
+    // Stop-wide copy stays stop-wide in the fallback: a notice that speaks
+    // for a whole grouped stop supersedes every member's own promise, and
+    // recording it as per-service would leave the siblings on their pre-move
+    // windows (codex P1, PR #4403 round 26).
+    stopWide: !!sendInput.metadata?.notificationEventKey,
+  }).catch(() => {});
 }
 
 function validateContract(input) {
@@ -603,6 +702,7 @@ async function dispatchToProvider(input, hooks = {}) {
   }
   return {
     sent: false,
+    deliveryOutcome: 'not_sent',
     error: `Provider for channel "${input.channel}" not yet wired in send_customer_message`,
   };
 }

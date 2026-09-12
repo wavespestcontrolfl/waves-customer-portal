@@ -12,6 +12,7 @@ const { lockCustomerComms } = require('../utils/customer-comms-lock');
 const logger = require('./logger');
 const { isAssignable } = require('./technician-eligibility');
 const VisitCapacity = require('./combined-visit-capacity');
+const { serviceDurationMinutes } = require('./service-library');
 const AvailabilityEngine = require('./availability');
 const { WAVEGUARD, ANNUAL_PREPAY_DISCOUNT_PCT, LAWN_PRICING_V2 } = require('./pricing-engine/constants');
 // Canonical service-key tier membership (aliased: this module's local
@@ -560,7 +561,7 @@ function supplementalCompanionLines(estimateData = {}) {
 }
 
 function combineRecurringServicesForScheduling(recurringServices = [], opts = {}) {
-  const { acceptFrequency = null, supplementalCompanions = [] } = opts;
+  const { acceptFrequency = null, supplementalCompanions = [], forceSeparateRetiredRoutes = false } = opts;
   const remaining = Array.isArray(recurringServices) ? recurringServices.slice() : [];
   const supplements = Array.isArray(supplementalCompanions) ? supplementalCompanions : [];
   const acceptPattern = RecurringAppointmentSeeder.normalizeRecurringPattern(acceptFrequency);
@@ -576,7 +577,7 @@ function combineRecurringServicesForScheduling(recurringServices = [], opts = {}
   // rides as a supplement (supplementalCompanionLines emits rodent bait
   // only), so nothing is orphaned by skipping. The bait+BOND routes are a
   // rider on one visit, not two programs, and keep combining either way.
-  const separateComboVisits = process.env.GATE_SEPARATE_COMBO_VISITS === 'true';
+  const separateComboVisits = forceSeparateRetiredRoutes || process.env.GATE_SEPARATE_COMBO_VISITS === 'true';
   for (const route of COMBINED_SERVICE_ROUTES) {
     if (route.retiredBySeparateVisits && separateComboVisits) continue;
     const primaryIdx = remaining.findIndex((svc) => recurringServiceKey(svc) === route.primaryKey);
@@ -925,7 +926,7 @@ function identityAwareComboMatches(reservedRows, combo, idMap) {
 // standalone identity silently drops the companion completion lane
 // (pre-push P1). Null identity falls back to label resolution, which knows
 // the combined name.
-function combinedRewriteUpdate(combo, catalogRow) {
+function combinedRewriteUpdate(combo, catalogRow, protectedDuration) {
   const update = {
     service_type: combo.route.name,
     service_id: null,
@@ -938,10 +939,39 @@ function combinedRewriteUpdate(combo, catalogRow) {
     // standalone (codex #3485 r6 P2).
     update.service_key_snapshot = combo.route.catalogServiceKey;
     if (catalogRow.default_duration_minutes) {
-      update.estimated_duration_minutes = catalogRow.default_duration_minutes;
+      update.estimated_duration_minutes = protectedDuration
+        || serviceDurationMinutes(catalogRow);
     }
   }
   return update;
+}
+
+// A version-2 reservation freezes one allowance per service. Converter
+// identity lookups happen later than reserve/commit, so an inactive or absent
+// catalog row can become selectable in between. Lock the row chosen by the
+// converter and refuse to attach a catalog identity whose current canonical
+// allowance no longer fits the member's certified minutes.
+function assertV2CatalogAllowance(catalogRow, allocatedMinutes) {
+  if (!catalogRow) return null;
+  const allocated = Number(allocatedMinutes);
+  const catalogDuration = serviceDurationMinutes(catalogRow, 60, { preserveCapacity: true });
+  if (!Number.isInteger(allocated) || allocated <= 0 || catalogDuration > allocated) {
+    throw require('./scheduling/arrival-route').capacityError('service_duration_changed');
+  }
+  // A shorter current policy does not erase a larger certified floor.
+  return allocated;
+}
+
+function v2CapacityMinutesForCatalog(capacity, catalogServiceKey) {
+  if (capacity?.version !== 2) return null;
+  const family = RecurringAppointmentSeeder.serviceKeyFor({ service_key: catalogServiceKey });
+  const index = capacity.services.indexOf(family);
+  return index >= 0 ? capacity.durations[index] : null;
+}
+
+function isCatalogCapacityError(error) {
+  return error?.code === 'SLOT_UNAVAILABLE'
+    && ['service_duration_changed', 'catalog_unavailable'].includes(error?.reason);
 }
 
 function serviceCountsTowardWaveGuardTier(svc = {}) {
@@ -3173,11 +3203,18 @@ function visitsPerYearForRecurringService(svc = {}) {
 }
 
 function durationMinutesForRecurringService(svc = {}, pattern = null, parentRow = {}) {
+  // A certified version-2 parent retains its accepted allowance even after
+  // gate shutdown; companion parents carry their own allocated duration.
+  if (parentRow.reservation_policy_version === 2) return firstPositiveNumber(parentRow.estimated_duration_minutes);
   // Combined synthetic lines carry the catalog row's duration explicitly
   // (e.g. Pest + Termite Bait at 75min) — that beats the pest-quarterly
   // default so combined follow-ups inherit the right visit length.
   const explicit = firstPositiveNumber(svc.estimatedDurationMinutes, svc.estimated_duration_minutes);
   if (explicit) return explicit;
+  // The new policy resolves defaults from the catalog at the booking
+  // boundary. Follow-ups inherit that reserved allowance, including custom
+  // longer estimates, instead of reinstating the retired family-wide hour.
+  if (require('./scheduling/policy').capacityEnabled()) return firstPositiveNumber(parentRow.estimated_duration_minutes);
   const serviceKey = RecurringAppointmentSeeder.serviceKeyFor(svc);
   const parentKey = RecurringAppointmentSeeder.serviceKeyFor({ service_type: parentRow.service_type });
   const key = serviceKey && serviceKey !== 'service' ? serviceKey : parentKey;
@@ -3267,6 +3304,7 @@ const IDENTITY_ONLY_CATALOG_KEYS = new Set([
 // byte-identical.
 const TREE_SHRUB_IDENTITY_ONLY_KEYS = new Set(Object.values(TREE_SHRUB_CADENCE_CATALOG_KEYS));
 function identityOnlyCatalogKey(catalogServiceKey) {
+  if (require('./scheduling/policy').capacityEnabled()) return false;
   return IDENTITY_ONLY_CATALOG_KEYS.has(catalogServiceKey)
     || (process.env.GATE_SEPARATE_COMBO_VISITS === 'true'
       && TREE_SHRUB_IDENTITY_ONLY_KEYS.has(catalogServiceKey));
@@ -3818,6 +3856,77 @@ async function registerSeededFollowUpReminders(rows = [], customerId) {
   }
 }
 
+// Acceptance is successful only when the sold recurring cadence has a
+// complete persisted series. Keep this as an admin-facing audit signal: a
+// missing child must never be hidden by a successful invoice/acceptance.
+async function verifyAcceptedRecurringSchedule(database, { estimateId, customerId, bookedAppointmentIds = [] }) {
+  const estimate = await database('estimates').where({ id: estimateId, customer_id: customerId })
+    .select('id', 'customer_id', 'property_id', 'estimate_data', 'accepted_at', 'accepted_service_mode', 'monthly_total', 'annual_total', 'onetime_total')
+    .first();
+  if (!estimate) return { ok: true, gaps: [] };
+  const retainedEvents = await database('activity_log')
+    .where({ customer_id: customerId, action: 'recurring_series_skipped' })
+    .select('metadata');
+  const retained = retainedEvents.map((event) => {
+    try { return typeof event.metadata === 'string' ? JSON.parse(event.metadata) : event.metadata; } catch { return null; }
+  }).filter((metadata) => String(metadata?.estimateId) === String(estimateId) && metadata?.existingParentId);
+  const retainedParentIds = retained.map((metadata) => metadata.existingParentId);
+  const rows = await database('scheduled_services as s')
+    .leftJoin('services as catalog', 'catalog.id', 's.service_id')
+    .where({ 's.customer_id': customerId })
+    .where(function linkedToEstimate() {
+      this.where('s.source_estimate_id', estimateId).orWhereIn('s.recurring_parent_id', function linkedParents() {
+        this.select('id').from('scheduled_services').where({ source_estimate_id: estimateId, customer_id: customerId });
+      }).orWhereIn('s.id', retainedParentIds).orWhereIn('s.recurring_parent_id', retainedParentIds)
+        .orWhereIn('s.id', bookedAppointmentIds);
+    })
+    .select('s.id', 's.customer_id', 's.property_id', 's.source_estimate_id', 's.recurring_parent_id',
+      's.service_type', 's.service_key_snapshot', 's.is_callback', 's.followup_included', 's.status', 's.scheduled_date',
+      's.is_recurring', 's.recurring_pattern', 's.recurring_ongoing', 's.recurring_interval_days',
+      's.recurring_nth', 's.recurring_weekday', 's.skip_weekends', 's.weekend_shift', 's.date_exception',
+      's.date_exception_cadence_date', 's.property_id',
+      'catalog.service_key as catalog_service_key', 'catalog.billing_type as catalog_billing_type');
+  const { acceptedScheduleFindings, formatDateOnly, isStandaloneReservation, readActiveFamilyHolds, readStoppedRecurringRoots } = require('./recurring-schedule-audit');
+  const todayET = etDateString();
+  const holds = await readActiveFamilyHolds(database, [customerId], todayET);
+  const stoppedRoots = await readStoppedRecurringRoots(database, [customerId]);
+  const reservedServiceIds = new Set(retained.map((metadata) => metadata.reservedServiceId).filter(Boolean));
+  const acceptedDay = estimate.accepted_at ? etDateString(estimate.accepted_at) : null;
+  const retainedRootSet = new Set(retainedParentIds);
+  // Property linkage runs after the caller commits this transaction. Avoid
+  // reporting that known post-commit invariant in the immediate check.
+  const auditRows = rows.filter((row) => {
+    // Same predicate as the scheduled reader: an adopted appointment that is
+    // already recurring is a plan visit, not a standalone reservation.
+    if (isStandaloneReservation(row, reservedServiceIds)) return false;
+    // Keep stopped roots as evidence for the classifier's explicit exemption,
+    // even when all their visits precede this acceptance.
+    if (stoppedRoots.has(row.recurring_parent_id || row.id)) return true;
+    const isRetained = row.source_estimate_id !== estimateId
+      && (retainedRootSet.has(row.id) || retainedRootSet.has(row.recurring_parent_id));
+    return !isRetained || !acceptedDay || formatDateOnly(row.scheduled_date) >= acceptedDay;
+  });
+  const gaps = acceptedScheduleFindings({ ...estimate, property_id: null }, auditRows, stoppedRoots, {
+    todayET,
+    heldFamilies: new Set(holds.map((hold) => hold.family_key)),
+  }).map((finding) => ({
+    ...finding,
+    estimateId,
+    customerId,
+  }));
+  if (!gaps.length) return { ok: true, gaps: [] };
+  const metadata = { estimateId, customerId, gaps };
+  await database('activity_log').insert({
+    customer_id: customerId,
+    estimate_id: estimateId,
+    action: 'recurring_schedule_missing_followups',
+    description: `Accepted estimate #${estimateId} has an incomplete recurring schedule (${gaps.map((gap) => `${gap.pattern || gap.serviceFamily}: ${gap.recordedVisits ?? 0}/${gap.expectedVisits ?? '?'}`).join(', ')}). Review before dispatch.`,
+    metadata: JSON.stringify(metadata),
+  });
+  logger.error(`[estimate-converter] accepted estimate ${estimateId} has incomplete recurring schedule: ${JSON.stringify(metadata)}`);
+  return { ok: false, gaps };
+}
+
 // The pattern seedRecurringFollowUpsForParent would actually seed for this
 // service/parent pair, or null when seeding would no-op. The guarded seeding
 // paths use it to decide whether the duplicate-series lock + re-check is
@@ -4127,6 +4236,26 @@ const EstimateConverter = {
     const usingCallerDatabase = !!opts.database;
     const database = opts.database || db;
     const estimate = await database('estimates').where({ id: estimateId }).first();
+    // Catalog SHARE lock BEFORE any scheduled_services row lock in this
+    // transaction (codex #4369 r3 P1): the version-2 protected catalog
+    // reads below take it late, after family/prepaid/reserved visit rows
+    // are FOR UPDATE'd, while catalog migrations lock `services` first and
+    // then update scheduled_services rows (20260902000010) — an ABBA cycle.
+    // Unlocked pre-read of the hold's policy version; the lock is a no-op
+    // when re-issued by those reads.
+    if (database.isTransaction && (require('./scheduling/policy').capacityEnabled() || await database('scheduled_services')
+      .where({ source_estimate_id: estimateId, reservation_policy_version: 2 }).first('id'))) {
+      try {
+        await require('./scheduling/catalog-lock').lockCatalogIdentity(database);
+      } catch (lockErr) {
+        // A lock timeout here is the catalog being unavailable for a
+        // capacity-certified conversion: the same recoverable 409 the
+        // protected reads raise, never an unmapped 500.
+        const unavailable = require('./scheduling/arrival-route').capacityError('catalog_unavailable');
+        unavailable.cause = lockErr;
+        throw unavailable;
+      }
+    }
     if (!estimate) throw new Error(`Estimate ${estimateId} not found`);
     if (estimate.status !== 'accepted') throw new Error(`Estimate ${estimateId} is not accepted (status: ${estimate.status})`);
     if (!estimate.customer_id) throw new Error(`Estimate ${estimateId} has no linked customer`);
@@ -4220,17 +4349,22 @@ const EstimateConverter = {
     // downstream) guarantees no partial rows are created; all three convertEstimate
     // entrypoints run inside a transaction, so a throw rolls back cleanly.
     const supplementalCompanions = supplementalCompanionLines(estimateData);
-    // ONE scheduling decision for the whole accept (Codex r2 on the
+    // ONE initial scheduling decision for the whole accept (Codex r2 on the
     // pest+rodent removal): the auto-schedule loop, the reservation branch,
     // unit counting, and prepay coverage all read this same result, so the
     // count can never disagree with what actually schedules. Only
     // fromSupplement standalone units add to the count — a line-sourced
     // standalone unit was already counted among the recurring lines, and
-    // the combine dedupes a line + duplicate scalar to one unit.
-    const combinedScheduling = combineRecurringServicesForScheduling(recurringServicesForConversion, {
+    // the combine dedupes a line + duplicate scalar to one unit. A stamped
+    // primary-only reservation can separate retired routes after its hold is
+    // loaded below; that changes placement only, not the accepted program count.
+    const combinedSchedulingOptions = {
       acceptFrequency: estimateData.customerSelection?.frequency || null,
       supplementalCompanions,
-    });
+    };
+    let combinedScheduling = combineRecurringServicesForScheduling(
+      recurringServicesForConversion, combinedSchedulingOptions,
+    );
     const supplementStandaloneUnits = combinedScheduling.standalone.filter((unit) => unit.fromSupplement);
     // Termite bond lines are RIDERS, not units (owner 2026-07-20): the bond
     // folds into the bait visit via its combined route, so counting it would
@@ -4988,6 +5122,25 @@ const EstimateConverter = {
     const capacitySnapshot = VisitCapacity.capacityFromReservation(reservedRows[0]);
     const combinedCapacity = capacitySnapshot && !capacitySnapshot.allocatedServiceIds ? capacitySnapshot : null;
     if (combinedCapacity && !database.isTransaction) throw VisitCapacity.capacityUnavailable();
+    // A version-2 reservation without a combined allocation certified only
+    // its primary program. Retire true two-program routes for this conversion
+    // even while the broader separate-visits gate is off, so a companion is
+    // created independently instead of being added to the certified visit.
+    const primaryOnlyCapacityReservation = reservedRows[0]?.reservation_policy_version === 2 && !combinedCapacity;
+    // A persisted version-2 COMBINED allocation was certified under the
+    // separate-visits gate with one member row per program; its retired
+    // two-program routes must stay separated at conversion even after that
+    // gate is disabled, or the anchor is rewritten into one combined row and
+    // the persisted mix no longer matches its members (codex #4351 P0).
+    const persistedCapacitySeparation = primaryOnlyCapacityReservation || combinedCapacity?.version === 2;
+    const separateReservedPrograms = persistedCapacitySeparation
+      || process.env.GATE_SEPARATE_COMBO_VISITS === 'true';
+    if (persistedCapacitySeparation) {
+      combinedScheduling = combineRecurringServicesForScheduling(recurringServicesForConversion, {
+        ...combinedSchedulingOptions,
+        forceSeparateRetiredRoutes: true,
+      });
+    }
 
     // ——— Multi-unit lock-order pre-pass (P1: cross-conversion deadlock) ———
     // Only the CALLER-TRANSACTION path needs it: with a caller-provided trx
@@ -5062,7 +5215,7 @@ const EstimateConverter = {
             // family lock order and deadlock (codex r17 P2: one reserves
             // termite and promotes mosquito while the other does the
             // reverse). Mirrors the loop's own name/key derivations.
-            const prePassRetiredPestPair = process.env.GATE_SEPARATE_COMBO_VISITS === 'true'
+            const prePassRetiredPestPair = separateReservedPrograms
               && (standalone.some((unit) => unit.catalogServiceKey === 'termite_bait')
                 || combos.some((combo) => combo.route.primaryKey === 'termite_bait'));
             for (const svc of remaining) {
@@ -5110,7 +5263,7 @@ const EstimateConverter = {
               // own name/pattern/key derivations exactly.
               const fam = seedingFamilyKey(svc);
               const treeShrubPromotable = fam === 'tree_shrub'
-                && process.env.GATE_SEPARATE_COMBO_VISITS === 'true'
+                && separateReservedPrograms
                 && (() => {
                   if (visitCountFieldsConflict(svc) || visitCountFieldsInvalid(svc)) return false;
                   if (combinedCapacity) return true;
@@ -5336,7 +5489,7 @@ const EstimateConverter = {
         // pre-rewrite combined identity. Under the gate the pairing uses
         // the same identity-aware classification as the zero-match
         // promotion; pre-gate keeps label-only reservedRowComboRewrites.
-        const comboRewritePairs = process.env.GATE_SEPARATE_COMBO_VISITS === 'true'
+        const comboRewritePairs = separateReservedPrograms
           ? (combos || []).flatMap((combo) => {
             const matching = identityAwareComboMatches(reservedRows, combo, reservedServiceKeyById);
             return matching.length === 1 ? [{ row: matching[0], combo }] : [];
@@ -5354,7 +5507,7 @@ const EstimateConverter = {
         // both-halves-reserved combo is already covered by its two reserved
         // rows (reservedRowComboRewrites' exactly-one-match contract), and
         // a one-match combo rewrites the reserved row below as always.
-        const promotedComboUnits = process.env.GATE_SEPARATE_COMBO_VISITS !== 'true' ? [] : (combos || [])
+        const promotedComboUnits = !separateReservedPrograms ? [] : (combos || [])
           .filter((combo) => identityAwareComboMatches(reservedRows, combo, reservedServiceKeyById).length === 0)
           .map((combo) => ({
             service: combo.service,
@@ -5370,7 +5523,7 @@ const EstimateConverter = {
         // suppresses the bait insert and nothing else would schedule the
         // billed pest program (audit P0). A pest-owned reservation dedups
         // via alreadyReserved exactly like every other promotion.
-        const retiredPestPairPresent = process.env.GATE_SEPARATE_COMBO_VISITS === 'true'
+        const retiredPestPairPresent = separateReservedPrograms
           && ((reservedStandalone || []).some((unit) => unit.catalogServiceKey === 'termite_bait')
             || (combos || []).some((combo) => combo.route.primaryKey === 'termite_bait'));
         const promotedRetiredPestUnits = !retiredPestPairPresent && !combinedCapacity ? [] : (remaining || [])
@@ -5395,7 +5548,7 @@ const EstimateConverter = {
         // same pattern gate applies, so a legacy line that would not seed
         // does not promote either.
         const promotableFamilies = ['lawn_care', 'palm_injection',
-          ...(process.env.GATE_SEPARATE_COMBO_VISITS === 'true' ? ['tree_shrub'] : [])];
+          ...(separateReservedPrograms ? ['tree_shrub'] : [])];
         const promotedLawnPalmUnits = (remaining || [])
           .filter((line) => {
             const fam = seedingFamilyKey(line);
@@ -5459,7 +5612,7 @@ const EstimateConverter = {
           return reservedRows.some((row) => {
             // POST-rewrite identity under the gate: a row the rider route
             // is about to rewrite covers what it will BECOME (audit P0).
-            const reservedKey = (process.env.GATE_SEPARATE_COMBO_VISITS === 'true'
+            const reservedKey = (separateReservedPrograms
               && pendingRewriteKeyByRowId.get(row.id))
               || reservedServiceKeyById.get(row.service_id)
               || String(row.service_key_snapshot || '')
@@ -5476,7 +5629,7 @@ const EstimateConverter = {
             // cadence-specific identity (pest_general_monthly on a
             // quarterly accept) must not suppress the correctly-cadenced
             // promoted unit — those rows need exact identity or a relink.
-            const retiredComboCover = process.env.GATE_SEPARATE_COMBO_VISITS === 'true'
+            const retiredComboCover = separateReservedPrograms
               && !!unit.catalogServiceKey && !!reservedKey
               && RETIRED_COMBINED_CATALOG_KEYS.has(reservedKey)
               && comboRouteFamiliesFromCatalogKey(reservedKey)
@@ -5515,7 +5668,7 @@ const EstimateConverter = {
             // for lawn/T&S). The label stays the fallback for
             // identity-less legacy rows; pre-gate keeps the r20
             // label-or-identity contract byte-for-byte.
-            if (process.env.GATE_SEPARATE_COMBO_VISITS === 'true' && reservedKey) {
+            if (separateReservedPrograms && reservedKey) {
               return identityMatch;
             }
             return identityMatch || recurringServiceKey({ name: row.service_type }) === unitKey;
@@ -5538,7 +5691,7 @@ const EstimateConverter = {
             : [recurringServiceForScheduledRow(
               recurringServicesForConversion,
               reservedStart,
-              process.env.GATE_SEPARATE_COMBO_VISITS === 'true'
+              separateReservedPrograms
                 ? seedFamilyForReservedIdentity(
                   reservedServiceKeyById.get(reservedStart.service_id)
                     || String(reservedStart.service_key_snapshot || '') || null,
@@ -5584,7 +5737,13 @@ const EstimateConverter = {
             const unitDate = unit.seasonalMosquito
               ? await rolledSeasonalFirstDate(scheduledDateOnly(reservedStart.scheduled_date))
               : scheduledDateOnly(reservedStart.scheduled_date);
-            const sameTrip = unitDate === scheduledDateOnly(reservedStart.scheduled_date);
+            // A primary-only capacity hold certifies no companion work.
+            // Keep those programs unassigned and without a promised window
+            // until an independent scheduling writer certifies their route.
+            const capacityReservation = reservedStart.reservation_policy_version === 2
+              || require('./scheduling/policy').capacityEnabled();
+            const sameTrip = unitDate === scheduledDateOnly(reservedStart.scheduled_date)
+              && (!!combinedCapacity || !capacityReservation);
             // Row notes are customer-visible — a seasonal line's raw
             // every_6_weeks frequency must not leak into them.
             const unitFrequencyLabel = unit.seasonalMosquito
@@ -5606,20 +5765,34 @@ const EstimateConverter = {
               notes: `Auto-scheduled from estimate #${estimateId} (${unit.noteKind || 'standalone bait program'} alongside reserved visit). Frequency: ${unitFrequencyLabel}.`,
               source_estimate_id: estimateId,
             };
+            const protectV2Member = combinedCapacity?.version === 2 && sameTrip;
             try {
-              const catalogRow = await database('services')
-                .where({ service_key: unit.catalogServiceKey })
-                .first('id', 'name', 'default_duration_minutes');
+              const catalogQuery = database('services').where({ service_key: unit.catalogServiceKey });
+              // Table SHARE lock instead of FOR SHARE (scheduling/catalog-lock.js):
+              // a row lock here deadlocks against the SHARE lock the same accept
+              // transaction holds through commitReservation (codex #4369 r2).
+              if (protectV2Member) await require('./scheduling/catalog-lock').lockCatalogIdentity(database);
+              const catalogRow = await catalogQuery.first('id', 'name', 'default_duration_minutes', 'min_duration_minutes',
+                  'max_duration_minutes', 'scheduling_duration_policy');
               if (catalogRow) {
+                const protectedDuration = protectV2Member
+                  ? assertV2CatalogAllowance(catalogRow,
+                    v2CapacityMinutesForCatalog(combinedCapacity, unit.catalogServiceKey))
+                  : null;
                 standaloneRow.service_id = catalogRow.id;
                 standaloneRow.service_type = Object.values(PEST_CADENCE_CATALOG_KEYS).includes(unit.catalogServiceKey)
                   ? (catalogRow.name || standaloneRow.service_type) : standaloneRow.service_type;
                 unit.service.name = standaloneRow.service_type;
                 if (catalogRow.default_duration_minutes && !identityOnlyCatalogKey(unit.catalogServiceKey)) {
-                  standaloneRow.estimated_duration_minutes = catalogRow.default_duration_minutes;
+                  standaloneRow.estimated_duration_minutes = Math.max(
+                    protectedDuration || serviceDurationMinutes(catalogRow),
+                    (protectV2Member || require('./scheduling/policy').capacityEnabled())
+                      ? firstPositiveNumber(unit.service.estimatedDurationMinutes, unit.service.estimated_duration_minutes) || 0 : 0);
                 }
               }
             } catch (lookupErr) {
+              if (isCatalogCapacityError(lookupErr)) throw lookupErr;
+              if (protectV2Member) throw require('./scheduling/arrival-route').capacityError('catalog_unavailable');
               logger.warn(`[estimate-converter] catalog lookup failed for ${unit.catalogServiceKey}: ${lookupErr.message}`);
               // Same abort as the auto-schedule path (codex r21 pre-push
               // P1): an errored palm lookup is unknown state, not a
@@ -5657,8 +5830,9 @@ const EstimateConverter = {
               if (recomputedEnd) standaloneRow.window_end = recomputedEnd;
             }
             if (combinedCapacity && sameTrip) {
-              Object.assign(standaloneRow, VisitCapacity.windowForCapacityService(reservedStart, capacityMembers.length));
+              Object.assign(standaloneRow, VisitCapacity.windowForCapacityService(reservedStart, capacityMembers.length, unit.catalogServiceKey));
               standaloneRow.service_key_snapshot = unit.catalogServiceKey;
+              if (combinedCapacity.version === 2) standaloneRow.reservation_policy_version = 2;
             }
             // Duplicate-series guard (P0): this standalone creator was the
             // third unguarded converter seeding path — a customer already
@@ -5796,14 +5970,28 @@ const EstimateConverter = {
           // Identity contract lives in combinedRewriteUpdate (pre-push P1:
           // a missing row / failed lookup CLEARS the standalone identity).
           let catalogRow = null;
+          let protectedDuration = null;
+          const protectV2Rewrite = row.reservation_policy_version === 2 && capacitySnapshot?.version !== 1;
           try {
-            catalogRow = await database('services')
-              .where({ service_key: combo.route.catalogServiceKey })
-              .first('id', 'default_duration_minutes');
+            const catalogQuery = database('services').where({ service_key: combo.route.catalogServiceKey });
+            // Table SHARE lock instead of FOR SHARE (scheduling/catalog-lock.js):
+            // a row lock here deadlocks against the SHARE lock the same accept
+            // transaction holds through commitReservation (codex #4369 r2).
+            if (protectV2Rewrite) await require('./scheduling/catalog-lock').lockCatalogIdentity(database);
+            catalogRow = await catalogQuery.first('id', 'default_duration_minutes', 'min_duration_minutes',
+                'max_duration_minutes', 'scheduling_duration_policy');
+            if (protectV2Rewrite) {
+              protectedDuration = assertV2CatalogAllowance(catalogRow,
+                combinedCapacity?.version === 2
+                  ? v2CapacityMinutesForCatalog(combinedCapacity, combo.route.catalogServiceKey)
+                  : row.estimated_duration_minutes);
+            }
           } catch (lookupErr) {
+            if (isCatalogCapacityError(lookupErr)) throw lookupErr;
+            if (protectV2Rewrite) throw require('./scheduling/arrival-route').capacityError('catalog_unavailable');
             logger.warn(`[estimate-converter] combined catalog lookup failed for ${combo.route.catalogServiceKey}: ${lookupErr.message}`);
           }
-          const update = combinedRewriteUpdate(combo, catalogRow);
+          const update = combinedRewriteUpdate(combo, catalogRow, protectedDuration);
           if (update.estimated_duration_minutes) {
             combo.service.estimatedDurationMinutes = update.estimated_duration_minutes;
           }
@@ -5840,6 +6028,7 @@ const EstimateConverter = {
         // P0): this fail-soft catch would otherwise complete
         // acceptance/billing without the sold palm series.
         if (combinedCapacity) throw comboErr;
+        if (isCatalogCapacityError(comboErr)) throw comboErr;
         if (comboErr.code === 'PALM_RECURRING_CATALOG_MISSING'
           || comboErr.code === 'PALM_RECURRING_LINE_INVALID'
           || comboErr.code === 'RESERVED_CATALOG_IDENTITY_UNKNOWN') throw comboErr;
@@ -5849,7 +6038,7 @@ const EstimateConverter = {
       if (combinedCapacity) {
         VisitCapacity.assertCapacityServices(reservedStart, capacityMembers);
         const allocation = {
-          ...VisitCapacity.windowForCapacityService(reservedStart, 0),
+          ...VisitCapacity.windowForCapacityService(reservedStart, 0, reservedStart.service_key_snapshot),
           reservation_service_mix: {
             ...combinedCapacity,
             scheduledDate: scheduledDateOnly(reservedStart.scheduled_date),
@@ -5858,10 +6047,13 @@ const EstimateConverter = {
           },
         };
         await database('scheduled_services').whereIn('id', allocation.reservation_service_mix.allocatedServiceIds)
-          .update({ reservation_service_mix: allocation.reservation_service_mix });
+          .update({ reservation_service_mix: allocation.reservation_service_mix,
+            ...(combinedCapacity.version === 2 ? { reservation_policy_version: 2 } : {}) });
         await database('scheduled_services').where({ id: reservedStart.id }).update(
-          VisitCapacity.windowForCapacityService(reservedStart, 0),
+          VisitCapacity.windowForCapacityService(reservedStart, 0, reservedStart.service_key_snapshot),
         );
+        if (combinedCapacity.version === 2) await require('./scheduling/arrival-route').persistCapacityAllocation(
+          database, reservedStart, allocation.reservation_service_mix.allocatedServiceIds);
         Object.assign(reservedStart, allocation);
       }
 
@@ -5883,7 +6075,7 @@ const EstimateConverter = {
         // THAT family's line, not its stale label — a pest-identified row
         // labeled bait would otherwise bind the bait line, termite seeding
         // declines, and the sold pest series stops after one visit.
-        const reservedIdentityFamily = process.env.GATE_SEPARATE_COMBO_VISITS === 'true'
+        const reservedIdentityFamily = separateReservedPrograms
           ? seedFamilyForReservedIdentity(
             reservedServiceKeyById.get(reservedStart.service_id)
               || String(reservedStart.service_key_snapshot || '') || null,
@@ -5983,10 +6175,19 @@ const EstimateConverter = {
                       ? (PEST_CADENCE_CATALOG_KEYS[reservedSeedingPattern] || null)
                       : null;
                 if (reservedCatalogKey) {
+                  const protectV2Parent = reservedStart.reservation_policy_version === 2
+                    && capacitySnapshot?.version !== 1;
                   try {
-                    const catalogRow = await trx('services')
-                      .where({ service_key: reservedCatalogKey })
-                      .first('id', 'service_key');
+                    const catalogQuery = trx('services').where({ service_key: reservedCatalogKey });
+                    // Table SHARE lock instead of FOR SHARE (scheduling/catalog-lock.js):
+                    // a row lock here deadlocks against the SHARE lock the same accept
+                    // transaction holds through commitReservation (codex #4369 r2).
+                    if (protectV2Parent) await require('./scheduling/catalog-lock').lockCatalogIdentity(trx);
+                    const catalogRow = await catalogQuery.first('id', 'service_key', 'default_duration_minutes', 'min_duration_minutes',
+                        'max_duration_minutes', 'scheduling_duration_policy');
+                    if (catalogRow && protectV2Parent) {
+                      assertV2CatalogAllowance(catalogRow, reservedStart.estimated_duration_minutes);
+                    }
                     if (catalogRow && reservedStart.service_id !== catalogRow.id) {
                       // Snapshot rides along (durable identity — completion
                       // trusts id, then snapshot). service_type is NEVER
@@ -6013,8 +6214,12 @@ const EstimateConverter = {
                       throw palmCatalogMissingError();
                     }
                   } catch (relinkErr) {
+                    if (isCatalogCapacityError(relinkErr)) throw relinkErr;
                     // Unknown identity state = fail closed for palm too.
                     if (relinkErr.code === 'PALM_RECURRING_CATALOG_MISSING') throw relinkErr;
+                    if (protectV2Parent) {
+                      throw require('./scheduling/arrival-route').capacityError('catalog_unavailable');
+                    }
                     logger.warn(`[estimate-converter] reserved-parent catalog relink failed for ${reservedCatalogKey} (existing identity kept): ${relinkErr.message}`);
                     if (reservedCatalogKey === 'palm_injection_semiannual') {
                       throw palmCatalogMissingError();
@@ -6065,6 +6270,7 @@ const EstimateConverter = {
           }
         } catch (seedErr) {
           if (combinedCapacity) throw seedErr;
+          if (isCatalogCapacityError(seedErr)) throw seedErr;
           // The palm identity abort must surface — swallowing it would
           // complete the acceptance around the very rollback it exists to
           // force (codex r17 pre-push P0).
@@ -6120,14 +6326,16 @@ const EstimateConverter = {
             // kill switches, and the booking/picker catalog filters.
             const catalogRow = await database('services')
               .where({ service_key: unit.catalogServiceKey })
-              .first('id', 'name', 'default_duration_minutes');
+              .first('id', 'name', 'default_duration_minutes', 'scheduling_duration_policy');
             if (catalogRow) {
               combinedServiceId = catalogRow.id;
               if (Object.values(PEST_CADENCE_CATALOG_KEYS).includes(unit.catalogServiceKey)) {
                 acceptedPestServiceName = catalogRow.name;
               }
               if (catalogRow.default_duration_minutes && !identityOnlyCatalogKey(unit.catalogServiceKey)) {
-                svc.estimatedDurationMinutes = catalogRow.default_duration_minutes;
+                svc.estimatedDurationMinutes = Math.max(serviceDurationMinutes(catalogRow),
+                  require('./scheduling/policy').capacityEnabled()
+                    ? firstPositiveNumber(svc.estimatedDurationMinutes, svc.estimated_duration_minutes) || 0 : 0);
               }
             } else {
               logger.warn(`[estimate-converter] catalog row ${unit.catalogServiceKey} absent — scheduling by name only`);
@@ -7008,7 +7216,17 @@ const EstimateConverter = {
       logger.error(`[estimate-converter] Draft invoice creation failed for estimate ${estimateId}: ${err.message}`);
     }
 
-    logger.info(`[estimate-converter] Estimate ${estimateId} converted: customer ${customerId} → ${tier} tier, $${convertedMonthlyRate}/mo customer rate ($${monthlyRate}/mo from this estimate), ${scheduledCount} services scheduled, billingTerm=${billingTerm}, draftInvoiceId=${draftInvoiceId || 'none'}`);
+    let recurringScheduleCheck = { ok: true, gaps: [] };
+    try {
+      // A nested Knex transaction uses a savepoint when acceptance owns the
+      // transaction, so an audit SQL error cannot poison later acceptance writes.
+      recurringScheduleCheck = await database.transaction((auditTrx) =>
+        verifyAcceptedRecurringSchedule(auditTrx, { estimateId, customerId, bookedAppointmentIds: opts.bookedAppointmentIds }));
+    } catch (err) {
+      recurringScheduleCheck = { ok: false, gaps: [], error: 'verification_failed' };
+      logger.warn(`[estimate-converter] recurring schedule verification failed for estimate ${estimateId}: ${err.message}`);
+    }
+    logger.info(`[estimate-converter] Estimate ${estimateId} converted: customer ${customerId} → ${tier} tier, $${convertedMonthlyRate}/mo customer rate ($${monthlyRate}/mo from this estimate), ${scheduledCount} services scheduled, recurringScheduleOk=${recurringScheduleCheck.ok}, billingTerm=${billingTerm}, draftInvoiceId=${draftInvoiceId || 'none'}`);
 
     const membershipEmail = {
       customerId,
@@ -7386,6 +7604,7 @@ const EstimateConverter = {
       estimateMonthlyRate: monthlyRate,
       serviceCount,
       scheduledCount,
+      recurringScheduleCheck,
       requiresManualRecurringScheduling: hasCommercialRecurring,
       firstScheduledServiceId,
       billingTerm,

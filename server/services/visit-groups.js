@@ -514,9 +514,8 @@ async function createOrJoinVisit({ rows, createdBy, trx = null }) {
     // enrollment UPDATE's own NO KEY UPDATE lock — the serialization the
     // TOCTOU fix needs is intact.
     await t('customers').where({ id: stopCustomerId }).forNoKeyUpdate().first('id');
-    const behaviorVersion = require('../config/feature-gates').isEnabled('visitCloseout')
-      && process.env.DATA_HYGIENE_VAULT_KEY ? 2 : 1;
-    if (behaviorVersion === 1 && await customerExcludedByAutopay(stopCustomerId, t)) {
+    const behaviorVersion = combinedCloseoutBehaviorVersion();
+    if (await groupingRefusedByAutopay(stopCustomerId, t)) {
       throw new Error('rows not mutually groupable: autopay_enrolled');
     }
     await lockStop(t, baseKeyFor(peek[0]));
@@ -1147,6 +1146,19 @@ async function dissolveForLegacyCompletion(visitId, { expectChildId = null, trx 
  * the enrollment-time refuse/dissolve seam belongs to that lane
  * (spec §6/§7, GATE_VISIT_GROUP_AUTOPAY) — not to a money flow here.
  */
+// Version 2 (combined closeout live with its encryption key) bills a grouped
+// visit through one packet, so Auto Pay customers may be grouped; version 1
+// keeps the Phase-1 exclusion. One decision for automatic stamping and the
+// staff grouping route alike.
+function combinedCloseoutBehaviorVersion() {
+  return require('../config/feature-gates').isEnabled('visitCloseout') && process.env.DATA_HYGIENE_VAULT_KEY ? 2 : 1;
+}
+
+async function groupingRefusedByAutopay(customerId, database = db) {
+  if (combinedCloseoutBehaviorVersion() === 2) return false;
+  return customerExcludedByAutopay(customerId, database);
+}
+
 async function customerExcludedByAutopay(customerId, database = db) {
   try {
     const customer = await database('customers').where({ id: customerId })
@@ -1481,7 +1493,10 @@ async function claimVisitNotification(row, kind) {
           this.where('visit_effects.status', '=', 'failed')
             .orWhere(function staleClaim() {
               this.where('visit_effects.status', '=', 'claimed').where('visit_effects.claimed_at', '<', leaseCutoff);
-            });
+            })
+            // A dispatch mark whose pre-provider marker outlived the lease:
+            // the process died before its provider request, provably.
+            .orWhere(function abandonedHandoff() { stalePreProviderHandoff(this, leaseCutoff); });
           // Email recovery consults each durable email_messages row and
           // skips every uncertain handoff. Reclaiming its aggregate lets
           // later, proven-unsent recipients finish. SMS has no such ledger.
@@ -1508,7 +1523,22 @@ async function claimVisitNotification(row, kind) {
 // The non-idempotent provider handoff is durable BEFORE sending a summary.
 // SMS ambiguity cannot be reclaimed. Email recovery skips uncertain
 // recipient rows and fences each subsequent handoff with its new token.
-async function beginVisitNotificationDispatch(visitId, kind, token, { dedupeKey = null, scheduled = false, database = db } = {}) {
+// The mark carries a pre-provider marker (`handoff_pending`, or
+// `handoff_pending:<email message id>` for an email recipient's queued
+// ledger row) that the handoff clears durably immediately before its
+// provider request. A process that dies between this commit and that
+// clear leaves the marker behind: past the claim lease it proves no
+// request was made, so the claim is reclaimable instead of uncertain.
+const HANDOFF_PENDING = 'handoff_pending';
+function handoffPendingMarker(ref = null) { return ref ? `${HANDOFF_PENDING}:${ref}` : HANDOFF_PENDING; }
+function isHandoffPending(lastError) { return typeof lastError === 'string' && (lastError === HANDOFF_PENDING || lastError.startsWith(`${HANDOFF_PENDING}:`)); }
+function stalePreProviderHandoff(query, leaseCutoff) {
+  return query.where('visit_effects.status', 'unknown_delivery')
+    .where('visit_effects.last_error', 'like', `${HANDOFF_PENDING}%`)
+    .where('visit_effects.claimed_at', '<', leaseCutoff);
+}
+
+async function beginVisitNotificationDispatch(visitId, kind, token, { dedupeKey = null, scheduled = false, database = db, pendingRef = null } = {}) {
   const effectType = effectTypeForKind(kind);
   if (!PACKET_EFFECT_TYPES.has(effectType) || !token) return false;
   if (scheduled && effectType !== 'completion_sms') return false;
@@ -1524,7 +1554,20 @@ async function beginVisitNotificationDispatch(visitId, kind, token, { dedupeKey 
     if (['completion_sms', 'completion_email'].includes(effectType)) {
       query.whereExists(database('service_visits').select(database.raw('1')).where({ id: visitId }).whereNull('summary_token_revoked_at'));
     }
-  }).update({ status: 'unknown_delivery', last_error: null, claimed_at: new Date(), updated_at: database.fn.now() }).returning('id');
+  }).update({ status: 'unknown_delivery', last_error: handoffPendingMarker(pendingRef), claimed_at: new Date(), updated_at: database.fn.now() }).returning('id');
+  return rows.length > 0;
+}
+
+// The durable "a provider request follows" transition: the pre-provider
+// marker is cleared on the dedicated marker connection (never a second
+// root-pool slot inside the held handoff) and awaited before the request,
+// so a crash after it leaves an uncertain effect and a crash before it a
+// reclaimable one. Zero rows means recovery already reclaimed the effect
+// (or its state changed): nothing may reach the provider.
+async function markVisitNotificationProviderStart(visitId, kind, token, database = require('../models/marker-db')()) {
+  const rows = await database('visit_effects').where({ visit_id: visitId, effect_type: effectTypeForKind(kind), claim_token: token,
+    status: 'unknown_delivery' }).where('last_error', 'like', `${HANDOFF_PENDING}%`)
+    .update({ last_error: null, updated_at: database.fn.now() }).returning('id');
   return rows.length > 0;
 }
 
@@ -3261,6 +3304,8 @@ module.exports = {
   createOrJoinVisit,
   maybeGroupRow,
   customerExcludedByAutopay,
+  combinedCloseoutBehaviorVersion,
+  groupingRefusedByAutopay,
   splitChild,
   handleChildTerminal,
   handleChildStopChanged,
@@ -3282,6 +3327,7 @@ module.exports = {
   claimVisitNotification,
   recordedPacketMember,
   beginVisitNotificationDispatch,
+  markVisitNotificationProviderStart, HANDOFF_PENDING, isHandoffPending,
   notificationLeaseLive,
   renewNotificationLease,
   finalizeVisitNotification,

@@ -61,7 +61,7 @@ function storedFloorBreachAcknowledged(estData = {}, stored = {}) {
   return root?.pricingMetadata?.manualDiscountFloorBreach?.acknowledged === true;
 }
 
-function storedManualDiscountForReplay(estData = {}) {
+function storedManualDiscountForReplay(estData = {}, { requireReplayable = false } = {}) {
   const stored = candidateList(estData).find((item) => item
     && typeof item === 'object'
     && (item.type === 'PERCENT' || item.type === 'FIXED')
@@ -72,6 +72,10 @@ function storedManualDiscountForReplay(estData = {}) {
   // allocations masquerade as proven-zero and replay anyway.
   if (stored.type === 'FIXED'
     && !(typeof stored.oneTimeAmount === 'number' && stored.oneTimeAmount === 0)) {
+    if (requireReplayable) {
+      throw Object.assign(new Error('The saved discount allocation needs review in the estimate editor before repricing.'),
+        { code: 'discount_review_required', statusCode: 409 });
+    }
     return null;
   }
   const out = {

@@ -103,17 +103,46 @@ async function buildDispatchJobUpdatePayload(jobId, actorId) {
   };
 }
 
-async function emitDispatchJobUpdate({ jobId, actorId }) {
+async function emitDispatchJobUpdate({ jobId, actorId, previousDate, qualityDates = null }) {
   const payload = await buildDispatchJobUpdatePayload(jobId, actorId);
   if (!payload) return null;
 
   const io = getIo();
   if (!io) {
     logger.warn('[dispatch-assignment] io not initialized; skipping dispatch:job_update');
+  } else {
+    io.to(ADMIN_ROOM).emit(ADMIN_EVENT, payload);
+  }
+  // Publish the job payload before doing additional reads so measurement
+  // latency cannot delay an older board update behind a newer one.
+  //
+  // `qualityDates`: a caller that mutates a BATCH of rows passes one Set
+  // here and calls flushDispatchQualityDates once after its loop. With the
+  // quality gates on, each refresh repairs and remeasures whole routes, so
+  // a 100-row bulk action refreshing per row would run ~100 near-duplicate
+  // passes serially and could time out the response after the schedule rows
+  // already committed. Single-row callers keep the inline refresh.
+  if (qualityDates) {
+    for (const date of [previousDate, payload.scheduled_date]) if (date) qualityDates.add(date);
     return payload;
   }
-  io.to(ADMIN_ROOM).emit(ADMIN_EVENT, payload);
+  await require('./scheduling/quality-after-change').refreshScheduleQualityAfterChange({
+    jobId, dates: [previousDate, payload.scheduled_date],
+  });
   return payload;
+}
+
+// One refresh for every date a batch touched. No-op for an empty set (the
+// gates are dark, or nothing moved), and it never rejects — the refresh
+// reports its own failures, and the batch has already committed.
+async function flushDispatchQualityDates(qualityDates) {
+  const dates = [...(qualityDates || [])].filter(Boolean);
+  if (!dates.length) return null;
+  // A flushed set is spent: a request that shares one Set between the
+  // rebooker, a series-effects pass and its own final flush must not refresh
+  // the same dates twice (codex #4295 r2 P2).
+  if (typeof qualityDates.clear === 'function') qualityDates.clear();
+  return require('./scheduling/quality-after-change').refreshScheduleQualityAfterChange({ dates });
 }
 
 async function assignDispatchJob({ jobId, technicianId, actorId, emit = true, trx = null, skipVisitSeam = false, expectTechnicianId, noticeSnapshot = null, noticeActorId } = {}) {
@@ -208,7 +237,12 @@ async function assignDispatchJob({ jobId, technicianId, actorId, emit = true, tr
         .whereNull('resolved_at')
         .select('id');
       for (const { id } of openAlerts) {
-        await resolveAlert({ id, resolvedBy: actorId, trx: assignmentTrx });
+        // auto: true — assigning a tech is not the dispatcher acknowledging
+        // THIS alert, it's a side effect that makes "unassigned" stale. If
+        // the visit is later unassigned again under the same promise, a
+        // fresh unassigned_overdue alert must still be raisable under the
+        // same tracking_key (codex P1, pre-push audit on 925e9e977).
+        await resolveAlert({ id, resolvedBy: actorId, trx: assignmentTrx, auto: true });
       }
     }
   };
@@ -306,6 +340,7 @@ async function assignDispatchJob({ jobId, technicianId, actorId, emit = true, tr
 module.exports = {
   assignDispatchJob,
   emitDispatchJobUpdate,
+  flushDispatchQualityDates,
   buildDispatchJobUpdatePayload,
   _test: {
     dateOnly,

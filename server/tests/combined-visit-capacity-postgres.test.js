@@ -7,7 +7,10 @@ jest.mock('../models/db', () => {
 });
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../config/feature-gates', () => ({ isEnabled: () => false, gateEnvValue: () => false }));
-jest.mock('../services/scheduling/blackout-dates', () => ({ isBlackoutDate: async () => false }));
+jest.mock('../services/scheduling/blackout-dates', () => ({
+  isBlackoutDate: async () => false,
+  lockClosureState: jest.requireActual('../services/scheduling/blackout-dates').lockClosureState,
+}));
 jest.mock('../services/slot-zone', () => ({ resolveEstimateZone: async () => null, zoneSlugOf: () => null }));
 jest.mock('../services/inspection-credit', () => ({ markBookingForInspectionCredit: async () => {} }));
 jest.mock('../services/tech-visit-notifications', () => ({ notifyTechVisitChange: async () => {} }));

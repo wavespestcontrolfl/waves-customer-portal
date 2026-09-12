@@ -2481,20 +2481,6 @@ router.get('/:id/cards', async (req, res, next) => {
 });
 
 // GET /api/admin/customers/:id/properties — multi-property list (Phase 1).
-// customer_properties column widths (migration 20260629000001). Enforced
-// here so an overlong paste is a 400 naming the field, not a PostgreSQL
-// bounce surfaced as a generic save failure.
-const PROPERTY_FIELD_LIMITS = Object.freeze({
-  address_line1: 200, address_line2: 100, city: 50, zip: 10, label: 100,
-});
-function propertyFieldOverLimit(body) {
-  for (const [field, max] of Object.entries(PROPERTY_FIELD_LIMITS)) {
-    const v = body?.[field];
-    if (v !== undefined && v !== null && String(v).length > max) return { field, max };
-  }
-  return null;
-}
-
 // Lazily backfills a primary property for customers created after the migration.
 // requireAdmin: returns every active property address on the account — a
 // per-customer assignment must not reveal sibling addresses, and no tech
@@ -2543,98 +2529,40 @@ router.get('/:id/properties', requireAdmin, async (req, res, next) => {
     const customerProperties = require('../services/customer-properties');
     await customerProperties.ensurePrimaryProperty(req.params.id).catch(() => {});
     const properties = await customerProperties.listProperties(req.params.id);
-    res.json({ properties, canChangeAppointmentAddress });
+    res.json({ properties, canChangeAppointmentAddress, canChangePrimary: require('../config/feature-gates').gateEnvValue('GATE_IB_PLATFORM') });
   } catch (err) { next(err); }
 });
 
-// POST /api/admin/customers/:id/properties — add a second (non-primary) property.
+// Property writes share the domain operation and audit with the Intelligence Bar.
 router.post('/:id/properties', requireAdmin, async (req, res, next) => {
   try {
-    const customerProperties = require('../services/customer-properties');
-    const { address_line1, address_line2, city, state, zip, occupancy_type, relationship, label } = req.body || {};
-    const { normalizeRelationship } = require('../constants/property-relationships');
-    const rel = normalizeRelationship(relationship);
-    if (!rel.ok) return res.status(400).json({ error: 'invalid relationship' });
-    if (!String(address_line1 || '').trim()) {
-      return res.status(400).json({ error: 'address_line1 is required' });
-    }
-    // Require city + ZIP too: the full-address dedup key includes them, so a
-    // partial address (street only) would not match the existing primary's key
-    // and could slip a duplicate past the 409 / unique index.
-    if (!String(city || '').trim() || !String(zip || '').trim()) {
-      return res.status(400).json({ error: 'city and zip are required' });
-    }
-    // customer_properties.state is varchar(2) and recordCallProperty stores
-    // `state || 'FL'` — an omitted state would silently persist as Florida.
-    // Require an explicit two-letter code here (reject "Florida" with a real
-    // validation error instead of a PostgreSQL bounce).
-    const stateCode = String(state || '').trim().toUpperCase();
-    if (!/^[A-Z]{2}$/.test(stateCode)) {
-      return res.status(400).json({ error: 'state is required as a two-letter code' });
-    }
-    const over = propertyFieldOverLimit({ address_line1, address_line2, city, zip, label });
-    if (over) {
-      return res.status(400).json({ error: `${over.field} must be ${over.max} characters or fewer` });
-    }
-    // If this address is the customer's OWN primary that's only PARTIAL on file
-    // (same street, missing city/ZIP), complete that primary first — otherwise its
-    // partial address_key wouldn't match this full address and recordCallProperty
-    // would insert a duplicate of the primary. Complete → ensure → record mirrors
-    // the call pipeline. completePrimaryFromCall is a no-op for a genuinely
-    // different street (a real secondary).
-    await customerProperties.completePrimaryFromCall(req.params.id, { address_line1, address_line2, city, zip }).catch(() => {});
-    // Ensure the primary exists, so the customer's current address is represented
-    // before we add a secondary. This also makes recordCallProperty's dedup reject
-    // a POST of the customer's own (now-complete) primary address (409) instead of
-    // creating a lone non-primary that a later read would duplicate.
-    await customerProperties.ensurePrimaryProperty(req.params.id).catch(() => {});
-    const result = await customerProperties.recordCallProperty({
-      customerId: req.params.id,
-      address_line1, address_line2, city, state: stateCode, zip,
-      occupancyType: occupancy_type,
-      relationship: rel.value,
-      label,
-      source: 'manual',
-    });
-    if (!result.created) {
-      return res.status(409).json({ error: 'A property with that street already exists for this customer' });
-    }
-    const properties = await customerProperties.listProperties(req.params.id);
-    return res.status(201).json({ propertyId: result.propertyId, properties });
+    const result = await require('../services/customer-properties').addManualProperty(req.params.id, req.body || {}, { actorId: req.technicianId });
+    return res.status(201).json(result);
   } catch (err) { next(err); }
 });
 
-// PATCH /api/admin/customers/:id/properties/:propertyId — edit occupancy/relationship/label.
 router.patch('/:id/properties/:propertyId', requireAdmin, async (req, res, next) => {
   try {
-    const { OCCUPANCY_TYPES, listProperties } = require('../services/customer-properties');
-    const updates = {};
-    if (req.body && req.body.occupancy_type !== undefined) {
-      if (!OCCUPANCY_TYPES.includes(req.body.occupancy_type)) {
-        return res.status(400).json({ error: 'invalid occupancy_type' });
-      }
-      updates.occupancy_type = req.body.occupancy_type;
-    }
-    if (req.body && req.body.relationship !== undefined) {
-      const rel = require('../constants/property-relationships').normalizeRelationship(req.body.relationship);
-      if (!rel.ok) return res.status(400).json({ error: 'invalid relationship' });
-      updates.relationship = rel.value;
-    }
-    if (req.body && req.body.label !== undefined) {
-      const over = propertyFieldOverLimit({ label: req.body.label });
-      if (over) {
-        return res.status(400).json({ error: `${over.field} must be ${over.max} characters or fewer` });
-      }
-      updates.label = req.body.label || null;
-    }
-    if (Object.keys(updates).length === 0) return res.status(400).json({ error: 'nothing to update' });
-    updates.updated_at = new Date();
-    const n = await db('customer_properties')
-      .where({ id: req.params.propertyId, customer_id: req.params.id })
-      .update(updates);
-    if (!n) return res.status(404).json({ error: 'property not found' });
-    const properties = await listProperties(req.params.id);
-    return res.json({ properties });
+    const result = await require('../services/customer-properties').editManualProperty(req.params.id, req.params.propertyId, req.body || {}, { actorId: req.technicianId });
+    return res.json(result);
+  } catch (err) { next(err); }
+});
+
+router.get('/:id/properties/:propertyId/primary-preview', requireAdmin, async (req, res, next) => {
+  if (!require('../config/feature-gates').gateEnvValue('GATE_IB_PLATFORM')) return res.status(404).json({ error: 'Not found' });
+  try {
+    const preview = await require('../services/customer-properties').previewManualPropertyChange(req.params.id, 'primary', {}, req.params.propertyId);
+    return res.json(preview);
+  } catch (err) { next(err); }
+});
+
+router.post('/:id/properties/:propertyId/primary', requireAdmin, async (req, res, next) => {
+  if (!require('../config/feature-gates').gateEnvValue('GATE_IB_PLATFORM')) return res.status(404).json({ error: 'Not found' });
+  try {
+    const result = await require('../services/customer-properties').changePrimaryProperty(req.params.id, req.params.propertyId, {
+      actorId: req.technicianId, expectedVersion: req.body?.expectedVersion,
+    });
+    return res.json(result);
   } catch (err) { next(err); }
 });
 
@@ -4047,12 +3975,11 @@ router.put('/:id', requireAdmin, async (req, res, next) => {
           // customer-dedupe.js and intelligence-bar/tools.js — extend ALL
           // in the same commit): pg_advisory_xact_lock(hashtextextended(
           //   'customer-email:' || lower(trim(<email>)), 0)).
+          // Every assigned address (the primary and the service-contact
+          // slots) takes the key: the bounce recovery's ownership check reads
+          // all of them (utils/customer-comms-lock.js lockAssignedCustomerEmails).
+          await require('../utils/customer-comms-lock').lockAssignedCustomerEmails(trx, updates);
           if (updates.email) {
-            const emailLc = String(updates.email).trim().toLowerCase();
-            await trx.raw(
-              'SELECT pg_advisory_xact_lock(hashtextextended(?, 0))',
-              [`customer-email:${emailLc}`],
-            );
             // Serialization ONLY — deliberately NO claimant refusal (r23):
             // customers.email is intentionally non-unique (migration
             // 20260417000010 dropped the constraint so spouses and shared
@@ -4064,6 +3991,22 @@ router.put('/:id', requireAdmin, async (req, res, next) => {
             // The automated-intake guard keeps its drop-the-email posture
             // — unauthenticated input never gets to claim a live
             // customer's mailbox; an operator can.
+          }
+          // EVERY refusal is decided BEFORE the first Stripe cancel (Codex
+          // #4311 r28 P2): the send-in-flight check below used to run after
+          // the session release, so a Bill-To edit rejected for an in-flight
+          // combined-visit send had already cancelled the customer's live
+          // pay-page session — and a Stripe cancel does not roll back with
+          // this transaction. Judged against the LOCKED snapshot, not the
+          // pre-transaction read: a payer cleared by another edit and
+          // restored by this stale request is still a change while a
+          // self-pay send is in flight.
+          if (updates.payer_id !== undefined && String(updates.payer_id ?? '') !== String(lockedBefore.payer_id ?? '')) {
+            if (await require('../services/visit-completion-packets').packetInvoiceSendInFlight({ customerId: req.params.id }, trx)) {
+              throw Object.assign(new Error('A combined-visit invoice for this customer is being delivered. Retry the Bill-To change in a moment.'), {
+                statusCode: 409, isOperational: true, code: 'invoice_send_in_flight',
+              });
+            }
           }
           // Assigning a DEFAULT payer must first release any unconfirmed
           // combined pay-page session on this customer's invoices (codex
@@ -4084,6 +4027,17 @@ router.put('/:id', requireAdmin, async (req, res, next) => {
             }
           }
           await trx('customers').where({ id: req.params.id }).update(updates);
+          // A Bill-To edit that can make a withdrawn combined-visit invoice
+          // self-pay again (payer cleared) requeues it through the shared
+          // reconciliation, inside this same transaction.
+          if (updates.payer_id !== undefined) {
+            const Packets = require('../services/visit-completion-packets');
+            await Packets.reconcileWithdrawnPacketInvoices(trx, { customerId: req.params.id });
+            // The opposite transition (a payer assigned) withdraws every
+            // self-pay combined-visit invoice this customer now owes to AP,
+            // including one the homeowner already holds a pay link for.
+            if (updates.payer_id) await Packets.withdrawPacketInvoicesForOwner(trx, { customerId: req.params.id });
+          }
           // Coordinates cleared ATOMICALLY with the address (and the move
           // stamp the fan-out writes in this same transaction): a committed
           // move must never leave the former home's lat/lng readable beside
@@ -4333,19 +4287,22 @@ router.put('/:id/notification-prefs', requireAdmin, async (req, res, next) => {
     }
     dbUpdates.updated_at = new Date();
 
-    if (existing) {
-      await db('notification_prefs')
+    // Row → address key, like every customer address writer: a billing
+    // address assigned here contends with a bearer-link handoff that read
+    // it as unowned, so the handoff commits first or re-judges ownership.
+    await db.transaction(async (trx) => {
+      if (!existing) {
+        // Create through the canonical helper (marketing flags NULL), then
+        // apply exactly the admin-named fields — a bare insert would take the
+        // legacy true defaults and mint marketing consent as a side effect.
+        await createDefaultCustomerRows(trx, req.params.id);
+      }
+      await trx('notification_prefs').where({ customer_id: req.params.id }).forUpdate().first('customer_id');
+      await require('../utils/customer-comms-lock').lockAssignedCustomerEmails(trx, dbUpdates);
+      await trx('notification_prefs')
         .where({ customer_id: req.params.id })
         .update(dbUpdates);
-    } else {
-      // Create through the canonical helper (marketing flags NULL), then
-      // apply exactly the admin-named fields — a bare insert would take the
-      // legacy true defaults and mint marketing consent as a side effect.
-      await createDefaultCustomerRows(db, req.params.id);
-      await db('notification_prefs')
-        .where({ customer_id: req.params.id })
-        .update(dbUpdates);
-    }
+    });
 
     const prefs = await db('notification_prefs')
       .where({ customer_id: req.params.id })
@@ -5737,7 +5694,6 @@ router._private = {
   applyCustomerListFilters,
   CUSTOMER_STAGES,
   SENSITIVE_CUSTOMER_FIELDS,
-  PROPERTY_FIELD_LIMITS,
   SCHEDULED_HISTORY_LIMIT,
   customerScheduledHistoryQuery,
   customerScheduledHistory,

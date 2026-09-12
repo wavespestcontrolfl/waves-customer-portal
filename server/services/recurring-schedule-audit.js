@@ -392,7 +392,7 @@ function acceptedScheduleFindings(estimate, visits, stoppedRoots = new Set(), { 
       const families = converter.comboRouteFamiliesFromCatalogKey(identity);
       const matches = families.length ? families.includes(family)
         : converter.seedingFamilyKey({ service: identity, name: row.service_type }) === family;
-      return matches && !row.is_callback && !row.followup_included;
+      return matches && !row.is_callback && !row.followup_included && !isBoosterVisit(row);
     });
     if (matching.length && matching.every((row) => stoppedRoots.has(row.recurring_parent_id || row.id))) continue;
     const rows = matching.filter((row) => !stoppedRoots.has(row.recurring_parent_id || row.id));
@@ -400,6 +400,26 @@ function acceptedScheduleFindings(estimate, visits, stoppedRoots = new Set(), { 
     if (finding) findings.push(finding);
   }
   return findings;
+}
+
+// Booster months are deliberately non-recurring rows that hang off a recurring
+// root (is_recurring:false + recurring_parent_id): paid extras, not part of the
+// accepted cadence. Auditing them as plan visits would call a complete series
+// missing recurrence (and flag their off-cadence spacing). The contract is an
+// explicit false: is_recurring is nullable, and a legacy / malformed child
+// whose flag is NULL is still a plan visit the classifier must report. A root
+// reservation that never acquired is_recurring has no parent and is audited.
+function isBoosterVisit(row) {
+  return row.is_recurring === false && !!row.recurring_parent_id;
+}
+
+// An adopted upcoming appointment is recorded as the acceptance's reservation.
+// If it already carries recurrence (or rides a recurring root) it is a real
+// plan visit and stays audited; only a standalone reservation that never
+// acquired recurrence is dropped. Shared by the scheduled reader and the
+// converter's immediate check so the two audits cannot diverge.
+function isStandaloneReservation(row, reservations) {
+  return reservations.has(row.id) && !row.is_recurring && !row.recurring_parent_id;
 }
 
 function classifyAcceptedSchedule({ estimate, family, pattern, rows, todayET, seeder }) {
@@ -482,6 +502,20 @@ function hasAcceptedScheduleSpacingGap(rows, pattern, seeder) {
   });
 }
 
+function readActiveFamilyHolds(conn, customerIds, todayET) {
+  return conn('plan_holds').whereIn('customer_id', customerIds).where('status', 'active')
+    .where('starts_on', '<=', todayET).where('resume_on', '>', todayET).select('customer_id', 'family_key');
+}
+
+async function readStoppedRecurringRoots(conn, customerIds) {
+  const decisions = await conn('recurring_plan_alerts').whereIn('customer_id', customerIds)
+    .whereNotNull('resolved_at').orderBy('resolved_at', 'desc')
+    .select('recurring_parent_id', 'resolved_action');
+  // Query is newest-first; Map's last value wins after reversing it.
+  const latestDecision = new Map(decisions.map((row) => [row.recurring_parent_id, row.resolved_action]).reverse());
+  return new Set([...latestDecision].filter(([, action]) => ['cancel_series', 'let_lapse'].includes(action)).map(([id]) => id));
+}
+
 async function findAcceptedRecurringScheduleGaps({ now = new Date() } = {}, conn = db) {
   // Let the accept/conversion transaction settle before paging. A real Date
   // binds a timestamptz cutoff independently of Railway's UTC process zone.
@@ -518,14 +552,8 @@ async function findAcceptedRecurringScheduleGaps({ now = new Date() } = {}, conn
   const retainedSeries = await conn('activity_log').whereIn('customer_id', customerIds)
     .where('action', 'recurring_series_skipped').select('customer_id', 'metadata');
   const todayET = etDateString(now);
-  const holds = await conn('plan_holds').whereIn('customer_id', customerIds).where('status', 'active')
-    .where('starts_on', '<=', todayET).where('resume_on', '>', todayET).select('customer_id', 'family_key');
-  const decisions = await conn('recurring_plan_alerts').whereIn('customer_id', customerIds)
-    .whereNotNull('resolved_at').orderBy('resolved_at', 'desc')
-    .select('recurring_parent_id', 'resolved_action');
-  // Query is newest-first; Map's last value wins after reversing it.
-  const latestDecision = new Map(decisions.map((row) => [row.recurring_parent_id, row.resolved_action]).reverse());
-  const stopped = new Set([...latestDecision].filter(([, action]) => ['cancel_series', 'let_lapse'].includes(action)).map(([id]) => id));
+  const holds = await readActiveFamilyHolds(conn, customerIds, todayET);
+  const stopped = await readStoppedRecurringRoots(conn, customerIds);
   // Index history once: each estimate only walks its explicitly linked roots.
   const customers = new Map(customerIds.map((id) => [id, { roots: new Map(), holds: new Set() }]));
   const estimatesById = new Map(estimates.map((estimate) => [estimate.id, {
@@ -565,7 +593,7 @@ async function findAcceptedRecurringScheduleGaps({ now = new Date() } = {}, conn
     // cancellation exemption; they never contribute to working visit counts.
     const linkedRows = [...roots].flatMap((root) => (customer.roots.get(root) || [])
       .filter((row) => stopped.has(root) || !retainedRoots.has(root) || row.scheduled_date >= acceptedDay))
-      .filter((row) => row.is_recurring || row.recurring_parent_id || !reservations.has(row.id));
+      .filter((row) => !isStandaloneReservation(row, reservations));
     findings.push(...acceptedScheduleFindings(estimate, linkedRows, stopped, { todayET, heldFamilies: customer.holds }));
   }
   return findings;
@@ -579,6 +607,9 @@ module.exports = {
   formatDateOnly,
   normalizeLimit,
   acceptedScheduleFindings,
+  isStandaloneReservation,
+  readActiveFamilyHolds,
+  readStoppedRecurringRoots,
   findAcceptedRecurringScheduleGaps,
   auditRecurringScheduleCoverage,
   measureRecurringSeries,
