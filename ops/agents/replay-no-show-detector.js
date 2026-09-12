@@ -10,7 +10,7 @@
  */
 const fs = require('fs');
 const path = require('path');
-const { evaluateNoShow, latestPromises, LIVE_STATUSES } = require('../../server/services/no-show-detector');
+const { evaluateNoShow, latestPromises, promisedStartAt, LIVE_STATUSES } = require('../../server/services/no-show-detector');
 const { etDateString } = require('../../server/utils/datetime-et');
 
 // One visit's timeline at one threshold. Returns the alerts it would have
@@ -46,15 +46,22 @@ function replayVisit(item, { from, to, threshold }) {
     // wrong" or "we had no evidence to judge with" (codex P1, round 4).
     // A live status is required for the same reason evaluateNoShow requires
     // one: a promise that only lands after the visit is completed/cancelled
-    // was never available to judge against. A null/invalid start_at is not
-    // coverage either — it is the unknown-window case latestPromises models
-    // for a legacy move notice, exactly as unusable to evaluateNoShow as no
-    // promise at all (codex P1 af4925f71, and the pre-push audit on #4403's
-    // head: new Date(null).getTime() is 0, a finite instant, so null must be
-    // rejected BEFORE the Date conversion — the same null-before-Date idiom
-    // as no-show-detector.js's own `instant` helper).
-    if (!covered && LIVE_STATUSES.includes(state.status) && promise && promise.start_at != null
-      && Number.isFinite(new Date(promise.start_at).getTime())) covered = true;
+    // was never available to judge against. Coverage is judged with the
+    // detector's OWN evidence rule (promisedStartAt) at an ALERT-RELEVANT
+    // tick — one at or past the stage-1 threshold — not merely at any live
+    // tick: a known window present before its own window opens, replaced by
+    // an unknown-window notice before either threshold, left every real
+    // decision point with nothing usable while an early pre-window tick had
+    // already marked the visit covered, understating missing_promise_visits
+    // and making an evidence-poor activation replay look complete (codex P1
+    // round 8). promisedStartAt also rejects a null start_at before any Date
+    // conversion — new Date(null).getTime() is 0, a finite instant — which is
+    // what keeps the unknown-window case (a legacy move notice) counted as
+    // missing rather than covered (codex P1 af4925f71).
+    if (!covered && LIVE_STATUSES.includes(state.status)) {
+      const start = promisedStartAt({ promise, now });
+      if (start != null && at >= start + threshold * 60000) covered = true;
+    }
     const alert = evaluateNoShow({ visit: state, promise, now, stage1Minutes: threshold });
     if (!alert) continue;
     const key = `${alert.promised_window.start_at}:${alert.stage}`;

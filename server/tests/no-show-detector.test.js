@@ -69,6 +69,33 @@ describe('missing tracking stages', () => {
     }] });
     for (const result of report.thresholds) expect(result.missing_promise_visits).toBe(1);
   });
+  test('a window replaced by an unknown one BEFORE either threshold is missing coverage, not covered (round-8 P1)', () => {
+    // The old confirmation has a real window, but a reschedule notice with no
+    // saved slot replaces it at 09:20 — before the 09:45 stage-1 threshold.
+    // Every tick that could have judged this visit had an unknown window; a
+    // pre-window tick at 08:00 must not mark it covered.
+    const report = replay({ synthetic: true, from: '2026-09-10T07:00:00-04:00', to: '2026-09-10T23:00:00-04:00', visits: [{
+      id: 'visit', initial: visit, outcome: 'unknown', events: [],
+      promises: [
+        { start_at: '2026-09-10T09:00:00-04:00', communicated_at: '2026-09-09T12:00:00-04:00', source: 'message' },
+        { start_at: null, communicated_at: '2026-09-10T09:20:00-04:00', source: 'message' },
+      ],
+    }] });
+    for (const result of report.thresholds) {
+      expect(result.missing_promise_visits).toBe(1);
+      expect(result.alerts).toEqual([]);
+    }
+    // Without the replacement, the same promise IS coverage — it is usable at
+    // the thresholds, and the visit alerts.
+    const covered = replay({ synthetic: true, from: '2026-09-10T07:00:00-04:00', to: '2026-09-10T23:00:00-04:00', visits: [{
+      id: 'visit', initial: visit, outcome: 'unknown', events: [],
+      promises: [{ start_at: '2026-09-10T09:00:00-04:00', communicated_at: '2026-09-09T12:00:00-04:00', source: 'message' }],
+    }] });
+    for (const result of covered.thresholds) {
+      expect(result.missing_promise_visits).toBe(0);
+      expect(result.alerts.length).toBeGreaterThan(0);
+    }
+  });
   test('coverage is measured at the decision points, not from the final state at `to` (round-4 P1)', () => {
     // The promise is communicated AFTER the visit is already completed, but
     // before the export window closes. Every production tick that could have
@@ -434,7 +461,7 @@ describe('loadPromiseEvents: email promise evidence checks the LIVE delivery sta
   function fakeConn() {
     const calls = {};
     const conn = (table) => {
-      if (table === 'messaging_audit_log as a' || table === 'audit_log' || table === 'series_moves as sm') return passthroughChain([]);
+      if (table === 'messaging_audit_log as a' || table === 'audit_log' || table === 'activity_log' || table === 'series_moves as sm') return passthroughChain([]);
       if (table === 'customer_interactions as ci') {
         const chain = {};
         chain.leftJoin = (joinTable, cb) => { calls.leftJoinTable = joinTable; calls.leftJoinCb = cb; return chain; };
@@ -544,7 +571,7 @@ describe('loadPromiseEvents: an UNLINKED sms_log row is neutral, a sentinel sid 
   function fakeConn() {
     const calls = {};
     const conn = (table) => {
-      if (table === 'customer_interactions as ci' || table === 'audit_log' || table === 'series_moves as sm') return passthroughChain([]);
+      if (table === 'customer_interactions as ci' || table === 'audit_log' || table === 'activity_log' || table === 'series_moves as sm') return passthroughChain([]);
       if (table === 'messaging_audit_log as a') {
         const chain = {};
         for (const m of ['leftJoin', 'whereIn', 'whereRaw', 'whereBetween', 'whereNull']) chain[m] = () => chain;
@@ -837,7 +864,7 @@ describe('loadPromiseEvents: pre-deploy legacy reschedule/confirmation messages 
   function fakeConn({ messageRows = [] } = {}) {
     const calls = {};
     const conn = (table) => {
-      if (table === 'customer_interactions as ci' || table === 'audit_log' || table === 'series_moves as sm') return passthroughChain([]);
+      if (table === 'customer_interactions as ci' || table === 'audit_log' || table === 'activity_log' || table === 'series_moves as sm') return passthroughChain([]);
       if (table === 'messaging_audit_log as a') {
         const chain = {};
         chain.leftJoin = () => chain;
@@ -932,7 +959,7 @@ describe('loadPromiseEvents: no fixed lookback — confirmations older than 100 
   // function" instead of silently passing.
   function fakeConn({ messageRows = [] } = {}) {
     const conn = (table) => {
-      if (table === 'customer_interactions as ci' || table === 'audit_log' || table === 'series_moves as sm') return passthroughChain([]);
+      if (table === 'customer_interactions as ci' || table === 'audit_log' || table === 'activity_log' || table === 'series_moves as sm') return passthroughChain([]);
       if (table === 'messaging_audit_log as a') return passthroughChain(messageRows);
       throw new Error(`fake conn: unexpected table ${table}`);
     };

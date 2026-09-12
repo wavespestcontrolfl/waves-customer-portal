@@ -305,6 +305,25 @@ async function loadPromiseEvents(conn, visitIds, { now = new Date() } = {}) {
     // reading it needs no second write to keep consistent, no retry marker
     // for a write that failed after the text went out, and no backfill —
     // every move made BEFORE this feature existed derives the same way.
+    // An APPLIED call reschedule is the one promise class with no
+    // customer-facing text of its own (call-reschedule-apply.js deliberately
+    // sends nothing — the agent already said it on the call), so it is also
+    // the one whose evidence cannot be recovered from a message. Derived from
+    // the activity_log row that path writes IN THE SAME TRANSACTION as the
+    // move (action call_reschedule_applied, metadata carrying the call, the
+    // visit and the applied `to` window), rather than trusted to a separate
+    // best-effort write afterwards: a transient failure in that write used to
+    // lose the promise permanently — the call is already finalized, and
+    // nothing re-runs it — leaving the PRE-MOVE reminder as the latest
+    // promise and alerting against a window the customer changed on the call
+    // (codex P1 round 8). The same derivation covers every reschedule already
+    // applied before this feature existed, and any applied while the capture
+    // gate was off. recordAgreedWindow still writes its audit row for the
+    // booking path; a duplicate promise for the same window is harmless —
+    // latestPromises keeps one.
+    () => conn('activity_log').where({ action: 'call_reschedule_applied' })
+      .whereRaw("metadata->>'scheduled_service_id' = ANY(?::text[])", [visitIds])
+      .where('created_at', '<=', now).select('id', 'metadata', 'created_at'),
     () => conn('series_moves as sm')
       // The move's own series text, joined by the series_move_id its metadata
       // carries, and held to the SAME delivery bar as any other promise
@@ -348,7 +367,7 @@ async function loadPromiseEvents(conn, visitIds, { now = new Date() } = {}) {
   if (conn.isTransaction) {
     for (const read of reads) results.push(await read());
   } else results.push(...await Promise.all(reads.map((read) => read())));
-  const [messages, emails, calls, seriesMoves] = results;
+  const [messages, emails, calls, appliedReschedules, seriesMoves] = results;
   const candidates = new Set(visitIds.map(String));
   return [
     ...messages.map((r) => ({ visit_id: r.appointment_id || r.metadata?.scheduled_service_id, start_at: Number.isFinite(Number(r.metadata?.rendered_slot_ms)) && r.metadata?.rendered_slot_ms != null
@@ -363,6 +382,17 @@ async function loadPromiseEvents(conn, visitIds, { now = new Date() } = {}) {
       communicated_at: r.provider_sent_at || r.metadata?.sent_at || r.created_at, source: 'email', source_id: r.id })),
     ...calls.map((r) => ({ visit_id: r.resource_id, start_at: r.metadata?.start_at,
       communicated_at: r.metadata?.communicated_at || r.created_at, source: 'call', source_id: r.id })),
+    ...appliedReschedules.map((r) => {
+      // The window the apply actually moved the visit to, which is the window
+      // the agent committed to on the call. ET wall clock, like every other
+      // date in this file; an unparseable one becomes an UNKNOWN window
+      // rather than a guess — the customer was still told the visit moved.
+      const to = r.metadata?.to || {};
+      const at = to.date ? parseETDateTime(`${String(to.date).slice(0, 10)}T${String(to.start || '08:00').slice(0, 5)}`) : null;
+      return { visit_id: r.metadata?.scheduled_service_id,
+        start_at: at && Number.isFinite(at.getTime()) ? at.toISOString() : null,
+        communicated_at: r.created_at, source: 'call', source_id: r.id };
+    }),
     ...seriesSupersessions(seriesMoves, candidates),
   ];
 }

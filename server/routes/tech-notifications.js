@@ -43,11 +43,17 @@ router.get('/', async (req, res, next) => {
     // every schedule-change card out of the window either. Texts on a tech's
     // own line (tech_line_sms — tech-line.js) are kept the same way and sit
     // in the same bucket. Missing-tracking notices (follow_through_tracking
-    // — no-show-detector.js) fall through to the same generic recency
-    // handling: fresh ones (<6h) surface in bucket 0 next to an actionable
-    // arrival prompt, older ones share the stale bucket.
+    // — no-show-detector.js) are their OWN bucket 0, regardless of age: they
+    // are undismissed only while the visit is still overdue with no arrival
+    // evidence (the sweep's reconcile pass dismisses them the moment that
+    // stops being true), and the generic recency rule dropped one past six
+    // hours into the routine kept-card bucket — so a tech who was offline
+    // while a stage-2 notice aged, then collected 20 newer assignment or text
+    // cards, never received the row at all and the client's own MAX_VISIT_CARDS
+    // ranking could not rescue what the server never returned (codex P2
+    // round 8).
     const rows = await q
-      .orderByRaw("CASE WHEN type LIKE 'visit\\_%' OR type = 'tech_line_sms' THEN 2 WHEN type = 'storm_watch_alert' THEN 1 WHEN created_at >= now() - interval '6 hours' THEN 0 ELSE 2 END")
+      .orderByRaw("CASE WHEN type = 'follow_through_tracking' THEN 0 WHEN type LIKE 'visit\\_%' OR type = 'tech_line_sms' THEN 2 WHEN type = 'storm_watch_alert' THEN 1 WHEN created_at >= now() - interval '6 hours' THEN 0 ELSE 2 END")
       .orderBy('created_at', 'desc')
       .limit(20);
     res.json({ notifications: rows.map(parseRow) });

@@ -39,6 +39,13 @@ test('buckets: fresh prompts (0) → fresh storms (1) → visit notices AND stal
   // visit rows + tech-line texts → 2; storms → 1; fresh other prompts → 0;
   // stale others → 2 (stale legacy rows compete with visits on recency,
   // never ahead of them).
+  // Missing-tracking notices lead the window at ANY age: they exist only
+  // while the visit is still overdue with no arrival evidence (the sweep
+  // dismisses them as soon as that stops being true), so one that aged past
+  // six hours must not fall in behind 20 routine kept cards and vanish from
+  // the tech's feed entirely (codex P2, PR #4403 round 8).
+  expect(sql).toMatch(/WHEN type = 'follow_through_tracking' THEN 0/);
+  expect(sql.indexOf("follow_through_tracking")).toBeLessThan(sql.indexOf("interval '6 hours'"));
   expect(sql).toMatch(/WHEN type LIKE 'visit\\_%' OR type = 'tech_line_sms' THEN 2/);
   expect(sql).toMatch(/WHEN type = 'storm_watch_alert' THEN 1/);
   expect(sql).toMatch(/interval '6 hours' THEN 0 ELSE 2 END/);
