@@ -105,7 +105,11 @@ export function MarginCalculator() {
         }),
       });
       setMargins(data);
-    } catch { setMargins(null); }
+    } catch (error) {
+      // af() throws the server's message on a non-2xx; discarding it made an
+      // expired session or a 500 look like "no results" with no explanation.
+      setMargins({ error: error.message || "Margin check failed" });
+    }
     setLoading(false);
   };
   useEffect(() => { fetchMargins(); }, []);
@@ -120,7 +124,11 @@ export function MarginCalculator() {
   const marginLabel = (margin) => margin >= 0.45 ? "Healthy" : margin >= 0.35 ? "Acceptable" : "Below floor";
 
   return (
-    <Card>
+    // EstimatesPageV2.jsx:4192 renders this export directly on its Pricing tab
+    // and provides no UiSurface, so the density boundary belongs here rather
+    // than only around PricingLogicPage's returns — otherwise these fields drop
+    // to the legacy 13px on that caller.
+    <UiSurface as={Card} density="comfortable">
       <CardHeader className="flex flex-wrap items-start justify-between gap-3"><CardTitle className="text-16">Margin calculator</CardTitle><Button onClick={fetchMargins} loading={loading}>{loading ? "Calculating..." : "Calculate"}</Button></CardHeader>
       <CardBody className="space-y-4">
         <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-5">
@@ -138,7 +146,7 @@ export function MarginCalculator() {
         {margins?.services && <Table className="min-w-[840px]" aria-label="Service margins"><THead><TR><TH>Service</TH><TH align="right">Annual price</TH><TH align="right">Est. cost</TH><TH>Cost source</TH><TH align="right">After discount</TH><TH align="right">Margin</TH><TH>Status</TH></TR></THead><TBody>{margins.services.map((service) => <TR key={service.service}><TD className="font-medium capitalize">{service.service.replace(/_/g, " ")}</TD><TD align="right" nums>${service.annual?.toLocaleString() || "—"}</TD><TD align="right" nums className="text-ink-secondary">${service.estimatedCost?.toLocaleString() || "—"}</TD><TD><Badge tone={costSourceTone(service.materialCostSource)}>{costSourceLabel(service.materialCostSource)}</Badge>{service.materialPerVisit != null ? <span className="ml-2 text-ui-caption text-ink-secondary u-nums">${Number(service.materialPerVisit).toFixed(2)}/visit</span> : ""}</TD><TD align="right" nums>${service.afterDiscount?.toLocaleString() || "—"}</TD><TD align="right" nums className="font-medium">{service.margin != null ? `${(service.margin * 100).toFixed(1)}%` : "—"}</TD><TD>{service.margin != null && <Badge tone={marginTone(service.margin)}>{marginLabel(service.margin)}</Badge>}</TD></TR>)}</TBody></Table>}
         {margins?.error && <ActionFeedback error>{margins.error}</ActionFeedback>}
       </CardBody>
-    </Card>
+    </UiSurface>
   );
 }
 
@@ -217,15 +225,17 @@ function PestCalibrationPanel() {
     { label: "Avg abs miss", value: formatMinutes(summary.avgAbsDelta || 0), tone: (summary.avgAbsDelta || 0) >= 12 ? "text-warn-fg" : undefined },
     { label: "15+ min outliers", value: summary.outlierCount || 0, tone: (summary.outlierCount || 0) > 0 ? "text-alert-fg" : undefined },
   ];
-  // A nonzero "missing" count is a sample-quality warning — main painted those
-  // three amber and left the descriptive counts plain.
+  // A nonzero "missing" count is a sample-quality warning. Main painted the
+  // estimate-link and timer gaps amber, but missing diagnostics red — that one
+  // is a calibration-data failure, not a warning.
   const missingTone = (count) => (count || 0) > 0 ? "text-warn-fg" : undefined;
+  const missingDiagnosticsTone = (count) => (count || 0) > 0 ? "text-alert-fg" : undefined;
   const healthMetrics = [
     { label: "Jobs synced", value: sampleHealth.jobsEvaluated || 0 }, { label: "Materialized", value: sampleHealth.materializedCount || 0 },
     { label: "Fallback matched", value: sampleHealth.fallbackMatchedCount || 0 },
     { label: "No est. link", value: sampleHealth.missingEstimateLinkCount || 0, tone: missingTone(sampleHealth.missingEstimateLinkCount) },
     { label: "No timer", value: sampleHealth.missingTimerCount || 0, tone: missingTone(sampleHealth.missingTimerCount) },
-    { label: "No diagnostics", value: sampleHealth.missingDiagnosticsCount || 0, tone: missingTone(sampleHealth.missingDiagnosticsCount) },
+    { label: "No diagnostics", value: sampleHealth.missingDiagnosticsCount || 0, tone: missingDiagnosticsTone(sampleHealth.missingDiagnosticsCount) },
   ];
 
   return (

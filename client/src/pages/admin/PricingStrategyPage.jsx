@@ -156,12 +156,13 @@ function MoneyModelTab({ dashboard, loading }) {
     { label: "Monthly recurring", value: formatMoney(overview.monthlyRecurringRevenue) },
   ];
   // Only Core carries a money figure in the contract; the other three stages
-  // report counts, so each card shows the number its stage actually has.
+  // report counts. Each card names the unit it is actually showing so a count
+  // like "14 completed services" cannot read as revenue beside Core's dollars.
   const stageRows = [
-    { stage: "Stage I: Attraction", desc: "First service / one-time", value: stages.attraction?.acceptedEstimates ?? 0 },
-    { stage: "Stage II: Core", desc: "WaveGuard recurring", value: formatMoney(stages.core?.monthlyRecurring), money: true },
-    { stage: "Stage III: Upsell", desc: "Add-ons & upgrades", value: stages.upsell?.totalCompletedServices ?? 0 },
-    { stage: "Stage IV: Continuity", desc: "Retention & renewals", value: stages.continuity?.totalRetained ?? 0 },
+    { stage: "Stage I: Attraction", desc: "First service / one-time", value: stages.attraction?.acceptedEstimates ?? 0, unit: "accepted estimates" },
+    { stage: "Stage II: Core", desc: "WaveGuard recurring", value: formatMoney(stages.core?.monthlyRecurring), unit: "monthly recurring" },
+    { stage: "Stage III: Upsell", desc: "Add-ons & upgrades", value: stages.upsell?.totalCompletedServices ?? 0, unit: "completed services" },
+    { stage: "Stage IV: Continuity", desc: "Retention & renewals", value: stages.continuity?.totalRetained ?? 0, unit: "retained customers" },
   ];
   const funnelRows = [
     { label: "Leads", value: funnel.leads },
@@ -177,13 +178,14 @@ function MoneyModelTab({ dashboard, loading }) {
         {metrics.map((metric) => <MetricCard key={metric.label} {...metric} />)}
       </div>
       <Card>
-        <CardHeader><CardTitle className="text-16">$100M money model — revenue by stage</CardTitle></CardHeader>
+        <CardHeader><CardTitle className="text-16">$100M money model — by stage</CardTitle></CardHeader>
         <CardBody className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
           {stageRows.map((stage) => (
             <div key={stage.stage} className="rounded-md border-hairline border-zinc-200 bg-zinc-50 p-4 text-center">
               <div className="font-medium text-zinc-900">{stage.stage}</div>
               <div className="mt-1 text-ui-caption text-ink-secondary">{stage.desc}</div>
               <div className="mt-3 text-22 font-medium text-zinc-900 u-nums">{stage.value}</div>
+              <div className="mt-1 text-ui-caption text-ink-secondary">{stage.unit}</div>
             </div>
           ))}
         </CardBody>
@@ -354,12 +356,25 @@ function LTVAnalysisTab() {
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
   const [recalculating, setRecalculating] = useState(false);
-  useEffect(() => { adminFetch("/admin/pricing/ltv-analysis").then(setData).catch(() => {}).finally(() => setLoading(false)); }, []);
+  // A mounted ref, not an effect-scoped flag: recalculate() outlives the effect,
+  // so both async paths need the same guard before they setState.
+  const mounted = useRef(true);
+  useEffect(() => () => { mounted.current = false; }, []);
+  useEffect(() => {
+    adminFetch("/admin/pricing/ltv-analysis")
+      .then((next) => { if (mounted.current) setData(next); })
+      .catch(() => {})
+      .finally(() => { if (mounted.current) setLoading(false); });
+  }, []);
   const recalculate = useCallback(async () => {
     setRecalculating(true);
-    try { await adminFetch("/admin/pricing/recalculate-ltv", { method: "POST" }); setData(await adminFetch("/admin/pricing/ltv-analysis")); }
+    try {
+      await adminFetch("/admin/pricing/recalculate-ltv", { method: "POST" });
+      const next = await adminFetch("/admin/pricing/ltv-analysis");
+      if (mounted.current) setData(next);
+    }
     catch { /* Existing behavior leaves the last snapshot visible. */ }
-    setRecalculating(false);
+    if (mounted.current) setRecalculating(false);
   }, []);
   if (loading) return <ActionFeedback className="min-h-20">Loading LTV analysis...</ActionFeedback>;
   if (!data) return <ActionFeedback className="min-h-20">No LTV data yet. Click "Recalculate" to generate.</ActionFeedback>;
