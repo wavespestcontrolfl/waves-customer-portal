@@ -679,6 +679,7 @@ async function loadPromiseEvents(conn, visitIds, { now = new Date() } = {}) {
   return [
     ...noticeEvents,
     ...calls.map((r) => ({ visit_id: r.resource_id, start_at: r.metadata?.start_at,
+      grouped: r.metadata?.stop_wide === true,
       communicated_at: r.metadata?.communicated_at || r.created_at, source: 'call', source_id: r.id })),
 
     // Recovery only: an unknown-window fallback must never DISPLACE the known
@@ -886,7 +887,7 @@ function agentCommittedStart(call) {
 // when the primary ledger failed, and its whole purpose is to still be there
 // whenever the feature is switched on. Best-effort itself — a send must
 // never fail because its bookkeeping did.
-async function recordSentWindowFallback({ visitId, startAtMs, communicatedAt = new Date(), providerSid = null, seriesMoveId = null } = {}) {
+async function recordSentWindowFallback({ visitId, startAtMs, communicatedAt = new Date(), providerSid = null, seriesMoveId = null, stopWide = false } = {}) {
   // null BEFORE the Number conversion: Number(null) is 0, a finite instant
   // (the epoch), so a bare isFinite check would stamp a 1970 window as the
   // promise — the same null-before-conversion trap `instant` guards above.
@@ -908,6 +909,10 @@ async function recordSentWindowFallback({ visitId, startAtMs, communicatedAt = n
         // this fallback exists because we could not write. Stamped here so
         // the sibling derivation can still find it (codex P1 round 14).
         ...(seriesMoveId ? { series_move_id: String(seriesMoveId) } : {}),
+        // Copy that spoke for a whole grouped stop keeps that identity here,
+        // so the promise it recovers supersedes every member's own rather
+        // than reading as one service's (codex P1 round 26).
+        ...(stopWide ? { stop_wide: true } : {}),
         fallback_reason: 'messaging_audit_unavailable' }, critical: true });
     return true;
   } catch (err) {

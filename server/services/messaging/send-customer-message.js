@@ -638,6 +638,11 @@ async function recordPromiseEvidenceFallback(sendInput, providerOutcome, audit) 
     // rounds 12 and 14). The detector reads this proof from the audit row we
     // just failed to write, so it rides along here.
     seriesMoveId,
+    // Stop-wide copy stays stop-wide in the fallback: a notice that speaks
+    // for a whole grouped stop supersedes every member's own promise, and
+    // recording it as per-service would leave the siblings on their pre-move
+    // windows (codex P1, PR #4403 round 26).
+    stopWide: !!sendInput.metadata?.notificationEventKey,
   }).catch(() => {});
 }
 

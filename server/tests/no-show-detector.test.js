@@ -1504,6 +1504,9 @@ describe('recordSentWindowFallback (the audit row failed, the text went out) (ro
     // The sender allows that path only for the series confirmation.
     const sender = require('fs').readFileSync(require('path').join(__dirname, '..', 'services', 'messaging', 'send-customer-message.js'), 'utf8');
     expect(sender).toContain('if (!knownSlot && !seriesMoveId) return;');
+    // Stop-wide copy keeps that identity in the fallback, or the siblings
+    // stay on their pre-move windows (round-26 P1).
+    expect(sender).toContain('stopWide: !!sendInput.metadata?.notificationEventKey,');
   });
 
   test('it never throws into the send path', async () => {
