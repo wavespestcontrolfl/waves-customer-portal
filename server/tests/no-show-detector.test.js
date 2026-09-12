@@ -297,6 +297,40 @@ describe('the offline replay never loads the database module (audit P1)', () => 
   });
 });
 
+describe('candidates come from the promise as well as the schedule (deferred P2, round 18)', () => {
+  const { promisedVisitIds } = require('../services/no-show-detector');
+  // A still-live visit staff moved far out of the date window WITHOUT telling
+  // the customer would otherwise drop out before its immutable promise
+  // evidence was ever read — the uncommunicated move this detector exists to
+  // catch.
+  test('ids come from all three evidence linkages, deduped', async () => {
+    const conn = (table) => {
+      const chain = {};
+      for (const m of ['where', 'whereRaw', 'whereBetween']) chain[m] = () => chain;
+      chain.select = () => Promise.resolve(({
+        messaging_audit_log: [{ appointment_id: 'v1', meta_visit_id: null }, { appointment_id: null, meta_visit_id: 'v2' }],
+        customer_interactions: [{ meta_visit_id: 'v2' }, { meta_visit_id: 'v3' }],
+        audit_log: [{ resource_id: 'v4' }],
+      })[table] || []);
+      return chain;
+    };
+    conn.raw = (sql) => ({ sql });
+    const ids = await promisedVisitIds(conn, { from: new Date('2026-09-01'), now: new Date('2026-09-12') });
+    expect(ids.sort()).toEqual(['v1', 'v2', 'v3', 'v4']);
+  });
+
+  test('nothing communicated recently -> no extra candidates', async () => {
+    const conn = () => {
+      const chain = {};
+      for (const m of ['where', 'whereRaw', 'whereBetween']) chain[m] = () => chain;
+      chain.select = () => Promise.resolve([]);
+      return chain;
+    };
+    conn.raw = (sql) => ({ sql });
+    expect(await promisedVisitIds(conn, { from: new Date('2026-09-01'), now: new Date('2026-09-12') })).toEqual([]);
+  });
+});
+
 describe('grouped stops are evaluated as one visit (round-10 P1)', () => {
   const { groupedStops, stopState, stopPromise } = require('../services/no-show-detector');
   // A service_visits row is ONE physical stop shared by N scheduled_services:
@@ -971,13 +1005,12 @@ describe('an appointment email with no interaction row still yields its promise 
 
     const [promise] = await loadPromiseEvents(conn, ['visit-1']);
     const joins = Object.fromEntries(captured.joins.map(([table, sql]) => [table, sql]));
-    // Linked through the STOP BASE KEY, so a service split off the stop — a
-    // new service_visits row under the same base key, its reminder state
-    // carried with it and no second notice sent — keeps this evidence
-    // (round-16 P1).
+    // The key's OWN stop, and only that stop: stop_base_key was tried here to
+    // follow a split, but it is (property|customer, date) — every other stop
+    // at that property that day shares it (round-18 P2).
     expect(joins['service_visits as keyed']).toContain("keyed.id::text = split_part(em.idempotency_key, ':', 3)");
-    expect(joins['service_visits as own']).toBe('own.stop_base_key');
-    expect(joins['scheduled_services as sv']).toContain('sv.visit_id = own.id');
+    expect(joins['service_visits as own']).toBeUndefined();
+    expect(joins['scheduled_services as sv']).toContain('sv.visit_id = keyed.id');
     // The stop id is selected so the "already recovered" check can be
     // stop-wide: the interaction row is keyed to whichever member owned the
     // claim, and a sibling seeing none of its own would otherwise keep an

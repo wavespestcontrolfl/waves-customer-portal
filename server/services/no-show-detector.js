@@ -75,6 +75,11 @@ const ARRIVAL_STAMPS = ['arrived_at', 'actual_start_time', 'check_in_time'];
 // (see the ignoreHorizon note on promisedStartAt) — an ancient, presumably
 // already-handled promise must not surface as news.
 const HORIZON_MS = 48 * 3600000;
+// How far back the candidate scan looks for a COMMUNICATED promise, for
+// visits whose current scheduled_date has moved outside the date window.
+// Wider than the 48h creation horizon so a promise communicated well before
+// the window still pulls its visit in; bounded so the lookup stays indexed.
+const PROMISE_RECALL_DAYS = 14;
 
 // Pure, exported for tests and for the replay's coverage measure: the
 // evidence-validity half of the rule. Returns the promised start instant the
@@ -423,14 +428,15 @@ async function loadPromiseEvents(conn, visitIds, { now = new Date() } = {}) {
       // reminder for the stop's NEXT occurrence would otherwise mint an
       // unknown-window promise for today's visit and silence its alert
       // (codex P1 round 13).
-      // Through the STOP BASE KEY, not the visit id: a split gives the leaving
-      // row a new service_visits row for the SAME stop (visit-groups mints it
-      // under the same stop lock and base key), so an id-equality join lost
-      // the evidence for exactly the row that was separated — while
-      // visit-groups deliberately carries that occurrence's reminder state
-      // with it, no second notice sent (codex P1 round 16).
+      // The key's own stop, and only that stop. stop_base_key was tried here
+      // to follow a service split onto its new service_visits row, but the
+      // base key is (property|customer, date) — every OTHER stop at that
+      // property on that day shares it, so the reminder for one stop would
+      // have answered for an unrelated one (codex P2 round 18). service_visits
+      // records no split lineage, so a split-off row loses this recovery;
+      // that costs only the unknown-window fallback, and only when the
+      // interaction insert ALSO failed for that send.
       .join('service_visits as keyed', conn.raw("keyed.id::text = split_part(em.idempotency_key, ':', 3)"))
-      .join('service_visits as own', 'own.stop_base_key', 'keyed.stop_base_key')
       .join('scheduled_services as sv', function joinOnStopOccurrence() {
         // The key's occurrence date must not be in the visit's FUTURE — that
         // is the next occurrence of a recurring stop, whose reminder says
@@ -441,7 +447,7 @@ async function loadPromiseEvents(conn, visitIds, { now = new Date() } = {}) {
         // still holds the promise that reminder communicated, and requiring
         // equality made the evidence vanish exactly when the schedule moved
         // under it (codex P1 round 16).
-        this.on(conn.raw(`sv.visit_id = own.id
+        this.on(conn.raw(`sv.visit_id = keyed.id
           AND split_part(em.idempotency_key, ':', 5) <= to_char(sv.scheduled_date, 'YYYY-MM-DD')`));
       })
       .whereIn(conn.raw("split_part(em.idempotency_key, ':', 1)"), APPOINTMENT_EMAIL_EVENTS)
@@ -940,11 +946,50 @@ function stopPromise(members = [], promises = new Map(), now = new Date()) {
 // One internal caller (sweep), one scope: every live candidate. The
 // tech-scoped / paginated variants this used to expose had no route behind
 // them (codex P2 round 17).
+// Visits the customer was TOLD about recently, whatever their current
+// scheduled_date says. Three index-backed reads, unioned: the scheduling
+// notices' own visit linkage (both the column and the legacy metadata key),
+// the appointment emails' interaction rows, and the call-evidence audit rows.
+// Deliberately id-only — the promise itself is loaded later by
+// loadPromiseEvents, which applies every delivery and eligibility rule.
+async function promisedVisitIds(conn, { from, now }) {
+  const [notices, emails, calls] = await Promise.all([
+    conn('messaging_audit_log').whereBetween('sent_at', [from, now])
+      .whereRaw("(purpose = ANY(?::text[]) OR purpose = 'appointment')", [NOTICE_PURPOSES])
+      .select('appointment_id', conn.raw("metadata->>'scheduled_service_id' as meta_visit_id")),
+    conn('customer_interactions').where('interaction_type', 'email_outbound')
+      .whereBetween('created_at', [from, now])
+      .select(conn.raw("metadata->>'scheduled_service_id' as meta_visit_id")),
+    conn('audit_log').where({ action: 'visit_window_promised', resource_type: 'scheduled_service' })
+      .whereBetween('created_at', [from, now]).select('resource_id'),
+  ]);
+  return [...new Set([
+    ...notices.flatMap((r) => [r.appointment_id, r.meta_visit_id]),
+    ...emails.map((r) => r.meta_visit_id),
+    ...calls.map((r) => r.resource_id),
+  ].filter(Boolean).map(String))];
+}
+
 async function listNoShows(conn, { now = new Date(), limit = 100 } = {}) {
   if (!enabled()) return [];
+  // Candidates by SCHEDULE DATE (the indexed scan) OR by PROMISE TIME: a
+  // still-live visit that staff moved far out of the date window without
+  // telling the customer would otherwise drop out before its immutable
+  // promise evidence was ever read — and that uncommunicated move is exactly
+  // what this detector exists to catch (codex P2, carried since round 4).
+  // The promise side is bounded by when the customer was TOLD, not by the
+  // visit's current date: a scheduling notice sent in the last
+  // PROMISE_RECALL_DAYS days, matched through the same visit linkage the
+  // evidence reads use, and every one of those lookups is index-backed
+  // (messaging_audit_appointment_sent_idx, the metadata indexes added by this
+  // PR, audit_log's action/created_at).
+  const recallFrom = new Date(now.getTime() - PROMISE_RECALL_DAYS * 86400000);
+  const promisedIds = await promisedVisitIds(conn, { from: recallFrom, now });
   const rows = await conn('scheduled_services as s').join('customers as c', 'c.id', 's.customer_id')
     .whereIn('s.status', LIVE_STATUSES)
-    .whereBetween('s.scheduled_date', [etDateString(new Date(now.getTime() - 60 * 86400000)), etDateString(new Date(now.getTime() + 100 * 86400000))])
+    .where((qb) => qb
+      .whereBetween('s.scheduled_date', [etDateString(new Date(now.getTime() - 60 * 86400000)), etDateString(new Date(now.getTime() + 100 * 86400000))])
+      .modify((inner) => { if (promisedIds.length) inner.orWhereIn('s.id', promisedIds); }))
     .select('s.*', 'c.first_name', 'c.last_name', 'c.phone');
   const liveRows = rows.filter((r) => !require('./internal-test-customers').isInternalTestCustomerId(r.customer_id));
   // Pull in every member of the stops these candidates belong to, even the
@@ -1313,4 +1358,4 @@ async function sweep(conn, { now = new Date() } = {}) {
   return { alerted, active: rows.length };
 }
 
-module.exports = { enabled, cleanupAfterDisable, evaluateNoShow, promisedStartAt, trackingStage, callCommitmentInstant, LIVE_STATUSES, latestPromises, loadPromiseEvents, seriesSupersessions, knownWindowAtOrAfter, groupedStops, representativeOf, stopState, stopPromise, lockedStop, recordSentWindowFallback, listNoShows, sweep, trackingKey, resolveLegacyCollision, alreadyHasOpenAlert, noticeStillCurrent };
+module.exports = { enabled, cleanupAfterDisable, evaluateNoShow, promisedStartAt, trackingStage, callCommitmentInstant, LIVE_STATUSES, latestPromises, loadPromiseEvents, seriesSupersessions, promisedVisitIds, knownWindowAtOrAfter, groupedStops, representativeOf, stopState, stopPromise, lockedStop, recordSentWindowFallback, listNoShows, sweep, trackingKey, resolveLegacyCollision, alreadyHasOpenAlert, noticeStillCurrent };
