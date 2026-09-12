@@ -1143,24 +1143,6 @@ describe('an appointment email with no interaction row still yields its promise 
       communicated_at: '2026-09-10T12:00:00.000Z' });
   });
 
-  test('the fallback never displaces the known window the interaction row already carries', async () => {
-    const { knownWindowAtOrAfter } = require('../services/no-show-detector');
-    const fallback = { visit_id: 'visit-1', communicated_at: '2026-09-10T12:00:00.000Z' };
-    const known = (over = {}) => [{ visit_id: 'visit-1', start_at: '2026-09-10T13:00:00.000Z',
-      communicated_at: '2026-09-10T12:00:00.000Z', source: 'email', ...over }];
-    expect(knownWindowAtOrAfter(known(), fallback)).toBe(true);
-    // The SMS leg counts too: a `both`-channel reminder sends its text first,
-    // so when the email's interaction insert fails the known window is
-    // already on the message side (round-21 P1).
-    expect(knownWindowAtOrAfter(known({ source: 'message' }), fallback)).toBe(true);
-    // An OLDER known window does not block it — a genuinely newer unknown
-    // promise (the legacy move-notice case) still has to win.
-    expect(knownWindowAtOrAfter(known({ communicated_at: '2026-09-09T12:00:00.000Z' }), fallback)).toBe(false);
-    // Another visit, or an unknown window, never blocks.
-    expect(knownWindowAtOrAfter(known({ visit_id: 'other' }), fallback)).toBe(false);
-    expect(knownWindowAtOrAfter(known({ start_at: null }), fallback)).toBe(false);
-  });
-
   // One grouped reminder writes an email_messages row per RECIPIENT, and
   // logEmailAttempt can fail for a later one after an earlier one already
   // recorded the window. Measuring from the earliest row of the fan-out keeps

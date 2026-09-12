@@ -735,24 +735,6 @@ async function loadPromiseEvents(conn, visitIds, { now = new Date() } = {}) {
   ];
 }
 
-// True when the notice-derived evidence — SMS as well as email, since a
-// `both`-channel reminder records the same window on both legs — already
-// carries a KNOWN window for this visit, communicated at or after the
-// fallback's own send time. The fallback is then a duplicate recovery of a
-// message already accounted for, and must not replace it: an unknown window
-// would silence a real alert.
-function knownWindowAtOrAfter(noticeEvents = [], fallback) {
-  const at = instant(fallback.communicated_at);
-  return noticeEvents.some((event) => String(event.visit_id || '') === String(fallback.visit_id)
-    && event.start_at != null
-    // The SAME precedence the interaction promise is dated by: after a
-    // successful retry its effective send time is the live em.sent_at, not
-    // the snapshot frozen at the first attempt, and comparing against the
-    // snapshot here made the suppression disagree with the promise it is
-    // suppressing for (codex P1 round 12).
-    && instant(event.communicated_at) >= at);
-}
-
 // Pure, exported for tests. One customer-notified series move -> an UNKNOWN
 // window (start_at: null) for each moved SIBLING, stamped at the moment the
 // customer was told. Unknown is the honest record: the text quoted only the
@@ -1556,4 +1538,4 @@ async function sweep(conn, { now = new Date() } = {}) {
   return { alerted, active: rows.length };
 }
 
-module.exports = { enabled, cleanupAfterDisable, evaluateNoShow, promisedStartAt, trackingStage, callCommitmentInstant, LIVE_STATUSES, latestPromises, loadPromiseEvents, seriesSupersessions, reminderTier, promisedVisitIds, knownWindowAtOrAfter, groupedStops, representativeOf, stopState, stopPromise, lockedStop, recordSentWindowFallback, listNoShows, sweep, trackingKey, resolveLegacyCollision, alreadyHasOpenAlert, noticeStillCurrent };
+module.exports = { enabled, cleanupAfterDisable, evaluateNoShow, promisedStartAt, trackingStage, callCommitmentInstant, LIVE_STATUSES, latestPromises, loadPromiseEvents, seriesSupersessions, reminderTier, promisedVisitIds, groupedStops, representativeOf, stopState, stopPromise, lockedStop, recordSentWindowFallback, listNoShows, sweep, trackingKey, resolveLegacyCollision, alreadyHasOpenAlert, noticeStillCurrent };
