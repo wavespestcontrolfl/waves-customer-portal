@@ -2,6 +2,7 @@
 import React from "react";
 import "@testing-library/jest-dom/vitest";
 import {
+  act,
   cleanup,
   fireEvent,
   render,
@@ -14,6 +15,7 @@ import { DiscountsSection } from "./DiscountsTabs";
 afterEach(() => {
   cleanup();
   vi.unstubAllGlobals();
+  vi.useRealTimers();
 });
 
 describe("DiscountsSection", () => {
@@ -98,5 +100,51 @@ describe("DiscountsSection", () => {
     expect(
       screen.queryByRole("button", { name: "Try again" }),
     ).not.toBeInTheDocument();
+  });
+
+  it("keeps the existing catalog retry label and request", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi
+        .fn()
+        .mockRejectedValueOnce(new Error("down"))
+        .mockResolvedValue({ ok: true, json: async () => [] }),
+    );
+
+    render(<DiscountsSection />);
+    const retry = await screen.findByRole("button", { name: "Retry" });
+    expect(
+      screen.queryByRole("button", { name: "Try again" }),
+    ).not.toBeInTheDocument();
+    fireEvent.click(retry);
+    await waitFor(() => expect(fetch).toHaveBeenCalledTimes(2));
+  });
+
+  it("keeps the first feedback timer when a second message is shown", async () => {
+    vi.useFakeTimers();
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url) => {
+        if (String(url).endsWith("/admin/discounts/calculate")) {
+          throw new Error("down");
+        }
+        return { ok: true, json: async () => [] };
+      }),
+    );
+
+    await act(async () => render(<DiscountsSection />));
+    fireEvent.click(screen.getByRole("tab", { name: "Preview" }));
+    await act(async () =>
+      fireEvent.click(screen.getByRole("button", { name: "Calculate" })),
+    );
+    expect(screen.getByText("Preview failed")).toBeInTheDocument();
+
+    act(() => vi.advanceTimersByTime(1000));
+    await act(async () =>
+      fireEvent.click(screen.getByRole("button", { name: "Calculate" })),
+    );
+    act(() => vi.advanceTimersByTime(2000));
+
+    expect(screen.queryByText("Preview failed")).not.toBeInTheDocument();
   });
 });

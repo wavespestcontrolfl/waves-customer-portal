@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import {
   ActionFeedback,
   Badge,
@@ -130,7 +130,6 @@ function DiscountsSection() {
   const [editing, setEditing] = useState(null);
   const [form, setForm] = useState({ ...EMPTY });
   const [toast, setToast] = useState("");
-  const toastTimer = useRef(null);
   const [previewCid, setPreviewCid] = useState("");
   const [previewSub, setPreviewSub] = useState("");
   const [previewResult, setPreviewResult] = useState(null);
@@ -153,12 +152,10 @@ function DiscountsSection() {
   useEffect(() => {
     load();
   }, [load]);
-  useEffect(() => () => clearTimeout(toastTimer.current), []);
 
   const show = (message) => {
-    clearTimeout(toastTimer.current);
     setToast(message);
-    toastTimer.current = setTimeout(() => setToast(""), 3000);
+    setTimeout(() => setToast(""), 3000);
   };
 
   const save = async () => {
@@ -315,10 +312,13 @@ function DiscountsSection() {
             </Card>
           ) : loadError ? (
             <Card>
-              <CardBody>
-                <ActionFeedback error onRetry={load}>
+              <CardBody className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                <ActionFeedback error className="flex-1">
                   {loadError}
                 </ActionFeedback>
+                <Button variant="secondary" onClick={load}>
+                  Retry
+                </Button>
               </CardBody>
             </Card>
           ) : sortedDiscounts.length === 0 ? (
