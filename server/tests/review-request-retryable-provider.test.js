@@ -84,12 +84,14 @@ describe('_applyOutreachSendResult settles the outreach step from deliveryOutcom
     db.mockReset();
   });
 
-  test('holds an uncertain touch out of processScheduled instead of scheduling a retry', async () => {
+  test('holds an uncertain NON-ASK touch out of processScheduled instead of scheduling a retry', async () => {
     const update = jest.fn().mockResolvedValue(1);
     db.mockReturnValue({ where: jest.fn().mockReturnValue({ update }) });
 
+    // A no-link check-in carries no reservation, so this slice's ask-spacing
+    // branch does not apply and the uncertain guard is what holds the row.
     const outcome = await ReviewRequest._applyOutreachSendResult(
-      { id: 'req-uncertain' },
+      { id: 'req-uncertain', template_key: 'winback_checkin' },
       { sent: false, blocked: false, deliveryOutcome: 'uncertain', code: 'PROVIDER_FAILURE' },
       'cron',
       'sms',
@@ -99,6 +101,29 @@ describe('_applyOutreachSendResult settles the outreach step from deliveryOutcom
     expect(update).toHaveBeenCalledWith({ status: 'deferred' });
     expect(outcome).toEqual({
       ok: false, deferred: true, uncertain: true, channel: 'sms', requestId: 'req-uncertain', code: 'PROVIDER_FAILURE',
+    });
+  });
+
+  test('an uncertain ASK is held for the full ask-spacing window, not the ordinary retry', async () => {
+    const update = jest.fn().mockResolvedValue(1);
+    db.mockReturnValue({ where: jest.fn().mockReturnValue({ update }) });
+
+    // A null template_key is the canonical ask (isAskTemplate). This slice
+    // holds it at the 72-hour spacing floor rather than parking it, so the
+    // customer cannot receive a second copy inside the window.
+    const outcome = await ReviewRequest._applyOutreachSendResult(
+      { id: 'req-uncertain-ask' },
+      { sent: false, blocked: false, deliveryOutcome: 'uncertain', code: 'PROVIDER_FAILURE' },
+      'cron',
+      'sms',
+    );
+
+    expect(update).toHaveBeenCalledWith(expect.objectContaining({ status: 'pending' }));
+    const scheduledFor = update.mock.calls[0][0].scheduled_for.getTime();
+    expect(scheduledFor).toBeGreaterThanOrEqual(Date.now() + 72 * 3600000 - 5000);
+    expect(outcome).toMatchObject({
+      ok: false, retryable: true, deferred: true, reason: 'provider_uncertain',
+      channel: 'sms', requestId: 'req-uncertain-ask', code: 'PROVIDER_FAILURE',
     });
   });
 
