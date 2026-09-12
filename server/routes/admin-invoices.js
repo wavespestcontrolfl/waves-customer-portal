@@ -9,6 +9,7 @@ const db = require('../models/db');
 const { VALID_PAYMENT_METHODS, recordManualPayment, retireOpenPaymentIntentBeforeSettlement } = require('../services/invoice-manual-payment');
 const logger = require('../services/logger');
 const { etDateString, addETDays, parseETDateTime } = require('../utils/datetime-et');
+const { dateOnlyString } = require('../utils/date-only');
 const { shortenOrPassthrough, invoiceShortCodePrefix } = require('../services/short-url');
 const { assertInvoiceCollectible, INVOICE_UNCOLLECTIBLE_STATUSES, invoiceAmountDue, visitRefusesSettlement } = require('../services/invoice-helpers');
 const CustomerCredit = require('../services/customer-credit');
@@ -1131,12 +1132,20 @@ async function loadLinkedOpenVisit({ scheduledServiceId, customerId }) {
 // lock, and buildCreateParams hands it to InvoiceService.create as
 // expectedPayerId. The mint's retry loop re-runs this hook per attempt, so
 // the pin is always the CURRENT attempt's verdict, never a stale one.
+// It also carries the LOCKED visit's scheduled_date out (Codex r19 P2
+// #4131): a client-supplied serviceDate can go stale (the visit is
+// rescheduled after the picker loads) or simply disagree with the visit
+// (an operator-edited date field) — either way buildCreateParams below
+// must derive the invoice's service_date from THIS row, not from
+// createArgs, or the linked invoice can show/text the customer the wrong
+// date and mis-key the pre-service/completed-service copy choice.
 function openVisitEligibilityInTrx({ visit, customerId, payerPin = null }) {
   return async (trx) => {
     const still = await trx('scheduled_services').where({ id: visit.id }).forUpdate().first();
     if (!still || String(still.customer_id) !== String(customerId) || !isOpenVisitStatus(still.status)) {
       throw conflict('visit_not_open', `That visit is no longer open for this customer${still ? ` (${still.status})` : ''} — nothing was created`);
     }
+    if (payerPin) payerPin.scheduledDate = still.scheduled_date;
     // The mint derives its deposit ledger from the visit snapshot's
     // source_estimate_id (Codex P1 r3): an estimate attached or relinked
     // between the pre-check and this lock would be missed (or the old
@@ -1215,7 +1224,7 @@ async function createInvoiceLinkedToOpenVisit({ visit, customerId, createArgs, e
   // openVisitEligibilityInTrx always runs before buildCreateParams (the mint
   // chain: advisory → key-share → eligibility hook → visit lock → create),
   // so this is never still `undefined` at the create — the pin is live.
-  const payerPin = { payerId: undefined };
+  const payerPin = { payerId: undefined, scheduledDate: undefined };
   try {
     minted = await mintScheduledServiceInvoiceWithDeposit({
       svc: visit,
@@ -1223,7 +1232,16 @@ async function createInvoiceLinkedToOpenVisit({ visit, customerId, createArgs, e
       expectedDepositCredit: numberOrNull(expectedDepositCredit),
       expectedBalanceDue: numberOrNull(expectedBalanceDue),
       assertEligibleInTrx: openVisitEligibilityInTrx({ visit, customerId, payerPin }),
-      buildCreateParams: () => ({ ...createArgs, scheduledServiceId: visit.id, expectedPayerId: payerPin.payerId }),
+      // serviceDate comes from the LOCKED visit, never createArgs (Codex
+      // r19 P2 #4131): a rescheduled visit or an operator-edited date field
+      // must not carry a stale/arbitrary date onto the invoice this create
+      // links to it — the visit this invoice bills IS the service date.
+      buildCreateParams: () => ({
+        ...createArgs,
+        scheduledServiceId: visit.id,
+        expectedPayerId: payerPin.payerId,
+        serviceDate: dateOnlyString(payerPin.scheduledDate) || createArgs.serviceDate,
+      }),
     });
   } catch (err) {
     const refused = mintRefusalResponse(err);

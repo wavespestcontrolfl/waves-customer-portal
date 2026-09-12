@@ -225,13 +225,18 @@ describe('the shared send claim (claimInvoiceForSend) under interleaving', () =>
     }
   });
 
-  test('the CLAIM refuses a visit-linked invoice whose recorded cash/Zelle prepayment already covers the balance — the interleaving where the office\'s direct scheduled_services write lands moments AFTER this invoice\'s mint, invisible to the mint\'s own eligibility check (round-17 P1 #4131 finding 1)', async () => {
+  test('the CLAIM refuses a visit-linked invoice whose recorded cash/Zelle prepayment has not yet been reconciled with it — the interleaving where the office\'s direct scheduled_services write lands moments AFTER this invoice\'s mint, invisible to the mint\'s own eligibility check (round-17 P1 #4131 finding 1, widened to partial prepayments round 19)', async () => {
     const db = require('../models/db');
     const InvoiceService = require('../services/invoice');
     const { claimInvoiceForSend } = InvoiceService;
     const original = db.getMockImplementation();
     const readRow = { id: 'inv-1', status: 'draft', total: 117, credit_applied: 0, scheduled_service_id: 'svc-1', service_record_id: null };
     let visitPrepaidAmount = 0;
+    // Whether a `scheduled_service_prepaid` payments row already exists for
+    // (inv-1, svc-1) — the durable "already reconciled with THIS invoice"
+    // marker admin-schedule's full-payment finalize and completion's
+    // applyPrepaidCreditToInvoice both write.
+    let creditApplied = false;
     db.mockImplementation((table) => {
       const q = original(table);
       if (table === 'invoices') {
@@ -246,14 +251,16 @@ describe('the shared send claim (claimInvoiceForSend) under interleaving', () =>
         }));
       }
       if (table === 'scheduled_services') q.first = jest.fn(async () => ({ id: 'svc-1', status: 'confirmed', prepaid_amount: visitPrepaidAmount }));
+      if (table === 'payments') q.first = jest.fn(async () => (creditApplied ? { id: 'pmt-1' } : null));
       return q;
     });
     try {
       // The office's direct scheduled_services.prepaid_amount write has
       // NO row lock of its own — it can commit right after this SAME
       // invoice's mint, which never saw it. By the time an Immediate send
-      // takes this claim, the visit is already fully covered: refuse
-      // rather than text the full-balance link for money already in hand.
+      // takes this claim, the visit's cash is not yet reconciled with the
+      // invoice: refuse rather than text the full-balance link for money
+      // already in hand.
       db.__state.status = 'draft';
       visitPrepaidAmount = 117;
       await expect(claimInvoiceForSend('inv-1')).rejects.toMatchObject({ code: 'visit_prepaid_covered', message: expect.stringMatching(/Invoice is not sendable/) });
@@ -262,11 +269,25 @@ describe('the shared send claim (claimInvoiceForSend) under interleaving', () =>
       visitPrepaidAmount = 200;
       await expect(claimInvoiceForSend('inv-1')).rejects.toMatchObject({ code: 'visit_prepaid_covered' });
       expect(db.__state.status).toBe('draft');
-      // A prepayment that only PARTIALLY covers the balance does not
-      // trip the guard — the remaining balance is genuinely still owed.
+      // Round-19 P1 (#4131 finding 1, partial-payment follow-on): a
+      // prepayment that only PARTIALLY covers the balance and has NOT yet
+      // been credited to this invoice must ALSO refuse — otherwise the
+      // Immediate send collects the invoice's full, un-reduced balance on
+      // top of the cash already taken.
       visitPrepaidAmount = 50;
+      creditApplied = false;
+      await expect(claimInvoiceForSend('inv-1')).rejects.toMatchObject({ code: 'visit_prepaid_covered', message: expect.stringMatching(/Invoice is not sendable/) });
+      expect(db.__state.status).toBe('draft');
+      // Once that same partial amount HAS been credited to this invoice
+      // (completion's applyPrepaidCreditToInvoice already reduced the
+      // total, or admin-schedule's reconciler caught up) the marker row
+      // exists and the claim proceeds normally for the genuinely
+      // remaining balance — comparing raw prepaid_amount (never cleared)
+      // against the now-reduced total would otherwise misfire here.
+      creditApplied = true;
       expect(await claimInvoiceForSend('inv-1')).toMatchObject({ claimed: true, previousStatus: 'draft' });
       db.__state.status = 'draft';
+      creditApplied = false;
       // Control: no recorded prepayment claims normally.
       visitPrepaidAmount = 0;
       expect(await claimInvoiceForSend('inv-1')).toMatchObject({ claimed: true, previousStatus: 'draft' });

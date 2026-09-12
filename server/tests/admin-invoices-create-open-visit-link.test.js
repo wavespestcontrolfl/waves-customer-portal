@@ -203,6 +203,46 @@ describe('POST /admin/invoices with an open visit link', () => {
     });
   });
 
+  describe('the invoice\'s serviceDate is derived from the LOCKED visit, not the client-supplied value (Codex r19 P2 #4131)', () => {
+    // Mirrors the "ownership and open status" test's shape above: the mint
+    // chain calls assertEligibleInTrx (openVisitEligibilityInTrx) on its own
+    // transaction, which pins the locked row's scheduled_date onto the
+    // out-parameter buildCreateParams reads.
+    function mintCallsHookWith(lockedRow) {
+      return mintScheduledServiceInvoiceWithDeposit.mockImplementationOnce(async ({ svc, assertEligibleInTrx }) => {
+        const trx = () => qb({ forUpdate: jest.fn(() => ({ first: jest.fn(async () => lockedRow) })) });
+        trx.raw = jest.fn(async () => ({ rows: [] }));
+        await assertEligibleInTrx(trx);
+        return { invoice: { id: 'inv-new', token: 'tok', customer_id: CUSTOMER, invoice_number: 'WPC-TEST-1', scheduled_service_id: svc.id }, reused: false };
+      });
+    }
+
+    test('a visit rescheduled between picker load and submit: the invoice bills the NEW scheduled_date, not the stale value the form loaded with', async () => {
+      // The picker loaded the visit at 2040-03-04 (the client's serviceDate,
+      // still in the request body below); the visit was rescheduled to
+      // 2040-03-10 before the create landed and locked it.
+      mintCallsHookWith({ id: VISIT, customer_id: CUSTOMER, status: 'confirmed', scheduled_date: new Date(Date.UTC(2040, 2, 10)) });
+      await withServer(async (baseUrl) => {
+        const res = await post(baseUrl, { scheduledServiceId: VISIT, serviceDate: '2040-03-04' });
+        expect(res.status).toBe(201);
+        const call = mintScheduledServiceInvoiceWithDeposit.mock.calls[0][0];
+        expect(call.buildCreateParams()).toMatchObject({ serviceDate: '2040-03-10' });
+      });
+    });
+
+    test('an operator-edited date field that disagrees with the locked visit: the locked visit\'s date wins', async () => {
+      // The visit was never rescheduled — the operator just typed a
+      // different date into the form's serviceDate field by hand.
+      mintCallsHookWith({ id: VISIT, customer_id: CUSTOMER, status: 'confirmed', scheduled_date: new Date(Date.UTC(2040, 5, 1)) });
+      await withServer(async (baseUrl) => {
+        const res = await post(baseUrl, { scheduledServiceId: VISIT, serviceDate: '2041-01-01' });
+        expect(res.status).toBe(201);
+        const call = mintScheduledServiceInvoiceWithDeposit.mock.calls[0][0];
+        expect(call.buildCreateParams()).toMatchObject({ serviceDate: '2040-06-01' });
+      });
+    });
+  });
+
   test('an accepted-estimate stamp still retires the parked setup-fee alert after an open-visit mint', async () => {
     const estimateId = '44444444-4444-4444-8444-444444444444';
     await withServer(async (baseUrl) => {

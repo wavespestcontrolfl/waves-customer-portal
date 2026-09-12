@@ -1037,6 +1037,30 @@ async function zeroDueOpenVisitSendOutcome(row, invoiceId) {
 // refuses to move a void row. What this buys is the good case: a visit
 // already cancelled at claim time gives the claim straight back and never
 // texts a pay link at all.
+// The durable marker that an out-of-band (cash/Zelle/phone) scheduled-
+// service prepayment has already been reconciled against THIS invoice —
+// written both by admin-schedule.js's full-payment finalize (the prepaid
+// route's own atomic flip-to-paid) and by completion's
+// applyPrepaidCreditToInvoice (which credits a still-open linked invoice,
+// partial or full, when the visit completes). Checking for this row —
+// not comparing raw amounts — is what let a PARTIAL credit already
+// reflected in the invoice's (reduced) total coexist with a genuinely
+// still-owed remaining balance: comparing scheduled_services.prepaid_amount
+// (never cleared once stamped) against the ALREADY-reduced amount due
+// would misfire and refuse a legitimate send for the remainder once the
+// prepaid amount is a large enough share of the original total (Codex r19
+// P1 #4131 finding 1 follow-on).
+async function outOfBandPrepaidCreditApplied(invoiceId, scheduledServiceId) {
+  if (!invoiceId || !scheduledServiceId) return false;
+  const row = await db("payments")
+    .where({ status: "paid" })
+    .whereRaw("metadata::jsonb ->> 'source' = ?", ["scheduled_service_prepaid"])
+    .whereRaw("metadata::jsonb ->> 'invoice_id' = ?", [String(invoiceId)])
+    .whereRaw("metadata::jsonb ->> 'scheduled_service_id' = ?", [String(scheduledServiceId)])
+    .first("id");
+  return !!row;
+}
+
 async function visitInvoiceRefusalUnderClaim(claimedRow, claimedFromStatus) {
   if (!claimedRow?.scheduled_service_id) return null;
   if (zeroDueVisitInvoice({ ...claimedRow, status: claimedFromStatus })) return { kind: "zero_due" };
@@ -1051,14 +1075,35 @@ async function visitInvoiceRefusalUnderClaim(claimedRow, claimedFromStatus) {
   // full-balance invoice was minted (the mint's own row lock only made the
   // write WAIT, then apply right after commit; nothing at mint time ever
   // saw the payment). admin-schedule.js's own reconciler applies the
-  // payment to a still-open linked invoice when it catches up, but this is
-  // the fail-closed backstop: never hand out a claim that would text a pay
-  // link for a balance already covered by recorded cash, whether or not
-  // that reconciler has run yet.
+  // payment to a still-open linked invoice when it catches up (full
+  // coverage only — see its own doc comment), but this is the fail-closed
+  // backstop: never hand out a claim that would text a pay link for a
+  // balance not yet reconciled with recorded cash, whether or not that
+  // reconciler has run yet.
+  //
+  // Round-19 P1 (#4131 finding 1, partial-payment follow-on): the same
+  // race applies to a PARTIAL out-of-band prepayment — admin-schedule.js
+  // deliberately never writes a partial credit against this invoice (a
+  // partial stays recorded on scheduled_services until a later top-up or
+  // completion), so an Immediate send in the meantime would still collect
+  // the invoice's full, un-reduced balance ON TOP OF the cash already
+  // taken. Refuse whenever the visit carries ANY positive out-of-band
+  // prepayment that has not yet been credited to THIS invoice — mirrors
+  // prepaidRefusesOfficeInvoice's "ANY positive prepayment refuses,
+  // partial or not" rule on the office invoice-CREATION path
+  // (services/visit-prepaid-coverage.js), applied here on the send path.
+  // Delivery stays refused until either admin-schedule's reconciler
+  // settles a now-full payment, or the visit's completion applies the
+  // partial credit (services/complete-scheduled-service.js
+  // applyPrepaidCreditToInvoice) and reduces the balance due — at which
+  // point the credited-payments-row marker below flips this open and a
+  // send proceeds for the genuinely remaining amount.
   if (visit && Number(visit.prepaid_amount) > 0) {
     const dueCents = Math.round(invoiceAmountDue(claimedRow) * 100);
-    const prepaidCents = Math.round(Number(visit.prepaid_amount) * 100);
-    if (dueCents > 0 && prepaidCents >= dueCents) return { kind: "visit_prepaid_covered" };
+    if (dueCents > 0) {
+      const credited = await outOfBandPrepaidCreditApplied(claimedRow.id, claimedRow.scheduled_service_id);
+      if (!credited) return { kind: "visit_prepaid_covered" };
+    }
   }
   return null;
 }
@@ -1078,14 +1123,19 @@ function queuedPayLinkError(queued) {
   return e;
 }
 
-// Round-17 P1 (#4131 finding 1): report-only, matching visitNeverRanError's
-// shape — the completion's classifier reads "Invoice is not sendable" as
-// nothing-left-to-deliver, and an office Immediate send surfaces the same
-// refusal rather than a scary error. The office reconciles the invoice by
-// hand (or admin-schedule.js's own reconciler settles it moments later).
+// Round-17 P1 (#4131 finding 1), widened round 19 to partial prepayments:
+// report-only, matching visitNeverRanError's shape — the completion's
+// classifier reads "Invoice is not sendable" as nothing-left-to-deliver,
+// and an office Immediate send surfaces the same refusal rather than a
+// scary error. Covers both a FULL out-of-band prepayment awaiting
+// admin-schedule's reconciler to flip the invoice paid, and a PARTIAL one
+// awaiting either that reconciler (once topped up to full) or the visit's
+// completion (applyPrepaidCreditToInvoice) to credit it and reduce the
+// balance due — either way, the office reconciles the invoice by hand
+// meanwhile, or one of those two catches up moments later.
 function visitPrepaidCoveredError(invoiceId) {
-  logger.warn(`[invoice] ${invoiceId}: send refused — the linked visit's recorded cash/Zelle prepayment already covers this balance`);
-  const e = new Error("Invoice is not sendable — the linked visit's recorded prepayment already covers this balance; nothing was sent");
+  logger.warn(`[invoice] ${invoiceId}: send refused — the linked visit's recorded cash/Zelle prepayment has not yet been reconciled with this invoice`);
+  const e = new Error("Invoice is not sendable — the linked visit's recorded prepayment has not yet been reconciled with this invoice; nothing was sent");
   e.code = "visit_prepaid_covered";
   return e;
 }
