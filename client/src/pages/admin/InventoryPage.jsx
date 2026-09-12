@@ -1380,7 +1380,7 @@ function PriceSyncTab({ showToast }) {
                   <TD>{product.sku || "—"}</TD>
                   <TD>{product.containerSize || "—"}</TD>
                   <TD>
-                    <Badge tone="neutral">
+                    <Badge tone="warn">
                       {product.bestPriceStatus || "needs_mapping"}
                     </Badge>
                   </TD>
@@ -1500,7 +1500,7 @@ function PriceSyncTab({ showToast }) {
                           : "Missing"}
                       </TD>
                       <TD>
-                        <Badge tone="neutral">
+                        <Badge tone={vendor.credentialStatus && vendor.credentialStatus !== "missing" ? "neutral" : "warn"}>
                           {vendor.credentialStatus || "needs_login"}
                         </Badge>
                       </TD>
@@ -3132,6 +3132,13 @@ function RestockRequestsTab({
       )}
     </Card>
   );
+}
+
+// Main coloured a vendor's last scrape green/amber/red/muted; the kit has no
+// success tone, so completed reads in the default ink.
+function scrapeStatusTone(status) {
+  if (status === "failed") return "alert";
+  return status === "running" ? "warn" : "neutral";
 }
 
 // How an automatic order's outcome reads on the Restock tab: colour + label.
@@ -5551,7 +5558,7 @@ function ScrapeTab({ showToast }) {
               <div className="text-ui-body text-ink-secondary mb-[8px]">
                 {v.productCount} products
               </div>
-              <Badge tone="neutral">{v.lastScrapeStatus || "never"}</Badge>
+              <Badge tone={scrapeStatusTone(v.lastScrapeStatus)}>{v.lastScrapeStatus || "never"}</Badge>
               <Button
                 onClick={() => triggerScrape(v.id)}
                 variant="primary"
