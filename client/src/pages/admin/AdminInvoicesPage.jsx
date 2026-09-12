@@ -6104,11 +6104,6 @@ function CreateInvoice({
       showToast("Select a customer");
       return;
     }
-    const staleCreate = await staleStackingBlock();
-    if (staleCreate) {
-      showToast(staleCreate);
-      return;
-    }
     if (
       !lineItems.some(
         (i) => i._kind !== "discount" && i.description && i.unit_price > 0,
@@ -6139,6 +6134,18 @@ function CreateInvoice({
     savingRef.current = true;
     setActionError("");
     setSaving(true);
+    // Revalidated AFTER the synchronous double-submit lock is taken: awaiting
+    // before it would let two fast clicks both pass `if (savingRef.current)`
+    // and post twice — a duplicate invoice. Release the lock if the gate moved.
+    {
+      const stale = await staleStackingBlock();
+      if (stale) {
+        savingRef.current = false;
+        setSaving(false);
+        showToast(stale);
+        return;
+      }
+    }
     try {
       const body = {
         customerId: selectedCustomer.id,
@@ -6279,11 +6286,6 @@ function CreateInvoice({
   // money totals.
   const handleSave = async () => {
     if (savingRef.current) return;
-    const staleSave = await staleStackingBlock();
-    if (staleSave) {
-      showToast(staleSave);
-      return;
-    }
     if (
       !lineItems.some(
         (i) => i._kind !== "discount" && i.description && i.unit_price > 0,
@@ -6300,6 +6302,18 @@ function CreateInvoice({
     savingRef.current = true;
     setActionError("");
     setSaving(true);
+    // Revalidated AFTER the synchronous double-submit lock is taken: awaiting
+    // before it would let two fast clicks both pass `if (savingRef.current)`
+    // and post twice — a duplicate invoice. Release the lock if the gate moved.
+    {
+      const stale = await staleStackingBlock();
+      if (stale) {
+        savingRef.current = false;
+        setSaving(false);
+        showToast(stale);
+        return;
+      }
+    }
     try {
       const body = {
         title: title || null,

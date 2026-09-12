@@ -273,19 +273,20 @@ export default function MobileCheckoutSheet({
 
   async function handleCharge() {
     if (minting || nothingToCharge || stackingUnconfirmedBlocksCharge) return;
-    // Revalidate right before posting money: polling narrows the window after
-    // a mid-session gate flip but cannot close it, and the preview on screen
-    // was computed under `stackingEnabled`. If that moved, the server would
-    // charge a different total than the technician is looking at.
+    setMinting(true);
+    setMintError(null);
+    // Revalidate right before posting money: polling narrows the window after a
+    // mid-session gate flip but cannot close it, and the preview on screen was
+    // computed under `stackingEnabled`. Ordered AFTER setMinting so the await
+    // cannot widen the double-tap window into a double charge.
     if (discountExtrasCount > 1) {
       const fresh = await ensureStackingFresh();
       if (!fresh.known || fresh.enabled !== stackingEnabled) {
+        setMinting(false);
         setMintError('The discount-stacking setting changed while this was open. Reload before charging so the total matches what will be billed.');
         return;
       }
     }
-    setMinting(true);
-    setMintError(null);
     try {
       const body = {
         // Discount rows post their STACKED dollars (what the sheet showed);

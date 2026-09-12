@@ -2787,19 +2787,21 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
   // Header, footer and second-program CTA share one synchronous lock. React
   // state alone can admit two taps before the first render marks us saving.
   const handleSubmit = async (separateProgram) => {
-    // Revalidate right before POSTING money (Codex r4 P1): the hook polls,
-    // but a gate flip between the last probe and this click would still book
-    // under the semantics the preview used.
+    if (submitLockRef.current) return;
+    submitLockRef.current = true;
+    // Revalidate right before POSTING money: the hook polls, but a gate flip
+    // between the last probe and this click would still book under the
+    // semantics the preview used. Ordered AFTER the submit lock — awaiting
+    // before it would let two fast clicks both pass and double-book.
     if (appointmentDiscountState) {
       const fresh = await ensureStackingFresh();
       if (!fresh.known || fresh.enabled !== stackingEnabled) {
+        submitLockRef.current = false;
         setStaleStackingNotice('The discount-stacking setting changed while this was open. Reload before saving so the totals match what will be saved.');
         return;
       }
       setStaleStackingNotice('');
     }
-    if (submitLockRef.current) return;
-    submitLockRef.current = true;
     let booked = false;
     try {
       booked = await submitAppointments(separateProgram);

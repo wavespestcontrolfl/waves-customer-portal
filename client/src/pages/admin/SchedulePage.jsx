@@ -2607,20 +2607,21 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
     !!form.windowStart;
 
   const handleSave = async ({ takePayment = false } = {}) => {
-    // Revalidate right before POSTING money (Codex r4 P1) — the hook polls,
-    // but a gate flip between the last probe and this click would still save
-    // under the semantics the preview used.
-    if (stackingEnabled || stackingUnconfirmedBlocksSave) {
+    if (stackingUnconfirmedBlocksSave) return;
+    setSaving(true);
+    // Revalidate right before POSTING money — the hook polls, but a gate flip
+    // between the last probe and this click would still save under the
+    // semantics the preview used. Ordered AFTER setSaving so the await cannot
+    // widen the double-click window; alert() is how this handler already
+    // reports a blocking validation failure (see the time-on-site check).
+    if (stackingEnabled) {
       const fresh = await ensureStackingFresh();
       if (!fresh.known || fresh.enabled !== stackingEnabled) {
-        // alert() is how this handler already reports a blocking validation
-        // failure (see the time-on-site check below).
+        setSaving(false);
         alert('The discount-stacking setting changed while this was open. Reload before saving so the totals match what will be saved.');
         return;
       }
     }
-    if (stackingUnconfirmedBlocksSave) return;
-    setSaving(true);
     // Time-on-site correction rides the same Save button but its own
     // endpoint: validate before anything writes so a typo aborts the whole
     // save rather than landing the update-details half only. The PATCH
