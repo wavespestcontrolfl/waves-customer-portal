@@ -12,7 +12,7 @@
   line-height: 1.3;
 }
 
-.staff-foundation input,
+.staff-foundation input:not([type="checkbox"]):not([type="radio"]),
 .staff-foundation select,
 .staff-foundation textarea {
   min-height: 44px;

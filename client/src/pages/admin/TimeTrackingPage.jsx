@@ -17,7 +17,6 @@ import {
   Users,
 } from "lucide-react";
 import AdminCommandHeader from "../../components/admin/AdminCommandHeader";
-import { UiSurface } from "../../components/ui";
 import "./TimeTrackingPage.css";
 import { TECH_LINE_NUMBERS } from "../../constants/techLines";
 import {
@@ -225,7 +224,7 @@ export default function TimeTrackingPage() {
   };
 
   return (
-    <UiSurface density="comfortable" className="staff-foundation mx-auto max-w-[1500px]">
+    <div className="staff-foundation mx-auto max-w-[1500px]">
       {" "}
       <AdminCommandHeader
         title="Staff"
@@ -330,7 +329,7 @@ export default function TimeTrackingPage() {
         <span style={{ color: D.green }}>OK</span>
         <span style={{ color: D.text }}>{toast}</span>{" "}
       </div>
-    </UiSurface>
+    </div>
   );
 }
 
@@ -1594,6 +1593,7 @@ function EditEntryModal({ entry, onClose, onSave }) {
 
   return createPortal(
     <div
+      className="staff-foundation"
       style={{
         position: "fixed",
         top: 0,
@@ -3584,6 +3584,7 @@ function CapabilitiesModal({ tech, onClose, onSaved, showToast }) {
 
   return createPortal(
     <div
+      className="staff-foundation"
       onClick={onClose}
       style={{
         position: "fixed",
@@ -3824,6 +3825,7 @@ function EarningsModal({ tech, onClose, showToast }) {
 
   return createPortal(
     <div
+      className="staff-foundation"
       onClick={onClose}
       style={{
         position: "fixed",
