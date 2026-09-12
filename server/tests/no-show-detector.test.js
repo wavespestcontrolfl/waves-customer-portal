@@ -424,43 +424,6 @@ describe('series reschedule confirmation feeds promise evidence (P1-1)', () => {
 });
 
 describe('loadPromiseEvents: email promise evidence checks the LIVE delivery state (P1-3)', () => {
-  // appointment-email.js's own customer_interactions row is write-once
-  // (status stays 'sent' forever); the live bounce/drop/block/fail state
-  // lands on email_messages via the SendGrid webhook, joined through
-  // provider_message_id. A row the webhook later marked bounced must not
-  // count as promise evidence — same live-status discipline
-  // loadPromiseEvents already applies to sms_log.status for texts
-  // (codex P1).
-  function passthroughChain(result = []) {
-    const chain = {};
-    for (const m of ['join', 'leftJoin', 'whereIn', 'whereRaw', 'whereBetween', 'whereNull', 'whereNotNull', 'where']) chain[m] = () => chain;
-    chain.select = () => Promise.resolve(result);
-    return chain;
-  }
-
-  function fakeConn() {
-    const calls = {};
-    const conn = (table) => {
-      if (table === 'messaging_audit_log as a' || table === 'audit_log' || table === 'series_moves as sm') return passthroughChain([]);
-      if (table === 'customer_interactions as ci') {
-        const chain = {};
-        chain.leftJoin = (joinTable, cb) => { calls.leftJoinTable = joinTable; calls.leftJoinCb = cb; return chain; };
-        chain.where = (...args) => { (calls.whereCalls ||= []).push(args); return chain; };
-        chain.whereBetween = () => chain;
-        chain.whereRaw = (...args) => { (calls.whereRawCalls ||= []).push(args); return chain; };
-        chain.select = (...args) => { calls.selected = args; return Promise.resolve([]); };
-        return chain;
-      }
-      throw new Error(`fake conn: unexpected table ${table}`);
-    };
-    conn.raw = (sql, bindings) => ({ sql, bindings });
-    conn.isTransaction = true;
-    return { conn, calls };
-  }
-
-});
-
-describe('loadPromiseEvents: email promise evidence checks the LIVE delivery state (P1-3)', () => {
   function passthroughChain(result = []) {
     const chain = {};
     for (const m of ['join', 'leftJoin', 'whereIn', 'whereRaw', 'whereBetween', 'whereNull', 'whereNotNull', 'where']) chain[m] = () => chain;
