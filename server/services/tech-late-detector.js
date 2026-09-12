@@ -185,6 +185,11 @@ async function runInner() {
                 -- round 9). An unresolved row of either source still
                 -- suppresses: that is a live alert, whoever raised it.
                 COALESCE(a.payload->>'source', '') <> 'no_show_detector'
+                -- ...and not a row the detector's legacy handoff resolved on
+                -- its way to raising its own card: that stamp means "replaced
+                -- by an automatic action", never "a dispatcher acknowledged
+                -- this schedule" (codex P2, PR #4403 round 12).
+                AND a.payload->>'superseded_at' IS NULL
                 AND LEFT(a.payload->>'scheduled_date', 10) = c.scheduled_date::text
                 AND a.payload->>'window_start' = c.window_start::text
                 AND COALESCE(a.payload->>'window_end', '') = COALESCE(c.window_end::text, '')

@@ -2,7 +2,7 @@
 /** READ-ONLY: replay operator-supplied visit/promise timelines. No database,
  * provider, or production access. Writes a local JSON + Markdown report.
  * node ops/agents/replay-no-show-detector.js --input export.json --output .tmp/no-show-replay
- * Input: { synthetic?:boolean, from, to, visits:[{ id, initial:{status,...},
+ * Input: { synthetic?:boolean, from, to, visits:[{ id, stop_id?, initial:{status,...},
  * events:[{at,patch:{status,...}}], promises:[{start_at,communicated_at,source}],
  * outcome:'missed'|'late'|'on_time'|'tracking_gap'|'unknown', complaint_at? }] }
  * A final-row snapshot alone is invalid: future terminal state must not hide
@@ -121,14 +121,44 @@ function replayVisit(item, { from, to, threshold }) {
   return { alerts, covered };
 }
 
+// Production collapses scheduled_services rows sharing a service_visits row
+// into ONE stop: one card, one merged tracking state, the latest promise
+// across members (no-show-detector.js's groupedStops/stopState/stopPromise).
+// An export that carries the constituent rows must be collapsed the same way
+// or the report counts duplicate alerts for one truck visit and marks the
+// non-owner siblings as missing evidence (codex P2 round 12). Rows carry the
+// grouping as `stop_id`; without it each row is its own stop, which is every
+// row while GATE_VISIT_GROUPS is off.
+function collapseStops(visits = []) {
+  const byStop = new Map();
+  for (const item of visits) {
+    const key = item.stop_id ? `stop:${item.stop_id}` : `row:${item.id}`;
+    if (!byStop.has(key)) byStop.set(key, []);
+    byStop.get(key).push(item);
+  }
+  return [...byStop.values()].map((members) => {
+    if (members.length === 1) return members[0];
+    const ordered = [...members].sort((a, b) => String(a.id).localeCompare(String(b.id)));
+    const base = ordered[0];
+    // One stop's timeline: every member's events and promises, and the
+    // outcome any member recorded (they describe the same physical visit).
+    return { ...base,
+      events: ordered.flatMap((m) => m.events || []),
+      promises: ordered.flatMap((m) => m.promises || []),
+      outcome: ordered.find((m) => m.outcome && m.outcome !== 'unknown')?.outcome || base.outcome,
+      complaint_at: ordered.find((m) => m.complaint_at)?.complaint_at || null };
+  });
+}
+
 function replay(input) {
   const from = new Date(input.from), to = new Date(input.to);
   if (!Array.isArray(input.visits) || !Number.isFinite(from.getTime()) || !Number.isFinite(to.getTime()) || from >= to) throw new Error('A bounded timeline export is required');
+  const stops = collapseStops(input.visits);
   const reports = [];
   for (const threshold of [45, 60]) {
     const alerts = [], days = {}, counts = { route_attention: 0, tracking_gap: 0, on_time: 0, unknown: 0 };
     let missingPromise = 0;
-    for (const item of input.visits) {
+    for (const item of stops) {
       const { alerts: visitAlerts, covered } = replayVisit(item, { from, to, threshold });
       if (!covered) missingPromise += 1;
       const bucket = ['missed', 'late'].includes(item.outcome) ? 'route_attention'
@@ -146,7 +176,7 @@ function replay(input) {
       before_complaint: alerts.filter((a) => a.warning_minutes_before_complaint > 0).length, by_day: days, alerts });
   }
   return { synthetic: input.synthetic === true, from: from.toISOString(), to: to.toISOString(),
-    coverage_days: (to - from) / 86400000, visits: input.visits.length, thresholds: reports };
+    coverage_days: (to - from) / 86400000, visits: stops.length, thresholds: reports };
 }
 
 function markdown(report) {
@@ -167,4 +197,4 @@ if (require.main === module) {
   fs.writeFileSync(`${outputPath}.md`, markdown(report));
   process.stdout.write(`Replayed ${report.visits} visits at 45 and 60 minutes; ${report.synthetic ? 'synthetic' : 'operator-supplied'} evidence.\n`);
 }
-module.exports = { replay, replayVisit, markdown };
+module.exports = { replay, replayVisit, collapseStops, markdown };

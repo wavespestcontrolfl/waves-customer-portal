@@ -117,6 +117,32 @@ describe('missing tracking stages', () => {
     }] });
     for (const result of report.thresholds) expect(result.alerts).toMatchObject([{ stage: 1, at: '2026-09-10T14:10:00.000Z' }]);
   });
+  test('a grouped stop\'s member rows replay as ONE visit (round-12 P2)', () => {
+    // Production collapses rows sharing a service_visits row into one card
+    // with one merged state and the latest promise across members; an export
+    // carrying the members must not count duplicate alerts, nor mark the
+    // non-owner sibling as missing evidence.
+    const promise = { start_at: '2026-09-10T09:00:00-04:00', communicated_at: '2026-09-09T12:00:00-04:00', source: 'message' };
+    const grouped = replay({ synthetic: true, from: '2026-09-10T09:00:00-04:00', to: '2026-09-10T12:00:00-04:00', visits: [
+      { id: 'aaa', stop_id: 'stop-1', initial: visit, promises: [promise], events: [], outcome: 'late' },
+      // The sibling holds no evidence of its own — the grouped reminder went
+      // out under the other member's claim.
+      { id: 'bbb', stop_id: 'stop-1', initial: visit, promises: [], events: [], outcome: 'unknown' },
+    ] });
+    expect(grouped.visits).toBe(1);
+    for (const result of grouped.thresholds) {
+      expect(result.missing_promise_visits).toBe(0);
+      expect(result.alerts.filter((a) => a.stage === 1)).toHaveLength(1);
+    }
+    // Without the grouping key they are two separate stops, as every row is
+    // while GATE_VISIT_GROUPS is off.
+    const ungrouped = replay({ synthetic: true, from: '2026-09-10T09:00:00-04:00', to: '2026-09-10T12:00:00-04:00', visits: [
+      { id: 'aaa', initial: visit, promises: [promise], events: [], outcome: 'late' },
+      { id: 'bbb', initial: visit, promises: [], events: [], outcome: 'unknown' },
+    ] });
+    expect(ungrouped.visits).toBe(2);
+    for (const result of ungrouped.thresholds) expect(result.missing_promise_visits).toBe(1);
+  });
   test('replay counts a null latest promised window as missing coverage, not covered', () => {
     // new Date(null).getTime() is 0 — a finite, valid instant (the epoch) —
     // not NaN, so a naive `!Number.isFinite(new Date(start_at).getTime())`
@@ -423,6 +449,12 @@ describe('resolveLegacyCollision (legacy alert handover)', () => {
     jest.clearAllMocks();
   });
 
+  test('the handoff stamps the resolve as automatic, so a rollback is not suppressed by it', async () => {
+    const { trx } = fakeAlertsTable([{ id: 'legacy-1', payload: {} }]);
+    await resolveLegacyCollision(trx, { jobId: 'job-1', type: 'tech_late' });
+    expect(resolveAlert).toHaveBeenCalledWith(expect.objectContaining({ id: 'legacy-1', auto: true }));
+  });
+
   test('an unresolved legacy tech_late row (no payload.source) is resolved so the handover can insert', async () => {
     const legacyRow = { id: 'legacy-1', job_id: 'visit-1', type: 'tech_late', payload: { delay_minutes: 12 } };
     const { trx, where, whereNull, whereRaw } = fakeAlertsTable([legacyRow]);
@@ -433,7 +465,7 @@ describe('resolveLegacyCollision (legacy alert handover)', () => {
     expect(whereNull).toHaveBeenCalledWith('resolved_at');
     expect(whereRaw.mock.calls[0][0]).toMatch(/payload->>'source'.*!=\s*'no_show_detector'/);
     expect(resolveAlert).toHaveBeenCalledTimes(1);
-    expect(resolveAlert).toHaveBeenCalledWith({ id: 'legacy-1', trx });
+    expect(resolveAlert).toHaveBeenCalledWith({ id: 'legacy-1', trx, auto: true });
     expect(count).toBe(1);
   });
 
@@ -454,8 +486,8 @@ describe('resolveLegacyCollision (legacy alert handover)', () => {
     const count = await resolveLegacyCollision(trx, { jobId: 'visit-3', type: 'unassigned_overdue' });
 
     expect(resolveAlert).toHaveBeenCalledTimes(2);
-    expect(resolveAlert).toHaveBeenNthCalledWith(1, { id: 'legacy-1', trx });
-    expect(resolveAlert).toHaveBeenNthCalledWith(2, { id: 'legacy-2', trx });
+    expect(resolveAlert).toHaveBeenNthCalledWith(1, { id: 'legacy-1', trx, auto: true });
+    expect(resolveAlert).toHaveBeenNthCalledWith(2, { id: 'legacy-2', trx, auto: true });
     expect(count).toBe(2);
   });
 });
@@ -634,7 +666,7 @@ describe('loadPromiseEvents: email promise evidence checks the LIVE delivery sta
   function fakeConn() {
     const calls = {};
     const conn = (table) => {
-      if (table === 'messaging_audit_log as a' || table === 'audit_log as al' || table === 'activity_log as al' || table === 'scheduled_services as sv' || table === 'email_messages' || table === 'series_moves as sm') return passthroughChain([]);
+      if (table === 'messaging_audit_log as a' || table === 'audit_log as al' || table === 'activity_log as al' || table === 'scheduled_services as sv' || table === 'email_messages' || table === 'email_messages as em' || table === 'series_moves as sm') return passthroughChain([]);
       if (table === 'customer_interactions as ci') {
         const chain = {};
         chain.leftJoin = (joinTable, cb) => { calls.leftJoinTable = joinTable; calls.leftJoinCb = cb; return chain; };
@@ -746,7 +778,7 @@ describe('loadPromiseEvents: an UNLINKED sms_log row is neutral, a sentinel sid 
   function fakeConn() {
     const calls = {};
     const conn = (table) => {
-      if (table === 'customer_interactions as ci' || table === 'audit_log as al' || table === 'activity_log as al' || table === 'scheduled_services as sv' || table === 'email_messages' || table === 'series_moves as sm') return passthroughChain([]);
+      if (table === 'customer_interactions as ci' || table === 'audit_log as al' || table === 'activity_log as al' || table === 'scheduled_services as sv' || table === 'email_messages' || table === 'email_messages as em' || table === 'series_moves as sm') return passthroughChain([]);
       if (table === 'messaging_audit_log as a') {
         const chain = {};
         for (const m of ['leftJoin', 'whereIn', 'whereRaw', 'whereBetween', 'whereNull']) chain[m] = () => chain;
@@ -846,6 +878,35 @@ describe('an appointment email with no interaction row still yields its promise 
     conn.isTransaction = true;
     return { conn, captured };
   }
+
+  test('a GROUPED reminder key (…:visit:<stop>:…) is recovered through the stop, as an unknown window', async () => {
+    // appointment-reminders.js keys a grouped email by the visit-effect claim
+    // — segment 2 is the literal 'visit', segment 3 the service_visits id,
+    // and there is no slot epoch — so the per-service read cannot see it at
+    // all. Unknown is the honest recovery: the key proves the customer was
+    // told about this occurrence, not at what time (round-12 P1).
+    const captured = {};
+    const chain = {};
+    for (const m of ['whereRaw', 'where', 'whereNotNull']) chain[m] = () => chain;
+    chain.join = (table, raw) => { captured.join = [table, raw?.sql]; return chain; };
+    chain.whereIn = (col, values) => { (captured.whereIn ||= []).push([col?.sql || col, values]); return chain; };
+    chain.select = () => Promise.resolve([{ id: 'em-9', sent_at: '2026-09-10T12:00:00.000Z', visit_id: 'visit-1' }]);
+    const passthrough = () => {
+      const other = {};
+      for (const m of ['join', 'leftJoin', 'whereIn', 'whereRaw', 'whereBetween', 'whereNull', 'whereNotNull', 'where']) other[m] = () => other;
+      other.select = () => Promise.resolve([]);
+      return other;
+    };
+    const conn = (table) => (table === 'email_messages as em' ? chain : passthrough());
+    conn.raw = (sql) => ({ sql });
+    conn.isTransaction = true;
+
+    const [promise] = await loadPromiseEvents(conn, ['visit-1']);
+    expect(captured.join[0]).toBe('scheduled_services as sv');
+    expect(captured.join[1]).toContain("sv.visit_id::text = split_part(em.idempotency_key, ':', 3)");
+    expect(promise).toMatchObject({ visit_id: 'visit-1', source: 'email', source_id: 'em-9', start_at: null,
+      communicated_at: '2026-09-10T12:00:00.000Z' });
+  });
 
   test('the window comes straight off the message row, scoped by the key\'s visit id and a delivered status', async () => {
     const slot = Date.parse('2026-09-12T13:00:00.000Z');
@@ -1150,37 +1211,6 @@ describe('seriesSupersessions: one series text supersedes every moved sibling (r
   // the read joins on. Without the Quick Move half, every sibling a quick
   // move touched kept its pre-move reminder as its latest promise (round-6
   // P1); this asserts the sender still stamps it.
-  test('a historical series move whose text carries no move id is matched by its anchor notice (round-7 P1)', async () => {
-    // Quick Move's moved-SMS only starts carrying series_move_id in this PR,
-    // so every quick move already in the database needs the fallback: the
-    // anchor's own delivered notice inside the hour after the move committed
-    // IS the text that told the customer, bounded on both sides so a later
-    // ordinary reminder can never stand in for it.
-    let joinSql = null;
-    const chain = {};
-    for (const m of ['leftJoin', 'whereIn', 'whereRaw', 'whereNull', 'whereNotNull', 'where']) chain[m] = () => chain;
-    chain.join = (table, cb) => {
-      // The series read joins with a callback; the booking read joins on
-      // plain columns — only the callback form carries the predicate here.
-      if (typeof cb !== 'function') return chain;
-      const onClause = { on: (arg) => { joinSql = arg.sql; return onClause; } };
-      cb.call(onClause);
-      return chain;
-    };
-    chain.select = () => Promise.resolve([]);
-    const conn = () => chain;
-    conn.raw = (sql) => ({ sql });
-    conn.isTransaction = true;
-    await loadPromiseEvents(conn, ['visit-1']);
-    expect(joinSql).toContain("a.metadata->>'series_move_id' = sm.id::text");
-    expect(joinSql).toContain("a.metadata->>'series_move_id' IS NULL AND a.appointment_id = sm.anchor_service_id");
-    expect(joinSql).toContain("a.sent_at >= sm.created_at AND a.sent_at < sm.created_at + interval '1 hour'");
-    // ...and only a text that actually announces a move qualifies: a 24h
-    // reminder landing in the same hour announces no series move.
-    expect(joinSql).toContain("a.metadata->>'original_message_type' LIKE 'rain_out_moved%'");
-    expect(joinSql).toContain("a.metadata->>'original_message_type' = 'reschedule_series_confirmation'");
-  });
-
   test('only a text that ANNOUNCES a move can supersede — the placement confirmation cannot (round-9 P1)', async () => {
     // A customer self-service placement move sends
     // appointment_recurring_placement_confirmed, whose seeded copy says
@@ -1205,17 +1235,14 @@ describe('seriesSupersessions: one series text supersedes every moved sibling (r
     await loadPromiseEvents(conn, ['visit-1']);
     // The message-type allowlist gates BOTH branches (the id match and the
     // legacy anchor-notice fallback), so no other message type can qualify.
-    const allowlist = joinSql.slice(0, joinSql.indexOf('AND ('));
-    expect(allowlist).toContain("a.metadata->>'original_message_type' LIKE 'rain_out_moved%'");
-    expect(allowlist).toContain("a.metadata->>'original_message_type' = 'reschedule_series_confirmation'");
+    // Exactly ONE message type qualifies. Quick Move's rain_out_moved* text
+    // describes the anchor only (admin-dispatch keeps the siblings'
+    // reminders open for that reason), and the placement confirmation says
+    // later commitments stand until staff review (round-12 P1).
+    expect(joinSql).toContain("a.metadata->>'original_message_type' = 'reschedule_series_confirmation'");
+    expect(joinSql).not.toContain('rain_out_moved');
     expect(joinSql).not.toContain('appointment_recurring_placement_confirmed');
-    expect(joinSql.indexOf("a.metadata->>'series_move_id' = sm.id::text")).toBeGreaterThan(joinSql.indexOf('AND ('));
-  });
-
-  test('the Quick Move moved-SMS carries the series move id it is the notification of', () => {
-    const rainOut = require('fs').readFileSync(require('path').join(__dirname, '..', 'services', 'rain-out.js'), 'utf8');
-    expect(rainOut).toContain("...(seriesMoveId ? { series_move_id: String(seriesMoveId) } : {}),");
-    expect(rainOut).toContain('seriesMoveId: seriesMoveId && ownsSeriesText ? seriesMoveId : null,');
+    expect(joinSql).toContain("a.metadata->>'series_move_id' = sm.id::text");
   });
 
   test('a fan-out to two contacts (two delivered audit rows) yields ONE event, at the earliest send', () => {
@@ -1334,7 +1361,7 @@ describe('loadPromiseEvents: pre-deploy legacy reschedule/confirmation messages 
   function fakeConn({ messageRows = [] } = {}) {
     const calls = {};
     const conn = (table) => {
-      if (table === 'customer_interactions as ci' || table === 'audit_log as al' || table === 'activity_log as al' || table === 'scheduled_services as sv' || table === 'email_messages' || table === 'series_moves as sm') return passthroughChain([]);
+      if (table === 'customer_interactions as ci' || table === 'audit_log as al' || table === 'activity_log as al' || table === 'scheduled_services as sv' || table === 'email_messages' || table === 'email_messages as em' || table === 'series_moves as sm') return passthroughChain([]);
       if (table === 'messaging_audit_log as a') {
         const chain = {};
         chain.leftJoin = () => chain;
@@ -1429,7 +1456,7 @@ describe('loadPromiseEvents: no fixed lookback — confirmations older than 100 
   // function" instead of silently passing.
   function fakeConn({ messageRows = [] } = {}) {
     const conn = (table) => {
-      if (table === 'customer_interactions as ci' || table === 'audit_log as al' || table === 'activity_log as al' || table === 'scheduled_services as sv' || table === 'email_messages' || table === 'series_moves as sm') return passthroughChain([]);
+      if (table === 'customer_interactions as ci' || table === 'audit_log as al' || table === 'activity_log as al' || table === 'scheduled_services as sv' || table === 'email_messages' || table === 'email_messages as em' || table === 'series_moves as sm') return passthroughChain([]);
       if (table === 'messaging_audit_log as a') return passthroughChain(messageRows);
       throw new Error(`fake conn: unexpected table ${table}`);
     };

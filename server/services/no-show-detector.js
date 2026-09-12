@@ -366,6 +366,26 @@ async function loadPromiseEvents(conn, visitIds, { now = new Date() } = {}) {
       .whereNotNull('sent_at').where('sent_at', '<=', now)
       .select('id', 'sent_at', conn.raw("split_part(idempotency_key, ':', 2) as visit_id"),
         conn.raw("split_part(idempotency_key, ':', 3) as slot_ms")),
+    // The GROUPED reminder's key has a different shape:
+    // `appointment.reminder_<kind>:visit:<service_visits id>:<effect>:<date>`
+    // (appointment-reminders.js's visitReminderEmailKey, keyed by the visit
+    // -effect claim so every member's email leg dedupes together). Segment 2
+    // is the literal 'visit' and there is no slot epoch in it, so the read
+    // above cannot see these at all — a stop whose grouped email lost its
+    // interaction row would fall back to an older promise (codex P1 round
+    // 12). Recovered here through the stop, as an UNKNOWN window: the key
+    // proves the customer was told about this occurrence but does not carry
+    // the time, and inventing one is exactly what these rounds keep
+    // rejecting. Unknown still beats a stale known window — latestPromises
+    // keeps the newest, and an unknown window raises no alert.
+    () => conn('email_messages as em')
+      .join('scheduled_services as sv', conn.raw("sv.visit_id::text = split_part(em.idempotency_key, ':', 3)"))
+      .whereIn(conn.raw("split_part(em.idempotency_key, ':', 1)"), APPOINTMENT_EMAIL_EVENTS)
+      .whereRaw("split_part(em.idempotency_key, ':', 2) = 'visit'")
+      .whereIn('sv.id', visitIds)
+      .whereIn('em.status', DELIVERED_EMAIL_STATUSES)
+      .whereNotNull('em.sent_at').where('em.sent_at', '<=', now)
+      .select('em.id', 'em.sent_at', 'sv.id as visit_id'),
     // A call-created booking: the visit row itself carries source_call_log_id
     // (a FK written in the booking transaction), so the window the agent
     // committed on that call is derivable from durable state — no separate
@@ -404,35 +424,19 @@ async function loadPromiseEvents(conn, visitIds, { now = new Date() } = {}) {
       // the moment the customer was told, not when the effects pass stamped
       // its marker.
       .join('messaging_audit_log as a', function joinOnSeriesMove() {
-        // Second branch for moves notified before the id was stamped on the
-        // text (codex P1 round 7): admin-dispatch's series confirmation has
-        // always carried series_move_id, but Quick Move's anchor-only
-        // moved-SMS — which doubles as the series confirmation — only starts
-        // carrying it in this PR, so every historical quick move would leave
-        // its siblings holding pre-move reminders. customer_notified already
-        // asserts a text went out for the move, and the pass that sends it is
-        // the one that committed the move (its reconciler retries inside a
-        // 5-minute lease), so the anchor's own delivered MOVE NOTICE within
-        // the hour after the move IS that text. Bounded on both sides in
-        // time, and BOTH branches are restricted to the message types that
-        // actually announce a move (Quick Move's rain_out_moved* rungs and
-        // the series confirmation): a 24h reminder or a prep-info text that
-        // happens to land in the same hour announces no series move, and
-        // letting one stand in would supersede every sibling's promise on the
-        // strength of a text that never mentioned them (codex P1 round 7).
-        // The allowlist also excludes the OTHER text a series move can send:
-        // `appointment_recurring_placement_confirmed`, the customer
-        // self-service placement notice whose seeded copy says existing
-        // commitments stay as they are until staff review. That text moves
-        // the cadence but deliberately does NOT retract the windows already
-        // promised, so treating it as a supersession would drop a sibling's
-        // still-standing confirmation and leave a visit the customer is
-        // expecting with no missing-tracking alert at all (codex P1 round 9).
-        this.on(conn.raw(`(a.metadata->>'original_message_type' LIKE 'rain_out_moved%'
-            OR a.metadata->>'original_message_type' = 'reschedule_series_confirmation')
-          AND (a.metadata->>'series_move_id' = sm.id::text
-            OR (a.metadata->>'series_move_id' IS NULL AND a.appointment_id = sm.anchor_service_id
-              AND a.sent_at >= sm.created_at AND a.sent_at < sm.created_at + interval '1 hour'))`));
+        // ONE message type supersedes a sibling's promise: the series
+        // confirmation, whose copy tells the customer the recurring
+        // appointments moved. Quick Move's rain_out_moved* text is NOT it —
+        // it describes the anchor appointment only, which is exactly why
+        // admin-dispatch.js's closeScope keeps the siblings' reminders open
+        // ("never covered by that text"). Treating it as a supersession
+        // replaced every sibling's still-standing promise with an unknown
+        // window and silenced alerts for appointments the customer is still
+        // expecting at the times they were given (codex P1 round 12). The
+        // placement confirmation is excluded for the same reason: its copy
+        // says later commitments stand until staff review.
+        this.on(conn.raw(`a.metadata->>'original_message_type' = 'reschedule_series_confirmation'
+          AND a.metadata->>'series_move_id' = sm.id::text`));
       })
       .leftJoin('sms_log as s', 's.twilio_sid', 'a.provider_message_id')
       .where('sm.customer_notified', true)
@@ -450,7 +454,7 @@ async function loadPromiseEvents(conn, visitIds, { now = new Date() } = {}) {
   if (conn.isTransaction) {
     for (const read of reads) results.push(await read());
   } else results.push(...await Promise.all(reads.map((read) => read())));
-  const [messages, emails, calls, directEmails, bookings, appliedReschedules, seriesMoves] = results;
+  const [messages, emails, calls, directEmails, groupedEmails, bookings, appliedReschedules, seriesMoves] = results;
   const candidates = new Set(visitIds.map(String));
   return [
     ...messages.map((r) => ({ visit_id: r.appointment_id || r.metadata?.scheduled_service_id, start_at: Number.isFinite(Number(r.metadata?.rendered_slot_ms)) && r.metadata?.rendered_slot_ms != null
@@ -467,6 +471,8 @@ async function loadPromiseEvents(conn, visitIds, { now = new Date() } = {}) {
       communicated_at: r.metadata?.communicated_at || r.created_at, source: 'call', source_id: r.id })),
     ...directEmails.map((r) => ({ visit_id: r.visit_id,
       start_at: new Date(Number(r.slot_ms)).toISOString(), communicated_at: r.sent_at,
+      source: 'email', source_id: r.id })),
+    ...groupedEmails.map((r) => ({ visit_id: r.visit_id, start_at: null, communicated_at: r.sent_at,
       source: 'email', source_id: r.id })),
     ...bookings.map((r) => {
       // The call's own start is passed EXPLICITLY: the row aliases it to
@@ -815,7 +821,13 @@ function trackingKey({ visitId, startAt, stage, type, recipient }) {
 async function resolveLegacyCollision(trx, { jobId, type }) {
   const legacy = await trx('dispatch_alerts').where({ job_id: jobId, type }).whereNull('resolved_at')
     .whereRaw("COALESCE(payload->>'source', '') != 'no_show_detector'");
-  for (const alert of legacy) await require('./dispatch-alerts').resolveAlert({ id: alert.id, trx });
+  // auto: true stamps payload.superseded_at. Without it, the legacy row this
+  // handoff resolved still reads to tech-late-detector's own dedupe as an
+  // acknowledged alert for the current schedule, so turning the gate back off
+  // left the fallback scan suppressed for that visit — the rollback path
+  // poisoned by the very handoff that enabled the feature (codex P2 round
+  // 12). The legacy predicate ignores rows carrying that stamp.
+  for (const alert of legacy) await require('./dispatch-alerts').resolveAlert({ id: alert.id, trx, auto: true });
   return legacy.length;
 }
 

@@ -4508,12 +4508,24 @@ async function applySeriesMoveEffects({ result, serviceId, newDate, newWindow, n
         // count as a scheduling notice) never picks this series notice up,
         // and keeps enforcing the pre-move window after a customer-notified
         // series move (codex P1).
-        const renderedSlotMs = parseETDateTime(rescheduleReminderTime(String(newDate).split('T')[0], { start: startForText })).getTime();
+        // ONLY when the text actually quoted an arrival range: with a
+        // windowless anchor, startForText is null, the copy omits
+        // window_text — and rescheduleReminderTime would default the missing
+        // start to 08:00, recording a promised time the customer was never
+        // given, which the no-show detector would then alert against (codex
+        // P1, PR #4403 round 12). No range in the message, no rendered slot:
+        // the notice still counts as evidence, with an unknown window.
+        const renderedSlotMs = startForText
+          ? parseETDateTime(rescheduleReminderTime(String(newDate).split('T')[0], { start: startForText })).getTime()
+          : null;
         // sendOutcome: the sender reports a DEFERRED send (send window,
         // provider hold) separately from a definitive non-send, and
         // providerAccepted once ANY recipient's handoff succeeded — read in
         // the catch too, because a fan-out can accept one contact and then
         // throw on a later one.
+        // Which of the two templates this notice renders — read once, so the
+        // copy and the message type it is recorded under can never disagree.
+        const placementConfirmed = result.futurePlacementDays === 3;
         const sendOutcome = {};
         try {
           const AppointmentReminders = require('../services/appointment-reminders');
@@ -4522,7 +4534,7 @@ async function applySeriesMoveEffects({ result, serviceId, newDate, newWindow, n
           const prefs = await AppointmentReminders.visitPrefsRow(customer.id, serviceId);
           notificationSent = await AppointmentReminders.safeSendAppointment(customer, prefs || {}, async (contact) => {
             const firstName = String(contact?.name || '').trim().split(/\s+/)[0] || customer.first_name || 'there';
-            return renderRequiredTemplate(result.futurePlacementDays === 3
+            return renderRequiredTemplate(placementConfirmed
               ? 'appointment_recurring_placement_confirmed' : 'appointment_series_rescheduled', {
               first_name: firstName,
               start_date: displayDate,
@@ -4532,7 +4544,14 @@ async function applySeriesMoveEffects({ result, serviceId, newDate, newWindow, n
               entity_type: 'scheduled_service',
               entity_id: serviceId,
             });
-          }, 'reschedule_series_confirmation', 'appointment', { scheduled_service_id: serviceId, series_move_id: seriesMoveId, reasonText, rendered_slot_ms: renderedSlotMs }, {
+          // The REAL template identity, not a fixed label: a placement
+          // confirmation tells the customer their later commitments are
+          // unchanged until staff review, so it must not read downstream as
+          // the series-move confirmation that supersedes every sibling's
+          // promised window (codex P1, PR #4403 round 12).
+          }, placementConfirmed ? 'appointment_recurring_placement_confirmed' : 'reschedule_series_confirmation',
+          'appointment', { scheduled_service_id: serviceId, series_move_id: seriesMoveId, reasonText,
+            ...(renderedSlotMs ? { rendered_slot_ms: renderedSlotMs } : {}) }, {
             // Authenticated staff explicitly asked to notify the customer of
             // the series move — exempt from the 8AM-8PM send window like the
             // neighboring rain-out and quick-move actions. A CUSTOMER-driven
