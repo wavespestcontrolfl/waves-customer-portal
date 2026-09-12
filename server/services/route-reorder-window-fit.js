@@ -69,9 +69,17 @@ function effectiveWindowRange(stop) {
   const raw = String(stop.time_window || '').trim().toLowerCase();
   if (raw === 'morning') return { startMin: 8 * 60, endMin: 12 * 60 };
   if (raw === 'afternoon') return { startMin: 12 * 60, endMin: 17 * 60 };
-  const m = raw.match(/^(\d{1,2}):(\d{2})/);
+  // A meridiem is part of the clock: '4:00 PM' is 16:00, not 04:00 — reading
+  // it as a morning promise can reject every order as infeasible, and can
+  // mark a still-upcoming afternoon window as already elapsed (codex #4430 r4
+  // P1). Same am/pm semantics route-reorder.js's effectiveWindowStart uses.
+  const m = raw.match(/^(\d{1,2})(?::(\d{2}))?\s*(am|pm)?/);
   if (m) {
-    const ws = Number(m[1]) * 60 + Number(m[2]);
+    let hour = Number(m[1]);
+    if (m[3] === 'pm' && hour < 12) hour += 12;
+    if (m[3] === 'am' && hour === 12) hour = 0;
+    if (hour > 23) return null;
+    const ws = hour * 60 + Number(m[2] || 0);
     return { startMin: ws, endMin: ws + ARRIVAL_WINDOW_MINUTES };
   }
   return null;

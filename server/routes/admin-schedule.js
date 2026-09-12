@@ -13557,7 +13557,7 @@ router.post('/optimize', requireAdmin, async (req, res, next) => {
     // audit P1). Unassigned stops have no tech-day and are left out of the
     // sum, same as they are left out of the guards.
     const { totalDurationMinutes, totalDistanceMeters, unoptimizedDistanceMeters,
-      savedDistanceMeters, savedPercent } = windowSafeFigures(result, resolvedByTech, anyWindowConstrained);
+      savedDistanceMeters, savedPercent } = windowSafeFigures(result, resolvedByTech, anyWindowConstrained, guarded.unassigned);
 
     const response = {
       success: true,

@@ -481,7 +481,7 @@ async function optimizeAllRoutes(input) {
   // A repaired order is NOT the one Google scored, so the card must not
   // advertise Google's savings for a sequence it will never apply — the same
   // per-tech-day figures the admin endpoint reports (codex #4430 r3 P1).
-  const figures = windowSafeFigures(result, guarded.resolvedByTech, guarded.anyWindowConstrained);
+  const figures = windowSafeFigures(result, guarded.resolvedByTech, guarded.anyWindowConstrained, guarded.unassigned);
   result.totalDistanceMeters = figures.totalDistanceMeters;
   result.unoptimizedDistanceMeters = figures.unoptimizedDistanceMeters;
   result.totalDurationSeconds = figures.totalDurationMinutes * 60;
@@ -627,7 +627,7 @@ async function optimizeTechRoute(input) {
   const optimizedById = new Map(result.orderedStops.map((s) => [s.id, s]));
   result.orderedStops = guarded.orderedIds.map((id) => optimizedById.get(id));
 
-  const figures = windowSafeFigures(result, guarded.resolvedByTech, guarded.anyWindowConstrained);
+  const figures = windowSafeFigures(result, guarded.resolvedByTech, guarded.anyWindowConstrained, guarded.unassigned);
   result.totalDistanceMeters = figures.totalDistanceMeters;
   result.unoptimizedDistanceMeters = figures.unoptimizedDistanceMeters;
   result.totalDurationSeconds = figures.totalDurationMinutes * 60;

@@ -106,9 +106,19 @@ function effectiveWindowStart(stop) {
   if (!raw) return null;
   if (raw === 'morning') return '08:00';
   if (raw === 'afternoon') return '12:00';
-  const m = raw.match(/^(\d{1,2}):(\d{2})/);
-  if (m) return `${m[1].padStart(2, '0')}:${m[2]}`;
-  return null; // 'any' / free text — no chronology promise to enforce
+  // Legacy rows store a literal clock, sometimes WITH a meridiem: reading
+  // '4:00 PM' as 04:00 turns an afternoon promise into a morning one, which
+  // can reject every order as infeasible on a future date and — on today's
+  // route — mark a still-upcoming promise as already elapsed (codex round 4
+  // P1). Same am/pm semantics the IB's parseTimeWindowStart uses.
+  const m = raw.match(/^(\d{1,2})(?::(\d{2}))?\s*(am|pm)?/);
+  if (!m) return null; // 'any' / free text — no chronology promise to enforce
+  let hour = parseInt(m[1], 10);
+  const minute = m[2] || '00';
+  if (m[3] === 'pm' && hour < 12) hour += 12;
+  if (m[3] === 'am' && hour === 12) hour = 0;
+  if (hour > 23) return null;
+  return `${String(hour).padStart(2, '0')}:${minute}`;
 }
 
 /**
@@ -240,6 +250,20 @@ function inProgressStartMin(dateStr, now = new Date()) {
   return hour * 60 + minute;
 }
 
+/**
+ * Statuses that are DONE with (dispatch-assignment.js's own terminal set,
+ * plus the board-hidden 'rescheduled'): they are not part of the route to
+ * drive, so they must not be guarded, scored, or allowed to veto the day.
+ * The callers' queries exclude only cancelled/completed, so a stale skipped
+ * or no_show row without coordinates would otherwise disable optimization
+ * for every live stop on that tech-day (codex round 4 P2).
+ */
+const OFF_ROUTE_STATUSES = new Set(['completed', 'cancelled', 'skipped', 'no_show', 'rescheduled']);
+
+function onRoute(stop) {
+  return !OFF_ROUTE_STATUSES.has(stop.status);
+}
+
 /** A stop the technician has already started. The staff picker refuses to
  *  verify a route containing one (arrival-route.js's own `own.some(...)`
  *  check) for the same reason the guard does below: the simulation restarts
@@ -331,8 +355,12 @@ function relaxElapsedWindows(sourceStops, startMin) {
  * runRouteReorder).
  */
 function chooseWindowSafeOrder({
-  RouteOptimizer, googleOrder, sourceStops, googleSource, legs = null, startMin = null,
+  RouteOptimizer, googleOrder: rawGoogleOrder, sourceStops: rawSourceStops, googleSource, legs = null, startMin = null,
 }) {
+  // Terminal rows ride along in every caller's day query but are not driven.
+  const sourceStops = rawSourceStops.filter(onRoute);
+  const liveIds = new Set(sourceStops.map((s) => s.id));
+  const googleOrder = rawGoogleOrder.filter((s) => liveIds.has(s.id));
   // beforeMeters (current running order, same model as the nightly ledger's
   // before_distance_meters) rides on EVERY return — a caller aggregating
   // several tech-days in one response (the multi-tech /optimize endpoint)
@@ -479,7 +507,9 @@ function resolveWindowSafeOrderByTechDay({ RouteOptimizer, orderedStops, sourceS
   const sourceById = new Map(sourceStops.map((s) => [s.id, s]));
   const byTech = new Map();
   for (const s of sourceStops) {
-    if (!s.technician_id) continue;
+    // Terminal rows are not driven — they keep their slot and are neither
+    // guarded nor reordered (see OFF_ROUTE_STATUSES).
+    if (!s.technician_id || !onRoute(s)) continue;
     if (!byTech.has(s.technician_id)) byTech.set(s.technician_id, []);
     byTech.get(s.technician_id).push(s);
   }
@@ -489,7 +519,7 @@ function resolveWindowSafeOrderByTechDay({ RouteOptimizer, orderedStops, sourceS
   // stop shifts every leg after it, and the feasibility guard's length check
   // is >=, so a longer flat list would be indexed positionally). Misaligned
   // legs are never trusted — the guard uses the shared fallback model.
-  const legsAlign = byTech.size <= 1 && sourceStops.every((s) => s.technician_id) ? legs : null;
+  const legsAlign = byTech.size <= 1 && sourceStops.every((s) => s.technician_id && onRoute(s)) ? legs : null;
   const resolvedByTech = new Map();
   for (const [techId, techStops] of byTech) {
     const ids = new Set(techStops.map((s) => s.id));
@@ -502,14 +532,20 @@ function resolveWindowSafeOrderByTechDay({ RouteOptimizer, orderedStops, sourceS
   }
   const queues = new Map([...resolvedByTech].map(([id, o]) => [id, [...o.orderedStops]]));
   const orderedIds = orderedStops.map((s) => {
-    const techId = sourceById.get(s.id)?.technician_id;
-    const queue = techId && queues.get(techId);
-    return queue ? queue.shift().id : s.id;
+    const source = sourceById.get(s.id);
+    const queue = source && onRoute(source) && source.technician_id && queues.get(source.technician_id);
+    return queue && queue.length ? queue.shift().id : s.id;
   });
   return {
     orderedIds,
     resolvedByTech,
     anyWindowConstrained: [...resolvedByTech.values()].some((o) => o.source === 'window_constrained'),
+    // In written order, for windowSafeFigures' unassigned bucket.
+    unassigned: {
+      RouteOptimizer,
+      stops: orderedIds.map((id) => sourceById.get(id))
+        .filter((s) => s && onRoute(s) && !s.technician_id && parseFloat(s.lat) && parseFloat(s.lng)),
+    },
   };
 }
 
@@ -524,12 +560,22 @@ function resolveWindowSafeOrderByTechDay({ RouteOptimizer, orderedStops, sourceS
  * first and report a leg nobody drives. Unassigned stops have no tech-day and
  * are left out of the sum, exactly as they are left out of the guards.
  */
-function windowSafeFigures(result, resolvedByTech, anyWindowConstrained) {
+function windowSafeFigures(result, resolvedByTech, anyWindowConstrained, unassigned = null) {
   const outcomes = [...resolvedByTech.values()];
+  // Geocoded stops with no technician have no tech-day to guard, but they ARE
+  // in the order that gets written and displayed, so leaving their legs out
+  // of a repaired day's totals understates what is driven (codex round 4 P2).
+  // Scored as their own bucket under the same shared model, before and after
+  // alike — their sequence is untouched by the repair, so the two cancel in
+  // `saved`, which is exactly right: no saving is claimed for them.
+  const unassignedMeters = anyWindowConstrained && unassigned && unassigned.stops.length
+    ? modelDistanceMeters(unassigned.RouteOptimizer, unassigned.stops) : 0;
   const totalDistanceMeters = anyWindowConstrained
-    ? outcomes.reduce((sum, o) => sum + (o.afterMeters || 0), 0) : result.totalDistanceMeters;
+    ? outcomes.reduce((sum, o) => sum + (o.afterMeters || 0), 0) + unassignedMeters
+    : result.totalDistanceMeters;
   const unoptimizedDistanceMeters = anyWindowConstrained
-    ? outcomes.reduce((sum, o) => sum + (o.beforeMeters || 0), 0) : result.unoptimizedDistanceMeters;
+    ? outcomes.reduce((sum, o) => sum + (o.beforeMeters || 0), 0) + unassignedMeters
+    : result.unoptimizedDistanceMeters;
   const totalDurationMinutes = Math.round(anyWindowConstrained
     ? outcomes.reduce((sum, o) => sum + (o.afterSeconds || 0), 0) / 60
     : result.totalDurationSeconds / 60);

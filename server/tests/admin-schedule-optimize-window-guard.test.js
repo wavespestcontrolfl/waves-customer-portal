@@ -579,3 +579,51 @@ test('an ungeocoded stop refuses the day even when Google’s order breaks no wi
   expect(body.conflict).toBeNull();
   expect(trxUpdates).toEqual([]);
 });
+
+// ── Codex round 4 ────────────────────────────────────────────────────────
+describe('round-4 guards', () => {
+  beforeEach(() => {
+    require('../services/scheduling/tech-day-lock').lockTechDays.mockImplementation(async () => {});
+    process.env.GATE_ROUTE_REORDER_WINDOW_FIT = 'true';
+    process.env.GATE_DRIVE_TIME_CALIBRATION = 'true';
+  });
+
+  test('a legacy "4:00 PM" time_window is an afternoon promise, not a 4am one', () => {
+    const { effectiveWindowStart, effectiveWindowRange } = require('../services/route-reorder')._internals;
+    expect(effectiveWindowStart({ window_start: null, time_window: '4:00 PM' })).toBe('16:00');
+    expect(effectiveWindowStart({ window_start: null, time_window: '9 AM' })).toBe('09:00');
+    expect(effectiveWindowStart({ window_start: null, time_window: '12:00 AM' })).toBe('00:00');
+    expect(effectiveWindowStart({ window_start: null, time_window: '12:00 PM' })).toBe('12:00');
+    expect(effectiveWindowStart({ window_start: null, time_window: '14:30' })).toBe('14:30');
+    expect(effectiveWindowStart({ window_start: null, time_window: 'any' })).toBeNull();
+    expect(effectiveWindowRange({ window_start: null, time_window: '4:00 PM' })).toEqual({ startMin: 960, endMin: 1080 });
+  });
+
+  test('a terminal (no_show) stop without coordinates does not disable the whole day', async () => {
+    stopsByDate[DATE] = [
+      ...chronologyDay(),
+      // Left on the board from an earlier attempt: never geocoded, not driven.
+      stop('GHOST', { status: 'no_show', lat: null, lng: null, route_order: 9 }),
+    ];
+    mockOptimizerOrder(['T2', 'T1', 'U', 'GHOST']);
+    const { status, body } = await optimizeRoute({ technicianId: 't1', date: DATE });
+    expect(status).toBe(200);
+    expect(body.source).toBe('window_constrained');
+    // The live stops are repaired; the terminal row keeps its own slot.
+    // The live stops are repaired; the terminal row is not rewritten at all.
+    expect(trxUpdates.map((u) => u.id)).toEqual(['T1', 'U', 'T2']);
+  });
+
+  test('a repaired day counts an unassigned stop’s legs in the reported totals', async () => {
+    stopsByDate[DATE] = [...chronologyDay(), stop('FREE', { technician_id: null, lng: 7, route_order: 4 })];
+    mockOptimizerOrder(['T2', 'T1', 'U', 'FREE']);
+    const { status, body } = await optimizeAll({ date: DATE });
+    expect(status).toBe(200);
+    // t1's repaired 22000/24000 m plus the unassigned stop's own bucket,
+    // which is identical on both sides (its sequence is untouched, so no
+    // saving is claimed for it) and non-zero (its legs ARE driven).
+    const unassignedMeters = body.totalDistanceMeters - 22000;
+    expect(unassignedMeters).toBeGreaterThan(0);
+    expect(body.unoptimizedDistanceMeters).toBe(24000 + unassignedMeters);
+  });
+});
