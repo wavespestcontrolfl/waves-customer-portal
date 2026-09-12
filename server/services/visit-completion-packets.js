@@ -684,8 +684,23 @@ async function releaseWithdrawnPacketInvoice(trx, invoice) {
   // a paused row keeps the legacy reminder sweep away too, so the debt would
   // simply stop being collected. ONLY this system pause is lifted — an admin
   // pause or an autopay hold carries its own reason and is left alone.
-  await trx('invoice_followup_sequences').where({ invoice_id: invoice.id, status: 'paused', paused_reason: 'payer_billed' })
-    .update({ status: 'active', paused_reason: null, next_touch_at: trx.fn.now(), updated_at: trx.fn.now() });
+  const pausedByWithdrawal = await trx('invoice_followup_sequences')
+    .where({ invoice_id: invoice.id, status: 'paused', paused_reason: 'payer_billed' }).first('id', 'customer_id');
+  if (pausedByWithdrawal) {
+    // An AUTOPAY customer goes back to the hold, never to active dunning
+    // (local audit): the withdrawal paused both states under one reason, so
+    // resuming everything to active would start payment reminders for a
+    // customer whose card runs automatically. Re-checked live, under this
+    // transaction, the same way the follow-up re-arm does it.
+    let onAutopay = false;
+    try {
+      onAutopay = await require('./autopay-eligibility').customerOnAutopay(pausedByWithdrawal.customer_id, { db: trx, failClosed: true });
+    } catch { onAutopay = false; }
+    await trx('invoice_followup_sequences').where({ id: pausedByWithdrawal.id })
+      .update(onAutopay
+        ? { status: 'autopay_hold', paused_reason: null, next_touch_at: null, updated_at: trx.fn.now() }
+        : { status: 'active', paused_reason: null, next_touch_at: trx.fn.now(), updated_at: trx.fn.now() });
+  }
   await liftPayerOfficeReview(trx, packet);
   return true;
 }
