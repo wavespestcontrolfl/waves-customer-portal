@@ -596,7 +596,7 @@ function ReviewCard({ review, onReplySubmit, onDismiss, onAutoReplyAction }) {
               <Button
                 onClick={() => runAuto("skip")}
                 disabled={autoBusy}
-                variant="primary"
+                variant="secondary"
               >
                 Skip auto
               </Button>

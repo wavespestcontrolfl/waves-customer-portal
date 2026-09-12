@@ -767,7 +767,7 @@ function BusinessInfoTab({ loc, gbp, onSave, showToast }) {
           </Button>{" "}
           <Button
             onClick={() => showToast("Push to Google to apply changes")}
-            variant="primary"
+            variant="secondary"
           >
             Push to Google
           </Button>{" "}
@@ -1075,7 +1075,7 @@ function ServicesTab({ loc, gbp, onSave, showToast }) {
           <Button
             onClick={loadSuggestions}
             disabled={loadingSugg}
-            variant="primary"
+            variant="secondary"
           >
             {loadingSugg ? "Loading..." : "Refresh"}
           </Button>{" "}
@@ -1460,7 +1460,7 @@ function BulkEditTab({ locations, onSave, showToast }) {
           <span>Select Locations</span>{" "}
           <div className="flex gap-[8px] flex-wrap mt-[4px]">
             {" "}
-            <Button onClick={selectAll} variant="primary">
+            <Button onClick={selectAll} variant="secondary">
               {selectedLocs.size === locations.length
                 ? "Deselect All"
                 : "Select All"}

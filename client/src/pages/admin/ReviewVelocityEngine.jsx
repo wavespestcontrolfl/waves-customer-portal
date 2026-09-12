@@ -1692,7 +1692,7 @@ function Pipeline({
                             e.stopPropagation();
                             quickStartSequence(c.id);
                           }}
-                          variant="primary"
+                          variant="secondary"
                           className=" whitespace-nowrap"
                         >
                           Cadence
@@ -1704,7 +1704,7 @@ function Pipeline({
                           e.stopPropagation();
                           setDrawerCust(c);
                         }}
-                        variant="primary"
+                        variant="secondary"
                         className=""
                       >
                         Edit
