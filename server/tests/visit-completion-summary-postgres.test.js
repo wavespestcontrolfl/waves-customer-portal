@@ -2816,19 +2816,30 @@ postgres('visit summary recipient recovery', () => {
     const Review = require('../services/review-request');
     const autoId = randomUUID();
     const manualId = randomUUID();
+    const claimedId = randomUUID();
+    const claimedAt = new Date();
     await mockPg('review_requests').insert([
       { id: autoId, customer_id: fixture.customerId, service_record_id: fixture.recordIds[0], status: 'pending', triggered_by: 'auto', token: randomUUID().replace(/-/g, '') },
-      { id: manualId, customer_id: fixture.customerId, service_record_id: fixture.recordIds[0], status: 'sending', triggered_by: 'tech', token: randomUUID().replace(/-/g, ''), claimed_at: new Date() },
+      { id: manualId, customer_id: fixture.customerId, service_record_id: fixture.recordIds[0], status: 'pending', triggered_by: 'tech', token: randomUUID().replace(/-/g, '') },
+      // Another sender's live claim: a park must not touch it.
+      { id: claimedId, customer_id: fixture.customerId, service_record_id: fixture.recordIds[0], status: 'sending', triggered_by: 'auto', token: randomUUID().replace(/-/g, ''), claimed_at: claimedAt },
     ]);
     try {
       await Review._parkAskAtProviderBoundary({ id: autoId, triggered_by: 'auto' });
       await Review._parkAskAtProviderBoundary({ id: manualId, triggered_by: 'tech' });
+      await Review._parkAskAtProviderBoundary({ id: claimedId, triggered_by: 'auto' });
       expect(await mockPg('review_requests').where({ id: autoId }).first()).toBeUndefined();
       const manual = await mockPg('review_requests').where({ id: manualId }).first();
-      expect(manual).toMatchObject({ status: 'pending', claimed_at: null });
+      expect(manual).toMatchObject({ status: 'pending' });
       expect(new Date(manual.scheduled_for).getTime()).toBeGreaterThan(Date.now() + 20 * 60 * 1000);
+      // The claimed row survives: its own sender parks it after the handoff
+      // has returned it to `pending`, and the stranded reconciliation owns it
+      // if that sender is lost.
+      const claimed = await mockPg('review_requests').where({ id: claimedId }).first();
+      expect(claimed).toMatchObject({ status: 'sending' });
+      expect(new Date(claimed.claimed_at).getTime()).toBe(claimedAt.getTime());
     } finally {
-      await mockPg('review_requests').whereIn('id', [autoId, manualId]).del();
+      await mockPg('review_requests').whereIn('id', [autoId, manualId, claimedId]).del();
     }
   });
 
@@ -3181,16 +3192,17 @@ postgres('visit summary recipient recovery', () => {
     // the oldest 20 meant a head of such rows monopolized every sweep and no
     // later stranded send was ever examined.
     const Review = require('../services/review-request');
-    const ids = [];
     const base = Date.now() - 60 * 60 * 1000;
+    // More than one run's budget (5 pages of 20) so the second run has
+    // somewhere new to go.
+    const rows = Array.from({ length: 110 }, (unused, i) => ({
+      id: randomUUID(), customer_id: fixture.customerId, service_record_id: fixture.recordIds[0],
+      status: 'sending', token: randomUUID().replace(/-/g, ''), claimed_at: new Date(base + i * 1000),
+      channel: 'sms', triggered_by: 'auto',
+    }));
+    const ids = rows.map((row) => row.id);
     try {
-      for (let i = 0; i < 22; i += 1) {
-        const id = randomUUID();
-        ids.push(id);
-        await mockPg('review_requests').insert({ id, customer_id: fixture.customerId, service_record_id: fixture.recordIds[0],
-          status: 'sending', token: randomUUID().replace(/-/g, ''), claimed_at: new Date(base + i * 1000),
-          channel: 'sms', triggered_by: 'auto' });
-      }
+      await mockPg('review_requests').insert(rows);
       const seen = [];
       const evidence = jest.spyOn(Review, '_inlineSendEvidence').mockImplementation(async (row) => {
         seen.push(row.id);
@@ -3201,8 +3213,38 @@ postgres('visit summary recipient recovery', () => {
       } finally {
         evidence.mockRestore();
       }
-      // Every row this fixture created was reached, not just the first page.
-      for (const id of ids) expect(seen).toContain(id);
+      // A full run's budget was spent paging, not stuck on the first 20.
+      expect(seen).toHaveLength(100);
+      expect(seen.slice(0, 100)).toEqual(ids.slice(0, 100));
+
+      // …and the NEXT run resumes past what this one judged rather than
+      // re-reading the same unresolvable head forever.
+      seen.length = 0;
+      const evidenceAgain = jest.spyOn(Review, '_inlineSendEvidence').mockImplementation(async (row) => {
+        seen.push(row.id);
+        return { unavailable: true };
+      });
+      try {
+        await Review.reconcileStrandedSends();
+      } finally {
+        evidenceAgain.mockRestore();
+      }
+      expect(seen[0]).toBe(ids[100]);
+      expect(seen).toHaveLength(10);
+
+      // The backlog ended, so the cursor resets and the run after that starts
+      // from the front again — nothing is examined only once.
+      seen.length = 0;
+      const evidenceThird = jest.spyOn(Review, '_inlineSendEvidence').mockImplementation(async (row) => {
+        seen.push(row.id);
+        return { unavailable: true };
+      });
+      try {
+        await Review.reconcileStrandedSends();
+      } finally {
+        evidenceThird.mockRestore();
+      }
+      expect(seen[0]).toBe(ids[0]);
     } finally {
       await mockPg('review_requests').whereIn('id', ids).del();
     }
