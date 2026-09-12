@@ -888,7 +888,11 @@ describe('an appointment email with no interaction row still yields its promise 
     const captured = {};
     const chain = {};
     for (const m of ['whereRaw', 'where', 'whereNotNull']) chain[m] = () => chain;
-    chain.join = (table, raw) => { captured.join = [table, raw?.sql]; return chain; };
+    chain.join = (table, cb) => {
+      const onClause = { on: (arg) => { captured.join = [table, arg.sql]; return onClause; } };
+      if (typeof cb === 'function') cb.call(onClause); else captured.join = [table, cb?.sql];
+      return chain;
+    };
     chain.whereIn = (col, values) => { (captured.whereIn ||= []).push([col?.sql || col, values]); return chain; };
     chain.select = (...args) => { captured.selected = args; return Promise.resolve([{ id: 'em-9', sent_at: '2026-09-10T12:00:00.000Z', visit_id: 'visit-1', stop_id: 'stop-1' }]); };
     const passthrough = () => {
@@ -909,6 +913,10 @@ describe('an appointment email with no interaction row still yields its promise 
     // unknown window that outranks the owner's real one (round-12 P1).
     expect(captured.selected).toContain('sv.visit_id as stop_id');
     expect(captured.join[1]).toContain("sv.visit_id::text = split_part(em.idempotency_key, ':', 3)");
+    // ...and to the OCCURRENCE: the claim dedupe key ends in the occurrence
+    // date, so a reminder for the stop's next occurrence cannot mint an
+    // unknown-window promise for today's visit (round-13 P1).
+    expect(captured.join[1]).toContain("split_part(em.idempotency_key, ':', 5) = to_char(sv.scheduled_date, 'YYYY-MM-DD')");
     expect(promise).toMatchObject({ visit_id: 'visit-1', source: 'email', source_id: 'em-9', start_at: null,
       communicated_at: '2026-09-10T12:00:00.000Z' });
   });

@@ -396,7 +396,15 @@ async function loadPromiseEvents(conn, visitIds, { now = new Date() } = {}) {
     // rejecting. Unknown still beats a stale known window — latestPromises
     // keeps the newest, and an unknown window raises no alert.
     () => conn('email_messages as em')
-      .join('scheduled_services as sv', conn.raw("sv.visit_id::text = split_part(em.idempotency_key, ':', 3)"))
+      // Scoped to the occurrence, not just the stop: the claim dedupe key is
+      // `<visit>:<effect>:<date>`, so segment 5 is the occurrence date and a
+      // reminder for the stop's NEXT occurrence would otherwise mint an
+      // unknown-window promise for today's visit and silence its alert
+      // (codex P1 round 13).
+      .join('scheduled_services as sv', function joinOnStopOccurrence() {
+        this.on(conn.raw(`sv.visit_id::text = split_part(em.idempotency_key, ':', 3)
+          AND split_part(em.idempotency_key, ':', 5) = to_char(sv.scheduled_date, 'YYYY-MM-DD')`));
+      })
       .whereIn(conn.raw("split_part(em.idempotency_key, ':', 1)"), APPOINTMENT_EMAIL_EVENTS)
       .whereRaw("split_part(em.idempotency_key, ':', 2) = 'visit'")
       .whereIn('sv.id', visitIds)
