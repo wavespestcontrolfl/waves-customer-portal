@@ -973,12 +973,16 @@ describe('recordSentWindowFallback (the audit row failed, the text went out) (ro
     const grouped = captured.find(([arg]) => typeof arg === 'function');
     const seen = [];
     const qb = {};
-    for (const m of ['whereRaw', 'orWhereNull', 'orWhereNotIn']) qb[m] = (...args) => { seen.push([m, ...args]); return qb; };
+    for (const m of ['whereRaw', 'orWhereNull', 'orWhereIn']) qb[m] = (...args) => { seen.push([m, ...args]); return qb; };
     grouped[0](qb);
+    // The same allowlist the messaging read applies: a linked row still at
+    // queued/scheduled/sending has not reached the phone, and counting it
+    // would make a fallback promise stronger than an ordinary one (round-10
+    // P1).
     expect(seen).toEqual([
       ['whereRaw', "al.metadata->>'provider_sid' IS NULL"],
       ['orWhereNull', 'fs.id'],
-      ['orWhereNotIn', 'fs.status', ['undelivered', 'failed', 'blocked']],
+      ['orWhereIn', 'fs.status', ['sent', 'delivered', 'read']],
     ]);
   });
 

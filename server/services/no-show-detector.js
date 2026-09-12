@@ -55,6 +55,9 @@ const LEGACY_SCHEDULING_MESSAGE_TYPES = ['reschedule_series_confirmation', 'conf
 // accept states, 'delivered' its confirmation, and the last three are
 // reactions it reports only for a delivered message.
 const DELIVERED_EMAIL_STATUSES = ['sent', 'processed', 'delivered', 'complained', 'spam_report', 'unsubscribed'];
+// sms_log statuses that mean the text reached the phone. queued/scheduled/
+// sending have not yet; undelivered/failed/blocked never will.
+const DELIVERED_SMS_STATUSES = ['sent', 'delivered', 'read'];
 const instant = (value) => value == null ? NaN : new Date(value).getTime();
 // Stamps that prove the tech reached the stop, in the order job-status.js
 // writes them. Any one of them clears the card.
@@ -150,7 +153,7 @@ function latestPromises(events, now = new Date()) {
 // the long note on the messaging_audit_log read for why unlinked is neutral
 // and why the success-shaped sentinels are not.
 function textActuallyWentOut() {
-  this.where('a.provider', 'push').orWhereIn('s.status', ['sent', 'delivered', 'read'])
+  this.where('a.provider', 'push').orWhereIn('s.status', DELIVERED_SMS_STATUSES)
     .orWhere(function unlinkedRealSend() {
       this.whereNull('s.id').whereRaw(`a.provider_message_id ~* '^(SM|MM)[a-f0-9]{32}$'`);
     });
@@ -306,8 +309,14 @@ async function loadPromiseEvents(conn, visitIds, { now = new Date() } = {}) {
       .leftJoin('sms_log as fs', 'fs.twilio_sid', conn.raw("al.metadata->>'provider_sid'"))
       .where({ 'al.action': 'visit_window_promised', 'al.resource_type': 'scheduled_service' })
       .whereIn('al.resource_id', visitIds).where('al.created_at', '<=', now)
+      // The SAME allowlist the messaging read applies, not a deny-list of the
+      // terminal failures: a linked row still sitting at queued/scheduled/
+      // sending has not reached the phone, and counting it made a fallback
+      // promise stronger than an ordinary one (codex P1 round 10). Unlinked
+      // stays neutral — the fallback exists precisely because the primary
+      // ledger failed, and sms_log may be missing too.
       .where((qb) => qb.whereRaw("al.metadata->>'provider_sid' IS NULL").orWhereNull('fs.id')
-        .orWhereNotIn('fs.status', ['undelivered', 'failed', 'blocked']))
+        .orWhereIn('fs.status', DELIVERED_SMS_STATUSES))
       .select('al.id', 'al.resource_id', 'al.metadata', 'al.created_at'),
     // A series move sends ONE text, and that text names only the anchor
     // occurrence's new date — every SIBLING it moved is left with whatever
