@@ -14,8 +14,8 @@ import {
   UiSurface,
 } from "../ui";
 import BestTimeHint from "./BestTimeHint";
-import SeriesMoveNotice from "./SeriesMoveNotice";
 import SlotConflictNotice from "./SlotConflictNotice";
+import { seriesMoveSummary } from "./seriesMove";
 
 export default function RescheduleDialogView({
   service,
@@ -72,7 +72,21 @@ export default function RescheduleDialogView({
           {seriesConfirm && (
             <Card data-testid="series-move-confirm"><CardBody>
               <h3 className="text-ui-body font-medium mb-2">Move to {seriesConfirmDate || seriesConfirm.body.newDate}?</h3>
-              <SeriesMoveNotice tone="inline" preview={seriesConfirm.preview} stale={seriesConfirm.stale} />
+              <div
+                role="status"
+                data-testid="series-move-notice"
+                className="rounded-sm border-hairline border-zinc-200 bg-zinc-50 px-3 py-2"
+              >
+                {seriesConfirm.stale ? (
+                  <p className="mb-1 text-ui-body font-medium text-ink-primary">
+                    The recurring plan changed since you looked — review the updated line and confirm again.
+                  </p>
+                ) : null}
+                <p className="text-ui-body leading-relaxed text-ink-primary">
+                  <strong className="font-medium">Recurring plan:</strong>{" "}
+                  {seriesMoveSummary(seriesConfirm.preview)}
+                </p>
+              </div>
               <div className="ui-record-actions mt-3">
                 <Button onClick={confirmSeriesMove} disabled={sending}>{sending ? "Moving…" : "Move visit + later visits"}</Button>
                 <Button variant="secondary" onClick={clearSeriesConfirm} disabled={sending}>Back</Button>
