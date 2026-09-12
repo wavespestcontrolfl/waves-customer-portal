@@ -77,9 +77,7 @@ describe("MobileServiceLibrary", () => {
     expect(onOpenProtocols).toHaveBeenCalledTimes(1);
   });
 
-  it("retains the existing category creation coming-soon action", async () => {
-    const alert = vi.fn();
-    vi.stubGlobal("alert", alert);
+  it("does not expose custom category creation for the fixed taxonomy", async () => {
     vi.stubGlobal(
       "fetch",
       vi.fn(async () => ({
@@ -94,7 +92,8 @@ describe("MobileServiceLibrary", () => {
     expect(
       await screen.findByRole("heading", { name: "Categories" }),
     ).toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: "Add" }));
-    expect(alert).toHaveBeenCalledWith("Create category — coming soon");
+    expect(
+      screen.queryByRole("button", { name: "Add" }),
+    ).not.toBeInTheDocument();
   });
 });
