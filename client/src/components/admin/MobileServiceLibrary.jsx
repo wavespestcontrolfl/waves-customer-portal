@@ -278,7 +278,6 @@ function CategoriesView({ onBack }) {
       <Header
         title="Categories"
         onBack={onBack}
-        onAdd={() => alert("Create category — coming soon")}
       />{" "}
       <LargeTitle>Categories</LargeTitle>{" "}
       <SearchBar
