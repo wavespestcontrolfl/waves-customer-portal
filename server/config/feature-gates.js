@@ -540,6 +540,23 @@ const gates = {
   // when it flips.
   editApptPriceServiceScope: process.env.GATE_EDIT_APPT_PRICE_SERVICE_SCOPE === 'true',
 
+  // Multiple discounts on one service, and the one rule for how they combine
+  // (owner ruling 2026-09-11). ON: Edit appointment gets a discount slot on
+  // every service line plus an "Applies to" line scope on the appointment
+  // discount, Create appointment gets the appointment-level slot, and every
+  // surface that saves a discount — visit, invoice, dispatch checkout —
+  // totals them the same way: dollar credits first, then percentages
+  // compounding on what is left (10% then 5% off $111 is $16.10, never an
+  // additive $16.65), with one WaveGuard tier per visit / invoice / checkout
+  // refused server-side and hidden in every picker.
+  // OFF (default): the new controls never render, update-details refuses a
+  // posted primaryLineDiscount / discountServiceKeyFilter outright rather
+  // than silently dropping it, and all three surfaces compute exactly as
+  // they did before this lane — each discount against the full line, the
+  // appointment discount after the line discounts, tier combinations
+  // accepted. Amounts already stored are never recomputed by a flip.
+  discountStacking: process.env.GATE_DISCOUNT_STACKING === 'true',
+
   // Collective series moves on every staff surface (owner rulings 2026-07-30
   // + 2026-08-28): with the gate on, ANY date move of a cadence visit that
   // reaches SmartRebooker.reschedule — dispatch drag, the Edit appointment

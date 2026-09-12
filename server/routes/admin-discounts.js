@@ -7,6 +7,7 @@ const logger = require('../services/logger');
 const { parseETDateTime } = require('../utils/datetime-et');
 const { attachDiscountCatalogClassification } = require('../services/discount-catalog-classifier');
 const { auditDiscountCatalogChange, ipFromReq, uaFromReq } = require('../services/audit-log');
+const { isEnabled } = require('../config/feature-gates');
 
 router.use(adminAuthenticate, requireTechOrAdmin);
 
@@ -23,6 +24,15 @@ function changedFields(before, after) {
   return [...keys].filter((key) => key !== 'updated_at'
     && JSON.stringify(before?.[key] ?? null) !== JSON.stringify(after?.[key] ?? null));
 }
+
+// GET /api/admin/discounts/stacking — is multi-discount stacking live?
+// Declared before the list route's neighbors for clarity; every surface that
+// offers a discount picker reads this so its controls and its preview match
+// what the server will actually save (GATE_DISCOUNT_STACKING). Read at call
+// time, so a flip needs no redeploy.
+router.get('/stacking', async (_req, res) => {
+  res.json({ enabled: isEnabled('discountStacking') });
+});
 
 // GET /api/admin/discounts — list all discounts
 router.get('/', async (req, res, next) => {

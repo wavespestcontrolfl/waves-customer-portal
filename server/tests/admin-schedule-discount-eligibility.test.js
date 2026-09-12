@@ -1,3 +1,6 @@
+// The stacking lane is dark by default; these cases exercise it ON, so the
+// gate must be set before the route/service modules snapshot it.
+process.env.GATE_DISCOUNT_STACKING = 'true';
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../middleware/admin-auth', () => ({
   adminAuthenticate: (_req, _res, next) => next(),
@@ -14,6 +17,9 @@ const DiscountEngine = require('../services/discount-engine');
 const {
   bookingCreatesWaveGuardCoverage,
   buildAppointmentPricing,
+  resolveAppointmentDiscountLineScope,
+  stackRowOf,
+  loadStackRows,
   calculateVisitFinancialsForAddons,
   calculateStoredVisitFinancials,
   lineExcludedFromPercentDiscount,
@@ -245,7 +251,7 @@ describe('admin schedule appointment discount eligibility', () => {
       serviceCategory: 'termite',
     }]);
 
-    expect(financials).toEqual({
+    expect(financials).toMatchObject({
       price: 100,
       appointmentDiscountDollars: 50,
     });
@@ -268,7 +274,7 @@ describe('admin schedule appointment discount eligibility', () => {
       serviceCategory: 'termite',
     }]);
 
-    expect(financials).toEqual({
+    expect(financials).toMatchObject({
       price: 100,
       appointmentDiscountDollars: 50,
     });
@@ -332,7 +338,7 @@ describe('admin schedule appointment discount eligibility', () => {
       { price: 60, serviceKey: 'termite_bond_1yr', serviceCategory: 'termite' },
     ]);
 
-    expect(financials).toEqual({
+    expect(financials).toMatchObject({
       price: 260.07,
       appointmentDiscountDollars: 22.23,
     });
@@ -353,7 +359,7 @@ describe('admin schedule appointment discount eligibility', () => {
         serviceCategoryFilter: null,
       },
     }, [{ price: 60, serviceKey: 'termite_bond_1yr', serviceCategory: 'termite' }]);
-    expect(financials).toEqual({ price: 150, appointmentDiscountDollars: 10 });
+    expect(financials).toMatchObject({ price: 150, appointmentDiscountDollars: 10 });
   });
 
   test('prices the initially created visit with the same bond exclusion as its children', async () => {
@@ -456,7 +462,7 @@ describe('admin schedule appointment discount eligibility', () => {
         serviceCategoryFilter: null,
       },
     }, []);
-    expect(financials).toEqual({ price: 195, appointmentDiscountDollars: 5 });
+    expect(financials).toMatchObject({ price: 195, appointmentDiscountDollars: 5 });
     // an explicit $0 cap (Postgres hands it back as "0.00") is a real cap
     const zero = calculateVisitFinancialsForAddons({
       primaryNet: 200,
@@ -464,7 +470,7 @@ describe('admin schedule appointment discount eligibility', () => {
       primaryServiceCategory: 'pest_control',
       appointmentDiscount: { discountType: 'percentage', discountAmount: 10, maxDiscountDollars: '0.00', serviceKeyFilter: null, serviceCategoryFilter: null },
     }, []);
-    expect(zero).toEqual({ price: 200, appointmentDiscountDollars: null });
+    expect(zero).toMatchObject({ price: 200, appointmentDiscountDollars: null });
   });
 
   test('stored replays honor the snapshotted preset cap', () => {
@@ -504,7 +510,7 @@ describe('admin schedule appointment discount eligibility', () => {
       },
     }, [{ price: 60, serviceKey: 'termite_bond_1yr', serviceCategory: 'termite' }]);
 
-    expect(financials).toEqual({ price: 135, appointmentDiscountDollars: 25 });
+    expect(financials).toMatchObject({ price: 135, appointmentDiscountDollars: 25 });
   });
 
   test('keeps the bond out of the percentage base on stored replays', () => {
@@ -607,6 +613,226 @@ describe('admin schedule appointment discount eligibility', () => {
       discount_name: null,
       discount_service_key_filter: null,
       discount_service_category_filter: null,
+    });
+  });
+
+  describe('discount stacking (owner ruling 2026-09-11)', () => {
+    test('calculateVisitFinancialsForAddons never discounts a pre-netted primary: no gross, no line slot', () => {
+      // A caller that passes only primaryNet (the legacy shape) with a stored
+      // line discount still attached must not get that discount replayed on
+      // the net — the slot is dropped when there is no gross to apply it to.
+      const financials = calculateVisitFinancialsForAddons({
+        primaryNet: 90,
+        primaryLineDiscount: { discountType: 'percentage', discountAmount: 10 },
+        primaryServiceKey: 'general_pest',
+        primaryServiceCategory: 'pest_control',
+        appointmentDiscount: null,
+      }, []);
+      expect(financials.price).toBe(90);
+
+      // With the gross supplied the same slot applies once, against the gross.
+      const stacked = calculateVisitFinancialsForAddons({
+        primaryGross: 100,
+        primaryNet: 90,
+        primaryLineDiscount: { discountType: 'percentage', discountAmount: 10 },
+        primaryServiceKey: 'general_pest',
+        primaryServiceCategory: 'pest_control',
+        appointmentDiscount: null,
+      }, []);
+      expect(stacked.price).toBe(90);
+    });
+
+    const SILVER = { id: 'silver', name: 'WaveGuard Silver', discount_type: 'percentage', amount: 10, stack_group: 'tier', is_stackable: false };
+    const GOLD = { id: 'gold', name: 'WaveGuard Gold', discount_type: 'percentage', amount: 15, stack_group: 'tier', is_stackable: false };
+    const MILITARY = { id: 'military', name: 'Military Discount', discount_type: 'percentage', amount: 5, is_stackable: true };
+    const REFERRAL = { id: 'referral', name: 'Referral Credit', discount_type: 'fixed_amount', amount: 25, is_stackable: true };
+
+    test('Silver on the pest line plus Military on the visit compounds (10% then 5%) — never an additive 15%', async () => {
+      db.mockReturnValueOnce(discountQuery(SILVER));   // primary line slot
+      db.mockReturnValueOnce(discountQuery(MILITARY)); // appointment slot
+      DiscountEngine.manualEligibilityFailures.mockResolvedValue([]);
+
+      const pricing = await buildAppointmentPricing({
+        serviceRecord: { service_key: 'pest_general_quarterly', category: 'pest_control', base_price: 111 },
+        primaryLinePrice: 111,
+        primaryLineDiscount: { discountId: SILVER.id },
+        serviceAddons: [],
+        discountId: MILITARY.id,
+        discountType: MILITARY.discount_type,
+        customer: { id: 'customer-1', is_military: true },
+      });
+
+      expect(pricing.primaryDiscount.discountDollars).toBe(11.1);
+      expect(pricing.primaryNet).toBe(99.9);
+      expect(pricing.appointmentDiscount.discountDollars).toBe(5);
+      expect(pricing.finalPrice).toBe(94.9);
+    });
+
+    test('a $25 credit on the visit comes off before the 10% line discount', async () => {
+      db.mockReturnValueOnce(discountQuery(SILVER));
+      db.mockReturnValueOnce(discountQuery(REFERRAL));
+      DiscountEngine.manualEligibilityFailures.mockResolvedValue([]);
+
+      const pricing = await buildAppointmentPricing({
+        serviceRecord: { service_key: 'pest_general_quarterly', category: 'pest_control', base_price: 111 },
+        primaryLinePrice: 111,
+        primaryLineDiscount: { discountId: SILVER.id },
+        serviceAddons: [],
+        discountId: REFERRAL.id,
+        discountType: REFERRAL.discount_type,
+        customer: { id: 'customer-1' },
+      });
+
+      expect(pricing.appointmentDiscount.discountDollars).toBe(25);
+      expect(pricing.primaryDiscount.discountDollars).toBe(8.6);
+      expect(pricing.finalPrice).toBe(77.4);
+    });
+
+    test('"Applies to" narrows the appointment discount to one line and stamps that scope', async () => {
+      db.mockReturnValueOnce(discountQuery(MILITARY));
+      DiscountEngine.manualEligibilityFailures.mockResolvedValue([]);
+
+      const pricing = await buildAppointmentPricing({
+        serviceRecord: { service_key: 'pest_general_quarterly', category: 'pest_control', base_price: 111 },
+        primaryLinePrice: 111,
+        // No serviceId → no catalog read; identity comes from the posted key.
+        serviceAddons: [{ name: 'Mosquito membership', basePrice: 60 }],
+        discountId: MILITARY.id,
+        discountType: MILITARY.discount_type,
+        discountServiceKeyFilter: 'pest_general_quarterly',
+        customer: { id: 'customer-1', is_military: true },
+      });
+
+      expect(pricing.appointmentDiscount.serviceKeyFilter).toBe('pest_general_quarterly');
+      expect(pricing.appointmentDiscount.discountDollars).toBe(5.55);
+      expect(pricing.finalPrice).toBe(165.45);
+    });
+
+    test('an "Applies to" line that is not on the visit is refused', async () => {
+      db.mockReturnValueOnce(discountQuery(MILITARY));
+      await expect(buildAppointmentPricing({
+        serviceRecord: { service_key: 'pest_general_quarterly', category: 'pest_control', base_price: 111 },
+        primaryLinePrice: 111,
+        serviceAddons: [],
+        discountId: MILITARY.id,
+        discountType: MILITARY.discount_type,
+        discountServiceKeyFilter: 'lawn_program',
+        customer: { id: 'customer-1', is_military: true },
+      })).rejects.toMatchObject({ status: 400, message: expect.stringMatching(/Applies to/) });
+    });
+
+    test('two WaveGuard tiers on one visit are refused before any eligibility read', async () => {
+      db.mockReturnValueOnce(discountQuery(SILVER)); // line slot
+      db.mockReturnValueOnce(discountQuery(GOLD));   // appointment slot
+      await expect(buildAppointmentPricing({
+        serviceRecord: { service_key: 'pest_general_quarterly', category: 'pest_control', base_price: 111 },
+        primaryLinePrice: 111,
+        primaryLineDiscount: { discountId: SILVER.id },
+        serviceAddons: [],
+        discountId: GOLD.id,
+        discountType: GOLD.discount_type,
+        customer: { id: 'customer-1', waveguard_tier: 'Gold' },
+      })).rejects.toMatchObject({
+        status: 400,
+        message: expect.stringMatching(/Only one WaveGuard tier discount can apply: WaveGuard Silver and WaveGuard Gold/),
+      });
+      // The line slot was resolved (its own eligibility read); the second
+      // tier never reached eligibility.
+      expect(DiscountEngine.manualEligibilityFailures).not.toHaveBeenCalledWith(
+        expect.objectContaining({ id: 'gold' }), expect.anything(), expect.anything(),
+      );
+    });
+
+    test('resolveAppointmentDiscountLineScope keeps the preset scope, narrows it, or refuses a mismatch', () => {
+      const lines = [
+        { serviceKey: 'pest_general_quarterly', serviceCategory: 'pest_control' },
+        { serviceKey: 'mosquito_membership', serviceCategory: 'mosquito' },
+      ];
+      expect(resolveAppointmentDiscountLineScope(MILITARY, null, lines)).toBeNull();
+      expect(resolveAppointmentDiscountLineScope(MILITARY, 'mosquito_membership', lines)).toBe('mosquito_membership');
+      const termiteOnly = { ...MILITARY, service_key_filter: 'termite_bond' };
+      expect(resolveAppointmentDiscountLineScope(termiteOnly, null, lines)).toBe('termite_bond');
+      expect(() => resolveAppointmentDiscountLineScope(termiteOnly, 'mosquito_membership', lines)).toThrow(/applies only to termite_bond/);
+      const pestOnly = { ...MILITARY, service_category_filter: 'pest_control' };
+      expect(() => resolveAppointmentDiscountLineScope(pestOnly, 'mosquito_membership', lines)).toThrow(/applies only to pest_control services/);
+    });
+
+    test('calculateVisitFinancialsForAddons restates every line slot under the stack (edit path)', () => {
+      const financials = calculateVisitFinancialsForAddons({
+        primaryNet: 99.9,
+        primaryGross: 111,
+        primaryLineDiscount: { discountType: 'percentage', discountAmount: 10 },
+        primaryServiceKey: 'pest_general_quarterly',
+        primaryServiceCategory: 'pest_control',
+        appointmentDiscount: {
+          discountType: 'fixed_amount',
+          discountAmount: 25,
+          serviceKeyFilter: 'pest_general_quarterly',
+          serviceCategoryFilter: null,
+        },
+      }, [{
+        base: 60,
+        price: 54,
+        discount: { discountType: 'percentage', discountAmount: 10 },
+        serviceKey: 'mosquito_membership',
+        serviceCategory: 'mosquito',
+      }]);
+
+      // $25 off the pest line first, then 10% of $86 = $8.60; the mosquito
+      // line is out of scope and keeps its own 10%. The $25 appointment
+      // credit is scoped to the pest line alone, so its whole per-line
+      // share (appointmentDiscountDollars) lands there and nowhere else
+      // (Codex #4405 r1 P1 — the covered-series add-on stamp reads this).
+      expect(financials.lines).toEqual([
+        { lineDiscountDollars: 8.6, net: 102.4, appointmentDiscountDollars: 25 },
+        { lineDiscountDollars: 6, net: 54, appointmentDiscountDollars: 0 },
+      ]);
+      expect(financials.appointmentDiscountDollars).toBe(25);
+      expect(financials.price).toBe(131.4);
+    });
+
+    test('stackRowOf / loadStackRows carry the stack identity and the lane', async () => {
+      expect(stackRowOf(SILVER, { scope: 'primary' })).toEqual({
+        id: 'silver', name: 'WaveGuard Silver', stack_group: 'tier', is_stackable: false,
+        scope: 'primary', spansAll: false,
+      });
+      expect(stackRowOf(SILVER, { spansAll: true }).spansAll).toBe(true);
+      expect(stackRowOf(null)).toBeNull();
+      expect(await loadStackRows([])).toEqual([]);
+      const select = jest.fn().mockResolvedValue([SILVER, MILITARY]);
+      const whereIn = jest.fn(() => ({ select }));
+      const conn = jest.fn(() => ({ whereIn }));
+      const rows = await loadStackRows([
+        { discountId: 'silver', scope: 'primary' },
+        { discountId: null, scope: 'addon:0' },
+        { discountId: 'military', spansAll: true },
+        { discountId: 'silver', scope: 'addon:1' },
+      ], conn);
+      // One catalog read for the distinct ids; one row back per filled slot,
+      // each carrying its own lane.
+      expect(whereIn).toHaveBeenCalledWith('id', ['silver', 'military']);
+      expect(rows.map((r) => [r.id, r.scope, r.spansAll])).toEqual([
+        ['silver', 'primary', false],
+        ['military', undefined, true],
+        ['silver', 'addon:1', false],
+      ]);
+    });
+
+    test('the same tier on a line and on the appointment is refused — it would compound on that line', async () => {
+      db.mockReturnValueOnce(discountQuery(SILVER));
+      db.mockReturnValueOnce(discountQuery(SILVER));
+      await expect(buildAppointmentPricing({
+        serviceRecord: { service_key: 'pest_general_quarterly', category: 'pest_control', base_price: 200 },
+        primaryLinePrice: 200,
+        primaryLineDiscount: { discountId: SILVER.id },
+        serviceAddons: [],
+        discountId: SILVER.id,
+        discountType: SILVER.discount_type,
+        customer: { id: 'customer-1', waveguard_tier: 'Silver' },
+      })).rejects.toMatchObject({
+        status: 400,
+        message: expect.stringMatching(/Only one WaveGuard tier discount can apply/),
+      });
     });
   });
 });

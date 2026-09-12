@@ -1,5 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import {
+  appointmentDiscountScopeLinesFor,
+  APPOINTMENT_DISCOUNT_TYPES,
   appointmentGroupRequestBody,
   assertManualPrepayMintEligible,
   bookableProperties,
@@ -29,6 +31,7 @@ import {
   recurringGroupRequestFields,
   shouldMintManualPrepay,
   submitFailureNotice,
+  submitGroupLinesForService,
 } from './CreateAppointmentModal.jsx';
 
 describe('CreateAppointmentModal won estimate helpers', () => {
@@ -387,6 +390,75 @@ describe('lineDiscountFields', () => {
   });
 });
 
+describe('APPOINTMENT_DISCOUNT_TYPES', () => {
+  it('offers every discount type the shared stack (discount-stack.js) accepts, not just percentage/fixed_amount', () => {
+    // Codex r1 P2: the appointment-level picker excluded the custom and
+    // free-service types even though pickAppointmentDiscount already
+    // prompts for their amount and the server booking path accepts them.
+    expect(APPOINTMENT_DISCOUNT_TYPES).toEqual(expect.arrayContaining([
+      'percentage', 'fixed_amount', 'variable_percentage', 'variable_amount', 'free_service',
+    ]));
+    expect(APPOINTMENT_DISCOUNT_TYPES).toHaveLength(5);
+  });
+});
+
+describe('submitGroupLinesForService (Codex r1 P2 — tier picker scoped to submit group)', () => {
+  // A booking with services on different cadences fans out into separate
+  // appointment POSTs (groupServicesForAppointmentSubmit) — one per cadence
+  // group, each validated independently by the server.
+  const quarterlyPest = { lineId: 'l1', name: 'Quarterly Pest', cadence: 'quarterly' };
+  const quarterlyBonus = { lineId: 'l2', name: 'Quarterly Add-on', cadence: 'quarterly' };
+  const monthlyLawn = { lineId: 'l3', name: 'Monthly Lawn', cadence: 'monthly' };
+  const services = [quarterlyPest, quarterlyBonus, monthlyLawn];
+  const groups = [
+    { cadence: 'quarterly', lines: [quarterlyPest, quarterlyBonus] },
+    { cadence: 'monthly', lines: [monthlyLawn] },
+  ];
+
+  it("returns only the requesting line's own submit group, not every service in the modal", () => {
+    expect(submitGroupLinesForService(groups, quarterlyPest, services)).toEqual([quarterlyPest, quarterlyBonus]);
+    expect(submitGroupLinesForService(groups, monthlyLawn, services)).toEqual([monthlyLawn]);
+  });
+
+  it('falls back to every service when the line is not found in any group', () => {
+    const stray = { lineId: 'l4', name: 'Stray', cadence: 'weekly' };
+    expect(submitGroupLinesForService(groups, stray, services)).toBe(services);
+  });
+
+  it('falls back to every service for a non-array groups argument', () => {
+    expect(submitGroupLinesForService(null, quarterlyPest, services)).toBe(services);
+    expect(submitGroupLinesForService(undefined, quarterlyPest, services)).toBe(services);
+  });
+});
+
+describe('appointmentDiscountScopeLinesFor (Codex r1 P2 — appointment slot scoped to its own group)', () => {
+  const quarterlyPest = { lineId: 'l1', name: 'Quarterly Pest', service_key: 'pest_general_quarterly' };
+  const monthlyLawn = { lineId: 'l2', name: 'Monthly Lawn', service_key: 'lawn_monthly' };
+  const services = [quarterlyPest, monthlyLawn];
+  const groups = [
+    { cadence: 'quarterly', lines: [quarterlyPest] },
+    { cadence: 'monthly', lines: [monthlyLawn] },
+  ];
+  const keyOf = (svc) => svc?.service_key ?? null;
+
+  it('scopes to the group whose line matches the "Applies to" key', () => {
+    expect(appointmentDiscountScopeLinesFor(groups, 'lawn_monthly', keyOf, services)).toEqual([monthlyLawn]);
+  });
+
+  it('defaults to the first submit group when no scope key is chosen', () => {
+    expect(appointmentDiscountScopeLinesFor(groups, '', keyOf, services)).toEqual([quarterlyPest]);
+    expect(appointmentDiscountScopeLinesFor(groups, null, keyOf, services)).toEqual([quarterlyPest]);
+  });
+
+  it('falls back to every service when the scope key matches no group', () => {
+    expect(appointmentDiscountScopeLinesFor(groups, 'termite_bond', keyOf, services)).toBe(services);
+  });
+
+  it('falls back to every service for a non-array groups argument', () => {
+    expect(appointmentDiscountScopeLinesFor(null, 'lawn_monthly', keyOf, services)).toBe(services);
+  });
+});
+
 describe('appointmentGroupRequestBody', () => {
   const base = {
     separateProgram: null, key: 'quarterly', separateProgramReason: '',
@@ -429,6 +501,37 @@ describe('appointmentGroupRequestBody', () => {
       urgency: 'routine',
       createInvoice: true,
     });
+  });
+
+  it('carries the appointment-level discount slot and its "Applies to" line only when one is chosen', () => {
+    expect(appointmentGroupRequestBody({
+      ...base,
+      appointmentDiscount: { id: 'mil', name: 'Military Discount', discount_type: 'percentage', amount: 5 },
+      appointmentDiscountScopeKey: 'pest_general_quarterly',
+    })).toMatchObject({
+      discountId: 'mil',
+      discountType: 'percentage',
+      discountAmount: 5,
+      discountServiceKeyFilter: 'pest_general_quarterly',
+    });
+    const whole = appointmentGroupRequestBody({
+      ...base,
+      appointmentDiscount: { id: 'mil', name: 'Military Discount', discount_type: 'percentage', amount: 5 },
+      appointmentDiscountScopeKey: '',
+    });
+    expect(whole.discountId).toBe('mil');
+    expect(whole.discountServiceKeyFilter).toBeUndefined();
+    expect(appointmentGroupRequestBody(base).discountId).toBeUndefined();
+  });
+
+  it('omits the appointment discount for a group it does not ride', () => {
+    // The submit loop passes the slot only for the group that carries it;
+    // every other group's body must be free of discount fields.
+    const body = appointmentGroupRequestBody({ ...base, appointmentDiscount: undefined });
+    expect(body.discountId).toBeUndefined();
+    expect(body.discountType).toBeUndefined();
+    expect(body.discountAmount).toBeUndefined();
+    expect(body.discountServiceKeyFilter).toBeUndefined();
   });
 
   it('sends a blank-priced auto-mosquito primary as null regardless of groupHasPrice, with no discount block', () => {
