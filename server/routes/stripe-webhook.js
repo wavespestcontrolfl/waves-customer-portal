@@ -2523,6 +2523,8 @@ async function mirrorSavedMethodForSucceededIntent(paymentIntent) {
         let mirrorEnrollment = null;
         try {
           await db.transaction(async (trx) => {
+            // Customer FOR UPDATE before the SHARE-taking ownership check.
+            await trx('customers').where({ id: wavesCustomerId }).forUpdate().first('id');
             if (mirrorInvoiceId
               && await require('../services/visit-completion-packets').invoicePayerOwnedNow(mirrorInvoiceId, trx)) {
               throw MIRROR_PAYER_BILLED_ROLLBACK;
@@ -5169,6 +5171,10 @@ async function handleSetupIntentSucceeded(setupIntent, { eventCreatedAt = null }
       let enrollment = null;
       try {
         await db.transaction(async (trx) => {
+          // Customer FOR UPDATE before the SHARE-taking ownership check, so
+          // the enrollment's upgrade of the same row cannot deadlock against
+          // a concurrent consent/enrollment transaction.
+          await trx('customers').where({ id: wavesCustomerId }).forUpdate().first('id');
           if (coveredInvoiceId
             && await require('../services/visit-completion-packets').invoicePayerOwnedNow(coveredInvoiceId, trx)) {
             throw COVERED_PAYER_BILLED_ROLLBACK;

@@ -1224,6 +1224,12 @@ router.post('/:token/consent', async (req, res, next) => {
     let row;
     try {
       row = await db.transaction(async (trx) => {
+        // The customer row FOR UPDATE first (local audit on r46): the
+        // ownership check takes it FOR SHARE and the enrollment then upgrades
+        // the same row to FOR UPDATE — two of these transactions holding
+        // SHARE would deadlock on that upgrade. Taking the stronger lock up
+        // front keeps the customer-before-member order intact.
+        await trx('customers').where({ id: invoice.customer_id }).forUpdate().first('id');
         if (await Packets.invoicePayerOwnedNow(invoice.id, trx)) throw PAYER_BILLED_ROLLBACK;
         const created = await ConsentService.recordConsent({
           customerId: invoice.customer_id,
@@ -1474,6 +1480,9 @@ router.post('/:token/setup-complete', async (req, res) => {
     let enrollment = null;
     try {
       await db.transaction(async (trx) => {
+        // Customer FOR UPDATE before the SHARE-taking ownership check, so the
+        // enrollment's own upgrade cannot deadlock against a sibling request.
+        await trx('customers').where({ id: invoice.customer_id }).forUpdate().first('id');
         if (await PacketsForConsent.invoicePayerOwnedNow(invoice.id, trx)) throw SETUP_PAYER_BILLED_ROLLBACK;
         if (needsConsentRow) {
           await ConsentService.recordConsent({
