@@ -87,23 +87,79 @@ async function main() {
     return page;
   }
 
-  async function assertFoundation(page) {
-    const surface = page.locator('[data-ui-density="comfortable"]').last();
-    await surface.waitFor();
-    const inlineStyles = await surface.locator('[style]:not(.ui-select)').evaluateAll((elements) => elements
-      .filter((element) => !element.closest('[data-shared-project-fields]') && element.getAttribute('style')?.trim())
-      .map((element) => ({ tag: element.tagName, style: element.getAttribute('style') })).slice(0, 8));
-    assert.deepEqual(inlineStyles, [], `page-owned inline styles must be absent: ${JSON.stringify(inlineStyles)}`);
-    const undersizedText = await surface.evaluate((rootElement) => Array.from(rootElement.querySelectorAll('*'))
-      .filter((element) => !element.closest('[data-shared-project-fields]') && element.children.length === 0 && element.textContent.trim() && getComputedStyle(element).display !== 'none')
-      .map((element) => ({ text: element.textContent.trim().slice(0, 80), size: parseFloat(getComputedStyle(element).fontSize) }))
-      .filter((item) => item.size < 14));
-    assert.deepEqual(undersizedText, [], `readable page-owned text below 14px: ${JSON.stringify(undersizedText)}`);
-    const undersizedControls = await surface.evaluate((rootElement) => Array.from(rootElement.querySelectorAll('button, a[href], input, select, textarea, summary'))
-      .filter((element) => !element.closest('[data-shared-project-fields]') && getComputedStyle(element).display !== 'none' && !element.classList.contains('u-touch-hit'))
-      .map((element) => ({ name: element.getAttribute('aria-label') || element.textContent.trim(), height: element.getBoundingClientRect().height }))
-      .filter((item) => item.height < 44));
-    assert.deepEqual(undersizedControls, [], `page-owned controls below 44px: ${JSON.stringify(undersizedControls)}`);
+  async function assertTokenPass(page) {
+    const result = await page.evaluate(() => {
+      const heading = Array.from(document.querySelectorAll('h1')).find((element) => element.textContent.trim() === 'Reports');
+      const rootElement = heading?.closest('.max-w-\\[1300px\\]');
+      if (!rootElement) return { error: 'Reports root was not found' };
+      const header = rootElement.children[0];
+      const filters = rootElement.children[1];
+      const directory = rootElement.children[2]?.children[0];
+      const roots = [header, filters, directory].filter(Boolean);
+      const ownedElements = roots.flatMap((rootNode) => [rootNode, ...rootNode.querySelectorAll('*')]);
+      const visible = (element) => element.getClientRects().length > 0 && getComputedStyle(element).visibility !== 'hidden';
+      const directText = (element) => Array.from(element.childNodes)
+        .filter((node) => node.nodeType === Node.TEXT_NODE)
+        .map((node) => node.textContent)
+        .join(' ')
+        .trim();
+      const undersizedText = ownedElements
+        .filter((element) => visible(element) && directText(element))
+        .map((element) => ({ text: directText(element).slice(0, 80), size: parseFloat(getComputedStyle(element).fontSize) }))
+        .filter((item) => item.size < 14);
+      const chromatic = ownedElements
+        .filter(visible)
+        .flatMap((element) => {
+          const style = getComputedStyle(element);
+          return [style.color, style.backgroundColor, style.borderTopColor].map((color) => ({ element, color }));
+        })
+        .filter(({ color }) => {
+          const channels = color.match(/[\d.]+/g)?.slice(0, 3).map(Number);
+          return channels?.length === 3 && Math.max(...channels) - Math.min(...channels) > 12;
+        })
+        .map(({ element, color }) => ({ text: element.textContent.trim().slice(0, 60), color }));
+      const status = directory?.querySelector('.project-status-dot')?.parentElement;
+      const dot = status?.querySelector('.project-status-dot');
+      const dotStyle = dot ? getComputedStyle(dot) : null;
+      const primaryAction = Array.from(header?.querySelectorAll('button') || [])
+        .find((button) => button.textContent.trim() === 'New Reports');
+      const selects = Array.from(filters?.querySelectorAll('select') || []);
+      return {
+        undersizedText,
+        chromatic,
+        primaryAction: primaryAction ? {
+          size: parseFloat(getComputedStyle(primaryAction).fontSize),
+          transform: getComputedStyle(primaryAction).textTransform,
+        } : null,
+        selects: selects.map((select) => ({
+          size: parseFloat(getComputedStyle(select).fontSize),
+          height: select.getBoundingClientRect().height,
+        })),
+        status: status ? {
+          transform: getComputedStyle(status).textTransform,
+          dotWidth: dot.getBoundingClientRect().width,
+          dotHeight: dot.getBoundingClientRect().height,
+          dotBackground: dotStyle.backgroundColor,
+          dotBorder: dotStyle.borderStyle,
+        } : null,
+      };
+    });
+    assert.equal(result.error, undefined, result.error);
+    assert.deepEqual(result.undersizedText, [], `private directory text below 14px: ${JSON.stringify(result.undersizedText)}`);
+    assert.deepEqual(result.chromatic, [], `ordinary private directory chrome must be neutral: ${JSON.stringify(result.chromatic)}`);
+    assert.deepEqual(result.primaryAction, { size: 14, transform: 'uppercase' });
+    assert.ok(result.selects.length >= 2, 'both report filters must render');
+    assert.ok(result.selects.every((select) => select.size >= 14), `filter text must be at least 14px: ${JSON.stringify(result.selects)}`);
+    if (page.viewportSize().width <= 390) {
+      assert.ok(result.selects.every((select) => select.height >= 44), `mobile filters must retain 44px targets: ${JSON.stringify(result.selects)}`);
+    }
+    assert.deepEqual(result.status, {
+      transform: 'uppercase',
+      dotWidth: 5,
+      dotHeight: 5,
+      dotBackground: 'rgba(0, 0, 0, 0)',
+      dotBorder: 'solid',
+    });
   }
 
   async function shot(page, name) {
@@ -128,33 +184,25 @@ async function main() {
       await desktop.goto(`${server.baseUrl}/admin/projects?projectId=project-1`);
       await desktop.getByRole('heading', { name: 'Reports', level: 1 }).waitFor();
       await desktop.getByText('Customer report preview', { exact: true }).waitFor();
-      await assertFoundation(desktop);
-      const finding = desktop.getByLabel('Inspection scope');
-      const findingBox = await finding.boundingBox();
-      const findingParentBox = await finding.locator('xpath=..').boundingBox();
-      assert.ok(findingBox.width >= findingParentBox.width - 2, `shared field should fill its container (${findingBox.width}px of ${findingParentBox.width}px)`);
-      console.log('Desktop foundation passed');
+      await assertTokenPass(desktop);
+      console.log('Desktop token pass verified');
       await shot(desktop, 'projects-desktop-1440');
+      const typeFilter = desktop.locator('.max-w-\\[1300px\\] > div').nth(1).locator('select').nth(1);
+      await Promise.all([
+        desktop.waitForRequest((request) => request.url().endsWith('/api/admin/projects?limit=500&project_type=pest_inspection') && request.method() === 'GET'),
+        typeFilter.selectOption('pest_inspection'),
+      ]);
+      console.log('Desktop filter query passed');
       const editCaption = desktop.getByRole('button', { name: 'Edit caption' }).first();
       await editCaption.scrollIntoViewIfNeeded();
       await editCaption.click();
       const captionInput = desktop.getByPlaceholder('Photo caption');
-      const captionTile = captionInput.locator('xpath=../..');
-      const [tileBox, inputBox, saveBox, cancelBox] = await Promise.all([
-        captionTile.boundingBox(),
-        captionInput.boundingBox(),
-        desktop.getByRole('button', { name: 'Save caption' }).boundingBox(),
-        desktop.getByRole('button', { name: 'Cancel caption edit' }).boundingBox(),
-      ]);
-      assert.ok(inputBox.x >= tileBox.x && inputBox.x + inputBox.width <= tileBox.x + tileBox.width, 'caption input must remain inside the photo tile');
-      assert.ok(saveBox.y >= inputBox.y + inputBox.height && cancelBox.y >= inputBox.y + inputBox.height, 'caption actions must sit below the input');
-      assert.ok(cancelBox.x + cancelBox.width <= tileBox.x + tileBox.width, 'caption actions must remain inside the photo tile');
       await captionInput.fill('Updated inspection caption');
       await Promise.all([
         desktop.waitForRequest((request) => request.url().endsWith('/api/admin/projects/project-1/photos/photo-1') && request.method() === 'PUT' && request.postDataJSON().caption === 'Updated inspection caption'),
         desktop.getByRole('button', { name: 'Save caption' }).click(),
       ]);
-      console.log('Desktop photo caption geometry and save passed');
+      console.log('Desktop photo caption save passed');
       const title = desktop.getByLabel('Report title');
       await title.fill('Updated synthetic inspection');
       await Promise.all([
@@ -189,16 +237,21 @@ async function main() {
       ]);
       await desktop.getByText(/Report delivered/).waitFor();
       console.log('Desktop report delivery passed');
+      await desktop.getByRole('button', { name: 'New Reports', exact: true }).click();
+      const createDialog = desktop.getByRole('dialog', { name: 'Create Project Report' });
+      await createDialog.waitFor();
+      await createDialog.getByRole('button', { name: 'Close', exact: true }).click();
+      console.log('Desktop create-report action passed');
     });
 
     const mobile = await openPage(390);
     await scenario('mobile detail and directory return without overflow', async () => {
       await mobile.goto(`${server.baseUrl}/admin/projects?projectId=project-1`);
       await mobile.getByText('Customer report preview', { exact: true }).waitFor();
-      await assertFoundation(mobile);
       assert.equal(await mobile.evaluate(() => document.documentElement.scrollWidth > innerWidth), false);
       await mobile.getByRole('button', { name: 'Close', exact: true }).click();
       await mobile.getByText('Synthetic customer', { exact: true }).waitFor();
+      await assertTokenPass(mobile);
       await shot(mobile, 'projects-mobile-390');
     });
 

@@ -1,26 +1,8 @@
 import { useEffect, useState, useCallback, useRef } from "react";
 import { useSearchParams } from "react-router-dom";
-import { BookOpen, Calendar, ClipboardList, ExternalLink, Mail, Plus, Sparkles, Upload, X } from "lucide-react";
+import { BookOpen, Calendar, ClipboardList, Mail, Plus } from "lucide-react";
 import AdminCommandHeader from "../../components/admin/AdminCommandHeader";
-import {
-  ActionFeedback,
-  Badge,
-  Button,
-  Card,
-  CardBody,
-  CardFooter,
-  CardHeader,
-  CardTitle,
-  Dialog,
-  DialogBody,
-  DialogFooter,
-  Field,
-  Input,
-  Select,
-  Switch,
-  Textarea,
-  UiSurface,
-} from "../../components/ui";
+import { Badge, Button, Dialog, DialogBody, DialogFooter, Select } from "../../components/ui";
 import { adminFetch } from "../../lib/adminFetch";
 import CreateProjectModal from "../../components/tech/CreateProjectModal";
 import WdoIntelligenceBar from "../../components/tech/WdoIntelligenceBar";
@@ -54,6 +36,8 @@ const {
  * customer-facing /report/project/:token link.
  */
 
+
+const MONO = "'JetBrains Mono', monospace";
 
 // C2 restyle: native confirm()/prompt() replaced with the shared Dialog
 // primitives. ask(message) resolves true/false; ask(message, { input:
@@ -95,16 +79,16 @@ function useConfirmDialog() {
   const element = pending ? (
     <Dialog open size="sm" onClose={handleCancel} aria-label="Confirmation">
       <DialogBody>
-        <div className="whitespace-pre-line text-ui-body text-zinc-700">
+        <div style={{ fontSize: 14, color: "#27272A", whiteSpace: "pre-line", lineHeight: 1.5 }}>
           {pending.message}
         </div>
         {pending.input && (
-          <Input
+          <input
             ref={inputRef}
             value={inputValue}
             onChange={(e) => setInputValue(e.target.value)}
             placeholder={pending.input}
-            className="mt-3"
+            style={{ ...inputStyle, marginTop: 12 }}
           />
         )}
       </DialogBody>
@@ -123,6 +107,17 @@ function useConfirmDialog() {
   ) : null;
   return [ask, element];
 }
+
+// C1/C2 restyle: the detail pane's chrome constants now carry the V2 zinc
+// ramp (whites/greys/black — owner direction). Names kept so the ~200
+// consumer sites need no churn; the embedded CustomerProjectReportPreview
+// deliberately does NOT read these — it mimics the customer-facing report.
+const ESTIMATE_BG = "#FFFFFF";
+const ESTIMATE_BORDER = "#E4E4E7";
+const ESTIMATE_INPUT_BORDER = "#D4D4D8";
+const ESTIMATE_INPUT_BG = "#FFFFFF";
+const ESTIMATE_TEXT = "#18181B";
+const ESTIMATE_MUTED = "#71717A";
 
 // Status pills ride the shared Badge on the zinc ramp — sent is the "done"
 // state (strong), draft/closed stay neutral; alert-fg is reserved for
@@ -153,6 +148,7 @@ const TYPE_LABELS = {
 const WDO_TYPE = "wdo_inspection";
 const CERTIFICATE_TYPE = "pre_treatment_termite_certificate";
 const OFFICIAL_TERMITE_DOCUMENT_TYPES = new Set([WDO_TYPE, CERTIFICATE_TYPE]);
+const ROBOTO_FONT = "'Roboto', Arial, sans-serif";
 const GENERAL_TYPE_LABELS = Object.fromEntries(
   Object.entries(TYPE_LABELS).filter(([key]) => key !== WDO_TYPE),
 );
@@ -701,17 +697,34 @@ function shouldShowProjectBookingCta(text) {
 function ProjectPreviewBookingCta({ upcomingAppointment, text }) {
   if (upcomingAppointment) {
     return (
-      <div className="mt-3 rounded-md border-hairline border-zinc-200 bg-white p-3 text-center">
-        <div className="text-ui-body font-medium text-zinc-900">
+      <div
+        style={{
+          marginTop: 12,
+          padding: "10px 12px",
+          borderRadius: 8,
+          background: "#fff",
+          border: "1px solid #D7E3EA",
+          textAlign: "center",
+        }}
+      >
+        <div
+          style={{
+            fontSize: 11,
+            fontWeight: 700,
+            color: "#1B2C5B",
+            textTransform: "uppercase",
+            letterSpacing: 0.5,
+          }}
+        >
           Upcoming appointment
         </div>
-        <div className="mt-1 text-ui-body text-zinc-700">
+        <div style={{ fontSize: 13, color: "#465569", lineHeight: 1.55, marginTop: 4 }}>
           {[upcomingAppointment.serviceType, formatProjectAppointmentWindow(upcomingAppointment)]
             .filter(Boolean)
             .join(" - ")}
         </div>
         {upcomingAppointment.technicianName && (
-          <div className="text-ui-body text-zinc-700">
+          <div style={{ fontSize: 13, color: "#465569", lineHeight: 1.45 }}>
             Technician: {upcomingAppointment.technicianName}
           </div>
         )}
@@ -723,12 +736,24 @@ function ProjectPreviewBookingCta({ upcomingAppointment, text }) {
     ? "Request Exclusion Estimate"
     : "Book an appointment";
   return (
-    <div className="mt-3 flex justify-center">
+    <div style={{ marginTop: 12, display: "flex", justifyContent: "center" }}>
       <a
         href={BOOK_URL}
         target="_blank"
         rel="noreferrer"
-        className="inline-flex min-h-11 items-center gap-2 rounded-sm border-hairline border-zinc-900 bg-zinc-900 px-4 py-2 text-ui-body font-medium text-white u-focus-ring"
+        style={{
+          display: "inline-flex",
+          alignItems: "center",
+          gap: 7,
+          minHeight: 40,
+          padding: "11px 15px",
+          borderRadius: 8,
+          background: "#FFD700",
+          color: "#1B2C5B",
+          fontSize: 13,
+          fontWeight: 700,
+          textDecoration: "none",
+        }}
       >
         <Calendar size={14} strokeWidth={2.25} />
         {label}
@@ -739,16 +764,23 @@ function ProjectPreviewBookingCta({ upcomingAppointment, text }) {
 
 function ProjectPreviewRecommendationsBlock({ text, upcomingAppointment }) {
   const sections = parseProjectRecommendationSections(text);
+  const wrapStyle = {
+    marginTop: 12,
+    padding: "11px 12px",
+    borderRadius: 9,
+    background: "#F0F7FC",
+    border: "1px solid #D7E3EA",
+  };
 
   if (sections) {
     return (
-      <div className="mt-3 rounded-md border-hairline border-zinc-200 bg-zinc-50 p-3">
+      <div style={wrapStyle}>
         {sections.map((section, index) => (
-          <div key={section.heading} className={index === 0 ? "" : "mt-3"}>
-            <div className="mb-1 text-ui-body font-medium text-zinc-900">
+          <div key={section.heading} style={{ marginTop: index === 0 ? 0 : 12 }}>
+            <div style={{ fontSize: 12, fontWeight: 700, color: "#1B2C5B", marginBottom: 4 }}>
               {titleCaseProjectSection(section.heading)}
             </div>
-            <div className="whitespace-pre-wrap text-ui-body text-zinc-700">
+            <div style={{ fontSize: 13, color: "#465569", lineHeight: 1.6, whiteSpace: "pre-wrap" }}>
               {section.body}
             </div>
             {section.heading === "WHAT WE RECOMMEND" &&
@@ -762,11 +794,11 @@ function ProjectPreviewRecommendationsBlock({ text, upcomingAppointment }) {
   }
 
   return (
-    <div className="mt-3 rounded-md border-hairline border-zinc-200 bg-zinc-50 p-3">
-      <div className="mb-1 text-ui-body font-medium text-zinc-900">
+    <div style={wrapStyle}>
+      <div style={{ fontSize: 12, fontWeight: 700, color: "#1B2C5B", marginBottom: 4 }}>
         Recommendations
       </div>
-      <div className="whitespace-pre-wrap text-ui-body text-zinc-700">
+      <div style={{ fontSize: 13, color: "#465569", lineHeight: 1.6, whiteSpace: "pre-wrap" }}>
         {text}
       </div>
       {shouldShowProjectBookingCta(text) && (
@@ -796,19 +828,45 @@ function ProjectPreviewPhotoTile({ photo, projectId }) {
 
   const label = photo.caption || (photo.category || "Service photo").replace(/_/g, " ");
   return (
-    <div className="overflow-hidden rounded-md border-hairline border-zinc-200 bg-white">
-      <div className="flex aspect-square items-center justify-center bg-zinc-100 text-ui-body font-medium text-ink-secondary">
+    <div
+      style={{
+        borderRadius: 8,
+        overflow: "hidden",
+        border: "1px solid #D7E3EA",
+        background: "#fff",
+      }}
+    >
+      <div
+        style={{
+          aspectRatio: "1/1",
+          background: "#F0F7FC",
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "center",
+          color: "#64748B",
+          fontSize: 12,
+          fontWeight: 700,
+        }}
+      >
         {url ? (
           <img
             src={url}
             alt={label}
-            className="h-full w-full object-cover"
+            style={{ width: "100%", height: "100%", objectFit: "cover" }}
           />
         ) : (
           "Photo"
         )}
       </div>
-      <div className="p-2 text-ui-body font-medium capitalize text-zinc-900">
+      <div
+        style={{
+          padding: "7px 8px",
+          fontSize: 12,
+          fontWeight: 700,
+          color: "#1B2C5B",
+          textTransform: "capitalize",
+        }}
+      >
         {label}
       </div>
     </div>
@@ -906,40 +964,85 @@ function CustomerProjectReportPreview({
   ].filter(Boolean);
 
   return (
-    <Card>
-      <CardHeader className="flex items-center justify-between gap-3 bg-zinc-50">
-        <div className="min-w-0">
-          <div className="text-ui-body text-ink-secondary">
+    <div
+      style={{
+        border: "1px solid #D7E3EA",
+        borderRadius: 12,
+        overflow: "hidden",
+        background: "#F7FBFE",
+      }}
+    >
+      <div
+        style={{
+          background: "#065A8C",
+          padding: "12px 14px",
+          display: "flex",
+          justifyContent: "space-between",
+          alignItems: "center",
+          gap: 12,
+        }}
+      >
+        <div style={{ minWidth: 0 }}>
+          <div
+            style={{
+              fontSize: 10,
+              color: "#CDEBFA",
+              textTransform: "uppercase",
+              letterSpacing: 1,
+              fontWeight: 700,
+            }}
+          >
             Customer report preview
           </div>
-          <div className="mt-1 text-18 font-medium leading-tight text-zinc-900">
+          <div
+            style={{
+              fontSize: 18,
+              color: "#fff",
+              fontWeight: 700,
+              marginTop: 2,
+              lineHeight: 1.15,
+            }}
+          >
             {reportTitle}
           </div>
-          <div className="mt-1 text-ui-body text-ink-secondary">
+          <div style={{ fontSize: 12, color: "#DFF4FC", marginTop: 3 }}>
             {project.customer_name || "Customer"}
           </div>
         </div>
-        <img src="/waves-logo.png" alt="Waves" className="h-7 w-auto" />
-      </CardHeader>
+        <img src="/waves-logo.png" alt="Waves" style={{ height: 26 }} />
+      </div>
 
-      <CardBody>
+      <div style={{ padding: 14 }}>
         {sentLink && (
           <a
             href={sentLink}
             target="_blank"
             rel="noreferrer"
-            className="mb-3 inline-flex min-h-11 items-center gap-2 text-ui-body font-medium text-zinc-900 underline u-focus-ring"
+            style={{
+              display: "inline-flex",
+              marginBottom: 12,
+              color: "#065A8C",
+              fontSize: 12,
+              fontWeight: 700,
+              textDecoration: "none",
+            }}
           >
-            <ExternalLink size={16} aria-hidden />
             Open live customer report
           </a>
         )}
 
-        <div className="rounded-md border-hairline border-zinc-200 bg-white p-4">
+        <div
+          style={{
+            background: "#fff",
+            border: "1px solid #D7E3EA",
+            borderRadius: 10,
+            padding: 14,
+          }}
+        >
           {metaRows.length > 0 && (
-            <div className="mb-3 grid gap-1">
+            <div style={{ display: "grid", gap: 2, marginBottom: 12 }}>
               {metaRows.map((row) => (
-                <div key={row} className="text-ui-body text-zinc-700">
+                <div key={row} style={{ fontSize: 13, color: "#465569", lineHeight: 1.45 }}>
                   {row}
                 </div>
               ))}
@@ -947,20 +1050,34 @@ function CustomerProjectReportPreview({
           )}
 
           {findingsEntries.length > 0 && (
-            <div className="mt-3">
-              <div className="mb-2 text-ui-body font-medium text-zinc-900">
+            <div style={{ marginTop: 12 }}>
+              <div
+                style={{
+                  fontSize: 11,
+                  fontWeight: 700,
+                  color: "#1B2C5B",
+                  textTransform: "uppercase",
+                  letterSpacing: 0.5,
+                  marginBottom: 8,
+                }}
+              >
                 Findings
               </div>
-              <div className="grid gap-2">
+              <div style={{ display: "grid", gap: 8 }}>
                 {findingsEntries.map(([key, value]) => (
                   <div
                     key={key}
-                    className="rounded-md border-hairline border-zinc-200 bg-zinc-50 p-3"
+                    style={{
+                      padding: "9px 10px",
+                      borderRadius: 9,
+                      background: "#F0F7FC",
+                      border: "1px solid #D7E3EA",
+                    }}
                   >
-                    <div className="mb-1 text-ui-body font-medium text-zinc-900">
+                    <div style={{ fontSize: 12, fontWeight: 700, color: "#1B2C5B", marginBottom: 2 }}>
                       {projectFieldLabel(typeCfg, key)}
                     </div>
-                    <div className="whitespace-pre-wrap text-ui-body text-zinc-700">
+                    <div style={{ fontSize: 13, color: "#465569", lineHeight: 1.5, whiteSpace: "pre-wrap" }}>
                       {(previewFreeTextKeys.has(key) ? feeRedact : feeRedactCueOnly)(formatProjectPreviewValue(value))}
                     </div>
                   </div>
@@ -970,20 +1087,34 @@ function CustomerProjectReportPreview({
           )}
 
           {complianceEntries.length > 0 && (
-            <div className="mt-3">
-              <div className="mb-2 text-ui-body font-medium text-zinc-900">
+            <div style={{ marginTop: 12 }}>
+              <div
+                style={{
+                  fontSize: 11,
+                  fontWeight: 700,
+                  color: "#1B2C5B",
+                  textTransform: "uppercase",
+                  letterSpacing: 0.5,
+                  marginBottom: 8,
+                }}
+              >
                 {complianceSection.eyebrow}
               </div>
-              <div className="grid gap-2">
+              <div style={{ display: "grid", gap: 8 }}>
                 {complianceEntries.map(([label, value]) => (
                   <div
                     key={label}
-                    className="rounded-md border-hairline border-zinc-200 bg-zinc-50 p-3"
+                    style={{
+                      padding: "9px 10px",
+                      borderRadius: 9,
+                      background: "#F0F7FC",
+                      border: "1px solid #D7E3EA",
+                    }}
                   >
-                    <div className="mb-1 text-ui-body font-medium text-zinc-900">
+                    <div style={{ fontSize: 12, fontWeight: 700, color: "#1B2C5B", marginBottom: 2 }}>
                       {label}
                     </div>
-                    <div className="whitespace-pre-wrap text-ui-body text-zinc-700">
+                    <div style={{ fontSize: 13, color: "#465569", lineHeight: 1.5, whiteSpace: "pre-wrap" }}>
                       {feeRedactCueOnly(formatProjectPreviewValue(value))}
                     </div>
                   </div>
@@ -1000,17 +1131,26 @@ function CustomerProjectReportPreview({
           ) : null}
 
           {visiblePhotos.length > 0 && (
-            <div className="mt-3">
-              <div className="mb-2 text-ui-body font-medium text-zinc-900">
+            <div style={{ marginTop: 12 }}>
+              <div
+                style={{
+                  fontSize: 11,
+                  fontWeight: 700,
+                  color: "#1B2C5B",
+                  textTransform: "uppercase",
+                  letterSpacing: 0.5,
+                  marginBottom: 8,
+                }}
+              >
                 Photos
               </div>
-              <div className="grid grid-cols-[repeat(auto-fit,minmax(92px,1fr))] gap-2">
+              <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(92px, 1fr))", gap: 8 }}>
                 {visiblePhotos.map((photo) => (
                   <ProjectPreviewPhotoTile key={photo.id} photo={photo} projectId={projectId} />
                 ))}
               </div>
               {(photos || []).length > visiblePhotos.length && (
-                <div className="mt-2 text-ui-body text-ink-secondary">
+                <div style={{ fontSize: 11, color: "#64748B", marginTop: 6 }}>
                   +{(photos || []).length - visiblePhotos.length} more shown on the full report
                 </div>
               )}
@@ -1018,19 +1158,37 @@ function CustomerProjectReportPreview({
           )}
         </div>
 
-        <div className="mt-3 text-center">
-          <div className="text-ui-body text-ink-secondary">Questions about this report?</div>
-          <div className="mt-2 flex justify-center gap-2">
-            <span className="rounded-sm border-hairline border-zinc-300 bg-white px-4 py-2 text-ui-body font-medium text-zinc-900">
-              Text us
+        <div style={{ textAlign: "center", marginTop: 12 }}>
+          <div style={{ fontSize: 13, color: "#465569" }}>Questions about this report?</div>
+          <div style={{ display: "flex", justifyContent: "center", gap: 8, marginTop: 8 }}>
+            <span
+              style={{
+                padding: "9px 14px",
+                background: "#FFD700",
+                color: "#1B2C5B",
+                borderRadius: 8,
+                fontSize: 13,
+                fontWeight: 700,
+              }}
+            >
+              Text Us
             </span>
-            <span className="rounded-sm border-hairline border-zinc-300 bg-white px-4 py-2 text-ui-body font-medium text-zinc-900">
-              Call us
+            <span
+              style={{
+                padding: "9px 14px",
+                background: "#E3F5FD",
+                color: "#065A8C",
+                borderRadius: 8,
+                fontSize: 13,
+                fontWeight: 700,
+              }}
+            >
+              Call Us
             </span>
           </div>
         </div>
-      </CardBody>
-    </Card>
+      </div>
+    </div>
   );
 }
 
@@ -1130,20 +1288,20 @@ export default function ProjectsPage() {
   const selected = projects.find((p) => p.id === selectedId);
 
   return (
-    <UiSurface density="comfortable" className="mx-auto max-w-[1300px] text-ui-body text-ink-primary">
+    <div className="max-w-[1300px] mx-auto text-ink-primary">
+      {" "}
       <AdminCommandHeader
-        variant="workspace"
         title="Reports"
         icon={ClipboardList}
         action={{
-          label: "New reports",
+          label: "New Reports",
           icon: Plus,
+          className: "!text-14",
           onClick: () => setCreateMode("general"),
         }}
       />
       {/* Filters */}
-      <Card className="mb-4">
-        <CardBody className="flex flex-wrap gap-2">
+      <div className="flex flex-wrap gap-2 mb-3 bg-white px-3 py-2.5 rounded-sm border-hairline border-zinc-200">
         <FilterSelect
           value={filterStatus}
           onChange={(e) => setFilterStatus(e.target.value)}
@@ -1166,19 +1324,34 @@ export default function ProjectsPage() {
             </option>
           ))}
         </FilterSelect>
-        </CardBody>
-      </Card>
-      {error && <ActionFeedback error className="mb-4">{error}</ActionFeedback>}
-      <div className={`grid gap-4 ${!isMobile && selected ? "grid-cols-[minmax(0,1fr)_minmax(0,1.4fr)]" : "grid-cols-1"}`}>
+      </div>
+      {error && <Alert tone="error">{error}</Alert>}
+      <div
+        style={{
+          display: "grid",
+          // On phones the master-detail can't sit side by side — stack to one
+          // column, and when a project is open show only the detail (full width)
+          // so its title/photos aren't squished into a sliver. The detail's
+          // close (X) returns to the list.
+          gridTemplateColumns: !isMobile && selected ? "1fr 1.4fr" : "1fr",
+          gap: 16,
+        }}
+      >
         {/* List — hidden on mobile while a detail is open */}
-        <div className={`${isMobile && selected ? "hidden" : "flex"} flex-col gap-2`}>
+        <div
+          style={{
+            display: isMobile && selected ? "none" : "flex",
+            flexDirection: "column",
+            gap: 8,
+          }}
+        >
           {showRegularProjects &&
             (loading ? (
-              <ActionFeedback className="min-h-20">Loading reports...</ActionFeedback>
+              <div className="p-6 text-14 text-zinc-500">Loading…</div>
             ) : regularProjects.length === 0 ? (
-              <Card><CardBody className="py-8 text-center text-ink-secondary">
+              <div className="p-6 bg-white rounded-sm border border-dashed border-zinc-300 text-14 text-zinc-500 text-center">
                 No reports match these filters.
-              </CardBody></Card>
+              </div>
             ) : (
               regularProjects.map((p) => (
                 <ProjectRow
@@ -1239,7 +1412,7 @@ export default function ProjectsPage() {
           }}
         />
       )}
-    </UiSurface>
+    </div>
   );
 }
 
@@ -1251,19 +1424,21 @@ function WdoReportsSection({ projects, selectedId, onSelect }) {
   }).length;
 
   return (
-    <section className="mt-4 flex flex-col gap-2 border-t border-hairline border-zinc-200 pt-4">
+    <section className="mt-4 pt-4 border-t border-hairline border-zinc-200 flex flex-col gap-2">
+      {" "}
       <div className="flex items-start justify-between gap-2.5">
         {" "}
         <div>
-          <div className="text-ui-body font-medium text-zinc-900">
-            WDO inspection reports
+          {" "}
+          <div className="text-14 font-medium text-zinc-500 uppercase tracking-label">
+            WDO Inspection Reports
           </div>{" "}
-          <div className="mt-1 text-ui-body text-ink-secondary">
+          <div className="text-14 text-ink-primary mt-1">
             Real-estate reports, realtor sharing, and closing-sensitive
             documentation.
           </div>
           {urgentCount > 0 && (
-            <div className="mt-1 text-ui-body font-medium text-alert-fg">
+            <div className="text-14 text-alert-fg font-medium mt-1">
               {urgentCount} draft{urgentCount === 1 ? "" : "s"} older than 24h
             </div>
           )}
@@ -1273,9 +1448,9 @@ function WdoReportsSection({ projects, selectedId, onSelect }) {
             portal, never ad hoc. */}
       </div>
       {projects.length === 0 ? (
-        <Card><CardBody className="text-center text-ink-secondary">
+        <div className="p-4 bg-white rounded-sm border border-dashed border-zinc-300 text-14 text-zinc-500 text-center">
           No WDO reports match these filters.
-        </CardBody></Card>
+        </div>
       ) : (
         projects.map((p) => (
           <ProjectRow
@@ -1299,7 +1474,7 @@ function FilterSelect({ value, onChange, children }) {
       size="sm"
       value={value}
       onChange={onChange}
-      className={`sm:!w-auto cursor-pointer ${value ? "text-ink-primary" : "text-zinc-500"}`}
+      className={`sm:!w-auto cursor-pointer md:!text-14 ${value ? "text-ink-primary" : "text-zinc-500"}`}
     >
       {children}
     </Select>
@@ -1308,34 +1483,46 @@ function FilterSelect({ value, onChange, children }) {
 
 function ProjectRow({ project, active, onSelect, compactType }) {
   const status = STATUS_STYLES[project.status] || STATUS_STYLES.draft;
+  const isComplete = project.status === "sent" || project.status === "closed";
   return (
     <button
       type="button"
       onClick={onSelect}
-      className={`min-h-14 w-full cursor-pointer rounded-md border bg-white p-3 text-left u-focus-ring ${
+      className={`text-left w-full cursor-pointer bg-white rounded-sm p-3 flex gap-3 items-start border ${
         active ? "border-zinc-900 ring-1 ring-zinc-900" : "border-hairline border-zinc-200 hover:border-zinc-400"
       }`}
     >
-      <div className="flex items-start gap-3">
-      <div className="flex h-12 w-12 flex-shrink-0 items-center justify-center rounded-sm bg-zinc-100 text-ui-caption font-medium text-ink-primary">
-        {compactType || TYPE_LABELS[project.project_type] || "Project"}
-      </div>
-      <div className="min-w-0 flex-1">
+      {" "}
+      <div className="flex-shrink-0 w-12 h-12 rounded-sm bg-zinc-100 flex items-center justify-center font-mono text-14 font-medium text-ink-primary">
+        {compactType || TYPE_LABELS[project.project_type] || "Proj"}
+      </div>{" "}
+      <div className="flex-1 min-w-0">
+        {" "}
         <div className="flex items-center justify-between gap-2">
           {" "}
-          <div className="overflow-hidden text-ellipsis whitespace-nowrap text-ui-body font-medium text-ink-primary">
+          <div className="text-14 font-medium text-ink-primary whitespace-nowrap overflow-hidden text-ellipsis">
             {project.customer_name || "Customer"}
           </div>{" "}
-          <Badge tone={status.tone} className="whitespace-nowrap">
+          <span
+            className={`inline-flex items-center gap-1.5 whitespace-nowrap text-14 font-medium uppercase tracking-label ${
+              isComplete ? "text-zinc-500" : "text-zinc-700"
+            }`}
+          >
+            <span
+              aria-hidden="true"
+              className={`project-status-dot h-[5px] w-[5px] rounded-full box-border ${
+                isComplete ? "border-[1px] border-solid border-zinc-500" : "border-[1px] border-solid border-zinc-700"
+              }`}
+            />
             {status.label}
-          </Badge>{" "}
+          </span>{" "}
         </div>{" "}
-        <div className="mt-1 text-ui-body text-ink-secondary">
+        <div className="text-14 text-zinc-500 mt-0.5">
           {project.title ||
             TYPE_LABELS[project.project_type] ||
             project.project_type}
         </div>{" "}
-        <div className="mt-2 flex flex-wrap gap-2 text-ui-caption text-ink-secondary">
+        <div className="flex gap-2.5 mt-1.5 text-14 text-zinc-500">
           {" "}
           <span>
             {fmtDate(project.project_date || project.created_at)}
@@ -1348,8 +1535,7 @@ function ProjectRow({ project, active, onSelect, compactType }) {
             </>
           )}
         </div>{" "}
-      </div>
-      </div>
+      </div>{" "}
     </button>
   );
 }
@@ -2170,7 +2356,19 @@ export function ProjectDetail({
   }
 
   if (loading || !project) {
-    return <ActionFeedback className="min-h-20">{loading ? "Loading project..." : error || "Project unavailable."}</ActionFeedback>;
+    return (
+      <div
+        style={{
+          background: "#FFFFFF",
+          border: `1px solid #E4E4E7`,
+          borderRadius: 6,
+          padding: 24,
+          color: "#71717A",
+        }}
+      >
+        {loading ? "Loading project…" : error || "Project unavailable."}
+      </div>
+    );
   }
 
   const status = STATUS_STYLES[project.status] || STATUS_STYLES.draft;
@@ -2186,61 +2384,142 @@ export function ProjectDetail({
   });
 
   return (
-    <Card
+    <div
       data-official-document-editor={isOfficialTermiteDocument ? project.project_type : undefined}
-      className="flex min-w-0 flex-col overflow-hidden"
+      style={{
+        background: ESTIMATE_BG,
+        border: `1px solid ${ESTIMATE_BORDER}`,
+        borderRadius: 6,
+        display: "flex",
+        flexDirection: "column",
+        overflow: "hidden",
+        boxShadow: "0 10px 30px rgba(27, 44, 91, 0.08)",
+        fontFamily: isOfficialTermiteDocument ? ROBOTO_FONT : undefined,
+      }}
     >
+      {isOfficialTermiteDocument && (
+        <style>{`[data-official-document-editor] *, [data-official-document-editor] input, [data-official-document-editor] select, [data-official-document-editor] textarea, [data-official-document-editor] button { font-family: ${ROBOTO_FONT} !important; }`}</style>
+      )}
       {/* Header */}
-      <CardHeader className="flex items-start justify-between gap-3 p-5">
-        <div className="min-w-0 flex-1">
-          <div className="text-ui-body text-ink-secondary">
+      <div
+        style={{
+          display: "flex",
+          alignItems: "flex-start",
+          justifyContent: "space-between",
+          padding: "20px 24px",
+          borderBottom: `1px solid ${ESTIMATE_BORDER}`,
+          background: "#FFFFFF",
+        }}
+      >
+        {" "}
+        <div style={{ flex: 1, minWidth: 0 }}>
+          {" "}
+          <div
+            style={{
+              fontSize: 12,
+              color: ESTIMATE_MUTED,
+              textTransform: "uppercase",
+              letterSpacing: "0.12em",
+              fontWeight: 500,
+            }}
+          >
             {typeCfg?.label || project.project_type} · {project.customer_name}
           </div>{" "}
-          <div className="mt-1 break-words text-22 font-medium leading-tight text-zinc-900">
+          <div
+            style={{
+              fontSize: 24,
+              fontWeight: 500,
+              letterSpacing: "-0.01em",
+              color: ESTIMATE_TEXT,
+              marginTop: 4,
+              lineHeight: 1.15,
+              overflowWrap: "anywhere",
+            }}
+          >
             {project.title || typeCfg?.label || "Project"}
           </div>{" "}
-          <div className="mt-2 flex flex-wrap items-center gap-2">
+          <div
+            style={{
+              display: "flex",
+              alignItems: "center",
+              gap: 8,
+              marginTop: 6,
+              flexWrap: "wrap",
+            }}
+          >
             {" "}
             <Badge tone={status.tone}>{status.label}</Badge>{" "}
-            <span className="text-ui-body text-ink-secondary">
+            <span style={{ fontSize: 11, color: "#71717A" }}>
               Inspection {fmtDate(project.project_date || project.created_at)}{" "}
               by {project.tech_name || "—"}
             </span>
             {project.sent_at && (
-              <span className="text-ui-body text-ink-secondary">
+              <span style={{ fontSize: 11, color: "#71717A" }}>
                 · Sent {fmtDate(project.sent_at)}
               </span>
             )}
           </div>{" "}
         </div>{" "}
-        <Button
-          variant="ghost"
+        <button
+          type="button"
           onClick={onClose}
-          className="ui-icon-action"
+          style={{
+            background: "transparent",
+            border: "none",
+            color: "#71717A",
+            fontSize: 22,
+            cursor: "pointer",
+            width: 44,
+            height: 44,
+            padding: 0,
+            display: "inline-flex",
+            alignItems: "center",
+            justifyContent: "center",
+            flexShrink: 0,
+          }}
           aria-label="Close"
         >
-          <X size={20} aria-hidden />
-        </Button>{" "}
-      </CardHeader>
+          ×
+        </button>{" "}
+      </div>
       {/* Body */}
-      <CardBody className="flex flex-col gap-5 p-5">
+      <div
+        style={{
+          padding: 24,
+          display: "flex",
+          flexDirection: "column",
+          gap: 18,
+        }}
+      >
         {error && <Alert tone="error">{error}</Alert>}
         {notice && <Alert tone="success">{notice}</Alert>}
         {delivery && (
           <DeliveryPanel channels={delivery} status={project.delivery_status} />
         )}
         {sentLink && (
-          <div className="rounded-md border-hairline border-zinc-200 bg-zinc-50 p-3 text-ui-body text-zinc-900">
-            <div className="mb-1 font-medium">
+          <div
+            style={{
+              padding: "10px 12px",
+              background: "#FAFAFA",
+              border: `1px solid #E4E4E7`,
+              borderRadius: 6,
+              fontSize: 12,
+              color: "#09090B",
+            }}
+          >
+            {" "}
+            <div style={{ fontWeight: 500, marginBottom: 4 }}>
               Customer-facing report
             </div>{" "}
-            <div className="break-all u-nums">
+            <div
+              style={{ fontFamily: MONO, fontSize: 11, wordBreak: "break-all" }}
+            >
               {" "}
               <a
                 href={sentLink}
                 target="_blank"
                 rel="noreferrer"
-                className="underline u-focus-ring"
+                style={{ color: "#18181B" }}
               >
                 {sentLink}
               </a>{" "}
@@ -2260,20 +2539,37 @@ export function ProjectDetail({
           sentLink={sentLink}
         />
         {project.project_type === WDO_TYPE && (
-          <Card className="bg-zinc-50"><CardBody className="flex flex-wrap items-center justify-between gap-3">
+          <div
+            style={{
+              padding: "10px 12px",
+              background: "#F4F4F5",
+              border: `1px solid #E4E4E7`,
+              borderRadius: 8,
+              display: "flex",
+              justifyContent: "space-between",
+              alignItems: "center",
+              gap: 12,
+            }}
+          >
             {" "}
             <div>
-              <div className="text-ui-body font-medium text-zinc-900">
+              <div style={{ fontSize: 12, fontWeight: 500, color: "#09090B" }}>
                 FDACS-13645 WDO form
               </div>
-              <div className="mt-1 text-ui-body text-ink-secondary">
+              <div style={{ fontSize: 11, color: "#71717A", marginTop: 2 }}>
                 Preview the filled report exactly as it will be filed.
               </div>
               <a
                 href="/forms/fdacs-13645-wdo-inspection-report.pdf"
                 target="_blank"
                 rel="noreferrer"
-                className="mt-1 inline-flex min-h-11 items-center text-ui-body text-zinc-900 underline u-focus-ring"
+                style={{
+                  fontSize: 11,
+                  color: "#71717A",
+                  textDecoration: "underline",
+                  marginTop: 4,
+                  display: "inline-block",
+                }}
               >
                 Open blank template
               </a>
@@ -2282,19 +2578,32 @@ export function ProjectDetail({
                 the action to operators who can actually call it, so techs (who
                 see this card too) aren't handed a button that always 403s. */}
             {canAdminActions && (
-              <Button
-                variant="secondary"
+              <button
+                type="button"
                 onClick={viewFilledFdacsPdf}
+                style={{
+                  flexShrink: 0,
+                  padding: "7px 10px",
+                  borderRadius: 6,
+                  fontSize: 11,
+                  fontWeight: 500,
+                  color: "#09090B",
+                  cursor: "pointer",
+                  background: "#FFFFFF",
+                  border: `1px solid #D4D4D8`,
+                }}
               >
                 View filled form
-              </Button>
+              </button>
             )}{" "}
-          </CardBody></Card>
+          </div>
         )}
         <ReadinessPanel readiness={readiness} />
         {/* Title */}
-        <Field label="Report title">
-          <Input
+        <div>
+          {" "}
+          <Label htmlFor={`${idPrefix}-title`}>Report title</Label>{" "}
+          <input
             id={`${idPrefix}-title`}
             name="title"
             type="text"
@@ -2304,10 +2613,17 @@ export function ProjectDetail({
               setDirty(true);
             }}
             placeholder={typeCfg?.label || "Project"}
-          />
-        </Field>
-        <Field label={project.project_type === CERTIFICATE_TYPE ? "Date of treatment" : "Inspection / project date"}>
-          <Input
+            style={inputStyle}
+          />{" "}
+        </div>{" "}
+        <div>
+          {" "}
+          <Label htmlFor={`${idPrefix}-project-date`}>
+            {project.project_type === CERTIFICATE_TYPE
+              ? "Date of treatment"
+              : "Inspection / project date"}
+          </Label>{" "}
+          <input
             id={`${idPrefix}-project-date`}
             name="project_date"
             type="date"
@@ -2316,9 +2632,19 @@ export function ProjectDetail({
               setEditProjectDate(e.target.value);
               setDirty(true);
             }}
-            className="min-w-0 max-w-full appearance-none"
-          />
-        </Field>
+            // iOS WebKit gives date inputs an intrinsic shadow-DOM width that
+            // can exceed width:100% — clamp it and drop the native appearance
+            // so the field tracks the container like the sibling text inputs
+            // (same fix as CreateProjectModal, #2806).
+            style={{
+              ...inputStyle,
+              WebkitAppearance: "none",
+              appearance: "none",
+              minWidth: 0,
+              maxWidth: "100%",
+            }}
+          />{" "}
+        </div>
         {project.project_type === WDO_TYPE && (
           <WdoIntelligenceBar
             projectId={projectId}
@@ -2334,10 +2660,20 @@ export function ProjectDetail({
             initialHistory={project.wdo_history || null}
             onEvidencePhotoSelected={handleEvidencePhotoSelected}
             disabled={saving || aiWriting}
+            palette={{
+              card: "#FFFFFF",
+              bg: "#F4F4F5",
+              border: "#E4E4E7",
+              heading: "#09090B",
+              text: "#27272A",
+              muted: "#71717A",
+              accent: "#18181B",
+              accentText: "#fff",
+              red: "#991B1B",
+            }}
           />
         )}
-        {/* Type-specific findings stay in the shared tech/admin renderer. */}
-        <div data-shared-project-fields className="space-y-3">
+        {/* Type-specific findings */}
         {typeCfg?.findingsFields?.map((field, fieldIndex) => (
           <div key={field.key}>
             {/* Sectioned schemas (WDO, pre-treat cert): header above the
@@ -2345,29 +2681,58 @@ export function ProjectDetail({
                 the typed CompletionPanel and CreateProjectModal. */}
             {field.section &&
               field.section !== typeCfg.findingsFields[fieldIndex - 1]?.section && (
-                <div className="mb-3 mt-5 border-b border-zinc-200 pb-2 text-ui-body font-medium text-zinc-900">
+                <div
+                  style={{
+                    fontSize: 12,
+                    fontWeight: 500,
+                    letterSpacing: "0.06em",
+                    textTransform: "uppercase",
+                    color: "#27272A",
+                    margin: "20px 0 10px",
+                    paddingBottom: 6,
+                    borderBottom: "1px solid #E4E4E7",
+                  }}
+                >
                   {field.section}
                 </div>
               )}
             {" "}
-            <div className="mb-2 flex items-center justify-between gap-2">
+            <div
+              style={{
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "space-between",
+                gap: 8,
+                marginBottom: 6,
+              }}
+            >
               {field.label !== field.section && (
-                <label
+                <Label
                   htmlFor={fieldInputId(field.key)}
-                  className="ui-label text-zinc-900"
+                  style={{ marginBottom: 0 }}
                 >
                   {field.label}
-                </label>
+                </Label>
               )}
               {project.project_type === WDO_TYPE &&
                 field.key === "property_address" &&
                 formatProjectCustomerAddress(project) && (
-                  <Button
-                    variant="ghost"
+                  <button
+                    type="button"
                     onClick={fillWdoAddressFromCustomer}
+                    style={{
+                      background: "transparent",
+                      border: "none",
+                      color: "#18181B",
+                      fontSize: 11,
+                      fontWeight: 500,
+                      cursor: "pointer",
+                      padding: 0,
+                      whiteSpace: "nowrap",
+                    }}
                   >
                     Fill from customer
-                  </Button>
+                  </button>
                 )}
             </div>
             <ProjectFindingFieldInput
@@ -2382,53 +2747,98 @@ export function ProjectDetail({
                 }));
                 setDirty(true);
               }}
-              inputStyle={{ width: "100%" }}
+              inputStyle={inputStyle}
               products={productCatalog}
               onProductSelect={(product) => handleProductSelect(field.key, product)}
             />
           </div>
         ))}
-        </div>
         {/* Recommendations */}
         <div>
           {" "}
-          <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
-            <label
+          <div
+            style={{
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "space-between",
+              marginBottom: 6,
+            }}
+          >
+            {" "}
+            <Label
               htmlFor={`${idPrefix}-recommendations`}
-              className="ui-label text-zinc-900"
+              style={{ margin: 0 }}
             >
               Recommendations / notes
-            </label>
+            </Label>
             {canAdminActions && (
-              <Button
-                variant="secondary"
+              <button
+                type="button"
                 onClick={handleAiWrite}
                 disabled={aiWriting || saving}
-                loading={aiWriting}
                 title="Claude drafts Customer Concern, What We Inspected, What We Found, What We Did, and What We Recommend from selected context."
+                style={{
+                  padding: "4px 10px",
+                  minHeight: 44,
+                  borderRadius: 6,
+                  fontSize: 11,
+                  fontWeight: 500,
+                  background: aiWriting ? "#71717A" : "#FFFFFF",
+                  color: "#09090B",
+                  border: `1px solid #D4D4D8`,
+                  cursor: aiWriting || saving ? "default" : "pointer",
+                  display: "inline-flex",
+                  alignItems: "center",
+                  gap: 6,
+                }}
               >
-                <Sparkles size={16} aria-hidden />
+                {" "}
+                <span aria-hidden="true"></span>
                 {aiWriting ? "Drafting…" : "Write with AI"}
-              </Button>
+              </button>
             )}
           </div>
           {canAdminActions && (
-            <div className="mb-2 flex flex-wrap gap-3 text-ui-body text-ink-secondary">
-              <Switch
+            <div
+              style={{
+                display: "flex",
+                flexWrap: "wrap",
+                gap: 10,
+                margin: "0 0 8px",
+                fontSize: 11,
+                color: "#71717A",
+              }}
+            >
+              {" "}
+              <label
+                style={{ display: "inline-flex", alignItems: "center", gap: 5, minHeight: 44 }}
+              >
+                {" "}
+                <input
                   id={`${idPrefix}-ai-comms`}
+                  name="ai_include_communications"
+                  type="checkbox"
                   checked={aiUseComms}
-                  onChange={setAiUseComms}
-                  label="Include recent calls/texts/emails"
+                  onChange={(e) => setAiUseComms(e.target.checked)}
                 />
-              <Switch
+                Include recent calls/texts/emails
+              </label>{" "}
+              <label
+                style={{ display: "inline-flex", alignItems: "center", gap: 5, minHeight: 44 }}
+              >
+                {" "}
+                <input
                   id={`${idPrefix}-ai-photos`}
+                  name="ai_include_photos"
+                  type="checkbox"
                   checked={aiUsePhotos}
-                  onChange={setAiUsePhotos}
-                  label="Include photos"
+                  onChange={(e) => setAiUsePhotos(e.target.checked)}
                 />
+                Include photos
+              </label>{" "}
             </div>
           )}
-          <Textarea
+          <textarea
             id={`${idPrefix}-recommendations`}
             name="recommendations"
             value={editRecs}
@@ -2438,29 +2848,68 @@ export function ProjectDetail({
             }}
             rows={8}
             placeholder={`Write freely, or tap "Write with AI" to draft the customer-facing report sections from findings, communication context, tech notes, and photos.`}
-            className="min-h-40"
+            style={{
+              ...inputStyle,
+              resize: "vertical",
+              minHeight: 160,
+              fontFamily: "'Roboto', Arial, sans-serif",
+            }}
           />{" "}
-          <div className="mt-2 flex flex-wrap gap-2">
+          <div
+            style={{ display: "flex", flexWrap: "wrap", gap: 6, marginTop: 8 }}
+          >
             {TECHNICAL_SNIPPETS.map((snippet) => (
-              <Button
+              <button
                 key={snippet.label}
-                variant="secondary"
+                type="button"
                 onClick={() => appendTechnicalSnippet(snippet.text)}
+                style={{
+                  padding: "5px 8px",
+                  minHeight: 44,
+                  borderRadius: 6,
+                  border: `1px solid #D4D4D8`,
+                  background: "#FFFFFF",
+                  color: "#09090B",
+                  fontSize: 11,
+                  fontWeight: 500,
+                  cursor: "pointer",
+                }}
               >
                 {snippet.label}
-              </Button>
+              </button>
             ))}
           </div>{" "}
         </div>
         {/* Photos */}
         <div>
           {" "}
-          <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
-            <div className="ui-label text-zinc-900">
+          <div
+            style={{
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "space-between",
+              marginBottom: 8,
+            }}
+          >
+            {" "}
+            <Label style={{ margin: 0 }}>
               Photos (optional) ({data.photos?.length || 0})
-            </div>{" "}
-            <label className="ui-control ui-action ui-control-comfortable inline-flex cursor-pointer items-center justify-center gap-2 rounded-sm border-hairline border-zinc-900 bg-zinc-900 px-4 text-ui-body font-medium text-white u-focus-ring">
-              <Upload size={16} aria-hidden /> Upload
+            </Label>{" "}
+            <label
+              style={{
+                display: "inline-flex",
+                alignItems: "center",
+                justifyContent: "center",
+                padding: "6px 12px",
+                borderRadius: 6,
+                fontSize: 12,
+                fontWeight: 500,
+                background: "#18181B",
+                color: "#fff",
+                cursor: "pointer",
+              }}
+            >
+              + Upload
               <input
                 id={`${idPrefix}-photos`}
                 name="project_photos"
@@ -2468,12 +2917,18 @@ export function ProjectDetail({
                 accept="image/*"
                 multiple
                 onChange={handlePhotoUpload}
-                className="sr-only"
+                style={{ display: "none" }}
               />{" "}
             </label>{" "}
           </div>
           {data.photos?.length > 0 ? (
-            <div className="grid grid-cols-[repeat(auto-fill,minmax(120px,1fr))] gap-2">
+            <div
+              style={{
+                display: "grid",
+                gridTemplateColumns: "repeat(auto-fill, minmax(120px, 1fr))",
+                gap: 8,
+              }}
+            >
               {data.photos.map((ph) => (
                 <PhotoThumb
                   key={ph.id}
@@ -2485,22 +2940,54 @@ export function ProjectDetail({
               ))}
             </div>
           ) : (
-            <div className="py-5 text-center text-ui-body text-ink-secondary">
+            <div
+              style={{
+                padding: "20px 0",
+                fontSize: 12,
+                color: "#71717A",
+                textAlign: "center",
+              }}
+            >
               No photos yet.
             </div>
           )}
         </div>{" "}
         {canAdminActions && closeoutPreview && project.status !== "closed" && (
-          <Card className={closeoutBlocksClose ? "border-alert-fg" : "bg-zinc-50"}>
-            <CardHeader className="flex items-center gap-2">
+          <div
+            style={{
+              border: `1px solid ${closeoutBlocksClose ? "#FCA5A5" : "#E4E4E7"}`,
+              background: closeoutBlocksClose ? "#FEF2F2" : "#FAFAFA",
+              borderRadius: 8,
+              padding: 12,
+            }}
+          >
+            <div
+              style={{
+                display: "flex",
+                alignItems: "center",
+                gap: 8,
+                color: "#09090B",
+                fontSize: 13,
+                fontWeight: 700,
+                marginBottom: 8,
+              }}
+            >
               <ClipboardList size={15} />
-              <CardTitle>Closeout</CardTitle>
-            </CardHeader>
-            <CardBody>
-            <div className="grid grid-cols-[repeat(auto-fit,minmax(170px,1fr))] gap-3 text-ui-body">
+              Closeout
+            </div>
+            <div
+              style={{
+                display: "grid",
+                gridTemplateColumns: "repeat(auto-fit, minmax(170px, 1fr))",
+                gap: 8,
+                fontSize: 12,
+              }}
+            >
               <div>
-                <div className="text-ink-secondary">Service</div>
-                <div className="font-medium text-zinc-900">
+                <div style={{ color: "#71717A", fontSize: 11, fontWeight: 500 }}>
+                  Service
+                </div>
+                <div style={{ color: "#09090B", fontWeight: 500 }}>
                   {closeoutPreview.serviceCompletion?.willCompleteService
                     ? `Complete ${closeoutPreview.serviceCompletion.serviceType || "linked service"}`
                     : closeoutPreview.serviceCompletion?.linked
@@ -2509,50 +2996,60 @@ export function ProjectDetail({
                 </div>
               </div>
               <div>
-                <div className="text-ink-secondary">Billing</div>
-                <div className={`font-medium ${billingBlocksClose ? "text-alert-fg" : "text-zinc-900"}`}>
+                <div style={{ color: "#71717A", fontSize: 11, fontWeight: 500 }}>
+                  Billing
+                </div>
+                <div
+                  style={{
+                    color: billingBlocksClose ? "#991B1B" : "#09090B",
+                    fontWeight: 500,
+                  }}
+                >
                   {closeoutBillingLabel(closeoutPreview.billing)}
                 </div>
               </div>
               <div>
-                <div className="text-ink-secondary">Follow-up</div>
-                <div className={`font-medium ${followupBlocksClose ? "text-alert-fg" : "text-zinc-900"}`}>
+                <div style={{ color: "#71717A", fontSize: 11, fontWeight: 500 }}>
+                  Follow-up
+                </div>
+                <div style={{ color: followupBlocksClose ? "#991B1B" : "#09090B", fontWeight: 500 }}>
                   {closeoutFollowupLabel(closeoutPreview.followup)}
                 </div>
               </div>
               <div>
-                <div className="text-ink-secondary">Report</div>
-                <div className="font-medium text-zinc-900">
+                <div style={{ color: "#71717A", fontSize: 11, fontWeight: 500 }}>
+                  Report
+                </div>
+                <div style={{ color: "#09090B", fontWeight: 500 }}>
                   {closeoutPreview.portal?.attached ? "Portal attached" : "Token-only"}
                 </div>
               </div>
             </div>
             {billingBlocksClose && (
-              <ActionFeedback error className="mt-2">
+              <div style={{ marginTop: 8, color: "#991B1B", fontSize: 12, fontWeight: 700 }}>
                 Use the completion action to charge an authorized card on file, or send the invoice and hold the customer&apos;s {project.project_type === CERTIFICATE_TYPE ? "certificate" : "report"} until payment.
-              </ActionFeedback>
+              </div>
             )}
             {followupBlocksClose && (
-              <ActionFeedback error className="mt-2">
+              <div style={{ marginTop: 8, color: "#991B1B", fontSize: 12, fontWeight: 700 }}>
                 Auto-schedule follow-up is not wired yet. Use alert follow-up or schedule the return manually before closing.
-              </ActionFeedback>
+              </div>
             )}
             {previewBlocksClose && !billingBlocksClose && !followupBlocksClose && (
-              <ActionFeedback error className="mt-2">
+              <div style={{ marginTop: 8, color: "#991B1B", fontSize: 12, fontWeight: 700 }}>
                 This project cannot close from the linked service’s current state.
-              </ActionFeedback>
+              </div>
             )}
-            </CardBody>
-          </Card>
+          </div>
         )}
         <ProjectHistoryPanel activity={data.activity || []} />{" "}
-      </CardBody>
+      </div>
       {/* Signature capture is a FIELD action — the licensee signs at the
           inspection, and POST /:id/wdo-signature is requireTechOrAdmin — so
           it is deliberately NOT behind canAdminActions (Codex P2 on the
           tech in-place embed). Send/PDF/close stay admin-gated. */}
       {project.project_type === WDO_TYPE && project.status !== "closed" && (
-        <div className="px-4">
+        <div style={{ padding: "0 16px" }}>
           <WdoSignaturePad
             projectId={project.id}
             signature={project.wdo_signature}
@@ -2563,58 +3060,105 @@ export function ProjectDetail({
         </div>
       )}
       {reportHeld && (
-        <div className="px-4 pb-3">
-          <ActionFeedback error>
+        <div style={{ padding: "0 16px 12px" }}>
+          <div
+            style={{
+              padding: "10px 12px",
+              borderRadius: 8,
+              border: "1px solid #FCD34D",
+              background: "#FFFBEB",
+              color: "#92400E",
+              fontSize: 13,
+              fontWeight: 500,
+            }}
+          >
             Report held — the customer has the invoice and pay link, and the
             report is emailed automatically the moment the invoice is paid.
             &ldquo;Send report&rdquo; delivers it now and clears the hold.
             {project.report_hold_last_error ? (
-              <span className="font-medium">
+              <div style={{ marginTop: 6, color: "#991B1B", fontWeight: 700 }}>
                 Last automatic release attempt failed:{" "}
                 {project.report_hold_last_error}
-              </span>
+              </div>
             ) : null}
-          </ActionFeedback>
+          </div>
         </div>
       )}
       {/* Footer actions */}
-      <CardFooter className="flex flex-wrap items-center justify-end gap-2">
+      <div
+        style={{
+          padding: "12px 16px",
+          borderTop: `1px solid #E4E4E7`,
+          display: "flex",
+          gap: 10,
+          flexWrap: "wrap",
+          justifyContent: "flex-end",
+          alignItems: "center",
+        }}
+      >
         {canAdminActions && reportHoldAvailable && project.status !== "closed" && (
-          <Switch
-            className="mr-auto"
+          <label
+            style={{
+              display: "inline-flex",
+              alignItems: "center",
+              gap: 7,
+              fontSize: 13,
+              color: "#3F3F46",
+              fontWeight: 500,
+              cursor: "pointer",
+              marginRight: "auto",
+            }}
             title={project.project_type === WDO_TYPE
               ? "Send the invoice + pay link now; the FDACS report is emailed automatically once the invoice is paid"
               : "Send the invoice + pay link now; the pre-treatment certificate is delivered automatically once the invoice is paid"}
-            checked={holdReportUntilPaid}
-            onChange={setHoldReportUntilPaid}
-            disabled={saving}
-            label="Hold report until invoice is paid"
-          />
+          >
+            <input
+              type="checkbox"
+              checked={holdReportUntilPaid}
+              onChange={(e) => setHoldReportUntilPaid(e.target.checked)}
+              disabled={saving}
+            />
+            Hold report until invoice is paid
+          </label>
         )}
         {canAdminActions && !isOfficialTermiteDocument && (
-          <Button
-            variant="secondary"
+          <button
+            type="button"
             onClick={handleSendPortalInvite}
             disabled={saving}
+            style={{
+              ...btnSecondary,
+              display: "inline-flex",
+              alignItems: "center",
+              gap: 8,
+              opacity: saving ? 0.5 : 1,
+            }}
           >
             <Mail size={16} />
             Portal invite
-          </Button>
+          </button>
         )}
         {canAdminActions && !isOfficialTermiteDocument && (
-          <Button
-            variant="secondary"
+          <button
+            type="button"
             onClick={handleSendPrepGuide}
             disabled={saving || !hasPrepGuide}
             title={hasPrepGuide ? "Send prep guide" : "No default prep guide for this project type"}
+            style={{
+              ...btnSecondary,
+              display: "inline-flex",
+              alignItems: "center",
+              gap: 8,
+              opacity: saving || !hasPrepGuide ? 0.45 : 1,
+            }}
           >
             <BookOpen size={16} />
             Prep guide
-          </Button>
+          </button>
         )}
         {canAdminActions && project.status !== "closed" && (
-          <Button
-            variant="secondary"
+          <button
+            type="button"
             onClick={handleClose}
             disabled={saving || closeoutBlocksClose}
             title={
@@ -2626,6 +3170,7 @@ export function ProjectDetail({
                     ? "Project cannot close from the current service state"
                   : "Close project"
             }
+            style={{ ...btnSecondary, opacity: saving || closeoutBlocksClose ? 0.5 : 1 }}
           >
             {billingBlocksClose
               ? "Send invoice first"
@@ -2634,32 +3179,37 @@ export function ProjectDetail({
                 : previewBlocksClose
                   ? "Cannot close"
                 : "Close project"}
-          </Button>
+          </button>
         )}
-        <Button
-          variant="secondary"
+        <button
+          type="button"
           onClick={saveEdits}
           disabled={saving || !dirty}
+          style={{ ...btnSecondary, opacity: saving || !dirty ? 0.4 : 1 }}
         >
           {saving ? "Saving…" : "Save changes"}
-        </Button>
+        </button>
         {canAdminActions &&
           project.status === "sent" &&
           project.status !== "closed" && (
-            <Button
+            <button
+              type="button"
               onClick={handleSend}
               disabled={saving || wdoSendBlocked}
+              style={{ ...btnPrimary, opacity: saving || wdoSendBlocked ? 0.5 : 1 }}
               title={wdoSendBlocked ? wdoSendBlockedTitle : undefined}
             >
               Resend report
-            </Button>
+            </button>
           )}
         {canAdminActions &&
           project.status !== "sent" &&
           project.status !== "closed" && (
-            <Button
+            <button
+              type="button"
               onClick={handleSend}
               disabled={saving || wdoSendBlocked}
+              style={{ ...btnPrimary, opacity: saving || wdoSendBlocked ? 0.5 : 1 }}
               title={
                 wdoSendBlocked
                   ? wdoSendBlockedTitle
@@ -2669,16 +3219,18 @@ export function ProjectDetail({
               }
             >
               {reportHeld ? "Send report now (release hold)" : "Send report"}
-            </Button>
+            </button>
           )}
         {canAdminActions &&
           (project.project_type === WDO_TYPE ||
             project.project_type === CERTIFICATE_TYPE ||
             project.service_record_id) &&
           project.status !== "closed" && (
-            <Button
+            <button
+              type="button"
               onClick={handleSendWithInvoice}
               disabled={saving || wdoSendBlocked}
+              style={{ ...btnPrimary, opacity: saving || wdoSendBlocked ? 0.5 : 1 }}
               title={
                 wdoSendBlocked
                   ? wdoSendBlockedTitle
@@ -2694,11 +3246,11 @@ export function ProjectDetail({
               {reportHoldAvailable && holdReportUntilPaid
                 ? "Send invoice & hold report"
                 : "Send report + invoice"}
-            </Button>
+            </button>
           )}
-      </CardFooter>{" "}
+      </div>{" "}
       {confirmDialog}
-    </Card>
+    </div>
   );
 }
 
@@ -2740,39 +3292,76 @@ function fmtDateTime(value) {
 function ProjectHistoryPanel({ activity }) {
   return (
     <div>
-      <div className="mb-2 text-ui-body font-medium text-zinc-900">
+      {" "}
+      <div
+        style={{
+          fontSize: 14,
+          fontWeight: 500,
+          color: "#09090B",
+          marginBottom: 8,
+        }}
+      >
         History
       </div>
       {activity.length > 0 ? (
-        <Card className="overflow-hidden">
+        <div
+          style={{
+            border: `1px solid #E4E4E7`,
+            borderRadius: 8,
+            overflow: "hidden",
+          }}
+        >
           {activity.map((item, idx) => (
             <div
               key={item.id || `${item.action}-${item.created_at}-${idx}`}
-              className={`${idx === 0 ? "" : "border-t border-zinc-200"} bg-white p-3`}
+              style={{
+                padding: "10px 12px",
+                borderTop: idx === 0 ? "none" : `1px solid #E4E4E7`,
+                background: "#FFFFFF",
+              }}
             >
-              <div className="flex items-start justify-between gap-3">
-                <div className="min-w-0">
-                  <div className="text-ui-body font-medium text-zinc-900">
+              {" "}
+              <div
+                style={{
+                  display: "flex",
+                  justifyContent: "space-between",
+                  gap: 12,
+                  alignItems: "flex-start",
+                }}
+              >
+                {" "}
+                <div style={{ minWidth: 0 }}>
+                  {" "}
+                  <div
+                    style={{ fontSize: 14, fontWeight: 500, color: "#09090B" }}
+                  >
                     {PROJECT_ACTIVITY_LABELS[item.action] || item.action}
                   </div>{" "}
-                  <div className="mt-1 text-ui-body text-ink-secondary">
+                  <div style={{ fontSize: 14, color: "#71717A", marginTop: 2 }}>
                     {item.description || "Project activity recorded."}
                   </div>
                   {item.actor_name && (
-                    <div className="mt-1 text-ui-body text-ink-secondary">
+                    <div style={{ fontSize: 14, color: "#71717A", marginTop: 4 }}>
                       By {item.actor_name}
                     </div>
                   )}
                 </div>{" "}
-                <div className="flex-shrink-0 text-right text-ui-body text-ink-secondary u-nums">
+                <div
+                  style={{
+                    flexShrink: 0,
+                    fontSize: 14,
+                    color: "#71717A",
+                    textAlign: "right",
+                  }}
+                >
                   {fmtDateTime(item.created_at)}
                 </div>{" "}
               </div>{" "}
             </div>
           ))}
-        </Card>
+        </div>
       ) : (
-        <div className="py-3 text-ui-body text-ink-secondary">
+        <div style={{ padding: "12px 0", fontSize: 14, color: "#71717A" }}>
           No activity recorded yet.
         </div>
       )}
@@ -2832,35 +3421,65 @@ export function PhotoThumb({ photo, projectId, onDelete, onCaptionSaved }) {
   }, [projectId, photo.id]);
 
   return (
-    <div className="relative aspect-square overflow-hidden rounded-md border-hairline border-zinc-200 bg-zinc-100">
+    <div
+      style={{
+        position: "relative",
+        background: "#F4F4F5",
+        borderRadius: 8,
+        border: `1px solid #E4E4E7`,
+        overflow: "hidden",
+        aspectRatio: "1/1",
+      }}
+    >
       {url ? (
         <a
           href={url}
           target="_blank"
           rel="noreferrer"
-          className="block h-full w-full u-focus-ring"
+          style={{ display: "block", width: "100%", height: "100%" }}
         >
           {" "}
           <img
             src={url}
             alt={photo.caption || photo.category || "Photo"}
-            className="h-full w-full object-cover"
+            style={{ width: "100%", height: "100%", objectFit: "cover" }}
           />{" "}
         </a>
       ) : (
-        <div className="flex h-full w-full items-center justify-center text-ui-body text-ink-secondary">
+        <div
+          style={{
+            width: "100%",
+            height: "100%",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            fontSize: 11,
+            color: "#71717A",
+          }}
+        >
           {loadFailed ? "Photo unavailable" : "Loading…"}
         </div>
       )}
       <div
-        className={`absolute inset-x-0 bottom-0 bg-black/70 px-2 py-2 text-ui-body font-medium text-white ${
-          editingCaption ? "space-y-2" : "flex min-h-11 items-center justify-between gap-1"
-        }`}
+        style={{
+          position: "absolute",
+          left: 0,
+          right: 0,
+          bottom: 0,
+          padding: "4px 6px",
+          background: "rgba(0,0,0,0.55)",
+          color: "#fff",
+          fontSize: 10,
+          fontWeight: 500,
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "space-between",
+        }}
       >
         {" "}
         {editingCaption ? (
           <>
-            <Input
+            <input
               type="text"
               value={captionDraft}
               maxLength={200}
@@ -2871,57 +3490,85 @@ export function PhotoThumb({ photo, projectId, onDelete, onCaptionSaved }) {
                 if (e.key === "Escape") setEditingCaption(false);
               }}
               placeholder="Photo caption"
-              className="w-full min-w-0"
+              style={{
+                flex: 1,
+                minWidth: 0,
+                fontSize: 10,
+                padding: "2px 4px",
+                borderRadius: 4,
+                border: "none",
+              }}
             />
-            <div className="flex justify-end gap-1">
-              <Button
-                variant="ghost"
-                onClick={saveCaption}
-                disabled={captionSaving}
-                className="ui-icon-action text-white hover:bg-white/10"
-                aria-label="Save caption"
-              >
-                ✓
-              </Button>
-              <Button
-                variant="ghost"
-                onClick={() => setEditingCaption(false)}
-                disabled={captionSaving}
-                className="ui-icon-action text-white hover:bg-white/10"
-                aria-label="Cancel caption edit"
-              >
-                ✕
-              </Button>
-            </div>
+            <button
+              type="button"
+              onClick={saveCaption}
+              disabled={captionSaving}
+              style={{ background: "transparent", border: "none", color: "#fff", cursor: "pointer", fontSize: 12, padding: "0 2px", lineHeight: 1 }}
+              aria-label="Save caption"
+            >
+              ✓
+            </button>
+            <button
+              type="button"
+              onClick={() => setEditingCaption(false)}
+              disabled={captionSaving}
+              style={{ background: "transparent", border: "none", color: "#fff", cursor: "pointer", fontSize: 12, padding: "0 2px", lineHeight: 1 }}
+              aria-label="Cancel caption edit"
+            >
+              ✕
+            </button>
           </>
         ) : (
           <>
-            <span title={photo.caption || undefined} className="overflow-hidden text-ellipsis whitespace-nowrap">
+            <span
+              title={photo.caption || undefined}
+              style={{
+                whiteSpace: "nowrap",
+                overflow: "hidden",
+                textOverflow: "ellipsis",
+              }}
+            >
               {photo.caption || (photo.category || "").replace(/_/g, " ")}
             </span>{" "}
-            <Button
-              variant="ghost"
+            <button
+              type="button"
               onClick={(e) => {
                 e.preventDefault();
                 setCaptionDraft(photo.caption || "");
                 setEditingCaption(true);
               }}
-              className="ui-icon-action text-white hover:bg-white/10"
+              style={{
+                background: "transparent",
+                border: "none",
+                color: "#fff",
+                cursor: "pointer",
+                fontSize: 11,
+                padding: "0 4px 0 0",
+                lineHeight: 1,
+              }}
               aria-label="Edit caption"
             >
               ✎
-            </Button>
-            <Button
-              variant="ghost"
+            </button>
+            <button
+              type="button"
               onClick={(e) => {
                 e.preventDefault();
                 onDelete();
               }}
-              className="ui-icon-action text-white hover:bg-white/10"
+              style={{
+                background: "transparent",
+                border: "none",
+                color: "#fff",
+                cursor: "pointer",
+                fontSize: 13,
+                padding: 0,
+                lineHeight: 1,
+              }}
               aria-label="Remove photo"
             >
               ×
-            </Button>
+            </button>
           </>
         )}{" "}
       </div>{" "}
@@ -2933,72 +3580,230 @@ function ReadinessPanel({ readiness }) {
   const complete = readiness.missing.length === 0;
   const hasQualityNotes = readiness.quality.length > 0;
   return (
-    <Card className={complete && !hasQualityNotes ? "bg-zinc-50" : "border-alert-fg"}>
-      <CardBody>
-      <div className="flex items-center justify-between gap-3">
+    <div
+      style={{
+        // V2 monochrome: complete = neutral zinc; blockers gate the send,
+        // so the incomplete state carries the genuine-alert tint.
+        padding: "10px 12px",
+        background: complete && !hasQualityNotes ? "#FAFAFA" : "#FEF2F2",
+        border: `1px solid ${complete && !hasQualityNotes ? "#E4E4E7" : "#FECACA"}`,
+        borderRadius: 6,
+      }}
+    >
+      {" "}
+      <div
+        style={{
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "space-between",
+          gap: 10,
+        }}
+      >
+        {" "}
         <div>
-          <div className="text-ui-body font-medium text-zinc-900">
+          {" "}
+          <div style={{ fontSize: 12, fontWeight: 500, color: "#09090B" }}>
             Pre-send review
           </div>{" "}
-          <div className="mt-1 text-ui-body text-ink-secondary">
+          <div style={{ fontSize: 11, color: "#71717A", marginTop: 2 }}>
             {complete
               ? "Required report details are present."
               : `${readiness.missing.length} required item${readiness.missing.length === 1 ? "" : "s"} still need attention.`}
           </div>{" "}
         </div>{" "}
-        <Badge tone={complete && !hasQualityNotes ? "strong" : "alert"}>
+        <span
+          style={{
+            flexShrink: 0,
+            fontSize: 10,
+            fontWeight: 500,
+            color: complete && !hasQualityNotes ? "#3F3F46" : "#991B1B",
+            textTransform: "uppercase",
+            letterSpacing: 0.5,
+          }}
+        >
           {complete && !hasQualityNotes ? "Ready" : "Review"}
-        </Badge>{" "}
+        </span>{" "}
       </div>{" "}
-      <div className="mt-3 grid grid-cols-[repeat(auto-fit,minmax(150px,1fr))] gap-2">
+      <div
+        style={{
+          display: "grid",
+          gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))",
+          gap: 6,
+          marginTop: 10,
+        }}
+      >
         {readiness.required.map((item) => (
           <div
             key={item.label}
-            className={`rounded-sm border-hairline p-2 text-ui-body ${item.ok ? "border-zinc-200 bg-white text-zinc-700" : "border-alert-fg bg-white text-alert-fg"}`}
+            style={{
+              fontSize: 11,
+              color: item.ok ? "#3F3F46" : "#991B1B",
+              background: item.ok ? "#FAFAFA" : "#FEF2F2",
+              border: `1px solid ${item.ok ? "#E4E4E7" : "#FECACA"}`,
+              borderRadius: 6,
+              padding: "5px 7px",
+            }}
           >
             {item.ok ? "Done" : "Missing"}: {item.label}
           </div>
         ))}
       </div>
       {hasQualityNotes && (
-        <div className="mt-3 flex flex-col gap-2">
+        <div
+          style={{
+            marginTop: 10,
+            display: "flex",
+            flexDirection: "column",
+            gap: 5,
+          }}
+        >
           {readiness.quality.map((note) => (
-            <div key={note} className="text-ui-body text-ink-secondary">
+            <div
+              key={note}
+              style={{ fontSize: 11, color: "#71717A", lineHeight: 1.4 }}
+            >
               Review: {note}
             </div>
           ))}
         </div>
       )}
-      </CardBody>
-    </Card>
+    </div>
   );
 }
 
 function Alert({ tone = "success", children }) {
-  return <ActionFeedback error={tone === "error"}>{children}</ActionFeedback>;
+  const isError = tone === "error";
+  return (
+    <div
+      style={{
+        // V2 monochrome: confirmations are neutral zinc; alert red is
+        // reserved for genuine errors.
+        padding: "9px 12px",
+        background: isError ? "#FEF2F2" : "#FAFAFA",
+        border: `1px solid ${isError ? "#FECACA" : "#E4E4E7"}`,
+        borderRadius: 6,
+        color: isError ? "#991B1B" : "#3F3F46",
+        fontSize: 12,
+        lineHeight: 1.45,
+      }}
+    >
+      {children}
+    </div>
+  );
 }
 
 function DeliveryPanel({ channels, status }) {
   const entries = Object.entries(channels || {});
   if (!entries.length) return null;
   return (
-    <Card className="bg-zinc-50"><CardBody>
-      <div className="mb-2 text-ui-body font-medium text-zinc-900">
+    <div
+      style={{
+        padding: "10px 12px",
+        background: "#F4F4F5",
+        border: `1px solid #E4E4E7`,
+        borderRadius: 8,
+      }}
+    >
+      {" "}
+      <div
+        style={{
+          fontSize: 12,
+          fontWeight: 500,
+          color: "#09090B",
+          marginBottom: 8,
+        }}
+      >
         Delivery status{status ? `: ${String(status).replace(/_/g, " ")}` : ""}
       </div>{" "}
-      <div className="flex flex-col gap-2">
+      <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
         {entries.map(([channel, result]) => (
-          <div key={channel} className="flex justify-between gap-3 text-ui-body">
+          <div
+            key={channel}
+            style={{
+              display: "flex",
+              justifyContent: "space-between",
+              gap: 10,
+              fontSize: 12,
+            }}
+          >
             {" "}
-            <span className="font-medium capitalize text-zinc-900">
+            <span
+              style={{
+                color: "#27272A",
+                fontWeight: 500,
+                textTransform: "uppercase",
+              }}
+            >
               {channel}
             </span>{" "}
-            <span className={`text-right ${result?.ok ? "text-zinc-700" : "text-alert-fg"}`}>
+            <span
+              style={{
+                color: result?.ok ? "#15803D" : "#991B1B",
+                textAlign: "right",
+              }}
+            >
               {result?.ok ? "Sent" : result?.error || "Failed"}
             </span>{" "}
           </div>
         ))}
       </div>{" "}
-    </CardBody></Card>
+    </div>
   );
 }
+
+function Label({ children, style, htmlFor }) {
+  return (
+    <label
+      htmlFor={htmlFor}
+      style={{
+        fontSize: 12,
+        fontWeight: 500,
+        color: ESTIMATE_MUTED,
+        textTransform: "uppercase",
+        letterSpacing: "0.12em",
+        marginBottom: 8,
+        display: "block",
+        ...(style || {}),
+      }}
+    >
+      {children}
+    </label>
+  );
+}
+
+const inputStyle = {
+  width: "100%",
+  minHeight: 44,
+  background: ESTIMATE_INPUT_BG,
+  color: ESTIMATE_TEXT,
+  border: `1px solid ${ESTIMATE_INPUT_BORDER}`,
+  borderRadius: 4,
+  padding: "10px 12px",
+  fontSize: 14,
+  fontWeight: 400,
+  boxSizing: "border-box",
+  outline: "none",
+};
+
+const btnPrimary = {
+  minHeight: 44,
+  padding: "0 18px",
+  borderRadius: 4,
+  fontSize: 14,
+  fontWeight: 500,
+  background: "#18181B",
+  color: "#fff",
+  border: "none",
+  cursor: "pointer",
+};
+const btnSecondary = {
+  minHeight: 44,
+  padding: "0 16px",
+  borderRadius: 4,
+  fontSize: 14,
+  fontWeight: 500,
+  background: "#FFFFFF",
+  color: ESTIMATE_TEXT,
+  border: `1px solid ${ESTIMATE_INPUT_BORDER}`,
+  cursor: "pointer",
+};

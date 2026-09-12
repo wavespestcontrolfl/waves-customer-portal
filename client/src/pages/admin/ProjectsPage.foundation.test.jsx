@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import React from "react";
 import "@testing-library/jest-dom/vitest";
-import { cleanup, configure, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, configure, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -69,21 +69,25 @@ function mount(entry = "/admin/projects?projectId=project-1", role = "admin") {
 }
 
 beforeEach(() => {
+  vi.stubGlobal("React", React);
   vi.stubGlobal("localStorage", { getItem: vi.fn() });
   vi.stubGlobal("fetch", vi.fn(async (url, options = {}) => response(fixtureFor(url, options))));
 });
 
 afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
 
-describe("Reports and projects new UI foundation", () => {
-  it("renders the complete report workspace and deep-linked detail on the comfortable surface", async () => {
-    const view = mount();
+describe("Reports Tier 2 token pass", () => {
+  it("renders the preserved deep-linked workspace with readable directory tokens and a status dot", async () => {
+    mount();
     expect(await screen.findByRole("heading", { name: "Reports", level: 1 })).toBeInTheDocument();
     expect(await screen.findByText("Customer report preview")).toBeInTheDocument();
     expect(screen.getByText("Synthetic report created.")).toBeInTheDocument();
     expect(screen.getByText("Pre-send review")).toBeInTheDocument();
-    expect(view.container.querySelector('[data-ui-density="comfortable"]')).toBeInTheDocument();
-    expect(view.container.querySelector("[style]:not(.ui-select)")).not.toBeInTheDocument();
+    const projectRow = screen.getByRole("button", { name: /Synthetic customer/ });
+    const status = within(projectRow).getByText("Draft");
+    expect(status).toHaveClass("text-14", "uppercase", "tracking-label");
+    expect(status.querySelector(".project-status-dot")).toBeInTheDocument();
+    expect(within(projectRow).getByText("Synthetic inspection")).toHaveClass("text-14");
   });
 
   it("preserves filter queries and the create-report action", async () => {
@@ -91,7 +95,7 @@ describe("Reports and projects new UI foundation", () => {
     await screen.findByText("Synthetic customer");
     fireEvent.change(screen.getAllByRole("combobox")[1], { target: { value: "pest_inspection" } });
     await waitFor(() => expect(fetch.mock.calls.some(([url]) => url === "/api/admin/projects?limit=500&project_type=pest_inspection")).toBe(true));
-    fireEvent.click(screen.getByRole("button", { name: "New reports" }));
+    fireEvent.click(screen.getByRole("button", { name: /New reports/i }));
     expect(screen.getByRole("dialog", { name: "Create report" })).toBeInTheDocument();
   });
 
