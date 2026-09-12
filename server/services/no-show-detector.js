@@ -522,7 +522,14 @@ async function loadPromiseEvents(conn, visitIds, { now = new Date() } = {}) {
     // NEWER unknown promise (the legacy move-notice case) still wins, because
     // this only defers to known evidence at or after the fallback's own time.
     ...groupedFallbacks,
-    ...directEmailFallbacks.filter((fallback) => !knownWindowAtOrAfter(emails, fallback)),
+    // The per-service recovery is NOT suppressed: it carries the same window
+    // the interaction row does (both come from the same send), but it is
+    // dated by the message row's live sent_at — which, after a successful
+    // retry, is when the customer actually received it, while the interaction
+    // snapshot is frozen at the failed first attempt. Dropping it would keep
+    // the less accurate of two identical windows (codex P1 round 13). Only
+    // the grouped fallback, whose window is UNKNOWN, has to defer.
+    ...directEmailFallbacks,
     ...bookings.map((r) => {
       // The call's own start is passed EXPLICITLY: the row aliases it to
       // call_created_at (sv also has a created_at), and
