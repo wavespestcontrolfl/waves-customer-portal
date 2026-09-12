@@ -67,7 +67,12 @@ export function tankOwnerRow(rows = []) {
 // volume again (Codex r2 P2).
 export function promoteTankOwner(rows = []) {
   if (tankOwnerRow(rows)) return rows;
-  const heir = rows.find((row) => isPerGallonUnit(row.rateUnit) && Number(row.carrierGallons) > 0);
+  // Only a row still FOLLOWING the tank can inherit it. A detached row holds
+  // its own mix — promoting it would make its next edit rewrite the rows that
+  // were following the removed owner, and hand new products its volume
+  // (pre-push audit P1). With no follower left there is no shared tank.
+  const heir = rows.find((row) => isPerGallonUnit(row.rateUnit)
+    && !row.carrierGallonsManual && Number(row.carrierGallons) > 0);
   return heir ? rows.map((row) => (row === heir ? { ...row, tankOwner: true } : row)) : rows;
 }
 
