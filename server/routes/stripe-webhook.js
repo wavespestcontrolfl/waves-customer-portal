@@ -2476,8 +2476,8 @@ async function mirrorSavedMethodForSucceededIntent(paymentIntent) {
         } catch (lookupErr) {
           logger.warn(`[stripe-webhook] consent-time lookup failed for pm ${stripePmId}: ${lookupErr.message}`);
         }
-        let coveredNeedsConsentRow = false;
-      if (!(await ConsentService.hasConsentFor(wavesCustomerId, stripePmId))) {
+        const mirrorNeedsConsentRow = !(await ConsentService.hasConsentFor(wavesCustomerId, stripePmId));
+        if (mirrorNeedsConsentRow) {
           // Record the consent snapshot SERVER-SIDE — same recipe as the
           // covered_capture webhook (Codex #2507 round-7 P1): for an ACH
           // micro-deposit signup, confirmPayment returned requires_action
@@ -2491,13 +2491,7 @@ async function mirrorSavedMethodForSucceededIntent(paymentIntent) {
           // + setup_future_usage written together by the controlled /setup
           // and /update-amount paths, and the customer confirmed that PI),
           // never inferred at charge time.
-          await ConsentService.recordConsent({
-            customerId: wavesCustomerId,
-            paymentMethodId: saved.id,
-            stripePaymentMethodId: stripePmId,
-            source: 'pay_page',
-            methodType: saved.method_type || 'card',
-          });
+          // (written inside the ownership transaction below)
         }
         const { enrollConsentedMethod } = require('../services/autopay-enrollment');
         // Invoice visit scope for the in-lock payer check (#3395 r14 P1):
@@ -2520,15 +2514,49 @@ async function mirrorSavedMethodForSucceededIntent(paymentIntent) {
         } catch (scopeErr) {
           logger.warn(`[stripe-webhook] invoice scope lookup failed for PI ${piId}: ${scopeErr.message}`);
         }
-        await enrollConsentedMethod({
-          customerId: wavesCustomerId,
-          paymentMethodId: saved.id,
-          source: 'save_card_consent',
-          details: { billing_mode: signupBillingMode },
-          authorizedAt,
-          scheduledServiceId: mirrorScopeSsId,
-          invoiceId: mirrorInvoiceId,
-        });
+        // ONE TRANSACTION for the authorization and the enrollment (local
+        // audit on r46, the rule every other save-a-method path now follows):
+        // committing consent first left it recorded when a Bill-To withdrawal
+        // landed before the enrollment refused. This rail has no request to
+        // answer, so a refusal simply leaves nothing behind.
+        const MIRROR_PAYER_BILLED_ROLLBACK = Symbol('mirror_payer_billed_rollback');
+        let mirrorEnrollment = null;
+        try {
+          await db.transaction(async (trx) => {
+            if (mirrorInvoiceId
+              && await require('../services/visit-completion-packets').invoicePayerOwnedNow(mirrorInvoiceId, trx)) {
+              throw MIRROR_PAYER_BILLED_ROLLBACK;
+            }
+            if (mirrorNeedsConsentRow) {
+              await ConsentService.recordConsent({
+                customerId: wavesCustomerId,
+                paymentMethodId: saved.id,
+                stripePaymentMethodId: stripePmId,
+                source: 'pay_page',
+                methodType: saved.method_type || 'card',
+                database: trx,
+              });
+            }
+            mirrorEnrollment = await enrollConsentedMethod({
+              customerId: wavesCustomerId,
+              paymentMethodId: saved.id,
+              source: 'save_card_consent',
+              details: { billing_mode: signupBillingMode },
+              authorizedAt,
+              scheduledServiceId: mirrorScopeSsId,
+              invoiceId: mirrorInvoiceId,
+              dbh: trx,
+            });
+            if (mirrorEnrollment?.reason === 'payer_billed') throw MIRROR_PAYER_BILLED_ROLLBACK;
+          });
+          // Savepoint mode hands the confirmation email back for after commit.
+          if (typeof mirrorEnrollment?.sendEnrollmentConfirmation === 'function') {
+            await mirrorEnrollment.sendEnrollmentConfirmation();
+          }
+        } catch (mirrorErr) {
+          if (mirrorErr !== MIRROR_PAYER_BILLED_ROLLBACK) throw mirrorErr;
+          logger.warn(`[stripe-webhook] save-card mirror for PI ${piId} — invoice ${mirrorInvoiceId} is billed to a third-party payer; no consent recorded, no enrollment`);
+        }
       }
       if (!existing) {
         PaymentLifecycleEmail.sendPaymentMethodUpdated({
