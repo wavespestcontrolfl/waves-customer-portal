@@ -179,7 +179,7 @@ postgres('deferred standalone lawn assessment notification (real PostgreSQL)', (
     }
   });
 
-  test('an enqueue failure rolls back without falsely releasing the in-flight send claim', async () => {
+  test('an enqueue failure preserves a proven-unsent notification as owed', async () => {
     const seeded = await seed();
     await fixture.knex.raw('ALTER TABLE sms_log ADD CONSTRAINT fixture_requires_body CHECK (message_body <> \'\')');
     try {
@@ -188,7 +188,7 @@ postgres('deferred standalone lawn assessment notification (real PostgreSQL)', (
         .resolves.toBeNull();
       expect(await fixture.knex('sms_log')).toHaveLength(0);
       expect(await fixture.knex('lawn_assessments').where({ id: seeded.assessment.id }).first())
-        .toMatchObject({ notification_sent: true, notification_sent_at: null });
+        .toMatchObject({ notification_sent: false, notification_sent_at: null });
     } finally {
       await fixture.knex.raw('ALTER TABLE sms_log DROP CONSTRAINT fixture_requires_body');
     }
@@ -291,6 +291,35 @@ postgres('deferred standalone lawn assessment notification (real PostgreSQL)', (
         .toMatchObject({ notification_sent: false, notification_sent_at: null });
     },
   );
+
+  test.each(['LAWN_DELIVERY_OWNERSHIP_LOST', 'LAWN_COPY_SEAL_LOST'])('%s at the final provider guard keeps the replay retryable', async (code) => {
+    const seeded = await seed();
+    const { queued } = await queueHeld(seeded.assessment.id);
+    const deps = replayDeps();
+    mockNotify.mockImplementation(async (_customerId, _type, options) => {
+      if (code === 'LAWN_DELIVERY_OWNERSHIP_LOST') {
+        await fixture.knex('lawn_assessment_runs').where({ id: seeded.run.id }).update({
+          pipeline_owner_token: randomUUID(), pipeline_claimed_at: fixture.knex.fn.now(),
+        });
+      } else {
+        deps.KnowledgeBridge.renewRecommendationSendSeal.mockResolvedValue(false);
+      }
+      try {
+        await options.preSendCheck();
+        throw new Error('the expired guard unexpectedly allowed delivery');
+      } catch (err) {
+        // Mirror the canonical sender's error normalization at the provider
+        // boundary; the result must retain retryability through smsResult.
+        expect(err.code).toBe(code);
+        return dispatcherResult({ sent: false, deliveryOutcome: 'not_sent', code: err.code, retryable: err.retryable === true });
+      }
+    });
+    await expect(replayDeferredNotification(replayMeta(seeded, queued), deps)).resolves.toMatchObject({
+      sent: false, deliveryOutcome: 'not_sent', code, retryable: true,
+    });
+    expect(await fixture.knex('lawn_assessments').where({ id: seeded.assessment.id }).first())
+      .toMatchObject({ notification_sent: false, notification_sent_at: null });
+  });
 
   test('a replay held again stays on the same queue row and releases its pipeline for the next scheduled attempt', async () => {
     const seeded = await seed();

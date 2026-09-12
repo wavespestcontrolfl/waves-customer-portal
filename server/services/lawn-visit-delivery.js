@@ -78,7 +78,7 @@ function sendSeal(KnowledgeBridge, knex, assessmentId, renewMs = SEAL_RENEW_MS, 
       if (taken && !lost) {
         lost = !(await KnowledgeBridge.renewRecommendationSendSeal(assessmentId, owner).catch(() => false));
       }
-      if (!taken || lost) throw Object.assign(new Error('Lawn delivery copy seal lost'), { code: 'LAWN_COPY_SEAL_LOST' });
+      if (!taken || lost) throw Object.assign(new Error('Lawn delivery copy seal lost'), { code: 'LAWN_COPY_SEAL_LOST', retryable: true });
       return renewalStartedAt + KnowledgeBridge.SEND_SEAL_MS;
     },
     async release() {
@@ -106,7 +106,7 @@ function nearTheVisit(assessment, windowMs) {
   return Date.now() - capturedAt <= windowMs;
 }
 
-const ownershipLost = () => Object.assign(new Error('Lawn delivery ownership lost'), { code: 'LAWN_DELIVERY_OWNERSHIP_LOST' });
+const ownershipLost = () => Object.assign(new Error('Lawn delivery ownership lost'), { code: 'LAWN_DELIVERY_OWNERSHIP_LOST', retryable: true });
 const stepIncomplete = (step) => Object.assign(new Error(`Lawn delivery step incomplete: ${step}`), { code: 'LAWN_DELIVERY_STEP_INCOMPLETE' });
 
 async function deliverConfirmedAssessment({ assessmentId, scheduledSmsLogId }, deps = {}) {
