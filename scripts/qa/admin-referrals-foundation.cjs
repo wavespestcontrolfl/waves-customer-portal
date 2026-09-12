@@ -218,8 +218,25 @@ async function main() {
               };
       else if (api === "/admin/referrals/promoters")
         body = { promoters: state.mode === "empty" ? [] : [promoterFixture] };
-      else if (api === "/admin/referrals/queue")
-        body = { referrals: state.mode === "empty" ? [] : [state.referral] };
+      else if (api === "/admin/referrals/queue") {
+        // Mirror server/routes/admin-referrals-v2.js:124-130 — with no
+        // ?status= query param (the client never sends one), the real route
+        // filters the default queue to pending/contacted/estimated/
+        // sms_failed, so a converted (signed_up) referral drops out of it.
+        const DEFAULT_QUEUE_STATUSES = [
+          "pending",
+          "contacted",
+          "estimated",
+          "sms_failed",
+        ];
+        const statusParam = url.searchParams.get("status");
+        const inQueue =
+          state.mode !== "empty" &&
+          (statusParam
+            ? state.referral.status === statusParam
+            : DEFAULT_QUEUE_STATUSES.includes(state.referral.status));
+        body = { referrals: inQueue ? [state.referral] : [] };
+      }
       else if (api === "/admin/referrals/payouts")
         body = { payouts: state.mode === "empty" ? [] : [state.payout] };
       else if (
@@ -486,14 +503,22 @@ async function main() {
             .at(-1).payload,
           { customerId: "customer-1", tier: "Gold", monthlyValue: "79" },
         );
-        // A signed-up referral drops its Convert action (only
-        // pending/contacted/estimated/sms_failed rows offer it), so the row
-        // button that opened this dialog is gone by now — checking focus
-        // landed back on it would just time out. Confirm the real contract
-        // instead: the status badge flips and the action disappears.
-        await page.getByText("signed up", { exact: true }).waitFor();
+        // The queue reload after conversion refetches
+        // /admin/referrals/queue, which (server/routes/admin-referrals-v2.js
+        // :124-130) filters the default queue to
+        // pending/contacted/estimated/sms_failed — a signed_up referral is
+        // no longer in it at all, not just missing its Convert action. With
+        // only one fixture referral, the row disappears entirely and the
+        // Queue tab falls back to its empty state; checking focus landed
+        // back on the (now-gone) trigger would just time out, so confirm
+        // the real post-conversion contract instead: the row is gone, the
+        // count heading reflects zero, and the empty state is shown.
+        await page
+          .getByRole("heading", { name: "Referral Queue (0)", exact: true })
+          .waitFor();
+        await page.getByText("No pending referrals", { exact: true }).waitFor();
         check(
-          `${width} convert removes the row's convert action once signed up`,
+          `${width} convert removes the referral from the queue once signed up`,
           (await convertTrigger.count()) === 0,
         );
 

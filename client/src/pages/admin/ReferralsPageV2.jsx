@@ -99,7 +99,12 @@ function Stat({ label, value, sub }) {
     <Card className="min-w-[150px] flex-1 border-0 bg-zinc-50">
       <CardBody>
         <div className="text-14 font-medium text-ink-secondary">{label}</div>
-        <div className="mt-1 text-20 font-medium tabular-nums text-zinc-900">
+        {/* text-20 is not a configured font-size utility (Tailwind emits no
+            rule for it), silently collapsing this KPI to the inherited
+            14px body size. Main used an explicit 24px; the nearest
+            configured token in tailwind.config.js's fontSize scale
+            (11/12/13/14/16/18/22/28 — no 20 or 24) is 22. */}
+        <div className="mt-1 text-22 font-medium tabular-nums text-zinc-900">
           {value}
         </div>
         {sub && <div className="mt-1 text-14 text-ink-secondary">{sub}</div>}
