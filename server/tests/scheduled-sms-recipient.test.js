@@ -19,19 +19,36 @@ jest.mock('../config/feature-gates', () => ({
 const db = require('../models/db');
 const { resolveScheduledRecipient, scheduledDepositReceiptAllowed, classifyDepositReplayFallback } = require('../services/scheduler');
 
-test('scheduled replay dispatch receives row-trusted identifiers around the unchanged canonical sender', () => {
+test.each([false, true])('scheduled replay uses trusted row identities and registered dispatch: %s', async (registered) => {
+  // Exercise the actual dispatch block without starting cron jobs or importing
+  // live integrations. A forged descriptor must not override its claimed row.
   const source = require('fs').readFileSync(require.resolve('../services/scheduler'), 'utf8');
   const start = source.indexOf('const replayDispatchMeta = {');
   const end = source.indexOf('const completedAt = new Date();', start);
-  const dispatchBlock = source.slice(start, end);
-
   expect(start).toBeGreaterThan(-1);
   expect(end).toBeGreaterThan(start);
-  expect(dispatchBlock).toContain('scheduled_sms_log_id: msg.id');
-  expect(dispatchBlock).toContain('customer_id: msg.customer_id');
-  expect(dispatchBlock).toContain('.dispatchDeferredReplay(claimMeta.entry_point, replayDispatchMeta, defaultDispatch)');
-  expect(dispatchBlock).toContain("entryPoint: 'scheduled_sms_cron'");
-  expect(dispatchBlock).toContain('body: msg.message_body');
+  const sendCustomerMessage = jest.fn(async () => ({ sent: true, deliveryOutcome: 'accepted' }));
+  const refusal = { sent: false, deliveryOutcome: 'not_sent', retryable: true };
+  const dispatchDeferredReplay = jest.fn(async (_entry, _meta, fallback) => registered ? refusal : fallback());
+  const result = await require('vm').runInNewContext(`(async () => { ${source.slice(start, end)} return smsResult; })()`, {
+    msg: { id: 'queue-row', customer_id: 'row-customer', message_body: 'Current queued copy' },
+    claimMeta: { entry_point: 'fixture', scheduled_sms_log_id: 'forged-row', customer_id: 'forged-customer' },
+    toPhone: 'fixture-phone', purpose: 'appointment', replayConsentBasis: undefined,
+    sendCustomerMessage,
+    require: () => ({ deferredSmsHandoff: () => undefined, dispatchDeferredReplay }),
+  });
+  expect(dispatchDeferredReplay).toHaveBeenCalledWith('fixture', expect.objectContaining({
+    scheduled_sms_log_id: 'queue-row', customer_id: 'row-customer',
+  }), expect.any(Function));
+  if (registered) {
+    expect(result).toBe(refusal);
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+  } else {
+    expect(result).toMatchObject({ sent: true });
+    expect(sendCustomerMessage).toHaveBeenCalledWith(expect.objectContaining({
+      body: 'Current queued copy', to: 'fixture-phone', customerId: 'row-customer', entryPoint: 'scheduled_sms_cron',
+    }));
+  }
 });
 
 function mockCustomerLookup(row) {
