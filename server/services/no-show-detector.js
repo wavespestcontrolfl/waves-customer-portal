@@ -1272,7 +1272,14 @@ async function sweep(conn, { now = new Date() } = {}) {
       // clear the row but cannot retract the push (codex P1 round 19). The
       // reconcile passes below still use the preload: they only resolve or
       // dismiss, and the next tick recreates anything cleared too eagerly.
-      const { visit, live } = await lockedStop(trx, card.id, { now });
+      // A FRESH clock, taken inside the transaction: the tick's `now` was
+      // read before a serial loop that can run for minutes over a large
+      // backlog, and evaluating against it would judge the thresholds — and
+      // filter promise evidence — by a time that has passed, hiding a
+      // reschedule communicated since (codex P1 round 19). The candidate list
+      // keeps the tick's clock; what gets MINTED is decided on this one.
+      const at = new Date();
+      const { visit, live } = await lockedStop(trx, card.id, { now: at });
       if (!enabled() || !visit) return null;
       if (!live || live.stage !== card.stage || live.promised_window.start_at !== card.promised_window.start_at) return null;
       const recipientTech = visit.technician_id ? await trx('technicians').where({ id: visit.technician_id,
