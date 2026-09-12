@@ -424,7 +424,15 @@ async function loadPromiseEvents(conn, visitIds, { now = new Date() } = {}) {
     ...calls.map((r) => ({ visit_id: r.resource_id, start_at: r.metadata?.start_at,
       communicated_at: r.metadata?.communicated_at || r.created_at, source: 'call', source_id: r.id })),
     ...bookings.map((r) => {
-      const target = r.processing_token ? null : agentCommittedStart(r);
+      // The call's own start is passed EXPLICITLY: the row aliases it to
+      // call_created_at (sv also has a created_at), and
+      // hasAgentCommittedEvidence grounds its transcript check on that
+      // timestamp — handing it `undefined` silently weakened the
+      // trusted-speaker rule this promise class depends on (codex P1 round
+      // 10).
+      const target = r.processing_token ? null : agentCommittedStart({
+        ai_extraction_enriched: r.ai_extraction_enriched, transcription: r.transcription, created_at: r.call_created_at,
+      });
       if (target == null) return null;
       return { visit_id: r.visit_id, start_at: new Date(target).toISOString(),
         communicated_at: callCommitmentInstant({ created_at: r.call_created_at, updated_at: r.call_updated_at,

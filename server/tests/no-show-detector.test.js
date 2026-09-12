@@ -744,6 +744,53 @@ describe('loadPromiseEvents: an UNLINKED sms_log row is neutral, a sentinel sid 
   });
 });
 
+describe('the call-booking promise derives from the visit\'s own call link (round-10 P1)', () => {
+  const flags = require('../services/call-triage-flags');
+  function fakeConn(bookingRows) {
+    const passthrough = () => {
+      const chain = {};
+      for (const m of ['join', 'leftJoin', 'whereIn', 'whereRaw', 'whereBetween', 'whereNull', 'whereNotNull', 'where']) chain[m] = () => chain;
+      chain.select = () => Promise.resolve([]);
+      return chain;
+    };
+    const conn = (table) => {
+      if (table !== 'scheduled_services as sv') return passthrough();
+      const chain = {};
+      for (const m of ['join', 'whereIn', 'whereRaw', 'where']) chain[m] = () => chain;
+      chain.select = () => Promise.resolve(bookingRows);
+      return chain;
+    };
+    conn.raw = (sql) => ({ sql });
+    conn.isTransaction = true;
+    return conn;
+  }
+  const row = {
+    visit_id: 'visit-1', call_id: 'call-1', transcription: 'Agent: We will see you Friday at one.\nCaller: Great.',
+    ai_extraction_enriched: { meta: {}, scheduling: { agent_committed_booking: true, confirmed_start_at: '2026-09-12T13:00:00-04:00' } },
+    call_created_at: '2026-09-10T14:00:00.000Z', duration_seconds: 300, processing_token: null,
+  };
+
+  beforeEach(() => { process.env.GATE_CALL_AGENT_COMMIT_TRUSTED_LABELS = 'true'; });
+  afterEach(() => { delete process.env.GATE_CALL_AGENT_COMMIT_TRUSTED_LABELS; });
+
+  test('the trusted-speaker check receives the CALL\'s start, not undefined', async () => {
+    const spy = jest.spyOn(flags, 'hasAgentCommittedEvidence').mockReturnValue(true);
+    const [promise] = await loadPromiseEvents(fakeConn([row]), ['visit-1']);
+    expect(spy).toHaveBeenCalledWith(row.ai_extraction_enriched, row.transcription, row.call_created_at);
+    expect(promise).toMatchObject({ visit_id: 'visit-1', source: 'call', source_id: 'call-1',
+      communicated_at: '2026-09-10T14:05:00.000Z' });
+    spy.mockRestore();
+  });
+
+  test('a call still being processed, or one the trusted-labels rule rejects, yields no promise', async () => {
+    const spy = jest.spyOn(flags, 'hasAgentCommittedEvidence').mockReturnValue(true);
+    expect(await loadPromiseEvents(fakeConn([{ ...row, processing_token: 'tok' }]), ['visit-1'])).toEqual([]);
+    spy.mockReturnValue(false);
+    expect(await loadPromiseEvents(fakeConn([row]), ['visit-1'])).toEqual([]);
+    spy.mockRestore();
+  });
+});
+
 describe('the applied-reschedule promise is dated by the CALL, not the processing pass (round-9 P1)', () => {
   // call-reschedule-apply.js sends the customer nothing — the agent already
   // said it on the call — so this derived promise is the only record of that
