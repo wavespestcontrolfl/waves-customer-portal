@@ -66,6 +66,21 @@ describe('missing tracking stages', () => {
       expect(stage1[1].at).toBe('2026-09-10T14:30:00.000Z');
     }
   });
+  test('a card that auto-resolves and recurs alerts twice in the replay (round-10 P1)', () => {
+    // En Route recorded at 09:50 clears the stage-1 card (production resolves
+    // it, stamped superseded); cleared again at 10:30, the same key must be
+    // raisable — production would raise a fresh card.
+    const report = replay({ synthetic: true, from: '2026-09-10T09:00:00-04:00', to: '2026-09-10T11:00:00-04:00', visits: [{
+      id: 'visit', initial: visit, outcome: 'tracking_gap',
+      promises: [{ start_at: '2026-09-10T09:00:00-04:00', communicated_at: '2026-09-09T12:00:00-04:00', source: 'message' }],
+      events: [
+        { at: '2026-09-10T09:50:00-04:00', patch: { en_route_at: '2026-09-10T09:50:00-04:00' } },
+        { at: '2026-09-10T10:30:00-04:00', patch: { en_route_at: null } },
+      ],
+    }] });
+    const stage1 = report.thresholds[0].alerts.filter((a) => a.stage === 1);
+    expect(stage1).toHaveLength(2);
+  });
   test('replay sees departure evidence cleared between thresholds on the next cron tick', () => {
     const report = replay({ synthetic: true, from: '2026-09-10T09:00:00-04:00', to: '2026-09-10T11:00:00-04:00', visits: [{
       id: 'visit', initial: { ...visit, en_route_at: '2026-09-10T09:30:00-04:00' }, promises: [promise],
@@ -227,17 +242,26 @@ describe('grouped stops are evaluated as one visit (round-10 P1)', () => {
   });
 
   test('stopState merges arrival evidence and settles on any member that left the live statuses', () => {
-    expect(stopState([a, { ...b, arrived_at: '2026-09-10T09:50:00Z' }]).arrived_at).toBe('2026-09-10T09:50:00Z');
-    expect(stopState([{ ...a, en_route_at: '2026-09-10T09:40:00Z' }, { ...b, en_route_at: '2026-09-10T09:30:00Z' }]).en_route_at)
+    const opts = { now: new Date('2026-09-10T12:00:00Z'), since: '2026-09-10T13:00:00Z' };
+    expect(stopState([a, { ...b, arrived_at: '2026-09-10T09:50:00Z' }], opts).arrived_at).toBe('2026-09-10T09:50:00Z');
+    expect(stopState([{ ...a, en_route_at: '2026-09-10T09:40:00Z' }, { ...b, en_route_at: '2026-09-10T09:30:00Z' }], opts).en_route_at)
       .toBe('2026-09-10T09:30:00Z');
-    expect(stopState([a, { ...b, status: 'completed' }]).status).toBe('completed');
+    // A stale prior-day stamp on one member must not be offered ahead of a
+    // valid one on another: evaluateNoShow would reject the stale value and
+    // the stop would read as never departed (round-10 P1).
+    expect(stopState([{ ...a, en_route_at: '2026-09-03T09:40:00Z' }, { ...b, en_route_at: '2026-09-10T09:30:00Z' }], opts).en_route_at)
+      .toBe('2026-09-10T09:30:00Z');
+    // ...and a stamp in the future is not evidence yet either.
+    expect(stopState([{ ...a, arrived_at: '2026-09-10T23:00:00Z' }, { ...b, arrived_at: '2026-09-10T09:30:00Z' }], opts).arrived_at)
+      .toBe('2026-09-10T09:30:00Z');
+    expect(stopState([a, { ...b, status: 'completed' }], opts).status).toBe('completed');
     // A CANCELLED sibling is not proof the truck attended: the customer may
     // still be waiting on the members that remain live (round-10 P1).
-    expect(stopState([a, { ...b, status: 'cancelled' }]).status).toBe('pending');
-    expect(stopState([{ ...a, status: 'cancelled' }, b]).status).toBe('pending');
-    expect(stopState([{ ...a, status: 'skipped' }, { ...b, status: 'no_show' }]).status).toBe('skipped');
+    expect(stopState([a, { ...b, status: 'cancelled' }], opts).status).toBe('pending');
+    expect(stopState([{ ...a, status: 'cancelled' }, b], opts).status).toBe('pending');
+    expect(stopState([{ ...a, status: 'skipped' }, { ...b, status: 'no_show' }], opts).status).toBe('skipped');
     // A single-row stop is passed through untouched.
-    expect(stopState([solo])).toBe(solo);
+    expect(stopState([solo], opts)).toBe(solo);
   });
 
   test('stopPromise takes the latest promise across members — the grouped text lands on only one of them', () => {

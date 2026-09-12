@@ -59,6 +59,9 @@ function replayVisit(item, { from, to, threshold }) {
   // (or complete -> reopen) cycle can alert again, exactly as production's
   // supersession stamp allows.
   let lifecycle = 0;
+  // Whether a card is currently standing, so its automatic supersession can
+  // free the key the way production's superseded_at stamp does.
+  let alerting = false;
   let wasLive = LIVE_STATUSES.includes(item.initial?.status);
   for (let at = Math.ceil(from.getTime() / 300000) * 300000; at <= to.getTime(); at += 300000) {
     const now = new Date(at);
@@ -79,7 +82,19 @@ function replayVisit(item, { from, to, threshold }) {
     // the number that says whether a no-alert backtest means "nothing was
     // wrong" or "we had no evidence to judge with" (codex P1, round 4).
     const alert = evaluateNoShow({ visit: state, promise, now, stage1Minutes: threshold });
-    if (!alert) continue;
+    if (!alert) {
+      // Production auto-resolves the card the moment the shape stops
+      // matching (an arrival, a changed promise, a stage that no longer
+      // applies) and stamps it superseded, which frees the SAME key to be
+      // raised again later. Keeping the key suppressed for the rest of the
+      // export understated the alert volume a rollout decision is made on
+      // (codex P1 round 10) — the same reason the recipient and the live
+      // lifecycle are in the key.
+      if (alerting) lifecycle += 1;
+      alerting = false;
+      continue;
+    }
+    alerting = true;
     // Production's own identity, not a window/stage pair: trackingKey folds
     // in the RECIPIENT, so a reassignment from tech A to B with the same
     // promise and stage mints a fresh card for B (and reconciles A's), and a

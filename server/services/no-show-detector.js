@@ -620,10 +620,20 @@ function groupedStops(rows = []) {
 // a NON-live status if any member has left LIVE_STATUSES — a stop whose first
 // service is already completed was plainly attended, whatever its siblings
 // still say.
-function stopState(members = []) {
+function stopState(members = [], { now = new Date(), since = null } = {}) {
   const base = members[0];
   if (members.length === 1) return base;
-  const earliest = (key) => members.map((m) => m[key]).filter((v) => Number.isFinite(instant(v)))
+  // Only stamps that could COUNT as this window's evidence are considered
+  // before taking the earliest: evaluateNoShow rejects anything outside the
+  // promised day or dated in the future, so collapsing to a raw earliest
+  // could hand it a stale prior-day stamp from one member and mask a valid
+  // one on another — the group would read as never departed/arrived (codex
+  // P1 round 10). The same bounds are applied there; this only decides which
+  // member's stamp is offered.
+  const floor = Number.isFinite(instant(since)) ? parseETDateTime(`${etDateString(new Date(instant(since)))}T00:00`).getTime() : -Infinity;
+  const ceiling = instant(now);
+  const earliest = (key) => members.map((m) => m[key])
+    .filter((v) => Number.isFinite(instant(v)) && instant(v) >= floor && instant(v) <= ceiling)
     .sort((a, b) => instant(a) - instant(b))[0] || null;
   // Only an ATTENDED sibling settles the stop. A cancelled/skipped/no_show
   // sibling proves nothing about the truck — the customer may still be
@@ -684,7 +694,8 @@ async function listNoShows(conn, { now = new Date(), limit = 100, offset = 0, ac
     // so a stop pulled in only through a sibling raises no card of its own.
     const r = members.find((m) => candidateIds.has(String(m.id)));
     if (!r) return null;
-    const alert = evaluateNoShow({ visit: stopState(members), promise: stopPromise(members, promises, now), now });
+    const promise = stopPromise(members, promises, now);
+    const alert = evaluateNoShow({ visit: stopState(members, { now, since: promise?.start_at }), promise, now });
     return alert ? { id: r.id, customer_id: r.customer_id, technician_id: r.technician_id, first_name: r.first_name,
       last_name: r.last_name, phone: r.phone, scheduled_date: r.scheduled_date,
       ...(members.length > 1 ? { grouped_service_ids: members.map((m) => String(m.id)) } : {}), ...alert } : null;
@@ -840,7 +851,8 @@ async function lockedStop(trx, serviceId, { now = new Date(), ignoreHorizon = fa
   const visit = members.find((m) => String(m.id) === String(serviceId)) || row;
   const events = await loadPromiseEvents(trx, members.map((m) => String(m.id)), { now });
   const promise = stopPromise(members, latestPromises(events, now), now);
-  return { visit, members, promise, live: evaluateNoShow({ visit: stopState(members), promise, now, ignoreHorizon }) };
+  return { visit, members, promise,
+    live: evaluateNoShow({ visit: stopState(members, { now, since: promise?.start_at }), promise, now, ignoreHorizon }) };
 }
 
 // The kill switch has to CLEAN UP, not just stop creating: sweep() is the
