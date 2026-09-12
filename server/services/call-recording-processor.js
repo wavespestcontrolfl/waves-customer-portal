@@ -8364,23 +8364,34 @@ const CallRecordingProcessor = {
           recovery_prompt_version: recoveryCohortVersion(),
         }
         : null;
-      await db('triage_items')
+      // The marker means different things on the two card types, so they are
+      // written separately (codex #4437 r7 pre-push P1):
+      //   address_unverified  — "the recovery EVIDENCE here is retired". Any
+      //     new attempt, successful or not, makes it current again.
+      //   address_recovered   — "the recovery this card DESCRIBES is no longer
+      //     current". Only an actual recovery may clear that.
+      const fenceToOwningPass = (qb) => qb.whereExists(function owningPass() {
+        this.select(db.raw('1')).from('call_log')
+          .whereRaw('call_log.id = ?', [call.id])
+          .where('call_log.processing_token', procToken);
+      });
+      const onCards = (reasonCode) => fenceToOwningPass(db('triage_items')
         .where('call_log_id', call.id)
-        .whereIn('reason_code', ['address_unverified', 'address_recovered'])
-        .whereIn('status', ['open', 'in_progress'])
-        .whereExists(function owningPass() {
-          this.select(db.raw('1')).from('call_log')
-            .whereRaw('call_log.id = ?', [call.id])
-            .where('call_log.processing_token', procToken);
-        })
+        .where('reason_code', reasonCode)
+        .whereIn('status', ['open', 'in_progress']));
+
+      await onCards('address_unverified')
         .update({
           payload: evidence
-            // Only a pass that actually RECOVERED clears the retirement. An
-            // attempt that ran and FAILED still carries evidence worth writing
-            // (its candidates go to the reviewer), but clearing the marker
-            // there made a previous pass's address_recovered card read as live
-            // and told the operator the street was reconstructed when this
-            // pass could not reconstruct it (codex #4437 r7 P1).
+            ? db.raw('(coalesce(payload, \'{}\'::jsonb) - \'recovery_superseded_at\') || ?::jsonb', [JSON.stringify(evidence)])
+            : recoveryMarkerPayload(db, null),
+          updated_at: new Date(),
+        })
+        .catch((e) => logger.warn(`[call-proc] address-evidence reconcile failed for ${maskSid(callSid)}: ${e.code || e.name || 'db_error'}`));
+
+      await onCards('address_recovered')
+        .update({
+          payload: evidence
             ? db.raw(`(coalesce(payload, '{}'::jsonb) ${addressRecovery?.recovered ? "- 'recovery_superseded_at'" : ''}) || ?::jsonb`, [JSON.stringify(evidence)])
             : recoveryMarkerPayload(db, null),
           updated_at: new Date(),

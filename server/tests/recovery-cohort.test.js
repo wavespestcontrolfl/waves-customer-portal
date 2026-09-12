@@ -101,6 +101,19 @@ describe('classifyRecoveryCohort', () => {
     expect([...retired.stale, ...retired.unattributable]).toEqual([]);
   });
 
+  // failed -> skipped -> failed. The middle pass retires the hold card; the
+  // third attempts again and fails. Its evidence is current, so the retirement
+  // must be gone — otherwise the scan skips the card and admits the call even
+  // once that attempt's contract goes stale.
+  test('a fresh failed attempt on a retired hold card is attributable again', () => {
+    const retiredThenReattempted = { ...attempt(OLD) }; // marker cleared by the new attempt
+    expect([...classifyRecoveryCohort([card('c1', retiredThenReattempted)], CURRENT).stale]).toEqual(['c1']);
+
+    const currentReattempt = { ...attempt(CURRENT) };
+    const out = classifyRecoveryCohort([card('c1', currentReattempt)], CURRENT);
+    expect([...out.stale, ...out.unattributable]).toEqual([]);
+  });
+
   test('a malformed payload fails to prove its pass instead of throwing', () => {
     const parse = (v) => JSON.parse(v);
     expect(() => classifyRecoveryCohort([card('c1', 'not json')], CURRENT, parse)).not.toThrow();
