@@ -92,6 +92,48 @@ test('a passing check dispatches, and the callback never reaches the provider in
   expect(auditInput.preDispatchCheck).toBeUndefined();
 });
 
+test.each([
+  ['returned refusal', async () => ({ ok: false, code: 'PREPARATION_INVALIDATED', reason: 'copy changed', retryable: true })],
+  ['coded throw', async () => { throw Object.assign(new Error('seal lost'), { code: 'COPY_SEAL_LOST', retryable: true }); }],
+])('a provider-boundary %s is normalized, audited, and kept out of serialized input', async (_label, preSendCheck) => {
+  sendViaTwilio.mockImplementationOnce(async (providerInput, hooks) => {
+    const verdict = await hooks.preSendCheck();
+    expect(verdict).toMatchObject({ ok: false, retryable: true });
+    expect(providerInput.preSendCheck).toBeUndefined();
+    return { sent: false, provider: 'push', deliveryOutcome: 'not_sent', appUnavailable: true, error: 'push stopped' };
+  });
+
+  const result = await sendCustomerMessage({ ...BASE_INPUT, preSendCheck });
+  expect(result).toMatchObject({
+    sent: false,
+    blocked: true,
+    deliveryOutcome: 'not_sent',
+    retryable: true,
+  });
+  expect(result.code).toBe(_label === 'coded throw' ? 'COPY_SEAL_LOST' : 'PREPARATION_INVALIDATED');
+  expect(persistAudit).toHaveBeenCalledWith(expect.objectContaining({
+    input: expect.not.objectContaining({ preSendCheck: expect.anything() }),
+    validatorsFailed: ['pre_send_check_boundary'],
+  }));
+});
+
+test.each([
+  ['accepted', { sent: true, provider: 'push', deliveryOutcome: 'accepted', providerMessageId: 'push:accepted' }],
+  ['uncertain', { sent: false, provider: 'push', deliveryOutcome: 'uncertain', retryable: true, error: 'provider unknown' }],
+])('a captured guard refusal never overwrites a provider outcome that is %s', async (_label, outcome) => {
+  sendViaTwilio.mockImplementationOnce(async (_providerInput, hooks) => {
+    expect(await hooks.preSendCheck()).toMatchObject({ ok: false, code: 'PREPARATION_INVALIDATED' });
+    return outcome;
+  });
+  const result = await sendCustomerMessage({
+    ...BASE_INPUT,
+    preSendCheck: async () => ({ ok: false, code: 'PREPARATION_INVALIDATED', retryable: true }),
+  });
+  expect(result.deliveryOutcome).toBe(outcome.deliveryOutcome);
+  expect(result.code).not.toBe('PREPARATION_INVALIDATED');
+  expect(result.blocked).toBe(false);
+});
+
 test('no hook — the legacy pipeline is untouched', async () => {
   const result = await sendCustomerMessage(BASE_INPUT);
   expect(result.sent).toBe(true);

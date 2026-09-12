@@ -173,6 +173,32 @@ describe('customer notification native push dispatch', () => {
     expect(result.push).not.toHaveProperty('accepted');
   });
 
+  test.each(['refused', 'throws'])('a guard %s after waiting for the dedupe lock prevents bell and push', async (mode) => {
+    const { notifQ, trx } = setupDb();
+    let releaseLock;
+    let lockEntered;
+    const entered = new Promise((resolve) => { lockEntered = resolve; });
+    trx.raw.mockImplementationOnce(() => new Promise((resolve) => {
+      releaseLock = resolve;
+      lockEntered();
+    }));
+    let valid = true;
+    const shouldContinue = jest.fn(async () => {
+      if (!valid && mode === 'throws') throw new Error('ownership lost');
+      return valid;
+    });
+    const pending = NotificationService.notifyCustomer('customer-1', 'lawn_health', 'Report ready', 'Current tip', {
+      dedupeKey: 'assessment-1', awaitPush: true, pushOptions: { shouldContinue },
+    });
+    await entered;
+    valid = false;
+    releaseLock();
+    await expect(pending).resolves.toMatchObject({ suppressed: true, reason: 'pre_send_check_blocked' });
+    expect(shouldContinue).toHaveBeenCalledTimes(1);
+    expect(notifQ.insert).not.toHaveBeenCalled();
+    expect(PushService.sendToCustomer).not.toHaveBeenCalled();
+  });
+
   test('fails closed when an unknown preference key is supplied', async () => {
     const { notifQ } = setupDb();
 
@@ -326,4 +352,3 @@ describe('saved-property destination on customer bells (GATE_APP_PROPERTY_SCOPE)
     expect(PushService.sendToCustomer.mock.calls[0][1]).not.toHaveProperty('appointmentId');
   });
 });
-
