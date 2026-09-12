@@ -3456,6 +3456,7 @@ function DeactivateStaffDialog({ tech, error, submitting, onCancel, onConfirm })
         alignItems: "center",
         justifyContent: "center",
         padding: "calc(16px + env(safe-area-inset-top, 0px)) calc(16px + env(safe-area-inset-right, 0px)) calc(16px + env(safe-area-inset-bottom, 0px)) calc(16px + env(safe-area-inset-left, 0px))",
+        overflowY: "auto",
       }}
     >
       <div
@@ -3471,6 +3472,8 @@ function DeactivateStaffDialog({ tech, error, submitting, onCancel, onConfirm })
           borderRadius: 6,
           width: "100%",
           maxWidth: 480,
+          maxHeight: "100%",
+          overflowY: "auto",
           padding: 20,
           boxSizing: "border-box",
         }}
