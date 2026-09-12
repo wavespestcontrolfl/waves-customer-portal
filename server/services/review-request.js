@@ -2081,6 +2081,17 @@ const ReviewService = {
         return;
       }
       if (isExplicitlyUncertainOutcome(providerOutcome)) {
+        // A row still `sending` belongs to the reconciliation (local audit on
+        // r39): moving it to `deferred` strands it for good — processScheduled
+        // takes only `pending` rows and reconcileStrandedSends only `sending`
+        // ones, so later delivery evidence could never recover the ask. The
+        // same claim-state check the returned-failure path makes.
+        if (await this._providerOutcomeUnknown(requestId)) {
+          logger.error(
+            `[review] SMS outcome UNCERTAIN after a thrown post-handoff error (requestId=${requestId} errType=${err?.name || "Error"}) — the claim stays for the stranded-send reconciliation`,
+          );
+          return;
+        }
         try {
           await db("review_requests").where({ id: requestId }).update({ status: "deferred", scheduled_for: fencedFrom });
           logger.error(
