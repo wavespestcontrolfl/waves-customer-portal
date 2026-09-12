@@ -345,20 +345,31 @@ async function runPacketCompletionCredits(packetId, database) {
   }
 }
 
-// One open office-review alert per packet: every raiser checks for it first,
-// so the pending-delivery alert and the close cannot both record one.
+/**
+ * One open office-review alert per packet. `dispatch_alerts` has no unique
+ * index for (type, payload->>'packetId'), so the check and the insert are
+ * SERIALIZED ON THE PACKET ROW (Codex #4311 r44 P1): an initial closeout that
+ * overlaps the resume sweep would otherwise have both runners pass the lookup
+ * before either insert commits, and the office would get two items for one
+ * packet. The close path already holds that row FOR UPDATE, so the lock is
+ * re-entrant there; the pending-delivery raiser takes it here.
+ */
 async function recordOfficeReviewAlert(database, { packet, memberId, state }) {
-  const open = await database('dispatch_alerts').where({ type: 'visit_closeout_review' }).whereNull('resolved_at')
-    .whereRaw("payload->>'packetId' = ?", [packet.id]).first('id');
-  if (open) return false;
-  const member = memberId ? await database('scheduled_services').where({ id: memberId }).first() : null;
-  await require('./dispatch-alerts').createAlert({
-    type: 'visit_closeout_review', severity: 'warn',
-    techId: member?.technician_id || null, jobId: member?.id || null,
-    trx: database.isTransaction ? database : undefined,
-    payload: { visitId: packet.visit_id, packetId: packet.id, ...state },
-  });
-  return true;
+  const run = async (trx) => {
+    await trx('visit_completion_packets').where({ id: packet.id }).forUpdate().first('id');
+    const open = await trx('dispatch_alerts').where({ type: 'visit_closeout_review' }).whereNull('resolved_at')
+      .whereRaw("payload->>'packetId' = ?", [packet.id]).first('id');
+    if (open) return false;
+    const member = memberId ? await trx('scheduled_services').where({ id: memberId }).first() : null;
+    await require('./dispatch-alerts').createAlert({
+      type: 'visit_closeout_review', severity: 'warn',
+      techId: member?.technician_id || null, jobId: member?.id || null,
+      trx,
+      payload: { visitId: packet.visit_id, packetId: packet.id, ...state },
+    });
+    return true;
+  };
+  return database.isTransaction ? run(database) : database.transaction(run);
 }
 
 /**
