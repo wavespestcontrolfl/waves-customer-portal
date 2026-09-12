@@ -495,6 +495,20 @@ describe('grouped stops are evaluated as one visit (round-10 P1)', () => {
     expect(stopPromise([a, b], promises, now)).toMatchObject({ visit_id: 'bbb', start_at: '2026-09-10T13:00:00Z' });
   });
 
+  test('a member confirmation older than the newest grouped send is gone', () => {
+    const now = new Date('2026-09-10T12:00:00Z');
+    // The grouped send quoted one window for every member, so aaa's older
+    // 09:00 confirmation no longer stands — even though ccc's own 11:00
+    // confirmation came later and is not itself grouped (round-24 P1).
+    const c = { id: 'ccc', visit_id: 'stop-1', status: 'pending' };
+    const promises = new Map([
+      ['aaa', { visit_id: 'aaa', start_at: '2026-09-10T09:00:00Z', communicated_at: '2026-09-08T12:00:00Z', source: 'message' }],
+      ['bbb', { visit_id: 'bbb', start_at: '2026-09-10T13:00:00Z', communicated_at: '2026-09-09T12:00:00Z', source: 'message', grouped: true }],
+      ['ccc', { visit_id: 'ccc', start_at: '2026-09-10T11:00:00Z', communicated_at: '2026-09-09T18:00:00Z', source: 'message' }],
+    ]);
+    expect(stopPromise([a, b, c], promises, now)).toMatchObject({ visit_id: 'ccc', start_at: '2026-09-10T11:00:00Z' });
+  });
+
   test('stopPromise takes the EARLIEST promised window across members, not the latest sent', () => {
     const now = new Date('2026-09-10T12:00:00Z');
     const promises = new Map([

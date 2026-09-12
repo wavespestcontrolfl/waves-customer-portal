@@ -996,9 +996,18 @@ function stopState(members = [], { now = new Date(), since = null } = {}) {
 // evidence of its own, and reading its id alone would fall back to an older
 // promise or none at all.
 function stopPromise(members = [], promises = new Map(), now = new Date()) {
-  const own = members.map((member) => promises.get(String(member.id)))
+  const held = members.map((member) => promises.get(String(member.id)))
     .filter((promise) => promise && instant(promise.communicated_at) <= instant(now));
-  if (!own.length) return null;
+  if (!held.length) return null;
+  // Anything communicated BEFORE the newest grouped send is gone: that send
+  // quoted one window for every member, so a member's older per-service
+  // confirmation no longer stands even if another member's confirmation came
+  // later and is not itself grouped (codex P1 round 24, third pass).
+  const newestGrouped = held.filter((promise) => promise.grouped)
+    .reduce((a, b) => (!a || instant(a.communicated_at) < instant(b.communicated_at) ? b : a), null);
+  const own = newestGrouped
+    ? held.filter((promise) => instant(promise.communicated_at) >= instant(newestGrouped.communicated_at))
+    : held;
   // An UNKNOWN window still wins when it is the newest thing the customer
   // heard: that is the legacy move-notice rule — coverage became unknown and
   // nothing has replaced it.
@@ -1481,9 +1490,7 @@ async function sweep(conn, { now = new Date() } = {}) {
       // resolve or dismiss and the next tick recreates anything cleared too
       // eagerly.
       const at = new Date();
-      const memberIds = card.grouped_service_ids || [String(card.id)];
-      const fresh = latestPromises(await loadPromiseEvents(trx, memberIds, { now: at }), at);
-      const { visit, live } = await lockedStop(trx, card.id, { now: at, promises: fresh });
+      const { visit, live } = await lockedStop(trx, card.id, { now: at });
       if (!enabled() || !visit) return null;
       if (!live || live.stage !== card.stage || live.promised_window.start_at !== card.promised_window.start_at) return null;
       const recipientTech = visit.technician_id ? await trx('technicians').where({ id: visit.technician_id,
