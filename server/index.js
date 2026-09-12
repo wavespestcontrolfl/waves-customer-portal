@@ -348,6 +348,7 @@ app.use('/api/public/a2a', (req, res, next) => {
   }
   next();
 });
+app.use('/api/visit-summary', require('./middleware/no-store').noStore);
 app.use('/api/', limiter);
 
 // Stricter rate limit for auth endpoints
@@ -677,6 +678,7 @@ app.use('/api/leads', leadIntakeLimiter, require('./routes/lead-webhook'));
 // auth inside the route). JSON body — mounted after express.json above.
 app.use('/api/webhooks/voice-agent', require('./routes/webhooks-voice-agent'));
 app.use('/api/reports', reportsPublicRoutes);
+app.use('/api/visit-summary', require('./routes/visit-summary-public'));
 app.use('/api/admin/inventory', adminInventoryRoutes);
 app.use('/api/admin/price-match', adminPriceMatchRoutes);
 app.use('/api/admin/price-change', require('./routes/admin-price-change'));
@@ -932,6 +934,7 @@ if (config.nodeEnv === 'production') {
   });
   app.get(/^\/report\/[a-f0-9]{32}\/?$/i, reportsPublicRoutes.reportLimiter, sendSpaHtml);
   app.get(/^\/recap\/[a-f0-9]{32}\/?$/i, reportsPublicRoutes.reportLimiter, sendSpaHtml);
+  app.get(/^\/visit\/[a-f0-9]{64}\/?$/, require('./middleware/no-store').noStore, reportsPublicRoutes.reportLimiter, sendSpaHtml);
 
   app.use(express.static(clientBuild, {
     maxAge: '1y',       // Cache hashed assets (/assets/*) for 1 year

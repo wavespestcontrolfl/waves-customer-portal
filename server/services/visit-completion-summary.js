@@ -69,10 +69,16 @@ async function packetHasPublishableSummary(packetId, database = db) {
 /** Explicit customer projection. Notes, addresses and billing tokens stay out. */
 async function getVisitCompletionSummary(token, database = db) {
   if (!VISIT_SUMMARY_TOKEN_RE.test(String(token || ''))) return null;
+  // The projection runs in one transaction that holds the visit row FOR
+  // SHARE from the authorization read to the response data: a revocation
+  // (an UPDATE of that row) either committed before this read, which then
+  // refuses the link, or waits behind it — never a read that authorized on
+  // a stale row while the revocation committed underneath it.
+  if (!database.isTransaction) return database.transaction((trx) => getVisitCompletionSummary(token, trx));
   const visit = await database('service_visits').where({
     summary_token_hash: crypto.createHash('sha256').update(token).digest('hex'),
   }).whereNull('summary_token_revoked_at').whereNotNull('summary_token_issued_at')
-    .whereIn('status', ['closing', 'closed']).first();
+    .whereIn('status', ['closing', 'closed']).forShare().first();
   if (!visit) return null;
   const packet = await database('visit_completion_packets').where({ visit_id: visit.id })
     .whereIn('status', ['processing', 'done']).first('id');

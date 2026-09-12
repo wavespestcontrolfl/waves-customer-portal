@@ -71,6 +71,7 @@
         "GET /sw.js [conditional: config.nodeEnv === 'production' [with config.nodeEnv=process.env.NODE_ENV || 'development']]",
         "GET <re:^\\/recap\\/[a-f0-9]{32}\\/?$/i> [conditional: config.nodeEnv === 'production' [with config.nodeEnv=process.env.NODE_ENV || 'development']]",
         "GET <re:^\\/report\\/[a-f0-9]{32}\\/?$/i> [conditional: config.nodeEnv === 'production' [with config.nodeEnv=process.env.NODE_ENV || 'development']]",
+        "GET <re:^\\/visit\\/[a-f0-9]{64}\\/?$> [conditional: config.nodeEnv === 'production' [with config.nodeEnv=process.env.NODE_ENV || 'development']]",
         "STATIC / (clientBuild = path.join(__dirname, '..', 'client', 'dist'), { maxAge: '1y', // Cache hashed assets (/assets/*) for 1 year immutable: true, s…#b5ade038) [conditional: config.nodeEnv === 'production' [with config.nodeEnv=process.env.NODE_ENV || 'development']]",
         "STATIC / (path.join(__dirname, '..', 'client', 'public'), { index: false, maxAge: config.nodeEnv === 'production' ? '1h' : 0, })"
       ]
@@ -663,6 +664,14 @@
       "routes": [
         "GET /api/webhooks/bouncie/ping",
         "POST /api/webhooks/bouncie"
+      ]
+    },
+    {
+      "router": "server/routes/visit-summary-public.js",
+      "mount": "/api/visit-summary",
+      "reason": "Issued 64-hex visit-summary bearer token; hashed lookup, exact eligible member projection, revocation, shared report limiter, privacy headers. Creation gate never darkens issued links; docs/public-route-contracts.md.",
+      "routes": [
+        "GET /api/visit-summary/:token"
       ]
     }
   ]
