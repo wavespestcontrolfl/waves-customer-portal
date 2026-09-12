@@ -122,10 +122,11 @@ async function main() {
     report.checks.push(name);
   };
 
-  async function openPage(width, mode = "populated") {
+  async function openPage(width, mode = "populated", delayInitial = false) {
     const state = {
       mode,
       failReferrals: mode === "error",
+      delayInitial,
       referral: structuredClone(referralFixture),
       payout: structuredClone(payoutFixture),
       settings: structuredClone(settingsFixture),
@@ -174,6 +175,10 @@ async function main() {
       };
       if (request.method() !== "GET") record.payload = request.postDataJSON();
       report.requests.push(record);
+      if (state.delayInitial && api.startsWith("/admin/referrals")) {
+        await new Promise((resolve) => setTimeout(resolve, 1000));
+        state.delayInitial = false;
+      }
       let body;
       let status = 200;
       if (api === "/health") body = { status: "ok", gates: {} };
@@ -236,8 +241,7 @@ async function main() {
             ? state.referral.status === statusParam
             : DEFAULT_QUEUE_STATUSES.includes(state.referral.status));
         body = { referrals: inQueue ? [state.referral] : [] };
-      }
-      else if (api === "/admin/referrals/payouts")
+      } else if (api === "/admin/referrals/payouts")
         body = { payouts: state.mode === "empty" ? [] : [state.payout] };
       else if (
         api === "/admin/referrals/settings" &&
@@ -344,7 +348,7 @@ async function main() {
   async function geometry(page, name) {
     const measurements = await page
       .locator(
-        '[data-ui-density="comfortable"] button:not([role="switch"]), [data-ui-density="comfortable"] input, [data-ui-density="comfortable"] textarea, [data-ui-density="comfortable"] select',
+        'button[style*="font-size"], input[style*="font-size"], textarea[style*="font-size"], select[style*="font-size"]',
       )
       .evaluateAll((nodes) =>
         nodes
@@ -359,15 +363,52 @@ async function main() {
             font: parseFloat(getComputedStyle(node).fontSize),
           })),
       );
-    check(`${name} has shared controls`, measurements.length > 0);
+    check(`${name} has original inline controls`, measurements.length > 0);
     for (const item of measurements) {
       check(
-        `${name} ${item.name || item.tag} has a 44px target`,
-        item.height >= 43.5,
-      );
-      check(
         `${name} ${item.name || item.tag} has readable text`,
-        item.font >= (item.tag === "BUTTON" ? 14 : 16),
+        item.font >= 14,
+      );
+    }
+    const undersizedText = await page
+      .locator('[style*="font-size"]')
+      .evaluateAll((nodes) =>
+        nodes
+          .filter(
+            (node) =>
+              node.getClientRects().length &&
+              [...node.childNodes].some(
+                (child) =>
+                  child.nodeType === Node.TEXT_NODE && child.textContent.trim(),
+              ),
+          )
+          .map((node) => ({
+            text: node.textContent.trim(),
+            font: parseFloat(getComputedStyle(node).fontSize),
+          }))
+          .filter((item) => item.font < 14),
+      );
+    check(
+      `${name} keeps readable local text at 14px`,
+      undersizedText.length === 0,
+    );
+    const buttonCase = await page
+      .locator('button[style*="font-size"]')
+      .evaluateAll((nodes) =>
+        nodes
+          .filter(
+            (node) => node.getClientRects().length && node.textContent.trim(),
+          )
+          .map((node) => ({
+            name: node.textContent.trim(),
+            transform: getComputedStyle(node).textTransform,
+            spacing: getComputedStyle(node).letterSpacing,
+          })),
+      );
+    for (const item of buttonCase) {
+      check(
+        `${name} ${item.name} uses uppercase CTA styling`,
+        item.transform === "uppercase" && parseFloat(item.spacing) > 0,
       );
     }
     report.geometry.push({ name, measurements });
@@ -379,53 +420,120 @@ async function main() {
     report.scenarios.push({ name, passed: true });
   }
 
+  async function closePage(page) {
+    await page.evaluate(() => localStorage.removeItem("waves_admin_token"));
+    await page.close();
+  }
+
   try {
     server = await previewServer(root);
     browser = await launchBrowser();
+    await scenario("initial loading feedback", async () => {
+      const { page } = await openPage(390, "populated", true);
+      await page.goto(`${server.baseUrl}/admin/referrals`);
+      await page
+        .getByText("Loading referral program...", { exact: true })
+        .waitFor();
+      check("initial load keeps visible feedback", true);
+      await page.getByText("Recent Activity", { exact: true }).waitFor();
+      await closePage(page);
+    });
+    await scenario("alert status tokens", async () => {
+      const { page, state } = await openPage(390);
+      state.referral.status = "sms_failed";
+      await page.goto(`${server.baseUrl}/admin/referrals`);
+      const alertStatus = page.getByText("sms failed", { exact: true }).first();
+      await alertStatus.waitFor();
+      check(
+        "failed status uses the alert text and dot tokens",
+        await alertStatus.evaluate((node) => {
+          const textStyle = getComputedStyle(node);
+          const dotStyle = getComputedStyle(node.firstElementChild);
+          return (
+            textStyle.color === "rgb(163, 45, 45)" &&
+            dotStyle.backgroundColor === "rgb(200, 49, 47)"
+          );
+        }),
+      );
+      await closePage(page);
+    });
     for (const width of [390, 820, 1440]) {
       await scenario(`populated route and actions at ${width}`, async () => {
         const { page } = await openPage(width);
         await page.goto(`${server.baseUrl}/admin/referrals`);
-        await page
-          .getByRole("heading", { name: "Recent Activity", exact: true })
-          .waitFor();
+        await page.getByText("Recent Activity", { exact: true }).waitFor();
         check(
           `${width} uses the real Referrals route`,
           new URL(page.url()).pathname === "/admin/referrals",
         );
         await screenshot(page, `dashboard-populated-${width}`);
         await geometry(page, `dashboard-${width}`);
+        const activeMetric = page
+          .getByText("Active Promoters", { exact: true })
+          .locator("..");
+        check(
+          `${width} ordinary metrics use zinc ink`,
+          (await activeMetric
+            .locator("div")
+            .nth(1)
+            .evaluate((node) => getComputedStyle(node).color)) ===
+            "rgb(9, 9, 11)",
+        );
+        const pendingStatus = page
+          .getByText("pending", { exact: true })
+          .first();
+        check(
+          `${width} queued status uses a hollow local dot`,
+          await pendingStatus.locator("span").evaluate((node) => {
+            const style = getComputedStyle(node);
+            return (
+              node.getBoundingClientRect().width === 5 &&
+              style.backgroundColor === "rgba(0, 0, 0, 0)" &&
+              style.borderTopWidth === "1px"
+            );
+          }),
+        );
 
         await page
           .getByRole("button", { name: "Analytics", exact: true })
           .click();
-        await page
-          .getByRole("heading", { name: "Conversion Funnel", exact: true })
-          .waitFor();
+        await page.getByText("Conversion Funnel", { exact: true }).waitFor();
+        const chartValue = page.getByText("2 conv / $50.00", { exact: true });
+        check(
+          `${width} chart ink and bar use zinc without a gradient`,
+          await chartValue.evaluate((node) => {
+            const labelStyle = getComputedStyle(node);
+            const bar = node.parentElement.nextElementSibling.firstElementChild;
+            const barStyle = getComputedStyle(bar);
+            return (
+              labelStyle.color === "rgb(63, 63, 70)" &&
+              barStyle.backgroundColor === "rgb(9, 9, 11)" &&
+              barStyle.backgroundImage === "none"
+            );
+          }),
+        );
         await screenshot(page, `analytics-populated-${width}`);
 
         await page
           .getByRole("button", { name: "Queue (1)", exact: true })
           .click();
         await page
-          // The Field kit's `required` marker is an aria-hidden " *" span,
-          // but Chrome's real accessible-name computation includes it in a
-          // native `<label for>` association (a browser quirk jsdom-based
-          // unit tests don't reproduce) — match what actually renders.
-          .getByLabel("Friend's name *", { exact: true })
+          .getByPlaceholder("Friend's name *", { exact: true })
           .fill("Taylor Example");
-        await page.getByLabel("Phone *", { exact: true }).fill("9415550199");
         await page
-          .getByLabel("Email", { exact: true })
+          .getByPlaceholder("Phone *", { exact: true })
+          .fill("9415550199");
+        await page
+          .getByPlaceholder("Email", { exact: true })
           .fill("taylor@example.invalid");
         await page
-          .getByLabel("Promoter ID", { exact: true })
+          .getByPlaceholder("Promoter ID", { exact: true })
           .fill("promoter-1");
         await page
-          .getByLabel("Address", { exact: true })
+          .getByPlaceholder("Address", { exact: true })
           .fill("Synthetic location");
         await page
-          .getByLabel("Notes", { exact: true })
+          .getByPlaceholder("Notes", { exact: true })
           .fill("Synthetic browser check");
         await Promise.all([
           page.waitForResponse((response) =>
@@ -465,24 +573,20 @@ async function main() {
           exact: true,
         });
         await convertTrigger.click();
-        const convertDialog = page.getByRole("dialog", {
-          name: "Convert Referral",
-          exact: true,
-        });
+        const convertDialog = page
+          .getByText("Convert Referral", { exact: true })
+          .locator("..");
         await convertDialog
-          .getByLabel("Customer Search", { exact: true })
-          .fill("Avery");
-        await convertDialog
-          .getByRole("button", {
-            name: "Avery Example (9415550102)",
+          .getByPlaceholder("Search customer name or phone...", {
             exact: true,
           })
+          .fill("Avery");
+        await convertDialog
+          .getByText("Avery Example (9415550102)", { exact: true })
           .click();
+        await convertDialog.locator("select").selectOption("Gold");
         await convertDialog
-          .getByLabel("WaveGuard Tier", { exact: true })
-          .selectOption("Gold");
-        await convertDialog
-          .getByLabel("Monthly Value ($)", { exact: true })
+          .getByPlaceholder("e.g. 79", { exact: true })
           .fill("79");
         await screenshot(page, `convert-dialog-${width}`);
         await geometry(page, `convert-dialog-${width}`);
@@ -513,9 +617,7 @@ async function main() {
         // back on the (now-gone) trigger would just time out, so confirm
         // the real post-conversion contract instead: the row is gone, the
         // count heading reflects zero, and the empty state is shown.
-        await page
-          .getByRole("heading", { name: "Referral Queue (0)", exact: true })
-          .waitFor();
+        await page.getByText("Referral Queue (0)", { exact: true }).waitFor();
         await page.getByText("No pending referrals", { exact: true }).waitFor();
         check(
           `${width} convert removes the referral from the queue once signed up`,
@@ -526,29 +628,27 @@ async function main() {
           .getByRole("button", { name: "Promoters", exact: true })
           .click();
         await page
-          .getByRole("heading", { name: "Promoters (1)", exact: true })
+          .getByPlaceholder("Search promoters...", { exact: true })
           .waitFor();
         const enrollTrigger = page.getByRole("button", {
           name: "Enroll Customer",
           exact: true,
         });
         await enrollTrigger.click();
-        const enrollDialog = page.getByRole("dialog", {
-          name: "Enroll Customer as Promoter",
-          exact: true,
-        });
+        const enrollDialog = page
+          .getByText("Enroll Customer as Promoter", { exact: true })
+          .locator("..");
         await enrollDialog
-          .getByLabel("Customer Search", { exact: true })
+          .getByPlaceholder("Search customer name or phone...", {
+            exact: true,
+          })
           .fill("Avery");
         await Promise.all([
           page.waitForResponse((response) =>
             response.url().endsWith("/api/admin/referrals/enroll"),
           ),
           enrollDialog
-            .getByRole("button", {
-              name: "Avery Example (9415550102)",
-              exact: true,
-            })
+            .getByText("Avery Example (9415550102)", { exact: true })
             .click(),
         ]);
         assert.deepEqual(
@@ -561,14 +661,8 @@ async function main() {
             .at(-1).payload,
           { customerId: "customer-1" },
         );
-        // handleEnroll's success path calls the page's `load()` (byte-for-
-        // byte from main), whose synchronous `setLoading(true)` swaps the
-        // ENTIRE tree for a "Loading referral program..." card in the same
-        // commit that closes the dialog — the trigger button is unmounted
-        // before the Dialog's cleanup can restore focus to it, so focus
-        // predictably falls back to <body>. Pre-existing main behavior
-        // (the full-teardown reload on every action); the Dialog primitive
-        // doesn't paper over it. Confirm the enroll actually landed instead.
+        // Main replaces the whole page with loading feedback while load()
+        // refreshes the data after a successful enrollment.
         await enrollDialog.waitFor({ state: "hidden" });
         await page
           .getByRole("button", { name: "Enroll Customer", exact: true })
@@ -595,7 +689,18 @@ async function main() {
             .at(-1).payload,
           {},
         );
-        await page.getByText("applied", { exact: true }).waitFor();
+        const appliedStatus = page.getByText("applied", { exact: true });
+        await appliedStatus.waitFor();
+        check(
+          `${width} completed status uses a hollow tertiary dot`,
+          await appliedStatus.locator("span").evaluate((node) => {
+            const style = getComputedStyle(node);
+            return (
+              style.backgroundColor === "rgba(0, 0, 0, 0)" &&
+              style.borderTopColor === "rgb(113, 113, 122)"
+            );
+          }),
+        );
 
         await page
           .getByRole("button", { name: "Settings", exact: true })
@@ -607,10 +712,12 @@ async function main() {
           .getByRole("button", { name: "Edit Settings", exact: true })
           .click();
         await page
-          .getByLabel("Referrer Reward (cents)", { exact: true })
+          .getByText("Referrer Reward (cents)", { exact: true })
+          .locator("..")
+          .locator("input")
           .fill("3000");
         await page
-          .getByRole("switch", { name: "Disabled", exact: true })
+          .getByRole("button", { name: "Disabled", exact: true })
           .click();
         await screenshot(page, `settings-edit-${width}`);
         await geometry(page, `settings-edit-${width}`);
@@ -637,7 +744,7 @@ async function main() {
             Object.keys(savedSettings).length ===
               Object.keys(settingsFixture).length,
         );
-        await page.close();
+        await closePage(page);
       });
 
       await scenario(`empty state at ${width}`, async () => {
@@ -652,14 +759,14 @@ async function main() {
           .getByRole("button", { name: "Promoters", exact: true })
           .click();
         await page
-          .getByRole("heading", { name: "Promoters (0)", exact: true })
+          .getByPlaceholder("Search promoters...", { exact: true })
           .waitFor();
         check(
           `${width} promoters table has no rows when empty`,
           (await page.locator("table tbody tr").count()) === 0,
         );
         await screenshot(page, `promoters-empty-${width}`);
-        await page.close();
+        await closePage(page);
       });
 
       // Main silently degrades a failed initial load (each list falls back to
@@ -668,9 +775,7 @@ async function main() {
       await scenario(`load failure degrades quietly at ${width}`, async () => {
         const { page } = await openPage(width, "error");
         await page.goto(`${server.baseUrl}/admin/referrals`);
-        await page
-          .getByRole("heading", { name: "Referrals", exact: true })
-          .waitFor();
+        await page.getByText("Referrals", { exact: true }).first().waitFor();
         check(
           `${width} dashboard renders nothing when stats fails to load`,
           (await page.getByText("Recent Activity").count()) === 0,
@@ -683,7 +788,7 @@ async function main() {
           .getByRole("button", { name: "Promoters", exact: true })
           .click();
         await page
-          .getByRole("heading", { name: "Promoters (0)", exact: true })
+          .getByPlaceholder("Search promoters...", { exact: true })
           .waitFor();
         await page
           .getByRole("button", { name: "Payouts", exact: true })
@@ -691,7 +796,7 @@ async function main() {
         await page.getByText("No payout requests", { exact: true }).waitFor();
         check(`${width} no pageerror on a fully-failed load`, true);
         await screenshot(page, `load-failure-${width}`);
-        await page.close();
+        await closePage(page);
       });
     }
     assert.deepEqual(report.unmatched, []);
