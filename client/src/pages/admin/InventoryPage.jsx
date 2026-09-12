@@ -2123,14 +2123,6 @@ function UnitReviewTab({ showToast }) {
                               Apply
                             </Button>
                           </div>
-                          <div className="text-ui-body text-ink-secondary">
-                            Apply unit:{" "}
-                            <strong className="text-zinc-900">
-                              {draft.inventoryUnit ||
-                                product.suggestedUnit ||
-                                "Choose a unit"}
-                            </strong>
-                          </div>
                           <Checkbox
                             label="Convert existing stock and low-stock threshold"
                             checked={draft.convertExistingStock !== false}
