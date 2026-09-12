@@ -6537,6 +6537,28 @@ async function recordCommitmentsStep({ call, callSid, transcription, extracted, 
 // (services/call-reschedule-apply.js). Runs after finalization, fenced on
 // this pass's GENERATION. Sends NOTHING to the customer. Dark behind
 // GATE_CALL_RESCHEDULE_APPLY; never blocks the call.
+// The two bookkeeping passes an APPLIED move owes, in one place so the step
+// above states the move and this states what follows from it (codex P2) —
+// both share the same precondition and both are non-blocking by design.
+async function applyRescheduleFollowUps({ call, callSid, result }) {
+  if (result?.outcome !== 'applied') return;
+  // recordCommitmentsStep ran BEFORE this step, so a schedule_visit promise
+  // the move just kept was written open and its proof did not exist yet.
+  // Re-run the fulfillment lookup now that the activity row exists, or the
+  // watchdog reports an overdue promise this pass already kept (GH codex
+  // #4204 r6 P2).
+  if (isEnabled('callCommitments')) {
+    await require('./call-commitments').refreshFulfillment(db, call.id)
+      .catch((err) => logger.warn(`[call-proc] post-reschedule fulfillment refresh failed for ${maskSid(callSid)}: ${err.message}`));
+  }
+  // NOTE: the promised window this move communicated needs no capture step
+  // here. no-show-detector.js derives it from the activity_log row
+  // call-reschedule-apply.js writes in the SAME transaction as the move, so
+  // there is nothing to lose if a best-effort write fails after the call is
+  // finalized — and every move applied before that feature existed reads the
+  // same way (codex P1, PR #4403 rounds 8 and 10).
+}
+
 async function applyCallRescheduleStep({ call, callSid, customerId, extracted, v2Result, appointmentResult, procGeneration }) {
   if (extracted?.is_spam || !isEnabled('callRescheduleApply')) return;
   if (v2Result?.status !== 'valid' || !v2Result.extraction) return;
@@ -6551,17 +6573,11 @@ async function applyCallRescheduleStep({ call, callSid, customerId, extracted, v
     if (result.outcome !== 'skipped' || result.reason !== 'not_a_reschedule') {
       logger.info(`[call-proc] reschedule-apply for ${maskSid(callSid)}: ${result.outcome}${result.reason ? ` (${result.reason})` : ''}${result.visitId ? ` visit=${result.visitId}` : ''}`);
     }
-    // recordCommitmentsStep ran BEFORE this step, so a schedule_visit promise
-    // the move just kept was written open and its proof did not exist yet.
-    // Re-run the fulfillment lookup now that the activity row exists, or the
-    // watchdog reports an overdue promise this pass already kept (GH codex
-    // #4204 r6 P2). Non-blocking, like every other line in this step.
-    if (result.outcome === 'applied' && isEnabled('callCommitments')) {
-      await require('./call-commitments').refreshFulfillment(db, call.id)
-        .catch((err) => logger.warn(`[call-proc] post-reschedule fulfillment refresh failed for ${maskSid(callSid)}: ${err.message}`));
-    }
+    await applyRescheduleFollowUps({ call, callSid, result });
+    return result;
   } catch (err) {
     logger.warn(`[call-proc] reschedule-apply step failed (non-blocking) for ${maskSid(callSid)}: ${err.message}`);
+    return { outcome: 'error', error: err.message };
   }
 }
 
@@ -16549,6 +16565,11 @@ const CallRecordingProcessor = {
       // agent-committed move of an on-the-books visit lands on the visit.
       // No customer comms. Generation-fenced, never blocking.
       await applyCallRescheduleStep({ call, callSid, customerId, extracted, v2Result, appointmentResult, procGeneration });
+
+      // The window this booking call committed needs no capture step either:
+      // the visit row carries source_call_log_id, written in the booking
+      // transaction, and no-show-detector.js derives the promise from that
+      // durable link (codex P1, PR #4403 round 10).
     }
 
     // Reconcile-only draft-linkage pass, AFTER the fenced finalization
@@ -17279,6 +17300,7 @@ CallRecordingProcessor._test = {
   isTechFollowUpCall,
   finalizeTechFollowUpCall,
   recordCommitmentsStep,
+  applyCallRescheduleStep,
   recordedPartOfComposite,
   summarizeBatch,
   noteSharedPhoneSibling,

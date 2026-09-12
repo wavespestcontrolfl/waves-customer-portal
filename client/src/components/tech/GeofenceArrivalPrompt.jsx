@@ -10,6 +10,9 @@
  *     no auto-dismiss: it waits until the tech taps "Got it"
  *   - a text card for `tech_line_sms` (tech-line.js: a text to the tech's own
  *     Twilio line) — same kept-until-"Got it" rule and the same on-screen cap
+ *   - a tracking card for `follow_through_tracking` (no-show-detector.js: a
+ *     missing-departure/arrival warning on one of this tech's own visits) —
+ *     same kept-until-"Got it" rule and cap, sharing the visit-card slot
  *
  * Mount once inside TechLayout / TechHomePage — it renders a fixed-position
  * container so the parent layout doesn't need to reserve space.
@@ -50,7 +53,12 @@ const MAX_VISIT_CARDS = 2;
 const VISIT_TYPES = new Set(['visit_assigned', 'visit_unassigned', 'visit_rescheduled', 'visit_cancelled']);
 // A text on the tech's own line is kept the same way, and shares the cap.
 const TEXT_TYPES = new Set(['tech_line_sms']);
-const KEPT_TYPES = new Set([...VISIT_TYPES, ...TEXT_TYPES]);
+// A missing-departure/arrival warning (no-show-detector.js) never
+// auto-dismisses either — it identifies a visit that still needs an
+// en_route/arrived stamp, so it stays until the tech taps "Got it" (or the
+// server-side alert clears and the card falls out of the poll).
+const TRACKING_TYPES = new Set(['follow_through_tracking']);
+const KEPT_TYPES = new Set([...VISIT_TYPES, ...TEXT_TYPES, ...TRACKING_TYPES]);
 const VISIT_ACCENT = {
   visit_assigned: '#0ea5e9',
   visit_rescheduled: '#f59e0b',
@@ -156,17 +164,25 @@ export default function GeofenceArrivalPrompt({ onStormReview }) {
       (a, b) => new Date(b.created_at || 0) - new Date(a.created_at || 0),
     );
     const shownStorms = stormAlerts.slice(0, MAX_STORM_CARDS);
-    const visitsNewestFirst = [...visitCards].sort(
-      (a, b) => new Date(b.created_at || 0) - new Date(a.created_at || 0),
-    );
-    const shownVisits = visitsNewestFirst.slice(0, MAX_VISIT_CARDS);
+    // Tracking cards (follow_through_tracking) rank ahead of routine kept
+    // cards inside the cap — stage 2 first, then stage 1 — so two newer
+    // routine visit/text cards can never push a stage-2 "needs an arrival
+    // check" card into the hidden-count summary. Recency alone was the only
+    // sort before this, and both buckets share MAX_VISIT_CARDS (codex P1).
+    const trackingTier = (n) => (n.type === 'follow_through_tracking' ? (n.payload?.stage === 2 ? 2 : 1) : 0);
+    const visitsRanked = [...visitCards].sort((a, b) => {
+      const tierDiff = trackingTier(b) - trackingTier(a);
+      if (tierDiff !== 0) return tierDiff;
+      return new Date(b.created_at || 0) - new Date(a.created_at || 0);
+    });
+    const shownVisits = visitsRanked.slice(0, MAX_VISIT_CARDS);
     // Order: actionable prompts, then storm warnings (both on a timer that
     // marks them read), then the persistent visit cards — nothing that can
     // expire unseen ever sits below something that waits for a tap.
     return {
       cards: [...otherCards, ...shownStorms, ...shownVisits],
       hiddenStormCount: stormAlerts.length - shownStorms.length,
-      hiddenVisitCount: visitsNewestFirst.length - shownVisits.length,
+      hiddenVisitCount: visitsRanked.length - shownVisits.length,
     };
   }, [active]);
 
@@ -272,6 +288,9 @@ export default function GeofenceArrivalPrompt({ onStormReview }) {
           )}
           {TEXT_TYPES.has(n.type) && (
             <TextCard n={n} onDismiss={() => dismissVisitCard(n.id)} />
+          )}
+          {TRACKING_TYPES.has(n.type) && (
+            <TrackingCard n={n} onDismiss={() => dismissVisitCard(n.id)} />
           )}
           {n.type === 'storm_watch_alert' && (
             <StormCard
@@ -430,6 +449,34 @@ function TextCard({ n, onDismiss }) {
       </div>
       <div style={{ fontSize: 14, color: COLORS.text, marginBottom: 12, lineHeight: 1.4, whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' }}>
         {p.body || (media > 0 ? `${media} photo${media === 1 ? '' : 's'}` : '(empty message)')}
+      </div>
+      <button onClick={onDismiss} style={{ ...btnSecondary, width: '100%' }}>Got it</button>
+    </div>
+  );
+}
+
+// A missing-departure/arrival warning on one of this tech's own visits
+// (no-show-detector.js). The server composes `message`; stage 2 means the
+// promised window is well behind, not just due.
+function TrackingCard({ n, onDismiss }) {
+  const p = n.payload || {};
+  const stage = p.stage;
+  return (
+    <div style={cardStyle(stage === 2 ? COLORS.red : COLORS.amber)} data-testid="tracking-notice">
+      <div style={{ fontSize: 14, color: COLORS.muted, marginBottom: 4 }}>
+        {stage === 2 ? '⚠️ Arrival check needed' : '📍 Window underway'}
+      </div>
+      {/* Same customer_name/when shape a VisitCard reads — identifies which
+          stop this is about (codex P1: a tech with more than one open stop
+          can't tell from the bare stage message alone). */}
+      <div style={{ fontSize: 16, fontWeight: 600, color: COLORS.text, marginBottom: 4 }}>
+        {p.customer_name || 'Customer'}
+      </div>
+      {p.when && (
+        <div style={{ fontSize: 13, color: COLORS.muted, marginBottom: 12 }}>{p.when}</div>
+      )}
+      <div style={{ fontSize: 14, color: COLORS.text, marginBottom: 12, lineHeight: 1.4 }}>
+        {n.message}
       </div>
       <button onClick={onDismiss} style={{ ...btnSecondary, width: '100%' }}>Got it</button>
     </div>
