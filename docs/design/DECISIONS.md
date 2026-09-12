@@ -2340,6 +2340,29 @@ The gate fails in both directions. Over the allowance is a regression, so a file
 
 `SecurePlanChoice`'s two 13px values — the violation the ruling names — are fixed to 14 rather than baselined. Two emoji the scanner found in doc comments rather than rendered JSX were removed from the prose.
 
+## 2026-09-11 — R3b: weights above 700 cleared from the baseline
+
+G-04 found weights above 700 surviving on glass through shared tokens the gate
+could not see. C8 widened the gate and enumerated what it exposed; this clears
+the whole `heavy-weight` rule from `LEGACY_BASELINE` — fifteen violations across
+eight files, all snapped to 700 (the customer scale is 400 / 500 / 600 / 700,
+owner sheet 2026-09-03).
+
+`App.jsx` carried seven at **850** — every customer error-boundary heading and
+its retry button, plus "Loading your portal". `NotificationBell` spelled its two
+as `fontWeight: type === 'admin' ? 700 : 800`: the ternary existed only to give
+the customer surface the heavier weight, so with both arms at 700 it is a
+distinction without a difference and the ternary is gone. The rest were single
+literals in `GlassNewsletterCard`, `InstallPrompt`, `NewsletterSignup`,
+`StationMapCard`, `VanScene` and one `font-weight: 800` in `index.css`.
+
+`InstallPrompt` and `VanScene` were weight-only and are **delisted** — the gate
+fails on a stale entry, so a file that reaches zero has to lose its line.
+
+**Debt: 90 → 75 across 25 files.** Everything left is `banned-font-size`, `emoji`,
+`font-family-literal` or `local-palette`. No behaviour changes; 96 tests across
+the seven suites that render these components pass unchanged.
+
 ## 2026-09-11 — R2a: one customer page column (CustomerColumn)
 
 The Liquid Glass audit's G-01 (`liquid-glass-consistency-audit-2026-09-09.md` §3) found five different phone gutters (10/12/16/20/24) and several desktop column widths across the customer glass pages, because no page-column primitive existed — every page hand-authored its own wrapper, and `index.css` carried five near-duplicate classes (`.waves-customer-page`, `.waves-receipt-page`, `.waves-estimate-page`, `.waves-rate-page`, `.waves-contract-page`) on top of that. `components/brand/CustomerColumn.jsx` is now the one primitive: `boxSizing: 'border-box'`, `width: '100%'`, `margin: '0 auto'`, `padding: '28px 16px 56px'` (`PAGE_TOP` / `PAGE_GUTTER` / `PAGE_BOTTOM`, new named tokens in `theme-doc.js`), `flex: 1` (page roots use `flex: 1`, DECISIONS 2026-09-04, so the shell footer follows the content), and `maxWidth` from `column`: `"document"` (default) → `DOC_COLUMN_MAX` (760) of CONTENT, `"flow"` → `FLOW_COLUMN_MAX` (640) of content. The named widths are content widths — the audit measured card edges — so the border-box outer cap is content + both gutters (792 / 672); a 760 outer cap would have rendered 728 of content past 792px viewports, a 32px narrowing of every desktop document that the first cut of this primitive actually had. None of this is a new choice — 760/28/56 is `DOC_PAGE_MARGIN` and 640 is `FLOW_COLUMN_MAX`, both already exported by `theme-doc.js` per the PR #2527 ruling ("pay's cap is the standard"); the fix is giving every page ONE way to reach them instead of eleven-plus. `DOC_COLUMN` (theme-doc's `min(100% - 32px, 760px)` width string) stays exported for its one non-`<CustomerColumn>` consumer (the tokens dev-preview) but no longer backs any page wrapper; the parallel `FLOW_COLUMN` string had no consumer and was not kept — flow pages reach 640 only through `<CustomerColumn column="flow">`.
