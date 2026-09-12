@@ -1461,44 +1461,59 @@ router.post('/:token/setup-complete', async (req, res) => {
       });
     }
     const methodType = (typeof pmObject === 'object' && pmObject?.type) || saved.method_type || 'card';
-    if (!(await ConsentService.hasConsentFor(invoice.customer_id, stripePmId))) {
-      // Same one-transaction fence as /consent: the authorization and the
-      // ownership judgement commit together.
-      const PacketsForConsent = require('../services/visit-completion-packets');
-      let refusedForPayer = false;
+    const PacketsForConsent = require('../services/visit-completion-packets');
+    // A consent row is written only when the method has none yet; the
+    // ownership judgement and the enrollment below run either way.
+    const needsConsentRow = !(await ConsentService.hasConsentFor(invoice.customer_id, stripePmId));
+    // CONSENT *AND* ENROLLMENT UNDER ONE OWNERSHIP JUDGEMENT (local audit on
+    // r46, the same pattern /consent uses): committing the authorization
+    // first left it recorded when a Bill-To assignment landed before the
+    // enrollment and the request answered 409.
+    const SETUP_PAYER_BILLED_ROLLBACK = Symbol('setup_payer_billed_rollback');
+    let refusedForPayer = false;
+    let enrollment = null;
+    try {
       await db.transaction(async (trx) => {
-        if (await PacketsForConsent.invoicePayerOwnedNow(invoice.id, trx)) {
-          refusedForPayer = true;
-          return null;
+        if (await PacketsForConsent.invoicePayerOwnedNow(invoice.id, trx)) throw SETUP_PAYER_BILLED_ROLLBACK;
+        if (needsConsentRow) {
+          await ConsentService.recordConsent({
+            customerId: invoice.customer_id,
+            paymentMethodId: saved.id,
+            stripePaymentMethodId: stripePmId,
+            source: 'pay_page',
+            methodType,
+            ip: req.ip,
+            userAgent: req.get('user-agent') || null,
+            database: trx,
+          });
         }
-        return ConsentService.recordConsent({
+        const { enrollConsentedMethod } = require('../services/autopay-enrollment');
+        enrollment = await enrollConsentedMethod({
           customerId: invoice.customer_id,
           paymentMethodId: saved.id,
-          stripePaymentMethodId: stripePmId,
-          source: 'pay_page',
-          methodType,
-          ip: req.ip,
-          userAgent: req.get('user-agent') || null,
-          database: trx,
+          source: 'save_card_consent',
+          details: { via: 'covered_by_credit_setup', invoice_id: invoice.id },
+          // Invoice visit scope for the in-lock payer check (#3395 r14 P1).
+          scheduledServiceId: invoice.scheduled_service_id || null,
+          invoiceId: invoice.id,
+          dbh: trx,
         });
+        if (enrollment?.reason === 'payer_billed') throw SETUP_PAYER_BILLED_ROLLBACK;
       });
-      if (refusedForPayer) {
-        return res.status(409).json({
-          error: 'This invoice is billed to a third-party payer',
-          code: 'invoice_withdrawn_from_customer',
-        });
-      }
+    } catch (txErr) {
+      if (txErr !== SETUP_PAYER_BILLED_ROLLBACK) throw txErr;
+      refusedForPayer = true;
     }
-    const { enrollConsentedMethod } = require('../services/autopay-enrollment');
-    const enrollment = await enrollConsentedMethod({
-      customerId: invoice.customer_id,
-      paymentMethodId: saved.id,
-      source: 'save_card_consent',
-      details: { via: 'covered_by_credit_setup', invoice_id: invoice.id },
-      // Invoice visit scope for the in-lock payer check (#3395 r14 P1).
-      scheduledServiceId: invoice.scheduled_service_id || null,
-      invoiceId: invoice.id,
-    });
+    if (refusedForPayer) {
+      return res.status(409).json({
+        error: 'This invoice is billed to a third-party payer',
+        code: 'invoice_withdrawn_from_customer',
+      });
+    }
+    // Savepoint mode hands the confirmation email back for after the commit.
+    if (typeof enrollment?.sendEnrollmentConfirmation === 'function') {
+      await enrollment.sendEnrollmentConfirmation();
+    }
     // A REFUSED enrollment must leave the invoice collectible (Codex
     // #2507 round-8 P2): settling here would complete the required-save
     // signup prepaid with nothing chargeable enrolled. ach_blocked =

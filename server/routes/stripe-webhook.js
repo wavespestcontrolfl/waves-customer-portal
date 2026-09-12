@@ -2476,7 +2476,8 @@ async function mirrorSavedMethodForSucceededIntent(paymentIntent) {
         } catch (lookupErr) {
           logger.warn(`[stripe-webhook] consent-time lookup failed for pm ${stripePmId}: ${lookupErr.message}`);
         }
-        if (!(await ConsentService.hasConsentFor(wavesCustomerId, stripePmId))) {
+        let coveredNeedsConsentRow = false;
+      if (!(await ConsentService.hasConsentFor(wavesCustomerId, stripePmId))) {
           // Record the consent snapshot SERVER-SIDE — same recipe as the
           // covered_capture webhook (Codex #2507 round-7 P1): for an ACH
           // micro-deposit signup, confirmPayment returned requires_action
@@ -5105,32 +5106,11 @@ async function handleSetupIntentSucceeded(setupIntent, { eventCreatedAt = null }
           makeDefault: false,
         });
       }
-      if (!(await ConsentService.hasConsentFor(wavesCustomerId, stripePmId))) {
-        // The authorization row and the ownership judgement commit together,
-        // the same fence the pay routes use (local audit on r39): the check
-        // above ran before a Stripe round-trip, and a Bill-To change during
-        // it would otherwise leave consent recorded for a withdrawn invoice.
-        let consentRefusedForPayer = false;
-        await db.transaction(async (trx) => {
-          if (coveredInvoiceId
-            && await require('../services/visit-completion-packets').invoicePayerOwnedNow(coveredInvoiceId, trx)) {
-            consentRefusedForPayer = true;
-            return null;
-          }
-          return ConsentService.recordConsent({
-            customerId: wavesCustomerId,
-            paymentMethodId: saved.id,
-            stripePaymentMethodId: stripePmId,
-            source: 'pay_page',
-            methodType: saved.method_type || 'card',
-            database: trx,
-          });
-        });
-        if (consentRefusedForPayer) {
-          logger.warn(`[stripe-webhook] covered-capture SI ${setupIntent.id} — invoice ${coveredInvoiceId} moved to a third-party payer during the save; no consent recorded, no enrollment`);
-          return;
-        }
-      }
+      // The authorization row, the ownership judgement and the enrollment all
+      // commit together below (local audit on r39 and r46): the checks above
+      // ran before a Stripe round-trip, and a Bill-To change during it would
+      // otherwise leave consent recorded for a withdrawn invoice.
+      const coveredNeedsConsentRow = !(await ConsentService.hasConsentFor(wavesCustomerId, stripePmId));
       await ConsentService.linkPaymentMethodId(stripePmId, saved.id);
       const { enrollConsentedMethod } = require('../services/autopay-enrollment');
       // authorizedAt: this webhook can complete DAYS after the customer
@@ -5152,18 +5132,59 @@ async function handleSetupIntentSucceeded(setupIntent, { eventCreatedAt = null }
       } catch (scopeErr) {
         logger.warn(`[stripe-webhook] covered-capture invoice scope lookup failed for SI ${setupIntent.id}: ${scopeErr.message}`);
       }
-      const enrollment = await enrollConsentedMethod({
-        customerId: wavesCustomerId,
-        paymentMethodId: saved.id,
-        source: 'save_card_consent',
-        details: { via: 'covered_capture_webhook', setup_intent_id: setupIntent.id },
-        authorizedAt: setupIntent.created ? new Date(setupIntent.created * 1000) : null,
-        scheduledServiceId: coveredScopeSsId,
-        // The withdrawal and the packet's live owner, re-judged inside the
-        // enrollment's own transaction (Codex #4311 r38 P1) — this completion
-        // can land days after the pre-check above.
-        invoiceId: coveredInvoiceId,
-      });
+      // CONSENT *AND* ENROLLMENT UNDER ONE OWNERSHIP JUDGEMENT (local audit
+      // on r46, matching /consent and /setup-complete): committing the
+      // authorization first left it recorded when a Bill-To assignment landed
+      // before the enrollment refused.
+      const COVERED_PAYER_BILLED_ROLLBACK = Symbol('covered_payer_billed_rollback');
+      let coveredRefusedForPayer = false;
+      let enrollment = null;
+      try {
+        await db.transaction(async (trx) => {
+          if (coveredInvoiceId
+            && await require('../services/visit-completion-packets').invoicePayerOwnedNow(coveredInvoiceId, trx)) {
+            throw COVERED_PAYER_BILLED_ROLLBACK;
+          }
+          if (coveredNeedsConsentRow) {
+            await ConsentService.recordConsent({
+              customerId: wavesCustomerId,
+              paymentMethodId: saved.id,
+              stripePaymentMethodId: stripePmId,
+              source: 'pay_page',
+              methodType: saved.method_type || 'card',
+              database: trx,
+            });
+          }
+          enrollment = await enrollConsentedMethodInTrx(trx);
+          if (enrollment?.reason === 'payer_billed') throw COVERED_PAYER_BILLED_ROLLBACK;
+        });
+      } catch (txErr) {
+        if (txErr !== COVERED_PAYER_BILLED_ROLLBACK) throw txErr;
+        coveredRefusedForPayer = true;
+      }
+      if (coveredRefusedForPayer) {
+        logger.warn(`[stripe-webhook] covered-capture SI ${setupIntent.id} — invoice ${coveredInvoiceId} moved to a third-party payer during the save; no consent recorded, no enrollment`);
+        return;
+      }
+      // Savepoint mode hands the confirmation email back for after the commit.
+      if (typeof enrollment?.sendEnrollmentConfirmation === 'function') {
+        await enrollment.sendEnrollmentConfirmation();
+      }
+      function enrollConsentedMethodInTrx(trx) {
+        return enrollConsentedMethod({
+          customerId: wavesCustomerId,
+          paymentMethodId: saved.id,
+          source: 'save_card_consent',
+          details: { via: 'covered_capture_webhook', setup_intent_id: setupIntent.id },
+          authorizedAt: setupIntent.created ? new Date(setupIntent.created * 1000) : null,
+          scheduledServiceId: coveredScopeSsId,
+          // The withdrawal and the packet's live owner, re-judged inside the
+          // enrollment (Codex #4311 r38 P1) — this completion can land days
+          // after the pre-check above.
+          invoiceId: coveredInvoiceId,
+          dbh: trx,
+        });
+      }
       // Capture done → apply the HELD credit coverage (Codex #2507
       // round-7 P1): under the hold flow the invoice stayed collectible
       // until this point, and when the browser never returns this webhook

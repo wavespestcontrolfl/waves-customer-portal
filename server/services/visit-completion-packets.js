@@ -429,7 +429,13 @@ function livePaymentVerdict(payment, invoice) {
     return { ...payment, state: 'office_required', reason: 'payer_assigned', payerId: livePayerId };
   }
   if (payment.reason !== 'payer_assigned') return payment;
-  return { ...payment, state: payment.state === 'office_required' ? 'collected' : payment.state, reason: null, payerId: null };
+  // The payer verdict goes, but the replacement is derived from the LIVE
+  // invoice (local audit on r46): a released invoice is requeued and still
+  // unpaid, so reporting `collected` would tell the caller money arrived that
+  // nobody has paid. Only a settled row justifies a settled outcome.
+  const settled = ['paid', 'prepaid'].includes(String(invoice.status || '').toLowerCase());
+  if (payment.state !== 'office_required') return { ...payment, reason: null, payerId: null };
+  return { ...payment, state: settled ? 'collected' : 'payment_needed', reason: null, payerId: null };
 }
 
 /**
