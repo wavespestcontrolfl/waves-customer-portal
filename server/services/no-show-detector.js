@@ -75,7 +75,8 @@ const ARRIVAL_STAMPS = ['arrived_at', 'actual_start_time', 'check_in_time'];
 // (see the ignoreHorizon note on promisedStartAt) — an ancient, presumably
 // already-handled promise must not surface as news.
 const HORIZON_MS = 48 * 3600000;
-// How long a detector row is left alone by the disabled-state cleanup. Long
+// How recently a tracking row must have been created for the disabled-state
+// cleanup to conclude the feature is still running on another replica. Long
 // enough to cover a rolling deploy, in which one replica can still read the
 // gate as off while another creates rows under it.
 const DISABLED_CLEANUP_GRACE_MS = 15 * 60000;
@@ -1280,20 +1281,28 @@ async function lockedStop(trx, serviceId, { now = new Date(), ignoreHorizon = fa
 async function cleanupAfterDisable(conn) {
   if (enabled()) return { resolved: 0, dismissed: 0 };
   const dispatch = require('./dispatch-alerts');
-  // A GRACE WINDOW, because this decision is process-local: during a
-  // zero-downtime deploy an old replica still carrying the gate as OFF runs
-  // alongside a new one that has it ON, and without this it would resolve the
-  // rows that replica is creating (codex P2 round 20). Anything the feature
-  // is actively maintaining is younger than this; a genuinely disabled fleet
-  // clears itself one tick later.
+  // Is the DETECTOR still active anywhere? This decision is process-local, so
+  // during a zero-downtime deploy an old replica still carrying the gate as
+  // OFF runs alongside a new one that has it ON. Judging each row by its own
+  // age was not enough — a long-standing alert the enabled replica is still
+  // maintaining is old, and would have been cleaned anyway (codex P1 round
+  // 20). The fleet-wide signal is detector ACTIVITY: any tracking row created
+  // within the grace window means the feature is running somewhere, so this
+  // pass stands down entirely and tries again next tick.
   const settled = new Date(Date.now() - DISABLED_CLEANUP_GRACE_MS);
+  const recentAlert = await conn('dispatch_alerts').whereRaw("payload->>'source' = 'no_show_detector'")
+    .where('created_at', '>=', settled).first('id');
+  const recentNotice = recentAlert ? null
+    : await conn('tech_notifications').where({ type: 'follow_through_tracking' })
+      .where('created_at', '>=', settled).first('id');
+  if (recentAlert || recentNotice) return { resolved: 0, dismissed: 0, deferred: true };
   const open = await conn('dispatch_alerts').whereIn('type', dispatch.OVERDUE_ALERT_TYPES)
     .whereNull('resolved_at').whereRaw("payload->>'source' = 'no_show_detector'")
-    .where('created_at', '<', settled).select('id');
+    .select('id');
   for (const alert of open) await dispatch.resolveAlert({ id: alert.id, auto: true });
   const dismissedAt = new Date();
   const dismissed = await conn('tech_notifications').where({ type: 'follow_through_tracking' })
-    .whereNull('dismissed_at').where('created_at', '<', settled)
+    .whereNull('dismissed_at')
     .update({ dismissed_at: dismissedAt, read: true, updated_at: dismissedAt,
       payload: conn.raw("COALESCE(payload, '{}'::jsonb) || jsonb_build_object('superseded_at', ?::text)", [dismissedAt.toISOString()]) });
   if (open.length || dismissed) {

@@ -371,6 +371,50 @@ describe('candidates come from the promise as well as the schedule (deferred P2,
   });
 });
 
+describe('cleanupAfterDisable stands down while the feature runs elsewhere (round-20 P1)', () => {
+  const { cleanupAfterDisable } = require('../services/no-show-detector');
+  // The gate is read per process, so during a zero-downtime deploy an old
+  // replica can still see it as OFF while a new one creates rows under it.
+  // Judging each row by its own age was not enough — a long-standing alert
+  // the enabled replica is still maintaining is old — so the signal is
+  // detector ACTIVITY anywhere in the fleet.
+  function fakeConn({ recentAlert = null, recentNotice = null } = {}) {
+    const calls = { updated: 0 };
+    const conn = (table) => {
+      const chain = {};
+      for (const m of ['whereIn', 'whereRaw', 'whereNull', 'where']) chain[m] = () => chain;
+      chain.first = async () => (table === 'dispatch_alerts' ? recentAlert : recentNotice);
+      chain.select = async () => [];
+      chain.update = async () => { calls.updated += 1; return 0; };
+      return chain;
+    };
+    conn.raw = (sql) => ({ sql });
+    return { conn, calls };
+  }
+
+  afterEach(() => { delete process.env.GATE_NOSHOW_DETECTOR; });
+
+  test('a tracking row created inside the grace window defers the whole pass', async () => {
+    const { conn, calls } = fakeConn({ recentAlert: { id: 'a1' } });
+    expect(await cleanupAfterDisable(conn)).toMatchObject({ resolved: 0, dismissed: 0, deferred: true });
+    expect(calls.updated).toBe(0);
+  });
+
+  test('no recent activity -> the pass clears everything, whatever its age', async () => {
+    const { conn, calls } = fakeConn();
+    const result = await cleanupAfterDisable(conn);
+    expect(result.deferred).toBeUndefined();
+    expect(calls.updated).toBe(1);
+  });
+
+  test('the gate being ON is still the first thing checked', async () => {
+    process.env.GATE_NOSHOW_DETECTOR = 'true';
+    const { conn, calls } = fakeConn();
+    expect(await cleanupAfterDisable(conn)).toMatchObject({ resolved: 0, dismissed: 0 });
+    expect(calls.updated).toBe(0);
+  });
+});
+
 describe('grouped stops are evaluated as one visit (round-10 P1)', () => {
   const { groupedStops, stopState, stopPromise } = require('../services/no-show-detector');
   // A service_visits row is ONE physical stop shared by N scheduled_services:
