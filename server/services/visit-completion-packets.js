@@ -310,6 +310,146 @@ function memberEffectRefusal(result) {
   return 'retry';
 }
 
+/**
+ * The two per-completion side effects a closed packet owes, each with its own
+ * eligibility: a loyalty card mints for every performed, non-internal-only
+ * completion (a backfill mints silently), while a referral credit excludes
+ * backfills but not an internal-only report posture. Both helpers own their
+ * single-use guards, so this runs once per packet pass and decides only WHO
+ * qualifies.
+ */
+async function runPacketCompletionCredits(packetId, database) {
+  const recorded = await database('visit_completion_packet_items as i')
+    .join('service_records as r', 'r.id', 'i.service_record_id')
+    .join('scheduled_services as s', 's.id', 'i.scheduled_service_id')
+    .where('i.packet_id', packetId).where('r.status', 'completed')
+    .orderBy('s.window_start').orderBy('s.id')
+    .select('s.id', 's.customer_id', 's.is_recurring', 's.recurring_pattern', 'r.id as record_id', 'r.structured_notes', 'r.service_date');
+  const notesOf = (member) => (typeof member.structured_notes === 'string'
+    ? JSON.parse(member.structured_notes) : member.structured_notes) || {};
+  const performed = (member) => !['inspection_only', 'customer_declined', 'incomplete'].includes(notesOf(member).visitOutcome || 'completed');
+  const backfill = (member) => notesOf(member).backfill === true;
+  const internalOnly = (member) => notesOf(member).internalOnlyCompletion === true
+    || (notesOf(member).internalOnlyCompletion === undefined && notesOf(member).typedReportDelivery === 'disabled');
+  const cardMember = recorded.find((member) => performed(member) && !internalOnly(member));
+  if (cardMember) {
+    await require('./customer-card').ensureCardForCompletion({
+      customerId: cardMember.customer_id, serviceRecordId: cardMember.record_id, scheduledServiceId: cardMember.id,
+      suppressIssuedEmail: backfill(cardMember),
+      firstVisitAt: backfill(cardMember) ? parseETDateTime(`${dateOnly(cardMember.service_date)}T12:00`) : null,
+    });
+  }
+  const referralMember = recorded.find((member) => performed(member) && !backfill(member) && (member.is_recurring || member.recurring_pattern));
+  if (referralMember) {
+    await require('./referral-engine').creditReferralOnFirstService({ customerId: referralMember.customer_id, serviceId: referralMember.id });
+  }
+}
+
+// One open office-review alert per packet: every raiser checks for it first,
+// so the pending-delivery alert and the close cannot both record one.
+async function recordOfficeReviewAlert(database, { packet, memberId, state }) {
+  const open = await database('dispatch_alerts').where({ type: 'visit_closeout_review' }).whereNull('resolved_at')
+    .whereRaw("payload->>'packetId' = ?", [packet.id]).first('id');
+  if (open) return false;
+  const member = memberId ? await database('scheduled_services').where({ id: memberId }).first() : null;
+  await require('./dispatch-alerts').createAlert({
+    type: 'visit_closeout_review', severity: 'warn',
+    techId: member?.technician_id || null, jobId: member?.id || null,
+    trx: database.isTransaction ? database : undefined,
+    payload: { visitId: packet.visit_id, packetId: packet.id, ...state },
+  });
+  return true;
+}
+
+/**
+ * The delivery and payment verdicts, RE-DERIVED under the closing locks. Both
+ * can move while the summary delivery is awaited: a recovery can settle an
+ * uncertain summary (the packet goes back on the queue), a bounce can arrive
+ * (the outreach is parked and the packet closes for review), and a Bill-To
+ * change can assign, clear or hand off the payer (the withdrawal itself
+ * records nothing while the packet is still processing). Returns the verdicts
+ * to close on, or `reopened` when the packet belongs back on the queue.
+ */
+async function deriveClosingVerdicts(trx, { packet, payment, delivery }) {
+  const uncertainNow = await trx('visit_effects').where({ visit_id: packet.visit_id })
+    .whereIn('effect_type', ['completion_sms', 'completion_email']).where({ status: 'unknown_delivery' }).first('id');
+  if (delivery.state === 'delivery_review' && !uncertainNow) return { reopened: true };
+  let nextDelivery = delivery;
+  if (uncertainNow && delivery.state === 'delivered') {
+    nextDelivery = { ...delivery, state: 'delivery_review' };
+    // Outreach enrolled a moment ago, before the bounce, is parked too.
+    await require('./visit-completion-summary').parkVisitReviewOutreach(packet.id, trx);
+  }
+  const invoice = payment.invoiceId
+    ? await trx('invoices').where({ id: payment.invoiceId }).first('id', 'payer_id', 'scheduled_send_error')
+    : null;
+  return { reopened: false, delivery: nextDelivery, payment: livePaymentVerdict(payment, invoice) };
+}
+
+/**
+ * The payment verdict a closing invoice justifies, in BOTH directions: an
+ * assignment or withdrawal during delivery closes for office review naming the
+ * LIVE payer, and a payer cleared during delivery drops the verdict it
+ * produced — a false payer alert would otherwise outlive the payer, and a
+ * handoff would name the wrong AP account. A non-payer office review (a failed
+ * charge) keeps its own.
+ */
+function livePaymentVerdict(payment, invoice) {
+  if (!invoice) return payment;
+  const [, stampedPayer] = String(invoice.scheduled_send_error || '').split(':');
+  const payerOwnedNow = Boolean(invoice.payer_id)
+    || require('./invoice-helpers').invoiceWithdrawnFromCustomer(invoice);
+  if (payerOwnedNow) {
+    const livePayerId = invoice.payer_id || (stampedPayer ? Number(stampedPayer) : null) || payment.payerId || null;
+    return { ...payment, state: 'office_required', reason: 'payer_assigned', payerId: livePayerId };
+  }
+  if (payment.reason !== 'payer_assigned') return payment;
+  return { ...payment, state: payment.state === 'office_required' ? 'collected' : payment.state, reason: null, payerId: null };
+}
+
+/**
+ * The close itself: verdicts re-derived under the locks, the office alert (one
+ * per packet), and the packet/visit transition. Returns the verdicts it closed
+ * on, and whether the packet was reopened for recovery instead.
+ */
+async function closeVisitCompletionPacket(database, { packet, memberId, payment, delivery }) {
+  let outcome = { payment, delivery, recovered: false };
+  await database.transaction(async (trx) => {
+    const visit = await trx('service_visits').where({ id: packet.visit_id }).first();
+    await trx('customers').where({ id: visit.customer_id }).forNoKeyUpdate().first('id');
+    await lockStop(trx, visit.stop_base_key);
+    await trx('service_visits').where({ id: visit.id }).forUpdate().first('id');
+    const locked = await trx('visit_completion_packets').where({ id: packet.id }).forUpdate().first();
+    if (locked.status === 'done') return;
+    const derived = await deriveClosingVerdicts(trx, { packet, payment, delivery });
+    if (derived.reopened) {
+      outcome = { ...outcome, recovered: true };
+      await trx('visit_completion_packets').where({ id: packet.id })
+        .update({ status: 'processing', error: 'review_enrollment_pending', updated_at: trx.fn.now() });
+      return;
+    }
+    outcome = { payment: derived.payment, delivery: derived.delivery, recovered: false };
+    const state = officeReviewState({
+      payment: derived.payment.state, delivery: derived.delivery.state,
+      reason: derived.payment.reason, payerId: derived.payment.payerId,
+    });
+    const closeReview = derived.payment.state === 'office_required' || derived.delivery.state === 'delivery_review';
+    if (closeReview) await recordOfficeReviewAlert(trx, { packet, memberId, state });
+    await trx('visit_completion_packets').where({ id: packet.id }).update({
+      status: 'done',
+      error: closeReview ? JSON.stringify(state) : null,
+      updated_at: trx.fn.now(),
+    });
+    // A recovery reopens only the packet: a visit that already closed keeps
+    // its original closure time and reason.
+    await trx('service_visits').where({ id: packet.visit_id }).update({
+      status: 'closed', closed_at: trx.raw('COALESCE(closed_at, NOW())'),
+      close_reason: trx.raw('COALESCE(close_reason, ?)', [closeReview ? 'office_review' : 'completed']), updated_at: trx.fn.now(),
+    });
+  });
+  return outcome;
+}
+
 /** Run summary and financial effects only after every member is ready. */
 async function runVisitCompletionPacketEffects(packetId, database = db) {
   const members = await runVisitCompletionPacketMemberEffects(packetId, database);
@@ -368,34 +508,7 @@ async function runVisitCompletionPacketEffects(packetId, database = db) {
     if (recollect) payment = await require('./visit-completion-payment').collectVisitCompletionInvoice(packet.id, database);
   }
   let delivery = await Summary.deliverVisitCompletionSummary(packet.id, token, database);
-  // Canonical completion gives these two effects different eligibility: a
-  // card mints for every performed, non-internal-only completion (a backfill
-  // mints silently), while a referral credit excludes backfills but not an
-  // internal-only report posture. Both helpers own their single-use guards.
-  const recorded = await database('visit_completion_packet_items as i')
-    .join('service_records as r', 'r.id', 'i.service_record_id')
-    .join('scheduled_services as s', 's.id', 'i.scheduled_service_id')
-    .where('i.packet_id', packet.id).where('r.status', 'completed')
-    .orderBy('s.window_start').orderBy('s.id')
-    .select('s.id', 's.customer_id', 's.is_recurring', 's.recurring_pattern', 'r.id as record_id', 'r.structured_notes', 'r.service_date');
-  const notesOf = (member) => (typeof member.structured_notes === 'string'
-    ? JSON.parse(member.structured_notes) : member.structured_notes) || {};
-  const performed = (member) => !['inspection_only', 'customer_declined', 'incomplete'].includes(notesOf(member).visitOutcome || 'completed');
-  const backfill = (member) => notesOf(member).backfill === true;
-  const internalOnly = (member) => notesOf(member).internalOnlyCompletion === true
-    || (notesOf(member).internalOnlyCompletion === undefined && notesOf(member).typedReportDelivery === 'disabled');
-  const cardMember = recorded.find((member) => performed(member) && !internalOnly(member));
-  if (cardMember) {
-    await require('./customer-card').ensureCardForCompletion({
-      customerId: cardMember.customer_id, serviceRecordId: cardMember.record_id, scheduledServiceId: cardMember.id,
-      suppressIssuedEmail: backfill(cardMember),
-      firstVisitAt: backfill(cardMember) ? parseETDateTime(`${dateOnly(cardMember.service_date)}T12:00`) : null,
-    });
-  }
-  const referralMember = recorded.find((member) => performed(member) && !backfill(member) && (member.is_recurring || member.recurring_pattern));
-  if (referralMember) {
-    await require('./referral-engine').creditReferralOnFirstService({ customerId: referralMember.customer_id, serviceId: referralMember.id });
-  }
+  await runPacketCompletionCredits(packet.id, database);
   // Review outreach follows the summary: enrollment waits until every
   // requested delivery leg has settled and never runs for an uncertain one.
   const reviewEnrollment = delivery.state === 'delivered'
@@ -404,107 +517,29 @@ async function runVisitCompletionPacketEffects(packetId, database = db) {
   const paymentPending = ['payment_pending', 'processing'].includes(payment.state);
   const pending = paymentPending || delivery.state === 'delivery_pending' || reviewEnrollment.retryable === true;
   // A DELIVERY REVIEW is recorded even while the payment is still pending
-  // (Codex #4311 r35 P2): the close below is the only place that raises the
-  // office alert, and an ACH settlement window is days long — the customer
+  // (Codex #4311 r35 P2): the close below is the only other place that raises
+  // the office alert, and an ACH settlement window is days long — the customer
   // did not reliably receive their summary and the review outreach is parked
-  // that whole time, with nothing telling the office. The packet stays
-  // resumable for settlement; this alert is deduped on the open one, so the
-  // close does not raise a second.
+  // that whole time, with nothing telling the office.
   if (pending && delivery.state === 'delivery_review') {
     try {
-      const open = await database('dispatch_alerts').where({ type: 'visit_closeout_review' }).whereNull('resolved_at')
-        .whereRaw("payload->>'packetId' = ?", [packet.id]).first('id');
-      if (!open) {
-        const alertMember = await database('scheduled_services').where({ id: items[0].scheduled_service_id }).first();
-        await require('./dispatch-alerts').createAlert({
-          type: 'visit_closeout_review', severity: 'warn', techId: alertMember?.technician_id || null, jobId: alertMember?.id || null,
-          payload: { visitId: packet.visit_id, packetId: packet.id, ...officeReviewState({ payment: payment.state, delivery: 'delivery_review' }) },
-        });
-      }
+      await recordOfficeReviewAlert(database, {
+        packet, memberId: items[0].scheduled_service_id,
+        state: officeReviewState({ payment: payment.state, delivery: 'delivery_review' }),
+      });
     } catch (alertErr) {
       require('./logger').warn(`[visit-closeout] could not record the delivery-review alert for packet ${packet.id}: ${alertErr.message}`);
     }
   }
   let recovered = false;
-  if (!pending) await database.transaction(async (trx) => {
-    const visit = await trx('service_visits').where({ id: packet.visit_id }).first();
-    await trx('customers').where({ id: visit.customer_id }).forNoKeyUpdate().first('id');
-    await lockStop(trx, visit.stop_base_key);
-    await trx('service_visits').where({ id: visit.id }).forUpdate().first('id');
-    const locked = await trx('visit_completion_packets').where({ id: packet.id }).forUpdate().first();
-    if (locked.status !== 'done') {
-      // The delivery effects are re-read under this lock. A recovery that
-      // settled the uncertain summary since the delivery read must not be
-      // closed over with the stale result (the packet stays on the recovery
-      // queue), and a bounce that arrived since must close for office review
-      // with its parked outreach rather than as a clean completion.
-      const uncertainNow = await trx('visit_effects').where({ visit_id: packet.visit_id })
-        .whereIn('effect_type', ['completion_sms', 'completion_email']).where({ status: 'unknown_delivery' }).first('id');
-      if (delivery.state === 'delivery_review' && !uncertainNow) {
-        recovered = true;
-        await trx('visit_completion_packets').where({ id: packet.id })
-          .update({ status: 'processing', error: 'review_enrollment_pending', updated_at: trx.fn.now() });
-        return;
-      }
-      if (uncertainNow && delivery.state === 'delivered') {
-        delivery = { ...delivery, state: 'delivery_review' };
-        // Outreach enrolled a moment ago, before the bounce, is parked too.
-        await Summary.parkVisitReviewOutreach(packet.id, trx);
-      }
-      // The PAYMENT verdict is re-derived under the closing locks too (Codex
-      // #4311 r39 P1): a Bill-To assignment can commit while the summary
-      // delivery is awaited, and the withdrawal it performs stamps the
-      // invoice and holds the visit WITHOUT alerting — a packet still
-      // `processing` has no office review to record against. Closing on the
-      // stale verdict would mark the packet done with error=null and drop
-      // withdrawn debt out of the recovery sweep with no billing alert.
-      const closingInvoice = payment.invoiceId
-        ? await trx('invoices').where({ id: payment.invoiceId }).first('id', 'payer_id', 'scheduled_send_error')
-        : null;
-      if (closingInvoice) {
-        // BOTH DIRECTIONS (Codex #4311 r40 P2): a Bill-To assignment during
-        // delivery must close for office review, and a Bill-To CLEAR or a
-        // handoff to another payer during delivery must not close with the
-        // earlier payer's verdict — a clear would leave a false payer alert
-        // and a handoff would tell staff to bill the wrong AP account.
-        const [, stampedPayer] = String(closingInvoice.scheduled_send_error || '').split(':');
-        const livePayerId = closingInvoice.payer_id
-          || (stampedPayer ? Number(stampedPayer) : null)
-          || null;
-        const payerOwnedNow = Boolean(closingInvoice.payer_id)
-          || require('./invoice-helpers').invoiceWithdrawnFromCustomer(closingInvoice);
-        if (payerOwnedNow) {
-          payment = { ...payment, state: 'office_required', reason: 'payer_assigned', payerId: livePayerId || payment.payerId || null };
-        } else if (payment.reason === 'payer_assigned') {
-          // The payer is gone: the verdict it produced goes with it. Whatever
-          // else the collection decided still stands (a failed charge keeps
-          // its own office_required), so only the payer verdict is cleared.
-          payment = { ...payment, state: payment.state === 'office_required' ? 'collected' : payment.state, reason: null, payerId: null };
-        }
-      }
-      const closeReview = payment.state === 'office_required' || delivery.state === 'delivery_review';
-      const alreadyAlerted = closeReview && await trx('dispatch_alerts').where({ type: 'visit_closeout_review' }).whereNull('resolved_at')
-        .whereRaw("payload->>'packetId' = ?", [packet.id]).first('id');
-      if (closeReview && !alreadyAlerted) {
-        const member = await trx('scheduled_services').where({ id: items[0].scheduled_service_id }).first();
-        await require('./dispatch-alerts').createAlert({
-          type: 'visit_closeout_review', severity: 'warn', techId: member.technician_id, jobId: member.id, trx,
-          payload: { visitId: packet.visit_id, packetId: packet.id, ...officeReviewState({ payment: payment.state, delivery: delivery.state, reason: payment.reason, payerId: payment.payerId }) },
-        });
-      }
-      await trx('visit_completion_packets').where({ id: packet.id }).update({
-        status: 'done',
-        error: closeReview ? JSON.stringify(officeReviewState({ payment: payment.state, delivery: delivery.state, reason: payment.reason, payerId: payment.payerId })) : null,
-        updated_at: trx.fn.now(),
-      });
-      // A recovery reopens only the packet: a visit that already closed keeps
-      // its original closure time and reason.
-      await trx('service_visits').where({ id: packet.visit_id }).update({
-        status: 'closed', closed_at: trx.raw('COALESCE(closed_at, NOW())'),
-        close_reason: trx.raw('COALESCE(close_reason, ?)', [closeReview ? 'office_review' : 'completed']), updated_at: trx.fn.now(),
-      });
-    }
-  });
+  if (!pending) {
+    const closed = await closeVisitCompletionPacket(database, {
+      packet, memberId: items[0].scheduled_service_id, payment, delivery,
+    });
+    payment = closed.payment;
+    delivery = closed.delivery;
+    recovered = closed.recovered;
+  }
   // Judged after the close: the locked re-read above may have moved the
   // delivery state to office review.
   const stalled = pending || recovered;
