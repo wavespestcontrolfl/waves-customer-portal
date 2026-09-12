@@ -70,6 +70,12 @@ router.get('/', async (req, res, next) => {
     // keep their relative order, one step down.
     const rows = await q
       .orderByRaw("CASE WHEN type = 'follow_through_tracking' THEN 0 WHEN type LIKE 'visit\\_%' OR type = 'tech_line_sms' THEN 3 WHEN type = 'storm_watch_alert' THEN 2 WHEN created_at >= now() - interval '6 hours' THEN 1 ELSE 3 END")
+      // Stage 2 before stage 1 INSIDE the tracking bucket, before the limit
+      // truncates: a tech with more than 20 undismissed tracking cards would
+      // otherwise lose an older critical arrival check behind 20 newer
+      // stage-1 warnings, and the client's own stage-2-first sort cannot
+      // rescue a row the window never returned (codex P2, PR #4403 round 20).
+      .orderByRaw("CASE WHEN type = 'follow_through_tracking' THEN COALESCE((payload->>'stage')::int, 0) ELSE 0 END DESC")
       .orderBy('created_at', 'desc')
       .limit(20);
     res.json({ notifications: rows.map(parseRow) });

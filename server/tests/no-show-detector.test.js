@@ -312,6 +312,7 @@ describe('candidates come from the promise as well as the schedule (deferred P2,
     const conn = (table) => {
       const chain = {};
       chain.where = () => chain;
+      chain.whereIn = () => chain;
       chain.whereRaw = (sql, bindings) => { seen.push([table, sql, bindings]); return chain; };
       chain.whereBetween = (col, range) => { seen.push([table, col?.sql || col, range]); return chain; };
       chain.select = () => Promise.resolve([]);
@@ -320,8 +321,13 @@ describe('candidates come from the promise as well as the schedule (deferred P2,
     conn.raw = (sql) => ({ sql });
     const now = new Date('2026-09-12T12:00:00.000Z');
     await promisedVisitIds(conn, { now });
-    const slotRanges = seen.filter(([, sql]) => String(sql).includes('rendered_slot_ms'));
-    expect(slotRanges).toHaveLength(2);
+    const slotRanges = seen.filter(([, sql]) => String(sql).includes('rendered_slot_ms')
+      || String(sql).includes("split_part(idempotency_key, ':', 3)::bigint"));
+    // Three tables carry a slot: the two metadata ones and email_messages,
+    // whose durable row is the recovery when the interaction insert failed —
+    // leaving it out of recall meant that visit could still be moved out of
+    // the date window and vanish (round-20 P1).
+    expect(slotRanges).toHaveLength(3);
     for (const [, , bindings] of slotRanges) {
       expect(bindings).toEqual([now.getTime() - 48 * 3600000, now.getTime()]);
     }
@@ -330,26 +336,27 @@ describe('candidates come from the promise as well as the schedule (deferred P2,
     expect(auditRange[2]).toEqual(['2026-09-10T12:00:00.000Z', '2026-09-12T12:00:00.000Z']);
   });
 
-  test('ids come from all three evidence linkages, deduped', async () => {
+  test('ids come from all four evidence linkages, deduped', async () => {
     const conn = (table) => {
       const chain = {};
-      for (const m of ['where', 'whereRaw', 'whereBetween']) chain[m] = () => chain;
+      for (const m of ['where', 'whereRaw', 'whereBetween', 'whereIn']) chain[m] = () => chain;
       chain.select = () => Promise.resolve(({
         messaging_audit_log: [{ appointment_id: 'v1', meta_visit_id: null }, { appointment_id: null, meta_visit_id: 'v2' }],
         customer_interactions: [{ meta_visit_id: 'v2' }, { meta_visit_id: 'v3' }],
         audit_log: [{ resource_id: 'v4' }],
+        email_messages: [{ meta_visit_id: 'v5' }],
       })[table] || []);
       return chain;
     };
     conn.raw = (sql) => ({ sql });
     const ids = await promisedVisitIds(conn, { now: new Date('2026-09-12') });
-    expect(ids.sort()).toEqual(['v1', 'v2', 'v3', 'v4']);
+    expect(ids.sort()).toEqual(['v1', 'v2', 'v3', 'v4', 'v5']);
   });
 
   test('nothing communicated recently -> no extra candidates', async () => {
     const conn = () => {
       const chain = {};
-      for (const m of ['where', 'whereRaw', 'whereBetween']) chain[m] = () => chain;
+      for (const m of ['where', 'whereRaw', 'whereBetween', 'whereIn']) chain[m] = () => chain;
       chain.select = () => Promise.resolve([]);
       return chain;
     };

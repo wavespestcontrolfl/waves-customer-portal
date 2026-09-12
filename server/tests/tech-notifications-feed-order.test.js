@@ -34,7 +34,7 @@ test('buckets: tracking (0) → fresh prompts (1) → fresh storms (2) → visit
   const res = { json: jest.fn(), status: jest.fn().mockReturnThis() };
   await getHandler()({ technicianId: 't-1', query: {} }, res, jest.fn());
 
-  expect(calls.orderByRaw).toHaveLength(1);
+  expect(calls.orderByRaw).toHaveLength(2);
   const sql = calls.orderByRaw[0];
   // visit rows + tech-line texts → 2; storms → 1; fresh other prompts → 0;
   // stale others → 2 (stale legacy rows compete with visits on recency,
@@ -50,6 +50,10 @@ test('buckets: tracking (0) → fresh prompts (1) → fresh storms (2) → visit
   expect(sql).toMatch(/WHEN type LIKE 'visit\\_%' OR type = 'tech_line_sms' THEN 3/);
   expect(sql).toMatch(/WHEN type = 'storm_watch_alert' THEN 2/);
   expect(sql).toMatch(/interval '6 hours' THEN 1 ELSE 3 END/);
+  // Stage 2 before stage 1 inside the tracking bucket, before the limit
+  // truncates — the client's stage-first sort cannot rescue a row the 20-row
+  // window never returned (round-20 P2).
+  expect(calls.orderByRaw[1]).toMatch(/follow_through_tracking' THEN COALESCE\(\(payload->>'stage'\)::int, 0\) ELSE 0 END DESC/);
   expect(calls.orderBy).toEqual([['created_at', 'desc']]);
   expect(calls.limit).toEqual([20]);
   expect(res.json).toHaveBeenCalledWith({ notifications: [] });

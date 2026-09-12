@@ -75,6 +75,10 @@ const ARRIVAL_STAMPS = ['arrived_at', 'actual_start_time', 'check_in_time'];
 // (see the ignoreHorizon note on promisedStartAt) — an ancient, presumably
 // already-handled promise must not surface as news.
 const HORIZON_MS = 48 * 3600000;
+// How long a detector row is left alone by the disabled-state cleanup. Long
+// enough to cover a rolling deploy, in which one replica can still read the
+// gate as off while another creates rows under it.
+const DISABLED_CLEANUP_GRACE_MS = 15 * 60000;
 
 // Pure, exported for tests and for the replay's coverage measure: the
 // evidence-validity half of the rule. Returns the promised start instant the
@@ -971,7 +975,7 @@ async function promisedVisitIds(conn, { now }) {
   // this bounded.
   const windowFrom = now.getTime() - HORIZON_MS;
   const windowTo = now.getTime();
-  const [notices, emails, calls] = await Promise.all([
+  const [notices, emails, calls, messages] = await Promise.all([
     conn('messaging_audit_log')
       .whereRaw("(metadata->>'rendered_slot_ms')::bigint BETWEEN ? AND ?", [windowFrom, windowTo])
       .select('appointment_id', conn.raw("metadata->>'scheduled_service_id' as meta_visit_id")),
@@ -981,11 +985,26 @@ async function promisedVisitIds(conn, { now }) {
     conn('audit_log').where({ action: 'visit_window_promised', resource_type: 'scheduled_service' })
       .whereBetween(conn.raw("(metadata->>'start_at')"), [new Date(windowFrom).toISOString(), new Date(windowTo).toISOString()])
       .select('resource_id'),
+    // The durable email row too: loadPromiseEvents recovers a delivered
+    // appointment email straight from email_messages when the best-effort
+    // interaction insert failed, and leaving it out of recall meant that
+    // visit could still be moved out of the date window and vanish — the one
+    // case the recovery exists for (codex P1 round 20). Per-service keys
+    // only; a grouped key carries no slot, and its promise is unknown-window,
+    // which never alerts.
+    conn('email_messages')
+      .whereIn(conn.raw("split_part(idempotency_key, ':', 1)"), APPOINTMENT_EMAIL_EVENTS)
+      .whereRaw("split_part(idempotency_key, ':', 2) <> 'visit'")
+      .whereRaw("split_part(idempotency_key, ':', 3) ~ '^[0-9]+$'")
+      .whereRaw("split_part(idempotency_key, ':', 3)::bigint BETWEEN ? AND ?", [windowFrom, windowTo])
+      .whereIn('status', DELIVERED_EMAIL_STATUSES)
+      .select(conn.raw("split_part(idempotency_key, ':', 2) as meta_visit_id")),
   ]);
   return [...new Set([
     ...notices.flatMap((r) => [r.appointment_id, r.meta_visit_id]),
     ...emails.map((r) => r.meta_visit_id),
     ...calls.map((r) => r.resource_id),
+    ...messages.map((r) => r.meta_visit_id),
   ].filter(Boolean).map(String))];
 }
 
@@ -1186,10 +1205,22 @@ async function lockedStop(trx, serviceId, { now = new Date(), ignoreHorizon = fa
   // pass uses (codex P1 round 10).
   const row = await trx('scheduled_services').where({ id: serviceId }).first();
   if (!row) return { visit: null, members: [], promise: null, live: null };
-  const members = row.visit_id
+  let members = row.visit_id
     ? await trx('scheduled_services').where({ visit_id: row.visit_id }).forUpdate().orderBy('id').select('*')
     : await trx('scheduled_services').where({ id: serviceId }).forUpdate().select('*');
   if (!members.length) return { visit: null, members: [], promise: null, live: null };
+  // Membership is re-checked against the LOCKED row: visit-groups can attach
+  // or split this service between the unlocked read above and the lock, and
+  // the snapshot would then be of the wrong stop — most sharply when the
+  // first read saw no group and one committed while FOR UPDATE waited (codex
+  // P2 round 20). One re-read settles it: the group is now locked, so it
+  // cannot change again underneath this transaction.
+  const locked = members.find((m) => String(m.id) === String(serviceId));
+  if (locked && String(locked.visit_id || '') !== String(row.visit_id || '')) {
+    members = locked.visit_id
+      ? await trx('scheduled_services').where({ visit_id: locked.visit_id }).forUpdate().orderBy('id').select('*')
+      : [locked];
+  }
   const visit = members.find((m) => String(m.id) === String(serviceId)) || row;
   // Evidence can be handed in, pre-loaded for the whole tick. Re-reading it
   // per row meant nine queries per card — a backlog of 50 stage-2 visits ran
@@ -1223,12 +1254,20 @@ async function lockedStop(trx, serviceId, { now = new Date(), ignoreHorizon = fa
 async function cleanupAfterDisable(conn) {
   if (enabled()) return { resolved: 0, dismissed: 0 };
   const dispatch = require('./dispatch-alerts');
+  // A GRACE WINDOW, because this decision is process-local: during a
+  // zero-downtime deploy an old replica still carrying the gate as OFF runs
+  // alongside a new one that has it ON, and without this it would resolve the
+  // rows that replica is creating (codex P2 round 20). Anything the feature
+  // is actively maintaining is younger than this; a genuinely disabled fleet
+  // clears itself one tick later.
+  const settled = new Date(Date.now() - DISABLED_CLEANUP_GRACE_MS);
   const open = await conn('dispatch_alerts').whereIn('type', dispatch.OVERDUE_ALERT_TYPES)
-    .whereNull('resolved_at').whereRaw("payload->>'source' = 'no_show_detector'").select('id');
+    .whereNull('resolved_at').whereRaw("payload->>'source' = 'no_show_detector'")
+    .where('created_at', '<', settled).select('id');
   for (const alert of open) await dispatch.resolveAlert({ id: alert.id, auto: true });
   const dismissedAt = new Date();
   const dismissed = await conn('tech_notifications').where({ type: 'follow_through_tracking' })
-    .whereNull('dismissed_at')
+    .whereNull('dismissed_at').where('created_at', '<', settled)
     .update({ dismissed_at: dismissedAt, read: true, updated_at: dismissedAt,
       payload: conn.raw("COALESCE(payload, '{}'::jsonb) || jsonb_build_object('superseded_at', ?::text)", [dismissedAt.toISOString()]) });
   if (open.length || dismissed) {
