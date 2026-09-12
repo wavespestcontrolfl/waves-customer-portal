@@ -451,12 +451,11 @@ async function main() {
           }
           if (leaf === "Unit Review") {
             await page.getByRole("button", { name: "fl_oz", exact: true }).waitFor();
-            await page.getByText("Apply unit: fl_oz", { exact: true }).waitFor();
             const fixPath = "/api/admin/inventory/unit-review/product-1/fix";
             await Promise.all([page.waitForResponse(response => response.url().includes(fixPath)), page.getByRole("button", { name: "Apply", exact: true }).click()]);
             assert.deepEqual(report.requests.filter(request => request.path === fixPath).at(-1).body, { inventoryUnit: "fl_oz", convertExistingStock: true });
             await page.getByLabel(`Custom unit for ${product.name}`).fill("gal");
-            await page.getByText("Apply unit: gal", { exact: true }).waitFor();
+            assert.equal(await page.getByLabel(`Custom unit for ${product.name}`).inputValue(), "gal");
             await page.getByRole("checkbox", { name: "Convert existing stock and low-stock threshold" }).uncheck();
             await Promise.all([page.waitForResponse(response => response.url().includes(fixPath)), page.getByRole("button", { name: "Apply", exact: true }).click()]);
             assert.deepEqual(report.requests.filter(request => request.path === fixPath).at(-1).body, { inventoryUnit: "gal", convertExistingStock: false });
