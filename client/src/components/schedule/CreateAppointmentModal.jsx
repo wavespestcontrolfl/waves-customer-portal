@@ -39,7 +39,6 @@ import BestTimeHint, { detourPhrase } from './BestTimeHint';
 import { useBestTimes } from './useBestTimes';
 import { etDateString } from '../../lib/timezone';
 import { propertyRelationshipChip } from '../../lib/contact-roles';
-import { addressAskNotice } from '../../lib/addressAsks';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 // Square monochrome palette — zinc-only, no teal/green/blue accents. Red reserved for genuine alerts.
@@ -961,24 +960,6 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
   const [bookingPropertyState, setBookingPropertyState] = useState('idle'); // idle | loading | ready | hidden | error
   const [selectedPropertyId, setSelectedPropertyId] = useState('');
   const [propertyRefresh, setPropertyRefresh] = useState(0);
-  // Open "this address may be wrong" cards on the selected customer's calls.
-  // The routing gate already refuses to auto-book these; booking one BY HAND
-  // was the hole (2026-09-10: a misheard street booked manually 66 s after the
-  // card opened, tech dispatched to an address that does not exist). Advisory,
-  // never a block — the operator may well be booking the fix.
-  const [addressAsk, setAddressAsk] = useState(null);
-  useEffect(() => {
-    setAddressAsk(null);
-    const customerId = selectedCustomer?.id;
-    if (!customerId) return undefined;
-    let cancelled = false;
-    // active = open OR in_progress: a card the office already claimed is
-    // still an owed callback.
-    adminFetch(`/admin/triage?status=active&customer_id=${encodeURIComponent(customerId)}`)
-      .then((data) => { if (!cancelled) setAddressAsk(addressAskNotice(data?.items)); })
-      .catch(() => { if (!cancelled) setAddressAsk(null); });
-    return () => { cancelled = true; };
-  }, [selectedCustomer?.id]);
   const propertyPickerActive = bookingPropertyState === 'ready';
   const selectedBookingProperty = propertyPickerActive
     ? bookingProperties.find((p) => String(p.id) === String(selectedPropertyId)) || null
@@ -2854,27 +2835,6 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
           {selectedCustomer && bookingPropertyState === 'error' && (
             <div role="alert" style={{ fontSize: 14, color: D.muted, marginTop: 10 }}>
               Saved addresses could not be loaded — this appointment books to the customer's primary address.
-            </div>
-          )}
-          {/* Red, not muted: this is the one notice on the modal that means
-              "a tech may drive somewhere that does not exist". */}
-          {selectedCustomer && addressAsk && (
-            <div
-              role="alert"
-              style={{
-                marginTop: 10, padding: '8px 10px', borderRadius: 4,
-                border: `1px solid ${D.red}`, fontSize: 14, color: D.red,
-              }}
-            >
-              <strong>Address still being confirmed</strong>
-              {' — '}
-              {addressAsk.reason}
-              {addressAsk.heard ? ` (heard as "${addressAsk.heard}")` : ''}
-              {'. '}
-              {addressAsk.candidates.length > 0
-                ? `The caller more likely said: ${addressAsk.candidates.join('; ')}. `
-                : ''}
-              Confirm it with the customer before dispatching — the callback is pending in the Triage Inbox.
             </div>
           )}
         </div>
