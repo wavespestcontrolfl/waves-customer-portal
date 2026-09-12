@@ -25,7 +25,7 @@ import { useParams } from "react-router-dom";
 // pattern as PayPageV2). All inline page styles use theme-doc roles.
 import { COLORS } from "../theme-brand";
 import { DOC, DOC_FONT, FS, FW, LH, SP, RADIUS, SHADOW } from "../theme-doc";
-import { WavesShell, BrandCard, BrandButton, SerifHeading, HelpPhoneLink } from "../components/brand";
+import { WavesShell, CustomerColumn, BrandCard, BrandButton, SerifHeading, HelpPhoneLink } from "../components/brand";
 import PublicLoadError from '../components/PublicLoadError';
 import DocumentActionBar from "../components/DocumentActionBar";
 import { getStripe } from "../lib/stripeLoader";
@@ -486,11 +486,12 @@ export default function StatementPayPage() {
 
   const shell = (children) => (
     <WavesShell variant="customer" topBar="solid">
-      {/* Standard 760px document column (owner ruling, PR #2527) — replaces
-          the outlier 792px/48px shell so /pay/statement matches its siblings. */}
-      <div className="waves-receipt-page">
+      {/* The one customer page column (audit G-01, DECISIONS 2026-09-11
+          "R2a") — replaces the outlier 792px/48px shell so /pay/statement
+          matches its siblings. */}
+      <CustomerColumn>
         {children}
-      </div>
+      </CustomerColumn>
     </WavesShell>
   );
 

@@ -1,6 +1,8 @@
-// Labeled anchor target for the jump-nav. The scroll-mt offsets clear the
-// sticky nav bar: two stacked rows below xl (section tabs over the period
-// strip — ~80px at md–lg, taller still with the mobile select), one row at xl+.
+// Labeled anchor target for the jump-nav. The scroll-mt offsets clear the sticky
+// nav bar, which at md–lg stacks the ~116px workspace command header, its gap and
+// the two-row period card — over 240px including the wrapper's bottom padding, so
+// the old md:scroll-mt-52 (208px) dropped headings under the chrome. md–xl clears
+// 288px; xl+ collapses the period strip onto one row and needs less.
 // `about` renders a native-details dropdown under the header explaining what
 // the section is for and how to read it — tap "What is this?" to expand.
 export default function DashboardSection({ id, title, caption, about, children }) {
@@ -8,20 +10,20 @@ export default function DashboardSection({ id, title, caption, about, children }
     <section
       id={id}
       aria-label={title}
-      className="scroll-mt-32 md:scroll-mt-24 xl:scroll-mt-16 mb-6"
+      className="mb-6 scroll-mt-56 md:scroll-mt-72 xl:scroll-mt-56"
     >
       <div className="flex items-baseline justify-between gap-3 pb-1.5 border-b border-hairline border-zinc-200">
-        <h2 className="u-label text-zinc-900">{title}</h2>
+        <h2 className="text-18 font-medium leading-[1.35] text-zinc-900">{title}</h2>
         {caption && (
-          <span className="text-12 text-ink-tertiary text-right">{caption}</span>
+          <span className="text-right text-ui-caption text-ink-secondary">{caption}</span>
         )}
       </div>
       {about ? (
         <details className="mb-3">
-          <summary className="list-none cursor-pointer select-none inline-block py-1.5 text-11 text-ink-tertiary underline decoration-dotted underline-offset-2 hover:text-ink-secondary u-focus-ring">
+          <summary className="inline-block min-h-11 cursor-pointer list-none select-none py-2.5 text-ui-caption text-ink-secondary underline decoration-dotted underline-offset-2 hover:text-zinc-900 u-focus-ring">
             What is this?
           </summary>
-          <p className="pb-2 text-12 text-ink-secondary leading-relaxed max-w-prose">
+          <p className="max-w-prose pb-2 text-ui-caption text-ink-secondary">
             {about}
           </p>
         </details>

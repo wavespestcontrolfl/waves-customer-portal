@@ -2339,3 +2339,38 @@ Widening the scan raw reports 355 violations across 59 files, which would simply
 The gate fails in both directions. Over the allowance is a regression, so a file with debt cannot accumulate more and a file with none has zero tolerance. Under it fails too: an allowance left above what the file actually carries is headroom for cleaned-up violations to return silently, so the numbers follow the code down and the line goes once the file is clean. That is what makes the list a ratchet rather than a permanent exemption list. Raising a number to go green is explicitly called out in the failure text as the wrong move. The debt is R3 and R4 work in the audit: the legacy `estimate/*` cluster, the 09-07 findings, App Store and Google Play badge artwork reproduced as inline SVG at 7.5px, and emoji the `Icon` sweep has not reached.
 
 `SecurePlanChoice`'s two 13px values — the violation the ruling names — are fixed to 14 rather than baselined. Two emoji the scanner found in doc comments rather than rendered JSX were removed from the prose.
+
+## 2026-09-11 — R2a: one customer page column (CustomerColumn)
+
+The Liquid Glass audit's G-01 (`liquid-glass-consistency-audit-2026-09-09.md` §3) found five different phone gutters (10/12/16/20/24) and several desktop column widths across the customer glass pages, because no page-column primitive existed — every page hand-authored its own wrapper, and `index.css` carried five near-duplicate classes (`.waves-customer-page`, `.waves-receipt-page`, `.waves-estimate-page`, `.waves-rate-page`, `.waves-contract-page`) on top of that. `components/brand/CustomerColumn.jsx` is now the one primitive: `boxSizing: 'border-box'`, `width: '100%'`, `margin: '0 auto'`, `padding: '28px 16px 56px'` (`PAGE_TOP` / `PAGE_GUTTER` / `PAGE_BOTTOM`, new named tokens in `theme-doc.js`), `flex: 1` (page roots use `flex: 1`, DECISIONS 2026-09-04, so the shell footer follows the content), and `maxWidth` from `column`: `"document"` (default) → `DOC_COLUMN_MAX` (760) of CONTENT, `"flow"` → `FLOW_COLUMN_MAX` (640) of content. The named widths are content widths — the audit measured card edges — so the border-box outer cap is content + both gutters (792 / 672); a 760 outer cap would have rendered 728 of content past 792px viewports, a 32px narrowing of every desktop document that the first cut of this primitive actually had. None of this is a new choice — 760/28/56 is `DOC_PAGE_MARGIN` and 640 is `FLOW_COLUMN_MAX`, both already exported by `theme-doc.js` per the PR #2527 ruling ("pay's cap is the standard"); the fix is giving every page ONE way to reach them instead of eleven-plus. `DOC_COLUMN` (theme-doc's `min(100% - 32px, 760px)` width string) stays exported for its one non-`<CustomerColumn>` consumer (the tokens dev-preview) but no longer backs any page wrapper; the parallel `FLOW_COLUMN` string had no consumer and was not kept — flow pages reach 640 only through `<CustomerColumn column="flow">`.
+
+**Migrated** (all now render `<CustomerColumn>`, dropping their own width/margin/padding recipe): document column — `ContractSignPage` (all three states), `LawnReportViewPage`, `PestReportViewPage`, `EstimateViewPage`, `ProjectReportViewPage`, `ReportViewPage` (both the legacy-PDF branch and the live `ServiceReportV1` — `.sr-shell`'s recipe moved to the primitive, its print-only zero-padding override kept as `!important` since it must beat the primitive's inline style), `PrepGuidePage`, `PriceChangeNoticePage`, `ReceiptPage` (kept `waves-print-root`, a print-only class glass-theme.css also targets for card styling; that selector now reads `.waves-print-root` instead of the retired `.waves-receipt-page` — `PayPageV2` carries `waves-print-root` too, because its inactive payment-method icon tile is a `[data-glass-clear]` descendant that matched through `.waves-receipt-page` before; `StatementPayPage` has no such descendant and carries nothing), `StatementPayPage`, `PayPageV2`, `NewsletterArchivePage` (its three stacked content wrappers folded into one `CustomerColumn`; the sticky issue-strip header stays separate — it's chrome, not the content column). Flow column — `AppointmentPage`, `TrackPage`, `ScheduleFlowPage` (both `/reschedule` and `/reservice`), `SecureAppointmentPage`.
+
+**Excluded, both by the audit's own terms**: `PortalPage`'s app-shell 10px gutter (an open owner decision, not this batch's call) and `.waves-onboarding-page` (a multi-step flow with its own grid, not a document — deferred to R4, C6 already ruled this).
+
+**Checked and left alone, not "eleven wrappers":** `RatePage` and `CardPage` render a centered, bounded card widget (their own background/border/logo header), not a full-width content column — forcing the primitive on either would restyle the card, not just consolidate a recipe. `LoginPage` is a vertically-centered two-column marketing hero, not a top-anchored content flow. `ServiceOutlinePage` already renders at 760/16px (Tailwind `max-w-[760px]` + `px-4`) across five independently full-bleed-banded sections — no drift to fix, and collapsing the bands into one column would change its alternating-background design. `ReviewPage` is dead code (unrouted since the RatePage consolidation, per the comment at `App.jsx:178`) — left as found per house rule against deleting files outside the assigned task.
+
+**Deleted from `index.css`**: `.waves-customer-page`, `.waves-receipt-page`, `.waves-estimate-page`, `.waves-rate-page`, `.waves-contract-page`, and their entries in the ≤820px responsive block (which had been giving these pages a *sixth* gutter, 24px, on top of the five G-01 measured — the new primitive needs no viewport override, matching "16px at every width"). `.waves-contract-single` / `.waves-billing-grid` / `.waves-pay-payment-panel` / `.waves-customer-help` and everything else in that block are unrelated and kept.
+
+## 2026-09-11 — R3b: weights above 700 cleared from the baseline
+
+G-04 found weights above 700 surviving on glass through shared tokens the gate
+could not see. C8 widened the gate and enumerated what it exposed; this clears
+the whole `heavy-weight` rule from `LEGACY_BASELINE` — fifteen violations across
+eight files, all snapped to 700 (the customer scale is 400 / 500 / 600 / 700,
+owner sheet 2026-09-03).
+
+`App.jsx` carried seven at **850** — every customer error-boundary heading and
+its retry button, plus "Loading your portal". `NotificationBell` spelled its two
+as `fontWeight: type === 'admin' ? 700 : 800`: the ternary existed only to give
+the customer surface the heavier weight, so with both arms at 700 it is a
+distinction without a difference and the ternary is gone. The rest were single
+literals in `GlassNewsletterCard`, `InstallPrompt`, `NewsletterSignup`,
+`StationMapCard`, `VanScene` and one `font-weight: 800` in `index.css`.
+
+`InstallPrompt` and `VanScene` were weight-only and are **delisted** — the gate
+fails on a stale entry, so a file that reaches zero has to lose its line.
+
+**Debt: 90 → 75 across 25 files.** Everything left is `banned-font-size`, `emoji`,
+`font-family-literal` or `local-palette`. No behaviour changes; 96 tests across
+the seven suites that render these components pass unchanged.
