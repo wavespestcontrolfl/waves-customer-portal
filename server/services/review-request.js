@@ -1877,6 +1877,15 @@ const ReviewService = {
         purpose: "review_request",
         customerId: customer.id,
         entryPoint: "review_request_send",
+        metadata: {
+          // Stamped onto the sms_log row at send time so the stranded-send
+          // reconciliation can prove this text left (local audit): this rail
+          // now takes a durable `sending` claim too, and without the stamp
+          // _inlineSendEvidence cannot match the row — an accepted send whose
+          // bookkeeping failed would sit `sending` forever beside the log
+          // that proves it went.
+          review_request_id: requestId,
+        },
         // Re-judged inside the canonical sender immediately before provider
         // preparation, and held through the Twilio request: the packet row
         // is shared FOR SHARE so a bounce reconciliation (which takes it FOR
