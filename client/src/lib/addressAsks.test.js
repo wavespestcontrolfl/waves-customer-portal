@@ -62,6 +62,20 @@ describe('addressAskNotice', () => {
     expect(notice.heard).toBeNull();
   });
 
+  it('keeps customer-mismatch copy when the estimate panel passes validation-only cards', () => {
+    const notice = addressAskNotice(filterAddressAsks([
+      ask('address_unverified', { address_as_heard: 'generic hold' }, 'call-a'),
+      ask('missing_unit_number', {
+        unit_ask_building: { street_line_1: '100 Test Harbor Drive' },
+      }, 'call-a'),
+      ask('on_file_proof_customer_mismatch', null, 'call-a'),
+      ask('address_recovered', { address_as_heard: 'retired from estimate panel' }, 'call-a'),
+    ]));
+
+    expect(notice).toMatchObject({ unitOnly: false, heard: null, building: null });
+    expect(notice.reason).toContain('different customer');
+  });
+
   // The 2026-09-10 call (c3c27b01): a spoken ordinal street transcribed as a
   // similar-sounding word. The notice has to name the garble AND what recovery
   // thought the caller said, or the operator books the garble by hand.
@@ -203,13 +217,21 @@ describe('missing unit number alongside its companion hold', () => {
   it('the same-call unit card defines the ask', () => {
     const notice = addressAskNotice([
       ask('address_unverified', { address_as_heard: '100 Port Ave East' }, 'call-1'),
-      ask('missing_unit_number', null, 'call-1'),
+      ask('missing_unit_number', {
+        unit_ask_building: {
+          street_line_1: '100 4th Avenue East',
+          city: 'Palmetto',
+          postal_code: '34221',
+        },
+      }, 'call-1'),
     ]);
 
     expect(notice.unitOnly).toBe(true);
     expect(notice.reason).toBe('the caller gave the building but no unit number');
-    // Evidence still comes from the card that carries it, same call.
-    expect(notice.heard).toBe('100 Port Ave East');
+    // The validated building belongs to the unit card. It is not a
+    // transcription and must never be labelled "heard as".
+    expect(notice.heard).toBeNull();
+    expect(notice.building).toBe('100 4th Avenue East, Palmetto, 34221');
   });
 
   // Call A is a known building missing its unit; call B genuinely did not
@@ -225,6 +247,7 @@ describe('missing unit number alongside its companion hold', () => {
     expect(notice.unitOnly).toBe(false);
     expect(notice.reason).toBe('the address from the call did not validate');
     expect(notice.heard).toBe('B unvalidated');
+    expect(notice.building).toBeNull();
   });
 
   // An unrelated call that simply failed validation must keep generic priority
@@ -238,6 +261,19 @@ describe('missing unit number alongside its companion hold', () => {
     expect(notice.unitOnly).toBe(false);
     expect(notice.reason).toBe('the address from the call did not validate');
     expect(notice.heard).toBe('unvalidated one');
+    expect(notice.building).toBeNull();
+  });
+
+  it('does not call a unit building a heard street even if the card carries both fields', () => {
+    const notice = addressAskNotice([
+      ask('missing_unit_number', {
+        address_as_heard: 'synthetic transcription',
+        unit_ask_building: { street_line_1: '44 Harbor Way' },
+      }, 'call-1'),
+    ]);
+
+    expect(notice.heard).toBeNull();
+    expect(notice.building).toBe('44 Harbor Way');
   });
 });
 

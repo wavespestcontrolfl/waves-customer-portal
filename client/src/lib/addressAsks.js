@@ -57,9 +57,10 @@ export function filterAddressConfirmations(items) {
 
 /**
  * What to tell an operator about these cards, or null when there is nothing
- * owed. `heard` is the street as the transcriber wrote it and `candidates` the
- * house-number-matched streets recovery thought the caller more likely said —
- * both come off the card payload, both are absent on older cards.
+ * owed. `heard` is the street as the transcriber wrote it, `building` is the
+ * validated premise on a unit-number ask, and `candidates` are the
+ * house-number-matched streets recovery thought the caller more likely said.
+ * All are absent on older cards.
  *
  * Everything shown comes from ONE card. A customer with active cards from two
  * different calls would otherwise pair one call's heard street with another
@@ -133,13 +134,27 @@ export function addressAskNotice(asks) {
     return r;
   };
   const sorted = [...pool].sort((a, b) => effectiveRank(a) - effectiveRank(b));
-  // Among equals, prefer a card that actually carries recovery evidence.
+  // A same-call generic hold is downgraded to the unit rank, but its
+  // address_as_heard must not make it win that tie: the unit card owns the
+  // validated building. Select that companion without ever reaching across
+  // calls. For other equal ranks, prefer the card carrying recovery evidence.
   const worst = effectiveRank(sorted[0]);
-  const card = sorted.find((i) => effectiveRank(i) === worst && i.payload?.address_as_heard) || sorted[0];
+  const lead = sorted[0];
+  const card = worst === 2
+    ? (lead.reason_code === 'missing_unit_number'
+      ? lead
+      : sorted.find((i) => i.reason_code === 'missing_unit_number' && sameCall(i, lead)) || lead)
+    : sorted.find((i) => effectiveRank(i) === worst && i.payload?.address_as_heard) || lead;
   const askKind = effectiveRank(card);
   const candidates = Array.isArray(card.payload?.address_candidates)
     ? card.payload.address_candidates.filter(Boolean)
     : [];
+  const unitBuilding = card.reason_code === 'missing_unit_number'
+    ? card.payload?.unit_ask_building
+    : null;
+  const building = unitBuilding?.street_line_1
+    ? [unitBuilding.street_line_1, unitBuilding.city, unitBuilding.postal_code].filter(Boolean).join(', ')
+    : null;
   return {
     unitOnly: askKind === 2,
     readbackOnly: askKind === 1,
@@ -150,7 +165,10 @@ export function addressAskNotice(asks) {
         : card.reason_code === 'on_file_proof_customer_mismatch'
           ? 'the saved address was validated for a different customer and this service address still needs confirmation'
           : 'the address from the call did not validate',
-    heard: card.payload?.address_as_heard || null,
+    // unit_ask_building is validated premise data, not a transcription. Keep
+    // it out of the "heard as" copy even if a future payload carries both.
+    heard: askKind === 2 ? null : card.payload?.address_as_heard || null,
+    building,
     candidates: [...new Set(candidates)].slice(0, 5),
   };
 }

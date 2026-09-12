@@ -29,7 +29,7 @@ import { useNavigate } from "react-router-dom";
 import { useIntelligenceBarActions, usePublishIntelligenceBarPageData } from "../../hooks/useIntelligenceBarPageData";
 import { ActionFeedback, Button, Badge, Card, Checkbox, Field, Input, Select, Textarea, UiSurface, cn } from "../../components/ui";
 import "../../styles/estimate-workflow.css";
-import { filterAddressAsks } from "../../lib/addressAsks";
+import { addressAskNotice, filterAddressAsks } from "../../lib/addressAsks";
 import PestProductionDiagnosticsPanel from "../../components/admin/PestProductionDiagnosticsPanel";
 import { ExternalLink } from "lucide-react";
 import { useEstimateSend } from "../../components/admin/EstimateSendDialog";
@@ -2323,6 +2323,7 @@ export default function EstimateToolViewV2({
   // bare complex address quoted as a 358-unit commercial property).
   // Read-only context, same fail-open contract as customerSpend.
   const [openAddressAsks, setOpenAddressAsks] = useState([]);
+  const openAddressNotice = addressAskNotice(openAddressAsks);
   useEffect(() => {
     setOpenAddressAsks([]);
     const customerId = existingCustomerMatch?.id || form.customerId;
@@ -4760,23 +4761,20 @@ export default function EstimateToolViewV2({
                     </div>
                   </div>
                 )}
-              {openAddressAsks.length > 0 && (
+              {openAddressNotice && (
                 <div className="mb-2.5 px-3 py-2 bg-zinc-50 border-hairline border-zinc-300 rounded-xs text-14 text-zinc-900">
                   <span className="inline-block w-1.5 h-1.5 rounded-full bg-zinc-900 mr-1.5 align-middle" />
                   <strong>Address still being confirmed</strong>
                   {" — "}
-                  {openAddressAsks.some((i) => i.reason_code === "missing_unit_number")
-                    ? "the caller gave the building but no unit number"
-                    : "the address from the call did not validate"}
-                  {(() => {
-                    const b = openAddressAsks.find((i) => i.payload?.unit_ask_building?.street_line_1)?.payload
-                      ?.unit_ask_building;
-                    return b
-                      ? ` (${[b.street_line_1, b.city, b.postal_code].filter(Boolean).join(", ")})`
-                      : "";
-                  })()}
-                  . Callback pending in the Triage Inbox — this lookup may be the whole building, not
-                  the unit.
+                  {openAddressNotice.reason}
+                  {openAddressNotice.heard ? ` (heard as "${openAddressNotice.heard}")` : ""}
+                  {". "}
+                  {openAddressNotice.building ? `Unit needed for: ${openAddressNotice.building}. ` : ""}
+                  {openAddressNotice.candidates.length > 0
+                    ? `The caller more likely said: ${openAddressNotice.candidates.join("; ")}. `
+                    : ""}
+                  Callback pending in the Triage Inbox
+                  {openAddressNotice.unitOnly ? " — this lookup may be the whole building, not the unit." : "."}
                 </div>
               )}
               {/* Gated on the DATA, not on existingCustomerMatch — the

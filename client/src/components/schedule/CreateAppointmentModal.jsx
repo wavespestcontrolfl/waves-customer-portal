@@ -76,6 +76,43 @@ function adminFetch(path, options = {}) {
   });
 }
 
+// Key the async result to the customer it was loaded for. On the render where
+// a customer is first selected (or changed), the prior result cannot be used
+// and `pending` is true before the effect has had a chance to run. A failed
+// read settles fail-open, matching this warning's advisory contract.
+export function useAddressAskLookup(customerId, fetcher = adminFetch) {
+  const customerKey = customerId == null ? '' : String(customerId);
+  const [lookup, setLookup] = useState({ customerId: '', status: 'idle', notice: null });
+
+  useEffect(() => {
+    if (!customerKey) {
+      setLookup({ customerId: '', status: 'idle', notice: null });
+      return undefined;
+    }
+    let cancelled = false;
+    setLookup({ customerId: customerKey, status: 'loading', notice: null });
+    // active = open OR in_progress: a card the office already claimed is
+    // still an owed callback.
+    fetcher(`/admin/triage?status=active&customer_id=${encodeURIComponent(customerKey)}`)
+      .then((data) => {
+        if (!cancelled) {
+          setLookup({ customerId: customerKey, status: 'ready', notice: addressAskNotice(data?.items) });
+        }
+      })
+      .catch(() => {
+        if (!cancelled) setLookup({ customerId: customerKey, status: 'error', notice: null });
+      });
+    return () => { cancelled = true; };
+  }, [customerKey, fetcher]);
+
+  const resultIsCurrent = lookup.customerId === customerKey;
+  return {
+    addressAsk: resultIsCurrent ? lookup.notice : null,
+    addressAskPending: !!customerKey && (!resultIsCurrent || lookup.status === 'loading'),
+    addressAskStatus: resultIsCurrent ? lookup.status : (customerKey ? 'loading' : 'idle'),
+  };
+}
+
 // Tier chips stay on the file's zinc palette — the label carries the tier, not a metal colour.
 const TIER_COLORS = { Platinum: D.text, Gold: D.text, Silver: D.text, Bronze: D.text, 'One-Time': D.text };
 
@@ -540,8 +577,14 @@ export function buildFindTimeRequestBody({
 // booking-property picker not mid-load, and no submission already in
 // flight. Collapses the form's two original guard clauses into one testable
 // predicate (AGENTS.md: collapsing redundant guards).
-export function canSubmitAppointments({ selectedCustomer, services, bookingPropertyState, alreadySubmitting }) {
-  if (alreadySubmitting) return false;
+export function canSubmitAppointments({
+  selectedCustomer,
+  services,
+  bookingPropertyState,
+  alreadySubmitting,
+  addressAskPending = false,
+}) {
+  if (alreadySubmitting || addressAskPending) return false;
   return !!selectedCustomer && services.length > 0 && bookingPropertyState !== 'loading';
 }
 
@@ -964,21 +1007,11 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
   // Open "this address may be wrong" cards on the selected customer's calls.
   // The routing gate already refuses to auto-book these; booking one BY HAND
   // was the hole (2026-09-10: a misheard street booked manually 66 s after the
-  // card opened, tech dispatched to an address that does not exist). Advisory,
-  // never a block — the operator may well be booking the fix.
-  const [addressAsk, setAddressAsk] = useState(null);
-  useEffect(() => {
-    setAddressAsk(null);
-    const customerId = selectedCustomer?.id;
-    if (!customerId) return undefined;
-    let cancelled = false;
-    // active = open OR in_progress: a card the office already claimed is
-    // still an owed callback.
-    adminFetch(`/admin/triage?status=active&customer_id=${encodeURIComponent(customerId)}`)
-      .then((data) => { if (!cancelled) setAddressAsk(addressAskNotice(data?.items)); })
-      .catch(() => { if (!cancelled) setAddressAsk(null); });
-    return () => { cancelled = true; };
-  }, [selectedCustomer?.id]);
+  // card opened, tech dispatched to an address that does not exist). The
+  // warning is advisory — the operator may well be booking the fix — but the
+  // lookup must settle before submit is enabled so a slow warning cannot land
+  // just after the booking. A lookup failure settles fail-open.
+  const { addressAsk, addressAskPending } = useAddressAskLookup(selectedCustomer?.id);
   const propertyPickerActive = bookingPropertyState === 'ready';
   const selectedBookingProperty = propertyPickerActive
     ? bookingProperties.find((p) => String(p.id) === String(selectedPropertyId)) || null
@@ -2209,7 +2242,11 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
   // Submit
   const submitAppointments = async (separateProgram) => {
     if (!canSubmitAppointments({
-      selectedCustomer, services, bookingPropertyState, alreadySubmitting: submittingRef.current,
+      selectedCustomer,
+      services,
+      bookingPropertyState,
+      alreadySubmitting: submittingRef.current,
+      addressAskPending,
     })) return;
     submittingRef.current = true;
     setSaving(true);
@@ -2523,7 +2560,13 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
   // While the property list is loading a multi-property customer has no
   // resolved address yet — a submit then would omit propertyId and book the
   // primary before the operator was shown the choice.
-  const canSubmit = !!selectedCustomer && !!selectedService && !saving && bookingPropertyState !== 'loading';
+  const canSubmit = canSubmitAppointments({
+    selectedCustomer,
+    services,
+    bookingPropertyState,
+    alreadySubmitting: saving,
+    addressAskPending,
+  });
   const hasRecurringServices = services.some((s) => s.cadence && s.cadence !== 'one_time');
   const firstCustomRecurringIndex = services.findIndex((s) => s.cadence === 'custom');
   const weekendRuleValue = skipWeekends ? weekendShift : 'allow';
@@ -2858,6 +2901,11 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
           )}
           {/* Red, not muted: this is the one notice on the modal that means
               "a tech may drive somewhere that does not exist". */}
+          {selectedCustomer && addressAskPending && (
+            <div role="status" aria-live="polite" style={{ fontSize: 14, color: D.muted, marginTop: 10 }}>
+              Checking address review status…
+            </div>
+          )}
           {selectedCustomer && addressAsk && (
             <div
               role="alert"
@@ -2871,6 +2919,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
               {addressAsk.reason}
               {addressAsk.heard ? ` (heard as "${addressAsk.heard}")` : ''}
               {'. '}
+              {addressAsk.building ? `Unit needed for: ${addressAsk.building}. ` : ''}
               {addressAsk.candidates.length > 0
                 ? `The caller more likely said: ${addressAsk.candidates.join('; ')}. `
                 : ''}
@@ -3773,9 +3822,9 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
                     onChange={(event) => setSeparateProgramReason(event.target.value)}
                     placeholder="Describe the additional scope of work"
                     style={{ display: 'block', boxSizing: 'border-box', width: '100%', margin: '8px 0', padding: 12, fontSize: 14, border: `1px solid ${D.border}`, borderRadius: 6 }} />
-                  <button type="button" disabled={saving || separateProgramReason.trim().length < 5}
+                  <button type="button" disabled={!canSubmit || separateProgramReason.trim().length < 5}
                     onClick={() => handleSubmit(duplicateConflict)}
-                    style={{ minHeight: 44, padding: '10px 16px', fontSize: 14, borderRadius: 6, background: D.text, color: D.white, border: 'none', opacity: saving || separateProgramReason.trim().length < 5 ? 0.5 : 1 }}>
+                    style={{ minHeight: 44, padding: '10px 16px', fontSize: 14, borderRadius: 6, background: D.text, color: D.white, border: 'none', opacity: !canSubmit || separateProgramReason.trim().length < 5 ? 0.5 : 1 }}>
                     Create separate recurring program
                   </button>
                 </div>
