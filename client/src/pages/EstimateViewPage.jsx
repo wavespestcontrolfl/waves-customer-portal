@@ -687,10 +687,13 @@ function NotFoundCard({ token = null, extensionEligible = false, onExtended = nu
 
   return (
     <div style={estimateCard({ padding: 32, textAlign: 'center', marginTop: 40 })}>
-      <div style={{ fontSize: 34 }}></div>
-      <div style={{ fontSize: 18, fontWeight: 600, marginTop: 8 }}>
+      {/* An h1, not a styled div (G-07 measured h1Count === 0 here). This card
+          is deliberately NOT a PublicStateCard: it doubles as the extension
+          request flow and flips to a success headline, so role="alert" would
+          be wrong on it. It needs the right heading element, not the card. */}
+      <h1 style={{ fontSize: 18, fontWeight: 600, marginTop: 8 }}>
         {extendedNow ? "You're all set" : 'Estimate unavailable'}
-      </div>
+      </h1>
       {!extendedNow ? (
         <div style={{ fontSize: 16, color: ESTIMATE_BODY, marginTop: 12, lineHeight: 1.5 }}>
           This link may have expired or isn't valid. Call us at{' '}
@@ -6787,8 +6790,12 @@ function EstimateViewPageInner({ websiteMode = false }) {
   }
   if (loadError) {
     return (
+      // No <Header> here: it renders an `h1`, and so does the card now, which
+      // put two h1s on this state (caught in the `r2b` evidence run). The
+      // header was a blank one anyway — customerFirstName and address are both
+      // null on a payload that never loaded — so the card stands alone, the
+      // same as every other load-error state.
       <Page website={websiteMode}>
-        <Header customerFirstName={null} address={null} />
         <PublicLoadError resource="estimate" onRetry={() => loadEstimate().catch(() => {
           setLoadError(true);
           setLoading(false);
