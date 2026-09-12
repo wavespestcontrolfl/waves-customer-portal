@@ -1944,7 +1944,7 @@ async function applyHumanUpdate(conn, id, { action, description, due_at, note, r
   // and independent of renewalAudit (which the callback branch below still
   // needs `before` — populated only for reopen/edit — to gate on).
   const linkPromiseVerdict = ['dismiss', 'fulfill'].includes(action)
-    ? await conn('call_commitments').where({ id }).first('kind', 'party') : null;
+    ? await conn('call_commitments').where({ id }).first('kind', 'party', 'call_log_id') : null;
   // Confirm's own pre-read, deliberately separate from `before` (which only
   // covers reopen/edit) so an ordinary callback Confirm never starts
   // fetching a row the callback branch below has no use for and would
@@ -2036,7 +2036,8 @@ async function applyHumanUpdate(conn, id, { action, description, due_at, note, r
     // landing before the next sweep could find the old attempt still
     // flagged uncertain with nothing left to ever clear it (see
     // retireAttemptsOnLedgerVerdict's own doc comment).
-    await require('./reschedule-link-promises').retireAttemptsOnLedgerVerdict(conn, id);
+    await require('./reschedule-link-promises').retireAttemptsOnLedgerVerdict(conn, id,
+      { callLogId: linkPromiseVerdict.call_log_id, action, reviewedBy, note });
   } else if (linkPromiseConfirm && linkPromiseConfirm.kind === 'send_reschedule_link' && linkPromiseConfirm.party === 'waves'
     && linkPromiseConfirm.status === 'open' && require('./reschedule-link-promises').humanStateBlocksPromise(linkPromiseConfirm.human_state)) {
     // Confirm is not always a no-op for this kind either: status 'open'

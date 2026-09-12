@@ -402,14 +402,14 @@ test('a genuine change of mind in a LATER clause still supersedes an earlier ref
 // shown to fall out of the result rather than merely asserting the SQL.
 // `filterStatus` makes the outbox rows honour the sweep's status allowlist
 // the way the real WHERE does.
-function fakeConn({ outbox = [], selfServe = null, selfServeVisitIds = null, cards = [], throwOn = null, smsLog = null, smsRows = null, systemSettings = {}, filterStatus = false } = {}) {
+function fakeConn({ outbox = [], selfServe = null, selfServeVisitIds = null, cards = [], throwOn = null, smsLog = null, smsRows = null, systemSettings = {}, filterStatus = false, calls = [], commitments = [] } = {}) {
   const seen = { statusAllowlist: null, logFilters: [], visitIdFilters: [], orderByCalls: [], whereRawCalls: [], updates: [], inserts: [], resolved: [] };
   const openCards = () => cards.filter((card) => !seen.resolved.includes(card.id));
   const evidenceVisitIds = () => (selfServeVisitIds !== null ? selfServeVisitIds
     : selfServe ? [...new Set(outbox.map((row) => row.related_scheduled_service_id).filter(Boolean))] : []);
   const build = (table) => {
     const name = String(table).split(' ')[0];
-    const state = { eq: {}, ranges: [], whereIn: [], notNull: [], evidenceFilter: false };
+    const state = { eq: {}, ranges: [], whereIn: [], notNull: [], evidenceFilter: false, orPredicates: [] };
     const statusIn = (row) => state.whereIn.filter((w) => w.col === 'status').every((w) => w.values.includes(row.status));
     const rows = () => {
       if (name === 'outbox_messages') {
@@ -418,17 +418,29 @@ function fakeConn({ outbox = [], selfServe = null, selfServeVisitIds = null, car
       }
       if (name === 'triage_items') return openCards();
       if (name === 'sms_log' && smsRows) return smsRows.filter((row) => statusIn(row) && state.notNull.every((col) => row[col] != null));
+      if (name === 'call_log') return calls.filter((row) => Object.entries(state.eq).every(([k, v]) => row[k] === v));
+      // needsSendInterlock's pre-staging check (codex #4293 P1): an open
+      // commitment with no outbox row at all yet. `orPredicates` covers the
+      // human_state null-or-confirmed clause below — a query-builder
+      // callback, not a plain eq object.
+      if (name === 'call_commitments') {
+        return commitments.filter((row) => Object.entries(state.eq).every(([k, v]) => row[k] === v)
+          && state.whereIn.every((w) => w.values.includes(row[w.col]))
+          && (state.orPredicates.length === 0 || state.orPredicates.some((fn) => fn(row))));
+      }
       return [];
     };
     const b = {};
     const pass = (fn) => (...args) => { if (fn) fn(...args); return b; };
     Object.assign(b, {
-      whereNotNull: pass((col) => state.notNull.push(col)), orWhereNotNull: pass(), whereNot: pass(), whereNotIn: pass(), orWhere: pass(),
+      whereNotNull: pass((col) => state.notNull.push(col)), orWhereNotNull: pass(), whereNot: pass(), whereNotIn: pass(),
+      orWhere: pass((col, val) => state.orPredicates.push((row) => row[col] === val)),
       whereRaw: pass((sql, bindings) => {
         seen.whereRawCalls.push({ table: name, sql, bindings });
         if (name === 'outbox_messages' && /reschedule_log/.test(sql)) state.evidenceFilter = true;
       }),
-      whereNull: pass(), join: pass(), leftJoin: pass(), limit: pass(), forUpdate: pass(), forShare: pass(),
+      whereNull: pass((col) => state.orPredicates.push((row) => row[col] == null)),
+      join: pass(), leftJoin: pass(), limit: pass(), forUpdate: pass(), forShare: pass(),
       orderBy: pass((arg) => seen.orderByCalls.push({ table: name, arg })),
       onConflict: () => ({ ignore: async () => 1 }),
       whereIn: pass((col, values) => {
@@ -448,6 +460,7 @@ function fakeConn({ outbox = [], selfServe = null, selfServeVisitIds = null, car
       then: (resolve, reject) => Promise.resolve().then(rows).then(resolve, reject),
       select: pass(),   // knex returns the builder; awaiting it yields the rows
       pluck: async (col) => {
+        if (name === 'call_log' && col === 'id') return rows().map((row) => row.id);
         // A bulk pluck of reschedule_log is the unbounded shape the r3 P2
         // retired; it is recorded so a regression back to it is visible.
         if (name !== 'reschedule_log' || col !== 'scheduled_service_id') return [];
@@ -467,6 +480,7 @@ function fakeConn({ outbox = [], selfServe = null, selfServeVisitIds = null, car
           const key = state.eq.key;
           return key != null && systemSettings[key] !== undefined ? { value: systemSettings[key] } : null;
         }
+        if (name === 'call_commitments') return rows()[0] || null;
         return null;
       },
       insert: (data) => {
@@ -1744,14 +1758,14 @@ test('a busy send interlock is a retryable block, and the gate off is a pass-thr
 
 // Run one send with the gate live and the module-level db answering from a
 // fake, restoring both afterwards.
-async function withLiveGate({ outbox = [], client }, fn) {
+async function withLiveGate({ outbox = [], commitments = [], calls = [], client }, fn) {
   const prior = process.env.GATE_RESCHEDULE_LINK_ON_PROMISE, priorCommitments = gates.callCommitments;
   const priorClient = db.client;
   try {
     gates.callCommitments = true;
     process.env.GATE_RESCHEDULE_LINK_ON_PROMISE = 'true';
     db.client = client;
-    db.mockImplementation(fakeConn({ outbox }).conn);
+    db.mockImplementation(fakeConn({ outbox, commitments, calls }).conn);
     return await fn();
   } finally {
     db.mockReset();
@@ -1787,6 +1801,34 @@ test('an operator text only pays for the interlock when a promised link is live'
   expect(live.client.acquireRawConnection).toHaveBeenCalledTimes(1);
   expect(live.connection.query).toHaveBeenCalledWith(expect.stringContaining('statement_timeout'));
   expect(live.client.destroyRawConnection).toHaveBeenCalledWith(live.connection);
+});
+
+test('an operator text serializes against a promise not yet staged — an open call_commitments row with NO outbox row at all (codex #4293 P1)', async () => {
+  // stagePromises runs on its own sweep cadence: a manual send landing in
+  // the gap between the office's promise being recorded and the next
+  // staging pass would previously find no outbox row (LIVE_PROMISE_STATUSES
+  // check alone) and skip the interlock entirely, racing the worker's own
+  // uncontended lock once it stages and dispatches minutes later — the same
+  // link could go out twice. needsSendInterlock must also check the
+  // commitment directly, not only its derived outbox row.
+  const core = jest.fn(async () => ({ sent: true }));
+  const admin = { customerId: 'customer', body: 'On our way.', metadata: { adminUserId: 'admin' } };
+  const calls = [{ id: 'call', customer_id: 'customer' }];
+  const commitments = [{ id: 'commitment', kind: 'send_reschedule_link', party: 'waves', status: 'open', human_state: null, call_log_id: 'call' }];
+
+  const live = fakeInterlock();
+  expect(await withLiveGate({ outbox: [], commitments, calls, client: live.client }, () => links.withSendLock(admin, core)))
+    .toEqual({ sent: true });
+  expect(live.client.acquireRawConnection).toHaveBeenCalledTimes(1);
+  expect(live.connection.query).toHaveBeenCalledWith(expect.stringContaining('statement_timeout'));
+  expect(core).toHaveBeenCalled();
+
+  // A commitment some OTHER customer's call holds must never engage this
+  // customer's interlock.
+  const quiet = fakeInterlock();
+  expect(await withLiveGate({ outbox: [], commitments, calls: [{ id: 'other-call', customer_id: 'someone-else' }], client: quiet.client },
+    () => links.withSendLock(admin, core))).toEqual({ sent: true });
+  expect(quiet.client.acquireRawConnection).not.toHaveBeenCalled();
 });
 
 test('an interlock that dies mid-send blocks at the provider boundary', async () => {

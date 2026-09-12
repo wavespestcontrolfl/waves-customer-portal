@@ -188,6 +188,59 @@ describe('PUT /admin/triage/:id/resolve on a reschedule_link_promise card', () =
   });
 });
 
+describe('a promise parks between the pre-lock read and the lock (codex #4293 P1)', () => {
+  test('resolving the card settles the commitment that parked WHILE the route was acquiring the call lock, not only the ones it saw before', async () => {
+    // Two commitments and their outbox rows are seeded as already parked
+    // against the same call, but the CARD only names the first one — the
+    // second's append is what a concurrent parkReview would have done in
+    // the gap between transitionCore's initial (pre-lock) read of `item`
+    // and this call actually acquiring lockTriageCall. lockTriageCall is
+    // mocked below to perform that exact append the moment the route
+    // reaches the lock, simulating the interleaving without needing real
+    // Postgres concurrency.
+    const COMMITMENT_ID_2 = 'commitment-2';
+    const OUTBOX_ID_2 = 'outbox-2';
+    const { conn, tables } = fixture({
+      call_commitments: [
+        { id: COMMITMENT_ID, call_log_id: CALL_ID, kind: 'send_reschedule_link', party: 'waves',
+          status: 'open', human_state: null, evidence: '[]', subject: null, fulfillment: null },
+        { id: COMMITMENT_ID_2, call_log_id: CALL_ID, kind: 'send_reschedule_link', party: 'waves',
+          status: 'open', human_state: null, evidence: '[]', subject: null, fulfillment: null },
+      ],
+      outbox_messages: [
+        { id: OUTBOX_ID, commitment_id: COMMITMENT_ID, related_call_log_id: CALL_ID, status: 'review', last_error: 'promise_needs_review' },
+        { id: OUTBOX_ID_2, commitment_id: COMMITMENT_ID_2, related_call_log_id: CALL_ID, status: 'review', last_error: 'promise_needs_review' },
+      ],
+    });
+    wireDb(db, { conn });
+    const { lockTriageCall } = require('../utils/triage-locks');
+    lockTriageCall.mockImplementationOnce(async () => {
+      // Splice in a NEW object rather than mutating the existing row
+      // in place — `item` (captured by the route BEFORE this lock call)
+      // is a reference to the OLD object, exactly like a real pre-lock
+      // knex read is a snapshot unaffected by a later writer's commit; a
+      // same-object mutation here would let `item.payload` see the append
+      // "for free" and defeat the very race this test exists to catch.
+      const idx = tables.triage_items.findIndex((c) => c.id === CARD_ID);
+      const card = tables.triage_items[idx];
+      const parked = card.payload.reschedule_link_promise.commitment_ids;
+      tables.triage_items[idx] = { ...card, payload: { ...card.payload,
+        reschedule_link_promise: { ...card.payload.reschedule_link_promise, commitment_ids: [...parked, COMMITMENT_ID_2] } } };
+    });
+    await withServer(async (baseUrl) => {
+      const res = await put(baseUrl, `/${CARD_ID}/resolve`, { note: 'Called the customer directly.' });
+      expect(res.status).toBe(200);
+    });
+    expect(tables.triage_items[0].status).toBe('resolved');
+    // Both commitments settle — not only the one the route's stale pre-lock
+    // snapshot knew about.
+    expect(tables.call_commitments.find((c) => c.id === COMMITMENT_ID)).toMatchObject({ status: 'fulfilled' });
+    expect(tables.call_commitments.find((c) => c.id === COMMITMENT_ID_2)).toMatchObject({ status: 'fulfilled' });
+    expect(tables.outbox_messages.find((o) => o.id === OUTBOX_ID)).toMatchObject({ status: 'cancelled' });
+    expect(tables.outbox_messages.find((o) => o.id === OUTBOX_ID_2)).toMatchObject({ status: 'cancelled' });
+  });
+});
+
 describe('PUT /admin/triage/:id/dismiss on a reschedule_link_promise card', () => {
   test('settles the commitment as dismissed and cancels the outbox row', async () => {
     const { conn, tables } = fixture();

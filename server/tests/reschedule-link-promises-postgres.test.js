@@ -1623,11 +1623,15 @@ postgres('reschedule-link-promises against PostgreSQL', () => {
 
         // Staff dismiss on the LEDGER — not the triage card — with NO sweep
         // in between. This is the fix under test: the dismiss's own
-        // transaction must retire the flag itself.
+        // transaction must retire the flag itself, AND (codex #4293 P2)
+        // cancel the attempt outright — the same terminal-verdict bulk
+        // cancel settleParkedPromiseCard applies from the triage card, so a
+        // ledger verdict needs no gated sweep to ever settle the row.
         const dismissed = await applyHumanUpdate(mockPg, commitment.id, { action: 'dismiss', reviewedBy: randomUUID() });
         expect(dismissed.status).toBe('dismissed');
         const afterDismiss = await mockPg('outbox_messages').where({ id: outboxId }).first();
-        expect(afterDismiss.status).toBe('sending'); // untouched — dismiss never cancels the row itself
+        expect(afterDismiss.status).toBe('cancelled');
+        expect(afterDismiss.last_error).toBe('dismissed_by_office');
         expect(afterDismiss.payload.delivery_outcome_uncertain).toBe(false);
 
         // Staff Reopen, still before any sweep has ever run.
@@ -1642,7 +1646,7 @@ postgres('reschedule-link-promises against PostgreSQL', () => {
         expect(staged).toBe(1);
         const rows = await mockPg('outbox_messages').where({ commitment_id: commitment.id }).orderBy('commitment_generation');
         expect(rows).toHaveLength(2);
-        expect(rows[0]).toMatchObject({ id: outboxId, commitment_generation: 0, status: 'sending' });
+        expect(rows[0]).toMatchObject({ id: outboxId, commitment_generation: 0, status: 'cancelled' });
         expect(rows[1]).toMatchObject({ commitment_generation: 1, status: 'pending' });
 
         // ...and sends: the renewed promise is not just admitted for
@@ -1674,10 +1678,92 @@ postgres('reschedule-link-promises against PostgreSQL', () => {
       const dismissed = await applyHumanUpdate(mockPg, commitment.id, { action: 'dismiss', reviewedBy: randomUUID() });
       expect(dismissed.status).toBe('dismissed');
       const row = await mockPg('outbox_messages').where({ id: outboxId }).first();
-      // Still parked (dismiss reconciles the flag, not the status — that
-      // stays the sweep's own job), but no longer flagged uncertain.
-      expect(row.status).toBe('review');
+      // Cancelled outright (codex #4293 P2) — a ledger dismiss is a terminal
+      // office verdict, not merely a flag clear; the row is no longer left
+      // parked for the sweep to notice and finish closing out.
+      expect(row.status).toBe('cancelled');
+      expect(row.last_error).toBe('dismissed_by_office');
       expect(row.payload.delivery_outcome_uncertain).toBe(false);
+    });
+
+    test('a ledger verdict settles the triage card and re-syncs call_log — WITH THE GATE OFF, never depending on a worker sweep that will not run (codex #4293 P2)', async () => {
+      const priorGate = process.env.GATE_RESCHEDULE_LINK_ON_PROMISE;
+      const priorCallCommitments = gates.callCommitments;
+      try {
+        // The gate AND the kill switch are both off — sweep() itself
+        // refuses to run at all (mode() === 'off'), so nothing is left to
+        // ever notice 'promise_closed' and finish the settlement if the
+        // ledger verdict's own transaction does not do it synchronously.
+        delete process.env.GATE_RESCHEDULE_LINK_ON_PROMISE;
+        gates.callCommitments = false;
+        expect(links.mode()).toBe('off');
+
+        const callId = randomUUID();
+        await mockPg('call_log').insert({ id: callId, direction: 'inbound', processing_generation: 0, review_status: 'open' });
+        const [first] = await mockPg('call_commitments').insert({
+          call_log_id: callId, commitment_key: 'send_reschedule_link:1', party: 'waves', kind: 'send_reschedule_link',
+          description: 'send a reschedule link', source: 'ai', status: 'open', last_seen_generation: 0, processing_generation: 0,
+        }).returning('id');
+        const [second] = await mockPg('call_commitments').insert({
+          call_log_id: callId, commitment_key: 'send_reschedule_link:2', party: 'waves', kind: 'send_reschedule_link',
+          description: 'send a second reschedule link', source: 'ai', status: 'open', last_seen_generation: 0, processing_generation: 0,
+        }).returning('id');
+        const firstOutboxId = randomUUID();
+        const secondOutboxId = randomUUID();
+        await mockPg('outbox_messages').insert([
+          { id: firstOutboxId, channel: 'sms', status: 'review', last_error: 'promise_needs_review', payload: {},
+            commitment_id: first.id, commitment_generation: 0, related_call_log_id: callId },
+          { id: secondOutboxId, channel: 'sms', status: 'review', last_error: 'promise_needs_review', payload: {},
+            commitment_id: second.id, commitment_generation: 0, related_call_log_id: callId },
+        ]);
+        // One card names BOTH parked promises — parkReview's own shape for
+        // two exceptions on the same call.
+        const [card] = await mockPg('triage_items').insert({
+          call_log_id: callId, category: 'customer_followup', severity: 'advisory', reason_code: 'reschedule_link_promise',
+          status: 'open', summary: '2 promised reschedule links need attention.',
+          payload: JSON.stringify({ reschedule_link_promise: { commitment_id: first.id, commitment_ids: [first.id, second.id], reason: 'promise_needs_review' } }),
+        }).returning('id');
+
+        // Dismiss the FIRST commitment straight off the ledger (Call
+        // Intelligence), not through the triage card.
+        const dismissed = await applyHumanUpdate(mockPg, first.id, { action: 'dismiss', reviewedBy: randomUUID(), note: 'Handled by phone' });
+        expect(dismissed.status).toBe('dismissed');
+
+        const firstOutbox = await mockPg('outbox_messages').where({ id: firstOutboxId }).first();
+        expect(firstOutbox).toMatchObject({ status: 'cancelled', last_error: 'dismissed_by_office' });
+        // The SIBLING promise is completely untouched — a ledger verdict on
+        // ONE commitment must not silently settle another.
+        const secondOutbox = await mockPg('outbox_messages').where({ id: secondOutboxId }).first();
+        expect(secondOutbox).toMatchObject({ status: 'review', last_error: 'promise_needs_review' });
+        const secondCommitment = await mockPg('call_commitments').where({ id: second.id }).first('status');
+        expect(secondCommitment.status).toBe('open');
+
+        // The card stays OPEN — it still speaks for the second, still-live
+        // promise — but drops the first id.
+        const afterFirst = await mockPg('triage_items').where({ id: card.id }).first();
+        expect(afterFirst.status).toBe('open');
+        expect(afterFirst.payload.reschedule_link_promise.commitment_ids).toEqual([second.id]);
+        const callAfterFirst = await mockPg('call_log').where({ id: callId }).first('review_status');
+        expect(callAfterFirst.review_status).toBe('open');
+
+        // Now fulfil the second — the ledger's own "mark done" — with the
+        // gate STILL off. Pre-fix, this outbox row and the card itself
+        // would stay open forever with nothing left to ever notice
+        // 'promise_closed' and finish the job.
+        const fulfilled = await applyHumanUpdate(mockPg, second.id, { action: 'fulfill', reviewedBy: randomUUID() });
+        expect(fulfilled.status).toBe('fulfilled');
+        const secondOutboxAfter = await mockPg('outbox_messages').where({ id: secondOutboxId }).first();
+        expect(secondOutboxAfter).toMatchObject({ status: 'cancelled', last_error: 'resolved_by_office' });
+
+        // The card's last id is gone — it resolves, and call_log re-syncs.
+        const afterSecond = await mockPg('triage_items').where({ id: card.id }).first('status');
+        expect(afterSecond.status).toBe('resolved');
+        const callAfterSecond = await mockPg('call_log').where({ id: callId }).first('review_status');
+        expect(callAfterSecond.review_status).toBe('resolved');
+      } finally {
+        if (priorGate === undefined) delete process.env.GATE_RESCHEDULE_LINK_ON_PROMISE; else process.env.GATE_RESCHEDULE_LINK_ON_PROMISE = priorGate;
+        gates.callCommitments = priorCallCommitments;
+      }
     });
   });
 

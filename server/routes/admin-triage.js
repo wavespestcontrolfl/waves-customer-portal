@@ -245,9 +245,21 @@ async function transitionCore({ id, nextStatus, note, assignedTo, expectedUpdate
       // left to ever surface it again — parkReview only (re)creates a card
       // when the outbox row's own status or last_error actually changes
       // (codex #4293 P1; see reschedule-link-promises.settleParkedPromiseCard).
-      await require('../services/reschedule-link-promises').settleParkedPromiseCard(trx, item, {
-        action: nextStatus, reviewedBy: assignedTo, note,
-      });
+      // Reload the payload UNDER THE LOCK: another promise can park
+      // (parkReview, itself lockTriageCall-serialized) in the gap between
+      // this route's initial pre-lock read of `item` and this point,
+      // appending its commitment id to payload.reschedule_link_promise
+      // .commitment_ids. Settling against the stale pre-lock snapshot would
+      // only settle the OLDER ids — the newly appended commitment stays
+      // open with its outbox parked in 'review' and no card left to ever
+      // surface it again, since parkReview only (re)creates a card when the
+      // outbox row's own status or last_error actually changes (codex
+      // #4293 P1).
+      const liveCard = await trx('triage_items').where({ id }).first('payload');
+      await require('../services/reschedule-link-promises').settleParkedPromiseCard(
+        trx, { ...item, payload: liveCard ? liveCard.payload : item.payload },
+        { action: nextStatus, reviewedBy: assignedTo, note },
+      );
     }
     if (nextStatus === 'resolved' && emailReviewCard) {
       // A force-reprocess can leave BOTH an email_invalid and an

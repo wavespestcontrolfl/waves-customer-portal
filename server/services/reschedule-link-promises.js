@@ -732,10 +732,48 @@ async function retireDeliveryUncertainty(conn, rowId) {
 // only reintroduce the deadlock for the one row shape (no provider id, never
 // reached the provider at all) that has no OTHER path back to ever clearing
 // the flag once reopened.
-async function retireAttemptsOnLedgerVerdict(conn, commitmentId) {
+//
+// Beyond the uncertainty flag, a dismiss/fulfill recorded here IS the same
+// terminal office verdict settleParkedPromiseCard applies from the triage
+// card — it must cancel the outbox attempt and close the card in this SAME
+// transaction too, not defer that half to a later worker sweep noticing
+// 'promise_closed'. That deferral was fine as long as SOME sweep was
+// guaranteed a turn, but the worker is gated (GATE_RESCHEDULE_LINK_ON_PROMISE
+// / GATE_CALL_COMMITMENTS, plus its own kill switch) — with either off,
+// sweep() never runs at all, and the outbox row stays parked in 'review'
+// with call_log.review_status stuck 'open' against a commitment that is
+// already terminal, forever (codex #4293 P2). `callLogId`/`action` are
+// required for this half (the plain uncertainty-retirement above still runs
+// unconditionally, matching every existing caller shape); callLogId also
+// gates taking the advisory call lock, needed the moment this touches
+// triage_items — clearPromiseException assumes its caller already holds it
+// (the SAME GLOBAL LOCK ORDER admin-triage.js documents: advisory call lock
+// -> triage_items), or a concurrent parkReview appending a fresh commitment
+// id to this exact card in the gap between this function's read and write
+// would have that append silently lost — pg_advisory_xact_lock is
+// per-session reentrant, so re-taking it here is a no-op when a caller
+// (settleParkedPromiseCard's chain) already holds it, and the first
+// acquisition when this runs directly off a ledger verdict.
+async function retireAttemptsOnLedgerVerdict(conn, commitmentId, { callLogId = null, action = null, reviewedBy = null, note = null } = {}) {
+  if (callLogId) await lockTriageCall(conn, callLogId);
   const rows = await conn('outbox_messages').where({ commitment_id: commitmentId })
     .whereNotIn('status', ['delivered', 'cancelled']).pluck('id');
   for (const rowId of rows) await retireDeliveryUncertainty(conn, rowId);
+  if (!callLogId || !action) return;
+  // Terminal for this ONE commitment only: cancel every non-terminal attempt
+  // outright (the same bulk clear settleParkedPromiseCard uses) and close
+  // whichever card names it. clearPromiseException is scoped to this
+  // commitment id alone — unlike a card-path verdict (which settles every id
+  // the card names at once), a ledger verdict on ONE commitment must leave
+  // any OTHER promise the same card still carries untouched.
+  await conn('outbox_messages').where({ related_call_log_id: callLogId, commitment_id: commitmentId })
+    .whereNotIn('status', ['delivered', 'cancelled'])
+    .update({ status: 'cancelled', last_error: action === 'dismiss' ? 'dismissed_by_office' : 'resolved_by_office', updated_at: new Date(),
+      payload: deliveryUncertainPatch(conn, false) });
+  await clearPromiseException(conn, callLogId, commitmentId, note);
+  await recordAuditEvent({ actor_type: reviewedBy ? 'technician' : 'system', actor_id: reviewedBy,
+    action: action === 'dismiss' ? 'reschedule_link_promise_dismissed' : 'reschedule_link_promise_resolved',
+    resource_type: 'call_commitment', resource_id: commitmentId, metadata: { via: 'ledger', settled_outbox_ids: rows }, critical: true, trx: conn });
 }
 
 async function parkReview(conn, row, reason) {
