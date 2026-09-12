@@ -359,10 +359,15 @@ function UpsellEngineTab({ showToast }) {
     ]).then(([ruleData, opportunityData]) => { setRules(ruleData.rules || []); setOpportunities((opportunityData.opportunities || []).map(normalizeOpportunity)); setLoading(false); });
   }, []);
   const triggerUpsell = async (customerId) => {
-    try { const response = await adminFetch(
+    // The route returns { success, upsell, messageSent } and never a `message`
+    // (admin-pricing-strategy.js:367), and messageSent is the outbound SMS body
+    // rather than operator-facing copy, so the generic confirmation is the only
+    // branch that was ever reachable.
+    try { await adminFetch(
         `/admin/pricing/trigger-upsell/${customerId}`,
         { method: "POST" },
-      ); showToast(response.message || "Upsell SMS sent!"); }
+      );
+      showToast("Upsell SMS sent!"); }
     catch (error) { showToast(`Failed: ${error.message}`); }
   };
   if (loading) return <ActionFeedback className="min-h-20">Loading upsell data...</ActionFeedback>;

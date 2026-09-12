@@ -33,7 +33,8 @@ function fixtureFor(url, options = {}) {
   // { customer, upsell } pairs and the summary/channel/retention LTV response
   // are what server/routes/admin-pricing-strategy.js actually returns.
   if (path === "/admin/pricing/upsell-opportunities") return { total: 1, opportunities: [{ customer: { id: "customer-1", name: "Synthetic customer", tier: "Silver", monthlyRate: 100, phone: "9415550100" }, upsell: { type: "add_service", service: "Mosquito", pitch: "Synthetic pitch", estimatedMonthlyAdd: 25 } }] };
-  if (path === "/admin/pricing/trigger-upsell/customer-1") return { message: "Synthetic upsell sent" };
+  // { success, upsell, messageSent } is what the route returns — no `message`.
+  if (path === "/admin/pricing/trigger-upsell/customer-1") return { success: true, upsell: { type: "add_service", service: "Mosquito", estimatedMonthlyAdd: 25 }, messageSent: "Synthetic outbound SMS body" };
   if (path === "/admin/pricing/offers") return { offers: [] };
   if (path === "/admin/pricing/ltv-analysis") return { totalTracked: 5, distribution: {}, channelPerformance: [{ source: "Referral", avgCAC: 90, avgLTV: 900, avgRevenue: 800, customerCount: 5, roi: 9 }], churnBreakdown: { low: 5, medium: 0, high: 0 }, retentionCurve: { "3mo": { retained: 5, pct: 100 }, "6mo": { retained: 4, pct: 80 }, "12mo": { retained: 4, pct: 75 }, "24mo": { retained: 2, pct: 40 } }, summary: { avgLTV: 900, avgCAC: 90, avgMonthlyRecurring: 120 } };
   if (path === "/admin/pricing/recalculate-ltv") return { success: true };
@@ -104,7 +105,9 @@ describe("Pricing admin new UI foundation", () => {
     fireEvent.click(screen.getByRole("button", { name: "Upsell engine" }));
     expect(await screen.findByText("Synthetic customer")).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "Send offer" }));
-    expect(await screen.findByText("Synthetic upsell sent")).toBeInTheDocument();
+    // The generic success copy is what an operator actually sees, since the
+    // route returns no `message` field for the page to prefer.
+    expect(await screen.findByText("Upsell SMS sent!")).toBeInTheDocument();
     expect(fetch).toHaveBeenCalledWith("/api/admin/pricing/trigger-upsell/customer-1", expect.objectContaining({ method: "POST" }));
   });
 });

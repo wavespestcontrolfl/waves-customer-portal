@@ -16,6 +16,33 @@ const configs = [
   { config_key: 'waveguard_tiers', name: 'WaveGuard tiers', category: 'waveguard', data: { gold: { threshold: 3, discount: 0.15 } } },
 ];
 
+// Mirrors PricingIntelligence.calculateValueScore (pricing-intelligence.js:75-104)
+// exactly — the clamp, the rounding and the four positioning bands — so a slider
+// change produces the response production would produce.
+function calculateValue(body) {
+  const clamp = (value) => Math.max(1, Math.min(10, Number(value) || 5));
+  const dO = clamp(body?.dreamOutcome);
+  const pL = clamp(body?.perceivedLikelihood);
+  const tD = clamp(body?.timeDelay);
+  const eS = clamp(body?.effortSacrifice);
+  const valueScore = Math.round(((dO * pL) / (tD * eS)) * 100) / 100;
+  let positioning, priceRecommendation;
+  if (valueScore >= 5) {
+    positioning = 'Premium — high perceived value, charge accordingly';
+    priceRecommendation = 'Price at top of market. Customers see massive value.';
+  } else if (valueScore >= 2) {
+    positioning = 'Competitive — good value but room to improve';
+    priceRecommendation = 'Price at market rate. Improve likelihood or reduce time/effort to go premium.';
+  } else if (valueScore >= 1) {
+    positioning = 'Commodity — need to differentiate';
+    priceRecommendation = 'Add guarantees, reduce onboarding friction, show faster results.';
+  } else {
+    positioning = "Red zone — customers don't see enough value";
+    priceRecommendation = 'Rethink the offer. Stack bonuses, add unconditional guarantee, speed up results.';
+  }
+  return { valueScore, inputs: { dreamOutcome: dO, perceivedLikelihood: pL, timeDelay: tD, effortSacrifice: eS }, priceRecommendation, positioning };
+}
+
 function fixture(api, method, body) {
   if (api === '/health') return { status: 'ok', gates: {} };
   if (api === '/admin/auth/me') return { id: 'fixture-admin', name: 'Fixture operator', role: 'admin' };
@@ -43,7 +70,7 @@ function fixture(api, method, body) {
   if (/^\/admin\/pricing-config\/discount-rules\//.test(api) && method === 'PUT') return { success: true };
   if (/^\/admin\/pricing-proposals\/\d+\/(approve|reject)$/.test(api) && method === 'POST') return { success: true, changelog_id: 22 };
   if (api === '/admin/pricing/dashboard') return { overview: { totalCustomers: 8, avgLTV: 900, avgCAC: 90, ltvToCacRatio: 10, monthlyRecurringRevenue: 1200, annualizedRecurring: 14400 }, stages: { attraction: { totalLeads: 10, totalEstimates: 8, acceptedEstimates: 6, conversionRate: 75 }, core: { recurringCustomers: 5, monthlyRecurring: 1200, tierBreakdown: {} }, upsell: { avgServicesPerCustomer: 2, totalCompletedServices: 14 }, continuity: { retentionBuckets: { '0-3mo': 1, '3-6mo': 0, '6-12mo': 1, '12-24mo': 2, '24mo+': 1 }, totalRetained: 5 } }, funnel: { leads: 10, estimates: 8, accepted: 6, active: 5 } };
-  if (api === '/admin/pricing/calculate-value') return { valueScore: 5.44, inputs: { dreamOutcome: 7, perceivedLikelihood: 7, timeDelay: 3, effortSacrifice: 3 }, priceRecommendation: 'Price at top of market. Customers see massive value.', positioning: 'Premium — high perceived value, charge accordingly' };
+  if (api === '/admin/pricing/calculate-value') return calculateValue(body);
   if (api === '/admin/pricing/offers') return { offers: [{ id: 'offer-1', name: 'Synthetic package', description: 'Synthetic custom offer', conversion_rate: 25 }] };
   if (api === '/admin/pricing/upsell-rules') return { rules: [{ id: 'rule-1', name: 'Synthetic upsell rule', trigger_event: 'renewal', offer_service: 'mosquito', enabled: true, times_triggered: 2, times_converted: 1 }] };
   // Shapes below mirror server/routes/admin-pricing-strategy.js exactly: the
@@ -51,7 +78,9 @@ function fixture(api, method, body) {
   // channelPerformance / retentionCurve. Flattened fixtures made this proof pass
   // against a contract the server never sends.
   if (api === '/admin/pricing/upsell-opportunities') return { total: 1, opportunities: [{ customer: { id: 'customer-1', name: 'Synthetic customer', tier: 'Silver', monthlyRate: 100, phone: '9415550100' }, upsell: { type: 'add_service', service: 'Mosquito', pitch: 'Synthetic pitch', estimatedMonthlyAdd: 25 } }] };
-  if (api === '/admin/pricing/trigger-upsell/customer-1') return { message: 'Synthetic upsell sent' };
+  // { success, upsell, messageSent } — the route has no `message` field, so the
+  // page falls back to its generic success copy.
+  if (api === '/admin/pricing/trigger-upsell/customer-1') return { success: true, upsell: { type: 'add_service', service: 'Mosquito', estimatedMonthlyAdd: 25 }, messageSent: 'Synthetic outbound SMS body' };
   if (api === '/admin/pricing/ltv-analysis') return {
     totalTracked: 5,
     distribution: { '<500': 1, '500-1000': 2, '1000-2000': 1, '2000-5000': 1, '5000+': 0 },
@@ -184,7 +213,7 @@ async function main() {
       await desktop.goto(`${server.baseUrl}/admin/pricing-logic?area=strategy`);
       await desktop.getByText('Total customers', { exact: true }).waitFor();
       await desktop.getByRole('button', { name: 'Value equation', exact: true }).click();
-      await desktop.getByText('Synthetic positioning', { exact: true }).waitFor();
+      await desktop.getByText('Premium — high perceived value, charge accordingly', { exact: true }).waitFor();
       const dreamOutcome = desktop.getByLabel('Dream outcome');
       await dreamOutcome.focus();
       await desktop.keyboard.press('ArrowRight');
@@ -197,7 +226,7 @@ async function main() {
       await desktop.getByRole('button', { name: 'Upsell engine', exact: true }).click();
       await desktop.getByText('Synthetic customer', { exact: true }).waitFor();
       await desktop.getByRole('button', { name: 'Send offer', exact: true }).click();
-      await desktop.getByText('Synthetic upsell sent', { exact: true }).waitFor();
+      await desktop.getByText('Upsell SMS sent!', { exact: true }).waitFor();
       await desktop.getByRole('button', { name: 'LTV analysis', exact: true }).click();
       await desktop.getByText('Referral', { exact: true }).first().waitFor();
       await Promise.all([
