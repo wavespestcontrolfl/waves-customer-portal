@@ -32,6 +32,7 @@ const { checkTcpaConsent } = require('../services/call-routing-gates');
 const { isV2Extraction } = require('../utils/extraction-compat');
 const { PROMPT_HASH } = require('../services/prompts/call-extraction-v1');
 const { recoveryCohortVersion } = require('../services/address-validation/recovery');
+const { classifyRecoveryCohort } = require('../services/address-validation/recovery-cohort');
 const MODELS = require('../config/models');
 
 const MIN_CALLS = 100;
@@ -160,41 +161,13 @@ async function main() {
   const attemptCards = await db('triage_items')
     .whereIn('call_log_id', cohortRows.map((r) => r.id))
     .whereIn('reason_code', ['address_recovered', 'address_unverified'])
-    .select('call_log_id', 'payload');
-  // Evidence is gathered PER CALL, and a card stamped with the current prompt
-  // wins over any historical one. triage_items legitimately keeps a resolved
-  // card alongside the active one, so a call reprocessed under the current
-  // prompt still carries its old pre-stamp card; scanning cards individually
-  // dropped that call forever — its current, attributable outcome could never
-  // re-enter the cohort, shrinking sample size and agreement for exactly the
-  // reprocessed calls the gate needs (codex #4437 r4 P1). The latest attempt
-  // defines the call.
-  const staleRecoveryPromptCalls = new Set();
-  const unattributableRecoveryCalls = new Set();
-  const recoveryEvidence = new Map();
-  for (const card of attemptCards) {
-    let p = {};
-    try { p = parseJson(card.payload) || {}; } catch { p = {}; }
-    // A card the processor explicitly superseded does not speak for the
-    // current pass: a previously-recovered call whose latest pass validated
-    // directly keeps that card, and reading its provenance excluded the call
-    // from the cohort although recovery never ran this time (codex #4437 r6
-    // P2). Skipped outright, so it can neither attribute nor disqualify.
-    if (p.recovery_superseded_at) continue;
-    const e = recoveryEvidence.get(card.call_log_id) || { current: false, stale: false, unattributable: false };
-    if (p.recovery_prompt_version === recoveryCohortVersion()) e.current = true;
-    else if (p.recovery_prompt_version) e.stale = true;
-    // A card that RECORDS an attempt but predates the stamp cannot say which
-    // prompt ran (codex #4437 r3 P1). Cards with no recovery evidence at all
-    // are not attempts: the prompt never touched them.
-    else if (p.address_candidates || p.recovery_method || p.address_as_heard) e.unattributable = true;
-    recoveryEvidence.set(card.call_log_id, e);
-  }
-  for (const [callId, e] of recoveryEvidence) {
-    if (e.current) continue;
-    if (e.stale) staleRecoveryPromptCalls.add(callId);
-    else if (e.unattributable) unattributableRecoveryCalls.add(callId);
-  }
+    .select('call_log_id', 'payload', 'status', 'updated_at', 'created_at');
+  // Exactly one card speaks for each call — the latest attempt. See
+  // recovery-cohort.js for why this is not a per-card judgement: deciding it
+  // per card has now been wrong in both directions on this PR.
+  const { stale: staleRecoveryPromptCalls, unattributable: unattributableRecoveryCalls } = classifyRecoveryCohort(
+    attemptCards, recoveryCohortVersion(), parseJson,
+  );
   const boundedRouteRows = cohortRows.filter(
     (r) => !staleRecoveryPromptCalls.has(r.id) && !unattributableRecoveryCalls.has(r.id),
   );
