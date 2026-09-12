@@ -20,6 +20,7 @@ import { Camera, Leaf } from "lucide-react";
 import AdminCommandHeader from "../../components/admin/AdminCommandHeader";
 import PhotoAssessmentsPage from "./PhotoAssessmentsPage";
 import useRenderedTabBeacon from "../../hooks/useRenderedTabBeacon";
+import { UiSurface } from "../../components/ui";
 
 const LawnAssessmentPanel = React.lazy(() => import("./LawnAssessmentPanel"));
 
@@ -60,7 +61,10 @@ export default function AssessmentsHubPage() {
   const [secondary, setSecondary] = useState(null);
 
   return (
-    <div className="max-w-[1200px]">
+    <UiSurface
+      density="comfortable"
+      className="mx-auto max-w-[1200px] text-ui-body"
+    >
       <AdminCommandHeader
         title="Assessments"
         icon={Camera}
@@ -84,6 +88,6 @@ export default function AssessmentsHubPage() {
       ) : (
         <PhotoAssessmentsPage embedded onSecondaryNav={setSecondary} />
       )}
-    </div>
+    </UiSurface>
   );
 }
