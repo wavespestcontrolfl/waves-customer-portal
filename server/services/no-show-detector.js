@@ -254,7 +254,11 @@ async function loadPromiseEvents(conn, visitIds, { now = new Date() } = {}) {
       // are all excluded. An UNLINKED row (em.id IS NULL) stays neutral —
       // that is a legacy or unlinked send, not a known-bad one.
       .where((qb) => qb.whereNull('em.id').orWhereIn('em.status', DELIVERED_EMAIL_STATUSES))
-      .select('ci.id', 'ci.metadata', 'ci.created_at'),
+      // em.sent_at is the LIVE send time: after a successful retry it is the
+      // retry's, while ci.metadata.sent_at is frozen at the first (failed)
+      // attempt. Selected so the mapping below can order promises by when the
+      // customer actually heard this window (codex P1 round 6).
+      .select('ci.id', 'ci.metadata', 'ci.created_at', 'em.sent_at as provider_sent_at'),
     () => conn('audit_log').where({ action: 'visit_window_promised', resource_type: 'scheduled_service' })
       .whereIn('resource_id', visitIds).where('created_at', '<=', now).select('id', 'resource_id', 'metadata', 'created_at'),
     // A series move sends ONE text, and that text names only the anchor
@@ -296,7 +300,13 @@ async function loadPromiseEvents(conn, visitIds, { now = new Date() } = {}) {
     ...messages.map((r) => ({ visit_id: r.appointment_id, start_at: Number.isFinite(Number(r.metadata?.rendered_slot_ms)) && r.metadata?.rendered_slot_ms != null
       ? new Date(Number(r.metadata.rendered_slot_ms)).toISOString() : null, communicated_at: r.sent_at, source: 'message', source_id: r.id })),
     ...emails.map((r) => ({ visit_id: r.metadata?.scheduled_service_id, start_at: Number.isFinite(Number(r.metadata?.rendered_slot_ms)) && r.metadata?.rendered_slot_ms != null
-      ? new Date(Number(r.metadata.rendered_slot_ms)).toISOString() : null, communicated_at: r.metadata?.sent_at || r.created_at, source: 'email', source_id: r.id })),
+      ? new Date(Number(r.metadata.rendered_slot_ms)).toISOString() : null,
+      // The retry's send time when there is one (see the select above), then
+      // the interaction row's own snapshot, then its insert time. A promise
+      // the customer heard on a retry must not be ordered at the moment the
+      // first attempt failed — an intervening reminder would otherwise look
+      // newer than it (codex P1 round 6).
+      communicated_at: r.provider_sent_at || r.metadata?.sent_at || r.created_at, source: 'email', source_id: r.id })),
     ...calls.map((r) => ({ visit_id: r.resource_id, start_at: r.metadata?.start_at,
       communicated_at: r.metadata?.communicated_at || r.created_at, source: 'call', source_id: r.id })),
     ...seriesSupersessions(seriesMoves, candidates),

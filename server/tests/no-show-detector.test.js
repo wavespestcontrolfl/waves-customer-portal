@@ -448,7 +448,7 @@ describe('loadPromiseEvents: email promise evidence checks the LIVE delivery sta
         chain.where = (...args) => { (calls.whereCalls ||= []).push(args); return chain; };
         chain.whereBetween = () => chain;
         chain.whereRaw = (...args) => { (calls.whereRawCalls ||= []).push(args); return chain; };
-        chain.select = () => Promise.resolve([]);
+        chain.select = (...args) => { calls.selected = args; return Promise.resolve([]); };
         return chain;
       }
       throw new Error(`fake conn: unexpected table ${table}`);
@@ -499,6 +499,10 @@ describe('loadPromiseEvents: email promise evidence checks the LIVE delivery sta
     // the retry would be discarded and an older promise would stand as the
     // latest (round-6 P1).
     expect(calledWith('whereRaw', "ci.metadata->>'status' IN ('sent','delivered')")).toBe(true);
+    // ...and the promise is ordered at the retry's send time, not at the
+    // moment the first attempt failed, or an intervening reminder would look
+    // newer than a window the customer heard afterwards (round-6 P1).
+    expect(calls.selected).toContain('em.sent_at as provider_sent_at');
 
     // (b) Unlinked stays neutral; a LINKED row must show a delivery the
     // recipient actually got — an ALLOWLIST, not "anything but the terminal
