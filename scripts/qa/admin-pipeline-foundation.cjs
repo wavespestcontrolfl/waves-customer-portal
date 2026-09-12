@@ -228,9 +228,11 @@ async function main() {
     unmatched: [],
     pageErrors: [],
   };
-  const server = await previewServer(root);
-  const browser = await launchBrowser();
+  let server;
+  let browser;
   try {
+    server = await previewServer(root);
+    browser = await launchBrowser();
     for (const width of [390, 768, 1024, 1440]) {
       const context = await browser.newContext({
         viewport: { width, height: width === 390 ? 844 : 1000 },
@@ -475,8 +477,8 @@ async function main() {
       path.join(output, "report.json"),
       JSON.stringify(report, null, 2),
     );
-    await browser.close();
-    await server.close();
+    await browser?.close();
+    await server?.close();
   }
   console.log(
     JSON.stringify({

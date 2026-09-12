@@ -2863,7 +2863,7 @@ export function LeadsSection({ newLeadRequest = 0 }) {
                     {" "}
                     <TR
                       onClick={() => expandSource(src)}
-                      className="cursor-pointer"
+                      className={`cursor-pointer ${src.is_active ? "" : "opacity-50"}`}
                     >
                       <TD>
                         {" "}
@@ -3055,18 +3055,19 @@ export function LeadsSection({ newLeadRequest = 0 }) {
     const totalLost = lostReasons.reduce((s, r) => s + r.count, 0);
     // Main's C.red/C.heading/C.text/C.green/C.amber/C.muted are (in this
     // file's local palette) #991B1B (real red) / #09090B / #27272A / #3F3F46
-    // / #52525B / #71717A — i.e. zinc-950/800/700/600/500. Only the first
-    // ("red") is a genuine color; the rest are grayscale weight steps for
-    // categorical distinction between lost-reason slices, not a severity
-    // encoding, restored here as the exact matching zinc shades.
+    // / #52525B / #71717A — i.e. zinc-950/800/700/600/500 for all but the
+    // first slot. Main gave the first (most common) lost-reason slice the
+    // real red, but that's whichever reason happens to sort first — neutral
+    // categorical/frequency data, not a genuinely negative condition — so
+    // alert red is NOT reused here; this is a pure zinc gradient instead.
     const pieClasses = [
-      "text-alert-fg",
       "text-zinc-900",
       "text-zinc-800",
       "text-zinc-700",
       "text-zinc-600",
       "text-zinc-500",
       "text-zinc-400",
+      "text-zinc-300",
     ];
 
     // Phone number ROI
@@ -3169,7 +3170,11 @@ export function LeadsSection({ newLeadRequest = 0 }) {
                   aria-label={`${ch.channel} cost`}
                   value={ch.totalCost}
                   max={maxChannelVal}
-                  className="h-3 w-full accent-alert-fg"
+                  // Main painted this C.red, but alert-fg is reserved for
+                  // genuinely negative conditions (e.g. negative ROI) — cost
+                  // here is routine comparison data, not an alert. Restored
+                  // as a lighter zinc weight, distinct from revenue's zinc-700.
+                  className="h-3 w-full accent-zinc-400"
                 />
                 <progress
                   aria-label={`${ch.channel} revenue`}
@@ -3188,7 +3193,7 @@ export function LeadsSection({ newLeadRequest = 0 }) {
           <div className="flex gap-[16px] text-ui-body text-ink-secondary mt-[8px]">
             {" "}
             <span>
-              <span className="inline-block w-3 h-3 rounded-sm mr-1 bg-alert-fg" />
+              <span className="inline-block w-3 h-3 rounded-sm mr-1 bg-zinc-400" />
               Cost
             </span>{" "}
             <span>
