@@ -419,6 +419,71 @@ test('an explicit month-name date claim in the evidence still parks a mismatched
     .toBe('date_not_grounded');
 });
 
+// codex #4293 P1 (reschedule-link-promises.js:796): the APPOINTMENT_REFERENCE
+// keyword gate means ANY quote containing "appointment" had ALL its date
+// language read as the visit's date — so a delivery-timing phrase sharing a
+// sentence with a bare appointment reference ("I will text you the
+// reschedule link tomorrow morning for your appointment") rejected a
+// correctly selected visit as ungrounded. Worse than a delayed send: this
+// PARKS THE PROMISE PERMANENTLY (date_not_grounded never retries on its
+// own). Fixed by binding a date claim to the visit only when it is ATTACHED
+// to the appointment noun (quoteContradictsVisit / appointmentAttachedText),
+// not merely co-occurring in the same sentence.
+describe('delivery timing language sharing a sentence with the appointment reference must not be read as the visit date (codex #4293 P1)', () => {
+  test('a timing phrase attached to the send verb does not park a correctly selected visit — it sends', () => {
+    const promise = 'I will text you the reschedule link tomorrow morning for your appointment.';
+    const evidence = [{ quote: promise, speaker: 'agent' }];
+    const source = { ...call, transcription: `Agent: ${promise}\nCaller: Thank you.` };
+    // The call happened 2030-01-07; the selected visit is a week out. Before
+    // the fix, "tomorrow" was read as the appointment date and contradicted
+    // this visit outright, parking the promise for good.
+    const nextWeek = { ...visit, id: 'next-week', scheduled_date: '2030-01-15' };
+    expect(select({ call: source, commitment: { ...commitment, subject: null, evidence }, candidates: [nextWeek] }).visit?.id)
+      .toBe('next-week');
+  });
+
+  test('both the delivery timing and the appointment date can share one sentence — only the appointment-adjacent one binds', () => {
+    const promise = "I'll text the reschedule link tomorrow morning for your September 20 appointment.";
+    const evidence = [{ quote: promise, speaker: 'agent' }];
+    const source = { ...call, transcription: `Agent: ${promise}\nCaller: Thank you.` };
+    // Binds the visit that actually falls on September 20 — "tomorrow
+    // morning" (attached to the send verb, not the noun) plays no part.
+    const sept20 = { ...visit, id: 'sept-20', scheduled_date: '2030-09-20' };
+    expect(select({ call: source, commitment: { ...commitment, subject: null, evidence }, candidates: [sept20] }).visit?.id)
+      .toBe('sept-20');
+    // And still rejects a visit that does NOT fall on September 20, proving
+    // it is September 20 — not "tomorrow" — that got read as the claim.
+    const sept21 = { ...visit, id: 'sept-21', scheduled_date: '2030-09-21' };
+    expect(select({ call: source, commitment: { ...commitment, subject: null, evidence }, candidates: [sept21] }).reason)
+      .toBe('date_not_grounded');
+  });
+
+  // explicitQuoteDate checks shapes in a fixed order (numeric, month name,
+  // ordinal, today, tomorrow, next-<weekday>), so a "September 20" appointment
+  // date happens to be found before "tomorrow" is ever reached even on the
+  // OLD, unattached full-quote scan — that ordering accident is why the test
+  // above does not, by itself, prove the fix. "today" sits BEFORE the bare
+  // weekday fallback in that same order, so pairing a "today" delivery-timing
+  // phrase with a weekday-named appointment does isolate the bug: the old
+  // code read the unattached "today" as the appointment date and rejected the
+  // correct (weekday-matching) visit outright.
+  test('a timing token that explicitQuoteDate resolves before a bare weekday still must not bind the visit', () => {
+    const promise = "I'll text you the reschedule link today for your Monday appointment.";
+    const evidence = [{ quote: promise, speaker: 'agent' }];
+    const source = { ...call, transcription: `Agent: ${promise}\nCaller: Thank you.` };
+    // `visit` (2030-01-08) is a Tuesday — the sole open visit does not fall on
+    // the attached "Monday", so it is correctly left parked either way.
+    expect(select({ call: source, commitment: { ...commitment, subject: null, evidence } }).reason)
+      .toBe('date_not_grounded');
+    // The visit that actually falls on Monday is the one that must be
+    // selected — "today" (attached to "text you ... today", the send verb,
+    // not the noun) must play no part in grounding it.
+    const monday = { ...visit, id: 'monday', scheduled_date: '2030-01-14' }; // a Monday
+    expect(select({ call: source, commitment: { ...commitment, subject: null, evidence }, candidates: [monday] }).visit?.id)
+      .toBe('monday');
+  });
+});
+
 test('an inactive account cannot be promised a link the reschedule page refuses', () => {
   for (const active of [false, null, undefined]) {
     expect(select({ customer: { ...customer, active } }).reason).toBe('customer_inactive');

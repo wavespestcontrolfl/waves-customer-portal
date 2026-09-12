@@ -709,11 +709,74 @@ function extractedDateUngrounded({ subject, call, candidates, callCommitments })
 // and evidenceContradictsSelectedVisit (every other source), so a shape this
 // file can recognise is checked the same way no matter which field it rode
 // in on.
+// A date claim only binds the VISIT when it is ATTACHED to the appointment
+// noun — not merely co-occurring somewhere in the same sentence. The promise
+// sentence itself is exactly where this bites: "I will text you the
+// reschedule link tomorrow morning for your appointment" used to read
+// "tomorrow" as the visit's date (any quote containing "appointment" had
+// ALL its date language read as the visit date) and reject a correctly
+// selected visit next week as ungrounded — not a delayed send but a
+// PERMANENTLY PARKED promise, since date_not_grounded never retries on its
+// own (codex #4293 P1). "Tomorrow morning" is delivery timing — when the
+// LINK goes out, already captured on its own by isPromisedFloor/
+// promisedFloorAt — and must never be read as a claim about WHICH visit.
+//
+// Attachment is checked positionally, the way a human reader tells the two
+// apart: the date sits immediately before the noun ("your September 20
+// appointment", "your Monday appointment" — nothing between the date and
+// the noun; a possessive/article ahead of the DATE plays no part in the
+// match) or immediately after it via a single connector word ("appointment
+// on September 20", "appointment this Monday"). Every date parser below
+// (explicitQuoteDate's full vocabulary, and the bare-weekday scan) only ever
+// sees these attached spans — never the full quote — so a date elsewhere in
+// the sentence cannot reach either check no matter which shape it takes.
+//
+// Where attachment is genuinely ambiguous, this resolves to NOT binding: the
+// old default (any co-occurring date grounds/contradicts) risked sending the
+// wrong visit's link, which used to be the worse failure; now that a false
+// park is known to be PERMANENT rather than merely delayed, under-binding
+// (park for human review) is the safer default, over-binding (misdirect a
+// live send) the one to avoid.
+const APPOINTMENT_NOUN_RE = /\b(?:appointment|appt|visit)\b/gi;
+// The single word allowed to link the noun to a date named AFTER it. Nothing
+// else — not even a verb like "is" — may sit between them for the after-form
+// to count as attached ("appointment is Wednesday" is not this shape; that
+// construction is validated elsewhere, via quoteGroundsVisitDate's own
+// full-text scan against subject.visit_date, which subject.quote is defined
+// to name specifically).
+const AFTER_NOUN_CONNECTOR_RE = /^\s*(?:on|this|that|for|at|in)\b\s*/i;
+function appointmentAttachedText(rawQuote) {
+  const text = String(rawQuote || '');
+  const spans = [];
+  APPOINTMENT_NOUN_RE.lastIndex = 0;
+  let m;
+  while ((m = APPOINTMENT_NOUN_RE.exec(text))) {
+    // Up to the two tokens immediately abutting the noun on the left — enough
+    // for every date shape this file recognizes (a month name + day, or
+    // "next <weekday>"), and nothing further back, so "for your" (the two
+    // tokens actually touching the noun in "...tomorrow morning for your
+    // appointment") is what gets captured, not "tomorrow".
+    const before = text.slice(0, m.index).match(/(?:\S+\s+)?\S+\s*$/);
+    if (before) spans.push(before[0]);
+    const afterAll = text.slice(m.index + m[0].length);
+    const connector = afterAll.match(AFTER_NOUN_CONNECTOR_RE);
+    if (connector) {
+      const rest = afterAll.slice(connector[0].length).match(/^\S+(?:\s+\S+)?/);
+      if (rest) spans.push(rest[0]);
+    }
+  }
+  // Joined on a non-word separator so a date shape can never assemble itself
+  // by accident out of the trailing token of one span and the leading token
+  // of the next (e.g. two different noun mentions in the same quote).
+  return spans.join(' | ');
+}
+
 function quoteContradictsVisit(quote, ymd, reference) {
-  const q = ` ${norm(quote)} `;
+  const attached = appointmentAttachedText(quote);
+  const q = ` ${norm(attached)} `;
   const [year, month, day] = String(ymd).split('-').map(Number);
   if (![year, month, day].every(Number.isFinite)) return true;
-  const explicit = explicitQuoteDate(q, reference, quote);
+  const explicit = explicitQuoteDate(q, reference, attached);
   if (explicit === AMBIGUOUS_DATE_CLAIM) return true; // fail closed — see numericQuoteDate
   if (explicit) return !claimFitsDate(explicit, ymd);
   // No explicit claim (no absolute date, ordinal, numeric shape, or
@@ -1720,8 +1783,21 @@ async function dispatch(conn, row, context, { now, send, buildLink, render, plan
   const { classifyDeliveryCertainty } = require('./messaging/send-customer-message');
   const check = async () => {
     if (mode() !== 'true') return { ok: false, code: 'LINK_GATE_OFF', reason: 'Reschedule link automation is off' };
-    if (!isWithinSendWindowET()) return { ok: false, code: 'LINK_QUIET_HOURS', reason: 'Waiting for the next send window' };
-    const checkedAt = new Date();
+    // `now` — not a fresh `new Date()` — is the same provider-boundary clock
+    // every OTHER decision in this file's dispatch path already uses
+    // (holdBeforeSend's own isWithinSendWindowET(now)/nextSendWindowOpenET(now)
+    // just above, in sweep()). A bare `new Date()` here reads the REAL clock
+    // regardless of what instant a caller (a test, or a reprocessed sweep)
+    // says "now" is — between 20:00 and 08:00 ET that silently turns every
+    // other outcome this check can reach into LINK_QUIET_HOURS, which is
+    // exactly why the provider-boundary due_at race test above only passed
+    // during office hours (codex #4293 P1). The rendering/provider round-trip
+    // this check straddles is milliseconds to low seconds, not enough to cross
+    // a quiet-hours boundary or matter for a due_at floor — `now` is fresh
+    // enough for both, and now the two are provably consistent instead of
+    // silently disagreeing.
+    if (!isWithinSendWindowET(now)) return { ok: false, code: 'LINK_QUIET_HOURS', reason: 'Waiting for the next send window' };
+    const checkedAt = now;
     const live = await contextFor(conn, commitment.id, checkedAt);
     if (live.reason || !sameVisitSnapshot(snapshot(live.visit), planned)) return { ok: false, code: 'LINK_SOURCE_CHANGED', reason: 'The discussed visit changed' };
     // holdBeforeSend rechecks the floor immediately before THIS call into

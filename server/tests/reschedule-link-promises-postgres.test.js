@@ -26,6 +26,7 @@ jest.mock('../services/logger', () => ({ warn: jest.fn(), info: jest.fn(), error
 const knex = require('knex');
 const { randomUUID } = require('node:crypto');
 const links = require('../services/reschedule-link-promises');
+const { parseETDateTime } = require('../utils/datetime-et');
 const { applyHumanUpdate, upsertCommitments } = require('../services/call-commitments');
 const { lockTriageCall } = require('../utils/triage-locks');
 const { gates } = require('../config/feature-gates');
@@ -1978,6 +1979,64 @@ postgres('reschedule-link-promises against PostgreSQL', () => {
       expect(after.last_error).toBe('LINK_FLOOR_NOT_REACHED');
       // Deferred to the NEW floor — not sent, and not simply retried a few
       // minutes out the way a busy interlock or quiet hours would be.
+      expect(new Date(after.available_at).getTime()).toBe(newFloor.getTime());
+      expect(after.payload.delivery_outcome_uncertain).toBe(false);
+    });
+
+    // codex #4293 P1 (reschedule-link-promises-postgres.test.js:1969): the
+    // test above passes a synthetic DAYTIME `now` to runOne, but check() —
+    // wired as both preDispatchCheck and preProviderCheck — used to call
+    // isWithinSendWindowET() and new Date() on the REAL clock regardless of
+    // what `now` said. Between 20:00 and 08:00 ET (i.e. most nights, and
+    // every run of an overnight CI job) that silently turned the verdict into
+    // LINK_QUIET_HOURS instead of LINK_FLOOR_NOT_REACHED, so this whole suite
+    // only passed during office hours.
+    //
+    // `now` here is deliberately left in the send window — exactly like the
+    // test above — because holdBeforeSend (runOne's OWN earlier gate) already
+    // honours `now` correctly today and would legitimately hold before
+    // dispatch() is ever reached if `now` itself were nighttime; that is a
+    // different, correct code path, not the bug. The bug lived in what
+    // check() reads AT the provider boundary once dispatch() is already
+    // running, so this test freezes the REAL wall clock to a quiet-hours
+    // instant for exactly that window and proves the verdict still comes
+    // from `now`, not from the frozen clock.
+    test('the same race still resolves to LINK_FLOOR_NOT_REACHED — never LINK_QUIET_HOURS — even when the real wall clock reads quiet hours (codex #4293 P1)', async () => {
+      const now = new Date('2030-01-07T14:00:00Z'); // 9:00 AM ET — inside the send window
+      const newFloor = new Date('2030-01-09T14:00:00Z'); // moved two days out
+      const commitmentId = await seedPromise({ quote: 'I will text you a reschedule link for that appointment.' });
+
+      const staged = await links.stagePromises(mockPg);
+      expect(staged).toBe(1);
+      const row = await mockPg('outbox_messages').where({ commitment_id: commitmentId }).first();
+
+      const raceSend = async ({ preDispatchCheck }) => {
+        await mockPg('call_commitments').where({ id: commitmentId }).update({ due_at: newFloor, due_basis: 'stated' });
+        const verdict = await preDispatchCheck({});
+        expect(verdict).toMatchObject({ ok: false, code: 'LINK_FLOOR_NOT_REACHED', retryable: true });
+        return { sent: false, blocked: true, code: verdict.code, retryable: true };
+      };
+
+      // Fake ONLY Date, pinned to 10:00 PM ET — real quiet hours — for the
+      // duration of the dispatch call. Every timer the real Postgres
+      // connection and its transaction machinery depend on (setTimeout,
+      // setInterval, nextTick, …) is left real; only `new Date()`/`Date.now()`
+      // reads are frozen. Before the fix, check()'s bare
+      // isWithinSendWindowET()/new Date() calls read exactly this frozen wall
+      // clock regardless of the daytime `now` runOne was given — reproducing
+      // precisely what an overnight CI run does to this suite.
+      jest.useFakeTimers({ now: parseETDateTime('2030-01-07T22:00:00'),
+        doNotFake: ['hrtime', 'nextTick', 'performance', 'queueMicrotask', 'requestAnimationFrame', 'cancelAnimationFrame',
+          'requestIdleCallback', 'cancelIdleCallback', 'setImmediate', 'clearImmediate', 'setInterval', 'clearInterval', 'setTimeout', 'clearTimeout'] });
+      try {
+        await links.runOne(mockPg, row, { now, send: raceSend, buildLink: stubBuildLink, render: stubRender });
+      } finally {
+        jest.useRealTimers();
+      }
+
+      const after = await mockPg('outbox_messages').where({ commitment_id: commitmentId }).first();
+      expect(after.status).toBe('pending');
+      expect(after.last_error).toBe('LINK_FLOOR_NOT_REACHED');
       expect(new Date(after.available_at).getTime()).toBe(newFloor.getTime());
       expect(after.payload.delivery_outcome_uncertain).toBe(false);
     });
