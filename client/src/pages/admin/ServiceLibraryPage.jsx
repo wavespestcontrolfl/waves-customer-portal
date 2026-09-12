@@ -1,39 +1,39 @@
-import { lazy, Suspense, useState, useEffect, useCallback, useId, useRef } from "react";
+import {
+  lazy,
+  Suspense,
+  useCallback,
+  useEffect,
+  useId,
+  useRef,
+  useState,
+} from "react";
 import { useSearchParams } from "react-router-dom";
-import useRenderedTabBeacon from "../../hooks/useRenderedTabBeacon";
 import { Library, Percent, Plus, Sprout } from "lucide-react";
 import AdminCommandHeader from "../../components/admin/AdminCommandHeader";
-import { DiscountsSection } from "./DiscountsTabs";
-import useIsMobile from "../../hooks/useIsMobile";
 import MobileServiceLibrary from "../../components/admin/MobileServiceLibrary";
+import {
+  ActionFeedback,
+  Badge,
+  Button,
+  Card,
+  CardBody,
+  Checkbox,
+  Field,
+  Input,
+  Select,
+  Textarea,
+  UiSurface,
+} from "../../components/ui";
+import useRenderedTabBeacon from "../../hooks/useRenderedTabBeacon";
+import useIsMobile from "../../hooks/useIsMobile";
 import { SERVICE_CATEGORIES as CATEGORIES } from "../../constants/serviceCategories";
 import { omitUnchangedDurationFields } from "../../lib/serviceLibraryPayload";
+import { DiscountsSection } from "./DiscountsTabs";
 
-const LawnProtocolCommandCenterPage = lazy(() =>
-  import("./LawnProtocolCommandCenterPage"),
+const LawnProtocolCommandCenterPage = lazy(
+  () => import("./LawnProtocolCommandCenterPage"),
 );
-
 const API = import.meta.env.VITE_API_URL || "/api";
-// V2 token pass: teal/purple fold to zinc-900. Semantic green/amber/red preserved.
-const D = {
-  bg: "#F4F4F5",
-  card: "#FFFFFF",
-  border: "#E4E4E7",
-  teal: "#18181B",
-  green: "#15803D",
-  amber: "#A16207",
-  red: "#991B1B",
-  purple: "#18181B",
-  text: "#27272A",
-  muted: "#71717A",
-  white: "#FFFFFF",
-  input: "#FFFFFF",
-  heading: "#09090B",
-  inputBorder: "#D4D4D8",
-  railBg: "#FAFAFA",
-  selected: "#18181B",
-  selectedFg: "#FAFAFA",
-};
 
 async function aFetch(path, opts = {}) {
   const r = await fetch(`${API}${path}`, {
@@ -65,34 +65,6 @@ async function fetchAllServices(query = "") {
   } while (rows.length < total);
   return rows;
 }
-
-const sCard = {
-  background: D.card,
-  border: `1px solid ${D.border}`,
-  borderRadius: 12,
-  padding: 16,
-};
-const sInput = {
-  padding: "8px 12px",
-  background: D.input,
-  border: `1px solid ${D.border}`,
-  borderRadius: 8,
-  color: D.text,
-  fontSize: 13,
-  outline: "none",
-  boxSizing: "border-box",
-  width: "100%",
-};
-const sBtn = (bg, color) => ({
-  padding: "8px 16px",
-  background: bg,
-  color,
-  border: "none",
-  borderRadius: 8,
-  fontSize: 13,
-  fontWeight: 500,
-  cursor: "pointer",
-});
 
 const EMPTY_SVC = {
   name: "",
@@ -150,20 +122,55 @@ const CLOSEOUT_REQUIREMENT_FIELDS = [
   "closeout_requirements_source",
 ];
 
-// Visible name with the legacy "WaveGuard" suffix stripped (it's been getting
-// jammed into the name string; we surface it as a pill instead).
-function cleanName(svc) {
-  return String(svc?.name || "")
+const SERVICE_SEARCH_FIELDS = [
+  "name",
+  "short_name",
+  "service_key",
+  "description",
+];
+const SERVICE_SEARCH_PLACEHOLDER = "Search services...";
+
+function serviceSaveLabel(saving, isNew) {
+  if (saving) return "Saving...";
+  return isNew ? "Create Service" : "Save Changes";
+}
+
+const isActiveCatalogService = (service) =>
+  service.is_active !== false && !service.is_archived;
+
+const SERVICE_VIEW_PREDICATES = {
+  all: isActiveCatalogService,
+  "view:waveguard": (service) =>
+    isActiveCatalogService(service) && service.is_waveguard,
+  "view:recurring": (service) =>
+    isActiveCatalogService(service) && service.billing_type === "recurring",
+  "view:onetime": (service) =>
+    isActiveCatalogService(service) && service.billing_type === "one_time",
+  "view:inactive": (service) =>
+    service.is_active === false && !service.is_archived,
+  "view:archived": (service) => service.is_archived,
+  ...Object.fromEntries(
+    CATEGORIES.map((category) => [
+      `category:${category.value}`,
+      (service) =>
+        isActiveCatalogService(service) &&
+        (service.category || "other") === category.value,
+    ]),
+  ),
+};
+
+function cleanName(service) {
+  return String(service?.name || "")
     .replace(/\s*WaveGuard\s*$/i, "")
     .trim();
 }
 
-function parseProducts(svc) {
-  const p = svc?.default_products;
-  if (Array.isArray(p)) return p;
-  if (typeof p === "string") {
+function parseProducts(service) {
+  const products = service?.default_products;
+  if (Array.isArray(products)) return products;
+  if (typeof products === "string") {
     try {
-      return JSON.parse(p);
+      return JSON.parse(products);
     } catch {
       return [];
     }
@@ -171,8 +178,8 @@ function parseProducts(svc) {
   return [];
 }
 
-function frequencyLabel(f) {
-  if (!f) return "";
+function frequencyLabel(frequency) {
+  if (!frequency) return "";
   return (
     {
       monthly: "Monthly",
@@ -182,73 +189,69 @@ function frequencyLabel(f) {
       quarterly: "Quarterly",
       semiannual: "Semiannual",
       annual: "Annual",
-    }[f] || f
+    }[frequency] || frequency
   );
 }
 
-function billingLabel(b) {
-  return b === "one_time"
-    ? "One-Time"
-    : b === "recurring"
-      ? "Recurring"
-      : b === "free"
-        ? "Free"
-        : b || "—";
+function billingLabel(billing) {
+  if (billing === "one_time") return "One-Time";
+  if (billing === "recurring") return "Recurring";
+  if (billing === "free") return "Free";
+  return billing || "—";
 }
 
-function priceLabel(svc) {
-  const p = Number(svc?.base_price || 0);
-  if (svc?.pricing_type === "variable" || svc?.pricing_type === "quoted")
-    return p ? `$${p.toFixed(0)}` : "Variable";
-  return p ? `$${p.toFixed(0)}` : "—";
+function priceLabel(service) {
+  const price = Number(service?.base_price || 0);
+  if (
+    service?.pricing_type === "variable" ||
+    service?.pricing_type === "quoted"
+  ) {
+    return price ? "$" + price.toFixed(0) : "Variable";
+  }
+  return price ? "$" + price.toFixed(0) : "—";
+}
+
+function variablePriceSuffix(service) {
+  if (service?.pricing_type === "variable" && Number(service?.base_price) > 0) {
+    return "variable";
+  }
+  return "";
 }
 
 function categoryLabel(value) {
   return (
-    (CATEGORIES.find((c) => c.value === value) || {}).label || value || "—"
+    CATEGORIES.find((category) => category.value === value)?.label ||
+    value ||
+    "—"
   );
 }
 
-function closeoutRequirementLabels(svc) {
+function closeoutRequirementLabels(service) {
   return [
-    svc?.requires_service_report !== false && "Service report",
-    svc?.requires_application_log && "Application/material log",
-    Number(svc?.required_photo_count || 0) > 0 && `${Number(svc.required_photo_count)} photo${Number(svc.required_photo_count) === 1 ? "" : "s"}`,
-    svc?.requires_customer_signature && "Customer signature",
-    svc?.requires_customer_notice && "Customer notice",
+    service?.requires_service_report !== false && "Service report",
+    service?.requires_application_log && "Application/material log",
+    Number(service?.required_photo_count || 0) > 0 &&
+      Number(service.required_photo_count) +
+        " photo" +
+        (Number(service.required_photo_count) === 1 ? "" : "s"),
+    service?.requires_customer_signature && "Customer signature",
+    service?.requires_customer_notice && "Customer notice",
   ].filter(Boolean);
 }
 
-function Field({ label, children, half, htmlFor }) {
+function FormSection({ title, children }) {
   return (
-    <div
-      style={{
-        flex: half ? "1 1 48%" : "1 1 100%",
-        minWidth: half ? 140 : 0,
-        marginBottom: 10,
-      }}
-    >
-      {" "}
-      <label
-        htmlFor={htmlFor}
-        style={{
-          fontSize: 11,
-          color: D.muted,
-          marginBottom: 3,
-          display: "block",
-        }}
-      >
-        {label}
-      </label>
+    <section className="space-y-3 border-t border-hairline border-zinc-200 pt-4 first:border-0 first:pt-0">
+      <h3 className="text-ui-body font-medium text-zinc-900">{title}</h3>
       {children}
-    </div>
+    </section>
   );
 }
 
 function ServiceForm({ svc, onSave, onCancel, isNew }) {
   const originalService = useRef(svc);
   const rawFormId = useId().replace(/:/g, "");
-  const fieldId = (key) => `${rawFormId}-${key}`;
+  const fieldId = (key) => rawFormId + "-" + key;
   const jsonForEdit = (value) => {
     if (value === null || value === undefined || value === "") return "";
     if (typeof value === "string") return value;
@@ -264,12 +267,13 @@ function ServiceForm({ svc, onSave, onCancel, isNew }) {
   const [closeoutTouched, setCloseoutTouched] = useState(false);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
-  const set = (k, v) => setForm((prev) => ({ ...prev, [k]: v }));
-  const setCloseout = (k, v) => {
+  const set = (key, value) =>
+    setForm((current) => ({ ...current, [key]: value }));
+  const setCloseout = (key, value) => {
     setCloseoutTouched(true);
-    setForm((prev) => ({
-      ...prev,
-      [k]: v,
+    setForm((current) => ({
+      ...current,
+      [key]: value,
       closeout_requirements_source: "manual",
     }));
   };
@@ -282,420 +286,274 @@ function ServiceForm({ svc, onSave, onCancel, isNew }) {
     setSaving(true);
     setError("");
     try {
-      const payload = isNew ? { ...form } : omitUnchangedDurationFields(form, originalService.current);
-      if (isNew && !closeoutTouched) {
+      const payload = isNew
+        ? { ...form }
+        : omitUnchangedDurationFields(form, originalService.current);
+      if (isNew && !closeoutTouched)
         CLOSEOUT_REQUIREMENT_FIELDS.forEach((key) => delete payload[key]);
-      }
       await onSave(payload);
-    } catch (e) {
-      setError(e.message || "Save failed");
+    } catch (saveError) {
+      setError(saveError.message || "Save failed");
     } finally {
       setSaving(false);
     }
   };
 
-  const inp = (key, type = "text", extra = {}) => (
-    <input
+  const input = (key, type = "text", extra = {}) => (
+    <Input
       id={fieldId(key)}
       name={key}
-      style={{
-        ...sInput,
-        ...(extra.disabled ? { opacity: 0.75, cursor: "not-allowed" } : {}),
-      }}
       type={type}
-      required={key === "name"}
       value={form[key] ?? ""}
       disabled={extra.disabled}
       title={extra.title}
-      onChange={(e) =>
+      onChange={(event) =>
         set(
           key,
           type === "number"
-            ? e.target.value === ""
+            ? event.target.value === ""
               ? ""
-              : Number(e.target.value)
-            : e.target.value,
+              : Number(event.target.value)
+            : event.target.value,
         )
       }
     />
   );
-  const sel = (key, options) => (
-    <select
+  const select = (key, options) => (
+    <Select
       id={fieldId(key)}
       name={key}
-      style={sInput}
       value={form[key] || ""}
-      onChange={(e) => set(key, e.target.value)}
+      onChange={(event) => set(key, event.target.value)}
     >
-      {options.map((o) => (
-        <option key={o.value} value={o.value}>
-          {o.label}
+      {options.map((option) => (
+        <option key={option.value} value={option.value}>
+          {option.label}
         </option>
       ))}
-    </select>
+    </Select>
   );
-  const chk = (key, label) => {
-    const id = fieldId(key);
-    return (
-      <label
-        htmlFor={id}
-        style={{
-          display: "flex",
-          alignItems: "center",
-          gap: 6,
-          fontSize: 13,
-          color: D.text,
-          cursor: "pointer",
-        }}
-      >
-        {" "}
-        <input
-          id={id}
-          name={key}
-          type="checkbox"
-          checked={!!form[key]}
-          onChange={(e) => set(key, e.target.checked)}
-        />
-        {label}
-      </label>
-    );
-  };
-  const closeoutChk = (key, label) => {
-    const id = fieldId(key);
-    return (
-      <label
-        htmlFor={id}
-        style={{
-          display: "flex",
-          alignItems: "center",
-          gap: 6,
-          fontSize: 13,
-          color: D.text,
-          cursor: "pointer",
-        }}
-      >
-        {" "}
-        <input
-          id={id}
-          name={key}
-          type="checkbox"
-          checked={!!form[key]}
-          onChange={(e) => setCloseout(key, e.target.checked)}
-        />
-        {label}
-      </label>
-    );
-  };
+  const choice = (key, label) => (
+    <Checkbox
+      id={fieldId(key)}
+      name={key}
+      label={label}
+      checked={!!form[key]}
+      onChange={(event) => set(key, event.target.checked)}
+    />
+  );
+  const closeoutChoice = (key, label) => (
+    <Checkbox
+      id={fieldId(key)}
+      name={key}
+      label={label}
+      checked={!!form[key]}
+      onChange={(event) => setCloseout(key, event.target.checked)}
+    />
+  );
 
   return (
-    <div>
-      {" "}
-      <div
-        style={{
-          fontSize: 11,
-          fontWeight: 500,
-          color: D.muted,
-          textTransform: "uppercase",
-          letterSpacing: 0.4,
-          marginBottom: 8,
-        }}
-      >
-        Definition
-      </div>{" "}
-      <div style={{ display: "flex", flexWrap: "wrap", gap: 10 }}>
-        {" "}
-        <Field label="Name" half htmlFor={fieldId("name")}>
-          {inp("name")}
-        </Field>{" "}
-        <Field label="Service Key" half htmlFor={fieldId("service_key")}>
-          {inp("service_key", "text", {
-            disabled: !isNew,
-            title: isNew ? undefined : "Service keys are locked after creation",
-          })}
-        </Field>{" "}
-        <Field label="Short Name" half htmlFor={fieldId("short_name")}>
-          {inp("short_name")}
-        </Field>{" "}
-        <Field label="Icon" half htmlFor={fieldId("icon")}>
-          {inp("icon")}
-        </Field>{" "}
-        <Field label="Category" half htmlFor={fieldId("category")}>
-          {sel("category", CATEGORIES)}
-        </Field>{" "}
-        <Field label="Subcategory" half htmlFor={fieldId("subcategory")}>
-          {inp("subcategory")}
-        </Field>{" "}
-        <Field label="Billing Type" half htmlFor={fieldId("billing_type")}>
-          {sel("billing_type", [
-            { value: "recurring", label: "Recurring" },
-            { value: "one_time", label: "One-Time" },
-            { value: "free", label: "Free" },
-          ])}
-        </Field>{" "}
-        <Field label="Frequency" half htmlFor={fieldId("frequency")}>
-          {sel("frequency", [
-            { value: "", label: "N/A" },
-            { value: "monthly", label: "Monthly" },
-            { value: "every_6_weeks", label: "Every 6 Weeks" },
-            { value: "seasonal_feb_oct", label: "Seasonal (Feb–Oct)" },
-            { value: "bimonthly", label: "Bi-Monthly" },
-            { value: "quarterly", label: "Quarterly" },
-            { value: "semiannual", label: "Semiannual" },
-            { value: "annual", label: "Annual" },
-          ])}
-        </Field>{" "}
-        <Field label="Visits/Year" half htmlFor={fieldId("visits_per_year")}>
-          {inp("visits_per_year", "number")}
-        </Field>{" "}
-        <Field
-          label="Duration (min)"
-          half
-          htmlFor={fieldId("default_duration_minutes")}
-        >
-          {inp("default_duration_minutes", "number")}
-        </Field>{" "}
-        <Field label="Min Duration" half htmlFor={fieldId("min_duration_minutes")}>
-          {inp("min_duration_minutes", "number")}
-        </Field>{" "}
-        <Field label="Max Duration" half htmlFor={fieldId("max_duration_minutes")}>
-          {inp("max_duration_minutes", "number")}
-        </Field>{" "}
-        <Field label="Schedule Buffer" half htmlFor={fieldId("scheduling_buffer_minutes")}>
-          {inp("scheduling_buffer_minutes", "number")}
-        </Field>{" "}
-      </div>{" "}
-      <div
-        style={{
-          fontSize: 11,
-          fontWeight: 500,
-          color: D.muted,
-          textTransform: "uppercase",
-          letterSpacing: 0.4,
-          marginTop: 14,
-          marginBottom: 8,
-        }}
-      >
-        Pricing
-      </div>{" "}
-      <div style={{ display: "flex", flexWrap: "wrap", gap: 10 }}>
-        {" "}
-        <Field label="Pricing Type" half htmlFor={fieldId("pricing_type")}>
-          {sel("pricing_type", [
-            { value: "variable", label: "Variable" },
-            { value: "fixed", label: "Fixed" },
-            { value: "quoted", label: "Quoted" },
-          ])}
-        </Field>{" "}
-        <Field label="Price" half htmlFor={fieldId("base_price")}>
-          {inp("base_price", "number")}
-        </Field>{" "}
-        <Field label="Price Range Min" half htmlFor={fieldId("price_range_min")}>
-          {inp("price_range_min", "number")}
-        </Field>{" "}
-        <Field label="Price Range Max" half htmlFor={fieldId("price_range_max")}>
-          {inp("price_range_max", "number")}
-        </Field>{" "}
-        <Field
-          label="Pricing Model Key"
-          half
-          htmlFor={fieldId("pricing_model_key")}
-        >
-          {inp("pricing_model_key")}
-        </Field>{" "}
-        <Field label="Sort Order" half htmlFor={fieldId("sort_order")}>
-          {inp("sort_order", "number")}
-        </Field>{" "}
-        <Field label="Typical Materials Cost" half htmlFor={fieldId("typical_materials_cost")}>
-          {inp("typical_materials_cost", "number")}
-        </Field>{" "}
-      </div>{" "}
-      <div style={{ display: "flex", flexWrap: "wrap", gap: 10 }}>
-        {[['requires_certification', 'Required Certifications (JSON)'], ['default_equipment', 'Default Equipment (JSON)'], ['default_products', 'Default Products (JSON)']].map(([key, label]) => (
-          <Field key={key} label={label} htmlFor={fieldId(key)}>
-            <textarea
-              id={fieldId(key)}
-              name={key}
-              style={{ ...sInput, minHeight: 70, resize: "vertical", fontFamily: "monospace" }}
-              value={form[key] || ""}
-              onChange={(e) => set(key, e.target.value)}
-              placeholder='["Example"]'
+    <div className="space-y-5">
+      <FormSection title="Definition">
+        <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+          <Field label="Name" required>
+            {input("name")}
+          </Field>
+          <Field label="Service Key">
+            {input("service_key", "text", {
+              disabled: !isNew,
+              title: isNew
+                ? undefined
+                : "Service keys are locked after creation",
+            })}
+          </Field>
+          <Field label="Short Name">{input("short_name")}</Field>
+          <Field label="Icon">{input("icon")}</Field>
+          <Field label="Category">{select("category", CATEGORIES)}</Field>
+          <Field label="Subcategory">{input("subcategory")}</Field>
+          <Field label="Billing Type">
+            {select("billing_type", [
+              { value: "recurring", label: "Recurring" },
+              { value: "one_time", label: "One-Time" },
+              { value: "free", label: "Free" },
+            ])}
+          </Field>
+          <Field label="Frequency">
+            {select("frequency", [
+              { value: "", label: "N/A" },
+              { value: "monthly", label: "Monthly" },
+              { value: "every_6_weeks", label: "Every 6 Weeks" },
+              { value: "seasonal_feb_oct", label: "Seasonal (Feb–Oct)" },
+              { value: "bimonthly", label: "Bi-Monthly" },
+              { value: "quarterly", label: "Quarterly" },
+              { value: "semiannual", label: "Semiannual" },
+              { value: "annual", label: "Annual" },
+            ])}
+          </Field>
+          <Field label="Visits/Year">
+            {input("visits_per_year", "number")}
+          </Field>
+          <Field label="Duration (min)">
+            {input("default_duration_minutes", "number")}
+          </Field>
+          <Field label="Min Duration">
+            {input("min_duration_minutes", "number")}
+          </Field>
+          <Field label="Max Duration">
+            {input("max_duration_minutes", "number")}
+          </Field>
+          <Field label="Schedule Buffer">
+            {input("scheduling_buffer_minutes", "number")}
+          </Field>
+        </div>
+      </FormSection>
+
+      <FormSection title="Pricing">
+        <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+          <Field label="Pricing Type">
+            {select("pricing_type", [
+              { value: "variable", label: "Variable" },
+              { value: "fixed", label: "Fixed" },
+              { value: "quoted", label: "Quoted" },
+            ])}
+          </Field>
+          <Field label="Price">{input("base_price", "number")}</Field>
+          <Field label="Price Range Min">
+            {input("price_range_min", "number")}
+          </Field>
+          <Field label="Price Range Max">
+            {input("price_range_max", "number")}
+          </Field>
+          <Field label="Pricing Model Key">{input("pricing_model_key")}</Field>
+          <Field label="Sort Order">{input("sort_order", "number")}</Field>
+          <Field label="Typical Materials Cost">
+            {input("typical_materials_cost", "number")}
+          </Field>
+        </div>
+        <div className="grid grid-cols-1 gap-4">
+          {[
+            ["requires_certification", "Required Certifications (JSON)"],
+            ["default_equipment", "Default Equipment (JSON)"],
+            ["default_products", "Default Products (JSON)"],
+          ].map(([key, label]) => (
+            <Field key={key} label={label}>
+              <Textarea
+                id={fieldId(key)}
+                name={key}
+                rows={3}
+                value={form[key] || ""}
+                onChange={(event) => set(key, event.target.value)}
+                placeholder='["Example"]'
+              />
+            </Field>
+          ))}
+        </div>
+      </FormSection>
+
+      <FormSection title="Compliance & Skills">
+        <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+          <Field label="Tax Service Key">{input("tax_service_key")}</Field>
+          <Field label="License Category">{input("license_category")}</Field>
+          <Field label="Min Tech Skill Level">
+            {input("min_tech_skill_level", "number")}
+          </Field>
+          <Field label="Color">
+            <Input
+              id={fieldId("color")}
+              name="color"
+              type="color"
+              className="px-1"
+              value={form.color || "#18181B"}
+              onChange={(event) => set("color", event.target.value)}
             />
           </Field>
-        ))}
-      </div>{" "}
-      <div
-        style={{
-          fontSize: 11,
-          fontWeight: 500,
-          color: D.muted,
-          textTransform: "uppercase",
-          letterSpacing: 0.4,
-          marginTop: 14,
-          marginBottom: 8,
-        }}
-      >
-        Compliance & Skills
-      </div>{" "}
-      <div style={{ display: "flex", flexWrap: "wrap", gap: 10 }}>
-        {" "}
-        <Field
-          label="Tax Service Key"
-          half
-          htmlFor={fieldId("tax_service_key")}
-        >
-          {inp("tax_service_key")}
-        </Field>{" "}
-        <Field
-          label="License Category"
-          half
-          htmlFor={fieldId("license_category")}
-        >
-          {inp("license_category")}
-        </Field>{" "}
-        <Field
-          label="Min Tech Skill Level"
-          half
-          htmlFor={fieldId("min_tech_skill_level")}
-        >
-          {inp("min_tech_skill_level", "number")}
-        </Field>{" "}
-        <Field label="Color" half htmlFor={fieldId("color")}>
-          <input
-            id={fieldId("color")}
-            name="color"
-            style={{ ...sInput, height: 36 }}
-            type="color"
-            value={form.color || "#18181B"}
-            onChange={(e) => set("color", e.target.value)}
-          />
-        </Field>{" "}
-      </div>{" "}
-      <div
-        style={{ display: "flex", flexWrap: "wrap", gap: 14, marginTop: 10 }}
-      >
-        {chk("is_waveguard", "WaveGuard")}
-        {chk("is_taxable", "Taxable")}
-        {chk("requires_license", "Requires License")}
-        {chk("requires_follow_up", "Requires Follow-up")}
-        {chk("customer_visible", "Customer Visible")}
-        {chk("booking_enabled", "Booking Enabled")}
-        {chk("public_quote_selectable", "Quote Form Selectable")}
-        {chk("is_active", "Active")}
-      </div>
-      {form.requires_follow_up && (
-        <div style={{ marginTop: 8 }}>
-          {" "}
-          <Field
-            label="Follow-up Interval (days)"
-            half
-            htmlFor={fieldId("follow_up_interval_days")}
-          >
-            {inp("follow_up_interval_days", "number")}
-          </Field>{" "}
         </div>
-      )}
-      <div
-        style={{
-          fontSize: 11,
-          fontWeight: 500,
-          color: D.muted,
-          textTransform: "uppercase",
-          letterSpacing: 0.4,
-          marginTop: 14,
-          marginBottom: 8,
-        }}
-      >
-        Closeout Requirements
-      </div>
-      <div style={{ display: "flex", flexWrap: "wrap", gap: 14, marginTop: 10 }}>
-        {closeoutChk("requires_service_report", "Service report")}
-        {closeoutChk("requires_application_log", "Application/material log")}
-        {closeoutChk("requires_customer_signature", "Customer signature")}
-        {closeoutChk("requires_customer_notice", "Customer notice")}
-      </div>
-      <div style={{ display: "flex", flexWrap: "wrap", gap: 10, marginTop: 10 }}>
-        <Field
-          label="Required Photos"
-          half
-          htmlFor={fieldId("required_photo_count")}
-        >
-          <input
-            id={fieldId("required_photo_count")}
-            name="required_photo_count"
-            style={sInput}
-            type="number"
-            min="0"
-            step="1"
-            value={form.required_photo_count ?? 0}
-            onChange={(e) => setCloseout(
-              "required_photo_count",
-              e.target.value === "" ? 0 : Number(e.target.value),
-            )}
-          />
-        </Field>
-        <Field
-          label="Requirement Source"
-          half
-          htmlFor={fieldId("closeout_requirements_source")}
-        >
-          <input
-            id={fieldId("closeout_requirements_source")}
-            name="closeout_requirements_source"
-            style={{ ...sInput, opacity: 0.75 }}
-            value={form.closeout_requirements_source || "manual"}
-            readOnly
-          />
-        </Field>
-      </div>
-      <Field label="Description" htmlFor={fieldId("description")}>
-        {" "}
-        <textarea
+        <div className="flex flex-wrap gap-x-5 gap-y-3">
+          {choice("is_waveguard", "WaveGuard")}
+          {choice("is_taxable", "Taxable")}
+          {choice("requires_license", "Requires License")}
+          {choice("requires_follow_up", "Requires Follow-up")}
+          {choice("customer_visible", "Customer Visible")}
+          {choice("booking_enabled", "Booking Enabled")}
+          {choice("public_quote_selectable", "Quote Form Selectable")}
+          {choice("is_active", "Active")}
+        </div>
+        {form.requires_follow_up && (
+          <div className="max-w-sm">
+            <Field label="Follow-up Interval (days)">
+              {input("follow_up_interval_days", "number")}
+            </Field>
+          </div>
+        )}
+      </FormSection>
+
+      <FormSection title="Closeout Requirements">
+        <div className="flex flex-wrap gap-x-5 gap-y-3">
+          {closeoutChoice("requires_service_report", "Service report")}
+          {closeoutChoice(
+            "requires_application_log",
+            "Application/material log",
+          )}
+          {closeoutChoice("requires_customer_signature", "Customer signature")}
+          {closeoutChoice("requires_customer_notice", "Customer notice")}
+        </div>
+        <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+          <Field label="Required Photos">
+            <Input
+              id={fieldId("required_photo_count")}
+              name="required_photo_count"
+              type="number"
+              min="0"
+              step="1"
+              value={form.required_photo_count ?? 0}
+              onChange={(event) =>
+                setCloseout(
+                  "required_photo_count",
+                  event.target.value === "" ? 0 : Number(event.target.value),
+                )
+              }
+            />
+          </Field>
+          <Field label="Requirement Source">
+            <Input
+              id={fieldId("closeout_requirements_source")}
+              name="closeout_requirements_source"
+              value={form.closeout_requirements_source || "manual"}
+              readOnly
+            />
+          </Field>
+        </div>
+      </FormSection>
+
+      <Field label="Description">
+        <Textarea
           id={fieldId("description")}
           name="description"
-          style={{ ...sInput, minHeight: 60, resize: "vertical" }}
+          rows={3}
           value={form.description || ""}
-          onChange={(e) => set("description", e.target.value)}
-        />{" "}
-      </Field>{" "}
-      <Field label="Internal Notes" htmlFor={fieldId("internal_notes")}>
-        {" "}
-        <textarea
+          onChange={(event) => set("description", event.target.value)}
+        />
+      </Field>
+      <Field label="Internal Notes">
+        <Textarea
           id={fieldId("internal_notes")}
           name="internal_notes"
-          style={{ ...sInput, minHeight: 40, resize: "vertical" }}
+          rows={2}
           value={form.internal_notes || ""}
-          onChange={(e) => set("internal_notes", e.target.value)}
-        />{" "}
+          onChange={(event) => set("internal_notes", event.target.value)}
+        />
       </Field>
-      {error && (
-        <div
-          style={{
-            color: D.red,
-            fontSize: 12,
-            marginTop: 8,
-            padding: "6px 10px",
-            background: D.red + "15",
-            borderRadius: 6,
-          }}
-        >
-          {error}
-        </div>
-      )}
-      <div style={{ display: "flex", gap: 8, marginTop: 14 }}>
-        {" "}
-        <button
-          style={sBtn(D.teal, D.white)}
-          onClick={submit}
-          disabled={saving}
-        >
-          {saving ? "Saving..." : isNew ? "Create Service" : "Save Changes"}
-        </button>
+      {error && <ActionFeedback error>{error}</ActionFeedback>}
+      <div className="ui-record-actions">
+        <Button onClick={submit} loading={saving}>
+          {serviceSaveLabel(saving, isNew)}
+        </Button>
         {onCancel && (
-          <button style={sBtn("transparent", D.muted)} onClick={onCancel}>
+          <Button variant="ghost" onClick={onCancel}>
             Cancel
-          </button>
+          </Button>
         )}
-      </div>{" "}
+      </div>
     </div>
   );
 }
@@ -704,203 +562,146 @@ function normalizeTab(value) {
   return ["discounts", "protocols"].includes(value) ? value : "catalog";
 }
 
-// ── Left rail: category list + saved-view shortcuts ───────────────────
+function ownValue(record, key) {
+  return Object.hasOwn(record, key) ? record[key] : null;
+}
+
 function RailItem({ label, count, active, onClick }) {
   return (
-    <button
-      type="button"
+    <Button
+      variant={active ? "primary" : "ghost"}
       onClick={onClick}
-      style={{
-        display: "flex",
-        alignItems: "center",
-        justifyContent: "space-between",
-        padding: "7px 10px",
-        borderRadius: 6,
-        background: active ? D.selected : "transparent",
-        color: active ? D.selectedFg : D.text,
-        border: "none",
-        cursor: "pointer",
-        textAlign: "left",
-        width: "100%",
-        fontSize: 13,
-        fontWeight: active ? 600 : 500,
-        marginBottom: 1,
-        transition: "background 0.12s",
-      }}
-      onMouseEnter={(e) => {
-        if (!active) e.currentTarget.style.background = "#F0F0F1";
-      }}
-      onMouseLeave={(e) => {
-        if (!active) e.currentTarget.style.background = "transparent";
-      }}
+      aria-pressed={active}
+      className={
+        "mb-1 flex min-h-11 w-full items-center justify-between gap-2 rounded-sm px-3 text-left text-ui-body font-medium u-focus-ring " +
+        (active ? "bg-zinc-900 text-white" : "text-zinc-900 hover:bg-zinc-100")
+      }
     >
-      {" "}
+      <span className="truncate">{label}</span>
       <span
-        style={{
-          overflow: "hidden",
-          textOverflow: "ellipsis",
-          whiteSpace: "nowrap",
-        }}
-      >
-        {label}
-      </span>{" "}
-      <span
-        style={{
-          fontSize: 11,
-          fontWeight: 500,
-          color: active ? "rgba(250,250,250,0.8)" : D.muted,
-          marginLeft: 8,
-          fontVariantNumeric: "tabular-nums",
-        }}
+        className={
+          "u-nums shrink-0 " + (active ? "text-zinc-200" : "text-ink-secondary")
+        }
       >
         {count}
-      </span>{" "}
-    </button>
+      </span>
+    </Button>
   );
 }
 
 function RailSection({ title, children }) {
   return (
-    <div style={{ marginBottom: 12 }}>
-      {" "}
-      <div
-        style={{
-          fontSize: 10,
-          fontWeight: 500,
-          color: D.muted,
-          textTransform: "uppercase",
-          letterSpacing: 0.5,
-          padding: "4px 10px 6px",
-        }}
-      >
+    <section className="mb-3">
+      <h3 className="px-3 pb-2 pt-1 text-ui-caption font-medium text-ink-secondary">
         {title}
-      </div>
+      </h3>
       {children}
-    </div>
+    </section>
   );
 }
 
-// ── Middle list: compact two-line service rows ────────────────────────
 function ServiceListRow({ svc, selected, onSelect }) {
-  const sub = [
+  const summary = [
     billingLabel(svc.billing_type),
     frequencyLabel(svc.frequency),
     priceLabel(svc),
   ]
     .filter(Boolean)
     .join(" · ");
+  const opacity = svc.is_archived
+    ? "opacity-50"
+    : svc.is_active
+      ? ""
+      : "opacity-60";
   return (
     <button
       type="button"
       onClick={onSelect}
-      style={{
-        display: "flex",
-        alignItems: "center",
-        gap: 10,
-        padding: "12px 14px",
-        background: selected ? D.selected : "transparent",
-        color: selected ? D.selectedFg : D.text,
-        border: "none",
-        borderBottom: `1px solid ${D.border}`,
-        cursor: "pointer",
-        textAlign: "left",
-        width: "100%",
-        opacity: svc.is_archived ? 0.55 : svc.is_active ? 1 : 0.6,
-        transition: "background 0.12s",
-      }}
-      onMouseEnter={(e) => {
-        if (!selected) e.currentTarget.style.background = "#FAFAFA";
-      }}
-      onMouseLeave={(e) => {
-        if (!selected) e.currentTarget.style.background = "transparent";
-      }}
+      aria-pressed={selected}
+      className={
+        "flex min-h-[64px] w-full items-center gap-3 border-b border-hairline border-zinc-200 px-4 py-3 text-left u-focus-ring " +
+        (selected ? "bg-zinc-900 text-white " : "hover:bg-zinc-50 ") +
+        opacity
+      }
     >
-      {" "}
       <span
-        style={{
-          width: 8,
-          height: 8,
-          borderRadius: "50%",
-          flexShrink: 0,
-          background: svc.is_waveguard
+        className={
+          "h-2 w-2 shrink-0 rounded-full border " +
+          (selected ? "border-white " : "border-zinc-500 ") +
+          (svc.is_waveguard
             ? selected
-              ? D.selectedFg
-              : D.heading
-            : "transparent",
-          border: `1.5px solid ${selected ? D.selectedFg : D.muted}`,
-        }}
+              ? "bg-white"
+              : "bg-zinc-900"
+            : "bg-transparent")
+        }
         aria-hidden
-      />{" "}
-      <div style={{ flex: 1, minWidth: 0 }}>
-        {" "}
-        <div
-          style={{
-            fontSize: 14,
-            fontWeight: 500,
-            color: selected ? D.selectedFg : D.heading,
-            whiteSpace: "nowrap",
-            overflow: "hidden",
-            textOverflow: "ellipsis",
-            display: "flex",
-            alignItems: "center",
-            gap: 8,
-          }}
-        >
-          {" "}
-          <span style={{ overflow: "hidden", textOverflow: "ellipsis" }}>
-            {cleanName(svc)}
-          </span>
+      />
+      <div className="min-w-0 flex-1">
+        <div className="flex items-center gap-2 font-medium">
+          <span className="truncate">{cleanName(svc)}</span>
           {svc.is_archived && (
-            <span
-              style={{
-                fontSize: 9,
-                fontWeight: 700,
-                padding: "2px 5px",
-                borderRadius: 3,
-                background: selected ? "rgba(250,250,250,0.18)" : "#71717A18",
-                color: selected ? D.selectedFg : D.muted,
-                letterSpacing: 0.4,
-                flexShrink: 0,
-              }}
-            >
-              ARCHIVED
-            </span>
+            <Badge className={selected ? "bg-zinc-700 text-white" : undefined}>
+              Archived
+            </Badge>
           )}
           {svc.is_waveguard && (
-            <span
-              style={{
-                fontSize: 9,
-                fontWeight: 700,
-                padding: "2px 5px",
-                borderRadius: 3,
-                background: selected ? "rgba(250,250,250,0.18)" : "#18181B11",
-                color: selected ? D.selectedFg : D.heading,
-                letterSpacing: 0.4,
-                flexShrink: 0,
-              }}
-            >
-              WG
-            </span>
+            <Badge tone={selected ? "neutral" : "strong"}>WG</Badge>
           )}
-        </div>{" "}
+        </div>
         <div
-          style={{
-            fontSize: 12,
-            marginTop: 2,
-            color: selected ? "rgba(250,250,250,0.7)" : D.muted,
-            whiteSpace: "nowrap",
-            overflow: "hidden",
-            textOverflow: "ellipsis",
-          }}
+          className={
+            "mt-1 truncate text-ui-caption " +
+            (selected ? "text-zinc-200" : "text-ink-secondary")
+          }
         >
-          {sub || "—"}
-        </div>{" "}
-      </div>{" "}
+          {summary || "—"}
+        </div>
+      </div>
     </button>
   );
 }
 
-// ── Right pane: detail/edit view ──────────────────────────────────────
+function ServiceRows({
+  loading,
+  services,
+  selectedId,
+  showNew,
+  onSelect,
+  renderDetail,
+}) {
+  if (loading && services.length === 0) {
+    return (
+      <div className="p-8 text-center text-ink-secondary">
+        Loading services…
+      </div>
+    );
+  }
+  if (services.length === 0) {
+    return (
+      <div className="p-8 text-center text-ink-secondary">
+        No services found
+      </div>
+    );
+  }
+  return services.map((service) => {
+    const row = (
+      <ServiceListRow
+        key={service.id}
+        svc={service}
+        selected={selectedId === service.id && !showNew}
+        onSelect={() => onSelect(service)}
+      />
+    );
+    if (!renderDetail) return row;
+    return (
+      <div key={service.id}>
+        {row}
+        {renderDetail(service)}
+      </div>
+    );
+  });
+}
+
 function DetailPane({
   svc,
   creating,
@@ -911,124 +712,174 @@ function DetailPane({
 }) {
   if (creating) {
     return (
-      <div
-        style={{
-          overflowY: "auto",
-          height: "100%",
-          minHeight: 0,
-          WebkitOverflowScrolling: "touch",
-        }}
-      >
-        {" "}
-        <div
-          style={{
-            position: "sticky",
-            top: 0,
-            zIndex: 1,
-            background: D.card,
-            borderBottom: `1px solid ${D.border}`,
-            padding: "20px 24px",
-          }}
-        >
-          {" "}
-          <div
-            style={{
-              fontSize: 11,
-              fontWeight: 500,
-              color: D.muted,
-              textTransform: "uppercase",
-              letterSpacing: 0.4,
-              marginBottom: 4,
-            }}
-          >
-            New
-          </div>{" "}
-          <h2
-            style={{
-              fontSize: 22,
-              fontWeight: 500,
-              color: D.heading,
-              margin: 0,
-              lineHeight: 1.2,
-            }}
-          >
+      <div className="h-full min-h-0 overflow-y-auto">
+        <div className="sticky top-0 z-[1] border-b border-hairline border-zinc-200 bg-white px-4 py-4 sm:px-6">
+          <div className="text-ui-caption text-ink-secondary">New</div>
+          <h2 className="m-0 mt-1 text-22 font-medium leading-[1.3] text-zinc-950">
             Add a service
-          </h2>{" "}
-          <div style={{ fontSize: 13, color: D.muted, marginTop: 6 }}>
+          </h2>
+          <p className="m-0 mt-1 text-ui-body text-ink-secondary">
             Define a new entry in the service catalog.
-          </div>{" "}
-        </div>{" "}
-        <div style={{ padding: "20px 24px" }}>
-          {" "}
+          </p>
+        </div>
+        <div className="p-4 sm:p-6">
           <ServiceForm
             svc={null}
             onSave={onSaveNew}
             onCancel={onCancelNew}
             isNew
-          />{" "}
-        </div>{" "}
+          />
+        </div>
       </div>
     );
   }
 
   if (!svc) {
     return (
-      <div
-        style={{
-          height: "100%",
-          display: "flex",
-          alignItems: "center",
-          justifyContent: "center",
-          flexDirection: "column",
-          gap: 10,
-          padding: 32,
-          color: D.muted,
-          textAlign: "center",
-        }}
-      >
-        {" "}
-        <div
-          style={{
-            width: 48,
-            height: 48,
-            borderRadius: 10,
-            border: `1.5px dashed ${D.border}`,
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "center",
-            color: D.border,
-            fontSize: 22,
-            marginBottom: 4,
-          }}
-          aria-hidden
-        >
-          ◧
-        </div>{" "}
-        <div style={{ fontSize: 14, fontWeight: 500, color: D.text }}>
+      <div className="flex h-full min-h-[260px] flex-col items-center justify-center gap-2 p-8 text-center text-ink-secondary">
+        <Library size={32} strokeWidth={1.5} aria-hidden />
+        <div className="font-medium text-zinc-900">
           Select a service to view details
-        </div>{" "}
-        <div style={{ fontSize: 12 }}>
-          Or click <b>+ Add Service</b>to create one.
-        </div>{" "}
+        </div>
+        <div className="text-ui-caption">
+          Or click <strong>+ Add Service</strong>to create one.
+        </div>
       </div>
     );
   }
 
   const products = parseProducts(svc);
   const closeoutRequirements = closeoutRequirementLabels(svc);
+  const headlineFacts = [
+    {
+      key: "billing",
+      visible: true,
+      value: [billingLabel(svc.billing_type), frequencyLabel(svc.frequency)]
+        .filter(Boolean)
+        .join(" · "),
+    },
+    {
+      key: "price",
+      visible: true,
+      value: [priceLabel(svc), variablePriceSuffix(svc)]
+        .filter(Boolean)
+        .join(" · "),
+    },
+    {
+      key: "duration",
+      visible: svc.default_duration_minutes > 0,
+      value: `${svc.default_duration_minutes} min`,
+    },
+    {
+      key: "visits",
+      visible: svc.visits_per_year > 0,
+      value: `${svc.visits_per_year} visits/yr`,
+    },
+  ]
+    .filter((fact) => fact.visible)
+    .map((fact) => fact.value)
+    .join(" · ");
+  const requirementItems = [
+    {
+      key: "license",
+      label: "License",
+      value: svc.license_category,
+      visible: Boolean(svc.license_category),
+    },
+    {
+      key: "skill",
+      label: "Min Skill",
+      value: `Level ${svc.min_tech_skill_level}`,
+      visible: svc.min_tech_skill_level > 1,
+    },
+    {
+      key: "follow-up",
+      label: "Follow-up",
+      value: `${[svc.follow_up_interval_days, "—"].find(Boolean)} days`,
+      visible: Boolean(svc.requires_follow_up),
+    },
+  ].filter((item) => item.visible);
+  const summarySections = [
+    {
+      key: "description",
+      visible: Boolean(svc.description),
+      content: (
+        <section key="description">
+          <h3 className="mb-1 text-ui-body font-medium text-zinc-900">
+            Description
+          </h3>
+          <p className="m-0 text-ui-body text-zinc-800">{svc.description}</p>
+        </section>
+      ),
+    },
+    {
+      key: "products",
+      visible: products.length > 0,
+      content: (
+        <section key="products">
+          <h3 className="mb-2 text-ui-body font-medium text-zinc-900">
+            Default Products
+          </h3>
+          <div className="flex flex-wrap gap-2">
+            {products.map((product, index) => (
+              <Badge key={index}>{product}</Badge>
+            ))}
+          </div>
+        </section>
+      ),
+    },
+    {
+      key: "closeout",
+      visible: closeoutRequirements.length > 0,
+      content: (
+        <section key="closeout">
+          <h3 className="mb-2 text-ui-body font-medium text-zinc-900">
+            Closeout Requirements
+          </h3>
+          <div className="flex flex-wrap gap-2">
+            {closeoutRequirements.map((item) => (
+              <Badge key={item}>{item}</Badge>
+            ))}
+            <Badge>{svc.closeout_requirements_source || "inferred_v1"}</Badge>
+          </div>
+        </section>
+      ),
+    },
+    {
+      key: "requirements",
+      visible: [
+        svc.requires_license,
+        svc.license_category,
+        svc.min_tech_skill_level > 1,
+        svc.requires_follow_up,
+      ].some(Boolean),
+      content: (
+        <dl key="requirements" className="flex flex-wrap gap-x-6 gap-y-3">
+          {requirementItems.map((item) => (
+            <div key={item.key}>
+              <dt className="font-medium text-zinc-900">{item.label}</dt>
+              <dd className="m-0 text-ink-secondary">{item.value}</dd>
+            </div>
+          ))}
+        </dl>
+      ),
+    },
+  ].filter((section) => section.visible);
 
   const handleDelete = async () => {
     if (
       !window.confirm(
-        `Archive "${cleanName(svc)}"?\n\nThis removes it from the active service catalog. The archive will be blocked if this service is still referenced by live schedules, packages, add-ons, or discount rules.`,
+        'Archive "' +
+          cleanName(svc) +
+          '"?\n\nThis removes it from the active service catalog. The archive will be blocked if this service is still referenced by live schedules, packages, add-ons, or discount rules.',
       )
     )
       return;
     try {
       await aFetch(`/admin/services/${svc.id}`, { method: "DELETE" });
       onDeleted();
-    } catch (err) {
-      window.alert("Archive failed: " + (err?.message || "unknown error"));
+    } catch (error) {
+      window.alert("Archive failed: " + (error?.message || "unknown error"));
     }
   };
 
@@ -1039,9 +890,9 @@ function DetailPane({
         body: JSON.stringify({ is_active: !svc.is_active }),
       });
       onUpdated();
-    } catch (err) {
+    } catch (error) {
       window.alert(
-        "Status update failed: " + (err?.message || "unknown error"),
+        "Status update failed: " + (error?.message || "unknown error"),
       );
     }
   };
@@ -1053,340 +904,46 @@ function DetailPane({
         body: JSON.stringify({ is_archived: false, is_active: true }),
       });
       onUpdated("Restored");
-    } catch (err) {
-      window.alert("Restore failed: " + (err?.message || "unknown error"));
+    } catch (error) {
+      window.alert("Restore failed: " + (error?.message || "unknown error"));
     }
   };
 
   return (
-    <div
-      style={{
-        overflowY: "auto",
-        height: "100%",
-        minHeight: 0,
-        WebkitOverflowScrolling: "touch",
-      }}
-      key={svc.id}
-    >
-      {/* Sticky summary header */}
-      <div
-        style={{
-          position: "sticky",
-          top: 0,
-          zIndex: 1,
-          background: D.card,
-          borderBottom: `1px solid ${D.border}`,
-          padding: "20px 24px",
-        }}
-      >
-        {" "}
-        <div
-          style={{
-            fontSize: 11,
-            fontWeight: 500,
-            color: D.muted,
-            textTransform: "uppercase",
-            letterSpacing: 0.4,
-            marginBottom: 4,
-          }}
-        >
-          {categoryLabel(svc.category)}
-          {svc.subcategory ? ` · ${svc.subcategory}` : ""}
-        </div>{" "}
-        <div
-          style={{
-            display: "flex",
-            alignItems: "flex-start",
-            justifyContent: "space-between",
-            gap: 12,
-            flexWrap: "wrap",
-          }}
-        >
-          {" "}
-          <h2
-            style={{
-              fontSize: 22,
-              fontWeight: 500,
-              color: D.heading,
-              margin: 0,
-              lineHeight: 1.25,
-            }}
-          >
+    <div className="h-full min-h-0 overflow-y-auto" key={svc.id}>
+      <div className="sticky top-0 z-[1] border-b border-hairline border-zinc-200 bg-white px-4 py-4 sm:px-6">
+        <div className="text-ui-caption text-ink-secondary">
+          {[categoryLabel(svc.category), svc.subcategory]
+            .filter(Boolean)
+            .join(" · ")}
+        </div>
+        <div className="mt-1 flex flex-wrap items-start justify-between gap-3">
+          <h2 className="m-0 flex flex-wrap items-center gap-2 text-22 font-medium leading-[1.3] text-zinc-950">
             {cleanName(svc)}
-            {svc.is_waveguard && (
-              <span
-                style={{
-                  fontSize: 10,
-                  fontWeight: 700,
-                  padding: "3px 7px",
-                  borderRadius: 4,
-                  background: D.heading,
-                  color: D.card,
-                  marginLeft: 10,
-                  verticalAlign: "middle",
-                  textTransform: "uppercase",
-                  letterSpacing: 0.5,
-                }}
-              >
-                WaveGuard
-              </span>
-            )}
+            {svc.is_waveguard && <Badge tone="strong">WaveGuard</Badge>}
           </h2>
           {svc.is_archived ? (
-            <span
-              style={{
-                ...sBtn("#71717A18", D.muted),
-                fontSize: 11,
-                padding: "4px 10px",
-                whiteSpace: "nowrap",
-              }}
-            >
-              Archived
-            </span>
+            <Badge>Archived</Badge>
           ) : (
-            <button
+            <Button
+              variant="secondary"
               onClick={handleToggleActive}
-              type="button"
-              style={{
-                ...sBtn(
-                  svc.is_active ? D.green + "18" : D.red + "15",
-                  svc.is_active ? D.green : D.red,
-                ),
-                fontSize: 11,
-                padding: "4px 10px",
-                whiteSpace: "nowrap",
-              }}
               title="Toggle active status"
             >
               {svc.is_active ? "● Active" : "○ Inactive"}
-            </button>
+            </Button>
           )}
-        </div>{" "}
-        <div
-          style={{
-            display: "flex",
-            gap: 12,
-            marginTop: 12,
-            fontSize: 13,
-            color: D.muted,
-            flexWrap: "wrap",
-          }}
-        >
-          {" "}
-          <span>
-            <b style={{ color: D.text, fontWeight: 500 }}>
-              {billingLabel(svc.billing_type)}
-            </b>
-            {svc.frequency ? ` · ${frequencyLabel(svc.frequency)}` : ""}
-          </span>{" "}
-          <span style={{ color: D.border }}>·</span>{" "}
-          <span>
-            <b style={{ color: D.text, fontWeight: 500 }}>{priceLabel(svc)}</b>
-            {svc.pricing_type === "variable" && Number(svc.base_price) > 0
-              ? " · variable"
-              : ""}
-          </span>
-          {svc.default_duration_minutes > 0 && (
-            <>
-              {" "}
-              <span style={{ color: D.border }}>·</span>{" "}
-              <span>
-                <b style={{ color: D.text, fontWeight: 500 }}>
-                  {svc.default_duration_minutes} min
-                </b>
-              </span>{" "}
-            </>
-          )}
-          {svc.visits_per_year > 0 && (
-            <>
-              {" "}
-              <span style={{ color: D.border }}>·</span>{" "}
-              <span>
-                <b style={{ color: D.text, fontWeight: 500 }}>
-                  {svc.visits_per_year} visits/yr
-                </b>
-              </span>{" "}
-            </>
-          )}
-        </div>{" "}
+        </div>
+        <div className="u-nums mt-3 text-ui-body font-medium text-zinc-900">
+          {headlineFacts}
+        </div>
       </div>
-      {/* Read-only callouts */}
-      <div style={{ padding: "20px 24px 0" }}>
-        {svc.description && (
-          <div style={{ marginBottom: 16 }}>
-            {" "}
-            <div
-              style={{
-                fontSize: 11,
-                fontWeight: 500,
-                color: D.muted,
-                textTransform: "uppercase",
-                letterSpacing: 0.4,
-                marginBottom: 6,
-              }}
-            >
-              Description
-            </div>{" "}
-            <div style={{ fontSize: 13, color: D.text, lineHeight: 1.5 }}>
-              {svc.description}
-            </div>{" "}
-          </div>
-        )}
-        {products.length > 0 && (
-          <div style={{ marginBottom: 16 }}>
-            {" "}
-            <div
-              style={{
-                fontSize: 11,
-                fontWeight: 500,
-                color: D.muted,
-                textTransform: "uppercase",
-                letterSpacing: 0.4,
-                marginBottom: 6,
-              }}
-            >
-              Default Products
-            </div>{" "}
-            <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
-              {products.map((p, i) => (
-                <span
-                  key={i}
-                  style={{
-                    fontSize: 12,
-                    padding: "4px 10px",
-                    borderRadius: 4,
-                    background: "#F4F4F5",
-                    color: D.text,
-                    border: `1px solid ${D.border}`,
-                  }}
-                >
-                  {p}
-                </span>
-              ))}
-            </div>{" "}
-          </div>
-        )}
-        {closeoutRequirements.length > 0 && (
-          <div style={{ marginBottom: 16 }}>
-            {" "}
-            <div
-              style={{
-                fontSize: 11,
-                fontWeight: 500,
-                color: D.muted,
-                textTransform: "uppercase",
-                letterSpacing: 0.4,
-                marginBottom: 6,
-              }}
-            >
-              Closeout Requirements
-            </div>{" "}
-            <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
-              {closeoutRequirements.map((item) => (
-                <span
-                  key={item}
-                  style={{
-                    fontSize: 12,
-                    padding: "4px 10px",
-                    borderRadius: 4,
-                    background: "#F4F4F5",
-                    color: D.text,
-                    border: `1px solid ${D.border}`,
-                  }}
-                >
-                  {item}
-                </span>
-              ))}
-              <span
-                style={{
-                  fontSize: 12,
-                  padding: "4px 10px",
-                  borderRadius: 4,
-                  background: "#FAFAFA",
-                  color: D.muted,
-                  border: `1px solid ${D.border}`,
-                }}
-              >
-                {svc.closeout_requirements_source || "inferred_v1"}
-              </span>
-            </div>{" "}
-          </div>
-        )}
-        {(svc.requires_license ||
-          svc.license_category ||
-          svc.min_tech_skill_level > 1 ||
-          svc.requires_follow_up) && (
-          <div
-            style={{
-              marginBottom: 16,
-              display: "flex",
-              gap: 24,
-              flexWrap: "wrap",
-            }}
-          >
-            {svc.license_category && (
-              <div>
-                {" "}
-                <div
-                  style={{
-                    fontSize: 11,
-                    fontWeight: 500,
-                    color: D.muted,
-                    textTransform: "uppercase",
-                    letterSpacing: 0.4,
-                  }}
-                >
-                  License
-                </div>{" "}
-                <div style={{ fontSize: 13, color: D.text, marginTop: 2 }}>
-                  {svc.license_category}
-                </div>{" "}
-              </div>
-            )}
-            {svc.min_tech_skill_level > 1 && (
-              <div>
-                {" "}
-                <div
-                  style={{
-                    fontSize: 11,
-                    fontWeight: 500,
-                    color: D.muted,
-                    textTransform: "uppercase",
-                    letterSpacing: 0.4,
-                  }}
-                >
-                  Min Skill
-                </div>{" "}
-                <div style={{ fontSize: 13, color: D.text, marginTop: 2 }}>
-                  Level {svc.min_tech_skill_level}
-                </div>{" "}
-              </div>
-            )}
-            {svc.requires_follow_up && (
-              <div>
-                {" "}
-                <div
-                  style={{
-                    fontSize: 11,
-                    fontWeight: 500,
-                    color: D.muted,
-                    textTransform: "uppercase",
-                    letterSpacing: 0.4,
-                  }}
-                >
-                  Follow-up
-                </div>{" "}
-                <div style={{ fontSize: 13, color: D.text, marginTop: 2 }}>
-                  {svc.follow_up_interval_days || "—"} days
-                </div>{" "}
-              </div>
-            )}
-          </div>
-        )}
+
+      <div className="space-y-4 px-4 pt-5 sm:px-6">
+        {summarySections.map((section) => section.content)}
       </div>
-      {/* Edit form */}
-      <div style={{ padding: "8px 24px 24px" }}>
-        {" "}
+
+      <div className="p-4 sm:p-6">
         <ServiceForm
           key={svc.id}
           svc={svc}
@@ -1397,55 +954,36 @@ function DetailPane({
             });
             onUpdated();
           }}
-        />{" "}
-        <div
-          style={{
-            marginTop: 16,
-            paddingTop: 16,
-            borderTop: `1px solid ${D.border}`,
-          }}
-        >
+        />
+        <div className="mt-5 border-t border-hairline border-zinc-200 pt-4">
           {svc.is_archived ? (
-            <button
-              type="button"
-              onClick={handleRestore}
-              style={{
-                ...sBtn(D.green + "18", D.green),
-                border: `1px solid ${D.green}33`,
-                fontSize: 12,
-              }}
-            >
+            <Button variant="secondary" onClick={handleRestore}>
               Restore service
-            </button>
+            </Button>
           ) : (
-            <button
-              type="button"
-              onClick={handleDelete}
-              style={{
-                ...sBtn(D.red + "15", D.red),
-                border: `1px solid ${D.red}33`,
-                fontSize: 12,
-              }}
-            >
+            <Button variant="danger" onClick={handleDelete}>
               Archive service
-            </button>
+            </Button>
           )}
-        </div>{" "}
-      </div>{" "}
+        </div>
+      </div>
     </div>
   );
 }
 
-// Tablet (768-1023px): horizontal-scroll category chips. <768 falls through to MobileServiceLibrary.
 function CompactCategoryChips({ counts, selectedView, onChange }) {
   const items = [
     { key: "all", label: "All", count: counts.all },
-    ...CATEGORIES.filter((c) => counts.byCategory[c.value]).map((c) => ({
-      key: `category:${c.value}`,
-      label: c.label,
-      count: counts.byCategory[c.value],
-    })),
+    ...CATEGORIES.filter((category) => counts.byCategory[category.value]).map(
+      (category) => ({
+        key: "category:" + category.value,
+        label: category.label,
+        count: counts.byCategory[category.value],
+      }),
+    ),
     { key: "view:waveguard", label: "WaveGuard", count: counts.waveguard },
+    { key: "view:recurring", label: "Recurring", count: counts.recurring },
+    { key: "view:onetime", label: "One-Time", count: counts.onetime },
     ...(counts.inactive > 0
       ? [{ key: "view:inactive", label: "Inactive", count: counts.inactive }]
       : []),
@@ -1454,40 +992,18 @@ function CompactCategoryChips({ counts, selectedView, onChange }) {
       : []),
   ];
   return (
-    <div
-      style={{
-        display: "flex",
-        gap: 6,
-        overflowX: "auto",
-        padding: "0 0 12px",
-        WebkitOverflowScrolling: "touch",
-      }}
-    >
-      {items.map((it) => {
-        const active = selectedView === it.key;
-        return (
-          <button
-            key={it.key}
-            onClick={() => onChange(it.key)}
-            type="button"
-            style={{
-              padding: "6px 12px",
-              borderRadius: 999,
-              fontSize: 12,
-              fontWeight: 500,
-              whiteSpace: "nowrap",
-              background: active ? D.selected : D.card,
-              color: active ? D.selectedFg : D.text,
-              border: `1px solid ${active ? D.selected : D.border}`,
-              cursor: "pointer",
-              flexShrink: 0,
-            }}
-          >
-            {it.label}{" "}
-            <span style={{ opacity: 0.7, marginLeft: 4 }}>{it.count}</span>{" "}
-          </button>
-        );
-      })}
+    <div className="flex gap-2 overflow-x-auto pb-3">
+      {items.map((item) => (
+        <Button
+          key={item.key}
+          variant={selectedView === item.key ? "primary" : "secondary"}
+          className="shrink-0"
+          onClick={() => onChange(item.key)}
+        >
+          {item.label}{" "}
+          <span className="u-nums ml-1 opacity-70">{item.count}</span>
+        </Button>
+      ))}
     </div>
   );
 }
@@ -1495,45 +1011,38 @@ function CompactCategoryChips({ counts, selectedView, onChange }) {
 export default function ServiceLibraryPage() {
   const isMobile = useIsMobile(768);
   const [services, setServices] = useState([]);
+  const [loading, setLoading] = useState(true);
   const [selectedView, setSelectedView] = useState("all");
   const [selectedId, setSelectedId] = useState(null);
-  // Sub-tabs + actions registered by the embedded Treatment Plans page
-  // (null on the other tabs). Declared before the mobile early return below
-  // so the hook order is stable.
   const [secondary, setSecondary] = useState(null);
   const [search, setSearch] = useState("");
   const [showNew, setShowNew] = useState(false);
   const [toast, setToast] = useState("");
+  const toastTimer = useRef(null);
   const [loadError, setLoadError] = useState("");
   const [searchParams, setSearchParams] = useSearchParams();
   const [tab, setTabState] = useState(() =>
     normalizeTab(searchParams.get("tab")),
   );
+  const [isTablet, setIsTablet] = useState(
+    () => typeof window !== "undefined" && window.innerWidth < 1280,
+  );
 
-  // Usage beacon for the tab that actually RENDERS — a deep link with an
-  // unknown ?tab= resolves to Catalog without the URL being rewritten.
-  // On the Protocols tab this page defers (null) to the embedded
-  // LawnProtocolCommandCenterPage, which owns the deeper ?protocolTab=
-  // leaf and reports it itself (Codex #2961 r17).
   useRenderedTabBeacon(
     "/admin/service-library",
     tab === "protocols" ? null : tab,
     [searchParams],
   );
-  // 768-1023px tablet stacked mode (separate from <768 mobile drilldown)
-  const [isTablet, setIsTablet] = useState(
-    () => typeof window !== "undefined" && window.innerWidth < 1024,
-  );
 
   useEffect(() => {
-    const onResize = () => setIsTablet(window.innerWidth < 1024);
+    const onResize = () => setIsTablet(window.innerWidth < 1280);
     window.addEventListener("resize", onResize);
     return () => window.removeEventListener("resize", onResize);
   }, []);
-
   useEffect(() => {
     setTabState(normalizeTab(searchParams.get("tab")));
   }, [searchParams]);
+  useEffect(() => () => clearTimeout(toastTimer.current), []);
 
   const setTab = useCallback(
     (nextTab) => {
@@ -1552,18 +1061,21 @@ export default function ServiceLibraryPage() {
     [searchParams, setSearchParams],
   );
 
-  const showToast = (msg) => {
-    setToast(msg);
-    setTimeout(() => setToast(""), 3000);
+  const showToast = (message) => {
+    clearTimeout(toastTimer.current);
+    setToast(message);
+    toastTimer.current = setTimeout(() => setToast(""), 3000);
   };
 
   const loadServices = useCallback(async () => {
+    setLoading(true);
     try {
       setLoadError("");
-      // Load all services once; filter client-side for snappier nav.
       setServices(await fetchAllServices("include_archived=true"));
-    } catch (err) {
-      setLoadError(err?.message || "Failed to load the service catalog");
+    } catch (error) {
+      setLoadError(error?.message || "Failed to load the service catalog");
+    } finally {
+      setLoading(false);
     }
   }, []);
 
@@ -1571,97 +1083,66 @@ export default function ServiceLibraryPage() {
     if (tab !== "protocols") loadServices();
   }, [loadServices, tab]);
 
-  if (isMobile && tab !== "protocols")
+  if (isMobile && tab !== "protocols") {
     return (
       <MobileServiceLibrary
         initialView={tab === "discounts" ? "discounts" : "menu"}
         onOpenProtocols={() => setTab("protocols")}
       />
     );
+  }
 
-  const counts = (() => {
-    const c = {
-      all: 0,
-      waveguard: 0,
-      recurring: 0,
-      onetime: 0,
-      inactive: 0,
-      archived: 0,
-      byCategory: {},
-    };
-    for (const s of services) {
-      if (s.is_archived) {
-        c.archived++;
-        continue;
-      }
-      if (s.is_active === false) {
-        c.inactive++;
-        continue;
-      }
-      c.all++;
-      if (s.is_waveguard) c.waveguard++;
-      if (s.billing_type === "recurring") c.recurring++;
-      if (s.billing_type === "one_time") c.onetime++;
-      const cat = s.category || "other";
-      c.byCategory[cat] = (c.byCategory[cat] || 0) + 1;
-    }
-    return c;
-  })();
+  const activeServices = services.filter(isActiveCatalogService);
+  const counts = {
+    all: activeServices.length,
+    waveguard: activeServices.filter((service) => service.is_waveguard).length,
+    recurring: activeServices.filter(
+      (service) => service.billing_type === "recurring",
+    ).length,
+    onetime: activeServices.filter(
+      (service) => service.billing_type === "one_time",
+    ).length,
+    inactive: services.filter(SERVICE_VIEW_PREDICATES["view:inactive"]).length,
+    archived: services.filter(SERVICE_VIEW_PREDICATES["view:archived"]).length,
+    byCategory: activeServices.reduce((byCategory, service) => {
+      const category = service.category || "other";
+      byCategory[category] = (byCategory[category] || 0) + 1;
+      return byCategory;
+    }, {}),
+  };
 
-  const viewFiltered = (() => {
-    let list = services;
-    if (selectedView === "all")
-      list = list.filter((s) => s.is_active !== false && !s.is_archived);
-    else if (selectedView === "view:waveguard")
-      list = list.filter(
-        (s) => s.is_waveguard && s.is_active !== false && !s.is_archived,
-      );
-    else if (selectedView === "view:recurring")
-      list = list.filter(
-        (s) =>
-          s.billing_type === "recurring" &&
-          s.is_active !== false &&
-          !s.is_archived,
-      );
-    else if (selectedView === "view:onetime")
-      list = list.filter(
-        (s) =>
-          s.billing_type === "one_time" &&
-          s.is_active !== false &&
-          !s.is_archived,
-      );
-    else if (selectedView === "view:inactive")
-      list = list.filter((s) => s.is_active === false && !s.is_archived);
-    else if (selectedView === "view:archived")
-      list = list.filter((s) => s.is_archived);
-    else if (selectedView.startsWith("category:")) {
-      const cat = selectedView.slice("category:".length);
-      list = list.filter(
-        (s) =>
-          (s.category || "other") === cat &&
-          s.is_active !== false &&
-          !s.is_archived,
-      );
-    }
-    if (search.trim()) {
-      const q = search.trim().toLowerCase();
-      list = list.filter(
-        (s) =>
-          (s.name || "").toLowerCase().includes(q) ||
-          (s.short_name || "").toLowerCase().includes(q) ||
-          (s.service_key || "").toLowerCase().includes(q) ||
-          (s.description || "").toLowerCase().includes(q),
-      );
-    }
-    return [...list].sort(
+  const configuredViewPredicate = ownValue(
+    SERVICE_VIEW_PREDICATES,
+    selectedView,
+  );
+  const viewPredicate = configuredViewPredicate || (() => true);
+  const query = search.trim().toLowerCase();
+  const viewFiltered = services
+    .filter(viewPredicate)
+    .filter(
+      (service) =>
+        !query ||
+        SERVICE_SEARCH_FIELDS.some((field) =>
+          String(service[field] || "")
+            .toLowerCase()
+            .includes(query),
+        ),
+    )
+    .sort(
       (a, b) =>
         (a.sort_order ?? 999) - (b.sort_order ?? 999) ||
         (a.name || "").localeCompare(b.name || ""),
     );
-  })();
 
-  const selectedSvc = services.find((s) => s.id === selectedId) || null;
-
+  const selectedSvc = services.find((service) => service.id === selectedId);
+  const {
+    actions: secondaryActions,
+    sections: secondarySections = [],
+    activeKey: secondaryActiveKey,
+    onChange: onSecondaryChange,
+    ariaLabel: secondaryAriaLabel,
+    navGridClassName: secondaryNavGridClassName,
+  } = secondary ?? {};
   const handleCreate = async (data) => {
     const created = await aFetch("/admin/services", {
       method: "POST",
@@ -1672,7 +1153,6 @@ export default function ServiceLibraryPage() {
     showToast("Service created");
     loadServices();
   };
-
   const handleUpdated = (message = "Saved") => {
     if (message === "Restored") setSelectedView("all");
     loadServices();
@@ -1690,10 +1170,31 @@ export default function ServiceLibraryPage() {
     { key: "discounts", label: "Discounts", Icon: Percent },
   ];
 
+  const selectView = (value) => {
+    setSelectedView(value);
+    setSelectedId(null);
+  };
+  const headerAction = ownValue(
+    {
+      catalog: {
+        label: "Add Service",
+        icon: Plus,
+        onClick: () => {
+          setShowNew(true);
+          setSelectedId(null);
+        },
+      },
+    },
+    tab,
+  );
+
   return (
-    <div style={{ maxWidth: 1300, margin: "0 auto" }}>
-      {" "}
+    <UiSurface
+      density="comfortable"
+      className="mx-auto min-w-0 max-w-[1300px] text-ui-body text-zinc-900"
+    >
       <AdminCommandHeader
+        variant="workspace"
         title="Services"
         icon={Library}
         sections={tabs}
@@ -1701,245 +1202,144 @@ export default function ServiceLibraryPage() {
         onSectionChange={setTab}
         ariaLabel="Services section"
         navGridClassName="grid-cols-1 sm:grid-cols-3"
-        actions={secondary?.actions}
-        secondarySections={secondary?.sections || []}
-        secondaryActiveKey={secondary?.activeKey}
-        onSecondaryChange={secondary?.onChange}
-        secondaryAriaLabel={secondary?.ariaLabel}
-        secondaryNavGridClassName={secondary?.navGridClassName}
-        action={
-          tab === "catalog"
-            ? {
-                label: "Add Service",
-                icon: Plus,
-                onClick: () => {
-                  setShowNew(true);
-                  setSelectedId(null);
-                },
-              }
-            : null
-        }
+        actions={secondaryActions}
+        secondarySections={secondarySections}
+        secondaryActiveKey={secondaryActiveKey}
+        onSecondaryChange={onSecondaryChange}
+        secondaryAriaLabel={secondaryAriaLabel}
+        secondaryNavGridClassName={secondaryNavGridClassName}
+        action={headerAction}
       />
-      {/* Toast */}
+
       {toast && (
-        <div
-          style={{
-            position: "fixed",
-            top: 20,
-            right: 20,
-            background: D.green,
-            color: D.card,
-            padding: "10px 20px",
-            borderRadius: 8,
-            fontSize: 13,
-            fontWeight: 500,
-            zIndex: 9999,
-          }}
-        >
+        <ActionFeedback className="pointer-events-none fixed right-[calc(20px+env(safe-area-inset-right,0px))] top-[calc(20px+env(safe-area-inset-top,0px))] z-[300] max-w-[calc(100vw-40px)] rounded-md border-hairline border-zinc-200 bg-white px-3.5 py-3 shadow-lg">
           {toast}
-        </div>
+        </ActionFeedback>
       )}
-      {/* === CATALOG TAB === */}
       {tab === "catalog" && loadError && (
-        <div
-          role="alert"
-          style={{
-            ...sCard,
-            color: D.red,
-            marginBottom: 12,
-            display: "flex",
-            justifyContent: "space-between",
-            alignItems: "center",
-            gap: 12,
-          }}
-        >
-          <span>Service catalog unavailable: {loadError}</span>
-          <button type="button" style={sBtn(D.teal, D.white)} onClick={loadServices}>
-            Retry
-          </button>
-        </div>
+        <Card className="mb-3">
+          <CardBody className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+            <ActionFeedback error className="flex-1">
+              Service catalog unavailable: {loadError}
+            </ActionFeedback>
+            <Button variant="secondary" onClick={loadServices}>
+              Retry
+            </Button>
+          </CardBody>
+        </Card>
       )}
+
       {tab === "catalog" &&
         (isTablet ? (
-          // Tablet (768-1023): stacked. Chips on top, full-width list, inline detail panel.
-          <div>
-            {" "}
+          <div className="space-y-3">
             <CompactCategoryChips
               counts={counts}
               selectedView={selectedView}
-              onChange={(v) => {
-                setSelectedView(v);
-                setSelectedId(null);
-              }}
-            />{" "}
-            <div style={{ ...sCard, padding: 8, marginBottom: 12 }}>
-              {" "}
-              <input
-                style={sInput}
-                placeholder="Search services..."
-                value={search}
-                onChange={(e) => setSearch(e.target.value)}
-              />{" "}
-            </div>
+              onChange={selectView}
+            />
+            <Card>
+              <CardBody>
+                <Field label="Search services">
+                  <Input
+                    type="search"
+                    placeholder={SERVICE_SEARCH_PLACEHOLDER}
+                    value={search}
+                    onChange={(event) => setSearch(event.target.value)}
+                  />
+                </Field>
+              </CardBody>
+            </Card>
             {showNew && (
-              <div style={{ ...sCard, marginBottom: 12, padding: 0 }}>
-                {" "}
+              <Card>
                 <DetailPane
                   creating
                   onSaveNew={handleCreate}
                   onCancelNew={() => setShowNew(false)}
-                />{" "}
-              </div>
+                />
+              </Card>
             )}
-            <div
-              style={{
-                background: D.card,
-                border: `1px solid ${D.border}`,
-                borderRadius: 12,
-                overflow: "hidden",
-              }}
-            >
-              {viewFiltered.length === 0 ? (
-                <div
-                  style={{
-                    padding: 32,
-                    textAlign: "center",
-                    color: D.muted,
-                    fontSize: 13,
-                  }}
-                >
-                  No services found
-                </div>
-              ) : (
-                viewFiltered.map((svc) => {
-                  const isOpen = selectedId === svc.id;
-                  return (
-                    <div key={svc.id}>
-                      {" "}
-                      <ServiceListRow
-                        svc={svc}
-                        selected={isOpen}
-                        onSelect={() => {
-                          setSelectedId(isOpen ? null : svc.id);
-                          setShowNew(false);
-                        }}
+            <Card className="overflow-hidden">
+              <ServiceRows
+                loading={loading}
+                services={viewFiltered}
+                selectedId={selectedId}
+                showNew={showNew}
+                onSelect={(service) => {
+                  const open = selectedId === service.id;
+                  setSelectedId(open ? null : service.id);
+                  setShowNew(false);
+                }}
+                renderDetail={(service) =>
+                  selectedId === service.id ? (
+                    <div className="border-b border-hairline border-zinc-200 bg-zinc-50">
+                      <DetailPane
+                        svc={service}
+                        onUpdated={handleUpdated}
+                        onDeleted={handleDeleted}
                       />
-                      {isOpen && (
-                        <div
-                          style={{
-                            background: D.railBg,
-                            borderBottom: `1px solid ${D.border}`,
-                          }}
-                        >
-                          {" "}
-                          <DetailPane
-                            svc={svc}
-                            onUpdated={handleUpdated}
-                            onDeleted={handleDeleted}
-                          />{" "}
-                        </div>
-                      )}
                     </div>
-                  );
-                })
-              )}
-            </div>{" "}
+                  ) : null
+                }
+              />
+            </Card>
           </div>
         ) : (
-          // Desktop (≥1024): three-pane master-detail.
-          <div
+          <Card
+            className="grid min-h-[420px] grid-cols-[210px_360px_minmax(0,1fr)] overflow-hidden"
             style={{
-              display: "grid",
-              gridTemplateColumns: "210px 360px 1fr",
               height: "clamp(420px, calc(100dvh - 240px), 760px)",
-              minHeight: 0,
-              minWidth: 0,
-              background: D.card,
-              border: `1px solid ${D.border}`,
-              borderRadius: 12,
-              overflow: "hidden",
             }}
           >
-            {/* RAIL */}
-            <div
-              style={{
-                borderRight: `1px solid ${D.border}`,
-                padding: "12px 8px",
-                overflowY: "auto",
-                minHeight: 0,
-                background: D.railBg,
-              }}
+            <aside
+              className="min-h-0 overflow-y-auto border-r border-hairline border-zinc-200 bg-zinc-50 p-2"
+              aria-label="Service catalog filters"
             >
-              {" "}
               <RailSection title="Catalog">
-                {" "}
                 <RailItem
                   label="All Services"
                   count={counts.all}
                   active={selectedView === "all"}
-                  onClick={() => {
-                    setSelectedView("all");
-                    setSelectedId(null);
-                  }}
-                />{" "}
-              </RailSection>{" "}
+                  onClick={() => selectView("all")}
+                />
+              </RailSection>
               <RailSection title="Categories">
-                {CATEGORIES.filter((c) => counts.byCategory[c.value]).map(
-                  (c) => (
-                    <RailItem
-                      key={c.value}
-                      label={c.label}
-                      count={counts.byCategory[c.value] || 0}
-                      active={selectedView === `category:${c.value}`}
-                      onClick={() => {
-                        setSelectedView(`category:${c.value}`);
-                        setSelectedId(null);
-                      }}
-                    />
-                  ),
-                )}
-              </RailSection>{" "}
+                {CATEGORIES.filter(
+                  (category) => counts.byCategory[category.value],
+                ).map((category) => (
+                  <RailItem
+                    key={category.value}
+                    label={category.label}
+                    count={counts.byCategory[category.value] || 0}
+                    active={selectedView === "category:" + category.value}
+                    onClick={() => selectView("category:" + category.value)}
+                  />
+                ))}
+              </RailSection>
               <RailSection title="Saved Views">
-                {" "}
                 <RailItem
                   label="WaveGuard"
                   count={counts.waveguard}
                   active={selectedView === "view:waveguard"}
-                  onClick={() => {
-                    setSelectedView("view:waveguard");
-                    setSelectedId(null);
-                  }}
-                />{" "}
+                  onClick={() => selectView("view:waveguard")}
+                />
                 <RailItem
                   label="Recurring"
                   count={counts.recurring}
                   active={selectedView === "view:recurring"}
-                  onClick={() => {
-                    setSelectedView("view:recurring");
-                    setSelectedId(null);
-                  }}
-                />{" "}
+                  onClick={() => selectView("view:recurring")}
+                />
                 <RailItem
                   label="One-Time"
                   count={counts.onetime}
                   active={selectedView === "view:onetime"}
-                  onClick={() => {
-                    setSelectedView("view:onetime");
-                    setSelectedId(null);
-                  }}
+                  onClick={() => selectView("view:onetime")}
                 />
-                {/* Inactive only surfaces when there ARE inactive rows — keeps the
-                    rail clean per Adam's directive while leaving a recovery path
-                    for reactivating services that get deactivated. */}
                 {counts.inactive > 0 && (
                   <RailItem
                     label="Inactive"
                     count={counts.inactive}
                     active={selectedView === "view:inactive"}
-                    onClick={() => {
-                      setSelectedView("view:inactive");
-                      setSelectedId(null);
-                    }}
+                    onClick={() => selectView("view:inactive")}
                   />
                 )}
                 {counts.archived > 0 && (
@@ -1947,85 +1347,46 @@ export default function ServiceLibraryPage() {
                     label="Archived"
                     count={counts.archived}
                     active={selectedView === "view:archived"}
-                    onClick={() => {
-                      setSelectedView("view:archived");
-                      setSelectedId(null);
-                    }}
+                    onClick={() => selectView("view:archived")}
                   />
                 )}
-              </RailSection>{" "}
-            </div>
-            {/* LIST */}
-            <div
-              style={{
-                borderRight: `1px solid ${D.border}`,
-                display: "flex",
-                flexDirection: "column",
-                minWidth: 0,
-                minHeight: 0,
-              }}
+              </RailSection>
+            </aside>
+            <section
+              className="flex min-h-0 min-w-0 flex-col border-r border-hairline border-zinc-200"
+              aria-label="Services"
             >
-              {" "}
-              <div
-                style={{ padding: 12, borderBottom: `1px solid ${D.border}` }}
-              >
-                {" "}
-                <input
-                  style={sInput}
-                  placeholder="Search services..."
-                  value={search}
-                  onChange={(e) => setSearch(e.target.value)}
-                />{" "}
-                <div
-                  style={{
-                    fontSize: 11,
-                    color: D.muted,
-                    marginTop: 8,
-                    paddingLeft: 2,
-                    fontVariantNumeric: "tabular-nums",
-                  }}
-                >
+              <div className="border-b border-hairline border-zinc-200 p-3">
+                <Field label="Search services">
+                  <Input
+                    type="search"
+                    placeholder={SERVICE_SEARCH_PLACEHOLDER}
+                    value={search}
+                    onChange={(event) => setSearch(event.target.value)}
+                  />
+                </Field>
+                <div className="u-nums mt-2 text-ui-caption text-ink-secondary">
                   {viewFiltered.length}{" "}
                   {viewFiltered.length === 1 ? "service" : "services"}
-                </div>{" "}
-              </div>{" "}
-              <div style={{ flex: 1, minHeight: 0, overflowY: "auto" }}>
-                {viewFiltered.length === 0 ? (
-                  <div
-                    style={{
-                      padding: 32,
-                      textAlign: "center",
-                      color: D.muted,
-                      fontSize: 13,
-                    }}
-                  >
-                    No services found
-                  </div>
-                ) : (
-                  viewFiltered.map((svc) => (
-                    <ServiceListRow
-                      key={svc.id}
-                      svc={svc}
-                      selected={selectedId === svc.id && !showNew}
-                      onSelect={() => {
-                        setSelectedId(svc.id);
-                        setShowNew(false);
-                      }}
-                    />
-                  ))
-                )}
-              </div>{" "}
-            </div>
-            {/* DETAIL */}
-            <div
-              style={{
-                minWidth: 0,
-                minHeight: 0,
-                height: "100%",
-                background: D.card,
-              }}
+                </div>
+              </div>
+              <div className="min-h-0 flex-1 overflow-y-auto">
+                <ServiceRows
+                  loading={loading}
+                  services={viewFiltered}
+                  selectedId={selectedId}
+                  showNew={showNew}
+                  onSelect={(service) => {
+                    setSelectedId(service.id);
+                    setShowNew(false);
+                  }}
+                />
+              </div>
+            </section>
+            <section
+              className="min-h-0 min-w-0 bg-white"
+              aria-label="Service details"
             >
-              {" "}
               <DetailPane
                 svc={showNew ? null : selectedSvc}
                 creating={showNew}
@@ -2033,24 +1394,28 @@ export default function ServiceLibraryPage() {
                 onCancelNew={() => setShowNew(false)}
                 onUpdated={handleUpdated}
                 onDeleted={handleDeleted}
-              />{" "}
-            </div>{" "}
-          </div>
+              />
+            </section>
+          </Card>
         ))}
-      {/* === PROTOCOL & READINESS TAB === */}
+
       {tab === "protocols" && (
         <Suspense
-          fallback={(
-            <div className="p-10 text-center text-14 text-ink-tertiary">
-              Loading protocol workspace…
-            </div>
-          )}
+          fallback={
+            <Card>
+              <CardBody className="py-10 text-center text-ink-secondary">
+                Loading protocol workspace…
+              </CardBody>
+            </Card>
+          }
         >
-          <LawnProtocolCommandCenterPage embedded onSecondaryNav={setSecondary} />
+          <LawnProtocolCommandCenterPage
+            embedded
+            onSecondaryNav={setSecondary}
+          />
         </Suspense>
       )}
-      {/* === DISCOUNTS TAB === */}
       {tab === "discounts" && <DiscountsSection />}
-    </div>
+    </UiSurface>
   );
 }

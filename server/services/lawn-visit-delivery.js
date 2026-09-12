@@ -258,7 +258,7 @@ async function replayDeferredNotification(meta, deps = {}) {
     notification = err.notificationResult;
     if (!notification) return { ...blocked(err.code || 'LAWN_NOTIFICATION_RETRY'), retryable: true };
   }
-  const outcome = notification.deliveryOutcome || (notification.sent ? 'accepted' : 'not_sent');
+  const outcome = notification.deliveryOutcome;
   // Scheduler retries must not reinterpret an ambiguous SDK handoff as a
   // non-send. Its existing terminal rail retains the assessment's send claim.
   if (outcome === 'uncertain') {
