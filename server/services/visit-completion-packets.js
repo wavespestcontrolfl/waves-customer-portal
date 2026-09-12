@@ -77,6 +77,10 @@ function recordsResult(packet, items, billing, replayed = false) {
 
 /** Owns the commit/rollback boundary; callers must supply a root Knex handle. */
 // Invoice states a Bill-To withdrawal never touches and a reconciliation never releases.
+// A void/cancel is an office problem when it lands mid-delivery; paid and
+// prepaid are settled outcomes the collection verdict already names.
+const VOIDED_INVOICE_STATUSES = new Set(['void', 'canceled', 'cancelled']);
+
 const INVOICE_TERMINAL_STATUSES = ['void', 'refunded', 'canceled', 'cancelled', 'paid', 'prepaid'];
 
 async function saveVisitCompletionPacket(input, database = db) {
@@ -392,7 +396,7 @@ async function deriveClosingVerdicts(trx, { packet, payment, delivery }) {
     await require('./visit-completion-summary').parkVisitReviewOutreach(packet.id, trx);
   }
   const invoice = payment.invoiceId
-    ? await trx('invoices').where({ id: payment.invoiceId }).first('id', 'payer_id', 'scheduled_send_error')
+    ? await trx('invoices').where({ id: payment.invoiceId }).first('id', 'status', 'payer_id', 'scheduled_send_error')
     : null;
   return { reopened: false, delivery: nextDelivery, payment: livePaymentVerdict(payment, invoice) };
 }
@@ -407,6 +411,16 @@ async function deriveClosingVerdicts(trx, { packet, payment, delivery }) {
  */
 function livePaymentVerdict(payment, invoice) {
   if (!invoice) return payment;
+  // A TERMINAL invoice is re-judged here too (Codex #4311 r46 P1): a void
+  // landing while the summary delivery was awaited leaves the collection's
+  // `payment_needed` verdict stale, and the packet would close as a clean
+  // completion — no office review, no billing hold — even though the
+  // collection applies exactly that when it sees the same void before
+  // delivery. Only a VOID/CANCELED invoice is the office's problem; paid and
+  // prepaid are the settled outcomes the verdict already describes.
+  if (VOIDED_INVOICE_STATUSES.has(String(invoice.status || '').toLowerCase())) {
+    return { ...payment, state: 'office_required', reason: 'invoice_voided', payerId: null };
+  }
   const [, stampedPayer] = String(invoice.scheduled_send_error || '').split(':');
   const payerOwnedNow = Boolean(invoice.payer_id)
     || require('./invoice-helpers').invoiceWithdrawnFromCustomer(invoice);

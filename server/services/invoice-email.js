@@ -353,6 +353,18 @@ async function sendInvoiceEmail(invoiceId, options = {}) {
         triggerEventId: `invoice_sent:${invoice.id}`,
         categories: ['invoice_sent'],
         attachments: [pdfAttachment(`invoice-${invoice.invoice_number}.pdf`, pdfBuffer)],
+        // Ownership AGAIN at the provider boundary (Codex #4311 r46 P1): the
+        // send fence only recognises `sending`, and the combined send flips
+        // the invoice to `sent` on the text leg — so a Bill-To change can
+        // commit while the short link, the PDF and the template render are
+        // awaited, and this email would still carry the homeowner the pay
+        // link for AP-owned debt. Fail-closed, no lock across provider I/O.
+        withProviderHandoff: async (dispatch) => {
+          const verdict = await require('./invoice-helpers').selfPayAtDispatch(invoice.id, db)();
+          if (verdict.ok !== true) return verdict;
+          await dispatch();
+          return { ok: true };
+        },
       });
       // A suppressed/blocked recipient (unsubscribed, on the suppression list)
       // resolves with sent:false — it was NOT delivered, so don't report ok:true.

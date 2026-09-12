@@ -1200,30 +1200,6 @@ router.post('/:token/consent', async (req, res, next) => {
     // unenrolled method is inert — so the fence is drawn here, around the
     // authorization itself.
     const Packets = require('../services/visit-completion-packets');
-    let consentRefusedForPayer = false;
-    const row = await db.transaction(async (trx) => {
-      if (await Packets.invoicePayerOwnedNow(invoice.id, trx)) {
-        consentRefusedForPayer = true;
-        return null;
-      }
-      return ConsentService.recordConsent({
-        customerId: invoice.customer_id,
-        paymentMethodId: saved.id,
-        stripePaymentMethodId: verifiedStripePmId,
-        source: 'pay_page',
-        methodType: verifiedMethodType,
-        ip: req.ip,
-        userAgent: req.get('user-agent') || null,
-        database: trx,
-      });
-    });
-    if (consentRefusedForPayer) {
-      return res.status(409).json({
-        error: 'This invoice is billed to a third-party payer',
-        code: 'invoice_withdrawn_from_customer',
-      });
-    }
-
     // An ACH debit that is still PROCESSING must not enroll yet (Codex
     // #2507 round-9 P2): the status guard above deliberately admits
     // 'processing' so the consent snapshot is recorded while the customer
@@ -1234,36 +1210,73 @@ router.post('/:token/consent', async (req, res, next) => {
     // webhook's save-card mirror finds it (hasConsentFor) and completes
     // enrollment after the money actually lands. Cards never sit in
     // 'processing', so this defers bank tenders only.
-    if (verifiedMethodType === 'us_bank_account' && pi.status !== 'succeeded') {
+    const enrollmentDeferred = verifiedMethodType === 'us_bank_account' && pi.status !== 'succeeded';
+    // CONSENT *AND* ENROLLMENT UNDER ONE OWNERSHIP JUDGEMENT (Codex #4311
+    // r46 P0): they used to commit in separate transactions, so a Bill-To
+    // assignment landing between them left the immutable consent row behind
+    // while the request answered 409. enrollConsentedMethod runs in savepoint
+    // mode on this transaction, so a `payer_billed` refusal rolls the consent
+    // back with it. (The Stripe attach above cannot join a database
+    // transaction — an attached-but-unconsented, unenrolled method is inert.)
+    const PAYER_BILLED_ROLLBACK = Symbol('payer_billed_rollback');
+    let consentRefusedForPayer = false;
+    let enrollment = null;
+    let row;
+    try {
+      row = await db.transaction(async (trx) => {
+        if (await Packets.invoicePayerOwnedNow(invoice.id, trx)) throw PAYER_BILLED_ROLLBACK;
+        const created = await ConsentService.recordConsent({
+          customerId: invoice.customer_id,
+          paymentMethodId: saved.id,
+          stripePaymentMethodId: verifiedStripePmId,
+          source: 'pay_page',
+          methodType: verifiedMethodType,
+          ip: req.ip,
+          userAgent: req.get('user-agent') || null,
+          database: trx,
+        });
+        if (enrollmentDeferred) return created;
+        const { enrollConsentedMethod } = require('../services/autopay-enrollment');
+        enrollment = await enrollConsentedMethod({
+          customerId: invoice.customer_id,
+          paymentMethodId: saved.id,
+          source: 'save_card_consent',
+          // The invoice's visit scopes the in-lock payer check (#3395 r14 P1):
+          // a self_pay_override visit on a payer-billed account is
+          // customer-paid — the account-level fallback would refuse.
+          scheduledServiceId: invoice.scheduled_service_id || null,
+          // …and the invoice itself, so the enrollment re-judges the
+          // withdrawal and the PACKET's live owner under this transaction.
+          invoiceId: invoice.id,
+          dbh: trx,
+        });
+        if (enrollment?.reason === 'payer_billed') throw PAYER_BILLED_ROLLBACK;
+        return created;
+      });
+    } catch (txErr) {
+      if (txErr !== PAYER_BILLED_ROLLBACK) throw txErr;
+      consentRefusedForPayer = true;
+    }
+    if (consentRefusedForPayer) {
+      return res.status(409).json({
+        error: 'This invoice is billed to a third-party payer',
+        code: 'invoice_withdrawn_from_customer',
+      });
+    }
+    if (enrollmentDeferred) {
       logger.info(`[pay-v2] Consent recorded for processing ACH PI ${pi.id} (invoice ${invoice.id}) — enrollment deferred to the succeeded webhook`);
       return res.json({ success: true, consentId: row.id, version: row.consent_text_version, enrollmentDeferred: true });
     }
 
     // Complete consent-gated autopay enrollment (Codex #2507 P1): when
     // Stripe's payment_intent.succeeded beat this POST the method sits
-    // saved-but-unenrolled — this call is then the ONLY path that flips
-    // the autopay flags, so an enrollment failure must FAIL the request
-    // (Codex #2507 round-5 P1): the client retries /consent once and
-    // flags consent_failed on the receipt, exactly like a consent-record
-    // failure — never a silent success with no Auto Pay. With the mirror
-    // above, method_not_found is no longer a normal outcome (round-7 P1)
-    // — the row was just ensured, so it too fails the request.
-    const { enrollConsentedMethod } = require('../services/autopay-enrollment');
-    const enrollment = await enrollConsentedMethod({
-      customerId: invoice.customer_id,
-      paymentMethodId: saved.id,
-      source: 'save_card_consent',
-      // The invoice's visit scopes the in-lock payer check (#3395 r14 P1):
-      // a self_pay_override visit on a payer-billed account is
-      // customer-paid — the account-level fallback would refuse.
-      scheduledServiceId: invoice.scheduled_service_id || null,
-      // …and the invoice itself, so the enrollment re-judges the withdrawal
-      // and the PACKET's live owner under its own lock (Codex #4311 r38 P1):
-      // a payer assigned to a SIBLING billed member is invisible to the
-      // representative-service resolver, and this route's own check ran
-      // several awaits earlier.
-      invoiceId: invoice.id,
-    });
+    // saved-but-unenrolled — the enrollment above (inside the consent
+    // transaction) is then the ONLY path that flips the autopay flags, so an
+    // enrollment failure must FAIL the request (Codex #2507 round-5 P1): the
+    // client retries /consent once and flags consent_failed on the receipt,
+    // exactly like a consent-record failure — never a silent success with no
+    // Auto Pay. With the mirror above, method_not_found is no longer a normal
+    // outcome (round-7 P1) — the row was just ensured, so it too fails.
     if (enrollment?.reason === 'method_not_found') {
       throw new Error('Saved payment method could not be enrolled');
     }
