@@ -354,7 +354,13 @@ function relaxElapsedWindows(sourceStops, startMin) {
     // real service estimate, and a relaxed co-visit pair would otherwise sum
     // two of them straight back into the phantom hour (#4435's coVisitWork).
     return { ...s,
-      estimated_duration_minutes: workDuration(s), raw_estimate_minutes: null,
+      // The window SPAN becomes the duration (so relaxing a deadline cannot
+      // shrink the work), while the row's REAL estimate travels untouched:
+      // nulling it made a bundle of two genuine 60-minute services count as
+      // 60 minutes rather than 120 (codex #4430 r5 P1). Span-only rows have
+      // no real estimate, so nothing is invented for them either.
+      estimated_duration_minutes: workDuration(s),
+      raw_estimate_minutes: Number(s.estimated_duration_minutes) || 0,
       // The promise itself is gone, but the fact that these rows SHARED one
       // is what makes a bundle a single physical stop — carry it across, or
       // an overdue pest+lawn pair is charged two hours again (#4435's

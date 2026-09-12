@@ -999,3 +999,36 @@ test('an overdue bundled stop is still one physical stop', () => {
   expect(out.orderedStops[0].window_start).toBe('09:00');
   expect(out.orderedStops[0].co_visit_window_key).toBeUndefined();
 });
+
+// Codex round 5 P1: relaxing an overdue promise must keep the row's REAL
+// estimate. Two genuine 60-minute services at one property are 120 minutes of
+// work whether or not their deadline has passed.
+test('an overdue bundle with real estimates still costs both of them', () => {
+  process.env.GATE_ROUTE_REORDER_WINDOW_FIT = 'true';
+  process.env.GATE_DRIVE_TIME_CALIBRATION = 'true';
+  const { chooseWindowSafeOrder } = require('../services/route-reorder');
+  const bundled = (id, ro) => ({
+    id, technician_id: 't1', status: 'confirmed', route_order: ro,
+    customer_id: 'cust_pair', service_address_line1: '100 Main St',
+    customer_address_line1: '100 Main St', customer_city: 'Bradenton', customer_zip: '34205',
+    visit_id: null, window_start: '09:00', window_end: '10:00', time_window: null,
+    estimated_duration_minutes: 60, lat: 1, lng: 1,
+  });
+  // Overdue at 12:30 — 120 real minutes of work would push a 12:00-13:00
+  // promise (arrival deadline 14:00) sitting behind them out of reach, so
+  // the legal order serves that promise FIRST and the overdue bundle after.
+  // Counting the bundle as 60 minutes leaves the board order looking fine.
+  const stops = [bundled('PEST', 1), bundled('LAWN', 2), {
+    id: 'NEXT', technician_id: 't1', status: 'confirmed', route_order: 3,
+    customer_id: 'cust_next', service_address_line1: '900 Other Rd',
+    customer_address_line1: '900 Other Rd', customer_city: 'Bradenton', customer_zip: '34205',
+    visit_id: null, window_start: '12:00', window_end: '13:00', time_window: null,
+    estimated_duration_minutes: 30, lat: 1, lng: 1,
+  }];
+  const out = chooseWindowSafeOrder({
+    RouteOptimizer, googleOrder: stops, sourceStops: stops, googleSource: 'google_routes_api', startMin: 12 * 60 + 30,
+  });
+  expect(out.orderedStops).not.toBeNull();
+  expect(out.orderedStops.map((st) => st.id)).toEqual(['NEXT', 'PEST', 'LAWN']);
+  expect(out.source).toBe('window_constrained');
+});
