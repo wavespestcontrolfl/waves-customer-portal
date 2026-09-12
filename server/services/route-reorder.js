@@ -355,12 +355,19 @@ function relaxElapsedWindows(sourceStops, startMin) {
  * runRouteReorder).
  */
 function chooseWindowSafeOrder({
-  RouteOptimizer, googleOrder: rawGoogleOrder, sourceStops: rawSourceStops, googleSource, legs = null, startMin = null,
+  RouteOptimizer, googleOrder: rawGoogleOrder, sourceStops: rawSourceStops, googleSource, legs: rawLegs = null, startMin = null,
 }) {
+  let legs = rawLegs;
   // Terminal rows ride along in every caller's day query but are not driven.
   const sourceStops = rawSourceStops.filter(onRoute);
   const liveIds = new Set(sourceStops.map((s) => s.id));
   const googleOrder = rawGoogleOrder.filter((s) => liveIds.has(s.id));
+  // Legs are POSITIONAL against the sequence the optimizer returned. Dropping
+  // a terminal stop shifts every leg after it, so a filtered sequence must
+  // fall back to the shared leg model rather than read one stop's travel as
+  // another's (codex round 4 P1) — the same rule the per-tech resolver
+  // applies when a slice is not the flat sequence.
+  if (googleOrder.length !== rawGoogleOrder.length) legs = null;
   // beforeMeters (current running order, same model as the nightly ledger's
   // before_distance_meters) rides on EVERY return — a caller aggregating
   // several tech-days in one response (the multi-tech /optimize endpoint)

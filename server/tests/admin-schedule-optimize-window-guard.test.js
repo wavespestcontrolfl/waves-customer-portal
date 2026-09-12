@@ -627,3 +627,29 @@ describe('round-4 guards', () => {
     expect(body.unoptimizedDistanceMeters).toBe(24000 + unassignedMeters);
   });
 });
+
+// Codex round 4 P1: legs are positional against the sequence the optimizer
+// returned, so once a terminal stop is filtered out of it they no longer line
+// up — one stop's travel must never be read as another's.
+test('an interleaved terminal stop makes Google’s legs untrustworthy, not misaligned', async () => {
+  process.env.GATE_ROUTE_REORDER_WINDOW_FIT = 'true';
+  process.env.GATE_DRIVE_TIME_CALIBRATION = 'true';
+  stopsByDate[DATE] = [
+    stop('A', { window_start: '09:00', lng: 1, route_order: 1 }),
+    stop('DEAD', { status: 'skipped', lng: 2, route_order: 2 }),
+    stop('B', { window_start: '13:00', lng: 3, route_order: 3 }),
+  ];
+  // A 600-minute leg sits at index 1 — DEAD's slot. Indexed positionally
+  // after filtering it would be charged to B and blow its promise.
+  mockOptimizerOrder(['A', 'DEAD', 'B'], {
+    legs: [{ durationMinutes: 0 }, { durationMinutes: 600 }, { durationMinutes: 0 }],
+  });
+  const { status, body } = await optimizeRoute({ technicianId: 't1', date: DATE });
+  expect(status).toBe(200);
+  expect(body.reason).toBeUndefined();
+  // Google's order is accepted as-is. Reading the misaligned 600-minute leg
+  // as B's travel would blow B's promise and force a "repair" of an order
+  // that was already legal.
+  expect(body.source).toBe('google_routes_api');
+  expect(trxUpdates.map((u) => u.id)).toEqual(['A', 'B']);
+});
