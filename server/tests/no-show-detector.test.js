@@ -524,6 +524,11 @@ describe('grouped stops are evaluated as one visit (round-10 P1)', () => {
     ]);
     // 13:00 (grouped, held by aaa) is earlier than bbb's own 15:00.
     expect(stopPromise([a, b], promises, now)).toMatchObject({ start_at: '2026-09-10T13:00:00Z', grouped: true });
+    // ...but once EVERY member has been told something since, the grouped
+    // window is fully superseded and must not linger as the stop's earliest.
+    const allReplaced = new Map([...promises,
+      ['aaa', [{ visit_id: 'aaa', start_at: '2026-09-10T16:00:00Z', communicated_at: '2026-09-09T20:00:00Z', source: 'message' }]]]);
+    expect(stopPromise([a, b], allReplaced, now)).toMatchObject({ start_at: '2026-09-10T15:00:00Z' });
   });
 
   test('stopPromise takes the EARLIEST promised window across members, not the latest sent', () => {
