@@ -13,6 +13,7 @@
 const sendgrid = require('./sendgrid-mail');
 const logger = require('./logger');
 const { deliverOpsDigest } = require('./ops-digest');
+const { retireIfClean } = require('./ops-digest-fall-off');
 const db = require('../models/db');
 const { isInternalEmailRecipient } = require('../utils/internal-email-recipients');
 const { runExclusive } = require('../utils/cron-lock');
@@ -121,6 +122,17 @@ async function sendYellowDigestIfDue(opts = {}) {
 }
 
 async function sendYellowDigestLocked(opts = {}) {
+  // The six-day marker suppresses ANOTHER digest, not the clean-state check:
+  // a queue that empties during those days must still retire the standing
+  // bell (codex P1 on #4397), so the queue is evaluated before the guard.
+  const wiki = opts.wiki || require('./agronomic-wiki');
+  const queue = await wiki.getReviewQueue();
+  const composed = composeYellowDigest(queue);
+  if (!composed) {
+    await retireIfClean('wiki-yellow-digest'); // fall-off: review queue empty
+    return { skipped: 'empty' };
+  }
+
   try {
     const recentRun = await db('knowledge_update_log')
       .where({ trigger_type: GUARD_TRIGGER })
@@ -130,11 +142,6 @@ async function sendYellowDigestLocked(opts = {}) {
   } catch (err) {
     logger.error(`[yellow-digest] guard query failed: ${err.message}`);
   }
-
-  const wiki = opts.wiki || require('./agronomic-wiki');
-  const queue = await wiki.getReviewQueue();
-  const composed = composeYellowDigest(queue);
-  if (!composed) return { skipped: 'empty' };
 
   if (!digestEnabled()) {
     logger.info(`[yellow-digest] gated OFF — would send: ${composed.pendingCount} blocked, ${composed.yellowCount} yellow`);
@@ -157,6 +164,7 @@ async function sendYellowDigestLocked(opts = {}) {
 
   try {
     await deliverOpsDigest({
+      fallOff: true, // retired by retireIfClean on the clean run
       key: 'wiki-yellow-digest',
       subject: composed.subject,
       html: composed.html,

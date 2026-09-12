@@ -25,6 +25,7 @@
 const sendgrid = require('./sendgrid-mail');
 const logger = require('./logger');
 const { deliverOpsDigest } = require('./ops-digest');
+const { retireIfClean } = require('./ops-digest-fall-off');
 const db = require('../models/db');
 const { isInternalEmailRecipient } = require('../utils/internal-email-recipients');
 const { etDateString } = require('../utils/datetime-et');
@@ -273,7 +274,10 @@ async function runPromisedEstimateWatcher(opts = {}) {
   }
 
   const composed = composePromisedEstimateDigest(rows);
-  if (!composed) return { skipped: 'nothing_found' };
+  if (!composed) {
+    await retireIfClean('promised-estimate'); // fall-off: no promised quote outstanding
+    return { skipped: 'nothing_found' };
+  }
 
   if (watcherDisabled()) {
     logger.info(`[promised-estimate-watcher] disabled — would send ${composed.count} row(s)`);
@@ -295,6 +299,7 @@ async function runPromisedEstimateWatcher(opts = {}) {
 
   try {
     await deliverOpsDigest({
+      fallOff: true, // retired by retireIfClean on the clean run
       key: 'promised-estimate',
       subject: composed.subject,
       html: composed.html,

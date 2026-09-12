@@ -17,6 +17,7 @@
 const sendgrid = require('./sendgrid-mail');
 const logger = require('./logger');
 const { deliverOpsDigest } = require('./ops-digest');
+const { retireIfClean } = require('./ops-digest-fall-off');
 const db = require('../models/db');
 const { isInternalEmailRecipient } = require('../utils/internal-email-recipients');
 const { isInternalTestCustomerId, INTERNAL_TEST_CUSTOMER_IDS } = require('./internal-test-customers');
@@ -385,7 +386,10 @@ async function runRescheduleIntentWatcher(opts = {}) {
   }
 
   const composed = composeRescheduleIntentDigest(rows);
-  if (!composed) return { skipped: 'nothing_found' };
+  if (!composed) {
+    await retireIfClean('reschedule-intent'); // fall-off: no unhandled reschedule text
+    return { skipped: 'nothing_found' };
+  }
 
   if (watcherDisabled()) {
     logger.info(`[reschedule-intent-watcher] disabled — would send ${composed.count} row(s)`);
@@ -408,6 +412,7 @@ async function runRescheduleIntentWatcher(opts = {}) {
 
   try {
     await deliverOpsDigest({
+      fallOff: true, // retired by retireIfClean on the clean run
       key: 'reschedule-intent',
       subject: composed.subject,
       html: composed.html,

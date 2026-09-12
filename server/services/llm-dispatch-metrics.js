@@ -717,11 +717,25 @@ function emailExceptions(day, exceptions) {
   const items = exceptions
     .map((e) => `<li style="margin:0 0 10px 0;"><strong>${e.policy}</strong> — ${e.detail}</li>`)
     .join('');
-  return require('./email').send({
-    to: DIGEST_TO,
-    subject: `FIX: LLM dispatch exceptions — ${day}`,
-    heading: 'AI dispatch exceptions',
-    body: `${exceptions.length === 1 ? 'One exception' : `${exceptions.length} exceptions`} on ${day}:<ul style="padding-left:20px;margin:12px 0;">${items}</ul>Normal traffic is never reported — this email only sends when something degraded, or when nothing was recorded at all.`,
+  const subject = `FIX: LLM dispatch exceptions — ${day}`;
+  const body = `${exceptions.length === 1 ? 'One exception' : `${exceptions.length} exceptions`} on ${day}:<ul style="padding-left:20px;margin:12px 0;">${items}</ul>Normal traffic is never reported — this alert only fires when something degraded, or when nothing was recorded at all.`;
+  const sendEmail = () => require('./email').send({ to: DIGEST_TO, subject, heading: 'AI dispatch exceptions', body });
+  // 2026-09-11 email shutoff: the same standing exception list arrived as a
+  // fresh email every morning (29 in 30 days). It is now an ops_digest bell
+  // — one standing row per week, rewritten and re-belled when the list
+  // changes — and the email is the fallback when the bell row cannot be
+  // written, which covers the "database unreachable" path this sender was
+  // originally kept on email for.
+  return require('./ops-digest').deliverOpsDigest({
+      fallOff: true, // retired by retireIfClean on the clean run
+    key: 'llm-dispatch-exceptions',
+    subject,
+    html: body,
+    link: '/admin/agents?tab=activity',
+    dedupeKey: 'ops-digest:llm-dispatch-exceptions',
+    dedupeWindowMs: 7 * 24 * 60 * 60 * 1000,
+    refreshOnDedupe: true,
+    sendEmail,
   });
 }
 
@@ -1068,6 +1082,9 @@ async function runLlmDispatchDigest() {
   if (exceptions.length) {
     const sent = await emailExceptions(day, exceptions);
     if (!sent.ok) sendError = sent.error || 'unknown email error';
+  } else {
+    // Fall-off (2026-09-11): a clean day retires the standing exception bell.
+    await require('./ops-digest-fall-off').retireIfClean('llm-dispatch-exceptions');
   }
 
   // An undeliverable exception email must FAIL the job (retention pruning

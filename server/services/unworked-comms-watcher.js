@@ -24,6 +24,7 @@
 const sendgrid = require('./sendgrid-mail');
 const logger = require('./logger');
 const { deliverOpsDigest } = require('./ops-digest');
+const { retireIfClean } = require('./ops-digest-fall-off');
 const db = require('../models/db');
 const { isInternalEmailRecipient } = require('../utils/internal-email-recipients');
 
@@ -802,7 +803,10 @@ async function runUnworkedCommsWatcher(opts = {}) {
   }
 
   const composed = composeUnworkedCommsDigest(sections, laneFailures);
-  if (!composed) return { skipped: 'nothing_found' };
+  if (!composed) {
+    await retireIfClean('unworked-comms'); // fall-off: nothing unworked → earlier digests clear
+    return { skipped: 'nothing_found' };
+  }
 
   if (watcherDisabled()) {
     logger.info(`[unworked-comms] disabled — would send ${composed.total} item(s)`);
@@ -824,6 +828,7 @@ async function runUnworkedCommsWatcher(opts = {}) {
 
   try {
     await deliverOpsDigest({
+      fallOff: true, // retired by retireIfClean on the clean run
       key: 'unworked-comms',
       subject: composed.subject,
       html: composed.html,

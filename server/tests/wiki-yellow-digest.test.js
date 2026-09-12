@@ -16,6 +16,7 @@ jest.mock('../services/sendgrid-mail', () => ({ isConfigured: jest.fn(() => true
 // Pass-through advisory lock — the "uses the lock" test asserts on this mock;
 // the lease-held test overrides it per-call.
 jest.mock('../utils/cron-lock', () => ({ runExclusive: jest.fn((name, fn) => fn()) }));
+jest.mock('../services/ops-digest-fall-off', () => ({ retireIfClean: jest.fn(async () => 0) }));
 
 const logger = require('../services/logger');
 const { runExclusive } = require('../utils/cron-lock');
@@ -117,15 +118,18 @@ describe('sendYellowDigestIfDue — cross-instance serialization', () => {
 });
 
 describe('sendYellowDigestIfDue — weekly guard', () => {
-  test('skips without touching the queue when a digest ran in the last 6 days', async () => {
+  test('skips the SEND when a digest ran in the last 6 days — the queue is still evaluated so a cleared queue can retire the bell', async () => {
     const state = useDb({ knowledge_update_log: [{ id: 7 }] });
     const wiki = mockWiki({ pending: [redPage()], blocked: [], recentYellow: [] });
     const mailer = mockMailer();
+    const { retireIfClean } = require('../services/ops-digest-fall-off');
+    retireIfClean.mockClear();
 
     const result = await sendYellowDigestIfDue({ wiki, sendgrid: mailer });
 
     expect(result).toEqual({ skipped: true });
-    expect(wiki.getReviewQueue).not.toHaveBeenCalled();
+    expect(wiki.getReviewQueue).toHaveBeenCalledTimes(1);
+    expect(retireIfClean).not.toHaveBeenCalled(); // queue still has work — nothing retires
     expect(mailer.sendOne).not.toHaveBeenCalled();
     expect(state.inserts.knowledge_update_log).toBeUndefined();
   });
@@ -142,6 +146,22 @@ describe('sendYellowDigestIfDue — weekly guard', () => {
     expect(result).toEqual({ skipped: 'empty' });
     expect(mailer.sendOne).not.toHaveBeenCalled();
     expect(state.inserts.knowledge_update_log).toBeUndefined();
+  });
+
+  test('a queue that empties inside the 6-day guard still retires the standing digest bell (codex P1 on #4397)', async () => {
+    useDb({ knowledge_update_log: [{ id: 7 }] }); // marker present → no send either way
+    const mailer = mockMailer();
+    const { retireIfClean } = require('../services/ops-digest-fall-off');
+    retireIfClean.mockClear();
+
+    const result = await sendYellowDigestIfDue({
+      wiki: mockWiki({ pending: [], blocked: [redPage({ review_status: 'blocked' })], recentYellow: [] }),
+      sendgrid: mailer,
+    });
+
+    expect(result).toEqual({ skipped: 'empty' });
+    expect(retireIfClean).toHaveBeenCalledWith('wiki-yellow-digest');
+    expect(mailer.sendOne).not.toHaveBeenCalled();
   });
 });
 

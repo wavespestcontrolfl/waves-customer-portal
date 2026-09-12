@@ -38,6 +38,14 @@
 const sendgrid = require('../sendgrid-mail');
 const logger = require('../logger');
 const { deliverOpsDigest } = require('../ops-digest');
+const { retireIfClean } = require('../ops-digest-fall-off');
+
+// One source for the digest keys: sendComposed builds `impact-digest:${label}`
+// and the fall-off must retire the exact same key, or it silently clears
+// nothing (pre-push P1).
+const PAUSED_LANE_LABEL = 'paused-lane alert';
+const BLIND_LOOP_LABEL = 'blind-loop alert';
+const opsKeyFor = (label) => `impact-digest:${label}`;
 const db = require('../../models/db');
 const { isInternalEmailRecipient } = require('../../utils/internal-email-recipients');
 const { runExclusive } = require('../../utils/cron-lock');
@@ -341,7 +349,7 @@ function checkedSince(database, since, { exclusive = false, until = null } = {})
 
 // ── send legs ───────────────────────────────────────────────────────
 
-async function sendComposed(composed, { mailer, database, markerKey, markerAt = null, categories, label }) {
+async function sendComposed(composed, { mailer, database, markerKey, markerAt = null, categories, label, fallOff = false }) {
   if (!digestEnabled()) {
     logger.info(`[impact-digest] gated OFF — would send: ${composed.subject}`);
     return { skipped: 'gated', subject: composed.subject };
@@ -361,7 +369,8 @@ async function sendComposed(composed, { mailer, database, markerKey, markerAt = 
 
   try {
     await deliverOpsDigest({
-      key: `impact-digest:${label}`,
+      key: opsKeyFor(label),
+      fallOff,
       subject: composed.subject,
       html: composed.html,
       text: composed.text,
@@ -421,7 +430,10 @@ async function alertPausedLanes({ database, mailer, tracker }) {
     logger.warn(`[impact-digest] paused-marker re-arm sweep failed: ${err.message}`);
   }
 
-  if (!paused.length) return { skipped: 'none-paused' };
+  if (!paused.length) {
+    await retireIfClean(opsKeyFor(PAUSED_LANE_LABEL)); // fall-off: no lane paused
+    return { skipped: 'none-paused' };
+  }
 
   const due = [];
   for (const entry of paused) {
@@ -439,7 +451,8 @@ async function alertPausedLanes({ database, mailer, tracker }) {
     // loop that follows is the authority on the rest.
     markerKey: pausedMarkerKey(due[0].bucket),
     categories: ['content-engine', 'impact-paused'],
-    label: 'paused-lane alert',
+    label: PAUSED_LANE_LABEL,
+    fallOff: true, // retired by retireIfClean when no lane is paused
   });
   if (result.sent) {
     for (const entry of due.slice(1)) await stampSendMarker(database, pausedMarkerKey(entry.bucket));
@@ -461,7 +474,10 @@ async function alertBlindLoop({ database, mailer }) {
 
   const counts = tallyVerdicts(rows);
   const measured = MEASURED_VERDICTS.reduce((sum, key) => sum + counts[key], 0);
-  if (measured > 0) return { skipped: 'grading' };
+  if (measured > 0) {
+    await retireIfClean(opsKeyFor(BLIND_LOOP_LABEL)); // fall-off: the loop is grading again
+    return { skipped: 'grading' };
+  }
 
   const composed = composeBlindLoopAlert({ ungraded: counts.insufficient_data, days: BLIND_LOOP_DAYS });
   if (!composed) return { skipped: 'below-floor' };
@@ -471,7 +487,8 @@ async function alertBlindLoop({ database, mailer }) {
     database,
     markerKey: BLIND_MARKER_KEY,
     categories: ['content-engine', 'impact-blind'],
-    label: 'blind-loop alert',
+    label: BLIND_LOOP_LABEL,
+    fallOff: true, // retired by retireIfClean once the loop grades again
   });
 }
 

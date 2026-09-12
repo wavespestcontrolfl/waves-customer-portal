@@ -21,6 +21,28 @@ beforeEach(() => {
 });
 
 describe('deliverOpsDigest', () => {
+  it('gate on: dedupe options pass through to notifyAdmin only when given (2026-09-11 email shutoff)', async () => {
+    withGate(true);
+    mockNotifyAdmin.mockResolvedValue({ id: 'n9', deduped: true });
+    await deliverOpsDigest({ key: 'llm-dispatch-exceptions', subject: 'FIX: LLM dispatch exceptions — 2026-09-11', html: '<p>x</p>', dedupeKey: 'ops-digest:llm-dispatch-exceptions', dedupeWindowMs: 604800000, refreshOnDedupe: true, sendEmail: jest.fn() });
+    expect(mockNotifyAdmin.mock.calls[0][3]).toMatchObject({ bell: true, dedupeKey: 'ops-digest:llm-dispatch-exceptions', dedupeWindowMs: 604800000, refreshOnDedupe: true });
+    mockNotifyAdmin.mockClear();
+    mockNotifyAdmin.mockResolvedValue({ id: 'n10' });
+    await deliverOpsDigest({ key: 'k', subject: 's', text: 't', sendEmail: jest.fn() });
+    const opts = mockNotifyAdmin.mock.calls[0][3];
+    expect(opts).not.toHaveProperty('dedupeKey');
+    expect(opts).not.toHaveProperty('dedupeWindowMs');
+    expect(opts).not.toHaveProperty('refreshOnDedupe');
+    expect(opts.metadata).not.toHaveProperty('fallOff');
+  });
+
+  it('gate on: fallOff stamps metadata.fallOff so the feed pins the row until resolved', async () => {
+    withGate(true);
+    mockNotifyAdmin.mockResolvedValue({ id: 'n11' });
+    await deliverOpsDigest({ key: 'lead-to-cash-invariants', subject: 'FIX: x', text: 't', fallOff: true, sendEmail: jest.fn() });
+    expect(mockNotifyAdmin.mock.calls[0][3].metadata).toMatchObject({ opsKey: 'lead-to-cash-invariants', fallOff: true });
+  });
+
   it('gate off: runs the sender email call and touches no bell', async () => {
     const sendEmail = jest.fn().mockResolvedValue({ ok: true });
     const out = await deliverOpsDigest({ key: 'unworked-comms', subject: 'FIX: x', text: 'body', sendEmail });

@@ -301,8 +301,12 @@ function digestItem(row) {
   const subject = String(row.title || '');
   const isAct = ACTION_PREFIX.test(subject);
   const isFix = /^FIX:/i.test(subject);
-  const status = isFix ? 'failed' : isAct ? (row.read_at ? 'completed' : 'awaiting_review') : 'completed';
   const meta = parseJson(row.metadata, {}) || {};
+  // Fall-off rule (owner 2026-09-11): a finding whose check has since run
+  // clean is retired by services/ops-digest.js resolveOpsDigest — read +
+  // metadata.resolved. It reads as done (never "failed") and says so.
+  const resolved = meta.resolved === true;
+  const status = resolved ? 'completed' : isFix ? 'failed' : isAct ? (row.read_at ? 'completed' : 'awaiting_review') : 'completed';
   return {
     id: `digest:${row.id}`,
     kind: 'digest',
@@ -311,7 +315,7 @@ function digestItem(row) {
     notificationId: row.id,
     agent: OPS_AGENT,
     title: subject.replace(DIGEST_PREFIX, ''),
-    subtitle: [meta.opsKey ? humanize(meta.opsKey) : 'digest', isAct ? 'needs you' : isFix ? 'needs a fix' : 'FYI'].join(' · '),
+    subtitle: [meta.opsKey ? humanize(meta.opsKey) : 'digest', resolved ? 'cleared' : isAct ? 'needs you' : isFix ? 'needs a fix' : 'FYI'].join(' · '),
     status,
     startedAt: iso(row.created_at),
     finishedAt: row.read_at ? iso(row.read_at) : null,
@@ -381,6 +385,56 @@ function clampWindowHours(value) {
   return Math.min(Math.floor(n), MAX_WINDOW_HOURS);
 }
 
+// Digest rows for the feed. Two queries, not one windowed query with a
+// LIMIT: the PINNED set — unread actions (ACT: / [Review]) and UNRESOLVED
+// FIX: digests that HAVE a resolution path — must survive however old they
+// are (their email was suppressed, so the row is the only copy; opening a
+// FIX does not fix it, only the fall-off rule's metadata.resolved does),
+// and a single ORDER BY DESC + LIMIT over the union would silently drop
+// the oldest pinned rows once enough newer ones exist (pre-push P1 on
+// #4397). "Has a resolution path" = metadata.source = 'ops-crons' (retired
+// by POST /api/ops/digest/resolve) or metadata.fallOff = true (a sender
+// that calls retireIfClean on its clean run — ops-digest-fall-off.js). A
+// FIX row nothing can ever resolve keeps the older read-or-window rule, or
+// it would sit as "failed" forever (codex P1 r2 on #4392). The windowed
+// set fills the rest and ALSO admits rows resolved inside the window
+// (metadata.resolvedAt), so a just-cleared old finding shows once as
+// "cleared" history instead of vanishing the moment it leaves the pinned
+// set (codex P2 r7). Ids are merged so a row never renders twice.
+const DIGEST_COLUMNS = ['id', 'title', 'body', 'link', 'metadata', 'read_at', 'created_at'];
+// Safety bound on the pinned query only — an order of magnitude above any
+// real pinned set (a handful of digests a day; the fall-off retires them),
+// never the feed's MAX_ITEMS, so the "pinned rows survive" promise holds.
+const PINNED_CAP = 5000;
+async function loadDigestRows(db, since) {
+  const base = () => db('notifications')
+    .select(...DIGEST_COLUMNS)
+    .where({ recipient_type: 'admin', category: DIGEST_CATEGORY });
+  const pinned = await base()
+    .where((q) =>
+      q.where((u) => u.whereNull('read_at').andWhereRaw("title ~* '^(ACT:|\\[Review\\])'"))
+        .orWhere((f) => f.whereRaw("COALESCE(metadata->>'resolved', '') <> 'true'")
+          .andWhereRaw("title ~* '^FIX:'")
+          .andWhere((r) => r.whereRaw("metadata->>'source' = 'ops-crons'").orWhereRaw("metadata->>'fallOff' = 'true'")))
+        .orWhere((legacy) => legacy.whereNull('read_at').andWhereRaw("title ~* '^FIX:'")))
+    .orderBy('created_at', 'desc')
+    .limit(PINNED_CAP);
+  const windowed = await base()
+    .where((w) => w.where('created_at', '>=', since)
+      .orWhereRaw("NULLIF(metadata->>'resolvedAt', '')::timestamptz >= ?", [since]))
+    .orderBy('created_at', 'desc')
+    .limit(MAX_ITEMS);
+  const seen = new Set();
+  const rows = [];
+  for (const row of [].concat(pinned || [], windowed || [])) {
+    const id = String(row.id);
+    if (seen.has(id)) continue;
+    seen.add(id);
+    rows.push(row);
+  }
+  return rows;
+}
+
 async function loadRows(windowHours) {
   const since = new Date(Date.now() - windowHours * 3600 * 1000);
   // Only a MISSING table (Postgres 42P01 — a ledger not yet migrated on
@@ -443,18 +497,7 @@ async function loadRows(windowHours) {
             .orWhere('consecutive_failures', '>', 0))
         .orderBy('last_started_at', 'desc')
         .limit(MAX_ITEMS)),
-    safe('notifications', () =>
-      db('notifications')
-        .select('id', 'title', 'body', 'link', 'metadata', 'read_at', 'created_at')
-        .where({ recipient_type: 'admin', category: DIGEST_CATEGORY })
-        // An unread action (ACT: / [Review]) or unresolved FIX: digest stays
-        // in the feed until read, however old — its email was suppressed, so
-        // this row is the only place it exists. FYI rows keep the window.
-        .where((q) =>
-          q.where('created_at', '>=', since)
-            .orWhere((u) => u.whereNull('read_at').andWhereRaw("title ~* '^(ACT:|FIX:|\\[Review\\])'")))
-        .orderBy('created_at', 'desc')
-        .limit(MAX_ITEMS)),
+    safe('notifications', () => loadDigestRows(db, since)),
   ]);
   // Approvals (any status — a terminal one tells us a pending-review run
   // was decided): every row on a loaded run, PLUS any still awaiting that
@@ -498,4 +541,6 @@ async function getActivity({ windowHours } = {}) {
   };
 }
 
-module.exports = { getActivity, buildActivity, runStatus, RUN_STAGES, TERMINAL_APPROVAL, STATUSES, clampWindowHours, MISSING_TABLE_SQLSTATE };
+module.exports = { getActivity, buildActivity, runStatus, RUN_STAGES, TERMINAL_APPROVAL, STATUSES, clampWindowHours, MISSING_TABLE_SQLSTATE,
+  _private: { loadDigestRows },
+};

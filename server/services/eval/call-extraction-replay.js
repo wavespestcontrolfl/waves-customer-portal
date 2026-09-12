@@ -12,6 +12,7 @@ const path = require('path');
 const logger = require('../logger');
 
 const { deliverOpsDigest } = require('../ops-digest');
+const { retireIfClean } = require('../ops-digest-fall-off');
 const DEFAULT_FIXTURE_PATH = path.join(__dirname, '..', '..', 'fixtures', 'call-extraction-eval', 'reviewed-calls.json');
 const MANUAL_RERUN = 'node server/scripts/run-call-extraction-replay-eval.js --json';
 
@@ -151,6 +152,7 @@ async function emailFailure({ sendEmail, subject, textBody, key = 'call-extracti
     // The eval_regression bell from notifyFailure / notifyInconclusive
     // stays; in-app mode adds the ops_digest row the Activity feed lists.
     const result = await deliverOpsDigest({
+      fallOff: true, // retired by retireIfClean on the clean run
       key,
       subject,
       text: textBody,
@@ -198,6 +200,7 @@ async function notifyFailure({ notify, sendEmail, finalAttempt, attempts, fixtur
       icon: '\u{1F9EA}',
       link: '/admin/dashboard',
       metadata: JSON.stringify({
+        evalKey: 'call-extraction-eval', // the fall-off retires this bell with the digest
         fixturePath,
         summary: compactSummary(finalRun?.summary),
         failures: lines,
@@ -231,6 +234,7 @@ async function notifyInconclusive({ notify, sendEmail, attempt, fixturePath }) {
       icon: '\u{1F9EA}',
       link: '/admin/dashboard',
       metadata: JSON.stringify({
+        evalKey: 'call-extraction-eval',
         fixturePath,
         error: attempt.error || null,
       }),
@@ -290,6 +294,12 @@ async function runCallExtractionReplayEval(opts = {}) {
     await notifyFailure({ notify, sendEmail, finalAttempt, attempts, fixturePath });
   } else if (finalAttempt.status === 'inconclusive') {
     await notifyInconclusive({ notify, sendEmail, attempt: finalAttempt, fixturePath });
+  } else if (notifyOnFailure && finalAttempt.status === 'pass') {
+    // Fall-off: an explicit SCHEDULED PASS clears the standing FIX — never
+    // "not fail and not inconclusive" (a skip / crash status must leave the
+    // bell standing; pre-push P1 on #4397). `notifyOnFailure` is already
+    // true on this branch (the manual-run case returned above).
+    await retireIfClean('call-extraction-eval', { alsoRetire: { category: 'eval_regression', field: 'evalKey' } });
   }
 
   const run = finalAttempt.run || {};
