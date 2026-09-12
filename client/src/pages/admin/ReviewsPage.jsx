@@ -430,16 +430,16 @@ function ReviewCard({ review, onReplySubmit, onDismiss, onAutoReplyAction }) {
                 {LOCATION_LABELS[review.locationId] || review.locationId}
               </Badge>{" "}
               {review.missingSince && (
-                <span
+                <Badge
+                  tone="warn"
                   title={`No longer returned by Google as of ${new Date(
                     review.missingSince,
                   ).toLocaleDateString("en-US", {
                     timeZone: "America/New_York",
                   })}. The full text is retained here as evidence for a missing-reviews support case.`}
-                  className="text-ui-body font-medium text-white bg-zinc-900 rounded-md"
                 >
                   Removed from Google
-                </span>
+                </Badge>
               )}{" "}
               {autoReply && !review.missingSince && (
                 <Badge

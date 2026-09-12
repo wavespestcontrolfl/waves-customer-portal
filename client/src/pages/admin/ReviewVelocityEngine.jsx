@@ -556,15 +556,20 @@ function eligibilityLabel(reasons = []) {
 }
 
 // ── Shared styles ──
-// Best-effort mapping onto the kit's 3 Badge tones (neutral | strong | alert
-// — no green/blue/purple tone exists). Main gave each of the 6 stage/sentiment
-// tags (acc/org/blu/grn/pur/red) its own color; "red" (Issue) keeps the
-// genuine-alert tone, "grn" (Reviewed — the done/success state, same
-// precedent as the kit's "Paid" example) gets strong, everything else is
-// neutral. Kit-level gap: distinct amber/blue/purple tones would restore
-// full parity with main's 6-way distinction.
+// Main gave each of the 6 stage/sentiment tags (acc/org/blu/grn/pur/red) its
+// own color; acc/blu/pur are all folded to the same near-black neutral
+// already (the V2 token pass), so only "grn" (Reviewed — done/success),
+// "org" (amber — sms_sent, a routine in-progress state) and "red" (Issue —
+// the genuine failure) map onto the kit's non-neutral tones.
 function Tag({ type, children }) {
-  const tone = type === "red" ? "alert" : type === "grn" ? "strong" : "neutral";
+  const tone =
+    type === "red"
+      ? "alert"
+      : type === "grn"
+        ? "strong"
+        : type === "org"
+          ? "warn"
+          : "neutral";
   return <Badge tone={tone}>{children}</Badge>;
 }
 function Btn({ variant = "ghost", onClick, disabled, children }) {

@@ -275,7 +275,7 @@ export default function GBPManagement() {
               )}
               <span className="text-ui-body">({l.totalReviews || 0})</span>
               {l.pendingUpdates > 0 && (
-                <Badge tone="neutral">{l.pendingUpdates} pending</Badge>
+                <Badge tone="warn">{l.pendingUpdates} pending</Badge>
               )}
             </div>{" "}
             <div
@@ -1289,17 +1289,17 @@ function ChangeHistoryTab({
   const locName = (id) => locations.find((l) => l.id === id)?.name || id;
   const fieldLabel = (f) =>
     f.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
-  // Best-effort mapping onto the kit's 3 Badge tones (neutral | strong |
-  // alert — no distinct amber/green tone exists). Main colored pending
-  // amber, approved green, rejected red; approved (done) gets strong,
-  // rejected keeps the genuine-alert tone, pending stays neutral. Kit-level
-  // gap: a distinct amber/green tone would restore full 3-way parity.
+  // Main colored pending amber, approved green, rejected red; approved
+  // (done) gets strong, pending gets warn, rejected keeps the genuine-alert
+  // tone.
   const statusTone = (status) =>
     status === "approved"
       ? "strong"
       : status === "rejected"
         ? "alert"
-        : "neutral";
+        : status === "pending"
+          ? "warn"
+          : "neutral";
   useEffect(() => {
     loadUpdates(filter);
   }, [filter, loadUpdates]);
