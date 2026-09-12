@@ -301,6 +301,21 @@ router.post('/reconcile', requireAdmin, async (req, res, next) => {
         }
       }
 
+      // The withdrawal check re-run on the LOCKED row (Codex #4311 r29 P1):
+      // a Bill-To assignment committing after the route's preflight leaves a
+      // sent/viewed/overdue invoice in the SAME status with a NULL payer_id
+      // and records the move only in `scheduled_send_error`, so neither the
+      // status predicate below nor the combined-session re-read (a projection
+      // without that column) can see it — and this route would attach cash,
+      // a check or a Stripe charge to debt that now belongs to AP.
+      const lockedInvoice = await trx('invoices').where({ id: invoiceId }).forUpdate().first();
+      if (!lockedInvoice) return { updated: 0 };
+      if (lockedInvoice.payer_id) return { conflict: 'Invoice is billed to a third-party payer — do not collect or reconcile it against the service recipient' };
+      try {
+        assertInvoiceCollectible(lockedInvoice);
+      } catch (e) {
+        return { conflict: e.message };
+      }
       const rows = await trx('invoices')
         .where({ id: invoiceId })
         .whereNotIn('status', INVOICE_UNCOLLECTIBLE_STATUSES)
@@ -422,6 +437,24 @@ router.post('/reconcile', requireAdmin, async (req, res, next) => {
     {
       const { closeOutVisitForIssuedInvoice } = require('../services/invoice-issued-closeout');
       await closeOutVisitForIssuedInvoice({ invoiceId, trigger: 'paid', actorTechnicianId: req.technicianId || null });
+    }
+
+    // A combined-visit packet defers its review ask behind an unpaid invoice,
+    // and closeOutVisitForIssuedInvoice refuses packet-owned visits — so an
+    // off-platform settlement reconciled here never enrolled the ask the
+    // technician requested (Codex #4311 r29 P1). Same shared path the Stripe
+    // webhook, record-payment and credit rails use. Best-effort after the
+    // commit; an unrecorded enrollment is logged for the packet sweep.
+    try {
+      const settled = await db('invoices').where({ id: invoiceId }).first('id', 'invoice_number', 'customer_id', 'service_record_id', 'visit_completion_packet_id');
+      if (settled) {
+        const outcome = await require('../services/review-request').enrollForPaidInvoice(settled, { source: 'payments_reconcile' });
+        if (outcome && outcome.recorded === false) {
+          logger.error(`[reconcile] invoice ${settled.invoice_number || invoiceId} settled with an UNRECORDED review enrollment — the packet recovery sweep owns it`);
+        }
+      }
+    } catch (enrollErr) {
+      logger.error(`[reconcile] review enrollment failed for invoice ${invoiceId}: ${enrollErr.message}`);
     }
 
     const refreshed = await db('invoices').where({ id: invoiceId }).first();

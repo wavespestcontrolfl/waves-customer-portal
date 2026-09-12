@@ -1894,7 +1894,14 @@ const ReviewService = {
         logger.info(
           `[review] SMS sent (customerId=${customer.id} requestId=${requestId} auditLogId=${result.auditLogId || "n/a"})`,
         );
-      } else if (!["VISIT_SUMMARY_UNCERTAIN", "VISIT_SUMMARY_STATE_UNAVAILABLE"].includes(result.code)
+      } else if (result.code === "REVIEW_CLAIM_LOST") {
+        // Another sender owns this ask's durable claim (Codex #4311 r29 P1).
+        // Nothing here may touch the row — a suppression, deferral or park
+        // written now would land on the owner's marker, and that owner may
+        // already have reached the provider.
+        logger.warn(`[review] SMS handoff found the claim taken by another sender (requestId=${requestId}) — leaving the row to its owner`);
+        return { sent: false, claimLost: true, reason: "review_claim_lost", requestId };
+      } else if (!["VISIT_SUMMARY_UNCERTAIN", "VISIT_SUMMARY_STATE_UNAVAILABLE", "REVIEW_CLAIM_LOST"].includes(result.code)
         && await this._providerOutcomeUnknown(requestId)) {
         // The same ambiguity the outreach path fences (audit P1): the Twilio
         // adapter reports provider errors as `sent: false` rather than
@@ -3061,6 +3068,10 @@ const ReviewService = {
     const Summary = require("./visit-completion-summary");
     if (Summary.PACKET_OWNED_REVIEW_TRIGGERS.includes(request.triggered_by)) {
       // 0 rows = the row is already gone, which is the state this wants.
+      // `sending` is deleted only when this caller's own send owns the claim
+      // (the handoff refuses with REVIEW_CLAIM_LOST otherwise, Codex r29 P1):
+      // the claim check runs before the summary verdict, so a park can only
+      // be reached by the claim's owner.
       const removed = await db("review_requests").whereIn("status", ["pending", "sending"]).where({ id: request.id })
         .del().then((n) => Number(n)).catch(() => null);
       if (removed === null) {
@@ -4040,6 +4051,13 @@ const ReviewService = {
       return { ok: false, retryable: true, channel: "sms", requestId: request.id };
     }
 
+    // The claim belongs to another sender (Codex #4311 r29 P1): report it and
+    // write nothing — every branch below would mark a row this send does not
+    // own, including the park, which deletes it outright.
+    if (result?.code === "REVIEW_CLAIM_LOST") {
+      logger.warn(`[review] outreach SMS handoff found the claim taken by another sender (requestId=${request.id})`);
+      return { ok: false, retryable: false, claimLost: true, channel: "sms", requestId: request.id, reason: "review_claim_lost" };
+    }
     const summaryVerdict = this._visitSummaryVerdictOutcome(result, request);
     if (summaryVerdict) {
       // Parked: the parking operation removed or will remove the durable
@@ -4284,6 +4302,10 @@ const ReviewService = {
       // operator is told it went and not to resend (GH Codex #3856 r12 P2).
       // A sequence step keeps its step-stable idempotency key, so it stays ok.
       return { ok: false, terminal: true, channel: "email", requestId: request.id, reason: "email_sent_unrecorded" };
+    }
+    if (summaryBlock?.code === "REVIEW_CLAIM_LOST") {
+      logger.warn(`[review] outreach email handoff found the claim taken by another sender (requestId=${request?.id})`);
+      return { ok: false, retryable: false, claimLost: true, channel: "email", requestId: request?.id, reason: "review_claim_lost" };
     }
     const summaryVerdict = summaryBlock && this._visitSummaryVerdictOutcome(summaryBlock, request);
     if (summaryVerdict) {

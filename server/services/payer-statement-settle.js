@@ -125,6 +125,16 @@ async function settleStatementPaid(statementId, settlement = {}, { database = db
   });
 
   // Cascade — accrued children are `draft`; settle every non-void/non-paid one.
+  // The packet-owned children are captured BEFORE the update: a review the
+  // closeout deferred behind an unpaid invoice is enrolled by the settlement
+  // signal, and this rail (NET statement payment) never sent one (Codex
+  // #4311 r29 P1). After the update those rows are indistinguishable from
+  // children settled by an earlier statement run.
+  const packetChildren = await database('invoices')
+    .where({ payer_statement_id: statementId })
+    .whereNotIn('status', ['void', 'paid'])
+    .whereNotNull('visit_completion_packet_id')
+    .select('id', 'invoice_number', 'customer_id', 'visit_completion_packet_id');
   const childrenSettled = await database('invoices')
     .where({ payer_statement_id: statementId })
     .whereNotIn('status', ['void', 'paid'])
@@ -163,8 +173,26 @@ async function settleStatementPaid(statementId, settlement = {}, { database = db
   if (existingRow) await database('payments').where({ id: existingRow.id }).update(rowData);
   else await database('payments').insert(rowData);
 
+  // The shared enrollment path, one child at a time. Never throws — the money
+  // has moved and the statement is paid; an enrollment whose recovery write
+  // ALSO failed is reported (`reviewsUnrecorded`) and logged for the caller,
+  // exactly like the Stripe paid handler's unrecorded outcome, instead of
+  // rolling a settled statement back.
+  const reviewsUnrecorded = [];
+  for (const child of packetChildren) {
+    try {
+      const outcome = await require('./review-request').enrollForPaidInvoice(child, { source: 'payer_statement' });
+      if (outcome && outcome.recorded === false) reviewsUnrecorded.push(child.id);
+    } catch (err) {
+      reviewsUnrecorded.push(child.id);
+      logger.error(`[payer-statement-settle] review enrollment threw for child invoice ${child.invoice_number || child.id}: ${err.message}`);
+    }
+  }
+  if (reviewsUnrecorded.length) {
+    logger.error(`[payer-statement-settle] statement ${statementId}: ${reviewsUnrecorded.length} packet invoice(s) settled with an UNRECORDED review enrollment — the packet recovery sweep owns them now`);
+  }
   logger.info(`[payer-statement-settle] statement ${statementId} → paid via ${paymentMethod}; ${childrenSettled} child invoice(s) cascaded (${source})`);
-  return { ok: true, statement: { ...stmt, status: 'paid', paid_at: paidAt }, childrenSettled };
+  return { ok: true, statement: { ...stmt, status: 'paid', paid_at: paidAt }, childrenSettled, reviewsUnrecorded };
 }
 
 /**

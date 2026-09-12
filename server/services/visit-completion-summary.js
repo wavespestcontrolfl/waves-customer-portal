@@ -754,24 +754,40 @@ async function reviewSendThroughSummaryHandoff(serviceRecordId, dispatch, databa
     verdict = await database.transaction(async (trx) => {
       const item = serviceRecordId
         ? await trx('visit_completion_packet_items').where({ service_record_id: serviceRecordId }).first('packet_id') : null;
-      if (item) {
-        const packet = await trx('visit_completion_packets').where({ id: item.packet_id }).forShare().first('visit_id');
-        const uncertain = packet && await trx('visit_effects').where({ visit_id: packet.visit_id, status: 'unknown_delivery' })
-          .whereIn('effect_type', ['completion_sms', 'completion_email']).first('id');
-        if (uncertain) return { ok: false, code: 'VISIT_SUMMARY_UNCERTAIN', reason: 'The visit summary this review follows is awaiting recovery' };
-      }
+      const packet = item && await trx('visit_completion_packets').where({ id: item.packet_id }).forShare().first('visit_id');
       // The claim is re-verified on the row itself once the packet row is
       // held (Codex r27 P1): a wait on that row longer than the stranded-send
       // window lets the reconciliation release this `sending` mark and a
       // later worker claim the same ask, and `marked` only records the update
-      // that ran before the wait. The exact claim (status + timestamp) has
-      // to still be this sender's immediately before the request; otherwise
-      // the ask belongs to whoever holds it now and nothing here is written
-      // or released.
+      // that ran before the wait. FOR UPDATE, not a plain read (r29 P1): the
+      // row stays locked through the provider request, so the reconciliation
+      // cannot flip this claim back to `pending` between the check and the
+      // send and let a second sender take it.
       if (!claimLost && marked) {
-        const held = await trx('review_requests').where({ id: requestId, status: 'sending', claimed_at: claimedAt }).first('id');
+        const held = await trx('review_requests').where({ id: requestId, status: 'sending', claimed_at: claimedAt }).forUpdate().first('id');
         claimLost = !held;
       }
+      // A claim held by ANOTHER SENDER outranks the summary verdict (r29 P1):
+      // reporting a park here would have the caller delete any
+      // `pending`/`sending` row for this ask — the durable marker of the
+      // worker that does own the claim, which may already have reached the
+      // provider. A row that is simply GONE (a bounce reconciliation parked
+      // it) is not that case, and still reports itself as a park below, so
+      // the cadence is parked rather than left running.
+      if (claimLost) {
+        const live = await trx('review_requests').where({ id: requestId }).forUpdate().first('id', 'status');
+        if (live?.status === 'sending') {
+          return { ok: false, code: 'REVIEW_CLAIM_LOST', reason: 'This review ask is being sent by another worker' };
+        }
+      }
+      if (packet) {
+        const uncertain = await trx('visit_effects').where({ visit_id: packet.visit_id, status: 'unknown_delivery' })
+          .whereIn('effect_type', ['completion_sms', 'completion_email']).first('id');
+        if (uncertain) return { ok: false, code: 'VISIT_SUMMARY_UNCERTAIN', reason: 'The visit summary this review follows is awaiting recovery' };
+      }
+      // No claim and no summary verdict to explain it: the row was suppressed,
+      // deleted or re-claimed since it was batched. Nothing is sent and
+      // nothing is written — the row belongs to whatever replaced this claim.
       if (claimLost) {
         return { ok: false, code: 'REVIEW_CLAIM_LOST', reason: 'This review ask is already being sent or is no longer pending' };
       }

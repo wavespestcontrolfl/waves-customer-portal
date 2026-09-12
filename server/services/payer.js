@@ -202,7 +202,26 @@ async function updatePayer(id, body) {
       ].map(String))].sort();
       if (referencingCustomerIds.length) {
         await trx('customers').whereIn('id', referencingCustomerIds).orderBy('id').forShare().select('id');
-        await trx('scheduled_services').where({ payer_id: pid }).orderBy('id').forShare().select('id');
+        // EVERY member of a packet this payer reaches, not only the members
+        // that name it (Codex #4311 r29 P2): the withdrawal resolves
+        // ownership per packet and takes ALL its billed members, so a member
+        // held by a concurrent job Bill-To edit — one that names no payer
+        // itself — is a row this transaction will wait for later. Locking
+        // the whole membership up front keeps both sides on one order.
+        await trx('scheduled_services')
+          .where((q) => q.where({ payer_id: pid })
+            .orWhereIn('id', trx('visit_completion_packet_items')
+              .whereIn('packet_id', trx('visit_completion_packet_items as direct')
+                .whereIn('direct.scheduled_service_id', trx('scheduled_services as ref').where('ref.payer_id', pid).select('ref.id'))
+                .select('direct.packet_id'))
+              .select('scheduled_service_id'))
+            .orWhereIn('id', trx('visit_completion_packet_items')
+              .whereIn('packet_id', trx('visit_completion_packet_items as owned')
+                .join('invoices', 'invoices.visit_completion_packet_id', 'owned.packet_id')
+                .whereIn('invoices.customer_id', referencingCustomerIds)
+                .select('owned.packet_id'))
+              .select('scheduled_service_id')))
+          .orderBy('id').forShare().select('id');
       }
       const current = await trx('payers').where({ id: pid }).forUpdate().first();
       if (!current) return { error: 'Payer not found', notFound: true };

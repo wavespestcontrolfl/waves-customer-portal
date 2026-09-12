@@ -3492,6 +3492,34 @@ postgres('visit summary recipient recovery', () => {
     }
   });
 
+  test('a sender without the claim is told so even when the summary is uncertain', async () => {
+    // Two workers loaded the same pending ask: the first marked it `sending`.
+    // If the summary turns uncertain before the second reaches its handoff,
+    // reporting a PARK would let the loser delete the winner's durable
+    // marker — and the winner may already have reached the provider.
+    const askId = randomUUID();
+    await mockPg('review_requests').insert({ id: askId, customer_id: fixture.customerId, service_record_id: fixture.recordIds[0],
+      status: 'sending', token: randomUUID().replace(/-/g, ''), claimed_at: new Date(), channel: 'sms', triggered_by: 'auto' });
+    await mockPg('visit_effects').insert({ visit_id: fixture.visitId, effect_type: 'completion_sms',
+      dedupe_key: `${fixture.visitId}:completion_sms:claimtest`, status: 'unknown_delivery', attempts: 1 });
+    try {
+      let dispatched = false;
+      const verdict = await Summary.reviewSendThroughSummaryHandoff(
+        fixture.recordIds[0],
+        async () => { dispatched = true; return { ok: true }; },
+        undefined,
+        { requestId: askId },
+      );
+      expect(verdict).toMatchObject({ ok: false, code: 'REVIEW_CLAIM_LOST' });
+      expect(dispatched).toBe(false);
+      // The winner's claim is untouched — not released, not deleted.
+      expect(await mockPg('review_requests').where({ id: askId }).first('status')).toMatchObject({ status: 'sending' });
+    } finally {
+      await mockPg('visit_effects').where({ visit_id: fixture.visitId, effect_type: 'completion_sms' }).del();
+      await mockPg('review_requests').where({ id: askId }).del();
+    }
+  });
+
   test('a review email handoff shares the packet row so a bounce reconciliation waits for the send', async () => {
     fixture.payload.items.forEach((item) => { item.body.requestReview = true; });
     await mockPg('visit_completion_packets').where({ id: fixture.packetId }).update({ payload: JSON.stringify(fixture.payload) });
