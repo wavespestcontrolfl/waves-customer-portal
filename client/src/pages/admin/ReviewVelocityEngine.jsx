@@ -1535,7 +1535,7 @@ function Pipeline({
                 <TR
                   key={c.id}
                   onDoubleClick={() => setDrawerCust(c)}
-                  className="cursor-pointer"
+                  className={`cursor-pointer${isSelected ? " bg-zinc-100" : ""}`}
                 >
                   <TD>
                     <Checkbox

@@ -129,7 +129,7 @@ function Stars({ count, size = 16 }) {
             key={i}
             size={size}
             className={
-              i < count ? "fill-current text-warning-fg" : "text-zinc-300"
+              i < count ? "fill-current text-warn-fg" : "text-zinc-300"
             }
             strokeWidth={1.8}
           />
@@ -164,7 +164,7 @@ function BreakdownBar({ star, count, max }) {
       <span className="text-ui-body text-ink-secondary w-[16px] text-right">
         {star}
       </span>{" "}
-      <Star size={14} className="fill-current text-warning-fg" />{" "}
+      <Star size={14} className="fill-current text-warn-fg" />{" "}
       <progress
         className="h-2 flex-1 accent-zinc-900"
         value={pct}
@@ -267,15 +267,16 @@ function autoReplyLabel(a) {
       return `Auto-reply: ${a.status}`;
   }
 }
-// Best-effort mapping onto the kit's 3 Badge tones (neutral | strong | alert —
-// no warn/positive tone exists). Main distinguished 7 statuses by color;
-// "posted" (done) gets strong, "failed"/"parked" (need staff attention —
-// main colored both the same amber) get alert, everything else stays neutral.
-// Kit-level gap: a distinct "needs attention" (amber) tone would let failed
-// and parked read differently again.
+// Mapping onto the kit's 4 Badge tones (neutral | strong | warn | alert).
+// Main distinguished 7 statuses by color; "posted" (done) gets strong,
+// "parked" (routine — needs staff review, not an error: low rating,
+// unrated, below threshold, or an Agent Ops draft) gets warn, "failed" (a
+// genuine send failure, currently retrying) gets alert, everything else
+// stays neutral.
 function autoReplyTone(a) {
   if (a.status === "posted") return "strong";
-  if (a.status === "failed" || a.status === "parked") return "alert";
+  if (a.status === "parked") return "warn";
+  if (a.status === "failed") return "alert";
   return "neutral";
 }
 function autoReplyTitle(a) {
@@ -468,7 +469,7 @@ function ReviewCard({ review, onReplySubmit, onDismiss, onAutoReplyAction }) {
       )}
 
       {/* Reply section */}
-      <div className="border-top border-hairline border-zinc-200 pt-[12px] mt-[8px]">
+      <div className="border-t border-hairline border-zinc-200 pt-[12px] mt-[8px]">
         {review.missingSince && (
           <div className="text-ui-body text-ink-secondary mb-[8px]">
             Removed from Google — replying is disabled. The review is retained
@@ -484,7 +485,7 @@ function ReviewCard({ review, onReplySubmit, onDismiss, onAutoReplyAction }) {
               <div className="text-ui-body text-ink-secondary mb-[4px]">
                 Saved draft
               </div>{" "}
-              <div className="text-ui-body text-zinc-900">
+              <div className="text-ui-body text-zinc-900 whitespace-pre-wrap">
                 {review.draftReply}
               </div>{" "}
               {review.draftStale && (
@@ -543,7 +544,7 @@ function ReviewCard({ review, onReplySubmit, onDismiss, onAutoReplyAction }) {
           !review.reply && (
             <div className="text-ui-body text-ink-secondary mb-[8px]">
               {autoReply.draft && (
-                <Card className="p-[10px] mb-[8px] text-zinc-900">
+                <Card className="p-[10px] mb-[8px] text-zinc-900 whitespace-pre-wrap">
                   <div className="text-ink-secondary mb-[4px]">
                     {autoReply.status === "parked"
                       ? "Auto-reply text attempted (needs reconciling)"
@@ -755,7 +756,7 @@ function ReviewSelect({ value, onChange, options }) {
     <UiSelect
       value={value}
       onChange={(e) => onChange(e.target.value)}
-        className="w-full sm:!w-auto sm:min-w-[170px] bg-white border-hairline border-zinc-200 rounded-md text-zinc-900 text-ui-body cursor-pointer"
+      className="w-full sm:!w-auto sm:min-w-[170px] bg-white border-hairline border-zinc-200 rounded-md text-zinc-900 text-ui-body cursor-pointer"
     >
       {options.map((o) => (
         <option key={o.value} value={o.value}>
@@ -1311,7 +1312,7 @@ function ReviewIncentivesPanel() {
                         </div>
 
                         {isOpen && (
-                          <div className="mt-[12px] border-top border-hairline border-zinc-200 pt-[12px]">
+                          <div className="mt-[12px] border-t border-hairline border-zinc-200 pt-[12px]">
                             <div className="flex gap-[8px] items-center flex-wrap mb-[10px]">
                               <Input
                                 value={candidateSearch}
@@ -1463,7 +1464,10 @@ function ReviewIncentivesPanel() {
               ) : (
                 <div className="grid gap-[8px]">
                   {payouts.slice(0, 50).map((p) => (
-                    <Card key={p.id} className="grid grid-cols-1 md:grid-cols-[1fr_auto_auto] gap-1.5 md:gap-3 items-center px-3 py-2.5">
+                    <Card
+                      key={p.id}
+                      className="grid grid-cols-1 md:grid-cols-[1fr_auto_auto] gap-1.5 md:gap-3 items-center px-3 py-2.5"
+                    >
                       <div>
                         <div className="text-ui-body font-medium text-zinc-900">
                           {p.technicianName}

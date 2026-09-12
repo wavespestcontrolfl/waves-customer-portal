@@ -271,13 +271,9 @@ export default function GBPManagement() {
             <div className="text-ui-body font-medium">{l.name}</div>{" "}
             <div className="flex items-center gap-[6px] mt-[4px]">
               {l.rating && (
-                <span className="text-ui-body font-medium">
-                  {l.rating}
-                </span>
+                <span className="text-ui-body font-medium">{l.rating}</span>
               )}
-              <span className="text-ui-body">
-                ({l.totalReviews || 0})
-              </span>
+              <span className="text-ui-body">({l.totalReviews || 0})</span>
               {l.pendingUpdates > 0 && (
                 <Badge tone="neutral">{l.pendingUpdates} pending</Badge>
               )}
@@ -475,7 +471,7 @@ function OverviewTab({ loc, gbp, onSync, onPush, syncing, pushing }) {
         ].map((f, i) => (
           <div
             key={i}
-            className="flex justify-between items-start border-bottom border-hairline border-zinc-200"
+            className="flex justify-between items-start py-2 border-b border-hairline border-zinc-200"
           >
             {" "}
             <span className="text-ui-body text-ink-secondary font-medium min-w-[120px]">
@@ -515,7 +511,10 @@ function OverviewTab({ loc, gbp, onSync, onPush, syncing, pushing }) {
                 href={loc.mapsUrl}
                 target="_blank"
                 rel="noopener noreferrer"
-                className={buttonStyles({ variant: "primary", density: "comfortable" })}
+                className={buttonStyles({
+                  variant: "primary",
+                  density: "comfortable",
+                })}
               >
                 View on Maps
               </a>
@@ -525,7 +524,10 @@ function OverviewTab({ loc, gbp, onSync, onPush, syncing, pushing }) {
                 href={loc.googleReviewUrl}
                 target="_blank"
                 rel="noopener noreferrer"
-                className={buttonStyles({ variant: "secondary", density: "comfortable" })}
+                className={buttonStyles({
+                  variant: "secondary",
+                  density: "comfortable",
+                })}
               >
                 Review Link
               </a>
@@ -670,7 +672,6 @@ function BusinessInfoTab({ loc, gbp, onSave, showToast }) {
         <FieldGroup>
           {" "}
           <Field label="Business Name">
-
             <Input
               value={form.business_name}
               onChange={(e) =>
@@ -682,7 +683,6 @@ function BusinessInfoTab({ loc, gbp, onSave, showToast }) {
             />
           </Field>{" "}
           <Field label="Phone">
-
             <Input
               value={form.phone}
               onChange={(e) =>
@@ -695,7 +695,6 @@ function BusinessInfoTab({ loc, gbp, onSave, showToast }) {
           </Field>{" "}
         </FieldGroup>{" "}
         <Field label="Website URL">
-
           <Input
             value={form.website_url}
             onChange={(e) =>
@@ -707,7 +706,6 @@ function BusinessInfoTab({ loc, gbp, onSave, showToast }) {
           />
         </Field>{" "}
         <Field label="Primary Category">
-
           <Input
             value={form.primary_category}
             onChange={(e) =>
@@ -720,7 +718,6 @@ function BusinessInfoTab({ loc, gbp, onSave, showToast }) {
           />
         </Field>{" "}
         <Field label="Store Code">
-
           <Input
             value={form.store_code}
             onChange={(e) =>
@@ -733,7 +730,6 @@ function BusinessInfoTab({ loc, gbp, onSave, showToast }) {
           />
         </Field>{" "}
         <Field label="Description">
-
           <Textarea
             value={form.description}
             onChange={(e) =>
@@ -1218,10 +1214,7 @@ function UpdateQueueTab({
       ) : (
         <div className="grid gap-[8px]">
           {updates.map((u) => (
-            <Card
-              key={u.id}
-              className="p-5 flex items-start gap-[12px]"
-            >
+            <Card key={u.id} className="p-5 flex items-start gap-[12px]">
               {" "}
               <Checkbox
                 checked={selectedIds.has(u.id)}
@@ -1302,7 +1295,11 @@ function ChangeHistoryTab({
   // rejected keeps the genuine-alert tone, pending stays neutral. Kit-level
   // gap: a distinct amber/green tone would restore full 3-way parity.
   const statusTone = (status) =>
-    status === "approved" ? "strong" : status === "rejected" ? "alert" : "neutral";
+    status === "approved"
+      ? "strong"
+      : status === "rejected"
+        ? "alert"
+        : "neutral";
   useEffect(() => {
     loadUpdates(filter);
   }, [filter, loadUpdates]);
@@ -1483,7 +1480,6 @@ function BulkEditTab({ locations, onSave, showToast }) {
         <FieldGroup>
           {" "}
           <Field label="Field to Edit">
-
             <Select value={field} onChange={(e) => setField(e.target.value)}>
               {fields.map((f) => (
                 <option key={f.value} value={f.value}>
@@ -1504,7 +1500,6 @@ function BulkEditTab({ locations, onSave, showToast }) {
             />
           ) : field === "hide_address" ? (
             <Select value={value} onChange={(e) => setValue(e.target.value)}>
-
               <option value="false">Show Address</option>
               <option value="true">Hide Address (SAB)</option>
             </Select>
@@ -1610,7 +1605,6 @@ function NotificationsTab({ showToast }) {
           Enable notifications
         </label>{" "}
         <Field label="Frequency">
-
           <Select
             value={prefs.frequency}
             onChange={(e) =>
@@ -1620,7 +1614,6 @@ function NotificationsTab({ showToast }) {
               }))
             }
           >
-
             <option value="realtime">Real-time (every change)</option>
             <option value="daily">Daily digest</option>
             <option value="weekly">Weekly digest</option>
@@ -1657,5 +1650,7 @@ function NotificationsTab({ showToast }) {
 
 // ── Shared layout helpers ──
 function FieldGroup({ children }) {
-  return <div className="grid grid-cols-1 md:grid-cols-2 gap-[12px]">{children}</div>;
+  return (
+    <div className="grid grid-cols-1 md:grid-cols-2 gap-[12px]">{children}</div>
+  );
 }
