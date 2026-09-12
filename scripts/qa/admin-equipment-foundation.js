@@ -368,9 +368,13 @@ function fixtures(state) {
     [
       "GET /api/admin/equipment/job-costs/summary",
       () =>
+        // An empty job_costs table does not come back null: the route
+        // normalizes the null aggregate to 0 and derives the averages from a
+        // zero job count (server/routes/admin-equipment.js), so the tiles read
+        // "0.0%" rather than an em dash.
         (state.empty
           ? {
-              avgMargin: null,
+              avgMargin: 0,
               avgRevenue: 0,
               avgCost: 0,
               totalJobs: 0,
@@ -1783,8 +1787,23 @@ async function readsAndNavigation(page, server, state, report, device) {
       "maintenance",
       "No equipment found",
       async () => {
-        assert.equal(await figure("Total Assets").innerText(), "0");
-        assert.equal(await figure("Overdue Maintenance").innerText(), "0");
+        // The YTD figures come from the overview's own fields rather than from
+        // the equipment list, so counts alone would keep passing if either the
+        // assets guard in fleetOverview() or its empty mileage input were lost
+        // and real spend stood beside "No equipment found".
+        for (const [label, value] of [
+          ["Total Assets", "0"],
+          ["Overdue Maintenance", "0"],
+          ["YTD Maintenance", "$0.00"],
+          ["YTD Mileage", "0"],
+          ["YTD Fuel", "$0.00"],
+          ["YTD IRS Deduction", "$0.00"],
+        ])
+          assert.equal(
+            await figure(label).innerText(),
+            value,
+            label + " on an empty account",
+          );
       },
     ],
     ["tank-mixes", "No tank mixes configured", null],
@@ -1792,7 +1811,7 @@ async function readsAndNavigation(page, server, state, report, device) {
       "job-costs",
       "No job costs recorded yet",
       async () => {
-        assert.equal(await jobFigure("Avg Margin").innerText(), "—");
+        assert.equal(await jobFigure("Avg Margin").innerText(), "0.0%");
         assert.equal(await jobFigure("Total Jobs Costed").innerText(), "0");
       },
     ],
