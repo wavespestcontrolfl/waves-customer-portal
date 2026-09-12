@@ -7,7 +7,7 @@ import {
   filterAddressConfirmations,
 } from './addressAsks';
 
-const ask = (reason_code, payload = null) => ({ reason_code, payload });
+const ask = (reason_code, payload = null, call_log_id = null) => ({ reason_code, payload, call_log_id });
 
 describe('filterAddressAsks', () => {
   it('keeps validation-ask cards only', () => {
@@ -72,11 +72,16 @@ describe('addressAskNotice', () => {
     });
   });
 
-  it('is not unit-only when a validation ask sits alongside it', () => {
+  // REVERSED at codex #4437 r4. This pair is the NORMAL shape of a real
+  // missing-unit result — call-triage-flags files both flags for one call, the
+  // generic one as the hold and the unit one as the ask — not two independent
+  // problems. Asserting "did not validate" here pinned the bug in place. The
+  // genuinely-unrelated case is covered by its own test below.
+  it('is unit-only when the companion hold comes from the same call', () => {
     const notice = addressAskNotice([ask('missing_unit_number'), ask('address_unverified')]);
 
-    expect(notice.unitOnly).toBe(false);
-    expect(notice.reason).toBe('the address from the call did not validate');
+    expect(notice.unitOnly).toBe(true);
+    expect(notice.reason).toBe('the caller gave the building but no unit number');
   });
 
   it('dedups candidates and caps the list', () => {
@@ -166,5 +171,37 @@ describe('read-back cards (validated premise, unconfirmed street)', () => {
     expect(filterAddressConfirmations(items).map((i) => i.reason_code))
       .toEqual(['address_unverified', 'address_recovered']);
     expect([...ADDRESS_READBACK_REASONS]).toEqual(['address_recovered', 'address_readback']);
+  });
+});
+
+// A PREMISE missing only its subpremise ALWAYS files both cards for the same
+// call: address_unverified is the hold, missing_unit_number names the ask
+// (call-triage-flags.js). If the generic card wins, the operator is told the
+// address "did not validate" for a building we can actually find, and can book
+// it with no door to knock on.
+describe('missing unit number alongside its companion hold', () => {
+  it('the same-call unit card defines the ask', () => {
+    const notice = addressAskNotice([
+      ask('address_unverified', { address_as_heard: '100 Port Ave East' }, 'call-1'),
+      ask('missing_unit_number', null, 'call-1'),
+    ]);
+
+    expect(notice.unitOnly).toBe(true);
+    expect(notice.reason).toBe('the caller gave the building but no unit number');
+    // Evidence still comes from the card that carries it, same call.
+    expect(notice.heard).toBe('100 Port Ave East');
+  });
+
+  // An unrelated call that simply failed validation must keep generic priority
+  // — its address is not "a known building missing a unit".
+  it('an unrelated call\'s generic failure is NOT relabelled as a unit ask', () => {
+    const notice = addressAskNotice([
+      ask('address_unverified', { address_as_heard: 'unvalidated one' }, 'call-1'),
+      ask('missing_unit_number', null, 'call-2'),
+    ]);
+
+    expect(notice.unitOnly).toBe(false);
+    expect(notice.reason).toBe('the address from the call did not validate');
+    expect(notice.heard).toBe('unvalidated one');
   });
 });

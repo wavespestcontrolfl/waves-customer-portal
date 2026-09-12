@@ -161,21 +161,33 @@ async function main() {
     .whereIn('call_log_id', cohortRows.map((r) => r.id))
     .whereIn('reason_code', ['address_recovered', 'address_unverified'])
     .select('call_log_id', 'payload');
+  // Evidence is gathered PER CALL, and a card stamped with the current prompt
+  // wins over any historical one. triage_items legitimately keeps a resolved
+  // card alongside the active one, so a call reprocessed under the current
+  // prompt still carries its old pre-stamp card; scanning cards individually
+  // dropped that call forever — its current, attributable outcome could never
+  // re-enter the cohort, shrinking sample size and agreement for exactly the
+  // reprocessed calls the gate needs (codex #4437 r4 P1). The latest attempt
+  // defines the call.
   const staleRecoveryPromptCalls = new Set();
   const unattributableRecoveryCalls = new Set();
+  const recoveryEvidence = new Map();
   for (const card of attemptCards) {
     let p = {};
     try { p = parseJson(card.payload) || {}; } catch { p = {}; }
-    if (p.recovery_prompt_version) {
-      if (p.recovery_prompt_version !== RECOVERY_PROMPT_VERSION) staleRecoveryPromptCalls.add(card.call_log_id);
-      continue;
-    }
+    const e = recoveryEvidence.get(card.call_log_id) || { current: false, stale: false, unattributable: false };
+    if (p.recovery_prompt_version === RECOVERY_PROMPT_VERSION) e.current = true;
+    else if (p.recovery_prompt_version) e.stale = true;
     // A card that RECORDS an attempt but predates the stamp cannot say which
-    // prompt ran, so it is dropped too — same fail-closed rule, not merely
-    // counted (codex #4437 r3 P1: counting it left pre-stamp failures pooled
-    // into the current prompt's metrics). Cards with no recovery evidence at
-    // all are not attempts and stay: the prompt never touched them.
-    if (p.address_candidates || p.recovery_method || p.address_as_heard) unattributableRecoveryCalls.add(card.call_log_id);
+    // prompt ran (codex #4437 r3 P1). Cards with no recovery evidence at all
+    // are not attempts: the prompt never touched them.
+    else if (p.address_candidates || p.recovery_method || p.address_as_heard) e.unattributable = true;
+    recoveryEvidence.set(card.call_log_id, e);
+  }
+  for (const [callId, e] of recoveryEvidence) {
+    if (e.current) continue;
+    if (e.stale) staleRecoveryPromptCalls.add(callId);
+    else if (e.unattributable) unattributableRecoveryCalls.add(callId);
   }
   const boundedRouteRows = cohortRows.filter(
     (r) => !staleRecoveryPromptCalls.has(r.id) && !unattributableRecoveryCalls.has(r.id),
