@@ -4,6 +4,12 @@
 jest.mock('../models/db', () => {
   const db = (...args) => mockPg(...args);
   db.raw = (...args) => mockPg.raw(...args);
+  // mockPg is itself already a transaction (the whole suite runs inside one,
+  // rolled back in afterAll), so a nested db.transaction() becomes a real
+  // Postgres SAVEPOINT rather than a fresh pooled connection like production
+  // gets — enough to exercise the SQL (advisory lock + SET LOCAL) for real,
+  // though it shares one connection rather than truly running in parallel.
+  db.transaction = (...args) => mockPg.transaction(...args);
   Object.defineProperty(db, 'schema', { get: () => mockPg.schema });
   return db;
 });
@@ -13,7 +19,10 @@ const { randomUUID, randomBytes } = require('node:crypto');
 const { etDateString, parseETDateTime } = require('../utils/datetime-et');
 const { invoiceOverdueSql, invoiceDaysOverdue } = require('../services/collections/account-anchor');
 const router = require('../routes/admin-customers');
-const { countUnreadInboundSms, markInboundSmsRead } = require('../services/inbound-sms-read');
+const { countUnreadInboundSms, markInboundSmsRead, retargetOrClearUnknownSenderBell } = require('../services/inbound-sms-read');
+const { sweepUnknownSenderAlertClaims, SWEEP_HORIZON_MS } = require('../services/sms-reply-alert-sweep');
+const NotificationService = require('../services/notification-service');
+const realNotificationService = jest.requireActual('../services/notification-service');
 const { openBalanceSummary } = require('../services/open-balance');
 const connection = process.env.C360_TEST_DATABASE_URL;
 const postgres = connection ? describe : describe.skip;
@@ -190,5 +199,982 @@ postgres('Customer 360 migrated PostgreSQL reads', () => {
     expect((await mockPg('messages').where({ id: olderMessage }).first()).is_read).toBe(true);
     expect((await mockPg('messages').where({ id: laterMessage }).first()).is_read).toBe(false);
     expect(await countUnreadInboundSms({ customerId: ids[1] })).toEqual({ conversations: 1, messages: 1 });
+  }, 30000);
+
+  test('reading an unknown sender\'s alerted SID retargets its one bell to a later unread message instead of clearing it (codex #4210)', async () => {
+    const conversationId = randomUUID();
+    const alertedMessageId = randomUUID();
+    const laterMessageId = randomUUID();
+    const alertedSid = `SM-synthetic-alerted-${randomBytes(4).toString('hex')}`;
+    const laterSid = `SM-synthetic-later-${randomBytes(4).toString('hex')}`;
+    // A phone unique to this run — contact_phone carries a dedup constraint
+    // shared with real inbound rows.
+    const unknownPhone = `+1941555${String(Date.now()).slice(-4)}`;
+    let bell;
+    try {
+      // Unknown sender: no customer_id, so the customer-scoped
+      // nothing-left-unread clear below can never reach this conversation's
+      // bell — only the SID it rang for (codex #4210 P2).
+      await mockPg('conversations').insert({ id: conversationId, customer_id: null, channel: 'sms', contact_phone: unknownPhone, our_endpoint_id: '+19415550190' });
+      await mockPg('messages').insert([
+        { id: alertedMessageId, conversation_id: conversationId, channel: 'sms', direction: 'inbound', author_type: 'lead', is_read: false, twilio_sid: alertedSid, body: 'First synthetic text', created_at: new Date(Date.now() - 120000) },
+        // Throttled: the 4h per-sender window suppressed its own bell.
+        { id: laterMessageId, conversation_id: conversationId, channel: 'sms', direction: 'inbound', author_type: 'lead', is_read: false, twilio_sid: laterSid, body: 'Second synthetic text, same sender', created_at: new Date(Date.now() - 60000) },
+      ]);
+      [bell] = await mockPg('notifications').insert({
+        recipient_type: 'admin', category: 'inbound_sms', title: 'Synthetic unknown-sender text', link: '/admin/communications',
+        metadata: JSON.stringify({ payload: { twilioSid: alertedSid } }),
+      }).returning('*');
+
+      // Reading only the alerted message must NOT clear the thread's only
+      // bell while the later throttled message is still unread — it must
+      // retarget the bell to that later SID instead.
+      await markInboundSmsRead({ messageIds: [alertedMessageId], role: 'admin' });
+      expect((await mockPg('messages').where({ id: alertedMessageId }).first()).is_read).toBe(true);
+      expect((await mockPg('messages').where({ id: laterMessageId }).first()).is_read).toBe(false);
+      let refreshedBell = await mockPg('notifications').where({ id: bell.id }).first();
+      expect(refreshedBell.read_at).toBeNull();
+      expect(refreshedBell.metadata.payload.twilioSid).toBe(laterSid);
+
+      // Reading the last remaining unread message finds nothing left in the
+      // conversation, so the retarget is a no-op and the bell (now keyed to
+      // this SID) is eligible for the ordinary by-SID clear.
+      await markInboundSmsRead({ messageIds: [laterMessageId], role: 'admin' });
+      expect((await mockPg('messages').where({ id: laterMessageId }).first()).is_read).toBe(true);
+      refreshedBell = await mockPg('notifications').where({ id: bell.id }).first();
+      expect(refreshedBell.metadata.payload.twilioSid).toBe(laterSid);
+    } finally {
+      await mockPg('messages').whereIn('id', [alertedMessageId, laterMessageId]).delete();
+      if (bell) await mockPg('notifications').where({ id: bell.id }).delete();
+      await mockPg('conversations').where({ id: conversationId }).delete();
+    }
+  }, 30000);
+
+  test('the retarget also runs for a conversationIds-driven read, not just an explicit messageIds one (claude pre-push audit P1, round 4)', async () => {
+    const conversationId = randomUUID();
+    const alertedMessageId = randomUUID();
+    const laterMessageId = randomUUID();
+    const alertedSid = `SM-synthetic-alerted-${randomBytes(4).toString('hex')}`;
+    const laterSid = `SM-synthetic-later-${randomBytes(4).toString('hex')}`;
+    const unknownPhone = `+1941555${String(Date.now()).slice(-4)}`;
+    let bell;
+    try {
+      await mockPg('conversations').insert({ id: conversationId, customer_id: null, channel: 'sms', contact_phone: unknownPhone, our_endpoint_id: '+19415550190' });
+      await mockPg('messages').insert([
+        { id: alertedMessageId, conversation_id: conversationId, channel: 'sms', direction: 'inbound', author_type: 'lead', is_read: false, twilio_sid: alertedSid, body: 'First synthetic text', created_at: new Date(Date.now() - 120000) },
+        { id: laterMessageId, conversation_id: conversationId, channel: 'sms', direction: 'inbound', author_type: 'lead', is_read: false, twilio_sid: laterSid, body: 'Second synthetic text, same sender', created_at: new Date(Date.now() - 60000) },
+      ]);
+      [bell] = await mockPg('notifications').insert({
+        recipient_type: 'admin', category: 'inbound_sms', title: 'Synthetic unknown-sender text', link: '/admin/communications',
+        metadata: JSON.stringify({ payload: { twilioSid: alertedSid } }),
+      }).returning('*');
+
+      // Opening the whole thread (the admin inbox's usual shape) passes
+      // conversationIds + readBefore, not an explicit messageIds list — the
+      // shared `scope` both mirrorSids and the retarget key off of covers
+      // either input shape identically, but the P2 fix was only exercised
+      // through messageIds until this test.
+      const readBefore = new Date(Date.now() + 1000);
+      await markInboundSmsRead({ conversationIds: [conversationId], readBefore, role: 'admin' });
+      expect((await mockPg('messages').where({ id: alertedMessageId }).first()).is_read).toBe(true);
+      expect((await mockPg('messages').where({ id: laterMessageId }).first()).is_read).toBe(true);
+      // Both messages in scope are read in the SAME call, so nothing
+      // remains unread — the bell must be cleared directly, not retargeted.
+      const refreshedBell = await mockPg('notifications').where({ id: bell.id }).first();
+      expect(refreshedBell.read_at).not.toBeNull();
+    } finally {
+      await mockPg('messages').whereIn('id', [alertedMessageId, laterMessageId]).delete();
+      if (bell) await mockPg('notifications').where({ id: bell.id }).delete();
+      await mockPg('conversations').where({ id: conversationId }).delete();
+    }
+  }, 30000);
+
+  test('the retarget follows the sender across the business numbers they texted, not just one conversation (pre-push audit P1)', async () => {
+    const firstConversationId = randomUUID();
+    const secondConversationId = randomUUID();
+    const alertedMessageId = randomUUID();
+    const laterMessageId = randomUUID();
+    const alertedSid = `SM-synthetic-alerted-${randomBytes(4).toString('hex')}`;
+    const laterSid = `SM-synthetic-later-${randomBytes(4).toString('hex')}`;
+    const unknownPhone = `+1941555${String(Date.now()).slice(-4)}`;
+    let bell;
+    try {
+      // The SAME unknown sender texted two different business numbers —
+      // conversations are keyed by (contact_phone, channel, our_endpoint_id),
+      // so this is two conversation rows, but the throttle/claim that rang
+      // the one bell is keyed on the raw phone across both.
+      await mockPg('conversations').insert([
+        { id: firstConversationId, customer_id: null, channel: 'sms', contact_phone: unknownPhone, our_endpoint_id: '+19415550190' },
+        { id: secondConversationId, customer_id: null, channel: 'sms', contact_phone: unknownPhone, our_endpoint_id: '+19415550191' },
+      ]);
+      await mockPg('messages').insert([
+        { id: alertedMessageId, conversation_id: firstConversationId, channel: 'sms', direction: 'inbound', author_type: 'lead', is_read: false, twilio_sid: alertedSid, body: 'First synthetic text, first number', created_at: new Date(Date.now() - 120000) },
+        // Same sender, a DIFFERENT conversation (second business number) —
+        // throttled: the 4h per-sender window suppressed its own bell.
+        { id: laterMessageId, conversation_id: secondConversationId, channel: 'sms', direction: 'inbound', author_type: 'lead', is_read: false, twilio_sid: laterSid, body: 'Second synthetic text, second number', created_at: new Date(Date.now() - 60000) },
+      ]);
+      [bell] = await mockPg('notifications').insert({
+        recipient_type: 'admin', category: 'inbound_sms', title: 'Synthetic unknown-sender text', link: '/admin/communications',
+        metadata: JSON.stringify({ payload: { twilioSid: alertedSid } }),
+      }).returning('*');
+
+      // Reading the alerted message in the FIRST conversation must retarget
+      // to the unread message in the SECOND — a conversation-scoped check
+      // would find nothing remaining in the first conversation and wrongly
+      // clear the sender's only bell.
+      await markInboundSmsRead({ messageIds: [alertedMessageId], role: 'admin' });
+      const refreshedBell = await mockPg('notifications').where({ id: bell.id }).first();
+      expect(refreshedBell.read_at).toBeNull();
+      expect(refreshedBell.metadata.payload.twilioSid).toBe(laterSid);
+    } finally {
+      await mockPg('messages').whereIn('id', [alertedMessageId, laterMessageId]).delete();
+      if (bell) await mockPg('notifications').where({ id: bell.id }).delete();
+      await mockPg('conversations').whereIn('id', [firstConversationId, secondConversationId]).delete();
+    }
+  }, 30000);
+
+  test('concurrently reading both of an unknown sender\'s unread messages clears the bell instead of leaving it stuck on a retarget the other request already missed (pre-push audit P1)', async () => {
+    const conversationId = randomUUID();
+    const firstMessageId = randomUUID();
+    const secondMessageId = randomUUID();
+    const firstSid = `SM-synthetic-race-a-${randomBytes(4).toString('hex')}`;
+    const secondSid = `SM-synthetic-race-b-${randomBytes(4).toString('hex')}`;
+    const unknownPhone = `+1941555${String(Date.now()).slice(-4)}`;
+    let bell;
+    // Unmock NotificationService for this test only: the real
+    // markInboundSmsReadAdmin (still reading through mockPg, since
+    // '../models/db' is mocked for the whole file) is what actually clears
+    // read_at — without it, a stuck-vs-cleared bell can't be observed.
+    NotificationService.markInboundSmsReadAdmin.mockImplementation((...args) => realNotificationService.markInboundSmsReadAdmin(...args));
+    try {
+      await mockPg('conversations').insert({ id: conversationId, customer_id: null, channel: 'sms', contact_phone: unknownPhone, our_endpoint_id: '+19415550190' });
+      await mockPg('messages').insert([
+        { id: firstMessageId, conversation_id: conversationId, channel: 'sms', direction: 'inbound', author_type: 'lead', is_read: false, twilio_sid: firstSid, body: 'First synthetic text', created_at: new Date(Date.now() - 120000) },
+        { id: secondMessageId, conversation_id: conversationId, channel: 'sms', direction: 'inbound', author_type: 'lead', is_read: false, twilio_sid: secondSid, body: 'Second synthetic text, same sender', created_at: new Date(Date.now() - 60000) },
+      ]);
+      [bell] = await mockPg('notifications').insert({
+        recipient_type: 'admin', category: 'inbound_sms', title: 'Synthetic unknown-sender text', link: '/admin/communications',
+        metadata: JSON.stringify({ payload: { twilioSid: firstSid } }),
+      }).returning('*');
+
+      // Both messages read at once, through separate concurrent calls (the
+      // shape two staff members opening the same unknown thread at once, or
+      // one request per message, would produce). This shares mockPg's one
+      // connection (a savepoint per db.transaction() rather than production's
+      // fresh pooled connection), so it can't reproduce the exact
+      // cross-connection interleaving timing — but it does exercise the real
+      // advisory-lock SQL under real concurrent JS calls and confirms the
+      // end state converges correctly rather than assuming it from mocks.
+      await Promise.all([
+        markInboundSmsRead({ messageIds: [firstMessageId], role: 'admin' }),
+        markInboundSmsRead({ messageIds: [secondMessageId], role: 'admin' }),
+      ]);
+
+      expect((await mockPg('messages').where({ id: firstMessageId }).first()).is_read).toBe(true);
+      expect((await mockPg('messages').where({ id: secondMessageId }).first()).is_read).toBe(true);
+      // Both messages are read, so the bell must end up cleared — the bug
+      // this guards against leaves read_at permanently null because the
+      // retarget's write and the ordinary by-SID clear can land in the
+      // wrong order for whichever message "won" the race.
+      const refreshedBell = await mockPg('notifications').where({ id: bell.id }).first();
+      expect(refreshedBell.read_at).not.toBeNull();
+    } finally {
+      NotificationService.markInboundSmsReadAdmin.mockReset().mockResolvedValue(0);
+      await mockPg('messages').whereIn('id', [firstMessageId, secondMessageId]).delete();
+      if (bell) await mockPg('notifications').where({ id: bell.id }).delete();
+      await mockPg('conversations').where({ id: conversationId }).delete();
+    }
+  }, 30000);
+
+  test('markInboundSmsReadAdmin clears bells by twilioSids against real Postgres — the `= ANY(?)` binding is a pg array, not a comma list (claude pre-push audit P1, refuted)', async () => {
+    // A fallback auditor read `whereRaw("... = ANY(?)", [sids])` as compiling
+    // to `ANY('a', 'b')` — invalid SQL Postgres rejects, which would make the
+    // by-SID bell clear silently fail-soft forever. It does not: knex's pg
+    // client serializes a JS array binding as a Postgres array literal
+    // ('{"a","b"}'), so ANY gets exactly the single array-typed expression it
+    // requires. No PG-backed test covered this specific path, which is the
+    // half of that finding that WAS right — so it is covered now, for one SID
+    // and for several.
+    const sids = [0, 1, 2].map((i) => `SM-synthetic-any-${i}-${randomBytes(4).toString('hex')}`);
+    const bells = [];
+    try {
+      for (const sid of sids) {
+        const [row] = await mockPg('notifications').insert({
+          recipient_type: 'admin', category: 'inbound_sms', title: 'Synthetic by-SID bell', link: '/admin/communications',
+          metadata: JSON.stringify({ payload: { twilioSid: sid } }),
+          // Explicit past timestamp: the read's `before` bound is a Node
+          // Date, while a defaulted created_at is Postgres' own clock — a
+          // sub-millisecond skew between the two would flake the bound.
+          created_at: new Date(Date.now() - 60000),
+        }).returning('*');
+        bells.push(row);
+      }
+
+      // Several SIDs at once.
+      const clearedMany = await realNotificationService.markInboundSmsReadAdmin({ twilioSids: [sids[0], sids[1]], role: 'admin' });
+      expect(clearedMany).toBe(2);
+      expect((await mockPg('notifications').where({ id: bells[0].id }).first()).read_at).not.toBeNull();
+      expect((await mockPg('notifications').where({ id: bells[1].id }).first()).read_at).not.toBeNull();
+      // The unrelated third bell is untouched — ANY matched a set, not everything.
+      expect((await mockPg('notifications').where({ id: bells[2].id }).first()).read_at).toBeNull();
+
+      // The single-element case the finding called out specifically.
+      const clearedOne = await realNotificationService.markInboundSmsReadAdmin({ twilioSid: sids[2], role: 'admin' });
+      expect(clearedOne).toBe(1);
+      expect((await mockPg('notifications').where({ id: bells[2].id }).first()).read_at).not.toBeNull();
+    } finally {
+      if (bells.length) await mockPg('notifications').whereIn('id', bells.map((b) => b.id)).delete();
+    }
+  }, 30000);
+
+  test('reading an unknown sender\'s message never clears a bell created after this read began, even when nothing else is unread (codex #4210 round-2 P1)', async () => {
+    const conversationId = randomUUID();
+    const messageId = randomUUID();
+    const sid = `SM-synthetic-entry-${randomBytes(4).toString('hex')}`;
+    const unknownPhone = `+1941555${String(Date.now()).slice(-4)}`;
+    let bell;
+    try {
+      await mockPg('conversations').insert({ id: conversationId, customer_id: null, channel: 'sms', contact_phone: unknownPhone, our_endpoint_id: '+19415550190' });
+      await mockPg('messages').insert({ id: messageId, conversation_id: conversationId, channel: 'sms', direction: 'inbound', author_type: 'lead', is_read: false, twilio_sid: sid, body: 'Synthetic text', created_at: new Date(Date.now() - 60000) });
+      // Stands in for a bell whose underlying inbound row lands strictly
+      // AFTER this read's request-entry `now` (the real race: a new message
+      // arrives, and its bell is written, between the `remaining` check and
+      // the clear/retarget write). A future created_at guarantees it
+      // postdates any `now` this call captures.
+      [bell] = await mockPg('notifications').insert({
+        recipient_type: 'admin', category: 'inbound_sms', title: 'Synthetic unknown-sender text',
+        link: '/admin/communications', created_at: new Date(Date.now() + 5 * 60000),
+        metadata: JSON.stringify({ payload: { twilioSid: sid } }),
+      }).returning('*');
+
+      await markInboundSmsRead({ messageIds: [messageId], role: 'admin' });
+      expect((await mockPg('messages').where({ id: messageId }).first()).is_read).toBe(true);
+      // Nothing else is unread for this phone, so the pre-fix code would
+      // clear the bell outright here — but it postdates the read's entry
+      // and must be left alone.
+      const refreshedBell = await mockPg('notifications').where({ id: bell.id }).first();
+      expect(refreshedBell.read_at).toBeNull();
+    } finally {
+      await mockPg('messages').where({ id: messageId }).delete();
+      if (bell) await mockPg('notifications').where({ id: bell.id }).delete();
+      await mockPg('conversations').where({ id: conversationId }).delete();
+    }
+  }, 30000);
+
+  test('a promoted thread\'s alerted SID still finds its live bell and retargets to a still-unread sibling instead of losing it to the blunt by-SID clear (codex #4210 round-2 P2)', async () => {
+    const conversationId = randomUUID();
+    const alertedMessageId = randomUUID();
+    const laterMessageId = randomUUID();
+    const alertedSid = `SM-synthetic-promoted-${randomBytes(4).toString('hex')}`;
+    const laterSid = `SM-synthetic-promoted-later-${randomBytes(4).toString('hex')}`;
+    const unknownPhone = `+1941555${String(Date.now()).slice(-4)}`;
+    let bell;
+    try {
+      // Promoted BEFORE the read: the conversation now carries a
+      // customer_id AND has contact_phone NULLed — the real shape
+      // promoteUnknownPhoneThreadWith leaves behind
+      // (services/conversations.js clears contact_phone on every promote/
+      // merge path; codex #4210 round-5 P1 caught an earlier version of
+      // this fixture that unrealistically kept it set). The bell rang
+      // while the sender was still unknown (link stays
+      // '/admin/communications', never rewritten). A distinct
+      // our_endpoint_id avoids the (customer_id, channel, our_endpoint_id)
+      // dedup index colliding with ids[0]'s fixture conversation from
+      // beforeAll.
+      await mockPg('conversations').insert({ id: conversationId, customer_id: ids[0], channel: 'sms', contact_phone: null, our_endpoint_id: '+19415550192' });
+      await mockPg('messages').insert([
+        { id: alertedMessageId, conversation_id: conversationId, channel: 'sms', direction: 'inbound', author_type: 'lead', is_read: false, twilio_sid: alertedSid, body: 'First synthetic text, alerted while unknown', created_at: new Date(Date.now() - 120000) },
+        // Arrived after promotion with no bell of its own (the throttled
+        // dispatch never rang again for this window) — its only hope is the
+        // ORIGINAL, still-live unlinked-style bell.
+        { id: laterMessageId, conversation_id: conversationId, channel: 'sms', direction: 'inbound', author_type: 'lead', is_read: false, twilio_sid: laterSid, body: 'Second synthetic text, after promotion', created_at: new Date(Date.now() - 60000) },
+      ]);
+      // The durable sender identity: contact_phone is gone from the
+      // conversation, so the retarget/liveBell queries resolve the phone
+      // through sms_log.from_phone instead.
+      await mockPg('sms_log').insert([
+        { direction: 'inbound', from_phone: unknownPhone, to_phone: '+19415550192', twilio_sid: alertedSid, message_body: 'First synthetic text, alerted while unknown' },
+        { direction: 'inbound', from_phone: unknownPhone, to_phone: '+19415550192', twilio_sid: laterSid, message_body: 'Second synthetic text, after promotion' },
+      ]);
+      [bell] = await mockPg('notifications').insert({
+        recipient_type: 'admin', category: 'inbound_sms', title: 'Synthetic unknown-sender text',
+        link: '/admin/communications',
+        metadata: JSON.stringify({ payload: { twilioSid: alertedSid } }),
+      }).returning('*');
+
+      // Reading the alerted message must NOT be handed to the blunt by-SID
+      // clear just because the conversation is now customer-linked — that
+      // would clear the bell while laterMessageId sits unread with no bell
+      // of its own (pre-fix: c.customer_id IS NULL excluded this SID from
+      // unknownSenderSids purely on today's linkage).
+      await markInboundSmsRead({ messageIds: [alertedMessageId], role: 'admin' });
+      expect((await mockPg('messages').where({ id: alertedMessageId }).first()).is_read).toBe(true);
+      expect((await mockPg('messages').where({ id: laterMessageId }).first()).is_read).toBe(false);
+      const refreshedBell = await mockPg('notifications').where({ id: bell.id }).first();
+      expect(refreshedBell.read_at).toBeNull();
+      expect(refreshedBell.metadata.payload.twilioSid).toBe(laterSid);
+    } finally {
+      await mockPg('messages').whereIn('id', [alertedMessageId, laterMessageId]).delete();
+      await mockPg('sms_log').whereIn('twilio_sid', [alertedSid, laterSid]).delete();
+      if (bell) await mockPg('notifications').where({ id: bell.id }).delete();
+      await mockPg('conversations').where({ id: conversationId }).delete();
+    }
+  }, 30000);
+
+  test('retargetOrClearUnknownSenderBell — the exported decision ringSmsReplyBell\'s post-insert race check now calls directly — retargets instead of clearing when a sibling is still unread (codex #4210 round-3 P1)', async () => {
+    const conversationId = randomUUID();
+    const readMessageId = randomUUID();
+    const stillUnreadMessageId = randomUUID();
+    const readSid = `SM-synthetic-postcheck-${randomBytes(4).toString('hex')}`;
+    const unreadSid = `SM-synthetic-postcheck-later-${randomBytes(4).toString('hex')}`;
+    const unknownPhone = `+1941555${String(Date.now()).slice(-4)}`;
+    let bell;
+    try {
+      await mockPg('conversations').insert({ id: conversationId, customer_id: null, channel: 'sms', contact_phone: unknownPhone, our_endpoint_id: '+19415550190' });
+      await mockPg('messages').insert([
+        // Already read by the time the post-check runs (the exact race:
+        // the thread was opened while ringSmsReplyBell's bell insert was
+        // still in flight).
+        { id: readMessageId, conversation_id: conversationId, channel: 'sms', direction: 'inbound', author_type: 'lead', is_read: true, twilio_sid: readSid, body: 'Read while the bell was being written', created_at: new Date(Date.now() - 60000) },
+        // A throttled sibling from the same sender, still unread, with no
+        // bell of its own — its only hope is this shared bell.
+        { id: stillUnreadMessageId, conversation_id: conversationId, channel: 'sms', direction: 'inbound', author_type: 'lead', is_read: false, twilio_sid: unreadSid, body: 'Still unread, throttled', created_at: new Date(Date.now() - 30000) },
+      ]);
+      [bell] = await mockPg('notifications').insert({
+        recipient_type: 'admin', category: 'inbound_sms', title: 'Synthetic unknown-sender text',
+        link: '/admin/communications',
+        metadata: JSON.stringify({ payload: { twilioSid: readSid } }),
+      }).returning('*');
+
+      // The exact call ringSmsReplyBell's post-insert race check now makes
+      // for an unknown sender, in place of the old blind by-SID clear.
+      const cleared = await retargetOrClearUnknownSenderBell(unknownPhone, new Date());
+      expect(cleared).toBe(0);
+      const refreshedBell = await mockPg('notifications').where({ id: bell.id }).first();
+      expect(refreshedBell.read_at).toBeNull();
+      expect(refreshedBell.metadata.payload.twilioSid).toBe(unreadSid);
+    } finally {
+      await mockPg('messages').whereIn('id', [readMessageId, stillUnreadMessageId]).delete();
+      if (bell) await mockPg('notifications').where({ id: bell.id }).delete();
+      await mockPg('conversations').where({ id: conversationId }).delete();
+    }
+  }, 30000);
+
+  test('concurrently reading a promoted thread\'s two unread siblings converges on a cleared bell rather than orphaning it on an already-read message (codex #4210 round-7 P1)', async () => {
+    const conversationId = randomUUID();
+    const firstMessageId = randomUUID();
+    const secondMessageId = randomUUID();
+    const firstSid = `SM-synthetic-promoted-race-a-${randomBytes(4).toString('hex')}`;
+    const secondSid = `SM-synthetic-promoted-race-b-${randomBytes(4).toString('hex')}`;
+    const unknownPhone = `+1941555${String(Date.now()).slice(-4)}`;
+    let bell;
+    try {
+      // Promoted, both messages unread, one bell currently targeting the
+      // first. Round 6 decided per-SID membership by "is this exact SID the
+      // bell's current target" — a snapshot taken OUTSIDE any lock, so
+      // reading the two messages as separate concurrent calls could have
+      // the second miss its own membership check (the bell still targeted
+      // the first at that instant), fall to a by-SID no-op, and then have
+      // the first's retarget hand the bell to it anyway under the phone
+      // lock — landing after the second's read had already finished,
+      // orphaning the bell on an already-read message nothing revisits.
+      await mockPg('conversations').insert({ id: conversationId, customer_id: ids[0], channel: 'sms', contact_phone: null, our_endpoint_id: '+19415550193' });
+      await mockPg('messages').insert([
+        { id: firstMessageId, conversation_id: conversationId, channel: 'sms', direction: 'inbound', author_type: 'lead', is_read: false, twilio_sid: firstSid, body: 'First synthetic text, promoted', created_at: new Date(Date.now() - 120000) },
+        { id: secondMessageId, conversation_id: conversationId, channel: 'sms', direction: 'inbound', author_type: 'lead', is_read: false, twilio_sid: secondSid, body: 'Second synthetic text, promoted', created_at: new Date(Date.now() - 60000) },
+      ]);
+      await mockPg('sms_log').insert([
+        { direction: 'inbound', from_phone: unknownPhone, to_phone: '+19415550193', twilio_sid: firstSid, message_body: 'First synthetic text, promoted' },
+        { direction: 'inbound', from_phone: unknownPhone, to_phone: '+19415550193', twilio_sid: secondSid, message_body: 'Second synthetic text, promoted' },
+      ]);
+      [bell] = await mockPg('notifications').insert({
+        recipient_type: 'admin', category: 'inbound_sms', title: 'Synthetic unknown-sender text',
+        link: '/admin/communications',
+        metadata: JSON.stringify({ payload: { twilioSid: firstSid } }),
+      }).returning('*');
+
+      await Promise.all([
+        markInboundSmsRead({ messageIds: [firstMessageId], role: 'admin' }),
+        markInboundSmsRead({ messageIds: [secondMessageId], role: 'admin' }),
+      ]);
+
+      expect((await mockPg('messages').where({ id: firstMessageId }).first()).is_read).toBe(true);
+      expect((await mockPg('messages').where({ id: secondMessageId }).first()).is_read).toBe(true);
+      // Both messages are read, so the bell must end up cleared regardless
+      // of which call's phone-lock transaction ran last.
+      const refreshedBell = await mockPg('notifications').where({ id: bell.id }).first();
+      expect(refreshedBell.read_at).not.toBeNull();
+    } finally {
+      await mockPg('messages').whereIn('id', [firstMessageId, secondMessageId]).delete();
+      await mockPg('sms_log').whereIn('twilio_sid', [firstSid, secondSid]).delete();
+      if (bell) await mockPg('notifications').where({ id: bell.id }).delete();
+      await mockPg('conversations').where({ id: conversationId }).delete();
+    }
+  }, 30000);
+
+  test('the sweep recovers an unread unknown-sender message once the winning claim expires unconfirmed, without a later message to reclaim it (codex #4210 round-8 P1)', async () => {
+    const conversationId = randomUUID();
+    const messageId = randomUUID();
+    const sid = `SM-synthetic-sweep-crash-${randomBytes(4).toString('hex')}`;
+    const unknownPhone = `+1941555${String(Date.now()).slice(-4)}`;
+    let dispatchedWith = null;
+    const dispatch = jest.fn(async (args) => {
+      dispatchedWith = args;
+      // Simulate a successful re-alert: write the bell a real dispatch
+      // would have produced.
+      await mockPg('notifications').insert({
+        recipient_type: 'admin', category: 'inbound_sms', title: 'Synthetic recovered alert',
+        link: '/admin/communications',
+        metadata: JSON.stringify({ payload: { twilioSid: args.MessageSid } }),
+      });
+      return true;
+    });
+    try {
+      // The winning dispatch claimed, then crashed before confirm OR
+      // release ever ran — the row sits with its short lease already
+      // expired and no bell was ever written for this message.
+      await mockPg('conversations').insert({ id: conversationId, customer_id: null, channel: 'sms', contact_phone: unknownPhone, our_endpoint_id: '+19415550194' });
+      await mockPg('messages').insert({ id: messageId, conversation_id: conversationId, channel: 'sms', direction: 'inbound', author_type: 'lead', is_read: false, twilio_sid: sid, body: 'Please quote pest control', created_at: new Date(Date.now() - 300000) });
+      await mockPg('sms_log').insert({ direction: 'inbound', from_phone: unknownPhone, to_phone: '+19415550194', twilio_sid: sid, message_body: 'Please quote pest control', metadata: JSON.stringify({ sms_reply_eligible: true }) });
+      await mockPg('sms_reply_alert_claims').insert({ phone: unknownPhone, expires_at: new Date(Date.now() - 60000) });
+
+      const result = await sweepUnknownSenderAlertClaims({ dispatch });
+      expect(dispatch).toHaveBeenCalledTimes(1);
+      expect(dispatchedWith).toMatchObject({ From: unknownPhone, MessageSid: sid });
+      expect(result.dispatched).toBe(1);
+
+      // The thread ends with a bell.
+      const bells = await mockPg('notifications').whereRaw("metadata->'payload'->>'twilioSid' = ?", [sid]).where({ read_at: null }).select();
+      expect(bells).toHaveLength(1);
+    } finally {
+      await mockPg('messages').where({ id: messageId }).delete();
+      await mockPg('sms_log').where({ twilio_sid: sid }).delete();
+      await mockPg('sms_reply_alert_claims').where({ phone: unknownPhone }).delete();
+      await mockPg('notifications').whereRaw("metadata->'payload'->>'twilioSid' = ?", [sid]).delete();
+      await mockPg('conversations').where({ id: conversationId }).delete();
+    }
+  }, 30000);
+
+  test('the sweep never scans past its recovery horizon — an ancient unread orphan is left alone while a recent one from another phone is still recovered (claude audit P1, post-merge)', async () => {
+    const ancientConversationId = randomUUID();
+    const recentConversationId = randomUUID();
+    const ancientMessageId = randomUUID();
+    const recentMessageId = randomUUID();
+    const ancientSid = `SM-synthetic-sweep-ancient-${randomBytes(4).toString('hex')}`;
+    const recentSid = `SM-synthetic-sweep-recent-${randomBytes(4).toString('hex')}`;
+    const stamp = String(Date.now()).slice(-4);
+    const ancientPhone = `+1941556${stamp}`;
+    const recentPhone = `+1941557${stamp}`;
+    const ancientCreatedAt = new Date(Date.now() - SWEEP_HORIZON_MS - 60000);
+    const recentCreatedAt = new Date(Date.now() - 300000);
+    const dispatch = jest.fn(async () => true);
+    try {
+      // Both rows have the exact orphan shape (unread, eligible, no receipt,
+      // no suppression, no live claim). Only the one inside the horizon may
+      // produce a dispatch — the other would otherwise re-enter the scan on
+      // every tick for as long as it stays unread.
+      await mockPg('conversations').insert([
+        { id: ancientConversationId, customer_id: null, channel: 'sms', contact_phone: ancientPhone, our_endpoint_id: '+19415550194' },
+        { id: recentConversationId, customer_id: null, channel: 'sms', contact_phone: recentPhone, our_endpoint_id: '+19415550194' },
+      ]);
+      await mockPg('messages').insert([
+        { id: ancientMessageId, conversation_id: ancientConversationId, channel: 'sms', direction: 'inbound', author_type: 'lead', is_read: false, twilio_sid: ancientSid, body: 'Ancient, past the horizon', created_at: ancientCreatedAt },
+        { id: recentMessageId, conversation_id: recentConversationId, channel: 'sms', direction: 'inbound', author_type: 'lead', is_read: false, twilio_sid: recentSid, body: 'Recent, needs recovery', created_at: recentCreatedAt },
+      ]);
+      await mockPg('sms_log').insert([
+        { direction: 'inbound', from_phone: ancientPhone, to_phone: '+19415550194', twilio_sid: ancientSid, message_body: 'Ancient, past the horizon', metadata: JSON.stringify({ sms_reply_eligible: true }), created_at: ancientCreatedAt, updated_at: ancientCreatedAt },
+        { direction: 'inbound', from_phone: recentPhone, to_phone: '+19415550194', twilio_sid: recentSid, message_body: 'Recent, needs recovery', metadata: JSON.stringify({ sms_reply_eligible: true }), created_at: recentCreatedAt, updated_at: recentCreatedAt },
+      ]);
+
+      const result = await sweepUnknownSenderAlertClaims({ dispatch });
+      expect(dispatch).toHaveBeenCalledTimes(1);
+      expect(dispatch).toHaveBeenCalledWith(expect.objectContaining({ From: recentPhone, MessageSid: recentSid }));
+      expect(dispatch).not.toHaveBeenCalledWith(expect.objectContaining({ From: ancientPhone }));
+      expect(result.dispatched).toBe(1);
+    } finally {
+      await mockPg('messages').whereIn('id', [ancientMessageId, recentMessageId]).delete();
+      await mockPg('sms_log').whereIn('twilio_sid', [ancientSid, recentSid]).delete();
+      await mockPg('conversations').whereIn('id', [ancientConversationId, recentConversationId]).delete();
+    }
+  }, 30000);
+
+  test('the sweep also recovers a released claim (the winner observed delivery failure and released cleanly) when no later message ever arrives (codex #4210 round-8 P1)', async () => {
+    const conversationId = randomUUID();
+    const messageId = randomUUID();
+    const sid = `SM-synthetic-sweep-released-${randomBytes(4).toString('hex')}`;
+    const unknownPhone = `+1941555${String(Date.now()).slice(-4)}`;
+    let dispatchedWith = null;
+    const dispatch = jest.fn(async (args) => {
+      dispatchedWith = args;
+      await mockPg('notifications').insert({
+        recipient_type: 'admin', category: 'inbound_sms', title: 'Synthetic recovered alert',
+        link: '/admin/communications',
+        metadata: JSON.stringify({ payload: { twilioSid: args.MessageSid } }),
+      });
+      return true;
+    });
+    try {
+      // The loser returned "handled" on the assumption the winner had it
+      // covered. The winner's delivery genuinely failed and it released the
+      // claim immediately (the already-correct half of the fix) — but with
+      // that release, NO claims row exists at all for this phone; the loser
+      // never verified anything, and no later message ever arrived to
+      // reclaim it. This is the failure mode findCandidatePhones must catch
+      // without relying on a claims-table row existing.
+      await mockPg('conversations').insert({ id: conversationId, customer_id: null, channel: 'sms', contact_phone: unknownPhone, our_endpoint_id: '+19415550195' });
+      await mockPg('messages').insert({ id: messageId, conversation_id: conversationId, channel: 'sms', direction: 'inbound', author_type: 'lead', is_read: false, twilio_sid: sid, body: 'Please quote pest control', created_at: new Date(Date.now() - 300000) });
+      await mockPg('sms_log').insert({ direction: 'inbound', from_phone: unknownPhone, to_phone: '+19415550195', twilio_sid: sid, message_body: 'Please quote pest control', metadata: JSON.stringify({ sms_reply_eligible: true }) });
+      // Deliberately no sms_reply_alert_claims row at all.
+
+      const result = await sweepUnknownSenderAlertClaims({ dispatch });
+      expect(dispatch).toHaveBeenCalledTimes(1);
+      expect(dispatchedWith).toMatchObject({ From: unknownPhone, MessageSid: sid });
+      expect(result.dispatched).toBe(1);
+    } finally {
+      await mockPg('messages').where({ id: messageId }).delete();
+      await mockPg('sms_log').where({ twilio_sid: sid }).delete();
+      await mockPg('notifications').whereRaw("metadata->'payload'->>'twilioSid' = ?", [sid]).delete();
+      await mockPg('conversations').where({ id: conversationId }).delete();
+    }
+  }, 30000);
+
+  test('the sweep never races a claim that is still genuinely active (codex #4210 round-8 P1)', async () => {
+    const activeConversationId = randomUUID();
+    const activeMessageId = randomUUID();
+    const activeSid = `SM-synthetic-sweep-active-${randomBytes(4).toString('hex')}`;
+    const activePhone = `+1941555${String(Date.now()).slice(-4)}`;
+    const dispatch = jest.fn(async () => true);
+    try {
+      // Genuinely in-flight: claim not yet expired.
+      await mockPg('conversations').insert({ id: activeConversationId, customer_id: null, channel: 'sms', contact_phone: activePhone, our_endpoint_id: '+19415550196' });
+      await mockPg('messages').insert({ id: activeMessageId, conversation_id: activeConversationId, channel: 'sms', direction: 'inbound', author_type: 'lead', is_read: false, twilio_sid: activeSid, body: 'In flight', created_at: new Date(Date.now() - 5000) });
+      await mockPg('sms_log').insert({ direction: 'inbound', from_phone: activePhone, to_phone: '+19415550196', twilio_sid: activeSid, message_body: 'In flight', metadata: JSON.stringify({ sms_reply_eligible: true }) });
+      await mockPg('sms_reply_alert_claims').insert({ phone: activePhone, expires_at: new Date(Date.now() + 60000) });
+
+      const result = await sweepUnknownSenderAlertClaims({ dispatch });
+      expect(dispatch).not.toHaveBeenCalled();
+      expect(result.dispatched).toBe(0);
+      expect(result.checked).toBeGreaterThanOrEqual(1);
+    } finally {
+      await mockPg('messages').where({ id: activeMessageId }).delete();
+      await mockPg('sms_log').where({ twilio_sid: activeSid }).delete();
+      await mockPg('sms_reply_alert_claims').where({ phone: activePhone }).delete();
+      await mockPg('conversations').where({ id: activeConversationId }).delete();
+    }
+  }, 30000);
+
+  test('the sweep never re-dispatches a message staff already dismissed the bell for, even though the SMS itself is still unread (codex #4210 round-10 P1)', async () => {
+    const conversationId = randomUUID();
+    const messageId = randomUUID();
+    const sid = `SM-synthetic-sweep-dismissed-${randomBytes(4).toString('hex')}`;
+    const unknownPhone = `+1941555${String(Date.now()).slice(-4)}`;
+    let bell;
+    const dispatch = jest.fn(async () => true);
+    try {
+      // Delivered successfully (sms_reply_alerted stamped) — staff saw the
+      // ADMIN NOTIFICATION and dismissed it (read_at set) without ever
+      // opening the SMS thread, so messages.is_read stays false. The claim
+      // has since expired (staff took their time). findLiveBell alone would
+      // treat the dismissed bell as "nothing covering it" and re-alert on a
+      // message staff already acted on.
+      await mockPg('conversations').insert({ id: conversationId, customer_id: null, channel: 'sms', contact_phone: unknownPhone, our_endpoint_id: '+19415550201' });
+      await mockPg('messages').insert({ id: messageId, conversation_id: conversationId, channel: 'sms', direction: 'inbound', author_type: 'lead', is_read: false, twilio_sid: sid, body: 'Please quote pest control', created_at: new Date(Date.now() - 300000) });
+      await mockPg('sms_log').insert({ direction: 'inbound', from_phone: unknownPhone, to_phone: '+19415550201', twilio_sid: sid, message_body: 'Please quote pest control', metadata: JSON.stringify({ sms_reply_eligible: true, sms_reply_alerted: true }) });
+      [bell] = await mockPg('notifications').insert({
+        recipient_type: 'admin', category: 'inbound_sms', title: 'Synthetic unknown-sender text',
+        link: '/admin/communications', read_at: new Date(),
+        metadata: JSON.stringify({ payload: { twilioSid: sid } }),
+      }).returning('*');
+
+      const result = await sweepUnknownSenderAlertClaims({ dispatch });
+      expect(dispatch).not.toHaveBeenCalled();
+      expect(result.dispatched).toBe(0);
+    } finally {
+      await mockPg('messages').where({ id: messageId }).delete();
+      await mockPg('sms_log').where({ twilio_sid: sid }).delete();
+      if (bell) await mockPg('notifications').where({ id: bell.id }).delete();
+      await mockPg('conversations').where({ id: conversationId }).delete();
+    }
+  }, 30000);
+
+  test('the sweep never re-dispatches a push-only successful delivery that never wrote a bell row at all (codex #4210 round-10 P1)', async () => {
+    const conversationId = randomUUID();
+    const messageId = randomUUID();
+    const sid = `SM-synthetic-sweep-push-only-${randomBytes(4).toString('hex')}`;
+    const unknownPhone = `+1941555${String(Date.now()).slice(-4)}`;
+    const dispatch = jest.fn(async () => true);
+    try {
+      // ringSmsReplyBell's own "delivered" definition is bellWritten OR
+      // push.sent > 0 — a push-only success stamps sms_reply_alerted just
+      // the same, with no notifications row ever written for it.
+      // findLiveBell would find nothing, and — pre-fix — wrongly treat this
+      // as orphaned.
+      await mockPg('conversations').insert({ id: conversationId, customer_id: null, channel: 'sms', contact_phone: unknownPhone, our_endpoint_id: '+19415550202' });
+      await mockPg('messages').insert({ id: messageId, conversation_id: conversationId, channel: 'sms', direction: 'inbound', author_type: 'lead', is_read: false, twilio_sid: sid, body: 'Please quote pest control', created_at: new Date(Date.now() - 300000) });
+      await mockPg('sms_log').insert({ direction: 'inbound', from_phone: unknownPhone, to_phone: '+19415550202', twilio_sid: sid, message_body: 'Please quote pest control', metadata: JSON.stringify({ sms_reply_eligible: true, sms_reply_alerted: true }) });
+
+      const result = await sweepUnknownSenderAlertClaims({ dispatch });
+      expect(dispatch).not.toHaveBeenCalled();
+      expect(result.dispatched).toBe(0);
+    } finally {
+      await mockPg('messages').where({ id: messageId }).delete();
+      await mockPg('sms_log').where({ twilio_sid: sid }).delete();
+      await mockPg('conversations').where({ id: conversationId }).delete();
+    }
+  }, 30000);
+
+  test('a later, genuinely failed message past the coverage window is still recovered even though an older message from the same phone already delivered successfully (codex #4210 round-11/12 P1)', async () => {
+    const conversationId = randomUUID();
+    const olderMessageId = randomUUID();
+    const newerMessageId = randomUUID();
+    const olderSid = `SM-synthetic-sweep-older-delivered-${randomBytes(4).toString('hex')}`;
+    const newerSid = `SM-synthetic-sweep-newer-failed-${randomBytes(4).toString('hex')}`;
+    const unknownPhone = `+1941555${String(Date.now()).slice(-4)}`;
+    // The newer message must arrive AFTER the older one's 4h coverage
+    // window lapses (codex #4210 round-12 P1) — within that window, a
+    // second unread message with no receipt of its own is the CORRECT,
+    // intentional throttle shape (one bell covers the whole window), not a
+    // failure; only past the window is "unread, no receipt" unambiguously
+    // a genuine orphan.
+    const olderCreatedAt = new Date(Date.now() - 5 * 60 * 60 * 1000);
+    const newerCreatedAt = new Date(Date.now() - 60000);
+    let dispatchedWith = null;
+    const dispatch = jest.fn(async (args) => { dispatchedWith = args; return true; });
+    try {
+      // The OLDER message delivered successfully and is simply still
+      // unread (staff hasn't looked yet — normal). A LATER message from
+      // the SAME phone arrived hours after that window closed and then
+      // had its own dispatch genuinely fail (claim released, no receipt).
+      // A phone-wide "has anything ever delivered" check would let the
+      // older, long-expired receipt wrongly cover the newer, unrelated
+      // failure — coverage must be window-bounded, not "any receipt ever".
+      await mockPg('conversations').insert({ id: conversationId, customer_id: null, channel: 'sms', contact_phone: unknownPhone, our_endpoint_id: '+19415550203' });
+      await mockPg('messages').insert([
+        { id: olderMessageId, conversation_id: conversationId, channel: 'sms', direction: 'inbound', author_type: 'lead', is_read: false, twilio_sid: olderSid, body: 'Delivered, still unread', created_at: olderCreatedAt },
+        { id: newerMessageId, conversation_id: conversationId, channel: 'sms', direction: 'inbound', author_type: 'lead', is_read: false, twilio_sid: newerSid, body: 'Failed, needs recovery', created_at: newerCreatedAt },
+      ]);
+      await mockPg('sms_log').insert([
+        { direction: 'inbound', from_phone: unknownPhone, to_phone: '+19415550203', twilio_sid: olderSid, message_body: 'Delivered, still unread', metadata: JSON.stringify({ sms_reply_eligible: true, sms_reply_alerted: true }), created_at: olderCreatedAt, updated_at: olderCreatedAt },
+        { direction: 'inbound', from_phone: unknownPhone, to_phone: '+19415550203', twilio_sid: newerSid, message_body: 'Failed, needs recovery', metadata: JSON.stringify({ sms_reply_eligible: true }), created_at: newerCreatedAt },
+      ]);
+
+      const result = await sweepUnknownSenderAlertClaims({ dispatch });
+      expect(dispatch).toHaveBeenCalledTimes(1);
+      expect(dispatchedWith).toMatchObject({ From: unknownPhone, MessageSid: newerSid });
+      expect(result.dispatched).toBe(1);
+    } finally {
+      await mockPg('messages').whereIn('id', [olderMessageId, newerMessageId]).delete();
+      await mockPg('sms_log').whereIn('twilio_sid', [olderSid, newerSid]).delete();
+      await mockPg('conversations').where({ id: conversationId }).delete();
+    }
+  }, 30000);
+
+  test('the sweep preserves an intentional throttle — a message covered by an earlier successful delivery\'s still-live window is never replayed as a new alert (codex #4210 round-12 P1)', async () => {
+    const conversationId = randomUUID();
+    const coveringMessageId = randomUUID();
+    const throttledMessageId = randomUUID();
+    const coveringSid = `SM-synthetic-sweep-covering-${randomBytes(4).toString('hex')}`;
+    const throttledSid = `SM-synthetic-sweep-throttled-${randomBytes(4).toString('hex')}`;
+    const unknownPhone = `+1941555${String(Date.now()).slice(-4)}`;
+    // The covering message delivered 3 hours ago — its 4h throttle window
+    // is still live. A second message arrived a minute ago and was
+    // correctly, intentionally suppressed by hasRecentUnknownSenderReceipt
+    // (twilio-webhook.js) — it never triggered its own delivery, so it
+    // carries no receipt of its own and is still unread. This is the SAME
+    // durable shape (unread, no receipt) the previous round's genuine-
+    // orphan test uses; only the window bound tells them apart, and no
+    // active claim row is needed to prove it either way.
+    const coveringCreatedAt = new Date(Date.now() - 3 * 60 * 60 * 1000);
+    const throttledCreatedAt = new Date(Date.now() - 60000);
+    const dispatch = jest.fn(async () => true);
+    try {
+      await mockPg('conversations').insert({ id: conversationId, customer_id: null, channel: 'sms', contact_phone: unknownPhone, our_endpoint_id: '+19415550204' });
+      await mockPg('messages').insert([
+        { id: coveringMessageId, conversation_id: conversationId, channel: 'sms', direction: 'inbound', author_type: 'lead', is_read: false, twilio_sid: coveringSid, body: 'First text, delivered', created_at: coveringCreatedAt },
+        { id: throttledMessageId, conversation_id: conversationId, channel: 'sms', direction: 'inbound', author_type: 'lead', is_read: false, twilio_sid: throttledSid, body: 'Second text, throttled by the first', created_at: throttledCreatedAt },
+      ]);
+      await mockPg('sms_log').insert([
+        { direction: 'inbound', from_phone: unknownPhone, to_phone: '+19415550204', twilio_sid: coveringSid, message_body: 'First text, delivered', metadata: JSON.stringify({ sms_reply_eligible: true, sms_reply_alerted: true }), created_at: coveringCreatedAt, updated_at: coveringCreatedAt },
+        { direction: 'inbound', from_phone: unknownPhone, to_phone: '+19415550204', twilio_sid: throttledSid, message_body: 'Second text, throttled by the first', metadata: JSON.stringify({ sms_reply_eligible: true }), created_at: throttledCreatedAt },
+      ]);
+
+      const result = await sweepUnknownSenderAlertClaims({ dispatch });
+      expect(dispatch).not.toHaveBeenCalled();
+      expect(result.dispatched).toBe(0);
+    } finally {
+      await mockPg('messages').whereIn('id', [coveringMessageId, throttledMessageId]).delete();
+      await mockPg('sms_log').whereIn('twilio_sid', [coveringSid, throttledSid]).delete();
+      await mockPg('conversations').where({ id: conversationId }).delete();
+    }
+  }, 30000);
+
+  test('the sweep recognizes coverage even when the message persisted FIRST is the one that lost the claim race (codex #4210 round-13 P1)', async () => {
+    const conversationId = randomUUID();
+    const earlierMessageId = randomUUID();
+    const laterMessageId = randomUUID();
+    const earlierSid = `SM-synthetic-sweep-earlier-loser-${randomBytes(4).toString('hex')}`;
+    const laterSid = `SM-synthetic-sweep-later-winner-${randomBytes(4).toString('hex')}`;
+    const unknownPhone = `+1941555${String(Date.now()).slice(-4)}`;
+    // Two near-simultaneous texts from the same sender: the EARLIER one
+    // (by created_at — its row landed first) is the one whose REQUEST lost
+    // the atomic per-phone claim race, so it never delivered and carries
+    // no receipt. The LATER one (by created_at, seconds after) is the one
+    // whose request reached the claim step first and won it, delivering
+    // successfully. This inversion is possible because the claim contends
+    // on concurrent REQUESTS, not on db row insert order. A one-directional
+    // "receipt must be at or before the candidate" bound (round 12) would
+    // never recognize the later receipt as covering the earlier message.
+    const earlierCreatedAt = new Date(Date.now() - 3 * 60 * 60 * 1000);
+    const laterCreatedAt = new Date(earlierCreatedAt.getTime() + 2000);
+    const dispatch = jest.fn(async () => true);
+    try {
+      await mockPg('conversations').insert({ id: conversationId, customer_id: null, channel: 'sms', contact_phone: unknownPhone, our_endpoint_id: '+19415550205' });
+      await mockPg('messages').insert([
+        { id: earlierMessageId, conversation_id: conversationId, channel: 'sms', direction: 'inbound', author_type: 'lead', is_read: false, twilio_sid: earlierSid, body: 'Persisted first, lost the claim race', created_at: earlierCreatedAt },
+        { id: laterMessageId, conversation_id: conversationId, channel: 'sms', direction: 'inbound', author_type: 'lead', is_read: false, twilio_sid: laterSid, body: 'Persisted seconds later, won and delivered', created_at: laterCreatedAt },
+      ]);
+      await mockPg('sms_log').insert([
+        { direction: 'inbound', from_phone: unknownPhone, to_phone: '+19415550205', twilio_sid: earlierSid, message_body: 'Persisted first, lost the claim race', metadata: JSON.stringify({ sms_reply_eligible: true }), created_at: earlierCreatedAt },
+        { direction: 'inbound', from_phone: unknownPhone, to_phone: '+19415550205', twilio_sid: laterSid, message_body: 'Persisted seconds later, won and delivered', metadata: JSON.stringify({ sms_reply_eligible: true, sms_reply_alerted: true }), created_at: laterCreatedAt, updated_at: laterCreatedAt },
+      ]);
+
+      const result = await sweepUnknownSenderAlertClaims({ dispatch });
+      expect(dispatch).not.toHaveBeenCalled();
+      expect(result.dispatched).toBe(0);
+    } finally {
+      await mockPg('messages').whereIn('id', [earlierMessageId, laterMessageId]).delete();
+      await mockPg('sms_log').whereIn('twilio_sid', [earlierSid, laterSid]).delete();
+      await mockPg('conversations').where({ id: conversationId }).delete();
+    }
+  }, 30000);
+
+  test('coverage is anchored to when delivery was confirmed, not when the message arrived (codex #4210 round-14 P1)', async () => {
+    const conversationId = randomUUID();
+    const coveringMessageId = randomUUID();
+    const laterMessageId = randomUUID();
+    const coveringSid = `SM-synthetic-sweep-confirm-anchor-a-${randomBytes(4).toString('hex')}`;
+    const laterSid = `SM-synthetic-sweep-confirm-anchor-b-${randomBytes(4).toString('hex')}`;
+    const unknownPhone = `+1941555${String(Date.now()).slice(-4)}`;
+    // Mirrors the auditor's own example: a message arrives, its dispatch is
+    // delayed (a sweep recovery in particular can land minutes after
+    // arrival), and delivery is only confirmed 4 minutes later. The
+    // confirmed claim's 4h window runs from THAT confirm time. A second
+    // message arriving late in that true window (1 minute before it
+    // closes) is still legitimately covered — but arrival-time-anchored
+    // math (created_at ± 4h) would place it just outside the window,
+    // wrongly treating it as an orphan.
+    const coveringCreatedAt = new Date(Date.now() - (4 * 60 + 2) * 60 * 1000); // arrived 4h02m ago
+    const coveringConfirmedAt = new Date(coveringCreatedAt.getTime() + 4 * 60 * 1000); // confirmed 4 minutes later (3h58m ago)
+    const laterCreatedAt = new Date(Date.now() - 60 * 1000); // arrived 1 minute ago
+    const dispatch = jest.fn(async () => true);
+    try {
+      await mockPg('conversations').insert({ id: conversationId, customer_id: null, channel: 'sms', contact_phone: unknownPhone, our_endpoint_id: '+19415550206' });
+      await mockPg('messages').insert([
+        { id: coveringMessageId, conversation_id: conversationId, channel: 'sms', direction: 'inbound', author_type: 'lead', is_read: false, twilio_sid: coveringSid, body: 'Arrived, delivery delayed', created_at: coveringCreatedAt },
+        { id: laterMessageId, conversation_id: conversationId, channel: 'sms', direction: 'inbound', author_type: 'lead', is_read: false, twilio_sid: laterSid, body: 'Arrived late in the true confirmed window', created_at: laterCreatedAt },
+      ]);
+      await mockPg('sms_log').insert([
+        { direction: 'inbound', from_phone: unknownPhone, to_phone: '+19415550206', twilio_sid: coveringSid, message_body: 'Arrived, delivery delayed', metadata: JSON.stringify({ sms_reply_eligible: true, sms_reply_alerted: true }), created_at: coveringCreatedAt, updated_at: coveringConfirmedAt },
+        { direction: 'inbound', from_phone: unknownPhone, to_phone: '+19415550206', twilio_sid: laterSid, message_body: 'Arrived late in the true confirmed window', metadata: JSON.stringify({ sms_reply_eligible: true }), created_at: laterCreatedAt },
+      ]);
+
+      const result = await sweepUnknownSenderAlertClaims({ dispatch });
+      expect(dispatch).not.toHaveBeenCalled();
+      expect(result.dispatched).toBe(0);
+    } finally {
+      await mockPg('messages').whereIn('id', [coveringMessageId, laterMessageId]).delete();
+      await mockPg('sms_log').whereIn('twilio_sid', [coveringSid, laterSid]).delete();
+      await mockPg('conversations').where({ id: conversationId }).delete();
+    }
+  }, 30000);
+
+  test('a failed dispatch stays recoverable after its conversation is promoted to a customer before the sweep runs (codex #4210 round-14 P1)', async () => {
+    const conversationId = randomUUID();
+    const messageId = randomUUID();
+    const sid = `SM-synthetic-sweep-promoted-${randomBytes(4).toString('hex')}`;
+    const unknownPhone = `+1941555${String(Date.now()).slice(-4)}`;
+    let dispatchedWith = null;
+    const dispatch = jest.fn(async (args) => { dispatchedWith = args; return true; });
+    try {
+      // The dispatch failed while the sender was still unknown (eligible,
+      // no receipt). Before the sweep ever ran, the conversation was
+      // promoted to a customer — promoteUnknownPhoneThreadWith
+      // (services/conversations.js) NULLs contact_phone and sets
+      // customer_id, but it does not deliver the missing bell.
+      // findCandidatePhones/findOrphanMessage must not gate on
+      // customer_id IS NULL, or this becomes permanently unrecoverable the
+      // instant it's promoted.
+      await mockPg('conversations').insert({ id: conversationId, customer_id: ids[0], channel: 'sms', contact_phone: null, our_endpoint_id: '+19415550207' });
+      await mockPg('messages').insert({ id: messageId, conversation_id: conversationId, channel: 'sms', direction: 'inbound', author_type: 'lead', is_read: false, twilio_sid: sid, body: 'Please quote pest control', created_at: new Date(Date.now() - 300000) });
+      await mockPg('sms_log').insert({ direction: 'inbound', from_phone: unknownPhone, to_phone: '+19415550207', twilio_sid: sid, message_body: 'Please quote pest control', metadata: JSON.stringify({ sms_reply_eligible: true }) });
+
+      const result = await sweepUnknownSenderAlertClaims({ dispatch });
+      expect(dispatch).toHaveBeenCalledTimes(1);
+      expect(dispatchedWith).toMatchObject({ From: unknownPhone, MessageSid: sid });
+      expect(result.dispatched).toBe(1);
+    } finally {
+      await mockPg('messages').where({ id: messageId }).delete();
+      await mockPg('sms_log').where({ twilio_sid: sid }).delete();
+      await mockPg('conversations').where({ id: conversationId }).delete();
+    }
+  }, 30000);
+
+  test('a message first delivered more than 4h after its own arrival is not repeatedly re-alerted on later sweeps (codex #4210 round-15 P1)', async () => {
+    const conversationId = randomUUID();
+    const messageId = randomUUID();
+    const sid = `SM-synthetic-sweep-late-recovery-${randomBytes(4).toString('hex')}`;
+    const unknownPhone = `+1941555${String(Date.now()).slice(-4)}`;
+    const dispatch = jest.fn(async () => true);
+    try {
+      // An outage (or similar) kept the sweep down for hours; this message
+      // finally delivered — updated_at is now, but created_at is 5 hours
+      // ago, more than the WINDOW apart. It is still unread (staff hasn't
+      // looked yet). A window-bounded self-coverage check would reject its
+      // own receipt as "too far away" and select it as an orphan again on
+      // every subsequent sweep tick, forever — a message's own delivery
+      // must count regardless of how long ago it happened.
+      await mockPg('conversations').insert({ id: conversationId, customer_id: null, channel: 'sms', contact_phone: unknownPhone, our_endpoint_id: '+19415550208' });
+      await mockPg('messages').insert({ id: messageId, conversation_id: conversationId, channel: 'sms', direction: 'inbound', author_type: 'lead', is_read: false, twilio_sid: sid, body: 'Please quote pest control', created_at: new Date(Date.now() - 5 * 60 * 60 * 1000) });
+      await mockPg('sms_log').insert({ direction: 'inbound', from_phone: unknownPhone, to_phone: '+19415550208', twilio_sid: sid, message_body: 'Please quote pest control', metadata: JSON.stringify({ sms_reply_eligible: true, sms_reply_alerted: true }), created_at: new Date(Date.now() - 5 * 60 * 60 * 1000), updated_at: new Date() });
+
+      const result = await sweepUnknownSenderAlertClaims({ dispatch });
+      expect(dispatch).not.toHaveBeenCalled();
+      expect(result.dispatched).toBe(0);
+    } finally {
+      await mockPg('messages').where({ id: messageId }).delete();
+      await mockPg('sms_log').where({ twilio_sid: sid }).delete();
+      await mockPg('conversations').where({ id: conversationId }).delete();
+    }
+  }, 30000);
+
+  test('the sweep never retries a message that was deliberately, terminally suppressed rather than failed (codex #4210 round-17 P1)', async () => {
+    const conversationId = randomUUID();
+    const messageId = randomUUID();
+    const sid = `SM-synthetic-sweep-suppressed-${randomBytes(4).toString('hex')}`;
+    const unknownPhone = `+1941555${String(Date.now()).slice(-4)}`;
+    const dispatch = jest.fn(async () => true);
+    try {
+      // triggerNotification returned suppressed/policySilenced — a
+      // recipient preference or the admin bell policy intentionally
+      // disabled delivery. No claim exists (released, not confirmed — same
+      // as a genuine failure), but the message carries the TERMINAL
+      // sms_reply_suppressed marker, not sms_reply_alerted. Retrying this
+      // forever would fight a decision that was never accidental.
+      await mockPg('conversations').insert({ id: conversationId, customer_id: null, channel: 'sms', contact_phone: unknownPhone, our_endpoint_id: '+19415550209' });
+      await mockPg('messages').insert({ id: messageId, conversation_id: conversationId, channel: 'sms', direction: 'inbound', author_type: 'lead', is_read: false, twilio_sid: sid, body: 'Please quote pest control', created_at: new Date(Date.now() - 300000) });
+      await mockPg('sms_log').insert({ direction: 'inbound', from_phone: unknownPhone, to_phone: '+19415550209', twilio_sid: sid, message_body: 'Please quote pest control', metadata: JSON.stringify({ sms_reply_eligible: true, sms_reply_suppressed: true }) });
+
+      const result = await sweepUnknownSenderAlertClaims({ dispatch });
+      expect(dispatch).not.toHaveBeenCalled();
+      expect(result.dispatched).toBe(0);
+    } finally {
+      await mockPg('messages').where({ id: messageId }).delete();
+      await mockPg('sms_log').where({ twilio_sid: sid }).delete();
+      await mockPg('conversations').where({ id: conversationId }).delete();
+    }
+  }, 30000);
+
+  test('the sweep never re-alerts an AI-answered message just because it is still unread (codex #4210 round-9 P1)', async () => {
+    const conversationId = randomUUID();
+    const messageId = randomUUID();
+    const sid = `SM-synthetic-sweep-ai-answered-${randomBytes(4).toString('hex')}`;
+    const unknownPhone = `+1941555${String(Date.now()).slice(-4)}`;
+    const dispatch = jest.fn(async () => true);
+    try {
+      // The AI answered this text successfully — dispatchUnknownSenderAlert
+      // was deliberately never called (aiAnswered suppresses it), so the
+      // sms_log row carries NO sms_reply_eligible stamp, even though the
+      // unified message is still unread (a human simply hasn't reviewed it
+      // yet — that's normal, not a lost alert).
+      await mockPg('conversations').insert({ id: conversationId, customer_id: null, channel: 'sms', contact_phone: unknownPhone, our_endpoint_id: '+19415550199' });
+      await mockPg('messages').insert({ id: messageId, conversation_id: conversationId, channel: 'sms', direction: 'inbound', author_type: 'lead', is_read: false, twilio_sid: sid, body: 'What services do you offer?', created_at: new Date(Date.now() - 300000) });
+      await mockPg('sms_log').insert({ direction: 'inbound', from_phone: unknownPhone, to_phone: '+19415550199', twilio_sid: sid, message_body: 'What services do you offer?' });
+
+      const result = await sweepUnknownSenderAlertClaims({ dispatch });
+      expect(dispatch).not.toHaveBeenCalled();
+      expect(result.dispatched).toBe(0);
+    } finally {
+      await mockPg('messages').where({ id: messageId }).delete();
+      await mockPg('sms_log').where({ twilio_sid: sid }).delete();
+      await mockPg('conversations').where({ id: conversationId }).delete();
+    }
+  }, 30000);
+
+  test('the sweep never re-alerts a tracking-line first contact through the sms_reply path (codex #4210 round-9 P1)', async () => {
+    const conversationId = randomUUID();
+    const messageId = randomUUID();
+    const sid = `SM-synthetic-sweep-tracking-${randomBytes(4).toString('hex')}`;
+    const unknownPhone = `+1941555${String(Date.now()).slice(-4)}`;
+    const dispatch = jest.fn(async () => true);
+    try {
+      // A domain/van tracking number's first contact routes to new_lead,
+      // not sms_reply — twilio-webhook.js excludes numberConfig.type
+      // domain_tracking/van_tracking from ever calling
+      // dispatchUnknownSenderAlert, so no eligibility stamp exists here
+      // either. Without the stamp requirement, the sweep would fire a
+      // second, wrong-type alert for a message a DIFFERENT bell already
+      // covers (findLiveBell only recognizes inbound_sms-category bells).
+      await mockPg('conversations').insert({ id: conversationId, customer_id: null, channel: 'sms', contact_phone: unknownPhone, our_endpoint_id: '+19415550200' });
+      await mockPg('messages').insert({ id: messageId, conversation_id: conversationId, channel: 'sms', direction: 'inbound', author_type: 'lead', is_read: false, twilio_sid: sid, body: 'Interested in a quote', created_at: new Date(Date.now() - 300000) });
+      await mockPg('sms_log').insert({ direction: 'inbound', from_phone: unknownPhone, to_phone: '+19415550200', twilio_sid: sid, message_body: 'Interested in a quote' });
+
+      const result = await sweepUnknownSenderAlertClaims({ dispatch });
+      expect(dispatch).not.toHaveBeenCalled();
+      expect(result.dispatched).toBe(0);
+    } finally {
+      await mockPg('messages').where({ id: messageId }).delete();
+      await mockPg('sms_log').where({ twilio_sid: sid }).delete();
+      await mockPg('conversations').where({ id: conversationId }).delete();
+    }
+  }, 30000);
+
+  test('a message arriving from the phone between the unread-check and the clear is not swept into it — the clear rechecks atomically at write time (codex #4210 round-8 P2)', async () => {
+    const conversationId = randomUUID();
+    const firstMessageId = randomUUID();
+    const secondMessageId = randomUUID();
+    const firstSid = `SM-synthetic-race-clear-a-${randomBytes(4).toString('hex')}`;
+    const secondSid = `SM-synthetic-race-clear-b-${randomBytes(4).toString('hex')}`;
+    const unknownPhone = `+1941555${String(Date.now()).slice(-4)}`;
+    let bell;
+    try {
+      await mockPg('conversations').insert({ id: conversationId, customer_id: null, channel: 'sms', contact_phone: unknownPhone, our_endpoint_id: '+19415550198' });
+      // The only message currently unread-eligible is already read — the
+      // function's OWN `remaining` check will find nothing at the moment it
+      // runs, same as the pre-fix code.
+      await mockPg('messages').insert({ id: firstMessageId, conversation_id: conversationId, channel: 'sms', direction: 'inbound', author_type: 'lead', is_read: true, twilio_sid: firstSid, body: 'Already read', created_at: new Date(Date.now() - 60000) });
+      [bell] = await mockPg('notifications').insert({
+        recipient_type: 'admin', category: 'inbound_sms', title: 'Synthetic unknown-sender text',
+        link: '/admin/communications',
+        metadata: JSON.stringify({ payload: { twilioSid: firstSid } }),
+      }).returning('*');
+
+      // A second, genuinely new message from the SAME sender arrives on a
+      // separate real connection concurrently with the retarget-or-clear
+      // call — the phone's advisory lock only serializes OTHER
+      // retarget-or-clear calls, not an ordinary inbound insert, so this is
+      // not blocked by it. `remaining` can find nothing at the instant it
+      // runs, then this lands before the clear's own statement executes.
+      const [cleared] = await Promise.all([
+        retargetOrClearUnknownSenderBell(unknownPhone, new Date()),
+        mockPg('messages').insert({ id: secondMessageId, conversation_id: conversationId, channel: 'sms', direction: 'inbound', author_type: 'lead', is_read: false, twilio_sid: secondSid, body: 'Second synthetic text, arrives mid-clear', created_at: new Date() }),
+      ]);
+
+      const refreshedBell = await mockPg('notifications').where({ id: bell.id }).first();
+      if (cleared > 0) {
+        // The insert lost the race and landed strictly after the clear had
+        // already committed — a legitimate ordering (nothing was unread at
+        // clear time); secondMessageId then relies on its own separate
+        // dispatch, not this call.
+        expect(refreshedBell.read_at).not.toBeNull();
+      } else {
+        // The atomic recheck caught the new arrival — the bell must
+        // survive, not be silently dropped.
+        expect(refreshedBell.read_at).toBeNull();
+      }
+    } finally {
+      await mockPg('messages').whereIn('id', [firstMessageId, secondMessageId]).delete();
+      if (bell) await mockPg('notifications').where({ id: bell.id }).delete();
+      await mockPg('conversations').where({ id: conversationId }).delete();
+    }
   }, 30000);
 });
