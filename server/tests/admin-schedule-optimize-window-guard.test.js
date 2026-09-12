@@ -1264,3 +1264,27 @@ test('a promise is not relaxed on its deadline minute', () => {
   expect(out.conflict).not.toBeNull();
   expect(out.orderedStops.map((s) => s.id)).toEqual(['DUE', 'FREE']);
 });
+
+// Codex round 5 P1: a nonempty leg list is not live evidence if it is SHORTER
+// than the geocoded stop count — violatesWindowFeasibility refuses such a list
+// and silently falls back to the model, so it must not buy a calibration
+// bypass either.
+test('a short leg list does not count as live evidence', async () => {
+  process.env.GATE_ROUTE_REORDER_WINDOW_FIT = 'true';
+  delete process.env.GATE_DRIVE_TIME_CALIBRATION;
+  stopsByDate[DATE] = [
+    stop('A', { lng: 1, route_order: 1 }),
+    stop('B', { lng: 2, route_order: 2 }),
+    stop('C', { lng: 3, route_order: 3 }),
+  ];
+  // Google answered with one leg for three geocoded stops.
+  mockOptimizerOrder(['A', 'B', 'C'], { legs: [{ durationMinutes: 4 }] });
+  const short = await optimizeRoute({ technicianId: 't1', date: DATE });
+  expect(short.status).toBe(409);
+  expect(short.body.reason).toBe('MODEL_UNCALIBRATED');
+
+  // A full list is live evidence and certifies the day without the gate.
+  mockOptimizerOrder(['A', 'B', 'C']);
+  const full = await optimizeRoute({ technicianId: 't1', date: DATE });
+  expect(full.status).toBe(200);
+});

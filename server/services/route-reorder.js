@@ -377,10 +377,19 @@ function relaxElapsedWindows(sourceStops, startMin) {
  *  source, a non-empty leg list, and a finite duration on every leg. The
  *  nearest-neighbour and single_stop paths return model-derived legs, which
  *  are exactly what the calibration gate exists to distrust. */
-function hasLiveLegs(googleSource, legs) {
-  return String(googleSource || '').startsWith('google')
-    && Array.isArray(legs) && legs.length > 0
-    && legs.every((leg) => Number.isFinite(leg?.durationMinutes));
+function hasLiveLegs(googleSource, legs, orderedStops, sourceById) {
+  if (!String(googleSource || '').startsWith('google')) return false;
+  if (!Array.isArray(legs) || legs.length === 0) return false;
+  // ENOUGH legs, not merely some: violatesWindowFeasibility refuses a list
+  // shorter than the geocoded stop count and silently falls back to the
+  // model, so a short list is not the live evidence it looks like (codex
+  // round 5 P1). Same count that guard computes.
+  const geocoded = orderedStops.filter((stop) => {
+    const row = (sourceById && sourceById.get(stop.id)) || stop;
+    return parseFloat(row.lat) && parseFloat(row.lng);
+  }).length;
+  if (legs.length < geocoded) return false;
+  return legs.slice(0, geocoded).every((leg) => Number.isFinite(leg?.durationMinutes));
 }
 
 /**
@@ -423,10 +432,10 @@ function gateOffReason() {
  *  - a pass without LIVE road durations rests on the in-house model, which
  *    the fallback's owner ruling requires to be calibrated.
  */
-function uncertifiableReason({ sourceStops, startMin, googleSource, legs, requireCalibratedModel }) {
+function uncertifiableReason({ sourceStops, startMin, googleSource, legs, requireCalibratedModel, googleOrder, sourceById }) {
   if (startMin != null && sourceStops.some(isLiveStop)) return 'LIVE_STOP_IN_PROGRESS';
   if (sourceStops.some((s) => !(parseFloat(s.lat) && parseFloat(s.lng)))) return 'COORDLESS_STOPS';
-  if (requireCalibratedModel && !hasLiveLegs(googleSource, legs)
+  if (requireCalibratedModel && !hasLiveLegs(googleSource, legs, googleOrder, sourceById)
     && !gateEnvValue('GATE_DRIVE_TIME_CALIBRATION')) return 'MODEL_UNCALIBRATED';
   return null;
 }
@@ -522,21 +531,8 @@ function chooseWindowSafeOrder({
   const chronoConflict = violatesWindowChronology(googleOrder, guardStops);
   const fitConflict = !chronoConflict && violatesWindowFeasibility(RouteOptimizer, googleOrder, guardStops, legs, simStart, from);
   const conflict = chronoConflict ? 'WINDOW_ORDER_CONFLICT' : (fitConflict ? 'WINDOW_FIT_CONFLICT' : null);
-  // A pass certified WITHOUT live road durations rests entirely on the
-  // in-house model, which the fallback's own ruling requires to be
-  // calibrated: the legacy 30 mph constant is documented as underestimating,
-  // so an uncalibrated "legal" can be a promise the truck cannot keep (codex
-  // round 5 P1). "Live" means Google actually measured them — the
-  // nearest-neighbour fallback and single_stop return MODEL legs, and an
-  // empty array is truthy — so provenance is checked, not mere presence.
-  // These callers ask for this; the nightly pass keeps its own long-standing
-  // contract, since it only ever SKIPS a day.
-  if (requireCalibratedModel && !hasLiveLegs(googleSource, legs)
-    && !gateEnvValue('GATE_DRIVE_TIME_CALIBRATION')) {
-    return { orderedStops: null, reason: 'MODEL_UNCALIBRATED', conflict, beforeMeters };
-  }
   // Reasons this day cannot be certified AT ALL, whatever the order says.
-  const blocked = uncertifiableReason({ sourceStops, startMin, googleSource, legs, requireCalibratedModel });
+  const blocked = uncertifiableReason({ sourceStops, startMin, googleSource, legs, requireCalibratedModel, googleOrder, sourceById });
   if (blocked) return { orderedStops: null, reason: blocked, conflict, beforeMeters };
   if (!chronoConflict && !fitConflict) {
     // Google's order is legal — still score it under the shared model (NOT

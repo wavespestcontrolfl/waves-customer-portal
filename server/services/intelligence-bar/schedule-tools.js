@@ -537,6 +537,10 @@ async function optimizeAllRoutes(input) {
   if (guarded.anyWindowConstrained) result.source = 'window_constrained';
   const savedMiles = Math.round(figures.savedDistanceMeters / 1609.34);
   const addedMiles = Math.round(figures.addedDistanceMeters / 1609.34);
+  // A repair that adds less than half a mile still ADDS mileage; rounding it
+  // to 0 and taking the savings branch would tell the operator the opposite
+  // (codex round 5 P2).
+  const addedMilesCopy = addedMiles > 0 ? `~${addedMiles} miles` : 'under a mile';
   const savedPct = figures.savedPercent;
 
   const summary = {
@@ -564,8 +568,8 @@ async function optimizeAllRoutes(input) {
     return {
       proposal: true,
       ...summary,
-      note: addedMiles > 0
-        ? `Would reorder ${stopsWithCoords.length} stops to keep every promised arrival window — this ADDS ~${addedMiles} miles. Re-call with confirmed:true to apply.`
+      note: figures.addedDistanceMeters > 0
+        ? `Would reorder ${stopsWithCoords.length} stops to keep every promised arrival window — this ADDS ${addedMilesCopy}. Re-call with confirmed:true to apply.`
         : `Would reorder ${stopsWithCoords.length} stops, saving ~${savedMiles} miles. Re-call with confirmed:true to apply.`,
     };
   }
@@ -697,6 +701,10 @@ async function optimizeTechRoute(input) {
   if (guarded.anyWindowConstrained) result.source = 'window_constrained';
   const savedMiles = Math.round(figures.savedDistanceMeters / 1609.34);
   const addedMiles = Math.round(figures.addedDistanceMeters / 1609.34);
+  // A repair that adds less than half a mile still ADDS mileage; rounding it
+  // to 0 and taking the savings branch would tell the operator the opposite
+  // (codex round 5 P2).
+  const addedMilesCopy = addedMiles > 0 ? `~${addedMiles} miles` : 'under a mile';
 
   const summary = {
     tech: tech.name,
@@ -722,8 +730,8 @@ async function optimizeTechRoute(input) {
     return {
       proposal: true,
       ...summary,
-      note: addedMiles > 0
-        ? `Would reorder ${tech.name}'s ${stopsWithCoords.length} stops to keep every promised arrival window — this ADDS ~${addedMiles} miles. Re-call with confirmed:true to apply.`
+      note: figures.addedDistanceMeters > 0
+        ? `Would reorder ${tech.name}'s ${stopsWithCoords.length} stops to keep every promised arrival window — this ADDS ${addedMilesCopy}. Re-call with confirmed:true to apply.`
         : `Would reorder ${tech.name}'s ${stopsWithCoords.length} stops, saving ~${savedMiles} miles. Re-call with confirmed:true to apply.`,
     };
   }
