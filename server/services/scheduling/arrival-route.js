@@ -15,11 +15,25 @@ const { currentOrder, effectiveWindowRange, simulateArrivalRoute, workDuration }
 const { SHIFT, capacityEnabled, placementFitsShift } = require('./policy');
 const { allocationKey, occupiedRows } = require('./visit-capacity');
 
+/** The customer's primary premise, aliased the way effectivePremise (and
+ *  stampedAddressDiverges) expect. Every query that feeds the co-visit merge
+ *  selects these. */
+const CUSTOMER_PREMISE_ALIASES = [{
+  customer_address_line1: 'customers.address_line1',
+  customer_address_line2: 'customers.address_line2',
+  customer_city: 'customers.city',
+  customer_state: 'customers.state',
+  customer_zip: 'customers.zip',
+}];
+
 const COLUMNS = [
   'id', 'customer_id', 'technician_id', 'scheduled_date', 'window_start', 'window_end',
   'estimated_duration_minutes', 'status', 'route_order', 'created_at', 'visit_id',
   'reservation_expires_at', 'actual_end_time', 'check_out_time', 'completed_at', 'time_window',
   'service_type', 'service_id', 'source_estimate_id', 'updated_at',
+  // Premise identity for the co-visit merge — premiseStampConflicts reads
+  // all four (street, unit, zip, city).
+  'service_address_line1', 'service_address_line2', 'service_address_city', 'service_address_zip',
   'reservation_service_mix', 'reservation_policy_version',
 ];
 
@@ -54,7 +68,13 @@ async function loadArrivalRouteContext({
     : await conn('scheduled_services')
     .leftJoin('customers', 'scheduled_services.customer_id', 'customers.id')
     .where('scheduled_services.id', serviceId)
-    .first(...COLUMNS.map(c => `scheduled_services.${c}`), ...serviceLocationSelects(conn));
+    .first(...COLUMNS.map(c => `scheduled_services.${c}`), ...serviceLocationSelects(conn),
+      // The co-visit merge resolves an UNSTAMPED row's premise from the
+      // customer's primary address, and serviceLocationSelects exposes it as
+      // `address_line1`, not the customer_address_* keys effectivePremise
+      // reads — so an unstamped target never merged with its sibling and the
+      // staff path kept charging the phantom duration (codex #4435 r4 P1).
+      ...CUSTOMER_PREMISE_ALIASES);
   if (!stored) return null;
   const techId = technicianId === undefined
     ? (Object.prototype.hasOwnProperty.call(changes, 'technician_id') ? changes.technician_id : stored.technician_id)
@@ -67,6 +87,8 @@ async function loadArrivalRouteContext({
       customer_address_line1: customer?.address_line1, customer_city: customer?.city, customer_zip: customer?.zip,
       customer_latitude: customer?.latitude, customer_longitude: customer?.longitude });
     Object.assign(target, { lat: geo?.lat ?? null, lng: geo?.lng ?? null,
+      customer_address_line1: customer?.address_line1, customer_city: customer?.city,
+      customer_state: customer?.state, customer_zip: customer?.zip,
       address_line1: target.service_address_line1 || customer?.address_line1,
       city: target.service_address_city || customer?.city,
       state: target.service_address_state || customer?.state, zip: target.service_address_zip || customer?.zip });
@@ -80,7 +102,10 @@ async function loadArrivalRouteContext({
   const rows = await dayStopsQuery(conn, {
     dateStr: date,
     excludeStatuses: NOT_A_ROUTE_STOP_STATUSES,
-    select: [...COLUMNS.map(c => `scheduled_services.${c}`), ...guardedCoordSelects(conn)],
+    select: [...COLUMNS.map(c => `scheduled_services.${c}`), ...guardedCoordSelects(conn),
+      // An unstamped row inherits the customer's premise, and the co-visit
+      // merge compares EFFECTIVE addresses (codex #4435 r3 P1).
+      ...CUSTOMER_PREMISE_ALIASES],
   }).where(q => q.whereNull('scheduled_services.reservation_expires_at')
       .orWhereRaw('scheduled_services.reservation_expires_at > NOW()'));
   const blocks = capacityEnabled() || preserveCapacity ? await conn('tech_schedule_blocks')
@@ -175,6 +200,14 @@ function evaluateArrivalPlacement(context, { windowStart, windowEnd, durationMin
   if (capacity) dayEndMin = Math.min(dayEndMin, SHIFT.endMinutes);
   const target = {
     ...context.target, window_start: windowStart, window_end: windowEnd,
+    // The target's REAL work — its own stored estimate, captured BEFORE the
+    // line below replaces it with the window span, and NEVER the
+    // window-derived `durationMinutes` (find-time-hints passes the selected
+    // span there, and treating a span as additive work charges a 20-minute
+    // job in a 60-minute window 60 minutes beside its sibling — codex #4435
+    // r3/r4 P1). A genuinely long service is still covered: the chain's
+    // floor is the longest member's workDuration, which includes it.
+    raw_estimate_minutes: Number(context.target?.estimated_duration_minutes) || 0,
     estimated_duration_minutes: context.prospective ? Number(durationMinutes)
       : Math.max(workDuration(context.target), Number(durationMinutes) || 0),
   };
@@ -217,7 +250,22 @@ function evaluateArrivalPlacement(context, { windowStart, windowEnd, durationMin
     const usedLegs = [];
     const travel = context.travel || (capacity ? RouteOptimizer.createSchedulingTravel({ maxRequests: 0 }) : null);
     const simulation = simulateArrivalRoute(RouteOptimizer, rangeForStop,
-      order.map(row => ({ ...row, estimated_duration_minutes: row.memberIds ? row.estimated_duration_minutes : workDuration(row) })), {
+      // raw_estimate_minutes keeps the UNTOUCHED estimate for the co-visit
+      // sum: the rewrite below hands every ungrouped row its window span as
+      // a duration, which would otherwise read as a real estimate and sum a
+      // span-only pair back into the phantom hour (Codex #4435 r2 P1).
+      order.map(row => ({ ...row,
+        // A row that already carries its raw estimate (the target above)
+        // keeps it — only ordinary rows take theirs from the untouched
+        // column before the normalization below.
+        // A grouped row already carries its members' ADDITIVE work as its
+        // duration (groupRouteStops / visit-capacity); nulling its raw
+        // estimate let a co-visit merge charge max(group, target) instead of
+        // their sum (codex #4435 r4 P1). Ordinary rows take theirs from the
+        // untouched column, and a row that already carries one keeps it.
+        raw_estimate_minutes: row.memberIds ? row.estimated_duration_minutes
+          : ('raw_estimate_minutes' in row ? row.raw_estimate_minutes : row.estimated_duration_minutes),
+        estimated_duration_minutes: row.memberIds ? row.estimated_duration_minutes : workDuration(row) })), {
         origin, startMin, dayEndMin, includeReturnInFinish: capacity, bufferMinutes,
         blockedIntervals: (context.blocks || []).map(block => ({ startMin: minuteOfDay(block.start_time), endMin: minuteOfDay(block.end_time) })),
         ...(travel ? { legMinutes: (from, to, departureMin) => {
