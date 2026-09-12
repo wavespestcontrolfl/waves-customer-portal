@@ -8367,7 +8367,7 @@ const CallRecordingProcessor = {
       await onCards('address_recovered')
         .update({
           payload: addressRecovery?.recovered
-            ? recoveryMarkerPayload(db, { ...evidence, ...recoveryPassStamp })
+            ? recoveryMarkerPayload(db, { ...evidence, ...recoveryPassStamp, address_recovered: addressRecovery.recovered.address_line1 })
             : db.raw('coalesce(payload, \'{}\'::jsonb) || ?::jsonb', [JSON.stringify(evidence)]),
           updated_at: new Date(),
         })

@@ -320,6 +320,25 @@ describe('address-recovery evidence claim fencing', () => {
     expect(db.state.cards[0].payload.recovery_superseded_at).toBeUndefined();
   });
 
+  test('a new successful recovery replaces the old matched street as well as its candidates', async () => {
+    const db = makeDatabase({
+      token: 'owning-token',
+      cards: [{
+        call_log_id: 'call-1',
+        reason_code: 'address_recovered',
+        payload: { ...recoveryPassStamp, address_recovered: '100 40th Avenue East' },
+      }],
+    });
+    await runFinalEvidenceReconcile(
+      db, { id: 'call-1' }, 'owning-token', recovered, recoveryPassStamp,
+      recoveryMarkerPayload, logger, maskSid, 'CA-1', '100 Fort Avenue East',
+    );
+    expect(db.state.cards[0].payload).toMatchObject({
+      address_recovered: '100 4th Avenue East',
+      address_candidates: ['100 4th Avenue East'],
+    });
+  });
+
   test('the shared recovered-card payload also starts retired', () => {
     const payload = buildAddressRecoveryPayload(recovered, '100 Fort Avenue East')('address_recovered');
 
