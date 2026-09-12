@@ -8344,13 +8344,26 @@ const CallRecordingProcessor = {
     // replacement pass's evidence with its own stale candidates — the same
     // processing_token predicate every other post-provider write here uses.
     const reconcileAddressRecoveryEvidence = async () => {
-      if (!addressRecovery?.attempted) return;
-      const evidence = {
-        address_as_heard: rawStreetBeforeAdopt,
-        address_candidates: addressRecovery.candidates || [],
-        recovery_method: addressRecovery.method || null,
-        recovery_prompt_version: recoveryCohortVersion(),
-      };
+      // A pass where recovery did NOT run must RETIRE the evidence an earlier
+      // pass left, not skip the write. Returning early here left an older
+      // failed attempt's cohort stamp on the open address_unverified card —
+      // only address_recovered cards got the supersede reconcile — so a call
+      // that later validated directly, with no recovery involved at all, kept
+      // being excluded from the promotion cohort as stale (pre-push P1).
+      //
+      // Retiring reuses recoveryMarkerPayload's null branch: the same contract
+      // that strips provenance and stamps recovery_superseded_at, which the
+      // cohort scan already skips. One marker, one meaning — "this card's
+      // recovery evidence does not speak for the current pass" — and the
+      // operator-facing heard street and candidates are left untouched.
+      const evidence = addressRecovery?.attempted
+        ? {
+          address_as_heard: rawStreetBeforeAdopt,
+          address_candidates: addressRecovery.candidates || [],
+          recovery_method: addressRecovery.method || null,
+          recovery_prompt_version: recoveryCohortVersion(),
+        }
+        : null;
       await db('triage_items')
         .where('call_log_id', call.id)
         .whereIn('reason_code', ['address_unverified', 'address_recovered'])
@@ -8361,7 +8374,11 @@ const CallRecordingProcessor = {
             .where('call_log.processing_token', procToken);
         })
         .update({
-          payload: db.raw('coalesce(payload, \'{}\'::jsonb) || ?::jsonb', [JSON.stringify(evidence)]),
+          payload: evidence
+            // A live attempt clears any retirement a previous pass stamped —
+            // mirror images, each clearing the other's key.
+            ? db.raw('(coalesce(payload, \'{}\'::jsonb) - \'recovery_superseded_at\') || ?::jsonb', [JSON.stringify(evidence)])
+            : recoveryMarkerPayload(db, null),
           updated_at: new Date(),
         })
         .catch((e) => logger.warn(`[call-proc] address-evidence reconcile failed for ${maskSid(callSid)}: ${e.code || e.name || 'db_error'}`));

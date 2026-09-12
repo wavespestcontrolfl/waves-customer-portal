@@ -87,6 +87,20 @@ describe('classifyRecoveryCohort', () => {
     expect([...beside.stale]).toEqual(['c1']);
   });
 
+  // Failed recovery under an old version, then a later pass that validates
+  // directly: the processor retires the stale evidence with the same
+  // recovery_superseded_at marker, so the freshly processed call is admitted
+  // rather than excluded for a recovery that no longer runs (pre-push P1).
+  test('retired failed-attempt evidence stops excluding the call', () => {
+    const stillStale = classifyRecoveryCohort([card('c1', attempt(OLD))], CURRENT);
+    expect([...stillStale.stale]).toEqual(['c1']);
+
+    const retired = classifyRecoveryCohort(
+      [card('c1', { address_candidates: ['x'], recovery_superseded_at: '2026-09-12T03:00:00Z' })], CURRENT,
+    );
+    expect([...retired.stale, ...retired.unattributable]).toEqual([]);
+  });
+
   test('a malformed payload fails to prove its pass instead of throwing', () => {
     const parse = (v) => JSON.parse(v);
     expect(() => classifyRecoveryCohort([card('c1', 'not json')], CURRENT, parse)).not.toThrow();
