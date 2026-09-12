@@ -546,7 +546,12 @@ function knownWindowAtOrAfter(interactionEvents = [], fallback) {
   const at = instant(fallback.communicated_at);
   return interactionEvents.some((event) => String(event.metadata?.scheduled_service_id || '') === String(fallback.visit_id)
     && event.metadata?.rendered_slot_ms != null
-    && instant(event.metadata?.sent_at || event.created_at) >= at);
+    // The SAME precedence the interaction promise is dated by: after a
+    // successful retry its effective send time is the live em.sent_at, not
+    // the snapshot frozen at the first attempt, and comparing against the
+    // snapshot here made the suppression disagree with the promise it is
+    // suppressing for (codex P1 round 12).
+    && instant(event.provider_sent_at || event.metadata?.sent_at || event.created_at) >= at);
 }
 
 // Pure, exported for tests. One customer-notified series move -> an UNKNOWN

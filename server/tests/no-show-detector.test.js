@@ -922,6 +922,12 @@ describe('an appointment email with no interaction row still yields its promise 
     // promise (the legacy move-notice case) still has to win.
     const older = [{ metadata: { scheduled_service_id: 'visit-1', rendered_slot_ms: 1, sent_at: '2026-09-09T12:00:00.000Z' } }];
     expect(knownWindowAtOrAfter(older, fallback)).toBe(false);
+    // A row whose send succeeded on RETRY is dated by the live em.sent_at,
+    // the same precedence the promise itself uses — comparing the frozen
+    // snapshot would make the suppression disagree with it (round-12 P1).
+    const retried = [{ provider_sent_at: '2026-09-10T12:00:00.000Z',
+      metadata: { scheduled_service_id: 'visit-1', rendered_slot_ms: 1, sent_at: '2026-09-09T08:00:00.000Z' } }];
+    expect(knownWindowAtOrAfter(retried, fallback)).toBe(true);
     // An interaction row for a different visit, or one with no window, never blocks.
     expect(knownWindowAtOrAfter([{ metadata: { scheduled_service_id: 'other', rendered_slot_ms: 1, sent_at: '2026-09-10T12:00:00.000Z' } }], fallback)).toBe(false);
     expect(knownWindowAtOrAfter([{ metadata: { scheduled_service_id: 'visit-1', sent_at: '2026-09-10T12:00:00.000Z' } }], fallback)).toBe(false);
