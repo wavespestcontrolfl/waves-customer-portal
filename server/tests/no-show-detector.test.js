@@ -709,6 +709,10 @@ describe('seriesSupersessions: one series text supersedes every moved sibling (r
     expect(joinSql).toContain("a.metadata->>'series_move_id' = sm.id::text");
     expect(joinSql).toContain("a.metadata->>'series_move_id' IS NULL AND a.appointment_id = sm.anchor_service_id");
     expect(joinSql).toContain("a.sent_at >= sm.created_at AND a.sent_at < sm.created_at + interval '1 hour'");
+    // ...and only a text that actually announces a move qualifies: a 24h
+    // reminder landing in the same hour announces no series move.
+    expect(joinSql).toContain("a.metadata->>'original_message_type' LIKE 'rain_out_moved%'");
+    expect(joinSql).toContain("a.metadata->>'original_message_type' = 'reschedule_series_confirmation'");
   });
 
   test('the Quick Move moved-SMS carries the series move id it is the notification of', () => {

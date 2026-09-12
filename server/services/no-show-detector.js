@@ -323,12 +323,19 @@ async function loadPromiseEvents(conn, visitIds, { now = new Date() } = {}) {
         // its siblings holding pre-move reminders. customer_notified already
         // asserts a text went out for the move, and the pass that sends it is
         // the one that committed the move (its reconciler retries inside a
-        // 5-minute lease), so the anchor's own delivered notice within the
-        // hour after the move IS that text. Bounded on both sides so an
-        // ordinary later reminder to the anchor can never stand in for it.
+        // 5-minute lease), so the anchor's own delivered MOVE NOTICE within
+        // the hour after the move IS that text. Bounded on both sides in
+        // time, and restricted to the message types that actually announce a
+        // move (Quick Move's rain_out_moved* rungs and the series
+        // confirmation): a 24h reminder or a prep-info text that happens to
+        // land in the same hour announces no series move, and letting one
+        // stand in would supersede every sibling's promise on the strength of
+        // a text that never mentioned them (codex P1 round 7).
         this.on(conn.raw(`a.metadata->>'series_move_id' = sm.id::text
           OR (a.metadata->>'series_move_id' IS NULL AND a.appointment_id = sm.anchor_service_id
-            AND a.sent_at >= sm.created_at AND a.sent_at < sm.created_at + interval '1 hour')`));
+            AND a.sent_at >= sm.created_at AND a.sent_at < sm.created_at + interval '1 hour'
+            AND (a.metadata->>'original_message_type' LIKE 'rain_out_moved%'
+              OR a.metadata->>'original_message_type' = 'reschedule_series_confirmation'))`));
       })
       .leftJoin('sms_log as s', 's.twilio_sid', 'a.provider_message_id')
       .where('sm.customer_notified', true)
