@@ -444,8 +444,16 @@ const TwilioService = {
         limit,
       });
       const frag = String(bodyFragment || "").toLowerCase();
+      // TERMINAL NON-DELIVERY IS NOT EVIDENCE (Codex #4311 r43 P1): Twilio
+      // records failed/undelivered/canceled messages too, and a caller asking
+      // "did this ask reach the customer?" would otherwise read one of those
+      // as proof, stamp the request sent and advance the cadence on a message
+      // nobody received. The local sms_log evidence excludes exactly these.
+      const TERMINAL_TWILIO_STATUSES = new Set(["failed", "undelivered", "canceled", "cancelled"]);
       const found = messages.some(
-        (m) => m.direction !== "inbound" && String(m.body || "").toLowerCase().includes(frag),
+        (m) => m.direction !== "inbound"
+          && !TERMINAL_TWILIO_STATUSES.has(String(m.status || "").toLowerCase())
+          && String(m.body || "").toLowerCase().includes(frag),
       );
       if (found) return { found: true };
       if (messages.length >= limit) return { unavailable: true, truncated: true };
