@@ -228,12 +228,12 @@ const btnPrimary = {
   letterSpacing: "0.06em",
   cursor: "pointer",
 };
-const btnSmall = (color) => ({
+const btnSmall = (background, color = "#fff") => ({
   padding: "3px 10px",
   borderRadius: 4,
   border: "none",
-  background: color,
-  color: D.heading,
+  background,
+  color,
   fontSize: 14,
   fontWeight: 500,
   textTransform: "uppercase",
@@ -962,7 +962,10 @@ export default function ReferralsPageV2() {
                                 onClick={() =>
                                   handleStatusChange(r.id, "rejected")
                                 }
-                                style={btnSmall(`${D.red}aa`)}
+                                style={{
+                                  ...btnSmall(D.card, D.red),
+                                  border: `1px solid ${D.red}`,
+                                }}
                               >
                                 Reject
                               </button>

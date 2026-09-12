@@ -113,6 +113,7 @@ async function main() {
     errors: [],
     screenshots: [],
     geometry: [],
+    contrast: [],
   };
   let server;
   let browser;
@@ -414,6 +415,71 @@ async function main() {
     report.geometry.push({ name, measurements });
   }
 
+  async function assertButtonContrast(page, name, labels) {
+    const results = [];
+    for (const label of labels) {
+      const result = await page
+        .getByRole("button", { name: label, exact: true })
+        .evaluate((node) => {
+          const parseColor = (value) => {
+            const channels = value.match(/[\d.]+/g).map(Number);
+            return {
+              r: channels[0],
+              g: channels[1],
+              b: channels[2],
+              a: channels[3] ?? 1,
+            };
+          };
+          const composite = (top, bottom) => ({
+            r: top.r * top.a + bottom.r * (1 - top.a),
+            g: top.g * top.a + bottom.g * (1 - top.a),
+            b: top.b * top.a + bottom.b * (1 - top.a),
+            a: 1,
+          });
+          const effectiveBackground = (element) => {
+            const underneath = element.parentElement
+              ? effectiveBackground(element.parentElement)
+              : { r: 255, g: 255, b: 255, a: 1 };
+            return composite(
+              parseColor(getComputedStyle(element).backgroundColor),
+              underneath,
+            );
+          };
+          const luminance = ({ r, g, b }) => {
+            const channels = [r, g, b].map((channel) => {
+              const srgb = channel / 255;
+              return srgb <= 0.04045
+                ? srgb / 12.92
+                : ((srgb + 0.055) / 1.055) ** 2.4;
+            });
+            return (
+              0.2126 * channels[0] + 0.7152 * channels[1] + 0.0722 * channels[2]
+            );
+          };
+          const style = getComputedStyle(node);
+          const background = effectiveBackground(node);
+          const foreground = composite(parseColor(style.color), background);
+          const lighter = Math.max(
+            luminance(foreground),
+            luminance(background),
+          );
+          const darker = Math.min(luminance(foreground), luminance(background));
+          return {
+            foreground: style.color,
+            background: style.backgroundColor,
+            ratio: (lighter + 0.05) / (darker + 0.05),
+          };
+        });
+      check(
+        `${name} ${label} meets 4.5:1 rendered contrast`,
+        result.ratio >= 4.5,
+      );
+      results.push({ label, ...result });
+    }
+    report.contrast.push({ name, results });
+    return results;
+  }
+
   async function scenario(name, run) {
     stage = name;
     await run();
@@ -557,6 +623,30 @@ async function main() {
           notes: "Synthetic browser check",
         });
 
+        const queueContrast = await assertButtonContrast(
+          page,
+          `queue-${width}`,
+          ["Contacted", "Convert", "Reject"],
+        );
+        check(
+          `${width} neutral queue actions use light text on zinc`,
+          queueContrast
+            .filter(({ label }) => label !== "Reject")
+            .every(
+              ({ foreground, background }) =>
+                foreground === "rgb(255, 255, 255)" &&
+                ["rgb(24, 24, 27)", "rgb(63, 63, 70)"].includes(background),
+            ),
+        );
+        const rejectContrast = queueContrast.find(
+          ({ label }) => label === "Reject",
+        );
+        check(
+          `${width} Reject uses alert text on a white surface`,
+          rejectContrast.foreground === "rgb(163, 45, 45)" &&
+            rejectContrast.background === "rgb(255, 255, 255)",
+        );
+
         await page
           .getByRole("button", { name: "Contacted", exact: true })
           .click();
@@ -672,6 +762,16 @@ async function main() {
         await page
           .getByRole("button", { name: "Payouts", exact: true })
           .click();
+        const [approveContrast] = await assertButtonContrast(
+          page,
+          `payouts-${width}`,
+          ["Approve"],
+        );
+        check(
+          `${width} Approve uses light text on zinc`,
+          approveContrast.foreground === "rgb(255, 255, 255)" &&
+            approveContrast.background === "rgb(63, 63, 70)",
+        );
         await Promise.all([
           page.waitForResponse((response) =>
             response
