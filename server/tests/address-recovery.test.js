@@ -4,7 +4,7 @@
  * as "C Phone Trl"). All network/model calls are injected via deps.
  */
 
-const { recoverStreetAddress, houseNumberOf, fetchPhoneticStreetCandidates, recoveryCohortVersion } = require('../services/address-validation/recovery');
+const { recoverStreetAddress, houseNumberOf, fetchPhoneticStreetCandidates } = require('../services/address-validation/recovery');
 
 // The real-world shape that motivated this module: caller said "5039 Seafoam
 // Trail", the transcriber wrote "5039 C Phone Trl", AV returned
@@ -461,26 +461,5 @@ describe('recoverStreetAddress — ordinal streets are distinct premises', () =>
     });
 
     expect(out.recovered).toMatchObject({ address_line1: '11106 4th Avenue East' });
-  });
-});
-
-describe('recoveryCohortVersion', () => {
-  const original = process.env.GEMINI_RECOVERY_MODEL;
-  afterEach(() => {
-    if (original === undefined) delete process.env.GEMINI_RECOVERY_MODEL;
-    else process.env.GEMINI_RECOVERY_MODEL = original;
-  });
-
-  test('changes when the recovery model is overridden', () => {
-    delete process.env.GEMINI_RECOVERY_MODEL;
-    const asDefault = recoveryCohortVersion();
-
-    process.env.GEMINI_RECOVERY_MODEL = 'gemini-9.9-experimental';
-    expect(recoveryCohortVersion()).not.toBe(asDefault);
-    expect(recoveryCohortVersion()).toContain('gemini-9.9-experimental');
-  });
-
-  test('carries the prompt version so a prompt edit still splits the cohort', () => {
-    expect(recoveryCohortVersion()).toContain('recovery-r2-ordinal');
   });
 });

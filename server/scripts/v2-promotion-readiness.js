@@ -18,6 +18,13 @@
  * Run: railway run -s Postgres node server/scripts/v2-promotion-readiness.js
  */
 
+// Recovery attribution is being split from the address-safety change in #4437.
+// Mutable triage cards cannot establish which recovery contract produced the
+// current routing result. Refuse to issue a promotion verdict until that
+// evidence is persisted per processing pass by the metrics follow-up.
+console.error('Promotion readiness unavailable: recovery cohort attribution is pending repair (PR #4437 follow-up). Do not use historical readiness reports to promote routing.');
+process.exit(1);
+
 require('dotenv').config({ path: require('path').join(__dirname, '..', '..', '.env') });
 const {
   canAutoRoute, computeDeterministicTriageFlags, mergeTriageFlags, isInServiceAreaCounty,
@@ -31,8 +38,6 @@ const {
 const { checkTcpaConsent } = require('../services/call-routing-gates');
 const { isV2Extraction } = require('../utils/extraction-compat');
 const { PROMPT_HASH } = require('../services/prompts/call-extraction-v1');
-const { recoveryCohortVersion } = require('../services/address-validation/recovery');
-const { classifyRecoveryCohort } = require('../services/address-validation/recovery-cohort');
 const MODELS = require('../config/models');
 
 const MIN_CALLS = 100;
@@ -145,32 +150,9 @@ async function main() {
       console.log('⚠️  No cohort boundary found. If you swapped primary/fallback WITHIN the current model pair, historical rows are misattributed — re-run with --since <flip time> before trusting this verdict.');
     }
   }
-  const cohortRows = cohortSince
+  const boundedRouteRows = cohortSince
     ? allRouteRows.filter((r) => new Date(r.created_at) > cohortSince)
     : allRouteRows;
-
-  // Recovery-prompt cohort boundary (codex #4437 r2 P1). The extraction prompt
-  // hash resets the cohort when the extraction contract changes, but the
-  // PHONETIC RECOVERY prompt is a second contract on the same rows: it decides
-  // which unresolvable streets recover, and therefore which calls auto-route
-  // instead of triaging. A call whose recovery ATTEMPT ran under an older
-  // recovery prompt is evidence for that prompt's behavior, whether it
-  // recovered (excluded below by the card stamp) or failed (excluded here) —
-  // under the current prompt the same call might route the other way. Both
-  // outcomes carry the stamp, so the attempt is attributable either way.
-  const attemptCards = await db('triage_items')
-    .whereIn('call_log_id', cohortRows.map((r) => r.id))
-    .whereIn('reason_code', ['address_recovered', 'address_unverified'])
-    .select('call_log_id', 'payload', 'status', 'updated_at', 'created_at');
-  // Exactly one card speaks for each call — the latest attempt. See
-  // recovery-cohort.js for why this is not a per-card judgement: deciding it
-  // per card has now been wrong in both directions on this PR.
-  const { stale: staleRecoveryPromptCalls, unattributable: unattributableRecoveryCalls } = classifyRecoveryCohort(
-    attemptCards, recoveryCohortVersion(), parseJson,
-  );
-  const boundedRouteRows = cohortRows.filter(
-    (r) => !staleRecoveryPromptCalls.has(r.id) && !unattributableRecoveryCalls.has(r.id),
-  );
 
   // Effective-verdict reconstruction for RECOVERED addresses (codex round-11
   // P2): the processor deliberately persists the ORIGINAL unresolvable
@@ -198,7 +180,6 @@ async function main() {
   const recoveredCallIds = new Set();
   let unstampedRecoveryCards = 0;
   let staleRecoveryCards = 0;
-  let staleRecoveryPromptCards = 0;
   for (const card of recoveryCards) {
     // Card payloads are operator-visible jsonb; a malformed one must not
     // crash the whole readiness run — it just fails to prove its pass.
@@ -208,12 +189,6 @@ async function main() {
     if (!p.extraction_model || !p.extraction_prompt_version) { unstampedRecoveryCards++; continue; }
     if (p.extraction_model !== row?.ai_extraction_model
       || p.extraction_prompt_version !== row?.ai_extraction_prompt_version) { staleRecoveryCards++; continue; }
-    // The extractor cohort does not pin recovery behavior: the phonetic prompt
-    // decides which garbles recover at all. A card written under a different
-    // recovery prompt reconstructs a verdict this cohort would not reach, so it
-    // is excluded the same fail-closed way an unstamped card is. Cards from
-    // before the recovery prompt was versioned have no key and are excluded too.
-    if (p.recovery_prompt_version !== recoveryCohortVersion()) { staleRecoveryPromptCards++; continue; }
     recoveredCallIds.add(card.call_log_id);
   }
 
@@ -436,11 +411,8 @@ async function main() {
   if (failOpenRoutes.length) {
     console.log(`   ↳ ${failOpenRoutes.length} auto-route(s) excluded as on-file fail-open dispatches (not phantom — listed below).`);
   }
-  if (unstampedRecoveryCards || staleRecoveryCards || staleRecoveryPromptCards) {
-    console.log(`   ↳ address_recovered cards NOT used to reconstruct a verdict: ${unstampedRecoveryCards} unstamped (pre-2026-08-01 history), ${staleRecoveryCards} from a different extraction pass, ${staleRecoveryPromptCards} from a different recovery prompt (current: ${recoveryCohortVersion()}).`);
-  }
-  if (staleRecoveryPromptCalls.size || unattributableRecoveryCalls.size) {
-    console.log(`   ↳ recovery-prompt cohort: ${staleRecoveryPromptCalls.size} call(s) dropped (attempt ran under an older recovery prompt), ${unattributableRecoveryCalls.size} dropped as pre-stamp attempts that cannot be attributed. Current recovery prompt: ${recoveryCohortVersion()}.`);
+  if (unstampedRecoveryCards || staleRecoveryCards) {
+    console.log(`   ↳ address_recovered cards NOT used to reconstruct a verdict: ${unstampedRecoveryCards} unstamped (pre-2026-08-01 history), ${staleRecoveryCards} from a different extraction pass.`);
   }
   console.log(`6. Disagreements reviewed           : ${disagreements.length === 0 ? 'none ✅' : disagreements.length + ' need manual review ⚠️'}`);
 

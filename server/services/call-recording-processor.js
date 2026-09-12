@@ -100,7 +100,7 @@ function callExtractionV2PrimaryEnabled() {
   }
 }
 const { computeDeterministicTriageFlags, mergeTriageFlags, suppressAddressFlagsForAV, canAutoRoute, hasCanonicalWriteBlock, deriveCallReviewBridge, deriveEmailReview, mergeNeedsConfirmation, detectRentalSignal, normalizeCounty, ADVISORY_TRIAGE_FLAGS, FAIL_OPEN_KNOWN_CUSTOMER_ADDRESS_FLAGS, streetCompareKey, isMissingUnitNumber, SCHEDULING_CHANGE_REVIEW_FLAGS, statesNewAddress } = require('./call-triage-flags');
-const { recoverStreetAddress, RECOVERABLE_STATUSES, recoveryCohortVersion } = require('./address-validation/recovery');
+const { recoverStreetAddress, RECOVERABLE_STATUSES } = require('./address-validation/recovery');
 
 // The address_recovered card's pass marker, reconciled to THIS pass. The two
 // branches are mirror images and each must clear the other's keys: a pass that
@@ -114,7 +114,7 @@ const { recoverStreetAddress, RECOVERABLE_STATUSES, recoveryCohortVersion } = re
 function recoveryMarkerPayload(db, passStamp) {
   return passStamp
     ? db.raw('(coalesce(payload, \'{}\'::jsonb) - \'recovery_superseded_at\') || ?::jsonb', [JSON.stringify(passStamp)])
-    : db.raw('(coalesce(payload, \'{}\'::jsonb) - \'extraction_model\' - \'extraction_prompt_version\' - \'recovery_prompt_version\') || ?::jsonb',
+    : db.raw('(coalesce(payload, \'{}\'::jsonb) - \'extraction_model\' - \'extraction_prompt_version\') || ?::jsonb',
       [JSON.stringify({ recovery_superseded_at: new Date().toISOString() })]);
 }
 const { detectContactDictationSignals, decodeDictatedContacts, applyEmailDictationPolicy, CONTACT_DICTATION_TRANSCRIPTION_PROMPT } = require('./contact-dictation');
@@ -8275,12 +8275,6 @@ const CallRecordingProcessor = {
     const recoveryPassStamp = {
       extraction_model: v2Result?.extraction?.meta?.extraction_model || CALL_EXTRACTION_ROUTE.primary.model,
       extraction_prompt_version: v2PromptVersion,
-      // The extractor cohort does NOT identify recovery behavior: the phonetic
-      // prompt decides which garbles recover at all, and the readiness audit
-      // reconstructs an accepting verdict from this card. Same extractor with a
-      // changed recovery prompt is a DIFFERENT routing cohort, so it is stamped
-      // separately (codex #4437 r1 P1).
-      recovery_prompt_version: recoveryCohortVersion(),
     };
     // Model + prompt identifies an extractor COHORT, not an individual pass
     // (codex round-18 P2): reprocess the same call on the same extractor with
@@ -8300,6 +8294,11 @@ const CallRecordingProcessor = {
     // rather than the only check.
     await db('triage_items')
       .where({ call_log_id: call.id, reason_code: 'address_recovered' })
+      .whereExists(function owningPass() {
+        this.select(db.raw('1')).from('call_log')
+          .whereRaw('call_log.id = ?', [call.id])
+          .where('call_log.processing_token', procToken);
+      })
       .update({
         payload: recoveryMarkerPayload(db, addressRecovery?.recovered ? recoveryPassStamp : null),
         updated_at: new Date(),
@@ -8320,18 +8319,12 @@ const CallRecordingProcessor = {
           address_as_heard: rawStreetBeforeAdopt,
           address_candidates: addressRecovery.candidates || [],
           recovery_method: addressRecovery.method || null,
-          // Stamped on every ATTEMPT, not just the ones that recovered (codex
-          // #4437 r2 P1). A failed attempt is evidence too: under a different
-          // phonetic prompt that same call might have recovered and auto-routed,
-          // so its triage outcome belongs to the prompt that produced it. Without
-          // the stamp on this side, the promotion cohort silently mixes calls
-          // whose recovery ran under incompatible behavior.
-          recovery_prompt_version: recoveryCohortVersion(),
+          ...(flag === 'address_recovered' ? { recovery_superseded_at: new Date().toISOString() } : {}),
         }
         : null);
 
-    // ONE fenced reconciliation for the whole pass, run after every filing
-    // site in both modes (codex #4437 r5). Patching inserts one at a time kept
+    // Reconcile candidate evidence after every filing
+    // site in both modes. Patching inserts one at a time kept
     // leaving sites out — the two fail-open demotion loops and the dedicated
     // address_recovered branch never carried the evidence at all, and a card
     // that already existed kept a stale payload through the conflict-ignored
@@ -8343,33 +8336,17 @@ const CallRecordingProcessor = {
     // calls, so a worker that lost its claim meanwhile must not overwrite the
     // replacement pass's evidence with its own stale candidates — the same
     // processing_token predicate every other post-provider write here uses.
+    // New recovered cards start retired. Otherwise a worker that loses its
+    // claim can insert after the replacement's failed pass, making an obsolete
+    // recovery look current even though both UPDATE statements are fenced.
+    // Only this owning-pass update activates a freshly inserted recovery.
     const reconcileAddressRecoveryEvidence = async () => {
-      // A pass where recovery did NOT run must RETIRE the evidence an earlier
-      // pass left, not skip the write. Returning early here left an older
-      // failed attempt's cohort stamp on the open address_unverified card —
-      // only address_recovered cards got the supersede reconcile — so a call
-      // that later validated directly, with no recovery involved at all, kept
-      // being excluded from the promotion cohort as stale (pre-push P1).
-      //
-      // Retiring reuses recoveryMarkerPayload's null branch: the same contract
-      // that strips provenance and stamps recovery_superseded_at, which the
-      // cohort scan already skips. One marker, one meaning — "this card's
-      // recovery evidence does not speak for the current pass" — and the
-      // operator-facing heard street and candidates are left untouched.
-      const evidence = addressRecovery?.attempted
-        ? {
-          address_as_heard: rawStreetBeforeAdopt,
-          address_candidates: addressRecovery.candidates || [],
-          recovery_method: addressRecovery.method || null,
-          recovery_prompt_version: recoveryCohortVersion(),
-        }
-        : null;
-      // The marker means different things on the two card types, so they are
-      // written separately (codex #4437 r7 pre-push P1):
-      //   address_unverified  — "the recovery EVIDENCE here is retired". Any
-      //     new attempt, successful or not, makes it current again.
-      //   address_recovered   — "the recovery this card DESCRIBES is no longer
-      //     current". Only an actual recovery may clear that.
+      if (!addressRecovery?.attempted) return;
+      const evidence = {
+        address_as_heard: rawStreetBeforeAdopt,
+        address_candidates: addressRecovery.candidates || [],
+        recovery_method: addressRecovery.method || null,
+      };
       const fenceToOwningPass = (qb) => qb.whereExists(function owningPass() {
         this.select(db.raw('1')).from('call_log')
           .whereRaw('call_log.id = ?', [call.id])
@@ -8382,18 +8359,16 @@ const CallRecordingProcessor = {
 
       await onCards('address_unverified')
         .update({
-          payload: evidence
-            ? db.raw('(coalesce(payload, \'{}\'::jsonb) - \'recovery_superseded_at\') || ?::jsonb', [JSON.stringify(evidence)])
-            : recoveryMarkerPayload(db, null),
+          payload: db.raw('coalesce(payload, \'{}\'::jsonb) || ?::jsonb', [JSON.stringify(evidence)]),
           updated_at: new Date(),
         })
         .catch((e) => logger.warn(`[call-proc] address-evidence reconcile failed for ${maskSid(callSid)}: ${e.code || e.name || 'db_error'}`));
 
       await onCards('address_recovered')
         .update({
-          payload: evidence
-            ? db.raw(`(coalesce(payload, '{}'::jsonb) ${addressRecovery?.recovered ? "- 'recovery_superseded_at'" : ''}) || ?::jsonb`, [JSON.stringify(evidence)])
-            : recoveryMarkerPayload(db, null),
+          payload: addressRecovery?.recovered
+            ? recoveryMarkerPayload(db, { ...evidence, ...recoveryPassStamp })
+            : db.raw('coalesce(payload, \'{}\'::jsonb) || ?::jsonb', [JSON.stringify(evidence)]),
           updated_at: new Date(),
         })
         .catch((e) => logger.warn(`[call-proc] address-evidence reconcile failed for ${maskSid(callSid)}: ${e.code || e.name || 'db_error'}`));
@@ -8546,7 +8521,7 @@ const CallRecordingProcessor = {
                   address_recovered: addressRecovery.recovered.address_line1,
                   address_candidates: addressRecovery.candidates || [],
                   recovery_method: addressRecovery.method || null,
-                  ...recoveryPassStamp,
+                  recovery_superseded_at: new Date().toISOString(),
                   ...(contactDictation?.addresses?.[0]?.confirmation_question
                     ? { confirmation_question: contactDictation.addresses[0].confirmation_question } : {}),
                 },
@@ -8911,16 +8886,11 @@ const CallRecordingProcessor = {
                   extraPayload: flag === 'missing_last_name' ? {
                     heard_name_v1: { first_name: extracted?.first_name ?? null, last_name: extracted?.last_name ?? null },
                   } : (isAddressFlag && addressRecovery?.attempted) ? {
-                    // Built from the SAME helper the enforce sites use, so the
-                    // recovery prompt version rides on FAILED attempts here too
-                    // (codex #4437 r3 P1). This is the site that files in SHADOW
-                    // mode — exactly the cohort the promotion gate audits — so an
-                    // unstamped failure HERE is the one that pools calls whose
-                    // recovery ran under incompatible behavior.
+                    // The same candidate evidence as the enforce path.
                     ...addressRecoveryPayload(flag),
                     address_recovered: flag === 'address_recovered' ? extracted.address_line1 : null,
-                    // Same pass stamp the enforce site writes.
-                    ...(flag === 'address_recovered' ? recoveryPassStamp : {}),
+                    // Inserts start retired; only the owning reconcile can activate them.
+                    ...(flag === 'address_recovered' ? { recovery_superseded_at: new Date().toISOString() } : {}),
                     ...(contactDictation?.addresses?.[0]?.confirmation_question
                       ? { confirmation_question: contactDictation.addresses[0].confirmation_question } : {}),
                   } : null,

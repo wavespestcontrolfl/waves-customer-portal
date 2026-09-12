@@ -21,7 +21,7 @@ jest.setTimeout(60000);
 
 (SKIP ? describe.skip : describe)('recovery marker reconcile on PostgreSQL', () => {
   const schema = `recovery_marker_${randomUUID().replaceAll('-', '')}`;
-  const STAMP = { extraction_model: 'gpt-5.6-sol', extraction_prompt_version: 'v6-abc', recovery_prompt_version: 'recovery-r2-ordinal' };
+  const STAMP = { extraction_model: 'gpt-5.6-sol', extraction_prompt_version: 'v6-abc' };
   let database;
 
   beforeAll(async () => {
@@ -57,10 +57,6 @@ jest.setTimeout(60000);
 
     expect(after.extraction_model).toBeUndefined();
     expect(after.extraction_prompt_version).toBeUndefined();
-    // The recovery cohort stamp is provenance too: leaving it on a superseded
-    // card made the readiness scan exclude a call whose latest pass validated
-    // directly and never ran recovery at all.
-    expect(after.recovery_prompt_version).toBeUndefined();
     expect(typeof after.recovery_superseded_at).toBe('string');
     // Operator-facing evidence is never collateral damage.
     expect(after.address_as_heard).toBe('100 Port Ave East');
