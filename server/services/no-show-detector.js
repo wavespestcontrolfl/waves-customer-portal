@@ -473,7 +473,15 @@ async function loadPromiseEvents(conn, visitIds, { now = new Date() } = {}) {
         this.on(conn.raw(`fb.action = 'visit_window_promised'
           AND fb.metadata->>'series_move_id' = sm.id::text`));
       })
+      // Held to the SAME delivery bar as the audit-row proof below: the
+      // fallback row carries the sid it was accepted under, so the carrier's
+      // later word still governs — a text the customer never received
+      // supersedes nothing (codex P1 round 14). Unlinked stays neutral, which
+      // is the fallback's premise.
+      .leftJoin('sms_log as fbs', 'fbs.twilio_sid', conn.raw("fb.metadata->>'provider_sid'"))
       .where('sm.customer_notified', true).where('fb.created_at', '<=', now)
+      .where((qb) => qb.whereRaw("fb.metadata->>'provider_sid' IS NULL").orWhereNull('fbs.id')
+        .orWhereIn('fbs.status', DELIVERED_SMS_STATUSES))
       .whereRaw("sm.rows @> ANY (SELECT jsonb_build_array(jsonb_build_object('id', v)) FROM unnest(?::text[]) AS v)", [visitIds])
       .select('sm.id', 'sm.anchor_service_id', 'sm.rows', conn.raw("(fb.metadata->>'communicated_at')::timestamptz as sent_at")),
     () => conn('series_moves as sm')

@@ -1122,7 +1122,12 @@ describe('recordSentWindowFallback (the audit row failed, the text went out) (ro
     expect(detector).toContain("fb.action = 'visit_window_promised'");
     expect(detector).toContain("AND fb.metadata->>'series_move_id' = sm.id::text");
     const sender = require('fs').readFileSync(require('path').join(__dirname, '..', 'services', 'messaging', 'send-customer-message.js'), 'utf8');
-    expect(sender).toContain("seriesMoveId: sendInput.metadata?.series_move_id || null,");
+    // ...and only for the series confirmation: the placement confirmation
+    // carries the same move id but supersedes nothing (round-14 P1).
+    expect(sender).toContain("sendInput.metadata?.original_message_type === 'reschedule_series_confirmation'");
+    // The fallback proof is held to the same delivery bar as the audit row.
+    expect(detector).toContain("fbs.twilio_sid");
+    expect(detector).toContain("orWhereIn('fbs.status', DELIVERED_SMS_STATUSES)");
   });
 
   test('a send with no visit or no rendered slot writes nothing', async () => {

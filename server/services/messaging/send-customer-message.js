@@ -623,10 +623,14 @@ async function recordPromiseEvidenceFallback(sendInput, providerOutcome, audit) 
     visitId: sendInput.appointmentId, startAtMs: sendInput.renderedSlotMs,
     communicatedAt: providerOutcome.sentAt || new Date(),
     providerSid: providerOutcome.provider === 'push' ? null : providerSid,
-    // A series confirmation also proves every sibling the move touched was
-    // superseded; the detector reads that from the audit row we just failed
-    // to write, so it has to ride along here (codex P1, PR #4403 round 14).
-    seriesMoveId: sendInput.metadata?.series_move_id || null,
+    // ONLY the series confirmation proves the siblings were superseded, and
+    // only that message type: the placement confirmation carries the same
+    // move id but its copy says later commitments stand until staff review,
+    // and Quick Move's moved-SMS names the anchor alone (codex P1, PR #4403
+    // rounds 12 and 14). The detector reads this proof from the audit row we
+    // just failed to write, so it rides along here.
+    seriesMoveId: sendInput.metadata?.original_message_type === 'reschedule_series_confirmation'
+      ? sendInput.metadata?.series_move_id || null : null,
   }).catch(() => {});
 }
 
