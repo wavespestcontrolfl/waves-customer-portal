@@ -4430,8 +4430,15 @@ const ReviewService = {
           let started = false;
           let verdict;
           try {
-            verdict = await require("./visit-completion-summary").reviewSendThroughSummaryHandoff(request?.service_record_id, async () => {
+            verdict = await require("./visit-completion-summary").reviewSendThroughSummaryHandoff(request?.service_record_id, async (trx, onProviderStart) => {
               started = true;
+              // The handoff's own provider-boundary callback (local audit):
+              // without it the handoff counts this send as undispatched and
+              // releases the claim even when SendGrid accepted the message
+              // and the request threw afterwards — the sequence would then
+              // retry and the library re-sends a failed record under the
+              // same idempotency key.
+              if (typeof onProviderStart === "function") onProviderStart();
               await dispatch();
               return { ok: true };
             }, undefined, { requestId: request?.id });
