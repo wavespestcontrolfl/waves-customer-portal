@@ -335,16 +335,20 @@ async function applyApprovedRouteOrder({ date, approvedIds, services, lockKeys, 
       // added since the confirm preflight would sit ungoverned beside (or
       // collide with) the approved 1..N sequence, so the eligible set must
       // match the approved set exactly under the locks.
-      const eligibleRows = await loadEligibleIds(trx);
-      const eligible = eligibleRows.map((row) => String(row.id ?? row));
+      // The WHOLE day under the lock, ungeocoded rows included: an
+      // appointment without a pin added in the gap is exactly what the
+      // COORDLESS_STOPS guard refuses, and filtering it out here would hide
+      // it while the ids and signatures still matched (codex #4430 r3 P1).
+      const dayRows = await loadEligibleIds(trx);
       const approvedSet = new Set(approvedIds);
-      if (eligible.length !== approvedIds.length || eligible.some((id) => !approvedSet.has(id))) {
+      const geocodedIds = dayRows.filter((row) => row.lat && row.lng).map((row) => String(row.id));
+      if (geocodedIds.length !== approvedIds.length || geocodedIds.some((id) => !approvedSet.has(id))) {
         throw Object.assign(new Error('stop set changed'), { code: 'STALE_OPTIMIZE_SET' });
       }
-      // Guard inputs too, not just membership: the same fence the admin
-      // endpoints apply (codex #4430 r3 P1).
-      if (eligibleRows.some((row) => row && typeof row === 'object' && row.window_start !== undefined
-        && routeWriteGuardSignature(row) !== guardSnapshot.get(String(row.id)))) {
+      // Membership over the full day, then the guard inputs themselves — the
+      // same fence the admin endpoints apply.
+      if (dayRows.length !== guardSnapshot.size
+        || dayRows.some((row) => routeWriteGuardSignature(row) !== guardSnapshot.get(String(row.id)))) {
         throw Object.assign(new Error('guard inputs changed'), { code: 'STALE_OPTIMIZE_SET' });
       }
       for (let i = 0; i < approvedIds.length; i++) {
@@ -437,7 +441,7 @@ async function optimizeAllRoutes(input) {
         excludeStatuses: ['cancelled', 'completed', 'rescheduled'],
         select: ['scheduled_services.id',
           ...ROUTE_WRITE_GUARD_COLUMNS.map((c) => `scheduled_services.${c}`), ...guardedCoordSelects(trx)],
-      })).filter((s) => s.lat && s.lng),
+      })),
     });
   }
 
@@ -597,7 +601,7 @@ async function optimizeTechRoute(input) {
         excludeStatuses: ['cancelled', 'completed', 'rescheduled'],
         select: ['scheduled_services.id',
           ...ROUTE_WRITE_GUARD_COLUMNS.map((c) => `scheduled_services.${c}`), ...guardedCoordSelects(trx)],
-      })).filter((s) => s.lat && s.lng),
+      })),
     });
     return applied.success ? { ...applied, tech: tech.name } : applied;
   }
