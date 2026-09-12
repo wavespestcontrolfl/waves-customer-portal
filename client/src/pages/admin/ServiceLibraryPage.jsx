@@ -122,6 +122,37 @@ const CLOSEOUT_REQUIREMENT_FIELDS = [
   "closeout_requirements_source",
 ];
 
+const SERVICE_SEARCH_FIELDS = [
+  "name",
+  "short_name",
+  "service_key",
+  "description",
+];
+
+const isActiveCatalogService = (service) =>
+  service.is_active !== false && !service.is_archived;
+
+const SERVICE_VIEW_PREDICATES = {
+  all: isActiveCatalogService,
+  "view:waveguard": (service) =>
+    isActiveCatalogService(service) && service.is_waveguard,
+  "view:recurring": (service) =>
+    isActiveCatalogService(service) && service.billing_type === "recurring",
+  "view:onetime": (service) =>
+    isActiveCatalogService(service) && service.billing_type === "one_time",
+  "view:inactive": (service) =>
+    service.is_active === false && !service.is_archived,
+  "view:archived": (service) => service.is_archived,
+  ...Object.fromEntries(
+    CATEGORIES.map((category) => [
+      `category:${category.value}`,
+      (service) =>
+        isActiveCatalogService(service) &&
+        (service.category || "other") === category.value,
+    ]),
+  ),
+};
+
 function cleanName(service) {
   return String(service?.name || "")
     .replace(/\s*WaveGuard\s*$/i, "")
@@ -172,6 +203,13 @@ function priceLabel(service) {
     return price ? "$" + price.toFixed(0) : "Variable";
   }
   return price ? "$" + price.toFixed(0) : "—";
+}
+
+function variablePriceSuffix(service) {
+  if (service?.pricing_type === "variable" && Number(service?.base_price) > 0) {
+    return "variable";
+  }
+  return "";
 }
 
 function categoryLabel(value) {
@@ -518,6 +556,10 @@ function normalizeTab(value) {
   return ["discounts", "protocols"].includes(value) ? value : "catalog";
 }
 
+function ownValue(record, key) {
+  return Object.hasOwn(record, key) ? record[key] : null;
+}
+
 function RailItem({ label, count, active, onClick }) {
   return (
     <Button
@@ -613,6 +655,47 @@ function ServiceListRow({ svc, selected, onSelect }) {
   );
 }
 
+function ServiceRows({
+  loading,
+  services,
+  selectedId,
+  showNew,
+  onSelect,
+  renderDetail,
+}) {
+  if (loading) {
+    return (
+      <div className="p-8 text-center text-ink-secondary">
+        Loading services…
+      </div>
+    );
+  }
+  if (services.length === 0) {
+    return (
+      <div className="p-8 text-center text-ink-secondary">
+        No services found
+      </div>
+    );
+  }
+  return services.map((service) => {
+    const row = (
+      <ServiceListRow
+        key={service.id}
+        svc={service}
+        selected={selectedId === service.id && !showNew}
+        onSelect={() => onSelect(service)}
+      />
+    );
+    if (!renderDetail) return row;
+    return (
+      <div key={service.id}>
+        {row}
+        {renderDetail(service)}
+      </div>
+    );
+  });
+}
+
 function DetailPane({
   svc,
   creating,
@@ -653,7 +736,7 @@ function DetailPane({
           Select a service to view details
         </div>
         <div className="text-ui-caption">
-          Or select Add Service to create one.
+          Or click <strong>+ Add Service</strong> to create one.
         </div>
       </div>
     );
@@ -661,6 +744,121 @@ function DetailPane({
 
   const products = parseProducts(svc);
   const closeoutRequirements = closeoutRequirementLabels(svc);
+  const headlineFacts = [
+    {
+      key: "billing",
+      visible: true,
+      value: [billingLabel(svc.billing_type), frequencyLabel(svc.frequency)]
+        .filter(Boolean)
+        .join(" · "),
+    },
+    {
+      key: "price",
+      visible: true,
+      value: [priceLabel(svc), variablePriceSuffix(svc)]
+        .filter(Boolean)
+        .join(" · "),
+    },
+    {
+      key: "duration",
+      visible: svc.default_duration_minutes > 0,
+      value: `${svc.default_duration_minutes} min`,
+    },
+    {
+      key: "visits",
+      visible: svc.visits_per_year > 0,
+      value: `${svc.visits_per_year} visits/yr`,
+    },
+  ]
+    .filter((fact) => fact.visible)
+    .map((fact) => fact.value)
+    .join(" · ");
+  const requirementItems = [
+    {
+      key: "license",
+      label: "License",
+      value: svc.license_category,
+      visible: Boolean(svc.license_category),
+    },
+    {
+      key: "skill",
+      label: "Min Skill",
+      value: `Level ${svc.min_tech_skill_level}`,
+      visible: svc.min_tech_skill_level > 1,
+    },
+    {
+      key: "follow-up",
+      label: "Follow-up",
+      value: `${[svc.follow_up_interval_days, "—"].find(Boolean)} days`,
+      visible: Boolean(svc.requires_follow_up),
+    },
+  ].filter((item) => item.visible);
+  const summarySections = [
+    {
+      key: "description",
+      visible: Boolean(svc.description),
+      content: (
+        <section key="description">
+          <h3 className="mb-1 text-ui-body font-medium text-zinc-900">
+            Description
+          </h3>
+          <p className="m-0 text-ui-body text-zinc-800">{svc.description}</p>
+        </section>
+      ),
+    },
+    {
+      key: "products",
+      visible: products.length > 0,
+      content: (
+        <section key="products">
+          <h3 className="mb-2 text-ui-body font-medium text-zinc-900">
+            Default Products
+          </h3>
+          <div className="flex flex-wrap gap-2">
+            {products.map((product, index) => (
+              <Badge key={index}>{product}</Badge>
+            ))}
+          </div>
+        </section>
+      ),
+    },
+    {
+      key: "closeout",
+      visible: closeoutRequirements.length > 0,
+      content: (
+        <section key="closeout">
+          <h3 className="mb-2 text-ui-body font-medium text-zinc-900">
+            Closeout Requirements
+          </h3>
+          <div className="flex flex-wrap gap-2">
+            {closeoutRequirements.map((item) => (
+              <Badge key={item}>{item}</Badge>
+            ))}
+            <Badge>{svc.closeout_requirements_source || "inferred_v1"}</Badge>
+          </div>
+        </section>
+      ),
+    },
+    {
+      key: "requirements",
+      visible: [
+        svc.requires_license,
+        svc.license_category,
+        svc.min_tech_skill_level > 1,
+        svc.requires_follow_up,
+      ].some(Boolean),
+      content: (
+        <dl key="requirements" className="flex flex-wrap gap-x-6 gap-y-3">
+          {requirementItems.map((item) => (
+            <div key={item.key}>
+              <dt className="font-medium text-zinc-900">{item.label}</dt>
+              <dd className="m-0 text-ink-secondary">{item.value}</dd>
+            </div>
+          ))}
+        </dl>
+      ),
+    },
+  ].filter((section) => section.visible);
 
   const handleDelete = async () => {
     if (
@@ -709,8 +907,9 @@ function DetailPane({
     <div className="h-full min-h-0 overflow-y-auto" key={svc.id}>
       <div className="sticky top-0 z-[1] border-b border-hairline border-zinc-200 bg-white px-4 py-4 sm:px-6">
         <div className="text-ui-caption text-ink-secondary">
-          {categoryLabel(svc.category)}
-          {svc.subcategory ? " · " + svc.subcategory : ""}
+          {[categoryLabel(svc.category), svc.subcategory]
+            .filter(Boolean)
+            .join(" · ")}
         </div>
         <div className="mt-1 flex flex-wrap items-start justify-between gap-3">
           <h2 className="m-0 flex flex-wrap items-center gap-2 text-22 font-medium leading-[1.3] text-zinc-950">
@@ -729,102 +928,13 @@ function DetailPane({
             </Button>
           )}
         </div>
-        <div className="u-nums mt-3 flex flex-wrap items-center gap-x-3 gap-y-1 text-ui-body text-ink-secondary">
-          <span className="font-medium text-zinc-900">
-            {billingLabel(svc.billing_type)}
-            {svc.frequency ? " · " + frequencyLabel(svc.frequency) : ""}
-          </span>
-          <span aria-hidden>·</span>
-          <span className="font-medium text-zinc-900">
-            {priceLabel(svc)}
-            {svc.pricing_type === "variable" && Number(svc.base_price) > 0
-              ? " · variable"
-              : ""}
-          </span>
-          {svc.default_duration_minutes > 0 && (
-            <>
-              <span aria-hidden>·</span>
-              <span className="font-medium text-zinc-900">
-                {svc.default_duration_minutes} min
-              </span>
-            </>
-          )}
-          {svc.visits_per_year > 0 && (
-            <>
-              <span aria-hidden>·</span>
-              <span className="font-medium text-zinc-900">
-                {svc.visits_per_year} visits/yr
-              </span>
-            </>
-          )}
+        <div className="u-nums mt-3 text-ui-body font-medium text-zinc-900">
+          {headlineFacts}
         </div>
       </div>
 
       <div className="space-y-4 px-4 pt-5 sm:px-6">
-        {svc.description && (
-          <section>
-            <h3 className="mb-1 text-ui-body font-medium text-zinc-900">
-              Description
-            </h3>
-            <p className="m-0 text-ui-body text-zinc-800">{svc.description}</p>
-          </section>
-        )}
-        {products.length > 0 && (
-          <section>
-            <h3 className="mb-2 text-ui-body font-medium text-zinc-900">
-              Default Products
-            </h3>
-            <div className="flex flex-wrap gap-2">
-              {products.map((product, index) => (
-                <Badge key={index}>{product}</Badge>
-              ))}
-            </div>
-          </section>
-        )}
-        {closeoutRequirements.length > 0 && (
-          <section>
-            <h3 className="mb-2 text-ui-body font-medium text-zinc-900">
-              Closeout Requirements
-            </h3>
-            <div className="flex flex-wrap gap-2">
-              {closeoutRequirements.map((item) => (
-                <Badge key={item}>{item}</Badge>
-              ))}
-              <Badge>{svc.closeout_requirements_source || "inferred_v1"}</Badge>
-            </div>
-          </section>
-        )}
-        {(svc.requires_license ||
-          svc.license_category ||
-          svc.min_tech_skill_level > 1 ||
-          svc.requires_follow_up) && (
-          <dl className="flex flex-wrap gap-x-6 gap-y-3">
-            {svc.license_category && (
-              <div>
-                <dt className="font-medium text-zinc-900">License</dt>
-                <dd className="m-0 text-ink-secondary">
-                  {svc.license_category}
-                </dd>
-              </div>
-            )}
-            {svc.min_tech_skill_level > 1 && (
-              <div>
-                <dt className="font-medium text-zinc-900">Min Skill</dt>
-                <dd className="m-0 text-ink-secondary">
-                  Level {svc.min_tech_skill_level}
-                </dd>
-              </div>
-            )}
-            {svc.requires_follow_up && (
-              <div>
-                <dt className="font-medium text-zinc-900">Follow-up</dt>
-                <dd className="m-0 text-ink-secondary">
-                  {svc.follow_up_interval_days || "—"} days
-                </dd>
-              </div>
-            )}
-          </dl>
-        )}
+        {summarySections.map((section) => section.content)}
       </div>
 
       <div className="p-4 sm:p-6">
@@ -907,7 +1017,7 @@ export default function ServiceLibraryPage() {
     normalizeTab(searchParams.get("tab")),
   );
   const [isTablet, setIsTablet] = useState(
-    () => typeof window !== "undefined" && window.innerWidth < 1024,
+    () => typeof window !== "undefined" && window.innerWidth < 1280,
   );
 
   useRenderedTabBeacon(
@@ -917,7 +1027,7 @@ export default function ServiceLibraryPage() {
   );
 
   useEffect(() => {
-    const onResize = () => setIsTablet(window.innerWidth < 1024);
+    const onResize = () => setIsTablet(window.innerWidth < 1280);
     window.addEventListener("resize", onResize);
     return () => window.removeEventListener("resize", onResize);
   }, []);
@@ -974,91 +1084,57 @@ export default function ServiceLibraryPage() {
     );
   }
 
+  const activeServices = services.filter(isActiveCatalogService);
   const counts = {
-    all: 0,
-    waveguard: 0,
-    recurring: 0,
-    onetime: 0,
-    inactive: 0,
-    archived: 0,
-    byCategory: {},
+    all: activeServices.length,
+    waveguard: activeServices.filter((service) => service.is_waveguard).length,
+    recurring: activeServices.filter(
+      (service) => service.billing_type === "recurring",
+    ).length,
+    onetime: activeServices.filter(
+      (service) => service.billing_type === "one_time",
+    ).length,
+    inactive: services.filter(SERVICE_VIEW_PREDICATES["view:inactive"]).length,
+    archived: services.filter(SERVICE_VIEW_PREDICATES["view:archived"]).length,
+    byCategory: activeServices.reduce((byCategory, service) => {
+      const category = service.category || "other";
+      byCategory[category] = (byCategory[category] || 0) + 1;
+      return byCategory;
+    }, {}),
   };
-  for (const service of services) {
-    if (service.is_archived) {
-      counts.archived += 1;
-      continue;
-    }
-    if (service.is_active === false) {
-      counts.inactive += 1;
-      continue;
-    }
-    counts.all += 1;
-    if (service.is_waveguard) counts.waveguard += 1;
-    if (service.billing_type === "recurring") counts.recurring += 1;
-    if (service.billing_type === "one_time") counts.onetime += 1;
-    const category = service.category || "other";
-    counts.byCategory[category] = (counts.byCategory[category] || 0) + 1;
-  }
 
-  let viewFiltered = services;
-  if (selectedView === "all")
-    viewFiltered = viewFiltered.filter(
-      (service) => service.is_active !== false && !service.is_archived,
-    );
-  else if (selectedView === "view:waveguard")
-    viewFiltered = viewFiltered.filter(
-      (service) =>
-        service.is_waveguard &&
-        service.is_active !== false &&
-        !service.is_archived,
-    );
-  else if (selectedView === "view:recurring")
-    viewFiltered = viewFiltered.filter(
-      (service) =>
-        service.billing_type === "recurring" &&
-        service.is_active !== false &&
-        !service.is_archived,
-    );
-  else if (selectedView === "view:onetime")
-    viewFiltered = viewFiltered.filter(
-      (service) =>
-        service.billing_type === "one_time" &&
-        service.is_active !== false &&
-        !service.is_archived,
-    );
-  else if (selectedView === "view:inactive")
-    viewFiltered = viewFiltered.filter(
-      (service) => service.is_active === false && !service.is_archived,
-    );
-  else if (selectedView === "view:archived")
-    viewFiltered = viewFiltered.filter((service) => service.is_archived);
-  else if (selectedView.startsWith("category:")) {
-    const category = selectedView.slice("category:".length);
-    viewFiltered = viewFiltered.filter(
-      (service) =>
-        (service.category || "other") === category &&
-        service.is_active !== false &&
-        !service.is_archived,
-    );
-  }
-  if (search.trim()) {
-    const query = search.trim().toLowerCase();
-    viewFiltered = viewFiltered.filter(
-      (service) =>
-        (service.name || "").toLowerCase().includes(query) ||
-        (service.short_name || "").toLowerCase().includes(query) ||
-        (service.service_key || "").toLowerCase().includes(query) ||
-        (service.description || "").toLowerCase().includes(query),
-    );
-  }
-  viewFiltered = [...viewFiltered].sort(
-    (a, b) =>
-      (a.sort_order ?? 999) - (b.sort_order ?? 999) ||
-      (a.name || "").localeCompare(b.name || ""),
+  const configuredViewPredicate = ownValue(
+    SERVICE_VIEW_PREDICATES,
+    selectedView,
   );
+  const viewPredicate = configuredViewPredicate || (() => true);
+  const query = search.trim().toLowerCase();
+  const viewFiltered = services
+    .filter(viewPredicate)
+    .filter(
+      (service) =>
+        !query ||
+        SERVICE_SEARCH_FIELDS.some((field) =>
+          String(service[field] || "")
+            .toLowerCase()
+            .includes(query),
+        ),
+    )
+    .sort(
+      (a, b) =>
+        (a.sort_order ?? 999) - (b.sort_order ?? 999) ||
+        (a.name || "").localeCompare(b.name || ""),
+    );
 
-  const selectedSvc =
-    services.find((service) => service.id === selectedId) || null;
+  const selectedSvc = services.find((service) => service.id === selectedId);
+  const {
+    actions: secondaryActions,
+    sections: secondarySections = [],
+    activeKey: secondaryActiveKey,
+    onChange: onSecondaryChange,
+    ariaLabel: secondaryAriaLabel,
+    navGridClassName: secondaryNavGridClassName,
+  } = secondary ?? {};
   const handleCreate = async (data) => {
     const created = await aFetch("/admin/services", {
       method: "POST",
@@ -1090,31 +1166,18 @@ export default function ServiceLibraryPage() {
     setSelectedView(value);
     setSelectedId(null);
   };
-
-  const serviceList = (
-    <div className="min-h-0 flex-1 overflow-y-auto">
-      {loading ? (
-        <div className="p-8 text-center text-ink-secondary">
-          Loading services…
-        </div>
-      ) : viewFiltered.length === 0 ? (
-        <div className="p-8 text-center text-ink-secondary">
-          No services found
-        </div>
-      ) : (
-        viewFiltered.map((service) => (
-          <ServiceListRow
-            key={service.id}
-            svc={service}
-            selected={selectedId === service.id && !showNew}
-            onSelect={() => {
-              setSelectedId(service.id);
-              setShowNew(false);
-            }}
-          />
-        ))
-      )}
-    </div>
+  const headerAction = ownValue(
+    {
+      catalog: {
+        label: "Add Service",
+        icon: Plus,
+        onClick: () => {
+          setShowNew(true);
+          setSelectedId(null);
+        },
+      },
+    },
+    tab,
   );
 
   return (
@@ -1131,30 +1194,19 @@ export default function ServiceLibraryPage() {
         onSectionChange={setTab}
         ariaLabel="Services section"
         navGridClassName="grid-cols-1 sm:grid-cols-3"
-        actions={secondary?.actions}
-        secondarySections={secondary?.sections || []}
-        secondaryActiveKey={secondary?.activeKey}
-        onSecondaryChange={secondary?.onChange}
-        secondaryAriaLabel={secondary?.ariaLabel}
-        secondaryNavGridClassName={secondary?.navGridClassName}
-        action={
-          tab === "catalog"
-            ? {
-                label: "Add Service",
-                icon: Plus,
-                onClick: () => {
-                  setShowNew(true);
-                  setSelectedId(null);
-                },
-              }
-            : null
-        }
+        actions={secondaryActions}
+        secondarySections={secondarySections}
+        secondaryActiveKey={secondaryActiveKey}
+        onSecondaryChange={onSecondaryChange}
+        secondaryAriaLabel={secondaryAriaLabel}
+        secondaryNavGridClassName={secondaryNavGridClassName}
+        action={headerAction}
       />
 
       {toast && (
-        <div className="fixed right-5 top-[calc(20px+env(safe-area-inset-top,0px))] z-[80]">
-          <ActionFeedback>{toast}</ActionFeedback>
-        </div>
+        <ActionFeedback className="pointer-events-none fixed right-[calc(20px+env(safe-area-inset-right,0px))] top-[calc(20px+env(safe-area-inset-top,0px))] z-[300] max-w-[calc(100vw-40px)] rounded-md border-hairline border-zinc-200 bg-white px-3.5 py-3 shadow-lg">
+          {toast}
+        </ActionFeedback>
       )}
       {tab === "catalog" && loadError && (
         <Card className="mb-3">
@@ -1196,46 +1248,36 @@ export default function ServiceLibraryPage() {
               </Card>
             )}
             <Card className="overflow-hidden">
-              {loading ? (
-                <div className="p-8 text-center text-ink-secondary">
-                  Loading services…
-                </div>
-              ) : viewFiltered.length === 0 ? (
-                <div className="p-8 text-center text-ink-secondary">
-                  No services found
-                </div>
-              ) : (
-                viewFiltered.map((service) => {
+              <ServiceRows
+                loading={loading}
+                services={viewFiltered}
+                selectedId={selectedId}
+                showNew={showNew}
+                onSelect={(service) => {
                   const open = selectedId === service.id;
-                  return (
-                    <div key={service.id}>
-                      <ServiceListRow
+                  setSelectedId(open ? null : service.id);
+                  setShowNew(false);
+                }}
+                renderDetail={(service) =>
+                  selectedId === service.id ? (
+                    <div className="border-b border-hairline border-zinc-200 bg-zinc-50">
+                      <DetailPane
                         svc={service}
-                        selected={open}
-                        onSelect={() => {
-                          setSelectedId(open ? null : service.id);
-                          setShowNew(false);
-                        }}
+                        onUpdated={handleUpdated}
+                        onDeleted={handleDeleted}
                       />
-                      {open && (
-                        <div className="border-b border-hairline border-zinc-200 bg-zinc-50">
-                          <DetailPane
-                            svc={service}
-                            onUpdated={handleUpdated}
-                            onDeleted={handleDeleted}
-                          />
-                        </div>
-                      )}
                     </div>
-                  );
-                })
-              )}
+                  ) : null
+                }
+              />
             </Card>
           </div>
         ) : (
           <Card
             className="grid min-h-[420px] grid-cols-[210px_360px_minmax(0,1fr)] overflow-hidden"
-            style={{ height: "clamp(420px, calc(100dvh - 240px), 760px)" }}
+            style={{
+              height: "clamp(420px, calc(100dvh - 240px), 760px)",
+            }}
           >
             <aside
               className="min-h-0 overflow-y-auto border-r border-hairline border-zinc-200 bg-zinc-50 p-2"
@@ -1317,7 +1359,18 @@ export default function ServiceLibraryPage() {
                   {viewFiltered.length === 1 ? "service" : "services"}
                 </div>
               </div>
-              {serviceList}
+              <div className="min-h-0 flex-1 overflow-y-auto">
+                <ServiceRows
+                  loading={loading}
+                  services={viewFiltered}
+                  selectedId={selectedId}
+                  showNew={showNew}
+                  onSelect={(service) => {
+                    setSelectedId(service.id);
+                    setShowNew(false);
+                  }}
+                />
+              </div>
             </section>
             <section
               className="min-h-0 min-w-0 bg-white"
