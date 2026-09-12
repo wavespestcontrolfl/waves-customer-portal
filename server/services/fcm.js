@@ -141,14 +141,22 @@ function classifyFcmResponse(status, errorCode, retryAfter) {
  * { ok } | { skipped } | { expired } | { failed } — so a config mistake fails
  * soft and never aborts the surrounding send loop (sendToCustomer / sendToAdmins).
  */
-function send(deviceToken, notification) {
+function send(deviceToken, notification, { shouldContinue = null } = {}) {
   return new Promise((resolve) => {
     if (!configured) return resolve({ ok: false, skipped: true, reason: 'fcm_not_configured' });
     if (!deviceToken) return resolve({ ok: false, failed: true, reason: 'missing_device_token' });
 
     getAccessToken()
-      .then((token) => {
+      .then(async (token) => {
         if (!token) return resolve({ ok: false, failed: true, retryable: true, reason: 'fcm_token_unavailable' });
+
+        // OAuth can take most of the caller's send window. Recheck only after
+        // it resolves and immediately before constructing the provider request.
+        if (typeof shouldContinue === 'function') {
+          let proceed = false;
+          try { proceed = await shouldContinue(); } catch { proceed = false; }
+          if (!proceed) return resolve({ ok: false, skipped: true, reason: 'pre_send_check_blocked' });
+        }
 
         let body;
         try {

@@ -1515,6 +1515,9 @@ module.exports._test = { sanitizeRecommendationsAgainstTreatment, contradictsApp
 // as the last line of defense for instantly opened report links.
 module.exports.sealRecommendationsForSend = sealForSend;
 module.exports.renewRecommendationSendSeal = renewSendSeal;
+// Callers can carry a conservative renewal deadline through later provider
+// preparation without duplicating this lease duration.
+module.exports.SEND_SEAL_MS = SEND_SEAL_MS;
 module.exports.releaseRecommendationSendSeal = releaseSendSeal;
 module.exports.treatmentGuard = {
   sanitizeRecommendationsAgainstTreatment,
