@@ -294,4 +294,25 @@ describe('a successful recovery supersedes the same call\'s stale hold', () => {
     expect(notice.reason).toBe('the address from the call did not validate');
     expect(notice.heard).toBe('100 Port Ave East');
   });
+
+  it('a retired recovery does NOT outrank the same call\'s current unit ask', () => {
+    const notice = addressAskNotice([
+      ask('address_unverified', null, 'call-1'),
+      ask('missing_unit_number', null, 'call-1'),
+      ask('address_recovered', { recovery_superseded_at: '2026-09-12T04:00:00.000Z' }, 'call-1'),
+    ]);
+
+    expect(notice.readbackOnly).toBe(false);
+    expect(notice.unitOnly).toBe(true);
+    expect(notice.reason).toBe('the caller gave the building but no unit number');
+  });
+
+  it('keeps a retired recovery as an owed historical read-back when it is the only card', () => {
+    const notice = addressAskNotice([
+      ask('address_recovered', { recovery_superseded_at: '2026-09-12T04:00:00.000Z' }, 'call-1'),
+    ]);
+
+    expect(notice.readbackOnly).toBe(true);
+    expect(notice.reason).toMatch(/pieced back together/);
+  });
 });

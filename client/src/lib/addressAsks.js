@@ -115,8 +115,16 @@ export function addressAskNotice(asks) {
   const liveRecovery = (r, i) => r.reason_code === 'address_recovered'
     && !r.payload?.recovery_superseded_at
     && sameCall(r, i);
+  const retiredRecoveryWithCurrentAsk = (i) => i.reason_code === 'address_recovered'
+    && i.payload?.recovery_superseded_at
+    && open.some((r) => r !== i && ADDRESS_ASK_REASONS.has(r.reason_code) && sameCall(r, i));
   const considered = open.filter((i) => !(i.reason_code === 'address_unverified'
-    && open.some((r) => liveRecovery(r, i))));
+    && open.some((r) => liveRecovery(r, i)))
+    // A superseded recovery remains an owed historical read-back when it is
+    // the only card. Once the same call has a current validation/unit ask,
+    // however, that current ask defines what must be confirmed. Letting the
+    // retired card retain read-back rank 1 would hide a unit-only ask at rank 2.
+    && !retiredRecoveryWithCurrentAsk(i));
   const pool = considered.length > 0 ? considered : open;
   const effectiveRank = (i) => {
     const r = rank(i);
