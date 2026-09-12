@@ -1,3 +1,4 @@
+const { randomUUID } = require('crypto');
 const db = require('../../models/db');
 const logger = require('../logger');
 const { sendServiceReportV1Email } = require('./email-delivery');
@@ -241,6 +242,7 @@ async function processServiceReportDelivery(delivery, knex = db) {
   const heldPayload = (delivery.payload && typeof delivery.payload === 'object') ? delivery.payload : {};
   const heldForGrounding = !!(heldPayload.awaiting_grounding && heldPayload.lawn_assessment_id);
   let lawnFenceCheck = null;
+  let verifySendSealHeld = null;
   let lawnSealRenewTimer = null;
   let releaseLawnSeal = null;
 
@@ -342,6 +344,18 @@ async function processServiceReportDelivery(delivery, knex = db) {
     // registration refuses while it is unexpired, so nothing can start
     // between this check and the dispatch.
     const versionOf = (row) => (row ? JSON.stringify([row.recommendations, row.ai_summary, row.updated_at]) : null);
+    // This delivery's claim on the seal. Lawn delivery recovery can cover the
+    // same assessment, and an unowned seal let whichever sender finished first
+    // release the other's protection mid-send.
+    const sealOwner = `report-delivery:${delivery.id}:${randomUUID()}`;
+    let lawnSealLost = false;
+    verifySendSealHeld = async () => {
+      if (!assessmentId) return true;
+      if (lawnSealLost) return false;
+      const renewed = await KnowledgeBridge.renewRecommendationSendSeal(assessmentId, sealOwner).catch(() => false);
+      if (!renewed) lawnSealLost = true;
+      return !lawnSealLost;
+    };
     lawnFenceCheck = async ({ renderedAssessmentId, renderedLawnHistoryIdentity } = {}) => {
       try {
         // The render is authoritative about which assessment the customer is
@@ -403,14 +417,13 @@ async function processServiceReportDelivery(delivery, knex = db) {
         // answer was null before the render and still null after, so the page
         // rendered no lawn section either way.
         if (!assessmentId) return true;
-        const sealed = await KnowledgeBridge.sealRecommendationsForSend(assessmentId, versionAtCheck, versionOf);
+        const sealed = await KnowledgeBridge.sealRecommendationsForSend(assessmentId, versionAtCheck, versionOf, sealOwner);
         if (sealed) {
           // The base TTL equals SendGrid's own request timeout, so a slow
           // dispatch could outlive a fixed seal (codex P1 r40) — renew on a
           // heartbeat until the send settles; the worker releases it below.
           lawnSealRenewTimer = setInterval(() => {
-            void KnowledgeBridge.renewRecommendationSendSeal(assessmentId)
-              .catch((renewErr) => logger.warn(`[delivery-queue] send-seal renew failed for ${assessmentId}: ${renewErr.message}`));
+            void verifySendSealHeld();
           }, 45000);
           lawnSealRenewTimer.unref?.();
         }
@@ -424,7 +437,7 @@ async function processServiceReportDelivery(delivery, knex = db) {
     if (assessmentId) {
       releaseLawnSeal = async () => {
         if (lawnSealRenewTimer) { clearInterval(lawnSealRenewTimer); lawnSealRenewTimer = null; }
-        await KnowledgeBridge.releaseRecommendationSendSeal(assessmentId)
+        await KnowledgeBridge.releaseRecommendationSendSeal(assessmentId, sealOwner)
           .catch((relErr) => logger.warn(`[delivery-queue] send-seal release failed for ${assessmentId} (expires by TTL): ${relErr.message}`));
       };
     }
@@ -473,6 +486,7 @@ async function processServiceReportDelivery(delivery, knex = db) {
       pinnedLawnAssessmentId: isLawnDelivery ? (canonicalAtResolve || PIN_NO_ASSESSMENT) : null,
       propertyHistoryEnabled,
       verifyBeforeSend: lawnFenceCheck,
+      verifySendSealHeld,
     });
     if (result.ok) {
       await markDeliverySent(delivery, result, knex);
