@@ -692,10 +692,18 @@ async function releaseWithdrawnPacketInvoice(trx, invoice) {
     // resuming everything to active would start payment reminders for a
     // customer whose card runs automatically. Re-checked live, under this
     // transaction, the same way the follow-up re-arm does it.
+    // The helper takes the customer ROW, not an id (local audit): an id makes
+    // its payment-method lookup read `customer.id` as undefined and answer
+    // "not on autopay", so every release would have activated dunning. A read
+    // failure keeps the hold — the quiet direction for a customer whose card
+    // may run automatically.
     let onAutopay = false;
     try {
-      onAutopay = await require('./autopay-eligibility').customerOnAutopay(pausedByWithdrawal.customer_id, { db: trx, failClosed: true });
-    } catch { onAutopay = false; }
+      const customer = await trx('customers').where({ id: pausedByWithdrawal.customer_id }).first();
+      onAutopay = customer
+        ? await require('./autopay-eligibility').customerOnAutopay(customer, { db: trx, failClosed: true })
+        : true;
+    } catch { onAutopay = true; }
     await trx('invoice_followup_sequences').where({ id: pausedByWithdrawal.id })
       .update(onAutopay
         ? { status: 'autopay_hold', paused_reason: null, next_touch_at: null, updated_at: trx.fn.now() }
