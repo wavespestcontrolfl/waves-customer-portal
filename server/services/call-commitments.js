@@ -1978,6 +1978,13 @@ async function applyHumanUpdate(conn, id, { action, description, due_at, note, r
     await require('./audit-log').recordAuditEvent({ actor_type: reviewedBy ? 'technician' : 'system', actor_id: reviewedBy || null,
       action: `callback_${action}`, resource_type: 'call_commitment', resource_id: id,
       metadata: { via: 'ledger', renewed_at: new Date().toISOString(), ...renewal }, critical: true, trx: conn });
+  } else if (before && before.kind === 'send_reschedule_link' && before.party === 'waves' && action === 'reopen') {
+    // The inverse of a dismiss is not a no-op for this kind: an explicit
+    // office verdict is one of only two things allowed to move the
+    // promised-link ledger's generation/uncertainty bookkeeping (see
+    // reschedule-link-promises.renewPromiseOnReopen for the full reasoning
+    // and the delivery-dedup decision).
+    await require('./reschedule-link-promises').renewPromiseOnReopen(conn, id, { reviewedBy });
   }
   return normalizeRow(await conn('call_commitments').where({ id }).first());
 }

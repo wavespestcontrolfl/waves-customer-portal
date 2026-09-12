@@ -703,6 +703,62 @@ async function settleParkedPromiseCard(trx, item, { action, reviewedBy = null, n
     resource_type: 'triage_item', resource_id: item.id, metadata: { commitment_ids: ids, settled_ids: openIds }, critical: true, trx });
 }
 
+// Called from call-commitments.applyHumanUpdate, inside its own reopen
+// transaction, the moment a send_reschedule_link commitment is reopened —
+// the inverse of a dismiss, and (with definitive provider evidence) one of
+// only two things allowed to move this ledger's bookkeeping. An office
+// Reopen restores human_state to 'confirmed' and status to 'open', but
+// upsertCommitments' own ON CONFLICT freezes processing_generation the
+// moment ANY human_state is set (`CASE WHEN human_state IS NULL...`) — a
+// re-extraction of the same call can never bump it again, so without an
+// explicit bump here stagePromises' own NOT EXISTS predicate (a cancelled
+// row already sitting at this exact generation) keeps excluding the
+// reopened promise from every future sweep, forever (this file's own
+// `stagePromises` doc comment names the identical hole for a replacement
+// recording, which bumps this same column for an UNTOUCHED row; Reopen is
+// the human-verdict counterpart that never got the same treatment).
+//
+// Delivery dedup decision: a delivered attempt is not undone by an office
+// dismiss. Rather than bump the generation and let a fresh outbox row run
+// the gauntlet down to matchingSend's body-content scan (which is scoped to
+// the CALL's own timing, not this reopen, and would still catch it — but
+// only after claiming a provider slot and re-deriving the visit), this
+// checks the one fact that actually matters — has ANY outbox row for this
+// exact commitment_id ever reached 'delivered' — directly and restores
+// 'fulfilled' immediately: no fresh generation, no new attempt ever
+// staged, zero risk of a second text. This is deliberately narrower than a
+// content/time-window scan: an ambiguous 'sent' receipt, a stale
+// reschedule_log self-serve entry, or any other evidence that is not this
+// exact commitment's own definitive delivery must NOT retire the reopened
+// promise on the spot — only a genuine delivered receipt is the "office
+// verdict"-grade fact this function trusts, matching this file's own rule
+// that delivery, and only delivery, keeps the promise.
+async function renewPromiseOnReopen(conn, commitmentId, { reviewedBy = null } = {}) {
+  const delivered = await conn('outbox_messages').where({ commitment_id: commitmentId, status: 'delivered' })
+    .orderBy('created_at', 'desc').first('id', 'sent_at', 'provider_message_id');
+  if (delivered) {
+    await conn('call_commitments').where({ id: commitmentId }).update({
+      status: 'fulfilled', fulfilled_at: new Date(), updated_at: new Date(),
+      fulfillment: JSON.stringify({ kind: 'reschedule_link_delivered', strength: 'direct', record_type: 'outbox_messages', record_id: delivered.id,
+        matched_at: new Date().toISOString(), basis: 'reopen_found_prior_delivery' }),
+    });
+    await recordAuditEvent({ actor_type: reviewedBy ? 'technician' : 'system', actor_id: reviewedBy,
+      action: 'reschedule_link_promise_reopen_already_delivered', resource_type: 'call_commitment', resource_id: commitmentId,
+      metadata: { outbox_id: delivered.id }, critical: true, trx: conn });
+    return;
+  }
+  // No delivered attempt on record for this commitment, ever: this is a
+  // genuine renewal. Bumping under the row's own lock (a bare increment,
+  // not a read-then-write) is what keeps a concurrent writer from clobbering
+  // this against a stale in-hand value — the same shape call_log's own
+  // generation bump uses (call-recording-processor.js).
+  await conn('call_commitments').where({ id: commitmentId })
+    .update({ processing_generation: conn.raw('COALESCE(processing_generation, 0) + 1'), updated_at: new Date() });
+  await recordAuditEvent({ actor_type: reviewedBy ? 'technician' : 'system', actor_id: reviewedBy,
+    action: 'reschedule_link_promise_reopen_renewed', resource_type: 'call_commitment', resource_id: commitmentId,
+    metadata: {}, critical: true, trx: conn });
+}
+
 // The card this promise's own exceptions raise. One promise reaching a
 // terminal state — delivered, or closed by the office — drops only ITS id;
 // the card resolves when the last parked promise on the call is gone, so a
@@ -1810,4 +1866,4 @@ async function reconcileUsedLinks(conn, now = new Date()) {
   return reconcileRows(conn, rows);
 }
 
-module.exports = { mode, selectDiscussedVisit, snapshot, stagePromises, matchingSend, claimForDispatch, runOne, sweep, withSendLock, resolveUsedLink, reconcileUsedLinks, recordLiveActivation, settleParkedPromiseCard, contextFor, fulfilPromise, markLinkUsed };
+module.exports = { mode, selectDiscussedVisit, snapshot, stagePromises, matchingSend, claimForDispatch, runOne, sweep, withSendLock, resolveUsedLink, reconcileUsedLinks, recordLiveActivation, settleParkedPromiseCard, contextFor, fulfilPromise, markLinkUsed, renewPromiseOnReopen };

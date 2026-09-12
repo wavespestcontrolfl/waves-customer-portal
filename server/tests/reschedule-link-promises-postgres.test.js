@@ -26,6 +26,7 @@ jest.mock('../services/logger', () => ({ warn: jest.fn(), info: jest.fn(), error
 const knex = require('knex');
 const { randomUUID } = require('node:crypto');
 const links = require('../services/reschedule-link-promises');
+const { applyHumanUpdate } = require('../services/call-commitments');
 const { gates } = require('../config/feature-gates');
 const rescheduleLinkPromisesMigration = require('../models/migrations/20260909000092_reschedule_link_promises');
 const outboxLastScannedMigration = require('../models/migrations/20260911000020_outbox_messages_last_scanned_at');
@@ -1175,6 +1176,210 @@ postgres('reschedule-link-promises against PostgreSQL', () => {
         await mockPg('call_commitments').where({ id: commitment.id }).update({ processing_generation: 1 });
         const staged = await links.stagePromises(mockPg);
         expect(staged).toBe(0);
+      } finally {
+        if (priorGate === undefined) delete process.env.GATE_RESCHEDULE_LINK_ON_PROMISE; else process.env.GATE_RESCHEDULE_LINK_ON_PROMISE = priorGate;
+        gates.callCommitments = priorCallCommitments;
+      }
+    });
+  });
+
+  /**
+   * codex #4293 P1 (pre-push audit on PR #4293, reschedule-link-promises.js:914):
+   * an office Reopen on the commitment ledger restores status 'open' and
+   * human_state 'confirmed' but — pre-fix — left processing_generation
+   * untouched. upsertCommitments' own ON CONFLICT freezes that column the
+   * moment ANY human_state is set (`CASE WHEN human_state IS NULL...`), so a
+   * re-extraction of the same call can never bump it either: the cancelled
+   * outbox row from the dismissed attempt sits at the SAME generation
+   * stagePromises' own NOT EXISTS predicate reads, and the reopened promise
+   * is excluded from every future sweep forever — the office's explicit
+   * verdict is silently inert. Only real Postgres row state (a genuine
+   * CHECK-constrained call_commitments row, a genuine partial-unique-index
+   * outbox insert) proves the fix's generation bump actually re-admits
+   * staging and that the delivery-dedup / stale-evidence decisions hold
+   * under the exact predicates stagePromises and applyHumanUpdate use.
+   */
+  describe('an office Reopen renews the promise\'s own generation (codex #4293 P1)', () => {
+    const quote = 'I will text you a reschedule link for that appointment.';
+    const promiseNow = new Date('2030-01-07T14:00:00Z'); // 9:00 AM ET — inside the send window
+    const stubBuildLink = async () => ({ url: 'https://example.com/reschedule/token' });
+    const stubRender = async () => 'Your reschedule link: https://example.com/reschedule/token';
+
+    test('dismissed promise -> staff Reopen -> the next sweep stages and sends a fresh attempt', async () => {
+      const priorGate = process.env.GATE_RESCHEDULE_LINK_ON_PROMISE;
+      const priorCallCommitments = gates.callCommitments;
+      const priorActivatedAt = process.env.RESCHEDULE_LINK_PROMISE_ACTIVATED_AT;
+      try {
+        process.env.GATE_RESCHEDULE_LINK_ON_PROMISE = 'true';
+        gates.callCommitments = true;
+        // stagePromises stamps the FRESH row's payload with the commitment's
+        // own created_at (unlike this test's hand-inserted first row, whose
+        // payload starts `{}`) — the very first thing runOne checks on it is
+        // isPreActivationRow, and this test's commitment is created well
+        // after the gate goes live, not before it. Fixing the boundary in
+        // the past is what every other test in this file with a live
+        // dispatch pass avoids needing by never round-tripping a
+        // stagePromises-produced row back through runOne — this one does,
+        // to prove the renewed generation actually reaches a real send.
+        process.env.RESCHEDULE_LINK_PROMISE_ACTIVATED_AT = '2000-01-01T00:00:00Z';
+
+        const callId = randomUUID();
+        const customerId = randomUUID();
+        const visitId = randomUUID();
+        const phone = '+15555550100';
+        await mockPg('customers').insert({ id: customerId, first_name: 'Pat', last_name: 'Customer', phone,
+          address_line1: '1 Example St', city: 'Bradenton', zip: '34205', active: true });
+        await mockPg('scheduled_services').insert({ id: visitId, customer_id: customerId, scheduled_date: '2030-01-08',
+          window_start: '09:00', window_end: '10:30', service_type: 'WaveGuard', status: 'confirmed', reschedule_token: 'token' });
+        await mockPg('call_log').insert({ id: callId, customer_id: customerId, direction: 'inbound', from_phone: phone,
+          v2_extraction_status: 'valid', processing_generation: 0, transcription: `Agent: ${quote}\nCaller: Thank you.` });
+        const [commitment] = await mockPg('call_commitments').insert({
+          call_log_id: callId, commitment_key: 'send_reschedule_link:1', party: 'waves', kind: 'send_reschedule_link',
+          description: 'send a reschedule link', source: 'ai', status: 'open', confidence: 0.95,
+          evidence: JSON.stringify([{ quote, speaker: 'agent' }]), last_seen_generation: 0, processing_generation: 0,
+        }).returning('id');
+        const outboxId = randomUUID();
+        // Never claimed yet — exactly what stagePromises itself would have
+        // inserted before the office ever touched the ledger.
+        await mockPg('outbox_messages').insert({ id: outboxId, channel: 'sms', status: 'pending', payload: {},
+          commitment_id: commitment.id, commitment_generation: 0,
+          related_call_log_id: callId, related_customer_id: customerId, related_scheduled_service_id: visitId });
+
+        // Staff dismiss on the ledger.
+        await mockPg('call_commitments').where({ id: commitment.id }).update({ status: 'dismissed', human_state: 'dismissed' });
+        // The next sweep notices — applyContextSkip's promise_closed branch
+        // cancels the now-orphaned outbox row (the exact "its outbox row
+        // becomes cancelled" step the finding names).
+        const beforeReopenRow = await mockPg('outbox_messages').where({ id: outboxId }).first();
+        await links.runOne(mockPg, beforeReopenRow, { now: promiseNow });
+        const cancelled = await mockPg('outbox_messages').where({ id: outboxId }).first();
+        expect(cancelled.status).toBe('cancelled');
+
+        // Staff Reopen.
+        const reopened = await applyHumanUpdate(mockPg, commitment.id, { action: 'reopen', reviewedBy: randomUUID() });
+        expect(reopened.status).toBe('open');
+        expect(reopened.human_state).toBe('confirmed');
+        // The fix under test: a fresh generation, so stagePromises' own NOT
+        // EXISTS predicate no longer finds the cancelled row "at or past"
+        // this commitment's current generation.
+        expect(Number(reopened.processing_generation)).toBe(1);
+
+        const staged = await links.stagePromises(mockPg);
+        expect(staged).toBe(1);
+        const rows = await mockPg('outbox_messages').where({ commitment_id: commitment.id }).orderBy('commitment_generation');
+        expect(rows).toHaveLength(2);
+        expect(rows[0]).toMatchObject({ commitment_generation: 0, status: 'cancelled' });
+        expect(rows[1]).toMatchObject({ commitment_generation: 1, status: 'pending' });
+
+        // The next sweep actually sends the renewed attempt.
+        const fakeSid = `SM${'0'.repeat(32)}`;
+        const successfulSend = async () => ({ sent: true, providerMessageId: fakeSid });
+        await links.runOne(mockPg, rows[1], { now: promiseNow, send: successfulSend, buildLink: stubBuildLink, render: stubRender });
+        const sent = await mockPg('outbox_messages').where({ id: rows[1].id }).first();
+        expect(sent.status).toBe('sent');
+        expect(sent.provider_message_id).toBe(fakeSid);
+      } finally {
+        if (priorGate === undefined) delete process.env.GATE_RESCHEDULE_LINK_ON_PROMISE; else process.env.GATE_RESCHEDULE_LINK_ON_PROMISE = priorGate;
+        if (priorActivatedAt === undefined) delete process.env.RESCHEDULE_LINK_PROMISE_ACTIVATED_AT; else process.env.RESCHEDULE_LINK_PROMISE_ACTIVATED_AT = priorActivatedAt;
+        gates.callCommitments = priorCallCommitments;
+      }
+    });
+
+    test('reopen after a genuinely delivered attempt restores fulfilled instead of re-texting (dedup decision: delivery is not undone by a dismiss)', async () => {
+      const priorGate = process.env.GATE_RESCHEDULE_LINK_ON_PROMISE;
+      const priorCallCommitments = gates.callCommitments;
+      try {
+        process.env.GATE_RESCHEDULE_LINK_ON_PROMISE = 'true';
+        gates.callCommitments = true;
+
+        const callId = randomUUID();
+        await mockPg('call_log').insert({ id: callId, direction: 'inbound', processing_generation: 0 });
+        const [commitment] = await mockPg('call_commitments').insert({
+          call_log_id: callId, commitment_key: 'send_reschedule_link:1', party: 'waves', kind: 'send_reschedule_link',
+          description: 'send a reschedule link', source: 'ai', status: 'fulfilled', last_seen_generation: 0, processing_generation: 0,
+          fulfilled_at: new Date('2030-01-01T14:05:00Z'),
+          fulfillment: JSON.stringify({ kind: 'reschedule_link_delivered', strength: 'direct', record_type: 'sms_log', record_id: randomUUID(),
+            matched_at: new Date('2030-01-01T14:05:00Z').toISOString(), basis: 'linked_visit_reschedule_link_delivered' }),
+        }).returning('id');
+        const outboxId = randomUUID();
+        const twilioSid = `SM${randomUUID().replaceAll('-', '').slice(0, 32)}`;
+        // The attempt that actually reached the customer — the provider's own
+        // definitive, terminal record.
+        await mockPg('outbox_messages').insert({ id: outboxId, channel: 'sms', status: 'delivered', provider_message_id: twilioSid,
+          sent_at: new Date('2030-01-01T14:00:00Z'), payload: { call_generation: 0, delivery_outcome_uncertain: false },
+          commitment_id: commitment.id, commitment_generation: 0, related_call_log_id: callId });
+
+        // Office mistakenly dismisses the already-kept promise off the
+        // ledger — the generic dismiss patch (call-commitments.js) never
+        // touches fulfilled_at/fulfillment, only status/human_state.
+        await mockPg('call_commitments').where({ id: commitment.id }).update({ status: 'dismissed', human_state: 'dismissed' });
+
+        const reopened = await applyHumanUpdate(mockPg, commitment.id, { action: 'reopen', reviewedBy: randomUUID() });
+        // A delivery is not undone by an office dismiss: Reopen surfaces
+        // that fact — restoring 'fulfilled' — rather than reopening the
+        // promise for a duplicate text.
+        expect(reopened.status).toBe('fulfilled');
+        expect(reopened.fulfillment).toMatchObject({ record_id: outboxId, basis: 'reopen_found_prior_delivery' });
+        // No fresh generation is ever admitted — nothing left for a future
+        // sweep to (re)send.
+        expect(Number(reopened.processing_generation)).toBe(0);
+
+        const staged = await links.stagePromises(mockPg);
+        expect(staged).toBe(0);
+        const rows = await mockPg('outbox_messages').where({ commitment_id: commitment.id });
+        expect(rows).toHaveLength(1);
+        expect(rows[0].id).toBe(outboxId);
+      } finally {
+        if (priorGate === undefined) delete process.env.GATE_RESCHEDULE_LINK_ON_PROMISE; else process.env.GATE_RESCHEDULE_LINK_ON_PROMISE = priorGate;
+        gates.callCommitments = priorCallCommitments;
+      }
+    });
+
+    test('reopen after an attempt that only reached "sent" (no delivery confirmation) renews the generation instead of trusting ambiguous evidence as proof', async () => {
+      const priorGate = process.env.GATE_RESCHEDULE_LINK_ON_PROMISE;
+      const priorCallCommitments = gates.callCommitments;
+      try {
+        process.env.GATE_RESCHEDULE_LINK_ON_PROMISE = 'true';
+        gates.callCommitments = true;
+
+        const callId = randomUUID();
+        const customerId = randomUUID();
+        await mockPg('customers').insert({ id: customerId, first_name: 'Pat', last_name: 'Customer', phone: '+15555550100',
+          address_line1: '1 Example St', city: 'Bradenton', zip: '34205', active: true });
+        await mockPg('call_log').insert({ id: callId, customer_id: customerId, direction: 'inbound', processing_generation: 0 });
+        const [commitment] = await mockPg('call_commitments').insert({
+          call_log_id: callId, commitment_key: 'send_reschedule_link:1', party: 'waves', kind: 'send_reschedule_link',
+          description: 'send a reschedule link', source: 'ai', status: 'open', last_seen_generation: 0, processing_generation: 0,
+        }).returning('id');
+        const outboxId = randomUUID();
+        const twilioSid = `SM${randomUUID().replaceAll('-', '').slice(0, 32)}`;
+        // Parked waiting on a carrier receipt that never arrived, and an
+        // earlier office verdict already resolved this attempt's own
+        // delivery_outcome_uncertain bookkeeping (unrelated to what this
+        // test targets — an unresolved uncertain older attempt has its own,
+        // separate stagePromises hold). A real, pre-reopen sms_log row still
+        // exists, but its status ('sent') is never confirmed delivery.
+        // Exactly the stale, ambiguous evidence a content/time scan (rather
+        // than this exact commitment's own definitive delivery status)
+        // could mistake for proof.
+        await mockPg('outbox_messages').insert({ id: outboxId, channel: 'sms', status: 'review', last_error: 'delivery_receipt_unavailable',
+          provider_message_id: twilioSid, sent_at: new Date('2030-01-01T14:00:00Z'), payload: { call_generation: 0, delivery_outcome_uncertain: false },
+          commitment_id: commitment.id, commitment_generation: 0, related_call_log_id: callId, related_customer_id: customerId });
+        await mockPg('sms_log').insert({ id: randomUUID(), customer_id: customerId, direction: 'outbound',
+          from_phone: '+15555550199', to_phone: '+15555550100', twilio_sid: twilioSid, status: 'sent', message_body: 'Your reschedule link: https://example.com/x' });
+
+        // The office dismisses without ever getting a delivery receipt.
+        await mockPg('call_commitments').where({ id: commitment.id }).update({ status: 'dismissed', human_state: 'dismissed' });
+
+        const reopened = await applyHumanUpdate(mockPg, commitment.id, { action: 'reopen', reviewedBy: randomUUID() });
+        // Not silently declared kept off ambiguous, pre-reopen evidence...
+        expect(reopened.status).toBe('open');
+        expect(reopened.fulfilled_at).toBeNull();
+        // ...and genuinely renewed, so the next sweep gets a real attempt.
+        expect(Number(reopened.processing_generation)).toBe(1);
+
+        const staged = await links.stagePromises(mockPg);
+        expect(staged).toBe(1);
       } finally {
         if (priorGate === undefined) delete process.env.GATE_RESCHEDULE_LINK_ON_PROMISE; else process.env.GATE_RESCHEDULE_LINK_ON_PROMISE = priorGate;
         gates.callCommitments = priorCallCommitments;
