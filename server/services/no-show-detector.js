@@ -75,11 +75,6 @@ const ARRIVAL_STAMPS = ['arrived_at', 'actual_start_time', 'check_in_time'];
 // (see the ignoreHorizon note on promisedStartAt) — an ancient, presumably
 // already-handled promise must not surface as news.
 const HORIZON_MS = 48 * 3600000;
-// How far back the candidate scan looks for a COMMUNICATED promise, for
-// visits whose current scheduled_date has moved outside the date window.
-// Wider than the 48h creation horizon so a promise communicated well before
-// the window still pulls its visit in; bounded so the lookup stays indexed.
-const PROMISE_RECALL_DAYS = 14;
 
 // Pure, exported for tests and for the replay's coverage measure: the
 // evidence-validity half of the rule. Returns the promised start instant the
@@ -480,6 +475,15 @@ async function loadPromiseEvents(conn, visitIds, { now = new Date() } = {}) {
       // marked by followup_source_service_id / parent_service_id at creation.
       .whereNull('sv.followup_source_service_id').whereNull('sv.parent_service_id')
       .where('cl.created_at', '<=', now)
+      // The extraction this reads is MUTABLE: a force-reprocess rewrites
+      // ai_extraction_enriched on the same call row, and a changed
+      // agent_committed_booking or confirmed_start_at would then move — or
+      // erase — a promise the customer was given at booking time, with no new
+      // communication behind it (codex P1 round 19). Only an extraction that
+      // still predates the booking it produced counts; a later reprocess
+      // simply stops answering, leaving the customer-facing confirmation as
+      // the evidence, which is the better record anyway.
+      .whereRaw("cl.updated_at <= sv.created_at + interval '1 hour'")
       .select('sv.id as visit_id', 'sv.created_at as booked_at', 'cl.id as call_id', 'cl.ai_extraction_enriched',
         'cl.transcription', 'cl.processing_token', 'cl.created_at as call_created_at', 'cl.direction as call_direction', 'cl.bridged_at as call_bridged_at',
         'cl.duration_seconds', 'cl.recording_duration_seconds'),
@@ -952,16 +956,26 @@ function stopPromise(members = [], promises = new Map(), now = new Date()) {
 // the appointment emails' interaction rows, and the call-evidence audit rows.
 // Deliberately id-only — the promise itself is loaded later by
 // loadPromiseEvents, which applies every delivery and eligibility rule.
-async function promisedVisitIds(conn, { from, now }) {
+async function promisedVisitIds(conn, { now }) {
+  // By the PROMISED WINDOW, not by how recently the notice was sent: a
+  // confirmation for a visit booked months ahead is the only communication
+  // that visit may ever get, and a send-time cutoff dropped exactly the
+  // long-lead-confirmation-plus-uncommunicated-move case this path exists for
+  // (codex P1 round 19). The window that can be alerting right now is the
+  // creation horizon itself — from 48h ago to now — which is also what keeps
+  // this bounded.
+  const windowFrom = now.getTime() - HORIZON_MS;
+  const windowTo = now.getTime();
   const [notices, emails, calls] = await Promise.all([
-    conn('messaging_audit_log').whereBetween('sent_at', [from, now])
-      .whereRaw("(purpose = ANY(?::text[]) OR purpose = 'appointment')", [NOTICE_PURPOSES])
+    conn('messaging_audit_log')
+      .whereRaw("(metadata->>'rendered_slot_ms')::bigint BETWEEN ? AND ?", [windowFrom, windowTo])
       .select('appointment_id', conn.raw("metadata->>'scheduled_service_id' as meta_visit_id")),
     conn('customer_interactions').where('interaction_type', 'email_outbound')
-      .whereBetween('created_at', [from, now])
+      .whereRaw("(metadata->>'rendered_slot_ms')::bigint BETWEEN ? AND ?", [windowFrom, windowTo])
       .select(conn.raw("metadata->>'scheduled_service_id' as meta_visit_id")),
     conn('audit_log').where({ action: 'visit_window_promised', resource_type: 'scheduled_service' })
-      .whereBetween('created_at', [from, now]).select('resource_id'),
+      .whereBetween(conn.raw("(metadata->>'start_at')"), [new Date(windowFrom).toISOString(), new Date(windowTo).toISOString()])
+      .select('resource_id'),
   ]);
   return [...new Set([
     ...notices.flatMap((r) => [r.appointment_id, r.meta_visit_id]),
@@ -972,19 +986,13 @@ async function promisedVisitIds(conn, { from, now }) {
 
 async function listNoShows(conn, { now = new Date(), limit = 100 } = {}) {
   if (!enabled()) return [];
-  // Candidates by SCHEDULE DATE (the indexed scan) OR by PROMISE TIME: a
+  // Candidates by SCHEDULE DATE (the indexed scan) OR by PROMISED WINDOW: a
   // still-live visit that staff moved far out of the date window without
   // telling the customer would otherwise drop out before its immutable
   // promise evidence was ever read — and that uncommunicated move is exactly
-  // what this detector exists to catch (codex P2, carried since round 4).
-  // The promise side is bounded by when the customer was TOLD, not by the
-  // visit's current date: a scheduling notice sent in the last
-  // PROMISE_RECALL_DAYS days, matched through the same visit linkage the
-  // evidence reads use, and every one of those lookups is index-backed
-  // (messaging_audit_appointment_sent_idx, the metadata indexes added by this
-  // PR, audit_log's action/created_at).
-  const recallFrom = new Date(now.getTime() - PROMISE_RECALL_DAYS * 86400000);
-  const promisedIds = await promisedVisitIds(conn, { from: recallFrom, now });
+  // what this detector exists to catch (codex P2 carried from round 4, P1
+  // round 19).
+  const promisedIds = await promisedVisitIds(conn, { now });
   const rows = await conn('scheduled_services as s').join('customers as c', 'c.id', 's.customer_id')
     .whereIn('s.status', LIVE_STATUSES)
     .where((qb) => qb
@@ -1230,16 +1238,15 @@ async function sweep(conn, { now = new Date() } = {}) {
   const dispatch = require('./dispatch-alerts');
   const techNotices = require('./tech-visit-notifications');
   let alerted = 0;
-  // One evidence read for the whole tick, shared by the per-card loop and
-  // both reconcile passes (codex P2 round 16). Built from every visit this
-  // sweep will touch: the cards' own members, plus the visits behind any open
-  // alert or active notice, which may no longer be candidates.
+  // One evidence read for the whole tick, shared by both RECONCILE passes
+  // (codex P2 round 16). The per-card creation loop deliberately re-reads
+  // under its own lock — see there. Built from the visits behind every open
+  // alert and active notice, which may no longer be candidates.
   const openAlerts = await conn('dispatch_alerts').whereIn('type', dispatch.OVERDUE_ALERT_TYPES)
     .whereNull('resolved_at').whereRaw("payload->>'source' = 'no_show_detector'").select('id', 'job_id', 'payload');
   const activeNotices = await conn('tech_notifications').where({ type: 'follow_through_tracking' })
     .whereNull('dismissed_at').select('id', 'technician_id', 'payload');
   const touched = [...new Set([
-    ...rows.flatMap((card) => card.grouped_service_ids || [String(card.id)]),
     ...openAlerts.map((alert) => String(alert.job_id)),
     ...activeNotices.map((notice) => String(notice.payload?.visit_id || '')),
   ].filter(Boolean))];
@@ -1258,7 +1265,14 @@ async function sweep(conn, { now = new Date() } = {}) {
       // confirmation here must use the same members, the same shared promise
       // and the same merged arrival state, or a sibling's arrival stamp
       // recorded since listNoShows ran would be missed (codex P1 round 10).
-      const { visit, live } = await lockedStop(trx, card.id, { now, promises: tickPromises });
+      // NO preload here: this is the path that MINTS an alert and pushes a
+      // notification, and a reschedule communicated between the tick-wide
+      // read and this transaction would otherwise raise a card for a window
+      // the customer has already been told was replaced — the next tick can
+      // clear the row but cannot retract the push (codex P1 round 19). The
+      // reconcile passes below still use the preload: they only resolve or
+      // dismiss, and the next tick recreates anything cleared too eagerly.
+      const { visit, live } = await lockedStop(trx, card.id, { now });
       if (!enabled() || !visit) return null;
       if (!live || live.stage !== card.stage || live.promised_window.start_at !== card.promised_window.start_at) return null;
       const recipientTech = visit.technician_id ? await trx('technicians').where({ id: visit.technician_id,

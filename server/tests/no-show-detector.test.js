@@ -303,6 +303,33 @@ describe('candidates come from the promise as well as the schedule (deferred P2,
   // the customer would otherwise drop out before its immutable promise
   // evidence was ever read — the uncommunicated move this detector exists to
   // catch.
+  // Recall follows the PROMISED WINDOW, not the send time: a confirmation for
+  // a visit booked months ahead is the only communication that visit may ever
+  // get, and a send-time cutoff dropped exactly the long-lead-confirmation
+  // plus uncommunicated-move case this path exists for (round-19 P1).
+  test('the recall range is the promised window, not the send time', async () => {
+    const seen = [];
+    const conn = (table) => {
+      const chain = {};
+      chain.where = () => chain;
+      chain.whereRaw = (sql, bindings) => { seen.push([table, sql, bindings]); return chain; };
+      chain.whereBetween = (col, range) => { seen.push([table, col?.sql || col, range]); return chain; };
+      chain.select = () => Promise.resolve([]);
+      return chain;
+    };
+    conn.raw = (sql) => ({ sql });
+    const now = new Date('2026-09-12T12:00:00.000Z');
+    await promisedVisitIds(conn, { now });
+    const slotRanges = seen.filter(([, sql]) => String(sql).includes('rendered_slot_ms'));
+    expect(slotRanges).toHaveLength(2);
+    for (const [, , bindings] of slotRanges) {
+      expect(bindings).toEqual([now.getTime() - 48 * 3600000, now.getTime()]);
+    }
+    const auditRange = seen.find(([table]) => table === 'audit_log');
+    expect(auditRange[1]).toContain("metadata->>'start_at'");
+    expect(auditRange[2]).toEqual(['2026-09-10T12:00:00.000Z', '2026-09-12T12:00:00.000Z']);
+  });
+
   test('ids come from all three evidence linkages, deduped', async () => {
     const conn = (table) => {
       const chain = {};
@@ -315,7 +342,7 @@ describe('candidates come from the promise as well as the schedule (deferred P2,
       return chain;
     };
     conn.raw = (sql) => ({ sql });
-    const ids = await promisedVisitIds(conn, { from: new Date('2026-09-01'), now: new Date('2026-09-12') });
+    const ids = await promisedVisitIds(conn, { now: new Date('2026-09-12') });
     expect(ids.sort()).toEqual(['v1', 'v2', 'v3', 'v4']);
   });
 
@@ -327,7 +354,7 @@ describe('candidates come from the promise as well as the schedule (deferred P2,
       return chain;
     };
     conn.raw = (sql) => ({ sql });
-    expect(await promisedVisitIds(conn, { from: new Date('2026-09-01'), now: new Date('2026-09-12') })).toEqual([]);
+    expect(await promisedVisitIds(conn, { now: new Date('2026-09-12') })).toEqual([]);
   });
 });
 
@@ -1122,6 +1149,16 @@ describe('the call-booking promise derives from the visit\'s own call link (roun
     // mapped onto it (round-16 P1).
     const detector = require('fs').readFileSync(require('path').join(__dirname, '..', 'services', 'no-show-detector.js'), 'utf8');
     expect(detector).toContain(".whereNull('sv.followup_source_service_id').whereNull('sv.parent_service_id')");
+    // ...and the extraction must still predate the booking it produced: a
+    // force-reprocess rewrites ai_extraction_enriched on the same row, and a
+    // changed commitment would move or erase a promise the customer was given
+    // at booking time with no new communication behind it (round-19 P1).
+    expect(detector).toContain("cl.updated_at <= sv.created_at + interval '1 hour'");
+    // ...and the extraction must still predate the booking it produced: a
+    // force-reprocess rewrites ai_extraction_enriched on the same row, and a
+    // changed commitment would move or erase a promise the customer was given
+    // at booking time with no new communication behind it (round-19 P1).
+    expect(detector).toContain("cl.updated_at <= sv.created_at + interval '1 hour'");
     expect(promise).toMatchObject({ visit_id: 'visit-1', source: 'call', source_id: 'call-1',
       communicated_at: '2026-09-10T14:05:00.000Z' });
     spy.mockRestore();
