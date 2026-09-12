@@ -2512,7 +2512,14 @@ async function mirrorSavedMethodForSucceededIntent(paymentIntent) {
           // debt that moved to AP while the payment was in flight.
           mirrorInvoiceId = piInvoice?.id || null;
         } catch (scopeErr) {
-          logger.warn(`[stripe-webhook] invoice scope lookup failed for PI ${piId}: ${scopeErr.message}`);
+          // FAIL CLOSED (Codex #4311 r47 P1): without the invoice id the
+          // transaction below skips invoicePayerOwnedNow and the enrollment
+          // has no invoice to judge, so a withdrawal caused by a payer on a
+          // SIBLING packet member would be invisible and the homeowner could
+          // be enrolled for AP-owned debt. Throwing leaves the event
+          // unacknowledged; Stripe redelivers and the lookup is retried.
+          logger.error(`[stripe-webhook] invoice scope lookup failed for PI ${piId} — not enrolling without the ownership fence: ${scopeErr.message}`);
+          throw scopeErr;
         }
         // ONE TRANSACTION for the authorization and the enrollment (local
         // audit on r46, the rule every other save-a-method path now follows):
