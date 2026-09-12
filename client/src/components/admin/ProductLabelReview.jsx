@@ -174,7 +174,7 @@ export default function ProductLabelReview({ product }) {
       <Card className="overflow-hidden">
         <CardBody className="space-y-4 break-words [overflow-wrap:anywhere]">
           <div>
-            <h3 className="flex items-center gap-2 text-18 font-medium text-zinc-900">
+            <h3 className="m-0 flex items-center gap-2 text-18 font-medium text-zinc-900">
               <FileText size={18} aria-hidden /> Label weather evidence
             </h3>
             <p className="mt-2 text-ui-body text-ink-secondary">
