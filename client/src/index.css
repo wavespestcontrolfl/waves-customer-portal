@@ -523,7 +523,7 @@ button, input, select, textarea, optgroup {
   border: 1px solid var(--border);
   border-radius: 8px;
   font-size: 12px;
-  font-weight: 800;
+  font-weight: 700;
   text-transform: uppercase;
   white-space: nowrap;
 }

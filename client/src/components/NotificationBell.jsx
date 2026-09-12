@@ -383,7 +383,7 @@ export default function NotificationBell({ type = 'admin', customerId }) {
           <span style={{
             position: 'absolute', top: 4, right: 2,
             background: colors.badge, color: '#fff', fontSize: 10,
-            fontWeight: type === 'admin' ? 700 : 800,
+            fontWeight: 700,
             minWidth: 18, height: 18, borderRadius: 9, display: 'flex',
             alignItems: 'center', justifyContent: 'center', padding: '0 4px',
           }}>
@@ -489,7 +489,7 @@ export default function NotificationBell({ type = 'admin', customerId }) {
                   <button type="button" onClick={loadNotifications} style={{
                     marginTop: 12, padding: '8px 14px', borderRadius: 8, border: '1px solid #D8D0C0',
                     background: '#fff', color: '#04395E', fontSize: 14,
-                    fontWeight: type === 'admin' ? 700 : 800, cursor: 'pointer',
+                    fontWeight: 700, cursor: 'pointer',
                   }}>Try again</button>
                 </div>
               )}
