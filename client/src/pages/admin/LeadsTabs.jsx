@@ -162,7 +162,7 @@ function LeadOwedPromises({ leadId }) {
       {rows.slice(0, LEAD_OWED_LIMIT).map((row) => (
         <Card
           key={row.id}
-          className="mb-[8px] p-[10px] text-ui-body text-zinc-900"
+          className={`mb-[8px] p-[10px] text-ui-body text-zinc-900 ${row.overdue ? "border-alert-fg" : ""}`}
         >
           <div className="mb-[4px]">
             <strong>
@@ -170,7 +170,9 @@ function LeadOwedPromises({ leadId }) {
             </strong>{" "}
             {row.description}
           </div>
-          <div className="mb-[6px]">
+          <div
+            className={`mb-[6px] ${row.overdue ? "text-alert-fg" : "text-ink-secondary"}`}
+          >
             {row.overdue
               ? "Overdue"
               : row.effective_due_at || row.due_at
@@ -361,6 +363,11 @@ function fmtCallDuration(seconds) {
   const s = Math.max(0, Math.round(seconds));
   return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
 }
+// Main's roiColor(): positive/zero ROI stays the default heading color,
+// negative ROI is a genuine alert (red).
+function roiColorClass(roi) {
+  return roi < 0 ? "text-alert-fg" : "text-zinc-900";
+}
 function LeadBadge({ label, tone = "neutral", className }) {
   return (
     <Badge tone={tone} className={className}>
@@ -380,23 +387,17 @@ function AgingBadge({ lead }) {
     />
   );
 }
-function MetricCard({ label, value, sub, alert = false }) {
+function MetricCard({ label, value, sub, alert = false, valueClassName }) {
   return (
     <Card
-      className={
-        alert
-          ? "flex-[1_1_180px] min-w-[160px] border-alert-fg p-5"
-          : "flex-[1_1_180px] min-w-[160px] p-5"
-      }
+      className={`flex-[1_1_180px] min-w-[160px] p-5 ${alert ? "border-alert-fg" : ""}`}
     >
       {" "}
       <div className="text-ui-body text-ink-secondary mb-[4px]">
         {label}
       </div>{" "}
       <div
-        className={
-          alert ? "text-26 font-medium text-alert-fg" : "text-26 font-medium"
-        }
+        className={`text-26 font-medium ${alert ? "text-alert-fg" : valueClassName || ""}`}
       >
         {value}
       </div>
@@ -552,6 +553,17 @@ function fmtShortDate(iso) {
 // SPEED-TO-LEAD TIMER
 // ═══════════════════════════════════════════════════════════════════════════
 
+// Inject pulse keyframe once (main's stlPulse, unchanged)
+if (
+  typeof document !== "undefined" &&
+  !document.getElementById("speed-to-lead-pulse")
+) {
+  const style = document.createElement("style");
+  style.id = "speed-to-lead-pulse";
+  style.textContent = `@keyframes stlPulse { 0%,100%{opacity:1} 50%{opacity:0.4} }`;
+  document.head.appendChild(style);
+}
+
 function SpeedToLeadTimer({ firstContactAt }) {
   const [elapsed, setElapsed] = useState(0);
   useEffect(() => {
@@ -569,13 +581,23 @@ function SpeedToLeadTimer({ firstContactAt }) {
   const hh = String(hours).padStart(2, "0");
   const mm = String(displayMinutes).padStart(2, "0");
   const ss = String(secs).padStart(2, "0");
+  // Main's C.green/C.amber are #3F3F46/#52525B (zinc-700/zinc-600) in this
+  // file's local palette, NOT real hues — this admin surface is monochrome
+  // by design (only C.red is a genuine color, reserved for the >=15min
+  // alert). Restored as the exact matching zinc shades, not invented amber.
+  const colorClass =
+    mins < 5
+      ? "text-zinc-700"
+      : mins < 15
+        ? "text-zinc-600"
+        : "text-alert-fg";
+  const shouldPulse = mins >= 5;
   return (
     <span
-      className={
-        mins >= 15
-          ? "text-ui-body font-medium text-alert-fg"
-          : "text-ui-body font-medium text-zinc-900"
-      }
+      className={`text-ui-body font-medium ${colorClass}`}
+      style={{
+        animation: shouldPulse ? "stlPulse 1.5s ease-in-out infinite" : "none",
+      }}
     >
       {hh}:{mm}:{ss}
     </span>
@@ -1475,9 +1497,7 @@ export function LeadsSection({ newLeadRequest = 0 }) {
                                   tone={
                                     lead.urgency === "urgent"
                                       ? "alert"
-                                      : lead.urgency === "high"
-                                        ? "neutral"
-                                        : "neutral"
+                                      : "neutral"
                                   }
                                 />{" "}
                               </TD>
@@ -1501,7 +1521,17 @@ export function LeadsSection({ newLeadRequest = 0 }) {
                           </TD>
                           {!compactQueue && (
                             <>
-                              <TD>
+                              <TD
+                                className={
+                                  lead.response_time_minutes != null
+                                    ? lead.response_time_minutes < 15
+                                      ? "text-zinc-700"
+                                      : lead.response_time_minutes < 60
+                                        ? "text-zinc-600"
+                                        : "text-alert-fg"
+                                    : "text-ink-secondary"
+                                }
+                              >
                                 {lead.status === "new" &&
                                 lead.response_time_minutes == null &&
                                 lead.first_contact_at ? (
@@ -1634,7 +1664,7 @@ export function LeadsSection({ newLeadRequest = 0 }) {
                                       {lead.monthly_value && (
                                         <div>
                                           Monthly Value:{" "}
-                                          <span className="text-zinc-900">
+                                          <span className="text-zinc-700">
                                             {fmtMoneyExact(lead.monthly_value)}
                                           </span>
                                         </div>
@@ -1936,6 +1966,10 @@ export function LeadsSection({ newLeadRequest = 0 }) {
                                     )}{" "}
                                   <Button
                                     variant={"primary"}
+                                    // Main's C.amber is #52525B (zinc-600) in
+                                    // this file's local palette, not a real
+                                    // amber — restored as the exact gray.
+                                    className="!bg-zinc-600 !border-zinc-600 hover:!bg-zinc-700"
                                     onClick={() =>
                                       setCallbackForm({
                                         leadId: lead.id,
@@ -1954,6 +1988,9 @@ export function LeadsSection({ newLeadRequest = 0 }) {
                                     <div className="flex flex-wrap gap-[8px] pb-[8px]">
                                       <Button
                                         variant={"primary"}
+                                        // Main's C.green is #3F3F46 (zinc-700) in this file's local
+                                        // palette, not a real green — restored as the exact gray.
+                                        className="!bg-zinc-700 !border-zinc-700 hover:!bg-zinc-800"
                                         onClick={() => {
                                           // Multi-service call leads persist a
                                           // composed label ("A + B + C") whose
@@ -2067,6 +2104,9 @@ export function LeadsSection({ newLeadRequest = 0 }) {
                                       {lead.phone && (
                                         <Button
                                           variant={"primary"}
+                                          // Main's C.green is #3F3F46 (zinc-700) in this file's local
+                                          // palette, not a real green — restored as the exact gray.
+                                          className="!bg-zinc-700 !border-zinc-700 hover:!bg-zinc-800"
                                           onClick={() =>
                                             callViaBridge(
                                               lead.phone,
@@ -2079,6 +2119,9 @@ export function LeadsSection({ newLeadRequest = 0 }) {
                                       )}
                                       <Button
                                         variant={"primary"}
+                                        // Main's C.green is #3F3F46 (zinc-700) in this file's local
+                                        // palette, not a real green — restored as the exact gray.
+                                        className="!bg-zinc-700 !border-zinc-700 hover:!bg-zinc-800"
                                         onClick={() => {
                                           setFormData({
                                             leadId: lead.id,
@@ -2113,7 +2156,7 @@ export function LeadsSection({ newLeadRequest = 0 }) {
                                       <Button
                                         disabled={deletingLeadId === lead.id}
                                         onClick={() => deleteLead(lead)}
-                                        variant="primary"
+                                        variant="danger"
                                         className="inline-flex items-center gap-[6px]"
                                       >
                                         <Trash2 size={14} strokeWidth={1.8} />
@@ -2129,7 +2172,7 @@ export function LeadsSection({ newLeadRequest = 0 }) {
                                   callbackForm.leadId === lead.id && (
                                     <div className="border-hairline border-zinc-200 rounded-md p-[14px] mb-[12px] bg-white">
                                       {" "}
-                                      <div className="text-ui-body text-zinc-900 font-medium mb-[8px]">
+                                      <div className="text-ui-body text-zinc-600 font-medium mb-[8px]">
                                         Schedule Callback
                                       </div>{" "}
                                       <div className="flex gap-[8px] mb-[8px]">
@@ -2172,6 +2215,9 @@ export function LeadsSection({ newLeadRequest = 0 }) {
                                         {" "}
                                         <Button
                                           variant={"primary"}
+                                          // Main's C.amber is #52525B (zinc-600)
+                                          // here, not a real amber.
+                                          className="!bg-zinc-600 !border-zinc-600 hover:!bg-zinc-700"
                                           disabled={
                                             !callbackForm.date ||
                                             !callbackForm.time
@@ -2211,7 +2257,7 @@ export function LeadsSection({ newLeadRequest = 0 }) {
                                 {/* Inline Add Appointment */}
                                 {apptForm && apptForm.leadId === lead.id && (
                                   <div className="border-hairline border-zinc-200 rounded-md p-[14px] mb-[12px] bg-white">
-                                    <div className="text-ui-body text-zinc-900 font-medium mb-[8px]">
+                                    <div className="text-ui-body text-zinc-700 font-medium mb-[8px]">
                                       Add Appointment
                                     </div>
                                     <div className="flex gap-[8px] mb-[8px]">
@@ -2326,6 +2372,8 @@ export function LeadsSection({ newLeadRequest = 0 }) {
                                     <div className="flex gap-[8px]">
                                       <Button
                                         variant={"primary"}
+                                        // Main's C.green is #3F3F46 (zinc-700), not a real green.
+                                        className="!bg-zinc-700 !border-zinc-700 hover:!bg-zinc-800"
                                         disabled={
                                           apptSaving ||
                                           !apptForm.date ||
@@ -2837,15 +2885,25 @@ export function LeadsSection({ newLeadRequest = 0 }) {
                       <TD className="text-zinc-900">{src.channel || "--"}</TD>
                       <TD className="text-zinc-900">{fmtMoney(mc)}</TD>
                       <TD className="text-zinc-900">{monthLeads}</TD>
-                      <TD className="text-zinc-900">{monthConv}</TD>
-                      <TD>{fmtPct(convRate)}</TD>
+                      <TD className="text-zinc-700">{monthConv}</TD>
+                      <TD
+                        className={
+                          convRate > 20
+                            ? "text-zinc-700"
+                            : convRate > 10
+                              ? "text-zinc-600"
+                              : "text-ink-secondary"
+                        }
+                      >
+                        {fmtPct(convRate)}
+                      </TD>
                       <TD className="text-zinc-900">
                         {cpl > 0 ? fmtMoney(cpl) : "--"}
                       </TD>
                       <TD className="text-zinc-900">
                         {cpa > 0 ? fmtMoney(cpa) : "--"}
                       </TD>
-                      <TD className="font-medium">
+                      <TD className={`font-medium ${hasRoiSignal ? roiColorClass(roi) : "text-ink-secondary"}`}>
                         {hasRoiSignal ? fmtPct(roi) : "--"}
                       </TD>
                     </TR>
@@ -2869,7 +2927,7 @@ export function LeadsSection({ newLeadRequest = 0 }) {
                                 <span className="text-ink-secondary text-ui-body">
                                   Conversions:{" "}
                                 </span>
-                                <span className="text-zinc-900">
+                                <span className="text-zinc-700">
                                   {detail.conversions}
                                 </span>
                               </div>{" "}
@@ -2885,7 +2943,7 @@ export function LeadsSection({ newLeadRequest = 0 }) {
                                 <span className="text-ink-secondary text-ui-body">
                                   Total Revenue:{" "}
                                 </span>
-                                <span className="text-zinc-900">
+                                <span className="text-zinc-700">
                                   {fmtMoney(detail.totalRevenue)}
                                 </span>
                               </div>{" "}
@@ -2893,7 +2951,9 @@ export function LeadsSection({ newLeadRequest = 0 }) {
                                 <span className="text-ink-secondary text-ui-body">
                                   ROI:{" "}
                                 </span>
-                                <span>{fmtPct(detail.roi)}</span>
+                                <span className={roiColorClass(detail.roi)}>
+                                  {fmtPct(detail.roi)}
+                                </span>
                               </div>{" "}
                               <div>
                                 <span className="text-ink-secondary text-ui-body">
@@ -2906,6 +2966,9 @@ export function LeadsSection({ newLeadRequest = 0 }) {
                             </div>{" "}
                             <Button
                               variant={"primary"}
+                              // Main's C.amber is #52525B (zinc-600), not a
+                              // real amber.
+                              className="!bg-zinc-600 !border-zinc-600 hover:!bg-zinc-700"
                               onClick={() => {
                                 setFormData({
                                   sourceId: src.id,
@@ -2990,14 +3053,20 @@ export function LeadsSection({ newLeadRequest = 0 }) {
 
     // Lost reasons pie
     const totalLost = lostReasons.reduce((s, r) => s + r.count, 0);
+    // Main's C.red/C.heading/C.text/C.green/C.amber/C.muted are (in this
+    // file's local palette) #991B1B (real red) / #09090B / #27272A / #3F3F46
+    // / #52525B / #71717A — i.e. zinc-950/800/700/600/500. Only the first
+    // ("red") is a genuine color; the rest are grayscale weight steps for
+    // categorical distinction between lost-reason slices, not a severity
+    // encoding, restored here as the exact matching zinc shades.
     const pieClasses = [
+      "text-alert-fg",
       "text-zinc-900",
       "text-zinc-800",
       "text-zinc-700",
       "text-zinc-600",
       "text-zinc-500",
       "text-zinc-400",
-      "text-zinc-300",
     ];
 
     // Phone number ROI
@@ -3041,6 +3110,11 @@ export function LeadsSection({ newLeadRequest = 0 }) {
               return `${ov.openUnansweredCount} waiting${since} · ${quality}`;
             })()}
             alert={ov.avgSpeedToLead >= 15}
+            valueClassName={
+              ov.avgSpeedToLead != null && ov.avgSpeedToLead >= 5
+                ? "text-zinc-600"
+                : "text-zinc-700"
+            }
           />{" "}
           <MetricCard
             label="Monthly ROI"
@@ -3095,13 +3169,13 @@ export function LeadsSection({ newLeadRequest = 0 }) {
                   aria-label={`${ch.channel} cost`}
                   value={ch.totalCost}
                   max={maxChannelVal}
-                  className="h-3 w-full accent-zinc-500"
+                  className="h-3 w-full accent-alert-fg"
                 />
                 <progress
                   aria-label={`${ch.channel} revenue`}
                   value={ch.totalRevenue}
                   max={maxChannelVal}
-                  className="h-3 w-full accent-zinc-900"
+                  className="h-3 w-full accent-zinc-700"
                 />
               </div>{" "}
               <div className="flex gap-[16px] text-ui-body text-ink-secondary mt-[2px]">
@@ -3114,11 +3188,11 @@ export function LeadsSection({ newLeadRequest = 0 }) {
           <div className="flex gap-[16px] text-ui-body text-ink-secondary mt-[8px]">
             {" "}
             <span>
-              <span className="inline-block w-3 h-3 rounded-sm mr-1 bg-zinc-500" />
+              <span className="inline-block w-3 h-3 rounded-sm mr-1 bg-alert-fg" />
               Cost
             </span>{" "}
             <span>
-              <span className="inline-block w-3 h-3 rounded-sm mr-1 bg-zinc-900" />
+              <span className="inline-block w-3 h-3 rounded-sm mr-1 bg-zinc-700" />
               Revenue
             </span>{" "}
           </div>{" "}
@@ -3225,12 +3299,18 @@ export function LeadsSection({ newLeadRequest = 0 }) {
                   4,
                   Math.min(20, (s.totalLeads / maxLeads) * 18),
                 );
+                // Main's C.heading/C.green/C.amber are zinc-950/zinc-700/
+                // zinc-600 in this file's local palette, NOT real hues —
+                // only C.red is a genuine color (the <=0% tier, a real
+                // alert). Restored as the matching zinc shades.
                 const toneClass =
-                  s.roi < 0
-                    ? "text-alert-fg"
-                    : s.roi > 200
-                      ? "text-zinc-900"
-                      : "text-zinc-500";
+                  s.roi > 200
+                    ? "text-zinc-900"
+                    : s.roi > 50
+                      ? "text-zinc-700"
+                      : s.roi > 0
+                        ? "text-zinc-600"
+                        : "text-alert-fg";
                 return (
                   <g key={i}>
                     {" "}
@@ -3273,7 +3353,7 @@ export function LeadsSection({ newLeadRequest = 0 }) {
                       key={i}
                       className="grid grid-cols-[minmax(90px,1fr)_2fr_auto] items-center gap-3"
                     >
-                      <span className="text-ui-body text-zinc-900">
+                      <span className="text-ui-body text-ink-secondary">
                         {b.label}
                       </span>
                       <div className="grid gap-1">
@@ -3287,7 +3367,7 @@ export function LeadsSection({ newLeadRequest = 0 }) {
                           aria-label={`${b.label} won leads`}
                           value={b.won || 0}
                           max={maxResp}
-                          className="h-1.5 w-full accent-zinc-900"
+                          className="h-1.5 w-full accent-zinc-700"
                         />
                       </div>
                       <span className="text-ui-body text-ink-secondary">
@@ -3305,7 +3385,7 @@ export function LeadsSection({ newLeadRequest = 0 }) {
                 Total
               </span>{" "}
               <span>
-                <span className="inline-block w-[10px] h-[10px] bg-zinc-900 rounded-sm mr-[4px]" />
+                <span className="inline-block w-[10px] h-[10px] bg-zinc-700 rounded-sm mr-[4px]" />
                 Won
               </span>{" "}
             </div>{" "}
@@ -3419,9 +3499,11 @@ export function LeadsSection({ newLeadRequest = 0 }) {
                   </TD>
                   <TD className="text-zinc-900">{fmtMoney(s.totalCost)}</TD>
                   <TD className="text-zinc-900">{s.totalLeads}</TD>
-                  <TD className="text-zinc-900">{s.conversions}</TD>
-                  <TD className="text-zinc-900">{fmtMoney(s.totalRevenue)}</TD>
-                  <TD className="font-medium">
+                  <TD className="text-zinc-700">{s.conversions}</TD>
+                  <TD className="text-zinc-700">{fmtMoney(s.totalRevenue)}</TD>
+                  <TD
+                    className={`font-medium ${s.roi > 0 ? roiColorClass(s.roi) : "text-ink-secondary"}`}
+                  >
                     {s.roi > 0 ? fmtPct(s.roi) : "--"}
                   </TD>
                 </TR>
@@ -3740,7 +3822,13 @@ export function LeadsSection({ newLeadRequest = 0 }) {
             }
             options={["Platinum", "Gold", "Silver", "Bronze", "One-Time"]}
           />{" "}
-          <Button onClick={submitForm} disabled={loading} variant={"primary"}>
+          <Button
+            onClick={submitForm}
+            disabled={loading}
+            variant={"primary"}
+            // Main's C.green is #3F3F46 (zinc-700), not a real green.
+            className="!bg-zinc-700 !border-zinc-700 hover:!bg-zinc-800"
+          >
             {loading ? "Converting..." : "Convert"}
           </Button>{" "}
         </LeadDialog>
@@ -3967,7 +4055,13 @@ export function LeadsSection({ newLeadRequest = 0 }) {
               }))
             }
           />{" "}
-          <Button onClick={submitForm} disabled={loading} variant={"primary"}>
+          <Button
+            onClick={submitForm}
+            disabled={loading}
+            variant={"primary"}
+            // Main's C.amber is #52525B (zinc-600), not a real amber.
+            className="!bg-zinc-600 !border-zinc-600 hover:!bg-zinc-700"
+          >
             {loading ? "Logging..." : "Log Cost"}
           </Button>{" "}
         </LeadDialog>
