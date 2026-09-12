@@ -166,13 +166,14 @@ const inYear = (date, year) => date.slice(0, 4) === String(year);
 // the query starts at the year boundary, so rows the long set walks back past
 // it are excluded here even though the detail summary and costOfOwnership,
 // which have no year filter, still count them.
-function fleetOverview(logs) {
+function fleetOverview(logs, assets = 1) {
   const year = easternYear(),
     totals = sumMileage(logs.filter((log) => inYear(log.log_date, year)));
   return {
-    total_assets: 1,
+    total_assets: assets,
     overdue_maintenance: 0,
-    ytd_maintenance_spend: inYear(maintenanceAt, year) ? maintenanceSpend : 0,
+    ytd_maintenance_spend:
+      assets && inYear(maintenanceAt, year) ? maintenanceSpend : 0,
     ytd_total_miles: totals.total_miles,
     ytd_fuel_cost: totals.total_fuel_cost,
     ytd_irs_deduction: totals.total_irs_deduction,
@@ -367,7 +368,19 @@ function fixtures(state) {
     [
       "GET /api/admin/equipment/job-costs/summary",
       () =>
-        state.jobSummary || {
+        // An empty job_costs table does not come back null: the route
+        // normalizes the null aggregate to 0 and derives the averages from a
+        // zero job count (server/routes/admin-equipment.js), so the tiles read
+        // "0.0%" rather than an em dash.
+        (state.empty
+          ? {
+              avgMargin: 0,
+              avgRevenue: 0,
+              avgCost: 0,
+              totalJobs: 0,
+              byServiceType: {},
+            }
+          : state.jobSummary) || {
           avgMargin: 60,
           avgRevenue: 250,
           avgCost: 100,
@@ -379,12 +392,15 @@ function fixtures(state) {
     ],
     [
       "GET /api/admin/equipment/job-costs",
-      (url) => ({
-        job_costs: limited(url, [jobCost]),
-        costs: limited(url, [jobCost]),
-        total: 1,
-        page: 1,
-      }),
+      (url) => {
+        const rows = state.empty ? [] : [jobCost];
+        return {
+          job_costs: limited(url, rows),
+          costs: limited(url, rows),
+          total: rows.length,
+          page: 1,
+        };
+      },
     ],
     [
       "GET /api/admin/equipment-maintenance",
@@ -392,7 +408,7 @@ function fixtures(state) {
     ],
     [
       "GET /api/admin/equipment-maintenance/analytics/overview",
-      () => fleetOverview(activeMileage()),
+      () => (state.empty ? fleetOverview([], 0) : fleetOverview(activeMileage())),
     ],
     [
       "GET /api/admin/equipment-maintenance/alerts",
@@ -438,23 +454,25 @@ function fixtures(state) {
     ],
     [
       "GET /api/admin/equipment-maintenance/analytics/costs",
-      () => ({ costs: [ownership(activeMileage())] }),
+      () => ({ costs: state.empty ? [] : [ownership(activeMileage())] }),
     ],
     [
       "GET /api/admin/equipment-maintenance/analytics/reliability",
       () => ({
-        reliability: [
-          {
-            id,
-            name: equipment.name,
-            category: "vehicle",
-            asset_tag: "QA-001",
-            incident_count: 1,
-            total_downtime_hours: 2,
-            total_jobs_affected: 0,
-            total_revenue_impact: 0,
-          },
-        ],
+        reliability: state.empty
+          ? []
+          : [
+              {
+                id,
+                name: equipment.name,
+                category: "vehicle",
+                asset_tag: "QA-001",
+                incident_count: 1,
+                total_downtime_hours: 2,
+                total_jobs_affected: 0,
+                total_revenue_impact: 0,
+              },
+            ],
       }),
     ],
     [
@@ -464,7 +482,9 @@ function fixtures(state) {
         // equipment, so a vehicle with no rows in that year is absent entirely
         // rather than present with zeroes.
         const year = Number(url.searchParams.get("year")) || easternYear(),
-          rows = activeMileage().filter((log) => inYear(log.log_date, year)),
+          rows = (state.empty ? [] : activeMileage()).filter((log) =>
+            inYear(log.log_date, year),
+          ),
           totals = sumMileage(rows);
         return {
           year,
@@ -477,11 +497,11 @@ function fixtures(state) {
     ],
     [
       "GET /api/admin/equipment-maintenance/schedules/due",
-      () => ({ schedules: [schedule] }),
+      () => ({ schedules: state.empty ? [] : [schedule] }),
     ],
     [
       "GET /api/admin/equipment-maintenance/records/recent",
-      (url) => ({ records: limited(url, [record]) }),
+      (url) => ({ records: limited(url, state.empty ? [] : [record]) }),
     ],
     [
       "GET /api/admin/equipment-systems",
@@ -490,15 +510,17 @@ function fixtures(state) {
     [
       "GET /api/admin/equipment-systems/reconciliation",
       () => ({
-        systems: [system],
-        equipment: [{ ...equipment, tax_register: taxRegisterAsset }],
+        systems: state.empty ? [] : [system],
+        equipment: state.empty
+          ? []
+          : [{ ...equipment, tax_register: taxRegisterAsset }],
         issues: [],
         summary: {
-          systems_with_any_equipment_link: 1,
-          systems_active: 1,
+          systems_with_any_equipment_link: state.empty ? 0 : 1,
+          systems_active: state.empty ? 0 : 1,
           systems_without_equipment_link: 0,
-          equipment_with_tax_link: 1,
-          equipment_active: 1,
+          equipment_with_tax_link: state.empty ? 0 : 1,
+          equipment_active: state.empty ? 0 : 1,
           tax_register_unlinked: 0,
         },
       }),
@@ -519,6 +541,8 @@ function fixtures(state) {
     ],
   ]);
 }
+const requestKey = (request) =>
+  `${request.method()} ${new URL(request.url()).pathname}`;
 async function install(page, server, state) {
   const handlers = fixtures(state),
     contracts = queryContracts();
@@ -1597,8 +1621,7 @@ async function analyticsIndependence(page, server, state) {
     "GET /api/admin/equipment-maintenance/analytics/overview",
   ]) {
     for (const mode of ["failure", "pending"]) {
-      const matches = (request) =>
-        `${request.method()} ${new URL(request.url()).pathname}` === key;
+      const matches = (request) => requestKey(request) === key;
       let response;
       if (mode === "failure") {
         state.failures.add(key);
@@ -1631,48 +1654,77 @@ async function analyticsIndependence(page, server, state) {
 }
 async function readsAndNavigation(page, server, state, report, device) {
   await analyticsIndependence(page, server, state);
-  for (const [tab, key, message, ready] of [
+  // `recovered` is the marker each retry has to put on screen, and it has to be
+  // content only that response can render. A static card heading — "Equipment
+  // Calibration", "Cost of Ownership" — stays visible for the whole failure, so
+  // waiting on one proved nothing about the retry: the alert is cleared on the
+  // click rather than on the response, and the request counter below moves at
+  // interception, so both were already satisfied before any body came back.
+  const text = (value) => (page) =>
+    page.getByText(value, { exact: true }).first().waitFor();
+  for (const [tab, key, message, recovered] of [
     [
       "assets",
       "GET /api/admin/equipment/equipment",
       "Could not load equipment:",
-      equipment.name,
+      text(equipment.name),
     ],
     [
       "maintenance",
       "GET /api/admin/equipment-maintenance",
       "Could not load fleet:",
-      equipment.name,
+      text(equipment.name),
     ],
     [
+      // The systems response is what fills the rig picker; its options sit in a
+      // closed <select>, so they are asserted attached rather than visible.
       "calibrations",
       "GET /api/admin/equipment-systems",
       "Could not load equipment systems:",
-      "Equipment Calibration",
+      (page) =>
+        page
+          .locator("option")
+          .filter({ hasText: system.name })
+          .first()
+          .waitFor({ state: "attached" }),
     ],
     [
+      // The reconciliation card shows "Reconciliation report unavailable." until
+      // its own report arrives, and only then the linked-summary tiles.
       "calibrations",
       "GET /api/admin/equipment-systems/reconciliation",
       "Could not load equipment reconciliation:",
-      "Equipment Calibration",
+      async (page) => {
+        await page.getByText("Systems linked", { exact: true }).waitFor();
+        assert.equal(
+          await page
+            .getByText("Reconciliation report unavailable.", { exact: true })
+            .count(),
+          0,
+          "reconciliation report recovered",
+        );
+      },
     ],
     [
       "tank-mixes",
       "GET /api/admin/equipment/tank-mixes",
       "Could not load tank mixes.",
-      "Synthetic tank mix",
+      text("Synthetic tank mix"),
     ],
     [
+      // The summary tiles render only once a summary is in hand.
       "job-costs",
       "GET /api/admin/equipment/job-costs/summary",
       "Could not load job costs:",
-      "Avg Margin",
+      text("Avg Margin"),
     ],
     [
+      // "Cost of Ownership" is the card heading and survives the failure; the
+      // totals footer is rendered only for a non-empty costs response.
       "analytics",
       "GET /api/admin/equipment-maintenance/analytics/costs",
       "Could not load analytics:",
-      "Cost of Ownership",
+      text("Totals"),
     ],
   ]) {
     state.failures.add(key);
@@ -1685,9 +1737,16 @@ async function readsAndNavigation(page, server, state, report, device) {
     if (tab === "assets") await shot(page, report, device + "-read-error");
     const before = state.requests.filter((r) => r.key === key).length;
     state.failures.delete(key);
+    // Awaited before the next iteration's navigation can abort it, so a retry
+    // whose response is dropped fails here instead of passing on a counter that
+    // moved when the request was intercepted.
+    const response = page.waitForResponse(
+      (r) => requestKey(r.request()) === key && r.ok(),
+    );
     await alert.getByRole("button", { name: /Try again|Retry/ }).click();
+    await response;
     await alert.waitFor({ state: "hidden" });
-    await page.getByText(ready, { exact: true }).first().waitFor();
+    await recovered(page);
     assert.ok(
       state.requests.filter((r) => r.key === key).length > before,
       key + " retries",
@@ -1695,11 +1754,100 @@ async function readsAndNavigation(page, server, state, report, device) {
     state.checks.push(key + " failure and read retry");
   }
   state.empty = true;
-  for (const [tab, text] of [
-    ["assets", "No equipment recorded."],
-    ["maintenance", "No equipment found"],
-    ["tank-mixes", "No tank mixes configured"],
-    ["calibrations", "No equipment systems are available for calibration."],
+  // A leaf's own empty copy is not evidence the account reads as empty: every
+  // figure rendered beside the list comes from a different endpoint. While only
+  // the list was emptied and only the list was asserted, a "1 asset" fleet tile
+  // and a "1/1 linked" reconciliation summary sat over an account with nothing
+  // in it and nothing caught it. Each leaf now empties, and checks, its
+  // neighbours as well.
+  // StatCard and SummaryTile render the label and then the value as sibling
+  // divs; the job-cost tiles put the value first. Either way the figure is read
+  // off its label rather than by position.
+  const figure = (label) =>
+    page
+      .getByText(label, { exact: true })
+      .locator("xpath=following-sibling::div[1]");
+  const jobFigure = (label) =>
+    page
+      .getByText(label, { exact: true })
+      .locator("xpath=preceding-sibling::div[1]");
+  // Cards that are rendered only for a non-empty response, and so must be gone
+  // from an empty account.
+  const absent = async (...labels) => {
+    for (const label of labels)
+      assert.equal(
+        await page.getByText(label, { exact: true }).count(),
+        0,
+        label + " on an empty account",
+      );
+  };
+  for (const [tab, text, neighbours] of [
+    ["assets", "No equipment recorded.", null],
+    [
+      "maintenance",
+      "No equipment found",
+      async () => {
+        // The YTD figures come from the overview's own fields rather than from
+        // the equipment list, so counts alone would keep passing if either the
+        // assets guard in fleetOverview() or its empty mileage input were lost
+        // and real spend stood beside "No equipment found".
+        for (const [label, value] of [
+          ["Total Assets", "0"],
+          ["Overdue Maintenance", "0"],
+          ["YTD Maintenance", "$0.00"],
+          ["YTD Mileage", "0"],
+          ["YTD Fuel", "$0.00"],
+          ["YTD IRS Deduction", "$0.00"],
+        ])
+          assert.equal(
+            await figure(label).innerText(),
+            value,
+            label + " on an empty account",
+          );
+      },
+    ],
+    ["tank-mixes", "No tank mixes configured", null],
+    [
+      "job-costs",
+      "No job costs recorded yet",
+      async () => {
+        assert.equal(await jobFigure("Avg Margin").innerText(), "0.0%");
+        assert.equal(await jobFigure("Total Jobs Costed").innerText(), "0");
+      },
+    ],
+    [
+      // The analytics tab has no empty copy of its own — every card here is
+      // rendered only when its own response carried rows, so their absence is
+      // what an empty account looks like. "Cost of Ownership" is the static
+      // heading that says the tab rendered at all.
+      "analytics",
+      "Cost of Ownership",
+      async () => {
+        await absent(
+          "Totals",
+          "Upcoming Maintenance (Next 30 Days)",
+          "Reliability Ranking (Downtime Hours)",
+          "Maintenance Cost Trend (Last 6 Months)",
+        );
+        // Costs, mileage and due schedules all name the vehicle when they have
+        // rows for it.
+        assert.equal(
+          await page.locator("main").getByText(equipment.name).count(),
+          0,
+          "vehicle rows on an empty account",
+        );
+      },
+    ],
+    [
+      "calibrations",
+      "No equipment systems are available for calibration.",
+      async () => {
+        assert.equal(await figure("Systems linked").innerText(), "0/0");
+        assert.equal(await figure("Equipment tax links").innerText(), "0/0");
+        // Only the "— select a spray rig —" placeholder is left.
+        assert.equal(await page.locator("option").count(), 1);
+      },
+    ],
   ]) {
     await page.goto(server.baseUrl + `/admin/equipment?tab=${tab}`);
     await page.getByText(text, { exact: false }).waitFor();
@@ -1708,6 +1856,7 @@ async function readsAndNavigation(page, server, state, report, device) {
       0,
       tab + " true empty",
     );
+    if (neighbours) await neighbours();
     state.checks.push(tab + " empty");
   }
   state.empty = false;

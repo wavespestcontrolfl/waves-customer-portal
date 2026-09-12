@@ -2093,7 +2093,6 @@ Everything else from the day's hardening stands: image-first visuals, pair-verif
 
 **Decisions.** (1) The badge background is `alert.fg` (`#C8312F`) with white text. An unread inbound text is a genuine alert under the alert-fg rule — a customer is waiting on a reply and nobody has read it — so this is not decoration and does not open the door to colored chrome elsewhere. The §5.7 unread dot on inbox rows stays dark. (2) Nothing else moves: the count is still `GET /admin/communications/unread-count` (inbound SMS only, per conversation, admin phones excluded), still hidden at zero, capped at 99+, 30 s poll plus the read event, one `UnreadBadge` component shared by both breakpoints.
 
-
 ## 2026-09-07 — Lawn assessment history: property scope, one resolver, confirm-time baseline (feat/lawn-assessment-property-history)
 
 ### Why
@@ -2206,7 +2205,6 @@ in the later UI PR, which is a documented P2 deferral here.
 
 **Verification.** Synthetic fixtures rendered the real Customers route and Waves shell at desktop, phone, and tablet widths in Chromium and WebKit. All sections, full history, directory selection/filtering, modal dismissal, and simulated keyboard viewport changes passed; screenshots were inspected. Focused client tests and the production build passed. No migrations or database integration checks were run. Physical iPhone home-screen behavior was not device-tested. This entry records a local implementation, not a deployment.
 
-
 ### Customer directory controls and numeric scores (2026-09-07)
 
 Directory, Map, and Outreach & Upsells use a compact outlined toolbar with their existing icons. A single responsive search and Filter row replaces separate desktop/mobile controls. Customer names show the recorded numeric health score in a circle using the existing score color bands; zero and missing values remain distinct, and stored letter grades remain filterable.
@@ -2240,7 +2238,6 @@ The second phase of the approved sidebar scope adds page search to the existing 
 ## 2026-09-08 — Reproduce Customer 360 foundation checks on the real route
 
 The Customer 360 proof uses the existing browser lifecycle and required-font loader, with synthetic API responses for both workspace and overlay presentations. Review reports identify the source checkout and distinguish failed runs from accepted browser results. Device checks remain a separate acceptance step.
-
 
 ## 2026-09-08 — One evidence-based lawn assessment per visit
 
@@ -2351,6 +2348,29 @@ The Liquid Glass audit's G-01 (`liquid-glass-consistency-audit-2026-09-09.md` §
 **Checked and left alone, not "eleven wrappers":** `RatePage` and `CardPage` render a centered, bounded card widget (their own background/border/logo header), not a full-width content column — forcing the primitive on either would restyle the card, not just consolidate a recipe. `LoginPage` is a vertically-centered two-column marketing hero, not a top-anchored content flow. `ServiceOutlinePage` already renders at 760/16px (Tailwind `max-w-[760px]` + `px-4`) across five independently full-bleed-banded sections — no drift to fix, and collapsing the bands into one column would change its alternating-background design. `ReviewPage` is dead code (unrouted since the RatePage consolidation, per the comment at `App.jsx:178`) — left as found per house rule against deleting files outside the assigned task.
 
 **Deleted from `index.css`**: `.waves-customer-page`, `.waves-receipt-page`, `.waves-estimate-page`, `.waves-rate-page`, `.waves-contract-page`, and their entries in the ≤820px responsive block (which had been giving these pages a *sixth* gutter, 24px, on top of the five G-01 measured — the new primitive needs no viewport override, matching "16px at every width"). `.waves-contract-single` / `.waves-billing-grid` / `.waves-pay-payment-panel` / `.waves-customer-help` and everything else in that block are unrelated and kept.
+
+## 2026-09-11 — R3b: weights above 700 cleared from the baseline
+
+G-04 found weights above 700 surviving on glass through shared tokens the gate
+could not see. C8 widened the gate and enumerated what it exposed; this clears
+the whole `heavy-weight` rule from `LEGACY_BASELINE` — fifteen violations across
+eight files, all snapped to 700 (the customer scale is 400 / 500 / 600 / 700,
+owner sheet 2026-09-03).
+
+`App.jsx` carried seven at **850** — every customer error-boundary heading and
+its retry button, plus "Loading your portal". `NotificationBell` spelled its two
+as `fontWeight: type === 'admin' ? 700 : 800`: the ternary existed only to give
+the customer surface the heavier weight, so with both arms at 700 it is a
+distinction without a difference and the ternary is gone. The rest were single
+literals in `GlassNewsletterCard`, `InstallPrompt`, `NewsletterSignup`,
+`StationMapCard`, `VanScene` and one `font-weight: 800` in `index.css`.
+
+`InstallPrompt` and `VanScene` were weight-only and are **delisted** — the gate
+fails on a stale entry, so a file that reaches zero has to lose its line.
+
+**Debt: 90 → 75 across 25 files.** Everything left is `banned-font-size`, `emoji`,
+`font-family-literal` or `local-palette`. No behaviour changes; 96 tests across
+the seven suites that render these components pass unchanged.
 
 ## 2026-09-11 — R2b: one terminal-state card (PublicStateCard)
 
