@@ -917,6 +917,30 @@ describe('runScheduleQualityAlertsOnly (reorder off, quality gates own the night
   });
 });
 
+// ── Round-0 fallback audit P1 ────────────────────────────────────────────
+// chooseWindowSafeOrder relaxes a window whose promised deadline has already
+// passed relative to `startMin` (the admin "today, mid-route" clock), so an
+// overdue stop no longer dictates order. Every figure it returns has to be
+// measured under that SAME relaxed view: re-simulating the accepted order
+// against the true, now-unreachable deadline returns null, and the multi-tech
+// /optimize response sums `afterSeconds || 0` — charging that whole truck
+// zero drive time.
+test('chooseWindowSafeOrder: a legal order whose promise already elapsed still reports afterSeconds', () => {
+  const { chooseWindowSafeOrder } = require('../services/route-reorder');
+  const stops = [
+    // 09:00-10:00 promise, deadline 10:00 — long past a 15:30 startMin.
+    { id: 'E1', technician_id: 't1', route_order: 1, window_start: '09:00', window_end: '10:00', estimated_duration_minutes: 60, lat: 1, lng: 3 },
+    { id: 'E2', technician_id: 't1', route_order: 2, window_start: null, window_end: null, estimated_duration_minutes: 60, lat: 1, lng: 1 },
+  ];
+  const out = chooseWindowSafeOrder({
+    RouteOptimizer, googleOrder: stops, sourceStops: stops, googleSource: 'google_routes_api', startMin: 15 * 60 + 30,
+  });
+  expect(out.orderedStops.map((s) => s.id)).toEqual(['E1', 'E2']);
+  expect(out.source).toBe('google_routes_api');
+  // 0 (this harness's legs are 0-minute), never null — null is the bug.
+  expect(out.afterSeconds).toBe(0);
+});
+
 // ── Codex #4435 round 2 ──────────────────────────────────────────────────
 // The commit-time fence hashed workDuration, which is max(window span, real
 // estimate) — so a pair of 60-minute-span rows could go from 20+20 to 20+50
