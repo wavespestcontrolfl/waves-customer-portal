@@ -457,7 +457,7 @@ async function loadServiceRecord(recordId) {
 }
 
 async function sendServiceReportV1Email(recordId, {
-  token, reportUrl, pdfUrl, forceFreshPdf = false, verifyBeforeSend = null,
+  token, reportUrl, pdfUrl, forceFreshPdf = false, verifyBeforeSend = null, verifySendSealHeld = null,
   // #3168: the assessment the caller's fence sealed. Pinning it on the render
   // is what makes the attachment's content provable — the renderer navigates
   // to the report page, which fetches its own data, so without a pin the file
@@ -644,6 +644,11 @@ async function sendServiceReportV1Email(recordId, {
     return { ok: false, error: 'Re-entry guidance corrected during render — deferring send', retryable: true };
   }
   try {
+
+  // Re-entry locking may wait past the lawn seal TTL; verify its owner again.
+  if (verifySendSealHeld && !(await verifySendSealHeld())) {
+    return { ok: false, error: 'Report copy seal lost — deferring send', retryable: true };
+  }
 
   const serviceLabel = serviceDisplayName(data);
   const templateOutcomes = await Promise.allSettled(
