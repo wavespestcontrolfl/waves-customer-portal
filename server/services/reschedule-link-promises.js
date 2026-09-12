@@ -184,8 +184,42 @@ const CONDITIONAL = /\b(?:not|never|unless|if|until|once|maybe|might|cannot)\b|\
 // The caller's own refusal, with the channel it names: "don't email it" is
 // group 1, "don't send me a text" is group 2, and a bare "don't send the
 // link" names no channel at all (both groups empty — refuses everything).
-const CALLER_REFUSAL = /\b(?:don t|do not|no need|never mind|nevermind)\b[a-z0-9 ]{0,20}?\b(?:(email|emailing|e mail|text|texting|sms)|(?:link|send|sending)(?:\s+(?:me|us)?\s*(?:a|an|the|any|another)?\s*(email|e mail|text|sms)\b)?)/g;
-const TEXT_REQUEST = /\b(?:text|texting|sms)\b/g;
+// The second branch's object phrase has to reach a channel word named via
+// "by/via/through" against a pronoun object too — "do not send the link by
+// text" and "please don't send that by text" both name the link's OBJECT
+// ("the link" / "that") before the preposition that actually names the
+// channel, and a determiner list that stopped at "the link" (with no
+// preposition option at all) left the match ending right after "send",
+// stranding "by text" outside it — the exact gap that let the bare word
+// "text" a few characters later misread as a NEW request superseding a
+// refusal that, in truth, named text all along (codex #4293 P1).
+const CALLER_REFUSAL = /\b(?:don t|do not|no need|never mind|nevermind)\b[a-z0-9 ]{0,20}?\b(?:(email|emailing|e mail|text|texting|sms)|(?:link|send|sending)(?:\s+(?:me|us)?\s*(?:a|an|the|any|another|that|it)?\s*(?:link\s+)?(?:by\s+|via\s+|through\s+)?(email|e mail|text|sms)\b)?)/g;
+// "no texts please" / "no more emails" — a refusal shape CALLER_REFUSAL's own
+// prefix list never covered (it names no "don't"/"do not"/etc. at all), but
+// one this worker still has to honor. Scoped tight — the channel word must be
+// the very next word after "no" (an optional "more" aside) — so it cannot
+// fire on an unrelated "no" earlier in an otherwise affirmative turn ("no,
+// that works, text it") the way a wide "no ... text" window would.
+const NO_CHANNEL_REFUSAL = /\bno\s+(?:more\s+)?(texts?|texting|sms|emails?|emailing|e mail)\b/g;
+// Which channel a matched refusal word names — shared by both CALLER_REFUSAL
+// (via refusedChannel) and NO_CHANNEL_REFUSAL, so there is exactly one place
+// that decides what "text"/"texts"/"sms" vs. "email"/"emails" means.
+function refusalChannelWord(word) {
+  if (/^(?:email|emailing|e mail|emails)$/.test(word)) return 'email';
+  return /^(?:text|texting|sms|texts)$/.test(word) ? 'sms' : 'any';
+}
+// An explicit ASK for the text — the caller telling the agent to send it, not
+// merely the channel noun surfacing again later in the same breath ("...by
+// text", already inside the refusal's own match above) or in an entirely
+// separate refusal of its own ("no texts please", its own NO_CHANNEL_REFUSAL
+// match). Round 4's genuine supersession ("don't email me the link... actually,
+// text it to me") is exactly this shape: an affirmative ask, in a later
+// clause, naming the channel the caller now wants. A bare "text" with no ask
+// around it must never flip a standing refusal back to permitted (codex
+// #4293 P1) — this is a consent boundary, so the phrasing that counts as a
+// request has to be a genuine one: "text it/that/me/us", "send me/us a/the
+// text", or an explicit "yes/actually/instead/please, text" turn.
+const TEXT_REQUEST = /\btext (?:it|that|this|me|us)\b|\b(?:send|shoot) (?:me|us) (?:a |an |the )?text\b|\b(?:yes|actually|instead|please) (?:just )?text\b/g;
 // This worker has exactly ONE pipeline: an SMS to the caller's own phone.
 // "I'll EMAIL you a reschedule link" is a promise it cannot keep, and quietly
 // texting it instead delivers the link on a channel the agent never named (or
@@ -249,9 +283,7 @@ function standingPromiseQuotes(commitment, turns) {
 // Which channel a caller refusal names: this worker only ever texts, so a
 // refusal of email alone leaves its promise standing.
 function refusedChannel(match) {
-  const word = match[1] || match[2] || '';
-  if (/^(?:email|emailing|e mail)$/.test(word)) return 'email';
-  return /^(?:text|texting|sms)$/.test(word) ? 'sms' : 'any';
+  return refusalChannelWord(match[1] || match[2] || '');
 }
 
 // Whether the caller's refusal of the TEXT still stands once the agent has
@@ -268,11 +300,20 @@ function callerRefusedText(ordered, promiseAt) {
   let refused = false;
   for (const turn of ordered.slice(promiseAt + 1)) {
     if (turn.speaker !== 'caller') continue;
-    const events = [...turn.text.matchAll(CALLER_REFUSAL)]
-      .map((m) => ({ at: m.index, end: m.index + m[0].length, refuses: refusedChannel(m) }));
+    // Both refusal shapes this turn might carry — CALLER_REFUSAL's own
+    // negation prefixes, and the bare "no text(s)" shape it never covered —
+    // feed the SAME event stream, so a request below is checked against
+    // every refusal clause on the turn, not just one family of them.
+    const events = [
+      ...[...turn.text.matchAll(CALLER_REFUSAL)].map((m) => ({ at: m.index, end: m.index + m[0].length, refuses: refusedChannel(m) })),
+      ...[...turn.text.matchAll(NO_CHANNEL_REFUSAL)].map((m) => ({ at: m.index, end: m.index + m[0].length, refuses: refusalChannelWord(m[1]) })),
+    ];
     for (const m of turn.text.matchAll(TEXT_REQUEST)) {
-      // "text" inside the refusal itself ("don't text me") is the refusal's
-      // own object, not a request for one.
+      // An affirmative ask whose own match falls inside a refusal's clause
+      // (e.g. the "text" that CALLER_REFUSAL's widened object phrase already
+      // consumed out of "send the link by text") is that refusal's own
+      // object, not a later request overturning it — the refusal's own
+      // clause can never supply the token that reverses it (codex #4293 P1).
       if (!events.some((e) => m.index >= e.at && m.index < e.end)) events.push({ at: m.index, requests: true });
     }
     for (const event of events.sort((a, b) => a.at - b.at)) {
@@ -944,7 +985,20 @@ async function reconcileAttempt(conn, row, now) {
   // itself must not depend on parkReview's own reason-unchanged guard ever
   // agreeing to write.
   if (failed && unparked) { await retireDeliveryUncertainty(conn, row.id); await parkReview(conn, row, 'delivery_failed'); }
-  else if (failed) await retireDeliveryUncertainty(conn, row.id);
+  // An already-parked failed attempt has nothing further THIS function can
+  // settle — but it must not report "handled" the way the live branches
+  // above and below do. Returning true here (as this used to, unconditionally)
+  // made runOne return immediately, so it never reached contextFor and the
+  // promise_closed cleanup there: an office dismissal or hand-fulfilment
+  // recorded on the commitment ledger after this exact SMS had already
+  // failed and parked left the exception card open forever, with no future
+  // sweep ever revisiting it (codex #4293 P1). Returning false — the same
+  // signal the final `return false` below already uses for "still parked,
+  // nothing definitive yet" — is safe: holdBeforeSend's very first check
+  // (`row.status === 'review'`) still refuses to plan a fresh send off this
+  // row, so contextFor's terminal read runs without ever retrying the
+  // failed dispatch.
+  else if (failed) { await retireDeliveryUncertainty(conn, row.id); return false; }
   else if (sms && ['delivered', 'read'].includes(sms.status)) await settleDelivery(conn, row, sms);
   else if (unparked && new Date(row.sent_at || row.last_attempt_at).getTime() + 24 * 3600000 < now.getTime()) await parkReview(conn, row, 'delivery_receipt_unavailable');
   else if (sms && !failed && unparked) await settleDelivery(conn, row, sms);

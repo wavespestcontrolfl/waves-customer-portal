@@ -301,6 +301,27 @@ test('only a caller refusal spoken AFTER the accepted promise counts, and it rev
   expect(select({ call: { ...call, transcription: stillRefused } }).reason).toBe('promise_needs_review');
 });
 
+test.each([
+  // The bare word "text" appears AFTER the negation in every one of these,
+  // exactly the shape that used to flip `refused` back to false: the
+  // refusal's own object ("the link", "that") or its own channel noun
+  // ("texts") is not a later request superseding it (codex #4293 P1).
+  'Do not send the link by text.',
+  "Don't text me the link.",
+  'No texts please.',
+  "Please don't send that by text.",
+])('a negated channel phrase stays refused — the refusal cannot supply the token that reverses itself (%s) (codex #4293 P1)', (refusal) => {
+  const transcription = `Agent: ${quote}\nCaller: ${refusal}`;
+  expect(select({ call: { ...call, transcription } }).reason).toBe('promise_needs_review');
+});
+
+test('a genuine change of mind in a LATER clause still supersedes an earlier refusal (codex #4293 P1)', () => {
+  // Round 4's real target: an affirmative ask ("actually, text it to me"),
+  // not a bare channel noun, in a clause the refusal itself never reached.
+  const transcription = `Agent: ${quote}\nCaller: Don't email me the link... actually, text it to me.`;
+  expect(select({ call: { ...call, transcription } }).visit?.id).toBe('visit');
+});
+
 // A knex stand-in that records the filters the worker builds and the writes it
 // makes. Only the shapes this module actually uses are modelled; builders are
 // thenable the way knex's are.

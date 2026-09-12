@@ -335,6 +335,68 @@ postgres('reschedule-link-promises against PostgreSQL', () => {
       }
     });
 
+    test('a PARKED failed attempt still lets a later office verdict reconcile the commitment and clear its own exception card, without retrying the send (codex #4293 P1)', async () => {
+      // reconcileAttempt's own 'else if (failed)' branch — the row is
+      // ALREADY 'review' from an earlier delivery_failed park, so `unparked`
+      // is false here. Before the fix this branch retired the flag and then
+      // (via the function's shared `return true` fall-through) told runOne
+      // "handled" — runOne returned immediately and never reached
+      // contextFor, so an office dismissal recorded on the commitment
+      // afterward could never close this row's own exception card.
+      const priorGate = process.env.GATE_RESCHEDULE_LINK_ON_PROMISE;
+      const priorCallCommitments = gates.callCommitments;
+      try {
+        process.env.GATE_RESCHEDULE_LINK_ON_PROMISE = 'true';
+        gates.callCommitments = true;
+
+        const callId = randomUUID();
+        const customerId = randomUUID();
+        const twilioSid = `SM${randomUUID().replaceAll('-', '').slice(0, 32)}`;
+        await mockPg('call_log').insert({ id: callId, direction: 'inbound', processing_generation: 1 });
+        // The office dismissed the commitment on the ledger AFTER this exact
+        // SMS had already failed and parked — human_state 'dismissed' reads
+        // as a terminal 'promise_closed' verdict in contextFor, independent
+        // of any generation bookkeeping.
+        const [commitment] = await mockPg('call_commitments').insert({
+          call_log_id: callId, commitment_key: 'send_reschedule_link:1', party: 'waves', kind: 'send_reschedule_link',
+          description: 'send a reschedule link', source: 'ai', status: 'open', human_state: 'dismissed',
+          last_seen_generation: 1, processing_generation: 1,
+        }).returning('id');
+        const outboxId = randomUUID();
+        // Already parked ('review') from an earlier pass's own
+        // 'delivery_failed' park — a real twilio_sid-bearing sms_log row
+        // still says 'failed', so every fresh sweep keeps landing back on
+        // this exact branch.
+        await mockPg('outbox_messages').insert({ id: outboxId, channel: 'sms', status: 'review', last_error: 'delivery_failed',
+          provider_message_id: twilioSid, sent_at: new Date(), payload: { delivery_outcome_uncertain: true },
+          commitment_id: commitment.id, commitment_generation: 1,
+          related_call_log_id: callId, related_customer_id: customerId, related_scheduled_service_id: randomUUID() });
+        await mockPg('sms_log').insert({ id: randomUUID(), customer_id: customerId, direction: 'outbound',
+          from_phone: '+15555550100', to_phone: '+15555550199', twilio_sid: twilioSid, status: 'failed', message_body: 'reschedule link' });
+        // The exception card the original delivery_failed park raised —
+        // still open, still speaking for this one commitment.
+        await mockPg('triage_items').insert({ call_log_id: callId, category: 'customer_followup', severity: 'advisory',
+          reason_code: 'reschedule_link_promise', status: 'open', summary: 'A promised reschedule link needs attention.',
+          payload: { reschedule_link_promise: { commitment_id: commitment.id, commitment_ids: [commitment.id], reason: 'delivery_failed' } } });
+
+        const row = await mockPg('outbox_messages').where({ id: outboxId }).first();
+        // No `send` stand-in is supplied — if this ever reached dispatch, the
+        // missing real Twilio wiring would throw. It must not: the terminal
+        // verdict is reconciled entirely through applyContextSkip's
+        // promise_closed branch, never through a resend.
+        await links.runOne(mockPg, row, { now: new Date() });
+
+        const after = await mockPg('outbox_messages').where({ id: outboxId }).first();
+        expect(after.status).toBe('cancelled');
+        expect(after.payload.delivery_outcome_uncertain).toBe(false);
+        const card = await mockPg('triage_items').where({ call_log_id: callId, reason_code: 'reschedule_link_promise' }).first();
+        expect(card.status).toBe('resolved');
+      } finally {
+        if (priorGate === undefined) delete process.env.GATE_RESCHEDULE_LINK_ON_PROMISE; else process.env.GATE_RESCHEDULE_LINK_ON_PROMISE = priorGate;
+        gates.callCommitments = priorCallCommitments;
+      }
+    });
+
     test('a definitive failure receipt reconciles even after the attempt already sits parked for an unrelated reason (codex #4293 P1)', async () => {
       // The row parked for stale_extraction on an earlier pass — a
       // transient context error, unrelated to delivery. A REAL twilio_sid
@@ -351,7 +413,13 @@ postgres('reschedule-link-promises against PostgreSQL', () => {
         const callId = randomUUID();
         const customerId = randomUUID();
         const twilioSid = `SM${randomUUID().replaceAll('-', '').slice(0, 32)}`;
-        await mockPg('call_log').insert({ id: callId, direction: 'inbound', processing_generation: 2 });
+        // last_seen_generation (2) deliberately mismatches call_log's
+        // processing_generation (5) so contextFor deterministically
+        // re-derives 'stale_extraction' on this very pass too (codex #4293
+        // P1: reconcileAttempt's parked-failed branch now falls through to
+        // contextFor instead of short-circuiting, so this reason is freshly
+        // recomputed, not merely a leftover insert value).
+        await mockPg('call_log').insert({ id: callId, direction: 'inbound', processing_generation: 5 });
         const [commitment] = await mockPg('call_commitments').insert({
           call_log_id: callId, commitment_key: 'send_reschedule_link:1', party: 'waves', kind: 'send_reschedule_link',
           description: 'send a reschedule link', source: 'ai', status: 'open', last_seen_generation: 2, processing_generation: 2,
@@ -371,8 +439,9 @@ postgres('reschedule-link-promises against PostgreSQL', () => {
         await links.runOne(mockPg, row, { now: new Date() });
 
         const after = await mockPg('outbox_messages').where({ id: outboxId }).first();
-        // The existing review reason is left exactly as it was — only the
-        // flag moves.
+        // The existing review reason reads exactly as it did — parkReview's
+        // own reason-unchanged guard no-ops a same-status/same-reason write —
+        // only the flag moves.
         expect(after.status).toBe('review');
         expect(after.last_error).toBe('stale_extraction');
         expect(after.payload.delivery_outcome_uncertain).toBe(false);
