@@ -103,7 +103,14 @@ function buildActions({ onRetry, mode, light }) {
   }
   if (mode !== 'row' && mode !== 'call') return actions;
 
-  const callIsPrimary = !onRetry && mode === 'row';
+  // Call is the card's one primary whenever there is no retry to own that
+  // tier — in `call` mode just as much as in `row` mode, where it is the ONLY
+  // action on the card. Gating this on `mode === 'row'` left every
+  // contact="call" page (both report pages, the project report's not-found,
+  // the service outline's expired) rendering its single CTA as the 44 chip,
+  // which is both a regression from the solid buttons they had and a
+  // contradiction of the invariant documented above.
+  const callIsPrimary = !onRetry;
   if (mode === 'row') {
     actions.push(
       <a key="text" href={WAVES_SUPPORT_SMS_TEL} style={secondaryStyle(light)}>

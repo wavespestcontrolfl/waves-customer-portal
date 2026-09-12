@@ -2360,9 +2360,14 @@ glass and an authored size would be dead style; and the contact actions are buil
 from `constants/business.js`, never a retyped number.
 
 **One primary per card** (style guide §2). When the state is recoverable the
-retry owns the 48 tier and contact drops to the 44 chip; when it is not, "Call
-Waves" is the primary and "Text Waves" the chip. The two-gold `ContactRow` that
-`/secure` and `/reschedule` each authored is what that resolves.
+retry owns the 48 tier and contact drops to the 44 chip; when it is not, the Call
+action is the primary and "Text Waves" the chip. The two-gold `ContactRow` that
+`/secure` and `/reschedule` each authored is what that resolves. The first cut
+gated that promotion on the two-button mode, so every `contact="call"` page —
+both report pages, the project report's not-found, the service outline's
+expired — rendered its ONLY action as the 44 chip: a regression from the solid
+buttons they had, and a contradiction of the invariant in the same file. The
+promotion depends on there being no retry, not on which contact mode is in play.
 
 **`PublicLoadError` is now a preset, not a ninth recipe** — `state="error"` plus
 the resource noun, with the copy every caller already got. Nine call sites are

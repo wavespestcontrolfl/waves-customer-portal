@@ -65,6 +65,21 @@ describe('PublicStateCard', () => {
     expect(screen.queryByRole('link', { name: 'Text Waves' })).toBeNull();
   });
 
+  it('contact="call" with no retry makes that lone CTA the primary', () => {
+    // Regression: gating this on mode === 'row' left the only action on the
+    // card as the 44 chip on every contact="call" page.
+    render(<PublicStateCard state="not-found" title="Gone" contact="call" />);
+    const call = screen.getByRole('link', { name: 'Call (941) 297-5749' });
+    expect(call).toHaveAttribute('data-glass-size', 'primary');
+    expect(call).toHaveAttribute('data-glass-accent');
+  });
+
+  it('contact="call" alongside a retry demotes Call to the chip', () => {
+    render(<PublicStateCard state="error" title="T" contact="call" onRetry={() => {}} />);
+    expect(screen.getByRole('button', { name: 'Try again' })).toHaveAttribute('data-glass-size', 'primary');
+    expect(screen.getByRole('link', { name: 'Call (941) 297-5749' })).not.toHaveAttribute('data-glass-size');
+  });
+
   it('contact="none" renders no actions at all', () => {
     render(<PublicStateCard state="expired" title="Expired" contact="none" />);
     expect(screen.queryByRole('link')).toBeNull();
