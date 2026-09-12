@@ -4624,7 +4624,7 @@ function ApprovalsTab({ showToast, onUpdate }) {
                   </div>{" "}
                 </div>
                 {pct !== null && (
-                  <Badge tone={isUp ? "alert" : "neutral"}>
+                  <Badge tone={isUp ? "strong" : "neutral"}>
                     {isUp ? "+" : ""}
                     {pct}%
                   </Badge>
