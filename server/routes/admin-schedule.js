@@ -9392,6 +9392,20 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
         // customer's default payer even though updates.payer_id is absent.
         // Over-triggering is safe (the release no-ops on non-combined /
         // confirmed sessions).
+        // EVERY refusal is decided BEFORE the first Stripe cancel (local
+        // audit, the same ordering the customer Bill-To route now uses): the
+        // session release below cancels a confirmable combined PaymentIntent,
+        // and a Stripe cancel does not roll back with this transaction — so an
+        // edit rejected for an in-flight send must not already have destroyed
+        // the customer's live pay-page session.
+        if (updates.payer_id !== undefined || updates.self_pay_override !== undefined) {
+          await trx('scheduled_services').where({ id: req.params.id }).forNoKeyUpdate().first('id');
+          if (await require('../services/visit-completion-packets').packetInvoiceSendInFlight({ scheduledServiceId: req.params.id }, trx)) {
+            throw Object.assign(new Error('The combined-visit invoice for this service is being delivered. Retry the Bill-To change in a moment.'), {
+              statusCode: 409, isOperational: true, code: 'invoice_send_in_flight',
+            });
+          }
+        }
         const activatesPayer = (Object.prototype.hasOwnProperty.call(updates, 'payer_id') && updates.payer_id)
           || (Object.prototype.hasOwnProperty.call(updates, 'self_pay_override') && !updates.self_pay_override);
         if (activatesPayer) {
@@ -9435,20 +9449,13 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
         const makeRecurringPreRow = updates.is_recurring === true
           ? await trx('scheduled_services').where({ id: req.params.id }).first('id', 'customer_id', 'is_recurring', 'recurring_parent_id')
           : null;
-        // A Bill-To change is re-judged here, under this transaction's row
-        // lock: the combined-visit send claim holds the billed member rows
-        // FOR SHARE while it resolves ownership, so this lock waits for the
-        // claim to commit and then sees the invoice in 'sending'. A payer can
-        // never land between the claim and the provider request. Recurring
-        // children keep inheriting the parent's Bill-To through this update.
-        if (updates.payer_id !== undefined || updates.self_pay_override !== undefined) {
-          await trx('scheduled_services').where({ id: req.params.id }).forNoKeyUpdate().first('id');
-          if (await require('../services/visit-completion-packets').packetInvoiceSendInFlight({ scheduledServiceId: req.params.id }, trx)) {
-            throw Object.assign(new Error('The combined-visit invoice for this service is being delivered. Retry the Bill-To change in a moment.'), {
-              statusCode: 409, isOperational: true, code: 'invoice_send_in_flight',
-            });
-          }
-        }
+        // (The Bill-To send-in-flight refusal ran above, under this
+        // transaction's row lock and before any Stripe cancellation: the
+        // combined-visit send claim holds the billed member rows FOR SHARE
+        // while it resolves ownership, so that lock waits for the claim to
+        // commit and then sees the invoice in 'sending'. A payer can never
+        // land between the claim and the provider request. Recurring children
+        // keep inheriting the parent's Bill-To through this update.)
         await trx('scheduled_services').where({ id: req.params.id }).update(updates);
         // A job Bill-To edit (payer cleared, self-pay override set) that makes a
         // withdrawn combined-visit invoice self-pay again requeues it here.
