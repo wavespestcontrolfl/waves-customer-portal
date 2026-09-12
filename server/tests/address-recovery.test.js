@@ -4,7 +4,7 @@
  * as "C Phone Trl"). All network/model calls are injected via deps.
  */
 
-const { recoverStreetAddress, houseNumberOf } = require('../services/address-validation/recovery');
+const { recoverStreetAddress, houseNumberOf, fetchPhoneticStreetCandidates } = require('../services/address-validation/recovery');
 
 // The real-world shape that motivated this module: caller said "5039 Seafoam
 // Trail", the transcriber wrote "5039 C Phone Trl", AV returned
@@ -115,6 +115,49 @@ describe('recoverStreetAddress — phase 1 (autocomplete on the street as heard)
     expect(out.attempted).toBe(true);
     expect(out.recovered).toBeNull();
     expect(out.candidates).toEqual([]);
+  });
+});
+
+// A numbered street spoken aloud and written down as a similar-sounding word
+// was outside the prompt's hypothesis space: every re-hearing came back
+// word-shaped and a tech was dispatched to a street that does not exist
+// (2026-09-10, call c3c27b01). The ordinal class has to be asked for by name.
+// Synthetic strings only — never a real lead address (AGENTS.md).
+describe('fetchPhoneticStreetCandidates — prompt covers both garble classes', () => {
+  const originalFetch = global.fetch;
+  const originalKey = process.env.GEMINI_API_KEY;
+  let sentPrompt;
+
+  beforeEach(() => {
+    process.env.GEMINI_API_KEY = 'test-key';
+    sentPrompt = null;
+    global.fetch = jest.fn(async (_url, opts) => {
+      sentPrompt = JSON.parse(opts.body).contents[0].parts[0].text;
+      return { ok: true, json: async () => ({ candidates: [{ content: { parts: [{ text: '{"candidates":["4th Avenue East"]}' }] } }] }) };
+    });
+  });
+  afterEach(() => {
+    global.fetch = originalFetch;
+    if (originalKey === undefined) delete process.env.GEMINI_API_KEY;
+    else process.env.GEMINI_API_KEY = originalKey;
+  });
+
+  test('asks for numbered/ordinal re-hearings, not just word-shaped ones', async () => {
+    const out = await fetchPhoneticStreetCandidates({
+      streetName: 'Port Ave East', city: 'Palmetto', state: 'FL', zip: '34221',
+    });
+    expect(out).toEqual(['4th Avenue East']);
+    expect(sentPrompt).toContain('Port Ave East');
+    expect(sentPrompt).toMatch(/numbered/i);
+    expect(sentPrompt).toMatch(/ordinal/i);
+    // The word-mis-heard-as-word class must survive alongside it.
+    expect(sentPrompt).toContain('Seafoam');
+  });
+
+  test('no API key → no call, no candidates', async () => {
+    delete process.env.GEMINI_API_KEY;
+    expect(await fetchPhoneticStreetCandidates({ streetName: 'Port Ave East', city: 'Palmetto' })).toEqual([]);
+    expect(global.fetch).not.toHaveBeenCalled();
   });
 });
 
@@ -356,5 +399,67 @@ describe('recoverStreetAddress — one aggregate budget', () => {
     expect(validate).not.toHaveBeenCalled();
     expect(out.recovered).toBeNull();
     expect(out.candidates).toEqual(['5039 Seafoam Trail, Lakewood Ranch, FL, USA']);
+  });
+});
+
+// The recovery MODEL decides which phonetic candidates come back, so it is
+// part of the cohort identity: the same prompt text on a different model is
+// different routing behavior and must not pool into one promotion cohort.
+// The ordinal prompt makes Gemini propose SEVERAL numbered streets for one
+// garble ("4th Avenue East", "40th Avenue East", "4th Drive Northeast"), which
+// is the whole point of it — and made a latent dedup bug reachable. The premise
+// key stripped every digit, so two genuinely different houses read as "exactly
+// one confirmed premise" and the first was auto-adopted: a tech sent to an
+// address nobody confirmed, the exact failure this module exists to prevent.
+describe('recoverStreetAddress — ordinal streets are distinct premises', () => {
+  const GARBLED_ORDINAL = { address_line1: '11106 Port Ave East', city: 'Bradenton', state: 'FL', zip: '34212' };
+  const confirmEachAsItself = async ({ addressLines }) => ({
+    status: 'validated_accept',
+    county: 'Manatee County',
+    normalized: {
+      street_line_1: String(addressLines[0]).split(',')[0].trim(),
+      city: 'Bradenton',
+      state: 'FL',
+      postal_code: '34212',
+    },
+  });
+
+  test('two streets differing only in their ordinal are ambiguity, never an auto-adopt', async () => {
+    const out = await recoverStreetAddress({
+      extracted: GARBLED_ORDINAL,
+      avStatus: 'missing_component',
+      deps: deps({
+        autocomplete: async (input) => (input.includes('Port') ? [] : [
+          '11106 4th Avenue East, Bradenton, FL 34212, USA',
+          '11106 40th Avenue East, Bradenton, FL 34212, USA',
+        ]),
+        phonetic: async () => ['4th Avenue East'],
+        validate: confirmEachAsItself,
+      }),
+    });
+
+    expect(out.recovered).toBeNull();
+    expect(out.candidates).toHaveLength(2);
+  });
+
+  test('the SAME ordinal street reached twice is still one premise', async () => {
+    const out = await recoverStreetAddress({
+      extracted: GARBLED_ORDINAL,
+      avStatus: 'missing_component',
+      deps: deps({
+        autocomplete: async (input) => (input.includes('Port') ? [] : [
+          '11106 4th Avenue East, Bradenton, FL 34212, USA',
+          '11106 4th Ave E, Bradenton, FL 34212, USA',
+        ]),
+        phonetic: async () => ['4th Avenue East'],
+        validate: async () => ({
+          status: 'validated_accept',
+          county: 'Manatee County',
+          normalized: { street_line_1: '11106 4th Avenue East', city: 'Bradenton', state: 'FL', postal_code: '34212' },
+        }),
+      }),
+    });
+
+    expect(out.recovered).toMatchObject({ address_line1: '11106 4th Avenue East' });
   });
 });
