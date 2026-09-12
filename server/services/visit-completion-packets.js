@@ -733,12 +733,23 @@ async function withdrawPacketInvoiceForPayer(trx, { packetId, invoiceId, visit, 
   // outstanding. The two verdicts are merged instead.
   const closedPacket = await trx('visit_completion_packets').where({ id: packetId, status: 'done' }).first('error');
   const priorState = parseOfficeReviewState(closedPacket?.error);
-  const mergedState = officeReviewState({
-    payment: 'office_required',
-    delivery: priorState?.delivery === 'delivery_review' ? 'delivery_review' : null,
-    reason: 'payer_assigned',
-    payerId,
-  });
+  // A PRE-EXISTING non-payer payment review survives too (Codex #4311 r45 P1).
+  // Relabelling it `payer_assigned` erased the original provenance, and a
+  // later Bill-To clear would then lift the alert and the packet error while
+  // deliberately leaving the visit's own billing hold — the office would be
+  // left holding a held visit with no signal for the problem that held it.
+  const priorPaymentReason = priorState?.payment === 'office_required'
+    && priorState.reason && priorState.reason !== 'payer_assigned'
+      ? priorState.reason : null;
+  const mergedState = {
+    ...officeReviewState({
+      payment: 'office_required',
+      delivery: priorState?.delivery === 'delivery_review' ? 'delivery_review' : null,
+      reason: 'payer_assigned',
+      payerId,
+    }),
+    ...(priorPaymentReason ? { priorPaymentReason } : {}),
+  };
   const closed = await trx('visit_completion_packets').where({ id: packetId, status: 'done' })
     .update({ error: JSON.stringify(mergedState), updated_at: trx.fn.now() });
   if (!closed) return true;
@@ -899,8 +910,28 @@ async function repointPayerOfficeReview(trx, packetId, payerId) {
 async function liftPayerOfficeReview(trx, packet) {
   const state = parseOfficeReviewState(packet.error);
   if (packet.status === 'done' && state?.reason === 'payer_assigned') {
-    const remaining = state.delivery === 'delivery_review' ? JSON.stringify(officeReviewState({ payment: 'payment_needed', delivery: 'delivery_review' })) : null;
+    // Whatever the withdrawal did NOT own stays: a delivery review, and a
+    // payment review that pre-dated the withdrawal (Codex #4311 r45 P1) —
+    // the visit keeps its own hold for that one, so clearing the error and
+    // the alert would leave the office no signal for it.
+    const remaining = state.priorPaymentReason
+      ? JSON.stringify(officeReviewState({
+        payment: 'office_required',
+        delivery: state.delivery === 'delivery_review' ? 'delivery_review' : null,
+        reason: state.priorPaymentReason,
+      }))
+      : (state.delivery === 'delivery_review'
+        ? JSON.stringify(officeReviewState({ payment: 'payment_needed', delivery: 'delivery_review' }))
+        : null);
     await trx('visit_completion_packets').where({ id: packet.id }).update({ error: remaining, updated_at: trx.fn.now() });
+    // An alert the withdrawal only borrowed is handed back rather than
+    // resolved: the original review is still owed.
+    if (state.priorPaymentReason) {
+      await trx('dispatch_alerts').where({ type: 'visit_closeout_review' }).whereNull('resolved_at')
+        .whereRaw("payload->>'packetId' = ?", [packet.id])
+        .update({ payload: trx.raw("(payload - 'payerId' - 'priorPaymentReason') || jsonb_build_object('reason', payload->>'priorPaymentReason')") });
+      return;
+    }
   }
   const alerts = await trx('dispatch_alerts').where({ type: 'visit_closeout_review' }).whereNull('resolved_at')
     .whereRaw("payload->>'packetId' = ?", [packet.id]).whereRaw("payload->>'reason' = 'payer_assigned'")

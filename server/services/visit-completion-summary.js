@@ -832,7 +832,16 @@ async function reviewSendThroughSummaryHandoff(serviceRecordId, dispatch, databa
   // worker lost before the sender's own bookkeeping strands nothing. The
   // release names this sender's own claim, so a mark that was taken over in
   // the meantime (claim lost above) is left to its new holder.
-  if (marked && verdict && verdict.ok === false) await release();
+  if (marked && verdict && verdict.ok === false) {
+    await release();
+    // The claim is NO LONGER OWNED once it is released (Codex #4311 r45 P1):
+    // another worker can take the row in the gap before the caller's
+    // bookkeeping runs, and a caller that still believed it held the claim
+    // would write by id and could reset or suppress that replacement's live
+    // `sending` row. Reporting the release makes the caller's writes skip a
+    // `sending` row while still moving its own, now-`pending` one.
+    if (claimRef) claimRef.marked = false;
+  }
   return verdict;
 }
 // The retry rail's provider request runs while the customer and preference

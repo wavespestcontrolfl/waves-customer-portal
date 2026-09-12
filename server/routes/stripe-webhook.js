@@ -2504,11 +2504,18 @@ async function mirrorSavedMethodForSucceededIntent(paymentIntent) {
         // payer-billed account must still enroll. Best-effort: a lookup
         // miss falls to the account scope (toward refusing — fail closed).
         let mirrorScopeSsId = null;
+        let mirrorInvoiceId = null;
         try {
           const piInvoice = await db('invoices')
             .where({ stripe_payment_intent_id: piId })
-            .first('scheduled_service_id');
+            .first('id', 'scheduled_service_id');
           mirrorScopeSsId = piInvoice?.scheduled_service_id || null;
+          // The INVOICE too (Codex #4311 r45 P1): the enrollment re-judges the
+          // withdrawal stamp and the packet's live owner under its own lock,
+          // which is the only way a payer on a SIBLING billed member is seen.
+          // Without it this mirror could enroll the homeowner for Auto Pay on
+          // debt that moved to AP while the payment was in flight.
+          mirrorInvoiceId = piInvoice?.id || null;
         } catch (scopeErr) {
           logger.warn(`[stripe-webhook] invoice scope lookup failed for PI ${piId}: ${scopeErr.message}`);
         }
@@ -2519,6 +2526,7 @@ async function mirrorSavedMethodForSucceededIntent(paymentIntent) {
           details: { billing_mode: signupBillingMode },
           authorizedAt,
           scheduledServiceId: mirrorScopeSsId,
+          invoiceId: mirrorInvoiceId,
         });
       }
       if (!existing) {

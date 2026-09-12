@@ -3495,6 +3495,51 @@ postgres('visit summary recipient recovery', () => {
     }
   });
 
+  test('a withdrawal on a packet already in payment review keeps that review when the payer leaves', async () => {
+    // The visit is already held for a NON-payer billing problem. Relabelling
+    // the review `payer_assigned` and then lifting it on a Bill-To clear would
+    // leave the office a held visit with no signal for the original problem.
+    const Packets = require('../services/visit-completion-packets');
+    const invoiceId = randomUUID();
+    const [payer] = await mockPg('payers').insert({ display_name: 'Fixture Property Management', ap_email: `${randomUUID()}@example.invalid`, active: true }).returning('id');
+    await mockPg('invoices').insert({ id: invoiceId, token: randomUUID().replace(/-/g, ''), invoice_number: `FIX-${invoiceId.slice(0, 8)}`,
+      customer_id: fixture.customerId, status: 'sent', total: 120, visit_completion_packet_id: fixture.packetId });
+    // Closed for a payment problem of its own, with the visit already held.
+    await mockPg('visit_completion_packets').where({ id: fixture.packetId }).update({
+      status: 'done',
+      error: JSON.stringify({ payment: 'office_required', reason: 'charge_failed' }),
+    });
+    await mockPg('service_visits').where({ id: fixture.visitId }).update({ billing_hold: true });
+    try {
+      await mockPg.transaction(async (trx) => {
+        await trx('customers').where({ id: fixture.customerId }).update({ payer_id: payer.id });
+        return Packets.withdrawPacketInvoicesForOwner(trx, { customerId: fixture.customerId });
+      });
+      const withdrawn = await mockPg('visit_completion_packets').where({ id: fixture.packetId }).first('error');
+      // The payer verdict is recorded, and the original provenance survives.
+      expect(JSON.parse(withdrawn.error)).toMatchObject({ reason: 'payer_assigned', priorPaymentReason: 'charge_failed' });
+
+      // Bill-To cleared: the payer verdict lifts, the original one does not.
+      await mockPg.transaction(async (trx) => {
+        await trx('customers').where({ id: fixture.customerId }).update({ payer_id: null });
+        return Packets.reconcileWithdrawnPacketInvoices(trx, { customerId: fixture.customerId });
+      });
+      const lifted = await mockPg('visit_completion_packets').where({ id: fixture.packetId }).first('error');
+      expect(JSON.parse(lifted.error)).toMatchObject({ payment: 'office_required', reason: 'charge_failed' });
+      const alert = await mockPg('dispatch_alerts').where({ type: 'visit_closeout_review' }).whereNull('resolved_at')
+        .whereRaw("payload->>'packetId' = ?", [fixture.packetId]).first('payload');
+      const payload = typeof alert?.payload === 'string' ? JSON.parse(alert.payload) : alert?.payload;
+      expect(payload?.reason).toBe('charge_failed');
+    } finally {
+      await mockPg('customers').where({ id: fixture.customerId }).update({ payer_id: null });
+      await mockPg('service_visits').where({ id: fixture.visitId }).update({ billing_hold: false });
+      await mockPg('visit_completion_packets').where({ id: fixture.packetId }).update({ status: 'done', error: null });
+      await mockPg('dispatch_alerts').where({ type: 'visit_closeout_review' }).whereRaw("payload->>'packetId' = ?", [fixture.packetId]).del();
+      await mockPg('invoices').where({ id: invoiceId }).del();
+      await mockPg('payers').where({ id: payer.id }).del();
+    }
+  });
+
   test('a payer-to-payer handoff moves the office review to the payer that owes it now', async () => {
     // The stamp, the packet error and the open alert all name the AP account
     // the office must bill; a second payer taking the packet over has to move
