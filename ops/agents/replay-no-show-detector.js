@@ -13,6 +13,30 @@ const path = require('path');
 const { evaluateNoShow, latestPromises, promisedStartAt, LIVE_STATUSES } = require('../../server/services/no-show-detector');
 const { etDateString } = require('../../server/utils/datetime-et');
 
+// Was usable promise evidence in hand when a decision was actually required?
+// Pure, and separated from the tick loop so the two rules it balances stay
+// readable (and replayVisit stays inside the repo's complexity budget):
+//   - coverage counts only at an ALERT-RELEVANT tick — at or past the stage-1
+//     threshold — so a known window replaced by an unknown-window notice
+//     before either threshold does not vouch for a decision point that had
+//     nothing usable (codex P1 round 8);
+//   - but a visit that leaves LIVE_STATUSES before any threshold, holding a
+//     known window at its last live tick, never needed a decision at all and
+//     is not missing evidence (codex P2 round 9). That flag is recomputed
+//     each tick, never latched, so a superseded window cannot resurrect it
+//     (codex P1 round 9).
+// promisedStartAt also rejects a null start_at before any Date conversion —
+// new Date(null).getTime() is 0, a finite instant — which is what keeps the
+// unknown-window case counted as missing (codex P1 af4925f71).
+function coverageAt({ covered, knownBeforeThreshold, liveNow, promise, now, at, threshold }) {
+  if (covered) return { covered, knownBeforeThreshold };
+  if (!liveNow) return { covered: knownBeforeThreshold, knownBeforeThreshold };
+  const start = promisedStartAt({ promise, now, ignoreHorizon: true });
+  if (start == null) return { covered: false, knownBeforeThreshold: false };
+  if (at >= start + threshold * 60000) return { covered: true, knownBeforeThreshold: false };
+  return { covered: false, knownBeforeThreshold: true };
+}
+
 // One visit's timeline at one threshold. Returns the alerts it would have
 // emitted and whether a usable promised window ever existed at a decision
 // point — split out of replay() so the per-tick rules, the validation and the
@@ -31,13 +55,22 @@ function replayVisit(item, { from, to, threshold }) {
   let eventIndex = 0;
   let covered = false;
   let knownBeforeThreshold = false;
+  // Bumped whenever the visit leaves the live statuses, so a cancel -> reopen
+  // (or complete -> reopen) cycle can alert again, exactly as production's
+  // supersession stamp allows.
+  let lifecycle = 0;
+  let wasLive = LIVE_STATUSES.includes(item.initial?.status);
   for (let at = Math.ceil(from.getTime() / 300000) * 300000; at <= to.getTime(); at += 300000) {
     const now = new Date(at);
     while (eventIndex < events.length && events[eventIndex].at <= at) {
       Object.assign(state, events[eventIndex].patch);
       eventIndex += 1;
     }
+    const liveNow = LIVE_STATUSES.includes(state.status);
+    if (wasLive && !liveNow) lifecycle += 1;
+    wasLive = liveNow;
     const promise = latestPromises(promises, now).get(String(item.id));
+    ({ covered, knownBeforeThreshold } = coverageAt({ covered, knownBeforeThreshold, liveNow, promise, now, at, threshold }));
     // Coverage is measured AT THE DECISION POINTS, not from the final state
     // at `to`: a promise backfilled or communicated after this visit's
     // thresholds passed leaves every production tick before it with nothing
@@ -45,41 +78,15 @@ function replayVisit(item, { from, to, threshold }) {
     // as covered and understated missing_promise_visits, which is exactly
     // the number that says whether a no-alert backtest means "nothing was
     // wrong" or "we had no evidence to judge with" (codex P1, round 4).
-    // A live status is required for the same reason evaluateNoShow requires
-    // one: a promise that only lands after the visit is completed/cancelled
-    // was never available to judge against. Coverage is judged with the
-    // detector's OWN evidence rule (promisedStartAt) at an ALERT-RELEVANT
-    // tick — one at or past the stage-1 threshold — not merely at any live
-    // tick: a known window present before its own window opens, replaced by
-    // an unknown-window notice before either threshold, left every real
-    // decision point with nothing usable while an early pre-window tick had
-    // already marked the visit covered, understating missing_promise_visits
-    // and making an evidence-poor activation replay look complete (codex P1
-    // round 8). promisedStartAt also rejects a null start_at before any Date
-    // conversion — new Date(null).getTime() is 0, a finite instant — which is
-    // what keeps the unknown-window case (a legacy move notice) counted as
-    // missing rather than covered (codex P1 af4925f71).
-    if (!covered && LIVE_STATUSES.includes(state.status)) {
-      const start = promisedStartAt({ promise, now, ignoreHorizon: true });
-      // A known window held while the visit was still live, but before the
-      // first threshold. On its own that is not coverage — the window can
-      // still be replaced by an unknown one before any decision point (the
-      // case above). It BECOMES coverage if the visit leaves LIVE_STATUSES
-      // before any threshold is reached: an on-time short visit completed at
-      // 09:30 against a 09:00 window never needed a decision at all, and
-      // counting it as missing evidence inflated the very denominator the
-      // rollout report is read for (codex P2 round 9).
-      // Recomputed every tick, never latched: a known window held early and
-      // then REPLACED by an unknown-window notice leaves the visit with
-      // nothing usable, and a latched flag would let the earlier window
-      // vouch for coverage the visit no longer had when it completed (codex
-      // P1 round 9, guarding the round-8 rule this exception sits beside).
-      knownBeforeThreshold = start != null && at < start + threshold * 60000;
-      if (start != null && at >= start + threshold * 60000) covered = true;
-    } else if (!covered && knownBeforeThreshold) covered = true;
     const alert = evaluateNoShow({ visit: state, promise, now, stage1Minutes: threshold });
     if (!alert) continue;
-    const key = `${alert.promised_window.start_at}:${alert.stage}`;
+    // Production's own identity, not a window/stage pair: trackingKey folds
+    // in the RECIPIENT, so a reassignment from tech A to B with the same
+    // promise and stage mints a fresh card for B (and reconciles A's), and a
+    // visit that leaves and re-enters LIVE_STATUSES gets a fresh one too.
+    // Deduping on window+stage alone suppressed both and understated the
+    // alert volume a rollout decision is made on (codex P2 round 10).
+    const key = `${alert.promised_window.start_at}:${alert.stage}:${state.technician_id || 'unassigned'}:${lifecycle}`;
     if (emitted.has(key)) continue;
     emitted.add(key);
     const complaint = new Date(item.complaint_at).getTime();

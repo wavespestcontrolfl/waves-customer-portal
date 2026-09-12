@@ -9,7 +9,7 @@ jest.mock('../services/dispatch-alerts', () => ({
   createAlert: jest.fn(),
 }));
 
-jest.mock('../services/no-show-detector', () => ({ enabled: jest.fn(() => false), sweep: jest.fn() }));
+jest.mock('../services/no-show-detector', () => ({ enabled: jest.fn(() => false), sweep: jest.fn(), cleanupAfterDisable: jest.fn(async () => ({ resolved: 0, dismissed: 0 })) }));
 jest.mock('../utils/cron-lock', () => ({ runExclusive: jest.fn(), recordJobStart: jest.fn(async () => {}), recordJobEnd: jest.fn(async () => {}) }));
 
 const db = require('../models/db');
@@ -124,6 +124,15 @@ describe('tech-late detector tuning', () => {
     locks.runExclusive.mockResolvedValueOnce({ skipped: true, reason: 'lease_held' });
     await detector.runTechLateCheck();
     expect(locks.recordJobEnd).not.toHaveBeenCalled();
+    // Gate OFF: the legacy branch clears whatever the detector left behind
+    // first — sweep() is the only pass that resolves a detector office alert
+    // or dismisses a tracking notice, and an unresolved detector row would
+    // suppress the very legacy alert this branch then raises (codex P1 round
+    // 10).
+    tracking.enabled.mockReturnValue(false);
+    tracking.cleanupAfterDisable.mockClear();
+    await detector.runTechLateCheck();
+    expect(tracking.cleanupAfterDisable).toHaveBeenCalledTimes(1);
   });
 
 });

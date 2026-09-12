@@ -2,7 +2,7 @@ jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../services/dispatch-alerts', () => ({ resolveAlert: jest.fn().mockResolvedValue({ id: 'resolved' }) }));
 jest.mock('../services/audit-log', () => ({ recordAuditEvent: jest.fn().mockResolvedValue({ id: 'audit' }) }));
-const { evaluateNoShow, latestPromises, trackingKey, resolveLegacyCollision, alreadyHasOpenAlert, callerIdentityMatches, loadPromiseEvents, noticeStillCurrent } = require('../services/no-show-detector');
+const { evaluateNoShow, latestPromises, trackingKey, resolveLegacyCollision, alreadyHasOpenAlert, loadPromiseEvents, noticeStillCurrent } = require('../services/no-show-detector');
 const { resolveAlert } = require('../services/dispatch-alerts');
 const { replay } = require('../../ops/agents/replay-no-show-detector');
 
@@ -48,6 +48,23 @@ describe('missing tracking stages', () => {
       outcome: 'late', complaint_at: '2026-09-10T11:40:00-04:00',
     }] });
     expect(report.thresholds.map((r) => [r.stage1_minutes, r.stage1_alerts, r.stage2_alerts, r.before_complaint])).toEqual([[45, 1, 1, 2], [60, 1, 1, 2]]);
+  });
+  test('a reassignment re-alerts in the replay, as production does (round-10 P2)', () => {
+    // trackingKey folds in the recipient, so A -> B with the same promise and
+    // stage mints a fresh card for B; deduping on window+stage alone
+    // suppressed it and understated the volume a rollout decision is made on.
+    const report = replay({ synthetic: true, from: '2026-09-10T09:00:00-04:00', to: '2026-09-10T12:00:00-04:00', visits: [{
+      id: 'visit', initial: { ...visit, technician_id: 'tech-a' }, outcome: 'late',
+      promises: [{ start_at: '2026-09-10T09:00:00-04:00', communicated_at: '2026-09-09T12:00:00-04:00', source: 'message' }],
+      // After BOTH thresholds (09:45 and 10:00), so each run sees a card for
+      // A and then a fresh one for B.
+      events: [{ at: '2026-09-10T10:30:00-04:00', patch: { technician_id: 'tech-b' } }],
+    }] });
+    for (const result of report.thresholds) {
+      const stage1 = result.alerts.filter((a) => a.stage === 1);
+      expect(stage1).toHaveLength(2);
+      expect(stage1[1].at).toBe('2026-09-10T14:30:00.000Z');
+    }
   });
   test('replay sees departure evidence cleared between thresholds on the next cron tick', () => {
     const report = replay({ synthetic: true, from: '2026-09-10T09:00:00-04:00', to: '2026-09-10T11:00:00-04:00', visits: [{
@@ -183,6 +200,51 @@ describe('the offline replay never loads the database module (audit P1)', () => 
     delete env.DATABASE_URL;
     delete env.DATABASE_PUBLIC_URL;
     expect(execFileSync(process.execPath, ['-e', probe], { env, encoding: 'utf8' })).toBe('false');
+  });
+});
+
+describe('grouped stops are evaluated as one visit (round-10 P1)', () => {
+  const { groupedStops, stopState, stopPromise } = require('../services/no-show-detector');
+  // A service_visits row is ONE physical stop shared by N scheduled_services:
+  // the reminder pipeline sends a single grouped text and links its evidence
+  // to whichever member won the claim, and one En Route/Arrived advances
+  // every member. Evaluating members independently read a sibling's evidence
+  // as missing and could raise several cards for one truck visit.
+  const a = { id: 'aaa', visit_id: 'stop-1', status: 'pending' };
+  const b = { id: 'bbb', visit_id: 'stop-1', status: 'pending' };
+  const solo = { id: 'ccc', visit_id: null, status: 'pending' };
+
+  test('members of one stop collapse into a single candidate; ungrouped rows stand alone', () => {
+    const stops = groupedStops([b, solo, a]);
+    expect(stops).toHaveLength(2);
+    const grouped = stops.find((g) => g.members.length > 1);
+    // Representative = lowest member id, so the tracking key (and the
+    // dispatch_alerts job_id it carries) is stable across sweeps even as the
+    // reminder claim moves between members from tier to tier.
+    expect(grouped.representative.id).toBe('aaa');
+    expect(grouped.members.map((m) => m.id)).toEqual(['aaa', 'bbb']);
+    expect(stops.find((g) => g.members.length === 1).representative.id).toBe('ccc');
+  });
+
+  test('stopState merges arrival evidence and settles on any member that left the live statuses', () => {
+    expect(stopState([a, { ...b, arrived_at: '2026-09-10T09:50:00Z' }]).arrived_at).toBe('2026-09-10T09:50:00Z');
+    expect(stopState([{ ...a, en_route_at: '2026-09-10T09:40:00Z' }, { ...b, en_route_at: '2026-09-10T09:30:00Z' }]).en_route_at)
+      .toBe('2026-09-10T09:30:00Z');
+    expect(stopState([a, { ...b, status: 'completed' }]).status).toBe('completed');
+    // A single-row stop is passed through untouched.
+    expect(stopState([solo])).toBe(solo);
+  });
+
+  test('stopPromise takes the latest promise across members — the grouped text lands on only one of them', () => {
+    const now = new Date('2026-09-10T12:00:00Z');
+    const promises = new Map([
+      ['aaa', { visit_id: 'aaa', start_at: '2026-09-10T13:00:00Z', communicated_at: '2026-09-08T12:00:00Z', source: 'message' }],
+      ['bbb', { visit_id: 'bbb', start_at: '2026-09-10T09:00:00Z', communicated_at: '2026-09-09T12:00:00Z', source: 'message' }],
+    ]);
+    expect(stopPromise([a, b], promises, now)).toMatchObject({ visit_id: 'bbb' });
+    // A sibling with no evidence of its own inherits the stop's.
+    expect(stopPromise([a, { id: 'zzz' }], promises, now)).toMatchObject({ visit_id: 'aaa' });
+    expect(stopPromise([{ id: 'zzz' }], promises, now)).toBeNull();
   });
 });
 
@@ -390,64 +452,6 @@ describe('A -> B -> A reassignment lifecycle (trackingKey + alreadyHasOpenAlert 
 });
 
 
-describe('callerIdentityMatches (shared caller-identity rule with call-reschedule-apply.js)', () => {
-  // Same primitive call-reschedule-apply.js's applied-reschedule path uses
-  // (counterpartPhone + KNOWN_CALLER_PHONE_COLS) — reused, not copied, so
-  // recordAgreedWindow never rejects a caller the apply path would accept
-  // (codex P1, pre-push audit on e2e0e089c).
-  const customer = {
-    phone: '+19410000001',
-    secondary_phone: '+19410000002',
-    service_contact_phone: '+19410000003',
-    service_contact2_phone: null,
-    service_contact3_phone: null,
-  };
-
-  test('an inbound caller matched on the primary phone', () => {
-    const call = { direction: 'inbound', from_phone: '+19410000001', to_phone: '+19415551234' };
-    expect(callerIdentityMatches(call, customer)).toBe(true);
-  });
-
-  test('(a) an inbound caller matched only via a secondary/service-contact column still matches — not just customer.phone', () => {
-    const viaSecondary = { direction: 'inbound', from_phone: '+19410000002', to_phone: '+19415551234' };
-    expect(callerIdentityMatches(viaSecondary, customer)).toBe(true);
-    const viaServiceContact = { direction: 'inbound', from_phone: '+19410000003', to_phone: '+19415551234' };
-    expect(callerIdentityMatches(viaServiceContact, customer)).toBe(true);
-  });
-
-  test('an outbound (exact "outbound") call is matched on the DIALED party (to_phone), not from_phone', () => {
-    const call = { direction: 'outbound', from_phone: '+19415551234', to_phone: '+19410000001' };
-    expect(callerIdentityMatches(call, customer)).toBe(true);
-    // from_phone (the Waves line) is not on file — proves to_phone drove the match.
-    const flippedNotOnFile = { direction: 'outbound', from_phone: '+19410000001', to_phone: '+19415559999' };
-    expect(callerIdentityMatches(flippedNotOnFile, customer)).toBe(false);
-  });
-
-  test('(b) direction "outbound-api" is classified as outbound (matched on to_phone), same as the apply path\'s prefix rule', () => {
-    const call = { direction: 'outbound-api', from_phone: '+19415551234', to_phone: '+19410000002' };
-    expect(callerIdentityMatches(call, customer)).toBe(true);
-    // If this were misread as inbound (exact 'outbound' match), it would
-    // compare from_phone (the Waves line, not on file) and wrongly reject.
-    const wouldFailIfMisreadAsInbound = { direction: 'outbound-api', from_phone: '+19415551234', to_phone: '+19415559999' };
-    expect(callerIdentityMatches(wouldFailIfMisreadAsInbound, customer)).toBe(false);
-  });
-
-  test('direction "outbound-dial" is also classified as outbound', () => {
-    const call = { direction: 'outbound-dial', from_phone: '+19415551234', to_phone: '+19410000003' };
-    expect(callerIdentityMatches(call, customer)).toBe(true);
-  });
-
-  test('a phone matching nothing on file does not match', () => {
-    const call = { direction: 'inbound', from_phone: '+19415559999', to_phone: '+19415551234' };
-    expect(callerIdentityMatches(call, customer)).toBe(false);
-  });
-
-  test('null call or null customer is handled without throwing', () => {
-    expect(callerIdentityMatches(null, customer)).toBe(false);
-    expect(callerIdentityMatches({ direction: 'inbound', from_phone: '+19410000001' }, null)).toBe(false);
-  });
-});
-
 describe('series reschedule confirmation feeds promise evidence (P1-1)', () => {
   // admin-dispatch.js's applySeriesMoveEffects sends
   // reschedule_series_confirmation with purpose='appointment'. Before this
@@ -498,7 +502,7 @@ describe('loadPromiseEvents: email promise evidence checks the LIVE delivery sta
   function fakeConn() {
     const calls = {};
     const conn = (table) => {
-      if (table === 'messaging_audit_log as a' || table === 'audit_log as al' || table === 'activity_log as al' || table === 'series_moves as sm') return passthroughChain([]);
+      if (table === 'messaging_audit_log as a' || table === 'audit_log as al' || table === 'activity_log as al' || table === 'scheduled_services as sv' || table === 'series_moves as sm') return passthroughChain([]);
       if (table === 'customer_interactions as ci') {
         const chain = {};
         chain.leftJoin = (joinTable, cb) => { calls.leftJoinTable = joinTable; calls.leftJoinCb = cb; return chain; };
@@ -608,7 +612,7 @@ describe('loadPromiseEvents: an UNLINKED sms_log row is neutral, a sentinel sid 
   function fakeConn() {
     const calls = {};
     const conn = (table) => {
-      if (table === 'customer_interactions as ci' || table === 'audit_log as al' || table === 'activity_log as al' || table === 'series_moves as sm') return passthroughChain([]);
+      if (table === 'customer_interactions as ci' || table === 'audit_log as al' || table === 'activity_log as al' || table === 'scheduled_services as sv' || table === 'series_moves as sm') return passthroughChain([]);
       if (table === 'messaging_audit_log as a') {
         const chain = {};
         for (const m of ['leftJoin', 'whereIn', 'whereRaw', 'whereBetween', 'whereNull']) chain[m] = () => chain;
@@ -824,6 +828,23 @@ describe('callCommitmentInstant (when the customer heard the promise) (round-5 P
     const latest = latestPromises([midCallReminder, callPromise], new Date('2026-09-10T12:00:00-04:00')).get('visit');
     expect(latest.source).toBe('call');
   });
+  // A portal OUTBOUND call inserts call_log before Twilio rings anyone, so
+  // talk time alone omits setup and ringing. The status callback's
+  // updated_at is the closest stored terminal stamp, trusted up to a bounded
+  // ringing allowance past the talk time — later processing writes move it
+  // too (round-10 P2).
+  test('the status stamp is used when it is later than the talk time, capped at ten minutes', () => {
+    const created = '2026-09-10T10:00:00Z';
+    // Rang 90s, then a 10-minute call: the stamp is the honest end.
+    expect(callCommitmentInstant({ created_at: created, duration_seconds: 600, updated_at: '2026-09-10T10:11:30Z' }).toISOString())
+      .toBe('2026-09-10T10:11:30.000Z');
+    // A stamp moved much later by processing writes is capped.
+    expect(callCommitmentInstant({ created_at: created, duration_seconds: 600, updated_at: '2026-09-10T18:00:00Z' }).toISOString())
+      .toBe('2026-09-10T10:20:00.000Z');
+    // A stamp at or before the talk end changes nothing.
+    expect(callCommitmentInstant({ created_at: created, duration_seconds: 600, updated_at: '2026-09-10T10:05:00Z' }).toISOString())
+      .toBe('2026-09-10T10:10:00.000Z');
+  });
   test('a recording duration wins over the reported one, and no usable duration falls back to the call start', () => {
     expect(callCommitmentInstant({ created_at: '2026-09-10T10:00:00Z', recording_duration_seconds: 60, duration_seconds: 5 }).toISOString())
       .toBe('2026-09-10T10:01:00.000Z');
@@ -889,6 +910,9 @@ describe('seriesSupersessions: one series text supersedes every moved sibling (r
     const chain = {};
     for (const m of ['leftJoin', 'whereIn', 'whereRaw', 'whereNull', 'whereNotNull', 'where']) chain[m] = () => chain;
     chain.join = (table, cb) => {
+      // The series read joins with a callback; the booking read joins on
+      // plain columns — only the callback form carries the predicate here.
+      if (typeof cb !== 'function') return chain;
       const onClause = { on: (arg) => { joinSql = arg.sql; return onClause; } };
       cb.call(onClause);
       return chain;
@@ -917,6 +941,9 @@ describe('seriesSupersessions: one series text supersedes every moved sibling (r
     const chain = {};
     for (const m of ['leftJoin', 'whereIn', 'whereRaw', 'whereNull', 'whereNotNull', 'where']) chain[m] = () => chain;
     chain.join = (table, cb) => {
+      // The series read joins with a callback; the booking read joins on
+      // plain columns — only the callback form carries the predicate here.
+      if (typeof cb !== 'function') return chain;
       const onClause = { on: (arg) => { joinSql = arg.sql; return onClause; } };
       cb.call(onClause);
       return chain;
@@ -1057,7 +1084,7 @@ describe('loadPromiseEvents: pre-deploy legacy reschedule/confirmation messages 
   function fakeConn({ messageRows = [] } = {}) {
     const calls = {};
     const conn = (table) => {
-      if (table === 'customer_interactions as ci' || table === 'audit_log as al' || table === 'activity_log as al' || table === 'series_moves as sm') return passthroughChain([]);
+      if (table === 'customer_interactions as ci' || table === 'audit_log as al' || table === 'activity_log as al' || table === 'scheduled_services as sv' || table === 'series_moves as sm') return passthroughChain([]);
       if (table === 'messaging_audit_log as a') {
         const chain = {};
         chain.leftJoin = () => chain;
@@ -1152,7 +1179,7 @@ describe('loadPromiseEvents: no fixed lookback — confirmations older than 100 
   // function" instead of silently passing.
   function fakeConn({ messageRows = [] } = {}) {
     const conn = (table) => {
-      if (table === 'customer_interactions as ci' || table === 'audit_log as al' || table === 'activity_log as al' || table === 'series_moves as sm') return passthroughChain([]);
+      if (table === 'customer_interactions as ci' || table === 'audit_log as al' || table === 'activity_log as al' || table === 'scheduled_services as sv' || table === 'series_moves as sm') return passthroughChain([]);
       if (table === 'messaging_audit_log as a') return passthroughChain(messageRows);
       throw new Error(`fake conn: unexpected table ${table}`);
     };

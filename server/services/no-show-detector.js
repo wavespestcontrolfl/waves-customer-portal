@@ -10,9 +10,7 @@ const { etDateString, parseETDateTime } = require('../utils/datetime-et');
 // DATABASE_URL, breaking the "READ-ONLY, no database access" guarantee its
 // header and ops/agents/README.md both make (pre-push audit, round 5).
 const recordAuditEvent = (...args) => require('./audit-log').recordAuditEvent(...args);
-const { phoneMatchDigits } = require('../utils/phone');
 const { ARRIVAL_WINDOW_MINUTES } = require('../utils/sms-time-format');
-const { KNOWN_CALLER_PHONE_COLS } = require('../utils/known-caller-phone');
 // Call-time, for the same reason as recordAuditEvent above:
 // technician-eligibility.js requires ../models/db at module scope, and every
 // other service dependency of this file is already lazy so that
@@ -329,9 +327,23 @@ async function loadPromiseEvents(conn, visitIds, { now = new Date() } = {}) {
     // promise and alerting against a window the customer changed on the call
     // (codex P1 round 8). The same derivation covers every reschedule already
     // applied before this feature existed, and any applied while the capture
-    // gate was off. recordAgreedWindow still writes its audit row for the
-    // booking path; a duplicate promise for the same window is harmless —
-    // latestPromises keeps one.
+    // gate was off — the same reason the booking read above derives from
+    // sv.source_call_log_id rather than a write.
+    // A call-created booking: the visit row itself carries source_call_log_id
+    // (a FK written in the booking transaction), so the window the agent
+    // committed on that call is derivable from durable state — no separate
+    // best-effort write to lose (codex P1 round 10, the booking twin of the
+    // applied-reschedule derivation below). The caller-identity check the old
+    // writer made is unnecessary here: the visit exists BECAUSE of this call,
+    // which is a stronger link than a phone match. Every other rule still
+    // applies through agentCommittedStart — spam/voicemail, an actual agent
+    // commitment, a finite confirmed_start_at, and the trusted-labels gate.
+    () => conn('scheduled_services as sv').join('call_log as cl', 'cl.id', 'sv.source_call_log_id')
+      .whereIn('sv.id', visitIds).where('cl.v2_extraction_status', 'valid')
+      .where('cl.created_at', '<=', now)
+      .select('sv.id as visit_id', 'cl.id as call_id', 'cl.ai_extraction_enriched', 'cl.transcription',
+        'cl.processing_token', 'cl.created_at as call_created_at', 'cl.updated_at as call_updated_at',
+        'cl.duration_seconds', 'cl.recording_duration_seconds'),
     () => conn('activity_log as al')
       // The CALL is joined for its own clock: the activity row is written
       // when the pass processed the recording, which can be long after the
@@ -344,7 +356,7 @@ async function loadPromiseEvents(conn, visitIds, { now = new Date() } = {}) {
       .whereRaw("al.metadata->>'scheduled_service_id' = ANY(?::text[])", [visitIds])
       .where('al.created_at', '<=', now)
       .select('al.id', 'al.metadata', 'al.created_at', 'cl.created_at as call_created_at',
-        'cl.duration_seconds', 'cl.recording_duration_seconds'),
+        'cl.updated_at as call_updated_at', 'cl.duration_seconds', 'cl.recording_duration_seconds'),
     () => conn('series_moves as sm')
       // The move's own series text, joined by the series_move_id its metadata
       // carries, and held to the SAME delivery bar as any other promise
@@ -396,7 +408,7 @@ async function loadPromiseEvents(conn, visitIds, { now = new Date() } = {}) {
   if (conn.isTransaction) {
     for (const read of reads) results.push(await read());
   } else results.push(...await Promise.all(reads.map((read) => read())));
-  const [messages, emails, calls, appliedReschedules, seriesMoves] = results;
+  const [messages, emails, calls, bookings, appliedReschedules, seriesMoves] = results;
   const candidates = new Set(visitIds.map(String));
   return [
     ...messages.map((r) => ({ visit_id: r.appointment_id || r.metadata?.scheduled_service_id, start_at: Number.isFinite(Number(r.metadata?.rendered_slot_ms)) && r.metadata?.rendered_slot_ms != null
@@ -411,6 +423,14 @@ async function loadPromiseEvents(conn, visitIds, { now = new Date() } = {}) {
       communicated_at: r.provider_sent_at || r.metadata?.sent_at || r.created_at, source: 'email', source_id: r.id })),
     ...calls.map((r) => ({ visit_id: r.resource_id, start_at: r.metadata?.start_at,
       communicated_at: r.metadata?.communicated_at || r.created_at, source: 'call', source_id: r.id })),
+    ...bookings.map((r) => {
+      const target = r.processing_token ? null : agentCommittedStart(r);
+      if (target == null) return null;
+      return { visit_id: r.visit_id, start_at: new Date(target).toISOString(),
+        communicated_at: callCommitmentInstant({ created_at: r.call_created_at, updated_at: r.call_updated_at,
+          duration_seconds: r.duration_seconds, recording_duration_seconds: r.recording_duration_seconds }).toISOString(),
+        source: 'call', source_id: r.call_id };
+    }).filter(Boolean),
     ...appliedReschedules.map((r) => {
       // The window the apply actually moved the visit to, which is the window
       // the agent committed to on the call. ET wall clock, like every other
@@ -422,8 +442,8 @@ async function loadPromiseEvents(conn, visitIds, { now = new Date() } = {}) {
       // recording pass wrote this row. Falls back to the activity row's own
       // timestamp when the call is gone (a purge, a legacy row).
       const heard = r.call_created_at
-        ? callCommitmentInstant({ created_at: r.call_created_at, duration_seconds: r.duration_seconds,
-          recording_duration_seconds: r.recording_duration_seconds })
+        ? callCommitmentInstant({ created_at: r.call_created_at, updated_at: r.call_updated_at,
+          duration_seconds: r.duration_seconds, recording_duration_seconds: r.recording_duration_seconds })
         : null;
       return { visit_id: r.metadata?.scheduled_service_id,
         start_at: at && Number.isFinite(at.getTime()) ? at.toISOString() : null,
@@ -471,48 +491,35 @@ function seriesSupersessions(rows = [], candidates = new Set()) {
   return [...earliest.values()];
 }
 
-// Pure, exported for tests. Same caller-identity rule
-// call-reschedule-apply.js's applied-reschedule path uses — counterpartPhone
-// classifies outbound by PREFIX (Twilio's direction keeps 'outbound-api'/
-// 'outbound-dial' on some paths; an exact 'outbound' match read those as
-// inbound and compared the Waves number instead of the customer's), matched
-// against ALL five on-file identity columns (primary, secondary, the three
-// service-contact slots) via KNOWN_CALLER_PHONE_COLS, not customer.phone
-// alone. Reused here rather than copied, so recordAgreedWindow never drifts
-// from what the apply path already treats as an on-file caller (codex P1,
-// pre-push audit on e2e0e089c) — a caller the linker matched through a
-// secondary/service-contact number, or a call whose direction is one of
-// those Twilio variants, must not fail this and leave the old promise in
-// place for a move that actually succeeded.
-function callerIdentityMatches(call, customer) {
-  const counterpartPhoneKeys = phoneMatchDigits(require('./call-reschedule-apply').counterpartPhone(call));
-  const onFileKeys = new Set(KNOWN_CALLER_PHONE_COLS.flatMap((col) => phoneMatchDigits(customer?.[col])));
-  return counterpartPhoneKeys.some((key) => onFileKeys.has(key));
-}
-
-// Pure, exported for tests. The whole "may this call's spoken slot become a
-// promised-window audit row?" policy in one declarative place, rather than a
-// chain of conditions spread through the transaction body (codex P2). Returns
-// the agreed start instant, or null when ANY rule rejects it:
-//   - the call is still being processed, or is not this visit's customer
-//   - the counterpart phone is not one of the customer's on-file numbers
-//   - the extraction says spam/voicemail, or that no agent commitment was made
-//   - no finite confirmed_start_at was extracted
-//   - the trusted-speaker rule below rejects the Agent:/Caller: labelling
-// The trusted-labels part mirrors canAutoRoute's own guard
-// (call-triage-flags.js ~L1162-1181): the transcript labels
-// hasAgentCommittedEvidence grounds against are themselves LLM-inferred, so a
-// swapped label could let a CALLER-spoken slot pass as an agent commitment.
-// This claim class demands that deterministic-labels opt everywhere else, and
-// a promised-window row is no different (codex P1 af4925f71) — the gate is
-// read live, not from the module-load `gates` snapshot, matching this file's
-// other gate reads.
-// "Does this call speak for this visit's customer at all?" — a settled call
-// (no processing token still held), linked to the same customer the visit
-// belongs to, from/to a number on that customer's file.
-function callSpeaksForVisit({ call, visit, customer }) {
-  if (!call || call.processing_token || !visit || call.customer_id !== visit.customer_id) return false;
-  return callerIdentityMatches(call, customer);
+// When the customer heard the commitment. The transcript carries no
+// per-utterance timestamps (call-triage-flags.js grounds against bare
+// "Agent:"/"Caller:" turns), so the call's END — created_at plus its own
+// recorded duration — is the closest defensible instant, and the only one
+// that orders correctly against an automated reminder sent DURING a long
+// call: dated at the call's START, the promise the agent made minutes later
+// looked OLDER than that reminder to latestPromises, and since the applied-
+// reschedule path sends no confirmation of its own, the detector went on
+// enforcing the stale window (codex P2 round 5). The end never precedes the
+// commitment, and a call with no usable duration falls back to created_at.
+// Portal OUTBOUND calls make created_at an even weaker floor: call-bridge.js
+// inserts call_log BEFORE Twilio rings the staff phone and then the customer,
+// so talk time alone omits setup and ringing and can still land before the
+// commitment was spoken (codex P2 round 10). The status callback stamps
+// updated_at when the call ends, which is the closest thing to a provider
+// terminal timestamp we store — but later processing writes (extraction,
+// transcription) move it too, so it is only trusted up to a bounded ringing
+// allowance past the talk time. Under-stating is the harmful direction: a
+// reminder sent during the call would then look newer than the window the
+// agent gave, and the detector would enforce the stale one.
+const RING_ALLOWANCE_MS = 10 * 60000;
+function callCommitmentInstant(call) {
+  const started = instant(call?.created_at);
+  const seconds = Number(call?.recording_duration_seconds || call?.duration_seconds || 0);
+  if (!Number.isFinite(started)) return new Date();
+  const talkEnd = Number.isFinite(seconds) && seconds > 0 ? started + seconds * 1000 : started;
+  const stamped = instant(call?.updated_at);
+  if (!Number.isFinite(stamped) || stamped <= talkEnd) return new Date(talkEnd);
+  return new Date(Math.min(stamped, talkEnd + RING_ALLOWANCE_MS));
 }
 
 // "What window, if any, did the AGENT commit to on this call?" — the
@@ -525,55 +532,6 @@ function agentCommittedStart(call) {
   if (!gateEnvValue('GATE_CALL_AGENT_COMMIT_TRUSTED_LABELS')
     || !require('./call-triage-flags').hasAgentCommittedEvidence(v2, call.transcription, call.created_at)) return null;
   return target;
-}
-
-function agreedWindowStart({ call, visit, customer }) {
-  return callSpeaksForVisit({ call, visit, customer }) ? agentCommittedStart(call) : null;
-}
-
-// Gated on CAPTURE, not on alerting (codex P1 round 5). A trusted call
-// commitment is the one promise class with no customer-facing text or email
-// of its own — the applied-reschedule path deliberately sends nothing — so a
-// call handled while the detector was dark leaves the PRE-MOVE reminder as
-// the latest promise forever. Activate the detector afterwards and it alerts
-// against a window the customer was already told had changed. Capture runs
-// ahead of activation instead: it writes one visit_window_promised audit row,
-// raises nothing, and sends nothing. GATE_NOSHOW_DETECTOR implies it.
-const captureEnabled = () => gateEnvValue('GATE_NOSHOW_PROMISE_CAPTURE') || enabled();
-
-// When the customer heard the commitment. The transcript carries no
-// per-utterance timestamps (call-triage-flags.js grounds against bare
-// "Agent:"/"Caller:" turns), so the call's END — created_at plus its own
-// recorded duration — is the closest defensible instant, and the only one
-// that orders correctly against an automated reminder sent DURING a long
-// call: dated at the call's START, the promise the agent made minutes later
-// looked OLDER than that reminder to latestPromises, and since the applied-
-// reschedule path sends no confirmation of its own, the detector went on
-// enforcing the stale window (codex P2 round 5). The end never precedes the
-// commitment, and a call with no usable duration falls back to created_at.
-function callCommitmentInstant(call) {
-  const started = instant(call?.created_at);
-  const seconds = Number(call?.recording_duration_seconds || call?.duration_seconds || 0);
-  if (!Number.isFinite(started)) return new Date();
-  return new Date(Number.isFinite(seconds) && seconds > 0 ? started + seconds * 1000 : started);
-}
-
-async function recordAgreedWindow(conn, { callId, visitId } = {}) {
-  if (!captureEnabled() || !callId || !visitId) return false;
-  return conn.transaction(async (trx) => {
-    await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?))', ['promised-call-window', `${callId}:${visitId}`]);
-    const call = await trx('call_log').where({ id: callId, v2_extraction_status: 'valid' }).first();
-    const visit = await trx('scheduled_services').where({ id: visitId }).first('customer_id');
-    const customer = visit ? await trx('customers').where({ id: visit.customer_id }).first(...KNOWN_CALLER_PHONE_COLS) : null;
-    const target = agreedWindowStart({ call, visit, customer });
-    if (target == null) return false;
-    const prior = await trx('audit_log').where({ action: 'visit_window_promised', resource_id: visitId })
-      .whereRaw("metadata->>'call_log_id' = ?", [callId]).first('id');
-    if (prior) return false;
-    await recordAuditEvent({ actor_type: 'system', action: 'visit_window_promised', resource_type: 'scheduled_service', resource_id: visitId,
-      metadata: { call_log_id: callId, start_at: new Date(target).toISOString(), communicated_at: callCommitmentInstant(call).toISOString() }, critical: true, trx });
-    return true;
-  });
 }
 
 // The messaging audit row is where a text's promised window lives, and
@@ -607,6 +565,64 @@ async function recordSentWindowFallback(conn, { visitId, startAtMs, communicated
   }
 }
 
+// A `service_visits` row is ONE physical stop shared by N scheduled_services
+// (visit-groups.js). The rest of the system already treats it as one: the
+// reminder pipeline sends a single grouped text and links its evidence to
+// whichever member won the claim, and one En Route / Arrived advances every
+// member. Evaluating members independently therefore read a sibling's
+// evidence as missing, and could raise several cards for one truck visit
+// (codex P1 round 10). Rows with no visit_id are their own group, which is
+// every row while GATE_VISIT_GROUPS is off.
+//
+// The representative is the lowest member id, not the claim owner: the claim
+// moves between members from tier to tier, and the tracking key (and the
+// dispatch_alerts job_id it carries) must stay stable across sweeps for the
+// same stop.
+function groupedStops(rows = []) {
+  const byStop = new Map();
+  for (const row of rows) {
+    const key = row.visit_id ? `visit:${row.visit_id}` : `row:${row.id}`;
+    if (!byStop.has(key)) byStop.set(key, []);
+    byStop.get(key).push(row);
+  }
+  return [...byStop.values()].map((members) => {
+    const ordered = [...members].sort((a, b) => String(a.id).localeCompare(String(b.id)));
+    return { representative: ordered[0], members: ordered };
+  });
+}
+
+// Pure, exported for tests. One stop's state for evaluation: the earliest
+// arrival/departure stamp any member carries (one action advances all of
+// them, but a member that raced ahead is still proof the truck arrived), and
+// a NON-live status if any member has left LIVE_STATUSES — a stop whose first
+// service is already completed was plainly attended, whatever its siblings
+// still say.
+function stopState(members = []) {
+  const base = members[0];
+  if (members.length === 1) return base;
+  const earliest = (key) => members.map((m) => m[key]).filter((v) => Number.isFinite(instant(v)))
+    .sort((a, b) => instant(a) - instant(b))[0] || null;
+  const settled = members.find((m) => !LIVE_STATUSES.includes(m.status));
+  return { ...base, status: settled ? settled.status : base.status,
+    en_route_at: earliest('en_route_at'), arrived_at: earliest('arrived_at'),
+    actual_start_time: earliest('actual_start_time'), check_in_time: earliest('check_in_time') };
+}
+
+// Pure, exported for tests. The stop's communicated window: the latest
+// promise across ALL members, because the grouped reminder's evidence is
+// linked to whichever member won the claim for that tier — a sibling has no
+// evidence of its own, and reading its id alone would fall back to an older
+// promise or none at all.
+function stopPromise(members = [], promises = new Map(), now = new Date()) {
+  let latest = null;
+  for (const member of members) {
+    const promise = promises.get(String(member.id));
+    if (!promise || instant(promise.communicated_at) > instant(now)) continue;
+    if (!latest || instant(latest.communicated_at) < instant(promise.communicated_at)) latest = promise;
+  }
+  return latest;
+}
+
 async function listNoShows(conn, { now = new Date(), limit = 100, offset = 0, actorId = null, admin = true } = {}) {
   if (!enabled()) return [];
   const rows = await conn('scheduled_services as s').join('customers as c', 'c.id', 's.customer_id')
@@ -617,10 +633,12 @@ async function listNoShows(conn, { now = new Date(), limit = 100, offset = 0, ac
   const liveRows = rows.filter((r) => !require('./internal-test-customers').isInternalTestCustomerId(r.customer_id));
   const events = await loadPromiseEvents(conn, liveRows.map((r) => String(r.id)), { now });
   const promises = latestPromises(events, now);
-  const cards = liveRows.map((r) => {
-    const alert = evaluateNoShow({ visit: r, promise: promises.get(String(r.id)), now });
+  const cards = groupedStops(liveRows).map(({ representative, members }) => {
+    const alert = evaluateNoShow({ visit: stopState(members), promise: stopPromise(members, promises, now), now });
+    const r = representative;
     return alert ? { id: r.id, customer_id: r.customer_id, technician_id: r.technician_id, first_name: r.first_name,
-      last_name: r.last_name, phone: r.phone, scheduled_date: r.scheduled_date, ...alert } : null;
+      last_name: r.last_name, phone: r.phone, scheduled_date: r.scheduled_date,
+      ...(members.length > 1 ? { grouped_service_ids: members.map((m) => String(m.id)) } : {}), ...alert } : null;
   }).filter(Boolean).sort((a, b) => b.stage - a.stage || instant(a.due_at) - instant(b.due_at) || a.id.localeCompare(b.id));
   return cards.slice(offset, offset + limit);
 }
@@ -746,6 +764,33 @@ async function reconcileOfficeAlert(trx, { card, visit, live, key, type, recipie
   return true;
 }
 
+// The kill switch has to CLEAN UP, not just stop creating: sweep() is the
+// only pass that resolves a detector office alert or dismisses a tracking
+// notice when the visit arrives, completes, moves or is reassigned. Flipping
+// GATE_NOSHOW_DETECTOR off used to freeze both — /api/admin/dispatch/alerts
+// keeps serving unresolved rows, so a stale critical card could sit on the
+// board indefinitely, and an unresolved detector row also suppresses the
+// legacy scanner the gate just handed back (codex P1 round 10). Runs from the
+// same cron as the legacy scan, so a disabled feature clears itself within one
+// tick. Every resolve is stamped automatic, so nothing here reads later as a
+// dispatcher's own acknowledgement.
+async function cleanupAfterDisable(conn) {
+  if (enabled()) return { resolved: 0, dismissed: 0 };
+  const dispatch = require('./dispatch-alerts');
+  const open = await conn('dispatch_alerts').whereIn('type', dispatch.OVERDUE_ALERT_TYPES)
+    .whereNull('resolved_at').whereRaw("payload->>'source' = 'no_show_detector'").select('id');
+  for (const alert of open) await dispatch.resolveAlert({ id: alert.id, auto: true });
+  const dismissedAt = new Date();
+  const dismissed = await conn('tech_notifications').where({ type: 'follow_through_tracking' })
+    .whereNull('dismissed_at')
+    .update({ dismissed_at: dismissedAt, read: true, updated_at: dismissedAt,
+      payload: conn.raw("COALESCE(payload, '{}'::jsonb) || jsonb_build_object('superseded_at', ?::text)", [dismissedAt.toISOString()]) });
+  if (open.length || dismissed) {
+    require('./logger').info(`[no-show-detector] gate off — cleared ${open.length} office alert(s) and ${dismissed} tracking notice(s)`);
+  }
+  return { resolved: open.length, dismissed: Number(dismissed) || 0 };
+}
+
 async function sweep(conn, { now = new Date() } = {}) {
   if (!enabled()) return { alerted: 0 };
   const rows = await listNoShows(conn, { now, limit: 10000 });
@@ -754,10 +799,18 @@ async function sweep(conn, { now = new Date() } = {}) {
   let alerted = 0;
   for (const card of rows) {
     const notice = await conn.transaction(async (trx) => {
-      const visit = await trx('scheduled_services').where({ id: card.id }).forUpdate().first();
+      // Re-read the WHOLE stop under the lock, not just the representative:
+      // a grouped visit is evaluated as one (see groupedStops), so its
+      // confirmation here must use the same members, the same shared promise
+      // and the same merged arrival state, or a sibling's arrival stamp
+      // recorded since listNoShows ran would be missed (codex P1 round 10).
+      const memberIds = card.grouped_service_ids || [String(card.id)];
+      const members = await trx('scheduled_services').whereIn('id', memberIds).forUpdate()
+        .orderBy('id').select('*');
+      const visit = members.find((m) => String(m.id) === String(card.id));
       if (!enabled() || !visit) return null;
-      const promise = latestPromises(await loadPromiseEvents(trx, [String(card.id)], { now }), now).get(String(card.id));
-      const live = evaluateNoShow({ visit, promise, now });
+      const promise = stopPromise(members, latestPromises(await loadPromiseEvents(trx, memberIds, { now }), now), now);
+      const live = evaluateNoShow({ visit: stopState(members), promise, now });
       if (!live || live.stage !== card.stage || live.promised_window.start_at !== card.promised_window.start_at) return null;
       const recipientTech = visit.technician_id ? await trx('technicians').where({ id: visit.technician_id,
         employment_status: 'active', field_dispatchable: true }).first('id', 'name') : null;
@@ -862,4 +915,4 @@ async function sweep(conn, { now = new Date() } = {}) {
   return { alerted, active: rows.length };
 }
 
-module.exports = { enabled, captureEnabled, evaluateNoShow, promisedStartAt, trackingStage, agreedWindowStart, callCommitmentInstant, LIVE_STATUSES, latestPromises, loadPromiseEvents, seriesSupersessions, recordAgreedWindow, recordSentWindowFallback, listNoShows, sweep, trackingKey, resolveLegacyCollision, alreadyHasOpenAlert, callerIdentityMatches, noticeStillCurrent };
+module.exports = { enabled, cleanupAfterDisable, evaluateNoShow, promisedStartAt, trackingStage, callCommitmentInstant, LIVE_STATUSES, latestPromises, loadPromiseEvents, seriesSupersessions, groupedStops, stopState, stopPromise, recordSentWindowFallback, listNoShows, sweep, trackingKey, resolveLegacyCollision, alreadyHasOpenAlert, noticeStillCurrent };

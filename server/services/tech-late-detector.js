@@ -117,6 +117,14 @@ async function runInner() {
     }
     return result;
   }
+  // Gate OFF: clear anything the detector left behind before the legacy scan
+  // runs. sweep() is the only pass that resolves a detector office alert or
+  // dismisses a tracking notice, so without this a disabled feature leaves
+  // stale critical cards on the dispatch board — and an unresolved detector
+  // row suppresses the very legacy alert this branch is about to raise
+  // (codex P1, PR #4403 round 10). Best-effort: a cleanup failure must not
+  // stop the fallback scan.
+  await tracking.cleanupAfterDisable(db).catch((err) => logger.warn(`[tech-late-detector] tracking cleanup failed: ${err.message}`));
   let rows;
   try {
     const result = await db.raw(`

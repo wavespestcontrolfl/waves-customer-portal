@@ -6427,19 +6427,12 @@ async function applyRescheduleFollowUps({ call, callSid, result }) {
     await require('./call-commitments').refreshFulfillment(db, call.id)
       .catch((err) => logger.warn(`[call-proc] post-reschedule fulfillment refresh failed for ${maskSid(callSid)}: ${err.message}`));
   }
-  // An applied move just communicated a NEW promised window to the caller —
-  // record it as promise evidence the same way a freshly booked appointment
-  // does (appointmentResult.scheduledServiceId), or the no-show detector
-  // keeps alerting against the stale pre-move window and never sees the one
-  // the agent just spoke (codex P1). recordAgreedWindow re-derives the agreed
-  // window from the call's own V2 extraction and enforces the same
-  // trusted-speaker gate that other path already requires — result.newDate/
-  // newWindow (the plan this step just applied) exist for logging/future use
-  // but are never a second source of truth.
-  if (result.visitId && isEnabled('noShowPromiseCapture')) {
-    await require('./no-show-detector').recordAgreedWindow(db, { callId: call.id, visitId: result.visitId })
-      .catch((err) => logger.warn(`[call-proc] reschedule-apply promise-window capture failed for ${maskSid(callSid)}: ${err.message}`));
-  }
+  // NOTE: the promised window this move communicated needs no capture step
+  // here. no-show-detector.js derives it from the activity_log row
+  // call-reschedule-apply.js writes in the SAME transaction as the move, so
+  // there is nothing to lose if a best-effort write fails after the call is
+  // finalized — and every move applied before that feature existed reads the
+  // same way (codex P1, PR #4403 rounds 8 and 10).
 }
 
 async function applyCallRescheduleStep({ call, callSid, customerId, extracted, v2Result, appointmentResult, procGeneration }) {
@@ -16445,13 +16438,10 @@ const CallRecordingProcessor = {
       // No customer comms. Generation-fenced, never blocking.
       await applyCallRescheduleStep({ call, callSid, customerId, extracted, v2Result, appointmentResult, procGeneration });
 
-      if (appointmentResult?.scheduledServiceId && isEnabled('noShowPromiseCapture')) {
-        try {
-          await require('./no-show-detector').recordAgreedWindow(db, { callId: call.id, visitId: appointmentResult.scheduledServiceId });
-        } catch (err) {
-          logger.warn(`[call-proc] promised window capture failed for ${call.id}: ${err.code || err.name || 'error'}`);
-        }
-      }
+      // The window this booking call committed needs no capture step either:
+      // the visit row carries source_call_log_id, written in the booking
+      // transaction, and no-show-detector.js derives the promise from that
+      // durable link (codex P1, PR #4403 round 10).
     }
 
     // Reconcile-only draft-linkage pass, AFTER the fenced finalization
