@@ -72,8 +72,15 @@ stamp — so every money seam on this surface reads the invoice ROW, not its
 status. `/setup`, `/quote`, `/finalize`, `/confirm` and `/update-amount`
 refuse such an invoice through the shared collectibility gate, and `/consent`,
 `/capture-setup` and `/setup-complete` refuse it with
-`409 { error, code: 'invoice_withdrawn_from_customer' }` so no payment method
-is saved or enrolled for Auto Pay against debt that now belongs to AP. A
+`409 { error, code: 'invoice_withdrawn_from_customer' }`. What that refusal
+guarantees, precisely: no consent is recorded and no Auto Pay enrollment
+happens for a withdrawn invoice — the authorization row and the ownership
+judgement commit in ONE transaction, and the enrollment re-judges ownership
+inside its own. A Bill-To change that lands mid-request, after the Stripe
+`attach` but before that fence, can leave the method attached to the
+customer's Stripe record; it is inert (no consent, not enrolled, not
+default) and the request still answers 409. The attach cannot join a database
+transaction, and the customer did ask to save the card. A
 withdrawn invoice is also absent from the authenticated portal's balance and
 Pay Now list, and carries no `manualPayOptions`. Nothing else in the payload
 changes; an invoice that returns to self-pay is released by the Bill-To

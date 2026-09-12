@@ -1171,11 +1171,12 @@ router.post('/:token/consent', async (req, res, next) => {
         statusCode: 409,
       });
     }
-    // OWNERSHIP IMMEDIATELY BEFORE THE FIRST WRITE (Codex #4311 r39 P0): the
-    // documented contract is that a withdrawn invoice saves and enrolls
-    // NOTHING, and the check at the top of this route ran several awaits and
-    // a Stripe round-trip ago. Packet-aware, so a payer on a sibling billed
-    // member counts, and fail-closed on an unreadable row.
+    // OWNERSHIP IMMEDIATELY BEFORE THE WRITES (Codex #4311 r39 P0): the check
+    // at the top of this route ran several awaits and a Stripe round-trip
+    // ago. Packet-aware, so a payer on a sibling billed member counts, and
+    // fail-closed on an unreadable row. The CONSENT row below is written in
+    // one transaction with this judgement (local audit): a withdrawal that
+    // commits mid-request cannot leave a recorded authorization behind.
     if (await require('../services/visit-completion-packets').invoicePayerOwnedNow(invoice.id)) {
       return res.status(409).json({
         error: 'This invoice is billed to a third-party payer',
@@ -1191,15 +1192,37 @@ router.post('/:token/consent', async (req, res, next) => {
       });
     }
 
-    const row = await ConsentService.recordConsent({
-      customerId: invoice.customer_id,
-      paymentMethodId: saved.id,
-      stripePaymentMethodId: verifiedStripePmId,
-      source: 'pay_page',
-      methodType: verifiedMethodType,
-      ip: req.ip,
-      userAgent: req.get('user-agent') || null,
+    // The consent row and the ownership judgement share ONE transaction
+    // (local audit on r39): a Bill-To assignment committing between an
+    // unlocked check and this insert would otherwise leave a recorded
+    // authorization against payer-owned debt. The Stripe attach above cannot
+    // join a database transaction — an attached-but-unconsented,
+    // unenrolled method is inert — so the fence is drawn here, around the
+    // authorization itself.
+    const Packets = require('../services/visit-completion-packets');
+    let consentRefusedForPayer = false;
+    const row = await db.transaction(async (trx) => {
+      if (await Packets.invoicePayerOwnedNow(invoice.id, trx)) {
+        consentRefusedForPayer = true;
+        return null;
+      }
+      return ConsentService.recordConsent({
+        customerId: invoice.customer_id,
+        paymentMethodId: saved.id,
+        stripePaymentMethodId: verifiedStripePmId,
+        source: 'pay_page',
+        methodType: verifiedMethodType,
+        ip: req.ip,
+        userAgent: req.get('user-agent') || null,
+        database: trx,
+      });
     });
+    if (consentRefusedForPayer) {
+      return res.status(409).json({
+        error: 'This invoice is billed to a third-party payer',
+        code: 'invoice_withdrawn_from_customer',
+      });
+    }
 
     // An ACH debit that is still PROCESSING must not enroll yet (Codex
     // #2507 round-9 P2): the status guard above deliberately admits
@@ -1420,15 +1443,32 @@ router.post('/:token/setup-complete', async (req, res) => {
     }
     const methodType = (typeof pmObject === 'object' && pmObject?.type) || saved.method_type || 'card';
     if (!(await ConsentService.hasConsentFor(invoice.customer_id, stripePmId))) {
-      await ConsentService.recordConsent({
-        customerId: invoice.customer_id,
-        paymentMethodId: saved.id,
-        stripePaymentMethodId: stripePmId,
-        source: 'pay_page',
-        methodType,
-        ip: req.ip,
-        userAgent: req.get('user-agent') || null,
+      // Same one-transaction fence as /consent: the authorization and the
+      // ownership judgement commit together.
+      const PacketsForConsent = require('../services/visit-completion-packets');
+      let refusedForPayer = false;
+      await db.transaction(async (trx) => {
+        if (await PacketsForConsent.invoicePayerOwnedNow(invoice.id, trx)) {
+          refusedForPayer = true;
+          return null;
+        }
+        return ConsentService.recordConsent({
+          customerId: invoice.customer_id,
+          paymentMethodId: saved.id,
+          stripePaymentMethodId: stripePmId,
+          source: 'pay_page',
+          methodType,
+          ip: req.ip,
+          userAgent: req.get('user-agent') || null,
+          database: trx,
+        });
       });
+      if (refusedForPayer) {
+        return res.status(409).json({
+          error: 'This invoice is billed to a third-party payer',
+          code: 'invoice_withdrawn_from_customer',
+        });
+      }
     }
     const { enrollConsentedMethod } = require('../services/autopay-enrollment');
     const enrollment = await enrollConsentedMethod({
