@@ -103,9 +103,9 @@ describe('#3135 — every lawn-report delivery is fenced, not just held ones', (
 
     await opts.verifyBeforeSend();
     expect(KnowledgeBridge.sealRecommendationsForSend).toHaveBeenCalledWith(
-      'assess-canonical', expect.any(String), expect.any(Function),
+      'assess-canonical', expect.any(String), expect.any(Function), expect.any(String),
     );
-    expect(KnowledgeBridge.releaseRecommendationSendSeal).toHaveBeenCalledWith('assess-canonical');
+    expect(KnowledgeBridge.releaseRecommendationSendSeal).toHaveBeenCalledWith('assess-canonical', expect.any(String));
   });
 
   test('a held delivery keeps sanitize + forceFreshPdf AND fences', async () => {
@@ -180,6 +180,29 @@ describe('#3135 — every lawn-report delivery is fenced, not just held ones', (
     const out = await processServiceReportDelivery(delivery, knex);
     expect(out.status).not.toBe('sent');
   });
+
+  test('a failed owner-only renewal makes the immediate send-seal callback stay false', async () => {
+    KnowledgeBridge.renewRecommendationSendSeal.mockResolvedValue(false);
+    sendServiceReportV1Email.mockImplementationOnce(async (_id, opts) => {
+      expect(await opts.verifyBeforeSend({ renderedAssessmentId: 'assess-canonical' })).toBe(true);
+      expect(await opts.verifySendSealHeld()).toBe(false);
+      // Loss is sticky: a later call cannot silently re-acquire or revive the
+      // expired seal for copy rendered under the old protection.
+      expect(await opts.verifySendSealHeld()).toBe(false);
+      return { ok: false, error: 'Report copy seal lost — deferring send', retryable: true };
+    });
+    const knex = makeKnex();
+    const delivery = { ...DELIVERY, payload: { source: 'dispatch_complete' } };
+
+    const out = await processServiceReportDelivery(delivery, knex);
+
+    expect(out.status).not.toBe('sent');
+    const sealOwner = KnowledgeBridge.sealRecommendationsForSend.mock.calls[0][3];
+    expect(sealOwner).toEqual(expect.any(String));
+    expect(KnowledgeBridge.renewRecommendationSendSeal)
+      .toHaveBeenCalledWith('assess-canonical', sealOwner);
+    expect(KnowledgeBridge.renewRecommendationSendSeal).toHaveBeenCalledTimes(1);
+  });
 });
 
 describe('#3135 r1/r2 — fence target resolution', () => {
@@ -208,7 +231,7 @@ describe('#3135 r1/r2 — fence target resolution', () => {
     const opts = sendServiceReportV1Email.mock.calls[0][1];
     await opts.verifyBeforeSend();
     expect(KnowledgeBridge.sealRecommendationsForSend).toHaveBeenCalledWith(
-      'assess-canonical', expect.any(String), expect.any(Function),
+      'assess-canonical', expect.any(String), expect.any(Function), expect.any(String),
     );
   });
 
@@ -227,7 +250,7 @@ describe('#3135 r1/r2 — fence target resolution', () => {
     expect(typeof opts.verifyBeforeSend).toBe('function');
     await opts.verifyBeforeSend();
     expect(KnowledgeBridge.sealRecommendationsForSend).toHaveBeenCalledWith(
-      'assess-held', expect.any(String), expect.any(Function),
+      'assess-held', expect.any(String), expect.any(Function), expect.any(String),
     );
   });
 
@@ -285,7 +308,7 @@ describe('#3135 r1/r2 — fence target resolution', () => {
 
     expect(out.status).toBe('sent');
     expect(KnowledgeBridge.sealRecommendationsForSend).toHaveBeenCalledWith(
-      'assess-canonical', expect.any(String), expect.any(Function),
+      'assess-canonical', expect.any(String), expect.any(Function), expect.any(String),
     );
   });
 
@@ -353,7 +376,7 @@ describe('#3135 r1/r2 — fence target resolution', () => {
 
     expect(out.status).toBe('sent');
     expect(KnowledgeBridge.sealRecommendationsForSend).toHaveBeenCalledWith(
-      'assess-canonical', expect.any(String), expect.any(Function),
+      'assess-canonical', expect.any(String), expect.any(Function), expect.any(String),
     );
     // Resolved twice: once to pick the target, once to prove it didn't drift.
     expect(loadLinkedLawnAssessment).toHaveBeenCalledTimes(2);
@@ -378,7 +401,7 @@ describe('#3135 r1/r2 — fence target resolution', () => {
 
     expect(out.status).toBe('sent');
     expect(KnowledgeBridge.sealRecommendationsForSend).toHaveBeenCalledWith(
-      'assess-held', expect.any(String), expect.any(Function),
+      'assess-held', expect.any(String), expect.any(Function), expect.any(String),
     );
     // Re-checked like any other fenced delivery: resolved before and after.
     expect(loadLinkedLawnAssessment).toHaveBeenCalledTimes(2);
