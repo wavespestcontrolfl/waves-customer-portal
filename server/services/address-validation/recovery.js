@@ -79,6 +79,13 @@ const RECOVERABLE_STATUSES = new Set([
 // r2 (2026-09-11): added the numbered/ordinal garble class.
 const RECOVERY_PROMPT_VERSION = 'recovery-r2-ordinal';
 
+// The cohort identity is the prompt AND the model. GEMINI_RECOVERY_MODEL
+// decides which phonetic candidates come back at all, so the same prompt text
+// on a different model is different routing behavior and must not pool into
+// one promotion cohort (codex #4437 r6 P1). Evaluated at call time, like every
+// other env read here — an override flip takes effect without a redeploy.
+const recoveryCohortVersion = () => `${RECOVERY_PROMPT_VERSION}@${RECOVERY_MODEL()}`;
+
 const MAX_CANDIDATES = 5; // phonetic re-hearings per call
 const MAX_CONFIRMATIONS = 3; // AV confirmation calls per recovery
 
@@ -297,6 +304,7 @@ async function recoverStreetAddress({ extracted = {}, avStatus, extraStreetCandi
 
 module.exports = {
   RECOVERY_PROMPT_VERSION,
+  recoveryCohortVersion,
   recoverStreetAddress,
   fetchAutocompletePredictions,
   fetchPhoneticStreetCandidates,

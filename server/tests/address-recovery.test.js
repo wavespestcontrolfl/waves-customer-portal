@@ -4,7 +4,7 @@
  * as "C Phone Trl"). All network/model calls are injected via deps.
  */
 
-const { recoverStreetAddress, houseNumberOf, fetchPhoneticStreetCandidates } = require('../services/address-validation/recovery');
+const { recoverStreetAddress, houseNumberOf, fetchPhoneticStreetCandidates, recoveryCohortVersion } = require('../services/address-validation/recovery');
 
 // The real-world shape that motivated this module: caller said "5039 Seafoam
 // Trail", the transcriber wrote "5039 C Phone Trl", AV returned
@@ -399,5 +399,29 @@ describe('recoverStreetAddress — one aggregate budget', () => {
     expect(validate).not.toHaveBeenCalled();
     expect(out.recovered).toBeNull();
     expect(out.candidates).toEqual(['5039 Seafoam Trail, Lakewood Ranch, FL, USA']);
+  });
+});
+
+// The recovery MODEL decides which phonetic candidates come back, so it is
+// part of the cohort identity: the same prompt text on a different model is
+// different routing behavior and must not pool into one promotion cohort.
+describe('recoveryCohortVersion', () => {
+  const original = process.env.GEMINI_RECOVERY_MODEL;
+  afterEach(() => {
+    if (original === undefined) delete process.env.GEMINI_RECOVERY_MODEL;
+    else process.env.GEMINI_RECOVERY_MODEL = original;
+  });
+
+  test('changes when the recovery model is overridden', () => {
+    delete process.env.GEMINI_RECOVERY_MODEL;
+    const asDefault = recoveryCohortVersion();
+
+    process.env.GEMINI_RECOVERY_MODEL = 'gemini-9.9-experimental';
+    expect(recoveryCohortVersion()).not.toBe(asDefault);
+    expect(recoveryCohortVersion()).toContain('gemini-9.9-experimental');
+  });
+
+  test('carries the prompt version so a prompt edit still splits the cohort', () => {
+    expect(recoveryCohortVersion()).toContain('recovery-r2-ordinal');
   });
 });

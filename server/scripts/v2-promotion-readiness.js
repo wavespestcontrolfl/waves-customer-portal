@@ -31,7 +31,7 @@ const {
 const { checkTcpaConsent } = require('../services/call-routing-gates');
 const { isV2Extraction } = require('../utils/extraction-compat');
 const { PROMPT_HASH } = require('../services/prompts/call-extraction-v1');
-const { RECOVERY_PROMPT_VERSION } = require('../services/address-validation/recovery');
+const { recoveryCohortVersion } = require('../services/address-validation/recovery');
 const MODELS = require('../config/models');
 
 const MIN_CALLS = 100;
@@ -175,8 +175,14 @@ async function main() {
   for (const card of attemptCards) {
     let p = {};
     try { p = parseJson(card.payload) || {}; } catch { p = {}; }
+    // A card the processor explicitly superseded does not speak for the
+    // current pass: a previously-recovered call whose latest pass validated
+    // directly keeps that card, and reading its provenance excluded the call
+    // from the cohort although recovery never ran this time (codex #4437 r6
+    // P2). Skipped outright, so it can neither attribute nor disqualify.
+    if (p.recovery_superseded_at) continue;
     const e = recoveryEvidence.get(card.call_log_id) || { current: false, stale: false, unattributable: false };
-    if (p.recovery_prompt_version === RECOVERY_PROMPT_VERSION) e.current = true;
+    if (p.recovery_prompt_version === recoveryCohortVersion()) e.current = true;
     else if (p.recovery_prompt_version) e.stale = true;
     // A card that RECORDS an attempt but predates the stamp cannot say which
     // prompt ran (codex #4437 r3 P1). Cards with no recovery evidence at all
@@ -234,7 +240,7 @@ async function main() {
     // recovery prompt reconstructs a verdict this cohort would not reach, so it
     // is excluded the same fail-closed way an unstamped card is. Cards from
     // before the recovery prompt was versioned have no key and are excluded too.
-    if (p.recovery_prompt_version !== RECOVERY_PROMPT_VERSION) { staleRecoveryPromptCards++; continue; }
+    if (p.recovery_prompt_version !== recoveryCohortVersion()) { staleRecoveryPromptCards++; continue; }
     recoveredCallIds.add(card.call_log_id);
   }
 
@@ -458,10 +464,10 @@ async function main() {
     console.log(`   ↳ ${failOpenRoutes.length} auto-route(s) excluded as on-file fail-open dispatches (not phantom — listed below).`);
   }
   if (unstampedRecoveryCards || staleRecoveryCards || staleRecoveryPromptCards) {
-    console.log(`   ↳ address_recovered cards NOT used to reconstruct a verdict: ${unstampedRecoveryCards} unstamped (pre-2026-08-01 history), ${staleRecoveryCards} from a different extraction pass, ${staleRecoveryPromptCards} from a different recovery prompt (current: ${RECOVERY_PROMPT_VERSION}).`);
+    console.log(`   ↳ address_recovered cards NOT used to reconstruct a verdict: ${unstampedRecoveryCards} unstamped (pre-2026-08-01 history), ${staleRecoveryCards} from a different extraction pass, ${staleRecoveryPromptCards} from a different recovery prompt (current: ${recoveryCohortVersion()}).`);
   }
   if (staleRecoveryPromptCalls.size || unattributableRecoveryCalls.size) {
-    console.log(`   ↳ recovery-prompt cohort: ${staleRecoveryPromptCalls.size} call(s) dropped (attempt ran under an older recovery prompt), ${unattributableRecoveryCalls.size} dropped as pre-stamp attempts that cannot be attributed. Current recovery prompt: ${RECOVERY_PROMPT_VERSION}.`);
+    console.log(`   ↳ recovery-prompt cohort: ${staleRecoveryPromptCalls.size} call(s) dropped (attempt ran under an older recovery prompt), ${unattributableRecoveryCalls.size} dropped as pre-stamp attempts that cannot be attributed. Current recovery prompt: ${recoveryCohortVersion()}.`);
   }
   console.log(`6. Disagreements reviewed           : ${disagreements.length === 0 ? 'none ✅' : disagreements.length + ' need manual review ⚠️'}`);
 

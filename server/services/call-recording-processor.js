@@ -100,7 +100,7 @@ function callExtractionV2PrimaryEnabled() {
   }
 }
 const { computeDeterministicTriageFlags, mergeTriageFlags, suppressAddressFlagsForAV, canAutoRoute, hasCanonicalWriteBlock, deriveCallReviewBridge, deriveEmailReview, mergeNeedsConfirmation, detectRentalSignal, normalizeCounty, ADVISORY_TRIAGE_FLAGS, FAIL_OPEN_KNOWN_CUSTOMER_ADDRESS_FLAGS, streetCompareKey, isMissingUnitNumber, SCHEDULING_CHANGE_REVIEW_FLAGS, statesNewAddress } = require('./call-triage-flags');
-const { recoverStreetAddress, RECOVERABLE_STATUSES, RECOVERY_PROMPT_VERSION } = require('./address-validation/recovery');
+const { recoverStreetAddress, RECOVERABLE_STATUSES, recoveryCohortVersion } = require('./address-validation/recovery');
 
 // The address_recovered card's pass marker, reconciled to THIS pass. The two
 // branches are mirror images and each must clear the other's keys: a pass that
@@ -114,7 +114,7 @@ const { recoverStreetAddress, RECOVERABLE_STATUSES, RECOVERY_PROMPT_VERSION } = 
 function recoveryMarkerPayload(db, passStamp) {
   return passStamp
     ? db.raw('(coalesce(payload, \'{}\'::jsonb) - \'recovery_superseded_at\') || ?::jsonb', [JSON.stringify(passStamp)])
-    : db.raw('(coalesce(payload, \'{}\'::jsonb) - \'extraction_model\' - \'extraction_prompt_version\') || ?::jsonb',
+    : db.raw('(coalesce(payload, \'{}\'::jsonb) - \'extraction_model\' - \'extraction_prompt_version\' - \'recovery_prompt_version\') || ?::jsonb',
       [JSON.stringify({ recovery_superseded_at: new Date().toISOString() })]);
 }
 const { detectContactDictationSignals, decodeDictatedContacts, applyEmailDictationPolicy, CONTACT_DICTATION_TRANSCRIPTION_PROMPT } = require('./contact-dictation');
@@ -8280,7 +8280,7 @@ const CallRecordingProcessor = {
       // reconstructs an accepting verdict from this card. Same extractor with a
       // changed recovery prompt is a DIFFERENT routing cohort, so it is stamped
       // separately (codex #4437 r1 P1).
-      recovery_prompt_version: RECOVERY_PROMPT_VERSION,
+      recovery_prompt_version: recoveryCohortVersion(),
     };
     // Model + prompt identifies an extractor COHORT, not an individual pass
     // (codex round-18 P2): reprocess the same call on the same extractor with
@@ -8326,7 +8326,7 @@ const CallRecordingProcessor = {
           // so its triage outcome belongs to the prompt that produced it. Without
           // the stamp on this side, the promotion cohort silently mixes calls
           // whose recovery ran under incompatible behavior.
-          recovery_prompt_version: RECOVERY_PROMPT_VERSION,
+          recovery_prompt_version: recoveryCohortVersion(),
         }
         : null);
 
@@ -8349,7 +8349,7 @@ const CallRecordingProcessor = {
         address_as_heard: rawStreetBeforeAdopt,
         address_candidates: addressRecovery.candidates || [],
         recovery_method: addressRecovery.method || null,
-        recovery_prompt_version: RECOVERY_PROMPT_VERSION,
+        recovery_prompt_version: recoveryCohortVersion(),
       };
       await db('triage_items')
         .where('call_log_id', call.id)
