@@ -1103,11 +1103,49 @@ async function dispatch(conn, row, context, { now, send, buildLink, render, plan
     }
     // The interlock was busy — nothing reached the provider, so this is a
     // retry in a few minutes, not an unknown outcome for the office (codex
-    // #4293 r2 P2).
+    // #4293 r2 P2). `blocked: true` is send-customer-message's own boundary
+    // for "refused before dispatchToProvider ever ran": withSendLock returns
+    // LOCK_BUSY before sendCore is even invoked, and every other blocked
+    // code here comes back from `check()` — used as BOTH preDispatchCheck
+    // (step 6.5, strictly before the step-7 dispatch call) and preProviderCheck
+    // (the literal Twilio-handoff seam, awaited inside sendViaTwilio before
+    // messages.create()) — so for the sms channel this call always uses,
+    // `blocked` and "never reached the provider" are the same fact; the
+    // push-only in-flight/retry shapes that WOULD imply an actual provider
+    // attempt (appPending/appRetryable) can't come back on this channel.
+    // `result.success === false` below (the one shape `blocked` is NOT set
+    // on) is Twilio actually having been asked, or an SDK call that never
+    // returned a definitive verdict — that one keeps the flag set, same as
+    // the exception path. A definitively-unsent attempt returning to a
+    // pre-send state (pending here, review below) with the flag still true
+    // is indistinguishable from one that might have reached the customer,
+    // which is exactly what let a later reprocessing pass advance the
+    // generation and have stagePromises block the replacement forever on an
+    // attempt nothing was ever actually unsure about (codex #4293 P1,
+    // follow-up round — the earlier round deliberately left the two named
+    // branches alone; Codex has since shown that call was not fail-safe
+    // caution but an indefinite block). Every clear below rides in the SAME
+    // update as the status write it accompanies, so there is no window
+    // where the row is pending/review but still flagged uncertain.
     if (result.blocked && result.code === 'LINK_LOCK_BUSY') return conn('outbox_messages').where({ id: row.id, status: 'sending' })
-      .update({ status: 'pending', available_at: new Date(now.getTime() + LOCK_RETRY_MINUTES * 60000), last_error: result.code, updated_at: new Date() });
+      .update({ status: 'pending', available_at: new Date(now.getTime() + LOCK_RETRY_MINUTES * 60000), last_error: result.code, updated_at: new Date(),
+        payload: deliveryUncertainPatch(conn, false) });
     if (result.blocked && ['LINK_QUIET_HOURS', 'QUIET_HOURS_HOLD', 'LINK_GATE_OFF'].includes(result.code)) return conn('outbox_messages').where({ id: row.id, status: 'sending' })
-      .update({ status: 'pending', available_at: nextSendWindowOpenET(new Date()), last_error: result.code, updated_at: new Date() });
+      .update({ status: 'pending', available_at: nextSendWindowOpenET(new Date()), last_error: result.code, updated_at: new Date(),
+        payload: deliveryUncertainPatch(conn, false) });
+    // Any other blocked refusal — a changed source visit or an already-sent
+    // duplicate from the same `check()` (LINK_SOURCE_CHANGED, LINK_ALREADY_SENT
+    // — the latter is normally intercepted by the `manual` branch above before
+    // it ever reaches here), or a shared send-customer-message pipeline guard
+    // (owned-number recipient, the move-hold boundary, a consent/suppression
+    // recheck failure at the handoff) — is equally definitive that no request
+    // reached Twilio. parkReview only ever writes status/last_error, never
+    // payload (deliberately — threading a clear through its own
+    // reason-unchanged no-op guard is exactly what stranded this flag before,
+    // codex #4293 P1, three earlier rounds), so the clear runs as
+    // retireDeliveryUncertainty's own independent write ahead of it, the same
+    // shape reconcileAttempt's delivery_failed branch already uses.
+    if (result.blocked) { await retireDeliveryUncertainty(conn, row.id); return parkReview(conn, row, result.code || 'provider_outcome_unknown'); }
     return parkReview(conn, row, result.code || 'provider_outcome_unknown');
   } catch {
     return parkReview(conn, row, 'provider_outcome_unknown');

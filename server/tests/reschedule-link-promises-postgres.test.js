@@ -34,7 +34,7 @@ const outboxCommitmentGenerationMigration = require('../models/migrations/202609
 const connection = process.env.RESCHEDULE_LINK_TEST_DATABASE_URL;
 const postgres = connection ? describe : describe.skip;
 const schema = `reschedule_link_${randomUUID().replaceAll('-', '')}`;
-const TABLES = ['customers', 'call_log', 'call_commitments', 'outbox_messages', 'system_settings', 'triage_items', 'audit_log', 'sms_templates', 'sms_log', 'scheduled_services'];
+const TABLES = ['customers', 'call_log', 'call_commitments', 'outbox_messages', 'system_settings', 'triage_items', 'audit_log', 'sms_templates', 'sms_log', 'scheduled_services', 'customer_properties', 'short_codes'];
 let admin;
 let mockPg;
 jest.setTimeout(30000);
@@ -708,5 +708,178 @@ postgres('reschedule-link-promises against PostgreSQL', () => {
       if (priorGate === undefined) delete process.env.GATE_RESCHEDULE_LINK_ON_PROMISE; else process.env.GATE_RESCHEDULE_LINK_ON_PROMISE = priorGate;
       gates.callCommitments = priorCallCommitments;
     }
+  });
+
+  /**
+   * codex #4293 P1, follow-up round on 189f53d7a: claimForDispatch marks
+   * EVERY freshly-claimed attempt delivery_outcome_uncertain the instant it
+   * claims the row — correctly so, since from that instant the process could
+   * die before ever reaching Twilio. But the interlock-busy and quiet-hours
+   * retry branches returned the row to 'pending' WITHOUT clearing that flag,
+   * even though both fire strictly before dispatchToProvider ever runs (the
+   * interlock rejects before sendCore is invoked at all; quiet hours/gate-off
+   * are preDispatchCheck, which runs before the step-7 dispatch call) — no
+   * request ever reached the provider, so there was nothing left uncertain.
+   * A prior round deliberately left these two branches alone as "fail-safe
+   * conservative"; Codex has since shown the flag then blocks stagePromises
+   * from ever staging a replacement generation, which is an indefinite block,
+   * not caution. Only a real dispatch()->claimForDispatch()->send() pass
+   * against genuine Postgres rows proves the fix's UPDATE actually clears the
+   * flag in the write that returns the row to pending, and that a REAL
+   * reprocess-driven generation bump then lets stagePromises through.
+   */
+  describe('a send that never reached the provider retires delivery uncertainty in the same write that returns the row to pending (codex #4293 P1, follow-up round)', () => {
+    const quote = 'I will text you a reschedule link for that appointment.';
+    const promiseNow = new Date('2030-01-07T14:00:00Z'); // 9:00 AM ET — inside the send window
+
+    // Full context: a real customer, a matched inbound call carrying the
+    // agent's promise quote, and one self-service-eligible future visit —
+    // exactly what contextFor's own candidates query and selectDiscussedVisit
+    // need to resolve a clean context with no `reason`, so runOne actually
+    // reaches dispatch() instead of short-circuiting on an earlier guard.
+    async function seedClaimableRow() {
+      const callId = randomUUID();
+      const customerId = randomUUID();
+      const visitId = randomUUID();
+      const phone = '+15555550100';
+      await mockPg('customers').insert({ id: customerId, first_name: 'Pat', last_name: 'Customer', phone,
+        address_line1: '1 Example St', city: 'Bradenton', zip: '34205', active: true });
+      await mockPg('scheduled_services').insert({ id: visitId, customer_id: customerId, scheduled_date: '2030-01-08',
+        window_start: '09:00', window_end: '10:30', service_type: 'WaveGuard', status: 'confirmed', reschedule_token: 'token' });
+      await mockPg('call_log').insert({ id: callId, customer_id: customerId, direction: 'inbound', from_phone: phone,
+        v2_extraction_status: 'valid', processing_generation: 0, transcription: `Agent: ${quote}\nCaller: Thank you.` });
+      const [commitment] = await mockPg('call_commitments').insert({
+        call_log_id: callId, commitment_key: 'send_reschedule_link:1', party: 'waves', kind: 'send_reschedule_link',
+        description: 'send a reschedule link', source: 'ai', status: 'open', confidence: 0.95,
+        evidence: JSON.stringify([{ quote, speaker: 'agent' }]), last_seen_generation: 0, processing_generation: 0,
+      }).returning('id');
+      const outboxId = randomUUID();
+      // Never claimed yet — the row stagePromises itself would have inserted.
+      await mockPg('outbox_messages').insert({ id: outboxId, channel: 'sms', status: 'pending', payload: {},
+        commitment_id: commitment.id, commitment_generation: 0,
+        related_call_log_id: callId, related_customer_id: customerId, related_scheduled_service_id: visitId });
+      return { commitment, row: await mockPg('outbox_messages').where({ id: outboxId }).first() };
+    }
+
+    // A stand-in send() that never invokes preDispatchCheck/preProviderCheck
+    // at all — this test targets dispatch()'s own handling of the RESULT
+    // send-customer-message hands back (which code path it takes for a given
+    // `code`, and whether it clears the flag), not how check() itself would
+    // have arrived at that result — check()'s own preDispatchCheck/
+    // preProviderCheck wiring is exercised structurally by reading
+    // send-customer-message.js and twilio-sms.js (see the block comment on
+    // dispatch()'s blocked-branch handling); reproducing it here would need
+    // short_codes/customer_properties join fixtures this suite does not
+    // otherwise carry, for no additional coverage of the fix under test.
+    const blockedSend = (code) => async () => ({ sent: false, blocked: true, code, retryable: true });
+    const stubBuildLink = async () => ({ url: 'https://example.com/reschedule/token' });
+    const stubRender = async () => 'Your reschedule link: https://example.com/reschedule/token';
+
+    test.each([
+      ['LINK_LOCK_BUSY', 'the interlock (withSendLock, before sendCore is ever invoked)'],
+      ['LINK_QUIET_HOURS', "check()'s own preDispatchCheck, ahead of dispatchToProvider"],
+      ['QUIET_HOURS_HOLD', 'the provider-handoff boundary recheck'],
+      ['LINK_GATE_OFF', 'check()\'s own preDispatchCheck, ahead of dispatchToProvider'],
+    ])('%s (%s) clears the flag in the same UPDATE that returns the row to pending, and a later generation bump can then stage', async (code) => {
+      const priorGate = process.env.GATE_RESCHEDULE_LINK_ON_PROMISE;
+      const priorCallCommitments = gates.callCommitments;
+      try {
+        process.env.GATE_RESCHEDULE_LINK_ON_PROMISE = 'true';
+        gates.callCommitments = true;
+
+        const { commitment, row } = await seedClaimableRow();
+        await links.runOne(mockPg, row, { now: promiseNow, send: blockedSend(code), buildLink: stubBuildLink, render: stubRender });
+
+        const afterBlock = await mockPg('outbox_messages').where({ id: row.id }).first();
+        // The claim itself (claimForDispatch) really did run and set the flag
+        // — this assertion would trivially pass on a row that was never
+        // claimed at all, so proving the retry status confirms the claim
+        // happened before asserting the flag is gone.
+        expect(afterBlock.status).toBe('pending');
+        expect(afterBlock.last_error).toBe(code);
+        expect(afterBlock.payload.delivery_outcome_uncertain).toBe(false);
+
+        // upsertCommitments would bump processing_generation on a real
+        // reprocess; simulate that here without touching call_log — the
+        // NOT EXISTS predicates in stagePromises only ever compare against
+        // the COMMITMENT's own processing_generation.
+        await mockPg('call_commitments').where({ id: commitment.id }).update({ processing_generation: 1 });
+
+        // With delivery uncertainty correctly cleared, the replacement
+        // generation is no longer blocked behind an attempt that in fact
+        // never reached the provider at all.
+        const staged = await links.stagePromises(mockPg);
+        expect(staged).toBe(1);
+        const rows = await mockPg('outbox_messages').where({ commitment_id: commitment.id }).orderBy('commitment_generation');
+        expect(rows).toHaveLength(2);
+        expect(rows[1]).toMatchObject({ commitment_generation: 1, status: 'pending' });
+      } finally {
+        if (priorGate === undefined) delete process.env.GATE_RESCHEDULE_LINK_ON_PROMISE; else process.env.GATE_RESCHEDULE_LINK_ON_PROMISE = priorGate;
+        gates.callCommitments = priorCallCommitments;
+      }
+    });
+
+    test('a blocked code outside the retry allowlist (e.g. a changed source visit) still clears the flag via its own retireDeliveryUncertainty write before parkReview', async () => {
+      // Not every blocked refusal is a short retry — LINK_SOURCE_CHANGED and
+      // the other shared send-customer-message pipeline guards park the row
+      // for the office (parkReview -> 'review') instead of retrying it. That
+      // write only ever touches status/last_error (deliberately — threading
+      // a clear through parkReview's own reason-unchanged no-op guard is
+      // exactly what stranded this flag before), so the clear has to land as
+      // its own independent write, the same shape reconcileAttempt's
+      // delivery_failed branch already uses.
+      const priorGate = process.env.GATE_RESCHEDULE_LINK_ON_PROMISE;
+      const priorCallCommitments = gates.callCommitments;
+      try {
+        process.env.GATE_RESCHEDULE_LINK_ON_PROMISE = 'true';
+        gates.callCommitments = true;
+
+        const { commitment, row } = await seedClaimableRow();
+        await links.runOne(mockPg, row, { now: promiseNow, send: blockedSend('LINK_SOURCE_CHANGED'), buildLink: stubBuildLink, render: stubRender });
+
+        const afterBlock = await mockPg('outbox_messages').where({ id: row.id }).first();
+        expect(afterBlock.status).toBe('review');
+        expect(afterBlock.last_error).toBe('LINK_SOURCE_CHANGED');
+        expect(afterBlock.payload.delivery_outcome_uncertain).toBe(false);
+
+        await mockPg('call_commitments').where({ id: commitment.id }).update({ processing_generation: 1 });
+        const staged = await links.stagePromises(mockPg);
+        expect(staged).toBe(1);
+      } finally {
+        if (priorGate === undefined) delete process.env.GATE_RESCHEDULE_LINK_ON_PROMISE; else process.env.GATE_RESCHEDULE_LINK_ON_PROMISE = priorGate;
+        gates.callCommitments = priorCallCommitments;
+      }
+    });
+
+    test('a genuinely ambiguous outcome (the provider was actually asked, or the SDK never confirmed) leaves the flag set', async () => {
+      // The one shape that must NOT clear: `blocked` is not set at all —
+      // either Twilio genuinely answered (result.success === false) or the
+      // request threw crossing the SDK boundary. Both keep the row
+      // conservatively uncertain, exactly as before this fix.
+      const priorGate = process.env.GATE_RESCHEDULE_LINK_ON_PROMISE;
+      const priorCallCommitments = gates.callCommitments;
+      try {
+        process.env.GATE_RESCHEDULE_LINK_ON_PROMISE = 'true';
+        gates.callCommitments = true;
+
+        const { commitment, row } = await seedClaimableRow();
+        const ambiguousSend = async () => ({ sent: false, success: false, error: 'twilio rejected the number' });
+        await links.runOne(mockPg, row, { now: promiseNow, send: ambiguousSend, buildLink: stubBuildLink, render: stubRender });
+
+        const afterBlock = await mockPg('outbox_messages').where({ id: row.id }).first();
+        expect(afterBlock.status).toBe('review');
+        expect(afterBlock.payload.delivery_outcome_uncertain).toBe(true);
+
+        // The still-uncertain older attempt correctly keeps blocking a fresh
+        // generation from staging — the flag doing exactly the job it exists
+        // for when the outcome really is unknown.
+        await mockPg('call_commitments').where({ id: commitment.id }).update({ processing_generation: 1 });
+        const staged = await links.stagePromises(mockPg);
+        expect(staged).toBe(0);
+      } finally {
+        if (priorGate === undefined) delete process.env.GATE_RESCHEDULE_LINK_ON_PROMISE; else process.env.GATE_RESCHEDULE_LINK_ON_PROMISE = priorGate;
+        gates.callCommitments = priorCallCommitments;
+      }
+    });
   });
 });
