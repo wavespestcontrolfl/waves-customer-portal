@@ -164,7 +164,7 @@ const NotificationDispatcher = {
    * @returns {{ sent: boolean, channel: string|null, results: object }}
    */
   async notify(customerId, notificationType, {
-    smsMessage, emailSubject, emailBody, preSendCheck,
+    smsMessage, emailSubject, emailBody, preSendCheck, scheduledSmsLogId,
   } = {}) {
     const customer = await db('customers').where({ id: customerId }).first();
     if (!customer) {
@@ -198,6 +198,7 @@ const NotificationDispatcher = {
     const channel = prefs?.[typeConfig.channel] || 'sms';
     const results = {};
     let sent = false;
+    let smsDelivery = null;
     // The SMS leg's canonical outcome ('accepted' | 'uncertain' | 'not_sent'),
     // kept alongside `sent` for callers holding a durable send-once claim: only
     // a definite 'not_sent' is safe to retry. An accepted-but-unaudited send
@@ -242,8 +243,10 @@ const NotificationDispatcher = {
           } : undefined,
           metadata: {
             original_message_type: notificationType,
+            ...(scheduledSmsLogId ? { scheduled_sms_log_id: scheduledSmsLogId } : {}),
           },
         });
+        smsDelivery = smsResult;
         smsOutcome = outcomeOfResult(smsResult);
         if (smsResult.sent) {
           results.sms = 'sent';
@@ -310,7 +313,7 @@ const NotificationDispatcher = {
       results.email = 'unavailable: email channel not implemented';
     }
 
-    return { sent, channel, results, deliveryOutcome: smsOutcome };
+    return { sent, channel, results, deliveryOutcome: smsOutcome, ...(smsDelivery ? { smsResult: smsDelivery } : {}) };
   },
 };
 

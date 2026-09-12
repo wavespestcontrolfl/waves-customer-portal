@@ -81,6 +81,11 @@ const failClosed = (label, id, err) => {
 };
 
 const REGISTRY = {
+  lawn_assessment_notification_deferred: {
+    async dispatch(meta) {
+      return require('../lawn-visit-delivery').replayDeferredNotification(meta);
+    },
+  },
   request_app_deferred: {
     async recheck(meta) {
       try {

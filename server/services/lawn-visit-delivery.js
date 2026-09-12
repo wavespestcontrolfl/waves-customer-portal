@@ -74,10 +74,12 @@ function sendSeal(KnowledgeBridge, knex, assessmentId, renewMs = SEAL_RENEW_MS, 
     },
     // Checked immediately before the customer dispatch, like the lease.
     async assertHeld() {
+      const renewalStartedAt = Date.now();
       if (taken && !lost) {
         lost = !(await KnowledgeBridge.renewRecommendationSendSeal(assessmentId, owner).catch(() => false));
       }
       if (!taken || lost) throw Object.assign(new Error('Lawn delivery copy seal lost'), { code: 'LAWN_COPY_SEAL_LOST' });
+      return renewalStartedAt + KnowledgeBridge.SEND_SEAL_MS;
     },
     async release() {
       if (timer) { clearInterval(timer); timer = null; }
@@ -107,7 +109,7 @@ function nearTheVisit(assessment, windowMs) {
 const ownershipLost = () => Object.assign(new Error('Lawn delivery ownership lost'), { code: 'LAWN_DELIVERY_OWNERSHIP_LOST' });
 const stepIncomplete = (step) => Object.assign(new Error(`Lawn delivery step incomplete: ${step}`), { code: 'LAWN_DELIVERY_STEP_INCOMPLETE' });
 
-async function deliverConfirmedAssessment({ assessmentId }, deps = {}) {
+async function deliverConfirmedAssessment({ assessmentId, scheduledSmsLogId }, deps = {}) {
   const { knex, LawnIntel, KnowledgeBridge, staleAfterMs, weatherWindowMs } = resolveDeps(deps);
   const heartbeatMs = validHeartbeat(deps.heartbeatMs, staleAfterMs);
   const claim = await runs.claimPipeline(assessmentId, knex, { staleAfterMs });
@@ -125,6 +127,7 @@ async function deliverConfirmedAssessment({ assessmentId }, deps = {}) {
   const guard = async () => { if (lost || !(await renew())) throw ownershipLost(); };
   const done = [];
   let seal = null;
+  let notificationResult = null;
   try {
     await guard();
     // Weather may legitimately be unavailable. It is an enrichment, while the
@@ -171,11 +174,17 @@ async function deliverConfirmedAssessment({ assessmentId }, deps = {}) {
       // Both of these put the stored copy in front of the customer, so they run
       // inside Knowledge Bridge's send seal (the true 'needsSeal' below).
       ['report', () => LawnIntel.generateServiceReport(assessmentId), true],
-      ['notification', () => LawnIntel.sendAssessmentNotification(assessmentId, {
+      ['notification', async () => { notificationResult = await LawnIntel.sendAssessmentNotification(assessmentId, {
         // The lease says this worker still owns the run; the seal says the copy
         // it is about to read is still the copy it sealed.
-        beforeSend: async () => { await guard(); await seal.assertHeld(); },
-      }), true],
+        beforeSend: async () => {
+          const renewalStartedAt = Date.now();
+          await guard();
+          const sealDeadline = await seal.assertHeld();
+          return { validUntil: Math.min(renewalStartedAt + staleAfterMs, sealDeadline) };
+        },
+        ...(scheduledSmsLogId ? { scheduledSmsLogId } : {}),
+      }); }, true],
     ];
     for (const [step, action, needsSeal] of actions) {
       const state = await runs.deliveryState(assessmentId, knex);
@@ -191,6 +200,11 @@ async function deliverConfirmedAssessment({ assessmentId }, deps = {}) {
       }
       await action(state);
       await guard();
+      if (step === 'notification' && (notificationResult?.notificationQueued || scheduledSmsLogId)
+        && !notificationResult?.sent && (notificationResult?.deliveryOutcome || 'not_sent') === 'not_sent') {
+        await runs.releasePipeline(assessmentId, owner, knex, { staleAfterMs });
+        return { done, gaps: (await runs.deliveryState(assessmentId, knex)).gaps, notificationResult };
+      }
       if ((await runs.deliveryState(assessmentId, knex)).gaps.includes(step)) throw stepIncomplete(step);
       done.push(step);
     }
@@ -206,12 +220,54 @@ async function deliverConfirmedAssessment({ assessmentId }, deps = {}) {
     const completed = await runs.completePipeline(assessmentId, owner, knex, { staleAfterMs });
     if (!completed.owned) throw ownershipLost();
     if (completed.gaps.length) throw stepIncomplete('completion');
-    return { done, gaps: [] };
+    return { done, gaps: [], ...(notificationResult ? { notificationResult } : {}) };
+  } catch (err) {
+    if (notificationResult) err.notificationResult = notificationResult;
+    throw err;
   } finally {
     clearInterval(timer);
     if (renewing) await renewing;
     if (seal) await seal.release();
   }
+}
+
+// The scheduled-SMS executor owns timing/retries; this entry owns only the
+// assessment send and its normal lease/seal. Never fall back to a frozen body.
+async function replayDeferredNotification(meta, deps = {}) {
+  const knex = deps.knex || db;
+  const assessment = await knex('lawn_assessments').where({ id: meta.assessment_id }).first();
+  const run = await runs.loadRun(meta.assessment_id, knex);
+  const blocked = (code) => ({ sent: false, blocked: true, deliveryOutcome: 'not_sent', code });
+  if (!assessment?.confirmed_by_tech || assessment.service_id
+    || String(assessment.customer_id) !== String(meta.customer_id)
+    || !run || String(run.id) !== String(meta.run_id) || !meta.scheduled_sms_log_id) {
+    return blocked('LAWN_NOTIFICATION_UNAVAILABLE');
+  }
+  // A durable claim can mean accepted OR uncertain, never permission to retry.
+  if (assessment.notification_sent) {
+    return { ...blocked('LAWN_NOTIFICATION_ALREADY_CLAIMED'), deliveryOutcome: 'uncertain' };
+  }
+  let notification;
+  try {
+    const result = await deliverConfirmedAssessment({
+      assessmentId: assessment.id, scheduledSmsLogId: meta.scheduled_sms_log_id,
+    }, deps);
+    notification = result.notificationResult;
+    if (!notification) return { ...blocked('LAWN_NOTIFICATION_BUSY'), retryable: true };
+  } catch (err) {
+    notification = err.notificationResult;
+    if (!notification) return { ...blocked(err.code || 'LAWN_NOTIFICATION_RETRY'), retryable: true };
+  }
+  const outcome = notification.deliveryOutcome || (notification.sent ? 'accepted' : 'not_sent');
+  // Scheduler retries must not reinterpret an ambiguous SDK handoff as a
+  // non-send. Its existing terminal rail retains the assessment's send claim.
+  if (outcome === 'uncertain') {
+    return { ...blocked('LAWN_NOTIFICATION_UNCERTAIN'), deliveryOutcome: 'uncertain' };
+  }
+  if (notification.sent || outcome === 'accepted') {
+    return { ...notification.smsResult, sent: true, deliveryOutcome: 'accepted' };
+  }
+  return notification.smsResult || blocked('LAWN_NOTIFICATION_SUPPRESSED');
 }
 
 const RECOVERY_RETRY_HORIZON_MS = 7 * 24 * 60 * 60 * 1000;
@@ -282,4 +338,4 @@ function scheduleRecovery(cron, { sweep = sweepAbandonedDeliveries } = {}) {
   }, { timezone: 'America/New_York' });
 }
 
-module.exports = { deliverConfirmedAssessment, sweepAbandonedDeliveries, scheduleRecovery, RECOVERY_RETRY_HORIZON_MS, WEATHER_WINDOW_MS };
+module.exports = { deliverConfirmedAssessment, replayDeferredNotification, sweepAbandonedDeliveries, scheduleRecovery, RECOVERY_RETRY_HORIZON_MS, WEATHER_WINDOW_MS };

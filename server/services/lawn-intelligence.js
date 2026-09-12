@@ -156,13 +156,52 @@ async function releaseNotificationSend(assessmentId, result) {
   await db('lawn_assessments').where({ id: assessmentId }).update({ notification_sent: false, notification_sent_at: null });
 }
 
+// The normal scheduled-SMS rail owns an after-hours retry even when the lawn
+// recovery sweep is off. Persist identity, never a body that can outlive its
+// copy seal. The registry dispatch reacquires ownership and renders on replay.
+async function deferAssessmentNotification(assessment, customer, nextAllowedAt) {
+  return db.transaction(async (trx) => {
+    const current = await trx('lawn_assessments').where({ id: assessment.id }).forUpdate().first();
+    if (!current?.notification_sent || current.notification_sent_at) return false;
+    const run = await trx('lawn_assessment_runs').where({ assessment_id: assessment.id }).first('id');
+    if (!run) throw new Error('Deferred lawn notification requires its stored run');
+    const existing = await trx('sms_log').where({ customer_id: customer.id })
+      .whereIn('status', ['scheduled', 'sending'])
+      .whereRaw("metadata->>'entry_point' = ? AND metadata->>'assessment_id' = ?",
+        ['lawn_assessment_notification_deferred', String(assessment.id)]).first('id');
+    if (!existing) await trx('sms_log').insert({
+      customer_id: customer.id,
+      direction: 'outbound',
+      from_phone: require('../config/twilio-numbers').getOutboundNumber(),
+      to_phone: customer.phone,
+      message_body: '',
+      status: 'scheduled',
+      scheduled_for: new Date(nextAllowedAt),
+      message_type: 'service_complete',
+      metadata: JSON.stringify({
+        entry_point: 'lawn_assessment_notification_deferred',
+        requires_registered_dispatch: true,
+        assessment_id: assessment.id,
+        run_id: run.id,
+        customer_id: customer.id,
+        replay_purpose: 'appointment',
+        refresh_customer_phone: true,
+      }),
+    });
+    // Obligation creation and proven-unsent claim release must commit together.
+    await trx('lawn_assessments').where({ id: assessment.id })
+      .update({ notification_sent: false, notification_sent_at: null });
+    return true;
+  });
+}
+
 // Delivery recovery's own preconditions — the lease and the copy seal — must
 // reach the caller rather than the send-failure log, and must not release a
 // claim: they say the send should not happen now, not that it failed.
 const DELIVERY_CONTROL_CODES = new Set(['LAWN_DELIVERY_OWNERSHIP_LOST', 'LAWN_COPY_SEAL_LOST']);
 const isOwnershipLoss = (err) => DELIVERY_CONTROL_CODES.has(err?.code);
 async function runBeforeSend(options) {
-  if (options?.beforeSend) await options.beforeSend();
+  if (options?.beforeSend) return options.beforeSend();
 }
 
 const LawnIntelligence = {
@@ -236,6 +275,7 @@ const LawnIntelligence = {
   async sendAssessmentNotification(assessmentId, options) {
     let claimed = false;
     let handedOff = false;
+    let dispatchResult = null;
     try {
       const assessment = await db('lawn_assessments').where({ id: assessmentId, confirmed_by_tech: true }).first();
       // service_id set → the visit's completion text carries the report link.
@@ -275,13 +315,25 @@ const LawnIntelligence = {
         emailSubject: `Your Lawn Health Report — Score: ${overall}/100`,
         emailBody: smsMessage,
         ...(typeof options?.beforeSend === 'function' ? {
-          preSendCheck: async () => { await runBeforeSend(options); return { ok: true }; },
+          preSendCheck: async () => {
+            const authority = await runBeforeSend(options);
+            return { ok: true, validUntil: authority?.validUntil };
+          },
         } : {}),
+        ...(options?.scheduledSmsLogId ? { scheduledSmsLogId: options.scheduledSmsLogId } : {}),
       });
       // Past this line the dispatcher has run, so a later throw — a failed
       // settle write, say — says nothing about whether a text went out. Only a
       // throw BEFORE this point is a definite non-delivery.
       handedOff = true;
+      dispatchResult = result;
+
+      if (typeof options?.beforeSend === 'function' && !options?.scheduledSmsLogId
+        && result?.deliveryOutcome === 'not_sent' && result.smsResult?.code === 'QUIET_HOURS_HOLD'
+        && result.smsResult.deferred && result.smsResult.nextAllowedAt) {
+        const queued = await deferAssessmentNotification(assessment, customer, result.smsResult.nextAllowedAt);
+        if (queued) return { ...result, notificationQueued: true, deferred: true, nextAllowedAt: result.smsResult.nextAllowedAt };
+      }
 
       if (result?.sent) await settleNotificationSend(assessmentId);
       // Nothing delivered (email-preferring customer, blocked SMS) is not a
@@ -299,6 +351,9 @@ const LawnIntelligence = {
       // has to come back or the step reads as delivered and is never retried.
       await releaseUnhandedClaim(assessmentId, claimed, handedOff);
       logger.error(`[lawn-intel] sendAssessmentNotification failed: ${err.message}`);
+      // A replay must retain provider evidence even when its local settlement
+      // write fails. Its queue row can settle without sending a second copy.
+      if (options?.scheduledSmsLogId && handedOff) return dispatchResult;
       return null;
     }
   },
