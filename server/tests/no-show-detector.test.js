@@ -664,6 +664,18 @@ describe('seriesSupersessions: one series text supersedes every moved sibling (r
     expect(seriesSupersessions([move], all).map((e) => e.visit_id)).not.toContain('sib-x');
   });
 
+  // Both surfaces that notify a customer of a series move stamp the move id
+  // on the text they send — admin-dispatch's series confirmation and Quick
+  // Move's anchor-only moved-SMS (rain-out.js's sendMovedSms) — which is what
+  // the read joins on. Without the Quick Move half, every sibling a quick
+  // move touched kept its pre-move reminder as its latest promise (round-6
+  // P1); this asserts the sender still stamps it.
+  test('the Quick Move moved-SMS carries the series move id it is the notification of', () => {
+    const rainOut = require('fs').readFileSync(require('path').join(__dirname, '..', 'services', 'rain-out.js'), 'utf8');
+    expect(rainOut).toContain("...(seriesMoveId ? { series_move_id: String(seriesMoveId) } : {}),");
+    expect(rainOut).toContain('seriesMoveId: seriesMoveId && ownsSeriesText ? seriesMoveId : null,');
+  });
+
   test('a fan-out to two contacts (two delivered audit rows) yields ONE event, at the earliest send', () => {
     const late = { ...move, sent_at: '2026-09-11T18:04:00.000Z' };
     const events = seriesSupersessions([late, move], all);

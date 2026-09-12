@@ -1406,7 +1406,7 @@ async function getOptions(serviceId, { caller = null } = {}) {
 // without it — the copy is optional, the tech's response is not.
 const FORECAST_DECORATION_TIMEOUT_MS = 1500;
 
-async function sendMovedSms({ job, customer, reasonCode, chosen, serviceId, customerNote = null, actorUserId = null, forecastHealth = { degraded: false }, operatorInitiated = false, prebuiltSms = null }) {
+async function sendMovedSms({ job, customer, reasonCode, chosen, serviceId, customerNote = null, actorUserId = null, forecastHealth = { degraded: false }, operatorInitiated = false, prebuiltSms = null, seriesMoveId = null }) {
   if (!customer?.phone) return { sent: false, reason: 'no_phone' };
 
   const isCustom = reasonCode === CUSTOM_REASON;
@@ -1665,6 +1665,16 @@ async function sendMovedSms({ job, customer, reasonCode, chosen, serviceId, cust
     metadata: {
       original_message_type: renderedKey,
       reason_code: reasonCode,
+      // The series move this text is the customer's notification OF, when it
+      // is one (Quick Move's anchor-only moved-SMS doubles as the series
+      // confirmation — see the claim below). no-show-detector.js joins on
+      // this key to learn that the customer was told a whole series moved,
+      // which is what supersedes the SIBLING occurrences' old promised
+      // windows — the text itself quotes only the anchor's new slot (codex
+      // P1, PR #4403 round 6). Without it those siblings keep their pre-move
+      // reminders as their latest promise and draw alerts for windows the
+      // customer already knows changed.
+      ...(seriesMoveId ? { series_move_id: String(seriesMoveId) } : {}),
       // Operator attribution: twilio-sms.js writes sms_log.admin_user_id
       // from this key. Without it every rain-out SMS — including ones
       // carrying a dispatcher-authored note — reads as system-generated in
@@ -2308,6 +2318,10 @@ async function commit({ serviceId, technicianId, reasonCode, scope, target, noti
           : await db('customers').where({ id: job.customer_id }).first('id', 'phone', 'first_name', 'zip', 'latitude', 'longitude');
         sms = await sendMovedSms({
           job, customer, reasonCode, chosen, serviceId: job.id,
+          // Only the text this pass OWNS as the series confirmation carries
+          // the move id — the per-job texts of a route-wide rain-out are not
+          // a series notification.
+          seriesMoveId: seriesMoveId && ownsSeriesText ? seriesMoveId : null,
           // Anchor only — a stop-specific note (gate code, pet warning)
           // must never fan out to the rest of the route's customers.
           customerNote: job.id === serviceId ? note : null,
