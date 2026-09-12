@@ -169,7 +169,10 @@ function MoneyModelTab({ dashboard, loading }) {
     { label: "Estimates", value: funnel.estimates },
     { label: "Accepted", value: funnel.accepted },
     { label: "Active", value: funnel.active },
-    { label: "Retained 6mo+", value: stages.continuity?.totalRetained },
+    // totalRetained is every active member with a member_since
+    // (pricing-intelligence.js:371-386), including sub-6-month ones, so it
+    // cannot stand in for "6mo+". Sum the buckets that actually qualify.
+    { label: "Retained 6mo+", value: retainedSixMonthsPlus(stages.continuity?.retentionBuckets) },
   ];
 
   return (
@@ -217,6 +220,11 @@ function ValueSlider({ label, desc, value, onChange, increaseLabel, decreaseLabe
       </div>
     </div>
   );
+}
+
+function retainedSixMonthsPlus(buckets) {
+  if (!buckets) return undefined;
+  return ["6-12mo", "12-24mo", "24mo+"].reduce((total, key) => total + (buckets[key] || 0), 0);
 }
 
 function valueScoreTone(score) {
