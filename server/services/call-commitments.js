@@ -1909,10 +1909,30 @@ async function applyHumanUpdate(conn, id, { action, description, due_at, note, r
   if (renewalAudit && ['reopen', 'edit'].includes(action) && !conn.isTransaction && typeof conn.transaction === 'function') {
     return conn.transaction((trx) => applyHumanUpdate(trx, id, { action, description, due_at, note, reviewedBy, renewalAudit }));
   }
+  // A dismiss or fulfill recorded straight on the ledger is an explicit
+  // office verdict for a send_reschedule_link commitment (see the branch
+  // below) — reconciling the promise's own outbox rows has to land in the
+  // SAME transaction as this status flip, or an office Reopen racing in
+  // right after could read the commitment as open again before that
+  // reconciliation ever ran (reschedule-link-promises.retireAttemptsOnLedgerVerdict's
+  // own doc comment has the full reasoning). Gated on renewalAudit for the
+  // same reason as the reopen/edit wrap above, not because the flag means
+  // anything for this kind: settleParkedPromiseCard already runs inside its
+  // OWN transaction and passes renewalAudit: false specifically so this
+  // never opens a second, nested one around a connection its caller already
+  // committed to reusing as-is.
+  if (renewalAudit && ['dismiss', 'fulfill'].includes(action) && !conn.isTransaction && typeof conn.transaction === 'function') {
+    return conn.transaction((trx) => applyHumanUpdate(trx, id, { action, description, due_at, note, reviewedBy, renewalAudit }));
+  }
   // Locked: the edit is classified (restated or not) against the row the
   // update will overwrite, never a snapshot another save has since changed.
   const before = renewalAudit && ['reopen', 'edit'].includes(action)
     ? await conn('call_commitments').where({ id }).forUpdate().first('id', 'kind', 'party', 'description', 'due_at', 'human_state', 'reviewed_at') : null;
+  // Same kind/party check as `before` above, but scoped to dismiss/fulfill
+  // and independent of renewalAudit (which the callback branch below still
+  // needs `before` — populated only for reopen/edit — to gate on).
+  const linkPromiseVerdict = ['dismiss', 'fulfill'].includes(action)
+    ? await conn('call_commitments').where({ id }).first('kind', 'party') : null;
   const patch = { reviewed_by: reviewedBy || null, reviewed_at: new Date(), updated_at: new Date() };
   if (note !== undefined) patch.human_note = note ? String(note).slice(0, 2000) : null;
   switch (action) {
@@ -1985,6 +2005,17 @@ async function applyHumanUpdate(conn, id, { action, description, due_at, note, r
     // reschedule-link-promises.renewPromiseOnReopen for the full reasoning
     // and the delivery-dedup decision).
     await require('./reschedule-link-promises').renewPromiseOnReopen(conn, id, { reviewedBy });
+  } else if (linkPromiseVerdict && linkPromiseVerdict.kind === 'send_reschedule_link' && linkPromiseVerdict.party === 'waves'
+    && ['dismiss', 'fulfill'].includes(action)) {
+    // The other half of the same rule: a dismiss or a manual "mark done"
+    // recorded directly on the ledger is exactly the office verdict
+    // settleParkedPromiseCard already retires delivery uncertainty for when
+    // it comes through this promise's own triage card. The ledger path
+    // never touched the outbox at all, so without this an office Reopen
+    // landing before the next sweep could find the old attempt still
+    // flagged uncertain with nothing left to ever clear it (see
+    // retireAttemptsOnLedgerVerdict's own doc comment).
+    await require('./reschedule-link-promises').retireAttemptsOnLedgerVerdict(conn, id);
   }
   return normalizeRow(await conn('call_commitments').where({ id }).first());
 }

@@ -1386,4 +1386,126 @@ postgres('reschedule-link-promises against PostgreSQL', () => {
       }
     });
   });
+
+  /**
+   * codex #4293 P1 (pre-push audit on PR #4293, reschedule-link-promises.js:755):
+   * dismissing an UNCERTAIN attempt through the commitment ledger (not this
+   * promise's own triage card) never touched the outbox row at all — only
+   * the next SWEEP's applyContextSkip('promise_closed') branch retired that
+   * flag, by finding the commitment no longer open. A staff Reopen landing
+   * before that sweep ever runs bumps processing_generation the moment the
+   * dismiss transaction commits, so the commitment reads 'open' again:
+   * promise_closed stops applying (nothing is closed any more), and a row
+   * with no provider_message_id is never handed to reconcileAttempt either.
+   * Nothing is left to ever clear the flag — stagePromises' own
+   * uncertain-attempt guard blocks the renewed generation forever, and the
+   * old row's own commitment now reads open, so nothing ever revisits it.
+   * Only a real Postgres run proves the fix actually lands atomically with
+   * the ledger's own dismiss UPDATE (not a separate, racable write) and that
+   * stagePromises' real NOT EXISTS predicate is satisfied afterward.
+   */
+  describe('a ledger dismiss reconciles delivery uncertainty atomically with the verdict (codex #4293 P1)', () => {
+    const quote = 'I will text you a reschedule link for that appointment.';
+    const promiseNow = new Date('2030-01-07T14:00:00Z'); // 9:00 AM ET — inside the send window
+    const stubBuildLink = async () => ({ url: 'https://example.com/reschedule/token' });
+    const stubRender = async () => 'Your reschedule link: https://example.com/reschedule/token';
+
+    test('dismiss -> Reopen BEFORE any sweep, with an uncertain no-provider-id attempt -> the renewed promise stages and sends', async () => {
+      const priorGate = process.env.GATE_RESCHEDULE_LINK_ON_PROMISE;
+      const priorCallCommitments = gates.callCommitments;
+      const priorActivatedAt = process.env.RESCHEDULE_LINK_PROMISE_ACTIVATED_AT;
+      try {
+        process.env.GATE_RESCHEDULE_LINK_ON_PROMISE = 'true';
+        gates.callCommitments = true;
+        process.env.RESCHEDULE_LINK_PROMISE_ACTIVATED_AT = '2000-01-01T00:00:00Z';
+
+        const callId = randomUUID();
+        const customerId = randomUUID();
+        const visitId = randomUUID();
+        const phone = '+15555550100';
+        await mockPg('customers').insert({ id: customerId, first_name: 'Pat', last_name: 'Customer', phone,
+          address_line1: '1 Example St', city: 'Bradenton', zip: '34205', active: true });
+        await mockPg('scheduled_services').insert({ id: visitId, customer_id: customerId, scheduled_date: '2030-01-08',
+          window_start: '09:00', window_end: '10:30', service_type: 'WaveGuard', status: 'confirmed', reschedule_token: 'token' });
+        await mockPg('call_log').insert({ id: callId, customer_id: customerId, direction: 'inbound', from_phone: phone,
+          v2_extraction_status: 'valid', processing_generation: 0, transcription: `Agent: ${quote}\nCaller: Thank you.` });
+        const [commitment] = await mockPg('call_commitments').insert({
+          call_log_id: callId, commitment_key: 'send_reschedule_link:1', party: 'waves', kind: 'send_reschedule_link',
+          description: 'send a reschedule link', source: 'ai', status: 'open', confidence: 0.95,
+          evidence: JSON.stringify([{ quote, speaker: 'agent' }]), last_seen_generation: 0, processing_generation: 0,
+        }).returning('id');
+        const outboxId = randomUUID();
+        // Claimed but never reached the provider — the exact "no provider
+        // id" shape the finding names: claimForDispatch's own claim already
+        // stamped delivery_outcome_uncertain true, and the process died (or
+        // is simply still mid-flight) before any provider_message_id was
+        // ever recorded. reconcileAttempt is never even reached for a row
+        // like this (runOne only calls it when row.provider_message_id is
+        // set), so nothing but an explicit office verdict can ever retire
+        // this flag once the commitment stops reading 'closed'.
+        await mockPg('outbox_messages').insert({ id: outboxId, channel: 'sms', status: 'sending', attempts: 1,
+          last_attempt_at: new Date('2030-01-07T13:55:00Z'),
+          payload: { commitment_created_at: new Date('2030-01-01T00:00:00Z').toISOString(), call_generation: 0, delivery_outcome_uncertain: true },
+          commitment_id: commitment.id, commitment_generation: 0,
+          related_call_log_id: callId, related_customer_id: customerId, related_scheduled_service_id: visitId });
+
+        // Staff dismiss on the LEDGER — not the triage card — with NO sweep
+        // in between. This is the fix under test: the dismiss's own
+        // transaction must retire the flag itself.
+        const dismissed = await applyHumanUpdate(mockPg, commitment.id, { action: 'dismiss', reviewedBy: randomUUID() });
+        expect(dismissed.status).toBe('dismissed');
+        const afterDismiss = await mockPg('outbox_messages').where({ id: outboxId }).first();
+        expect(afterDismiss.status).toBe('sending'); // untouched — dismiss never cancels the row itself
+        expect(afterDismiss.payload.delivery_outcome_uncertain).toBe(false);
+
+        // Staff Reopen, still before any sweep has ever run.
+        const reopened = await applyHumanUpdate(mockPg, commitment.id, { action: 'reopen', reviewedBy: randomUUID() });
+        expect(reopened.status).toBe('open');
+        expect(Number(reopened.processing_generation)).toBe(1);
+
+        // Pre-fix, the old row's flag would still read true here and
+        // stagePromises' own uncertain-attempt NOT EXISTS predicate would
+        // exclude this commitment forever — 0 staged, permanently.
+        const staged = await links.stagePromises(mockPg);
+        expect(staged).toBe(1);
+        const rows = await mockPg('outbox_messages').where({ commitment_id: commitment.id }).orderBy('commitment_generation');
+        expect(rows).toHaveLength(2);
+        expect(rows[0]).toMatchObject({ id: outboxId, commitment_generation: 0, status: 'sending' });
+        expect(rows[1]).toMatchObject({ commitment_generation: 1, status: 'pending' });
+
+        // ...and sends: the renewed promise is not just admitted for
+        // staging, it actually reaches the provider on its next sweep.
+        const fakeSid = `SM${'0'.repeat(32)}`;
+        const successfulSend = async () => ({ sent: true, providerMessageId: fakeSid });
+        await links.runOne(mockPg, rows[1], { now: promiseNow, send: successfulSend, buildLink: stubBuildLink, render: stubRender });
+        const sent = await mockPg('outbox_messages').where({ id: rows[1].id }).first();
+        expect(sent.status).toBe('sent');
+        expect(sent.provider_message_id).toBe(fakeSid);
+      } finally {
+        if (priorGate === undefined) delete process.env.GATE_RESCHEDULE_LINK_ON_PROMISE; else process.env.GATE_RESCHEDULE_LINK_ON_PROMISE = priorGate;
+        if (priorActivatedAt === undefined) delete process.env.RESCHEDULE_LINK_PROMISE_ACTIVATED_AT; else process.env.RESCHEDULE_LINK_PROMISE_ACTIVATED_AT = priorActivatedAt;
+        gates.callCommitments = priorCallCommitments;
+      }
+    });
+
+    test('dismiss through the ledger retires uncertainty for every non-terminal attempt, same as the triage-card path', async () => {
+      const callId = randomUUID();
+      await mockPg('call_log').insert({ id: callId, direction: 'inbound', processing_generation: 0 });
+      const [commitment] = await mockPg('call_commitments').insert({
+        call_log_id: callId, commitment_key: 'send_reschedule_link:1', party: 'waves', kind: 'send_reschedule_link',
+        description: 'send a reschedule link', source: 'ai', status: 'open', last_seen_generation: 0, processing_generation: 0,
+      }).returning('id');
+      const outboxId = randomUUID();
+      await mockPg('outbox_messages').insert({ id: outboxId, channel: 'sms', status: 'review', last_error: 'provider_outcome_unknown',
+        payload: { delivery_outcome_uncertain: true }, commitment_id: commitment.id, commitment_generation: 0, related_call_log_id: callId });
+
+      const dismissed = await applyHumanUpdate(mockPg, commitment.id, { action: 'dismiss', reviewedBy: randomUUID() });
+      expect(dismissed.status).toBe('dismissed');
+      const row = await mockPg('outbox_messages').where({ id: outboxId }).first();
+      // Still parked (dismiss reconciles the flag, not the status — that
+      // stays the sweep's own job), but no longer flagged uncertain.
+      expect(row.status).toBe('review');
+      expect(row.payload.delivery_outcome_uncertain).toBe(false);
+    });
+  });
 });

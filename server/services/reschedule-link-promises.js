@@ -606,6 +606,52 @@ async function retireDeliveryUncertainty(conn, rowId) {
     .update({ payload: deliveryUncertainPatch(conn, false), updated_at: new Date() });
 }
 
+// Called from call-commitments.applyHumanUpdate, inside its own dismiss/
+// fulfill transaction, whenever an office verdict is recorded directly on
+// the commitment ledger rather than through this promise's own triage card.
+// The card path (settleParkedPromiseCard, below) already treats "the office
+// has ruled" as license to retire delivery uncertainty on every attempt
+// still in flight — the ledger's own dismiss/fulfill never did, because it
+// only ever touched call_commitments. That asymmetry is invisible as long
+// as the next sweep gets a turn first: applyContextSkip's own
+// promise_closed branch (contextFor sees the commitment is no longer open)
+// retires the flag then, exactly like the card path would have. But an
+// office Reopen (renewPromiseOnReopen) landing BEFORE that sweep bumps
+// processing_generation the moment the ledger verdict transaction commits —
+// the commitment reads 'open' again, promise_closed stops applying (the
+// commitment is no longer closed), and a row with no provider_message_id is
+// never handed to reconcileAttempt either. Nothing is left to ever retire
+// that flag again: stagePromises' own uncertain-attempt guard blocks every
+// later generation forever (codex #4293 P1, this round). Retiring it here,
+// in the SAME transaction as the verdict, closes the window a separate
+// write would leave open — this is not a new mechanism, only the ledger
+// finally doing what the card path already does, through the one shared
+// clear (retireDeliveryUncertainty), never a bespoke UPDATE.
+//
+// Every non-terminal row for the commitment is covered, exactly like
+// settleParkedPromiseCard's own bulk clear: an explicit office verdict
+// speaks for every attempt still in flight, not only the one that happened
+// to still be flagged. This does carry the same accepted risk the card path
+// already carries — an attempt that genuinely reached the provider (status
+// 'sent', a real provider_message_id, outcome still ambiguous) has its
+// uncertainty flag cleared before that outcome is actually known, so a
+// renewed generation could in principle be staged and sent alongside a
+// delayed delivery of the OLDER attempt. That risk is not new here: it is
+// the identical trade-off settleParkedPromiseCard has made for the
+// triage-card verdict since this file's very first round, and
+// matchingSend's own visit-link scan (checked again immediately before any
+// fresh send) is what backstops it in both places — a genuinely delivered
+// older attempt is found in sms_log by its link and settles the row rather
+// than duplicating the text. Declining to retire uncertainty here would
+// only reintroduce the deadlock for the one row shape (no provider id, never
+// reached the provider at all) that has no OTHER path back to ever clearing
+// the flag once reopened.
+async function retireAttemptsOnLedgerVerdict(conn, commitmentId) {
+  const rows = await conn('outbox_messages').where({ commitment_id: commitmentId })
+    .whereNotIn('status', ['delivered', 'cancelled']).pluck('id');
+  for (const rowId of rows) await retireDeliveryUncertainty(conn, rowId);
+}
+
 async function parkReview(conn, row, reason) {
   await conn.transaction(async (trx) => {
     await lockTriageCall(trx, row.related_call_log_id);
@@ -1866,4 +1912,4 @@ async function reconcileUsedLinks(conn, now = new Date()) {
   return reconcileRows(conn, rows);
 }
 
-module.exports = { mode, selectDiscussedVisit, snapshot, stagePromises, matchingSend, claimForDispatch, runOne, sweep, withSendLock, resolveUsedLink, reconcileUsedLinks, recordLiveActivation, settleParkedPromiseCard, contextFor, fulfilPromise, markLinkUsed, renewPromiseOnReopen };
+module.exports = { mode, selectDiscussedVisit, snapshot, stagePromises, matchingSend, claimForDispatch, runOne, sweep, withSendLock, resolveUsedLink, reconcileUsedLinks, recordLiveActivation, settleParkedPromiseCard, contextFor, fulfilPromise, markLinkUsed, renewPromiseOnReopen, retireAttemptsOnLedgerVerdict };
