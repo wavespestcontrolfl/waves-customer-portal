@@ -335,7 +335,8 @@ function calibrationEvidenceMissing(run) {
 
 function completedRecommendations(value) {
   const parsed = parseObject(value);
-  return !!parsed && ((typeof parsed.summary === 'string' && parsed.summary.trim().length > 0)
+  return !!parsed && (parsed._sanitizationFinal === true || parsed._groundedInApplications === true
+    || (typeof parsed.summary === 'string' && parsed.summary.trim().length > 0)
     || (Array.isArray(parsed.recommendations) && parsed.recommendations.length > 0));
 }
 

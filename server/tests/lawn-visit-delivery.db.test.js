@@ -398,6 +398,24 @@ const deferred = () => { let resolve; const promise = new Promise((r) => { resol
     expect((await stored(assessment.id)).pipeline_completed_at).toBeInstanceOf(Date);
   });
 
+  test.each(['_sanitizationFinal', '_groundedInApplications'])('recovery preserves finalized copy with only %s in the payload', async (marker) => {
+    const assessment = await seed();
+    const recommendations = { [marker]: true };
+    const summary = 'Previously finalized fixture summary';
+    await db.knex('lawn_assessments').where({ id: assessment.id }).update({
+      recommendations: JSON.stringify(recommendations), ai_summary: summary,
+      report_auto_generated: true, notification_sent: true, notification_sent_at: new Date(),
+    });
+    const deps = dependencies();
+    expect(await deliver(assessment.id, deps)).toMatchObject({ gaps: [] });
+    expect(deps.KnowledgeBridge.generateAssessmentRecommendations).not.toHaveBeenCalled();
+    expect(deps.LawnIntel.generateServiceReport).not.toHaveBeenCalled();
+    expect(deps.LawnIntel.sendAssessmentNotification).not.toHaveBeenCalled();
+    const saved = await db.knex('lawn_assessments').where({ id: assessment.id }).first();
+    expect(JSON.parse(saved.recommendations)).toEqual(recommendations);
+    expect(saved.ai_summary).toBe(summary);
+  });
+
   test('copy that cannot be sealed defers the report and the text to a later sweep', async () => {
     const assessment = await seed();
     const deps = dependencies();
