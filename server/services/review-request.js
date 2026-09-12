@@ -1867,8 +1867,18 @@ const ReviewService = {
     // left, so the due row retries on its own. The mock/knex row object is
     // captured before the fence so the definitive writes restore it.
     const fencedFrom = request.scheduled_for || null;
-    // Filled in by the handoff with the claim this attempt took.
+    // Filled in by the handoff with the claim this attempt took, and cleared
+    // when this attempt releases it.
     const sendClaim = {};
+    // Post-send bookkeeping writes go through this (local audit on r45): once
+    // this attempt no longer owns the claim, another worker can hold the row
+    // in `sending` with a provider request running, and an id-only update
+    // would overwrite that claim — duplicate outreach, or lost delivery
+    // bookkeeping. A row this attempt still owns is matched either way.
+    const ownLegacyRow = () => {
+      const q = db("review_requests").where({ id: requestId });
+      return sendClaim.marked ? q : q.whereNot("status", "sending");
+    };
     let fenced = 0;
     try {
       fenced = await db("review_requests").where({ id: requestId, status: "pending" })
@@ -1969,7 +1979,7 @@ const ReviewService = {
         // automatic resend, which could duplicate a text that already
         // landed (codex #4338 P1).
         try {
-          await db("review_requests").where({ id: requestId }).update({
+          await ownLegacyRow().update({
             status: "deferred",
             scheduled_for: fencedFrom,
           });
@@ -2001,7 +2011,7 @@ const ReviewService = {
       } else {
         const deferredRetryAt = retryAtForDeferredSend(result);
         if (deferredRetryAt) {
-          await db("review_requests").where({ id: requestId }).update({
+          await ownLegacyRow().update({
             status: "pending",
             scheduled_for: deferredRetryAt,
           });
@@ -2017,7 +2027,7 @@ const ReviewService = {
           // same code, which silently dropped legitimate review requests
           // during DB blips.
           const retryAt = new Date(Date.now() + 5 * 60 * 1000);
-          await db("review_requests").where({ id: requestId }).update({
+          await ownLegacyRow().update({
             scheduled_for: retryAt,
           });
           // PII: ID + code only. result.reason can include recipient phone
@@ -2033,7 +2043,7 @@ const ReviewService = {
           // suppressed so processScheduled() — which only picks rows with
           // status='pending' — stops retrying. The request row stays for
           // audit history; the audit_log row captures the block reason.
-          await db("review_requests").where({ id: requestId }).update({
+          await ownLegacyRow().update({
             status: "suppressed",
           });
           // PII: ID + code only — see WRAPPER LOOKUP FAILED above for why
@@ -2056,7 +2066,7 @@ const ReviewService = {
           // the row into the cron's retry queue regardless of how it was
           // originally created.
           const retryAt = new Date(Date.now() + 5 * 60 * 1000);
-          await db("review_requests").where({ id: requestId }).update({
+          await ownLegacyRow().update({
             scheduled_for: retryAt,
           });
           // PII: ID + code only — see WRAPPER LOOKUP FAILED above for why
