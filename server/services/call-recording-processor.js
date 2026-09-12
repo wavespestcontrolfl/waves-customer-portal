@@ -101,6 +101,22 @@ function callExtractionV2PrimaryEnabled() {
 }
 const { computeDeterministicTriageFlags, mergeTriageFlags, suppressAddressFlagsForAV, canAutoRoute, hasCanonicalWriteBlock, deriveCallReviewBridge, deriveEmailReview, mergeNeedsConfirmation, detectRentalSignal, normalizeCounty, ADVISORY_TRIAGE_FLAGS, FAIL_OPEN_KNOWN_CUSTOMER_ADDRESS_FLAGS, streetCompareKey, isMissingUnitNumber, SCHEDULING_CHANGE_REVIEW_FLAGS, statesNewAddress } = require('./call-triage-flags');
 const { recoverStreetAddress, RECOVERABLE_STATUSES, RECOVERY_PROMPT_VERSION } = require('./address-validation/recovery');
+
+// The address_recovered card's pass marker, reconciled to THIS pass. The two
+// branches are mirror images and each must clear the other's keys: a pass that
+// recovered re-stamps its provenance AND drops any recovery_superseded_at a
+// failed pass left behind; a pass that did not recover strips the provenance
+// and records when it was superseded. Leaving the failed pass's marker on a
+// later SUCCESS made success -> failure -> success reject the current recovery
+// forever, so the booking banner kept selecting the stale validation failure
+// (codex #4437 r5 pre-push P1). Exported for the round-trip test — this SQL is
+// the contract, and it has now been wrong in both directions.
+function recoveryMarkerPayload(db, passStamp) {
+  return passStamp
+    ? db.raw('(coalesce(payload, \'{}\'::jsonb) - \'recovery_superseded_at\') || ?::jsonb', [JSON.stringify(passStamp)])
+    : db.raw('(coalesce(payload, \'{}\'::jsonb) - \'extraction_model\' - \'extraction_prompt_version\') || ?::jsonb',
+      [JSON.stringify({ recovery_superseded_at: new Date().toISOString() })]);
+}
 const { detectContactDictationSignals, decodeDictatedContacts, applyEmailDictationPolicy, CONTACT_DICTATION_TRANSCRIPTION_PROMPT } = require('./contact-dictation');
 const { arbitrateQuarantinedEmail } = require('./contact-quarantine-arbiter');
 const { computeAppointmentIdempotencyKey, computeAddressHash, checkTcpaConsent, buildRouteDecision, buildTriageItem, V2_DECISION_VERSION } = require('./call-routing-gates');
@@ -8285,10 +8301,7 @@ const CallRecordingProcessor = {
     await db('triage_items')
       .where({ call_log_id: call.id, reason_code: 'address_recovered' })
       .update({
-        payload: addressRecovery?.recovered
-          ? db.raw('coalesce(payload, \'{}\'::jsonb) || ?::jsonb', [JSON.stringify(recoveryPassStamp)])
-          : db.raw('(coalesce(payload, \'{}\'::jsonb) - \'extraction_model\' - \'extraction_prompt_version\') || ?::jsonb',
-            [JSON.stringify({ recovery_superseded_at: new Date().toISOString() })]),
+        payload: recoveryMarkerPayload(db, addressRecovery?.recovered ? recoveryPassStamp : null),
         updated_at: new Date(),
       })
       .catch((e) => logger.warn(`[call-proc] recovery-marker reconcile failed for ${maskSid(callSid)}: ${e.code || e.name || 'db_error'}`));
@@ -17352,5 +17365,6 @@ CallRecordingProcessor.CALL_EXTRACTION_MAX_ATTEMPTS = CALL_EXTRACTION_MAX_ATTEMP
 // the booking path wrote window_start from — a second implementation of the
 // ET-offset-vs-instant rule would drift from it.
 CallRecordingProcessor.v2IsoToEtWallClock = v2IsoToEtWallClock;
+CallRecordingProcessor.recoveryMarkerPayload = recoveryMarkerPayload;
 
 module.exports = CallRecordingProcessor;
