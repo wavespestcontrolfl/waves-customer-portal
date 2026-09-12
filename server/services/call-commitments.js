@@ -1924,6 +1924,18 @@ async function applyHumanUpdate(conn, id, { action, description, due_at, note, r
   if (renewalAudit && ['dismiss', 'fulfill'].includes(action) && !conn.isTransaction && typeof conn.transaction === 'function') {
     return conn.transaction((trx) => applyHumanUpdate(trx, id, { action, description, due_at, note, reviewedBy, renewalAudit }));
   }
+  // A Confirm recorded on the ledger can ALSO be the office verdict that
+  // revives a send_reschedule_link commitment's generation (see the
+  // linkPromiseConfirm branch below) — that write has to land in the SAME
+  // transaction as the human_state flip, for the identical reason the
+  // reopen/edit and dismiss/fulfill wraps above exist: a separate write
+  // racing a concurrent sweep pass could act on a state this transaction is
+  // about to change out from under it. Its own condition, independent of
+  // the reopen/edit wrap, so an ordinary callback Confirm (which needs none
+  // of this) never pays for a transaction it doesn't use.
+  if (renewalAudit && action === 'confirm' && !conn.isTransaction && typeof conn.transaction === 'function') {
+    return conn.transaction((trx) => applyHumanUpdate(trx, id, { action, description, due_at, note, reviewedBy, renewalAudit }));
+  }
   // Locked: the edit is classified (restated or not) against the row the
   // update will overwrite, never a snapshot another save has since changed.
   const before = renewalAudit && ['reopen', 'edit'].includes(action)
@@ -1933,6 +1945,15 @@ async function applyHumanUpdate(conn, id, { action, description, due_at, note, r
   // needs `before` — populated only for reopen/edit — to gate on).
   const linkPromiseVerdict = ['dismiss', 'fulfill'].includes(action)
     ? await conn('call_commitments').where({ id }).first('kind', 'party') : null;
+  // Confirm's own pre-read, deliberately separate from `before` (which only
+  // covers reopen/edit) so an ordinary callback Confirm never starts
+  // fetching a row the callback branch below has no use for and would
+  // otherwise mistake for licence to record a callback_confirm audit event
+  // that has never existed for this action. human_state/status are read
+  // here, before the patch below overwrites them, because the transition
+  // rule (see the branch after the switch) turns on what they WERE.
+  const linkPromiseConfirm = action === 'confirm'
+    ? await conn('call_commitments').where({ id }).first('kind', 'party', 'human_state', 'status') : null;
   const patch = { reviewed_by: reviewedBy || null, reviewed_at: new Date(), updated_at: new Date() };
   if (note !== undefined) patch.human_note = note ? String(note).slice(0, 2000) : null;
   switch (action) {
@@ -2002,9 +2023,9 @@ async function applyHumanUpdate(conn, id, { action, description, due_at, note, r
     // The inverse of a dismiss is not a no-op for this kind: an explicit
     // office verdict is one of only two things allowed to move the
     // promised-link ledger's generation/uncertainty bookkeeping (see
-    // reschedule-link-promises.renewPromiseOnReopen for the full reasoning
-    // and the delivery-dedup decision).
-    await require('./reschedule-link-promises').renewPromiseOnReopen(conn, id, { reviewedBy });
+    // reschedule-link-promises.renewPromiseOnOfficeVerdict for the full
+    // reasoning and the delivery-dedup decision).
+    await require('./reschedule-link-promises').renewPromiseOnOfficeVerdict(conn, id, { reviewedBy, trigger: 'reopen' });
   } else if (linkPromiseVerdict && linkPromiseVerdict.kind === 'send_reschedule_link' && linkPromiseVerdict.party === 'waves'
     && ['dismiss', 'fulfill'].includes(action)) {
     // The other half of the same rule: a dismiss or a manual "mark done"
@@ -2016,6 +2037,25 @@ async function applyHumanUpdate(conn, id, { action, description, due_at, note, r
     // flagged uncertain with nothing left to ever clear it (see
     // retireAttemptsOnLedgerVerdict's own doc comment).
     await require('./reschedule-link-promises').retireAttemptsOnLedgerVerdict(conn, id);
+  } else if (linkPromiseConfirm && linkPromiseConfirm.kind === 'send_reschedule_link' && linkPromiseConfirm.party === 'waves'
+    && linkPromiseConfirm.status === 'open' && require('./reschedule-link-promises').humanStateBlocksPromise(linkPromiseConfirm.human_state)) {
+    // Confirm is not always a no-op for this kind either: status 'open'
+    // combined with a genuinely BLOCKING human_state can only mean 'edited'
+    // (a 'dismissed' row's own action always sets status 'dismissed' in the
+    // very same patch, so the two never separate) — an office Edit that the
+    // very next sweep already found blocking (applyContextSkip's
+    // promise_closed branch, humanStateBlocksPromise) and cancelled the
+    // then-current outbox row for, at the commitment's UNCHANGED
+    // processing_generation (edit never bumps it). A later Confirm affirms
+    // the same live obligation is still correct, restoring human_state to
+    // 'confirmed' — but leaves that generation exactly where the cancelled
+    // row already occupies it, so stagePromises' own NOT EXISTS predicate
+    // would exclude this promise from every future sweep forever without
+    // the identical renewal Reopen already gets. Routed through the SAME
+    // helper Reopen uses — never a second, bespoke bump — so this decision
+    // cannot be skipped by a future transition that reaches 'open' +
+    // 'confirmed' some other way.
+    await require('./reschedule-link-promises').renewPromiseOnOfficeVerdict(conn, id, { reviewedBy, trigger: 'confirm' });
   }
   return normalizeRow(await conn('call_commitments').where({ id }).first());
 }

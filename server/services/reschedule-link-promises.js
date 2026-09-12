@@ -616,7 +616,7 @@ async function retireDeliveryUncertainty(conn, rowId) {
 // as the next sweep gets a turn first: applyContextSkip's own
 // promise_closed branch (contextFor sees the commitment is no longer open)
 // retires the flag then, exactly like the card path would have. But an
-// office Reopen (renewPromiseOnReopen) landing BEFORE that sweep bumps
+// office Reopen (renewPromiseOnOfficeVerdict) landing BEFORE that sweep bumps
 // processing_generation the moment the ledger verdict transaction commits —
 // the commitment reads 'open' again, promise_closed stops applying (the
 // commitment is no longer closed), and a row with no provider_message_id is
@@ -749,47 +749,61 @@ async function settleParkedPromiseCard(trx, item, { action, reviewedBy = null, n
     resource_type: 'triage_item', resource_id: item.id, metadata: { commitment_ids: ids, settled_ids: openIds }, critical: true, trx });
 }
 
-// Called from call-commitments.applyHumanUpdate, inside its own reopen
-// transaction, the moment a send_reschedule_link commitment is reopened —
-// the inverse of a dismiss, and (with definitive provider evidence) one of
-// only two things allowed to move this ledger's bookkeeping. An office
-// Reopen restores human_state to 'confirmed' and status to 'open', but
-// upsertCommitments' own ON CONFLICT freezes processing_generation the
-// moment ANY human_state is set (`CASE WHEN human_state IS NULL...`) — a
-// re-extraction of the same call can never bump it again, so without an
-// explicit bump here stagePromises' own NOT EXISTS predicate (a cancelled
-// row already sitting at this exact generation) keeps excluding the
-// reopened promise from every future sweep, forever (this file's own
-// `stagePromises` doc comment names the identical hole for a replacement
-// recording, which bumps this same column for an UNTOUCHED row; Reopen is
-// the human-verdict counterpart that never got the same treatment).
+// Called from call-commitments.applyHumanUpdate, inside its own reopen (or
+// confirm) transaction, the moment an office verdict puts a
+// send_reschedule_link commitment BACK into a live, staging-eligible state
+// (status 'open', human_state null/'confirmed') from a state that was not —
+// the inverse of whatever closed it, and (with definitive provider
+// evidence) one of only two things allowed to move this ledger's
+// generation/uncertainty bookkeeping. Every such verdict restores
+// human_state to 'confirmed' (Reopen also restores status to 'open'; Confirm
+// leaves status alone because it was already 'open' — see the transition
+// table in call-commitments.applyHumanUpdate), but upsertCommitments' own ON
+// CONFLICT freezes processing_generation the moment ANY human_state is set
+// (`CASE WHEN human_state IS NULL...`) — a re-extraction of the same call
+// can never bump it again, so without an explicit bump here stagePromises'
+// own NOT EXISTS predicate (a cancelled row already sitting at this exact
+// generation) keeps excluding the promise from every future sweep, forever
+// (this file's own `stagePromises` doc comment names the identical hole for
+// a replacement recording, which bumps this same column for an UNTOUCHED
+// row; an office verdict is the human counterpart that never got the same
+// treatment until Reopen's own fix — and Confirm, reviving an `edited`
+// promise the sweep already cancelled at its own generation, is the exact
+// same hole under a different button).
+//
+// `trigger` ('reopen' | 'confirm') names which verdict called this, purely
+// for the audit action and the delivered-restore fulfillment's `basis` —
+// the mechanics below are identical either way, which is the point: this is
+// the ONE place any office verdict may renew or settle this ledger, so a
+// future transition cannot silently skip the decision this function embodies.
 //
 // Delivery dedup decision: a delivered attempt is not undone by an office
-// dismiss. Rather than bump the generation and let a fresh outbox row run
-// the gauntlet down to matchingSend's body-content scan (which is scoped to
-// the CALL's own timing, not this reopen, and would still catch it — but
-// only after claiming a provider slot and re-deriving the visit), this
-// checks the one fact that actually matters — has ANY outbox row for this
-// exact commitment_id ever reached 'delivered' — directly and restores
-// 'fulfilled' immediately: no fresh generation, no new attempt ever
-// staged, zero risk of a second text. This is deliberately narrower than a
+// closing and reopening the promise around it. Rather than bump the
+// generation and let a fresh outbox row run the gauntlet down to
+// matchingSend's body-content scan (which is scoped to the CALL's own
+// timing, not this verdict, and would still catch it — but only after
+// claiming a provider slot and re-deriving the visit), this checks the one
+// fact that actually matters — has ANY outbox row for this exact
+// commitment_id ever reached 'delivered' — directly and restores
+// 'fulfilled' immediately: no fresh generation, no new attempt ever staged,
+// zero risk of a second text. This is deliberately narrower than a
 // content/time-window scan: an ambiguous 'sent' receipt, a stale
 // reschedule_log self-serve entry, or any other evidence that is not this
-// exact commitment's own definitive delivery must NOT retire the reopened
+// exact commitment's own definitive delivery must NOT retire the renewed
 // promise on the spot — only a genuine delivered receipt is the "office
 // verdict"-grade fact this function trusts, matching this file's own rule
 // that delivery, and only delivery, keeps the promise.
-async function renewPromiseOnReopen(conn, commitmentId, { reviewedBy = null } = {}) {
+async function renewPromiseOnOfficeVerdict(conn, commitmentId, { reviewedBy = null, trigger = 'reopen' } = {}) {
   const delivered = await conn('outbox_messages').where({ commitment_id: commitmentId, status: 'delivered' })
     .orderBy('created_at', 'desc').first('id', 'sent_at', 'provider_message_id');
   if (delivered) {
     await conn('call_commitments').where({ id: commitmentId }).update({
       status: 'fulfilled', fulfilled_at: new Date(), updated_at: new Date(),
       fulfillment: JSON.stringify({ kind: 'reschedule_link_delivered', strength: 'direct', record_type: 'outbox_messages', record_id: delivered.id,
-        matched_at: new Date().toISOString(), basis: 'reopen_found_prior_delivery' }),
+        matched_at: new Date().toISOString(), basis: `${trigger}_found_prior_delivery` }),
     });
     await recordAuditEvent({ actor_type: reviewedBy ? 'technician' : 'system', actor_id: reviewedBy,
-      action: 'reschedule_link_promise_reopen_already_delivered', resource_type: 'call_commitment', resource_id: commitmentId,
+      action: `reschedule_link_promise_${trigger}_already_delivered`, resource_type: 'call_commitment', resource_id: commitmentId,
       metadata: { outbox_id: delivered.id }, critical: true, trx: conn });
     return;
   }
@@ -801,7 +815,7 @@ async function renewPromiseOnReopen(conn, commitmentId, { reviewedBy = null } = 
   await conn('call_commitments').where({ id: commitmentId })
     .update({ processing_generation: conn.raw('COALESCE(processing_generation, 0) + 1'), updated_at: new Date() });
   await recordAuditEvent({ actor_type: reviewedBy ? 'technician' : 'system', actor_id: reviewedBy,
-    action: 'reschedule_link_promise_reopen_renewed', resource_type: 'call_commitment', resource_id: commitmentId,
+    action: `reschedule_link_promise_${trigger}_renewed`, resource_type: 'call_commitment', resource_id: commitmentId,
     metadata: {}, critical: true, trx: conn });
 }
 
@@ -1912,4 +1926,4 @@ async function reconcileUsedLinks(conn, now = new Date()) {
   return reconcileRows(conn, rows);
 }
 
-module.exports = { mode, selectDiscussedVisit, snapshot, stagePromises, matchingSend, claimForDispatch, runOne, sweep, withSendLock, resolveUsedLink, reconcileUsedLinks, recordLiveActivation, settleParkedPromiseCard, contextFor, fulfilPromise, markLinkUsed, renewPromiseOnReopen, retireAttemptsOnLedgerVerdict };
+module.exports = { mode, selectDiscussedVisit, snapshot, stagePromises, matchingSend, claimForDispatch, runOne, sweep, withSendLock, resolveUsedLink, reconcileUsedLinks, recordLiveActivation, settleParkedPromiseCard, contextFor, fulfilPromise, markLinkUsed, renewPromiseOnOfficeVerdict, retireAttemptsOnLedgerVerdict, humanStateBlocksPromise };
