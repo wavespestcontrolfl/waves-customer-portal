@@ -4145,7 +4145,7 @@ router.get('/', async (req, res, next) => {
     const legacyCloseoutEnabled = isEnabled('visitCloseout') && Boolean(process.env.DATA_HYGIENE_VAULT_KEY);
     for (const service of enriched) {
       service.visitCloseoutPacket = closeoutByVisit.get(service.visitId) || null;
-      service.visitCloseoutEnabled = closeoutVisitIds.has(service.visitId) || legacyCloseoutEnabled;
+      service.visitCloseoutEnabled = Boolean(service.visitCloseoutPacket) || closeoutVisitIds.has(service.visitId) || legacyCloseoutEnabled;
     }
 
     // Group by technician
@@ -4618,7 +4618,7 @@ router.get('/week', async (req, res, next) => {
           // rain-out gating) behaves identically in week view.
           scheduledDate: dateStr,
           visitId: s.visit_id || null,
-          visitCloseoutEnabled: visitCloseoutEnabled || Number(s.visit_behavior_version) >= 2,
+          visitCloseoutEnabled: Boolean(s.closeout_packet_id) || visitCloseoutEnabled || Number(s.visit_behavior_version) >= 2,
           visitCloseoutPacket: s.closeout_packet_id ? { id: s.closeout_packet_id, status: s.closeout_packet_status } : null,
         };
       }));
