@@ -1,5 +1,6 @@
-import { useState, useEffect, useMemo } from "react";
+import { useState, useEffect, useMemo, useCallback, useRef } from "react";
 import {
+  ActionFeedback,
   Button,
   Card as UiCard,
   Table,
@@ -273,6 +274,8 @@ export default function WavesSEODashboard() {
   const [cityFilter, setCityFilter] = useState("All");
   const [catFilter, setCatFilter] = useState("All");
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState("");
+  const loadSequence = useRef(0);
 
   // Real data from API
   const [aiData, setAiData] = useState(null);
@@ -281,19 +284,35 @@ export default function WavesSEODashboard() {
   const [syncing, setSyncing] = useState(false);
   const [syncMsg, setSyncMsg] = useState("");
   const canRunSeoActions = isAdminUser();
-  useEffect(() => {
+  const loadDashboard = useCallback(() => {
+    const sequence = ++loadSequence.current;
     setLoading(true);
+    setLoadError("");
     Promise.all([
-      adminFetch("/admin/seo/ai-overview").catch(() => null),
-      adminFetch("/admin/seo/rankings?days=7").catch(() => null),
-      adminFetch("/admin/seo/backlinks").catch(() => null),
-    ]).then(([ai, rank, bl]) => {
-      setAiData(ai);
-      setRankData(rank);
-      setBacklinkData(bl);
-      setLoading(false);
-    });
+      adminFetch("/admin/seo/ai-overview"),
+      adminFetch("/admin/seo/rankings?days=7"),
+      adminFetch("/admin/seo/backlinks"),
+    ])
+      .then(([ai, rank, bl]) => {
+        if (sequence !== loadSequence.current) return;
+        setAiData(ai);
+        setRankData(rank);
+        setBacklinkData(bl);
+      })
+      .catch((error) => {
+        if (sequence !== loadSequence.current) return;
+        setLoadError(error?.message || "Failed to load SEO dashboard data");
+      })
+      .finally(() => {
+        if (sequence === loadSequence.current) setLoading(false);
+      });
   }, []);
+  useEffect(() => {
+    loadDashboard();
+    return () => {
+      loadSequence.current += 1;
+    };
+  }, [loadDashboard]);
   const cities = [
     "All",
     "Bradenton",
@@ -435,6 +454,17 @@ export default function WavesSEODashboard() {
       >
         Loading SEO Command Center...
       </UiSurface>
+    );
+  }
+  if (loadError) {
+    return (
+      <ActionFeedback
+        error
+        onRetry={loadDashboard}
+        className="justify-center [padding:40px] text-center"
+      >
+        SEO dashboard unavailable: {loadError}
+      </ActionFeedback>
     );
   }
   const runSync = async () => {
