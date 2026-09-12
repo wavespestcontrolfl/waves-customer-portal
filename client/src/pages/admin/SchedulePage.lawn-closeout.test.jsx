@@ -611,6 +611,29 @@ it('a tank total survives product-area and visit-area changes', async () => {
   expect(totals()[2].value).toBe('20');
 });
 
+// The governed path: a plan row whose suggested amount is unavailable, given
+// an actual rate and gallons, keeps its dose through a plan refresh — the
+// reconciliation used to blank every derived total the plan could not express
+// (Codex r1 P1).
+it('a governed plan row keeps its tank dose through a plan refresh', async () => {
+  enableDefaults();
+  mount();
+  await waitFor(() => expect(totals()).toHaveLength(2));
+  const card = () => within(totals()[0].parentElement);
+  // The tech records what actually went out: a tank concentration.
+  fireEvent.change(card().getAllByRole('combobox')[0], { target: { value: 'fl_oz/gal' } });
+  fireEvent.change(card().getByPlaceholderText('Rate'), { target: { value: '0.8' } });
+  fireEvent.change(screen.getAllByPlaceholderText('Gal')[0], { target: { value: '25' } });
+  await waitFor(() => expect(totals()[0].value).toBe('20'));
+  fireEvent.click(screen.getByRole('button', { name: 'Refresh plan' }));
+  await waitFor(() => expect(totals()[1].value).toBe('10'));
+  expect(totals()[0].value).toBe('20');
+  expect(screen.getAllByPlaceholderText('Gal')[0].value).toBe('25');
+  fireEvent.click(await screen.findByRole('button', { name: /complete & send recap/i }));
+  await waitFor(() => expect(submit).toHaveBeenCalledOnce());
+  expect(submit.mock.calls[0][1].products[0]).toMatchObject({ rate: '0.8', rateUnit: 'fl_oz/gal', totalAmount: 20, amountUnit: 'fl_oz' });
+});
+
 it('a rate unit moving off per-gallon does not strand the tank total', async () => {
   enableDefaults();
   const added = { id: 'manual-taurus', name: 'Fixture termiticide', category: 'insecticide', default_unit: 'fl_oz/gal', default_rate: '0.8' };

@@ -43,6 +43,9 @@ import { completionDraftKey } from "../../lib/completion-drafts";
 import {
   defaultApplicationMethodForLine,
   isPerBasisUnit,
+  isPerGallonUnit,
+  isTankCalculation,
+  derivedTankTotal,
   normalizeApplicationMethod,
   resolveRatePrefill,
 } from "../../lib/product-rate-prefill";
@@ -830,25 +833,6 @@ function lawnAreaForProtocol(service) {
 export const PANEL_HISTORY_LIMIT = 6;
 export function customerPanelHistory(customerData, currentId) {
   return buildAppointmentHistory(customerData, PANEL_HISTORY_LIMIT, { currentId });
-}
-
-// A per-gallon rate ("fl_oz/gal", "oz/gal", "g/gal") is a tank concentration:
-// it becomes a real applied quantity once the tech says how many gallons of
-// mix went out — amount = rate x gallons, in the unit before the "/". Every
-// other per-basis unit (g/spot, ml/inch dbh, oz/acre) has no carrier volume
-// to multiply by and still waits for the tech's actual.
-export function isPerGallonUnit(unit) {
-  return /\/gal$/.test(String(unit || ""));
-}
-export function derivedTankTotal(rate, gallons) {
-  const r = Number(rate);
-  const g = Number(gallons);
-  if (!Number.isFinite(r) || r <= 0 || !Number.isFinite(g) || g <= 0) return "";
-  // Four decimals, matching the server's per-gallon calculator and above the
-  // three `service_products.total_amount` stores: a 0.03 fl oz/gal mix in
-  // half a gallon is 0.015, not 0.02, and small valid doses must not round
-  // to zero and render blank (Codex r1 P2).
-  return Math.round(r * g * 10000) / 10000;
 }
 
 export function derivedTotalAmount(rate, areaSqft) {

@@ -22,6 +22,34 @@ export function isPerBasisUnit(unit) {
   return u.includes("/") && !u.endsWith("/1000sf");
 }
 
+// A per-gallon rate ("fl_oz/gal", "oz/gal", "g/gal") is a tank concentration:
+// it becomes a real applied quantity once the technician says how many gallons
+// of mix went out — amount = rate x gallons, in the unit before the "/". Every
+// other per-basis unit (g/spot, ml/inch dbh, oz/acre) has no carrier volume to
+// multiply by and still waits for the technician's actual.
+// These live here, beside isPerBasisUnit, because the closeout panel AND the
+// lawn plan reconciliation both have to agree on what a tank row is: a rule
+// re-implemented per call site is what let a refresh blank a dose the tech had
+// already measured.
+export function isPerGallonUnit(unit) {
+  return /\/gal$/.test(String(unit || ""));
+}
+// Gallons the technician entered make this row's quantity an actual, not a
+// suggestion — no plan refresh, visit-area change or withdrawal may blank it.
+export function isTankCalculation(product = {}) {
+  return isPerGallonUnit(product.rateUnit) && Number(product.carrierGallons) > 0;
+}
+export function derivedTankTotal(rate, gallons) {
+  const r = Number(rate);
+  const g = Number(gallons);
+  if (!Number.isFinite(r) || r <= 0 || !Number.isFinite(g) || g <= 0) return "";
+  // Four decimals, matching the server's per-gallon calculator and above the
+  // three `service_products.total_amount` stores: a 0.03 fl oz/gal mix in half
+  // a gallon is 0.015, not 0.02, and small valid doses must not round to zero
+  // and render blank (Codex r1 P2).
+  return Math.round(r * g * 10000) / 10000;
+}
+
 // Generic "insecticide" categories cover dry/bait/packet forms too (e.g.
 // Advion WDG Granular, Delta Dust, Alpine WSG), whose inferred method
 // still falls through to perimeter_spray — a 4 oz liquid default would be
