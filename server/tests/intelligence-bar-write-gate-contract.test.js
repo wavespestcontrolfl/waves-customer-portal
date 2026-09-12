@@ -37,6 +37,9 @@ jest.mock('../services/route-optimizer', () => ({
   HQ: { lat: 27.4, lng: -82.5 },
   haversine: jest.requireActual('../services/route-optimizer').haversine,
   milesToDriveMinutes: jest.requireActual('../services/route-optimizer').milesToDriveMinutes,
+  // The route tools now run the shared window-safety guard, which scores
+  // orders with the same in-house leg model the nightly pass uses.
+  fallbackLegMetrics: jest.requireActual('../services/route-optimizer').fallbackLegMetrics,
   optimizeRoute: jest.fn(async (stops) => ({
     orderedStops: stops,
     totalDistanceMeters: 10000,

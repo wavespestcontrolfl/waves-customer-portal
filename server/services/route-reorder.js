@@ -40,7 +40,7 @@
 const db = require('../models/db');
 const logger = require('./logger');
 const { gateEnvValue } = require('../config/feature-gates');
-const { etDateString, addETDays, parseETDateTime, validCalendarDate } = require('../utils/datetime-et');
+const { etDateString, etParts, addETDays, parseETDateTime, validCalendarDate } = require('../utils/datetime-et');
 const { dayStopsQuery, guardedCoordSelects } = require('./scheduling/day-stops');
 const { toDateStr } = require('./auto-dispatch/dates');
 const { loadReminderFreeze, FREEZE_HOURS, TIER2_MIN_DAYS_OUT } = require('./auto-dispatch/route-tiers');
@@ -228,6 +228,28 @@ function withinFreezeClock(dateStr, windowStart, now) {
 }
 
 /**
+ * Simulation clock for a date that may be ALREADY IN PROGRESS — null for any
+ * date other than today, which is byte-for-byte the pre-fix behavior. Shared
+ * by every caller that can be asked to optimize "today" (the two admin
+ * optimize endpoints and the Intelligence Bar's two route tools); the nightly
+ * pass never runs today, so it passes nothing.
+ */
+function inProgressStartMin(dateStr, now = new Date()) {
+  if (dateStr !== etDateString(now)) return null;
+  const { hour, minute } = etParts(now);
+  return hour * 60 + minute;
+}
+
+/** A stop the technician has already started. The staff picker refuses to
+ *  verify a route containing one (arrival-route.js's own `own.some(...)`
+ *  check) for the same reason the guard does below: the simulation restarts
+ *  at HQ and recharges the full service, so it can move the stop being
+ *  worked or call the rest of the day infeasible. */
+function isLiveStop(stop) {
+  return ['en_route', 'on_site'].includes(stop.status);
+}
+
+/**
  * A promised window whose deadline has ALREADY PASSED relative to `startMin`
  * (the admin optimize endpoints' "today, already in progress" simulation
  * clock — see chooseWindowSafeOrder) is not a promise the chosen order can
@@ -340,6 +362,23 @@ function chooseWindowSafeOrder({
   const chronoConflict = violatesWindowChronology(googleOrder, guardStops);
   const fitConflict = !chronoConflict && violatesWindowFeasibility(RouteOptimizer, googleOrder, guardStops, legs, simStart);
   const conflict = chronoConflict ? 'WINDOW_ORDER_CONFLICT' : (fitConflict ? 'WINDOW_FIT_CONFLICT' : null);
+  // A tech-day already being driven cannot be simulated from HQ at the day
+  // open: the truck has a real position, the live stop's remaining work is
+  // unknown, and every order here would renumber it. Refuse rather than write
+  // an order computed from a fiction — the same call the staff picker's
+  // route check makes (codex round 3 P1). Only for today: startMin is null on
+  // every other date, and `status` need not even be selected there.
+  if (startMin != null && sourceStops.some(isLiveStop)) {
+    return { orderedStops: null, reason: 'LIVE_STOP_IN_PROGRESS', conflict, beforeMeters };
+  }
+  // BEFORE the legal-order return, not just before a repair: both simulations
+  // count an ungeocoded stop's travel as ZERO, so a chronologically fine order
+  // containing one can pass the feasibility guard while the unknown trip makes
+  // a later promise unreachable (codex round 3 P1). Whatever the guards said,
+  // a day we cannot simulate is a day we do not rewrite.
+  if (sourceStops.some((s) => !(parseFloat(s.lat) && parseFloat(s.lng)))) {
+    return { orderedStops: null, reason: 'COORDLESS_STOPS', conflict, beforeMeters };
+  }
   if (!chronoConflict && !fitConflict) {
     // Google's order is legal — still score it under the shared model (NOT
     // Google's own road-routed numbers) so a caller that has to AGGREGATE
@@ -367,9 +406,6 @@ function chooseWindowSafeOrder({
       gateOff: !windowFitFlagOn ? 'WINDOW_FIT' : 'CALIBRATION',
     };
   }
-  if (sourceStops.some((s) => !(parseFloat(s.lat) && parseFloat(s.lng)))) {
-    return { orderedStops: null, reason: 'COORDLESS_STOPS', conflict, beforeMeters };
-  }
   const fallback = computeWindowFitOrder(RouteOptimizer, currentOrder(guardStops), {
     effectiveWindowStart, effectiveWindowRange: guardRange, violatesWindowChronology, violatesWindowFeasibility, modelDistanceMeters,
   }, { startMin: simStart });
@@ -383,6 +419,62 @@ function chooseWindowSafeOrder({
     beforeMeters,
     afterMeters: fallback.afterMeters,
     afterSeconds: fallback.afterSeconds,
+  };
+}
+
+
+/**
+ * THE per-tech-day application of chooseWindowSafeOrder — one mechanism for
+ * every writer that hands Google a whole board and writes route_order back
+ * (the two admin optimize endpoints and the Intelligence Bar's two route
+ * tools). A promised arrival window is a promise to whichever truck drives
+ * it, so Google's flat multi-tech sequence has to be sliced into tech-days
+ * before the chronology/feasibility guards mean anything; each tech's
+ * resolved slice is substituted back into its own slots, so untouched techs
+ * and unassigned stops keep their exact positions.
+ *
+ * `orderedStops` may be trimmed optimizer objects — the guard reads its
+ * window inputs from `sourceStops` by id, and the result is returned as
+ * `orderedIds` so each caller can rebuild its own row shape.
+ *
+ * One unrepairable tech-day refuses the WHOLE request ({ refusal }) rather
+ * than half-writing another tech's fine segment.
+ */
+function resolveWindowSafeOrderByTechDay({ RouteOptimizer, orderedStops, sourceStops, googleSource, legs = null, startMin = null }) {
+  const sourceById = new Map(sourceStops.map((s) => [s.id, s]));
+  const byTech = new Map();
+  for (const s of sourceStops) {
+    if (!s.technician_id) continue;
+    if (!byTech.has(s.technician_id)) byTech.set(s.technician_id, []);
+    byTech.get(s.technician_id).push(s);
+  }
+  // Google's legs describe the FLAT sequence — they line up with a
+  // technician's extracted slice only when that slice IS the flat sequence:
+  // one tech on the call AND no unassigned stops interleaved (an unassigned
+  // stop shifts every leg after it, and the feasibility guard's length check
+  // is >=, so a longer flat list would be indexed positionally). Misaligned
+  // legs are never trusted — the guard uses the shared fallback model.
+  const legsAlign = byTech.size <= 1 && sourceStops.every((s) => s.technician_id) ? legs : null;
+  const resolvedByTech = new Map();
+  for (const [techId, techStops] of byTech) {
+    const ids = new Set(techStops.map((s) => s.id));
+    const slice = orderedStops.filter((s) => ids.has(s.id)).map((s) => sourceById.get(s.id));
+    const outcome = chooseWindowSafeOrder({
+      RouteOptimizer, googleOrder: slice, sourceStops: techStops, googleSource, legs: legsAlign, startMin,
+    });
+    if (!outcome.orderedStops) return { refusal: { technicianId: techId, ...outcome } };
+    resolvedByTech.set(techId, outcome);
+  }
+  const queues = new Map([...resolvedByTech].map(([id, o]) => [id, [...o.orderedStops]]));
+  const orderedIds = orderedStops.map((s) => {
+    const techId = sourceById.get(s.id)?.technician_id;
+    const queue = techId && queues.get(techId);
+    return queue ? queue.shift().id : s.id;
+  });
+  return {
+    orderedIds,
+    resolvedByTech,
+    anyWindowConstrained: [...resolvedByTech.values()].some((o) => o.source === 'window_constrained'),
   };
 }
 
@@ -1033,6 +1125,8 @@ async function recordSkippedTick(reason, now = new Date()) {
 }
 
 module.exports = {
+  inProgressStartMin,
+  resolveWindowSafeOrderByTechDay,
   runRouteReorder,
   runRouteReorderIfEnabled,
   runRouteRepairAfterChange,

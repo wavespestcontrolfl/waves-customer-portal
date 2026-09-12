@@ -100,9 +100,10 @@ function trxTable() {
   const filters = {};
   let idsIn = null;
   const c = {};
-  c.where = (a, b) => { if (typeof a === 'object') Object.assign(filters, a); else filters[a] = b; return c; };
+  c.where = (a, b) => { if (typeof a === 'object') Object.assign(filters, a); else filters[String(a).replace('scheduled_services.', '')] = b; return c; };
   c.whereNull = (col) => { filters[col] = null; return c; };
-  c.whereIn = (col, vals) => { if (col === 'id') idsIn = new Set(vals); return c; };
+  c.whereIn = (col, vals) => { if (String(col).endsWith('id')) idsIn = new Set(vals); return c; };
+  c.leftJoin = () => c;
   c.modify = (fn) => { fn(c); return c; };
   c.update = async (u) => { trxUpdates.push({ ...filters, ...u }); return 1; };
   // The post-lock guard-input re-read. Reads stopsByDate LIVE, so a test that
@@ -496,4 +497,85 @@ describe('round-2 in-progress clock guards', () => {
     expect(relaxed.window_start).toBeNull(); // arrival constraint relaxed
     expect(relaxed.estimated_duration_minutes).toBe(180); // work preserved
   });
+});
+
+// ── Codex round 3 ────────────────────────────────────────────────────────
+describe('round-3 guards', () => {
+  beforeEach(() => {
+    require('../services/scheduling/tech-day-lock').lockTechDays.mockImplementation(async () => {});
+    process.env.GATE_ROUTE_REORDER_WINDOW_FIT = 'true';
+    process.env.GATE_DRIVE_TIME_CALIBRATION = 'true';
+  });
+  afterEach(() => { jest.useRealTimers(); });
+
+  test("today's route with a stop already in progress is refused, not re-simulated from HQ", async () => {
+    jest.useFakeTimers({ doNotFake: ['nextTick', 'setImmediate'] });
+    jest.setSystemTime(new Date('2026-09-20T17:00:00Z')); // 13:00 ET
+    const TODAY = '2026-09-20';
+    stopsByDate[TODAY] = chronologyDay().map((s) => (s.id === 'T1' ? { ...s, status: 'on_site' } : s));
+    mockOptimizerOrder(['T2', 'T1', 'U']);
+    const { status, body } = await optimizeRoute({ technicianId: 't1' });
+    expect(status).toBe(409);
+    expect(body.reason).toBe('LIVE_STOP_IN_PROGRESS');
+    expect(body.error).toMatch(/already in progress/i);
+    expect(trxUpdates).toEqual([]);
+  });
+
+  test('the same live stop on a FUTURE date is not in progress and optimizes normally', async () => {
+    stopsByDate[DATE] = chronologyDay().map((s) => (s.id === 'T1' ? { ...s, status: 'on_site' } : s));
+    mockOptimizerOrder(['T2', 'T1', 'U']);
+    const { status, body } = await optimizeRoute({ technicianId: 't1', date: DATE });
+    expect(status).toBe(200);
+    expect(body.source).toBe('window_constrained');
+  });
+
+  test('a coordinate change between the day load and the lock aborts the write', async () => {
+    const { lockTechDays } = require('../services/scheduling/tech-day-lock');
+    stopsByDate[DATE] = [stop('A', { lng: 1, route_order: 2 }), stop('B', { lng: 2, route_order: 1 })];
+    mockOptimizerOrder(['A', 'B']);
+    // Re-geocoded in the lock gap: the order was computed for the old pin.
+    lockTechDays.mockImplementation(async () => {
+      stopsByDate[DATE] = stopsByDate[DATE].map((s) => (s.id === 'A' ? { ...s, lat: 9, lng: 9 } : s));
+    });
+    const { status, body } = await optimizeRoute({ technicianId: 't1', date: DATE });
+    expect(status).toBe(409);
+    expect(body.error).toMatch(/reload and retry/i);
+    expect(trxUpdates).toEqual([]);
+  });
+});
+
+// Round-0 codex audit P1s on the same head: a stop ADDED to the tech-day in
+// the lock gap has no position in the order about to be written, and an
+// ungeocoded stop makes the whole day unsimulatable whatever the guards said.
+test('a stop added to the tech-day between the day load and the lock aborts the write', async () => {
+  const { lockTechDays } = require('../services/scheduling/tech-day-lock');
+  process.env.GATE_ROUTE_REORDER_WINDOW_FIT = 'true';
+  process.env.GATE_DRIVE_TIME_CALIBRATION = 'true';
+  stopsByDate[DATE] = [stop('A', { lng: 1, route_order: 2 }), stop('B', { lng: 2, route_order: 1 })];
+  mockOptimizerOrder(['A', 'B']);
+  lockTechDays.mockImplementation(async () => {
+    stopsByDate[DATE] = [...stopsByDate[DATE], stop('C', { lng: 3, route_order: 3 })];
+  });
+  const { status, body } = await optimizeRoute({ technicianId: 't1', date: DATE });
+  expect(status).toBe(409);
+  expect(body.error).toMatch(/reload and retry/i);
+  expect(trxUpdates).toEqual([]);
+  lockTechDays.mockImplementation(async () => {});
+});
+
+test('an ungeocoded stop refuses the day even when Google’s order breaks no window', async () => {
+  process.env.GATE_ROUTE_REORDER_WINDOW_FIT = 'true';
+  process.env.GATE_DRIVE_TIME_CALIBRATION = 'true';
+  // Chronologically fine (A then B), but B has no pin: its travel counts as
+  // zero in both simulations, so "feasible" is not knowable.
+  stopsByDate[DATE] = [
+    stop('A', { window_start: '09:00', lng: 1, route_order: 1 }),
+    stop('B', { window_start: '13:00', lat: null, lng: null, route_order: 2 }),
+  ];
+  mockOptimizerOrder(['A', 'B']);
+  const { status, body } = await optimizeRoute({ technicianId: 't1', date: DATE });
+  expect(status).toBe(409);
+  expect(body.reason).toBe('COORDLESS_STOPS');
+  expect(body.conflict).toBeNull();
+  expect(trxUpdates).toEqual([]);
 });

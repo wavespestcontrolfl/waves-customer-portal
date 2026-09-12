@@ -14,6 +14,7 @@ const { assertAssignableTechnician, applyAssignable } = require('../technician-e
 const { scheduledServiceTrackTokenExpiry } = require('../track-token-expiry');
 const { etDateString, addETDays, validScheduleDate, sameDayWindowElapsed } = require('../../utils/datetime-et');
 const { dayStopsQuery, guardedCoordSelects } = require('../scheduling/day-stops');
+const { resolveWindowSafeOrderByTechDay, inProgressStartMin } = require('../route-reorder');
 const { probeSlotOverlap, slotOverlapWarning } = require('../scheduling/window-rules');
 
 const SCHEDULE_TOOLS = [
@@ -354,6 +355,15 @@ async function applyApprovedRouteOrder({ date, approvedIds, services, lockKeys, 
   };
 }
 
+
+/** Operator-facing copy for each refusal the shared window guard returns. */
+function routeGuardMessage(reason) {
+  if (reason === 'WINDOW_FIT_GATE_OFF') return 'The shortest route breaks a promised arrival window and the window-fit repair is off — nothing was changed.';
+  if (reason === 'LIVE_STOP_IN_PROGRESS') return 'A stop on this route is already in progress — reorder it once that visit is complete.';
+  if (reason === 'COORDLESS_STOPS') return 'A stop on this route has no map location, so its arrival window cannot be verified — nothing was changed.';
+  return 'No legal stop order keeps every promised arrival window — nothing was changed.';
+}
+
 async function optimizeAllRoutes(input) {
   const { date, confirmed } = input;
   let RouteOptimizer;
@@ -408,6 +418,25 @@ async function optimizeAllRoutes(input) {
     })),
     { startLat: RouteOptimizer.HQ.lat, startLng: RouteOptimizer.HQ.lng, endAtStart: true },
   );
+
+  // Window safety BEFORE anything is proposed — the approved card is applied
+  // verbatim later, so an illegal order must never reach it.
+  // Window safety BEFORE anything is proposed — the approved card is applied
+  // verbatim later, so an illegal order must never reach it. Same shared
+  // per-tech-day resolver the admin optimize buttons and the nightly pass use
+  // (codex #4430 r3 P1: these two tools were the third writer still applying
+  // Google's raw order).
+  const guarded = resolveWindowSafeOrderByTechDay({
+    RouteOptimizer, orderedStops: result.orderedStops, sourceStops: stopsWithCoords,
+    googleSource: result.source, legs: result.legs, startMin: inProgressStartMin(date),
+  });
+  if (guarded.refusal) {
+    return { blocked: true, date, reason: guarded.refusal.reason, conflict: guarded.refusal.conflict,
+      technician_id: guarded.refusal.technicianId,
+      message: routeGuardMessage(guarded.refusal.reason) };
+  }
+  const optimizedById = new Map(result.orderedStops.map((s) => [s.id, s]));
+  result.orderedStops = guarded.orderedIds.map((id) => optimizedById.get(id));
 
   const savedMiles = Math.max(0, Math.round((result.unoptimizedDistanceMeters - result.totalDistanceMeters) / 1609.34));
   const savedPct = result.unoptimizedDistanceMeters > 0
@@ -536,6 +565,17 @@ async function optimizeTechRoute(input) {
     })),
     { startLat: RouteOptimizer.HQ.lat, startLng: RouteOptimizer.HQ.lng, endAtStart: true },
   );
+
+  const guarded = resolveWindowSafeOrderByTechDay({
+    RouteOptimizer, orderedStops: result.orderedStops, sourceStops: stopsWithCoords,
+    googleSource: result.source, legs: result.legs, startMin: inProgressStartMin(date),
+  });
+  if (guarded.refusal) {
+    return { blocked: true, date, tech: tech.name, reason: guarded.refusal.reason,
+      conflict: guarded.refusal.conflict, message: routeGuardMessage(guarded.refusal.reason) };
+  }
+  const optimizedById = new Map(result.orderedStops.map((s) => [s.id, s]));
+  result.orderedStops = guarded.orderedIds.map((id) => optimizedById.get(id));
 
   const savedMiles = Math.max(0, Math.round((result.unoptimizedDistanceMeters - result.totalDistanceMeters) / 1609.34));
 
