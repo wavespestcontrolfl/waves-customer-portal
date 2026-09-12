@@ -9,6 +9,7 @@ import {
   TH,
   THead,
   TR,
+  UiSurface,
 } from "../../components/ui";
 const API_BASE = import.meta.env.VITE_API_URL || "/api";
 function adminFetch(path) {
@@ -390,7 +391,11 @@ export default function WavesPPCDashboard() {
     );
   }
   return (
-    <div className="text-zinc-800">
+    // AdsPage and AdminLayoutV2 provide no UiSurface, so without this the
+    // migrated Button, Badge, TH and TD primitives resolve the legacy context
+    // default — 11px badges and headings and legacy control sizing. Wrapped at
+    // this page, the migrated unit, rather than higher.
+    <UiSurface className="text-zinc-800">
       {" "}
       {/* Header */}
       <div className="[margin-bottom:24px]">
@@ -582,7 +587,7 @@ export default function WavesPPCDashboard() {
                   <div className="ppc-kpi-grid-4 grid max-sm:!grid-cols-2 [grid-template-columns:repeat(4,1fr)] [gap:12px]">
                     {" "}
                     <div>
-                      <div className="text-ui-body font-medium text-zinc-900">
+                      <div className="text-22 font-medium text-zinc-900">
                         {fmtMoney(sp)}
                       </div>
                       <div className="text-ui-body text-ink-secondary">
@@ -590,7 +595,7 @@ export default function WavesPPCDashboard() {
                       </div>
                     </div>{" "}
                     <div>
-                      <div className="text-ui-body font-medium text-green-700">
+                      <div className="text-22 font-medium text-green-700">
                         {fmtMoney(rv)}
                       </div>
                       <div className="text-ui-body text-ink-secondary">
@@ -598,7 +603,7 @@ export default function WavesPPCDashboard() {
                       </div>
                     </div>{" "}
                     <div>
-                      <div className="text-ui-body font-medium text-zinc-900">
+                      <div className="text-22 font-medium text-zinc-900">
                         {ld}
                       </div>
                       <div className="text-ui-body text-ink-secondary">
@@ -606,7 +611,7 @@ export default function WavesPPCDashboard() {
                       </div>
                     </div>{" "}
                     <div>
-                      <div className="text-ui-body font-medium text-zinc-900">
+                      <div className="text-22 font-medium text-zinc-900">
                         {sp > 0 ? (rv / sp).toFixed(1) + "x" : "--"}
                       </div>
                       <div className="text-ui-body text-ink-secondary">
@@ -820,7 +825,7 @@ export default function WavesPPCDashboard() {
                   <div className="ppc-funnel-stats max-sm:!grid-cols-3 [padding-top:12px] [margin-top:12px] grid [grid-template-columns:repeat(3,1fr)] [gap:12px] text-center border-t border-hairline border-zinc-200">
                     {" "}
                     <div>
-                      <div className="text-ui-body font-medium text-zinc-900">
+                      <div className="text-18 font-medium text-zinc-900">
                         {fmt(funnelData.totalLeads)}
                       </div>
                       <div className="text-ui-body text-ink-secondary">
@@ -828,7 +833,7 @@ export default function WavesPPCDashboard() {
                       </div>
                     </div>{" "}
                     <div>
-                      <div className="text-ui-body font-medium text-green-700">
+                      <div className="text-18 font-medium text-green-700">
                         {fmtMoney(funnelData.totalRevenue)}
                       </div>
                       <div className="text-ui-body text-ink-secondary">
@@ -840,7 +845,7 @@ export default function WavesPPCDashboard() {
                         style={{
                           color: funnelData.roas >= 2 ? "#15803D" : "#A16207",
                         }}
-                        className="text-ui-body font-medium"
+                        className="text-18 font-medium"
                       >
                         {funnelData.roas}x
                       </div>
@@ -1031,6 +1036,6 @@ export default function WavesPPCDashboard() {
           )}
         </div>
       )}
-    </div>
+    </UiSurface>
   );
 }
