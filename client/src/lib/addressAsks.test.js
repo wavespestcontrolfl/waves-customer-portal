@@ -8,6 +8,17 @@ import {
 } from './addressAsks';
 
 const ask = (reason_code, payload = null, call_log_id = null) => ({ reason_code, payload, call_log_id });
+const lowerPriorityReasons = [
+  ...ADDRESS_ASK_REASONS,
+  ...ADDRESS_READBACK_REASONS,
+].filter((reason) => reason !== 'on_file_proof_customer_mismatch');
+const mismatchPriorityCases = lowerPriorityReasons.flatMap((reason) => (
+  [true, false].flatMap((sameCall) => ([true, false].map((mismatchFirst) => ({
+    reason,
+    sameCall,
+    mismatchFirst,
+  }))))
+));
 
 describe('filterAddressAsks', () => {
   it('keeps validation-ask cards only', () => {
@@ -51,6 +62,21 @@ describe('addressAskNotice', () => {
     expect(notice.reason).toContain('different customer');
   });
 
+  it.each(mismatchPriorityCases)(
+    'customer-mismatched proof outranks $reason (sameCall=$sameCall, mismatchFirst=$mismatchFirst)',
+    ({ reason, sameCall, mismatchFirst }) => {
+      const mismatch = ask('on_file_proof_customer_mismatch', null, 'call-a');
+      const other = ask(reason, {
+        address_as_heard: 'lower-priority evidence',
+        unit_ask_building: { street_line_1: '100 Test Harbor Drive' },
+      }, sameCall ? 'call-a' : 'call-b');
+      const notice = addressAskNotice(mismatchFirst ? [mismatch, other] : [other, mismatch]);
+
+      expect(notice).toMatchObject({ unitOnly: false, readbackOnly: false, heard: null, building: null });
+      expect(notice.reason).toContain('different customer');
+    },
+  );
+
   it('a same-call unit ask and recovery cannot hide customer-mismatched address proof', () => {
     const notice = addressAskNotice([
       ask('missing_unit_number', null, 'call-a'),
@@ -65,9 +91,6 @@ describe('addressAskNotice', () => {
   it('keeps customer-mismatch copy when the estimate panel passes validation-only cards', () => {
     const notice = addressAskNotice(filterAddressAsks([
       ask('address_unverified', { address_as_heard: 'generic hold' }, 'call-a'),
-      ask('missing_unit_number', {
-        unit_ask_building: { street_line_1: '100 Test Harbor Drive' },
-      }, 'call-a'),
       ask('on_file_proof_customer_mismatch', null, 'call-a'),
       ask('address_recovered', { address_as_heard: 'retired from estimate panel' }, 'call-a'),
     ]));

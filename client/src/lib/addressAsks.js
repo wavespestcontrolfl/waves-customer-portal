@@ -69,10 +69,12 @@ export function filterAddressConfirmations(items) {
 export function addressAskNotice(asks) {
   const open = filterAddressConfirmations(asks);
   if (open.length === 0) return null;
-  // Worst class first: an address that did not validate outranks one that
-  // validated but still owes a read-back, which outranks a known building
-  // missing only its unit. The chosen card is the one the copy speaks for.
+  // Worst class first: saved-address proof for a DIFFERENT customer outranks
+  // every generic validation result, regardless of which card carries richer
+  // evidence. A generic failure then outranks an owed read-back, which
+  // outranks a known building missing only its unit.
   const rank = (i) => {
+    if (i.reason_code === 'on_file_proof_customer_mismatch') return -1;
     if (i.reason_code === 'missing_unit_number') return 2;
     if (ADDRESS_READBACK_REASONS.has(i.reason_code)) return 1;
     return 0;

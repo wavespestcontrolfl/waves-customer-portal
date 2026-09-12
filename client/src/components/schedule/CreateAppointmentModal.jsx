@@ -80,7 +80,13 @@ function adminFetch(path, options = {}) {
 // a customer is first selected (or changed), the prior result cannot be used
 // and `pending` is true before the effect has had a chance to run. A failed
 // read settles fail-open, matching this warning's advisory contract.
-export function useAddressAskLookup(customerId, fetcher = adminFetch) {
+export const ADDRESS_ASK_LOOKUP_TIMEOUT_MS = 10_000;
+
+export function useAddressAskLookup(
+  customerId,
+  fetcher = adminFetch,
+  timeoutMs = ADDRESS_ASK_LOOKUP_TIMEOUT_MS,
+) {
   const customerKey = customerId == null ? '' : String(customerId);
   const [lookup, setLookup] = useState({ customerId: '', status: 'idle', notice: null });
 
@@ -90,20 +96,46 @@ export function useAddressAskLookup(customerId, fetcher = adminFetch) {
       return undefined;
     }
     let cancelled = false;
+    let settled = false;
+    let timeout;
+    const controller = new AbortController();
     setLookup({ customerId: customerKey, status: 'loading', notice: null });
+    const settleError = () => {
+      if (cancelled || settled) return;
+      settled = true;
+      clearTimeout(timeout);
+      setLookup({ customerId: customerKey, status: 'error', notice: null });
+    };
+    timeout = setTimeout(() => {
+      controller.abort();
+      settleError();
+    }, timeoutMs);
     // active = open OR in_progress: a card the office already claimed is
     // still an owed callback.
-    fetcher(`/admin/triage?status=active&customer_id=${encodeURIComponent(customerKey)}`)
+    let request;
+    try {
+      request = fetcher(
+        `/admin/triage?status=active&customer_id=${encodeURIComponent(customerKey)}`,
+        { signal: controller.signal },
+      );
+    } catch {
+      settleError();
+    }
+    Promise.resolve(request)
       .then((data) => {
-        if (!cancelled) {
+        if (!cancelled && !settled) {
+          settled = true;
+          clearTimeout(timeout);
           setLookup({ customerId: customerKey, status: 'ready', notice: addressAskNotice(data?.items) });
         }
       })
-      .catch(() => {
-        if (!cancelled) setLookup({ customerId: customerKey, status: 'error', notice: null });
-      });
-    return () => { cancelled = true; };
-  }, [customerKey, fetcher]);
+      .catch(settleError);
+    return () => {
+      cancelled = true;
+      clearTimeout(timeout);
+      controller.abort();
+    };
+  }, [customerKey, fetcher, timeoutMs]);
 
   const resultIsCurrent = lookup.customerId === customerKey;
   return {
