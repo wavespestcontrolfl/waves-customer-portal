@@ -209,3 +209,29 @@ test('a co-visit target contributes its real estimate, not its normalized window
   // 50 + 60 = 110 and push this to 10:50.
   expect(target20.departure).toBe('10:10');
 });
+
+// Codex #4435 round 4 P1: a grouped (memberIds) row already carries its
+// members' ADDITIVE work as its duration. Treating it as having no real
+// estimate let a co-visit merge charge max(group, target) instead of their
+// sum, certifying a placement that does not fit.
+test('a grouped allocation contributes its summed work to a co-visit chain', () => {
+  const sameProperty = (id, over = {}) => stop(id, '09:00', 27.545, {
+    customer_id: 'cust_1', service_address_line1: '100 Main St',
+    customer_address_line1: '100 Main St', customer_city: 'Bradenton', customer_zip: '34205',
+    visit_id: null, ...over,
+  });
+  const grouped = sameProperty('allocation', {
+    memberIds: ['m1', 'm2'], estimated_duration_minutes: 30, route_order: 1,
+  });
+  const ctx = {
+    date: DATE, now: new Date(), grouped: false,
+    target: sameProperty('target', { estimated_duration_minutes: 45 }),
+    rows: [grouped],
+  };
+  const fit = evaluateArrivalPlacement(ctx, { windowStart: '09:00', windowEnd: '10:00', durationMinutes: 45 });
+  const target = fit.arrivals.find((s) => s.id === 'target');
+  expect(fit.feasible).toBe(true);
+  // 09:00 + max(60-minute span, 30 + 45) = 10:15, not the 10:00 that
+  // dropping the group's own 30 minutes would give.
+  expect(target.departure).toBe('10:15');
+});

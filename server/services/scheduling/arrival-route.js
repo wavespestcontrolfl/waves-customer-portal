@@ -15,6 +15,17 @@ const { currentOrder, effectiveWindowRange, simulateArrivalRoute, workDuration }
 const { SHIFT, capacityEnabled, placementFitsShift } = require('./policy');
 const { allocationKey, occupiedRows } = require('./visit-capacity');
 
+/** The customer's primary premise, aliased the way effectivePremise (and
+ *  stampedAddressDiverges) expect. Every query that feeds the co-visit merge
+ *  selects these. */
+const CUSTOMER_PREMISE_ALIASES = [{
+  customer_address_line1: 'customers.address_line1',
+  customer_address_line2: 'customers.address_line2',
+  customer_city: 'customers.city',
+  customer_state: 'customers.state',
+  customer_zip: 'customers.zip',
+}];
+
 const COLUMNS = [
   'id', 'customer_id', 'technician_id', 'scheduled_date', 'window_start', 'window_end',
   'estimated_duration_minutes', 'status', 'route_order', 'created_at', 'visit_id',
@@ -57,7 +68,13 @@ async function loadArrivalRouteContext({
     : await conn('scheduled_services')
     .leftJoin('customers', 'scheduled_services.customer_id', 'customers.id')
     .where('scheduled_services.id', serviceId)
-    .first(...COLUMNS.map(c => `scheduled_services.${c}`), ...serviceLocationSelects(conn));
+    .first(...COLUMNS.map(c => `scheduled_services.${c}`), ...serviceLocationSelects(conn),
+      // The co-visit merge resolves an UNSTAMPED row's premise from the
+      // customer's primary address, and serviceLocationSelects exposes it as
+      // `address_line1`, not the customer_address_* keys effectivePremise
+      // reads — so an unstamped target never merged with its sibling and the
+      // staff path kept charging the phantom duration (codex #4435 r4 P1).
+      ...CUSTOMER_PREMISE_ALIASES);
   if (!stored) return null;
   const techId = technicianId === undefined
     ? (Object.prototype.hasOwnProperty.call(changes, 'technician_id') ? changes.technician_id : stored.technician_id)
@@ -70,6 +87,8 @@ async function loadArrivalRouteContext({
       customer_address_line1: customer?.address_line1, customer_city: customer?.city, customer_zip: customer?.zip,
       customer_latitude: customer?.latitude, customer_longitude: customer?.longitude });
     Object.assign(target, { lat: geo?.lat ?? null, lng: geo?.lng ?? null,
+      customer_address_line1: customer?.address_line1, customer_city: customer?.city,
+      customer_state: customer?.state, customer_zip: customer?.zip,
       address_line1: target.service_address_line1 || customer?.address_line1,
       city: target.service_address_city || customer?.city,
       state: target.service_address_state || customer?.state, zip: target.service_address_zip || customer?.zip });
@@ -84,15 +103,9 @@ async function loadArrivalRouteContext({
     dateStr: date,
     excludeStatuses: NOT_A_ROUTE_STOP_STATUSES,
     select: [...COLUMNS.map(c => `scheduled_services.${c}`), ...guardedCoordSelects(conn),
-      // The customer's primary premise: an unstamped row inherits it, and the
-      // co-visit merge compares EFFECTIVE addresses (Codex #4435 r3 P1).
-      {
-        customer_address_line1: 'customers.address_line1',
-        customer_address_line2: 'customers.address_line2',
-        customer_city: 'customers.city',
-        customer_state: 'customers.state',
-        customer_zip: 'customers.zip',
-      }],
+      // An unstamped row inherits the customer's premise, and the co-visit
+      // merge compares EFFECTIVE addresses (codex #4435 r3 P1).
+      ...CUSTOMER_PREMISE_ALIASES],
   }).where(q => q.whereNull('scheduled_services.reservation_expires_at')
       .orWhereRaw('scheduled_services.reservation_expires_at > NOW()'));
   const blocks = capacityEnabled() || preserveCapacity ? await conn('tech_schedule_blocks')
@@ -243,7 +256,12 @@ function evaluateArrivalPlacement(context, { windowStart, windowEnd, durationMin
         // A row that already carries its raw estimate (the target above)
         // keeps it — only ordinary rows take theirs from the untouched
         // column before the normalization below.
-        raw_estimate_minutes: row.memberIds ? null
+        // A grouped row already carries its members' ADDITIVE work as its
+        // duration (groupRouteStops / visit-capacity); nulling its raw
+        // estimate let a co-visit merge charge max(group, target) instead of
+        // their sum (codex #4435 r4 P1). Ordinary rows take theirs from the
+        // untouched column, and a row that already carries one keeps it.
+        raw_estimate_minutes: row.memberIds ? row.estimated_duration_minutes
           : ('raw_estimate_minutes' in row ? row.raw_estimate_minutes : row.estimated_duration_minutes),
         estimated_duration_minutes: row.memberIds ? row.estimated_duration_minutes : workDuration(row) })), {
         origin, startMin, dayEndMin, includeReturnInFinish: capacity, bufferMinutes,

@@ -110,7 +110,14 @@ beforeEach(() => {
         leftJoin: () => c,
         select: async () => (stopsByDate[filters.scheduled_date] || [])
           .filter((s) => s.technician_id === filters.technician_id)
-          .map((s) => ({ id: s.id, window_start: s.window_start, time_window: s.time_window, estimated_duration_minutes: s.estimated_duration_minutes, auto_dispatch_locked: s.auto_dispatch_locked, auto_dispatch_excluded: s.auto_dispatch_excluded, route_order: s.route_order, lat: s.lat, lng: s.lng })),
+          .map((s) => ({ id: s.id, window_start: s.window_start, time_window: s.time_window, estimated_duration_minutes: s.estimated_duration_minutes, auto_dispatch_locked: s.auto_dispatch_locked, auto_dispatch_excluded: s.auto_dispatch_excluded, route_order: s.route_order, lat: s.lat, lng: s.lng,
+            // Same projection the day load selects — the commit fence hashes
+            // the effective premise (customer fallback included).
+            window_end: s.window_end, visit_id: s.visit_id, customer_id: s.customer_id,
+            service_address_line1: s.service_address_line1, service_address_line2: s.service_address_line2,
+            service_address_city: s.service_address_city, service_address_zip: s.service_address_zip,
+            customer_address_line1: s.customer_address_line1, customer_address_line2: s.customer_address_line2,
+            customer_city: s.customer_city, customer_state: s.customer_state, customer_zip: s.customer_zip })),
         update: async (u) => { attempted.push({ id: filters.id, ...u }); return 1; },
       };
       return c;

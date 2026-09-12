@@ -134,7 +134,14 @@ beforeEach(() => {
           // Unchanged tech-day: mirror the loaded stops for this date+tech.
           return (stopsByDate[filters.scheduled_date] || [])
             .filter((s) => s.technician_id === filters.technician_id)
-            .map((s) => ({ id: s.id, window_start: s.window_start, window_end: s.window_end, visit_id: s.visit_id, time_window: s.time_window, estimated_duration_minutes: s.estimated_duration_minutes, auto_dispatch_locked: s.auto_dispatch_locked, auto_dispatch_excluded: s.auto_dispatch_excluded, route_order: s.route_order, lat: s.lat, lng: s.lng }));
+            .map((s) => ({ id: s.id, window_start: s.window_start, window_end: s.window_end, visit_id: s.visit_id, time_window: s.time_window, estimated_duration_minutes: s.estimated_duration_minutes, auto_dispatch_locked: s.auto_dispatch_locked, auto_dispatch_excluded: s.auto_dispatch_excluded, route_order: s.route_order, lat: s.lat, lng: s.lng,
+              // The commit fence hashes the EFFECTIVE premise, so the live
+              // read projects the same columns the day load selected.
+              service_address_line1: s.service_address_line1, service_address_line2: s.service_address_line2,
+              service_address_city: s.service_address_city, service_address_zip: s.service_address_zip,
+              customer_id: s.customer_id,
+              customer_address_line1: s.customer_address_line1, customer_address_line2: s.customer_address_line2,
+              customer_city: s.customer_city, customer_state: s.customer_state, customer_zip: s.customer_zip }));
         },
         update: async (u) => { attempted.push({ id: filters.id, ...u }); return 1; },
       };
@@ -938,6 +945,26 @@ test('commit-time revalidation: a premise re-stamp mid-run rolls back (it is a m
     { id: 'A', window_start: '09:00', route_order: 2, lat: 1, lng: 1, service_address_line1: '100 Main St' },
     { id: 'B', window_start: '09:00', route_order: 1, lat: 1, lng: 3, service_address_line1: '100 Main St', service_address_line2: 'Apt 2' },
     { id: 'C', window_start: '09:00', route_order: 3, lat: 1, lng: 2, service_address_line1: '100 Main St' },
+  ];
+  const res = await runRouteReorder({ now: NOW });
+  expect(res.applied).toBe(0);
+  expect(trxUpdates).toEqual([]);
+  const ledger = JSON.parse(ledgerInserts[0].result);
+  expect(ledger.skips).toContainEqual(expect.objectContaining({ date: '2026-08-18', reason: 'STALE_TECH_DAY' }));
+});
+
+// ── Codex #4435 round 4 ──────────────────────────────────────────────────
+// isCoVisitPair resolves an UNSTAMPED row's premise from the customer's
+// primary address, so that address is a merge input: edited mid-run it
+// changes the workload the order was certified against, while every stamped
+// column and coordinate stays exactly where it was.
+test('commit-time revalidation: a CUSTOMER address change mid-run rolls back', async () => {
+  stopsByDate['2026-08-18'] = backtrackDay('', { customer_address_line1: '100 Main St' });
+  liveRowsOverride = [
+    { id: 'A', window_start: '09:00', route_order: 2, lat: 1, lng: 1, customer_address_line1: '100 Main St' },
+    // Re-stamped on the customer record — the service rows are untouched.
+    { id: 'B', window_start: '09:00', route_order: 1, lat: 1, lng: 3, customer_address_line1: '200 Oak Ave' },
+    { id: 'C', window_start: '09:00', route_order: 3, lat: 1, lng: 2, customer_address_line1: '100 Main St' },
   ];
   const res = await runRouteReorder({ now: NOW });
   expect(res.applied).toBe(0);

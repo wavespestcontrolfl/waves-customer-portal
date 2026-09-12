@@ -43,6 +43,7 @@ const { gateEnvValue } = require('../config/feature-gates');
 const { etDateString, addETDays, parseETDateTime, validCalendarDate } = require('../utils/datetime-et');
 const { dayStopsQuery, guardedCoordSelects } = require('./scheduling/day-stops');
 const { toDateStr } = require('./auto-dispatch/dates');
+const { effectiveServiceAddress } = require('./stamped-address');
 const { loadReminderFreeze, FREEZE_HOURS, TIER2_MIN_DAYS_OUT } = require('./auto-dispatch/route-tiers');
 const { computeWindowFitOrder, effectiveWindowRange, currentOrder, computeChronologicalRepair, workDuration, isCoVisitPair, advanceCoVisit, startCoVisitChain } = require('./route-reorder-window-fit');
 
@@ -624,14 +625,34 @@ async function runRouteReorder(opts = {}, conn = db) {
                   'scheduled_services.customer_id',
                   'scheduled_services.service_address_line1', 'scheduled_services.service_address_line2',
                   'scheduled_services.service_address_city', 'scheduled_services.service_address_zip',
+                  // The customer's primary premise too — an unstamped row's
+                  // merge identity lives there.
+                  { customer_address_line1: 'customers.address_line1',
+                    customer_address_line2: 'customers.address_line2',
+                    customer_city: 'customers.city',
+                    customer_state: 'customers.state',
+                    customer_zip: 'customers.zip' },
                   'scheduled_services.route_order', ...guardedCoordSelects(trx));
               const num = (v) => (v == null || v === '' ? null : parseFloat(v));
               // Full guard-input signature: window RANGE + service duration —
               // the chronology AND feasibility guards were evaluated against
               // these, so any mid-run change invalidates the order.
-              const premise = (s) => [s.service_address_line1, s.service_address_line2,
-                s.service_address_city, s.service_address_zip]
-                .map((v) => String(v ?? '').trim().toLowerCase()).join(',');
+              // The EFFECTIVE premise, not the bare stamp: isCoVisitPair
+              // resolves an unstamped row through the customer's primary
+              // address, so a customer address edited mid-run changes the
+              // merge identity while every stamped column stays put (codex
+              // #4435 r4 P1).
+              const premise = (s) => {
+                const eff = effectiveServiceAddress(s, {
+                  address_line1: s.customer_address_line1,
+                  address_line2: s.customer_address_line2,
+                  city: s.customer_city,
+                  state: s.customer_state,
+                  zip: s.customer_zip,
+                });
+                return [eff.line1, eff.line2, eff.city, eff.zip]
+                  .map((v) => String(v ?? '').trim().toLowerCase()).join(',');
+              };
               const windowSig = (s) => {
                 const r = effectiveWindowRange(s);
                 const dur = workDuration(s, repair ? 0 : 60);
