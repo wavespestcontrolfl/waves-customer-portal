@@ -119,6 +119,20 @@ describe('missing tracking stages', () => {
     }] });
     for (const result of unknown.thresholds) expect(result.missing_promise_visits).toBe(1);
   });
+  test('a window replaced before the threshold and then completed is still missing coverage (round-9 P1)', () => {
+    // The early-completion exception must not resurrect a window the visit
+    // no longer held: known at 08:00, replaced by an unknown-window notice
+    // at 09:20, completed 09:30, threshold 09:45.
+    const report = replay({ synthetic: true, from: '2026-09-10T07:00:00-04:00', to: '2026-09-10T23:00:00-04:00', visits: [{
+      id: 'visit', initial: visit, outcome: 'on_time',
+      promises: [
+        { start_at: '2026-09-10T09:00:00-04:00', communicated_at: '2026-09-09T12:00:00-04:00', source: 'message' },
+        { start_at: null, communicated_at: '2026-09-10T09:20:00-04:00', source: 'message' },
+      ],
+      events: [{ at: '2026-09-10T09:30:00-04:00', patch: { status: 'completed' } }],
+    }] });
+    for (const result of report.thresholds) expect(result.missing_promise_visits).toBe(1);
+  });
   test('coverage is measured at the decision points, not from the final state at `to` (round-4 P1)', () => {
     // The promise is communicated AFTER the visit is already completed, but
     // before the export window closes. Every production tick that could have

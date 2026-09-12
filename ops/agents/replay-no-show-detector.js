@@ -69,10 +69,13 @@ function replayVisit(item, { from, to, threshold }) {
       // 09:30 against a 09:00 window never needed a decision at all, and
       // counting it as missing evidence inflated the very denominator the
       // rollout report is read for (codex P2 round 9).
-      if (start != null) {
-        if (at >= start + threshold * 60000) covered = true;
-        else knownBeforeThreshold = true;
-      }
+      // Recomputed every tick, never latched: a known window held early and
+      // then REPLACED by an unknown-window notice leaves the visit with
+      // nothing usable, and a latched flag would let the earlier window
+      // vouch for coverage the visit no longer had when it completed (codex
+      // P1 round 9, guarding the round-8 rule this exception sits beside).
+      knownBeforeThreshold = start != null && at < start + threshold * 60000;
+      if (start != null && at >= start + threshold * 60000) covered = true;
     } else if (!covered && knownBeforeThreshold) covered = true;
     const alert = evaluateNoShow({ visit: state, promise, now, stage1Minutes: threshold });
     if (!alert) continue;
