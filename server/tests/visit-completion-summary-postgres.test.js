@@ -3462,6 +3462,39 @@ postgres('visit summary recipient recovery', () => {
     }
   });
 
+  test('a blocked or bounced review email is not evidence the ask was sent', async () => {
+    // The library's dedupe set answers "would a re-send duplicate?", which is
+    // true for blocked/dropped/bounced — none of which reached the customer.
+    // Marking those sent would advance the cadence and spend the ask
+    // allowance on an email nobody received.
+    const Review = require('../services/review-request');
+    const askId = randomUUID();
+    const sequenceId = randomUUID();
+    const key = `review_seq:${sequenceId}:0`;
+    await mockPg('review_requests').insert({ id: askId, customer_id: fixture.customerId, service_record_id: fixture.recordIds[0],
+      status: 'sending', token: randomUUID().replace(/-/g, ''), claimed_at: new Date(), channel: 'email',
+      triggered_by: 'sequence', sequence_id: sequenceId, sequence_step: 0 });
+    const row = { id: askId, sequence_id: sequenceId, sequence_step: 0, channel: 'email' };
+    try {
+      for (const status of ['blocked', 'dropped', 'bounced']) {
+        await mockPg('email_messages').where({ idempotency_key: key }).del();
+        await mockPg('email_messages').insert({ idempotency_key: key, status,
+          recipient_email_snapshot: fixture.primaryEmail, template_key: 'review.outreach' });
+        expect(await Review._emailSendEvidence(row)).toEqual({ found: false });
+      }
+      // Delivery — or a recipient ACTION on the delivered mail — is evidence.
+      for (const status of ['delivered', 'opened', 'unsubscribed']) {
+        await mockPg('email_messages').where({ idempotency_key: key }).del();
+        await mockPg('email_messages').insert({ idempotency_key: key, status,
+          recipient_email_snapshot: fixture.primaryEmail, template_key: 'review.outreach' });
+        expect(await Review._emailSendEvidence(row)).toEqual({ found: true });
+      }
+    } finally {
+      await mockPg('email_messages').where({ idempotency_key: key }).del();
+      await mockPg('review_requests').where({ id: askId }).del();
+    }
+  });
+
   test('a payer-to-payer handoff moves the office review to the payer that owes it now', async () => {
     // The stamp, the packet error and the open alert all name the AP account
     // the office must bill; a second payer taking the packet over has to move

@@ -314,6 +314,16 @@ const INLINE_EMAIL_RETRY_WINDOW_MS = 30 * 24 * 60 * 60 * 1000;
 // The semantics live with the transport (sendgrid-mail.js).
 const isDefiniteProviderRejection = (err) => require("./sendgrid-mail").isDefiniteRejection(err);
 
+// What an email_messages status proves about the ASK, which is not the same
+// question the library's dedupe set answers (Codex #4311 r41 P1).
+// Delivered, or acted on by the recipient — the ask reached them.
+const EMAIL_DELIVERY_EVIDENCE = new Set([
+  "sent", "delivered", "opened", "clicked", "unsubscribed", "spam_report", "spamreport", "complained",
+]);
+// Terminal non-delivery: the provider refused or the mailbox rejected it, so
+// the customer never received the ask and nothing may be marked sent.
+const EMAIL_NON_DELIVERY_EVIDENCE = new Set(["blocked", "dropped", "bounced", "bounce"]);
+
 // Where the stranded-send sweep stopped last run, so successive runs rotate
 // through the whole backlog instead of re-reading the same unresolvable head.
 let strandedSweepCursor = null;
@@ -3154,6 +3164,18 @@ const ReviewService = {
     const message = await db("email_messages").where({ idempotency_key: key }).first("status", "queued_at", "error_message");
     if (!message) return { found: false };
     const EmailLib = require("./email-template-library");
+    // EXPLICIT positive evidence only (Codex #4311 r41 P1). The library's
+    // dedupe set answers a different question — "would a re-send be a
+    // duplicate?" — and it includes blocked, dropped and bounced, none of
+    // which reached the customer. Treating those as proof marked the ask sent
+    // and advanced the cadence, spending the customer's ask allowance on an
+    // email they never received. A recipient ACTION (open, click,
+    // unsubscribe, spam report) is delivery evidence; a terminal
+    // non-delivery is a positive none, so the claim is released and ordinary
+    // suppression decides whether anything is tried again.
+    const status = String(message.status || "").toLowerCase();
+    if (EMAIL_DELIVERY_EVIDENCE.has(status)) return { found: true };
+    if (EMAIL_NON_DELIVERY_EVIDENCE.has(status)) return { found: false };
     if (!EmailLib.shouldRetryExistingMessage(message)) return { found: true };
     // A row the library would send again is not proof of no send: a failed
     // or stale queued row can follow a lost response after acceptance, and
