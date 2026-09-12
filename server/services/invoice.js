@@ -3291,6 +3291,36 @@ const InvoiceService = {
         }
       }
 
+      // A linked visit scheduled for TODAY that has not actually happened yet
+      // (the office invoice picker's whole point — texting a pay link before
+      // the technician arrives, P1 #4131 pre-push audit) must not fall through
+      // to invoice_sent's "...completed on {service_date}" claim just because
+      // "today" isn't "future". Date alone can't tell completed from open on
+      // the service date itself — only the visit's own status can. Reuses the
+      // SAME null-tolerant isLiveVisitStatus predicate as the closeout
+      // resolver (never a second status list) so this can't drift from what
+      // "still open" means elsewhere. Never checked for a future/past date:
+      // future already selects pre-service copy on the date alone, and a
+      // past-dated linked visit reaching send is completed by every existing
+      // invariant, so a status lookup there would be a no-op at best.
+      let linkedVisitOpenToday = false;
+      if (serviceDateIsTodayET && invoice.scheduled_service_id) {
+        try {
+          const { isLiveVisitStatus } = require("./invoice-issued-closeout");
+          const linkedVisit = await db("scheduled_services")
+            .where({ id: invoice.scheduled_service_id })
+            .first("status");
+          linkedVisitOpenToday = isLiveVisitStatus(linkedVisit?.status);
+        } catch (err) {
+          // Unknown beats a false "completed" claim: a lookup failure defaults
+          // to the pre-service copy (no completion assertion either way)
+          // rather than risking invoice_sent's "...completed on {date}" text
+          // reaching a customer who has not been visited yet.
+          logger.warn(`[invoice] Linked visit status lookup failed for ${invoiceId}: ${err.message}`);
+          linkedVisitOpenToday = true;
+        }
+      }
+
       // Annual-prepay invoices use a dedicated, coverage-aware template — the
       // generic invoice_sent copy ("...completed on {service_date}") misframes a
       // full year of prepaid visits as a single completed service. Resolve the
@@ -3341,15 +3371,21 @@ const InvoiceService = {
           }, tplOpts);
         }
         // Upfront invoices — the setup + first-application invoice auto-sent at
-        // estimate acceptance, or any invoice billed before its service date —
-        // must not use the generic "...completed on {service_date}" copy, which
-        // asserts a not-yet-performed service AND prints a future date. A service
-        // date still in the future selects a pre-service variant with no completion
-        // claim and no date placeholder. Gated on the same base `invoice` kill
-        // switch as the prepay variant (a disabled invoice_sent skips this too,
-        // keeping the invoice retryable); a missing/disabled variant row falls
-        // through to the standard copy below so the send is never blocked.
-        if (!body && serviceDateIsFutureET && invoiceSmsActive) {
+        // estimate acceptance, or any invoice billed before its service has
+        // happened — must not use the generic "...completed on {service_date}"
+        // copy, which asserts a not-yet-performed service AND prints a date
+        // the reader would read as already past. A service date still in the
+        // future selects the pre-service variant on the date alone; a service
+        // date of TODAY selects it too when the linked visit hasn't completed
+        // (linkedVisitOpenToday, above) — the office invoice picker's whole
+        // point is billing a visit before the technician arrives, and date
+        // alone can't distinguish that from a same-day visit that already
+        // ran (P1 #4131 pre-push audit). Gated on the same base `invoice`
+        // kill switch as the prepay variant (a disabled invoice_sent skips
+        // this too, keeping the invoice retryable); a missing/disabled
+        // variant row falls through to the standard copy below so the send
+        // is never blocked.
+        if (!body && (serviceDateIsFutureET || linkedVisitOpenToday) && invoiceSmsActive) {
           body = await templates.getTemplate("invoice_sent_upfront", {
             first_name: customer.first_name || "",
             service_type: serviceType,
