@@ -198,7 +198,7 @@ function FunnelBar({
       <div className="[width:80px] text-ui-body font-medium text-right shrink-0 text-ink-secondary">
         {label}
       </div>{" "}
-      <div className="[flex:1] [height:26px] bg-zinc-100 rounded-sm overflow-hidden relative">
+      <div data-qa="metric-bar-track" className="[flex:1] min-w-0 [height:26px] bg-zinc-100 rounded-sm overflow-hidden relative">
         {" "}
         <div
           data-qa="metric-bar-fill"
@@ -209,15 +209,15 @@ function FunnelBar({
           }}
           className="[height:100%] rounded-sm transition-all"
         />{" "}
-        <span
-          data-qa="metric-bar-value"
-          data-metric={metric}
-          className={`absolute [right:8px] [top:50%] [transform:translateY(-50%)] text-ui-body font-medium ${alert ? "text-alert-fg" : "text-zinc-800"}`}
-        >
-          {prefix}
-          {fmt(value)}
-        </span>{" "}
       </div>{" "}
+      <span
+        data-qa="metric-bar-value"
+        data-metric={metric}
+        className={`w-[88px] shrink-0 break-words text-right text-ui-body font-medium ${alert ? "text-alert-fg" : "text-zinc-800"}`}
+      >
+        {prefix}
+        {fmt(value)}
+      </span>{" "}
     </div>
   );
 }
@@ -230,6 +230,8 @@ function DonutChart({
   metric,
 }) {
   const total = segments.reduce((s, seg) => s + seg.value, 0);
+  // Preserve the complete currency amount when it would outgrow the ring.
+  const largeCenterValue = String(centerValue ?? "").length > 10;
   let cumAngle = -90;
   const paths = segments.map((seg, i) => {
     const angle = total > 0 ? (seg.value / total) * 360 : 0;
@@ -272,7 +274,8 @@ function DonutChart({
         <div
           data-qa="donut-center-value"
           data-metric={metric}
-          className="text-22 font-medium text-zinc-800"
+          style={{ maxWidth: size - 2 * thickness - 12 }}
+          className={`${largeCenterValue ? "text-14" : "text-22"} break-words font-medium text-zinc-800`}
         >
           {centerValue}
         </div>{" "}
@@ -381,10 +384,10 @@ export default function WavesPPCDashboard() {
     return Object.values(map).sort((a, b) => b.revenue - a.revenue);
   }, [campaigns]);
   const serviceColors = {
-    "Pest Control": "#D4D4D8",
-    "Lawn Care": "#E4E4E7",
-    Mosquito: "#A1A1AA",
-    Termite: "#D4D4D8",
+    "Pest Control": "#18181B",
+    "Lawn Care": "#3F3F46",
+    Mosquito: "#71717A",
+    Termite: "#52525B",
   };
   const activeCampaigns = campaigns.filter((c) => c.status === "active").length;
   if (loading) {
@@ -518,7 +521,7 @@ export default function WavesPPCDashboard() {
                     maxValue={
                       Math.max(...serviceBreakdown.map((x) => x.revenue)) * 1.1
                     }
-                    color={serviceColors[s.service] || "#D4D4D8"}
+                    color={serviceColors[s.service] || "#71717A"}
                     prefix="$"
                     metric="revenue"
                   />
@@ -540,7 +543,7 @@ export default function WavesPPCDashboard() {
                       maxValue={
                         Math.max(...serviceBreakdown.map((x) => x.spent)) * 1.1
                       }
-                      color={serviceColors[s.service] || "#D4D4D8"}
+                      color={serviceColors[s.service] || "#71717A"}
                       prefix="$"
                     />
                   ))}
@@ -840,15 +843,7 @@ export default function WavesPPCDashboard() {
                         label={stage.replace(/_/g, " ")}
                         value={count}
                         maxValue={funnelData.totalLeads || 1}
-                        color={
-                          stage === "completed"
-                            ? "#D4D4D8"
-                            : stage === "booked"
-                              ? "#D4D4D8"
-                              : stage === "lost"
-                                ? "#FEE2E2"
-                                : "#D4D4D8"
-                        }
+                        color={stage === "lost" ? "#C8312F" : "#71717A"}
                         alert={stage === "lost"}
                       />
                     ))}

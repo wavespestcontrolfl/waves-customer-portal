@@ -30,7 +30,7 @@ const campaigns = [
   // The dashboard's existing platform split recognizes these legacy/manual
   // campaign_type keys. Keep the synced Google Ads SEARCH row above as well:
   // this visual QA must not hide the production-sync normalization mismatch.
-  { ...campaign, id: 2, campaign_name: 'Venice Pest Control', platform: 'manual', campaign_type: 'google_search' },
+  { ...campaign, id: 2, campaign_name: 'Venice Pest Control', platform: 'manual', campaign_type: 'google_search', target_area: 'Venice' },
   {
     ...campaign,
     id: 3,
@@ -43,13 +43,31 @@ const campaigns = [
     last30d: { spend: 750, conversionValue: 3200, conversions: 26, clicks: 120, impressions: 2800 },
   },
 ];
+const lowRoasCampaigns = campaigns.map((item) => {
+  const ratio = item.id === 2 ? 1.5 : item.id === 1 ? 0.5 : 0.8;
+  return {
+    ...item,
+    last7d: { ...item.last7d, conversionValue: item.last7d.spend * ratio },
+    last30d: { ...item.last30d, conversionValue: item.last30d.spend * ratio },
+  };
+});
 
-function fixture(api, method, { emptyCampaigns = false } = {}) {
-  if (api === '/admin/ads/campaigns') return { campaigns: emptyCampaigns ? [] : campaigns };
+function fixture(api, method, { emptyCampaigns = false, largeRevenue = false, lowRoas = false } = {}) {
+  if (api === '/admin/ads/campaigns') {
+    return { campaigns: emptyCampaigns ? [] : lowRoas ? lowRoasCampaigns : campaigns };
+  }
   if (api === '/admin/ads/funnel?period=30d') {
-    return { funnel: { lead: 75, booked: 52, completed: 41 }, totalLeads: 75, totalRevenue: 9000, roas: 4.5 };
+    return lowRoas
+      ? { funnel: { lead: 75, booked: 52, completed: 41, lost: 10 }, totalLeads: 75, totalRevenue: 3000, roas: 1.5 }
+      : { funnel: { lead: 75, booked: 52, completed: 41 }, totalLeads: 75, totalRevenue: 9000, roas: 4.5 };
   }
   if (api === '/admin/ads/revenue-attribution?period=month') {
+    if (largeRevenue) {
+      return { totalRevenue: 1000000, sources: [{ source: 'Google Ads', revenue: 750000, roas: 4.2 }, { source: 'Local Service Ads', revenue: 250000, roas: 5.1 }] };
+    }
+    if (lowRoas) {
+      return { totalRevenue: 3000, sources: [{ source: 'Google Ads', revenue: 2000, roas: 0.5 }, { source: 'Local Service Ads', revenue: 1000, roas: 1.5 }] };
+    }
     return { totalRevenue: 9000, sources: [{ source: 'Google Ads', revenue: 6500, roas: 4.2 }, { source: 'Local Service Ads', revenue: 2500, roas: 5.1 }] };
   }
   if (api === '/admin/ads/call-bridge?period=30d') return { summary: { total: 0, ready: 0, ambiguous: 0, unmatched: 0 }, matches: [] };
@@ -66,6 +84,12 @@ async function main() {
   const report = { ...evidence(root), requests: [], fallbackFixtures: [], consoleErrors: [], pageErrors: [], screenshots: [], geometry: [] };
   let server;
   let browser;
+
+  async function assertMetric(locator, text, color) {
+    await locator.waitFor();
+    assert.equal((await locator.textContent()).trim(), text);
+    assert.equal(await locator.evaluate((element) => getComputedStyle(element).color), color);
+  }
 
   async function openPage(width, fixtureOptions = {}) {
     const page = await browser.newPage({ viewport: { width, height: 1000 }, timezoneId: 'America/New_York', serviceWorkers: 'block' });
@@ -98,7 +122,7 @@ async function main() {
     return page;
   }
 
-  async function verify(page, name) {
+  async function verify(page, name, { adaptiveDonut = false, semanticRoas = false } = {}) {
     await waitForFonts(page);
     await page.locator('#admin-main').evaluate((element) => element.scrollTo({ top: 0, left: 0, behavior: 'instant' }));
     await page.waitForTimeout(150);
@@ -116,8 +140,30 @@ async function main() {
         .map((node) => ({ name: node.getAttribute('aria-label') || node.textContent.trim().slice(0, 60), height: node.getBoundingClientRect().height }))
         .filter((item) => item.height < 43.5);
       const dashboard = rootElement.querySelector('[data-qa="ppc-dashboard"]');
-      const donutCenterSizes = dashboard
-        ? [...dashboard.querySelectorAll('[data-qa="donut-center-value"]')].filter(visible).map((node) => parseFloat(getComputedStyle(node).fontSize))
+      const donutCenters = dashboard
+        ? [...dashboard.querySelectorAll('[data-qa="donut-center-value"]')].filter(visible).map((node) => {
+          const chart = node.closest('.relative');
+          const svg = chart.querySelector('svg');
+          const svgRect = svg.getBoundingClientRect();
+          const strokeWidth = Number(svg.querySelector('path')?.getAttribute('stroke-width') || 0);
+          const innerRadius = svgRect.width / 2 - strokeWidth;
+          const center = { x: svgRect.left + svgRect.width / 2, y: svgRect.top + svgRect.height / 2 };
+          const textRects = [node, node.nextElementSibling].flatMap((element) => {
+            const range = document.createRange();
+            range.selectNodeContents(element);
+            return [...range.getClientRects()];
+          });
+          const corners = textRects.flatMap((rect) => [
+            [rect.left, rect.top], [rect.right, rect.top],
+            [rect.left, rect.bottom], [rect.right, rect.bottom],
+          ]);
+          const maxCornerDistance = Math.max(...corners.map(([x, y]) => Math.hypot(x - center.x, y - center.y)));
+          return {
+            text: node.textContent.trim(), fontSize: parseFloat(getComputedStyle(node).fontSize),
+            textRects: textRects.map((rect) => ({ width: rect.width, height: rect.height })),
+            innerRadius, maxCornerDistance, fits: maxCornerDistance <= innerRadius + 0.5,
+          };
+        })
         : [];
       const revenueMetrics = dashboard
         ? [...dashboard.querySelectorAll('[data-metric="revenue"]')].filter(visible).map((node) => ({ text: node.textContent.trim(), color: getComputedStyle(node).color }))
@@ -136,22 +182,47 @@ async function main() {
         const [lighter, darker] = [luminance(a), luminance(b)].sort((left, right) => right - left);
         return (lighter + 0.05) / (darker + 0.05);
       };
+      const opaqueBackground = (node) => {
+        let current = node;
+        while (current) {
+          const color = getComputedStyle(current).backgroundColor;
+          const channels = color.match(/[\d.]+/g)?.map(Number) || [];
+          if (channels.length >= 3 && (channels.length === 3 || channels[3] > 0)) return color;
+          current = current.parentElement;
+        }
+        return 'rgb(255, 255, 255)';
+      };
       const barContrasts = dashboard
         ? [...dashboard.querySelectorAll('[data-qa="metric-bar"]')].filter(visible).map((bar) => {
-          const valueColor = getComputedStyle(bar.querySelector('[data-qa="metric-bar-value"]')).color;
+          const value = bar.querySelector('[data-qa="metric-bar-value"]');
+          const valueColor = getComputedStyle(value).color;
+          const valueBackground = opaqueBackground(value);
           const fillColor = getComputedStyle(bar.querySelector('[data-qa="metric-bar-fill"]')).backgroundColor;
-          return { valueColor, fillColor, ratio: contrast(valueColor, fillColor) };
+          const trackColor = getComputedStyle(bar.querySelector('[data-qa="metric-bar-track"]')).backgroundColor;
+          return {
+            valueColor, valueBackground, fillColor, trackColor,
+            valueRatio: contrast(valueColor, valueBackground),
+            fillTrackRatio: contrast(fillColor, trackColor),
+          };
         })
         : [];
-      return { smallText, shortControls, donutCenterSizes, revenueMetrics, roasMetrics, barContrasts, overflow: document.documentElement.scrollWidth > innerWidth + 1, titleSize: parseFloat(getComputedStyle(rootElement.querySelector('h1')).fontSize) };
+      return { smallText, shortControls, donutCenters, revenueMetrics, roasMetrics, barContrasts, overflow: document.documentElement.scrollWidth > innerWidth + 1, titleSize: parseFloat(getComputedStyle(rootElement.querySelector('h1')).fontSize) };
     });
     report.geometry.push({ name, viewport: page.viewportSize(), ...result });
     assert.deepEqual(result.smallText, [], `${name}: readable text below 14px`);
     assert.deepEqual(result.shortControls, [], `${name}: controls below 44px`);
-    assert.ok(result.donutCenterSizes.every((size) => size === 22), `${name}: donut center value below 22px`);
+    assert.ok(result.donutCenters.every((center) => center.fits), `${name}: donut center overlaps ring ${JSON.stringify(result.donutCenters)}`);
+    if (adaptiveDonut) {
+      assert.ok(result.donutCenters.every((center) => center.fontSize >= 14), `${name}: adaptive donut text below 14px ${JSON.stringify(result.donutCenters)}`);
+    } else {
+      assert.ok(result.donutCenters.every((center) => center.fontSize === 22), `${name}: normal donut center value is not 22px ${JSON.stringify(result.donutCenters)}`);
+    }
     assert.ok(result.revenueMetrics.every((metric) => ['rgb(24, 24, 27)', 'rgb(39, 39, 42)'].includes(metric.color)), `${name}: non-zinc revenue metric ${JSON.stringify(result.revenueMetrics)}`);
-    assert.ok(result.roasMetrics.every((metric) => ['rgb(24, 24, 27)', 'rgb(39, 39, 42)', 'rgb(82, 82, 91)'].includes(metric.color)), `${name}: non-zinc normal ROAS metric ${JSON.stringify(result.roasMetrics)}`);
-    assert.ok(result.barContrasts.every((bar) => bar.ratio >= 4.5), `${name}: metric bar contrast below 4.5 ${JSON.stringify(result.barContrasts)}`);
+    if (!semanticRoas) {
+      assert.ok(result.roasMetrics.every((metric) => ['rgb(24, 24, 27)', 'rgb(39, 39, 42)', 'rgb(82, 82, 91)'].includes(metric.color)), `${name}: non-zinc normal ROAS metric ${JSON.stringify(result.roasMetrics)}`);
+    }
+    assert.ok(result.barContrasts.every((bar) => bar.fillTrackRatio >= 3), `${name}: metric fill/track contrast below 3 ${JSON.stringify(result.barContrasts)}`);
+    assert.ok(result.barContrasts.every((bar) => bar.valueRatio >= 4.5), `${name}: metric value/background contrast below 4.5 ${JSON.stringify(result.barContrasts)}`);
     assert.equal(result.overflow, false, `${name}: page overflow`);
     assert.equal(result.titleSize, 22, `${name}: page title size`);
     const file = path.join(output, `${name}.png`);
@@ -207,6 +278,42 @@ async function main() {
       await mobile.waitForTimeout(150);
       await verify(mobile, `ppc-${section.toLowerCase().replaceAll(' ', '-')}-390`);
     }
+
+    for (const width of [1440, 390]) {
+      const large = await openPage(width, { largeRevenue: true });
+      await large.goto(`${server.baseUrl}/admin/ppc`);
+      await large.getByRole('heading', { name: 'Waves PPC command center', level: 2 }).waitFor();
+      await large.locator('#admin-main').getByRole('button', { name: 'Funnel & Attribution', exact: true }).last().evaluate((element) => element.click());
+      await large.getByText('$1,000,000.00', { exact: true }).waitFor();
+      await verify(large, `ppc-dashboard-large-donut-${width}`, { adaptiveDonut: true });
+      const largeGeometry = report.geometry.find((entry) => entry.name === `ppc-dashboard-large-donut-${width}`);
+      const largeCenter = largeGeometry.donutCenters.find((center) => center.text === '$1,000,000.00');
+      assert.ok(largeCenter, `${width}: exact seven-digit donut total missing`);
+      assert.ok(largeCenter.fontSize >= 14 && largeCenter.fits, `${width}: seven-digit donut total does not fit ${JSON.stringify(largeCenter)}`);
+    }
+
+    const lowDesktop = await openPage(1440, { lowRoas: true });
+    await lowDesktop.goto(`${server.baseUrl}/admin/ppc`);
+    await lowDesktop.getByRole('heading', { name: 'Waves PPC command center', level: 2 }).waitFor();
+    await assertMetric(lowDesktop.locator('[data-qa="ppc-dashboard"] [data-metric="roas"]').first(), '1.0x', 'rgb(153, 27, 27)');
+    await verify(lowDesktop, 'ppc-dashboard-low-roas-overview-1440', { semanticRoas: true });
+    await lowDesktop.locator('#admin-main').getByRole('button', { name: 'Campaigns', exact: true }).last().evaluate((element) => element.click());
+    await assertMetric(lowDesktop.getByRole('row').filter({ hasText: 'Bradenton Pest Control' }).locator('[data-metric="roas"]'), '0.5x', 'rgb(153, 27, 27)');
+    await assertMetric(lowDesktop.getByRole('row').filter({ hasText: 'Venice Pest Control' }).locator('[data-metric="roas"]'), '1.5x', 'rgb(161, 98, 7)');
+    await verify(lowDesktop, 'ppc-dashboard-low-roas-campaigns-1440', { semanticRoas: true });
+    await lowDesktop.locator('#admin-main').getByRole('button', { name: 'Funnel & Attribution', exact: true }).last().evaluate((element) => element.click());
+    await assertMetric(lowDesktop.locator('[data-qa="ppc-dashboard"] [data-metric="roas"]').first(), '1.5x', 'rgb(161, 98, 7)');
+    await assertMetric(lowDesktop.getByText('0.5x ROAS', { exact: true }), '0.5x ROAS', 'rgb(82, 82, 91)');
+    await verify(lowDesktop, 'ppc-dashboard-low-roas-funnel-1440', { semanticRoas: true });
+
+    const lowMobile = await openPage(390, { lowRoas: true });
+    await lowMobile.goto(`${server.baseUrl}/admin/ppc`);
+    await lowMobile.getByRole('heading', { name: 'Waves PPC command center', level: 2 }).waitFor();
+    await assertMetric(lowMobile.locator('[data-qa="ppc-dashboard"] [data-metric="roas"]').first(), '1.0x', 'rgb(153, 27, 27)');
+    await verify(lowMobile, 'ppc-dashboard-low-roas-overview-390', { semanticRoas: true });
+    await lowMobile.locator('#admin-main').getByRole('button', { name: 'Funnel & Attribution', exact: true }).last().evaluate((element) => element.click());
+    await assertMetric(lowMobile.locator('[data-qa="ppc-dashboard"] [data-metric="roas"]').first(), '1.5x', 'rgb(161, 98, 7)');
+    await verify(lowMobile, 'ppc-dashboard-low-roas-funnel-390', { semanticRoas: true });
 
     for (const width of [1440, 390]) {
       const empty = await openPage(width, { emptyCampaigns: true });
