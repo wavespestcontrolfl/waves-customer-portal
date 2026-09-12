@@ -12332,7 +12332,11 @@ export function CompletionPanel({
     invalidateGeneratedReportOnTypedEdit();
     setSelectedProducts(current => current.map(product => follows(product)
       ? { ...product, areaValue: lawnVisitArea,
-        totalAmount: product.totalAmountManual ? product.totalAmount : lawnDerivedTotal(product, lawnVisitArea) } : product));
+        // A per-gallon row's quantity comes from the tank, not the visit
+        // area: the area still follows, the dose stays (audit P1).
+        totalAmount: product.totalAmountManual || isPerGallonUnit(product.rateUnit)
+          ? product.totalAmount
+          : lawnDerivedTotal(product, lawnVisitArea) } : product));
   }, [lawnDefaultsEnabled, lawnVisitArea, selectedProducts]);
   useEffect(() => {
     if (!completionImprovements || !isLawn) return;
@@ -14950,8 +14954,11 @@ export function CompletionPanel({
           // quantity (Codex r1 P1).
           if (!p.totalAmountManual) next.totalAmount = "";
         } else if (!next.totalAmountManual) {
-          if (isPerGallonUnit(next.rateUnit)
-            && ["rate", "rateUnit", "carrierGallons"].includes(field)) {
+          // Any edit on a per-gallon row: its total is the tank dose, full
+          // stop. Scoping this to rate/unit/gallons let a treated-area edit
+          // fall through to the per-1,000 derivation, which is blank for a
+          // per-basis unit and erased a valid tank total (audit P1).
+          if (isPerGallonUnit(next.rateUnit)) {
             // A DERIVED tank dose is always in the rate's base unit — never
             // a hand-picked one: 0.8 fl_oz/gal x 30 is 24 fl oz, and letting
             // it recompute under a chosen "gal" would deduct the wrong

@@ -591,6 +591,26 @@ it('a new product seeds from the tank owner, not a detached row', async () => {
   expect(totals()[4].value).toBe('100');
 });
 
+// A tank dose comes from the tank, not the square footage: neither a typed
+// product area nor a visit-area refresh may erase it (audit P1).
+it('a tank total survives product-area and visit-area changes', async () => {
+  enableDefaults();
+  const added = { id: 'manual-taurus', name: 'Fixture termiticide', category: 'insecticide', default_unit: 'fl_oz/gal', default_rate: '0.8' };
+  render(<CompletionPanel service={service} products={[...catalog, added]} onClose={() => {}} onSubmit={submit} />);
+  await waitFor(() => expect(totals()).toHaveLength(2), { timeout: 5000 });
+  fireEvent.change(screen.getByPlaceholderText('Search products...'), { target: { value: added.name } });
+  fireEvent.click(screen.getByText(added.name));
+  await waitFor(() => expect(totals()).toHaveLength(3));
+  fireEvent.change(screen.getAllByPlaceholderText('Gal')[0], { target: { value: '25' } });
+  await waitFor(() => expect(totals()[2].value).toBe('20'));
+  const card = () => within(totals()[2].parentElement);
+  fireEvent.change(card().getByPlaceholderText('Sq ft'), { target: { value: '1000' } });
+  expect(totals()[2].value).toBe('20');
+  fireEvent.change(screen.getByLabelText('Area for this visit (sq ft)'), { target: { value: '4000' } });
+  await waitFor(() => expect(totals()[0].value).toBe('12'));
+  expect(totals()[2].value).toBe('20');
+});
+
 it('a rate unit moving off per-gallon does not strand the tank total', async () => {
   enableDefaults();
   const added = { id: 'manual-taurus', name: 'Fixture termiticide', category: 'insecticide', default_unit: 'fl_oz/gal', default_rate: '0.8' };
