@@ -1595,7 +1595,12 @@ async function handlePaymentIntentSucceeded(paymentIntent, eventCreated = null) 
     // see it", and both wrong answers move or strand money. Let it throw so
     // Stripe redelivers, the way the statement rail handles an unresolved
     // lookup.
-    ? await db('payments').where({ stripe_payment_intent_id: piId, status: 'processing' }).first('id')
+    // `paid` counts too (local audit P0): the settle path flips the payments
+    // row before the invoice, so a replay after a failed invoice write finds
+    // this PI already `paid`. Reading only `processing` there would quarantine
+    // a charge WE already own and leave the invoice stuck `processing`
+    // forever. Either status means this settlement is ours to finish.
+    ? await db('payments').where({ stripe_payment_intent_id: piId }).whereIn('status', ['processing', 'paid']).first('id')
     : null;
   if (invoiceForTenderGuard && !savedCardAttemptForTenderGuard && !processingPaymentForIntent
     && invoiceWithdrawnFromCustomer(invoiceForTenderGuard)) {

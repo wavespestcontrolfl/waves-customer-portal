@@ -4432,6 +4432,23 @@ const ReviewService = {
       // A sequence step keeps its step-stable idempotency key, so it stays ok.
       return { ok: false, terminal: true, channel: "email", requestId: request.id, reason: "email_sent_unrecorded" };
     }
+    // A manual EMAIL ask has no retry owner (local audit P1): processScheduled
+    // selects sms/null channels only and the sequence worker owns nothing
+    // here, so parking it as pending-with-a-schedule promises a retry that
+    // never comes and leaves a queued row in the way. Report it terminally
+    // instead — the operator decides whether to re-send once the summary
+    // settles.
+    const manualEmailWithoutRetryOwner = manageRetryVia !== "sequence"
+      && !request?.sequence_id
+      && !require("./visit-completion-summary").PACKET_OWNED_REVIEW_TRIGGERS.includes(request?.triggered_by);
+    if (summaryBlock && manualEmailWithoutRetryOwner
+      && ["VISIT_SUMMARY_UNCERTAIN", "VISIT_SUMMARY_STATE_UNAVAILABLE"].includes(summaryBlock.code)) {
+      await db("review_requests").where({ id: request.id, status: "pending" })
+        .update({ status: "failed", scheduled_for: null })
+        .catch((bookErr) => logger.error(`[review] terminal bookkeeping for a manual email ask failed (requestId=${request?.id}): ${bookErr.message}`));
+      logger.warn(`[review] manual review email not sent: the visit summary is unsettled (requestId=${request?.id} code=${summaryBlock.code}) — no automatic retry owns this ask`);
+      return { ok: false, terminal: true, channel: "email", requestId: request?.id, reason: "visit_summary_unsettled" };
+    }
     if (summaryBlock?.code === "REVIEW_CLAIM_LOST") {
       logger.warn(`[review] outreach email handoff found the claim taken by another sender (requestId=${request?.id})`);
       return { ok: false, retryable: false, claimLost: true, channel: "email", requestId: request?.id, reason: "review_claim_lost" };
