@@ -4341,7 +4341,16 @@ const ReviewService = {
    * reconciliation, and no caller may reset it.
    */
   async _providerOutcomeUnknown(requestId) {
-    const row = await db("review_requests").where({ id: requestId }).first("status").catch(() => null);
+    // A FAILED read is "unknown", not "released" (local audit): returning
+    // false here is indistinguishable from a row that moved on, and the
+    // caller would then reset a still-`sending` request and send a second
+    // ask on top of one the provider already accepted. Unreadable state
+    // keeps the claim standing for the reconciliation to judge.
+    const row = await db("review_requests").where({ id: requestId }).first("status")
+      .catch((err) => {
+        logger.error(`[review] could not read the claim state (requestId=${requestId}): ${err.message} — treating the provider outcome as unknown`);
+        return { status: "sending" };
+      });
     return row?.status === "sending";
   },
 
