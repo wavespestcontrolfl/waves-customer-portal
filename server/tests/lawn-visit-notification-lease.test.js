@@ -74,10 +74,10 @@ describe('sendAssessmentNotification lease check', () => {
     expect(updates).toEqual([]);
   });
 
-  test('other send failures are still swallowed as before', async () => {
-    NotificationDispatcher.notify.mockRejectedValueOnce(new Error('carrier down'));
+  test('a throw out of the dispatcher happened before any handoff, so the claim comes back', async () => {
+    NotificationDispatcher.notify.mockRejectedValueOnce(new Error('prefs lookup failed'));
     await expect(LawnIntel.sendAssessmentNotification('a-1')).resolves.toBeNull();
-    // The claim stands: the dispatcher may already have put a text on the wire.
-    expect(updates.map(([, f]) => f.notification_sent)).toEqual([true]);
+    // Provider failures arrive in the result; a throw means nothing was sent.
+    expect(updates.map(([, f]) => f.notification_sent)).toEqual([true, false]);
   });
 });

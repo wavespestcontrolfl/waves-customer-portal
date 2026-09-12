@@ -66,7 +66,10 @@ const deferred = () => { let resolve; const promise = new Promise((r) => { resol
         generateServiceReport: jest.fn((id) => update(id, { report_auto_generated: true })),
         trackAssessmentCompletion: jest.fn(async () => ({})),
       },
-      KnowledgeBridge: { generateAssessmentRecommendations: jest.fn((id) => update(id, { recommendations: JSON.stringify({ summary: 'Fixture summary' }) })) },
+      KnowledgeBridge: {
+        generateAssessmentRecommendations: jest.fn((id) => update(id, { recommendations: JSON.stringify({ summary: 'Fixture summary' }) })),
+        treatmentGuard: { isGenerationInFlight: jest.fn(async () => false) },
+      },
     };
   }
   const deliver = (id, deps) => deliverConfirmedAssessment({ assessmentId: id }, deps);
@@ -281,6 +284,37 @@ const deferred = () => { let resolve; const promise = new Promise((r) => { resol
     await expect(deliver(assessment.id, deps)).rejects.toMatchObject({ code: 'LAWN_DELIVERY_STEP_INCOMPLETE' });
     expect(deps.LawnIntel.generateServiceReport).toHaveBeenCalledTimes(1);
     expect((await db.knex('lawn_assessments').where({ id: assessment.id }).first()).report_auto_generated).toBe(true);
+  });
+
+  test('a run whose recommendations are still generating waits instead of delivering', async () => {
+    const assessment = await seed();
+    const deps = dependencies();
+    deps.KnowledgeBridge.treatmentGuard.isGenerationInFlight.mockResolvedValueOnce(true);
+    expect(await deliver(assessment.id, deps)).toMatchObject({ skipped: 'generation_in_flight' });
+    expect(deps.LawnIntel.sendAssessmentNotification).not.toHaveBeenCalled();
+    expect(deps.KnowledgeBridge.generateAssessmentRecommendations).not.toHaveBeenCalled();
+    // The claim is handed back, so the next sweep can pick the run up at once.
+    expect((await stored(assessment.id)).pipeline_claimed_at).toBeNull();
+    expect(await deliver(assessment.id, deps)).toMatchObject({ gaps: [] });
+  });
+
+  test('never-attempted runs are swept before ones that keep failing', async () => {
+    await db.knex('lawn_assessment_runs').update({ pipeline_completed_at: db.knex.fn.now() });
+    const failing = [];
+    for (let i = 0; i < 2; i += 1) {
+      const older = await seed();
+      await db.knex('lawn_assessments').where({ id: older.id }).update({ confirmed_at: db.knex.raw("clock_timestamp() - interval '2 days'") });
+      await runs.claimPipeline(older.id, db.knex);
+      await expire(older.id);
+      failing.push(older.id);
+    }
+    const fresh = await seed();
+    const deliver = jest.fn(async () => ({ done: [], gaps: [] }));
+    const result = await sweepAbandonedDeliveries({ knex: db.knex, limit: 1, deliver });
+    expect(result).toMatchObject({ candidates: 1 });
+    // Oldest-first alone would have picked a poison row ahead of this one.
+    expect(deliver.mock.calls.map(([arg]) => arg.assessmentId)).toEqual([fresh.id]);
+    expect(failing).toHaveLength(2);
   });
 
   test('an ungated environment counts recovery candidates and sends nothing', async () => {

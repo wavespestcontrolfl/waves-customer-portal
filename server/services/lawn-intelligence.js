@@ -214,6 +214,7 @@ const LawnIntelligence = {
   // dispatcher call; recovery passes its lease check so a worker that lost
   // ownership mid-step never sends.
   async sendAssessmentNotification(assessmentId, options) {
+    let claimed = false;
     try {
       const assessment = await db('lawn_assessments').where({ id: assessmentId, confirmed_by_tech: true }).first();
       // service_id set → the visit's completion text carries the report link.
@@ -246,6 +247,7 @@ const LawnIntelligence = {
       // time. At-most-once is the right side to fail on here: the report is in
       // the portal either way, and a duplicate text is not retractable.
       if (!(await claimNotificationSend(assessmentId))) return null;
+      claimed = true;
       const NotificationDispatcher = require('./notification-dispatcher');
       const result = await NotificationDispatcher.notify(customer.id, 'service_complete', {
         smsMessage,
@@ -263,6 +265,10 @@ const LawnIntelligence = {
       return result;
     } catch (err) {
       if (isOwnershipLoss(err)) throw err;
+      // The dispatcher reports provider failures in its RESULT, so a throw out
+      // of it happened before any handoff: nothing is on the wire, and the claim
+      // has to come back or the step reads as delivered and is never retried.
+      if (claimed) await releaseNotificationSend(assessmentId, null);
       logger.error(`[lawn-intel] sendAssessmentNotification failed: ${err.message}`);
       return null;
     }

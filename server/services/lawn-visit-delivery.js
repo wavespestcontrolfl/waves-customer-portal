@@ -8,6 +8,18 @@ const runs = require('./lawn-visit-runs');
 // snapshot unset rather than recording recovery-day weather as the visit's.
 const WEATHER_WINDOW_MS = 6 * 60 * 60 * 1000;
 
+function validHeartbeat(heartbeatMs, staleAfterMs) {
+  const beat = heartbeatMs ?? 30000;
+  if (!Number.isSafeInteger(beat) || beat < 1 || beat >= staleAfterMs) throw new TypeError('Delivery heartbeat must be shorter than its lease');
+  return beat;
+}
+
+async function generationInFlight(KnowledgeBridge, assessmentId, knex) {
+  const guard = KnowledgeBridge && KnowledgeBridge.treatmentGuard;
+  if (!guard || typeof guard.isGenerationInFlight !== 'function') return false;
+  return guard.isGenerationInFlight(assessmentId, knex);
+}
+
 function nearTheVisit(assessment, windowMs) {
   const confirmedAt = assessment?.confirmed_at ? new Date(assessment.confirmed_at).getTime() : NaN;
   if (!Number.isFinite(confirmedAt)) return false;
@@ -23,8 +35,7 @@ async function deliverConfirmedAssessment({ assessmentId }, deps = {}) {
   const KnowledgeBridge = deps.KnowledgeBridge || require('./knowledge-bridge');
   const staleAfterMs = deps.staleAfterMs ?? runs.PIPELINE_STALE_MS;
   const weatherWindowMs = deps.weatherWindowMs ?? WEATHER_WINDOW_MS;
-  const heartbeatMs = deps.heartbeatMs ?? 30000;
-  if (!Number.isSafeInteger(heartbeatMs) || heartbeatMs < 1 || heartbeatMs >= staleAfterMs) throw new TypeError('Delivery heartbeat must be shorter than its lease');
+  const heartbeatMs = validHeartbeat(deps.heartbeatMs, staleAfterMs);
   const claim = await runs.claimPipeline(assessmentId, knex, { staleAfterMs });
   if (!claim) return { skipped: 'not_claimed', done: [], gaps: [] };
   const owner = claim.pipeline_owner_token;
@@ -59,6 +70,14 @@ async function deliverConfirmedAssessment({ assessmentId }, deps = {}) {
       await guard(); // The lease covers every effect in the pipeline, this one included.
       return weather;
     };
+    // Knowledge Bridge's durable fence owns whether stored recommendations are
+    // settled. While a generation is in flight the stored copy can still be
+    // replaced, so this run waits for the next sweep instead of delivering, and
+    // instead of starting a second generation.
+    if (await generationInFlight(KnowledgeBridge, assessmentId, knex)) {
+      await runs.releasePipeline(assessmentId, owner, knex, { staleAfterMs });
+      return { skipped: 'generation_in_flight', done: [], gaps: [] };
+    }
     await attachWeatherOnce((await runs.deliveryState(assessmentId, knex)).assessment);
     const actions = [
       ['calibration', async (state) => {
@@ -132,7 +151,11 @@ async function sweepAbandonedDeliveries({ knex = db, limit = 25, staleAfterMs = 
       .whereRaw("assessment.confirmed_at > clock_timestamp() - (? * interval '1 millisecond')", [retryHorizonMs])
       .where((q) => q.whereNull('run.pipeline_claimed_at')
         .orWhereRaw("run.pipeline_claimed_at < clock_timestamp() - (? * interval '1 millisecond')", [staleAfterMs]))
-      .orderBy('assessment.confirmed_at', 'asc').limit(limit).select('run.assessment_id');
+      // Never-attempted runs first. Oldest-first alone let a pool of repeatedly
+      // failing runs refill the batch every sweep and starve a fresh interrupted
+      // delivery until they aged out.
+      .orderByRaw('(run.pipeline_claimed_at IS NOT NULL), assessment.confirmed_at ASC')
+      .limit(limit).select('run.assessment_id');
   } catch (err) {
     if (err?.code === '42P01' || err?.code === '42703') return { candidates: 0, resumed: 0, failed: 0, skipped: 'schema_unavailable' };
     throw err;
