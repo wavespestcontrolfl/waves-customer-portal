@@ -634,12 +634,14 @@ describe('loadPromiseEvents: email promise evidence checks the LIVE delivery sta
   function fakeConn() {
     const calls = {};
     const conn = (table) => {
-      if (table === 'messaging_audit_log as a' || table === 'audit_log as al' || table === 'activity_log as al' || table === 'scheduled_services as sv' || table === 'series_moves as sm') return passthroughChain([]);
+      if (table === 'messaging_audit_log as a' || table === 'audit_log as al' || table === 'activity_log as al' || table === 'scheduled_services as sv' || table === 'email_messages' || table === 'series_moves as sm') return passthroughChain([]);
       if (table === 'customer_interactions as ci') {
         const chain = {};
         chain.leftJoin = (joinTable, cb) => { calls.leftJoinTable = joinTable; calls.leftJoinCb = cb; return chain; };
         chain.where = (...args) => { (calls.whereCalls ||= []).push(args); return chain; };
         chain.whereBetween = () => chain;
+        chain.whereIn = () => chain;
+        chain.whereNotNull = () => chain;
         chain.whereRaw = (...args) => { (calls.whereRawCalls ||= []).push(args); return chain; };
         chain.select = (...args) => { calls.selected = args; return Promise.resolve([]); };
         return chain;
@@ -744,7 +746,7 @@ describe('loadPromiseEvents: an UNLINKED sms_log row is neutral, a sentinel sid 
   function fakeConn() {
     const calls = {};
     const conn = (table) => {
-      if (table === 'customer_interactions as ci' || table === 'audit_log as al' || table === 'activity_log as al' || table === 'scheduled_services as sv' || table === 'series_moves as sm') return passthroughChain([]);
+      if (table === 'customer_interactions as ci' || table === 'audit_log as al' || table === 'activity_log as al' || table === 'scheduled_services as sv' || table === 'email_messages' || table === 'series_moves as sm') return passthroughChain([]);
       if (table === 'messaging_audit_log as a') {
         const chain = {};
         for (const m of ['leftJoin', 'whereIn', 'whereRaw', 'whereBetween', 'whereNull']) chain[m] = () => chain;
@@ -815,6 +817,48 @@ describe('loadPromiseEvents: an UNLINKED sms_log row is neutral, a sentinel sid 
     const [, legacySql, bindings] = scopeCall.find(([m]) => m === 'orWhereRaw');
     expect(legacySql).toContain("a.appointment_id IS NULL AND a.metadata->>'scheduled_service_id' = ANY(?::text[])");
     expect(bindings).toEqual([['visit-1']]);
+  });
+});
+
+describe('an appointment email with no interaction row still yields its promise (round-11 P1)', () => {
+  // appointment-email.js's logEmailAttempt swallows a failed insert and the
+  // send still reports success, and an idempotent retry writes no second
+  // interaction — so an email-only customer could permanently lose the
+  // window they were given. The durable email_messages row survives that,
+  // and its idempotency_key encodes <event_type>:<visit>:<slot ms>.
+  function fakeConn(rows) {
+    const passthrough = () => {
+      const chain = {};
+      for (const m of ['join', 'leftJoin', 'whereIn', 'whereRaw', 'whereBetween', 'whereNull', 'whereNotNull', 'where']) chain[m] = () => chain;
+      chain.select = () => Promise.resolve([]);
+      return chain;
+    };
+    const captured = {};
+    const conn = (table) => {
+      if (table !== 'email_messages') return passthrough();
+      const chain = {};
+      chain.whereIn = (col, values) => { (captured.whereIn ||= []).push([col?.sql || col, values]); return chain; };
+      for (const m of ['whereRaw', 'where', 'whereNotNull']) chain[m] = () => chain;
+      chain.select = () => Promise.resolve(rows);
+      return chain;
+    };
+    conn.raw = (sql) => ({ sql });
+    conn.isTransaction = true;
+    return { conn, captured };
+  }
+
+  test('the window comes straight off the message row, scoped by the key\'s visit id and a delivered status', async () => {
+    const slot = Date.parse('2026-09-12T13:00:00.000Z');
+    const { conn, captured } = fakeConn([{ id: 'em-1', sent_at: '2026-09-10T12:00:00.000Z', visit_id: 'visit-1', slot_ms: String(slot) }]);
+    const [promise] = await loadPromiseEvents(conn, ['visit-1']);
+    expect(promise).toMatchObject({ visit_id: 'visit-1', source: 'email', source_id: 'em-1',
+      start_at: new Date(slot).toISOString(), communicated_at: '2026-09-10T12:00:00.000Z' });
+    const scoped = captured.whereIn.map(([col, values]) => [col, values]);
+    expect(scoped).toEqual(expect.arrayContaining([
+      ["split_part(idempotency_key, ':', 1)", ['appointment.confirmation', 'appointment.reminder_72h', 'appointment.reminder_24h', 'appointment.rescheduled']],
+      ["split_part(idempotency_key, ':', 2)", ['visit-1']],
+      ['status', ['sent', 'processed', 'delivered', 'complained', 'spam_report', 'unsubscribed']],
+    ]));
   });
 });
 
@@ -1016,13 +1060,21 @@ describe('callCommitmentInstant (when the customer heard the promise) (round-5 P
   // updated_at is the closest stored terminal stamp, trusted up to a bounded
   // ringing allowance past the talk time — later processing writes move it
   // too (round-10 P2).
-  test('an OUTBOUND call gets a fixed ringing allowance, and the result never drifts', () => {
+  test('an outbound call is measured from its recorded bridge, and the result never drifts', () => {
     const created = '2026-09-10T10:00:00Z';
-    // call-bridge inserts the row before Twilio rings anyone, so talk time
-    // alone omits setup and ringing (round-10 P2).
-    expect(callCommitmentInstant({ created_at: created, duration_seconds: 600, direction: 'outbound-api' }).toISOString())
-      .toBe('2026-09-10T10:11:00.000Z');
+    // bridged_at is when the two legs were actually connected — the same
+    // convention call-commitments.js's callEndedAt uses — so the end is
+    // bridge + talk time, measured rather than guessed (round-11 P2).
+    expect(callCommitmentInstant({ created_at: created, duration_seconds: 600, direction: 'outbound-api',
+      bridged_at: '2026-09-10T10:01:30Z' }).toISOString()).toBe('2026-09-10T10:11:30.000Z');
+    // No bridge stamp (inbound, or a row recovered near the end): created_at
+    // remains the floor.
     expect(callCommitmentInstant({ created_at: created, duration_seconds: 600, direction: 'inbound' }).toISOString())
+      .toBe('2026-09-10T10:10:00.000Z');
+    expect(callCommitmentInstant({ created_at: created, duration_seconds: 600, direction: 'outbound-api' }).toISOString())
+      .toBe('2026-09-10T10:10:00.000Z');
+    // A bridge stamp from before the row was created is ignored.
+    expect(callCommitmentInstant({ created_at: created, duration_seconds: 600, bridged_at: '2026-09-10T09:00:00Z' }).toISOString())
       .toBe('2026-09-10T10:10:00.000Z');
     // Deterministic: updated_at is NOT consulted, so later processing writes
     // cannot advance a promise after the fact and leapfrog a reminder that
@@ -1282,7 +1334,7 @@ describe('loadPromiseEvents: pre-deploy legacy reschedule/confirmation messages 
   function fakeConn({ messageRows = [] } = {}) {
     const calls = {};
     const conn = (table) => {
-      if (table === 'customer_interactions as ci' || table === 'audit_log as al' || table === 'activity_log as al' || table === 'scheduled_services as sv' || table === 'series_moves as sm') return passthroughChain([]);
+      if (table === 'customer_interactions as ci' || table === 'audit_log as al' || table === 'activity_log as al' || table === 'scheduled_services as sv' || table === 'email_messages' || table === 'series_moves as sm') return passthroughChain([]);
       if (table === 'messaging_audit_log as a') {
         const chain = {};
         chain.leftJoin = () => chain;
@@ -1377,7 +1429,7 @@ describe('loadPromiseEvents: no fixed lookback — confirmations older than 100 
   // function" instead of silently passing.
   function fakeConn({ messageRows = [] } = {}) {
     const conn = (table) => {
-      if (table === 'customer_interactions as ci' || table === 'audit_log as al' || table === 'activity_log as al' || table === 'scheduled_services as sv' || table === 'series_moves as sm') return passthroughChain([]);
+      if (table === 'customer_interactions as ci' || table === 'audit_log as al' || table === 'activity_log as al' || table === 'scheduled_services as sv' || table === 'email_messages' || table === 'series_moves as sm') return passthroughChain([]);
       if (table === 'messaging_audit_log as a') return passthroughChain(messageRows);
       throw new Error(`fake conn: unexpected table ${table}`);
     };

@@ -572,12 +572,6 @@ module.exports = {
   planRescheduleFromCall,
   loadCandidates,
   resolveRescheduleCards,
-  // Shared caller-identity primitive (codex P1, pre-push audit on
-  // e2e0e089c): no-show-detector.js reused this
-  // instead of a second, narrower "outbound === exact match, customer.phone
-  // only" copy that misread outbound-api/outbound-dial as inbound and
-  // rejected a caller matched through a secondary/service-contact column.
-  counterpartPhone,
   MIN_SCHEDULING_CONFIDENCE,
   CANDIDATE_SPAN_DAYS,
   CARD_REASON_CODES,

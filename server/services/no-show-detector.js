@@ -58,6 +58,11 @@ const DELIVERED_EMAIL_STATUSES = ['sent', 'processed', 'delivered', 'complained'
 // sms_log statuses that mean the text reached the phone. queued/scheduled/
 // sending have not yet; undelivered/failed/blocked never will.
 const DELIVERED_SMS_STATUSES = ['sent', 'delivered', 'read'];
+// The appointment email event types that quote an arrival window — the same
+// list the interaction read filters on, and the first segment of the
+// idempotency key appointment-email.js builds for each of them.
+const APPOINTMENT_EMAIL_EVENTS = ['appointment.confirmation', 'appointment.reminder_72h',
+  'appointment.reminder_24h', 'appointment.rescheduled'];
 const instant = (value) => value == null ? NaN : new Date(value).getTime();
 // Stamps that prove the tech reached the stop, in the order job-status.js
 // writes them. Any one of them clears the card.
@@ -278,7 +283,7 @@ async function loadPromiseEvents(conn, visitIds, { now = new Date() } = {}) {
       // the snapshot still decides for an unlinked/legacy row.
       .where((qb) => qb.whereRaw("ci.metadata->>'status' IN ('sent','delivered')")
         .orWhereIn('em.status', DELIVERED_EMAIL_STATUSES))
-      .whereRaw("ci.metadata->>'event_type' IN ('appointment.confirmation','appointment.reminder_72h','appointment.reminder_24h','appointment.rescheduled')")
+      .whereIn(conn.raw("ci.metadata->>'event_type'"), APPOINTMENT_EMAIL_EVENTS)
       // A LINKED row must currently show a delivery the customer actually
       // received: an allowlist, not "anything but the terminal failures"
       // (codex P1 round 6). transactional-email-provider-retry.js flips a
@@ -343,6 +348,24 @@ async function loadPromiseEvents(conn, visitIds, { now = new Date() } = {}) {
     // applied before this feature existed, and any applied while the capture
     // gate was off — the same reason the booking read above derives from
     // sv.source_call_log_id rather than a write.
+    // The email evidence read above starts from customer_interactions, whose
+    // insert is itself best-effort: appointment-email.js's logEmailAttempt
+    // swallows a failure, the send still reports success, and an idempotent
+    // retry writes no second interaction — so an email-only customer could
+    // permanently lose the window they were given (codex P1 round 11). The
+    // durable email_messages row survives that, and its idempotency_key
+    // encodes exactly what the promise needs: <event_type>:<visit>:<slot ms>.
+    // Read straight from it, holding the same delivered-status bar, and let
+    // latestPromises dedupe against the interaction-derived copy when both
+    // exist (same visit, same window, same send time).
+    () => conn('email_messages')
+      .whereIn(conn.raw("split_part(idempotency_key, ':', 1)"), APPOINTMENT_EMAIL_EVENTS)
+      .whereIn(conn.raw("split_part(idempotency_key, ':', 2)"), visitIds)
+      .whereRaw("split_part(idempotency_key, ':', 3) ~ '^[0-9]+$'")
+      .whereIn('status', DELIVERED_EMAIL_STATUSES)
+      .whereNotNull('sent_at').where('sent_at', '<=', now)
+      .select('id', 'sent_at', conn.raw("split_part(idempotency_key, ':', 2) as visit_id"),
+        conn.raw("split_part(idempotency_key, ':', 3) as slot_ms")),
     // A call-created booking: the visit row itself carries source_call_log_id
     // (a FK written in the booking transaction), so the window the agent
     // committed on that call is derivable from durable state — no separate
@@ -356,7 +379,7 @@ async function loadPromiseEvents(conn, visitIds, { now = new Date() } = {}) {
       .whereIn('sv.id', visitIds).where('cl.v2_extraction_status', 'valid')
       .where('cl.created_at', '<=', now)
       .select('sv.id as visit_id', 'sv.created_at as booked_at', 'cl.id as call_id', 'cl.ai_extraction_enriched',
-        'cl.transcription', 'cl.processing_token', 'cl.created_at as call_created_at', 'cl.direction as call_direction',
+        'cl.transcription', 'cl.processing_token', 'cl.created_at as call_created_at', 'cl.direction as call_direction', 'cl.bridged_at as call_bridged_at',
         'cl.duration_seconds', 'cl.recording_duration_seconds'),
     () => conn('activity_log as al')
       // The CALL is joined for its own clock: the activity row is written
@@ -370,7 +393,7 @@ async function loadPromiseEvents(conn, visitIds, { now = new Date() } = {}) {
       .whereRaw("al.metadata->>'scheduled_service_id' = ANY(?::text[])", [visitIds])
       .where('al.created_at', '<=', now)
       .select('al.id', 'al.metadata', 'al.created_at', 'cl.created_at as call_created_at',
-        'cl.direction as call_direction', 'cl.duration_seconds', 'cl.recording_duration_seconds'),
+        'cl.direction as call_direction', 'cl.bridged_at as call_bridged_at', 'cl.duration_seconds', 'cl.recording_duration_seconds'),
     () => conn('series_moves as sm')
       // The move's own series text, joined by the series_move_id its metadata
       // carries, and held to the SAME delivery bar as any other promise
@@ -415,14 +438,19 @@ async function loadPromiseEvents(conn, visitIds, { now = new Date() } = {}) {
       .where('sm.customer_notified', true)
       .where('a.sent_at', '<=', now).whereNull('a.blocked_code').whereNull('a.provider_error')
       .where(textActuallyWentOut)
-      .where((qb) => { for (const id of visitIds) qb.orWhereRaw('sm.rows @> ?::jsonb', [JSON.stringify([{ id }])]); })
+      // ONE set-based predicate, not one OR branch per candidate: a large
+      // recurring schedule put thousands of containment clauses in this
+      // statement, whose construction and planning cost (and expression
+      // limits) could abort the whole tick (codex P2 round 11). The GIN index
+      // still serves each generated element.
+      .whereRaw("sm.rows @> ANY (SELECT jsonb_build_array(jsonb_build_object('id', v)) FROM unnest(?::text[]) AS v)", [visitIds])
       .select('sm.id', 'sm.anchor_service_id', 'sm.rows', 'a.sent_at'),
   ];
   const results = [];
   if (conn.isTransaction) {
     for (const read of reads) results.push(await read());
   } else results.push(...await Promise.all(reads.map((read) => read())));
-  const [messages, emails, calls, bookings, appliedReschedules, seriesMoves] = results;
+  const [messages, emails, calls, directEmails, bookings, appliedReschedules, seriesMoves] = results;
   const candidates = new Set(visitIds.map(String));
   return [
     ...messages.map((r) => ({ visit_id: r.appointment_id || r.metadata?.scheduled_service_id, start_at: Number.isFinite(Number(r.metadata?.rendered_slot_ms)) && r.metadata?.rendered_slot_ms != null
@@ -437,6 +465,9 @@ async function loadPromiseEvents(conn, visitIds, { now = new Date() } = {}) {
       communicated_at: r.provider_sent_at || r.metadata?.sent_at || r.created_at, source: 'email', source_id: r.id })),
     ...calls.map((r) => ({ visit_id: r.resource_id, start_at: r.metadata?.start_at,
       communicated_at: r.metadata?.communicated_at || r.created_at, source: 'call', source_id: r.id })),
+    ...directEmails.map((r) => ({ visit_id: r.visit_id,
+      start_at: new Date(Number(r.slot_ms)).toISOString(), communicated_at: r.sent_at,
+      source: 'email', source_id: r.id })),
     ...bookings.map((r) => {
       // The call's own start is passed EXPLICITLY: the row aliases it to
       // call_created_at (sv also has a created_at), and
@@ -449,7 +480,7 @@ async function loadPromiseEvents(conn, visitIds, { now = new Date() } = {}) {
       });
       if (target == null) return null;
       return { visit_id: r.visit_id, start_at: new Date(target).toISOString(),
-        communicated_at: callCommitmentInstant({ created_at: r.call_created_at, direction: r.call_direction,
+        communicated_at: callCommitmentInstant({ created_at: r.call_created_at, direction: r.call_direction, bridged_at: r.call_bridged_at,
           duration_seconds: r.duration_seconds, recording_duration_seconds: r.recording_duration_seconds },
         { notAfter: r.booked_at }).toISOString(),
         source: 'call', source_id: r.call_id };
@@ -465,7 +496,7 @@ async function loadPromiseEvents(conn, visitIds, { now = new Date() } = {}) {
       // recording pass wrote this row. Falls back to the activity row's own
       // timestamp when the call is gone (a purge, a legacy row).
       const heard = r.call_created_at
-        ? callCommitmentInstant({ created_at: r.call_created_at, direction: r.call_direction,
+        ? callCommitmentInstant({ created_at: r.call_created_at, direction: r.call_direction, bridged_at: r.call_bridged_at,
           duration_seconds: r.duration_seconds, recording_duration_seconds: r.recording_duration_seconds },
         { notAfter: r.created_at })
         : null;
@@ -542,7 +573,6 @@ function seriesSupersessions(rows = [], candidates = new Set()) {
 // reminder that really was newer (codex P1 round 10). direction is immutable,
 // so this stays deterministic: every read of the same call returns the same
 // instant.
-const OUTBOUND_RING_ALLOWANCE_MS = 60000;
 function callCommitmentInstant(call, { notAfter = null } = {}) {
   const started = instant(call?.created_at);
   const seconds = Number(call?.recording_duration_seconds || call?.duration_seconds || 0);
@@ -562,13 +592,16 @@ function callCommitmentInstant(call, { notAfter = null } = {}) {
   const anchor = instant(notAfter);
   const ceiling = Number.isFinite(anchor) && anchor >= started ? anchor : NaN;
   const clamp = (ms) => (Number.isFinite(ceiling) ? Math.min(ms, ceiling) : ms);
-  const talkEnd = clamp(Number.isFinite(seconds) && seconds > 0 ? started + seconds * 1000 : started);
-  // call-bridge.js inserts the row BEFORE Twilio rings the staff phone and
-  // then the customer, so an outbound call's talk time omits setup and
-  // ringing and its end can otherwise land before the commitment was spoken
-  // (codex P2 round 10).
-  const outbound = String(call?.direction || '').startsWith('outbound');
-  return new Date(outbound ? clamp(talkEnd + OUTBOUND_RING_ALLOWANCE_MS) : talkEnd);
+  // bridged_at is the recorded moment the two legs were connected — the
+  // convention call-commitments.js's callEndedAt already uses — so for an
+  // outbound call the end is bridge + talk time, measured rather than
+  // guessed at a fixed allowance (codex P2 round 11). Rows without it (an
+  // inbound call, or one recovered near the end by a status callback) keep
+  // created_at as the floor.
+  const bridged = instant(call?.bridged_at);
+  const floor = Number.isFinite(bridged) && bridged >= started ? bridged : started;
+  const talkEnd = clamp(Number.isFinite(seconds) && seconds > 0 ? floor + seconds * 1000 : floor);
+  return new Date(talkEnd);
 }
 
 // "What window, if any, did the AGENT commit to on this call?" — the
