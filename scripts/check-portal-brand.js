@@ -212,33 +212,75 @@ function relKey(filePath) {
   return path.relative(ROOT, filePath).split(path.sep).join('/');
 }
 
-// Whole-line comment detection, stateful across a file's lines. Returns a
-// closure so each file gets its own block state. Skips a line only when the
-// line carries no code at all:
-//   `// ...`                     whole-line line comment
-//   inside an open /* ... */     every line up to and including one ending `*/`
-//   `/* ... */` alone on a line  opened and closed with nothing either side
-// A line where a block closes and code follows (`*/ const x = ...`) is NOT
-// skipped -- that was a real masking bug, caught in review. The lookalike is
-// CSS's universal selector: a bare `* {` line is code, not a comment, which is
-// why a leading `*` never means anything outside an already-open block.
-function commentSkipper() {
-  let inBlock = false;
-  return function skip(line) {
-    const t = line.trim();
-    const closes = t.includes('*/');
-    if (inBlock) {
-      if (!closes) return true;          // wholly inside the block
-      inBlock = false;
-      return t.endsWith('*/');           // code after the close? scan it
+// Which lines are ENTIRELY comment, so scanning them reports debt that does
+// not exist: Icon.jsx's note about migrating the old portal's emoji keys to
+// <Icon/>, and GlassEstimateExtras' "5-star reviews only" docblock, were both
+// counted as raw-emoji violations -- the gate forbade DESCRIBING the sweep it
+// asks for.
+//
+// This asks the parser rather than the line's prefix. A prefix test cannot
+// tell a comment from rendered JSX text that merely starts with `//` -- inside
+// a <pre>, say -- and skipping such a line would hide a real violation on a
+// visible element, the exact masking this is meant to avoid.
+//
+// Two rules survive from the prefix version, because they are about intent
+// rather than detection:
+//   - only WHOLE-line comments are skipped. A line holding both code and a
+//     comment is scanned in full, in both directions: a trailing `// note`
+//     after code, and code trailing a `*/`.
+//   - on a parse failure nothing is skipped. Scanning a comment costs a false
+//     positive; skipping code costs a miss, and a miss is the worse failure.
+const acorn = require('acorn');
+const jsx = require('acorn-jsx');
+const JsxParser = acorn.Parser.extend(jsx());
+
+function commentLineSet(text, isCss) {
+  const lines = text.split('\n');
+  const covered = new Set();
+  const ranges = [];
+
+  if (isCss) {
+    // CSS has no `//` comment. Only /* ... */ -- and a bare `* {` line is the
+    // universal selector, code that a prefix test mistakes for a docblock.
+    const rx = /\/\*[\s\S]*?\*\//g;
+    let m;
+    while ((m = rx.exec(text))) ranges.push([m.index, m.index + m[0].length]);
+  } else {
+    const comments = [];
+    try {
+      JsxParser.parse(text, {
+        ecmaVersion: 'latest', sourceType: 'module',
+        allowHashBang: true, allowReturnOutsideFunction: true, onComment: comments,
+      });
+    } catch {
+      return covered; // unparseable: skip nothing, scan everything
     }
-    if (t.startsWith('//')) return true;
-    if (t.startsWith('/*')) {
-      if (!closes) { inBlock = true; return true; }
-      return t.endsWith('*/');
+    for (const c of comments) ranges.push([c.start, c.end]);
+  }
+  if (!ranges.length) return covered;
+
+  const lineStart = [];
+  let off = 0;
+  for (const line of lines) { lineStart.push(off); off += line.length + 1; }
+
+  // A line counts as comment only when blanking every comment span on it
+  // leaves nothing but whitespace.
+  const spans = lines.map(() => []);
+  for (const [a, b] of ranges) {
+    for (let i = 0; i < lines.length; i += 1) {
+      const s0 = lineStart[i];
+      const e0 = s0 + lines[i].length;
+      if (b <= s0 || a >= e0) continue;
+      spans[i].push([Math.max(a, s0) - s0, Math.min(b, e0) - s0]);
     }
-    return false;
-  };
+  }
+  for (let i = 0; i < lines.length; i += 1) {
+    if (!spans[i].length) continue;
+    let rest = lines[i];
+    for (const [a, b] of spans[i]) rest = rest.slice(0, a) + ' '.repeat(b - a) + rest.slice(b);
+    if (!rest.trim()) covered.add(i + 1);
+  }
+  return covered;
 }
 
 function checkFile(filePath) {
@@ -256,10 +298,10 @@ function checkFile(filePath) {
   // a trailing `// note` after code, and code trailing a `*/` on the closing
   // line of a block. The rule is never to mask, so where the two overlap the
   // scanner wins and we accept the odd false positive on comment prose.
-  const skipComment = commentSkipper();
+  const commentLines = commentLineSet(text, /\.css$/.test(filePath));
   lines.forEach((line, i) => {
     const n = i + 1;
-    if (skipComment(line)) return;
+    if (commentLines.has(n)) return;
 
     if (EMOJI_RX.test(line)) {
       violations.push({
@@ -469,4 +511,4 @@ function main() {
 // this gate before, so they get a test rather than a comment.
 if (require.main === module) main();
 
-module.exports = { checkFile, commentSkipper, LEGACY_BASELINE };
+module.exports = { checkFile, commentLineSet, LEGACY_BASELINE };
