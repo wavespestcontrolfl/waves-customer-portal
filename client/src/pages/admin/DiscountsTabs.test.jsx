@@ -72,34 +72,74 @@ describe("DiscountsSection", () => {
     });
   });
 
-  it("keeps the existing blank statistics state when loading fails", async () => {
+  it("shows a statistics failure and retries to genuine zero results", async () => {
+    let attempts = 0;
+    let resolveRetry;
     vi.stubGlobal(
       "fetch",
-      vi.fn(async (url) => {
+      vi.fn((url) => {
         if (String(url).endsWith("/admin/discounts/stats")) {
-          throw new Error("down");
+          attempts += 1;
+          if (attempts === 1)
+            return Promise.resolve({ ok: false, status: 503 });
+          return new Promise((resolve) => {
+            resolveRetry = resolve;
+          });
         }
-        return { ok: true, json: async () => [] };
+        return Promise.resolve({ ok: true, json: async () => [] });
       }),
     );
-
     render(<DiscountsSection />);
     fireEvent.click(screen.getByRole("tab", { name: "Stats" }));
-
-    await waitFor(() =>
-      expect(
-        fetch.mock.calls.some(([url]) =>
-          String(url).endsWith("/admin/discounts/stats"),
-        ),
-      ).toBe(true),
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "Could not load discount statistics.",
     );
-    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+    expect(screen.queryByText("Total Applications")).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Try again" }));
     expect(
-      screen.queryByText("Loading discount statistics…"),
-    ).not.toBeInTheDocument();
+      await screen.findByText("Loading discount statistics…"),
+    ).toBeInTheDocument();
     expect(
       screen.queryByRole("button", { name: "Try again" }),
     ).not.toBeInTheDocument();
+    resolveRetry({
+      ok: true,
+      json: async () => ({ totalApplied: 0, totalGiven: 0, discounts: [] }),
+    });
+    expect(await screen.findByText("$0.00")).toBeInTheDocument();
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+    expect(attempts).toBe(2);
+  });
+
+  it("ignores an older statistics response after leaving and reopening the tab", async () => {
+    const pending = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((url) =>
+        String(url).endsWith("/admin/discounts/stats")
+          ? new Promise((resolve) => pending.push(resolve))
+          : Promise.resolve({ ok: true, json: async () => [] }),
+      ),
+    );
+    render(<DiscountsSection />);
+    fireEvent.click(screen.getByRole("tab", { name: "Stats" }));
+    fireEvent.click(screen.getByRole("tab", { name: "Discount Catalog" }));
+    fireEvent.click(screen.getByRole("tab", { name: "Stats" }));
+    await act(async () =>
+      pending[1]({
+        ok: true,
+        json: async () => ({ totalApplied: 2, totalGiven: 20, discounts: [] }),
+      }),
+    );
+    expect(await screen.findByText("$20.00")).toBeInTheDocument();
+    await act(async () =>
+      pending[0]({
+        ok: true,
+        json: async () => ({ totalApplied: 1, totalGiven: 10, discounts: [] }),
+      }),
+    );
+    expect(screen.queryByText("$10.00")).not.toBeInTheDocument();
+    expect(screen.getByText("$20.00")).toBeInTheDocument();
   });
 
   it("keeps the existing catalog retry label and request", async () => {
