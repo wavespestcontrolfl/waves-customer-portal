@@ -451,7 +451,9 @@ async function loadPromiseEvents(conn, visitIds, { now = new Date() } = {}) {
       .whereNotNull('em.sent_at').where('em.sent_at', '<=', now)
       // One row per (message, member) even if two visits of the stop match —
       // seriesSupersessions/latestPromises dedupe by visit anyway.
-      .select('em.id', 'em.sent_at', 'sv.id as visit_id', 'keyed.id as stop_id'),
+      .select('em.id', 'em.sent_at', 'sv.id as visit_id', 'keyed.id as stop_id',
+        conn.raw("split_part(em.idempotency_key, ':', 1) as tier"),
+        conn.raw("split_part(em.idempotency_key, ':', 5) as occurrence")),
     // A call-created booking: the visit row itself carries source_call_log_id
     // (a FK written in the booking transaction), so the window the agent
     // committed on that call is derivable from durable state — no separate
@@ -563,23 +565,28 @@ async function loadPromiseEvents(conn, visitIds, { now = new Date() } = {}) {
   // of its own and keep an unknown-window fallback that then outranks the
   // owner's known window for the whole stop (codex P1 round 12).
   const groupedFallbacks = (() => {
-    // Keyed by STOP, and measured from the EARLIEST row of the fan-out: one
-    // grouped reminder writes an email_messages row per recipient, and
-    // logEmailAttempt can fail for a later one after an earlier one already
-    // recorded the window. Keying on the exact send time let that later row
-    // survive as an unknown-window fallback and — being newer — outrank the
-    // known window every recipient actually received (codex P1 round 17).
+    // Keyed by ONE SEND — stop, reminder tier and occurrence — and measured
+    // from the earliest row of that send's fan-out. A grouped reminder writes
+    // an email_messages row per recipient, and logEmailAttempt can fail for a
+    // later one after an earlier one already recorded the window; keying on
+    // the exact send time let that later row survive as an unknown-window
+    // fallback and, being newer, outrank the known window every recipient
+    // actually received (codex P1 round 17). Keying by stop ALONE went too
+    // far the other way: the 72h reminder's recovery would then cover the
+    // 24h send too, which is a different message the customer received later
+    // (codex P1 round 17, second pass).
+    const sendKey = (r) => `${r.stop_id}:${r.tier}:${r.occurrence}`;
     const earliest = new Map();
     for (const r of groupedEmails) {
       const at = instant(r.sent_at);
-      if (!earliest.has(r.stop_id) || at < earliest.get(r.stop_id)) earliest.set(r.stop_id, at);
+      if (!earliest.has(sendKey(r)) || at < earliest.get(sendKey(r))) earliest.set(sendKey(r), at);
     }
-    const recoveredStops = new Set(groupedEmails
+    const recoveredSends = new Set(groupedEmails
       .filter((r) => knownWindowAtOrAfter(emails, { visit_id: r.visit_id,
-        communicated_at: new Date(earliest.get(r.stop_id)).toISOString() }))
-      .map((r) => r.stop_id));
+        communicated_at: new Date(earliest.get(sendKey(r))).toISOString() }))
+      .map(sendKey));
     return groupedEmails
-      .filter((r) => !recoveredStops.has(r.stop_id))
+      .filter((r) => !recoveredSends.has(sendKey(r)))
       .map((r) => ({ visit_id: r.visit_id, start_at: null, communicated_at: r.sent_at,
         source: 'email', source_id: r.id }));
   })();

@@ -958,7 +958,7 @@ describe('an appointment email with no interaction row still yields its promise 
       return chain;
     };
     chain.whereIn = (col, values) => { (captured.whereIn ||= []).push([col?.sql || col, values]); return chain; };
-    chain.select = (...args) => { captured.selected = args; return Promise.resolve([{ id: 'em-9', sent_at: '2026-09-10T12:00:00.000Z', visit_id: 'visit-1', stop_id: 'stop-1' }]); };
+    chain.select = (...args) => { captured.selected = args.map((a) => a?.sql || a); return Promise.resolve([{ id: 'em-9', sent_at: '2026-09-10T12:00:00.000Z', visit_id: 'visit-1', stop_id: 'stop-1', tier: 'appointment.reminder_72h', occurrence: '2026-09-10' }]); };
     const passthrough = () => {
       const other = {};
       for (const m of ['join', 'leftJoin', 'whereIn', 'whereRaw', 'whereBetween', 'whereNull', 'whereNotNull', 'where']) other[m] = () => other;
@@ -1029,8 +1029,11 @@ describe('an appointment email with no interaction row still yields its promise 
     // covered — which is why the stop is keyed by its earliest row.
     expect(knownWindowAtOrAfter(known, { ...earliest, communicated_at: '2026-09-10T12:00:04.000Z' })).toBe(false);
     const detector = require('fs').readFileSync(require('path').join(__dirname, '..', 'services', 'no-show-detector.js'), 'utf8');
-    expect(detector).toContain('if (!earliest.has(r.stop_id) || at < earliest.get(r.stop_id)) earliest.set(r.stop_id, at);');
-    expect(detector).toContain('.map((r) => r.stop_id));');
+    // ...and the unit is ONE SEND — stop, tier, occurrence — so the 72h
+    // reminder's recovery does not cover the 24h send, a different message
+    // the customer received later (round-17 P1).
+    expect(detector).toContain("const sendKey = (r) => `${r.stop_id}:${r.tier}:${r.occurrence}`;");
+    expect(detector).toContain('.map(sendKey));');
   });
 
   test('the window comes straight off the message row, scoped by the key\'s visit id and a delivered status', async () => {
