@@ -128,6 +128,7 @@ const SERVICE_SEARCH_FIELDS = [
   "service_key",
   "description",
 ];
+const SERVICE_SEARCH_PLACEHOLDER = "Search services...";
 
 const isActiveCatalogService = (service) =>
   service.is_active !== false && !service.is_archived;
@@ -1236,7 +1237,7 @@ export default function ServiceLibraryPage() {
                 <Field label="Search services">
                   <Input
                     type="search"
-                    placeholder="Search services…"
+                    placeholder={SERVICE_SEARCH_PLACEHOLDER}
                     value={search}
                     onChange={(event) => setSearch(event.target.value)}
                   />
@@ -1354,7 +1355,7 @@ export default function ServiceLibraryPage() {
                 <Field label="Search services">
                   <Input
                     type="search"
-                    placeholder="Search services…"
+                    placeholder={SERVICE_SEARCH_PLACEHOLDER}
                     value={search}
                     onChange={(event) => setSearch(event.target.value)}
                   />

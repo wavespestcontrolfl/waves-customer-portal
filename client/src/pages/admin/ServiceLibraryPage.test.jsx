@@ -126,6 +126,9 @@ describe("ServiceLibraryPage hub", () => {
     renderServices();
 
     expect(
+      screen.getByRole("searchbox", { name: "Search services" }),
+    ).toHaveAttribute("placeholder", "Search services...");
+    expect(
       screen.getByRole("button", { name: /Recurring/ }),
     ).toBeInTheDocument();
     expect(
