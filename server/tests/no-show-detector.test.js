@@ -1106,8 +1106,23 @@ describe('recordSentWindowFallback (the audit row failed, the text went out) (ro
     expect(await recordSentWindowFallback({ visitId: 'visit-1', startAtMs, communicatedAt: '2026-09-10T12:00:00.000Z' })).toBe(true);
     const [[event]] = recordAuditEvent.mock.calls;
     expect(event).toMatchObject({ action: 'visit_window_promised', resource_type: 'scheduled_service', resource_id: 'visit-1', critical: true });
+    expect(event.metadata.series_move_id).toBeUndefined();
     expect(event.metadata).toMatchObject({ start_at: '2026-09-11T13:00:00.000Z', communicated_at: '2026-09-10T12:00:00.000Z',
       fallback_reason: 'messaging_audit_unavailable' });
+  });
+
+  // A series confirmation also proves every sibling the move touched was
+  // superseded — proof that normally lives on the audit row this fallback
+  // exists because we could not write (round-14 P1).
+  test('a series confirmation stamps the move id, and the sibling derivation accepts that proof', async () => {
+    await recordSentWindowFallback({ visitId: 'visit-1', startAtMs: Date.now(), seriesMoveId: 'move-7' });
+    const [[event]] = recordAuditEvent.mock.calls;
+    expect(event.metadata.series_move_id).toBe('move-7');
+    const detector = require('fs').readFileSync(require('path').join(__dirname, '..', 'services', 'no-show-detector.js'), 'utf8');
+    expect(detector).toContain("fb.action = 'visit_window_promised'");
+    expect(detector).toContain("AND fb.metadata->>'series_move_id' = sm.id::text");
+    const sender = require('fs').readFileSync(require('path').join(__dirname, '..', 'services', 'messaging', 'send-customer-message.js'), 'utf8');
+    expect(sender).toContain("seriesMoveId: sendInput.metadata?.series_move_id || null,");
   });
 
   test('a send with no visit or no rendered slot writes nothing', async () => {

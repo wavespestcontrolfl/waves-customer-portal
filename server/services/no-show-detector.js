@@ -461,6 +461,21 @@ async function loadPromiseEvents(conn, visitIds, { now = new Date() } = {}) {
       .where('al.created_at', '<=', now)
       .select('al.id', 'al.metadata', 'al.created_at', 'cl.created_at as call_created_at',
         'cl.direction as call_direction', 'cl.bridged_at as call_bridged_at', 'cl.duration_seconds', 'cl.recording_duration_seconds'),
+    // The same supersession, proved by the FALLBACK row instead of the audit
+    // row: when persistAudit failed for a series confirmation, nothing in
+    // messaging_audit_log records that text, so the join below finds nothing
+    // and every sibling keeps its stale promise (codex P1 round 14). The
+    // fallback row carries the move id and the send time, which is all the
+    // derivation needs; seriesSupersessions dedupes the two sources by
+    // (visit, move), keeping the earliest.
+    () => conn('series_moves as sm')
+      .join('audit_log as fb', function joinOnFallbackProof() {
+        this.on(conn.raw(`fb.action = 'visit_window_promised'
+          AND fb.metadata->>'series_move_id' = sm.id::text`));
+      })
+      .where('sm.customer_notified', true).where('fb.created_at', '<=', now)
+      .whereRaw("sm.rows @> ANY (SELECT jsonb_build_array(jsonb_build_object('id', v)) FROM unnest(?::text[]) AS v)", [visitIds])
+      .select('sm.id', 'sm.anchor_service_id', 'sm.rows', conn.raw("(fb.metadata->>'communicated_at')::timestamptz as sent_at")),
     () => conn('series_moves as sm')
       // The move's own series text, joined by the series_move_id its metadata
       // carries, and held to the SAME delivery bar as any other promise
@@ -501,7 +516,8 @@ async function loadPromiseEvents(conn, visitIds, { now = new Date() } = {}) {
   if (conn.isTransaction) {
     for (const read of reads) results.push(await read());
   } else results.push(...await Promise.all(reads.map((read) => read())));
-  const [messages, emails, calls, directEmails, groupedEmails, bookings, appliedReschedules, seriesMoves] = results;
+  const [messages, emails, calls, directEmails, groupedEmails, bookings, appliedReschedules,
+    seriesMoveFallbacks, seriesMoves] = results;
   const candidates = new Set(visitIds.map(String));
   // The per-service recovery keeps its own window (the key carries the slot),
   // so it is only dropped when the interaction row already provided one for
@@ -588,7 +604,7 @@ async function loadPromiseEvents(conn, visitIds, { now = new Date() } = {}) {
         start_at: at && Number.isFinite(at.getTime()) ? at.toISOString() : null,
         communicated_at: heard ? heard.toISOString() : r.created_at, source: 'call', source_id: r.id };
     }),
-    ...seriesSupersessions(seriesMoves, candidates),
+    ...seriesSupersessions([...seriesMoves, ...seriesMoveFallbacks], candidates),
   ];
 }
 
@@ -742,7 +758,7 @@ function agentCommittedStart(call) {
 // when the primary ledger failed, and its whole purpose is to still be there
 // whenever the feature is switched on. Best-effort itself — a send must
 // never fail because its bookkeeping did.
-async function recordSentWindowFallback({ visitId, startAtMs, communicatedAt = new Date(), providerSid = null } = {}) {
+async function recordSentWindowFallback({ visitId, startAtMs, communicatedAt = new Date(), providerSid = null, seriesMoveId = null } = {}) {
   // null BEFORE the Number conversion: Number(null) is 0, a finite instant
   // (the epoch), so a bare isFinite check would stamp a 1970 window as the
   // promise — the same null-before-conversion trap `instant` guards above.
@@ -753,6 +769,11 @@ async function recordSentWindowFallback({ visitId, startAtMs, communicatedAt = n
     await recordAuditEvent({ actor_type: 'system', action: 'visit_window_promised', resource_type: 'scheduled_service', resource_id: String(visitId),
       metadata: { start_at: new Date(Number(startAtMs)).toISOString(), communicated_at: at.toISOString(),
         ...(providerSid ? { provider_sid: String(providerSid) } : {}),
+        // A SERIES confirmation is also the proof that every sibling the move
+        // touched was superseded — proof that normally lives on the audit row
+        // this fallback exists because we could not write. Stamped here so
+        // the sibling derivation can still find it (codex P1 round 14).
+        ...(seriesMoveId ? { series_move_id: String(seriesMoveId) } : {}),
         fallback_reason: 'messaging_audit_unavailable' }, critical: true });
     return true;
   } catch (err) {

@@ -623,6 +623,10 @@ async function recordPromiseEvidenceFallback(sendInput, providerOutcome, audit) 
     visitId: sendInput.appointmentId, startAtMs: sendInput.renderedSlotMs,
     communicatedAt: providerOutcome.sentAt || new Date(),
     providerSid: providerOutcome.provider === 'push' ? null : providerSid,
+    // A series confirmation also proves every sibling the move touched was
+    // superseded; the detector reads that from the audit row we just failed
+    // to write, so it has to ride along here (codex P1, PR #4403 round 14).
+    seriesMoveId: sendInput.metadata?.series_move_id || null,
   }).catch(() => {});
 }
 
