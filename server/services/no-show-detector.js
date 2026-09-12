@@ -1026,8 +1026,12 @@ function stopPromise(members = [], eventsByVisit = new Map(), now = new Date()) 
   const newestGrouped = members.flatMap(eventsOf)
     .filter((event) => event.grouped && instant(event.communicated_at) <= instant(now))
     .reduce((a, b) => (!a || instant(a.communicated_at) < instant(b.communicated_at) ? b : a), null);
+  // Past a grouped send, the candidates are: that send itself — which every
+  // member holds, including the ones whose own confirmation it replaced and
+  // who have had nothing since (codex P1 round 24, fifth pass) — plus
+  // anything communicated to a member AFTER it.
   const own = newestGrouped
-    ? held.filter((promise) => instant(promise.communicated_at) >= instant(newestGrouped.communicated_at))
+    ? [newestGrouped, ...held.filter((promise) => instant(promise.communicated_at) > instant(newestGrouped.communicated_at))]
     : held;
   // An UNKNOWN window still wins when it is the newest thing the customer
   // heard: that is the legacy move-notice rule — coverage became unknown and

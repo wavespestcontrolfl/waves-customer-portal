@@ -509,6 +509,23 @@ describe('grouped stops are evaluated as one visit (round-10 P1)', () => {
     expect(stopPromise([a, b, c], promises, now)).toMatchObject({ visit_id: 'ccc', start_at: '2026-09-10T11:00:00Z' });
   });
 
+  test('members with no replacement keep the grouped window after the claim owner gets a later notice', () => {
+    const now = new Date('2026-09-10T12:00:00Z');
+    // The grouped send lives only in the claim owner's event list, and a
+    // later per-service notice displaced it as that member's latest. Members
+    // whose own confirmation it replaced, and who have had nothing since,
+    // still hold it — so it must remain a candidate (round-24 P1).
+    const promises = new Map([
+      ['aaa', [{ visit_id: 'aaa', start_at: '2026-09-10T09:00:00Z', communicated_at: '2026-09-08T12:00:00Z', source: 'message' }]],
+      ['bbb', [
+        { visit_id: 'bbb', start_at: '2026-09-10T13:00:00Z', communicated_at: '2026-09-09T12:00:00Z', source: 'message', grouped: true },
+        { visit_id: 'bbb', start_at: '2026-09-10T15:00:00Z', communicated_at: '2026-09-09T18:00:00Z', source: 'message' },
+      ]],
+    ]);
+    // 13:00 (grouped, held by aaa) is earlier than bbb's own 15:00.
+    expect(stopPromise([a, b], promises, now)).toMatchObject({ start_at: '2026-09-10T13:00:00Z', grouped: true });
+  });
+
   test('stopPromise takes the EARLIEST promised window across members, not the latest sent', () => {
     const now = new Date('2026-09-10T12:00:00Z');
     const promises = new Map([
