@@ -14824,11 +14824,14 @@ export function CompletionPanel({
       prev.map((p) => {
         if (p.productId !== productId) {
           // One tank, one carrier volume: gallons entered on any per-gallon
-          // row fill the other per-gallon rows that are still blank, so a
-          // two-product tank mix is typed once. A row the tech already gave
-          // its own gallons keeps them, and so does a hand-entered total.
-          if (field === "carrierGallons" && isPerGallonUnit(p.rateUnit)
-            && !(Number(p.carrierGallons) > 0) && Number(value) > 0) {
+          // row set the tank for every other per-gallon row, so a two-product
+          // mix is typed once — and a later correction (a typo, more mix) or
+          // a clear tracks across them all. Only a row the tech gave its OWN
+          // gallons stops following (carrierGallonsManual, the same rule
+          // totalAmountManual applies to an entered total); a value this
+          // propagation supplied is not a tech entry and must not freeze a
+          // recorded quantity at a stale tank volume (pre-push audit P1).
+          if (field === "carrierGallons" && isPerGallonUnit(p.rateUnit) && !p.carrierGallonsManual) {
             const shared = { ...p, carrierGallons: value };
             if (!shared.totalAmountManual) shared.totalAmount = derivedTankTotal(shared.rate, value);
             return shared;
@@ -14846,6 +14849,9 @@ export function CompletionPanel({
           next.lawnPlanManualFields = [...new Set([...(p.lawnPlanManualFields || []), field])];
         }
         if (field === "applicationArea") next.applicationAreaDefault = false;
+        // The row the tech typed into owns its gallons from here on; the
+        // rows that merely followed the tank keep following it.
+        if (field === "carrierGallons") next.carrierGallonsManual = true;
         if (field === "applicationMethod") {
           const areaRequirement = requiredApplicationArea(
             value,
@@ -14918,8 +14924,14 @@ export function CompletionPanel({
             next.amountUnit = perBasis ? String(value).split("/")[0] : value;
             if (perBasis) next.totalAmount = "";
             // A tank dose is meaningless under a per-1,000 unit: re-derive
-            // from the treated area, or blank, rather than relabel it.
-            else if (isPerGallonUnit(p.rateUnit)) next.totalAmount = lawnDerivedTotal(next, next.areaValue);
+            // from the treated area, or blank, rather than relabel it. The
+            // gallons go with it, so a unit round-trip cannot silently
+            // re-drive a quantity from a stale tank volume (audit P1).
+            else if (isPerGallonUnit(p.rateUnit)) {
+              next.totalAmount = lawnDerivedTotal(next, next.areaValue);
+              next.carrierGallons = "";
+              next.carrierGallonsManual = false;
+            }
           }
         }
         if (governed && field === "applicationArea" && !p.lawnPlanManualFields?.includes("areaValue")) {

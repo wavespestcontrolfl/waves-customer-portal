@@ -432,6 +432,38 @@ it('a per-gallon product added after the gallons were typed joins the same tank'
   expect(totals()[3].value).toBe('12.5');
 });
 
+// A correction to the tank must reach the rows that only followed it; a row
+// the tech gave its own gallons stops following (pre-push audit P1).
+it('a corrected tank volume cascades to followers and spares a row with its own gallons', async () => {
+  enableDefaults();
+  const taurus = { id: 'manual-taurus', name: 'Fixture termiticide', category: 'insecticide', default_unit: 'fl_oz/gal', default_rate: '0.8' };
+  const surfactant = { id: 'manual-surf', name: 'Fixture surfactant', category: 'adjuvant', default_unit: 'fl_oz/gal', default_rate: '0.5' };
+  render(<CompletionPanel service={service} products={[...catalog, taurus, surfactant]} onClose={() => {}} onSubmit={submit} />);
+  await waitFor(() => expect(totals()).toHaveLength(2), { timeout: 5000 });
+  let count = 2;
+  for (const product of [taurus, surfactant]) {
+    fireEvent.change(screen.getByPlaceholderText('Search products...'), { target: { value: product.name } });
+    fireEvent.click(screen.getByText(product.name));
+    count += 1;
+    await waitFor(() => expect(totals()).toHaveLength(count));
+  }
+  const gal = () => screen.getAllByPlaceholderText('Gal');
+  fireEvent.change(gal()[0], { target: { value: '25' } });
+  await waitFor(() => expect(totals()[3].value).toBe('12.5'));
+  // The follower tracks the correction rather than freezing at 25.
+  fireEvent.change(gal()[0], { target: { value: '30' } });
+  await waitFor(() => expect(totals()[2].value).toBe('24'));
+  expect(gal()[1].value).toBe('30');
+  expect(totals()[3].value).toBe('15');
+  // Its own gallons make it independent of the next correction.
+  fireEvent.change(gal()[1], { target: { value: '10' } });
+  await waitFor(() => expect(totals()[3].value).toBe('5'));
+  fireEvent.change(gal()[0], { target: { value: '40' } });
+  await waitFor(() => expect(totals()[2].value).toBe('32'));
+  expect(gal()[1].value).toBe('10');
+  expect(totals()[3].value).toBe('5');
+});
+
 it('a rate unit moving off per-gallon does not strand the tank total', async () => {
   enableDefaults();
   const added = { id: 'manual-taurus', name: 'Fixture termiticide', category: 'insecticide', default_unit: 'fl_oz/gal', default_rate: '0.8' };
@@ -446,6 +478,11 @@ it('a rate unit moving off per-gallon does not strand the tank total', async () 
   fireEvent.change(within(totals()[2].parentElement).getAllByRole('combobox')[0], { target: { value: 'fl_oz' } });
   expect(totals()[2].value).toBe('4');
   expect(screen.queryAllByPlaceholderText('Gal')).toHaveLength(0);
+  // Back again: the old tank volume is gone, so nothing re-drives a
+  // quantity from a stale 25 gallons (pre-push audit P1).
+  fireEvent.change(within(totals()[2].parentElement).getAllByRole('combobox')[0], { target: { value: 'fl_oz/gal' } });
+  expect(screen.getAllByPlaceholderText('Gal')[0].value).toBe('');
+  expect(totals()[2].value).toBe('');
 });
 
 it('a withdrawn suggestion requires actual units and method instead of displaying hidden fallbacks', async () => {
