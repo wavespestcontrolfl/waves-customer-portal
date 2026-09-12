@@ -502,12 +502,31 @@ describe('bellAllowed decision order', () => {
 
   test('customer communication rings; everything else is silent by default (owner ruling 2026-08-28)', async () => {
     mockTables({ notification_preferences: chainMock([]) });
-    for (const [category, triggerKey] of [['inbound_email', 'customer_email_received'], ['missed_call', 'customer_missed_call'], ['inbound_sms', 'sms_reply'], ['new_lead', 'new_lead'], ['voicemail_callback', 'customer_voicemail_callback'], ['schedule', 'appointment_reschedule_intent']]) {
+    for (const [category, triggerKey] of [['inbound_email', 'customer_email_received'], ['missed_call', 'customer_missed_call'], ['inbound_sms', 'sms_reply'], ['new_lead', 'new_lead'], ['voicemail_callback', 'customer_voicemail_callback'], ['schedule', 'appointment_reschedule_intent'], ['payment', 'payment_failed']]) {
       await expect(bellPolicy.bellAllowed({ category, triggerKey })).resolves.toBe(true);
     }
-    for (const [category, triggerKey] of [['payment', 'payment_failed'], ['payment', 'bill_payment_error'], ['billing', null], ['dispute', null], ['job_application', 'new_job_application'], ['estimate_converted', null], ['estimate_measurement_review', null], ['system', 'twilio_failure']]) {
+    for (const [category, triggerKey] of [['payment', 'bill_payment_error'], ['billing', null], ['dispute', null], ['job_application', 'new_job_application'], ['estimate_converted', null], ['estimate_measurement_review', null], ['system', 'twilio_failure']]) {
       await expect(bellPolicy.bellAllowed({ category, triggerKey })).resolves.toBe(false);
     }
+  });
+
+  test('payment_failed rings even with the payment category silenced; other payment bells stay behind the toggle (owner ruling 2026-09-11)', async () => {
+    // An explicit "payment: off" override must not silence a declined card —
+    // the trigger allowlist sits above the category override. payment_succeeded
+    // is still denylisted and a category-only payment bell still honors "off".
+    mockTables({ notification_preferences: chainMock([{ trigger_key: 'category:payment', bell_enabled: false }]) });
+    await expect(bellPolicy.bellAllowed({ category: 'payment', triggerKey: 'payment_failed' })).resolves.toBe(true);
+    await expect(bellPolicy.bellAllowed({ category: 'payment', triggerKey: 'payment_succeeded' })).resolves.toBe(false);
+    await expect(bellPolicy.bellAllowed({ category: 'payment', triggerKey: null })).resolves.toBe(false);
+  });
+
+  test('repeat_caller is retired from the bell even though its missed_call category is allowlisted (owner ruling 2026-09-11)', async () => {
+    mockTables({ notification_preferences: chainMock([]) });
+    await expect(bellPolicy.bellAllowed({ category: 'missed_call', triggerKey: 'repeat_caller' })).resolves.toBe(false);
+    // The missed calls behind it still ring one bell each.
+    await expect(bellPolicy.bellAllowed({ category: 'missed_call', triggerKey: 'customer_missed_call' })).resolves.toBe(true);
+    // A site-level bell:true still wins (the denylist sits below the explicit tag).
+    await expect(bellPolicy.bellAllowed({ category: 'missed_call', triggerKey: 'repeat_caller', options: { bell: true } })).resolves.toBe(true);
   });
 });
 

@@ -233,6 +233,24 @@ app.use('/api/public/pest-forecast', (req, res, next) => {
   next();
 });
 
+// Ops-digest ingest (routes/ops-digest-ingest.js): unobservable-when-dark,
+// mounted ABOVE the global cors() (which would answer an OPTIONS preflight
+// 204 on its own), the global /api/ limiter (429) and the body parsers
+// (400/413) — while OPS_DIGEST_INGEST_TOKEN is unset EVERY request to the
+// path, any method, gets the generic unknown-route 404 (codex P0 r1/r4 on
+// #4392). Token-route privacy baseline (no-store, noindex, no-referrer) is
+// stamped first so the dark 404 carries it too; the router chain re-stamps
+// for the authenticated outcomes. The router's own darkUnlessConfigured
+// stays as the in-router layer; this one runs first.
+app.use('/api/ops/digest', require('./middleware/no-store').noStore, (req, res, next) => {
+  if (!process.env.OPS_DIGEST_INGEST_TOKEN) {
+    // middleware/errors.js notFoundBody — the one formatter, so this stays
+    // indistinguishable from an unknown route while dark.
+    return res.status(404).json(require('./middleware/errors').notFoundBody(req));
+  }
+  next();
+});
+
 // CORS — allow frontend dev server and production domain
 const { allowedOrigins } = require('./config/cors-origins');
 app.use(cors({
@@ -445,6 +463,11 @@ app.use('/api/webhooks/resend', require('./routes/webhooks-resend'));
 // parsers so login/reset floods cannot force large JSON parsing work.
 const { staffAuthBodyParsers } = require('./middleware/staff-auth-body');
 app.use('/api/admin/auth', ...staffAuthBodyParsers);
+
+// Ops-digest ingest: dark 404 → limiter → bearer auth → 1 MB JSON parse,
+// all BEFORE the global body parsers, so an unauthenticated caller can
+// never reach a 400/413 (routes/ops-digest-ingest.js ingestPreParsers).
+app.use('/api/ops/digest', ...require('./routes/ops-digest-ingest').ingestPreParsers);
 
 // MCP knowledge endpoint: authenticate (403/503/401 fail-closed) BEFORE any
 // body parsing, then parse with its own 256kb cap — same reason as staff
@@ -770,6 +793,9 @@ app.use('/api/integrations/watchdog-worker', require('./routes/integrations-watc
 app.use('/api/integrations/commitments-worker', require('./routes/integrations-commitments-worker'));
 // MCP read-only knowledge tools — machine auth (MCP_SERVICE_TOKEN), gated.
 app.use('/api/mcp', require('./routes/mcp'));
+// External ops-cron findings → ops_digest bell rows — machine auth
+// (OPS_DIGEST_INGEST_TOKEN); 404 until the token is set.
+app.use('/api/ops/digest', require('./routes/ops-digest-ingest'));
 app.use('/api/integrations/vendor-login-worker', require('./routes/integrations-vendor-login-worker'));
 app.use('/api/integrations/vendor-price-worker', require('./routes/integrations-vendor-price-worker'));
 app.use('/api/admin/kb', require('./routes/admin-kb'));

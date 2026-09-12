@@ -1860,6 +1860,40 @@ tools may be added here — the write surface stays IB-only behind
 write-gates. JSON-RPC batches are capped at 20; GET returns 405 (stateless
 server, no SSE). Treat the auth ordering and the read-only tool surface as
 security-critical).
+`/api/ops/digest` and `/api/ops/digest/resolve` (POST; machine-to-machine
+— the external Waves ops crons on the owner's Mac post their FIX:/ACT:
+findings so they land as `ops_digest` admin bell rows (the Waves Ops lane
+in Agents → Activity) instead of emails to contact@, and retire a finding's
+standing rows once its check has run clean N times (fall-off rule, owner
+2026-09-11). Token-only auth: `OPS_DIGEST_INGEST_TOKEN` via
+`Authorization: Bearer`, constant-time compare. Privacy baseline on every
+outcome (`Cache-Control: no-store`, `X-Robots-Tag: noindex`,
+`Referrer-Policy: no-referrer` via middleware/no-store.js). Fail-closed in
+ordered layers, the dark check FIRST — a pre-router `app.use('/api/ops/digest')`
+gate in server/index.js mounted ahead of the global `cors()` (so even an
+OPTIONS preflight reads 404 while dark), the global `/api/` limiter, and a
+pre-parser chain (`ingestPreParsers`: dark gate → own limiter → bearer auth
+→ 1 MB JSON parse → JSON body-error handler) mounted ahead of the global
+JSON parser, same pattern as `/api/mcp`. While the token is unset every
+request reads the SAME generic 404 an unknown route gets (`Route not
+found: METHOD path`), never a revealing 429, 400 or 413; with the token set
+a malformed or oversized body is parsed only AFTER auth, so an
+unauthenticated caller sees 401, never 400/413. Layers: 404 while the token
+is unset (that IS the kill switch), then 120/15-min per-IP limiter
+(/64-collapsed), 401 on mismatch,
+409 while `GATE_OPS_DIGESTS_IN_APP` / `GATE_AGENT_ACTIVITY` are off, 400 on
+a rejected payload (kinds other than FIX/ACT are refused — routine/FYI
+reporting stays on email), 503 when no row landed; the caller emails on
+any non-2xx so nothing is lost. `/resolve` shares the 404 → limiter → 401
+→ 400 layers but deliberately has NO 409: retiring history must never
+depend on the ingest lane being on, so it answers 200 `{ resolved: N }`
+(N may be 0) whatever the gates say. Writes exactly one admin `ops_digest` row
+(bell:true, dedupe on the check+key pair inside a rolling day; links must
+be `/admin`-relative; subject/body/metadata size-capped) or marks rows
+read + `metadata.resolved` — never deletes, never touches customer rows.
+No customer PII may be posted here (the ops-cron contract is id prefixes
+and masked phones). Treat the auth ordering and the exceptions-only kind
+allowlist as security/ruling-critical).
 `/api/client-errors` (POST; unauthenticated client error telemetry. An
 anonymous surface — /admin/login, a public token route, or any page — can
 crash in the browser, so the reporter cannot require auth. Error reports

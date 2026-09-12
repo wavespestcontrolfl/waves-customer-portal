@@ -121,4 +121,74 @@ async function deliverOpsDigest({ key, subject, text, html, link = null, metadat
   return { ok: true, channel: 'in_app', id: row.id || null };
 }
 
-module.exports = { deliverOpsDigest, inAppEnabled, htmlToText, CATEGORY };
+/**
+ * Fall-off rule (owner 2026-09-11): an exception bell must not sit unread
+ * forever once the condition behind it has cleared. When the check that
+ * raised a finding has run clean N times in a row (the runner counts), it
+ * asks for the finding's standing rows to be retired: every admin
+ * ops_digest row carrying that opsKey (and source, when given) that is not
+ * yet resolved is stamped resolved in metadata and, if still unread, marked
+ * read. Keyed off the resolved marker, NOT read_at: the owner opening a
+ * FIX/ACT bell before the check runs clean must not leave it "needs a fix"
+ * forever (pre-push P1). The row stays in the feed as history ("cleared");
+ * nothing is deleted. Returns the number of rows retired. Never throws — a
+ * failed retire is logged and reported as 0 so the caller can retry on its
+ * next clean run.
+ */
+// `lockKey`: the dedupeKey the matching ingest uses. When given, the retire
+// runs in its own transaction under the SAME advisory lock notifyAdmin's
+// dedupe takes (`admin:${dedupeKey}`), so an overlapping recurrence and a
+// clean-run resolve for one key serialize — never "deduped onto a row that
+// is being resolved" nor "fresh failure resolved by the clean run" (codex
+// P1 r6 on #4392). Without it the update runs on the shared connection.
+// `notAfter`: the clean observation's timestamp. Only rows whose own
+// observation is not newer than it retire — the advisory lock serializes
+// requests, not observations, so a later failure whose ingest won the lock
+// first must survive an earlier clean run's resolve (codex P1 r7 on #4392).
+// The row's observation is GREATEST(metadata.observedAt, created_at).
+// observedAt is kept MONOTONIC by the ingest route: under the same advisory
+// lock, it reads the standing observation BEFORE writing and stores the
+// later of the two — necessary because notifyAdmin's refreshOnDedupe merge
+// takes the INCOMING metadata verbatim (pinned by
+// notification-dedupe-refresh-semantics.test.js), so a delayed re-post from
+// an earlier run would otherwise lower it. created_at stays in the
+// comparison as a floor for rows written by any other path, so the cutoff
+// fails safe (a bell stays up) rather than clearing a live failure.
+async function resolveOpsDigest({ key, source = null, resolvedBy = 'ops-crons', lockKey = null, notAfter = null } = {}) {
+  const opsKey = String(key || '').trim();
+  if (!opsKey) return 0;
+  const db = require('../models/db');
+  const retire = async (conn) => {
+    const stamp = new Date().toISOString();
+    let q = conn('notifications')
+      .where({ recipient_type: 'admin', category: CATEGORY })
+      .whereRaw("COALESCE(metadata->>'resolved', '') <> 'true'")
+      .whereRaw("metadata->>'opsKey' = ?", [opsKey]);
+    if (source) q = q.whereRaw("metadata->>'source' = ?", [String(source)]);
+    if (notAfter) q = q.whereRaw("GREATEST(COALESCE(NULLIF(metadata->>'observedAt', '')::timestamptz, created_at), created_at) <= ?::timestamptz", [notAfter]);
+    return q.update({
+      read_at: conn.raw('COALESCE(read_at, NOW())'),
+      // Drop the dedupeKey with the resolve stamp: a resolved row must never
+      // be the "standing" row notifyAdmin's rolling-window dedupe finds, or a
+      // finding that clears and recurs inside the window would be swallowed
+      // as deduped with no live bell (codex P1 on #4392). opsKey stays for
+      // history and the Activity feed.
+      metadata: conn.raw("(COALESCE(metadata, '{}'::jsonb) - 'dedupeKey') || ?::jsonb", [JSON.stringify({ resolved: true, resolvedAt: stamp, resolvedBy: String(resolvedBy) })]),
+    });
+  };
+  try {
+    const count = lockKey
+      ? await db.transaction(async (trx) => {
+        await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`admin:${lockKey}`]);
+        return retire(trx);
+      })
+      : await retire(db);
+    logger.info(`[ops-digest] ${opsKey}: retired ${count} standing row(s) (${resolvedBy})`);
+    return Number(count) || 0;
+  } catch (err) {
+    logger.warn(`[ops-digest] ${opsKey}: retire failed: ${err.message}`);
+    return 0;
+  }
+}
+
+module.exports = { deliverOpsDigest, resolveOpsDigest, inAppEnabled, htmlToText, CATEGORY };
