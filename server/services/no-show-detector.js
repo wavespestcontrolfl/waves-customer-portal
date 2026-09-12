@@ -1158,7 +1158,10 @@ async function listNoShows(conn, { now = new Date(), limit = 100 } = {}) {
       .select('s.*', 'c.first_name', 'c.last_name', 'c.phone')
     : [];
   const events = await loadPromiseEvents(conn, [...liveRows, ...siblings].map((r) => String(r.id)), { now });
-  const promises = latestPromises(events, now);
+  // Event ARRAYS, the shape stopPromise needs: it computes each member's
+  // latest itself so a grouped send stays visible even when a later
+  // per-service notice displaced it (codex P1 round 24).
+  const promises = byVisit(events);
   const candidateIds = new Set(liveRows.map((r) => String(r.id)));
   const cards = groupedStops([...liveRows, ...siblings]).map(({ members }) => {
     // The representative must be a row this scan actually returned — the
