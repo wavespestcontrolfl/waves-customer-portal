@@ -522,7 +522,9 @@ async function runPending() {
     .whereNull('i.payer_id')
     // …and the withdrawal stamp, which records exactly the same ownership
     // move on a row whose payer_id stays NULL (Codex #4311 r31 P1).
-    .where((q) => q.whereNull('i.scheduled_send_error').orWhereNot('i.scheduled_send_error', 'like', 'payer_billed:%'))
+    .where(function withdrawnExcluded() {
+      this.whereNull('i.scheduled_send_error').orWhereNot('i.scheduled_send_error', 'like', 'payer_billed:%');
+    })
     .select(
       's.*',
       'i.id as invoice_id', 'i.token', 'i.title', 'i.total', 'i.credit_applied', 'i.status as invoice_status',

@@ -1037,6 +1037,13 @@ router.get('/balance', async (req, res, next) => {
       .where({ customer_id: req.customerId })
       .whereIn('status', ['sent', 'viewed', 'overdue'])
       .whereNull('payer_id')
+      // A combined-visit invoice WITHDRAWN to a payer keeps payer_id NULL and
+      // a collectible status — the move lives only in its stamp (Codex #4311
+      // r33 P1) — so a payer_id-only filter showed the homeowner AP-owned
+      // debt as their own balance.
+      .where(function withdrawnExcluded() {
+        this.whereNull('scheduled_send_error').orWhereNot('scheduled_send_error', 'like', 'payer_billed:%');
+      })
       // Outstanding balance = amount DUE (total − applied account credit), not the
       // raw total, so the portal balance matches what Stripe/Terminal actually charge.
       .select(db.raw('COALESCE(SUM(GREATEST(total - COALESCE(credit_applied, 0), 0)), 0) AS total'))
@@ -1102,6 +1109,11 @@ router.get('/balance', async (req, res, next) => {
         })
         .whereNull('payer_id')
         .whereNull('payer_statement_id')
+        // …and withdrawn rows, which keep a NULL payer_id: the Pay Now list
+        // hands out a bearer pay link, so it must never carry AP-owned debt.
+        .where(function withdrawnExcluded() {
+          this.whereNull('scheduled_send_error').orWhereNot('scheduled_send_error', 'like', 'payer_billed:%');
+        })
         // Positive balance in SQL, BEFORE the cap — otherwise five old
         // fully-credited invoices would crowd a payable sixth out of the
         // list entirely (Codex P2). Same GREATEST expression as the

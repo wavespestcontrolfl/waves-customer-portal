@@ -221,6 +221,22 @@ async function enrollSettledPacketReviews(invoiceIds, { database = db, source = 
       logger.error(`[payer-statement-settle] review enrollment threw for child invoice ${id}: ${err.message}`);
     }
   }
+  if (!unrecorded.length) {
+    // A later pass (a redelivery, or the admin re-running the reconcile)
+    // recorded them after all: retire the warning rather than leaving
+    // dispatch an open item for work that is no longer missing.
+    try {
+      const open = await db('dispatch_alerts').where({ type: 'visit_closeout_review' }).whereNull('resolved_at')
+        .whereRaw("payload->>'reason' = 'review_enrollment_unrecorded'")
+        .whereRaw("payload->>'invoiceIds' = ?", [JSON.stringify(ids)])
+        .select('id');
+      for (const alert of open) {
+        await require('./dispatch-alerts').resolveAlert({ id: alert.id, resolvedBy: null });
+      }
+    } catch (resolveErr) {
+      logger.warn(`[payer-statement-settle] could not retire an unrecorded-enrollment alert: ${resolveErr.message}`);
+    }
+  }
   if (unrecorded.length) {
     logger.error(`[payer-statement-settle] ${unrecorded.length} settled packet invoice(s) have an UNRECORDED review enrollment — the packet recovery sweep owns them now`);
     // A rail with no redelivery (the admin offline reconcile) would otherwise
@@ -229,16 +245,25 @@ async function enrollSettledPacketReviews(invoiceIds, { database = db, source = 
     // invoice set; a failure to alert is logged, never thrown over money that
     // has already moved.
     try {
-      await require('./dispatch-alerts').createAlert({
-        type: 'visit_closeout_review',
-        severity: 'warn',
-        payload: {
-          reason: 'review_enrollment_unrecorded',
-          source,
-          invoiceIds: unrecorded,
-          detail: 'These settled invoices owe a review ask that could not be recorded — re-run the enrollment or ask manually.',
-        },
-      });
+      // ONE open alert per invoice set (Codex #4311 r33 P2): the webhook
+      // throws for redelivery after this, so every retry would otherwise
+      // insert another warning for the same missing ask.
+      const existing = await db('dispatch_alerts').where({ type: 'visit_closeout_review' }).whereNull('resolved_at')
+        .whereRaw("payload->>'reason' = 'review_enrollment_unrecorded'")
+        .whereRaw("payload->>'invoiceIds' = ?", [JSON.stringify(unrecorded)])
+        .first('id');
+      if (!existing) {
+        await require('./dispatch-alerts').createAlert({
+          type: 'visit_closeout_review',
+          severity: 'warn',
+          payload: {
+            reason: 'review_enrollment_unrecorded',
+            source,
+            invoiceIds: unrecorded,
+            detail: 'These settled invoices owe a review ask that could not be recorded — re-run the enrollment or ask manually.',
+          },
+        });
+      }
     } catch (alertErr) {
       logger.error(`[payer-statement-settle] could not raise the unrecorded-enrollment alert: ${alertErr.message}`);
     }

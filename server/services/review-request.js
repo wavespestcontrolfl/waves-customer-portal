@@ -4241,7 +4241,7 @@ const ReviewService = {
       return { ok: false, retryable: false, uncertain: true, reason: "provider_uncertain", channel: "sms", requestId: request.id };
     }
     try {
-      return await this._applyOutreachSendResult(request, result, manageRetryVia, "sms");
+      return await this._applyOutreachSendResult(request, result, manageRetryVia, "sms", sendClaim);
     } catch (bookErr) {
       // The send already happened — do NOT requeue. Report based on what the
       // provider did; the audit log holds the full record for reconciliation.
@@ -4265,7 +4265,17 @@ const ReviewService = {
     }
   },
 
-  async _applyOutreachSendResult(request, result, manageRetryVia, channel) {
+  async _applyOutreachSendResult(request, result, manageRetryVia, channel, sendClaim = null) {
+    // When this attempt took NO claim of its own — a refusal decided by a
+    // validator BEFORE the handoff ran — a `sending` row is another sender's
+    // live claim, and its provider request may be in flight (Codex #4311 r33
+    // P1). Every write below is scoped away from such a row; the owner's own
+    // bookkeeping (or the stranded-send reconciliation) settles it.
+    const unclaimed = !!sendClaim && !sendClaim.marked;
+    const ownRow = () => {
+      const q = db("review_requests").where({ id: request.id });
+      return unclaimed ? q.whereNot("status", "sending") : q;
+    };
     if (result && result.sent) {
       await db("review_requests").where({ id: request.id }).update({
         sms_sent_at: new Date(),
@@ -4285,19 +4295,19 @@ const ReviewService = {
       // must hold the WHOLE sequence rather than schedule the same step
       // again in 30 minutes, which would re-run sendOutreachTouch and send
       // a second text (codex #4338 P1, round 2).
-      await db("review_requests").where({ id: request.id }).update({ status: "deferred" });
+      await ownRow().update({ status: "deferred" });
       return { ok: false, deferred: true, uncertain: true, channel, requestId: request.id, code: result?.code };
     }
     const deferredRetryAt = retryAtForDeferredSend(result);
     if (deferredRetryAt) {
       if (manageRetryVia === "cron") {
-        await db("review_requests").where({ id: request.id }).update({
+        await ownRow().update({
           status: "pending",
           scheduled_for: deferredRetryAt,
         });
       } else {
         // The sequence cron owns retries — keep this row out of processScheduled.
-        await db("review_requests").where({ id: request.id }).update({ status: "deferred" });
+        await ownRow().update({ status: "deferred" });
       }
       return { ok: false, deferred: true, nextAllowedAt: deferredRetryAt, channel, requestId: request.id, code: result?.code };
     }
@@ -4311,7 +4321,7 @@ const ReviewService = {
       result.code !== "CONSENT_LOOKUP_FAILED" &&
       (result.terminal === true || (result.blocked && result.retryable !== true && !result.deferred));
     if (terminalBlock) {
-      await db("review_requests").where({ id: request.id }).update({ status: "suppressed" });
+      await ownRow().update({ status: "suppressed" });
       return { ok: false, blocked: true, terminal: true, channel, requestId: request.id, code: result?.code };
     }
     // Transient (provider failure / consent lookup blip).

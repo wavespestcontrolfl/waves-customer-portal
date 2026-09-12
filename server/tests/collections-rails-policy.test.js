@@ -69,6 +69,9 @@ function chain({ result = [], first, returning } = {}) {
   const q = {};
   ['join', 'where', 'whereIn', 'whereNotIn', 'whereNull', 'whereNotNull', 'whereRaw',
     'select', 'orderBy', 'forUpdate', 'limit', 'andWhere',
+    // the withdrawal-stamp exclusion (a payer-billed combined-visit invoice
+    // keeps payer_id NULL) builds its clause from these
+    'whereNot', 'orWhereNot', 'orWhereNull',
   ].forEach((m) => { q[m] = jest.fn((arg) => { if (typeof arg === 'function') arg.call(q); return q; }); });
   q.orWhere = jest.fn((arg) => { if (typeof arg === 'function') arg.call(q); return q; });
   q.insert = jest.fn(() => q);
@@ -156,7 +159,12 @@ const LP_EXPECTED_SEND = {
 
 function armLatePaymentHappyPath() {
   setDbQueues({
-    invoices: [chain({ result: [LP_INVOICE] })],
+    invoices: [
+      chain({ result: [LP_INVOICE] }),
+      // the pre-guard ownership re-read, then the last one before dispatch
+      chain({ first: { payer_id: null, scheduled_send_error: null } }),
+      chain({ first: { payer_id: null, scheduled_send_error: null } }),
+    ],
     activity_log: [chain({ first: null }), chain()],
     customers: [chain({ first: LP_CUSTOMER })],
     invoice_followup_sequences: [chain({ first: undefined }), chain({ first: undefined })],
@@ -185,7 +193,12 @@ describe('late-payment-checker rail', () => {
     process.env.GATE_COLLECTIONS_POLICY = 'true';
     ContactPolicy.evaluate.mockResolvedValue(DENIED);
     setDbQueues({
-      invoices: [chain({ result: [LP_INVOICE] })],
+      invoices: [
+      chain({ result: [LP_INVOICE] }),
+      // the pre-guard ownership re-read, then the last one before dispatch
+      chain({ first: { payer_id: null, scheduled_send_error: null } }),
+      chain({ first: { payer_id: null, scheduled_send_error: null } }),
+    ],
       activity_log: [chain({ first: null })],
       customers: [chain({ first: LP_CUSTOMER })],
       invoice_followup_sequences: [chain({ first: undefined }), chain({ first: undefined })],
@@ -232,7 +245,12 @@ describe('late-payment-checker rail', () => {
     // eligible set; sibling inv-2 is the one the verdict allows.
     ContactPolicy.evaluate.mockResolvedValue({ allowed: true, denialReasons: [], eligibleInvoiceIds: ['inv-2'] });
     setDbQueues({
-      invoices: [chain({ result: [LP_INVOICE] })],
+      invoices: [
+      chain({ result: [LP_INVOICE] }),
+      // the pre-guard ownership re-read, then the last one before dispatch
+      chain({ first: { payer_id: null, scheduled_send_error: null } }),
+      chain({ first: { payer_id: null, scheduled_send_error: null } }),
+    ],
       activity_log: [chain({ first: null })],
       customers: [chain({ first: LP_CUSTOMER })],
       invoice_followup_sequences: [chain({ first: undefined }), chain({ first: undefined })],
@@ -271,7 +289,12 @@ describe('late-payment-checker rail', () => {
   test('LEDGER FAILURE ⇒ NO SEND: an unledgerable contact is never attempted (and retries next run — no dedupe row)', async () => {
     ContactLedger.recordContact.mockRejectedValue(new Error('ledger down'));
     setDbQueues({
-      invoices: [chain({ result: [LP_INVOICE] })],
+      invoices: [
+      chain({ result: [LP_INVOICE] }),
+      // the pre-guard ownership re-read, then the last one before dispatch
+      chain({ first: { payer_id: null, scheduled_send_error: null } }),
+      chain({ first: { payer_id: null, scheduled_send_error: null } }),
+    ],
       activity_log: [chain({ first: null })],
       customers: [chain({ first: LP_CUSTOMER })],
       invoice_followup_sequences: [chain({ first: undefined }), chain({ first: undefined })],
@@ -355,8 +378,9 @@ function armFollowupHappyPath({ sequenceUpdate = chain() } = {}) {
     customers: [chain({ first: FU_CUSTOMER })],
     invoices: [
       chain({ first: FU_INVOICE }), // claim-txn row lock read
+      chain({ first: FU_INVOICE }), // fireTouch's live ownership re-read
       chain({ first: FU_INVOICE }), // credit path's own invoice read
-      chain({ first: FU_INVOICE }), // pre-dun refresh
+      chain({ first: FU_INVOICE }), // pre-dun refresh (ownership judged again)
       chain({ first: FU_INVOICE }), // email-eligibility read
     ],
     notification_prefs: [chain({ first: { email_enabled: true } })],
@@ -387,7 +411,10 @@ describe('invoice-followups rail', () => {
     setDbQueues({
       'invoice_followup_sequences as s': [chain({ result: [followupRow()] })],
       customers: [chain({ first: FU_CUSTOMER })],
-      invoices: [chain({ first: FU_INVOICE })], // claim-txn row lock read only
+      invoices: [
+        chain({ first: FU_INVOICE }), // claim-txn row lock read
+        chain({ first: FU_INVOICE }), // fireTouch's live ownership re-read
+      ],
       invoice_followup_sequences: [
         chain({ first: FU_LIVE_SEQ }),
         chain({ result: 1 }), // touch claim
@@ -458,8 +485,9 @@ describe('invoice-followups rail', () => {
       customers: [chain({ first: FU_CUSTOMER })],
       invoices: [
         chain({ first: FU_INVOICE }), // claim-txn row lock read
+        chain({ first: FU_INVOICE }), // fireTouch's live ownership re-read
         chain({ first: FU_INVOICE }), // credit path's own invoice read
-        chain({ first: FU_INVOICE }), // pre-dun refresh
+        chain({ first: FU_INVOICE }), // pre-dun refresh (ownership judged again)
       ],
       invoice_followup_sequences: [
         chain({ first: FU_LIVE_SEQ }),

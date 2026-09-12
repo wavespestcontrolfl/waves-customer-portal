@@ -1016,6 +1016,11 @@ router.post('/:token/consent', async (req, res, next) => {
 
     invoice = await db('invoices').where({ token: req.params.token }).first();
     if (!invoice) return res.status(404).json({ error: 'Invoice not found' });
+    if (invoiceWithdrawnFromCustomer(invoice)) {
+      // Same rule as the collection seams (Codex #4311 r33 P1): a withdrawn
+      // invoice must not enroll the homeowner's method for the debt.
+      return res.status(409).json({ error: 'This invoice is billed to a third-party payer', code: 'invoice_withdrawn_from_customer' });
+    }
     if (!invoice.customer_id) {
       return respondWithPaymentError(req, res, {
         invoice,
@@ -1250,6 +1255,13 @@ router.post('/:token/capture-setup', async (req, res) => {
     invoice = await db('invoices').where({ token: req.params.token }).first();
     if (!invoice) return res.status(404).json({ error: 'Invoice not found' });
     if (!invoice.customer_id) return res.status(400).json({ error: 'Invoice has no customer' });
+    // A WITHDRAWN invoice funds nothing (Codex #4311 r33 P1): it keeps a
+    // collectible status and a NULL payer_id, so the required-save check
+    // still approves it and the homeowner's method would be saved — and
+    // enrolled for Auto Pay — against debt that now belongs to AP.
+    if (invoiceWithdrawnFromCustomer(invoice)) {
+      return res.status(409).json({ error: 'This invoice is billed to a third-party payer', code: 'invoice_withdrawn_from_customer' });
+    }
     // Fail closed: capture exists solely for the required-save +
     // credit-covered state — any other invoice/token must not be usable to
     // start attaching methods to the account.
@@ -1329,6 +1341,9 @@ router.post('/:token/setup-complete', async (req, res) => {
     invoice = await db('invoices').where({ token: req.params.token }).first();
     if (!invoice) return res.status(404).json({ error: 'Invoice not found' });
     if (!invoice.customer_id) return res.status(400).json({ error: 'Invoice has no customer' });
+    if (invoiceWithdrawnFromCustomer(invoice)) {
+      return res.status(409).json({ error: 'This invoice is billed to a third-party payer', code: 'invoice_withdrawn_from_customer' });
+    }
     // Fail closed: this endpoint exists solely to satisfy the required-save
     // rule — a non-required invoice token must not be usable to attach
     // methods to the account.
