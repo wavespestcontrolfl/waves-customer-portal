@@ -76,6 +76,33 @@ function fixture(url, options = {}) {
       },
       signals: ["Synthetic seasonal signal"],
     };
+  if (parsed.pathname === "/api/admin/content/blog/audit")
+    return {
+      audit: {
+        total: 10,
+        published: 4,
+        drafts: 1,
+        queued: 2,
+        ideas: 3,
+        recommendations: [
+          {
+            priority: "critical",
+            title: "Synthetic content gap",
+            action: "Review the synthetic fixture before publishing.",
+          },
+        ],
+        topicDistribution: {
+          counts: { Termites: 4, Mosquitoes: 6 },
+          gaps: ["Synthetic rodent guide"],
+        },
+        cityDistribution: {
+          counts: { Sarasota: 6, Bradenton: 4 },
+          overrepresented: [{ city: "Sarasota" }],
+        },
+        duplicates: [],
+        topPerformers: [{ score: 91, title: "Synthetic top performer" }],
+      },
+    };
   if (parsed.pathname === "/api/admin/content/authors")
     return {
       authors: [
@@ -89,6 +116,7 @@ function fixture(url, options = {}) {
     options.method === "PUT"
   )
     return { post: { ...post, ...JSON.parse(options.body) } };
+  if (parsed.pathname === "/api/admin/content/blog/post-17") return { post };
   if (
     parsed.pathname === "/api/admin/content/generate" &&
     options.method === "POST"
@@ -152,9 +180,7 @@ describe("Blog workspace foundation", () => {
       </MemoryRouter>,
     );
 
-    fireEvent.click(
-      await screen.findByRole("button", { name: /Page Refresh/ }),
-    );
+    fireEvent.click(await screen.findByText("Page Refresh", { exact: true }));
     fireEvent.change(
       screen.getByPlaceholderText(
         "Describe the topic or paste a working title...",
@@ -192,13 +218,17 @@ describe("Blog workspace foundation", () => {
     render(
       <MemoryRouter initialEntries={["/admin/blog?status=draft"]}>
         <BlogPage />
+        <LocationSearch />
       </MemoryRouter>,
     );
 
     fireEvent.click(await screen.findByText("Synthetic termite guide"));
     const title = await screen.findByDisplayValue("Synthetic termite guide");
+    expect(screen.getByTestId("location-search")).toHaveTextContent(
+      "post=post-17",
+    );
     fireEvent.change(title, { target: { value: "Edited synthetic guide" } });
-    fireEvent.click(screen.getByRole("button", { name: "Save draft" }));
+    fireEvent.click(screen.getByRole("button", { name: "Save Draft" }));
 
     await waitFor(() => {
       const request = fetch.mock.calls.find(
@@ -227,9 +257,105 @@ describe("Blog workspace foundation", () => {
       });
     });
 
+    await waitFor(() =>
+      expect(screen.getByTestId("location-search")).not.toHaveTextContent(
+        "post=post-17",
+      ),
+    );
+
     expect(
-      within(screen.getByRole("navigation", { name: "Blog section" }))
-        .getByRole("button", { name: "Posts" }),
+      within(
+        screen.getByRole("navigation", { name: "Blog section" }),
+      ).getByRole("button", { name: "Posts" }),
     ).toBeInTheDocument();
+  });
+
+  it("preserves the existing audit scorecard and distribution charts", async () => {
+    render(
+      <MemoryRouter initialEntries={["/admin/blog?tab=audit"]}>
+        <BlogPage />
+      </MemoryRouter>,
+    );
+
+    expect(await screen.findByText("Content Health Scorecard")).toBeVisible();
+    expect(screen.getByText("By Topic")).toBeVisible();
+    expect(screen.getByText("By City")).toBeVisible();
+    expect(screen.getByText("Synthetic top performer")).toBeVisible();
+    expect(screen.getByText("Synthetic content gap")).toBeVisible();
+    expect(screen.getByText(/Synthetic rodent guide/)).toBeVisible();
+  });
+
+  it("does not apply Blog token overrides to lazy embedded workspaces", async () => {
+    render(
+      <MemoryRouter initialEntries={["/admin/blog?tab=autopilot"]}>
+        <BlogPage />
+      </MemoryRouter>,
+    );
+
+    expect(await screen.findByText("Autopilot workspace")).toBeVisible();
+    expect(document.querySelector(".admin-blog-token-scope")).toBeNull();
+  });
+
+  it("opens bookmarked posts directly and keeps list parameters on close", async () => {
+    render(
+      <MemoryRouter
+        initialEntries={[
+          "/admin/blog?tab=posts&status=draft&post=post-17&keep=yes",
+        ]}
+      >
+        <BlogPage />
+        <LocationSearch />
+      </MemoryRouter>,
+    );
+
+    expect(
+      await screen.findByDisplayValue("Synthetic termite guide"),
+    ).toBeVisible();
+    expect(
+      fetch.mock.calls.some(([url]) =>
+        String(url).endsWith("/admin/content/blog/post-17"),
+      ),
+    ).toBe(true);
+
+    fireEvent.click(screen.getByRole("button", { name: /Back to list/ }));
+    await screen.findByText("Synthetic termite guide");
+    expect(screen.getByTestId("location-search")).toHaveTextContent("keep=yes");
+    expect(screen.getByTestId("location-search")).toHaveTextContent(
+      "status=draft",
+    );
+    expect(screen.getByTestId("location-search")).not.toHaveTextContent(
+      "post=post-17",
+    );
+  });
+
+  it("recovers a bookmarked post after a failed read", async () => {
+    let reads = 0;
+    fetch.mockImplementation(async (url, options = {}) => {
+      const parsed = new URL(String(url), "http://localhost");
+      if (
+        parsed.pathname === "/api/admin/content/blog/post-17" &&
+        !options.method
+      ) {
+        reads += 1;
+        if (reads === 1)
+          return jsonResponse({ error: "Synthetic read failed" }, 503);
+      }
+      return jsonResponse(fixture(url, options));
+    });
+
+    render(
+      <MemoryRouter initialEntries={["/admin/blog?post=post-17"]}>
+        <BlogPage />
+      </MemoryRouter>,
+    );
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "Synthetic read failed",
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Try again" }));
+    expect(
+      await screen.findByDisplayValue("Synthetic termite guide"),
+    ).toBeVisible();
+    expect(reads).toBe(2);
   });
 });

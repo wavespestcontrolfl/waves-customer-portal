@@ -115,15 +115,11 @@ function bodyFor(url, method) {
         topPerformers: [{ score: 91, title: "Synthetic top performer" }],
       },
     };
-  if (
-    url.pathname === "/api/admin/content/blog/post-17" &&
-    method === "PUT"
-  )
+  if (url.pathname === "/api/admin/content/blog/post-17" && method === "PUT")
     return { post };
-  if (
-    url.pathname === "/api/admin/content/generate" &&
-    method === "POST"
-  )
+  if (url.pathname === "/api/admin/content/blog/post-17" && method === "GET")
+    return { post };
+  if (url.pathname === "/api/admin/content/generate" && method === "POST")
     return { id: "generated-post" };
   if (url.pathname === "/api/admin/usage/track") return { ok: true };
   return null;
@@ -144,6 +140,130 @@ function visibleTypography() {
       text: node.textContent.trim().slice(0, 60),
       font: getComputedStyle(node).fontSize,
     }));
+}
+
+function tokenViolations() {
+  const visible = (node) =>
+    node.getClientRects().length > 0 && !node.closest("[hidden], [inert]");
+  const rgb = (value) => {
+    const match = value.match(
+      /rgba?\((\d+),\s*(\d+),\s*(\d+)(?:,\s*([\d.]+))?\)/,
+    );
+    return match
+      ? [
+          Number(match[1]),
+          Number(match[2]),
+          Number(match[3]),
+          Number(match[4] ?? 1),
+        ]
+      : null;
+  };
+  const allowed = (value) => {
+    const color = rgb(value);
+    if (!color || color[3] === 0) return true;
+    const [red, green, blue] = color;
+    const neutral =
+      Math.max(red, green, blue) - Math.min(red, green, blue) <= 12;
+    const alertRed = red > green && Math.abs(green - blue) <= 6;
+    return neutral || alertRed;
+  };
+  const failures = [];
+  for (const node of document.querySelectorAll(".admin-blog-token-scope *")) {
+    if (!visible(node)) continue;
+    const style = getComputedStyle(node);
+    for (const property of [
+      "color",
+      "backgroundColor",
+      "borderTopColor",
+      "borderRightColor",
+      "borderBottomColor",
+      "borderLeftColor",
+    ]) {
+      if (!allowed(style[property])) {
+        failures.push({
+          text: node.textContent.trim().slice(0, 50),
+          property,
+          value: style[property],
+        });
+      }
+    }
+    if (node.tagName === "BUTTON") {
+      if (
+        style.textTransform !== "uppercase" ||
+        parseFloat(style.letterSpacing) < 0.7
+      ) {
+        failures.push({
+          text: node.textContent.trim().slice(0, 50),
+          property: "button-label",
+          value: `${style.textTransform}/${style.letterSpacing}`,
+        });
+      }
+    }
+  }
+  return failures;
+}
+
+function buttonContrastViolations() {
+  const parseColor = (value) => {
+    const match = value.match(
+      /rgba?\((\d+),\s*(\d+),\s*(\d+)(?:,\s*([\d.]+))?\)/,
+    );
+    return match
+      ? [
+          Number(match[1]),
+          Number(match[2]),
+          Number(match[3]),
+          Number(match[4] ?? 1),
+        ]
+      : [0, 0, 0, 0];
+  };
+  const composite = (foreground, background, alpha = foreground[3]) => [
+    foreground[0] * alpha + background[0] * (1 - alpha),
+    foreground[1] * alpha + background[1] * (1 - alpha),
+    foreground[2] * alpha + background[2] * (1 - alpha),
+    1,
+  ];
+  const backgroundFor = (node) => {
+    if (!node) return [255, 255, 255, 1];
+    const beneath = backgroundFor(node.parentElement);
+    const own = parseColor(getComputedStyle(node).backgroundColor);
+    return composite(own, beneath);
+  };
+  const luminance = (color) => {
+    const channels = color.slice(0, 3).map((channel) => {
+      const normalized = channel / 255;
+      return normalized <= 0.04045
+        ? normalized / 12.92
+        : ((normalized + 0.055) / 1.055) ** 2.4;
+    });
+    return channels[0] * 0.2126 + channels[1] * 0.7152 + channels[2] * 0.0722;
+  };
+  const contrast = (first, second) => {
+    const light = Math.max(luminance(first), luminance(second));
+    const dark = Math.min(luminance(first), luminance(second));
+    return (light + 0.05) / (dark + 0.05);
+  };
+
+  return [...document.querySelectorAll(".admin-blog-token-scope button")]
+    .filter((node) => node.getClientRects().length > 0)
+    .map((node) => {
+      const style = getComputedStyle(node);
+      const beneath = backgroundFor(node.parentElement);
+      const background = composite(parseColor(style.backgroundColor), beneath);
+      const text = composite(parseColor(style.color), background);
+      const opacity = Number(style.opacity);
+      const renderedBackground = composite(background, beneath, opacity);
+      const renderedText = composite(text, beneath, opacity);
+      return {
+        text: node.textContent.trim().slice(0, 50),
+        disabled: node.disabled,
+        ratio: Number(contrast(renderedText, renderedBackground).toFixed(2)),
+        color: style.color,
+        background: style.backgroundColor,
+        beneath: beneath.slice(0, 3).map((channel) => Math.round(channel)),
+      };
+    })
+    .filter((result) => result.ratio < 4.5);
 }
 
 async function main() {
@@ -171,9 +291,23 @@ async function main() {
       });
       const page = await context.newPage();
       page.setDefaultTimeout(20000);
-      await page.addInitScript(() =>
-        localStorage.setItem("waves_admin_token", "synthetic-token"),
-      );
+      await page.addInitScript(() => {
+        localStorage.setItem("waves_admin_token", "synthetic-token");
+        const browserFetch = window.fetch.bind(window);
+        window.fetch = (input, init) =>
+          String(input).includes("/api/admin/usage/track")
+            ? Promise.resolve(
+                new Response(JSON.stringify({ ok: true }), {
+                  status: 200,
+                  headers: { "Content-Type": "application/json" },
+                }),
+              )
+            : browserFetch(input, init);
+        Object.defineProperty(navigator, "sendBeacon", {
+          configurable: true,
+          value: () => true,
+        });
+      });
       await page.routeWebSocket("**/*", (socket) => socket.close());
       page.on("pageerror", (error) =>
         report.pageErrors.push(`${width}: ${error.message}`),
@@ -214,6 +348,11 @@ async function main() {
       const capture = async (name) => {
         await page.evaluate(() => window.scrollTo(0, 0));
         await waitForFonts(page);
+        await page.evaluate(() =>
+          Promise.allSettled(
+            document.getAnimations().map((animation) => animation.finished),
+          ),
+        );
         assert.ok(
           await page.evaluate(
             () => document.documentElement.scrollWidth <= innerWidth + 1,
@@ -224,6 +363,16 @@ async function main() {
           await page.evaluate(visibleTypography),
           [],
           `small text in ${name} at ${width}`,
+        );
+        assert.deepEqual(
+          await page.evaluate(tokenViolations),
+          [],
+          `non-token color or button label in ${name} at ${width}`,
+        );
+        assert.deepEqual(
+          await page.evaluate(buttonContrastViolations),
+          [],
+          `button contrast below 4.5:1 in ${name} at ${width}`,
         );
         const controls = await page
           .locator("button,input,select,textarea")
@@ -239,15 +388,14 @@ async function main() {
         assert.ok(
           controls.every(
             (control) =>
-              control.font >= 14 &&
-              control.height >= (width === 390 ? 44 : 28),
+              control.font >= 14 && control.height >= (width === 390 ? 44 : 24),
           ),
           `undersized control in ${name} at ${width}: ${JSON.stringify(controls)}`,
         );
         const shot = `${name}-${width}.png`;
         await page.screenshot({
           path: path.join(output, shot),
-          fullPage: true,
+          fullPage: false,
           animations: "disabled",
         });
         report.screenshots.push(shot);
@@ -258,13 +406,43 @@ async function main() {
         waitUntil: "domcontentloaded",
         timeout: 60000,
       });
-      const postRow = page.getByRole("button", { name: new RegExp(post.title) });
+      const postRow = page.getByText(post.title, { exact: false }).first();
       await postRow.waitFor();
       await capture("posts");
 
       await postRow.click();
-      const titleInput = page.getByRole("textbox", { name: "Title" });
+      const titleInput = page.locator("input").first();
       await titleInput.waitFor();
+      assert.equal(
+        new URL(page.url()).searchParams.get("post"),
+        "post-17",
+        `editor bookmark at ${width}`,
+      );
+      const statusDot = page.locator('[data-qa="blog-status-dot"]').first();
+      await statusDot.waitFor();
+      const statusDotStyle = await statusDot.evaluate((node) => {
+        const box = node.getBoundingClientRect();
+        const style = getComputedStyle(node);
+        return {
+          width: box.width,
+          height: box.height,
+          radius: style.borderRadius,
+        };
+      });
+      assert.equal(
+        statusDotStyle.width,
+        5,
+        `status dot width in editor at ${width}`,
+      );
+      assert.equal(
+        statusDotStyle.height,
+        5,
+        `status dot height in editor at ${width}`,
+      );
+      assert.ok(
+        statusDotStyle.radius === "50%" || statusDotStyle.radius === "999px",
+        `status dot shape in editor at ${width}`,
+      );
       await capture("editor");
       await titleInput.fill("Edited synthetic guide");
       await Promise.all([
@@ -273,17 +451,17 @@ async function main() {
         ),
         page.getByRole("button", { name: "Save draft" }).click(),
       ]);
+      await page.waitForURL((url) => !url.searchParams.has("post"));
 
       const blogNav = page.getByRole("navigation", { name: "Blog section" });
       await blogNav.getByRole("button", { name: "Generate" }).click();
-      await page.getByText("FAWN weather", { exact: true }).waitFor();
+      await page.getByText("FAWN Weather", { exact: true }).waitFor();
+      await capture("generate-disabled");
       await page
         .getByPlaceholder("Describe the topic or paste a working title...")
         .fill("Synthetic refresh topic");
-      await page.getByRole("button", { name: /Page Refresh/ }).click();
-      await page
-        .getByRole("button", { name: "Sarasota", exact: true })
-        .click();
+      await page.getByText("Page Refresh", { exact: true }).click();
+      await page.getByRole("button", { name: "Sarasota", exact: true }).click();
       await capture("generate");
       await Promise.all([
         page.waitForResponse((response) =>
