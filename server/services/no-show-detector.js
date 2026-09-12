@@ -601,6 +601,17 @@ async function recordSentWindowFallback(conn, { visitId, startAtMs, communicated
 // moves between members from tier to tier, and the tracking key (and the
 // dispatch_alerts job_id it carries) must stay stable across sweeps for the
 // same stop.
+// The stop's representative: the lowest-id member that is still LIVE (the
+// lowest id at all if none are). Shared by creation and both reconcile passes
+// so they cannot disagree — when the previous representative completes or
+// cancels and drops out, the stop's card moves to the next live member, and
+// the reconcile pass must recognise the old row's notice/alert as superseded
+// rather than leaving two cards up for one stop (codex P1 round 10).
+function representativeOf(members = []) {
+  const ordered = [...members].sort((a, b) => String(a.id).localeCompare(String(b.id)));
+  return ordered.find((m) => LIVE_STATUSES.includes(m.status)) || ordered[0] || null;
+}
+
 function groupedStops(rows = []) {
   const byStop = new Map();
   for (const row of rows) {
@@ -692,7 +703,11 @@ async function listNoShows(conn, { now = new Date(), limit = 100, offset = 0, ac
     // The representative must be a row this scan actually returned — the
     // card, its tracking key and the office alert's job_id all hang off it —
     // so a stop pulled in only through a sibling raises no card of its own.
-    const r = members.find((m) => candidateIds.has(String(m.id)));
+    // Prefer the stop's canonical representative; fall back to any candidate
+    // row when that member is outside this scan (a tech-scoped listing).
+    const preferred = representativeOf(members);
+    const r = preferred && candidateIds.has(String(preferred.id))
+      ? preferred : members.find((m) => candidateIds.has(String(m.id)));
     if (!r) return null;
     const promise = stopPromise(members, promises, now);
     const alert = evaluateNoShow({ visit: stopState(members, { now, since: promise?.start_at }), promise, now });
@@ -851,8 +866,14 @@ async function lockedStop(trx, serviceId, { now = new Date(), ignoreHorizon = fa
   const visit = members.find((m) => String(m.id) === String(serviceId)) || row;
   const events = await loadPromiseEvents(trx, members.map((m) => String(m.id)), { now });
   const promise = stopPromise(members, latestPromises(events, now), now);
-  return { visit, members, promise,
-    live: evaluateNoShow({ visit: stopState(members, { now, since: promise?.start_at }), promise, now, ignoreHorizon }) };
+  const live = evaluateNoShow({ visit: stopState(members, { now, since: promise?.start_at }), promise, now, ignoreHorizon });
+  // A card belongs to the stop's representative. If this row is no longer it
+  // — the previous representative completed or cancelled and the stop moved
+  // to the next live member — its card is superseded by that member's, so the
+  // reconcile passes must clear it instead of keeping two up for one stop.
+  const representative = representativeOf(members);
+  const stale = !!representative && String(representative.id) !== String(serviceId);
+  return { visit, members, promise, representative, live: stale ? null : live };
 }
 
 // The kill switch has to CLEAN UP, not just stop creating: sweep() is the
@@ -998,4 +1019,4 @@ async function sweep(conn, { now = new Date() } = {}) {
   return { alerted, active: rows.length };
 }
 
-module.exports = { enabled, cleanupAfterDisable, evaluateNoShow, promisedStartAt, trackingStage, callCommitmentInstant, LIVE_STATUSES, latestPromises, loadPromiseEvents, seriesSupersessions, groupedStops, stopState, stopPromise, lockedStop, recordSentWindowFallback, listNoShows, sweep, trackingKey, resolveLegacyCollision, alreadyHasOpenAlert, noticeStillCurrent };
+module.exports = { enabled, cleanupAfterDisable, evaluateNoShow, promisedStartAt, trackingStage, callCommitmentInstant, LIVE_STATUSES, latestPromises, loadPromiseEvents, seriesSupersessions, groupedStops, representativeOf, stopState, stopPromise, lockedStop, recordSentWindowFallback, listNoShows, sweep, trackingKey, resolveLegacyCollision, alreadyHasOpenAlert, noticeStillCurrent };

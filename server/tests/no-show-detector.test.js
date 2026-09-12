@@ -81,6 +81,23 @@ describe('missing tracking stages', () => {
     const stage1 = report.thresholds[0].alerts.filter((a) => a.stage === 1);
     expect(stage1).toHaveLength(2);
   });
+  test('a promise that flip-flops A -> B -> A alerts for A twice (round-10 P1)', () => {
+    // Production supersedes the A card when B arrives and allows a fresh one
+    // when A returns; a key suppressed for the whole export hid the second.
+    const base = { visit_id: 'visit', source: 'message' };
+    const report = replay({ synthetic: true, from: '2026-09-10T09:00:00-04:00', to: '2026-09-10T13:00:00-04:00', visits: [{
+      id: 'visit', initial: visit, outcome: 'tracking_gap', events: [],
+      promises: [
+        { ...base, start_at: '2026-09-10T09:00:00-04:00', communicated_at: '2026-09-09T12:00:00-04:00' },
+        { ...base, start_at: '2026-09-10T10:00:00-04:00', communicated_at: '2026-09-10T09:50:00-04:00' },
+        { ...base, start_at: '2026-09-10T09:00:00-04:00', communicated_at: '2026-09-10T11:00:00-04:00' },
+      ],
+    }] });
+    const forA = report.thresholds[0].alerts
+      .filter((a) => a.stage === 1 || a.stage === 2);
+    // The A window is alerted on before the B notice and again after it.
+    expect(forA.length).toBeGreaterThanOrEqual(3);
+  });
   test('replay sees departure evidence cleared between thresholds on the next cron tick', () => {
     const report = replay({ synthetic: true, from: '2026-09-10T09:00:00-04:00', to: '2026-09-10T11:00:00-04:00', visits: [{
       id: 'visit', initial: { ...visit, en_route_at: '2026-09-10T09:30:00-04:00' }, promises: [promise],
@@ -325,6 +342,22 @@ describe('lockedStop: creation and both reconcile passes see the same stop (roun
     // Evidence belongs to 'bbb'; the stop uses it for 'aaa' too.
     expect(promise).toMatchObject({ visit_id: 'bbb' });
     expect(live).toMatchObject({ stage: 2, evidence: 'missing_tracking' });
+  });
+
+  test('a stop whose representative moved on treats the old row\'s card as superseded', async () => {
+    // The lowest-id member cancelled, so the stop's card belongs to the next
+    // live member now. Reconciling the OLD row must clear its card rather
+    // than leave two up for one stop (round-10 P1).
+    const moved = [{ ...members[0], status: 'cancelled' }, members[1]];
+    const trx = fakeTrx(moved);
+    trx.raw = (sql) => ({ sql });
+    trx.isTransaction = true;
+    const stale = await lockedStop(trx, 'aaa', { now });
+    expect(stale.representative.id).toBe('bbb');
+    expect(stale.live).toBeNull();
+    // ...and the new representative still evaluates as overdue.
+    const current = await lockedStop(trx, 'bbb', { now });
+    expect(current.live).toMatchObject({ stage: 2 });
   });
 
   test('a missing row yields nothing, not a throw', async () => {

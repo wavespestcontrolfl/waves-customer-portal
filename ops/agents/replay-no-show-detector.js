@@ -62,6 +62,7 @@ function replayVisit(item, { from, to, threshold }) {
   // Whether a card is currently standing, so its automatic supersession can
   // free the key the way production's superseded_at stamp does.
   let alerting = false;
+  let lastShape = null;
   let wasLive = LIVE_STATUSES.includes(item.initial?.status);
   for (let at = Math.ceil(from.getTime() / 300000) * 300000; at <= to.getTime(); at += 300000) {
     const now = new Date(at);
@@ -94,6 +95,14 @@ function replayVisit(item, { from, to, threshold }) {
       alerting = false;
       continue;
     }
+    // A SHAPE change while a card is standing is also a supersession in
+    // production: the old alert is resolved (stamped) and a new one created,
+    // so a later return to the earlier window/stage is a fresh card, not a
+    // duplicate. Without this, a promise that flip-flops A -> B -> A alerted
+    // once for A and never again (codex P1 round 10).
+    const shape = `${alert.promised_window.start_at}:${alert.stage}`;
+    if (alerting && lastShape && shape !== lastShape) lifecycle += 1;
+    lastShape = shape;
     alerting = true;
     // Production's own identity, not a window/stage pair: trackingKey folds
     // in the RECIPIENT, so a reassignment from tech A to B with the same
@@ -101,7 +110,7 @@ function replayVisit(item, { from, to, threshold }) {
     // visit that leaves and re-enters LIVE_STATUSES gets a fresh one too.
     // Deduping on window+stage alone suppressed both and understated the
     // alert volume a rollout decision is made on (codex P2 round 10).
-    const key = `${alert.promised_window.start_at}:${alert.stage}:${state.technician_id || 'unassigned'}:${lifecycle}`;
+    const key = `${shape}:${state.technician_id || 'unassigned'}:${lifecycle}`;
     if (emitted.has(key)) continue;
     emitted.add(key);
     const complaint = new Date(item.complaint_at).getTime();
