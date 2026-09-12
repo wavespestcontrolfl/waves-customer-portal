@@ -563,11 +563,23 @@ async function loadPromiseEvents(conn, visitIds, { now = new Date() } = {}) {
   // of its own and keep an unknown-window fallback that then outranks the
   // owner's known window for the whole stop (codex P1 round 12).
   const groupedFallbacks = (() => {
+    // Keyed by STOP, and measured from the EARLIEST row of the fan-out: one
+    // grouped reminder writes an email_messages row per recipient, and
+    // logEmailAttempt can fail for a later one after an earlier one already
+    // recorded the window. Keying on the exact send time let that later row
+    // survive as an unknown-window fallback and — being newer — outrank the
+    // known window every recipient actually received (codex P1 round 17).
+    const earliest = new Map();
+    for (const r of groupedEmails) {
+      const at = instant(r.sent_at);
+      if (!earliest.has(r.stop_id) || at < earliest.get(r.stop_id)) earliest.set(r.stop_id, at);
+    }
     const recoveredStops = new Set(groupedEmails
-      .filter((r) => knownWindowAtOrAfter(emails, { visit_id: r.visit_id, communicated_at: r.sent_at }))
-      .map((r) => `${r.stop_id}:${instant(r.sent_at)}`));
+      .filter((r) => knownWindowAtOrAfter(emails, { visit_id: r.visit_id,
+        communicated_at: new Date(earliest.get(r.stop_id)).toISOString() }))
+      .map((r) => r.stop_id));
     return groupedEmails
-      .filter((r) => !recoveredStops.has(`${r.stop_id}:${instant(r.sent_at)}`))
+      .filter((r) => !recoveredStops.has(r.stop_id))
       .map((r) => ({ visit_id: r.visit_id, start_at: null, communicated_at: r.sent_at,
         source: 'email', source_id: r.id }));
   })();
@@ -918,12 +930,14 @@ function stopPromise(members = [], promises = new Map(), now = new Date()) {
   return latest;
 }
 
-async function listNoShows(conn, { now = new Date(), limit = 100, offset = 0, actorId = null, admin = true } = {}) {
+// One internal caller (sweep), one scope: every live candidate. The
+// tech-scoped / paginated variants this used to expose had no route behind
+// them (codex P2 round 17).
+async function listNoShows(conn, { now = new Date(), limit = 100 } = {}) {
   if (!enabled()) return [];
   const rows = await conn('scheduled_services as s').join('customers as c', 'c.id', 's.customer_id')
     .whereIn('s.status', LIVE_STATUSES)
     .whereBetween('s.scheduled_date', [etDateString(new Date(now.getTime() - 60 * 86400000)), etDateString(new Date(now.getTime() + 100 * 86400000))])
-    .modify((q) => { if (!admin && actorId) q.where('s.technician_id', actorId); })
     .select('s.*', 'c.first_name', 'c.last_name', 'c.phone');
   const liveRows = rows.filter((r) => !require('./internal-test-customers').isInternalTestCustomerId(r.customer_id));
   // Pull in every member of the stops these candidates belong to, even the
@@ -946,7 +960,7 @@ async function listNoShows(conn, { now = new Date(), limit = 100, offset = 0, ac
     // card, its tracking key and the office alert's job_id all hang off it —
     // so a stop pulled in only through a sibling raises no card of its own.
     // Prefer the stop's canonical representative; fall back to any candidate
-    // row when that member is outside this scan (a tech-scoped listing).
+    // row when that member is outside this scan.
     const preferred = representativeOf(members);
     const r = preferred && candidateIds.has(String(preferred.id))
       ? preferred : members.find((m) => candidateIds.has(String(m.id)));
@@ -957,7 +971,7 @@ async function listNoShows(conn, { now = new Date(), limit = 100, offset = 0, ac
       last_name: r.last_name, phone: r.phone, scheduled_date: r.scheduled_date,
       ...(members.length > 1 ? { grouped_service_ids: members.map((m) => String(m.id)) } : {}), ...alert } : null;
   }).filter(Boolean).sort((a, b) => b.stage - a.stage || instant(a.due_at) - instant(b.due_at) || a.id.localeCompare(b.id));
-  return cards.slice(offset, offset + limit);
+  return cards.slice(0, limit);
 }
 
 // Pure. The dispatch:alert socket broadcast carries the bare inserted row

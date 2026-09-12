@@ -63,9 +63,13 @@ router.get('/', async (req, res, next) => {
     // while a stage-2 notice aged, then collected 20 newer assignment or text
     // cards, never received the row at all and the client's own MAX_VISIT_CARDS
     // ranking could not rescue what the server never returned (codex P2
-    // round 8).
+    // round 8). Its OWN bucket, ahead of every other fresh row: sharing
+    // bucket 0 with them meant an offline tech who collected 20 newer
+    // geofence/timer prompts — two events across ten stops — still lost the
+    // stage-2 card from the window (codex P2 round 17). The other buckets
+    // keep their relative order, one step down.
     const rows = await q
-      .orderByRaw("CASE WHEN type = 'follow_through_tracking' THEN 0 WHEN type LIKE 'visit\\_%' OR type = 'tech_line_sms' THEN 2 WHEN type = 'storm_watch_alert' THEN 1 WHEN created_at >= now() - interval '6 hours' THEN 0 ELSE 2 END")
+      .orderByRaw("CASE WHEN type = 'follow_through_tracking' THEN 0 WHEN type LIKE 'visit\\_%' OR type = 'tech_line_sms' THEN 3 WHEN type = 'storm_watch_alert' THEN 2 WHEN created_at >= now() - interval '6 hours' THEN 1 ELSE 3 END")
       .orderBy('created_at', 'desc')
       .limit(20);
     res.json({ notifications: rows.map(parseRow) });

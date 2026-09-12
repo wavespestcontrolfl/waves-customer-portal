@@ -1015,6 +1015,24 @@ describe('an appointment email with no interaction row still yields its promise 
     expect(knownWindowAtOrAfter([{ metadata: { scheduled_service_id: 'visit-1', sent_at: '2026-09-10T12:00:00.000Z' } }], fallback)).toBe(false);
   });
 
+  // One grouped reminder writes an email_messages row per RECIPIENT, and
+  // logEmailAttempt can fail for a later one after an earlier one already
+  // recorded the window. Measuring from the earliest row of the fan-out keeps
+  // that known window; keying on the exact send time let the later row
+  // survive as an unknown fallback and outrank it (round-17 P1).
+  test('an earlier recipient\'s known window covers the whole fan-out', () => {
+    const { knownWindowAtOrAfter } = require('../services/no-show-detector');
+    const earliest = { visit_id: 'visit-1', communicated_at: '2026-09-10T12:00:00.000Z' };
+    const known = [{ metadata: { scheduled_service_id: 'visit-1', rendered_slot_ms: 1, sent_at: '2026-09-10T12:00:00.000Z' } }];
+    expect(knownWindowAtOrAfter(known, earliest)).toBe(true);
+    // The later recipient's row, measured on its own send time, would not be
+    // covered — which is why the stop is keyed by its earliest row.
+    expect(knownWindowAtOrAfter(known, { ...earliest, communicated_at: '2026-09-10T12:00:04.000Z' })).toBe(false);
+    const detector = require('fs').readFileSync(require('path').join(__dirname, '..', 'services', 'no-show-detector.js'), 'utf8');
+    expect(detector).toContain('if (!earliest.has(r.stop_id) || at < earliest.get(r.stop_id)) earliest.set(r.stop_id, at);');
+    expect(detector).toContain('.map((r) => r.stop_id));');
+  });
+
   test('the window comes straight off the message row, scoped by the key\'s visit id and a delivered status', async () => {
     const slot = Date.parse('2026-09-12T13:00:00.000Z');
     const { conn, captured } = fakeConn([{ id: 'em-1', sent_at: '2026-09-10T12:00:00.000Z', visit_id: 'visit-1', slot_ms: String(slot) }]);
