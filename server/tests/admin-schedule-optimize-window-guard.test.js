@@ -110,8 +110,17 @@ function trxTable() {
   // The post-lock guard-input re-read. Reads stopsByDate LIVE, so a test that
   // mutates a row inside the lockTechDays mock is mutating it in the same gap
   // the fence exists to catch.
-  c.select = async () => (stopsByDate[filters.scheduled_date] || [])
-    .filter((row) => !idsIn || idsIn.has(row.id));
+  c.whereNotNull = () => c;
+  c.select = async () => {
+    // The completed-origin re-read inside the transaction (see
+    // assertTechDayOriginsFresh) reads the same fixtures the pre-lock load did.
+    if (filters.status === 'completed') {
+      return (completedByDate[filters.scheduled_date] || [])
+        .filter((row) => !filters.technician_id || row.technician_id === filters.technician_id);
+    }
+    return (stopsByDate[filters.scheduled_date] || [])
+      .filter((row) => !idsIn || idsIn.has(row.id));
+  };
   return c;
 }
 
@@ -499,24 +508,25 @@ describe('round-2 in-progress clock guards', () => {
 
   test('an elapsed window keeps its service duration — only the arrival deadline is relaxed', () => {
     const { chooseWindowSafeOrder } = require('../services/route-reorder');
-    // A 09:00-12:00 job with no estimate: workDuration is its 180-minute
-    // span. Overdue at 12:30, its ARRIVAL deadline stops binding — but the
-    // job is still three hours of work, and clearing the window fields
-    // would shrink it to the 60-minute default and let the guard call a
-    // later promise reachable that is not.
+    // A 09:00-12:00 job (no estimate ⇒ workDuration is its 180-minute span)
+    // that is overdue at 12:30, then two still-keepable promises. Relaxing
+    // the arrival constraint must NOT shrink the overdue job: at 180 minutes
+    // it has to go LAST, and only a shrunken one could lead.
     const stops = [
-      { id: 'OVERDUE', technician_id: 't1', route_order: 1, window_start: '09:00', window_end: '12:00', estimated_duration_minutes: null, lat: 1, lng: 1 },
-      { id: 'LATER', technician_id: 't1', route_order: 2, window_start: '13:00', window_end: '14:00', estimated_duration_minutes: 30, lat: 1, lng: 1 },
+      { id: 'OVERDUE', technician_id: 't1', status: 'confirmed', route_order: 1, window_start: '09:00', window_end: '12:00', estimated_duration_minutes: null, lat: 1, lng: 1 },
+      { id: 'LATER', technician_id: 't1', status: 'confirmed', route_order: 2, window_start: '13:00', window_end: '14:00', estimated_duration_minutes: 30, lat: 1, lng: 1 },
+      { id: 'THIRD', technician_id: 't1', status: 'confirmed', route_order: 3, window_start: '14:00', window_end: '15:00', estimated_duration_minutes: 30, lat: 1, lng: 1 },
     ];
     const out = chooseWindowSafeOrder({
       RouteOptimizer, googleOrder: stops, sourceStops: stops, googleSource: 'google_routes_api', startMin: 12 * 60 + 30,
     });
-    // The still-keepable 13:00 promise is served first; the overdue job
-    // follows, carrying its full 180 minutes rather than a shrunken hour.
-    expect(out.orderedStops.map((s) => s.id)).toEqual(['LATER', 'OVERDUE']);
-    const relaxed = out.orderedStops.find((s) => s.id === 'OVERDUE');
-    expect(relaxed.window_start).toBeNull(); // arrival constraint relaxed
-    expect(relaxed.estimated_duration_minutes).toBe(180); // work preserved
+    expect(out.orderedStops.map((s) => s.id)).toEqual(['LATER', 'THIRD', 'OVERDUE']);
+    // And the returned rows are the STORED ones — the relaxed copies exist
+    // only inside the simulation, so nothing downstream can be told this
+    // appointment has no promised window.
+    const overdue = out.orderedStops.find((s) => s.id === 'OVERDUE');
+    expect(overdue.window_start).toBe('09:00');
+    expect(overdue.window_end).toBe('12:00');
   });
 });
 
@@ -842,4 +852,63 @@ test('a dropped terminal stop makes Google’s own totals stale, repair or not',
   expect(body.totalDistanceMeters).not.toBe(12345);
   expect(body.unoptimizedDistanceMeters).not.toBe(99999);
   expect(body.legs).toEqual([]);
+});
+
+// Codex round 5: the completed rows an origin is derived from are NOT in the
+// live-day freshness fence, so a time-on-site correction landing in the lock
+// gap can change which completion is latest — and the order was certified
+// from the old one.
+test('a completed-stop correction in the lock gap aborts the write', async () => {
+  const { lockTechDays } = require('../services/scheduling/tech-day-lock');
+  process.env.GATE_ROUTE_REORDER_WINDOW_FIT = 'true';
+  process.env.GATE_DRIVE_TIME_CALIBRATION = 'true';
+  jest.useFakeTimers({ doNotFake: ['nextTick', 'setImmediate'] });
+  jest.setSystemTime(new Date('2026-09-20T13:00:00Z')); // 09:00 ET
+  try {
+    const TODAY = '2026-09-20';
+    stopsByDate[TODAY] = [stop('A', { lng: 1, route_order: 1 }), stop('B', { lng: 2, route_order: 2 })];
+    completedByDate[TODAY] = [
+      { id: 'D1', technician_id: 't1', route_order: 0, lat: 1, lng: 5, check_out_time: '2026-09-20T12:30:00Z' },
+      { id: 'D2', technician_id: 't1', route_order: 0, lat: 1, lng: 9, check_out_time: '2026-09-20T12:50:00Z' },
+    ];
+    mockOptimizerOrder(['A', 'B']);
+    // An operator corrects D1's time-on-site while the optimizer runs: D1 is
+    // now the latest completion, so the truck is somewhere else entirely.
+    lockTechDays.mockImplementation(async () => {
+      completedByDate[TODAY] = [
+        { id: 'D1', technician_id: 't1', route_order: 0, lat: 1, lng: 5, check_out_time: '2026-09-20T12:55:00Z' },
+        { id: 'D2', technician_id: 't1', route_order: 0, lat: 1, lng: 9, check_out_time: '2026-09-20T12:50:00Z' },
+      ];
+    });
+    const { status, body } = await optimizeRoute({ technicianId: 't1' });
+    expect(status).toBe(409);
+    expect(body.error).toMatch(/reload and retry/i);
+    expect(trxUpdates).toEqual([]);
+  } finally {
+    lockTechDays.mockImplementation(async () => {});
+    jest.useRealTimers();
+  }
+});
+
+test('an unstamped completion makes the origin unprovable — the day refuses', async () => {
+  process.env.GATE_ROUTE_REORDER_WINDOW_FIT = 'true';
+  process.env.GATE_DRIVE_TIME_CALIBRATION = 'true';
+  jest.useFakeTimers({ doNotFake: ['nextTick', 'setImmediate'] });
+  jest.setSystemTime(new Date('2026-09-20T13:00:00Z'));
+  try {
+    const TODAY = '2026-09-20';
+    stopsByDate[TODAY] = chronologyDay();
+    completedByDate[TODAY] = [
+      { id: 'D1', technician_id: 't1', route_order: 1, lat: 1, lng: 5, check_out_time: '2026-09-20T12:30:00Z' },
+      // No completion time at all: which of these is last cannot be proven,
+      // and route_order is commonly null on real rows.
+      { id: 'D2', technician_id: 't1', route_order: null, lat: 1, lng: 9 },
+    ];
+    mockOptimizerOrder(['T2', 'T1', 'U']);
+    const { status, body } = await optimizeRoute({ technicianId: 't1' });
+    expect(status).toBe(409);
+    expect(body.reason).toBe('PROGRESS_ORIGIN_UNKNOWN');
+  } finally {
+    jest.useRealTimers();
+  }
 });

@@ -14,7 +14,7 @@ const { completeScheduledServiceInsert } = require('../services/booking/create-s
 const { collectiveMoveGateOn, dateExceptionStamp } = require('../services/rebooker');
 const { stampedDivergesSql, stampedLine2Sql } = require('../services/stamped-address');
 const { dayStopsQuery, guardedCoordSelects } = require('../services/scheduling/day-stops');
-const { chooseWindowSafeOrder, inProgressStartMin, loadTechDayOrigins, driveableStop,
+const { chooseWindowSafeOrder, inProgressStartMin, loadTechDayOrigins, assertTechDayOriginsFresh, driveableStop,
   resolveWindowSafeOrderByTechDay, windowSafeFigures,
   ROUTE_WRITE_GUARD_COLUMNS, routeWriteGuardSignature } = require('../services/route-reorder');
 const {
@@ -13527,6 +13527,8 @@ router.post('/optimize', requireAdmin, async (req, res, next) => {
       await db.transaction(async (trx) => {
         await lockTechDays(trx, services.map((s) => ({ techId: s.technician_id, date: dateStr })));
         await assertGuardInputsFresh(trx, dateStr, technicianId || null, guardSnapshot);
+        // The completed rows the origin came from are outside that fence.
+        await assertTechDayOriginsFresh(trx, dateStr, techDayOrigins, { technicianId: technicianId || null, now });
         // Stale-snapshot guard (uncapped audit r21 P1): the optimizer ran
         // BEFORE this fence was acquired — a reassignment/date move that
         // committed while we waited for the lock must not receive the stale
@@ -13708,6 +13710,8 @@ router.post('/optimize-route', requireAdmin, async (req, res, next) => {
       await db.transaction(async (trx) => {
         await lockTechDays(trx, [{ techId: technicianId, date: dateStr }]);
         await assertGuardInputsFresh(trx, dateStr, technicianId || null, guardSnapshot);
+        // The completed rows the origin came from are outside that fence.
+        await assertTechDayOriginsFresh(trx, dateStr, techDayOrigins, { technicianId: technicianId || null, now });
         // Stale-snapshot guard — same contract as /optimize above: the stop
         // must still be on THIS tech-day or the whole rewrite aborts.
         for (let i = 0; i < finalOrdered.length; i++) {

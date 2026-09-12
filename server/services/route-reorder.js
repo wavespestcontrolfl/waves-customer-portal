@@ -423,6 +423,7 @@ function chooseWindowSafeOrder({
   // by the multi-tech caller, silently under-reporting a truck's drive time
   // (round-0 fallback audit P1).
   const relaxedById = new Map(guardStops.map((s) => [s.id, s]));
+  const sourceById = new Map(sourceStops.map((s) => [s.id, s]));
   const guardRange = (s) => effectiveWindowRange(relaxedById.get(s.id) || s);
   const chronoConflict = violatesWindowChronology(googleOrder, guardStops);
   const fitConflict = !chronoConflict && violatesWindowFeasibility(RouteOptimizer, googleOrder, guardStops, legs, simStart, from);
@@ -478,7 +479,11 @@ function chooseWindowSafeOrder({
     return { orderedStops: null, reason: 'NO_FEASIBLE_IMPROVEMENT', conflict, beforeMeters };
   }
   return {
-    orderedStops: fallback.orderedStops,
+    // The winner is mapped back to the STORED rows: the relaxed copies exist
+    // only for simulation, and serializing one would tell the caller an
+    // appointment has no promised window when the database still holds it
+    // (codex round 5 P2).
+    orderedStops: fallback.orderedStops.map((stop) => sourceById.get(stop.id) || stop),
     source: 'window_constrained',
     conflict,
     beforeMeters,
@@ -548,34 +553,58 @@ async function loadTechDayOrigins(conn, dateStr, { technicianId = null, now = ne
     .select('scheduled_services.id', 'scheduled_services.technician_id', 'scheduled_services.route_order',
       'scheduled_services.check_out_time', 'scheduled_services.actual_end_time', 'scheduled_services.completed_at',
       ...guardedCoordSelects(conn));
-  const finishedAt = (r) => r.check_out_time || r.actual_end_time || r.completed_at || null;
   const byTech = new Map();
   for (const row of rows) {
     if (!byTech.has(row.technician_id)) byTech.set(row.technician_id, []);
     byTech.get(row.technician_id).push(row);
   }
   for (const [techId, techRows] of byTech) {
-    // Latest finish wins; with no timestamps, the furthest along the board.
-    const ordered = [...techRows].sort((a, b) => {
-      const fa = finishedAt(a);
-      const fb = finishedAt(b);
-      if (fa && fb) return String(fa).localeCompare(String(fb));
-      if (fa) return 1;
-      if (fb) return -1;
-      return (Number(a.route_order) || 0) - (Number(b.route_order) || 0);
-    });
-    // The LATEST completion is where the truck is. If that row has no pin the
-    // position is unknown — an earlier stop is where it USED to be, and
-    // driving from there is a guess the guard must not make (codex round 5
-    // P1).
-    const last = ordered[ordered.length - 1];
+    // SAME rule arrival-route.js's own current-day resolver applies: a
+    // completed row with no completion time makes the order of completions
+    // unprovable, and route_order is commonly null — guessing from query
+    // order could start the route at a stop the truck left hours ago (codex
+    // round 5 P1). Any unstamped completion ⇒ the position is unknown.
+    const completed = techRows.map((row) => ({
+      ...row, completionTime: row.actual_end_time || row.check_out_time || row.completed_at,
+    }));
+    if (completed.some((row) => !row.completionTime)) { unknown.add(techId); continue; }
+    completed.sort((a, b) => new Date(b.completionTime) - new Date(a.completionTime));
+    // The LATEST completion is where the truck is. No pin there means the
+    // position is unknown too — an earlier stop is where it USED to be, and
+    // driving from there is a guess the guard must not make.
+    const last = completed[0];
     if (last && parseFloat(last.lat) && parseFloat(last.lng)) {
-      origins.set(techId, { lat: parseFloat(last.lat), lng: parseFloat(last.lng) });
+      origins.set(techId, { id: last.id, completionTime: String(last.completionTime), lat: parseFloat(last.lat), lng: parseFloat(last.lng) });
     } else {
       unknown.add(techId);
     }
   }
   return { origins, unknown };
+}
+
+/**
+ * Re-read the completed rows the origins were derived from, inside the write
+ * transaction, and confirm they still point at the same truck positions. A
+ * completed visit is NOT in the freshness fence's locked set (that reads the
+ * live day), so an after-the-fact time-on-site correction can change WHICH
+ * completion is latest between the origin read and the commit, leaving the
+ * order certified from a stop the truck left earlier (codex round 5 P2).
+ * Throws the caller's stale error when anything moved.
+ */
+async function assertTechDayOriginsFresh(trx, dateStr, techDayOrigins, { technicianId = null, now = new Date(), stale } = {}) {
+  if (!techDayOrigins || (techDayOrigins.origins.size === 0 && techDayOrigins.unknown.size === 0)) return;
+  const fresh = await loadTechDayOrigins(trx, dateStr, { technicianId, now });
+  const same = (a, b) => (!a && !b)
+    || Boolean(a && b && a.id === b.id && a.completionTime === b.completionTime
+      && a.lat === b.lat && a.lng === b.lng);
+  const techIds = new Set([...techDayOrigins.origins.keys(), ...techDayOrigins.unknown,
+    ...fresh.origins.keys(), ...fresh.unknown]);
+  for (const techId of techIds) {
+    if (techDayOrigins.unknown.has(techId) !== fresh.unknown.has(techId)
+      || !same(techDayOrigins.origins.get(techId), fresh.origins.get(techId))) {
+      throw stale ? stale(techId) : Object.assign(new Error('completed-stop origin changed while optimizing'), { code: 'STALE_OPTIMIZE' });
+    }
+  }
 }
 
 /**
@@ -1361,6 +1390,7 @@ async function recordSkippedTick(reason, now = new Date()) {
 module.exports = {
   inProgressStartMin,
   loadTechDayOrigins,
+  assertTechDayOriginsFresh,
   driveableStop: onRoute,
   ROUTE_WRITE_GUARD_COLUMNS,
   routeWriteGuardSignature,
