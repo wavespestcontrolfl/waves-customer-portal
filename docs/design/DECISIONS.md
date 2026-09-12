@@ -2093,6 +2093,7 @@ Everything else from the day's hardening stands: image-first visuals, pair-verif
 
 **Decisions.** (1) The badge background is `alert.fg` (`#C8312F`) with white text. An unread inbound text is a genuine alert under the alert-fg rule — a customer is waiting on a reply and nobody has read it — so this is not decoration and does not open the door to colored chrome elsewhere. The §5.7 unread dot on inbox rows stays dark. (2) Nothing else moves: the count is still `GET /admin/communications/unread-count` (inbound SMS only, per conversation, admin phones excluded), still hidden at zero, capped at 99+, 30 s poll plus the read event, one `UnreadBadge` component shared by both breakpoints.
 
+
 ## 2026-09-07 — Lawn assessment history: property scope, one resolver, confirm-time baseline (feat/lawn-assessment-property-history)
 
 ### Why
@@ -2205,6 +2206,7 @@ in the later UI PR, which is a documented P2 deferral here.
 
 **Verification.** Synthetic fixtures rendered the real Customers route and Waves shell at desktop, phone, and tablet widths in Chromium and WebKit. All sections, full history, directory selection/filtering, modal dismissal, and simulated keyboard viewport changes passed; screenshots were inspected. Focused client tests and the production build passed. No migrations or database integration checks were run. Physical iPhone home-screen behavior was not device-tested. This entry records a local implementation, not a deployment.
 
+
 ### Customer directory controls and numeric scores (2026-09-07)
 
 Directory, Map, and Outreach & Upsells use a compact outlined toolbar with their existing icons. A single responsive search and Filter row replaces separate desktop/mobile controls. Customer names show the recorded numeric health score in a circle using the existing score color bands; zero and missing values remain distinct, and stored letter grades remain filterable.
@@ -2238,6 +2240,7 @@ The second phase of the approved sidebar scope adds page search to the existing 
 ## 2026-09-08 — Reproduce Customer 360 foundation checks on the real route
 
 The Customer 360 proof uses the existing browser lifecycle and required-font loader, with synthetic API responses for both workspace and overlay presentations. Review reports identify the source checkout and distinguish failed runs from accepted browser results. Device checks remain a separate acceptance step.
+
 
 ## 2026-09-08 — One evidence-based lawn assessment per visit
 
