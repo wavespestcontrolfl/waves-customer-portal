@@ -435,7 +435,7 @@ describe('lockedStop: creation and both reconcile passes see the same stop (roun
     let evidenceReads = 0;
     const trx = (table) => {
       const chain = {};
-      for (const m of ['join', 'leftJoin', 'whereIn', 'whereRaw', 'whereBetween', 'whereNull', 'whereNotNull', 'forUpdate', 'orderBy']) chain[m] = () => chain;
+      for (const m of ['join', 'leftJoin', 'whereIn', 'whereRaw', 'whereBetween', 'whereNull', 'whereNotNull', 'forUpdate', 'orderBy', 'distinct']) chain[m] = () => chain;
       if (table === 'scheduled_services') {
         chain.where = (args) => { chain._rows = args?.visit_id ? members : members.filter((r) => String(r.id) === String(args?.id)); return chain; };
         chain.first = async () => chain._rows[0];
@@ -716,7 +716,7 @@ describe('series reschedule confirmation feeds promise evidence (P1-1)', () => {
 describe('loadPromiseEvents: email promise evidence checks the LIVE delivery state (P1-3)', () => {
   function passthroughChain(result = []) {
     const chain = {};
-    for (const m of ['join', 'leftJoin', 'whereIn', 'whereRaw', 'whereBetween', 'whereNull', 'whereNotNull', 'where']) chain[m] = () => chain;
+    for (const m of ['join', 'leftJoin', 'whereIn', 'whereRaw', 'whereBetween', 'whereNull', 'whereNotNull', 'where', 'distinct']) chain[m] = () => chain;
     chain.select = () => Promise.resolve(result);
     return chain;
   }
@@ -835,7 +835,7 @@ describe('loadPromiseEvents: an UNLINKED sms_log row is neutral, a sentinel sid 
   // text went out and never get an sms_log row either.
   function passthroughChain(result = []) {
     const chain = {};
-    for (const m of ['join', 'leftJoin', 'whereIn', 'whereRaw', 'whereBetween', 'whereNull', 'whereNotNull', 'where']) chain[m] = () => chain;
+    for (const m of ['join', 'leftJoin', 'whereIn', 'whereRaw', 'whereBetween', 'whereNull', 'whereNotNull', 'where', 'distinct']) chain[m] = () => chain;
     chain.select = () => Promise.resolve(result);
     return chain;
   }
@@ -925,7 +925,7 @@ describe('an appointment email with no interaction row still yields its promise 
   function fakeConn(rows) {
     const passthrough = () => {
       const chain = {};
-      for (const m of ['join', 'leftJoin', 'whereIn', 'whereRaw', 'whereBetween', 'whereNull', 'whereNotNull', 'where']) chain[m] = () => chain;
+      for (const m of ['join', 'leftJoin', 'whereIn', 'whereRaw', 'whereBetween', 'whereNull', 'whereNotNull', 'where', 'distinct']) chain[m] = () => chain;
       chain.select = () => Promise.resolve([]);
       return chain;
     };
@@ -953,8 +953,8 @@ describe('an appointment email with no interaction row still yields its promise 
     const chain = {};
     for (const m of ['whereRaw', 'where', 'whereNotNull']) chain[m] = () => chain;
     chain.join = (table, cb) => {
-      const onClause = { on: (arg) => { captured.join = [table, arg.sql]; return onClause; } };
-      if (typeof cb === 'function') cb.call(onClause); else captured.join = [table, cb?.sql];
+      const onClause = { on: (arg) => { (captured.joins ||= []).push([table, arg.sql]); return onClause; } };
+      if (typeof cb === 'function') cb.call(onClause); else (captured.joins ||= []).push([table, cb?.sql || cb]);
       return chain;
     };
     chain.whereIn = (col, values) => { (captured.whereIn ||= []).push([col?.sql || col, values]); return chain; };
@@ -970,17 +970,27 @@ describe('an appointment email with no interaction row still yields its promise 
     conn.isTransaction = true;
 
     const [promise] = await loadPromiseEvents(conn, ['visit-1']);
-    expect(captured.join[0]).toBe('scheduled_services as sv');
+    const joins = Object.fromEntries(captured.joins.map(([table, sql]) => [table, sql]));
+    // Linked through the STOP BASE KEY, so a service split off the stop — a
+    // new service_visits row under the same base key, its reminder state
+    // carried with it and no second notice sent — keeps this evidence
+    // (round-16 P1).
+    expect(joins['service_visits as keyed']).toContain("keyed.id::text = split_part(em.idempotency_key, ':', 3)");
+    expect(joins['service_visits as own']).toBe('own.stop_base_key');
+    expect(joins['scheduled_services as sv']).toContain('sv.visit_id = own.id');
     // The stop id is selected so the "already recovered" check can be
     // stop-wide: the interaction row is keyed to whichever member owned the
     // claim, and a sibling seeing none of its own would otherwise keep an
     // unknown window that outranks the owner's real one (round-12 P1).
-    expect(captured.selected).toContain('sv.visit_id as stop_id');
-    expect(captured.join[1]).toContain("sv.visit_id::text = split_part(em.idempotency_key, ':', 3)");
-    // ...and to the OCCURRENCE: the claim dedupe key ends in the occurrence
-    // date, so a reminder for the stop's next occurrence cannot mint an
-    // unknown-window promise for today's visit (round-13 P1).
-    expect(captured.join[1]).toContain("split_part(em.idempotency_key, ':', 5) <= to_char(sv.scheduled_date, 'YYYY-MM-DD')");
+    // The stop id comes from the KEY (the stop the reminder was sent for),
+    // not from the row's current visit_id, which a split may have changed.
+    expect(captured.selected).toContain('keyed.id as stop_id');
+    // ...and bounded by the OCCURRENCE: the claim dedupe key ends in the
+    // occurrence date, so a reminder for the stop's NEXT occurrence cannot
+    // mint an unknown-window promise for today's visit (round-13 P1), while a
+    // date in the visit's past still counts — the schedule may have moved
+    // under it (round-16 P1).
+    expect(joins['scheduled_services as sv']).toContain("split_part(em.idempotency_key, ':', 5) <= to_char(sv.scheduled_date, 'YYYY-MM-DD')");
     expect(promise).toMatchObject({ visit_id: 'visit-1', source: 'email', source_id: 'em-9', start_at: null,
       communicated_at: '2026-09-10T12:00:00.000Z' });
   });
@@ -1025,7 +1035,7 @@ describe('the call-booking promise derives from the visit\'s own call link (roun
   function fakeConn(bookingRows) {
     const passthrough = () => {
       const chain = {};
-      for (const m of ['join', 'leftJoin', 'whereIn', 'whereRaw', 'whereBetween', 'whereNull', 'whereNotNull', 'where']) chain[m] = () => chain;
+      for (const m of ['join', 'leftJoin', 'whereIn', 'whereRaw', 'whereBetween', 'whereNull', 'whereNotNull', 'where', 'distinct']) chain[m] = () => chain;
       chain.select = () => Promise.resolve([]);
       return chain;
     };
@@ -1081,7 +1091,7 @@ describe('the applied-reschedule promise is dated by the CALL, not the processin
   function fakeConn(activityRows) {
     const passthrough = () => {
       const chain = {};
-      for (const m of ['join', 'leftJoin', 'whereIn', 'whereRaw', 'whereBetween', 'whereNull', 'whereNotNull', 'where']) chain[m] = () => chain;
+      for (const m of ['join', 'leftJoin', 'whereIn', 'whereRaw', 'whereBetween', 'whereNull', 'whereNotNull', 'where', 'distinct']) chain[m] = () => chain;
       chain.select = () => Promise.resolve([]);
       return chain;
     };
@@ -1488,7 +1498,7 @@ describe('loadPromiseEvents: pre-deploy legacy reschedule/confirmation messages 
   // alert against a window the visit no longer holds.
   function passthroughChain(result = []) {
     const chain = {};
-    for (const m of ['join', 'leftJoin', 'whereIn', 'whereRaw', 'whereBetween', 'whereNull', 'whereNotNull', 'where']) chain[m] = () => chain;
+    for (const m of ['join', 'leftJoin', 'whereIn', 'whereRaw', 'whereBetween', 'whereNull', 'whereNotNull', 'where', 'distinct']) chain[m] = () => chain;
     chain.select = () => Promise.resolve(result);
     return chain;
   }

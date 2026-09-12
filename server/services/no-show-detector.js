@@ -423,6 +423,14 @@ async function loadPromiseEvents(conn, visitIds, { now = new Date() } = {}) {
       // reminder for the stop's NEXT occurrence would otherwise mint an
       // unknown-window promise for today's visit and silence its alert
       // (codex P1 round 13).
+      // Through the STOP BASE KEY, not the visit id: a split gives the leaving
+      // row a new service_visits row for the SAME stop (visit-groups mints it
+      // under the same stop lock and base key), so an id-equality join lost
+      // the evidence for exactly the row that was separated — while
+      // visit-groups deliberately carries that occurrence's reminder state
+      // with it, no second notice sent (codex P1 round 16).
+      .join('service_visits as keyed', conn.raw("keyed.id::text = split_part(em.idempotency_key, ':', 3)"))
+      .join('service_visits as own', 'own.stop_base_key', 'keyed.stop_base_key')
       .join('scheduled_services as sv', function joinOnStopOccurrence() {
         // The key's occurrence date must not be in the visit's FUTURE — that
         // is the next occurrence of a recurring stop, whose reminder says
@@ -433,7 +441,7 @@ async function loadPromiseEvents(conn, visitIds, { now = new Date() } = {}) {
         // still holds the promise that reminder communicated, and requiring
         // equality made the evidence vanish exactly when the schedule moved
         // under it (codex P1 round 16).
-        this.on(conn.raw(`sv.visit_id::text = split_part(em.idempotency_key, ':', 3)
+        this.on(conn.raw(`sv.visit_id = own.id
           AND split_part(em.idempotency_key, ':', 5) <= to_char(sv.scheduled_date, 'YYYY-MM-DD')`));
       })
       .whereIn(conn.raw("split_part(em.idempotency_key, ':', 1)"), APPOINTMENT_EMAIL_EVENTS)
@@ -441,7 +449,9 @@ async function loadPromiseEvents(conn, visitIds, { now = new Date() } = {}) {
       .whereIn('sv.id', visitIds)
       .whereIn('em.status', DELIVERED_EMAIL_STATUSES)
       .whereNotNull('em.sent_at').where('em.sent_at', '<=', now)
-      .select('em.id', 'em.sent_at', 'sv.id as visit_id', 'sv.visit_id as stop_id'),
+      // One row per (message, member) even if two visits of the stop match —
+      // seriesSupersessions/latestPromises dedupe by visit anyway.
+      .select('em.id', 'em.sent_at', 'sv.id as visit_id', 'keyed.id as stop_id'),
     // A call-created booking: the visit row itself carries source_call_log_id
     // (a FK written in the booking transaction), so the window the agent
     // committed on that call is derivable from durable state — no separate
