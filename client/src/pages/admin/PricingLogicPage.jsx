@@ -221,7 +221,9 @@ function PestCalibrationPanel() {
   const reviewQueue = summary.reviewQueue || [];
   const summaryMetrics = [
     { label: "Samples", value: summary.count || 0 },
-    { label: "Avg miss", value: formatMinutes(summary.avgDelta || 0), tone: calibrationDeltaTone(summary.avgDelta || 0) },
+    // The aggregate stayed amber at every size on main; only an individual 15+
+    // minute sample went red, so this must not reuse calibrationDeltaTone().
+    { label: "Avg miss", value: formatMinutes(summary.avgDelta || 0), tone: Math.abs(summary.avgDelta || 0) >= 8 ? "text-warn-fg" : undefined },
     { label: "Avg abs miss", value: formatMinutes(summary.avgAbsDelta || 0), tone: (summary.avgAbsDelta || 0) >= 12 ? "text-warn-fg" : undefined },
     { label: "15+ min outliers", value: summary.outlierCount || 0, tone: (summary.outlierCount || 0) > 0 ? "text-alert-fg" : undefined },
   ];
@@ -243,7 +245,9 @@ function PestCalibrationPanel() {
       <CardHeader className="flex flex-wrap items-start justify-between gap-3"><div><CardTitle className="text-16">Pest production calibration</CardTitle><p className="mt-1 text-ui-body text-ink-secondary">Shadow estimator minutes compared with completed job timers from accepted estimates.</p></div><div className="grid items-end gap-2 sm:grid-cols-3 lg:grid-cols-[150px_150px_110px_auto_auto]"><Field label="Start"><Input type="date" value={startDate} onChange={(event) => setStartDate(event.target.value)} /></Field><Field label="End"><Input type="date" value={endDate} onChange={(event) => setEndDate(event.target.value)} /></Field><Field label="Rows"><Select value={limit} onChange={(event) => setLimit(event.target.value)}><option value="50">50</option><option value="150">150</option><option value="500">500</option></Select></Field><Button variant="secondary" onClick={load} loading={loading}><RefreshCw size={16} aria-hidden /> {loading ? "Syncing..." : "Sync"}</Button><Button onClick={downloadCsv} loading={downloading} disabled={loading || data?.sync?.unavailable}><Download size={16} aria-hidden /> {downloading ? "Exporting..." : "Export CSV"}</Button></div></CardHeader>
       <CardBody className="space-y-5">
         {error && <ActionFeedback error>{error}</ActionFeedback>}
-        {data?.sync?.unavailable && <ActionFeedback>Calibration table is not migrated yet. Run database migrations before collecting samples.</ActionFeedback>}
+        {/* Amber on main, and it disables CSV export while active — an
+            unavailable calibration system is not routine feedback. */}
+        {data?.sync?.unavailable && <ActionFeedback className="!text-warn-fg">Calibration table is not migrated yet. Run database migrations before collecting samples.</ActionFeedback>}
         <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">{summaryMetrics.map((metric) => <Card key={metric.label}><CardBody><div className={`text-18 font-medium u-nums ${metric.tone || "text-zinc-900"}`}>{metric.value}</div><div className="mt-1 text-ui-caption text-ink-secondary">{metric.label}</div></CardBody></Card>)}</div>
         <div className="grid grid-cols-2 gap-3 lg:grid-cols-6">{healthMetrics.map((metric) => <div key={metric.label} className="rounded-md bg-zinc-50 p-3"><div className={`text-16 font-medium u-nums ${metric.tone || "text-zinc-900"}`}>{metric.value}</div><div className="mt-1 text-ui-caption text-ink-secondary">{metric.label}</div></div>)}</div>
         <div className="grid gap-3 lg:grid-cols-2"><CalibrationGroup title="By pool cage size" rows={summary.byPoolCageSize || []} /><CalibrationGroup title="By lot band" rows={summary.byLotBand || []} /></div>

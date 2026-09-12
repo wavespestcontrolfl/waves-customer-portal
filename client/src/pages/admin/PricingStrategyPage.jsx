@@ -122,7 +122,7 @@ export default function PricingStrategyPage({ embedded = false, onSecondaryNav }
 // which the kit does have — are restored. ratioTone() is main's threshold.
 const METRIC_TONES = { warn: "text-warn-fg", alert: "text-alert-fg" };
 function ratioTone(ratio) {
-  if (!ratio) return undefined;
+  if (ratio == null) return undefined;
   if (ratio >= 3) return undefined;
   return ratio >= 2 ? "warn" : "alert";
 }
@@ -152,7 +152,7 @@ function MoneyModelTab({ dashboard, loading }) {
     { label: "Total customers", value: overview.totalCustomers || 0 },
     { label: "Avg LTV", value: formatMoney(overview.avgLTV) },
     { label: "Avg CAC", value: formatMoney(overview.avgCAC) },
-    { label: "LTV:CAC ratio", value: overview.ltvToCacRatio ? `${overview.ltvToCacRatio.toFixed(1)}x` : "—", tone: ratioTone(overview.ltvToCacRatio) },
+    { label: "LTV:CAC ratio", value: overview.ltvToCacRatio != null ? `${overview.ltvToCacRatio.toFixed(1)}x` : "—", tone: ratioTone(overview.ltvToCacRatio) },
     { label: "Monthly recurring", value: formatMoney(overview.monthlyRecurringRevenue) },
   ];
   // Only Core carries a money figure in the contract; the other three stages
@@ -415,14 +415,16 @@ function LTVAnalysisTab() {
   // fields this tab used to read are not part of that response.
   const summary = data.summary || {};
   const channels = data.channelPerformance || [];
+  // A measured 0 is data (positive CAC, zero LTV) — only an unmeasurable ratio
+  // is null, so the checks below test for null rather than truthiness.
   const ltvCacRatio = summary.avgCAC > 0 ? summary.avgLTV / summary.avgCAC : null;
   // The route happens to sort channelPerformance by roi desc, but the tile should
   // not depend on response ordering to name the top performer.
-  const bestChannel = channels.reduce((best, channel) => (channel.roi || 0) > (best?.roi || 0) ? channel : best, null)?.source;
+  const bestChannel = channels.reduce((best, channel) => (best === null || (channel.roi || 0) > (best.roi || 0)) ? channel : best, null)?.source;
   const retention12mo = data.retentionCurve?.["12mo"]?.pct;
   const metrics = [
     { label: "Avg LTV", value: formatMoney(summary.avgLTV) }, { label: "Avg CAC", value: formatMoney(summary.avgCAC) },
-    { label: "LTV:CAC", value: ltvCacRatio ? `${ltvCacRatio.toFixed(1)}x` : "—", tone: ratioTone(ltvCacRatio) },
+    { label: "LTV:CAC", value: ltvCacRatio != null ? `${ltvCacRatio.toFixed(1)}x` : "—", tone: ratioTone(ltvCacRatio) },
     { label: "Best channel", value: bestChannel || "—" }, { label: "12mo retention", value: retention12mo != null ? `${retention12mo}%` : "—" },
   ];
   return (
