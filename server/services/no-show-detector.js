@@ -154,7 +154,15 @@ function latestPromises(events, now = new Date()) {
     // not fall back to an older window and call it the latest promise.
     if (!event.visit_id || !Number.isFinite(at) || at > now.getTime()) continue;
     const prior = byVisit.get(String(event.visit_id));
-    if (!prior || instant(prior.communicated_at) < at) byVisit.set(String(event.visit_id), event);
+    // A strictly NEWER communication always wins — including an unknown
+    // window, which is the legacy move-notice rule. On a TIE the known window
+    // wins: the same send can reach this list twice, once from an interaction
+    // row that predates rendered_slot_ms (unknown) and once recovered from
+    // the message row's own key (known), and keeping the unknown copy threw
+    // away the window that recovery exists to restore (codex P1 round 14).
+    const tie = prior && instant(prior.communicated_at) === at
+      && prior.start_at == null && event.start_at != null;
+    if (!prior || instant(prior.communicated_at) < at || tie) byVisit.set(String(event.visit_id), event);
   }
   return byVisit;
 }

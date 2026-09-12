@@ -48,6 +48,20 @@ describe('missing tracking stages', () => {
     expect(late({ status: 'completed' }, { ignoreHorizon: true })).toBeNull();
     expect(evaluateNoShow({ visit, promise: null, now: new Date('2026-09-12T09:01:00-04:00'), ignoreHorizon: true })).toBeNull();
   });
+  test('on a TIE the known window wins, but a newer unknown still supersedes (round-14 P1)', () => {
+    const at = '2026-09-10T12:00:00-04:00';
+    const unknown = { visit_id: 'visit', start_at: null, communicated_at: at, source: 'email' };
+    const known = { visit_id: 'visit', start_at: '2026-09-10T09:00:00-04:00', communicated_at: at, source: 'email' };
+    const now = new Date('2026-09-10T13:00:00-04:00');
+    // The same send can arrive twice: once from a legacy interaction row with
+    // no rendered_slot_ms, once recovered from the message key. Keeping the
+    // unknown copy threw away the window the recovery exists to restore.
+    expect(latestPromises([unknown, known], now).get('visit').start_at).toBe(known.start_at);
+    expect(latestPromises([known, unknown], now).get('visit').start_at).toBe(known.start_at);
+    // A strictly NEWER unknown still supersedes — the legacy move-notice rule.
+    const laterUnknown = { ...unknown, communicated_at: '2026-09-10T12:30:00-04:00' };
+    expect(latestPromises([known, laterUnknown], now).get('visit').start_at).toBeNull();
+  });
   test('a newer unknown communication window cannot be replaced by an older known one', () => {
     const map = latestPromises([promise, { ...promise, start_at: null, communicated_at: '2026-09-10T08:00:00-04:00' }], new Date('2026-09-10T12:00:00-04:00'));
     expect(map.get('visit').start_at).toBeNull();
