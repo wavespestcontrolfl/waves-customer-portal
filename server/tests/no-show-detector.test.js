@@ -378,12 +378,17 @@ describe('cleanupAfterDisable stands down while the feature runs elsewhere (roun
   // Judging each row by its own age was not enough — a long-standing alert
   // the enabled replica is still maintaining is old — so the signal is
   // detector ACTIVITY anywhere in the fleet.
-  function fakeConn({ recentAlert = null, recentNotice = null } = {}) {
-    const calls = { updated: 0 };
+  function fakeConn({ sweepRan = null, recentAlert = null, recentNotice = null } = {}) {
+    const calls = { updated: 0, probed: [] };
     const conn = (table) => {
       const chain = {};
       for (const m of ['whereIn', 'whereRaw', 'whereNull', 'where']) chain[m] = () => chain;
-      chain.first = async () => (table === 'dispatch_alerts' ? recentAlert : recentNotice);
+      chain.first = async () => {
+        calls.probed.push(table);
+        if (table === 'job_health') return sweepRan;
+        return table === 'dispatch_alerts' ? recentAlert : recentNotice;
+      };
+      chain.first.catch = undefined;
       chain.select = async () => [];
       chain.update = async () => { calls.updated += 1; return 0; };
       return chain;
@@ -393,6 +398,16 @@ describe('cleanupAfterDisable stands down while the feature runs elsewhere (roun
   }
 
   afterEach(() => { delete process.env.GATE_NOSHOW_DETECTOR; });
+
+  // The durable fleet signal is the sweep's own cron health row: an enabled
+  // replica stamps last_started_at every tick, including ticks that create
+  // nothing — which is exactly what row-recency probes missed (round-22 P2).
+  test('a recent sweep run defers the pass, without needing any new rows', async () => {
+    const { conn, calls } = fakeConn({ sweepRan: { job_name: 'no-show-detector' } });
+    expect(await cleanupAfterDisable(conn)).toMatchObject({ deferred: true });
+    expect(calls.updated).toBe(0);
+    expect(calls.probed).toEqual(['job_health']);
+  });
 
   test('a tracking row created inside the grace window defers the whole pass', async () => {
     const { conn, calls } = fakeConn({ recentAlert: { id: 'a1' } });
@@ -1205,6 +1220,9 @@ describe('the call-booking promise derives from the visit\'s own call link (roun
     visit_id: 'visit-1', call_id: 'call-1', transcription: 'Agent: We will see you Friday at one.\nCaller: Great.',
     ai_extraction_enriched: { meta: {}, scheduling: { agent_committed_booking: true, confirmed_start_at: '2026-09-12T13:00:00-04:00' } },
     call_created_at: '2026-09-10T14:00:00.000Z', duration_seconds: 300, processing_token: null,
+    // A first-pass call with a valid extraction: the only shape whose window
+    // this derivation asserts (round-22 P1).
+    processing_generation: 1, v2_extraction_status: 'valid',
   };
 
   beforeEach(() => { process.env.GATE_CALL_AGENT_COMMIT_TRUSTED_LABELS = 'true'; });
@@ -1214,9 +1232,17 @@ describe('the call-booking promise derives from the visit\'s own call link (roun
     const spy = jest.spyOn(flags, 'hasAgentCommittedEvidence').mockReturnValue(true);
     const [promise] = await loadPromiseEvents(fakeConn([row]), ['visit-1']);
     expect(spy).toHaveBeenCalledWith(row.ai_extraction_enriched, row.transcription, row.call_created_at);
-    // A REPROCESSED call keeps the promise, without its window.
-    const [reprocessed] = await loadPromiseEvents(fakeConn([{ ...row, processing_generation: 3 }]), ['visit-1']);
-    expect(reprocessed).toMatchObject({ visit_id: 'visit-1', source: 'call', start_at: null });
+    // A REPROCESSED call keeps the promise, without its window — and without
+    // consulting the extraction at all, so an invalidated one or a removed
+    // commitment cannot erase it either (round-22 P1).
+    for (const over of [{ processing_generation: 3 },
+      { processing_generation: 3, v2_extraction_status: 'invalid' },
+      { processing_generation: 3, ai_extraction_enriched: { meta: {}, scheduling: {} } }]) {
+      const [reprocessed] = await loadPromiseEvents(fakeConn([{ ...row, ...over }]), ['visit-1']);
+      expect(reprocessed).toMatchObject({ visit_id: 'visit-1', source: 'call', start_at: null });
+    }
+    // A FIRST-pass call whose extraction is not valid is no evidence at all.
+    expect(await loadPromiseEvents(fakeConn([{ ...row, v2_extraction_status: 'invalid' }]), ['visit-1'])).toEqual([]);
     // A follow-up child the same call spawned carries source_call_log_id too
     // but has no confirmed time of its own — the primary's window must not be
     // mapped onto it (round-16 P1).
@@ -1231,7 +1257,10 @@ describe('the call-booking promise derives from the visit\'s own call link (roun
     // its one piece of evidence to an ordinary recovery pass (round-19 P1,
     // round-21 P2).
     expect(detector).toContain('const firstPass = Number(r.processing_generation || 0) <= 1;');
-    expect(detector).toContain('start_at: firstPass ? new Date(target).toISOString() : null,');
+    // The reprocessed branch returns BEFORE either mutable-extraction check,
+    // so an invalidated extraction or a removed commitment cannot erase the
+    // promise (round-22 P1).
+    expect(detector.indexOf('if (!firstPass) {')).toBeLessThan(detector.indexOf("if (r.v2_extraction_status !== 'valid') return null;"));
     expect(detector).not.toContain('cl.updated_at <=');
     expect(promise).toMatchObject({ visit_id: 'visit-1', source: 'call', source_id: 'call-1',
       communicated_at: '2026-09-10T14:05:00.000Z' });

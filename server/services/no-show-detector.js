@@ -485,7 +485,7 @@ async function loadPromiseEvents(conn, visitIds, { now = new Date() } = {}) {
     // applies through agentCommittedStart — spam/voicemail, an actual agent
     // commitment, a finite confirmed_start_at, and the trusted-labels gate.
     () => conn('scheduled_services as sv').join('call_log as cl', 'cl.id', 'sv.source_call_log_id')
-      .whereIn('sv.id', visitIds).where('cl.v2_extraction_status', 'valid')
+      .whereIn('sv.id', visitIds)
       // The call's confirmed_start_at belongs to the visit the caller BOOKED,
       // not to a follow-up treatment the same call spawned: that child
       // carries source_call_log_id too but deliberately has no confirmed time
@@ -506,7 +506,7 @@ async function loadPromiseEvents(conn, visitIds, { now = new Date() } = {}) {
       // customer was told something on that call, and the time is no longer
       // ours to assert.
       .select('sv.id as visit_id', 'sv.created_at as booked_at', 'cl.id as call_id', 'cl.ai_extraction_enriched',
-        'cl.transcription', 'cl.processing_token', 'cl.processing_generation',
+        'cl.transcription', 'cl.processing_token', 'cl.processing_generation', 'cl.v2_extraction_status',
         'cl.created_at as call_created_at', 'cl.direction as call_direction', 'cl.bridged_at as call_bridged_at',
         'cl.duration_seconds', 'cl.recording_duration_seconds'),
     () => conn('activity_log as al')
@@ -686,14 +686,27 @@ async function loadPromiseEvents(conn, visitIds, { now = new Date() } = {}) {
       // timestamp — handing it `undefined` silently weakened the
       // trusted-speaker rule this promise class depends on (codex P1 round
       // 10).
-      const target = r.processing_token ? null : agentCommittedStart({
+      if (r.processing_token) return null;
+      // Past the first processing pass the extraction is no longer evidence
+      // of anything — it may have been rewritten, invalidated, or had its
+      // commitment removed — but the BOOKING still proves the customer was
+      // told something on that call, so the promise survives as an unknown
+      // window. Both mutable-extraction checks are therefore skipped there,
+      // not merely overridden afterwards (codex P1 round 22).
+      const firstPass = Number(r.processing_generation || 0) <= 1;
+      if (!firstPass) {
+        return { visit_id: r.visit_id, start_at: null,
+          communicated_at: callCommitmentInstant({ created_at: r.call_created_at, direction: r.call_direction,
+            bridged_at: r.call_bridged_at, duration_seconds: r.duration_seconds,
+            recording_duration_seconds: r.recording_duration_seconds }, { notAfter: r.booked_at }).toISOString(),
+          source: 'call', source_id: r.call_id };
+      }
+      if (r.v2_extraction_status !== 'valid') return null;
+      const target = agentCommittedStart({
         ai_extraction_enriched: r.ai_extraction_enriched, transcription: r.transcription, created_at: r.call_created_at,
       });
       if (target == null) return null;
-      // Past the first processing pass the window is no longer ours to
-      // assert — see the note on the read above.
-      const firstPass = Number(r.processing_generation || 0) <= 1;
-      return { visit_id: r.visit_id, start_at: firstPass ? new Date(target).toISOString() : null,
+      return { visit_id: r.visit_id, start_at: new Date(target).toISOString(),
         communicated_at: callCommitmentInstant({ created_at: r.call_created_at, direction: r.call_direction, bridged_at: r.call_bridged_at,
           duration_seconds: r.duration_seconds, recording_duration_seconds: r.recording_duration_seconds },
         { notAfter: r.booked_at }).toISOString(),
@@ -1112,11 +1125,14 @@ async function listNoShows(conn, { now = new Date(), limit = 100 } = {}) {
     // The representative must be a row this scan actually returned — the
     // card, its tracking key and the office alert's job_id all hang off it —
     // so a stop pulled in only through a sibling raises no card of its own.
-    // Prefer the stop's canonical representative; fall back to any candidate
-    // row when that member is outside this scan.
-    const preferred = representativeOf(members);
-    const r = preferred && candidateIds.has(String(preferred.id))
-      ? preferred : members.find((m) => candidateIds.has(String(m.id)));
+    // The stop's canonical representative whenever ANY member made it into
+    // this scan — including when recall pulled in only the sibling that owns
+    // the grouped reminder. Building the card on that sibling instead would
+    // hand lockedStop a non-representative id, which it treats as superseded,
+    // so the stop would raise no alert at all (codex P1 round 22). Members
+    // outside the scan are still loaded (siblings are fetched above), so the
+    // representative is available even when it was not itself recalled.
+    const r = members.some((m) => candidateIds.has(String(m.id))) ? representativeOf(members) : null;
     if (!r) return null;
     const promise = stopPromise(members, promises, now);
     const alert = evaluateNoShow({ visit: stopState(members, { now, since: promise?.start_at }), promise, now });
@@ -1266,6 +1282,13 @@ async function reconcileOfficeAlert(trx, { card, visit, live, key, type, recipie
 // them, re-notifying the tech every five minutes (codex P1 round 10).
 // Members are locked in id order, the same order every pass takes them in.
 async function lockedStop(trx, serviceId, { now = new Date(), ignoreHorizon = false, promises = null } = {}) {
+  // The STOP's advisory lock first, the same one visit-groups takes for every
+  // create/join/split: its splitChild can lock the higher-id child and then
+  // wait for its sibling, while an id-ordered FOR UPDATE here locks the
+  // sibling first and waits for the child — a lock inversion that deadlocks
+  // the sweep against an operator's split (codex P1 round 22). Holding the
+  // stop lock serialises the two, and it is released with the transaction.
+  await require('./visit-groups').lockStopForRow(trx, serviceId).catch(() => null);
   // The first read takes NO lock: it only answers "which stop is this?".
   // Locking the representative and then the group would take row locks in
   // two different orders (this row first, then every member in id order),
@@ -1332,21 +1355,26 @@ async function lockedStop(trx, serviceId, { now = new Date(), ignoreHorizon = fa
 async function cleanupAfterDisable(conn) {
   if (enabled()) return { resolved: 0, dismissed: 0 };
   const dispatch = require('./dispatch-alerts');
-  // Is the DETECTOR still active anywhere? This decision is process-local, so
-  // during a zero-downtime deploy an old replica still carrying the gate as
-  // OFF runs alongside a new one that has it ON. Judging each row by its own
-  // age was not enough — a long-standing alert the enabled replica is still
-  // maintaining is old, and would have been cleaned anyway (codex P1 round
-  // 20). The fleet-wide signal is detector ACTIVITY: any tracking row created
-  // within the grace window means the feature is running somewhere, so this
-  // pass stands down entirely and tries again next tick.
+  // Is the DETECTOR still running anywhere? This decision is process-local,
+  // so during a zero-downtime deploy an old replica still carrying the gate
+  // as OFF runs alongside a new one that has it ON. The durable fleet signal
+  // is the sweep's own cron health row: runExclusive('no-show-detector', …)
+  // stamps last_started_at on EVERY enabled tick, whether or not that tick
+  // had anything to create — which is exactly the case row-recency probes
+  // missed, an enabled replica maintaining unchanged rows without making new
+  // ones (codex P2 round 22, refining the round-20 fix). Newly created rows
+  // are still honoured as a second signal, for the first ticks after a flip
+  // when health may not have been written yet.
   const settled = new Date(Date.now() - DISABLED_CLEANUP_GRACE_MS);
-  const recentAlert = await conn('dispatch_alerts').whereRaw("payload->>'source' = 'no_show_detector'")
-    .where('created_at', '>=', settled).first('id');
-  const recentNotice = recentAlert ? null
+  const sweepRan = await conn('job_health').where({ job_name: 'no-show-detector' })
+    .where('last_started_at', '>=', settled).first('job_name').catch(() => null);
+  const recentAlert = sweepRan ? null
+    : await conn('dispatch_alerts').whereRaw("payload->>'source' = 'no_show_detector'")
+      .where('created_at', '>=', settled).first('id');
+  const recentNotice = sweepRan || recentAlert ? null
     : await conn('tech_notifications').where({ type: 'follow_through_tracking' })
       .where('created_at', '>=', settled).first('id');
-  if (recentAlert || recentNotice) return { resolved: 0, dismissed: 0, deferred: true };
+  if (sweepRan || recentAlert || recentNotice) return { resolved: 0, dismissed: 0, deferred: true };
   const open = await conn('dispatch_alerts').whereIn('type', dispatch.OVERDUE_ALERT_TYPES)
     .whereNull('resolved_at').whereRaw("payload->>'source' = 'no_show_detector'")
     .select('id');
