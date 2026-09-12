@@ -2,14 +2,15 @@
 import React from 'react';
 import '@testing-library/jest-dom/vitest';
 import { cleanup, fireEvent, render, screen } from '@testing-library/react';
-import { MemoryRouter, useLocation } from 'react-router-dom';
+import { MemoryRouter, useLocation, useNavigate } from 'react-router-dom';
 import { afterEach, expect, it, vi } from 'vitest';
 import BlogPage from './BlogPage';
+import useRenderedTabBeacon from '../../hooks/useRenderedTabBeacon';
 
-function LocationProbe() { const location = useLocation(); return <output data-testid="location">{location.search}{location.hash}</output>; }
+function LocationProbe() { const location = useLocation(); const navigate = useNavigate(); return <><output data-testid="location">{location.pathname}{location.search}{location.hash}</output><button onClick={() => navigate(-1)}>Browser back</button></>; }
 
-vi.mock('../../hooks/useRenderedTabBeacon', () => ({ default: () => {} }));
-afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
+vi.mock('../../hooks/useRenderedTabBeacon', () => ({ default: vi.fn() }));
+afterEach(() => { cleanup(); vi.unstubAllGlobals(); vi.clearAllMocks(); });
 
 it('distinguishes unavailable posts from an empty list and retries', async () => {
   let unavailable = true;
@@ -36,12 +37,16 @@ it('opens a bookmarked post and returns to its list without dropping URL context
     return new Response(JSON.stringify({ posts: [], counts: {}, byStatus: {} }));
   });
   vi.stubGlobal('fetch', fetchMock);
-  render(<MemoryRouter initialEntries={['/admin/blog?tab=posts&status=draft&source=bookmark&post=ABCDEF01-2345-4678-9012-ABCDEF012345#details']}><BlogPage /><LocationProbe /></MemoryRouter>);
+  render(<MemoryRouter initialEntries={['/admin/dashboard', '/admin/blog?tab=posts&status=draft&source=bookmark&post=ABCDEF01-2345-4678-9012-ABCDEF012345#details']}><BlogPage /><LocationProbe /></MemoryRouter>);
   expect(await screen.findByDisplayValue('Fixture article')).toBeInTheDocument();
+  expect(useRenderedTabBeacon).toHaveBeenLastCalledWith('/admin/blog', 'editor', expect.any(Array));
   fireEvent.click(screen.getByRole('button', { name: /Back to list/i }));
   expect(await screen.findByText('No posts found')).toBeInTheDocument();
   expect(fetchMock.mock.calls.some(([url]) => String(url).includes('/blog?status=draft'))).toBe(true);
   expect(screen.getByTestId('location')).toHaveTextContent('?tab=posts&status=draft&source=bookmark#details');
+  expect(useRenderedTabBeacon).toHaveBeenLastCalledWith('/admin/blog', 'draft', expect.any(Array));
+  fireEvent.click(screen.getByRole('button', { name: 'Browser back' }));
+  expect(screen.getByTestId('location')).toHaveTextContent('/admin/dashboard');
   expect(fetchMock.mock.calls.every(([, options]) => !options?.method || options.method === 'GET')).toBe(true);
 });
 

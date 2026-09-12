@@ -2955,6 +2955,8 @@ export default function BlogPage() {
     ? paramStatus
     : legacyPostStatus || "published";
 
+  const postId = searchParams.get("post");
+
   // Usage beacon for the leaf that actually RENDERS — legacy status deep
   // links (?tab=drafts) and unknown values resolve to Posts without
   // rewriting the URL (Codex #2961 r17). While Posts is active, the
@@ -2967,7 +2969,7 @@ export default function BlogPage() {
   // would suppress.
   useRenderedTabBeacon(
     "/admin/blog",
-    tab === "posts" ? postStatus : tab,
+    postId ? "editor" : tab === "posts" ? postStatus : tab,
     [searchParams],
   );
 
@@ -2982,7 +2984,6 @@ export default function BlogPage() {
     );
   const location = useLocation();
   const navigate = useNavigate();
-  const postId = searchParams.get("post");
   const [selectedPost, setSelectedPost] = useState(null);
   const [postError, setPostError] = useState("");
   const [postRetry, setPostRetry] = useState(0);
@@ -2990,7 +2991,7 @@ export default function BlogPage() {
     const params = new URLSearchParams(searchParams);
     if (post) params.set("post", String(post.id));
     else params.delete("post");
-    navigate({ pathname: location.pathname, search: params.toString(), hash: location.hash });
+    navigate({ pathname: location.pathname, search: params.toString(), hash: location.hash }, { replace: !post });
   };
   useEffect(() => {
     let active = true;
