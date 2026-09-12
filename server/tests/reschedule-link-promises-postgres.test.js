@@ -950,5 +950,113 @@ postgres('reschedule-link-promises against PostgreSQL', () => {
         gates.callCommitments = priorCallCommitments;
       }
     });
+
+    /**
+     * codex #4293 P1, follow-up round on 7d0a11381: `blocked: false` with an
+     * explicit `deliveryOutcome: 'not_sent'` is a THIRD shape carrying the
+     * exact same certainty as the two already-handled cases above (a
+     * definitive Twilio rejection surfacing through the non-blocked
+     * provider-failure path, or a disabled template) — `blocked` alone can
+     * never see it, so the flag was stranding a fourth time on proof that
+     * nothing was sent. classifyDeliveryCertainty (send-customer-message.js)
+     * reads deliveryOutcome directly instead of `blocked`, so this clears
+     * the same way the blocked branches above do.
+     */
+    test('blocked: false with deliveryOutcome: not_sent clears the flag, and a later generation can stage', async () => {
+      const priorGate = process.env.GATE_RESCHEDULE_LINK_ON_PROMISE;
+      const priorCallCommitments = gates.callCommitments;
+      try {
+        process.env.GATE_RESCHEDULE_LINK_ON_PROMISE = 'true';
+        gates.callCommitments = true;
+
+        const { commitment, row } = await seedClaimableRow();
+        // Not a thrown error and not `blocked: true` — the exact shape a
+        // disabled template or a definitive non-blocked provider rejection
+        // returns from send-customer-message.
+        const notSentSend = async () => ({ sent: false, blocked: false, deliveryOutcome: 'not_sent', code: 'PROVIDER_FAILURE', error: 'template disabled' });
+        await links.runOne(mockPg, row, { now: promiseNow, send: notSentSend, buildLink: stubBuildLink, render: stubRender });
+
+        const afterBlock = await mockPg('outbox_messages').where({ id: row.id }).first();
+        expect(afterBlock.status).toBe('review');
+        expect(afterBlock.last_error).toBe('PROVIDER_FAILURE');
+        expect(afterBlock.payload.delivery_outcome_uncertain).toBe(false);
+
+        await mockPg('call_commitments').where({ id: commitment.id }).update({ processing_generation: 1 });
+        const staged = await links.stagePromises(mockPg);
+        expect(staged).toBe(1);
+        const rows = await mockPg('outbox_messages').where({ commitment_id: commitment.id }).orderBy('commitment_generation');
+        expect(rows).toHaveLength(2);
+        expect(rows[1]).toMatchObject({ commitment_generation: 1, status: 'pending' });
+      } finally {
+        if (priorGate === undefined) delete process.env.GATE_RESCHEDULE_LINK_ON_PROMISE; else process.env.GATE_RESCHEDULE_LINK_ON_PROMISE = priorGate;
+        gates.callCommitments = priorCallCommitments;
+      }
+    });
+
+    /**
+     * The same 'not_sent' certainty can also arrive on a THROWN error's own
+     * `.providerOutcome` — sendCustomerMessageCore tags every throw (e.g. a
+     * downstream persistAudit failure) with the provider outcome it had
+     * already observed. dispatch()'s catch block must read that the same
+     * way it reads a normal return, not treat every throw as unknown.
+     */
+    test("deliveryOutcome: not_sent arriving via a thrown error's err.providerOutcome also clears the flag", async () => {
+      const priorGate = process.env.GATE_RESCHEDULE_LINK_ON_PROMISE;
+      const priorCallCommitments = gates.callCommitments;
+      try {
+        process.env.GATE_RESCHEDULE_LINK_ON_PROMISE = 'true';
+        gates.callCommitments = true;
+
+        const { commitment, row } = await seedClaimableRow();
+        const thrownNotSentSend = async () => {
+          const err = new Error('audit persist failed after a definitive provider rejection');
+          err.providerOutcome = { sent: false, deliveryOutcome: 'not_sent', code: 'PROVIDER_FAILURE' };
+          throw err;
+        };
+        await links.runOne(mockPg, row, { now: promiseNow, send: thrownNotSentSend, buildLink: stubBuildLink, render: stubRender });
+
+        const afterBlock = await mockPg('outbox_messages').where({ id: row.id }).first();
+        expect(afterBlock.status).toBe('review');
+        expect(afterBlock.last_error).toBe('provider_outcome_unknown');
+        expect(afterBlock.payload.delivery_outcome_uncertain).toBe(false);
+
+        await mockPg('call_commitments').where({ id: commitment.id }).update({ processing_generation: 1 });
+        const staged = await links.stagePromises(mockPg);
+        expect(staged).toBe(1);
+      } finally {
+        if (priorGate === undefined) delete process.env.GATE_RESCHEDULE_LINK_ON_PROMISE; else process.env.GATE_RESCHEDULE_LINK_ON_PROMISE = priorGate;
+        gates.callCommitments = priorCallCommitments;
+      }
+    });
+
+    /**
+     * The genuinely unknown counterpart to the two tests above: a thrown SDK
+     * error carrying NO providerOutcome at all (this pipeline has no known
+     * fact to vouch for) must still leave the flag set — classifyDeliveryCertainty
+     * must not read a throw as proof of anything by itself.
+     */
+    test('a thrown error with no providerOutcome at all leaves the flag set', async () => {
+      const priorGate = process.env.GATE_RESCHEDULE_LINK_ON_PROMISE;
+      const priorCallCommitments = gates.callCommitments;
+      try {
+        process.env.GATE_RESCHEDULE_LINK_ON_PROMISE = 'true';
+        gates.callCommitments = true;
+
+        const { commitment, row } = await seedClaimableRow();
+        const thrownUnknownSend = async () => { throw new Error('ECONNRESET'); };
+        await links.runOne(mockPg, row, { now: promiseNow, send: thrownUnknownSend, buildLink: stubBuildLink, render: stubRender });
+
+        const afterBlock = await mockPg('outbox_messages').where({ id: row.id }).first();
+        expect(afterBlock.status).toBe('review');
+        expect(afterBlock.payload.delivery_outcome_uncertain).toBe(true);
+
+        await mockPg('call_commitments').where({ id: commitment.id }).update({ processing_generation: 1 });
+        const staged = await links.stagePromises(mockPg);
+        expect(staged).toBe(0);
+      } finally {
+        if (priorGate === undefined) delete process.env.GATE_RESCHEDULE_LINK_ON_PROMISE; else process.env.GATE_RESCHEDULE_LINK_ON_PROMISE = priorGate;
+        gates.callCommitments = priorCallCommitments;
+      }
+    });
   });
 });
