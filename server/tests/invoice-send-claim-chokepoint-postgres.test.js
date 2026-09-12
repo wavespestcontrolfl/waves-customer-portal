@@ -539,4 +539,93 @@ postgres('the shared send claim on a migrated database', () => {
       expect((await readInvoice(minted.id)).status).toBe('sending');
     });
   });
+
+  describe('sendViaSMSAndEmail treats an invoice-WIDE under-claim refusal as a whole-send refusal — email must not run (pre-push P1 #4131, this round)', () => {
+    // sendViaSMSAndEmail's own claim succeeds (draft -> sending) BEFORE this
+    // fixture's race fires, exactly like the office's Immediate send: the
+    // customer's visit is cancelled in the ONE real await between that
+    // claim and the inner sendViaSMS call — autoApplyAccountCreditIfEnabled.
+    async function draftInvoiceFixture() {
+      await visitFixture();
+      f.invoiceId = randomUUID();
+      await mockPg('invoices').insert({ id: f.invoiceId, customer_id: f.customerId, scheduled_service_id: f.serviceId,
+        invoice_number: `TST-${f.invoiceId.slice(0, 8)}`, token: randomUUID().replace(/-/g, ''), status: 'draft',
+        total: 117, subtotal: 117, credit_applied: 0,
+        line_items: JSON.stringify([{ description: 'Quarterly Pest Control Service', amount: 117, quantity: 1, unit_price: 117 }]) });
+      return f;
+    }
+
+    test('a visit cancelled in the gap refuses the SMS leg as visit_cancelled, skips the email leg entirely, and restores the claim — WITHOUT the fix, sendInvoiceEmail (which never checks visit status) still fires and finalizes the invoice sent', async () => {
+      await draftInvoiceFixture();
+      const { sendInvoiceEmail } = require('../services/invoice-email');
+      sendInvoiceEmail.mockClear();
+      const CustomerCredit = require('../services/customer-credit');
+      const applySpy = jest.spyOn(CustomerCredit, 'autoApplyAccountCreditIfEnabled').mockImplementationOnce(async () => {
+        // The race: a prepayment/cancellation landing after THIS wrapper's
+        // own claim, before the inner sendViaSMS call's under-claim recheck.
+        await mockPg('scheduled_services').where({ id: f.serviceId }).update({ status: 'cancelled' });
+        return { applied: 0, fullyCovered: false };
+      });
+      try {
+        const result = await InvoiceService.sendViaSMSAndEmail(f.invoiceId);
+        expect(result.ok).toBe(false);
+        expect(result.sms).toMatchObject({ ok: false, code: 'visit_cancelled', invoiceWideRefusal: true });
+        expect(result.email.ok).toBe(false);
+        // THE bug: without the fix, nothing here distinguishes "the whole
+        // invoice is refused" from "only SMS failed" — the email leg below
+        // runs anyway, and sendInvoiceEmail has no visit-status guard of its
+        // own, so it delivers a full invoice email for a visit that never
+        // ran (and would finalize the row 'sent' in the process).
+        expect(sendInvoiceEmail).not.toHaveBeenCalled();
+        const invoice = await readInvoice(f.invoiceId);
+        // The claim is restored, not finalized on the email leg — still
+        // exactly where it started.
+        expect(invoice.status).toBe('draft');
+        expect(invoice.sent_at).toBeNull();
+        expect(invoice.sms_sent_at).toBeNull();
+      } finally {
+        applySpy.mockRestore();
+      }
+    });
+  });
+
+  describe('the completion delivery claim treats an email-delivered draft as already delivered (pre-push P1 #4131, this round — mechanism diff)', () => {
+    // completionInvoiceAlreadyDelivered (invoice-helpers.js) reads ONLY
+    // sent_at + status IN ('sent','paid','prepaid') — it has no idea
+    // email_sent_at exists. The completion's OWN claim.invoice, checked
+    // against that helper, is furthermore always status='sending' the
+    // instant a plain claimInvoiceForSend succeeds (the UPDATE that
+    // returned it just set that), so the status half of that helper could
+    // never fire there either way — sent_at was the only thing that check
+    // ever actually caught. firstDeliveryOnly's alreadyDeliveredForFirstSend
+    // checks sent_at OR email_sent_at OR status IN
+    // ('sent','viewed','overdue','paid','prepaid'), evaluated on the PRE-flip
+    // row — a strict superset, and it fires before any claim is taken at all.
+    async function preDeliveredLinkedDraftFixture() {
+      await visitFixture();
+      f.invoiceId = randomUUID();
+      await mockPg('invoices').insert({ id: f.invoiceId, customer_id: f.customerId, scheduled_service_id: f.serviceId,
+        invoice_number: `TST-${f.invoiceId.slice(0, 8)}`, token: randomUUID().replace(/-/g, ''), status: 'draft',
+        total: 117, subtotal: 117, credit_applied: 0, email_sent_at: new Date(),
+        line_items: JSON.stringify([{ description: 'Quarterly Pest Control Service', amount: 117, quantity: 1, unit_price: 117 }]) });
+      return f;
+    }
+
+    test('a linked draft carrying ONLY email_sent_at (status still draft, sent_at still null) is not re-delivered by the completion — no second pay-link text, and the pre-existing invoice is left exactly as it was, never claimed', async () => {
+      await preDeliveredLinkedDraftFixture();
+      const result = await complete();
+      expect(result.status).toBe(200);
+      // THE bug: without the fix, the plain claim (draft -> sending)
+      // succeeds — nothing about this invoice looks unsendable to
+      // SEND_CLAIMABLE_STATUSES — and completionInvoiceAlreadyDelivered on
+      // the now-'sending' claim.invoice sees neither a matching status nor
+      // sent_at, so the completion proceeds to text a SECOND pay link and
+      // finalizes the row 'sent' on top of the email delivery it already had.
+      expect(payLinkTexts()).toHaveLength(0);
+      const invoice = await readInvoice(f.invoiceId);
+      expect(invoice.status).toBe('draft'); // never claimed — firstDeliveryOnly refused pre-flip
+      expect(invoice.sent_at).toBeNull();
+      expect(invoice.sms_sent_at).toBeNull();
+    });
+  });
 });

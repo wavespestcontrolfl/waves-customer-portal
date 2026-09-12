@@ -1242,7 +1242,11 @@ async function restoreClaimAndThrow(invoiceId, previousStatus, err, consumedQueu
 // or not: either way there is nothing left for this claim to deliver.
 async function throwForZeroDueVisitInvoice(invoiceId, fallbackRow) {
   const settlement = await settleZeroDueVisitInvoice(invoiceId);
-  if (settlement.settled) throw invoiceNotSendableError(settlement.invoice || { ...fallbackRow, status: "prepaid" });
+  if (settlement.settled) {
+    const err = invoiceNotSendableError(settlement.invoice || { ...fallbackRow, status: "prepaid" });
+    err.code = "zero_due";
+    throw err;
+  }
   throw depositSettlementPendingError(invoiceId, settlement.reason);
 }
 
@@ -1262,9 +1266,25 @@ async function throwForZeroDueVisitInvoice(invoiceId, fallbackRow) {
 // own comment), so it cannot share reverifyClaimedVisitInvoice's
 // restoreSendClaim call, only this part.
 async function throwVisitInvoiceRefusal(invoiceId, invoice, underClaim) {
-  if (underClaim.kind === "zero_due") await throwForZeroDueVisitInvoice(invoiceId, invoice);
-  if (underClaim.kind === "visit_prepaid_covered") throw visitPrepaidCoveredError(invoiceId);
-  throw visitNeverRanError(invoiceId, underClaim.visitStatus);
+  try {
+    if (underClaim.kind === "zero_due") await throwForZeroDueVisitInvoice(invoiceId, invoice);
+    if (underClaim.kind === "visit_prepaid_covered") throw visitPrepaidCoveredError(invoiceId);
+    throw visitNeverRanError(invoiceId, underClaim.visitStatus);
+  } catch (err) {
+    // Every refusal dispatched here means the INVOICE has nothing left to
+    // deliver on ANY channel — paid off out-of-band, its visit never ran,
+    // or nothing due — not a channel-specific delivery failure (pre-push
+    // P1 #4131 finding 1). Flag it explicitly so a caller juggling
+    // multiple channels (sendViaSMSAndEmail) can tell "this channel
+    // failed, try the next" apart from "the whole send is refused" without
+    // having to infer it from which catch block happened to run: falling
+    // through to email here would mail a stale full-balance invoice to a
+    // customer sendViaSMS just determined has already paid, whose visit
+    // never happened, or who owes nothing — email has no equivalent guard
+    // (sendInvoiceEmail never checks visit prepayments).
+    err.invoiceWideRefusal = true;
+    throw err;
+  }
 }
 
 async function reverifyClaimedVisitInvoice(invoiceId, invoice, previousStatus) {
@@ -3743,6 +3763,15 @@ const InvoiceService = {
         if (err.retryAfterMs) sms.retryAfterMs = err.retryAfterMs;
         if (err.smsBody) sms.heldBody = err.smsBody;
         if (err.toPhone) sms.heldToPhone = err.toPhone;
+        // The inner sendViaSMS's own under-claim recheck (a prepayment,
+        // cancellation, or retotal-to-zero landing between THIS wrapper's
+        // claim and the SMS leg's recheck) can refuse the WHOLE invoice,
+        // not just the SMS channel (pre-push P1 #4131 finding 1) —
+        // throwVisitInvoiceRefusal marks exactly that. A channel-specific
+        // failure (bad phone, Twilio error, a provider hold) carries no
+        // such flag and must still fall through to the email leg below,
+        // unchanged.
+        if (err.invoiceWideRefusal) sms.invoiceWideRefusal = true;
       }
     }
 
@@ -3796,10 +3825,12 @@ const InvoiceService = {
     const scheduledSmsHeld = allowClaimed
       && ["QUIET_HOURS_HOLD", "PUSH_IN_FLIGHT", "APP_DELIVERY_HOLD", "APP_PROVIDER_RETRY"].includes(sms.code)
       && Boolean(sms.nextAllowedAt);
-    if (scheduledSmsHeld || sms.holdUnowned) {
+    if (scheduledSmsHeld || sms.holdUnowned || sms.invoiceWideRefusal) {
       email.error = sms.holdUnowned
         ? "Held SMS pay link could not be queued — whole send deferred so the claim stays retryable"
-        : "Deferred with the held SMS leg — outside 8AM-8PM ET send window";
+        : sms.invoiceWideRefusal
+          ? "Invoice-wide send refusal (not a channel-specific SMS failure) — email leg skipped so the claim stays restorable"
+          : "Deferred with the held SMS leg — outside 8AM-8PM ET send window";
       email.code = sms.code;
     } else {
       try {

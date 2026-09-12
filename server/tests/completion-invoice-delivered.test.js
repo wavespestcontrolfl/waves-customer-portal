@@ -590,7 +590,19 @@ describe('completionInvoiceAlreadyDelivered', () => {
     expect(completion).toMatch(/const suppressCompletionInvoiceLink = !!invoiceAlreadySent\s*\|\| !!\(preMintedInvoice && require\('\.\.\/services\/invoice-helpers'\)\.completionInvoiceAlreadyDelivered\(preMintedInvoice\)\);/);
     // …and takes the ONE send claim before texting a link for a reused invoice (Codex P1 r4):
     // claim at the decision, finalize via markDeliverySent when the link went out, release otherwise (normal end and thrown path).
-    expect(completion).toMatch(/const claim = await InvoiceServiceForClaim\.claimInvoiceForSend\(invoice\.id\);[\s\S]{0,600}?if \(require\('\.\.\/services\/invoice-helpers'\)\.completionInvoiceAlreadyDelivered\(claim\.invoice\)\) \{\s*await InvoiceServiceForClaim\.restoreSendClaim\(invoice\.id, claim\.previousStatus, claim\.claimed\);[\s\S]{0,300}?reusedInvoiceClaimedElsewhere = true;\s*\} else \{\s*completionInvoiceSendClaim = \{ invoiceId: invoice\.id, previousStatus: claim\.previousStatus, claimed: claim\.claimed \};/);
+    // firstDeliveryOnly (P1 #4131, this round): the plain claim +
+    // completionInvoiceAlreadyDelivered(claim.invoice) post-claim recheck a
+    // prior sweep called "equivalent" is gone — claim.invoice.status is
+    // always 'sending' post-flip (that recheck's status half could never
+    // fire) and the helper never read email_sent_at at all, so an
+    // email-delivered AP invoice was invisible to it. firstDeliveryOnly
+    // refuses BEFORE the flip on sent_at, email_sent_at, or a delivered
+    // status — see the completion-invoice-delivered describe block below
+    // for the mechanism-diff proof.
+    expect(completion).toMatch(/const claim = await InvoiceServiceForClaim\.claimInvoiceForSend\(invoice\.id, \{ firstDeliveryOnly: true \}\);\s*completionInvoiceSendClaim = \{ invoiceId: invoice\.id, previousStatus: claim\.previousStatus, claimed: claim\.claimed \};/);
+    // The dead post-claim recheck itself (an actual call, not a comment
+    // explaining why it's gone) no longer exists at this site.
+    expect(completion).not.toMatch(/if \(require\('\.\.\/services\/invoice-helpers'\)\.completionInvoiceAlreadyDelivered\(claim\.invoice\)\)/);
     // The claim is attempted only when every other pay-link gate already passes.
     // …including a decline notice that already delivered the link (GitHub r6 P1): report-only, no claim.
     // Codex r16 P1 #4131: the claim is taken for EVERY collectible invoice —
@@ -604,9 +616,13 @@ describe('completionInvoiceAlreadyDelivered', () => {
     expect(completion).not.toMatch(/allowCompletionInvoiceLinkBase/);
     // A refused claim is classified: settled/gone → report-only; in-flight send or transient failure → the resumable 503 (retryable delivery).
     // A queued pay-link text (any of the three send-window queues) is a durable delivery owner → report-only, never the 503.
-    expect(completion).toMatch(/const nothingLeftToDeliver = claimErr\?\.code === 'queued_pay_link'\s*\|\| \/Cannot send a \(paid\|prepaid\|voided\) invoice\|Cannot send an invoice while payment is processing\|Invoice not found\|Invoice is not sendable\/i\.test\(claimMessage\);\s*if \(!nothingLeftToDeliver\) \{[\s\S]{0,300}?return exitForCompletionSmsResume\(new Error\(`Invoice \$\{invoice\.id\} delivery claim unavailable: \$\{claimMessage\}`\)\);/);
+    // 'already_delivered' (P1 #4131, this round) is firstDeliveryOnly's own
+    // refusal — the row was already delivered since the pre-completion
+    // read; nothing left for THIS completion to send either, same as a
+    // queued pay-link text.
+    expect(completion).toMatch(/const nothingLeftToDeliver = claimErr\?\.code === 'queued_pay_link'\s*\|\| claimErr\?\.code === 'already_delivered'\s*\|\| \/Cannot send a \(paid\|prepaid\|voided\) invoice\|Cannot send an invoice while payment is processing\|Invoice not found\|Invoice is not sendable\/i\.test\(claimMessage\);\s*if \(!nothingLeftToDeliver\) \{[\s\S]{0,300}?return exitForCompletionSmsResume\(new Error\(`Invoice \$\{invoice\.id\} delivery claim unavailable: \$\{claimMessage\}`\)\);/);
     // …and the completion's claim carries no adoptsQueuedInvoiceSend: a queued invoice_send_deferred row refuses it too.
-    expect(completion).toMatch(/const claim = await InvoiceServiceForClaim\.claimInvoiceForSend\(invoice\.id\);/);
+    expect(completion).toMatch(/const claim = await InvoiceServiceForClaim\.claimInvoiceForSend\(invoice\.id, \{ firstDeliveryOnly: true \}\);/);
     // The link is delivered at PROVIDER ACCEPTANCE, before markDeliverySent, on both the success path and the accepted-then-threw catch (GitHub r5 P1): a failed status sync never hands the claim back on a texted link.
     expect(completion.match(/completionInvoiceLinkDelivered = true;/g)).toHaveLength(2);
     expect(completion).toMatch(/completionSmsProviderAccepted = smsResult\.sent === true;[\s\S]{0,900}?if \(completionSmsProviderAccepted && invoice\?\.id && invoiceCreated && payUrl && allowCompletionInvoiceLink\) \{\s*completionInvoiceLinkDelivered = true;\s*\}/);

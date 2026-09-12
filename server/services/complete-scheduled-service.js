@@ -11667,17 +11667,27 @@ async function completeScheduledService(completionInput, packetContext = null) {
         if (linkOtherwiseEligible && invoice?.id) {
           try {
             const InvoiceServiceForClaim = require('../services/invoice');
-            const claim = await InvoiceServiceForClaim.claimInvoiceForSend(invoice.id);
-            // 'sent' is claimable (a resend), so a row DELIVERED since the
-            // pre-completion snapshot would still be claimed here — reject it
-            // (pre-push P1 r4): give the claim straight back and go report-only.
-            if (require('../services/invoice-helpers').completionInvoiceAlreadyDelivered(claim.invoice)) {
-              await InvoiceServiceForClaim.restoreSendClaim(invoice.id, claim.previousStatus, claim.claimed);
-              logger.info(`[dispatch] invoice ${invoice.id} was delivered since the pre-completion read — completion text goes report-only`);
-              reusedInvoiceClaimedElsewhere = true;
-            } else {
-              completionInvoiceSendClaim = { invoiceId: invoice.id, previousStatus: claim.previousStatus, claimed: claim.claimed };
-            }
+            // firstDeliveryOnly (P1 #4131, this round — third overturned
+            // "different but equivalent" verdict in this PR): a prior sweep
+            // called the plain claim + completionInvoiceAlreadyDelivered(claim.invoice)
+            // check below correct because it "achieves the same effect via
+            // an older mechanism". It does not. completionInvoiceAlreadyDelivered
+            // reads claim.invoice.sent_at + status in ['sent','paid','prepaid']
+            // — but claim.invoice IS the just-flipped row (status forced to
+            // 'sending' by the UPDATE above), so the status half can never
+            // match, AND the helper never looks at email_sent_at at all. An
+            // AP payer email that delivered (email_sent_at stamped, sent_at
+            // still null — invoice-email.js's own durable pre-bookkeeping
+            // stamp) was therefore invisible here, and the completion could
+            // claim the row and text a second pay link on top of a delivery
+            // the customer already has. firstDeliveryOnly's own
+            // alreadyDeliveredForFirstSend refuses the claim BEFORE any flip
+            // on sent_at OR email_sent_at OR status in
+            // ['sent','viewed','overdue','paid','prepaid'] — a strict
+            // superset of what the removed check below ever covered, so
+            // nothing here is a downgrade.
+            const claim = await InvoiceServiceForClaim.claimInvoiceForSend(invoice.id, { firstDeliveryOnly: true });
+            completionInvoiceSendClaim = { invoiceId: invoice.id, previousStatus: claim.previousStatus, claimed: claim.claimed };
           } catch (claimErr) {
             // Classify the refusal (pre-push P1 r4): a row that is settled or
             // gone (paid / prepaid / voided / not found / a non-sendable status
@@ -11692,8 +11702,13 @@ async function completeScheduledService(completionInput, packetContext = null) {
             // admin send's held SMS leg, or this visit's own deferred text)
             // owns the delivery durably (pre-push P1): it texts the link at
             // the window open, so this completion is report-only — not a
-            // retryable obligation.
+            // retryable obligation. 'already_delivered' is firstDeliveryOnly's
+            // own refusal (this round, P1 #4131) — the row was already
+            // delivered (sent_at, email_sent_at, or a delivered status) since
+            // the pre-completion read; nothing left for THIS completion to
+            // send either.
             const nothingLeftToDeliver = claimErr?.code === 'queued_pay_link'
+              || claimErr?.code === 'already_delivered'
               || /Cannot send a (paid|prepaid|voided) invoice|Cannot send an invoice while payment is processing|Invoice not found|Invoice is not sendable/i.test(claimMessage);
             if (!nothingLeftToDeliver) {
               logger.warn(`[dispatch] invoice ${invoice.id} delivery claim unavailable (${claimMessage}) — closeout saved, delivery left retryable`);
