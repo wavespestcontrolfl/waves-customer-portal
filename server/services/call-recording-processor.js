@@ -8375,9 +8375,13 @@ const CallRecordingProcessor = {
         })
         .update({
           payload: evidence
-            // A live attempt clears any retirement a previous pass stamped —
-            // mirror images, each clearing the other's key.
-            ? db.raw('(coalesce(payload, \'{}\'::jsonb) - \'recovery_superseded_at\') || ?::jsonb', [JSON.stringify(evidence)])
+            // Only a pass that actually RECOVERED clears the retirement. An
+            // attempt that ran and FAILED still carries evidence worth writing
+            // (its candidates go to the reviewer), but clearing the marker
+            // there made a previous pass's address_recovered card read as live
+            // and told the operator the street was reconstructed when this
+            // pass could not reconstruct it (codex #4437 r7 P1).
+            ? db.raw(`(coalesce(payload, '{}'::jsonb) ${addressRecovery?.recovered ? "- 'recovery_superseded_at'" : ''}) || ?::jsonb`, [JSON.stringify(evidence)])
             : recoveryMarkerPayload(db, null),
           updated_at: new Date(),
         })

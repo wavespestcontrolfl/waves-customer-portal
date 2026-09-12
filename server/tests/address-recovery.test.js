@@ -405,6 +405,65 @@ describe('recoverStreetAddress — one aggregate budget', () => {
 // The recovery MODEL decides which phonetic candidates come back, so it is
 // part of the cohort identity: the same prompt text on a different model is
 // different routing behavior and must not pool into one promotion cohort.
+// The ordinal prompt makes Gemini propose SEVERAL numbered streets for one
+// garble ("4th Avenue East", "40th Avenue East", "4th Drive Northeast"), which
+// is the whole point of it — and made a latent dedup bug reachable. The premise
+// key stripped every digit, so two genuinely different houses read as "exactly
+// one confirmed premise" and the first was auto-adopted: a tech sent to an
+// address nobody confirmed, the exact failure this module exists to prevent.
+describe('recoverStreetAddress — ordinal streets are distinct premises', () => {
+  const GARBLED_ORDINAL = { address_line1: '11106 Port Ave East', city: 'Bradenton', state: 'FL', zip: '34212' };
+  const confirmEachAsItself = async ({ addressLines }) => ({
+    status: 'validated_accept',
+    county: 'Manatee County',
+    normalized: {
+      street_line_1: String(addressLines[0]).split(',')[0].trim(),
+      city: 'Bradenton',
+      state: 'FL',
+      postal_code: '34212',
+    },
+  });
+
+  test('two streets differing only in their ordinal are ambiguity, never an auto-adopt', async () => {
+    const out = await recoverStreetAddress({
+      extracted: GARBLED_ORDINAL,
+      avStatus: 'missing_component',
+      deps: deps({
+        autocomplete: async (input) => (input.includes('Port') ? [] : [
+          '11106 4th Avenue East, Bradenton, FL 34212, USA',
+          '11106 40th Avenue East, Bradenton, FL 34212, USA',
+        ]),
+        phonetic: async () => ['4th Avenue East'],
+        validate: confirmEachAsItself,
+      }),
+    });
+
+    expect(out.recovered).toBeNull();
+    expect(out.candidates).toHaveLength(2);
+  });
+
+  test('the SAME ordinal street reached twice is still one premise', async () => {
+    const out = await recoverStreetAddress({
+      extracted: GARBLED_ORDINAL,
+      avStatus: 'missing_component',
+      deps: deps({
+        autocomplete: async (input) => (input.includes('Port') ? [] : [
+          '11106 4th Avenue East, Bradenton, FL 34212, USA',
+          '11106 4th Ave E, Bradenton, FL 34212, USA',
+        ]),
+        phonetic: async () => ['4th Avenue East'],
+        validate: async () => ({
+          status: 'validated_accept',
+          county: 'Manatee County',
+          normalized: { street_line_1: '11106 4th Avenue East', city: 'Bradenton', state: 'FL', postal_code: '34212' },
+        }),
+      }),
+    });
+
+    expect(out.recovered).toMatchObject({ address_line1: '11106 4th Avenue East' });
+  });
+});
+
 describe('recoveryCohortVersion', () => {
   const original = process.env.GEMINI_RECOVERY_MODEL;
   afterEach(() => {

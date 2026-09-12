@@ -92,6 +92,14 @@ const MAX_CONFIRMATIONS = 3; // AV confirmation calls per recovery
 const houseNumberOf = (street) => (String(street || '').trim().match(/^\d+/) || [null])[0];
 const zip5 = (zip) => (String(zip || '').match(/^\d{5}/) || [null])[0];
 const cityKey = (city) => String(city || '').toLowerCase().replace(/[^a-z]/g, '');
+// Premise identity keeps DIGITS. cityKey drops them — right for comparing city
+// names, catastrophic for a numbered grid: "4th Avenue East" and "40th Avenue
+// East" both reduced to "thavenueeast", so two genuinely different houses
+// counted as ONE confirmed premise and the first was auto-adopted, sending a
+// tech to an address nobody confirmed (codex #4437 r7 P1). The ordinal prompt
+// makes multi-ordinal candidate sets the normal case, so this is live rather
+// than theoretical.
+const premiseKey = (street) => String(street || '').toLowerCase().replace(/[^a-z0-9]/g, '');
 
 /** Places Autocomplete → array of prediction descriptions ([] on zero results, null on API failure). */
 async function fetchAutocompletePredictions(input, { deadline = newDeadline() } = {}) {
@@ -280,7 +288,7 @@ async function recoverStreetAddress({ extracted = {}, avStatus, extraStreetCandi
     }
     // Distinct confirmed premises — two different validated streets is genuine
     // ambiguity, which belongs to a human, not an auto-adopt.
-    const premiseKeys = new Set(confirmed.map((c) => `${cityKey(c.street_line_1)}|${zip5(c.postal_code)}`));
+    const premiseKeys = new Set(confirmed.map((c) => `${premiseKey(c.street_line_1)}|${zip5(c.postal_code)}`));
     const recovered = !truncated && premiseKeys.size === 1
       ? {
         address_line1: confirmed[0].street_line_1,
@@ -304,6 +312,7 @@ async function recoverStreetAddress({ extracted = {}, avStatus, extraStreetCandi
 
 module.exports = {
   RECOVERY_PROMPT_VERSION,
+  premiseKey,
   recoveryCohortVersion,
   recoverStreetAddress,
   fetchAutocompletePredictions,
