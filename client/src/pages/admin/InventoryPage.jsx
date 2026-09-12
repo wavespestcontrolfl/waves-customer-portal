@@ -1,5 +1,10 @@
 import { useState, useEffect, useCallback, useRef } from "react";
-import { useOutletContext, useSearchParams } from "react-router-dom";
+import {
+  useLocation,
+  useNavigate,
+  useOutletContext,
+  useSearchParams,
+} from "react-router-dom";
 import useRenderedTabBeacon from "../../hooks/useRenderedTabBeacon";
 import {
   useIntelligenceBarActions,
@@ -208,6 +213,8 @@ export default function InventoryPage() {
     lastMutation?.domain === "inventory" ? lastMutation.id : null;
   const statsSequence = useRef(0);
   const [searchParams] = useSearchParams();
+  const location = useLocation();
+  const navigate = useNavigate();
   // Server-verified role from the shell's Outlet context (never localStorage).
   const outletContext = useOutletContext();
   const isAdminRole = outletContext?.user?.role === "admin";
@@ -218,19 +225,34 @@ export default function InventoryPage() {
     ),
   })).filter((g) => g.tabs.length > 0);
   const requestedTab = searchParams.get("tab");
-  const initialTab =
+  const tab =
     ALL_LEAF_TABS.includes(requestedTab) &&
     (isAdminRole || !OWNER_ONLY_INVENTORY_TABS.has(requestedTab))
       ? requestedTab
       : "products";
-  const [tab, setTab] = useState(initialTab);
 
-  // Usage beacon for the tab that actually RENDERS. The URL only SEEDS
-  // this state (validated, Products default) and switches never write
-  // back, so query-less landings went unnamed and a ?tab=typo deep link
-  // recorded a leaf that never rendered (same class as the r17 sweep;
-  // found in the r19 route-key enumeration). searchParams dep per the
-  // unchanged-leaf contract: a same-route URL change re-asserts the leaf.
+  const setTab = useCallback(
+    (nextTab) => {
+      const normalizedTab =
+        ALL_LEAF_TABS.includes(nextTab) &&
+        (isAdminRole || !OWNER_ONLY_INVENTORY_TABS.has(nextTab))
+          ? nextTab
+          : "products";
+      if (normalizedTab === tab) return;
+      const next = new URLSearchParams(searchParams);
+      next.set("tab", normalizedTab);
+      navigate({
+        pathname: location.pathname,
+        search: `?${next.toString()}`,
+        hash: location.hash,
+      });
+    },
+    [isAdminRole, location.hash, location.pathname, navigate, searchParams, tab],
+  );
+
+  // Report the validated, role-allowed leaf that actually renders. The
+  // searchParams dependency also re-asserts the fallback after same-route
+  // history navigation to an invalid or restricted deep link.
   useRenderedTabBeacon("/admin/inventory", tab, [searchParams]);
   const [stats, setStats] = useState(null);
   const [toast, setToast] = useState("");
