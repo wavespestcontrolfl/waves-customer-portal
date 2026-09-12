@@ -95,6 +95,9 @@ export function withdrawLawnPlanSuggestions(rows, { planUnverified = false } = {
       ['applicationMethod', ['applicationMethod']], ['rateUnit', ['rate', 'rateUnit']],
       ['amountUnit', ['totalAmount', 'amountUnit']], ['areaUnit', ['areaValue', 'areaUnit']],
     ].filter(([unit, owners]) => !(unit === 'amountUnit' && row.totalAmountManual)
+      // A retained tank calculation keeps the units that label it: 20 without
+      // fl_oz is not a record (Codex r1 P1).
+      && !(isTankCalculation(row) && ['rateUnit', 'amountUnit'].includes(unit))
       && !owners.some(owner => row.lawnPlanManualFields?.includes(owner))).map(([unit]) => [unit, ''])) : {}),
     lawnAmountReason: LAWN_PLAN_UNAVAILABLE_REASON,
   } : row);
