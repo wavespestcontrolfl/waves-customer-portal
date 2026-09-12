@@ -28,7 +28,7 @@ export default function GlassNewsletterCard({ source }) {
     >
       {/* Eyebrow names the section so the card says what it is. */}
       <div data-gt="eyebrow" style={{
-        fontSize: 12, fontWeight: 800, letterSpacing: '0.08em',
+        fontSize: 12, fontWeight: 700, letterSpacing: '0.08em',
         textTransform: 'uppercase', color: CUSTOMER_SURFACE.muted,
         marginBottom: 8,
       }}>
