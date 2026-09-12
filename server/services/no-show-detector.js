@@ -491,7 +491,8 @@ async function loadPromiseEvents(conn, visitIds, { now = new Date() } = {}) {
       // customer was told something on that call, and the time is no longer
       // ours to assert.
       .select('sv.id as visit_id', 'sv.created_at as booked_at', 'cl.id as call_id', 'cl.ai_extraction_enriched',
-        'cl.transcription', 'cl.processing_token', 'cl.created_at as call_created_at', 'cl.direction as call_direction', 'cl.bridged_at as call_bridged_at',
+        'cl.transcription', 'cl.processing_token', 'cl.processing_generation',
+        'cl.created_at as call_created_at', 'cl.direction as call_direction', 'cl.bridged_at as call_bridged_at',
         'cl.duration_seconds', 'cl.recording_duration_seconds'),
     () => conn('activity_log as al')
       // The CALL is joined for its own clock: the activity row is written
@@ -610,14 +611,21 @@ async function loadPromiseEvents(conn, visitIds, { now = new Date() } = {}) {
     // 24h send too, which is a different message the customer received later
     // (codex P1 round 17, second pass).
     const sendKey = (r) => `${r.stop_id}:${r.tier}:${r.occurrence}`;
-    const earliest = new Map();
+    // Matched by SEND IDENTITY — the visit and the occurrence the notice
+    // quoted — not by "communicated at or after". A `both`-channel reminder
+    // sends its SMS BEFORE the email, so the known window is timestamped
+    // EARLIER than the email fan-out it covers, and a time comparison could
+    // never see it (codex P1 round 21, second pass).
+    const knownOccurrences = new Set(noticeEvents
+      .filter((event) => event.visit_id && event.start_at != null)
+      .map((event) => `${event.visit_id}:${etDateString(new Date(event.start_at))}`));
+    const stopMembersOf = new Map();
     for (const r of groupedEmails) {
-      const at = instant(r.sent_at);
-      if (!earliest.has(sendKey(r)) || at < earliest.get(sendKey(r))) earliest.set(sendKey(r), at);
+      if (!stopMembersOf.has(r.stop_id)) stopMembersOf.set(r.stop_id, new Set());
+      stopMembersOf.get(r.stop_id).add(String(r.visit_id));
     }
     const recoveredSends = new Set(groupedEmails
-      .filter((r) => knownWindowAtOrAfter(noticeEvents, { visit_id: r.visit_id,
-        communicated_at: new Date(earliest.get(sendKey(r))).toISOString() }))
+      .filter((r) => [...stopMembersOf.get(r.stop_id)].some((memberId) => knownOccurrences.has(`${memberId}:${r.occurrence}`)))
       .map(sendKey));
     return groupedEmails
       .filter((r) => !recoveredSends.has(sendKey(r)))

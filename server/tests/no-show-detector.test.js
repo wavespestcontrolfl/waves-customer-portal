@@ -1135,19 +1135,10 @@ describe('an appointment email with no interaction row still yields its promise 
   // recorded the window. Measuring from the earliest row of the fan-out keeps
   // that known window; keying on the exact send time let the later row
   // survive as an unknown fallback and outrank it (round-17 P1).
-  test('an earlier recipient\'s known window covers the whole fan-out', () => {
-    const { knownWindowAtOrAfter } = require('../services/no-show-detector');
-    const earliest = { visit_id: 'visit-1', communicated_at: '2026-09-10T12:00:00.000Z' };
-    const known = [{ visit_id: 'visit-1', start_at: '2026-09-10T13:00:00.000Z',
-      communicated_at: '2026-09-10T12:00:00.000Z', source: 'email' }];
-    expect(knownWindowAtOrAfter(known, earliest)).toBe(true);
-    // The later recipient's row, measured on its own send time, would not be
-    // covered — which is why the stop is keyed by its earliest row.
-    expect(knownWindowAtOrAfter(known, { ...earliest, communicated_at: '2026-09-10T12:00:04.000Z' })).toBe(false);
+  test('the recovery unit is one SEND — stop, tier, occurrence', () => {
     const detector = require('fs').readFileSync(require('path').join(__dirname, '..', 'services', 'no-show-detector.js'), 'utf8');
-    // ...and the unit is ONE SEND — stop, tier, occurrence — so the 72h
-    // reminder's recovery does not cover the 24h send, a different message
-    // the customer received later (round-17 P1).
+    // So the 72h reminder's recovery does not cover the 24h send, a different
+    // message the customer received later (round-17 P1).
     expect(detector).toContain("const sendKey = (r) => `${r.stop_id}:${r.tier}:${r.occurrence}`;");
     expect(detector).toContain('.map(sendKey));');
   });
