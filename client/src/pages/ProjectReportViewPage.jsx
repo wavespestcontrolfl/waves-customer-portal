@@ -427,12 +427,16 @@ export default function ProjectReportViewPage() {
     </div>
   );
 
+  // App.jsx wraps this page in WavesShell, so the terminal states belong in the
+  // shared column like every other one. The full-viewport centred wrapper they
+  // had kept a 20px gutter instead of 16 and pushed the trust footer below the
+  // fold — the drift this migration exists to remove.
   if (loadError) return (
-    <div style={{ minHeight: '100vh', background: ESTIMATE_BG, display: 'grid', placeItems: 'center', padding: 20, fontFamily: FONT_BODY }}>
+    <CustomerColumn style={{ fontFamily: FONT_BODY }}>
       <PublicStateCard state="error" title="We couldn&rsquo;t load that project report" onRetry={() => setLoadAttempt(a => a + 1)}>
         This looks temporary. Your link is still valid&mdash;check your connection and try again.
       </PublicStateCard>
-    </div>
+    </CustomerColumn>
   );
 
   // Payment-held report (402 report_payment_required): the inspection is
@@ -469,11 +473,11 @@ export default function ProjectReportViewPage() {
   );
 
   if (!data || data.error) return (
-    <div style={{ minHeight: '100vh', background: ESTIMATE_BG, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 20, fontFamily: FONT_BODY }}>
+    <CustomerColumn style={{ fontFamily: FONT_BODY }}>
       <PublicStateCard state="not-found" title="Report unavailable" contact="call">
         This link may have expired or is not valid.
       </PublicStateCard>
-    </div>
+    </CustomerColumn>
   );
 
   const typeLabel = TYPE_LABELS[data.projectType] || 'Project';

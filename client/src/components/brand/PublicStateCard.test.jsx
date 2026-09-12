@@ -128,4 +128,21 @@ describe('PublicStateCard', () => {
     expect(card.style.backdropFilter).toContain('blur');
     expect(card.style.boxShadow).toContain('inset');
   });
+
+  it('ignores caller attempts to restore per-page geometry', () => {
+    // BrandCard reads maxWidth and padding as props, so without stripping them
+    // the advertised one-card invariant was documentation, not enforcement.
+    render(
+      <PublicStateCard state="error" title="T" maxWidth={440} padding={20} style={{ maxWidth: 300, padding: 4 }} />
+    );
+    const card = screen.getByRole('alert');
+    expect(card.style.maxWidth).toBe('560px');
+    expect(card.style.padding).toBe('clamp(20px, 4vw, 32px)');
+  });
+
+  it('still forwards other props and styles', () => {
+    render(<PublicStateCard state="error" title="T" data-testid="psc" style={{ marginTop: 12 }} />);
+    const card = screen.getByTestId('psc');
+    expect(card.style.marginTop).toBe('12px');
+  });
 });
