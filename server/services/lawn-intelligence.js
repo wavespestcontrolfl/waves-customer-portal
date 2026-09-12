@@ -125,6 +125,16 @@ async function claimNotificationSend(assessmentId) {
     .update({ notification_sent: true, notification_sent_at: new Date() });
 }
 
+// Only a definite non-delivery frees the claim.
+async function resolveUnsentClaim(assessmentId, result) {
+  const outcome = result?.deliveryOutcome || 'not_sent';
+  if (outcome !== 'not_sent') {
+    logger.warn(`[lawn-intel] assessment ${assessmentId}: notification outcome ${outcome}; claim kept, not re-sent`);
+    return;
+  }
+  await releaseNotificationSend(assessmentId, result);
+}
+
 async function releaseNotificationSend(assessmentId, result) {
   logger.warn(`[lawn-intel] assessment ${assessmentId}: no notification channel delivered (${JSON.stringify(result?.results || {})}); released for re-send`);
   await db('lawn_assessments').where({ id: assessmentId }).update({ notification_sent: false, notification_sent_at: null });
@@ -246,8 +256,10 @@ const LawnIntelligence = {
 
       // Nothing delivered (email-preferring customer, blocked SMS) is not a
       // send: release the claim so the miss stays visible and re-sendable
-      // rather than being permanently recorded as "notified".
-      if (!result?.sent) await releaseNotificationSend(assessmentId, result);
+      // rather than being permanently recorded as "notified". An accepted or
+      // UNCERTAIN handoff keeps its claim — the carrier may already have the
+      // text, and recovery must not send a second one to find out.
+      if (!result?.sent) await resolveUnsentClaim(assessmentId, result);
 
       return result;
     } catch (err) {

@@ -52,10 +52,17 @@ describe('sendAssessmentNotification lease check', () => {
     expect(updates[0][1].notification_sent_at).toBeInstanceOf(Date);
   });
 
-  test('a dispatcher that delivered nothing releases the claim for a re-send', async () => {
-    NotificationDispatcher.notify.mockResolvedValueOnce({ sent: false, results: { sms: 'blocked' } });
+  test('a dispatcher that definitely delivered nothing releases the claim for a re-send', async () => {
+    NotificationDispatcher.notify.mockResolvedValueOnce({ sent: false, deliveryOutcome: 'not_sent', results: { sms: 'blocked' } });
     await expect(LawnIntel.sendAssessmentNotification('a-1')).resolves.toMatchObject({ sent: false });
     expect(updates.map(([, f]) => f.notification_sent)).toEqual([true, false]);
+  });
+
+  test.each(['uncertain', 'accepted'])('a %s handoff keeps its claim rather than risking a second text', async (deliveryOutcome) => {
+    // Twilio may already hold the message; recovery must not send again to find out.
+    NotificationDispatcher.notify.mockResolvedValueOnce({ sent: false, deliveryOutcome, results: { sms: 'error: audit write failed' } });
+    await LawnIntel.sendAssessmentNotification('a-1');
+    expect(updates.map(([, f]) => f.notification_sent)).toEqual([true]);
   });
 
   test('a service-linked assessment never gets the standalone text, whoever calls', async () => {

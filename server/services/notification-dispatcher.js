@@ -137,6 +137,22 @@ async function deferredNotificationStillWanted(notificationType, customerId, now
   }
 }
 
+// Canonical SMS outcome for callers holding a durable send-once claim:
+// 'accepted' | 'uncertain' | 'not_sent'. Only a definite 'not_sent' is safe to
+// retry. A throw past the provider carries the KNOWN outcome on the error;
+// without one the send is uncertain, never assumed undelivered.
+function outcomeOfResult(smsResult) {
+  if (smsResult.deliveryOutcome) return smsResult.deliveryOutcome;
+  return smsResult.sent ? 'accepted' : 'not_sent';
+}
+
+function outcomeOfThrow(err) {
+  const known = err && err.providerOutcome;
+  if (known && known.deliveryOutcome) return known.deliveryOutcome;
+  if (known && known.sent) return 'accepted';
+  return 'uncertain';
+}
+
 const NotificationDispatcher = {
 
   /**
@@ -180,6 +196,11 @@ const NotificationDispatcher = {
     const channel = prefs?.[typeConfig.channel] || 'sms';
     const results = {};
     let sent = false;
+    // The SMS leg's canonical outcome ('accepted' | 'uncertain' | 'not_sent'),
+    // kept alongside `sent` for callers holding a durable send-once claim: only
+    // a definite 'not_sent' is safe to retry. An accepted-but-unaudited send
+    // throws with the outcome attached, and a lost outcome must read uncertain.
+    let smsOutcome = null;
 
     // Marketing-purpose SMS is opt-IN (TCPA), not merely not-opted-out:
     // the consentBasis below reads stored prefs as captured consent, so the
@@ -220,6 +241,7 @@ const NotificationDispatcher = {
             original_message_type: notificationType,
           },
         });
+        smsOutcome = outcomeOfResult(smsResult);
         if (smsResult.sent) {
           results.sms = 'sent';
           sent = true;
@@ -263,7 +285,10 @@ const NotificationDispatcher = {
           logger.warn(`[notify] SMS blocked/failed for ${customerId}: ${smsResult.code || smsResult.reason || 'unknown'}`);
         }
       } catch (err) {
-        logger.error(`[notify] SMS failed for ${customerId}: ${err.message}`);
+        // A throw past the provider carries the KNOWN outcome; without one the
+        // send is uncertain, never assumed undelivered.
+        smsOutcome = outcomeOfThrow(err);
+        logger.error(`[notify] SMS failed for ${customerId}: ${err.message} (outcome: ${smsOutcome})`);
         results.sms = `error: ${err.message}`;
       }
     }
@@ -279,7 +304,7 @@ const NotificationDispatcher = {
       results.email = 'unavailable: email channel not implemented';
     }
 
-    return { sent, channel, results };
+    return { sent, channel, results, deliveryOutcome: smsOutcome };
   },
 };
 
