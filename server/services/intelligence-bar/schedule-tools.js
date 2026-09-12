@@ -15,6 +15,7 @@ const { scheduledServiceTrackTokenExpiry } = require('../track-token-expiry');
 const { etDateString, addETDays, validScheduleDate, sameDayWindowElapsed } = require('../../utils/datetime-et');
 const { dayStopsQuery, guardedCoordSelects } = require('../scheduling/day-stops');
 const { resolveWindowSafeOrderByTechDay, windowSafeFigures, inProgressStartMin, loadTechDayOrigins,
+  assertTechDayOriginsFresh,
   ROUTE_WRITE_GUARD_COLUMNS, routeWriteGuardSignature } = require('../route-reorder');
 const { probeSlotOverlap, slotOverlapWarning } = require('../scheduling/window-rules');
 
@@ -311,14 +312,19 @@ async function applyApprovedRouteOrder({ date, approvedIds, services, lockKeys, 
   // illegal, and this path applies it verbatim (codex #4430 r3 P1). The guard
   // is asked to validate the APPROVED order — if it would rather write a
   // different one, the card is stale.
+  // Kept for the write transaction below: a completed visit's time or pin can
+  // change while confirmation waits for locks, and completed rows are outside
+  // loadEligibleIds' own freshness check (codex #4430 r5 P1).
+  let techDayOrigins = null;
   if (RouteOptimizer) {
     const approvedOrder = approvedIds.map((id) => byId.get(id));
+    // From the truck's real position, exactly as the preview did — the day
+    // has moved on since the card was drawn.
+    techDayOrigins = await loadTechDayOrigins(db, date);
     const revalidated = resolveWindowSafeOrderByTechDay({
       RouteOptimizer, orderedStops: approvedOrder, sourceStops: services,
       googleSource: 'approved_card', startMin: inProgressStartMin(date),
-      // From the truck's real position, exactly as the preview did — the
-      // day has moved on since the card was drawn (codex round 5 P1).
-      techDayOrigins: await loadTechDayOrigins(db, date),
+      techDayOrigins,
     });
     if (revalidated.refusal) {
       return { error: routeGuardMessage(revalidated.refusal.reason), reason: revalidated.refusal.reason, preview_changed: true };
@@ -354,6 +360,10 @@ async function applyApprovedRouteOrder({ date, approvedIds, services, lockKeys, 
         || dayRows.some((row) => routeWriteGuardSignature(row) !== guardSnapshot.get(String(row.id)))) {
         throw Object.assign(new Error('guard inputs changed'), { code: 'STALE_OPTIMIZE_SET' });
       }
+      // The completed rows the origin came from are outside that set.
+      await assertTechDayOriginsFresh(trx, date, techDayOrigins, {
+        stale: () => Object.assign(new Error('completed-stop origin changed'), { code: 'STALE_OPTIMIZE_SET' }),
+      });
       for (let i = 0; i < approvedIds.length; i++) {
         const expectTech = expectTechFor(byId.get(approvedIds[i])) || null;
         const updated = await trx('scheduled_services')
