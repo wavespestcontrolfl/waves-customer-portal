@@ -73,8 +73,10 @@ function Card({ className, ...props }) {
 
 const PLATFORM_ICONS = { facebook: "", instagram: "", linkedin: "", gbp: "" };
 
+// Autonomous run + credential health statuses. compliance_rejected belongs here
+// too: content-scheduler.js:746 writes it when the compliance judge parks a post.
 function statusTone(value) {
-  return ["failed", "error", "expired"].includes(value) ? "alert" : "neutral";
+  return ["failed", "error", "expired", "compliance_rejected"].includes(value) ? "alert" : "neutral";
 }
 
 // Raw platform keys came off the API lowercase and were displayed through
@@ -91,7 +93,10 @@ function platformLabel(key, overrides = {}) {
 // A history row is only an alert when the publish actually failed. draft,
 // scheduled and dry_run are routine workflow states (social-content-studio.js
 // creates drafts, content-scheduler.js creates scheduled rows).
-const FAILED_POST_STATUSES = ["failed", "error", "expired", "rejected"];
+// compliance_rejected is persisted by content-scheduler.js:746 when the
+// compliance judge parks a scheduled post — a genuine publishing failure, not a
+// routine workflow state.
+const FAILED_POST_STATUSES = ["failed", "error", "expired", "rejected", "compliance_rejected"];
 function postStatusTone(value) {
   return FAILED_POST_STATUSES.includes(value) ? "alert" : "neutral";
 }
@@ -818,7 +823,7 @@ function AutonomousDraftReview({ run, variants, chosenIdx, chosenVariant, chosen
                           className="rounded-md px-2.5 py-2 bg-white border-hairline border-zinc-200"
                         >
                           <div className="text-ui-body font-medium text-ink-secondary mb-1">
-                            {platform === "gbp" ? "GBP" : platform}
+                            {platformLabel(platform)}
                           </div>
                           <div className="text-ui-body text-zinc-900 whitespace-pre-wrap max-h-[110px] overflow-y-auto">
                             {String(text || "")}
@@ -2564,16 +2569,16 @@ function AnalyticsTab() {
                       <TD className="px-2 py-1.5 text-ink-secondary whitespace-nowrap">
                         {p.publishedAt ? formatETDate(p.publishedAt) : "—"}
                       </TD>
-                      <TD className="px-2 py-1.5 text-right">
+                      <TD nums className="px-2 py-1.5 text-right">
                         {num(e?.likes)}
                       </TD>
-                      <TD className="px-2 py-1.5 text-right">
+                      <TD nums className="px-2 py-1.5 text-right">
                         {num(e?.comments)}
                       </TD>
-                      <TD className="px-2 py-1.5 text-right">
+                      <TD nums className="px-2 py-1.5 text-right">
                         {e && e.shares != null ? e.shares : "—"}
                       </TD>
-                      <TD className="px-2 py-1.5 text-right text-zinc-900 font-medium">
+                      <TD nums className="px-2 py-1.5 text-right text-zinc-900 font-medium">
                         {num(e?.score)}
                       </TD>
                     </TR>
