@@ -1228,9 +1228,14 @@ describe('delivery uncertainty is retired only by definitive provider evidence o
     const row = promiseRow('outbox', 'commitment', { status: 'sending', provider_message_id: 'SM123',
       sent_at: now, payload: { delivery_outcome_uncertain: true } });
     const { seen } = await sweepWith({ outbox: [row], smsLog: { id: 'sms1', status: 'failed' } });
-    const patch = seen.updates.find((u) => u.table === 'outbox_messages' && u.eq.id === 'outbox');
-    expect(patch.patch).toMatchObject({ status: 'review', last_error: 'delivery_failed' });
-    expect(patch.patch.payload.delivery_outcome_uncertain).toBe(false);
+    // retireDeliveryUncertainty writes the flag as its own independent
+    // update, separate from parkReview's status/last_error transition — see
+    // the block comment on retireDeliveryUncertainty for why the clear must
+    // never ride along on that other write.
+    const clearPatch = seen.updates.find((u) => u.table === 'outbox_messages' && u.eq.id === 'outbox' && u.patch.payload);
+    const parkPatch = seen.updates.find((u) => u.table === 'outbox_messages' && u.eq.id === 'outbox' && u.patch.status === 'review');
+    expect(parkPatch.patch).toMatchObject({ status: 'review', last_error: 'delivery_failed' });
+    expect(clearPatch.patch.payload.delivery_outcome_uncertain).toBe(false);
   });
 
   test('a definitive failure receipt reconciles even after the attempt already sits parked for an unrelated reason (codex #4293 P1)', async () => {

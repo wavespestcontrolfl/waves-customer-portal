@@ -540,14 +540,29 @@ async function matchingSend(conn, context, since) {
   return messages.find((sms) => carriesVisitLink(sms.message_body, needles)) || null;
 }
 
-// clearDeliveryUncertain is for the ONE class of park reason that is itself
-// definitive provider evidence — reconcileAttempt's 'delivery_failed' (a
-// real twilio_sid-bearing sms_log row proved this exact attempt did NOT
-// reach the customer, so there is no duplicate risk left to hold against).
-// Every other reason (a context error, a claim failure, a worker exception)
-// must NOT pass this — the default leaves the payload, and therefore the
-// flag, untouched.
-async function parkReview(conn, row, reason, { clearDeliveryUncertain = false } = {}) {
+// Retiring delivery uncertainty is its OWN operation with its own trigger —
+// definitive provider evidence for THIS attempt (a delivered/read receipt, or
+// a failed/undelivered one), or an explicit office verdict — and it must
+// never be threaded as an option through some OTHER transition's write. That
+// threading is exactly what kept breaking this: a parked-state guard ate the
+// clear when a failure receipt arrived after the attempt was already parked,
+// a generation guard ate it when a success receipt arrived for a generation
+// the commitment had already moved past, and — the shape named here —
+// parkReview's own reason-unchanged no-op optimisation ate it when a receipt
+// arrived whose park reason happened to match the reason already on the row
+// (codex #4293 P1, three separate rounds). This function carries no reason
+// and no status predicate belonging to any other concern — only the
+// COALESCE jsonb merge every other payload write in this file uses, so it
+// can never collide with whatever else a concurrent writer does to the row's
+// payload in the same breath. The one guard it DOES keep — an already
+// delivered/cancelled row — is a legitimate no-op, not a borrowed one: that
+// row's own transition already retired the flag, or it never mattered.
+async function retireDeliveryUncertainty(conn, rowId) {
+  await conn('outbox_messages').where({ id: rowId }).whereNotIn('status', ['delivered', 'cancelled'])
+    .update({ payload: deliveryUncertainPatch(conn, false), updated_at: new Date() });
+}
+
+async function parkReview(conn, row, reason) {
   await conn.transaction(async (trx) => {
     await lockTriageCall(trx, row.related_call_log_id);
     // runOne reads row.payload.link_used_reconciled_at (its "already
@@ -564,16 +579,7 @@ async function parkReview(conn, row, reason, { clearDeliveryUncertain = false } 
     const changed = await trx('outbox_messages').where({ id: row.id }).whereNotIn('status', ['delivered', 'cancelled'])
       .whereRaw(LINK_NOT_YET_RECONCILED)
       .whereRaw("(status <> 'review' OR last_error IS DISTINCT FROM ?)", [reason])
-      .update({ status: 'review', last_error: reason, updated_at: new Date(),
-        // A JS-spread merge on `row.payload` (a snapshot this function never
-        // re-reads under the lock) would be safe against markLinkUsed only
-        // because the WHERE guard above independently re-checks the one
-        // dangerous key at UPDATE time — but a raw jsonb merge is strictly
-        // safer (proof against ANY concurrent payload writer, not just the
-        // one this WHERE clause happens to guard against today) at zero
-        // extra cost, so it is what every other payload-merge site in this
-        // file uses (codex #4293 P1).
-        ...(clearDeliveryUncertain ? { payload: deliveryUncertainPatch(trx, false) } : {}) });
+      .update({ status: 'review', last_error: reason, updated_at: new Date() });
     if (!changed) return;
     // One card per CALL, but it has to name every promise parked against that
     // call. A card carrying only the first commitment id was resolved the
@@ -803,7 +809,19 @@ async function settleDelivery(conn, row, sms, context = null) {
   // reached above (identity mismatch short-circuited before it), so the
   // generation guard on MUTATING the commitment is exactly as strict as it
   // was before this fix.
-  }).then((result) => result?.needsReview ? parkReview(conn, row, 'delivery_scope_changed', { clearDeliveryUncertain: delivered }) : result);
+  }).then(async (result) => {
+    if (!result?.needsReview) return result;
+    // retireDeliveryUncertainty runs as its OWN write, independent of
+    // whatever parkReview below decides — including when parkReview turns
+    // out to be a no-op because this row is already parked for the SAME
+    // 'delivery_scope_changed' reason from an earlier pass (this attempt was
+    // 'sent' when it first scope-changed, then the SAME sms later reached
+    // 'delivered'). Threading the clear through parkReview's own
+    // reason-unchanged optimisation left it stranded behind that no-op
+    // forever — the exact sequence Codex named (codex #4293 P1).
+    if (delivered) await retireDeliveryUncertainty(conn, row.id);
+    return parkReview(conn, row, 'delivery_scope_changed');
+  });
 }
 
 // A replacement/adopted recording (call-commitments.js upsertCommitments)
@@ -903,31 +921,6 @@ async function stagePromises(conn) {
   return rows.length;
 }
 
-// A row already parked in review — for whatever reason last put it there —
-// can still receive a LATER definitive failure receipt: the carrier
-// confirms the earlier "unknown" attempt in fact never reached the
-// customer. That is exactly as conclusive as a delivered receipt, and must
-// retire delivery_outcome_uncertain the same way; leaving it true blocks
-// stagePromises from ever staging a replacement generation, forever, despite
-// proof delivery failed (codex #4293 P1). This is a payload-only merge, not
-// parkReview — the row's status and its existing review reason (whatever
-// context error actually parked it) are left exactly as they are; only the
-// flag moves.
-//
-// `row` here is the sweep's own pre-lock read — this function takes no
-// transaction and no lockTriageCall, so a JS-spread merge on `row.payload`
-// would blindly overwrite whatever markLinkUsed (or any other writer) had
-// stamped onto this exact row's payload in the gap between that read and
-// this UPDATE, INCLUDING link_used_reconciled_at — silently un-reconciling
-// an already-closed promise for a later sweep to re-park (codex #4293 P1).
-// deliveryUncertainPatch's raw jsonb merge makes the ordering irrelevant:
-// whatever the row's payload actually is at UPDATE time keeps every key
-// except the one this call names.
-async function clearDeliveryUncertainInReview(conn, row) {
-  await conn('outbox_messages').where({ id: row.id, status: 'review' })
-    .update({ payload: deliveryUncertainPatch(conn, false), updated_at: new Date() });
-}
-
 // An attempt that already reached the provider OWNS the row until its
 // outcome is known: delivery settles it, a failure or a receipt that never
 // arrives parks it for the office, and an accepted-but-undecided send waits
@@ -943,9 +936,15 @@ async function reconcileAttempt(conn, row, now) {
   // delivery uncertainty: the message never reached the customer, so
   // staging a fresh generation afterward carries no duplicate risk. That
   // holds independently of whether the row is still live or already
-  // parked — a failure is a failure either way (codex #4293 P1).
-  if (failed && unparked) await parkReview(conn, row, 'delivery_failed', { clearDeliveryUncertain: true });
-  else if (failed) await clearDeliveryUncertainInReview(conn, row);
+  // parked — a failure is a failure either way (codex #4293 P1). The clear
+  // runs as retireDeliveryUncertainty's own independent write, not as an
+  // option threaded through parkReview — parkReview owns the status/
+  // last_error transition (and, when unparked, always fires it, so ordering
+  // the clear before or after it makes no difference here), but the clear
+  // itself must not depend on parkReview's own reason-unchanged guard ever
+  // agreeing to write.
+  if (failed && unparked) { await retireDeliveryUncertainty(conn, row.id); await parkReview(conn, row, 'delivery_failed'); }
+  else if (failed) await retireDeliveryUncertainty(conn, row.id);
   else if (sms && ['delivered', 'read'].includes(sms.status)) await settleDelivery(conn, row, sms);
   else if (unparked && new Date(row.sent_at || row.last_attempt_at).getTime() + 24 * 3600000 < now.getTime()) await parkReview(conn, row, 'delivery_receipt_unavailable');
   else if (sms && !failed && unparked) await settleDelivery(conn, row, sms);
@@ -1008,7 +1007,7 @@ async function applyContextSkip(conn, row, reason, now) {
   // the office has ruled, so no future sweep will ever act on this row again.
   if (reason === 'promise_closed') return conn.transaction(async (trx) => {
     await lockTriageCall(trx, row.related_call_log_id);
-    // Same class as clearDeliveryUncertainInReview and settleReconciledReceipt:
+    // Same class as retireDeliveryUncertainty and settleReconciledReceipt:
     // `row` is a pre-lock snapshot, so the payload write has to merge at the
     // database level rather than replace from it — a customer using the link
     // (markLinkUsed, serialized behind the SAME lockTriageCall above) could

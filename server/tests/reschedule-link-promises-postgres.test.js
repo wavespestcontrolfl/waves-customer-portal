@@ -540,6 +540,108 @@ postgres('reschedule-link-promises against PostgreSQL', () => {
   });
 
   /**
+   * codex #4293 P1 (pre-push audit on PR #4293, this round): the THIRD shape
+   * clearing delivery uncertainty rode along on a foreign guard as a
+   * passenger. settleDelivery's own scope-changed fallback threaded
+   * `clearDeliveryUncertain` through parkReview as an option — but
+   * parkReview's UPDATE also carries its own reason-unchanged no-op
+   * optimisation (`status <> 'review' OR last_error IS DISTINCT FROM
+   * reason`), meant only to stop a churny re-park from restamping
+   * updated_at pointlessly. When the SAME sms attempt scope-changes TWICE
+   * for the SAME reason — first while merely 'sent' (not yet definitive),
+   * then again once the carrier confirms 'delivered' (now definitive) — the
+   * second call's park reason ('delivery_scope_changed') matches the first
+   * call's already-parked reason, so that guard skips the ENTIRE UPDATE,
+   * including the payload merge the clear was piggybacking on. The flag
+   * stays true forever and stagePromises never stages the replacement
+   * generation, despite the carrier's own receipt having definitively
+   * proven delivery. Only a real Postgres UPDATE evaluates that
+   * IS-DISTINCT-FROM predicate against the row's actual, already-parked
+   * state — a mock cannot honestly arbitrate whether the second call's
+   * WHERE clause matches zero rows.
+   */
+  test('a delivered receipt clears uncertainty even when it reconfirms the SAME already-parked scope-change reason (codex #4293 P1)', async () => {
+    const priorGate = process.env.GATE_RESCHEDULE_LINK_ON_PROMISE;
+    const priorCallCommitments = gates.callCommitments;
+    try {
+      process.env.GATE_RESCHEDULE_LINK_ON_PROMISE = 'true';
+      gates.callCommitments = true;
+
+      const callId = randomUUID();
+      const customerId = randomUUID();
+      const visitId = randomUUID();
+      const phone = '+15555550100';
+      const twilioSid = `SM${randomUUID().replaceAll('-', '').slice(0, 32)}`;
+      await mockPg('customers').insert({ id: customerId, first_name: 'Pat', last_name: 'Customer', phone,
+        address_line1: '1 Example St', city: 'Bradenton', zip: '34205' });
+      await mockPg('scheduled_services').insert({ id: visitId, customer_id: customerId, scheduled_date: '2030-01-08', service_type: 'WaveGuard' });
+      // Reprocessing has already bumped the call (and the commitment's
+      // last_seen_generation right along with it) to generation 2 — exactly
+      // like the superseded-generation test above — BEFORE this generation-1
+      // attempt's own carrier receipts arrive at all.
+      await mockPg('call_log').insert({ id: callId, customer_id: customerId, direction: 'inbound', from_phone: phone, processing_generation: 2 });
+      const [commitment] = await mockPg('call_commitments').insert({
+        call_log_id: callId, commitment_key: 'send_reschedule_link:1', party: 'waves', kind: 'send_reschedule_link',
+        description: 'send a reschedule link', source: 'ai', status: 'open', last_seen_generation: 2, processing_generation: 2,
+      }).returning('id');
+      const outboxId = randomUUID();
+      await mockPg('outbox_messages').insert({ id: outboxId, channel: 'sms', status: 'sending', provider_message_id: twilioSid,
+        sent_at: new Date(), payload: { call_generation: 1, delivery_outcome_uncertain: true },
+        commitment_id: commitment.id, commitment_generation: 1,
+        related_call_log_id: callId, related_customer_id: customerId, related_scheduled_service_id: visitId });
+      // Pass 1: the carrier has only accepted the message so far — 'sent',
+      // not yet definitive proof either way.
+      await mockPg('sms_log').insert({ id: randomUUID(), customer_id: customerId, direction: 'outbound',
+        from_phone: '+15555550199', to_phone: phone, twilio_sid: twilioSid, status: 'sent', message_body: 'Your reschedule link: https://example.com/x' });
+
+      const row1 = await mockPg('outbox_messages').where({ id: outboxId }).first();
+      await links.runOne(mockPg, row1, { now: new Date() });
+
+      const afterScopeChange = await mockPg('outbox_messages').where({ id: outboxId }).first();
+      // Parked for the scope change, exactly like the superseded-generation
+      // case — but NOT yet definitive, so the flag correctly stays true.
+      expect(afterScopeChange.status).toBe('review');
+      expect(afterScopeChange.last_error).toBe('delivery_scope_changed');
+      expect(afterScopeChange.payload.delivery_outcome_uncertain).toBe(true);
+
+      // Pass 2: the SAME message's carrier receipt now confirms delivery —
+      // definitive evidence — but the row is already parked for the exact
+      // same reason this second pass will conclude too.
+      await mockPg('sms_log').where({ twilio_sid: twilioSid }).update({ status: 'delivered' });
+      const row2 = await mockPg('outbox_messages').where({ id: outboxId }).first();
+      await links.runOne(mockPg, row2, { now: new Date() });
+
+      const after = await mockPg('outbox_messages').where({ id: outboxId }).first();
+      // The park reason is unchanged — parkReview's own no-op guard has
+      // nothing new to write, and correctly so.
+      expect(after.status).toBe('review');
+      expect(after.last_error).toBe('delivery_scope_changed');
+      // But the flag must retire regardless: the second receipt is
+      // definitive provider evidence for THIS attempt, independent of
+      // whether parkReview itself found anything to change.
+      expect(after.payload.delivery_outcome_uncertain).toBe(false);
+
+      // The commitment itself stays untouched — this is a superseded
+      // generation, never fulfilled by this attempt's evidence.
+      const afterCommitment = await mockPg('call_commitments').where({ id: commitment.id }).first();
+      expect(afterCommitment.status).toBe('open');
+      expect(afterCommitment.fulfilled_at).toBeNull();
+
+      // With the flag finally cleared, generation 2's own replacement send
+      // is no longer blocked behind an attempt whose outcome is, in fact,
+      // known.
+      const staged = await links.stagePromises(mockPg);
+      expect(staged).toBe(1);
+      const rows2 = await mockPg('outbox_messages').where({ commitment_id: commitment.id }).orderBy('commitment_generation');
+      expect(rows2).toHaveLength(2);
+      expect(rows2[1]).toMatchObject({ commitment_generation: 2, status: 'pending' });
+    } finally {
+      if (priorGate === undefined) delete process.env.GATE_RESCHEDULE_LINK_ON_PROMISE; else process.env.GATE_RESCHEDULE_LINK_ON_PROMISE = priorGate;
+      gates.callCommitments = priorCallCommitments;
+    }
+  });
+
+  /**
    * codex #4293 P1 (pre-push audit on PR #4293): clearDeliveryUncertainInReview
    * takes no transaction and no lock, and (pre-fix) replaced `payload` from
    * `row` — the caller's own pre-lock snapshot — instead of merging at the
