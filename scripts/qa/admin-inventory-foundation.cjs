@@ -203,7 +203,19 @@ function responseFor(url) {
 
 async function metricsFor(page, surface) {
   return surface.evaluate((node) => ({
-    overflow: document.documentElement.scrollWidth > innerWidth,
+    // The page scrolls inside #admin-main (AdminLayoutV2's fixed-height
+    // overflowY: auto container), not the window — comparing only the
+    // document root to innerWidth misses horizontal spill that stays inside
+    // that container (and its available width is already narrower than
+    // innerWidth once the sidebar is accounted for). Check both the surface
+    // itself and its closest #admin-main.
+    overflow: (() => {
+      const admin = node.closest("#admin-main");
+      return (
+        node.scrollWidth > node.clientWidth ||
+        (admin ? admin.scrollWidth > admin.clientWidth : false)
+      );
+    })(),
     // Checkbox/radio inputs render a native 16-20px box on purpose (u-nums
     // aside, tokens.css u-touch-hit gives them a 44px hit target via a
     // ::before pseudo-element on coarse pointers only) — asserting their own

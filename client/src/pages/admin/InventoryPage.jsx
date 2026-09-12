@@ -341,12 +341,14 @@ export default function InventoryPage() {
             {
               label: "Needs Price",
               value: stats.products?.needsPrice,
+              // Main: unconditional amber (routine, not a failure state).
+              tone: "warn",
               filter: "needs_price",
             },
             {
               label: "Low Stock",
               value: stats.products?.lowStock,
-              alert: stats.products?.lowStock > 0,
+              tone: stats.products?.lowStock > 0 ? "alert" : undefined,
               filter: "low_stock",
             },
             {
@@ -358,14 +360,15 @@ export default function InventoryPage() {
             {
               label: "Pending Approvals",
               value: stats.approvals?.pending,
-              alert: stats.approvals?.pending > 0,
+              // Main: amber — routine queued work, not a failure.
+              tone: stats.approvals?.pending > 0 ? "warn" : undefined,
               action: () => setTab("approvals"),
               adminOnly: true,
             },
             {
               label: "Restock",
               value: stats.restockRequests?.open,
-              alert: stats.restockRequests?.open > 0,
+              tone: stats.restockRequests?.open > 0 ? "warn" : undefined,
               action: () => setTab("restock"),
             },
             {
@@ -390,19 +393,18 @@ export default function InventoryPage() {
                   }
                 }}
                 variant="secondary"
-                className={
-                  s.alert
-                    ? "flex-[1_1_120px] min-w-[120px] min-h-20 flex-col border-alert-fg text-center"
-                    : "flex-[1_1_120px] min-w-[120px] min-h-20 flex-col text-center"
-                }
+                className={cn(
+                  "flex-[1_1_120px] min-w-[120px] min-h-20 flex-col text-center",
+                  s.tone === "alert" && "border-alert-fg",
+                  s.tone === "warn" && "border-warn-fg",
+                )}
               >
                 {" "}
                 <div
-                  className={
-                    s.alert
-                      ? "text-22 font-medium text-alert-fg u-nums"
-                      : "text-22 font-medium text-zinc-900 u-nums"
-                  }
+                  className={cn(
+                    "text-22 font-medium u-nums",
+                    s.tone === "alert" ? "text-alert-fg" : s.tone === "warn" ? "text-warn-fg" : "text-zinc-900",
+                  )}
                 >
                   {s.value ?? 0}
                 </div>{" "}
@@ -1502,7 +1504,7 @@ function PriceSyncTab({ showToast }) {
                           : "Missing"}
                       </TD>
                       <TD>
-                        <Badge tone={vendor.credentialStatus && vendor.credentialStatus !== "missing" ? "neutral" : "warn"}>
+                        <Badge tone={vendor.loginDiscoveryNeeded ? "warn" : "neutral"}>
                           {vendor.credentialStatus || "needs_login"}
                         </Badge>
                       </TD>
@@ -5108,7 +5110,7 @@ function ProtocolsTab({
             key={svc.serviceType}
             className={
               highlightService
-                ? "p-5 mb-3 border-alert-fg ring-2 ring-alert-bg"
+                ? "p-5 mb-3 border-warn-fg ring-2 ring-warn-bg"
                 : "p-5 mb-3"
             }
           >
@@ -5268,7 +5270,7 @@ function ProtocolsTab({
                     ) : (
                       <TR
                         key={p.id}
-                        className={highlightProductCost ? "bg-alert-bg" : ""}
+                        className={highlightProductCost ? "bg-warn-bg" : ""}
                       >
                         <TD className="font-medium">
                           {p.productName}{" "}
@@ -5633,7 +5635,15 @@ function ScrapeTab({ showToast }) {
                 <TR key={j.id}>
                   <TD className="font-medium">{j.vendor_name}</TD>
                   <TD>
-                    <Badge tone={j.status === "failed" ? "alert" : "neutral"}>
+                    <Badge
+                      tone={
+                        j.status === "failed"
+                          ? "alert"
+                          : j.status === "completed"
+                            ? "neutral"
+                            : "warn"
+                      }
+                    >
                       {j.status}
                     </Badge>
                   </TD>
