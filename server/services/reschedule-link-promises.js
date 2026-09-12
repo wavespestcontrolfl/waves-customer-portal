@@ -497,9 +497,11 @@ function subjectNotGrounded(subject, call) {
 // one, and nothing the quote SAYS about the date may contradict it. The check
 // itself — quoteContradictsVisit — is defined further down, alongside the
 // parsers (explicitQuoteDate, claimFitsDate) it depends on; it is the SAME
-// function narrowBySubject calls below and evidenceContradictsSelectedVisit
-// calls for every other evidence source (codex #4293 P1 r11 — see that
-// function's own doc comment for why there is only one of it now).
+// function narrowBySubject calls below and evidenceDateVerdict calls (for
+// its contradiction pass) for every other evidence source (codex #4293 P1
+// r11 — see that function's own doc comment for why there is only one of it
+// now, and its own doc comment for the third, 'unresolved' outcome added on
+// top of it this round).
 
 // Positive grounding for an extracted appointment date: quoteContradictsVisit
 // only rejects a quote that says something ELSE, so "my appointment tomorrow"
@@ -706,8 +708,8 @@ function extractedDateUngrounded({ subject, call, candidates, callCommitments })
 // selected visit is contradicted, which needs no uniqueness reasoning at
 // all — see the weekday branch below). Consolidating removes the seam: one
 // function, one vocabulary, called from both narrowBySubject (subject.quote)
-// and evidenceContradictsSelectedVisit (every other source), so a shape this
-// file can recognise is checked the same way no matter which field it rode
+// and evidenceDateVerdict's contradiction pass (every other source), so a
+// shape this file can recognise is checked the same way no matter which field it rode
 // in on.
 // A date claim only binds the VISIT when it is ATTACHED to the appointment
 // noun — not merely co-occurring somewhere in the same sentence. The promise
@@ -793,6 +795,67 @@ function quoteContradictsVisit(quote, ymd, reference) {
   return WEEKDAY_NAMES.some((name, index) => index !== weekday && new RegExp(`\\b${name}\\b`).test(q));
 }
 
+// Seven grounding findings have alternated between binding too loosely (a
+// delivery-timing date contradicts the visit -> promise parks permanently)
+// and binding too tightly (an appointment date the strict connector list
+// does not recognise gets silently discarded -> wrong customer gets a
+// link). Every attempt to place the boundary by regex alone has produced
+// the opposite error the next round, because a boolean attached/not-attached
+// split has no way to represent "I found language about the appointment's
+// date here, but I cannot confidently tell what it says." This is that third
+// state. "Your appointment is on September 20" is exactly the shape that
+// slips through appointmentAttachedText's own connector list unrecognised —
+// AFTER_NOUN_CONNECTOR_RE requires the connector word to sit IMMEDIATELY
+// after the noun, and "is" is not on that list — so the date sailed through
+// as if the quote had said nothing about a date at all, and a sole
+// candidate visit was sent a link for the WRONG appointment (codex #4293
+// P1, this round). "the appointment, September 20, needs moving" is the
+// same shape with a comma instead of a verb.
+//
+// Scoped the same conservative direction as appointmentAttachedText's own
+// scan: only the text AFTER the noun, only up to the next sentence boundary
+// (or a bounded run of characters, whichever comes first), and only once
+// the narrow attached capture (quoteContradictsVisit's own connector-plus-
+// two-token window) has already had a look and found no date claim of its
+// own. A delivery-timing phrase never matches this at all: every existing
+// delivery-timing shape in this file (a timing clause BEFORE "for your
+// appointment") has nothing left after the noun once the sentence ends
+// right there, so the wide scan below never even finds a claim to weigh
+// against a send verb — there is no send-verb guard here because the
+// required tests do not exercise one and adding an unverified heuristic
+// on top of an already-heuristic boundary is exactly the mistake this
+// comment is warning against.
+const WIDE_AFTER_NOUN_RE = /^[^.!?]{0,80}/;
+function unresolvedAppointmentDateClaim(rawQuote, reference) {
+  const text = String(rawQuote || '');
+  APPOINTMENT_NOUN_RE.lastIndex = 0;
+  let m;
+  while ((m = APPOINTMENT_NOUN_RE.exec(text))) {
+    const afterAll = text.slice(m.index + m[0].length);
+    const connector = afterAll.match(AFTER_NOUN_CONNECTOR_RE);
+    // The connector's own narrow capture (mirroring appointmentAttachedText)
+    // gets first refusal: if IT already resolves to a recognisable date
+    // claim, that claim is Attached — quoteContradictsVisit's own scan owns
+    // it, and this function has nothing to add for this occurrence of the
+    // noun. Only when the connector is absent, OR present but its own
+    // narrow capture names no date at all (e.g. "appointment at 100 Example
+    // Street"), does the wider, unresolved-shaped scan below run — over the
+    // WHOLE after-noun text, so a claim sitting past a connector's own
+    // two-token cap is not missed either.
+    if (connector) {
+      const restSpan = afterAll.slice(connector[0].length).match(/^\S+(?:\s+\S+)?/);
+      const restText = restSpan ? restSpan[0] : '';
+      const rq = ` ${norm(restText)} `;
+      if (explicitQuoteDate(rq, reference, restText) || quoteHasWeekdayToken(rq)) continue;
+    }
+    const wide = afterAll.match(WIDE_AFTER_NOUN_RE);
+    const span = wide ? wide[0] : '';
+    const q = ` ${norm(span)} `;
+    if (explicitQuoteDate(q, reference, span) || quoteHasWeekdayToken(q)) return true;
+  }
+  return false;
+}
+
 // Every field an AGENT utterance attached to this promise can live in,
 // gathered RAW (un-normalized) — explicitQuoteDate's numeric branch needs
 // the "/" or "-" separator norm() would otherwise strip, so this must not
@@ -850,14 +913,63 @@ const APPOINTMENT_REFERENCE = /\b(?:appointment|appt|visit)\b/;
 // contradicted the sole visit narrowBySubject selected with no date filter
 // applied at all (codex #4293 P1 r10 — the fourth grounding gap in four
 // rounds, each accepted as "validate the quote" and each time "the quote"
-// turning out to mean a narrower thing than it sounded). Only a promise
-// whose ENTIRE evidence set names no appointment-bound date at all may
-// proceed ungrounded — exactly quoteContradictsVisit's own per-quote rule
-// (every shape it recognises, explicit or bare-weekday), applied across
-// every source instead of one.
-function evidenceContradictsSelectedVisit(texts, ymd, reference) {
-  return texts.filter((quote) => APPOINTMENT_REFERENCE.test(norm(quote)))
-    .some((quote) => quoteContradictsVisit(quote, ymd, reference));
+// turning out to mean a narrower thing than it sounded).
+//
+// THE OUTCOME IS THREE-WAY, not a boolean grounded/ungrounded (codex #4293
+// P1, this round):
+//   1. Attached — a date clearly bound to the appointment noun by
+//      quoteContradictsVisit's own adjacency/connector rule. Validated
+//      against the selected visit; a mismatch is a genuine contradiction —
+//      'date_not_grounded', exactly as before.
+//   2. Clearly delivery timing — a date attached to the SEND verb, not the
+//      appointment noun (isPromisedFloor/promisedFloorAt's own territory).
+//      Never scanned for a visit claim at all — a quote naming no
+//      appointment noun never reaches this function (APPOINTMENT_REFERENCE
+//      below), and a date sitting before "for your appointment" with
+//      nothing left after the noun is invisible to
+//      unresolvedAppointmentDateClaim by construction.
+//   3. Unresolved — a date claim that references the appointment (shares
+//      its sentence, per APPOINTMENT_REFERENCE) but that neither of the
+//      above can place with confidence — "your appointment is on September
+//      20" (the connector list requires the word to sit IMMEDIATELY after
+//      the noun; "is" is not on it), "the appointment, September 20, needs
+//      moving". This is evidence we cannot interpret, not evidence of
+//      nothing: it must PARK, under its own reason
+//      ('appointment_date_unresolved', distinct from a genuine
+//      contradiction), never fall through as if the quote said nothing —
+//      and it parks even when the date happens to equal the selected
+//      visit's own date, because "unresolved" describes what THIS CODE
+//      could establish about the claim, not whether the claim turned out to
+//      agree by chance.
+//
+// subject.quote is excluded from the unresolved scan (but NOT from the
+// contradiction scan, unchanged) exactly when subject.visit_date is
+// populated: that pairing already went through quoteGroundsVisitDate — a
+// full, UNSCOPED scan of the entire quote — via extractedDateUngrounded,
+// before this function ever runs. Several existing, passing fixtures state
+// the appointment date as "my appointment is <weekday>" (the identical
+// "is"-not-a-connector shape this round is fixing for evidence), and that
+// full scan already resolved them positively; re-running the narrower
+// after-noun heuristic against an already-validated quote would manufacture
+// a false 'unresolved' the moment its claim sits outside the strict
+// connector window. subject.quote rejoins the unresolved pool when
+// visit_date is ABSENT — the one case nothing else ever validates it at
+// all, the same gap this fix closes for ordinary evidence.
+function unresolvedEvidenceSources(commitment, subject, promisedQuotes) {
+  const fromEvidence = (commitment.evidence || []).filter((e) => e.speaker === 'agent').map((e) => e.quote);
+  const fromSubject = (!subject?.visit_date && commitment.subject?.quote) ? [commitment.subject.quote] : [];
+  return [...new Set([...fromEvidence, ...fromSubject, ...promisedQuotes])].filter(Boolean);
+}
+
+function evidenceDateVerdict({ commitment, subject, promisedQuotes, ymd, reference }) {
+  const texts = promiseEvidenceTexts(commitment, promisedQuotes);
+  for (const quote of texts) {
+    if (APPOINTMENT_REFERENCE.test(norm(quote)) && quoteContradictsVisit(quote, ymd, reference)) return 'contradicts';
+  }
+  for (const quote of unresolvedEvidenceSources(commitment, subject, promisedQuotes)) {
+    if (APPOINTMENT_REFERENCE.test(norm(quote)) && unresolvedAppointmentDateClaim(quote, reference)) return 'unresolved';
+  }
+  return 'ok';
 }
 
 function selectDiscussedVisit({ commitment, call, customer, candidates = [], now = new Date() }) {
@@ -883,8 +995,17 @@ function selectDiscussedVisit({ commitment, call, customer, candidates = [], now
   if (extractedDateUngrounded({ subject, call, candidates, callCommitments })) return skip('date_not_grounded');
   const selected = narrowBySubject(candidates, subject, reference);
   if (selected.length !== 1) return skip(selected.length ? 'ambiguous_visit' : 'discussed_visit_unavailable');
-  if (evidenceContradictsSelectedVisit(promiseEvidenceTexts(commitment, promisedQuotes), dateOnly(selected[0].scheduled_date), reference))
-    return skip('date_not_grounded');
+  const dateVerdict = evidenceDateVerdict({ commitment, subject, promisedQuotes, ymd: dateOnly(selected[0].scheduled_date), reference });
+  if (dateVerdict === 'contradicts') return skip('date_not_grounded');
+  // Unresolved is not a contradiction — it is a date claim about this
+  // appointment that this file cannot confidently place at all, attached or
+  // not, so there is nothing to validate against the selected visit one way
+  // or the other. It gets its OWN reason, distinct from a genuine mismatch,
+  // so the office (via the triage card) and the audit ledger can tell "we
+  // know this is wrong" apart from "we don't know what this claim means" —
+  // see parkReview and the triage card it raises, both keyed on this string
+  // exactly like every other reason here.
+  if (dateVerdict === 'unresolved') return skip('appointment_date_unresolved');
   const notReady = visitNotSelfServiceReason(selected[0], now);
   return notReady ? skip(notReady) : { visit: selected[0] };
 }

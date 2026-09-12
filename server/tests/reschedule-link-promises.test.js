@@ -419,6 +419,73 @@ test('an explicit month-name date claim in the evidence still parks a mismatched
     .toBe('date_not_grounded');
 });
 
+// codex #4293 P1 (reschedule-link-promises.js:762): a date claim that
+// references the appointment but sits outside appointmentAttachedText's own
+// narrow connector list ("is on", a bare comma) used to be silently
+// discarded — read as if the quote said nothing about a date at all — and a
+// sole open visit on a DIFFERENT date was sent the link anyway. The fix
+// makes the outcome three-way: this shape is now UNRESOLVED, and parks
+// under its own reason rather than either being validated (Attached) or
+// ignored (delivery timing).
+describe('an appointment date claim the connector rule cannot place parks as unresolved, not silently ungrounded (codex #4293 P1)', () => {
+  test('the Codex repro: "your appointment is on September 20" against a sole, DIFFERENT-dated visit parks — it does not send', () => {
+    const promise = 'I will text you a reschedule link. Your appointment is on September 20.';
+    const evidence = [{ quote: promise, speaker: 'agent' }];
+    const source = { ...call, transcription: `Agent: ${promise}\nCaller: Thank you.` };
+    const sept21 = { ...visit, id: 'sept-21', scheduled_date: '2030-09-21' };
+    const result = select({ call: source, commitment: { ...commitment, subject: null, evidence }, candidates: [sept21] });
+    expect(result.visit).toBeUndefined();
+    expect(result.reason).toBe('appointment_date_unresolved');
+  });
+
+  test('the identical "is on" phrasing parks even when the date happens to MATCH the selected visit — unresolved is unresolved regardless of the coincidence', () => {
+    const promise = 'I will text you a reschedule link. Your appointment is on September 20.';
+    const evidence = [{ quote: promise, speaker: 'agent' }];
+    const source = { ...call, transcription: `Agent: ${promise}\nCaller: Thank you.` };
+    const sept20 = { ...visit, id: 'sept-20', scheduled_date: '2030-09-20' };
+    const result = select({ call: source, commitment: { ...commitment, subject: null, evidence }, candidates: [sept20] });
+    expect(result.visit).toBeUndefined();
+    expect(result.reason).toBe('appointment_date_unresolved');
+  });
+
+  test('a comma-separated date after the noun ("the appointment, September 20, needs moving") is the same unresolved shape', () => {
+    const promise = 'I will text you a reschedule link. The appointment, September 20, needs moving.';
+    const evidence = [{ quote: promise, speaker: 'agent' }];
+    const source = { ...call, transcription: `Agent: ${promise}\nCaller: Thank you.` };
+    const sept21 = { ...visit, id: 'sept-21', scheduled_date: '2030-09-21' };
+    expect(select({ call: source, commitment: { ...commitment, subject: null, evidence }, candidates: [sept21] }).reason)
+      .toBe('appointment_date_unresolved');
+  });
+
+  test('genuinely attached and delivery-timing shapes keep their prior, non-unresolved outcomes', () => {
+    // "my September 20 appointment" is BEFORE the noun — strictly attached —
+    // still a contradiction, not unresolved, against a mismatched visit.
+    const attached = 'I will text you a reschedule link for your September 20 appointment.';
+    const attachedEvidence = [{ quote: attached, speaker: 'agent' }];
+    const attachedSource = { ...call, transcription: `Agent: ${attached}\nCaller: Thank you.` };
+    const sept21 = { ...visit, id: 'sept-21', scheduled_date: '2030-09-21' };
+    expect(select({ call: attachedSource, commitment: { ...commitment, subject: null, evidence: attachedEvidence }, candidates: [sept21] }).reason)
+      .toBe('date_not_grounded');
+    // A delivery-timing date with nothing left after the noun is still
+    // neither attached nor unresolved — it sends.
+    const timing = 'I will text you the reschedule link tomorrow morning for your appointment.';
+    const timingEvidence = [{ quote: timing, speaker: 'agent' }];
+    const timingSource = { ...call, transcription: `Agent: ${timing}\nCaller: Thank you.` };
+    const nextWeek = { ...visit, id: 'next-week', scheduled_date: '2030-01-15' };
+    expect(select({ call: timingSource, commitment: { ...commitment, subject: null, evidence: timingEvidence }, candidates: [nextWeek] }).visit?.id)
+      .toBe('next-week');
+  });
+
+  test('an ambiguous numeric date claim still fails closed as a contradiction, not unresolved', () => {
+    const promise = 'I will text you a reschedule link for my 9/10 appointment.';
+    const evidence = [{ quote: promise, speaker: 'agent' }];
+    const source = { ...call, transcription: `Agent: ${promise}\nCaller: Thank you.` };
+    const sept10 = { ...visit, id: 'sept-10', scheduled_date: '2030-09-10' };
+    expect(select({ call: source, commitment: { ...commitment, subject: null, evidence }, candidates: [sept10] }).reason)
+      .toBe('date_not_grounded');
+  });
+});
+
 // codex #4293 P1 (reschedule-link-promises.js:796): the APPOINTMENT_REFERENCE
 // keyword gate means ANY quote containing "appointment" had ALL its date
 // language read as the visit's date — so a delivery-timing phrase sharing a
