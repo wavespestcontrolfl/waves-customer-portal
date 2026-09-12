@@ -1356,8 +1356,9 @@ function no_account_holder_callback(value, record, { spoken }) {
     re.lastIndex = 0;
     let match = re.exec(text);
     while (match) {
-      const clause = clauseOf(text, match.index);
-      if (!clauseIsNegated(clause) && !clauseIsEpistemicallyHedged(clause)) {
+      const [start] = clauseBounds(text, match.index);
+      const claim = text.slice(start, match.index + match[0].length);
+      if (!clauseIsNegated(claim) && !clauseIsEpistemicallyHedged(claim)) {
         return ['fail', `promised to contact the account holder: "${clip(match[0], 160)}"`];
       }
       match = re.exec(text);
