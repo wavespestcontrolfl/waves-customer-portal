@@ -6,8 +6,8 @@ import { MemoryRouter, Route, Routes, useLocation } from 'react-router-dom';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 vi.mock('../../components/admin/AdminCommandHeader', () => ({
-  default: ({ sections, activeKey, onSectionChange, ariaLabel }) => (
-    <nav aria-label={ariaLabel}>
+  default: ({ sections, activeKey, onSectionChange, ariaLabel, variant }) => (
+    <nav aria-label={ariaLabel} data-variant={variant}>
       {sections.map(({ key, label }) => (
         <button
           key={key}
@@ -82,6 +82,12 @@ describe('CompliancePage Staff authentication', () => {
     for (const [, options] of fetchMock.mock.calls) {
       expect(options?.headers?.Authorization).toBe('Bearer phase-b-staff-token');
     }
+    expect(screen.getByRole('navigation', { name: 'Compliance section' })).toHaveAttribute(
+      'data-variant',
+      'workspace',
+    );
+    expect(screen.getByRole('navigation', { name: 'Compliance section' }).closest('[data-ui-density]'))
+      .toHaveAttribute('data-ui-density', 'comfortable');
   });
 
   it('deep-links to the embedded Credentials workspace', () => {
@@ -127,6 +133,84 @@ describe('CompliancePage Staff authentication', () => {
       'aria-current',
       'page',
     );
+  });
+
+  it('keeps application filters on the existing endpoint', async () => {
+    localStorage.setItem('waves_admin_user', JSON.stringify({ role: 'admin' }));
+    const fetchMock = vi.fn(async () => ({ ok: true, json: async () => ({ applications: [], total: 0 }) }));
+    vi.stubGlobal('fetch', fetchMock);
+    renderCompliance();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Application Log' }));
+    fireEvent.change(screen.getByLabelText('Product name'), { target: { value: 'Synthetic product' } });
+
+    await waitFor(() => expect(fetchMock.mock.calls.some(([url]) => (
+      String(url).includes('/api/admin/compliance-v2/applications?')
+      && String(url).includes('productName=Synthetic+product')
+      && String(url).includes('limit=25')
+      && String(url).includes('offset=0')
+    ))).toBe(true));
+  });
+
+  it('does not download an HTTP error as CSV and allows a successful retry', async () => {
+    const createObjectURL = vi.fn(() => 'blob:synthetic-export');
+    const revokeObjectURL = vi.fn();
+    vi.stubGlobal('URL', Object.assign(URL, { createObjectURL, revokeObjectURL }));
+    const click = vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {});
+    let fail = true;
+    const blob = new Blob(['Date,Product\n2035-01-01,Fixture'], { type: 'text/csv' });
+    const readBlob = vi.fn(async () => blob);
+    vi.stubGlobal('fetch', vi.fn(async (url) => String(url).includes('/report/export')
+      ? { ok: !fail, status: fail ? 503 : 200, blob: readBlob }
+      : { ok: true, json: async () => ({ applications: [], total: 0 }) }));
+    renderCompliance('/admin/compliance?tab=applications');
+    fireEvent.click(screen.getByRole('button', { name: 'Application Log' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Export for DACS' }));
+    expect(await screen.findByRole('alert')).toHaveTextContent('Export failed (HTTP 503)');
+    expect(readBlob).not.toHaveBeenCalled();
+    expect(click).not.toHaveBeenCalled();
+    fail = false;
+    fireEvent.click(screen.getByRole('button', { name: 'Export for DACS' }));
+    await waitFor(() => expect(click).toHaveBeenCalledOnce());
+    expect(createObjectURL).toHaveBeenCalledWith(blob);
+    expect(revokeObjectURL).toHaveBeenCalledWith('blob:synthetic-export');
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+  });
+
+  it('edits a license in the shared dialog with the existing payload', async () => {
+    localStorage.setItem('waves_admin_user', JSON.stringify({ role: 'admin' }));
+    const technician = {
+      id: '11111111-1111-4111-8111-111111111111',
+      name: 'Fixture technician',
+      license: 'OLD-1',
+      licenseExpiry: '2027-02-01',
+      licenseCategories: ['General Household Pest'],
+      licenseStatus: 'active',
+    };
+    const fetchMock = vi.fn(async (url) => ({
+      ok: true,
+      json: async () => String(url).endsWith('/licenses') ? { technicians: [technician] } : {},
+    }));
+    vi.stubGlobal('fetch', fetchMock);
+    renderCompliance('/admin/compliance?tab=licenses');
+
+    await screen.findByText('Fixture technician');
+    fireEvent.click(screen.getByRole('button', { name: 'Edit' }));
+    expect(screen.getByRole('dialog', { name: 'Edit license' })).toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText('License #'), { target: { value: 'NEW-2' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledWith(
+      '/api/admin/compliance-v2/licenses/11111111-1111-4111-8111-111111111111',
+      expect.objectContaining({
+        method: 'PUT',
+        body: JSON.stringify({
+          fl_applicator_license: 'NEW-2',
+          license_expiry: '2027-02-01',
+          license_categories: ['General Household Pest'],
+        }),
+      }),
+    ));
   });
 });
 

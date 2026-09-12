@@ -583,15 +583,20 @@ describe('invoice assertInvoiceCollectible', () => {
     );
     for (const s of INVOICE_UNCOLLECTIBLE_STATUSES) {
       expect(isInvoiceCollectibleStatus(s)).toBe(false);
-      expect(() => assertInvoiceCollectible(s)).toThrow(/paid|prepaid|processing|void|refunded|canceled/);
+      expect(() => assertInvoiceCollectible({ status: s })).toThrow(/paid|prepaid|processing|void|refunded|canceled/);
     }
   });
 
   test('open invoice statuses remain collectible', () => {
     for (const s of ['draft', 'scheduled', 'sent', 'viewed', 'overdue', 'sending']) {
       expect(isInvoiceCollectibleStatus(s)).toBe(true);
-      expect(() => assertInvoiceCollectible(s)).not.toThrow();
+      expect(() => assertInvoiceCollectible({ status: s })).not.toThrow();
     }
+  });
+
+  test('the invoice row is required — a status string is refused, not silently un-checked', () => {
+    expect(() => assertInvoiceCollectible('sent')).toThrow(/requires the invoice row/);
+    expect(() => assertInvoiceCollectible(null)).toThrow(/requires the invoice row/);
   });
 });
 

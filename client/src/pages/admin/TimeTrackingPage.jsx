@@ -17,6 +17,7 @@ import {
   Users,
 } from "lucide-react";
 import AdminCommandHeader from "../../components/admin/AdminCommandHeader";
+import "./TimeTrackingPage.css";
 import { TECH_LINE_NUMBERS } from "../../constants/techLines";
 import {
   etDateString,
@@ -77,24 +78,30 @@ function adminFetch(path, opts = {}) {
 const sCard = {
   background: D.card,
   border: `1px solid ${D.border}`,
-  borderRadius: 12,
-  padding: 20,
+  borderRadius: 6,
+  padding: 16,
   marginBottom: 12,
-  boxShadow: "0 1px 3px rgba(0,0,0,0.08)",
+  boxShadow: "none",
 };
 const sBtn = (bg, color) => ({
-  padding: "8px 16px",
+  minHeight: 44,
+  padding: "0 16px",
   background: bg,
   color,
-  border: "none",
-  borderRadius: 8,
-  fontSize: 13,
+  border: `1px solid ${bg === "transparent" ? D.border : bg}`,
+  borderRadius: 4,
+  fontSize: 14,
   fontWeight: 500,
   cursor: "pointer",
+  display: "inline-flex",
+  alignItems: "center",
+  justifyContent: "center",
+  lineHeight: 1.3,
 });
 const sBadge = (bg, color) => ({
-  fontSize: 10,
-  padding: "2px 8px",
+  fontSize: 14,
+  lineHeight: 1.35,
+  padding: "3px 8px",
   borderRadius: 4,
   background: bg,
   color,
@@ -103,12 +110,13 @@ const sBadge = (bg, color) => ({
 });
 const sInput = {
   width: "100%",
-  padding: "8px 12px",
+  minHeight: 44,
+  padding: "0 12px",
   background: D.input,
   border: `1px solid ${D.border}`,
-  borderRadius: 8,
+  borderRadius: 4,
   color: D.text,
-  fontSize: 13,
+  fontSize: 16,
   outline: "none",
   boxSizing: "border-box",
 };
@@ -216,7 +224,7 @@ export default function TimeTrackingPage() {
   };
 
   return (
-    <div style={{ maxWidth: 1300, margin: "0 auto" }}>
+    <div className="staff-foundation mx-auto max-w-[1500px]">
       {" "}
       <AdminCommandHeader
         title="Staff"
@@ -238,9 +246,11 @@ export default function TimeTrackingPage() {
         <div
           style={{
             display: "flex",
-            flexWrap: "wrap",
+            flexWrap: "nowrap",
+            overflowX: "auto",
             gap: 8,
             marginBottom: 16,
+            paddingBottom: 2,
           }}
         >
           {activeGroup.tabs.filter((key) => key !== "pay-growth" || payGrowthGateOpen).map((key) => {
@@ -256,13 +266,11 @@ export default function TimeTrackingPage() {
                   display: "inline-flex",
                   alignItems: "center",
                   gap: 6,
-                  height: 36,
+                  minHeight: 44,
                   padding: "0 14px",
-                  borderRadius: 6,
-                  fontSize: 12,
-                  fontWeight: 700,
-                  textTransform: "uppercase",
-                  letterSpacing: "0.04em",
+                  borderRadius: 4,
+                  fontSize: 14,
+                  fontWeight: 500,
                   cursor: "pointer",
                   border: `1px solid ${active ? "#18181B" : "#E4E4E7"}`,
                   background: active ? "#18181B" : "#FFFFFF",
@@ -320,7 +328,7 @@ export default function TimeTrackingPage() {
         {" "}
         <span style={{ color: D.green }}>OK</span>
         <span style={{ color: D.text }}>{toast}</span>{" "}
-      </div>{" "}
+      </div>
     </div>
   );
 }
@@ -1585,6 +1593,7 @@ function EditEntryModal({ entry, onClose, onSave }) {
 
   return createPortal(
     <div
+      className="staff-foundation"
       style={{
         position: "fixed",
         top: 0,
@@ -3575,6 +3584,7 @@ function CapabilitiesModal({ tech, onClose, onSaved, showToast }) {
 
   return createPortal(
     <div
+      className="staff-foundation"
       onClick={onClose}
       style={{
         position: "fixed",
@@ -3815,6 +3825,7 @@ function EarningsModal({ tech, onClose, showToast }) {
 
   return createPortal(
     <div
+      className="staff-foundation"
       onClick={onClose}
       style={{
         position: "fixed",

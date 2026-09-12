@@ -50,7 +50,7 @@ const {
   invoicePaymentStatusForIntent,
   nextInvoiceStatusAfterFailedPayment,
 } = require('./stripe-invoice-state');
-const { assertInvoiceCollectible, isInvoiceCollectibleStatus, invoiceAmountDue } = require('./invoice-helpers');
+const { assertInvoiceCollectible, assertInvoiceNotWithdrawnFromCustomer, isInvoiceCollectibleStatus, invoiceAmountDue } = require('./invoice-helpers');
 
 // Stripe rejects a payment_method_types narrow when an incompatible
 // PaymentMethod is already attached to the PaymentIntent — e.g. a customer
@@ -1888,7 +1888,7 @@ const StripeService = {
 
     const invoice = await db('invoices').where({ id: invoiceId }).first();
     if (!invoice) throw new Error('Invoice not found');
-    assertInvoiceCollectible(invoice.status);
+    assertInvoiceCollectible(invoice);
     if (invoice.payer_id) {
       throw new Error('Invoice is billed to a third-party payer — collect from the payer, not a saved card on the service account');
     }
@@ -1992,7 +1992,7 @@ const StripeService = {
       }
       throw err;
     }
-    assertInvoiceCollectible(invoice.status);
+    assertInvoiceCollectible(invoice);
     // Third-party Bill-To: never charge a card on file for a payer-billed
     // invoice — the saved card belongs to invoice.customer_id (the homeowner),
     // but this bill is the payer's. AR routes to the payer AP inbox.
@@ -2059,7 +2059,7 @@ const StripeService = {
           .forUpdate()
           .first();
         if (!lockedInvoice) throw new Error('Invoice not found');
-        assertInvoiceCollectible(lockedInvoice.status);
+        assertInvoiceCollectible(lockedInvoice);
         // Frozen-consent hard cap, enforced against the LOCKED invoice
         // (Codex #3153 r7 P0) and BEFORE any account-credit application
         // (r8 P1: the fully-covered-by-credit early return would otherwise
@@ -3424,7 +3424,7 @@ const StripeService = {
 
     const invoice = await db('invoices').where({ id: invoiceId }).first();
     if (!invoice) throw new Error('Invoice not found');
-    assertInvoiceCollectible(invoice.status);
+    assertInvoiceCollectible(invoice);
     // Phase 2: an accrued invoice is payable ONLY through its consolidated
     // statement — never mint an individual PaymentIntent for it (it would
     // double-collect once the statement settles).
@@ -3510,7 +3510,7 @@ const StripeService = {
           .forUpdate()
           .first();
         if (!lockedInvoice) throw new Error('Invoice not found');
-        assertInvoiceCollectible(lockedInvoice.status);
+        assertInvoiceCollectible(lockedInvoice);
         // Stale-render fence, rechecked against the LOCKED row: the route's
         // version check reads unlocked, so an edit committing between that
         // check and this lock would price and stamp the PI from the edited
@@ -4210,7 +4210,7 @@ const StripeService = {
 
     const invoice = await db('invoices').where({ id: invoiceId }).first();
     if (!invoice) throw new Error('Invoice not found');
-    assertInvoiceCollectible(invoice.status);
+    assertInvoiceCollectible(invoice);
     if (!invoice.stripe_payment_intent_id) {
       throw new Error('PaymentIntent does not belong to this invoice');
     }
@@ -4541,7 +4541,7 @@ const StripeService = {
         .forUpdate()
         .first();
       if (!lockedInvoice) throw new Error('Invoice not found');
-      assertInvoiceCollectible(lockedInvoice.status);
+      assertInvoiceCollectible(lockedInvoice);
       if (replacementAllocation) {
         await PayCombined.verifyAllocationLocked(trx, replacementAllocation, {
           anchorInvoiceId: invoiceId,
@@ -4651,7 +4651,7 @@ const StripeService = {
 
     const invoice = await db('invoices').where({ id: invoiceId }).first();
     if (!invoice) throw new Error('Invoice not found');
-    assertInvoiceCollectible(invoice.status);
+    assertInvoiceCollectible(invoice);
 
     // Retrieve the PM from Stripe to get real-time funding type
     let pm;
@@ -4736,7 +4736,7 @@ const StripeService = {
 
     const invoice = await db('invoices').where({ id: invoiceId }).first();
     if (!invoice) throw new Error('Invoice not found');
-    assertInvoiceCollectible(invoice.status);
+    assertInvoiceCollectible(invoice);
 
     if (!invoice.stripe_payment_intent_id) {
       throw new Error('Invoice has no active PaymentIntent');
@@ -4832,7 +4832,7 @@ const StripeService = {
           .forUpdate()
           .first();
         if (!lockedInvoice) throw new Error('Invoice not found');
-        assertInvoiceCollectible(lockedInvoice.status);
+        assertInvoiceCollectible(lockedInvoice);
         if (String(lockedInvoice.stripe_payment_intent_id || '')
           !== String(invoice.stripe_payment_intent_id)) {
           throw new Error('Invoice has a different active payment');
@@ -5328,7 +5328,7 @@ const StripeService = {
       throw new Error('Invoice is billed on the payer’s monthly statement — pay the statement, not the individual invoice');
     }
     if (['void', 'refunded', 'canceled', 'cancelled'].includes(String(invoice.status || '').toLowerCase())) {
-      assertInvoiceCollectible(invoice.status);
+      assertInvoiceCollectible(invoice);
     }
     if (invoice.status === 'paid') {
       const existingPayment = await db('payments')
@@ -5341,6 +5341,13 @@ const StripeService = {
     if (invoice.status === 'prepaid') {
       throw new Error('Invoice is already prepaid');
     }
+    // UNCONDITIONAL (codex r25 P1): the assertion above fires only for the
+    // terminal statuses, which a withdrawn packet invoice is never in — it
+    // keeps `sent`/`viewed`/`overdue` so the homeowner's link still resolves.
+    // Without this an already-issued PaymentIntent settles customer funds
+    // against debt that now belongs to AP. After the paid branch so a replayed
+    // PI still returns its recorded payment.
+    assertInvoiceNotWithdrawnFromCustomer(invoice);
     if (invoice.status === 'processing'
       && String(invoice.stripe_payment_intent_id || '') !== String(paymentIntentId)) {
       throw new Error('Bank payment is already processing');
@@ -5653,7 +5660,7 @@ const StripeService = {
           .first();
         if (!lockedInvoice) throw new Error('Invoice not found');
         if (['void', 'refunded', 'canceled', 'cancelled'].includes(String(lockedInvoice.status || '').toLowerCase())) {
-          assertInvoiceCollectible(lockedInvoice.status);
+          assertInvoiceCollectible(lockedInvoice);
         }
         if (lockedInvoice.status === 'paid') {
           const existingPayment = await trx('payments')
@@ -5666,6 +5673,10 @@ const StripeService = {
         if (lockedInvoice.status === 'prepaid') {
           throw new Error('Invoice is already prepaid');
         }
+        // Re-checked under the row lock for the same reason as the pre-lock
+        // read (codex r25 P1): a Bill-To move committing between them must not
+        // let this settlement through.
+        assertInvoiceNotWithdrawnFromCustomer(lockedInvoice);
         if (lockedInvoice.status === 'processing'
           && String(lockedInvoice.stripe_payment_intent_id || '') !== String(paymentIntentId)) {
           throw new Error('Bank payment is already processing');

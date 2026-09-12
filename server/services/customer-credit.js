@@ -388,7 +388,7 @@ async function applyAccountCreditToInvoice({ invoiceId, createdBy = 'system', fu
     if (invoice.payer_id) return { applied: 0, skipped: 'payer_billed' };
     try {
        
-      require('./invoice-helpers').assertInvoiceCollectible(invoice.status);
+      require('./invoice-helpers').assertInvoiceCollectible(invoice);
     } catch {
       return { applied: 0, skipped: 'uncollectible' };
     }

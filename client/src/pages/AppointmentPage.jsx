@@ -19,8 +19,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { useParams } from 'react-router-dom';
 import { COLORS, FONTS } from '../theme-brand';
 import { CUSTOMER_SURFACE } from '../theme-customer';
-import { FLOW_COLUMN_MAX } from '../theme-doc';
-import { WavesShell } from '../components/brand';
+import { WavesShell, CustomerColumn, PublicStateCard } from '../components/brand';
 import Icon from '../components/Icon';
 import VanScene from '../components/VanScene';
 import { useGlassSurface } from '../glass/glass-engine';
@@ -69,9 +68,9 @@ const PRIMARY_CTA = {
 function Page({ children }) {
   return (
     <WavesShell variant="customer" topBar="solid">
-      <div data-glass-clear="" style={{ flex: 1, padding: '24px 16px 40px', maxWidth: FLOW_COLUMN_MAX, width: '100%', margin: '0 auto', fontFamily: FONT_BODY, color: S.text }}>
+      <CustomerColumn column="flow" data-glass-clear="" style={{ fontFamily: FONT_BODY, color: S.text }}>
         {children}
-      </div>
+      </CustomerColumn>
     </WavesShell>
   );
 }
@@ -352,31 +351,18 @@ export default function AppointmentPage() {
   if (notFound) {
     return (
       <Page>
-        <MessageCard
-          title="We couldn't find that appointment"
-          body="This link may have expired. Text or call us and we'll get you sorted."
-        />
+        <PublicStateCard state="not-found" title="We couldn't find that appointment">
+          This link may have expired. Text or call us and we'll get you sorted.
+        </PublicStateCard>
       </Page>
     );
   }
   if (loadError) {
     return (
       <Page>
-        <Card>
-          <div data-gt="h3x" style={{ fontSize: 22, fontWeight: 700, fontFamily: FONTS.heading, marginBottom: 8 }}>
-            We couldn't load that appointment
-          </div>
-          <div style={{ fontSize: 16, color: S.body, lineHeight: 1.55 }}>
-            This looks temporary. Your link is still valid—try again in a moment.
-          </div>
-          <button
-            type="button"
-            onClick={load}
-            style={{ marginTop: 16, border: 0, borderRadius: 8, padding: '11px 16px', background: COLORS.glassNavy, color: '#fff', font: 'inherit', fontWeight: 700, cursor: 'pointer' }}
-          >
-            Try again
-          </button>
-        </Card>
+        <PublicStateCard state="error" title="We couldn't load that appointment" onRetry={load}>
+          This looks temporary. Your link is still valid&mdash;try again in a moment.
+        </PublicStateCard>
       </Page>
     );
   }
