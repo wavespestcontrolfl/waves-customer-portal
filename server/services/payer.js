@@ -272,7 +272,24 @@ async function updatePayer(id, body) {
       const [row] = await trx('payers').where({ id: pid }).update(dbUpdates).returning('*');
       // With the payer live again, every self-pay combined-visit invoice of a
       // referencing customer or job is withdrawn to it.
-      if (activating) await require('./visit-completion-packets').withdrawPacketInvoicesForOwner(trx, { payerId: pid });
+      if (activating) {
+        const Packets = require('./visit-completion-packets');
+        await Packets.withdrawPacketInvoicesForOwner(trx, { payerId: pid });
+        // …and RE-JUDGE the packets that were already withdrawn to someone
+        // else (local audit): a packet whose first billed member references
+        // this payer while another member references an active one was
+        // stamped for THAT payer. Reactivating this one changes the live
+        // answer, and the stamp, packet error and office alert would keep
+        // naming the wrong AP account. Scoped by customer, not by payer id —
+        // filtering on this payer would skip exactly the stamps that name
+        // another.
+        for (const customerId of [...new Set([
+          ...await trx('customers').where({ payer_id: pid }).whereNull('deleted_at').pluck('id'),
+          ...await trx('scheduled_services').where({ payer_id: pid }).whereNotNull('customer_id').pluck('customer_id'),
+        ].map(String))].sort()) {
+          await Packets.reconcileWithdrawnPacketInvoices(trx, { customerId });
+        }
+      }
       // A deactivation that waited on a send claim's payer lock arrives after
       // that claim withdrew the homeowner invoice to this payer: with the
       // payer inactive, live ownership is self-pay again, so the withdrawn
