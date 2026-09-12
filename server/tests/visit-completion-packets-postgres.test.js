@@ -441,7 +441,13 @@ postgres('visit completion packet records on PostgreSQL', () => {
     const savedWeek = await request(`/api/admin/schedule/week?start=${date}`, { auth });
     expect(savedWeek.status).toBe(200);
     expect(savedWeek.body.days.flatMap((day) => day.services)).toEqual(expect.arrayContaining(fixture.serviceIds.map((id) => (
-      expect.objectContaining({ id, visitId: fixture.visitId, visitCloseoutEnabled: fullBehavior,
+      expect.objectContaining({ id, visitId: fixture.visitId, visitCloseoutEnabled: true,
+        visitCloseoutPacket: { id: result.body.packetId, status: 'done' } })
+    ))));
+    const savedDay = await request(`/api/admin/schedule?date=${date}`, { auth });
+    expect(savedDay.status).toBe(200);
+    expect(savedDay.body.services).toEqual(expect.arrayContaining(fixture.serviceIds.map((id) => (
+      expect.objectContaining({ id, visitId: fixture.visitId, visitCloseoutEnabled: true,
         visitCloseoutPacket: { id: result.body.packetId, status: 'done' } })
     ))));
     const detail = await request(path, { auth });
