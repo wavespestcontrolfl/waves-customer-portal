@@ -4408,6 +4408,10 @@ async function applySeriesMoveEffects({ result, serviceId, newDate, newWindow, n
     // their pre-move reminders. Non-blocking, like every other bookkeeping
     // effect here: a failure must never fail a move the customer was already
     // told about, and a retry pass re-runs it (the write dedupes per move).
+    // Runs LAST, after the notified stamp and the reminder close: those two
+    // are an ordered pair (the stamp is written before the close is
+    // attempted, so a pass that dies between them is redone as a close-only
+    // pass, never as a second text) and nothing may come between them.
     const recordSeriesPromiseSupersession = async () => {
       try {
         await require('../services/no-show-detector').recordSeriesSupersession(db, {
@@ -4584,8 +4588,8 @@ async function applySeriesMoveEffects({ result, serviceId, newDate, newWindow, n
             // pass that dies or fails between the two is redone as a
             // close-only pass, never as a second text.
             await recordCustomerNotified();
-            await recordSeriesPromiseSupersession();
             await closeSeriesReminders();
+            await recordSeriesPromiseSupersession();
           }
         } catch (err) {
           notificationError = err.message;
@@ -4597,8 +4601,8 @@ async function applySeriesMoveEffects({ result, serviceId, newDate, newWindow, n
             notificationSent = true;
             notificationError = null;
             await recordCustomerNotified();
-            await recordSeriesPromiseSupersession();
             await closeSeriesReminders();
+            await recordSeriesPromiseSupersession();
           }
         }
       }
