@@ -4795,6 +4795,130 @@ function validatePhoneCallAppointmentCustomer(customer = {}, extracted = {}, cal
   return { ok: missing.length === 0, missing, advisory, details: merged };
 }
 
+// Natures where the person on the line is definitively NOT the customer the
+// call is linked to. Narrower than the creation-only
+// V2_NON_CUSTOMER_CALL_NATURES, which also holds the existing-customer
+// natures that an update path exists to serve (GH codex #4432 r1 P1).
+const V2_THIRD_PARTY_CALL_NATURES = new Set(['job_applicant', 'vendor_or_partner']);
+
+// Deliberately NOT gated on callExtractionV2PrimaryEnabled() (GH codex #4432
+// r3 P1). That flag guards ADOPTION — a V2 false positive must not suppress a
+// valid V1 customer create, so the creation hold reverts to legacy behavior
+// when V2 is demoted. This consumer only ever DECLINES to copy contact detail
+// onto a row that already exists, which is the safe direction: a shadow-mode
+// verdict may veto, the capture still rides the call record and the triage
+// cards for the office, and nothing legacy is suppressed. A valid V2
+// extraction is produced in shadow mode too, so the applicant/vendor veto
+// keeps working through a flag flip or rollback.
+function thirdPartyCallNatureFromV2(v2Result) {
+  return v2Result?.status === 'valid'
+    && V2_THIRD_PARTY_CALL_NATURES.has(v2Result.extraction?.call_nature);
+}
+
+// The pre-linked contact-backfill gate, as a pure decision so the identity
+// rules are testable as BEHAVIOR and not as a source-text shape (GH codex
+// #4432 r2 P1): a future edit that preserves the wording while inverting a
+// condition has to fail a test.
+//
+// IDENTITY is the inbound ANI — never resolveCallContactPhone's result, which
+// prefers a DICTATED callback number and says nothing about who is on the
+// line (r1 P2); an outbound call's identity is the number WE dialed.
+// `thirdPartyCallNature` must be the update-path subset (job_applicant /
+// vendor_or_partner), NOT the creation-only aggregate, which also holds the
+// existing-customer natures this backfill exists to serve (r1 P1).
+function prelinkedBackfillIdentityPhone(call = {}) {
+  return isOutboundCall(call)
+    ? firstExternalPhone(call.to_phone)
+    : firstExternalPhone(call.from_phone);
+}
+
+function prelinkedBackfillGate({
+  call, customerId, createdCustomerFromCall, phoneMatchedThisPass, extracted = {}, thirdPartyCallNature,
+  explicitUnlink = false,
+} = {}) {
+  const identityPhone = prelinkedBackfillIdentityPhone(call);
+  const eligible = !!customerId
+    // Belt and braces (GH codex #4432 r4 P1): an operator unlink already
+    // nulls call.customer_id, so customerId is falsy here — but this branch
+    // writes to a customer row, and "this call belongs to no customer" is
+    // stated in the override, not inferred from a variable two hundred lines
+    // up. The sibling phone-match branch carries the same predicate.
+    && !explicitUnlink
+    && !createdCustomerFromCall     // a fresh row already carries this call's capture
+    && !phoneMatchedThisPass        // the phone-match branch already backfilled
+    && !!identityPhone
+    && !extracted.is_voicemail      // one-sided transcription: too lossy to trust contact detail
+    && !thirdPartyCallNature;       // an applicant's / vendor's email is not the customer's
+  return { eligible, identityPhone };
+}
+
+// The customer-level half: the identity number must be the linked customer's
+// own, and the spoken name must not contradict the record. A missing or
+// soft-deleted row accepts nothing.
+function linkedCustomerAcceptsBackfill(linked, identityPhone, extracted = {}) {
+  if (!linked || linked.deleted_at) return false;
+  return customerPhoneMatches(identityPhone, linked) && extractedNameMatchesCustomer(extracted, linked);
+}
+
+// Email + address backfill for a call that resolved to an EXISTING customer.
+// Shared by the phone-match branch and the pre-linked branch of Step 3.
+//
+// Same garbled-stored-email rule as the appointment backfill (codex
+// round-12 P2): an invalid stored value is replaceable by a VALID capture; a
+// valid stored email is never overwritten. A REPLACEMENT of a garbled stored
+// email must fan out (copies of the old address exist) and does so in ONE
+// transaction with the customer write, so a partial fan-out cannot strand
+// snapshots on an address the record no longer holds (codex round-24 P1);
+// an empty→value write only settles the missing-email card; neither settles
+// the read-back cards filed for this unverified capture (round-9 + round-10
+// P2; fan-out gap from the local pre-push audit P1). Both paths ride the
+// email-claim guard (r16): every writer that ASSIGNS an email serializes
+// with a concurrent merge-undo's claim probe via the shared normalized-email
+// advisory lock — proceed-with-fresh-read, so only the email column is ever
+// dropped and the address backfill still lands.
+async function backfillLinkedCustomerFromExtraction({ customerId, existing, extracted = {}, source }) {
+  const updates = {};
+  const existingEmailInvalid = existing.email && !EMAIL_RE.test(String(existing.email).trim().toLowerCase());
+  const capturedEmailValid = extracted.email && EMAIL_RE.test(String(extracted.email).trim().toLowerCase());
+  if ((!existing.email || existingEmailInvalid) && capturedEmailValid) updates.email = extracted.email;
+  if ((!existing.address_line1 || existing.address_line1 === '') && extracted.address_line1) {
+    updates.address_line1 = extracted.address_line1;
+    if (extracted.city) updates.city = extracted.city;
+    if (extracted.zip) updates.zip = extracted.zip;
+  }
+  if (Object.keys(updates).length === 0) return { updates };
+  const fanout = require('./customer-email-fanout');
+  const replacingGarbled = !!(updates.email && existingEmailInvalid);
+  const guarded = await fanout.applyCustomerUpdatesWithEmailClaimGuard({
+    customerId, updates,
+    source,
+    ...(replacingGarbled ? {
+      replaceExpectedEmail: existing.email,
+      applyWithEmailInTrx: async (trx) => {
+        await trx('customers').where({ id: customerId }).update(updates);
+        await fanout.propagateCustomerEmailChange({
+          before: existing,
+          after: { id: customerId, email: updates.email },
+          source: `call-captured email replacing a garbled address (${source})`,
+          reviewReasonCodes: ['customer_email_missing'],
+        }, trx);
+      },
+    } : {}),
+  });
+  if (updates.email && guarded.emailApplied && !replacingGarbled) {
+    try {
+      await fanout.resolveOpenEmailReviewCards({
+        customerId, email: updates.email,
+        source: `call-captured email (${source})`,
+        reasonCodes: ['customer_email_missing'],
+      });
+    } catch (e) {
+      logger.warn(`[call-proc] email review-card resolution failed after ${source} for customer ${customerId}: ${e.message}`);
+    }
+  }
+  return { updates, emailApplied: !!(updates.email && guarded.emailApplied) };
+}
+
 async function backfillCustomerFromAppointmentContact(customerId, customer = {}, extracted = {}, callerPhone = null, { suppressPhone = false } = {}) {
   if (!customerId) return customer;
   const updates = {};
@@ -6406,6 +6530,41 @@ async function recordCommitmentsStep({ call, callSid, transcription, extracted, 
   }
 }
 
+// Reschedule apply — when a matched existing customer's call moved a visit
+// that is already on the books (V2 scheduling.status reschedule_requested +
+// agent_committed_booking + confirmed_start_at), move that visit through
+// the rebooker, note the access request, resolve the reschedule cards
+// (services/call-reschedule-apply.js). Runs after finalization, fenced on
+// this pass's GENERATION. Sends NOTHING to the customer. Dark behind
+// GATE_CALL_RESCHEDULE_APPLY; never blocks the call.
+async function applyCallRescheduleStep({ call, callSid, customerId, extracted, v2Result, appointmentResult, procGeneration }) {
+  if (extracted?.is_spam || !isEnabled('callRescheduleApply')) return;
+  if (v2Result?.status !== 'valid' || !v2Result.extraction) return;
+  if (!(call?.customer_id || customerId)) return;
+  try {
+    const result = await require('./call-reschedule-apply').applyCallReschedule({
+      conn: db,
+      call,
+      procGeneration,
+      appointmentCreated: !!appointmentResult?.scheduledServiceId,
+    });
+    if (result.outcome !== 'skipped' || result.reason !== 'not_a_reschedule') {
+      logger.info(`[call-proc] reschedule-apply for ${maskSid(callSid)}: ${result.outcome}${result.reason ? ` (${result.reason})` : ''}${result.visitId ? ` visit=${result.visitId}` : ''}`);
+    }
+    // recordCommitmentsStep ran BEFORE this step, so a schedule_visit promise
+    // the move just kept was written open and its proof did not exist yet.
+    // Re-run the fulfillment lookup now that the activity row exists, or the
+    // watchdog reports an overdue promise this pass already kept (GH codex
+    // #4204 r6 P2). Non-blocking, like every other line in this step.
+    if (result.outcome === 'applied' && isEnabled('callCommitments')) {
+      await require('./call-commitments').refreshFulfillment(db, call.id)
+        .catch((err) => logger.warn(`[call-proc] post-reschedule fulfillment refresh failed for ${maskSid(callSid)}: ${err.message}`));
+    }
+  } catch (err) {
+    logger.warn(`[call-proc] reschedule-apply step failed (non-blocking) for ${maskSid(callSid)}: ${err.message}`);
+  }
+}
+
 // Terminal write for a tech follow-up call: the transcript is already
 // stored; this lands the extraction, summary and sentiment the Calls tab
 // reads, marks the call processed and releases the claim in one
@@ -7680,6 +7839,16 @@ const CallRecordingProcessor = {
     const v2NonCustomerCallNature = callExtractionV2PrimaryEnabled()
       && v2Result?.status === 'valid'
       && V2_NON_CUSTOMER_CALL_NATURES.has(v2Result.extraction?.call_nature);
+
+    // The subset where the person on the line is definitively NOT the linked
+    // customer. The set above is a CREATION hold — it also covers the
+    // existing-customer natures, where the classification asserts the caller
+    // already has a record. Consumers that update an ALREADY-LINKED customer
+    // (the pre-linked contact backfill in Step 3) must use this narrower set
+    // instead, or the calls it exists to serve are exactly the ones it skips
+    // (GH codex #4432 r1 P1). 'other' stays out: indeterminate is not
+    // third-party, and those consumers carry their own identity gates.
+    const v2ThirdPartyCallNature = thirdPartyCallNatureFromV2(v2Result);
 
     // ── V2-primary field adoption (owner promotion 2026-07-23) ──
     // A valid V2 extraction now DRIVES the canonical writes: its identity /
@@ -9046,6 +9215,7 @@ const CallRecordingProcessor = {
     }
 
     const sharedPhoneAmbiguity = {};
+    let phoneMatchedThisPass = false;
     if (!customerId && phone && !explicitUnlink) {
       // Try to find an existing customer by the external contact phone.
       // Name match wins; phone-only matching needs a second deterministic
@@ -9068,63 +9238,12 @@ const CallRecordingProcessor = {
       });
       if (existing) {
         customerId = existing.id;
-        // Update with any new info
-        const updates = {};
-        // Same garbled-stored-email rule as the appointment backfill
-        // (codex round-12 P2): invalid stored value is replaceable by a
-        // VALID capture; a valid stored email is never overwritten.
-        const existingEmailInvalid = existing.email && !EMAIL_RE.test(String(existing.email).trim().toLowerCase());
-        const capturedEmailValid = extracted.email && EMAIL_RE.test(String(extracted.email).trim().toLowerCase());
-        if ((!existing.email || existingEmailInvalid) && capturedEmailValid) updates.email = extracted.email;
-        if ((!existing.address_line1 || existing.address_line1 === '') && extracted.address_line1) {
-          updates.address_line1 = extracted.address_line1;
-          if (extracted.city) updates.city = extracted.city;
-          if (extracted.zip) updates.zip = extracted.zip;
-        }
-        if (Object.keys(updates).length > 0) {
-          // Same contract as the appointment backfill above: a REPLACEMENT of
-          // a garbled stored email must fan out (copies of the old address
-          // exist) and does so in ONE transaction with the customer write, so
-          // a partial fan-out cannot strand snapshots on an address the
-          // record no longer holds (codex round-24 P1); an empty→value write
-          // only settles the missing-email card; neither settles the
-          // read-back cards filed for this unverified capture (round-9 +
-          // round-10 P2; fan-out gap from the local pre-push audit P1). Both
-          // paths ride the email-claim guard (r16): every writer that
-          // ASSIGNS an email serializes with a concurrent merge-undo's
-          // claim probe via the shared normalized-email advisory lock —
-          // proceed-with-fresh-read, so only the email column is ever
-          // dropped and the address backfill still lands.
-          const fanout = require('./customer-email-fanout');
-          const replacingGarbled = !!(updates.email && existingEmailInvalid);
-          const guarded = await fanout.applyCustomerUpdatesWithEmailClaimGuard({
-            customerId, updates,
-            source: 'call-extraction-backfill',
-            ...(replacingGarbled ? {
-              replaceExpectedEmail: existing.email,
-              applyWithEmailInTrx: async (trx) => {
-                await trx('customers').where({ id: customerId }).update(updates);
-                await fanout.propagateCustomerEmailChange({
-                  before: existing,
-                  after: { id: customerId, email: updates.email },
-                  source: 'call-captured email replacing a garbled address (phone-match update)',
-                  reviewReasonCodes: ['customer_email_missing'],
-                }, trx);
-              },
-            } : {}),
-          });
-          if (updates.email && guarded.emailApplied && !replacingGarbled) {
-            try {
-              await fanout.resolveOpenEmailReviewCards({
-                customerId, email: updates.email,
-                source: 'call-captured email (phone-match update)',
-                reasonCodes: ['customer_email_missing'],
-              });
-            } catch (e) {
-              logger.warn(`[call-proc] email review-card resolution failed after phone-match update for customer ${customerId}: ${e.message}`);
-            }
-          }
-        }
+        phoneMatchedThisPass = true;
+        // Update with any new info (email + address; shared with the
+        // pre-linked path below).
+        await backfillLinkedCustomerFromExtraction({
+          customerId, existing, extracted, source: 'call-extraction-backfill',
+        });
       } else if (sharedPhoneAmbiguity.candidates) {
         // Shared phone, no deterministic tiebreak: minting ANOTHER customer
         // on this number would make it permanently multi-match (the duplicate
@@ -9312,6 +9431,50 @@ const CallRecordingProcessor = {
         }
       } else if (!extracted.first_name) {
         logger.info(`[call-proc] Skipping new customer creation for ${callSid}: first name not confirmed`);
+      }
+    }
+
+    // Pre-linked calls (call.customer_id set at ring time by the inbound
+    // webhook, an operator link, or the transcript-name reconciliation
+    // above) skipped the phone-match branch entirely, so a capture on a
+    // NON-booking call never reached the customer row: the only other email
+    // backfill sits inside the auto-booking branch. Incident 2026-09-11
+    // (customer 7411b13a-3046-4376-b4c8-2d84f32c2ef7): the email dictated on
+    // the second and third calls stayed on call_log.ai_extraction while
+    // customers.email stayed null, and the manual booking that evening sent
+    // the no-email prep fallback text instead of the guide email.
+    //
+    // Same trust bar as the phone-match branch: the IDENTITY number must be
+    // the customer's own and the spoken name must not contradict the record.
+    // Identity is the inbound ANI, never resolveCallContactPhone's result —
+    // that helper prefers a DICTATED callback number, which says nothing
+    // about who is on the line and would reject a caller whose verified ANI
+    // is exactly what established the link (GH codex #4432 r1 P2); the same
+    // rule the phone-verification lane below uses. An outbound call's
+    // identity is the number WE dialed.
+    //
+    // Never from a voicemail (a one-sided transcription is too lossy to
+    // trust contact detail from) or from a THIRD-PARTY call nature — an
+    // applicant's or a vendor's email is not the customer's. Deliberately
+    // NOT the creation-only v2NonCustomerCallNature aggregate: that set also
+    // holds billing_question / existing_customer_service /
+    // existing_customer_scheduling, which are precisely the linked-customer
+    // calls this backfill exists to repair (GH codex #4432 r1 P1).
+    // Fail-soft.
+    const prelinkedGate = prelinkedBackfillGate({
+      call, customerId, createdCustomerFromCall, phoneMatchedThisPass, extracted, explicitUnlink,
+      thirdPartyCallNature: v2ThirdPartyCallNature,
+    });
+    if (prelinkedGate.eligible) {
+      try {
+        const linked = await db('customers').where({ id: customerId }).whereNull('deleted_at').first();
+        if (linkedCustomerAcceptsBackfill(linked, prelinkedGate.identityPhone, extracted)) {
+          await backfillLinkedCustomerFromExtraction({
+            customerId, existing: linked, extracted, source: 'call-extraction-backfill-prelinked',
+          });
+        }
+      } catch (e) {
+        logger.warn(`[call-proc] pre-linked customer backfill skipped for ${maskSid(callSid)}: ${e.message}`);
       }
     }
 
@@ -16381,6 +16544,11 @@ const CallRecordingProcessor = {
 
       // Commitments (recordCommitmentsStep): after finalization, generation-fenced, never blocking.
       await recordCommitmentsStep({ call, callSid, transcription, extracted, v2Result, procGeneration });
+
+      // Reschedule apply (applyCallRescheduleStep): an existing customer's
+      // agent-committed move of an on-the-books visit lands on the visit.
+      // No customer comms. Generation-fenced, never blocking.
+      await applyCallRescheduleStep({ call, callSid, customerId, extracted, v2Result, appointmentResult, procGeneration });
     }
 
     // Reconcile-only draft-linkage pass, AFTER the fenced finalization
@@ -17104,6 +17272,10 @@ const LEAD_UNIT_MAX_LENGTH = 100;
 const LEAD_PLACE_TAIL_MAX_LENGTH = 80;
 
 CallRecordingProcessor._test = {
+  backfillLinkedCustomerFromExtraction,
+  prelinkedBackfillGate,
+  thirdPartyCallNatureFromV2,
+  linkedCustomerAcceptsBackfill,
   isTechFollowUpCall,
   finalizeTechFollowUpCall,
   recordCommitmentsStep,

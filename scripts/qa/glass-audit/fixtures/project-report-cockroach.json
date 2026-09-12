@@ -1,0 +1,34 @@
+{
+  "/api/reports/project/cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc/data": {
+    "status": 200,
+    "body": {
+      "fdacsPdfAvailable": false,
+      "status": "sent",
+      "title": "German roach cleanout — kitchen",
+      "technicianName": "Adam",
+      "projectDate": "2026-06-28",
+      "sentAt": "2026-06-28T18:30:00Z",
+      "recommendations": null,
+      "followupDate": null,
+      "followupFindings": null,
+      "followupCompletedAt": null,
+      "upcomingAppointment": null,
+      "photos": [],
+      "customerName": "William Carter",
+      "customerEmail": "william.carter@example.com",
+      "customerPhone": "9415550123",
+      "cityState": "Parrish, FL",
+      "customerAddress": "10225 Kalamazoo Pl, Parrish, FL 34219",
+      "projectType": "cockroach",
+      "findings": {
+        "species": "German",
+        "activity_level": "Moderate",
+        "activity_locations": "Kitchen, Bathrooms",
+        "evidence_observed": "Live roaches, Droppings",
+        "conducive_conditions": "Food debris, Cardboard storage",
+        "work_completed": "Bait placement, Insect growth regulator, Crack & crevice treatment",
+        "customer_prep": "Remove food debris, No over-the-counter sprays"
+      }
+    }
+  }
+}

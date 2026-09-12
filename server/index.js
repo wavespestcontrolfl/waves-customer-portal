@@ -936,8 +936,10 @@ if (config.nodeEnv === 'production') {
     maxAge: '1y',       // Cache hashed assets (/assets/*) for 1 year
     immutable: true,
     setHeaders: (res, filePath) => {
-      // But never cache index.html or sw.js
-      if (filePath.endsWith('.html') || filePath.endsWith('sw.js')) {
+      // But never cache index.html, sw.js, or the per-build asset list —
+      // all three keep a stable filename across deploys, so the immutable
+      // year above would pin the previous build's copy.
+      if (filePath.endsWith('.html') || filePath.endsWith('sw.js') || filePath.endsWith('build-assets.json')) {
         res.set('Cache-Control', 'no-cache, no-store, must-revalidate');
       }
     },

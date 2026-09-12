@@ -403,6 +403,15 @@ describe('rescheduleSeries — date-only sweep', () => {
     id, status: 'confirmed', scheduled_date: date, window_start: '09:00:00', window_end: '11:00:00', technician_id: null, ...extra,
   });
 
+  test.each([true, false])('pending anchor history records only the persisted transition with keepStatus=%s', async (keepStatus) => {
+    const anchor = anchorRow({ status: 'pending' });
+    const { updates, historyInsert } = wireSeriesMocks([sib('svc-1', BASE, { status: 'pending' })], { anchor });
+    await SmartRebooker.rescheduleSeries('svc-1', TARGET, { start: '09:00', end: '11:00' }, 'admin', 'admin', { ...ADMIN_OPTS, keepStatus });
+    expect(updates[0].update.mock.calls[0][0].status).toBe(keepStatus ? 'pending' : 'confirmed');
+    if (keepStatus) expect(historyInsert.insert).not.toHaveBeenCalled();
+    else expect(historyInsert.insert).toHaveBeenCalledWith({ job_id: 'svc-1', from_status: 'pending', to_status: 'confirmed', transitioned_by: null });
+  });
+
   test('anchor takes the new window + confirmed; siblings keep window, status and tech (a pending placeholder stays pending)', async () => {
     const { updates, historyInsert } = wireSeriesMocks([
       sib('svc-1', BASE),
@@ -1062,7 +1071,7 @@ describe('caller wiring (source)', () => {
     expect(disp).toContain("jsonb_array_length(COALESCE(result->'rewoundIds', '[]'::jsonb)) > 0");
     expect(read('../services/rebooker.js')).toContain('await markSeriesCleanupDone(seriesMoveId, cleanupOk);');
     expect(fs.existsSync(path.join(__dirname, '../models/migrations/20260828000032_series_moves_cleanup_done_at.js'))).toBe(true);
-    expect(disp).toContain("const RECONCILE_SURFACES = ['dispatch_board', 'edit_modal', 'sms_reply', 'customer_web', 'quick_move'];");
+    expect(disp).toContain("const RECONCILE_SURFACES = ['dispatch_board', 'edit_modal', 'sms_reply', 'customer_web', 'quick_move', 'call_reschedule'];");
     expect(fx).not.toContain('operatorInitiated: true');
     expect(fx).toContain("if (cardOnly) return { notificationSent: false, notificationError: 'superseded', conflicts: dueConflicts, seriesMoveId };");
     const reb = read('../services/rebooker.js');

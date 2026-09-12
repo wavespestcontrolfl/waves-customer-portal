@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
+import { ActionFeedback, Card, CardBody, UiSurface } from "../../components/ui";
 import useIsMobile from "../../hooks/useIsMobile";
 import { useFeatureFlag } from "../../hooks/useFeatureFlag";
 import AiChartsPanel from "../../components/dashboard/AiChartsPanel";
@@ -498,9 +499,13 @@ export default function DashboardPageV2() {
 
   if (loading) {
     return (
-      <div className="p-16 text-center text-14 sm:text-13 text-ink-secondary">
-        Loading dashboard…
-      </div>
+      <UiSurface density="comfortable" className="mx-auto max-w-[1300px] text-ui-body text-zinc-900">
+        <Card>
+          <CardBody>
+            <ActionFeedback>Loading dashboard…</ActionFeedback>
+          </CardBody>
+        </Card>
+      </UiSurface>
     );
   }
   if (!data || data.error || !data.kpis) {
@@ -508,33 +513,50 @@ export default function DashboardPageV2() {
     // sending operators in circles. Show the real cause + a Retry button.
     if (isRateLimitError(loadError)) {
       return (
-        <div className="p-16 text-center text-14 sm:text-13 text-alert-fg">
-          Too many requests. Wait a few seconds and{" "}
-          <button
-            onClick={() => window.location.reload()}
-            className="underline"
-          >
-            retry
-          </button>
-          .
-        </div>
+        <UiSurface density="comfortable" className="mx-auto max-w-[1300px] text-ui-body">
+          <Card>
+            <CardBody>
+              {/* The sentence keeps main's wording, so the retry affordance stays
+                  inline rather than becoming ActionFeedback's "Try again" button. */}
+              <ActionFeedback error>
+                Too many requests. Wait a few seconds and{" "}
+                <button onClick={() => window.location.reload()} className="underline">
+                  retry
+                </button>
+                .
+              </ActionFeedback>
+            </CardBody>
+          </Card>
+        </UiSurface>
       );
     }
     if (isForbiddenError(loadError)) {
       return (
-        <div className="p-16 text-center text-14 sm:text-13 text-alert-fg">
-          Dashboard access requires an admin account.
-        </div>
+        <UiSurface density="comfortable" className="mx-auto max-w-[1300px] text-ui-body">
+          <Card>
+            <CardBody>
+              <ActionFeedback error>
+                Dashboard access requires an admin account.
+              </ActionFeedback>
+            </CardBody>
+          </Card>
+        </UiSurface>
       );
     }
     return (
-      <div className="p-16 text-center text-14 sm:text-13 text-alert-fg">
-        Failed to load dashboard.{" "}
-        <button onClick={() => window.location.reload()} className="underline">
-          Retry
-        </button>
-        .
-      </div>
+      <UiSurface density="comfortable" className="mx-auto max-w-[1300px] text-ui-body">
+        <Card>
+          <CardBody>
+            <ActionFeedback error>
+              Failed to load dashboard.{" "}
+              <button onClick={() => window.location.reload()} className="underline">
+                Retry
+              </button>
+              .
+            </ActionFeedback>
+          </CardBody>
+        </Card>
+      </UiSurface>
     );
   }
 
@@ -567,47 +589,16 @@ export default function DashboardPageV2() {
   };
 
   return (
-    <div className="dashboard-blackout min-h-full bg-surface-page font-sans text-zinc-900">
-      <header className="mb-3 max-md:mb-4">
-        <div className="flex min-w-0 items-start justify-between flex-wrap gap-3">
-          <div className="min-w-0">
-            <div className="u-label text-ink-secondary max-md:text-13 max-md:tracking-normal max-md:normal-case max-md:font-medium max-md:text-zinc-500">
-              {todayLabel} · {timeLabel}
-            </div>
-            <h1 className="text-28 font-normal tracking-h1 mt-1 max-md:mt-2">
-              <span
-                className="md:hidden"
-                style={{ fontSize: 32, fontWeight: 700, lineHeight: 1.1 }}
-              >
-                {greeting()}, {firstName}
-              </span>{" "}
-              <span className="hidden md:inline">
-                {greeting()}, {firstName}
-              </span>
-            </h1>
-          </div>
-          <div className="text-12 text-ink-tertiary flex shrink-0 items-center gap-1.5 max-md:-mr-2">
-            {/* clockTick keeps this label fresh between auto-refreshes */}
-            <span>Updated {relativeTime(lastUpdated, clockTick)}</span>{" "}
-            <button
-              type="button"
-              onClick={refresh}
-              disabled={refreshing}
-              aria-label="Refresh dashboard"
-              className="inline-flex h-11 w-11 items-center justify-center rounded-sm hover:text-ink-secondary u-focus-ring md:h-8 md:w-8"
-            >
-              <span className={`inline-block ${refreshing ? "animate-spin" : ""}`}>
-                ↻
-              </span>
-            </button>
-          </div>
-        </div>
-      </header>
-
+    <UiSurface density="comfortable" className="dashboard-blackout mx-auto min-h-full max-w-[1300px] text-ui-body text-zinc-900">
       {/* Sticky jump-nav + period selector. The period drives the KPI tiles
           (distributed across sections) and the Marketing Attribution panels;
           everything else keeps its fixed window (labeled per card). */}
       <DashboardJumpNav
+        title={`${greeting()}, ${firstName}`}
+        dateLabel={`${todayLabel} · ${timeLabel}`}
+        updatedLabel={`Updated ${relativeTime(lastUpdated, clockTick)}`}
+        onRefresh={refresh}
+        refreshing={refreshing}
         sections={SECTIONS}
         period={period}
         customRange={customRange}
@@ -684,6 +675,6 @@ export default function DashboardPageV2() {
           {...kpiStripProps}
         />
       )}
-    </div>
+    </UiSurface>
   );
 }
