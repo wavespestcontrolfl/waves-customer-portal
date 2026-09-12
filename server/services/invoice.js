@@ -4999,6 +4999,17 @@ const InvoiceService = {
       if (!updated) {
         throw new Error("Invoice status changed while unvoiding — re-check and retry");
       }
+      // The preserved withdrawal stamp is re-judged against LIVE ownership
+      // (Codex #4311 r30 P1): a withdrawn invoice that was voided is skipped
+      // by the Bill-To reconciliation (void is terminal), so a payer cleared
+      // in the meantime would leave the restored self-pay draft stamped —
+      // unpayable and unschedulable for good. The shared reconciliation
+      // releases it when the packet is self-pay again and keeps the stamp
+      // (re-pointed if the payer changed) while a payer still owes it.
+      if (updated.visit_completion_packet_id && String(updated.scheduled_send_error || '').startsWith("payer_billed:")) {
+        await require("./visit-completion-packets")
+          .reconcileWithdrawnPacketInvoices(trx, { customerId: updated.customer_id });
+      }
       // Term-link TOCTOU re-check on the FRESH row under the lock (Codex
       // #3493 r2): a concurrent /annual-prepay can create the term and
       // stamp the invoice between the pre-transaction guards and this

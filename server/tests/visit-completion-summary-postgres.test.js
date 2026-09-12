@@ -3250,6 +3250,43 @@ postgres('visit summary recipient recovery', () => {
     }
   });
 
+  test('restoring a voided withdrawn invoice re-judges its stamp against live ownership', async () => {
+    // A withdrawn invoice that was voided is invisible to the Bill-To
+    // reconciliation (void is terminal), so a payer cleared while it was void
+    // would leave the restored draft stamped — unpayable and unschedulable.
+    const Packets = require('../services/visit-completion-packets');
+    const { invoiceWithdrawnFromCustomer } = require('../services/invoice-helpers');
+    const InvoiceService = require('../services/invoice');
+    const invoiceId = randomUUID();
+    const [payer] = await mockPg('payers').insert({ display_name: 'Fixture Property Management', ap_email: `${randomUUID()}@example.invalid`, active: true }).returning('id');
+    await mockPg('invoices').insert({ id: invoiceId, token: randomUUID().replace(/-/g, ''), invoice_number: `FIX-${invoiceId.slice(0, 8)}`,
+      customer_id: fixture.customerId, status: 'draft', total: 120, visit_completion_packet_id: fixture.packetId });
+    try {
+      await mockPg.transaction(async (trx) => {
+        await trx('customers').where({ id: fixture.customerId }).update({ payer_id: payer.id });
+        return Packets.withdrawPacketInvoicesForOwner(trx, { customerId: fixture.customerId });
+      });
+      expect(invoiceWithdrawnFromCustomer(await mockPg('invoices').where({ id: invoiceId }).first())).toBe(true);
+
+      // Voided while withdrawn, then the Bill-To is cleared: the
+      // reconciliation cannot see a terminal row.
+      await mockPg('invoices').where({ id: invoiceId }).update({ status: 'void' });
+      await mockPg('customers').where({ id: fixture.customerId }).update({ payer_id: null });
+
+      await InvoiceService.unvoidInvoice(invoiceId);
+      const restored = await mockPg('invoices').where({ id: invoiceId }).first();
+      expect(restored.status).toBe('scheduled');
+      expect(invoiceWithdrawnFromCustomer(restored)).toBe(false);
+    } finally {
+      await mockPg('customers').where({ id: fixture.customerId }).update({ payer_id: null });
+      await mockPg('service_visits').where({ id: fixture.visitId }).update({ billing_hold: false });
+      await mockPg('visit_completion_packets').where({ id: fixture.packetId }).update({ error: null });
+      await mockPg('dispatch_alerts').where({ type: 'visit_closeout_review' }).whereRaw("payload->>'packetId' = ?", [fixture.packetId]).del();
+      await mockPg('invoices').where({ id: invoiceId }).del();
+      await mockPg('payers').where({ id: payer.id }).del();
+    }
+  });
+
   test('a payer-to-payer handoff moves the office review to the payer that owes it now', async () => {
     // The stamp, the packet error and the open alert all name the AP account
     // the office must bill; a second payer taking the packet over has to move

@@ -1119,7 +1119,19 @@ async function handleStatementPaymentIntentEvent(paymentIntent, eventType, event
         logger.warn(`[stripe-webhook] statement S-${statementId} non-active-PI success ${piId} (active ${stmt.stripe_payment_intent_id || 'none'})`);
         return false;
       }
-      if (stmt.status === 'paid') return true; // idempotent — THIS PI already settled (dunning may stop)
+      if (stmt.status === 'paid') {
+        // Idempotent — THIS PI already settled (dunning may stop). The packet
+        // children are still reported (Codex #4311 r30 P1): if the first
+        // delivery settled but its review enrollment and recovery marker both
+        // failed, this redelivery is the only path back, and an empty list
+        // would acknowledge the event with those reviews still missing.
+        settledPacketInvoiceIds = await trx('invoices')
+          .where({ payer_statement_id: statementId })
+          .whereNotNull('visit_completion_packet_id')
+          .whereNot({ status: 'void' })
+          .pluck('id');
+        return true;
+      }
 
       // Fail closed on UNVERIFIED card funding: surcharge must derive from the
       // ACTUAL confirmed funding, but paymentDetailsFromIntent swallows Stripe
