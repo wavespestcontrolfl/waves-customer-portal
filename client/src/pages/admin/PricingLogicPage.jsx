@@ -289,7 +289,9 @@ export default function PricingLogicPage({ embedded = false, onSecondaryNav } = 
       <section id="pricing-reality">{activeSection === "reality" && <PricingRealityCheckPage />}</section>
     </div>
   );
-  if (embedded) return <UiSurface density="comfortable">{content}</UiSurface>;
+  // Same as Strategy: the routed path is always embedded, and main capped this
+  // workspace's content at 1300px.
+  if (embedded) return <UiSurface density="comfortable" className="mx-auto max-w-[1300px]">{content}</UiSurface>;
   return (
     <UiSurface density="comfortable" className="mx-auto max-w-[1300px] text-ui-body text-ink-primary">
       <AdminCommandHeader variant="workspace" title="Pricing" icon={Calculator} sections={PRICING_SECTIONS} activeKey={activeSection} onSectionChange={handleSectionChange} navGridClassName="grid-cols-2 md:grid-cols-5" />

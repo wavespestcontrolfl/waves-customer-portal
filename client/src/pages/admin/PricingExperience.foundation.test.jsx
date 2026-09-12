@@ -27,8 +27,8 @@ function fixtureFor(url, options = {}) {
   if (path.startsWith("/admin/pricing-config/pest-calibration?")) return { summary: { count: 1, avgDelta: 2, avgAbsDelta: 2, outlierCount: 0, byPoolCageSize: [], byLotBand: [], reviewQueue: [] }, sampleHealth: {}, records: [] };
   if (path === "/admin/pricing-config") return { configs: pricingConfig };
   if (path === "/admin/pricing-config/audit-log?limit=30") return { logs: [] };
-  if (path === "/admin/pricing/dashboard") return { overview: { totalCustomers: 8, avgLTV: 900, avgCAC: 90, ltvToCacRatio: 10, monthlyRecurringRevenue: 1200, annualizedRecurring: 14400 }, stages: { attraction: { totalLeads: 10, totalEstimates: 8, acceptedEstimates: 6, conversionRate: 75 }, core: { recurringCustomers: 5, monthlyRecurring: 1200, tierBreakdown: {} }, upsell: { avgServicesPerCustomer: 2, totalCompletedServices: 14 }, continuity: { retentionBuckets: { '0-3mo': 1, '3-6mo': 0, '6-12mo': 1, '12-24mo': 2, '24mo+': 1 }, totalRetained: 4 } }, funnel: { leads: 10, estimates: 8, accepted: 6, active: 5 } };
-  if (path === "/admin/pricing/calculate-value") return { valueScore: 54, priceRecommendation: "Market rate", positioning: "Synthetic positioning" };
+  if (path === "/admin/pricing/dashboard") return { overview: { totalCustomers: 8, avgLTV: 900, avgCAC: 90, ltvToCacRatio: 10, monthlyRecurringRevenue: 1200, annualizedRecurring: 14400 }, stages: { attraction: { totalLeads: 10, totalEstimates: 8, acceptedEstimates: 6, conversionRate: 75 }, core: { recurringCustomers: 5, monthlyRecurring: 1200, tierBreakdown: {} }, upsell: { avgServicesPerCustomer: 2, totalCompletedServices: 14 }, continuity: { retentionBuckets: { '0-3mo': 1, '3-6mo': 0, '6-12mo': 1, '12-24mo': 2, '24mo+': 1 }, totalRetained: 5 } }, funnel: { leads: 10, estimates: 8, accepted: 6, active: 5 } };
+  if (path === "/admin/pricing/calculate-value") return { valueScore: 5.44, inputs: { dreamOutcome: 7, perceivedLikelihood: 7, timeDelay: 3, effortSacrifice: 3 }, priceRecommendation: "Price at top of market. Customers see massive value.", positioning: "Premium — high perceived value, charge accordingly" };
   if (path === "/admin/pricing/upsell-rules") return { rules: [{ id: "rule-1", name: "Synthetic rule", trigger_event: "renewal", offer_service: "mosquito", enabled: true, times_triggered: 2, times_converted: 1 }] };
   // { customer, upsell } pairs and the summary/channel/retention LTV response
   // are what server/routes/admin-pricing-strategy.js actually returns.
@@ -85,8 +85,17 @@ describe("Pricing admin new UI foundation", () => {
   it("preserves strategy calculation and upsell actions", async () => {
     render(<MemoryRouter><PricingStrategyPage /></MemoryRouter>);
     expect(await screen.findByText("Total customers")).toBeInTheDocument();
+    // The fixture's five buckets total 5 while only the 6mo+ ones total 4, so
+    // these two must differ — that gap is exactly the overcount the funnel row
+    // used to have when it reused totalRetained.
+    expect(screen.getByText("Stage IV: Continuity").parentElement).toHaveTextContent("5");
+    expect(screen.getByText("Retained 6mo+").parentElement).toHaveTextContent("4");
     fireEvent.click(screen.getByRole("button", { name: "Value equation" }));
-    expect(await screen.findByText("Synthetic positioning")).toBeInTheDocument();
+    // The production-length positioning and recommendation strings, not the old
+    // short synthetic ones — the Badge has to hold the real copy.
+    expect(await screen.findByText("Premium — high perceived value, charge accordingly")).toBeInTheDocument();
+    expect(screen.getByText("Price at top of market. Customers see massive value.")).toBeInTheDocument();
+    expect(screen.getByText("5.44")).toBeInTheDocument();
     fireEvent.change(screen.getByLabelText("Dream outcome"), { target: { value: "9" } });
     await waitFor(() => {
       const calls = fetch.mock.calls.filter(([url, options]) => url === "/api/admin/pricing/calculate-value" && options?.method === "POST");

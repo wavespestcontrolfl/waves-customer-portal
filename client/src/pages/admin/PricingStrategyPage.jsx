@@ -97,7 +97,10 @@ export default function PricingStrategyPage({ embedded = false, onSecondaryNav }
         <Card
           role={toast.startsWith("Failed:") ? "alert" : "status"}
           className={cn(
-            "pointer-events-none fixed z-[300] right-4 bottom-[calc(80px+env(safe-area-inset-bottom))] sm:bottom-5 max-w-[calc(100vw-32px)] px-4 py-3 shadow-lg",
+            // md:, not sm: — AdminLayoutV2 keeps its 56px bottom tab bar below
+            // useIsMobile()'s 768px default, while Tailwind's sm: starts at 640px,
+            // which put the toast over the nav between 640 and 767px.
+            "pointer-events-none fixed z-[300] right-4 bottom-[calc(80px+env(safe-area-inset-bottom))] md:bottom-5 max-w-[calc(100vw-32px)] px-4 py-3 shadow-lg",
             toast.startsWith("Failed:") ? "text-alert-fg" : "text-ink-primary",
           )}
         >
@@ -107,7 +110,9 @@ export default function PricingStrategyPage({ embedded = false, onSecondaryNav }
     </div>
   );
 
-  if (embedded) return <UiSurface density="comfortable">{content}</UiSurface>;
+  // The routed path is always embedded, so the width cap has to live here too —
+  // the hub caps only its header, and main capped Strategy content at 1200px.
+  if (embedded) return <UiSurface density="comfortable" className="mx-auto max-w-[1200px]">{content}</UiSurface>;
   return (
     <UiSurface density="comfortable" className="mx-auto max-w-[1300px] text-ui-body text-ink-primary">
       <AdminCommandHeader variant="workspace" title="Pricing strategy" icon={DollarSign} />
@@ -420,7 +425,13 @@ function LTVAnalysisTab() {
   const ltvCacRatio = summary.avgCAC > 0 ? summary.avgLTV / summary.avgCAC : null;
   // The route happens to sort channelPerformance by roi desc, but the tile should
   // not depend on response ordering to name the top performer.
-  const bestChannel = channels.reduce((best, channel) => (best === null || (channel.roi || 0) > (best.roi || 0)) ? channel : best, null)?.source;
+  // Only channels with a measured ROI are ranked: the server emits null for a
+  // zero-cost channel and 0 for a measured-but-unprofitable one, and its own sort
+  // maps both to zero, so encounter order could otherwise crown an unmeasurable
+  // organic channel over a measured one. A genuine numeric 0 still seeds.
+  const bestChannel = channels
+    .filter((channel) => channel.roi != null)
+    .reduce((best, channel) => (best === null || channel.roi > best.roi ? channel : best), null)?.source;
   const retention12mo = data.retentionCurve?.["12mo"]?.pct;
   const metrics = [
     { label: "Avg LTV", value: formatMoney(summary.avgLTV) }, { label: "Avg CAC", value: formatMoney(summary.avgCAC) },
