@@ -3176,6 +3176,38 @@ postgres('visit summary recipient recovery', () => {
     }
   });
 
+  test('the stranded-send sweep pages past claims whose evidence never resolves', async () => {
+    // An ask with no provable evidence is left alone by design. Taking only
+    // the oldest 20 meant a head of such rows monopolized every sweep and no
+    // later stranded send was ever examined.
+    const Review = require('../services/review-request');
+    const ids = [];
+    const base = Date.now() - 60 * 60 * 1000;
+    try {
+      for (let i = 0; i < 22; i += 1) {
+        const id = randomUUID();
+        ids.push(id);
+        await mockPg('review_requests').insert({ id, customer_id: fixture.customerId, service_record_id: fixture.recordIds[0],
+          status: 'sending', token: randomUUID().replace(/-/g, ''), claimed_at: new Date(base + i * 1000),
+          channel: 'sms', triggered_by: 'auto' });
+      }
+      const seen = [];
+      const evidence = jest.spyOn(Review, '_inlineSendEvidence').mockImplementation(async (row) => {
+        seen.push(row.id);
+        return { unavailable: true };
+      });
+      try {
+        await Review.reconcileStrandedSends();
+      } finally {
+        evidence.mockRestore();
+      }
+      // Every row this fixture created was reached, not just the first page.
+      for (const id of ids) expect(seen).toContain(id);
+    } finally {
+      await mockPg('review_requests').whereIn('id', ids).del();
+    }
+  });
+
   test('a payer-to-payer handoff moves the office review to the payer that owes it now', async () => {
     // The stamp, the packet error and the open alert all name the AP account
     // the office must bill; a second payer taking the packet over has to move

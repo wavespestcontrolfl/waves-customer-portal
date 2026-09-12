@@ -1708,8 +1708,14 @@ const ReviewService = {
     if (request.service_record_id && await require("./visit-completion-summary").visitSummaryUncertainForRecord(request.service_record_id)) {
       const Summary = require("./visit-completion-summary");
       if (Summary.PACKET_OWNED_REVIEW_TRIGGERS.includes(request.triggered_by)) {
-        await db("review_requests").whereIn("status", ["pending", "sending"]).where({ id: requestId }).del().catch(() => {});
-        logger.info(`[review] Parked request (requestId=${requestId} reason=visit_summary_bounced)`);
+        // `pending` ONLY (local audit on r29): this preflight holds no send
+        // claim, and a `sending` row is another sender's durable marker — one
+        // that may already have reached the provider. Deleting it here would
+        // let its sent bookkeeping move zero rows and the recovery re-create
+        // and re-send an ask the customer already has. A claimed row is
+        // parked by its own sender, at the provider boundary.
+        const parked = Number(await db("review_requests").where({ id: requestId, status: "pending" }).del().catch(() => 0));
+        logger.info(`[review] Parked request (requestId=${requestId} reason=visit_summary_bounced parked=${parked})`);
       } else {
         await db("review_requests").where({ id: requestId, status: "pending" })
           .update({ scheduled_for: new Date(Date.now() + 30 * 60 * 1000) }).catch(() => {});
@@ -2935,7 +2941,33 @@ const ReviewService = {
    */
   async reconcileStrandedSends() {
     const staleBefore = new Date(Date.now() - INLINE_CLAIM_STALE_MS);
-    const stranded = await db("review_requests")
+    // PAGED, not "the oldest 20" (local audit on r29). An ask whose evidence
+    // is permanently unavailable — a no-link check-in with no SMS log, a
+    // failed email record — is left untouched by design, so twenty of them at
+    // the head of the queue used to monopolize every sweep and no later
+    // stranded send was ever examined. The sweep keysets past what it has
+    // already judged, bounded per run so one pass stays cheap.
+    const PAGE = 20;
+    const MAX_PAGES = 5;
+    let cursor = null;
+    let finished = 0;
+    let released = 0;
+    for (let page = 0; page < MAX_PAGES; page += 1) {
+      const batch = await this._strandedSendPage(staleBefore, cursor, PAGE);
+      if (!batch.length) break;
+      cursor = { claimedAt: batch[batch.length - 1].claimed_at, id: batch[batch.length - 1].id };
+      const outcome = await this._reconcileStrandedBatch(batch, staleBefore);
+      finished += outcome.finished;
+      released += outcome.released;
+      if (batch.length < PAGE) break;
+    }
+    if (finished || released) logger.info(`[review] stranded sends reconciled (finished=${finished} released=${released})`);
+    return { finished, released };
+  },
+
+  /** One keyset page of stale claims, oldest first. */
+  async _strandedSendPage(staleBefore, cursor, limit) {
+    const query = db("review_requests")
       .where({ status: "sending" })
       .whereNotNull("claimed_at")
       .where("claimed_at", "<=", staleBefore)
@@ -2953,8 +2985,21 @@ const ReviewService = {
         });
       })
       .orderBy("claimed_at")
-      .limit(20)
+      .orderBy("id")
+      .limit(limit)
       .select("id", "customer_id", "token", "claimed_at", "sequence_id", "sequence_step", "channel", "template_key");
+    if (cursor) {
+      // (claimed_at, id) keyset: claimed_at alone is not unique, and an
+      // equality skip would drop rows that share a timestamp.
+      query.where(function () {
+        this.where("claimed_at", ">", cursor.claimedAt)
+          .orWhere(function () { this.where("claimed_at", cursor.claimedAt).where("id", ">", cursor.id); });
+      });
+    }
+    return query;
+  },
+
+  async _reconcileStrandedBatch(stranded, staleBefore) {
     let finished = 0;
     let released = 0;
     for (const row of stranded) {
@@ -2999,7 +3044,6 @@ const ReviewService = {
       finished += outcome.finished || 0;
       released += outcome.released || 0;
     }
-    if (finished || released) logger.info(`[review] stranded sends reconciled (finished=${finished} released=${released})`);
     return { finished, released };
   },
 
