@@ -1680,4 +1680,155 @@ postgres('reschedule-link-promises against PostgreSQL', () => {
       expect(row.payload.delivery_outcome_uncertain).toBe(false);
     });
   });
+
+  /**
+   * codex #4293 P1: neither stagePromises nor runOne's own final check ever
+   * read commitment.due_at — a grounded promise like "I'll text you the
+   * link tomorrow morning" was staged with available_at = now and sent on
+   * whatever sweep found it, a day early. A REQUESTED time ("tomorrow
+   * morning") is a floor: do not send before it. A DEADLINE ("by Friday")
+   * only bounds how late the send may be: sending earlier still keeps it.
+   * The extractor does not persist which shape produced a given due_at
+   * (see the doc comment on isPromisedFloor in reschedule-link-promises.js),
+   * so the distinction is read back out of the grounding evidence quote —
+   * these tests exercise that classification through the real staging and
+   * dispatch path, against genuine Postgres rows.
+   */
+  describe('a stated delivery time is honoured as a floor, a deadline is not (codex #4293 P1)', () => {
+    const fakeSid = `SM${'0'.repeat(32)}`;
+    const stubBuildLink = async () => ({ url: 'https://example.com/reschedule/token' });
+    const stubRender = async () => 'Your reschedule link: https://example.com/reschedule/token';
+    const successfulSend = async () => ({ sent: true, providerMessageId: fakeSid });
+
+    async function seedPromise({ quote, dueAt = null }) {
+      const callId = randomUUID();
+      const customerId = randomUUID();
+      const visitId = randomUUID();
+      const phone = '+15555550100';
+      await mockPg('customers').insert({ id: customerId, first_name: 'Pat', last_name: 'Customer', phone,
+        address_line1: '1 Example St', city: 'Bradenton', zip: '34205', active: true });
+      await mockPg('scheduled_services').insert({ id: visitId, customer_id: customerId, scheduled_date: '2030-01-20',
+        window_start: '09:00', window_end: '10:30', service_type: 'WaveGuard', status: 'confirmed', reschedule_token: 'token' });
+      await mockPg('call_log').insert({ id: callId, customer_id: customerId, direction: 'inbound', from_phone: phone,
+        v2_extraction_status: 'valid', processing_generation: 0, transcription: `Agent: ${quote}\nCaller: Thank you.` });
+      const [commitment] = await mockPg('call_commitments').insert({
+        call_log_id: callId, commitment_key: 'send_reschedule_link:1', party: 'waves', kind: 'send_reschedule_link',
+        description: 'send a reschedule link', source: 'ai', status: 'open', confidence: 0.95,
+        evidence: JSON.stringify([{ quote, speaker: 'agent' }]), last_seen_generation: 0, processing_generation: 0,
+        due_at: dueAt, due_basis: dueAt ? 'stated' : null,
+      }).returning('id');
+      return commitment.id;
+    }
+
+    let priorGate;
+    let priorActivatedAt;
+    let priorCallCommitments;
+    beforeEach(() => {
+      priorGate = process.env.GATE_RESCHEDULE_LINK_ON_PROMISE;
+      priorActivatedAt = process.env.RESCHEDULE_LINK_PROMISE_ACTIVATED_AT;
+      priorCallCommitments = gates.callCommitments;
+      process.env.GATE_RESCHEDULE_LINK_ON_PROMISE = 'true';
+      // Every fixture visit here predates this fixed instant by construction
+      // (the call/commitment rows are inserted after this line runs), so a
+      // real activation-boundary write can never race the very row it is
+      // meant to admit.
+      process.env.RESCHEDULE_LINK_PROMISE_ACTIVATED_AT = '2000-01-01T00:00:00Z';
+      gates.callCommitments = true;
+    });
+    afterEach(() => {
+      if (priorGate === undefined) delete process.env.GATE_RESCHEDULE_LINK_ON_PROMISE; else process.env.GATE_RESCHEDULE_LINK_ON_PROMISE = priorGate;
+      if (priorActivatedAt === undefined) delete process.env.RESCHEDULE_LINK_PROMISE_ACTIVATED_AT; else process.env.RESCHEDULE_LINK_PROMISE_ACTIVATED_AT = priorActivatedAt;
+      gates.callCommitments = priorCallCommitments;
+    });
+
+    test('"tomorrow morning" is not sent on today\'s sweep, and IS sent on tomorrow\'s', async () => {
+      const dueAt = new Date('2030-01-08T14:00:00Z'); // 9:00 AM ET, Jan 8
+      const todayNow = new Date('2030-01-07T14:00:00Z'); // 9:00 AM ET, Jan 7 — before due_at, inside the send window
+      const tomorrowNow = new Date('2030-01-08T15:00:00Z'); // 10:00 AM ET, Jan 8 — after due_at, inside the send window
+
+      const commitmentId = await seedPromise({ quote: 'I will text you the reschedule link tomorrow morning.', dueAt });
+
+      // Staging: the row's available_at is the promised floor, not now.
+      const staged = await links.stagePromises(mockPg);
+      expect(staged).toBe(1);
+      const afterStaging = await mockPg('outbox_messages').where({ commitment_id: commitmentId }).first();
+      expect(new Date(afterStaging.available_at).getTime()).toBe(dueAt.getTime());
+
+      // Today's pass (runOne, as an ordinary sweep tick would drive it):
+      // due_at has not passed — nothing is sent.
+      const sendSpy = jest.fn(successfulSend);
+      await links.runOne(mockPg, afterStaging, { now: todayNow, send: sendSpy, buildLink: stubBuildLink, render: stubRender });
+      expect(sendSpy).not.toHaveBeenCalled();
+      const stillPending = await mockPg('outbox_messages').where({ commitment_id: commitmentId }).first();
+      expect(stillPending.status).toBe('pending');
+
+      // Tomorrow's pass: due_at has passed — the promise is kept.
+      await links.runOne(mockPg, stillPending, { now: tomorrowNow, send: sendSpy, buildLink: stubBuildLink, render: stubRender });
+      expect(sendSpy).toHaveBeenCalledTimes(1);
+      const sent = await mockPg('outbox_messages').where({ commitment_id: commitmentId }).first();
+      expect(sent.status).toBe('sent');
+      expect(sent.provider_message_id).toBe(fakeSid);
+    });
+
+    test('"by Friday" is a deadline, not a floor — it may send on the very next sweep', async () => {
+      const dueAt = new Date('2030-01-11T14:00:00Z'); // Friday, well after `now` below
+      const now = new Date('2030-01-07T14:00:00Z'); // Monday, 9:00 AM ET
+
+      const commitmentId = await seedPromise({ quote: 'I will text you the reschedule link by Friday.', dueAt });
+
+      const staged = await links.stagePromises(mockPg);
+      expect(staged).toBe(1);
+      // Staging itself never delays a deadline promise past now.
+      const afterStaging = await mockPg('outbox_messages').where({ commitment_id: commitmentId }).first();
+      expect(new Date(afterStaging.available_at).getTime()).toBeLessThan(dueAt.getTime());
+
+      await links.runOne(mockPg, afterStaging, { now, send: successfulSend, buildLink: stubBuildLink, render: stubRender });
+      const sent = await mockPg('outbox_messages').where({ commitment_id: commitmentId }).first();
+      expect(sent.status).toBe('sent');
+    });
+
+    test('no stated timing sends on the very next sweep, exactly as before this fix', async () => {
+      const now = new Date('2030-01-07T14:00:00Z');
+      const commitmentId = await seedPromise({ quote: 'I will text you a reschedule link for that appointment.' });
+
+      const staged = await links.stagePromises(mockPg);
+      expect(staged).toBe(1);
+      const afterStaging = await mockPg('outbox_messages').where({ commitment_id: commitmentId }).first();
+      await links.runOne(mockPg, afterStaging, { now, send: successfulSend, buildLink: stubBuildLink, render: stubRender });
+      const sent = await mockPg('outbox_messages').where({ commitment_id: commitmentId }).first();
+      expect(sent.status).toBe('sent');
+    });
+
+    test('a floor promise is rechecked fresh immediately before dispatch — a stale available_at cannot slip a still-future promise out early', async () => {
+      // Simulates the commitment's due_at moving OUT after this row was
+      // already staged (a human edit, a reopened generation): available_at
+      // still says "due now," but the commitment's own due_at is later.
+      // runOne's own recheck — not staging's one-time computation — is what
+      // has to catch this.
+      const dueAt = new Date('2030-01-08T14:00:00Z');
+      const beforeDue = new Date('2030-01-07T14:00:00Z');
+      const afterDue = new Date('2030-01-08T15:00:00Z');
+      const commitmentId = await seedPromise({ quote: 'I will text you the reschedule link tomorrow morning.', dueAt });
+
+      const staged = await links.stagePromises(mockPg);
+      expect(staged).toBe(1);
+      // Force the row to look immediately due, as if it had been staged
+      // before due_at was ever set.
+      await mockPg('outbox_messages').where({ commitment_id: commitmentId }).update({ available_at: beforeDue });
+      const staleRow = await mockPg('outbox_messages').where({ commitment_id: commitmentId }).first();
+
+      const sendSpy = jest.fn(successfulSend);
+      await links.runOne(mockPg, staleRow, { now: beforeDue, send: sendSpy, buildLink: stubBuildLink, render: stubRender });
+      expect(sendSpy).not.toHaveBeenCalled();
+      const held = await mockPg('outbox_messages').where({ commitment_id: commitmentId }).first();
+      expect(held.status).toBe('pending');
+      // The recheck corrects available_at back to the real floor.
+      expect(new Date(held.available_at).getTime()).toBe(dueAt.getTime());
+
+      await links.runOne(mockPg, held, { now: afterDue, send: sendSpy, buildLink: stubBuildLink, render: stubRender });
+      expect(sendSpy).toHaveBeenCalledTimes(1);
+      const sent = await mockPg('outbox_messages').where({ commitment_id: commitmentId }).first();
+      expect(sent.status).toBe('sent');
+    });
+  });
 });

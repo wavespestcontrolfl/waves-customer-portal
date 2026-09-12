@@ -44,6 +44,65 @@ const DELIVERY_UNCERTAIN_KEY = 'delivery_outcome_uncertain';
 function deliveryUncertainPatch(conn, value) {
   return conn.raw("COALESCE(payload, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ [DELIVERY_UNCERTAIN_KEY]: value })]);
 }
+
+// A stated delivery time is one of two English shapes, and they cut the
+// opposite way on whether an early send keeps the promise:
+//   - a REQUESTED time ("I'll text you the link tomorrow morning", "this
+//     evening", "on Monday") means the customer was told not to expect it
+//     any sooner — sending early breaks the very promise being kept;
+//   - a DEADLINE ("by Friday", "before the weekend", "within a couple of
+//     days") only bounds how LATE the send may be — sending earlier still
+//     keeps it.
+// call-commitments.js does not persist this distinction: toRow only keeps
+// the model's literal wording (due_text) in the row's description, and
+// only when due_at was NOT pinned — a STATED due_at (due_basis 'stated')
+// carries no record of which shape produced it. Properly fixing that needs
+// a schema/extractor change beyond this file (a persisted due_type
+// alongside due_basis, populated at extraction time) — see the follow-up
+// note on isPromisedFloor below. What IS already persisted verbatim is the
+// grounding evidence quote the promise was extracted from, so the deadline
+// shape is read back out of THAT text instead: a quote that names its own
+// upper bound in so many words is a deadline, and anything else that
+// carries a due_at is treated as the customer's own requested time — err
+// toward sending later, never earlier, the same call-booking-precedence
+// principle already ruled for the agent's spoken word (codex #4293 P1).
+const DEADLINE_PHRASING_RE = /\b(?:by|before|within|no later than|prior to)\b/i;
+function isDeadlinePromise(commitment) {
+  const quotes = (commitment?.evidence || [])
+    .filter((e) => e?.speaker === 'agent')
+    .map((e) => String(e?.quote || ''))
+    .join(' \n ');
+  return DEADLINE_PHRASING_RE.test(quotes);
+}
+
+// FOLLOW-UP NEEDED: this infers the floor/deadline shape from free-text
+// evidence as a stand-in for a real schema field, because the extractor
+// (call-commitments.js) throws the literal wording away the moment due_at
+// is stated (see toRow's due_text comment). The durable fix is a persisted
+// due_type ('floor' | 'deadline') set by the model at extraction time,
+// alongside due_basis, so no downstream reader has to re-derive it from
+// prose. Until that lands, a stated due_at with no evidence quote naming a
+// deadline is treated as a floor — conservative in the direction of
+// sending later, never earlier.
+function isPromisedFloor(commitment) {
+  return Boolean(commitment?.due_at) && !isDeadlinePromise(commitment);
+}
+
+// The instant before which a floor promise may not be sent, or null when
+// there is none to honour (no stated due_at, a deadline rather than a
+// floor, or a floor already in the past). Callers recompute this fresh
+// from the commitment's CURRENT due_at/evidence every time — at staging
+// AND again immediately before every dispatch attempt (holdBeforeSend) —
+// rather than trusting whatever staging computed once, so a commitment
+// edited to a later due_at after staging cannot slip out on the row's
+// original available_at.
+function promisedFloorAt(commitment, now) {
+  if (!isPromisedFloor(commitment)) return null;
+  const due = new Date(commitment.due_at);
+  if (Number.isNaN(due.getTime()) || due.getTime() <= now.getTime()) return null;
+  return due;
+}
+
 const sendContext = new AsyncLocalStorage();
 function mode() {
   const value = String(process.env.GATE_RESCHEDULE_LINK_ON_PROMISE || '').toLowerCase();
@@ -1067,7 +1126,7 @@ async function stagePromises(conn) {
         AND COALESCE(o.commitment_generation, -1) < COALESCE(cc.processing_generation, 0)
         AND (o.payload->>'${DELIVERY_UNCERTAIN_KEY}') = 'true'
     )`)
-    .select('cc.id', 'cc.call_log_id', 'cc.created_at', 'cc.processing_generation', 'cl.customer_id').limit(200);
+    .select('cc.id', 'cc.call_log_id', 'cc.created_at', 'cc.processing_generation', 'cc.due_at', 'cc.evidence', 'cl.customer_id').limit(200);
   // commitment_created_at rides along on the outbox row itself so runOne can
   // judge pre-activation without a second call_commitments query per row —
   // the exact check the r8 activation boundary needs to run before anything
@@ -1076,7 +1135,16 @@ async function stagePromises(conn) {
   // earlier one staged for the same commitment_id — see the composite
   // (commitment_id, commitment_generation) uniqueness in migration
   // 20260911000030_outbox_messages_commitment_generation.js.
+  const stagedAt = new Date();
   for (const row of rows) {
+    // A requested delivery time is honoured from the very first row this
+    // promise ever gets: available_at starts at the floor instead of now,
+    // so the ordinary due-now sweep query never even selects the row
+    // before its promised time (codex #4293 P1). holdBeforeSend rechecks
+    // this same floor fresh on every pass in case the commitment's due_at
+    // moves out further after this row is staged.
+    const commitment = require('./call-commitments').normalizeRow(row);
+    const floor = promisedFloorAt(commitment, stagedAt);
     // The unattempted counterpart to the uncertain-attempt hold above: an
     // older-generation row that never got past claimForDispatch (still
     // 'pending'/'shadow') is not uncertain — it never reached the provider
@@ -1089,7 +1157,7 @@ async function stagePromises(conn) {
       .update({ status: 'cancelled', last_error: 'superseded_generation', updated_at: new Date() });
     await conn('outbox_messages').insert({ channel: 'sms', status: mode() === 'shadow' ? 'shadow' : 'pending',
       payload: { kind: KIND, commitment_created_at: row.created_at }, commitment_id: row.id, commitment_generation: row.processing_generation ?? 0,
-      related_call_log_id: row.call_log_id, related_customer_id: row.customer_id, available_at: new Date() })
+      related_call_log_id: row.call_log_id, related_customer_id: row.customer_id, available_at: floor || stagedAt })
       // The index this must match (migration 20260911000030) is PARTIAL —
       // WHERE commitment_id IS NOT NULL, to keep it off the many ordinary
       // outbox rows with no commitment at all. Postgres accepts an ON
@@ -1461,6 +1529,19 @@ async function holdBeforeSend(conn, row, context, planned, now) {
   }
   if (row.payload.visit_snapshot && !sameVisitSnapshot(row.payload.visit_snapshot, planned)) {
     await parkReview(conn, row, 'appointment_changed');
+    return true;
+  }
+  // A requested delivery time is a floor, rechecked here fresh against the
+  // commitment's CURRENT due_at on every single pass — this call sits
+  // directly ahead of runOne's own call into dispatch(), so this is the
+  // recheck "immediately before dispatch" — not only the available_at
+  // staging computed once. A commitment whose due_at moved out further
+  // after this row was staged (a human edit, a reopened generation) must
+  // not be able to slip out on a stale available_at (codex #4293 P1).
+  const floor = promisedFloorAt(context.commitment, now);
+  if (floor) {
+    await conn('outbox_messages').where({ id: row.id }).whereIn('status', ['pending', 'shadow'])
+      .update({ related_scheduled_service_id: visit.id, payload: plan, available_at: floor, updated_at: now });
     return true;
   }
   if (mode() === 'shadow') {
@@ -1926,4 +2007,4 @@ async function reconcileUsedLinks(conn, now = new Date()) {
   return reconcileRows(conn, rows);
 }
 
-module.exports = { mode, selectDiscussedVisit, snapshot, stagePromises, matchingSend, claimForDispatch, runOne, sweep, withSendLock, resolveUsedLink, reconcileUsedLinks, recordLiveActivation, settleParkedPromiseCard, contextFor, fulfilPromise, markLinkUsed, renewPromiseOnOfficeVerdict, retireAttemptsOnLedgerVerdict, humanStateBlocksPromise };
+module.exports = { mode, selectDiscussedVisit, snapshot, stagePromises, matchingSend, claimForDispatch, runOne, sweep, withSendLock, resolveUsedLink, reconcileUsedLinks, recordLiveActivation, settleParkedPromiseCard, contextFor, fulfilPromise, markLinkUsed, renewPromiseOnOfficeVerdict, retireAttemptsOnLedgerVerdict, humanStateBlocksPromise, isDeadlinePromise, isPromisedFloor, promisedFloorAt };

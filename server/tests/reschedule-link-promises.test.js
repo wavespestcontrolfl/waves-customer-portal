@@ -1839,3 +1839,59 @@ test('the commitment gate and explicit shadow/true modes are required', () => {
     gates.callCommitments = priorCommitments;
   }
 });
+
+// codex #4293 P1: a requested delivery time ("tomorrow morning", "this
+// evening", "on Monday") is a floor customers were told not to expect the
+// text before; a deadline ("by Friday", "before the weekend", "within a
+// couple of days") only bounds how LATE it may go. The extractor persists
+// both shapes identically (due_at + due_basis 'stated', see toRow), so the
+// distinction is read back out of the grounding evidence quote instead —
+// these pin the exact wording examples the finding names, independent of
+// any database round trip.
+describe('a stated due_at is a floor unless its own evidence names a deadline (codex #4293 P1)', () => {
+  const dueAt = new Date('2030-01-08T14:00:00Z');
+  const commitmentWith = (quote) => ({ due_at: dueAt.toISOString(), evidence: [{ quote, speaker: 'agent' }] });
+
+  test.each([
+    "I'll text you the link tomorrow morning.",
+    "I'll send that over this evening.",
+    "I'll get you that link on Monday.",
+  ])('a requested time (%s) is a floor', (quote) => {
+    expect(links.isPromisedFloor(commitmentWith(quote))).toBe(true);
+  });
+
+  test.each([
+    "I'll get that to you by Friday.",
+    "I'll send it before the weekend.",
+    "I'll have that over within a couple of days.",
+  ])('a deadline (%s) is NOT a floor', (quote) => {
+    expect(links.isPromisedFloor(commitmentWith(quote))).toBe(false);
+  });
+
+  test('no stated due_at is never a floor, regardless of wording', () => {
+    expect(links.isPromisedFloor({ due_at: null, evidence: [{ quote: 'tomorrow morning', speaker: 'agent' }] })).toBe(false);
+  });
+
+  test('a due_at with no evidence at all defaults to a floor — ambiguous errs toward sending later', () => {
+    expect(links.isPromisedFloor({ due_at: dueAt.toISOString(), evidence: [] })).toBe(true);
+  });
+
+  test('only the AGENT\'s own words are read for deadline phrasing — a caller line saying "by Friday" does not turn the agent\'s floor into a deadline', () => {
+    const commitment = { due_at: dueAt.toISOString(), evidence: [
+      { quote: "I'll text you the link tomorrow morning.", speaker: 'agent' },
+      { quote: 'Can you get that to me by Friday?', speaker: 'caller' },
+    ] };
+    expect(links.isPromisedFloor(commitment)).toBe(true);
+  });
+
+  test('promisedFloorAt is null once the floor has already passed, and equals due_at while it is still ahead', () => {
+    const commitment = commitmentWith("I'll text you the link tomorrow morning.");
+    expect(links.promisedFloorAt(commitment, new Date('2030-01-07T14:00:00Z'))).toEqual(dueAt);
+    expect(links.promisedFloorAt(commitment, new Date('2030-01-09T00:00:00Z'))).toBeNull();
+  });
+
+  test('promisedFloorAt is null for a deadline even while it is still ahead of now', () => {
+    const commitment = commitmentWith("I'll get that to you by Friday.");
+    expect(links.promisedFloorAt(commitment, new Date('2030-01-07T14:00:00Z'))).toBeNull();
+  });
+});
