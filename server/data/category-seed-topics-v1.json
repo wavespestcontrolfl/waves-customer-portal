@@ -239,7 +239,7 @@
       "schema_types": [
         "Article"
       ],
-      "thesis": "Doveweed hides in plain sight because it looks like St. Augustine until it has taken over — it germinates late, thrives in the summer wet season, and is one of the toughest summer-annual weeds in SWFL turf. Do not call it a broadleaf: UF/IFAS describes doveweed (Murdannia nudiflora) as an aggressive summer annual turfgrass weed.",
+      "thesis": "Doveweed hides in plain sight because it looks like St. Augustine until it has taken over — it germinates late, thrives in the summer wet season, and is one of the toughest summer-annual weeds in SWFL turf. Describe its classification only in the terms the cited UF/IFAS page uses, and do not assert a broadleaf-versus-monocot correction of your own.",
       "outline": [
         "Why you didn't notice it until August: late germination and a grass-like look (per UF/IFAS)",
         "ID cues: rubbery shiny leaves, creeping stems that root at the nodes, purple bloom",
@@ -280,7 +280,7 @@
         "Article",
         "FAQPage"
       ],
-      "thesis": "Many of the chronic lawn problems we see start at the mower — height, frequency, and blade condition matter as much to St. Augustine health as any product does. Do not quantify the share; no source supports a figure.",
+      "thesis": "Mowing is the lawn practice homeowners control most directly and get wrong most often: height, frequency, and blade condition all affect St. Augustine health, and the cited UF/IFAS mowing guidance is the basis for every number in this post. Make no comparison between mowing and any product, and make no claim about how often we see a problem.",
       "outline": [
         "Title carries the count (7); ~60-word quick answer naming all seven mistakes up front",
         "1. Mowing below the recommended height for St. Augustine (state UF/IFAS's current recommended range, verified)",
@@ -784,7 +784,7 @@
       "schema_types": [
         "Article"
       ],
-      "thesis": "October and November are when SWFL lawns can actually be rebuilt — summer's pest, fungus, and rain stress is over, the fertilizer window is open, and warm soil keeps St. Augustine growing while the weather stops fighting you.",
+      "thesis": "October and November are when SWFL lawns can actually be rebuilt — the summer pattern of pest, fungus, and rain stress changes as the season turns (it does not simply end; large patch is the fall watch item), the fertilizer window is open, and warm soil keeps St. Augustine growing while the weather stops fighting you.",
       "outline": [
         "Why fall beats spring in SWFL: warm soil, lower summer-disease pressure (large patch is the fall watch item — do not imply fall is disease-free), open fertilizer window, gentler sun",
         "Week-by-week: assess damage → feed for roots → plug/patch bare areas → pre-emergent for winter weeds",
@@ -1109,7 +1109,7 @@
       "action": "new_supporting_blog",
       "slug": "/lawn-care/winter-ryegrass-overseeding-north-port-fl/",
       "city": "North Port",
-      "working_title": "Why Winter Rye Overseeding Usually Backfires on North Port St. Augustine Lawns",
+      "working_title": "What UF/IFAS Says About Overseeding North Port St. Augustine Lawns With Winter Rye",
       "primary_kw": "overseeding st augustine winter",
       "secondary_kws": [
         "winter rye grass florida",
