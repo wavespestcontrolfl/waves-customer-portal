@@ -133,6 +133,18 @@ html[data-glass-theme] [data-gt="eyebrow"] {
   color: var(--ts) !important;
   text-transform: uppercase;
 }
+/* Numbers read on the same scale as the headings they sit under (owner ruling
+   C4, DECISIONS 2026-09-11). Pages had authored 17, 19, 22, 24, 28, 34, 50 and
+   64px metrics against a role that set weight and figures but never a size.
+   The sizes below are the type scale already in this sheet — h3 20, h2 26,
+   h1 32/40 — so a metric never introduces a step that no heading uses.
+   The BASE role deliberately stays size-neutral. A default here would be
+   `!important` over every caller that has not migrated yet, and the legacy
+   estimate walker already tags prices `data-gt="metric"`: the fallback
+   one-time price would drop 34 → 26 and the recurring price would lose its
+   responsive 24–40 clamp the moment this shipped. Moving those callers onto
+   `data-gt-size` is R4; until then an untagged metric renders as it does on
+   main. */
 html[data-glass-theme] [data-gt="metric"] {
   font-weight: 700 !important;
   letter-spacing: -0.035em !important;
@@ -140,6 +152,10 @@ html[data-glass-theme] [data-gt="metric"] {
   font-variant-numeric: tabular-nums !important;
   color: var(--brand) !important;
 }
+html[data-glass-theme] [data-gt="metric"][data-gt-size="sm"] { font-size: 20px !important; }
+html[data-glass-theme] [data-gt="metric"][data-gt-size="md"] { font-size: 26px !important; }
+html[data-glass-theme] [data-gt="metric"][data-gt-size="lg"] { font-size: 32px !important; }
+html[data-glass-theme] [data-gt="metric"][data-gt-size="xl"] { font-size: 40px !important; }
 html[data-glass-theme] [data-gt="fine"] {
   font-size: 14px !important; /* 14px floor (was 12; 11.5 before the 2026-07-06 pass) */
   line-height: 1.45 !important;
@@ -350,8 +366,11 @@ html[data-glass-theme] [data-glass="modal"] {
 html[data-glass-theme] [data-glass-scrim] {
   background: radial-gradient(circle at center, rgba(255, 255, 255, 0.08), transparent 45%),
     rgba(4, 57, 94, 0.38) !important;
-  backdrop-filter: blur(8px);
-  -webkit-backdrop-filter: blur(8px);
+  /* The background above is `!important` and the blur was not, so a page that
+     authored its own scrim kept the sheet's colour and lost its material
+     (G-08). A scrim is one material or the other, never half of each. */
+  backdrop-filter: blur(8px) !important;
+  -webkit-backdrop-filter: blur(8px) !important;
 }
 
 
@@ -458,14 +477,28 @@ html[data-glass-theme] [data-glass-pill] { border-radius: 999px !important; }
    circle 50%), tagged or inline: the multi-service selector on /book, the
    carousel arrows, switches and close buttons keep their geometry. */
 html[data-glass-theme] button:not([data-glass-pill]):not([style*="border-radius: 999"]):not([style*="border-radius: 50%"]), html[data-glass-theme] a[data-glass-accent]:not([data-glass-pill]):not([style*="border-radius: 999"]):not([style*="border-radius: 50%"]), html[data-glass-theme] input, html[data-glass-theme] select, html[data-glass-theme] textarea { border-radius: 10px !important; }
+/* r11 control floor (owner ruling C3, DECISIONS 2026-09-11): 48 is the
+   document primary, 44 is the floor for everything interactive.
+   The floors keep `!important`, because a floor a page can undercut is not a
+   floor — `PayPageV2`'s gold Zelle and Copy chips author an inline 40 and are
+   held at 44 by exactly this rule. What went wrong before (G-03) was that 44
+   was the ONLY tier, so `BrandButton`'s authored 48 lost to it and every
+   primary CTA on glass rendered 44. The document primary now has its own tier
+   in the sheet rather than being authored inline and overridden here.
+   The separate 40px chip minimum is retired: it was the only interactive
+   surface allowed under the touch floor, and it forced the `.pill-chip`
+   special case that used to sit below to exist at all (codex #3983 r3 — rows
+   without a selected pill sat 4px short and jumped when the selection moved).
+   One floor for chips and CTAs alike makes that exception unnecessary. */
 html[data-glass-theme] :is(button, a)[data-glass-accent] { min-height: 44px !important; }
-html[data-glass-theme] :is(button, a)[data-glass="chip"] { min-height: 40px !important; }
-/* Pill pickers (PillSelector + the Watering Days loop) keep one 44px row
-   height in BOTH states — the generic 40px chip minimum would otherwise make
-   rows without a selected pill 4px shorter and jump when the selection moves
-   (codex #3983 r3). */
-html[data-glass-theme] .pill-chip[data-glass="chip"] { min-height: 44px !important; }
-html[data-glass-theme] .service-report-v1 .cross-sell-card h2, html[data-glass-theme] .service-report-v1 .review-request-card h2 { font-size: 20px !important; }
+html[data-glass-theme] :is(button, a)[data-glass="chip"] { min-height: 44px !important; }
+/* `.btn-primary` is listed because the older shared `components/Button.jsx`
+   primitive still renders the primary action on /book, RatePage and
+   ReviewPage. It passes `data-glass-accent` without the size tag, so the 44px
+   accent rule above — being `!important` — beat its own non-important 48px
+   minimum and left those document actions at 44 despite C3. */
+html[data-glass-theme] :is(button, a)[data-glass-size="primary"],
+html[data-glass-theme] :is(button, a)[data-glass-accent].btn-primary { min-height: 48px !important; }
 /* Placeholders read as hints, never as entered values (owner 2026-09-06,
    customer feedback): italic, slate-500 (#64748B, 4.8:1 on white — WCAG AA for
    14px text; a lighter grey fell to 2.6:1). This is the
@@ -479,7 +512,7 @@ html[data-glass-theme] input::placeholder, html[data-glass-theme] textarea::plac
 html[data-glass-theme] [data-glass="card"], html[data-glass-theme] [data-glass=""] {
   background: linear-gradient(135deg, rgba(255, 255, 255, 0.3), rgba(255, 255, 255, 0.08)), rgba(244, 239, 224, 0.36) !important;
 }
-html[data-glass-theme] .sr-cell, html[data-glass-theme] .applied-product-card, html[data-glass-theme] .sr-shell .sr-grid-3, html[data-glass-theme] .waves-receipt-page [data-glass-clear] {
+html[data-glass-theme] .sr-cell, html[data-glass-theme] .applied-product-card, html[data-glass-theme] .sr-shell .sr-grid-3, html[data-glass-theme] .waves-print-root [data-glass-clear] {
   background: linear-gradient(135deg, rgba(255, 255, 255, 0.38), rgba(255, 255, 255, 0.15)), rgba(244, 239, 224, 0.36) !important;
   border: 1px solid rgba(255, 255, 255, 0.62) !important;
   border-radius: 10px !important;
@@ -608,7 +641,25 @@ html[data-glass-theme] .sr-shell .report-action-bar { margin-bottom: 0 !importan
   html[data-glass-theme] [data-glass],
   html[data-glass-theme] [data-glass="soft"],
   html[data-glass-theme] [data-glass="chip"],
-  html[data-glass-theme] [data-glass-accent] {
+  html[data-glass-theme] [data-glass-accent],
+  /* The estimate page builds its cards from `.gc-*` classes rather than the
+     `data-glass` attributes, so forced colours left it rendering glass over
+     the user's own palette (G-10). Enumerated rather than `[class*="gc-"]`:
+     that substring match also catches text and layout helpers
+     (`.gc-proof-item`, `.gc-gr-name`, `.gc-phone-cam`), and giving each of
+     those a Canvas background and a border turns the page into nested boxes.
+     These are the `.gc-*` rules that actually paint a translucent or blurred
+     material — grep `glass-components.css` for backdrop-filter / rgba
+     backgrounds if the set changes. */
+  html[data-glass-theme] .gc-freq-btn,
+  html[data-glass-theme] .gc-mbb,
+  html[data-glass-theme] .gc-mbb-btn,
+  html[data-glass-theme] .gc-proof,
+  html[data-glass-theme] .gc-scarcity,
+  html[data-glass-theme] .gc-section-cta,
+  html[data-glass-theme] .gc-slot-priority,
+  html[data-glass-theme] .gc-slot-rain,
+  html[data-glass-theme] .gc-tech-chip {
     background: Canvas !important;
     color: CanvasText !important;
     border: 1px solid CanvasText !important;
@@ -619,7 +670,11 @@ html[data-glass-theme] .sr-shell .report-action-bar { margin-bottom: 0 !importan
   html[data-glass-theme] [data-glass]::before,
   html[data-glass-theme] [data-glass]::after,
   .glass-scene-orbs,
-  .glass-scene-grain {
+  .glass-scene-grain,
+  /* Decoration, not a surface: an absolutely positioned `inset: -30px` radial
+     glow behind the phone mockups. Flattening it to Canvas would draw a
+     bordered ellipse around them; it hides, like the scene orbs above. */
+  html[data-glass-theme] .gc-av-glow {
     display: none !important;
   }
 }

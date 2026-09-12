@@ -10,11 +10,8 @@ import { useState } from 'react';
 import {
   Area,
   AreaChart,
-  Bar,
-  BarChart,
   CartesianGrid,
   Cell,
-  Legend,
   Line,
   LineChart,
   Pie,
@@ -26,7 +23,7 @@ import {
   XAxis,
   YAxis,
 } from 'recharts';
-import { Card, CardBody, CardHeader, CardTitle, cn } from '../ui';
+import { Badge, Button, Card, CardBody, CardHeader, CardTitle, UiSurface, cn } from '../ui';
 
 // ─── Palette ──────────────────────────────────────────────────────
 //
@@ -84,18 +81,21 @@ export function fmtInt(n) {
 
 // ─── Chart-card wrapper ───────────────────────────────────────────
 
+// ChartCard is the density surface for the chart kit: every shared control
+// inside a card renders at the documented comfortable density rather than
+// inheriting `legacy` from an unmigrated page root.
 export function ChartCard({ title, sub, action, children, className }) {
   return (
-    <Card className={cn('max-md:border-0 max-md:shadow-sm max-md:rounded-xl', className)}>
+    <UiSurface as={Card} density="comfortable" className={className}>
       <CardHeader className="flex items-start justify-between gap-3 flex-wrap">
         <div>
           <CardTitle>{title}</CardTitle>
-          {sub && <div className="text-12 text-ink-secondary mt-1">{sub}</div>}
+          {sub && <div className="mt-1 text-ui-caption text-ink-secondary">{sub}</div>}
         </div>
         {action}
       </CardHeader>
       <CardBody>{children}</CardBody>
-    </Card>
+    </UiSurface>
   );
 }
 
@@ -106,7 +106,7 @@ const TOOLTIP_STYLE = {
   border: '0.5px solid #E4E4E7',
   borderRadius: 6,
   color: '#18181B',
-  fontSize: 12,
+  fontSize: 14,
   padding: '6px 10px',
 };
 
@@ -121,15 +121,15 @@ const SPARKLINE_INITIAL_DIMENSION = { width: 88, height: 28 };
 export function KpiSparklineTile({ label, value, sub, delta, deltaSuffix, alert, series }) {
   const data = (series || []).map((v, i) => ({ i, v: Number(v) || 0 }));
   return (
-    <Card className="max-md:border-0 max-md:shadow-sm max-md:rounded-xl max-md:min-h-[128px]">
+    <Card className="max-md:min-h-[128px]">
       <CardBody className="p-4 max-md:p-4">
-        <div className="u-label text-ink-secondary max-md:text-11 max-md:font-medium max-md:tracking-label max-md:uppercase max-md:text-zinc-600">
+        <div className="text-14 font-medium text-ink-secondary">
           {label}
         </div>
         <div className="flex items-end justify-between gap-3 mt-2 max-md:block">
           <div
             className={cn(
-              'u-nums text-28 font-medium tracking-tight leading-none max-md:text-[28px] max-md:font-bold',
+              'u-nums text-28 font-medium tracking-tight leading-none',
               alert ? 'text-alert-fg' : 'text-zinc-900'
             )}
           >
@@ -166,7 +166,7 @@ export function KpiSparklineTile({ label, value, sub, delta, deltaSuffix, alert,
         {delta != null && (
           <div
             className={cn(
-              'mt-2 text-12 font-medium max-md:text-11',
+              'mt-2 text-ui-caption font-medium',
               delta < 0 ? 'text-alert-fg' : 'text-ink-secondary'
             )}
           >
@@ -174,7 +174,7 @@ export function KpiSparklineTile({ label, value, sub, delta, deltaSuffix, alert,
           </div>
         )}
         {sub && delta == null && (
-          <div className="mt-2 text-12 max-md:text-11 text-ink-secondary">{sub}</div>
+          <div className="mt-2 text-ui-caption text-ink-secondary">{sub}</div>
         )}
       </CardBody>
     </Card>
@@ -252,7 +252,10 @@ export function KpiRing({ value, max = 100, target = null, lowerIsBetter = false
   const v = value == null || value === '' ? NaN : Number(value);
   const present = Number.isFinite(v);
   const frac = present && max > 0 ? Math.max(0, Math.min(1, v / max)) : 0;
-  const size = 58;
+  // Long labels (CSAT's "10.0/10") widen the ring rather than shrinking the
+  // text below the 14px floor: the 58px ring's ~46px opening only fits four
+  // characters at 14px/500.
+  const size = String(display ?? '').length > 4 ? 72 : 58;
   const stroke = 6;
   const r = (size - stroke) / 2;
   const c = 2 * Math.PI * r;
@@ -277,7 +280,7 @@ export function KpiRing({ value, max = 100, target = null, lowerIsBetter = false
         textAnchor="middle"
         dominantBaseline="central"
         fill={color === CHART_SUCCESS || color === CHART_ALERT ? color : present ? '#18181B' : CHART_PRIOR}
-        style={{ fontSize: String(display ?? '').length > 4 ? 11 : 13, fontWeight: 500 }}
+        style={{ fontSize: 14, fontWeight: 500 }}
       >
         {display}
       </text>
@@ -351,12 +354,12 @@ export function RevenueTrendArea({ current = [], prior = [], height = 240 }) {
           <CartesianGrid strokeDasharray="3 3" stroke={CHART_GRID} vertical={false} />
           <XAxis
             dataKey="day"
-            tick={{ fill: CHART_TICK, fontSize: 10 }}
+            tick={{ fill: CHART_TICK, fontSize: 14 }}
             tickLine={false}
             axisLine={{ stroke: CHART_GRID }}
           />
           <YAxis
-            tick={{ fill: CHART_TICK, fontSize: 10 }}
+            tick={{ fill: CHART_TICK, fontSize: 14 }}
             tickFormatter={fmtMoneyCompact}
             tickLine={false}
             axisLine={false}
@@ -421,12 +424,12 @@ export function ReviewTrendChart({ trend = [], height = 240 }) {
           <CartesianGrid strokeDasharray="3 3" stroke={CHART_GRID} vertical={false} />
           <XAxis
             dataKey="month"
-            tick={{ fill: CHART_TICK, fontSize: 10 }}
+            tick={{ fill: CHART_TICK, fontSize: 14 }}
             tickLine={false}
             axisLine={{ stroke: CHART_GRID }}
           />
           <YAxis
-            tick={{ fill: CHART_TICK, fontSize: 10 }}
+            tick={{ fill: CHART_TICK, fontSize: 14 }}
             allowDecimals={false}
             tickLine={false}
             axisLine={false}
@@ -496,7 +499,7 @@ export function ServiceMixDonut({ mix = [], height = 220 }) {
           </PieChart>
         </ResponsiveContainer>
       </div>
-      <ul className="text-12 space-y-2">
+      <ul className="space-y-2 text-ui-caption">
         {data.map((d) => (
           <li key={d.name} className="flex items-center gap-2 min-w-0">
             <span className="w-2 h-2 rounded-full flex-shrink-0" style={{ background: d.fill }} />
@@ -531,8 +534,8 @@ export function EstimateFunnel({ funnel = {}, rates = {}, totalAcceptedValue, by
     <div className="space-y-3">
       {stages.map((s) => (
         <div key={s.label}>
-          <div className="flex items-baseline justify-between text-12 mb-1">
-            <span className={cn('u-label', s.dim ? 'text-ink-tertiary' : 'text-ink-secondary')}>{s.label}</span>
+          <div className="mb-1 flex items-baseline justify-between text-ui-caption">
+            <span className={cn('font-medium', s.dim ? 'text-ink-tertiary' : 'text-ink-secondary')}>{s.label}</span>
             <span className="u-nums">
               <span className={cn('font-medium', s.dim ? 'text-ink-tertiary' : 'text-zinc-900')}>{s.count}</span>
               <span className="text-ink-tertiary ml-2">{s.pct}%</span>
@@ -551,7 +554,7 @@ export function EstimateFunnel({ funnel = {}, rates = {}, totalAcceptedValue, by
       ))}
       {totalAcceptedValue != null && (
         <div className="pt-3 mt-3 flex items-baseline justify-between">
-          <span className="u-label text-ink-secondary">Accepted value</span>
+          <span className="ui-label text-ink-secondary">Accepted value</span>
           <span className="u-nums text-18 font-medium">{fmtMoney(totalAcceptedValue)}</span>
         </div>
       )}
@@ -561,10 +564,10 @@ export function EstimateFunnel({ funnel = {}, rates = {}, totalAcceptedValue, by
           dashboard triage exception. */}
       {Array.isArray(byService) && byService.length > 0 && (
         <div className="pt-3 mt-3 border-t border-hairline border-zinc-100">
-          <div className="u-label text-ink-secondary mb-2">What leads asked for</div>
+          <div className="ui-label mb-2 text-ink-secondary">What leads asked for</div>
           <div className="space-y-1.5">
             {byService.map((s) => (
-              <div key={s.service} className="flex items-baseline justify-between gap-3 text-12">
+              <div key={s.service} className="flex items-baseline justify-between gap-3 text-ui-caption">
                 <span className="text-ink-primary truncate">{s.service}</span>
                 <span className="u-nums whitespace-nowrap text-ink-tertiary">
                   {fmtInt(s.sent)} sent
@@ -603,12 +606,12 @@ export function AgingBar({ aging = {}, totalOutstanding, totalOverdue, height = 
       <div className="flex items-baseline justify-between mb-3">
         <div>
           <div className="u-nums text-22 font-medium tracking-tight">{fmtMoney(totalOutstanding ?? total)}</div>
-          <div className="text-12 text-ink-secondary mt-1">Outstanding</div>
+          <div className="mt-1 text-ui-caption text-ink-secondary">Outstanding</div>
         </div>
         {totalOverdue != null && totalOverdue > 0 && (
           <div className="text-right">
             <div className="u-nums text-14 font-medium text-alert-fg">{fmtMoney(totalOverdue)}</div>
-            <div className="text-11 text-ink-secondary mt-1">Overdue</div>
+            <div className="mt-1 text-ui-caption text-ink-secondary">Overdue</div>
           </div>
         )}
       </div>
@@ -617,10 +620,10 @@ export function AgingBar({ aging = {}, totalOutstanding, totalOverdue, height = 
           <div key={b.key} style={{ width: `${(b.amount / total) * 100}%`, background: b.fill }} />
         ))}
       </div>
-      <ul className="grid grid-cols-3 md:grid-cols-6 gap-3 mt-4 text-12">
+      <ul className="mt-4 grid grid-cols-3 gap-3 text-ui-caption md:grid-cols-6">
         {buckets.map((b) => (
           <li key={b.key} className="min-w-0">
-            <div className="flex items-center gap-2 u-label text-ink-secondary">
+            <div className="ui-label flex items-center gap-2 text-ink-secondary">
               <span className="w-2 h-2 rounded-full flex-shrink-0" style={{ background: b.fill }} />
               <span className="truncate">{b.label}</span>
             </div>
@@ -648,7 +651,7 @@ export function RevenueByCity({ cities = [], total = 0 }) {
   return (
     <ul className="space-y-2.5">
       {cities.map((c) => (
-        <li key={c.city} className="flex items-center gap-3 text-12">
+        <li key={c.city} className="flex items-center gap-3 text-ui-caption">
           <span className="w-24 flex-shrink-0 truncate text-ink-secondary" title={c.city}>
             {c.city}
           </span>
@@ -707,7 +710,7 @@ export function CompletionGauge({ completed = 0, total = 0, remaining = 0, cance
           </RadialBarChart>
         </ResponsiveContainer>
       </div>
-      <ul className="text-12 space-y-2">
+      <ul className="space-y-2 text-ui-caption">
         <Row label="Completed" value={completed} fill={CHART_SUCCESS} />
         <Row label="Remaining" value={remaining} fill={CHART_PRIMARY} />
         <Row label="Cancelled" value={cancelled} fill={CHART_PRIOR} dim />
@@ -716,7 +719,7 @@ export function CompletionGauge({ completed = 0, total = 0, remaining = 0, cance
             Scheduled today on a day with a missed visit. */}
         {noShow > 0 ? <Row label="No-show" value={noShow} fill={CHART_PRIOR} dim /> : null}
         <li className="pt-2 mt-2 flex items-baseline justify-between">
-          <span className="u-label text-ink-secondary">Scheduled today</span>
+          <span className="ui-label text-ink-secondary">Scheduled today</span>
           <span className="u-nums font-medium">{total}</span>
         </li>
       </ul>
@@ -840,8 +843,8 @@ export function CaptureGauge({ captureRate, captured = 0, missed = 0, wonCount =
           </>
         )}
         {/* Endpoint labels: 0% (left) and 100% (right). */}
-        <text x={cx - radius} y={cy + 16} textAnchor="middle" fill={CHART_TICK} style={{ fontSize: 10, fontWeight: 400 }}>0%</text>
-        <text x={cx + radius} y={cy + 16} textAnchor="middle" fill={CHART_TICK} style={{ fontSize: 10, fontWeight: 400 }}>100%</text>
+        <text x={cx - radius} y={cy + 16} textAnchor="middle" fill={CHART_TICK} style={{ fontSize: 14, fontWeight: 400 }}>0%</text>
+        <text x={cx + radius} y={cy + 16} textAnchor="middle" fill={CHART_TICK} style={{ fontSize: 14, fontWeight: 400 }}>100%</text>
       </svg>
 
       {/* Big rate %, toned by zone, with the captured/missed money + counts. */}
@@ -852,11 +855,11 @@ export function CaptureGauge({ captureRate, captured = 0, missed = 0, wonCount =
         >
           {present ? `${Math.round(rate)}%` : '—'}
         </div>
-        <div className="u-label text-ink-tertiary mt-1">Capture rate</div>
-        <div className="text-13 text-ink-secondary mt-2 u-nums">
+        <div className="ui-label mt-1 text-ink-secondary">Capture rate</div>
+        <div className="mt-2 u-nums text-ui-caption text-ink-secondary">
           {fmtMoneyCompact(captured)} captured · {fmtMoneyCompact(missed)} missed
         </div>
-        <div className="text-12 text-ink-tertiary mt-1 u-nums">
+        <div className="mt-1 u-nums text-ui-caption text-ink-secondary">
           {fmtInt(wonCount)} won / {fmtInt(lostCount)} lost
         </div>
       </div>
@@ -879,9 +882,9 @@ export function MrrTrendChart({ trend = [], height = 220 }) {
       >
         <LineChart data={trend} margin={{ top: 8, right: 8, bottom: 0, left: -12 }}>
           <CartesianGrid strokeDasharray="3 3" stroke={CHART_GRID} vertical={false} />
-          <XAxis dataKey="month" tick={{ fill: CHART_TICK, fontSize: 10 }} tickLine={false} axisLine={{ stroke: CHART_GRID }} />
+          <XAxis dataKey="month" tick={{ fill: CHART_TICK, fontSize: 14 }} tickLine={false} axisLine={{ stroke: CHART_GRID }} />
           <YAxis
-            tick={{ fill: CHART_TICK, fontSize: 10 }}
+            tick={{ fill: CHART_TICK, fontSize: 14 }}
             tickFormatter={fmtMoneyCompact}
             tickLine={false}
             axisLine={false}
@@ -917,7 +920,7 @@ export function LeadSourceBars({ bySource = [], maxRows = 8 }) {
     <ul className="space-y-2">
       {top.map((r) => (
         <li key={r.source}>
-          <div className="flex items-baseline justify-between text-12 mb-1">
+          <div className="mb-1 flex items-baseline justify-between text-ui-caption">
             <span className="text-zinc-900 truncate pr-2">{r.source}</span>
             <span className="u-nums">
               <span className="font-medium">{r.count}</span>
@@ -961,25 +964,23 @@ export function RetentionCohortGrid({ cohorts = [], maxOffset = 0 }) {
     };
   };
   return (
-    <div>
+    <UiSurface density="comfortable">
       {mrrAvailable && (
         <div className="flex items-center gap-2 mb-3">
           <div className="inline-flex border-hairline border-zinc-300 rounded-sm overflow-hidden">
             {[["customers", "Customers"], ["mrr", "Net MRR"]].map(([k, lbl]) => (
-              <button
+              <Button
                 key={k}
                 type="button"
                 onClick={() => setWeight(k)}
-                className={cn(
-                  "px-2.5 h-7 text-12",
-                  weight === k ? "bg-zinc-900 text-white" : "text-ink-secondary hover:bg-zinc-50",
-                )}
+                variant={weight === k ? "primary" : "secondary"}
+                className="px-3"
               >
                 {lbl}
-              </button>
+              </Button>
             ))}
           </div>
-          <span className="text-11 text-ink-tertiary">
+          <span className="text-ui-caption text-ink-secondary">
             {byMrr ? "net revenue retained — >100% = expansion" : "share of customers retained"}
           </span>
         </div>
@@ -987,28 +988,28 @@ export function RetentionCohortGrid({ cohorts = [], maxOffset = 0 }) {
       <div className="overflow-x-auto">
         <div className="min-w-max">
           <div className="flex items-center gap-1 mb-1">
-            <div className="w-16 shrink-0 u-label text-ink-tertiary">Cohort</div>
-            <div className="w-10 shrink-0 u-label text-ink-tertiary text-right">N</div>
+            <div className="ui-label w-20 shrink-0 text-ink-secondary">Cohort</div>
+            <div className="ui-label w-12 shrink-0 text-right text-ink-secondary">N</div>
             {cols.map((m) => (
-              <div key={m} className="w-10 shrink-0 u-label text-ink-tertiary text-center">{`M${m}`}</div>
+              <div key={m} className="ui-label w-12 shrink-0 text-center text-ink-secondary">{`M${m}`}</div>
             ))}
           </div>
           {cohorts.map((c) => {
             const series = byMrr ? c.retentionMrr : c.retention;
             return (
               <div key={c.month} className="flex items-center gap-1 mb-1">
-                <div className="w-16 shrink-0 text-12 text-ink-secondary truncate">{c.label}</div>
-                <div className="w-10 shrink-0 text-12 u-nums text-ink-tertiary text-right">{fmtInt(c.size)}</div>
+                <div className="w-20 shrink-0 truncate text-ui-caption text-ink-secondary">{c.label}</div>
+                <div className="w-12 shrink-0 text-right u-nums text-ui-caption text-ink-secondary">{fmtInt(c.size)}</div>
                 {cols.map((m) => {
                   const pct = series?.[m];
-                  if (pct == null) return <div key={m} className="w-10 h-7 shrink-0" />;
+                  if (pct == null) return <div key={m} className="h-11 w-12 shrink-0" />;
                   const title = byMrr
                     ? `${c.label} · month ${m}: ${pct}% net revenue retention vs ${fmtMoney(c.baseMrr)} at signup${pct > 100 ? ' (expansion)' : ''}`
                     : `${c.label} · month ${m}: ${pct}% of ${c.size} retained`;
                   return (
                     <div
                       key={m}
-                      className="w-10 h-7 shrink-0 rounded-xs flex items-center justify-center text-11 u-nums"
+                      className="flex h-11 w-12 shrink-0 items-center justify-center rounded-xs text-ui-caption u-nums"
                       style={cellStyle(pct)}
                       title={title}
                     >
@@ -1021,7 +1022,7 @@ export function RetentionCohortGrid({ cohorts = [], maxOffset = 0 }) {
           })}
         </div>
       </div>
-    </div>
+    </UiSurface>
   );
 }
 
@@ -1042,7 +1043,7 @@ export function TechLeaderboardBars({ leaderboard = [] }) {
         const unassigned = !!t.unassigned;
         return (
           <li key={t.techId || `unassigned-${i}`}>
-            <div className="flex items-baseline justify-between text-12 mb-1">
+            <div className="mb-1 flex items-baseline justify-between text-ui-caption">
               <span className={cn('text-zinc-900', unassigned && 'text-alert-fg')}>
                 <span className="text-ink-tertiary u-nums mr-2">{i + 1}.</span>
                 <span className="font-medium">{t.name}</span>
@@ -1059,7 +1060,7 @@ export function TechLeaderboardBars({ leaderboard = [] }) {
                 }}
               />
             </div>
-            <div className="flex justify-between mt-1 text-11 text-ink-secondary u-nums">
+            <div className="mt-1 flex justify-between text-ui-caption text-ink-secondary u-nums">
               <span>RPMH {fmtMoney(t.rpmh)}</span>
               <span className={cn(t.margin < 40 && 'text-alert-fg font-medium')}>{t.margin}% margin</span>
               <span className={cn(t.callbackRate >= 6 && 'text-alert-fg font-medium')}>{t.callbackRate}% callbacks</span>
@@ -1075,7 +1076,7 @@ export function TechLeaderboardBars({ leaderboard = [] }) {
 
 export function EmptyState({ children }) {
   return (
-    <div className="py-10 text-center text-13 text-ink-secondary">{children}</div>
+    <div className="py-10 text-center text-ui-body text-ink-secondary">{children}</div>
   );
 }
 
@@ -1103,9 +1104,9 @@ function fmtPaybackShort(m) {
 // Visible small-sample pill — the warning IS the badge, never a tooltip.
 function LowSamplePill({ n }) {
   return (
-    <span className="inline-block text-11 px-1.5 py-0.5 rounded-sm border border-amber-300 bg-amber-50 text-amber-700 whitespace-nowrap shrink-0">
+    <Badge tone="warn" className="shrink-0 whitespace-nowrap">
       Low sample · n={fmtInt(n)}
-    </span>
+    </Badge>
   );
 }
 
@@ -1121,15 +1122,15 @@ export function CapitalAllocationCard({ data }) {
   const blendedLow = hasBlend && h.blendedConfidence === 'low';
   const blendedPayback = fmtPaybackShort(h.blendedPaybackMonths);
   return (
-    <div>
+    <UiSurface density="comfortable">
       <div className="flex items-end justify-between gap-3">
         <div style={{ opacity: blendedLow ? 0.55 : 1 }}>
-          <div className="u-label text-ink-tertiary">Blended LTV : CAC</div>
+          <div className="ui-label text-ink-secondary">Blended LTV : CAC</div>
           <div className="u-nums text-28 font-medium tracking-tight leading-none" style={{ color: blendedColor }}>
             {fmtRatio(h.blendedLtvCac)}
           </div>
           {hasBlend && (
-            <div className="text-11 text-ink-tertiary mt-1">
+            <div className="mt-1 text-ui-caption text-ink-secondary">
               {[
                 h.blendedCac != null ? `CAC ${fmtMoney(h.blendedCac)}` : null,
                 blendedPayback,
@@ -1140,25 +1141,25 @@ export function CapitalAllocationCard({ data }) {
         </div>
         <div className="flex flex-col items-end gap-1 shrink-0">
           {h.blendedBandLabel && (
-            <span
-              className="text-11 px-2 py-0.5 rounded-sm"
+            <Badge
+              tone="neutral"
               style={{ color: blendedColor || '#71717a', border: `1px solid ${blendedColor || '#d4d4d8'}` }}
             >
               {h.blendedBandLabel}
-            </span>
+            </Badge>
           )}
           {blendedLow && <LowSamplePill n={h.blendedCustomers} />}
         </div>
       </div>
 
       {h.topOpportunity && (
-        <div className="text-12 mt-2" style={{ color: CAP_TONE_COLOR.good }}>
+        <div className="mt-2 text-ui-caption" style={{ color: CAP_TONE_COLOR.good }}>
           ▲ <span className="font-medium">{h.topOpportunity.source}</span> {fmtRatio(h.topOpportunity.ltvCac)} —{' '}
           {h.topOpportunity.band === 'pour_in' ? 'pour cash in' : 'scale up'}
         </div>
       )}
       {h.biggestLeak && (
-        <div className="text-12 mt-1" style={{ color: CAP_TONE_COLOR.bad }}>
+        <div className="mt-1 text-ui-caption" style={{ color: CAP_TONE_COLOR.bad }}>
           ▼ <span className="font-medium">{h.biggestLeak.source}</span> {fmtRatio(h.biggestLeak.ltvCac)} — losing money, cut or fix
         </div>
       )}
@@ -1180,16 +1181,16 @@ export function CapitalAllocationCard({ data }) {
             <div key={c.sourceKey} className="py-2 first:pt-0 last:pb-0">
               <div className="flex items-center gap-2" style={{ opacity: low ? 0.7 : 1 }}>
                 <span className="w-2 h-2 rounded-full shrink-0" style={{ background: color }} />
-                <span className="text-13 text-ink-primary truncate">{c.source}</span>
+                <span className="truncate text-ui-body text-ink-primary">{c.source}</span>
                 {low && c.ltvCac != null && <LowSamplePill n={c.customers} />}
                 <span
-                  className="ml-auto u-nums text-13 font-medium shrink-0"
+                  className="ml-auto shrink-0 u-nums text-ui-body font-medium"
                   style={{ color: c.ltvCac == null ? undefined : color }}
                 >
                   {fmtRatio(c.ltvCac)}
                 </span>
               </div>
-              <div className="text-11 text-ink-tertiary mt-0.5 pl-4 truncate" style={{ opacity: low ? 0.85 : 1 }}>
+              <div className="mt-0.5 truncate pl-4 text-ui-caption text-ink-secondary" style={{ opacity: low ? 0.85 : 1 }}>
                 {c.bandLabel} · {detail}
               </div>
             </div>
@@ -1197,12 +1198,12 @@ export function CapitalAllocationCard({ data }) {
         })}
       </div>
 
-      <div className="mt-3 pt-2 border-t border-hairline border-zinc-100 text-11 text-ink-tertiary">
+      <div className="mt-3 border-t border-hairline border-zinc-100 pt-2 text-ui-caption text-ink-secondary">
         LTV = 12-month lifetime <span className="font-medium">gross profit</span> (not revenue). CAC = all-in
         marketing cost — ad spend + retainers + referral rewards (no separate sales
         payroll exists to include). ≥30:1 pour cash in; under 3:1 fix or cut.
       </div>
-    </div>
+    </UiSurface>
   );
 }
 
@@ -1218,18 +1219,7 @@ export function CapitalAllocationCard({ data }) {
 function ChannelChip({ channel }) {
   if (!channel) return null;
   const isPaid = channel === 'paid';
-  return (
-    <span
-      className={cn(
-        'inline-block px-1.5 py-0.5 text-[10px] uppercase tracking-label rounded-xs border-hairline',
-        isPaid
-          ? 'bg-zinc-900 text-white border-zinc-900'
-          : 'bg-surface-sunken text-ink-secondary border-zinc-200'
-      )}
-    >
-      {channel}
-    </span>
-  );
+  return <Badge tone={isPaid ? 'strong' : 'neutral'}>{channel}</Badge>;
 }
 
 // ─── Marketing Attribution scorecard ──────────────────────────────
@@ -1363,11 +1353,11 @@ function AttributionFunnel({ calls, leads, booked, leadsToBookedPct, revenue }) 
   ];
   return (
     <div className="pb-3 mb-3 border-b border-hairline border-zinc-200">
-      <div className="u-label text-ink-tertiary mb-2">Funnel</div>
+      <div className="ui-label mb-2 text-ink-secondary">Funnel</div>
       <div className="flex flex-col gap-1.5">
         {stages.map((s) => (
           <div key={s.label} className="flex items-center gap-3">
-            <span className="u-label text-ink-tertiary w-12 shrink-0">{s.label}</span>
+            <span className="ui-label w-16 shrink-0 text-ink-secondary">{s.label}</span>
             <div className="relative flex-1 h-5 rounded-xs overflow-hidden bg-surface-sunken" style={{ background: CHART_GRID }}>
               <div
                 className="absolute inset-y-0 left-0 rounded-xs"
@@ -1376,17 +1366,17 @@ function AttributionFunnel({ calls, leads, booked, leadsToBookedPct, revenue }) 
             </div>
             {/* value sits OUTSIDE the bar so it stays legible even when the bar
                 is floored to its 6% minimum (e.g. the small Booked stage). */}
-            <span className="u-nums text-12 text-ink-primary w-10 shrink-0 text-right">
+            <span className="w-12 shrink-0 text-right u-nums text-ui-caption text-ink-primary">
               {s.value == null ? '—' : fmtInt(s.value)}
             </span>
-            <span className="u-nums text-11 text-ink-tertiary w-12 shrink-0 text-right whitespace-nowrap">
+            <span className="w-14 shrink-0 whitespace-nowrap text-right u-nums text-ui-caption text-ink-secondary">
               {s.pct != null ? `↓ ${s.pct}%` : ''}
             </span>
           </div>
         ))}
       </div>
       <div className="flex items-baseline gap-2 mt-2 pl-[3.75rem]">
-        <span className="u-label text-ink-tertiary">Won rev</span>
+        <span className="ui-label text-ink-secondary">Won rev</span>
         <span className="u-nums text-16 font-medium text-ink-primary">
           {revenue == null ? '—' : fmtMoneyCompact(revenue)}
         </span>
@@ -1400,7 +1390,7 @@ function ChannelMixBar({ channels }) {
   const total = channels.reduce((s, c) => s + (c.leads || 0), 0) || 1;
   return (
     <div className="mt-4 pt-3 border-t border-hairline border-zinc-200">
-      <div className="u-label text-ink-tertiary mb-2">Channel mix · first contact</div>
+      <div className="ui-label mb-2 text-ink-secondary">Channel mix · first contact</div>
       <div className="flex h-2 rounded-sm overflow-hidden mb-2 bg-surface-sunken">
         {channels.map((c, i) => (
           <div
@@ -1412,7 +1402,7 @@ function ChannelMixBar({ channels }) {
       </div>
       <div className="flex flex-wrap gap-x-4 gap-y-1">
         {channels.map((c, i) => (
-          <span key={c.channel} className="flex items-center gap-1.5 text-12">
+          <span key={c.channel} className="flex items-center gap-1.5 text-ui-caption">
             <span
               className="w-2 h-2 rounded-full flex-shrink-0"
               style={{ background: CHART_SERIES[i % CHART_SERIES.length] }}
@@ -1494,7 +1484,7 @@ export function AttributionScorecard({ callsBySource, leadsBySource, channelMix,
       : {};
 
   return (
-    <div>
+    <UiSurface density="comfortable">
       <AttributionFunnel
         calls={callsBySource?.total_inbound_calls ?? null}
         leads={leadsBySource?.total_leads ?? null}
@@ -1503,7 +1493,7 @@ export function AttributionScorecard({ callsBySource, leadsBySource, channelMix,
         revenue={leadsBySource?.total_revenue ?? null}
       />
 
-      <div className="u-label text-ink-tertiary mb-2">Where leads &amp; revenue come from</div>
+      <div className="ui-label mb-2 text-ink-secondary">Where leads &amp; revenue come from</div>
       <div className="flex flex-col gap-2">
         {topLeadRows.map((r, i) => {
           const won = r.booked > 0;
@@ -1522,7 +1512,7 @@ export function AttributionScorecard({ callsBySource, leadsBySource, channelMix,
                   the bar keeps a min width and the revenue column is content-sized
                   on mobile (sm:w-24 aligns desktop) so neither collapses or clips. */}
               <div className="flex items-center gap-1.5 min-w-0 w-28 sm:w-40 shrink-0">
-                <span className="truncate text-12 text-ink-secondary">{r.name}</span>
+                <span className="truncate text-ui-caption text-ink-secondary">{r.name}</span>
                 <ChannelChip channel={r.channel} />
               </div>
               <div className="relative flex-1 min-w-[16px] h-4 rounded-xs overflow-hidden bg-surface-sunken">
@@ -1531,8 +1521,8 @@ export function AttributionScorecard({ callsBySource, leadsBySource, channelMix,
                   style={{ width: `${(r.leads / maxLeads) * 100}%`, background: CHART_PRIMARY }}
                 />
               </div>
-              <span className="u-nums text-12 text-ink-primary w-7 shrink-0 text-right">{fmtInt(r.leads)}</span>
-              <span className="u-nums text-12 shrink-0 text-right whitespace-nowrap sm:w-24">
+              <span className="w-8 shrink-0 text-right u-nums text-ui-caption text-ink-primary">{fmtInt(r.leads)}</span>
+              <span className="shrink-0 whitespace-nowrap text-right u-nums text-ui-caption sm:w-24">
                 {won ? (
                   <>
                     <span className="font-medium" style={{ color: CHART_SUCCESS }}>★{r.booked}</span>
@@ -1550,34 +1540,36 @@ export function AttributionScorecard({ callsBySource, leadsBySource, channelMix,
       </div>
 
       {rows.length > shownCount && (
-        <button
+        <Button
           type="button"
           onClick={() => setShowAll((v) => !v)}
-          className="mt-3 text-12 text-ink-tertiary hover:text-ink-secondary"
+          variant="ghost"
+          className="mt-3"
         >
           {showAll
             ? 'Hide source detail ▴'
             : `▸ ${rows.length - shownCount} more sources · Show all`}
-        </button>
+        </Button>
       )}
 
       {showAll && (
         <div className="overflow-x-auto mt-3 pt-3 border-t border-hairline border-zinc-200">
           <div className="min-w-[600px]">
             <div className={cn('grid gap-x-2 pb-2 text-ink-tertiary', SCORECARD_GRID)}>
-              <button type="button" onClick={() => onSort('name')} className="u-label text-left hover:text-ink-secondary">
+              <Button type="button" onClick={() => onSort('name')} variant="ghost" className="justify-start px-1 text-left">
                 Source{arrow('name')}
-              </button>
+              </Button>
               {SCORECARD_COLUMNS.map((c) => (
-                <button
+                <Button
                   key={c.key}
                   type="button"
                   onClick={() => onSort(c.key)}
-                  className="u-label text-right hover:text-ink-secondary whitespace-nowrap"
+                  variant="ghost"
+                  className="justify-end whitespace-nowrap px-1 text-right"
                 >
                   {c.label}
                   {arrow(c.key)}
-                </button>
+                </Button>
               ))}
             </div>
             {sorted.map((r, i) => {
@@ -1590,7 +1582,7 @@ export function AttributionScorecard({ callsBySource, leadsBySource, channelMix,
                   key={`${r.name}-${i}`}
                   {...drillProps(r)}
                   className={cn(
-                    'relative grid gap-x-2 items-center py-1.5 text-12 border-t border-hairline border-zinc-100',
+                    'relative grid gap-x-2 items-center py-2 text-ui-caption border-t border-hairline border-zinc-100',
                     canDrill(r)
                       && 'cursor-pointer hover:bg-surface-sunken focus:outline-none focus-visible:ring-1 focus-visible:ring-zinc-400',
                     SCORECARD_GRID,
@@ -1604,7 +1596,7 @@ export function AttributionScorecard({ callsBySource, leadsBySource, channelMix,
                     <span className="truncate">{r.name}</span>
                     <ChannelChip channel={r.channel} />
                     {unmapped && (
-                      <span className="text-[10px] uppercase tracking-label text-alert-fg shrink-0">unmapped</span>
+                      <Badge tone="alert" className="shrink-0">unmapped</Badge>
                     )}
                   </div>
                   <span className="relative text-right u-nums">{cell(r.hasCalls, r.calls)}</span>
@@ -1636,7 +1628,6 @@ export function AttributionScorecard({ callsBySource, leadsBySource, channelMix,
       )}
 
       <ChannelMixBar channels={channelMix?.channels || []} />
-    </div>
+    </UiSurface>
   );
 }
-

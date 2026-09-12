@@ -13,7 +13,7 @@ import {
   X,
 } from "lucide-react";
 import AdminCommandHeader from "../../components/admin/AdminCommandHeader";
-import { Badge, Button, Card, CardBody, cn } from "../../components/ui";
+import { Dialog, DialogHeader, DialogTitle, DialogBody, DialogFooter, ActionFeedback, Badge, Button, Card, CardBody, Checkbox, Field, Input, Select, Textarea, UiSurface, cn } from "../../components/ui";
 import { adminFetch as rawAdminFetch } from "../../lib/adminFetch";
 
 const CATEGORY_TABS = [
@@ -176,55 +176,11 @@ function versionFromApi(version, template) {
   };
 }
 
-function Field({ label, children }) {
-  return (
-    <label className="grid gap-1 text-11 font-medium uppercase tracking-label text-ink-secondary">
-      {label}
-      {children}
-    </label>
-  );
-}
-
-function TextInput(props) {
-  return (
-    <input
-      {...props}
-      className={cn(
-        "h-9 rounded-xs border-hairline border-zinc-300 bg-white px-2 text-13 text-zinc-900 normal-case tracking-normal u-focus-ring",
-        props.className,
-      )}
-    />
-  );
-}
-
-function SelectInput(props) {
-  return (
-    <select
-      {...props}
-      className={cn(
-        "h-9 rounded-xs border-hairline border-zinc-300 bg-white px-2 text-13 text-zinc-900 normal-case tracking-normal u-focus-ring",
-        props.className,
-      )}
-    />
-  );
-}
-
-function TextArea(props) {
-  return (
-    <textarea
-      {...props}
-      className={cn(
-        "min-h-28 rounded-xs border-hairline border-zinc-300 bg-white px-2 py-2 text-13 text-zinc-900 normal-case tracking-normal leading-5 u-focus-ring",
-        props.className,
-      )}
-    />
-  );
-}
-
 // `embedded` (under ContractsPage): the hub owns the header card, so this
 // page hands its category tabs + actions up via `onSecondaryNav` instead of
 // rendering its own header. Standalone rendering is unchanged.
 export default function DocumentTemplatesPage({ embedded = false, onSecondaryNav } = {}) {
+  const [confirmBulkSend, setConfirmBulkSend] = useState(false);
   const [category, setCategory] = useState("all");
   const [templates, setTemplates] = useState([]);
   const [selectedKey, setSelectedKey] = useState("");
@@ -263,10 +219,10 @@ export default function DocumentTemplatesPage({ embedded = false, onSecondaryNav
   // On the single-column mobile layout the editor renders below the template
   // list, so selecting a template or starting a new one updates content that
   // sits off-screen ("nothing happens" from the top of the page). Bring the
-  // editor into view on narrow viewports; on lg+ it's already beside the list.
+  // editor into view on narrow viewports; on xl+ it's already beside the list.
   const focusEditor = useCallback(() => {
     if (typeof window === "undefined") return;
-    if (window.matchMedia?.("(min-width: 1024px)").matches) return;
+    if (window.matchMedia?.("(min-width: 1280px)").matches) return;
     requestAnimationFrame(() => {
       editorRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
     });
@@ -565,8 +521,7 @@ export default function DocumentTemplatesPage({ embedded = false, onSecondaryNav
 
   const sendBulkGuide = async () => {
     if (!bulkEnabled || !bulkPreview || bulkSendableCount <= 0) return;
-    const confirmed = window.confirm(`Send ${templateDraft.name} to ${numberLabel(bulkSendableCount)} customer${bulkSendableCount === 1 ? "" : "s"}?`);
-    if (!confirmed) return;
+    setConfirmBulkSend(false);
     setBulkLoading(true);
     setError("");
     setToast("");
@@ -597,16 +552,17 @@ export default function DocumentTemplatesPage({ embedded = false, onSecondaryNav
       navGridClassName: "grid-cols-2 md:grid-cols-6",
       actions: [
         { label: "Refresh", icon: RefreshCw, variant: "secondary", onClick: () => hubNavRef.current.loadTemplates(), disabled: loading },
-        { label: "New Template", icon: Plus, onClick: () => hubNavRef.current.startNew() },
+        { label: "New template", icon: Plus, onClick: () => hubNavRef.current.startNew() },
       ],
     });
     return () => onSecondaryNav(null);
   }, [embedded, onSecondaryNav, category, loading]);
 
   return (
-    <div className="mx-auto max-w-[1500px]">
+    <UiSurface density="comfortable" className="mx-auto min-w-0 max-w-[1500px] text-ui-body">
       {!embedded && (
       <AdminCommandHeader
+        variant="workspace"
         title="Contract templates"
         icon={FileText}
         sections={CATEGORY_TABS}
@@ -615,31 +571,28 @@ export default function DocumentTemplatesPage({ embedded = false, onSecondaryNav
         navGridClassName="grid-cols-2 md:grid-cols-6"
         actions={[
           { label: "Refresh", icon: RefreshCw, variant: "secondary", onClick: loadTemplates, disabled: loading },
-          { label: "New Template", icon: Plus, onClick: startNew },
+          { label: "New template", icon: Plus, onClick: startNew },
         ]}
       />
       )}
 
       {error && (
-        <div className="mb-3 rounded-sm border-hairline border-red-200 bg-red-50 px-3 py-2 text-12 text-red-900">
-          {error}
-        </div>
+        <ActionFeedback error className="mb-3">{error}</ActionFeedback>
       )}
       {toast && (
-        <div className="mb-3 rounded-sm border-hairline border-emerald-200 bg-emerald-50 px-3 py-2 text-12 text-emerald-950">
-          {toast}
-        </div>
+        <ActionFeedback className="mb-3">{toast}</ActionFeedback>
       )}
 
-      <div className="grid gap-4 lg:grid-cols-[320px_1fr]">
-        <div className="rounded-sm border-hairline border-zinc-200 bg-white overflow-hidden">
+      <div className="grid gap-5 xl:grid-cols-[280px_minmax(0,1fr)]">
+        <Card className="min-w-0 self-start overflow-hidden">
           <div className="border-b-hairline border-zinc-200 px-3 py-2">
-            <div className="u-label text-ink-secondary">Template library</div>
-            <div className="mt-1 text-12 text-zinc-900">{loading ? "Loading" : `${templates.length} template${templates.length === 1 ? "" : "s"}`}</div>
+            <div className="ui-label text-ink-secondary">Template library</div>
+            <div className="mt-1 text-ui-body text-zinc-900">{loading ? "Loading" : `${templates.length} template${templates.length === 1 ? "" : "s"}`}</div>
           </div>
           <div className="divide-y divide-zinc-100">
+            {loading && <ActionFeedback className="p-4">Loading templates…</ActionFeedback>}
             {templates.map((template) => (
-              <button
+              <Button variant="ghost"
                 key={template.templateKey}
                 type="button"
                 onClick={() => {
@@ -648,43 +601,43 @@ export default function DocumentTemplatesPage({ embedded = false, onSecondaryNav
                   focusEditor();
                 }}
                 className={cn(
-                  "w-full appearance-none border-0 px-3 py-3 text-left hover:bg-zinc-50 u-focus-ring",
+                  "h-auto w-full flex-col items-stretch whitespace-normal px-4 py-4 text-left",
                   selectedKey === template.templateKey && !newMode ? "bg-zinc-50" : "bg-white",
                 )}
               >
                 <div className="flex items-start justify-between gap-2">
                   <div className="min-w-0">
-                    <div className="truncate text-13 font-medium text-zinc-900">{template.name}</div>
-                    <div className="mt-1 truncate text-11 text-ink-secondary">{template.templateKey}</div>
+                    <div className="break-words text-ui-body font-medium text-zinc-900">{template.name}</div>
+                    <div className="mt-1 break-words text-ui-body text-ink-secondary">{template.templateKey}</div>
                   </div>
                   <Badge tone={statusTone(template.status)}>{template.status}</Badge>
                 </div>
                 <div className="mt-2 flex flex-wrap gap-1">
-                  <span className="h-5 px-1.5 inline-flex items-center rounded-xs border-hairline border-zinc-200 bg-zinc-50 text-10 uppercase tracking-label text-ink-secondary">
+                  <span className="min-h-7 px-2 inline-flex items-center rounded-xs border-hairline border-zinc-200 bg-zinc-50 text-ui-body  text-ink-secondary">
                     {template.category}
                   </span>
                   {template.requiresSignature && (
-                    <span className="h-5 px-1.5 inline-flex items-center rounded-xs border-hairline border-zinc-200 bg-white text-10 uppercase tracking-label text-zinc-700">
+                    <span className="min-h-7 px-2 inline-flex items-center rounded-xs border-hairline border-zinc-200 bg-white text-ui-body  text-zinc-700">
                       E-sign
                     </span>
                   )}
                 </div>
-              </button>
+              </Button>
             ))}
-            {!templates.length && (
-              <div className="px-3 py-8 text-center text-12 text-ink-secondary">
+            {!loading && !error && !templates.length && (
+              <div className="px-3 py-8 text-center text-ui-body text-ink-secondary">
                 No templates for this filter.
               </div>
             )}
           </div>
-        </div>
+        </Card>
 
-        <div ref={editorRef} className="space-y-4 scroll-mt-4">
+        <div ref={editorRef} className="min-w-0 space-y-5 scroll-mt-4 md:scroll-mt-44">
           <Card>
             <CardBody className="p-4">
               <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
                 <div>
-                  <div className="u-label text-ink-secondary">Template details</div>
+                  <div className="ui-label text-ink-secondary">Template details</div>
                   <div className="mt-1 text-16 font-medium text-zinc-900">
                     {newMode ? "New document template" : templateDraft.name || "Select a template"}
                   </div>
@@ -703,7 +656,7 @@ export default function DocumentTemplatesPage({ embedded = false, onSecondaryNav
 
         <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
                 <Field label="Template key">
-                  <TextInput
+                  <Input
                     value={templateDraft.templateKey || ""}
                     disabled={!newMode}
                     onChange={(event) => updateTemplate("templateKey", event.target.value)}
@@ -711,58 +664,50 @@ export default function DocumentTemplatesPage({ embedded = false, onSecondaryNav
                   />
                 </Field>
                 <Field label="Name">
-                  <TextInput value={templateDraft.name || ""} onChange={(event) => updateTemplate("name", event.target.value)} />
+                  <Input value={templateDraft.name || ""} onChange={(event) => updateTemplate("name", event.target.value)} />
                 </Field>
                 <Field label="Category">
-                  <SelectInput value={templateDraft.category || "general"} onChange={(event) => updateTemplate("category", event.target.value)}>
+                  <Select value={templateDraft.category || "general"} onChange={(event) => updateTemplate("category", event.target.value)}>
                     <option value="service_agreement">Service agreement</option>
                     <option value="wdo">WDO</option>
                     <option value="prep_form">Prep form</option>
                     <option value="notice">Notice</option>
                     <option value="marketing">Marketing</option>
                     <option value="general">General</option>
-                  </SelectInput>
+                  </Select>
                 </Field>
                 <Field label="Status">
-                  <SelectInput value={templateDraft.status || "active"} onChange={(event) => updateTemplate("status", event.target.value)}>
+                  <Select value={templateDraft.status || "active"} onChange={(event) => updateTemplate("status", event.target.value)}>
                     <option value="active">Active</option>
                     <option value="draft">Draft</option>
                     <option value="paused">Paused</option>
                     <option value="archived">Archived</option>
-                  </SelectInput>
+                  </Select>
                 </Field>
               </div>
 
               <div className="mt-3 grid gap-3 md:grid-cols-[1fr_1fr_180px]">
                 <Field label="Description">
-                  <TextInput value={templateDraft.description || ""} onChange={(event) => updateTemplate("description", event.target.value)} />
+                  <Input value={templateDraft.description || ""} onChange={(event) => updateTemplate("description", event.target.value)} />
                 </Field>
                 <Field label="Tags">
-                  <TextInput value={csvFromArray(templateDraft.tags)} onChange={(event) => updateTemplate("tags", arrayFromCsv(event.target.value))} />
+                  <Input value={csvFromArray(templateDraft.tags)} onChange={(event) => updateTemplate("tags", arrayFromCsv(event.target.value))} />
                 </Field>
-                <label className="mt-5 inline-flex h-9 items-center gap-2 text-12 font-medium text-zinc-900">
-                  <input
-                    type="checkbox"
-                    checked={templateDraft.requiresSignature !== false}
-                    onChange={(event) => updateTemplate("requiresSignature", event.target.checked)}
-                    className="h-4 w-4 rounded-xs border-zinc-300 text-zinc-900 u-focus-ring"
-                  />
-                  Requires e-sign
-                </label>
+                <Checkbox label="Requires e-sign" checked={templateDraft.requiresSignature !== false} onChange={(event) => updateTemplate("requiresSignature", event.target.checked)} />
               </div>
               <div className="mt-3 grid gap-3 md:grid-cols-3">
                 <Field label="Default delivery">
-                  <SelectInput
+                  <Select
                     value={templateDraft.defaultDeliveryChannel || "email"}
                     onChange={(event) => updateTemplate("defaultDeliveryChannel", event.target.value)}
                   >
                     <option value="email">Email</option>
                     <option value="sms">SMS</option>
                     <option value="both">Email + SMS</option>
-                  </SelectInput>
+                  </Select>
                 </Field>
                 <Field label="Expires after days">
-                  <TextInput
+                  <Input
                     type="number"
                     min="1"
                     max="14"
@@ -771,7 +716,7 @@ export default function DocumentTemplatesPage({ embedded = false, onSecondaryNav
                   />
                 </Field>
                 <Field label="Reminder days">
-                  <TextInput
+                  <Input
                     value={csvFromArray(templateDraft.reminderScheduleDays || [])}
                     onChange={(event) => updateTemplate("reminderScheduleDays", arrayFromCsv(event.target.value))}
                     placeholder="1, 3, -1"
@@ -781,13 +726,13 @@ export default function DocumentTemplatesPage({ embedded = false, onSecondaryNav
             </CardBody>
           </Card>
 
-          <div className="grid gap-4 xl:grid-cols-[1.1fr_0.9fr]">
+          <div className="grid gap-5 2xl:grid-cols-[minmax(0,1.1fr)_minmax(0,0.9fr)]">
             <Card>
               <CardBody className="p-4">
                 <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
                   <div>
-                    <div className="u-label text-ink-secondary">Active version</div>
-                    <div className="mt-1 text-13 text-zinc-900">
+                    <div className="ui-label text-ink-secondary">Active version</div>
+                    <div className="mt-1 text-ui-body text-zinc-900">
                       {activeVersion ? `Version ${activeVersion.versionNumber}` : newMode ? "Draft version" : "No active version"}
                     </div>
                   </div>
@@ -799,17 +744,17 @@ export default function DocumentTemplatesPage({ embedded = false, onSecondaryNav
 
                 <div className="grid gap-3">
                   <Field label="Document title">
-                    <TextInput value={versionDraft.title || ""} onChange={(event) => updateVersion("title", event.target.value)} />
+                    <Input value={versionDraft.title || ""} onChange={(event) => updateVersion("title", event.target.value)} />
                   </Field>
                   <Field label="Body">
-                    <TextArea
+                    <Textarea
                       value={versionDraft.body || ""}
                       onChange={(event) => updateVersion("body", event.target.value)}
-                      className="min-h-[340px] font-mono text-12"
+                      className="min-h-[340px]"
                     />
                   </Field>
                   <Field label="Signer disclosure">
-                    <TextArea
+                    <Textarea
                       value={versionDraft.signerDisclosure || ""}
                       onChange={(event) => updateVersion("signerDisclosure", event.target.value)}
                       className="min-h-20"
@@ -818,14 +763,14 @@ export default function DocumentTemplatesPage({ embedded = false, onSecondaryNav
                 </div>
 
                 <div className="mt-3 rounded-xs border-hairline border-zinc-200 bg-zinc-50 p-2">
-                  <div className="u-label text-ink-secondary">Merge fields</div>
+                  <div className="ui-label text-ink-secondary">Merge fields</div>
                   <div className="mt-2 flex flex-wrap gap-1.5">
                     {variableList.map((variable) => (
-                      <span key={variable} className="h-6 px-2 inline-flex items-center rounded-xs border-hairline border-zinc-200 bg-white text-11 text-zinc-800">
+                      <span key={variable} className="min-h-7 px-2 inline-flex items-center rounded-xs border-hairline border-zinc-200 bg-white text-ui-body text-zinc-800">
                         {variable}
                       </span>
                     ))}
-                    {!variableList.length && <span className="text-12 text-ink-secondary">No merge fields.</span>}
+                    {!variableList.length && <span className="text-ui-body text-ink-secondary">No merge fields.</span>}
                   </div>
                 </div>
               </CardBody>
@@ -835,21 +780,21 @@ export default function DocumentTemplatesPage({ embedded = false, onSecondaryNav
               <Card>
                 <CardBody className="p-4">
                   <div className="mb-3">
-                    <div className="u-label text-ink-secondary">Preview context</div>
-                    <div className="mt-1 text-13 text-zinc-900">Rendered output</div>
+                    <div className="ui-label text-ink-secondary">Preview context</div>
+                    <div className="mt-1 text-ui-body text-zinc-900">Rendered output</div>
                   </div>
-                  <TextArea
+                  <Textarea
                     value={previewContext}
                     onChange={(event) => setPreviewContext(event.target.value)}
-                    className="min-h-40 font-mono text-12"
+                    aria-label="Preview context" className="min-h-40"
                   />
                   <div className="mt-3 rounded-xs border-hairline border-zinc-200 bg-zinc-50 p-3">
                     <div className="text-14 font-medium text-zinc-900">{preview?.title || versionDraft.title || "Preview"}</div>
-                    <div className="mt-2 max-h-80 overflow-auto whitespace-pre-line text-12 leading-5 text-zinc-800">
+                    <div className="mt-2 max-h-80 overflow-auto whitespace-pre-line text-ui-body leading-5 text-zinc-800">
                       {preview?.body || "Run preview to render this template."}
                     </div>
                     {(preview?.unresolvedVariables || []).length > 0 && (
-                      <div className="mt-3 rounded-xs border-hairline border-amber-300 bg-amber-50 px-2 py-1.5 text-11 text-amber-950">
+                      <div className="mt-3 rounded-xs border-hairline border-zinc-300 bg-zinc-50 px-2 py-1.5 text-ui-body text-zinc-900">
                         Unresolved: {preview.unresolvedVariables.join(", ")}
                       </div>
                     )}
@@ -859,10 +804,10 @@ export default function DocumentTemplatesPage({ embedded = false, onSecondaryNav
 
               <Card>
                 <CardBody className="p-4">
-                  <div className="mb-3 flex items-center justify-between gap-2">
+                  <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
                     <div>
-                      <div className="u-label text-ink-secondary">Customer link</div>
-                      <div className="mt-1 text-13 text-zinc-900">Create customer document</div>
+                      <div className="ui-label text-ink-secondary">Customer link</div>
+                      <div className="mt-1 text-ui-body text-zinc-900">Create customer document</div>
                     </div>
                     <Button size="sm" onClick={createSigningLink} disabled={saving || newMode || !selectedCustomerId}>
                       <Send size={14} className="mr-1.5" />
@@ -872,7 +817,7 @@ export default function DocumentTemplatesPage({ embedded = false, onSecondaryNav
                   <div className="grid gap-3">
                     <div className="grid gap-2">
                       <Field label="Customer">
-                        <TextInput
+                        <Input
                           value={customerQuery}
                           onChange={(event) => {
                             setCustomerQuery(event.target.value);
@@ -885,15 +830,15 @@ export default function DocumentTemplatesPage({ embedded = false, onSecondaryNav
                       {selectedCustomer && (
                         <div className="flex items-start justify-between gap-2 rounded-xs border-hairline border-zinc-200 bg-zinc-50 px-2 py-2">
                           <div className="min-w-0">
-                            <div className="flex items-center gap-1.5 text-12 font-medium text-zinc-900">
+                            <div className="flex items-center gap-1.5 text-ui-body font-medium text-zinc-900">
                               <UserRound size={14} />
                               <span className="truncate">{customerName(selectedCustomer)}</span>
                             </div>
-                            <div className="mt-0.5 truncate text-11 text-ink-secondary">
+                            <div className="mt-0.5 break-words text-ui-body text-ink-secondary">
                               {[selectedCustomer.address, selectedCustomer.phone, selectedCustomer.email].filter(Boolean).join(" · ")}
                             </div>
                           </div>
-                          <button
+                          <Button variant="ghost"
                             type="button"
                             title="Clear selected customer"
                             aria-label="Clear selected customer"
@@ -902,16 +847,16 @@ export default function DocumentTemplatesPage({ embedded = false, onSecondaryNav
                               setSendCustomerId("");
                               setCustomerQuery("");
                             }}
-                            className="inline-flex h-7 w-7 flex-shrink-0 items-center justify-center rounded-xs border-hairline border-zinc-200 bg-white text-zinc-700 hover:bg-zinc-100 u-focus-ring"
+                            className="shrink-0"
                           >
                             <X size={14} />
-                          </button>
+                          </Button>
                         </div>
                       )}
                       {!selectedCustomer && (customerResults.length > 0 || customerLoading) && (
                         <div className="rounded-xs border-hairline border-zinc-200 bg-white">
                           {customerResults.map((customer) => (
-                            <button
+                            <Button variant="ghost"
                               key={customer.id}
                               type="button"
                               onClick={() => {
@@ -920,53 +865,45 @@ export default function DocumentTemplatesPage({ embedded = false, onSecondaryNav
                                 setCustomerQuery(customerSearchLabel(customer));
                                 setCustomerResults([]);
                               }}
-                              className="flex w-full items-start gap-2 border-b-hairline border-zinc-100 px-2 py-2 text-left last:border-b-0 hover:bg-zinc-50 u-focus-ring"
+                              className="h-auto w-full items-start justify-start whitespace-normal text-left"
                             >
                               <UserRound size={14} className="mt-0.5 flex-shrink-0 text-zinc-600" />
                               <span className="min-w-0">
-                                <span className="block truncate text-12 font-medium text-zinc-900">{customerName(customer)}</span>
-                                <span className="block truncate text-11 text-ink-secondary">
+                                <span className="block break-words text-ui-body font-medium text-zinc-900">{customerName(customer)}</span>
+                                <span className="block break-words text-ui-body text-ink-secondary">
                                   {[customer.address, customer.phone, customer.email].filter(Boolean).join(" · ")}
                                 </span>
                               </span>
-                            </button>
+                            </Button>
                           ))}
                           {customerLoading && (
-                            <div className="px-2 py-2 text-12 text-ink-secondary">Searching customers...</div>
+                            <div className="px-2 py-2 text-ui-body text-ink-secondary">Searching customers...</div>
                           )}
                         </div>
                       )}
                       {!selectedCustomer && customerQuery.trim().length >= 2 && !customerLoading && customerResults.length === 0 && (
-                        <div className="text-12 text-ink-secondary">No matching customers found.</div>
+                        <div className="text-ui-body text-ink-secondary">No matching customers found.</div>
                       )}
                     </div>
                     <Field label="Property address (optional)">
-                      <TextInput
+                      <Input
                         value={sendPropertyAddress}
                         onChange={(event) => setSendPropertyAddress(event.target.value)}
                         placeholder="Overrides the customer's primary address on the document"
                       />
                     </Field>
                     <Field label="Values">
-                      <TextArea value={sendValues} onChange={(event) => setSendValues(event.target.value)} className="min-h-32 font-mono text-12" />
+                      <Textarea value={sendValues} onChange={(event) => setSendValues(event.target.value)} className="min-h-32" />
                     </Field>
-                    <label className="inline-flex items-center gap-2 text-12 font-medium text-zinc-900">
-                      <input
-                        type="checkbox"
-                        checked={sendAllowUnresolved}
-                        onChange={(event) => setSendAllowUnresolved(event.target.checked)}
-                        className="h-4 w-4 rounded-xs border-zinc-300 text-zinc-900 u-focus-ring"
-                      />
-                      Allow unresolved fields
-                    </label>
+                    <Checkbox label="Allow unresolved fields" checked={sendAllowUnresolved} onChange={(event) => setSendAllowUnresolved(event.target.checked)} />
                   </div>
                   {signingUrl && (
                     <div className="mt-3 rounded-xs border-hairline border-zinc-200 bg-zinc-50 p-2">
-                      <div className="mb-2 flex items-center gap-2 text-12 font-medium text-zinc-900">
+                      <div className="mb-2 flex items-center gap-2 text-ui-body font-medium text-zinc-900">
                         <Link2 size={14} />
                         Document link ready
                       </div>
-                      <div className="break-all text-11 leading-5 text-zinc-800">{signingUrl}</div>
+                      <div className="break-all text-ui-body leading-5 text-zinc-800">{signingUrl}</div>
                       <Button size="sm" variant="secondary" className="mt-2" onClick={copySigningUrl}>
                         <Copy size={14} className="mr-1.5" />
                         Copy
@@ -978,17 +915,17 @@ export default function DocumentTemplatesPage({ embedded = false, onSecondaryNav
 
               <Card>
                 <CardBody className="p-4">
-                  <div className="mb-3 flex items-center justify-between gap-2">
+                  <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
                     <div>
-                      <div className="u-label text-ink-secondary">Bulk send guide</div>
-                      <div className="mt-1 text-13 text-zinc-900">Preview audience and send</div>
+                      <div className="ui-label text-ink-secondary">Bulk send guide</div>
+                      <div className="mt-1 text-ui-body text-zinc-900">Preview audience and send</div>
                     </div>
                     <div className="flex flex-wrap gap-2">
                       <Button size="sm" variant="secondary" onClick={runBulkPreview} disabled={!bulkEnabled || bulkLoading}>
                         <Eye size={14} className="mr-1.5" />
                         Preview
                       </Button>
-                      <Button size="sm" onClick={sendBulkGuide} disabled={!bulkEnabled || bulkLoading || !bulkPreview || bulkSendableCount <= 0}>
+                      <Button size="sm" onClick={(event) => { event.currentTarget.focus({ preventScroll: true }); setConfirmBulkSend(true); }} disabled={!bulkEnabled || bulkLoading || !bulkPreview || bulkSendableCount <= 0}>
                         <Send size={14} className="mr-1.5" />
                         Send batch
                       </Button>
@@ -996,14 +933,14 @@ export default function DocumentTemplatesPage({ embedded = false, onSecondaryNav
                   </div>
 
                   {!bulkEnabled ? (
-                    <div className="rounded-xs border-hairline border-zinc-200 bg-zinc-50 px-3 py-2 text-12 text-ink-secondary">
+                    <div className="rounded-xs border-hairline border-zinc-200 bg-zinc-50 px-3 py-2 text-ui-body text-ink-secondary">
                       Select an active marketing or customer-guide template.
                     </div>
                   ) : (
                     <div className="grid gap-3">
                       <div className="grid gap-3 md:grid-cols-2">
                         <Field label="Audience">
-                          <SelectInput
+                          <Select
                             value={bulkAudience}
                             onChange={(event) => {
                               const next = event.target.value;
@@ -1016,10 +953,10 @@ export default function DocumentTemplatesPage({ embedded = false, onSecondaryNav
                             {BULK_AUDIENCES.map((option) => (
                               <option key={option.value} value={option.value}>{option.label}</option>
                             ))}
-                          </SelectInput>
+                          </Select>
                         </Field>
                         <Field label="Guide type">
-                          <SelectInput
+                          <Select
                             value={bulkGuideType}
                             onChange={(event) => {
                               setBulkGuideType(event.target.value);
@@ -1029,10 +966,10 @@ export default function DocumentTemplatesPage({ embedded = false, onSecondaryNav
                             {BULK_GUIDE_TYPES.map((option) => (
                               <option key={option.value} value={option.value}>{option.label}</option>
                             ))}
-                          </SelectInput>
+                          </Select>
                         </Field>
                         <Field label="Delivery">
-                          <SelectInput
+                          <Select
                             value={bulkChannel}
                             onChange={(event) => {
                               setBulkChannel(event.target.value);
@@ -1042,10 +979,10 @@ export default function DocumentTemplatesPage({ embedded = false, onSecondaryNav
                             {BULK_CHANNELS.map((option) => (
                               <option key={option.value} value={option.value}>{option.label}</option>
                             ))}
-                          </SelectInput>
+                          </Select>
                         </Field>
                         <Field label="Batch limit">
-                          <TextInput
+                          <Input
                             type="number"
                             min="1"
                             max="250"
@@ -1057,7 +994,7 @@ export default function DocumentTemplatesPage({ embedded = false, onSecondaryNav
                           />
                         </Field>
                         <Field label="Search">
-                          <TextInput
+                          <Input
                             value={bulkSearch}
                             onChange={(event) => {
                               setBulkSearch(event.target.value);
@@ -1067,7 +1004,7 @@ export default function DocumentTemplatesPage({ embedded = false, onSecondaryNav
                           />
                         </Field>
                         <Field label="City">
-                          <TextInput
+                          <Input
                             value={bulkCity}
                             onChange={(event) => {
                               setBulkCity(event.target.value);
@@ -1077,7 +1014,7 @@ export default function DocumentTemplatesPage({ embedded = false, onSecondaryNav
                           />
                         </Field>
                         <Field label="Days">
-                          <TextInput
+                          <Input
                             type="number"
                             min="1"
                             max="365"
@@ -1089,7 +1026,7 @@ export default function DocumentTemplatesPage({ embedded = false, onSecondaryNav
                           />
                         </Field>
                         <Field label="Skip duplicate days">
-                          <TextInput
+                          <Input
                             type="number"
                             min="0"
                             max="365"
@@ -1106,38 +1043,38 @@ export default function DocumentTemplatesPage({ embedded = false, onSecondaryNav
                         <div className="rounded-xs border-hairline border-zinc-200 bg-zinc-50 p-3">
                           <div className="grid grid-cols-2 gap-2 md:grid-cols-4">
                             <div className="rounded-xs border-hairline border-zinc-200 bg-white px-2 py-2">
-                              <div className="u-label text-ink-secondary">Matched</div>
+                              <div className="ui-label text-ink-secondary">Matched</div>
                               <div className="u-nums mt-1 text-18 font-medium text-zinc-900">{numberLabel(bulkPreview.counts?.matched)}</div>
                             </div>
                             <div className="rounded-xs border-hairline border-zinc-200 bg-white px-2 py-2">
-                              <div className="u-label text-ink-secondary">Sendable</div>
-                              <div className="u-nums mt-1 text-18 font-medium text-emerald-950">{numberLabel(bulkPreview.counts?.sendable)}</div>
+                              <div className="ui-label text-ink-secondary">Sendable</div>
+                              <div className="u-nums mt-1 text-18 font-medium text-zinc-900">{numberLabel(bulkPreview.counts?.sendable)}</div>
                             </div>
                             <div className="rounded-xs border-hairline border-zinc-200 bg-white px-2 py-2">
-                              <div className="u-label text-ink-secondary">Duplicates</div>
-                              <div className="u-nums mt-1 text-18 font-medium text-amber-950">{numberLabel(bulkPreview.counts?.duplicateSkipped)}</div>
+                              <div className="ui-label text-ink-secondary">Duplicates</div>
+                              <div className="u-nums mt-1 text-18 font-medium text-zinc-900">{numberLabel(bulkPreview.counts?.duplicateSkipped)}</div>
                             </div>
                             <div className="rounded-xs border-hairline border-zinc-200 bg-white px-2 py-2">
-                              <div className="u-label text-ink-secondary">Products</div>
+                              <div className="ui-label text-ink-secondary">Products</div>
                               <div className="u-nums mt-1 text-18 font-medium text-zinc-900">{numberLabel(bulkPreview.productGuide?.productCount)}</div>
                             </div>
                           </div>
                           {bulkPreview.counts?.capped && (
-                            <div className="mt-2 rounded-xs border-hairline border-amber-300 bg-amber-50 px-2 py-1.5 text-11 text-amber-950">
+                            <div className="mt-2 rounded-xs border-hairline border-zinc-300 bg-zinc-50 px-2 py-1.5 text-ui-body text-zinc-900">
                               Preview is capped by the batch limit.
                             </div>
                           )}
                           <div className="mt-3 grid gap-2">
                             {(bulkPreview.sampleCustomers || []).slice(0, 6).map((customer) => (
-                              <div key={customer.id} className="flex items-start justify-between gap-2 border-b-hairline border-zinc-200 pb-2 text-12 last:border-b-0 last:pb-0">
+                              <div key={customer.id} className="flex items-start justify-between gap-2 border-b-hairline border-zinc-200 pb-2 text-ui-body last:border-b-0 last:pb-0">
                                 <div className="min-w-0">
                                   <div className="truncate font-medium text-zinc-900">{customer.name}</div>
-                                  <div className="truncate text-11 text-ink-secondary">
+                                  <div className="break-words text-ui-body text-ink-secondary">
                                     {[customer.address, customer.phone, customer.email].filter(Boolean).join(" · ")}
                                   </div>
                                 </div>
                                 {customer.duplicateContractId && (
-                                  <span className="flex-shrink-0 rounded-xs border-hairline border-amber-300 bg-amber-50 px-1.5 py-0.5 text-10 uppercase tracking-label text-amber-950">
+                                  <span className="flex-shrink-0 rounded-xs border-hairline border-zinc-300 bg-zinc-50 px-1.5 py-0.5 text-ui-body  text-zinc-900">
                                     duplicate
                                   </span>
                                 )}
@@ -1148,7 +1085,7 @@ export default function DocumentTemplatesPage({ embedded = false, onSecondaryNav
                       )}
 
                       {bulkResult && (
-                        <div className="rounded-xs border-hairline border-emerald-200 bg-emerald-50 p-3 text-12 text-emerald-950">
+                        <div className="rounded-xs border-hairline border-zinc-200 bg-zinc-50 p-3 text-ui-body text-zinc-900">
                           <div className="font-medium">Batch result</div>
                           <div className="mt-1">
                             Created {numberLabel(bulkResult.summary?.created)} documents, sent {numberLabel(bulkResult.summary?.sentSms)} SMS.
@@ -1168,6 +1105,14 @@ export default function DocumentTemplatesPage({ embedded = false, onSecondaryNav
           </div>
         </div>
       </div>
-    </div>
+      <Dialog open={confirmBulkSend} onClose={() => setConfirmBulkSend(false)} size="sm">
+        <DialogHeader><DialogTitle>Send batch</DialogTitle></DialogHeader>
+        <DialogBody>Send {templateDraft.name} to {numberLabel(bulkSendableCount)} customer{bulkSendableCount === 1 ? "" : "s"}?</DialogBody>
+        <DialogFooter>
+          <Button variant="secondary" onClick={() => setConfirmBulkSend(false)}>Cancel</Button>
+          <Button onClick={sendBulkGuide} disabled={bulkLoading}>Send batch</Button>
+        </DialogFooter>
+      </Dialog>
+    </UiSurface>
   );
 }
