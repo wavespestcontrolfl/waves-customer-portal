@@ -2572,10 +2572,16 @@ const ReviewService = {
         kind: "review",
         entityType: "review_requests",
         entityId: row.id,
+        rethrow: true,
       });
       if (short) frags.push(short);
-    } catch {
-      /* no short URL — the token fragment still reconciles */
+    } catch (shortErr) {
+      // An UNREADABLE short code is not "no short code" (local audit): the
+      // text that went out may have carried one, and searching the long token
+      // alone would find nothing and release an ask the customer already has.
+      // Unknown, so the claim stays standing for a later pass.
+      logger.warn(`[review] short-link lookup failed for stranded ask ${row.id}: ${shortErr.message} — evidence unavailable`);
+      return { unavailable: true };
     }
     frags = frags.filter(Boolean).map((f) => String(f).replace(/^https?:\/\//, ""));
     for (const frag of frags) {
