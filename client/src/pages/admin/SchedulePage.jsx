@@ -44,7 +44,7 @@ import { stackVisitDiscounts, stackablePresets,
   isCustomAmountPreset,
   isCustomPercentagePreset,
 } from "../../lib/discountStack";
-import { useDiscountStacking } from "../../hooks/useDiscountStacking";
+import { useDiscountStackingState, ensureStackingFresh } from "../../hooks/useDiscountStacking";
 import {
   defaultApplicationMethodForLine,
   isPerBasisUnit,
@@ -1318,6 +1318,44 @@ export function reconcileNewPinsWithRegistry({ stationNew, stationPreloads, stat
   return { changed, stationNew: keptNew, stationStatuses: statuses };
 }
 
+// Codex #4405 P1: a percentage/variable line-discount stamp restored from
+// the stored slot (the primary line's server-stamped type/amount, or an
+// add-on's seeded stamp) carries no cap — scheduled_services has no
+// line_discount_max_dollars column, so the cap only lives on the catalog
+// row the stored discount_id names. Mirrors the server's
+// reconstructStoredLineSlot: trust the catalog row's cap in the PREVIEW
+// only when it still confirms the stamp's type (and, for a fixed catalog
+// amount, the stamp's amount) — an edited-since preset must not have a
+// stale/mismatched cap silently merged into an untouched slot. Unverified
+// (or no catalog row yet) leaves the stamp exactly as it was, which is the
+// status quo before this fix, not a new failure mode.
+export function verifiedLineDiscountCap(stamp, catalogRow) {
+  if (!stamp) return null;
+  if (!catalogRow || catalogRow.discount_type !== stamp.discount_type) return stamp;
+  const isVariable = isCustomAmountPreset(catalogRow) || isCustomPercentagePreset(catalogRow);
+  if (!isVariable && Number(catalogRow.amount) !== Number(stamp.amount)) return stamp;
+  return { ...stamp, max_discount_dollars: catalogRow.max_discount_dollars };
+}
+
+// Codex #4405 P1: mirrors stackingSaveBlocked in CreateAppointmentModal for
+// the Edit appointment modal's shape. The appointment-level "Discount"
+// control (pre-existing before this lane) now COMPOUNDS with a line's own
+// discount slot once the gate is truly on — reconstructed server-side from
+// the stored stamp (reconstructStoredLineSlot) even when this session's
+// client math ran with compound: stackingEnabled==false because the probe
+// hadn't resolved. That reconstruction only fires when a line actually
+// carries a discount slot — the primary's seeded/picked one, or an add-on's
+// (freshly picked, or its stored `_origDiscountType`, which the
+// addons-payload builder restates verbatim while stacking reads
+// unconfirmed/off). A visit with no line-level discount anywhere only ever
+// has the one appointment discount either way, so it's unaffected — a plain
+// single-discount save stays byte-identical to main.
+export function editApptStackingSaveBlocked({ known, appointmentDiscountSelected, primaryLineDiscount, lines }) {
+  const lineDiscountInPlay = !!primaryLineDiscount
+    || (Array.isArray(lines) && lines.some((l) => !!l?.lineDiscount || !!l?._origDiscountType));
+  return !known && !!appointmentDiscountSelected && lineDiscountInPlay;
+}
+
 // Accepts "HH:MM" or "HH:MM:SS" (DB rows carry seconds; time inputs don't).
 function timeToMinutes(value) {
   if (typeof value !== "string") return null;
@@ -1628,7 +1666,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
   // Deploy-wide release gate (GATE_DISCOUNT_STACKING), read before any state
   // that consults it. Fails closed, so this is exactly the pre-lane modal
   // until the owner flips it.
-  const stackingEnabled = useDiscountStacking();
+  const { enabled: stackingEnabled, known: stackingKnown, retry: retryStackingProbe } = useDiscountStackingState();
   const serviceHasSeries = !!(
     service.isRecurring ||
     service.recurringParentId ||
@@ -2080,6 +2118,13 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
   );
   const [primaryLineDiscountDirty, setPrimaryLineDiscountDirty] = useState(false);
   const primaryLineDiscount = stackingEnabled ? primaryLineDiscountState : null;
+  // See editApptStackingSaveBlocked above for the compounding hazard this guards.
+  const stackingUnconfirmedBlocksSave = editApptStackingSaveBlocked({
+    known: stackingKnown,
+    appointmentDiscountSelected: !!(discountType && discountAmount !== ""),
+    primaryLineDiscount: primaryLineDiscountState,
+    lines: serviceLines,
+  });
   const [createInvoice, setCreateInvoice] = useState(
     !!(service.createInvoiceOnComplete ?? service.create_invoice_on_complete),
   );
@@ -2248,6 +2293,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
   const presetById = (id) =>
     id ? discountPresets.find((d) => String(d.id) === String(id)) || null : null;
   const lineDiscountRow = (ld) => (ld ? { ...(presetById(ld.id) || {}), ...ld } : null);
+  const previewSlot = (ld) => verifiedLineDiscountCap(ld, presetById(ld?.id));
   // Codex r3 P2: this copy recognized only zero-valued fixed_amount/percentage
   // presets, not the variable_* types, so picking a variable preset skipped
   // the prompt, created a zero-valued slot and the server dropped the
@@ -2561,6 +2607,19 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
     !!form.windowStart;
 
   const handleSave = async ({ takePayment = false } = {}) => {
+    // Revalidate right before POSTING money (Codex r4 P1) — the hook polls,
+    // but a gate flip between the last probe and this click would still save
+    // under the semantics the preview used.
+    if (stackingEnabled || stackingUnconfirmedBlocksSave) {
+      const fresh = await ensureStackingFresh();
+      if (!fresh.known || fresh.enabled !== stackingEnabled) {
+        // alert() is how this handler already reports a blocking validation
+        // failure (see the time-on-site check below).
+        alert('The discount-stacking setting changed while this was open. Reload before saving so the totals match what will be saved.');
+        return;
+      }
+    }
+    if (stackingUnconfirmedBlocksSave) return;
     setSaving(true);
     // Time-on-site correction rides the same Save button but its own
     // endpoint: validate before anything writes so a typo aborts the whole
@@ -3108,12 +3167,12 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
     lines: [
       {
         gross: primaryPrice,
-        lineDiscount: primaryLineDiscount,
+        lineDiscount: previewSlot(primaryLineDiscount),
         eligible: lineTakesDiscount(primaryLineForDiscount),
       },
       ...serviceLines.map((l) => ({
         gross: l.price !== "" && !isNaN(parseFloat(l.price)) ? parseFloat(l.price) : 0,
-        lineDiscount: l.lineDiscount,
+        lineDiscount: previewSlot(l.lineDiscount),
         eligible: lineTakesDiscount(l),
       })),
     ],
@@ -3700,7 +3759,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
             )}{" "}
             <button
               onClick={() => handleSave({ takePayment: true })}
-              disabled={saving}
+              disabled={saving || stackingUnconfirmedBlocksSave}
               className="font-medium flex-1 md:flex-initial"
               style={{
                 padding: "11px 14px",
@@ -3709,8 +3768,8 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                 color: "#fff",
                 border: "none",
                 fontSize: 13,
-                cursor: saving ? "wait" : "pointer",
-                opacity: saving ? 0.6 : 1,
+                cursor: (saving || stackingUnconfirmedBlocksSave) ? "wait" : "pointer",
+                opacity: (saving || stackingUnconfirmedBlocksSave) ? 0.6 : 1,
                 whiteSpace: "nowrap",
               }}
             >
@@ -3718,7 +3777,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
             </button>{" "}
             <button
               onClick={() => handleSave()}
-              disabled={saving}
+              disabled={saving || stackingUnconfirmedBlocksSave}
               className="font-medium flex-1 md:flex-initial"
               style={{
                 padding: "11px 14px",
@@ -3727,8 +3786,8 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                 color: "#111827",
                 border: `1px solid ${D.inputBorder}`,
                 fontSize: 13,
-                cursor: saving ? "wait" : "pointer",
-                opacity: saving ? 0.6 : 1,
+                cursor: (saving || stackingUnconfirmedBlocksSave) ? "wait" : "pointer",
+                opacity: (saving || stackingUnconfirmedBlocksSave) ? 0.6 : 1,
                 whiteSpace: "nowrap",
               }}
             >
@@ -4389,6 +4448,44 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                   </>
                 )}
               </div>{" "}
+              {stackingUnconfirmedBlocksSave && (
+                <div
+                  style={{
+                    background: "#DC262615",
+                    border: "1px solid #DC262655",
+                    borderRadius: 8,
+                    padding: 10,
+                    marginBottom: 14,
+                    fontSize: 12,
+                    color: "#DC2626",
+                    display: "flex",
+                    alignItems: "center",
+                    justifyContent: "space-between",
+                    gap: 8,
+                  }}
+                >
+                  <span>
+                    Could not confirm how multiple discounts combine — retry before saving.
+                  </span>
+                  <button
+                    type="button"
+                    onClick={retryStackingProbe}
+                    style={{
+                      background: "none",
+                      border: "1px solid #DC2626",
+                      color: "#DC2626",
+                      borderRadius: 6,
+                      padding: "4px 10px",
+                      fontSize: 12,
+                      fontWeight: 500,
+                      cursor: "pointer",
+                      flex: "0 0 auto",
+                    }}
+                  >
+                    Retry
+                  </button>
+                </div>
+              )}
               <div
                 style={{
                   borderTop: `1px solid ${D.border}`,

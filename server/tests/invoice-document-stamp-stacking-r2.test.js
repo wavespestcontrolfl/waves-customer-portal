@@ -347,7 +347,16 @@ describe('r3 — a SCOPED appointment stamp reaches only its own lines', () => {
     expect(result.discount_amount).toBe(38.5);
   });
 
-  test('a scope naming no line on the invoice takes $0 rather than spreading', async () => {
+  test('a scope naming no line on the invoice takes $0, not the frozen $30 (r4 P1)', async () => {
+    // Codex #4405 r4 P1: an appointment discount scoped to one service (here
+    // 'termite_bond') whose line was deleted/changed by THIS same invoice
+    // edit resolves an empty eligible pool in the document stack — but the
+    // reduce that turns stack results into discount_amount used to check
+    // isStoredDiscountLineItem() FIRST and short-circuit straight to the
+    // frozen storedDiscountDollars(item), never consulting the stack's
+    // eligibleLines-aware result. A $30 add-on-only credit therefore
+    // survived after the add-on it targeted was gone, and discounted
+    // unrelated services (here the pest line's own pick) forever.
     setupDb({ customer: CUSTOMER, discounts: [LINE_10] });
     const result = await calculateUpdateFinancials({
       lineItems: [
@@ -360,10 +369,46 @@ describe('r3 — a SCOPED appointment stamp reaches only its own lines', () => {
       invoice: { id: 'invoice-1' },
       taxRate: 0,
     });
-    // The stamp's own frozen $30 is still subtracted by the caller (it is a
-    // real stored charge adjustment), but it consumes no line's balance, so
-    // the primary's 10% stays $10.
-    expect(result.discount_amount).toBe(40);
+    // The orphaned stamp takes $0 (its scope matches nothing), so the
+    // primary's own 10% resolves against its full $100 = $10. Total removed
+    // is $10, NOT $40 (the pre-fix $30 orphaned stamp + $10).
+    expect(result.discount_amount).toBe(10);
+    expect(result.total).toBe(190);
+  });
+
+  test('CREATE path: the same orphaned-scope invoice also takes $0 for the stamp', async () => {
+    setupDb({ customer: CUSTOMER, discounts: [LINE_10] });
+    const invoice = await InvoiceService.create({
+      customerId: 'customer-1',
+      title: 'Pest Control',
+      lineItems: [
+        PRIMARY,
+        ADDON,
+        appointmentStamp({ dollars: 30, type: 'fixed_amount', amount: 30, scopeKey: 'termite_bond' }),
+        primaryPick,
+      ],
+      trustedStoredDiscountSources: ['scheduled_service'],
+    });
+    expect(invoice.discount_amount).toBe(10);
+    expect(invoice.total).toBe(190);
+  });
+
+  test('an UNSCOPED stamp keeps taking its full frozen dollars even with no other change', async () => {
+    // Contrast case named in the assignment: an unscoped stamp's pool is
+    // every line, so it must be completely unaffected by the r4 fix.
+    setupDb({ customer: CUSTOMER, discounts: [LINE_10] });
+    const result = await calculateUpdateFinancials({
+      lineItems: [
+        PRIMARY,
+        ADDON,
+        appointmentStamp({ dollars: 30, type: 'fixed_amount', amount: 30 }),
+        primaryPick,
+      ],
+      customer: CUSTOMER,
+      invoice: { id: 'invoice-1' },
+      taxRate: 0,
+    });
+    expect(result.discount_amount).toBe(38.5);
   });
 });
 
@@ -449,5 +494,55 @@ describe('r3 fallback — spansAll and stored never disagree on one item', () =>
       taxRate: 0,
     });
     expect(result.total).toBe(90);
+  });
+});
+
+
+/**
+ * The orphaned-scope fix must not overcharge a LEGACY invoice. Only lines
+ * built by buildScheduledServiceInvoiceLines carry `service_key`; an invoice
+ * persisted before this lane has none, so a scoped stamp replayed onto it
+ * would match no line, resolve to $0, and silently bill the customer the
+ * whole credit. Scope is honored only when the invoice actually carries keys.
+ */
+describe('a scoped stamp on a KEYLESS legacy invoice keeps its credit', () => {
+  const KEYLESS_PRIMARY = {
+    client_id: 'line-1', description: 'Pest Control', quantity: 1, unit_price: 100, amount: 100,
+  };
+  const KEYLESS_ADDON = {
+    client_id: 'line-2', description: 'Lawn Care', quantity: 1, unit_price: 100, amount: 100,
+  };
+
+  test('no line carries a service key → the stamp is treated as unscoped, not dropped', async () => {
+    setupDb({ customer: CUSTOMER, discounts: [] });
+    const result = await calculateUpdateFinancials({
+      lineItems: [
+        KEYLESS_PRIMARY,
+        KEYLESS_ADDON,
+        appointmentStamp({ dollars: 30, type: 'fixed_amount', amount: 30, scopeKey: 'lawn_fert_monthly' }),
+      ],
+      customer: CUSTOMER,
+      invoice: { id: 'invoice-1' },
+      taxRate: 0,
+    });
+    // The $30 credit still applies. Dropping it would bill $200 instead of
+    // $170 — an overcharge on an invoice that simply predates service_key.
+    expect(result.discount_amount).toBe(30);
+    expect(result.total).toBe(170);
+  });
+
+  test('keys PRESENT but none matching still resolves to $0 — the orphaned case', async () => {
+    setupDb({ customer: CUSTOMER, discounts: [] });
+    const result = await calculateUpdateFinancials({
+      lineItems: [
+        { ...KEYLESS_PRIMARY, service_key: 'pest_general_quarterly' },
+        appointmentStamp({ dollars: 30, type: 'fixed_amount', amount: 30, scopeKey: 'lawn_fert_monthly' }),
+      ],
+      customer: CUSTOMER,
+      invoice: { id: 'invoice-1' },
+      taxRate: 0,
+    });
+    expect(result.discount_amount).toBe(0);
+    expect(result.total).toBe(100);
   });
 });

@@ -39,7 +39,7 @@ import BestTimeHint, { detourPhrase } from './BestTimeHint';
 import { useBestTimes } from './useBestTimes';
 import { etDateString } from '../../lib/timezone';
 import { stackVisitDiscounts, stackablePresets, isCustomAmountPreset, isCustomPercentagePreset } from '../../lib/discountStack';
-import { useDiscountStackingState } from '../../hooks/useDiscountStacking';
+import { useDiscountStackingState, ensureStackingFresh } from '../../hooks/useDiscountStacking';
 import { propertyRelationshipChip } from '../../lib/contact-roles';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
@@ -1034,6 +1034,19 @@ export function percentExclusionsSaveBlocked({ discount, excludedKeys }) {
   return isPercent && excludedKeys === null;
 }
 
+// Codex #4405 P2: the appointment discount rides exactly ONE cadence group
+// (appointmentDiscountGroup — a split booking posts each group as its own
+// separate, independently-validated appointment request; owner ruling: a
+// discount posted with one group never reaches services in another). A line
+// in a DIFFERENT group never carries this discount, so its own picker must
+// not have the tier hidden under the discount's spansAll row — that tier
+// stays available for the line's own slot. `group` null means there is
+// nothing to scope against (no appointment discount selected, or it
+// resolved no group), so every line is unaffected.
+export function appointmentDiscountSpansLine(group, svc) {
+  return !group || group.lines.includes(svc);
+}
+
 export default function CreateAppointmentModal({ defaultDate, defaultWindowStart, defaultDurationMinutes, defaultTechId, defaultCustomer = null, defaultEstimateId = null, onClose, onCreated, onChange }) {
   const dialogRef = useModalFocus(true, onClose);
   const isMobile = typeof window !== 'undefined' && window.innerWidth < 768;
@@ -1072,6 +1085,9 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
   // quick-add "Attach as additional property" on the same customer.
   const [bookingProperties, setBookingProperties] = useState([]);
   const [bookingPropertyState, setBookingPropertyState] = useState('idle'); // idle | loading | ready | hidden | error
+  // Set when a submit-time revalidation finds the gate moved under us; shown
+  // through the existing discount-blocked banner rather than a second channel.
+  const [staleStackingNotice, setStaleStackingNotice] = useState('');
   const [selectedPropertyId, setSelectedPropertyId] = useState('');
   const [propertyRefresh, setPropertyRefresh] = useState(0);
   const propertyPickerActive = bookingPropertyState === 'ready';
@@ -1761,9 +1777,16 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
     const svc = services[idx];
     const key = svc?.lineId || idx;
     const q = (lineDiscountQueries[key] || '').trim().toLowerCase();
+    // Codex #4405 P2: the appointment discount rides exactly ONE cadence
+    // group (appointmentDiscountGroup — a split booking posts each group as
+    // its own separate appointment request). Including its spansAll row
+    // unconditionally hid the identical tier from every line's picker, even
+    // one in a DIFFERENT group that never carries this discount and posts
+    // separately. appointmentDiscountGroup is defined below; safe here for
+    // the same forward-reference reason lineLaneRows above already relies on.
     const offered = presetsStackableWith([
       ...lineLaneRows(idx),
-      laneRow(appointmentDiscount, { spansAll: true }),
+      appointmentDiscountSpansLine(appointmentDiscountGroup, svc) ? laneRow(appointmentDiscount, { spansAll: true }) : null,
     ], { scope: `line:${idx}` });
     if (!q) return offered.slice(0, 10);
     return offered
@@ -2764,6 +2787,17 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
   // Header, footer and second-program CTA share one synchronous lock. React
   // state alone can admit two taps before the first render marks us saving.
   const handleSubmit = async (separateProgram) => {
+    // Revalidate right before POSTING money (Codex r4 P1): the hook polls,
+    // but a gate flip between the last probe and this click would still book
+    // under the semantics the preview used.
+    if (appointmentDiscountState) {
+      const fresh = await ensureStackingFresh();
+      if (!fresh.known || fresh.enabled !== stackingEnabled) {
+        setStaleStackingNotice('The discount-stacking setting changed while this was open. Reload before saving so the totals match what will be saved.');
+        return;
+      }
+      setStaleStackingNotice('');
+    }
     if (submitLockRef.current) return;
     submitLockRef.current = true;
     let booked = false;
@@ -2845,7 +2879,8 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
   const percentExclusionsBlockSave = percentExclusionsSaveBlocked({
     discount: appointmentDiscount, excludedKeys: percentExcludedKeys,
   });
-  const discountSaveBlockedReason = stackingUnconfirmedBlocksSave
+  const discountSaveBlockedReason = staleStackingNotice
+    || stackingUnconfirmedBlocksSave
     ? 'Could not confirm the discount-stacking status — retry before saving.'
     : (percentExclusionsBlockSave
       ? 'Could not confirm which services this percentage discount excludes — retry before saving.'

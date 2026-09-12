@@ -19,11 +19,21 @@ import { useCallback, useEffect, useState } from 'react';
  * multi-discount money get a `known` flag so they can refuse to compute or
  * submit stacked amounts while the gate's real state is unconfirmed,
  * instead of confidently previewing (and posting) the wrong math.
+ *
+ * Codex #4405 P1: even a SUCCESSFUL probe was cached for the rest of the SPA
+ * session, so an open tab kept the old semantics across a mid-session
+ * GATE_DISCOUNT_STACKING flip while the server's money endpoints read the
+ * live env var on every request. A confirmed value now expires after
+ * CACHE_TTL_MS and is treated exactly like the unconfirmed state until it is
+ * revalidated — so `known` (already the flag every money submitter checks)
+ * goes false again on its own, with no separate "stale" concept for callers
+ * to learn.
  */
 
-// Module-scope singleton — one fetch per SPA session (until a failure clears
-// it), shared by every surface that asks.
+// Module-scope singleton — one fetch per TTL window (sooner if a failure
+// clears it), shared by every surface that asks.
 let cache = null; // null = unloaded/unknown, boolean = confirmed by the server
+let cachedAt = null; // ms epoch `cache` was confirmed, or null
 let inflight = null;
 let lastErrorAt = null; // ms epoch of the most recent probe failure, or null
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
@@ -33,12 +43,22 @@ const API_BASE = import.meta.env.VITE_API_URL || '/api';
 // mount in that window still reports known:false rather than a stale true/false.
 const RETRY_BACKOFF_MS = 15000;
 
+// A confirmed answer is trusted for this long before the next mount (or the
+// next retry()) has to revalidate it — long enough to spare a burst of
+// mounts a fetch each, short enough that a flag flip during a deploy reaches
+// an open tab well within the same shift, not "whenever it's next reloaded".
+const CACHE_TTL_MS = 60000;
+
+function cacheIsFresh() {
+  return cache !== null && cachedAt !== null && Date.now() - cachedAt < CACHE_TTL_MS;
+}
+
 function snapshot() {
-  return cache === null ? { enabled: false, known: false } : { enabled: cache, known: true };
+  return cacheIsFresh() ? { enabled: cache, known: true } : { enabled: false, known: false };
 }
 
 async function loadStacking() {
-  if (cache !== null) return snapshot();
+  if (cacheIsFresh()) return snapshot();
   if (inflight) return inflight;
   if (lastErrorAt !== null && Date.now() - lastErrorAt < RETRY_BACKOFF_MS) {
     // Still backing off from the last failure — report unknown without
@@ -50,6 +70,7 @@ async function loadStacking() {
       const token = localStorage.getItem('waves_admin_token');
       if (!token) {
         cache = false; // no admin session — a determinate answer, not a probe failure
+        cachedAt = Date.now();
         lastErrorAt = null;
         return snapshot();
       }
@@ -59,6 +80,7 @@ async function loadStacking() {
       if (!res.ok) throw new Error(`stacking fetch failed: ${res.status}`);
       const data = await res.json();
       cache = data?.enabled === true;
+      cachedAt = Date.now();
       lastErrorAt = null;
       return snapshot();
     } catch {
@@ -66,6 +88,7 @@ async function loadStacking() {
       // failure — leave cache null so the next mount (after the backoff)
       // re-probes instead of being stuck on a guess for the whole session.
       cache = null;
+      cachedAt = null;
       lastErrorAt = Date.now();
       return snapshot();
     } finally {
@@ -86,11 +109,22 @@ export function useDiscountStackingState() {
   const [attempt, setAttempt] = useState(0);
   useEffect(() => {
     let alive = true;
-    loadStacking().then((value) => {
-      if (alive) setState(value);
-    });
+    const sync = () => { loadStacking().then((value) => { if (alive) setState(value); }); };
+    sync();
+    // A TTL alone only helps surfaces that MOUNT after it expires: this
+    // effect runs on mount (and on retry), so without a timer an already-open
+    // tab keeps whatever it resolved first — which is precisely the reported
+    // failure, a tab surviving a mid-session gate flip while every server
+    // money endpoint reads the live value. Re-probe each TTL window, and
+    // immediately when the tab is focused again, so a mounted surface tracks
+    // the gate instead of a snapshot of it.
+    const timer = setInterval(sync, CACHE_TTL_MS);
+    const onVisible = () => { if (!document.hidden) sync(); };
+    document.addEventListener('visibilitychange', onVisible);
     return () => {
       alive = false;
+      clearInterval(timer);
+      document.removeEventListener('visibilitychange', onVisible);
     };
   }, [attempt]);
   // An operator-initiated retry is an explicit "try again now" — it clears
@@ -111,9 +145,25 @@ export function useDiscountStacking() {
   return useDiscountStackingState().enabled;
 }
 
+/**
+ * Revalidate before POSTING money. The polling above narrows the window but
+ * cannot close it: a gate flip between the last probe and this click would
+ * still submit under the old semantics. Money surfaces await this and compare
+ * `enabled` against the value their preview used — if it moved, the totals on
+ * screen are not the totals the server will save, so the submission must stop
+ * rather than silently bill the other regime.
+ *
+ * Returns { enabled, known } exactly like the hook's state.
+ */
+export async function ensureStackingFresh() {
+  if (cacheIsFresh()) return snapshot();
+  return loadStacking();
+}
+
 // Test seam: reset the session cache between cases.
 export function __resetDiscountStackingCache() {
   cache = null;
+  cachedAt = null;
   inflight = null;
   lastErrorAt = null;
 }

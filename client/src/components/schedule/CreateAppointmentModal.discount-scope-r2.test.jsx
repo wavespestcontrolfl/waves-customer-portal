@@ -23,6 +23,7 @@ import {
   resolveAppointmentDiscountGroup,
   stackingSaveBlocked,
   percentExclusionsSaveBlocked,
+  appointmentDiscountSpansLine,
 } from './CreateAppointmentModal';
 
 const lineServiceKey = (svc) => svc.serviceKey;
@@ -107,5 +108,25 @@ describe('stackingSaveBlocked (r2 P1 — unconfirmed gate)', () => {
     // A plain single-discount save is untouched — the gate-off path stays
     // byte-identical to main whether or not the probe answered.
     expect(stackingSaveBlocked({ known: false, appointmentDiscountSelected: null })).toBe(false);
+  });
+});
+
+// Codex #4405 P2: a split-cadence booking (e.g. a quarterly pest group and a
+// monthly lawn group, each posted as its own separate appointment request)
+// has an appointment discount that rides exactly ONE of those groups. A
+// line in the OTHER group never carries this discount and posts separately
+// — its own picker must not hide the tier under the discount's spansAll row.
+describe('appointmentDiscountSpansLine (r_ P2 — split-cadence spansAll leak)', () => {
+  it('a line INSIDE the discount\'s group is spanned (hide the tier from its own picker)', () => {
+    expect(appointmentDiscountSpansLine({ key: 'quarterly', lines: [PEST] }, PEST)).toBe(true);
+  });
+
+  it('a line in a DIFFERENT group is NOT spanned — its picker still offers the tier', () => {
+    expect(appointmentDiscountSpansLine({ key: 'quarterly', lines: [PEST] }, LAWN)).toBe(false);
+  });
+
+  it('no group (no appointment discount selected, or it resolved none) spans nothing to hide from — every line unaffected', () => {
+    expect(appointmentDiscountSpansLine(null, PEST)).toBe(true);
+    expect(appointmentDiscountSpansLine(null, LAWN)).toBe(true);
   });
 });

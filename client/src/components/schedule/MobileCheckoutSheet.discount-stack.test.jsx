@@ -10,9 +10,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import MobileCheckoutSheet from './MobileCheckoutSheet';
 
 // GATE_DISCOUNT_STACKING, as the sheet sees it.
-const stacking = vi.hoisted(() => ({ enabled: true }));
+const stacking = vi.hoisted(() => ({ enabled: true, known: true, retry: vi.fn() }));
 vi.mock('../../hooks/useDiscountStacking', () => ({
-  useDiscountStacking: () => stacking.enabled,
+  useDiscountStackingState: () => ({ enabled: stacking.enabled, known: stacking.known, retry: stacking.retry }),
 }));
 
 const SILVER = {
@@ -51,7 +51,7 @@ vi.mock('../../hooks/useCustomerCards', () => ({
 }));
 
 afterEach(cleanup);
-beforeEach(() => { stacking.enabled = true; });
+beforeEach(() => { stacking.enabled = true; stacking.known = true; stacking.retry.mockClear(); });
 
 const SERVICE = {
   id: 'svc-1',
@@ -128,5 +128,32 @@ describe('MobileCheckoutSheet with stacking dark', () => {
     addDiscount('WaveGuard Silver');
     fireEvent.click(screen.getByRole('button', { name: 'Add Item or Discount' }));
     expect(screen.getByTestId('chosen-count')).toHaveTextContent('0');
+  });
+});
+
+// Codex #4405 P1: if the stacking probe fails while the server gate is ON,
+// this sheet must not let a tech charge two discounts on the previewed
+// additive math while /admin/schedule/:id/invoice compounds — block until
+// the probe is authoritative (known:true), regardless of what `enabled`
+// last read.
+describe('MobileCheckoutSheet with the stacking probe unconfirmed', () => {
+  beforeEach(() => { stacking.known = false; });
+
+  it('a single discount is unaffected — nothing to stack against yet', () => {
+    render(<MobileCheckoutSheet service={SERVICE} onClose={() => {}} />);
+    addDiscount('WaveGuard Silver');
+    expect(screen.getByRole('button', { name: 'Charge $99.90' })).toBeEnabled();
+    expect(screen.queryByText(/Could not confirm how multiple discounts combine/)).not.toBeInTheDocument();
+  });
+
+  it('a second discount in play blocks Charge until the probe resolves, with a Retry', () => {
+    render(<MobileCheckoutSheet service={SERVICE} onClose={() => {}} />);
+    addDiscount('WaveGuard Silver');
+    addDiscount('Military Discount');
+    const chargeButton = screen.getByRole('button', { name: 'Confirm discount stacking to charge' });
+    expect(chargeButton).toBeDisabled();
+    expect(screen.getByText(/Could not confirm how multiple discounts combine/)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Retry' }));
+    expect(stacking.retry).toHaveBeenCalledTimes(1);
   });
 });

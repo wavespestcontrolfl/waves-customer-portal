@@ -26,7 +26,7 @@
 
 import { createPortal } from 'react-dom';
 import { stackDiscounts } from '../../lib/discountStack';
-import { useDiscountStacking } from '../../hooks/useDiscountStacking';
+import { useDiscountStackingState, ensureStackingFresh } from '../../hooks/useDiscountStacking';
 import { X, Tag } from 'lucide-react';
 import { useMemo, useState } from 'react';
 import MobileServicePickerSheet from './MobileServicePickerSheet';
@@ -83,7 +83,7 @@ export default function MobileCheckoutSheet({
   const { cards: cardsOnFile } = useCustomerCards(service?.customerId || service?.customer_id);
   // Deploy-wide release gate (GATE_DISCOUNT_STACKING); fails closed to the
   // pre-lane preview, which is what the mint endpoint then stores.
-  const stackingEnabled = useDiscountStacking();
+  const { enabled: stackingEnabled, known: stackingKnown, retry: retryStackingProbe } = useDiscountStackingState();
 
   if (!service) return null;
 
@@ -128,6 +128,15 @@ export default function MobileCheckoutSheet({
     return { stackedDiscountRows: rows, extraDiscountsTotal: -stacked.totalDollars };
   }, [extras, servicesSubtotal, stackingEnabled]);
   const extraAmount = (e) => (stackedDiscountRows.has(e.id) ? -stackedDiscountRows.get(e.id) : Number(e.amount));
+  // Codex #4405 P1: a second discount actually in play (two or more manual
+  // discount rows added by the tech) must not charge while the stacking
+  // gate's real state is unconfirmed — this sheet's additive/compounding
+  // preview could silently diverge from what /admin/schedule/:id/invoice
+  // (which reads the gate independently, at mint time) compounds. A single
+  // discount row is unaffected either way — the mint endpoint has nothing
+  // to stack against it regardless of the gate.
+  const discountExtrasCount = extras.filter((e) => e._kind === 'discount').length;
+  const stackingUnconfirmedBlocksCharge = !stackingKnown && discountExtrasCount > 1;
 
   const prepaidAmount = service.prepaidAmount != null ? Math.max(0, Number(service.prepaidAmount) || 0) : 0;
   // An open invoice already attached to this visit (accept-minted setup +
@@ -263,7 +272,18 @@ export default function MobileCheckoutSheet({
   const removeExtra = (id) => setExtras((prev) => prev.filter((e) => e.id !== id));
 
   async function handleCharge() {
-    if (minting || nothingToCharge) return;
+    if (minting || nothingToCharge || stackingUnconfirmedBlocksCharge) return;
+    // Revalidate right before posting money: polling narrows the window after
+    // a mid-session gate flip but cannot close it, and the preview on screen
+    // was computed under `stackingEnabled`. If that moved, the server would
+    // charge a different total than the technician is looking at.
+    if (discountExtrasCount > 1) {
+      const fresh = await ensureStackingFresh();
+      if (!fresh.known || fresh.enabled !== stackingEnabled) {
+        setMintError('The discount-stacking setting changed while this was open. Reload before charging so the total matches what will be billed.');
+        return;
+      }
+    }
     setMinting(true);
     setMintError(null);
     try {
@@ -341,9 +361,9 @@ export default function MobileCheckoutSheet({
         <button
           type="button"
           onClick={handleCharge}
-          disabled={minting || nothingToCharge}
+          disabled={minting || nothingToCharge || stackingUnconfirmedBlocksCharge}
           className="w-full bg-zinc-900 text-white font-medium rounded-xs u-focus-ring"
-          style={{ padding: '16px 20px', fontSize: 16, opacity: (minting || nothingToCharge) ? 0.6 : 1 }}
+          style={{ padding: '16px 20px', fontSize: 16, opacity: (minting || nothingToCharge || stackingUnconfirmedBlocksCharge) ? 0.6 : 1 }}
         >
           {minting
             ? 'Opening payment…'
@@ -351,8 +371,29 @@ export default function MobileCheckoutSheet({
               ? 'Payment processing — nothing to collect'
               : nothingToCharge
                 ? 'No charge — complete from job'
-                : `Charge $${total.toFixed(2)}`}
+                : stackingUnconfirmedBlocksCharge
+                  ? 'Confirm discount stacking to charge'
+                  : `Charge $${total.toFixed(2)}`}
         </button>
+        {stackingUnconfirmedBlocksCharge && (
+          <div
+            role="alert"
+            className="flex items-center justify-between gap-2 bg-alert-bg border border-alert-fg/30 rounded-sm px-3 py-2"
+            style={{ marginTop: 8 }}
+          >
+            <span className="text-alert-fg" style={{ fontSize: 12 }}>
+              Could not confirm how multiple discounts combine — retry before charging.
+            </span>
+            <button
+              type="button"
+              onClick={retryStackingProbe}
+              className="text-alert-fg border border-alert-fg rounded-sm u-focus-ring"
+              style={{ padding: '4px 10px', fontSize: 12, fontWeight: 500, flex: '0 0 auto', background: 'none' }}
+            >
+              Retry
+            </button>
+          </div>
+        )}
         {mintError && (
           <div role="alert" className="text-center text-alert-fg" style={{ fontSize: 12, marginTop: 6 }}>
             {mintError}

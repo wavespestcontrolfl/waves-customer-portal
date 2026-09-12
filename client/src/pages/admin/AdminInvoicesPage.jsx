@@ -22,7 +22,7 @@ import {
   isCustomAmountPreset,
   isCustomPercentagePreset,
 } from "../../lib/discountStack";
-import { useDiscountStackingState } from "../../hooks/useDiscountStacking";
+import { useDiscountStackingState, ensureStackingFresh } from "../../hooks/useDiscountStacking";
 // client/src/pages/admin/AdminInvoicesPage.jsx
 //
 // Admin Invoices page — list, search, create, edit, void, refund.
@@ -233,6 +233,29 @@ export function invoiceDiscountDollars(lineItems, availableDiscounts, { compound
     });
   });
   return dollars;
+}
+
+// Codex #4405 P2: mirrors the documentStamps handling above — a stored
+// discount row with no `discount_for` is a PARENTLESS (appointment-level)
+// stamp that reaches the WHOLE invoice, not one line. Scoping it to "" made
+// it look like an ordinary line-scoped pick that never collides with a real
+// line's scope, so stackablePresets kept offering the identical tier on
+// every OTHER line's picker; picking it there passed client validation and
+// then the server's stackGroupConflict refused the whole Save with a
+// stack-group conflict. spansAll makes every line's picker hide it, the
+// same signal stackGroupConflict itself checks.
+export function chosenDiscountRowsFor(lineItems, availableDiscounts) {
+  return (Array.isArray(lineItems) ? lineItems : [])
+    .filter((i) => i._kind === "discount" && i.discount_id)
+    .map((i) => {
+      const row = (Array.isArray(availableDiscounts) ? availableDiscounts : [])
+        .find((d) => String(d.id) === String(i.discount_id));
+      if (!row) return null;
+      return i.discount_for
+        ? { ...row, scope: String(i.discount_for) }
+        : { ...row, scope: "", spansAll: true };
+    })
+    .filter(Boolean);
 }
 
 const API_BASE = import.meta.env.VITE_API_URL || "/api";
@@ -5761,13 +5784,7 @@ function CreateInvoice({
   // One WaveGuard tier per invoice: a tier already on any line hides the
   // other tiers from every picker (the server refuses the combination
   // regardless).
-  const chosenDiscountRows = lineItems
-    .filter((i) => i._kind === "discount" && i.discount_id)
-    .map((i) => {
-      const row = availableDiscounts.find((d) => String(d.id) === String(i.discount_id));
-      return row ? { ...row, scope: String(i.discount_for || "") } : null;
-    })
-    .filter(Boolean);
+  const chosenDiscountRows = chosenDiscountRowsFor(lineItems, availableDiscounts);
   const matchingDiscounts = (lineIdx) => {
     const lineKey = lineItems[lineIdx]?.client_id || lineIdx;
     const q = (discountQueries[lineKey] || "").trim().toLowerCase();
@@ -6069,10 +6086,27 @@ function CreateInvoice({
   const removeQueuedAttachment = (idx) => {
     setQueuedAttachments((prev) => prev.filter((_, i) => i !== idx));
   };
+  // Revalidate immediately before POSTING money (Codex r4 P1): the hook polls,
+  // but a gate flip between the last probe and this click would still submit
+  // under the semantics the preview used. Returns a reason string to show, or
+  // null when it is safe to proceed.
+  const staleStackingBlock = async () => {
+    if (discountRowCount <= 1) return null;
+    const fresh = await ensureStackingFresh();
+    if (!fresh.known || fresh.enabled !== stackingEnabled) {
+      return 'The discount-stacking setting changed while this was open. Reload before saving so the totals match what will be saved.';
+    }
+    return null;
+  };
   const handleCreate = async () => {
     if (savingRef.current) return;
     if (!selectedCustomer) {
       showToast("Select a customer");
+      return;
+    }
+    const staleCreate = await staleStackingBlock();
+    if (staleCreate) {
+      showToast(staleCreate);
       return;
     }
     if (
@@ -6245,6 +6279,11 @@ function CreateInvoice({
   // money totals.
   const handleSave = async () => {
     if (savingRef.current) return;
+    const staleSave = await staleStackingBlock();
+    if (staleSave) {
+      showToast(staleSave);
+      return;
+    }
     if (
       !lineItems.some(
         (i) => i._kind !== "discount" && i.description && i.unit_price > 0,

@@ -145,10 +145,14 @@ describe('P0 (1): the stored primary stamp always matches the saved total, even 
   });
 
   test('wiring: the untouched-slot branch persists line_discount_dollars unconditionally, never gated by primaryLineDiscountProvided', () => {
-    const block = src.slice(
-      src.indexOf('await presetEligibilityCheck(['),
-      src.indexOf('if (cols.estimated_price) updates.estimated_price = financials.price;')
-    );
+    // Anchor INSIDE the update-details route: `if (cols.estimated_price) {`
+    // also appears in propagatePriceServiceToFollowingSiblings earlier in the
+    // file, so every offset is searched FORWARD from this route's own marker.
+    const editPathAt = src.indexOf('await presetEligibilityCheck([');
+    expect(editPathAt).toBeGreaterThan(-1);
+    const endMarker = src.indexOf('if (cols.estimated_price) {', editPathAt);
+    expect(endMarker).toBeGreaterThan(editPathAt);
+    const block = src.slice(editPathAt, endMarker);
     // Structural: an `else if` (or equivalent standalone) branch that
     // writes line_discount_dollars OUTSIDE the `if (primaryLineDiscountProvided)`
     // gate, using the restated slotDollars.
@@ -159,6 +163,33 @@ describe('P0 (1): the stored primary stamp always matches the saved total, even 
     expect(untouchedBranch).not.toMatch(/updates\.line_discount_id/);
     expect(untouchedBranch).not.toMatch(/updates\.line_discount_type/);
     expect(untouchedBranch).not.toMatch(/updates\.line_discount_amount/);
+  });
+
+  // The gate-flip preservation branch (r4 P0) is the ONE case that writes a
+  // stamp other than the restated slotDollars: it keeps the STORED stamp. That
+  // is only sound because the stored TOTAL is preserved in the same breath —
+  // the stamp and the total must always replay to the same number, so they
+  // have to be governed by the same condition. This pins that pairing.
+  test('wiring: gate-flip preservation keeps the stored stamp and the stored total under ONE condition', () => {
+    const editPathAt = src.indexOf('await presetEligibilityCheck([');
+    const stampBranch = src.slice(
+      src.indexOf('} else if (legacyEconomicsPreserved) {', editPathAt),
+      src.indexOf('} else if (cols.line_discount_dollars)', editPathAt),
+    );
+    expect(stampBranch).toMatch(/updates\.line_discount_dollars\s*=\s*existing\?\.line_discount_dollars/);
+
+    const priceAt = src.indexOf('if (cols.estimated_price) {', editPathAt);
+    const priceBranch = src.slice(priceAt, src.indexOf('if (cols.primary_line_price', priceAt));
+    expect(priceBranch).toMatch(/legacyEconomicsPreserved\s*\?\s*storedTotal/);
+
+    // The appointment-discount stamp is preserved by the same condition too.
+    const apptAt = src.indexOf('if (cols.discount_dollars) {', editPathAt);
+    const apptBranch = src.slice(
+      apptAt,
+      src.indexOf('// An untouched primary line slot keeps its line_discount_* columns', apptAt),
+    );
+    expect(apptBranch).toMatch(/legacyEconomicsPreserved\s*\?/);
+    expect(apptBranch).toMatch(/existing\?\.discount_dollars/);
   });
 });
 

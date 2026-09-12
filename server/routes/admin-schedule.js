@@ -3292,12 +3292,43 @@ async function propagatePriceServiceToFollowingSiblings(conn, {
         // dollars. calculateStoredVisitFinancials (above) subtracts
         // line_discount_dollars as a frozen number, so the value it is
         // handed has to be this sibling's own.
+        //
+        // The primary and every add-on's slot are reconstructed through the
+        // shared cap-aware helper, not built raw from type+amount: a bare
+        // { discountType, discountAmount } has no cap, so a capped
+        // percentage (e.g. 50% off capped at $20) replayed UNCAPPED on every
+        // sibling — estimated_price stays right (it's re-derived from the
+        // frozen dollars via calculateStoredVisitFinancials above) but
+        // line_discount_dollars/the add-on's own discount_dollars get
+        // overwritten with the larger uncapped number, so a later invoice
+        // replay disagrees with the stored visit total (Codex #4405 r4 P1).
+        const primarySlot = await reconstructStoredLineSlot({
+          stacking: true,
+          discountId: overlaid.line_discount_id,
+          storedType: overlaid.line_discount_type,
+          storedAmount: overlaid.line_discount_amount,
+          storedDollars: fields.line_discount_dollars,
+          conn,
+        });
+        const addonSlots = await Promise.all(siblingAddons.map((addon) => (
+          addon.discount_type
+            ? reconstructStoredLineSlot({
+              stacking: true,
+              discountId: addon.discount_id,
+              storedType: addon.discount_type,
+              storedAmount: addon.discount_amount,
+              storedDollars: addon.discount_dollars,
+              conn,
+            })
+            : null
+        )));
         const siblingStacked = calculateVisitFinancialsForAddons({
           primaryGross: overlaid.primary_line_price != null ? Number(overlaid.primary_line_price) : null,
-          primaryLineDiscount: {
-            discountType: overlaid.line_discount_type || null,
-            discountAmount: overlaid.line_discount_amount != null ? Number(overlaid.line_discount_amount) : null,
-          },
+          primaryLineDiscount: primarySlot ? {
+            discountType: primarySlot.discountType,
+            discountAmount: primarySlot.discountAmount,
+            maxDiscountDollars: primarySlot.maxDiscountDollars ?? null,
+          } : null,
           primaryServiceKey: overlaid.service_key_snapshot || null,
           primaryServiceCategory: overlaid.service_category_snapshot || null,
           appointmentDiscount: overlaid.discount_type ? {
@@ -3307,14 +3338,15 @@ async function propagatePriceServiceToFollowingSiblings(conn, {
             serviceKeyFilter: overlaid.discount_service_key_filter || null,
             serviceCategoryFilter: overlaid.discount_service_category_filter || null,
           } : null,
-        }, siblingAddons.map((addon) => ({
+        }, siblingAddons.map((addon, i) => ({
           base: addon.base_price != null ? Number(addon.base_price) : null,
           price: addon.estimated_price != null ? Number(addon.estimated_price) : 0,
           serviceKey: addon.service_key_snapshot || null,
           serviceCategory: addon.service_category_snapshot || null,
-          discount: addon.discount_type ? {
-            discountType: addon.discount_type,
-            discountAmount: addon.discount_amount != null ? Number(addon.discount_amount) : null,
+          discount: addonSlots[i] ? {
+            discountType: addonSlots[i].discountType,
+            discountAmount: addonSlots[i].discountAmount,
+            maxDiscountDollars: addonSlots[i].maxDiscountDollars ?? null,
           } : null,
         })));
         const restated = siblingStacked.lines?.[0];
@@ -8913,7 +8945,13 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
       // exactly as create does (authoritative amount/cap, eligibility).
       const existingAddonRows = stacking && addons.some((a) => a?.discountId)
         ? await db('scheduled_service_addons').where({ scheduled_service_id: req.params.id })
-          .select('service_id', 'service_name', 'discount_id', 'discount_type', 'discount_amount', 'base_price')
+          // discount_dollars is the frozen fallback reconstructStoredLineSlot
+          // falls back to when the cap can't be confirmed (deleted preset or
+          // drifted catalog type/amount) — without it here the fallback was
+          // `undefined`, so a preserved-but-unverifiable capped percentage
+          // replayed UNCAPPED instead of falling back to the frozen dollar
+          // credit (Codex #4405 r4 P1).
+          .select('service_id', 'service_name', 'discount_id', 'discount_type', 'discount_amount', 'discount_dollars', 'base_price')
           .catch(() => [])
         : [];
       const storedAddonFor = (a, serviceName) => existingAddonRows.find((row) => (
@@ -9029,6 +9067,11 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
           'discount_type',
           'discount_amount',
           'line_discount_dollars',
+          // Needed to PRESERVE a legacy row's economics on a save that
+          // changes neither price nor discounts (see legacyEconomicsPreserved).
+          'estimated_price',
+          'discount_dollars',
+          'primary_line_price',
         ];
         if (cols.discount_id) existingFields.push('discount_id');
         if (cols.line_discount_id) existingFields.push('line_discount_id');
@@ -9108,6 +9151,36 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
           assertStackGroups(stackRows);
         }
 
+        // GATE-FLIP SAFETY (Codex #4405 r4 P0; AGENTS.md "existing DB rows must
+        // keep working"). A visit saved while the gate was OFF carries legacy
+        // economics: line discounts first, then the appointment credit over the
+        // eligible nets. Once the gate is ON, routing those same stored slots
+        // through the live compound stack re-prices the row — a $100 primary +
+        // $100 add-on with 10% off the add-on and a $30 credit moves from $160
+        // to $161.50 just by saving NOTES. The gate contract is that existing
+        // amounts do not change on a flip.
+        //
+        // Whether a stored row was written under the legacy or the compound
+        // regime is not recorded anywhere, so it cannot be known here. What CAN
+        // be decided is that a save which changes neither the prices nor any
+        // discount must not change the money: the stored numbers are that row's
+        // economics under whichever regime produced them, so preserving them is
+        // correct either way. A save that DOES touch a price or a discount still
+        // recomputes live — uniform economics for already-stored rows edited
+        // that way would need a persisted regime marker (a migration), which is
+        // the owner's call, and is recorded in the PR rather than guessed at.
+        const moneyInputsUnchanged = !discountInputsPosted
+          && !moneyValuesDiffer(primaryGross, existing?.primary_line_price)
+          && normalizedAddons.every((l) => {
+            const stored = storedAddonFor(l, l.serviceName);
+            return stored && !moneyValuesDiffer(l.base, stored.base_price);
+          })
+          && normalizedAddons.length === existingAddonRows.length;
+        const storedTotal = Number(existing?.estimated_price);
+        const legacyEconomicsPreserved = stacking
+          && moneyInputsUnchanged
+          && Number.isFinite(storedTotal)
+          && storedTotal > 0;
         const financials = calculateVisitFinancialsForAddons({
           primaryNet,
           primaryGross,
@@ -9161,6 +9234,10 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
             if (cols.line_discount_type) updates.line_discount_type = slotDollars != null ? String(primaryLineSlot.discountType).slice(0, 30) : null;
             if (cols.line_discount_amount) updates.line_discount_amount = slotDollars != null ? Number(primaryLineSlot.discountAmount) : null;
             if (cols.line_discount_dollars) updates.line_discount_dollars = slotDollars;
+          } else if (legacyEconomicsPreserved) {
+            // Untouched save on a row whose economics must not move: keep the
+            // stored stamp exactly as it is (see legacyEconomicsPreserved).
+            updates.line_discount_dollars = existing?.line_discount_dollars ?? null;
           } else if (cols.line_discount_dollars) {
             // Untouched: the slot's identity (id/name/type/amount) is left
             // exactly as stored — but the DOLLARS must always be restated.
@@ -9176,7 +9253,11 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
             updates.line_discount_dollars = slotDollars;
           }
         }
-        if (cols.estimated_price) updates.estimated_price = financials.price;
+        if (cols.estimated_price) {
+          updates.estimated_price = legacyEconomicsPreserved
+            ? storedTotal
+            : financials.price;
+        }
         if (cols.primary_line_price && primaryGross != null) updates.primary_line_price = primaryGross;
         // Only rewrite the appointment-level discount columns when the request
         // explicitly carried a discount value; otherwise leave them as-is.
@@ -9185,7 +9266,11 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
           if (cols.discount_type) updates.discount_type = effDiscountType;
           if (cols.discount_amount) updates.discount_amount = effDiscountAmount;
         }
-        if (cols.discount_dollars) updates.discount_dollars = financials.appointmentDiscountDollars;
+        if (cols.discount_dollars) {
+          updates.discount_dollars = legacyEconomicsPreserved
+            ? (existing?.discount_dollars ?? null)
+            : financials.appointmentDiscountDollars;
+        }
         // An untouched primary line slot keeps its line_discount_* columns —
         // invoicing reads them and an older editor can't resend them.
       }

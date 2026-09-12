@@ -397,8 +397,15 @@ function storedDiscountDollars(item) {
   );
 }
 
-function resolveStoredDiscountLineItem(item, row) {
-  const dollars = storedDiscountDollars(item);
+// overrideDollars: the SCOPED document-stack's own resolved dollars for this
+// stamp (Codex #4405 r4 P1) — an appointment discount narrowed to one
+// service (document_scope_service_key) resolves against ONLY the lines that
+// still carry that service, so a deleted/changed line leaves an empty pool
+// and this must be 0, not the frozen amount recorded when the line still
+// existed. Omitted (undefined) for every other stored stamp (line-scoped, or
+// document-wide unscoped), which keep the frozen dollars exactly as before.
+function resolveStoredDiscountLineItem(item, row, overrideDollars) {
+  const dollars = overrideDollars != null ? overrideDollars : storedDiscountDollars(item);
   item.quantity = 1;
   item.unit_price = -dollars;
   item.amount = -dollars;
@@ -600,8 +607,23 @@ function stackInvoiceDocumentDiscounts(serviceLines, entries, manualDiscountRows
   // service key; an unscoped one reaches every line (eligibleLines absent).
   // A scope that matches NO line leaves the term with an empty pool, so it
   // takes $0 rather than silently spreading everywhere.
+  // Can this invoice express a service-key scope at all? Only lines built by
+  // buildScheduledServiceInvoiceLines carry `service_key`. An invoice
+  // persisted BEFORE this lane added that field has none, and a scoped stamp
+  // replayed onto it would match no line, resolve to $0 and OVERCHARGE the
+  // customer by the whole credit — the same "existing DB rows must keep
+  // working" rule the activation P0 cites, in the more dangerous direction.
+  // So: scope is honored only when the invoice actually carries keys. No keys
+  // anywhere ⇒ treat the stamp as unscoped (its pre-lane behavior). Keys
+  // present but none matching ⇒ genuinely orphaned (the target line was
+  // removed), which is the case that must resolve to $0.
+  const invoiceCarriesServiceKeys = serviceLines.some(
+    (line) => line && line.service_key != null && String(line.service_key) !== "",
+  );
   const documentStoredTerms = documentDiscountEntries.map(({ item }) => {
-    const scopeKey = item.document_scope_service_key || null;
+    const scopeKey = invoiceCarriesServiceKeys
+      ? (item.document_scope_service_key || null)
+      : null;
     return {
       discountType: "fixed_amount",
       amount: storedDiscountDollars(item),
@@ -646,7 +668,19 @@ function stackInvoiceDocumentDiscounts(serviceLines, entries, manualDiscountRows
     row: d,
     dollars: stacked.documentTerms[documentStoredTerms.length + i].dollars,
   }));
-  return { lineItemMap, manualDiscounts };
+  // Parallel to documentDiscountEntries/documentStoredTerms — the ACTUAL
+  // dollars this stack resolved for each stored document stamp, honoring
+  // eligibleLines. A SCOPED stamp (document_scope_service_key) whose target
+  // line was deleted/changed resolves an empty pool here and so gets 0,
+  // unlike storedDiscountDollars(item) which would keep replaying the frozen
+  // amount forever (Codex #4405 r4 P1 — the caller uses this only for scoped
+  // stamps; an unscoped stamp's pool is every line, so it already reproduces
+  // the frozen number and is left on its existing path untouched).
+  const documentStoredDiscounts = documentDiscountEntries.map(({ item }, i) => ({
+    item,
+    dollars: stacked.documentTerms[i].dollars,
+  }));
+  return { lineItemMap, manualDiscounts, documentStoredDiscounts };
 }
 
 async function loadInvoiceDiscountRows(ids = [], database = db) {
@@ -1027,21 +1061,39 @@ async function calculateUpdateFinancials({
   const editDocumentEntries = editClassifiedItems.filter(
     (entry) => entry.spansAll && entry.stored,
   );
-  const editStackedDiscounts = editStackingEnabled
+  const editDocumentStack = editStackingEnabled
     ? stackInvoiceDocumentDiscounts(
       positiveServiceLines,
       editLineEntries,
       [],
       editDocumentEntries,
-    ).lineItemMap
+    )
+    : null;
+  const editStackedDiscounts = editDocumentStack
+    ? editDocumentStack.lineItemMap
     : stackLineItemDiscounts(editLineEntries, false);
+  // A SCOPED appointment stamp (document_scope_service_key) whose target
+  // line this same save deleted/changed resolves an empty eligible pool in
+  // the document stack above — but isStoredDiscountLineItem below is a
+  // frozen-dollar shortcut that never consulted that stack, so it kept
+  // adding the stamp's full original dollars to discount_amount forever
+  // (Codex #4405 r4 P1: a $30 add-on-only credit outlives the add-on it was
+  // scoped to and discounts unrelated services). Only a genuinely SCOPED
+  // stamp is routed through the recomputed value — an unscoped document-wide
+  // stamp's pool is every line, so it already reproduces the frozen number
+  // and stays on the untouched path below.
+  const scopedDocumentStoredDollarsByItem = new Map(
+    (editDocumentStack?.documentStoredDiscounts || [])
+      .filter(({ item }) => item.document_scope_service_key)
+      .map(({ item, dollars }) => [item, dollars]),
+  );
   const lineItemDiscountAmount = editNegativeItems
     .reduce((sum, item) => {
       const row = item.discount_id
         ? lineItemDiscountRowById.get(String(item.discount_id))
         : null;
       if (isStoredDiscountLineItem(item)) {
-        return sum + resolveStoredDiscountLineItem(item, row).dollars;
+        return sum + resolveStoredDiscountLineItem(item, row, scopedDocumentStoredDollarsByItem.get(item)).dollars;
       }
       const resolved = editStackedDiscounts.get(item);
       if (!resolved) {
@@ -1745,6 +1797,14 @@ const InvoiceService = {
     // discount independently against the untouched subtotal.
     let stackedLineItemDiscounts;
     let manualDiscounts;
+    // A genuinely SCOPED stamp (document_scope_service_key) whose target
+    // line doesn't exist on this invoice resolves an empty eligible pool
+    // below — read by the stored-item branch further down so a scoped
+    // appointment credit can't outlive the line it was scoped to (Codex
+    // #4405 r4 P1, mirrors the same fix in calculateUpdateFinancials). An
+    // unscoped stamp's pool is every line, so it stays on the untouched
+    // frozen-dollar path.
+    let scopedDocumentStoredDollarsByItem = new Map();
     if (stackingEnabled) {
       const stacked = stackInvoiceDocumentDiscounts(
         positiveServiceLines,
@@ -1754,6 +1814,11 @@ const InvoiceService = {
       );
       stackedLineItemDiscounts = stacked.lineItemMap;
       manualDiscounts = stacked.manualDiscounts;
+      scopedDocumentStoredDollarsByItem = new Map(
+        (stacked.documentStoredDiscounts || [])
+          .filter(({ item }) => item.document_scope_service_key)
+          .map(({ item, dollars }) => [item, dollars]),
+      );
     } else {
       stackedLineItemDiscounts = stackLineItemDiscounts(
         lineItemDiscountEntries,
@@ -1786,7 +1851,7 @@ const InvoiceService = {
           ? lineItemDiscountRowById.get(String(item.discount_id))
           : null;
         if (isStoredDiscountLineItem(item, trustedStoredSources)) {
-          return resolveStoredDiscountLineItem(item, row);
+          return resolveStoredDiscountLineItem(item, row, scopedDocumentStoredDollarsByItem.get(item));
         }
         const resolved = stackedLineItemDiscounts.get(item);
         if (!resolved) {

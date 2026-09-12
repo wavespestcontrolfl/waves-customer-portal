@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   ATTACHMENT_HELP_TEXT,
+  chosenDiscountRowsFor,
   invoiceDiscountDollars,
   invoiceLineAmount,
   ATTACHMENT_VISIBILITY_TEXT,
@@ -18,6 +19,7 @@ import {
   persistedSendDisposition,
   validateAttachmentFiles,
 } from "./AdminInvoicesPage.jsx";
+import { stackablePresets } from "../../lib/discountStack";
 
 describe("AdminInvoicesPage Zelle notice candidates", () => {
   const near = { invoice_id: "n", invoice_number: "WPC-2026-0003", customer_name: "Sam Roe", amount_due_cents: 12000, exact_amount: false, name_match: false };
@@ -380,5 +382,51 @@ describe("AdminInvoicesPage stacked line-item discounts", () => {
     expect(invoiceLineAmount({ quantity: 2, unit_price: 55.5 })).toBe(111);
     expect(invoiceLineAmount({ unit_price: -11.1 })).toBe(-11.1);
     expect(invoiceLineAmount({})).toBe(0);
+  });
+});
+
+// Codex #4405 P2: a stored discount with no `discount_for` is a PARENTLESS
+// (appointment-level) stamp reaching the whole invoice (invoiceDiscountDollars'
+// own documentStamps handling above treats it exactly this way). The picker
+// row builder must mark it spansAll so every line's picker hides the
+// identical tier — picking it elsewhere passes client validation and then
+// the server's stackGroupConflict refuses the whole Save.
+describe("AdminInvoicesPage chosenDiscountRowsFor (parentless stamp spansAll)", () => {
+  const SILVER = { id: "silver", name: "WaveGuard Silver", discount_type: "percentage", amount: 10, stack_group: "tier", is_stackable: false };
+  const CATALOG = [SILVER];
+
+  it("a line-scoped stamp (discount_for set) keeps its own line's scope, not spansAll", () => {
+    const rows = chosenDiscountRowsFor(
+      [{ _kind: "discount", discount_id: "silver", discount_for: "line-1" }],
+      CATALOG,
+    );
+    expect(rows).toEqual([{ ...SILVER, scope: "line-1" }]);
+  });
+
+  it("a parentless stamp (no discount_for) is marked spansAll, scope empty", () => {
+    const rows = chosenDiscountRowsFor(
+      [{ _kind: "discount", discount_id: "silver", discount_for: null }],
+      CATALOG,
+    );
+    expect(rows).toEqual([{ ...SILVER, scope: "", spansAll: true }]);
+  });
+
+  it("drops a discount item with no matching catalog row, and non-discount items", () => {
+    expect(chosenDiscountRowsFor(
+      [{ _kind: "discount", discount_id: "gone", discount_for: "line-1" }, { _kind: "service" }],
+      CATALOG,
+    )).toEqual([]);
+    expect(chosenDiscountRowsFor(undefined, undefined)).toEqual([]);
+  });
+
+  it("integration with stackablePresets: a parentless tier hides itself from every line's picker, not just its own scope", () => {
+    const chosen = chosenDiscountRowsFor(
+      [{ _kind: "discount", discount_id: "silver", discount_for: null }],
+      CATALOG,
+    );
+    // Before this fix, scope defaulted to "" and never matched a real line's
+    // scope, so the identical tier stayed offered on every OTHER line.
+    expect(stackablePresets(CATALOG, chosen, { scope: "line-1" })).toEqual([]);
+    expect(stackablePresets(CATALOG, chosen, { scope: "line-2" })).toEqual([]);
   });
 });

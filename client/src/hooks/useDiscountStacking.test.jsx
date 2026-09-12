@@ -126,4 +126,66 @@ describe('useDiscountStacking', () => {
     expect(screen.getByTestId('known')).toHaveTextContent('known');
     expect(screen.getByTestId('state')).toHaveTextContent('on');
   });
+
+  // Codex #4405 P1: a SUCCESSFUL probe used to be cached for the rest of the
+  // SPA session — an open tab would keep previewing/submitting the old
+  // semantics across a mid-session GATE_DISCOUNT_STACKING flip while the
+  // server's money endpoints read the live env var on every request.
+  describe('confirmed-value TTL', () => {
+    it('does not re-fetch a confirmed value within the TTL window', async () => {
+      let now = 1_000_000;
+      const dateSpy = vi.spyOn(Date, 'now').mockImplementation(() => now);
+      try {
+        const fetchMock = vi.fn(async () => ({ ok: true, json: async () => ({ enabled: true }) }));
+        vi.stubGlobal('fetch', fetchMock);
+
+        render(<KnownProbe />);
+        await waitFor(() => expect(screen.getByTestId('known')).toHaveTextContent('known'));
+        cleanup();
+
+        // Well within the TTL — a fresh mount reads the still-fresh cache
+        // synchronously, no second fetch.
+        now += 59000;
+        render(<KnownProbe />);
+        expect(screen.getByTestId('known')).toHaveTextContent('known');
+        expect(screen.getByTestId('state')).toHaveTextContent('on');
+        expect(fetchMock).toHaveBeenCalledTimes(1);
+      } finally {
+        dateSpy.mockRestore();
+      }
+    });
+
+    it('a confirmed value past the TTL reports known:false again until revalidated, and a money submission must not proceed on it', async () => {
+      let now = 1_000_000;
+      const dateSpy = vi.spyOn(Date, 'now').mockImplementation(() => now);
+      try {
+        const fetchMock = vi
+          .fn()
+          .mockResolvedValueOnce({ ok: true, json: async () => ({ enabled: true }) })
+          // The server flips the gate OFF mid-session; a stale cache must
+          // not keep reporting the old `true` as confirmed.
+          .mockResolvedValueOnce({ ok: true, json: async () => ({ enabled: false }) });
+        vi.stubGlobal('fetch', fetchMock);
+
+        render(<KnownProbe />);
+        await waitFor(() => expect(screen.getByTestId('known')).toHaveTextContent('known'));
+        expect(screen.getByTestId('state')).toHaveTextContent('on');
+        cleanup();
+
+        // Past the 60s TTL: the cached `true` is no longer trustworthy on
+        // its own — the very first synchronous render (before the re-probe
+        // resolves) must already report known:false, so a caller gating a
+        // money submission on `known` cannot fire mid-flip on the stale value.
+        now += 61000;
+        render(<KnownProbe />);
+        expect(screen.getByTestId('known')).toHaveTextContent('unknown');
+        await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
+        // Revalidation lands the real (now false) answer.
+        await waitFor(() => expect(screen.getByTestId('state')).toHaveTextContent('off'));
+        expect(screen.getByTestId('known')).toHaveTextContent('known');
+      } finally {
+        dateSpy.mockRestore();
+      }
+    });
+  });
 });
