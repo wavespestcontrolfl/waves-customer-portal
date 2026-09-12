@@ -73,7 +73,11 @@ const source = {
   name: "Website",
   source_type: "website_organic",
   channel: "organic",
-  active: true,
+  // The real /admin/leads/sources payload (lead_sources.*) and the
+  // component both key off is_active, not active — the QA fixture had
+  // drifted from that field name, so every "active" row in the QA run
+  // was actually rendered opacity-50 as if inactive.
+  is_active: true,
   monthly_cost: 200,
   cost_type: "per_month",
   twilio_phone_number: "+19415550200",
@@ -330,6 +334,17 @@ async function main() {
       await page.getByRole("region", { name: "Lead board" }).waitFor();
       await page.getByRole("button", { name: "Sources", exact: true }).click();
       await page.getByText("Lead Sources (1)").waitFor();
+      // is_active: true on the fixture source — assert the active-row
+      // presentation (no opacity-50), not just that the row exists, so a
+      // regression back to the inactive treatment for active sources would
+      // be caught here.
+      assert.doesNotMatch(
+        (await page.getByRole("row", { name: /Website/ }).getAttribute(
+          "class",
+        )) || "",
+        /opacity-50/,
+        `active source row rendered opacity-50 at ${width}`,
+      );
       const analyticsButton = page.getByRole("button", {
         name: "Analytics",
         exact: true,

@@ -380,11 +380,22 @@ function AgingBadge({ lead }) {
   const days = daysSinceContact(lead);
   if (days == null) return null;
   const label = days < 1 ? "today" : days === 1 ? "1d" : `${days}d`;
+  // Main's 4-tier: <1d strong(heading)/1-2d muted/3-6d C.amber(zinc-600, a
+  // distinct non-alert step before red)/>=7d C.red(alert). "strong" is
+  // already the <1d tier, so the 3-6d mid-age warning can't reuse it
+  // without collapsing the two together — restored as an explicit
+  // zinc-600 chip, matching main's weight instead.
+  if (days >= 1 && days < 3) return <LeadBadge label={label} tone="neutral" />;
+  if (days >= 3 && days < 7)
+    return (
+      <LeadBadge
+        label={label}
+        tone="neutral"
+        className="!bg-zinc-600/15 !text-zinc-600"
+      />
+    );
   return (
-    <LeadBadge
-      label={label}
-      tone={days < 1 ? "strong" : days >= 7 ? "alert" : "neutral"}
-    />
+    <LeadBadge label={label} tone={days < 1 ? "strong" : "alert"} />
   );
 }
 function MetricCard({ label, value, sub, alert = false, valueClassName }) {
@@ -1269,7 +1280,7 @@ export function LeadsSection({ newLeadRequest = 0 }) {
           {(filtersOpen || !isMobile) && (
             <div
               id="lead-queue-filters"
-              className="flex flex-wrap gap-[12px] mt-[12px]"
+              className="flex flex-wrap items-end gap-[12px] mt-[12px]"
             >
               <LeadField
                 label="Stage"
@@ -1498,6 +1509,16 @@ export function LeadsSection({ newLeadRequest = 0 }) {
                                     lead.urgency === "urgent"
                                       ? "alert"
                                       : "neutral"
+                                  }
+                                  // Main's C.amber (zinc-600) distinguished
+                                  // "high" from normal (muted); restored as
+                                  // an explicit zinc-600 chip rather than
+                                  // reusing "strong" (a different tier
+                                  // elsewhere) or collapsing into neutral.
+                                  className={
+                                    lead.urgency === "high"
+                                      ? "!bg-zinc-600/15 !text-zinc-600"
+                                      : undefined
                                   }
                                 />{" "}
                               </TD>
@@ -1903,7 +1924,11 @@ export function LeadsSection({ newLeadRequest = 0 }) {
                                                 ? "alert"
                                                 : "neutral"
                                             }
-                                            className="mr-[6px]"
+                                            className={
+                                              meta.urgency === "urgent"
+                                                ? "mr-[6px]"
+                                                : "mr-[6px] !bg-zinc-600/15 !text-zinc-600"
+                                            }
                                           />
                                         )}
                                       <div className="mt-[10px]">
@@ -2653,7 +2678,7 @@ export function LeadsSection({ newLeadRequest = 0 }) {
                           }
                           expandLead(lead);
                         }}
-                        className="bg-white border-hairline border-zinc-200 rounded-md p-[10px]"
+                        className={`bg-white border-hairline border-zinc-200 rounded-md p-[10px] cursor-grab ${draggingLeadId === lead.id ? "opacity-40" : "opacity-100"}`}
                       >
                         {" "}
                         <div className="flex items-center gap-[8px] mb-[6px]">
@@ -2687,6 +2712,11 @@ export function LeadsSection({ newLeadRequest = 0 }) {
                               label={lead.urgency}
                               tone={
                                 lead.urgency === "urgent" ? "alert" : "neutral"
+                              }
+                              className={
+                                lead.urgency === "urgent"
+                                  ? undefined
+                                  : "!bg-zinc-600/15 !text-zinc-600"
                               }
                             />
                           )}
