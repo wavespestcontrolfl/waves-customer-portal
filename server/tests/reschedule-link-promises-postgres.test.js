@@ -26,7 +26,7 @@ jest.mock('../services/logger', () => ({ warn: jest.fn(), info: jest.fn(), error
 const knex = require('knex');
 const { randomUUID } = require('node:crypto');
 const links = require('../services/reschedule-link-promises');
-const { applyHumanUpdate } = require('../services/call-commitments');
+const { applyHumanUpdate, upsertCommitments } = require('../services/call-commitments');
 const { lockTriageCall } = require('../utils/triage-locks');
 const { gates } = require('../config/feature-gates');
 const rescheduleLinkPromisesMigration = require('../models/migrations/20260909000092_reschedule_link_promises');
@@ -1955,6 +1955,27 @@ postgres('reschedule-link-promises against PostgreSQL', () => {
    * The fix (call-commitments.js applyHumanUpdate) moved the lock ahead of
    * the row update, so the ledger path now takes the SAME advisory-lock-
    * first order as every other writer.
+   *
+   * codex #4293 P1 (a later round): the table above, and this file's own
+   * module doc comment, were rebuilt after a second instance of the exact
+   * same bug class turned up in call-commitments.js's upsertCommitments —
+   * the call-processing upsert, not the ledger verdict. Its ownership fence
+   * takes call_log FOR SHARE, then its ON CONFLICT upsert locks the
+   * call_commitments row, with NO advisory lock at all: the previous
+   * round's table classified upsertCommitments as touching call_commitments
+   * ONLY and excluded it from the multi-lock analysis on that basis, which
+   * is why this was missed — it actually takes call_log FOR SHARE first.
+   * Crossed against the ledger path's real order (advisory -> call_commitments
+   * -> ... -> call_log, via retireAttemptsOnLedgerVerdict's
+   * clearPromiseException), that is the identical row-lock-then-advisory-
+   * lock-vs-advisory-lock-then-row shape as the first finding, just with
+   * call_log standing in for the resource upsertCommitments never locked
+   * behind the advisory lock. The fix takes lockTriageCall as the very
+   * first statement of upsertCommitments' transaction, and does the same in
+   * recordRelayCommitments (whose own call_log FOR UPDATE precedes calling
+   * upsertCommitments, so the lock has to be taken there too, before that
+   * read, not merely inside upsertCommitments where it would already be too
+   * late).
    */
   describe('lock ordering: the advisory call lock is always taken before call_commitments/outbox_messages rows (codex #4293 P1, lock-order inversion)', () => {
     // Faithful replica of the PRE-FIX applyHumanUpdate(dismiss/fulfill)
@@ -2070,6 +2091,110 @@ postgres('reschedule-link-promises against PostgreSQL', () => {
 
       const after = await mockPg('call_commitments').where({ id: commitment.id }).first('status');
       expect(after.status).toBe('dismissed');
+    }, 15000);
+
+    // The second finding: upsertCommitments' pre-fix shape (call_log FOR
+    // SHARE, then the ON CONFLICT upsert's call_commitments lock — no
+    // advisory lock at all) crossed against the ledger dismiss/fulfill
+    // path's real, unchanged-by-this-fix order (advisory -> call_commitments
+    // -> ... -> call_log, inside retireAttemptsOnLedgerVerdict's
+    // clearPromiseException). Both sides are hand-rolled and sequenced step
+    // by step — not raced — so this is not a timing bet on whether the
+    // deadlock happens; by the time the two queries are crossed, each side
+    // already, provably, holds the lock the other is about to request.
+    async function preFixUpsertRowFirst(trx, callLogId) {
+      await trx('call_log').where({ id: callLogId }).forShare().first('id');
+    }
+
+    test('mechanism: upsertCommitments\' pre-fix shape (call_log then call_commitments, no advisory) deadlocks against the ledger path\'s real order — the exact pre-fix hazard for this second finding', async () => {
+      const callId = randomUUID();
+      await mockPg('call_log').insert({ id: callId, direction: 'inbound', processing_generation: 0 });
+      const [commitment] = await mockPg('call_commitments').insert({
+        call_log_id: callId, commitment_key: 'waves:send_reschedule_link', party: 'waves', kind: 'send_reschedule_link',
+        description: 'send a reschedule link', source: 'ai', status: 'open', last_seen_generation: 0, processing_generation: 0,
+      }).returning('id');
+
+      // txUpsert: the PRE-FIX upsertCommitments shape (call_log first, no advisory).
+      // txLedger: the ledger path's real (fixed, unchanged by THIS fix) order —
+      // advisory first, then the call_commitments row.
+      const txUpsert = await mockPg.transaction();
+      const txLedger = await mockPg.transaction();
+      try {
+        // Step 1 (sequenced): txUpsert takes call_log FOR SHARE — the
+        // pre-fix ownership fence, with no advisory lock ever requested.
+        await preFixUpsertRowFirst(txUpsert, callId);
+        // Step 2 (sequenced): txLedger takes the advisory lock, then the
+        // call_commitments row — applyHumanUpdate's real, fixed order.
+        await lockTriageCall(txLedger, callId);
+        await txLedger('call_commitments').where({ id: commitment.id }).update({ updated_at: new Date() });
+
+        // Step 3: cross, concurrently, the resource the OTHER side already
+        // holds — a genuine wait-for cycle by construction, exactly like
+        // the first finding's own mechanism test above.
+        const crossed = await Promise.allSettled([
+          txUpsert('call_commitments').where({ id: commitment.id }).update({ updated_at: new Date() }),
+          txLedger('call_log').where({ id: callId }).update({ updated_at: new Date() }),
+        ]);
+
+        const rejected = crossed.filter((r) => r.status === 'rejected');
+        const fulfilled = crossed.filter((r) => r.status === 'fulfilled');
+        expect(fulfilled).toHaveLength(1);
+        expect(rejected).toHaveLength(1);
+        expect(String(rejected[0].reason?.code || rejected[0].reason?.message || '')).toMatch(/40P01|deadlock/i);
+      } finally {
+        await txUpsert.rollback().catch(() => {});
+        await txLedger.rollback().catch(() => {});
+      }
+    }, 15000);
+
+    test('fix: the real upsertCommitments and the real ledger applyHumanUpdate(dismiss) on the SAME call never deadlock', async () => {
+      const callId = randomUUID();
+      // processing_generation must match the procGeneration upsertCommitments
+      // is called with below — the ownership fence refuses (and never
+      // reaches the call_commitments upsert at all) on a mismatch.
+      await mockPg('call_log').insert({ id: callId, direction: 'inbound', processing_generation: 0 });
+      const [commitment] = await mockPg('call_commitments').insert({
+        call_log_id: callId, commitment_key: 'waves:send_reschedule_link', party: 'waves', kind: 'send_reschedule_link',
+        description: 'send a reschedule link', source: 'ai', status: 'open', last_seen_generation: 0, processing_generation: 0,
+      }).returning('id');
+      const items = [{ party: 'waves', kind: 'send_reschedule_link', description: 'send a reschedule link',
+        channel: 'sms', evidence: [], confidence: 0.9 }];
+
+      // Force genuine concurrent contention on the SAME advisory lock both
+      // real functions now take first, rather than racing and hoping: a
+      // third transaction holds it while both real calls are issued, so
+      // each is genuinely queued behind it — not merely raced — before it
+      // releases. This is deterministic regardless of either call's own DB
+      // round-trip speed: with the advisory lock held, neither can reach
+      // ANY row lock (call_log or call_commitments) until the holder lets go.
+      const holder = await mockPg.transaction();
+      await lockTriageCall(holder, callId);
+      try {
+        const upsertPromise = upsertCommitments(mockPg, callId, items, { generation: 0, procGeneration: 0 });
+        const dismissPromise = applyHumanUpdate(mockPg, commitment.id, { action: 'dismiss', reviewedBy: randomUUID() });
+        // Give both calls time to actually reach their own lockTriageCall
+        // call and queue behind the holder's lock.
+        await new Promise((resolve) => setTimeout(resolve, 300));
+        await holder.commit();
+
+        const results = await Promise.allSettled([upsertPromise, dismissPromise]);
+        for (const result of results) {
+          if (result.status === 'rejected') {
+            throw new Error(`real advisory-lock-first writer aborted instead of serializing (lock-order inversion regressed): ${result.reason?.message || result.reason}`);
+          }
+        }
+      } finally {
+        await holder.rollback().catch(() => {});
+      }
+
+      // Both writes actually landed: the dismiss verdict, and the upsert's
+      // unconditional last_seen_generation bump (the human_state it also set
+      // freezes every OTHER column, but never that one — see upsertCommitments'
+      // own ON CONFLICT clause).
+      const after = await mockPg('call_commitments').where({ id: commitment.id }).first('status', 'last_seen_generation', 'human_state');
+      expect(after.status).toBe('dismissed');
+      expect(after.human_state).toBe('dismissed');
+      expect(Number(after.last_seen_generation)).toBe(0);
     }, 15000);
   });
 });

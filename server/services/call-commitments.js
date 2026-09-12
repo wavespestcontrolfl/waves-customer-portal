@@ -591,6 +591,23 @@ async function upsertCommitments(conn, callLogId, items, { generation = null, ex
   const rows = [...dedupedByKey.values()].map((item) => toRow(callLogId, item, { generation, extractorVersion, recordingSid }));
 
   return conn.transaction(async (trx) => {
+    // CANONICAL LOCK ORDER (see reschedule-link-promises.js's module doc
+    // comment for the full rebuilt table): the per-call advisory lock FIRST,
+    // before touching call_log OR call_commitments — this function locks
+    // both (the ownership fence below takes call_log FOR SHARE, then the
+    // upsert loop locks the call_commitments row via INSERT ... ON CONFLICT
+    // DO UPDATE) and used to take neither's serializing lock. A concurrent
+    // ledger dismiss/fulfill (call-commitments.applyHumanUpdate) takes this
+    // SAME advisory lock, then locks call_commitments, then — via
+    // retireAttemptsOnLedgerVerdict's clearPromiseException — call_log: the
+    // exact reverse of this function's own call_log-then-call_commitments
+    // order. Two writers on the same call taking locks in opposite orders
+    // with neither serialized behind the advisory lock is a lock-order-
+    // inversion deadlock waiting to happen, and until now this was the one
+    // caller that skipped the lock entirely (codex #4293 P1, this round).
+    // pg_advisory_xact_lock is per-session reentrant, so this is a no-op
+    // when a caller (recordRelayCommitments) already holds it.
+    await require('../utils/triage-locks').lockTriageCall(trx, callLogId);
     // Fixes the promised-link worker's live-activation boundary, in this
     // SAME transaction, before anything else writes — a send_reschedule_link
     // row this pass inserts is judged later against that instant, and a
@@ -1843,6 +1860,17 @@ async function recordRelayCommitments(conn, { callSid, transcript, estimateQueue
   try {
     if (!callSid) return summary;
     return await conn.transaction(async (trx) => {
+      // Same lock-order requirement as upsertCommitments (see its own doc
+      // comment, and reschedule-link-promises.js's module comment): this
+      // transaction locks call_log FOR UPDATE below, then reaches
+      // upsertCommitments, which locks call_commitments — the advisory lock
+      // has to come first, before either. callLogId is not known until
+      // call_log is read, so an unlocked pre-read gets the id the advisory
+      // lock needs before the locked (FOR UPDATE) read that actually reads
+      // this transaction's working snapshot (codex #4293 P1, this round).
+      const pre = await trx('call_log').where({ twilio_call_sid: callSid }).first('id');
+      if (!pre) return summary;
+      await require('../utils/triage-locks').lockTriageCall(trx, pre.id);
       const call = await trx('call_log').where({ twilio_call_sid: callSid }).forUpdate().first('id', 'metadata', 'source', 'call_outcome');
       if (!call) return summary;
       // A voice-agent sandbox call is a test: a promise Sandy makes on it

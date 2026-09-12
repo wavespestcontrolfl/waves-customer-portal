@@ -391,7 +391,13 @@ describe('recordCallCommitments keeps the deterministic seeds when the model leg
     expect(out.skipped).toBe('model_failed');
     expect(out.modelError).toBe('provider timeout');
     expect(raw).toHaveBeenCalled();
-    expect(String(raw.mock.calls[0][0])).toContain('INSERT INTO call_commitments');
+    // upsertCommitments now takes the shared per-call advisory lock (its own
+    // trx.raw call) before the ownership-fence read, ahead of the INSERT —
+    // see call-commitments.js's own doc comment and reschedule-link-promises.js's
+    // module comment for why (codex #4293 P1, lock-order inversion fix).
+    // The INSERT is no longer necessarily the first raw call; find it
+    // instead of assuming its position.
+    expect(raw.mock.calls.some((call) => String(call[0]).includes('INSERT INTO call_commitments'))).toBe(true);
   });
 });
 

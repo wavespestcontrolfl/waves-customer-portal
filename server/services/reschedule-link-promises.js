@@ -9,48 +9,106 @@ const { isWithinSendWindowET, nextSendWindowOpenET } = require('./messaging/send
 const { lockTriageCall } = require('../utils/triage-locks');
 const { recordAuditEvent } = require('./audit-log');
 
-// CANONICAL LOCK ORDER for this feature (codex #4293 P1, this round — a
-// lock-order-inversion deadlock in the ledger dismiss/fulfill path, fixed by
-// moving its lockTriageCall call ahead of the call_commitments UPDATE in
-// call-commitments.js's applyHumanUpdate):
+// CANONICAL LOCK ORDER for this feature (codex #4293 P1, rebuilt this round
+// from the code, not from the previous round's table — see the correction
+// note below for why that table was wrong).
 //
-//   advisory call lock (lockTriageCall) -> call_commitments row
-//     -> outbox_messages row(s) -> triage_items row(s) [-> call_log]
+// THE RULE: any writer that will touch more than one of these four
+// resources — call_log, call_commitments, outbox_messages, triage_items —
+// across a single transaction MUST take the shared per-call advisory lock
+// (lockTriageCall) FIRST, before locking ANY of them. That is the entire
+// rule; the relative order of the four resources AFTER the advisory lock is
+// not itself load-bearing, and paths below legitimately differ on it. The
+// reason is what the advisory lock actually buys: pg_advisory_xact_lock on
+// a given call id is a per-transaction mutex, so once two writers on the
+// SAME call both take it first, only one of them can ever be touching any
+// of these rows at a time — the other is still queued on the advisory lock
+// itself, holding no row lock at all. Two such writers can no more form a
+// row-lock cycle than two threads that only ever hold one mutex at a time
+// can deadlock on it. A writer that only ever touches ONE of these
+// resources needs no place here either; it cannot deadlock against this
+// order no matter when it runs, advisory lock or not.
 //
-// Any writer that will touch more than one of these across a single
-// transaction MUST take the advisory lock first, before locking any of the
-// others — not because of what each resource IS, but because it is the one
-// lock every such writer takes, so taking it first is what makes two
-// writers on the SAME call fully serialize instead of racing into a cycle.
-// A writer that only ever touches ONE of these resources needs no place in
-// this table; it cannot itself deadlock against this order no matter when
-// it runs.
-//
-// Every current path that acquires more than one, and the order it takes
-// them in:
-//   settleDelivery              advisory -> call_commitments -> outbox_messages
-//   parkReview                  advisory -> outbox_messages -> triage_items
-//   settleParkedPromiseCard     (caller's advisory, via admin-triage
-//                                transitionCore) -> call_commitments -> outbox_messages
-//   fulfilPromise                call_commitments -> triage_items
-//                                (always called under a caller-held advisory lock —
-//                                settleDelivery, settleReconciledReceipt)
-//   settleReconciledReceipt     advisory -> outbox_messages -> call_commitments -> triage_items
-//     (delivered branch)
-//   applyContextSkip            advisory -> outbox_messages -> triage_items
-//     ('promise_closed')
-//   markLinkUsed                advisory -> triage_items -> call_commitments -> outbox_messages
-//   call-commitments.js         advisory -> call_commitments -> outbox_messages -> triage_items
-//     applyHumanUpdate
-//     (dismiss/fulfill, this fix)
-//   admin-triage.js              advisory -> triage_items -> call_commitments -> outbox_messages
-//     transitionCore (reschedule_link_promise card resolve/dismiss,
-//     via settleParkedPromiseCard)
+// Every current path that acquires more than one, and the order it
+// actually takes them in (re-derived by grepping every
+// pg_advisory_xact_lock / forUpdate / forShare / FOR SHARE / FOR UPDATE and
+// every transaction that updates a row it previously read):
+//   upsertCommitments (call-commitments.js)
+//                                advisory -> call_log -> call_commitments
+//   recordRelayCommitments (call-commitments.js)
+//                                advisory -> call_log -> call_commitments
+//                                (via upsertCommitments)
+//   settleDelivery               advisory -> call_log -> call_commitments
+//                                -> outbox_messages [-> triage_items ->
+//                                call_log again, via fulfilPromise's
+//                                clearPromiseException, when delivered]
+//   parkReview                   advisory -> outbox_messages -> triage_items
+//                                -> call_log
+//   settleParkedPromiseCard      (caller's advisory, via admin-triage
+//                                transitionCore, which has already touched
+//                                triage_items) -> call_commitments
+//                                -> outbox_messages -> [triage_items ->
+//                                call_log again, via applyHumanUpdate's
+//                                dismiss/fulfill branch] -> outbox_messages
+//                                again
+//   fulfilPromise                 call_commitments -> triage_items ->
+//                                call_log (always called under a
+//                                caller-held advisory lock — settleDelivery,
+//                                settleReconciledReceipt)
+//   settleReconciledReceipt      advisory -> outbox_messages ->
+//     (delivered branch)         call_commitments -> triage_items -> call_log
+//   applyContextSkip             advisory -> outbox_messages -> triage_items
+//     ('promise_closed')         -> call_log
+//   markLinkUsed                 advisory -> triage_items -> call_log
+//                                (both via resolveRescheduleCards) ->
+//                                call_commitments (attemptOwnsCurrentGeneration)
+//                                -> [triage_items -> call_log again, via
+//                                clearPromiseException] -> outbox_messages
+//   call-commitments.js          advisory -> call_commitments ->
+//     applyHumanUpdate           outbox_messages -> triage_items -> call_log
+//     (dismiss/fulfill)          (via retireAttemptsOnLedgerVerdict's
+//                                clearPromiseException)
+//   admin-triage.js              advisory -> triage_items -> call_commitments
+//     transitionCore             -> outbox_messages -> [triage_items ->
+//     (reschedule_link_promise    call_log again, via applyHumanUpdate's
+//     card resolve/dismiss,       dismiss/fulfill branch] -> outbox_messages
+//     via settleParkedPromiseCard) again -> call_log again (transitionCore's
+//                                own review_status resync)
 //
 // Single-resource paths (excluded from the table above by construction —
-// nothing to invert): renewPromiseOnOfficeVerdict and upsertCommitments
-// touch only call_commitments; claimForDispatch and the failed/undelivered
-// branch of settleReconciledReceipt touch only outbox_messages.
+// nothing to invert): renewPromiseOnOfficeVerdict touches only
+// call_commitments (its outbox_messages read is a plain, unlocked SELECT,
+// never a row lock); claimForDispatch and the failed/undelivered branch of
+// settleReconciledReceipt touch only outbox_messages; addHumanCommitment
+// touches only call_commitments.
+//
+// CORRECTION (this round): the previous table was wrong in two ways, and
+// both were the same mistake — treating a resource a path reads with a
+// plain, unlocked SELECT the same as one it locks, or the reverse, missing
+// a lock a path actually takes.
+//   1. upsertCommitments was classified as touching call_commitments ONLY
+//      and excluded from the table entirely. It actually takes call_log FOR
+//      SHARE in its ownership fence, BEFORE the ON CONFLICT upsert locks
+//      the call_commitments row — and, being excluded, it never took the
+//      advisory lock at all. Crossed against applyHumanUpdate's real
+//      advisory -> call_commitments -> ... -> call_log order, that is a
+//      genuine lock-order-inversion deadlock (this round's P1; see the
+//      postgres suite's "mechanism" test for this finding, which reproduces
+//      it deterministically). recordRelayCommitments has the identical
+//      shape one level up (its own call_log FOR UPDATE precedes calling
+//      upsertCommitments), so it needed the same fix.
+//   2. Every OTHER entry in the previous table silently ended at
+//      outbox_messages or triage_items and never listed call_log as a
+//      resource at all — even though settleDelivery, markLinkUsed, and
+//      every clearPromiseException-calling path (fulfilPromise, parkReview,
+//      applyContextSkip, applyHumanUpdate's ledger dismiss/fulfill,
+//      settleParkedPromiseCard, transitionCore) all lock call_log
+//      somewhere in their sequence — settleDelivery even takes it SECOND,
+//      immediately after the advisory lock, before call_commitments. That
+//      omission is exactly why upsertCommitments' missing lock read as
+//      "safe": with call_log never named as a shared resource, nothing
+//      flagged that a path touching call_log + call_commitments with no
+//      advisory lock was even in scope for this analysis.
 const KIND = 'send_reschedule_link';
 // How long a send waits after losing the customer's advisory interlock.
 const LOCK_RETRY_MINUTES = 5;
