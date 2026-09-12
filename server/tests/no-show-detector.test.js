@@ -320,6 +320,12 @@ describe('grouped stops are evaluated as one visit (round-10 P1)', () => {
     expect(stopState([{ ...a, arrived_at: '2026-09-10T23:00:00Z' }, { ...b, arrived_at: '2026-09-10T09:30:00Z' }], opts).arrived_at)
       .toBe('2026-09-10T09:30:00Z');
     expect(stopState([a, { ...b, status: 'completed' }], opts).status).toBe('completed');
+    // The most ADVANCED live status wins, whichever member holds it: one
+    // member on_site or en_route is evidence for the whole stop (round-14
+    // P1) — on_site clears the card, en_route stops stage 1.
+    expect(stopState([a, { ...b, status: 'on_site' }], opts).status).toBe('on_site');
+    expect(stopState([{ ...a, status: 'en_route' }, b], opts).status).toBe('en_route');
+    expect(stopState([a, { ...b, status: 'en_route' }], opts).status).toBe('en_route');
     // A CANCELLED sibling is not proof the truck attended: the customer may
     // still be waiting on the members that remain live (round-10 P1).
     expect(stopState([a, { ...b, status: 'cancelled' }], opts).status).toBe('pending');

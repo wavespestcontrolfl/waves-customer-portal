@@ -819,7 +819,14 @@ function stopState(members = [], { now = new Date(), since = null } = {}) {
   // one, so a cancelled representative cannot silence its live siblings
   // either.
   const attended = members.find((m) => ATTENDED_STATUSES.includes(m.status));
-  const live = members.find((m) => LIVE_STATUSES.includes(m.status));
+  // The most ADVANCED live status among the members, not the first one found:
+  // LIVE_STATUSES runs pending -> confirmed -> en_route -> on_site, and one
+  // member sitting at 'en_route' or 'on_site' is evidence for the whole stop
+  // (one action advances them all). Taking whichever member happened to come
+  // first could hand back 'pending' and discard that — on_site clears the
+  // card outright, and en_route stops stage 1 (codex P1 round 14).
+  const live = members.filter((m) => LIVE_STATUSES.includes(m.status))
+    .sort((a, b) => LIVE_STATUSES.indexOf(b.status) - LIVE_STATUSES.indexOf(a.status))[0];
   const status = attended ? attended.status : (live ? live.status : base.status);
   return { ...base, status,
     en_route_at: earliest('en_route_at'), arrived_at: earliest('arrived_at'),
