@@ -62,6 +62,7 @@ describe('completion draft departure', () => {
     });
     expect(onPrepared).toHaveBeenCalledTimes(1);
     expect(onPrepared.mock.calls[0][1]).toMatchObject({ technicianNotes: 'Prepared report note', completionPhotos: [expect.objectContaining(photos[0])] });
+    expect(onPrepared.mock.calls[0][1]).not.toHaveProperty('timeOnSite');
     expect(onPrepared.mock.calls[0][2].servicePhotos).toEqual(photos);
     expect(onSubmit).not.toHaveBeenCalled();
     expect(screen.getByRole('button', { name: /^Save service form/i })).toBeTruthy();
@@ -132,6 +133,7 @@ describe('completion draft departure', () => {
       fireEvent.click(screen.getByRole('button', { name: /^Complete & Send Recap/i }));
     });
     expect(onSubmit).toHaveBeenCalledTimes(1);
+    expect(onSubmit.mock.calls[0][1]).toEqual(expect.objectContaining({ timeOnSite: expect.any(String) }));
     view.unmount();
     act(() => vi.advanceTimersByTime(1500));
     expect(readDraft()).toBeNull();

@@ -1002,8 +1002,11 @@ export function completionPreferencesNeedDraft({
 // is an admin-typed override of the running timer (validated 1..720 —
 // out-of-range falls back to the elapsed string so a stray value never
 // ships as operator input; handleSubmit blocks it with an alert first), a
-// string is the auto-elapsed timer, recorded exactly as before.
-export function completionTimeOnSiteBody({ backfill, typedMinutes, elapsed, adjustedMinutes = "" }) {
+// string is the auto-elapsed timer, recorded exactly as before. A prepared
+// combined-visit form omits only that automatic string so packet save can
+// allocate the shared canonical duration across members; explicit numeric
+// operator input remains attached to its member.
+export function completionTimeOnSiteBody({ backfill, typedMinutes, elapsed, adjustedMinutes = "", preparing = false }) {
   if (!backfill) {
     const trimmed = String(adjustedMinutes ?? "").trim();
     if (trimmed !== "") {
@@ -1012,7 +1015,7 @@ export function completionTimeOnSiteBody({ backfill, typedMinutes, elapsed, adju
         return { timeOnSite: minutes };
       }
     }
-    return { timeOnSite: elapsed };
+    return preparing ? {} : { timeOnSite: elapsed };
   }
   const minutes = Math.round(Number(typedMinutes));
   return Number.isFinite(minutes) && minutes > 0 ? { timeOnSite: minutes } : {};
@@ -15580,6 +15583,7 @@ export function CompletionPanel({
           typedMinutes: backfillTimeOnSite,
           elapsed,
           adjustedMinutes: liveAdjustEligible ? adjustedTimeOnSite : "",
+          preparing: !!onPrepared,
         }),
         // Re-entry steppers: only sides the tech moved off their seed post.
         // An untouched panel sends nothing and the server's computed
