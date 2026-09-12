@@ -348,6 +348,9 @@ describe('POST /schedule/optimize (multi tech-day)', () => {
   test('one unrepairable tech-day fails the WHOLE request — no partial write of the other tech', async () => {
     // t1 legal (two untimed stops); t2 has a chronology conflict and the
     // window-fit gate is off — the whole call must refuse, not write t1 alone.
+    // Calibration is ON here: a multi-tech call has no usable Google legs, so
+    // without it the guard refuses earlier (see the MODEL_UNCALIBRATED case).
+    process.env.GATE_DRIVE_TIME_CALIBRATION = 'true';
     const t1 = [stop('A', { technician_id: 't1', lng: 1, route_order: 1 }), stop('B', { technician_id: 't1', lng: 2, route_order: 2 })];
     stopsByDate[DATE] = [...t1, ...chronologyDay('t2')];
     mockOptimizerOrder(['A', 'T2', 'T1', 'U', 'B']);
@@ -1072,5 +1075,68 @@ test('an accepted overdue bundle reports real drive minutes, not zero', () => {
     expect(out.afterSeconds).toBeGreaterThan(0);
   } finally {
     RouteOptimizer.fallbackLegMetrics = realLegs;
+  }
+});
+
+// Codex round 5 P1: a pass certified WITHOUT Google's legs rests entirely on
+// the in-house model, and the fallback's own ruling requires that model to be
+// calibrated. These buttons WRITE, so an uncalibrated "legal" is refused
+// rather than committed.
+test('a multi-tech call refuses while drive-time calibration is off', async () => {
+  process.env.GATE_ROUTE_REORDER_WINDOW_FIT = 'true';
+  delete process.env.GATE_DRIVE_TIME_CALIBRATION;
+  // Two techs, both perfectly legal — but a multi-tech slice has no usable
+  // legs, so the only travel truth available is the uncalibrated model.
+  stopsByDate[DATE] = [
+    stop('A', { technician_id: 't1', lng: 1, route_order: 1 }),
+    stop('B', { technician_id: 't1', lng: 2, route_order: 2 }),
+    stop('C', { technician_id: 't2', lng: 3, route_order: 1 }),
+    stop('D', { technician_id: 't2', lng: 4, route_order: 2 }),
+  ];
+  mockOptimizerOrder(['A', 'B', 'C', 'D']);
+  const { status, body } = await optimizeAll({ date: DATE });
+  expect(status).toBe(409);
+  expect(body.reason).toBe('MODEL_UNCALIBRATED');
+  expect(body.error).toMatch(/calibration is off/i);
+  expect(trxUpdates).toEqual([]);
+
+  // With calibration on, the same board writes.
+  process.env.GATE_DRIVE_TIME_CALIBRATION = 'true';
+  mockOptimizerOrder(['A', 'B', 'C', 'D']);
+  const ok = await optimizeAll({ date: DATE });
+  expect(ok.status).toBe(200);
+  expect(trxUpdates.map((u) => u.id)).toEqual(['A', 'B', 'C', 'D']);
+});
+
+// Codex round 5 P1: today's minute is sampled BEFORE the Routes API call, and
+// the call plus a contended tech-day lock cost real time — an order that
+// barely made a remaining promise at request start can be past it by commit.
+test("today's order is re-checked at the current minute under the write locks", async () => {
+  const { lockTechDays } = require('../services/scheduling/tech-day-lock');
+  process.env.GATE_ROUTE_REORDER_WINDOW_FIT = 'true';
+  process.env.GATE_DRIVE_TIME_CALIBRATION = 'true';
+  jest.useFakeTimers({ doNotFake: ['nextTick', 'setImmediate'] });
+  jest.setSystemTime(new Date('2026-09-20T17:00:00Z')); // 13:00 ET
+  try {
+    const TODAY = '2026-09-20';
+    // A 16:00-17:00 promise (arrival deadline 18:00) behind a five-hour job:
+    // starting at 13:00 the truck just makes it; starting at 15:00 it cannot,
+    // and the legal order becomes promise-first.
+    stopsByDate[TODAY] = [
+      stop('LONG', { estimated_duration_minutes: 300, lng: 1, route_order: 1 }),
+      stop('PROMISE', { window_start: '16:00', window_end: '17:00', estimated_duration_minutes: 30, lng: 2, route_order: 2 }),
+    ];
+    mockOptimizerOrder(['LONG', 'PROMISE']);
+    // The lock is contended: two hours pass before the write.
+    lockTechDays.mockImplementation(async () => {
+      jest.setSystemTime(new Date('2026-09-20T19:00:00Z')); // 15:00 ET
+    });
+    const { status, body } = await optimizeRoute({ technicianId: 't1' });
+    expect(status).toBe(409);
+    expect(body.error).toMatch(/reload and retry/i);
+    expect(trxUpdates).toEqual([]);
+  } finally {
+    lockTechDays.mockImplementation(async () => {});
+    jest.useRealTimers();
   }
 });

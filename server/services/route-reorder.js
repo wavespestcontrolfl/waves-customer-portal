@@ -443,7 +443,7 @@ function driveableInputs({ rawGoogleOrder, rawSourceStops, rawLegs, origin }) {
  */
 function chooseWindowSafeOrder({
   RouteOptimizer, googleOrder: rawGoogleOrder, sourceStops: rawSourceStops, googleSource, legs: rawLegs = null,
-  startMin = null, origin = null,
+  startMin = null, origin = null, requireCalibratedModel = false,
 }) {
   const { sourceStops, googleOrder, legs } = driveableInputs({ rawGoogleOrder, rawSourceStops, rawLegs, origin });
   // beforeMeters (current running order, same model as the nightly ledger's
@@ -477,6 +477,17 @@ function chooseWindowSafeOrder({
   const chronoConflict = violatesWindowChronology(googleOrder, guardStops);
   const fitConflict = !chronoConflict && violatesWindowFeasibility(RouteOptimizer, googleOrder, guardStops, legs, simStart, from);
   const conflict = chronoConflict ? 'WINDOW_ORDER_CONFLICT' : (fitConflict ? 'WINDOW_FIT_CONFLICT' : null);
+  // A pass certified WITHOUT Google's real legs rests entirely on the
+  // in-house model, which the fallback's own ruling requires to be
+  // calibrated: the legacy 30 mph constant is documented as underestimating,
+  // so an uncalibrated "legal" can be a promise the truck cannot keep (codex
+  // round 5 P1). Legs get discarded for a multi-tech slice, a filtered
+  // sequence, or a moved origin — exactly the cases the admin and
+  // Intelligence Bar buttons hit. Those callers ask for this; the nightly
+  // pass keeps its own long-standing contract (it only ever SKIPS a day).
+  if (requireCalibratedModel && !legs && !gateEnvValue('GATE_DRIVE_TIME_CALIBRATION')) {
+    return { orderedStops: null, reason: 'MODEL_UNCALIBRATED', conflict, beforeMeters };
+  }
   // A tech-day already being driven cannot be simulated from HQ at the day
   // open: the truck has a real position, the live stop's remaining work is
   // unknown, and every order here would renumber it. Refuse rather than write
@@ -673,6 +684,7 @@ async function loadTechDayOrigins(conn, dateStr, { technicianId = null, now = ne
 async function assertTechDayOriginsFresh(trx, dateStr, techDayOrigins, { technicianId = null, now = new Date(), stale } = {}) {
   if (!techDayOrigins || (techDayOrigins.origins.size === 0 && techDayOrigins.unknown.size === 0)) return;
   const fresh = await loadTechDayOrigins(trx, dateStr, { technicianId, now, lock: true });
+  const result = fresh;
   const same = (a, b) => (!a && !b)
     || Boolean(a && b && a.id === b.id && a.completionTime === b.completionTime
       && a.lat === b.lat && a.lng === b.lng);
@@ -684,6 +696,7 @@ async function assertTechDayOriginsFresh(trx, dateStr, techDayOrigins, { technic
       throw stale ? stale(techId) : Object.assign(new Error('completed-stop origin changed while optimizing'), { code: 'STALE_OPTIMIZE' });
     }
   }
+  return result;
 }
 
 /**
@@ -704,7 +717,7 @@ async function assertTechDayOriginsFresh(trx, dateStr, techDayOrigins, { technic
  * than half-writing another tech's fine segment.
  */
 function resolveWindowSafeOrderByTechDay({ RouteOptimizer, orderedStops, sourceStops, googleSource, legs = null,
-  startMin = null, techDayOrigins = null }) {
+  startMin = null, techDayOrigins = null, requireCalibratedModel = true }) {
   const sourceById = new Map(sourceStops.map((s) => [s.id, s]));
   const byTech = new Map();
   for (const s of sourceStops) {
@@ -733,6 +746,7 @@ function resolveWindowSafeOrderByTechDay({ RouteOptimizer, orderedStops, sourceS
     const outcome = chooseWindowSafeOrder({
       RouteOptimizer, googleOrder: slice, sourceStops: techStops, googleSource, legs: legsAlign, startMin,
       origin: techDayOrigins ? techDayOrigins.origins.get(techId) || null : null,
+      requireCalibratedModel,
     });
     if (!outcome.orderedStops) return { refusal: { technicianId: techId, ...outcome } };
     resolvedByTech.set(techId, outcome);
