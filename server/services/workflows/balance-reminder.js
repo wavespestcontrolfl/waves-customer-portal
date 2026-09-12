@@ -378,6 +378,16 @@ class BalanceReminder {
     if (!config) return { ok: false, skipped: true, reason: "no_email_template_mapping" };
 
     const latestInvoice = await db("invoices").where({ id: invoice.id }).first();
+    // OWNERSHIP on the email sidecar's own fresh row (local audit on r43):
+    // the eligibility check below reads status alone, and a Bill-To change
+    // that lands after the text succeeded would still email the homeowner a
+    // payment demand for AP-owned debt.
+    if (latestInvoice
+      && (latestInvoice.payer_id
+        || require("../invoice-helpers").invoiceWithdrawnFromCustomer(latestInvoice))) {
+      logger.info(`[balance-reminder] late-payment email skipped for invoice ${invoice.id}: billed to a third-party payer`);
+      return { ok: false, skipped: true, reason: "invoice_payer_billed" };
+    }
     if (!invoiceCanReceiveLatePaymentEmail(latestInvoice)) {
       logger.info(
         `[balance-reminder] late-payment email skipped for invoice ${invoice.id}: invoice status is ${latestInvoice?.status || "missing"}`,
@@ -435,6 +445,15 @@ class BalanceReminder {
           `late_payment_${config.stageDays}d`,
         ],
         suppressionGroupKey: "transactional_required",
+        // …and again at the provider boundary, inside the library's handoff:
+        // the recipient resolution and payload render are awaited after the
+        // read above. Fail-closed, like the follow-up engine's email leg.
+        withProviderHandoff: async (dispatch) => {
+          const verdict = await require("../invoice-helpers").selfPayAtDispatch(invoice.id, db)();
+          if (verdict.ok !== true) return verdict;
+          await dispatch();
+          return { ok: true };
+        },
       });
 
       if (result.deduped) {
