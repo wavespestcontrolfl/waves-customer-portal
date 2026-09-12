@@ -280,7 +280,7 @@
         "Article",
         "FAQPage"
       ],
-      "thesis": "Mowing is the lawn practice homeowners control most directly and get wrong most often: height, frequency, and blade condition all affect St. Augustine health, and the cited UF/IFAS mowing guidance is the basis for every number in this post. Make no comparison between mowing and any product, and make no claim about how often we see a problem.",
+      "thesis": "Mowing height, mowing frequency and blade condition all affect St. Augustine health, and they are the practices a homeowner controls directly — the cited UF/IFAS mowing guidance is the basis for every number in this post. Make no comparison between mowing and any product, no claim about how common a mistake is, and no claim about what we see in the field.",
       "outline": [
         "Title carries the count (7); ~60-word quick answer naming all seven mistakes up front",
         "1. Mowing below the recommended height for St. Augustine (state UF/IFAS's current recommended range, verified)",
@@ -702,7 +702,7 @@
         "Why post-emergent control in spring is too late — the burs have already formed",
         "The fall pre-emergent window: what soil-temperature trigger UF/IFAS ties germination to (verified)",
         "What burweed looks like young, for homeowners who want to scout",
-        "Density as the first defense: why thick turf does much of a pre-emergent’s job",
+        "Density as the first defense: how thick, healthy turf helps suppress weed establishment — describe this without comparing it to a pre-emergent or claiming it replaces one",
         "Pairing with the rest of the fall weed program (link the pre-emergent and winter-weed posts)"
       ],
       "sources": [
@@ -1164,7 +1164,7 @@
       "schema_types": [
         "Article"
       ],
-      "thesis": "Many “dying shrub” worries start with a watering theory and turn out to be an insect — the visible symptom is rarely where the problem began. Do not quantify how often, and make no claim about what Waves service calls find.",
+      "thesis": "A shrub in decline is often read as a watering problem when the visible symptom can point to an insect instead — the symptom is rarely where the problem began. State no frequency: do not say how often either explanation is right, and make no claim about what our service calls find.",
       "outline": [
         "Title carries the count (6); ~60-word quick answer naming all six signs up front",
         "1. Sticky film or black sooty coating on leaves (honeydew producers)",
@@ -1338,7 +1338,7 @@
       ],
       "thesis": "North Port's sandy soils and dry winters punish thirsty ornamentals — the Florida-Friendly Landscaping program's plant guidance points to shrubs that establish once and then largely fend for themselves.",
       "outline": [
-        "The North Port context: sandy soil, dry-season irrigation limits, well-water lots",
+        "The North Port context: sandy soil, well-water lots, and — ONLY if the watering-restriction source named in the sources can be located and cited — the local dry-season irrigation limits; if that page cannot be found, cover the soil and well-water context alone and omit irrigation limits entirely rather than describing them uncited",
         "What 'Florida-Friendly' actually means (the UF/IFAS FFL program, described accurately)",
         "A verified shortlist of drought-tolerant shrubs for SWFL from FFL/UF/IFAS plant guidance (each entry verified against the source)",
         "Right plant, right place: sun, salt, and mature-size mistakes that undo drought tolerance",
