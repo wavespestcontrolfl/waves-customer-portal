@@ -216,6 +216,10 @@ async function sendCustomerMessage(input) {
   if (withSmsHandoff && (typeof withSmsHandoff !== 'function' || sendInput.channel !== 'sms' || !smsHandoffAllowed)) {
     return { sent: false, blocked: true, deliveryOutcome: 'not_sent', code: 'UNSUPPORTED_SMS_HANDOFF', reason: 'Locked SMS handoff is restricted to immediate lead replies and visit summaries' };
   }
+  if (typeof preSendCheck === 'function' && withSmsHandoff) {
+    return { sent: false, blocked: true, deliveryOutcome: 'not_sent', code: 'UNSUPPORTED_SEND_GUARD_COMBINATION',
+      reason: 'A caller pre-send check cannot be combined with a locked SMS handoff' };
+  }
   // SMS link schemes are removed before audit counting, matching the final
   // Twilio boundary for direct callers.
   // Typographic punctuation (curly quotes, em dashes, real ellipses) forces
@@ -446,7 +450,17 @@ async function sendCustomerMessage(input) {
     if (typeof preSendCheck !== 'function') return { ok: true };
     try {
       const verdict = await preSendCheck({ channel: sendInput.channel });
-      if (verdict?.ok === true) return verdict;
+      if (verdict?.ok === true) {
+        if (Object.prototype.hasOwnProperty.call(verdict, 'validUntil')) {
+          if (typeof verdict.validUntil !== 'number' || !Number.isFinite(verdict.validUntil)) {
+            return { ok: false, code: 'PRE_SEND_CHECK_INVALID', reason: 'pre-send check returned an invalid validUntil', retryable: false };
+          }
+          if (Date.now() >= verdict.validUntil) {
+            return { ok: false, code: 'PRE_SEND_CHECK_EXPIRED', reason: 'pre-send authority expired', retryable: true };
+          }
+        }
+        return verdict;
+      }
       return {
         ok: false,
         code: verdict?.code || 'PRE_SEND_CHECK_FAILED',
@@ -462,6 +476,34 @@ async function sendCustomerMessage(input) {
       };
     }
   };
+  const providerPreSendCheck = async () => {
+    const windowVerdict = checkSendWindow(sendInput, policy, contactState);
+    if (!windowVerdict || windowVerdict.ok !== true) {
+      return rememberBoundaryBlock(windowVerdict, 'check_send_window_boundary');
+    }
+    // Move-hold boundary re-check at the ACTUAL Twilio handoff (uncapped
+    // codex audit P1): the step-6.4 check runs before the provider's own
+    // internal awaits — a unit move stamping during them must still hold
+    // the send. Same deferral contract as the window hold.
+    if (appointmentMoveHoldApplies(sendInput) && await appointmentMoveHeld(sendInput)) {
+      return rememberBoundaryBlock(
+        { ok: false, code: 'MOVE_HOLD', reason: 'grouped unit move in progress — appointment notice held', retryable: true },
+        'move_hold_boundary',
+      );
+    }
+    const callerVerdict = await runCallerPreSendCheck();
+    if (!callerVerdict.ok) return rememberBoundaryBlock(callerVerdict, 'pre_send_check_boundary');
+    // The awaited caller guard may itself straddle 20:00 ET. Keep this pure
+    // clock check as the final operation before returning to the provider.
+    const finalWindowVerdict = checkSendWindow(sendInput, policy, contactState);
+    return finalWindowVerdict?.ok === true
+      ? { ...callerVerdict, ...finalWindowVerdict }
+      : rememberBoundaryBlock(finalWindowVerdict, 'check_send_window_boundary');
+  };
+  // Push performs an ownership read after the awaited guard. It can then
+  // re-check the window without another opaque caller await or a DB lock.
+  providerPreSendCheck.isStillValid = () => checkSendWindow(sendInput, policy, contactState)?.ok === true;
+
   providerOutcome = { sent: false, deliveryOutcome: 'uncertain' };
   providerOutcome = await dispatchToProvider(sendInput, {
     // The caller's handoff receives (trx, onProviderStart): the callback fires
@@ -490,35 +532,12 @@ async function sendCustomerMessage(input) {
       await dispatch();
       return { ok: true };
     })),
-    preSendCheck: async () => {
-      const windowVerdict = checkSendWindow(sendInput, policy, contactState);
-      if (!windowVerdict || windowVerdict.ok !== true) {
-        return rememberBoundaryBlock(windowVerdict, 'check_send_window_boundary');
-      }
-      // Move-hold boundary re-check at the ACTUAL Twilio handoff (uncapped
-      // codex audit P1): the step-6.4 check runs before the provider's own
-      // internal awaits — a unit move stamping during them must still hold
-      // the send. Same deferral contract as the window hold.
-      if (appointmentMoveHoldApplies(sendInput) && await appointmentMoveHeld(sendInput)) {
-        return rememberBoundaryBlock(
-          { ok: false, code: 'MOVE_HOLD', reason: 'grouped unit move in progress — appointment notice held', retryable: true },
-          'move_hold_boundary',
-        );
-      }
-      const callerVerdict = await runCallerPreSendCheck();
-      if (!callerVerdict.ok) return rememberBoundaryBlock(callerVerdict, 'pre_send_check_boundary');
-      // The awaited caller guard may itself straddle 20:00 ET. Keep this pure
-      // clock check as the final operation before returning to the provider.
-      const finalWindowVerdict = checkSendWindow(sendInput, policy, contactState);
-      return finalWindowVerdict?.ok === true
-        ? finalWindowVerdict
-        : rememberBoundaryBlock(finalWindowVerdict, 'check_send_window_boundary');
-    },
+    preSendCheck: providerPreSendCheck,
   });
 
-  // Push fan-out consumes the provider hook as a boolean and therefore loses
-  // its code. Restore that boundary refusal only when the provider proves no
-  // leg was sent. An accepted or uncertain outcome remains authoritative.
+  // Push fan-out normalizes a provider-hook refusal to false and therefore
+  // loses its code. Restore that boundary refusal only when the provider
+  // proves no leg was sent. Accepted or uncertain remains authoritative.
   if (providerBoundaryBlock && providerOutcome.deliveryOutcome === 'not_sent') {
     providerOutcome = {
       ...providerOutcome,

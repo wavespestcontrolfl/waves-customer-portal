@@ -219,24 +219,49 @@ class PushNotificationService {
     const results = [];
     let claimLost = false;
     for (const sub of subs) {
-      if (opts.notificationId) {
-        // A paused old worker cannot hand off another device after a newer
-        // worker reclaimed its expired lease.
-        const owned = await db('notifications').where({ id: opts.notificationId })
-          .whereRaw("metadata->>'pushAttemptToken' = ? AND (metadata->>'pushLeaseUntil')::timestamptz > now()", [attemptToken]).first('id').catch(() => null);
-        if (!owned) { claimLost = true; break; }
-      }
-      if (typeof opts.shouldContinue === 'function') {
-        let go = false;
-        try { go = await opts.shouldContinue(); } catch { go = false; }
-        if (!go) {
-          results.push({ sent: false, skipped: true, reason: 'send_window_closed' });
-          continue;
+      let earliestValidUntil = null;
+      const compositeShouldContinue = (typeof opts.shouldContinue === 'function' || opts.notificationId)
+        ? async () => {
+          if (typeof opts.shouldContinue === 'function') {
+            let verdict;
+            try { verdict = await opts.shouldContinue(); } catch { return false; }
+            if (verdict !== true && verdict?.ok !== true) return false;
+            if (verdict && typeof verdict === 'object'
+              && Object.prototype.hasOwnProperty.call(verdict, 'validUntil')) {
+              if (typeof verdict.validUntil !== 'number' || !Number.isFinite(verdict.validUntil)) return false;
+              earliestValidUntil = earliestValidUntil == null
+                ? verdict.validUntil : Math.min(earliestValidUntil, verdict.validUntil);
+            }
+          }
+          if (opts.notificationId) {
+            // The opaque caller check can wait while a newer worker reclaims
+            // the lease. Verify ownership only after it returns; never hold a
+            // notification row lock across caller code.
+            const owned = await db('notifications').where({ id: opts.notificationId })
+              .whereRaw("metadata->>'pushAttemptToken' = ? AND (metadata->>'pushLeaseUntil')::timestamptz > now()", [attemptToken])
+              .first('id', 'metadata').catch(() => null);
+            const ownedLeaseUntil = Date.parse(owned?.metadata?.pushLeaseUntil);
+            if (!owned || !Number.isFinite(ownedLeaseUntil) || ownedLeaseUntil <= Date.now()) {
+              claimLost = true;
+              return false;
+            }
+          }
+          if (earliestValidUntil != null && Date.now() >= earliestValidUntil) return false;
+          if (typeof opts.shouldContinue?.isStillValid === 'function') {
+            try { if (opts.shouldContinue.isStillValid() !== true) return false; } catch { return false; }
+          }
+          return true;
         }
+        : undefined;
+      if (compositeShouldContinue && !(await compositeShouldContinue())) {
+        if (claimLost) break;
+        results.push({ sent: false, skipped: true, reason: 'send_window_closed' });
+        continue;
       }
-      const result = await sendSubscription(sub, notification, { shouldContinue: opts.shouldContinue })
+      const result = await sendSubscription(sub, notification, { shouldContinue: compositeShouldContinue })
         .catch(() => ({ sent: false, failed: true, reason: 'provider_failure' }));
       results.push(result);
+      if (claimLost) break;
       if (result.sent && opts.notificationId) {
         // Persist the first acceptance before walking another device, so a
         // later provider crash does not erase an already accepted event.
