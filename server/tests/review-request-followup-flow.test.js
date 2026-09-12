@@ -44,6 +44,7 @@ const ReviewService = require('../services/review-request');
 function chain(overrides = {}) {
   return {
     where: jest.fn(function () { return this; }),
+    whereNot: jest.fn(function () { return this; }),
     whereIn: jest.fn(function () { return this; }),
     whereNotIn: jest.fn(function () { return this; }),
     whereNull: jest.fn(function () { return this; }),
@@ -227,6 +228,7 @@ describe('review request follow-up flow', () => {
       ]),
       chain({ first: jest.fn().mockResolvedValue(null) }),
       updateQuery,
+      updateQuery, // the reopen after the definite not-sent
     ];
     const customerQuery = chain({
       first: jest.fn().mockResolvedValue({
@@ -259,7 +261,118 @@ describe('review request follow-up flow', () => {
     const result = await ReviewService.processFollowups();
 
     expect(result).toEqual({ sent: 0, suppressed: 0, internalFollowups: 0 });
-    expect(updateQuery.update).not.toHaveBeenCalled();
+    // Pre-send marker, then handed back on the definite not-sent (codex
+    // #4338 P1, round 4) — the row is eligible again for a later run.
+    expect(updateQuery.update).toHaveBeenNthCalledWith(1, expect.objectContaining({ followup_sent: true }));
+    expect(updateQuery.update).toHaveBeenLastCalledWith(expect.objectContaining({ followup_sent: false, followup_sent_at: null }));
+  });
+
+  test('an uncertain follow-up handoff is held, not left retryable (codex #4338 P1)', async () => {
+    const updateQuery = chain();
+    const reviewRequestQueries = [
+      chain(), // deleted-customer follow-up close-out pre-pass
+      collection([]),
+      collection([
+        {
+          id: 'rr-uncertain',
+          customer_id: 'cust-1',
+          sms_sent_at: '2026-05-30T15:00:00.000Z',
+          status: 'sent',
+          score: null,
+        },
+      ]),
+      chain({ first: jest.fn().mockResolvedValue(null) }),
+      updateQuery,
+    ];
+    const customerQuery = chain({
+      first: jest.fn().mockResolvedValue({
+        id: 'cust-1',
+        first_name: 'Jamie',
+        last_name: 'Rios',
+        phone: '+19415550123',
+        city: 'Sarasota',
+        has_left_google_review: false,
+      }),
+    });
+
+    db.mockImplementation((table) => {
+      if (table === 'review_requests') return reviewRequestQueries.shift();
+      if (table === 'customers') return customerQuery;
+      throw new Error(`Unexpected table query: ${table}`);
+    });
+    getServiceContact.mockReturnValue({ phone: '+19415550123', name: 'Jamie' });
+    getServiceContactSmsRecipient.mockReturnValue({ phone: '+19415550123', name: 'Jamie' });
+    renderSmsTemplate.mockResolvedValue('Please review us');
+    // No SID, no thrown error — the provider handoff never confirmed
+    // accept/reject. retryable is unset, exactly the shape Codex flagged.
+    sendCustomerMessage.mockResolvedValue({
+      sent: false,
+      blocked: false,
+      deliveryOutcome: 'uncertain',
+      code: 'PROVIDER_FAILURE',
+      auditLogId: 'audit-1',
+    });
+
+    const result = await ReviewService.processFollowups();
+
+    // Held, not left retryable for the next run to duplicate-send.
+    expect(result).toEqual({ sent: 0, suppressed: 1, internalFollowups: 0 });
+    expect(updateQuery.update).toHaveBeenCalledWith(expect.objectContaining({
+      followup_sent: true,
+    }));
+  });
+
+  test('an uncertain follow-up handoff THROWN (not returned) is also held, not left eligible (codex #4338 P1, round 2)', async () => {
+    // The old catch only logged and returned — followup_sent stayed unset,
+    // so the NEXT run's candidate query re-selected this row and could send
+    // a duplicate follow-up after a post-handoff audit-persistence throw.
+    const updateQuery = chain();
+    const reviewRequestQueries = [
+      chain(), // deleted-customer follow-up close-out pre-pass
+      collection([]),
+      collection([
+        {
+          id: 'rr-uncertain-throw',
+          customer_id: 'cust-1',
+          sms_sent_at: '2026-05-30T15:00:00.000Z',
+          status: 'sent',
+          score: null,
+        },
+      ]),
+      chain({ first: jest.fn().mockResolvedValue(null) }),
+      updateQuery,
+    ];
+    const customerQuery = chain({
+      first: jest.fn().mockResolvedValue({
+        id: 'cust-1',
+        first_name: 'Jamie',
+        last_name: 'Rios',
+        phone: '+19415550123',
+        city: 'Sarasota',
+        has_left_google_review: false,
+      }),
+    });
+
+    db.mockImplementation((table) => {
+      if (table === 'review_requests') return reviewRequestQueries.shift();
+      if (table === 'customers') return customerQuery;
+      throw new Error(`Unexpected table query: ${table}`);
+    });
+    getServiceContact.mockReturnValue({ phone: '+19415550123', name: 'Jamie' });
+    getServiceContactSmsRecipient.mockReturnValue({ phone: '+19415550123', name: 'Jamie' });
+    renderSmsTemplate.mockResolvedValue('Please review us');
+    sendCustomerMessage.mockImplementation(() => {
+      throw Object.assign(new Error('audit write failed'), {
+        providerOutcome: { sent: false, deliveryOutcome: 'uncertain', code: 'PROVIDER_FAILURE' },
+      });
+    });
+
+    const result = await ReviewService.processFollowups();
+
+    expect(result).toEqual({ sent: 0, suppressed: 1, internalFollowups: 0 });
+    expect(updateQuery.update).toHaveBeenCalledWith(expect.objectContaining({
+      followup_sent: true,
+    }));
   });
 
   test('creates inline review rows as pending until the bundled completion SMS is delivered', async () => {
@@ -662,6 +775,10 @@ describe('review request follow-up flow', () => {
 
   test('stale claim, provider confirms nothing left → pre-provider crash, claim released', async () => {
     const { findOutboundMessageSince } = require('../services/twilio');
+    // The numbers the customer holds now, then the recipient-less pass that
+    // covers a number changed or merged since the claim — "nothing left"
+    // means both came back empty.
+    findOutboundMessageSince.mockResolvedValueOnce({ found: false });
     findOutboundMessageSince.mockResolvedValueOnce({ found: false });
     const { rrQuery } = wireStaleClaimNoLocalEvidence();
     rrQuery.update.mockResolvedValueOnce(1); // the reclaim
@@ -761,6 +878,7 @@ describe('review request follow-up flow', () => {
         if (table === 'customers') return customersQuery;
         throw new Error(`Unexpected table query: ${table}`);
       });
+      require('../services/twilio').findOutboundMessageSince.mockResolvedValueOnce({ found: false });
       require('../services/twilio').findOutboundMessageSince.mockResolvedValueOnce({ found: false });
       expect(await ReviewService.findInlineAwaitingEmail('cust-1')).toBeNull();
       expect(rrQuery.update).not.toHaveBeenCalled();
@@ -961,7 +1079,9 @@ describe('review request follow-up flow', () => {
     test('_sendOutreachEmail (one-off): a post-dispatch throw is uncertain — counted as the ask, never "try again" (r9 P2)', async () => {
       const rrUpdateOneOff = jest.fn().mockResolvedValue(1);
       db.mockImplementation((table) => {
-        if (table === 'review_requests') return chain({ update: rrUpdateOneOff });
+        // The row's status stays 'sent'/'failed' here, never 'sending': these
+        // throws are all a definite provider outcome, not the uncertain hold.
+        if (table === 'review_requests') return chain({ update: rrUpdateOneOff, first: jest.fn().mockResolvedValue({ status: 'sent' }) });
         throw new Error(`Unexpected table query: ${table}`);
       });
       const args = { request: { id: 'rr-7' }, customer: { id: 'cust-1', first_name: 'Megan' }, contact: { email: 'megan@example.com', name: 'Megan' }, reviewUrl: 'https://x/rate/t', techName: 'Adam', manageRetryVia: null };

@@ -1,64 +1,48 @@
-import React, { useState, useEffect, useRef } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import { useSearchParams } from "react-router-dom";
+import { Calculator, ClipboardList, Download, Gauge, Percent, RefreshCw, Scale, SlidersHorizontal } from "lucide-react";
 import useRenderedTabBeacon from "../../hooks/useRenderedTabBeacon";
-import {
-  Calculator,
-  ClipboardList,
-  Gauge,
-  Percent,
-  Scale,
-  SlidersHorizontal,
-} from "lucide-react";
 import PricingLogicPanel from "../../components/admin/PricingLogicPanel";
 import AdminCommandHeader from "../../components/admin/AdminCommandHeader";
 import PricingRealityCheckPage from "./PricingRealityCheckPage";
-
-const ROBOTO = "'Roboto', Arial, sans-serif";
-
-// V2 token pass: teal/purple fold to zinc-900. Semantic green/amber/red preserved.
-const D = {
-  bg: "#F4F4F5",
-  card: "#FFFFFF",
-  border: "#E4E4E7",
-  teal: "#18181B",
-  green: "#15803D",
-  amber: "#A16207",
-  red: "#991B1B",
-  purple: "#18181B",
-  text: "#27272A",
-  muted: "#71717A",
-  white: "#FFFFFF",
-  heading: "#09090B",
-  input: "#FFFFFF",
-};
+import {
+  ActionFeedback,
+  Badge,
+  Button,
+  Card,
+  CardBody,
+  CardHeader,
+  CardTitle,
+  Field,
+  Input,
+  Select,
+  Table,
+  TBody,
+  TD,
+  TH,
+  THead,
+  TR,
+  UiSurface,
+} from "../../components/ui";
 
 const API_BASE = import.meta.env.VITE_API_URL || "/api";
 const PRICING_SECTIONS = [
   { key: "margins", label: "Margins", Icon: Percent },
   { key: "calibration", label: "Calibration", Icon: Gauge },
-  { key: "specs", label: "Service Specs", Icon: ClipboardList },
-  { key: "logic", label: "Logic Rules", Icon: SlidersHorizontal },
+  { key: "specs", label: "Service specs", Icon: ClipboardList },
+  { key: "logic", label: "Logic rules", Icon: SlidersHorizontal },
   { key: "reality", label: "Audit", Icon: Scale },
 ];
 
 function sectionFromSearchParams(searchParams) {
   const section = searchParams.get("section");
-  return PRICING_SECTIONS.some((item) => item.key === section)
-    ? section
-    : "margins";
+  return PRICING_SECTIONS.some((item) => item.key === section) ? section : "margins";
 }
 
 function scrollToPricingSection(key) {
-  const scroll = () => {
-    document
-      .getElementById(`pricing-${key}`)
-      ?.scrollIntoView({ behavior: "smooth", block: "start" });
-  };
-  if (typeof requestAnimationFrame === "function") {
-    requestAnimationFrame(scroll);
-  } else {
-    scroll();
-  }
+  const scroll = () => document.getElementById(`pricing-${key}`)?.scrollIntoView({ behavior: "smooth", block: "start" });
+  if (typeof requestAnimationFrame === "function") requestAnimationFrame(scroll);
+  else scroll();
 }
 
 const af = (p, o = {}) =>
@@ -88,15 +72,16 @@ function adminRawFetch(p, o = {}) {
 }
 
 function isoDateOffset(daysBack) {
-  const d = new Date();
-  d.setDate(d.getDate() - daysBack);
-  const year = d.getFullYear();
-  const month = String(d.getMonth() + 1).padStart(2, "0");
-  const day = String(d.getDate()).padStart(2, "0");
-  return `${year}-${month}-${day}`;
+  const date = new Date();
+  date.setDate(date.getDate() - daysBack);
+  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
 }
 
-// ── Margin Calculator ──
+const formatMinutes = (value) => {
+  const number = Number(value);
+  return Number.isFinite(number) ? `${number > 0 ? "+" : ""}${number.toFixed(1)} min` : "0.0 min";
+};
+
 export function MarginCalculator() {
   const [lotSqFt, setLotSqFt] = useState(10000);
   const [homeSqFt, setHomeSqFt] = useState(2000);
@@ -120,532 +105,78 @@ export function MarginCalculator() {
         }),
       });
       setMargins(data);
-    } catch {
-      setMargins(null);
+    } catch (error) {
+      // af() throws the server's message on a non-2xx; discarding it made an
+      // expired session or a 500 look like "no results" with no explanation.
+      setMargins({ error: error.message || "Margin check failed" });
     }
     setLoading(false);
   };
+  useEffect(() => { fetchMargins(); }, []);
 
-  useEffect(() => {
-    fetchMargins();
-  }, []);
-
-  const marginColor = (m) => {
-    if (m >= 0.45) return D.green;
-    if (m >= 0.35) return D.amber;
-    return D.red;
-  };
-
-  const marginLabel = (m) => {
-    if (m >= 0.45) return "Healthy";
-    if (m >= 0.35) return "Acceptable";
-    return "Below Floor";
-  };
-
-  const costSourceLabel = (source) => {
-    if (source === "inventory_cost_per_unit") return "Inventory";
-    if (source === "inventory_best_price_unit_size") return "Inventory";
-    return "Fallback";
-  };
-
-  const inputStyle = {
-    padding: "8px 10px",
-    background: D.input,
-    border: `1px solid ${D.border}`,
-    borderRadius: 6,
-    color: D.heading,
-    fontSize: 14,
-    width: "100%",
-    maxWidth: "100%",
-    boxSizing: "border-box",
-    textAlign: "right",
-    fontFamily: ROBOTO,
-    outline: "none",
-  };
-  // Label above its input (block stack) so narrow widths never collide.
-  const calcLabelStyle = {
-    display: "flex",
-    flexDirection: "column",
-    gap: 4,
-    minWidth: 0,
-    fontSize: 12,
-    color: D.muted,
-  };
+  const costSourceLabel = (source) => source === "inventory_cost_per_unit" || source === "inventory_best_price_unit_size" ? "Inventory" : "Fallback";
+  // A fallback cost is an estimate, not a measured one — main flagged it amber.
+  const costSourceTone = (source) => costSourceLabel(source) === "Fallback" ? "warn" : "neutral";
+  // Three bands, three tones, as on main: healthy green, the 0.35-0.45
+  // "Acceptable" band amber so a drifting margin is still visible, below-floor
+  // red. Collapsing the middle band to neutral removed the only warning.
+  const marginTone = (margin) => margin < 0.35 ? "alert" : margin >= 0.45 ? "strong" : "warn";
+  const marginLabel = (margin) => margin >= 0.45 ? "Healthy" : margin >= 0.35 ? "Acceptable" : "Below floor";
 
   return (
-    <div
-      style={{
-        background: D.card,
-        borderRadius: 12,
-        border: `1px solid ${D.border}`,
-        padding: 20,
-        marginBottom: 20,
-      }}
-    >
-      {" "}
-      <div
-        style={{
-          display: "flex",
-          justifyContent: "space-between",
-          alignItems: "center",
-          flexWrap: "wrap",
-          gap: 8,
-          marginBottom: 16,
-        }}
-      >
-        {" "}
-        <h2
-          style={{
-            margin: 0,
-            fontSize: 12,
-            fontWeight: 500,
-            color: D.heading,
-            fontFamily: ROBOTO,
-            letterSpacing: "0.02em",
-          }}
-        >
-          Margin calculator
-        </h2>{" "}
-        <button
-          onClick={fetchMargins}
-          disabled={loading}
-          style={{
-            padding: "6px 14px",
-            borderRadius: 6,
-            border: "none",
-            cursor: "pointer",
-            fontSize: 12,
-            fontWeight: 500,
-            background: D.teal,
-            color: D.white,
-            maxWidth: "100%",
-            whiteSpace: "normal",
-          }}
-        >
-          {loading ? "Calculating..." : "Calculate"}
-        </button>{" "}
-      </div>{" "}
-      <div
-        style={{
-          display: "grid",
-          gridTemplateColumns: "repeat(auto-fill, minmax(140px, 1fr))",
-          gap: 12,
-          marginBottom: 16,
-        }}
-      >
-        {" "}
-        <label style={calcLabelStyle}>
-          Lot SqFt
-          <input
-            type="number"
-            value={lotSqFt}
-            onChange={(e) => setLotSqFt(Number(e.target.value))}
-            style={inputStyle}
-          />{" "}
-        </label>{" "}
-        <label style={calcLabelStyle}>
-          Home SqFt
-          <input
-            type="number"
-            value={homeSqFt}
-            onChange={(e) => setHomeSqFt(Number(e.target.value))}
-            style={inputStyle}
-          />{" "}
-        </label>{" "}
-        <label style={calcLabelStyle}>
-          Lawn SqFt
-          <input
-            type="number"
-            value={lawnSqFt}
-            onChange={(e) => setLawnSqFt(Number(e.target.value))}
-            style={inputStyle}
-          />{" "}
-        </label>{" "}
-        <label style={calcLabelStyle}>
-          Bed Area
-          <input
-            type="number"
-            value={bedArea}
-            onChange={(e) => setBedArea(Number(e.target.value))}
-            style={inputStyle}
-          />{" "}
-        </label>{" "}
-        <label style={calcLabelStyle}>
-          WaveGuard
-          <select
-            value={tier}
-            onChange={(e) => setTier(e.target.value)}
-            style={{ ...inputStyle, textAlign: "left" }}
-          >
-            {" "}
-            <option value="bronze">Bronze</option>{" "}
-            <option value="silver">Silver</option>{" "}
-            <option value="gold">Gold</option>{" "}
-            <option value="platinum">Platinum</option>{" "}
-          </select>{" "}
-        </label>{" "}
-      </div>
-      {/* The server labels margins by the ENGINE-derived tier for the bundle
-          it actually priced. If a min_services retune makes that diverge
-          from the selection, say so — never let the operator read gold
-          margins under a silver label. */}
-      {margins?.waveguardTier && (
-        <div
-          style={{
-            fontSize: 12,
-            fontFamily: ROBOTO,
-            color: margins.waveguardTierMismatch ? D.amber : D.muted,
-            marginBottom: 12,
-          }}
-        >
-          {margins.waveguardTierMismatch
-            ? `Engine priced this bundle as ${margins.waveguardTier.toUpperCase()} (requested ${String(margins.waveguardTierRequested || tier).toUpperCase()}) — tier thresholds are out of line with the engine; margins below are ${margins.waveguardTier.toUpperCase()} margins.`
-            : `Margins priced at ${margins.waveguardTier.toUpperCase()} tier discounts.`}
+    // EstimatesPageV2.jsx:4192 renders this export directly on its Pricing tab
+    // and provides no UiSurface, so the density boundary belongs here rather
+    // than only around PricingLogicPage's returns — otherwise these fields drop
+    // to the legacy 13px on that caller.
+    <UiSurface as={Card} density="comfortable" className="mb-5">
+      <CardHeader className="flex flex-wrap items-start justify-between gap-3"><CardTitle className="text-16">Margin calculator</CardTitle><Button onClick={fetchMargins} loading={loading}>{loading ? "Calculating..." : "Calculate"}</Button></CardHeader>
+      <CardBody className="space-y-4">
+        <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-5">
+          <Field label="Lot SqFt"><Input type="number" value={lotSqFt} onChange={(event) => setLotSqFt(Number(event.target.value))} className="u-nums" /></Field>
+          <Field label="Home SqFt"><Input type="number" value={homeSqFt} onChange={(event) => setHomeSqFt(Number(event.target.value))} className="u-nums" /></Field>
+          <Field label="Lawn SqFt"><Input type="number" value={lawnSqFt} onChange={(event) => setLawnSqFt(Number(event.target.value))} className="u-nums" /></Field>
+          <Field label="Bed area"><Input type="number" value={bedArea} onChange={(event) => setBedArea(Number(event.target.value))} className="u-nums" /></Field>
+          <Field label="WaveGuard"><Select value={tier} onChange={(event) => setTier(event.target.value)}><option value="bronze">Bronze</option><option value="silver">Silver</option><option value="gold">Gold</option><option value="platinum">Platinum</option></Select></Field>
         </div>
-      )}
-      {margins?.services && (
-        <div style={{ overflowX: "auto" }}>
-          {" "}
-          <table
-            style={{ width: "100%", fontSize: 12, borderCollapse: "collapse" }}
-          >
-            <thead>
-              <tr>
-                <th
-                  style={{
-                    padding: "8px 10px",
-                    textAlign: "left",
-                    color: D.muted,
-                    borderBottom: `2px solid ${D.border}`,
-                    fontSize: 11,
-                    fontWeight: 700,
-                  }}
-                >
-                  Service
-                </th>
-                <th
-                  style={{
-                    padding: "8px 10px",
-                    textAlign: "right",
-                    color: D.muted,
-                    borderBottom: `2px solid ${D.border}`,
-                    fontSize: 11,
-                    fontWeight: 700,
-                  }}
-                >
-                  Annual Price
-                </th>
-                <th
-                  style={{
-                    padding: "8px 10px",
-                    textAlign: "right",
-                    color: D.muted,
-                    borderBottom: `2px solid ${D.border}`,
-                    fontSize: 11,
-                    fontWeight: 700,
-                  }}
-                >
-                  Est. Cost
-                </th>
-                <th
-                  style={{
-                    padding: "8px 10px",
-                    textAlign: "left",
-                    color: D.muted,
-                    borderBottom: `2px solid ${D.border}`,
-                    fontSize: 11,
-                    fontWeight: 700,
-                  }}
-                >
-                  Cost Source
-                </th>
-                <th
-                  style={{
-                    padding: "8px 10px",
-                    textAlign: "right",
-                    color: D.muted,
-                    borderBottom: `2px solid ${D.border}`,
-                    fontSize: 11,
-                    fontWeight: 700,
-                  }}
-                >
-                  After Discount
-                </th>
-                <th
-                  style={{
-                    padding: "8px 10px",
-                    textAlign: "right",
-                    color: D.muted,
-                    borderBottom: `2px solid ${D.border}`,
-                    fontSize: 11,
-                    fontWeight: 700,
-                  }}
-                >
-                  Margin
-                </th>
-                <th
-                  style={{
-                    padding: "8px 10px",
-                    textAlign: "center",
-                    color: D.muted,
-                    borderBottom: `2px solid ${D.border}`,
-                    fontSize: 11,
-                    fontWeight: 700,
-                  }}
-                >
-                  Status
-                </th>
-              </tr>
-            </thead>
-            <tbody>
-              {margins.services.map((s) => (
-                <tr
-                  key={s.service}
-                  style={{ borderBottom: `1px solid ${D.border}22` }}
-                >
-                  <td
-                    style={{
-                      padding: "8px 10px",
-                      color: D.text,
-                      fontWeight: 500,
-                      fontSize: 12,
-                      textTransform: "capitalize",
-                    }}
-                  >
-                    {s.service.replace(/_/g, " ")}
-                  </td>
-                  <td
-                    style={{
-                      padding: "8px 10px",
-                      textAlign: "right",
-                      fontFamily: ROBOTO,
-                      fontSize: 13,
-                    }}
-                  >
-                    ${s.annual?.toLocaleString() || "—"}
-                  </td>
-                  <td
-                    style={{
-                      padding: "8px 10px",
-                      textAlign: "right",
-                      fontFamily: ROBOTO,
-                      fontSize: 13,
-                      color: D.muted,
-                    }}
-                  >
-                    ${s.estimatedCost?.toLocaleString() || "—"}
-                  </td>
-                  <td
-                    style={{
-                      padding: "8px 10px",
-                      color:
-                        s.materialCostSource === "fallback" ? D.amber : D.green,
-                      fontSize: 11,
-                      fontWeight: 500,
-                    }}
-                  >
-                    {costSourceLabel(s.materialCostSource)}
-                    {s.materialPerVisit != null
-                      ? ` · $${Number(s.materialPerVisit).toFixed(2)}/visit`
-                      : ""}
-                  </td>
-                  <td
-                    style={{
-                      padding: "8px 10px",
-                      textAlign: "right",
-                      fontFamily: ROBOTO,
-                      fontSize: 13,
-                    }}
-                  >
-                    ${s.afterDiscount?.toLocaleString() || "—"}
-                  </td>
-                  <td
-                    style={{
-                      padding: "8px 10px",
-                      textAlign: "right",
-                      fontFamily: ROBOTO,
-                      fontSize: 13,
-                      fontWeight: 700,
-                      color: marginColor(s.margin),
-                    }}
-                  >
-                    {s.margin != null ? `${(s.margin * 100).toFixed(1)}%` : "—"}
-                  </td>
-                  <td style={{ padding: "8px 10px", textAlign: "center" }}>
-                    {s.margin != null && (
-                      <span
-                        style={{
-                          fontSize: 10,
-                          padding: "2px 8px",
-                          borderRadius: 4,
-                          fontWeight: 500,
-                          background: `${marginColor(s.margin)}18`,
-                          color: marginColor(s.margin),
-                        }}
-                      >
-                        {marginLabel(s.margin)}
-                      </span>
-                    )}
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>{" "}
-        </div>
-      )}
-      {margins?.error && (
-        <div style={{ color: D.red, fontSize: 12, padding: 10 }}>
-          {margins.error}
-        </div>
-      )}
-    </div>
+        {/* Main painted the mismatch branch amber and the normal status muted;
+            one neutral ActionFeedback for both made a tier drift look routine. */}
+        {margins?.waveguardTier && <ActionFeedback className={margins.waveguardTierMismatch ? "!text-warn-fg" : undefined}>{margins.waveguardTierMismatch
+          ? `Engine priced this bundle as ${margins.waveguardTier.toUpperCase()} (requested ${String(margins.waveguardTierRequested || tier).toUpperCase()}) — tier thresholds are out of line with the engine; margins below are ${margins.waveguardTier.toUpperCase()} margins.`
+          : `Margins priced at ${margins.waveguardTier.toUpperCase()} tier discounts.`}</ActionFeedback>}
+        {margins?.services && <Table className="min-w-[840px]" aria-label="Service margins"><THead><TR><TH>Service</TH><TH align="right">Annual price</TH><TH align="right">Est. cost</TH><TH>Cost source</TH><TH align="right">After discount</TH><TH align="right">Margin</TH><TH>Status</TH></TR></THead><TBody>{margins.services.map((service) => <TR key={service.service}><TD className="font-medium capitalize">{service.service.replace(/_/g, " ")}</TD><TD align="right" nums>${service.annual?.toLocaleString() || "—"}</TD><TD align="right" nums className="text-ink-secondary">${service.estimatedCost?.toLocaleString() || "—"}</TD><TD><Badge tone={costSourceTone(service.materialCostSource)}>{costSourceLabel(service.materialCostSource)}</Badge>{service.materialPerVisit != null ? <span className="ml-2 text-ui-caption text-ink-secondary u-nums">${Number(service.materialPerVisit).toFixed(2)}/visit</span> : ""}</TD><TD align="right" nums>${service.afterDiscount?.toLocaleString() || "—"}</TD><TD align="right" nums className="font-medium">{service.margin != null ? `${(service.margin * 100).toFixed(1)}%` : "—"}</TD><TD>{service.margin != null && <Badge tone={marginTone(service.margin)}>{marginLabel(service.margin)}</Badge>}</TD></TR>)}</TBody></Table>}
+        {margins?.error && <ActionFeedback error>{margins.error}</ActionFeedback>}
+      </CardBody>
+    </UiSurface>
   );
 }
+
+const SPEC_SERVICES = [
+  { key: "rodentPlugging", fn: "calculatePluggingPrice", name: "Rodent Plugging", desc: "Entry-point sealing tiered by 1–5 / 6–15 / 16+ pts. $95 standalone, $45 add-on. 65% margin target." },
+  { key: "termiteFoam", fn: "calculateFoamPrice", name: "Termite Foam", desc: "Termidor Foam spot treatment per app point + cans (~$30/can). $125 min. 15% bundle discount with liquid barrier." },
+  { key: "stingingV2", fn: "calculateStingingPrice", name: "Stinging Insect", desc: "Multiplier stack: nest type × location × urgency / after-hours. Mins: $95 / $125 / $175." },
+  { key: "exclusionV2", fn: "calculateExclusionPrice", name: "Exclusion (Full)", desc: "sqft tiers $395 / $595 / $895 / $1,295. Tile roof 1.4×, 2-story 1.3×. multiVisit flag at >4hr." },
+  { key: "rodentGuaranteeCombo", fn: "calculateRodentGuaranteeCombo", name: "Rodent Guarantee Combo", desc: "Exclusion + Bait Stations + 12/24-mo guarantee. No bundle discount on the bait component, 15–25% guarantee premium. Min $695 / $995. Bait stations price at the standard footprint bracket (per quarterly application, station allowance by home size) — the post-exclusion modifier was retired 2026-08-29." },
+];
 
 function SpecServicesPanel() {
-  const SPEC_SERVICES = [
-    {
-      key: "rodentPlugging",
-      fn: "calculatePluggingPrice",
-      name: "Rodent Plugging",
-      desc: "Entry-point sealing tiered by 1–5 / 6–15 / 16+ pts. $95 standalone, $45 add-on. 65% margin target.",
-    },
-    {
-      key: "termiteFoam",
-      fn: "calculateFoamPrice",
-      name: "Termite Foam",
-      desc: "Termidor Foam spot treatment per app point + cans (~$30/can). $125 min. 15% bundle discount with liquid barrier.",
-    },
-    {
-      key: "stingingV2",
-      fn: "calculateStingingPrice",
-      name: "Stinging Insect",
-      desc: "Multiplier stack: nest type × location × urgency / after-hours. Mins: $95 / $125 / $175.",
-    },
-    {
-      key: "exclusionV2",
-      fn: "calculateExclusionPrice",
-      name: "Exclusion (Full)",
-      desc: "sqft tiers $395 / $595 / $895 / $1,295. Tile roof 1.4×, 2-story 1.3×. multiVisit flag at >4hr.",
-    },
-    {
-      key: "rodentGuaranteeCombo",
-      fn: "calculateRodentGuaranteeCombo",
-      name: "Rodent Guarantee Combo",
-      desc: "Exclusion + Bait Stations + 12/24-mo guarantee. No bundle discount on the bait component, 15–25% guarantee premium. Min $695 / $995. Bait stations price at the standard footprint bracket (per quarterly application, station allowance by home size) — the post-exclusion modifier was retired 2026-08-29.",
-    },
-  ];
   return (
-    <div
-      style={{
-        background: D.card,
-        borderRadius: 12,
-        border: `1px solid ${D.border}`,
-        padding: 20,
-        marginBottom: 20,
-      }}
-    >
-      {" "}
-      <div
-        style={{
-          display: "flex",
-          justifyContent: "space-between",
-          alignItems: "center",
-          marginBottom: 4,
-        }}
-      >
-        {" "}
-        <h2
-          style={{
-            margin: 0,
-            fontSize: 12,
-            fontWeight: 500,
-            color: D.heading,
-            fontFamily: ROBOTO,
-            letterSpacing: "0.02em",
-          }}
-        >
-          Missing-services pricing spec
-        </h2>{" "}
-        <span
-          style={{
-            fontSize: 11,
-            fontWeight: 700,
-            padding: "3px 10px",
-            borderRadius: 12,
-            background: D.green + "22",
-            color: D.green,
-            border: `1px solid ${D.green}55`,
-          }}
-        >
-          Linked to Estimator Engine
-        </span>{" "}
-      </div>{" "}
-      <div style={{ fontSize: 12, color: D.muted, marginBottom: 14 }}>
-        These five services are wired into{" "}
-        <code style={{ fontFamily: ROBOTO }}>generateEstimate()</code>via the{" "}
-        <code style={{ fontFamily: ROBOTO }}>services.&lt;key&gt;</code>input.
-        Spec doc:{" "}
-        <code style={{ fontFamily: ROBOTO }}>
-          missing-services-pricing-spec.md
-        </code>
-        .
-      </div>{" "}
-      <div style={{ display: "grid", gridTemplateColumns: "1fr", gap: 10 }}>
-        {SPEC_SERVICES.map((s) => (
-          <div
-            key={s.key}
-            style={{
-              display: "grid",
-              gridTemplateColumns: "180px 1fr",
-              gap: 14,
-              padding: 12,
-              background: D.bg,
-              border: `1px solid ${D.border}`,
-              borderRadius: 8,
-            }}
-          >
-            {" "}
-            <div>
-              {" "}
-              <div style={{ fontSize: 13, fontWeight: 700, color: D.heading }}>
-                {s.name}
-              </div>{" "}
-              <div
-                style={{
-                  fontSize: 11,
-                  color: D.muted,
-                  fontFamily: ROBOTO,
-                  marginTop: 2,
-                }}
-              >
-                services.{s.key}
-              </div>{" "}
-              <div
-                style={{
-                  fontSize: 10,
-                  color: D.teal,
-                  fontFamily: ROBOTO,
-                  marginTop: 2,
-                }}
-              >
-                {s.fn}()
-              </div>{" "}
-            </div>{" "}
-            <div style={{ fontSize: 12, color: D.text, lineHeight: 1.5 }}>
-              {s.desc}
-            </div>{" "}
-          </div>
-        ))}
-      </div>{" "}
-    </div>
+    <Card><CardHeader className="flex flex-wrap items-start justify-between gap-3"><div><CardTitle className="text-16">Missing-services pricing spec</CardTitle><p className="mt-1 max-w-3xl text-ui-body text-ink-secondary">These five services are wired into <code className="u-nums">generateEstimate()</code> via the <code className="u-nums">services.&lt;key&gt;</code> input. Spec doc: <code className="u-nums">missing-services-pricing-spec.md</code>.</p></div><Badge tone="strong">Linked to estimator engine</Badge></CardHeader><CardBody className="grid gap-3">{SPEC_SERVICES.map((service) => <div key={service.key} className="grid gap-3 rounded-md border-hairline border-zinc-200 bg-zinc-50 p-3 md:grid-cols-[220px_minmax(0,1fr)]"><div><div className="font-medium text-zinc-900">{service.name}</div><div className="mt-1 text-ui-caption text-ink-secondary u-nums">services.{service.key}</div><div className="text-ui-caption text-ink-secondary u-nums">{service.fn}()</div></div><p className="text-ui-body text-zinc-700">{service.desc}</p></div>)}</CardBody></Card>
   );
 }
 
-function fmtMin(value) {
-  const n = Number(value);
-  if (!Number.isFinite(n)) return "0.0 min";
-  return `${n > 0 ? "+" : ""}${n.toFixed(1)} min`;
+// Main coloured a sample's miss red at 15+ minutes and amber at 8-14, which is
+// how the table is triaged; a single neutral treatment hid the 8-14 band, since
+// only the 15+ rows also reach the review queue.
+function calibrationDeltaTone(delta) {
+  const miss = Math.abs(delta);
+  if (miss >= 15) return "text-alert-fg";
+  return miss >= 8 ? "text-warn-fg" : undefined;
+}
+
+function CalibrationGroup({ title, rows }) {
+  return (
+    <Card><CardHeader><CardTitle>{title}</CardTitle></CardHeader><CardBody className="divide-y divide-zinc-200">{(rows || []).slice(0, 6).map((row) => <div key={row.key} className="grid grid-cols-[minmax(0,1fr)_50px_80px_80px] gap-2 py-2 text-ui-body"><span className="capitalize">{row.key}</span><span className="text-right text-ink-secondary u-nums">{row.count}</span><span className="text-right u-nums">{formatMinutes(row.avgDelta)}</span><span className="text-right text-ink-secondary u-nums">{formatMinutes(row.avgAbsDelta)}</span></div>)}{(!rows || rows.length === 0) && <p className="text-ink-secondary">No samples yet.</p>}</CardBody></Card>
+  );
 }
 
 function PestCalibrationPanel() {
@@ -658,832 +189,115 @@ function PestCalibrationPanel() {
   const [limit, setLimit] = useState("150");
 
   const load = async () => {
-    setLoading(true);
-    setError("");
+    setLoading(true); setError("");
     try {
-      const qs = new URLSearchParams({
-        startDate,
-        endDate,
-        limit,
-      });
+      const qs = new URLSearchParams({ startDate, endDate, limit });
       setData(
         await af(`/admin/pricing-config/pest-calibration?${qs.toString()}`),
       );
-    } catch (err) {
-      setError(err.message || "Failed to load pest calibration");
-    } finally {
-      setLoading(false);
     }
+    catch (nextError) { setError(nextError.message || "Failed to load pest calibration"); }
+    finally { setLoading(false); }
   };
-
   const downloadCsv = async () => {
-    setDownloading(true);
-    setError("");
+    setDownloading(true); setError("");
     try {
-      const qs = new URLSearchParams({
-        startDate,
-        endDate,
-        limit: "10000",
-        format: "csv",
-      });
+      const qs = new URLSearchParams({ startDate, endDate, limit: "10000", format: "csv" });
       const response = await adminRawFetch(
         `/admin/pricing-config/pest-calibration?${qs.toString()}`,
       );
-      if (!response.ok)
-        throw new Error(`CSV export failed (${response.status})`);
+      if (!response.ok) throw new Error(`CSV export failed (${response.status})`);
       const text = await response.text();
       const url = URL.createObjectURL(new Blob([text], { type: "text/csv" }));
-      const a = document.createElement("a");
-      a.href = url;
-      a.download = `pest-production-calibration-${startDate}-to-${endDate}.csv`;
-      document.body.appendChild(a);
-      a.click();
-      a.remove();
-      URL.revokeObjectURL(url);
-    } catch (err) {
-      setError(err.message || "Failed to export pest calibration CSV");
-    } finally {
-      setDownloading(false);
-    }
+      const anchor = document.createElement("a"); anchor.href = url; anchor.download = `pest-production-calibration-${startDate}-to-${endDate}.csv`; document.body.appendChild(anchor); anchor.click(); anchor.remove(); URL.revokeObjectURL(url);
+    } catch (nextError) { setError(nextError.message || "Failed to export pest calibration CSV"); }
+    finally { setDownloading(false); }
   };
-
-  useEffect(() => {
-    load();
-  }, []);
+  useEffect(() => { load(); }, []);
 
   const summary = data?.summary || {};
   const records = data?.records || [];
-  const poolRows = summary.byPoolCageSize || [];
-  const lotRows = summary.byLotBand || [];
   const sampleHealth = data?.sampleHealth || {};
   const reviewQueue = summary.reviewQueue || [];
+  const summaryMetrics = [
+    { label: "Samples", value: summary.count || 0 },
+    // The aggregate stayed amber at every size on main; only an individual 15+
+    // minute sample went red, so this must not reuse calibrationDeltaTone().
+    { label: "Avg miss", value: formatMinutes(summary.avgDelta || 0), tone: Math.abs(summary.avgDelta || 0) >= 8 ? "text-warn-fg" : undefined },
+    { label: "Avg abs miss", value: formatMinutes(summary.avgAbsDelta || 0), tone: (summary.avgAbsDelta || 0) >= 12 ? "text-warn-fg" : undefined },
+    { label: "15+ min outliers", value: summary.outlierCount || 0, tone: (summary.outlierCount || 0) > 0 ? "text-alert-fg" : undefined },
+  ];
+  // A nonzero "missing" count is a sample-quality warning. Main painted the
+  // estimate-link and timer gaps amber, but missing diagnostics red — that one
+  // is a calibration-data failure, not a warning.
+  const missingTone = (count) => (count || 0) > 0 ? "text-warn-fg" : undefined;
+  const missingDiagnosticsTone = (count) => (count || 0) > 0 ? "text-alert-fg" : undefined;
+  const healthMetrics = [
+    { label: "Jobs synced", value: sampleHealth.jobsEvaluated || 0 }, { label: "Materialized", value: sampleHealth.materializedCount || 0 },
+    { label: "Fallback matched", value: sampleHealth.fallbackMatchedCount || 0 },
+    { label: "No est. link", value: sampleHealth.missingEstimateLinkCount || 0, tone: missingTone(sampleHealth.missingEstimateLinkCount) },
+    { label: "No timer", value: sampleHealth.missingTimerCount || 0, tone: missingTone(sampleHealth.missingTimerCount) },
+    { label: "No diagnostics", value: sampleHealth.missingDiagnosticsCount || 0, tone: missingDiagnosticsTone(sampleHealth.missingDiagnosticsCount) },
+  ];
 
   return (
-    <div
-      style={{
-        background: D.card,
-        borderRadius: 12,
-        border: `1px solid ${D.border}`,
-        padding: 20,
-        marginBottom: 20,
-      }}
-    >
-      {" "}
-      <div
-        style={{
-          display: "flex",
-          justifyContent: "space-between",
-          alignItems: "flex-start",
-          gap: 16,
-          marginBottom: 16,
-          flexWrap: "wrap",
-        }}
-      >
-        {" "}
-        <div>
-          {" "}
-          <h2
-            style={{
-              margin: 0,
-              fontSize: 13,
-              fontWeight: 700,
-              color: D.heading,
-              fontFamily: ROBOTO,
-            }}
-          >
-            Pest production calibration
-          </h2>{" "}
-          <div style={{ color: D.muted, fontSize: 12, marginTop: 4 }}>
-            Shadow estimator minutes compared with completed job timers from
-            accepted estimates.
-          </div>{" "}
-        </div>{" "}
-        <div
-          style={{
-            display: "flex",
-            gap: 8,
-            alignItems: "center",
-            flexWrap: "wrap",
-            justifyContent: "flex-end",
-          }}
-        >
-          {" "}
-          <label
-            style={{
-              display: "grid",
-              gap: 3,
-              fontSize: 10,
-              color: D.muted,
-              fontWeight: 700,
-              textTransform: "uppercase",
-            }}
-          >
-            Start
-            <input
-              type="date"
-              value={startDate}
-              onChange={(e) => setStartDate(e.target.value)}
-              style={{
-                padding: "7px 8px",
-                borderRadius: 6,
-                border: `1px solid ${D.border}`,
-                fontSize: 12,
-                color: D.heading,
-              }}
-            />{" "}
-          </label>{" "}
-          <label
-            style={{
-              display: "grid",
-              gap: 3,
-              fontSize: 10,
-              color: D.muted,
-              fontWeight: 700,
-              textTransform: "uppercase",
-            }}
-          >
-            End
-            <input
-              type="date"
-              value={endDate}
-              onChange={(e) => setEndDate(e.target.value)}
-              style={{
-                padding: "7px 8px",
-                borderRadius: 6,
-                border: `1px solid ${D.border}`,
-                fontSize: 12,
-                color: D.heading,
-              }}
-            />{" "}
-          </label>{" "}
-          <label
-            style={{
-              display: "grid",
-              gap: 3,
-              fontSize: 10,
-              color: D.muted,
-              fontWeight: 700,
-              textTransform: "uppercase",
-            }}
-          >
-            Rows
-            <select
-              value={limit}
-              onChange={(e) => setLimit(e.target.value)}
-              style={{
-                padding: "7px 8px",
-                borderRadius: 6,
-                border: `1px solid ${D.border}`,
-                fontSize: 12,
-                color: D.heading,
-                background: D.input,
-              }}
-            >
-              {" "}
-              <option value="50">50</option> <option value="150">150</option>{" "}
-              <option value="500">500</option>{" "}
-            </select>{" "}
-          </label>{" "}
-          <button
-            onClick={load}
-            disabled={loading}
-            style={{
-              padding: "8px 12px",
-              borderRadius: 6,
-              border: `1px solid ${D.border}`,
-              cursor: loading ? "default" : "pointer",
-              background: D.input,
-              color: D.heading,
-              fontSize: 12,
-              fontWeight: 500,
-              alignSelf: "end",
-            }}
-          >
-            {loading ? "Syncing..." : "Sync"}
-          </button>{" "}
-          <button
-            onClick={downloadCsv}
-            disabled={downloading || loading || data?.sync?.unavailable}
-            style={{
-              padding: "8px 12px",
-              borderRadius: 6,
-              border: "none",
-              cursor: downloading || loading ? "default" : "pointer",
-              background: D.heading,
-              color: D.white,
-              fontSize: 12,
-              fontWeight: 700,
-              alignSelf: "end",
-              opacity:
-                downloading || loading || data?.sync?.unavailable ? 0.55 : 1,
-            }}
-          >
-            {downloading ? "Exporting..." : "Export CSV"}
-          </button>{" "}
-        </div>{" "}
-      </div>
-      {error && (
-        <div style={{ color: D.red, fontSize: 12, marginBottom: 12 }}>
-          {error}
-        </div>
-      )}
-      {data?.sync?.unavailable && (
-        <div style={{ color: D.amber, fontSize: 12, marginBottom: 12 }}>
-          Calibration table is not migrated yet. Run database migrations before
-          collecting samples.
-        </div>
-      )}
-      <div
-        style={{
-          display: "grid",
-          gridTemplateColumns: "repeat(auto-fit, minmax(140px, 1fr))",
-          gap: 10,
-          marginBottom: 16,
-        }}
-      >
-        {[
-          { label: "Samples", value: summary.count || 0, color: D.heading },
-          {
-            label: "Avg miss",
-            value: fmtMin(summary.avgDelta || 0),
-            color: Math.abs(summary.avgDelta || 0) >= 8 ? D.amber : D.green,
-          },
-          {
-            label: "Avg abs miss",
-            value: fmtMin(summary.avgAbsDelta || 0),
-            color: (summary.avgAbsDelta || 0) >= 12 ? D.amber : D.heading,
-          },
-          {
-            label: "15+ min outliers",
-            value: summary.outlierCount || 0,
-            color: (summary.outlierCount || 0) > 0 ? D.red : D.green,
-          },
-        ].map((card) => (
-          <div
-            key={card.label}
-            style={{
-              background: D.bg,
-              border: `1px solid ${D.border}`,
-              borderRadius: 8,
-              padding: 12,
-            }}
-          >
-            {" "}
-            <div
-              style={{
-                fontSize: 18,
-                fontWeight: 700,
-                color: card.color,
-                fontFamily: ROBOTO,
-              }}
-            >
-              {card.value}
-            </div>{" "}
-            <div
-              style={{
-                fontSize: 10,
-                color: D.muted,
-                textTransform: "uppercase",
-                letterSpacing: 0.5,
-                marginTop: 3,
-              }}
-            >
-              {card.label}
-            </div>{" "}
-          </div>
-        ))}
-      </div>{" "}
-      <div
-        style={{
-          display: "grid",
-          gridTemplateColumns: "repeat(auto-fit, minmax(130px, 1fr))",
-          gap: 10,
-          marginBottom: 16,
-        }}
-      >
-        {[
-          {
-            label: "Jobs synced",
-            value: sampleHealth.jobsEvaluated || 0,
-            color: D.heading,
-          },
-          {
-            label: "Materialized",
-            value: sampleHealth.materializedCount || 0,
-            color: D.green,
-          },
-          {
-            label: "Fallback matched",
-            value: sampleHealth.fallbackMatchedCount || 0,
-            color: D.heading,
-          },
-          {
-            label: "No est. link",
-            value: sampleHealth.missingEstimateLinkCount || 0,
-            color:
-              (sampleHealth.missingEstimateLinkCount || 0) > 0
-                ? D.amber
-                : D.muted,
-          },
-          {
-            label: "No timer",
-            value: sampleHealth.missingTimerCount || 0,
-            color:
-              (sampleHealth.missingTimerCount || 0) > 0 ? D.amber : D.muted,
-          },
-          {
-            label: "No diagnostics",
-            value: sampleHealth.missingDiagnosticsCount || 0,
-            color:
-              (sampleHealth.missingDiagnosticsCount || 0) > 0 ? D.red : D.muted,
-          },
-        ].map((card) => (
-          <div
-            key={card.label}
-            style={{
-              background: D.bg,
-              border: `1px solid ${D.border}`,
-              borderRadius: 8,
-              padding: 10,
-            }}
-          >
-            {" "}
-            <div
-              style={{
-                fontSize: 16,
-                fontWeight: 700,
-                color: card.color,
-                fontFamily: ROBOTO,
-              }}
-            >
-              {card.value}
-            </div>{" "}
-            <div
-              style={{
-                fontSize: 10,
-                color: D.muted,
-                textTransform: "uppercase",
-                letterSpacing: 0.5,
-                marginTop: 3,
-              }}
-            >
-              {card.label}
-            </div>{" "}
-          </div>
-        ))}
-      </div>{" "}
-      <div
-        style={{
-          display: "grid",
-          gridTemplateColumns: "repeat(auto-fit, minmax(260px, 1fr))",
-          gap: 14,
-          marginBottom: 16,
-        }}
-      >
-        {" "}
-        <CalibrationGroup title="By pool cage size" rows={poolRows} />{" "}
-        <CalibrationGroup title="By lot band" rows={lotRows} />{" "}
-      </div>
-      {reviewQueue.length > 0 && (
-        <div
-          style={{
-            background: D.bg,
-            border: `1px solid ${D.border}`,
-            borderRadius: 8,
-            padding: 12,
-            marginBottom: 16,
-          }}
-        >
-          {" "}
-          <div
-            style={{
-              display: "flex",
-              justifyContent: "space-between",
-              gap: 12,
-              marginBottom: 8,
-            }}
-          >
-            {" "}
-            <div style={{ fontSize: 12, fontWeight: 700, color: D.heading }}>
-              Needs Calibration Review
-            </div>{" "}
-            <div style={{ fontSize: 11, color: D.muted }}>
-              {summary.reviewQueueCount || reviewQueue.length} flagged
-            </div>{" "}
-          </div>{" "}
-          <div style={{ overflowX: "auto" }}>
-            {" "}
-            <table
-              style={{
-                width: "100%",
-                borderCollapse: "collapse",
-                fontSize: 12,
-              }}
-            >
-              <thead>
-                <tr>
-                  {["Date", "Customer", "Delta", "Pool", "Lot", "Why"].map(
-                    (h) => (
-                      <th
-                        key={h}
-                        style={{
-                          textAlign:
-                            h === "Customer" || h === "Why" ? "left" : "right",
-                          padding: "7px 8px",
-                          borderBottom: `1px solid ${D.border}`,
-                          color: D.muted,
-                          fontSize: 11,
-                          fontWeight: 700,
-                        }}
-                      >
-                        {h}
-                      </th>
-                    ),
-                  )}
-                </tr>
-              </thead>
-              <tbody>
-                {reviewQueue.slice(0, 8).map((row) => {
-                  const why = Array.isArray(row.calibration_review_reasons)
-                    ? row.calibration_review_reasons.join(", ")
-                    : "";
-                  return (
-                    <tr
-                      key={`review-${row.id || row.scheduled_service_id}`}
-                      style={{ borderBottom: `1px solid ${D.border}66` }}
-                    >
-                      <td
-                        style={{
-                          padding: "7px 8px",
-                          textAlign: "right",
-                          color: D.text,
-                        }}
-                      >
-                        {String(row.service_date || "").slice(0, 10) || "-"}
-                      </td>
-                      <td
-                        style={{
-                          padding: "7px 8px",
-                          color: D.heading,
-                          fontWeight: 500,
-                        }}
-                      >
-                        {row.customer_name || row.address_line1 || "Unknown"}
-                      </td>
-                      <td
-                        style={{
-                          padding: "7px 8px",
-                          textAlign: "right",
-                          color: D.red,
-                          fontWeight: 700,
-                        }}
-                      >
-                        {fmtMin(row.delta_minutes || 0)}
-                      </td>
-                      <td
-                        style={{
-                          padding: "7px 8px",
-                          textAlign: "right",
-                          color: D.text,
-                        }}
-                      >
-                        {row.pool_cage_size || "-"}
-                      </td>
-                      <td
-                        style={{
-                          padding: "7px 8px",
-                          textAlign: "right",
-                          color: D.text,
-                        }}
-                      >
-                        {row.lot_sqft
-                          ? Number(row.lot_sqft).toLocaleString()
-                          : "-"}
-                      </td>
-                      <td style={{ padding: "7px 8px", color: D.muted }}>
-                        {why || "-"}
-                      </td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>{" "}
-          </div>{" "}
-        </div>
-      )}
-      <div style={{ overflowX: "auto" }}>
-        {" "}
-        <table
-          style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}
-        >
-          <thead>
-            <tr>
-              {[
-                "Date",
-                "Customer",
-                "Pool",
-                "Lot",
-                "Pred",
-                "Actual",
-                "Delta",
-                "Confidence",
-                "Reasons",
-              ].map((h) => (
-                <th
-                  key={h}
-                  style={{
-                    textAlign: h === "Customer" ? "left" : "right",
-                    padding: "8px 10px",
-                    borderBottom: `1px solid ${D.border}`,
-                    color: D.muted,
-                    fontSize: 11,
-                    fontWeight: 700,
-                  }}
-                >
-                  {h}
-                </th>
-              ))}
-            </tr>
-          </thead>
-          <tbody>
-            {records.slice(0, 50).map((row) => {
-              const delta = Number(row.delta_minutes || 0);
-              const reasons = Array.isArray(row.review_reasons)
-                ? row.review_reasons.join(", ")
-                : "";
-              return (
-                <tr
-                  key={row.id || row.scheduled_service_id}
-                  style={{ borderBottom: `1px solid ${D.border}66` }}
-                >
-                  <td
-                    style={{
-                      padding: "8px 10px",
-                      textAlign: "right",
-                      color: D.text,
-                    }}
-                  >
-                    {String(row.service_date || "").slice(0, 10) || "-"}
-                  </td>
-                  <td
-                    style={{
-                      padding: "8px 10px",
-                      color: D.heading,
-                      fontWeight: 500,
-                    }}
-                  >
-                    {row.customer_name || row.address_line1 || "Unknown"}
-                  </td>
-                  <td
-                    style={{
-                      padding: "8px 10px",
-                      textAlign: "right",
-                      color: D.text,
-                    }}
-                  >
-                    {row.pool_cage_size || "-"}
-                  </td>
-                  <td
-                    style={{
-                      padding: "8px 10px",
-                      textAlign: "right",
-                      color: D.text,
-                    }}
-                  >
-                    {row.lot_sqft ? Number(row.lot_sqft).toLocaleString() : "-"}
-                  </td>
-                  <td
-                    style={{
-                      padding: "8px 10px",
-                      textAlign: "right",
-                      color: D.text,
-                    }}
-                  >
-                    {Number(row.predicted_minutes || 0).toFixed(1)}
-                  </td>
-                  <td
-                    style={{
-                      padding: "8px 10px",
-                      textAlign: "right",
-                      color: D.text,
-                    }}
-                  >
-                    {Number(row.actual_minutes || 0).toFixed(1)}
-                  </td>
-                  <td
-                    style={{
-                      padding: "8px 10px",
-                      textAlign: "right",
-                      color:
-                        Math.abs(delta) >= 15
-                          ? D.red
-                          : Math.abs(delta) >= 8
-                            ? D.amber
-                            : D.green,
-                      fontWeight: 700,
-                    }}
-                  >
-                    {fmtMin(delta)}
-                  </td>
-                  <td
-                    style={{
-                      padding: "8px 10px",
-                      textAlign: "right",
-                      color: D.muted,
-                    }}
-                  >
-                    {row.pricing_confidence || "-"}
-                  </td>
-                  <td
-                    style={{
-                      padding: "8px 10px",
-                      textAlign: "right",
-                      color: D.muted,
-                      maxWidth: 220,
-                      whiteSpace: "nowrap",
-                      overflow: "hidden",
-                      textOverflow: "ellipsis",
-                    }}
-                    title={reasons}
-                  >
-                    {reasons || "-"}
-                  </td>
-                </tr>
-              );
-            })}
-            {!loading && records.length === 0 && (
-              <tr>
-                <td
-                  colSpan="9"
-                  style={{ padding: 18, textAlign: "center", color: D.muted }}
-                >
-                  No calibration samples yet. Completed pest jobs need an
-                  accepted estimate link and a completed job timer.
-                </td>
-              </tr>
-            )}
-          </tbody>
-        </table>{" "}
-      </div>{" "}
-    </div>
+    <Card>
+      <CardHeader className="flex flex-wrap items-start justify-between gap-3"><div><CardTitle className="text-16">Pest production calibration</CardTitle><p className="mt-1 text-ui-body text-ink-secondary">Shadow estimator minutes compared with completed job timers from accepted estimates.</p></div><div className="grid items-end gap-2 sm:grid-cols-3 lg:grid-cols-[150px_150px_110px_auto_auto]"><Field label="Start"><Input type="date" value={startDate} onChange={(event) => setStartDate(event.target.value)} /></Field><Field label="End"><Input type="date" value={endDate} onChange={(event) => setEndDate(event.target.value)} /></Field><Field label="Rows"><Select value={limit} onChange={(event) => setLimit(event.target.value)}><option value="50">50</option><option value="150">150</option><option value="500">500</option></Select></Field><Button variant="secondary" onClick={load} loading={loading}><RefreshCw size={16} aria-hidden /> {loading ? "Syncing..." : "Sync"}</Button><Button onClick={downloadCsv} loading={downloading} disabled={loading || data?.sync?.unavailable}><Download size={16} aria-hidden /> {downloading ? "Exporting..." : "Export CSV"}</Button></div></CardHeader>
+      <CardBody className="space-y-5">
+        {error && <ActionFeedback error>{error}</ActionFeedback>}
+        {/* Amber on main, and it disables CSV export while active — an
+            unavailable calibration system is not routine feedback. */}
+        {data?.sync?.unavailable && <ActionFeedback className="!text-warn-fg">Calibration table is not migrated yet. Run database migrations before collecting samples.</ActionFeedback>}
+        <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">{summaryMetrics.map((metric) => <Card key={metric.label}><CardBody><div className={`text-18 font-medium u-nums ${metric.tone || "text-zinc-900"}`}>{metric.value}</div><div className="mt-1 text-ui-caption text-ink-secondary">{metric.label}</div></CardBody></Card>)}</div>
+        <div className="grid grid-cols-2 gap-3 lg:grid-cols-6">{healthMetrics.map((metric) => <div key={metric.label} className="rounded-md bg-zinc-50 p-3"><div className={`text-16 font-medium u-nums ${metric.tone || "text-zinc-900"}`}>{metric.value}</div><div className="mt-1 text-ui-caption text-ink-secondary">{metric.label}</div></div>)}</div>
+        <div className="grid gap-3 lg:grid-cols-2"><CalibrationGroup title="By pool cage size" rows={summary.byPoolCageSize || []} /><CalibrationGroup title="By lot band" rows={summary.byLotBand || []} /></div>
+        {reviewQueue.length > 0 && <div><div className="mb-2 flex flex-wrap justify-between gap-2"><h3 className="font-medium text-zinc-900">Needs calibration review</h3><Badge tone="alert">{summary.reviewQueueCount || reviewQueue.length} flagged</Badge></div><Table className="min-w-[720px]" aria-label="Calibration review queue"><THead><TR><TH>Date</TH><TH>Customer</TH><TH align="right">Delta</TH><TH align="right">Pool</TH><TH align="right">Lot</TH><TH>Why</TH></TR></THead><TBody>{reviewQueue.slice(0, 8).map((row) => <TR key={`review-${row.id || row.scheduled_service_id}`}><TD nums>{String(row.service_date || "").slice(0, 10) || "-"}</TD><TD className="font-medium">{row.customer_name || row.address_line1 || "Unknown"}</TD><TD align="right" nums className="text-alert-fg">{formatMinutes(row.delta_minutes || 0)}</TD><TD align="right">{row.pool_cage_size || "-"}</TD><TD align="right" nums>{row.lot_sqft ? Number(row.lot_sqft).toLocaleString() : "-"}</TD><TD className="text-ink-secondary">{Array.isArray(row.calibration_review_reasons) ? row.calibration_review_reasons.join(", ") : "-"}</TD></TR>)}</TBody></Table></div>}
+        <Table className="min-w-[900px]" aria-label="Pest calibration samples"><THead><TR><TH>Date</TH><TH>Customer</TH><TH align="right">Pool</TH><TH align="right">Lot</TH><TH align="right">Pred</TH><TH align="right">Actual</TH><TH align="right">Delta</TH><TH align="right">Confidence</TH><TH>Reasons</TH></TR></THead><TBody>{records.slice(0, 50).map((row) => { const reasons = Array.isArray(row.review_reasons) ? row.review_reasons.join(", ") : ""; const delta = Number(row.delta_minutes || 0); return <TR key={row.id || row.scheduled_service_id}><TD nums>{String(row.service_date || "").slice(0, 10) || "-"}</TD><TD className="font-medium">{row.customer_name || row.address_line1 || "Unknown"}</TD><TD align="right">{row.pool_cage_size || "-"}</TD><TD align="right" nums>{row.lot_sqft ? Number(row.lot_sqft).toLocaleString() : "-"}</TD><TD align="right" nums>{Number(row.predicted_minutes || 0).toFixed(1)}</TD><TD align="right" nums>{Number(row.actual_minutes || 0).toFixed(1)}</TD><TD align="right" nums className={calibrationDeltaTone(delta)}>{formatMinutes(delta)}</TD><TD align="right">{row.pricing_confidence || "-"}</TD><TD className="max-w-[220px] truncate text-ink-secondary" title={reasons}>{reasons || "-"}</TD></TR>; })}{!loading && records.length === 0 && <TR><TD colSpan="9" className="py-6 text-center text-ink-secondary">No calibration samples yet. Completed pest jobs need an accepted estimate link and a completed job timer.</TD></TR>}</TBody></Table>
+      </CardBody>
+    </Card>
   );
 }
 
-function CalibrationGroup({ title, rows }) {
-  return (
-    <div
-      style={{
-        background: D.bg,
-        border: `1px solid ${D.border}`,
-        borderRadius: 8,
-        padding: 12,
-      }}
-    >
-      {" "}
-      <div
-        style={{
-          fontSize: 12,
-          fontWeight: 700,
-          color: D.heading,
-          marginBottom: 8,
-        }}
-      >
-        {title}
-      </div>
-      {(rows || []).slice(0, 6).map((row) => (
-        <div
-          key={row.key}
-          style={{
-            display: "grid",
-            gridTemplateColumns: "1fr 60px 78px 78px",
-            gap: 8,
-            padding: "5px 0",
-            borderTop: `1px solid ${D.border}88`,
-            alignItems: "center",
-          }}
-        >
-          {" "}
-          <span
-            style={{ color: D.text, fontSize: 12, textTransform: "capitalize" }}
-          >
-            {row.key}
-          </span>{" "}
-          <span style={{ color: D.muted, fontSize: 12, textAlign: "right" }}>
-            {row.count}
-          </span>{" "}
-          <span style={{ color: D.text, fontSize: 12, textAlign: "right" }}>
-            {fmtMin(row.avgDelta)}
-          </span>{" "}
-          <span style={{ color: D.muted, fontSize: 12, textAlign: "right" }}>
-            {fmtMin(row.avgAbsDelta)}
-          </span>{" "}
-        </div>
-      ))}
-      {(!rows || rows.length === 0) && (
-        <div style={{ color: D.muted, fontSize: 12 }}>No samples yet.</div>
-      )}
-    </div>
-  );
-}
-
-// `embedded` (under PricingHubPage): the hub owns the header card, so this
-// page hands its section tabs up via `onSecondaryNav` instead of rendering
-// its own header. Standalone rendering is unchanged.
 export default function PricingLogicPage({ embedded = false, onSecondaryNav } = {}) {
   const [searchParams, setSearchParams] = useSearchParams();
   const requestedSection = sectionFromSearchParams(searchParams);
   const [activeSection, setActiveSection] = useState(requestedSection);
-
-  // Usage beacon for the section that actually RENDERS — invalid or
-  // missing ?section= resolves to Margins without rewriting the URL. The
-  // Pricing hub defers to this page while the Logic area is active, so
-  // the deepest rendered leaf is what lands in the report
-  // (Codex #2961 r18).
   useRenderedTabBeacon("/admin/pricing-logic", activeSection, [searchParams]);
   const focusedService = searchParams.get("service");
   const focus = searchParams.get("focus");
   const serviceLabel = focusedService ? focusedService.replace(/_/g, " ") : "";
 
-  useEffect(() => {
-    setActiveSection(requestedSection);
-    if (requestedSection === "margins") return;
-    scrollToPricingSection(requestedSection);
-  }, [requestedSection]);
-
+  useEffect(() => { setActiveSection(requestedSection); if (requestedSection !== "margins") scrollToPricingSection(requestedSection); }, [requestedSection]);
   const handleSectionChange = (key) => {
     setActiveSection(key);
-    const nextParams = new URLSearchParams(searchParams);
-    nextParams.set("section", key);
-    setSearchParams(nextParams, { replace: true });
-    scrollToPricingSection(key);
+    const nextParams = new URLSearchParams(searchParams); nextParams.set("section", key); setSearchParams(nextParams, { replace: true }); scrollToPricingSection(key);
   };
-
-  const sectionChangeRef = useRef(handleSectionChange);
-  sectionChangeRef.current = handleSectionChange;
+  const sectionChangeRef = useRef(handleSectionChange); sectionChangeRef.current = handleSectionChange;
   useEffect(() => {
     if (!embedded || !onSecondaryNav) return undefined;
-    onSecondaryNav({
-      sections: PRICING_SECTIONS,
-      activeKey: activeSection,
-      onChange: (key) => sectionChangeRef.current(key),
-      ariaLabel: "Pricing section",
-      navGridClassName: "grid-cols-2 md:grid-cols-5",
-    });
+    onSecondaryNav({ sections: PRICING_SECTIONS, activeKey: activeSection, onChange: (key) => sectionChangeRef.current(key), ariaLabel: "Pricing section", navGridClassName: "grid-cols-2 md:grid-cols-5" });
     return () => onSecondaryNav(null);
   }, [embedded, onSecondaryNav, activeSection]);
 
-  return (
-    <div style={{ padding: "0 0 60px", fontFamily: ROBOTO }}>
-      {" "}
-      <div style={{ maxWidth: 1300, margin: "0 auto" }}>
-        {" "}
-        {!embedded && (
-          <AdminCommandHeader
-            title="Pricing"
-            icon={Calculator}
-            sections={PRICING_SECTIONS}
-            activeKey={activeSection}
-            onSectionChange={handleSectionChange}
-            navGridClassName="grid-cols-2 md:grid-cols-5"
-          />
-        )}
-        {focus === "margin" && (
-          <div
-            style={{
-              background: `${D.amber}14`,
-              border: `1px solid ${D.amber}44`,
-              borderRadius: 10,
-              padding: 14,
-              marginBottom: 16,
-              color: D.text,
-              fontSize: 13,
-            }}
-          >
-            Review margin rules{serviceLabel ? ` for ${serviceLabel}` : ""}. The
-            estimate audit flagged this service below the pricing floor.
-          </div>
-        )}
-        <section id="pricing-margins">
-          {" "}
-          <MarginCalculator />{" "}
-        </section>{" "}
-        <section id="pricing-calibration">
-          {" "}
-          <PestCalibrationPanel />{" "}
-        </section>{" "}
-        <section id="pricing-specs">
-          {" "}
-          <SpecServicesPanel />{" "}
-        </section>{" "}
-        <section id="pricing-logic">
-          {" "}
-          <PricingLogicPanel />{" "}
-        </section>{" "}
-        <section id="pricing-reality">
-          {" "}
-          {activeSection === "reality" && <PricingRealityCheckPage />}{" "}
-        </section>{" "}
-      </div>{" "}
+  const content = (
+    <div className="space-y-5">
+      {/* A below-floor review prompt from the estimate audit is a warning; main
+          painted it amber, and alert red is for request failures. */}
+      {focus === "margin" && <ActionFeedback className="!text-warn-fg">Review margin rules{serviceLabel ? ` for ${serviceLabel}` : ""}. The estimate audit flagged this service below the pricing floor.</ActionFeedback>}
+      <section id="pricing-margins"><MarginCalculator /></section>
+      <section id="pricing-calibration"><PestCalibrationPanel /></section>
+      <section id="pricing-specs"><SpecServicesPanel /></section>
+      <section id="pricing-logic"><PricingLogicPanel /></section>
+      <section id="pricing-reality">{activeSection === "reality" && <PricingRealityCheckPage />}</section>
     </div>
+  );
+  // Same as Strategy: the routed path is always embedded, and main capped this
+  // workspace's content at 1300px.
+  if (embedded) return <UiSurface density="comfortable" className="mx-auto max-w-[1300px]">{content}</UiSurface>;
+  return (
+    <UiSurface density="comfortable" className="mx-auto max-w-[1300px] text-ui-body text-ink-primary">
+      <AdminCommandHeader variant="workspace" title="Pricing" icon={Calculator} sections={PRICING_SECTIONS} activeKey={activeSection} onSectionChange={handleSectionChange} navGridClassName="grid-cols-2 md:grid-cols-5" />
+      {content}
+    </UiSurface>
   );
 }

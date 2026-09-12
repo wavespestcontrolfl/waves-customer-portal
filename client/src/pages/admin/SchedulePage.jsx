@@ -43,6 +43,17 @@ import { completionDraftKey } from "../../lib/completion-drafts";
 import {
   defaultApplicationMethodForLine,
   isPerBasisUnit,
+  isPerGallonUnit,
+  isTankCalculation,
+  derivedTankTotal,
+  tankOwnerRow,
+  promoteTankOwner,
+  applyTankDose,
+  markTankEntry,
+  tankPropagates,
+  followTank,
+  clearTankOnUnitChange,
+  joinTankOnUnitChange,
   normalizeApplicationMethod,
   resolveRatePrefill,
 } from "../../lib/product-rate-prefill";
@@ -12232,6 +12243,10 @@ export function CompletionPanel({
       ...buildSelectedProduct(product),
       totalAmount,
       totalAmountManual: true,
+      // Marked manual so a rate or area edit cannot recompute the house
+      // default — but it is a seed, not the tech's own number, so stating a
+      // carrier volume replaces it (Codex r5 P1).
+      totalAmountSeeded: true,
     }));
     if (!rows.length) return;
     pestDefaultMixSnapshotRef.current = JSON.stringify(rows);
@@ -12313,7 +12328,11 @@ export function CompletionPanel({
     invalidateGeneratedReportOnTypedEdit();
     setSelectedProducts(current => current.map(product => follows(product)
       ? { ...product, areaValue: lawnVisitArea,
-        totalAmount: product.totalAmountManual ? product.totalAmount : lawnDerivedTotal(product, lawnVisitArea) } : product));
+        // A per-gallon row's quantity comes from the tank, not the visit
+        // area: the area still follows, the dose stays (audit P1).
+        totalAmount: product.totalAmountManual || isPerGallonUnit(product.rateUnit)
+          ? product.totalAmount
+          : lawnDerivedTotal(product, lawnVisitArea) } : product));
   }, [lawnDefaultsEnabled, lawnVisitArea, selectedProducts]);
   useEffect(() => {
     if (!completionImprovements || !isLawn) return;
@@ -14607,9 +14626,18 @@ export function CompletionPanel({
     if (lawnDefaultsEnabled) {
       const item = lawnCompletionDefaults.items.find(item => String(item.product.id) === String(product.id));
       const planned = item && lawnPlanSelections([item], buildSelectedProduct, products, { areas: areasServiced, governed: true })[0];
-      row = planned || { ...row, rate: "", totalAmount: "", applicationArea: areasServiced.join(", "), applicationAreaDefault: true,
+      // A product the tech adds by hand is not governed by the plan, so it
+      // keeps the catalog label prefill (rate + rate × visit area / 1,000)
+      // exactly as an ungoverned closeout does — a per-1k rate on file is
+      // the tech's starting point, never a withheld blank (owner 2026-09-11:
+      // techs were retyping every rate and total after the gate went live).
+      // The suggestion stays editable and is still the tech's actual to
+      // confirm; a label with no per-1k rate prefills nothing, as before.
+      row = planned || { ...row, applicationArea: areasServiced.join(", "), applicationAreaDefault: true,
         lawnAreaDefault: row.areaUnit === "sqft",
-        lawnAmountReason: "Enter the actual amount for this application." };
+        lawnAmountReason: row.totalAmount !== ""
+          ? "Suggested from the label rate for the visit area. Confirm the actual amount."
+          : "Enter the actual amount for this application." };
     }
     // A re-added product is no longer a removed default whatever the plan
     // state — a draft restored under an outage carries removed ids too, and
@@ -14659,10 +14687,23 @@ export function CompletionPanel({
     // blank for the tech to enter. A linear-ft prefill derives nothing
     // either: the derived Total is a per-1,000-sqft calculation and has no
     // meaning against perimeter footage.
+    // One tank, one carrier volume (updateProduct shares it across rows):
+    // a per-gallon product added AFTER the tech typed gallons starts from
+    // the same tank rather than waiting to be told again.
+    // Strictly from the tank's OWNER, never the first row that happens to
+    // carry a number: a row that detached onto its own mix would otherwise
+    // seed the new product with a volume it never shared, and the next owner
+    // correction would move it anyway (pre-push audit P1). A blank owner
+    // value seeds blank.
+    const sharedGallons = isPerGallonUnit(prefillRateUnit)
+      ? selectedProducts.find((p) => isPerGallonUnit(p.rateUnit) && p.tankOwner)?.carrierGallons ?? ""
+      : "";
     const prefillTotal =
-      perBasisUnit || areaRequirement?.unit === "linear_ft"
-        ? ""
-        : derivedTotalAmount(prefillRate, prefillArea);
+      isPerGallonUnit(prefillRateUnit)
+        ? derivedTankTotal(prefillRate, sharedGallons)
+        : perBasisUnit || areaRequirement?.unit === "linear_ft"
+          ? ""
+          : derivedTotalAmount(prefillRate, prefillArea);
     return {
         productId: product.id,
         name: product.name,
@@ -14704,6 +14745,10 @@ export function CompletionPanel({
           labelMaxRate ??
           null,
         totalAmount: prefillTotal,
+        // Gallons of finished mix for a per-gallon rate; blank for every
+        // other unit and never submitted (a derivation input, like the
+        // treated area is for a per-1,000 rate).
+        carrierGallons: sharedGallons,
         totalAmountManual: false,
         applicationMethod,
         applicationArea: "",
@@ -14777,17 +14822,33 @@ export function CompletionPanel({
     }
     invalidateGeneratedReportOnTypedEdit();
     setSelectedProducts((prev) =>
-      prev.filter((p) => p.productId !== productId),
+      promoteTankOwner(prev.filter((p) => p.productId !== productId)),
     );
   }
   function updateProduct(productId, field, value) {
     if (generating) return;
     lawnDefaultMixSeededRef.current = true;
     invalidateGeneratedReportOnTypedEdit();
-    setSelectedProducts((prev) =>
-      prev.map((p) => {
-        if (p.productId !== productId) return p;
+    setSelectedProducts((prev) => {
+      // One tank, one carrier volume, one owner — the rules and their reasons
+      // live in lib/product-rate-prefill. Only the owner's corrections travel,
+      // so a row given its own gallons detaches alone.
+      const tankOwner = tankOwnerRow(prev);
+      const propagateTank = tankPropagates(prev, productId, field);
+      // An owner that leaves per-gallon frees the slot the same way removing
+      // it does, and the rows still on its mix keep the tank: without an heir
+      // the next gallons edit — a detached row's included — would propagate
+      // over them (pre-push audit P1). Idempotent while an owner remains.
+      return promoteTankOwner(prev.map((p) => {
+        if (p.productId !== productId) return propagateTank ? followTank(p, value) : p;
         const next = { ...p, [field]: value };
+        // Leaving a per-gallon rate retires the tank with it, on every lane —
+        // a pest perimeter or tree/shrub row never reaches the rate-unit
+        // branch below, so a hidden volume would survive the round-trip back.
+        Object.assign(next, clearTankOnUnitChange(next, p.rateUnit));
+        // And its mirror: a row converted into a per-gallon rate joins the
+        // mix already in the tank rather than asking for it again.
+        Object.assign(next, joinTankOnUnitChange(next, p.rateUnit, tankOwner));
         // Provenance is per row: a governed row restored while the initial
         // plan request failed (`lawnDefaultsEnabled` false, no defaults
         // loaded) still records which fields the tech edited, or a successful
@@ -14798,6 +14859,9 @@ export function CompletionPanel({
           next.lawnPlanManualFields = [...new Set([...(p.lawnPlanManualFields || []), field])];
         }
         if (field === "applicationArea") next.applicationAreaDefault = false;
+        // The row the tech typed into owns its gallons from here on, and the
+        // first such row owns the tank.
+        if (field === "carrierGallons") Object.assign(next, markTankEntry(next, tankOwner));
         if (field === "applicationMethod") {
           const areaRequirement = requiredApplicationArea(
             value,
@@ -14841,15 +14905,28 @@ export function CompletionPanel({
         // in the rate's unit, so a rate-unit change moves the total unit too.
         if (field === "totalAmount") {
           next.totalAmountManual = true;
+          next.totalAmountSeeded = false;
         } else if (governed && field === "amountUnit") {
           // A still-derived total is the plan's quantity in the plan's unit:
           // a unit change alone withdraws it (never keeps the number under
           // the new unit, never converts) until the tech enters the actual.
           // An entered total keeps its number under the chosen unit as
-          // before (Codex r8 P1).
+          // before (Codex r8 P1). A derived TANK dose follows the same rule
+          // on any lane: without it, 0.8 fl_oz/gal x 30 recomputes as "24
+          // gal" under a hand-picked unit and deducts the wrong inventory
+          // quantity (Codex r1 P1).
           if (!p.totalAmountManual) next.totalAmount = "";
         } else if (!next.totalAmountManual) {
-          if (next.areaUnit !== "sqft") {
+          if (field === "rateUnit" && isPerGallonUnit(p.rateUnit)) {
+            // A tank dose is meaningless under the new unit: re-derive from
+            // the treated area where that is what the unit means, else blank
+            // — never relabel 20 fl oz of tank mix as 20 of something else.
+            const perBasis = isPerBasisUnit(value);
+            next.amountUnit = perBasis ? String(value).split("/")[0] : value;
+            next.totalAmount = !perBasis && next.areaUnit === "sqft"
+              ? lawnDerivedTotal(next, next.areaValue)
+              : "";
+          } else if (next.areaUnit !== "sqft") {
             if (field === "applicationMethod" && p.areaUnit === "sqft") {
               next.totalAmount = "";
             }
@@ -14892,9 +14969,13 @@ export function CompletionPanel({
             next.lawnPlanManualFields = [...new Set([...(next.lawnPlanManualFields || []), "amountUnit"])];
           }
         }
-        return next;
-      }),
-    );
+        // One closing step: a tank row shows its dose, whatever cleared it
+        // earlier. The governed area and method handlers above blank derived
+        // totals the plan cannot express; none of them has to know about
+        // tanks (Codex r1 P1).
+        return applyTankDose(next);
+      }));
+    });
   }
   function toggleArea(area) {
     if (generating) return;
@@ -18214,6 +18295,22 @@ export function CompletionPanel({
                           ? catalogUnitOption(sp.rateUnit, STANDARD_RATE_UNIT_OPTIONS)
                           : null}{" "}
                       </select>{" "}
+                      {isPerGallonUnit(sp.rateUnit) ? (
+                        <>
+                          <span style={{ fontSize: 12, fontWeight: 500, color: M.ink3 }}>
+                            Gallons mixed
+                          </span>{" "}
+                          <input
+                            type="number"
+                            placeholder="Gal"
+                            value={sp.carrierGallons ?? ""}
+                            onChange={(e) =>
+                              updateProduct(sp.productId, "carrierGallons", e.target.value)
+                            }
+                            style={{ ...mInput, width: 84, height: 40, padding: "0 12px" }}
+                          />{" "}
+                        </>
+                      ) : null}
                       <span style={{ fontSize: 12, fontWeight: 500, color: M.ink3 }}>
                         Total used
                       </span>{" "}
@@ -20586,6 +20683,22 @@ export function CompletionPanel({
                           ? catalogUnitOption(sp.rateUnit, STANDARD_RATE_UNIT_OPTIONS)
                           : null}{" "}
                   </select>{" "}
+                  {isPerGallonUnit(sp.rateUnit) ? (
+                    <>
+                      <span style={{ fontSize: 12, fontWeight: 500, color: D.muted }}>
+                        Gallons mixed
+                      </span>{" "}
+                      <input
+                        type="number"
+                        placeholder="Gal"
+                        value={sp.carrierGallons ?? ""}
+                        onChange={(e) =>
+                          updateProduct(sp.productId, "carrierGallons", e.target.value)
+                        }
+                        style={{ ...inputStyle, width: 70, marginBottom: 0 }}
+                      />{" "}
+                    </>
+                  ) : null}
                   <span style={{ fontSize: 12, fontWeight: 500, color: D.muted }}>
                     Total used
                   </span>{" "}

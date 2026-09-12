@@ -1,85 +1,23 @@
-import React, { useState, useEffect, useCallback } from "react";
+import React, { useCallback, useEffect, useRef, useState } from "react";
 import { useSearchParams } from "react-router-dom";
-import {
-  BadgeCheck,
-  ClipboardList,
-  FileText,
-  Gauge,
-  ShieldCheck,
-} from "lucide-react";
+import { BadgeCheck, ClipboardList, FileText, Gauge, ShieldCheck } from "lucide-react";
 import AdminCommandHeader from "../../components/admin/AdminCommandHeader";
+import {
+  ActionFeedback, Badge, Button, Card, CardBody, CardHeader, CardTitle,
+  Dialog, DialogBody, DialogFooter, DialogHeader, DialogTitle, Field, Input,
+  Table, TBody, TD, TH, THead, TR, UiSurface,
+} from "../../components/ui";
+import useRenderedTabBeacon from "../../hooks/useRenderedTabBeacon";
 import { getAdminAuthToken, getAdminUser } from "../../lib/adminAuth";
 import { formatETDateOnly } from "../../lib/timezone";
 import CredentialsPage from "./CredentialsPage";
-import useRenderedTabBeacon from "../../hooks/useRenderedTabBeacon";
 
 const API = "/api/admin/compliance-v2";
-// "manatee_county" → "Manatee County" (API jurisdictions are snake_case).
-const titleCaseCounty = (s) =>
-  String(s || "")
-    .split("_")
-    .filter(Boolean)
-    .map((w) => w.charAt(0).toUpperCase() + w.slice(1))
-    .join(" ");
-const fmtDay = (v) => formatETDateOnly(v) || v || "";
-const headers = (token) => ({
-  Authorization: `Bearer ${token}`,
-  "Content-Type": "application/json",
-});
-
-// V2 token pass — mirrors the palette used across EmailPage, ReviewsPage,
-// ServiceLibraryPage, etc. Kept as a local const so a one-page restyle
-// doesn't pull in a brand-new import surface.
-const D = {
-  bg: "#F4F4F5",
-  card: "#FFFFFF",
-  border: "#E4E4E7",
-  text: "#27272A",
-  muted: "#71717A",
-  heading: "#09090B",
-  green: "#15803D",
-  amber: "#A16207",
-  red: "#991B1B",
-  ink: "#18181B",
-};
-
-const sCard = {
-  background: D.card,
-  border: `1px solid ${D.border}`,
-  borderRadius: 12,
-  padding: 18,
-};
-const sInput = {
-  padding: "8px 12px",
-  background: D.card,
-  border: `1px solid ${D.border}`,
-  borderRadius: 8,
-  color: D.text,
-  fontSize: 13,
-  outline: "none",
-};
-const thS = {
-  fontSize: 11,
-  color: D.muted,
-  fontWeight: 500,
-  textAlign: "left",
-  padding: "12px 14px",
-  background: "#F8F8F8",
-  borderBottom: `1px solid ${D.border}`,
-};
-const tdS = {
-  padding: "12px 14px",
-  borderTop: `1px solid ${D.border}`,
-  fontSize: 13,
-  color: D.text,
-  verticalAlign: "middle",
-};
-const sTableWrap = {
-  background: D.card,
-  border: `1px solid ${D.border}`,
-  borderRadius: 12,
-  overflow: "auto",
-};
+const APPLICATION_PAGE_SIZE = 25;
+const titleCaseCounty = (value) => String(value || "").split("_").filter(Boolean)
+  .map((word) => word.charAt(0).toUpperCase() + word.slice(1)).join(" ");
+const fmtDay = (value) => formatETDateOnly(value) || value || "";
+const headers = (token) => ({ Authorization: `Bearer ${token}`, "Content-Type": "application/json" });
 
 function useFetch(url, token, deps = []) {
   const [data, setData] = useState(null);
@@ -89,885 +27,343 @@ function useFetch(url, token, deps = []) {
     setLoading(true);
     setError(null);
     fetch(url, { headers: headers(token) })
-      .then(async (r) => {
-        // A 403/500 JSON body used to parse as "data" and render a blank
-        // dashboard of dashes; a network error left the loading line up
-        // forever (UI audit F0406). Both are errors with a retry now.
-        if (!r.ok) throw new Error(`HTTP ${r.status}`);
-        return r.json();
+      .then(async (response) => {
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        return response.json();
       })
       .then(setData)
-      .catch((e) => {
-        console.error(e);
-        // Drop the previous page's rows too: stale records under freshly
-        // chosen filters read as current results.
+      .catch((requestError) => {
+        console.error(requestError);
         setData(null);
-        setError(e?.message || "Request failed");
+        setError(requestError?.message || "Request failed");
       })
       .finally(() => setLoading(false));
   }, [url, token]);
-  useEffect(() => {
-    reload();
-  }, [reload, ...deps]);
+  useEffect(() => { reload(); }, [reload, ...deps]);
   return { data, loading, error, reload };
 }
 
-function StatCard({ label, value, sub, accent = D.ink }) {
-  return (
-    <div style={{ ...sCard, padding: "16px 20px", minWidth: 160, flex: 1 }}>
-      {" "}
-      <div
-        style={{
-          color: D.muted,
-          fontSize: 11,
-          fontWeight: 500,
-          textTransform: "uppercase",
-          letterSpacing: 0.4,
-        }}
-      >
-        {label}
-      </div>{" "}
-      <div
-        style={{
-          color: accent,
-          fontSize: 28,
-          fontWeight: 700,
-          margin: "6px 0 2px",
-          fontFamily: "'JetBrains Mono', monospace",
-        }}
-      >
-        {value ?? "—"}
-      </div>
-      {sub && <div style={{ color: D.muted, fontSize: 12 }}>{sub}</div>}
-    </div>
-  );
+function ErrorState({ children, onRetry, className = "" }) {
+  return <div className={`flex flex-wrap items-center gap-3 ${className}`}>
+    <ActionFeedback error>{children}</ActionFeedback>
+    <Button variant="secondary" onClick={onRetry}>Retry</Button>
+  </div>;
 }
 
-// ═══════════ DASHBOARD TAB ═══════════
+// tone follows main's accent: amber for the nonblocking warning counts, red only
+// where main used D.red. A boolean "alert" flag collapsed both into reserved red.
+const STAT_TONES = {
+  alert: { border: "border-alert-fg", value: "text-alert-fg", sub: "text-alert-fg" },
+  warn: { border: "border-warn-fg", value: "text-warn-fg", sub: "text-warn-fg" },
+  neutral: { border: undefined, value: "text-zinc-900", sub: "text-ink-secondary" },
+};
+
+function StatCard({ label, value, sub, tone = "neutral" }) {
+  const { border, value: valueTone, sub: subTone } = STAT_TONES[tone] || STAT_TONES.neutral;
+  return <Card className={border}>
+    <CardBody>
+      <div className="text-ui-caption font-medium text-ink-secondary">{label}</div>
+      <div className={`mt-1 text-28 font-medium u-nums ${valueTone}`}>{value ?? "—"}</div>
+      {sub && <div className={`mt-1 text-ui-caption ${subTone}`}>{sub}</div>}
+    </CardBody>
+  </Card>;
+}
+
 function DashboardTab({ token }) {
   const { data, loading, error, reload } = useFetch(`${API}/dashboard`, token);
-  const { data: nData } = useFetch(`${API}/nitrogen-status`, token);
-
-  if (error)
-    return (
-      <div role="alert" style={{ color: D.red, padding: 20 }}>
-        Couldn't load the dashboard — {error}
-        <button type="button" onClick={reload} style={{ marginLeft: 8, padding: "4px 10px", borderRadius: 6, border: `1px solid ${D.red}`, background: "transparent", color: D.red, cursor: "pointer", font: "inherit" }}>Retry</button>
-      </div>
-    );
-  if (loading || !data)
-    return (
-      <div style={{ color: D.muted, padding: 20 }}>Loading dashboard…</div>
-    );
-
-  const blackoutActive = nData?.activeBlackoutCount > 0;
-
-  return (
-    <div>
-      {" "}
-      <div
-        style={{ display: "flex", gap: 12, flexWrap: "wrap", marginBottom: 20 }}
-      >
-        {" "}
-        <StatCard label="YTD Applications" value={data.ytdApplications} />{" "}
-        <StatCard
-          label="Unique Products"
-          value={data.uniqueProducts}
-          accent={D.green}
-        />{" "}
-        <StatCard
-          label="Warnings"
-          value={data.warningCount}
-          accent={data.warningCount > 0 ? D.amber : D.green}
-        />{" "}
-        <StatCard
-          label="Licensed Techs"
-          value={data.licensedTechs}
-          sub={
-            data.expiringLicenses > 0
-              ? `${data.expiringLicenses} expiring soon`
-              : "All current"
-          }
-          accent={data.expiringLicenses > 0 ? D.amber : D.green}
-        />{" "}
-        <StatCard
-          label="Restricted Use Apps"
-          value={data.restrictedUseApps}
-          accent={D.red}
-        />{" "}
-      </div>
-      {/* Nitrogen blackout card */}
-      <div
-        style={{
-          ...sCard,
-          marginBottom: 20,
-          background: blackoutActive ? "#FEF2F2" : "#F0FDF4",
-          borderColor: blackoutActive ? "#FCA5A5" : "#86EFAC",
-        }}
-      >
-        {" "}
-        <div
-          style={{
-            color: blackoutActive ? D.red : D.green,
-            fontWeight: 700,
-            fontSize: 14,
-            marginBottom: 8,
-          }}
-        >
-          {blackoutActive
-            ? "Nitrogen Blackout Active"
-            : "No Active Nitrogen Blackout"}
-        </div>
-        {nData?.blackoutPeriods?.map((b, i) => (
-          <div key={i} style={{ color: D.text, fontSize: 13, marginBottom: 4 }}>
-            {titleCaseCounty(b.jurisdiction)}: {fmtDay(b.start)} to {fmtDay(b.end)}
-          </div>
-        ))}
-      </div>
-      {/* Recent applications */}
-      <div
-        style={{
-          fontSize: 15,
-          fontWeight: 700,
-          color: D.heading,
-          marginBottom: 10,
-        }}
-      >
-        Recent Applications
-      </div>{" "}
-      <div style={sTableWrap}>
-        {" "}
-        <table style={{ width: "100%", borderCollapse: "collapse" }}>
-          <thead>
-            <tr>
-              {["Date", "Product", "Customer", "Technician"].map((h) => (
-                <th key={h} style={thS}>
-                  {h}
-                </th>
-              ))}
-            </tr>
-          </thead>
-          <tbody>
-            {data.recentApplications?.map((a) => (
-              <tr key={a.id}>
-                <td style={{ ...tdS, whiteSpace: "nowrap" }}>{fmtDay(a.date)}</td>
-                <td style={{ ...tdS, fontWeight: 500, color: D.heading }}>
-                  {a.product || "—"}
-                </td>
-                <td style={tdS}>{a.customer || "—"}</td>
-                <td style={tdS}>{a.tech || "—"}</td>
-              </tr>
-            ))}
-            {!data.recentApplications?.length && (
-              <tr>
-                <td
-                  colSpan={4}
-                  style={{
-                    ...tdS,
-                    color: D.muted,
-                    textAlign: "center",
-                    padding: 24,
-                  }}
-                >
-                  No applications recorded yet
-                </td>
-              </tr>
-            )}
-          </tbody>
-        </table>{" "}
-      </div>{" "}
+  const { data: nitrogenData } = useFetch(`${API}/nitrogen-status`, token);
+  if (error) return <ErrorState onRetry={reload} className="min-h-20">Couldn't load the dashboard — {error}</ErrorState>;
+  if (loading || !data) return <ActionFeedback className="min-h-20">Loading dashboard…</ActionFeedback>;
+  const blackoutActive = nitrogenData?.activeBlackoutCount > 0;
+  return <div className="space-y-5">
+    <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-5">
+      <StatCard label="YTD Applications" value={data.ytdApplications} />
+      <StatCard label="Unique Products" value={data.uniqueProducts} />
+      <StatCard label="Warnings" value={data.warningCount} tone={data.warningCount > 0 ? "warn" : "neutral"} />
+      <StatCard label="Licensed Techs" value={data.licensedTechs}
+        sub={data.expiringLicenses > 0 ? `${data.expiringLicenses} expiring soon` : "All current"}
+        tone={data.expiringLicenses > 0 ? "warn" : "neutral"} />
+      <StatCard label="Restricted Use Apps" value={data.restrictedUseApps} />
     </div>
-  );
+    <Card className={blackoutActive ? "border-alert-fg" : undefined}>
+      <CardHeader><CardTitle className={blackoutActive ? "text-alert-fg" : undefined}>
+        {blackoutActive ? "Nitrogen Blackout Active" : "No Active Nitrogen Blackout"}
+      </CardTitle></CardHeader>
+      <CardBody className="space-y-1 text-ui-body text-ink-secondary">
+        {nitrogenData?.blackoutPeriods?.map((blackout, index) => <div key={index} className="u-nums">
+          {titleCaseCounty(blackout.jurisdiction)}: {fmtDay(blackout.start)} to {fmtDay(blackout.end)}
+        </div>)}
+      </CardBody>
+    </Card>
+    <Card>
+      <CardHeader><CardTitle>Recent Applications</CardTitle></CardHeader>
+      <CardBody className="p-0"><Table layout="records">
+        <THead><TR><TH scope="col">Date</TH><TH scope="col">Product</TH><TH scope="col">Customer</TH><TH scope="col">Technician</TH></TR></THead>
+        <TBody>
+          {data.recentApplications?.map((application) => <TR key={application.id}>
+            <TD className="font-medium text-zinc-900 u-nums">{fmtDay(application.date)}</TD>
+            <TD data-label="Product">{application.product || "—"}</TD>
+            <TD data-label="Customer">{application.customer || "—"}</TD>
+            <TD data-label="Technician">{application.tech || "—"}</TD>
+          </TR>)}
+          {!data.recentApplications?.length && <TR><TD colSpan={4} className="py-8 text-center text-ink-secondary">No applications recorded yet</TD></TR>}
+        </TBody>
+      </Table></CardBody>
+    </Card>
+  </div>;
 }
 
-// ═══════════ APPLICATION LOG TAB ═══════════
+function limitSeverityTone(severity) {
+  if (!severity) return "neutral";
+  return severity === "hard_block" ? "alert" : "warn";
+}
+
 function ApplicationLogTab({ token }) {
-  const [filters, setFilters] = useState({
-    startDate: "",
-    endDate: "",
-    productName: "",
-    page: 0,
-  });
-  const limit = 25;
+  const [filters, setFilters] = useState({ startDate: "", endDate: "", productName: "", page: 0 });
+  const [exporting, setExporting] = useState(false);
+  const [exportError, setExportError] = useState("");
+  const exportInFlight = useRef(false);
   const qs = new URLSearchParams({
     ...(filters.startDate && { startDate: filters.startDate }),
     ...(filters.endDate && { endDate: filters.endDate }),
     ...(filters.productName && { productName: filters.productName }),
-    limit: String(limit),
-    offset: String(filters.page * limit),
+    limit: String(APPLICATION_PAGE_SIZE), offset: String(filters.page * APPLICATION_PAGE_SIZE),
   }).toString();
   const { data, loading, error, reload } = useFetch(`${API}/applications?${qs}`, token, [qs]);
-
   const exportCSV = async () => {
-    const params = new URLSearchParams({
-      ...(filters.startDate && { startDate: filters.startDate }),
-      ...(filters.endDate && { endDate: filters.endDate }),
-    }).toString();
-    const res = await fetch(`${API}/report/export?${params}`, {
-      headers: headers(token),
-    });
-    const blob = await res.blob();
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = "dacs-report.csv";
-    a.click();
-    URL.revokeObjectURL(url);
+    if (exportInFlight.current) return;
+    exportInFlight.current = true;
+    setExporting(true);
+    setExportError("");
+    try {
+      const params = new URLSearchParams({
+        ...(filters.startDate && { startDate: filters.startDate }),
+        ...(filters.endDate && { endDate: filters.endDate }),
+      }).toString();
+      const response = await fetch(`${API}/report/export?${params}`, {
+        headers: headers(token),
+      });
+      if (!response.ok) throw new Error(`Export failed (HTTP ${response.status}). Please try again.`);
+      const blob = await response.blob();
+      const url = URL.createObjectURL(blob);
+      const anchor = document.createElement("a");
+      anchor.href = url;
+      anchor.download = "dacs-report.csv";
+      try { anchor.click(); } finally { URL.revokeObjectURL(url); }
+    } catch (requestError) {
+      setExportError(requestError.message || "Export failed. Please try again.");
+    } finally {
+      exportInFlight.current = false;
+      setExporting(false);
+    }
   };
-
-  return (
-    <div>
-      {" "}
-      <div
-        style={{
-          display: "flex",
-          gap: 10,
-          flexWrap: "wrap",
-          marginBottom: 16,
-          alignItems: "center",
-        }}
-      >
-        {" "}
-        <input
-          type="date"
-          style={sInput}
-          value={filters.startDate}
-          onChange={(e) =>
-            setFilters((f) => ({ ...f, startDate: e.target.value, page: 0 }))
-          }
-        />{" "}
-        <input
-          type="date"
-          style={sInput}
-          value={filters.endDate}
-          onChange={(e) =>
-            setFilters((f) => ({ ...f, endDate: e.target.value, page: 0 }))
-          }
-        />{" "}
-        <input
-          placeholder="Product name…"
-          style={{ ...sInput, width: 200 }}
-          value={filters.productName}
-          onChange={(e) =>
-            setFilters((f) => ({ ...f, productName: e.target.value, page: 0 }))
-          }
-        />{" "}
-        <button
-          onClick={exportCSV}
-          style={{
-            background: D.ink,
-            color: D.card,
-            border: "none",
-            borderRadius: 8,
-            padding: "8px 16px",
-            cursor: "pointer",
-            fontWeight: 500,
-            fontSize: 13,
-          }}
-        >
-          Export for DACS
-        </button>{" "}
-      </div>
-      {error ? (
-        <div role="alert" style={{ color: D.red }}>
-          Couldn't load applications — {error}
-          <button type="button" onClick={reload} style={{ marginLeft: 8, padding: "4px 10px", borderRadius: 6, border: `1px solid ${D.red}`, background: "transparent", color: D.red, cursor: "pointer", font: "inherit" }}>Retry</button>
+  return <div className="space-y-4">
+    <Card><CardBody className="grid gap-3 md:grid-cols-2 xl:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_minmax(220px,1.5fr)_auto] xl:items-end">
+      <Field label="Start date"><Input type="date" value={filters.startDate} onChange={(event) => setFilters((current) => ({ ...current, startDate: event.target.value, page: 0 }))} /></Field>
+      <Field label="End date"><Input type="date" value={filters.endDate} onChange={(event) => setFilters((current) => ({ ...current, endDate: event.target.value, page: 0 }))} /></Field>
+      <Field label="Product name"><Input placeholder="Product name…" value={filters.productName} onChange={(event) => setFilters((current) => ({ ...current, productName: event.target.value, page: 0 }))} /></Field>
+      <Button onClick={exportCSV} loading={exporting}>Export for DACS</Button>
+    </CardBody></Card>
+    {exportError && <ActionFeedback error>{exportError}</ActionFeedback>}
+    {error ? <ErrorState onRetry={reload}>Couldn't load applications — {error}</ErrorState> : loading ? <ActionFeedback className="min-h-16">Loading…</ActionFeedback> : <>
+      <Card><CardBody className="p-0"><Table className="min-w-[900px]">
+        <THead><TR>{["Date", "Product", "Active Ingredient", "EPA Reg #", "Rate", "Customer", "Tech", "Method"].map((heading) => <TH key={heading} scope="col">{heading}</TH>)}</TR></THead>
+        <TBody>
+          {data?.applications?.map((application) => <TR key={application.id}>
+            <TD className="whitespace-nowrap u-nums">{application.applicationDate}</TD>
+            <TD className="font-medium text-zinc-900">{application.productName}</TD>
+            <TD className="text-ink-secondary">{application.activeIngredient || "—"}</TD>
+            <TD className="text-ink-secondary u-nums">{application.epaRegNumber || "—"}</TD>
+            <TD className="u-nums">{application.applicationRate ? `${application.applicationRate} ${application.rateUnit || ""}` : "—"}</TD>
+            <TD>{application.customerName || "—"}</TD><TD>{application.techName || "—"}</TD>
+            <TD className="text-ink-secondary">{application.applicationMethod || "—"}</TD>
+          </TR>)}
+          {!data?.applications?.length && <TR><TD colSpan={8} className="py-8 text-center text-ink-secondary">No applications found</TD></TR>}
+        </TBody>
+      </Table></CardBody></Card>
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <span className="text-ui-caption text-ink-secondary u-nums">{data?.total || 0} total records</span>
+        <div className="ui-record-actions">
+          <Button variant="secondary" disabled={filters.page === 0} onClick={() => setFilters((current) => ({ ...current, page: current.page - 1 }))}>Prev</Button>
+          <Button variant="secondary" disabled={(data?.applications?.length || 0) < APPLICATION_PAGE_SIZE} onClick={() => setFilters((current) => ({ ...current, page: current.page + 1 }))}>Next</Button>
         </div>
-      ) : loading ? (
-        <div style={{ color: D.muted }}>Loading…</div>
-      ) : (
-        <>
-          {" "}
-          <div style={sTableWrap}>
-            {" "}
-            <div style={{ overflowX: "auto" }}>
-              {" "}
-              <table
-                style={{
-                  width: "100%",
-                  borderCollapse: "collapse",
-                  minWidth: 900,
-                }}
-              >
-                <thead>
-                  <tr>
-                    {[
-                      "Date",
-                      "Product",
-                      "Active Ingredient",
-                      "EPA Reg #",
-                      "Rate",
-                      "Customer",
-                      "Tech",
-                      "Method",
-                    ].map((h) => (
-                      <th key={h} style={thS}>
-                        {h}
-                      </th>
-                    ))}
-                  </tr>
-                </thead>
-                <tbody>
-                  {data?.applications?.map((a) => (
-                    <tr key={a.id}>
-                      <td style={{ ...tdS, whiteSpace: "nowrap" }}>
-                        {a.applicationDate}
-                      </td>
-                      <td style={{ ...tdS, fontWeight: 500, color: D.heading }}>
-                        {a.productName}
-                      </td>
-                      <td style={{ ...tdS, color: D.muted, fontSize: 12 }}>
-                        {a.activeIngredient || "—"}
-                      </td>
-                      <td style={{ ...tdS, color: D.muted, fontSize: 12 }}>
-                        {a.epaRegNumber || "—"}
-                      </td>
-                      <td style={{ ...tdS, fontSize: 12 }}>
-                        {a.applicationRate
-                          ? `${a.applicationRate} ${a.rateUnit || ""}`
-                          : "—"}
-                      </td>
-                      <td style={tdS}>{a.customerName || "—"}</td>
-                      <td style={tdS}>{a.techName || "—"}</td>
-                      <td style={{ ...tdS, color: D.muted, fontSize: 12 }}>
-                        {a.applicationMethod || "—"}
-                      </td>
-                    </tr>
-                  ))}
-                  {!data?.applications?.length && (
-                    <tr>
-                      <td
-                        colSpan={8}
-                        style={{
-                          ...tdS,
-                          color: D.muted,
-                          textAlign: "center",
-                          padding: 24,
-                        }}
-                      >
-                        No applications found
-                      </td>
-                    </tr>
-                  )}
-                </tbody>
-              </table>{" "}
-            </div>{" "}
-          </div>{" "}
-          <div
-            style={{
-              display: "flex",
-              justifyContent: "space-between",
-              alignItems: "center",
-              marginTop: 12,
-            }}
-          >
-            {" "}
-            <span style={{ color: D.muted, fontSize: 13 }}>
-              {data?.total || 0} total records
-            </span>{" "}
-            <div style={{ display: "flex", gap: 8 }}>
-              {" "}
-              <button
-                disabled={filters.page === 0}
-                onClick={() => setFilters((f) => ({ ...f, page: f.page - 1 }))}
-                style={{
-                  background: D.card,
-                  color: D.text,
-                  border: `1px solid ${D.border}`,
-                  borderRadius: 8,
-                  padding: "6px 14px",
-                  cursor: filters.page === 0 ? "not-allowed" : "pointer",
-                  fontSize: 13,
-                  opacity: filters.page === 0 ? 0.5 : 1,
-                }}
-              >
-                Prev
-              </button>{" "}
-              <button
-                disabled={(data?.applications?.length || 0) < limit}
-                onClick={() => setFilters((f) => ({ ...f, page: f.page + 1 }))}
-                style={{
-                  background: D.card,
-                  color: D.text,
-                  border: `1px solid ${D.border}`,
-                  borderRadius: 8,
-                  padding: "6px 14px",
-                  cursor:
-                    (data?.applications?.length || 0) < limit
-                      ? "not-allowed"
-                      : "pointer",
-                  fontSize: 13,
-                  opacity: (data?.applications?.length || 0) < limit ? 0.5 : 1,
-                }}
-              >
-                Next
-              </button>{" "}
-            </div>{" "}
-          </div>{" "}
-        </>
-      )}
-    </div>
-  );
+      </div>
+    </>}
+  </div>;
 }
 
-// ═══════════ PRODUCT LIMITS TAB ═══════════
+// Same class as the severity badge: main painted exceeded / blackout_active /
+// expired red and warning / expiring_soon amber, so collapsing all five into
+// alert put reserved red on two warning states.
+const ALERT_STATUSES = ["exceeded", "blackout_active", "expired"];
+const WARN_STATUSES = ["warning", "expiring_soon"];
+function statusTone(status) {
+  if (ALERT_STATUSES.includes(status)) return "alert";
+  return WARN_STATUSES.includes(status) ? "warn" : "neutral";
+}
+function StatusBadge({ status }) {
+  return <Badge tone={statusTone(status)}>{status?.replace(/_/g, " ")}</Badge>;
+}
+
 function ProductLimitsTab({ token }) {
   const [customerId, setCustomerId] = useState("");
   const [result, setResult] = useState(null);
   const [loading, setLoading] = useState(false);
-  const { data: nData } = useFetch(`${API}/nitrogen-status`, token);
-
+  const { data: nitrogenData } = useFetch(`${API}/nitrogen-status`, token);
   const lookup = async () => {
     if (!customerId) return;
     setLoading(true);
     try {
-      const r = await fetch(`${API}/product-limits?customer_id=${customerId}`, {
+      const response = await fetch(`${API}/product-limits?customer_id=${customerId}`, {
         headers: headers(token),
       });
-      setResult(await r.json());
-    } catch (e) {
-      console.error(e);
-    }
+      setResult(await response.json());
+    } catch (requestError) { console.error(requestError); }
     setLoading(false);
   };
-
-  const statusColor = (s) =>
-    ({
-      ok: D.green,
-      warning: D.amber,
-      exceeded: D.red,
-      blackout_active: D.red,
-    })[s] || D.muted;
-
-  return (
-    <div>
-      {" "}
-      <div
-        style={{
-          display: "flex",
-          gap: 10,
-          marginBottom: 20,
-          alignItems: "center",
-        }}
-      >
-        {" "}
-        <input
-          placeholder="Customer ID…"
-          value={customerId}
-          onChange={(e) => setCustomerId(e.target.value)}
-          style={{ ...sInput, width: 320 }}
-        />{" "}
-        <button
-          onClick={lookup}
-          style={{
-            background: D.ink,
-            color: D.card,
-            border: "none",
-            borderRadius: 8,
-            padding: "8px 16px",
-            cursor: "pointer",
-            fontSize: 13,
-            fontWeight: 500,
-          }}
-        >
-          Check Limits
-        </button>{" "}
-      </div>
-      {loading && <div style={{ color: D.muted }}>Checking…</div>}
-      {result?.limits && (
-        <div style={{ marginBottom: 24 }}>
-          {" "}
-          <div
-            style={{
-              fontSize: 15,
-              fontWeight: 700,
-              color: D.heading,
-              marginBottom: 10,
-            }}
-          >
-            {result.customerName}
-          </div>{" "}
-          <div style={sTableWrap}>
-            {" "}
-            <table style={{ width: "100%", borderCollapse: "collapse" }}>
-              <thead>
-                <tr>
-                  {[
-                    "Type",
-                    "Limit",
-                    "Current",
-                    "Status",
-                    "Severity",
-                    "Description",
-                  ].map((h) => (
-                    <th key={h} style={thS}>
-                      {h}
-                    </th>
-                  ))}
-                </tr>
-              </thead>
-              <tbody>
-                {result.limits.map((l, i) => (
-                  <tr key={i}>
-                    <td style={tdS}>{l.limitType?.replace(/_/g, " ")}</td>
-                    <td style={{ ...tdS, fontWeight: 500, color: D.heading }}>
-                      {l.limitValue}
-                    </td>
-                    <td style={{ ...tdS, fontWeight: 500, color: D.heading }}>
-                      {l.currentUsage}
-                    </td>
-                    <td style={tdS}>
-                      <span
-                        style={{
-                          color: statusColor(l.status),
-                          fontWeight: 500,
-                          fontSize: 11,
-                          textTransform: "uppercase",
-                          letterSpacing: 0.4,
-                        }}
-                      >
-                        {l.status?.replace(/_/g, " ")}
-                      </span>
-                    </td>
-                    <td
-                      style={{
-                        ...tdS,
-                        color: l.severity === "hard_block" ? D.red : D.amber,
-                      }}
-                    >
-                      {l.severity}
-                    </td>
-                    <td
-                      style={{
-                        ...tdS,
-                        color: D.muted,
-                        fontSize: 12,
-                        maxWidth: 320,
-                      }}
-                    >
-                      {l.description}
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>{" "}
-          </div>{" "}
-        </div>
-      )}
-      <div
-        style={{
-          fontSize: 15,
-          fontWeight: 700,
-          color: D.heading,
-          marginTop: 24,
-          marginBottom: 10,
-        }}
-      >
-        Nitrogen Status — All Lawn Customers
-      </div>
-      {nData?.customers?.length ? (
-        <div style={sTableWrap}>
-          {" "}
-          <table style={{ width: "100%", borderCollapse: "collapse" }}>
-            <thead>
-              <tr>
-                {[
-                  "Customer",
-                  "City",
-                  "County",
-                  "Lawn Type",
-                  "N Apps YTD",
-                  "Blackout",
-                ].map((h) => (
-                  <th key={h} style={thS}>
-                    {h}
-                  </th>
-                ))}
-              </tr>
-            </thead>
-            <tbody>
-              {nData.customers.map((c) => (
-                <tr key={c.customerId}>
-                  <td style={tdS}>{c.customerName}</td>
-                  <td style={{ ...tdS, color: D.muted }}>{c.city}</td>
-                  <td style={{ ...tdS, color: D.muted }}>
-                    {titleCaseCounty(c.county)}
-                  </td>
-                  <td style={{ ...tdS, color: D.muted }}>{c.lawnType}</td>
-                  <td style={{ ...tdS, fontWeight: 500, color: D.heading }}>
-                    {c.nitrogenAppsYTD}
-                  </td>
-                  <td style={tdS}>
-                    {" "}
-                    <span
-                      style={{
-                        color: c.blackoutActive ? D.red : D.green,
-                        fontWeight: 500,
-                        fontSize: 11,
-                        textTransform: "uppercase",
-                        letterSpacing: 0.4,
-                      }}
-                    >
-                      {c.blackoutActive ? "Active" : "Clear"}
-                    </span>{" "}
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>{" "}
-        </div>
-      ) : (
-        <div style={{ color: D.muted }}>No lawn customers found</div>
-      )}
-    </div>
-  );
+  return <div className="space-y-6">
+    <Card><CardBody className="flex flex-col gap-3 sm:flex-row sm:items-end">
+      <Field label="Customer ID" className="w-full max-w-md"><Input placeholder="Customer ID…" value={customerId} onChange={(event) => setCustomerId(event.target.value)} /></Field>
+      <Button onClick={lookup}>Check Limits</Button>
+    </CardBody></Card>
+    {loading && <ActionFeedback>Checking…</ActionFeedback>}
+    {result?.limits && <Card>
+      <CardHeader><CardTitle>{result.customerName}</CardTitle></CardHeader>
+      <CardBody className="p-0"><Table layout="records">
+        <THead><TR>{["Type", "Limit", "Current", "Status", "Severity", "Description"].map((heading) => <TH key={heading} scope="col">{heading}</TH>)}</TR></THead>
+        <TBody>{result.limits.map((limit, index) => <TR key={index}>
+          <TD className="font-medium text-zinc-900">{limit.limitType?.replace(/_/g, " ")}</TD>
+          <TD data-label="Limit" nums>{limit.limitValue}</TD><TD data-label="Current" nums>{limit.currentUsage}</TD>
+          <TD data-label="Status"><StatusBadge status={limit.status} /></TD>
+          {/* Only hard_block is a genuine alert. compliance.js paints everything
+              else amber, and the truthiness check was giving an informational
+              rule the reserved red treatment. */}
+          <TD data-label="Severity"><Badge tone={limitSeverityTone(limit.severity)}>{limit.severity}</Badge></TD>
+          <TD data-label="Description" className="text-ink-secondary">{limit.description}</TD>
+        </TR>)}</TBody>
+      </Table></CardBody>
+    </Card>}
+    <Card>
+      <CardHeader><CardTitle>Nitrogen Status — All Lawn Customers</CardTitle></CardHeader>
+      <CardBody className={nitrogenData?.customers?.length ? "p-0" : undefined}>
+        {nitrogenData?.customers?.length ? <Table layout="records">
+          <THead><TR>{["Customer", "City", "County", "Lawn Type", "N Apps YTD", "Blackout"].map((heading) => <TH key={heading} scope="col">{heading}</TH>)}</TR></THead>
+          <TBody>{nitrogenData.customers.map((customer) => <TR key={customer.customerId}>
+            <TD className="font-medium text-zinc-900">{customer.customerName}</TD>
+            <TD data-label="City" className="text-ink-secondary">{customer.city}</TD>
+            <TD data-label="County" className="text-ink-secondary">{titleCaseCounty(customer.county)}</TD>
+            <TD data-label="Lawn Type" className="text-ink-secondary">{customer.lawnType}</TD>
+            <TD data-label="N Apps YTD" nums>{customer.nitrogenAppsYTD}</TD>
+            <TD data-label="Blackout"><Badge tone={customer.blackoutActive ? "alert" : "neutral"}>{customer.blackoutActive ? "Active" : "Clear"}</Badge></TD>
+          </TR>)}</TBody>
+        </Table> : <p className="text-ui-body text-ink-secondary">No lawn customers found</p>}
+      </CardBody>
+    </Card>
+  </div>;
 }
 
-// ═══════════ LICENSES TAB ═══════════
 function LicensesTab({ token }) {
   const { data, loading, error, reload } = useFetch(`${API}/licenses`, token);
   const [editing, setEditing] = useState(null);
   const [form, setForm] = useState({});
-
-  const startEdit = (t) => {
-    setEditing(t.id);
-    setForm({
-      fl_applicator_license: t.license || "",
-      license_expiry: t.licenseExpiry || "",
-      license_categories: t.licenseCategories || [],
-    });
+  const [saving, setSaving] = useState(false);
+  const [saveError, setSaveError] = useState(null);
+  const savingRef = useRef(false);
+  const startEdit = (event, technician) => {
+    event.currentTarget.focus({ preventScroll: true });
+    setEditing(technician.id);
+    setSaveError(null);
+    setForm({ fl_applicator_license: technician.license || "", license_expiry: technician.licenseExpiry || "", license_categories: technician.licenseCategories || [] });
   };
-
-  const save = async () => {
-    await fetch(`${API}/licenses/${editing}`, {
+  const closeEditor = () => {
+    if (!savingRef.current) {
+      setEditing(null);
+      setSaveError(null);
+    }
+  };
+  const save = async (event) => {
+    event.preventDefault();
+    if (savingRef.current) return;
+    savingRef.current = true;
+    setSaving(true);
+    setSaveError(null);
+    try {
+      const response = await fetch(`${API}/licenses/${editing}`, {
       method: "PUT",
       headers: headers(token),
       body: JSON.stringify(form),
     });
-    setEditing(null);
-    reload();
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      setEditing(null);
+      reload();
+    } catch (requestError) {
+      setSaveError(`Couldn't save the license — ${requestError?.message || "Request failed"}`);
+    } finally {
+      savingRef.current = false;
+      setSaving(false);
+    }
   };
-
-  const statusBadge = (s) => {
-    const colors = {
-      active: D.green,
-      expiring_soon: D.amber,
-      expired: D.red,
-      none: D.muted,
-    };
-    return (
-      <span
-        style={{
-          color: colors[s] || D.muted,
-          fontWeight: 500,
-          fontSize: 11,
-          textTransform: "uppercase",
-          letterSpacing: 0.4,
-        }}
-      >
-        {s?.replace("_", " ")}
-      </span>
-    );
-  };
-
-  if (error)
-    return (
-      <div role="alert" style={{ color: D.red, padding: 20 }}>
-        Couldn't load licenses — {error}
-        <button type="button" onClick={reload} style={{ marginLeft: 8, padding: "4px 10px", borderRadius: 6, border: `1px solid ${D.red}`, background: "transparent", color: D.red, cursor: "pointer", font: "inherit" }}>Retry</button>
-      </div>
-    );
-  if (loading)
-    return <div style={{ color: D.muted, padding: 20 }}>Loading…</div>;
-
-  return (
-    <div style={sTableWrap}>
-      {" "}
-      <table style={{ width: "100%", borderCollapse: "collapse" }}>
-        <thead>
-          <tr>
-            {[
-              "Technician",
-              "License #",
-              "Expiry",
-              "Categories",
-              "Status",
-              "",
-            ].map((h) => (
-              <th key={h} style={thS}>
-                {h}
-              </th>
-            ))}
-          </tr>
-        </thead>
-        <tbody>
-          {data?.technicians?.map((t) => (
-            <tr key={t.id}>
-              <td style={{ ...tdS, fontWeight: 500, color: D.heading }}>
-                {t.name}
-              </td>
-              {editing === t.id ? (
-                <>
-                  <td style={tdS}>
-                    {" "}
-                    <input
-                      value={form.fl_applicator_license}
-                      onChange={(e) =>
-                        setForm((f) => ({
-                          ...f,
-                          fl_applicator_license: e.target.value,
-                        }))
-                      }
-                      style={{ ...sInput, width: 140 }}
-                    />{" "}
-                  </td>
-                  <td style={tdS}>
-                    {" "}
-                    <input
-                      type="date"
-                      value={form.license_expiry}
-                      onChange={(e) =>
-                        setForm((f) => ({
-                          ...f,
-                          license_expiry: e.target.value,
-                        }))
-                      }
-                      style={sInput}
-                    />{" "}
-                  </td>
-                  <td style={{ ...tdS, color: D.muted, fontSize: 12 }}>—</td>
-                  <td style={tdS}>{statusBadge(t.licenseStatus)}</td>
-                  <td style={tdS}>
-                    {" "}
-                    <button
-                      onClick={save}
-                      style={{
-                        background: D.green,
-                        color: D.card,
-                        border: "none",
-                        borderRadius: 8,
-                        padding: "6px 12px",
-                        cursor: "pointer",
-                        marginRight: 6,
-                        fontSize: 12,
-                        fontWeight: 500,
-                      }}
-                    >
-                      Save
-                    </button>{" "}
-                    <button
-                      onClick={() => setEditing(null)}
-                      style={{
-                        background: "transparent",
-                        color: D.muted,
-                        border: `1px solid ${D.border}`,
-                        borderRadius: 8,
-                        padding: "6px 12px",
-                        cursor: "pointer",
-                        fontSize: 12,
-                      }}
-                    >
-                      Cancel
-                    </button>{" "}
-                  </td>
-                </>
-              ) : (
-                <>
-                  <td style={tdS}>{t.license || "—"}</td>
-                  <td style={tdS}>{t.licenseExpiry || "—"}</td>
-                  <td style={{ ...tdS, color: D.muted, fontSize: 12 }}>
-                    {Array.isArray(t.licenseCategories)
-                      ? t.licenseCategories.join(", ")
-                      : "—"}
-                  </td>
-                  <td style={tdS}>{statusBadge(t.licenseStatus)}</td>
-                  <td style={tdS}>
-                    {" "}
-                    <button
-                      onClick={() => startEdit(t)}
-                      style={{
-                        background: "transparent",
-                        color: D.ink,
-                        border: `1px solid ${D.border}`,
-                        borderRadius: 8,
-                        padding: "6px 12px",
-                        cursor: "pointer",
-                        fontSize: 12,
-                        fontWeight: 500,
-                      }}
-                    >
-                      Edit
-                    </button>{" "}
-                  </td>
-                </>
-              )}
-            </tr>
-          ))}
-        </tbody>
-      </table>{" "}
-    </div>
-  );
+  if (error) return <ErrorState onRetry={reload} className="min-h-20">Couldn't load licenses — {error}</ErrorState>;
+  if (loading) return <ActionFeedback className="min-h-20">Loading…</ActionFeedback>;
+  const editingTechnician = data?.technicians?.find((technician) => technician.id === editing);
+  return <>
+    <Card><CardBody className="p-0"><Table layout="records">
+      <THead><TR>{["Technician", "License #", "Expiry", "Categories", "Status", ""].map((heading) => <TH key={heading} scope="col">{heading}</TH>)}</TR></THead>
+      <TBody>{data?.technicians?.map((technician) => <TR key={technician.id}>
+        <TD className="font-medium text-zinc-900">{technician.name}</TD>
+        <TD data-label="License #" className="u-nums">{technician.license || "—"}</TD>
+        <TD data-label="Expiry" className="u-nums">{technician.licenseExpiry || "—"}</TD>
+        <TD data-label="Categories" className="text-ink-secondary">{Array.isArray(technician.licenseCategories) ? technician.licenseCategories.join(", ") : "—"}</TD>
+        <TD data-label="Status"><StatusBadge status={technician.licenseStatus} /></TD>
+        <TD className="text-right"><Button variant="secondary" onClick={(event) => startEdit(event, technician)}>Edit</Button></TD>
+      </TR>)}</TBody>
+    </Table></CardBody></Card>
+    <Dialog open={editing !== null} onClose={closeEditor} size="sm">
+      <DialogHeader><DialogTitle>Edit license</DialogTitle></DialogHeader>
+      <form onSubmit={save} className="flex min-h-0 flex-col">
+        <DialogBody className="space-y-4">
+          <p className="text-ui-body font-medium text-zinc-900">{editingTechnician?.name}</p>
+          <Field label="License #"><Input value={form.fl_applicator_license || ""} onChange={(event) => setForm((current) => ({ ...current, fl_applicator_license: event.target.value }))} /></Field>
+          <Field label="Expiry"><Input type="date" value={form.license_expiry || ""} onChange={(event) => setForm((current) => ({ ...current, license_expiry: event.target.value }))} /></Field>
+          {saveError && <ActionFeedback error>{saveError}</ActionFeedback>}
+        </DialogBody>
+        <DialogFooter><Button variant="secondary" onClick={closeEditor} disabled={saving}>Cancel</Button><Button type="submit" loading={saving}>Save</Button></DialogFooter>
+      </form>
+    </Dialog>
+  </>;
 }
 
-// ═══════════ MAIN PAGE ═══════════
 const COMPLIANCE_TABS = [
   { key: "dashboard", label: "Dashboard", Icon: Gauge },
   { key: "log", label: "Application Log", Icon: ClipboardList },
   { key: "limits", label: "Product Limits", Icon: ShieldCheck },
   { key: "licenses", label: "Licenses", Icon: FileText },
-  // Credentials embeds an admin-only workspace (/api/admin/credentials is
-  // requireAdmin) while this page itself is tech-reachable
-  // (requireTechOrAdmin) — so the tab is filtered by role below.
   { key: "credentials", label: "Credentials", Icon: BadgeCheck, adminOnly: true },
 ];
 
 export default function CompliancePage() {
   const [searchParams, setSearchParams] = useSearchParams();
   const isAdmin = getAdminUser()?.role === "admin";
-  const visibleTabs = COMPLIANCE_TABS.filter(
-    ({ adminOnly }) => !adminOnly || isAdmin,
-  );
+  const visibleTabs = COMPLIANCE_TABS.filter(({ adminOnly }) => !adminOnly || isAdmin);
   const visibleTabKeys = new Set(visibleTabs.map(({ key }) => key));
   const requestedTab = searchParams.get("tab");
   const tab = visibleTabKeys.has(requestedTab) ? requestedTab : "dashboard";
   const token = getAdminAuthToken();
-
-  // Usage beacon for the tab that actually RENDERS: this resolution is
-  // role-aware — a tech opening the admin-only ?tab=credentials (e.g. via
-  // the legacy /admin/credentials redirect) renders Dashboard, and the
-  // layout's raw-query beacon would record a tab they never saw
-  // (Codex #2961 r15).
   useRenderedTabBeacon("/admin/compliance", tab, [searchParams]);
-
   const selectTab = (nextTab) => {
-    // Re-clicking the active section renders nothing new — skip the URL
-    // churn (and the usage beacon it would re-fire).
     if (nextTab === tab) return;
     const nextParams = new URLSearchParams(searchParams);
-    if (nextTab === "dashboard") nextParams.delete("tab");
-    else nextParams.set("tab", nextTab);
+    if (nextTab === "dashboard") nextParams.delete("tab"); else nextParams.set("tab", nextTab);
     setSearchParams(nextParams);
   };
-
-  return (
-    <div style={{ maxWidth: 1300, margin: "0 auto" }}>
-      {" "}
-      <AdminCommandHeader
-        title="Compliance"
-        icon={ShieldCheck}
-        sections={visibleTabs}
-        activeKey={tab}
-        onSectionChange={selectTab}
-        ariaLabel="Compliance section"
-        navGridClassName={
-          isAdmin ? "grid-cols-2 lg:grid-cols-5" : "grid-cols-2 lg:grid-cols-4"
-        }
-      />
-      {tab === "dashboard" && <DashboardTab token={token} />}
-      {tab === "log" && <ApplicationLogTab token={token} />}
-      {tab === "limits" && <ProductLimitsTab token={token} />}
-      {tab === "licenses" && <LicensesTab token={token} />}
-      {tab === "credentials" && isAdmin && <CredentialsPage embedded />}
-    </div>
-  );
+  return <UiSurface density="comfortable" className="mx-auto max-w-[1300px] text-ui-body text-ink-primary">
+    <AdminCommandHeader variant="workspace" title="Compliance" icon={ShieldCheck} sections={visibleTabs}
+      activeKey={tab} onSectionChange={selectTab} ariaLabel="Compliance section"
+      navGridClassName={isAdmin ? "grid-cols-2 lg:grid-cols-5" : "grid-cols-2 lg:grid-cols-4"} />
+    {tab === "dashboard" && <DashboardTab token={token} />}
+    {tab === "log" && <ApplicationLogTab token={token} />}
+    {tab === "limits" && <ProductLimitsTab token={token} />}
+    {tab === "licenses" && <LicensesTab token={token} />}
+    {tab === "credentials" && isAdmin && <CredentialsPage embedded />}
+  </UiSurface>;
 }

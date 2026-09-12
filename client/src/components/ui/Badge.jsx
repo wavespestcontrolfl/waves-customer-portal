@@ -8,12 +8,14 @@ const BASE =
 const TONES = {
   neutral: 'bg-zinc-100 text-zinc-700',
   strong: 'bg-zinc-900 text-white',
+  warn: 'bg-warn-bg text-warn-fg',
   alert: 'bg-alert-bg text-alert-fg',
 };
 
 const DOT_TONES = {
   neutral: 'bg-zinc-500',
   strong: 'bg-zinc-900',
+  warn: 'bg-warn-fg',
   alert: 'bg-alert-fg',
 };
 

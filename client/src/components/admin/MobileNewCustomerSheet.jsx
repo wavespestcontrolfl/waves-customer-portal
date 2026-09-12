@@ -2,7 +2,6 @@
 // Full-screen sheet over the Customers page. Matches the compact mobile layout:
 //   · round X top-left, round "Save" pill top-right (dims when invalid)
 //   · big "New customer" heading
-//   · grey "Import from contacts" pill (stub — needs iOS bridge)
 //   · rounded outlined inputs for name / phone / email
 //   · "Address" section label then Country / Line 1 / Line 2 / City / State / ZIP
 //
@@ -225,15 +224,6 @@ export default function MobileNewCustomerSheet({
         >
           New customer
         </h1>
-        {/* Import from contacts (stub — needs native bridge) */}
-        <button
-          type="button"
-          onClick={() => alert("Import from contacts — coming soon")}
-          className="w-full rounded-full bg-zinc-100 text-zinc-900 font-medium u-focus-ring"
-          style={{ padding: "14px 20px", fontSize: 15, marginBottom: 18 }}
-        >
-          Import from contacts
-        </button>
         {/* Name + phone + email */}
         <div className="flex flex-col gap-3">
           {" "}
