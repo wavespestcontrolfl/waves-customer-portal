@@ -206,8 +206,8 @@ async function settleStatementPaid(statementId, settlement = {}, { database = db
  * enrollment is unrecorded.
  */
 /** The open unrecorded-enrollment alerts, with the invoice ids each names. */
-async function openUnrecordedEnrollmentAlerts() {
-  const rows = await db('dispatch_alerts').where({ type: 'visit_closeout_review' }).whereNull('resolved_at')
+async function openUnrecordedEnrollmentAlerts(database = db) {
+  const rows = await database('dispatch_alerts').where({ type: 'visit_closeout_review' }).whereNull('resolved_at')
     .whereRaw("payload->>'reason' = 'review_enrollment_unrecorded'")
     .select('id', 'payload');
   return rows.map((alert) => {
@@ -222,12 +222,12 @@ async function openUnrecordedEnrollmentAlerts() {
  * sets overlap — [A,B] then [B] — and an exact-array match would retire the
  * wrong one and leave the other open forever.
  */
-async function retireRecoveredEnrollmentAlerts(recovered) {
+async function retireRecoveredEnrollmentAlerts(recovered, trx) {
   const recoveredSet = new Set(recovered.map(String));
-  for (const alert of await openUnrecordedEnrollmentAlerts()) {
+  for (const alert of await openUnrecordedEnrollmentAlerts(trx)) {
     if (!alert.invoiceIds.length) continue;
     if (alert.invoiceIds.every((id) => recoveredSet.has(id))) {
-      await require('./dispatch-alerts').resolveAlert({ id: alert.id, resolvedBy: null });
+      await require('./dispatch-alerts').resolveAlert({ id: alert.id, resolvedBy: null, trx });
     }
   }
 }
@@ -238,9 +238,9 @@ async function retireRecoveredEnrollmentAlerts(recovered) {
  * does not, because on a rail with no redelivery this alert is the last record
  * that the ask is still owed.
  */
-async function raiseUnrecordedEnrollmentAlert(unrecorded, source) {
+async function raiseUnrecordedEnrollmentAlert(unrecorded, source, trx) {
   const alreadyNamed = new Set();
-  for (const alert of await openUnrecordedEnrollmentAlerts()) {
+  for (const alert of await openUnrecordedEnrollmentAlerts(trx)) {
     alert.invoiceIds.forEach((id) => alreadyNamed.add(id));
   }
   const unnamed = unrecorded.filter((id) => !alreadyNamed.has(String(id)));
@@ -248,6 +248,7 @@ async function raiseUnrecordedEnrollmentAlert(unrecorded, source) {
   await require('./dispatch-alerts').createAlert({
     type: 'visit_closeout_review',
     severity: 'warn',
+    trx,
     payload: {
       reason: 'review_enrollment_unrecorded',
       source,
@@ -280,20 +281,31 @@ async function enrollSettledPacketReviews(invoiceIds, { database = db, source = 
     const { recorded } = await enrollOneSettledPacketReview(id, database, source);
     if (!recorded) unrecorded.push(id);
   }
-  try {
-    await retireRecoveredEnrollmentAlerts(ids.filter((id) => !unrecorded.includes(id)));
-  } catch (resolveErr) {
-    logger.warn(`[payer-statement-settle] could not retire an unrecorded-enrollment alert: ${resolveErr.message}`);
-  }
   if (unrecorded.length) {
     logger.error(`[payer-statement-settle] ${unrecorded.length} settled packet invoice(s) have an UNRECORDED review enrollment — the packet recovery sweep owns them now`);
-    try {
-      await raiseUnrecordedEnrollmentAlert(unrecorded, source);
-    } catch (alertErr) {
-      // The alert is the durable signal, so its own failure is escalated
-      // rather than swallowed (Codex #4311 r36 P1): the caller still receives
-      // the unrecorded ids and reports them to the operator.
+  }
+  // The retire and the raise are ONE serialized decision (Codex #4311 r48
+  // P1): dispatch_alerts has no uniqueness constraint for these payloads, so
+  // two runs finishing the same paid statement — an admin reconcile and a
+  // webhook replay — could both pass the dedupe read before either insert
+  // committed, or a successful run could retire an alert that a failing run
+  // was about to re-raise. Locking the affected invoice rows (in id order,
+  // so two runs cannot deadlock) serializes the whole lifecycle.
+  try {
+    await db.transaction(async (trx) => {
+      await trx('invoices').whereIn('id', [...ids].map(String).sort()).orderBy('id').forUpdate().select('id');
+      await retireRecoveredEnrollmentAlerts(ids.filter((id) => !unrecorded.includes(id)), trx);
+      if (!unrecorded.length) return;
+      await raiseUnrecordedEnrollmentAlert(unrecorded, source, trx);
+    });
+  } catch (alertErr) {
+    // The alert is the durable signal, so its own failure is escalated rather
+    // than swallowed (Codex #4311 r36 P1): the caller still receives the
+    // unrecorded ids and reports them to the operator.
+    if (unrecorded.length) {
       logger.error(`[payer-statement-settle] could not raise the unrecorded-enrollment alert — the ONLY durable signal for ${unrecorded.length} lost review ask(s) (${unrecorded.join(', ')}): ${alertErr.message}`);
+    } else {
+      logger.warn(`[payer-statement-settle] could not retire an unrecorded-enrollment alert: ${alertErr.message}`);
     }
   }
   return unrecorded;
