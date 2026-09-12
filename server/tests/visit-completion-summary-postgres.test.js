@@ -3519,6 +3519,12 @@ postgres('visit summary recipient recovery', () => {
       // The payer verdict is recorded, and the original provenance survives.
       expect(JSON.parse(withdrawn.error)).toMatchObject({ reason: 'payer_assigned', priorPaymentReason: 'charge_failed' });
 
+      // A REPEATED withdrawal (a coordinator replay) keeps it too: by now the
+      // original reason lives in priorPaymentReason, not in `reason`.
+      await mockPg.transaction((trx) => Packets.withdrawPacketInvoicesForOwner(trx, { customerId: fixture.customerId }));
+      expect(JSON.parse((await mockPg('visit_completion_packets').where({ id: fixture.packetId }).first('error')).error))
+        .toMatchObject({ reason: 'payer_assigned', priorPaymentReason: 'charge_failed' });
+
       // Bill-To cleared: the payer verdict lifts, the original one does not.
       await mockPg.transaction(async (trx) => {
         await trx('customers').where({ id: fixture.customerId }).update({ payer_id: null });

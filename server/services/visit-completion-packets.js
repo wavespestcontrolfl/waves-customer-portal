@@ -738,9 +738,15 @@ async function withdrawPacketInvoiceForPayer(trx, { packetId, invoiceId, visit, 
   // later Bill-To clear would then lift the alert and the packet error while
   // deliberately leaving the visit's own billing hold — the office would be
   // left holding a held visit with no signal for the problem that held it.
-  const priorPaymentReason = priorState?.payment === 'office_required'
-    && priorState.reason && priorState.reason !== 'payer_assigned'
-      ? priorState.reason : null;
+  // A REPEATED withdrawal (a coordinator replay) must not lose it (local
+  // audit on r45): by then the original reason already lives in
+  // priorPaymentReason and `reason` reads 'payer_assigned', so deriving only
+  // from `reason` would null it out and the later lift would clear the error
+  // and the alert while the original billing hold remained.
+  const priorPaymentReason = priorState?.priorPaymentReason
+    || (priorState?.payment === 'office_required'
+      && priorState.reason && priorState.reason !== 'payer_assigned'
+        ? priorState.reason : null);
   const mergedState = {
     ...officeReviewState({
       payment: 'office_required',
