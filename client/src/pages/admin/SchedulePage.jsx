@@ -13230,7 +13230,10 @@ export function CompletionPanel({
       const selectedDraft = deviceIsNewer
         ? {
             ...draft,
-            ...(!Array.isArray(draft.servicePhotos) && Array.isArray(prepared?.servicePhotos)
+            ...(!Array.isArray(draft.servicePhotos)
+              && draft.draftId
+              && draft.draftId === prepared?.draftId
+              && Array.isArray(prepared.servicePhotos)
               ? { servicePhotos: prepared.servicePhotos }
               : {}),
           }

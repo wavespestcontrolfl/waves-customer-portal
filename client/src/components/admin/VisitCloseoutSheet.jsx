@@ -3,7 +3,7 @@ import { X, CheckCircle2, ClipboardList } from 'lucide-react';
 import { Button, Sheet, SheetBody, SheetFooter, SheetHeader } from '../ui';
 import { CompletionPanel, completionReconcilePrompt, createCompletionIdempotencyKey } from '../../pages/admin/SchedulePage';
 import { adminFetch } from '../../utils/admin-fetch';
-import { getCompletionResumeBody, putCompletionResumeBody, deleteCompletionResumeBody } from '../../lib/completion-resume-store';
+import { deleteVisitCompletionDraft, getVisitCompletionDraft, putVisitCompletionDraft } from '../../lib/completion-resume-store';
 
 // The server classifies retained history from canonical service records.
 const liveMembers = (detail) => detail.members.filter((member) => member.requiresForm === true);
@@ -14,7 +14,6 @@ const OUTCOMES = {
 };
 
 export default function VisitCloseoutSheet({ visitId, products, onClose, onSaved }) {
-  const storageKey = `visit:${visitId}`;
   const [visit, setVisit] = useState(null);
   const [services, setServices] = useState([]);
   const [draft, setDraft] = useState(null);
@@ -30,10 +29,10 @@ export default function VisitCloseoutSheet({ visitId, products, onClose, onSaved
     setError('');
     Promise.all([
       adminFetch(`/admin/visit-closeouts/${visitId}`),
-      getCompletionResumeBody(storageKey),
+      getVisitCompletionDraft(visitId),
     ]).then(async ([detail, stored]) => {
       // A lost final response can leave a draft after the server finished.
-      if (['done', 'failed'].includes(detail.packet?.status)) await deleteCompletionResumeBody(storageKey);
+      if (['done', 'failed'].includes(detail.packet?.status)) await deleteVisitCompletionDraft(visitId);
       const day = await adminFetch(`/admin/schedule?date=${encodeURIComponent(detail.serviceDate)}`);
       const rows = liveMembers(detail).map((member) => (day.services || []).find((service) => service.id === member.id));
       if (rows.some((row) => !row || row.visitId !== visitId)) throw new Error('The service list changed. Refresh the schedule before closing this visit.');
@@ -43,7 +42,7 @@ export default function VisitCloseoutSheet({ visitId, products, onClose, onSaved
       setDraft(stored?.visitId === visitId ? stored : { visitId, key: createCompletionIdempotencyKey(visitId), forms: {} });
     }).catch((err) => { if (live) setError(err.message || 'Could not load the visit.'); });
     return () => { live = false; };
-  }, [visitId, storageKey, reload]);
+  }, [visitId, reload]);
 
   const packet = visit?.packet;
   const finished = result ? ['done', 'office_required'].includes(result.state) : ['done', 'failed'].includes(packet?.status);
@@ -53,7 +52,7 @@ export default function VisitCloseoutSheet({ visitId, products, onClose, onSaved
 
   async function prepare(serviceId, body, formDraft) {
     const next = { ...draft, forms: { ...draft.forms, [serviceId]: { body, draft: formDraft } } };
-    if (!await putCompletionResumeBody(storageKey, next)) {
+    if (!await putVisitCompletionDraft(visitId, next)) {
       throw new Error('Could not save this form and its photos on this device. Free some storage and try again.');
     }
     setDraft(next);
@@ -68,7 +67,7 @@ export default function VisitCloseoutSheet({ visitId, products, onClose, onSaved
     setError('');
     let confirmedDraft;
     try {
-      if (!packet && !await putCompletionResumeBody(storageKey, candidate)) throw new Error('Could not preserve these forms for retry. Please try again.');
+      if (!packet && !await putVisitCompletionDraft(visitId, candidate)) throw new Error('Could not preserve these forms for retry. Please try again.');
       const response = await adminFetch(`/admin/visit-closeouts/${visitId}${packet ? '/resume' : ''}`, {
         method: 'POST',
         headers: { 'Idempotency-Key': candidate.key },
@@ -77,7 +76,7 @@ export default function VisitCloseoutSheet({ visitId, products, onClose, onSaved
       setResult(response);
       setVisit((current) => ({ ...current, canRevokeSummary: response.canRevokeSummary === true,
         packet: { id: response.packetId, status: response.state === 'done' || response.state === 'office_required' ? 'done' : 'processing' } }));
-      if (['done', 'office_required'].includes(response.state)) await deleteCompletionResumeBody(storageKey);
+      if (['done', 'office_required'].includes(response.state)) await deleteVisitCompletionDraft(visitId);
       onSaved();
     } catch (err) {
       const form = candidate.forms[err.details?.serviceId];
@@ -99,7 +98,7 @@ export default function VisitCloseoutSheet({ visitId, products, onClose, onSaved
           const detail = await adminFetch(`/admin/visit-closeouts/${visitId}`);
           setVisit(detail);
           setResult(null);
-          if (['done', 'failed'].includes(detail.packet?.status)) await deleteCompletionResumeBody(storageKey);
+          if (['done', 'failed'].includes(detail.packet?.status)) await deleteVisitCompletionDraft(visitId);
           if (detail.packet) onSaved();
         } catch { /* The same key/body remain durable for a later retry. */ }
       }

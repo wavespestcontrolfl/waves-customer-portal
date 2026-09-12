@@ -6,7 +6,7 @@ import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/re
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import VisitCloseoutSheet from './VisitCloseoutSheet';
 import { adminFetch } from '../../utils/admin-fetch';
-import { getCompletionResumeBody } from '../../lib/completion-resume-store';
+import { getVisitCompletionDraft } from '../../lib/completion-resume-store';
 
 vi.mock('../../utils/admin-fetch', () => ({ adminFetch: vi.fn() }));
 vi.mock('../../pages/admin/SchedulePage', () => ({
@@ -85,7 +85,7 @@ it('requires every form and preserves the exact photo bodies and key across a re
   const view = mount();
   expect(await screen.findByRole('button', { name: 'Complete visit' })).toBeDisabled();
   await prepareBoth();
-  const saved = await getCompletionResumeBody('visit:visit');
+  const saved = await getVisitCompletionDraft('visit');
   view.unmount();
   mount();
   expect(await screen.findByText('Incomplete — office follow-up')).toBeInTheDocument();
@@ -105,7 +105,7 @@ it.each([true, false])('preserves member reconciliation confirmation (confirmed=
   vi.spyOn(window, 'confirm').mockReturnValue(confirmed);
   mount();
   await prepareBoth();
-  const saved = await getCompletionResumeBody('visit:visit');
+  const saved = await getVisitCompletionDraft('visit');
   const original = adminFetch.getMockImplementation();
   adminFetch.mockImplementation(async (path, options) => {
     if (options?.method !== 'POST') return original(path);
@@ -113,7 +113,7 @@ it.each([true, false])('preserves member reconciliation confirmation (confirmed=
     if (!items[0].body.reportReconcileConfirmed) throw Object.assign(new Error('Report disagrees with recorded values'), {
       code: 'report_reconcile', details: { serviceId: 'one' },
     });
-    expect(await getCompletionResumeBody('visit:visit')).toMatchObject({ key: saved.key,
+    expect(await getVisitCompletionDraft('visit')).toMatchObject({ key: saved.key,
       forms: { one: { body: { ...saved.forms.one.body, reportReconcileConfirmed: true } }, two: saved.forms.two } });
     return { packetId: 'packet', state: 'effects_pending' };
   });
@@ -124,18 +124,18 @@ it.each([true, false])('preserves member reconciliation confirmation (confirmed=
   const posts = adminFetch.mock.calls.filter(([, options]) => options?.method === 'POST');
   expect(posts).toHaveLength(confirmed ? 2 : 1);
   expect(posts.every(([, options]) => options.headers['Idempotency-Key'] === saved.key)).toBe(true);
-  if (!confirmed) expect(await getCompletionResumeBody('visit:visit')).toEqual(saved);
+  if (!confirmed) expect(await getVisitCompletionDraft('visit')).toEqual(saved);
 });
 
 it('clears photo drafts when reopening a packet already finished by the server', async () => {
   const view = mount();
   await prepareBoth();
-  expect(await getCompletionResumeBody('visit:visit')).not.toBeNull();
+  expect(await getVisitCompletionDraft('visit')).not.toBeNull();
   view.unmount();
   packet = { id: 'packet', status: 'done' };
   mount();
   await screen.findByText('Visit closeout is complete.');
-  await waitFor(async () => expect(await getCompletionResumeBody('visit:visit')).toBeNull());
+  await waitFor(async () => expect(await getVisitCompletionDraft('visit')).toBeNull());
 });
 
 it('discovers a packet after a lost response and resumes the saved server closeout', async () => {
@@ -155,7 +155,7 @@ it('discovers a packet after a lost response and resumes the saved server closeo
   expect(posts).toHaveLength(2);
   expect(posts[1][0]).toBe('/admin/visit-closeouts/visit/resume');
   expect(JSON.parse(posts[1][1].body)).toEqual({});
-  await waitFor(async () => expect(await getCompletionResumeBody('visit:visit')).toBeNull());
+  await waitFor(async () => expect(await getVisitCompletionDraft('visit')).toBeNull());
   expect(screen.queryByRole('button', { name: 'Complete visit' })).not.toBeInTheDocument();
 });
 
@@ -178,7 +178,7 @@ it('uses the discovered terminal packet after losing a resume response', async (
   fireEvent.click(resume);
   expect(await screen.findByText('Visit closeout is complete.')).toBeInTheDocument();
   expect(screen.queryByRole('button', { name: 'Resume closeout' })).not.toBeInTheDocument();
-  await waitFor(async () => expect(await getCompletionResumeBody('visit:visit')).toBeNull());
+  await waitFor(async () => expect(await getVisitCompletionDraft('visit')).toBeNull());
 });
 
 it('reopens a failed saved packet as an office exception without offering another retry', async () => {
@@ -191,7 +191,7 @@ it('reopens a failed saved packet as an office exception without offering anothe
   expect(screen.queryByRole('button', { name: 'Resume closeout' })).not.toBeInTheDocument();
   expect(screen.queryByRole('button', { name: 'Complete visit' })).not.toBeInTheDocument();
   expect(screen.queryByRole('button', { name: 'Open form' })).not.toBeInTheDocument();
-  await waitFor(async () => expect(await getCompletionResumeBody('visit:visit')).toBeNull());
+  await waitFor(async () => expect(await getVisitCompletionDraft('visit')).toBeNull());
 });
 
 it('offers the server-authorized summary revoke action after completion', async () => {

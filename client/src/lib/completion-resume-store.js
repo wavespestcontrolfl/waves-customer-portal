@@ -150,6 +150,23 @@ export function deleteCompletionDraft(serviceId, scope) {
     .then((result) => result !== false);
 }
 
+// Visit closeout forms are unsubmitted field drafts too. Keep them in the
+// draft database so an older open CompletionPanel tab, whose committed-body
+// pruner knows nothing about visit keys, cannot delete them as unmarked
+// completion retries. The fixed scope gives one durable row per visit.
+const VISIT_DRAFT_SCOPE = "visit";
+export function putVisitCompletionDraft(visitId, draft, now = Date.now()) {
+  return putCompletionDraft(visitId, draft, VISIT_DRAFT_SCOPE, now);
+}
+
+export function getVisitCompletionDraft(visitId) {
+  return getCompletionDraft(visitId, VISIT_DRAFT_SCOPE);
+}
+
+export function deleteVisitCompletionDraft(visitId) {
+  return deleteCompletionDraft(visitId, VISIT_DRAFT_SCOPE);
+}
+
 // Deletes every draft row older than `maxAgeMs` across all scopes and
 // resolves the [{ serviceId, scope }] it removed so the caller can drop the
 // matching localStorage metadata. Each row's age check and delete are
@@ -188,9 +205,7 @@ export function pruneCompletionResumeBodies(isOwed, now = Date.now()) {
     .then((keys) => Promise.all(
       (Array.isArray(keys) ? keys : [])
         .map((key) => String(key))
-        // Visit drafts share this photo-capable store. They have no legacy
-        // per-service resume marker and remain until the stop is finished.
-        .filter((key) => !key.startsWith('visit:') && !isOwed(key))
+        .filter((key) => !isOwed(key))
         .map((key) => rowFor(key).then((row) => (
           row && now - Number(row.storedAt || 0) < PRUNE_GRACE_MS
             ? false

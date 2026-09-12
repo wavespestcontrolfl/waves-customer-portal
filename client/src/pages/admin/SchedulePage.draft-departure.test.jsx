@@ -82,7 +82,7 @@ describe('completion draft departure', () => {
 
   it('restores edits newer than the prepared form and retains its photos', async () => {
     const photos = [{ data: 'data:image/jpeg;base64,c3ludGhldGlj', name: 'fixture.jpg' }];
-    const preparedDraft = { serviceId: service.id, savedAt: new Date(Date.now() - 1000).toISOString(),
+    const preparedDraft = { serviceId: service.id, draftId: 'prepared-photo-revision', savedAt: new Date(Date.now() - 1000).toISOString(),
       notes: 'Prepared note', servicePhotos: photos };
     const onPrepared = vi.fn().mockResolvedValue(undefined);
     const first = await mount({ preparedDraft, onPrepared });
@@ -95,6 +95,21 @@ describe('completion draft departure', () => {
     await act(async () => fireEvent.click(screen.getByRole('button', { name: /^Save service form/i })));
     expect(onPrepared.mock.calls[0][1].technicianNotes).toBe('Newer unsaved edit');
     expect(onPrepared.mock.calls[0][2].servicePhotos).toEqual(photos);
+  });
+
+  it('does not resurrect prepared photos when a newer draft names another photo revision', async () => {
+    const photos = [{ data: 'data:image/jpeg;base64,c3RhbGU=', name: 'removed-fixture.jpg' }];
+    const preparedDraft = { serviceId: service.id, draftId: 'prepared-photo-revision',
+      savedAt: new Date(Date.now() - 1000).toISOString(), notes: 'Prepared note', servicePhotos: photos };
+    localStorage.setItem(key, JSON.stringify({ serviceId: service.id, owner: '', draftId: 'newer-photo-revision',
+      savedAt: new Date().toISOString(), notes: 'Photos removed in newer draft', generationPhotoCount: 0 }));
+    const onPrepared = vi.fn().mockResolvedValue(undefined);
+    await mount({ preparedDraft, onPrepared });
+    fireEvent.click(screen.getByRole('button', { name: 'Restore', exact: true }));
+    expect(notes().value).toBe('Photos removed in newer draft');
+    await act(async () => fireEvent.click(screen.getByRole('button', { name: /^Save service form/i })));
+    expect(onPrepared.mock.calls[0][1].completionPhotos).toEqual([]);
+    expect(onPrepared.mock.calls[0][2].servicePhotos).toEqual([]);
   });
 
   it('keeps an unopened saved draft intact and does not resurrect a discarded draft', async () => {
