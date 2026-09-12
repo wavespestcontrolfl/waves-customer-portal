@@ -456,6 +456,12 @@ async function loadPromiseEvents(conn, visitIds, { now = new Date() } = {}) {
   } else results.push(...await Promise.all(reads.map((read) => read())));
   const [messages, emails, calls, directEmails, groupedEmails, bookings, appliedReschedules, seriesMoves] = results;
   const candidates = new Set(visitIds.map(String));
+  // The per-service recovery keeps its own window (the key carries the slot),
+  // so it is only dropped when the interaction row already provided one for
+  // the same send.
+  const directEmailFallbacks = directEmails.map((r) => ({ visit_id: r.visit_id,
+    start_at: new Date(Number(r.slot_ms)).toISOString(), communicated_at: r.sent_at,
+    source: 'email', source_id: r.id }));
   return [
     ...messages.map((r) => ({ visit_id: r.appointment_id || r.metadata?.scheduled_service_id, start_at: Number.isFinite(Number(r.metadata?.rendered_slot_ms)) && r.metadata?.rendered_slot_ms != null
       ? new Date(Number(r.metadata.rendered_slot_ms)).toISOString() : null, communicated_at: r.sent_at, source: 'message', source_id: r.id })),
@@ -469,11 +475,17 @@ async function loadPromiseEvents(conn, visitIds, { now = new Date() } = {}) {
       communicated_at: r.provider_sent_at || r.metadata?.sent_at || r.created_at, source: 'email', source_id: r.id })),
     ...calls.map((r) => ({ visit_id: r.resource_id, start_at: r.metadata?.start_at,
       communicated_at: r.metadata?.communicated_at || r.created_at, source: 'call', source_id: r.id })),
-    ...directEmails.map((r) => ({ visit_id: r.visit_id,
-      start_at: new Date(Number(r.slot_ms)).toISOString(), communicated_at: r.sent_at,
-      source: 'email', source_id: r.id })),
+
+    // Recovery only: an unknown-window fallback must never DISPLACE the known
+    // window for the same send. When the interaction row exists, it carries
+    // the slot and lands above with the same send time — dropping the
+    // fallback there keeps the real window (codex P1 round 12). A genuinely
+    // NEWER unknown promise (the legacy move-notice case) still wins, because
+    // this only defers to known evidence at or after the fallback's own time.
     ...groupedEmails.map((r) => ({ visit_id: r.visit_id, start_at: null, communicated_at: r.sent_at,
-      source: 'email', source_id: r.id })),
+      source: 'email', source_id: r.id }))
+      .filter((fallback) => !knownWindowAtOrAfter(emails, fallback)),
+    ...directEmailFallbacks.filter((fallback) => !knownWindowAtOrAfter(emails, fallback)),
     ...bookings.map((r) => {
       // The call's own start is passed EXPLICITLY: the row aliases it to
       // call_created_at (sv also has a created_at), and
@@ -512,6 +524,17 @@ async function loadPromiseEvents(conn, visitIds, { now = new Date() } = {}) {
     }),
     ...seriesSupersessions(seriesMoves, candidates),
   ];
+}
+
+// True when the interaction-derived evidence already carries a KNOWN window
+// for this visit, communicated at or after the fallback's own send time — in
+// which case the fallback is a duplicate recovery of the same message and
+// must not replace it (an unknown window would silence a real alert).
+function knownWindowAtOrAfter(interactionEvents = [], fallback) {
+  const at = instant(fallback.communicated_at);
+  return interactionEvents.some((event) => String(event.metadata?.scheduled_service_id || '') === String(fallback.visit_id)
+    && event.metadata?.rendered_slot_ms != null
+    && instant(event.metadata?.sent_at || event.created_at) >= at);
 }
 
 // Pure, exported for tests. One customer-notified series move -> an UNKNOWN
@@ -1090,4 +1113,4 @@ async function sweep(conn, { now = new Date() } = {}) {
   return { alerted, active: rows.length };
 }
 
-module.exports = { enabled, cleanupAfterDisable, evaluateNoShow, promisedStartAt, trackingStage, callCommitmentInstant, LIVE_STATUSES, latestPromises, loadPromiseEvents, seriesSupersessions, groupedStops, representativeOf, stopState, stopPromise, lockedStop, recordSentWindowFallback, listNoShows, sweep, trackingKey, resolveLegacyCollision, alreadyHasOpenAlert, noticeStillCurrent };
+module.exports = { enabled, cleanupAfterDisable, evaluateNoShow, promisedStartAt, trackingStage, callCommitmentInstant, LIVE_STATUSES, latestPromises, loadPromiseEvents, seriesSupersessions, knownWindowAtOrAfter, groupedStops, representativeOf, stopState, stopPromise, lockedStop, recordSentWindowFallback, listNoShows, sweep, trackingKey, resolveLegacyCollision, alreadyHasOpenAlert, noticeStillCurrent };

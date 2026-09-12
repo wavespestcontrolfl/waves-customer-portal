@@ -10,7 +10,7 @@
  */
 const fs = require('fs');
 const path = require('path');
-const { evaluateNoShow, latestPromises, promisedStartAt, LIVE_STATUSES } = require('../../server/services/no-show-detector');
+const { evaluateNoShow, latestPromises, promisedStartAt, stopState, stopPromise, LIVE_STATUSES } = require('../../server/services/no-show-detector');
 const { etDateString } = require('../../server/utils/datetime-et');
 
 // Was usable promise evidence in hand when a decision was actually required?
@@ -42,17 +42,30 @@ function coverageAt({ covered, knownBeforeThreshold, liveNow, promise, now, at, 
 // point — split out of replay() so the per-tick rules, the validation and the
 // aggregation can be reviewed independently (codex P2).
 function replayVisit(item, { from, to, threshold }) {
-  if (!item.id || !item.initial?.status || !Array.isArray(item.events) || !Array.isArray(item.promises)) throw new Error('Each visit needs initial state, dated events, and promises');
-  const events = item.events.map((event) => {
-    const at = new Date(event.at).getTime();
-    if (!Number.isFinite(at)) throw new Error('Every state change needs a valid timestamp');
-    return { ...event, at };
-  }).sort((a, b) => a.at - b.at);
-  const promises = item.promises.map((p) => ({ ...p, visit_id: item.id }));
-  const state = { id: item.id, ...item.initial };
+  // A grouped stop keeps its members SEPARATE and merges them at every tick,
+  // exactly as production does: each member advances its own state from its
+  // own events, and the stop's state/promise come from the detector's own
+  // stopState/stopPromise. Folding the members into one synthetic row instead
+  // would let a cancelled sibling's status patch cancel the whole stop and
+  // lose the other members' arrival stamps (codex P1 round 12).
+  const members = (item.members || [item]).map((member) => {
+    if (!member.id || !member.initial?.status || !Array.isArray(member.events) || !Array.isArray(member.promises)) throw new Error('Each visit needs initial state, dated events, and promises');
+    return {
+      id: member.id,
+      // The member's OWN id wins over anything in the exported snapshot: it is
+      // what its promises are keyed by, and what stopPromise looks up.
+      state: { ...member.initial, id: member.id },
+      events: member.events.map((event) => {
+        const at = new Date(event.at).getTime();
+        if (!Number.isFinite(at)) throw new Error('Every state change needs a valid timestamp');
+        return { ...event, at };
+      }).sort((a, b) => a.at - b.at),
+      promises: member.promises.map((p) => ({ ...p, visit_id: member.id })),
+      eventIndex: 0,
+    };
+  });
   const alerts = [];
   const emitted = new Set();
-  let eventIndex = 0;
   let covered = false;
   let knownBeforeThreshold = false;
   // Bumped whenever the visit leaves the live statuses, so a cancel -> reopen
@@ -63,17 +76,22 @@ function replayVisit(item, { from, to, threshold }) {
   // free the key the way production's superseded_at stamp does.
   let alerting = false;
   let lastShape = null;
-  let wasLive = LIVE_STATUSES.includes(item.initial?.status);
+  let wasLive = members.some((m) => LIVE_STATUSES.includes(m.state.status));
   for (let at = Math.ceil(from.getTime() / 300000) * 300000; at <= to.getTime(); at += 300000) {
     const now = new Date(at);
-    while (eventIndex < events.length && events[eventIndex].at <= at) {
-      Object.assign(state, events[eventIndex].patch);
-      eventIndex += 1;
+    for (const member of members) {
+      while (member.eventIndex < member.events.length && member.events[member.eventIndex].at <= at) {
+        Object.assign(member.state, member.events[member.eventIndex].patch);
+        member.eventIndex += 1;
+      }
     }
-    const liveNow = LIVE_STATUSES.includes(state.status);
+    const memberStates = members.map((m) => m.state);
+    const perMember = new Map(members.map((m) => [String(m.id), latestPromises(m.promises, now).get(String(m.id))]));
+    const promise = stopPromise(memberStates, perMember, now);
+    const stop = stopState(memberStates, { now, since: promise?.start_at });
+    const liveNow = LIVE_STATUSES.includes(stop.status);
     if (wasLive && !liveNow) lifecycle += 1;
     wasLive = liveNow;
-    const promise = latestPromises(promises, now).get(String(item.id));
     ({ covered, knownBeforeThreshold } = coverageAt({ covered, knownBeforeThreshold, liveNow, promise, now, at, threshold }));
     // Coverage is measured AT THE DECISION POINTS, not from the final state
     // at `to`: a promise backfilled or communicated after this visit's
@@ -82,7 +100,7 @@ function replayVisit(item, { from, to, threshold }) {
     // as covered and understated missing_promise_visits, which is exactly
     // the number that says whether a no-alert backtest means "nothing was
     // wrong" or "we had no evidence to judge with" (codex P1, round 4).
-    const alert = evaluateNoShow({ visit: state, promise, now, stage1Minutes: threshold });
+    const alert = evaluateNoShow({ visit: stop, promise, now, stage1Minutes: threshold });
     if (!alert) {
       // Production auto-resolves the card the moment the shape stops
       // matching (an arrival, a changed promise, a stage that no longer
@@ -101,7 +119,7 @@ function replayVisit(item, { from, to, threshold }) {
     // duplicate. Shape includes the RECIPIENT, because trackingKey does — an
     // A -> B -> A reassignment gives A a fresh card in production, and a key
     // suppressed for the export hid the second one (codex P1 round 10).
-    const shape = `${alert.promised_window.start_at}:${alert.stage}:${state.technician_id || 'unassigned'}`;
+    const shape = `${alert.promised_window.start_at}:${alert.stage}:${stop.technician_id || 'unassigned'}`;
     if (alerting && lastShape && shape !== lastShape) lifecycle += 1;
     lastShape = shape;
     alerting = true;
@@ -140,13 +158,13 @@ function collapseStops(visits = []) {
     if (members.length === 1) return members[0];
     const ordered = [...members].sort((a, b) => String(a.id).localeCompare(String(b.id)));
     const base = ordered[0];
-    // One stop's timeline: every member's events and promises, and the
-    // outcome any member recorded (they describe the same physical visit).
-    return { ...base,
-      events: ordered.flatMap((m) => m.events || []),
-      promises: ordered.flatMap((m) => m.promises || []),
+    // The members stay separate — replayVisit merges them at every tick, the
+    // way production does — and only the stop-level labels are folded: the
+    // outcome any member recorded, and the earliest complaint (they all
+    // describe the same physical visit).
+    return { id: base.id, initial: base.initial, events: base.events, promises: base.promises, members: ordered,
       outcome: ordered.find((m) => m.outcome && m.outcome !== 'unknown')?.outcome || base.outcome,
-      complaint_at: ordered.find((m) => m.complaint_at)?.complaint_at || null };
+      complaint_at: ordered.map((m) => m.complaint_at).filter(Boolean).sort()[0] || null };
   });
 }
 

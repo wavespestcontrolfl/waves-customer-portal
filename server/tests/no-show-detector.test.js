@@ -908,6 +908,20 @@ describe('an appointment email with no interaction row still yields its promise 
       communicated_at: '2026-09-10T12:00:00.000Z' });
   });
 
+  test('the fallback never displaces the known window the interaction row already carries', async () => {
+    const { knownWindowAtOrAfter } = require('../services/no-show-detector');
+    const fallback = { visit_id: 'visit-1', communicated_at: '2026-09-10T12:00:00.000Z' };
+    const withWindow = [{ metadata: { scheduled_service_id: 'visit-1', rendered_slot_ms: 1, sent_at: '2026-09-10T12:00:00.000Z' } }];
+    expect(knownWindowAtOrAfter(withWindow, fallback)).toBe(true);
+    // An OLDER known window does not block it — a genuinely newer unknown
+    // promise (the legacy move-notice case) still has to win.
+    const older = [{ metadata: { scheduled_service_id: 'visit-1', rendered_slot_ms: 1, sent_at: '2026-09-09T12:00:00.000Z' } }];
+    expect(knownWindowAtOrAfter(older, fallback)).toBe(false);
+    // An interaction row for a different visit, or one with no window, never blocks.
+    expect(knownWindowAtOrAfter([{ metadata: { scheduled_service_id: 'other', rendered_slot_ms: 1, sent_at: '2026-09-10T12:00:00.000Z' } }], fallback)).toBe(false);
+    expect(knownWindowAtOrAfter([{ metadata: { scheduled_service_id: 'visit-1', sent_at: '2026-09-10T12:00:00.000Z' } }], fallback)).toBe(false);
+  });
+
   test('the window comes straight off the message row, scoped by the key\'s visit id and a delivered status', async () => {
     const slot = Date.parse('2026-09-12T13:00:00.000Z');
     const { conn, captured } = fakeConn([{ id: 'em-1', sent_at: '2026-09-10T12:00:00.000Z', visit_id: 'visit-1', slot_ms: String(slot) }]);
