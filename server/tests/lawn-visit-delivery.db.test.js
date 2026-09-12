@@ -317,6 +317,32 @@ const deferred = () => { let resolve; const promise = new Promise((r) => { resol
     expect(failing).toHaveLength(2);
   });
 
+  test('a transient failure gets another attempt even behind older poison runs', async () => {
+    await db.knex('lawn_assessment_runs').update({ pipeline_completed_at: db.knex.fn.now() });
+    const attemptedAt = async (id, interval) => db.knex('lawn_assessment_runs').where({ assessment_id: id })
+      .update({ pipeline_claimed_at: db.knex.raw(`clock_timestamp() - interval '${interval}'`), pipeline_owner_token: randomUUID() });
+    const poison = [];
+    for (let i = 0; i < 2; i += 1) {
+      const old = await seed();
+      await db.knex('lawn_assessments').where({ id: old.id }).update({ confirmed_at: db.knex.raw("clock_timestamp() - interval '3 days'") });
+      await attemptedAt(old.id, '20 minutes');
+      poison.push(old.id);
+    }
+    // Attempted most recently of the three, and the newest confirmation.
+    const transient = await seed();
+    await attemptedAt(transient.id, '16 minutes');
+    const deliver = jest.fn(async () => ({ done: [], gaps: [] }));
+    const sweptOver = [];
+    for (let pass = 0; pass < 3; pass += 1) {
+      await sweepAbandonedDeliveries({ knex: db.knex, limit: 1, deliver });
+      const [[{ assessmentId }]] = deliver.mock.calls.slice(-1);
+      sweptOver.push(assessmentId);
+      await attemptedAt(assessmentId, '0 minutes');
+    }
+    // Least-recently-attempted wins each pass, so no run waits behind the others.
+    expect(new Set(sweptOver)).toEqual(new Set([...poison, transient.id]));
+  });
+
   test('an ungated environment counts recovery candidates and sends nothing', async () => {
     await db.knex('lawn_assessment_runs').update({ pipeline_completed_at: db.knex.fn.now() });
     const stuck = await seed();

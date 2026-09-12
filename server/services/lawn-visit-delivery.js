@@ -151,10 +151,11 @@ async function sweepAbandonedDeliveries({ knex = db, limit = 25, staleAfterMs = 
       .whereRaw("assessment.confirmed_at > clock_timestamp() - (? * interval '1 millisecond')", [retryHorizonMs])
       .where((q) => q.whereNull('run.pipeline_claimed_at')
         .orWhereRaw("run.pipeline_claimed_at < clock_timestamp() - (? * interval '1 millisecond')", [staleAfterMs]))
-      // Never-attempted runs first. Oldest-first alone let a pool of repeatedly
-      // failing runs refill the batch every sweep and starve a fresh interrupted
-      // delivery until they aged out.
-      .orderByRaw('(run.pipeline_claimed_at IS NOT NULL), assessment.confirmed_at ASC')
+      // Never-attempted runs first, then least-recently-attempted. Ordering by
+      // confirmation time alone let a pool of permanently failing runs refill
+      // every batch as their leases expired, starving both fresh deliveries and
+      // newer transient failures until the horizon dropped the poison rows.
+      .orderByRaw('(run.pipeline_claimed_at IS NOT NULL), run.pipeline_claimed_at ASC, assessment.confirmed_at ASC')
       .limit(limit).select('run.assessment_id');
   } catch (err) {
     if (err?.code === '42P01' || err?.code === '42703') return { candidates: 0, resumed: 0, failed: 0, skipped: 'schema_unavailable' };
