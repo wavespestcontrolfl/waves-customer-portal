@@ -146,3 +146,49 @@ test('a real CSS comment is still skipped', () => {
   ].join('\n'));
   assert.deepEqual(hits, []);
 });
+
+test('a standalone {/* ... */} JSX comment is not scanned', () => {
+  // The standard JSX comment form: the parser's range covers only the
+  // `/* ... */`, leaving the braces as non-whitespace on the line.
+  const hits = scan('Sample.jsx', [
+    'export default function S() {',
+    '  return (',
+    '    <div>',
+    '      {/* fontSize: 12 and \u{1F512} in a note, nothing rendered */}',
+    '      <span>hi</span>',
+    '    </div>',
+    '  );',
+    '}',
+  ].join('\n'));
+  assert.deepEqual(hits, []);
+});
+
+test('braces holding more than the comment are not treated as a wrapper', () => {
+  // `{/* note */ x}` is an expression with a comment in it, not a comment.
+  // Only the comment itself is blanked, so the line keeps its code and is
+  // scanned like any other.
+  const hits = scan('Sample.jsx', [
+    'const a = <div>{/* note */ x}</div>;',
+    'const b = { fontSize: 12 };',
+  ].join('\n'));
+  assert.deepEqual(hits, ['banned-font-size:2']);
+});
+
+test('TypeScript parses, so its comments are classified too', () => {
+  // walk() accepts .ts/.tsx; a parser that cannot read them would send every
+  // such file down the failure path and report its comment prose as debt.
+  const hits = scan('Sample.tsx', [
+    'interface P { size: number }',
+    '// a note about \u{1F512} and fontSize: 12',
+    'export const S = (p: P): number => p.size;',
+  ].join('\n'));
+  assert.deepEqual(hits, []);
+});
+
+test('TypeScript still reports real violations', () => {
+  const hits = scan('Sample.tsx', [
+    'interface P { size: number }',
+    'export const S = (p: P) => ({ fontSize: 12 });',
+  ].join('\n'));
+  assert.deepEqual(hits, ['banned-font-size:2']);
+});

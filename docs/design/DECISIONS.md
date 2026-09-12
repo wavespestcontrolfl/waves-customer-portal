@@ -2363,12 +2363,24 @@ sweep it asks for, and `Icon.jsx` sat in `LEGACY_BASELINE` carrying debt it did
 not have.
 
 Whole-line comments are now skipped, and **which lines those are comes from the
-parser, not the line's prefix** (`commentLineSet()`, acorn + acorn-jsx; a regex
-for `.css`, where `//` is not a comment at all). A prefix test cannot tell a
+parser, not the line's prefix** (`commentLineSet()`). A prefix test cannot tell a
 comment from rendered JSX text that merely starts with `//` — inside a `<pre>`,
 say — and skipping such a line would hide a real violation on a visible element.
 That was a review finding on the first cut of this change, and it is the reason
 the detection is lexical.
+
+The parser is `@babel/parser` with the `jsx` and `typescript` plugins, not acorn:
+`walk()` accepts `.ts` and `.tsx`, and acorn cannot read them. A parser that
+chokes on an extension the walker advertises sends that file down the failure
+path forever — safe, since nothing is skipped, but it also means comment prose in
+it is reported as debt. One parser covers every extension accepted.
+
+Two shapes need help beyond the raw comment range. `{/* … */}` is **the** way to
+write a comment in JSX children, and the parser's range covers only the
+`/* … */`, leaving the braces as non-whitespace so the line reads as code — a
+note mentioning a banned size could fail the gate though nothing renders. When
+braces wrap a comment and nothing else, they count as part of it;
+`{/* note */ x}` is an expression and stays scanned.
 
 **Only** whole-line comments: a line counts only when blanking every comment span
 on it leaves nothing but whitespace, so anything sharing a line with code is

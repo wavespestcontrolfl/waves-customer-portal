@@ -230,15 +230,33 @@ function relKey(filePath) {
 //     after code, and code trailing a `*/`.
 //   - on a parse failure nothing is skipped. Scanning a comment costs a false
 //     positive; skipping code costs a miss, and a miss is the worse failure.
-const acorn = require('acorn');
-const jsx = require('acorn-jsx');
-const JsxParser = acorn.Parser.extend(jsx());
+// @babel/parser, not acorn: `walk()` accepts .ts and .tsx, and acorn cannot
+// parse TypeScript. A parser that chokes on an extension the walker advertises
+// means that file takes the failure path forever -- safe, since nothing is
+// skipped, but it also means comment prose in it is reported as debt. One
+// parser with the jsx + typescript plugins covers every extension accepted.
+const { parse: babelParse } = require('@babel/parser');
 
 // CSS comment spans, respecting strings. A regex cannot do this: the `/*` in
 // `content: "/*"` is a string, not a comment opener, and treating it as one
 // blanks every rule until the next `*/` -- masking real violations in between.
 // CSS has no `//` comment, and only two string delimiters, so a small scanner
 // covers it. An unterminated `/*` runs to EOF, which is what browsers do too.
+// `{/* ... */}` is THE way to write a comment in JSX children, and the parser's
+// range covers only the `/* ... */`. The braces are left over as non-whitespace,
+// so the line reads as code and the comment gets scanned -- which is how a note
+// mentioning a banned size or an emoji could still fail the gate even though
+// nothing renders. When a comment is wrapped by braces holding nothing else,
+// the braces are part of the comment for our purposes.
+function expandJsxWrapper(text, start, end) {
+  let a = start;
+  let b = end;
+  while (a > 0 && /\s/.test(text[a - 1])) a -= 1;
+  while (b < text.length && /\s/.test(text[b])) b += 1;
+  if (text[a - 1] === '{' && text[b] === '}') return [a - 1, b + 1];
+  return [start, end];
+}
+
 function cssCommentRanges(text) {
   const out = [];
   let i = 0;
@@ -272,16 +290,17 @@ function commentLineSet(text, isCss) {
   if (isCss) {
     for (const r of cssCommentRanges(text)) ranges.push(r);
   } else {
-    const comments = [];
+    let ast;
     try {
-      JsxParser.parse(text, {
-        ecmaVersion: 'latest', sourceType: 'module',
-        allowHashBang: true, allowReturnOutsideFunction: true, onComment: comments,
+      ast = babelParse(text, {
+        sourceType: 'unambiguous',
+        allowReturnOutsideFunction: true,
+        plugins: ['jsx', 'typescript'],
       });
     } catch {
       return covered; // unparseable: skip nothing, scan everything
     }
-    for (const c of comments) ranges.push([c.start, c.end]);
+    for (const c of ast.comments || []) ranges.push(expandJsxWrapper(text, c.start, c.end));
   }
   if (!ranges.length) return covered;
 
