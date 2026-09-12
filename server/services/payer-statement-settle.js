@@ -221,21 +221,26 @@ async function enrollSettledPacketReviews(invoiceIds, { database = db, source = 
       logger.error(`[payer-statement-settle] review enrollment threw for child invoice ${id}: ${err.message}`);
     }
   }
-  if (!unrecorded.length) {
-    // A later pass (a redelivery, or the admin re-running the reconcile)
-    // recorded them after all: retire the warning rather than leaving
-    // dispatch an open item for work that is no longer missing.
-    try {
-      const open = await db('dispatch_alerts').where({ type: 'visit_closeout_review' }).whereNull('resolved_at')
-        .whereRaw("payload->>'reason' = 'review_enrollment_unrecorded'")
-        .whereRaw("payload->>'invoiceIds' = ?", [JSON.stringify(ids)])
-        .select('id');
-      for (const alert of open) {
+  // PER-INVOICE, not per set (Codex #4311 r34 P2): incremental recovery makes
+  // the sets overlap — an alert for [A,B] followed by one for [B] — and an
+  // exact-array match would retire the wrong one and leave the other open
+  // forever. Every alert whose invoices are now ALL recorded is retired, and a
+  // new one is raised only for invoices no open alert already names.
+  const recovered = ids.filter((id) => !unrecorded.includes(id));
+  try {
+    const openAlerts = await db('dispatch_alerts').where({ type: 'visit_closeout_review' }).whereNull('resolved_at')
+      .whereRaw("payload->>'reason' = 'review_enrollment_unrecorded'")
+      .select('id', 'payload');
+    for (const alert of openAlerts) {
+      const payload = typeof alert.payload === 'string' ? JSON.parse(alert.payload || '{}') : (alert.payload || {});
+      const named = Array.isArray(payload.invoiceIds) ? payload.invoiceIds.map(String) : [];
+      if (!named.length) continue;
+      if (named.every((id) => recovered.includes(id))) {
         await require('./dispatch-alerts').resolveAlert({ id: alert.id, resolvedBy: null });
       }
-    } catch (resolveErr) {
-      logger.warn(`[payer-statement-settle] could not retire an unrecorded-enrollment alert: ${resolveErr.message}`);
     }
+  } catch (resolveErr) {
+    logger.warn(`[payer-statement-settle] could not retire an unrecorded-enrollment alert: ${resolveErr.message}`);
   }
   if (unrecorded.length) {
     logger.error(`[payer-statement-settle] ${unrecorded.length} settled packet invoice(s) have an UNRECORDED review enrollment — the packet recovery sweep owns them now`);
@@ -245,21 +250,26 @@ async function enrollSettledPacketReviews(invoiceIds, { database = db, source = 
     // invoice set; a failure to alert is logged, never thrown over money that
     // has already moved.
     try {
-      // ONE open alert per invoice set (Codex #4311 r33 P2): the webhook
-      // throws for redelivery after this, so every retry would otherwise
-      // insert another warning for the same missing ask.
-      const existing = await db('dispatch_alerts').where({ type: 'visit_closeout_review' }).whereNull('resolved_at')
+      // One open alert per INVOICE (r33 P2 + r34 P2): the webhook throws for
+      // redelivery after this, so every retry would otherwise insert another
+      // warning, and overlapping sets across retries must not each raise one.
+      const openAlerts = await db('dispatch_alerts').where({ type: 'visit_closeout_review' }).whereNull('resolved_at')
         .whereRaw("payload->>'reason' = 'review_enrollment_unrecorded'")
-        .whereRaw("payload->>'invoiceIds' = ?", [JSON.stringify(unrecorded)])
-        .first('id');
-      if (!existing) {
+        .select('payload');
+      const alreadyNamed = new Set();
+      for (const alert of openAlerts) {
+        const payload = typeof alert.payload === 'string' ? JSON.parse(alert.payload || '{}') : (alert.payload || {});
+        (Array.isArray(payload.invoiceIds) ? payload.invoiceIds : []).forEach((id) => alreadyNamed.add(String(id)));
+      }
+      const unnamed = unrecorded.filter((id) => !alreadyNamed.has(String(id)));
+      if (unnamed.length) {
         await require('./dispatch-alerts').createAlert({
           type: 'visit_closeout_review',
           severity: 'warn',
           payload: {
             reason: 'review_enrollment_unrecorded',
             source,
-            invoiceIds: unrecorded,
+            invoiceIds: unnamed,
             detail: 'These settled invoices owe a review ask that could not be recorded — re-run the enrollment or ask manually.',
           },
         });

@@ -64,7 +64,20 @@ payment URL from the payload. FAQ flag (2026-09-03): with
 GATE_PAY_PAGE_FAQ=true the GET payload carries `payFaq: true` — a display
 flag for the copy-only "Common questions" accordion under the Pay button;
 no other field changes, no customer or invoice data rides it, and gate off
-⇒ key absent, payload byte-identical — unset the gate to kill it),
+⇒ key absent, payload byte-identical — unset the gate to kill it. THIRD-PARTY
+BILL-TO WITHDRAWAL (2026-09-12): a combined-visit invoice whose Bill-To moved
+to a payer AFTER the homeowner already held this link keeps a collectible
+status and a NULL `payer_id` — the move is recorded only in its withdrawal
+stamp — so every money seam on this surface reads the invoice ROW, not its
+status. `/setup`, `/quote`, `/finalize`, `/confirm` and `/update-amount`
+refuse such an invoice through the shared collectibility gate, and `/consent`,
+`/capture-setup` and `/setup-complete` refuse it with
+`409 { error, code: 'invoice_withdrawn_from_customer' }` so no payment method
+is saved or enrolled for Auto Pay against debt that now belongs to AP. A
+withdrawn invoice is also absent from the authenticated portal's balance and
+Pay Now list, and carries no `manualPayOptions`. Nothing else in the payload
+changes; an invoice that returns to self-pay is released by the Bill-To
+reconciliation and collects normally again),
 `/api/pay/statement/:token` (+ `/setup`, `/quote`, `/finalize`) — payer NET
 statement self-serve pay, **gated behind GATE_PAYER_STATEMENTS** (404 when off),
 64-hex `payer_statements.token` format gate + public-route rate limit; resolves
