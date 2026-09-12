@@ -1166,6 +1166,9 @@ async function handleStatementPaymentIntentEvent(paymentIntent, eventType, event
         source: 'stripe_webhook',
       }, { database: trx }); // trx is the THIRD arg — same txn re-locks the row (no self-deadlock)
       settledPacketInvoiceIds = settleResult?.packetInvoiceIds || [];
+      // An already-paid statement still reports its packet children, so a
+      // redelivery re-runs the post-commit enrollment (idempotent) instead of
+      // finishing with nothing to do.
       return true;
     });
     // Only when this PI actually left the statement paid — never on an anomaly
@@ -1179,12 +1182,22 @@ async function handleStatementPaymentIntentEvent(paymentIntent, eventType, event
       // The packet-owned children's deferred review asks, enrolled after the
       // money transaction committed (that closeout refuses packet-owned
       // visits, so nothing else enrolls them on this rail).
-      await Settle.enrollSettledPacketReviews(settledPacketInvoiceIds, { source: 'payer_statement_webhook' });
+      // An enrollment whose recovery marker ALSO failed is not something this
+      // rail can drop (Codex #4311 r30 P1): completing the handler marks the
+      // event processed and the requested reviews are gone for good. Throwing
+      // leaves the event unacknowledged, and the redelivery re-enters the
+      // idempotent already-paid path, which reports the same children.
+      const unrecorded = await Settle.enrollSettledPacketReviews(settledPacketInvoiceIds, { source: 'payer_statement_webhook' });
       // Stop any statement-level dunning now that it's paid (best-effort, outside
       // the money txn — the eligibility filter already excludes `paid`, so this is
-      // just hygiene and never gates settlement).
+      // just hygiene and never gates settlement). Runs BEFORE the retry throw so
+      // a redelivery is not the first thing that stops dunning on a paid
+      // statement.
       await require('../services/payer-statement-followups').stopOnStatementSettled(statementId)
         .catch((e) => logger.warn(`[payer-statement-followups] stopOnStatementSettled failed: ${e.message}`));
+      if (unrecorded.length) {
+        throw new Error(`statement S-${statementId} settled but ${unrecorded.length} packet review enrollment(s) are unrecorded — retrying on redelivery`);
+      }
     }
   } else if (eventType === 'processing') {
     // Re-read the CURRENT PI status before marking processing — a stale/retried

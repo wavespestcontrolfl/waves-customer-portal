@@ -53,7 +53,9 @@ function handler(table) {
       // The packet-owned children are read before the cascade so their
       // deferred review asks can be enrolled after the settlement commits.
       whereNotNull() { return this; },
+      whereNot() { return this; },
       async select() { return packetChildren; },
+      async pluck() { return packetChildren.map((row) => row.id); },
       async first() { return packetChildren.find((row) => row.id === this._id) || packetChildren[0]; },
       async update(patch) { captured.invoiceUpdates.push(patch); return invoiceUpdateCount; },
     };
@@ -100,6 +102,14 @@ describe('settleStatementPaid (cascade)', () => {
       // ids back instead (local audit r29 P1).
       expect(enroll).not.toHaveBeenCalled();
       expect(res.packetInvoiceIds).toEqual(['inv-a', 'inv-b']);
+
+      // A redelivery finds the statement already paid and STILL reports the
+      // packet children, so the caller can finish an enrollment that failed
+      // after the first settlement committed (r30 P1).
+      stmtRow = { id: 11, payer_id: 4, status: 'paid', paid_at: 'T' };
+      const replay = await settleStatementPaid(11, { paymentMethod: 'check', processor: 'manual', amountCents: 5000, source: 'admin' });
+      expect(replay).toMatchObject({ ok: true, alreadyPaid: true });
+      expect(replay.packetInvoiceIds).toEqual(['inv-a', 'inv-b']);
 
       // The caller enrolls after its commit, on the root connection.
       const unrecorded = await enrollSettledPacketReviews(res.packetInvoiceIds);

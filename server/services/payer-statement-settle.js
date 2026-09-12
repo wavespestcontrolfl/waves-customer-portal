@@ -78,7 +78,18 @@ async function settleStatementPaid(statementId, settlement = {}, { database = db
   const stmt = await database('payer_statements').where({ id: statementId }).forUpdate().first();
   if (!stmt) throw new Error(`settleStatementPaid: statement ${statementId} not found`);
   if (stmt.status === 'paid') {
-    return { ok: true, alreadyPaid: true, statement: stmt };
+    // A REDELIVERY must be able to finish what the first delivery started
+    // (Codex #4311 r30 P1): if enrollment (and its recovery marker) failed
+    // after the settlement committed, the only way back is this idempotent
+    // path, so it reports the packet-owned children too. enrollForPaidInvoice
+    // is idempotent, so re-running it on already-enrolled children is a
+    // no-op.
+    const settledChildren = await database('invoices')
+      .where({ payer_statement_id: statementId })
+      .whereNotNull('visit_completion_packet_id')
+      .whereNot({ status: 'void' })
+      .pluck('id');
+    return { ok: true, alreadyPaid: true, statement: stmt, packetInvoiceIds: settledChildren };
   }
   // Webhook settles from any payable status OR `processing` (ACH confirmed);
   // an offline reconcile passes the PAYABLE-only set so it can't settle a
