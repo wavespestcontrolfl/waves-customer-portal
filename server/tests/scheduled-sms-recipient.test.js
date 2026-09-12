@@ -19,6 +19,21 @@ jest.mock('../config/feature-gates', () => ({
 const db = require('../models/db');
 const { resolveScheduledRecipient, scheduledDepositReceiptAllowed, classifyDepositReplayFallback } = require('../services/scheduler');
 
+test('scheduled replay dispatch receives row-trusted identifiers around the unchanged canonical sender', () => {
+  const source = require('fs').readFileSync(require.resolve('../services/scheduler'), 'utf8');
+  const start = source.indexOf('const replayDispatchMeta = {');
+  const end = source.indexOf('const completedAt = new Date();', start);
+  const dispatchBlock = source.slice(start, end);
+
+  expect(start).toBeGreaterThan(-1);
+  expect(end).toBeGreaterThan(start);
+  expect(dispatchBlock).toContain('scheduled_sms_log_id: msg.id');
+  expect(dispatchBlock).toContain('customer_id: msg.customer_id');
+  expect(dispatchBlock).toContain('.dispatchDeferredReplay(claimMeta.entry_point, replayDispatchMeta, defaultDispatch)');
+  expect(dispatchBlock).toContain("entryPoint: 'scheduled_sms_cron'");
+  expect(dispatchBlock).toContain('body: msg.message_body');
+});
+
 function mockCustomerLookup(row) {
   db.mockImplementation((table) => {
     if (table !== 'customers') throw new Error(`unexpected table: ${table}`);
