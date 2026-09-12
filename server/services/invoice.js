@@ -4843,7 +4843,6 @@ const InvoiceService = {
    * at void time stays cancelled — recreate it on the restored invoice.
    */
   async unvoidInvoice(id) {
-    let reconcileWithdrawnAfterCommit = null;
     const current = await db("invoices").where({ id }).first();
     if (!current) throw new Error("Invoice not found");
     if (current.status !== "void") {
@@ -4967,6 +4966,24 @@ const InvoiceService = {
     // obligation durable: the registry sweep re-runs it if we crash first).
     const cancelledHookRows = [];
     await db.transaction(async (trx) => {
+      // OWNERSHIP ROWS FIRST, before this transaction touches the invoice
+      // (local audit P0 + the earlier lock-order P1): the restore must decide
+      // live Bill-To ownership ATOMICALLY — a collectible draft committed
+      // ahead of a separate reconciliation can be paid by the homeowner in
+      // between, and a swallowed failure would leave it collectible for good
+      // — and the withdrawal it may need takes customer and member rows,
+      // which every Bill-To writer takes before the invoice. Taking them here
+      // puts this restore on that same order; the reconciliation below is
+      // then re-entrant on rows this transaction already holds.
+      if (current.visit_completion_packet_id && current.customer_id) {
+        await trx("customers").where({ id: current.customer_id }).forShare().first("id");
+        const billedMembers = await trx("visit_completion_packet_items")
+          .where({ packet_id: current.visit_completion_packet_id })
+          .pluck("scheduled_service_id");
+        if (billedMembers.length) {
+          await trx("scheduled_services").whereIn("id", billedMembers.filter(Boolean)).orderBy("id").forShare().select("id");
+        }
+      }
       // Statement re-check under lock (a concurrent close could finalize it
       // between the fast pre-check above and this write).
       if (current.payer_statement_id) {
@@ -5007,14 +5024,22 @@ const InvoiceService = {
       // unpayable and unschedulable for good. The shared reconciliation
       // releases it when the packet is self-pay again and keeps the stamp
       // (re-pointed if the payer changed) while a payer still owes it.
-      // The reconciliation runs AFTER this transaction commits (local audit):
-      // it takes customer and member rows, and this transaction already holds
-      // the invoice — the inverse of the order every Bill-To writer uses
-      // (ownership rows, then the invoice), which deadlocks one side. Flagged
-      // here, performed below in its own transaction, where the established
-      // order holds.
-      if (updated.visit_completion_packet_id && String(updated.scheduled_send_error || '').startsWith("payer_billed:")) {
-        reconcileWithdrawnAfterCommit = { customerId: updated.customer_id };
+      // EVERY restored packet invoice is re-judged HERE, stamped or not, and
+      // the verdict commits with the restore (local audit P0): an invoice
+      // voided BEFORE a payer was assigned carries no stamp — the withdrawal
+      // skips terminal rows — so the unvoid would otherwise hand the
+      // homeowner a collectible link for debt that is now payer-owned, and a
+      // payer sitting on a SIBLING billed member escapes the payment rail's
+      // representative-service lookup entirely. The ownership rows were taken
+      // at the top of this transaction, so both calls are re-entrant on the
+      // established order.
+      if (updated.visit_completion_packet_id) {
+        const Packets = require("./visit-completion-packets");
+        // A stamp that outlived the void is re-pointed or released…
+        await Packets.reconcileWithdrawnPacketInvoices(trx, { customerId: updated.customer_id });
+        // …and a restored row whose live owner is a payer is withdrawn before
+        // it can ever be collected.
+        await Packets.withdrawPacketInvoicesForOwner(trx, { customerId: updated.customer_id });
       }
       // Term-link TOCTOU re-check on the FRESH row under the lock (Codex
       // #3493 r2): a concurrent /annual-prepay can create the term and
@@ -5240,21 +5265,6 @@ const InvoiceService = {
       invoice = updated;
     });
     logger.info(`[invoice] Unvoided to draft: ${invoice.invoice_number}`);
-    // The withdrawal stamp the restore preserved is re-judged here, AFTER the
-    // commit and in its own transaction (local audit): the reconciliation
-    // takes customer and member rows before the invoice, which is the order
-    // every Bill-To writer uses; running it inside the restore — which
-    // already held the invoice row — was the inverse order and deadlocked one
-    // side. Best-effort like the rest of the post-commit work: the stamp is
-    // durable, and the next Bill-To transition reconciles it either way.
-    if (reconcileWithdrawnAfterCommit) {
-      try {
-        await db.transaction((trx) => require("./visit-completion-packets")
-          .reconcileWithdrawnPacketInvoices(trx, reconcileWithdrawnAfterCommit));
-      } catch (err) {
-        logger.warn(`[invoice] unvoid withdrawal reconciliation failed for ${invoice.invoice_number}: ${err.message}`);
-      }
-    }
     // Dunning stays under the system void stop while the restored invoice
     // sits in draft — reminders against an unpublished draft would be
     // wrong. The RESEND is the lifecycle point that re-arms it:

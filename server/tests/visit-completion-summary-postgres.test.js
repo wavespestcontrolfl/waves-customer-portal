@@ -3284,6 +3284,16 @@ postgres('visit summary recipient recovery', () => {
       const restored = await mockPg('invoices').where({ id: invoiceId }).first();
       expect(restored.status).toBe('scheduled');
       expect(invoiceWithdrawnFromCustomer(restored)).toBe(false);
+
+      // …and the opposite sequence: voided BEFORE any payer existed, so the
+      // withdrawal skipped the terminal row and no stamp was ever written.
+      // Restoring it while a payer owns the packet must withdraw it now, not
+      // hand the homeowner a collectible link (local audit P0).
+      await mockPg('invoices').where({ id: invoiceId }).update({ status: 'void', scheduled_send_error: null });
+      await mockPg('customers').where({ id: fixture.customerId }).update({ payer_id: payer.id });
+      await InvoiceService.unvoidInvoice(invoiceId);
+      const rejudged = await mockPg('invoices').where({ id: invoiceId }).first();
+      expect(invoiceWithdrawnFromCustomer(rejudged)).toBe(true);
     } finally {
       await mockPg('customers').where({ id: fixture.customerId }).update({ payer_id: null });
       await mockPg('service_visits').where({ id: fixture.visitId }).update({ billing_hold: false });

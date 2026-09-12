@@ -275,7 +275,10 @@ async function enrollSettledPacketReviews(invoiceIds, { database = db, source = 
         });
       }
     } catch (alertErr) {
-      logger.error(`[payer-statement-settle] could not raise the unrecorded-enrollment alert: ${alertErr.message}`);
+      // The alert is the durable signal, so its own failure is escalated
+      // rather than swallowed (Codex #4311 r36 P1): the caller still receives
+      // the unrecorded ids and reports them to the operator.
+      logger.error(`[payer-statement-settle] could not raise the unrecorded-enrollment alert — the ONLY durable signal for ${unrecorded.length} lost review ask(s) (${unrecorded.join(', ')}): ${alertErr.message}`);
     }
   }
   return unrecorded;

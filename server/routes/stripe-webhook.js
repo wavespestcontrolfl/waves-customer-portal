@@ -5067,6 +5067,25 @@ async function handleSetupIntentSucceeded(setupIntent, { eventCreatedAt = null }
     try {
       const StripeService = require('../services/stripe');
       const ConsentService = require('../services/payment-method-consents');
+      // THE WITHDRAWAL, RE-READ HERE (Codex #4311 r36 P1): this completion can
+      // land days after /capture-setup returned (a dead browser, ACH
+      // micro-deposits), so the route's request-time guard cannot speak for
+      // it. A Bill-To move since then leaves the invoice collectible with a
+      // NULL payer_id — the stamp is the only record — and enrolling now
+      // would put the homeowner's method on Auto Pay for debt owed by AP.
+      // The settle refuses the invoice afterwards either way; the enrollment
+      // is what has to be stopped.
+      const coveredInvoiceId = setupIntent.metadata?.invoice_id || null;
+      if (coveredInvoiceId) {
+        const coveredInvoice = await db('invoices').where({ id: coveredInvoiceId })
+          .first('id', 'payer_id', 'scheduled_send_error');
+        if (!coveredInvoice
+          || coveredInvoice.payer_id
+          || require('../services/invoice-helpers').invoiceWithdrawnFromCustomer(coveredInvoice)) {
+          logger.warn(`[stripe-webhook] covered-capture SI ${setupIntent.id} skipped — invoice ${coveredInvoiceId} is billed to a third-party payer`);
+          return;
+        }
+      }
       let saved = await db('payment_methods').where({ stripe_payment_method_id: stripePmId }).first();
       if (saved && saved.customer_id !== wavesCustomerId) {
         logger.warn(`[stripe-webhook] covered-capture pm ${stripePmId} belongs to ${saved.customer_id}, SI customer ${wavesCustomerId} — skipping`);

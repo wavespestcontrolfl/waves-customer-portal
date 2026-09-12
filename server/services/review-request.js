@@ -4324,14 +4324,18 @@ const ReviewService = {
       await ownRow().update({ status: "suppressed" });
       return { ok: false, blocked: true, terminal: true, channel, requestId: request.id, code: result?.code };
     }
-    // Transient (provider failure / consent lookup blip).
+    // Transient (provider failure / consent lookup blip). Claim-scoped like
+    // every other write here (Codex #4311 r36 P1): a pre-handoff
+    // CONSENT_LOOKUP_FAILED carries neither `retryable` nor `deferred`, so it
+    // lands in this branch having taken no claim — and resetting a `sending`
+    // row would hand another worker's live ask back to the scheduler.
     if (manageRetryVia === "cron") {
-      await db("review_requests").where({ id: request.id }).update({
+      await ownRow().update({
         status: "pending",
         scheduled_for: new Date(Date.now() + 5 * 60 * 1000),
       });
     } else {
-      await db("review_requests").where({ id: request.id }).update({ status: "failed" });
+      await ownRow().update({ status: "failed" });
     }
     return { ok: false, retryable: true, channel, requestId: request.id, code: result?.code };
   },

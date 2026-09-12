@@ -42,7 +42,12 @@ router.get('/', async (req, res, next) => {
     let payerLookupFailed = false;
     const payerInvRows = await db('invoices')
       .where({ customer_id: req.customerId })
-      .whereNotNull('payer_id')
+      // payer_id OR the withdrawal stamp (Codex #4311 r36 P1): a withdrawn
+      // combined-visit invoice keeps payer_id NULL, so an id-only test let
+      // its failed attempts and receipts read as the homeowner's own.
+      .where(function payerOwned() {
+        this.whereNotNull('payer_id').orWhere('scheduled_send_error', 'like', 'payer_billed:%');
+      })
       .select('id', 'stripe_payment_intent_id', 'stripe_charge_id', 'invoice_number')
       .catch(() => { payerLookupFailed = true; return []; });
     const payerInvoiceIds = new Set(payerInvRows.map((r) => String(r.id)));
@@ -967,7 +972,14 @@ router.get('/balance', async (req, res, next) => {
     // payment failure would show as the homeowner's own balance / failure).
     const payerInvRows = await db('invoices')
       .where({ customer_id: req.customerId })
-      .whereNotNull('payer_id')
+      // …including a WITHDRAWN invoice, whose payer_id stays NULL: without it
+      // a failed Auto Pay attempt on a still-draft packet invoice kept
+      // counting toward the homeowner's balance after the debt moved to AP
+      // (Codex #4311 r36 P1) — drafts are deliberately excluded from
+      // balanceCarryingInvoiceIds, so nothing else filtered it.
+      .where(function payerOwned() {
+        this.whereNotNull('payer_id').orWhere('scheduled_send_error', 'like', 'payer_billed:%');
+      })
       .select('id')
       .catch(() => []);
     const payerInvoiceIds = new Set(payerInvRows.map((r) => String(r.id)));
