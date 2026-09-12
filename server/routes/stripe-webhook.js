@@ -1100,6 +1100,7 @@ async function handleStatementPaymentIntentEvent(paymentIntent, eventType, event
     // Returns true ONLY when this PI left the statement `paid` (a fresh settle or
     // an idempotent already-paid) — every anomaly path returns false so the
     // post-txn dunning-stop never fires on a still-unpaid statement.
+    let settledPacketInvoiceIds = [];
     const settledNow = await db.transaction(async (trx) => {
       // Same per-statement money lock as disputes/refunds — serialize settlement
       // against any concurrent/out-of-order clawback on this statement.
@@ -1146,7 +1147,7 @@ async function handleStatementPaymentIntentEvent(paymentIntent, eventType, event
         return false;
       }
 
-      await Settle.settleStatementPaid(statementId, {
+      const settleResult = await Settle.settleStatementPaid(statementId, {
         paymentMethod,
         processor: 'stripe',
         stripePaymentIntentId: piId,
@@ -1164,6 +1165,7 @@ async function handleStatementPaymentIntentEvent(paymentIntent, eventType, event
         settledAt: eventCreated ? new Date(eventCreated * 1000) : null,
         source: 'stripe_webhook',
       }, { database: trx }); // trx is the THIRD arg — same txn re-locks the row (no self-deadlock)
+      settledPacketInvoiceIds = settleResult?.packetInvoiceIds || [];
       return true;
     });
     // Only when this PI actually left the statement paid — never on an anomaly
@@ -1174,6 +1176,10 @@ async function handleStatementPaymentIntentEvent(paymentIntent, eventType, event
       // Every linked child invoice is paid now: close out their open visits,
       // outside the money txn (GitHub r9 P1 #4127). Best-effort by contract.
       await require('../services/invoice-issued-closeout').closeOutVisitsForStatement(statementId, { trigger: 'paid' });
+      // The packet-owned children's deferred review asks, enrolled after the
+      // money transaction committed (that closeout refuses packet-owned
+      // visits, so nothing else enrolls them on this rail).
+      await Settle.enrollSettledPacketReviews(settledPacketInvoiceIds, { source: 'payer_statement_webhook' });
       // Stop any statement-level dunning now that it's paid (best-effort, outside
       // the money txn — the eligibility filter already excludes `paid`, so this is
       // just hygiene and never gates settlement).

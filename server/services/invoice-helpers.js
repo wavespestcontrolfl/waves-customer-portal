@@ -108,6 +108,16 @@ const PACKET_WITHDRAWN_SEND_ERROR = /^payer_billed:/;
 // the operator's evidence. A withdrawal has to preserve that state — the row
 // may already have reached the customer — instead of turning it into a fresh
 // draft the release would re-queue.
+// Every writer that CLEARS scheduled_send_error must keep a `payer_billed:`
+// withdrawal stamp: the stamp is the only record that a combined-visit
+// invoice's Bill-To moved to a third-party payer while the homeowner already
+// held its pay link, and clearing it makes the invoice collectible from the
+// homeowner again (Codex #4311 r29 P0). Use in place of `scheduled_send_error:
+// null`; a row with no stamp still ends up NULL.
+function preserveWithdrawalStamp(database) {
+  return database.raw("CASE WHEN scheduled_send_error LIKE 'payer_billed:%' THEN scheduled_send_error ELSE NULL END");
+}
+
 const STALE_SEND_PARK_ERROR = 'Recovered from stale sending claim — delivery unverified; check whether the customer received it, then resend or re-schedule manually';
 
 function invoiceWithdrawnFromCustomer(invoice) {
@@ -204,6 +214,7 @@ function formatCardLine(brand, last4) {
 module.exports = {
   INVOICE_UPDATE_ALLOWED_FIELDS,
   STALE_SEND_PARK_ERROR,
+  preserveWithdrawalStamp,
   INVOICE_UNCOLLECTIBLE_STATUSES,
   VISIT_NEVER_RAN_STATUSES,
   visitRefusesSettlement,

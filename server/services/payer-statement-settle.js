@@ -173,26 +173,47 @@ async function settleStatementPaid(statementId, settlement = {}, { database = db
   if (existingRow) await database('payments').where({ id: existingRow.id }).update(rowData);
   else await database('payments').insert(rowData);
 
-  // The shared enrollment path, one child at a time. Never throws — the money
-  // has moved and the statement is paid; an enrollment whose recovery write
-  // ALSO failed is reported (`reviewsUnrecorded`) and logged for the caller,
-  // exactly like the Stripe paid handler's unrecorded outcome, instead of
-  // rolling a settled statement back.
-  const reviewsUnrecorded = [];
-  for (const child of packetChildren) {
+  logger.info(`[payer-statement-settle] statement ${statementId} → paid via ${paymentMethod}; ${childrenSettled} child invoice(s) cascaded (${source})`);
+  // The packet children are RETURNED, not enrolled here (local audit r29 P1):
+  // both callers settle inside a transaction, and enrollment runs on the root
+  // connection — it would read each child's pre-commit `unpaid` status,
+  // report `invoice_unpaid`, and the settled statement would permanently miss
+  // the review the technician requested. The callers enroll after commit via
+  // enrollSettledPacketReviews.
+  return { ok: true, statement: { ...stmt, status: 'paid', paid_at: paidAt }, childrenSettled,
+    packetInvoiceIds: packetChildren.map((child) => child.id) };
+}
+
+/**
+ * The deferred review of every packet-owned child of a settled statement,
+ * enrolled AFTER the settlement committed (local audit r29 P1). A combined
+ * visit defers its ask behind the unpaid invoice and
+ * closeOutVisitForIssuedInvoice refuses packet-owned visits, so a NET
+ * statement payment is the only settlement signal those asks ever get.
+ * Never throws — the money has moved; an enrollment whose recovery write
+ * also failed is logged for the packet recovery sweep. Returns the ids whose
+ * enrollment is unrecorded.
+ */
+async function enrollSettledPacketReviews(invoiceIds, { database = db, source = 'payer_statement' } = {}) {
+  const ids = (invoiceIds || []).filter(Boolean);
+  if (!ids.length) return [];
+  const unrecorded = [];
+  for (const id of ids) {
     try {
-      const outcome = await require('./review-request').enrollForPaidInvoice(child, { source: 'payer_statement' });
-      if (outcome && outcome.recorded === false) reviewsUnrecorded.push(child.id);
+      const invoice = await database('invoices').where({ id })
+        .first('id', 'invoice_number', 'customer_id', 'service_record_id', 'visit_completion_packet_id');
+      if (!invoice) continue;
+      const outcome = await require('./review-request').enrollForPaidInvoice(invoice, { source });
+      if (outcome && outcome.recorded === false) unrecorded.push(id);
     } catch (err) {
-      reviewsUnrecorded.push(child.id);
-      logger.error(`[payer-statement-settle] review enrollment threw for child invoice ${child.invoice_number || child.id}: ${err.message}`);
+      unrecorded.push(id);
+      logger.error(`[payer-statement-settle] review enrollment threw for child invoice ${id}: ${err.message}`);
     }
   }
-  if (reviewsUnrecorded.length) {
-    logger.error(`[payer-statement-settle] statement ${statementId}: ${reviewsUnrecorded.length} packet invoice(s) settled with an UNRECORDED review enrollment — the packet recovery sweep owns them now`);
+  if (unrecorded.length) {
+    logger.error(`[payer-statement-settle] ${unrecorded.length} settled packet invoice(s) have an UNRECORDED review enrollment — the packet recovery sweep owns them now`);
   }
-  logger.info(`[payer-statement-settle] statement ${statementId} → paid via ${paymentMethod}; ${childrenSettled} child invoice(s) cascaded (${source})`);
-  return { ok: true, statement: { ...stmt, status: 'paid', paid_at: paidAt }, childrenSettled, reviewsUnrecorded };
+  return unrecorded;
 }
 
 /**
@@ -244,6 +265,7 @@ module.exports = {
   priorPayableStatus,
   withStatementMoneyLock,
   settleStatementPaid,
+  enrollSettledPacketReviews,
   markStatementProcessing,
   revertStatementProcessing,
   markStatementViewed,

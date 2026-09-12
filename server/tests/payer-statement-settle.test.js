@@ -19,6 +19,7 @@ jest.mock('../utils/datetime-et', () => ({ etDateString: () => '2026-06-21' }));
 
 const {
   settleStatementPaid,
+  enrollSettledPacketReviews,
   markStatementProcessing,
   revertStatementProcessing,
   markStatementViewed,
@@ -47,12 +48,13 @@ function handler(table) {
   }
   if (table === 'invoices') {
     return {
-      where() { return this; },
+      where(clause) { if (clause && clause.id) this._id = clause.id; return this; },
       whereNotIn() { return this; },
       // The packet-owned children are read before the cascade so their
-      // deferred review asks can be enrolled by the settlement.
+      // deferred review asks can be enrolled after the settlement commits.
       whereNotNull() { return this; },
       async select() { return packetChildren; },
+      async first() { return packetChildren.find((row) => row.id === this._id) || packetChildren[0]; },
       async update(patch) { captured.invoiceUpdates.push(patch); return invoiceUpdateCount; },
     };
   }
@@ -92,12 +94,20 @@ describe('settleStatementPaid (cascade)', () => {
       .mockImplementation(async (invoice) => (invoice.id === 'inv-b' ? { recorded: false } : { enrolled: true }));
     try {
       const res = await settleStatementPaid(11, { paymentMethod: 'check', processor: 'manual', amountCents: 5000, source: 'admin' });
+      expect(res.ok).toBe(true);
+      // The settle itself enrolls NOTHING: it runs inside the caller's
+      // transaction, where every child still reads as unpaid. It hands the
+      // ids back instead (local audit r29 P1).
+      expect(enroll).not.toHaveBeenCalled();
+      expect(res.packetInvoiceIds).toEqual(['inv-a', 'inv-b']);
+
+      // The caller enrolls after its commit, on the root connection.
+      const unrecorded = await enrollSettledPacketReviews(res.packetInvoiceIds);
       expect(enroll).toHaveBeenCalledTimes(2);
       expect(enroll).toHaveBeenCalledWith(expect.objectContaining({ id: 'inv-a' }), { source: 'payer_statement' });
-      // The statement still settles; an enrollment whose recovery write also
-      // failed is REPORTED, never rolled back over captured money.
-      expect(res.ok).toBe(true);
-      expect(res.reviewsUnrecorded).toEqual(['inv-b']);
+      // An enrollment whose recovery write also failed is REPORTED, never
+      // rolled back over captured money.
+      expect(unrecorded).toEqual(['inv-b']);
     } finally {
       enroll.mockRestore();
     }

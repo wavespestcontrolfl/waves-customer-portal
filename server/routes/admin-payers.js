@@ -301,6 +301,11 @@ router.post('/:id/statements/:statementId/reconcile', async (req, res, next) => 
     // visits, AFTER the money transaction committed (the closeout takes its
     // own row locks; GitHub r9 P1 #4127). Best-effort by contract.
     await require('../services/invoice-issued-closeout').closeOutVisitsForStatement(owned.id, { trigger: 'paid', actorTechnicianId: req.technicianId || null, actorRole: req.techRole || null });
+    // …and the reviews those packet-owned children deferred behind their
+    // unpaid invoice, which that closeout refuses to touch. After the commit,
+    // so enrollment reads the settled status.
+    await require('../services/payer-statement-settle')
+      .enrollSettledPacketReviews(result?.packetInvoiceIds, { source: 'payer_statement_reconcile' });
     // Paid offline → stop dunning (best-effort, outside the settle txn; the
     // eligibility filter already excludes `paid`, so this is just hygiene).
     await StatementFollowups.stopOnStatementSettled(owned.id)

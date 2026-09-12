@@ -3106,6 +3106,49 @@ postgres('visit summary recipient recovery', () => {
     }
   });
 
+  test('scheduling a send cannot clear a withdrawal stamp', async () => {
+    // The stamp is the ONLY record that this invoice's Bill-To moved to a
+    // payer while the homeowner already held its link. A scheduler write that
+    // cleared it would make the invoice collectible from the homeowner again
+    // and queue it for delivery to them.
+    const Packets = require('../services/visit-completion-packets');
+    const { invoiceWithdrawnFromCustomer } = require('../services/invoice-helpers');
+    const invoiceId = randomUUID();
+    const [payer] = await mockPg('payers').insert({ display_name: 'Fixture Property Management', ap_email: `${randomUUID()}@example.invalid`, active: true }).returning('id');
+    await mockPg('invoices').insert({ id: invoiceId, token: randomUUID().replace(/-/g, ''), invoice_number: `FIX-${invoiceId.slice(0, 8)}`,
+      customer_id: fixture.customerId, status: 'draft', total: 120, visit_completion_packet_id: fixture.packetId });
+    try {
+      await mockPg.transaction(async (trx) => {
+        await trx('customers').where({ id: fixture.customerId }).update({ payer_id: payer.id });
+        return Packets.withdrawPacketInvoicesForOwner(trx, { customerId: fixture.customerId });
+      });
+      expect(invoiceWithdrawnFromCustomer(await mockPg('invoices').where({ id: invoiceId }).first())).toBe(true);
+
+      // The schedule-send predicate refuses a stamped row outright.
+      const scheduled = await mockPg('invoices').where({ id: invoiceId })
+        .whereIn('status', ['draft', 'scheduled'])
+        .whereRaw("(scheduled_send_error IS NULL OR scheduled_send_error NOT LIKE 'payer_billed:%')")
+        .update({ status: 'scheduled', scheduled_send_at: new Date(), scheduled_send_error: null });
+      expect(scheduled).toBe(0);
+
+      // …and a writer that DOES clear the column keeps the stamp.
+      const { preserveWithdrawalStamp } = require('../services/invoice-helpers');
+      await mockPg('invoices').where({ id: invoiceId }).update({ scheduled_send_error: preserveWithdrawalStamp(mockPg) });
+      expect(invoiceWithdrawnFromCustomer(await mockPg('invoices').where({ id: invoiceId }).first())).toBe(true);
+      // A row with an ordinary send error still clears to NULL.
+      await mockPg('invoices').where({ id: invoiceId }).update({ scheduled_send_error: 'Twilio 30003 unreachable' });
+      await mockPg('invoices').where({ id: invoiceId }).update({ scheduled_send_error: preserveWithdrawalStamp(mockPg) });
+      expect((await mockPg('invoices').where({ id: invoiceId }).first()).scheduled_send_error).toBeNull();
+    } finally {
+      await mockPg('customers').where({ id: fixture.customerId }).update({ payer_id: null });
+      await mockPg('service_visits').where({ id: fixture.visitId }).update({ billing_hold: false });
+      await mockPg('visit_completion_packets').where({ id: fixture.packetId }).update({ error: null });
+      await mockPg('dispatch_alerts').where({ type: 'visit_closeout_review' }).whereRaw("payload->>'packetId' = ?", [fixture.packetId]).del();
+      await mockPg('invoices').where({ id: invoiceId }).del();
+      await mockPg('payers').where({ id: payer.id }).del();
+    }
+  });
+
   test('a payer-to-payer handoff moves the office review to the payer that owes it now', async () => {
     // The stamp, the packet error and the open alert all name the AP account
     // the office must bill; a second payer taking the packet over has to move
