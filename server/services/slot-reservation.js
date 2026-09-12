@@ -2042,7 +2042,7 @@ async function extendReservation({ estimateId, scheduledServiceId, holdMinutes =
       // the extend would keep a hold alive for a quote the renderer no
       // longer serves. Required lazily: estimate-public owns the predicate
       // and itself requires this module.
-       
+      // eslint-disable-next-line global-require
       const { isEstimateCustomerViewable } = require('../routes/estimate-public');
       if (typeof isEstimateCustomerViewable === 'function' && !isEstimateCustomerViewable(estimate)) {
         const err = new Error('estimate is not customer-viewable');
