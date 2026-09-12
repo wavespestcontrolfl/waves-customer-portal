@@ -14,7 +14,7 @@ const { completeScheduledServiceInsert } = require('../services/booking/create-s
 const { collectiveMoveGateOn, dateExceptionStamp } = require('../services/rebooker');
 const { stampedDivergesSql, stampedLine2Sql } = require('../services/stamped-address');
 const { dayStopsQuery, guardedCoordSelects } = require('../services/scheduling/day-stops');
-const { chooseWindowSafeOrder, inProgressStartMin, loadTechDayOrigins,
+const { chooseWindowSafeOrder, inProgressStartMin, loadTechDayOrigins, driveableStop,
   resolveWindowSafeOrderByTechDay, windowSafeFigures,
   ROUTE_WRITE_GUARD_COLUMNS, routeWriteGuardSignature } = require('../services/route-reorder');
 const {
@@ -13511,6 +13511,10 @@ router.post('/optimize', requireAdmin, async (req, res, next) => {
     }
     const byId = new Map(services.map((s) => [s.id, s]));
     const anyWindowConstrained = guarded.anyWindowConstrained;
+    // Google's totals and legs describe the route it scored; ours describe
+    // the one being written. They diverge on a repair AND whenever a stop
+    // was dropped or the origin moved (codex round 5 P1).
+    const ownFigures = anyWindowConstrained || guarded.scoredRouteChanged;
     const finalOrdered = guarded.orderedIds.map((id) => byId.get(id));
 
     // Update route_order on each service — fenced + transactional: an
@@ -13565,7 +13569,7 @@ router.post('/optimize', requireAdmin, async (req, res, next) => {
     // audit P1). Unassigned stops have no tech-day and are left out of the
     // sum, same as they are left out of the guards.
     const { totalDurationMinutes, totalDistanceMeters, unoptimizedDistanceMeters,
-      savedDistanceMeters, savedPercent, addedDistanceMeters } = windowSafeFigures(result, resolvedByTech, anyWindowConstrained, guarded.unassigned);
+      savedDistanceMeters, savedPercent, addedDistanceMeters } = windowSafeFigures(result, resolvedByTech, ownFigures, guarded.unassigned);
 
     const response = {
       success: true,
@@ -13589,7 +13593,7 @@ router.post('/optimize', requireAdmin, async (req, res, next) => {
       // never computed for a repaired order (computeWindowFitOrder scores
       // candidates, it doesn't fetch turn-by-turn legs — see its own "legs =
       // null is DELIBERATE" note) — empty rather than Google's now-stale list.
-      legs: anyWindowConstrained ? [] : result.legs,
+      legs: ownFigures ? [] : result.legs,
       source: anyWindowConstrained ? 'window_constrained' : result.source,
       // Backwards-compat field
       estimatedDriveMinutes: totalDurationMinutes,
@@ -13729,9 +13733,16 @@ router.post('/optimize-route', requireAdmin, async (req, res, next) => {
     // numbers byte-identical; a window-fit repair reports the SAME-MODEL
     // before/after the fallback itself scored against.
     let totalDurationMinutes;
+    // Google's totals describe the route IT scored — all stops, starting at
+    // HQ. Ours describe the one being written. They diverge on a repair AND
+    // whenever a terminal stop dropped out or the truck's position replaced
+    // HQ (codex round 5 P1).
+    const scoredRouteChanged = services.some((svc) => !driveableStop(svc))
+      || Boolean(techDayOrigins.origins.get(technicianId));
+    const ownFigures = windowConstrained || scoredRouteChanged;
     let totalDistanceMeters;
     let unoptimizedDistanceMeters;
-    if (windowConstrained) {
+    if (ownFigures) {
       totalDistanceMeters = outcome.afterMeters;
       unoptimizedDistanceMeters = outcome.beforeMeters;
       totalDurationMinutes = Math.round((outcome.afterSeconds || 0) / 60);
@@ -13740,7 +13751,9 @@ router.post('/optimize-route', requireAdmin, async (req, res, next) => {
       totalDistanceMeters = result.totalDistanceMeters;
       unoptimizedDistanceMeters = result.unoptimizedDistanceMeters;
     }
-    const savedDistanceMeters = Math.max(0, unoptimizedDistanceMeters - totalDistanceMeters);
+    const distanceChangeMeters = totalDistanceMeters - unoptimizedDistanceMeters;
+    const savedDistanceMeters = Math.max(0, -distanceChangeMeters);
+    const addedDistanceMeters = Math.max(0, distanceChangeMeters);
     const savedPercent = unoptimizedDistanceMeters > 0
       ? Math.round((savedDistanceMeters / unoptimizedDistanceMeters) * 100)
       : 0;
@@ -13759,11 +13772,12 @@ router.post('/optimize-route', requireAdmin, async (req, res, next) => {
       totalDurationMinutes,
       unoptimizedDistanceMeters,
       savedDistanceMeters,
+      addedDistanceMeters,
       savedPercent,
       // computeWindowFitOrder scores candidates, it doesn't fetch turn-by-turn
-      // legs (see its own "legs = null is DELIBERATE" note) — Google's leg
-      // list describes an order that was never written, so it's stale here.
-      legs: windowConstrained ? [] : result.legs,
+      // legs (see its own "legs = null is DELIBERATE" note) — and Google's leg
+      // list describes a route that was never written whenever ours differs.
+      legs: ownFigures ? [] : result.legs,
       source: windowConstrained ? 'window_constrained' : result.source,
     };
 

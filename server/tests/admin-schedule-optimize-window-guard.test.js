@@ -819,3 +819,27 @@ test('the truck is at its LATEST completion — an older pinned stop is not a fa
     jest.useRealTimers();
   }
 });
+
+// Codex round 5 P1: Google's totals and legs describe the route IT scored —
+// every stop, starting at HQ. Once a terminal stop drops out or the truck's
+// position replaces HQ, they describe a drive nobody takes, even when no
+// window repair was needed.
+test('a dropped terminal stop makes Google’s own totals stale, repair or not', async () => {
+  process.env.GATE_ROUTE_REORDER_WINDOW_FIT = 'true';
+  process.env.GATE_DRIVE_TIME_CALIBRATION = 'true';
+  stopsByDate[DATE] = [
+    stop('A', { lng: 1, route_order: 1 }),
+    stop('B', { lng: 2, route_order: 2 }),
+    stop('GHOST', { status: 'no_show', lng: 50, route_order: 3 }),
+  ];
+  mockOptimizerOrder(['A', 'B', 'GHOST']);
+  const { status, body } = await optimizeRoute({ technicianId: 't1', date: DATE });
+  expect(status).toBe(200);
+  // No repair was needed, but GHOST is not driven — so the response reports
+  // our model (a short A→B loop), not Google's mocked 12345/99999 figures
+  // for a route that includes a 50-unit detour.
+  expect(body.source).toBe('google_routes_api');
+  expect(body.totalDistanceMeters).not.toBe(12345);
+  expect(body.unoptimizedDistanceMeters).not.toBe(99999);
+  expect(body.legs).toEqual([]);
+});

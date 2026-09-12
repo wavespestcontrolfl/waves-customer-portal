@@ -639,6 +639,13 @@ function resolveWindowSafeOrderByTechDay({ RouteOptimizer, orderedStops, sourceS
     orderedIds,
     resolvedByTech,
     anyWindowConstrained: [...resolvedByTech.values()].some((o) => o.source === 'window_constrained'),
+    // TRUE whenever the route we will write is not the route the optimizer
+    // scored — a terminal stop dropped out of it, or it starts from the truck
+    // instead of HQ. Google's own totals and legs then describe a different
+    // drive, so the caller must report OUR model's figures even when no
+    // window repair happened (codex round 5 P1).
+    scoredRouteChanged: sourceStops.some((s) => !onRoute(s))
+      || Boolean(techDayOrigins && techDayOrigins.origins.size > 0),
     // In written order, for windowSafeFigures' unassigned bucket.
     unassigned: {
       RouteOptimizer,
@@ -659,7 +666,11 @@ function resolveWindowSafeOrderByTechDay({ RouteOptimizer, orderedStops, sourceS
  * first and report a leg nobody drives. Unassigned stops have no tech-day and
  * are left out of the sum, exactly as they are left out of the guards.
  */
-function windowSafeFigures(result, resolvedByTech, anyWindowConstrained, unassigned = null) {
+function windowSafeFigures(result, resolvedByTech, ownFigures, unassigned = null) {
+  // `ownFigures`: report OUR model rather than Google's — true when a
+  // tech-day was repaired AND when the scored route changed under us (see
+  // resolveWindowSafeOrderByTechDay's scoredRouteChanged).
+  const anyWindowConstrained = ownFigures;
   const outcomes = [...resolvedByTech.values()];
   // Geocoded stops with no technician have no tech-day to guard, but they ARE
   // in the order that gets written and displayed, so leaving their legs out
@@ -1350,6 +1361,7 @@ async function recordSkippedTick(reason, now = new Date()) {
 module.exports = {
   inProgressStartMin,
   loadTechDayOrigins,
+  driveableStop: onRoute,
   ROUTE_WRITE_GUARD_COLUMNS,
   routeWriteGuardSignature,
   resolveWindowSafeOrderByTechDay,
