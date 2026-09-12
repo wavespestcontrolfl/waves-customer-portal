@@ -1,4 +1,6 @@
 jest.mock('../models/db', () => jest.fn());
+const mockDuplicatePairEligibility = jest.fn();
+jest.mock('../services/customer-dedupe', () => ({ duplicatePairEligibility: (...args) => mockDuplicatePairEligibility(...args) }));
 const db = require('../models/db');
 const Context = require('../services/intelligence-bar/task-context');
 
@@ -9,6 +11,7 @@ const PROPERTY = '30000000-0000-4000-8000-000000000001';
 let rows;
 let lookupRows;
 beforeEach(() => {
+  mockDuplicatePairEligibility.mockReset().mockResolvedValue({ eligible: false, code: 'not_in_queue', reason: 'Pair is no longer in the duplicate queue', candidate: null });
   lookupRows = [];
   rows = {
     google_reviews: [{ id: REVIEW, customer_id: A, reviewer_name: 'Synthetic Reviewer' }],
@@ -1041,4 +1044,54 @@ test('the gap reader\'s candidate appointment is an appointment reference bound 
   expect(await read({ date: '2026-09-09' }, { targets: [], contactRequested: true, page: { ids: {} } })).toEqual({ input: { date: '2026-09-09' } });
   // A candidate with an unresolved name still has nobody to bind to.
   expect((await read({ date: '2026-09-09', candidate_service_id: appointment }, { targets: [], contactRequested: true, page: { ids: {} } })).code).toBe('target_clarification_required');
+});
+
+test('merge_customers binds both role-named ids as customer records of the task', async () => {
+  const task = await Context.resolve({ prompt: 'Merge the duplicate stub into this customer', pageData: { customer_id: A } });
+  expect(task.target.customer_id).toBe(A);
+
+  // (a) Task on winner A; loser B is an ELIGIBLE duplicate-queue candidate
+  // under this exact pairing — admitted, not refused.
+  mockDuplicatePairEligibility.mockResolvedValueOnce({ eligible: true, code: 'eligible', reason: null, candidate: { tier: 'yellow', reasons: [] } });
+  const eligibleOnWinner = await Context.validateRecordTarget({ winner_customer_id: A, loser_customer_id: B }, context(A), { toolName: 'merge_customers' });
+  expect(eligibleOnWinner).toBeNull();
+  expect(mockDuplicatePairEligibility).toHaveBeenCalledWith(A, B);
+
+  // (b) Same pairing, but INELIGIBLE (red/not-in-queue/address-conflict —
+  // any non-eligible outcome): the loser stays outside the task's authority
+  // and the request is refused like any other foreign record.
+  mockDuplicatePairEligibility.mockResolvedValueOnce({ eligible: false, code: 'red_pair', reason: 'looks like two different people', candidate: { tier: 'red', reasons: [] } });
+  const ineligibleOnWinner = await Context.validateRecordTarget({ winner_customer_id: A, loser_customer_id: B }, context(A), { toolName: 'merge_customers' });
+  expect(ineligibleOnWinner.code).toBe('target_clarification_required');
+
+  // (c) Task on the LOSER instead of the winner — the operator can be on
+  // either the stub page or the real customer's page. Eligible → admitted,
+  // and the winner/loser argument order to the eligibility check is still
+  // exactly (winner, loser) regardless of which half the task permits.
+  mockDuplicatePairEligibility.mockClear();
+  mockDuplicatePairEligibility.mockResolvedValueOnce({ eligible: true, code: 'eligible', reason: null, candidate: { tier: 'yellow', reasons: [] } });
+  const eligibleOnLoser = await Context.validateRecordTarget({ winner_customer_id: A, loser_customer_id: B }, context(B), { toolName: 'merge_customers' });
+  expect(eligibleOnLoser).toBeNull();
+  expect(mockDuplicatePairEligibility).toHaveBeenCalledWith(A, B);
+
+  // (c2) Uppercase-but-valid UUIDs (Codex #4348 r5 P2): task targets are
+  // canonical lowercase, so the pair is normalized before the permitted
+  // and eligibility checks — admitted, with the canonical pair passed on.
+  mockDuplicatePairEligibility.mockClear();
+  mockDuplicatePairEligibility.mockResolvedValueOnce({ eligible: true, code: 'eligible', reason: null, candidate: { tier: 'yellow', reasons: [] } });
+  const upper = await Context.validateRecordTarget({ winner_customer_id: A.toUpperCase(), loser_customer_id: B.toUpperCase() }, context(A), { toolName: 'merge_customers' });
+  expect(upper).toBeNull();
+  expect(mockDuplicatePairEligibility).toHaveBeenCalledWith(A, B);
+
+  // (d) Neither id is the task's customer: refused outright, no eligibility
+  // check needed (there's no established target to widen from).
+  mockDuplicatePairEligibility.mockClear();
+  const neitherPermitted = await Context.validateRecordTarget({ winner_customer_id: A, loser_customer_id: B }, { targets: [], page: { ids: {} } }, { toolName: 'merge_customers' });
+  expect(neitherPermitted.code).toBe('target_clarification_required');
+  expect(mockDuplicatePairEligibility).not.toHaveBeenCalled();
+
+  // The ids are read as records: a vanished loser is a record_unavailable, not a pass.
+  rows.customers = rows.customers.filter(row => row.id !== B);
+  const vanished = await Context.validateRecordTarget({ winner_customer_id: A, loser_customer_id: B }, task, { toolName: 'merge_customers' });
+  expect(vanished.code).toBe('record_unavailable');
 });

@@ -5,7 +5,8 @@ import {
   FONTS,
 } from '../theme-brand';
 import { CUSTOMER_SURFACE } from '../theme-customer';
-import { DOC_COLUMN_MAX, DOC_EYEBROW, DOC_FONT, FS } from '../theme-doc';
+import { DOC_EYEBROW, DOC_FONT, FS } from '../theme-doc';
+import { CustomerColumn } from '../components/brand';
 import Icon from '../components/Icon';
 import PublicLoadError from '../components/PublicLoadError';
 import DocumentActionBar from '../components/DocumentActionBar';
@@ -586,7 +587,7 @@ export default function ProjectReportViewPage() {
       {/* Page-local top bar removed — the WavesShell top bar (App.jsx route
           wrap, owner 2026-07-06) provides the standard chrome. */}
       {/* div, not <main> — WavesShell supplies the main landmark. */}
-      <div style={{ flex: 1, padding: '32px 20px 64px', maxWidth: DOC_COLUMN_MAX, width: '100%', margin: '0 auto', boxSizing: 'border-box' }}>
+      <CustomerColumn>
         {/* Owner rules 2026-07-16: the four-box bar (Download PDF / Share /
             Print / Portal Login) sits at the TOP of every report, above the
             header. A filed WDO report downloads the real FDACS PDF;
@@ -795,7 +796,7 @@ export default function ProjectReportViewPage() {
           {' '}This report is provided for your records.
         </footer>
 
-      </div>
+      </CustomerColumn>
     </div>
   );
 }

@@ -180,6 +180,23 @@ describe('tool definitions handed to the model', () => {
     }
   });
 
+  test('GATE_IB_MERGE_CUSTOMERS: merge_customers is handed to the model only while the gate is on (Codex r14 P1)', async () => {
+    const original = process.env.GATE_IB_MERGE_CUSTOMERS;
+    try {
+      delete process.env.GATE_IB_MERGE_CUSTOMERS;
+      scriptModelTurns([[{ type: 'text', text: 'OK' }]]);
+      await withServer(async (baseUrl) => { expect((await postQuery(baseUrl, { prompt: 'hello', context: 'customers' })).status).toBe(200); });
+      expect(mockMessagesCreate.mock.calls[0][0].tools.map((t) => t.name)).not.toContain('merge_customers');
+      jest.clearAllMocks();
+      process.env.GATE_IB_MERGE_CUSTOMERS = 'true';
+      scriptModelTurns([[{ type: 'text', text: 'OK' }]]);
+      await withServer(async (baseUrl) => { expect((await postQuery(baseUrl, { prompt: 'hello', context: 'customers' })).status).toBe(200); });
+      expect(mockMessagesCreate.mock.calls[0][0].tools.map((t) => t.name)).toContain('merge_customers');
+    } finally {
+      if (original === undefined) delete process.env.GATE_IB_MERGE_CUSTOMERS; else process.env.GATE_IB_MERGE_CUSTOMERS = original;
+    }
+  });
+
   test('the contract metadata itself stays on the module definition (the gate still reads it)', () => {
     const { HISTORY_TOOLS } = require('../services/intelligence-bar/history-tools');
     expect(HISTORY_TOOLS.find((t) => t.name === 'search_ib_history')._contracts.tables).toContain('ib_thread_turns');
