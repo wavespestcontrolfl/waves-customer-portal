@@ -5,6 +5,7 @@ import { useParams } from 'react-router-dom';
 import { Button } from '../components/Button';
 import Icon from '../components/Icon';
 import PublicLoadError from '../components/PublicLoadError';
+import { CustomerColumn } from '../components/brand';
 import { useGlassSurface } from '../glass/glass-engine';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
@@ -355,10 +356,14 @@ export default function RatePage() {
   );
 
   if (error === 'temporary') return (
+    // CustomerColumn, not a hand-rolled wrapper: my first pass at un-nesting
+    // this kept the page card's `calc(100% - 24px)` / 420 cap, which capped the
+    // state card at 420 with 12px gutters and defeated its own 560 / 16. A
+    // parent constraint bypasses the component's prop filtering entirely.
     <Scene>
-      <div style={{ position: 'relative', zIndex: 1, width: 'calc(100% - 24px)', maxWidth: 420, marginTop: 'clamp(20px, 8dvh, 64px)' }}>
+      <CustomerColumn style={{ position: 'relative', zIndex: 1 }}>
         <PublicLoadError resource="feedback request" onRetry={() => setLoadAttempt(a => a + 1)} />
-      </div>
+      </CustomerColumn>
     </Scene>
   );
 

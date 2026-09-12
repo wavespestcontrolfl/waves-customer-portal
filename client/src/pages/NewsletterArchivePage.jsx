@@ -123,9 +123,11 @@ export default function NewsletterArchivePage() {
   if (status === 'error') {
     return (
       <WavesShell variant="customer" topBar="solid">
-        <div data-glass-clear="" style={{ background: PAGE_BG, flex: 1, padding: '48px 20px' }}>
+        {/* The shared column, same as the not-found branch below: the 48/20
+            wrapper gave this state a 20px gutter while its sibling had 16. */}
+        <CustomerColumn data-glass-clear="" style={{ background: PAGE_BG }}>
           <PublicLoadError resource="newsletter issue" onRetry={() => setLoadAttempt(a => a + 1)} />
-        </div>
+        </CustomerColumn>
       </WavesShell>
     );
   }
