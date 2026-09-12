@@ -403,6 +403,28 @@ async function runVisitCompletionPacketEffects(packetId, database = db) {
     : { enrolled: false, reason: delivery.state };
   const paymentPending = ['payment_pending', 'processing'].includes(payment.state);
   const pending = paymentPending || delivery.state === 'delivery_pending' || reviewEnrollment.retryable === true;
+  // A DELIVERY REVIEW is recorded even while the payment is still pending
+  // (Codex #4311 r35 P2): the close below is the only place that raises the
+  // office alert, and an ACH settlement window is days long — the customer
+  // did not reliably receive their summary and the review outreach is parked
+  // that whole time, with nothing telling the office. The packet stays
+  // resumable for settlement; this alert is deduped on the open one, so the
+  // close does not raise a second.
+  if (pending && delivery.state === 'delivery_review') {
+    try {
+      const open = await database('dispatch_alerts').where({ type: 'visit_closeout_review' }).whereNull('resolved_at')
+        .whereRaw("payload->>'packetId' = ?", [packet.id]).first('id');
+      if (!open) {
+        const alertMember = await database('scheduled_services').where({ id: items[0].scheduled_service_id }).first();
+        await require('./dispatch-alerts').createAlert({
+          type: 'visit_closeout_review', severity: 'warn', techId: alertMember?.technician_id || null, jobId: alertMember?.id || null,
+          payload: { visitId: packet.visit_id, packetId: packet.id, ...officeReviewState({ payment: payment.state, delivery: 'delivery_review' }) },
+        });
+      }
+    } catch (alertErr) {
+      require('./logger').warn(`[visit-closeout] could not record the delivery-review alert for packet ${packet.id}: ${alertErr.message}`);
+    }
+  }
   let recovered = false;
   if (!pending) await database.transaction(async (trx) => {
     const visit = await trx('service_visits').where({ id: packet.visit_id }).first();
@@ -430,7 +452,9 @@ async function runVisitCompletionPacketEffects(packetId, database = db) {
         await Summary.parkVisitReviewOutreach(packet.id, trx);
       }
       const closeReview = payment.state === 'office_required' || delivery.state === 'delivery_review';
-      if (closeReview) {
+      const alreadyAlerted = closeReview && await trx('dispatch_alerts').where({ type: 'visit_closeout_review' }).whereNull('resolved_at')
+        .whereRaw("payload->>'packetId' = ?", [packet.id]).first('id');
+      if (closeReview && !alreadyAlerted) {
         const member = await trx('scheduled_services').where({ id: items[0].scheduled_service_id }).first();
         await require('./dispatch-alerts').createAlert({
           type: 'visit_closeout_review', severity: 'warn', techId: member.technician_id, jobId: member.id, trx,
@@ -540,6 +564,27 @@ async function withdrawPacketInvoiceForPayer(trx, { packetId, invoiceId, visit, 
   // for a handoff that may well have succeeded. Such a row keeps its status
   // and its empty send time; only the stamp is written, flagged `park` so
   // the release restores the operator's evidence instead of scheduling it.
+  // The homeowner's APPLIED CREDIT goes back before the debt changes hands
+  // (Codex #4311 r35 P1): the payer-attach path (reverseCreditAndStampPayer)
+  // already refuses to transfer ownership without returning it, and a
+  // withdrawal is the same transfer by a different route — leaving it applied
+  // understates the customer's balance and subsidizes the payer. An
+  // incomplete reversal (a payment already in flight against the reduced
+  // amount) THROWS, so the withdrawal and the Bill-To write roll back
+  // together and the invoice stays self-pay for the caller's defer path.
+  const appliedCredit = Number((await trx('invoices').where({ id: invoiceId }).first('credit_applied'))?.credit_applied || 0);
+  if (appliedCredit > 0.004) {
+    const { reverseAppliedCredit } = require('./customer-credit');
+    const reversal = await reverseAppliedCredit({
+      invoiceId, amount: appliedCredit, createdBy: 'system',
+      note: `Bill-To moved to payer ${payerId} — homeowner credit returned`,
+    }, trx);
+    if ((Number(reversal?.reversed) || 0) + 0.005 < appliedCredit) {
+      const stuck = new Error(`homeowner credit reversal incomplete (${reversal?.skipped || 'partial'}) — invoice stays self-pay`);
+      stuck.code = 'CREDIT_REVERSAL_INCOMPLETE';
+      throw stuck;
+    }
+  }
   const parked = prior?.status === 'scheduled' && !prior.scheduled_send_at
     && (String(prior.scheduled_send_error || '') === STALE_SEND_PARK_ERROR || /:park(:|$)/.test(String(prior.scheduled_send_error || '')));
   const stamp = `payer_billed:${payerId}${parked ? ':park' : ''}`;

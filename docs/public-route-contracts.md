@@ -1094,7 +1094,17 @@ gate, 24h expiry with 410, access-count audit, 30/15min limiter,
 `no-store`).
 `POST /api/stripe/terminal/validate-handoff` (machine-to-machine burn of
 the 60s single-use handoff JWT — the token IS the auth; see the atomic
-terminal-handoff burn rule in AGENTS.md).
+terminal-handoff burn rule in AGENTS.md. THIRD-PARTY BILL-TO WITHDRAWAL
+(2026-09-12): a combined-visit invoice whose Bill-To moved to a payer after
+the handoff was minted keeps a collectible status and a NULL `payer_id` —
+the move is recorded only in its withdrawal stamp — so this route treats a
+withdrawn invoice exactly like a terminal status change and refuses with the
+existing `invoice_changed` outcome after the burn, rather than handing the
+technician a card-present session for debt now owed by AP. `/handoff` refuses
+to mint one for the same reason, and `/payment-intent` refuses with
+`409 { code: 'invoice_withdrawn_from_customer' }` — including a re-read under
+the invoice row lock at the final bind, so a Bill-To change committing during
+the mint is caught).
 `/api/admin/push/vapid-key` (GET; deliberate — the VAPID public key is
 public by protocol).
 `/api/health` (GET; liveness probe, no data).

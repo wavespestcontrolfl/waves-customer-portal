@@ -812,8 +812,14 @@ async function reviewSendThroughSummaryHandoff(serviceRecordId, dispatch, databa
       if (claimLost) {
         return { ok: false, code: 'REVIEW_CLAIM_LOST', reason: 'This review ask is already being sent or is no longer pending' };
       }
-      dispatched = true;
-      return dispatch(trx);
+      // `dispatched` flips at the PROVIDER BOUNDARY, not here (Codex #4311
+      // r35 P2): the sender's own fresh consent/suppression/window rechecks
+      // run inside dispatch() before the Twilio request, and a throw from one
+      // of those is provably unsent — marking dispatch started up front left
+      // such a row `sending` with nothing to prove its absence (a no-link
+      // cadence touch has no sms_log for the evidence reader). The callback
+      // the send layer invokes immediately before the request is what sets it.
+      return dispatch(trx, () => { dispatched = true; });
     });
   } catch (err) {
     // A throw before the request is provably unsent; one from the request

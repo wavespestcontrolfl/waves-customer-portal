@@ -2716,8 +2716,15 @@ postgres('visit summary recipient recovery', () => {
     const askId = randomUUID();
     await mockPg('review_requests').insert({ id: askId, customer_id: fixture.customerId, service_record_id: fixture.recordIds[0], status: 'pending', token: randomUUID().replace(/-/g, '') });
     try {
-      await expect(Summary.reviewSendThroughSummaryHandoff(fixture.recordIds[0], async () => { throw new Error('socket hang up'); }, undefined, { requestId: askId }))
-        .rejects.toThrow('socket hang up');
+      // The dispatch reports the PROVIDER BOUNDARY (the callback the send
+      // layer fires immediately before the Twilio request) and then throws —
+      // the outcome the reconciliation exists for.
+      await expect(Summary.reviewSendThroughSummaryHandoff(
+        fixture.recordIds[0],
+        async (trx, onProviderStart) => { onProviderStart(); throw new Error('socket hang up'); },
+        undefined,
+        { requestId: askId },
+      )).rejects.toThrow('socket hang up');
       // The provider may hold the message: the row stays marked for the reconciliation.
       const marked = await mockPg('review_requests').where({ id: askId }).first();
       expect(marked).toMatchObject({ status: 'sending' });
@@ -3328,6 +3335,38 @@ postgres('visit summary recipient recovery', () => {
       expect(resumed.next_touch_at).not.toBeNull();
     } finally {
       await mockPg('invoice_followup_sequences').where({ invoice_id: invoiceId }).del();
+      await mockPg('customers').where({ id: fixture.customerId }).update({ payer_id: null });
+      await mockPg('service_visits').where({ id: fixture.visitId }).update({ billing_hold: false });
+      await mockPg('visit_completion_packets').where({ id: fixture.packetId }).update({ error: null });
+      await mockPg('dispatch_alerts').where({ type: 'visit_closeout_review' }).whereRaw("payload->>'packetId' = ?", [fixture.packetId]).del();
+      await mockPg('invoices').where({ id: invoiceId }).del();
+      await mockPg('payers').where({ id: payer.id }).del();
+    }
+  });
+
+  test('a withdrawal returns the homeowner credit already applied to the invoice', async () => {
+    // The payer-attach path refuses to transfer ownership without returning
+    // applied credit; a withdrawal is the same transfer by another route.
+    const Packets = require('../services/visit-completion-packets');
+    const invoiceId = randomUUID();
+    const [payer] = await mockPg('payers').insert({ display_name: 'Fixture Property Management', ap_email: `${randomUUID()}@example.invalid`, active: true }).returning('id');
+    await mockPg('invoices').insert({ id: invoiceId, token: randomUUID().replace(/-/g, ''), invoice_number: `FIX-${invoiceId.slice(0, 8)}`,
+      customer_id: fixture.customerId, status: 'draft', total: 120, credit_applied: 20, visit_completion_packet_id: fixture.packetId });
+    try {
+      await mockPg.transaction(async (trx) => {
+        await trx('customers').where({ id: fixture.customerId }).update({ payer_id: payer.id });
+        return Packets.withdrawPacketInvoicesForOwner(trx, { customerId: fixture.customerId });
+      });
+      const withdrawn = await mockPg('invoices').where({ id: invoiceId }).first('credit_applied', 'scheduled_send_error');
+      expect(Number(withdrawn.credit_applied || 0)).toBe(0);
+      expect(withdrawn.scheduled_send_error).toMatch(/^payer_billed:/);
+      // …and the customer's balance carries the returned credit.
+      const ledger = await mockPg('customer_credit_ledger').where({ customer_id: fixture.customerId, invoice_id: invoiceId })
+        .orderBy('created_at', 'desc').first('delta', 'source');
+      expect(Number(ledger?.delta || 0)).toBe(20);
+    } finally {
+      await mockPg('customer_credit_ledger').where({ customer_id: fixture.customerId }).del();
+      await mockPg('customers').where({ id: fixture.customerId }).update({ account_credits: 0 });
       await mockPg('customers').where({ id: fixture.customerId }).update({ payer_id: null });
       await mockPg('service_visits').where({ id: fixture.visitId }).update({ billing_hold: false });
       await mockPg('visit_completion_packets').where({ id: fixture.packetId }).update({ error: null });
