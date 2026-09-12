@@ -114,6 +114,16 @@ export function followTank(row, gallons) {
 // and if no row owned the tank yet it becomes the owner.
 export function markTankEntry(row, owner) {
   const hasVolume = Number(row.carrierGallons) > 0;
+  // Clearing an override while a tank is still active rejoins it there and
+  // then: the row has no volume of its own, and leaving it blank until the
+  // owner happens to be edited again would block the closeout on a missing
+  // actual (Codex r4 P2). The owner clearing its OWN gallons is the other
+  // case — that clear has already travelled to the followers.
+  if (!hasVolume && owner && owner.productId !== row.productId) {
+    return applyTankDose({
+      ...row, carrierGallons: owner.carrierGallons, carrierGallonsManual: false, tankOwner: false,
+    });
+  }
   return {
     ...row,
     // A row holds its own gallons only while it HAS gallons: clearing them

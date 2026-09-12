@@ -487,6 +487,13 @@ it('a follower given its own gallons does not drag the tank\'s other followers',
   await waitFor(() => expect(totals()[3].value).toBe('20'));
   expect(gal()[2].value).toBe('25');
   expect(totals()[4].value).toBe('100');
+  // Clearing B's override rejoins it to A's tank immediately, rather than
+  // leaving it blank until A is edited again (Codex r4 P2).
+  fireEvent.change(gal()[1], { target: { value: '' } });
+  await waitFor(() => expect(gal()[1].value).toBe('25'));
+  expect(totals()[3].value).toBe('50');
+  fireEvent.change(gal()[1], { target: { value: '10' } });
+  await waitFor(() => expect(totals()[3].value).toBe('20'));
   // A second edit on detached B still leaves C alone — typing "12" is two
   // edits, and the first must not make B an owner (pre-push audit P1).
   fireEvent.change(gal()[1], { target: { value: '12' } });

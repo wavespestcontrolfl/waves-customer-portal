@@ -91,3 +91,15 @@ it('a row converted into a per-gallon rate joins the tank already mixed', () => 
   expect(joinTankOnUnitChange(row({ rateUnit: 'fl_oz' }), 'fl_oz/gal', owner).carrierGallons).toBe('');
   expect(joinTankOnUnitChange(row({ rateUnit: 'oz/gal', carrierGallons: '10' }), 'fl_oz/gal', owner).carrierGallons).toBe('10');
 });
+
+it('clearing an override rejoins the active tank at once', () => {
+  const owner = row({ productId: 'a', carrierGallons: '25', tankOwner: true, carrierGallonsManual: true });
+  const cleared = row({ productId: 'b', rate: '2', carrierGallons: '', carrierGallonsManual: true });
+  expect(markTankEntry(cleared, owner)).toMatchObject({
+    carrierGallons: '25', carrierGallonsManual: false, tankOwner: false, totalAmount: 50,
+  });
+  // The owner clearing its own gallons is the other case: that clear has
+  // already travelled to the followers, so it just gives up the tank.
+  expect(markTankEntry(row({ productId: 'a', carrierGallons: '', tankOwner: true }), owner))
+    .toMatchObject({ carrierGallons: '', tankOwner: false, carrierGallonsManual: false });
+});
