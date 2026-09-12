@@ -2208,6 +2208,19 @@ async function executeMerge({ winnerId, loserId, performedBy, performedById = nu
     // Both directions are fenced against a send in flight (the loser-side check
     // before the sweep, the winner-side one just above).
     if (backfills.payer_id || winner.payer_id) {
+      // Only invoices REPOINTED FROM THE LOSER can carry undo-relevant
+      // reversals (local audit on r42): journaling the winner's own ledger
+      // rows would have the undo hand them to the loser while the invoices
+      // stayed with the winner. A count-only sweep record cannot name them,
+      // so nothing is journaled and the table is marked non-replayable.
+      const sweptInvoiceIds = repointedIds['invoices.customer_id'];
+      const inheritedInvoiceIds = new Set(Array.isArray(sweptInvoiceIds) ? sweptInvoiceIds.map(String) : []);
+      // …and only the reversal rows this withdrawal creates: a snapshot taken
+      // before it runs is what makes the diff precise.
+      const ledgerBefore = inheritedInvoiceIds.size
+        ? new Set((await trx('customer_credit_ledger').where({ customer_id: winnerId })
+          .whereIn('invoice_id', [...inheritedInvoiceIds]).pluck('id')).map(String))
+        : new Set();
       const withdrawnInvoiceIds = await require('./visit-completion-packets')
         .withdrawPacketInvoicesForOwner(trx, { customerId: winnerId });
       // The withdrawal RETURNS the homeowner's applied credit, and it runs
@@ -2216,18 +2229,19 @@ async function executeMerge({ winnerId, loserId, performedBy, performedById = nu
       // undo would then return the invoice to the loser while the returned
       // credit stayed with the winner. Journal them with the rest so the undo
       // repoints them too.
-      if (withdrawnInvoiceIds.length) {
-        const reversalIds = await trx('customer_credit_ledger')
+      const inheritedWithdrawn = withdrawnInvoiceIds.filter((id) => inheritedInvoiceIds.has(String(id)));
+      if (inheritedWithdrawn.length) {
+        const reversalIds = (await trx('customer_credit_ledger')
           .where({ customer_id: winnerId })
-          .whereIn('invoice_id', withdrawnInvoiceIds)
-          .pluck('id');
+          .whereIn('invoice_id', inheritedWithdrawn)
+          .pluck('id')).map(String).filter((id) => !ledgerBefore.has(id));
         if (reversalIds.length) {
           const key = 'customer_credit_ledger.customer_id';
           const existing = repointedIds[key];
           if (Array.isArray(existing)) {
-            repointedIds[key] = [...new Set([...existing, ...reversalIds.map(String)])];
+            repointedIds[key] = [...new Set([...existing, ...reversalIds])];
           } else if (!existing) {
-            repointedIds[key] = reversalIds.map(String);
+            repointedIds[key] = reversalIds;
           } else {
             // The sweep already fell back to count-only for this table, so an
             // id-precise undo is not available for it either way; keep the
@@ -2236,6 +2250,10 @@ async function executeMerge({ winnerId, loserId, performedBy, performedById = nu
             if (!collisionHandlers.includes('customer_credit_ledger')) collisionHandlers.push('customer_credit_ledger');
           }
         }
+      } else if (withdrawnInvoiceIds.length && !Array.isArray(sweptInvoiceIds) && sweptInvoiceIds) {
+        // Invoices were repointed but the sweep recorded only a count, so a
+        // reversal among them cannot be named for the undo.
+        if (!collisionHandlers.includes('customer_credit_ledger')) collisionHandlers.push('customer_credit_ledger');
       }
     }
 

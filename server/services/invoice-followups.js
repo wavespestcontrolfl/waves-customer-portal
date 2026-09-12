@@ -168,6 +168,13 @@ async function sendFollowupEmail({ row, customer, step, ctx }) {
   if (!latestInvoice || isTerminalInvoice(latestInvoice)) {
     return { ok: false, skipped: true, reason: 'invoice_not_eligible' };
   }
+  // OWNERSHIP on the email leg's own fresh row (local audit on r42): the
+  // pre-dispatch guard added for the text protects only that leg, and this
+  // read checked terminal status alone — a payer assigned since the batch
+  // would still email the homeowner a payment demand for AP-owned debt.
+  if (latestInvoice.payer_id || invoiceWithdrawnFromCustomer(latestInvoice)) {
+    return { ok: false, skipped: true, reason: 'invoice_payer_billed' };
+  }
 
   const prefs = await db('notification_prefs')
     .where({ customer_id: customer.id })
@@ -203,6 +210,16 @@ async function sendFollowupEmail({ row, customer, step, ctx }) {
       idempotencyKey: `invoice_followup_email:${row.invoice_id}:${step.id}`,
       categories: ['invoice_followup', step.id],
       suppressionGroupKey: 'transactional_required',
+      // …and again at the provider boundary, inside the library's own handoff
+      // (local audit on r42): the recipient resolution and payload render are
+      // awaited after the read above. Fail-closed — an unreadable invoice
+      // aborts before dispatch, like every other ownership guard here.
+      withProviderHandoff: async (dispatch) => {
+        const verdict = await invoiceHelpers.selfPayAtDispatch(row.invoice_id, db)();
+        if (verdict.ok !== true) return verdict;
+        await dispatch();
+        return { ok: true };
+      },
     });
 
     if (result.deduped) {

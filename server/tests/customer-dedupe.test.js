@@ -1524,7 +1524,7 @@ describe('executeMerge', () => {
     // merge is the ownership writer that must run it (round-24 P1).
     const Packets = require('../services/visit-completion-packets');
     const inFlight = jest.spyOn(Packets, 'packetInvoiceSendInFlight').mockResolvedValue(false);
-    const withdraw = jest.spyOn(Packets, 'withdrawPacketInvoicesForOwner').mockResolvedValue(1);
+    const withdraw = jest.spyOn(Packets, 'withdrawPacketInvoicesForOwner').mockResolvedValue(['inv-withdrawn-1']);
     try {
       const { trx } = buildTrx({
         winner: { id: WINNER, first_name: 'A', last_name: 'B', phone: '+19995550003', payer_id: null },
@@ -1561,7 +1561,7 @@ describe('executeMerge', () => {
     // exactly this direction collectible through the homeowner's link.
     const Packets = require('../services/visit-completion-packets');
     const inFlight = jest.spyOn(Packets, 'packetInvoiceSendInFlight').mockResolvedValue(false);
-    const withdraw = jest.spyOn(Packets, 'withdrawPacketInvoicesForOwner').mockResolvedValue(1);
+    const withdraw = jest.spyOn(Packets, 'withdrawPacketInvoicesForOwner').mockResolvedValue(['inv-withdrawn-1']);
     try {
       const { trx } = buildTrx({
         winner: { id: WINNER, first_name: 'A', last_name: 'B', phone: '+19995550003', payer_id: 5 },
