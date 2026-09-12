@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useState } from "react";
+import React, { useCallback, useEffect, useId, useMemo, useState } from "react";
 import { Link } from "react-router-dom";
 import AdminCommandHeader from "../../components/admin/AdminCommandHeader";
 import {
@@ -99,7 +99,9 @@ function NumberField({ value, onChange, min, max, step = 0.1, suffix, label }) {
   // label text, so the visible label string stays 1:1. Field requires its
   // single child to be the labelable control itself (it clones an id/htmlFor
   // association onto it), so the suffix renders as a sibling instead of
-  // wrapping the Input in an extra div.
+  // wrapping the Input in an extra div — but it still needs to reach the
+  // input's accessible name/description, or screen readers drop the unit.
+  const suffixId = useId();
   return (
     <div className={suffix ? "flex items-end gap-2" : undefined}>
       <Field label={label} className={suffix ? "flex-1" : undefined}>
@@ -114,9 +116,10 @@ function NumberField({ value, onChange, min, max, step = 0.1, suffix, label }) {
             onChange(next);
           }}
           className="u-nums"
+          aria-describedby={suffix ? suffixId : undefined}
         />
       </Field>
-      {suffix ? <span className="pb-2 text-ui-caption text-ink-secondary">{suffix}</span> : null}
+      {suffix ? <span id={suffixId} className="pb-2 text-ui-caption text-ink-secondary">{suffix}</span> : null}
     </div>
   );
 }
@@ -161,7 +164,7 @@ function SelectField({ value, onChange, label, options }) {
 }
 
 function Pill({ tone = "neutral", children }) {
-  const badgeTone = tone === "success" ? "strong" : tone === "error" ? "alert" : "neutral";
+  const badgeTone = tone === "success" ? "strong" : tone === "error" ? "alert" : tone === "warning" ? "warn" : "neutral";
   return <Badge tone={badgeTone}>{children}</Badge>;
 }
 
@@ -419,7 +422,7 @@ export default function PestPressureSettingsPage() {
   if (loading) {
     return (
       <UiSurface density="comfortable" className="mx-auto max-w-[1300px] text-ui-body text-ink-primary">
-        <AdminCommandHeader variant="workspace" title="Pest pressure" icon={ShieldAlert} />
+        <AdminCommandHeader variant="workspace" title="Pest pressure" icon={ShieldAlert} sticky={false} />
         <ActionFeedback className="min-h-20">Loading Pest Pressure settings…</ActionFeedback>
       </UiSurface>
     );
@@ -427,7 +430,7 @@ export default function PestPressureSettingsPage() {
   if (!config) {
     return (
       <UiSurface density="comfortable" className="mx-auto max-w-[1300px] text-ui-body text-ink-primary">
-        <AdminCommandHeader variant="workspace" title="Pest pressure" icon={ShieldAlert} />
+        <AdminCommandHeader variant="workspace" title="Pest pressure" icon={ShieldAlert} sticky={false} />
         <ActionFeedback error className="min-h-20">Could not load settings. {saveError || ""}</ActionFeedback>
       </UiSurface>
     );
@@ -440,6 +443,7 @@ export default function PestPressureSettingsPage() {
           variant="workspace"
           title="Pest pressure"
           icon={ShieldAlert}
+          sticky={false}
           actions={[
             { key: "restore", label: "Restore defaults", icon: RotateCcw, variant: "secondary", onClick: handleRestoreDefaults },
             {
