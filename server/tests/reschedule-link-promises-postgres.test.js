@@ -628,6 +628,12 @@ postgres('reschedule-link-promises against PostgreSQL', () => {
    * IS-DISTINCT-FROM predicate against the row's actual, already-parked
    * state — a mock cannot honestly arbitrate whether the second call's
    * WHERE clause matches zero rows.
+   *
+   * codex #4293 P1 (this round): pass 2 here also exercises the sibling fix
+   * to the finding above — an already-'review' row whose receipt scope-
+   * changes AGAIN now reports reconcileAttempt's done: false, so runOne
+   * reaches contextFor's own fresh read this same pass instead of returning
+   * immediately (see reconcileAttempt's delivered/read branch).
    */
   test('a delivered receipt clears uncertainty even when it reconfirms the SAME already-parked scope-change reason (codex #4293 P1)', async () => {
     const priorGate = process.env.GATE_RESCHEDULE_LINK_ON_PROMISE;
@@ -674,17 +680,27 @@ postgres('reschedule-link-promises against PostgreSQL', () => {
       expect(afterScopeChange.payload.delivery_outcome_uncertain).toBe(true);
 
       // Pass 2: the SAME message's carrier receipt now confirms delivery —
-      // definitive evidence — but the row is already parked for the exact
-      // same reason this second pass will conclude too.
+      // definitive evidence — and the row is already parked for the exact
+      // scope-change reason this second pass's own settleDelivery call will
+      // conclude too (still an identity mismatch: the generation gap never
+      // closes). Unlike pass 1 — a FRESH transition into 'review', which
+      // reconcileAttempt still defers to next pass exactly like the sibling
+      // delivery_failed branch — a row that was ALREADY 'review' before this
+      // call runs is precisely the case this round's fix stops
+      // short-circuiting: runOne now continues on to contextFor's own fresh
+      // read this SAME pass (codex #4293 P1, this round), which is what
+      // lets a later office dismissal or hand-fulfilment close this card
+      // instead of never revisiting it. Reaching contextFor at all this
+      // pass is new; recomputing 'call_not_ready' off it is incidental to
+      // THIS minimal fixture (no v2_extraction_status on call_log) — see the
+      // parallel 'freshly recomputed' stale_extraction case above.
       await mockPg('sms_log').where({ twilio_sid: twilioSid }).update({ status: 'delivered' });
       const row2 = await mockPg('outbox_messages').where({ id: outboxId }).first();
       await links.runOne(mockPg, row2, { now: new Date() });
 
       const after = await mockPg('outbox_messages').where({ id: outboxId }).first();
-      // The park reason is unchanged — parkReview's own no-op guard has
-      // nothing new to write, and correctly so.
       expect(after.status).toBe('review');
-      expect(after.last_error).toBe('delivery_scope_changed');
+      expect(after.last_error).toBe('call_not_ready');
       // But the flag must retire regardless: the second receipt is
       // definitive provider evidence for THIS attempt, independent of
       // whether parkReview itself found anything to change.
@@ -704,6 +720,112 @@ postgres('reschedule-link-promises against PostgreSQL', () => {
       const rows2 = await mockPg('outbox_messages').where({ commitment_id: commitment.id }).orderBy('commitment_generation');
       expect(rows2).toHaveLength(2);
       expect(rows2[1]).toMatchObject({ commitment_generation: 2, status: 'pending' });
+    } finally {
+      if (priorGate === undefined) delete process.env.GATE_RESCHEDULE_LINK_ON_PROMISE; else process.env.GATE_RESCHEDULE_LINK_ON_PROMISE = priorGate;
+      gates.callCommitments = priorCallCommitments;
+    }
+  });
+
+  /**
+   * codex #4293 P1 (pre-push audit on PR #4293, this round): the finding
+   * this whole file's newest tests protect against, played all the way
+   * through to the office-facing symptom. Before this round's fix,
+   * reconcileAttempt's delivered/read branch reported "handled" (its old
+   * unconditional true) on EVERY pass a scope-changed row's sms stayed
+   * delivered/read — which is forever, since a real carrier receipt never
+   * changes status again. runOne therefore returned immediately every
+   * single sweep and never reached contextFor's own promise_closed check,
+   * so a card raised for a stale generation's scope-changed receipt could
+   * never close, even once staff dismissed or hand-fulfilled the
+   * commitment on the ledger. This test fails without the fix: `after`
+   * would still show status 'review' / last_error 'delivery_scope_changed'
+   * and the card would still be 'open'.
+   */
+  test('a delivered receipt for a superseded generation parks scope-changed, then closing the commitment through the ledger lets the next sweep clear its card without resending (codex #4293 P1)', async () => {
+    const priorGate = process.env.GATE_RESCHEDULE_LINK_ON_PROMISE;
+    const priorCallCommitments = gates.callCommitments;
+    try {
+      process.env.GATE_RESCHEDULE_LINK_ON_PROMISE = 'true';
+      gates.callCommitments = true;
+
+      const callId = randomUUID();
+      const customerId = randomUUID();
+      const visitId = randomUUID();
+      const phone = '+15555550100';
+      const twilioSid = `SM${randomUUID().replaceAll('-', '').slice(0, 32)}`;
+      await mockPg('customers').insert({ id: customerId, first_name: 'Pat', last_name: 'Customer', phone,
+        address_line1: '1 Example St', city: 'Bradenton', zip: '34205' });
+      await mockPg('scheduled_services').insert({ id: visitId, customer_id: customerId, scheduled_date: '2030-01-08', service_type: 'WaveGuard' });
+      // A replacement recording already reopened this commitment under
+      // generation 2 — exactly like the superseded-generation test above —
+      // BEFORE generation 1's own carrier receipt ever arrives, and the
+      // office has not yet acted on either generation.
+      await mockPg('call_log').insert({ id: callId, customer_id: customerId, direction: 'inbound', from_phone: phone, processing_generation: 2 });
+      const [commitment] = await mockPg('call_commitments').insert({
+        call_log_id: callId, commitment_key: 'send_reschedule_link:1', party: 'waves', kind: 'send_reschedule_link',
+        description: 'send a reschedule link', source: 'ai', status: 'open', human_state: null,
+        last_seen_generation: 2, processing_generation: 2,
+      }).returning('id');
+      const outboxId = randomUUID();
+      // This exact attempt was claimed and sent under generation 1 — still
+      // 'sending' (no receipt yet), the window stagePromises must not stage
+      // a duplicate generation into.
+      await mockPg('outbox_messages').insert({ id: outboxId, channel: 'sms', status: 'sending', provider_message_id: twilioSid,
+        sent_at: new Date(), payload: { call_generation: 1, delivery_outcome_uncertain: true },
+        commitment_id: commitment.id, commitment_generation: 1,
+        related_call_log_id: callId, related_customer_id: customerId, related_scheduled_service_id: visitId });
+      // The provider's own definitive record: this generation-1 attempt
+      // really was delivered.
+      await mockPg('sms_log').insert({ id: randomUUID(), customer_id: customerId, direction: 'outbound',
+        from_phone: '+15555550199', to_phone: phone, twilio_sid: twilioSid, status: 'delivered', message_body: 'Your reschedule link: https://example.com/x' });
+
+      // A `send` stand-in that throws if ever invoked — neither pass below
+      // may reach dispatch() at all: this row already carries a claimed
+      // provider_message_id, so reconcileAttempt owns it on every pass, and
+      // holdBeforeSend's own 'review' gate refuses a fresh send once parked.
+      const mustNotSend = async () => { throw new Error('must not attempt a fresh send off an already-claimed, scope-changed row'); };
+
+      // Sweep 1: the identity check refuses this receipt (generation 1 no
+      // longer matches the commitment's current generation 2) and parks it
+      // for the office — a FRESH transition, deferred one pass exactly like
+      // the sibling delivery_failed branch, so this same sweep does not yet
+      // reach contextFor.
+      const row1 = await mockPg('outbox_messages').where({ id: outboxId }).first();
+      await links.runOne(mockPg, row1, { now: new Date(), send: mustNotSend });
+
+      const afterScopeChange = await mockPg('outbox_messages').where({ id: outboxId }).first();
+      expect(afterScopeChange.status).toBe('review');
+      expect(afterScopeChange.last_error).toBe('delivery_scope_changed');
+      expect(afterScopeChange.payload.delivery_outcome_uncertain).toBe(false);
+      const cardAfterPark = await mockPg('triage_items').where({ call_log_id: callId, reason_code: 'reschedule_link_promise' }).first();
+      expect(cardAfterPark.status).toBe('open');
+
+      // Between sweeps, staff dismiss the promise on the commitment ledger —
+      // an office verdict contextFor reads straight off the commitment row
+      // as 'promise_closed', independent of any generation bookkeeping.
+      await mockPg('call_commitments').where({ id: commitment.id }).update({ human_state: 'dismissed' });
+
+      // Sweep 2 ("the next sweep"): the SAME delivered receipt scope-changes
+      // again — this row was ALREADY 'review' when this pass began, so
+      // reconcileAttempt now reports done: false (the fix under test) and
+      // runOne reaches contextFor's own fresh read this same pass, which
+      // finds the commitment closed and hands off to applyContextSkip's
+      // promise_closed cleanup.
+      const row2 = await mockPg('outbox_messages').where({ id: outboxId }).first();
+      await links.runOne(mockPg, row2, { now: new Date(), send: mustNotSend });
+
+      const after = await mockPg('outbox_messages').where({ id: outboxId }).first();
+      // Cancelled, not re-parked and not re-sent.
+      expect(after.status).toBe('cancelled');
+      expect(after.payload.delivery_outcome_uncertain).toBe(false);
+      const cardAfterClose = await mockPg('triage_items').where({ call_log_id: callId, reason_code: 'reschedule_link_promise' }).first();
+      expect(cardAfterClose.status).toBe('resolved');
+
+      // The dismissal itself is untouched by any of this — applyContextSkip
+      // reads the verdict, it never writes one.
+      const afterCommitment = await mockPg('call_commitments').where({ id: commitment.id }).first();
+      expect(afterCommitment.human_state).toBe('dismissed');
+      expect(afterCommitment.fulfilled_at).toBeNull();
     } finally {
       if (priorGate === undefined) delete process.env.GATE_RESCHEDULE_LINK_ON_PROMISE; else process.env.GATE_RESCHEDULE_LINK_ON_PROMISE = priorGate;
       gates.callCommitments = priorCallCommitments;

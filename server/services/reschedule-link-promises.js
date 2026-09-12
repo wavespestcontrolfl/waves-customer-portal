@@ -821,6 +821,12 @@ function settledOutboxPatch(current, sms, context, { delivered, visitId, generat
   };
 }
 
+// Returns { scopeChanged }: false when the receipt settled normally (or the
+// row had nothing left to settle at all — already delivered/cancelled, or
+// its commitment vanished); true when deliveryIdentityMatches refused it and
+// this attempt was parked as delivery_scope_changed instead. reconcileAttempt
+// is the only caller that reads this — see its own doc comment for why the
+// distinction matters to runOne's early exit.
 async function settleDelivery(conn, row, sms, context = null) {
   const delivered = ['delivered', 'read'].includes(sms.status);
   return conn.transaction(async (trx) => {
@@ -836,7 +842,7 @@ async function settleDelivery(conn, row, sms, context = null) {
     if (!deliveryIdentityMatches({ call, commitment, current, visit, customer, sms, context, visitId, generation })) return { needsReview: true };
     await trx('outbox_messages').where({ id: row.id }).update(settledOutboxPatch(current, sms, context, { delivered, visitId, generation }));
     if (delivered) await fulfilPromise(trx, row, sms, call);
-    return null;
+    return { scopeChanged: false };
   // deliveryIdentityMatches failing (context changed — most often reprocessing
   // advancing the generation before this receipt arrived) says nothing about
   // whether the PROVIDER delivered THIS attempt: `delivered` above is that
@@ -854,7 +860,13 @@ async function settleDelivery(conn, row, sms, context = null) {
   // generation guard on MUTATING the commitment is exactly as strict as it
   // was before this fix.
   }).then(async (result) => {
-    if (!result?.needsReview) return result;
+    // The early `return null` above (row already delivered/cancelled, or its
+    // commitment vanished before this transaction's own lock) and the
+    // identity-matched `{ scopeChanged: false }` both mean the same thing to
+    // every caller: nothing about the COMMITMENT's own scope changed here,
+    // so there is nothing left for a terminal reconciliation pass to find
+    // this attempt responsible for.
+    if (!result?.needsReview) return { scopeChanged: false };
     // retireDeliveryUncertainty runs as its OWN write, independent of
     // whatever parkReview below decides — including when parkReview turns
     // out to be a no-op because this row is already parked for the SAME
@@ -864,7 +876,18 @@ async function settleDelivery(conn, row, sms, context = null) {
     // reason-unchanged optimisation left it stranded behind that no-op
     // forever — the exact sequence Codex named (codex #4293 P1).
     if (delivered) await retireDeliveryUncertainty(conn, row.id);
-    return parkReview(conn, row, 'delivery_scope_changed');
+    await parkReview(conn, row, 'delivery_scope_changed');
+    // Reported regardless of whether parkReview's own reason-unchanged guard
+    // found a live write to make: scopeChanged describes the FACT that this
+    // receipt no longer speaks for the commitment's current generation, not
+    // whether this particular call happened to change a byte on the row.
+    // The commitment itself may since have been closed through the ledger —
+    // reconcileAttempt's caller (runOne) needs this signal to know it must
+    // still reach that terminal reconciliation THIS pass, not next sweep,
+    // exactly like a freshly-parked delivery_failed attempt would on its own
+    // very next pass (codex #4293 P1, this round: the delivered/scope-changed
+    // sibling of that same fix).
+    return { scopeChanged: true };
   });
 }
 
@@ -965,11 +988,34 @@ async function stagePromises(conn) {
   return rows.length;
 }
 
+// Every branch below reports two INDEPENDENT facts to its one caller
+// (runOne's `if (row.provider_message_id) { const { done } = await
+// reconcileAttempt(...); if (done) return; }` gate):
+//   - sendHandled: a send already reached the provider for this exact
+//     attempt — reconcileAttempt only ever runs once row.provider_message_id
+//     is already set (see runOne), so nothing in this function should ever
+//     attempt, or tell its caller to attempt, a fresh dispatch. Every branch
+//     below means this; none of them ever hands a still-plannable row back.
+//   - done: true stops runOne here for this pass (its old bare `return
+//     true`); false lets runOne continue on to contextFor's terminal
+//     (promise_closed) reconciliation this SAME pass (its old bare `return
+//     false`). Conflating the two — treating "send handled" as also meaning
+//     "nothing more to do" — is exactly what let a scope-changed delivery
+//     receipt suppress that reconciliation forever (codex #4293 P1, this
+//     round; see the delivered/read branch below). A branch may report
+//     done: false only for a row that was ALREADY 'review' before this
+//     function was ever called — holdBeforeSend's own first check refuses
+//     to plan a fresh send from that status, so continuing past this point
+//     can never open a duplicate send (see the assertion in the postgres
+//     spec), and nothing about the row's OWN status can have gone stale
+//     between here and there: this call never transitioned it.
+function outcome(done) { return { sendHandled: true, done }; }
+
 // An attempt that already reached the provider OWNS the row until its
 // outcome is known: delivery settles it, a failure or a receipt that never
 // arrives parks it for the office, and an accepted-but-undecided send waits
-// for the next sweep. Returns false when the row is still the worker's to
-// plan. Never resends — the claim is what survives process death.
+// for the next sweep. Never resends — the claim is what survives process
+// death.
 async function reconcileAttempt(conn, row, now) {
   const sms = await conn('sms_log').where({ twilio_sid: row.provider_message_id })
     .first('id', 'twilio_sid', 'status', 'created_at', 'customer_id', 'to_phone', 'message_body');
@@ -987,27 +1033,91 @@ async function reconcileAttempt(conn, row, now) {
   // the clear before or after it makes no difference here), but the clear
   // itself must not depend on parkReview's own reason-unchanged guard ever
   // agreeing to write.
-  if (failed && unparked) { await retireDeliveryUncertainty(conn, row.id); await parkReview(conn, row, 'delivery_failed'); }
+  if (failed && unparked) {
+    await retireDeliveryUncertainty(conn, row.id);
+    await parkReview(conn, row, 'delivery_failed');
+    // done: true — one park per pass, not a park-and-reconcile in the same
+    // breath. This condition requires `unparked`, so it can never fire
+    // again for the same row once parked; the very next pass finds it
+    // already 'review' and lands in the `failed` branch just below, which
+    // now reports done: false. Deferring by exactly one pass here (rather
+    // than reconciling immediately, as the scope-changed branch below now
+    // does) is deliberate, not an oversight: this condition cannot loop the
+    // way an unconditional match can, so there is no gap to close by acting
+    // sooner.
+    return outcome(true);
+  }
   // An already-parked failed attempt has nothing further THIS function can
-  // settle — but it must not report "handled" the way the live branches
-  // above and below do. Returning true here (as this used to, unconditionally)
-  // made runOne return immediately, so it never reached contextFor and the
-  // promise_closed cleanup there: an office dismissal or hand-fulfilment
-  // recorded on the commitment ledger after this exact SMS had already
-  // failed and parked left the exception card open forever, with no future
-  // sweep ever revisiting it (codex #4293 P1). Returning false — the same
-  // signal the final `return false` below already uses for "still parked,
-  // nothing definitive yet" — is safe: holdBeforeSend's very first check
-  // (`row.status === 'review'`) still refuses to plan a fresh send off this
-  // row, so contextFor's terminal read runs without ever retrying the
-  // failed dispatch.
-  else if (failed) { await retireDeliveryUncertainty(conn, row.id); return false; }
-  else if (sms && ['delivered', 'read'].includes(sms.status)) await settleDelivery(conn, row, sms);
-  else if (unparked && new Date(row.sent_at || row.last_attempt_at).getTime() + 24 * 3600000 < now.getTime()) await parkReview(conn, row, 'delivery_receipt_unavailable');
-  else if (sms && !failed && unparked) await settleDelivery(conn, row, sms);
-  else if (unparked) await conn('outbox_messages').where({ id: row.id }).update({ updated_at: now });
-  else return false;
-  return true;
+  // settle. done: false — holdBeforeSend's own first check (`row.status ===
+  // 'review'`) still refuses to plan a fresh send off this row, so
+  // contextFor's terminal read runs without ever retrying the failed
+  // dispatch. Reporting done: true here unconditionally (as this branch
+  // used to, before separating the two signals) made runOne return
+  // immediately, so it never reached contextFor and the promise_closed
+  // cleanup there: an office dismissal or hand-fulfilment recorded on the
+  // commitment ledger after this exact SMS had already failed and parked
+  // left the exception card open forever, with no future sweep ever
+  // revisiting it (codex #4293 P1).
+  if (failed) { await retireDeliveryUncertainty(conn, row.id); return outcome(false); }
+  if (sms && ['delivered', 'read'].includes(sms.status)) {
+    const { scopeChanged } = await settleDelivery(conn, row, sms);
+    // A normal settle (scopeChanged: false) always means delivered here —
+    // this branch's own condition requires sms.status to be delivered/read
+    // — and fulfilPromise already ran inside settleDelivery, closing the
+    // exception card itself; done stays true, nothing left for this pass.
+    //
+    // A scope-changed park (the identity check refused this receipt) on a
+    // row that was STILL LIVE (`unparked`) when this call started is a
+    // FRESH transition — one park per pass, exactly like the delivery_failed
+    // branch above: done stays true, deferring reconciliation to the very
+    // next pass, which will find the row already 'review' and land in the
+    // branch just below instead.
+    //
+    // A scope-changed park on a row that was ALREADY 'review' when this
+    // call started is the loop this round's fix closes. Unlike the
+    // delivery_failed branch above, THIS condition is not gated on
+    // `unparked`: a delivered/read sms row never stops being delivered/read,
+    // so it matches here on EVERY future pass regardless of parked status —
+    // an already-parked scope-changed row used to re-enter settleDelivery
+    // and report "handled" (the old unconditional true) forever, permanently
+    // suppressing contextFor's promise_closed cleanup: a delivered receipt
+    // for a superseded generation parked as delivery_scope_changed, and a
+    // later office dismissal or hand-fulfilment recorded on the ledger left
+    // the exception card open indefinitely, with no future sweep ever
+    // revisiting it (codex #4293 P1, this round). done: false here reaches
+    // that cleanup, and is safe exactly like the already-parked failed
+    // branch above: the row was ALREADY 'review' before this call touched
+    // it, so holdBeforeSend's own first check still refuses to plan a fresh
+    // send off it.
+    return outcome(!scopeChanged || unparked);
+  }
+  if (unparked && new Date(row.sent_at || row.last_attempt_at).getTime() + 24 * 3600000 < now.getTime()) {
+    await parkReview(conn, row, 'delivery_receipt_unavailable');
+    // done: true — same one-park-per-pass reasoning as delivery_failed
+    // above: this condition requires `unparked`, so it cannot re-fire for
+    // the same row once parked, and the fallback branch at the bottom of
+    // this function reports done: false on the very next pass.
+    return outcome(true);
+  }
+  if (sms && !failed && unparked) {
+    // An AMBIGUOUS provider status (queued/sent/accepted) settled here can
+    // land on a normal patch (row stays 'sent', not 'review' — a fresh
+    // dispatch must stay off the table, so done cannot be false) or a
+    // scope-changed park; either way this branch's own `unparked` guard
+    // means it is ALWAYS a first transition for this row, exactly like the
+    // delivery_failed and 24h-timeout branches above — one park per pass,
+    // never a repeat match once the row is parked (an ambiguous status
+    // settling to 'review' makes `unparked` false on every later pass, so
+    // this branch simply stops matching; the general fallback below reports
+    // done: false from then on, same as it always has).
+    await settleDelivery(conn, row, sms);
+    return outcome(true);
+  }
+  if (unparked) { await conn('outbox_messages').where({ id: row.id }).update({ updated_at: now }); return outcome(true); }
+  // Already parked, and nothing above found anything new to settle — the
+  // general "still parked, nothing definitive yet" catch. done: false, same
+  // as the already-parked failed branch: row.status is already 'review'.
+  return outcome(false);
 }
 
 // A reconciled row (the customer already used this exact link to move
@@ -1297,7 +1407,13 @@ async function runOne(conn, row, { now = new Date(), send = null, buildLink = nu
   // see isPreActivationRow / cancelPreActivation (codex #4293 P1 r8).
   if (await isPreActivationRow(conn, row)) return cancelPreActivation(conn, row);
   // Reconcile accepted/ambiguous attempts before planning any new send.
-  if (row.provider_message_id && await reconcileAttempt(conn, row, now)) return;
+  // Only `done` gates this early exit — `sendHandled` is reconcileAttempt's
+  // own explicit statement that a fresh dispatch is never on the table here
+  // (see its doc comment); nothing below this line ever needed to ask.
+  if (row.provider_message_id) {
+    const { done } = await reconcileAttempt(conn, row, now);
+    if (done) return;
+  }
   // A row still 'sending' with no provider id yet (the process died between
   // the claim and the provider call), or already parked with delivery
   // uncertain, falls straight through to here on every sweep. A context
