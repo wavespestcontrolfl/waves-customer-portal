@@ -366,3 +366,88 @@ describe('r3 — a SCOPED appointment stamp reaches only its own lines', () => {
     expect(result.discount_amount).toBe(40);
   });
 });
+
+
+/**
+ * Round-3 fallback P1 — classifyInvoiceDiscountItem must use the SAME
+ * trusted-source list as the caller's parallel `stored` flag. Reading the
+ * default let the two disagree on one item, so it matched neither the line
+ * entries (no parent) nor the document entries (spansAll && stored), fell
+ * through to the resolver and threw "Invalid line-item discount": a
+ * legitimate legacy stamp replay became a hard invoice-save failure.
+ */
+describe('r3 fallback — spansAll and stored never disagree on one item', () => {
+  // A LEGACY stamp: no document_discount flag (it predates the lane), so the
+  // classifier can only recognize it structurally — trusted stored source
+  // plus the `_appointment` client_id suffix.
+  function legacyStamp({ source = 'scheduled_service', discountId = 'legacy-1' } = {}) {
+    return {
+      client_id: `discount_${discountId}_appointment`,
+      _kind: 'discount',
+      discount_id: discountId,
+      discount_for: null,
+      description: 'Appointment discount',
+      quantity: 1,
+      unit_price: -10,
+      amount: -10,
+      discount_type: 'fixed_amount',
+      discount_amount: 10,
+      discount_dollars: 10,
+      use_stored_discount: true,
+      stored_discount_source: source,
+    };
+  }
+  const LEGACY_DISC = {
+    id: 'legacy-1', name: 'Legacy Appointment Discount', discount_type: 'fixed_amount', amount: 10,
+    is_active: true, show_in_invoices: true, is_stackable: true,
+  };
+
+  test('a caller trusting only validated_checkout still gets its stamp COMPOUNDED', async () => {
+    setupDb({ customer: CUSTOMER, discounts: [LEGACY_DISC, LINE_5] });
+    const invoice = await InvoiceService.create({
+      customerId: 'customer-1',
+      title: 'Checkout',
+      lineItems: [
+        SERVICE_LINE,
+        legacyStamp({ source: 'validated_checkout' }),
+        linePick(LINE_5),
+      ],
+      trustedStoredDiscountSources: ['validated_checkout'],
+    });
+    // Pre-fix, spansAll came from the DEFAULT trusted set (which does not
+    // trust validated_checkout) while `stored` came from the caller's, so the
+    // stamp was NOT collected as a document term. Its dollars were still
+    // counted (the resolver's stored branch catches it), but the fresh 5%
+    // resolved against the full $100 instead of the $90 the stamp left:
+    // $15 off, not $14.50. The failure is a compounding mismatch, not the
+    // hard save failure the finding predicted.
+    expect(invoice.discount_amount).toBe(14.5);
+    expect(invoice.total).toBe(85.5);
+  });
+
+  test('an UNTRUSTED no-parent discount row is still refused — unchanged from main', async () => {
+    setupDb({ customer: CUSTOMER, discounts: [LEGACY_DISC] });
+    // The caller does not trust scheduled_service, so this is neither a frozen
+    // stamp nor a parented pick: refusing it is the pre-existing contract, and
+    // the fix must not turn that into a silent document-wide discount. What
+    // the fix changes is only that spansAll and stored now AGREE (both false)
+    // instead of disagreeing.
+    await expect(InvoiceService.create({
+      customerId: 'customer-1',
+      title: 'Checkout',
+      lineItems: [SERVICE_LINE, legacyStamp({ source: 'scheduled_service' })],
+      trustedStoredDiscountSources: ['validated_checkout'],
+    })).rejects.toThrow(/Invalid line-item discount/);
+  });
+
+  test('the default trust list still recognizes a scheduled_service legacy stamp', async () => {
+    setupDb({ customer: CUSTOMER, discounts: [LEGACY_DISC] });
+    const result = await calculateUpdateFinancials({
+      lineItems: [SERVICE_LINE, legacyStamp({ source: 'scheduled_service' })],
+      customer: CUSTOMER,
+      invoice: { id: 'invoice-1' },
+      taxRate: 0,
+    });
+    expect(result.total).toBe(90);
+  });
+});

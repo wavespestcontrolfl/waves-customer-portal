@@ -517,7 +517,7 @@ function stackLineItemDiscounts(entries, compound) {
 // document term instead of being summed independently outside it (finding
 // 2), and (b) carries spansAll:true into the one-tier conflict check
 // instead of the per-line 'line' scope a discount_for value would give it.
-function classifyInvoiceDiscountItem(item, serviceLineByClientId) {
+function classifyInvoiceDiscountItem(item, serviceLineByClientId, trustedStoredSources) {
   if (item.discount_for) {
     return {
       parent: serviceLineByClientId.get(String(item.discount_for)) || null,
@@ -531,8 +531,18 @@ function classifyInvoiceDiscountItem(item, serviceLineByClientId) {
   // trusted stored source, and the `_appointment` scope suffix its
   // client_id carries. The "Scheduled price adjustment" replay row is
   // `discount_scheduled_price_<id>` and so still never matches.
+  // The SAME trusted-source list the caller uses for its parallel `stored`
+  // flag. Reading the default here instead let the two disagree on one item:
+  // a caller trusting only 'validated_checkout' would see spansAll true (the
+  // default set trusts 'scheduled_service') and stored false, so the item
+  // matched neither lineItemDiscountEntries (no parent) nor
+  // documentDiscountEntries (spansAll && stored), fell through to the
+  // resolver, and a legitimate legacy stamp replay threw "Invalid line-item
+  // discount" — a hard invoice-save failure (Codex #4405 r3 fallback P1).
   const legacyAppointmentStamp = !!(
-    isStoredDiscountLineItem(item) &&
+    (trustedStoredSources
+      ? isStoredDiscountLineItem(item, trustedStoredSources)
+      : isStoredDiscountLineItem(item)) &&
     String(item.client_id || "").endsWith("_appointment")
   );
   return {
@@ -1693,7 +1703,7 @@ const InvoiceService = {
             // the same spansAll slot a manual invoice-level pick does — as
             // an ordinary 'line' scope it would be allowed to sit beside
             // the SAME tier re-picked on a service line (Codex #4405 r2 P1).
-            const { spansAll, scope } = classifyInvoiceDiscountItem(item, serviceLineByClientId);
+            const { spansAll, scope } = classifyInvoiceDiscountItem(item, serviceLineByClientId, trustedStoredSources);
             return spansAll ? { ...row, spansAll: true } : { ...row, scope };
           })
           .filter(Boolean),
@@ -1701,7 +1711,7 @@ const InvoiceService = {
       ]);
     }
     const classifiedNegativeItems = negativeItems.map((item) => {
-      const { parent, spansAll } = classifyInvoiceDiscountItem(item, serviceLineByClientId);
+      const { parent, spansAll } = classifyInvoiceDiscountItem(item, serviceLineByClientId, trustedStoredSources);
       return {
         item,
         stored: isStoredDiscountLineItem(item, trustedStoredSources),
