@@ -24,6 +24,9 @@ function adminFetch(path) {
 // V2 token pass: non-semantic accents (blue/purple/orange/cyan/gold) fold to
 // zinc-900; semantic green/red/yellow preserved as V2-legal variants.
 // Glows collapsed to zinc-100 pastels.
+const REVENUE_CHART_COLORS = [
+  "#18181B", "#3F3F46", "#71717A", "#A1A1AA", "#D4D4D8",
+];
 
 // --- HELPERS ---
 const fmt = (n, d = 0) =>
@@ -53,7 +56,7 @@ function MiniSparkline({ data, width = 80, height = 24 }) {
     )
     .join(" ");
   const up = data[data.length - 1] >= data[0];
-  const c = up ? "#15803D" : "#991B1B";
+  const c = up ? "#18181B" : "#991B1B";
   return (
     <svg width={width} height={height} className="block">
       {" "}
@@ -74,7 +77,7 @@ function MiniSparkline({ data, width = 80, height = 24 }) {
     </svg>
   );
 }
-function KPI({ value, label, sub, color = "#18181B" }) {
+function KPI({ value, label, sub, color = "#18181B", metric }) {
   return (
     <UiCard className="[padding:20px_16px] text-center relative overflow-hidden">
       {" "}
@@ -85,6 +88,7 @@ function KPI({ value, label, sub, color = "#18181B" }) {
         className="absolute [top:0px] [left:50%] [transform:translateX(-50%)] [width:60px] [height:3px] rounded-xs"
       />{" "}
       <div
+        data-metric={metric}
         style={{
           color,
         }}
@@ -181,10 +185,15 @@ function QualityDots({ score }) {
     </div>
   );
 }
-function FunnelBar({ label, value, maxValue, color, prefix = "" }) {
+function FunnelBar({
+  label, value, maxValue, color, prefix = "", metric, alert = false,
+}) {
   const pct = maxValue > 0 ? (value / maxValue) * 100 : 0;
   return (
-    <div className="flex items-center [gap:12px] [margin-bottom:8px]">
+    <div
+      data-qa="metric-bar"
+      className="flex items-center [gap:12px] [margin-bottom:8px]"
+    >
       {" "}
       <div className="[width:80px] text-ui-body font-medium text-right shrink-0 text-ink-secondary">
         {label}
@@ -192,6 +201,7 @@ function FunnelBar({ label, value, maxValue, color, prefix = "" }) {
       <div className="[flex:1] [height:26px] bg-zinc-100 rounded-sm overflow-hidden relative">
         {" "}
         <div
+          data-qa="metric-bar-fill"
           style={{
             width: `${pct}%`,
             background: color,
@@ -199,7 +209,11 @@ function FunnelBar({ label, value, maxValue, color, prefix = "" }) {
           }}
           className="[height:100%] rounded-sm transition-all"
         />{" "}
-        <span className="absolute [right:8px] [top:50%] [transform:translateY(-50%)] text-ui-body font-medium text-zinc-800">
+        <span
+          data-qa="metric-bar-value"
+          data-metric={metric}
+          className={`absolute [right:8px] [top:50%] [transform:translateY(-50%)] text-ui-body font-medium ${alert ? "text-alert-fg" : "text-zinc-800"}`}
+        >
           {prefix}
           {fmt(value)}
         </span>{" "}
@@ -213,6 +227,7 @@ function DonutChart({
   thickness = 18,
   centerLabel,
   centerValue,
+  metric,
 }) {
   const total = segments.reduce((s, seg) => s + seg.value, 0);
   let cumAngle = -90;
@@ -254,7 +269,11 @@ function DonutChart({
       </svg>{" "}
       <div className="absolute [top:50%] [left:50%] [transform:translate(-50%,-50%)] text-center">
         {" "}
-        <div className="text-ui-body font-medium text-zinc-800">
+        <div
+          data-qa="donut-center-value"
+          data-metric={metric}
+          className="text-22 font-medium text-zinc-800"
+        >
           {centerValue}
         </div>{" "}
         <div className="text-ui-body font-medium text-ink-secondary">
@@ -362,10 +381,10 @@ export default function WavesPPCDashboard() {
     return Object.values(map).sort((a, b) => b.revenue - a.revenue);
   }, [campaigns]);
   const serviceColors = {
-    "Pest Control": "#18181B",
-    "Lawn Care": "#15803D",
-    Mosquito: "#18181B",
-    Termite: "#18181B",
+    "Pest Control": "#D4D4D8",
+    "Lawn Care": "#E4E4E7",
+    Mosquito: "#A1A1AA",
+    Termite: "#D4D4D8",
   };
   const activeCampaigns = campaigns.filter((c) => c.status === "active").length;
   if (loading) {
@@ -380,7 +399,7 @@ export default function WavesPPCDashboard() {
       <UiCard className="[padding:60px] text-center">
         {" "}
         <div className="text-ui-body [margin-bottom:16px]"></div>{" "}
-        <div className="text-ui-body font-medium [margin-bottom:8px] text-zinc-900">
+        <div className="text-18 font-medium [margin-bottom:8px] text-zinc-900">
           No Campaigns Yet
         </div>{" "}
         <div className="text-ui-body text-ink-secondary">
@@ -455,13 +474,15 @@ export default function WavesPPCDashboard() {
               value={fmtMoney(totals.revenue)}
               label="7-Day Revenue"
               sub="attributed revenue"
-              color={"#15803D"}
+              color={"#18181B"}
+              metric="revenue"
             />{" "}
             <KPI
               value={`${overallROAS}x`}
               label="ROAS"
               sub="return on ad spend"
-              color={parseFloat(overallROAS) >= 2 ? "#15803D" : "#991B1B"}
+              color={parseFloat(overallROAS) >= 2 ? "#18181B" : "#991B1B"}
+              metric="roas"
             />{" "}
             <KPI
               value={fmt(totals.leads)}
@@ -497,8 +518,9 @@ export default function WavesPPCDashboard() {
                     maxValue={
                       Math.max(...serviceBreakdown.map((x) => x.revenue)) * 1.1
                     }
-                    color={serviceColors[s.service] || "#18181B"}
+                    color={serviceColors[s.service] || "#D4D4D8"}
                     prefix="$"
+                    metric="revenue"
                   />
                 ))
               ) : (
@@ -518,7 +540,7 @@ export default function WavesPPCDashboard() {
                       maxValue={
                         Math.max(...serviceBreakdown.map((x) => x.spent)) * 1.1
                       }
-                      color={serviceColors[s.service] || "#18181B"}
+                      color={serviceColors[s.service] || "#D4D4D8"}
                       prefix="$"
                     />
                   ))}
@@ -595,7 +617,10 @@ export default function WavesPPCDashboard() {
                       </div>
                     </div>{" "}
                     <div>
-                      <div className="text-22 font-medium text-green-700">
+                      <div
+                        data-metric="revenue"
+                        className="text-22 font-medium text-zinc-900"
+                      >
                         {fmtMoney(rv)}
                       </div>
                       <div className="text-ui-body text-ink-secondary">
@@ -611,7 +636,7 @@ export default function WavesPPCDashboard() {
                       </div>
                     </div>{" "}
                     <div>
-                      <div className="text-22 font-medium text-zinc-900">
+                      <div data-metric="roas" className="text-22 font-medium text-zinc-900">
                         {sp > 0 ? (rv / sp).toFixed(1) + "x" : "--"}
                       </div>
                       <div className="text-ui-body text-ink-secondary">
@@ -755,18 +780,22 @@ export default function WavesPPCDashboard() {
                         <TD className="[padding:10px_8px] text-right font-medium text-zinc-800">
                           {fmtMoney(p.spend)}
                         </TD>
-                        <TD className="[padding:10px_8px] text-right font-medium text-green-700">
+                        <TD
+                          data-metric="revenue"
+                          className="[padding:10px_8px] text-right font-medium text-zinc-800"
+                        >
                           {fmtMoney(p.conversionValue)}
                         </TD>
                         <TD
                           style={{
                             color:
                               roas >= 2
-                                ? "#15803D"
+                                ? "#18181B"
                                 : roas >= 1
                                   ? "#A16207"
                                   : "#991B1B",
                           }}
+                          data-metric="roas"
                           className="[padding:10px_8px] text-right font-medium"
                         >
                           {roas > 0 ? roas.toFixed(1) + "x" : "--"}
@@ -813,13 +842,14 @@ export default function WavesPPCDashboard() {
                         maxValue={funnelData.totalLeads || 1}
                         color={
                           stage === "completed"
-                            ? "#15803D"
+                            ? "#D4D4D8"
                             : stage === "booked"
-                              ? "#18181B"
+                              ? "#D4D4D8"
                               : stage === "lost"
-                                ? "#991B1B"
-                                : "#18181B"
+                                ? "#FEE2E2"
+                                : "#D4D4D8"
                         }
+                        alert={stage === "lost"}
                       />
                     ))}
                   <div className="ppc-funnel-stats max-sm:!grid-cols-3 [padding-top:12px] [margin-top:12px] grid [grid-template-columns:repeat(3,1fr)] [gap:12px] text-center border-t border-hairline border-zinc-200">
@@ -833,7 +863,10 @@ export default function WavesPPCDashboard() {
                       </div>
                     </div>{" "}
                     <div>
-                      <div className="text-18 font-medium text-green-700">
+                      <div
+                        data-metric="revenue"
+                        className="text-18 font-medium text-zinc-900"
+                      >
                         {fmtMoney(funnelData.totalRevenue)}
                       </div>
                       <div className="text-ui-body text-ink-secondary">
@@ -843,8 +876,9 @@ export default function WavesPPCDashboard() {
                     <div>
                       <div
                         style={{
-                          color: funnelData.roas >= 2 ? "#15803D" : "#A16207",
+                          color: funnelData.roas >= 2 ? "#18181B" : "#A16207",
                         }}
+                        data-metric="roas"
                         className="text-18 font-medium"
                       >
                         {funnelData.roas}x
@@ -872,16 +906,14 @@ export default function WavesPPCDashboard() {
                     size={160}
                     segments={(revenueData.sources || []).map((s, i) => ({
                       value: s.revenue,
-                      color: [
-                        "#18181B",
-                        "#15803D",
-                        "#18181B",
-                        "#18181B",
-                        "#18181B",
-                      ][i % 5],
+                      color:
+                        REVENUE_CHART_COLORS[
+                          i % REVENUE_CHART_COLORS.length
+                        ],
                     }))}
                     centerValue={fmtMoney(revenueData.totalRevenue)}
                     centerLabel="Total"
+                    metric="revenue"
                   />{" "}
                   <div className="[margin-top:16px] grid [gap:6px]">
                     {(revenueData.sources || []).map((s, i) => (
@@ -894,13 +926,10 @@ export default function WavesPPCDashboard() {
                           {" "}
                           <span
                             style={{
-                              background: [
-                                "#18181B",
-                                "#15803D",
-                                "#18181B",
-                                "#18181B",
-                                "#18181B",
-                              ][i % 5],
+                              background:
+                                REVENUE_CHART_COLORS[
+                                  i % REVENUE_CHART_COLORS.length
+                                ],
                             }}
                             className="[width:10px] [height:10px] rounded-xs"
                           />{" "}
@@ -910,11 +939,17 @@ export default function WavesPPCDashboard() {
                         </div>{" "}
                         <div className="flex [gap:16px]">
                           {" "}
-                          <span className="text-ui-body font-medium text-zinc-800">
+                          <span
+                            data-metric="revenue"
+                            className="text-ui-body font-medium text-zinc-800"
+                          >
                             {fmtMoney(s.revenue)}
                           </span>
                           {s.roas && (
-                            <span className="text-ui-body text-ink-secondary">
+                            <span
+                              data-metric="roas"
+                              className="text-ui-body text-ink-secondary"
+                            >
                               {s.roas}x ROAS
                             </span>
                           )}
@@ -1006,18 +1041,22 @@ export default function WavesPPCDashboard() {
                               <TD className="[padding:10px_8px] text-right font-medium text-zinc-900">
                                 {row.conv}
                               </TD>
-                              <TD className="[padding:10px_8px] text-right font-medium text-green-700">
+                              <TD
+                                data-metric="revenue"
+                                className="[padding:10px_8px] text-right font-medium text-zinc-900"
+                              >
                                 {fmtMoney(row.revenue)}
                               </TD>
                               <TD
                                 style={{
                                   color:
                                     roas >= 2
-                                      ? "#15803D"
+                                      ? "#18181B"
                                       : roas >= 1
                                         ? "#A16207"
                                         : "#991B1B",
                                 }}
+                                data-metric="roas"
                                 className="[padding:10px_8px] text-right font-medium"
                               >
                                 {roas > 0 ? roas.toFixed(1) + "x" : "--"}
