@@ -203,24 +203,17 @@ function Thumb({ icon }) {
 function CategoriesView({ onBack }) {
   const [services, setServices] = useState([]);
   const [loading, setLoading] = useState(true);
-  const [loadError, setLoadError] = useState("");
   const [query, setQuery] = useState("");
   const [expandedKey, setExpandedKey] = useState(null);
 
-  const load = useCallback(() => {
-    setLoading(true);
-    setLoadError("");
-    return fetchAllServices(new URLSearchParams({ is_active: "true" }))
-      .then(setServices)
-      .catch((error) =>
-        setLoadError(error?.message || "Failed to load categories"),
-      )
-      .finally(() => setLoading(false));
-  }, []);
-
   useEffect(() => {
-    load();
-  }, [load]);
+    fetchAllServices(new URLSearchParams({ is_active: "true" }))
+      .then((rows) => {
+        setServices(rows);
+        setLoading(false);
+      })
+      .catch(() => setLoading(false));
+  }, []);
 
   const groups = useMemo(() => {
     // Group services by `category`. Count distinct subcategories within each
@@ -264,14 +257,6 @@ function CategoriesView({ onBack }) {
         <div className="p-10 text-center text-ui-body text-ink-secondary">
           Loading…
         </div>
-      ) : loadError ? (
-        <Card>
-          <CardBody>
-            <ActionFeedback error onRetry={load}>
-              {loadError}
-            </ActionFeedback>
-          </CardBody>
-        </Card>
       ) : groups.length === 0 ? (
         <div className="p-10 text-center text-ui-body text-ink-secondary">
           No categories

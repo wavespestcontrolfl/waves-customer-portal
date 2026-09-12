@@ -96,4 +96,17 @@ describe("MobileServiceLibrary", () => {
       screen.queryByRole("button", { name: "Add" }),
     ).not.toBeInTheDocument();
   });
+
+  it("keeps the original empty category state when loading fails", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => Promise.reject(new Error("down"))));
+    render(<MobileServiceLibrary />);
+
+    fireEvent.click(screen.getByRole("button", { name: /Categories/i }));
+
+    expect(await screen.findByText("No categories")).toBeInTheDocument();
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "Try again" }),
+    ).not.toBeInTheDocument();
+  });
 });
