@@ -653,3 +653,33 @@ test('an interleaved terminal stop makes Google’s legs untrustworthy, not misa
   expect(body.source).toBe('google_routes_api');
   expect(trxUpdates.map((u) => u.id)).toEqual(['A', 'B']);
 });
+
+// Codex round 4 P1: the unassigned bucket must contribute its driving TIME as
+// well as its mileage — reporting one without the other understates the day.
+test('a repaired day counts the unassigned stop’s drive minutes too', async () => {
+  process.env.GATE_ROUTE_REORDER_WINDOW_FIT = 'true';
+  process.env.GATE_DRIVE_TIME_CALIBRATION = 'true';
+  // Non-zero travel for this case only: 1 "mile" per degree, 2 min per mile.
+  const realLegs = RouteOptimizer.fallbackLegMetrics;
+  RouteOptimizer.fallbackLegMetrics = (miles) => ({ meters: Math.round(miles * 1000), minutes: Math.round(miles * 2) });
+  try {
+    // Same board twice — the only difference is one UNASSIGNED stop, which
+    // belongs to no tech-day and so changes nothing else.
+    stopsByDate[DATE] = chronologyDay();
+    mockOptimizerOrder(['T2', 'T1', 'U']);
+    const withoutFree = (await optimizeAll({ date: DATE })).body;
+
+    trxUpdates.length = 0;
+    stopsByDate[DATE] = [...chronologyDay(), stop('FREE', { technician_id: null, lng: 7, route_order: 4 })];
+    mockOptimizerOrder(['T2', 'T1', 'U', 'FREE']);
+    const withFree = (await optimizeAll({ date: DATE })).body;
+
+    expect(withoutFree.source).toBe('window_constrained');
+    // FREE alone is HQ→(1,7)→HQ = 16 "miles" = 32 minutes of driving, and
+    // 16000 m — both must land in the totals, not just the mileage.
+    expect(withFree.totalDistanceMeters - withoutFree.totalDistanceMeters).toBe(16000);
+    expect(withFree.totalDurationMinutes - withoutFree.totalDurationMinutes).toBe(32);
+  } finally {
+    RouteOptimizer.fallbackLegMetrics = realLegs;
+  }
+});

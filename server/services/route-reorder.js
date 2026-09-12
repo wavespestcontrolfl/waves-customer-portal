@@ -207,6 +207,24 @@ function modelDistanceMeters(RouteOptimizer, orderedStops) {
   return total;
 }
 
+/** Drive MINUTES for the same HQ → stops → HQ loop under the same shared
+ *  model — the duration mirror of modelDistanceMeters, so a caller that sums
+ *  a bucket's mileage can report its driving time from the same legs rather
+ *  than charging it zero (codex round 4 P1). */
+function modelDriveMinutes(RouteOptimizer, orderedStops) {
+  let prev = RouteOptimizer.HQ;
+  let total = 0;
+  for (const s of orderedStops) {
+    const lat = parseFloat(s.lat);
+    const lng = parseFloat(s.lng);
+    if (!lat || !lng) continue;
+    total += RouteOptimizer.fallbackLegMetrics(RouteOptimizer.haversine(prev.lat, prev.lng, lat, lng)).minutes || 0;
+    prev = { lat, lng };
+  }
+  total += RouteOptimizer.fallbackLegMetrics(RouteOptimizer.haversine(prev.lat, prev.lng, RouteOptimizer.HQ.lat, RouteOptimizer.HQ.lng)).minutes || 0;
+  return total;
+}
+
 /**
  * True when the proposed stop order contradicts the stops' window chronology:
  * any stop with a fixed effective start (window_start OR legacy time_window
@@ -575,8 +593,11 @@ function windowSafeFigures(result, resolvedByTech, anyWindowConstrained, unassig
   // Scored as their own bucket under the same shared model, before and after
   // alike — their sequence is untouched by the repair, so the two cancel in
   // `saved`, which is exactly right: no saving is claimed for them.
-  const unassignedMeters = anyWindowConstrained && unassigned && unassigned.stops.length
-    ? modelDistanceMeters(unassigned.RouteOptimizer, unassigned.stops) : 0;
+  const hasUnassigned = anyWindowConstrained && unassigned && unassigned.stops.length > 0;
+  const unassignedMeters = hasUnassigned ? modelDistanceMeters(unassigned.RouteOptimizer, unassigned.stops) : 0;
+  // Its driving TIME too, from the same legs — reporting the bucket's mileage
+  // while charging it zero minutes understates the day (codex round 4 P1).
+  const unassignedMinutes = hasUnassigned ? modelDriveMinutes(unassigned.RouteOptimizer, unassigned.stops) : 0;
   const totalDistanceMeters = anyWindowConstrained
     ? outcomes.reduce((sum, o) => sum + (o.afterMeters || 0), 0) + unassignedMeters
     : result.totalDistanceMeters;
@@ -584,7 +605,7 @@ function windowSafeFigures(result, resolvedByTech, anyWindowConstrained, unassig
     ? outcomes.reduce((sum, o) => sum + (o.beforeMeters || 0), 0) + unassignedMeters
     : result.unoptimizedDistanceMeters;
   const totalDurationMinutes = Math.round(anyWindowConstrained
-    ? outcomes.reduce((sum, o) => sum + (o.afterSeconds || 0), 0) / 60
+    ? outcomes.reduce((sum, o) => sum + (o.afterSeconds || 0), 0) / 60 + unassignedMinutes
     : result.totalDurationSeconds / 60);
   const savedDistanceMeters = Math.max(0, unoptimizedDistanceMeters - totalDistanceMeters);
   return {
@@ -1260,5 +1281,5 @@ module.exports = {
   // re-validation reuses this SAME signature the shared decision was
   // evaluated against (codex GitHub round P2) rather than re-deriving it.
   windowGuardSignature,
-  _internals: { currentOrder, effectiveWindowStart, effectiveWindowRange, violatesWindowFeasibility, withinFreezeClock, violatesWindowChronology, modelDistanceMeters, loadAutoDispatchSummary, EXCLUDE_STATUSES, GOOGLE_WAYPOINT_CAP },
+  _internals: { currentOrder, modelDriveMinutes, effectiveWindowStart, effectiveWindowRange, violatesWindowFeasibility, withinFreezeClock, violatesWindowChronology, modelDistanceMeters, loadAutoDispatchSummary, EXCLUDE_STATUSES, GOOGLE_WAYPOINT_CAP },
 };
