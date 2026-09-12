@@ -650,8 +650,14 @@ async function loadPromiseEvents(conn, visitIds, { now = new Date() } = {}) {
     // send — a different message the customer received later (codex P1 round
     // 21, rounds 17 and 21 pulling in opposite directions until both are
     // expressed as identity rather than order).
+    // GROUPED evidence only: a member that got an INDIVIDUAL reminder before
+    // it was grouped can share the tier and occurrence with the later grouped
+    // send, and counting that as proof discarded the grouped send's own
+    // fallback — leaving the members on their pre-grouping windows (codex P2
+    // round 25). A grouped fallback exists because the grouped interaction
+    // row is missing, so only other grouped evidence can stand in for it.
     const knownSends = new Set(noticeEvents
-      .filter((event) => event.visit_id && event.start_at != null && event.tier)
+      .filter((event) => event.grouped && event.visit_id && event.start_at != null && event.tier)
       .map((event) => `${event.visit_id}:${etDateString(new Date(event.start_at))}:${event.tier}`));
     const stopMembersOf = new Map();
     for (const r of groupedEmails) {

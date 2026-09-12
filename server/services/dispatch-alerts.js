@@ -250,6 +250,19 @@ async function resolveAlert({ id, resolvedBy, trx, auto = false } = {}) {
       .whereNull('resolved_at')
       .update(patch)
       .returning(['id', 'type', 'severity', 'tech_id', 'job_id', 'payload', 'created_at', 'resolved_at', 'resolved_by']);
+    // A MANUAL resolve that lost the race still has the last word on
+    // provenance: an automatic write landing just before it stamps
+    // superseded_at, the manual update then matches no unresolved row, and
+    // the stamp would make no-show-detector's alreadyHasOpenAlert recreate a
+    // card the dispatcher explicitly resolved. Clearing it here is the same
+    // rule the tech-notification /dismiss route applies (codex P2, PR #4403
+    // round 25).
+    if (!auto && !rows.length) {
+      await t('dispatch_alerts').where({ id }).whereNotNull('resolved_at')
+        .whereRaw("payload->>'superseded_at' IS NOT NULL")
+        .update({ resolved_by: resolvedBy || null,
+          payload: t.raw("COALESCE(payload, '{}'::jsonb) - 'superseded_at'") });
+    }
     const row = rows[0] || null;
     await clearTrackingBells(t, row ? [row] : []);
     return row;

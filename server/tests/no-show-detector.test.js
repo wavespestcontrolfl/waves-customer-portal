@@ -1238,7 +1238,12 @@ describe('an appointment email with no interaction row still yields its promise 
     // email, so the known window is timestamped earlier than the fan-out it
     // covers and a time comparison could never see it (round-21 P1) — while
     // the 72h reminder must still not answer for the 24h send (round-17 P1).
+    // GROUPED evidence only: a member's individual reminder from before it
+    // was grouped can share the tier and occurrence with the later grouped
+    // send, and counting it as proof discarded the grouped send's own
+    // fallback (round-25 P2).
     expect(detector).toContain('const knownSends = new Set(noticeEvents');
+    expect(detector).toContain('.filter((event) => event.grouped && event.visit_id && event.start_at != null && event.tier)');
     expect(detector).toContain('knownSends.has(`${memberId}:${r.occurrence}:${reminderTier(r.tier)}`)');
     // The tier for a TEXT comes from its purpose: the sender passes a generic
     // 'appointment_reminder' message type and names the rung in the purpose.
