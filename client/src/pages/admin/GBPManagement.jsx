@@ -282,7 +282,11 @@ export default function GBPManagement() {
               title={l.authError || ""}
               className={
                 "text-ui-body mt-[4px] " +
-                (l.authError ? "text-alert-fg" : "text-ink-secondary")
+                (selectedLoc?.id === l.id
+                  ? "text-white"
+                  : l.authError
+                    ? "text-alert-fg"
+                    : "text-ink-secondary")
               }
             >
               {l.hasCredentials
@@ -1306,12 +1310,12 @@ function ChangeHistoryTab({
   return (
     <div>
       {" "}
-      <div className="flex justify-between items-center mb-[16px]">
+      <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between mb-[16px]">
         {" "}
         <div className="text-ui-body font-medium text-zinc-900">
           Change History
         </div>{" "}
-        <div className="flex gap-[4px]">
+        <div className="flex flex-wrap gap-[4px]">
           {["all", "pending", "approved", "rejected"].map((f) => (
             <Button
               key={f}

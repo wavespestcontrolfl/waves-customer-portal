@@ -1893,7 +1893,9 @@ function CustomerDrawer({
   return (
     <Sheet
       open
-      onClose={onClose}
+      onClose={() => {
+        if (!sending && !seqStarting) onClose();
+      }}
       width="md"
       ariaLabel={`Review outreach for ${c.name}`}
     >
@@ -1914,6 +1916,7 @@ function CustomerDrawer({
         </div>{" "}
         <Button
           onClick={onClose}
+          disabled={sending || seqStarting}
           variant="primary"
           className="text-[18px]"
           aria-label="Close outreach details"
