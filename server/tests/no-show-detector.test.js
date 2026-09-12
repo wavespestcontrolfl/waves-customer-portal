@@ -482,13 +482,28 @@ describe('grouped stops are evaluated as one visit (round-10 P1)', () => {
     expect(stopState([solo], opts)).toBe(solo);
   });
 
-  test('stopPromise takes the latest promise across members — the grouped text lands on only one of them', () => {
+  test('stopPromise takes the EARLIEST promised window across members, not the latest sent', () => {
     const now = new Date('2026-09-10T12:00:00Z');
     const promises = new Map([
       ['aaa', { visit_id: 'aaa', start_at: '2026-09-10T13:00:00Z', communicated_at: '2026-09-08T12:00:00Z', source: 'message' }],
       ['bbb', { visit_id: 'bbb', start_at: '2026-09-10T09:00:00Z', communicated_at: '2026-09-09T12:00:00Z', source: 'message' }],
     ]);
+    // Staff can group already-confirmed appointments without sending
+    // replacement copy, so each member still holds its own confirmation:
+    // picking by recency let a later-sent 13:00 confirmation override a
+    // sibling's still-standing 09:00 promise and delay both stages for a stop
+    // the customer expects at 09:00 (round-24 P1).
     expect(stopPromise([a, b], promises, now)).toMatchObject({ visit_id: 'bbb' });
+    const reversed = new Map([
+      ['aaa', { visit_id: 'aaa', start_at: '2026-09-10T09:00:00Z', communicated_at: '2026-09-09T12:00:00Z', source: 'message' }],
+      ['bbb', { visit_id: 'bbb', start_at: '2026-09-10T13:00:00Z', communicated_at: '2026-09-09T18:00:00Z', source: 'message' }],
+    ]);
+    expect(stopPromise([a, b], reversed, now)).toMatchObject({ visit_id: 'aaa' });
+    // An UNKNOWN window still wins when it is the newest thing the customer
+    // heard — the legacy move-notice rule.
+    const superseded = new Map([...reversed,
+      ['bbb', { visit_id: 'bbb', start_at: null, communicated_at: '2026-09-10T08:00:00Z', source: 'message' }]]);
+    expect(stopPromise([a, b], superseded, now)).toMatchObject({ visit_id: 'bbb', start_at: null });
     // A sibling with no evidence of its own inherits the stop's.
     expect(stopPromise([a, { id: 'zzz' }], promises, now)).toMatchObject({ visit_id: 'aaa' });
     expect(stopPromise([{ id: 'zzz' }], promises, now)).toBeNull();
@@ -587,6 +602,19 @@ describe('lockedStop: creation and both reconcile passes see the same stop (roun
     expect(evidenceReads).toBe(0);
     expect(promise).toMatchObject({ visit_id: 'bbb' });
     expect(live).toMatchObject({ stage: 2 });
+  });
+
+  test('the push is re-checked after the card commits, and a manual dismissal clears the stamp', () => {
+    const detector = require('fs').readFileSync(require('path').join(__dirname, '..', 'services', 'no-show-detector.js'), 'utf8');
+    // An arrival/completion/reassignment waiting on the row lock can commit
+    // the moment this transaction releases it, and nothing retracts a push
+    // (round-24 P2).
+    expect(detector).toContain('if (notice && await stillOverdue(conn, notice, { now })) await techNotices.pushTrackingNotice(notice);');
+    expect(detector).toContain('async function stillOverdue(conn, notice, { now = new Date() } = {}) {');
+    // And a tech's own dismissal clears any supersession stamp the sweep
+    // wrote in the meantime, or the next cycle resurrects the card it cleared.
+    const route = require('fs').readFileSync(require('path').join(__dirname, '..', 'routes', 'tech-notifications.js'), 'utf8');
+    expect(route).toContain("payload: db.raw(\"COALESCE(payload, '{}'::jsonb) - 'superseded_at'\")");
   });
 
   test('a stop lock that cannot be taken skips the row, and never proceeds unlocked', async () => {

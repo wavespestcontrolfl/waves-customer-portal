@@ -985,13 +985,24 @@ function stopState(members = [], { now = new Date(), since = null } = {}) {
 // evidence of its own, and reading its id alone would fall back to an older
 // promise or none at all.
 function stopPromise(members = [], promises = new Map(), now = new Date()) {
-  let latest = null;
-  for (const member of members) {
-    const promise = promises.get(String(member.id));
-    if (!promise || instant(promise.communicated_at) > instant(now)) continue;
-    if (!latest || instant(latest.communicated_at) < instant(promise.communicated_at)) latest = promise;
-  }
-  return latest;
+  const own = members.map((member) => promises.get(String(member.id)))
+    .filter((promise) => promise && instant(promise.communicated_at) <= instant(now));
+  if (!own.length) return null;
+  // An UNKNOWN window still wins when it is the newest thing the customer
+  // heard: that is the legacy move-notice rule — coverage became unknown and
+  // nothing has replaced it.
+  const newest = own.reduce((a, b) => (instant(a.communicated_at) >= instant(b.communicated_at) ? a : b));
+  if (newest.start_at == null) return newest;
+  // Otherwise the EARLIEST promised window across the members, not the most
+  // recently communicated one. Staff can group already-confirmed
+  // appointments (admin-visits) without sending replacement copy, so each
+  // member still holds its own confirmation — and picking by recency let a
+  // later-sent 11 AM confirmation override a sibling's still-standing 9 AM
+  // promise, delaying both tracking stages for a stop the customer expects
+  // at 9 (codex P1 round 24). The stop is one truck visit: the first window
+  // any member was promised is the one it has to meet.
+  return own.filter((promise) => promise.start_at != null)
+    .reduce((a, b) => (instant(a.start_at) <= instant(b.start_at) ? a : b));
 }
 
 // One internal caller (sweep), one scope: every live candidate. The
@@ -1377,6 +1388,20 @@ async function cleanupAfterDisable(conn) {
   return { resolved: open.length, dismissed: Number(dismissed) || 0 };
 }
 
+// Is this notice's stop still overdue, and still this technician's? Checked
+// between the committed card and the push, which is the one effect the next
+// sweep cannot undo (codex P2 round 24). Read-only and outside the
+// transaction: the card already stands either way.
+async function stillOverdue(conn, notice, { now = new Date() } = {}) {
+  try {
+    const { visit, live } = await lockedStop(conn, notice.visitId, { now, ignoreHorizon: true });
+    return !!live && !!visit && String(visit.technician_id || '') === String(notice.technicianId || '');
+  } catch (err) {
+    require('./logger').warn(`[no-show-detector] push recheck failed for ${notice.visitId}: ${err.message}`);
+    return false;
+  }
+}
+
 // One row's transaction, isolated: a stop lock that cannot be taken (another
 // pass holds it) or a stop that moved under the peek raises, and that must
 // skip this row rather than abort the sweep — the next tick retries it.
@@ -1424,21 +1449,22 @@ async function sweep(conn, { now = new Date() } = {}) {
       // confirmation here must use the same members, the same shared promise
       // and the same merged arrival state, or a sibling's arrival stamp
       // recorded since listNoShows ran would be missed (codex P1 round 10).
-      // NO preload here: this is the path that MINTS an alert and pushes a
-      // notification, and a reschedule communicated between the tick-wide
-      // read and this transaction would otherwise raise a card for a window
-      // the customer has already been told was replaced — the next tick can
-      // clear the row but cannot retract the push (codex P1 round 19). The
-      // reconcile passes below still use the preload: they only resolve or
-      // dismiss, and the next tick recreates anything cleared too eagerly.
-      // A FRESH clock, taken inside the transaction: the tick's `now` was
-      // read before a serial loop that can run for minutes over a large
-      // backlog, and evaluating against it would judge the thresholds — and
-      // filter promise evidence — by a time that has passed, hiding a
-      // reschedule communicated since (codex P1 round 19). The candidate list
-      // keeps the tick's clock; what gets MINTED is decided on this one.
+      // Evidence re-read for THIS STOP, inside the transaction, on a FRESH
+      // clock. This is the path that MINTS an alert and pushes a
+      // notification: a reschedule communicated since the tick-wide read
+      // would otherwise raise a card for a window the customer has already
+      // been told was replaced, and the next tick can clear the row but
+      // cannot retract the push (codex P1 round 19). The clock matters for
+      // the same reason — the tick's `now` was read before a serial loop
+      // that can run for minutes. Scoped to the stop's own members rather
+      // than re-running the whole tick's scan under the lock (codex P2 round
+      // 24); the reconcile passes keep the tick-wide preload, since they only
+      // resolve or dismiss and the next tick recreates anything cleared too
+      // eagerly.
       const at = new Date();
-      const { visit, live } = await lockedStop(trx, card.id, { now: at });
+      const memberIds = card.grouped_service_ids || [String(card.id)];
+      const fresh = latestPromises(await loadPromiseEvents(trx, memberIds, { now: at }), at);
+      const { visit, live } = await lockedStop(trx, card.id, { now: at, promises: fresh });
       if (!enabled() || !visit) return null;
       if (!live || live.stage !== card.stage || live.promised_window.start_at !== card.promised_window.start_at) return null;
       const recipientTech = visit.technician_id ? await trx('technicians').where({ id: visit.technician_id,
@@ -1467,8 +1493,14 @@ async function sweep(conn, { now = new Date() } = {}) {
       }
       return notice;
     }));
-    // Deliver each committed notice before another row or cleanup can fail.
-    if (notice) await techNotices.pushTrackingNotice(notice);
+    // Deliver each committed notice before another row or cleanup can fail —
+    // but re-check the visit first. An arrival, completion or reassignment
+    // waiting on the row lock this transaction just released can commit
+    // before the provider call finishes, and the old technician would get a
+    // missing-tracking push for a visit that has already arrived or moved on:
+    // the next sweep dismisses the durable card, but nothing retracts a push
+    // (codex P2 round 24).
+    if (notice && await stillOverdue(conn, notice, { now })) await techNotices.pushTrackingNotice(notice);
   }
   // The same rows the evidence preload above was built from.
   for (const alert of openAlerts) await withRow(alert.job_id, () => conn.transaction(async (trx) => {

@@ -102,7 +102,14 @@ router.post('/:id/dismiss', async (req, res, next) => {
 
     await db('tech_notifications')
       .where({ id: row.id })
-      .update({ read: true, dismissed_at: new Date(), updated_at: new Date() });
+      // A tech's own dismissal CLEARS any automatic supersession stamp the
+      // sweep may have written in the meantime: the sweep reads that stamp as
+      // "this card was retired by the system, so an identical one may be
+      // raised again", and leaving it would let the next cycle resurrect a
+      // card the tech had already cleared — and push it again (codex P2, PR
+      // #4403 round 24).
+      .update({ read: true, dismissed_at: new Date(), updated_at: new Date(),
+        payload: db.raw("COALESCE(payload, '{}'::jsonb) - 'superseded_at'") });
 
     // If it was an arrival reminder, log the dismissal in geofence_events
     if (row.type === 'geofence_arrival_reminder') {
