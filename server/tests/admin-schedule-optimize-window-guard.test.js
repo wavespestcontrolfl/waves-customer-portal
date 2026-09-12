@@ -965,3 +965,37 @@ test('a same-property bundled-service day is not counted as separate visits', as
   expect(body.reason).toBeUndefined();
   expect(trxUpdates.map((u) => u.id)).toEqual(['PEST', 'LAWN', 'MOSQ', 'OTHER']);
 });
+
+// Codex round 5 P1: relaxing an elapsed arrival deadline clears the window
+// fields, and isCoVisitPair keys on the shared promise — so without carrying
+// that identity across, an OVERDUE bundle counts as separate full visits
+// again and eats hours the truck does not spend.
+test('an overdue bundled stop is still one physical stop', () => {
+  const { chooseWindowSafeOrder } = require('../services/route-reorder');
+  const bundled = (id) => ({
+    id, technician_id: 't1', status: 'confirmed', route_order: id === 'PEST' ? 1 : 2,
+    customer_id: 'cust_pair', service_address_line1: '100 Main St',
+    customer_address_line1: '100 Main St', customer_city: 'Bradenton', customer_zip: '34205',
+    visit_id: null, window_start: '09:00', window_end: '10:00', time_window: null,
+    estimated_duration_minutes: null, lat: 1, lng: 1,
+  });
+  // Both overdue at 12:30, and a 12:00-13:00 promise (deadline 14:00) after
+  // them. As ONE stop the pair costs its promised hour and that later
+  // arrival is reachable; as two it eats 120 minutes and is not.
+  const stops = [bundled('PEST'), bundled('LAWN'), {
+    id: 'NEXT', technician_id: 't1', status: 'confirmed', route_order: 3,
+    customer_id: 'cust_next', service_address_line1: '900 Other Rd',
+    customer_address_line1: '900 Other Rd', customer_city: 'Bradenton', customer_zip: '34205',
+    visit_id: null, window_start: '12:00', window_end: '13:00', time_window: null,
+    estimated_duration_minutes: 30, lat: 1, lng: 1,
+  }];
+  const out = chooseWindowSafeOrder({
+    RouteOptimizer, googleOrder: stops, sourceStops: stops, googleSource: 'google_routes_api', startMin: 12 * 60 + 30,
+  });
+  expect(out.orderedStops).not.toBeNull();
+  expect(out.orderedStops.map((s) => s.id)).toEqual(['PEST', 'LAWN', 'NEXT']);
+  // And the rows handed back are the STORED ones — the relaxed copies, key
+  // and all, never leave the simulation.
+  expect(out.orderedStops[0].window_start).toBe('09:00');
+  expect(out.orderedStops[0].co_visit_window_key).toBeUndefined();
+});

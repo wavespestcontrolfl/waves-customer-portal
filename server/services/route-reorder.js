@@ -353,7 +353,13 @@ function relaxElapsedWindows(sourceStops, startMin) {
     // raw_estimate_minutes goes with it: the carried-forward SPAN is not a
     // real service estimate, and a relaxed co-visit pair would otherwise sum
     // two of them straight back into the phantom hour (#4435's coVisitWork).
-    return { ...s, estimated_duration_minutes: workDuration(s), raw_estimate_minutes: null,
+    return { ...s,
+      estimated_duration_minutes: workDuration(s), raw_estimate_minutes: null,
+      // The promise itself is gone, but the fact that these rows SHARED one
+      // is what makes a bundle a single physical stop — carry it across, or
+      // an overdue pest+lawn pair is charged two hours again (#4435's
+      // isCoVisitPair; codex #4430 r5 P1).
+      co_visit_window_key: `${range.startMin}-${range.endMin}`,
       window_start: null, window_end: null, time_window: null };
   });
 }

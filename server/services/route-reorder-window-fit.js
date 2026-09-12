@@ -194,10 +194,12 @@ function isCoVisitPair(effectiveWindowRange, prevStop, stop) {
   if (prevStop.visit_id != null || stop.visit_id != null) return false;
   if (prevStop.customer_id == null || stop.customer_id == null) return false;
   if (String(prevStop.customer_id) !== String(stop.customer_id)) return false;
-  const prevRange = effectiveWindowRange(prevStop);
-  const range = effectiveWindowRange(stop);
-  if (!prevRange || !range) return false;
-  if (prevRange.startMin !== range.startMin || prevRange.endMin !== range.endMin) return false;
+  // The promise the pair SHARED, which is what makes them one physical stop.
+  // A caller that relaxes an already-elapsed arrival deadline (route-reorder's
+  // relaxElapsedWindows) clears the window fields, so the stored promise has
+  // to travel separately or an overdue bundle goes back to counting as two
+  // full visits (codex #4430 r5 P1).
+  if (!sameCoVisitWindow(effectiveWindowRange, prevStop, stop)) return false;
   const prevLat = parseFloat(prevStop.lat);
   const prevLng = parseFloat(prevStop.lng);
   const lat = parseFloat(stop.lat);
@@ -219,6 +221,20 @@ function isCoVisitPair(effectiveWindowRange, prevStop, stop) {
  * prefixes prunable: the clock only moves forward, so no suffix can rescue
  * a missed window.
  */
+/** True when both rows carry the same promised arrival window — the stored
+ *  one where a caller has relaxed it for simulation (co_visit_window_key),
+ *  else the live effectiveWindowRange. Both sides must know their promise:
+ *  an unconstrained stop is not "the same window" as anything. */
+function sameCoVisitWindow(effectiveWindowRange, prevStop, stop) {
+  const prevKey = prevStop.co_visit_window_key;
+  const key = stop.co_visit_window_key;
+  if (prevKey || key) return Boolean(prevKey && key && prevKey === key);
+  const prevRange = effectiveWindowRange(prevStop);
+  const range = effectiveWindowRange(stop);
+  if (!prevRange || !range) return false;
+  return prevRange.startMin === range.startMin && prevRange.endMin === range.endMin;
+}
+
 /**
  * The stop's EFFECTIVE premise — its own stamp where it has one, the
  * customer's primary address where it does not, resolved by the repo's own
