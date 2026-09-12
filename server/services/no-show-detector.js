@@ -1022,7 +1022,14 @@ function stopPromise(members = [], eventsByVisit = new Map(), now = new Date()) 
   // leaving another member's stale pre-grouped confirmation standing (codex
   // P1 round 24, fourth pass).
   const eventsOf = (member) => eventsByVisit.get(String(member.id)) || [];
-  const held = members.map((member) => latestPromises(eventsOf(member), now).get(String(member.id)))
+  // A member the customer is no longer expecting — cancelled, skipped,
+  // no_show, awaiting re-placement — contributes no window of its own: the
+  // stop must not be held to a time for a service that is not happening
+  // (codex P1 round 25). Its GROUPED evidence still counts below, because
+  // that copy spoke for the whole stop.
+  const awaited = members.filter((member) => LIVE_STATUSES.includes(member.status)
+    || ATTENDED_STATUSES.includes(member.status));
+  const held = awaited.map((member) => latestPromises(eventsOf(member), now).get(String(member.id)))
     .filter(Boolean);
   if (!held.length) return null;
   // Anything communicated BEFORE the newest grouped send is gone: that send
@@ -1041,7 +1048,7 @@ function stopPromise(members = [], eventsByVisit = new Map(), now = new Date()) 
   const after = newestGrouped
     ? held.filter((promise) => instant(promise.communicated_at) > instant(newestGrouped.communicated_at)) : [];
   const replaced = new Set(after.map((promise) => String(promise.visit_id)));
-  const stillHolding = newestGrouped && members.some((member) => !replaced.has(String(member.id)));
+  const stillHolding = newestGrouped && awaited.some((member) => !replaced.has(String(member.id)));
   const own = newestGrouped ? [...(stillHolding ? [newestGrouped] : []), ...after] : held;
   if (!own.length) return null;
   // An UNKNOWN window still wins when it is the newest thing the customer

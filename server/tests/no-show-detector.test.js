@@ -531,6 +531,20 @@ describe('grouped stops are evaluated as one visit (round-10 P1)', () => {
     expect(stopPromise([a, b], allReplaced, now)).toMatchObject({ start_at: '2026-09-10T15:00:00Z' });
   });
 
+  test('a cancelled member contributes no window of its own', () => {
+    const now = new Date('2026-09-10T12:00:00Z');
+    // The customer is not expecting that service, so the stop must not be
+    // held to its 09:00 — the live sibling's 13:00 is the window (round-25 P1).
+    const promises = new Map([
+      ['aaa', [{ visit_id: 'aaa', start_at: '2026-09-10T09:00:00Z', communicated_at: '2026-09-08T12:00:00Z', source: 'message' }]],
+      ['bbb', [{ visit_id: 'bbb', start_at: '2026-09-10T13:00:00Z', communicated_at: '2026-09-09T12:00:00Z', source: 'message' }]],
+    ]);
+    expect(stopPromise([{ ...a, status: 'cancelled' }, b], promises, now))
+      .toMatchObject({ visit_id: 'bbb', start_at: '2026-09-10T13:00:00Z' });
+    // Live members are unaffected.
+    expect(stopPromise([a, b], promises, now)).toMatchObject({ visit_id: 'aaa' });
+  });
+
   test('stopPromise takes the EARLIEST promised window across members, not the latest sent', () => {
     const now = new Date('2026-09-10T12:00:00Z');
     const promises = new Map([
