@@ -111,6 +111,13 @@ async function getScheduleQualityMeasurements(input = {}, conn = require('../../
         'scheduled_services.customer_id',
         'scheduled_services.service_address_line1', 'scheduled_services.service_address_line2',
         'scheduled_services.service_address_city', 'scheduled_services.service_address_zip',
+        {
+          customer_address_line1: 'customers.address_line1',
+          customer_address_line2: 'customers.address_line2',
+          customer_city: 'customers.city',
+          customer_state: 'customers.state',
+          customer_zip: 'customers.zip',
+        },
         'scheduled_services.window_start', 'scheduled_services.window_end', 'scheduled_services.time_window',
         'scheduled_services.status', 'scheduled_services.reservation_expires_at',
         'scheduled_services.created_at', 'scheduled_services.visit_id', 'scheduled_services.estimated_duration_minutes',

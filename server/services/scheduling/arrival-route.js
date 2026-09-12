@@ -83,7 +83,16 @@ async function loadArrivalRouteContext({
   const rows = await dayStopsQuery(conn, {
     dateStr: date,
     excludeStatuses: NOT_A_ROUTE_STOP_STATUSES,
-    select: [...COLUMNS.map(c => `scheduled_services.${c}`), ...guardedCoordSelects(conn)],
+    select: [...COLUMNS.map(c => `scheduled_services.${c}`), ...guardedCoordSelects(conn),
+      // The customer's primary premise: an unstamped row inherits it, and the
+      // co-visit merge compares EFFECTIVE addresses (Codex #4435 r3 P1).
+      {
+        customer_address_line1: 'customers.address_line1',
+        customer_address_line2: 'customers.address_line2',
+        customer_city: 'customers.city',
+        customer_state: 'customers.state',
+        customer_zip: 'customers.zip',
+      }],
   }).where(q => q.whereNull('scheduled_services.reservation_expires_at')
       .orWhereRaw('scheduled_services.reservation_expires_at > NOW()'));
   const blocks = capacityEnabled() || preserveCapacity ? await conn('tech_schedule_blocks')
@@ -178,6 +187,12 @@ function evaluateArrivalPlacement(context, { windowStart, windowEnd, durationMin
   if (capacity) dayEndMin = Math.min(dayEndMin, SHIFT.endMinutes);
   const target = {
     ...context.target, window_start: windowStart, window_end: windowEnd,
+    // The target's REAL work, captured BEFORE the line below replaces its
+    // estimate with the window span: a 20-minute job in a 60-minute span
+    // beside a 50-minute co-visit sibling is max(60, 20 + 50) = 70 minutes on
+    // site, not 60 + 50 (Codex #4435 r3 P1).
+    raw_estimate_minutes: context.prospective ? Number(durationMinutes) || 0
+      : Math.max(Number(context.target?.estimated_duration_minutes) || 0, Number(durationMinutes) || 0),
     estimated_duration_minutes: context.prospective ? Number(durationMinutes)
       : Math.max(workDuration(context.target), Number(durationMinutes) || 0),
   };
@@ -224,7 +239,12 @@ function evaluateArrivalPlacement(context, { windowStart, windowEnd, durationMin
       // sum: the rewrite below hands every ungrouped row its window span as
       // a duration, which would otherwise read as a real estimate and sum a
       // span-only pair back into the phantom hour (Codex #4435 r2 P1).
-      order.map(row => ({ ...row, raw_estimate_minutes: row.memberIds ? null : row.estimated_duration_minutes,
+      order.map(row => ({ ...row,
+        // A row that already carries its raw estimate (the target above)
+        // keeps it — only ordinary rows take theirs from the untouched
+        // column before the normalization below.
+        raw_estimate_minutes: row.memberIds ? null
+          : ('raw_estimate_minutes' in row ? row.raw_estimate_minutes : row.estimated_duration_minutes),
         estimated_duration_minutes: row.memberIds ? row.estimated_duration_minutes : workDuration(row) })), {
         origin, startMin, dayEndMin, includeReturnInFinish: capacity, bufferMinutes,
         blockedIntervals: (context.blocks || []).map(block => ({ startMin: minuteOfDay(block.start_time), endMin: minuteOfDay(block.end_time) })),

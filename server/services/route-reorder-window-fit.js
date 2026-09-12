@@ -46,7 +46,7 @@
  */
 
 const { ARRIVAL_WINDOW_MINUTES } = require('../utils/sms-time-format');
-const { premiseStampConflicts } = require('./stamped-address');
+const { premiseStampConflicts, effectiveServiceAddress } = require('./stamped-address');
 const hhmmToMin = (hhmm) => {
   const [h, m] = String(hhmm).split(':').map(Number);
   return h * 60 + m;
@@ -153,10 +153,14 @@ function workDuration(stop, fallback = 60) {
  * (authoritative for an existing appointment, see day-stops.js) has to agree
  * too — and "the same premise" is the repo's existing premiseStampConflicts
  * rule (street key, then the unit from line 2 or embedded in the street
- * line, then zip, then city), not a line-1 string match: Apt 1 and Apt 2 of
- * one building share both the parcel pin AND their line 1 (Codex #4435 r2
- * P1). A row whose select carries no address column at all is UNKNOWN, not
- * known-equal, and never merges.
+ * line, then zip, then city) over the EFFECTIVE address, not a line-1 string
+ * match on the stamp: Apt 1 and Apt 2 of one building share both the parcel
+ * pin AND their line 1 (Codex #4435 r2 P1), and an unstamped row inherits
+ * the customer's primary premise, so comparing a bare stamp against nothing
+ * finds no conflict where a real one exists (r3 P1). A row whose premise
+ * cannot be resolved at all — no address column selected, or no street line
+ * on either the stamp or the customer — is UNKNOWN, not known-equal, and
+ * never merges.
  * A coordless side never matches: a multi-property customer (commercial
  * chain, rental owner) with one ungeocoded row in the same auto-templated
  * slot is two addresses, and merging them would under-count real work —
@@ -193,7 +197,10 @@ function isCoVisitPair(effectiveWindowRange, prevStop, stop) {
   if (!(lat && lng && prevLat && prevLng)) return false;
   if (lat !== prevLat || lng !== prevLng) return false;
   if (!('service_address_line1' in prevStop) || !('service_address_line1' in stop)) return false;
-  return !premiseStampConflicts(prevStop, stop);
+  const prevPremise = effectivePremise(prevStop);
+  const premise = effectivePremise(stop);
+  if (!prevPremise.service_address_line1 || !premise.service_address_line1) return false;
+  return !premiseStampConflicts(prevPremise, premise);
 }
 
 /**
@@ -204,6 +211,30 @@ function isCoVisitPair(effectiveWindowRange, prevStop, stop) {
  * prefixes prunable: the clock only moves forward, so no suffix can rescue
  * a missed window.
  */
+/**
+ * The stop's EFFECTIVE premise — its own stamp where it has one, the
+ * customer's primary address where it does not, resolved by the repo's own
+ * effectiveServiceAddress (which knows when a stamp's unit inherits and when
+ * it diverges). Shaped as service_address_* so premiseStampConflicts can read
+ * it. Callers alias the customer columns as customer_address_line1 etc., the
+ * same names stampedAddressDiverges already expects.
+ */
+function effectivePremise(stop) {
+  const eff = effectiveServiceAddress(stop, {
+    address_line1: stop.customer_address_line1,
+    address_line2: stop.customer_address_line2,
+    city: stop.customer_city,
+    state: stop.customer_state,
+    zip: stop.customer_zip,
+  });
+  return {
+    service_address_line1: eff.line1,
+    service_address_line2: eff.line2,
+    service_address_city: eff.city,
+    service_address_zip: eff.zip,
+  };
+}
+
 /**
  * On-site minutes for a co-visit chain. NOT the max of the members'
  * durations: a row's `workDuration` falls back to its promised WINDOW SPAN

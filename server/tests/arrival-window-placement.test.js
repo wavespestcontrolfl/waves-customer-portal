@@ -173,3 +173,39 @@ test.each([
   const input = context({ target: { ...target(), ...existingWork } });
   expect(evaluateArrivalPlacement(input, placement('09:00', 60)).feasible).toBe(false);
 });
+
+// ── Codex #4435 round 3 P1 ───────────────────────────────────────────────
+// The co-visit merge charges a chain the SUM of its members' real estimates,
+// floored by the longest window-derived duration. The target is normalized
+// (its estimate replaced by its window span) before the simulation runs, so
+// its RAW estimate has to be captured first — otherwise a 20-minute target in
+// a 60-minute span beside a 50-minute sibling is modeled as 60 + 50 = 110
+// instead of max(60, 20 + 50) = 70, and a valid save is rejected.
+test('a co-visit target contributes its real estimate, not its normalized window span', () => {
+  const sameProperty = (id, over = {}) => stop(id, '09:00', 27.545, {
+    customer_id: 'cust_1', service_address_line1: '100 Main St',
+    customer_address_line1: '100 Main St', customer_city: 'Bradenton', customer_zip: '34205',
+    visit_id: null, ...over,
+  });
+  // Sibling already on the board: same customer, same 09:00-10:00 promise,
+  // same pin, 50 real minutes. Target: 20 real minutes in the same slot.
+  const sibling = sameProperty('sibling', { estimated_duration_minutes: 50, route_order: 1 });
+  const ctx = {
+    date: DATE, now: new Date(), grouped: false,
+    target: sameProperty('target', { estimated_duration_minutes: 20 }),
+    rows: [sibling],
+  };
+  const fit = evaluateArrivalPlacement(ctx, { windowStart: '09:00', windowEnd: '10:00', durationMinutes: 20 });
+  const target20 = fit.arrivals.find((s) => s.id === 'target');
+  const sib = fit.arrivals.find((s) => s.id === 'sibling');
+  expect(fit.feasible).toBe(true);
+  // One physical stop: both rows arrive together at 09:00 and the pair leaves
+  // after max(60-minute span, 50 + 20 real minutes) = 70 minutes — 10:10, not
+  // the 11:50 two normalized 60-minute spans plus a 50-minute sibling give.
+  expect(target20.arrival).toBe(sib.arrival);
+  expect(target20.arrival).toBe('09:00');
+  // The chain's total shows on its last member: 09:00 + max(60, 50 + 20).
+  // Taking the target's estimate AFTER its span normalization would make it
+  // 50 + 60 = 110 and push this to 10:50.
+  expect(target20.departure).toBe('10:10');
+});

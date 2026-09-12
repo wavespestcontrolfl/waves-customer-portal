@@ -50,7 +50,11 @@ const DAY = '2026-08-17';
 function stop(id, over = {}) {
   // service_address_line1 is null on a real row that inherits the
   // customer's address — present-but-null, which is what the guard needs.
-  return { id, technician_id: 't1', route_order: null, window_start: null, time_window: null, estimated_duration_minutes: 60, service_type: 'pest', zone: null, lat: 1, lng: 1, service_address_line1: null, visit_id: null, ...over };
+  return { id, technician_id: 't1', route_order: null, window_start: null, time_window: null, estimated_duration_minutes: 60, service_type: 'pest', zone: null, lat: 1, lng: 1, service_address_line1: null, visit_id: null,
+    // A real row: unstamped, so its premise is the customer's own
+    // primary address (the columns the day load aliases).
+    customer_address_line1: '100 Main St', customer_address_line2: null,
+    customer_city: 'Bradenton', customer_state: 'FL', customer_zip: '34205', ...over };
 }
 
 const GUARDS = {
@@ -609,4 +613,24 @@ describe('round-2 co-visit guards', () => {
     expect(sim).not.toBeNull();
     expect(sim.arrivals.map((s) => s.departureMin)).toEqual([840, 880, 900]);
   });
+});
+
+// ── Codex #4435 round 3 ──────────────────────────────────────────────────
+test('unit: an UNSTAMPED row inherits the customer premise — it does not merge with a stamped sibling unit', () => {
+  const { isCoVisitPair } = require('../services/route-reorder-window-fit');
+  const slot = { customer_id: 'cust_b', window_start: '13:00', window_end: '14:00', estimated_duration_minutes: null, lat: 1, lng: 1 };
+  // Both rows sit on the customer's own 100 Main St; one explicitly stamps a
+  // DIFFERENT unit. Comparing bare stamps finds no conflict (one side has no
+  // street line at all) — comparing effective premises does.
+  const inherited = stop('inherited', slot);
+  const stamped = stop('stamped', { ...slot, service_address_line1: '100 Main St', service_address_line2: 'Apt 2' });
+  expect(isCoVisitPair(effectiveWindowRange, inherited, stamped)).toBe(false);
+  // The same stamp naming the customer's OWN unit is one premise again.
+  const sameUnit = stop('same', { ...slot, service_address_line1: '100 Main St' });
+  expect(isCoVisitPair(effectiveWindowRange, inherited, sameUnit)).toBe(true);
+  // And a premise that resolves to nothing at all (no stamp, no customer
+  // address) is unknown, never known-equal.
+  const blankA = { ...inherited, customer_address_line1: null };
+  const blankB = { ...sameUnit, service_address_line1: null, customer_address_line1: null };
+  expect(isCoVisitPair(effectiveWindowRange, blankA, blankB)).toBe(false);
 });

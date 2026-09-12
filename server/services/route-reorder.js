@@ -298,6 +298,16 @@ async function runRouteReorder(opts = {}, conn = db) {
             // physical stop (Codex #4435 r1 P1 — see isCoVisitPair).
             'scheduled_services.service_address_line1', 'scheduled_services.service_address_line2',
             'scheduled_services.service_address_city', 'scheduled_services.service_address_zip',
+            // The customer's primary premise too: an UNSTAMPED row inherits
+            // it, and comparing a bare stamp against nothing finds no
+            // conflict where a real one exists (Codex #4435 r3 P1).
+            {
+              customer_address_line1: 'customers.address_line1',
+              customer_address_line2: 'customers.address_line2',
+              customer_city: 'customers.city',
+              customer_state: 'customers.state',
+              customer_zip: 'customers.zip',
+            },
             'scheduled_services.route_order', 'scheduled_services.window_start',
             'scheduled_services.window_end', 'scheduled_services.visit_id',
             'scheduled_services.time_window',
