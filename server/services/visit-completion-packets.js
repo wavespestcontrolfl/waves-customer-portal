@@ -465,6 +465,15 @@ async function closeVisitCompletionPacket(database, { packet, memberId, payment,
       reason: derived.payment.reason, payerId: derived.payment.payerId,
     });
     const closeReview = derived.payment.state === 'office_required' || derived.delivery.state === 'delivery_review';
+    // A payment review derived HERE puts the visit on billing hold, exactly as
+    // the collection does when it sees the same state before delivery (local
+    // audit on r46): a void landing mid-delivery would otherwise close the
+    // packet for office review while leaving billing_hold false, so the visit
+    // itself carried no billing guard.
+    if (derived.payment.state === 'office_required' && payment.state !== 'office_required') {
+      await trx('service_visits').where({ id: packet.visit_id })
+        .update({ billing_hold: true, updated_at: trx.fn.now() });
+    }
     if (closeReview) await recordOfficeReviewAlert(trx, { packet, memberId, state });
     await trx('visit_completion_packets').where({ id: packet.id }).update({
       status: 'done',
