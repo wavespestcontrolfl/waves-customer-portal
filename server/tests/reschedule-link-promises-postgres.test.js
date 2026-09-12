@@ -334,5 +334,122 @@ postgres('reschedule-link-promises against PostgreSQL', () => {
         gates.callCommitments = priorCallCommitments;
       }
     });
+
+    test('a definitive failure receipt reconciles even after the attempt already sits parked for an unrelated reason (codex #4293 P1)', async () => {
+      // The row parked for stale_extraction on an earlier pass — a
+      // transient context error, unrelated to delivery. A REAL twilio_sid
+      // sms_log row now proves the provider itself rejected THIS attempt.
+      // That is exactly as conclusive as the still-live 'delivery_failed'
+      // case above and must retire the flag too, or stagePromises blocks a
+      // replacement generation forever despite proof delivery failed.
+      const priorGate = process.env.GATE_RESCHEDULE_LINK_ON_PROMISE;
+      const priorCallCommitments = gates.callCommitments;
+      try {
+        process.env.GATE_RESCHEDULE_LINK_ON_PROMISE = 'true';
+        gates.callCommitments = true;
+
+        const callId = randomUUID();
+        const customerId = randomUUID();
+        const twilioSid = `SM${randomUUID().replaceAll('-', '').slice(0, 32)}`;
+        await mockPg('call_log').insert({ id: callId, direction: 'inbound', processing_generation: 2 });
+        const [commitment] = await mockPg('call_commitments').insert({
+          call_log_id: callId, commitment_key: 'send_reschedule_link:1', party: 'waves', kind: 'send_reschedule_link',
+          description: 'send a reschedule link', source: 'ai', status: 'open', last_seen_generation: 2, processing_generation: 2,
+        }).returning('id');
+        const outboxId = randomUUID();
+        // Already parked ('review') for a context error, not a delivery
+        // outcome — the exact shape reconcileAttempt's pre-fix guard
+        // ('failed && unparked') silently ignored.
+        await mockPg('outbox_messages').insert({ id: outboxId, channel: 'sms', status: 'review', last_error: 'stale_extraction',
+          provider_message_id: twilioSid, sent_at: new Date(), payload: { delivery_outcome_uncertain: true },
+          commitment_id: commitment.id, commitment_generation: 1,
+          related_call_log_id: callId, related_customer_id: customerId, related_scheduled_service_id: randomUUID() });
+        await mockPg('sms_log').insert({ id: randomUUID(), customer_id: customerId, direction: 'outbound',
+          from_phone: '+15555550100', to_phone: '+15555550199', twilio_sid: twilioSid, status: 'failed', message_body: 'reschedule link' });
+
+        const row = await mockPg('outbox_messages').where({ id: outboxId }).first();
+        await links.runOne(mockPg, row, { now: new Date() });
+
+        const after = await mockPg('outbox_messages').where({ id: outboxId }).first();
+        // The existing review reason is left exactly as it was — only the
+        // flag moves.
+        expect(after.status).toBe('review');
+        expect(after.last_error).toBe('stale_extraction');
+        expect(after.payload.delivery_outcome_uncertain).toBe(false);
+
+        // With the flag cleared, a replacement generation can finally stage.
+        const staged = await links.stagePromises(mockPg);
+        expect(staged).toBe(1);
+      } finally {
+        if (priorGate === undefined) delete process.env.GATE_RESCHEDULE_LINK_ON_PROMISE; else process.env.GATE_RESCHEDULE_LINK_ON_PROMISE = priorGate;
+        gates.callCommitments = priorCallCommitments;
+      }
+    });
+  });
+
+  describe('markLinkUsed clears the shared exception card only when the attempt still owns the current generation (codex #4293 P1)', () => {
+    // markLinkUsed's own transaction reads the commitment row FRESH under
+    // FOR UPDATE, exactly like fulfilPromise — a genuine Postgres lock read,
+    // not a JS mock's in-memory state, is what actually proves the fence
+    // reads the commitment as it stands NOW and not whatever the caller's
+    // stale `row` snapshot implies.
+    async function seedReopenedCommitment({ replacementReopened }) {
+      const callId = randomUUID();
+      const customerId = randomUUID();
+      const visitId = randomUUID();
+      await mockPg('call_log').insert({ id: callId, direction: 'inbound', processing_generation: replacementReopened ? 2 : 1 });
+      const [commitment] = await mockPg('call_commitments').insert({
+        call_log_id: callId, commitment_key: 'send_reschedule_link:1', party: 'waves', kind: 'send_reschedule_link',
+        description: 'send a reschedule link', source: 'ai', status: 'open',
+        last_seen_generation: replacementReopened ? 2 : 1, processing_generation: replacementReopened ? 2 : 1,
+      }).returning('id');
+      const outboxId = randomUUID();
+      // Generation 1's own attempt reached the provider, then sat parked
+      // waiting on a carrier receipt that never arrived — the shape
+      // unreconciledPromiseRows admits ('review' with a provider id).
+      await mockPg('outbox_messages').insert({ id: outboxId, channel: 'sms', status: 'review', last_error: 'provider_outcome_unknown',
+        provider_message_id: `SM${randomUUID().replaceAll('-', '').slice(0, 32)}`,
+        payload: { call_generation: 1, delivery_outcome_uncertain: true },
+        commitment_id: commitment.id, commitment_generation: 1,
+        related_call_log_id: callId, related_customer_id: customerId, related_scheduled_service_id: visitId });
+      // The exception card this generation-1 attempt raised — still open,
+      // still speaking for this one commitment_id.
+      await mockPg('triage_items').insert({ call_log_id: callId, category: 'customer_followup', severity: 'advisory',
+        reason_code: 'reschedule_link_promise', status: 'open', summary: 'A promised reschedule link needs attention.',
+        payload: { reschedule_link_promise: { commitment_id: commitment.id, commitment_ids: [commitment.id], reason: 'provider_outcome_unknown' } } });
+      const row = await mockPg('outbox_messages').where({ id: outboxId }).first();
+      return { callId, commitment, row };
+    }
+
+    test('the customer using the OLDER attempt\'s link after a replacement recording reopened the commitment leaves the replacement\'s card intact', async () => {
+      // A replacement recording reopened this SAME commitment_id to
+      // generation 2 (a fresh, still-live obligation) between when
+      // generation 1's link went out and when the customer finally clicked
+      // it. Reconciling the OLD row must stamp it, but must NOT clear the
+      // shared card the (still-open) generation-2 attempt also depends on.
+      const { callId, row } = await seedReopenedCommitment({ replacementReopened: true });
+      await links.markLinkUsed(mockPg, row);
+
+      const afterRow = await mockPg('outbox_messages').where({ id: row.id }).first();
+      // The customer really did use this link — that fact is always
+      // recorded, whatever generation staged it.
+      expect(afterRow.payload.link_used_reconciled_at).toBeTruthy();
+
+      const card = await mockPg('triage_items').where({ call_log_id: callId, reason_code: 'reschedule_link_promise' }).first();
+      // The office still has a live obligation to see — the card must not
+      // have been resolved out from under the replacement generation.
+      expect(card.status).toBe('open');
+    });
+
+    test('the customer using the link with no replacement generation in play clears the card exactly as before', async () => {
+      const { callId, row } = await seedReopenedCommitment({ replacementReopened: false });
+      await links.markLinkUsed(mockPg, row);
+
+      const afterRow = await mockPg('outbox_messages').where({ id: row.id }).first();
+      expect(afterRow.payload.link_used_reconciled_at).toBeTruthy();
+
+      const card = await mockPg('triage_items').where({ call_log_id: callId, reason_code: 'reschedule_link_promise' }).first();
+      expect(card.status).toBe('resolved');
+    });
   });
 });

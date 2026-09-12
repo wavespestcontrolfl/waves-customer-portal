@@ -718,12 +718,20 @@ function deliveryIdentityMatches({ call, commitment, current, visit, customer, s
 // (codex #4293 P1). A row with no recorded generation (older data, or a
 // caller that never stamped one) falls through to the old, ungated
 // behavior rather than block on data that was never captured.
+//
+// Shared with markLinkUsed, whose own late-arriving-customer-move path is
+// the identical shape: an OLDER generation's outbox row (the one whose link
+// the customer actually clicked) speaking for whatever the commitment has
+// become since a replacement recording reopened it (codex #4293 P1).
+async function attemptOwnsCurrentGeneration(trx, row, commitmentId, payload = row.payload) {
+  const generation = payload?.call_generation;
+  if (generation == null) return true;
+  const commitment = await trx('call_commitments').where({ id: commitmentId }).forUpdate().first('id', 'last_seen_generation');
+  return !commitment || Number(commitment.last_seen_generation) === Number(generation);
+}
+
 async function fulfilPromise(trx, row, sms, call) {
-  const generation = row.payload?.call_generation;
-  const commitment = generation == null ? null
-    : await trx('call_commitments').where({ id: row.commitment_id }).forUpdate().first('id', 'last_seen_generation');
-  const ownsCurrentGeneration = generation == null || !commitment || Number(commitment.last_seen_generation) === Number(generation);
-  if (!ownsCurrentGeneration) return;
+  if (!(await attemptOwnsCurrentGeneration(trx, row, row.commitment_id))) return;
   const updated = await trx('call_commitments').where({ id: row.commitment_id, status: 'open' })
     .where((q) => q.whereNull('human_state').orWhere('human_state', 'confirmed'))
     .update({ status: 'fulfilled', fulfilled_at: new Date(), updated_at: new Date(), fulfillment: {
@@ -871,6 +879,21 @@ async function stagePromises(conn) {
   return rows.length;
 }
 
+// A row already parked in review — for whatever reason last put it there —
+// can still receive a LATER definitive failure receipt: the carrier
+// confirms the earlier "unknown" attempt in fact never reached the
+// customer. That is exactly as conclusive as a delivered receipt, and must
+// retire delivery_outcome_uncertain the same way; leaving it true blocks
+// stagePromises from ever staging a replacement generation, forever, despite
+// proof delivery failed (codex #4293 P1). This is a payload-only merge, not
+// parkReview — the row's status and its existing review reason (whatever
+// context error actually parked it) are left exactly as they are; only the
+// flag moves.
+async function clearDeliveryUncertainInReview(conn, row) {
+  await conn('outbox_messages').where({ id: row.id, status: 'review' })
+    .update({ payload: { ...row.payload, [DELIVERY_UNCERTAIN_KEY]: false }, updated_at: new Date() });
+}
+
 // An attempt that already reached the provider OWNS the row until its
 // outcome is known: delivery settles it, a failure or a receipt that never
 // arrives parks it for the office, and an accepted-but-undecided send waits
@@ -884,8 +907,11 @@ async function reconcileAttempt(conn, row, now) {
   // A real twilio_sid-bearing sms_log row saying the provider itself
   // rejected this exact attempt IS the definitive evidence that retires
   // delivery uncertainty: the message never reached the customer, so
-  // staging a fresh generation afterward carries no duplicate risk.
+  // staging a fresh generation afterward carries no duplicate risk. That
+  // holds independently of whether the row is still live or already
+  // parked — a failure is a failure either way (codex #4293 P1).
   if (failed && unparked) await parkReview(conn, row, 'delivery_failed', { clearDeliveryUncertain: true });
+  else if (failed) await clearDeliveryUncertainInReview(conn, row);
   else if (sms && ['delivered', 'read'].includes(sms.status)) await settleDelivery(conn, row, sms);
   else if (unparked && new Date(row.sent_at || row.last_attempt_at).getTime() + 24 * 3600000 < now.getTime()) await parkReview(conn, row, 'delivery_receipt_unavailable');
   else if (sms && !failed && unparked) await settleDelivery(conn, row, sms);
@@ -1419,6 +1445,18 @@ const ATTEMPTED_STATUSES = ['sent', 'delivered', 'review'];
 // the caller observed as 'sent' can have been parked to 'review' by a
 // concurrent pass in the gap since that read, and the stale value used to
 // skip clearPromiseException for a card that, right now, is actually open.
+//
+// This row's own STAMP always lands — the customer really did use THIS
+// attempt's link, whatever generation it was staged under, and that fact is
+// worth recording regardless. Clearing the shared exception CARD is a
+// different question: a replacement recording can reopen this same
+// commitment_id under a NEW generation and park a fresh attempt of its own
+// before the customer ever gets around to using the OLD attempt's still-live
+// link (the token lives on the visit, not on any one generation). Closing
+// the card on that stale click would erase the office's only visibility into
+// the REPLACEMENT commitment's still-open obligation — the same
+// generation-ownership hole fulfilPromise was fenced against, at the
+// used-link path instead (codex #4293 P1).
 async function markLinkUsed(conn, row) {
   await conn.transaction(async (trx) => {
     await lockTriageCall(trx, row.related_call_log_id);
@@ -1429,8 +1467,8 @@ async function markLinkUsed(conn, row) {
     // is no office work left to chase. The card closes; the promise's own
     // status does NOT move, because a missing receipt is still not proof of
     // delivery (codex #4293 r2 P2).
-    const current = await trx('outbox_messages').where({ id: row.id }).first('status');
-    if (current?.status === 'review') {
+    const current = await trx('outbox_messages').where({ id: row.id }).first('status', 'payload');
+    if (current?.status === 'review' && await attemptOwnsCurrentGeneration(trx, row, row.commitment_id, current.payload)) {
       await clearPromiseException(trx, row.related_call_log_id, row.commitment_id, USED_LINK_NOTE);
     }
     await trx('outbox_messages').where({ id: row.id })

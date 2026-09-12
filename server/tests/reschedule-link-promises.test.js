@@ -898,6 +898,138 @@ describe('a staff Confirm is an affirmative review, not a claim (codex #4293 P1 
       { id: 'sms1' }, { id: 'call' });
     expect(state.status).toBe('fulfilled');
   });
+
+  // markLinkUsed's own generation fence (codex #4293 P1 — this round's sweep):
+  // fulfilPromise's fence protects the DELIVERY path from a stale generation
+  // fulfilling a replacement commitment's live obligation; this is the
+  // identical hole at the USED-LINK path. The reschedule token lives on the
+  // VISIT, not on any one outbox generation, so a customer can click an
+  // OLDER attempt's link after a replacement recording has already reopened
+  // the same commitment_id and parked a fresh attempt of its own. Clearing
+  // the shared exception card on that stale click would erase the office's
+  // only visibility into the replacement's still-open obligation. A
+  // dedicated fake connection is needed here (unlike fakeFulfilConnWithCard
+  // above) because markLinkUsed, unlike fulfilPromise, itself reads and
+  // writes outbox_messages — its own reconciliation stamp — inside the same
+  // transaction as the card check.
+  function fakeMarkLinkUsedConn({ commitment, outboxPayload, cardPayload }) {
+    const commitmentState = { ...commitment };
+    const outboxState = { status: 'review', payload: outboxPayload };
+    const cardState = cardPayload ? { id: 'card', call_log_id: 'call', reason_code: 'reschedule_link_promise', status: 'open', payload: cardPayload } : null;
+    const callLogState = { id: 'call', review_status: 'open' };
+    function commitmentsBuilder() {
+      const eq = {};
+      const b = {
+        where(a) { Object.assign(eq, a); return b; },
+        forUpdate: () => b,
+        first: async (...cols) => {
+          if (!Object.entries(eq).every(([k, v]) => commitmentState[k] === v)) return null;
+          if (!cols.length) return { ...commitmentState };
+          const picked = {};
+          for (const col of cols) picked[col] = commitmentState[col];
+          return picked;
+        },
+      };
+      return b;
+    }
+    function outboxBuilder() {
+      const eq = {};
+      const b = {
+        where(a) { Object.assign(eq, a); return b; },
+        first: async (...cols) => {
+          if (eq.id !== 'outbox') return null;
+          if (!cols.length) return { ...outboxState };
+          const picked = {};
+          for (const col of cols) picked[col] = outboxState[col];
+          return picked;
+        },
+        update: async (patch) => {
+          // markLinkUsed's own reconciliation stamp is a raw jsonb merge
+          // (`COALESCE(payload, '{}'::jsonb) || ?::jsonb`) — replay it for
+          // real against the in-memory payload rather than clobbering it.
+          if (patch.payload && patch.payload.__rawMerge) {
+            outboxState.payload = { ...outboxState.payload, ...patch.payload.__rawMerge };
+            const { payload: _payload, ...rest } = patch;
+            Object.assign(outboxState, rest);
+          } else Object.assign(outboxState, patch);
+          return 1;
+        },
+      };
+      return b;
+    }
+    function triageBuilder() {
+      const eq = {};
+      const inFilters = [];
+      const b = {
+        where(a) { Object.assign(eq, a); return b; },
+        whereIn(col, vals) { inFilters.push([col, vals]); return b; },
+        select: async (...cols) => {
+          if (!cardState) return [];
+          if (!Object.entries(eq).every(([k, v]) => cardState[k] === v)) return [];
+          if (!inFilters.every(([col, vals]) => vals.includes(cardState[col]))) return [];
+          const picked = {};
+          for (const col of cols) picked[col] = cardState[col];
+          return [picked];
+        },
+        update: async (patch) => { if (cardState) Object.assign(cardState, patch); return cardState ? 1 : 0; },
+        first: async () => (cardState && ['open', 'in_progress'].includes(cardState.status) ? { id: cardState.id } : null),
+      };
+      return b;
+    }
+    function callLogBuilder() {
+      const b = {};
+      const pass = () => (...a) => b;
+      Object.assign(b, { where: pass(), update: async (patch) => { Object.assign(callLogState, patch); return 1; } });
+      return b;
+    }
+    const conn = (table) => {
+      const name = String(table).split(' ')[0];
+      if (name === 'call_commitments') return commitmentsBuilder();
+      if (name === 'outbox_messages') return outboxBuilder();
+      if (name === 'triage_items') return triageBuilder();
+      if (name === 'call_log') return callLogBuilder();
+      return { where: () => ({ update: async () => 0, first: async () => null, whereIn: () => ({ select: async () => [] }) }) };
+    };
+    conn.transaction = async (fn) => fn(conn);
+    conn.raw = (sql, bindings) => ({ __rawMerge: bindings ? JSON.parse(bindings[0]) : undefined });
+    return { conn, commitmentState, outboxState, cardState, callLogState };
+  }
+
+  test('the customer using an OLDER attempt\'s link after a replacement recording reopened the commitment leaves the replacement\'s card intact (codex #4293 P1)', async () => {
+    const { conn, cardState, outboxState } = fakeMarkLinkUsedConn({
+      commitment: { id: 'commitment', last_seen_generation: 2 },
+      outboxPayload: { call_generation: 1 },
+      cardPayload: { reschedule_link_promise: { commitment_id: 'commitment', commitment_ids: ['commitment'] } },
+    });
+    await links.markLinkUsed(conn, { id: 'outbox', commitment_id: 'commitment', related_call_log_id: 'call', related_scheduled_service_id: 'visit' });
+    // The row is stamped reconciled regardless — the customer really did use
+    // THIS attempt's link.
+    expect(outboxState.payload.link_used_reconciled_at).toBeDefined();
+    // But the shared card, which the REPLACEMENT generation's still-open
+    // attempt also depends on, is left exactly as it was.
+    expect(cardState.status).toBe('open');
+  });
+
+  test('the customer using the link with no replacement generation in play clears the card exactly as before', async () => {
+    const { conn, cardState, outboxState } = fakeMarkLinkUsedConn({
+      commitment: { id: 'commitment', last_seen_generation: 1 },
+      outboxPayload: { call_generation: 1 },
+      cardPayload: { reschedule_link_promise: { commitment_id: 'commitment', commitment_ids: ['commitment'] } },
+    });
+    await links.markLinkUsed(conn, { id: 'outbox', commitment_id: 'commitment', related_call_log_id: 'call', related_scheduled_service_id: 'visit' });
+    expect(outboxState.payload.link_used_reconciled_at).toBeDefined();
+    expect(cardState.status).toBe('resolved');
+  });
+
+  test('a row with no recorded generation falls back to the old, ungated behavior for markLinkUsed too', async () => {
+    const { conn, cardState } = fakeMarkLinkUsedConn({
+      commitment: { id: 'commitment', last_seen_generation: 9 },
+      outboxPayload: {},
+      cardPayload: { reschedule_link_promise: { commitment_id: 'commitment', commitment_ids: ['commitment'] } },
+    });
+    await links.markLinkUsed(conn, { id: 'outbox', commitment_id: 'commitment', related_call_log_id: 'call', related_scheduled_service_id: 'visit' });
+    expect(cardState.status).toBe('resolved');
+  });
 });
 
 test('a customer relink between staging and dispatch rebinds the row under the claim transaction', async () => {
@@ -1084,6 +1216,25 @@ describe('delivery uncertainty is retired only by definitive provider evidence o
     const { seen } = await sweepWith({ outbox: [row], smsLog: { id: 'sms1', status: 'failed' } });
     const patch = seen.updates.find((u) => u.table === 'outbox_messages' && u.eq.id === 'outbox');
     expect(patch.patch).toMatchObject({ status: 'review', last_error: 'delivery_failed' });
+    expect(patch.patch.payload.delivery_outcome_uncertain).toBe(false);
+  });
+
+  test('a definitive failure receipt reconciles even after the attempt already sits parked for an unrelated reason (codex #4293 P1)', async () => {
+    // The row already parked for a transient context error (stale_extraction,
+    // unrelated to delivery) when a REAL twilio_sid-bearing sms_log row later
+    // proves the provider itself rejected this exact attempt — a definitive
+    // failure exactly as conclusive as the still-live case above. The pre-fix
+    // `failed && unparked` guard ignored this because the row was already
+    // parked, leaving the flag stuck true and stagePromises blocking a
+    // replacement generation FOREVER despite proof delivery failed.
+    const row = promiseRow('outbox', 'commitment', { status: 'review', last_error: 'stale_extraction',
+      provider_message_id: 'SM123', payload: { delivery_outcome_uncertain: true } });
+    const { seen } = await sweepWith({ outbox: [row], smsLog: { id: 'sms1', status: 'failed' } });
+    const patch = seen.updates.find((u) => u.table === 'outbox_messages' && u.eq.id === 'outbox' && u.patch.payload);
+    expect(patch).toBeDefined();
+    // The existing review reason is left exactly as it was — only the flag moves.
+    expect(patch.patch.status).toBeUndefined();
+    expect(patch.patch.last_error).toBeUndefined();
     expect(patch.patch.payload.delivery_outcome_uncertain).toBe(false);
   });
 
