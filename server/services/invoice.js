@@ -4843,6 +4843,7 @@ const InvoiceService = {
    * at void time stays cancelled — recreate it on the restored invoice.
    */
   async unvoidInvoice(id) {
+    let reconcileWithdrawnAfterCommit = null;
     const current = await db("invoices").where({ id }).first();
     if (!current) throw new Error("Invoice not found");
     if (current.status !== "void") {
@@ -5006,9 +5007,14 @@ const InvoiceService = {
       // unpayable and unschedulable for good. The shared reconciliation
       // releases it when the packet is self-pay again and keeps the stamp
       // (re-pointed if the payer changed) while a payer still owes it.
+      // The reconciliation runs AFTER this transaction commits (local audit):
+      // it takes customer and member rows, and this transaction already holds
+      // the invoice — the inverse of the order every Bill-To writer uses
+      // (ownership rows, then the invoice), which deadlocks one side. Flagged
+      // here, performed below in its own transaction, where the established
+      // order holds.
       if (updated.visit_completion_packet_id && String(updated.scheduled_send_error || '').startsWith("payer_billed:")) {
-        await require("./visit-completion-packets")
-          .reconcileWithdrawnPacketInvoices(trx, { customerId: updated.customer_id });
+        reconcileWithdrawnAfterCommit = { customerId: updated.customer_id };
       }
       // Term-link TOCTOU re-check on the FRESH row under the lock (Codex
       // #3493 r2): a concurrent /annual-prepay can create the term and
@@ -5234,6 +5240,21 @@ const InvoiceService = {
       invoice = updated;
     });
     logger.info(`[invoice] Unvoided to draft: ${invoice.invoice_number}`);
+    // The withdrawal stamp the restore preserved is re-judged here, AFTER the
+    // commit and in its own transaction (local audit): the reconciliation
+    // takes customer and member rows before the invoice, which is the order
+    // every Bill-To writer uses; running it inside the restore — which
+    // already held the invoice row — was the inverse order and deadlocked one
+    // side. Best-effort like the rest of the post-commit work: the stamp is
+    // durable, and the next Bill-To transition reconciles it either way.
+    if (reconcileWithdrawnAfterCommit) {
+      try {
+        await db.transaction((trx) => require("./visit-completion-packets")
+          .reconcileWithdrawnPacketInvoices(trx, reconcileWithdrawnAfterCommit));
+      } catch (err) {
+        logger.warn(`[invoice] unvoid withdrawal reconciliation failed for ${invoice.invoice_number}: ${err.message}`);
+      }
+    }
     // Dunning stays under the system void stop while the restored invoice
     // sits in draft — reminders against an unpublished draft would be
     // wrong. The RESEND is the lifecycle point that re-arms it:
