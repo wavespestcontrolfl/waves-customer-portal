@@ -13,7 +13,7 @@ vi.mock('../../pages/admin/SchedulePage', () => ({
   createCompletionIdempotencyKey: (id) => `fixture_${id}`,
   completionReconcilePrompt: (error) => error.code === 'report_reconcile' ? 'Confirm recorded values' : null,
   CompletionPanel: ({ service, onPrepared }) => <button onClick={() => onPrepared(service.id, {
-    visitOutcome: service.id === 'one' ? 'completed' : 'incomplete',
+    visitOutcome: service.fixtureOutcome || (service.id === 'one' ? 'completed' : 'incomplete'),
     completionPhotos: [{ data: 'data:image/jpeg;base64,c3ludGhldGlj', capturedAt: '2020-01-01T12:00:00Z' }],
   }, { serviceId: service.id, notes: 'Saved fixture form' })}>Save fixture form</button>,
 }));
@@ -82,6 +82,21 @@ it('requires a form for a completed status when the server has no canonical reco
   expect(screen.getByRole('button', { name: 'Complete visit' })).toBeDisabled();
   await prepareBoth();
   expect(screen.getByRole('button', { name: 'Complete visit' })).toBeEnabled();
+});
+
+it('shows the canonical follow-up and customer-concern outcomes in the review rows', async () => {
+  const outcomeServices = [
+    { ...services[0], fixtureOutcome: 'follow_up_needed' },
+    { ...services[1], fixtureOutcome: 'customer_concern' },
+  ];
+  adminFetch.mockImplementation(async (path) => path.startsWith('/admin/schedule?')
+    ? { services: outcomeServices }
+    : { visitId: 'visit', serviceDate: '2020-01-01', members: outcomeServices, packet: null });
+  mount();
+  await prepareBoth();
+  expect(screen.getByText('Follow-up needed')).toBeInTheDocument();
+  expect(screen.getByText('Customer concern')).toBeInTheDocument();
+  expect(screen.queryByText('Form ready')).not.toBeInTheDocument();
 });
 
 it('requires every form and preserves the exact photo bodies and key across a reload', async () => {

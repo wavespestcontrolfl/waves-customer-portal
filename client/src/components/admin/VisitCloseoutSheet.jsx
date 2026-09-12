@@ -13,6 +13,7 @@ const liveMembers = (detail) => detail.members.filter((member) => member.require
 const OUTCOMES = {
   completed: 'Completed', incomplete: 'Incomplete — office follow-up',
   inspection_only: 'Inspection only', customer_declined: 'Customer declined',
+  follow_up_needed: 'Follow-up needed', customer_concern: 'Customer concern',
 };
 
 function operatorScope() {
