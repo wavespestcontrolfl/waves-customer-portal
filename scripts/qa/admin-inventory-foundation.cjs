@@ -227,10 +227,19 @@ async function metricsFor(page, surface) {
         height: element.getBoundingClientRect().height,
         font: parseFloat(getComputedStyle(element).fontSize),
       })),
-    readable: [...node.querySelectorAll("p,span,td,th,h1,h2,h3,label")]
+    // Migrated values/labels/headings often render as plain divs (e.g. the
+    // Lawn Facts summary metrics) rather than p/span/td/th — a div-less
+    // selector never samples that text, so a font-size regression there
+    // could still pass. Widen to every element and keep only those with a
+    // non-empty direct text node, so a wrapper div isn't double-counted for
+    // text that already belongs to a nested child.
+    readable: [...node.querySelectorAll("*")]
       .filter(
         (element) =>
-          element.getClientRects().length && element.textContent.trim(),
+          element.getClientRects().length &&
+          [...element.childNodes].some(
+            (child) => child.nodeType === 3 && child.textContent.trim(),
+          ),
       )
       .map((element) => parseFloat(getComputedStyle(element).fontSize)),
   }));

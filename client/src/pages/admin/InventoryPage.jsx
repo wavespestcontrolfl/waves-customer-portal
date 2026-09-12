@@ -608,7 +608,7 @@ function LawnFactsTab({ showToast }) {
           </div>
           <div className="flex gap-[8px] flex-wrap">
             {missingFieldEntries.map(([field, count]) => (
-              <Badge key={field} tone="neutral">
+              <Badge key={field} tone="warn">
                 {field} · {count}
               </Badge>
             ))}
@@ -944,7 +944,13 @@ function LawnContentModulesTab({ showToast }) {
                   <TD>{module.title}</TD>
                   <TD>{module.audience}</TD>
                   <TD>
-                    <Badge tone="neutral">{module.status}</Badge>
+                    {/* Main: green when approved, amber otherwise (draft/
+                        review/deprecated/retired) — the module status enum
+                        has no failed/rejected state to reserve alert for.
+                        The kit has no success tone, so approved is strong. */}
+                    <Badge tone={module.status === "approved" ? "strong" : "warn"}>
+                      {module.status}
+                    </Badge>
                   </TD>
                   <TD className="max-w-[460px]">
                     <div className="line-clamp-3 overflow-hidden">{module.plain_text}</div>
@@ -1322,7 +1328,7 @@ function PriceSyncTab({ showToast }) {
                         <Badge
                           key={connection.id}
                           title={`${connection.approvalStatus} / ${connection.credentialStatus}`}
-                          tone="neutral"
+                          tone={connection.credentialStatus === "missing" ? "warn" : "neutral"}
                         >
                           {connection.type}
                         </Badge>
@@ -4156,7 +4162,11 @@ function RegistryTab({ showToast }) {
                   {p.category}
                 </span>
                 <Badge tone="neutral">{vis.label}</Badge>
-                <Badge tone="neutral">{stat.label}</Badge>
+                {/* Main: muted/teal/green for the rest (no kit equivalent,
+                    stay neutral) but retired was red. */}
+                <Badge tone={stat.value === "retired" ? "alert" : "neutral"}>
+                  {stat.label}
+                </Badge>
                 {!isEditing && (
                   <Button onClick={() => startEdit(p)} variant="secondary">
                     Edit
