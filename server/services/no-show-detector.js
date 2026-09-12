@@ -1031,11 +1031,13 @@ function stopPromise(members = [], eventsByVisit = new Map(), now = new Date()) 
     || ATTENDED_STATUSES.includes(member.status));
   const held = awaited.map((member) => latestPromises(eventsOf(member), now).get(String(member.id)))
     .filter(Boolean);
-  if (!held.length) return null;
   // Anything communicated BEFORE the newest grouped send is gone: that send
   // quoted one window for every member, so a member's older per-service
   // confirmation no longer stands even if another member's confirmation came
-  // later and is not itself grouped (codex P1 round 24, third pass).
+  // later and is not itself grouped (codex P1 round 24, third pass). Read
+  // from EVERY member's events, and before the empty check below: a grouped
+  // reminder owned by a member that has since been cancelled is still the
+  // window its live siblings are holding (codex P1 round 25).
   const newestGrouped = members.flatMap(eventsOf)
     .filter((event) => event.grouped && instant(event.communicated_at) <= instant(now))
     .reduce((a, b) => (!a || instant(a.communicated_at) < instant(b.communicated_at) ? b : a), null);
@@ -1045,6 +1047,7 @@ function stopPromise(members = [], eventsByVisit = new Map(), now = new Date()) 
   // the grouped window, and once EVERY member has one the grouped promise is
   // fully superseded and must not linger as the stop's earliest (codex P1
   // round 24, fifth and sixth passes).
+  if (!held.length && !newestGrouped) return null;
   const after = newestGrouped
     ? held.filter((promise) => instant(promise.communicated_at) > instant(newestGrouped.communicated_at)) : [];
   const replaced = new Set(after.map((promise) => String(promise.visit_id)));

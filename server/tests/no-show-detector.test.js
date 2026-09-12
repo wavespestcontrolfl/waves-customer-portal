@@ -543,6 +543,14 @@ describe('grouped stops are evaluated as one visit (round-10 P1)', () => {
       .toMatchObject({ visit_id: 'bbb', start_at: '2026-09-10T13:00:00Z' });
     // Live members are unaffected.
     expect(stopPromise([a, b], promises, now)).toMatchObject({ visit_id: 'aaa' });
+    // ...and a GROUPED reminder owned by a member that has since been
+    // cancelled is still the window its live siblings hold (round-25 P1).
+    const groupedByCancelled = new Map([
+      ['aaa', [{ visit_id: 'aaa', start_at: '2026-09-10T13:00:00Z', communicated_at: '2026-09-09T12:00:00Z', source: 'message', grouped: true }]],
+      ['bbb', []],
+    ]);
+    expect(stopPromise([{ ...a, status: 'cancelled' }, b], groupedByCancelled, now))
+      .toMatchObject({ start_at: '2026-09-10T13:00:00Z', grouped: true });
   });
 
   test('stopPromise takes the EARLIEST promised window across members, not the latest sent', () => {
