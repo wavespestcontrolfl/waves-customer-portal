@@ -154,6 +154,22 @@ export default function SecureAppointmentPage() {
     }
   }, [token]);
 
+  // The retry on the unavailable card must not fan out. `refresh` leaves the
+  // state at `unavailable` for the whole fetch, so the button stays live and
+  // repeated taps start concurrent GETs -- and an older one failing after a
+  // newer one succeeded would call setState('unavailable') and replace the
+  // loaded page with the error card again. One in flight at a time.
+  const retryingRef = useRef(false);
+  const retryLoad = useCallback(async () => {
+    if (retryingRef.current) return;
+    retryingRef.current = true;
+    try {
+      await refresh();
+    } finally {
+      retryingRef.current = false;
+    }
+  }, [refresh]);
+
   // Post-capture refresh with a SECURED fallback (Codex #3153 r21): once
   // the server confirmed completion, the save IS done — a transient
   // refetch failure must render the secured state, never an error message
@@ -491,7 +507,7 @@ export default function SecureAppointmentPage() {
   if (state === 'unavailable') {
     return (
       <Shell>
-        <PublicStateCard state="error" title={<>We couldn&rsquo;t load that link</>} onRetry={refresh}>
+        <PublicStateCard state="error" title={<>We couldn&rsquo;t load that link</>} onRetry={retryLoad}>
           This looks temporary. Your link is still valid&mdash;try again in a moment.
         </PublicStateCard>
       </Shell>

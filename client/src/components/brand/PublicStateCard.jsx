@@ -41,6 +41,19 @@ const CONTACT_DEFAULT = { 'not-found': 'row', expired: 'row', error: 'none' };
 // three come back.
 const CARD_MAX_WIDTH = 560;
 
+// tone="light" is the dark-scene variant, and the page that uses it (/card)
+// never calls useGlassSurface -- so `data-glass="card"` is inert there and the
+// frosted material cannot be delegated to the sheet. These are the values that
+// wrapper authored (CardPage's GLASS_MATERIAL): without the blur and the inset
+// highlight the card reads as a flat translucent panel on the navy scene.
+const LIGHT_SCENE_MATERIAL = {
+  background: 'rgba(255,255,255,0.14)',
+  border: '1px solid rgba(255,255,255,0.32)',
+  boxShadow: 'inset 0 1px 0 rgba(255,255,255,0.35)',
+  backdropFilter: 'blur(20px) saturate(160%)',
+  WebkitBackdropFilter: 'blur(20px) saturate(160%)',
+};
+
 // Action styling lives here rather than in BrandButton because two of the three
 // actions are links (tel:/sms:), and BrandButton renders a <button>. The
 // heights are the C3 ruling: 48 for the card's one primary, 44 floor for the
@@ -70,6 +83,12 @@ function primaryStyle(light) {
     color: light ? '#FFFFFF' : '#1B2C5B',
   };
 }
+
+// `data-glass="chip"` is the hook BrandButton's secondary variant uses; without
+// it the sheet's chip material, blur and hover never reach these actions and
+// they render as solid outlined controls -- the file called them the chip tier
+// while giving the sheet nothing to match on.
+const CHIP_ATTRS = { 'data-glass': 'chip' };
 
 function secondaryStyle(light) {
   return {
@@ -113,7 +132,7 @@ function buildActions({ onRetry, mode, light }) {
   const callIsPrimary = !onRetry;
   if (mode === 'row') {
     actions.push(
-      <a key="text" href={WAVES_SUPPORT_SMS_TEL} style={secondaryStyle(light)}>
+      <a key="text" href={WAVES_SUPPORT_SMS_TEL} {...CHIP_ATTRS} style={secondaryStyle(light)}>
         Text Waves
       </a>
     );
@@ -124,6 +143,7 @@ function buildActions({ onRetry, mode, light }) {
       href={WAVES_SUPPORT_PHONE_TEL}
       data-glass-accent={callIsPrimary && !light ? '' : undefined}
       data-glass-size={callIsPrimary ? 'primary' : undefined}
+      {...(callIsPrimary ? null : CHIP_ATTRS)}
       style={callIsPrimary ? primaryStyle(light) : secondaryStyle(light)}
     >
       {mode === 'call' ? `Call ${WAVES_SUPPORT_PHONE_DISPLAY}` : 'Call Waves'}
@@ -156,7 +176,7 @@ export default function PublicStateCard({
       style={{
         textAlign: 'center',
         margin: '0 auto',
-        ...(light ? { background: 'rgba(255,255,255,0.10)', border: '1px solid rgba(255,255,255,0.28)' } : null),
+        ...(light ? LIGHT_SCENE_MATERIAL : null),
         ...style,
       }}
       {...rest}

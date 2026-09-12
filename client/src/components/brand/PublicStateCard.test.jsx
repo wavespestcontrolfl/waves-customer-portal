@@ -107,4 +107,25 @@ describe('PublicStateCard', () => {
     expect(card.style.maxWidth).toBe('560px');
     expect(card.style.padding).not.toBe('');
   });
+
+  it('tags secondary actions as glass chips so the sheet can style them', () => {
+    render(<PublicStateCard state="not-found" title="Gone" />);
+    expect(screen.getByRole('link', { name: 'Text Waves' })).toHaveAttribute('data-glass', 'chip');
+    // The primary must NOT be a chip.
+    expect(screen.getByRole('link', { name: 'Call Waves' })).not.toHaveAttribute('data-glass');
+  });
+
+  it('demoted Call becomes a chip when a retry owns the primary tier', () => {
+    render(<PublicStateCard state="not-found" title="Gone" onRetry={() => {}} />);
+    expect(screen.getByRole('link', { name: 'Call Waves' })).toHaveAttribute('data-glass', 'chip');
+  });
+
+  it('tone="light" authors the frosted material rather than delegating to the sheet', () => {
+    // /card never calls useGlassSurface, so data-glass is inert there and the
+    // blur has to be on the element.
+    render(<PublicStateCard state="error" title="T" tone="light" />);
+    const card = screen.getByRole('alert');
+    expect(card.style.backdropFilter).toContain('blur');
+    expect(card.style.boxShadow).toContain('inset');
+  });
 });
