@@ -3146,7 +3146,11 @@ const ReviewService = {
     const advance = { current_step: nextStep, touches_sent: (seq.touches_sent || 0) + 1, last_touch_at: now, updated_at: now };
     const updates = nextStep >= plan.length
       ? { ...advance, status: "completed", stop_reason: "completed", next_run_at: null, completed_at: now }
-      : { ...advance, next_run_at: nextTouchRunAt({ startedAt: seq.started_at || now, step: plan[nextStep], now }) };
+      // previousStep carries the 72-hour spacing rule the ordinary runner
+      // applies (local audit): omitting it makes nextTouchRunAt read the
+      // recovered step as an ask, and a recovered resolution_check or
+      // satisfaction_confirm would push the following ask out another 72 h.
+      : { ...advance, next_run_at: nextTouchRunAt({ startedAt: seq.started_at || now, step: plan[nextStep], previousStep: plan[seq.current_step] || null, now }) };
     const moved = await database("review_sequences").where({ id: seq.id, status: seq.status, current_step: seq.current_step })
       .whereNull("next_run_at").update(updates);
     if (moved) logger.info(`[review] stranded touch advanced its sequence (sequenceId=${seq.id} step=${seq.current_step})`);

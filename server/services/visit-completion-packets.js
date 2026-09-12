@@ -679,6 +679,13 @@ async function releaseWithdrawnPacketInvoice(trx, invoice) {
   // Only a hold the withdrawal created is lifted: a visit held before it
   // for another office-owned reason keeps that hold.
   if (holdFlag === 'hold') await trx('service_visits').where({ id: packet.visit_id }).update({ billing_hold: false, updated_at: trx.fn.now() });
+  // The dunning the withdrawal paused resumes with it (local audit): a
+  // sent/viewed/overdue invoice triggers no new send lifecycle on release, and
+  // a paused row keeps the legacy reminder sweep away too, so the debt would
+  // simply stop being collected. ONLY this system pause is lifted — an admin
+  // pause or an autopay hold carries its own reason and is left alone.
+  await trx('invoice_followup_sequences').where({ invoice_id: invoice.id, status: 'paused', paused_reason: 'payer_billed' })
+    .update({ status: 'active', paused_reason: null, next_touch_at: trx.fn.now(), updated_at: trx.fn.now() });
   await liftPayerOfficeReview(trx, packet);
   return true;
 }

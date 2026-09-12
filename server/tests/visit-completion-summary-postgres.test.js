@@ -3316,6 +3316,16 @@ postgres('visit summary recipient recovery', () => {
         })
         .first('id');
       expect(overdue).toBeUndefined();
+
+      // Ownership back to self-pay: the debt is collectible again, so the
+      // pause the withdrawal set is lifted (an admin pause would not be).
+      await mockPg.transaction(async (trx) => {
+        await trx('customers').where({ id: fixture.customerId }).update({ payer_id: null });
+        return Packets.reconcileWithdrawnPacketInvoices(trx, { customerId: fixture.customerId });
+      });
+      const resumed = await mockPg('invoice_followup_sequences').where({ invoice_id: invoiceId }).first('status', 'paused_reason', 'next_touch_at');
+      expect(resumed).toMatchObject({ status: 'active', paused_reason: null });
+      expect(resumed.next_touch_at).not.toBeNull();
     } finally {
       await mockPg('invoice_followup_sequences').where({ invoice_id: invoiceId }).del();
       await mockPg('customers').where({ id: fixture.customerId }).update({ payer_id: null });
