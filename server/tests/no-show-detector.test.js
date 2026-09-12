@@ -458,6 +458,36 @@ describe('loadPromiseEvents: email promise evidence checks the LIVE delivery sta
     return { conn, calls };
   }
 
+});
+
+describe('loadPromiseEvents: email promise evidence checks the LIVE delivery state (P1-3)', () => {
+  function passthroughChain(result = []) {
+    const chain = {};
+    for (const m of ['join', 'leftJoin', 'whereIn', 'whereRaw', 'whereBetween', 'whereNull', 'whereNotNull', 'where']) chain[m] = () => chain;
+    chain.select = () => Promise.resolve(result);
+    return chain;
+  }
+
+  function fakeConn() {
+    const calls = {};
+    const conn = (table) => {
+      if (table === 'messaging_audit_log as a' || table === 'audit_log' || table === 'series_moves as sm') return passthroughChain([]);
+      if (table === 'customer_interactions as ci') {
+        const chain = {};
+        chain.leftJoin = (joinTable, cb) => { calls.leftJoinTable = joinTable; calls.leftJoinCb = cb; return chain; };
+        chain.where = (...args) => { (calls.whereCalls ||= []).push(args); return chain; };
+        chain.whereBetween = () => chain;
+        chain.whereRaw = (...args) => { (calls.whereRawCalls ||= []).push(args); return chain; };
+        chain.select = (...args) => { calls.selected = args; return Promise.resolve([]); };
+        return chain;
+      }
+      throw new Error(`fake conn: unexpected table ${table}`);
+    };
+    conn.raw = (sql, bindings) => ({ sql, bindings });
+    conn.isTransaction = true;
+    return { conn, calls };
+  }
+
   test('joins email_messages on the stable id and counts only a currently delivered row', async () => {
     const { conn, calls } = fakeConn();
     await loadPromiseEvents(conn, ['visit-1']);
@@ -558,7 +588,16 @@ describe('loadPromiseEvents: an UNLINKED sms_log row is neutral, a sentinel sid 
   test('push OR linked sent/delivered/read OR (unlinked AND real Twilio sid)', async () => {
     const { conn, calls } = fakeConn();
     await loadPromiseEvents(conn, ['visit-1']);
-    const deliveredCall = (calls.whereCalls || []).find(([arg]) => typeof arg === 'function');
+    // Two grouped predicates now: the visit-linkage scope (appointment_id, or
+    // metadata for a legacy row that predates the column) and the delivery
+    // rule. The delivery one is the one that asks about sms_log status.
+    const deliveredCall = (calls.whereCalls || []).filter(([arg]) => typeof arg === 'function')
+      .find(([fn]) => {
+        const probe = { where: () => probe, orWhereIn: (col) => { probe.sawStatus = probe.sawStatus || col === 's.status'; return probe; },
+          orWhere: () => probe, whereIn: () => probe, orWhereRaw: () => probe, whereNull: () => probe, whereRaw: () => probe };
+        fn.call(probe, probe);
+        return probe.sawStatus === true;
+      });
     expect(deliveredCall).toBeTruthy();
 
     const inner = { whereNull: jest.fn(() => inner), whereRaw: jest.fn(() => inner) };
@@ -566,7 +605,7 @@ describe('loadPromiseEvents: an UNLINKED sms_log row is neutral, a sentinel sid 
       where: jest.fn(() => qb), orWhereIn: jest.fn(() => qb),
       orWhere: jest.fn((fn) => { fn.call(inner); return qb; }),
     };
-    deliveredCall[0].call(qb);
+    deliveredCall[0].call(qb, qb);
     expect(qb.where).toHaveBeenCalledWith('a.provider', 'push');
     expect(qb.orWhereIn).toHaveBeenCalledWith('s.status', ['sent', 'delivered', 'read']);
     expect(inner.whereNull).toHaveBeenCalledWith('s.id');
@@ -581,6 +620,27 @@ describe('loadPromiseEvents: an UNLINKED sms_log row is neutral, a sentinel sid 
     expect(pattern.test('template-disabled')).toBe(false);
     expect(pattern.test('internal-redirect')).toBe(false);
     expect(pattern.test('push:delivered')).toBe(false);
+  });
+
+
+  test('a legacy audit row with no appointment_id is still scoped by its metadata visit id (round-6 P1)', async () => {
+    const { conn, calls } = fakeConn();
+    await loadPromiseEvents(conn, ['visit-1']);
+    const scopeCall = (calls.whereCalls || []).filter(([arg]) => typeof arg === 'function')
+      .map(([fn]) => {
+        const seen = [];
+        const probe = {};
+        for (const m of ['whereIn', 'orWhereRaw', 'where', 'orWhere', 'orWhereIn', 'whereNull', 'whereRaw']) {
+          probe[m] = (...args) => { seen.push([m, ...args]); return probe; };
+        }
+        fn.call(probe, probe);
+        return seen;
+      })
+      .find((seen) => seen.some(([m, col]) => m === 'whereIn' && col === 'a.appointment_id'));
+    expect(scopeCall).toBeTruthy();
+    const [, legacySql, bindings] = scopeCall.find(([m]) => m === 'orWhereRaw');
+    expect(legacySql).toContain("a.appointment_id IS NULL AND a.metadata->>'scheduled_service_id' = ANY(?::text[])");
+    expect(bindings).toEqual([['visit-1']]);
   });
 });
 

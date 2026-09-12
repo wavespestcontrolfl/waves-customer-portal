@@ -175,7 +175,19 @@ async function loadPromiseEvents(conn, visitIds, { now = new Date() } = {}) {
   // future.
   const reads = [
     () => conn('messaging_audit_log as a').leftJoin('sms_log as s', 's.twilio_sid', 'a.provider_message_id')
-      .whereIn('a.appointment_id', visitIds)
+      // Either linkage, because appointment_id is NOT universal: the
+      // messaging audit only began stamping it from the appointment senders
+      // on 2026-08-06 (appointment-reminders.js's
+      // `...(metaExtra.scheduled_service_id ? { appointmentId } : {})`), while
+      // those same senders have always carried scheduled_service_id in the
+      // row's metadata. A LEGACY reschedule/confirmation notice — exactly the
+      // class the purpose predicate below goes out of its way to keep as an
+      // unknown-window promise — is therefore invisible to an
+      // appointment_id-only scope, so the stale pre-move window it superseded
+      // goes on driving alerts (codex P1 round 6). Matched on both, and the
+      // mapping below reads the visit id from whichever one the row has.
+      .where((qb) => qb.whereIn('a.appointment_id', visitIds)
+        .orWhereRaw("a.appointment_id IS NULL AND a.metadata->>'scheduled_service_id' = ANY(?::text[])", [visitIds]))
       // Generic appointment texts also include links and preparation tips;
       // only a scheduling notice can replace the customer's promised window.
       // Legacy move notices without a saved time still count as unknown.
@@ -297,7 +309,7 @@ async function loadPromiseEvents(conn, visitIds, { now = new Date() } = {}) {
   const [messages, emails, calls, seriesMoves] = results;
   const candidates = new Set(visitIds.map(String));
   return [
-    ...messages.map((r) => ({ visit_id: r.appointment_id, start_at: Number.isFinite(Number(r.metadata?.rendered_slot_ms)) && r.metadata?.rendered_slot_ms != null
+    ...messages.map((r) => ({ visit_id: r.appointment_id || r.metadata?.scheduled_service_id, start_at: Number.isFinite(Number(r.metadata?.rendered_slot_ms)) && r.metadata?.rendered_slot_ms != null
       ? new Date(Number(r.metadata.rendered_slot_ms)).toISOString() : null, communicated_at: r.sent_at, source: 'message', source_id: r.id })),
     ...emails.map((r) => ({ visit_id: r.metadata?.scheduled_service_id, start_at: Number.isFinite(Number(r.metadata?.rendered_slot_ms)) && r.metadata?.rendered_slot_ms != null
       ? new Date(Number(r.metadata.rendered_slot_ms)).toISOString() : null,
