@@ -1756,12 +1756,27 @@ async function readsAndNavigation(page, server, state, report, device) {
   // and a "1/1 linked" reconciliation summary sat over an account with nothing
   // in it and nothing caught it. Each leaf now empties, and checks, its
   // neighbours as well.
-  // Both StatCard and SummaryTile render the label and then the value as
-  // sibling divs, so the value is read off the label rather than by position.
+  // StatCard and SummaryTile render the label and then the value as sibling
+  // divs; the job-cost tiles put the value first. Either way the figure is read
+  // off its label rather than by position.
   const figure = (label) =>
     page
       .getByText(label, { exact: true })
       .locator("xpath=following-sibling::div[1]");
+  const jobFigure = (label) =>
+    page
+      .getByText(label, { exact: true })
+      .locator("xpath=preceding-sibling::div[1]");
+  // Cards that are rendered only for a non-empty response, and so must be gone
+  // from an empty account.
+  const absent = async (...labels) => {
+    for (const label of labels)
+      assert.equal(
+        await page.getByText(label, { exact: true }).count(),
+        0,
+        label + " on an empty account",
+      );
+  };
   for (const [tab, text, neighbours] of [
     ["assets", "No equipment recorded.", null],
     [
@@ -1773,6 +1788,37 @@ async function readsAndNavigation(page, server, state, report, device) {
       },
     ],
     ["tank-mixes", "No tank mixes configured", null],
+    [
+      "job-costs",
+      "No job costs recorded yet",
+      async () => {
+        assert.equal(await jobFigure("Avg Margin").innerText(), "—");
+        assert.equal(await jobFigure("Total Jobs Costed").innerText(), "0");
+      },
+    ],
+    [
+      // The analytics tab has no empty copy of its own — every card here is
+      // rendered only when its own response carried rows, so their absence is
+      // what an empty account looks like. "Cost of Ownership" is the static
+      // heading that says the tab rendered at all.
+      "analytics",
+      "Cost of Ownership",
+      async () => {
+        await absent(
+          "Totals",
+          "Upcoming Maintenance (Next 30 Days)",
+          "Reliability Ranking (Downtime Hours)",
+          "Maintenance Cost Trend (Last 6 Months)",
+        );
+        // Costs, mileage and due schedules all name the vehicle when they have
+        // rows for it.
+        assert.equal(
+          await page.locator("main").getByText(equipment.name).count(),
+          0,
+          "vehicle rows on an empty account",
+        );
+      },
+    ],
     [
       "calibrations",
       "No equipment systems are available for calibration.",
