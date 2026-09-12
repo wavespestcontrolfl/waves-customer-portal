@@ -57,6 +57,10 @@ const REQUIRED_TEMPLATE_PLACEHOLDERS = Object.freeze({
   outbound_voicemail_quote_request: Object.freeze(['first_name', 'callback_clause', 'optout_clause']),
   outbound_voicemail_returning_call: Object.freeze(['first_name', 'callback_clause', 'optout_clause']),
   outbound_voicemail_saw_text: Object.freeze(['first_name', 'callback_clause', 'optout_clause']),
+  // Promised reschedule link: the link IS the promise. An edit that drops it
+  // renders nothing the worker can send, so every promise on the queue parks
+  // for manual review instead (codex #4293 r1 P2).
+  reschedule_link_promise: Object.freeze(['link']),
 });
 
 function validateTemplateBody(body, variables, templateKey = null) {

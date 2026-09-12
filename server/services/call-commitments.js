@@ -56,7 +56,7 @@ try { Anthropic = require('@anthropic-ai/sdk'); } catch { Anthropic = null; }
 
 const WAVES_KINDS = Object.freeze([
   'send_estimate', 'send_appointment_confirmation', 'callback', 'send_report',
-  'send_paperwork', 'technician_follow_up', 'schedule_visit',
+  'send_paperwork', 'technician_follow_up', 'schedule_visit', 'send_reschedule_link',
 ]);
 const CUSTOMER_KINDS = Object.freeze([
   'send_photos', 'confirm_date', 'call_back', 'provide_info', 'make_payment',
@@ -76,7 +76,7 @@ const CHANNELS = Object.freeze(['sms', 'email', 'call', 'in_person', 'unknown'])
 
 // Bumped when the derivation rules or the model prompt change, so a row can
 // say which extractor produced it.
-const EXTRACTOR_VERSION = 'commitments-v1';
+const EXTRACTOR_VERSION = 'commitments-v2';
 
 // Mirrors CALL_PROC_EXTRACT_TIMEOUT_MS in call-recording-processor.js; the
 // claim ceiling counts this leg at the same budget.
@@ -104,7 +104,12 @@ function slug(text) {
 // singular kinds (one estimate, one confirmation, one callback…) key on
 // party:kind alone so a reworded description on reprocess upserts the same
 // row instead of duplicating it.
-const REPEATABLE_KINDS = new Set(['send_report', 'send_paperwork', 'provide_info', 'other']);
+// send_reschedule_link is repeatable for a different reason: one call can
+// promise a link for TWO existing appointments, and a party:kind key would
+// upsert the second over the first, silently dropping one obligation (codex
+// #4293 r2 P2). The quote anchor gives each promise its own row, and each
+// carries its own grounded subject naming its visit.
+const REPEATABLE_KINDS = new Set(['send_report', 'send_paperwork', 'provide_info', 'send_reschedule_link', 'other']);
 
 function commitmentKey(item) {
   const party = item.party === 'customer' ? 'customer' : 'waves';
@@ -334,6 +339,15 @@ const MODEL_OUTPUT_SCHEMA = {
           due_text: { type: ['string', 'null'], maxLength: 80 },
           due_at: { type: ['string', 'null'] },
           confidence: { type: 'number', minimum: 0, maximum: 1 },
+          subject: {
+            type: ['object', 'null'], additionalProperties: false,
+            properties: {
+              visit_date: { type: ['string', 'null'], pattern: '^\\d{4}-\\d{2}-\\d{2}$' },
+              service: { type: ['string', 'null'], maxLength: 120 },
+              address: { type: ['string', 'null'], maxLength: 240 },
+              quote: { type: ['string', 'null'], maxLength: 500 },
+            },
+          },
           evidence: {
             type: 'array',
             minItems: 1,
@@ -377,6 +391,7 @@ Rules — these are strict:
 3. "due_text" is the timing as spoken ("by tomorrow morning", "later today", "after the inspection") or null. "due_at" is an ISO 8601 timestamp with the -04:00/-05:00 Eastern offset ONLY when the spoken timing names a specific day/time relative to the call date (${when} Eastern); otherwise null. Never invent a time.
 4. "confidence" is how sure you are that the quoted words constitute a real commitment (0 to 1).
 5. Use kind "other" only when none of the listed kinds fits.
+   Use send_reschedule_link ONLY when the AGENT promises to send a link for changing an existing appointment. A caller asking for one, a generic website link, a booking link for new service, or a link already sent is not this promise. Include subject: the CURRENT appointment's date (visit_date, YYYY-MM-DD), service and street address actually discussed, plus a verbatim subject.quote. Resolve relative dates against the call date. Never put the requested NEW date into visit_date. Omit unknown subject values; never guess the soonest visit. If the transcript discusses multiple possible visits, leave subject null.
 6. Output ONLY a JSON object, no prose:
 {"commitments":[{"party":"waves","kind":"send_estimate","description":"...","channel":"email","due_text":"...","due_at":null,"confidence":0.9,"evidence":[{"quote":"...","speaker":"agent"}]}]}
 
@@ -392,18 +407,24 @@ function parseLooseJsonObject(text) {
   return JSON.parse(raw.slice(start, end + 1));
 }
 
-// The transcript's labelled turns, normalized, by speaker. Null when the
-// transcript carries no Agent:/Caller: labels at all (a flat fallback
-// transcript), in which case only flat grounding is possible.
+// The transcript's labelled turns, normalized, by speaker — plus the same
+// turns in spoken order under `ordered` ({ speaker, text }) for a reader
+// that needs to know what came BEFORE what across speakers (the promised-
+// link worker's caller-refusal ordering). Null when the transcript carries
+// no Agent:/Caller: labels at all (a flat fallback transcript), in which
+// case only flat grounding is possible.
 const PARTY_SPEAKER = { waves: 'agent', customer: 'caller' };
 function speakerTurns(transcript) {
-  const turns = { agent: [], caller: [] };
+  const turns = { agent: [], caller: [], ordered: [] };
   let labelled = false;
   for (const line of String(transcript || '').split('\n')) {
     const m = line.match(/^\s*(agent|caller|customer)\s*:\s*(.*)$/i);
     if (!m) continue;
     labelled = true;
-    turns[m[1].toLowerCase() === 'agent' ? 'agent' : 'caller'].push(normalizeForMatch(m[2]));
+    const speaker = m[1].toLowerCase() === 'agent' ? 'agent' : 'caller';
+    const text = normalizeForMatch(m[2]);
+    turns[speaker].push(text);
+    turns.ordered.push({ speaker, text });
   }
   return labelled ? turns : null;
 }
@@ -422,6 +443,7 @@ function speakerTurns(transcript) {
 const KIND_ACTION_WORDS = Object.freeze({
   send_estimate: ['estimate', 'quote', 'pricing', 'price', 'proposal'],
   send_appointment_confirmation: ['confirm', 'confirmation', 'text', 'email', 'details'],
+  send_reschedule_link: ['link', 'reschedule', 'rescheduling'],
   callback: ['call', 'ring', 'phone', 'reach'],
   send_report: ['report', 'summary', 'send'],
   send_paperwork: ['paperwork', 'form', 'agreement', 'contract', 'document', 'send'],
@@ -468,6 +490,9 @@ function groundModelCommitments(items, transcript) {
     if (typeof item.confidence !== 'number' || item.confidence < MIN_MODEL_CONFIDENCE) { droppedLowConfidence += 1; continue; }
     const malformedDue = Number.isNaN(parseDueAt(item.due_at));
     if (malformedDue) malformedDueAt += 1;
+    // Preserve a supplied subject for the send guard to validate. Dropping
+    // an ungrounded subject would turn an explicit mismatch into no filter.
+    const subject = item.kind === 'send_reschedule_link' ? item.subject || null : null;
     kept.push({
       party: item.party,
       kind: COMMITMENT_KINDS.includes(item.kind) ? item.kind : 'other',
@@ -486,6 +511,7 @@ function groundModelCommitments(items, transcript) {
       // words, not the model's claim.
       evidence: grounded.map((e) => ({ quote: String(e.quote).trim(), speaker: turns && speaker ? speaker : e.speaker })),
       origin: 'model',
+      subject,
     });
   }
   return { kept, droppedUngrounded, droppedLowConfidence, droppedMismatched, malformedDueAt };
@@ -536,6 +562,7 @@ function toRow(callLogId, item, { generation, extractorVersion, recordingSid = n
     due_basis: item.due_basis || null,
     confidence: typeof item.confidence === 'number' ? Math.max(0, Math.min(1, item.confidence)) : null,
     evidence: JSON.stringify(item.evidence || []),
+    subject: JSON.stringify(item.subject || null),
     source: 'ai',
     processing_generation: generation ?? null,
     last_seen_generation: generation ?? null,
@@ -564,6 +591,32 @@ async function upsertCommitments(conn, callLogId, items, { generation = null, ex
   const rows = [...dedupedByKey.values()].map((item) => toRow(callLogId, item, { generation, extractorVersion, recordingSid }));
 
   return conn.transaction(async (trx) => {
+    // CANONICAL LOCK ORDER (see reschedule-link-promises.js's module doc
+    // comment for the full rebuilt table): the per-call advisory lock FIRST,
+    // before touching call_log OR call_commitments — this function locks
+    // both (the ownership fence below takes call_log FOR SHARE, then the
+    // upsert loop locks the call_commitments row via INSERT ... ON CONFLICT
+    // DO UPDATE) and used to take neither's serializing lock. A concurrent
+    // ledger dismiss/fulfill (call-commitments.applyHumanUpdate) takes this
+    // SAME advisory lock, then locks call_commitments, then — via
+    // retireAttemptsOnLedgerVerdict's clearPromiseException — call_log: the
+    // exact reverse of this function's own call_log-then-call_commitments
+    // order. Two writers on the same call taking locks in opposite orders
+    // with neither serialized behind the advisory lock is a lock-order-
+    // inversion deadlock waiting to happen, and until now this was the one
+    // caller that skipped the lock entirely (codex #4293 P1, this round).
+    // pg_advisory_xact_lock is per-session reentrant, so this is a no-op
+    // when a caller (recordRelayCommitments) already holds it.
+    await require('../utils/triage-locks').lockTriageCall(trx, callLogId);
+    // Fixes the promised-link worker's live-activation boundary, in this
+    // SAME transaction, before anything else writes — a send_reschedule_link
+    // row this pass inserts is judged later against that instant, and a
+    // transient failure recording it must take the whole write down with it
+    // rather than leave the row committed with no boundary on record (codex
+    // #4293 P2 r4; see reschedule-link-promises.recordLiveActivation). A
+    // no-op for every other commitment kind and whenever that gate isn't
+    // live.
+    await require('./reschedule-link-promises').recordLiveActivation(trx);
     // The fence also names the AUDIO this pass heard: an adopted or
     // replaced recording swaps recording_sid without moving the generation,
     // and a pass still enriching the superseded audio must not persist its
@@ -610,8 +663,8 @@ async function upsertCommitments(conn, callLogId, items, { generation = null, ex
       const result = await trx.raw(
         `INSERT INTO call_commitments
            (call_log_id, commitment_key, party, kind, description, channel, due_at, due_basis, confidence,
-            evidence, source, processing_generation, last_seen_generation, extractor_version, recording_sid, status, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?::jsonb, ?, ?, ?, ?, ?, ?, ?)
+            evidence, source, processing_generation, last_seen_generation, extractor_version, recording_sid, status, updated_at, subject)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?::jsonb, ?, ?, ?, ?, ?, ?, ?, ?::jsonb)
          ON CONFLICT (call_log_id, commitment_key) DO UPDATE SET
            ${callbackDeadlineUpdate}
            description = CASE WHEN call_commitments.human_state IS NULL AND call_commitments.source = 'ai' THEN EXCLUDED.description ELSE call_commitments.description END,
@@ -620,6 +673,7 @@ async function upsertCommitments(conn, callLogId, items, { generation = null, ex
            due_basis = CASE WHEN call_commitments.human_state IS NULL AND call_commitments.source = 'ai' THEN EXCLUDED.due_basis ELSE call_commitments.due_basis END,
            confidence = CASE WHEN call_commitments.human_state IS NULL AND call_commitments.source = 'ai' THEN EXCLUDED.confidence ELSE call_commitments.confidence END,
            evidence = CASE WHEN call_commitments.human_state IS NULL AND call_commitments.source = 'ai' THEN EXCLUDED.evidence ELSE call_commitments.evidence END,
+           subject = CASE WHEN call_commitments.human_state IS NULL AND call_commitments.source = 'ai' THEN EXCLUDED.subject ELSE call_commitments.subject END,
            processing_generation = CASE WHEN call_commitments.human_state IS NULL AND call_commitments.source = 'ai' THEN EXCLUDED.processing_generation ELSE call_commitments.processing_generation END,
            extractor_version = CASE WHEN call_commitments.human_state IS NULL AND call_commitments.source = 'ai' THEN EXCLUDED.extractor_version ELSE call_commitments.extractor_version END,
            recording_sid = CASE WHEN call_commitments.human_state IS NULL AND call_commitments.source = 'ai' THEN EXCLUDED.recording_sid ELSE call_commitments.recording_sid END,
@@ -628,7 +682,7 @@ async function upsertCommitments(conn, callLogId, items, { generation = null, ex
          RETURNING id, (xmax = 0) AS inserted`,
         [
           row.call_log_id, row.commitment_key, row.party, row.kind, row.description, row.channel, row.due_at, row.due_basis, row.confidence,
-          row.evidence, row.source, row.processing_generation, row.last_seen_generation, row.extractor_version, row.recording_sid, row.status, row.updated_at,
+          row.evidence, row.source, row.processing_generation, row.last_seen_generation, row.extractor_version, row.recording_sid, row.status, row.updated_at, row.subject,
         ],
       );
       written += (result?.rows || []).length;
@@ -688,6 +742,9 @@ async function recordCallCommitments({
       ...item,
       evidence: anchorEvidence(item.evidence, { segments, transcript }),
     }));
+    // upsertCommitments fixes the promised-link activation boundary inside
+    // its own write transaction (see there) — atomic with the commitment
+    // row a live send_reschedule_link promise needs it recorded against.
     const result = await upsertCommitments(conn, call.id, items, { generation: procGeneration, procToken, procGeneration, recordingSid: call?.recording_sid || null });
     summary.written = result.written;
     summary.ownershipLost = result.ownershipLost;
@@ -732,6 +789,7 @@ function normalizeRow(row) {
     // no reader sees a snooze the queue no longer honours.
     ...(row.snoozed_until !== undefined ? { snoozed_until: cardsEnabled ? row.snoozed_until : null } : {}),
     evidence: parse(row.evidence) || [],
+    subject: parse(row.subject),
     fulfillment: parse(row.fulfillment),
     confidence: row.confidence == null ? null : Number(row.confidence),
   };
@@ -1802,6 +1860,17 @@ async function recordRelayCommitments(conn, { callSid, transcript, estimateQueue
   try {
     if (!callSid) return summary;
     return await conn.transaction(async (trx) => {
+      // Same lock-order requirement as upsertCommitments (see its own doc
+      // comment, and reschedule-link-promises.js's module comment): this
+      // transaction locks call_log FOR UPDATE below, then reaches
+      // upsertCommitments, which locks call_commitments — the advisory lock
+      // has to come first, before either. callLogId is not known until
+      // call_log is read, so an unlocked pre-read gets the id the advisory
+      // lock needs before the locked (FOR UPDATE) read that actually reads
+      // this transaction's working snapshot (codex #4293 P1, this round).
+      const pre = await trx('call_log').where({ twilio_call_sid: callSid }).first('id');
+      if (!pre) return summary;
+      await require('../utils/triage-locks').lockTriageCall(trx, pre.id);
       const call = await trx('call_log').where({ twilio_call_sid: callSid }).forUpdate().first('id', 'metadata', 'source', 'call_outcome');
       if (!call) return summary;
       // A voice-agent sandbox call is a test: a promise Sandy makes on it
@@ -1868,10 +1937,72 @@ async function applyHumanUpdate(conn, id, { action, description, due_at, note, r
   if (renewalAudit && ['reopen', 'edit'].includes(action) && !conn.isTransaction && typeof conn.transaction === 'function') {
     return conn.transaction((trx) => applyHumanUpdate(trx, id, { action, description, due_at, note, reviewedBy, renewalAudit }));
   }
+  // A dismiss or fulfill recorded straight on the ledger is an explicit
+  // office verdict for a send_reschedule_link commitment (see the branch
+  // below) — reconciling the promise's own outbox rows has to land in the
+  // SAME transaction as this status flip, or an office Reopen racing in
+  // right after could read the commitment as open again before that
+  // reconciliation ever ran (reschedule-link-promises.retireAttemptsOnLedgerVerdict's
+  // own doc comment has the full reasoning). Gated on renewalAudit for the
+  // same reason as the reopen/edit wrap above, not because the flag means
+  // anything for this kind: settleParkedPromiseCard already runs inside its
+  // OWN transaction and passes renewalAudit: false specifically so this
+  // never opens a second, nested one around a connection its caller already
+  // committed to reusing as-is.
+  if (renewalAudit && ['dismiss', 'fulfill'].includes(action) && !conn.isTransaction && typeof conn.transaction === 'function') {
+    return conn.transaction((trx) => applyHumanUpdate(trx, id, { action, description, due_at, note, reviewedBy, renewalAudit }));
+  }
+  // A Confirm recorded on the ledger can ALSO be the office verdict that
+  // revives a send_reschedule_link commitment's generation (see the
+  // linkPromiseConfirm branch below) — that write has to land in the SAME
+  // transaction as the human_state flip, for the identical reason the
+  // reopen/edit and dismiss/fulfill wraps above exist: a separate write
+  // racing a concurrent sweep pass could act on a state this transaction is
+  // about to change out from under it. Its own condition, independent of
+  // the reopen/edit wrap, so an ordinary callback Confirm (which needs none
+  // of this) never pays for a transaction it doesn't use.
+  if (renewalAudit && action === 'confirm' && !conn.isTransaction && typeof conn.transaction === 'function') {
+    return conn.transaction((trx) => applyHumanUpdate(trx, id, { action, description, due_at, note, reviewedBy, renewalAudit }));
+  }
   // Locked: the edit is classified (restated or not) against the row the
   // update will overwrite, never a snapshot another save has since changed.
   const before = renewalAudit && ['reopen', 'edit'].includes(action)
     ? await conn('call_commitments').where({ id }).forUpdate().first('id', 'kind', 'party', 'description', 'due_at', 'human_state', 'reviewed_at') : null;
+  // Same kind/party check as `before` above, but scoped to dismiss/fulfill
+  // and independent of renewalAudit (which the callback branch below still
+  // needs `before` — populated only for reopen/edit — to gate on).
+  const linkPromiseVerdict = ['dismiss', 'fulfill'].includes(action)
+    ? await conn('call_commitments').where({ id }).first('kind', 'party', 'call_log_id') : null;
+  // CANONICAL LOCK ORDER for this feature (see the module doc comment near
+  // the top of reschedule-link-promises.js for the full table): advisory
+  // call lock (lockTriageCall) FIRST, then the call_commitments row, then
+  // any outbox_messages rows, then triage_items. Every other multi-lock path
+  // in this feature (settleDelivery, markLinkUsed, applyContextSkip,
+  // parkReview, settleReconciledReceipt, admin-triage's transitionCore)
+  // already takes the locks in this order. This ledger dismiss/fulfill path
+  // used to be the one exception: the UPDATE below used to run first, and
+  // only afterward — inside retireAttemptsOnLedgerVerdict — did it acquire
+  // this SAME advisory lock. A concurrent settleDelivery (or any other
+  // advisory-lock-first path) could hold the advisory lock waiting on this
+  // row while this transaction held the row waiting on the advisory lock:
+  // a lock-order-inversion deadlock, with Postgres aborting one side and
+  // losing either an office verdict or a delivery reconciliation (codex
+  // #4293 P1). Taking the lock here, before the row is ever touched, is
+  // what keeps this path in the same order as every other one — a no-op
+  // (pg_advisory_xact_lock is per-session reentrant) when a caller such as
+  // settleParkedPromiseCard's transitionCore chain already holds it.
+  if (linkPromiseVerdict && linkPromiseVerdict.kind === 'send_reschedule_link' && linkPromiseVerdict.party === 'waves') {
+    await require('../utils/triage-locks').lockTriageCall(conn, linkPromiseVerdict.call_log_id);
+  }
+  // Confirm's own pre-read, deliberately separate from `before` (which only
+  // covers reopen/edit) so an ordinary callback Confirm never starts
+  // fetching a row the callback branch below has no use for and would
+  // otherwise mistake for licence to record a callback_confirm audit event
+  // that has never existed for this action. human_state/status are read
+  // here, before the patch below overwrites them, because the transition
+  // rule (see the branch after the switch) turns on what they WERE.
+  const linkPromiseConfirm = action === 'confirm'
+    ? await conn('call_commitments').where({ id }).first('kind', 'party', 'human_state', 'status') : null;
   const patch = { reviewed_by: reviewedBy || null, reviewed_at: new Date(), updated_at: new Date() };
   if (note !== undefined) patch.human_note = note ? String(note).slice(0, 2000) : null;
   switch (action) {
@@ -1937,6 +2068,44 @@ async function applyHumanUpdate(conn, id, { action, description, due_at, note, r
     await require('./audit-log').recordAuditEvent({ actor_type: reviewedBy ? 'technician' : 'system', actor_id: reviewedBy || null,
       action: `callback_${action}`, resource_type: 'call_commitment', resource_id: id,
       metadata: { via: 'ledger', renewed_at: new Date().toISOString(), ...renewal }, critical: true, trx: conn });
+  } else if (before && before.kind === 'send_reschedule_link' && before.party === 'waves' && action === 'reopen') {
+    // The inverse of a dismiss is not a no-op for this kind: an explicit
+    // office verdict is one of only two things allowed to move the
+    // promised-link ledger's generation/uncertainty bookkeeping (see
+    // reschedule-link-promises.renewPromiseOnOfficeVerdict for the full
+    // reasoning and the delivery-dedup decision).
+    await require('./reschedule-link-promises').renewPromiseOnOfficeVerdict(conn, id, { reviewedBy, trigger: 'reopen' });
+  } else if (linkPromiseVerdict && linkPromiseVerdict.kind === 'send_reschedule_link' && linkPromiseVerdict.party === 'waves'
+    && ['dismiss', 'fulfill'].includes(action)) {
+    // The other half of the same rule: a dismiss or a manual "mark done"
+    // recorded directly on the ledger is exactly the office verdict
+    // settleParkedPromiseCard already retires delivery uncertainty for when
+    // it comes through this promise's own triage card. The ledger path
+    // never touched the outbox at all, so without this an office Reopen
+    // landing before the next sweep could find the old attempt still
+    // flagged uncertain with nothing left to ever clear it (see
+    // retireAttemptsOnLedgerVerdict's own doc comment).
+    await require('./reschedule-link-promises').retireAttemptsOnLedgerVerdict(conn, id,
+      { callLogId: linkPromiseVerdict.call_log_id, action, reviewedBy, note });
+  } else if (linkPromiseConfirm && linkPromiseConfirm.kind === 'send_reschedule_link' && linkPromiseConfirm.party === 'waves'
+    && linkPromiseConfirm.status === 'open' && require('./reschedule-link-promises').humanStateBlocksPromise(linkPromiseConfirm.human_state)) {
+    // Confirm is not always a no-op for this kind either: status 'open'
+    // combined with a genuinely BLOCKING human_state can only mean 'edited'
+    // (a 'dismissed' row's own action always sets status 'dismissed' in the
+    // very same patch, so the two never separate) — an office Edit that the
+    // very next sweep already found blocking (applyContextSkip's
+    // promise_closed branch, humanStateBlocksPromise) and cancelled the
+    // then-current outbox row for, at the commitment's UNCHANGED
+    // processing_generation (edit never bumps it). A later Confirm affirms
+    // the same live obligation is still correct, restoring human_state to
+    // 'confirmed' — but leaves that generation exactly where the cancelled
+    // row already occupies it, so stagePromises' own NOT EXISTS predicate
+    // would exclude this promise from every future sweep forever without
+    // the identical renewal Reopen already gets. Routed through the SAME
+    // helper Reopen uses — never a second, bespoke bump — so this decision
+    // cannot be skipped by a future transition that reaches 'open' +
+    // 'confirmed' some other way.
+    await require('./reschedule-link-promises').renewPromiseOnOfficeVerdict(conn, id, { reviewedBy, trigger: 'confirm' });
   }
   return normalizeRow(await conn('call_commitments').where({ id }).first());
 }
@@ -2107,6 +2276,8 @@ module.exports = {
   kindBelongsToParty,
   parseDueAt,
   anchorEvidence,
+  speakerTurns,
+  normalizeForMatch,
   deriveCommitmentsFromExtraction,
   callbackDueAt,
   callEndedAt,

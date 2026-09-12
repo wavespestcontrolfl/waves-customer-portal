@@ -73,6 +73,14 @@ const KIND_EVIDENCE = {
   send_paperwork: /\b(?:paperwork|form|agreement|contract|document|certificate)\b/i,
   technician_follow_up: /\b(?:technician|tech|recheck|revisit|visit)\b|\b(?:come|return)\s+(?:back|out|by)\b/i,
   schedule_visit: /\b(?:schedule|reschedule|appointment|visit|book|booking)\b|\bcome\s+(?:out|by|over)\b/i,
+  // Neither half alone establishes THIS specific promise: "reschedule" on
+  // its own could just mean the visit already moved, and "link"/"text"/
+  // "send" alone is too generic to be a report or a call elsewhere in this
+  // table. Both lookaheads must match — mirrors the call-side promise
+  // grounding (RESCHEDULE_WORD/MOVE_INTENT plus the text/link channel
+  // check) in reschedule-link-promises.js, simplified to this table's
+  // single-regex shape (codex #4293 P1, sms-operational-extractor).
+  send_reschedule_link: /(?=.*\b(?:reschedul\w*|re[- ]?schedul\w*|move|moving)\b)(?=.*\b(?:link|text|texting|sms|send|sending)\b)/i,
   send_photos: /\b(?:photos?|pictures?|pics?)\b/i,
   confirm_date: /\b(?:confirm|date|day|time)\b/i,
   provide_info: /\b(?:info(?:rmation)?|address|email|number|code|details?)\b/i,

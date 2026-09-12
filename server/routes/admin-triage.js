@@ -237,6 +237,30 @@ async function transitionCore({ id, nextStatus, note, assignedTo, expectedUpdate
       const { clearCallUnitAnswer } = require('../utils/estimate-claim-sql');
       await clearCallUnitAnswer(trx, item.call_log_id);
     }
+    if (item.reason_code === 'reschedule_link_promise' && ['resolved', 'dismissed'].includes(nextStatus)) {
+      // A promise exception is not closed by generic bookkeeping alone: the
+      // underlying call_commitments row and its outbox_messages row must
+      // move to a terminal state IN THE SAME transition, or the promise
+      // stays open and the outbox stays parked in 'review' with nothing
+      // left to ever surface it again — parkReview only (re)creates a card
+      // when the outbox row's own status or last_error actually changes
+      // (codex #4293 P1; see reschedule-link-promises.settleParkedPromiseCard).
+      // Reload the payload UNDER THE LOCK: another promise can park
+      // (parkReview, itself lockTriageCall-serialized) in the gap between
+      // this route's initial pre-lock read of `item` and this point,
+      // appending its commitment id to payload.reschedule_link_promise
+      // .commitment_ids. Settling against the stale pre-lock snapshot would
+      // only settle the OLDER ids — the newly appended commitment stays
+      // open with its outbox parked in 'review' and no card left to ever
+      // surface it again, since parkReview only (re)creates a card when the
+      // outbox row's own status or last_error actually changes (codex
+      // #4293 P1).
+      const liveCard = await trx('triage_items').where({ id }).first('payload');
+      await require('../services/reschedule-link-promises').settleParkedPromiseCard(
+        trx, { ...item, payload: liveCard ? liveCard.payload : item.payload },
+        { action: nextStatus, reviewedBy: assignedTo, note },
+      );
+    }
     if (nextStatus === 'resolved' && emailReviewCard) {
       // A force-reprocess can leave BOTH an email_invalid and an
       // email_unverified card on the call (the partial unique index is
@@ -587,6 +611,13 @@ router.post('/:id/verdict', async (req, res) => {
     if (item.reason_code === 'property_role_confirm') {
       return res.status(400).json({ error: 'This card is a pending property-role confirmation, not a call verdict — use Apply or Dismiss instead.' });
     }
+    // A parked reschedule-link promise is exception handling on an
+    // OBLIGATION, not a call-routing judgment — and settling it (see
+    // transitionCore) needs the single-card Resolve/Dismiss transition, not
+    // a call-level cascade that never touches the underlying commitment.
+    if (item.reason_code === 'reschedule_link_promise') {
+      return res.status(400).json({ error: 'This card is a parked reschedule-link promise, not a call verdict — use Resolve or Dismiss instead.' });
+    }
 
     // Call-level compare-and-swap: resolve ALL open triage rows for this call in
     // one update. The affected-row count is the win check — the first verdict
@@ -637,9 +668,11 @@ router.post('/:id/verdict', async (req, res) => {
       }
       const resolvedRows = await trx('triage_items')
         .where({ call_log_id: item.call_log_id })
-        // Bounce follow-ups AND pending property-role confirmations survive a
-        // call verdict — both carry work of their own (see the guards above).
-        .whereNotIn('reason_code', ['email_bounce_reverify', 'property_role_confirm'])
+        // Bounce follow-ups, pending property-role confirmations, and parked
+        // reschedule-link promises all survive a call verdict — each carries
+        // work of its own (see the guards above) that a bulk call-level
+        // resolve must not silently swallow without settling it.
+        .whereNotIn('reason_code', ['email_bounce_reverify', 'property_role_confirm', 'reschedule_link_promise'])
         .whereIn('status', OPEN_STATES)
         .update({
           status: 'resolved',

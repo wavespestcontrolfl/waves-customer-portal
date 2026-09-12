@@ -353,8 +353,8 @@ describe('model contract', () => {
   });
   test('the output schema pins the kinds the table CHECK-constrains', () => {
     expect(MODEL_OUTPUT_SCHEMA.properties.commitments.items.properties.kind.enum).toEqual(COMMITMENT_KINDS);
-    const migration = require('../models/migrations/20260901000010_call_commitments');
-    expect(migration.COMMITMENT_KINDS).toEqual([...COMMITMENT_KINDS]);
+    const migration = require('../models/migrations/20260909000092_reschedule_link_promises');
+    expect(new Set(migration.COMMITMENT_KINDS)).toEqual(new Set(COMMITMENT_KINDS));
   });
 });
 
@@ -391,7 +391,151 @@ describe('recordCallCommitments keeps the deterministic seeds when the model leg
     expect(out.skipped).toBe('model_failed');
     expect(out.modelError).toBe('provider timeout');
     expect(raw).toHaveBeenCalled();
-    expect(String(raw.mock.calls[0][0])).toContain('INSERT INTO call_commitments');
+    // upsertCommitments now takes the shared per-call advisory lock (its own
+    // trx.raw call) before the ownership-fence read, ahead of the INSERT —
+    // see call-commitments.js's own doc comment and reschedule-link-promises.js's
+    // module comment for why (codex #4293 P1, lock-order inversion fix).
+    // The INSERT is no longer necessarily the first raw call; find it
+    // instead of assuming its position.
+    expect(raw.mock.calls.some((call) => String(call[0]).includes('INSERT INTO call_commitments'))).toBe(true);
+  });
+});
+
+describe('recordCallCommitments fixes the promised-link activation boundary atomically with the commitment write (codex #4293 P2 r4)', () => {
+  const { recordCallCommitments } = require('../services/call-commitments');
+  const { gates } = require('../config/feature-gates');
+
+  // upsertCommitments now calls recordLiveActivation FIRST INSIDE its own
+  // write transaction (not ahead of it), so the boundary write and the
+  // commitment row share one trx — the mock has to answer both call_log
+  // (the ownership fence) and system_settings (persistedActivationBoundary's
+  // read, insert-if-absent, re-read) on the SAME object conn.transaction
+  // hands back, exactly like a real knex transaction would.
+  function fakeConn(systemSettings) {
+    // rows[0].now backs persistedActivationBoundary's `await conn.raw('SELECT
+    // now() ...')` — the transaction-clock read this boundary now persists
+    // instead of a JS `new Date()` (codex #4293 P1).
+    const raw = jest.fn(async () => ({ rows: [{ id: 'row', now: new Date() }], rowCount: 1 }));
+    function trx(table) {
+      if (table === 'call_log') return { where: () => ({ forShare: () => ({ first: async () => ({ id: 'c' }) }) }) };
+      if (table !== 'system_settings') throw new Error(`unexpected table: ${table}`);
+      let key;
+      const b = {
+        where: (eq) => { key = eq.key; return b; },
+        first: async () => (systemSettings[key] !== undefined ? { value: systemSettings[key] } : null),
+        insert: (data) => ({ onConflict: () => ({ ignore: async () => {
+          if (!(data.key in systemSettings)) systemSettings[data.key] = data.value;
+          return 1;
+        } }) }),
+      };
+      return b;
+    }
+    trx.raw = raw;
+    const conn = Object.assign(jest.fn(trx), { transaction: async (fn) => fn(trx) });
+    return conn;
+  }
+
+  // Simulates a transient system_settings failure: the boundary read/write
+  // throws once, then behaves normally — used to prove the commitment row
+  // never commits un-boundaried (codex #4293 P2 r4).
+  function fakeConnWithTransientFailure(systemSettings) {
+    const raw = jest.fn(async () => ({ rows: [{ id: 'row', now: new Date() }], rowCount: 1 }));
+    let calls = 0;
+    function trx(table) {
+      if (table === 'call_log') return { where: () => ({ forShare: () => ({ first: async () => ({ id: 'c' }) }) }) };
+      if (table !== 'system_settings') throw new Error(`unexpected table: ${table}`);
+      calls += 1;
+      if (calls === 1) throw new Error('connection terminated unexpectedly');
+      let key;
+      const b = {
+        where: (eq) => { key = eq.key; return b; },
+        first: async () => (systemSettings[key] !== undefined ? { value: systemSettings[key] } : null),
+        insert: (data) => ({ onConflict: () => ({ ignore: async () => {
+          if (!(data.key in systemSettings)) systemSettings[data.key] = data.value;
+          return 1;
+        } }) }),
+      };
+      return b;
+    }
+    trx.raw = raw;
+    const conn = Object.assign(jest.fn(trx), { transaction: async (fn) => fn(trx) });
+    return conn;
+  }
+
+  const v2 = {
+    service_request: { quote_promised: true },
+    caller: { preferred_contact_method: 'email' },
+    confidence: { overall: 0.8 },
+    evidence: [{ field_path: '/service_request/quote_promised', quote: 'I will email you an estimate', speaker: 'agent', transcript_offset_ms: null }],
+  };
+  const modelClient = { messages: { create: jest.fn(async () => { throw new Error('provider timeout'); }) } };
+  const run = (conn) => recordCallCommitments({ conn, call: { id: 'c', created_at: new Date().toISOString(), transcript_structured: null },
+    transcript: 'Agent: I will email you an estimate this afternoon, thank you for calling us today.', v2, procToken: 'tok', modelClient });
+
+  test('gate live, nothing persisted: the boundary is on record by the time this write returns, not deferred to a later sweep', async () => {
+    const priorGate = process.env.GATE_RESCHEDULE_LINK_ON_PROMISE, priorEnv = process.env.RESCHEDULE_LINK_PROMISE_ACTIVATED_AT;
+    const priorCommitments = gates.callCommitments;
+    try {
+      gates.callCommitments = true;
+      process.env.GATE_RESCHEDULE_LINK_ON_PROMISE = 'true';
+      delete process.env.RESCHEDULE_LINK_PROMISE_ACTIVATED_AT;
+      const systemSettings = {};
+      const out = await run(fakeConn(systemSettings));
+      expect(out.error).toBeUndefined();
+      expect(systemSettings.reschedule_link_promise_activated_at).toBeDefined();
+    } finally {
+      if (priorGate === undefined) delete process.env.GATE_RESCHEDULE_LINK_ON_PROMISE; else process.env.GATE_RESCHEDULE_LINK_ON_PROMISE = priorGate;
+      if (priorEnv === undefined) delete process.env.RESCHEDULE_LINK_PROMISE_ACTIVATED_AT; else process.env.RESCHEDULE_LINK_PROMISE_ACTIVATED_AT = priorEnv;
+      gates.callCommitments = priorCommitments;
+    }
+  });
+
+  test('gate off (or shadow): the write proceeds exactly as before and system_settings is never touched', async () => {
+    const priorGate = process.env.GATE_RESCHEDULE_LINK_ON_PROMISE, priorCommitments = gates.callCommitments;
+    try {
+      delete process.env.GATE_RESCHEDULE_LINK_ON_PROMISE;
+      gates.callCommitments = true;
+      const systemSettings = {};
+      const out = await run(fakeConn(systemSettings));
+      expect(out.error).toBeUndefined();
+      expect(out.seeds).toBe(1);
+      expect(systemSettings.reschedule_link_promise_activated_at).toBeUndefined();
+    } finally {
+      if (priorGate === undefined) delete process.env.GATE_RESCHEDULE_LINK_ON_PROMISE; else process.env.GATE_RESCHEDULE_LINK_ON_PROMISE = priorGate;
+      gates.callCommitments = priorCommitments;
+    }
+  });
+
+  test('gate live, a transient system_settings failure: the commitment row does not commit un-boundaried', async () => {
+    // Reproduces the P2 finding directly: with the boundary write and the
+    // commitment upsert sharing one transaction, a transient failure on the
+    // FIRST must roll the SECOND back too — never leave the commitment
+    // committed while the boundary is still unset (which a later healthy
+    // sweep would then fix at a LATER instant and cancel this legitimate
+    // live promise as pre_activation, silently).
+    const priorGate = process.env.GATE_RESCHEDULE_LINK_ON_PROMISE, priorEnv = process.env.RESCHEDULE_LINK_PROMISE_ACTIVATED_AT;
+    const priorCommitments = gates.callCommitments;
+    try {
+      gates.callCommitments = true;
+      process.env.GATE_RESCHEDULE_LINK_ON_PROMISE = 'true';
+      delete process.env.RESCHEDULE_LINK_PROMISE_ACTIVATED_AT;
+      const systemSettings = {};
+      const out = await run(fakeConnWithTransientFailure(systemSettings));
+      // The failure surfaces — it is not swallowed — and nothing was written.
+      expect(out.error).toBeDefined();
+      expect(out.written).toBe(0);
+      expect(systemSettings.reschedule_link_promise_activated_at).toBeUndefined();
+
+      // A retry (the transient condition has now cleared) writes both the
+      // boundary and the commitment together.
+      const retried = await run(fakeConn(systemSettings));
+      expect(retried.error).toBeUndefined();
+      expect(systemSettings.reschedule_link_promise_activated_at).toBeDefined();
+    } finally {
+      if (priorGate === undefined) delete process.env.GATE_RESCHEDULE_LINK_ON_PROMISE; else process.env.GATE_RESCHEDULE_LINK_ON_PROMISE = priorGate;
+      if (priorEnv === undefined) delete process.env.RESCHEDULE_LINK_PROMISE_ACTIVATED_AT; else process.env.RESCHEDULE_LINK_PROMISE_ACTIVATED_AT = priorEnv;
+      gates.callCommitments = priorCommitments;
+    }
   });
 });
 
