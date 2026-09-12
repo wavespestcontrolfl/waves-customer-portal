@@ -130,6 +130,12 @@ async function claimNotificationSend(assessmentId) {
     .update({ notification_sent: true, notification_sent_at: null });
 }
 
+// Only a throw before the dispatcher ran proves nothing was sent.
+async function releaseUnhandedClaim(assessmentId, claimed, handedOff) {
+  if (!claimed || handedOff) return;
+  await releaseNotificationSend(assessmentId, null);
+}
+
 async function settleNotificationSend(assessmentId) {
   await db('lawn_assessments').where({ id: assessmentId }).update({ notification_sent_at: new Date() });
 }
@@ -226,6 +232,7 @@ const LawnIntelligence = {
   // ownership mid-step never sends.
   async sendAssessmentNotification(assessmentId, options) {
     let claimed = false;
+    let handedOff = false;
     try {
       const assessment = await db('lawn_assessments').where({ id: assessmentId, confirmed_by_tech: true }).first();
       // service_id set → the visit's completion text carries the report link.
@@ -265,6 +272,10 @@ const LawnIntelligence = {
         emailSubject: `Your Lawn Health Report — Score: ${overall}/100`,
         emailBody: smsMessage,
       });
+      // Past this line the dispatcher has run, so a later throw — a failed
+      // settle write, say — says nothing about whether a text went out. Only a
+      // throw BEFORE this point is a definite non-delivery.
+      handedOff = true;
 
       if (result?.sent) await settleNotificationSend(assessmentId);
       // Nothing delivered (email-preferring customer, blocked SMS) is not a
@@ -280,7 +291,7 @@ const LawnIntelligence = {
       // The dispatcher reports provider failures in its RESULT, so a throw out
       // of it happened before any handoff: nothing is on the wire, and the claim
       // has to come back or the step reads as delivered and is never retried.
-      if (claimed) await releaseNotificationSend(assessmentId, null);
+      await releaseUnhandedClaim(assessmentId, claimed, handedOff);
       logger.error(`[lawn-intel] sendAssessmentNotification failed: ${err.message}`);
       return null;
     }

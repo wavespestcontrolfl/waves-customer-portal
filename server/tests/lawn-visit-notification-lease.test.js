@@ -10,7 +10,12 @@ const rows = {
 jest.mock('../models/db', () => {
   const query = (name) => ({
     first: async () => rows[name],
-    update: async (fields) => { updates.push([name, fields]); return 1; },
+    update: async (fields) => {
+      const settling = Object.keys(fields).length === 1 && fields.notification_sent_at instanceof Date;
+      if (settling && rows.failSettle) throw new Error('settle write failed');
+      updates.push([name, fields]);
+      return 1;
+    },
     // The claim's second .where((q) => …) narrows an unsent row; the fixture row is unsent.
     where: () => query(name),
   });
@@ -78,6 +83,16 @@ describe('sendAssessmentNotification lease check', () => {
     } finally { delete rows.lawn_assessments.service_id; }
     expect(NotificationDispatcher.notify).not.toHaveBeenCalled();
     expect(updates).toEqual([]);
+  });
+
+  test('a settle write that fails after dispatch keeps the claim rather than re-sending', async () => {
+    rows.failSettle = true;
+    try {
+      await expect(LawnIntel.sendAssessmentNotification('a-1')).resolves.toBeNull();
+    } finally { delete rows.failSettle; }
+    // The text went out; only its timestamp is missing. Releasing here would
+    // hand the customer a second copy.
+    expect(updates.map(([, f]) => f.notification_sent)).toEqual([true]);
   });
 
   test('a throw out of the dispatcher happened before any handoff, so the claim comes back', async () => {
