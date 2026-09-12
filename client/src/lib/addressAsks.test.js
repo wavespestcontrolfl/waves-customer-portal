@@ -263,4 +263,18 @@ describe('a successful recovery supersedes the same call\'s stale hold', () => {
     expect(notice.readbackOnly).toBe(true);
     expect(notice.reason).toMatch(/pieced back together/);
   });
+  // Recovered once, then reprocessed with recovery FAILING: the processor keeps
+  // the address_recovered card open but stamps recovery_superseded_at. Treating
+  // it as live would claim the street was reconstructed when this pass could
+  // not reconstruct it.
+  it('an invalidated recovery card does NOT suppress the live validation failure', () => {
+    const notice = addressAskNotice([
+      ask('address_unverified', { address_as_heard: '100 Port Ave East' }, 'call-1'),
+      ask('address_recovered', { recovery_superseded_at: '2026-09-12T04:00:00.000Z' }, 'call-1'),
+    ]);
+
+    expect(notice.readbackOnly).toBe(false);
+    expect(notice.reason).toBe('the address from the call did not validate');
+    expect(notice.heard).toBe('100 Port Ave East');
+  });
 });

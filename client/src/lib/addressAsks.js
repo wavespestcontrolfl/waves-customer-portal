@@ -105,8 +105,17 @@ export function addressAskNotice(asks) {
   // hides the street that was actually recovered (codex #4437 r5 P2). Scoped
   // to the generic hold only — a missing unit can still be owed on a call
   // whose street was recovered.
+  // ...but only a CURRENT recovery supersedes. When a later pass fails to
+  // recover, the processor deliberately leaves the address_recovered card open
+  // and marks it `recovery_superseded_at` (stripping its pass stamps). Reading
+  // the card's mere existence would then tell the operator the street was
+  // reconstructed when this pass could not reconstruct it — the opposite of
+  // the truth, in the dispatch-risk direction (pre-push P1).
+  const liveRecovery = (r, i) => r.reason_code === 'address_recovered'
+    && !r.payload?.recovery_superseded_at
+    && sameCall(r, i);
   const considered = open.filter((i) => !(i.reason_code === 'address_unverified'
-    && open.some((r) => r.reason_code === 'address_recovered' && sameCall(r, i))));
+    && open.some((r) => liveRecovery(r, i))));
   const pool = considered.length > 0 ? considered : open;
   const effectiveRank = (i) => {
     const r = rank(i);
