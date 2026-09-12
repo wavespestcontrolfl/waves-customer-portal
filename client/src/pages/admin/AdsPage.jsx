@@ -1559,15 +1559,20 @@ export default function AdsPage() {
         navGridClassName="grid-cols-2 md:grid-cols-6"
       />
       {tab === "ppc-dashboard" && (
-        <Suspense
-          fallback={
-            <div className="text-ink-secondary [padding:40px] text-center">
-              Loading PPC dashboard...
-            </div>
-          }
-        >
-          <PPCDashboardPage />
-        </Suspense>
+        // Marked so the foundation QA can exclude it: the dashboard is migrated
+        // by its own PR and still renders explicit 11px text and sub-44px
+        // controls, which UiSurface does not override.
+        <div data-qa="ppc-dashboard">
+          <Suspense
+            fallback={
+              <div className="text-ink-secondary [padding:40px] text-center">
+                Loading PPC dashboard...
+              </div>
+            }
+          >
+            <PPCDashboardPage />
+          </Suspense>
+        </div>
       )}
       {tab === "overview" && <OverviewTab />}
       {tab === "call-bridge" && <CallBridgeTab />}

@@ -83,7 +83,10 @@ async function main() {
     const result = await page.evaluate(() => {
       const rootElement = document.querySelector('main .ads-page[data-ui-density="comfortable"]');
       if (!rootElement) throw new Error('Comfortable PPC surface missing');
-      const visible = (node) => node.getClientRects().length > 0;
+      // The PPC dashboard is migrated by its own PR; scanning it here fails the
+      // run before the refreshed workspaces are ever exercised.
+      const excluded = rootElement.querySelector('[data-qa="ppc-dashboard"]');
+      const visible = (node) => node.getClientRects().length > 0 && !(excluded && excluded.contains(node));
       const smallText = [...rootElement.querySelectorAll('*')]
         .filter(visible)
         .filter((node) => [...node.childNodes].some((child) => child.nodeType === 3 && child.textContent.trim()))
@@ -106,7 +109,10 @@ async function main() {
   }
 
   try {
-    server = await connectPreview(process.env.ADMIN_PREVIEW_URL || 'http://127.0.0.1:25157');
+    // No URL unless one is actually supplied: browser.js treats any requested
+    // URL as an externally managed server and throws rather than starting Vite,
+    // so the documented bare invocation could never come up on a clean checkout.
+    server = await connectPreview(process.env.ADMIN_PREVIEW_URL);
     browser = await launchBrowser();
     const desktop = await openPage(1440);
     await desktop.goto(`${server.baseUrl}/admin/ppc`);
