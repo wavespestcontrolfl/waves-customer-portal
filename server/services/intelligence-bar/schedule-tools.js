@@ -14,7 +14,7 @@ const { assertAssignableTechnician, applyAssignable } = require('../technician-e
 const { scheduledServiceTrackTokenExpiry } = require('../track-token-expiry');
 const { etDateString, addETDays, validScheduleDate, sameDayWindowElapsed } = require('../../utils/datetime-et');
 const { dayStopsQuery, guardedCoordSelects } = require('../scheduling/day-stops');
-const { resolveWindowSafeOrderByTechDay, inProgressStartMin } = require('../route-reorder');
+const { resolveWindowSafeOrderByTechDay, windowSafeFigures, inProgressStartMin } = require('../route-reorder');
 const { probeSlotOverlap, slotOverlapWarning } = require('../scheduling/window-rules');
 
 const SCHEDULE_TOOLS = [
@@ -426,8 +426,13 @@ async function optimizeAllRoutes(input) {
   // per-tech-day resolver the admin optimize buttons and the nightly pass use
   // (codex #4430 r3 P1: these two tools were the third writer still applying
   // Google's raw order).
+  // sourceStops is the FULL day, not just the geocoded rows: an ungeocoded
+  // appointment is exactly what COORDLESS_STOPS and LIVE_STOP_IN_PROGRESS
+  // exist to catch, and filtering it out first would hide it (codex #4430 r3
+  // P1). Ungeocoded rows are not in the optimizer's order, so a day that
+  // passes leaves their route_order untouched.
   const guarded = resolveWindowSafeOrderByTechDay({
-    RouteOptimizer, orderedStops: result.orderedStops, sourceStops: stopsWithCoords,
+    RouteOptimizer, orderedStops: result.orderedStops, sourceStops: services,
     googleSource: result.source, legs: result.legs, startMin: inProgressStartMin(date),
   });
   if (guarded.refusal) {
@@ -438,10 +443,16 @@ async function optimizeAllRoutes(input) {
   const optimizedById = new Map(result.orderedStops.map((s) => [s.id, s]));
   result.orderedStops = guarded.orderedIds.map((id) => optimizedById.get(id));
 
-  const savedMiles = Math.max(0, Math.round((result.unoptimizedDistanceMeters - result.totalDistanceMeters) / 1609.34));
-  const savedPct = result.unoptimizedDistanceMeters > 0
-    ? Math.round(((result.unoptimizedDistanceMeters - result.totalDistanceMeters) / result.unoptimizedDistanceMeters) * 100)
-    : 0;
+  // A repaired order is NOT the one Google scored, so the card must not
+  // advertise Google's savings for a sequence it will never apply — the same
+  // per-tech-day figures the admin endpoint reports (codex #4430 r3 P1).
+  const figures = windowSafeFigures(result, guarded.resolvedByTech, guarded.anyWindowConstrained);
+  result.totalDistanceMeters = figures.totalDistanceMeters;
+  result.unoptimizedDistanceMeters = figures.unoptimizedDistanceMeters;
+  result.totalDurationSeconds = figures.totalDurationMinutes * 60;
+  if (guarded.anyWindowConstrained) result.source = 'window_constrained';
+  const savedMiles = Math.round(figures.savedDistanceMeters / 1609.34);
+  const savedPct = figures.savedPercent;
 
   const summary = {
     date,
@@ -566,8 +577,10 @@ async function optimizeTechRoute(input) {
     { startLat: RouteOptimizer.HQ.lat, startLng: RouteOptimizer.HQ.lng, endAtStart: true },
   );
 
+  // Full day as sourceStops, repaired figures on the card — see the notes in
+  // optimize_all_routes above.
   const guarded = resolveWindowSafeOrderByTechDay({
-    RouteOptimizer, orderedStops: result.orderedStops, sourceStops: stopsWithCoords,
+    RouteOptimizer, orderedStops: result.orderedStops, sourceStops: services,
     googleSource: result.source, legs: result.legs, startMin: inProgressStartMin(date),
   });
   if (guarded.refusal) {
@@ -577,7 +590,12 @@ async function optimizeTechRoute(input) {
   const optimizedById = new Map(result.orderedStops.map((s) => [s.id, s]));
   result.orderedStops = guarded.orderedIds.map((id) => optimizedById.get(id));
 
-  const savedMiles = Math.max(0, Math.round((result.unoptimizedDistanceMeters - result.totalDistanceMeters) / 1609.34));
+  const figures = windowSafeFigures(result, guarded.resolvedByTech, guarded.anyWindowConstrained);
+  result.totalDistanceMeters = figures.totalDistanceMeters;
+  result.unoptimizedDistanceMeters = figures.unoptimizedDistanceMeters;
+  result.totalDurationSeconds = figures.totalDurationMinutes * 60;
+  if (guarded.anyWindowConstrained) result.source = 'window_constrained';
+  const savedMiles = Math.round(figures.savedDistanceMeters / 1609.34);
 
   const summary = {
     tech: tech.name,

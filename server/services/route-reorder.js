@@ -479,6 +479,37 @@ function resolveWindowSafeOrderByTechDay({ RouteOptimizer, orderedStops, sourceS
 }
 
 /**
+ * The distance/duration figures a route-writing caller reports. When every tech-day passed the
+ * guards unchanged they are Google's own reported numbers, byte-identical to
+ * before the guard existed. When any tech-day was window-fit-repaired they
+ * are summed PER TECH-DAY from chooseWindowSafeOrder's own before/after
+ * figures under the SAME shared model the repair scored against: Google's
+ * numbers describe an order that was never written, and scoring the flat
+ * multi-tech list as one route would chain truck A's last stop to truck B's
+ * first and report a leg nobody drives. Unassigned stops have no tech-day and
+ * are left out of the sum, exactly as they are left out of the guards.
+ */
+function windowSafeFigures(result, resolvedByTech, anyWindowConstrained) {
+  const outcomes = [...resolvedByTech.values()];
+  const totalDistanceMeters = anyWindowConstrained
+    ? outcomes.reduce((sum, o) => sum + (o.afterMeters || 0), 0) : result.totalDistanceMeters;
+  const unoptimizedDistanceMeters = anyWindowConstrained
+    ? outcomes.reduce((sum, o) => sum + (o.beforeMeters || 0), 0) : result.unoptimizedDistanceMeters;
+  const totalDurationMinutes = Math.round(anyWindowConstrained
+    ? outcomes.reduce((sum, o) => sum + (o.afterSeconds || 0), 0) / 60
+    : result.totalDurationSeconds / 60);
+  const savedDistanceMeters = Math.max(0, unoptimizedDistanceMeters - totalDistanceMeters);
+  return {
+    totalDurationMinutes,
+    totalDistanceMeters,
+    unoptimizedDistanceMeters,
+    savedDistanceMeters,
+    savedPercent: unoptimizedDistanceMeters > 0
+      ? Math.round((savedDistanceMeters / unoptimizedDistanceMeters) * 100) : 0,
+  };
+}
+
+/**
  * Full guard-input signature for the commit-time staleness fence: window
  * RANGE + service duration + the staff-pin flags + the linked visit — the
  * chronology AND feasibility guards (and, for a linked visit, its identity)
@@ -1127,6 +1158,7 @@ async function recordSkippedTick(reason, now = new Date()) {
 module.exports = {
   inProgressStartMin,
   resolveWindowSafeOrderByTechDay,
+  windowSafeFigures,
   runRouteReorder,
   runRouteReorderIfEnabled,
   runRouteRepairAfterChange,

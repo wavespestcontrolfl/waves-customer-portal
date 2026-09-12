@@ -15,7 +15,7 @@ const { collectiveMoveGateOn, dateExceptionStamp } = require('../services/rebook
 const { stampedDivergesSql, stampedLine2Sql } = require('../services/stamped-address');
 const { dayStopsQuery, guardedCoordSelects } = require('../services/scheduling/day-stops');
 const { chooseWindowSafeOrder, windowGuardSignature, inProgressStartMin,
-  resolveWindowSafeOrderByTechDay } = require('../services/route-reorder');
+  resolveWindowSafeOrderByTechDay, windowSafeFigures } = require('../services/route-reorder');
 const {
   assertAdminAppointmentWindow, probeSlotOverlap, slotOverlapWarning, ADMIN_OCCUPANCY_EXCLUDE_STATUSES,
 } = require('../services/scheduling/window-rules');
@@ -13422,37 +13422,6 @@ function optimizeGuardSignature(stop) {
     stop.status ?? '', num(stop.lat), num(stop.lng)].join('|');
 }
 
-/**
- * The response's distance/duration figures. When every tech-day passed the
- * guards unchanged they are Google's own reported numbers, byte-identical to
- * before the guard existed. When any tech-day was window-fit-repaired they
- * are summed PER TECH-DAY from chooseWindowSafeOrder's own before/after
- * figures under the SAME shared model the repair scored against: Google's
- * numbers describe an order that was never written, and scoring the flat
- * multi-tech list as one route would chain truck A's last stop to truck B's
- * first and report a leg nobody drives. Unassigned stops have no tech-day and
- * are left out of the sum, exactly as they are left out of the guards.
- */
-function optimizeFigures(result, resolvedByTech, anyWindowConstrained) {
-  const outcomes = [...resolvedByTech.values()];
-  const totalDistanceMeters = anyWindowConstrained
-    ? outcomes.reduce((sum, o) => sum + (o.afterMeters || 0), 0) : result.totalDistanceMeters;
-  const unoptimizedDistanceMeters = anyWindowConstrained
-    ? outcomes.reduce((sum, o) => sum + (o.beforeMeters || 0), 0) : result.unoptimizedDistanceMeters;
-  const totalDurationMinutes = Math.round(anyWindowConstrained
-    ? outcomes.reduce((sum, o) => sum + (o.afterSeconds || 0), 0) / 60
-    : result.totalDurationSeconds / 60);
-  const savedDistanceMeters = Math.max(0, unoptimizedDistanceMeters - totalDistanceMeters);
-  return {
-    totalDurationMinutes,
-    totalDistanceMeters,
-    unoptimizedDistanceMeters,
-    savedDistanceMeters,
-    savedPercent: unoptimizedDistanceMeters > 0
-      ? Math.round((savedDistanceMeters / unoptimizedDistanceMeters) * 100) : 0,
-  };
-}
-
 /** Operator-facing copy for each refusal the shared decision can return. */
 function optimizeRefusalMessage(reason) {
   if (reason === 'WINDOW_FIT_GATE_OFF') return 'Google\'s route breaks a promised arrival window and the window-fit repair is off — nothing was changed.';
@@ -13618,7 +13587,7 @@ router.post('/optimize', requireAdmin, async (req, res, next) => {
     // audit P1). Unassigned stops have no tech-day and are left out of the
     // sum, same as they are left out of the guards.
     const { totalDurationMinutes, totalDistanceMeters, unoptimizedDistanceMeters,
-      savedDistanceMeters, savedPercent } = optimizeFigures(result, resolvedByTech, anyWindowConstrained);
+      savedDistanceMeters, savedPercent } = windowSafeFigures(result, resolvedByTech, anyWindowConstrained);
 
     const response = {
       success: true,
