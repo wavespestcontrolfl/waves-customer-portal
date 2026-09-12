@@ -195,7 +195,9 @@ test('a co-visit target contributes its real estimate, not its normalized window
     target: sameProperty('target', { estimated_duration_minutes: 20 }),
     rows: [sibling],
   };
-  const fit = evaluateArrivalPlacement(ctx, { windowStart: '09:00', windowEnd: '10:00', durationMinutes: 20 });
+  // 60 is what find-time-hints actually passes — the selected WINDOW SPAN,
+  // not the job's real length. Treating that span as work is the bug.
+  const fit = evaluateArrivalPlacement(ctx, { windowStart: '09:00', windowEnd: '10:00', durationMinutes: 60 });
   const target20 = fit.arrivals.find((s) => s.id === 'target');
   const sib = fit.arrivals.find((s) => s.id === 'sibling');
   expect(fit.feasible).toBe(true);
@@ -205,8 +207,9 @@ test('a co-visit target contributes its real estimate, not its normalized window
   expect(target20.arrival).toBe(sib.arrival);
   expect(target20.arrival).toBe('09:00');
   // The chain's total shows on its last member: 09:00 + max(60, 50 + 20).
-  // Taking the target's estimate AFTER its span normalization would make it
-  // 50 + 60 = 110 and push this to 10:50.
+  // Taking the target's estimate AFTER its span normalization — or reading
+  // the 60-minute span argument as work — makes it 50 + 60 = 110 and pushes
+  // this to 10:50.
   expect(target20.departure).toBe('10:10');
 });
 

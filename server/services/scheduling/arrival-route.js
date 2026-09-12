@@ -200,12 +200,14 @@ function evaluateArrivalPlacement(context, { windowStart, windowEnd, durationMin
   if (capacity) dayEndMin = Math.min(dayEndMin, SHIFT.endMinutes);
   const target = {
     ...context.target, window_start: windowStart, window_end: windowEnd,
-    // The target's REAL work, captured BEFORE the line below replaces its
-    // estimate with the window span: a 20-minute job in a 60-minute span
-    // beside a 50-minute co-visit sibling is max(60, 20 + 50) = 70 minutes on
-    // site, not 60 + 50 (Codex #4435 r3 P1).
-    raw_estimate_minutes: context.prospective ? Number(durationMinutes) || 0
-      : Math.max(Number(context.target?.estimated_duration_minutes) || 0, Number(durationMinutes) || 0),
+    // The target's REAL work — its own stored estimate, captured BEFORE the
+    // line below replaces it with the window span, and NEVER the
+    // window-derived `durationMinutes` (find-time-hints passes the selected
+    // span there, and treating a span as additive work charges a 20-minute
+    // job in a 60-minute window 60 minutes beside its sibling — codex #4435
+    // r3/r4 P1). A genuinely long service is still covered: the chain's
+    // floor is the longest member's workDuration, which includes it.
+    raw_estimate_minutes: Number(context.target?.estimated_duration_minutes) || 0,
     estimated_duration_minutes: context.prospective ? Number(durationMinutes)
       : Math.max(workDuration(context.target), Number(durationMinutes) || 0),
   };
