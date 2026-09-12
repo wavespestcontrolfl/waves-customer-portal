@@ -219,6 +219,18 @@ function ValueSlider({ label, desc, value, onChange, increaseLabel, decreaseLabe
   );
 }
 
+function valueScoreTone(score) {
+  if (score == null) return undefined;
+  if (score < 1) return "text-alert-fg";
+  return score < 2 ? "text-warn-fg" : undefined;
+}
+
+function valueScoreBadgeTone(score) {
+  if (score == null) return "neutral";
+  if (score < 1) return "alert";
+  return score < 2 ? "warn" : "strong";
+}
+
 function ValueEquationTab() {
   const [inputs, setInputs] = useState({ dreamOutcome: 7, perceivedLikelihood: 7, timeDelay: 3, effortSacrifice: 3 });
   const [result, setResult] = useState(null);
@@ -259,8 +271,12 @@ function ValueEquationTab() {
         <Card>
           <CardHeader><CardTitle className="text-16">Value score</CardTitle></CardHeader>
           <CardBody className="text-center">
-            <div className="text-28 font-medium text-zinc-900 u-nums">{result?.valueScore ?? "—"}</div>
-            <Badge tone="strong" className="mt-3">{result?.priceRecommendation || "Calculating"}</Badge>
+            {/* pricing-intelligence.js:84-96 bands the score: >=5 premium,
+                >=2 competitive, >=1 commodity, below that the red zone. Main
+                painted a low score red; a single strong badge made a failing
+                offer look like a premium one. */}
+            <div className={`text-28 font-medium u-nums ${valueScoreTone(result?.valueScore) || "text-zinc-900"}`}>{result?.valueScore ?? "—"}</div>
+            <Badge tone={valueScoreBadgeTone(result?.valueScore)} className="mt-3">{result?.priceRecommendation || "Calculating"}</Badge>
             {result?.positioning && <p className="mt-3 text-ui-body text-ink-secondary">{result.positioning}</p>}
           </CardBody>
         </Card>
@@ -314,7 +330,6 @@ function normalizeOpportunity({ customer = {}, upsell = {} }) {
     customerName: customer.name,
     currentTier: customer.tier,
     monthlyRate: customer.monthlyRate,
-    serviceCount: upsell.currentServiceCount,
     potentialAdd: upsell.estimatedMonthlyAdd,
     suggestedService: upsell.service,
   };
@@ -342,7 +357,10 @@ function UpsellEngineTab({ showToast }) {
     <div className="space-y-5">
       <Card><CardHeader><CardTitle className="text-16">Upsell opportunities ({opportunities.length})</CardTitle></CardHeader><CardBody className="divide-y divide-zinc-200">
         {opportunities.length === 0 ? <p className="py-6 text-center text-ink-secondary">No upsell opportunities found</p> : opportunities.slice(0, 10).map((opportunity) => (
-          <div key={opportunity.customerId} className="flex min-h-14 flex-wrap items-center justify-between gap-3 py-3"><div><div className="font-medium text-zinc-900">{opportunity.customerName}</div><div className="text-ui-caption text-ink-secondary">Currently: {opportunity.currentTier} · {opportunity.serviceCount} service{opportunity.serviceCount !== 1 ? "s" : ""} · {formatMoney(opportunity.monthlyRate)}/mo</div></div><div className="flex flex-wrap items-center gap-3"><div><div className="font-medium u-nums">+{formatMoney(opportunity.potentialAdd)}/mo</div><div className="text-ui-caption text-ink-secondary">{opportunity.suggestedService}</div></div><Button onClick={() => triggerUpsell(opportunity.customerId)}><Send size={16} aria-hidden /> Send offer</Button></div></div>
+          <div key={opportunity.customerId} className="flex min-h-14 flex-wrap items-center justify-between gap-3 py-3"><div><div className="font-medium text-zinc-900">{opportunity.customerName}</div>{/* No service count: neither findBestUpsell branch
+                (pricing-intelligence.js:268-312) returns one, so main's
+                "{serviceCount} services" always rendered undefined. */}
+              <div className="text-ui-caption text-ink-secondary">Currently: {opportunity.currentTier} · {formatMoney(opportunity.monthlyRate)}/mo</div></div><div className="flex flex-wrap items-center gap-3"><div><div className="font-medium u-nums">+{formatMoney(opportunity.potentialAdd)}/mo</div><div className="text-ui-caption text-ink-secondary">{opportunity.suggestedService}</div></div><Button onClick={() => triggerUpsell(opportunity.customerId)}><Send size={16} aria-hidden /> Send offer</Button></div></div>
         ))}
       </CardBody></Card>
       <Card><CardHeader><CardTitle className="text-16">Upsell rules</CardTitle></CardHeader><CardBody className="divide-y divide-zinc-200">
@@ -359,7 +377,13 @@ function LTVAnalysisTab() {
   // A mounted ref, not an effect-scoped flag: recalculate() outlives the effect,
   // so both async paths need the same guard before they setState.
   const mounted = useRef(true);
-  useEffect(() => () => { mounted.current = false; }, []);
+  // Re-armed in setup, not just cleared in cleanup: StrictMode runs
+  // setup → cleanup → setup in development, and a cleanup-only ref would stay
+  // false for the second setup and strand the tab on "Loading LTV analysis...".
+  useEffect(() => {
+    mounted.current = true;
+    return () => { mounted.current = false; };
+  }, []);
   useEffect(() => {
     adminFetch("/admin/pricing/ltv-analysis")
       .then((next) => { if (mounted.current) setData(next); })

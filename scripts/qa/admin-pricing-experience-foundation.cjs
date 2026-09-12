@@ -50,7 +50,7 @@ function fixture(api, method, body) {
   // upsell list is { customer, upsell } pairs and the LTV read returns summary /
   // channelPerformance / retentionCurve. Flattened fixtures made this proof pass
   // against a contract the server never sends.
-  if (api === '/admin/pricing/upsell-opportunities') return { total: 1, opportunities: [{ customer: { id: 'customer-1', name: 'Synthetic customer', tier: 'Silver', monthlyRate: 100, phone: '9415550100' }, upsell: { type: 'add_service', service: 'Mosquito', pitch: 'Synthetic pitch', estimatedMonthlyAdd: 25, currentServiceCount: 2 } }] };
+  if (api === '/admin/pricing/upsell-opportunities') return { total: 1, opportunities: [{ customer: { id: 'customer-1', name: 'Synthetic customer', tier: 'Silver', monthlyRate: 100, phone: '9415550100' }, upsell: { type: 'add_service', service: 'Mosquito', pitch: 'Synthetic pitch', estimatedMonthlyAdd: 25 } }] };
   if (api === '/admin/pricing/trigger-upsell/customer-1') return { message: 'Synthetic upsell sent' };
   if (api === '/admin/pricing/ltv-analysis') return {
     totalTracked: 5,
@@ -103,7 +103,11 @@ async function main() {
   }
 
   async function assertFoundation(page) {
-    const surface = page.locator('[data-ui-density="comfortable"]').last();
+    // .first(), not .last(): PricingLogicPage renders an outer surface that
+    // contains MarginCalculator's own nested one, and .last() picked the
+    // calculator card — so the checks skipped PricingLogicPanel entirely and
+    // could report a full-workspace pass while inspecting a fraction of it.
+    const surface = page.locator('[data-ui-density="comfortable"]').first();
     await surface.waitFor();
     const inlineStyles = await surface.locator('[style]:not(.ui-select)').evaluateAll((elements) => elements.filter((element) => element.getAttribute('style')?.trim()).map((element) => ({ tag: element.tagName, style: element.getAttribute('style') })).slice(0, 8));
     assert.deepEqual(inlineStyles, [], `page-local inline styles must be absent: ${JSON.stringify(inlineStyles)}`);
