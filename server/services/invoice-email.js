@@ -117,6 +117,17 @@ async function sendInvoiceEmail(invoiceId, options = {}) {
   if (invoice.payer_statement_id) {
     return { ok: false, error: 'Invoice is billed on the payer’s monthly statement; not sent individually.' };
   }
+  // A WITHDRAWN combined-visit invoice is payer-owned on a row whose payer_id
+  // stays NULL (Codex #4311 r45 P1): the send fence only recognises `sending`,
+  // and sendViaSMSAndEmail flips the invoice to `sent` on the text leg — so a
+  // Bill-To edit landing between the legs would reach this one, and the
+  // payer_id checks below would let the homeowner receive the PDF and pay
+  // link for debt that now belongs to AP. This is the email chokepoint; fail
+  // closed here as the statement guard above does.
+  if (require('./invoice-helpers').invoiceWithdrawnFromCustomer(invoice)) {
+    logger.warn(`[invoice-email] Invoice ${invoice.invoice_number} was withdrawn to a third-party payer — not emailing the customer.`);
+    return { ok: false, error: 'Invoice is billed to a third-party payer; not sent to the customer.' };
+  }
   // Amount the customer pays = total − applied account credit (what Stripe charges).
   const amountDue = invoiceAmountDue(invoice);
   const customer = await db('customers').where({ id: invoice.customer_id })
