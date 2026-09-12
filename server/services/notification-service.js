@@ -151,10 +151,15 @@ const NotificationService = {
       const isAdmin = recipientType === 'admin';
       // The bell exposes the same copy as native push. Recheck after any
       // preference/property lookup and dedupe lock, before persisting it.
-      if (!isAdmin && typeof shouldContinue === 'function') {
-        let allowed = false;
-        try { allowed = await shouldContinue(); } catch { /* fail closed */ }
-        if (allowed !== true) return { id: null, suppressed: true, reason: 'pre_send_check_blocked' };
+      if (typeof shouldContinue === 'function') {
+        const verdict = await shouldContinue();
+        const allowed = verdict === true || verdict?.ok === true;
+        const hasDeadline = verdict && Object.prototype.hasOwnProperty.call(verdict, 'validUntil');
+        const deadlineValid = !hasDeadline || (Number.isFinite(verdict.validUntil) && Date.now() < verdict.validUntil);
+        const windowValid = typeof shouldContinue.isStillValid !== 'function' || shouldContinue.isStillValid() === true;
+        if (!allowed || !deadlineValid || !windowValid) {
+          return { id: null, suppressed: true, reason: 'pre_send_check_blocked' };
+        }
       }
       const [notif] = await connection('notifications').insert({
         recipient_type: recipientType,
@@ -360,7 +365,7 @@ const NotificationService = {
       body,
       ...createOpts,
       metadata,
-      ...(typeof pushOptions.shouldContinue === 'function' ? { shouldContinue: pushOptions.shouldContinue } : {}),
+      shouldContinue: pushOptions.shouldContinue,
     };
 
     let notification;

@@ -346,14 +346,26 @@ function heartbeatCutoff() {
 // (non-window senders).
 function windowGuardFrom(preSendCheck) {
   if (typeof preSendCheck !== 'function') return undefined;
-  return async () => {
+  const guard = async () => {
     try {
       const verdict = await preSendCheck();
-      return Boolean(verdict && verdict.ok === true);
+      if (verdict === true) return true;
+      return verdict?.ok === true ? verdict : false;
     } catch {
       return false; // unknown window state → stop the fan-out
     }
   };
+  // The structured success carries a caller's copy deadline. This pure
+  // companion lets push re-check the canonical clock after its ownership
+  // query without repeating an opaque caller await.
+  guard.isStillValid = () => {
+    try {
+      return typeof preSendCheck.isStillValid !== 'function' || preSendCheck.isStillValid() === true;
+    } catch {
+      return false;
+    }
+  };
+  return guard;
 }
 
 // Durable in-app record, written only AFTER delivery is proven so retry
@@ -622,5 +634,5 @@ module.exports = {
   PUSH_ROUTING_POLICY,
   gatePushRoutingOn: () => gateEnvValue('GATE_PUSH_CHANNEL_ROUTING'),
   // exported for tests
-  _test: { pushPresentation, PRESENTATION, PREF_CHANNEL_COLUMN, normalizeDigits, pushEligibleRuntime },
+  _test: { pushPresentation, PRESENTATION, PREF_CHANNEL_COLUMN, normalizeDigits, pushEligibleRuntime, windowGuardFrom },
 };

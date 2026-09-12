@@ -117,6 +117,58 @@ test.each([
   }));
 });
 
+test('a successful caller boundary preserves its finite copy deadline', async () => {
+  const validUntil = Date.now() + 60000;
+  const preSendCheck = jest.fn(async () => ({ ok: true, validUntil, preparation: 'fresh' }));
+  await sendCustomerMessage({ ...BASE_INPUT, preSendCheck });
+
+  const providerGuard = sendViaTwilio.mock.calls[0][1].preSendCheck;
+  await expect(providerGuard()).resolves.toEqual({
+    ok: true, validUntil, preparation: 'fresh',
+  });
+  expect(providerGuard.isStillValid()).toBe(true);
+});
+
+test.each([NaN, Infinity, '123'])('an invalid caller copy deadline fails closed: %s', async (validUntil) => {
+  sendViaTwilio.mockImplementationOnce(async (_providerInput, hooks) => {
+    expect(await hooks.preSendCheck()).toMatchObject({ ok: false, code: 'PRE_SEND_CHECK_INVALID' });
+    return { sent: false, provider: 'push', deliveryOutcome: 'not_sent' };
+  });
+
+  await expect(sendCustomerMessage({
+    ...BASE_INPUT,
+    preSendCheck: async () => ({ ok: true, validUntil }),
+  })).resolves.toMatchObject({ sent: false, blocked: true, deliveryOutcome: 'not_sent', code: 'PRE_SEND_CHECK_INVALID' });
+});
+
+test('an expired caller copy deadline is a retryable definite non-send', async () => {
+  sendViaTwilio.mockImplementationOnce(async (_providerInput, hooks) => {
+    expect(await hooks.preSendCheck()).toMatchObject({ ok: false, code: 'PRE_SEND_CHECK_EXPIRED', retryable: true });
+    return { sent: false, provider: 'push', deliveryOutcome: 'not_sent' };
+  });
+
+  await expect(sendCustomerMessage({
+    ...BASE_INPUT,
+    preSendCheck: async () => ({ ok: true, validUntil: Date.now() - 1 }),
+  })).resolves.toMatchObject({
+    sent: false, blocked: true, deliveryOutcome: 'not_sent', code: 'PRE_SEND_CHECK_EXPIRED', retryable: true,
+  });
+});
+
+test('caller pre-send checks cannot run outside an SMS handoff lock', async () => {
+  const result = await sendCustomerMessage({
+    ...BASE_INPUT,
+    entryPoint: 'lead_response_auto_reply',
+    preSendCheck: async () => ({ ok: true }),
+    withSmsHandoff: jest.fn(),
+  });
+
+  expect(result).toMatchObject({
+    sent: false, blocked: true, deliveryOutcome: 'not_sent', code: 'UNSUPPORTED_SEND_GUARD_COMBINATION',
+  });
+  expect(sendViaTwilio).not.toHaveBeenCalled();
+});
+
 test.each([
   ['accepted', { sent: true, provider: 'push', deliveryOutcome: 'accepted', providerMessageId: 'push:accepted' }],
   ['uncertain', { sent: false, provider: 'push', deliveryOutcome: 'uncertain', retryable: true, error: 'provider unknown' }],

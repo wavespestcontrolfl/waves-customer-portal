@@ -297,7 +297,9 @@ describe('sendCustomerMessage send-window integration', () => {
     // async since the move-hold boundary re-check joined the hook (codex
     // #3609 r31) — the provider awaits it either way.
     await expect(hooks.preSendCheck()).resolves.toEqual({ ok: true });
+    expect(hooks.preSendCheck.isStillValid()).toBe(true);
     jest.setSystemTime(WINDOW_CLOSE);
+    expect(hooks.preSendCheck.isStillValid()).toBe(false);
     const lateVerdict = await hooks.preSendCheck();
     expect(lateVerdict.ok).toBe(false);
     expect(lateVerdict.code).toBe('QUIET_HOURS_HOLD');
