@@ -2379,7 +2379,7 @@ noun is the only thing that varies.
 `AppointmentPage` (not-found + load-error), `SecureAppointmentPage`, `ReceiptPage`,
 `ContractSignPage`, `StatementPayPage`, `ReportViewPage`, `ProjectReportViewPage`,
 `LawnReportViewPage`, `PestReportViewPage`, `PriceChangeNoticePage`, `PrepGuidePage`,
-`ServiceOutlinePage`, `CardPage`, `NewsletterArchivePage`.
+`ServiceOutlinePage`, `CardPage`, `NewsletterArchivePage`, `PayPageV2`.
 
 `NewsletterArchivePage` is the one whose terminal action is not a phone number —
 it points back at the newsletter index — so it takes `contact="none"` and keeps
@@ -2401,6 +2401,11 @@ Same reason. Where the affordance was already a standalone button, unifying it
 was structural and was done: `ReportViewPage`'s lone "Call Waves" became the
 standard pair.
 
+**`EstimateViewPage` keeps its own card on purpose.** It doubles as the
+estimate-extension request flow and flips to a success headline ("You're all
+set"), so `role="alert"` would be wrong on it. It takes the `h1` G-07 asks for
+and nothing else — the heading element was the finding there, not the card.
+
 ### Two things that fell out of the migration
 
 `SecureAppointmentPage`'s `unavailable` state — set whenever the payload fetch
@@ -2413,6 +2418,22 @@ only the visit summary was guarded). It now renders the error card with a retry.
 other terminal card has one, and a slot for a single caller is exactly the
 speculative config rule 16 forbids. `TrackPage`'s empty 32px decorative `div`
 went the same way.
+
+### The evidence run caught a regression this PR had shipped
+
+`qa:glass` runs `r2b` / `r2b-fix` (six error scenarios x two states x two
+widths, 32 captures, 0 failed) reported `estimate-404 / load-error` at
+**`h1:2`**: that branch renders `<Header/>`, which carries an `h1`, alongside
+the card, which now carries one too. `PublicLoadError` rendered a `div` before
+this PR, so promoting it is what created the duplicate. The header was blank
+there anyway and is gone.
+
+After the fix, every terminal state at both widths: `h1:1`, no text under 14px,
+no weight over 700, no horizontal overflow. Card geometry, measured: at 390 all
+twelve cards are `x:16 w:358` — a 16px gutter on both sides; at 1440 eleven are
+`x:440 w:560`, the twelfth being the EstimateViewPage card in the 760 document
+column. G-02 measured padding 20 / 24 / 32 and gutters 20 vs 16 across these
+same pages.
 
 ### Testing
 
