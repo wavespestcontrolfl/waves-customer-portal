@@ -1135,6 +1135,29 @@ describe('an appointment email with no interaction row still yields its promise 
   // recorded the window. Measuring from the earliest row of the fan-out keeps
   // that known window; keying on the exact send time let the later row
   // survive as an unknown fallback and outrank it (round-17 P1).
+  test('the grouped recovery matches a SEND by identity: visit, occurrence and tier', () => {
+    const { reminderTier } = require('../services/no-show-detector');
+    const detector = require('fs').readFileSync(require('path').join(__dirname, '..', 'services', 'no-show-detector.js'), 'utf8');
+    // Identity, not order: a `both`-channel reminder sends its SMS BEFORE the
+    // email, so the known window is timestamped earlier than the fan-out it
+    // covers and a time comparison could never see it (round-21 P1) — while
+    // the 72h reminder must still not answer for the 24h send (round-17 P1).
+    expect(detector).toContain('const knownSends = new Set(noticeEvents');
+    expect(detector).toContain('knownSends.has(`${memberId}:${r.occurrence}:${reminderTier(r.tier)}`)');
+    // The tier for a TEXT comes from its purpose: the sender passes a generic
+    // 'appointment_reminder' message type and names the rung in the purpose.
+    expect(detector).toContain("'a.sent_at', 'a.purpose')");
+    expect(detector).toContain('tier: reminderTier(r.purpose || r.metadata?.original_message_type)');
+    // ...and one canonical name across the three spellings.
+    expect(reminderTier('appointment_reminder_72h')).toBe(reminderTier('appointment.reminder_72h'));
+    expect(reminderTier('appointment.reminder_24h')).not.toBe(reminderTier('appointment.reminder_72h'));
+    expect(reminderTier('appointment_reminder')).not.toBe(reminderTier('appointment.reminder_24h'));
+    expect(reminderTier('appointment.confirmation')).toBe('confirmation');
+    expect(reminderTier(null)).toBeNull();
+    // ...and the reprocessing guard reads a column the query actually selects.
+    expect(detector).toContain("'cl.processing_token', 'cl.processing_generation',");
+  });
+
   test('the recovery unit is one SEND — stop, tier, occurrence', () => {
     const detector = require('fs').readFileSync(require('path').join(__dirname, '..', 'services', 'no-show-detector.js'), 'utf8');
     // So the 72h reminder's recovery does not cover the 24h send, a different

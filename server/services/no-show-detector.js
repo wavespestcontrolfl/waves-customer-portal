@@ -255,7 +255,12 @@ async function loadPromiseEvents(conn, visitIds, { now = new Date() } = {}) {
       // internal-) mean NO text reached the customer and never get an
       // sms_log row, so they must stay excluded.
       .where(textActuallyWentOut)
-      .select('a.id', 'a.appointment_id', 'a.metadata', 'a.sent_at'),
+      // purpose carries the TIER for a text: the sender passes a generic
+      // 'appointment_reminder' message type and names the rung in the purpose
+      // ('appointment_reminder_24h' / '_72h' / 'appointment_confirmation'),
+      // so normalising the message type alone could never match the email
+      // side of the same send (codex P1 round 21, fourth pass).
+      .select('a.id', 'a.appointment_id', 'a.metadata', 'a.sent_at', 'a.purpose'),
     // appointment-email.js's own send-time customer_interactions row is
     // never updated afterward (it stays status:'sent' forever) — the LIVE
     // delivery state lands on email_messages via the SendGrid webhook
@@ -592,7 +597,7 @@ async function loadPromiseEvents(conn, visitIds, { now = new Date() } = {}) {
   // survive as an unknown-window fallback and outrank it (codex P1 round 21).
   const noticeEvents = [
     ...messages.map((r) => ({ visit_id: r.appointment_id || r.metadata?.scheduled_service_id,
-      start_at: slotOf(r.metadata), tier: reminderTier(r.metadata?.original_message_type),
+      start_at: slotOf(r.metadata), tier: reminderTier(r.purpose || r.metadata?.original_message_type),
       communicated_at: r.sent_at, source: 'message', source_id: r.id })),
     ...emails.map((r) => ({ visit_id: r.metadata?.scheduled_service_id, start_at: slotOf(r.metadata),
       tier: reminderTier(r.metadata?.event_type),
