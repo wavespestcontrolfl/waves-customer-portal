@@ -3,6 +3,17 @@ const db = require('../models/db');
 const logger = require('./logger');
 const runs = require('./lawn-visit-runs');
 
+// Weather is fetched as CURRENT conditions, so it stands in for the visit's own
+// only while the visit is recent. Past this, a run recovered late leaves the
+// snapshot unset rather than recording recovery-day weather as the visit's.
+const WEATHER_WINDOW_MS = 6 * 60 * 60 * 1000;
+
+function nearTheVisit(assessment, windowMs) {
+  const confirmedAt = assessment?.confirmed_at ? new Date(assessment.confirmed_at).getTime() : NaN;
+  if (!Number.isFinite(confirmedAt)) return false;
+  return Date.now() - confirmedAt <= windowMs;
+}
+
 const ownershipLost = () => Object.assign(new Error('Lawn delivery ownership lost'), { code: 'LAWN_DELIVERY_OWNERSHIP_LOST' });
 const stepIncomplete = (step) => Object.assign(new Error(`Lawn delivery step incomplete: ${step}`), { code: 'LAWN_DELIVERY_STEP_INCOMPLETE' });
 
@@ -11,6 +22,7 @@ async function deliverConfirmedAssessment({ assessmentId }, deps = {}) {
   const LawnIntel = deps.LawnIntel || require('./lawn-intelligence');
   const KnowledgeBridge = deps.KnowledgeBridge || require('./knowledge-bridge');
   const staleAfterMs = deps.staleAfterMs ?? runs.PIPELINE_STALE_MS;
+  const weatherWindowMs = deps.weatherWindowMs ?? WEATHER_WINDOW_MS;
   const heartbeatMs = deps.heartbeatMs ?? 30000;
   if (!Number.isSafeInteger(heartbeatMs) || heartbeatMs < 1 || heartbeatMs >= staleAfterMs) throw new TypeError('Delivery heartbeat must be shorter than its lease');
   const claim = await runs.claimPipeline(assessmentId, knex, { staleAfterMs });
@@ -36,6 +48,13 @@ async function deliverConfirmedAssessment({ assessmentId }, deps = {}) {
     // recovery-time weather — it is attached once, not refreshed per attempt.
     const attachWeatherOnce = async (assessment) => {
       if (assessment?.fawn_snapshot) return null;
+      if (!nearTheVisit(assessment, weatherWindowMs)) {
+        // A fetch is current conditions, not the visit's. Recorded days later it
+        // would be wrong rather than missing, and reports and outcome analysis
+        // read it as the visit's weather — so leave it unset and say so.
+        logger.warn('[lawn-visit-delivery] weather not attached', { assessmentId, reason: 'visit_too_old' });
+        return null;
+      }
       const weather = await LawnIntel.attachWeather(assessmentId);
       await guard(); // The lease covers every effect in the pipeline, this one included.
       return weather;
@@ -148,4 +167,4 @@ function scheduleRecovery(cron, { sweep = sweepAbandonedDeliveries } = {}) {
   }, { timezone: 'America/New_York' });
 }
 
-module.exports = { deliverConfirmedAssessment, sweepAbandonedDeliveries, scheduleRecovery, RECOVERY_RETRY_HORIZON_MS };
+module.exports = { deliverConfirmedAssessment, sweepAbandonedDeliveries, scheduleRecovery, RECOVERY_RETRY_HORIZON_MS, WEATHER_WINDOW_MS };

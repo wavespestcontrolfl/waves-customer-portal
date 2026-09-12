@@ -240,6 +240,18 @@ const deferred = () => { let resolve; const promise = new Promise((r) => { resol
     expect((await stored(recovered.id)).pipeline_completed_at).toBeInstanceOf(Date);
   });
 
+  test('a run recovered long after the visit leaves the weather unset, not wrong', async () => {
+    const assessment = await seed();
+    await db.knex('lawn_assessments').where({ id: assessment.id })
+      .update({ confirmed_at: db.knex.raw("clock_timestamp() - interval '3 days'") });
+    const deps = dependencies();
+    await deliver(assessment.id, deps);
+    // Current conditions are not the visit's conditions three days on.
+    expect(deps.LawnIntel.attachWeather).not.toHaveBeenCalled();
+    expect((await db.knex('lawn_assessments').where({ id: assessment.id }).first()).fawn_snapshot).toBeNull();
+    expect((await stored(assessment.id)).pipeline_completed_at).toBeInstanceOf(Date);
+  });
+
   test('recovery stops sweeping a run that has been failing past the retry horizon', async () => {
     await db.knex('lawn_assessment_runs').update({ pipeline_completed_at: db.knex.fn.now() });
     const recent = await seed(), ancient = await seed();
