@@ -406,7 +406,10 @@ describe('recordCallCommitments fixes the promised-link activation boundary atom
   // read, insert-if-absent, re-read) on the SAME object conn.transaction
   // hands back, exactly like a real knex transaction would.
   function fakeConn(systemSettings) {
-    const raw = jest.fn(async () => ({ rows: [{ id: 'row' }], rowCount: 1 }));
+    // rows[0].now backs persistedActivationBoundary's `await conn.raw('SELECT
+    // now() ...')` — the transaction-clock read this boundary now persists
+    // instead of a JS `new Date()` (codex #4293 P1).
+    const raw = jest.fn(async () => ({ rows: [{ id: 'row', now: new Date() }], rowCount: 1 }));
     function trx(table) {
       if (table === 'call_log') return { where: () => ({ forShare: () => ({ first: async () => ({ id: 'c' }) }) }) };
       if (table !== 'system_settings') throw new Error(`unexpected table: ${table}`);
@@ -430,7 +433,7 @@ describe('recordCallCommitments fixes the promised-link activation boundary atom
   // throws once, then behaves normally — used to prove the commitment row
   // never commits un-boundaried (codex #4293 P2 r4).
   function fakeConnWithTransientFailure(systemSettings) {
-    const raw = jest.fn(async () => ({ rows: [{ id: 'row' }], rowCount: 1 }));
+    const raw = jest.fn(async () => ({ rows: [{ id: 'row', now: new Date() }], rowCount: 1 }));
     let calls = 0;
     function trx(table) {
       if (table === 'call_log') return { where: () => ({ forShare: () => ({ first: async () => ({ id: 'c' }) }) }) };

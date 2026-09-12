@@ -17,6 +17,11 @@ const LOCK_RETRY_MINUTES = 5;
 // — Postgres only accepts an ON CONFLICT target that matches an existing
 // unique index verbatim, predicate included.
 const COMMITMENT_GENERATION_CONFLICT_TARGET = '(commitment_id, commitment_generation) WHERE commitment_id IS NOT NULL';
+// Shared by every write that must not act on a row a concurrent markLinkUsed
+// has already closed for good: the customer moving themselves is terminal
+// (see markLinkUsed), and a write racing behind it on stale, pre-stamp data
+// must lose instead of undoing that closure.
+const LINK_NOT_YET_RECONCILED = "(payload->>'link_used_reconciled_at') IS NULL";
 const sendContext = new AsyncLocalStorage();
 function mode() {
   const value = String(process.env.GATE_RESCHEDULE_LINK_ON_PROMISE || '').toLowerCase();
@@ -63,7 +68,22 @@ const ACTIVATION_SETTINGS_KEY = 'reschedule_link_promise_activated_at';
 async function persistedActivationBoundary(conn) {
   const existing = await conn('system_settings').where({ key: ACTIVATION_SETTINGS_KEY }).first('value');
   if (existing?.value) return new Date(existing.value);
-  const now = new Date();
+  // The DATABASE's clock, not this process's JS clock: call-commitments.
+  // upsertCommitments calls recordLiveActivation FIRST inside the very same
+  // transaction that later inserts the send_reschedule_link commitment row
+  // this boundary is meant to admit, and that row's created_at defaults to
+  // CURRENT_TIMESTAMP — which Postgres fixes at TRANSACTION START, not at
+  // the moment the INSERT statement runs. A JS `new Date()` read here is a
+  // wall-clock sample taken strictly after that transaction already opened,
+  // so it lands AFTER the CURRENT_TIMESTAMP the later INSERT will stamp —
+  // the very commitment establishing the boundary is born a moment before
+  // it and gets silently cancelled as pre_activation on the next sweep, the
+  // exact failure this boundary exists to prevent (codex #4293 P1).
+  // now()/transaction_timestamp() evaluated in this same transaction is
+  // pinned to that identical transaction-start instant, so a commitment
+  // this transaction writes is never before its own activation boundary.
+  const { rows } = await conn.raw('SELECT now() AS now');
+  const now = rows[0].now;
   await conn('system_settings').insert({ key: ACTIVATION_SETTINGS_KEY, value: now.toISOString(), category: 'reschedule_link_promises',
     description: 'First live-activation instant for GATE_RESCHEDULE_LINK_ON_PROMISE; a send_reschedule_link commitment recorded before it is historical, not a live promise.' })
     .onConflict('key').ignore();
@@ -501,7 +521,19 @@ async function matchingSend(conn, context, since) {
 async function parkReview(conn, row, reason) {
   await conn.transaction(async (trx) => {
     await lockTriageCall(trx, row.related_call_log_id);
+    // runOne reads row.payload.link_used_reconciled_at (its "already
+    // settled, terminal" check) from a snapshot fetched BEFORE this
+    // function's own call lock is acquired. A concurrent public reschedule
+    // can run markLinkUsed — which takes the SAME lock, closes the card, and
+    // stamps the row — in the gap between that read and this transaction
+    // starting; the lock only serializes the two writers, it doesn't make
+    // the stale read behind this call valid. Without the stamp-is-null
+    // condition here, this UPDATE would go ahead and re-park a row
+    // markLinkUsed already closed for good, reopening a card that later
+    // reconciliation (unreconciledPromiseRows) will never revisit because
+    // the stamp already excludes it (codex #4293 P1).
     const changed = await trx('outbox_messages').where({ id: row.id }).whereNotIn('status', ['delivered', 'cancelled'])
+      .whereRaw(LINK_NOT_YET_RECONCILED)
       .whereRaw("(status <> 'review' OR last_error IS DISTINCT FROM ?)", [reason])
       .update({ status: 'review', last_error: reason, updated_at: new Date() });
     if (!changed) return;
@@ -1278,7 +1310,7 @@ function unreconciledPromiseRows(conn) {
   return conn('outbox_messages').whereNotNull('commitment_id').whereIn('status', ATTEMPTED_STATUSES)
     .whereNotNull('related_scheduled_service_id').whereNotNull('related_call_log_id')
     .where(function attempted() { this.whereNot('status', 'review').orWhereNotNull('provider_message_id'); })
-    .whereRaw("(payload->>'link_used_reconciled_at') IS NULL");
+    .whereRaw(LINK_NOT_YET_RECONCILED);
 }
 
 // The customer moved the visit THEMSELVES, after the link went out. This is
