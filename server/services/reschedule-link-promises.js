@@ -9,6 +9,48 @@ const { isWithinSendWindowET, nextSendWindowOpenET } = require('./messaging/send
 const { lockTriageCall } = require('../utils/triage-locks');
 const { recordAuditEvent } = require('./audit-log');
 
+// CANONICAL LOCK ORDER for this feature (codex #4293 P1, this round — a
+// lock-order-inversion deadlock in the ledger dismiss/fulfill path, fixed by
+// moving its lockTriageCall call ahead of the call_commitments UPDATE in
+// call-commitments.js's applyHumanUpdate):
+//
+//   advisory call lock (lockTriageCall) -> call_commitments row
+//     -> outbox_messages row(s) -> triage_items row(s) [-> call_log]
+//
+// Any writer that will touch more than one of these across a single
+// transaction MUST take the advisory lock first, before locking any of the
+// others — not because of what each resource IS, but because it is the one
+// lock every such writer takes, so taking it first is what makes two
+// writers on the SAME call fully serialize instead of racing into a cycle.
+// A writer that only ever touches ONE of these resources needs no place in
+// this table; it cannot itself deadlock against this order no matter when
+// it runs.
+//
+// Every current path that acquires more than one, and the order it takes
+// them in:
+//   settleDelivery              advisory -> call_commitments -> outbox_messages
+//   parkReview                  advisory -> outbox_messages -> triage_items
+//   settleParkedPromiseCard     (caller's advisory, via admin-triage
+//                                transitionCore) -> call_commitments -> outbox_messages
+//   fulfilPromise                call_commitments -> triage_items
+//                                (always called under a caller-held advisory lock —
+//                                settleDelivery, settleReconciledReceipt)
+//   settleReconciledReceipt     advisory -> outbox_messages -> call_commitments -> triage_items
+//     (delivered branch)
+//   applyContextSkip            advisory -> outbox_messages -> triage_items
+//     ('promise_closed')
+//   markLinkUsed                advisory -> triage_items -> call_commitments -> outbox_messages
+//   call-commitments.js         advisory -> call_commitments -> outbox_messages -> triage_items
+//     applyHumanUpdate
+//     (dismiss/fulfill, this fix)
+//   admin-triage.js              advisory -> triage_items -> call_commitments -> outbox_messages
+//     transitionCore (reschedule_link_promise card resolve/dismiss,
+//     via settleParkedPromiseCard)
+//
+// Single-resource paths (excluded from the table above by construction —
+// nothing to invert): renewPromiseOnOfficeVerdict and upsertCommitments
+// touch only call_commitments; claimForDispatch and the failed/undelivered
+// branch of settleReconciledReceipt touch only outbox_messages.
 const KIND = 'send_reschedule_link';
 // How long a send waits after losing the customer's advisory interlock.
 const LOCK_RETRY_MINUTES = 5;
@@ -751,9 +793,14 @@ async function retireDeliveryUncertainty(conn, rowId) {
 // -> triage_items), or a concurrent parkReview appending a fresh commitment
 // id to this exact card in the gap between this function's read and write
 // would have that append silently lost — pg_advisory_xact_lock is
-// per-session reentrant, so re-taking it here is a no-op when a caller
-// (settleParkedPromiseCard's chain) already holds it, and the first
-// acquisition when this runs directly off a ledger verdict.
+// per-session reentrant, so re-taking it here is always a no-op: the FIRST
+// acquisition for a ledger verdict now happens in call-commitments.js's
+// applyHumanUpdate, before that caller ever touches the call_commitments
+// row (a prior round took it here instead, after the row was already
+// updated — a lock-order inversion against every other advisory-lock-first
+// path in this feature, codex #4293 P1). Kept here too, defensively, for
+// any future caller that reaches this function without going through that
+// guard.
 async function retireAttemptsOnLedgerVerdict(conn, commitmentId, { callLogId = null, action = null, reviewedBy = null, note = null } = {}) {
   if (callLogId) await lockTriageCall(conn, callLogId);
   const rows = await conn('outbox_messages').where({ commitment_id: commitmentId })

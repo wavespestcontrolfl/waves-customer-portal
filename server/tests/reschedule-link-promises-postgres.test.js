@@ -27,6 +27,7 @@ const knex = require('knex');
 const { randomUUID } = require('node:crypto');
 const links = require('../services/reschedule-link-promises');
 const { applyHumanUpdate } = require('../services/call-commitments');
+const { lockTriageCall } = require('../utils/triage-locks');
 const { gates } = require('../config/feature-gates');
 const rescheduleLinkPromisesMigration = require('../models/migrations/20260909000092_reschedule_link_promises');
 const outboxLastScannedMigration = require('../models/migrations/20260911000020_outbox_messages_last_scanned_at');
@@ -1935,5 +1936,140 @@ postgres('reschedule-link-promises against PostgreSQL', () => {
       const sent = await mockPg('outbox_messages').where({ commitment_id: commitmentId }).first();
       expect(sent.status).toBe('sent');
     });
+  });
+
+  /**
+   * codex #4293 P1 (this round): a lock-order inversion. applyHumanUpdate's
+   * ledger dismiss/fulfill branch used to UPDATE the call_commitments row
+   * FIRST and only afterward — inside retireAttemptsOnLedgerVerdict — take
+   * the shared per-call advisory lock (lockTriageCall). Every OTHER
+   * multi-lock writer in this feature (settleDelivery, markLinkUsed,
+   * applyContextSkip, parkReview, admin-triage's transitionCore) takes that
+   * SAME advisory lock FIRST, before ever touching a call_commitments or
+   * outbox_messages row. Two writers racing in opposite orders — one
+   * holding the row and waiting on the lock, the other holding the lock and
+   * waiting on the row — is a textbook Postgres deadlock: the server aborts
+   * one side outright (error 40P01) rather than let both hang forever,
+   * losing either an office verdict or a delivery reconciliation.
+   *
+   * The fix (call-commitments.js applyHumanUpdate) moved the lock ahead of
+   * the row update, so the ledger path now takes the SAME advisory-lock-
+   * first order as every other writer.
+   */
+  describe('lock ordering: the advisory call lock is always taken before call_commitments/outbox_messages rows (codex #4293 P1, lock-order inversion)', () => {
+    // Faithful replica of the PRE-FIX applyHumanUpdate(dismiss/fulfill)
+    // shape: the commitment row update runs first, the advisory lock is
+    // only requested afterward. Nothing in the current tree still does
+    // this — this function exists ONLY to demonstrate, deterministically,
+    // that the shape this round's fix replaced was a genuine deadlock
+    // hazard against settleDelivery's (unchanged, still-current) order.
+    async function preFixLedgerRowFirst(trx, commitmentId) {
+      await trx('call_commitments').where({ id: commitmentId }).update({ updated_at: new Date() });
+    }
+
+    test('mechanism: row-lock-then-advisory-lock deadlocks against an advisory-lock-then-row writer — the exact pre-fix hazard', async () => {
+      const callId = randomUUID();
+      await mockPg('call_log').insert({ id: callId, direction: 'inbound', processing_generation: 1 });
+      const [commitment] = await mockPg('call_commitments').insert({
+        call_log_id: callId, commitment_key: 'send_reschedule_link:1', party: 'waves', kind: 'send_reschedule_link',
+        description: 'send a reschedule link', source: 'ai', status: 'open', last_seen_generation: 0, processing_generation: 0,
+      }).returning('id');
+
+      // txLedger: the PRE-FIX ledger shape (row first).
+      // txSettle: settleDelivery's real, unchanged shape (advisory lock first).
+      const txLedger = await mockPg.transaction();
+      const txSettle = await mockPg.transaction();
+      try {
+        // Step 1 (sequenced, not raced): txLedger takes the commitment row.
+        await preFixLedgerRowFirst(txLedger, commitment.id);
+        // Step 2 (sequenced): txSettle takes the advisory lock.
+        await lockTriageCall(txSettle, callId);
+
+        // Step 3: cross-request, concurrently, the resource the OTHER side
+        // already holds — a genuine wait-for cycle. This is not a timing
+        // race about WHETHER a deadlock happens (both sides are already
+        // blocked on each other by construction); only WHICH side Postgres'
+        // deadlock detector aborts is arbitrary.
+        const crossed = await Promise.allSettled([
+          lockTriageCall(txLedger, callId),
+          txSettle('call_commitments').where({ id: commitment.id }).forUpdate().first(),
+        ]);
+
+        const rejected = crossed.filter((r) => r.status === 'rejected');
+        const fulfilled = crossed.filter((r) => r.status === 'fulfilled');
+        expect(fulfilled).toHaveLength(1);
+        expect(rejected).toHaveLength(1);
+        expect(String(rejected[0].reason?.code || rejected[0].reason?.message || '')).toMatch(/40P01|deadlock/i);
+      } finally {
+        await txLedger.rollback().catch(() => {});
+        await txSettle.rollback().catch(() => {});
+      }
+    }, 15000);
+
+    test('fix: applyHumanUpdate(dismiss) and an advisory-lock-first writer on the SAME call never deadlock', async () => {
+      const callId = randomUUID();
+      await mockPg('call_log').insert({ id: callId, direction: 'inbound', processing_generation: 1 });
+      const [commitment] = await mockPg('call_commitments').insert({
+        call_log_id: callId, commitment_key: 'send_reschedule_link:1', party: 'waves', kind: 'send_reschedule_link',
+        description: 'send a reschedule link', source: 'ai', status: 'open', last_seen_generation: 0, processing_generation: 0,
+      }).returning('id');
+      const outboxId = randomUUID();
+      await mockPg('outbox_messages').insert({ id: outboxId, channel: 'sms', status: 'sending', payload: {},
+        commitment_id: commitment.id, commitment_generation: 0, related_call_log_id: callId, related_customer_id: randomUUID() });
+
+      // settleDelivery's real order (lockTriageCall -> call_commitments
+      // forUpdate -> outbox_messages forUpdate), reproduced directly rather
+      // than through the full settleDelivery fixture — a visit, a matching
+      // customer phone, and an sms_log row would all be needed to satisfy
+      // deliveryIdentityMatches, none of which bears on the property this
+      // test checks: the LOCK ORDER, not settleDelivery's own delivery-
+      // identity business logic. `onLockHeld` fires the instant the
+      // advisory lock is actually held, so the test below can sequence
+      // applyHumanUpdate's own start AFTER it — without that signal, the
+      // two async functions merely race, and on a fast local Postgres
+      // instance applyHumanUpdate's entire transaction can complete before
+      // this one even reaches its own lockTriageCall call, so the contention
+      // this test exists to force (and, pre-fix, deadlock on) never
+      // actually happens and the test passes for the wrong reason.
+      async function advisoryFirstWriter(onLockHeld) {
+        const trx = await mockPg.transaction();
+        try {
+          await lockTriageCall(trx, callId);
+          onLockHeld();
+          // Hold the advisory lock a beat so applyHumanUpdate's own
+          // dismiss — started once this function signals the lock is
+          // held — has to actually wait on it rather than the two
+          // happening to run back to back.
+          await new Promise((resolve) => setTimeout(resolve, 300));
+          await trx('call_commitments').where({ id: commitment.id }).forUpdate().first();
+          await trx('outbox_messages').where({ id: outboxId }).forUpdate().update({ updated_at: new Date() });
+          await trx.commit();
+        } catch (err) {
+          await trx.rollback().catch(() => {});
+          throw err;
+        }
+      }
+
+      let lockHeld;
+      const lockHeldPromise = new Promise((resolve) => { lockHeld = resolve; });
+      const writerPromise = advisoryFirstWriter(lockHeld);
+      // Do not start the dismiss until the advisory lock is genuinely held
+      // — see the comment on advisoryFirstWriter above for why an unsequenced
+      // race would let this test pass even against the pre-fix ordering.
+      await lockHeldPromise;
+      const results = await Promise.allSettled([
+        applyHumanUpdate(mockPg, commitment.id, { action: 'dismiss', reviewedBy: randomUUID() }),
+        writerPromise,
+      ]);
+
+      for (const result of results) {
+        if (result.status === 'rejected') {
+          throw new Error(`concurrent call-locked writer aborted instead of serializing (lock-order inversion regressed): ${result.reason?.message || result.reason}`);
+        }
+      }
+
+      const after = await mockPg('call_commitments').where({ id: commitment.id }).first('status');
+      expect(after.status).toBe('dismissed');
+    }, 15000);
   });
 });

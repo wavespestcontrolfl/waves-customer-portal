@@ -1945,6 +1945,27 @@ async function applyHumanUpdate(conn, id, { action, description, due_at, note, r
   // needs `before` — populated only for reopen/edit — to gate on).
   const linkPromiseVerdict = ['dismiss', 'fulfill'].includes(action)
     ? await conn('call_commitments').where({ id }).first('kind', 'party', 'call_log_id') : null;
+  // CANONICAL LOCK ORDER for this feature (see the module doc comment near
+  // the top of reschedule-link-promises.js for the full table): advisory
+  // call lock (lockTriageCall) FIRST, then the call_commitments row, then
+  // any outbox_messages rows, then triage_items. Every other multi-lock path
+  // in this feature (settleDelivery, markLinkUsed, applyContextSkip,
+  // parkReview, settleReconciledReceipt, admin-triage's transitionCore)
+  // already takes the locks in this order. This ledger dismiss/fulfill path
+  // used to be the one exception: the UPDATE below used to run first, and
+  // only afterward — inside retireAttemptsOnLedgerVerdict — did it acquire
+  // this SAME advisory lock. A concurrent settleDelivery (or any other
+  // advisory-lock-first path) could hold the advisory lock waiting on this
+  // row while this transaction held the row waiting on the advisory lock:
+  // a lock-order-inversion deadlock, with Postgres aborting one side and
+  // losing either an office verdict or a delivery reconciliation (codex
+  // #4293 P1). Taking the lock here, before the row is ever touched, is
+  // what keeps this path in the same order as every other one — a no-op
+  // (pg_advisory_xact_lock is per-session reentrant) when a caller such as
+  // settleParkedPromiseCard's transitionCore chain already holds it.
+  if (linkPromiseVerdict && linkPromiseVerdict.kind === 'send_reschedule_link' && linkPromiseVerdict.party === 'waves') {
+    await require('../utils/triage-locks').lockTriageCall(conn, linkPromiseVerdict.call_log_id);
+  }
   // Confirm's own pre-read, deliberately separate from `before` (which only
   // covers reopen/edit) so an ordinary callback Confirm never starts
   // fetching a row the callback branch below has no use for and would
