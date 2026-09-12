@@ -313,6 +313,64 @@ test('an ambiguous numeric subject date fails closed rather than guessing M/D vs
   expect(select({ call: dmSource, commitment: { ...commitment, subject: dmSubject }, candidates: [dec25] }).visit?.id).toBe('dec-25');
 });
 
+test('a date claim grounds the pick even when subject itself is null, not just subject.quote (codex #4293 P1 r10)', () => {
+  // Date validation used to read subject.quote, but subject is optional in
+  // the extraction schema — with subject: null, "I will text you a
+  // reschedule link for your September 20 appointment" passed every date
+  // guard (all of them gated on subject.quote/subject.visit_date being
+  // present) and bound whatever visit narrowBySubject fell back to on
+  // sole-candidate trust. The positive-grounding check now reads the
+  // promise's own evidence directly, with no subject involved at all.
+  const promise = 'I will text you a reschedule link for your September 20 appointment.';
+  const evidence = [{ quote: promise, speaker: 'agent' }];
+  const source = { ...call, transcription: `Agent: ${promise}\nCaller: Thank you.` };
+  const sept21 = { ...visit, id: 'sept-21', scheduled_date: '2030-09-21' };
+  // The Codex repro: a sole September 21 visit must NOT receive the link
+  // promised for September 20.
+  expect(select({ call: source, commitment: { ...commitment, subject: null, evidence }, candidates: [sept21] }).reason)
+    .toBe('date_not_grounded');
+  // The identical evidence DOES ground a visit that actually falls on the
+  // named date.
+  const sept20 = { ...visit, id: 'sept-20', scheduled_date: '2030-09-20' };
+  expect(select({ call: source, commitment: { ...commitment, subject: null, evidence }, candidates: [sept20] }).visit?.id)
+    .toBe('sept-20');
+});
+
+test('a date claim grounds the pick from promisedQuotes even when subject.quote itself names no date (codex #4293 P1 r10)', () => {
+  // subject.quote grounds nothing about the date here — it just names the
+  // service. The date claim lives only in the standing-promise quote
+  // (promisedQuotes), which the old subject-only check never read at all.
+  const promise = 'I will text you a reschedule link for your September 20 appointment.';
+  const subjectQuote = 'That is for my WaveGuard service.';
+  const evidence = [{ quote: promise, speaker: 'agent' }];
+  const subject = { quote: subjectQuote, service: 'WaveGuard' };
+  const source = { ...call, transcription: `Agent: ${promise}\nCaller: ${subjectQuote}` };
+  const sept21 = { ...visit, id: 'sept-21', scheduled_date: '2030-09-21' };
+  expect(select({ call: source, commitment: { ...commitment, subject, evidence }, candidates: [sept21] }).reason)
+    .toBe('date_not_grounded');
+  const sept20 = { ...visit, id: 'sept-20', scheduled_date: '2030-09-20' };
+  expect(select({ call: source, commitment: { ...commitment, subject, evidence }, candidates: [sept20] }).visit?.id)
+    .toBe('sept-20');
+});
+
+test('evidence naming no date anywhere still trusts the sole open visit (codex #4293 P1 r10)', () => {
+  const promise = 'I will text you a reschedule link for that appointment.';
+  const evidence = [{ quote: promise, speaker: 'agent' }];
+  const source = { ...call, transcription: `Agent: ${promise}\nCaller: Thank you.` };
+  const sept21 = { ...visit, id: 'sept-21', scheduled_date: '2030-09-21' };
+  expect(select({ call: source, commitment: { ...commitment, subject: null, evidence }, candidates: [sept21] }).visit?.id)
+    .toBe('sept-21');
+});
+
+test('an ambiguous numeric date claim anywhere in the evidence fails closed even with subject null (codex #4293 P1 r10)', () => {
+  const promise = 'I will text you a reschedule link for my 9/10 appointment.';
+  const evidence = [{ quote: promise, speaker: 'agent' }];
+  const source = { ...call, transcription: `Agent: ${promise}\nCaller: Thank you.` };
+  const sept10 = { ...visit, id: 'sept-10', scheduled_date: '2030-09-10' };
+  expect(select({ call: source, commitment: { ...commitment, subject: null, evidence }, candidates: [sept10] }).reason)
+    .toBe('date_not_grounded');
+});
+
 test('an inactive account cannot be promised a link the reschedule page refuses', () => {
   for (const active of [false, null, undefined]) {
     expect(select({ customer: { ...customer, active } }).reason).toBe('customer_inactive');

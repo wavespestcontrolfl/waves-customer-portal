@@ -715,6 +715,72 @@ function quoteDateContradictsSelectedVisit(quote, ymd, reference) {
   return !!explicit && !claimFitsDate(explicit, ymd);
 }
 
+// Every field an AGENT utterance attached to this promise can live in,
+// gathered RAW (un-normalized) — explicitQuoteDate's numeric branch needs
+// the "/" or "-" separator norm() would otherwise strip, so this must not
+// hand back pre-normalized text as the only copy of a claim.
+//   - commitment.evidence: the extractor's own seed quotes for this
+//     commitment (schema-capped at 1-3, agent or caller — only the agent's
+//     own words are evidence FOR the worker's own promise), independent of
+//     whether any one of them reads as a STANDING PROMISE on its own —
+//     standingPromiseQuotes filters harder than that (link + send-word +
+//     tense + not-retracted), so a date named in a neighboring evidence
+//     quote that isn't itself promise-shaped was invisible to every
+//     narrower check this file has had.
+//   - commitment.subject.quote: the extractor's separate verbatim quote for
+//     the appointment subject — the field the last four rounds each
+//     widened one optionality level at a time (r3: validated only when
+//     subject.visit_date was populated; this round: subject itself can be
+//     null, so gating presence on subject?.quote skipped the check
+//     entirely rather than widening it).
+//   - promisedQuotes: the caller's own standing-promise subset of
+//     commitment.evidence, already computed once per call in
+//     selectDiscussedVisit — read directly here (not re-derived) so this
+//     stays the one place that actually reads every source, rather than an
+//     assumption that scanning commitment.evidence alone subsumes it.
+function promiseEvidenceTexts(commitment, promisedQuotes = []) {
+  const fromEvidence = (commitment.evidence || []).filter((e) => e.speaker === 'agent').map((e) => e.quote);
+  const fromSubject = commitment.subject?.quote ? [commitment.subject.quote] : [];
+  return [...new Set([...fromEvidence, ...fromSubject, ...promisedQuotes])].filter(Boolean);
+}
+
+// promisedQuotes/commitment.evidence are the PROMISE sentence itself, and a
+// promise sentence's own trailing clause is exactly where delivery-timing
+// language lives ("I'll text you the link tomorrow morning", "...by
+// Friday") — words explicitQuoteDate resolves the same way it resolves an
+// appointment date, but that means WHEN THE LINK GOES OUT, not which visit
+// it is for. isPromisedFloor/promisedFloorAt already extract that timing
+// into its own due_at floor; scanning the same sentence again for an
+// "appointment date" would read "tomorrow" as a claim about the VISIT and
+// park (or worse, silently pick) on a manufactured contradiction against
+// whatever the visit's real date happens to be. subject.quote never has
+// this ambiguity — the extraction contract defines it as naming the
+// appointment specifically — but evidence/promisedQuotes are not so scoped.
+// The two are told apart the same way a human reader would: a date claim
+// only binds the VISIT when its sentence also references the appointment
+// itself.
+const APPOINTMENT_REFERENCE = /\b(?:appointment|appt|visit)\b/;
+
+// Positive grounding, not absence of contradiction: the selected visit must
+// positively agree with EVERY explicit date claim found anywhere in the
+// promise's agent evidence (promiseEvidenceTexts) that actually names the
+// appointment — not merely fail to be contradicted by one narrow field.
+// This is what replaces gating the check on `subject?.quote` — subject is
+// optional in the extraction schema, so a promise with subject: null
+// skipped date validation entirely, even when its own standing-promise
+// quote (or another evidence entry) named an explicit date that
+// contradicted the sole visit narrowBySubject selected with no date filter
+// applied at all (codex #4293 P1 r10 — the fourth grounding gap in four
+// rounds, each accepted as "validate the quote" and each time "the quote"
+// turning out to mean a narrower thing than it sounded). Only a promise
+// whose ENTIRE evidence set names no appointment-bound date at all may
+// proceed ungrounded — exactly quoteDateContradictsSelectedVisit's own
+// per-quote rule, applied across every source instead of one.
+function evidenceContradictsSelectedVisit(texts, ymd, reference) {
+  return texts.filter((quote) => APPOINTMENT_REFERENCE.test(norm(quote)))
+    .some((quote) => quoteDateContradictsSelectedVisit(quote, ymd, reference));
+}
+
 function selectDiscussedVisit({ commitment, call, customer, candidates = [], now = new Date() }) {
   const skip = (reason) => ({ reason });
   const identity = callerIdentityReason(call, customer);
@@ -737,7 +803,7 @@ function selectDiscussedVisit({ commitment, call, customer, candidates = [], now
   if (extractedDateUngrounded({ subject, call, candidates, callCommitments })) return skip('date_not_grounded');
   const selected = narrowBySubject(candidates, subject);
   if (selected.length !== 1) return skip(selected.length ? 'ambiguous_visit' : 'discussed_visit_unavailable');
-  if (subject?.quote && quoteDateContradictsSelectedVisit(subject.quote, dateOnly(selected[0].scheduled_date),
+  if (evidenceContradictsSelectedVisit(promiseEvidenceTexts(commitment, promisedQuotes), dateOnly(selected[0].scheduled_date),
     callCommitments.callEndedAt(call) || call.created_at)) return skip('date_not_grounded');
   const notReady = visitNotSelfServiceReason(selected[0], now);
   return notReady ? skip(notReady) : { visit: selected[0] };
