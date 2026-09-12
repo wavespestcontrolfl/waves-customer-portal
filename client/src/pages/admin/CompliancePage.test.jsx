@@ -152,6 +152,31 @@ describe('CompliancePage Staff authentication', () => {
     ))).toBe(true));
   });
 
+  it('does not download an HTTP error as CSV and allows a successful retry', async () => {
+    const createObjectURL = vi.fn(() => 'blob:synthetic-export');
+    const revokeObjectURL = vi.fn();
+    vi.stubGlobal('URL', Object.assign(URL, { createObjectURL, revokeObjectURL }));
+    const click = vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {});
+    let fail = true;
+    const blob = new Blob(['Date,Product\n2035-01-01,Fixture'], { type: 'text/csv' });
+    const readBlob = vi.fn(async () => blob);
+    vi.stubGlobal('fetch', vi.fn(async (url) => String(url).includes('/report/export')
+      ? { ok: !fail, status: fail ? 503 : 200, blob: readBlob }
+      : { ok: true, json: async () => ({ applications: [], total: 0 }) }));
+    renderCompliance('/admin/compliance?tab=applications');
+    fireEvent.click(screen.getByRole('button', { name: 'Application Log' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Export for DACS' }));
+    expect(await screen.findByRole('alert')).toHaveTextContent('Export failed (HTTP 503)');
+    expect(readBlob).not.toHaveBeenCalled();
+    expect(click).not.toHaveBeenCalled();
+    fail = false;
+    fireEvent.click(screen.getByRole('button', { name: 'Export for DACS' }));
+    await waitFor(() => expect(click).toHaveBeenCalledOnce());
+    expect(createObjectURL).toHaveBeenCalledWith(blob);
+    expect(revokeObjectURL).toHaveBeenCalledWith('blob:synthetic-export');
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+  });
+
   it('edits a license in the shared dialog with the existing payload', async () => {
     localStorage.setItem('waves_admin_user', JSON.stringify({ role: 'admin' }));
     const technician = {
