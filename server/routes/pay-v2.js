@@ -1277,6 +1277,12 @@ router.post('/:token/consent', async (req, res, next) => {
     // exactly like a consent-record failure — never a silent success with no
     // Auto Pay. With the mirror above, method_not_found is no longer a normal
     // outcome (round-7 P1) — the row was just ensured, so it too fails.
+    // The enrollment ran in savepoint mode, so its confirmation email is
+    // handed back for the caller to fire AFTER the commit (local audit on
+    // r46) — inside the transaction it could have outlived a rollback.
+    if (typeof enrollment?.sendEnrollmentConfirmation === 'function') {
+      await enrollment.sendEnrollmentConfirmation();
+    }
     if (enrollment?.reason === 'method_not_found') {
       throw new Error('Saved payment method could not be enrolled');
     }
