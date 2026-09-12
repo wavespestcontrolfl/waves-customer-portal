@@ -130,6 +130,11 @@ const SERVICE_SEARCH_FIELDS = [
 ];
 const SERVICE_SEARCH_PLACEHOLDER = "Search services...";
 
+function serviceSaveLabel(saving, isNew) {
+  if (saving) return "Saving...";
+  return isNew ? "Create Service" : "Save Changes";
+}
+
 const isActiveCatalogService = (service) =>
   service.is_active !== false && !service.is_archived;
 
@@ -541,7 +546,7 @@ function ServiceForm({ svc, onSave, onCancel, isNew }) {
       {error && <ActionFeedback error>{error}</ActionFeedback>}
       <div className="ui-record-actions">
         <Button onClick={submit} loading={saving}>
-          {isNew ? "Create Service" : "Save Changes"}
+          {serviceSaveLabel(saving, isNew)}
         </Button>
         {onCancel && (
           <Button variant="ghost" onClick={onCancel}>
@@ -737,7 +742,7 @@ function DetailPane({
           Select a service to view details
         </div>
         <div className="text-ui-caption">
-          Or click <strong>+ Add Service</strong> to create one.
+          Or click <strong>+ Add Service</strong>to create one.
         </div>
       </div>
     );
@@ -925,7 +930,7 @@ function DetailPane({
               onClick={handleToggleActive}
               title="Toggle active status"
             >
-              {svc.is_active ? "Active" : "Inactive"}
+              {svc.is_active ? "● Active" : "○ Inactive"}
             </Button>
           )}
         </div>
