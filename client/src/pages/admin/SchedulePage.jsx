@@ -14830,10 +14830,14 @@ export function CompletionPanel({
       // by itself and must not drag the rows still following the owner with
       // it (Codex r1 P1): with A seeding B and C, putting B on its own
       // 10-gallon mix leaves C on A's tank.
-      const tankOwned = field === "carrierGallons"
-        && prev.some((row) => isPerGallonUnit(row.rateUnit) && row.carrierGallonsManual);
-      const editedOwnsTank = prev.find((row) => row.productId === productId)?.carrierGallonsManual === true;
-      const propagateTank = field === "carrierGallons" && (!tankOwned || editedOwnsTank);
+      // The owner is the row that FIRST set the tank, not any row the tech
+      // has since edited: a detached follower's second keystroke would
+      // otherwise start driving its old siblings again (pre-push audit P1 —
+      // typing "10" is two edits). The owner slot frees up when that row
+      // leaves per-gallon or is removed, and the next entry claims it.
+      const tankOwner = prev.find((row) => isPerGallonUnit(row.rateUnit) && row.tankOwner);
+      const propagateTank = field === "carrierGallons"
+        && (!tankOwner || tankOwner.productId === productId);
       return prev.map((p) => {
         if (p.productId !== productId) {
           // One tank, one carrier volume: gallons entered on any per-gallon
@@ -14846,7 +14850,14 @@ export function CompletionPanel({
           // recorded quantity at a stale tank volume (pre-push audit P1).
           if (propagateTank && isPerGallonUnit(p.rateUnit) && !p.carrierGallonsManual) {
             const shared = { ...p, carrierGallons: value };
-            if (!shared.totalAmountManual) shared.totalAmount = derivedTankTotal(shared.rate, value);
+            if (!shared.totalAmountManual) {
+              // A follower's derived dose is locked to its own rate's base
+              // unit exactly as the edited row's is — otherwise a follower
+              // whose unit the tech had changed comes back as "15 gal"
+              // (pre-push audit P1).
+              shared.amountUnit = String(shared.rateUnit).split("/")[0];
+              shared.totalAmount = derivedTankTotal(shared.rate, value);
+            }
             return shared;
           }
           return p;
@@ -14860,6 +14871,7 @@ export function CompletionPanel({
         if (field === "rateUnit" && isPerGallonUnit(p.rateUnit) && !isPerGallonUnit(value)) {
           next.carrierGallons = "";
           next.carrierGallonsManual = false;
+          next.tankOwner = false;
         }
         // Provenance is per row: a governed row restored while the initial
         // plan request failed (`lawnDefaultsEnabled` false, no defaults
@@ -14872,8 +14884,13 @@ export function CompletionPanel({
         }
         if (field === "applicationArea") next.applicationAreaDefault = false;
         // The row the tech typed into owns its gallons from here on; the
-        // rows that merely followed the tank keep following it.
-        if (field === "carrierGallons") next.carrierGallonsManual = true;
+        // rows that merely followed the tank keep following it. The first
+        // such row also becomes the tank owner, the only row whose later
+        // corrections travel.
+        if (field === "carrierGallons") {
+          next.carrierGallonsManual = true;
+          if (!tankOwner) next.tankOwner = true;
+        }
         if (field === "applicationMethod") {
           const areaRequirement = requiredApplicationArea(
             value,

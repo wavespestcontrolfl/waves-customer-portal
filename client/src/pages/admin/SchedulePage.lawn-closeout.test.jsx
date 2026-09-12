@@ -487,11 +487,25 @@ it('a follower given its own gallons does not drag the tank\'s other followers',
   await waitFor(() => expect(totals()[3].value).toBe('20'));
   expect(gal()[2].value).toBe('25');
   expect(totals()[4].value).toBe('100');
+  // A second edit on detached B still leaves C alone — typing "12" is two
+  // edits, and the first must not make B an owner (pre-push audit P1).
+  fireEvent.change(gal()[1], { target: { value: '12' } });
+  await waitFor(() => expect(totals()[3].value).toBe('24'));
+  expect(gal()[2].value).toBe('25');
+  expect(totals()[4].value).toBe('100');
   // A's correction still reaches C, and still not independent B.
   fireEvent.change(gal()[0], { target: { value: '30' } });
   await waitFor(() => expect(totals()[4].value).toBe('120'));
-  expect(gal()[1].value).toBe('10');
-  expect(totals()[3].value).toBe('20');
+  expect(gal()[1].value).toBe('12');
+  expect(totals()[3].value).toBe('24');
+  // A follower whose amount unit the tech changed comes back in the RATE's
+  // base unit when the tank corrects, never as "150 gal" (pre-push audit P1).
+  const cUnit = () => within(totals()[4].parentElement).getAllByRole('combobox')[1];
+  fireEvent.change(cUnit(), { target: { value: 'gal' } });
+  expect(totals()[4].value).toBe('');
+  fireEvent.change(gal()[0], { target: { value: '40' } });
+  await waitFor(() => expect(totals()[4].value).toBe('160'));
+  expect(cUnit().value).toBe('fl_oz');
 });
 
 // A per-gallon row on a NON-lawn lane (pest perimeter: area unit linear_ft)
