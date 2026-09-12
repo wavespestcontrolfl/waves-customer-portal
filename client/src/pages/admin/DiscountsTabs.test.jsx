@@ -9,7 +9,6 @@ import {
   waitFor,
 } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { UiSurface } from "../../components/ui";
 import { DiscountsSection } from "./DiscountsTabs";
 
 afterEach(() => {
@@ -27,14 +26,17 @@ describe("DiscountsSection", () => {
       })),
     );
 
-    render(
-      <UiSurface density="comfortable">
-        <DiscountsSection />
-      </UiSurface>,
+    render(<DiscountsSection />);
+    const createButton = await screen.findByRole("button", {
+      name: "+ New Discount",
+    });
+    expect(createButton).toHaveClass("ui-action");
+    expect(
+      screen.getByText("+ New Discount", { selector: "strong" }).parentElement,
+    ).toHaveTextContent(
+      "No discounts yet. Click + New Discount to add your first one.",
     );
-    fireEvent.click(
-      await screen.findByRole("button", { name: "New Discount" }),
-    );
+    fireEvent.click(createButton);
     fireEvent.change(screen.getByRole("textbox", { name: "Key" }), {
       target: { value: "summer-25" },
     });

@@ -21,6 +21,7 @@ import {
   TH,
   THead,
   TR,
+  UiSurface,
 } from "../../components/ui";
 
 const API = import.meta.env.VITE_API_URL || "/api";
@@ -283,7 +284,7 @@ function DiscountsSection() {
   ];
 
   return (
-    <div className="space-y-4 text-ui-body text-zinc-900">
+    <UiSurface density="comfortable" className="space-y-4 text-ui-body text-zinc-900">
       <div className="ui-record-actions justify-end">
         <Button
           onClick={() => {
@@ -292,7 +293,7 @@ function DiscountsSection() {
             setTab("form");
           }}
         >
-          New Discount
+          + New Discount
         </Button>
       </div>
       {toast && (
@@ -329,7 +330,8 @@ function DiscountsSection() {
           ) : sortedDiscounts.length === 0 ? (
             <Card>
               <CardBody className="py-10 text-center text-ink-secondary">
-                No discounts yet. Select New Discount to add your first one.
+                No discounts yet. Click <strong>+ New Discount</strong> to add
+                your first one.
               </CardBody>
             </Card>
           ) : (
@@ -840,7 +842,7 @@ function DiscountsSection() {
           )}
         </TabPanel>
       </Tabs>
-    </div>
+    </UiSurface>
   );
 }
 
