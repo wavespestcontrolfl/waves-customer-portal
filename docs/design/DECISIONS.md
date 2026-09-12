@@ -2379,7 +2379,13 @@ noun is the only thing that varies.
 `AppointmentPage` (not-found + load-error), `SecureAppointmentPage`, `ReceiptPage`,
 `ContractSignPage`, `StatementPayPage`, `ReportViewPage`, `ProjectReportViewPage`,
 `LawnReportViewPage`, `PestReportViewPage`, `PriceChangeNoticePage`, `PrepGuidePage`,
-`ServiceOutlinePage`, `CardPage`.
+`ServiceOutlinePage`, `CardPage`, `NewsletterArchivePage`.
+
+`NewsletterArchivePage` is the one whose terminal action is not a phone number —
+it points back at the newsletter index — so it takes `contact="none"` and keeps
+that link as the card's content. It was missed by the first pass of this PR
+because it reached the card through `PublicLoadError` for its error branch while
+hand-rolling its not-found, which is precisely the split G-02 describes.
 
 ### What this did NOT decide
 
