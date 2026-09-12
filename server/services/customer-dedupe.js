@@ -2160,6 +2160,17 @@ async function executeMerge({ winnerId, loserId, performedBy, performedById = nu
       if (winnerPlan.inFlight > 0 && !winner.payer_id && loser.payer_id) {
         throw new Error('A combined payment for the surviving record is still in flight and this merge would change its billing owner — retry after it settles');
       }
+      // The SEND fence belongs with the other defers, ahead of the Stripe
+      // writes (Codex #4311 r40 P1): a cancel is an external effect this
+      // transaction cannot roll back, so a merge that is about to be refused
+      // for an in-flight combined-visit send must not already have cancelled
+      // the customer's checkout session. The post-sweep fence below still
+      // covers the repointed loser invoices; this one covers the winner's own
+      // before anything is cancelled.
+      if (backfills.payer_id && !winner.payer_id
+        && await require('./visit-completion-packets').packetInvoiceSendInFlight({ customerId: winnerId }, trx)) {
+        throw new Error('A combined-visit invoice for the surviving record is being sent and this merge would change its billing owner — retry after it settles');
+      }
       // Past every defer: now the Stripe writes.
       await PayCombined.applyStampedSessionRelease(trx, winnerPlan);
       await PayCombined.applyStampedSessionRelease(trx, loserPlan);

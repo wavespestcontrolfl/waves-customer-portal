@@ -461,16 +461,26 @@ async function runVisitCompletionPacketEffects(packetId, database = db) {
       const closingInvoice = payment.invoiceId
         ? await trx('invoices').where({ id: payment.invoiceId }).first('id', 'payer_id', 'scheduled_send_error')
         : null;
-      if (closingInvoice
-        && (closingInvoice.payer_id || require('./invoice-helpers').invoiceWithdrawnFromCustomer(closingInvoice))
-        && payment.state !== 'office_required') {
+      if (closingInvoice) {
+        // BOTH DIRECTIONS (Codex #4311 r40 P2): a Bill-To assignment during
+        // delivery must close for office review, and a Bill-To CLEAR or a
+        // handoff to another payer during delivery must not close with the
+        // earlier payer's verdict — a clear would leave a false payer alert
+        // and a handoff would tell staff to bill the wrong AP account.
         const [, stampedPayer] = String(closingInvoice.scheduled_send_error || '').split(':');
-        payment = {
-          ...payment,
-          state: 'office_required',
-          reason: 'payer_assigned',
-          payerId: closingInvoice.payer_id || (stampedPayer ? Number(stampedPayer) : null) || payment.payerId || null,
-        };
+        const livePayerId = closingInvoice.payer_id
+          || (stampedPayer ? Number(stampedPayer) : null)
+          || null;
+        const payerOwnedNow = Boolean(closingInvoice.payer_id)
+          || require('./invoice-helpers').invoiceWithdrawnFromCustomer(closingInvoice);
+        if (payerOwnedNow) {
+          payment = { ...payment, state: 'office_required', reason: 'payer_assigned', payerId: livePayerId || payment.payerId || null };
+        } else if (payment.reason === 'payer_assigned') {
+          // The payer is gone: the verdict it produced goes with it. Whatever
+          // else the collection decided still stands (a failed charge keeps
+          // its own office_required), so only the payer verdict is cleared.
+          payment = { ...payment, state: payment.state === 'office_required' ? 'collected' : payment.state, reason: null, payerId: null };
+        }
       }
       const closeReview = payment.state === 'office_required' || delivery.state === 'delivery_review';
       const alreadyAlerted = closeReview && await trx('dispatch_alerts').where({ type: 'visit_closeout_review' }).whereNull('resolved_at')

@@ -97,6 +97,7 @@ router.get('/recent-charges', recentChargesLimiter, async (req, res, next) => {
  * manual reconciliation (cash/check/off-platform).
  */
 router.post('/reconcile', requireAdmin, async (req, res, next) => {
+  let reviewUnrecordedWarning = null;
   try {
     const { invoiceId, stripeChargeId, collectedVia, amount, note } = req.body || {};
     if (!invoiceId) return res.status(400).json({ error: 'invoiceId required' });
@@ -453,7 +454,7 @@ router.post('/reconcile', requireAdmin, async (req, res, next) => {
           logger.error(`[reconcile] invoice ${settled.invoice_number || invoiceId} settled with an UNRECORDED review enrollment — the packet recovery sweep owns it`);
           // No redelivery owns this rail (Codex #4311 r31 P1): without a
           // durable record the ask is simply lost, so the office is told.
-          await require('../services/dispatch-alerts').createAlert({
+          const alerted = await require('../services/dispatch-alerts').createAlert({
             type: 'visit_closeout_review',
             severity: 'warn',
             payload: {
@@ -462,7 +463,16 @@ router.post('/reconcile', requireAdmin, async (req, res, next) => {
               invoiceIds: [invoiceId],
               detail: 'This settled invoice owes a review ask that could not be recorded — re-run the enrollment or ask manually.',
             },
-          }).catch((alertErr) => logger.error(`[reconcile] could not raise the unrecorded-enrollment alert: ${alertErr.message}`));
+          }).catch((alertErr) => {
+            logger.error(`[reconcile] could not raise the unrecorded-enrollment alert: ${alertErr.message}`);
+            return null;
+          });
+          // The alert is the durable signal; when it cannot be persisted the
+          // OPERATOR is the last one (Codex #4311 r40 P1) — this rail has no
+          // redelivery, and reporting a clean reconciliation would lose the
+          // requested review silently. The payment is recorded either way, so
+          // this rides the success response as a warning.
+          if (!alerted) reviewUnrecordedWarning = invoiceId;
         }
       }
     } catch (enrollErr) {
@@ -472,7 +482,11 @@ router.post('/reconcile', requireAdmin, async (req, res, next) => {
     const refreshed = await db('invoices').where({ id: invoiceId }).first();
     res.json({ success: true, invoice: refreshed, stripe_charge: chargeDetails ? {
       id: chargeDetails.id, amount: chargeDetails.amount / 100, receipt_url: chargeDetails.receipt_url,
-    } : null });
+    } : null,
+    ...(reviewUnrecordedWarning ? {
+      reviewsUnrecorded: [reviewUnrecordedWarning],
+      warning: 'The payment is recorded, but the review ask for this visit could not be recorded and no alert could be raised — enroll it from the visit or ask manually.',
+    } : {}) });
   } catch (err) { next(err); }
 });
 
