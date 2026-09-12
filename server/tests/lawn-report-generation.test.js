@@ -47,15 +47,25 @@ describe('generateServiceReport durability markers', () => {
     expect(state.assessmentUpdates).toEqual([expect.objectContaining({ report_auto_generated: true, report_id: 'r-1' })]);
   });
 
-  test('a missing service_reports table leaves the step unmarked so recovery retries it', async () => {
+  test('no service_reports table still completes the step — there is nothing to insert', async () => {
     state.hasTable = false;
     await LawnIntel.generateServiceReport('a-1');
     expect(state.rows).toEqual([]);
-    // Marking it done here would tell recovery the report exists, forever.
-    expect(state.assessmentUpdates.some((u) => u.report_auto_generated)).toBe(false);
+    // This schema has no such table at all; withholding the marker would leave
+    // delivery's report step owed forever and block the notification behind it.
+    expect(state.assessmentUpdates).toEqual([expect.objectContaining({ report_auto_generated: true })]);
+  });
+
+  test('a service_reports table with no usable columns leaves the step owed', async () => {
+    state.reportCols = {};
+    await LawnIntel.generateServiceReport('a-1');
+    expect(state.rows).toEqual([]);
+    // Real migration lag: recovery should retry once the columns land.
+    expect(state.assessmentUpdates).toEqual([]);
   });
 
   test('an assessment table with no marker column generates nothing at all', async () => {
+    state.hasTable = true;
     state.assessmentCols = { updated_at: {} };
     // An unrecordable report would be re-inserted by every recovery sweep.
     await LawnIntel.generateServiceReport('a-1');

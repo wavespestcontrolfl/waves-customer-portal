@@ -109,9 +109,8 @@ async function assessPhotoQuality(base64Image, mimeType) {
 // MAIN SERVICE
 // ══════════════════════════════════════════════════════════════
 
-// Only the columns this database actually has; null when there is no table.
+// Only the columns this database actually has; null when none of them match.
 async function reportInsertData(reportData) {
-  if (!(await db.schema.hasTable('service_reports').catch(() => false))) return null;
   const reportCols = await db('service_reports').columnInfo().catch(() => ({}));
   const insertData = Object.fromEntries(Object.entries(reportData).filter(([key]) => reportCols[key]));
   return Object.keys(insertData).length > 0 ? insertData : null;
@@ -440,7 +439,19 @@ const LawnIntelligence = {
         generated_at: new Date(),
       };
 
-      const insertData = await reportInsertData(reportData);
+      // No service_reports table anywhere in this schema (none of the repo's
+      // migrations create one) is the NORMAL case, not a lag: the assessment row
+      // and Lawn Report V2 are the report. Withholding the marker there left the
+      // delivery pipeline's report step owed forever, which blocked the standalone
+      // notification behind it — so "nothing to insert" still completes the step.
+      const reportsTable = await db.schema.hasTable('service_reports').catch(() => false);
+      const insertData = reportsTable ? await reportInsertData(reportData) : null;
+      // A table that exists but accepted no columns is a real migration lag: leave
+      // the step owed so recovery retries once the schema catches up.
+      if (reportsTable && !insertData) {
+        logger.warn(`[lawn-intel] assessment ${assessmentId}: service_reports has no usable columns; report left owed`);
+        return null;
+      }
       // With no marker column nothing can record that this report exists, so the
       // recovery sweep would read the step as owed and insert a fresh row on
       // every pass. Skip the insert rather than pile rows up unrecorded.
@@ -456,11 +467,7 @@ const LawnIntelligence = {
       const report = await db.transaction(async (trx) => {
         const row = insertData ? (await trx('service_reports').insert(insertData).returning('*'))[0] : null;
         const update = {};
-        // Only a real report row is proof: stamping the marker when nothing was
-        // inserted (no table, no matching columns) would tell delivery recovery
-        // the report step is durably done and stop it retrying once the schema
-        // catches up.
-        if (row && assessmentCols.report_auto_generated) update.report_auto_generated = true;
+        if (assessmentCols.report_auto_generated) update.report_auto_generated = true;
         if (row?.id && assessmentCols.report_id) update.report_id = row.id;
         if (assessmentCols.updated_at) update.updated_at = new Date();
         if (Object.keys(update).length > 0) await trx('lawn_assessments').where({ id: assessmentId }).update(update);
