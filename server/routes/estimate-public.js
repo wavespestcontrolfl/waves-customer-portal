@@ -20,6 +20,7 @@ const { formatAddress } = require('../utils/address-normalizer');
 const { arrivalWindowRange, formatSmsTimeRange } = require('../utils/sms-time-format');
 const { shortenOrPassthrough } = require('../services/short-url');
 const { mintEstimateAcceptToken } = require('../utils/estimate-handoff-token');
+const { groupLinkStillViewable } = require('../services/proposal-bid');
 
 // Gate pass for the accepted-estimate /book links (GATE_BOOKING_CUSTOMERS_ONLY):
 // the links carry only the correlation estimate_id, so under the customers-only
@@ -8531,7 +8532,15 @@ async function handleEstimateView(req, res, next) {
       return next();
     }
 
-    if (new Date(estimate.expires_at) < new Date() && estimate.status !== 'accepted') {
+    // expires_at IS this property's own offer deadline (#4309 round 7), so it
+    // is read directly — no narrowing helper. A dead end here is the ONE place
+    // group-link viewability applies: the delivered link is this anchor's
+    // token, so when the anchor's own offer has ended but the group is still
+    // reachable, the page renders instead of the expired stub and the customer
+    // can still open a fixed sibling that outlives it. The anchor's own card
+    // resolves to 'expired' through terminalState and stays unacceptable.
+    if (new Date(estimate.expires_at) < new Date() && estimate.status !== 'accepted'
+      && !(estimate.estimate_group_id && groupLinkStillViewable(estimate))) {
       return res.set('Content-Type', 'text/html').send(
         renderExpiredPage({ address: estimate.address, customerName: estimate.customer_name })
       );
@@ -8718,6 +8727,8 @@ async function handleEstimateView(req, res, next) {
       onetimeTotal: parseFloat(estimate.onetime_total || 0),
       tier: estimate.waveguard_tier,
       createdAt: estimate.created_at,
+      // Shown deadline = this property's own fixed date when that is earlier
+      // This property's own offer deadline (#4309 round 7).
       expiresAt: estimate.expires_at,
       satelliteUrl: estimate.satellite_url || null,
       showOneTimeOption: !!estimate.show_one_time_option,
@@ -16020,6 +16031,49 @@ router.post('/:token/measurement-review', measurementReviewLimiter, async (req, 
 // later requests fall back to notify-office-only, and the office extends
 // manually via POST /api/admin/estimates/:id/extend on their own judgment.
 // Every path raises an in-app admin notification.
+// The notify-only extension claim: group lock (same lock proposal saves,
+// grouped sends, extensions and renewals take) → re-read the row FOR UPDATE
+// and confirm it is STILL in the group just locked → fixed-hold verdict on
+// that CONFIRMED group → dedupe claim pinned to that same membership, all in
+// one transaction. `blocked` is the generic-404 answer; `claimed` 0 without a
+// block is the ordinary 24h dedupe (GH codex P1 r5 on #4309).
+//
+// Lock-then-reread ordering matches the auto-renew sweep
+// (estimate-auto-renew.js): the initial read is only a PEEK of the group to
+// lock — an eligible sent/viewed row can be moved into or between groups
+// while this transaction waits on that group's advisory lock (or, for an
+// initially ungrouped row, no lock is taken at all), so the code re-reads
+// `estimate_group_id` FOR UPDATE after the lock and refuses to judge or
+// claim on the stale peek if membership changed underneath it. The final
+// update is predicated on that same confirmed membership so a membership
+// change between the verdict and the write makes the update match nothing
+// rather than committing the estimate into a fixed-validity sibling's group,
+// burning `extension_requested_at`, and paging the office instead of
+// returning the contract's generic 404 (GH codex P1 r6 on #4309). Exported
+// for tests.
+async function claimNotifyOnlyExtensionRequest(estimateId, dedupeOpen) {
+  return db.transaction(async (trx) => {
+    const initial = await trx('estimates').where({ id: estimateId }).first();
+    if (!initial) return { claimed: 0, blocked: true };
+    const groupId = initial.estimate_group_id || null;
+    let fresh = initial;
+    if (groupId) {
+      await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
+        ['estimate-group-send', String(groupId)]);
+      fresh = await trx('estimates').where({ id: estimateId }).forUpdate().first();
+      if (!fresh || (fresh.estimate_group_id || null) !== groupId) return { claimed: 0, blocked: true };
+    }
+    if (await require('../services/estimate-extension').fixedBidBlocksExtension(trx, fresh)) return { claimed: 0, blocked: true };
+    let query = trx('estimates').where({ id: estimateId });
+    query = groupId ? query.where({ estimate_group_id: groupId }) : query.whereNull('estimate_group_id');
+    const claimed = await query
+      .where(dedupeOpen)
+      .whereRaw(REPRICE_PENDING_ABSENT_SQL)
+      .update({ extension_requested_at: trx.fn.now() });
+    return { claimed, blocked: false };
+  });
+}
+
 router.post('/:token/extension-request', extensionRequestLimiter, async (req, res, next) => {
   try {
     if (!featureGates.isEnabled('estimateExtensionRequest')) {
@@ -16037,7 +16091,8 @@ router.post('/:token/extension-request', extensionRequestLimiter, async (req, re
     if (estimate && await callSideBlockForEstimateData(db, parseEstimateDataSafe(estimate))) {
       return res.status(404).json({ error: 'Estimate not found' });
     }
-    if (!estimate || !isEstimateExtensionRequestEligible(estimate)) {
+    if (!estimate || !isEstimateExtensionRequestEligible(estimate)
+      || await require('../services/estimate-extension').fixedBidBlocksExtension(db, estimate)) {
       return res.status(404).json({ error: 'Estimate not found' });
     }
 
@@ -16119,6 +16174,7 @@ router.post('/:token/extension-request', extensionRequestLimiter, async (req, re
             ? { extension_requested_at: null, extension_auto_granted_at: null }
             : { extension_requested_at: null },
         ).catch((e) => logger.warn(`[estimate-extension-request] auto-claim release failed for estimate ${estimate.id}: ${e.message}`));
+        if (err.code === 'FIXED_BID_VALIDITY') return res.status(404).json({ error: 'Estimate not found' });
         logger.error(`[estimate-extension-request] auto-grant failed for estimate ${estimate.id}: ${err.message}`);
         return res.status(500).json({ error: 'extension_request_failed' });
       }
@@ -16172,11 +16228,13 @@ router.post('/:token/extension-request', extensionRequestLimiter, async (req, re
     // must not fall through to a 201 that pages the office — the row is off
     // the surface, so the answer is the same generic 404 as an unknown
     // token (no enumeration). A zero row is re-read to tell the two apart.
-    const claimed = await db('estimates')
-      .where({ id: estimate.id })
-      .where(DEDUPE_OPEN)
-      .whereRaw(REPRICE_PENDING_ABSENT_SQL)
-      .update({ extension_requested_at: db.fn.now() });
+    // Serialized and re-judged like the auto-grant inside extendEstimate
+    // (GH codex P1 r5 on #4309): a sibling can gain a fixed date between
+    // the preflight above and this claim, and the route contract answers a
+    // fixed-validity group with the generic 404 BEFORE any claim burns the
+    // window or pages the office.
+    const { claimed, blocked } = await claimNotifyOnlyExtensionRequest(estimate.id, DEDUPE_OPEN);
+    if (blocked) return res.status(404).json({ error: 'Estimate not found' });
     if (!claimed) {
       const fresh = await db('estimates').where({ id: estimate.id }).first('id', 'estimate_data');
       if (!fresh || estimateOffCustomerSurface(fresh)) {
@@ -18320,6 +18378,7 @@ function isEstimateCustomerViewable(estimate = {}, now = new Date()) {
 // archived rows are office-retired. Gate + rate limit live at the call sites.
 function isEstimateExtensionRequestEligible(estimate = {}, now = new Date()) {
   if (!estimate || estimate.archived_at) return false;
+  if (require('../services/proposal-bid').hasFixedBidValidity(estimate)) return false;
   // plan_restart quotes never self-extend (codex GH #3671 r9 P1): the C4
   // ruling requires every restart price to be a CURRENT recompute — the
   // customer's path back is the Restart button, which re-prices; an
@@ -25183,7 +25242,8 @@ router.get('/:token/data', dataLimiter, async (req, res, next) => {
       // real-but-ineligible tokens (drafts, archived, send_failed) from
       // unknown ones and break the generic-404 contract.
       if (featureGates.isEnabled('estimateExtensionRequest')
-        && isEstimateExtensionRequestEligible(estimate)) {
+        && isEstimateExtensionRequestEligible(estimate)
+        && !(await require('../services/estimate-extension').fixedBidBlocksExtension(db, estimate))) {
         return res.status(404).json({ error: 'Estimate not found', extensionRequestEligible: true });
       }
       return res.status(404).json({ error: 'Estimate not found' });
@@ -25393,7 +25453,12 @@ router.get('/:token/data', dataLimiter, async (req, res, next) => {
 
     const terminalState = (() => {
       if (['accepted', 'declined', 'expired'].includes(estimate.status)) return estimate.status;
-      if (estimate.expires_at && new Date(estimate.expires_at) < new Date()) return 'expired';
+      // The CTA/activity state follows THIS property's own offer deadline,
+      // which is exactly what expires_at now holds (#4309 round 7). Group-link
+      // viewability never softens it: a reachable group of expired cards still
+      // renders every card expired.
+      const shownExpiry = estimate.expires_at;
+      if (shownExpiry && new Date(shownExpiry) < new Date()) return 'expired';
       return null;
     })();
     const ctaTerminalState = terminalState || (quoteRequirement.quoteRequired ? 'quote_required' : null);
@@ -25583,6 +25648,7 @@ router.get('/:token/data', dataLimiter, async (req, res, next) => {
           taxRate: proposalForView.taxRate,
           taxLabel: proposalForView.taxLabel,
           terms: proposalForView.terms,
+          ...(proposalForView.validThrough ? { validThrough: proposalForView.validThrough } : {}),
           buildings: (proposalForView.buildings || []).map((building) => ({
             name: building.name,
             note: building.note,
@@ -26108,6 +26174,7 @@ async function handleEstimateAsk(req, res, next) {
     if (!verifyEstimateAskToken(req, estimate)) {
       return res.status(403).json({ error: 'estimate_ask_forbidden' });
     }
+    // Same authored-deadline rule as the page's CTA state (GH codex P2 r4 on #4309).
     if (!isEstimateAskAnswerable(estimate)) {
       return res.status(409).json({ error: 'estimate_expired' });
     }
@@ -26306,6 +26373,7 @@ module.exports.recurringServiceReceivesTierDiscount = recurringServiceReceivesTi
 module.exports.recurringServiceCountsTowardTier = recurringServiceCountsTowardTier;
 module.exports.adminDraftPreviewEligible = adminDraftPreviewEligible;
 module.exports.isEstimateExtensionRequestEligible = isEstimateExtensionRequestEligible;
+module.exports.claimNotifyOnlyExtensionRequest = claimNotifyOnlyExtensionRequest;
 module.exports.anchoredAnnualTotal = anchoredAnnualTotal;
 module.exports.clampLawnLadderEntry = clampLawnLadderEntry;
 module.exports.pricingBundleMissingRequiredSetupFee = pricingBundleMissingRequiredSetupFee;

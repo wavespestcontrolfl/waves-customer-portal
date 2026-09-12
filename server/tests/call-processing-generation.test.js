@@ -561,7 +561,7 @@ describe('unit-answer fence (clarify write-back) — stamp, read, decide', () =>
     const ext = fs.readFileSync(path.join(__dirname, '../services/estimate-extension.js'), 'utf8');
     expect(ext).toContain("const { REPRICE_PENDING_ABSENT_SQL } = require('../utils/estimate-claim-sql');");
     expect(ext.split('.whereRaw(REPRICE_PENDING_ABSENT_SQL)').length - 1).toBe(2);
-    const guarded = ext.slice(ext.indexOf('const updated = await db(\'estimates\')'), ext.indexOf('.update(updates);'));
+    const guarded = ext.slice(ext.indexOf('const updated = await trx(\'estimates\')'), ext.indexOf('.update(updates);'));
     expect(guarded).toContain('.whereRaw(REPRICE_PENDING_ABSENT_SQL)');
   });
 });
@@ -682,9 +682,13 @@ describe('generation fence + call-lock wiring (source pins)', () => {
     // decline + the five CAS whole-blob mutations (select-tier, bond, interior, service mix, preferences) + the extension auto-grant claim (r7) + the notify-only claim (r10).
     expect((pub.match(/\.whereRaw\(REPRICE_PENDING_ABSENT_SQL\)/g) || []).length).toBe(8);
     // A zero-row notify-only claim re-reads and answers the generic 404 for a held row — never a 201 that pages the office (codex r10 P0).
-    const notifyClaimAt = pub.indexOf("update({ extension_requested_at: db.fn.now() });");
+    // The claim itself now rides the group lock + fixed-hold recheck in
+    // claimNotifyOnlyExtensionRequest (GH codex P1 r5 on #4309); the held-row
+    // re-read still follows a zero-row claim at the call site.
+    expect(pub).toContain(".whereRaw(REPRICE_PENDING_ABSENT_SQL)\n      .update({ extension_requested_at: trx.fn.now() });");
+    const notifyClaimAt = pub.indexOf("const { claimed, blocked } = await claimNotifyOnlyExtensionRequest(estimate.id, DEDUPE_OPEN);");
     expect(notifyClaimAt).toBeGreaterThan(-1);
-    expect(pub.slice(notifyClaimAt, notifyClaimAt + 400)).toContain("if (!fresh || estimateOffCustomerSurface(fresh)) {\n        return res.status(404).json({ error: 'Estimate not found' });");
+    expect(pub.slice(notifyClaimAt, notifyClaimAt + 500)).toContain("if (!fresh || estimateOffCustomerSurface(fresh)) {\n        return res.status(404).json({ error: 'Estimate not found' });");
     expect(pub).toContain("return { ok: false, status: 409, error: 'This estimate is being re-priced — please try again in a few minutes' };");
     // The accept preflight answers the documented re-price 409 BEFORE the generic accept-active refusal (codex r6 P0).
     const acceptRepriceAt = pub.indexOf("return res.status(409).json({ error: 'This estimate is being re-priced — please try again in a few minutes' });");

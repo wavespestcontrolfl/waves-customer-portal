@@ -351,18 +351,23 @@ async function sweepTimeRules(now = new Date()) {
           .whereRaw('GREATEST(last_viewed_at, COALESCE(sent_at, last_viewed_at)) < ?', [new Date(nowMs - p.minQuietHours * 3600000)])
           .whereRaw('GREATEST(last_viewed_at, COALESCE(sent_at, last_viewed_at)) > ?', [new Date(nowMs - p.maxQuietHours * 3600000)]);
       } else if (rule.rule_key === 'expiring_engaged') {
-        q = q.whereIn('status', ACTIVE_STATUSES)
+        // expires_at is this row's own offer deadline and is never widened
+        // by a grouped sibling (#4309 round 7), so the plain window bound is
+        // correct again and the blanket fixed-validity OR is gone.
+        q = q.select('estimates.expires_at', 'estimates.estimate_data')
+          .whereIn('status', ACTIVE_STATUSES)
           .whereNotNull('viewed_at')
           .whereNotNull('expires_at')
-          .where('expires_at', '>', now)
-          .where('expires_at', '<', new Date(nowMs + p.expiresWithinDays * 86400000))
+          .where((sub) => sub
+            .where((b) => b.where('expires_at', '>', now).where('expires_at', '<', new Date(nowMs + p.expiresWithinDays * 86400000))))
           .where((sub) => sub.where('followup_expiring_sent', false).orWhereNull('followup_expiring_sent'));
       } else if (rule.rule_key === 'expiring_never_viewed') {
-        q = q.whereIn('status', ACTIVE_STATUSES)
+        q = q.select('estimates.expires_at', 'estimates.estimate_data')
+          .whereIn('status', ACTIVE_STATUSES)
           .whereNull('viewed_at')
           .whereNotNull('expires_at')
-          .where('expires_at', '>', now)
-          .where('expires_at', '<', new Date(nowMs + p.expiresWithinDays * 86400000))
+          .where((sub) => sub
+            .where((b) => b.where('expires_at', '>', now).where('expires_at', '<', new Date(nowMs + p.expiresWithinDays * 86400000))))
           .where((sub) => sub.where('followup_expiring_sent', false).orWhereNull('followup_expiring_sent'));
       } else {
         continue; // unknown sweep rule — nothing to scan
@@ -538,6 +543,8 @@ async function processDueBatch(now = new Date()) {
       // expires_at can lapse HOURS before the daily expiration sweep flips
       // status to 'expired', and the public route already renders those
       // links as expired (codex 2736 r2) — never email a link that dead-ends.
+      // expires_at is the row's own offer deadline (#4309 round 7), which is
+      // exactly what the public page and CTA enforce.
       if (est.expires_at && new Date(est.expires_at).getTime() <= nowMs) {
         await markJob(job.id, 'skipped', 'link-expired');
         continue;

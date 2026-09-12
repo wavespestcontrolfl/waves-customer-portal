@@ -1442,6 +1442,13 @@ const EstimateFollowUp = {
       if (!delivery.expiring.anyEnabled) {
         logger.info("[est-followup] Expiring stage disabled — SMS and email templates inactive");
       }
+      // expires_at is never widened by a grouped sibling any more (#4309
+      // round 7), so the ordinary one-to-three-day window is correct for
+      // every row again — fixed-validity included. The blanket
+      // fixed-validity OR that used to admit rows whose raw column had been
+      // pushed outward is gone with it, which restores the ONE-DAY LOWER
+      // BOUND this stage is supposed to have: a bid inside its final day is
+      // not reminded (GH codex P2 r7 on #4309).
       const expiring = delivery.expiring.anyEnabled ? await db("estimates")
         .whereIn("status", ["sent", "viewed"])
         .whereNull("archived_at")
@@ -1490,6 +1497,9 @@ const EstimateFollowUp = {
           claimed = true;
           const firstName = (est.customer_name || "").split(" ")[0] || "there";
           const { smsUrl, emailUrl } = await mintStageLinks(est, "estimate_followup_expiring");
+          // The row's own offer deadline — the same value the candidate bound
+          // selected on, so the copy can never quote a different date than
+          // the one that made this estimate eligible (#4309 round 7).
           const expDate = new Date(est.expires_at).toLocaleDateString("en-US", {
             month: "long",
             day: "numeric",

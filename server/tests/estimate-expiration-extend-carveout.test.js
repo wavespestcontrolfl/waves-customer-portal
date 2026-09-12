@@ -51,7 +51,7 @@ function makeQuery(updateResult = 0) {
     }
     return name === 'update' ? Promise.resolve(updateResult) : q;
   };
-  ['where', 'whereIn', 'whereNot', 'whereNotIn', 'whereNull', 'whereNotNull', 'orWhere', 'orWhereRaw', 'modify', 'update']
+  ['where', 'whereRaw', 'whereIn', 'whereNot', 'whereNotIn', 'whereNull', 'whereNotNull', 'orWhere', 'orWhereRaw', 'modify', 'update']
     .forEach((m) => { q[m] = record(m); });
   return { q, calls };
 }
@@ -87,6 +87,11 @@ describe('runEstimateExpiration Rule 1 extension carve-out', () => {
     expect(orRaw).toBeDefined();
     expect(orRaw[1]).toContain('sent_at');
     expect(orRaw[2]).toEqual([7]);
+  });
+  test('fixed bid validity bypasses inactivity expiry but still uses explicit date expiry', () => {
+    const { FIXED_BID_VALIDITY_ABSENT_SQL } = require('../services/proposal-bid');
+    expect(rule1.calls).toContainEqual(['whereRaw', FIXED_BID_VALIDITY_ABSENT_SQL]);
+    expect(rule2.calls).not.toContainEqual(['whereRaw', FIXED_BID_VALIDITY_ABSENT_SQL]);
   });
 
   test('Rule 1 still ages out on sent_at for rows without a live deadline', () => {

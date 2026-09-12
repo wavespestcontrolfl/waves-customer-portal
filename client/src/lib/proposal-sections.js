@@ -5,10 +5,8 @@
 // pattern as the commercial inclusions bullets) — change them together.
 
 // commercialTerms → ordered [label, value] rows, omitting absent fields.
-// There is deliberately NO validity-period row: the send flow stamps the
-// enforced expiry (estimates.expires_at, printed as "Valid through") from
-// the fixed ESTIMATE_SEND_EXPIRY_DAYS — the adjustable-expiry lane adds an
-// authored validity together with enforcement (codex 1A-i r1/r2).
+// Bid validity is printed in proposal details and enforced by expires_at;
+// it is not a second free-text commercial-term promise.
 // Canonical payment-terms tokens → customer-facing labels. The tokens are
 // the payer system's vocabulary (server payer.js PAYMENT_TERMS), normalized
 // by the server; anything unrecognized renders nothing rather than raw data.

@@ -268,11 +268,8 @@ function cleanBoundedInt(value, { min, max }) {
 
 // §10 Commercial terms — the structured agreement block. Free-text `terms`
 // demotes to an "Additional terms" override rendered beneath these.
-// NO validity-period field here on purpose: the send flow stamps the
-// enforced expiry (expires_at) from the fixed ESTIMATE_SEND_EXPIRY_DAYS, so
-// an authored validity option would persist a promise nothing enforces or
-// renders (codex #3297 r2). The adjustable-expiry lane adds it together
-// with enforcement and rendering.
+// Bid validity is a separate proposal.validThrough calendar date, enforced
+// through expires_at by both proposal authoring and delivery.
 function normalizeCommercialTerms(raw) {
   if (!raw || typeof raw !== 'object') return null;
   const terms = {
@@ -706,6 +703,7 @@ function normalizeProposal(estimate = {}, { recurringMode = 'legacy', livePricin
     taxRate: Math.min(1, Math.max(0, num(base.taxRate, 0))),
     taxLabel: String(base.taxLabel || 'Sales tax').slice(0, 60),
     terms: base.terms ? String(base.terms).slice(0, 2000) : null,
+    ...(base.validThrough ? { validThrough: base.validThrough } : {}),
     buildings,
     // Structured sections (slice 1A-i) — null when absent, so legacy
     // proposals round-trip and render exactly as before. Read from the

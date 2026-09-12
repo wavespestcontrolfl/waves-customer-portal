@@ -15,6 +15,7 @@ const logger = require('./logger');
 const { excludePendingFirstBookings } = require('./estimate-conversion-guard');
 const { ESTIMATE_SEND_EXPIRY_DAYS } = require('./admin-estimate-persistence');
 const { EXPIRED_DISPOSITION_SQL } = require('./estimate-disposition');
+const { FIXED_BID_VALIDITY_ABSENT_SQL } = require('./proposal-bid');
 
 // Every expiry flip also stamps WHY (estimator audit 2026-08-29 P0): the
 // 130-of-161 losses that expire silently were the whole learning gap. The
@@ -53,6 +54,8 @@ async function runEstimateExpiration() {
     .where('sent_at', '<', ageCutoff)
     .whereNull('accepted_at')
     .whereNull('declined_at')
+    // A bid's authored date governs even when it is close to a resend date.
+    .whereRaw(FIXED_BID_VALIDITY_ABSENT_SQL)
     // An operator EXTENSION overrides the inactivity rule: POST /:id/extend
     // pushes expires_at (and texts the customer the new deadline) but
     // leaves sent_at, so without this carve-out every extension of an

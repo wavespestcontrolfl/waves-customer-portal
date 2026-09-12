@@ -192,6 +192,13 @@ describe('adminDraftPreviewEligible (staff draft preview — cheap half of the /
 });
 
 describe('isEstimateExtensionRequestEligible (expired-page "Request an extension")', () => {
+  it.each(['expired', 'sent', 'viewed', 'send_failed'])('withholds the extension offer for a published fixed-validity %s bid', (status) => {
+    const row = { status, sent_at: PAST, expires_at: PAST };
+    const data = { proposal: { validThrough: '2020-01-01' } };
+    expect(isEstimateExtensionRequestEligible({ ...row, estimate_data: data })).toBe(false);
+    expect(isEstimateExtensionRequestEligible({ ...row, estimate_data: JSON.stringify(data) })).toBe(false);
+  });
+
   it('never extends a plan_restart quote — the Restart button re-prices; the expired token stays dead (codex GH #3671 r9 P1)', () => {
     expect(isEstimateExtensionRequestEligible({ status: 'sent', sent_at: PAST, expires_at: PAST, source: 'plan_restart' })).toBe(false);
     expect(isEstimateExtensionRequestEligible({ status: 'expired', sent_at: PAST, source: 'plan_restart' })).toBe(false);

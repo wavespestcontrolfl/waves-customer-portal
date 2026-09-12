@@ -155,7 +155,7 @@ function lockReason(est) {
   if (est.archivedAt) return 'This estimate is archived. Unarchive it from the estimates list to edit the proposal.';
   if (est.priceLockedAt) return 'This proposal is price-locked (accepted) and can no longer be re-priced.';
   if (est.status === 'sending') return 'This estimate is being sent right now. Refresh once the send finishes.';
-  if (['accepted', 'declined', 'expired'].includes(est.status)) {
+  if (['accepted', 'declined', ...(est.fixedBidValidity ? [] : ['expired'])].includes(est.status)) {
     return `A ${STATUS_LABELS[est.status]?.toLowerCase() || est.status} estimate can no longer be re-priced.`;
   }
   return null;
@@ -205,6 +205,9 @@ function CommercialProposalEditor() {
   const [propertyAddress, setPropertyAddress] = useState('');
   const [taxRatePct, setTaxRatePct] = useState('0');
   const [terms, setTerms] = useState('');
+  const [validThrough, setValidThrough] = useState('');
+  // The SAVED fixed date — the one the server enforces on send and Mark won.
+  const [savedValidThrough, setSavedValidThrough] = useState('');
   const [bidToolsEnabled, setBidToolsEnabled] = useState(false);
   const [buildings, setBuildings] = useState([emptyBuilding(0)]);
   const showUnitColumn = bidToolsEnabled || buildings.some((building) => building.lineItems.some((line) => line.unit));
@@ -229,6 +232,13 @@ function CommercialProposalEditor() {
   const [briefOpen, setBriefOpen] = useState(true);
 
   const locked = lockReason(estimate);
+  // A fixed bid past its SAVED validity date stays editable (so the date can
+  // be revised) but cannot be sent or marked won — the server refuses both
+  // (assertBidSendDate / fixedBidDeadlinePassed), so neither action is
+  // offered until a later date is saved (GH codex P2 r5 on #4309). Eastern
+  // calendar-day comparison, the same day the server's proposalExpiry ends.
+  const fixedDeadlinePassed = !!savedValidThrough
+    && new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' }) > savedValidThrough;
 
   // Monotonic edit generation: every field edit bumps it, and save() applies
   // the normalized reload ONLY if no edit landed while the save round-trip
@@ -269,6 +279,8 @@ function CommercialProposalEditor() {
     setPropertyAddress(p.propertyAddress || est?.address || '');
     setTaxRatePct(String((Number(p.taxRate) || 0) * 100));
     setTerms(p.terms || '');
+    setValidThrough(p.validThrough || '');
+    setSavedValidThrough(p.validThrough || '');
     setBidToolsEnabled(data.bidToolsEnabled === true);
     setBuildings(
       Array.isArray(p.buildings) && p.buildings.length
@@ -646,7 +658,7 @@ function CommercialProposalEditor() {
   // from what is actually on screen.
   const formRef = React.useRef(null);
   formRef.current = {
-    title, preparedFor, propertyAddress, taxRate, terms,
+    title, preparedFor, propertyAddress, taxRate, terms, validThrough,
     buildings, scopeItems, programsState, correctiveWork, responsibilitiesText, commercialTerms,
     loadedAuthored, dirty,
   };
@@ -728,6 +740,7 @@ function CommercialProposalEditor() {
       propertyAddress: f.propertyAddress.trim(),
       taxRate: f.taxRate,
       terms: f.terms.trim() || null,
+      ...(bidToolsEnabled ? { validThrough: f.validThrough || null } : {}),
       ...structuredSectionsPayload(f),
       // Priced programs ARE the recurring itemization — the server rejects
       // building line items beside them, so the payload omits buildings
@@ -1475,6 +1488,12 @@ function CommercialProposalEditor() {
               <CardTitle>Commercial terms</CardTitle>
             </CardHeader>
             <CardBody>
+              {(bidToolsEnabled || validThrough) && <label className="block mb-4 text-14">
+                Valid through (Eastern time)
+                <Input type="date" value={validThrough} disabled={!!locked || !bidToolsEnabled} className="mt-1 max-w-xs"
+                  onChange={(e) => { setValidThrough(e.target.value); markEdit(); }} />
+                <span className="block mt-1 text-zinc-600">Prices remain valid through the end of this date, including resends. Leave blank for the standard seven days after sending. For a bid hold, enter the date required by the solicitation.</span>
+              </label>}
               <div className="text-12 text-zinc-500 mb-2">
                 Optional — structured terms shown as their own section on the proposal.
                 Free-text terms below become &ldquo;Additional terms&rdquo; once any of these are set.
@@ -1588,7 +1607,10 @@ function CommercialProposalEditor() {
                 {downloading ? <Loader2 size={15} className="animate-spin" /> : <Download size={15} />} Download PDF
               </Button>
 
-              {!locked && (
+              {!locked && fixedDeadlinePassed && (
+                <p className="text-13 text-zinc-600">The bid validity date has passed. Save a later Valid through date before sending or marking this proposal won.</p>
+              )}
+              {!locked && !fixedDeadlinePassed && (
                 <Button variant="secondary" className="w-full" onClick={sendProposal} disabled={sending || saving}>
                   {sending ? <Loader2 size={15} className="animate-spin" /> : <SendIcon size={15} />} Review and send
                 </Button>
@@ -1604,7 +1626,7 @@ function CommercialProposalEditor() {
                 </Button>
               )}
 
-              {savedOnce && !estimate?.archivedAt && canMarkProposalWon(estimate) && (
+              {savedOnce && !estimate?.archivedAt && !fixedDeadlinePassed && canMarkProposalWon(estimate) && (
                 <Button variant="secondary" className="w-full" onClick={markWon} disabled={markingWon}>
                   {markingWon ? <Loader2 size={15} className="animate-spin" /> : <CheckCircle2 size={15} />} Mark won
                 </Button>
