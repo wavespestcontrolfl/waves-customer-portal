@@ -126,4 +126,31 @@ describe("MobileServiceLibrary", () => {
       screen.queryByRole("button", { name: "Try again" }),
     ).not.toBeInTheDocument();
   });
+
+  it.each([
+    ["discounts", "Add"],
+    ["services", "Create Service"],
+  ])("shows the existing saving label in the %s editor", async (view, openName) => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((url, options) => {
+        if (options?.method === "POST") return new Promise(() => {});
+        const data = String(url).includes("/admin/services")
+          ? { services: [] }
+          : [];
+        return Promise.resolve({ ok: true, json: async () => data });
+      }),
+    );
+    render(<MobileServiceLibrary initialView={view} />);
+
+    fireEvent.click(screen.getByRole("button", { name: openName }));
+    fireEvent.change(screen.getByRole("textbox", { name: "Name" }), {
+      target: { value: "Pending fixture" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Create" }));
+
+    expect(
+      await screen.findByRole("button", { name: "Saving…" }),
+    ).toBeDisabled();
+  });
 });

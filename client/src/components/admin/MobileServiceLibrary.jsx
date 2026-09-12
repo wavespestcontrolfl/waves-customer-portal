@@ -72,6 +72,11 @@ const rowChrome =
 const editPanelChrome =
   "bg-zinc-50 border-hairline border-zinc-200 rounded-md p-4 flex flex-col gap-4 text-ui-body";
 
+function saveButtonLabel(saving, isNew) {
+  if (saving) return "Saving…";
+  return isNew ? "Create" : "Save";
+}
+
 function SearchBar({ value, onChange, placeholder }) {
   return (
     <Input
@@ -645,7 +650,7 @@ function DiscountEditPanel({ discount, onCancel, onSaved }) {
           Cancel
         </Button>{" "}
         <Button type="submit" loading={saving}>
-          {isNew ? "Create" : "Save"}
+          {saveButtonLabel(saving, isNew)}
         </Button>{" "}
       </div>{" "}
     </form>
@@ -1096,7 +1101,7 @@ function ServiceEditPanel({ service, onCancel, onSaved }) {
           Cancel
         </Button>{" "}
         <Button type="submit" loading={saving}>
-          {isNew ? "Create" : "Save"}
+          {saveButtonLabel(saving, isNew)}
         </Button>{" "}
       </div>{" "}
     </form>
