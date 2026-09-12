@@ -4,7 +4,7 @@
  *
  * Every send path that requeues a held text (QUIET_HOURS_HOLD →
  * sms_log status 'scheduled') registers its entry_point here with up to
- * four hooks, and the executor consults the registry generically:
+ * five hooks, and the executor consults the registry generically:
  *
  *   recheck(claimMeta)   — BEFORE dispatch: is this message still valid?
  *                          The world moves overnight — estimates get
@@ -21,6 +21,11 @@
  *                          then runs `dispatch(trx)` while those rows are
  *                          still held, so nothing can change under the
  *                          provider request.
+ *   dispatch(claimMeta) — replace the frozen-body replay with a fresh,
+ *                          guarded canonical send. It must return the same
+ *                          canonical send outcome as the default dispatcher;
+ *                          its outcome or error is final, with no fallback to
+ *                          the frozen queued body.
  *   finalize(claimMeta, ctx) — AFTER the provider accepts: the state
  *                          transitions the immediate path would have run
  *                          inline (invoice draft→sent, review delivered
@@ -1193,6 +1198,25 @@ async function recheckDeferredReplay(entryPoint, claimMeta = {}) {
   }
 }
 
+// Registered dispatchers own the complete replay, including preparation of
+// fresh copy and its final send guard. Their outcome/error propagates as-is:
+// falling back after either one could send the frozen queued body. The marker
+// protects rows produced during a rolling deploy until their entry is loaded.
+async function dispatchDeferredReplay(entryPoint, claimMeta = {}, defaultDispatch) {
+  const entry = entryFor(entryPoint);
+  if (entry && typeof entry.dispatch === 'function') return entry.dispatch(claimMeta);
+  if (claimMeta.requires_registered_dispatch === true) {
+    return {
+      sent: false,
+      blocked: true,
+      code: 'DEFERRED_DISPATCH_UNAVAILABLE',
+      retryable: true,
+      deliveryOutcome: 'not_sent',
+    };
+  }
+  return defaultDispatch();
+}
+
 // undefined = no locked handoff registered: the sender dispatches normally.
 // Errors propagate: the provider wrapper distinguishes a failed read before
 // the handoff (retryable, nothing left) from a failure after acceptance.
@@ -1369,6 +1393,7 @@ const DURABLE_FINALIZE_ENTRY_POINTS = Object.entries(REGISTRY)
 
 module.exports = {
   recheckDeferredReplay,
+  dispatchDeferredReplay,
   deferredSmsHandoff,
   finalizeDeferredReplay,
   onTerminalDeferredReplay,

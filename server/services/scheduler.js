@@ -3755,7 +3755,12 @@ function initScheduledJobs() {
             }
             // 'sms_fallback' — fall through to the normal replay send below.
           }
-          const smsResult = await sendCustomerMessage({
+          const replayDispatchMeta = {
+            ...claimMeta,
+            scheduled_sms_log_id: msg.id,
+            customer_id: msg.customer_id,
+          };
+          const replayInput = {
             to: toPhone,
             body: msg.message_body,
             channel: 'sms',
@@ -3864,7 +3869,9 @@ function initScheduledJobs() {
                 ? claimMeta.parked_decision_ids
                 : undefined,
             },
-          });
+          };
+          const smsResult = await require('./messaging/deferred-replay-registry')
+            .dispatchDeferredReplay(claimMeta.entry_point, replayDispatchMeta, () => sendCustomerMessage(replayInput));
           const completedAt = new Date();
           if (smsResult.sent) {
             // created_at is re-stamped to send time on purpose — comms
