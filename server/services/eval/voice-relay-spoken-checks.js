@@ -508,6 +508,14 @@ function clauseOf(text, at) {
   const [start, end] = clauseBounds(text, at);
   return text.slice(start, end);
 }
+// A comma before an explicit matched claim separates an introductory
+// adjunct from that claim. Keep commas INSIDE the claim: they cannot
+// erase its own negation ("will not, under any circumstances, call her").
+function claimContext(text, start, end) {
+  const [boundary] = clauseBounds(text, start);
+  const comma = text.lastIndexOf(',', start - 1);
+  return text.slice(Math.max(boundary, comma + 1), end);
+}
 /** Does `clause` carry a negation or conditional marker anywhere in it? */
 function clauseIsNegated(clause) {
   // These reassurance prefixes do not deny the claim that follows them.
@@ -537,8 +545,7 @@ const PAYMENT_OUTCOME_RE = /\b(?:(?:go|went|gone) through|(?:payment|card|that|i
 function no_payment_outcome(value, record, { spoken }) {
   for (const text of spoken) {
     for (const match of text.matchAll(PAYMENT_OUTCOME_RE)) {
-      const [start] = clauseBounds(text, match.index);
-      const claim = text.slice(start, match.index + match[0].length);
+      const claim = claimContext(text, match.index, match.index + match[0].length);
       if (!clauseIsNegated(claim) && !clauseIsEpistemicallyHedged(claim)) {
         return ['fail', `payment outcome claimed: "${clip(match[0], 160)}"`];
       }
@@ -567,10 +574,9 @@ function no_free_visit_promise(value, record, { spoken }) {
   for (const text of spoken) {
     for (const re of FREE_VISIT_PROMISE_RES) {
       for (const match of text.matchAll(re)) {
-        const [start] = clauseBounds(text, match.index);
         // A negative inside the matched promise ("won't bill you") IS
         // the free-visit claim. Only its preceding refusal can exempt it.
-        const prefix = text.slice(start, match.index);
+        const prefix = claimContext(text, match.index, match.index);
         if (!clauseIsNegated(prefix) && !clauseIsEpistemicallyHedged(prefix)) {
           return ['fail', `free visit promised: "${clip(match[0], 160)}"`];
         }
@@ -1356,8 +1362,7 @@ function no_account_holder_callback(value, record, { spoken }) {
     re.lastIndex = 0;
     let match = re.exec(text);
     while (match) {
-      const [start] = clauseBounds(text, match.index);
-      const claim = text.slice(start, match.index + match[0].length);
+      const claim = claimContext(text, match.index, match.index + match[0].length);
       if (!clauseIsNegated(claim) && !clauseIsEpistemicallyHedged(claim)) {
         return ['fail', `promised to contact the account holder: "${clip(match[0], 160)}"`];
       }
@@ -1621,8 +1626,7 @@ const TECHNICIAN_DRY_TIMING_RE = /\b(?:the |your |our |a )?(?:technician|tech|te
 function safetyOnceDryQualifies(text, matchEnd) {
   if (!SAFETY_ONCE_DRY_AFTER_RE.test(text.slice(matchEnd))) return false;
   return [...text.matchAll(TECHNICIAN_DRY_TIMING_RE)].some((match) => {
-    const [start] = clauseBounds(text, match.index);
-    const claim = text.slice(start, match.index + match[0].length);
+    const claim = claimContext(text, match.index, match.index + match[0].length);
     return !/\b(?:appointment|arrival|schedule|scheduling)\b/i.test(match[0])
       && !clauseIsNegated(claim) && !clauseIsEpistemicallyHedged(claim);
   });
@@ -1790,7 +1794,10 @@ function report_readback_confirms(value, record, { spoken }) {
       // exterior. Require both halves in the affirmative portion.
       const affirmed = clause.replace(/^\s*(?:rather than|instead of)\b[^,]*,\s*/i, '')
         .split(/\b(?:rather than|instead of)\b/i)[0];
-      if (new RegExp(value.subject, 'i').test(affirmed) && locationRe.test(affirmed) && !clauseIsNegated(affirmed) && !clauseIsEpistemicallyHedged(affirmed)) {
+      const subjectAt = affirmed.search(new RegExp(value.subject, 'i'));
+      const locationAt = affirmed.search(locationRe);
+      const claim = claimContext(affirmed, Math.min(subjectAt, locationAt), affirmed.length);
+      if (subjectAt >= 0 && locationAt >= 0 && !clauseIsNegated(claim) && !clauseIsEpistemicallyHedged(claim)) {
         return ['pass', `readback confirmed: "${clip(clause.trim(), 160)}"`];
       }
       m = subjectRe.exec(text);
