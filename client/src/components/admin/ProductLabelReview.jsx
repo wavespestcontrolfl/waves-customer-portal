@@ -177,7 +177,7 @@ export default function ProductLabelReview({ product }) {
             <h3 className="m-0 flex items-center gap-2 text-18 font-medium text-zinc-900">
               <FileText size={18} aria-hidden /> Label weather evidence
             </h3>
-            <p className="mt-2 text-ui-body text-ink-secondary">
+            <p className="mt-2 mb-3 text-ui-body text-ink-secondary">
               Read the EPA label, check the source pages, then approve weather
               facts for the Job Card. This review does not verify mixing rates.
             </p>
@@ -187,7 +187,7 @@ export default function ProductLabelReview({ product }) {
           {notice && <ActionFeedback>{notice}</ActionFeedback>}
           {active && (
             <details className="border-0 border-b border-solid border-zinc-200 pb-3">
-              <summary className="min-h-11 cursor-pointer py-2 text-ui-body font-medium text-zinc-900">
+              <summary className="box-border min-h-11 cursor-pointer text-ui-body font-medium text-zinc-900">
                 Current weather review ·{" "}
                 {active.status === "approved"
                   ? activeCurrent
@@ -222,7 +222,7 @@ export default function ProductLabelReview({ product }) {
           )}
           {draft ? (
             <div className="space-y-4">
-              <h4 className="text-14 font-medium text-zinc-900">
+              <h4 className="my-3.5 text-14 font-medium text-zinc-900">
                 CANDIDATE · NOT YET ACTIVE
               </h4>
               <p className="text-ui-body text-ink-secondary">
@@ -275,7 +275,7 @@ export default function ProductLabelReview({ product }) {
               Find & read EPA label
             </Button>
           )}
-          <p className="text-ui-body text-ink-secondary">
+          <p className="mt-3.5 mb-0 text-ui-body text-ink-secondary">
             No numeric limit in the source is not a clearance to apply. Missing
             and conditional evidence can still produce UNKNOWN.
           </p>
