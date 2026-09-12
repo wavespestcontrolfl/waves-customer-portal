@@ -597,14 +597,23 @@ async function maybeAutoClearBillingPauseForIntent(paymentIntent, eventCreated) 
   }
 }
 
-async function recordOrphanSucceededPaymentIntent(paymentIntent, amount, reason) {
+// Sentinel: the succeeded-PI fallback transaction quarantined this charge, so
+// the rest of the handler (invoice-paid update, settlement effects) is skipped.
+const QUARANTINED = Symbol('quarantined');
+
+async function recordOrphanSucceededPaymentIntent(paymentIntent, amount, reason, { database = db } = {}) {
   const latestCharge = paymentIntent.latest_charge;
   const stripeChargeId = typeof latestCharge === 'string'
     ? latestCharge
     : latestCharge?.id || null;
 
   try {
-    await db('stripe_orphan_charges')
+    // Written through the CALLER'S transaction when it holds one (local audit
+    // P1): stripe_orphan_charges.invoice_id is a foreign key, so inserting on
+    // the root connection while that same invoice row is held FOR UPDATE here
+    // waits on this transaction's own lock and the quarantine can never
+    // commit.
+    await database('stripe_orphan_charges')
       .insert({
         stripe_payment_intent_id: paymentIntent.id,
         stripe_charge_id: stripeChargeId,
@@ -1861,7 +1870,7 @@ async function handlePaymentIntentSucceeded(paymentIntent, eventCreated = null) 
   if (updated > 0) {
     logger.info(`[stripe-webhook] Updated ${updated} payment(s) to paid for PI: ${piId}`);
   } else {
-    await db.transaction(async (trx) => {
+    const fallbackOutcome = await db.transaction(async (trx) => {
       await lockPaymentIntentPaymentRow(trx, piId);
       const existingPayment = await trx('payments')
         .where({ stripe_payment_intent_id: piId })
@@ -1883,8 +1892,9 @@ async function handlePaymentIntentSucceeded(paymentIntent, eventCreated = null) 
           paymentIntent,
           chargedTotal ?? centsToDollars(paymentIntent.amount),
           `No locally collectible invoice matched succeeded PI ${piId}`,
+          { database: trx },
         );
-        return;
+        return QUARANTINED;
       }
 
       const lockedInvoice = await trx('invoices')
@@ -1914,8 +1924,13 @@ async function handlePaymentIntentSucceeded(paymentIntent, eventCreated = null) 
           paymentIntent,
           chargedTotal ?? centsToDollars(paymentIntent.amount),
           reason,
+          { database: trx },
         );
-        return;
+        // The OUTER handler must stop too (local audit P0): this `return` only
+        // leaves the transaction callback, and everything after it marks the
+        // invoice paid and runs the settlement effects — on a quarantined
+        // charge with no payments row.
+        return QUARANTINED;
       }
       if (invoicePaymentIntentBlocksFallback({
         invoiceStatus: lockedInvoice.status,
@@ -2062,7 +2077,11 @@ async function handlePaymentIntentSucceeded(paymentIntent, eventCreated = null) 
         logger.info(`[stripe-webhook] Bound ambiguous saved-card attempt ${matchingAmbiguousAttempt.id} to succeeded PI ${piId}`);
       }
       logger.info(`[stripe-webhook] Inserted missing paid payment row for PI: ${piId}`);
+      return null;
     });
+    // Quarantined: no payments row exists for this PI on purpose, so the
+    // invoice-paid update and the settlement effects below must not run.
+    if (fallbackOutcome === QUARANTINED) return;
   }
 
   // A disputed chargeback owns this PI now — a late or reclaimed
