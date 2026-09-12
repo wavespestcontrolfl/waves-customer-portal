@@ -1,4 +1,5 @@
 import lawnLibrary from '../../../shared/lawn-condition-findings.json';
+import { isTankCalculation } from './product-rate-prefill';
 
 // Existing plan and assessment records remain authoritative; these helpers only
 // prepare editable closeout fields and select a previous confirmed visit.
@@ -81,8 +82,9 @@ export const LAWN_PLAN_UNAVAILABLE_REASON = 'Plan unavailable. Confirm the treat
 export function withdrawLawnPlanSuggestions(rows, { planUnverified = false } = {}) {
   return rows.map((row) => row.lawnPlanDefaults ? {
     ...row,
-    totalAmount: row.totalAmountManual ? row.totalAmount : '',
-    rate: row.lawnPlanManualFields?.includes('rate') ? row.rate : '',
+    // A measured tank dose is an actual, not a suggestion to withdraw.
+    totalAmount: row.totalAmountManual || isTankCalculation(row) ? row.totalAmount : '',
+    rate: row.lawnPlanManualFields?.includes('rate') || isTankCalculation(row) ? row.rate : '',
     areaValue: row.lawnPlanManualFields?.includes('areaValue') ? row.areaValue : '',
     // A unit the plan chose is withdrawn with the value it labeled: the
     // recipe or catalog unit may have changed while the draft waited, and an
@@ -93,6 +95,9 @@ export function withdrawLawnPlanSuggestions(rows, { planUnverified = false } = {
       ['applicationMethod', ['applicationMethod']], ['rateUnit', ['rate', 'rateUnit']],
       ['amountUnit', ['totalAmount', 'amountUnit']], ['areaUnit', ['areaValue', 'areaUnit']],
     ].filter(([unit, owners]) => !(unit === 'amountUnit' && row.totalAmountManual)
+      // A retained tank calculation keeps the units that label it: 20 without
+      // fl_oz is not a record (Codex r1 P1).
+      && !(isTankCalculation(row) && ['rateUnit', 'amountUnit'].includes(unit))
       && !owners.some(owner => row.lawnPlanManualFields?.includes(owner))).map(([unit]) => [unit, ''])) : {}),
     lawnAmountReason: LAWN_PLAN_UNAVAILABLE_REASON,
   } : row);
@@ -112,6 +117,12 @@ export function reconcileLawnPlanSelections(current, defaults, removedIds = []) 
     const ownCalculation = CALCULATION_INPUTS.some(key => manual.has(key));
     // Preserve each entered value with its unit on both refresh and withdrawal.
     if (row.totalAmountManual) manual.add('totalAmount');
+    // A tank calculation is an actual: the technician measured the gallons, so
+    // the rate, its units and the dose they produce belong to this row, and a
+    // refresh must not blank a quantity the plan cannot express (Codex r1 P1).
+    // Marked after `ownCalculation` above so the treated area still follows
+    // the visit.
+    if (isTankCalculation(row)) for (const key of ['rate', 'rateUnit', 'amountUnit', 'totalAmount']) manual.add(key);
     for (const [field, unit] of [['totalAmount', 'amountUnit'], ['rate', 'rateUnit'], ['areaValue', 'areaUnit']]) {
       if (manual.has(field)) manual.add(unit);
     }
@@ -141,7 +152,7 @@ export function reconcileLawnPlanSelections(current, defaults, removedIds = []) 
       next.rate = '';
       if (!row.totalAmountManual) next.totalAmount = '';
     }
-    if (fresh.totalAmount === '' && !row.totalAmountManual) next.totalAmount = '';
+    if (fresh.totalAmount === '' && !manual.has('totalAmount')) next.totalAmount = '';
     if (fresh.rate === '' && !manual.has('rate')) next.rate = '';
     if (row.applicationAreaDefault !== false) next.applicationArea = fresh.applicationArea;
     return [next];
