@@ -3046,14 +3046,6 @@ const ReviewService = {
     let released = 0;
     for (const row of stranded) {
       const email = row.channel === "email";
-      let evidence;
-      try {
-        evidence = email ? await this._emailSendEvidence(row) : await this._inlineSendEvidence(row);
-      } catch (err) {
-        logger.warn(`[review] stranded send evidence failed (requestId=${row.id}): ${err.message}`);
-        continue;
-      }
-      if (evidence.unavailable) continue;
       // The guard is the stale claim itself (a re-claimed row carries a
       // fresh claimed_at past the cutoff), never an equality on a timestamp
       // that may have lost precision on its way through the driver.
@@ -3061,6 +3053,24 @@ const ReviewService = {
       // The touch and its sequence move together: a repair recorded on one
       // without the other would strand the cadence for good.
       const outcome = await db.transaction(async (trx) => {
+        // THE CLAIM IS LOCKED BEFORE THE EVIDENCE IS READ (local audit): a
+        // handoff delayed past the stale cutoff holds this row FOR UPDATE
+        // through its provider request, so reading evidence first could
+        // report "nothing sent" about a text the provider was accepting
+        // right then, and the release below would hand it to the scheduler
+        // for a second send. SKIP LOCKED, not a wait: a row a sender is
+        // actively holding is that sender's to finish, and the sweep moves
+        // on to the next instead of blocking behind a live provider call.
+        const claimed = await guard(trx).forUpdate().skipLocked().first("id");
+        if (!claimed) return {};
+        let evidence;
+        try {
+          evidence = email ? await this._emailSendEvidence(row) : await this._inlineSendEvidence(row);
+        } catch (err) {
+          logger.warn(`[review] stranded send evidence failed (requestId=${row.id}): ${err.message}`);
+          return {};
+        }
+        if (evidence.unavailable) return {};
         if (evidence.found) {
           const now = new Date();
           const done = Number(await guard(trx).update({
