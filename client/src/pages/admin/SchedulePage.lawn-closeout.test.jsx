@@ -464,6 +464,93 @@ it('a corrected tank volume cascades to followers and spares a row with its own 
   expect(totals()[3].value).toBe('5');
 });
 
+// Three rows: a follower given its own gallons detaches alone and leaves the
+// rows still following the tank owner alone (Codex r1 P1).
+it('a follower given its own gallons does not drag the tank\'s other followers', async () => {
+  enableDefaults();
+  const mk = (id, rate) => ({ id, name: `Fixture tank ${id}`, category: 'insecticide', default_unit: 'fl_oz/gal', default_rate: rate });
+  const [a, b, c] = [mk('tank-a', '1'), mk('tank-b', '2'), mk('tank-c', '4')];
+  render(<CompletionPanel service={service} products={[...catalog, a, b, c]} onClose={() => {}} onSubmit={submit} />);
+  await waitFor(() => expect(totals()).toHaveLength(2), { timeout: 5000 });
+  let count = 2;
+  for (const product of [a, b, c]) {
+    fireEvent.change(screen.getByPlaceholderText('Search products...'), { target: { value: product.name } });
+    fireEvent.click(screen.getByText(product.name));
+    count += 1;
+    await waitFor(() => expect(totals()).toHaveLength(count));
+  }
+  const gal = () => screen.getAllByPlaceholderText('Gal');
+  fireEvent.change(gal()[0], { target: { value: '25' } });
+  await waitFor(() => expect(totals().slice(2).map(i => i.value)).toEqual(['25', '50', '100']));
+  // B goes on its own 10-gallon mix; C stays on A's tank.
+  fireEvent.change(gal()[1], { target: { value: '10' } });
+  await waitFor(() => expect(totals()[3].value).toBe('20'));
+  expect(gal()[2].value).toBe('25');
+  expect(totals()[4].value).toBe('100');
+  // A's correction still reaches C, and still not independent B.
+  fireEvent.change(gal()[0], { target: { value: '30' } });
+  await waitFor(() => expect(totals()[4].value).toBe('120'));
+  expect(gal()[1].value).toBe('10');
+  expect(totals()[3].value).toBe('20');
+});
+
+// A per-gallon row on a NON-lawn lane (pest perimeter: area unit linear_ft)
+// never reached the lawn rate-unit branch, so the tank total and the hidden
+// gallons survived the unit change (Codex r1 P1).
+it('leaving per-gallon clears the tank on a non-lawn row too', async () => {
+  const shrubs = { ...service, serviceType: 'Tree & Shrub Care', completionProfile: { serviceKey: 'tree_shrub', requiresProducts: true }, waveguardTier: null };
+  const added = { id: 'manual-demand', name: 'Fixture foliar product', category: 'insecticide', default_unit: 'fl_oz/gal', default_rate: '0.8' };
+  render(<CompletionPanel service={shrubs} products={[added]} onClose={() => {}} onSubmit={submit} />);
+  fireEvent.change(await screen.findByPlaceholderText('Search products...'), { target: { value: added.name } });
+  fireEvent.click(screen.getByText(added.name));
+  await waitFor(() => expect(totals()).toHaveLength(1));
+  fireEvent.change(screen.getAllByPlaceholderText('Gal')[0], { target: { value: '25' } });
+  await waitFor(() => expect(totals()[0].value).toBe('20'));
+  const unit = () => within(totals()[0].parentElement).getAllByRole('combobox')[0];
+  fireEvent.change(unit(), { target: { value: 'g' } });
+  expect(totals()[0].value).toBe('');
+  expect(screen.queryAllByPlaceholderText('Gal')).toHaveLength(0);
+  // Back to per-gallon: no stale 25 gallons revives a quantity.
+  fireEvent.change(unit(), { target: { value: 'fl_oz/gal' } });
+  expect(screen.getAllByPlaceholderText('Gal')[0].value).toBe('');
+  expect(totals()[0].value).toBe('');
+});
+
+// A hand-picked amount unit must not relabel a derived tank dose: 0.8 fl oz/gal
+// x 30 is not "24 gal" (Codex r1 P1).
+it('changing the amount unit withdraws a derived tank total', async () => {
+  enableDefaults();
+  const added = { id: 'manual-taurus', name: 'Fixture termiticide', category: 'insecticide', default_unit: 'fl_oz/gal', default_rate: '0.8' };
+  render(<CompletionPanel service={service} products={[...catalog, added]} onClose={() => {}} onSubmit={submit} />);
+  await waitFor(() => expect(totals()).toHaveLength(2), { timeout: 5000 });
+  fireEvent.change(screen.getByPlaceholderText('Search products...'), { target: { value: added.name } });
+  fireEvent.click(screen.getByText(added.name));
+  await waitFor(() => expect(totals()).toHaveLength(3));
+  fireEvent.change(screen.getAllByPlaceholderText('Gal')[0], { target: { value: '25' } });
+  await waitFor(() => expect(totals()[2].value).toBe('20'));
+  const amountUnit = () => within(totals()[2].parentElement).getAllByRole('combobox')[1];
+  fireEvent.change(amountUnit(), { target: { value: 'gal' } });
+  expect(totals()[2].value).toBe('');
+  // A later gallons edit re-derives in the RATE's base unit, never under the
+  // hand-picked one: 24 fl oz, not 24 gal.
+  fireEvent.change(screen.getAllByPlaceholderText('Gal')[0], { target: { value: '30' } });
+  expect(totals()[2].value).toBe('24');
+  expect(amountUnit().value).toBe('fl_oz');
+});
+
+// Small doses keep the precision the record stores (Codex r1 P2).
+it('a fractional tank dose keeps its precision', async () => {
+  enableDefaults();
+  const added = { id: 'manual-micro', name: 'Fixture micro dose', category: 'insecticide', default_unit: 'fl_oz/gal', default_rate: '0.03' };
+  render(<CompletionPanel service={service} products={[...catalog, added]} onClose={() => {}} onSubmit={submit} />);
+  await waitFor(() => expect(totals()).toHaveLength(2), { timeout: 5000 });
+  fireEvent.change(screen.getByPlaceholderText('Search products...'), { target: { value: added.name } });
+  fireEvent.click(screen.getByText(added.name));
+  await waitFor(() => expect(totals()).toHaveLength(3));
+  fireEvent.change(screen.getAllByPlaceholderText('Gal')[0], { target: { value: '0.5' } });
+  await waitFor(() => expect(totals()[2].value).toBe('0.015'));
+});
+
 it('a rate unit moving off per-gallon does not strand the tank total', async () => {
   enableDefaults();
   const added = { id: 'manual-taurus', name: 'Fixture termiticide', category: 'insecticide', default_unit: 'fl_oz/gal', default_rate: '0.8' };
