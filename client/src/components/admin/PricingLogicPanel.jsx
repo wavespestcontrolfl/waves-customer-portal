@@ -62,8 +62,9 @@ const TABS = [
   { key: "changelog", label: "Changelog" },
 ];
 
-const formatDate = (value) => value ? new Date(value).toLocaleString(undefined, {
+const formatDate = (value, includeSeconds = false) => value ? new Date(value).toLocaleString(undefined, {
   year: "numeric", month: "short", day: "numeric", hour: "2-digit", minute: "2-digit",
+  second: includeSeconds ? "2-digit" : undefined,
 }) : "—";
 
 const formatValue = (value) => {
@@ -371,7 +372,7 @@ function AuditLog() {
   const [logs, setLogs] = useState([]);
   useEffect(() => { af("/admin/pricing-config/audit-log?limit=30").then((data) => setLogs(data.logs || [])).catch(() => {}); }, []);
   if (logs.length === 0) return null;
-  return <Card><CardHeader><CardTitle className="text-16">Recent changes</CardTitle></CardHeader><CardBody className="divide-y divide-zinc-200">{logs.map((log, index) => <div key={`${log.config_key}-${log.changed_at}-${index}`} className="py-2 text-ui-body text-ink-secondary"><span className="font-medium text-zinc-900 u-nums">{log.config_key}</span> changed by <span className="text-zinc-900">{log.changed_by || "admin"}</span> — <span className="u-nums">{formatDate(log.changed_at)}</span>{log.reason && <span> ({log.reason})</span>}</div>)}</CardBody></Card>;
+  return <Card><CardHeader><CardTitle className="text-16">Recent changes</CardTitle></CardHeader><CardBody className="divide-y divide-zinc-200">{logs.map((log, index) => <div key={`${log.config_key}-${log.changed_at}-${index}`} className="py-2 text-ui-body text-ink-secondary"><span className="font-medium text-zinc-900 u-nums">{log.config_key}</span> changed by <span className="text-zinc-900">{log.changed_by || "admin"}</span> — <span className="u-nums">{formatDate(log.changed_at, true)}</span>{log.reason && <span> ({log.reason})</span>}</div>)}</CardBody></Card>;
 }
 
 export default function PricingLogicPanel() {
