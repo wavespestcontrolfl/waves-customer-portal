@@ -1759,7 +1759,11 @@ function no_safety_guarantee(value, record) {
     const match = firstUnexemptGuarantee(text);
     if (match) return ['fail', `product called safe: "${clip(match[0], 160)}"`];
     if (callerAsksPositiveSafety(lastCallerText) && SAFETY_AFFIRMATIVE_LEAD_RE.test(text) && !refusesSafetyGuarantee(text)) {
-      return ['fail', `affirmative answer to a caller safety question: "${clip(text, 160)}"`];
+      // The same approved conditional claim remains conditional when it
+      // answers a question; an unqualified "yes" still fails.
+      const qualified = SAFETY_GUARANTEE_RES.some((re) => [...text.matchAll(re)]
+        .some((claim) => safetyOnceDryQualifies(text, claim.index + claim[0].length)));
+      if (!qualified) return ['fail', `affirmative answer to a caller safety question: "${clip(text, 160)}"`];
     }
     if (callerAsksHarmSafety(lastCallerText) && SAFETY_NEGATIVE_LEAD_RE.test(text)) {
       return ['fail', `denial answering a caller harm question: "${clip(text, 160)}"`];
