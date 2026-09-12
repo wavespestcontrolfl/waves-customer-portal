@@ -1,5 +1,5 @@
 import { useState, useEffect, lazy, Suspense } from "react";
-import { useSearchParams } from "react-router-dom";
+import { useLocation, useNavigate, useSearchParams } from "react-router-dom";
 import useRenderedTabBeacon from "../../hooks/useRenderedTabBeacon";
 import {
   Bot,
@@ -161,11 +161,15 @@ function PostList({ status, onSelectPost }) {
   const [posts, setPosts] = useState([]);
   const [counts, setCounts] = useState({});
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
+  const [retry, setRetry] = useState(0);
   const [filterTag, setFilterTag] = useState("");
   const [filterCity, setFilterCity] = useState("");
   const [search, setSearch] = useState("");
-  const load = () => {
+  useEffect(() => {
+    let active = true;
     setLoading(true);
+    setError("");
     let url = `/admin/content/blog?status=${status}`;
     if (filterTag) url += `&tag=${encodeURIComponent(filterTag)}`;
     if (filterCity) url += `&city=${encodeURIComponent(filterCity)}`;
@@ -173,14 +177,18 @@ function PostList({ status, onSelectPost }) {
     if (status === "published") url += "&sort=seo_score&order=asc";
     adminFetch(url)
       .then((d) => {
+        if (!active) return;
         setPosts(d.posts || []);
         setCounts(d.counts || {});
         setLoading(false);
       })
-      .catch(() => setLoading(false));
-  };
-
-  useEffect(load, [status, filterTag, filterCity, search]);
+      .catch((requestError) => {
+        if (!active) return;
+        setError(requestError.message || "Request failed");
+        setLoading(false);
+      });
+    return () => { active = false; };
+  }, [status, filterTag, filterCity, search, retry]);
 
   const tags = [...new Set(posts.map((p) => p.tag).filter(Boolean))].sort();
   const cities = [...new Set(posts.map((p) => p.city).filter(Boolean))].sort();
@@ -259,11 +267,19 @@ function PostList({ status, onSelectPost }) {
           ))}
         </select>{" "}
         <span style={{ fontSize: 12, color: D.muted, marginLeft: "auto" }}>
-          {posts.length} posts
+          {error ? "Posts unavailable" : `${posts.length} posts`}
         </span>{" "}
       </div>
       {/* Post Cards */}
-      {posts.length === 0 ? (
+      {error ? (
+        <div role="alert" style={{ color: D.red, padding: 16, fontSize: 14 }}>
+          <p>Couldn't load posts — {error}</p>
+          <button type="button" onClick={() => setRetry((value) => value + 1)}
+            style={{ minHeight: 44, padding: "8px 16px", border: `1px solid ${D.border}`, borderRadius: 4, background: D.card, color: D.text, fontSize: 14 }}>
+            Try again
+          </button>
+        </div>
+      ) : posts.length === 0 ? (
         <Card style={{ textAlign: "center", padding: 40 }}>
           {" "}
           <div style={{ color: D.muted }}>No posts found</div>{" "}
@@ -2939,6 +2955,8 @@ export default function BlogPage() {
     ? paramStatus
     : legacyPostStatus || "published";
 
+  const postId = searchParams.get("post");
+
   // Usage beacon for the leaf that actually RENDERS — legacy status deep
   // links (?tab=drafts) and unknown values resolve to Posts without
   // rewriting the URL (Codex #2961 r17). While Posts is active, the
@@ -2951,7 +2969,7 @@ export default function BlogPage() {
   // would suppress.
   useRenderedTabBeacon(
     "/admin/blog",
-    tab === "posts" ? postStatus : tab,
+    postId ? "editor" : tab === "posts" ? postStatus : tab,
     [searchParams],
   );
 
@@ -2964,7 +2982,56 @@ export default function BlogPage() {
       },
       { replace: true },
     );
+  const location = useLocation();
+  const navigate = useNavigate();
   const [selectedPost, setSelectedPost] = useState(null);
+  const [postError, setPostError] = useState("");
+  const [postRetry, setPostRetry] = useState(0);
+  const openPost = (post) => {
+    const params = new URLSearchParams(searchParams);
+    if (post) {
+      params.set("post", String(post.id));
+      navigate(
+        {
+          pathname: location.pathname,
+          search: params.toString(),
+          hash: location.hash,
+        },
+        {
+          state: { ...location.state, blogEditorOrigin: "list" },
+        },
+      );
+      return;
+    }
+    if (location.state?.blogEditorOrigin === "list") {
+      navigate(-1);
+      return;
+    }
+    params.delete("post");
+    navigate(
+      {
+        pathname: location.pathname,
+        search: params.toString(),
+        hash: location.hash,
+      },
+      { replace: true },
+    );
+  };
+  useEffect(() => {
+    let active = true;
+    setSelectedPost(null);
+    setPostError("");
+    if (postId) {
+      adminFetch(`/admin/content/blog/${encodeURIComponent(postId)}`)
+        .then((data) => {
+          if (!active) return;
+          if (!data.post) throw new Error("Post not found");
+          setSelectedPost(data.post);
+        })
+        .catch((error) => { if (active) setPostError(error.message || "Request failed"); });
+    }
+    return () => { active = false; };
+  }, [postId, postRetry]);
   const [counts, setCounts] = useState({});
   const [generatingIdeas, setGeneratingIdeas] = useState(false);
   const setPostStatus = (status) =>
@@ -2996,18 +3063,21 @@ export default function BlogPage() {
     setGeneratingIdeas(false);
   };
 
-  if (selectedPost) {
+  if (postId) {
     return (
       <div>
-        {" "}
-        <AdminCommandHeader title="Content editor" icon={Newspaper} />{" "}
-        <PostEditor
-          post={selectedPost}
-          onBack={() => setSelectedPost(null)}
-          onUpdate={(p) => {
-            setSelectedPost(null);
-          }}
-        />{" "}
+        <AdminCommandHeader title="Content editor" icon={Newspaper} />
+        {postError ? (
+          <div role="alert" style={{ padding: 20, fontSize: 14, color: D.red }}>
+            <p>Couldn't load this post — {postError}</p>
+            <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
+              <button type="button" onClick={() => setPostRetry((value) => value + 1)} style={{ minHeight: 44, padding: "8px 16px" }}>Try again</button>
+              <button type="button" onClick={() => openPost(null)} style={{ minHeight: 44, padding: "8px 16px" }}>Back to list</button>
+            </div>
+          </div>
+        ) : selectedPost && String(selectedPost.id).toLowerCase() === postId.toLowerCase() ? (
+          <PostEditor key={postId} post={selectedPost} onBack={() => openPost(null)} onUpdate={() => openPost(null)} />
+        ) : <p role="status" style={{ padding: 20, fontSize: 14, color: D.muted }}>Loading post…</p>}
       </div>
     );
   }
@@ -3108,7 +3178,7 @@ export default function BlogPage() {
           <PostList
             key={postStatus}
             status={postStatus}
-            onSelectPost={setSelectedPost}
+            onSelectPost={openPost}
           />
         </>
       )}
