@@ -225,7 +225,7 @@ export default function LawnAssessmentPanel({ embedded = false }) {
       // Seed from the server's season-adjusted scores so the review
       // tiles match what will be persisted if the tech makes no changes.
       const initialScores = r.adjustedScores || r.displayScores;
-      setTechScores(initialScores ? { ...initialScores } : null);
+      setTechScores({ ...initialScores });
       setProtocolChecks({
         irrigation_inches_per_week: "",
         protocol_field_notes: "",

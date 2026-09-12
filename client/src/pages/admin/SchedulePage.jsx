@@ -8376,8 +8376,8 @@ function parseAssessmentScores(row = {}) {
   const turf_density = lawnScores.lawnScoreValue(row.turf_density ?? row.turfDensity);
   const weed_suppression = lawnScores.lawnScoreValue(row.weed_suppression ?? row.weedSuppression);
   const color_health = lawnScores.lawnScoreValue(row.color_health ?? row.colorHealth);
-  // Kept (not shown as chips) so a re-confirm preserves the AI values; the tech
-  // now corrects stress_damage directly instead of these two.
+  // Preserve known AI components. Missing components get explicit controls
+  // during confirmation so unknown values never become invented scores.
   const fungus_control = lawnScores.lawnScoreValue(row.fungus_control ?? row.fungusControl);
   const thatch_level = lawnScores.lawnScoreValue(row.thatch_level ?? row.thatchLevel);
   // Legacy assessments (created before the stress_damage column) have a null
@@ -8664,6 +8664,12 @@ function LawnAssessmentCompletionBlock({
   const scoreSource = techScores || result?.adjustedScores || result?.displayScores || null;
   const hasResult = !!result?.assessment?.id;
   const confirmed = !!confirmedId;
+  // Keep the usual four controls; expose underlying scores only when the
+  // saved assessment lacks them. Keep them editable until the save completes.
+  const metrics = [...LAWN_ASSESSMENT_METRICS, ...[
+    { key: "fungus_control", label: "Fungus control" },
+    { key: "thatch_level", label: "Thatch condition" },
+  ].filter((metric) => !confirmed && lawnScores.lawnScoreValue(result?.assessment?.[metric.key]) == null)];
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
@@ -8798,7 +8804,7 @@ function LawnAssessmentCompletionBlock({
       {hasResult && (
         <>
           <div style={{ display: "grid", gridTemplateColumns: `repeat(${LAWN_ASSESSMENT_METRICS.length}, minmax(0, 1fr))`, gap: 6 }}>
-            {LAWN_ASSESSMENT_METRICS.map((metric) => {
+            {metrics.map((metric) => {
               const value = lawnScores.lawnScoreValue(scoreSource?.[metric.key]);
               return (
                 <div
@@ -8818,10 +8824,10 @@ function LawnAssessmentCompletionBlock({
                   <div style={{ fontSize: 14, color: D.muted, marginTop: 3 }}>{metric.label}</div>
                   {!confirmed && (
                     <div style={{ display: "flex", justifyContent: "center", gap: 4, marginTop: 6 }}>
-                      <button type="button" onClick={() => adjustScore(metric.key, -5)} style={scoreButtonStyle}>
+                      <button type="button" aria-label={`Decrease ${metric.label}`} onClick={() => adjustScore(metric.key, -5)} style={scoreButtonStyle}>
                         -
                       </button>
-                      <button type="button" onClick={() => adjustScore(metric.key, 5)} style={scoreButtonStyle}>
+                      <button type="button" aria-label={`Increase ${metric.label}`} onClick={() => adjustScore(metric.key, 5)} style={scoreButtonStyle}>
                         +
                       </button>
                     </div>
