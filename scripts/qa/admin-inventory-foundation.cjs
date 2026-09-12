@@ -445,8 +445,13 @@ async function main() {
         Restock: () => page.getByText("No restock requests in this view.", { exact: true }).waitFor(),
         "Lawn Facts": () => page.getByText("No products match this status.", { exact: true }).waitFor(),
         "Lawn Content": () => page.getByText("Lawn Outline Content Library", { exact: true }).waitFor(),
-        Protocols: () => page.getByText("Templates", { exact: true }).waitFor(),
-        "Service Margins": () => page.getByText("Exterior perimeter", { exact: true }).waitFor(),
+        // "Templates" also labels a per-line button, so it isn't a unique
+        // match; "COGS" only labels the metric.
+        Protocols: () => page.getByText("COGS", { exact: true }).waitFor(),
+        // MarginsTab never renders product notes — wait on its always-
+        // present heading instead (rendered post-load whether or not any
+        // service line has products, same strategy as Lawn Content below).
+        "Service Margins": () => page.getByText("COGS by Service Line", { exact: true }).waitFor(),
       };
       for (const [group, leaves] of navigation) {
         await page
