@@ -14683,10 +14683,18 @@ export function CompletionPanel({
     // blank for the tech to enter. A linear-ft prefill derives nothing
     // either: the derived Total is a per-1,000-sqft calculation and has no
     // meaning against perimeter footage.
+    // One tank, one carrier volume (updateProduct shares it across rows):
+    // a per-gallon product added AFTER the tech typed gallons starts from
+    // the same tank rather than waiting to be told again.
+    const sharedGallons = isPerGallonUnit(prefillRateUnit)
+      ? selectedProducts.find((p) => isPerGallonUnit(p.rateUnit) && Number(p.carrierGallons) > 0)?.carrierGallons ?? ""
+      : "";
     const prefillTotal =
-      perBasisUnit || areaRequirement?.unit === "linear_ft"
-        ? ""
-        : derivedTotalAmount(prefillRate, prefillArea);
+      isPerGallonUnit(prefillRateUnit)
+        ? derivedTankTotal(prefillRate, sharedGallons)
+        : perBasisUnit || areaRequirement?.unit === "linear_ft"
+          ? ""
+          : derivedTotalAmount(prefillRate, prefillArea);
     return {
         productId: product.id,
         name: product.name,
@@ -14731,7 +14739,7 @@ export function CompletionPanel({
         // Gallons of finished mix for a per-gallon rate; blank for every
         // other unit and never submitted (a derivation input, like the
         // treated area is for a per-1,000 rate).
-        carrierGallons: "",
+        carrierGallons: sharedGallons,
         totalAmountManual: false,
         applicationMethod,
         applicationArea: "",

@@ -412,6 +412,26 @@ it('a per-gallon product derives its total from gallons mixed, and shares them a
   expect(submit.mock.calls[0][1].products[2].carrierGallons).toBeUndefined();
 });
 
+// The other order: gallons first, then a second tank product is remembered.
+// Adding it must not ask for the same tank volume again (pre-push audit P1).
+it('a per-gallon product added after the gallons were typed joins the same tank', async () => {
+  enableDefaults();
+  const taurus = { id: 'manual-taurus', name: 'Fixture termiticide', category: 'insecticide', default_unit: 'fl_oz/gal', default_rate: '0.8' };
+  const surfactant = { id: 'manual-surf', name: 'Fixture surfactant', category: 'adjuvant', default_unit: 'fl_oz/gal', default_rate: '0.5' };
+  render(<CompletionPanel service={service} products={[...catalog, taurus, surfactant]} onClose={() => {}} onSubmit={submit} />);
+  await waitFor(() => expect(totals()).toHaveLength(2), { timeout: 5000 });
+  fireEvent.change(screen.getByPlaceholderText('Search products...'), { target: { value: taurus.name } });
+  fireEvent.click(screen.getByText(taurus.name));
+  await waitFor(() => expect(totals()).toHaveLength(3));
+  fireEvent.change(screen.getAllByPlaceholderText('Gal')[0], { target: { value: '25' } });
+  await waitFor(() => expect(totals()[2].value).toBe('20'));
+  fireEvent.change(screen.getByPlaceholderText('Search products...'), { target: { value: surfactant.name } });
+  fireEvent.click(screen.getByText(surfactant.name));
+  await waitFor(() => expect(totals()).toHaveLength(4));
+  expect(screen.getAllByPlaceholderText('Gal')[1].value).toBe('25');
+  expect(totals()[3].value).toBe('12.5');
+});
+
 it('a rate unit moving off per-gallon does not strand the tank total', async () => {
   enableDefaults();
   const added = { id: 'manual-taurus', name: 'Fixture termiticide', category: 'insecticide', default_unit: 'fl_oz/gal', default_rate: '0.8' };
