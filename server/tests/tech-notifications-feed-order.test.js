@@ -53,3 +53,34 @@ test('buckets: fresh prompts (0) → fresh storms (1) → visit notices AND stal
   expect(calls.limit).toEqual([20]);
   expect(res.json).toHaveBeenCalledWith({ notifications: [] });
 });
+
+// GATE_NOSHOW_DETECTOR is the feature's kill switch, and turning it off stops
+// the sweep that dismisses tracking notices when their visit completes, moves
+// or is reassigned — so the feed must stop serving them too, or a disabled
+// feature leaves stale cards leading every tech's window (codex P1, PR #4403
+// round 9).
+test('tracking notices are served only while GATE_NOSHOW_DETECTOR is on', async () => {
+  const run = async () => {
+    const notCalls = [];
+    const chain = {};
+    for (const m of ['where', 'whereNull', 'orWhereRaw']) {
+      chain[m] = jest.fn(function (arg) { if (typeof arg === 'function') arg.call(chain, chain); return chain; });
+    }
+    chain.whereNot = jest.fn((arg) => { notCalls.push(arg); return chain; });
+    chain.orderByRaw = jest.fn(() => chain);
+    chain.orderBy = jest.fn(() => chain);
+    chain.limit = jest.fn(() => chain);
+    chain.then = (res, rej) => Promise.resolve([]).then(res, rej);
+    db.mockImplementation(() => chain);
+    const res = { json: jest.fn(), status: jest.fn().mockReturnThis() };
+    await getHandler()({ technicianId: 't-1', query: {} }, res, jest.fn());
+    return notCalls;
+  };
+
+  delete process.env.GATE_NOSHOW_DETECTOR;
+  expect(await run()).toContainEqual({ type: 'follow_through_tracking' });
+
+  process.env.GATE_NOSHOW_DETECTOR = 'true';
+  expect(await run()).not.toContainEqual({ type: 'follow_through_tracking' });
+  delete process.env.GATE_NOSHOW_DETECTOR;
+});

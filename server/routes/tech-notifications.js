@@ -27,6 +27,18 @@ router.get('/', async (req, res, next) => {
         this.whereNot({ type: 'storm_watch_alert' })
           .orWhereRaw("created_at >= now() - interval '6 hours'");
       });
+    // GATE_NOSHOW_DETECTOR is the feature's kill switch, and turning it off
+    // stops the sweep — which is the only thing that dismisses a tracking
+    // notice when its visit completes, moves or is reassigned. Undismissed
+    // rows would otherwise keep showing (and, since round 8, leading the
+    // window) with no reconciliation behind them, so a disabled feature
+    // would leave stale cards on techs' phones indefinitely (codex P1, PR
+    // #4403 round 9). Read at request time, like every other gate here: a
+    // flip needs no redeploy, and re-enabling hands the rows straight back
+    // to the sweep, which reconciles them on its next tick.
+    if (!require('../config/feature-gates').gateEnvValue('GATE_NOSHOW_DETECTOR')) {
+      q = q.whereNot({ type: 'follow_through_tracking' });
+    }
     if (unreadOnly) q = q.where({ read: false });
     // FRESH non-storm rows outrank everything inside the 20-row window: a
     // storm burst must never crowd an actionable geofence/timer prompt out
