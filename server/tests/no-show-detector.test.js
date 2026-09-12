@@ -231,6 +231,11 @@ describe('grouped stops are evaluated as one visit (round-10 P1)', () => {
     expect(stopState([{ ...a, en_route_at: '2026-09-10T09:40:00Z' }, { ...b, en_route_at: '2026-09-10T09:30:00Z' }]).en_route_at)
       .toBe('2026-09-10T09:30:00Z');
     expect(stopState([a, { ...b, status: 'completed' }]).status).toBe('completed');
+    // A CANCELLED sibling is not proof the truck attended: the customer may
+    // still be waiting on the members that remain live (round-10 P1).
+    expect(stopState([a, { ...b, status: 'cancelled' }]).status).toBe('pending');
+    expect(stopState([{ ...a, status: 'cancelled' }, b]).status).toBe('pending');
+    expect(stopState([{ ...a, status: 'skipped' }, { ...b, status: 'no_show' }]).status).toBe('skipped');
     // A single-row stop is passed through untouched.
     expect(stopState([solo])).toBe(solo);
   });

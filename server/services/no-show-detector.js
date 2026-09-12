@@ -22,6 +22,11 @@ const isAssignable = (...args) => require('./technician-eligibility').isAssignab
 
 const enabled = () => gateEnvValue('GATE_NOSHOW_DETECTOR');
 const LIVE_STATUSES = ['pending', 'confirmed', 'en_route', 'on_site'];
+// The one terminal status that means the truck actually reached the stop.
+// Used only to settle a GROUPED stop: 'cancelled', 'skipped' and 'no_show'
+// (the rest of visit-context/statuses.js's TERMINAL_ROW_STATUSES) say nothing
+// about arrival, and a 'rescheduled' row is awaiting re-placement, not done.
+const ATTENDED_STATUSES = ['completed'];
 const NOTICE_PURPOSES = ['appointment_confirmation', 'appointment_reminder_72h', 'appointment_reminder_24h'];
 // purpose='appointment' scheduling notices whose original_message_type
 // names a reschedule/confirmation rung, but predate rendered_slot_ms being
@@ -610,8 +615,17 @@ function stopState(members = []) {
   if (members.length === 1) return base;
   const earliest = (key) => members.map((m) => m[key]).filter((v) => Number.isFinite(instant(v)))
     .sort((a, b) => instant(a) - instant(b))[0] || null;
-  const settled = members.find((m) => !LIVE_STATUSES.includes(m.status));
-  return { ...base, status: settled ? settled.status : base.status,
+  // Only an ATTENDED sibling settles the stop. A cancelled/skipped/no_show
+  // sibling proves nothing about the truck — the customer may still be
+  // waiting on the members that remain live, and treating it as settled
+  // silenced the alert for the whole stop (codex P1 round 10). If nothing
+  // was attended, the stop keeps a LIVE status while any member still has
+  // one, so a cancelled representative cannot silence its live siblings
+  // either.
+  const attended = members.find((m) => ATTENDED_STATUSES.includes(m.status));
+  const live = members.find((m) => LIVE_STATUSES.includes(m.status));
+  const status = attended ? attended.status : (live ? live.status : base.status);
+  return { ...base, status,
     en_route_at: earliest('en_route_at'), arrived_at: earliest('arrived_at'),
     actual_start_time: earliest('actual_start_time'), check_in_time: earliest('check_in_time') };
 }
@@ -784,11 +798,18 @@ async function reconcileOfficeAlert(trx, { card, visit, live, key, type, recipie
 // them, re-notifying the tech every five minutes (codex P1 round 10).
 // Members are locked in id order, the same order every pass takes them in.
 async function lockedStop(trx, serviceId, { now = new Date(), ignoreHorizon = false } = {}) {
-  const row = await trx('scheduled_services').where({ id: serviceId }).forUpdate().first();
+  // The first read takes NO lock: it only answers "which stop is this?".
+  // Locking the representative and then the group would take row locks in
+  // two different orders (this row first, then every member in id order),
+  // which is how two sweeps working the same stop from different members
+  // deadlock. The group below is locked in id order, the one order every
+  // pass uses (codex P1 round 10).
+  const row = await trx('scheduled_services').where({ id: serviceId }).first();
   if (!row) return { visit: null, members: [], promise: null, live: null };
   const members = row.visit_id
     ? await trx('scheduled_services').where({ visit_id: row.visit_id }).forUpdate().orderBy('id').select('*')
-    : [row];
+    : await trx('scheduled_services').where({ id: serviceId }).forUpdate().select('*');
+  if (!members.length) return { visit: null, members: [], promise: null, live: null };
   const visit = members.find((m) => String(m.id) === String(serviceId)) || row;
   const events = await loadPromiseEvents(trx, members.map((m) => String(m.id)), { now });
   const promise = stopPromise(members, latestPromises(events, now), now);
