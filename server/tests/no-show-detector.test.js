@@ -472,7 +472,12 @@ describe('loadPromiseEvents: email promise evidence checks the LIVE delivery sta
     // which the row reads as unlinked-and-therefore-neutral forever, even
     // while the retry sits queued or failed (round-7 P1). idempotency_key is
     // immutable and encodes <event_type>:<scheduled_service_id>:.
-    expect(joinSql).toContain("em.idempotency_key LIKE (ci.metadata->>'event_type') || ':' || (ci.metadata->>'scheduled_service_id') || ':%'");
+    // Pinned to the OCCURRENCE, not just the visit: the key's appointment
+    // stamp is the slot epoch the interaction records as rendered_slot_ms, so
+    // a visit rescheduled twice cannot have a later delivered confirmation
+    // vouch for an earlier one the customer never received.
+    expect(joinSql).toContain("em.idempotency_key LIKE (ci.metadata->>'event_type') || ':' || (ci.metadata->>'scheduled_service_id') || ':' || (ci.metadata->>'rendered_slot_ms') || ':%'");
+    expect(joinSql).toContain("ci.metadata->>'rendered_slot_ms' IS NOT NULL");
 
     // Both grouped predicates in this read pass a function to `.where(...)`
     // (every other call passes a string/object filter). Replay each against a

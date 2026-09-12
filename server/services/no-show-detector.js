@@ -244,14 +244,21 @@ async function loadPromiseEvents(conn, visitIds, { now = new Date() } = {}) {
         // while the retry sits queued or failed. email_messages.idempotency_key
         // is immutable and, for every appointment email, is built as
         // `<event_type>:<scheduled_service_id>:<appointment stamp>:<recipient
-        // token>` (appointment-email.js), so the interaction's own metadata
-        // reconstructs its prefix exactly. A fan-out matches each recipient's
-        // row; one delivered recipient is delivery, same as the SMS side.
+        // token>` (appointment-email.js), where the appointment stamp IS the
+        // slot epoch the interaction already records as rendered_slot_ms. All
+        // three are matched, so the link is to THIS occurrence's send: a visit
+        // rescheduled twice has one interaction and one message row per slot,
+        // and a visit-only prefix would let a later, delivered confirmation
+        // vouch for an earlier one the customer never received (codex P1
+        // round 7). A row with no rendered_slot_ms cannot be pinned to an
+        // occurrence, so it stays unlinked and neutral rather than guessing.
+        // A fan-out matches each recipient's row; one delivered recipient is
+        // delivery, same as the SMS side.
         this.on(conn.raw(`em.id::text = (ci.metadata->>'email_message_id')
           OR (ci.metadata->>'email_message_id' IS NULL AND em.provider_message_id = (ci.metadata->>'provider_message_id'))
           OR (ci.metadata->>'email_message_id' IS NULL AND ci.metadata->>'event_type' IS NOT NULL
-            AND ci.metadata->>'scheduled_service_id' IS NOT NULL
-            AND em.idempotency_key LIKE (ci.metadata->>'event_type') || ':' || (ci.metadata->>'scheduled_service_id') || ':%')`));
+            AND ci.metadata->>'scheduled_service_id' IS NOT NULL AND ci.metadata->>'rendered_slot_ms' IS NOT NULL
+            AND em.idempotency_key LIKE (ci.metadata->>'event_type') || ':' || (ci.metadata->>'scheduled_service_id') || ':' || (ci.metadata->>'rendered_slot_ms') || ':%')`));
       })
       .where('ci.interaction_type', 'email_outbound').where('ci.created_at', '<=', now)
       .whereRaw("ci.metadata->>'scheduled_service_id' = ANY(?::text[])", [visitIds])
