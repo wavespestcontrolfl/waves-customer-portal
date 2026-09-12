@@ -501,7 +501,12 @@ function chooseWindowSafeOrder({
     // a single-tech caller that wants Google's own reported numbers for an
     // unrepaired day keeps using its own `result.*` fields, unaffected by
     // these — see admin-schedule.js's two callers.
-    const sim = simulateArrivalRoute(RouteOptimizer, guardRange, googleOrder, { startMin: simStart, origin: from });
+    // The RELAXED rows, not the stored ones: advanceSim reads the co-visit
+    // identity off the stop objects it is handed, so simulating the originals
+    // makes an overdue bundle look like separate visits, and a null sim is
+    // reported as zero drive time for that whole truck (codex round 5 P1).
+    const sim = simulateArrivalRoute(RouteOptimizer, guardRange,
+      googleOrder.map((stop) => relaxedById.get(stop.id) || stop), { startMin: simStart, origin: from });
     return {
       orderedStops: googleOrder,
       source: googleSource,

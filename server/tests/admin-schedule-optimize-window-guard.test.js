@@ -1032,3 +1032,45 @@ test('an overdue bundle with real estimates still costs both of them', () => {
   expect(out.orderedStops.map((st) => st.id)).toEqual(['NEXT', 'PEST', 'LAWN']);
   expect(out.source).toBe('window_constrained');
 });
+
+// Codex round 5 P1: the accepted order is SCORED as well as guarded, and
+// advanceSim reads the co-visit identity off the rows it is handed — so the
+// scoring simulation has to see the relaxed rows too, or an overdue bundle
+// looks like separate visits, the simulation fails, and that truck's whole
+// drive time is reported as zero.
+test('an accepted overdue bundle reports real drive minutes, not zero', () => {
+  process.env.GATE_ROUTE_REORDER_WINDOW_FIT = 'true';
+  process.env.GATE_DRIVE_TIME_CALIBRATION = 'true';
+  const realLegs = RouteOptimizer.fallbackLegMetrics;
+  RouteOptimizer.fallbackLegMetrics = (miles) => ({ meters: Math.round(miles * 1000), minutes: Math.round(miles * 2) });
+  try {
+    const { chooseWindowSafeOrder } = require('../services/route-reorder');
+    const bundled = (id, ro) => ({
+      id, technician_id: 't1', status: 'confirmed', route_order: ro,
+      customer_id: 'cust_pair', service_address_line1: '100 Main St',
+      customer_address_line1: '100 Main St', customer_city: 'Bradenton', customer_zip: '34205',
+      visit_id: null, window_start: '09:00', window_end: '10:00', time_window: null,
+      estimated_duration_minutes: null, lat: 1, lng: 1,
+    });
+    // A three-service overdue bundle (one promised hour, relaxed) and a LIVE
+    // 13:00-14:00 promise behind it. The guard merges the bundle and accepts
+    // the order; scoring it without the merge would charge three hours, miss
+    // that promise, and report the truck's whole drive as zero.
+    const stops = [bundled('PEST', 1), bundled('LAWN', 2), bundled('MOSQ', 3), {
+      id: 'NEXT', technician_id: 't1', status: 'confirmed', route_order: 4,
+      customer_id: 'cust_next', service_address_line1: '900 Other Rd',
+      customer_address_line1: '900 Other Rd', customer_city: 'Bradenton', customer_zip: '34205',
+      visit_id: null, window_start: '13:00', window_end: '14:00', time_window: null,
+      estimated_duration_minutes: 30, lat: 1, lng: 5,
+    }];
+    const out = chooseWindowSafeOrder({
+      RouteOptimizer, googleOrder: stops, sourceStops: stops, googleSource: 'google_routes_api', startMin: 12 * 60 + 30,
+    });
+    expect(out.orderedStops).not.toBeNull();
+    expect(out.source).toBe('google_routes_api');
+    expect(out.afterSeconds).not.toBeNull();
+    expect(out.afterSeconds).toBeGreaterThan(0);
+  } finally {
+    RouteOptimizer.fallbackLegMetrics = realLegs;
+  }
+});
