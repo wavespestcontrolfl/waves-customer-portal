@@ -1385,7 +1385,7 @@ export default function BlogPage() {
 
   if (selectedPost) {
     return (
-      <UiSurface density="comfortable">
+      <UiSurface density="legacy">
         <AdminCommandHeader
           variant="workspace"
           title="Content editor"
@@ -1403,7 +1403,7 @@ export default function BlogPage() {
   }
 
   return (
-    <UiSurface density="comfortable">
+    <UiSurface density="legacy">
       <AdminCommandHeader
         variant="workspace"
         title="Blog"

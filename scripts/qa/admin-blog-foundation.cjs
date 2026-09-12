@@ -157,9 +157,11 @@ async function main() {
     unmatched: [],
     pageErrors: [],
   };
-  const server = await previewServer(root, process.env.ADMIN_UI_PREVIEW_URL);
-  const browser = await launchBrowser();
+  let server;
+  let browser;
   try {
+    server = await previewServer(root, process.env.ADMIN_UI_PREVIEW_URL);
+    browser = await launchBrowser();
     for (const width of [390, 1440]) {
       const context = await browser.newContext({
         viewport: { width, height: width === 390 ? 900 : 1000 },
@@ -322,8 +324,8 @@ async function main() {
     assert.deepEqual(report.pageErrors, []);
     report.passed = true;
   } finally {
-    await browser.close();
-    await server.close();
+    if (browser) await browser.close();
+    if (server) await server.close();
     fs.writeFileSync(
       path.join(output, "report.json"),
       `${JSON.stringify(report, null, 2)}\n`,
