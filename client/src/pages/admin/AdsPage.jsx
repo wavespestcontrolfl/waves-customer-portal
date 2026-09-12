@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef, lazy, Suspense } from "react";
+import { useLocation, useNavigate, useSearchParams } from "react-router-dom";
 import {
   BarChart3,
   CalendarRange,
@@ -1538,12 +1539,27 @@ function CapacityTab() {
   );
 }
 export default function AdsPage() {
-  const [tab, setTab] = useState("ppc-dashboard");
+  const [searchParams] = useSearchParams();
+  const location = useLocation();
+  const navigate = useNavigate();
+  const requestedTab = searchParams.get("tab");
+  const tab = TABS.some((item) => item.key === requestedTab)
+    ? requestedTab
+    : "ppc-dashboard";
+  const setTab = (nextTab) => {
+    if (nextTab === tab) return;
+    const next = new URLSearchParams(searchParams);
+    next.set("tab", nextTab);
+    navigate({
+      pathname: location.pathname,
+      search: `?${next.toString()}`,
+      hash: location.hash,
+    });
+  };
 
-  // Usage beacon for the tab that actually RENDERS. PPC tabs are pure
-  // state — they never reach the router, so without this the page's tab
-  // column is impossible, same as Communications (Codex #2961 r17).
-  useRenderedTabBeacon("/admin/ppc", tab);
+  // Report the validated leaf that actually renders, including fallbacks
+  // reached through same-route history navigation.
+  useRenderedTabBeacon("/admin/ppc", tab, [searchParams]);
   return (
     <UiSurface
       density="comfortable"

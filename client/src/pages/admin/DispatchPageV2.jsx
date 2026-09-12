@@ -1336,7 +1336,7 @@ export default function DispatchPageV2({
       )}
 
       {/* Mobile-only ViewMode selector — Day + Week only on phones. */}
-      <div className="md:hidden mb-3 grid grid-cols-2 gap-1.5">
+      {activeTab === "board" && (<div className="md:hidden mb-3 grid grid-cols-2 gap-1.5">
         {[
           { id: "day", label: "Day" },
           { id: "week", label: "Week" },
@@ -1357,7 +1357,7 @@ export default function DispatchPageV2({
             {m.label}
           </button>
         ))}
-      </div>
+      </div>)}
       {showNewAppt && (
         <CreateAppointmentModal
           defaultDate={newApptDefaults?.date || date}
