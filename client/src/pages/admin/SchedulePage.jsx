@@ -46,6 +46,13 @@ import {
   isPerGallonUnit,
   isTankCalculation,
   derivedTankTotal,
+  tankOwnerRow,
+  promoteTankOwner,
+  applyTankDose,
+  markTankEntry,
+  tankPropagates,
+  followTank,
+  clearTankOnUnitChange,
   normalizeApplicationMethod,
   resolveRatePrefill,
 } from "../../lib/product-rate-prefill";
@@ -14810,7 +14817,7 @@ export function CompletionPanel({
     }
     invalidateGeneratedReportOnTypedEdit();
     setSelectedProducts((prev) =>
-      prev.filter((p) => p.productId !== productId),
+      promoteTankOwner(prev.filter((p) => p.productId !== productId)),
     );
   }
   function updateProduct(productId, field, value) {
@@ -14818,54 +14825,18 @@ export function CompletionPanel({
     lawnDefaultMixSeededRef.current = true;
     invalidateGeneratedReportOnTypedEdit();
     setSelectedProducts((prev) => {
-      // One tank has one owner: the row the tech typed gallons into. Only the
-      // owner's corrections travel. A follower given its own gallons detaches
-      // by itself and must not drag the rows still following the owner with
-      // it (Codex r1 P1): with A seeding B and C, putting B on its own
-      // 10-gallon mix leaves C on A's tank.
-      // The owner is the row that FIRST set the tank, not any row the tech
-      // has since edited: a detached follower's second keystroke would
-      // otherwise start driving its old siblings again (pre-push audit P1 —
-      // typing "10" is two edits). The owner slot frees up when that row
-      // leaves per-gallon or is removed, and the next entry claims it.
-      const tankOwner = prev.find((row) => isPerGallonUnit(row.rateUnit) && row.tankOwner);
-      const propagateTank = field === "carrierGallons"
-        && (!tankOwner || tankOwner.productId === productId);
+      // One tank, one carrier volume, one owner — the rules and their reasons
+      // live in lib/product-rate-prefill. Only the owner's corrections travel,
+      // so a row given its own gallons detaches alone.
+      const tankOwner = tankOwnerRow(prev);
+      const propagateTank = tankPropagates(prev, productId, field);
       return prev.map((p) => {
-        if (p.productId !== productId) {
-          // One tank, one carrier volume: gallons entered on any per-gallon
-          // row set the tank for every other per-gallon row, so a two-product
-          // mix is typed once — and a later correction (a typo, more mix) or
-          // a clear tracks across them all. Only a row the tech gave its OWN
-          // gallons stops following (carrierGallonsManual, the same rule
-          // totalAmountManual applies to an entered total); a value this
-          // propagation supplied is not a tech entry and must not freeze a
-          // recorded quantity at a stale tank volume (pre-push audit P1).
-          if (propagateTank && isPerGallonUnit(p.rateUnit) && !p.carrierGallonsManual) {
-            const shared = { ...p, carrierGallons: value };
-            if (!shared.totalAmountManual) {
-              // A follower's derived dose is locked to its own rate's base
-              // unit exactly as the edited row's is — otherwise a follower
-              // whose unit the tech had changed comes back as "15 gal"
-              // (pre-push audit P1).
-              shared.amountUnit = String(shared.rateUnit).split("/")[0];
-              shared.totalAmount = derivedTankTotal(shared.rate, value);
-            }
-            return shared;
-          }
-          return p;
-        }
+        if (p.productId !== productId) return propagateTank ? followTank(p, value) : p;
         const next = { ...p, [field]: value };
-        // Leaving a per-gallon rate retires the tank with it, on every lane:
+        // Leaving a per-gallon rate retires the tank with it, on every lane —
         // a pest perimeter or tree/shrub row never reaches the rate-unit
-        // branch below (its area unit is not sqft), so a hidden carrier
-        // volume would survive to re-drive a quantity on the round-trip back
-        // (Codex r1 P1). Cleared whether or not the total is the tech's own.
-        if (field === "rateUnit" && isPerGallonUnit(p.rateUnit) && !isPerGallonUnit(value)) {
-          next.carrierGallons = "";
-          next.carrierGallonsManual = false;
-          next.tankOwner = false;
-        }
+        // branch below, so a hidden volume would survive the round-trip back.
+        Object.assign(next, clearTankOnUnitChange(next, p.rateUnit));
         // Provenance is per row: a governed row restored while the initial
         // plan request failed (`lawnDefaultsEnabled` false, no defaults
         // loaded) still records which fields the tech edited, or a successful
@@ -14876,14 +14847,9 @@ export function CompletionPanel({
           next.lawnPlanManualFields = [...new Set([...(p.lawnPlanManualFields || []), field])];
         }
         if (field === "applicationArea") next.applicationAreaDefault = false;
-        // The row the tech typed into owns its gallons from here on; the
-        // rows that merely followed the tank keep following it. The first
-        // such row also becomes the tank owner, the only row whose later
-        // corrections travel.
-        if (field === "carrierGallons") {
-          next.carrierGallonsManual = true;
-          if (!tankOwner) next.tankOwner = true;
-        }
+        // The row the tech typed into owns its gallons from here on, and the
+        // first such row owns the tank.
+        if (field === "carrierGallons") Object.assign(next, markTankEntry(next, tankOwner));
         if (field === "applicationMethod") {
           const areaRequirement = requiredApplicationArea(
             value,
@@ -14927,7 +14893,7 @@ export function CompletionPanel({
         // in the rate's unit, so a rate-unit change moves the total unit too.
         if (field === "totalAmount") {
           next.totalAmountManual = true;
-        } else if (field === "amountUnit" && (governed || isPerGallonUnit(next.rateUnit))) {
+        } else if (governed && field === "amountUnit") {
           // A still-derived total is the plan's quantity in the plan's unit:
           // a unit change alone withdraws it (never keeps the number under
           // the new unit, never converts) until the tech enters the actual.
@@ -14938,19 +14904,7 @@ export function CompletionPanel({
           // quantity (Codex r1 P1).
           if (!p.totalAmountManual) next.totalAmount = "";
         } else if (!next.totalAmountManual) {
-          // Any edit on a per-gallon row: its total is the tank dose, full
-          // stop. Scoping this to rate/unit/gallons let a treated-area edit
-          // fall through to the per-1,000 derivation, which is blank for a
-          // per-basis unit and erased a valid tank total (audit P1).
-          if (isPerGallonUnit(next.rateUnit)) {
-            // A DERIVED tank dose is always in the rate's base unit — never
-            // a hand-picked one: 0.8 fl_oz/gal x 30 is 24 fl oz, and letting
-            // it recompute under a chosen "gal" would deduct the wrong
-            // inventory quantity (Codex r1 P1). Entering the total is how the
-            // tech takes over the unit; that stops the derivation entirely.
-            next.amountUnit = String(next.rateUnit).split("/")[0];
-            next.totalAmount = derivedTankTotal(next.rate, next.carrierGallons);
-          } else if (field === "rateUnit" && isPerGallonUnit(p.rateUnit)) {
+          if (field === "rateUnit" && isPerGallonUnit(p.rateUnit)) {
             // A tank dose is meaningless under the new unit: re-derive from
             // the treated area where that is what the unit means, else blank
             // — never relabel 20 fl oz of tank mix as 20 of something else.
@@ -15002,18 +14956,11 @@ export function CompletionPanel({
             next.lawnPlanManualFields = [...new Set([...(next.lawnPlanManualFields || []), "amountUnit"])];
           }
         }
-        // One closing invariant for the whole function: a per-gallon row with
-        // the technician's gallons behind it shows the tank dose, in the
-        // rate's own base unit. The governed area and method handlers above
-        // blank derived totals the plan cannot express, and each new one
-        // would have to remember the tank; this restores the dose once,
-        // wherever it was cleared (Codex r1 P1). Entering a total is how the
-        // technician takes the quantity — and its unit — away from the tank.
-        if (!next.totalAmountManual && isTankCalculation(next)) {
-          next.amountUnit = String(next.rateUnit).split("/")[0];
-          next.totalAmount = derivedTankTotal(next.rate, next.carrierGallons);
-        }
-        return next;
+        // One closing step: a tank row shows its dose, whatever cleared it
+        // earlier. The governed area and method handlers above blank derived
+        // totals the plan cannot express; none of them has to know about
+        // tanks (Codex r1 P1).
+        return applyTankDose(next);
       });
     });
   }

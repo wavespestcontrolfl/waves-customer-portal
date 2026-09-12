@@ -659,6 +659,32 @@ it('a governed plan row keeps its tank dose through a plan refresh', async () =>
   expect(submit.mock.calls[0][1].products[0]).toMatchObject({ rate: '0.8', rateUnit: 'fl_oz/gal', totalAmount: 20, amountUnit: 'fl_oz' });
 });
 
+// Removing the tank's owner leaves its followers holding the same mix: the
+// next product added joins that tank rather than asking again (Codex r2 P2).
+it('the shared tank survives removing the row that owned it', async () => {
+  enableDefaults();
+  const mk = (id, rate) => ({ id, name: `Fixture heir ${id}`, category: 'insecticide', default_unit: 'fl_oz/gal', default_rate: rate });
+  const [a, b, c] = [mk('heir-a', '1'), mk('heir-b', '2'), mk('heir-c', '4')];
+  render(<CompletionPanel service={service} products={[...catalog, a, b, c]} onClose={() => {}} onSubmit={submit} />);
+  await waitFor(() => expect(totals()).toHaveLength(2), { timeout: 5000 });
+  const add = async (product, expected) => {
+    fireEvent.change(screen.getByPlaceholderText('Search products...'), { target: { value: product.name } });
+    fireEvent.click(screen.getByText(product.name));
+    await waitFor(() => expect(totals()).toHaveLength(expected));
+  };
+  await add(a, 3);
+  await add(b, 4);
+  fireEvent.change(screen.getAllByPlaceholderText('Gal')[0], { target: { value: '25' } });
+  await waitFor(() => expect(totals()[3].value).toBe('50'));
+  // A owned the tank; remove it and B still holds the same 25-gallon mix.
+  fireEvent.click(screen.getAllByRole('button', { name: 'Remove product' })[2]);
+  await waitFor(() => expect(totals()).toHaveLength(3));
+  expect(screen.getAllByPlaceholderText('Gal')[0].value).toBe('25');
+  await add(c, 4);
+  expect(screen.getAllByPlaceholderText('Gal')[1].value).toBe('25');
+  expect(totals()[3].value).toBe('100');
+});
+
 it('a rate unit moving off per-gallon does not strand the tank total', async () => {
   enableDefaults();
   const added = { id: 'manual-taurus', name: 'Fixture termiticide', category: 'insecticide', default_unit: 'fl_oz/gal', default_rate: '0.8' };

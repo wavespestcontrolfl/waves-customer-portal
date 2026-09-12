@@ -50,6 +50,71 @@ export function derivedTankTotal(rate, gallons) {
   return Math.round(r * g * 10000) / 10000;
 }
 
+// The tank rules, in one place, as three small operations over a product row.
+// The closeout's per-product updater was accumulating a branch per rule; the
+// tank concern lives here instead so that updater stays a state machine about
+// plan provenance, not about carrier volume.
+
+// The row whose corrections travel: the one that FIRST set the volume, not any
+// row the technician has since edited (a detached row's second keystroke must
+// not start driving its old siblings again — typing "12" is two edits).
+export function tankOwnerRow(rows = []) {
+  return rows.find((row) => isPerGallonUnit(row.rateUnit) && row.tankOwner) || null;
+}
+
+// Removing the owner leaves its followers holding the same mix: promote one so
+// the next product added still joins that tank instead of asking for the
+// volume again (Codex r2 P2).
+export function promoteTankOwner(rows = []) {
+  if (tankOwnerRow(rows)) return rows;
+  const heir = rows.find((row) => isPerGallonUnit(row.rateUnit) && Number(row.carrierGallons) > 0);
+  return heir ? rows.map((row) => (row === heir ? { ...row, tankOwner: true } : row)) : rows;
+}
+
+// A per-gallon row with the technician's gallons behind it shows rate x
+// gallons in the rate's own base unit — whatever cleared it earlier. Applied
+// as the closing step of every row update, so a handler that blanks a derived
+// total it cannot express does not have to know about tanks.
+export function applyTankDose(row) {
+  if (row.totalAmountManual || !isPerGallonUnit(row.rateUnit)) return row;
+  // Clearing the gallons clears the dose: derivedTankTotal returns "" without
+  // a volume, so this one call covers both halves of the rule.
+  return {
+    ...row,
+    amountUnit: String(row.rateUnit).split("/")[0],
+    totalAmount: derivedTankTotal(row.rate, row.carrierGallons),
+  };
+}
+
+// Gallons entered on the tank's owner (or on any row while nobody owns it)
+// travel; a detached row's edits are its own.
+export function tankPropagates(rows, productId, field) {
+  if (field !== "carrierGallons") return false;
+  const owner = tankOwnerRow(rows);
+  return !owner || owner.productId === productId;
+}
+
+// One tank, one carrier volume: a row still following the tank takes the new
+// volume and the dose it implies. A row holding its own gallons is left alone.
+export function followTank(row, gallons) {
+  if (!isPerGallonUnit(row.rateUnit) || row.carrierGallonsManual) return row;
+  return applyTankDose({ ...row, carrierGallons: gallons });
+}
+
+// The technician typed this row's own gallons: it stops following the tank,
+// and if no row owned the tank yet it becomes the owner.
+export function markTankEntry(row, owner) {
+  return { ...row, carrierGallonsManual: true, ...(owner ? {} : { tankOwner: true }) };
+}
+
+// Leaving a per-gallon rate retires the tank with it: the volume is cleared so
+// a round-trip back cannot re-drive a quantity from a stale figure, and the
+// owner slot frees for the next entry.
+export function clearTankOnUnitChange(row, previousRateUnit) {
+  if (!isPerGallonUnit(previousRateUnit) || isPerGallonUnit(row.rateUnit)) return row;
+  return { ...row, carrierGallons: "", carrierGallonsManual: false, tankOwner: false };
+}
+
 // Generic "insecticide" categories cover dry/bait/packet forms too (e.g.
 // Advion WDG Granular, Delta Dust, Alpine WSG), whose inferred method
 // still falls through to perimeter_spray — a 4 oz liquid default would be
