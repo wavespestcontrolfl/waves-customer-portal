@@ -50,6 +50,30 @@ it('opens a bookmarked post and returns to its list without dropping URL context
   expect(fetchMock.mock.calls.every(([, options]) => !options?.method || options.method === 'GET')).toBe(true);
 });
 
+it('returns from a list-opened editor without leaving a duplicate list history entry', async () => {
+  const post = { id: 'abcdef01-2345-4678-9012-abcdef012345', title: 'Fixture list article', content: '', status: 'draft', tag: 'pest', city: 'Fixture town' };
+  vi.stubGlobal('fetch', vi.fn(async (url) => {
+    const path = String(url);
+    if (path.endsWith(`/blog/${post.id}`)) return new Response(JSON.stringify({ post }));
+    if (path.includes('/blog?status=draft')) return new Response(JSON.stringify({ posts: [post], counts: {} }));
+    if (path.endsWith('/authors')) return new Response(JSON.stringify({ authors: [] }));
+    if (path.endsWith('/service-areas')) return new Response(JSON.stringify({ serviceAreas: [] }));
+    return new Response(JSON.stringify({ byStatus: {} }));
+  }));
+  render(<MemoryRouter initialEntries={['/admin/dashboard', '/admin/blog?tab=posts&status=draft&source=list#details']}><BlogPage /><LocationProbe /></MemoryRouter>);
+
+  fireEvent.click(await screen.findByText('Fixture list article'));
+  expect(await screen.findByDisplayValue('Fixture list article')).toBeInTheDocument();
+  expect(screen.getByTestId('location')).toHaveTextContent(`?tab=posts&status=draft&source=list&post=${post.id}#details`);
+
+  fireEvent.click(screen.getByRole('button', { name: /Back to list/i }));
+  expect(await screen.findByText('Fixture list article')).toBeInTheDocument();
+  expect(screen.getByTestId('location')).toHaveTextContent('?tab=posts&status=draft&source=list#details');
+
+  fireEvent.click(screen.getByRole('button', { name: 'Browser back' }));
+  expect(screen.getByTestId('location')).toHaveTextContent('/admin/dashboard');
+});
+
 it('shows a failed bookmarked-post read with retry and a way back to the list', async () => {
   vi.stubGlobal('fetch', vi.fn(async (url) => new Response(JSON.stringify(String(url).endsWith('/blog/missing') ? { error: 'Post not found' } : { byStatus: {} }), { status: String(url).endsWith('/blog/missing') ? 404 : 200 })));
   render(<MemoryRouter initialEntries={['/admin/blog?post=missing']}><BlogPage /></MemoryRouter>);

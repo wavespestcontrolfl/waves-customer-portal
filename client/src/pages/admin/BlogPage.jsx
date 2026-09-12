@@ -2989,9 +2989,33 @@ export default function BlogPage() {
   const [postRetry, setPostRetry] = useState(0);
   const openPost = (post) => {
     const params = new URLSearchParams(searchParams);
-    if (post) params.set("post", String(post.id));
-    else params.delete("post");
-    navigate({ pathname: location.pathname, search: params.toString(), hash: location.hash }, { replace: !post });
+    if (post) {
+      params.set("post", String(post.id));
+      navigate(
+        {
+          pathname: location.pathname,
+          search: params.toString(),
+          hash: location.hash,
+        },
+        {
+          state: { ...location.state, blogEditorOrigin: "list" },
+        },
+      );
+      return;
+    }
+    if (location.state?.blogEditorOrigin === "list") {
+      navigate(-1);
+      return;
+    }
+    params.delete("post");
+    navigate(
+      {
+        pathname: location.pathname,
+        search: params.toString(),
+        hash: location.hash,
+      },
+      { replace: true },
+    );
   };
   useEffect(() => {
     let active = true;
