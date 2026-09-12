@@ -166,7 +166,7 @@ export default function AgentDecisionsPage({ embedded = false } = {}) {
 
   const review = useCallback(async (decision, verdict) => {
     if (!decision) return;
-    setBusyId(decision.id);
+    setBusyId(`${decision.id}:${verdict}`);
     setError("");
     setNotice("");
     try {
@@ -195,7 +195,7 @@ export default function AgentDecisionsPage({ embedded = false } = {}) {
 
   const saveReplyTraining = useCallback(async (decision, replyVerdict) => {
     if (!decision) return;
-    setBusyId(`${decision.id}:reply`);
+    setBusyId(`${decision.id}:reply:${replyVerdict}`);
     setError("");
     setNotice("");
     try {
@@ -259,7 +259,7 @@ export default function AgentDecisionsPage({ embedded = false } = {}) {
           ].map(([label, value]) => (
             <Card key={label} className="p-4">
               <div className="text-14 font-medium text-ink-secondary">{label}</div>
-              <div className="text-24 font-medium text-zinc-900 u-nums">{value}</div>
+              <div className="text-28 font-medium text-zinc-900 u-nums">{value}</div>
             </Card>
           ))}
         </div>
@@ -275,7 +275,7 @@ export default function AgentDecisionsPage({ embedded = false } = {}) {
                 <Card key={label} className="p-3">
                   <div className="text-14 font-medium text-ink-secondary">{label}</div>
                   <div className="flex items-baseline gap-2 u-nums">
-                    <strong className="text-20 font-medium text-zinc-900">{count}</strong>
+                    <strong className="text-22 font-medium text-zinc-900">{count}</strong>
                     <span className="text-ui-caption text-ink-secondary">{percent(rate)}</span>
                   </div>
                 </Card>
@@ -289,7 +289,9 @@ export default function AgentDecisionsPage({ embedded = false } = {}) {
                   <div key={row.workflow} className="grid grid-cols-[minmax(0,1fr)_auto_auto] items-center gap-2 text-ui-body">
                     <div className="truncate font-medium text-zinc-900">{row.workflow}</div>
                     <span className="text-ink-secondary u-nums">{row.reviewed} reviewed</span>
-                    <span className="font-medium text-zinc-900 u-nums">{percent(row.acceptanceRate)} accept</span>
+                    <span className={`${row.rejectedRate > 0.15 ? "text-alert-fg" : "text-zinc-900"} font-medium u-nums`}>
+                      {percent(row.acceptanceRate)} accept
+                    </span>
                   </div>
                 ))}
               </div>
@@ -353,7 +355,7 @@ export default function AgentDecisionsPage({ embedded = false } = {}) {
           </Button>
         </div>
 
-        <div className="grid gap-4 lg:grid-cols-[minmax(280px,380px)_minmax(0,1fr)] items-start">
+        <div className="grid gap-4 md:grid-cols-[minmax(280px,380px)_minmax(0,1fr)] items-start">
           <Card className="overflow-hidden">
             {loading ? (
               <ActionFeedback className="m-4">Loading decisions...</ActionFeedback>
@@ -550,7 +552,7 @@ export default function AgentDecisionsPage({ embedded = false } = {}) {
                         disabled={!!busyId || !(idealReply.trim() || selected.suggestedMessage)}
                         onClick={() => saveReplyTraining(selected, "accepted")}
                         variant="secondary"
-                        loading={busyId === `${selected.id}:reply`}
+                        loading={busyId === `${selected.id}:reply:accepted`}
                       >
                         <CheckCircle2 size={16} aria-hidden /> Accept draft
                       </Button>
@@ -559,7 +561,7 @@ export default function AgentDecisionsPage({ embedded = false } = {}) {
                         disabled={!!busyId || !idealReply.trim()}
                         onClick={() => saveReplyTraining(selected, "edited")}
                         variant="secondary"
-                        loading={busyId === `${selected.id}:reply`}
+                        loading={busyId === `${selected.id}:reply:edited`}
                       >
                         <Edit3 size={16} aria-hidden /> Edit & save
                       </Button>
@@ -568,7 +570,7 @@ export default function AgentDecisionsPage({ embedded = false } = {}) {
                         disabled={!!busyId || !idealReply.trim()}
                         onClick={() => saveReplyTraining(selected, "rejected")}
                         variant="danger"
-                        loading={busyId === `${selected.id}:reply`}
+                        loading={busyId === `${selected.id}:reply:rejected`}
                       >
                         <XCircle size={16} aria-hidden /> Reject & rewrite
                       </Button>
@@ -577,7 +579,7 @@ export default function AgentDecisionsPage({ embedded = false } = {}) {
                         disabled={!!busyId}
                         onClick={() => saveReplyTraining(selected, "no_reply_needed")}
                         variant="secondary"
-                        loading={busyId === `${selected.id}:reply`}
+                        loading={busyId === `${selected.id}:reply:no_reply_needed`}
                       >
                         <Save size={16} aria-hidden /> No reply needed
                       </Button>
@@ -627,13 +629,13 @@ export default function AgentDecisionsPage({ embedded = false } = {}) {
                   />
                   </FormField>
                   <div className="ui-record-actions">
-                    <Button type="button" disabled={!!busyId} loading={busyId === selected.id} onClick={() => review(selected, "accepted")}>
+                    <Button type="button" disabled={!!busyId} loading={busyId === `${selected.id}:accepted`} onClick={() => review(selected, "accepted")}>
                       <CheckCircle2 size={16} aria-hidden /> Accept
                     </Button>
-                    <Button type="button" disabled={!!busyId} loading={busyId === selected.id} onClick={() => review(selected, "corrected")} variant="secondary">
+                    <Button type="button" disabled={!!busyId} loading={busyId === `${selected.id}:corrected`} onClick={() => review(selected, "corrected")} variant="secondary">
                       <Edit3 size={16} aria-hidden /> Correct
                     </Button>
-                    <Button type="button" disabled={!!busyId} loading={busyId === selected.id} onClick={() => review(selected, "dismissed")} variant="danger">
+                    <Button type="button" disabled={!!busyId} loading={busyId === `${selected.id}:dismissed`} onClick={() => review(selected, "dismissed")} variant="danger">
                       <XCircle size={16} aria-hidden /> Dismiss
                     </Button>
                   </div>
