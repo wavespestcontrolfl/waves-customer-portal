@@ -28,8 +28,12 @@ describe('review outreach templates', () => {
     expect(getOutreachTemplate('nope')).toBeNull();
   });
 
-  test('the one-time cadence is Day 0/4/6 ending on email, reminder SMS weekdays-only (owner spec 2026-08-05: touch 2 lands 3-5 days after treatment, touch 3 lands 5-7)', () => {
-    expect(DEFAULT_SEQUENCE_PLAN.map((s) => s.day)).toEqual([0, 4, 6]);
+  test('the one-time cadence is Day 0/4/7 ending on email, reminder SMS weekdays-only (owner spec 2026-08-05: touch 2 lands 3-5 days after treatment, touch 3 lands 5-7; 3-day rule 2026-09-07 puts the email 72 h after the Day-4 SMS)', () => {
+    expect(DEFAULT_SEQUENCE_PLAN.map((s) => s.day)).toEqual([0, 4, 7]);
+    // Every later step sits at least 3 days after the previous one.
+    for (let i = 1; i < DEFAULT_SEQUENCE_PLAN.length; i++) {
+      expect(DEFAULT_SEQUENCE_PLAN[i].day - DEFAULT_SEQUENCE_PLAN[i - 1].day).toBeGreaterThanOrEqual(3);
+    }
     expect(DEFAULT_SEQUENCE_PLAN.map((s) => s.channel)).toEqual(['sms', 'sms', 'email']);
     expect(DEFAULT_SEQUENCE_PLAN[1].weekdaysOnly).toBe(true);
     // Every step references a real template.

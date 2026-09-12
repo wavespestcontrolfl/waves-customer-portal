@@ -8,6 +8,7 @@ import AppointmentPage from './AppointmentPage';
 
 vi.mock('../components/brand', () => ({
   WavesShell: ({ children }) => <div>{children}</div>,
+  CustomerColumn: ({ children, ...props }) => <div {...props}>{children}</div>,
 }));
 
 function jsonResponse(body, status = 200) {
