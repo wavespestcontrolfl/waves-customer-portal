@@ -73,10 +73,19 @@ padding, hairline 1–3px offsets) are allowed but must be deliberate.
 
 ## Layout
 
-- Document column: **760px** (`DOC_COLUMN` = `min(100% - 32px, 760px)`;
-  owner ruling PR #2527 — "pay's cap is the standard"). Prefer
-  `className="waves-receipt-page"` which also carries the standard
-  `28px auto 56px` page margins.
+- **Page column** (audit G-01, DECISIONS 2026-09-11 "R2a: one customer page
+  column"): every customer page wraps its content in
+  `<CustomerColumn>` (`components/brand/CustomerColumn.jsx`) — never author a
+  column wrapper by hand. One 16px phone gutter at every viewport, 28px top
+  clearance, 56px bottom clearance (`PAGE_GUTTER` / `PAGE_TOP` / `PAGE_BOTTOM`
+  in `theme-doc.js`), and two named widths: `column="document"` (the
+  default) caps at **760px** (`DOC_COLUMN_MAX`; owner ruling PR #2527 —
+  "pay's cap is the standard") for estimates, reports, receipts, invoices,
+  notices and contracts; `column="flow"` caps at **640px**
+  (`FLOW_COLUMN_MAX`) for the short transactional flows — appointment,
+  track, reschedule/re-service, secure, rate. The portal app-shell gutter
+  (10px) is an open owner decision and stays excluded; onboarding's step
+  grid is deferred to R4.
 - Radii from `RADIUS`: tag 6, input 8, button 10, card 12, modal 16,
   pill 999. The glass sheet renders cards 12, controls 10, pills 999. The pay family's shipped 8px card idiom is expressed as
   `RADIUS.input` — do not re-round it.

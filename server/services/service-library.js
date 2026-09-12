@@ -59,8 +59,10 @@ function withSchedulingDuration(service) {
 
 // All booking callers use the catalog allowance. Appointment overrides are
 // supplied separately by staff paths and must never be truncated to this range.
-function serviceDurationMinutes(service, fallback = 60) {
-  const duration = Number(withSchedulingDuration(service)?.default_duration_minutes);
+function serviceDurationMinutes(service, fallback = 60, { preserveCapacity = false } = {}) {
+  const policy = service?.scheduling_duration_policy;
+  const duration = Number(preserveCapacity && policy?.version === 1
+    ? policy.default_duration_minutes : withSchedulingDuration(service)?.default_duration_minutes);
   return Number.isInteger(duration) && duration > 0 ? duration : fallback;
 }
 
@@ -603,6 +605,12 @@ async function deactivateService(id, { audit } = {}) {
   // row cannot be newly LINKED; a text-only late reference is a display
   // label, not a lane.
   return db.transaction(async (trx) => {
+    // Table lock BEFORE the row lock: a capacity certification holding the
+    // catalog SHARE lock later takes FOR KEY SHARE on this row through its
+    // scheduled_services.service_id FK, and this UPDATE needs ROW EXCLUSIVE
+    // behind that SHARE — row-first here deadlocks through the FK (codex
+    // #4369 r4 P1). See scheduling/catalog-lock.js.
+    await require('./scheduling/catalog-lock').lockCatalogForWrite(trx);
     const before = await trx('services').where({ id }).forUpdate().first();
     if (!before) return null;
     const references = await getServiceReferences(before, trx);

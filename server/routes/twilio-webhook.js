@@ -5,8 +5,6 @@ const db = require('../models/db');
 const TWILIO_NUMBERS = require('../config/twilio-numbers');
 const TwilioService = require('../services/twilio');
 const logger = require('../services/logger');
-const { etDateString } = require('../utils/datetime-et');
-const { createDefaultCustomerRows } = require('../services/customer-default-rows');
 const { recordSuppression, clearSuppression } = require('../services/messaging/validators/suppression');
 const { detectSmsOptCommand } = require('../services/messaging/opt-out-detector');
 const { tryClaimInboundWebhook, releaseInboundWebhook } = require('../services/messaging/inbound-dedupe');
@@ -15,8 +13,7 @@ const { uploadTwilioMedia } = require('../services/sms-media');
 const { alertTwilioFailure, isFailureStatus } = require('../services/twilio-failure-alerts');
 const { hasSchedulingIntent, isSmsReaction, isQuietSmsReaction, isCourtesyOnly, hasRescheduleOrAwayIntent } = require('../services/sms-intent');
 const { publicPortalUrl } = require('../utils/portal-url');
-const { properCase } = require('../utils/name-case');
-const { applyContactNormalization } = require('../utils/intake-normalize');
+const { phoneMatchDigits } = require('../utils/phone');
 
 // Admin alert recipient — must be a real cell, never one of our own Twilio
 // numbers (an SMS from the HQ line to itself fails with Twilio error 21266).
@@ -53,6 +50,100 @@ function maskPhone(phone) {
   return digits.length >= 4 ? `***${digits.slice(-4)}` : '***';
 }
 
+// Has any Waves line ever texted this number? Evidence, any of:
+//   - a customer-facing sms_log outbound row the provider ACCEPTED
+//     (queued/sent/delivered — a 'scheduled' or 'blocked' row never reached
+//     them, codex #4211 P2); internal alerts, operator-phone sends, and the
+//     AI assistant's own auto-replies are not customer-facing evidence
+//     (codex #4211 P1/P2 — see the exclusions inside);
+//   - a unified outbound messages row on a conversation with this contact
+//     (a Twilio-accepted send whose legacy log write was lost, codex P1);
+//   - an ACTIVE suppression row: a recipient the provider bounced with
+//     21610 or a pre-portal opt-out has nothing in sms_log, yet their START
+//     must clear that row (codex P0).
+// Domestic formatting variants share an identity; international numbers keep
+// their full country code. Query errors preserve real consent handling.
+// Split from the fail-open wrapper below (codex P0 follow-up, 2026-09-11):
+// the wrapper's "true" on a query error is the right default for compliance
+// ELIGIBILITY (never silently refuse a real STOP). The webhook route awaits
+// this directly (not the wrapper) so it can log a genuine MATCH separately
+// from a fail-open default and, since round-3's design fix (2026-09-11),
+// decide whether the query needs to run at all — the AI line or an already-
+// resolved known caller record answers eligibility without it (see
+// `complianceEligible` in twilio-webhook.js).
+async function queryOutboundHistory(phone) {
+  const variants = phoneMatchDigits(phone);
+  if (!variants.length) return false;
+  const fullDigits = (col) => db.raw(`regexp_replace(coalesce(${col}, ''), '[^0-9]', '', 'g')`);
+  // Reuse the outbound service's operator identity so an untyped/manual
+  // office alert cannot establish customer-facing SMS history. An existing
+  // suppression still counts below, allowing an operator's START to clear it.
+  // This CURRENT-phone check is a fast path only — it correctly excludes a
+  // number that is STILL the operator's, but it re-derives from live env
+  // vars, so it stops recognizing a number that WAS the operator's before
+  // ADAM_PHONE changed and the number was reassigned. The
+  // `to_owner_phone_at_send` metadata flag (stamped durably in
+  // TwilioService.sendSMS at the moment of send, codex #4211 P2) covers
+  // that case regardless of what the operator's phone is today.
+  const operator = TwilioService.isKnownOwnerPhone(phone)
+    || phoneMatchDigits(process.env.ADMIN_ALERT_PHONE).some((value) => variants.includes(value));
+  // Excludes internal/admin alerts (never customer-facing) AND the AI
+  // assistant's own auto-replies ('ai_assistant' on the direct send,
+  // 'ai_assistant_reply' on its provider-retry queue row). The toll-free
+  // AI number answers first-contact strangers by design (isAiNumber makes
+  // them compliance-eligible unconditionally above) — including ones whose
+  // "message" is actually an unrelated vendor robotext. Without this
+  // exclusion, that auto-reply becomes a real outbound sms_log/messages
+  // row, which then makes the robotexter's number look like a genuine
+  // Waves relationship to every OTHER line's compliance check too,
+  // legitimizing its next footer-bearing text there (codex #4211 P1).
+  const notInternal = (col) => function notInternalAlert() {
+    this.whereNotIn(col, ['internal_alert', 'admin_alert', 'ai_assistant', 'ai_assistant_reply']).orWhereNull(col);
+  };
+  const notStampedOwnerPhone = (metaCol) => `COALESCE(${metaCol}->>'to_owner_phone_at_send', 'false') <> 'true'`;
+  if (!operator) {
+    const sent = await db('sms_log')
+      .where({ direction: 'outbound' })
+      .whereIn('status', ['queued', 'sent', 'delivered'])
+      .whereIn(fullDigits('to_phone'), variants)
+      .whereRaw("COALESCE(from_phone, '') <> 'push' AND COALESCE(metadata->>'channel', '') <> 'push'")
+      .where(notInternal('message_type'))
+      .whereRaw(notStampedOwnerPhone('metadata'))
+      .first('id');
+    if (sent) return true;
+    // A push-only unified touchpoint is deliberately threaded as SMS but
+    // has no Twilio SID. Require actual provider evidence for this fallback.
+    const unified = await db('messages')
+      .join('conversations', 'conversations.id', 'messages.conversation_id')
+      .where({ 'messages.channel': 'sms', 'messages.direction': 'outbound' })
+      .whereIn(fullDigits('conversations.contact_phone'), variants)
+      .whereRaw("messages.twilio_sid ~ '^(SM|MM)[0-9a-fA-F]{32}$'")
+      .where(function accepted() { this.whereNotIn('messages.delivery_status', ['failed', 'undelivered', 'blocked', 'canceled']).orWhereNull('messages.delivery_status'); })
+      .where(notInternal('messages.message_type'))
+      .whereRaw(notStampedOwnerPhone('messages.metadata'))
+      .first('messages.id');
+    if (unified) return true;
+  }
+  const suppressed = await db('messaging_suppression')
+    .where({ active: true })
+    .whereIn(fullDigits('phone'), variants)
+    .first('id');
+  return Boolean(suppressed);
+}
+
+// Fail-open wrapper: never silently refuses a real STOP over a query error.
+// See the comment above `queryOutboundHistory` for why a caller that needs
+// to distinguish a genuine match from this fail-open default should await
+// the raw query instead.
+async function hasOutboundHistory(phone) {
+  try {
+    return await queryOutboundHistory(phone);
+  } catch (err) {
+    logger.warn('[sms-compliance] outbound-history check failed; treating sender as eligible', { code: err.code || 'unknown' });
+    return true;
+  }
+}
+
 async function findSingleCustomerByPhone(phone) {
   const key = phoneLookupKey(phone);
   if (!key) return null;
@@ -67,58 +158,6 @@ async function findSingleCustomerByPhone(phone) {
   if (matches.length > 1) {
     logger.warn(`[sms] ${matches.length} customers share sender phone ${maskPhone(phone)}; not auto-linking inbound SMS`);
   }
-  return null;
-}
-
-function cleanIntroNameSegment(segment) {
-  const text = String(segment || '')
-    .replace(/[“”]/g, '"')
-    .replace(/[’]/g, "'")
-    .split(/[.,;!?]/)[0]
-    .replace(/\s+(?:and|but|because|who|that|i|we)\b.*$/i, '')
-    .replace(/\s+(?:from|in|at|with|seeking|looking|need|needs|want|wants|live|lives|located)\b.*$/i, '')
-    .trim();
-  const words = text.match(/[a-z][a-z' -]*/gi);
-  if (!words) return '';
-  const candidate = words.join(' ').replace(/\s+/g, ' ').trim();
-  const lower = candidate.toLowerCase();
-  const firstWord = lower.split(' ')[0];
-  if (
-    !candidate ||
-    [
-      'about', 'at', 'for', 'from', 'in', 'located', 'live', 'lives', 'looking',
-      'need', 'needs', 'interested', 'seeking', 'trying', 'want', 'wants', 'with',
-    ].includes(firstWord) ||
-    /^(a|an|the|quote|service|pest|rodent|lawn|customer|homeowner|property)$/i.test(lower)
-  ) {
-    return '';
-  }
-  return properCase(candidate.split(' ').slice(0, 3).join(' '));
-}
-
-function extractContactNameFromSms(body) {
-  const text = String(body || '').replace(/\s+/g, ' ').trim();
-  if (!text) return null;
-
-  const patterns = [
-    /\bmy\s+name\s+is\s+(.{1,80})/i,
-    /\bthis\s+is\s+(.{1,80})/i,
-    /\bi['’]?m\s+(.{1,80})/i,
-    /\bi\s+am\s+(.{1,80})/i,
-  ];
-
-  for (const pattern of patterns) {
-    const match = text.match(pattern);
-    const fullName = cleanIntroNameSegment(match?.[1]);
-    if (!fullName) continue;
-    const parts = fullName.split(/\s+/);
-    return {
-      fullName,
-      firstName: parts[0] || '',
-      lastName: parts.slice(1).join(' '),
-    };
-  }
-
   return null;
 }
 
@@ -326,7 +365,7 @@ router.post('/sms', async (req, res) => {
     // message row exists BEFORE the sms_reply bell below is written: the
     // thread-read bell cross-clear only clears bells for threads with no
     // unread message, which needs message-before-bell ordering (hook P1).
-    await require('../services/conversations').recordTouchpoint({
+    const inboundTouchpoint = await require('../services/conversations').recordTouchpoint({
       customerId: customer?.id,
       channel: 'sms',
       ourEndpointId: To,
@@ -346,8 +385,101 @@ router.post('/sms', async (req, res) => {
       metadata: { location: numberConfig?.label, numberType: numberConfig?.type, ...(courtesyOnly ? { courtesyOnly: true } : {}) },
     }).catch(() => {});
 
-    // ── STOP / UNSUBSCRIBE keyword handling ──
-    const optCommand = detectSmsOptCommand(Body);
+    // ── Resolve the sender relationship FIRST, before any screening or
+    // opt-out handling (codex round 3 design fix, 2026-09-11 — see the PR's
+    // "Consent-before-classification" section). One lookup answers both
+    // "is this sender compliance-eligible" (STOP/HELP/START handling below)
+    // and, further down, "is this sender a classifier candidate at all":
+    // a known caller record covers the primary phone AND the three
+    // service-contact slots AND secondary_phone (known-caller-phone.js),
+    // a strict superset of `customer` (customers.phone-only). Fails OPEN to
+    // eligible on a query error so a real STOP is always honored.
+    let knownCallerRecord = null;
+    let knownCallerLookupFailed = false;
+    try {
+      knownCallerRecord = await require('../utils/known-caller-phone').findKnownCallerCustomer(db, From);
+    } catch { knownCallerLookupFailed = true; }
+    // The outbound-history query only runs while the relationship is STILL
+    // unresolved — the AI line or a known caller record already answers
+    // eligibility on their own, so an unlinked-prospect scan of sms_log
+    // (no index on to_phone; see the PR report) never runs for them
+    // (codex P1, restoring the pre-round-2 `||` short-circuit). Queried
+    // directly (not through the `hasOutboundHistory` fail-open wrapper) so a
+    // genuine positive MATCH can be told apart from the wrapper's fail-open
+    // default.
+    let outboundHistoryMatch = false;
+    let outboundHistoryLookupFailed = false;
+    if (!isAiNumber && !knownCallerLookupFailed && !knownCallerRecord) {
+      try {
+        outboundHistoryMatch = await queryOutboundHistory(From);
+      } catch (err) {
+        outboundHistoryLookupFailed = true;
+        logger.warn('[sms-compliance] outbound-history check failed; treating sender as eligible', { code: err.code || 'unknown' });
+      }
+    }
+    // Compliance-eligible: a sender Waves has actually messaged (the AI
+    // line, a known caller record, or genuine outbound history), OR a
+    // lookup that failed and fails OPEN so a real STOP is never silently
+    // refused.
+    const complianceEligible = isAiNumber
+      || Boolean(knownCallerLookupFailed || knownCallerRecord)
+      || outboundHistoryMatch
+      || outboundHistoryLookupFailed;
+
+    // ── STOP / UNSUBSCRIBE / HELP / START keyword handling ──
+    // Consent runs BEFORE the classifier, and ONLY for eligible senders, on
+    // the FULL untouched text: a real customer's or known prospect's STOP is
+    // honored immediately — no model call, no 3.5s budget, no footer
+    // stripping. A NON-eligible sender's opt-out-shaped phrasing is never
+    // checked here at all: their full text (footer included) goes to the
+    // classifier below, and the model alone decides solicitation vs. a
+    // genuine message. Bypass out of enforcement exists ONLY for eligible
+    // senders, so a vendor's own "Reply STOP to stop messages." footer can
+    // no longer earn a false opt-out this way (fixes codex round 3 P0
+    // 3987949450 / P1 3987949459 — the 2026-07-23 incident class). A first-
+    // contact stranger's body was already never scanned before this
+    // redesign (audit 2026-09-09); this just removes the regex machinery
+    // that used to try to protect that same boundary from inside the
+    // detector.
+    const optCommand = complianceEligible
+      ? detectSmsOptCommand(Body)
+      : { action: null };
+
+    // Save the inbox message before any classifier await: the durable SID
+    // claim suppresses retries even if the process dies during a model call.
+    // A failed unified write bypasses screening and keeps the legacy path.
+    let solicitation = null;
+    let verdictMessage = null;
+    try {
+      const screen = require('../services/sms-solicitation-classifier');
+      const solicitationMode = screen.classifierMode();
+      // `!complianceEligible` — an eligible sender (known relationship or
+      // outbound history) never reaches the classifier at all, consent or
+      // not (contract: known primary/secondary/service-contact numbers and
+      // the AI line bypass the classifier). `!inboundMedia.length` — codex
+      // P1 pre-push, 2026-09-11: the screen only ever reads `Body`, the
+      // caption text. An MMS attachment's own content (a photo, a flyer) is
+      // never classified, so a caption that merely LOOKS like a pitch
+      // ("Check out our new service!" alongside a photo of an actual
+      // completed pest-control job at a referred property) could get the
+      // whole message — attachment included — silenced on caption text
+      // alone. Skipping the screen entirely for any inbound carrying media
+      // is the safe default: no verdict, no enforcement, ordinary handling
+      // (alerts/lead intake) proceeds.
+      if (inboundTouchpoint?.message?.id && MessageSid && solicitationMode !== 'off' && !complianceEligible && !smsReaction && !inboundMedia.length && Body) {
+        solicitation = await screen.screenInboundSms({ body: Body, isReaction: smsReaction, isAiLine: isAiNumber });
+        if (solicitation) {
+          // NOT marked read here even when enforced — see the deferred
+          // read-mark right after the legacy sms_log row persists, below.
+          verdictMessage = await updateByTwilioSid(MessageSid, {
+            metadata: db.raw("COALESCE(metadata, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ spam_verdict: solicitation })]),
+            updated_at: new Date(),
+          });
+        }
+      }
+    } catch { logger.warn('[sms-solicitation] screen failed; continuing normal handling'); }
+    const solicitationEnforced = Boolean(solicitation?.enforced && verdictMessage?.id);
+    const solicitationMeta = solicitation ? { spam_verdict: { ...solicitation, enforced: solicitationEnforced } } : {};
 
     if (optCommand.action === 'opt_out') {
       const normalizedFrom = normalizeE164(From);
@@ -381,6 +513,7 @@ router.post('/sms', async (req, res) => {
           customer_id: customer?.id || null, direction: 'inbound', from_phone: From, to_phone: To,
           message_body: Body, twilio_sid: MessageSid, status: 'received', message_type: 'opt_out',
           metadata: JSON.stringify({
+            ...solicitationMeta,
             opt_out_reason: optCommand.reason,
             detection_method: optCommand.detectionMethod,
             source_keyword: optCommand.sourceKeyword,
@@ -474,7 +607,7 @@ router.post('/sms', async (req, res) => {
     // HELP/INFO: the opt-in ask copy advertises "HELP for help" — answer it
     // (carrier compliance) instead of letting it fall into normal routing.
     const { detectHelp, HELP_RESPONSE_TEMPLATE } = require('../services/messaging/opt-out-detector');
-    if (detectHelp(Body).help) {
+    if (complianceEligible && detectHelp(Body).help) {
       await db('sms_log').insert({
         customer_id: customer?.id || null, direction: 'inbound', from_phone: From, to_phone: To,
         message_body: Body, twilio_sid: MessageSid, status: 'received', message_type: 'help_request',
@@ -716,8 +849,9 @@ router.post('/sms', async (req, res) => {
       message_type: messageType,
       // Courtesy closers are read on arrival in the legacy log too, so the
       // sms_log-backed unread counts agree with the unified messages row.
-      ...((courtesyOnly || unifiedAlreadyRead) ? { is_read: true } : {}),
+      ...((courtesyOnly || unifiedAlreadyRead || solicitationEnforced) ? { is_read: true } : {}),
       metadata: JSON.stringify({
+        ...solicitationMeta,
         locationId: numberConfig.locationId,
         source: numberConfig.type,
         domain: numberConfig.domain,
@@ -731,7 +865,7 @@ router.post('/sms', async (req, res) => {
     // Close the SELECT→INSERT window (hook P1): if the thread was read between
     // the check above and this insert, the read mirror found no legacy row —
     // re-check now that the row exists and mirror the state ourselves.
-    if (!courtesyOnly && !unifiedAlreadyRead && smsLogEntry?.id) {
+    if (!courtesyOnly && !unifiedAlreadyRead && !solicitationEnforced && smsLogEntry?.id) {
       const readNow = await db('messages').where({ channel: 'sms', twilio_sid: MessageSid }).first('is_read')
         .then((r) => r?.is_read === true).catch(() => false);
       if (readNow) await db('sms_log').where({ id: smsLogEntry.id }).update({ is_read: true }).catch(() => {});
@@ -739,6 +873,21 @@ router.post('/sms', async (req, res) => {
     // The inbound message is now durably recorded — releasing the claim on a
     // later error would let a retry duplicate this row (twilio_sid not unique).
     persisted = true;
+
+    // Mark the UNIFIED copy read only now that the legacy sms_log row (just
+    // above, in the same insert) is durably persisted — codex P1, 2026-09-11:
+    // marking it read at classification time, well before this insert, meant
+    // a worker crash in between left only a read unified copy behind: the
+    // durable webhook claim stayed owned, so Twilio's retry was rejected as a
+    // duplicate and the legacy row, alert, and downstream handling never
+    // existed. Best-effort — the legacy row is already correct either way.
+    if (solicitationEnforced) {
+      await updateByTwilioSid(MessageSid, { is_read: true, read_at: new Date() }).catch(() => {});
+    }
+
+    // Keep both source rows, then stop before lead creation, quoting,
+    // notifications or any auto-reply. This also covers tracking/tech lines.
+    if (solicitationEnforced) return res.type('text/xml').send('<Response></Response>');
 
     // The same post-ack kick covers both consumed replies and the ordinary
     // path. A failed or interrupted kick is recovered from the persisted row.
@@ -813,78 +962,38 @@ router.post('/sms', async (req, res) => {
       } catch (e) { logger.error(`[lead-intake] Failed: ${e.message}`); }
     }
 
-    // DOMAIN TRACKING — new lead from a domain-specific number
-    if ((numberConfig.type === 'domain_tracking' || numberConfig.type === 'van_tracking') && !customer) {
-      const leadSource = TWILIO_NUMBERS.getLeadSourceFromNumber(To);
-      const { CREATED_VIA } = require('../services/customer-stages');
-      const { resolveLocation } = require('../config/locations');
-      const loc = resolveLocation(numberConfig.area || leadSource.area || '');
-      const code = 'WAVES-' + Array.from({ length: 4 }, () => 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'[Math.floor(Math.random() * 32)]).join('');
-      const inboundContactName = extractContactNameFromSms(Body);
-
+    // DOMAIN / VAN TRACKING — first text from an unknown number to a
+    // domain-specific or van-wrap line. Owner ruling 2026-09-08: a text is
+    // not an identified person, so nothing is created here — no customer
+    // row, no name guessed from the body. The thread sits in the inbox
+    // under the sender's phone number (the "Unknown" chip) until staff link
+    // or create the record, like every other unknown-sender thread. The
+    // admin bell still fires — it replaces the owner SMS forward for
+    // tracking lines (isTrackingLeadInbound below) — and links to the inbox
+    // instead of a lead record.
+    if ((numberConfig.type === 'domain_tracking' || numberConfig.type === 'van_tracking') && !customer && !smsReaction && !courtesyOnly && (Body || inboundMedia.length)) {
       try {
-        // Account layer: attach-or-create so the new lead profile is
-        // login-complete (portal refresh sessions FK customer_accounts).
-        // Lazy require: admin-customers is a route module (load-cycle risk).
-        const { ensureCustomerAccount } = require('./admin-customers');
-        const account = await ensureCustomerAccount(db, {
-          firstName: inboundContactName?.firstName || 'Unknown',
-          lastName: inboundContactName?.lastName || '',
+        const { triggerNotification } = require('../services/notification-triggers');
+        const source = numberConfig.domain || 'van wrap';
+        await triggerNotification('new_lead', {
+          title: `New text from ${source}`,
+          name: 'Unknown sender',
+          twilioSid: MessageSid,
           phone: From,
-          email: null,
+          message: Body || 'Photo',
+          source,
+          area: numberConfig.area || 'Unknown',
+          link: '/admin/communications',
         });
-        const [newCust] = await db('customers').insert(applyContactNormalization({
-          account_id: account.accountId,
-          is_primary_profile: !account.existingCustomer,
-          profile_label: account.existingCustomer ? 'Additional property' : 'Primary',
-          first_name: inboundContactName?.firstName || 'Unknown',
-          last_name: inboundContactName?.lastName || '',
-          phone: From, address_line1: '', city: numberConfig.area || '', state: 'FL', zip: '',
-          referral_code: code, lead_source: leadSource.source,
-          lead_source_detail: numberConfig.domain || leadSource.domain || 'Van wrap',
-          lead_source_area: numberConfig.area || '', lead_source_channel: 'organic',
-          nearest_location_id: numberConfig.location || loc.id,
-          pipeline_stage: 'new_lead', pipeline_stage_changed_at: new Date(),
-          // PROVENANCE stamp — this row is a placeholder minted for a number
-          // nobody has identified yet. Consumers (estimator SMS context)
-          // must be able to tell it from a genuine fresh lead, and row
-          // shape cannot do that: a form submitted without an address
-          // produces the same blank street/ZIP new_lead row.
-          created_via: CREATED_VIA.TWILIO_TRACKING_SHELL,
-          last_contact_date: new Date(), last_contact_type: Body ? 'sms_inbound' : 'call_inbound',
-          member_since: etDateString(),
-          crm_notes: `Inbound ${Body ? 'SMS' : 'call'} from ${numberConfig.domain || 'van wrap'}. ${Body ? 'Message: ' + Body : ''}`,
-        })).returning('*');
-
-        await createDefaultCustomerRows(db, newCust.id);
-
-        try {
-          const { triggerNotification } = require('../services/notification-triggers');
-          const source = numberConfig.domain || 'van wrap';
-          await triggerNotification('new_lead', {
-            title: `New lead from ${source}`,
-            name: inboundContactName?.fullName || 'Unknown prospect',
-            phone: From,
-            message: Body || 'Phone call',
-            source,
-            area: numberConfig.area || 'Unknown',
-            leadId: newCust.id,
-          });
-        } catch (e) { logger.error(`Domain lead notification failed: ${e.message}`); }
-
-        await db('activity_log').insert({
-          customer_id: newCust.id, action: 'customer_created',
-          description: `New lead from ${numberConfig.domain || 'van wrap'}: ${From}`,
-        });
-      } catch (e) { logger.error(`Domain lead creation failed: ${e.message}`); }
+      } catch (e) { logger.error(`Domain lead notification failed: ${e.message}`); }
     }
 
     // ESTIMATOR SMS DRAFTS (GATE_ESTIMATOR_SMS_DRAFTS, default OFF): a
     // quote-flavored inbound text runs the estimator engine against the
-    // thread — priced DRAFT + one phone-scoped bell, never a send. Runs
-    // AFTER the domain/van tracking branch so a first-contact text to a
-    // tracking number has its customer row before the context builds (an
-    // earlier placement drafted unlinked). The AWAITED part is cheap and
+    // thread — priced DRAFT + one phone-scoped bell, never a send. A
+    // first-contact text from an unknown number drafts unlinked (no
+    // customer row is minted for it; see the tracking branch above) and
+    // the context builder grounds it by address. The AWAITED part is cheap and
     // bounded (regex prefilter → FAST classifier with a webhook-safe
     // timeout → one durable owed-quote bell); the DEEP composer detaches
     // inside startSmsThreadDraft AFTER that bell exists, so a restart
@@ -1096,6 +1205,11 @@ router.post('/sms', async (req, res) => {
           .where('created_at', '>', new Date(Date.now() - 4 * 60 * 60 * 1000))
           .where('created_at', '<', smsLogEntry.created_at)
           .whereNot('twilio_sid', MessageSid)
+          // An enforced solicitation verdict on the prior row means that
+          // text was silently screened out, not a real prior inbound the
+          // sender had a conversation about — it must not itself consume
+          // the next genuine message's alert quota (codex P1, 2026-09-11).
+          .whereRaw("COALESCE(metadata->'spam_verdict'->>'enforced', 'false') != 'true'")
           .first('id');
         repeatUnknownSender = Boolean(prior);
       } catch (e) { logger.warn(`[twilio-webhook] repeat-sender check failed: ${e.message}`); }
@@ -1904,7 +2018,7 @@ function shouldReserveCorrectionJob(body, smsReaction) {
 }
 
 router._internals = {
-  extractContactNameFromSms,
+  hasOutboundHistory,
   intakeOutcome,
   shouldReserveCorrectionJob,
 };

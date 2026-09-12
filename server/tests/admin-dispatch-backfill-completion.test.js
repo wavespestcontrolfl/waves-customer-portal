@@ -2073,7 +2073,7 @@ describe('required-mint failure leaves the closeout resumable — fail-closed by
       // same hoisted derivations and row columns the shouldInvoice call
       // reads — the frozen posture can never describe a different population
       // than the one the mint decision bills.
-      expect(source).toMatch(/const backfillMintRequiredAtCommit = backfillExpectedMintAtCommit\(\{\s*\n\s*isBackfillCompletion,\s*\n\s*recapReviewOnly,\s*\n\s*autopayCoversVisit,\s*\n\s*createInvoiceOnComplete: svc\.create_invoice_on_complete,\s*\n\s*waveguardTier: svc\.cust_waveguard_tier,\s*\n\s*explicitMembership: explicitMembershipLane,\s*\n\s*explicitPerVisitLane,\s*\n\s*perApplicationBilling,\s*\n\s*annualPrepayBilling,\s*\n\s*hasVisitPrice,\s*\n\s*invoiceAmount,\s*\n\s*autoInvoicePricedVisits: process\.env\.GATE_AUTOINVOICE_PRICED_VISITS === 'true',\s*\n\s*serviceType: svc\.service_type,\s*\n\s*isCallback: svc\.is_callback,\s*\n\s*visitPerformed,\s*\n\s*typedOneTimeBilling: typedOneTimeBillingProfile,\s*\n\s*\}\);/);
+      expect(source).toMatch(/const backfillMintRequiredAtCommit = backfillExpectedMintAtCommit\(\{\s*\n\s*isBackfillCompletion,\s*\n\s*issuedInvoiceCloseout: !!issuedInvoiceCloseout,\s*\n\s*recapReviewOnly,\s*\n\s*autopayCoversVisit,\s*\n\s*createInvoiceOnComplete: svc\.create_invoice_on_complete,\s*\n\s*waveguardTier: svc\.cust_waveguard_tier,\s*\n\s*explicitMembership: explicitMembershipLane,\s*\n\s*explicitPerVisitLane,\s*\n\s*perApplicationBilling,\s*\n\s*annualPrepayBilling,\s*\n\s*hasVisitPrice,\s*\n\s*invoiceAmount,\s*\n\s*autoInvoicePricedVisits: process\.env\.GATE_AUTOINVOICE_PRICED_VISITS === 'true',\s*\n\s*serviceType: svc\.service_type,\s*\n\s*isCallback: svc\.is_callback,\s*\n\s*visitPerformed,\s*\n\s*typedOneTimeBilling: typedOneTimeBillingProfile,\s*\n\s*\}\);/);
       // Dues coverage joins the freeze with its REAL value (fix round 12):
       // the coverage derivation is hoisted above the transaction — one
       // derivation shared with the invoice block, like every other input —
@@ -2310,7 +2310,7 @@ describe('completion route wiring (source contracts)', () => {
   const verdictSource = fs.readFileSync(path.join(__dirname, '../services/completion-charge-verdict.js'), 'utf8');
 
   test('route feeds the requester role into the plan and honors the 403 status', () => {
-    expect(source).toMatch(/backfillCompletionPlan\(\{ backfill, scheduledDate: svc\.scheduled_date, role: completionInput\.actor\.techRole \}\)/);
+    expect(source).toMatch(/backfillCompletionPlan\(\{ backfill, scheduledDate: svc\.scheduled_date, role: completionInput\.actor\.techRole, allowSameDay: !!completionInput\.issuedInvoiceCloseout \}\)/);
     expect(source).toMatch(/\{ status: backfillPlan\.status \|\| 400, body: backfillPlan\.error \}/);
   });
 
@@ -2537,7 +2537,7 @@ describe('completion route wiring (source contracts)', () => {
     // no wall-clock end instant can reach the row. The live admin override's
     // adjusted instant sits strictly after backfill's in the fallback chain
     // and is null in every backfill mode (guarded on !isBackfillCompletion).
-    expect(source).toMatch(/const backfillEndedAt = isBackfillCompletion\s*\n\s*\? backfillCompletionEndInstant\(completionServiceDate, effectiveTimeOnSite, svc\)\s*\n\s*: null;/);
+    expect(source).toMatch(/const backfillEndedAt = isBackfillCompletion\s*\n\s*\? backfillCompletionEndInstant\(completionServiceDate, effectiveTimeOnSite, svc, \{ now: completionEndedAt \}\)\s*\n\s*: null;/);
     expect(source).toMatch(/const adjustedEndedAt = !isBackfillCompletion && liveAdjustedTimeOnSite\s*\n\s*&& !correctionPreservedMidFlight\s*\n\s*\? adjustedCompletionEndInstant\(svc, effectiveTimeOnSite, completionEndedAt\)\s*\n\s*: null;\s*\n\s*const completionLifecycleAt = backfillEndedAt \|\| adjustedEndedAt \|\| completionEndedAt;/);
   });
 
@@ -2681,7 +2681,7 @@ describe('completion route wiring (source contracts)', () => {
     // log + job_complete notification block directly above still runs
     // first-run only.
     const before = source.slice(0, costingAt);
-    const activityGuardAt = before.lastIndexOf('if (!resumingCommittedCompletion || packetEffects) {');
+    const activityGuardAt = before.lastIndexOf('if ((!resumingCommittedCompletion || packetEffects) && !issuedInvoiceCloseout) {');
     const activityBlock = source.slice(activityGuardAt, costingAt);
     expect(activityBlock).toContain('Job form save failed');
   });
@@ -2727,8 +2727,11 @@ describe('completion route wiring (source contracts)', () => {
     // completed_at window can see the visit; instant coverage above.)
     // The else branch carries the LIVE admin override's adjusted instant
     // (codex P2 #3152 round 10) — null for plain live completions, so the
-    // backfill contract itself is unchanged.
-    expect(source).toMatch(/const backfillTrackerCompletedAt = isBackfillCompletion\s*\n\s*\? backfillCompletionEndInstant\(\s*\n\s*serviceDateOnly\(svc\.scheduled_date\),\s*\n\s*effectiveTimeOnSite,\s*\n\s*svc,\s*\n\s*\)\s*\n(?:\s*\/\/[^\n]*\n)*\s*: \(typeof effectiveTimeOnSite === 'number'\s*\n\s*\? \(completionWallClockAt\s*\n\s*\? adjustedCompletionEndInstant\(svc, effectiveTimeOnSite, completionWallClockAt\)\s*\n\s*: \(finiteDate\(svc\.actual_end_time\) \|\| finiteDate\(svc\.check_out_time\) \|\| null\)\)\s*\n\s*: null\);/);
+    // backfill contract itself is unchanged. The `now` anchor is the
+    // transaction's own wall clock, or on a crash-resumed retry the end
+    // instant the record froze (issuedInvoiceCloseout.completedAt, #4127
+    // GitHub r3 P2) — never the retry's clock; null = the day-scale rule.
+    expect(source).toMatch(/const backfillTrackerCompletedAt = isBackfillCompletion\s*\n\s*\? backfillCompletionEndInstant\(\s*\n\s*serviceDateOnly\(svc\.scheduled_date\),\s*\n\s*effectiveTimeOnSite,\s*\n\s*svc,\s*\n(?:\s*\/\/[^\n]*\n)*\s*\{ now: completionWallClockAt \|\| finiteDate\(parseJsonObject\(record\?\.structured_notes\)\?\.issuedInvoiceCloseout\?\.completedAt\) \|\| null \},\s*\n\s*\)\s*\n(?:\s*\/\/[^\n]*\n)*\s*: \(typeof effectiveTimeOnSite === 'number'\s*\n\s*\? \(completionWallClockAt\s*\n\s*\? adjustedCompletionEndInstant\(svc, effectiveTimeOnSite, completionWallClockAt\)\s*\n\s*: \(finiteDate\(svc\.actual_end_time\) \|\| finiteDate\(svc\.check_out_time\) \|\| null\)\)\s*\n\s*: null\);/);
     // Derived AFTER the crash-resume re-derivation (it reads the healed
     // flag AND the frozen duration), BEFORE the first markComplete that
     // consumes it.
@@ -2757,6 +2760,8 @@ describe('completion route wiring (source contracts)', () => {
     expect(backfillHoldBranch).not.toBeNull();
     expect(backfillHoldBranch[1]).toContain('heldCardForScheduledService');
     expect(backfillHoldBranch[1]).not.toContain('chargeCardHoldOnCompletion');
+    // A settled issued invoice releases the hold (no charge) instead of parking it (GitHub r12 P2 #4127).
+    expect(backfillHoldBranch[1]).toContain("releaseCardHold({ scheduledServiceId: svc.id, reason: 'issued_invoice_settled' })");
     expect(backfillHoldBranch[1]).not.toContain('chargeInvoiceWithSavedCard');
     // The real charge call survives, unreachable for backfill completions.
     expect(source).toMatch(/\} else try \{\s*\n\s*const CardHolds = require\('\.\.\/services\/estimate-card-holds'\);\s*\n\s*const holdCharge = await CardHolds\.chargeCardHoldOnCompletion/);
@@ -2767,7 +2772,10 @@ describe('completion route wiring (source contracts)', () => {
     // referrer and the referee AND messages the referrer, so the quiet path
     // must not reach it. The guard also protects the reward's single-use
     // idempotency: firing here would burn it on a visit nobody announced.
-    expect(source).toMatch(/const referralVisitPerformed = closedDealVisitPerformed && !isBackfillCompletion;/);
+    // The ONE carve-out is the issued-invoice closeout (GitHub r12 P1 #4127):
+    // the invoice event proves the service happened, so the credits post —
+    // with the referrer's SMS / email suppressed (notify: false).
+    expect(source).toMatch(/const referralVisitPerformed = closedDealVisitPerformed && \(!isBackfillCompletion \|\| !!issuedInvoiceCloseout\);/);
     const referralBlock = source.match(/if \(referralVisitPerformed && !packetEffects\) \{([\s\S]*?)\n {4}\}/);
     expect(referralBlock).not.toBeNull();
     expect(referralBlock[1]).toContain('creditReferralOnFirstService');
@@ -2820,8 +2828,9 @@ describe('completion route wiring (source contracts)', () => {
       '&& !isBackfillCompletion) {',
       // payer AP invoice email
       'invoice.payer_id && !payerInvoiceAlreadyDelivered && !isBackfillCompletion',
-      // referral credit
-      'const referralVisitPerformed = closedDealVisitPerformed && !isBackfillCompletion;',
+      // referral credit — an issued-invoice closeout is carved out (credits
+      // post quietly, notify: false), so the gate reads the carve-out too
+      'const referralVisitPerformed = closedDealVisitPerformed && (!isBackfillCompletion || !!issuedInvoiceCloseout);',
       // prepaid-credit application (gate lives inside the helper, defined
       // and called after the re-derivation)
       'prepaid credit NOT auto-applied',

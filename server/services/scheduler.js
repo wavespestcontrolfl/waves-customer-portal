@@ -735,6 +735,25 @@ function initScheduledJobs() {
     }
   }, { timezone: 'America/New_York' });
 
+  // DAILY 3:20 AM ET — primary-property backstop. The same customer-create
+  // paths never create the lazily-backfilled primary customer_properties
+  // row, so a booking for a fresh lead anchored to NULL (prod 2026-09-07:
+  // 144 rows missing). Daily is enough (owner 2026-09-07) once #4115
+  // lands: from then on the booking anchor backfills a missing primary at
+  // booking time and this only has to catch customers nothing read in
+  // between. Until #4115 merges this sweep is the only backstop, so #4115
+  // merges first. Own job_health name so the watchdog reports it apart
+  // from the geocode sweep.
+  cron.schedule('20 3 * * *', async () => {
+    try {
+      const { runExclusive } = require('../utils/cron-lock');
+      const { sweepMissingPrimaryProperties } = require('./customer-properties');
+      await runExclusive('primary-property-backstop', () => sweepMissingPrimaryProperties());
+    } catch (err) {
+      logger.error(`[customer-properties] primary backstop sweep failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
   // =========================================================================
   // DAILY 2:40AM — Knowledge-index sync (hybrid knowledge search, lane A2):
   // re-reads every corpus connector, upserts changed chunks, embeds pending
@@ -1146,7 +1165,29 @@ function initScheduledJobs() {
     // Call-time read (NOT the baked isEnabled snapshot) so a Railway var flip
     // takes effect on the next tick without a redeploy — matching the
     // documented gate contract and the service's own internal check.
-    if (!gateEnvValue('GATE_ROUTE_REORDER')) return;
+    if (!gateEnvValue('GATE_ROUTE_REORDER')) {
+      // The reorder pass below is also the ONLY nightly trigger for the
+      // route-quality alert reconciliation folded into it — with reorder
+      // off, existing defects never got an initial card and no card ever
+      // expired, even with the measurement + alert gates on (codex #4295
+      // r2 P2). Run just that reconciliation, under its own gates, over the
+      // same six-date band; skip repair and distance optimization entirely.
+      // No runExclusive: unlike the reorder pass, this never writes
+      // route_order, so it needs none of that writer-serialization, and
+      // the reconciler already self-serializes on its own advisory lock.
+      try {
+        const { runScheduleQualityAlertsOnly } = require('./route-reorder');
+        const result = await runScheduleQualityAlertsOnly();
+        if (result.status === 'failed') {
+          logger.error('[route-reorder] quality-alerts-only cron run failed');
+        } else if (result.status === 'reconciled') {
+          logger.info(`[route-reorder] quality-alerts-only cron run: created=${result.created} resolved=${result.resolved}`);
+        }
+      } catch (err) {
+        logger.error(`[route-reorder] quality-alerts-only cron run failed: ${err.message}`);
+      }
+      return;
+    }
     logger.info('Running: Route-Tiers nightly reorder');
     try {
       // runExclusive x2: 'route-tiers-nightly' guards against deploy-overlap
@@ -1430,6 +1471,25 @@ function initScheduledJobs() {
       }
     } catch {
       logger.error('[sms-operations] commitment watcher did not complete');
+    }
+  }, { timezone: 'America/New_York' });
+
+  // The same watchdog and persisted identities own reminders before and
+  // after rollback. Cards add a five-minute cadence to the daily sweep.
+  cron.schedule('0 */5 * * * *', async () => {
+    if (!require('./callback-cards').enabled()) return;
+    try {
+      const { runCallCommitmentsWatchdog } = require('./call-commitments-watchdog');
+      const result = await runCallCommitmentsWatchdog();
+      if (result?.skipped === true && result.reason !== 'gated_off' && result.reason !== 'lease_held') {
+        const { recordJobStart, recordJobEnd } = require('../utils/cron-lock');
+        const t0 = Date.now();
+        await recordJobStart('call-commitments-watchdog').catch(() => {});
+        await recordJobEnd('call-commitments-watchdog', t0, new Error(`tick skipped: ${result.reason || 'no_connection'}`)).catch(() => {});
+        throw new Error(`Callback reminder tick skipped: ${result.reason || 'no_connection'}`);
+      }
+    } catch (err) {
+      logger.error(`[callback-cards] tick failed (${err.code || err.name || 'error'})`);
     }
   }, { timezone: 'America/New_York' });
 
@@ -3231,6 +3291,10 @@ function initScheduledJobs() {
         const StatementFollowups = require('./payer-statement-followups');
         const result = await StatementFollowups.runPending();
         logger.info(`Payer statement dunning done: ${result.sent} sent, ${result.skipped} skipped`);
+        // Settled-statement child closeouts that failed or never ran have no
+        // other retry (GitHub r10 P2 #4127); gated on its own flag inside.
+        const sweep = await require('./invoice-issued-closeout').retrySettledStatementCloseouts();
+        if (sweep.retried) logger.info(`Settled-statement closeout retry: ${sweep.retried} retried, ${sweep.closed} closed`);
       });
     } catch (err) {
       logger.error(`Payer statement dunning failed: ${err.message}`);
@@ -3990,7 +4054,14 @@ function initScheduledJobs() {
                 // standalone review fallback, flip referral/report state into
                 // the admin retry lane). Armed ONLY here, never on timers,
                 // so fallbacks can't race a still-retryable replay.
-                await runTerminalHookDurably(msg.id, claimMeta.entry_point, claimMeta);
+                // provider_terminal_rejection carries the adapter's proof of
+                // a synchronous, definitive provider rejection (a terminal
+                // Twilio code) into the hook — visit_summary_deferred's
+                // onTerminal uses it to settle an unknown_delivery effect as
+                // suppressed instead of leaving it parked as unknown; other
+                // entry points ignore the field.
+                await runTerminalHookDurably(msg.id, claimMeta.entry_point,
+                  { ...claimMeta, provider_terminal_rejection: smsResult.terminal === true });
               }
               // The customer was never answered — used + parked cards return.
               const blockedMeta = await readFreshMeta();

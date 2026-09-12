@@ -53,6 +53,9 @@ mocked provider response is not evidence of end-to-end capability.
 - `action-registry.js` validates explicit role/side-effect/approval policy for the
   existing 209 definitions and dynamically loads authorized cross-module tools.
   Unknown classifications and injected top-level actor/approval fields fail closed.
+  Every entry also declares a data `scope` (see
+  `intelligence-bar-read-scope-catalog.md`); a missing or invalid scope keeps the
+  tool out of the registry and `task-context.js` refuses it as `scope_unclassified`.
 - `outcomes.js` recognizes blocked/failed/unknown/partial/provider-accepted results.
   Confirmation and recovered cards use stored outcomes; accepted SMS audit failures
   retain provider acceptance without implying delivery or permitting a repeat send.
@@ -122,6 +125,9 @@ fingerprints. These three scheduling sites remain **unmapped**. Phase 3 must
 verify selected-property ownership and completeness, address-specific availability,
 and quote/property compatibility through the shared scheduling path; no scheduling
 parity is claimed by importing already-merged portal code into this foundation.
+The booking submission also carries `propertyId` in its separately constructed
+body. Its unchanged request call is not flagged by the source fingerprint;
+selected-property stamping and quote compatibility remain explicit Phase 3 work.
 
 The `5e81129e7` integration imports the upstream email consolidation and editor/
 mailbox extraction: 21 additional sites and one changed Communications site,
@@ -152,6 +158,13 @@ Current foundation census: 1,746 retained UI sites; seven current transport
 exceptions; 1,739 sites still unsupported/unverified in the matrix. Historical
 transport calls remain recorded after their frontend sites changed. Registration of existing tools
 has deliberately not been relabeled as verified application parity.
+The dependent property branch adds two UI sites and verifies four property
+operations: 1,748 retained sites, seven transport exceptions, and 1,737 unverified.
+The inventory branch adds its retained request site and four partially verified
+admin inventory scopes; the technician and other remaining scopes continue to
+count as unsupported/unverified. Its final census retains 1,750 sites: four
+verified property sites, eight transport/navigation exceptions, and 1,738
+unsupported/unverified sites including the four partial inventory entries.
 
 ## Verification evidence
 
@@ -282,15 +295,21 @@ communication was performed. `GATE_IB_PLATFORM` defaults off.
 
 ## Outstanding implementation
 
-Phase 2 property creation/labels/primary switching, shared inventory operations,
-and existing-customer estimates are next. Phase 3 remaining domain operations
+Phase 2 saved-property creation, labels/occupancy and primary switching are
+implemented in `intelligence-bar-property-workflows.md`. Shared admin inventory
+stock/request/receive operations are verified in `intelligence-bar-inventory-workflows.md`,
+with technician coverage explicitly incomplete. Administrator existing-customer
+residential lawn creation/revision is implemented in
+`intelligence-bar-estimate-workflows.md`; the other estimate programs and lifecycle
+remain incomplete. Phase 3 remaining domain operations
 are enumerated in `intelligence-bar-remaining-capabilities.md`; this is engineering
 work, not a credential blocker. Compound workflow and comprehensive adversarial
 verification remain incomplete.
 
-Browser review also found that Customer 360's modal covers the global touch
-opener; keyboard activation works. A touch entry inside record overlays and
-refresh of affected views remain required. Real iOS keyboard/safe-area behavior,
+Customer 360 now has an overlay touch opener and matching-record refresh for
+verified property mutations; the scoped context survives overlay open/close.
+The property browser run supersedes the earlier unstyled harness screenshots.
+Affected-view refresh for remaining domains is still required. Real iOS keyboard/safe-area behavior,
 voice permission/error states, attachment failure, full live-model behavior,
 and performance checks have not been verified. No full-parity completion claim
 is supported by this foundation checkpoint.

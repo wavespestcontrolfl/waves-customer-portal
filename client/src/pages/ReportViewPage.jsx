@@ -52,6 +52,7 @@ import {
   docButton,
   docTransition,
 } from '../theme-doc';
+import { CustomerColumn } from '../components/brand';
 import ServiceReportDocument from './ServiceReportDocument';
 import { useWavesShell } from '../components/brand/WavesShellContext';
 import { useGlassSurface } from '../glass/glass-engine';
@@ -3289,7 +3290,10 @@ function ReviewRequestCard({ data, token, mode, placement = 'top' }) {
   return (
     <section data-glass="card" className={`report-card review-request-card review-request-card-${placement}`} data-section={`review-request-${placement}`}>
       <div>
-        <h2>{copy.title}</h2>
+        {/* h3, not h2 (owner ruling C5, DECISIONS 2026-09-11): these CTA-card
+            headlines were authored as h2 and then shrunk back down by two
+            separate size exceptions. h3 is 20px on the sheet by itself. */}
+        <h3>{copy.title}</h3>
       </div>
       <a
         data-glass-accent=""
@@ -3385,11 +3389,11 @@ function CrossSellCard({ data, token, mode }) {
           office confirms full per-application terms before anything is
           scheduled (the click-to-estimate PR moves that confirmation onto
           the estimate page itself). City rides the report payload. */}
-      <h2>
+      <h3>
         {priced
           ? `Keep your home${cityPhrase} protected for just ${perApplication}!`
           : `Your exact ${offer.label.toLowerCase()} quote is one tap away`}
-      </h2>
+      </h3>
       <div className="cross-sell-cta-row">
         {requestState === 'sent' ? (
           <p className="cross-sell-confirm">
@@ -5606,7 +5610,7 @@ function LegacyReport({ data, token, glass = false }) {
       </header>
       ) : null}
       {/* div, not <main> — WavesShell supplies the main landmark. */}
-      <div style={{ flex: 1, maxWidth: DOC_COLUMN_MAX, width: '100%', margin: '0 auto', padding: '32px 20px 64px', boxSizing: 'border-box' }}>
+      <CustomerColumn>
         <div style={{ padding: '8px 0 24px' }}>
           <div style={{ fontSize: 14, color: ESTIMATE_MUTED, textTransform: 'uppercase', fontWeight: 700, marginBottom: 8 }}>
             Service report{data.serviceType ? ` · ${data.serviceType}` : ''}
@@ -5640,7 +5644,7 @@ function LegacyReport({ data, token, glass = false }) {
         <div data-glass={glass ? 'card' : undefined} style={{ marginTop: 16, borderRadius: 16, overflow: 'hidden', border: glass ? undefined : `1px solid ${ESTIMATE_BORDER}`, background: glass ? undefined : '#fff' }}>
           <iframe src={pdfUrl} style={{ width: '100%', height: 620, border: 'none', background: '#fff' }} title="Service report PDF" />
         </div>
-      </div>
+      </CustomerColumn>
     </div>
   );
 }
@@ -5954,13 +5958,9 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           text-overflow: ellipsis;
           white-space: nowrap;
         }
-        .sr-shell {
-          max-width: ${DOC_COLUMN_MAX}px;
-          width: 100%;
-          margin: 0 auto;
-          padding: 32px 20px 64px;
-          box-sizing: border-box;
-        }
+        /* .sr-shell's width/gutter/margin recipe moved to <CustomerColumn>
+           (audit G-01, DECISIONS 2026-09-11 "R2a"). Only the print-only
+           padding override below still targets this class name. */
         .sr-actions { display: flex; gap: 8px; flex-wrap: wrap; justify-content: flex-end; }
         .report-action-bar {
           display: block;
@@ -7696,7 +7696,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
         .review-request-card-top {
           margin-bottom: 16px;
         }
-        .review-request-card h2 {
+        .review-request-card h3 {
           margin-bottom: 0;
         }
         .review-request-card .review-cta {
@@ -7730,14 +7730,15 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           font-size: 14px;
           line-height: 1.5;
         }
-        .service-report-v1 .cross-sell-card h2,
-        .service-report-v1 .review-request-card h2 {
-          /* !important matches glass-theme.css's own blanket important
-             h2 sizing — owner ruling 2026-08-13: CTA-card headlines run
-             one step smaller than section headings, centered. */
+        .service-report-v1 .cross-sell-card h3,
+        .service-report-v1 .review-request-card h3 {
+          /* Owner ruling 2026-08-13 still holds — CTA-card headlines run one
+             step smaller than section headings, centered — but the step is
+             now expressed by the element. These were h2 (26px) pulled back to
+             22 here and to 20 in glass-theme.css; both size overrides are gone
+             and h3's own 20px carries the rule. Layout only below. */
           margin-bottom: 4px;
           text-align: center;
-          font-size: 22px !important;
         }
         .cross-sell-price {
           display: flex;
@@ -8584,7 +8585,6 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           .sr-top-inner { align-items: center; flex-direction: row; }
           .sr-actions { width: 100%; justify-content: stretch; }
           .sr-actions a, .sr-actions button { flex: 1; }
-          .sr-shell { padding: 16px 16px 36px; }
           .report-action-bar { padding: 16px; }
           /* Keep the 2×2 grid on phones — four stacked full-width buttons made
              the utility bar a full screen tall (audit 2026-07-28). Slimmer
@@ -8784,7 +8784,10 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
              is hidden in print, so the body must go with it). */
           .companion-internal { display: none; }
           .service-report-v1 { background: #fff; }
-          .sr-shell { padding: 0; }
+          /* !important: CustomerColumn authors this padding inline, which
+             plain stylesheet specificity can't beat — print needs zero
+             padding regardless. */
+          .sr-shell { padding: 0 !important; }
           .service-status-card,
           .sr-section,
           .report-card,
@@ -8825,7 +8828,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
       {/* Page-local .sr-top bar removed — the WavesShell top bar (App.jsx
           route wrap, owner 2026-07-06) provides the standard chrome. */}
       {/* div, not <main> — WavesShell supplies the main landmark. */}
-      <div className="sr-shell">
+      <CustomerColumn className="sr-shell">
         {/* Staff-only shadow reports keep the internal notice on top. */}
         {mode === 'live' && data.internalOnly && <InternalReviewBar />}
 
@@ -9453,7 +9456,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
               shot filtered out of the display payload) must not over-claim. */}
           {data.photoChain?.valid === true && (data.photos || []).length > 0 && (data.photos || []).every((p) => p?.hashSha256) ? ' Photos hash-chained and tamper-evident.' : ''}
         </footer>
-      </div>
+      </CustomerColumn>
     </div>
   );
 }

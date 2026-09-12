@@ -515,6 +515,27 @@ postgres('customer app preferences and push ledger (PostgreSQL)', () => {
     });
   });
 
+  // Codex #4303 r6 P1: retrySummaryThroughHandoff and commitRecoveryOnDelivery
+  // both lock a notification_prefs row before taking the shared address key.
+  // A billing-email save that took the key first would deadlock against
+  // either of them; it must take the row first, like they do.
+  test('a billing-email save cannot deadlock against a row-then-key writer holding the same address', async () => {
+    const billingEmail = `qa-billing-${randomUUID()}@example.com`;
+    const { lockCustomerEmail } = require('../utils/customer-comms-lock');
+    const writer = mockPg.transaction(async (trx) => {
+      await trx('notification_prefs').where({ customer_id: property }).forUpdate().first('customer_id');
+      await new Promise((resolve) => setTimeout(resolve, 300));
+      await lockCustomerEmail(trx, billingEmail);
+      await trx('notification_prefs').where({ customer_id: property }).update({ updated_at: trx.fn.now() });
+      return 'committed';
+    });
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    const response = await put({ billingEmail });
+    await expect(writer).resolves.toBe('committed');
+    expect(response.status).toBe(200);
+    expect(await mockPg('notification_prefs').where({ customer_id: property }).first()).toMatchObject({ billing_email: billingEmail });
+  });
+
   test('invoice App choice belongs to the charged profile and survives old-client saves', async () => {
     expect((await put({ invoiceChannel: 'push' })).status).toBe(409);
     await device();
@@ -620,7 +641,7 @@ postgres('customer app preferences and push ledger (PostgreSQL)', () => {
       expect(await require('../services/messaging/push-channel-routing').attemptPushFirst({
         customerId: property, to: '+19415550101', body: 'Your invoice is ready.', messageType: 'invoice',
         explicitPushOnly: true, invoiceId, notificationEventKey: `qa:${invoiceId}`,
-      })).toMatchObject({ delivered: false, retryable: true, reason: 'invoice_lookup_failed' });
+      })).toMatchObject({ delivered: false, retryable: true, deliveryOutcome: 'not_sent', reason: 'invoice_lookup_failed' });
       expect(apns.send).not.toHaveBeenCalled();
       expect(await mockPg('notifications')).toHaveLength(0);
     } finally {

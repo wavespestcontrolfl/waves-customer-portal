@@ -771,6 +771,28 @@ async function recordEmailSuppressionForEvent(ev, message, groupKey, at, client 
   return client.transaction(write);
 }
 
+// The visit summary's aggregate follows the recipient ledger. A provider
+// block is retryable and stays with the retry rail (which reconciles the
+// summary when its retries terminate) unless this very event exhausted the
+// retries; a terminal bounce reopens the summary for office review; a drop
+// for a recipient who opted out is a suppression, not a bounce, and settles
+// the aggregate from the ledger (suppressed when every recipient declined);
+// a delivery event is the durable retry for the recovery the rail attempted
+// inline.
+async function reconcileSummaryForEmailEvent(ev, message, updates, client) {
+  if (!updates) return;
+  const Summary = require('../services/visit-completion-summary');
+  const providerBlock = providerRetry.isProviderBlockedEvent(ev);
+  const optOutDrop = ev.event === 'dropped' && Summary.summaryEmailOptOutDrop(ev.reason || ev.response);
+  const terminalBounce = ['bounce', 'blocked', 'dropped'].includes(ev.event) && !providerBlock && !optOutDrop;
+  if (terminalBounce || (providerBlock && updates.provider_retry_exhausted_at)) {
+    await Summary.reconcileSummaryEmailBounce(message, client);
+  }
+  if (ev.event === 'delivered' || optOutDrop) {
+    await Summary.reconcileSummaryEmailRecovery(message, client);
+  }
+}
+
 async function handleEmailMessageEvent(ev, message, client = db) {
   const now = eventOccurredAt(ev);
   // The recipient's address key comes FIRST, before this row is touched: the
@@ -790,15 +812,7 @@ async function handleEmailMessageEvent(ev, message, client = db) {
 
   const updates = computeEmailMessageEventUpdates(ev, message, now);
   if (updates) await client('email_messages').where({ id: message.id }).update(updates);
-  if (updates && ['bounce', 'blocked', 'dropped'].includes(ev.event)) {
-    await require('../services/visit-completion-summary').reconcileSummaryEmailBounce(message, client);
-  }
-  // A delivery event after a provider-retry resend is the durable retry for
-  // the recovery the rail attempted inline (a transient failure there would
-  // otherwise leave the effect on office review with the message sent).
-  if (ev.event === 'delivered') {
-    await require('../services/visit-completion-summary').reconcileSummaryEmailRecovery(message, client);
-  }
+  await reconcileSummaryForEmailEvent(ev, message, updates, client);
   const groupKey = await groupKeyForEmailMessage(message, client);
   await recordEmailSuppressionForEvent(ev, message, groupKey, now, client);
 }

@@ -108,6 +108,9 @@ async function recordManualPayment(id, {
   requireSelfPay = false,
   automated = false,
   settlementFence = null,
+  // Staff user id behind an operator-recorded payment (audit attribution
+  // for the invoice-issued closeout); null for automated settlements.
+  recordedByTechnicianId = null,
 } = {}) {
   if (expectedAmountCents != null && !(Number.isSafeInteger(expectedAmountCents) && expectedAmountCents > 0)) {
     throw refusal(400, 'expectedAmountCents must be a positive integer number of cents');
@@ -132,7 +135,7 @@ async function recordManualPayment(id, {
   // Terminal or in-flight invoices can never be manually marked paid.
   // This shares the same transition guard as Stripe collection paths.
   try {
-    assertInvoiceCollectible(invoice.status);
+    assertInvoiceCollectible(invoice);
   } catch (err) {
     throw refusal(invoice.status === 'processing' ? 409 : 400, err.message);
   }
@@ -221,6 +224,18 @@ async function recordManualPayment(id, {
     if (!locked) return null;
     const lockedPiId = locked.stripe_payment_intent_id || null;
     if (lockedPiId && lockedPiId !== triagedPiId) return { racedNewPaymentIntent: lockedPiId };
+    // The collectibility gate re-run UNDER THE LOCK (audit P0): the unlocked
+    // read at the top of this function can be overtaken by a Bill-To
+    // assignment that stamps the withdrawal, and only `status` is re-checked
+    // at the paid flip below. The self-pay fence does not cover it either —
+    // that resolver reads this invoice's own representative service, while the
+    // payer may sit on another billed member of the same packet, and it is
+    // skipped entirely when the caller does not require self-pay.
+    try {
+      assertInvoiceCollectible(locked);
+    } catch (err) {
+      return { noLongerCollectible: err.message };
+    }
     // Amount fence under the same lock as the paid flip: the caller settles
     // a specific sum; the ledger row below records invoiceAmountDue(row), so
     // the two must agree NOW, not when the caller last looked.
@@ -349,6 +364,9 @@ async function recordManualPayment(id, {
   if (updatedInvoice?.visitNeverRan) {
     throw refusal(409, `This invoice's visit is ${updatedInvoice.visitNeverRan.replace('_', '-')} — nothing was recorded. Void or reissue the invoice, or record the money as account credit.`, { visitNeverRan: updatedInvoice.visitNeverRan });
   }
+  if (updatedInvoice?.noLongerCollectible) {
+    throw refusal(409, `${updatedInvoice.noLongerCollectible} — nothing was recorded`);
+  }
   if (updatedInvoice?.notSelfPay) {
     throw refusal(409, 'Invoice is no longer an open self-pay invoice (a payer or statement was assigned) — nothing was recorded');
   }
@@ -456,6 +474,13 @@ async function recordManualPayment(id, {
       }).catch((err) => logger.warn(`[admin-invoices:record-payment] activity_log insert failed: ${err.message}`));
     }
   }
+
+  // Invoice issued ⇒ visit completed (owner ruling 2026-09-07, dark behind
+  // GATE_INVOICE_ISSUED_CLOSES_VISIT): money received by hand proves the
+  // visit happened — close it out quietly. Best-effort after the payment
+  // is recorded.
+  const { closeOutVisitForIssuedInvoice } = require('./invoice-issued-closeout');
+  await closeOutVisitForIssuedInvoice({ invoiceId: id, trigger: 'paid', actorTechnicianId: recordedByTechnicianId });
 
   const final = await db('invoices').where({ id }).first();
   return {

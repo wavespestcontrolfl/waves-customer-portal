@@ -146,8 +146,11 @@ async function deferredSummaryRecipient(meta, database = db, { customer: heldCus
   if (!visit) return { eligible: false, reason: 'visit_summary_unavailable' };
   // An unreadable account primary is a failed read (the registry keeps the
   // replay retryable), never a recipient that changed.
-  const customer = heldCustomer || await withAccountPrimaryContact(await database('customers').where({ id: meta.customer_id }).first(),
-    { db: database, rethrow: true, forShare: Boolean(database.isTransaction) });
+  // An archived visit customer is never reauthorized (the archive keeps the
+  // contact columns, so the recipient comparison alone would pass).
+  const row = heldCustomer || await database('customers').where({ id: meta.customer_id }).whereNull('deleted_at').first();
+  if (!row) return { eligible: false, reason: 'visit_summary_unavailable' };
+  const customer = heldCustomer || await withAccountPrimaryContact(row, { db: database, rethrow: true, forShare: Boolean(database.isTransaction) });
   const recipient = getServiceContactSmsRecipient(customer);
   // Contact saves keep their formatting and the canonical sender normalizes
   // before Twilio, so the frozen number and the live one are compared by
@@ -225,8 +228,9 @@ async function claimDispatchThroughHandoff({ visitId, customerId, kind, token, s
     // A secondary profile's blank contact fields fall back to the account
     // primary: that row is held too, and an unreadable primary is a failed
     // claim read, not a silently different recipient.
-    const customer = await withAccountPrimaryContact(await trx('customers').where({ id: customerId }).first(),
-      { db: trx, forShare: true, rethrow: true });
+    const liveCustomer = await trx('customers').where({ id: customerId }).whereNull('deleted_at').first();
+    if (!liveCustomer) return false;
+    const customer = await withAccountPrimaryContact(liveCustomer, { db: trx, forShare: true, rethrow: true });
     // The visit row is held too: a revocation or status change after the
     // mark committed serializes behind the provider request instead of
     // racing it.
@@ -299,8 +303,17 @@ async function terminalDeferredSummarySms(meta) {
   const effect = await db('visit_effects').where({ visit_id: meta.visit_id, effect_type: 'completion_sms',
     claim_token: meta.visit_summary_claim_token }).first('status');
   if (!effect || ['sent', 'suppressed'].includes(effect.status)) return;
+  // The handoff's pre-provider marker clears before the provider request, so
+  // a throw from the request itself (the only way this hook's row reaches
+  // 'unknown_delivery' straight from the claim) leaves the effect reading
+  // unknown even when the scheduler already knows better: a synchronous
+  // Twilio rejection with a terminal code (21610/21211/21614/...) proves
+  // nothing was accepted. Carry that proof in and settle definitively
+  // instead of leaving a proven-unsent leg parked for the office.
+  const status = effect.status === 'unknown_delivery' && meta.provider_terminal_rejection !== true
+    ? 'unknown_delivery' : 'suppressed';
   const result = await VisitGroups.finalizeVisitNotification(meta.visit_id, 'completion_sms',
-    effect.status === 'unknown_delivery' ? 'unknown_delivery' : 'suppressed', new Date(), meta.visit_summary_claim_token);
+    status, new Date(), meta.visit_summary_claim_token);
   if (!result.ok) throw new Error('Visit summary terminal state could not be saved');
 }
 
@@ -346,8 +359,11 @@ async function sendSummarySms({ visit, member, customer, summaryUrl, requested }
     // Once handed to a non-idempotent provider, every failure is ambiguous
     // (a timeout, a 5xx, a 429: the provider may hold the text) and stays
     // unknown for office reconciliation. Never reclaim it. A refusal before
-    // the request is a block and keeps its own retry contract.
-    if (!result.sent && !result.blocked && dispatched) {
+    // the request is a block and keeps its own retry contract, and so is a
+    // definitive synchronous rejection (an unsubscribed, invalid or
+    // non-mobile number: the adapter's terminal codes), which proves the
+    // provider accepted nothing.
+    if (!result.sent && !result.blocked && dispatched && result.terminal !== true) {
       await VisitGroups.finalizeVisitNotification(visit.id, 'completion_sms', 'unknown_delivery', new Date(), claim.token);
       return;
     }
@@ -361,10 +377,27 @@ async function sendSummarySms({ visit, member, customer, summaryUrl, requested }
 
 // The template library saves each recipient before provider handoff. Only an
 // absent row or its explicit pre-dispatch abort proves another send is safe.
+// SendGrid drops a message for a recipient who opted out (a group or
+// address unsubscribe, a spam report) under one of these reasons. The
+// address is reachable; the customer declined. Such a leg settles as
+// suppressed, never as an unknown delivery for the office to chase.
+const SUMMARY_OPT_OUT_DROP_REASONS = ['group unsubscribe', 'unsubscribed address', 'spam reporting address'];
+function summaryEmailOptOutDrop(reason) {
+  return SUMMARY_OPT_OUT_DROP_REASONS.includes(String(reason || '').trim().toLowerCase());
+}
+
 function summaryEmailState(message) {
   if (!message) return 'retry';
-  if (['sent', 'delivered', 'opened', 'clicked'].includes(message.status)) return 'sent';
+  // unsubscribed/spam_report are recipient-generated events that land only
+  // AFTER the recipient received the message — the same sent evidence as
+  // opened/clicked. Without this a multi-recipient summary where one leg
+  // unsubscribes and the other bounces can never fully settle: this row
+  // reads unknown_delivery forever, so reconcileSummaryEmailRecovery's
+  // "every recipient row settled" gate never closes even after the bounced
+  // leg is corrected.
+  if (['sent', 'delivered', 'opened', 'clicked', 'unsubscribed', 'spam_report'].includes(message.status)) return 'sent';
   if (message.status === 'blocked') return 'suppressed';
+  if (message.status === 'dropped' && summaryEmailOptOutDrop(message.error_message)) return 'suppressed';
   if (message.status === 'failed' && !message.sent_at && !message.provider_message_id
     && message.error_message === require('./email-template-library').ABORTED_BEFORE_DISPATCH) return 'retry';
   return 'unknown_delivery';
@@ -433,26 +466,42 @@ async function sendSummaryEmailRecipient({ visit, customer, claim, summaryUrl, r
 // request left the recipient's ledger row queued; the mark's marker names
 // that row and, past the lease, proves no request was made, so the row is
 // settled as a pre-dispatch abort and the replay finishes that recipient
-// instead of skipping it as uncertain. Read before the claim (which
-// reclaims such a mark), settled once the claim is owned.
+// instead of skipping it as uncertain. Read AND settled before the claim
+// (which reclaims such a mark and would lose the marker): the settlement is
+// provable on its own (marker past the lease, row queued with no provider
+// id) and idempotent, so a crash between it and the claim leaves a row the
+// next owner re-sends, never one it skips as uncertain.
 async function settleAbandonedSummaryEmailRow(visitId, database) {
   const effect = await database('visit_effects').where({ visit_id: visitId, effect_type: 'completion_email', status: 'unknown_delivery' }).first('last_error', 'claimed_at');
   if (!effect || !VisitGroups.isHandoffPending(effect.last_error)) return null;
   if (new Date(effect.claimed_at).getTime() > Date.now() - VisitGroups.NOTIFICATION_CLAIM_LEASE_MS) return null;
   const messageId = effect.last_error.split(':')[1] || null;
+  const marker = effect.last_error;
+  // The settlement re-reads the marker under the effect row FOR UPDATE: a
+  // still-live owner delayed past the lease clears that marker on its own
+  // connection right before its provider request (markVisitNotificationProviderStart),
+  // and that clear either committed first — the proof is gone and the row
+  // is left alone — or waits for this transaction and finds the row
+  // already settled. The proof and the settlement cannot cross.
   return async () => {
     if (!messageId) return 0;
-    return database('email_messages').where({ id: messageId, status: 'queued', trigger_event_id: `visit_summary:${visitId}` })
-      .whereNull('provider_message_id').whereNull('sent_at')
-      .update({ status: 'failed', error_message: require('./email-template-library').ABORTED_BEFORE_DISPATCH, updated_at: database.fn.now() });
+    const settle = async (trx) => {
+      const held = await trx('visit_effects').where({ visit_id: visitId, effect_type: 'completion_email', status: 'unknown_delivery' })
+        .forUpdate().first('last_error');
+      if (!held || held.last_error !== marker) return 0;
+      return trx('email_messages').where({ id: messageId, status: 'queued', trigger_event_id: `visit_summary:${visitId}` })
+        .whereNull('provider_message_id').whereNull('sent_at')
+        .update({ status: 'failed', error_message: require('./email-template-library').ABORTED_BEFORE_DISPATCH, updated_at: trx.fn.now() });
+    };
+    return database.isTransaction ? settle(database) : database.transaction(settle);
   };
 }
 
 async function sendSummaryEmail({ visit, member, customer, prefs, summaryUrl, visible, database }) {
   const abandoned = await settleAbandonedSummaryEmailRow(visit.id, database);
+  if (abandoned) await abandoned();
   const claim = await VisitGroups.claimVisitNotification(member, 'completion_email');
   if (claim?.state !== 'owner') return;
-  if (abandoned) await abandoned();
   const recipients = visible ? summaryEmailRecipients(customer, prefs) : [];
   try {
     const scope = { trigger_event_id: `visit_summary:${visit.id}`, recipient_id: customer.id };
@@ -510,6 +559,11 @@ async function summaryEmailEvidence(message, database) {
 async function reconcileSummaryEmailBounce(message, database = db) {
   const match = /^visit_summary:([0-9a-f-]{36})$/.exec(String(message?.trigger_event_id || ''));
   if (!match || message.template_key !== 'service.visit_summary') return { reconciled: false };
+  // A caller outside a transaction (the retry rail's exhaustion) gets one
+  // here: the packet and effect locks below must outlive their SELECTs, or a
+  // review handoff can take the packet row between the read and the flip,
+  // see the still-sent effect and send the ask this parks.
+  if (!database.isTransaction) return database.transaction((trx) => reconcileSummaryEmailBounce(message, trx));
   const visitId = match[1];
   // Two recipients can bounce in concurrent webhook transactions; holding
   // the shared effect serializes them so the second reads the first's
@@ -567,7 +621,7 @@ async function summaryRetryAuthorized(message, database = db, { destination = nu
     .whereIn('status', ['closing', 'closed']).modify((query) => { if (held) query.forShare(); }).first('id', 'customer_id');
   if (!visit) return { ok: false, reason: 'visit_summary_unavailable' };
   const customer = await withAccountPrimaryContact(
-    await database('customers').where({ id: visit.customer_id }).first(), { db: database, forShare: held, rethrow: held },
+    await database('customers').where({ id: visit.customer_id }).whereNull('deleted_at').first(), { db: database, forShare: held, rethrow: held },
   );
   if (!customer) return { ok: false, reason: 'visit_summary_unavailable' };
   const prefs = await database('notification_prefs').where({ customer_id: visit.customer_id }).first() || {};
@@ -581,6 +635,11 @@ async function summaryRetryAuthorized(message, database = db, { destination = nu
 }
 
 const PARKED_REVIEW_REASON = 'visit_summary_bounced';
+// The review asks the closeout owns: the packet's own enrollment and the
+// cadence touches it starts. An admin- or technician-triggered ask is the
+// operator's (its copy, channel and timing cannot be rebuilt by the
+// recovery), so parking leaves it pending for the scheduler to defer.
+const PACKET_OWNED_REVIEW_TRIGGERS = ['auto', 'sequence'];
 // stop_reason is varchar(24).
 const PARKED_SUPERSEDED_REASON = 'summary_park_superseded';
 
@@ -607,16 +666,19 @@ async function visitSummaryUncertainForRecord(serviceRecordId, database = db) {
 // Parks the cadence sequences enrolled for this packet's recorded service
 // records (stopped with a reason of their own and their schedule kept, so
 // the recovery can resume them without a fresh enrollment that the cadence
-// cooldown might refuse) and removes the pending legacy asks. An ask whose
+// cooldown might refuse) and removes the pending automatic asks. An ask whose
 // provider handoff has started is `sending` (see reviewSendThroughSummaryHandoff)
-// and is kept: its delivery is recorded by its own sender.
+// and is kept: its delivery is recorded by its own sender. A manual ask is
+// kept too (PACKET_OWNED_REVIEW_TRIGGERS). A delivered ask's follow-up is
+// held by processFollowups while the summary stays uncertain.
 async function parkVisitReviewOutreach(packetId, database = db) {
   const records = await database('visit_completion_packet_items').where({ packet_id: packetId })
     .whereNotNull('service_record_id').pluck('service_record_id');
   if (!records.length) return { parked: 0 };
   const parked = await database('review_sequences').whereIn('service_record_id', records).where({ status: 'active' })
     .update({ status: 'stopped', stop_reason: PARKED_REVIEW_REASON, completed_at: database.fn.now(), updated_at: database.fn.now() });
-  const removed = await database('review_requests').whereIn('service_record_id', records).where({ status: 'pending' }).del();
+  const removed = await database('review_requests').whereIn('service_record_id', records).where({ status: 'pending' })
+    .whereIn('triggered_by', PACKET_OWNED_REVIEW_TRIGGERS).del();
   return { parked: Number(parked || 0) + Number(removed || 0) };
 }
 
@@ -624,6 +686,10 @@ async function parkVisitReviewOutreach(packetId, database = db) {
 // schedule or now, whichever is later, unless the customer has since gained
 // another active sequence. Returns how many resumed.
 async function resumeVisitReviewOutreach(packetId, database = db) {
+  // With the cadence gate off the sequence cron advances nothing: a parked
+  // cadence stays parked, and the enrollment that follows takes the
+  // documented legacy single-ask path instead.
+  if (!require('../config/feature-gates').isEnabled('reviewSequences')) return 0;
   const packet = await database('visit_completion_packets').where({ id: packetId }).first('visit_id');
   const records = await database('visit_completion_packet_items').where({ packet_id: packetId })
     .whereNotNull('service_record_id').pluck('service_record_id');
@@ -660,27 +726,72 @@ async function resumeVisitReviewOutreach(packetId, database = db) {
 // whose delivery is about to be recorded (a throw from the request rolls
 // the mark back with the transaction).
 async function reviewSendThroughSummaryHandoff(serviceRecordId, dispatch, database = db, { requestId = null } = {}) {
-  return database.transaction(async (trx) => {
-    const item = serviceRecordId
-      ? await trx('visit_completion_packet_items').where({ service_record_id: serviceRecordId }).first('packet_id') : null;
-    if (item) {
-      const packet = await trx('visit_completion_packets').where({ id: item.packet_id }).forShare().first('visit_id');
-      const uncertain = packet && await trx('visit_effects').where({ visit_id: packet.visit_id, status: 'unknown_delivery' })
-        .whereIn('effect_type', ['completion_sms', 'completion_email']).first('id');
-      if (uncertain) return { ok: false, code: 'VISIT_SUMMARY_UNCERTAIN', reason: 'The visit summary this review follows is awaiting recovery' };
-    }
-    if (requestId) await trx('review_requests').where({ id: requestId, status: 'pending' }).update({ status: 'sending' });
-    const verdict = await dispatch(trx);
-    // A refusal before the request (consent, suppression, send window) is
-    // provably unsent: the row returns to pending in this same transaction,
-    // so a worker lost before the sender's own bookkeeping strands nothing.
-    if (requestId && verdict && verdict.ok === false) {
-      await trx('review_requests').where({ id: requestId, status: 'sending' }).update({ status: 'pending' });
-    }
-    return verdict;
-  });
+  // The pre-provider mark is durable BEFORE the held handoff, on the marker
+  // connection (never inside the transaction it would roll back with): a
+  // worker lost after the provider accepted but before this transaction
+  // commits leaves a `sending` row the stranded-send reconciliation
+  // (review-request.js) proves or releases, never a pending row the
+  // scheduler would send again. claimed_at is written at JavaScript
+  // precision so the reconciliation's guards compare it losslessly.
+  const claimedAt = new Date();
+  const marked = requestId
+    ? Number(await require('../models/marker-db')()('review_requests').where({ id: requestId, status: 'pending' })
+      .update({ status: 'sending', claimed_at: claimedAt })) : 0;
+  // A claim that moved NO row is not a send permit (audit P1): the row is
+  // already `sending` under another sender, or it was suppressed, parked or
+  // deleted between batching and here. Dispatching anyway lets two senders
+  // reach the provider for one ask, or sends an ask that has been withdrawn.
+  // The verdict is decided INSIDE the transaction below, after the summary
+  // check, so a park (which removes the row) still reports itself as a park
+  // rather than as a lost claim. Nothing is written either way — the row
+  // belongs to whoever holds the claim, or to the state that replaced it.
+  let claimLost = !!requestId && !marked;
+  const release = () => database('review_requests').where({ id: requestId, status: 'sending', claimed_at: claimedAt })
+    .update({ status: 'pending', claimed_at: null });
+  let dispatched = false;
+  let verdict;
+  try {
+    verdict = await database.transaction(async (trx) => {
+      const item = serviceRecordId
+        ? await trx('visit_completion_packet_items').where({ service_record_id: serviceRecordId }).first('packet_id') : null;
+      if (item) {
+        const packet = await trx('visit_completion_packets').where({ id: item.packet_id }).forShare().first('visit_id');
+        const uncertain = packet && await trx('visit_effects').where({ visit_id: packet.visit_id, status: 'unknown_delivery' })
+          .whereIn('effect_type', ['completion_sms', 'completion_email']).first('id');
+        if (uncertain) return { ok: false, code: 'VISIT_SUMMARY_UNCERTAIN', reason: 'The visit summary this review follows is awaiting recovery' };
+      }
+      // The claim is re-verified on the row itself once the packet row is
+      // held (Codex r27 P1): a wait on that row longer than the stranded-send
+      // window lets the reconciliation release this `sending` mark and a
+      // later worker claim the same ask, and `marked` only records the update
+      // that ran before the wait. The exact claim (status + timestamp) has
+      // to still be this sender's immediately before the request; otherwise
+      // the ask belongs to whoever holds it now and nothing here is written
+      // or released.
+      if (!claimLost && marked) {
+        const held = await trx('review_requests').where({ id: requestId, status: 'sending', claimed_at: claimedAt }).first('id');
+        claimLost = !held;
+      }
+      if (claimLost) {
+        return { ok: false, code: 'REVIEW_CLAIM_LOST', reason: 'This review ask is already being sent or is no longer pending' };
+      }
+      dispatched = true;
+      return dispatch(trx);
+    });
+  } catch (err) {
+    // A throw before the request is provably unsent; one from the request
+    // is not, and the row stays marked for the reconciliation to judge.
+    if (marked && !dispatched) await release().catch(() => {});
+    throw err;
+  }
+  // A refusal before the request (consent, suppression, send window, an
+  // uncertain summary) is provably unsent: the row returns to pending, so a
+  // worker lost before the sender's own bookkeeping strands nothing. The
+  // release names this sender's own claim, so a mark that was taken over in
+  // the meantime (claim lost above) is left to its new holder.
+  if (marked && verdict && verdict.ok === false) await release();
+  return verdict;
 }
-
 // The retry rail's provider request runs while the customer and preference
 // rows are held, so the recipient the fence approved is the recipient the
 // provider receives. `dispatch()` performs the request.
@@ -690,7 +801,7 @@ async function retrySummaryThroughHandoff(message, dispatch, { destination = nul
   return database.transaction(async (trx) => {
     const visit = await trx('service_visits').where({ id: match[1] }).forShare().first('customer_id');
     if (!visit) return { ok: false, reason: 'visit_summary_unavailable' };
-    const customer = await trx('customers').where({ id: visit.customer_id }).forShare().first();
+    const customer = await trx('customers').where({ id: visit.customer_id }).whereNull('deleted_at').forShare().first();
     if (!customer) return { ok: false, reason: 'visit_summary_unavailable' };
     await createDefaultCustomerRows(trx, visit.customer_id);
     await trx('notification_prefs').where({ customer_id: visit.customer_id }).forShare().first('customer_id');
@@ -720,12 +831,19 @@ async function reconcileSummaryEmailRecovery(message, database = db) {
   const match = /^visit_summary:([0-9a-f-]{36})$/.exec(String(message?.trigger_event_id || ''));
   if (!match || message.template_key !== 'service.visit_summary') return { reconciled: false };
   const visitId = match[1];
-  return database.transaction(async (trx) => {
+  const run = async (trx) => {
     // provider_bounce: a bounce reopened a sent aggregate. provider_outcome_unknown:
     // the bounce landed before the initial send returned, or the handoff was
     // ambiguous — a delivery event is the proof either lacked.
-    const effect = await trx('visit_effects').where({ visit_id: visitId, effect_type: 'completion_email', status: 'unknown_delivery' })
-      .whereIn('last_error', ['provider_bounce', 'provider_outcome_unknown']).forUpdate().first('id');
+    // A still-sent aggregate is judged too: a provider block that scheduled
+    // a retry never reopened it (the rail owns the block), so when that
+    // retry is refused and the ledger holds no accepted send any more, the
+    // aggregate settles as suppressed instead of reading as delivered.
+    const effect = await trx('visit_effects').where({ visit_id: visitId, effect_type: 'completion_email' })
+      .where(function () {
+        this.where({ status: 'sent' })
+          .orWhere(function () { this.where({ status: 'unknown_delivery' }).whereIn('last_error', ['provider_bounce', 'provider_outcome_unknown']); });
+      }).forUpdate().first('id', 'status');
     if (!effect) return { reconciled: false };
     const { outcomes } = await summaryEmailEvidence(message, trx);
     // Every recipient row must be settled: a delivery proves sent, and a
@@ -735,6 +853,7 @@ async function reconcileSummaryEmailRecovery(message, database = db) {
       return { reconciled: false };
     }
     const settled = outcomes.includes('sent') ? 'sent' : 'suppressed';
+    if (effect.status === settled) return { reconciled: false };
     await trx('visit_effects').where({ id: effect.id })
       .update({ status: settled, sent_at: settled === 'sent' ? trx.fn.now() : null, last_error: null, updated_at: trx.fn.now() });
     // The bounce alert, or the coordinator's delivery-review alert when the
@@ -759,11 +878,23 @@ async function reconcileSummaryEmailRecovery(message, database = db) {
     // that already closed goes back on the recovery queue so the coordinator
     // re-observes the settled summary and enrolls the review it still owes.
     if (!otherUncertain) {
-      await trx('visit_completion_packets').where({ visit_id: visitId, status: 'done' })
-        .update({ status: 'processing', error: 'review_enrollment_pending', updated_at: trx.fn.now() });
+      // A packet closed for office review of its payment (a payer owns the
+      // invoice, the visit is on billing hold) owes no review enrollment:
+      // reopening it would only re-record the payer alert it already holds.
+      const closed = await trx('visit_completion_packets').where({ visit_id: visitId, status: 'done' }).first('id', 'error');
+      const state = require('./visit-completion-packets').parseOfficeReviewState(closed?.error);
+      if (closed && state?.payment !== 'office_required') {
+        await trx('visit_completion_packets').where({ id: closed.id, status: 'done' })
+          .update({ status: 'processing', error: 'review_enrollment_pending', updated_at: trx.fn.now() });
+      }
     }
     return { reconciled: true };
-  });
+  };
+  // Composable with a caller's own transaction (the retry rail's stopRetry
+  // commits the ledger's terminal update and this settlement together), or
+  // opens its own when called standalone (the webhook and the recovery
+  // handoff's post-commit best-effort call).
+  return database.isTransaction ? run(database) : database.transaction(run);
 }
 
 async function deliverVisitCompletionSummary(packetId, token, database = db) {
@@ -771,9 +902,10 @@ async function deliverVisitCompletionSummary(packetId, token, database = db) {
   const visit = await database('service_visits').where({ id: packet.visit_id }).first();
   // An unreadable account primary is a failed read the coordinator retries,
   // never a secondary profile with no recipient.
-  const customer = await withAccountPrimaryContact(
-    await database('customers').where({ id: visit.customer_id }).first(), { db: database, rethrow: true },
-  );
+  const row = await database('customers').where({ id: visit.customer_id }).first();
+  // An archived customer receives nothing: both legs settle as suppressed.
+  const archived = !row || Boolean(row.deleted_at);
+  const customer = await withAccountPrimaryContact(row, { db: database, rethrow: true });
   const prefs = await database('notification_prefs').where({ customer_id: customer.id }).first() || {};
   // A recorded member owns the effects; retained history never qualifies.
   const member = await VisitGroups.recordedPacketMember(packet.id, database);
@@ -781,9 +913,9 @@ async function deliverVisitCompletionSummary(packetId, token, database = db) {
   const summary = token ? await getVisitCompletionSummary(token, database) : null;
   const visibleMembers = await database('visit_completion_packet_items').where({ packet_id: packet.id })
     .whereIn('service_record_id', (summary?.services || []).map((service) => service.id)).pluck('scheduled_service_id');
-  const context = { visit, member, customer, prefs, database, visible: Boolean(summary),
+  const context = { visit, member, customer, prefs, database, visible: !archived && Boolean(summary),
     summaryUrl: token ? portalUrl(`/visit/${token}`) : null,
-    requested: payload.items.some((item) => visibleMembers.includes(item.serviceId) && item.body.sendCompletionSms === true) };
+    requested: !archived && payload.items.some((item) => visibleMembers.includes(item.serviceId) && item.body.sendCompletionSms === true) };
   await sendSummarySms(context);
   await sendSummaryEmail(context);
   const effects = await database('visit_effects').where({ visit_id: visit.id })
@@ -805,4 +937,5 @@ module.exports = { VISIT_SUMMARY_TOKEN_RE, ensureVisitSummaryToken, packetHasPub
   deliverVisitCompletionSummary, reconcileSummaryEmailBounce, reconcileSummaryEmailRecovery, summaryRetryAuthorized,
   recheckDeferredSummarySms, beginDeferredSummarySms, finalizeDeferredSummarySms, terminalDeferredSummarySms,
   retrySummaryThroughHandoff, parkVisitReviewOutreach, resumeVisitReviewOutreach, visitSummaryUncertainForRecord,
-  reviewSendThroughSummaryHandoff, PARKED_REVIEW_REASON };
+  reviewSendThroughSummaryHandoff, PARKED_REVIEW_REASON, PACKET_OWNED_REVIEW_TRIGGERS, summaryEmailOptOutDrop,
+  _settleAbandonedSummaryEmailRow: settleAbandonedSummaryEmailRow };
