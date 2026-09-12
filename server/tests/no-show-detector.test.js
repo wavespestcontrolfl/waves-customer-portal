@@ -248,6 +248,64 @@ describe('grouped stops are evaluated as one visit (round-10 P1)', () => {
   });
 });
 
+describe('lockedStop: creation and both reconcile passes see the same stop (round-10 P1)', () => {
+  const { lockedStop } = require('../services/no-show-detector');
+  // The per-card loop evaluated the whole stop while the reconcile passes
+  // looked only at the representative row, so a grouped reminder owned by a
+  // SIBLING read as "no promise" there: every tick created the alert and
+  // notice and then immediately resolved and dismissed them, re-notifying
+  // the tech every five minutes. One shared reader makes that impossible.
+  const now = new Date('2026-09-10T15:30:00Z');
+  const members = [
+    { id: 'aaa', visit_id: 'stop-1', status: 'pending', scheduled_date: '2026-09-10' },
+    { id: 'bbb', visit_id: 'stop-1', status: 'pending', scheduled_date: '2026-09-10' },
+  ];
+  // The grouped reminder's evidence is linked to the SIBLING, not the
+  // representative the card and the alert are keyed on.
+  const siblingEvidence = [{ id: 'm1', appointment_id: 'bbb', sent_at: '2026-09-09T12:00:00Z',
+    metadata: { rendered_slot_ms: Date.parse('2026-09-10T13:00:00Z') } }];
+
+  function fakeTrx(rows) {
+    return (table) => {
+      const chain = {};
+      for (const m of ['join', 'leftJoin', 'whereIn', 'whereRaw', 'whereBetween', 'whereNull', 'whereNotNull', 'where', 'forUpdate', 'orderBy']) {
+        chain[m] = () => chain;
+      }
+      if (table === 'scheduled_services') {
+        chain.where = (args) => {
+          chain._members = args?.visit_id ? rows : rows.filter((r) => String(r.id) === String(args?.id));
+          return chain;
+        };
+        chain.first = async () => chain._members[0];
+        chain.select = async () => chain._members;
+        return chain;
+      }
+      if (table === 'messaging_audit_log as a') { chain.select = () => Promise.resolve(siblingEvidence); return chain; }
+      chain.select = () => Promise.resolve([]);
+      return chain;
+    };
+  }
+
+  test('a stop whose promise is linked to a sibling still evaluates as overdue', async () => {
+    const trx = fakeTrx(members);
+    trx.raw = (sql) => ({ sql });
+    trx.isTransaction = true;
+    const { visit, members: locked, promise, live } = await lockedStop(trx, 'aaa', { now });
+    expect(visit.id).toBe('aaa');
+    expect(locked.map((m) => m.id)).toEqual(['aaa', 'bbb']);
+    // Evidence belongs to 'bbb'; the stop uses it for 'aaa' too.
+    expect(promise).toMatchObject({ visit_id: 'bbb' });
+    expect(live).toMatchObject({ stage: 2, evidence: 'missing_tracking' });
+  });
+
+  test('a missing row yields nothing, not a throw', async () => {
+    const trx = fakeTrx([]);
+    trx.raw = (sql) => ({ sql });
+    trx.isTransaction = true;
+    expect(await lockedStop(trx, 'gone', { now })).toMatchObject({ visit: null, live: null });
+  });
+});
+
 describe('tracking key (reassignment refreshes the office alert)', () => {
   const base = { visitId: 'visit', startAt: '2026-09-10T13:00:00.000Z', stage: 2, type: 'tech_late' };
   test('a different recipient tech changes the key, even with promise/stage/type unchanged', () => {

@@ -764,6 +764,29 @@ async function reconcileOfficeAlert(trx, { card, visit, live, key, type, recipie
   return true;
 }
 
+// One stop, read and LOCKED under the caller's transaction, evaluated the
+// same way everywhere: creation and both reconcile passes. The group is
+// re-derived from the row's current visit_id rather than from a payload, so a
+// stop regrouped since the card was raised still reconciles as it stands now.
+//
+// All three call sites MUST share this: the per-card loop evaluated the whole
+// stop while the reconcile passes looked only at the representative, so a
+// grouped reminder owned by a SIBLING read as "no promise" there — each tick
+// created the alert and notice and then immediately resolved and dismissed
+// them, re-notifying the tech every five minutes (codex P1 round 10).
+// Members are locked in id order, the same order every pass takes them in.
+async function lockedStop(trx, serviceId, { now = new Date(), ignoreHorizon = false } = {}) {
+  const row = await trx('scheduled_services').where({ id: serviceId }).forUpdate().first();
+  if (!row) return { visit: null, members: [], promise: null, live: null };
+  const members = row.visit_id
+    ? await trx('scheduled_services').where({ visit_id: row.visit_id }).forUpdate().orderBy('id').select('*')
+    : [row];
+  const visit = members.find((m) => String(m.id) === String(serviceId)) || row;
+  const events = await loadPromiseEvents(trx, members.map((m) => String(m.id)), { now });
+  const promise = stopPromise(members, latestPromises(events, now), now);
+  return { visit, members, promise, live: evaluateNoShow({ visit: stopState(members), promise, now, ignoreHorizon }) };
+}
+
 // The kill switch has to CLEAN UP, not just stop creating: sweep() is the
 // only pass that resolves a detector office alert or dismisses a tracking
 // notice when the visit arrives, completes, moves or is reassigned. Flipping
@@ -804,13 +827,8 @@ async function sweep(conn, { now = new Date() } = {}) {
       // confirmation here must use the same members, the same shared promise
       // and the same merged arrival state, or a sibling's arrival stamp
       // recorded since listNoShows ran would be missed (codex P1 round 10).
-      const memberIds = card.grouped_service_ids || [String(card.id)];
-      const members = await trx('scheduled_services').whereIn('id', memberIds).forUpdate()
-        .orderBy('id').select('*');
-      const visit = members.find((m) => String(m.id) === String(card.id));
+      const { visit, live } = await lockedStop(trx, card.id, { now });
       if (!enabled() || !visit) return null;
-      const promise = stopPromise(members, latestPromises(await loadPromiseEvents(trx, memberIds, { now }), now), now);
-      const live = evaluateNoShow({ visit: stopState(members), promise, now });
       if (!live || live.stage !== card.stage || live.promised_window.start_at !== card.promised_window.start_at) return null;
       const recipientTech = visit.technician_id ? await trx('technicians').where({ id: visit.technician_id,
         employment_status: 'active', field_dispatchable: true }).first('id', 'name') : null;
@@ -845,8 +863,7 @@ async function sweep(conn, { now = new Date() } = {}) {
     .whereRaw("payload->>'source' = 'no_show_detector'").whereNull('resolved_at').select('id', 'job_id', 'payload');
   for (const alert of active) await conn.transaction(async (trx) => {
     if (!enabled()) return;
-    const visit = await trx('scheduled_services').where({ id: alert.job_id }).forUpdate().first();
-    const promise = latestPromises(await loadPromiseEvents(trx, [String(alert.job_id)], { now }), now).get(String(alert.job_id));
+    const { live } = await lockedStop(trx, alert.job_id, { now, ignoreHorizon: true });
     // ignoreHorizon: true — past the 48h horizon this alert's own visit
     // would no longer appear in listNoShows' candidate set at all (the
     // horizon gates CREATION, not retention — see evaluateNoShow), and
@@ -861,7 +878,6 @@ async function sweep(conn, { now = new Date() } = {}) {
     // there would be the same silent drop, so the existing card stays open
     // (naming the tech it was raised against) until the visit itself moves
     // on or a dispatcher resolves it.
-    const live = evaluateNoShow({ visit, promise, now, ignoreHorizon: true });
     if (!live || live.stage !== alert.payload.stage || live.promised_window.start_at !== alert.payload.promised_window?.start_at) {
       // Same automatic-supersession stamp as the per-card loop above (codex
       // P1) — this pass catches a visit that dropped out of `rows`
@@ -883,12 +899,11 @@ async function sweep(conn, { now = new Date() } = {}) {
   for (const notice of activeNotices) await conn.transaction(async (trx) => {
     if (!enabled()) return;
     const visitId = notice.payload?.visit_id;
-    const visit = visitId ? await trx('scheduled_services').where({ id: visitId }).forUpdate().first() : null;
-    const promise = visit ? latestPromises(await loadPromiseEvents(trx, [String(visitId)], { now }), now).get(String(visitId)) : null;
+    const { visit, live } = visitId ? await lockedStop(trx, visitId, { now, ignoreHorizon: true })
+      : { visit: null, live: null };
     // ignoreHorizon: true for the same reason as the dispatch_alerts pass
     // above — elapsed time alone must not dismiss a notice for a visit
     // that is still live with no arrival evidence.
-    const live = visit ? evaluateNoShow({ visit, promise, now, ignoreHorizon: true }) : null;
     const sameRecipient = !!(live && visit.technician_id === notice.technician_id);
     // The tech this notice was written for may have gone
     // field_dispatchable=false since (a deliberate move to office-only —
@@ -915,4 +930,4 @@ async function sweep(conn, { now = new Date() } = {}) {
   return { alerted, active: rows.length };
 }
 
-module.exports = { enabled, cleanupAfterDisable, evaluateNoShow, promisedStartAt, trackingStage, callCommitmentInstant, LIVE_STATUSES, latestPromises, loadPromiseEvents, seriesSupersessions, groupedStops, stopState, stopPromise, recordSentWindowFallback, listNoShows, sweep, trackingKey, resolveLegacyCollision, alreadyHasOpenAlert, noticeStillCurrent };
+module.exports = { enabled, cleanupAfterDisable, evaluateNoShow, promisedStartAt, trackingStage, callCommitmentInstant, LIVE_STATUSES, latestPromises, loadPromiseEvents, seriesSupersessions, groupedStops, stopState, stopPromise, lockedStop, recordSentWindowFallback, listNoShows, sweep, trackingKey, resolveLegacyCollision, alreadyHasOpenAlert, noticeStillCurrent };
