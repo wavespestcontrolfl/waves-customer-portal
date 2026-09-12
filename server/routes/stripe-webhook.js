@@ -5098,13 +5098,30 @@ async function handleSetupIntentSucceeded(setupIntent, { eventCreatedAt = null }
         });
       }
       if (!(await ConsentService.hasConsentFor(wavesCustomerId, stripePmId))) {
-        await ConsentService.recordConsent({
-          customerId: wavesCustomerId,
-          paymentMethodId: saved.id,
-          stripePaymentMethodId: stripePmId,
-          source: 'pay_page',
-          methodType: saved.method_type || 'card',
+        // The authorization row and the ownership judgement commit together,
+        // the same fence the pay routes use (local audit on r39): the check
+        // above ran before a Stripe round-trip, and a Bill-To change during
+        // it would otherwise leave consent recorded for a withdrawn invoice.
+        let consentRefusedForPayer = false;
+        await db.transaction(async (trx) => {
+          if (coveredInvoiceId
+            && await require('../services/visit-completion-packets').invoicePayerOwnedNow(coveredInvoiceId, trx)) {
+            consentRefusedForPayer = true;
+            return null;
+          }
+          return ConsentService.recordConsent({
+            customerId: wavesCustomerId,
+            paymentMethodId: saved.id,
+            stripePaymentMethodId: stripePmId,
+            source: 'pay_page',
+            methodType: saved.method_type || 'card',
+            database: trx,
+          });
         });
+        if (consentRefusedForPayer) {
+          logger.warn(`[stripe-webhook] covered-capture SI ${setupIntent.id} — invoice ${coveredInvoiceId} moved to a third-party payer during the save; no consent recorded, no enrollment`);
+          return;
+        }
       }
       await ConsentService.linkPaymentMethodId(stripePmId, saved.id);
       const { enrollConsentedMethod } = require('../services/autopay-enrollment');
