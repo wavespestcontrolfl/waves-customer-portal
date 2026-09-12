@@ -84,9 +84,6 @@ async function deliverConfirmedAssessment({ assessmentId }, deps = {}) {
     await attachWeatherOnce((await runs.deliveryState(assessmentId, knex)).assessment);
     const actions = [
       ['calibration', async (state) => {
-        // No snapshot, no recoverable comparison: stay owed rather than complete
-        // a run that quietly dropped the technician's corrections.
-        if (!state.calibration) throw stepIncomplete('calibration');
         const { aiScores, finalScores, technicianId } = state.calibration;
         await LawnIntel.recordTechCalibration(assessmentId, aiScores, finalScores, { knex, strict: true, technicianId });
       }],
@@ -116,7 +113,9 @@ async function deliverConfirmedAssessment({ assessmentId }, deps = {}) {
       done.push(step);
     }
     await guard();
-    const { assessment, notificationUnsettled } = await runs.deliveryState(assessmentId, knex);
+    const { assessment, notificationUnsettled, calibrationEvidenceLost } = await runs.deliveryState(assessmentId, knex);
+    // The comparison is gone for good; the visit's other delivery is not.
+    if (calibrationEvidenceLost) logger.warn('[lawn-visit-delivery] completing without a confirmation snapshot', { assessmentId });
     // Completing over an unsettled claim is the one outcome nobody can verify:
     // name the assessment so a person can check the messaging audit for it.
     if (notificationUnsettled) logger.warn('[lawn-visit-delivery] completing with an unsettled notification claim', { assessmentId });

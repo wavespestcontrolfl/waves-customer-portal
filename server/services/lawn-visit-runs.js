@@ -325,11 +325,10 @@ function calibrationForRun(assessment, run) {
   return { aiScores: snapshot.ai_scores, finalScores: snapshot.final_scores, technicianId };
 }
 
-// A confirmation snapshot is the only record of what the technician changed, so
-// a run without one cannot prove its calibration either way. Completing such a
-// run would silently discard the AI-versus-technician comparison; an absent
-// snapshot is therefore an OWED step, distinct from a snapshot that says the
-// visit was not calibration-eligible, which owes nothing.
+// A confirmation snapshot is the only record of what the technician changed. A
+// run without one cannot have its comparison reconstructed — the assessment row
+// may have been edited since — so the loss is surfaced at completion rather
+// than silently passing as a visit that owed no calibration.
 function calibrationEvidenceMissing(run) {
   return !parseObject(run?.reconciliation)?.confirmation;
 }
@@ -349,7 +348,11 @@ async function deliveryState(assessmentId, knex) {
   const calibration = calibrationForRun(assessment, run);
   const gaps = [];
   const calibrationRecorded = await knex('tech_calibration').where({ assessment_id: assessmentId }).first('id');
-  if (!calibrationRecorded && (calibration || calibrationEvidenceMissing(run))) gaps.push('calibration');
+  if (calibration && !calibrationRecorded) gaps.push('calibration');
+  // Reported, not owed. A run with no snapshot has no recoverable comparison —
+  // blocking on it would strand every other step behind evidence this runner
+  // cannot produce — so completion says so instead of pretending it was fine.
+  const calibrationEvidenceLost = !calibrationRecorded && calibrationEvidenceMissing(run);
   if (!completedRecommendations(assessment.recommendations)) gaps.push('recommendations');
   if (!run.pipeline_health_completed_at) gaps.push('health');
   if (!assessment.service_id && !assessment.notification_sent) gaps.push('notification');
@@ -360,7 +363,7 @@ async function deliveryState(assessmentId, knex) {
   const notificationUnsettled = !assessment.service_id
     && assessment.notification_sent === true && !assessment.notification_sent_at;
   if (!(assessment.report_auto_generated === true || assessment.report_id)) gaps.push('report');
-  return { assessment, run, gaps, calibration, notificationUnsettled };
+  return { assessment, run, gaps, calibration, notificationUnsettled, calibrationEvidenceLost };
 }
 
 async function markPipelineHealthComplete(assessmentId, ownerToken, knex, { staleAfterMs = PIPELINE_STALE_MS } = {}) {

@@ -356,15 +356,21 @@ const deferred = () => { let resolve; const promise = new Promise((r) => { resol
     expect(new Set(sweptOver)).toEqual(new Set([...poison, transient.id]));
   });
 
-  test('a run with no confirmation snapshot stays owed instead of completing without calibration', async () => {
+  test('a run with no confirmation snapshot delivers what it can and reports the lost comparison', async () => {
     const assessment = await seed();
     await db.knex('lawn_assessment_runs').where({ assessment_id: assessment.id })
       .update({ reconciliation: JSON.stringify({}) });
     const deps = dependencies();
-    await expect(deliver(assessment.id, deps)).rejects.toMatchObject({ code: 'LAWN_DELIVERY_STEP_INCOMPLETE' });
+    const logger = require('../services/logger');
+    logger.warn.mockClear();
+    await deliver(assessment.id, deps);
+    // The comparison cannot be rebuilt — the assessment row may have changed
+    // since — but the report and the customer's text still can be.
     expect(deps.LawnIntel.recordTechCalibration).not.toHaveBeenCalled();
-    // Completing here would silently discard the technician's corrections.
-    expect((await stored(assessment.id)).pipeline_completed_at).toBeNull();
+    expect(logger.warn).toHaveBeenCalledWith('[lawn-visit-delivery] completing without a confirmation snapshot', { assessmentId: assessment.id });
+    expect(deps.LawnIntel.sendAssessmentNotification).toHaveBeenCalledTimes(1);
+    expect(deps.LawnIntel.generateServiceReport).toHaveBeenCalledTimes(1);
+    expect((await stored(assessment.id)).pipeline_completed_at).toBeInstanceOf(Date);
   });
 
   test('a snapshot that says the visit was not calibration-eligible owes nothing', async () => {
