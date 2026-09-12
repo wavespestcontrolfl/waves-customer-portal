@@ -504,8 +504,8 @@ describe('lockedStop: creation and both reconcile passes see the same stop (roun
   // the tech every five minutes. One shared reader makes that impossible.
   const now = new Date('2026-09-10T15:30:00Z');
   const members = [
-    { id: 'aaa', visit_id: 'stop-1', status: 'pending', scheduled_date: '2026-09-10' },
-    { id: 'bbb', visit_id: 'stop-1', status: 'pending', scheduled_date: '2026-09-10' },
+    { id: 'aaa', visit_id: 'stop-1', status: 'pending', scheduled_date: '2026-09-10', customer_id: 'cust-1', property_id: 'prop-1' },
+    { id: 'bbb', visit_id: 'stop-1', status: 'pending', scheduled_date: '2026-09-10', customer_id: 'cust-1', property_id: 'prop-1' },
   ];
   // The grouped reminder's evidence is linked to the SIBLING, not the
   // representative the card and the alert are keyed on.
@@ -587,6 +587,22 @@ describe('lockedStop: creation and both reconcile passes see the same stop (roun
     expect(evidenceReads).toBe(0);
     expect(promise).toMatchObject({ visit_id: 'bbb' });
     expect(live).toMatchObject({ stage: 2 });
+  });
+
+  test('a stop lock that cannot be taken skips the row, and never proceeds unlocked', async () => {
+    const detector = require('fs').readFileSync(require('path').join(__dirname, '..', 'services', 'no-show-detector.js'), 'utf8');
+    // The lock is taken BEFORE any row lock — visit-groups' splitChild can
+    // lock the higher-id child and wait for its sibling while an id-ordered
+    // FOR UPDATE here does the reverse (round-22 P1) — and its failure is
+    // propagated, not swallowed: continuing unlocked restores the inversion.
+    expect(detector).toContain("await require('./visit-groups').lockStopForRow(trx, serviceId);");
+    expect(detector).not.toContain('lockStopForRow(trx, serviceId).catch');
+    expect(detector.indexOf('lockStopForRow(trx, serviceId)'))
+      .toBeLessThan(detector.indexOf("const row = await trx('scheduled_services').where({ id: serviceId }).first();"));
+    // Each row runs inside withRow, so one unlockable stop skips that row
+    // instead of aborting the sweep.
+    expect(detector).toContain('async function withRow(id, run) {');
+    expect(detector).toContain('const notice = await withRow(card.id, () => conn.transaction(async (trx) => {');
   });
 
   test('a missing row yields nothing, not a throw', async () => {

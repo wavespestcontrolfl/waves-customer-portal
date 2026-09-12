@@ -1288,7 +1288,12 @@ async function lockedStop(trx, serviceId, { now = new Date(), ignoreHorizon = fa
   // sibling first and waits for the child — a lock inversion that deadlocks
   // the sweep against an operator's split (codex P1 round 22). Holding the
   // stop lock serialises the two, and it is released with the transaction.
-  await require('./visit-groups').lockStopForRow(trx, serviceId).catch(() => null);
+  // NOT swallowed: lockStopForRow throws VISIT_STOP_MOVED when the stop
+  // changed under the peek, and continuing without the lock would put back
+  // exactly the inversion it prevents. Each caller's transaction is one row,
+  // so the throw skips that row and the next tick retries it (codex P1 round
+  // 22, second pass).
+  await require('./visit-groups').lockStopForRow(trx, serviceId);
   // The first read takes NO lock: it only answers "which stop is this?".
   // Locking the representative and then the group would take row locks in
   // two different orders (this row first, then every member in id order),
@@ -1390,6 +1395,18 @@ async function cleanupAfterDisable(conn) {
   return { resolved: open.length, dismissed: Number(dismissed) || 0 };
 }
 
+// One row's transaction, isolated: a stop lock that cannot be taken (another
+// pass holds it) or a stop that moved under the peek raises, and that must
+// skip this row rather than abort the sweep — the next tick retries it.
+async function withRow(id, run) {
+  try {
+    return await run();
+  } catch (err) {
+    require('./logger').warn(`[no-show-detector] row ${id} skipped this tick: ${err.message}`);
+    return null;
+  }
+}
+
 async function sweep(conn, { now = new Date() } = {}) {
   if (!enabled()) return { alerted: 0 };
   const rows = await listNoShows(conn, { now, limit: 10000 });
@@ -1417,7 +1434,9 @@ async function sweep(conn, { now = new Date() } = {}) {
   const tickPromises = evidenceIds.length
     ? latestPromises(await loadPromiseEvents(conn, evidenceIds, { now }), now) : new Map();
   for (const card of rows) {
-    const notice = await conn.transaction(async (trx) => {
+    // One row's failure — a stop lock that could not be taken, a moved stop —
+    // must not abort the sweep: the next tick retries it.
+    const notice = await withRow(card.id, () => conn.transaction(async (trx) => {
       // Re-read the WHOLE stop under the lock, not just the representative:
       // a grouped visit is evaluated as one (see groupedStops), so its
       // confirmation here must use the same members, the same shared promise
@@ -1465,12 +1484,12 @@ async function sweep(conn, { now = new Date() } = {}) {
         alerted += 1;
       }
       return notice;
-    });
+    }));
     // Deliver each committed notice before another row or cleanup can fail.
     if (notice) await techNotices.pushTrackingNotice(notice);
   }
   // The same rows the evidence preload above was built from.
-  for (const alert of openAlerts) await conn.transaction(async (trx) => {
+  for (const alert of openAlerts) await withRow(alert.job_id, () => conn.transaction(async (trx) => {
     if (!enabled()) return;
     const { live } = await lockedStop(trx, alert.job_id, { now, ignoreHorizon: true, promises: tickPromises });
     // ignoreHorizon: true — past the 48h horizon this alert's own visit
@@ -1495,7 +1514,7 @@ async function sweep(conn, { now = new Date() } = {}) {
       // must not treat this row as a human resolution.
       await dispatch.resolveAlert({ id: alert.id, trx, auto: true });
     }
-  });
+  }));
   // Tech-side notices have no auto-resolve of their own (codex P1): a
   // stage-1-only notice never gets a dispatch_alerts row, and even a stage 2
   // that DOES only clears the office side above. Reconcile every unread/
@@ -1503,7 +1522,7 @@ async function sweep(conn, { now = new Date() } = {}) {
   // is scoped to the technician_id it was written for), or superseded by a
   // later stage (dedupeKey differs per stage, so the old stage-1 row would
   // otherwise sit next to the new stage-2 one forever) all dismiss it.
-  for (const notice of activeNotices) await conn.transaction(async (trx) => {
+  for (const notice of activeNotices) await withRow(notice.payload?.visit_id, () => conn.transaction(async (trx) => {
     if (!enabled()) return;
     const visitId = notice.payload?.visit_id;
     const { visit, live } = visitId ? await lockedStop(trx, visitId, { now, ignoreHorizon: true, promises: tickPromises })
@@ -1533,7 +1552,7 @@ async function sweep(conn, { now = new Date() } = {}) {
         .update({ dismissed_at: dismissedAt, read: true, updated_at: dismissedAt,
           payload: trx.raw("COALESCE(payload, '{}'::jsonb) || jsonb_build_object('superseded_at', ?::text)", [dismissedAt.toISOString()]) });
     }
-  });
+  }));
   return { alerted, active: rows.length };
 }
 
