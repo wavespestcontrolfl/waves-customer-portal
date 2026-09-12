@@ -685,6 +685,36 @@ it('the shared tank survives removing the row that owned it', async () => {
   expect(totals()[3].value).toBe('100');
 });
 
+// An owner that leaves per-gallon frees the slot just like removal does; the
+// rows still on its mix keep the tank, so a detached row's next edit cannot
+// propagate over them (pre-push audit P1).
+it('the tank survives its owner changing rate unit, and a detached row still cannot claim it', async () => {
+  enableDefaults();
+  const mk = (id, rate) => ({ id, name: `Fixture unit ${id}`, category: 'insecticide', default_unit: 'fl_oz/gal', default_rate: rate });
+  const [a, b, c] = [mk('unit-a', '1'), mk('unit-b', '2'), mk('unit-c', '4')];
+  render(<CompletionPanel service={service} products={[...catalog, a, b, c]} onClose={() => {}} onSubmit={submit} />);
+  await waitFor(() => expect(totals()).toHaveLength(2), { timeout: 5000 });
+  let count = 2;
+  for (const product of [a, b, c]) {
+    fireEvent.change(screen.getByPlaceholderText('Search products...'), { target: { value: product.name } });
+    fireEvent.click(screen.getByText(product.name));
+    count += 1;
+    await waitFor(() => expect(totals()).toHaveLength(count));
+  }
+  const gal = () => screen.getAllByPlaceholderText('Gal');
+  fireEvent.change(gal()[0], { target: { value: '25' } });
+  await waitFor(() => expect(totals()[4].value).toBe('100'));
+  fireEvent.change(gal()[1], { target: { value: '10' } });
+  await waitFor(() => expect(totals()[3].value).toBe('20'));
+  // A owned the tank; take it off per-gallon and C keeps the 25-gallon mix.
+  fireEvent.change(within(totals()[2].parentElement).getAllByRole('combobox')[0], { target: { value: 'fl_oz' } });
+  await waitFor(() => expect(screen.getAllByPlaceholderText('Gal')).toHaveLength(2));
+  fireEvent.change(screen.getAllByPlaceholderText('Gal')[0], { target: { value: '12' } });
+  await waitFor(() => expect(totals()[3].value).toBe('24'));
+  expect(screen.getAllByPlaceholderText('Gal')[1].value).toBe('25');
+  expect(totals()[4].value).toBe('100');
+});
+
 it('a rate unit moving off per-gallon does not strand the tank total', async () => {
   enableDefaults();
   const added = { id: 'manual-taurus', name: 'Fixture termiticide', category: 'insecticide', default_unit: 'fl_oz/gal', default_rate: '0.8' };

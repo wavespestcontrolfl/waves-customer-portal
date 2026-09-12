@@ -14830,7 +14830,11 @@ export function CompletionPanel({
       // so a row given its own gallons detaches alone.
       const tankOwner = tankOwnerRow(prev);
       const propagateTank = tankPropagates(prev, productId, field);
-      return prev.map((p) => {
+      // An owner that leaves per-gallon frees the slot the same way removing
+      // it does, and the rows still on its mix keep the tank: without an heir
+      // the next gallons edit — a detached row's included — would propagate
+      // over them (pre-push audit P1). Idempotent while an owner remains.
+      return promoteTankOwner(prev.map((p) => {
         if (p.productId !== productId) return propagateTank ? followTank(p, value) : p;
         const next = { ...p, [field]: value };
         // Leaving a per-gallon rate retires the tank with it, on every lane —
@@ -14961,7 +14965,7 @@ export function CompletionPanel({
         // totals the plan cannot express; none of them has to know about
         // tanks (Codex r1 P1).
         return applyTankDose(next);
-      });
+      }));
     });
   }
   function toggleArea(area) {
