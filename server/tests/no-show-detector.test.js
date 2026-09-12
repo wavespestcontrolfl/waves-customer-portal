@@ -359,6 +359,17 @@ describe('candidates come from the promise as well as the schedule (deferred P2,
     expect(ids.sort()).toEqual(['v1', 'v2', 'v3', 'v4', 'v5', 'v6', 'v7']);
   });
 
+  // The grouped reminder is linked to whichever member won the send claim,
+  // and that member may have been cancelled since — the live siblings still
+  // holding its window would then be recalled by nobody, because the status
+  // filter drops the only id the promise pointed at (round-26 P1).
+  test('the live siblings of a cancelled promise owner are pulled in explicitly', () => {
+    const detector = require('fs').readFileSync(require('path').join(__dirname, '..', 'services', 'no-show-detector.js'), 'utf8');
+    expect(detector).toContain('const strandedStops = promisedIds.length');
+    expect(detector).toContain(".whereIn('id', promisedIds).whereNotIn('status', LIVE_STATUSES)");
+    expect(detector).toContain(".whereIn('s.visit_id', strandedStops).whereIn('s.status', LIVE_STATUSES)");
+  });
+
   test('nothing communicated recently -> no extra candidates', async () => {
     const conn = () => {
       const chain = {};

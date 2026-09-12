@@ -5070,6 +5070,10 @@ router.post('/:serviceId/reschedule', async (req, res, next) => {
         req.params.serviceId,
         String(newDate).split('T')[0],
         noticeStart,
+        // One notice for the WHOLE stop: recorded as stop-wide so the no-show
+        // detector treats it as superseding every member's own promise rather
+        // than only the tapped service's (codex P1, PR #4403 round 26).
+        { stopWideFor: result.visitMove?.visitId || null },
       );
       return res.json({ ...result, notificationSent: notice.sent, notificationError: notice.error });
     }

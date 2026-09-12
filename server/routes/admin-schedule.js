@@ -1125,7 +1125,14 @@ async function resetAppointmentReminderForScheduleRewrite(trx, scheduledServiceI
 // (no enforcement); a string = the card-approved number; null = the card
 // showed NO SMS recipient — a phone that appears afterwards must refuse,
 // never receive a text the operator did not approve.
-async function sendRescheduleNoticeForVisit(serviceId, dateStr, startHHMM, { expectedPhone = undefined } = {}) {
+// `stopWideFor`: the service_visits id when this ONE notice speaks for a
+// whole grouped stop (admin-dispatch moves a stop as a unit and quotes the
+// stop's landed start). It rides into the message metadata as the
+// notification event key, which is how no-show-detector.js tells copy that
+// supersedes every member's own promise from copy about one service — without
+// it, each sibling kept its pre-move window and could raise a false alert
+// against it (codex P1, PR #4403 round 26).
+async function sendRescheduleNoticeForVisit(serviceId, dateStr, startHHMM, { expectedPhone = undefined, stopWideFor = null } = {}) {
   // Shared belt for every notice path (update-details, bulk reschedule, IB
   // schedule tools): a LEGACY outbound-review row (pending before the
   // 2026-08-11 review-hold removal) must be activated — reminders armed,
@@ -1204,6 +1211,7 @@ async function sendRescheduleNoticeForVisit(serviceId, dateStr, startHHMM, { exp
         });
       }, 'appointment_rescheduled', 'appointment_confirmation', {
         scheduled_service_id: serviceId,
+        ...(stopWideFor ? { notificationEventKey: `visit:${stopWideFor}` } : {}),
         // ABA guard input (codex #3609 r48): the slot this notice quotes —
         // the shared guard accepts either the row's own start or the
         // grouped stop's canonical start, so visitMove.visitStart works.

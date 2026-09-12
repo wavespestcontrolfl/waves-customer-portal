@@ -1169,7 +1169,24 @@ async function listNoShows(conn, { now = new Date(), limit = 100 } = {}) {
       .whereBetween('s.scheduled_date', [etDateString(new Date(now.getTime() - 60 * 86400000)), etDateString(new Date(now.getTime() + 100 * 86400000))])
       .modify((inner) => { if (promisedIds.length) inner.orWhereIn('s.id', promisedIds); }))
     .select('s.*', 'c.first_name', 'c.last_name', 'c.phone');
-  const liveRows = rows.filter((r) => !require('./internal-test-customers').isInternalTestCustomerId(r.customer_id));
+  // A recalled row that is NOT live still names a stop: the grouped reminder
+  // is linked to whichever member won the send claim, and that member may
+  // have been cancelled since — in which case the live siblings that are
+  // still holding its window would be recalled by nobody, because the status
+  // filter above drops the only id the promise pointed at (codex P1 round
+  // 26). Their stop is pulled in explicitly.
+  const strandedStops = promisedIds.length
+    ? (await conn('scheduled_services').whereIn('id', promisedIds).whereNotIn('status', LIVE_STATUSES)
+      .whereNotNull('visit_id').distinct('visit_id')).map((r) => r.visit_id)
+    : [];
+  const stranded = strandedStops.length
+    ? await conn('scheduled_services as s').join('customers as c', 'c.id', 's.customer_id')
+      .whereIn('s.visit_id', strandedStops).whereIn('s.status', LIVE_STATUSES)
+      .whereNotIn('s.id', rows.map((r) => r.id))
+      .select('s.*', 'c.first_name', 'c.last_name', 'c.phone')
+    : [];
+  const liveRows = [...rows, ...stranded]
+    .filter((r) => !require('./internal-test-customers').isInternalTestCustomerId(r.customer_id));
   // Pull in every member of the stops these candidates belong to, even the
   // ones this query could not return — a sibling already completed, outside
   // the date window, or filtered out by the tech scope. The grouped reminder
