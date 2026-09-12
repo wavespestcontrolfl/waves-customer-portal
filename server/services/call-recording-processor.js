@@ -8317,24 +8317,41 @@ const CallRecordingProcessor = {
         }
         : null);
 
-    // `.ignore()` on the open-card conflict keeps the FIRST pass's payload, so
-    // reprocessing an already-triaged call leaves the card showing only the
-    // garble while THIS pass holds the candidates — including the live cards
-    // that motivated the change (codex #4437 r1 P2). Merge the recovery
-    // evidence into whatever card is still open: `||` overwrites exactly these
-    // keys and leaves the operator-facing fields of the payload alone.
-    // Best-effort; the insert above is what must not fail.
-    const mergeAddressRecoveryEvidence = async (flag) => {
-      const evidence = addressRecoveryPayload(flag);
-      if (!evidence) return;
+    // ONE fenced reconciliation for the whole pass, run after every filing
+    // site in both modes (codex #4437 r5). Patching inserts one at a time kept
+    // leaving sites out — the two fail-open demotion loops and the dedicated
+    // address_recovered branch never carried the evidence at all, and a card
+    // that already existed kept a stale payload through the conflict-ignored
+    // insert. This single write owns the invariant instead of six call sites
+    // sharing it: whatever address cards this call has open, they carry THIS
+    // pass's recovery evidence, including sites added later.
+    //
+    // Fenced on the claim. The recovery fan-out above awaits bounded network
+    // calls, so a worker that lost its claim meanwhile must not overwrite the
+    // replacement pass's evidence with its own stale candidates — the same
+    // processing_token predicate every other post-provider write here uses.
+    const reconcileAddressRecoveryEvidence = async () => {
+      if (!addressRecovery?.attempted) return;
+      const evidence = {
+        address_as_heard: rawStreetBeforeAdopt,
+        address_candidates: addressRecovery.candidates || [],
+        recovery_method: addressRecovery.method || null,
+        recovery_prompt_version: RECOVERY_PROMPT_VERSION,
+      };
       await db('triage_items')
-        .where({ call_log_id: call.id, reason_code: flag })
+        .where('call_log_id', call.id)
+        .whereIn('reason_code', ['address_unverified', 'address_recovered'])
         .whereIn('status', ['open', 'in_progress'])
+        .whereExists(function owningPass() {
+          this.select(db.raw('1')).from('call_log')
+            .whereRaw('call_log.id = ?', [call.id])
+            .where('call_log.processing_token', procToken);
+        })
         .update({
           payload: db.raw('coalesce(payload, \'{}\'::jsonb) || ?::jsonb', [JSON.stringify(evidence)]),
           updated_at: new Date(),
         })
-        .catch((e) => logger.warn(`[call-proc] address-evidence merge failed for ${maskSid(callSid)}: ${e.code || e.name || 'db_error'}`));
+        .catch((e) => logger.warn(`[call-proc] address-evidence reconcile failed for ${maskSid(callSid)}: ${e.code || e.name || 'db_error'}`));
     };
 
     // Explicit SMS consent is a property of the CALL, not of the routing mode:
@@ -8464,7 +8481,6 @@ const CallRecordingProcessor = {
               }))
               .onConflict(db.raw('(call_log_id, reason_code) WHERE status IN (\'open\', \'in_progress\')'))
               .ignore();
-            await mergeAddressRecoveryEvidence(flag);
           }
 
           // A recovered street auto-routes on the recovered verdict above, but
@@ -8566,8 +8582,7 @@ const CallRecordingProcessor = {
                 extraPayload: addressRecoveryPayload(flag),
               });
               await db('triage_items').insert(triageItem).onConflict(db.raw('(call_log_id, reason_code) WHERE status IN (\'open\', \'in_progress\')')).ignore();
-              await mergeAddressRecoveryEvidence(flag);
-            }
+              }
             // Demoted flags survive a block by ANOTHER gate (codex round-4
             // P2): an agent-committed call held on e.g. address_unverified
             // must still surface the "confirm the account holder" advisory —
@@ -8867,11 +8882,7 @@ const CallRecordingProcessor = {
                 }))
                 .onConflict(db.raw('(call_log_id, reason_code) WHERE status IN (\'open\', \'in_progress\')'))
                 .ignore();
-              // Same reprocess gap the enforce sites close: an already-open card
-              // keeps its first payload, so the stamp and candidates would never
-              // reach it.
-              await mergeAddressRecoveryEvidence(flag);
-            } catch (triageErr) {
+              } catch (triageErr) {
               logger.warn(`[call-proc-bridge] triage_items insert failed for ${maskSid(callSid)}: ${triageErr.message}`);
             }
           }
@@ -8984,6 +8995,11 @@ const CallRecordingProcessor = {
         logger.warn(`[call-proc] email review skipped for ${maskSid(callSid)}: ${emailErr.message}`);
       }
     }
+
+    // Every address card for this pass is filed by now (both modes, every
+    // branch) — reconcile the recovery evidence onto all of them in one
+    // fenced write.
+    await reconcileAddressRecoveryEvidence();
 
     // Hard veto → record extraction for audit, skip all canonical writes
     // (no customer, no lead, no appointment, no automation). Mirrors the

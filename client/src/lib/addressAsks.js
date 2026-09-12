@@ -97,12 +97,23 @@ export function addressAskNotice(asks) {
   // genuine validation failure. Classifying after selection let call A's
   // known building hide call B's unresolvable address (pre-push P1).
   const sameCall = (a, b) => (a.call_log_id ?? null) === (b.call_log_id ?? null);
+  // A successful recovery SUPERSEDES that same call's generic validation
+  // failure. Reprocessing a call from failed to successful recovery files a
+  // NEW address_recovered card and leaves the old address_unverified card
+  // active; the reason codes differ, so no payload merge can ever update the
+  // stale one. Without this the banner keeps reporting "did not validate" and
+  // hides the street that was actually recovered (codex #4437 r5 P2). Scoped
+  // to the generic hold only — a missing unit can still be owed on a call
+  // whose street was recovered.
+  const considered = open.filter((i) => !(i.reason_code === 'address_unverified'
+    && open.some((r) => r.reason_code === 'address_recovered' && sameCall(r, i))));
+  const pool = considered.length > 0 ? considered : open;
   const effectiveRank = (i) => {
     const r = rank(i);
-    if (r === 0 && open.some((u) => u.reason_code === 'missing_unit_number' && sameCall(u, i))) return 2;
+    if (r === 0 && pool.some((u) => u.reason_code === 'missing_unit_number' && sameCall(u, i))) return 2;
     return r;
   };
-  const sorted = [...open].sort((a, b) => effectiveRank(a) - effectiveRank(b));
+  const sorted = [...pool].sort((a, b) => effectiveRank(a) - effectiveRank(b));
   // Among equals, prefer a card that actually carries recovery evidence.
   const worst = effectiveRank(sorted[0]);
   const card = sorted.find((i) => effectiveRank(i) === worst && i.payload?.address_as_heard) || sorted[0];

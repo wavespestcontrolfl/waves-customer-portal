@@ -151,10 +151,13 @@ describe('read-back cards (validated premise, unconfirmed street)', () => {
   });
 
   // A card that did not validate at all is the worse problem — it wins the copy.
-  it('a validation failure outranks a read-back card', () => {
+  // Ids are explicit: these are two INDEPENDENT calls. The same two reason
+  // codes on ONE call is the supersede case instead (recovery resolved that
+  // call's hold), covered in its own describe below.
+  it('a validation failure outranks a read-back card on another call', () => {
     const notice = addressAskNotice([
-      ask('address_recovered', { address_as_heard: 'recovered one' }),
-      ask('address_unverified', { address_as_heard: 'unvalidated one' }),
+      ask('address_recovered', { address_as_heard: 'recovered one' }, 'call-A'),
+      ask('address_unverified', { address_as_heard: 'unvalidated one' }, 'call-B'),
     ]);
 
     expect(notice.readbackOnly).toBe(false);
@@ -218,5 +221,46 @@ describe('missing unit number alongside its companion hold', () => {
     expect(notice.unitOnly).toBe(false);
     expect(notice.reason).toBe('the address from the call did not validate');
     expect(notice.heard).toBe('unvalidated one');
+  });
+});
+
+// Reprocessing a call from failed to successful recovery files a NEW
+// address_recovered card and leaves the old address_unverified card active.
+// Different reason codes, so no payload merge can update the stale one.
+describe('a successful recovery supersedes the same call\'s stale hold', () => {
+  it('shows the recovered street, not "did not validate"', () => {
+    const notice = addressAskNotice([
+      ask('address_unverified', { address_as_heard: '100 Port Ave East' }, 'call-1'),
+      ask('address_recovered', { address_as_heard: '100 Port Ave East', address_candidates: ['100 4th Avenue East'] }, 'call-1'),
+    ]);
+
+    expect(notice.readbackOnly).toBe(true);
+    expect(notice.reason).toMatch(/pieced back together/);
+    expect(notice.candidates).toEqual(['100 4th Avenue East']);
+  });
+
+  it('does not supersede a DIFFERENT call\'s validation failure', () => {
+    const notice = addressAskNotice([
+      ask('address_unverified', { address_as_heard: 'B unvalidated' }, 'call-B'),
+      ask('address_recovered', null, 'call-A'),
+    ]);
+
+    expect(notice.readbackOnly).toBe(false);
+    expect(notice.reason).toBe('the address from the call did not validate');
+  });
+
+  // Recovery fixed the street and a unit is still owed. The stale hold drops
+  // out, leaving the read-back (rank 1) ahead of the unit ask (rank 2) on the
+  // existing precedence — the operator is told the street was reconstructed,
+  // and confirms the whole address, unit included, on that same callback.
+  it('leads with the read-back when a unit is also owed', () => {
+    const notice = addressAskNotice([
+      ask('address_unverified', null, 'call-1'),
+      ask('address_recovered', null, 'call-1'),
+      ask('missing_unit_number', null, 'call-1'),
+    ]);
+
+    expect(notice.readbackOnly).toBe(true);
+    expect(notice.reason).toMatch(/pieced back together/);
   });
 });
