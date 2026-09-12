@@ -10,7 +10,7 @@
  */
 const fs = require('fs');
 const path = require('path');
-const { evaluateNoShow, latestPromises, promisedStartAt, stopState, stopPromise, LIVE_STATUSES } = require('../../server/services/no-show-detector');
+const { evaluateNoShow, promisedStartAt, stopState, stopPromise, LIVE_STATUSES } = require('../../server/services/no-show-detector');
 const { etDateString } = require('../../server/utils/datetime-et');
 
 // Was usable promise evidence in hand when a decision was actually required?
@@ -86,7 +86,10 @@ function replayVisit(item, { from, to, threshold }) {
       }
     }
     const memberStates = members.map((m) => m.state);
-    const perMember = new Map(members.map((m) => [String(m.id), latestPromises(m.promises, now).get(String(m.id))]));
+    // Event LISTS per member, the shape stopPromise needs: it has to see a
+    // grouped send even when a later per-service notice displaced it as that
+    // member's latest (codex P1 round 24).
+    const perMember = new Map(members.map((m) => [String(m.id), m.promises]));
     const promise = stopPromise(memberStates, perMember, now);
     const stop = stopState(memberStates, { now, since: promise?.start_at });
     const liveNow = LIVE_STATUSES.includes(stop.status);

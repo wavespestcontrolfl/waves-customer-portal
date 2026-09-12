@@ -489,8 +489,8 @@ describe('grouped stops are evaluated as one visit (round-10 P1)', () => {
     // applies only between confirmations that each speak for one service
     // (round-24 P1, second pass).
     const promises = new Map([
-      ['aaa', { visit_id: 'aaa', start_at: '2026-09-10T09:00:00Z', communicated_at: '2026-09-08T12:00:00Z', source: 'message' }],
-      ['bbb', { visit_id: 'bbb', start_at: '2026-09-10T13:00:00Z', communicated_at: '2026-09-09T12:00:00Z', source: 'message', grouped: true }],
+      ['aaa', [{ visit_id: 'aaa', start_at: '2026-09-10T09:00:00Z', communicated_at: '2026-09-08T12:00:00Z', source: 'message' }]],
+      ['bbb', [{ visit_id: 'bbb', start_at: '2026-09-10T13:00:00Z', communicated_at: '2026-09-09T12:00:00Z', source: 'message', grouped: true }]],
     ]);
     expect(stopPromise([a, b], promises, now)).toMatchObject({ visit_id: 'bbb', start_at: '2026-09-10T13:00:00Z' });
   });
@@ -502,9 +502,9 @@ describe('grouped stops are evaluated as one visit (round-10 P1)', () => {
     // confirmation came later and is not itself grouped (round-24 P1).
     const c = { id: 'ccc', visit_id: 'stop-1', status: 'pending' };
     const promises = new Map([
-      ['aaa', { visit_id: 'aaa', start_at: '2026-09-10T09:00:00Z', communicated_at: '2026-09-08T12:00:00Z', source: 'message' }],
-      ['bbb', { visit_id: 'bbb', start_at: '2026-09-10T13:00:00Z', communicated_at: '2026-09-09T12:00:00Z', source: 'message', grouped: true }],
-      ['ccc', { visit_id: 'ccc', start_at: '2026-09-10T11:00:00Z', communicated_at: '2026-09-09T18:00:00Z', source: 'message' }],
+      ['aaa', [{ visit_id: 'aaa', start_at: '2026-09-10T09:00:00Z', communicated_at: '2026-09-08T12:00:00Z', source: 'message' }]],
+      ['bbb', [{ visit_id: 'bbb', start_at: '2026-09-10T13:00:00Z', communicated_at: '2026-09-09T12:00:00Z', source: 'message', grouped: true }]],
+      ['ccc', [{ visit_id: 'ccc', start_at: '2026-09-10T11:00:00Z', communicated_at: '2026-09-09T18:00:00Z', source: 'message' }]],
     ]);
     expect(stopPromise([a, b, c], promises, now)).toMatchObject({ visit_id: 'ccc', start_at: '2026-09-10T11:00:00Z' });
   });
@@ -512,8 +512,8 @@ describe('grouped stops are evaluated as one visit (round-10 P1)', () => {
   test('stopPromise takes the EARLIEST promised window across members, not the latest sent', () => {
     const now = new Date('2026-09-10T12:00:00Z');
     const promises = new Map([
-      ['aaa', { visit_id: 'aaa', start_at: '2026-09-10T13:00:00Z', communicated_at: '2026-09-08T12:00:00Z', source: 'message' }],
-      ['bbb', { visit_id: 'bbb', start_at: '2026-09-10T09:00:00Z', communicated_at: '2026-09-09T12:00:00Z', source: 'message' }],
+      ['aaa', [{ visit_id: 'aaa', start_at: '2026-09-10T13:00:00Z', communicated_at: '2026-09-08T12:00:00Z', source: 'message' }]],
+      ['bbb', [{ visit_id: 'bbb', start_at: '2026-09-10T09:00:00Z', communicated_at: '2026-09-09T12:00:00Z', source: 'message' }]],
     ]);
     // Staff can group already-confirmed appointments without sending
     // replacement copy, so each member still holds its own confirmation:
@@ -522,14 +522,14 @@ describe('grouped stops are evaluated as one visit (round-10 P1)', () => {
     // the customer expects at 09:00 (round-24 P1).
     expect(stopPromise([a, b], promises, now)).toMatchObject({ visit_id: 'bbb' });
     const reversed = new Map([
-      ['aaa', { visit_id: 'aaa', start_at: '2026-09-10T09:00:00Z', communicated_at: '2026-09-09T12:00:00Z', source: 'message' }],
-      ['bbb', { visit_id: 'bbb', start_at: '2026-09-10T13:00:00Z', communicated_at: '2026-09-09T18:00:00Z', source: 'message' }],
+      ['aaa', [{ visit_id: 'aaa', start_at: '2026-09-10T09:00:00Z', communicated_at: '2026-09-09T12:00:00Z', source: 'message' }]],
+      ['bbb', [{ visit_id: 'bbb', start_at: '2026-09-10T13:00:00Z', communicated_at: '2026-09-09T18:00:00Z', source: 'message' }]],
     ]);
     expect(stopPromise([a, b], reversed, now)).toMatchObject({ visit_id: 'aaa' });
     // An UNKNOWN window still wins when it is the newest thing the customer
     // heard — the legacy move-notice rule.
     const superseded = new Map([...reversed,
-      ['bbb', { visit_id: 'bbb', start_at: null, communicated_at: '2026-09-10T08:00:00Z', source: 'message' }]]);
+      ['bbb', [{ visit_id: 'bbb', start_at: null, communicated_at: '2026-09-10T08:00:00Z', source: 'message' }]]]);
     expect(stopPromise([a, b], superseded, now)).toMatchObject({ visit_id: 'bbb', start_at: null });
     // A sibling with no evidence of its own inherits the stop's.
     expect(stopPromise([a, { id: 'zzz' }], promises, now)).toMatchObject({ visit_id: 'aaa' });
@@ -623,8 +623,8 @@ describe('lockedStop: creation and both reconcile passes see the same stop (roun
     };
     trx.raw = (sql) => ({ sql });
     trx.isTransaction = true;
-    const preloaded = new Map([['bbb', { visit_id: 'bbb', start_at: '2026-09-10T13:00:00Z',
-      communicated_at: '2026-09-09T12:00:00Z', source: 'message' }]]);
+    const preloaded = new Map([['bbb', [{ visit_id: 'bbb', start_at: '2026-09-10T13:00:00Z',
+      communicated_at: '2026-09-09T12:00:00Z', source: 'message' }]]]);
     const { promise, live } = await lockedStop(trx, 'aaa', { now, promises: preloaded });
     expect(evidenceReads).toBe(0);
     expect(promise).toMatchObject({ visit_id: 'bbb' });

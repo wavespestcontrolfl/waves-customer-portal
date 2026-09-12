@@ -990,20 +990,41 @@ function stopState(members = [], { now = new Date(), since = null } = {}) {
     actual_start_time: earliest('actual_start_time'), check_in_time: earliest('check_in_time') };
 }
 
+// Promise events grouped by visit id — what stopPromise needs, since it has
+// to see a grouped send even when a later per-service notice has displaced it
+// as some member's latest.
+function byVisit(events = []) {
+  const map = new Map();
+  for (const event of events) {
+    const key = String(event.visit_id || '');
+    if (!key) continue;
+    if (!map.has(key)) map.set(key, []);
+    map.get(key).push(event);
+  }
+  return map;
+}
+
 // Pure, exported for tests. The stop's communicated window: the latest
 // promise across ALL members, because the grouped reminder's evidence is
 // linked to whichever member won the claim for that tier — a sibling has no
 // evidence of its own, and reading its id alone would fall back to an older
 // promise or none at all.
-function stopPromise(members = [], promises = new Map(), now = new Date()) {
-  const held = members.map((member) => promises.get(String(member.id)))
-    .filter((promise) => promise && instant(promise.communicated_at) <= instant(now));
+function stopPromise(members = [], eventsByVisit = new Map(), now = new Date()) {
+  // The full event list per member, not just each member's latest: a grouped
+  // send stops being anyone's latest as soon as one member gets a later
+  // per-service notice, and the supersession below would then be invisible —
+  // leaving another member's stale pre-grouped confirmation standing (codex
+  // P1 round 24, fourth pass).
+  const eventsOf = (member) => eventsByVisit.get(String(member.id)) || [];
+  const held = members.map((member) => latestPromises(eventsOf(member), now).get(String(member.id)))
+    .filter(Boolean);
   if (!held.length) return null;
   // Anything communicated BEFORE the newest grouped send is gone: that send
   // quoted one window for every member, so a member's older per-service
   // confirmation no longer stands even if another member's confirmation came
   // later and is not itself grouped (codex P1 round 24, third pass).
-  const newestGrouped = held.filter((promise) => promise.grouped)
+  const newestGrouped = members.flatMap(eventsOf)
+    .filter((event) => event.grouped && instant(event.communicated_at) <= instant(now))
     .reduce((a, b) => (!a || instant(a.communicated_at) < instant(b.communicated_at) ? b : a), null);
   const own = newestGrouped
     ? held.filter((promise) => instant(promise.communicated_at) >= instant(newestGrouped.communicated_at))
@@ -1353,7 +1374,7 @@ async function lockedStop(trx, serviceId, { now = new Date(), ignoreHorizon = fa
   // (codex P2 round 16). The lock still protects the schedule rows, which are
   // what the decision writes against; evidence a few seconds old cannot make
   // a card appear or vanish that the next tick would not correct.
-  const known = promises || latestPromises(await loadPromiseEvents(trx, members.map((m) => String(m.id)), { now }), now);
+  const known = promises || byVisit(await loadPromiseEvents(trx, members.map((m) => String(m.id)), { now }));
   const promise = stopPromise(members, known, now);
   const live = evaluateNoShow({ visit: stopState(members, { now, since: promise?.start_at }), promise, now, ignoreHorizon });
   // A card belongs to the stop's representative. If this row is no longer it
@@ -1467,7 +1488,7 @@ async function sweep(conn, { now = new Date() } = {}) {
     : [];
   const evidenceIds = [...new Set([...touched, ...stopsTouched])];
   const tickPromises = evidenceIds.length
-    ? latestPromises(await loadPromiseEvents(conn, evidenceIds, { now }), now) : new Map();
+    ? byVisit(await loadPromiseEvents(conn, evidenceIds, { now })) : new Map();
   for (const card of rows) {
     // One row's failure — a stop lock that could not be taken, a moved stop —
     // must not abort the sweep: the next tick retries it.
@@ -1596,4 +1617,4 @@ async function sweep(conn, { now = new Date() } = {}) {
   return { alerted, active: rows.length };
 }
 
-module.exports = { enabled, cleanupAfterDisable, evaluateNoShow, promisedStartAt, trackingStage, callCommitmentInstant, LIVE_STATUSES, latestPromises, loadPromiseEvents, seriesSupersessions, reminderTier, promisedVisitIds, groupedStops, representativeOf, stopState, stopPromise, lockedStop, recordSentWindowFallback, listNoShows, sweep, trackingKey, resolveLegacyCollision, alreadyHasOpenAlert, noticeStillCurrent };
+module.exports = { enabled, cleanupAfterDisable, evaluateNoShow, promisedStartAt, trackingStage, callCommitmentInstant, LIVE_STATUSES, latestPromises, loadPromiseEvents, seriesSupersessions, byVisit, reminderTier, promisedVisitIds, groupedStops, representativeOf, stopState, stopPromise, lockedStop, recordSentWindowFallback, listNoShows, sweep, trackingKey, resolveLegacyCollision, alreadyHasOpenAlert, noticeStillCurrent };
