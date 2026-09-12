@@ -75,11 +75,14 @@ Individual PR review and CI remain the release gates.
 | Mobile Service Library | #4464 |
 | Field Assessment | #4465 |
 
-The parked visual PRs #4412 (Blog), #4413 (Reports), and #4420
-(Referrals) require either an explicit route promotion or reduction to a
-token pass. Reports also changes ProjectDetail shared with the tech app
-and Dispatch. They must not be counted as missing implementations or
-merged on the strength of this audit.
+The original handoff flagged #4412 (Blog), #4413 (Reports), and #4420
+(Referrals) for exceeding token-only scope. During this followthrough,
+their proposals were retitled as Tier-2 token passes, and Reports #4413
+landed as `2daadf2114`. Their reviews and merges are managed separately
+from this audit. Reports uses ProjectDetail shared with the tech app and
+Dispatch. Blog visual changes must preserve the bookmark, history and
+read-recovery behavior landed in #4452; none of these existing PRs should
+be counted as missing implementations.
 
 ## Product backlog
 
