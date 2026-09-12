@@ -69,6 +69,9 @@ const deferred = () => { let resolve; const promise = new Promise((r) => { resol
       KnowledgeBridge: {
         generateAssessmentRecommendations: jest.fn((id) => update(id, { recommendations: JSON.stringify({ summary: 'Fixture summary' }) })),
         treatmentGuard: { isGenerationInFlight: jest.fn(async () => false) },
+        sealRecommendationsForSend: jest.fn(async () => true),
+        renewRecommendationSendSeal: jest.fn(async () => true),
+        releaseRecommendationSendSeal: jest.fn(async () => true),
       },
     };
   }
@@ -393,6 +396,35 @@ const deferred = () => { let resolve; const promise = new Promise((r) => { resol
     expect(logger.warn).toHaveBeenCalledWith('[lawn-visit-delivery] completing with an unsettled notification claim', { assessmentId: assessment.id });
     expect(deps.LawnIntel.sendAssessmentNotification).toHaveBeenCalledTimes(1);
     expect((await stored(assessment.id)).pipeline_completed_at).toBeInstanceOf(Date);
+  });
+
+  test('copy that cannot be sealed defers the report and the text to a later sweep', async () => {
+    const assessment = await seed();
+    const deps = dependencies();
+    // A regeneration started after the preflight fence read: the seal refuses.
+    deps.KnowledgeBridge.sealRecommendationsForSend.mockResolvedValue(false);
+    expect(await deliver(assessment.id, deps)).toMatchObject({ skipped: 'copy_unsettled' });
+    expect(deps.LawnIntel.generateServiceReport).not.toHaveBeenCalled();
+    expect(deps.LawnIntel.sendAssessmentNotification).not.toHaveBeenCalled();
+    // Earlier steps still stand, and the claim is handed back for the next pass.
+    expect(deps.LawnIntel.emitHealthSignal).toHaveBeenCalledTimes(1);
+    expect((await stored(assessment.id)).pipeline_claimed_at).toBeNull();
+    deps.KnowledgeBridge.sealRecommendationsForSend.mockResolvedValue(true);
+    expect(await deliver(assessment.id, deps)).toMatchObject({ gaps: [] });
+    expect(deps.KnowledgeBridge.releaseRecommendationSendSeal).toHaveBeenCalledWith(assessment.id);
+  });
+
+  test('the customer send runs inside a seal taken at the version it renders', async () => {
+    const assessment = await seed();
+    const deps = dependencies();
+    await deliver(assessment.id, deps);
+    const sealCall = deps.KnowledgeBridge.sealRecommendationsForSend.mock.invocationCallOrder[0];
+    const sendCall = deps.LawnIntel.sendAssessmentNotification.mock.invocationCallOrder[0];
+    const releaseCall = deps.KnowledgeBridge.releaseRecommendationSendSeal.mock.invocationCallOrder[0];
+    expect(sealCall).toBeLessThan(sendCall);
+    expect(releaseCall).toBeGreaterThan(sendCall);
+    // Sealed once for both copy-rendering steps, not once per step.
+    expect(deps.KnowledgeBridge.sealRecommendationsForSend).toHaveBeenCalledTimes(1);
   });
 
   test('an ungated environment counts recovery candidates and sends nothing', async () => {

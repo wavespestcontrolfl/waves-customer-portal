@@ -14,6 +14,63 @@ function validHeartbeat(heartbeatMs, staleAfterMs) {
   return beat;
 }
 
+// The same seal/renew/release boundary the service-report delivery queue takes
+// around its send: seal the stored copy at the version this run is about to
+// render, renew while the steps run, release when they settle.
+function resolveDeps(deps) {
+  return {
+    knex: deps.knex || db,
+    LawnIntel: deps.LawnIntel || require('./lawn-intelligence'),
+    KnowledgeBridge: deps.KnowledgeBridge || require('./knowledge-bridge'),
+    staleAfterMs: deps.staleAfterMs ?? runs.PIPELINE_STALE_MS,
+    weatherWindowMs: deps.weatherWindowMs ?? WEATHER_WINDOW_MS,
+  };
+}
+
+function weatherOwed(assessment, windowMs, assessmentId) {
+  if (assessment?.fawn_snapshot) return false;
+  if (nearTheVisit(assessment, windowMs)) return true;
+  // A fetch is current conditions, not the visit's. Recorded days later it would
+  // be wrong rather than missing, and reports and outcome analysis read it as the
+  // visit's weather — so leave it unset and say so.
+  logger.warn('[lawn-visit-delivery] weather not attached', { assessmentId, reason: 'visit_too_old' });
+  return false;
+}
+
+async function sealRefused(seal, needsSeal) {
+  if (!needsSeal) return false;
+  return !(await seal.ensure());
+}
+
+function sendSeal(KnowledgeBridge, knex, assessmentId) {
+  const versionOf = (row) => (row ? JSON.stringify([row.recommendations, row.ai_summary, row.updated_at]) : null);
+  let timer = null;
+  let taken = false;
+  return {
+    async ensure() {
+      if (taken) return true;
+      if (typeof KnowledgeBridge.sealRecommendationsForSend !== 'function') return true;
+      const row = await knex('lawn_assessments').where({ id: assessmentId }).first('recommendations', 'ai_summary', 'updated_at');
+      taken = await KnowledgeBridge.sealRecommendationsForSend(assessmentId, versionOf(row), versionOf);
+      if (!taken) return false;
+      // A slow step must not outlive a fixed TTL.
+      timer = setInterval(() => {
+        void KnowledgeBridge.renewRecommendationSendSeal(assessmentId)
+          .catch((err) => logger.warn('[lawn-visit-delivery] send-seal renew failed', { assessmentId, message: err.message }));
+      }, 45000);
+      timer.unref?.();
+      return true;
+    },
+    async release() {
+      if (timer) { clearInterval(timer); timer = null; }
+      if (!taken || typeof KnowledgeBridge.releaseRecommendationSendSeal !== 'function') return;
+      taken = false;
+      await KnowledgeBridge.releaseRecommendationSendSeal(assessmentId)
+        .catch((err) => logger.warn('[lawn-visit-delivery] send-seal release failed, expires by TTL', { assessmentId, message: err.message }));
+    },
+  };
+}
+
 async function generationInFlight(KnowledgeBridge, assessmentId, knex) {
   const guard = KnowledgeBridge && KnowledgeBridge.treatmentGuard;
   if (!guard || typeof guard.isGenerationInFlight !== 'function') return false;
@@ -33,11 +90,7 @@ const ownershipLost = () => Object.assign(new Error('Lawn delivery ownership los
 const stepIncomplete = (step) => Object.assign(new Error(`Lawn delivery step incomplete: ${step}`), { code: 'LAWN_DELIVERY_STEP_INCOMPLETE' });
 
 async function deliverConfirmedAssessment({ assessmentId }, deps = {}) {
-  const knex = deps.knex || db;
-  const LawnIntel = deps.LawnIntel || require('./lawn-intelligence');
-  const KnowledgeBridge = deps.KnowledgeBridge || require('./knowledge-bridge');
-  const staleAfterMs = deps.staleAfterMs ?? runs.PIPELINE_STALE_MS;
-  const weatherWindowMs = deps.weatherWindowMs ?? WEATHER_WINDOW_MS;
+  const { knex, LawnIntel, KnowledgeBridge, staleAfterMs, weatherWindowMs } = resolveDeps(deps);
   const heartbeatMs = validHeartbeat(deps.heartbeatMs, staleAfterMs);
   const claim = await runs.claimPipeline(assessmentId, knex, { staleAfterMs });
   if (!claim) return { skipped: 'not_claimed', done: [], gaps: [] };
@@ -53,6 +106,7 @@ async function deliverConfirmedAssessment({ assessmentId }, deps = {}) {
   timer.unref?.();
   const guard = async () => { if (lost || !(await renew())) throw ownershipLost(); };
   const done = [];
+  let seal = null;
   try {
     await guard();
     // Weather may legitimately be unavailable. It is an enrichment, while the
@@ -61,14 +115,7 @@ async function deliverConfirmedAssessment({ assessmentId }, deps = {}) {
     // analysis, so a recovery hours or days later must not overwrite it with
     // recovery-time weather — it is attached once, not refreshed per attempt.
     const attachWeatherOnce = async (assessment) => {
-      if (assessment?.fawn_snapshot) return null;
-      if (!nearTheVisit(assessment, weatherWindowMs)) {
-        // A fetch is current conditions, not the visit's. Recorded days later it
-        // would be wrong rather than missing, and reports and outcome analysis
-        // read it as the visit's weather — so leave it unset and say so.
-        logger.warn('[lawn-visit-delivery] weather not attached', { assessmentId, reason: 'visit_too_old' });
-        return null;
-      }
+      if (!weatherOwed(assessment, weatherWindowMs, assessmentId)) return null;
       const weather = await LawnIntel.attachWeather(assessmentId);
       await guard(); // The lease covers every effect in the pipeline, this one included.
       return weather;
@@ -82,6 +129,7 @@ async function deliverConfirmedAssessment({ assessmentId }, deps = {}) {
       return { skipped: 'generation_in_flight', done: [], gaps: [] };
     }
     await attachWeatherOnce((await runs.deliveryState(assessmentId, knex)).assessment);
+    seal = sendSeal(KnowledgeBridge, knex, assessmentId);
     const actions = [
       ['calibration', async (state) => {
         const { aiScores, finalScores, technicianId } = state.calibration;
@@ -100,13 +148,23 @@ async function deliverConfirmedAssessment({ assessmentId }, deps = {}) {
       // channel will deliver to leaves the notification step permanently owed,
       // and running it first starved the report — which stands on its own in
       // the portal — behind a send that can never succeed.
-      ['report', () => LawnIntel.generateServiceReport(assessmentId)],
-      ['notification', () => LawnIntel.sendAssessmentNotification(assessmentId, { beforeSend: guard })],
+      // Both of these put the stored copy in front of the customer, so they run
+      // inside Knowledge Bridge's send seal (the true 'needsSeal' below).
+      ['report', () => LawnIntel.generateServiceReport(assessmentId), true],
+      ['notification', () => LawnIntel.sendAssessmentNotification(assessmentId, { beforeSend: guard }), true],
     ];
-    for (const [step, action] of actions) {
+    for (const [step, action, needsSeal] of actions) {
       const state = await runs.deliveryState(assessmentId, knex);
       if (!state.gaps.includes(step)) continue;
       await guard();
+      // The preflight fence read cannot cover a regeneration that starts after
+      // it, so the steps that render copy take the same atomic seal the report
+      // delivery queue uses. Unsealable copy defers the rest to a later sweep
+      // rather than sending a version a generator can still replace.
+      if (await sealRefused(seal, needsSeal)) {
+        await runs.releasePipeline(assessmentId, owner, knex, { staleAfterMs });
+        return { skipped: 'copy_unsettled', done, gaps: state.gaps };
+      }
       await action(state);
       await guard();
       if ((await runs.deliveryState(assessmentId, knex)).gaps.includes(step)) throw stepIncomplete(step);
@@ -128,6 +186,7 @@ async function deliverConfirmedAssessment({ assessmentId }, deps = {}) {
   } finally {
     clearInterval(timer);
     if (renewing) await renewing;
+    if (seal) await seal.release();
   }
 }
 
