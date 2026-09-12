@@ -498,11 +498,11 @@ it('a follower given its own gallons does not drag the tank\'s other followers',
   await waitFor(() => expect(totals()[4].value).toBe('120'));
   expect(gal()[1].value).toBe('12');
   expect(totals()[3].value).toBe('24');
-  // A follower whose amount unit the tech changed comes back in the RATE's
-  // base unit when the tank corrects, never as "150 gal" (pre-push audit P1).
+  // A follower's dose is labelled by its own rate, never by a hand-picked
+  // unit — 160 fl oz, never "160 gal" (pre-push audit P1).
   const cUnit = () => within(totals()[4].parentElement).getAllByRole('combobox')[1];
   fireEvent.change(cUnit(), { target: { value: 'gal' } });
-  expect(totals()[4].value).toBe('');
+  expect(cUnit().value).toBe('fl_oz');
   fireEvent.change(gal()[0], { target: { value: '40' } });
   await waitFor(() => expect(totals()[4].value).toBe('160'));
   expect(cUnit().value).toBe('fl_oz');
@@ -543,13 +543,38 @@ it('changing the amount unit withdraws a derived tank total', async () => {
   fireEvent.change(screen.getAllByPlaceholderText('Gal')[0], { target: { value: '25' } });
   await waitFor(() => expect(totals()[2].value).toBe('20'));
   const amountUnit = () => within(totals()[2].parentElement).getAllByRole('combobox')[1];
+  // The unit of a derived tank dose is the rate's: 0.8 fl_oz/gal x 25 is
+  // 20 fl oz and can never be relabelled 20 gal, which would deduct the wrong
+  // inventory quantity. Entering a total is how the tech takes the unit.
   fireEvent.change(amountUnit(), { target: { value: 'gal' } });
-  expect(totals()[2].value).toBe('');
-  // A later gallons edit re-derives in the RATE's base unit, never under the
-  // hand-picked one: 24 fl oz, not 24 gal.
+  expect(totals()[2].value).toBe('20');
+  expect(amountUnit().value).toBe('fl_oz');
   fireEvent.change(screen.getAllByPlaceholderText('Gal')[0], { target: { value: '30' } });
   expect(totals()[2].value).toBe('24');
   expect(amountUnit().value).toBe('fl_oz');
+  fireEvent.change(totals()[2], { target: { value: '26' } });
+  fireEvent.change(amountUnit(), { target: { value: 'gal' } });
+  expect(totals()[2].value).toBe('26');
+  expect(amountUnit().value).toBe('gal');
+});
+
+// The governed area and method handlers blank derived totals the plan cannot
+// express; a measured tank dose is not one of them (Codex r1 P1).
+it('a tank dose survives an application-area and a method change', async () => {
+  enableDefaults();
+  const added = { id: 'manual-taurus', name: 'Fixture termiticide', category: 'insecticide', default_unit: 'fl_oz/gal', default_rate: '0.8' };
+  render(<CompletionPanel service={service} products={[...catalog, added]} onClose={() => {}} onSubmit={submit} />);
+  await waitFor(() => expect(totals()).toHaveLength(2), { timeout: 5000 });
+  fireEvent.change(screen.getByPlaceholderText('Search products...'), { target: { value: added.name } });
+  fireEvent.click(screen.getByText(added.name));
+  await waitFor(() => expect(totals()).toHaveLength(3));
+  fireEvent.change(screen.getAllByPlaceholderText('Gal')[0], { target: { value: '25' } });
+  await waitFor(() => expect(totals()[2].value).toBe('20'));
+  fireEvent.click(screen.getAllByRole('button', { name: 'Back yard', exact: true }).at(-1));
+  expect(totals()[2].value).toBe('20');
+  fireEvent.change(within(totals()[2].parentElement).getAllByRole('combobox')[2], { target: { value: 'spot_treatment' } });
+  expect(totals()[2].value).toBe('20');
+  expect(screen.getAllByPlaceholderText('Gal')[0].value).toBe('25');
 });
 
 // Small doses keep the precision the record stores (Codex r1 P2).

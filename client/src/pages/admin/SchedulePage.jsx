@@ -15002,6 +15002,17 @@ export function CompletionPanel({
             next.lawnPlanManualFields = [...new Set([...(next.lawnPlanManualFields || []), "amountUnit"])];
           }
         }
+        // One closing invariant for the whole function: a per-gallon row with
+        // the technician's gallons behind it shows the tank dose, in the
+        // rate's own base unit. The governed area and method handlers above
+        // blank derived totals the plan cannot express, and each new one
+        // would have to remember the tank; this restores the dose once,
+        // wherever it was cleared (Codex r1 P1). Entering a total is how the
+        // technician takes the quantity — and its unit — away from the tank.
+        if (!next.totalAmountManual && isTankCalculation(next)) {
+          next.amountUnit = String(next.rateUnit).split("/")[0];
+          next.totalAmount = derivedTankTotal(next.rate, next.carrierGallons);
+        }
         return next;
       });
     });
