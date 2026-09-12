@@ -1137,6 +1137,19 @@ describe('recordSentWindowFallback (the audit row failed, the text went out) (ro
     expect(recordAuditEvent).not.toHaveBeenCalled();
   });
 
+  // A date-only series move quotes no arrival range, so there is no window to
+  // record — but refusing to write anything lost both the anchor's
+  // unknown-window promise and the siblings' supersession proof, leaving
+  // every one of those visits on its older window (round-15 P1).
+  test('a WINDOWLESS series confirmation still records the supersession proof', async () => {
+    expect(await recordSentWindowFallback({ visitId: 'visit-1', startAtMs: null, seriesMoveId: 'move-7' })).toBe(true);
+    const [[event]] = recordAuditEvent.mock.calls;
+    expect(event.metadata).toMatchObject({ start_at: null, series_move_id: 'move-7' });
+    // The sender allows that path only for the series confirmation.
+    const sender = require('fs').readFileSync(require('path').join(__dirname, '..', 'services', 'messaging', 'send-customer-message.js'), 'utf8');
+    expect(sender).toContain('if (!knownSlot && !seriesMoveId) return;');
+  });
+
   test('it never throws into the send path', async () => {
     recordAuditEvent.mockRejectedValueOnce(new Error('ledger down'));
     expect(await recordSentWindowFallback({ visitId: 'visit-1', startAtMs: Date.now() })).toBe(false);

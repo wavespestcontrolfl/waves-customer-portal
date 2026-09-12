@@ -770,12 +770,18 @@ async function recordSentWindowFallback({ visitId, startAtMs, communicatedAt = n
   // null BEFORE the Number conversion: Number(null) is 0, a finite instant
   // (the epoch), so a bare isFinite check would stamp a 1970 window as the
   // promise — the same null-before-conversion trap `instant` guards above.
-  if (!visitId || startAtMs == null || !Number.isFinite(Number(startAtMs))) return false;
+  // A missing window is only allowed for a series confirmation, which is
+  // evidence in its own right: a date-only move quotes no arrival range, so
+  // the honest record is an UNKNOWN window for the anchor plus the
+  // supersession proof for its siblings — refusing to write anything left
+  // every one of those visits on its older window (codex P1 round 15).
+  const known = startAtMs != null && Number.isFinite(Number(startAtMs));
+  if (!visitId || (!known && !seriesMoveId)) return false;
   const at = new Date(communicatedAt);
   if (!Number.isFinite(at.getTime())) return false;
   try {
     await recordAuditEvent({ actor_type: 'system', action: 'visit_window_promised', resource_type: 'scheduled_service', resource_id: String(visitId),
-      metadata: { start_at: new Date(Number(startAtMs)).toISOString(), communicated_at: at.toISOString(),
+      metadata: { start_at: known ? new Date(Number(startAtMs)).toISOString() : null, communicated_at: at.toISOString(),
         ...(providerSid ? { provider_sid: String(providerSid) } : {}),
         // A SERIES confirmation is also the proof that every sibling the move
         // touched was superseded — proof that normally lives on the audit row

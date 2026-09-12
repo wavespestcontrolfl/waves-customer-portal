@@ -614,13 +614,21 @@ async function sendCustomerMessage(input) {
 // blocking: the text is already out.
 async function recordPromiseEvidenceFallback(sendInput, providerOutcome, audit) {
   if (audit.id || !sendInput.appointmentId) return;
-  if (sendInput.renderedSlotMs == null || !Number.isFinite(Number(sendInput.renderedSlotMs))) return;
+  // A SERIES confirmation is recorded even with no window of its own: a
+  // date-only move quotes no arrival range, and refusing to write anything
+  // there loses both the anchor's unknown-window promise and the siblings'
+  // supersession proof, leaving every one of those visits on its older
+  // window (codex P1, PR #4403 round 15).
+  const seriesMoveId = sendInput.metadata?.original_message_type === 'reschedule_series_confirmation'
+    ? sendInput.metadata?.series_move_id || null : null;
+  const knownSlot = sendInput.renderedSlotMs != null && Number.isFinite(Number(sendInput.renderedSlotMs));
+  if (!knownSlot && !seriesMoveId) return;
   const providerSid = String(providerOutcome.providerMessageId || '');
   const deliverable = /^(SM|MM)[a-f0-9]{32}$/i.test(providerSid)
     || (providerOutcome.provider === 'push' && providerOutcome.deliveryOutcome === 'accepted');
   if (!deliverable) return;
   await require('../no-show-detector').recordSentWindowFallback({
-    visitId: sendInput.appointmentId, startAtMs: sendInput.renderedSlotMs,
+    visitId: sendInput.appointmentId, startAtMs: knownSlot ? sendInput.renderedSlotMs : null,
     communicatedAt: providerOutcome.sentAt || new Date(),
     providerSid: providerOutcome.provider === 'push' ? null : providerSid,
     // ONLY the series confirmation proves the siblings were superseded, and
@@ -629,8 +637,7 @@ async function recordPromiseEvidenceFallback(sendInput, providerOutcome, audit) 
     // and Quick Move's moved-SMS names the anchor alone (codex P1, PR #4403
     // rounds 12 and 14). The detector reads this proof from the audit row we
     // just failed to write, so it rides along here.
-    seriesMoveId: sendInput.metadata?.original_message_type === 'reschedule_series_confirmation'
-      ? sendInput.metadata?.series_move_id || null : null,
+    seriesMoveId,
   }).catch(() => {});
 }
 
