@@ -590,8 +590,15 @@ export default function WavesPPCDashboard() {
                 type === "google_lsa"
                   ? "Local Service Ads"
                   : "Google Search Ads";
+              // Sync keeps Google's channel: SEARCH, or enum 2 stored as text.
+              // Retain existing manual types without treating Display/PMax as Search.
               const typeCamps = campaigns.filter(
-                (c) => c.campaign_type === type && c.status === "active",
+                (c) =>
+                  c.status === "active" &&
+                  (c.campaign_type === type ||
+                    (type === "google_search" &&
+                      c.platform === "google_ads" &&
+                      ["SEARCH", "2"].includes(c.campaign_type))),
               );
               const sp = typeCamps.reduce(
                 (s, c) => s + (c.last30d?.spend || 0),
@@ -606,7 +613,7 @@ export default function WavesPPCDashboard() {
                 0,
               );
               return (
-                <UiCard key={type} className="p-5">
+                <UiCard key={type} data-qa={`platform-${type}`} className="p-5">
                   {" "}
                   <SectionTitle>{label}</SectionTitle>{" "}
                   <div className="ppc-kpi-grid-4 grid max-sm:!grid-cols-2 [grid-template-columns:repeat(4,1fr)] [gap:12px]">
