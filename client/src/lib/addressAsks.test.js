@@ -192,6 +192,21 @@ describe('missing unit number alongside its companion hold', () => {
     expect(notice.heard).toBe('100 Port Ave East');
   });
 
+  // Call A is a known building missing its unit; call B genuinely did not
+  // validate. B is the worse problem and must not be hidden behind A's unit
+  // ask just because A was selected first.
+  it('a genuine validation failure on another call outranks a unit ask', () => {
+    const notice = addressAskNotice([
+      ask('address_unverified', { address_as_heard: 'A building' }, 'call-A'),
+      ask('missing_unit_number', null, 'call-A'),
+      ask('address_unverified', { address_as_heard: 'B unvalidated' }, 'call-B'),
+    ]);
+
+    expect(notice.unitOnly).toBe(false);
+    expect(notice.reason).toBe('the address from the call did not validate');
+    expect(notice.heard).toBe('B unvalidated');
+  });
+
   // An unrelated call that simply failed validation must keep generic priority
   // — its address is not "a known building missing a unit".
   it('an unrelated call\'s generic failure is NOT relabelled as a unit ask', () => {

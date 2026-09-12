@@ -83,11 +83,6 @@ export function addressAskNotice(asks) {
   const readbackReason = (i) => (i.reason_code === 'address_recovered'
     ? 'the street was pieced back together from a garbled recording and has not been read back'
     : 'the street validated, but it was heard with low confidence and has not been read back');
-  const sorted = [...open].sort((a, b) => rank(a) - rank(b));
-  // Among equals, prefer a card that actually carries recovery evidence.
-  const worst = rank(sorted[0]);
-  const card = sorted.find((i) => rank(i) === worst && i.payload?.address_as_heard) || sorted[0];
-  const kind = rank(card);
   // A PREMISE resolved except for its subpremise ALWAYS files BOTH cards for
   // the same call: address_unverified is the hold, missing_unit_number is the
   // ask. call-triage-flags.js says so in as many words — the unit flag "never
@@ -95,13 +90,23 @@ export function addressAskNotice(asks) {
   // the generic card worst therefore made the unit ask unreachable for every
   // real missing-unit result, and told the operator the address "did not
   // validate" when the building is known and only the door is missing — they
-  // could still book it with nowhere to knock. A companion on the SAME call
-  // defines the ask; an unrelated call's generic failure keeps its priority
-  // (codex #4437 r4 P1).
+  // could still book it with nowhere to knock (codex #4437 r4 P1).
+  //
+  // Resolved BEFORE ranking, per card: a generic hold whose own call also has
+  // a unit card is really a unit ask, so it must not outrank another call's
+  // genuine validation failure. Classifying after selection let call A's
+  // known building hide call B's unresolvable address (pre-push P1).
   const sameCall = (a, b) => (a.call_log_id ?? null) === (b.call_log_id ?? null);
-  const unitCompanion = kind === 0
-    && open.some((i) => i.reason_code === 'missing_unit_number' && sameCall(i, card));
-  const askKind = unitCompanion ? 2 : kind;
+  const effectiveRank = (i) => {
+    const r = rank(i);
+    if (r === 0 && open.some((u) => u.reason_code === 'missing_unit_number' && sameCall(u, i))) return 2;
+    return r;
+  };
+  const sorted = [...open].sort((a, b) => effectiveRank(a) - effectiveRank(b));
+  // Among equals, prefer a card that actually carries recovery evidence.
+  const worst = effectiveRank(sorted[0]);
+  const card = sorted.find((i) => effectiveRank(i) === worst && i.payload?.address_as_heard) || sorted[0];
+  const askKind = effectiveRank(card);
   const candidates = Array.isArray(card.payload?.address_candidates)
     ? card.payload.address_candidates.filter(Boolean)
     : [];
