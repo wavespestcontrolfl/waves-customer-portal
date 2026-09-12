@@ -3693,25 +3693,27 @@ export function SubscribersView() {
         <DialogHeader>
           <DialogTitle>Import subscribers?</DialogTitle>
         </DialogHeader>
-        <DialogBody className="space-y-3">
-          {importConfirmation && (
-            <p className="text-ui-body text-ink-secondary">
-              Import {importConfirmation.subscribers.length.toLocaleString()} subscriber rows as{" "}
-              {importConfirmation.preConsented
-                ? "active and immediately mailable"
-                : "pending confirmation"}?
-            </p>
-          )}
-          {importError && <ActionFeedback error>{importError}</ActionFeedback>}
-        </DialogBody>
-        <DialogFooter>
-          <Button variant="secondary" onClick={closeImportDialog} disabled={importing}>
-            Cancel
-          </Button>
-          <Button onClick={confirmImport} loading={importing}>
-            Import subscribers
-          </Button>
-        </DialogFooter>
+        <form onSubmit={(event) => { event.preventDefault(); confirmImport(); }}>
+          <DialogBody className="space-y-3">
+            {importConfirmation && (
+              <p className="text-ui-body text-ink-secondary">
+                Import {importConfirmation.subscribers.length.toLocaleString()} subscriber rows as{" "}
+                {importConfirmation.preConsented
+                  ? "active and immediately mailable"
+                  : "pending confirmation"}?
+              </p>
+            )}
+            {importError && <ActionFeedback error>{importError}</ActionFeedback>}
+          </DialogBody>
+          <DialogFooter>
+            <Button variant="secondary" onClick={closeImportDialog} disabled={importing}>
+              Cancel
+            </Button>
+            <Button type="submit" loading={importing}>
+              Import subscribers
+            </Button>
+          </DialogFooter>
+        </form>
       </Dialog>
       <Dialog
         open={Boolean(unsubscribeTarget)}
@@ -3721,22 +3723,24 @@ export function SubscribersView() {
         <DialogHeader>
           <DialogTitle>Unsubscribe subscriber?</DialogTitle>
         </DialogHeader>
-        <DialogBody className="space-y-3">
-          {unsubscribeTarget && (
-            <p className="text-ui-body text-ink-secondary u-nums">
-              Unsubscribe {unsubscribeTarget.email}?
-            </p>
-          )}
-          {unsubscribeError && <ActionFeedback error>{unsubscribeError}</ActionFeedback>}
-        </DialogBody>
-        <DialogFooter>
-          <Button variant="secondary" onClick={closeUnsubscribeDialog} disabled={unsubscribing}>
-            Cancel
-          </Button>
-          <Button variant="danger" onClick={removeSubscriber} loading={unsubscribing}>
-            Unsubscribe
-          </Button>
-        </DialogFooter>
+        <form onSubmit={(event) => { event.preventDefault(); removeSubscriber(); }}>
+          <DialogBody className="space-y-3">
+            {unsubscribeTarget && (
+              <p className="text-ui-body text-ink-secondary u-nums">
+                Unsubscribe {unsubscribeTarget.email}?
+              </p>
+            )}
+            {unsubscribeError && <ActionFeedback error>{unsubscribeError}</ActionFeedback>}
+          </DialogBody>
+          <DialogFooter>
+            <Button variant="secondary" onClick={closeUnsubscribeDialog} disabled={unsubscribing}>
+              Cancel
+            </Button>
+            <Button type="submit" variant="danger" loading={unsubscribing}>
+              Unsubscribe
+            </Button>
+          </DialogFooter>
+        </form>
       </Dialog>
     </UiSurface>
   );

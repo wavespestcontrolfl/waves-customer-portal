@@ -103,7 +103,9 @@ describe('Newsletter subscriber dialogs', () => {
 
     fireEvent.change(fileInput, { target: { files: [csv] } });
     dialog = await screen.findByRole('dialog', { name: 'Import subscribers?' });
-    fireEvent.click(within(dialog).getByRole('button', { name: 'Import subscribers' }));
+    const importButton = within(dialog).getByRole('button', { name: 'Import subscribers' });
+    expect(importButton).toHaveAttribute('type', 'submit');
+    fireEvent.submit(importButton.closest('form'));
     await waitFor(() => expect(fetchMock).toHaveBeenCalledWith(
       '/api/admin/newsletter/subscribers/import',
       expect.objectContaining({
@@ -131,7 +133,9 @@ describe('Newsletter subscriber dialogs', () => {
 
     const dialog = await screen.findByRole('dialog', { name: 'Unsubscribe subscriber?' });
     expect(dialog).toHaveTextContent('Unsubscribe reader@example.com?');
-    fireEvent.click(within(dialog).getByRole('button', { name: 'Unsubscribe' }));
+    const unsubscribeButton = within(dialog).getByRole('button', { name: 'Unsubscribe' });
+    expect(unsubscribeButton).toHaveAttribute('type', 'submit');
+    fireEvent.submit(unsubscribeButton.closest('form'));
     expect(await within(dialog).findByRole('alert')).toHaveTextContent('Failed: Synthetic failure');
     expect(screen.getByRole('dialog', { name: 'Unsubscribe subscriber?' })).toBeInTheDocument();
     expect(alert).not.toHaveBeenCalled();
