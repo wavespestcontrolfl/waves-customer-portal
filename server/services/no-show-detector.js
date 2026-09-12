@@ -273,7 +273,13 @@ async function loadPromiseEvents(conn, visitIds, { now = new Date() } = {}) {
         // email_message_id existed had NO usable link once a retry replaced
         // the provider id, and its frozen 'sent' snapshot was read as neutral
         // evidence while the retry sat queued or failed (codex P1 round 13).
-        // Relinked through the stop the interaction's own service belongs to.
+        // Relinked through the stop the interaction's own service belongs to,
+        // AND the occurrence it was sent for: the claim dedupe key ends in
+        // that date, so without it a reminder for the stop's next occurrence
+        // would answer for this one's delivery state (codex P1 round 13).
+        // The date comes from the window the text itself quoted
+        // (rendered_slot_ms), in ET, not from the visit's current
+        // scheduled_date, which a later move may have changed.
         // A fan-out matches each recipient's row; one delivered recipient is
         // delivery, same as the SMS side.
         this.on(conn.raw(`em.id::text = (ci.metadata->>'email_message_id')
@@ -283,10 +289,13 @@ async function loadPromiseEvents(conn, visitIds, { now = new Date() } = {}) {
             AND em.idempotency_key LIKE (ci.metadata->>'event_type') || ':' || (ci.metadata->>'scheduled_service_id') || ':' || (ci.metadata->>'rendered_slot_ms') || ':%')
           OR (ci.metadata->>'email_message_id' IS NULL AND ci.metadata->>'event_type' IS NOT NULL
             AND ci.metadata->>'scheduled_service_id' ~ '^[0-9a-f-]{36}$'
+            AND ci.metadata->>'rendered_slot_ms' ~ '^[0-9]+$'
             AND em.idempotency_key LIKE (ci.metadata->>'event_type') || ':visit:%'
             AND split_part(em.idempotency_key, ':', 3) = (
               SELECT sv2.visit_id::text FROM scheduled_services sv2
-              WHERE sv2.id = (ci.metadata->>'scheduled_service_id')::uuid))`));
+              WHERE sv2.id = (ci.metadata->>'scheduled_service_id')::uuid)
+            AND split_part(em.idempotency_key, ':', 5) = to_char(
+              to_timestamp((ci.metadata->>'rendered_slot_ms')::bigint / 1000) AT TIME ZONE 'America/New_York', 'YYYY-MM-DD'))`));
       })
       .where('ci.interaction_type', 'email_outbound').where('ci.created_at', '<=', now)
       .whereRaw("ci.metadata->>'scheduled_service_id' = ANY(?::text[])", [visitIds])

@@ -711,6 +711,12 @@ describe('loadPromiseEvents: email promise evidence checks the LIVE delivery sta
     // a visit rescheduled twice cannot have a later delivered confirmation
     // vouch for an earlier one the customer never received.
     expect(joinSql).toContain("em.idempotency_key LIKE (ci.metadata->>'event_type') || ':' || (ci.metadata->>'scheduled_service_id') || ':' || (ci.metadata->>'rendered_slot_ms') || ':%'");
+    // A GROUPED interaction's key is <event>:visit:<stop>:<effect>:<date>, so
+    // it relinks through the stop AND the occurrence date the text quoted —
+    // without the date, a reminder for the stop's next occurrence would
+    // answer for this one's delivery state (round-13 P1).
+    expect(joinSql).toContain("em.idempotency_key LIKE (ci.metadata->>'event_type') || ':visit:%'");
+    expect(joinSql).toContain("AT TIME ZONE 'America/New_York', 'YYYY-MM-DD')");
     expect(joinSql).toContain("ci.metadata->>'rendered_slot_ms' IS NOT NULL");
 
     // Both grouped predicates in this read pass a function to `.where(...)`
