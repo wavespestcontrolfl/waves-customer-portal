@@ -2208,7 +2208,35 @@ async function executeMerge({ winnerId, loserId, performedBy, performedById = nu
     // Both directions are fenced against a send in flight (the loser-side check
     // before the sweep, the winner-side one just above).
     if (backfills.payer_id || winner.payer_id) {
-      await require('./visit-completion-packets').withdrawPacketInvoicesForOwner(trx, { customerId: winnerId });
+      const withdrawnInvoiceIds = await require('./visit-completion-packets')
+        .withdrawPacketInvoicesForOwner(trx, { customerId: winnerId });
+      // The withdrawal RETURNS the homeowner's applied credit, and it runs
+      // AFTER the FK sweep — so the ledger rows it writes belong to the
+      // winner and are not in the sweep's id record (Codex #4311 r42 P1). An
+      // undo would then return the invoice to the loser while the returned
+      // credit stayed with the winner. Journal them with the rest so the undo
+      // repoints them too.
+      if (withdrawnInvoiceIds.length) {
+        const reversalIds = await trx('customer_credit_ledger')
+          .where({ customer_id: winnerId })
+          .whereIn('invoice_id', withdrawnInvoiceIds)
+          .pluck('id');
+        if (reversalIds.length) {
+          const key = 'customer_credit_ledger.customer_id';
+          const existing = repointedIds[key];
+          if (Array.isArray(existing)) {
+            repointedIds[key] = [...new Set([...existing, ...reversalIds.map(String)])];
+          } else if (!existing) {
+            repointedIds[key] = reversalIds.map(String);
+          } else {
+            // The sweep already fell back to count-only for this table, so an
+            // id-precise undo is not available for it either way; keep the
+            // existing record and mark the table as not replayable backwards,
+            // the same signal a unique-collision handler raises.
+            if (!collisionHandlers.includes('customer_credit_ledger')) collisionHandlers.push('customer_credit_ledger');
+          }
+        }
+      }
     }
 
     const [journal] = await trx('customer_merge_journal').insert({

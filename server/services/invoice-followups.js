@@ -26,7 +26,8 @@
  */
 
 const db = require('../models/db');
-const { invoiceWithdrawnFromCustomer } = require('./invoice-helpers');
+const invoiceHelpers = require('./invoice-helpers');
+const { invoiceWithdrawnFromCustomer } = invoiceHelpers;
 const logger = require('./logger');
 const { invoiceAmountDue } = require('./invoice-helpers');
 const smsTemplatesRouter = require('../routes/admin-sms-templates');
@@ -1022,6 +1023,12 @@ async function fireTouch(row, { operatorInitiated = false } = {}) {
           original_message_type: messageType,
           notificationEventKey: `invoice-followup:${row.id}:${step.id}`,
         },
+        // The LAST ownership check, run by the canonical sender immediately
+        // before provider preparation (Codex #4311 r42 P1): the short-link
+        // round-trip and the contact-ledger writes are awaited after the
+        // re-read above, and this rail holds no claim a Bill-To writer
+        // fences on. Fail-closed, with no lock held across provider I/O.
+        preDispatchCheck: invoiceHelpers.selfPayAtDispatch(row.invoice_id, db),
       }) : null;
       if (sendResult && (sendResult.blocked || sendResult.sent === false)) {
         await ContactLedger.markSendFailed(smsLedger, { code: sendResult.code || 'sms_blocked' });

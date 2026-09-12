@@ -105,7 +105,9 @@ describe('late-payment micro-deposit diversion', () => {
     setDbQueues({
       invoices: [
         chain({ result: [invoice] }),
-        // the pre-guard ownership re-read, then the last one before dispatch
+        // the pre-guard ownership re-read, the last one before dispatch, and
+        // the email leg's own check
+        chain({ first: { payer_id: null, scheduled_send_error: null } }),
         chain({ first: { payer_id: null, scheduled_send_error: null } }),
         chain({ first: { payer_id: null, scheduled_send_error: null } }),
       ],
@@ -143,7 +145,9 @@ describe('late-payment micro-deposit diversion', () => {
     setDbQueues({
       invoices: [
         chain({ result: [invoice] }),
-        // the pre-guard ownership re-read, then the last one before dispatch
+        // the pre-guard ownership re-read, the last one before dispatch, and
+        // the email leg's own check
+        chain({ first: { payer_id: null, scheduled_send_error: null } }),
         chain({ first: { payer_id: null, scheduled_send_error: null } }),
         chain({ first: { payer_id: null, scheduled_send_error: null } }),
       ],

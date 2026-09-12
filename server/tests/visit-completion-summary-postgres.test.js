@@ -2972,18 +2972,18 @@ postgres('visit summary recipient recovery', () => {
     await mockPg('visit_completion_packets').where({ id: fixture.packetId }).update({ status: 'done', error: null });
     try {
       // Self-pay: nothing to withdraw.
-      expect(await mockPg.transaction((trx) => Packets.withdrawPacketInvoicesForOwner(trx, { customerId: fixture.customerId }))).toBe(0);
+      expect(await mockPg.transaction((trx) => Packets.withdrawPacketInvoicesForOwner(trx, { customerId: fixture.customerId }))).toEqual([]);
       // The customer's default payer assigned in the same transaction as the withdrawal.
       expect(await mockPg.transaction(async (trx) => {
         await trx('customers').where({ id: fixture.customerId }).forUpdate().first('id');
         await trx('customers').where({ id: fixture.customerId }).update({ payer_id: payer.id });
         return Packets.withdrawPacketInvoicesForOwner(trx, { customerId: fixture.customerId });
-      })).toBe(1);
+      })).toHaveLength(1);
       expect(await mockPg('invoices').where({ id: invoiceId }).first()).toMatchObject({ status: 'sent', scheduled_send_error: `payer_billed:${payer.id}:hold` });
       expect(await mockPg('service_visits').where({ id: fixture.visitId }).first()).toMatchObject({ billing_hold: true });
       expect(await mockPg('dispatch_alerts').where({ tech_id: fixture.techId, type: 'visit_closeout_review' }).whereNull('resolved_at')).toHaveLength(1);
       // Already withdrawn: not withdrawn twice.
-      expect(await mockPg.transaction((trx) => Packets.withdrawPacketInvoicesForOwner(trx, { customerId: fixture.customerId }))).toBe(0);
+      expect(await mockPg.transaction((trx) => Packets.withdrawPacketInvoicesForOwner(trx, { customerId: fixture.customerId }))).toEqual([]);
     } finally {
       await mockPg('customers').where({ id: fixture.customerId }).update({ payer_id: null });
       await mockPg('invoices').where({ id: invoiceId }).del();
@@ -3013,7 +3013,7 @@ postgres('visit summary recipient recovery', () => {
         await trx('customers').where({ id: fixture.customerId }).forUpdate().first('id');
         await trx('customers').where({ id: fixture.customerId }).update({ payer_id: payer.id });
         return Packets.withdrawPacketInvoicesForOwner(trx, { customerId: fixture.customerId });
-      })).toBe(1);
+      })).toHaveLength(1);
       const withdrawn = await mockPg('invoices').where({ id: invoiceId }).first();
       // Still `sent` with no payer_id — the state every seam used to read as payable.
       expect(withdrawn).toMatchObject({ status: 'sent', payer_id: null, scheduled_send_error: `payer_billed:${payer.id}:hold` });

@@ -391,6 +391,13 @@ const LatePaymentService = {
               invoiceId: inv.id,
               entryPoint: 'late_payment_checker',
               metadata: { original_message_type: 'late_payment' },
+              // The LAST ownership check, run by the canonical sender
+              // immediately before provider preparation (Codex #4311 r42 P1):
+              // the template render, the policy lookup and the ledger insert
+              // are all awaited after the read above, and this legacy rail
+              // holds no claim a Bill-To writer fences on. Fail-closed, and
+              // no lock is held across provider I/O.
+              preDispatchCheck: require('./invoice-helpers').selfPayAtDispatch(inv.id, db),
             });
             if (sendResult.sent !== true) {
               await ContactLedger.markSendFailed(smsLedger, { code: sendResult.code || 'blocked' });
@@ -440,7 +447,13 @@ const LatePaymentService = {
           if (emailLedger) {
             try {
               const BalanceReminder = require('./workflows/balance-reminder');
-              if (typeof BalanceReminder.sendLatePaymentEmail === 'function') {
+              // The email leg's own last check (Codex #4311 r42 P1): its
+              // handoff is later still than the SMS one, so ownership is
+              // re-read immediately before it too. Fail-closed.
+              const emailOwnership = await require('./invoice-helpers').selfPayAtDispatch(inv.id, db)();
+              if (emailOwnership.ok !== true) {
+                logger.warn(`[late-payment] email reminder skipped for invoice ${inv.id} — ${emailOwnership.reason}`);
+              } else if (typeof BalanceReminder.sendLatePaymentEmail === 'function') {
                 emailResult = await BalanceReminder.sendLatePaymentEmail({
                   customer,
                   invoice: inv,

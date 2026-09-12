@@ -114,6 +114,28 @@ const PACKET_WITHDRAWN_SEND_ERROR = /^payer_billed:/;
 // held its pay link, and clearing it makes the invoice collectible from the
 // homeowner again (Codex #4311 r29 P0). Use in place of `scheduled_send_error:
 // null`; a row with no stamp still ends up NULL.
+/**
+ * The freshest ownership verdict, as a sendCustomerMessage preDispatchCheck:
+ * the canonical sender runs it immediately before provider preparation, which
+ * is the last point a dunning rail can abort without holding a lock across
+ * provider I/O (Codex #4311 r42 P1). Fail closed — an unreadable row blocks
+ * the send, because "cannot tell" and "self-pay" are not the same answer.
+ */
+function selfPayAtDispatch(invoiceId, database) {
+  return async () => {
+    try {
+      const live = await database('invoices').where({ id: invoiceId }).first('payer_id', 'scheduled_send_error');
+      if (!live) return { ok: false, code: 'INVOICE_UNREADABLE', reason: 'invoice could not be re-read before dispatch' };
+      if (live.payer_id || invoiceWithdrawnFromCustomer(live)) {
+        return { ok: false, code: 'INVOICE_PAYER_BILLED', reason: 'invoice is billed to a third-party payer' };
+      }
+      return { ok: true };
+    } catch (err) {
+      return { ok: false, code: 'INVOICE_UNREADABLE', reason: err.message };
+    }
+  };
+}
+
 function preserveWithdrawalStamp(database) {
   return database.raw("CASE WHEN scheduled_send_error LIKE 'payer_billed:%' THEN scheduled_send_error ELSE NULL END");
 }
@@ -215,6 +237,7 @@ module.exports = {
   INVOICE_UPDATE_ALLOWED_FIELDS,
   STALE_SEND_PARK_ERROR,
   preserveWithdrawalStamp,
+  selfPayAtDispatch,
   INVOICE_UNCOLLECTIBLE_STATUSES,
   VISIT_NEVER_RAN_STATUSES,
   visitRefusesSettlement,

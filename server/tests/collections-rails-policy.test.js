@@ -155,13 +155,19 @@ const LP_EXPECTED_SEND = {
   invoiceId: 'inv-1',
   entryPoint: 'late_payment_checker',
   metadata: { original_message_type: 'late_payment' },
+  // The last ownership check, run by the canonical sender immediately before
+  // provider preparation — a Bill-To change during the render/ledger awaits
+  // must not reach the homeowner.
+  preDispatchCheck: expect.any(Function),
 };
 
 function armLatePaymentHappyPath() {
   setDbQueues({
     invoices: [
       chain({ result: [LP_INVOICE] }),
-      // the pre-guard ownership re-read, then the last one before dispatch
+      // the pre-guard ownership re-read, the last one before dispatch, and
+      // the email leg's own check (its handoff is later still)
+      chain({ first: { payer_id: null, scheduled_send_error: null } }),
       chain({ first: { payer_id: null, scheduled_send_error: null } }),
       chain({ first: { payer_id: null, scheduled_send_error: null } }),
     ],
@@ -195,7 +201,9 @@ describe('late-payment-checker rail', () => {
     setDbQueues({
       invoices: [
       chain({ result: [LP_INVOICE] }),
-      // the pre-guard ownership re-read, then the last one before dispatch
+      // the pre-guard ownership re-read, the last one before dispatch, and
+      // the email leg's own check (its handoff is later still)
+      chain({ first: { payer_id: null, scheduled_send_error: null } }),
       chain({ first: { payer_id: null, scheduled_send_error: null } }),
       chain({ first: { payer_id: null, scheduled_send_error: null } }),
     ],
@@ -247,7 +255,9 @@ describe('late-payment-checker rail', () => {
     setDbQueues({
       invoices: [
       chain({ result: [LP_INVOICE] }),
-      // the pre-guard ownership re-read, then the last one before dispatch
+      // the pre-guard ownership re-read, the last one before dispatch, and
+      // the email leg's own check (its handoff is later still)
+      chain({ first: { payer_id: null, scheduled_send_error: null } }),
       chain({ first: { payer_id: null, scheduled_send_error: null } }),
       chain({ first: { payer_id: null, scheduled_send_error: null } }),
     ],
@@ -291,7 +301,9 @@ describe('late-payment-checker rail', () => {
     setDbQueues({
       invoices: [
       chain({ result: [LP_INVOICE] }),
-      // the pre-guard ownership re-read, then the last one before dispatch
+      // the pre-guard ownership re-read, the last one before dispatch, and
+      // the email leg's own check (its handoff is later still)
+      chain({ first: { payer_id: null, scheduled_send_error: null } }),
       chain({ first: { payer_id: null, scheduled_send_error: null } }),
       chain({ first: { payer_id: null, scheduled_send_error: null } }),
     ],
@@ -365,6 +377,10 @@ const FU_EXPECTED_SEND = {
   invoiceId: 'inv-1',
   entryPoint: 'invoice_followup_sequence',
   metadata: { original_message_type: 'invoice_followup', notificationEventKey: 'invoice-followup:seq-1:d3_friendly' },
+  // The last ownership check, run by the canonical sender immediately before
+  // provider preparation — the short-link round-trip and the ledger writes
+  // are awaited after this rail's own re-read.
+  preDispatchCheck: expect.any(Function),
 };
 
 const FU_LIVE_SEQ = {

@@ -715,16 +715,36 @@ async function withdrawPacketInvoiceForPayer(trx, { packetId, invoiceId, visit, 
   if (held || /:hold$/.test(String(prior?.scheduled_send_error || ''))) {
     await trx('invoices').where({ id: invoiceId, scheduled_send_error: stamp }).update({ scheduled_send_error: `${stamp}:hold` });
   }
+  // A packet that closed for DELIVERY review keeps that verdict (Codex #4311
+  // r42 P2): replacing the whole error with a payer-only state would raise a
+  // second alert beside the delivery one, and a later Bill-To clear would then
+  // wipe the packet error entirely while the summary recovery is still
+  // outstanding. The two verdicts are merged instead.
+  const closedPacket = await trx('visit_completion_packets').where({ id: packetId, status: 'done' }).first('error');
+  const priorState = parseOfficeReviewState(closedPacket?.error);
+  const mergedState = officeReviewState({
+    payment: 'office_required',
+    delivery: priorState?.delivery === 'delivery_review' ? 'delivery_review' : null,
+    reason: 'payer_assigned',
+    payerId,
+  });
   const closed = await trx('visit_completion_packets').where({ id: packetId, status: 'done' })
-    .update({ error: JSON.stringify(officeReviewState({ payment: 'office_required', reason: 'payer_assigned', payerId })), updated_at: trx.fn.now() });
+    .update({ error: JSON.stringify(mergedState), updated_at: trx.fn.now() });
   if (!closed) return true;
+  // Any open review alert for this packet is reused — the delivery alert
+  // included — so the office sees one item carrying both verdicts.
   const open = await trx('dispatch_alerts').where({ type: 'visit_closeout_review' }).whereNull('resolved_at')
-    .whereRaw("payload->>'packetId' = ?", [packetId]).whereRaw("payload->>'reason' = 'payer_assigned'").first('id');
+    .whereRaw("payload->>'packetId' = ?", [packetId]).first('id');
   const member = billed.length ? await trx('scheduled_services').where({ id: billed[0] }).first('id', 'technician_id') : null;
-  if (member && !open) {
+  if (open) {
+    // Augment it in place: the payer verdict joins whatever it already
+    // carried, so a later lift can tell a delivery review is still owed.
+    await trx('dispatch_alerts').where({ id: open.id })
+      .update({ payload: trx.raw('payload || ?::jsonb', [JSON.stringify(mergedState)]) });
+  } else if (member) {
     await require('./dispatch-alerts').createAlert({
       type: 'visit_closeout_review', severity: 'warn', techId: member.technician_id, jobId: member.id, trx,
-      payload: { visitId: visit.id, packetId, ...officeReviewState({ payment: 'office_required', reason: 'payer_assigned', payerId }) },
+      payload: { visitId: visit.id, packetId, ...mergedState },
     });
   }
   return true;
@@ -905,11 +925,17 @@ async function withdrawPacketInvoicesForOwner(trx, { customerId = null, schedule
         .whereIn('scheduled_service_id', trx('scheduled_services').where({ payer_id: payerId }).select('id')).select('packet_id')));
   }
   const candidates = await query.select('id', 'visit_completion_packet_id');
-  let withdrawn = 0;
+  // The IDS, not just a count (Codex #4311 r42 P1): a caller that must journal
+  // what this withdrawal touched — the customer merge, whose undo repoints
+  // rows by id — needs to know which invoices moved. `length` keeps the
+  // count-like reading every other caller relies on.
+  const withdrawn = [];
   for (const invoice of candidates) {
     const { visit, billed, payerId: owner } = await resolvePacketOwnershipLocked(invoice.visit_completion_packet_id, trx);
     if (!visit || !owner) continue;
-    if (await withdrawPacketInvoiceForPayer(trx, { packetId: invoice.visit_completion_packet_id, invoiceId: invoice.id, visit, billed, payerId: owner })) withdrawn += 1;
+    if (await withdrawPacketInvoiceForPayer(trx, { packetId: invoice.visit_completion_packet_id, invoiceId: invoice.id, visit, billed, payerId: owner })) {
+      withdrawn.push(invoice.id);
+    }
   }
   return withdrawn;
 }
