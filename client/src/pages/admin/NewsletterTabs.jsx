@@ -3709,7 +3709,7 @@ export function SubscribersView() {
             <Button variant="secondary" onClick={closeImportDialog} disabled={importing}>
               Cancel
             </Button>
-            <Button type="submit" loading={importing}>
+            <Button type="submit" loading={importing} autoFocus>
               Import subscribers
             </Button>
           </DialogFooter>
@@ -3736,7 +3736,7 @@ export function SubscribersView() {
             <Button variant="secondary" onClick={closeUnsubscribeDialog} disabled={unsubscribing}>
               Cancel
             </Button>
-            <Button type="submit" variant="danger" loading={unsubscribing}>
+            <Button type="submit" variant="danger" loading={unsubscribing} autoFocus>
               Unsubscribe
             </Button>
           </DialogFooter>

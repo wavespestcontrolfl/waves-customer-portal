@@ -105,6 +105,7 @@ describe('Newsletter subscriber dialogs', () => {
     dialog = await screen.findByRole('dialog', { name: 'Import subscribers?' });
     const importButton = within(dialog).getByRole('button', { name: 'Import subscribers' });
     expect(importButton).toHaveAttribute('type', 'submit');
+    expect(importButton).toHaveFocus();
     fireEvent.submit(importButton.closest('form'));
     await waitFor(() => expect(fetchMock).toHaveBeenCalledWith(
       '/api/admin/newsletter/subscribers/import',
@@ -135,6 +136,7 @@ describe('Newsletter subscriber dialogs', () => {
     expect(dialog).toHaveTextContent('Unsubscribe reader@example.com?');
     const unsubscribeButton = within(dialog).getByRole('button', { name: 'Unsubscribe' });
     expect(unsubscribeButton).toHaveAttribute('type', 'submit');
+    expect(unsubscribeButton).toHaveFocus();
     fireEvent.submit(unsubscribeButton.closest('form'));
     expect(await within(dialog).findByRole('alert')).toHaveTextContent('Failed: Synthetic failure');
     expect(screen.getByRole('dialog', { name: 'Unsubscribe subscriber?' })).toBeInTheDocument();
