@@ -204,7 +204,12 @@ function responseFor(url) {
 async function metricsFor(page, surface) {
   return surface.evaluate((node) => ({
     overflow: document.documentElement.scrollWidth > innerWidth,
-    controls: [...node.querySelectorAll("button,input,select,textarea")]
+    // Checkbox/radio inputs render a native 16-20px box on purpose (u-nums
+    // aside, tokens.css u-touch-hit gives them a 44px hit target via a
+    // ::before pseudo-element on coarse pointers only) — asserting their own
+    // bounding box is >=44px is the wrong check on every pointer type, so
+    // they're excluded from the control-size assertion entirely.
+    controls: [...node.querySelectorAll("button,input:not([type=checkbox]):not([type=radio]),select,textarea")]
       .filter((element) => element.getClientRects().length)
       .map((element) => ({
         height: element.getBoundingClientRect().height,
