@@ -3455,7 +3455,7 @@ function DeactivateStaffDialog({ tech, error, submitting, onCancel, onConfirm })
         display: "flex",
         alignItems: "center",
         justifyContent: "center",
-        padding: "max(16px, env(safe-area-inset-top, 0px)) max(16px, env(safe-area-inset-right, 0px)) max(16px, env(safe-area-inset-bottom, 0px)) max(16px, env(safe-area-inset-left, 0px))",
+        padding: "calc(16px + env(safe-area-inset-top, 0px)) calc(16px + env(safe-area-inset-right, 0px)) calc(16px + env(safe-area-inset-bottom, 0px)) calc(16px + env(safe-area-inset-left, 0px))",
       }}
     >
       <div
