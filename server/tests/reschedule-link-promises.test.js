@@ -371,6 +371,54 @@ test('an ambiguous numeric date claim anywhere in the evidence fails closed even
     .toBe('date_not_grounded');
 });
 
+// codex #4293 P1 r11: quoteDateContradictsSelectedVisit (the evidence-wide
+// check r10 made unconditional) only ever consulted explicitQuoteDate, which
+// deliberately leaves a BARE weekday name unresolved — that vocabulary lived
+// only in quoteGroundsVisitDate, still gated on subject.visit_date being
+// populated. With subject: null, "your Monday appointment" against a sole
+// Tuesday visit sailed through: the evidence-wide check ran (unconditional),
+// found no EXPLICIT claim to check (a bare weekday is not one), and stopped
+// looking — the check had become unconditional, but its vocabulary had not.
+// This is now consolidated into one function (quoteContradictsVisit) that
+// both narrowBySubject and evidenceContradictsSelectedVisit call, and it
+// resolves a bare weekday exactly like every other shape.
+describe('a bare weekday claim anywhere in the evidence is checked against the selected visit even with subject null (codex #4293 P1 r11)', () => {
+  const promise = 'I will text you a reschedule link for your Monday appointment.';
+  const evidence = [{ quote: promise, speaker: 'agent' }];
+  const source = { ...call, transcription: `Agent: ${promise}\nCaller: Thank you.` };
+
+  test('a sole visit on a DIFFERENT weekday parks for review, not sent', () => {
+    // The fixture `visit` is 2030-01-08, a Tuesday.
+    expect(select({ call: source, commitment: { ...commitment, subject: null, evidence }, candidates: [visit] }).reason)
+      .toBe('date_not_grounded');
+  });
+
+  test('the identical evidence DOES ground a sole visit that actually falls on the named weekday', () => {
+    const monday = { ...visit, id: 'monday', scheduled_date: '2030-01-14' }; // also a Monday
+    expect(select({ call: source, commitment: { ...commitment, subject: null, evidence }, candidates: [monday] }).visit?.id)
+      .toBe('monday');
+  });
+
+  test('two open visits both on the named weekday stay ambiguous — the reason is not overridden by the new weekday check', () => {
+    const monday1 = { ...visit, id: 'monday1', scheduled_date: '2030-01-14' };
+    const monday2 = { ...visit, id: 'monday2', scheduled_date: '2030-01-21' };
+    expect(select({ call: source, commitment: { ...commitment, subject: null, evidence }, candidates: [monday1, monday2] }).reason)
+      .toBe('ambiguous_visit');
+  });
+});
+
+test('an explicit month-name date claim in the evidence still parks a mismatched visit with subject null, post-consolidation (codex #4293 P1 r10/r11 regression)', () => {
+  // Same explicit-claim shape as the r10 test above (an absolute month+day),
+  // re-asserted here against the CONSOLIDATED quoteContradictsVisit to prove
+  // r11's merge did not narrow what the evidence-wide check already caught.
+  const promise = 'I will text you a reschedule link for your September 20 appointment.';
+  const evidence = [{ quote: promise, speaker: 'agent' }];
+  const source = { ...call, transcription: `Agent: ${promise}\nCaller: Thank you.` };
+  const october = { ...visit, id: 'october', scheduled_date: '2030-10-20' };
+  expect(select({ call: source, commitment: { ...commitment, subject: null, evidence }, candidates: [october] }).reason)
+    .toBe('date_not_grounded');
+});
+
 test('an inactive account cannot be promised a link the reschedule page refuses', () => {
   for (const active of [false, null, undefined]) {
     expect(select({ customer: { ...customer, active } }).reason).toBe('customer_inactive');

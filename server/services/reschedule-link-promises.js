@@ -494,31 +494,14 @@ function subjectNotGrounded(subject, call) {
 // appointment", or any visit more than a week away, were thrown out even when
 // the date matched exactly (codex #4293 r3 P2). An existing appointment has a
 // date of record instead: the candidate's own ET date must equal the stated
-// one, and nothing the quote SAYS about the date may contradict it.
-function quoteContradictsVisitDate(quote, ymd) {
-  const q = ` ${norm(quote)} `;
-  const [year, month, day] = String(ymd).split('-').map(Number);
-  if (![year, month, day].every(Number.isFinite)) return true;
-  // A calendar date is timezone-free, so the UTC weekday of the ET wall date
-  // is exact.
-  const weekday = new Date(Date.UTC(year, month - 1, day)).getUTCDay();
-  // "August 9" against a September visit, or "September 27" against the 20th.
-  for (const [index, name] of MONTH_NAMES.entries()) {
-    const spoken = q.match(new RegExp(`\\b${name}\\b\\s*(\\d{1,2})?`));
-    if (!spoken) continue;
-    // "may" is an ordinary verb too — it only reads as a month with a day on it.
-    if (name === 'may' && !spoken[1]) continue;
-    if (index + 1 !== month) return true;
-    if (spoken[1] && Number(spoken[1]) !== day) return true;
-  }
-  // "the 27th" against the 20th.
-  const ordinal = q.match(/\b(\d{1,2})(?:st|nd|rd|th)\b/);
-  if (ordinal && Number(ordinal[1]) !== day) return true;
-  // "Friday" against a Tuesday visit.
-  return WEEKDAY_NAMES.some((name, index) => index !== weekday && new RegExp(`\\b${name}\\b`).test(q));
-}
+// one, and nothing the quote SAYS about the date may contradict it. The check
+// itself — quoteContradictsVisit — is defined further down, alongside the
+// parsers (explicitQuoteDate, claimFitsDate) it depends on; it is the SAME
+// function narrowBySubject calls below and evidenceContradictsSelectedVisit
+// calls for every other evidence source (codex #4293 P1 r11 — see that
+// function's own doc comment for why there is only one of it now).
 
-// Positive grounding for an extracted appointment date: quoteContradictsVisitDate
+// Positive grounding for an extracted appointment date: quoteContradictsVisit
 // only rejects a quote that says something ELSE, so "my appointment tomorrow"
 // sails through unexamined and binds whatever date the model happened to pick
 // — right or wrong — the moment some candidate visit shares it. With more than
@@ -652,11 +635,11 @@ function quoteGroundsVisitDate(quote, ymd, reference, candidates = []) {
   return candidates.length <= 1;
 }
 
-function narrowBySubject(candidates, subject) {
+function narrowBySubject(candidates, subject, reference) {
   let selected = candidates;
   if (subject?.visit_date) {
     selected = selected.filter((v) => dateOnly(v.scheduled_date) === subject.visit_date
-      && !quoteContradictsVisitDate(subject.quote, subject.visit_date));
+      && !quoteContradictsVisit(subject.quote, subject.visit_date, reference));
   }
   if (subject?.service) selected = selected.filter((v) => norm(v.service_type || v.service_name).includes(norm(subject.service)));
   if (subject?.address) selected = selected.filter((v) => require('./estimator-engine/address-compare').sameStreetAddress(
@@ -693,26 +676,58 @@ function extractedDateUngrounded({ subject, call, candidates, callCommitments })
 }
 
 // The invariant every date-grounding fix in this file keeps rediscovering,
-// made unconditional: if the grounding quote names an explicit date, that
-// date must agree with the visit about to receive a link — regardless of
-// whether the extractor populated subject.visit_date at all.
+// made unconditional: if a claim names a date for the appointment, that date
+// must agree with the visit about to receive a link — regardless of which
+// optional extraction field the claim happened to arrive in.
 // extractedDateUngrounded (quoteGroundsVisitDate) only runs when
 // subject.visit_date is present; when the model omits it, narrowBySubject
 // applies no date filter, so "I will text you a link for your September 20
 // appointment" bound whatever visit narrowBySubject selected on service /
 // address alone (or the sole remaining candidate when it selected on
 // nothing) — sending the wrong appointment's link the moment the customer's
-// only open visit fell on a different date (codex #4293 P1 r9). This reuses
-// the same explicitQuoteDate parser (numeric dates and AMBIGUOUS_DATE_CLAIM
-// included) against the visit actually SELECTED, not the extracted date, so
-// it catches the mismatch even with no extraction to check in the first
-// place. A quote naming no date at all has nothing to check the pick
-// against and is left alone, exactly as before.
-function quoteDateContradictsSelectedVisit(quote, ymd, reference) {
+// only open visit fell on a different date (codex #4293 P1 r9).
+//
+// THIS is the one place that answers "does this quote's claimed date
+// contradict this visit?", and it is the ONLY such place in the file — it
+// used to be two: quoteContradictsVisitDate (month/ordinal/bare-weekday
+// only, no numeric dates or today/tomorrow/next-<weekday>, called from
+// narrowBySubject for subject.quote alone) and an earlier version of this
+// function (explicitQuoteDate's full vocabulary — numeric dates and
+// AMBIGUOUS_DATE_CLAIM included — but no bare weekday at all, called from
+// evidenceContradictsSelectedVisit for every OTHER evidence source). Each
+// covered a shape the other did not, so a promise with subject: null whose
+// standing-promise quote named a bare weekday ("your Monday appointment")
+// sailed through ungrounded the moment the sole open visit fell on a
+// DIFFERENT weekday (codex #4293 P1 r11) — the evidence-wide check had
+// already been made unconditional (r10), but its vocabulary was still
+// missing the one shape quoteGroundsVisitDate needs a candidate list to
+// resolve responsibly (grounding a pick among several same-weekday visits)
+// and this function does not (it only has to say whether ONE already-
+// selected visit is contradicted, which needs no uniqueness reasoning at
+// all — see the weekday branch below). Consolidating removes the seam: one
+// function, one vocabulary, called from both narrowBySubject (subject.quote)
+// and evidenceContradictsSelectedVisit (every other source), so a shape this
+// file can recognise is checked the same way no matter which field it rode
+// in on.
+function quoteContradictsVisit(quote, ymd, reference) {
   const q = ` ${norm(quote)} `;
+  const [year, month, day] = String(ymd).split('-').map(Number);
+  if (![year, month, day].every(Number.isFinite)) return true;
   const explicit = explicitQuoteDate(q, reference, quote);
   if (explicit === AMBIGUOUS_DATE_CLAIM) return true; // fail closed — see numericQuoteDate
-  return !!explicit && !claimFitsDate(explicit, ymd);
+  if (explicit) return !claimFitsDate(explicit, ymd);
+  // No explicit claim (no absolute date, ordinal, numeric shape, or
+  // today/tomorrow/next-<weekday> token) — a bare weekday name is still a
+  // claim about the date, just one explicitQuoteDate deliberately leaves
+  // unresolved (that parser reserves bare weekdays for
+  // quoteGroundsVisitDate's uniqueness-gated GROUNDING rule, which needs the
+  // full candidate list to decide whether the word could have meant more
+  // than one open visit). CONTRADICTION is a simpler question: the visit is
+  // already selected, so any weekday name in the quote that is not the one
+  // this visit actually falls on disagrees with it, full stop — no
+  // candidate list needed.
+  const weekday = new Date(Date.UTC(year, month - 1, day)).getUTCDay();
+  return WEEKDAY_NAMES.some((name, index) => index !== weekday && new RegExp(`\\b${name}\\b`).test(q));
 }
 
 // Every field an AGENT utterance attached to this promise can live in,
@@ -774,11 +789,12 @@ const APPOINTMENT_REFERENCE = /\b(?:appointment|appt|visit)\b/;
 // rounds, each accepted as "validate the quote" and each time "the quote"
 // turning out to mean a narrower thing than it sounded). Only a promise
 // whose ENTIRE evidence set names no appointment-bound date at all may
-// proceed ungrounded — exactly quoteDateContradictsSelectedVisit's own
-// per-quote rule, applied across every source instead of one.
+// proceed ungrounded — exactly quoteContradictsVisit's own per-quote rule
+// (every shape it recognises, explicit or bare-weekday), applied across
+// every source instead of one.
 function evidenceContradictsSelectedVisit(texts, ymd, reference) {
   return texts.filter((quote) => APPOINTMENT_REFERENCE.test(norm(quote)))
-    .some((quote) => quoteDateContradictsSelectedVisit(quote, ymd, reference));
+    .some((quote) => quoteContradictsVisit(quote, ymd, reference));
 }
 
 function selectDiscussedVisit({ commitment, call, customer, candidates = [], now = new Date() }) {
@@ -800,11 +816,12 @@ function selectDiscussedVisit({ commitment, call, customer, candidates = [], now
     && (groundedSubject || promisedQuotes.some((quote) => RESCHEDULE_WORD.test(quote) || MOVE_INTENT.test(quote) || EXISTING_SLOT.test(quote)));
   if (revoked || !promisedQuotes.length || !aboutThisAppointment
     || !Number.isFinite(Number(commitment.confidence)) || Number(commitment.confidence) < 0.9) return skip('promise_needs_review');
+  const reference = callCommitments.callEndedAt(call) || call.created_at;
   if (extractedDateUngrounded({ subject, call, candidates, callCommitments })) return skip('date_not_grounded');
-  const selected = narrowBySubject(candidates, subject);
+  const selected = narrowBySubject(candidates, subject, reference);
   if (selected.length !== 1) return skip(selected.length ? 'ambiguous_visit' : 'discussed_visit_unavailable');
-  if (evidenceContradictsSelectedVisit(promiseEvidenceTexts(commitment, promisedQuotes), dateOnly(selected[0].scheduled_date),
-    callCommitments.callEndedAt(call) || call.created_at)) return skip('date_not_grounded');
+  if (evidenceContradictsSelectedVisit(promiseEvidenceTexts(commitment, promisedQuotes), dateOnly(selected[0].scheduled_date), reference))
+    return skip('date_not_grounded');
   const notReady = visitNotSelfServiceReason(selected[0], now);
   return notReady ? skip(notReady) : { visit: selected[0] };
 }
@@ -1693,6 +1710,10 @@ async function dispatch(conn, row, context, { now, send, buildLink, render, plan
   row.related_scheduled_service_id = visit.id;
   row.related_customer_id = customer.id;
   let manual = null;
+  // Set only by check()'s own floor recheck below, so the result handler can
+  // defer to the SAME instant the check computed rather than recomputing it
+  // (and risking a second, later `new Date()` landing on a different floor).
+  let deferredUntil = null;
   // The shared "was this definitely not sent" derivation (codex #4293 P1,
   // follow-up round) — see its own doc comment in send-customer-message.js
   // for the full outcome-vocabulary table this reads.
@@ -1700,8 +1721,24 @@ async function dispatch(conn, row, context, { now, send, buildLink, render, plan
   const check = async () => {
     if (mode() !== 'true') return { ok: false, code: 'LINK_GATE_OFF', reason: 'Reschedule link automation is off' };
     if (!isWithinSendWindowET()) return { ok: false, code: 'LINK_QUIET_HOURS', reason: 'Waiting for the next send window' };
-    const live = await contextFor(conn, commitment.id, new Date());
+    const checkedAt = new Date();
+    const live = await contextFor(conn, commitment.id, checkedAt);
     if (live.reason || !sameVisitSnapshot(snapshot(live.visit), planned)) return { ok: false, code: 'LINK_SOURCE_CHANGED', reason: 'The discussed visit changed' };
+    // holdBeforeSend rechecks the floor immediately before THIS call into
+    // dispatch(), but this check runs again — twice, at preDispatchCheck AND
+    // preProviderCheck — after that, while link rendering, the template
+    // lookup, and the messaging pipeline's own awaits are all in flight. If
+    // re-extraction moves the commitment's due_at further out during that
+    // window, the visit snapshot above still matches (due_at is not part of
+    // it) and sails through unaware, sending EARLY on the strength of a
+    // floor that is no longer current (codex #4293 P1). Recompute the floor
+    // fresh from the just-reloaded `live.commitment` — not the `commitment`
+    // captured when dispatch() started — and defer to it rather than send.
+    const floor = promisedFloorAt(live.commitment, checkedAt);
+    if (floor) {
+      deferredUntil = floor;
+      return { ok: false, code: 'LINK_FLOOR_NOT_REACHED', reason: 'The promised delivery time moved out', retryable: true };
+    }
     manual = await matchingSend(conn, live, evidenceSince);
     return manual ? { ok: false, code: 'LINK_ALREADY_SENT', reason: 'The link was already sent' } : { ok: true };
   };
@@ -1725,6 +1762,14 @@ async function dispatch(conn, row, context, { now, send, buildLink, render, plan
         payload: deliveryUncertainPatch(conn, false) });
     if (result.blocked && ['LINK_QUIET_HOURS', 'QUIET_HOURS_HOLD', 'LINK_GATE_OFF'].includes(result.code)) return conn('outbox_messages').where({ id: row.id, status: 'sending' })
       .update({ status: 'pending', available_at: nextSendWindowOpenET(new Date()), last_error: result.code, updated_at: new Date(),
+        payload: deliveryUncertainPatch(conn, false) });
+    // A moved-out due_at is not an unknown outcome or an office-review
+    // matter — nothing reached the provider, and the fix is exactly the same
+    // shape as a quiet-hours hold: defer to the floor check() just computed,
+    // the same way holdBeforeSend defers a pass that never reached dispatch()
+    // at all (codex #4293 P1).
+    if (result.blocked && result.code === 'LINK_FLOOR_NOT_REACHED' && deferredUntil) return conn('outbox_messages').where({ id: row.id, status: 'sending' })
+      .update({ status: 'pending', available_at: deferredUntil, last_error: result.code, updated_at: new Date(),
         payload: deliveryUncertainPatch(conn, false) });
     // Everything else that reaches here — a changed source visit or an
     // already-sent duplicate from the same `check()` (LINK_SOURCE_CHANGED,

@@ -1936,6 +1936,51 @@ postgres('reschedule-link-promises against PostgreSQL', () => {
       const sent = await mockPg('outbox_messages').where({ commitment_id: commitmentId }).first();
       expect(sent.status).toBe('sent');
     });
+
+    // codex #4293 P1 (this round): holdBeforeSend's recheck above only
+    // guards the window BEFORE dispatch() is even entered. Once inside
+    // dispatch(), link rendering and the messaging pipeline's own awaits are
+    // in flight for a real interval — if re-extraction moves the
+    // commitment's due_at into the future DURING that window, the row's
+    // visit snapshot still matches (due_at plays no part in it) and the
+    // final guard (check(), wired as BOTH preDispatchCheck and
+    // preProviderCheck) used to compare only the visit snapshot, sailing
+    // through unaware and sending EARLY on the strength of a floor that had
+    // already moved. This drives the REAL check() function — not a
+    // blocked-code stand-in — through a send() stub that calls
+    // preDispatchCheck itself, after mutating due_at, exactly as the real
+    // messaging pipeline would call it at the provider boundary.
+    test('a due_at moved into the future between staging and the provider boundary defers the send to the new floor, not the stale one (codex #4293 P1)', async () => {
+      const now = new Date('2030-01-07T14:00:00Z'); // 9:00 AM ET — inside the send window
+      const newFloor = new Date('2030-01-09T14:00:00Z'); // moved two days out
+      const commitmentId = await seedPromise({ quote: 'I will text you a reschedule link for that appointment.' });
+
+      // No due_at at staging time: the row is immediately due.
+      const staged = await links.stagePromises(mockPg);
+      expect(staged).toBe(1);
+      const row = await mockPg('outbox_messages').where({ commitment_id: commitmentId }).first();
+
+      // A stand-in send() that races the real dispatch: it moves due_at into
+      // the future and THEN calls the real preDispatchCheck — the same
+      // sequence a concurrent reprocess landing while link rendering and the
+      // messaging pipeline were still awaiting would produce.
+      const raceSend = async ({ preDispatchCheck }) => {
+        await mockPg('call_commitments').where({ id: commitmentId }).update({ due_at: newFloor, due_basis: 'stated' });
+        const verdict = await preDispatchCheck({});
+        expect(verdict).toMatchObject({ ok: false, code: 'LINK_FLOOR_NOT_REACHED', retryable: true });
+        return { sent: false, blocked: true, code: verdict.code, retryable: true };
+      };
+
+      await links.runOne(mockPg, row, { now, send: raceSend, buildLink: stubBuildLink, render: stubRender });
+
+      const after = await mockPg('outbox_messages').where({ commitment_id: commitmentId }).first();
+      expect(after.status).toBe('pending');
+      expect(after.last_error).toBe('LINK_FLOOR_NOT_REACHED');
+      // Deferred to the NEW floor — not sent, and not simply retried a few
+      // minutes out the way a busy interlock or quiet hours would be.
+      expect(new Date(after.available_at).getTime()).toBe(newFloor.getTime());
+      expect(after.payload.delivery_outcome_uncertain).toBe(false);
+    });
   });
 
   /**
