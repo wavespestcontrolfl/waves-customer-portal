@@ -145,6 +145,7 @@ export default function VisitCloseoutSheet({ visitId, products, onClose, onSaved
           setResult(null);
           if (['done', 'failed'].includes(detail.packet?.status)) {
             await clearTerminalDrafts(visitId, detail.members, scope);
+            setError('');
           }
           if (err.code === 'visit_members_changed' && !detail.packet) {
             const day = await adminFetch(`/admin/schedule?date=${encodeURIComponent(detail.serviceDate)}`);

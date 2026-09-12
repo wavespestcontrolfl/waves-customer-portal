@@ -253,6 +253,7 @@ it('uses the discovered terminal packet after losing a resume response', async (
   fireEvent.click(resume);
   expect(await screen.findByText('Visit closeout is complete.')).toBeInTheDocument();
   expect(screen.queryByRole('button', { name: 'Resume closeout' })).not.toBeInTheDocument();
+  expect(screen.queryByRole('alert')).not.toBeInTheDocument();
   await waitFor(async () => expect(await getVisitCompletionDraft('visit', scope)).toBeNull());
 });
 
