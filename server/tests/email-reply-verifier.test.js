@@ -274,6 +274,18 @@ describe('email reply verifier', () => {
     expect(verdict('Hi Casey, your payment was on September 10.').ok).toBe(true);
   });
 
+  test('invoice due dates cannot support invoice event dates', () => {
+    expect(verdict('Hi Casey, your invoice is due September 20.').ok).toBe(true);
+    for (const wording of [
+      'your invoice was sent September 20',
+      'your invoice was issued September 20',
+      'your invoice was sent September 20 and is due September 20',
+      'your invoice is dated September 20',
+    ]) {
+      expect(verdict(`Hi Casey, ${wording}.`).violations).toContain('date_unsupported:September 20');
+    }
+  });
+
   test('requires payment context before treating received as a payment claim', () => {
     expect(verdict('Hi Casey, we received your email about your appointment.').ok).toBe(true);
     const facts = contextWith().facts.map((fact) => (fact.key === 'recent_payment'

@@ -225,6 +225,9 @@ function dateSupported(raw, sentence, available) {
 }
 
 function temporalSupportedByEntry(raw, sentence, entry) {
+  // The assembler exposes invoice dueDate, not lifecycle event timestamps.
+  if (entry.key === 'open_invoice' && (!/\bdue\b/i.test(sentence)
+    || /\b(?:sent|viewed|created|issued|paid|cancelled|canceled|processed|refunded|voided|emailed)\b/i.test(sentence))) return false;
   const normalized = normalizeTemporal(raw);
   if ([...entry.aliases].some((alias) => normalizeTemporal(alias) === normalized)) return true;
   const standaloneClocks = String(sentence).replace(TIME_RANGE_RE, '').match(TIME_RE) || [];
