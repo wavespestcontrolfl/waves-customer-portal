@@ -87,6 +87,21 @@ function reviewedOccurrence(row, date, window = {}, options = {}) {
     to_date: date, to_start: target.start || null, to_end: target.end || null };
 }
 
+const REVIEWED_OCCURRENCE_FIELDS = [
+  'id', 'from_date', 'status', 'from_start', 'from_end', 'duration', 'property_id',
+  'date_exception', 'cadence_date', 'to_date', 'to_start', 'to_end',
+];
+
+function reviewedOccurrencesMatch(actual, expected) {
+  if (actual.length !== expected.length) return false;
+  return actual.every((row, index) => {
+    const disclosed = expected[index];
+    return disclosed && Object.keys(disclosed).length === REVIEWED_OCCURRENCE_FIELDS.length
+      && REVIEWED_OCCURRENCE_FIELDS.every((field) => Object.prototype.hasOwnProperty.call(disclosed, field)
+        && disclosed[field] === row[field]);
+  });
+}
+
 // Seasonal mosquito cadence lives in the seeder — single source of truth for
 // the Feb-Oct walk, so this file's own nextRecurringDate cannot drift from it.
 const { SEASONAL_FEB_OCT, seasonalFebOctDate, clampDateToSeason, customerPrefersNoWeekends, preferenceRowBlocksWeekends } = require('./recurring-appointment-seeder');
@@ -2404,7 +2419,7 @@ class SmartRebooker {
         const actual = siblings.slice(startIdx).map((row, i) => sweptIds.includes(String(row.id))
           ? reviewedOccurrence(row, projectOccurrenceDate(i, row), String(row.id) === String(serviceId) ? win : {}, options) : null).filter(Boolean)
           .sort((a, b) => a.id.localeCompare(b.id));
-        if (JSON.stringify(actual) !== JSON.stringify(options.expectOccurrences)) {
+        if (!reviewedOccurrencesMatch(actual, options.expectOccurrences)) {
           throw Object.assign(new Error('The recurring dates or windows changed. Refresh the proposal.'), { statusCode: 409, code: 'SERIES_CHANGED' });
         }
       }

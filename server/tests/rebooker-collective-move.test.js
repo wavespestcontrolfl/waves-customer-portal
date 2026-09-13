@@ -945,7 +945,7 @@ describe('previewSeriesMove', () => {
     expect(findConflictingVisits).toHaveBeenCalledWith(expect.objectContaining({ date: dayOffset(28), excludeServiceIds: ['svc-1', 'svc-3', 'svc-4'] }));
   });
 
-  test('the disclosed anchor window retains its duration and can be applied unchanged', async () => {
+  test('the disclosed anchor window retains its duration and applies after transport reorders object keys', async () => {
     const anchor = anchorRow({ window_end: '10:30:00', estimated_duration_minutes: 90 });
     const rows = [{ ...anchor }];
     const queries = [chain({ first: jest.fn().mockResolvedValue(anchor) }),
@@ -955,7 +955,8 @@ describe('previewSeriesMove', () => {
     expect(preview.occurrences[0]).toMatchObject({ to_start: '13:00', to_end: '14:30', duration: 90 });
     const { updates } = wireSeriesMocks(rows, { anchor });
     await SmartRebooker.rescheduleSeries('svc-1', TARGET, { start: '13:00' }, 'admin', 'admin', {
-      pendingConfirmation: true, expectOccurrenceIds: preview.occurrenceIds, expectOccurrences: preview.occurrences,
+      pendingConfirmation: true, expectOccurrenceIds: preview.occurrenceIds,
+      expectOccurrences: preview.occurrences.map((row) => Object.fromEntries(Object.entries(row).reverse())),
     });
     expect(updates[0].update.mock.calls[0][0]).toMatchObject({ scheduled_date: TARGET, window_start: '13:00', window_end: '14:30', status: 'pending' });
   });
