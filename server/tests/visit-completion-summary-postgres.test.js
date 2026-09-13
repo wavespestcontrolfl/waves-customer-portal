@@ -2160,6 +2160,31 @@ postgres('visit summary recipient recovery', () => {
     }
   });
 
+  test('a zero-due packet invoice stays settled after the packet claim reports nothing to deliver', async () => {
+    const Invoice = require('../services/invoice');
+    const invoiceId = randomUUID();
+    await mockPg('invoices').insert({
+      id: invoiceId,
+      token: randomUUID().replace(/-/g, ''),
+      invoice_number: `FIX-${invoiceId.slice(0, 8)}`,
+      customer_id: fixture.customerId,
+      scheduled_service_id: fixture.serviceIds[0],
+      visit_completion_packet_id: fixture.packetId,
+      status: 'draft',
+      total: 0,
+      credit_applied: 0,
+    });
+    try {
+      await expect(Invoice.claimPacketInvoiceForSend(invoiceId, fixture.packetId))
+        .rejects.toMatchObject({ code: 'zero_due' });
+      expect(await mockPg('invoices').where({ id: invoiceId }).first())
+        .toMatchObject({ status: 'prepaid', prepaid_by: 'system:zero_balance' });
+    } finally {
+      await mockPg('invoices').where({ id: invoiceId }).del();
+    }
+  });
+
+
   test('a reschedule that lands between the worker\'s due read and its claim keeps the invoice queued for later', async () => {
     const invoiceId = randomUUID();
     await mockPg('invoices').insert({ id: invoiceId, token: randomUUID().replace(/-/g, ''), invoice_number: `FIX-${invoiceId.slice(0, 8)}`,
@@ -3864,7 +3889,7 @@ postgres('visit summary recipient recovery', () => {
     }
   });
 
-  test('a transient Bill-To re-judge failure under the worker claim returns the send to its queue slot', async () => {
+  test('a transient Bill-To re-judge failure leaves the preclaim for its token-owning worker to restore', async () => {
     const invoiceId = randomUUID();
     await mockPg('invoices').insert({ id: invoiceId, token: randomUUID().replace(/-/g, ''), invoice_number: `FIX-${invoiceId.slice(0, 8)}`,
       customer_id: fixture.customerId, status: 'sending', total: 120, visit_completion_packet_id: fixture.packetId,
@@ -3882,7 +3907,9 @@ postgres('visit summary recipient recovery', () => {
       expect(await require('../services/invoice').sendViaSMSAndEmail(invoiceId, { allowClaimed: true })).toMatchObject({ ok: false, code: 'bill_to_fence_failed' });
       expect(interrupted).toBe(true);
       const invoice = await mockPg('invoices').where({ id: invoiceId }).first();
-      expect(invoice.status).toBe('scheduled');
+      // sendViaSMSAndEmail does not own the scheduled worker's claim token;
+      // processScheduledSends performs the guarded restore after this result.
+      expect(invoice.status).toBe('sending');
       expect(invoice.scheduled_send_at).not.toBeNull();
       expect(sendCustomerMessage).not.toHaveBeenCalled();
       expect(sendOne).not.toHaveBeenCalled();

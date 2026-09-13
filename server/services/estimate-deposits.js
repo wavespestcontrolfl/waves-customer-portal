@@ -251,6 +251,25 @@ async function receivedDepositTotal(estimateId) {
   return totalCents / 100;
 }
 
+// Advisory-lock keyspace shared with scheduled-invoice-mint.js's
+// pendingDepositCredit read (Codex round 14 P1 #4131): pendingDepositCredit
+// is a plain SELECT and this function's insert/update are independent
+// writes, so without a shared lock a deposit can settle AFTER the mint's
+// zero-credit check but BEFORE the invoice commits — the check passes,
+// consumeAppliedDeposit skips (nothing to apply), and a full-balance
+// invoice goes out beside the newly received deposit. Keyed on the
+// estimate, same two-key scheme every other advisory lock in this codebase
+// uses (namespace + id-as-text) — whichever side gets here first (this
+// write, or the mint's read-through-commit) completes before the other
+// proceeds; import this helper, never re-declare the raw lock statement.
+const ESTIMATE_DEPOSIT_LEDGER_LOCK = 'estimate.deposit.ledger';
+async function acquireEstimateDepositLedgerLock(trx, estimateId) {
+  await trx.raw(
+    'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
+    [ESTIMATE_DEPOSIT_LEDGER_LOCK, String(estimateId)],
+  );
+}
+
 // Mark a deposit PaymentIntent received — idempotent on the unique PI id, so
 // the webhook and accept-time verification can both fire in any order.
 // MONOTONIC: only a pending row can advance to received. Accept can verify
@@ -272,27 +291,36 @@ async function markDepositReceived({ paymentIntentId, estimateId, amountDollars,
   const receivedStamp = receivedAt instanceof Date && !Number.isNaN(receivedAt.getTime())
     ? receivedAt
     : db.fn.now();
-  const inserted = await db('estimate_deposits')
-    .insert({
-      estimate_id: estimateId,
-      amount: amountDollars,
-      card_surcharge: Number(cardSurcharge) || 0,
-      stripe_payment_intent_id: paymentIntentId,
-      status: 'received',
-      received_at: receivedStamp,
-      updated_at: db.fn.now(),
-    })
-    .onConflict('stripe_payment_intent_id')
-    .ignore()
-    .returning('id');
-  const updated = await db('estimate_deposits')
-    .where({ stripe_payment_intent_id: paymentIntentId, status: 'pending' })
-    .update({
-      status: 'received',
-      card_surcharge: Number(cardSurcharge) || 0,
-      received_at: receivedStamp,
-      updated_at: db.fn.now(),
-    });
+  // The insert/update run inside the SAME advisory-locked transaction the
+  // mint contends on (Codex round 14 P1 #4131) — the lock is acquired
+  // FIRST so a concurrent mint's pendingDepositCredit read either sees
+  // this row already committed, or waits behind this transaction and sees
+  // it on its own (equally locked) read.
+  const { inserted, updated } = await db.transaction(async (trx) => {
+    await acquireEstimateDepositLedgerLock(trx, estimateId);
+    const insertedRows = await trx('estimate_deposits')
+      .insert({
+        estimate_id: estimateId,
+        amount: amountDollars,
+        card_surcharge: Number(cardSurcharge) || 0,
+        stripe_payment_intent_id: paymentIntentId,
+        status: 'received',
+        received_at: receivedStamp,
+        updated_at: trx.fn.now(),
+      })
+      .onConflict('stripe_payment_intent_id')
+      .ignore()
+      .returning('id');
+    const updatedCount = await trx('estimate_deposits')
+      .where({ stripe_payment_intent_id: paymentIntentId, status: 'pending' })
+      .update({
+        status: 'received',
+        card_surcharge: Number(cardSurcharge) || 0,
+        received_at: receivedStamp,
+        updated_at: trx.fn.now(),
+      });
+    return { inserted: insertedRows, updated: updatedCount };
+  });
 
   // Exactly one caller wins the not-yet-received → received transition
   // (webhook vs the accept flow's live verification) — that winner sends the
@@ -1489,6 +1517,16 @@ async function consumeDepositCredit({ estimateId, amount, invoiceId, trx = db })
   if (!(remainingCents > 0)) return 0;
   const requestedCents = remainingCents;
 
+  // Serialize against markDepositReceived / a concurrent mint's own read
+  // (Codex round 16 P1 #4131 — same chokepoint as pendingDepositCredit):
+  // the lock lives INSIDE this ledger writer so a caller can't forget it.
+  // Callers that already hold it (the mint's own transaction, which locks
+  // before its pendingDepositCredit read) just re-acquire — advisory xact
+  // locks are reentrant within the same transaction. trx must be a REAL
+  // transaction for the lock to actually serialize anything; every current
+  // caller already passes one.
+  await acquireEstimateDepositLedgerLock(trx, estimateId);
+
   const rows = await trx('estimate_deposits')
     .where({ estimate_id: estimateId, status: 'received' })
     .orderBy('created_at', 'asc')
@@ -1584,6 +1622,13 @@ async function restoreDepositCreditForVoidedInvoice({ invoice, trx = db }) {
     totalRequestedCents += requestedCents;
     const estimateId = line.estimate_id || null;
     if (!estimateId) continue; // unstamped line — counted in the shortfall alert below
+    // Serialize against a concurrent mint's pendingDepositCredit read /
+    // consumeDepositCredit write, and against markDepositReceived (Codex
+    // round 16 P1 #4131): this restore makes credit available again, so it
+    // needs the SAME lock those take, acquired here inside the helper
+    // rather than left to each void path to remember. trx must be a real
+    // transaction (every current caller already supplies one).
+    await acquireEstimateDepositLedgerLock(trx, estimateId);
     let remainingCents = requestedCents;
     const rows = await trx('estimate_deposits')
       .where({ estimate_id: estimateId })
@@ -1708,6 +1753,7 @@ module.exports = {
   computeDepositAmount,
   DEPOSIT_FOLLOWUP_WINDOW,
   consumeDepositCredit,
+  acquireEstimateDepositLedgerLock,
   handleDepositChargeReversed,
   handleDepositDisputeClosed,
   handleDepositIntentCanceled,

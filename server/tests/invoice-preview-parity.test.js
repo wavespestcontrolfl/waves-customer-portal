@@ -349,6 +349,114 @@ describe('previewInvoiceTotals ↔ create parity', () => {
     }
   });
 
+  // The CALLER's payer pin (GitHub r11 P1 #4131) — a different contract from
+  // the frozen tax basis above and independent of it. The Invoices-page
+  // open-visit create decides prepaid coverage against a payer it resolved
+  // under the visit lock; create() then resolves the payer again from
+  // customers.payer_id / payers.active, neither of which the mint lock chain
+  // holds. A default-payer clear or a payer deactivation landing in between
+  // would drop creation to self-pay and mint a collectible homeowner invoice
+  // for a visit the payer's prepayment covered — so the pin refuses instead.
+  test('expectedPayerId: divergence 409s (PAYER_CHANGED) with nothing written; a matching pin — and no pin at all — create normally', async () => {
+    const PayerService = require('../services/payer');
+    // The definitive resolution now reads SELF-PAY (the default payer was
+    // cleared / the payer deactivated between the route's verdict and here).
+    const resolveSpy = jest
+      .spyOn(PayerService, 'resolveForInvoice')
+      .mockResolvedValue({ payerId: null, poNumber: null, taxExempt: false, snapshot: null, paymentTerms: null });
+    try {
+      const refused = mockCreateDb();
+      await expect(InvoiceService.create({
+        customerId: 'cust-1',
+        scheduledServiceId: 'sched-1',
+        title: 'WDO Inspection',
+        lineItems: [{ description: 'WDO inspection', quantity: 1, unit_price: FEE, amount: FEE }],
+        expectedPayerId: 'payer-1', // the route verified a payer-billed visit
+      })).rejects.toMatchObject({ code: 'PAYER_CHANGED', status: 409, statusCode: 409 });
+      // Refused BEFORE the insert — nothing collectible was minted.
+      expect(refused).toHaveLength(0);
+
+      // A pin that matches the definitive resolution is invisible…
+      const pinned = mockCreateDb();
+      await InvoiceService.create({
+        customerId: 'cust-1',
+        scheduledServiceId: 'sched-1',
+        title: 'WDO Inspection',
+        lineItems: [{ description: 'WDO inspection', quantity: 1, unit_price: FEE, amount: FEE }],
+        expectedPayerId: null, // the route verified SELF-PAY
+      });
+      expect(pinned).toHaveLength(1);
+      expect(pinned[0].payer_id ?? null).toBeNull();
+
+      // …and every create that takes no payer verdict (the overwhelming
+      // majority) is untouched by the pin.
+      const unpinned = mockCreateDb();
+      await runCreate();
+      expect(unpinned).toHaveLength(1);
+    } finally {
+      resolveSpy.mockRestore();
+    }
+  });
+
+  // Codex r12 P1 #4131: a pinned payer verdict must FAIL CLOSED on an
+  // UNVERIFIABLE final resolution, not just a verified mismatch. Fail-soft
+  // mode (the default whenever the statements and frozen-tax gates are both
+  // off) swallows a resolveForInvoice error and synthesizes the SAME
+  // self-pay answer the equality check above would happily match against a
+  // self-pay pin (expectedPayerId === null) — so a concurrently-assigned
+  // payer that made the final lookup error could still slip an individually
+  // collectible homeowner invoice past the pin. The fix forces
+  // throwOnError whenever expectedPayerId is supplied, so the resolver
+  // never gets to answer fail-soft while pinned.
+  test('expectedPayerId pinned + the definitive resolution throws: refused (PAYER_CHANGED), never a synthesized self-pay match', async () => {
+    const PayerService = require('../services/payer');
+    const resolveSpy = jest
+      .spyOn(PayerService, 'resolveForInvoice')
+      .mockImplementation(async (opts) => {
+        if (opts.throwOnError) throw new Error('payer schema probe failed mid-lock');
+        // Fail-soft mode (no pin, gates off) reports self-pay here — the
+        // exact shape a self-pay pin below would spuriously match if the
+        // pin failed to force throwOnError.
+        return { payerId: null, poNumber: null, taxExempt: false, snapshot: null, paymentTerms: null };
+      });
+    try {
+      // A self-pay pin (expectedPayerId: null) would match this fail-soft
+      // self-pay answer byte-for-byte — the fix is that the pin forces
+      // throwOnError so the resolver never gets to answer fail-soft at all.
+      const refusedSelfPayPin = mockCreateDb();
+      await expect(InvoiceService.create({
+        customerId: 'cust-1',
+        scheduledServiceId: 'sched-1',
+        title: 'WDO Inspection',
+        lineItems: [{ description: 'WDO inspection', quantity: 1, unit_price: FEE, amount: FEE }],
+        expectedPayerId: null, // the route verified SELF-PAY under its own lock
+      })).rejects.toMatchObject({ code: 'PAYER_CHANGED', status: 409, statusCode: 409 });
+      expect(refusedSelfPayPin).toHaveLength(0);
+      expect(resolveSpy).toHaveBeenLastCalledWith(expect.objectContaining({ throwOnError: true }));
+
+      // Same fail-closed refusal with a payer-billed pin.
+      const refusedPayerBilledPin = mockCreateDb();
+      await expect(InvoiceService.create({
+        customerId: 'cust-1',
+        scheduledServiceId: 'sched-1',
+        title: 'WDO Inspection',
+        lineItems: [{ description: 'WDO inspection', quantity: 1, unit_price: FEE, amount: FEE }],
+        expectedPayerId: 'payer-1',
+      })).rejects.toMatchObject({ code: 'PAYER_CHANGED', status: 409, statusCode: 409 });
+      expect(refusedPayerBilledPin).toHaveLength(0);
+
+      // Unpinned creates keep the existing fail-soft contract (gates off):
+      // an unverifiable lookup still resolves to self-pay rather than
+      // blocking a create that took no payer verdict at all.
+      const unpinned = mockCreateDb();
+      await runCreate();
+      expect(unpinned).toHaveLength(1);
+      expect(resolveSpy).toHaveBeenLastCalledWith(expect.objectContaining({ throwOnError: false }));
+    } finally {
+      resolveSpy.mockRestore();
+    }
+  });
+
   // Automatic branch (no explicit taxRate) + NON-exempt payer: the customer's
   // certificate must be excluded from the calculator too — create and preview
   // both pass skipCustomerExemption so the payer's AP invoice charges the
