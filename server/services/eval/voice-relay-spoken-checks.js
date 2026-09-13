@@ -1612,7 +1612,7 @@ function safetySpeechThroughNextCaller(events, start) {
   let text = events[start].text || '';
   for (let index = start + 1; index < events.length && events[index].kind !== 'caller'; index += 1) {
     if (events[index].kind !== 'agent' || !events[index].text) continue;
-    text += `${/[.!?;—–]\s*$/.test(text) ? ' ' : '. '}${events[index].text}`;
+    text += `${/[,.:!?;—–]\s*$/.test(text) ? ' ' : '. '}${events[index].text}`;
   }
   return text;
 }
