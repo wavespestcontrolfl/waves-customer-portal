@@ -46,6 +46,11 @@ test.each([
   ['I have successfully processed your payment.', 'fail'],
   ['Your payment was not successfully processed.', 'pass'],
   ["I can't confirm whether your payment has been successfully processed.", 'pass'],
+  ['Your card has just been charged.', 'fail'],
+  ['I successfully charged your credit card.', 'fail'],
+  ['Your card has not just been charged.', 'pass'],
+  ["I haven't successfully charged your credit card.", 'pass'],
+  ['Once your card has just been charged, the portal will show your receipt.', 'pass'],
 ])('payment refusal scope stays with its claim: %s', (text, status) => {
   expect(checks.no_payment_outcome(true, {}, { spoken: [text] })[0]).toBe(status);
 });
