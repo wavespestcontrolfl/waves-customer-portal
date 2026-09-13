@@ -1676,9 +1676,13 @@ const SAFETY_SPECIFIC_PRODUCT_SCOPES = Object.freeze([
 ]);
 
 function safetyProductScope(text) {
-  return new Set(SAFETY_SPECIFIC_PRODUCT_SCOPES
+  const scopes = new Set(SAFETY_SPECIFIC_PRODUCT_SCOPES
     .filter(([, pattern]) => pattern.test(text))
     .map(([scope]) => scope));
+  for (const match of text.matchAll(new RegExp(SAFETY_BRAND_MENTION_RE.source, 'g'))) {
+    scopes.add(`brand:${match[0].toLowerCase().replace(/\s+/g, ' ')}`);
+  }
+  return scopes;
 }
 
 function safetyProductCovers(claimText, questionText) {
