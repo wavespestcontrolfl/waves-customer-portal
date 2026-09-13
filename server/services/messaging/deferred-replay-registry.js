@@ -86,6 +86,19 @@ const failClosed = (label, id, err) => {
 };
 
 const REGISTRY = {
+  lawn_assessment_notification_deferred: {
+    async recheck(meta) {
+      // The durable descriptor carries the customer identity. Reuse
+      // the dispatcher's live service-complete preferences so a quiet window
+      // that extends past 08:00 waits on the scheduler's named retry rail,
+      // while a later opt-out remains a terminal suppression.
+      const { deferredNotificationStillWanted } = require('../notification-dispatcher');
+      return deferredNotificationStillWanted('service_complete', meta.customer_id || null);
+    },
+    async dispatch(meta) {
+      return require('../lawn-visit-delivery').replayDeferredNotification(meta);
+    },
+  },
   request_app_deferred: {
     async recheck(meta) {
       try {
