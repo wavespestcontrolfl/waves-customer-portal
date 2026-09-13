@@ -1247,7 +1247,9 @@ const SAFETY_BRAND_CODE = '(?:[A-Z]{1,4}\\d{0,3}|\\d{1,4}[A-Z]{0,3})';
 
 const SAFETY_BRAND_SUBJECT = `\\b(?!${SAFETY_SUBJECT_DETERMINER_CAPITALIZED}\\b)[A-Z][a-z]+\\s+${SAFETY_BRAND_CODE}\\b`;
 
-const SAFETY_SUBJECT_VERB = `(?:[\\x27\\u2019](?:s|re)|\\s+(?:is|are|was|were|will be|would be|should be))`;
+const SAFETY_PRODUCT_RELATIVE = '(?:\\s+(?:(?:that|which)\\s+)?(?:we|they|you|the technician)\\s+(?:(?:have|had|has|just|already|recently)\\s+)*(?:use|used|apply|applied|spray|sprayed|put down))?';
+
+const SAFETY_SUBJECT_VERB = `${SAFETY_PRODUCT_RELATIVE}(?:[\\x27\\u2019](?:s|re)|\\s+(?:is|are|was|were|will be|would be|should be))`;
 
 const SAFETY_INTENSIFIER = '(?:(?:completely|totally|perfectly|entirely|absolutely|fully|100%|very|quite|pretty)\\s+)?';
 
@@ -1534,7 +1536,7 @@ function capture_lead_input_asserts(value, record) {
 
 const PET_GUIDANCE_RE = /\b(?:(?:technician|team member)\b[^,.!?;]{0,100}?\b(?:go(?:es)? over|review(?:s)?|explain(?:s)?|talk(?:s)?(?: you)? through)|ask (?:the |a |your )?(?:technician|team member) about)\b[^,.!?;]{0,80}?\b(?:products?(?:\s+labels?)?|labels?|precautions?)(?:\s+(?:and|or)\s+(?:the\s+)?(?:products?(?:\s+labels?)?|labels?|precautions?))*\b/gi;
 
-const PET_SPECULATIVE_GUIDANCE_RE = /\b(?:might|may|could|would|should|maybe|perhaps|possibly|potentially)\b/i;
+const PET_SPECULATIVE_GUIDANCE_RE = /\b(?:might|may|could|would|should|maybe|perhaps|possibly|potentially|refuse[sd]?|decline[sd]?|failed|unable)\b/i;
 
 const PET_TRAILING_CONDITION_RE = /^(?:(?!\b(?:and|or|but|however|then|so)\b(?!\s+(?:only\s+)?(?:if|unless)\b))[^.!?;—–])*?\b(?:(?:only\s+)?if|unless)\b/i;
 
