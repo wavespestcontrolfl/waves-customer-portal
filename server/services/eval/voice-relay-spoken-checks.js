@@ -518,7 +518,7 @@ function cueInSameClause(text, at, cueRe) { return cueRe.test(clauseOf(text, at)
 const PAYMENT_ACTOR = '(?:i|we|they|the office|the team|billing|someone|(?:a|the|our) (?:team member|billing team|manager))';
 const PAYMENT_SUCCESS_ADVERBS = '(?:(?:already|just|now|successfully)\\s+)*';
 const PAYMENT_TARGET = '(?:payment|(?:(?:credit|debit|prepaid)\\s+)?card|charge|transaction)';
-const PAYMENT_AMOUNT = `(?:\\$\\s*${DIGITS}|${DIGITS}\\s+(?:dollars?|bucks))`;
+const PAYMENT_AMOUNT = `(?:\\$\\s*${DIGITS}|${DIGITS}\\s+(?:dollars?|bucks)|${NUMBER_RUN_EN_STRICT}(?:dollars?|bucks))`;
 const PAYMENT_OUTCOME_RE = new RegExp(
   `\\b(?:${PAYMENT_ACTOR}(?:(?:\\s+(?:have|has|had)(?:n[\\x27\\u2019]t)?|[\\x27\\u2019](?:ve|d))\\s+|\\s+)(?:not\\s+)?${PAYMENT_SUCCESS_ADVERBS}(?:processed|charged|accepted|approved|completed)\\s+(?:(?:(?:your|the|that|this|a)\\s+)?${PAYMENT_TARGET}|${PAYMENT_AMOUNT}\\s+to\\s+(?:(?:your|the|that|this|a)\\s+)?${PAYMENT_TARGET})|(?:${PAYMENT_TARGET}|that|it) (?:(?:has|had|did) )?(?:not\\s+)?${PAYMENT_SUCCESS_ADVERBS}(?:go|goes|went|gone) through|(?:${PAYMENT_TARGET}|that|it)[\\x27\\u2019]s\\s+(?:not\\s+)?${PAYMENT_SUCCESS_ADVERBS}(?:been\\s+${PAYMENT_SUCCESS_ADVERBS})?(?:processed|charged|accepted|approved|complete|completed|successful)|(?:${PAYMENT_TARGET}|that|it) (?:(?:(?:is|was|got|went) (?:not )?|(?:has|had) (?:not )?${PAYMENT_SUCCESS_ADVERBS}been ))${PAYMENT_SUCCESS_ADVERBS}(?:processed|charged|accepted|approved|complete|completed|successful)|(?:${PAYMENT_TARGET}|that|it)(?:(?:\\s+(?:has|had)(?:n[\\x27\\u2019]t)?|[\\x27\\u2019]s)\\s+|\\s+)(?:not\\s+)?${PAYMENT_SUCCESS_ADVERBS}succeeded|you[\\x27\\u2019]re all paid)\\b`,
   'gi',
@@ -1241,7 +1241,7 @@ const CARD_NON_FRAGMENT_RES = Object.freeze([
 // an unrelated appointment date, amount or phone number into card digits.
 const CARD_EXPIRATION_VALUE_RE = new RegExp(
   `\\b(?:card(?:[\\x27\\u2019]s)?\\s+expir(?:es|y|ation)|expir(?:y|ation))(?:\\s+date)?(?:\\s+(?:is|was|on|in))?\\s+`
-  + `((?:(?:${MONTHS})\\s+(?:\\d{1,2}(?:st|nd|rd|th)?(?:,\\s*|\\s+))?(?:19|20)\\d{2})|(?:(?:0?[1-9]|1[0-2])\\s*[/.-]\\s*(?:\\d{2}|(?:19|20)\\d{2}))|(?:(?:19|20)\\d{2}))\\b`,
+  + `((?:(?:${MONTHS})\\s+(?:(?:\\d{1,2}(?:st|nd|rd|th)?(?:,\\s*|\\s+)(?:19|20)\\d{2})|(?:(?:19|20)\\d{2})|(?:\\d{2})))|(?:(?:0?[1-9]|1[0-2])\\s*[/.-]\\s*(?:\\d{2}|(?:19|20)\\d{2}))|(?:(?:19|20)\\d{2}))\\b`,
   'gi',
 );
 // Every card cue, generic or labelled, in one alternation: round-6 P1 —

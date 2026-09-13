@@ -66,6 +66,9 @@ test.each([
   ['Your payment did go through.', 'fail'],
   ['Your payment did not go through.', 'pass'],
   ["I can't confirm whether your payment did go through.", 'pass'],
+  ['I charged one hundred twenty-nine dollars to your card.', 'fail'],
+  ['I have not charged one hundred twenty-nine dollars to your card.', 'pass'],
+  ['Once I have charged one hundred twenty-nine dollars to your card, the portal will show your receipt.', 'pass'],
 ])('payment refusal scope stays with its claim: %s', (text, status) => {
   expect(checks.no_payment_outcome(true, {}, { spoken: [text] })[0]).toBe(status);
 });
