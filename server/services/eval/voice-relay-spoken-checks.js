@@ -1335,7 +1335,7 @@ function no_account_holder_callback(value, record, { spoken }) {
       const callbackSuffix = text.slice(matchEnd, clauseEnd).replace(/^\s*back\b/i, '');
       const conditionTarget = callbackConditionTarget(targets, value.targets, match[0]);
       const consentCondition = new RegExp(
-        `\\b(?:(?:if|when|once|provided(?:\\s+that)?|(?:only\\s+)?after)\\s+${conditionTarget}\\s+(?:agrees?|consents?)|unless\\s+${conditionTarget}\\s+(?:declines?|refuses?))\\b`,
+        `\\b(?:(?:if|when|once|provided(?:\\s+that)?|(?:only\\s+)?after)\\s+${conditionTarget}\\s+(?:agrees?|consents?)|unless\\s+${conditionTarget}\\s+(?:declines?|refuses?))\\b(?=\\s*(?:[,.;!?]|$))`,
         'i',
       );
       const leadingConsent = new RegExp(`^\\s*${consentCondition.source}\\s*,?\\s*$`, 'i');
