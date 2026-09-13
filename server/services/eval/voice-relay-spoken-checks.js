@@ -1295,6 +1295,17 @@ function reportHasConciseFinding(affirmed, subjectAt, locationAt, findingVerb) {
     && /\b(?:around|along|on|to|at|in)\b/i.test(affirmed.slice(firstAt, lastAt));
 }
 
+// Reuse the capture evaluator's denial spans for explicit denial predicates
+// ("denied having applied"). Only a span overlapping this finding's evidence
+// governs it, so a later independent affirmative assertion remains usable.
+function reportClaimIsDenied(claim, affirmed, subjectAt, locationAt, findingVerb) {
+  if (clauseIsNegated(claim) || clauseIsEpistemicallyHedged(claim)) return true;
+  if (subjectAt < 0 || locationAt < 0) return false;
+  const firstAt = Math.min(subjectAt, locationAt, findingVerb ? findingVerb.index : affirmed.length);
+  const lastAt = Math.max(subjectAt, locationAt, findingVerb ? findingVerb.index : 0) + 1;
+  return deniedSpans(affirmed).some(([start, end]) => firstAt < end && lastAt > start);
+}
+
 /** value: { subject: "<regex>", location: "<regex>" } */
 function report_readback_confirms(value, record, { spoken }) {
   const subjectRe = new RegExp(value.subject, 'gi');
@@ -1335,7 +1346,7 @@ function report_readback_confirms(value, record, { spoken }) {
       if (subjectAt >= 0 && locationAt >= 0 && !REPORT_UNCERTAINTY_RE.test(affirmed) && !REPORT_INSTRUCTION_RE.test(affirmed)
           && !alternativeLocation
           && (completedFinding || conciseFinding)
-          && !clauseIsNegated(claim) && !clauseIsEpistemicallyHedged(claim)) {
+          && !reportClaimIsDenied(claim, affirmed, subjectAt, locationAt, findingVerb)) {
         return ['pass', `readback confirmed: "${clip(clause.trim(), 160)}"`];
       }
     }

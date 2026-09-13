@@ -25,6 +25,8 @@ test.each([
   ['Talstar P was applied to the exterior perimeter, not indoors.', 'pass'],
   ['Talstar P was applied indoors, not to the exterior perimeter.', 'fail'],
   ['Talstar P was not applied to the exterior perimeter, only indoors.', 'fail'],
+  ['The technician denied having applied Talstar P to the exterior perimeter.', 'fail'],
+  ['The technician denied having applied Talstar P indoors, but Talstar P was applied to the exterior perimeter.', 'pass'],
   ['I doubt Talstar P was applied to the exterior perimeter.', 'fail'],
   ['Talstar P was not applied, to the exterior perimeter.', 'fail'],
   ['Before leaving, the technician applied Talstar P to the exterior perimeter.', 'pass'],
