@@ -427,6 +427,8 @@ export default function DispatchPageV2({
   // Async refreshes may finish after the operator has moved to another day.
   // Keep the displayed date available to late modal callbacks and response
   // guards without tying fetchSchedule's identity to date changes.
+  const pendingScheduleRequestRef = useRef(null);
+  const scheduleLoadErrorRef = useRef(null);
   const displayedDateRef = useRef(date);
   displayedDateRef.current = date;
   const [data, setData] = useState(null);
@@ -676,8 +678,15 @@ export default function DispatchPageV2({
     // transient refresh failure) unmounts the in-place project editor and
     // its unsaved edits in board/week modes (Codex r8 P2). Loud stays the
     // default for initial loads, date changes, and explicit retries.
-    const isDisplayedDate = () => d === displayedDateRef.current;
-    if (!silent && isDisplayedDate()) {
+    const updatesDisplayedDate = updateState && d === displayedDateRef.current;
+    const request = {
+      foreground: !silent || !!pendingScheduleRequestRef.current?.foreground,
+    };
+    if (updatesDisplayedDate) pendingScheduleRequestRef.current = request;
+    const isCurrent = () => updatesDisplayedDate
+      && d === displayedDateRef.current
+      && pendingScheduleRequestRef.current === request;
+    if (!silent && isCurrent()) {
       setLoading(true);
       setError(null);
     }
@@ -686,19 +695,22 @@ export default function DispatchPageV2({
         adminFetch(`/admin/schedule?date=${d}`),
         adminFetch("/admin/dispatch/products/catalog"),
       ]);
-      if (updateState && isDisplayedDate()) {
+      if (isCurrent()) {
         setData(scheduleData);
         setProducts(catalogData.products || []);
-        setError(null);
+        setError((current) => current === scheduleLoadErrorRef.current ? null : current);
+        setLoading(false);
       }
-      if (!silent && isDisplayedDate()) setLoading(false);
       return scheduleData;
     } catch (e) {
-      if (!silent && isDisplayedDate()) {
+      if (isCurrent() && request.foreground) {
+        scheduleLoadErrorRef.current = e;
         setError(e);
         setLoading(false);
       }
       return null;
+    } finally {
+      if (pendingScheduleRequestRef.current === request) pendingScheduleRequestRef.current = null;
     }
   }, []);
 

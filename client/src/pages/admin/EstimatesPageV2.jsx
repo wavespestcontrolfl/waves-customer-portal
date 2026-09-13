@@ -1618,9 +1618,16 @@ function EstimatePipelineViewV2({
   const activeFilterRef = useRef(filter);
   activeFilterRef.current = filter;
   const estimatesRequestRef = useRef(0);
+  const foregroundRequestRef = useRef(null);
+  const queuedSilentRefreshRef = useRef(false);
   const refreshEstimates = useCallback(({ silent = false } = {}) => {
+    if (silent && foregroundRequestRef.current !== null) {
+      queuedSilentRefreshRef.current = true;
+      return;
+    }
     const requestId = ++estimatesRequestRef.current;
     if (!silent) {
+      foregroundRequestRef.current = requestId;
       setLoading(true);
       setError(null);
     }
@@ -1651,6 +1658,17 @@ function EstimatePipelineViewV2({
         if (requestId !== estimatesRequestRef.current) return;
         if (!silent) setError(err);
         setLoading(false);
+      })
+      .finally(() => {
+        if (!silent && foregroundRequestRef.current === requestId) {
+          foregroundRequestRef.current = null;
+        }
+        if (requestId === estimatesRequestRef.current
+          && foregroundRequestRef.current === null
+          && queuedSilentRefreshRef.current) {
+          queuedSilentRefreshRef.current = false;
+          refreshEstimates({ silent: true });
+        }
       });
   }, []);
   useEffect(() => {
