@@ -24,3 +24,15 @@ test('an introductory epistemic refusal remains attached to its assertion', () =
   const text = "I can't confirm this, Talstar P was applied to the exterior perimeter.";
   expect(clauseIsEpistemicallyHedged(claimContext(text, text.indexOf('Talstar'), text.length))).toBe(true);
 });
+
+test('a longer epistemic refusal before a comma retains its complement', () => {
+  const { clauseIsEpistemicallyHedged } = require('../services/eval/voice-relay-spoken-checks')._internals;
+  const text = 'I do not have enough information to confirm this, Talstar P was applied';
+  expect(clauseIsEpistemicallyHedged(claimContext(text, text.indexOf('Talstar'), text.length))).toBe(true);
+});
+
+test('a refusal with its own object does not govern the assertion after a comma', () => {
+  const { clauseIsEpistemicallyHedged } = require('../services/eval/voice-relay-spoken-checks')._internals;
+  const text = "I can't confirm the appointment, Talstar P was applied";
+  expect(clauseIsEpistemicallyHedged(claimContext(text, text.indexOf('Talstar'), text.length))).toBe(false);
+});

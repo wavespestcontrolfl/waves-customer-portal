@@ -355,6 +355,44 @@ describe('calculateJobCost — durable backfill labor guard (Codex P1)', () => {
     expect(res.labor_cost).toBe(52.5);
   });
 
+  test.each([
+    ['zero', 0],
+    ['unknown', null],
+  ])('a grouped %s allocation blocks linked timers and the shared lifecycle span', async (_label, allocatedMinutes) => {
+    const record = {
+      ...NORMAL_RECORD,
+      structured_notes: { visitDurationAllocation: { version: 1, allocatedMinutes } },
+    };
+    const db = fakeCostingDb({
+      svc: NORMAL_SVC,
+      record,
+      jobEntries: [{ duration_minutes: 90 }],
+      windowEntries: [{ duration_minutes: 90 }],
+    });
+    const res = await calculateJobCost('svc-1', db);
+    expect(res.laborHours).toBe(0);
+    expect(res.labor_cost).toBe(0);
+    expect(db.writes.windowQueried).toBe(false);
+  });
+
+  test('a later authorized duration correction supersedes the frozen grouped allocation', async () => {
+    const record = {
+      ...NORMAL_RECORD,
+      structured_notes: {
+        visitDurationAllocation: { version: 1, allocatedMinutes: 20 },
+        timeOnSiteAdjusted: true,
+      },
+    };
+    const db = fakeCostingDb({
+      svc: { ...NORMAL_SVC, service_time_minutes: 45, time_on_site_adjusted_minutes: 45 },
+      record,
+      jobEntries: [{ duration_minutes: 90 }],
+    });
+    const res = await calculateJobCost('svc-1', db);
+    expect(res.laborHours).toBe(0.75);
+    expect(res.labor_cost).toBe(26.25);
+  });
+
   test('only boolean true triggers — a string "true" marker never flips the policy', async () => {
     const record = { ...NORMAL_RECORD, structured_notes: { backfill: 'true' } };
     const db = fakeCostingDb({ svc: NORMAL_SVC, record });

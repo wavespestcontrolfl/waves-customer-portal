@@ -24,6 +24,25 @@ hours; scheduling uses the converter’s physical service units. Combined select
 with unsupported converter families or cadences are refused before a hold.
 Creation defaults off.
 
+## Actual time for combined closeout
+
+The September 12 closeout continuation selects proportional allocation of the
+final stop duration across its recorded services. Preparing a service form must
+not freeze the shared running timer into that member. The server captures the
+stop total once when it saves the packet, using canonical arrival evidence, and
+allocates automatic member minutes by their scheduled estimated durations.
+Integer rounding must preserve the total, with deterministic service-ID ties.
+Retained historical members receive no allocation.
+
+Explicit administrator duration corrections and quiet backfill durations retain
+their existing authorization and semantics. Automatic allocation must not widen
+the administrator-only numeric override contract. Freeze the allocation with the
+packet and record so retries and later job-cost/estimate-actual recalculations
+reuse it. Zero minutes stay zero; absent arrival evidence stays unknown. Neither
+case may fall back to counting the shared visit span again for each service.
+The shared lifecycle timestamps remain truthful arrival/completion timestamps;
+do not fabricate sequential actual service times from a costing allocation.
+
 ## Existing mechanisms to extend
 
 - `services/visit-groups.js`: stop identity, membership locks, frozen membership,
@@ -89,6 +108,10 @@ Paths above are relative to `server/`.
   and surface an office exception; they never charge again to simplify grouping.
 - Concurrent closeouts, double taps, retries after provider timeouts, late Stripe
   webhooks, and gate changes must all converge on the same invoice/payment.
+  Visits created under the full closeout gate retain `behavior_version=2`;
+  disabling creation does not restore individual completion or billing for
+  those visits. Missing summary-key configuration holds closeout without
+  completing services. Existing legacy visits keep their original version.
 - Preserve all deployed native app and public token contracts. Specialty
   compliance documents remain available even when the summary groups services.
 
