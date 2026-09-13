@@ -93,6 +93,23 @@ describe('actualDurationMinutes', () => {
     )).toBe(30);
   });
 
+  it.each([
+    ['zero', 0, 0],
+    ['unknown', null, null],
+  ])('keeps a grouped %s allocation from falling back to the shared visit span', (_label, allocatedMinutes, expected) => {
+    expect(actualDurationMinutes(
+      { actual_duration_minutes: allocatedMinutes, arrived_at: '2026-06-10T14:00:00Z', completed_at: '2026-06-10T16:00:00Z' },
+      { structured_notes: { visitDurationAllocation: { version: 1, allocatedMinutes } } },
+    )).toBe(expected);
+  });
+
+  it('lets a later positive admin correction supersede the frozen grouped allocation', () => {
+    expect(actualDurationMinutes(
+      { actual_duration_minutes: 45, arrived_at: '2026-06-10T14:00:00Z', completed_at: '2026-06-10T16:00:00Z' },
+      { structured_notes: { visitDurationAllocation: { version: 1, allocatedMinutes: 20 } } },
+    )).toBe(45);
+  });
+
   it('rejects nonsense spans (negative, multi-day) instead of poisoning deltas', () => {
     expect(actualDurationMinutes(
       { arrived_at: '2026-06-10T15:00:00Z', completed_at: '2026-06-10T14:00:00Z' }, {},

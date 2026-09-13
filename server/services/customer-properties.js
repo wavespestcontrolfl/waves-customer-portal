@@ -139,11 +139,16 @@ function isNewAddress(existingProps, candidate = {}) {
 }
 
 /** Active properties for a customer, primary first. */
-async function listProperties(customerId) {
+async function listProperties(customerId, conn = db) {
   if (!customerId) return [];
-  return db('customer_properties')
+  const properties = await conn('customer_properties')
     .where({ customer_id: customerId, active: true })
     .orderBy([{ column: 'is_primary', order: 'desc' }, { column: 'created_at', order: 'asc' }]);
+  const customer = await conn('customers').where({ id: customerId }).first('contact_role');
+  return properties.map(property => {
+    const unavailable = primaryPropertyUnavailable(property, customer);
+    return { ...property, primary_change_eligible: !unavailable, primary_change_unavailable: unavailable?.message || null };
+  });
 }
 
 /**
@@ -580,6 +585,85 @@ async function syncPrimaryCoordsFromCustomer(customerId, conn = db) {
 }
 
 /**
+ * Daily backstop for the lazily-created PRIMARY row. The primary is
+ * created on first READ (properties tab, call pipeline, estimate linkage),
+ * and none of the customer-insert paths (website quote, web-form / GBP
+ * lead, Twilio, proposal win, …) create one — prod 2026-09-07: 144 live,
+ * addressed customers had no property row, and every booking anchored for
+ * them fell to NULL. This sweep fills the gap within the day so no later
+ * consumer has to assume the row exists (once #4115 lands the booking
+ * anchor backfills its own at booking time and this catches customers
+ * nothing read; until then it is the only backstop). Per customer, one transaction:
+ * customers row FOR UPDATE, re-check (still live, still addressed, still
+ * no row — a concurrent read may have backfilled it), then the same core
+ * every lazy read uses. Newest first (a fresh lead is the one about to be
+ * booked). Best-effort per row: a
+ * failure is counted and logged by code only (a knex error message embeds
+ * the SQL bindings, i.e. the address) and the sweep moves on.
+ */
+async function sweepMissingPrimaryProperties({ batchSize = 100, maxRows = 2000 } = {}) {
+  const results = { checked: 0, created: 0, skipped: 0, failed: 0 };
+  // Batches until nothing is eligible (or maxRows, a runaway guard): a
+  // daily run must drain the whole backlog, not the newest 100. A created
+  // row leaves the candidate set by itself; a failed or skipped-but-still-
+  // row-less id is excluded from later batches so it cannot be re-selected
+  // forever within one run.
+  const seen = new Set();
+  let cappedOut = false;
+  while (results.checked < maxRows) {
+    const rows = await db('customers as c')
+      .whereNull('c.deleted_at')
+      .whereRaw("btrim(coalesce(c.address_line1, '')) <> ''")
+      .whereNotExists(db('customer_properties as p').select(1).whereRaw('p.customer_id = c.id'))
+      .modify((q) => { if (seen.size) q.whereNotIn('c.id', Array.from(seen)); })
+      .orderBy('c.created_at', 'desc')
+      .limit(Math.min(batchSize, maxRows - results.checked))
+      .select('c.id');
+    if (!rows.length) break;
+    for (const row of rows) {
+      seen.add(row.id);
+      results.checked += 1;
+      try {
+        const r = await db.transaction(async (trx) => {
+          const customer = await trx('customers').where({ id: row.id }).forUpdate().first();
+          if (!customer || customer.deleted_at || !String(customer.address_line1 || '').trim()) return { created: false };
+          const any = await trx('customer_properties').where({ customer_id: row.id }).first('id');
+          if (any) return { created: false };
+          return ensurePrimaryCore(customer, { source: 'backfill' }, trx);
+        });
+        if (r.created) results.created += 1; else results.skipped += 1;
+      } catch (err) {
+        results.failed += 1;
+        logger.error(`[customer-properties] primary backstop failed for customer ${row.id}: ${err.code || err.name || 'error'}`);
+      }
+    }
+    // Stopped on the guard, not on an empty candidate set: whatever is left
+    // waits for the next run, and the doc's "within a day" does not hold for
+    // it. A clean resolve alone would read as fully drained.
+    if (results.checked >= maxRows) cappedOut = true;
+  }
+  if (results.checked > 0) {
+    logger.info(
+      `[customer-properties] primary backstop sweep: checked=${results.checked}, ` +
+      `created=${results.created}, skipped=${results.skipped}, failed=${results.failed}`,
+    );
+  }
+  if (cappedOut) {
+    logger.warn(`[customer-properties] primary backstop stopped at the maxRows guard (${maxRows}); a backlog may remain for the next run`);
+  }
+  // Every row was attempted; now surface the failures to job_health (the
+  // scheduler runs this under runExclusive, which records success on a
+  // resolved promise) — counts only, never an address or SQL text.
+  if (results.failed > 0) {
+    throw Object.assign(
+      new Error(`primary backstop sweep: ${results.failed} of ${results.checked} row(s) failed`),
+      { results },
+    );
+  }
+  return results;
+}
+
+/**
  * The UNAMBIGUOUS property for a booking that carries no explicit property
  * identity: the customer's sole ACTIVE property (GH codex #3699 r3 — the
  * visit-group stamp needs a property anchor, and the estimate-linkage
@@ -697,7 +781,274 @@ async function anchorSoleProperty(target, cols, conn = db) {
   target.property_id = await soleActivePropertyId(target.customer_id, conn);
 }
 
+const PROPERTY_FIELD_LIMITS = Object.freeze({ address_line1: 200, address_line2: 100, city: 50, zip: 10, label: 100 });
+
+function propertyActionError(message, statusCode = 400, code = 'invalid_property') {
+  return Object.assign(new Error(message), { statusCode, status: statusCode, isOperational: true, code });
+}
+
+function manualPropertyFields(kind, input = {}) {
+  for (const [field, max] of Object.entries(PROPERTY_FIELD_LIMITS)) {
+    if (input[field] == null) continue;
+    if (typeof input[field] !== 'string') throw propertyActionError(`${field} must be text`);
+    if (input[field].length > max) throw propertyActionError(`${field} must be ${max} characters or fewer`);
+  }
+  const changes = {};
+  if (input.label !== undefined) changes.label = input.label || null;
+  if (input.occupancy_type !== undefined) {
+    if (!OCCUPANCY_TYPES.includes(input.occupancy_type)) throw propertyActionError('invalid occupancy_type');
+    changes.occupancy_type = input.occupancy_type;
+  }
+  if (input.relationship !== undefined) {
+    const relationship = require('../constants/property-relationships').normalizeRelationship(input.relationship);
+    if (!relationship.ok) throw propertyActionError('invalid relationship');
+    changes.relationship = relationship.value;
+  }
+  if (kind !== 'add') return changes;
+  if (!String(input.address_line1 || '').trim()) throw propertyActionError('address_line1 is required');
+  if (!String(input.city || '').trim() || !String(input.zip || '').trim()) throw propertyActionError('city and zip are required');
+  const state = String(input.state || '').trim().toUpperCase();
+  if (!/^[A-Z]{2}$/.test(state)) throw propertyActionError('state is required as a two-letter code');
+  return { address_line1: input.address_line1.trim(), address_line2: input.address_line2 || null,
+    city: input.city.trim(), state, zip: input.zip.trim(), occupancy_type: 'unknown', label: null, ...changes };
+}
+
+async function manualPropertyContext(customerId, conn = db, lock = false) {
+  let customerQuery = conn('customers').where({ id: customerId }).whereNull('deleted_at')
+    .select('*', conn.raw('updated_at::text as row_version'));
+  if (lock) customerQuery = customerQuery.forUpdate();
+  const customer = await customerQuery.first();
+  if (!customer) throw propertyActionError('Customer not found', 404, 'customer_not_found');
+  let propertyQuery = conn('customer_properties').where({ customer_id: customerId }).orderBy('id')
+    .select('*', conn.raw('updated_at::text as row_version'));
+  if (lock) propertyQuery = propertyQuery.forUpdate();
+  return { customer, properties: await propertyQuery };
+}
+
+function propertyAddressLabel(property) {
+  return [property.address_line1, property.address_line2, property.city, property.state, property.zip].filter(Boolean).join(', ');
+}
+
+// Shared read-only preview for the property editor and IB. The opaque version
+// binds the normalized action to the full-precision customer/portfolio versions.
+async function previewManualPropertyChange(customerId, kind, input = {}, propertyId = null, conn = db, loaded = null) {
+  const { customer, properties } = loaded || await manualPropertyContext(customerId, conn);
+  const changes = manualPropertyFields(kind, input);
+  const target = propertyId && properties.find(p => p.id === propertyId && p.active);
+  const primary = properties.find(p => p.is_primary && p.active);
+  const base = { proposal: true, customer: { id: customerId, name: [customer.first_name, customer.last_name].filter(Boolean).join(' ') } };
+  let preview;
+  if (kind === 'add') {
+    // The writer first completes a same-street account or primary address that
+    // is missing its city or ZIP (completePrimaryFromCall), so the candidate is
+    // compared against those completed forms here, before an approval exists.
+    const completed = record => (record && streetKey(record.address_line1) === streetKey(changes.address_line1)
+      ? { ...record, city: record.city || changes.city, zip: record.zip || changes.zip } : record);
+    const existing = properties.map(p => p.is_primary && p.active ? completed(p) : p);
+    if (!isNewAddress(existing, changes) || addressKey(completed(customer)) === addressKey(changes)) {
+      throw propertyActionError('A property with that street already exists for this customer', 409, 'property_exists');
+    }
+    const firstProperty = !properties.some(p => p.is_primary) && !customer.address_line1;
+    if (firstProperty && !changes.label) changes.label = 'Primary';
+    if (firstProperty && !changes.relationship) changes.relationship = defaultRelationshipForContactRole(customer.contact_role);
+    preview = { ...base, address: propertyAddressLabel(changes), changes,
+      effects: !firstProperty
+        ? 'Saves an additional property. Registers the existing account address as primary if needed. Existing appointments, recurring services and invoices keep their locations.'
+        : 'Saves the first property as primary and fills the empty account address. No appointments are created and no messages are sent.' };
+  } else {
+    if (!target) throw propertyActionError('property not found', 404, 'property_not_found');
+    if (kind === 'edit') {
+      if (!Object.keys(changes).length) throw propertyActionError('nothing to update');
+      preview = { ...base, property: { id: target.id, address: propertyAddressLabel(target) },
+        before: Object.fromEntries(Object.keys(changes).map(key => [key, target[key]])), changes,
+        effects: 'Updates only this saved property’s label, relationship or occupancy. Account, billing, appointment and recurring-service addresses are unchanged.' };
+    } else if (kind === 'primary') {
+      preview = { ...base, ...await previewPrimaryPropertyChange(conn, customerId, target, primary, customer) };
+    } else throw propertyActionError('Unknown property operation');
+  }
+  preview._version = require('crypto').createHash('sha256').update(JSON.stringify([
+    kind, customerId, propertyId, changes, customer.row_version,
+    properties.map(p => [p.id, p.row_version]), preview._invoice_ids || [],
+  ])).digest('hex');
+  return preview;
+}
+
+// Relationships that record the property as something other than the home
+// the customer lives in. Occupancy may still read 'unknown' for them, so the
+// relationship is checked in its own right before a promotion.
+const NON_RESIDENCE_RELATIONSHIPS = new Set(['rental_owned', 'family_home', 'managed_for_client']);
+
+function primaryPropertyUnavailable(target, customer) {
+  if (target.is_primary) return { message: 'This property is already primary', code: 'already_primary' };
+  if (String(customer?.contact_role || '').trim().toLowerCase() === 'tenant') {
+    return { message: 'A tenant account cannot be promoted to an owner-occupied primary residence.', code: 'primary_role_unavailable' };
+  }
+  if (require('./pricing-engine/commercial-helpers').normalizePropertyType(target.property_type) === 'commercial'
+    || !['owner_occupied', 'unknown'].includes(normalizeOccupancy(target.occupancy_type))) {
+    return { message: 'Primary requires an owner-occupied or unclassified residential property.', code: 'primary_role_unavailable' };
+  }
+  if (NON_RESIDENCE_RELATIONSHIPS.has(String(target.relationship || '').trim().toLowerCase())) {
+    return { message: 'This property is recorded as a rental, a family member’s home or a client-managed property. Correct its relationship before making it primary.', code: 'primary_role_unavailable' };
+  }
+  if (!['address_line1', 'city', 'state', 'zip'].every(field => String(target[field] || '').trim())) {
+    return { message: 'Complete the street, city, state and ZIP before making this property primary.', code: 'property_incomplete' };
+  }
+  return null;
+}
+
+async function previewPrimaryPropertyChange(conn, customerId, target, primary, customer) {
+  const unavailable = primaryPropertyUnavailable(target, customer);
+  if (unavailable) throw propertyActionError(unavailable.message, 409, unavailable.code);
+  const invoices = await conn('invoices').where({ customer_id: customerId }).whereNull('customer_address_snapshot').orderBy('id').select('id');
+  const oldAddress = primary || (customer.address_line1 ? customer : null);
+  return { previous_primary: oldAddress ? { id: primary?.id || null, address: propertyAddressLabel(oldAddress) } : null,
+    primary_property: { id: target.id, address: propertyAddressLabel(target) },
+    protected_invoice_count: invoices.length, _invoice_ids: invoices.map(row => row.id),
+    effects: [
+      'Makes this property primary and mirrors its address, coordinates and saved property measurements onto the customer profile.',
+      'Registers the existing account address as a saved property if needed. Preserves existing appointment and recurring-service locations. Completed visits keep the address they were serviced at on their reports; historical service records stay unchanged.',
+      'Preserves the displayed address on existing invoices and receipts. Third-party billing addresses and all amounts stay unchanged.',
+      'The new primary is owner-occupied; custom labels are retained. Sprinkler settings require review for the new property. Sends no messages.',
+    ] };
+}
+
+async function writeManualProperty(customerId, kind, input, propertyId, options, apply) {
+  const changes = manualPropertyFields(kind, input);
+  return db.transaction(async trx => {
+    if (kind === 'primary') {
+      await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))', ['property-preferences', String(customerId)]);
+    }
+    await require('../utils/customer-comms-lock').lockCustomerComms(trx, customerId);
+    const loaded = await manualPropertyContext(customerId, trx, true);
+    const preview = await previewManualPropertyChange(customerId, kind, changes, propertyId, trx, loaded);
+    if (options.expectedVersion && options.expectedVersion !== preview._version) {
+      throw propertyActionError('The customer or properties changed. Request a fresh preview.', 409, 'preview_changed');
+    }
+    const savedId = await apply(trx, loaded, changes);
+    const auditId = await require('./audit-log').recordAuditEvent({
+      actor_type: 'admin', actor_id: options.actorId || null, action: `customer_property_${kind}`,
+      resource_type: 'customer_property', resource_id: savedId, metadata: { customer_id: customerId, fields: Object.keys(changes) },
+      critical: true, trx,
+    });
+    const properties = await listProperties(customerId, trx);
+    const saved = properties.find(p => p.id === savedId);
+    const matches = saved && Object.entries(preview.changes || {}).every(([key, value]) => saved[key] === value);
+    if (!matches || (kind === 'primary' && (!saved.is_primary || saved.occupancy_type !== 'owner_occupied'))) throw propertyActionError('The saved property did not match the requested change', 409, 'verification_failed');
+    if (saved.is_primary && kind !== 'edit') {
+      const account = await trx('customers').where({ id: customerId }).first();
+      if (addressKey(account) !== addressKey(saved)) throw propertyActionError('The primary property and account address did not match', 409, 'verification_failed');
+    }
+    return { success: true, propertyId: savedId, customer_id: customerId, properties, audit_id: auditId,
+      verification: { property_id: savedId, persisted: true, fields_match: true },
+      href: `/admin/customers?customerId=${encodeURIComponent(customerId)}` };
+  });
+}
+
+async function addManualProperty(customerId, input, options = {}) {
+  return writeManualProperty(customerId, 'add', input, null, options, async (trx, _loaded, changes) => {
+    await completePrimaryFromCall(customerId, changes, { conn: trx });
+    await ensurePrimaryProperty(customerId, { conn: trx });
+    const result = await recordCallProperty({ customerId, ...changes, occupancyType: changes.occupancy_type, source: 'manual', conn: trx });
+    if (!result.created) throw propertyActionError('A property with that street already exists for this customer', 409, 'property_exists');
+    return result.propertyId;
+  });
+}
+
+async function editManualProperty(customerId, propertyId, input, options = {}) {
+  return writeManualProperty(customerId, 'edit', input, propertyId, options, async (trx, _loaded, changes) => {
+    await trx('customer_properties').where({ id: propertyId, customer_id: customerId, active: true })
+      .update({ ...changes, updated_at: trx.fn.now() });
+    return propertyId;
+  });
+}
+
+async function changePrimaryProperty(customerId, propertyId, options = {}) {
+  if (!options.expectedVersion) throw propertyActionError('Review the primary-property preview first', 409, 'preview_required');
+  return writeManualProperty(customerId, 'primary', {}, propertyId, options, async (trx, { customer, properties }) => {
+    // A legacy account whose address is already saved as a non-primary row
+    // reuses that row as the old primary instead of inserting a duplicate,
+    // which the address-key index would refuse.
+    const savedAccountRow = customer.address_line1 && !properties.some(p => p.is_primary && p.active)
+      ? properties.find(p => p.active && addressKey(p) === addressKey(customer)) : null;
+    if (savedAccountRow && savedAccountRow.id !== propertyId) {
+      await trx('customer_properties').where({ id: savedAccountRow.id }).update({ is_primary: true, updated_at: trx.fn.now() });
+    }
+    // A selected account row must go through the shared promotion writer so
+    // occupancy, labels, measurements and irrigation review all complete.
+    if (savedAccountRow?.id !== propertyId) await ensurePrimaryProperty(customer, { conn: trx });
+    const primary = await trx('customer_properties').where({ customer_id: customerId, is_primary: true, active: true }).first();
+    if (customer.address_line1 && !primary && savedAccountRow?.id !== propertyId) throw propertyActionError('The existing account property could not be preserved. Review the saved properties before changing the primary.', 409, 'primary_missing');
+    const target = properties.find(p => p.id === propertyId);
+    await preserveSettledVisitAddresses(trx, customerId, primary || savedAccountRow);
+    const result = await require('./property-role-proposals').applyPropertyRoleProposals(trx, { customerId, proposals: [{
+      kind: 'primary_flip', new_primary_property_id: propertyId, new_primary_address_key: addressKey(target),
+      old_primary_property_id: primary?.id || null, old_primary_address_key: primary ? addressKey(primary) : null,
+    }] });
+    if (result.applied !== 1 || result.skipped) throw propertyActionError('The primary property could not be changed. Request a fresh preview.', 409, 'preview_changed');
+    return propertyId;
+  });
+}
+
+// Settled visits (completed, cancelled, skipped, rescheduled, no-show) with no
+// saved service address are rendered by the report loaders from the account
+// address (each report component independently falls back to customers). The
+// role-proposal pin deliberately leaves them alone, so before a manual primary
+// change moves the account address they are stamped with the address they
+// were serviced at. Fill-only, including compatible partial stamps, and never
+// a visit whose saved components or estimate target another property.
+async function preserveSettledVisitAddresses(trx, customerId, oldPrimary) {
+  if (!oldPrimary) return;
+  const { TERMINAL_VISIT_STATUSES } = require('./property-role-proposals');
+  const { estimateQuotesCustomerAddress } = require('./estimate-property-linkage');
+  const stamp = {
+    service_address_line1: oldPrimary.address_line1,
+    service_address_line2: oldPrimary.address_line2 || '',
+    service_address_city: oldPrimary.city || '',
+    service_address_state: oldPrimary.state || 'FL',
+    service_address_zip: oldPrimary.zip || '',
+  };
+  const visits = trx('scheduled_services')
+    .where({ customer_id: customerId })
+    .where(function () { this.whereNull('property_id').orWhere('property_id', oldPrimary.id); })
+    .where(function () { for (const column of Object.keys(stamp)) this.orWhereNull(column); })
+    .whereIn('status', TERMINAL_VISIT_STATUSES);
+  const legacyEstimates = await trx('estimates').whereNull('property_id')
+    .whereIn('id', visits.clone().select('source_estimate_id')).select('id', 'address');
+  const otherEstimateIds = legacyEstimates.filter(estimate => !estimateQuotesCustomerAddress(estimate.address, oldPrimary)).map(estimate => estimate.id);
+  const candidates = await visits
+    .modify(query => {
+      if (otherEstimateIds.length) query.where(q => q.whereNull('source_estimate_id').orWhereNotIn('source_estimate_id', otherEstimateIds));
+    })
+    .where(function () {
+      this.whereNull('source_estimate_id').orWhereNotExists(trx('estimates')
+        .whereRaw('estimates.id = scheduled_services.source_estimate_id')
+        .whereNotNull('property_id').whereNot('property_id', oldPrimary.id));
+    })
+    .orderBy('id').forUpdate().select('*');
+  const normalizers = { service_address_line1: streetKey, service_address_city: normStreet,
+    service_address_state: normStreet, service_address_zip: normalizeZip };
+  const oldUnit = unitKey(oldPrimary.address_line2) || streetEmbeddedUnitKey(oldPrimary.address_line1);
+  const compatible = candidates.filter(visit =>
+    Object.entries(normalizers).every(([column, normalize]) => visit[column] == null || normalize(visit[column]) === normalize(stamp[column]))
+    && [unitKey(visit.service_address_line2), streetEmbeddedUnitKey(visit.service_address_line1)].filter(Boolean).every(unit => unit === oldUnit));
+  if (!compatible.length) return;
+  await trx('scheduled_services').whereIn('id', compatible.map(visit => visit.id)).update({
+      property_id: oldPrimary.id,
+      ...Object.fromEntries(Object.entries(stamp).map(([column, value]) => [column, trx.raw('COALESCE(??, ?)', [column, value])])),
+      lat: trx.raw('COALESCE(lat, ?)', [oldPrimary.latitude ?? null]),
+      lng: trx.raw('COALESCE(lng, ?)', [oldPrimary.longitude ?? null]),
+      updated_at: new Date(),
+    });
+}
+
 module.exports = {
+  PROPERTY_FIELD_LIMITS,
+  manualPropertyFields,
+  previewManualPropertyChange,
+  addManualProperty,
+  editManualProperty,
+  changePrimaryProperty,
+  sweepMissingPrimaryProperties,
   soleActivePropertyId,
   anchorSoleProperty,
   bookingPropertyStamp,

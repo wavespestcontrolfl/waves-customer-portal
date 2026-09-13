@@ -1,8 +1,9 @@
 const db = require('../models/db');
 const logger = require('./logger');
-const { buildPlanForService } = require('./waveguard-plan-engine');
+const { buildPlanForService, customerBillingModeColumnExists } = require('./waveguard-plan-engine');
 const { etDateString, addETDays } = require('../utils/datetime-et');
 const { describeInventoryConversion } = require('./inventory-units');
+const { lawnPlanProgramApplies } = require('./lawn-completion-defaults');
 
 // Planner blocks under which waveguard-plan-engine plans NO products for the
 // appointment (see propertyGate in buildPlanForService).
@@ -38,7 +39,10 @@ async function buildWaveGuardInventoryForecast({ days = 14, limit = 150, knex = 
   const safeLimit = Math.max(1, Math.min(300, Number(limit || 150)));
   const startDate = etDateString();
   const endDate = etDateString(addETDays(new Date(), safeDays));
-  const services = await knex('scheduled_services as ss')
+  // One schema probe for the whole batch — the planner would otherwise
+  // probe information_schema once per forecasted service (Codex #4365 r4 P2).
+  const billingModeColumnExists = await customerBillingModeColumnExists(knex);
+  const servicesQuery = knex('scheduled_services as ss')
     .leftJoin('customers as c', 'ss.customer_id', 'c.id')
     .leftJoin('technicians as t', 'ss.technician_id', 't.id')
     .whereBetween('ss.scheduled_date', [startDate, endDate])
@@ -49,7 +53,25 @@ async function buildWaveGuardInventoryForecast({ days = 14, limit = 150, knex = 
       this.whereILike('ss.service_type', '%lawn%')
         .orWhereILike('ss.service_type', '%fertiliz%')
         .orWhereILike('ss.service_type', '%turf%');
-    })
+    });
+  // Non-program lanes are excluded BEFORE the limit (Codex #4365 r8 P2): a
+  // run of reclassified legacy customers must not consume the window's
+  // slots and push real program visits past the cutoff. Same rule as
+  // lawnPlanProgramApplies — an explicit per_visit / one_time lane is not a
+  // program unless the appointment carries a COMPLETE assignment; the
+  // in-loop predicate below remains the authoritative check on the plan.
+  if (billingModeColumnExists) {
+    servicesQuery.where(function programLane() {
+      this.whereNull('c.billing_mode')
+        .orWhereNotIn('c.billing_mode', ['per_visit', 'one_time'])
+        .orWhere(function completeAssignment() {
+          this.whereNotNull('ss.lawn_protocol_key')
+            .whereNotNull('ss.lawn_protocol_version')
+            .whereNotNull('ss.lawn_protocol_window_key');
+        });
+    });
+  }
+  const services = await servicesQuery
     .select(
       'ss.id',
       'ss.customer_id',
@@ -69,6 +91,7 @@ async function buildWaveGuardInventoryForecast({ days = 14, limit = 150, knex = 
 
   const productMap = new Map();
   const errors = [];
+  const skippedNonProgram = [];
 
   function ensureRow(product, inventory, demandUnit) {
     const key = String(product.id);
@@ -95,7 +118,7 @@ async function buildWaveGuardInventoryForecast({ days = 14, limit = 150, knex = 
 
   for (const service of services) {
     try {
-      const plan = await buildPlanForService(service.id, { db: knex });
+      const plan = await buildPlanForService(service.id, { db: knex, billingModeColumnExists });
       const customerName = `${service.first_name || ''} ${service.last_name || ''}`.trim() || 'Customer';
       // Under the lawn completion gates the planner withholds EVERY product
       // when the assigned protocol version/window cannot be resolved
@@ -110,6 +133,16 @@ async function buildWaveGuardInventoryForecast({ days = 14, limit = 150, knex = 
         .find((block) => WITHHELD_PLAN_BLOCK_CODES.includes(block.code));
       if (withheldBlock) {
         errors.push({ serviceId: service.id, scheduledDate: service.scheduled_date, customerName, message: withheldBlock.message });
+        continue;
+      }
+      // The visit was admitted by its customer's tier, but an explicit
+      // per_visit / one_time lane with no complete appointment assignment
+      // means the calendar protocol is not that customer's program — its
+      // products are not committed demand (Codex #4365 r7 P2; same predicate
+      // as closeout attribution and the lawn_protocol_* stamp). The lane
+      // itself is office-only and stays out of the response (r8 P2).
+      if (!lawnPlanProgramApplies(plan)) {
+        skippedNonProgram.push({ serviceId: service.id, scheduledDate: service.scheduled_date, customerName });
         continue;
       }
       for (const item of plan?.mixCalculator?.items || []) {
@@ -197,6 +230,7 @@ async function buildWaveGuardInventoryForecast({ days = 14, limit = 150, knex = 
     statusCounts,
     products,
     errors,
+    skippedNonProgram,
     generatedAt: new Date().toISOString(),
   };
 }

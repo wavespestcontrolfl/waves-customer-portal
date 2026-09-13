@@ -206,14 +206,19 @@ async function cancelPendingAction(id, requestedBy) {
   return { cancelled: count > 0 };
 }
 
-async function recordResult(id, result) {
+async function recordResult(id, result, { database = db, critical = false, onlyIfEmpty = false } = {}) {
   try {
-    await db('ib_pending_actions').where({ id }).update({
+    const query = database('ib_pending_actions').where({ id });
+    if (critical) query.where({ status: 'confirmed' }).whereNotNull('consumed_at');
+    if (onlyIfEmpty) query.whereNull('result');
+    const updated = await query.update({
       result: JSON.stringify(result ?? null),
-      updated_at: db.fn.now(),
+      updated_at: database.fn.now(),
     });
+    if (critical && updated !== 1) throw new Error('Consumed action receipt was not saved');
     return true;
   } catch (err) {
+    if (critical) throw err;
     logger.warn(`[intelligence-bar:pending] Could not record result for ${id} (code=${err.code || 'unknown'})`);
     return false;
   }

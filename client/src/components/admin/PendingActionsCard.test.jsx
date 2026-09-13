@@ -92,6 +92,23 @@ test('resolved cards do not offer another confirmation after a follow-up', () =>
   expect(screen.queryByRole('button', { name: 'Confirm' })).toBeNull();
 });
 
+test('renders the saved request lifecycle and link from a verified receipt, including after recovery', async () => {
+  const receipt = { success: true, outcome: 'completed', result: {
+    verification: { persisted: true, request_id: 'request-1' },
+    receipt: { label: 'Restock request saved', summary: 'Synthetic product: 2 lb; request open. No vendor order was submitted.', href: '/admin/inventory?tab=restock' },
+  } };
+  vi.stubGlobal('fetch', vi.fn().mockRejectedValueOnce(new TypeError('Response lost')).mockResolvedValue(response(receipt)));
+  const view = render(<PendingActionsCard actions={[action]} variant="light" />);
+  fireEvent.click(screen.getByRole('button', { name: 'Confirm' }));
+  expect(await screen.findByText('Restock request saved')).toBeVisible();
+  expect(screen.getByText(/No vendor order was submitted/)).toBeVisible();
+  expect(screen.getByRole('link', { name: 'Open saved record' })).toHaveAttribute('href', '/admin/inventory?tab=restock');
+  expect(screen.queryByText('✓ Done')).not.toBeInTheDocument();
+  view.unmount();
+  render(<PendingActionsCard actions={[{ ...action, receipt }]} variant="light" />);
+  expect(screen.getByText('Restock request saved')).toBeVisible();
+});
+
 test('a recovered expired receipt asks for a fresh proposal without implying execution failed', () => {
   render(<PendingActionsCard actions={[{ ...action, contract: { action_label: 'Save request', approval: { required: true, reason: 'Confirm to run' } }, receipt: { outcome: 'expired', result: null } }]} variant="light" />);
   expect(screen.getByText('Expired proposal: Save request')).toBeTruthy();

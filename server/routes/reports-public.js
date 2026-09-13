@@ -168,6 +168,7 @@ const { pestReportV2PdfSignature } = require('../services/service-report/pest-re
 const { attachTermiteReportV2, termiteReportV2PdfSignature } = require('../services/service-report/termite-report-v2');
 const { cockroachReportV2PdfSignature, cockroachReportV2RenderedSignature, attachCockroachReportV2 } = require('../services/service-report/cockroach-report-v2');
 const { reserviceReportPdfSignature, reserviceReportRenderedSignature, reserviceTrendsPdfSignature, reserviceReportCopyGateOn } = require('../services/service-report/reservice-report');
+const { reportPhotoSetPdfSignature } = require('../services/service-report/photo-set-signature');
 const { treatmentZonePdfSignature } = require('../services/treatment-zone-maps');
 const { photoMarksPdfSignature } = require('../services/service-report/photo-marks');
 const { stationMapPdfSignature } = require('../services/termite-stations');
@@ -1887,6 +1888,11 @@ router.get('/:token', async (req, res, next) => {
       // must re-render the cached document.
       const reserviceV2Signature = await reserviceReportPdfSignature(service, { knex: db });
       const reserviceTrendsSignature = await reserviceTrendsPdfSignature(service, db);
+      // Photo-set key component + render fence: closeout photo recovery can
+      // attach rows while this untracked render runs (Codex #4091 P1). The
+      // parked-summary marker is derived from THIS loaded snapshot; the
+      // post-render re-read below sees live state (photo-set-signature.js).
+      const photoSetSignature = await reportPhotoSetPdfSignature(service.id, db, { serviceData: service.service_data });
       // Treatment-zone key component: gate flips and re-traces change the
       // key so cached PDFs re-render with/without the traced map.
       const tzSignature = await treatmentZonePdfSignature(service, db);
@@ -1904,7 +1910,7 @@ router.get('/:token', async (req, res, next) => {
       // bypassing it into a generic 500.
       const laSignature = await lawnAssessmentPdfSignature(service, db);
       const expectedPdfStorageKey = reportPdfStorageKey(service.id, {
-        visibilitySignature: visibilitySignature + summarySignature + mosquitoV2Signature + pestV2Signature + termiteV2Signature + cockroachV2Signature + reserviceV2Signature + reserviceTrendsSignature + tzSignature + smSignature + tnSignature + timeOnSiteAdjustedPdfSignature(service) + reentryAdjustedPdfSignature(service) + laSignature + photoMarksPdfSignature() + publicOriginPdfSignature(),
+        visibilitySignature: visibilitySignature + summarySignature + mosquitoV2Signature + pestV2Signature + termiteV2Signature + cockroachV2Signature + reserviceV2Signature + reserviceTrendsSignature + photoSetSignature + tzSignature + smSignature + tnSignature + timeOnSiteAdjustedPdfSignature(service) + reentryAdjustedPdfSignature(service) + laSignature + photoMarksPdfSignature() + publicOriginPdfSignature(),
       });
       const storedPdf = service.pdf_storage_key === expectedPdfStorageKey
         ? await getHealthyStoredReportPdf(service.pdf_storage_key)
@@ -2030,11 +2036,15 @@ router.get('/:token', async (req, res, next) => {
           // Same fence as pdf-queue: a callback inserted/reclassified
           // mid-render must not store the old chart under the new key.
           logger.warn(`[reports-public] callback set changed during PDF render for ${service.id} — not caching this render`);
+        } else if (await reportPhotoSetPdfSignature(service.id, db) !== photoSetSignature) {
+          // Recovered closeout photos landed mid-render: this output describes
+          // the OLD photo set and must not become the cached document.
+          logger.warn(`[reports-public] photo set changed during PDF render for ${service.id} — not caching this render`);
         } else if (unreachablePhotos > 0) {
           logger.warn(`[reports-public] ${unreachablePhotos} report photo(s) unreachable for ${service.id} — serving without storing`);
         } else {
           const key = await putReportPdf(service.id, pdf, {
-            visibilitySignature: visibilitySignature + summarySignature + mosquitoV2Signature + pestV2Signature + termiteV2Signature + cockroachRenderedSignature + reserviceRenderedSignature + reserviceTrendsSignature + tzSignature + smSignature + tnRenderedSignature + timeOnSiteAdjustedPdfSignature(service) + reentryAdjustedPdfSignature(service) + laRenderSignature + photoMarksPdfSignature() + publicOriginPdfSignature(),
+            visibilitySignature: visibilitySignature + summarySignature + mosquitoV2Signature + pestV2Signature + termiteV2Signature + cockroachRenderedSignature + reserviceRenderedSignature + reserviceTrendsSignature + photoSetSignature + tzSignature + smSignature + tnRenderedSignature + timeOnSiteAdjustedPdfSignature(service) + reentryAdjustedPdfSignature(service) + laRenderSignature + photoMarksPdfSignature() + publicOriginPdfSignature(),
           });
           await db('service_records').where({ id: service.id }).update({ pdf_storage_key: key });
         }

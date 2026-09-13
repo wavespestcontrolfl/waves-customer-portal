@@ -9,7 +9,7 @@ const { parseQuotedETDeadline } = require('../utils/datetime-et');
 const { scrubPans, scrubSegments } = require('../utils/pan-scrub');
 
 // The shared proposal rule_version column is varchar(16).
-const VERSION = 'sms-ops-v17';
+const VERSION = 'sms-ops-v18';
 const FACT_FIELDS = Object.freeze([
   'contact_preference', 'irrigation_controller_location', 'irrigation_schedule_notes',
   'irrigation_issues', 'parking_notes', 'pet_details', 'access_notes', 'special_instructions',
@@ -115,8 +115,22 @@ function matchesExplicitAccessCode({ quote, field, value }) {
   return fields[match[1].toLowerCase()] === field && match[2].trim() === value;
 }
 
+// Row ids and record refs are identifiers this codebase generates, never
+// cardholder data, but roughly one UUID in 500 hides a Luhn-valid 13-19 digit
+// run that the PAN detector rewrites. A rewritten id silently breaks the
+// citation contract in both directions: the prompt offers a ref the model
+// cannot be matched back to, and a faithful `record_ref` echo fails the
+// sensitive-output guard. Exempt a value only when the key names an id AND
+// the value is UUID-shaped, so free text can never claim the exemption.
+const ID_KEY = /(?:^|_)(?:id|ref)$/;
+const OPAQUE_ID = /^(?:[a-z_]+:)?[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+function opaqueId(key, item) {
+  return ID_KEY.test(String(key)) && OPAQUE_ID.test(item);
+}
+
 function stringifySmsEvidence(value) {
-  return JSON.stringify(value, (key, item) => typeof item === 'string' ? scrubPans(item) : item);
+  return JSON.stringify(value, (key, item) => typeof item === 'string' && !opaqueId(key, item)
+    ? scrubPans(item) : item);
 }
 
 function buildPrompt({ message, history = [], properties = [], captureCommitments = true, captureAdditionalProperties = false }) {

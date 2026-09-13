@@ -279,6 +279,19 @@ function isBackfilledRecord(serviceRecord) {
 function actualDurationMinutes(scheduledService, serviceRecord) {
   const tracked = positiveNumber(scheduledService?.actual_duration_minutes);
   if (tracked) return Math.round(tracked);
+  // Grouped closeout freezes each service's share of the one measured visit
+  // duration in durable record metadata. Zero is an observed integer share,
+  // while null means the visit had no trustworthy server-side start. In both
+  // cases the marker blocks fallback to the shared lifecycle span, which
+  // would report the whole stop once for every service. A later admin
+  // correction updates actual_duration_minutes above and keeps precedence.
+  const notes = parseJsonbValue(serviceRecord?.structured_notes);
+  const allocation = notes?.visitDurationAllocation;
+  if (allocation?.version === 1
+    && Object.prototype.hasOwnProperty.call(allocation, 'allocatedMinutes')) {
+    return Number.isInteger(allocation.allocatedMinutes) && allocation.allocatedMinutes >= 0
+      ? allocation.allocatedMinutes : null;
+  }
   if (isBackfilledRecord(serviceRecord)) return null;
 
   const spans = [

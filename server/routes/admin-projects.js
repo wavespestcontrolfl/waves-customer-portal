@@ -5193,6 +5193,7 @@ router.post('/:id/send-with-invoice', requireAdmin, async (req, res, next) => {
         email: isPayerInvoice ? !!channels.payer_email?.ok : !!channels.email?.ok,
         source: 'project_report_with_invoice',
         payUrl,
+        actorTechnicianId: req.technicianId || null,
       }).catch((err) => logger.error(`[projects] markDeliverySent failed for ${invoice.id}: ${err.message}`));
       // Invoice is delivered + finalized — now run the full-coverage side effects we
       // deferred at apply time (stop dunning followups + activate the annual-prepay

@@ -305,6 +305,8 @@ describe('applyPropertyRoleProposals (primary-flip runbook)', () => {
         whereNull(c) { this._whereNulls.push(c); return this; },
         whereNotNull(c) { this._whereNotNulls = (this._whereNotNulls || []).concat(c); return this; },
         forUpdate() { return this; },
+        noWait() { return this; },
+        orderBy() { return this; },
         select() { return this; },
         whereNotIn(c, v) { this._whereNotIn = [c, v]; return this; },
         whereIn(c, v) { this._whereIns = (this._whereIns || []).concat([[c, v]]); return this; },

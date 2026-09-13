@@ -2313,9 +2313,10 @@ describe('bearerLinkSendCheck (immediate-send seam for contract + visit card lin
 
   test('markStatementsSent goes through the email delivery\'s own finalized → sent writer, per statement', async () => {
     const { markStatementSent } = require('../services/payer-statement-email');
-    await markStatementsSent([31, 52]);
-    expect(markStatementSent).toHaveBeenCalledWith(31);
-    expect(markStatementSent).toHaveBeenCalledWith(52);
+    await markStatementsSent([31, 52], { actorTechnicianId: 'tech-1', actorRole: 'admin' });
+    // The operator is threaded through to the delivery writer (GitHub r10 P2 #4127).
+    expect(markStatementSent).toHaveBeenCalledWith(31, expect.anything(), { actorTechnicianId: 'tech-1', actorRole: 'admin' });
+    expect(markStatementSent).toHaveBeenCalledWith(52, expect.anything(), { actorTechnicianId: 'tech-1', actorRole: 'admin' });
   });
 
   describe('project report send claim (the project send flow\'s own delivery claim, taken by the composer send — GH Codex #3893 r10 + r11 P1)', () => {

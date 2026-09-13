@@ -21,6 +21,7 @@ const {
   extractedNameMatchesCustomer,
 } = _test;
 const { sameFirstName } = require('../utils/name-match');
+const { canAutoRoute } = require('../services/call-triage-flags');
 const { normalizeSecondaryContacts } = require('../utils/normalize-extraction-v2');
 const { mapSecondaryContactsToLegacy } = require('../utils/extraction-compat');
 const { getServiceContactSlots, SERVICE_CONTACT_SLOTS } = require('../services/customer-contact');
@@ -381,6 +382,118 @@ describe('resolveCallBookingPropertyLinkage', () => {
     expect(out.lat).toBe(27.1);
     expect(out.lng).toBe(-82.4);
   });
+
+  // codex P1 — a lightweight known-caller proof must not be spent against a
+  // DIFFERENT customer than the one canonical resolution retained. A supplied
+  // snapshot must be trusted over a live re-query, so a stale/reassigned
+  // customer row can never silently substitute a different on-file address.
+  test('a supplied on-file address snapshot is used directly, bypassing a live customer re-query', async () => {
+    const props = [{ id: 'prop-home', address_line1: '123 Oak St', address_line2: null, city: 'Venice', zip: '34285', latitude: 27.1, longitude: -82.4 }];
+    const trx = (table) => {
+      const builder = {
+        where: () => builder,
+        // A live re-query would return a DIFFERENT address — if the resolver
+        // ignores the snapshot and falls through to this, the test fails.
+        first: () => Promise.resolve(table === 'customers' ? { address_line1: '999 Wrong Way', address_line2: null, city: 'Nowhere', state: 'FL', zip: '00000' } : null),
+        select: () => Promise.resolve(table === 'customer_properties' ? props : []),
+      };
+      return builder;
+    };
+    const out = await resolveCallBookingPropertyLinkage('cust-1', {}, trx, {
+      useOnFileAddress: true,
+      onFileAddressSnapshot: { line1: '123 Oak Street', line2: null, city: 'Venice', state: 'FL', zip: '34285' },
+    });
+    expect(out.address.line1).toBe('123 Oak Street');
+    expect(out.propertyId).toBe('prop-home');
+    // codex P2: state is a sibling of line1/city/zip on the proof snapshot —
+    // it must survive the stamp, not just the street/city/zip components.
+    expect(out.address.state).toBe('FL');
+  });
+});
+
+// ─── On-file address proof bound to the resolved customer (codex P1) ───────
+describe('resolveOnFileAddressAuthority — proof binds to the CANONICAL customer', () => {
+  const { resolveOnFileAddressAuthority, summarizeKnownCaller } = _test;
+  const snapshot = { line1: '100 Main St', line2: null, city: 'Venice', zip: '34285' };
+
+  test('summarizeKnownCaller carries the matched customer id', () => {
+    expect(summarizeKnownCaller({ id: 'cust-A', first_name: 'Jane', pipeline_stage: 'active', address_line1: '1 Elm St' }).id).toBe('cust-A');
+    expect(summarizeKnownCaller(null)).toBeNull();
+  });
+
+  test('same customer both sides → authorized, snapshot carried', () => {
+    expect(resolveOnFileAddressAuthority({
+      usesOnFileAddress: true, proofCustomerId: 'cust-A', proofAddress: snapshot, canonicalCustomerId: 'cust-A',
+    })).toEqual({ useOnFileAddress: true, onFileAddressSnapshot: snapshot, proofRejected: false });
+  });
+
+  test('canonical resolution reconciled to a DIFFERENT customer → rejected, never stamps the unmatched proof', () => {
+    expect(resolveOnFileAddressAuthority({
+      usesOnFileAddress: true, proofCustomerId: 'cust-A', proofAddress: snapshot, canonicalCustomerId: 'cust-B',
+    })).toEqual({ useOnFileAddress: false, onFileAddressSnapshot: null, proofRejected: true });
+  });
+
+  test('no known proof-customer id (unknown caller) → never authorized even when usesOnFileAddress is true', () => {
+    expect(resolveOnFileAddressAuthority({
+      usesOnFileAddress: true, proofCustomerId: null, proofAddress: snapshot, canonicalCustomerId: 'cust-B',
+    })).toEqual({ useOnFileAddress: false, onFileAddressSnapshot: null, proofRejected: true });
+  });
+
+  test('usesOnFileAddress false → rejected regardless of identity match, but not a proof mismatch', () => {
+    expect(resolveOnFileAddressAuthority({
+      usesOnFileAddress: false, proofCustomerId: 'cust-A', proofAddress: snapshot, canonicalCustomerId: 'cust-A',
+    })).toEqual({ useOnFileAddress: false, onFileAddressSnapshot: null, proofRejected: false });
+  });
+
+  // codex P1: a mismatched proof (usesOnFileAddress true, customer ids
+  // don't bind) must not silently fall back to a fresh customers-table
+  // read for the CANONICAL customer when the extraction carries no line1
+  // of its own — resolveCallBookingPropertyLinkage holds instead.
+  test('proofRejected + no extraction line1 → null address with a hold reason, no customers-table read', async () => {
+    const authority = resolveOnFileAddressAuthority({
+      usesOnFileAddress: true, proofCustomerId: 'cust-A', proofAddress: snapshot, canonicalCustomerId: 'cust-B',
+    });
+    let customersRead = false;
+    const trx = (table) => {
+      const builder = {
+        where: () => builder,
+        first: () => {
+          if (table === 'customers') customersRead = true;
+          return Promise.resolve(null);
+        },
+        select: () => Promise.resolve([]),
+      };
+      return builder;
+    };
+    const out = await resolveCallBookingPropertyLinkage('cust-B', { city: 'Venice' }, trx, authority);
+    expect(out).toEqual({
+      propertyId: null, address: null, lat: null, lng: null, holdReason: 'on_file_proof_customer_mismatch',
+    });
+    expect(customersRead).toBe(false);
+  });
+
+  // codex r9 P1: proofRejected with a street still in the extraction is
+  // ALSO held — that street was the restatement compared against the other
+  // customer's saved address, never validated on its own for this one.
+  test('proofRejected + extraction has its own line1 → still held, no customers-table read', async () => {
+    const authority = resolveOnFileAddressAuthority({
+      usesOnFileAddress: true, proofCustomerId: 'cust-A', proofAddress: snapshot, canonicalCustomerId: 'cust-B',
+    });
+    const trx = (table) => {
+      const builder = {
+        where: () => builder,
+        first: () => Promise.resolve(null),
+        select: () => Promise.resolve(table === 'customer_properties' ? [] : []),
+      };
+      return builder;
+    };
+    const out = await resolveCallBookingPropertyLinkage('cust-B', {
+      address_line1: '77 Palm Ave', city: 'Venice', state: 'FL', zip: '34285',
+    }, trx, authority);
+    expect(out).toEqual({
+      propertyId: null, address: null, lat: null, lng: null, holdReason: 'on_file_proof_customer_mismatch',
+    });
+  });
 });
 
 // ─── Fail-open V1 address-conflict demotion (codex r7: shared enforce+audit) ─
@@ -406,16 +519,50 @@ describe('demoteFailOpenOnV1AddressConflict', () => {
     const r = demoteFailOpenOnV1AddressConflict(allowed, { city: 'Sarasota' }, kc);
     expect(r.allowed).toBe(false);
   });
-  test('partial-only V1 evidence demotes even when it MATCHES on-file (codex r10 P2)', () => {
-    // Same city/ZIP cannot disambiguate a second property in that city/ZIP —
-    // partial evidence without a street always holds for review.
-    expect(demoteFailOpenOnV1AddressConflict(allowed, { city: 'Venice' }, kc).allowed).toBe(false);
-    expect(demoteFailOpenOnV1AddressConflict(allowed, { zip: '34285' }, kc).allowed).toBe(false);
+  test.each([{ city: 'Venice' }, { zip: '34285' }])('matching V1 locality preserves the approved on-file route: %j', v1 => {
+    expect(demoteFailOpenOnV1AddressConflict(allowed, v1, kc)).toBe(allowed);
+  });
+  test.each([{ zip: '34202' }, { state: 'CT' }, { address_line2: 'Apt B' }])('contradictory V1 component still demotes: %j', v1 => {
+    expect(demoteFailOpenOnV1AddressConflict(allowed, v1, kc).allowed).toBe(false);
+  });
+  test('on-file routing without an address flag still checks V1 evidence', () => {
+    const onFile = { allowed: true, usesOnFileAddress: true };
+    expect(demoteFailOpenOnV1AddressConflict(onFile, { address_line1: '9 Elsewhere Rd' }, kc).allowed).toBe(false);
   });
   test('address flags did not fail open → untouched even with a conflicting V1 street', () => {
     const noAddr = { allowed: true, failedOpenFlags: ['caller_phone_missing'] };
     expect(demoteFailOpenOnV1AddressConflict(noAddr, { address_line1: '9 Elsewhere Rd' }, kc)).toBe(noAddr);
   });
+});
+
+test.each([
+  [{ city: 'Venice' }, { city: 'Venice' }, 'missing_component', 'Apt A'],
+  [{ postal_code: '34285' }, { zip: '34285' }, 'missing_component', 'Apt A'],
+  [{ street_line_1: '100 Main Street' }, { address_line1: '100 Main St' }, 'missing_component', null],
+  [{ street_line_1: '100 Main Street' }, { address_line1: '100 Main St' }, 'not_attempted', null],
+])('accepted restatement %j retains the complete saved property through booking', async (service_address, flat, status, unit) => {
+  const saved = { address_line1: '100 Main St', address_line2: unit, city: 'Venice', state: 'FL', zip: '34285' };
+  const knownCustomer = { hasAddress: true, addressLine1: saved.address_line1, addressLine2: unit, addressCity: saved.city, addressZip: saved.zip };
+  const extraction = {
+    meta: { is_voicemail: false, is_spam: false }, caller: { relationship_to_property: 'owner' },
+    property: { service_address }, confidence: { overall: 0.9 }, consent: {},
+    scheduling: { status: 'confirmed', confirmed_start_at: '2026-09-11T10:00:00-04:00' },
+    triage_flags: status === 'missing_component' ? ['address_unverified'] : [],
+  };
+  const route = _test.demoteFailOpenOnV1AddressConflict(canAutoRoute(extraction, {
+    failOpen: true, knownCustomer, contactPhone: '+19415550100', addressValidation: { status, inServiceArea: null },
+  }), flat, knownCustomer);
+  expect(route).toMatchObject({ allowed: true, usesOnFileAddress: true });
+  const trx = table => {
+    const builder = {
+      where: () => builder,
+      first: async () => table === 'customers' ? saved : null,
+      select: async () => table === 'customer_properties' ? [{ ...saved, id: 'home', latitude: 27.1, longitude: -82.4 }] : [],
+    };
+    return builder;
+  };
+  const linkage = await resolveCallBookingPropertyLinkage('cust-1', flat, trx, { useOnFileAddress: route.usesOnFileAddress });
+  expect(linkage).toEqual({ propertyId: 'home', address: { line1: saved.address_line1, line2: unit, city: saved.city, state: 'FL', zip: saved.zip }, lat: 27.1, lng: -82.4 });
 });
 
 // ─── Stamped-address divergence rule (codex round-4 P1) ─────────────────────

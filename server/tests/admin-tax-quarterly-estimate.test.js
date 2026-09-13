@@ -54,7 +54,12 @@ jest.mock('../middleware/admin-auth', () => ({
   adminAuthenticate: (req, _res, next) => { req.techRole = 'admin'; next(); },
   requireTechOrAdmin: (_req, _res, next) => next(),
 }));
-jest.mock('../services/invoice-helpers', () => ({ invoiceAmountDue: jest.fn() }));
+jest.mock('../services/invoice-helpers', () => ({
+  invoiceAmountDue: jest.fn(),
+  // The dunning guards read the withdrawal stamp too (a payer-billed
+  // combined-visit invoice keeps payer_id NULL).
+  invoiceWithdrawnFromCustomer: (invoice) => /^payer_billed:/.test(String(invoice?.scheduled_send_error || '')),
+}));
 jest.mock('../services/expense-categorizer', () => ({
   autoCategorizeExpense: jest.fn(),
   categoryDeductibleAmount: jest.fn((_c, a) => a),

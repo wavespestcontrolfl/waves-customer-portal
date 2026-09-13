@@ -149,11 +149,19 @@ function checkCoverage(current, manifest, policy, baselineProof = new Set()) {
   for (const action of current) {
     const previous = stored.get(action.id);
     if (!previous) { errors.push(`New unmapped UI action: ${action.ui.file}:${action.ui.line}`); continue; }
-    const implemented = previous.tools?.length && previous.tools.every(name => policy[name])
-      && previous.status === 'verified' && Array.isArray(previous.evidence) && previous.evidence.length
+    const tested = previous.tools?.length && previous.tools.every(name => policy[name])
+      && Array.isArray(previous.evidence) && previous.evidence.length
       && previous.evidence.every(value => typeof value === 'string' && value.trim())
       && ['permission', 'approval', 'inputsAndEffects'].every(key => typeof previous[key] === 'string'
         && previous[key].trim() && previous[key].trim() !== 'requires_action_review');
+    // Partial deliveries keep their unverified scopes in the denominator.
+    // Both tested and remaining scopes need explicit reviewed evidence.
+    const verifiedScopes = Array.isArray(previous.verifiedScopes) ? previous.verifiedScopes : [];
+    const remainingScopes = Array.isArray(previous.remainingScopes) ? previous.remainingScopes : [];
+    const partialText = [previous.review, ...verifiedScopes, ...remainingScopes.flatMap(scope => [scope?.scope, scope?.reason])];
+    const partialReviewed = [verifiedScopes.length, remainingScopes.length,
+      partialText.every(value => typeof value === 'string' && value.trim().length > 0)].every(Boolean);
+    const implemented = tested && (previous.status === 'verified' || (previous.status === 'partially_verified' && partialReviewed));
     const exception = ['reviewed_exception', 'reviewed_unmapped'].includes(previous.status)
       && ['review', 'reason'].every(key => typeof previous.exception?.[key] === 'string' && previous.exception[key].trim());
     if ((implemented || exception) && previous.reviewedFingerprint === action.fingerprint) continue;
@@ -166,10 +174,24 @@ function checkCoverage(current, manifest, policy, baselineProof = new Set()) {
 
 function verifiedBaselineProof(current, manifest) {
   const stored = new Map(manifest.actions.map(action => [action.id, action]));
+  const currentIds = new Set(current.map(action => action.id));
+  const relocationCounts = new Map();
+  for (const action of current) {
+    const from = stored.get(action.id)?.relocatedFrom;
+    if (from) relocationCounts.set(from, (relocationCounts.get(from) || 0) + 1);
+  }
   const proof = new Set(), sources = new Map(), revisions = new Map();
   for (const action of current) {
     const previous = stored.get(action.id);
     if (previous?.baselineFingerprint !== action.fingerprint) continue;
+    const original = stored.get(previous.relocatedFrom);
+    // An explicitly reviewed move of an unchanged call retains its unsupported
+    // status. It cannot cover a copy, a payload change, or source never on main.
+    const relocated = original && !currentIds.has(original.id) && relocationCounts.get(original.id) === 1
+      && original.status === 'unmapped' && original.baselineFingerprint === action.fingerprint
+      && original.ui.file === action.ui.file
+      && typeof previous.relocationReview === 'string' && previous.relocationReview.trim();
+    if (previous.relocatedFrom && !relocated) continue;
     const ref = previous.baselineSource || manifest.baselineCommit;
     // Baseline allowances may only name source already merged on main.
     // A contributor's new call plus a matching JSON row is not a baseline.
@@ -190,7 +212,8 @@ function verifiedBaselineProof(current, manifest) {
       } catch { sources.set(key, new Set()); }
     }
     const identity = `${action.id}:${action.fingerprint}`;
-    if (sources.get(key).has(identity)) proof.add(identity);
+    const sourceIdentity = `${relocated ? original.id : action.id}:${action.fingerprint}`;
+    if (sources.get(key).has(sourceIdentity)) proof.add(identity);
   }
   return proof;
 }

@@ -796,8 +796,8 @@ describe('the send', () => {
     expect(mockSendCustomerMessage).not.toHaveBeenCalled();
   });
 
-  test('a RETRYABLE provider outcome keeps the claim (Twilio may have accepted)', async () => {
-    mockSendCustomerMessage.mockResolvedValueOnce({ sent: false, retryable: true, code: 'PROVIDER_RETRYABLE' });
+  test('an explicit uncertain provider outcome keeps the claim even when non-retryable', async () => {
+    mockSendCustomerMessage.mockResolvedValueOnce({ sent: false, retryable: false, deliveryOutcome: 'uncertain', code: 'PROVIDER_UNCERTAIN' });
     const res = await requestCardForAppointment({ scheduledServiceId: 'svc-1' });
     expect(res.reason).toBe('send_outcome_uncertain');
     const ssUpdates = touches('scheduled_services')
@@ -808,6 +808,16 @@ describe('the send', () => {
       .flatMap((t) => t.chain.calls.filter(([op]) => op === 'update'))
       .map(([, patch]) => patch);
     expect(reqUpdates.some((p) => p.sent_at instanceof Date)).toBe(true);
+  });
+
+  test('an explicit not-sent provider outcome releases the claim even when retryable', async () => {
+    mockSendCustomerMessage.mockResolvedValueOnce({ sent: false, retryable: true, deliveryOutcome: 'not_sent', code: 'PROVIDER_RETRYABLE' });
+    const res = await requestCardForAppointment({ scheduledServiceId: 'svc-1' });
+    expect(res.reason).toBe('send_blocked:PROVIDER_RETRYABLE');
+    const ssUpdates = touches('scheduled_services')
+      .flatMap((t) => t.chain.calls.filter(([op]) => op === 'update'))
+      .map(([, patch]) => patch);
+    expect(ssUpdates.some((p) => p.card_link_sent_at === null)).toBe(true);
   });
 
   test('blocked send releases the claim and the pending row', async () => {

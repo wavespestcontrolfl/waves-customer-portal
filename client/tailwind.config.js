@@ -43,6 +43,17 @@ export default {
           fg: '#C8312F',
           hover: '#A32D2D',
         },
+        // Warning, not alert. `alert` red is reserved for genuine alerts, so a
+        // degraded-but-working state had no token and migrated surfaces were
+        // dropping to neutral — indistinguishable from unknown. The legacy `D`
+        // palettes already paint these amber (#FEF3C7 on #A16207); the fg is
+        // darkened to amber-800 so 11-14px badge text clears AA on the amber
+        // ground (6.15:1, where alert sits at 4.63:1 and #A16207 only reached
+        // 4.42:1).
+        warn: {
+          bg: '#FEF3C7',
+          fg: '#854D0E',
+        },
         surface: {
           page: '#FAFAFA',
           card: '#FFFFFF',

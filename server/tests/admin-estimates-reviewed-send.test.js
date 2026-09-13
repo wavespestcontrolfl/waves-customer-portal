@@ -94,6 +94,7 @@ jest.mock('../services/pricing-authority-gate', () => {
 });
 
 let row;
+let groupRows;
 let mutations;
 
 function savedEstimate(overrides = {}) {
@@ -117,7 +118,7 @@ function dataOf(estimate = row) {
 function estimateDatabase(table) {
   const filters = [];
   const builder = {};
-  const matches = () => table === 'estimates' && filters.every((filter) => filter(row));
+  const matches = () => table === 'estimates' ? [row, ...groupRows].filter((candidate) => filters.every((filter) => filter(candidate))) : [];
   builder.where = jest.fn((key, value) => {
     if (typeof key === 'function') { key(builder); return builder; }
     for (const [field, expected] of Object.entries(typeof key === 'object' ? key : { [key]: value })) {
@@ -136,16 +137,18 @@ function estimateDatabase(table) {
   for (const method of ['whereRaw', 'orWhereRaw', 'orWhereNotNull', 'forUpdate', 'orderBy', 'limit', 'transacting']) builder[method] = jest.fn(() => builder);
   builder.orWhere = jest.fn((key) => { if (typeof key === 'function') key(builder); return builder; });
   builder.modify = jest.fn((callback) => { callback(builder); return builder; });
-  builder.first = jest.fn(async () => matches() ? structuredClone(row) : null);
-  builder.select = jest.fn(async () => matches() ? [structuredClone(row)] : []);
+  builder.first = jest.fn(async () => matches().length ? structuredClone(matches()[0]) : null);
+  builder.select = jest.fn(async () => matches().map((candidate) => structuredClone(candidate)));
   builder.update = jest.fn(async (patch) => {
     mutations.push({ table, patch });
-    if (!matches()) return 0;
+    const targets = matches();
+    if (!targets.length) return 0;
+    const target = targets[0];
     for (const [key, value] of Object.entries(patch)) {
       if (key === 'estimate_data' && value?.sql) {
-        if (value.bindings?.[0]) row.estimate_data = { ...dataOf(), ...JSON.parse(value.bindings[0]) };
-      } else if (key === 'status' && value?.sql) row.status = row.viewed_at ? 'viewed' : 'sent';
-      else row[key] = value;
+        if (value.bindings?.[0]) target.estimate_data = { ...dataOf(target), ...JSON.parse(value.bindings[0]) };
+      } else if (key === 'status' && value?.sql) target.status = target.viewed_at ? 'viewed' : 'sent';
+      else target[key] = value;
     }
     return 1;
   });
@@ -180,6 +183,7 @@ beforeEach(() => {
   jest.clearAllMocks();
   gateEnvValue.mockReturnValue(false);
   row = savedEstimate();
+  groupRows = [];
   mutations = [];
   db.mockImplementation(estimateDatabase);
   sendgrid.isConfigured.mockReturnValue(true);
@@ -258,7 +262,7 @@ describe('commercial bid authoring', () => {
       expect(row).toEqual(before);
     }
   });
-  test('saving a longer fixed hold leaves every sibling untouched and records the entry link\'s viewability on the anchor (owner ruling on #4309 r7)', async () => {
+  test('saving a longer anchor hold changes only its own offer deadline (owner ruling on #4309 r7)', async () => {
     Object.assign(row, { status: 'sent', sent_at: new Date('2026-01-02T12:00:00.000Z'), estimate_group_id: 'synthetic-group', estimate_data: { proposal: { ...proposal(), validThrough: '2099-12-21' } } });
     const res = await invoke('/:id/proposal', 'put', { proposal: { ...proposal(), validThrough: '2099-12-31' } });
     expect(res.statusCode).toBe(200);
@@ -271,6 +275,55 @@ describe('commercial bid authoring', () => {
     expect(siblingExtension).toBeUndefined();
     const anchorData = row.estimate_data || {};
     expect(Object.prototype.hasOwnProperty.call(anchorData, 'groupWidenFloorExpiresAt')).toBe(false);
+  });
+  test.each([
+    ['newly authored', null],
+    ['lengthened', '2099-12-21'],
+  ])('a %s sibling hold extends the delivered anchor link while offers keep their own deadlines', async (_label, oldDate) => {
+    const anchor = savedEstimate({
+      id: 'published-anchor', status: 'sent', estimate_group_id: 'synthetic-group',
+      sent_at: new Date('2026-01-02T12:00:00.000Z'),
+      expires_at: new Date('2099-01-08T12:00:00.000Z'),
+      estimate_data: { deliveryState: { lastDeliveredAt: '2026-01-02T12:00:00.000Z' } },
+    });
+    groupRows.push(anchor);
+    Object.assign(row, {
+      status: 'sent', sent_at: new Date('2026-01-02T12:00:00.000Z'),
+      estimate_group_id: 'synthetic-group',
+      estimate_data: { groupPublishedByEstimateId: anchor.id, proposal: { ...proposal(), validThrough: oldDate } },
+    });
+    const result = await invoke('/:id/proposal', 'put', { proposal: { ...proposal(), validThrough: '2099-12-31' } });
+    expect(result.statusCode).toBe(200);
+    expect(row.expires_at.toISOString()).toBe('2100-01-01T04:59:59.999Z');
+    expect(anchor.expires_at.toISOString()).toBe('2099-01-08T12:00:00.000Z');
+    expect(dataOf(anchor).groupLinkViewableThrough).toBe('2100-01-01T04:59:59.999Z');
+    expect(dataOf().groupLinkViewableThrough).toBeUndefined();
+
+    // A later shortening closes only this property's offer. The already
+    // delivered group link keeps its promised navigation lifetime.
+    const shorter = await invoke('/:id/proposal', 'put', { proposal: { ...proposal(), validThrough: '2099-12-21' } });
+    expect(shorter.statusCode).toBe(200);
+    expect(row.expires_at.toISOString()).toBe('2099-12-22T04:59:59.999Z');
+    expect(dataOf(anchor).groupLinkViewableThrough).toBe('2100-01-01T04:59:59.999Z');
+    expect(anchor.expires_at.toISOString()).toBe('2099-01-08T12:00:00.000Z');
+  });
+  test('a stale publication marker never extends an anchor from another group', async () => {
+    const formerAnchor = savedEstimate({
+      id: 'former-anchor', status: 'sent', estimate_group_id: 'former-group',
+      sent_at: new Date('2026-01-02T12:00:00.000Z'),
+      expires_at: new Date('2099-01-08T12:00:00.000Z'),
+    });
+    groupRows.push(formerAnchor);
+    Object.assign(row, {
+      status: 'sent', sent_at: new Date('2026-01-02T12:00:00.000Z'),
+      estimate_group_id: 'current-group',
+      estimate_data: { groupPublishedByEstimateId: formerAnchor.id, proposal: proposal() },
+    });
+    const result = await invoke('/:id/proposal', 'put', { proposal: { ...proposal(), validThrough: '2099-12-31' } });
+    expect(result.statusCode).toBe(200);
+    expect(row.expires_at.toISOString()).toBe('2100-01-01T04:59:59.999Z');
+    expect(dataOf(formerAnchor).groupLinkViewableThrough).toBeUndefined();
+    expect(formerAnchor.expires_at.toISOString()).toBe('2099-01-08T12:00:00.000Z');
   });
   test('shortening a fixed hold rewrites only the anchor, because no sibling was ever widened (owner ruling on #4309 r7)', async () => {
     const sibling = { ...row, id: 'sibling-1', status: 'sent', sent_at: new Date('2026-01-02T12:00:00.000Z'), estimate_group_id: 'synthetic-group' };

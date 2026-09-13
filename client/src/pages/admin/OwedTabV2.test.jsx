@@ -25,6 +25,7 @@ beforeEach(() => {
   vi.useFakeTimers({ toFake: ["Date"] });
   vi.setSystemTime(new Date("2026-09-05T15:00:00Z"));
   calls = [];
+  cards.summary = null;
   localStorage.setItem("waves_admin_token", "t");
   vi.stubGlobal("fetch", vi.fn(async (url, options = {}) => {
     calls.push({ url: String(url), method: options.method || "GET", body: options.body ? JSON.parse(options.body) : null });
@@ -36,7 +37,17 @@ afterEach(() => {
   cleanup();
   vi.useRealTimers();
   vi.unstubAllGlobals();
+  vi.restoreAllMocks();
   window.location.hash = "";
+});
+
+// Follow-through has its own browser workflow; these tests isolate the legacy
+// ledger. The stub reports whatever summary a test hands it (null = the card
+// feed never loaded, which is also what a failed card request reports).
+const cards = vi.hoisted(() => ({ summary: null }));
+vi.mock("../../components/admin/AdminFollowThroughCards", async () => {
+  const { useEffect } = await import("react");
+  return { default: ({ onSummary }) => { useEffect(() => { if (cards.summary) onSummary?.(cards.summary); }, [onSummary]); return null; } };
 });
 
 describe("OwedTabV2", () => {
@@ -74,6 +85,23 @@ describe("OwedTabV2", () => {
     expect(screen.getByText("AI assistant")).toBeInTheDocument();
     expect(screen.getByText(/Possibly kept: outbound call/)).toBeInTheDocument();
     expect(screen.getByText(/2 open · 1 overdue/)).toBeInTheDocument();
+  });
+
+  it("keeps Waves' callback rows in the ledger until the card feed itself loads enabled", async () => {
+    globalThis.fetch.mockResolvedValue({ ok: true, status: 200, json: async () => ({ commitments: rows(), overdue_implicit_days: 3, callbacks_enabled: true }) });
+    render(<OwedTabV2 />);
+    await waitFor(() => expect(screen.getByText("Send the caller an estimate")).toBeInTheDocument());
+    expect(screen.getByText(/Call the caller back/)).toBeInTheDocument();
+    expect(screen.getByText(/2 open · 1 overdue/)).toBeInTheDocument();
+  });
+
+  it("hands Waves' callbacks to the cards once they load, folding their counts and pagination into the summary", async () => {
+    cards.summary = { enabled: true, open: 100, overdue: 4, hasMore: true };
+    globalThis.fetch.mockResolvedValue({ ok: true, status: 200, json: async () => ({ commitments: rows(), overdue_implicit_days: 3, callbacks_enabled: true }) });
+    render(<OwedTabV2 />);
+    await waitFor(() => expect(screen.getByText("Send the caller an estimate")).toBeInTheDocument());
+    expect(screen.queryByText(/Call the caller back/)).not.toBeInTheDocument();
+    expect(screen.getByText(/101\+ open · 5 overdue/)).toBeInTheDocument();
   });
 
   it("walks a queue longer than one page with Load more, appending rows at the server's next offset", async () => {

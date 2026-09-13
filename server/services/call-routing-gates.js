@@ -82,10 +82,12 @@ function checkTcpaConsent(extraction, opts = {}) {
 // a force-reprocess would keep the stale auto_route recommendation while the
 // fresh run holds the call — corrupting the promotion metrics and any
 // feedback tied to that decision row.
-// Authorization, confidence and scheduling decisions changed. Version 1.4
-// is reserved for the separately reviewed saved-address routing change.
-const V2_DECISION_VERSION = 'v2-1.5.0';
-const V2_DECISION_VERSIONS = ['v2-1.0.0', 'v2-1.1.0', 'v2-1.2.0', 'v2-1.3.0', 'v2-1.4.0', 'v2-1.5.0'];
+// Authorization, confidence and scheduling decisions changed in v2-1.5.0.
+// v2-1.6.0 recognizes matching saved-address components and preserves stated
+// geography through service-area validation (the change once reserved as
+// 1.4, landed after 1.5). Reprocessing gets a fresh decision.
+const V2_DECISION_VERSION = 'v2-1.6.0';
+const V2_DECISION_VERSIONS = ['v2-1.0.0', 'v2-1.1.0', 'v2-1.2.0', 'v2-1.3.0', 'v2-1.4.0', 'v2-1.5.0', 'v2-1.6.0'];
 
 function buildRouteDecision({
   callLogId,
@@ -395,6 +397,10 @@ function buildTriageItem({
     // within a day of the discussed date) — a human picks which one the
     // call belongs to instead of the AI inserting a duplicate.
     ambiguous_existing_appointment: 'time_ambiguous',
+    // On-file proof was computed against a different customer than booking
+    // resolved to and the call carried no street of its own (codex P1) —
+    // nothing either side vouches for, so the office confirms WHERE.
+    on_file_proof_customer_mismatch: 'address_review',
     // The call was attached to a human's existing booking, so the promised
     // follow-up treatment was NOT auto-booked — the office books visit 2.
     attached_booking_followup_unbooked: 'time_ambiguous',

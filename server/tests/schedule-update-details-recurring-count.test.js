@@ -882,6 +882,85 @@ describe('update-details wiring (source guards)', () => {
     expect((src.match(/CUSTOMER_CHANGED_RETRY/g) || []).length).toBeGreaterThanOrEqual(2);
   });
 
+  test('a make-this-recurring spawn adds its new children to the quality-refresh batch (codex #4295 r2 P2)', () => {
+    // This is the spawn branch that converts a one-time visit into a series
+    // (not the visit-count top-up branches, which already do both pushes).
+    // It used to record new child ids only in spawnedRecurringChildren, never
+    // in recurringUpdatedJobIds — so the batching block below collected only
+    // the edited parent and the new children's dates got no measurement/
+    // alert reconciliation.
+    const start = src.indexOf('spawnedRecurringChildren.push({');
+    const end = src.indexOf('recurringCreated++;', start);
+    expect(start).toBeGreaterThan(-1);
+    expect(end).toBeGreaterThan(start);
+    const spawnBlock = src.slice(start, end);
+    expect(spawnBlock).toContain('recurringUpdatedJobIds.push(childRow.id);');
+  });
+
+  test('every blackout write refreshes route quality for the dates it changes (codex #4295 r2 P2)', () => {
+    const handler = (route) => {
+      const start = src.indexOf(route);
+      expect(start).toBeGreaterThan(-1);
+      return src.slice(start, src.indexOf('\n});', start));
+    };
+    expect(handler("router.put('/blackout-dates/weekly'")).toContain('refreshQualityForBlackoutChange(weeklyBlackoutRefreshDates(previousDays, days))');
+    expect(handler("router.post('/blackout-dates'")).toContain('refreshQualityForBlackoutChange([date])');
+    const del = handler("router.delete('/blackout-dates/:id'");
+    expect(del).toContain("first('date')");
+    expect(del.indexOf("first('date')")).toBeLessThan(del.indexOf('.del()'));
+    expect(del).toContain('refreshQualityForBlackoutChange([blackoutDateString(row && row.date)])');
+  });
+
+  test('a weekly days-off change refreshes only the toggled weekdays inside the 30-day horizon', () => {
+    const { weeklyBlackoutRefreshDates, blackoutDateString } = adminScheduleRouter._test;
+    // Thursday 2026-08-13 04:10 ET: horizon = 2026-08-14 .. 2026-09-12.
+    const now = new Date('2026-08-13T08:10:00Z');
+    expect(weeklyBlackoutRefreshDates([0], [0, 6], now)).toEqual(['2026-08-15', '2026-08-22', '2026-08-29', '2026-09-05', '2026-09-12']);
+    expect(weeklyBlackoutRefreshDates([0, 6], [0], now)).toEqual(['2026-08-15', '2026-08-22', '2026-08-29', '2026-09-05', '2026-09-12']);
+    expect(weeklyBlackoutRefreshDates(['0'], [0], now)).toEqual([]);
+    expect(weeklyBlackoutRefreshDates([], [], now)).toEqual([]);
+    expect(blackoutDateString('2026-08-20T00:00:00.000Z')).toBe('2026-08-20');
+    expect(blackoutDateString(new Date(2026, 7, 20))).toBe('2026-08-20');
+    expect(blackoutDateString(null)).toBeNull();
+  });
+
+  test('a count-only series edit still enters the broadcast-and-flush block (codex #4295 r3 P2)', () => {
+    expect(src).toContain('if (assignmentChanged || detailsChanged || addonsReplaced || addressUpdatedIds.length || recurringUpdatedJobIds.length) {');
+  });
+
+  test('the Edit Appointment series move owns one route-quality Set across rebooker, effects and grouped members (codex #4295 r3 P2)', () => {
+    const start = src.indexOf("const result = await SmartRebooker.reschedule(row.id, target, win, 'admin', 'admin', {");
+    expect(start).toBeGreaterThan(-1);
+    const block = src.slice(src.lastIndexOf('const qualityDates = new Set();', start), src.indexOf('return {', start));
+    expect(block).toContain('qualityDates,\n        adminWindowRules: true,');
+    expect(block).toContain('reasonText: null,\n        qualityDates,\n      });');
+    expect(block).toContain('emitDispatchJobUpdate({ jobId: movedId, actorId: req.technicianId, qualityDates })');
+    expect(block).toContain('await flushDispatchQualityDates(qualityDates);');
+    const dispatchSrc = fs.readFileSync(path.join(__dirname, '../routes/admin-dispatch.js'), 'utf8');
+    // The callee flushes only when it owns the Set; a batch caller flushes once.
+    expect(dispatchSrc).toContain('const ownsFlush = !qualityDates;');
+    expect(dispatchSrc).toMatch(/if \(ownsFlush\) \{\s+try \{\s+await flushDispatchQualityDates\(seriesQualityDates\);/);
+  });
+
+  test('the collective-move branch and the tech Quick Move flush the shared route-quality Set (codex #4295 r4 P2)', () => {
+    const dispatchSrc = fs.readFileSync(path.join(__dirname, '../routes/admin-dispatch.js'), 'utf8');
+    expect(dispatchSrc).not.toContain('groupedQualityDates');
+    const start = dispatchSrc.indexOf('if (result.seriesMoveId) {');
+    const branch = dispatchSrc.slice(start, dispatchSrc.indexOf('return res.json({', start));
+    expect(branch).toContain('emitDispatchJobUpdate({ jobId: movedId, actorId: req.technicianId, qualityDates })');
+    expect(branch).toContain('await flushDispatchQualityDates(qualityDates);');
+    const techSrc = fs.readFileSync(path.join(__dirname, '../routes/tech-track.js'), 'utf8');
+    expect(techSrc).toContain("flushDispatchQualityDates(new Set(result.qualityDates))");
+    expect(techSrc.indexOf('flushDispatchQualityDates(new Set(result.qualityDates))')).toBeGreaterThan(techSrc.indexOf('RainOut.commit({'));
+  });
+
+  test('the edit broadcast waits for every board update before the shared Set is flushed (codex #4295 r5 P2)', () => {
+    const start = src.indexOf('const broadcastJobIds = new Set(');
+    const block = src.slice(start, src.indexOf('await flushDispatchQualityDates(qualityDates);', start));
+    expect(block).toContain('await Promise.allSettled([...broadcastJobIds].map((jobId) =>');
+    expect(block).not.toContain('await Promise.all([...broadcastJobIds]');
+  });
+
   test('top-up visits get the post-registration terminal re-check (Codex #3337 r2 P1)', () => {
     // A series cancel landing between this commit and the reminder insert
     // would otherwise leave an armed reminder on a cancelled visit.

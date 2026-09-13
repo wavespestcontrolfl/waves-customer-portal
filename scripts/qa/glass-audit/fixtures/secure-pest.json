@@ -1,0 +1,32 @@
+{
+  "/api/public/secure-card/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa": {
+    "status": 200,
+    "body": {
+      "state": "ready",
+      "firstName": "Taylor",
+      "serviceType": "Quarterly Pest Control",
+      "dateDisplay": "Tue, Aug 4",
+      "windowDisplay": "8–10 AM",
+      "clientSecret": "seti_demo_secret",
+      "setupIntentId": "seti_demo",
+      "publishableKey": "pk_test_demo",
+      "planContext": {
+        "mode": "recurring",
+        "planClass": "fee_waiver",
+        "perVisit": 135,
+        "visitsPerYear": 4,
+        "annualBase": 540,
+        "prepay": {
+          "total": 540,
+          "discount": 0,
+          "ratePctLabel": ""
+        },
+        "setupFee": {
+          "amount": 99,
+          "waivedWithPrepay": true
+        },
+        "selected": null
+      }
+    }
+  }
+}

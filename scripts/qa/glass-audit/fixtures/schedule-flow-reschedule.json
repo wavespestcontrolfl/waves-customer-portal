@@ -1,0 +1,261 @@
+{
+  "/api/public/reschedule/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa": {
+    "status": 200,
+    "body": {
+      "state": "reschedulable",
+      "customerFirstName": "Jordan",
+      "service": {
+        "type": "Quarterly Pest Control"
+      },
+      "isRecurring": true,
+      "collectiveAnchor": false,
+      "futurePlacementDays": null,
+      "current": {
+        "date": "2026-09-15",
+        "windowStart": "09:00",
+        "windowEnd": "10:30"
+      },
+      "lanes": [
+        {
+          "key": "pest",
+          "label": "Pest control",
+          "alreadyBooked": null
+        }
+      ],
+      "availability": {
+        "days": [
+          {
+            "date": "2026-09-12",
+            "fullDate": "Saturday, September 12",
+            "nearby": true,
+            "rainChance": 20,
+            "slots": [
+              {
+                "date": "2026-09-12",
+                "start_time": "09:00",
+                "end_time": "10:30",
+                "start_label": "9:00 AM",
+                "end_label": "10:30 AM",
+                "technician_id": "tech-preview",
+                "nearby": true,
+                "rank": 1
+              },
+              {
+                "date": "2026-09-12",
+                "start_time": "13:00",
+                "end_time": "14:30",
+                "start_label": "1:00 PM",
+                "end_label": "2:30 PM",
+                "technician_id": "tech-preview",
+                "nearby": false,
+                "rank": 2
+              }
+            ]
+          },
+          {
+            "date": "2026-09-13",
+            "fullDate": "Sunday, September 13",
+            "nearby": false,
+            "rainChance": 55,
+            "slots": [
+              {
+                "date": "2026-09-13",
+                "start_time": "09:00",
+                "end_time": "10:30",
+                "start_label": "9:00 AM",
+                "end_label": "10:30 AM",
+                "technician_id": "tech-preview",
+                "nearby": false,
+                "rank": 3
+              },
+              {
+                "date": "2026-09-13",
+                "start_time": "13:00",
+                "end_time": "14:30",
+                "start_label": "1:00 PM",
+                "end_label": "2:30 PM",
+                "technician_id": "tech-preview",
+                "nearby": false,
+                "rank": 4
+              }
+            ]
+          },
+          {
+            "date": "2026-09-15",
+            "fullDate": "Tuesday, September 15",
+            "nearby": true,
+            "rainChance": 20,
+            "slots": [
+              {
+                "date": "2026-09-15",
+                "start_time": "09:00",
+                "end_time": "10:30",
+                "start_label": "9:00 AM",
+                "end_label": "10:30 AM",
+                "technician_id": "tech-preview",
+                "nearby": true,
+                "rank": 5
+              },
+              {
+                "date": "2026-09-15",
+                "start_time": "13:00",
+                "end_time": "14:30",
+                "start_label": "1:00 PM",
+                "end_label": "2:30 PM",
+                "technician_id": "tech-preview",
+                "nearby": false,
+                "rank": 6
+              }
+            ]
+          },
+          {
+            "date": "2026-09-16",
+            "fullDate": "Wednesday, September 16",
+            "nearby": false,
+            "rainChance": 20,
+            "slots": [
+              {
+                "date": "2026-09-16",
+                "start_time": "09:00",
+                "end_time": "10:30",
+                "start_label": "9:00 AM",
+                "end_label": "10:30 AM",
+                "technician_id": "tech-preview",
+                "nearby": false,
+                "rank": 7
+              },
+              {
+                "date": "2026-09-16",
+                "start_time": "13:00",
+                "end_time": "14:30",
+                "start_label": "1:00 PM",
+                "end_label": "2:30 PM",
+                "technician_id": "tech-preview",
+                "nearby": false,
+                "rank": 8
+              }
+            ]
+          },
+          {
+            "date": "2026-09-18",
+            "fullDate": "Friday, September 18",
+            "nearby": false,
+            "rainChance": 20,
+            "slots": [
+              {
+                "date": "2026-09-18",
+                "start_time": "09:00",
+                "end_time": "10:30",
+                "start_label": "9:00 AM",
+                "end_label": "10:30 AM",
+                "technician_id": "tech-preview",
+                "nearby": false,
+                "rank": 9
+              },
+              {
+                "date": "2026-09-18",
+                "start_time": "13:00",
+                "end_time": "14:30",
+                "start_label": "1:00 PM",
+                "end_label": "2:30 PM",
+                "technician_id": "tech-preview",
+                "nearby": false,
+                "rank": 10
+              }
+            ]
+          },
+          {
+            "date": "2026-09-19",
+            "fullDate": "Saturday, September 19",
+            "nearby": false,
+            "rainChance": 20,
+            "slots": [
+              {
+                "date": "2026-09-19",
+                "start_time": "09:00",
+                "end_time": "10:30",
+                "start_label": "9:00 AM",
+                "end_label": "10:30 AM",
+                "technician_id": "tech-preview",
+                "nearby": false,
+                "rank": 11
+              },
+              {
+                "date": "2026-09-19",
+                "start_time": "13:00",
+                "end_time": "14:30",
+                "start_label": "1:00 PM",
+                "end_label": "2:30 PM",
+                "technician_id": "tech-preview",
+                "nearby": false,
+                "rank": 12
+              }
+            ]
+          },
+          {
+            "date": "2026-09-20",
+            "fullDate": "Sunday, September 20",
+            "nearby": false,
+            "rainChance": 20,
+            "slots": [
+              {
+                "date": "2026-09-20",
+                "start_time": "09:00",
+                "end_time": "10:30",
+                "start_label": "9:00 AM",
+                "end_label": "10:30 AM",
+                "technician_id": "tech-preview",
+                "nearby": false,
+                "rank": 13
+              },
+              {
+                "date": "2026-09-20",
+                "start_time": "13:00",
+                "end_time": "14:30",
+                "start_label": "1:00 PM",
+                "end_label": "2:30 PM",
+                "technician_id": "tech-preview",
+                "nearby": false,
+                "rank": 14
+              }
+            ]
+          }
+        ],
+        "slots": [
+          {
+            "date": "2026-09-12",
+            "start_time": "09:00",
+            "end_time": "10:30",
+            "start_label": "9:00 AM",
+            "end_label": "10:30 AM",
+            "technician_id": "tech-preview",
+            "nearby": true,
+            "rank": 1
+          },
+          {
+            "date": "2026-09-15",
+            "start_time": "09:00",
+            "end_time": "10:30",
+            "start_label": "9:00 AM",
+            "end_label": "10:30 AM",
+            "technician_id": "tech-preview",
+            "nearby": true,
+            "rank": 5
+          },
+          {
+            "date": "2026-09-12",
+            "start_time": "13:00",
+            "end_time": "14:30",
+            "start_label": "1:00 PM",
+            "end_label": "2:30 PM",
+            "technician_id": "tech-preview",
+            "nearby": false,
+            "rank": 2
+          }
+        ],
+        "rangeFrom": "2026-09-10",
+        "rangeTo": "2026-09-23"
+      }
+    }
+  }
+}

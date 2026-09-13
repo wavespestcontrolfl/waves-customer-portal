@@ -56,7 +56,7 @@ describe('closeoutIssuesForVisit', () => {
     expect(closeoutIssuesForVisit(base({ reportDelivery: fact('pending', 'not_enqueued') }))).toEqual([expect.objectContaining({ type: 'report_delivery_incomplete', summary: expect.stringMatching(/never delivered/) })]);
     expect(closeoutIssuesForVisit(base({ reportDelivery: fact('pending', 'project_report_not_sent') }))).toHaveLength(1);
     expect(closeoutIssuesForVisit(base({ reportDelivery: fact('failed', 'delivery_skipped_no_recipient') }))[0].summary).toMatch(/no report recipient on file/);
-    for (const r of ['delivery_queued', 'delivery_sending', 'project_report_on_hold', 'recap_sms_in_flight', 'report_not_published']) {
+    for (const r of ['delivery_queued', 'delivery_sending', 'project_report_on_hold', 'recap_sms_in_flight', 'report_not_published', 'visit_summary_delivery_pending']) {
       expect(closeoutIssuesForVisit(base({ reportDelivery: fact('pending', r) }))).toEqual([]);
     }
   });

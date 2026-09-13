@@ -90,6 +90,25 @@ describe('combineRecurringServicesForScheduling', () => {
     expect(lawn.remaining).toEqual([]);
   });
 
+  test('a primary-only capacity reservation can separate retired two-program routes while the release gate is off', () => {
+    const previous = process.env.GATE_SEPARATE_COMBO_VISITS;
+    process.env.GATE_SEPARATE_COMBO_VISITS = 'false';
+    try {
+      const result = combineRecurringServicesForScheduling([
+        { name: 'Quarterly Pest Control', service: 'pest_control', frequency: 'quarterly' },
+        { name: 'Termite Bait Station System', service: 'termite_bait', frequency: 'quarterly' },
+      ], { forceSeparateRetiredRoutes: true });
+      expect(result.combos).toEqual([]);
+      expect(result.remaining.map(recurringServiceKey)).toEqual(['pest_control']);
+      expect(result.standalone).toEqual([
+        expect.objectContaining({ catalogServiceKey: 'termite_bait' }),
+      ]);
+    } finally {
+      if (previous === undefined) delete process.env.GATE_SEPARATE_COMBO_VISITS;
+      else process.env.GATE_SEPARATE_COMBO_VISITS = previous;
+    }
+  });
+
   test('mismatched cadences stay separate rows', () => {
     const { remaining, combos } = combineRecurringServicesForScheduling([
       { name: 'Monthly Pest Control', frequency: 'monthly' },
@@ -583,6 +602,23 @@ describe('combined-name downstream keys', () => {
     expect(serviceKeyFor({ service_type: 'Rodent Pest Control' })).toBe('rodent_bait');
     expect(serviceKeyFor({ service_type: 'Quarterly Rodent Bait Station Service' })).toBe('rodent_bait');
     expect(serviceKeyFor({ service_type: 'Termite Bait Station System' })).toBe('termite_bait');
+  });
+
+  test.each([30, 40, 90])('version-2 follow-ups retain the accepted %i-minute allowance after gate shutdown', duration => {
+    const gate = process.env.GATE_SCHEDULING_CAPACITY;
+    delete process.env.GATE_SCHEDULING_CAPACITY;
+    try {
+      const parent = { id: 'held-parent', customer_id: 'fixture', scheduled_date: '2027-05-20',
+        service_type: 'Quarterly Pest Control', estimated_duration_minutes: duration, reservation_policy_version: 2 };
+      const resolved = durationMinutesForRecurringService({ service: 'pest_control' }, 'quarterly', parent);
+      const rows = buildRecurringFollowUpRows(parent, { pattern: 'quarterly', durationMinutes: resolved });
+      expect(rows).toHaveLength(3);
+      expect(rows.every(row => row.estimated_duration_minutes === duration)).toBe(true);
+      expect(durationMinutesForRecurringService({ service: 'pest_control', estimatedDurationMinutes: 20 }, 'quarterly', parent)).toBe(duration);
+    } finally {
+      if (gate === undefined) delete process.env.GATE_SCHEDULING_CAPACITY;
+      else process.env.GATE_SCHEDULING_CAPACITY = gate;
+    }
   });
 
   test('explicit duration on a combined synthetic line beats the pest-quarterly default', () => {

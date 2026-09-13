@@ -8,11 +8,10 @@ import {
   MessageSquare,
   RefreshCw,
   RotateCcw,
-  Search,
   XCircle,
 } from "lucide-react";
 import AdminCommandHeader from "../../components/admin/AdminCommandHeader";
-import { Badge, Button, Card, CardBody, Table, TBody, TD, TH, THead, TR, cn } from "../../components/ui";
+import { Dialog, DialogHeader, DialogTitle, DialogBody, DialogFooter, ActionFeedback, Badge, Button, Card, CardBody, Field, Input, Table, TBody, TD, TH, THead, TR, UiSurface } from "../../components/ui";
 import { adminFetch as rawAdminFetch } from "../../lib/adminFetch";
 
 const STATUS_TABS = [
@@ -67,6 +66,7 @@ function canAct(request) {
 // page hands its status tabs + Refresh up via `onSecondaryNav` instead of
 // rendering its own header. Standalone rendering is unchanged.
 export default function DocumentRequestsPage({ embedded = false, onSecondaryNav } = {}) {
+  const [cancelTarget, setCancelTarget] = useState(null);
   const [status, setStatus] = useState("open");
   const [search, setSearch] = useState("");
   const [requests, setRequests] = useState([]);
@@ -149,8 +149,7 @@ export default function DocumentRequestsPage({ embedded = false, onSecondaryNav 
 
   const cancelRequest = async (request) => {
     if (!request?.id) return;
-    const ok = window.confirm(`Cancel ${request.title || "this document request"}?`);
-    if (!ok) return;
+    setCancelTarget(null);
     setActionKey(`${request.id}:cancel`);
     setError("");
     setToast("");
@@ -192,9 +191,10 @@ export default function DocumentRequestsPage({ embedded = false, onSecondaryNav 
   }, [embedded, onSecondaryNav, status, loading]);
 
   return (
-    <div className="mx-auto max-w-[1500px]">
+    <UiSurface density="comfortable" className="mx-auto min-w-0 max-w-[1500px] text-ui-body">
       {!embedded && (
       <AdminCommandHeader
+        variant="workspace"
         title="Document requests"
         icon={FileClock}
         sections={STATUS_TABS}
@@ -207,16 +207,10 @@ export default function DocumentRequestsPage({ embedded = false, onSecondaryNav 
       />
       )}
 
-      <div className="mb-3 flex flex-wrap items-center gap-2">
-        <div className="relative min-w-[260px] flex-1">
-          <Search size={15} className="pointer-events-none absolute left-2 top-1/2 -translate-y-1/2 text-ink-secondary" />
-          <input
-            value={search}
-            onChange={(event) => setSearch(event.target.value)}
-            placeholder="Search customer, document, phone, or email"
-            className="h-9 w-full rounded-xs border-hairline border-zinc-300 bg-white pl-8 pr-2 text-13 text-zinc-900 u-focus-ring"
-          />
-        </div>
+      <div className="mb-5 flex flex-wrap items-end gap-3">
+        <Field label="Search requests" className="min-w-0 flex-1">
+          <Input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Search customer, document, phone, or email" />
+        </Field>
         <Button variant="secondary" onClick={() => setSearch("")} disabled={!search}>
           Clear
         </Button>
@@ -230,30 +224,26 @@ export default function DocumentRequestsPage({ embedded = false, onSecondaryNav 
           ["Failed delivery", stats?.failedDelivery],
           ["Signed this week", stats?.signedThisWeek],
         ].map(([label, value]) => (
-          <div key={label} className="rounded-sm border-hairline border-zinc-200 bg-white px-3 py-2">
-            <div className="u-label text-ink-secondary">{label}</div>
+          <Card key={label}><CardBody>
+            <div className="ui-label text-ink-secondary">{label}</div>
             <div className="u-nums mt-1 text-20 font-medium text-zinc-900">{value ?? "—"}</div>
-          </div>
+          </CardBody></Card>
         ))}
       </div>
 
       {error && (
-        <div className="mb-3 rounded-sm border-hairline border-red-200 bg-red-50 px-3 py-2 text-12 text-red-900">
-          {error}
-        </div>
+        <ActionFeedback error className="mb-3">{error}</ActionFeedback>
       )}
       {toast && (
-        <div className="mb-3 rounded-sm border-hairline border-emerald-200 bg-emerald-50 px-3 py-2 text-12 text-emerald-950">
-          {toast}
-        </div>
+        <ActionFeedback className="mb-3">{toast}</ActionFeedback>
       )}
       {latestLink && (
         <div className="mb-3 rounded-sm border-hairline border-zinc-200 bg-zinc-50 px-3 py-2">
-          <div className="mb-1 flex items-center gap-2 text-12 font-medium text-zinc-900">
+          <div className="mb-1 flex items-center gap-2 text-ui-body font-medium text-zinc-900">
             <Link2 size={14} />
             Fresh link ready
           </div>
-          <div className="break-all text-11 text-ink-secondary">{latestLink}</div>
+          <div className="break-all text-ui-body text-ink-secondary">{latestLink}</div>
           <Button size="sm" variant="secondary" className="mt-2" onClick={copyLatestLink}>
             Copy
           </Button>
@@ -263,7 +253,7 @@ export default function DocumentRequestsPage({ embedded = false, onSecondaryNav 
       <Card>
         <CardBody className="p-0">
           <div className="overflow-x-auto">
-            <Table>
+            <Table layout="records">
               <THead>
                 <TR>
                   <TH>Status</TH>
@@ -281,55 +271,47 @@ export default function DocumentRequestsPage({ embedded = false, onSecondaryNav 
                   const acting = actionKey.startsWith(`${request.id}:`);
                   return (
                     <TR key={request.id}>
-                      <TD>
+                      <TD data-label="Status">
                         <Badge tone={statusTone(request.requestStatus || request.status)}>
                           {statusLabel(request.requestStatus || request.status)}
                         </Badge>
                       </TD>
-                      <TD>
-                        <div className="max-w-[280px]">
-                          <div className="truncate text-13 font-medium text-zinc-900">
+                      <TD data-label="Document">
+                        <div className="min-w-0">
+                          <div className="break-words text-ui-body font-medium text-zinc-900">
                             {request.title || "Document request"}
                           </div>
-                          <div className="truncate text-11 text-ink-secondary">
+                          <div className="break-words text-ui-body text-ink-secondary">
                             {request.documentTemplateKey || "template"}
                           </div>
                         </div>
                       </TD>
-                      <TD>
-                        <div className="max-w-[260px]">
+                      <TD data-label="Customer">
+                        <div className="min-w-0">
                           <Link
                             to={`/admin/customers?customerId=${encodeURIComponent(request.customerId || "")}`}
-                            className="truncate text-13 font-medium text-zinc-900 underline-offset-2 hover:underline"
+                            className="break-words text-ui-body font-medium text-zinc-900 underline-offset-2 hover:underline"
                           >
                             {customerName(request)}
                           </Link>
-                          <div className="truncate text-11 text-ink-secondary">
+                          <div className="break-words text-ui-body text-ink-secondary">
                             {[request.customer?.phone, request.customer?.email].filter(Boolean).join(" · ")}
                           </div>
                         </div>
                       </TD>
-                      <TD className="u-nums">{fmtDate(request.createdAt)}</TD>
-                      <TD className="u-nums">{fmtDate(request.shareTokenExpiresAt)}</TD>
-                      <TD>
+                      <TD data-label="Created" className="u-nums">{fmtDate(request.createdAt)}</TD>
+                      <TD data-label="Expires" className="u-nums">{fmtDate(request.shareTokenExpiresAt)}</TD>
+                      <TD data-label="Delivery">
                         <div className="flex flex-wrap gap-1">
-                          <span className={cn("h-5 px-1.5 inline-flex items-center rounded-xs border-hairline text-10 uppercase tracking-label", delivery.emailSent ? "bg-zinc-900 border-zinc-900 text-white" : "bg-zinc-50 border-zinc-200 text-ink-secondary")}>
-                            Email {delivery.emailSent || 0}
-                          </span>
-                          <span className={cn("h-5 px-1.5 inline-flex items-center rounded-xs border-hairline text-10 uppercase tracking-label", delivery.smsSent ? "bg-zinc-900 border-zinc-900 text-white" : "bg-zinc-50 border-zinc-200 text-ink-secondary")}>
-                            SMS {delivery.smsSent || 0}
-                          </span>
-                          <span className={cn("h-5 px-1.5 inline-flex items-center rounded-xs border-hairline text-10 uppercase tracking-label", delivery.remindersSent ? "bg-zinc-900 border-zinc-900 text-white" : "bg-zinc-50 border-zinc-200 text-ink-secondary")}>
-                            Remind {delivery.remindersSent || 0}
-                          </span>
+                          <Badge tone={delivery.emailSent ? "strong" : "neutral"}>Email {delivery.emailSent || 0}</Badge>
+                          <Badge tone={delivery.smsSent ? "strong" : "neutral"}>SMS {delivery.smsSent || 0}</Badge>
+                          <Badge tone={delivery.remindersSent ? "strong" : "neutral"}>Remind {delivery.remindersSent || 0}</Badge>
                           {delivery.deliveryFailures ? (
-                            <span className="h-5 px-1.5 inline-flex items-center rounded-xs border-hairline border-red-200 bg-red-50 text-10 uppercase tracking-label text-red-900">
-                              Failed {delivery.deliveryFailures}
-                            </span>
+                            <Badge tone="alert">Failed {delivery.deliveryFailures}</Badge>
                           ) : null}
                         </div>
                       </TD>
-                      <TD>
+                      <TD data-label="Actions">
                         <div className="flex flex-wrap gap-1.5">
                           {canAct(request) && (
                             <>
@@ -349,7 +331,7 @@ export default function DocumentRequestsPage({ embedded = false, onSecondaryNav 
                                 <RotateCcw size={13} className="mr-1" />
                                 Link
                               </Button>
-                              <Button size="sm" variant="danger" disabled={acting} onClick={() => cancelRequest(request)}>
+                              <Button size="sm" variant="danger" disabled={acting} onClick={(event) => { event.currentTarget.focus({ preventScroll: true }); setCancelTarget(request); }}>
                                 <XCircle size={13} className="mr-1" />
                                 Cancel
                               </Button>
@@ -363,18 +345,26 @@ export default function DocumentRequestsPage({ embedded = false, onSecondaryNav 
               </TBody>
             </Table>
           </div>
-          {!loading && requests.length === 0 && (
-            <div className="px-4 py-10 text-center text-13 text-ink-secondary">
+          {!loading && !error && requests.length === 0 && (
+            <div className="px-4 py-10 text-center text-ui-body text-ink-secondary">
               No document requests match this view.
             </div>
           )}
           {loading && (
-            <div className="px-4 py-10 text-center text-13 text-ink-secondary">
+            <div className="px-4 py-10 text-center text-ui-body text-ink-secondary">
               Loading document requests...
             </div>
           )}
         </CardBody>
       </Card>
-    </div>
+      <Dialog open={Boolean(cancelTarget)} onClose={() => setCancelTarget(null)} size="sm">
+        <DialogHeader><DialogTitle>Cancel document request</DialogTitle></DialogHeader>
+        <DialogBody>Cancel {cancelTarget?.title || "this document request"}?</DialogBody>
+        <DialogFooter>
+          <Button variant="secondary" onClick={() => setCancelTarget(null)}>Keep request</Button>
+          <Button variant="danger" onClick={() => cancelRequest(cancelTarget)}>Cancel request</Button>
+        </DialogFooter>
+      </Dialog>
+    </UiSurface>
   );
 }

@@ -31,6 +31,7 @@ jest.mock('../middleware/admin-auth', () => ({
 const express = require('express');
 const db = require('../models/db');
 const inventoryRouter = require('../routes/admin-inventory');
+const { errorHandler } = require('../middleware/errors');
 
 const { recalcBestPrice } = inventoryRouter._test;
 
@@ -38,9 +39,7 @@ function appServer() {
   const app = express();
   app.use(express.json());
   app.use('/admin/inventory', inventoryRouter);
-  app.use((err, _req, res, _next) => {
-    res.status(err.status || 500).json({ error: err.message });
-  });
+  app.use(errorHandler);
   const server = app.listen(0);
   return { server, baseUrl: `http://127.0.0.1:${server.address().port}` };
 }
@@ -82,12 +81,27 @@ beforeEach(() => {
   db.fn = { now: jest.fn(() => 'NOW()') };
 });
 
+describe('GET /restock-requests validation', () => {
+  test.each([
+    ['requestId=truncated-request-id', 'Invalid restock request id'],
+    ['status=unknown', 'Invalid request status'],
+  ])('rejects %s with a client error through the production error handler', async (query, message) => {
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/inventory/restock-requests?${query}`);
+      expect(res.status).toBe(400);
+      expect(await res.json()).toMatchObject({ error: message });
+      expect(db).not.toHaveBeenCalled();
+    });
+  });
+});
+
 // ---------------------------------------------------------------------------
 // Restock receive guard
 // ---------------------------------------------------------------------------
 
 describe('POST /restock-requests/:id/action', () => {
   function wireRestock(requestRow) {
+    const productRow = { id: 'prod-1', inventory_on_hand: 10, inventory_unit: 'gal' };
     const movements = [];
     const stockUpdates = [];
     const statusUpdates = [];
@@ -105,9 +119,10 @@ describe('POST /restock-requests/:id/action', () => {
       if (q._table === 'products_catalog') {
         if (q.called('update')) {
           stockUpdates.push(q.args('update')[0]);
+          Object.assign(productRow, q.args('update')[0]);
           return 1;
         }
-        return { id: 'prod-1', inventory_on_hand: 10, inventory_unit: 'gal' };
+        return { ...productRow };
       }
       if (q._table === 'vendor_orders') {
         if (q.called('update')) { orderUpdates.push(q.args('update')[0]); return 1; } // settleLandedAfterReceive

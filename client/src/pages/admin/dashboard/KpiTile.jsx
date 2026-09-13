@@ -1,4 +1,4 @@
-import { cn } from "../../../components/ui";
+import { Card, CardBody, UiSurface, cn } from "../../../components/ui";
 import {
   EmptyState,
   KpiBullet,
@@ -81,8 +81,9 @@ export function KpiTile({ label, value, sub, alert, chart, metricKey, metricValu
   // sub beside it — no duplicate big number.
   if (chart?.kind === "gauge") {
     return (
-      <div className={cn("bg-surface-sunken border-hairline border-zinc-200 rounded-sm p-2.5 md:p-3", lowConfidence && "opacity-70")}>
-        <div className="u-label text-ink-secondary">{label}</div>
+      <UiSurface as={Card} className={cn(lowConfidence && "opacity-70")}>
+        <CardBody>
+        <div className="text-14 font-medium text-ink-secondary">{label}</div>
         <div className="flex items-center gap-2.5 md:gap-3 mt-1.5 md:mt-2">
           <KpiRing
             value={chart.value}
@@ -93,20 +94,22 @@ export function KpiTile({ label, value, sub, alert, chart, metricKey, metricValu
             warn={warn}
             display={value}
           />
-          {subText && <div className="text-11 text-ink-secondary min-w-0">{subText}</div>}
+          {subText && <div className="min-w-0 text-ui-caption text-ink-secondary">{subText}</div>}
         </div>
         {series && (
           <div className="mt-2">
             <Sparkline series={series} />
           </div>
         )}
-      </div>
+        </CardBody>
+      </UiSurface>
     );
   }
   // Bullet / diverging tiles keep the big number, with the bar beneath.
   return (
-    <div className={cn("bg-surface-sunken border-hairline border-zinc-200 rounded-sm p-2.5 md:p-3", lowConfidence && "opacity-70")}>
-      <div className="u-label text-ink-secondary">{label}</div>
+    <UiSurface as={Card} className={cn(lowConfidence && "opacity-70")}>
+      <CardBody>
+      <div className="text-14 font-medium text-ink-secondary">{label}</div>
       {/* Diverging/no-chart tiles have no ring or bar to carry the tone, so
           the number itself shows the full red/amber/green verdict (red stays
           alert-only; untargeted tiles keep the neutral zinc). */}
@@ -124,7 +127,7 @@ export function KpiTile({ label, value, sub, alert, chart, metricKey, metricValu
       >
         {value}
       </div>
-      {subText && <div className="mt-1 text-11 text-ink-secondary">{subText}</div>}
+      {subText && <div className="mt-1 text-ui-caption text-ink-secondary">{subText}</div>}
       {chart?.kind === "bullet" && (
         <div className="mt-2">
           <KpiBullet
@@ -147,6 +150,7 @@ export function KpiTile({ label, value, sub, alert, chart, metricKey, metricValu
           <Sparkline series={series} />
         </div>
       )}
-    </div>
+      </CardBody>
+    </UiSurface>
   );
 }

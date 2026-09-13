@@ -117,8 +117,8 @@ describe('group-link viewability is separate from the offer deadline (owner ruli
   });
   test('viewability is consulted ONLY where the delivered link would dead-end, never by an actionable path', () => {
     const src = require('fs').readFileSync(require('path').join(__dirname, '../routes/estimate-public.js'), 'utf8');
-    // Exactly one reader, and it guards the expired-stub branch.
-    expect(src.match(/groupLinkStillViewable\(/g)).toHaveLength(1);
+    // Both document and React navigation gates consult the window.
+    expect(src.match(/groupLinkStillViewable\(/g)).toHaveLength(2);
     expect(src).toMatch(/&& !\(estimate\.estimate_group_id && groupLinkStillViewable\(estimate\)\)/);
     // Nothing that decides an offer may read the navigation window.
     for (const actionable of ['estimate-follow-up.js', 'estimate-engagement-engine.js']) {

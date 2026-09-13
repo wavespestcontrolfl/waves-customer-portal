@@ -54,7 +54,7 @@ const { isEnabled } = require('../config/feature-gates');
 const { sendCustomerMessage } = require('./messaging/send-customer-message');
 const { renderSmsTemplate } = require('./sms-template-renderer');
 const { isWithinSendWindowET } = require('./messaging/send-window');
-const { isRealProviderSend } = require('./sms-auto-send');
+const { isRealProviderSend, isAmbiguousProviderOutcome } = require('./sms-auto-send');
 const TWILIO_NUMBERS = require('../config/twilio-numbers');
 
 const { REASONS, visitInProgress, nonServiceCaller } = require('./outbound-call-reason');
@@ -203,11 +203,9 @@ function releaseClaim(phone) {
   return db('sms_send_claims').where({ claim_key: CLAIM_PREFIX + phone }).del()
     .catch((err) => logger.warn(`[outbound-voicemail-sms] claim release failed for ${maskPhone(phone)} (${err?.code || err?.name || 'error'})`));
 }
-// A retryable / deferred provider outcome is NOT a definitive no-send — the
-// provider may still hold the text — so the claim stays held (tech-line rule).
-function isAmbiguousOutcome(result) {
-  return Boolean(result) && result.sent !== true && !result.blocked && Boolean(result.retryable || result.deferred);
-}
+// An explicit uncertain provider outcome keeps the claim held because the
+// provider may still hold the text. Legacy providers fall back to their
+// retryable/deferred flags (tech-line rule).
 
 // Fold a sendCustomerMessage result into this lane's outcome shape.
 function classifyOutcome(result, { phone, reason, templateKey, callLogId }) {
@@ -225,7 +223,7 @@ function classifyOutcome(result, { phone, reason, templateKey, callLogId }) {
     return { sent: false, skipped: 'policy_block', code: result.code || null, reason };
   }
   logger.warn(`[outbound-voicemail-sms] Provider send failed for ${maskPhone(phone)}: ${result.code || result.reason || 'unknown'}`);
-  return { sent: false, skipped: 'provider_failed', code: result.code || null, reason, ambiguous: isAmbiguousOutcome(result) };
+  return { sent: false, skipped: 'provider_failed', code: result.code || null, reason, ambiguous: isAmbiguousProviderOutcome(result) };
 }
 
 /**
@@ -274,13 +272,17 @@ async function sendOutboundVoicemailText({ phone: rawPhone, customerId = null, f
     return { sent: false, skipped: 'template_disabled', reason };
   }
 
-  const result = await sendCustomerMessage(buildSendInput({ phone, body, customerId, callerId, callSid, callLogId, reason, templateKey })).catch((err) => {
+  const result = await sendCustomerMessage(buildSendInput({ phone, body, customerId, callerId, callSid, callLogId, reason, templateKey })).catch(async (err) => {
     // The pipeline carries Twilio's known result when the final audit write
     // fails. A real acceptance still owns the claim and permits the hangup;
     // never invite a second message just because its audit could not save.
-    if (!isRealProviderSend(err?.providerOutcome)) throw err;
-    logger.error(`[outbound-voicemail-sms] Text accepted but audit write failed (${err.code || err.name || 'error'}) for call_log ${callLogId || 'n/a'}`);
-    return err.providerOutcome;
+    if (isRealProviderSend(err?.providerOutcome)) {
+      logger.error(`[outbound-voicemail-sms] Text accepted but audit write failed (${err.code || err.name || 'error'}) for call_log ${callLogId || 'n/a'}`);
+      return err.providerOutcome;
+    }
+    if (isAmbiguousProviderOutcome(err?.providerOutcome)) return err.providerOutcome;
+    await releaseClaim(phone);
+    throw err;
   });
   const outcome = classifyOutcome(result, { phone, reason, templateKey, callLogId });
   if (!outcome.sent && !outcome.ambiguous) await releaseClaim(phone);

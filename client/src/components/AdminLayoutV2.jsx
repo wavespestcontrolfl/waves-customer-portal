@@ -1,4 +1,5 @@
 import { IntelligenceBarPageDataProvider } from '../hooks/useIntelligenceBarPageData';
+import ScheduleSaveNotice, { clearScheduleSaveNotices } from './schedule/ScheduleSaveNotice';
 /*
  * AdminLayoutV2 — Square Dashboard-inspired light admin shell.
  *
@@ -13,7 +14,7 @@ import { IntelligenceBarPageDataProvider } from '../hooks/useIntelligenceBarPage
  * remap the same tokens on a `[data-theme="tech-dark"]` scope without
  * touching this component.
  */
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useRef, useCallback } from "react";
 import { Outlet, useNavigate, useLocation, Link } from "react-router-dom";
 import { consumeSnapshotOnMount } from "../lib/tapToPayReturn";
 import { cn } from "./ui/cn";
@@ -205,18 +206,22 @@ export default function AdminLayoutV2() {
 
   const handleLogout = () => {
     clearEmailDrafts();
+    clearScheduleSaveNotices();
     localStorage.removeItem("waves_admin_token");
     localStorage.removeItem("waves_admin_user");
     refetchFlags().catch(() => {});
     navigate("/admin/login", { replace: true });
   };
 
-  const closeSidebarForPalette = () => {
+  const closeSidebarForPalette = useCallback(() => {
     // The assistant must capture an opener that survives the hidden drawer.
     if (isMobile && sidebarOpen) menuTriggerRef.current?.focus({ preventScroll: true });
     setSidebarOpen(false);
-  };
-  const openPalette = () => { closeSidebarForPalette(); paletteRef.current?.open(); };
+  }, [isMobile, sidebarOpen]);
+  // The page-data provider takes this opener as a context value, so it has to
+  // be stable across renders that change neither the drawer nor the viewport.
+  const openPalette = useCallback(() => { closeSidebarForPalette(); paletteRef.current?.open(); },
+    [closeSidebarForPalette]);
 
   const sidebarVisible = !isMobile || sidebarOpen;
   // The redirect effect runs after render. Apply its existing role policy to
@@ -225,7 +230,7 @@ export default function AdminLayoutV2() {
     && (user?.role === "admin" || !isPathAdminOnly(location.pathname));
 
   return (
-    <IntelligenceBarPageDataProvider>
+    <IntelligenceBarPageDataProvider open={openPalette}>
     <AdminNavigationProvider key={user?.id || 'unverified'} user={user} enabled={navigationEnabled && authStatus === 'ready'} agentEstimateEnabled={agentEstimateEnabled}>
     <div
       className="admin-shell-v2"
@@ -672,7 +677,7 @@ export default function AdminLayoutV2() {
         ref={mainRef}
       >
         {canRenderRoute ? (
-          <Outlet context={{ user }} />
+          <><Outlet context={{ user }} /><ScheduleSaveNotice /></>
         ) : (
           <div role={authStatus === "error" ? "alert" : "status"}>
             {authStatus === "error"

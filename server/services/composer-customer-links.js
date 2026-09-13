@@ -1482,9 +1482,9 @@ async function markPrepGuidesSent(preps, actorId) {
  * picks it up (GH Codex #3844 r2 P1). Value-guarded there (never
  * downgrades, never re-stamps a resend).
  */
-async function markStatementsSent(statementIds) {
+async function markStatementsSent(statementIds, { actorTechnicianId = null, actorRole = null } = {}) {
   const { markStatementSent } = require('./payer-statement-email');
-  for (const id of statementIds) await markStatementSent(id);
+  for (const id of statementIds) await markStatementSent(id, db, { actorTechnicianId, actorRole });
 }
 
 /**

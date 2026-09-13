@@ -10,7 +10,7 @@ jest.mock('../utils/pan-scrub', () => {
 jest.mock('../utils/cron-lock', () => ({ runExclusive: jest.fn((name, work) => work()) }));
 jest.mock('../services/notification-service', () => ({ notifyAdmin: jest.fn() }));
 
-const { groundExtraction, extractSmsOperations, buildPrompt } = require('../services/sms-operational-extractor');
+const { groundExtraction, extractSmsOperations, buildPrompt, stringifySmsEvidence } = require('../services/sms-operational-extractor');
 const { eligibleMessage, factVerdict, runSmsOperationalActions } = require('../services/sms-operational-actions');
 const { groundFulfillment, admissibleWitness, verifySmsFulfillment } = require('../services/sms-commitment-fulfillment');
 const { dispatchWithFallback } = require('../services/llm/call');
@@ -788,6 +788,24 @@ describe('fulfillment proof', () => {
     expect(dispatchWithFallback.mock.calls[0][1].text).not.toContain('CVV is 123');
     expect(groundFulfillment({ verdict: 'fulfilled', record_ref: 'sms:1', quote: text }, evidence, { kind: 'other' }))
       .toMatchObject({ verdict: 'uncertain', reason: 'sensitive_model_output' });
+  });
+
+  test('a PAN-lookalike record id survives the prompt and the sensitive-output guard', async () => {
+    dispatchWithFallback.mockReset().mockResolvedValue({ ok: true, json: { verdict: 'open', record_ref: null, quote: null } });
+    // Roughly one UUID in 500 hides a Luhn-valid 13-19 digit run. This one
+    // does, so the scrubber would rewrite the id it is asked to cite.
+    const id = '35037702-7555-4718-8aa9-183d7088f227';
+    expect(require('../utils/pan-scrub').scrubPans(id)).not.toBe(id);
+    const witness = { ...record, id, ref: `estimate:${id}` };
+    const evidence = { records: [witness], failures: [] };
+    await verifySmsFulfillment(commitment, evidence);
+    expect(dispatchWithFallback.mock.calls[0][1].text).toContain(`estimate:${id}`);
+    expect(groundFulfillment({ ...verdict, record_ref: witness.ref }, evidence, commitment))
+      .toMatchObject({ verdict: 'fulfilled', record_id: id });
+    // The exemption is keyed on an id-shaped key AND an id-shaped value, so a
+    // card number in free text is still scrubbed wherever it appears.
+    const carded = { ...witness, text: 'Card 4242 4242 4242 4242', id: 'Card 4242 4242 4242 4242' };
+    expect(stringifySmsEvidence(carded)).not.toContain('4242 4242 4242 4242');
   });
 
   test('fulfillment holds split SMS readbacks before exposing any body copy to the provider', async () => {

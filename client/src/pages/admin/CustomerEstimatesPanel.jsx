@@ -5,7 +5,6 @@
 // GET /admin/customers/:id/estimates-summary.
 
 import { useCallback, useEffect, useState } from "react";
-import { createPortal } from "react-dom";
 import { Link } from "react-router-dom";
 import {
   Phone,
@@ -20,7 +19,16 @@ import {
   Tag,
   Trash2,
 } from "lucide-react";
-import { Badge, Button, cn } from "../../components/ui";
+import {
+  Badge,
+  Button,
+  Card,
+  Sheet,
+  SheetBody,
+  SheetHeader,
+  buttonStyles,
+  cn,
+} from "../../components/ui";
 import { adminFetch } from "../../lib/adminFetch";
 import CallBridgeLink from "../../components/admin/CallBridgeLink";
 
@@ -114,15 +122,6 @@ export default function CustomerEstimatesPanel({ customerId, onClose }) {
     if (customerId) load();
   }, [customerId, load]);
 
-  // Close on Escape
-  useEffect(() => {
-    const onKey = (e) => {
-      if (e.key === "Escape") onClose?.();
-    };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [onClose]);
-
   if (!customerId) return null;
 
   const c = data?.customer;
@@ -140,58 +139,54 @@ export default function CustomerEstimatesPanel({ customerId, onClose }) {
       }).toString()}`
     : "/admin/estimates";
 
-  return createPortal(
-    <>
-      {" "}
-      <div
-        className="fixed inset-0 z-[105] bg-black/30"
-        onClick={onClose}
-        aria-hidden
-      />{" "}
-      <aside
-        className="fixed inset-y-0 right-0 z-[110] h-[100dvh] max-h-[100dvh] w-full sm:max-w-[480px] bg-white border-l border-hairline border-zinc-200 shadow-2xl flex flex-col box-border pt-[env(safe-area-inset-top)] pb-[env(safe-area-inset-bottom)]"
-        role="dialog"
-        aria-label="Customer + estimate history"
-        style={{ fontFamily: "'Roboto', Arial, sans-serif" }}
-      >
+  return (
+    <Sheet
+      open
+      onClose={onClose}
+      width="sm"
+      layer={110}
+      ariaLabel="Customer + estimate history"
+      className="sm:max-w-[480px]"
+    >
+      <SheetHeader className="gap-2 px-3 py-2.5">
         {" "}
-        <div className="flex items-center gap-2 px-3 py-2.5 border-b border-hairline border-zinc-200">
+        <Button
+          type="button"
+          variant="ghost"
+          onClick={onClose}
+          aria-label="Back to estimates"
+          className="-ml-1 gap-1 px-2"
+        >
           {" "}
-          <button
-            type="button"
-            onClick={onClose}
-            aria-label="Back to estimates"
-            className="inline-flex items-center gap-1 h-9 px-2 -ml-1 rounded-sm text-ink-secondary hover:text-zinc-900 hover:bg-zinc-50 u-focus-ring"
-          >
-            {" "}
-            <ChevronLeft size={18} strokeWidth={1.75} />{" "}
-            <span className="text-13 font-medium">Back</span>{" "}
-          </button>{" "}
-          <div className="flex-1 text-center min-w-0 px-2">
-            {" "}
-            <div className="text-11 uppercase tracking-label text-ink-tertiary">
-              Customer
-            </div>{" "}
-          </div>
-          {/* Spacer to balance the Back button's width and keep the eyebrow centered */}
-          <div className="w-[70px]" aria-hidden />{" "}
+          <ChevronLeft size={18} strokeWidth={1.75} />{" "}
+          <span className="text-ui-body font-medium">Back</span>{" "}
+        </Button>
+        <div className="flex-1 text-center min-w-0 px-2">
+          {" "}
+          <div className="text-ui-body uppercase tracking-label text-ink-tertiary">
+            Customer
+          </div>{" "}
         </div>
+        {/* Spacer to balance the Back button's width and keep the eyebrow centered */}
+        <div className="w-[70px]" aria-hidden />{" "}
+      </SheetHeader>
+      <SheetBody className="space-y-5 px-4 py-4">
         {loading && (
-          <div className="p-6 text-13 text-ink-secondary text-center">
+          <div className="p-6 text-ui-body text-ink-secondary text-center">
             Loading…
           </div>
         )}
         {err && (
-          <div className="p-6 text-13 text-alert-fg text-center">
+          <div className="p-6 text-ui-body text-alert-fg text-center">
             Couldn't load: {err}
           </div>
         )}
         {!loading && !err && c && (
-          <div className="flex-1 overflow-y-auto px-4 py-4 space-y-5">
+          <div className="space-y-5">
             {/* Customer card — each row has a leading icon so the field
                 type is obvious at a glance (Name / Phone / Email /
                 Address / Lead source). */}
-            <section className="border border-hairline border-zinc-200 rounded-sm p-3 space-y-1.5 text-13">
+            <Card className="space-y-1.5 p-3 text-ui-body">
               {" "}
               <div className="flex items-center gap-2">
                 {" "}
@@ -283,11 +278,11 @@ export default function CustomerEstimatesPanel({ customerId, onClose }) {
                 ) : null}
                 {c.active === false && <Badge tone="alert">Inactive</Badge>}
               </div>{" "}
-            </section>
+            </Card>
             {/* Quick actions */}
             <section className="grid grid-cols-2 gap-2">
               {c.phone && (
-                <button
+                <Button
                   type="button"
                   onClick={async () => {
                     if (
@@ -314,17 +309,21 @@ export default function CustomerEstimatesPanel({ customerId, onClose }) {
                       alert("Call failed: " + e.message);
                     }
                   }}
-                  className="inline-flex items-center justify-center gap-2 h-10 border-hairline border-zinc-900 rounded-sm text-white bg-zinc-900 hover:bg-zinc-800 text-12 font-medium uppercase tracking-label"
+                  className="gap-2"
                 >
                   {" "}
                   <Phone size={14} strokeWidth={1.75} />
                   Call
-                </button>
+                </Button>
               )}
               {c.phone && (
                 <a
                   href={`/admin/communications?phone=${encodeURIComponent(c.phone)}`}
-                  className="inline-flex items-center justify-center gap-2 h-10 border-hairline border-zinc-900 rounded-sm text-white bg-zinc-900 hover:bg-zinc-800 text-12 font-medium uppercase tracking-label"
+                  className={buttonStyles({
+                    variant: "primary",
+                    density: "comfortable",
+                    className: "gap-2",
+                  })}
                 >
                   {" "}
                   <MessageSquare size={14} strokeWidth={1.75} />
@@ -333,7 +332,11 @@ export default function CustomerEstimatesPanel({ customerId, onClose }) {
               )}
               <Link
                 to={prefillHref}
-                className="inline-flex items-center justify-center gap-2 h-10 border-hairline border-zinc-300 rounded-sm text-zinc-900 bg-white hover:bg-zinc-50 text-12 font-medium uppercase tracking-label"
+                className={buttonStyles({
+                  variant: "secondary",
+                  density: "comfortable",
+                  className: "gap-2",
+                })}
               >
                 {" "}
                 <FilePlus2 size={14} strokeWidth={1.75} />
@@ -341,7 +344,11 @@ export default function CustomerEstimatesPanel({ customerId, onClose }) {
               </Link>{" "}
               <Link
                 to={`/admin/customers?customerId=${encodeURIComponent(c.id)}`}
-                className="inline-flex items-center justify-center gap-2 h-10 border-hairline border-zinc-300 rounded-sm text-zinc-900 bg-white hover:bg-zinc-50 text-12 font-medium uppercase tracking-label"
+                className={buttonStyles({
+                  variant: "secondary",
+                  density: "comfortable",
+                  className: "gap-2",
+                })}
               >
                 {" "}
                 <ExternalLink size={14} strokeWidth={1.75} />
@@ -375,7 +382,7 @@ export default function CustomerEstimatesPanel({ customerId, onClose }) {
             )}
 
             {stats && stats.acceptedLifetimeMonthly > 0 && (
-              <div className="text-12 text-ink-secondary">
+              <div className="text-ui-body text-ink-secondary">
                 {" "}
                 <strong className="text-zinc-900">
                   {fmtMoney(stats.acceptedLifetimeMonthly)}/mo
@@ -389,11 +396,11 @@ export default function CustomerEstimatesPanel({ customerId, onClose }) {
                 on this panel; comms is supplementary. */}
             <section>
               {" "}
-              <div className="text-11 uppercase tracking-label text-ink-tertiary mb-2">
+              <div className="text-ui-body uppercase tracking-label text-ink-tertiary mb-2">
                 Estimate history ({estimates.length})
               </div>
               {estimates.length === 0 ? (
-                <div className="text-13 text-ink-secondary text-center py-6 border border-hairline border-dashed border-zinc-200 rounded-sm">
+                <div className="text-ui-body text-ink-secondary text-center py-6 border border-hairline border-dashed border-zinc-200 rounded-sm">
                   No estimates yet.
                 </div>
               ) : (
@@ -419,21 +426,21 @@ export default function CustomerEstimatesPanel({ customerId, onClose }) {
                             {" "}
                             <Badge tone={tone}>{label}</Badge>
                             {e.waveguard_tier && (
-                              <span className="text-11 text-ink-secondary">
+                              <span className="text-ui-body text-ink-secondary">
                                 {e.waveguard_tier}
                               </span>
                             )}
-                            <span className="text-11 text-ink-tertiary">
+                            <span className="text-ui-body text-ink-tertiary">
                               {timeAgo(anchorDate)}
                             </span>{" "}
                           </div>
                           {e.service_interest && (
-                            <div className="text-12 text-ink-secondary mt-0.5 truncate">
+                            <div className="text-ui-body text-ink-secondary mt-0.5 truncate">
                               {e.service_interest}
                             </div>
                           )}
                           {e.decline_reason && (
-                            <div className="text-12 text-alert-fg mt-0.5">
+                            <div className="text-ui-body text-alert-fg mt-0.5">
                               Declined: {e.decline_reason}
                             </div>
                           )}
@@ -449,7 +456,7 @@ export default function CustomerEstimatesPanel({ customerId, onClose }) {
                             )}
                           >
                             {fmtMoney(e.monthly_total)}
-                            <span className="text-11 text-ink-tertiary">
+                            <span className="text-ui-body text-ink-tertiary">
                               /mo
                             </span>{" "}
                           </div>{" "}
@@ -462,14 +469,15 @@ export default function CustomerEstimatesPanel({ customerId, onClose }) {
                                 href={`/estimate/${e.token}?adminPreview=1`}
                                 target="_blank"
                                 rel="noreferrer"
-                                className="text-11 text-ink-secondary hover:text-zinc-900 underline decoration-dotted"
+                                className="text-ui-body text-ink-secondary hover:text-zinc-900 underline decoration-dotted"
                               >
                                 View →
                               </a>
                             )}
                             {e.status === "draft" && (
-                              <button
+                              <Button
                                 type="button"
+                                variant="ghost"
                                 aria-label="Delete draft estimate"
                                 title="Delete this draft estimate"
                                 onClick={async () => {
@@ -497,11 +505,11 @@ export default function CustomerEstimatesPanel({ customerId, onClose }) {
                                     );
                                   }
                                 }}
-                                className="inline-flex items-center justify-center h-7 w-7 rounded-sm text-alert-fg hover:bg-alert-bg u-focus-ring"
+                                className="h-9 w-9 px-0 text-alert-fg hover:bg-alert-bg"
                               >
                                 {" "}
                                 <Trash2 size={14} strokeWidth={1.75} />{" "}
-                              </button>
+                              </Button>
                             )}
                           </div>{" "}
                         </div>{" "}
@@ -521,14 +529,14 @@ export default function CustomerEstimatesPanel({ customerId, onClose }) {
                 {" "}
                 <div className="flex items-center justify-between mb-2">
                   {" "}
-                  <div className="uppercase tracking-label text-11 text-ink-tertiary">
+                  <div className="uppercase tracking-label text-ui-body text-ink-tertiary">
                     Communications history{" "}
                     {comms.length > 0 && `(${comms.length})`}
                   </div>
                   {c.phone && (
                     <Link
                       to={`/admin/communications?phone=${encodeURIComponent(c.phone)}`}
-                      className="text-11 text-ink-secondary hover:text-zinc-900 underline decoration-dotted"
+                      className="text-ui-body text-ink-secondary hover:text-zinc-900 underline decoration-dotted"
                     >
                       Open thread →
                     </Link>
@@ -540,13 +548,13 @@ export default function CustomerEstimatesPanel({ customerId, onClose }) {
                       <CommsRow key={m.id} m={m} />
                     ))}
                     {comms.length > 10 && (
-                      <div className="text-11 text-ink-tertiary text-center pt-1">
+                      <div className="text-ui-body text-ink-tertiary text-center pt-1">
                         + {comms.length - 10} more — open thread to see all
                       </div>
                     )}
                   </div>
                 ) : lastContact ? (
-                  <div className="text-12 text-ink-secondary">
+                  <div className="text-ui-body text-ink-secondary">
                     {" "}
                     <span className="text-zinc-900">
                       {lastContact.channel === "voice" ? "Call" : "SMS"}
@@ -567,9 +575,8 @@ export default function CustomerEstimatesPanel({ customerId, onClose }) {
             )}
           </div>
         )}
-      </aside>{" "}
-    </>,
-    document.body,
+      </SheetBody>
+    </Sheet>
   );
 }
 
@@ -605,10 +612,12 @@ function StatCell({ label, value, sub, accent }) {
       >
         {value}
       </div>{" "}
-      <div className="text-11 text-ink-tertiary uppercase tracking-label">
+      <div className="text-ui-body text-ink-tertiary uppercase tracking-label">
         {label}
       </div>
-      {sub && <div className="text-11 text-ink-secondary mt-0.5">{sub}</div>}
+      {sub && (
+        <div className="text-ui-body text-ink-secondary mt-0.5">{sub}</div>
+      )}
     </div>
   );
 }
@@ -636,7 +645,7 @@ function CommsRow({ m }) {
   return (
     <div
       className={cn(
-        "border border-hairline border-zinc-200 rounded-sm px-2.5 py-2 text-12 flex items-start gap-2",
+        "border border-hairline border-zinc-200 rounded-sm px-2.5 py-2 text-ui-body flex items-start gap-2",
         !isOut && "border-l-2 border-l-waves-blue",
       )}
     >
@@ -651,11 +660,11 @@ function CommsRow({ m }) {
         <div className="flex items-center gap-1.5 flex-wrap">
           {" "}
           <span className="text-zinc-900 font-medium">{label}</span>{" "}
-          <span className="text-11 text-ink-tertiary">
+          <span className="text-ui-body text-ink-tertiary">
             · {timeAgo(m.createdAt)}
           </span>
           {m.ourEndpointLabel && (
-            <span className="text-11 text-ink-tertiary">
+            <span className="text-ui-body text-ink-tertiary">
               · {m.ourEndpointLabel}
             </span>
           )}

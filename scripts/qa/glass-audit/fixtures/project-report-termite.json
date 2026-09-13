@@ -1,0 +1,33 @@
+{
+  "/api/reports/project/cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc/data": {
+    "status": 200,
+    "body": {
+      "fdacsPdfAvailable": false,
+      "status": "sent",
+      "title": "Annual termite inspection",
+      "technicianName": "Adam",
+      "projectDate": "2026-06-28",
+      "sentAt": "2026-06-28T18:30:00Z",
+      "recommendations": null,
+      "followupDate": null,
+      "followupFindings": null,
+      "followupCompletedAt": null,
+      "upcomingAppointment": null,
+      "photos": [],
+      "customerName": "William Carter",
+      "customerEmail": "william.carter@example.com",
+      "customerPhone": "9415550123",
+      "cityState": "Parrish, FL",
+      "customerAddress": "10225 Kalamazoo Pl, Parrish, FL 34219",
+      "projectType": "termite_inspection",
+      "findings": {
+        "areas_inspected": "Exterior perimeter, garage, attic access, bath traps",
+        "areas_not_inspected": "Attic beyond decked storage area — flooring blocks crawl access",
+        "termite_type": "None observed",
+        "activity_status": "No activity",
+        "treatment_recommendation": "Continue annual inspections; monitor mulch depth at foundation",
+        "inspection_notice_affixed": "Yes"
+      }
+    }
+  }
+}

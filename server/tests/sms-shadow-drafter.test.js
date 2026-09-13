@@ -798,3 +798,102 @@ describe('sealed-lane dispatch budget (08-15 tuning)', () => {
     expect(dispatched[0].policy.fallback).toBeTruthy();
   });
 });
+
+describe('auto-send fallback publication', () => {
+  async function runDraft(autoSendResult) {
+    jest.resetModules();
+    process.env.SHADOW_DRAFT_VERIFY = 'false';
+    process.env.SHADOW_FEWSHOT = 'false';
+
+    const insertedRows = [];
+    const mockDb = jest.fn((table) => {
+      if (table !== 'message_drafts') throw new Error(`unexpected table: ${table}`);
+      return {
+        insert: jest.fn((row) => {
+          insertedRows.push(row);
+          return { returning: jest.fn(async () => [{ id: 'draft-1' }]) };
+        }),
+      };
+    });
+    const maybeAutoSend = jest.fn(async () => autoSendResult);
+    const publishSuggestion = jest.fn(async () => 'decision-1');
+    const supersedeStaleSuggestions = jest.fn(async () => 0);
+    const resolveDeliveryMode = jest.fn(async () => 'auto_send');
+
+    jest.doMock('../models/db', () => mockDb);
+    jest.doMock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
+    jest.doMock('../services/context-aggregator', () => ({
+      getContextForCustomer: jest.fn(async () => ({
+        summary: 'QA customer',
+        flags: [],
+        smsHistory: [],
+        customer: { billingLane: null },
+        billing: { outstandingBalance: 0, recentPayments: [] },
+      })),
+      authorizedDuesCents: jest.fn(() => []),
+    }));
+    jest.doMock('../services/voice-profile-distiller', () => ({
+      getApprovedVoiceProfile: jest.fn(async () => null),
+    }));
+    jest.doMock('../services/llm/call', () => ({
+      dispatchWithFallback: jest.fn(async () => ({
+        ok: true,
+        text: JSON.stringify({ reply: 'We are checking on that for you.', intended_actions: [], missing_info: null }),
+        model: 'fixture-model',
+      })),
+    }));
+    jest.doMock('@anthropic-ai/sdk', () => jest.fn(() => ({ messages: { create: jest.fn() } })));
+    jest.doMock('../services/sms-auto-send', () => ({
+      autoSendActionsSafe: jest.fn(() => true),
+      maybeAutoSend,
+    }));
+    jest.doMock('../services/sms-suggest-mode', () => ({
+      AUTO_SEND_MODE: 'auto_send',
+      SUGGESTED_STATUS: 'suggested',
+      resolveDeliveryMode,
+      publishSuggestion,
+      supersedeStaleSuggestions,
+      hasRedactionPlaceholder: jest.fn(() => false),
+      hasPriceQuote: jest.fn(() => false),
+    }));
+    jest.doMock('../services/comms-lint', () => ({
+      lintComms: jest.fn(() => ({ pass: true, failures: [] })),
+      toFlags: jest.fn(() => []),
+    }));
+
+    const { draftShadowReply } = require('../services/sms-shadow-drafter');
+    const id = await draftShadowReply({
+      inboundMessage: 'Can someone check on this?',
+      fromPhone: '+19415550100',
+      customer: { id: 'customer-1' },
+      smsLogId: 'sms-1',
+      intent: { intent: 'general_customer_sms_needs_review', confidence: 0.9 },
+    });
+    return { id, insertedRows, maybeAutoSend, publishSuggestion, supersedeStaleSuggestions, resolveDeliveryMode };
+  }
+
+  test('provider uncertainty stays shadow; a definitive failure still publishes the human fallback', async () => {
+    const priorVerify = process.env.SHADOW_DRAFT_VERIFY;
+    const priorFewshot = process.env.SHADOW_FEWSHOT;
+    try {
+      const uncertain = await runDraft({ sent: false, reason: 'provider_uncertain', ambiguous: true });
+      expect(uncertain.id).toBe('draft-1');
+      expect(uncertain.insertedRows).toEqual([expect.objectContaining({ status: 'shadow' })]);
+      expect(uncertain.maybeAutoSend).toHaveBeenCalledTimes(1);
+      expect(uncertain.publishSuggestion).not.toHaveBeenCalled();
+      expect(uncertain.supersedeStaleSuggestions).toHaveBeenCalledWith({ customerId: 'customer-1', smsLogId: 'sms-1' });
+
+      const definitive = await runDraft({ sent: false, reason: 'provider_failure', ambiguous: false });
+      expect(definitive.publishSuggestion).toHaveBeenCalledWith(expect.objectContaining({
+        draftId: 'draft-1', customerId: 'customer-1', smsLogId: 'sms-1',
+      }));
+      expect(definitive.resolveDeliveryMode).toHaveBeenCalledTimes(2);
+      expect(definitive.supersedeStaleSuggestions).not.toHaveBeenCalled();
+    } finally {
+      if (priorVerify === undefined) delete process.env.SHADOW_DRAFT_VERIFY;
+      else process.env.SHADOW_DRAFT_VERIFY = priorVerify;
+      if (priorFewshot === undefined) delete process.env.SHADOW_FEWSHOT;
+      else process.env.SHADOW_FEWSHOT = priorFewshot;
+    }
+  });
+});

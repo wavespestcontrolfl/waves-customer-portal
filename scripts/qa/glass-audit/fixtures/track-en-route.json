@@ -1,0 +1,55 @@
+{
+  "/api/public/track/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb": {
+    "status": 200,
+    "body": {
+      "state": "en_route",
+      "customerFirstName": "Jordan",
+      "customer": {
+        "name": "Jordan Rivera",
+        "serviceContactNames": []
+      },
+      "service": {
+        "type": "Quarterly Pest Control"
+      },
+      "tech": {
+        "firstName": "Alex",
+        "photoUrl": null
+      },
+      "property": {
+        "addressLine1": "1200 Sample Lane",
+        "city": "Parrish",
+        "state": "FL",
+        "zip": "34219",
+        "lat": null,
+        "lng": null
+      },
+      "window": {
+        "start": "2026-09-10T13:00:00.000Z"
+      },
+      "vehicle": {
+        "etaMinutes": 12,
+        "etaSource": "provider",
+        "lat": null,
+        "lng": null,
+        "lastReportedAt": "2026-09-10T06:07:13.582Z"
+      },
+      "stopsAhead": null,
+      "routeProgress": {
+        "currentStop": 2,
+        "yourStop": 4,
+        "totalStops": 6,
+        "atStop": true
+      },
+      "arrivedAt": "2026-09-10T06:07:13.582Z",
+      "summary": {
+        "completedAt": "2026-09-10T06:07:13.582Z",
+        "photos": [],
+        "serviceReportToken": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        "invoiceToken": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+      },
+      "meta": {
+        "pollIntervalSeconds": 0
+      }
+    }
+  }
+}

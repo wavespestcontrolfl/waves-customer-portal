@@ -514,7 +514,8 @@ async function createOrJoinVisit({ rows, createdBy, trx = null }) {
     // enrollment UPDATE's own NO KEY UPDATE lock — the serialization the
     // TOCTOU fix needs is intact.
     await t('customers').where({ id: stopCustomerId }).forNoKeyUpdate().first('id');
-    if (await customerExcludedByAutopay(stopCustomerId, t)) {
+    const behaviorVersion = combinedCloseoutBehaviorVersion();
+    if (await groupingRefusedByAutopay(stopCustomerId, t)) {
       throw new Error('rows not mutually groupable: autopay_enrolled');
     }
     await lockStop(t, baseKeyFor(peek[0]));
@@ -588,6 +589,9 @@ async function createOrJoinVisit({ rows, createdBy, trx = null }) {
       if (!target || String(target.status) !== 'open' || target.stop_base_key !== baseKey) {
         throw new Error('visit membership conflict: attached visit not open for joining');
       }
+      if (Number(target.behavior_version) !== behaviorVersion) {
+        throw new Error('visit membership conflict: closeout behavior differs');
+      }
       // Membership freeze applies to JOINS too (codex #3590 r4): once the
       // visit has a packet, child artifact, issued link, or payment
       // attempt, its member set is frozen — a late join would desync
@@ -621,6 +625,7 @@ async function createOrJoinVisit({ rows, createdBy, trx = null }) {
         .whereIn('status', OPEN_STATUSES)
         .orderBy('stop_seq', 'asc');
       for (const v of openVisits) {
+        if (Number(v.behavior_version) !== behaviorVersion) continue;
         if (rowTechs.length && v.technician_id && String(v.technician_id) !== rowTechs[0]) continue;
         const vAnchor = { ...v, window_start: null, window_end: null };
         if (!fresh.every((r) => canJoin(r, vAnchor).ok)) continue;
@@ -648,6 +653,7 @@ async function createOrJoinVisit({ rows, createdBy, trx = null }) {
           stop_seq: seq,
           technician_id: rowTechs[0] || null,
           group_family: first.group_family || null,
+          behavior_version: behaviorVersion,
           status: 'open',
           created_by: createdBy || 'admin:unknown',
         })
@@ -1065,9 +1071,10 @@ async function ensureLegacyCompletable(scheduledServiceId, database = db) {
   const row = await database('scheduled_services').where({ id: scheduledServiceId }).first('id', 'visit_id');
   if (!row) return { ok: false, reason: 'not_found' };
   if (!row.visit_id) return { ok: true };
-  const visit = await database('service_visits').where({ id: row.visit_id }).first('id', 'status');
+  const visit = await database('service_visits').where({ id: row.visit_id }).first('id', 'status', 'behavior_version');
   if (!visit) return { ok: false, reason: 'orphan', visitId: row.visit_id }; // fail closed
   if (String(visit.status) === 'dissolved') return { ok: true };
+  if (Number(visit.behavior_version) >= 2) return { ok: false, reason: 'visit_closeout_required', visitId: visit.id };
   if (['closing', 'closed'].includes(String(visit.status))) {
     return { ok: false, reason: 'visit_' + visit.status, visitId: visit.id };
   }
@@ -1079,7 +1086,7 @@ async function ensureLegacyCompletable(scheduledServiceId, database = db) {
 async function dissolveForLegacyCompletion(visitId, { expectChildId = null, trx = null } = {}) {
   const body = async (t) => {
       const visit = await t('service_visits').where({ id: visitId }).first();
-      if (!visit || String(visit.status) !== 'open') return false;
+      if (!visit || String(visit.status) !== 'open' || Number(visit.behavior_version) >= 2) return false;
       await lockStop(t, visit.stop_base_key);
       // The completed child must STILL belong to this visit (codex r10):
       // a split/move landing between the recheck and this cleanup means
@@ -1139,6 +1146,19 @@ async function dissolveForLegacyCompletion(visitId, { expectChildId = null, trx 
  * the enrollment-time refuse/dissolve seam belongs to that lane
  * (spec §6/§7, GATE_VISIT_GROUP_AUTOPAY) — not to a money flow here.
  */
+// Version 2 (combined closeout live with its encryption key) bills a grouped
+// visit through one packet, so Auto Pay customers may be grouped; version 1
+// keeps the Phase-1 exclusion. One decision for automatic stamping and the
+// staff grouping route alike.
+function combinedCloseoutBehaviorVersion() {
+  return require('../config/feature-gates').isEnabled('visitCloseout') && process.env.DATA_HYGIENE_VAULT_KEY ? 2 : 1;
+}
+
+async function groupingRefusedByAutopay(customerId, database = db) {
+  if (combinedCloseoutBehaviorVersion() === 2) return false;
+  return customerExcludedByAutopay(customerId, database);
+}
+
 async function customerExcludedByAutopay(customerId, database = db) {
   try {
     const customer = await database('customers').where({ id: customerId })
@@ -1234,7 +1254,8 @@ async function groupRowOn(database, rowId, createdBy) {
   // customer that will be refused anyway. Unit moves of existing visits
   // never pass through createOrJoinVisit, so later enrollment cannot
   // break them.
-  if (await customerExcludedByAutopay(row.customer_id, database)) return null;
+  const closeoutEnabled = require('../config/feature-gates').isEnabled('visitCloseout') && process.env.DATA_HYGIENE_VAULT_KEY;
+  if (!closeoutEnabled && await customerExcludedByAutopay(row.customer_id, database)) return null;
   const partnersQ = database('scheduled_services as ss')
     .leftJoin('services as svc', 'ss.service_id', 'svc.id')
     .leftJoin('service_visits as sv', 'sv.id', 'ss.visit_id')
@@ -1245,7 +1266,8 @@ async function groupRowOn(database, rowId, createdBy) {
     .where('svc.groupable', true)
     .where('svc.group_family', row.group_family)
     .whereNotNull('ss.window_start')
-    .where((q) => q.whereNull('ss.visit_id').orWhere('sv.status', 'open'))
+    .where((q) => q.whereNull('ss.visit_id').orWhere((attached) => attached
+      .where('sv.status', 'open').where('sv.behavior_version', closeoutEnabled ? 2 : 1)))
     .select('ss.id', 'ss.visit_id');
   if (row.property_id) partnersQ.where('ss.property_id', row.property_id);
   else partnersQ.whereNull('ss.property_id');
@@ -1366,9 +1388,12 @@ const EFFECT_TYPE_BY_KIND = Object.freeze({
   on_site: 'tracker_arrived',
   reminder_72h: 'reminder_72h',
   reminder_24h: 'reminder_24h',
+  completion_sms: 'completion_sms',
+  completion_email: 'completion_email',
   visit_payment: 'visit_payment',
 });
 const REMINDER_EFFECT_TYPES = new Set(['reminder_72h', 'reminder_24h']);
+const PACKET_EFFECT_TYPES = new Set(['completion_sms', 'completion_email', 'visit_payment']);
 function effectTypeForKind(kind) {
   return EFFECT_TYPE_BY_KIND[kind] || 'tracker_arrived';
 }
@@ -1389,10 +1414,18 @@ function dedupeKeyFor(visit, effectType) {
     : `${visit.id}:${effectType}`;
 }
 
+// Only recorded packet members own packet effects. Retained history can
+// have a different assignment or stop tuple and cannot claim delivery.
+async function recordedPacketMember(packetId, database = db) {
+  return database('scheduled_services as s')
+    .join('visit_completion_packet_items as i', 'i.scheduled_service_id', 's.id')
+    .where('i.packet_id', packetId).orderBy('s.id').select('s.*').first();
+}
+
 async function claimVisitNotification(row, kind) {
   if (!row || !row.visit_id) return null;
   const effectType = effectTypeForKind(kind);
-  const packetEffect = effectType === 'visit_payment';
+  const packetEffect = PACKET_EFFECT_TYPES.has(effectType);
   const eligibleStatuses = packetEffect ? ['closing', 'closed'] : ['open'];
   const logger = require('./logger');
   const token = require('crypto').randomBytes(16).toString('hex');
@@ -1416,7 +1449,7 @@ async function claimVisitNotification(row, kind) {
       // whose detach seam has not run yet still carries the old visit_id.
       const fresh = await t('scheduled_services').where({ id: row.id }).forUpdate()
         .first('id', 'visit_id', 'technician_id', 'customer_id', 'property_id', 'scheduled_date', 'window_start', 'window_end');
-      if (!fresh || String(fresh.visit_id || '') !== String(visit.id)) return { state: 'detached', token: null };
+      if (!fresh || String(fresh.visit_id) !== String(visit.id)) return { state: 'detached', token: null };
       // The visit owns assignment: a one-child reassignment that committed
       // ahead of its detach seam is a detached row (codex r12).
       if (visit.technician_id && String(fresh.technician_id || '') !== String(visit.technician_id)) return { state: 'detached', token: null };
@@ -1434,6 +1467,16 @@ async function claimVisitNotification(row, kind) {
       // visit's date — a move that committed while we waited must claim
       // under the date it actually holds).
       const dedupeKey = dedupeKeyFor(visit, effectType);
+      if (effectType === 'completion_sms') {
+        // Communications cancels a still-scheduled row by deleting it. The
+        // queue and pending marker were committed together, so its absence
+        // proves that this queued summary was cancelled before dispatch.
+        await t('visit_effects').where({ visit_id: visit.id, effect_type: effectType, dedupe_key: dedupeKey, status: 'pending' })
+          .whereNotNull('scheduled_at').whereNotExists(t('sms_log').select(t.raw('1'))
+            .where({ customer_id: visit.customer_id, direction: 'outbound' })
+            .whereRaw("metadata->>'visit_summary_claim_token' = visit_effects.claim_token"))
+          .update({ status: 'suppressed', last_error: 'scheduled_message_cancelled', updated_at: t.fn.now() });
+      }
       const rows = await t('visit_effects')
         .insert({
           visit_id: visit.id,
@@ -1450,7 +1493,19 @@ async function claimVisitNotification(row, kind) {
           this.where('visit_effects.status', '=', 'failed')
             .orWhere(function staleClaim() {
               this.where('visit_effects.status', '=', 'claimed').where('visit_effects.claimed_at', '<', leaseCutoff);
+            })
+            // A dispatch mark whose pre-provider marker outlived the lease:
+            // the process died before its provider request, provably.
+            .orWhere(function abandonedHandoff() { stalePreProviderHandoff(this, leaseCutoff); });
+          // Email recovery consults each durable email_messages row and
+          // skips every uncertain handoff. Reclaiming its aggregate lets
+          // later, proven-unsent recipients finish. SMS has no such ledger.
+          if (effectType === 'completion_email') this.orWhere(function recoverEmail() {
+            this.where('visit_effects.status', 'unknown_delivery').where(function finishedOrStale() {
+              this.where('visit_effects.last_error', 'provider_outcome_unknown')
+                .orWhere('visit_effects.claimed_at', '<', leaseCutoff);
             });
+          });
         })
         .returning('id');
       if (rows && rows.length) return { state: 'owner', token, dedupeKey };
@@ -1463,6 +1518,57 @@ async function claimVisitNotification(row, kind) {
     logger.warn(`[visit-groups] notification claim ${effectType} for visit ${row.visit_id} failed: ${err.message}`);
     return { state: 'error', token: null };
   }
+}
+
+// The non-idempotent provider handoff is durable BEFORE sending a summary.
+// SMS ambiguity cannot be reclaimed. Email recovery skips uncertain
+// recipient rows and fences each subsequent handoff with its new token.
+// The mark carries a pre-provider marker (`handoff_pending`, or
+// `handoff_pending:<email message id>` for an email recipient's queued
+// ledger row) that the handoff clears durably immediately before its
+// provider request. A process that dies between this commit and that
+// clear leaves the marker behind: past the claim lease it proves no
+// request was made, so the claim is reclaimable instead of uncertain.
+const HANDOFF_PENDING = 'handoff_pending';
+function handoffPendingMarker(ref = null) { return ref ? `${HANDOFF_PENDING}:${ref}` : HANDOFF_PENDING; }
+function isHandoffPending(lastError) { return typeof lastError === 'string' && (lastError === HANDOFF_PENDING || lastError.startsWith(`${HANDOFF_PENDING}:`)); }
+function stalePreProviderHandoff(query, leaseCutoff) {
+  return query.where('visit_effects.status', 'unknown_delivery')
+    .where('visit_effects.last_error', 'like', `${HANDOFF_PENDING}%`)
+    .where('visit_effects.claimed_at', '<', leaseCutoff);
+}
+
+async function beginVisitNotificationDispatch(visitId, kind, token, { dedupeKey = null, scheduled = false, database = db, pendingRef = null } = {}) {
+  const effectType = effectTypeForKind(kind);
+  if (!PACKET_EFFECT_TYPES.has(effectType) || !token) return false;
+  if (scheduled && effectType !== 'completion_sms') return false;
+  const rows = await database('visit_effects').where({ visit_id: visitId, effect_type: effectType,
+    dedupe_key: dedupeKey || `${visitId}:${effectType}`, claim_token: token,
+  }).modify((query) => {
+    if (scheduled) query.where({ status: 'pending' }).whereNotNull('scheduled_at');
+    else query.where(function owned() {
+      this.where('status', 'unknown_delivery').orWhere(function liveClaim() {
+        this.where('status', 'claimed').where('claimed_at', '>', new Date(Date.now() - NOTIFICATION_CLAIM_LEASE_MS));
+      });
+    });
+    if (['completion_sms', 'completion_email'].includes(effectType)) {
+      query.whereExists(database('service_visits').select(database.raw('1')).where({ id: visitId }).whereNull('summary_token_revoked_at'));
+    }
+  }).update({ status: 'unknown_delivery', last_error: handoffPendingMarker(pendingRef), claimed_at: new Date(), updated_at: database.fn.now() }).returning('id');
+  return rows.length > 0;
+}
+
+// The durable "a provider request follows" transition: the pre-provider
+// marker is cleared on the dedicated marker connection (never a second
+// root-pool slot inside the held handoff) and awaited before the request,
+// so a crash after it leaves an uncertain effect and a crash before it a
+// reclaimable one. Zero rows means recovery already reclaimed the effect
+// (or its state changed): nothing may reach the provider.
+async function markVisitNotificationProviderStart(visitId, kind, token, database = require('../models/marker-db')()) {
+  const rows = await database('visit_effects').where({ visit_id: visitId, effect_type: effectTypeForKind(kind), claim_token: token,
+    status: 'unknown_delivery' }).where('last_error', 'like', `${HANDOFF_PENDING}%`)
+    .update({ last_error: null, updated_at: database.fn.now() }).returning('id');
+  return rows.length > 0;
 }
 
 /**
@@ -1506,7 +1612,7 @@ async function otherLiveMembers(t, visitId, rowId) {
 async function finalizeVisitNotification(visitId, kind, smsOutcome, at = new Date(), token = null, { dedupeKey = null, lastError, providerId } = {}) {
   const effectType = effectTypeForKind(kind);
   if (!visitId || !NOTIFICATION_ATTEMPT_OUTCOMES.has(String(smsOutcome))) return { ok: true, skipped: true, effectType, status: null };
-  const status = smsOutcome === 'sent' ? 'sent' : smsOutcome === 'retry' ? 'failed' : 'suppressed';
+  const status = ['sent', 'unknown_delivery'].includes(smsOutcome) ? smsOutcome : smsOutcome === 'retry' ? 'failed' : 'suppressed';
   // Reminder kinds MUST pass the claim's key (it carries the visit date);
   // tracker call sites keep the historical default untouched.
   const key = dedupeKey || `${visitId}:${effectType}`;
@@ -1522,6 +1628,7 @@ async function finalizeVisitNotification(visitId, kind, smsOutcome, at = new Dat
         dedupe_key: key,
         status,
         attempts: 1,
+        last_error: status === 'unknown_delivery' ? 'provider_outcome_unknown' : null,
         sent_at: status === 'sent' ? at : null,
         ...details,
       })
@@ -1531,6 +1638,7 @@ async function finalizeVisitNotification(visitId, kind, smsOutcome, at = new Dat
         attempts: db.raw('?? + 1', ['visit_effects.attempts']),
         sent_at: status === 'sent' ? at : null,
         updated_at: at,
+        last_error: status === 'unknown_delivery' ? 'provider_outcome_unknown' : null,
         ...details,
       })
       .where('visit_effects.status', '<>', 'sent')
@@ -1556,7 +1664,7 @@ async function finalizeVisitNotification(visitId, kind, smsOutcome, at = new Dat
   }
 }
 
-const NOTIFICATION_ATTEMPT_OUTCOMES = new Set(['sent', 'suppressed', 'retry', 'gate_off']);
+const NOTIFICATION_ATTEMPT_OUTCOMES = new Set(['sent', 'suppressed', 'retry', 'gate_off', 'unknown_delivery']);
 // A claim is a lease: a `claimed` row older than this is reclaimable (its
 // owner's finalize failed or its process died). Sized well above any
 // plausible send (a multi-contact Twilio loop takes seconds, not minutes);
@@ -3181,6 +3289,7 @@ async function moveVisitAsUnit({ rebooker, serviceId, service, newDate, newWindo
 }
 
 module.exports = {
+  NOTIFICATION_CLAIM_LEASE_MS,
   dateOnly,
   rowStillAtVisitStop,
   toMinutes,
@@ -3195,6 +3304,8 @@ module.exports = {
   createOrJoinVisit,
   maybeGroupRow,
   customerExcludedByAutopay,
+  combinedCloseoutBehaviorVersion,
+  groupingRefusedByAutopay,
   splitChild,
   handleChildTerminal,
   handleChildStopChanged,
@@ -3214,6 +3325,9 @@ module.exports = {
   releaseReminderHoldByToken,
   MOVE_HOLD_TTL_MS,
   claimVisitNotification,
+  recordedPacketMember,
+  beginVisitNotificationDispatch,
+  markVisitNotificationProviderStart, HANDOFF_PENDING, isHandoffPending,
   notificationLeaseLive,
   renewNotificationLease,
   finalizeVisitNotification,
