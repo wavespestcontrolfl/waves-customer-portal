@@ -1299,7 +1299,11 @@ const SAFETY_SUBJECT_VERB = `${SAFETY_PRODUCT_RELATIVE}(?:[\\x27\\u2019](?:s|re)
 
 const SAFETY_INTENSIFIER = '(?:(?:completely|totally|perfectly|entirely|absolutely|fully|100%|very|quite|pretty)\\s+)?';
 
-const SAFETY_COORDINATED_ADJECTIVE_PREFIX = '(?:(?:[a-z]+(?:-[a-z]+)?\\s+){1,2}(?:and|but)\\s+)?';
+const SAFETY_COORDINATED_ADJECTIVE_ITEM = '(?:[a-z]+(?:-[a-z]+)?\\s+)?[a-z]+(?:-[a-z]+)?';
+
+const SAFETY_COORDINATED_ADJECTIVE_SEPARATOR = '\\s*(?:,\\s*(?:(?:and|but)\\s+)?|(?:and|but)\\s+)';
+
+const SAFETY_COORDINATED_ADJECTIVE_PREFIX = `(?:(?:${SAFETY_COORDINATED_ADJECTIVE_ITEM})${SAFETY_COORDINATED_ADJECTIVE_SEPARATOR}){0,3}`;
 
 const SAFETY_ADJECTIVE = vocabAlt(SAFETY_ADJECTIVES);
 
@@ -1311,7 +1315,9 @@ const HARM_ADJECTIVE = vocabAlt(HARM_WORDS);
 
 const SAFETY_ONCE_DRY_COORDINATED_WORD = `(?!(?:${SAFETY_ADJECTIVE})\\b)[a-z]+(?:-[a-z]+)?`;
 
-const SAFETY_ONCE_DRY_COORDINATED_PREFIX = `(?:(?:${SAFETY_ONCE_DRY_COORDINATED_WORD}\\s+){1,2}(?:and|but)\\s+)?`;
+const SAFETY_ONCE_DRY_COORDINATED_ITEM = `(?:${SAFETY_ONCE_DRY_COORDINATED_WORD}\\s+)?${SAFETY_ONCE_DRY_COORDINATED_WORD}`;
+
+const SAFETY_ONCE_DRY_COORDINATED_PREFIX = `(?:(?:${SAFETY_ONCE_DRY_COORDINATED_ITEM})${SAFETY_COORDINATED_ADJECTIVE_SEPARATOR}){0,3}`;
 
 const SAFETY_AUDIENCE_NOUN = '(?:dogs?|puppy|cats?|kittens?|pets?|animals?|children|kids|people|humans?|bab(?:y|ies))';
 
