@@ -1,8 +1,10 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
 import { useBiometricLock } from '../components/BiometricGate';
+import { isNativeApp } from '../native/platform';
 
 const PortalReadContext = createContext(null);
 export const READ_TIMEOUT_MS = 15000;
+const RESUME_REFRESH_MS = 1000;
 
 // Scoped to the mounted, authenticated property. Nothing is written to browser
 // storage: logout, a different session, or a property change drops these reads.
@@ -23,7 +25,7 @@ export function PortalReadProvider({ enabled, children }) {
     return () => readers.delete(read);
   }, [readers]);
 
-  const refresh = useCallback(async () => {
+  const refresh = useCallback(async ({ preserveVerified = true } = {}) => {
     if (!enabled || refreshingRef.current || lockedRef.current || navigator.onLine === false) return;
     refreshingRef.current = true;
     lastRefresh.current = Date.now();
@@ -31,7 +33,7 @@ export function PortalReadProvider({ enabled, children }) {
     try {
       do {
         refreshQueued.current = false;
-        await Promise.allSettled([...readers].map(read => read()));
+        await Promise.allSettled([...readers].map(read => read({ preserveVerified })));
       } while (refreshQueued.current && !lockedRef.current && navigator.onLine !== false);
     } finally {
       refreshingRef.current = false;
@@ -42,7 +44,7 @@ export function PortalReadProvider({ enabled, children }) {
   useEffect(() => {
     if (!enabled) return undefined;
     const resume = () => {
-      if (document.visibilityState === 'visible' && Date.now() - lastRefresh.current >= 30000) void refresh();
+      if (document.visibilityState === 'visible' && Date.now() - lastRefresh.current >= RESUME_REFRESH_MS) void refresh();
     };
     const reconnect = () => {
       setOnline(true);
@@ -54,11 +56,29 @@ export function PortalReadProvider({ enabled, children }) {
     window.addEventListener('offline', disconnect);
     window.addEventListener('focus', resume);
     document.addEventListener('visibilitychange', resume);
+    const restore = (event) => { if (event.persisted) resume(); };
+    window.addEventListener('pageshow', restore);
+    let disposed = false;
+    let nativeListener;
+    if (isNativeApp()) {
+      import('@capacitor/app')
+        .then(({ App }) => App.addListener('appStateChange', ({ isActive }) => {
+          if (!disposed && isActive) resume();
+        }))
+        .then((listener) => {
+          if (disposed) void listener.remove().catch(() => {});
+          else nativeListener = listener;
+        })
+        .catch(() => {}); // Browser lifecycle and post-unlock refresh remain available.
+    }
     return () => {
+      disposed = true;
       window.removeEventListener('online', reconnect);
       window.removeEventListener('offline', disconnect);
       window.removeEventListener('focus', resume);
       document.removeEventListener('visibilitychange', resume);
+      window.removeEventListener('pageshow', restore);
+      if (nativeListener) void nativeListener.remove().catch(() => {});
     };
   }, [enabled, refresh]);
 
@@ -102,9 +122,18 @@ export default function usePortalRead(key, load) {
     if (offline) setState(previous => ({ ...previous, verified: false }));
   }, [offline]);
 
-  const refresh = useCallback(async () => {
+  const refresh = useCallback(async ({ preserveVerified = false } = {}) => {
     const attempt = ++sequence.current;
-    setState(previous => ({ ...previous, loading: previous.data === undefined, pending: true, verified: false, error: previous.data === undefined ? '' : previous.error }));
+    // Background reads preserve a healthy view so they do not collapse scroll
+    // or remove focused inputs. Manual retries, offline/error/remounted-cache
+    // states remain unverified until success; 401/403 still clear cache below.
+    setState(previous => ({
+      ...previous,
+      loading: previous.data === undefined,
+      pending: true,
+      verified: preserveVerified ? previous.verified : false,
+      error: previous.data === undefined ? '' : previous.error,
+    }));
     let timer;
     try {
       if (cache && navigator.onLine === false) throw new Error('You are offline. Reconnect to update this information.');
@@ -126,6 +155,7 @@ export default function usePortalRead(key, load) {
         ...(denied ? { data: undefined, updatedAt: null } : {}),
         loading: false,
         pending: false,
+        verified: false,
         error: error?.message || 'Could not update this information.',
       }));
     } finally {

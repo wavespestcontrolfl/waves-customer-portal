@@ -8,7 +8,9 @@ export function PortalRefreshArea({ children, available = true, onlineContent })
   const portal = usePortalRefresh();
   const start = useRef(null);
   const [pull, setPull] = useState(0);
+  const [pullRefreshing, setPullRefreshing] = useState(false);
   const active = portal?.enabled && available;
+  const showNotice = !portal?.online || pull > 0 || pullRefreshing;
   const reset = () => { start.current = null; setPull(0); };
   const onTouchStart = (event) => {
     if (!active || portal.refreshing || !portal.online || event.touches.length !== 1) return;
@@ -28,19 +30,28 @@ export function PortalRefreshArea({ children, available = true, onlineContent })
     if (dx > 30 || dy < 0) { reset(); return; }
     setPull(Math.min(110, dy));
   };
+  const refreshManually = async () => {
+    setPullRefreshing(true);
+    try { await portal.refresh({ preserveVerified: false }); }
+    finally { setPullRefreshing(false); }
+  };
   const onTouchEnd = () => {
-    if (pull >= 80) void portal.refresh();
+    if (pull >= 80) void refreshManually();
     reset();
   };
   return <div onTouchStart={onTouchStart} onTouchMove={onTouchMove} onTouchEnd={onTouchEnd} onTouchCancel={reset}>
-    {active && <div data-glass="soft" style={{ display: 'flex', gap: 12, justifyContent: 'space-between', alignItems: 'center', padding: '10px 14px', borderRadius: 12, marginBottom: 16, color: COLORS.glassNavy }}>
-      <span role="status" style={{ fontSize: 14 }}>
-        {!portal.online ? 'You’re offline. Showing saved information.' : portal.refreshing ? 'Refreshing…' : pull >= 80 ? 'Release to refresh' : pull > 0 ? 'Pull down to refresh' : 'Refresh your visits and documents'}
-      </span>
-      <button type="button" data-glass-accent="" style={buttonStyle} onClick={() => { void portal.refresh(); }} disabled={portal.refreshing || !portal.online}>
-        {portal.refreshing ? 'Refreshing…' : 'Refresh'}
-      </button>
-    </div>}
+    {active && <>
+      {!showNotice && <button type="button" className="sr-only focus:not-sr-only" style={buttonStyle} onClick={() => { void refreshManually(); }} disabled={portal.refreshing}>Refresh</button>}
+      <span role="status" className="sr-only">{portal.refreshing && !pullRefreshing ? 'Refreshing…' : ''}</span>
+      {showNotice && <div data-glass="soft" style={{ display: 'flex', gap: 12, justifyContent: 'space-between', alignItems: 'center', padding: '10px 14px', borderRadius: 12, marginBottom: 16, color: COLORS.glassNavy }}>
+        <span role="status" style={{ fontSize: 14 }}>
+          {!portal.online ? 'You’re offline. Showing saved information.' : pullRefreshing ? 'Refreshing…' : pull >= 80 ? 'Release to refresh' : 'Pull down to refresh'}
+        </span>
+        <button type="button" data-glass-accent="" style={buttonStyle} onClick={() => { void refreshManually(); }} disabled={portal.refreshing || !portal.online}>
+          {portal.refreshing ? 'Refreshing…' : 'Refresh'}
+        </button>
+      </div>}
+    </>}
     {(!portal?.enabled || portal.online) && onlineContent}
     {children}
   </div>;
