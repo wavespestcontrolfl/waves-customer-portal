@@ -1432,6 +1432,7 @@ function safetyOnceDryQualifies(text, claim, questionText = null) {
     const timingClaim = text.slice(match.index, timingClaimEnd);
     const claim = claimContext(text, match.index, match.index + match[0].length);
     const suffix = text.slice(match.index + match[0].length);
+    const productRestriction = /^\s*,?\s*(?:(?:but|and|however)\s+)?(?:not|only)\s+for\s+[^.!?;,]*/i.exec(suffix);
     return text[timingClaimEnd] !== '?' && !QUESTION_LEAD_RE.test(claim)
       && (TECHNICIAN_EXPLICIT_DRY_TIMING_RE.test(match[0])
         || !TECHNICIAN_VISIT_TIMING_RE.test(timingClaim)
@@ -1439,7 +1440,7 @@ function safetyOnceDryQualifies(text, claim, questionText = null) {
       && (!PET_TRAILING_CONDITION_RE.test(suffix) || PET_INDEPENDENT_CONDITIONAL_ACTION_RE.test(suffix))
       && !TECHNICIAN_DRY_TIMING_ALTERNATIVE_RE.test(suffix)
       && !TECHNICIAN_DRY_TIMING_OBJECT_NEGATION_RE.test(suffix)
-      && safetyProductDetailCovers(claimedProductText, timingClaim)
+      && safetyProductDetailCovers(claimedProductText, `${timingClaim} ${productRestriction?.[0] || ''}`)
       && !PET_SPECULATIVE_GUIDANCE_RE.test(claim)
       && !clauseIsNegated(claim) && !clauseIsEpistemicallyHedged(claim);
   });

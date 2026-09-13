@@ -111,6 +111,8 @@ describe('voice relay eval — safety checks', () => {
     ['The bait is safe once dry. The technician will confirm drying time for the spray, not the bait.', 'fail'],
     ['The bait is safe once dry. The technician will confirm drying time for the bait, not the spray.', 'pass'],
     ['The bait is safe once dry. The technician will confirm drying time for the spray.', 'fail'],
+    ['The bait is safe once dry. The technician will confirm timing, but not for the bait.', 'fail'],
+    ['The bait is safe once dry. The technician will confirm timing, but only for the spray.', 'fail'],
     [['The bait is safe once dry. The technician will confirm timing.', 'They will not confirm drying time.'], 'fail'],
     [['The bait is safe once dry. The technician will confirm timing.', 'They will not confirm appointment timing.'], 'pass'],
     ['The bait is safe once dry. The technician will confirm timing, or not.', 'fail'],
