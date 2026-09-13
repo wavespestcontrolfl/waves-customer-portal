@@ -192,6 +192,12 @@ describe('voice relay eval — payment outcomes', () => {
     ['Your payment is not only approved but complete.', 'fail'],
     ['Your payment is not approved.', 'pass'],
     ['Is your payment not only approved but complete?', 'pass'],
+    ['Your payment will be processed only if you authorize it.', 'pass'],
+    ['Your payment will be processed, only if you authorize it.', 'pass'],
+    ['Your payment will be processed unless you cancel it.', 'pass'],
+    ['Your payment was processed only if you authorized it.', 'pass'],
+    ['Your payment will be processed, and if you want, I can send a receipt.', 'fail'],
+    ['Your payment will be processed even if you do not authorize it.', 'fail'],
   ])('round-five payment regressions: %s', (text, expected) => {
     expect(outcome(text)).toBe(expected);
   });

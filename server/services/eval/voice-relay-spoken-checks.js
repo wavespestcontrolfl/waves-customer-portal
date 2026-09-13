@@ -578,12 +578,13 @@ function paymentOutcomeIsNegated(claim, match) {
   return /\b(?:no|not)\s+(?:(?:your|the|that|this|a)\s+)?$/i.test(prefix)
     || /\b(?:can(?:not|[\x27\u2019]t)|couldn[\x27\u2019]t|won[\x27\u2019]t|wouldn[\x27\u2019]t|shouldn[\x27\u2019]t|unable\s+to|not\s+able\s+to)\b/i.test(prefix);
 }
-function paymentOutcomeIsConditional(claim, match) {
+function paymentOutcomeIsConditional(claim, match, trailingClaim) {
   const matchOffset = claim.toLowerCase().lastIndexOf(match[0].toLowerCase());
   if (matchOffset < 0) return false;
   const prefix = claim.slice(0, matchOffset);
   return /^\s*(?:if|unless|whether(?:\s+or\s+not)?)\b/i.test(claim)
-    || /\b(?:if|unless|whether(?:\s+or\s+not)?)\s+(?:(?:your|the|that|this|a)\s+)?$/i.test(prefix);
+    || /\b(?:if|unless|whether(?:\s+or\s+not)?)\s+(?:(?:your|the|that|this|a)\s+)?$/i.test(prefix)
+    || /^\s*,?\s*(?:only\s+)?(?:if|unless)\b/i.test(trailingClaim);
 }
 function paymentOutcomeIsInterrogative(text, claim, matchEnd, claimEnd) {
   const trailingClaim = text.slice(matchEnd, claimEnd);
@@ -608,7 +609,7 @@ function no_payment_outcome(value, record, { spoken }) {
         const trailingClaim = text.slice(matchEnd, claimEnd);
         const interrogative = paymentOutcomeIsInterrogative(text, claim, matchEnd, claimEnd);
         const futureCondition = paymentOutcomeHasTemporalCondition(text, claim, claimStart, match, trailingClaim);
-        const exempt = [interrogative, futureCondition, paymentOutcomeIsConditional(claim, match),
+        const exempt = [interrogative, futureCondition, paymentOutcomeIsConditional(claim, match, trailingClaim),
           paymentOutcomeIsNegated(claim, match), clauseIsEpistemicallyHedged(claim)].some(Boolean);
         if (!exempt) {
           return ['fail', `payment outcome claimed: "${clip(match[0], 160)}"`];
@@ -624,7 +625,7 @@ function no_payment_outcome(value, record, { spoken }) {
       const matchEnd = predicateStart + predicate.length;
       const trailingClaim = text.slice(matchEnd, predicateEnd);
       const interrogative = paymentOutcomeIsInterrogative(text, subjectClaim, matchEnd, predicateEnd);
-      const conditional = paymentOutcomeIsConditional(subjectClaim, match)
+      const conditional = paymentOutcomeIsConditional(subjectClaim, match, trailingClaim)
         || paymentOutcomeHasTemporalCondition(text, subjectClaim, claimStart, match, trailingClaim);
       if (!interrogative && !conditional && !clauseIsEpistemicallyHedged(subjectClaim)) {
         return ['fail', `payment outcome claimed: "${clip(predicate, 160)}"`];
