@@ -71,13 +71,24 @@ async function stageProposal(conn, { callId, procGeneration = null } = {}) {
   return conn.transaction(async (trx) => {
     await lockTriageCall(trx, callId);
     const call = await trx('call_log').where({ id: callId }).forUpdate().first();
-    if (!enabled() || !call?.customer_id || call.processing_token || call.v2_extraction_status !== 'valid'
+    if (!enabled() || !call || call.processing_token
       || (procGeneration != null && Number(call.processing_generation) !== Number(procGeneration))) return { staged: false };
+    const retire = async () => {
+      const card = await trx('triage_items').where({ call_log_id: callId, reason_code: 'reschedule_or_cancel', status: 'open' })
+        .whereNull('assigned_to').whereRaw("payload->'reschedule_proposal' IS NOT NULL").forUpdate().first('id', 'payload');
+      if (card) {
+        const payload = typeof card.payload === 'string' ? JSON.parse(card.payload) : { ...(card.payload || {}) };
+        delete payload.reschedule_proposal;
+        await trx('triage_items').where({ id: card.id }).update({ payload, updated_at: new Date() });
+      }
+      return { staged: false };
+    };
+    if (!call.customer_id || call.v2_extraction_status !== 'valid') return retire();
     const v2 = call.ai_extraction_enriched;
-    if (v2?.meta?.is_spam || v2?.meta?.is_voicemail || v2?.scheduling?.status !== 'reschedule_requested') return { staged: false };
+    if (v2?.meta?.is_spam || v2?.meta?.is_voicemail || v2?.scheduling?.status !== 'reschedule_requested') return retire();
     const proposed = v2.scheduling.proposed_start_at;
     const quote = proposalEvidence(v2, call.transcription);
-    if (!proposed || !Number.isFinite(new Date(proposed).getTime()) || !quote) return { staged: false };
+    if (!proposed || !Number.isFinite(new Date(proposed).getTime()) || !quote) return retire();
     const handled = await trx('activity_log').where({ action: ACTIVITY_ACTION })
       .whereRaw("metadata->>'call_log_id' = ?", [callId]).first('id');
     if (handled) return { staged: false };
@@ -204,7 +215,7 @@ async function applyProposal(conn, id, { actorId, visitId, previewHash, now = ne
   if (preview.preview_hash !== previewHash) throw fail('The appointment or recurring plan changed. Refresh the preview.');
   const { call, card, customer, candidates, v2, series, selected } = preview;
   return applyReviewedCallReschedule({ conn, call, customer, candidates, v2, visitId: selected.id, actorId, now, rebooker,
-    operationKey: `proposal:${id}:${previewHash}`,
+    operationKey: `proposal:${id}:${previewHash}`, proposalCardId: id,
     occurrenceIds: series.occurrenceIds || [], occurrences: series.occurrences, guard: async (trx) => {
       if (!enabled()) throw fail('Reschedule proposals are disabled');
       const followUps = await require('./call-booking-catalog').planCallFollowUpShift({ conn: trx, parentServiceId: selected.id,

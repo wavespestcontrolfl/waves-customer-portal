@@ -49,14 +49,14 @@ function visit(overrides = {}) {
   };
 }
 
-function makeConn({ lockedVisit = visit(), lockedVisits = null, offers = [], portalRequest = null } = {}) {
+function makeConn({ lockedVisit = visit(), lockedVisits = null, offers = [], portalRequest = null, humanHandled = null } = {}) {
   const events = [];
   const inserts = [];
   const updates = [];
   const lockedSets = [];
   const availableVisits = lockedVisits || [lockedVisit];
   const builder = (table) => {
-    const state = { update: null, excludedStatuses: [], visitIds: null, targetVisitId: null };
+    const state = { update: null, excludedStatuses: [], visitIds: null, targetVisitId: null, excludedId: null };
     const query = {
       where(...args) {
         if (args.length === 1 && args[0]?.scheduled_service_id) state.targetVisitId = String(args[0].scheduled_service_id);
@@ -73,6 +73,10 @@ function makeConn({ lockedVisit = visit(), lockedVisits = null, offers = [], por
         if (table === 'service_requests' && column === 'status') state.excludedStatuses = values;
         return query;
       },
+      whereNot(column, value) {
+        if (table === 'triage_items' && column === 'id') state.excludedId = String(value);
+        return query;
+      },
       whereNull() { return query; },
       orderBy() { return query; },
       forShare() { events.push(`${table}:share`); return query; },
@@ -82,6 +86,10 @@ function makeConn({ lockedVisit = visit(), lockedVisits = null, offers = [], por
         if (table === 'customers') return Promise.resolve(customer);
         if (table === 'call_log') return Promise.resolve(call);
         if (table === 'scheduled_services') return Promise.resolve(lockedVisit);
+        if (table === 'triage_items') {
+          events.push('triage_items:handled-select');
+          return Promise.resolve(humanHandled && String(humanHandled.id) !== state.excludedId ? humanHandled : undefined);
+        }
         if (table === 'service_requests') {
           events.push('service_requests:select');
           return Promise.resolve(portalRequest && String(portalRequest.scheduled_service_id || VISIT_ID) === state.targetVisitId
@@ -210,6 +218,30 @@ describe('applyReviewedCallReschedule', () => {
     });
   });
 
+  test.each([
+    ['claimed', { id: 'sibling-card', status: 'in_progress', resolution_source: null }],
+    ['resolved', { id: 'sibling-card', status: 'resolved', resolution_source: 'human' }],
+    ['dismissed', { id: 'sibling-card', status: 'dismissed', resolution_source: 'human' }],
+  ])('a human-%s sibling coordination card fences reviewed Apply under the call lock', async (_label, humanHandled) => {
+    const conn = makeConn({ humanHandled });
+    const rebooker = mover(conn);
+    const guard = jest.fn();
+
+    await expect(applyReviewedCallReschedule({ ...applyArgs(conn, rebooker, guard),
+      proposalCardId: 'proposal-card' })).rejects.toMatchObject({ status: 409 });
+    expect(conn.events.indexOf('triage-call:lock')).toBeLessThan(conn.events.indexOf('triage_items:handled-select'));
+    expect(guard).not.toHaveBeenCalled();
+    expect(conn.inserts).toHaveLength(0);
+  });
+
+  test('the proposal card itself may remain claimed by the applying staff member', async () => {
+    const conn = makeConn({ humanHandled: { id: 'proposal-card', status: 'in_progress' } });
+
+    const result = await applyReviewedCallReschedule({ ...applyArgs(conn, mover(conn)), proposalCardId: 'proposal-card' });
+    expect(result).toMatchObject({ outcome: 'applied', visitId: VISIT_ID });
+    expect(conn.inserts.map(({ table }) => table)).toEqual(['activity_log']);
+  });
+
   test('a rejected proposal guard leaves the move side effects unwritten', async () => {
     const conn = makeConn();
     const rebooker = mover(conn);
@@ -296,6 +328,24 @@ describe('applyReviewedCallReschedule', () => {
 
     expect(() => planRescheduleFromCall({ v2: late, call, customer, candidates: [candidate], now: NOW,
       humanOverride: { visitId: VISIT_ID } })).toThrow('end by 20:00');
+  });
+
+  test('a seasonally wrong Eastern offset never shifts the caller requested wall clock', () => {
+    const wrongOffset = { ...extraction, scheduling: { ...extraction.scheduling, proposed_start_at: '2027-07-15T14:00:00-05:00' } };
+    const candidate = visit({ scheduled_date: '2027-07-14' });
+
+    expect(planRescheduleFromCall({ v2: wrongOffset, call, customer, candidates: [candidate], now: NOW,
+      humanOverride: { visitId: VISIT_ID } })).toMatchObject({ action: 'skip', reason: 'inconsistent_start_offset' });
+  });
+
+  test('a matching parked visit stays in the editor while a real change uses the canonical mover', () => {
+    const parked = visit({ status: 'rescheduled', scheduled_date: '2026-09-15', window_start: '14:00:00', window_end: '15:00:00' });
+
+    expect(planRescheduleFromCall({ v2: extraction, call, customer, candidates: [parked], now: NOW,
+      humanOverride: { visitId: VISIT_ID } })).toMatchObject({ action: 'skip', reason: 'visit_parked_for_rebook' });
+    expect(planRescheduleFromCall({ v2: extraction, call, customer,
+      candidates: [visit({ status: 'rescheduled' })], now: NOW, humanOverride: { visitId: VISIT_ID } }))
+      .toMatchObject({ action: 'apply', visitId: VISIT_ID });
   });
 
   test.each([
