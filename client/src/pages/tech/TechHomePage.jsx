@@ -233,6 +233,8 @@ export default function TechHomePage({ section = 'today' }) {
   const [scheduleError, setScheduleError] = useState('');
   const [showCreateProject, setShowCreateProject] = useState(false);
   const [createProjectHasPendingPhotos, setCreateProjectHasPendingPhotos] = useState(false);
+  const [continueProjectId, setContinueProjectId] = useState(null);
+  const [projectEditorDirty, setProjectEditorDirty] = useState(false);
   const [showProjectPicker, setShowProjectPicker] = useState(false);
   const [projectDefaults, setProjectDefaults] = useState(null);
   const [photoTarget, setPhotoTarget] = useState(null); // { id, customerName }
@@ -509,7 +511,8 @@ export default function TechHomePage({ section = 'today' }) {
   // moves the accordion until the action settles.
   const [busyStopId, setBusyStopId] = useState(null);
   const navigationBusy = Boolean(
-    busyStopId || enRouteState.pendingId || onSiteState.pendingId || createProjectHasPendingPhotos
+    busyStopId || enRouteState.pendingId || onSiteState.pendingId
+      || createProjectHasPendingPhotos || projectEditorDirty
   );
   useLayoutEffect(() => {
     setNavigationBusy?.(navigationBusy);
@@ -559,10 +562,8 @@ export default function TechHomePage({ section = 'today' }) {
   // A visit whose report already exists (linkedProject rides the schedule
   // payload) CONTINUES that report in place — re-opening the create form
   // would mint a duplicate project for the same visit.
-  const [continueProjectId, setContinueProjectId] = useState(null);
-  // Mirrors ProjectDetail's dirty state so the editor's close button and
-  // backdrop cannot silently discard report edits.
-  const [projectEditorDirty, setProjectEditorDirty] = useState(false);
+  // Mirrors ProjectDetail's dirty state so editor and browser navigation
+  // cannot silently discard report edits.
   const closeProjectEditor = useCallback(() => {
     if (projectEditorDirty && !confirm('Discard unsaved report edits?')) return;
     setProjectEditorDirty(false);
@@ -994,7 +995,14 @@ export default function TechHomePage({ section = 'today' }) {
           allowedProjectTypes={projectDefaults?.projectType ? [projectDefaults.projectType] : null}
           onPendingPhotosChange={setCreateProjectHasPendingPhotos}
           onClose={() => { setCreateProjectHasPendingPhotos(false); setShowCreateProject(false); setProjectDefaults(null); }}
-          onCreated={() => { setCreateProjectHasPendingPhotos(false); setShowCreateProject(false); setProjectDefaults(null); }}
+          onCreated={(project, outcome) => {
+            setCreateProjectHasPendingPhotos(false);
+            setShowCreateProject(false);
+            setProjectDefaults(null);
+            setProjectEditorDirty(false);
+            if (project?.id && !outcome?.completed) setContinueProjectId(project.id);
+            fetchSchedule();
+          }}
         />
       )}
 

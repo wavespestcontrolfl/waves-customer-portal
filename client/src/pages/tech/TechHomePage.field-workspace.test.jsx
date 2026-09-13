@@ -11,9 +11,10 @@ vi.mock('../../hooks/useFeatureFlag', () => ({ useFeatureFlag: () => false }));
 vi.mock('../../components/tech/TechIntelligenceBar', () => ({ default: () => <div>Field assistant</div> }));
 vi.mock('../../components/tech/GeofenceArrivalPrompt', () => ({ default: () => null }));
 vi.mock('../../components/tech/CreateProjectModal', () => ({
-  default: ({ onPendingPhotosChange }) => <div role="dialog" aria-label="Create project fixture">
+  default: ({ onPendingPhotosChange, onCreated }) => <div role="dialog" aria-label="Create project fixture">
     <button onClick={() => onPendingPhotosChange(true)}>Queue report photo</button>
     <button onClick={() => onPendingPhotosChange(false)}>Clear report photos</button>
+    <button onClick={() => onCreated({ id: 'created-report', status: 'draft' })}>Finish partial report</button>
   </div>,
   wdoFeeSeedFromVisit: () => null,
 }));
@@ -22,7 +23,7 @@ vi.mock('../../components/tech/TechServicePhotosModal', () => ({ default: ({ ser
 vi.mock('../../components/tech/TechTreatmentZoneModal', () => ({ default: () => null }));
 vi.mock('../../components/tech/FieldLeadModal', () => ({ default: () => null }));
 vi.mock('../../components/ServiceRecapModal', () => ({ default: () => <div>Existing recap form</div> }));
-vi.mock('../admin/ProjectsPage', () => ({ ProjectDetail: ({ onDirtyChange, onClose }) => <div data-testid="project-detail">
+vi.mock('../admin/ProjectsPage', () => ({ ProjectDetail: ({ projectId, onDirtyChange, onClose }) => <div data-testid="project-detail" data-project-id={projectId}>
   <button onClick={() => onDirtyChange(true)}>Edit report</button>
   <button onClick={() => onDirtyChange(false)}>Save report</button>
   <button onClick={onClose}>Close report</button>
@@ -195,6 +196,25 @@ describe('Tech field workspace uses the existing route workflow', () => {
     await waitFor(() => expect(mocks.navigationBusy).toHaveBeenLastCalledWith(false));
   });
 
+  it('retains a partially created report and refreshes the route before it can be reopened', async () => {
+    rows = [row('one')];
+    mount('/tech/tools');
+    const report = await screen.findByRole('button', { name: /Project Report/ });
+    const scheduleReads = () => fetchMock.mock.calls.filter(([path]) => path.includes('/admin/schedule?')).length;
+    const initialReads = scheduleReads();
+    fireEvent.click(report);
+    rows = [row('one', { linkedProject: { id: 'created-report', status: 'draft' } })];
+    fireEvent.click(screen.getByRole('button', { name: 'Finish partial report' }));
+
+    expect(await screen.findByTestId('project-detail')).toHaveAttribute('data-project-id', 'created-report');
+    await waitFor(() => expect(scheduleReads()).toBeGreaterThan(initialReads));
+    fireEvent.click(screen.getByRole('button', { name: 'Close report' }));
+    await waitFor(() => expect(screen.queryByTestId('project-detail')).not.toBeInTheDocument());
+    fireEvent.click(screen.getByRole('button', { name: /Project Report/ }));
+    expect(await screen.findByTestId('project-detail')).toHaveAttribute('data-project-id', 'created-report');
+    expect(screen.queryByRole('dialog', { name: 'Create project fixture' })).not.toBeInTheDocument();
+  });
+
   it('keeps Project Report disabled when the selected visit is missing despite another live service', async () => {
     rows = [row('one')];
     await act(async () => { mount('/tech/tools?visit=row%3Amissing'); });
@@ -250,6 +270,7 @@ describe('Tech field workspace uses the existing route workflow', () => {
     const editor = await screen.findByTestId('project-detail');
 
     fireEvent.click(screen.getByRole('button', { name: 'Edit report' }));
+    await waitFor(() => expect(mocks.navigationBusy).toHaveBeenLastCalledWith(true));
     fireEvent.click(editor.parentElement.parentElement);
     fireEvent.click(screen.getByRole('button', { name: 'Close report' }));
     expect(confirmClose).toHaveBeenCalledTimes(2);
@@ -270,6 +291,7 @@ describe('Tech field workspace uses the existing route workflow', () => {
     await screen.findByTestId('project-detail');
     fireEvent.click(screen.getByRole('button', { name: 'Edit report' }));
     fireEvent.click(screen.getByRole('button', { name: 'Save report' }));
+    await waitFor(() => expect(mocks.navigationBusy).toHaveBeenLastCalledWith(false));
     fireEvent.click(screen.getByRole('button', { name: 'Close report' }));
     expect(confirmClose).toHaveBeenCalledTimes(3);
     await waitFor(() => expect(screen.queryByTestId('project-detail')).not.toBeInTheDocument());
