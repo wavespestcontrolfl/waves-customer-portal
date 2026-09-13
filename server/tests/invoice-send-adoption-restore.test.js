@@ -77,6 +77,16 @@ function chain({ rows, returning, first, updateCount = 1 } = {}) {
   return q;
 }
 
+function throwingChain(err) {
+  const q = {};
+  for (const m of ['where', 'whereIn', 'whereNotNull', 'whereNull', 'whereRaw', 'orWhere', 'orderBy', 'limit', 'update', 'insert']) {
+    q[m] = jest.fn(() => q);
+  }
+  q.then = (resolve, reject) => Promise.reject(err).then(resolve, reject);
+  q.catch = jest.fn((fn) => Promise.reject(err).catch(fn));
+  return q;
+}
+
 const draftInvoice = {
   id: 'inv-1',
   invoice_number: 'WPC-2026-2001',
@@ -129,6 +139,22 @@ describe('claimInvoiceForSend adoption survives a failed replacement delivery', 
     expect(restoreClaimChain._baseUpdate.mock.calls[0][0]).toMatchObject({ status: 'draft' });
     // ...strictly AFTER the queue row, per the owner's ordering rule.
     expect(callOrder).toEqual(['queue', 'claim']);
+  });
+
+  test('a transient queue-restore failure keeps the invoice send claim held for recovery', async () => {
+    const restoreErr = new Error('transient sms_log restore failure');
+    db.mockReturnValueOnce(throwingChain(restoreErr));
+
+    await expect(InvoiceService.restoreSendClaim(
+      'inv-1',
+      'draft',
+      true,
+      [{ id: 'sms-queued-1' }],
+    )).rejects.toMatchObject({ code: 'queued_sms_restore_failed' });
+
+    // No invoices query follows the failed sms_log update: the claim remains
+    // 'sending', which is the durable recovery marker for the lost hand-off.
+    expect(db.mock.calls.map(([table]) => table)).toEqual(['sms_log']);
   });
 
   test('sendViaSMS (direct caller) held by a quiet-hours-style provider hold requeues the text instead of losing it', async () => {
@@ -468,8 +494,9 @@ describe('sendViaSMSAndEmail: the SMS queue restore decision is per-channel, not
       .mockReturnValueOnce(chain({ returning: [] })) // inner consume — nothing left, outer already took it
       .mockReturnValueOnce(chain({ first: undefined })) // inner strict re-check
       .mockReturnValueOnce(chain({ first: { id: 'cust-1', phone: null } })) // customer lookup — NO PHONE, the SMS leg fails
+      .mockReturnValueOnce(chain({ first: sendingInvoice })) // second-channel collectibility recheck
+      .mockReturnValueOnce(restoreQueueChain) // THE TARGET: restore before releasing/finalizing the invoice claim
       .mockReturnValueOnce(chain()) // outer finalize update (email succeeded)
-      .mockReturnValueOnce(restoreQueueChain) // THE TARGET: restoreConsumedQueuedSend for the SMS-specific failure
       .mockReturnValue(fallback); // lead conversion / follow-ups / anything else
 
     sendInvoiceEmail.mockResolvedValueOnce({ ok: true, payUrl: 'https://pay.example/xyz' });
@@ -487,10 +514,41 @@ describe('sendViaSMSAndEmail: the SMS queue restore decision is per-channel, not
     expect(restoreUpdate.scheduled_for).toBeUndefined();
   });
 
+  test('email ok + SMS fails: a transient queue-restore failure does not finalize/release the invoice claim', async () => {
+    jest.clearAllMocks();
+    const sendingInvoice = { ...draftWithCustomer, status: 'sending' };
+    const restoreErr = new Error('transient queue restore failure');
+    db
+      .mockReturnValueOnce(chain({ first: accrualRow }))
+      .mockReturnValueOnce(chain({ first: draftWithCustomer }))
+      .mockReturnValueOnce(chain({ first: undefined }))
+      .mockReturnValueOnce(chain({ returning: [sendingInvoice] }))
+      .mockReturnValueOnce(chain({ first: undefined }))
+      .mockReturnValueOnce(chain({ returning: [CONSUMED_ROW] }))
+      .mockReturnValueOnce(chain({ first: undefined }))
+      .mockReturnValueOnce(chain({ first: sendingInvoice }))
+      .mockReturnValueOnce(chain({ first: undefined }))
+      .mockReturnValueOnce(chain({ returning: [] }))
+      .mockReturnValueOnce(chain({ first: undefined }))
+      .mockReturnValueOnce(chain({ first: { id: 'cust-1', phone: null } }))
+      .mockReturnValueOnce(chain({ first: sendingInvoice }))
+      .mockReturnValueOnce(throwingChain(restoreErr));
+
+    sendInvoiceEmail.mockResolvedValueOnce({ ok: true, payUrl: 'https://pay.example/xyz' });
+
+    await expect(InvoiceService.sendViaSMSAndEmail('inv-1', {}))
+      .rejects.toMatchObject({ code: 'queued_sms_restore_failed' });
+    expect(sendInvoiceEmail).toHaveBeenCalledTimes(1);
+    // The failed queue update is the final DB operation. In particular, no
+    // invoices finalize follows it and the durable 'sending' marker remains.
+    expect(db.mock.calls.at(-1)[0]).toBe('sms_log');
+    expect(db).toHaveBeenCalledTimes(14);
+  });
+
   test('email ok + SMS accepted by the provider: the consumed SMS queue row stays cancelled', async () => {
     jest.clearAllMocks();
     const sendingInvoice = { ...draftWithCustomer, status: 'sending' };
-    const fallback = chain();
+    const fallback = chain({ first: { ...sendingInvoice, status: 'sent' } });
     db
       .mockReturnValueOnce(chain({ first: accrualRow })) // accrual pre-check
       .mockReturnValueOnce(chain({ first: draftWithCustomer })) // outer claim read
@@ -521,19 +579,7 @@ describe('sendViaSMSAndEmail: the SMS queue restore decision is per-channel, not
     expect(anyRestoredToScheduled).toBe(false);
   });
 
-  // A .then that rejects instead of resolving — a chain() this suite's
-  // update-count convention can't express (chain()'s .then always resolves).
-  function throwingChain(err) {
-    const q = {};
-    for (const m of ['where', 'whereIn', 'whereNotNull', 'whereNull', 'whereRaw', 'orWhere', 'orderBy', 'limit', 'update', 'insert']) {
-      q[m] = jest.fn(() => q);
-    }
-    q.then = (resolve, reject) => Promise.reject(err).then(resolve, reject);
-    q.catch = jest.fn((fn) => Promise.reject(err).catch(fn));
-    return q;
-  }
-
-  test('round-17 P1 (#4131 finding 2): SMS fails, email is provider-accepted, and the invoice finalize update THROWS — the consumed SMS queue row is still restored (try/finally), and the throw still propagates', async () => {
+  test('round-17 P1 (#4131 finding 2): SMS fails, email is provider-accepted, and the invoice finalize update THROWS — the consumed SMS queue row was restored first, and the throw still propagates', async () => {
     jest.clearAllMocks();
     const sendingInvoice = { ...draftWithCustomer, status: 'sending' };
     const restoreQueueChain = chain();
@@ -552,15 +598,16 @@ describe('sendViaSMSAndEmail: the SMS queue restore decision is per-channel, not
       .mockReturnValueOnce(chain({ returning: [] })) // inner consume — nothing left, outer already took it
       .mockReturnValueOnce(chain({ first: undefined })) // inner strict re-check
       .mockReturnValueOnce(chain({ first: { id: 'cust-1', phone: null } })) // customer lookup — NO PHONE, the SMS leg fails
-      .mockReturnValueOnce(throwingChain(finalizeErr)) // THE TARGET: outer finalize update throws AFTER email already delivered
-      .mockReturnValueOnce(restoreQueueChain) // the SMS-specific restore must still run, from the finally
+      .mockReturnValueOnce(chain({ first: sendingInvoice })) // second-channel collectibility recheck
+      .mockReturnValueOnce(restoreQueueChain) // queue obligation is durable before claim release/finalize
+      .mockReturnValueOnce(throwingChain(finalizeErr)) // outer finalize update throws AFTER email already delivered
       .mockReturnValue(fallback);
 
     sendInvoiceEmail.mockResolvedValueOnce({ ok: true, payUrl: 'https://pay.example/xyz' });
 
     await expect(InvoiceService.sendViaSMSAndEmail('inv-1', {})).rejects.toThrow(finalizeErr);
 
-    // The promised SMS delivery is recovered even though the finalize that
+    // The promised SMS delivery was recovered before the finalize that
     // would have flipped the invoice to 'sent' never completed — a stale
     // 'sending' invoice is a separate, already-owned problem (stale-claim
     // recovery); losing the customer's queued pay-link text is not.

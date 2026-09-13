@@ -971,7 +971,7 @@ async function restoreConsumedQueuedSend(consumedRows, database = db) {
   const ids = consumedRows.map((row) => row.id).filter(Boolean);
   if (!ids.length) return;
   try {
-    await database("sms_log")
+    const restored = await database("sms_log")
       .whereIn("id", ids)
       .where({ status: "cancelled" })
       .whereRaw("metadata->>'cancelled_reason' = 'superseded_by_live_send'")
@@ -980,8 +980,19 @@ async function restoreConsumedQueuedSend(consumedRows, database = db) {
         updated_at: new Date(),
         metadata: database.raw("(metadata - 'cancelled_reason') - 'cancelled_at'"),
       });
+    if (Number(restored) !== ids.length) {
+      throw new Error(`restored ${Number(restored) || 0} of ${ids.length} row(s)`);
+    }
   } catch (err) {
     logger.error(`[invoice] queued pay-link SMS restore FAILED for ${ids.join(", ")} — the customer's original scheduled send did not resume: ${err.message}`);
+    // The invoice's 'sending' claim is the recovery marker for this
+    // incomplete hand-off. Propagate so restoreSendClaim cannot expose the
+    // invoice as claimable while its previously promised SMS is still
+    // cancelled; stale-claim recovery will park the send for review.
+    const restoreErr = new Error(`Could not restore the queued pay-link SMS obligation for invoice send: ${err.message}`);
+    restoreErr.code = "queued_sms_restore_failed";
+    restoreErr.cause = err;
+    throw restoreErr;
   }
 }
 
@@ -4067,15 +4078,25 @@ const InvoiceService = {
       email.code = sms.code;
     } else {
       try {
-        const r = await sendInvoiceEmail(invoiceId, {
-          recipientOverride: emailRecipientOverride,
-          payUrlParams,
-        });
-        if (r?.ok) email.ok = true;
-        else if (r?.error) email.error = r.error;
-        if (!payUrl && r?.payUrl) payUrl = r.payUrl;
-        if (r?.recipient) email.recipient = r.recipient;
-        if (r?.messageId) email.messageId = r.messageId;
+        // Cancellation can void a live claim while the SMS provider call is
+        // in flight. Re-read the invoice at the second-channel chokepoint so
+        // that a committed void/cancellation prevents a payment email from
+        // starting after that SMS leg returns.
+        const currentForEmail = await db("invoices").where({ id: invoiceId }).first("status");
+        if (!currentForEmail || !SEND_FINALIZABLE_STATUSES.includes(currentForEmail.status)) {
+          email.error = invoiceNotSendableError(currentForEmail).message;
+          email.code = "invoice_not_sendable";
+        } else {
+          const r = await sendInvoiceEmail(invoiceId, {
+            recipientOverride: emailRecipientOverride,
+            payUrlParams,
+          });
+          if (r?.ok) email.ok = true;
+          else if (r?.error) email.error = r.error;
+          if (!payUrl && r?.payUrl) payUrl = r.payUrl;
+          if (r?.recipient) email.recipient = r.recipient;
+          if (r?.messageId) email.messageId = r.messageId;
+        }
       } catch (err) {
         email.error = err.message;
       }
@@ -4091,41 +4112,26 @@ const InvoiceService = {
     // itself reached provider accept, not on whether email also succeeded.
     const smsQueueRowsNeedRestore = !sms.ok && !sms.scheduled;
     if (ok) {
-      // Round-17 P1 (#4131 finding 2): the per-channel queue restore below
-      // used to run only AFTER this finalize update returned — a retry that
-      // consumed an existing invoice_send_deferred row, whose SMS leg then
-      // failed while email succeeded, would strand that row 'cancelled'
-      // forever if THIS update throws post-provider-accept (a DB blip after
-      // the email already delivered): the function exits, the invoice is
-      // left 'sending' for stale-claim recovery to park, and the promised
-      // SMS is never recovered. try/finally (the round-14 sendViaSMS
-      // chokepoint's shape) guarantees the restore runs whether this
-      // update succeeds or throws; the throw itself still propagates —
-      // finalizing the invoice is a separate, still-unresolved problem
-      // stale-claim recovery already owns.
-      try {
-        await db("invoices")
-          .where({ id: invoiceId })
-          .whereIn("status", SEND_FINALIZABLE_STATUSES)
-          .update({
-            status: db.raw(
-              "CASE WHEN status IN ('draft', 'scheduled', 'sending') THEN 'sent' ELSE status END",
-            ),
-            sent_at: new Date(),
-            scheduled_send_at: null,
-            scheduled_send_error: require("./invoice-helpers").preserveWithdrawalStamp(db),
-            scheduled_request_review: false,
-            scheduled_review_delay_minutes: null,
-            updated_at: new Date(),
-          });
-      } finally {
-        // Email alone finalized the invoice — the claim itself is correctly
-        // released (finalized 'sent'), but the SMS leg specifically did NOT
-        // deliver: restore the queue row it cancelled instead of leaving it
-        // stranded cancelled forever (Codex round 15 P1 #4131). The invoice
-        // claim release is unchanged by this — only the queue row.
-        if (smsQueueRowsNeedRestore) await restoreConsumedQueuedSend(consumedQueuedSendRows);
-      }
+      // Email alone can satisfy this attempt while the adopted, promised SMS
+      // still needs to resume. Restore that durable queue obligation BEFORE
+      // releasing/finalizing the invoice claim. A failed restore propagates
+      // and deliberately leaves 'sending' as the recovery marker instead of
+      // exposing a claimable invoice with its original SMS cancelled.
+      if (smsQueueRowsNeedRestore) await restoreConsumedQueuedSend(consumedQueuedSendRows);
+      await db("invoices")
+        .where({ id: invoiceId })
+        .whereIn("status", SEND_FINALIZABLE_STATUSES)
+        .update({
+          status: db.raw(
+            "CASE WHEN status IN ('draft', 'scheduled', 'sending') THEN 'sent' ELSE status END",
+          ),
+          sent_at: new Date(),
+          scheduled_send_at: null,
+          scheduled_send_error: require("./invoice-helpers").preserveWithdrawalStamp(db),
+          scheduled_request_review: false,
+          scheduled_review_delay_minutes: null,
+          updated_at: new Date(),
+        });
       // First send finalized on SMS and/or email — convert the originating lead.
       // Covers the email-only case the inner sendViaSMS hook can't (it skips when
       // allowClaimed). Resend-safe via the priorStatus gate.

@@ -358,6 +358,7 @@ describe('processScheduledSends send-window handling', () => {
         .mockReturnValueOnce(chain({ first: undefined })) // strict re-check after the consume (none live)
         .mockReturnValueOnce(chain({ first: undefined })) // requeue idempotency check (no prior row)
         .mockReturnValueOnce(requeueInsert) // held-SMS scheduled-rail insert
+        .mockReturnValueOnce(chain({ first: { ...draftInvoice, status: 'sending' } })) // second-channel collectibility recheck
         .mockReturnValueOnce(chain()) // finalize update
         .mockReturnValueOnce(chain({ first: null })); // lead-conversion read (permissive)
 

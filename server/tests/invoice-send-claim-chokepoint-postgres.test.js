@@ -642,6 +642,26 @@ postgres('the shared send claim on a migrated database', () => {
         applySpy.mockRestore();
       }
     });
+
+    test('a cancellation that voids the invoice during the SMS provider leg prevents the following email leg', async () => {
+      await draftInvoiceFixture();
+      const { sendInvoiceEmail } = require('../services/invoice-email');
+      sendInvoiceEmail.mockClear();
+      sendCustomerMessage.mockImplementationOnce(async () => {
+        // Simulate the cancellation sweep committing while the provider call
+        // is in flight. The SMS finalize CAS cannot overwrite this void.
+        await mockPg('invoices').where({ id: f.invoiceId }).update({ status: 'void', updated_at: new Date() });
+        return { sent: true, channel: 'sms', providerMessageId: `SM${randomUUID().slice(0, 8)}` };
+      });
+
+      const result = await InvoiceService.sendViaSMSAndEmail(f.invoiceId);
+
+      expect(result.sms.ok).toBe(true);
+      expect(result.email).toMatchObject({ ok: false, code: 'invoice_not_sendable' });
+      expect(result.email.error).toMatch(/voided invoice/);
+      expect(sendInvoiceEmail).not.toHaveBeenCalled();
+      expect((await readInvoice(f.invoiceId)).status).toBe('void');
+    });
   });
 
   describe('the completion delivery claim treats an email-delivered draft as already delivered (pre-push P1 #4131, this round — mechanism diff)', () => {
