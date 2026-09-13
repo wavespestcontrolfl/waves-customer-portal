@@ -579,7 +579,11 @@ const TERMITE_INSTALL_DEFAULTS = Object.freeze({
 });
 let TERMITE_INSTALL = { ...TERMITE_INSTALL_DEFAULTS };
 const positiveNumber = (v) => (Number.isFinite(Number(v)) && Number(v) > 0 ? Number(v) : null);
-const nonNegativeNumber = (v) => (Number.isFinite(Number(v)) && Number(v) >= 0 ? Number(v) : null);
+// Match the server bridge's missing-value semantics. Number(null) and
+// Number('') are both zero, but a missing admin knob restores its default;
+// only an explicit numeric zero disables a non-negative term.
+const nonNegativeNumber = (v) => (v !== null && v !== undefined && v !== ''
+  && Number.isFinite(Number(v)) && Number(v) >= 0 ? Number(v) : null);
 // One row per knob: the engine-effective key first, then the row aliases the
 // server bridge reads, then the in-code default (table-driven so the applier
 // carries no per-key branching — codex #4313 r5 P2).

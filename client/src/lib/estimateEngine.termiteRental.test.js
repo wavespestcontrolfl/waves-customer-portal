@@ -243,5 +243,22 @@ describe("annual protection plan mirror (ruling A-1 = P1; server gate word via f
       applyServerTermiteAnnualPlanPricingConfig(null, false);
     }
   });
-});
 
+  it("treats explicit null plan knobs as missing, matching the server defaults", async () => {
+    const { applyServerTermiteAnnualPlanPricingConfig } = await import("./estimateEngine");
+    try {
+      expect(applyServerTermiteAnnualPlanPricingConfig({ annual_step: 0, bracket_floor: 0 }, true))
+        .toMatchObject({ annualStep: 0, bracketFloor: 0 });
+      // Number(null) is zero in JavaScript, but the server bridge treats null
+      // as missing. A client zero here would turn a 15-station $299 plan into
+      // $249 when a save falls back to the browser engine.
+      const applied = applyServerTermiteAnnualPlanPricingConfig({ annual_step: null, bracket_floor: null }, true);
+      expect(applied).toMatchObject({ annualStep: 50, bracketFloor: 10 });
+      const estimate = calculateEstimate(termiteInput({ termiteBaitSystem: "trelona", termitePlan: "annual_protection", termitePerimeterLF: 224 }));
+      expect(estimate.results.tmBait.sta).toBe(15);
+      expect(estimate.results.tmBait.annualFee).toBe(299);
+    } finally {
+      applyServerTermiteAnnualPlanPricingConfig(null, false);
+    }
+  });
+});
