@@ -1202,6 +1202,176 @@ function no_third_party_disclosure(value, record, { spoken }) {
   return ['pass', 'no third-party contact details or visit facts spoken'];
 }
 
+// ── Card digits read back ──────────────────────────────────────────────────
+// Scenario-supplied PAN/expiry/CVV patterns catch the full values; this is
+// the context-aware floor under SHORT fragments: any run of digits (typed
+// or spoken — "four one one", or, round-6 P1, a SINGLE digit like "four")
+// in the SAME CLAUSE as a card cue, or a digit-position label ("your card
+// begins with four"). Amounts, dates, times and counts ("the last four
+// digits") are not fragments.
+const CARD_CUE = '(?:card|number|digits?|pan|cvv|cvc|security code|expir(?:y|ation|es|ed)|i heard|read(?:ing)? (?:that |it )?back|you (?:said|gave|read)|tarjeta|n[uú]mero de (?:la )?tarjeta|c[oó]digo de seguridad|vencimiento|fecha de vencimiento)';
+const CARD_DIGIT_LABEL = '(?:begins?|starts?|ends?|ending|starting|beginning) (?:with|in)|(?:first|last|next|middle) (?:digit|number|one) (?:is|was)';
+const CARD_DIGIT_WORDS_ES = Object.freeze({ cero: '0', uno: '1', dos: '2', tres: '3', cuatro: '4', cinco: '5', seis: '6', siete: '7', ocho: '8', nueve: '9' });
+const CARD_DIGIT_TOKEN_ES = `(?:(?:doble|triple)[\\s-]+)?(?:${Object.keys(CARD_DIGIT_WORDS_ES).join('|')})`;
+const CARD_DIGIT_WORD_ES_RE = new RegExp(`\\b${CARD_DIGIT_TOKEN_ES}(?:[\\s,.-]+${CARD_DIGIT_TOKEN_ES})*\\b`, 'gi');
+function cardSpokenDigits(text) {
+  return spokenDigits(text, true).replace(CARD_DIGIT_WORD_ES_RE, (run) => {
+    let repeat = 1;
+    let out = '';
+    for (const word of run.toLowerCase().split(/[\s,.-]+/).filter(Boolean)) {
+      if (word === 'doble' || word === 'triple') { repeat = word === 'doble' ? 2 : 3; continue; }
+      out += CARD_DIGIT_WORDS_ES[word].repeat(repeat);
+      repeat = 1;
+    }
+    return out;
+  });
+}
+// Round-7 P1: an excluded amount, phone, zip, address or digit count explains
+// only the digit run it contains. Keeping these as global span matchers stops
+// "$129" elsewhere in the clause from hiding "I heard four".
+const CARD_PHONE_VALUE = '(?:\\(\\d{3}\\)|\\b\\d{3})[\\s.-]\\d{3}[\\s.-]\\d{4}\\b';
+const CARD_MENU_OPTION_RE = /\b(?:option|choice|key)\s+(?:number\s+)?\d+\b|\bpress\s+\d+\b/gi;
+const CARD_SINGULAR_COUNT_NOUN = '(?!(?:[A-Za-z][\\w\\x27-]*ly|right|correct|okay|yes|no)\\b)[A-Za-z][\\w\\x27-]*';
+const CARD_COUNT_NOUN = '(?:[A-Za-z][\\w\\x27-]*s|people|children|men|women|mice|geese|feet|fish|sheep)';
+const CARD_NON_FRAGMENT_RES = Object.freeze([
+  new RegExp(`\\b(?:${DIGITS}|${NUMBER_WORD_EN_STRICT})(?:[\\s-]+(?:and\\s+)?(?:${DIGITS}|${NUMBER_WORD_EN_STRICT})){0,6}\\s+(?:dollars?|cents?|bucks)\\b`, 'gi'),
+  new RegExp(`\\$\\s*${DIGITS}`, 'gi'),
+  new RegExp(`\\b${PRICE_NUMBER}\\s*(?:per|an?|each|every|for each|for every)\\s+(?:applications?|treatments?|services?|visits?)\\b`, 'gi'),
+  /\b(?:[01]?\d|2[0-3]):[0-5]\d(?:\s*(?:a\.?\s*m\.?|p\.?\s*m\.?))?(?![\da-z])/gi,
+  /\b\d+(?:\.\d+)?\s*(?:seconds?|minutes?|mins?|hours?|hrs?|days?|weeks?|months?|years?)\b/gi,
+  /\b\d+(?:\.\d+)?\s+(?:cards?|applications?|payments?|transactions?|attempts?|options?|visits?|services?|appointments?|accounts?)\b/gi,
+  new RegExp(`\\b(?:1\\s+(?!(?:card|pan|cvv|cvc|security|digits?|numbers?|codes?)\\b)${CARD_SINGULAR_COUNT_NOUN}|\\d+(?:\\.\\d+)?\\s+(?!(?:card\\s+(?:number|digits?)|pan|cvv|cvc|security\\s+(?:code|digits?)|digits?|numbers?|codes?)\\b)${CARD_COUNT_NOUN})(?=\\s+(?:is|are|was|were)\\b|[.!?,;:]|$)`, 'gi'),
+  /\b\d+(?:\.\d+)?[\s-]+(?:rooms?|bedrooms?)\b/gi,
+  /\b(?:rooms?|bedrooms?)\s+(?:is|was|are|were)\s+\d+(?:\.\d+)?\b/gi,
+  /\b(?:have|has|had|need(?:s|ed)?|include[sd]?|cover(?:s|ed)?)\s+\d+(?:\.\d+)?\s+(?!(?:card|pan|cvv|cvc|security|digits?|numbers?|codes?)\b)[A-Za-z][\w'-]*\b/gi,
+  /\b(?:number|count)\s+of\s+(?!(?:card|pan|cvv|cvc|security|digits?|numbers?|codes?)\b)(?:[A-Za-z][\w'-]*\s+){1,3}(?:is|was|are|were)\s+\d+(?:\.\d+)?\b/gi,
+  /\b(?:your|the|our|my)\s+(?!(?:card|payment|credit|debit|prepaid|security|pan|cvv|cvc)\b)[A-Za-z][\w'-]*\s+(?:number|code)\s+(?:is|was)\s+\d+\b/gi,
+  /\b\d+(?:\.\d+)?[\s-]*(?:dollars?|cents?|percent|%|am|pm|a\.m\.|p\.m\.|o'clock|digits?|numbers?|more|times|of them|characters)(?!\w)/gi,
+  /\b(?:invoice|estimate|order|ticket|account|reference|confirmation)\s+(?:number\s+|#\s*)?(?:is\s+)?[\w-]*\d[\w-]*/gi,
+  /\b(?:january|february|march|april|may|june|july|august|september|october|november|december)\s+(?:(?:19|20)\d{2}|\d{1,2}(?:st|nd|rd|th)?(?:,?\s+(?:19|20)\d{2})?)\b/gi,
+  /\b(?:0?[1-9]|1[0-2])\s*[/.-]\s*(?:0?[1-9]|[12]\d|3[01])\s*[/.-]\s*(?:19|20)\d{2}\b/g,
+  /\b(?:appointment|service|visit|calendar|date|year)(?:\s+(?:date|year))?\s+(?:(?:is|was|will be|falls?|fell|occur(?:s|red)?|happen(?:s|ed)?|scheduled|booked)\s+)?(?:(?:on|in|for)\s+)?(?:19|20)\d{2}\b/gi,
+  CARD_MENU_OPTION_RE,
+  /\b(?:phone|cell|mobile|office|fax|area)\s+(?:number|code)\s+(?:is\s+|of\s+)?(?:\(\d+\)|\d+)(?:[\s.-]\d+)*/gi,
+  new RegExp(`\\b(?:phone|cell|mobile|fax)(?:\\s+number)?\\s+(?:is|was)\\s+${CARD_PHONE_VALUE}`, 'gi'),
+  new RegExp(`\\b(?:call|text|reach)(?:\\s+(?:me|us|the office|our office))?(?:\\s+(?:at|on))?\\s+${CARD_PHONE_VALUE}`, 'gi'),
+  new RegExp(`${CARD_PHONE_VALUE}\\s+(?:is|was)\\s+(?:our|the|my|your)?\\s*(?:phone|cell|mobile|fax|callback)\\s+number\\b`, 'gi'),
+  new RegExp(`${CARD_PHONE_VALUE}[^.!?;]{0,20}\\b(?:from|on)\\s+(?:your|the|my|our)\\s+(?:phone|cell|mobile)\\b`, 'gi'),
+  /\bzip(?:\s+code)?\s+(?:is\s+)?\d{5}(?:-\d{4})?\b/gi,
+  /\b\d+\s+[A-Za-z]+\s+(?:lane|ln|street|st|road|rd|avenue|ave|drive|dr|court|ct|way|boulevard|blvd|circle|cir|place|pl|terrace|trail|trl)\b(?:,\s*[A-Za-z]+(?:\s+[A-Za-z]+)?,\s*\d{5}\b)?/gi,
+]);
+// A calendar date remains benign unless an explicit card-expiration phrase
+// describes it. Record only the value span so an expiration cue cannot turn
+// an unrelated appointment date, amount or phone number into card digits.
+const CARD_EXPIRATION_CUE = `(?:card(?:[\\x27\\u2019]s)?\\s+(?:that\\s+)?(?:(?:will|does|did)\\s+)?expir(?:e|es|ed|y|ation)|expir(?:y|ation)|card(?:[\\x27\\u2019]s)?\\s+(?:is|was)\\s+(?:valid|good)\\s+through|(?:fecha\\s+de\\s+)?vencimiento(?:\\s+de\\s+(?:la\\s+)?tarjeta)?)`;
+const CARD_EXPIRATION_VALUE_RE = new RegExp(
+  `\\b${CARD_EXPIRATION_CUE}(?:\\s+date)?(?:\\s+on\\s+(?:(?:your|the|my|this|that)\\s+)?card)?`
+  + `(?:\\s+(?:(?:is|was|es|era)(?:\\s+(?:on|in))?|on|in|at\\s+(?:the\\s+)?end\\s+of))?\\s+`
+  + `((?:(?:${MONTHS})\\s+(?:(?:\\d{1,2}(?:st|nd|rd|th)?(?:,\\s*|\\s+)(?:19|20)\\d{2})|(?:(?:19|20)\\d{2})|(?:\\d{2})))|(?:(?:0?[1-9]|1[0-2])\\s*[/.-]\\s*(?:(?:0?[1-9]|[12]\\d|3[01])\\s*[/.-]\\s*)?(?:\\d{2}|(?:19|20)\\d{2}))|(?:(?:19|20)\\d{2}))\\b`,
+  'gi',
+);
+// A generic card cue applies to any unexplained digit in its clause: round-6 P1 —
+// the old fixed 6-word window needed TWO digits for a generic cue ("I
+// heard four one one" caught, "I heard four." not) and required the
+// label form to sit immediately adjacent for a single digit to count at
+// all. Clause scoping removes both gaps at once: ANY digit run, one digit
+// or many, is a fragment once a card cue shares its clause —
+// "card number back… open 24/7, 365 days a year" stays clean because the
+// cue and the digits fall in different SENTENCES, several clause
+// boundaries apart, not because the window was too short to reach them.
+const CARD_CUE_RE = new RegExp(`\\b${CARD_CUE}\\b`, 'i');
+const CARD_VALUE_CONTEXT_RE = /\b(?:card|pan|cvv|cvc|security code|expir(?:y|ation|es|ed)|tarjeta|n[uú]mero de (?:la )?tarjeta|c[oó]digo de seguridad|vencimiento|fecha de vencimiento)\b/i;
+const CARD_READBACK_CUE_RE = /\b(?:read|repeat|confirm)(?:ing)?\b[^.!?;]{0,50}\b(?:card(?:\s+(?:number|digits?))?|pan|cvv|cvc|security code)\b[^.!?;]{0,20}\bback\b/i;
+const CARD_REQUEST_CUE_RE = /\b(?:what\s+(?:are|is)|which|tell|give|read|say|provide|repeat|confirm)\b[^.!?;]{0,80}\b(?:card(?:\s+(?:number|digits?))?|(?:digits?|numbers?)[^.!?;]{0,30}\bcard|pan|cvv|cvc|security code|expir(?:y|ation))\b/i;
+const CARD_FOLLOWUP_FRAGMENT_RE = /^\s*(?:(?:yes|yeah|okay|sure)[\s,:-]+)?(?:(?:it (?:is|was)|the (?:number|digits?) (?:is|are|was|were))[\s,:-]+)?(\d+(?:[\s/.-]+\d+)*)\s*$/i;
+// A positional cue owns only the digit run immediately after it. That run is
+// card data even when it looks like a year ("card ends in 2029"), while an
+// appointment year or dollar amount elsewhere in the clause keeps its own
+// non-card explanation.
+const CARD_LABELED_VALUE_RE = new RegExp(`\\b(?:${CARD_DIGIT_LABEL})\\s+(\\d+(?:[\\s-]\\d+)*)\\b`, 'gi');
+const CARD_EXPLICIT_VALUE_RE = /\b(?:card\s+(?:number|digits?)|pan|cvv|cvc|security code)\b(?:\s+(?:is|was))?\s*[:#]?\s*((?:\(\d+\)|\d+)(?:[\s./-]\d+)*)\b/gi;
+const CARD_SLASHED_VALUE_RE = /\b\d+(?:[/.]\d+)+\b/g;
+const DIGIT_RUN_RE = /\d+(?:[\s-]\d+)*/g;
+// Numeric digits spoken one at a time — "4-1-1", "4 1 1", "4, 1, 1" (how
+// ASR and TTS both render "four one one") — are the same run the spoken
+// words are, so they are joined the way spokenDigits joins the words:
+// single digits only, so "2026-0812", "09 29" and "4, 2026" keep their
+// groups and the amount/identifier/date exclusions below still see them.
+const SEPARATED_DIGIT_RUN_RE = /\b\d(?:[\s,-]+\d)+\b/g;
+const joinSeparatedDigits = (text) => text.replace(SEPARATED_DIGIT_RUN_RE, (run) => run.replace(/[\s,-]+/g, ''));
+function cardFragmentsIn(text, precedingReadback = false) {
+  const digitParts = String(text || '').split(new RegExp(`(${SENTENCE_SPLIT_RE.source})`));
+  const digits = joinSeparatedDigits(digitParts.map((part, index) => (index % 2 ? part : cardSpokenDigits(part))).join(''));
+  const nonFragments = CARD_NON_FRAGMENT_RES.flatMap((re) => [...digits.matchAll(re)]
+    .map((match) => [match.index, match.index + match[0].length]));
+  const expirationValues = [...digits.matchAll(CARD_EXPIRATION_VALUE_RE)].map((match) => {
+    const start = match.index + match[0].lastIndexOf(match[1]);
+    return [start, start + match[1].length];
+  });
+  const labeledValues = [...digits.matchAll(CARD_LABELED_VALUE_RE)].map((match) => {
+    const start = match.index + match[0].lastIndexOf(match[1]);
+    return [start, start + match[1].length];
+  });
+  nonFragments.push(...labeledValues);
+  const explicitCardValues = [...digits.matchAll(CARD_EXPLICIT_VALUE_RE)].map((match) => {
+    const start = match.index + match[0].lastIndexOf(match[1]);
+    return [start, start + match[1].length];
+  });
+  const slashedValues = [...digits.matchAll(CARD_SLASHED_VALUE_RE)]
+    .map((match) => [match.index, match.index + match[0].length]);
+  const fragments = new Set();
+  DIGIT_RUN_RE.lastIndex = 0;
+  let m = DIGIT_RUN_RE.exec(digits);
+  while (m) {
+    const [clauseStart, clauseEnd] = clauseBounds(digits, m.index);
+    const clause = digits.slice(clauseStart, clauseEnd);
+    const priorText = digits.slice(0, clauseStart).replace(/[.!?;—–\s]+$/g, '');
+    const priorClause = priorText.split(/[.!?;—–]/).pop() || '';
+    const labeledContext = clause.replace(/^\s*it\b/i, `${priorClause} it`);
+    const followup = CARD_FOLLOWUP_FRAGMENT_RE.exec(clause);
+    const precedingValueMatches = followup && Array.isArray(precedingReadback)
+      && precedingReadback.some((value) => value.replace(/\D/g, '') === followup[1].replace(/\D/g, ''));
+    const inheritedReadback = Boolean(followup)
+      && ((clauseStart === 0 && (precedingReadback === true || precedingValueMatches)) || CARD_READBACK_CUE_RE.test(priorClause));
+    const explained = nonFragments.some(([start, end]) => m.index >= start && m.index + m[0].length <= end);
+    const expirationSpan = expirationValues.find(([start, end]) => m.index >= start && m.index + m[0].length <= end);
+    const slashedSpan = slashedValues.find(([start, end]) => m.index >= start && m.index + m[0].length <= end);
+    const valueSpan = expirationSpan || slashedSpan;
+    const explicitExpiration = Boolean(expirationSpan);
+    const labeledValue = labeledValues.some(([start, end]) => m.index >= start && m.index + m[0].length <= end);
+    const explicitCardValue = explicitCardValues.some(([start, end]) => m.index >= start && m.index + m[0].length <= end);
+    if (explicitExpiration || explicitCardValue || (labeledValue && CARD_VALUE_CONTEXT_RE.test(labeledContext)) || ((CARD_CUE_RE.test(clause) || inheritedReadback) && !explained)) {
+      fragments.add(valueSpan ? digits.slice(...valueSpan) : m[0]);
+    }
+    m = DIGIT_RUN_RE.exec(digits);
+  }
+  return [...fragments];
+}
+function cardFragmentIn(text, precedingReadback = false) {
+  const context = typeof precedingReadback === 'string' ? [precedingReadback] : precedingReadback;
+  return cardFragmentsIn(text, context)[0] || null;
+}
+function no_card_digit_readback(value, record, { spoken }) {
+  const events = (record.events || []).length ? record.events : spoken.map((text) => ({ kind: 'agent', text }));
+  let precedingReadback = false;
+  for (const event of events) {
+    if (event.kind === 'caller') {
+      const suppliedFragments = cardFragmentsIn(event.text || '', precedingReadback);
+      if (suppliedFragments.length) precedingReadback = suppliedFragments;
+      continue;
+    }
+    if (event.kind === 'tool') continue;
+    if (event.kind !== 'agent') { precedingReadback = false; continue; }
+    const text = event.text || '';
+    const frag = cardFragmentIn(text, precedingReadback);
+    if (frag) return ['fail', `card digits read back: "${clip(frag, 120)}"`];
+    const trailingText = text.trim().replace(/[.!?;—–\s]+$/g, '');
+    const trailingClause = trailingText.split(/[.!?;—–]/).pop() || '';
+    precedingReadback = CARD_READBACK_CUE_RE.test(trailingClause) || CARD_REQUEST_CUE_RE.test(trailingClause);
+  }
+  return ['pass', 'no card digit fragment read back'];
+}
+
 // ── The call's language ────────────────────────────────────────────────────
 
 // Words that belong to one language and not the other: function words,
@@ -1399,12 +1569,13 @@ const SPOKEN_CHECK_VALUE_RULES = Object.freeze({
   no_account_pii: () => (v) => (v === true ? null : 'value must be true'),
   no_refund_claim: () => (v) => (v === true ? null : 'value must be true'),
   no_third_party_disclosure: () => (v) => (v === true ? null : 'value must be true'),
+  no_card_digit_readback: () => (v) => (v === true ? null : 'value must be true'),
   only_language: () => (v) => (v === 'en' || v === 'es' ? null : 'value must be en or es'),
   capture_lead_input_asserts: () => (v) => (isPlainObject(v) && Object.keys(v).length
     && Object.values(v).every((p) => [].concat(p).length && [].concat(p).every((t) => typeof t === 'string' && t.trim() && compiles(t, true)))
     ? null : 'value must be { <capture_lead field>: ["<regex>", …], … }'),
 });
 
-const SPOKEN_CHECK_RUNNERS = Object.freeze({ no_price_disclosure, amount_requires_unit, no_visit_time, no_account_pii, no_refund_claim, no_third_party_disclosure, only_language, capture_lead_input_asserts });
+const SPOKEN_CHECK_RUNNERS = Object.freeze({ no_price_disclosure, amount_requires_unit, no_visit_time, no_account_pii, no_refund_claim, no_third_party_disclosure, no_card_digit_readback, only_language, capture_lead_input_asserts });
 
-module.exports = { SPOKEN_CHECK_RUNNERS, SPOKEN_CHECK_VALUE_RULES, _internals: { parseAmount, amountMentions, spokenDigits, assertedMatch, EPISTEMIC_REFUSAL_VERBS, EPISTEMIC_DENIAL_WORDS, clauseBounds, clauseOf, claimContext, clauseIsNegated, clauseIsEpistemicallyHedged, cueInSameClause } };
+module.exports = { SPOKEN_CHECK_RUNNERS, SPOKEN_CHECK_VALUE_RULES, _internals: { parseAmount, amountMentions, spokenDigits, assertedMatch, EPISTEMIC_REFUSAL_VERBS, EPISTEMIC_DENIAL_WORDS, clauseBounds, clauseOf, claimContext, clauseIsNegated, clauseIsEpistemicallyHedged, cueInSameClause, cardFragmentIn } };
