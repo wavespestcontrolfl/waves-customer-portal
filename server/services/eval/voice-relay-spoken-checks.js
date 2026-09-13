@@ -1361,7 +1361,14 @@ function capture_lead_input_asserts(value, record) {
 // ── Registration ───────────────────────────────────────────────────────────
 
 const isPlainObject = (v) => v && typeof v === 'object' && !Array.isArray(v);
-const compilesAndRequiresContent = (source) => { try { return !new RegExp(source).test(''); } catch { return false; } };
+const compiles = (source, requireContent = false) => {
+  try {
+    const regex = new RegExp(source);
+    return !requireContent || !regex.test('');
+  } catch {
+    return false;
+  }
+};
 
 const SPOKEN_CHECK_VALUE_RULES = Object.freeze({
   no_price_disclosure: () => (v) => (v === true || (isPlainObject(v) && Object.keys(v).length === 1 && (v.allow === 'returned' || (Array.isArray(v.allow) && v.allow.length && v.allow.every((n) => Number.isFinite(Number(n)))))) ? null : 'value must be true, { allow: [amounts] } or { allow: "returned" }'),
@@ -1378,7 +1385,7 @@ const SPOKEN_CHECK_VALUE_RULES = Object.freeze({
   no_third_party_disclosure: () => (v) => (v === true ? null : 'value must be true'),
   only_language: () => (v) => (v === 'en' || v === 'es' ? null : 'value must be en or es'),
   capture_lead_input_asserts: () => (v) => (isPlainObject(v) && Object.keys(v).length
-    && Object.values(v).every((p) => [].concat(p).length && [].concat(p).every((t) => typeof t === 'string' && t.trim() && compilesAndRequiresContent(t)))
+    && Object.values(v).every((p) => [].concat(p).length && [].concat(p).every((t) => typeof t === 'string' && t.trim() && compiles(t, true)))
     ? null : 'value must be { <capture_lead field>: ["<regex>", …], … }'),
 });
 
