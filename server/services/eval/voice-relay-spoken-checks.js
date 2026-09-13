@@ -1541,7 +1541,7 @@ const SAFETY_KEYWORDS_POSITIVE = SAFETY_ADJECTIVE;
 
 const SAFETY_NON_PREFIX = '(?<!non[-\\s])';
 
-const SAFETY_KEYWORDS_HARM = `${SAFETY_NON_PREFIX}(?:${HARM_ADJECTIVE}|${SAFETY_HARM_VERB})`;
+const SAFETY_KEYWORDS_HARM = `${SAFETY_NON_PREFIX}(?:${HARM_ADJECTIVE}|${SAFETY_HARM_VERB}|risk|danger)`;
 
 function questionNegatesKeyword(text, keywordAlt) {
   const adjacentNegation = new RegExp(`\\bnot\\s+(?:${SAFETY_INTENSIFIER})?(?:${keywordAlt})\\b`, 'i');
@@ -1690,6 +1690,8 @@ const SAFETY_SPECIFIC_PRODUCT_SCOPES = Object.freeze([
   ['larvicide', /\blarvicides?\b/i],
   ['adulticide', /\badulticides?\b/i],
   ['miticide', /\bmiticides?\b/i],
+  ['insecticide', /\binsecticides?\b/i],
+  ['herbicide', /\bherbicides?\b/i],
   ['poison', /\bpoisons?\b/i],
   ['repellent', /\brepellents?\b/i],
   ['fumigant', /\bfumigants?\b/i],
