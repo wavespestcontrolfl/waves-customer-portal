@@ -19,7 +19,9 @@ jest.mock('../models/db', () => {
     // The claim's second .where((q) => …) narrows an unsent row; the fixture row is unsent.
     where: () => query(name),
   });
-  return (name) => ({ where: () => query(name) });
+  const mockDb = (name) => ({ where: () => query(name) });
+  mockDb.transaction = jest.fn();
+  return mockDb;
 });
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));
 jest.mock('../services/lawn-visit-runs', () => ({
@@ -30,11 +32,14 @@ jest.mock('../services/lawn-visit-runs', () => ({
   recordNotificationNotSent: jest.fn(),
 }));
 jest.mock('../services/sms-template-renderer', () => ({ renderRequiredSmsTemplate: jest.fn(async () => 'Your report is ready') }));
-jest.mock('../services/notification-dispatcher', () => ({ notify: jest.fn(async () => ({ sent: true, results: { sms: 'sent' } })) }));
+jest.mock('../services/notification-dispatcher', () => ({
+  notify: jest.fn(async () => ({ sent: true, deliveryOutcome: 'accepted', results: { sms: 'sent' } })),
+}));
 
 const NotificationDispatcher = require('../services/notification-dispatcher');
 const LawnIntel = require('../services/lawn-intelligence');
 const visitRuns = require('../services/lawn-visit-runs');
+const db = require('../models/db');
 
 const ownershipLost = () => Object.assign(new Error('Lawn delivery ownership lost'), { code: 'LAWN_DELIVERY_OWNERSHIP_LOST' });
 
@@ -52,7 +57,7 @@ describe('sendAssessmentNotification lease check', () => {
       return true;
     });
     visitRuns.settleNotificationAttempt.mockImplementation(async () => {
-      if (rows.failSettle) throw new Error('settle write failed');
+      if (rows.failSettle) throw rows.settleError || new Error('settle write failed');
       updates.push(['lawn_assessments', { notification_sent_at: new Date() }]);
       return true;
     });
@@ -82,14 +87,40 @@ describe('sendAssessmentNotification lease check', () => {
     ]);
   });
 
+  test('an unguarded dispatcher-owned quiet-hours queue settles without creating a second queue', async () => {
+    NotificationDispatcher.notify.mockResolvedValueOnce({
+      sent: true,
+      deliveryOutcome: 'not_sent',
+      results: { sms: 'scheduled' },
+      smsResult: {
+        sent: false,
+        deliveryOutcome: 'not_sent',
+        code: 'QUIET_HOURS_HOLD',
+        deferred: true,
+        nextAllowedAt: '2026-09-14T12:00:00.000Z',
+      },
+    });
+
+    await expect(LawnIntel.sendAssessmentNotification('a-1')).resolves.toMatchObject({
+      sent: true, deliveryOutcome: 'not_sent',
+    });
+    expect(db.transaction).not.toHaveBeenCalled();
+    expect(updates.map(([, fields]) => fields)).toEqual([
+      expect.objectContaining({ notification_sent: true, notification_sent_at: null }),
+      expect.objectContaining({ notification_sent_at: expect.any(Date) }),
+    ]);
+  });
+
   test('a dispatcher that definitely delivered nothing releases the claim for a re-send', async () => {
     NotificationDispatcher.notify.mockResolvedValueOnce({ sent: false, deliveryOutcome: 'not_sent', results: { sms: 'blocked' } });
     await expect(LawnIntel.sendAssessmentNotification('a-1')).resolves.toMatchObject({ sent: false });
     expect(updates.map(([, f]) => f.notification_sent)).toEqual([true, false]);
   });
 
-  test('a known dispatcher early refusal is normalized as definite non-delivery', async () => {
-    NotificationDispatcher.notify.mockResolvedValueOnce({ sent: false, results: { reason: 'type_disabled' } });
+  test('a canonical dispatcher early refusal is definite non-delivery', async () => {
+    NotificationDispatcher.notify.mockResolvedValueOnce({
+      sent: false, deliveryOutcome: 'not_sent', results: { reason: 'type_disabled' },
+    });
     await expect(LawnIntel.sendAssessmentNotification('a-1')).resolves.toMatchObject({
       sent: false, deliveryOutcome: 'not_sent',
     });
@@ -129,11 +160,17 @@ describe('sendAssessmentNotification lease check', () => {
     expect(updates).toEqual([]);
   });
 
-  test('a settle write that fails after dispatch keeps the claim rather than re-sending', async () => {
+  test('captured dispatch evidence wins when a later settle error carries a conflicting outcome', async () => {
     rows.failSettle = true;
+    rows.settleError = Object.assign(new Error('settle write failed'), {
+      providerOutcome: { sent: false, deliveryOutcome: 'not_sent', code: 'STALE_ERROR_METADATA' },
+    });
     try {
       await expect(LawnIntel.sendAssessmentNotification('a-1')).resolves.toBeNull();
-    } finally { delete rows.failSettle; }
+    } finally {
+      delete rows.failSettle;
+      delete rows.settleError;
+    }
     // The text went out; only its timestamp is missing. Releasing here would
     // hand the customer a second copy.
     expect(updates.map(([, f]) => f.notification_sent)).toEqual([true]);
