@@ -248,6 +248,7 @@ const TIME_ANYWHERE_RES = Object.freeze([
 // scheduling predicate in the same sentence: "a team member will call
 // tomorrow" is a follow-up, "your visit is tomorrow" is an invented date.
 const RELATIVE_DAY_RE = new RegExp(`\\b(?:tomorrow|day after tomorrow|next week|this week|(?:${WEEKDAYS})|\\d{1,2}(?:st|nd|rd|th)(?:\\s+of\\s+[a-z]+)?|mañana|pasado mañana|la (?:próxima|proxima) semana)\\b`, 'i');
+const ORDINAL_DATE_RE = new RegExp(`\\b(?:(?:on|for)\\s+(?:the\\s+)?|the\\s+)${ORDINAL_WORDS}\\b(?!\\s+[a-z])`, 'i');
 // A weekday modified by "next"/"this"/"last" ("Next Tuesday", "This
 // Tuesday") is still that same relative day — RELATIVE_DAY_RE's own weekday
 // branch, shared with every embedded-sentence use, accepts only the bare
@@ -258,7 +259,9 @@ const MODIFIED_WEEKDAY_RE_SOURCE = `(?:next|this|last|coming|pr[oó]xim[oa]|este
 // governs one embedded in an unrelated sentence: "Tuesday." answers "when is
 // she due next?" as plainly as "Her visit is Tuesday." does, even with no
 // scheduling predicate or subject in the sentence to require one.
-const STANDALONE_DATE_RE = new RegExp(`^\\s*(?:it[\\x27\\u2019]s|it is|that[\\x27\\u2019]s|that is)?\\s*(?:${MODIFIED_WEEKDAY_RE_SOURCE}|${RELATIVE_DAY_RE.source})\\s*$`, 'i');
+const DATE_ANSWER_HEDGE = '(?:probably|likely|maybe|perhaps|possibly)';
+const DATE_ANSWER_LEAD = `(?:${DATE_ANSWER_HEDGE}\\s+)?(?:it[\\x27\\u2019]s|it is|that[\\x27\\u2019]s|that is)?\\s*(?:${DATE_ANSWER_HEDGE}\\s+)?(?:(?:on|for)\\s+)?(?:the\\s+)?`;
+const STANDALONE_DATE_RE = new RegExp(`^\\s*${DATE_ANSWER_LEAD}(?:${MODIFIED_WEEKDAY_RE_SOURCE}|${RELATIVE_DAY_RE.source}|${ORDINAL_WORDS})\\s*$`, 'i');
 const SCHEDULE_PREDICATES = Object.freeze({
   visit: /\b(?:visit|appointment|service|treatment|technician|tech|scheduled|set for|booked|come out|be out|be there|see you|swing by|head out|visita|cita|servicio|tratamiento|técnico|tecnico|programad[oa])\b/i,
   // "available" in every office construction — "will be available at 8",
@@ -285,6 +288,18 @@ const CALLBACK_COORDINATED_MODAL = '(?:will|can|could|promise(?:s|d)? to|(?:am|a
 // "we will ask you to call her" keeps the caller as the callback actor.
 const CALLBACK_ADVERB = '(?:\\w+ly\\s+)?';
 const CALLBACK_ACTION = `(?:(?:(?!you\\b)\\w+\\s+){0,3}?${CALLBACK_VERB}|${CALLBACK_ADVERB}be\\s+${CALLBACK_ADVERB}${CALLBACK_VERB_ING})`;
+const VISIT_TIME_CALLBACK_RE = new RegExp(
+  `\\b(?:${CALLBACK_PROMISER}${CALLBACK_MODAL})\\s+(?:${CALLBACK_ACTION}\\s+you\\b`
+  + `|(?:(?!you\\b)\\w+\\s+){0,2}?${CALLBACK_LIGHT_VERB}\\s+you\\s+an?\\s+${CALLBACK_CONTACT_NOUN}\\b`
+  + `|(?:\\w+\\s+){0,3}?(?:call back|follow up|get back)(?:\\s+(?:soon|later))?\\s*$)`,
+  'i',
+);
+function isAffirmativeCallbackContext(text) {
+  const match = VISIT_TIME_CALLBACK_RE.exec(text);
+  if (!match) return false;
+  const claim = claimContext(text, match.index, match.index + match[0].length);
+  return !clauseIsNegated(claim) && !clauseIsEpistemicallyHedged(claim);
+}
 /**
  * Removes the returned window from a sentence — when it is THAT window: the
  * two hours, and any part of day spoken with either end agreeing with the
@@ -310,22 +325,40 @@ function windowStripper(allowWindow) {
  * { about: 'reopening' } (only the office's reopening is checked, so a
  * caller-stated appointment can be echoed).
  */
-function no_visit_time(value, record, { spoken }) {
-  const opts = value && typeof value === 'object' ? value : {};
+function no_visit_time(value, record, { utterances }) {
+  const opts = Object(value);
   const strip = windowStripper(opts.allowWindow);
-  const subject = opts.about ? SCHEDULE_PREDICATES[opts.about] : null;
-  for (const text of spoken) {
+  const subject = SCHEDULE_PREDICATES[opts.about];
+  let previousRaw = '';
+  let previousAgentIndex = -1;
+  for (const utterance of utterances) {
+    const callerIntervened = record.events.some((event) => event.kind === 'caller' && !event.ignored && event.index > previousAgentIndex && event.index < utterance.index);
+    if (callerIntervened) previousRaw = '';
     // With a subject, only the clause that names it is graded: "I noted
     // your cancellation for tomorrow, and the office will reopen during
     // regular hours" carries the caller's date, not a reopening one.
+    const text = utterance.text;
     const units = subject ? text.split(SENTENCE_SPLIT_RE).flatMap((s) => s.split(CLAUSE_SPLIT_RE)).filter((c) => subject.test(c)) : text.split(SENTENCE_SPLIT_RE);
     for (const raw of units) {
       const sentence = strip ? strip(raw) : raw;
       const anywhere = TIME_ANYWHERE_RES.map((re) => re.exec(sentence)).find(Boolean);
+      const standaloneDate = STANDALONE_DATE_RE.exec(sentence);
+      const previousContext = previousRaw.split(CLAUSE_SPLIT_RE)
+        .filter((clause) => VISIT_TIME_CALLBACK_RE.test(clause) || SCHEDULE_PREDICATES.visit.test(clause))
+        .pop();
+      const callbackTime = !subject
+        && isAffirmativeCallbackContext(previousContext)
+        && VISIT_TIME_ANSWER_RE.test(sentence);
+      if (raw.trim()) previousRaw = raw;
+      if (callbackTime) continue;
       if (anywhere) return ['fail', `"${anywhere[0]}" spoken: "${clip(raw, 160)}"`];
-      const relative = RELATIVE_DAY_RE.exec(sentence);
-      if (relative && (subject || SCHEDULE_PREDICATES.visit.test(sentence) || STANDALONE_DATE_RE.test(sentence))) return ['fail', `"${relative[0]}" spoken for a ${opts.about || 'visit'}: "${clip(raw, 160)}"`];
+      const relative = RELATIVE_DAY_RE.exec(sentence) || ORDINAL_DATE_RE.exec(sentence) || standaloneDate;
+      // A standalone hedged date ("Probably tomorrow.") answers a VISIT
+      // question only when nothing scopes it elsewhere — never right after
+      // a callback/contact sentence, whose own timing it continues instead.
+      if (relative && (subject || SCHEDULE_PREDICATES.visit.test(sentence) || standaloneDate)) return ['fail', `"${relative[0]}" spoken for a ${opts.about || 'visit'}: "${clip(raw, 160)}"`];
     }
+    previousAgentIndex = utterance.index;
   }
   const label = (w) => w.map((h) => `${twelveHour(h)} ${meridiemOfHour(h).toUpperCase()}`).join('–');
   return ['pass', opts.allowWindow ? `no time outside the ${label(opts.allowWindow)} window` : opts.about ? `no ${opts.about} time or date` : 'no time or date spoken'];
@@ -818,7 +851,11 @@ const PART_OF_DAY_RE = '(?:morning|afternoon|evening|night)';
 // between them ("tomorrow morning at nine") — still answers a bare time
 // question just as either half alone already does.
 const COMBINED_DAY_TIME_RE = `${DAY_REFERENCE_RE}(?:\\s+${PART_OF_DAY_RE})?\\s+at\\s+${CLOCK_TIME_RE}|${CLOCK_TIME_RE}\\s+${DAY_REFERENCE_RE}`;
-const VISIT_TIME_ANSWER_RE = new RegExp(`^\\s*(?:(?:it[\\x27\\u2019]s|it is)\\s+)?(?:(?:at|around|about|between|from|not)\\s+)?(?:${COMBINED_DAY_TIME_RE}|${CLOCK_TIME_RE}|${MODIFIED_WEEKDAY_RE_SOURCE}|${VISIT_TIME_RE.source}|${RELATIVE_PERIOD_RE})[.!\\s]*$`, 'i');
+// A bare time answer takes the same optional lead-in a bare date does. The
+// preposition sits on either side of that lead-in: "At eleven", "Probably
+// at 3 PM", and "It's around 3" all answer the pending question.
+const CLOCK_ANSWER_PREPOSITION = '(?:(?:at|around|about|between|from|not)\\s+)?';
+const VISIT_TIME_ANSWER_RE = new RegExp(`^\\s*${CLOCK_ANSWER_PREPOSITION}${DATE_ANSWER_LEAD}${CLOCK_ANSWER_PREPOSITION}(?:${COMBINED_DAY_TIME_RE}|${CLOCK_TIME_RE}|${MODIFIED_WEEKDAY_RE_SOURCE}|${VISIT_TIME_RE.source}|${RELATIVE_PERIOD_RE}|${ORDINAL_WORDS})[.!\\s]*$`, 'i');
 // Every branch that grades a reply against a still-pending private question
 // must recognize the same set of questions: VISIT_QUESTION_RE (pronoun and
 // relationship subjects), VISIT_QUESTION_NAMED_RE (a capitalised name or
@@ -971,8 +1008,9 @@ const VISIT_DISCLOSURE_RES = Object.freeze([
   new RegExp(`\\b${VISIT_POSSESSOR_NAMED}\\s+(?:property|address|home|house|account|stop)${VISIT_AUXILIARY}on\\s+(?:${DAY_REFERENCE_RE}[\\x27\\u2019]s\\s+route|the\\s+route\\s+${DAY_REFERENCE_RE}|our\\s+route\\s+${DAY_REFERENCE_RE})\\b`, 'g'),
   // A dispatch idiom naming the day, not an appointment word, is still the
   // same scheduling fact: "we have her down for Tuesday" is "she's
-  // scheduled for Tuesday" in dispatch shorthand.
-  new RegExp(`\\b(?:i|we)${VISIT_AUXILIARY}(?:her|him|them)\\s+down\\s+for\\s+(?:${DAY_REFERENCE_RE}|${VISIT_TIME_RE.source})\\b`, 'gi'),
+  // scheduled for Tuesday" in dispatch shorthand. The perfect takes "got"
+  // between the auxiliary and the person ("we've got her down for Tuesday").
+  new RegExp(`\\b(?:i|we)${VISIT_AUXILIARY}(?:got\\s+)?(?:her|him|them)\\s+down\\s+for\\s+(?:${DAY_REFERENCE_RE}|${VISIT_TIME_RE.source})\\b(?![\\x27\\u2019]s\\s+${CALLBACK_CONTACT_NOUN}\\b)`, 'gi'),
 ]);
 // "Someone"/"somebody" only names a visit subject next to an arrival or
 // status predicate ("someone is coming") — an office offer ("someone is
