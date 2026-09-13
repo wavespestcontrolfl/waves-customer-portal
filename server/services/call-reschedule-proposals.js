@@ -142,7 +142,7 @@ async function listProposals(conn, { limit = 100, offset = 0, now = new Date() }
 }
 
 async function dismissProposal(conn, id, { actorId, expectedAt } = {}) {
-  if (!enabled()) throw fail('Reschedule proposals are disabled');
+  // Gate rollback stops staging/listing, but must not strand an existing card.
   if (!expectedAt) throw fail('The proposal changed. Refresh before dismissing.');
   const { transitionCore } = require('../routes/admin-triage');
   const result = await transitionCore({
@@ -150,7 +150,7 @@ async function dismissProposal(conn, id, { actorId, expectedAt } = {}) {
     expectedUpdatedAt: expectedAt, requireVersion: true,
     beforeTransition: async (trx) => {
       const live = await trx('triage_items').where({ id }).first('payload');
-      if (!enabled() || !live?.payload?.reschedule_proposal) throw fail('The proposal changed. Refresh before dismissing.');
+      if (!live?.payload?.reschedule_proposal) throw fail('The proposal changed. Refresh before dismissing.');
     },
     afterTransition: (trx) => recordAuditEvent({
       actor_type: 'technician', actor_id: actorId, action: 'reschedule_proposal_dismissed',

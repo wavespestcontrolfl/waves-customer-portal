@@ -1,6 +1,6 @@
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
-const { proposalEvidence, proposalAddress, customerWindow, stageProposal } = require('../services/call-reschedule-proposals');
+const { proposalEvidence, proposalAddress, customerWindow, stageProposal, dismissProposal } = require('../services/call-reschedule-proposals');
 const { classifyTriageItem } = require('../services/triage-auto-resolve');
 
 describe('reviewed proposed times', () => {
@@ -206,5 +206,21 @@ test.each(['resolved', 'dismissed'])('shared triage %s rejects stale or missing 
     const result = await transitionCore({ conn, id: card.id, nextStatus, expectedUpdatedAt });
     expect(result.outcome).toBe('stale_version');
     expect(conn.updates).toEqual([]);
+  }
+});
+
+test('gate rollback still allows a version-bound dismissal of an existing proposal', async () => {
+  const triage = require('../routes/admin-triage');
+  const transition = jest.spyOn(triage, 'transitionCore').mockImplementation(async (options) => {
+    await options.beforeTransition(() => ({ where: () => ({ first: async () => ({ payload: { reschedule_proposal: {} } }) }) }));
+    expect(options).toMatchObject({ id: 'card', nextStatus: 'dismissed', expectedUpdatedAt: '2026-09-13T04:00:00Z', requireVersion: true });
+    return { outcome: 'ok' };
+  });
+  process.env.GATE_RESCHEDULE_PROPOSAL_CARD = 'false';
+  try {
+    await expect(dismissProposal({}, 'card', { actorId: 'staff', expectedAt: '2026-09-13T04:00:00Z' })).resolves.toEqual({ dismissed: true });
+  } finally {
+    delete process.env.GATE_RESCHEDULE_PROPOSAL_CARD;
+    transition.mockRestore();
   }
 });
