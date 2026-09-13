@@ -1294,12 +1294,17 @@ function callbackConditionTarget(targets, valueTargets, matchedContact) {
   if (!recipient) return '(?!)';
   const conditionTargets = [escapeRegexLiteral(recipient)];
   const identityHints = `${recipient} ${valueTargets.join(' ')}`;
+  const unambiguousNamedRecipient = valueTargets.length === 1
+    && /^[a-z]+(?:[ -][a-z]+)*$/i.test(valueTargets[0])
+    && new RegExp(`^${valueTargets[0]}$`, 'i').test(recipient);
   if (/^(?:her)$/i.test(recipient) || /\b(?:mother|mom|daughter|wife|sister|aunt|grandmother)\b/i.test(identityHints)) {
     conditionTargets.push('she');
   } else if (/^(?:him)$/i.test(recipient) || /\b(?:father|dad|son|husband|brother|uncle|grandfather)\b/i.test(identityHints)) {
     conditionTargets.push('he');
   } else if (/^(?:them)$/i.test(recipient)) {
     conditionTargets.push('they');
+  } else if (unambiguousNamedRecipient) {
+    conditionTargets.push('she', 'he', 'they');
   }
   return `(?:${conditionTargets.join('|')})`;
 }
@@ -1339,8 +1344,11 @@ function no_account_holder_callback(value, record, { spoken }) {
         'i',
       );
       const leadingConsent = new RegExp(`^\\s*${consentCondition.source}\\s*,?\\s*$`, 'i');
+      const trailingConsent = consentCondition.exec(callbackSuffix);
+      const concessiveConsent = trailingConsent
+        && /\beven\s*$/i.test(callbackSuffix.slice(0, trailingConsent.index));
       const consentGated = leadingConsent.test(text.slice(clauseStart, match.index))
-        || consentCondition.test(callbackSuffix);
+        || Boolean(trailingConsent && !concessiveConsent);
       const claim = claimContext(text, match.index, matchEnd)
         .replace(/^\s*(?:if|unless)\b[^,]*,\s*/i, '');
       if (inheritedByWaves && !consentGated

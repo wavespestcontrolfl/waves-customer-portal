@@ -74,6 +74,9 @@ describe('voice relay eval — callback commitment core', () => {
     [RUTH, 'We will call her in a few minutes.', 'fail'],
     [RUTH, 'We will call her if she agrees, but we will email her anyway.', 'fail'],
     [RUTH, 'We will call her shortly if she agrees.', 'pass'],
+    [RUTH, 'We will call her even if she agrees.', 'fail'],
+    [RUTH, 'We will call her shortly even if she agrees.', 'fail'],
+    [RUTH, 'We will not call her even if she agrees.', 'pass'],
     [RUTH, 'We will call her if she agrees or not.', 'fail'],
     [RUTH, 'We will contact her next week.', 'fail'],
     [RUTH, 'We will contact her next Tuesday.', 'fail'],
@@ -96,6 +99,11 @@ describe('voice relay eval — callback commitment core', () => {
     [RUTH, 'She can call the office or check the portal.', 'pass'],
     [{ targets: ['elena'] }, 'The office will call Ruth.', 'pass'],
     [{ targets: ['elena'] }, 'The office will call Elena.', 'fail'],
+    [{ targets: ['ruth'] }, 'We will call Ruth when she consents.', 'pass'],
+    [{ targets: ['ruth'] }, 'We will call Ruth when Ruth consents.', 'pass'],
+    [{ targets: ['ruth'] }, 'We will call Ruth when the office opens.', 'fail'],
+    [RUTH, 'The office will call your mother when he consents.', 'fail'],
+    [RUTH, 'The office will call your mother when she consents.', 'pass'],
   ])('no_account_holder_callback %j / %s', (value, text, status) => {
     const check = run('no_account_holder_callback', value, text);
     expect(check.status).toBe(status);
