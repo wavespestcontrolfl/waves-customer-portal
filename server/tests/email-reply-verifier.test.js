@@ -87,6 +87,15 @@ describe('email reply verifier', () => {
       .toContain('fact_binding_unsupported');
   });
 
+  test('between-and appointment windows preserve ordered endpoints', () => {
+    expect(verdict('Hi Casey, your pending appointment is September 15 between 9 AM and 11 AM.').ok).toBe(true);
+    expect(verdict('Hi Casey, your pending appointment is September 15 between 9 and 11 AM.').ok).toBe(true);
+    for (const window of ['11 AM and 9 AM', '9 AM and 9 AM']) {
+      expect(verdict(`Hi Casey, your pending appointment is September 15 between ${window}.`).violations)
+        .toContain('fact_binding_unsupported');
+    }
+  });
+
   test('status checks bind amounts even when another fact category is named', () => {
     const facts = contextWith().facts.concat({ key: 'recent_payment', status: 'present',
       value: { amount: 25, paymentDate: '2026-09-11', status: 'succeeded' } });
