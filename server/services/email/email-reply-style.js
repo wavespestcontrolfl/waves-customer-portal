@@ -23,13 +23,17 @@ async function emailExemplars(context, intent, database) {
   const selection = parseEmailSelection(setting?.value);
   if (!selection || !selection.replyIds.length || selection.reviewedAtMs > Date.now()) return [];
   const rows = await savepointRead(database, (connection) => connection('voice_corpus_examples')
+    .join('emails as source_email', 'source_email.id', 'voice_corpus_examples.source_id')
+    .whereRaw('(source_email.customer_id IS NULL OR source_email.customer_id = voice_corpus_examples.customer_id)')
+    .whereNotIn('source_email.gmail_thread_id', [...selection.heldOutThreadIds])
+    .whereRaw("source_email.gmail_thread_id = voice_corpus_examples.outcome->>'gmailThreadId'")
     .where({ source: 'email_human_reply', intent })
     .whereIn('source_id', selection.replyIds)
-    .whereNot('customer_id', context.identity.customerId)
-    .whereNotIn('customer_id', [...selection.heldOutCustomerIds])
+    .whereNot('voice_corpus_examples.customer_id', context.identity.customerId)
+    .whereNotIn('voice_corpus_examples.customer_id', [...selection.heldOutCustomerIds])
     .whereNotNull('inbound_text').whereNotNull('reply_text')
     .orderBy('occurred_at', 'desc').limit(500)
-    .select('source_id', 'customer_id', 'inbound_text', 'reply_text', 'outcome', 'occurred_at'));
+    .select('source_id', 'voice_corpus_examples.customer_id', 'inbound_text', 'reply_text', 'outcome', 'occurred_at'));
   return rows.filter((row) => {
     let provenance = row.outcome;
     try { if (typeof provenance === 'string') provenance = JSON.parse(provenance); } catch { return false; }
@@ -58,7 +62,8 @@ async function loadEmailReplyStyle(context, { database = db } = {}) {
   }
   if (!result.exemplars.length) {
     try {
-      const rows = await savepointRead(database, (connection) => fetchVoiceExemplars({ intent, limit: MAX_EXEMPLARS, dbi: connection }));
+      const rows = await savepointRead(database, (connection) => fetchVoiceExemplars({ intent, limit: MAX_EXEMPLARS, dbi: connection,
+        excludeCustomerIds: [context.identity.customerId], throwOnError: true }));
       result.exemplars = rows.map(cleanExample).filter(Boolean);
       result.sourceHealth.smsExamples = result.exemplars.length ? 'present' : 'absent';
     } catch { result.sourceHealth.smsExamples = 'unavailable'; }

@@ -31,6 +31,8 @@ suite('email drafting style PostgreSQL contract', () => {
     mockDb = await database.transaction();
     customerId = randomUUID(); replyId = randomUUID(); threadId = randomUUID();
     await mockDb('customers').insert({ id: customerId, first_name: 'Synthetic', phone: '+15555550123', active: true });
+    await mockDb('emails').insert({ id: replyId, gmail_id: replyId, gmail_thread_id: threadId,
+      customer_id: customerId, from_address: 'contact@wavespestcontrol.com', received_at: new Date() });
     await mockDb('voice_corpus_examples').del();
     await mockDb('voice_profiles').del();
     selection = { version: 1, reviewedBy: randomUUID(), reviewedAt: new Date().toISOString(),
@@ -68,6 +70,18 @@ suite('email drafting style PostgreSQL contract', () => {
     await saveSelection();
     expect((await load()).exemplars).toEqual([]);
   });
+  test('reassigned email ownership withdraws an existing corpus example', async () => {
+    await mockDb('customers').insert({ id: context.identity.customerId, first_name: 'Current', phone: '+15555550124' });
+    await mockDb('emails').where('id', replyId).update({ customer_id: context.identity.customerId });
+    expect((await load()).exemplars).toEqual([]);
+  });
+  test('SMS fallback excludes current-customer examples', async () => {
+    selection.replyIds = []; await saveSelection();
+    await mockDb('customers').insert({ id: context.identity.customerId, first_name: 'Current', phone: '+15555550124' });
+    await mockDb('voice_corpus_examples').insert({ source: 'sms_human_reply', source_id: randomUUID(), intent,
+      customer_id: context.identity.customerId, inbound_text: 'SMS question', reply_text: 'Prior customer answer', occurred_at: new Date() });
+    expect((await load()).exemplars).toEqual([]);
+  });
   test('excludes current-customer examples', async () => {
     context.identity.customerId = customerId;
     expect((await load()).exemplars).toEqual([]);
@@ -75,9 +89,15 @@ suite('email drafting style PostgreSQL contract', () => {
   test('gate off reads no email selection and uses the existing SMS reader', async () => {
     process.env.GATE_VOICE_CORPUS_EMAIL_SOURCE = 'false';
     await mockDb.schema.alterTable('system_settings', (table) => table.renameColumn('value', 'fixture_hidden_value'));
-    await mockDb('voice_corpus_examples').insert({ source: 'sms_human_reply', source_id: randomUUID(), intent,
+    await mockDb('voice_corpus_examples').insert({ source: 'sms_human_reply', source_id: randomUUID(), intent, customer_id: customerId,
       inbound_text: 'SMS question', reply_text: 'I can help with that.', occurred_at: new Date() });
     expect((await load()).exemplars).toEqual([{ inbound_text: 'SMS question', reply_text: 'I can help with that.' }]);
+  });
+  test('non-transactional read failures report unavailable rather than empty', async () => {
+    const unavailable = () => { throw new Error('Synthetic unavailable source'); };
+    expect(await loadEmailReplyStyle(context, { database: unavailable })).toMatchObject({
+      exemplars: [], sourceHealth: { emailExamples: 'unavailable', smsExamples: 'unavailable' },
+    });
   });
   test('schema failure degrades without aborting the transaction', async () => {
     await mockDb.schema.alterTable('voice_corpus_examples', (table) => table.renameColumn('outcome', 'fixture_hidden_outcome'));

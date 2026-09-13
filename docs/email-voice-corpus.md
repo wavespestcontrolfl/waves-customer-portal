@@ -59,8 +59,12 @@ email rows cannot trigger a shared profile refresh.
 checks the source gate and current reviewed selection on every fetch, excludes
 the current customer's examples and held-out identities/threads, and returns
 at most four clean email pairs for the inbound intent. Removing an ID withdraws
-it immediately even though the existing corpus row remains. Missing examples
-fall back to the existing SMS reader, including its sealed-evaluation exclusion.
+it immediately even though the existing corpus row remains. Current source
+email ownership/thread are checked too, so reassignment withdraws the old row.
+Missing examples
+fall back to the existing SMS reader, including its sealed-evaluation exclusion
+and exclusion of the current customer. Read failures remain distinguishable
+from an empty corpus, including outside transactions.
 Examples are untrusted USER-channel style data, never customer facts.
 
 `GATE_EMAIL_VOICE_PROFILE=false` is a separate, strict opt-in. When enabled,
