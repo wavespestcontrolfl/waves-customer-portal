@@ -9,3 +9,18 @@ test.each([
   const start = text.indexOf(claim);
   expect(clauseIsNegated(claimContext(text, start, start + claim.length))).toBe(negated);
 });
+
+test.each([
+  ['If the report is correct, Talstar P was applied to the exterior perimeter.', 'Talstar P was applied', true],
+  ['Unless the report is wrong, Talstar P was applied to the exterior perimeter.', 'Talstar P was applied', true],
+  ['Before leaving, Talstar P was applied to the exterior perimeter.', 'Talstar P was applied', false],
+])('governing conditions survive an introductory comma: %s', (text, claim, negated) => {
+  const start = text.indexOf(claim);
+  expect(clauseIsNegated(claimContext(text, start, text.length))).toBe(negated);
+});
+
+test('an introductory epistemic refusal remains attached to its assertion', () => {
+  const { clauseIsEpistemicallyHedged } = require('../services/eval/voice-relay-spoken-checks')._internals;
+  const text = "I can't confirm this, Talstar P was applied to the exterior perimeter.";
+  expect(clauseIsEpistemicallyHedged(claimContext(text, text.indexOf('Talstar'), text.length))).toBe(true);
+});
