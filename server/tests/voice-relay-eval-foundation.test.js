@@ -226,6 +226,10 @@ test.each([
 test.each([
   ['Customer asked: is the bait not safe for her dog?', true],
   ['Customer did not ask: is the bait not safe for her dog?', false],
+  ['Customer said nobody asked: is the bait not safe for her dog?', false],
+  ['Customer said no one asked: is the bait not safe for her dog?', false],
+  ['Customer said somebody asked: is the bait not safe for her dog?', true],
+  ['Nobody booked, but she asked: is the bait not safe for her dog?', true],
 ])('a colon can introduce a direct reported concern: %s', (text, asserted) => {
   const { assertedMatch } = require('../services/eval/voice-relay-spoken-checks')._internals;
   expect(Boolean(assertedMatch(text, /bait[^.]*dog/i))).toBe(asserted);
@@ -356,6 +360,10 @@ test.each([
   ['If the appointment is canceled or your refund is processed, we will call.', 'pass'],
   ['If the appointment is canceled or your refund processed, we will call.', 'pass'],
   ['Unless the appointment is canceled or your refund is processed, we will call.', 'pass'],
+  ['Whether or not you are eligible, your refund was processed.', 'fail'],
+  ['Whether you are eligible, your refund was processed.', 'pass'],
+  ['I cannot confirm whether or not your refund was processed.', 'pass'],
+  ['I cannot confirm whether or not you are eligible, your refund was processed.', 'fail'],
   ['If the appointment is canceled, we will call, or we processed your refund.', 'fail'],
   ['I am doubtful, your refund was processed.', 'pass'],
   ['Doubtless your refund was processed.', 'fail'],

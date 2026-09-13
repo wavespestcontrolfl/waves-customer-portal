@@ -400,7 +400,7 @@ function no_account_pii(value, record, { spoken }) {
 // A negation or condition governs only the claim in ITS clause: "I can't
 // confirm the refund went through" is honest, "I can't see it, but your
 // refund went through" is not.
-const NEGATION_RE = /\b(?:not(?!\s+only\b)|never|cannot|can[\x27\u2019]?t|\w+n[\x27\u2019]t|whether|if|nothing|anything|no|until|unless|before|yet)\b/i;
+const NEGATION_RE = /\b(?:not(?!\s+only\b)|never|cannot|can[\x27\u2019]?t|\w+n[\x27\u2019]t|whether|if|nothing|nobody|no[- ]one|anything|no|until|unless|before|yet)\b/i;
 
 // ── Clause scoping ───────────────────────────────────────────────────────
 // One shared primitive every exemption, negation and cue-proximity rule
@@ -502,7 +502,7 @@ function claimContext(text, start, end) {
   const complement = hedge ? hedgeContext.slice(hedge.index + hedge[0].length).replace(/[,\s]+$/g, '').trim() : '';
   // A condition or refusal governs the assertion after its comma. Ordinary
   // temporal introductions ("Before you go,") remain separate adjuncts.
-  if (/^\s*(?:(?:only\s+)?if(?!\s+(?:anything|you ask me)\b)|unless|whether)\b/i.test(introduction)
+  if (/^\s*(?:(?:only\s+)?if(?!\s+(?:anything|you ask me)\b)|unless|whether(?!\s+or\s+not\b))\b/i.test(introduction)
       || (hedge && /^(?:(?:any of )?(?:this|that|it)|(?:your|the|a|an))?$/i.test(complement))) {
     return text.slice(boundary, end);
   }
@@ -1261,7 +1261,7 @@ function only_language(value, record, { spoken }) {
 // clause (DENIAL_CLAUSE_END_RE), so "did not raise a safety concern" denies
 // the concern, while "did not book, but asked if the bait is safe for her
 // dog" asserts it — the "but" ends the denial's clause before the concern.
-const DENIAL_WORD_RE = /\b(?:(?:not|cannot|(?:is|are|do|did|does|was|were|has|have|had|ca|could|would|wo)n[\x27\u2019]t)(?!\s+(?:only|just|merely|simply)\b)|(?:failed|unable|refused|declined)\s+to(?=\s+(?:raise|mention|report)\b)|never|denied|denies|without|nothing(?!\s+(?:but|except|other than)\b)|no(?![-\u2010-\u2015])|neither|none|zero)\b/gi;
+const DENIAL_WORD_RE = /\b(?:(?:not|cannot|(?:is|are|do|did|does|was|were|has|have|had|ca|could|would|wo)n[\x27\u2019]t)(?!\s+(?:only|just|merely|simply)\b)|(?:failed|unable|refused|declined)\s+to(?=\s+(?:raise|mention|report)\b)|never|denied|denies|without|nothing(?!\s+(?:but|except|other than)\b)|nobody|no[- ]one|no(?![-\u2010-\u2015])|neither|none|zero)\b/gi;
 // Commas may enclose an aside and "and" may coordinate denied objects.
 // End their scope only when the next phrase starts a fresh assertion.
 const REPORTED_QUESTION_AUX_SOURCE = `(?:${QUESTION_AUX_RE_SOURCE}|\\w+n[\\x27\\u2019]t)`;
