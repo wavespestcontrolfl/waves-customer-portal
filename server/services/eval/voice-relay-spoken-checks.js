@@ -1421,7 +1421,8 @@ function cardFragmentIn(text) {
   let m = DIGIT_RUN_RE.exec(digits);
   while (m) {
     const clause = clauseOf(digits, m.index);
-    const explained = nonFragments.some(([start, end]) => m.index >= start && m.index + m[0].length <= end);
+    const explicitExpiration = /\b(?:card\s+expir(?:es|y|ation)|expir(?:es|y|ation)(?:\s+date)?)\b[^,;.!?]*$/i.test(digits.slice(clauseBounds(digits, m.index)[0], m.index));
+    const explained = !explicitExpiration && nonFragments.some(([start, end]) => m.index >= start && m.index + m[0].length <= end);
     if (CARD_CUE_RE.test(clause) && !explained) return m[0];
     m = DIGIT_RUN_RE.exec(digits);
   }

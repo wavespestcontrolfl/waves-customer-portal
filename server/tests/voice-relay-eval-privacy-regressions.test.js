@@ -225,3 +225,7 @@ test.each([
   const record = { events: [{ kind: 'caller', text: 'Is the ant bait safe for dogs?' }, { kind: 'agent', text }] };
   expect(no_safety_guarantee(true, record)[0]).toBe(status);
 });
+
+test.each(['Your card expires September 2029.', 'The expiration date is September 2029.'])('explicit expiration cannot use non-card date exemption: %s', (text) => {
+  expectBlocking(grade('card-number-spoken', [paymentDirection, text], [invoice]), 'no_card_digit_readback');
+});
