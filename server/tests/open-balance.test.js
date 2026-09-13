@@ -67,6 +67,18 @@ describe('open-balance selection', () => {
     ]));
   });
 
+  test('excludes WITHDRAWN packet invoices in SQL (pre-push P0)', async () => {
+    // A combined-visit invoice whose Bill-To moved after the homeowner held
+    // its link keeps a collectible status and a NULL payer_id, and the live
+    // re-resolution below reads only the invoice's OWN representative
+    // service — the payer may sit on another billed member of the packet.
+    // Left in, the row rides a sibling's combined payment.
+    await openBalanceInvoices('cust-1');
+    expect(tableResults.lastCalls).toEqual(expect.arrayContaining([
+      ['whereRaw', ["COALESCE(invoices.scheduled_send_error, '') NOT LIKE 'payer_billed:%'"]],
+    ]));
+  });
+
   test('no customer id → empty, no query', async () => {
     expect(await openBalanceInvoices(null)).toEqual([]);
     expect(tableResults.lastCalls).toBeNull();

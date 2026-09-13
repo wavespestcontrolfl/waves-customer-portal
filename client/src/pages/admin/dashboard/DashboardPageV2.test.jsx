@@ -284,6 +284,17 @@ describe("DashboardPageV2 sections", () => {
     // Wait for the initial load to settle (header greeting appears post-load).
     await screen.findAllByText(/Good (morning|afternoon|evening), Waves/);
 
+    expect(document.querySelector('[data-ui-density="comfortable"]')).toBeInTheDocument();
+    expect(
+      screen.getByRole("heading", {
+        name: /Good (morning|afternoon|evening), Waves/,
+        level: 1,
+      }),
+    ).toHaveClass("text-22");
+    expect(screen.getByRole("button", { name: "Refresh" })).toHaveClass(
+      "ui-control-comfortable",
+    );
+
     // One anchor <section> per command-center section.
     for (const id of ["today", "growth", "profit", "retention", "cash"]) {
       expect(document.getElementById(id)).toBeInTheDocument();

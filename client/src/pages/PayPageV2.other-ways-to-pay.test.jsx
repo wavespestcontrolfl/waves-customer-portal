@@ -7,7 +7,11 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import PayPageV2 from './PayPageV2';
 
 vi.mock('../glass/glass-engine', () => ({ useGlassSurface: vi.fn() }));
-vi.mock('../components/brand', () => ({
+// PublicStateCard and BrandCard come through for real: they are leaf
+// presentational components, and these suites assert on the terminal-state
+// markup they produce. Everything heavier stays stubbed.
+vi.mock('../components/brand', async (importOriginal) => ({
+  ...(await importOriginal()),
   WavesShell: ({ children }) => <div>{children}</div>,
   CustomerColumn: ({ children, ...props }) => <div {...props}>{children}</div>,
   BrandCard: ({ children }) => <section>{children}</section>,

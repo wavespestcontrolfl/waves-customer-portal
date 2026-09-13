@@ -185,6 +185,12 @@ function emitAlert(row) {
   io.to(ROOM).emit(EVENT, row);
 }
 
+async function clearTrackingBells(t, rows) {
+  const ids = rows.filter((row) => row?.payload?.source === 'no_show_detector').map((row) => String(row.id));
+  if (ids.length) await t('notifications').whereIn(t.raw("metadata->>'dispatch_alert_id'"), ids)
+    .whereNull('read_at').update({ read_at: t.fn.now() });
+}
+
 /**
  * Mark an alert resolved and broadcast dispatch:alert_resolved.
  *
@@ -207,25 +213,59 @@ function emitAlert(row) {
  *                                   payload (other dispatchers don't
  *                                   need it for the cache eviction).
  * @param {object} [args.trx]        optional Knex transaction.
+ * @param {boolean} [args.auto]      true when this resolve is a SYSTEM
+ *                                   side effect (a status change, a
+ *                                   reassignment clearing staleness, a
+ *                                   tracking-key supersession) rather
+ *                                   than a person explicitly clicking
+ *                                   Resolve. Stamps payload.superseded_at
+ *                                   on the same write — no-show-
+ *                                   detector.js's alreadyHasOpenAlert /
+ *                                   recordTrackingNotice dedupe checks
+ *                                   read this stamp to tell "the system
+ *                                   cleared this, a fresh alert under
+ *                                   the same tracking_key may still be
+ *                                   warranted" apart from a human's
+ *                                   considered dismissal, which must
+ *                                   keep blocking recreation (codex P1,
+ *                                   pre-push audit on 925e9e977). A
+ *                                   non-tracking alert type picks up an
+ *                                   inert, unread extra payload key.
  * @returns {Promise<object|null>}   the resolved row, or null if no
  *                                   row matched (already resolved or
  *                                   id doesn't exist).
  */
-async function resolveAlert({ id, resolvedBy, trx } = {}) {
+async function resolveAlert({ id, resolvedBy, trx, auto = false } = {}) {
   if (!id) {
     throw new Error('resolveAlert: id is required');
   }
 
   async function doWrite(t) {
+    const patch = { resolved_at: t.fn.now(), resolved_by: resolvedBy || null };
+    if (auto) {
+      patch.payload = t.raw("COALESCE(payload, '{}'::jsonb) || jsonb_build_object('superseded_at', ?::text)", [new Date().toISOString()]);
+    }
     const rows = await t('dispatch_alerts')
       .where({ id })
       .whereNull('resolved_at')
-      .update({
-        resolved_at: t.fn.now(),
-        resolved_by: resolvedBy || null,
-      })
+      .update(patch)
       .returning(['id', 'type', 'severity', 'tech_id', 'job_id', 'payload', 'created_at', 'resolved_at', 'resolved_by']);
-    return rows[0] || null;
+    // A MANUAL resolve that lost the race still has the last word on
+    // provenance: an automatic write landing just before it stamps
+    // superseded_at, the manual update then matches no unresolved row, and
+    // the stamp would make no-show-detector's alreadyHasOpenAlert recreate a
+    // card the dispatcher explicitly resolved. Clearing it here is the same
+    // rule the tech-notification /dismiss route applies (codex P2, PR #4403
+    // round 25).
+    if (!auto && !rows.length) {
+      await t('dispatch_alerts').where({ id }).whereNotNull('resolved_at')
+        .whereRaw("payload->>'superseded_at' IS NOT NULL")
+        .update({ resolved_by: resolvedBy || null,
+          payload: t.raw("COALESCE(payload, '{}'::jsonb) - 'superseded_at'") });
+    }
+    const row = rows[0] || null;
+    await clearTrackingBells(t, row ? [row] : []);
+    return row;
   }
 
   if (trx) {
@@ -301,13 +341,15 @@ function summarizeResolvedAlerts(rows) {
  */
 async function resolveAllOpenAlerts({ resolvedBy, trx } = {}) {
   async function doWrite(t) {
-    return t('dispatch_alerts')
+    const rows = await t('dispatch_alerts')
       .whereNull('resolved_at')
       .update({
         resolved_at: t.fn.now(),
         resolved_by: resolvedBy || null,
       })
       .returning(['id', 'type', 'severity', 'tech_id', 'job_id', 'payload', 'created_at', 'resolved_at', 'resolved_by']);
+    await clearTrackingBells(t, rows);
+    return rows;
   }
 
   let rows;
@@ -384,6 +426,12 @@ const OVERDUE_ALERT_TYPES = ['tech_late', 'unassigned_overdue'];
  * No-op for any toStatus not in OVERDUE_ALERT_AUTO_RESOLVE_STATUSES,
  * which makes it safe to call unconditionally on every status write.
  *
+ * auto: true on every resolveAlert call here — a status transition
+ * (including the arrival/on_site case) is a system side effect, never a
+ * person acknowledging the alert card itself, so a wrong status reversed
+ * later under the same promise + technician must still be able to raise
+ * a fresh alert (codex P1, pre-push audit on 925e9e977).
+ *
  * @returns {Promise<{resolved: number}>}
  */
 async function autoResolveOverdueAlertsForJob({ jobId, resolvedBy, trx, toStatus } = {}) {
@@ -398,7 +446,7 @@ async function autoResolveOverdueAlertsForJob({ jobId, resolvedBy, trx, toStatus
     .select('id');
   let resolved = 0;
   for (const { id } of openAlerts) {
-    const row = await resolveAlert({ id, resolvedBy, trx });
+    const row = await resolveAlert({ id, resolvedBy, trx, auto: true });
     if (row) resolved += 1;
   }
   return { resolved };

@@ -46,6 +46,7 @@
  */
 
 const { ARRIVAL_WINDOW_MINUTES } = require('../utils/sms-time-format');
+const { premiseStampConflicts, effectiveServiceAddress } = require('./stamped-address');
 const hhmmToMin = (hhmm) => {
   const [h, m] = String(hhmm).split(':').map(Number);
   return h * 60 + m;
@@ -69,9 +70,17 @@ function effectiveWindowRange(stop) {
   const raw = String(stop.time_window || '').trim().toLowerCase();
   if (raw === 'morning') return { startMin: 8 * 60, endMin: 12 * 60 };
   if (raw === 'afternoon') return { startMin: 12 * 60, endMin: 17 * 60 };
-  const m = raw.match(/^(\d{1,2}):(\d{2})/);
+  // A meridiem is part of the clock: '4:00 PM' is 16:00, not 04:00 — reading
+  // it as a morning promise can reject every order as infeasible, and can
+  // mark a still-upcoming afternoon window as already elapsed (codex #4430 r4
+  // P1). Same am/pm semantics route-reorder.js's effectiveWindowStart uses.
+  const m = raw.match(/^(\d{1,2})(?::(\d{2}))?\s*(am|pm)?/);
   if (m) {
-    const ws = Number(m[1]) * 60 + Number(m[2]);
+    let hour = Number(m[1]);
+    if (m[3] === 'pm' && hour < 12) hour += 12;
+    if (m[3] === 'am' && hour === 12) hour = 0;
+    if (hour > 23) return null;
+    const ws = hour * 60 + Number(m[2] || 0);
     return { startMin: ws, endMin: ws + ARRIVAL_WINDOW_MINUTES };
   }
   return null;
@@ -131,15 +140,229 @@ function workDuration(stop, fallback = 60) {
 }
 
 /**
- * Advance the day simulation by one stop. state = { clock (minute-of-day),
- * prev ({lat,lng}), travelMin (cumulative) }. Returns the next state, or
- * null when the stop provably misses its promised arrival deadline —
- * making prefixes prunable: the clock only moves forward, so no suffix can
- * rescue a missed window.
+ * PHANTOM-HOUR FIX (prod, Sat 2026-09-12): two customers each had TWO
+ * scheduled_services rows (pest + lawn) promised the
+ * SAME arrival window at the SAME property — one physical stop, `visit_id`
+ * NULL (GATE_VISIT_GROUPS is dark in prod, so these rows never went through
+ * visit-groups.js's proper grouping — see the veto note on
+ * computeChronologicalRepair below). Simulated as two independent stops each
+ * charged their own workDuration, the pair cost 2 hours of on-site time for
+ * a 1-hour promise — enough by itself to make the day simulate infeasible
+ * (computeChronologicalRepair returned null, NO_SAFE_INSERTION) and to make
+ * violatesWindowFeasibility reject a legal Google order for the same
+ * phantom hour.
+ *
+ * True when `stop` is a continuation of the SAME physical stop as
+ * `prevStop`: identical customer, identical promised arrival window
+ * (effectiveWindowRange), the same stamped PREMISE, and BOTH rows geocoded
+ * to identical coordinates. Coordinates alone do not prove one
+ * physical stop — a customer's two units in one building share the parcel
+ * centroid (Codex #4435 r1 P1) — so the saved per-appointment address
+ * (authoritative for an existing appointment, see day-stops.js) has to agree
+ * too — and "the same premise" is the repo's existing premiseStampConflicts
+ * rule (street key, then the unit from line 2 or embedded in the street
+ * line, then zip, then city) over the EFFECTIVE address, not a line-1 string
+ * match on the stamp: Apt 1 and Apt 2 of one building share both the parcel
+ * pin AND their line 1 (Codex #4435 r2 P1), and an unstamped row inherits
+ * the customer's primary premise, so comparing a bare stamp against nothing
+ * finds no conflict where a real one exists (r3 P1). A row whose premise
+ * cannot be resolved at all — no address column selected, or no street line
+ * on either the stamp or the customer — is UNKNOWN, not known-equal, and
+ * never merges.
+ * A coordless side never matches: a multi-property customer (commercial
+ * chain, rental owner) with one ungeocoded row in the same auto-templated
+ * slot is two addresses, and merging them would under-count real work —
+ * the inverse of the phantom hour. Failing closed there keeps that day
+ * byte-for-byte what it was before this fix (the nightly pass rejects
+ * coordless days before it gets here anyway). BOTH stops must carry
+ * `customer_id` — a caller whose select list drops the column (or a stop
+ * with no customer_id at all, e.g. an unlinked estimate hold) never matches,
+ * so the simulation for it is unchanged too. A stop carrying a
+ * `visit_id` on EITHER side never matches either: a service_visits group is
+ * arrival-route.js's SUM-of-durations contract, and collapsing it to MAX
+ * here would under-count genuine extra work (the veto note on
+ * computeChronologicalRepair below). This guard is what enforces that veto
+ * on the shared simulation paths (computeWindowFitOrder,
+ * violatesWindowFeasibility) that have no ungrouped-only gate of their own.
  */
+function isCoVisitPair(effectiveWindowRange, prevStop, stop) {
+  // Presence-checked like the address below, not a bare `!= null`:
+  // `undefined != null` is false in JS, so a select that drops the column
+  // would silently no-op the ONE veto protecting visit-groups' SUM contract
+  // (round-0 fallback audit P1).
+  if (!('visit_id' in prevStop) || !('visit_id' in stop)) return false;
+  if (prevStop.visit_id != null || stop.visit_id != null) return false;
+  if (prevStop.customer_id == null || stop.customer_id == null) return false;
+  if (String(prevStop.customer_id) !== String(stop.customer_id)) return false;
+  // The promise the pair SHARED, which is what makes them one physical stop.
+  // A caller that relaxes an already-elapsed arrival deadline (route-reorder's
+  // relaxElapsedWindows) clears the window fields, so the stored promise has
+  // to travel separately or an overdue bundle goes back to counting as two
+  // full visits (codex #4430 r5 P1).
+  if (!sameCoVisitWindow(effectiveWindowRange, prevStop, stop)) return false;
+  const prevLat = parseFloat(prevStop.lat);
+  const prevLng = parseFloat(prevStop.lng);
+  const lat = parseFloat(stop.lat);
+  const lng = parseFloat(stop.lng);
+  if (!(lat && lng && prevLat && prevLng)) return false;
+  if (lat !== prevLat || lng !== prevLng) return false;
+  if (!('service_address_line1' in prevStop) || !('service_address_line1' in stop)) return false;
+  const prevPremise = effectivePremise(prevStop);
+  const premise = effectivePremise(stop);
+  if (!prevPremise.service_address_line1 || !premise.service_address_line1) return false;
+  return !premiseStampConflicts(prevPremise, premise);
+}
+
+/**
+ * Advance the day simulation by one stop. state = { clock (minute-of-day),
+ * prev ({lat,lng}), prevStop (the full previous stop, for the co-visit
+ * check above), travelMin (cumulative) }. Returns the next state, or null
+ * when the stop provably misses its promised arrival deadline — making
+ * prefixes prunable: the clock only moves forward, so no suffix can rescue
+ * a missed window.
+ */
+/** True when both rows carry the same promised arrival window — the stored
+ *  one where a caller has relaxed it for simulation (co_visit_window_key),
+ *  else the live effectiveWindowRange. Both sides must know their promise:
+ *  an unconstrained stop is not "the same window" as anything. */
+function sameCoVisitWindow(effectiveWindowRange, prevStop, stop) {
+  const prevKey = prevStop.co_visit_window_key;
+  const key = stop.co_visit_window_key;
+  if (prevKey || key) return Boolean(prevKey && key && prevKey === key);
+  const prevRange = effectiveWindowRange(prevStop);
+  const range = effectiveWindowRange(stop);
+  if (!prevRange || !range) return false;
+  return prevRange.startMin === range.startMin && prevRange.endMin === range.endMin;
+}
+
+/**
+ * The stop's EFFECTIVE premise — its own stamp where it has one, the
+ * customer's primary address where it does not, resolved by the repo's own
+ * effectiveServiceAddress (which knows when a stamp's unit inherits and when
+ * it diverges). Shaped as service_address_* so premiseStampConflicts can read
+ * it. Callers alias the customer columns as customer_address_line1 etc., the
+ * same names stampedAddressDiverges already expects.
+ */
+function effectivePremise(stop) {
+  const eff = effectiveServiceAddress(stop, {
+    address_line1: stop.customer_address_line1,
+    address_line2: stop.customer_address_line2,
+    city: stop.customer_city,
+    state: stop.customer_state,
+    zip: stop.customer_zip,
+  });
+  return {
+    service_address_line1: eff.line1,
+    service_address_line2: eff.line2,
+    service_address_city: eff.city,
+    service_address_zip: eff.zip,
+  };
+}
+
+/**
+ * On-site minutes for a co-visit chain. NOT the max of the members'
+ * durations: a row's `workDuration` falls back to its promised WINDOW SPAN
+ * when it has no real estimate, and two rows sharing one hour-long promise
+ * are one hour on site, not two (the phantom hour) — but two rows that each
+ * carry a REAL estimate are genuinely additive work, and charging only the
+ * longer of them would let the guards approve a day whose later customers
+ * cannot be reached (Codex #4435 r1 P1, the same SUM invariant
+ * arrival-route.js's groupRouteStops holds for visit_id groups). So: the sum
+ * of the chain's real estimates, floored by the longest member's
+ * window-derived duration.
+ */
+function coVisitWork(chain, stop) {
+  const floor = Math.max(chain.coFloor || 0, workDuration(stop));
+  const estimates = (chain.coEstimates || 0) + rawEstimateMinutes(stop);
+  return { floor, estimates, minutes: Math.max(floor, estimates) };
+}
+
+/**
+ * The row's REAL service estimate, 0 when it has none. arrival-route.js's
+ * evaluateArrivalPlacement pre-normalizes every ungrouped row's
+ * estimated_duration_minutes to workDuration(row) before simulating, which
+ * would make a span-only row look like a real 60-minute estimate and sum two
+ * of them straight back into the phantom hour (Codex #4435 r2 P1) — so that
+ * caller stamps the untouched value as raw_estimate_minutes, and this is
+ * what the co-visit sum reads.
+ */
+function rawEstimateMinutes(stop) {
+  const raw = 'raw_estimate_minutes' in stop ? stop.raw_estimate_minutes : stop.estimated_duration_minutes;
+  return Number(raw) || 0;
+}
+
+/** The chain bookkeeping a NON-merged stop starts: one row on its own is a
+ *  one-member co-visit chain. Shared by both simulations' non-merge branches
+ *  so the initialization cannot drift from advanceCoVisit's own arithmetic
+ *  (round-0 fallback audit P1). */
+function startCoVisitChain(stop) {
+  const floor = workDuration(stop);
+  const estimates = rawEstimateMinutes(stop);
+  return { coFloor: floor, coEstimates: estimates, coMerged: Math.max(floor, estimates) };
+}
+
+/**
+ * THE co-visit advance — the one place the merge's timing lives, called by
+ * both simulations (advanceSim below and violatesWindowFeasibility's own
+ * inline loop in route-reorder.js, which walks Google's legs itself and so
+ * cannot call advanceSim wholesale). Keeping the arithmetic in one function
+ * is what stops the two from drifting into a phantom hour on one path and an
+ * under-count on the other (round-0 fallback audit P1).
+ *
+ * `chain` = { clock, arrivalMin, coFloor, coEstimates } for the run of rows
+ * already merged at this stop. Returns the same shape advanced by `stop`,
+ * plus the `waiting` those minutes added. Arrival stays pinned to the
+ * sibling's already-proven arrival; only the EXTRA minutes past the current
+ * clock are new, and they obey blockedIntervals exactly as the normal path's
+ * work does (the sibling's own span was checked when it was simulated).
+ */
+function advanceCoVisit(chain, stop, blockedIntervals = []) {
+  const merged = coVisitWork(chain, stop);
+  // The DELTA of merged work, NOT (ideal end − clock): once a block has
+  // postponed an earlier extension the clock carries idle minutes, and
+  // measuring against it would let that idle swallow a later member's work
+  // outright (Codex #4435 r2 P1 — a third row's 20 minutes vanishing).
+  const extra = Math.max(0, merged.minutes - (chain.coMerged || 0));
+  let extraStart = chain.clock;
+  if (extra > 0) {
+    for (const block of blockedIntervals) {
+      if (extraStart < block.endMin && extraStart + extra > block.startMin) extraStart = block.endMin;
+    }
+  }
+  return {
+    clock: extraStart + extra,
+    arrivalMin: chain.arrivalMin,
+    coFloor: merged.floor,
+    coEstimates: merged.estimates,
+    coMerged: merged.minutes,
+    // A block that postpones the extra work holds the truck on site with
+    // nothing to do — the same thing waiting for a window to open is, and
+    // evaluateArrivalPlacement breaks equal-travel ties on this number
+    // (Codex #4435 r1 P2).
+    waiting: extraStart - chain.clock,
+  };
+}
+
 function advanceSim(RouteOptimizer, effectiveWindowRange, state, stop, {
   legMinutes, bufferMinutes = 0, blockedIntervals = [], reportLate = false,
 } = {}) {
+  // Co-visit continuation: no new leg, arrival pinned to the sibling's
+  // arrival (already proven inside the promise) — see isCoVisitPair above.
+  if (state.prevStop && isCoVisitPair(effectiveWindowRange, state.prevStop, stop)) {
+    const merged = advanceCoVisit(state, stop, blockedIntervals);
+    return {
+      clock: merged.clock,
+      prev: state.prev,
+      prevStop: stop,
+      visited: true,
+      travelMin: state.travelMin,
+      arrivalMin: merged.arrivalMin,
+      waitingMin: (state.waitingMin || 0) + merged.waiting,
+      coFloor: merged.coFloor,
+      coEstimates: merged.coEstimates,
+      coMerged: merged.coMerged,
+    };
+  }
   const lat = parseFloat(stop.lat);
   const lng = parseFloat(stop.lng);
   let travel = 0;
@@ -165,14 +388,32 @@ function advanceSim(RouteOptimizer, effectiveWindowRange, state, stop, {
     if (startMin < block.endMin && startMin + workDuration(stop) > block.startMin) startMin = block.endMin;
   }
   if (range && startMin > range.endMin && !reportLate) return null;
-  return { clock: startMin + workDuration(stop), prev, visited: true, travelMin: state.travelMin + travel, arrivalMin: startMin, waitingMin: (state.waitingMin || 0) + Math.max(0, startMin - state.clock - travel) };
+  return { clock: startMin + workDuration(stop), prev, prevStop: stop, visited: true, travelMin: state.travelMin + travel, arrivalMin: startMin, waitingMin: (state.waitingMin || 0) + Math.max(0, startMin - state.clock - travel), ...startCoVisitChain(stop) };
 }
 
 /** Repair the demonstrated null-position insertion defect. Keep the relative
  * order of every already-positioned stop, including ties. Only a fully timed,
  * ungrouped, unpinned route with a chronological backbone qualifies. A repair
  * must turn an infeasible baseline into a feasible route; no distance saving
- * is needed to correct that defect. The caller owns gates and fenced writes. */
+ * is needed to correct that defect. The caller owns gates and fenced writes.
+ *
+ * `visit_id` VETO (deliberate, not extended to the co-visit rule above):
+ * a `service_visits` row is visit-groups.js's OWN mechanism for "N
+ * scheduled_services sharing one physical stop" (its combined duration is
+ * the SUM of members' real work estimates plus a shared/offset arrival
+ * range — see arrival-route.js's groupRouteStops, which pre-groups visit_id
+ * members into one stop BEFORE simulating). That is a different, and
+ * correct, model from this fix's co-visit rule: co-visit rows are
+ * INDEPENDENT scheduled_services whose window span alone (not a real work
+ * estimate) makes them look like they each cost a full promised hour, so
+ * the honest fix is the MAX of the two, not the sum. Collapsing a real
+ * multi-service visit_id group to MAX here would under-count genuine extra
+ * work and is out of scope for a phantom-hour fix — this module has no
+ * visit_id-aware pre-grouping step (sum durations, union/offset windows,
+ * shared technician) to replicate arrival-route.js's contract, so the veto
+ * stays: a visit_id day is left for the (dark, GATE_VISIT_GROUPS) group
+ * path or a human, never silently mis-simulated here.
+ */
 function computeChronologicalRepair(RouteOptimizer, stops) {
   if (stops.some(stop => {
     const duration = workDuration(stop, 0);
@@ -189,7 +430,23 @@ function computeChronologicalRepair(RouteOptimizer, stops) {
   if (simulateArrivalRoute(RouteOptimizer, effectiveWindowRange, ordered)) return null;
   const candidate = [...backbone];
   for (const stop of additions) {
-    const index = candidate.findIndex(other => effectiveWindowRange(other).startMin > effectiveWindowRange(stop).startMin);
+    const range = effectiveWindowRange(stop);
+    // Phantom-hour fix: a same-customer, same-window addition MUST land
+    // immediately next to its sibling (co-visit merge only fires for
+    // CONSECUTIVE stops), never split from it by a same-window addition
+    // from a different customer that happens to sort between them by
+    // currentOrder's created_at/id tiebreak. When a sibling is already
+    // placed (backbone or an earlier addition), insert right after it —
+    // pest before lawn falls out naturally from currentOrder's processing
+    // order; otherwise fall through to the general window-start insertion.
+    // Same predicate the simulation merges on — a pair that would not
+    // merge (different address, visit_id) gets the plain window-start slot.
+    const siblingIndex = candidate.findIndex(other => isCoVisitPair(effectiveWindowRange, other, stop));
+    if (siblingIndex !== -1) {
+      candidate.splice(siblingIndex + 1, 0, stop);
+      continue;
+    }
+    const index = candidate.findIndex(other => effectiveWindowRange(other).startMin > range.startMin);
     candidate.splice(index === -1 ? candidate.length : index, 0, stop);
   }
   const simulation = simulateArrivalRoute(RouteOptimizer, effectiveWindowRange, candidate);
@@ -239,7 +496,7 @@ function simulateArrivalRoute(RouteOptimizer, rangeForStop, seq, {
  *  WITHIN a group is explored (the guard permits any tie order, and a
  *  specific one can be the only feasible or the cheapest sequence —
  *  pre-push audit P1). */
-function exhaustiveSearch(RouteOptimizer, guards, groups, untimed) {
+function exhaustiveSearch(RouteOptimizer, guards, groups, untimed, startMin = 8 * 60, origin = RouteOptimizer.HQ) {
   let best = null;
   let bestMeters = Infinity;
   const total = groups.reduce((n, g) => n + g.length, 0) + untimed.length;
@@ -248,7 +505,7 @@ function exhaustiveSearch(RouteOptimizer, guards, groups, untimed) {
   const seq = [];
   const recurse = (groupIdx, groupRemaining, state) => {
     if (seq.length === total) {
-      const meters = guards.modelDistanceMeters(RouteOptimizer, seq);
+      const meters = guards.modelDistanceMeters(RouteOptimizer, seq, origin);
       if (meters < bestMeters) {
         bestMeters = meters;
         best = [...seq];
@@ -282,24 +539,24 @@ function exhaustiveSearch(RouteOptimizer, guards, groups, untimed) {
       used[i] = false;
     }
   };
-  recurse(0, (groups[0] || []).length, { clock: 8 * 60, prev: RouteOptimizer.HQ, travelMin: 0 });
+  recurse(0, (groups[0] || []).length, { clock: startMin, prev: origin, travelMin: 0 });
   return best;
 }
 
 /** Greedy cheapest-feasible insertion for days above the exhaustive cap:
  *  start from the backbone (which must itself be feasible), then each round
  *  insert the globally cheapest feasible (untimed stop, position) pair. */
-function greedyInsertion(RouteOptimizer, guards, backbone, untimed) {
+function greedyInsertion(RouteOptimizer, guards, backbone, untimed, startMin = 8 * 60, origin = RouteOptimizer.HQ) {
   let seq = [...backbone];
-  if (simulateArrivalRoute(RouteOptimizer, guards.effectiveWindowRange, seq) == null) return null;
+  if (simulateArrivalRoute(RouteOptimizer, guards.effectiveWindowRange, seq, { startMin, origin }) == null) return null;
   const remaining = [...untimed];
   while (remaining.length > 0) {
     let bestPick = null;
     for (let r = 0; r < remaining.length; r++) {
       for (let pos = 0; pos <= seq.length; pos++) {
         const candidate = [...seq.slice(0, pos), remaining[r], ...seq.slice(pos)];
-        if (simulateArrivalRoute(RouteOptimizer, guards.effectiveWindowRange, candidate) == null) continue;
-        const meters = guards.modelDistanceMeters(RouteOptimizer, candidate);
+        if (simulateArrivalRoute(RouteOptimizer, guards.effectiveWindowRange, candidate, { startMin, origin }) == null) continue;
+        const meters = guards.modelDistanceMeters(RouteOptimizer, candidate, origin);
         if (!bestPick || meters < bestPick.meters) bestPick = { r, candidate, meters };
       }
     }
@@ -321,8 +578,14 @@ function greedyInsertion(RouteOptimizer, guards, backbone, untimed) {
  * Returns { orderedStops, afterMeters, afterSeconds } or null when no
  * feasible order exists (or the winner fails a production guard — belt and
  * suspenders; by construction it should not).
+ *
+ * `startMin` (default 8am, the nightly day-open) is the simulation's
+ * departure clock — the admin optimize endpoints pass the caller's actual ET
+ * minute-of-day here for a day already in progress (codex GitHub round P1):
+ * simulating from 8am on a day that's really 15:30 already can accept a
+ * repair that is no longer drivable in the time remaining.
  */
-function computeWindowFitOrder(RouteOptimizer, stops, guards) {
+function computeWindowFitOrder(RouteOptimizer, stops, guards, { startMin = 8 * 60, origin = RouteOptimizer.HQ } = {}) {
   if (!Array.isArray(stops) || stops.length < 2) return null;
   const timed = [];
   const untimed = [];
@@ -353,7 +616,7 @@ function computeWindowFitOrder(RouteOptimizer, stops, guards) {
   const groupSizes = groupStops.map((g) => g.length);
   let winner;
   if (sequenceCount(stops.length, backbone.length, groupSizes) <= EXHAUSTIVE_SEQUENCE_CAP) {
-    winner = exhaustiveSearch(RouteOptimizer, guards, groupStops, untimed);
+    winner = exhaustiveSearch(RouteOptimizer, guards, groupStops, untimed, startMin, origin);
   } else {
     // Greedy path: the stable tie order can be the ONE infeasible
     // permutation of an equal-start group (uncapped audit P1 — the exact
@@ -366,11 +629,11 @@ function computeWindowFitOrder(RouteOptimizer, stops, guards) {
     // keep the stable operator-visible order.
     let greedyBackbone = backbone;
     if (backbone.length > 0 && sequenceCount(backbone.length, backbone.length, groupSizes) <= EXHAUSTIVE_SEQUENCE_CAP) {
-      const feasibleBackbone = exhaustiveSearch(RouteOptimizer, guards, groupStops, []);
+      const feasibleBackbone = exhaustiveSearch(RouteOptimizer, guards, groupStops, [], startMin, origin);
       if (!feasibleBackbone) return null;
       greedyBackbone = feasibleBackbone;
     }
-    winner = greedyInsertion(RouteOptimizer, guards, greedyBackbone, untimed);
+    winner = greedyInsertion(RouteOptimizer, guards, greedyBackbone, untimed, startMin, origin);
   }
   if (!winner) return null;
 
@@ -389,13 +652,13 @@ function computeWindowFitOrder(RouteOptimizer, stops, guards) {
   // is a board ordering, the day re-evaluates every night, and dispatch
   // remains human-driven.
   if (guards.violatesWindowChronology(winner, stops)) return null;
-  if (guards.violatesWindowFeasibility(RouteOptimizer, winner, stops, null)) return null;
+  if (guards.violatesWindowFeasibility(RouteOptimizer, winner, stops, null, startMin, origin)) return null;
 
-  const simulation = simulateArrivalRoute(RouteOptimizer, guards.effectiveWindowRange, winner);
+  const simulation = simulateArrivalRoute(RouteOptimizer, guards.effectiveWindowRange, winner, { startMin, origin });
   if (!simulation) return null;
   return {
     orderedStops: winner,
-    afterMeters: guards.modelDistanceMeters(RouteOptimizer, winner),
+    afterMeters: guards.modelDistanceMeters(RouteOptimizer, winner, origin),
     afterSeconds: Math.round(simulation.travelMin * 60),
   };
 }
@@ -407,5 +670,8 @@ module.exports = {
   simulateArrivalRoute,
   computeChronologicalRepair,
   workDuration,
+  isCoVisitPair,
+  advanceCoVisit,
+  startCoVisitChain,
   _internals: { sequenceCount, exhaustiveSearch, greedyInsertion, EXHAUSTIVE_SEQUENCE_CAP },
 };

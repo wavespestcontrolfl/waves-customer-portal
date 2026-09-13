@@ -271,6 +271,28 @@ router.get('/commitments/sms', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+router.get('/proposals', async (req, res, next) => {
+  try {
+    const offset = Number(req.query.offset || 0);
+    if (!Number.isInteger(offset) || offset < 0 || offset > 100000) return res.status(400).json({ error: 'Invalid offset' });
+    const proposals = require('../services/call-reschedule-proposals');
+    const rows = await proposals.listProposals(db, { limit: 101, offset });
+    res.json({ proposals_enabled: proposals.enabled(), proposals: rows.slice(0, 100), has_more: rows.length > 100, next_offset: offset + 100 });
+  } catch (err) { next(err); }
+});
+
+router.post('/proposals/:id/dismiss', async (req, res, next) => {
+  try {
+    if (!UUID_RE.test(req.params.id)) return res.status(400).json({ error: 'Invalid proposal id' });
+    res.json(await require('../services/call-reschedule-proposals').dismissProposal(db, req.params.id, {
+      actorId: req.technicianId, expectedAt: req.body?.expected_at,
+    }));
+  } catch (err) {
+    if (err.status) return res.status(err.status).json({ error: err.message });
+    next(err);
+  }
+});
+
 // The one commitments feed for every staff view, callback cards included:
 // `kind=callback` narrows it to the callback lane and the rows carry their
 // owner projection (callback-cards.decorateCallbackRows).

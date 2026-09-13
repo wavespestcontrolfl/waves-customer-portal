@@ -7977,7 +7977,7 @@ function CustomerRecipientDetails({
               id="c360-billing-contact-name"
               name="billingContactName"
               value={recipientPrefsDraft.billingContactName}
-              disabled={!isAdmin}
+              disabled={!isAdmin || recipientPrefsSaving}
               onChange={(e) =>
                 setRecipientPrefsDraft((prev) => ({
                   ...prev,
@@ -7996,7 +7996,7 @@ function CustomerRecipientDetails({
               id="c360-billing-recipient-email"
               name="billingEmail"
               value={recipientPrefsDraft.billingEmail}
-              disabled={!isAdmin}
+              disabled={!isAdmin || recipientPrefsSaving}
               onChange={(e) =>
                 setRecipientPrefsDraft((prev) => ({
                   ...prev,
@@ -8098,7 +8098,7 @@ function CustomerRecipientDetails({
                 id={field.id}
                 name={field.name}
                 type="checkbox"
-                disabled={!isAdmin}
+                disabled={!isAdmin || recipientPrefsSaving}
                 className="mt-0.5"
                 checked={
                   field.defaultOn
@@ -8842,6 +8842,7 @@ function useCustomerRecipientPreferences({
   setProfileActionErr,
   setData,
   customerId,
+  customerIdRef,
 }) {
   const [recipientPrefsDraft, setRecipientPrefsDraft] = useState({
     billingContactName: "",
@@ -8849,6 +8850,13 @@ function useCustomerRecipientPreferences({
   });
   const [recipientPrefsSaving, setRecipientPrefsSaving] = useState(false);
   const [recipientPrefsErr, setRecipientPrefsErr] = useState("");
+  const preferenceWriteRef = useRef(false);
+  const preferenceWriteSeqRef = useRef(0);
+  useEffect(() => {
+    preferenceWriteSeqRef.current += 1;
+    preferenceWriteRef.current = false;
+    setRecipientPrefsSaving(false);
+  }, [customerId]);
   useEffect(() => {
     const prefs = data?.notificationPrefs || {};
     setRecipientPrefsDraft({
@@ -8868,10 +8876,18 @@ function useCustomerRecipientPreferences({
       );
       return;
     }
+    if (preferenceWriteRef.current) return;
+    preferenceWriteRef.current = true;
+    const seq = ++preferenceWriteSeqRef.current;
+    const forCustomerId = customerId;
+    const stillViewing = () =>
+      preferenceWriteSeqRef.current === seq &&
+      String(customerIdRef.current) === String(forCustomerId);
     const previous = data.notificationPrefs || {};
     const patchKeys = Object.keys(patch);
+    setRecipientPrefsSaving(true);
     setData((prev) =>
-      prev
+      String(prev?.customer?.id) === String(forCustomerId)
         ? {
             ...prev,
             notificationPrefs: {
@@ -8884,22 +8900,23 @@ function useCustomerRecipientPreferences({
     try {
       setProfileActionErr("");
       const response = await adminFetch(
-        `/admin/customers/${customerId}/notification-prefs`,
+        `/admin/customers/${forCustomerId}/notification-prefs`,
         {
           method: "PUT",
           body: JSON.stringify(patch),
         },
       );
-      if (response?.notificationPrefs) {
+      if (stillViewing() && response?.notificationPrefs) {
         setData((prev) =>
-          prev
+          String(prev?.customer?.id) === String(forCustomerId)
             ? { ...prev, notificationPrefs: response.notificationPrefs }
             : prev,
         );
       }
     } catch (err) {
+      if (!stillViewing()) return;
       setData((prev) => {
-        if (!prev) return prev;
+        if (String(prev?.customer?.id) !== String(forCustomerId)) return prev;
         const notificationPrefs = { ...(prev.notificationPrefs || {}) };
         patchKeys.forEach((key) => {
           if (Object.prototype.hasOwnProperty.call(previous, key)) {
@@ -8913,6 +8930,11 @@ function useCustomerRecipientPreferences({
       setProfileActionErr(
         err.message || "Notification preference failed to save",
       );
+    } finally {
+      if (stillViewing()) {
+        preferenceWriteRef.current = false;
+        setRecipientPrefsSaving(false);
+      }
     }
   };
   const saveRecipientPrefs = async () => {
@@ -8920,32 +8942,44 @@ function useCustomerRecipientPreferences({
       setRecipientPrefsErr("Admin access is required to change recipients");
       return;
     }
+    if (preferenceWriteRef.current) return;
+    preferenceWriteRef.current = true;
+    const seq = ++preferenceWriteSeqRef.current;
+    const forCustomerId = customerId;
+    const stillViewing = () =>
+      preferenceWriteSeqRef.current === seq &&
+      String(customerIdRef.current) === String(forCustomerId);
+    const recipientPrefsSnapshot = { ...recipientPrefsDraft };
     setRecipientPrefsSaving(true);
     setRecipientPrefsErr("");
     try {
       const response = await adminFetch(
-        `/admin/customers/${customerId}/notification-prefs`,
+        `/admin/customers/${forCustomerId}/notification-prefs`,
         {
           method: "PUT",
           body: JSON.stringify({
-            billingContactName: recipientPrefsDraft.billingContactName,
-            billingEmail: recipientPrefsDraft.billingEmail,
+            billingContactName: recipientPrefsSnapshot.billingContactName,
+            billingEmail: recipientPrefsSnapshot.billingEmail,
           }),
         },
       );
-      if (response?.notificationPrefs) {
+      if (stillViewing() && response?.notificationPrefs) {
         setData((prev) =>
-          prev
+          String(prev?.customer?.id) === String(forCustomerId)
             ? { ...prev, notificationPrefs: response.notificationPrefs }
             : prev,
         );
       }
     } catch (err) {
+      if (!stillViewing()) return;
       setRecipientPrefsErr(
         err.message || "Recipient preferences failed to save",
       );
     } finally {
-      setRecipientPrefsSaving(false);
+      if (stillViewing()) {
+        preferenceWriteRef.current = false;
+        setRecipientPrefsSaving(false);
+      }
     }
   };
   const c = data?.customer || {};
@@ -9638,6 +9672,7 @@ export default function Customer360ProfileV2({
     setProfileActionErr,
     setData,
     customerId,
+    customerIdRef,
   });
   const {
     editOpen,

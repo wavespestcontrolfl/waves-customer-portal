@@ -62,7 +62,7 @@ import { useFeatureFlag } from '../../hooks/useFeatureFlag';
 import { getAdminAuthToken, getAdminDisplayName, getAdminUser } from '../../lib/adminAuth';
 import { etDateString } from '../../lib/timezone';
 import VisitBriefPanel from './VisitBriefPanel';
-import { fmtMoney, shortAddress, stopAccessIndicator, stopCollectSummary } from './visitBrief';
+import { fmtMoney, recordlessVisitNeedsCloseout, shortAddress, stopAccessIndicator, stopCollectSummary } from './visitBrief';
 
 // In-place report editor for project-backed visits (WDO, pre-treat cert —
 // owner ask 2026-07-13): tapping a visit whose report already exists opens
@@ -95,8 +95,9 @@ function isPestControlService(service) {
 // findings schema) complete through the Dispatch completion form — neither
 // the recap modal (no findings/billing gate) nor project creation (server
 // 422s appointment-managed types) is the right surface.
-function isTypedFindingsService(service) {
-  return !!service?.completionProfile?.findingsType;
+function usesDispatchCompletion(service) {
+  return !!service?.completionProfile?.findingsType
+    || !!((service?.visitId || service?.visit_id) && (service?.visitCloseoutEnabled || service?.visitCloseoutPacket));
 }
 
 // C4 (universal one-time services, ratified Q9): instead of an alert telling
@@ -110,7 +111,7 @@ function isTypedFindingsService(service) {
 const TERMINAL_SERVICE_STATUSES = new Set(["completed", "cancelled", "skipped", "no_show"]);
 function openTypedCompletion(service) {
   const status = String(service?.status || "");
-  if (TERMINAL_SERVICE_STATUSES.has(status)) {
+  if (TERMINAL_SERVICE_STATUSES.has(status) && !service?.visitCloseoutPacket && !recordlessVisitNeedsCloseout(service)) {
     alert(`This visit is already ${status} — nothing to complete.`);
     return;
   }
@@ -231,6 +232,9 @@ export default function TechHomePage({ section = 'today' }) {
   const [loading, setLoading] = useState(true);
   const [scheduleError, setScheduleError] = useState('');
   const [showCreateProject, setShowCreateProject] = useState(false);
+  const [createProjectHasPendingPhotos, setCreateProjectHasPendingPhotos] = useState(false);
+  const [continueProjectId, setContinueProjectId] = useState(null);
+  const [projectEditorDirty, setProjectEditorDirty] = useState(false);
   const [showProjectPicker, setShowProjectPicker] = useState(false);
   const [projectDefaults, setProjectDefaults] = useState(null);
   const [photoTarget, setPhotoTarget] = useState(null); // { id, customerName }
@@ -283,7 +287,9 @@ export default function TechHomePage({ section = 'today' }) {
       if (seq !== scheduleSeq.current) return;
       if (!res.ok) throw new Error(data.error || `Route failed to load (${res.status})`);
       setScheduleError('');
-      setSchedule(scheduleRowsFromResponse(data));
+      setSchedule(scheduleRowsFromResponse(data).map((service) => ({
+        ...service, visitCloseoutEnabled: service.visitCloseoutEnabled === true || data.visitCloseout === true,
+      })));
       setRainChance(typeof data.rainChance === 'number' ? data.rainChance : null);
     } catch (err) {
       if (seq !== scheduleSeq.current) return;
@@ -504,7 +510,10 @@ export default function TechHomePage({ section = 'today' }) {
   // lock timer before it could release (codex #4072 r19 P2). No header
   // moves the accordion until the action settles.
   const [busyStopId, setBusyStopId] = useState(null);
-  const navigationBusy = Boolean(busyStopId || enRouteState.pendingId || onSiteState.pendingId);
+  const navigationBusy = Boolean(
+    busyStopId || enRouteState.pendingId || onSiteState.pendingId
+      || createProjectHasPendingPhotos || projectEditorDirty
+  );
   useLayoutEffect(() => {
     setNavigationBusy?.(navigationBusy);
     return () => setNavigationBusy?.(false);
@@ -527,6 +536,7 @@ export default function TechHomePage({ section = 'today' }) {
   }, [section, selectedVisitKey, schedule, scheduleError, loadStopDetail]);
 
   const openProjectForService = useCallback((service) => {
+    setCreateProjectHasPendingPhotos(false);
     setProjectDefaults(service ? {
       customerId: service.customer_id || service.customerId || '',
       customerLabel: service.customer_name || service.customerName || '',
@@ -552,7 +562,14 @@ export default function TechHomePage({ section = 'today' }) {
   // A visit whose report already exists (linkedProject rides the schedule
   // payload) CONTINUES that report in place — re-opening the create form
   // would mint a duplicate project for the same visit.
-  const [continueProjectId, setContinueProjectId] = useState(null);
+  // Mirrors ProjectDetail's dirty state so editor and browser navigation
+  // cannot silently discard report edits.
+  const closeProjectEditor = useCallback(() => {
+    if (projectEditorDirty && !confirm('Discard unsaved report edits?')) return;
+    setProjectEditorDirty(false);
+    setContinueProjectId(null);
+    fetchSchedule();
+  }, [fetchSchedule, projectEditorDirty]);
   const [projectTypesRegistry, setProjectTypesRegistry] = useState(null);
   useEffect(() => {
     if (!continueProjectId || projectTypesRegistry) return;
@@ -572,20 +589,25 @@ export default function TechHomePage({ section = 'today' }) {
     const linkedStatus = service?.linkedProject?.status;
     if (linkedStatus === 'closed' || linkedStatus === 'sent' || service?.status === 'completed') return;
     if (service?.linkedProject?.id) {
+      setProjectEditorDirty(false);
       setContinueProjectId(service.linkedProject.id);
       return;
     }
     openProjectForService(service);
   }, [openProjectForService]);
   const projectServices = fieldWorkspace
-    ? (selectedVisitKey ? (selectedVisit?.services || []) : myServices).filter((service) => !TERMINAL_STATUSES_VISIT.has(service.status) && !['sent', 'closed'].includes(service.linkedProject?.status))
+    ? (selectedVisitKey ? (selectedVisit?.services || []) : myServices).filter((service) => (
+        !!service.visitCloseoutPacket || recordlessVisitNeedsCloseout(service)
+        || (!TERMINAL_STATUSES_VISIT.has(service.status)
+          && !['sent', 'closed'].includes(service.linkedProject?.status))
+      ))
     : myServices;
   const handleProjectQuickAction = useCallback(() => {
     if (projectServices.length === 1) {
       const only = projectServices[0];
       // Same routing as the row/picker handlers — a cut-over typed job must
       // not open CreateProjectModal through the quick action either.
-      if (isTypedFindingsService(only)) {
+      if (usesDispatchCompletion(only)) {
         openTypedCompletion(only);
       } else if (isPestControlService(only)) {
         setRecapService(only);
@@ -606,8 +628,8 @@ export default function TechHomePage({ section = 'today' }) {
     setSearchParams((params) => { params.delete('visit'); return params; });
   };
   const openServiceReport = (service) => {
-    if (TERMINAL_STATUSES_VISIT.has(service.status)) return;
-    if (isTypedFindingsService(service)) openTypedCompletion(service);
+    if (TERMINAL_STATUSES_VISIT.has(service.status) && !service.visitCloseoutPacket && !recordlessVisitNeedsCloseout(service)) return;
+    if (usesDispatchCompletion(service)) openTypedCompletion(service);
     else if (isPestControlService(service)) setRecapService(service);
     else openProjectOrContinue(service);
   };
@@ -941,7 +963,7 @@ export default function TechHomePage({ section = 'today' }) {
                 onBusyChange={(busy) => onStopBusyChange(stop, busy)}
                 onRetryDetail={() => loadStopDetail(stop)}
                 onProject={(s) => (
-                  isTypedFindingsService(s)
+                  usesDispatchCompletion(s)
                     ? openTypedCompletion(s)
                     : isPestControlService(s) ? setRecapService(s) : openProjectOrContinue(s)
                 )}
@@ -971,8 +993,16 @@ export default function TechHomePage({ section = 'today' }) {
           defaultInspectionFee={projectDefaults?.visitPrice ?? ''}
           defaultProjectType={projectDefaults?.projectType || ''}
           allowedProjectTypes={projectDefaults?.projectType ? [projectDefaults.projectType] : null}
-          onClose={() => { setShowCreateProject(false); setProjectDefaults(null); }}
-          onCreated={() => { setShowCreateProject(false); setProjectDefaults(null); }}
+          onPendingPhotosChange={setCreateProjectHasPendingPhotos}
+          onClose={() => { setCreateProjectHasPendingPhotos(false); setShowCreateProject(false); setProjectDefaults(null); }}
+          onCreated={(project, outcome) => {
+            setCreateProjectHasPendingPhotos(false);
+            setShowCreateProject(false);
+            setProjectDefaults(null);
+            setProjectEditorDirty(false);
+            if (project?.id && !outcome?.completed) setContinueProjectId(project.id);
+            fetchSchedule();
+          }}
         />
       )}
 
@@ -985,7 +1015,7 @@ export default function TechHomePage({ section = 'today' }) {
              (z-50), which mounts LATER at body-end and therefore paints
              above this scrim. A higher z here would bury the dialogs. */
           style={{ position: 'fixed', inset: 0, zIndex: 50, background: 'rgba(0,0,0,0.6)', overflowY: 'auto' }}
-          onClick={() => { setContinueProjectId(null); fetchSchedule(); }}
+          onClick={closeProjectEditor}
         >
           {/* The report editor is a customer-document surface — it renders
               light (V2) over the dark portal, same as the report preview. */}
@@ -1001,7 +1031,8 @@ export default function TechHomePage({ section = 'today' }) {
               <ProjectDetail
                 projectId={continueProjectId}
                 typesRegistry={projectTypesRegistry}
-                onClose={() => { setContinueProjectId(null); fetchSchedule(); }}
+                onDirtyChange={setProjectEditorDirty}
+                onClose={closeProjectEditor}
                 onChanged={() => fetchSchedule()}
                 canAdminActions={getAdminUser()?.role === 'admin'}
               />
@@ -1017,7 +1048,7 @@ export default function TechHomePage({ section = 'today' }) {
           onClose={() => setShowProjectPicker(false)}
           onSelect={(service) => {
             setShowProjectPicker(false);
-            if (isTypedFindingsService(service)) openTypedCompletion(service);
+            if (usesDispatchCompletion(service)) openTypedCompletion(service);
             else if (isPestControlService(service)) setRecapService(service);
             else openProjectOrContinue(service);
           }}

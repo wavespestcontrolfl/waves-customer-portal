@@ -145,6 +145,21 @@ describe('GET /pay/:token manualPayOptions', () => {
     });
   });
 
+  // A Zelle transfer happens entirely off-platform, so this block is the one
+  // collection rail the guarded POST routes cannot refuse afterwards. A
+  // withdrawn packet invoice keeps a collectible STATUS, so the status-only
+  // read advertised an amount for debt that now belongs to AP (codex r25 P1).
+  test('env set ⇒ key absent on a withdrawn packet invoice', async () => {
+    process.env.ZELLE_RECIPIENT = 'pay@example.com';
+    for (const status of ['sent', 'viewed', 'overdue']) {
+      const { body } = await getPayPage(invoiceData({ status, scheduled_send_error: 'payer_billed:5:hold' }));
+      expect(body).not.toHaveProperty('manualPayOptions');
+    }
+    // An ordinary delivery failure is not a withdrawal.
+    const { body } = await getPayPage(invoiceData({ status: 'overdue', scheduled_send_error: 'smtp 550 mailbox unavailable' }));
+    expect(body.manualPayOptions).toEqual(expect.objectContaining({ zelle: { recipient: 'pay@example.com' } }));
+  });
+
   test('env set ⇒ key absent while a saved-card attempt is in flight (codex r5 P1 cross-rail fence)', async () => {
     process.env.ZELLE_RECIPIENT = 'pay@example.com';
     const StripeService = require('../services/stripe');

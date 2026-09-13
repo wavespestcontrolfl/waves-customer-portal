@@ -27,6 +27,18 @@ router.get('/', async (req, res, next) => {
         this.whereNot({ type: 'storm_watch_alert' })
           .orWhereRaw("created_at >= now() - interval '6 hours'");
       });
+    // GATE_NOSHOW_DETECTOR is the feature's kill switch, and turning it off
+    // stops the sweep — which is the only thing that dismisses a tracking
+    // notice when its visit completes, moves or is reassigned. Undismissed
+    // rows would otherwise keep showing (and, since round 8, leading the
+    // window) with no reconciliation behind them, so a disabled feature
+    // would leave stale cards on techs' phones indefinitely (codex P1, PR
+    // #4403 round 9). Read at request time, like every other gate here: a
+    // flip needs no redeploy, and re-enabling hands the rows straight back
+    // to the sweep, which reconciles them on its next tick.
+    if (!require('../config/feature-gates').gateEnvValue('GATE_NOSHOW_DETECTOR')) {
+      q = q.whereNot({ type: 'follow_through_tracking' });
+    }
     if (unreadOnly) q = q.where({ read: false });
     // FRESH non-storm rows outrank everything inside the 20-row window: a
     // storm burst must never crowd an actionable geofence/timer prompt out
@@ -42,9 +54,28 @@ router.get('/', async (req, res, next) => {
     // `new_appointment` type the client never rendered) must not starve
     // every schedule-change card out of the window either. Texts on a tech's
     // own line (tech_line_sms — tech-line.js) are kept the same way and sit
-    // in the same bucket.
+    // in the same bucket. Missing-tracking notices (follow_through_tracking
+    // — no-show-detector.js) are their OWN bucket 0, regardless of age: they
+    // are undismissed only while the visit is still overdue with no arrival
+    // evidence (the sweep's reconcile pass dismisses them the moment that
+    // stops being true), and the generic recency rule dropped one past six
+    // hours into the routine kept-card bucket — so a tech who was offline
+    // while a stage-2 notice aged, then collected 20 newer assignment or text
+    // cards, never received the row at all and the client's own MAX_VISIT_CARDS
+    // ranking could not rescue what the server never returned (codex P2
+    // round 8). Its OWN bucket, ahead of every other fresh row: sharing
+    // bucket 0 with them meant an offline tech who collected 20 newer
+    // geofence/timer prompts — two events across ten stops — still lost the
+    // stage-2 card from the window (codex P2 round 17). The other buckets
+    // keep their relative order, one step down.
     const rows = await q
-      .orderByRaw("CASE WHEN type LIKE 'visit\\_%' OR type = 'tech_line_sms' THEN 2 WHEN type = 'storm_watch_alert' THEN 1 WHEN created_at >= now() - interval '6 hours' THEN 0 ELSE 2 END")
+      .orderByRaw("CASE WHEN type = 'follow_through_tracking' THEN 0 WHEN type LIKE 'visit\\_%' OR type = 'tech_line_sms' THEN 3 WHEN type = 'storm_watch_alert' THEN 2 WHEN created_at >= now() - interval '6 hours' THEN 1 ELSE 3 END")
+      // Stage 2 before stage 1 INSIDE the tracking bucket, before the limit
+      // truncates: a tech with more than 20 undismissed tracking cards would
+      // otherwise lose an older critical arrival check behind 20 newer
+      // stage-1 warnings, and the client's own stage-2-first sort cannot
+      // rescue a row the window never returned (codex P2, PR #4403 round 20).
+      .orderByRaw("CASE WHEN type = 'follow_through_tracking' THEN COALESCE((payload->>'stage')::int, 0) ELSE 0 END DESC")
       .orderBy('created_at', 'desc')
       .limit(20);
     res.json({ notifications: rows.map(parseRow) });
@@ -71,7 +102,14 @@ router.post('/:id/dismiss', async (req, res, next) => {
 
     await db('tech_notifications')
       .where({ id: row.id })
-      .update({ read: true, dismissed_at: new Date(), updated_at: new Date() });
+      // A tech's own dismissal CLEARS any automatic supersession stamp the
+      // sweep may have written in the meantime: the sweep reads that stamp as
+      // "this card was retired by the system, so an identical one may be
+      // raised again", and leaving it would let the next cycle resurrect a
+      // card the tech had already cleared — and push it again (codex P2, PR
+      // #4403 round 24).
+      .update({ read: true, dismissed_at: new Date(), updated_at: new Date(),
+        payload: db.raw("COALESCE(payload, '{}'::jsonb) - 'superseded_at'") });
 
     // If it was an arrival reminder, log the dismissal in geofence_events
     if (row.type === 'geofence_arrival_reminder') {

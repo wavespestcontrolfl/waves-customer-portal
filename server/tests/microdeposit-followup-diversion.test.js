@@ -55,7 +55,7 @@ const InvoiceFollowUps = require('../services/invoice-followups');
 
 function chain({ result = [], first, updateResult = 1 } = {}) {
   const q = {};
-  ['where', 'whereIn', 'whereNotIn', 'whereNull', 'whereRaw', 'andWhere', 'orWhere', 'join', 'limit', 'select', 'returning', 'forUpdate']
+  ['where', 'whereIn', 'whereNotIn', 'whereNull', 'whereNot', 'orWhereNot', 'orWhereNull', 'whereRaw', 'andWhere', 'orWhere', 'join', 'limit', 'select', 'returning', 'forUpdate']
     .forEach((m) => { q[m] = jest.fn((arg) => { if (typeof arg === 'function') arg.call(q); return q; }); });
   q.first = jest.fn(async () => first);
   q.insert = jest.fn(async () => undefined);
@@ -117,6 +117,8 @@ describe('invoice-followups micro-deposit diversion', () => {
       // Claim-txn row lock read + credit re-read.
       invoices: [
         chain({ first: { id: 'inv-1', customer_id: 'cust-1', status: 'viewed', token: 'token-1' } }),
+        // fireTouch's live ownership re-read before anything else runs
+        chain({ first: { payer_id: null, scheduled_send_error: null } }),
         chain({ first: { total: '129.00', credit_applied: null, status: 'viewed', title: 'Quarterly Pest Control', token: 'token-1', due_date: '2026-05-10', invoice_number: 'WPC-2026-1042' } }),
       ],
       // Post-lock revalidation → claim → cadence advance → claim clear.
@@ -161,7 +163,8 @@ describe('invoice-followups micro-deposit diversion', () => {
       customers: [chain({ first: customer })],
       invoices: [
         chain({ first: { id: 'inv-1', customer_id: 'cust-1', status: 'viewed', token: 'token-1' } }), // claim-txn row lock read
-        chain({ first: { total: '129.00', credit_applied: null, status: 'viewed', title: 'Quarterly Pest Control', token: 'token-1', due_date: '2026-05-10', invoice_number: 'WPC-2026-1042' } }), // credit re-read
+        chain({ first: { payer_id: null, scheduled_send_error: null } }), // fireTouch's live ownership re-read
+        chain({ first: { total: '129.00', credit_applied: null, status: 'viewed', title: 'Quarterly Pest Control', token: 'token-1', due_date: '2026-05-10', invoice_number: 'WPC-2026-1042', payer_id: null, scheduled_send_error: null } }), // credit re-read (ownership judged again)
         chain({ first: { id: 'inv-1', status: 'viewed', title: 'Quarterly Pest Control', total: '129.00', credit_applied: null, due_date: '2026-05-10', service_date: '2026-05-01', invoice_number: 'WPC-2026-1042' } }), // sendFollowupEmail re-read
       ],
       notification_prefs: [chain({ first: {} })],

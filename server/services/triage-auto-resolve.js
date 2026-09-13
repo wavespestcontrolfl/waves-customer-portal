@@ -988,6 +988,8 @@ const CLASSIFY_RULES = [
 // off). Returns { action: 'resolve'|'dismiss', rule } or null (untouched).
 function classifyTriageItem(item, ctx, { now = new Date() } = {}) {
   if (item.status !== 'open') return null;
+  // A reviewed request needs a scheduling outcome, including during gate rollback.
+  if (item.payload?.reschedule_proposal) return null;
   const ev = (ctx.evidence instanceof Map && ctx.evidence.get(item.id)) || null;
   const hit = CLASSIFY_RULES.find(({ when }) => when(item, ev, now));
   return hit ? { action: hit.action, rule: hit.rule } : null;

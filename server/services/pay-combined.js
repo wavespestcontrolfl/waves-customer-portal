@@ -45,7 +45,7 @@ const logger = require('./logger');
 const { isEnabled } = require('../config/feature-gates');
 const { openBalanceInvoices } = require('./open-balance');
 const { dunningStoppedInvoiceIds } = require('./completion-balance-sweep');
-const { invoiceAmountDue, isInvoiceCollectibleStatus } = require('./invoice-helpers');
+const { invoiceAmountDue, isInvoiceCollectibleStatus, invoiceWithdrawnFromCustomer } = require('./invoice-helpers');
 
 // Stripe metadata values cap at 500 chars. The compact `${id}:${cents}`
 // encoding spends ~44 chars per sibling, so 8 siblings stay comfortably
@@ -364,6 +364,13 @@ async function verifyAllocationLocked(trx, allocation, { anchorInvoiceId, expect
     if (stoppedNow.has(String(entry.invoiceId))) throw staleErr(`dunning stopped on invoice ${row.invoice_number}`);
     if (!isInvoiceCollectibleStatus(row.status)) throw staleErr(`invoice ${row.invoice_number} is ${row.status}`);
     if (row.payer_id || row.payer_statement_id) throw staleErr(`invoice ${row.invoice_number} became payer-billed`);
+    // The WITHDRAWAL stamp under the same lock (pre-push P0): a combined-visit
+    // packet invoice whose Bill-To moved after the homeowner held its link
+    // keeps a collectible status and a NULL payer_id, so neither check above
+    // sees it, and the live resolve below reads only this invoice's own
+    // representative service — the payer may sit on another billed member of
+    // the same packet. This is the allocation's last fence before money moves.
+    if (invoiceWithdrawnFromCustomer(row)) throw staleErr(`invoice ${row.invoice_number} was withdrawn to a third-party payer`);
     // LIVE payer re-resolution for EVERY row, anchor included (codex r4 P1;
     // anchor exemption removed per codex r5 P1): a payer assigned after
     // invoice creation lives on scheduled_services (or as the customer's
@@ -504,13 +511,51 @@ async function releaseUnconfirmedCombinedSessionsForScheduledServices(database, 
     .pluck('customer_id')).filter(Boolean).map(String).sort();
   await lockCombinedCustomers(database, customerIds);
   const rows = await database('invoices')
-    .whereIn('scheduled_service_id', ids)
+    // A combined-visit invoice is anchored to ONE billed member's
+    // scheduled_service_id; a Bill-To edit on any OTHER member of that
+    // packet moves the same debt, so every invoice whose packet contains an
+    // edited member is in the scan too (Codex #4311 r27 P1).
+    .where((q) => q.whereIn('scheduled_service_id', ids)
+      .orWhereIn('visit_completion_packet_id', database('visit_completion_packet_items')
+        .whereIn('scheduled_service_id', ids).select('packet_id')))
     .whereNotNull('stripe_payment_intent_id')
     // 'processing' rows stay IN the scan (codex r26 P1): they are exactly
     // the in-flight signal the PI-status check must see and report.
     .whereNotIn('status', ['paid', 'prepaid', 'void', 'refunded', 'canceled', 'cancelled'])
     .select('id', 'invoice_number', 'stripe_payment_intent_id');
-  return releaseUnconfirmedCombinedSessions(database, rows);
+  return releaseWholeOrNothing(database, [rows]);
+}
+
+/** Plan every side, then cancel only if NOTHING is in flight (Codex #4311
+ * r27 P2, the same rule the merge applies to its two sides): a payer change
+ * that is about to be refused for in-flight money must not already have
+ * cancelled a sibling session — a Stripe cancel is an external effect the
+ * caller's transaction cannot roll back. */
+async function releaseWholeOrNothing(database, rowSets) {
+  const plans = [];
+  let inFlight = 0;
+  for (const rows of rowSets) {
+    const plan = await planStampedSessionRelease(database, rows);
+    inFlight += plan.inFlight;
+    plans.push(plan);
+  }
+  if (inFlight > 0) return { released: 0, inFlight };
+  let released = 0;
+  for (const plan of plans) released += (await applyStampedSessionRelease(database, plan)).released;
+  return { released, inFlight: 0 };
+}
+
+/** The customer-default-payer fence over SEVERAL customers at once — one
+ * verdict for all of them (Codex #4311 r27 P2): a payer reactivation moves
+ * every referencing customer's debt together, and a per-customer loop
+ * cancelled the first customer's confirmable session before a later
+ * customer's in-flight payment refused the change. */
+async function releaseUnconfirmedCombinedSessionsForCustomers(database, customerIds) {
+  const ids = [...new Set((customerIds || []).filter(Boolean).map(String))].sort();
+  if (!ids.length) return { released: 0, inFlight: 0 };
+  const rowSets = [];
+  for (const id of ids) rowSets.push(await lockAndPinStampedSessionsForCustomer(database, id));
+  return releaseWholeOrNothing(database, rowSets);
 }
 
 /** Customer-default-payer variant of the same fence (the customers.payer_id
@@ -781,7 +826,6 @@ async function applyStampedSessionRelease(database, plan) {
     }
     await clearPaymentIntentStamps(database, piId);
     released += 1;
-    logger.info(`[pay-combined] payer change released unconfirmed combined PI ${piId} and cleared its stamps`);
   }
   return { released, inFlight: plan.inFlight };
 }
@@ -1327,6 +1371,7 @@ module.exports = {
   lockCombinedCustomers,
   lockCombinedCustomerStable,
   releaseUnconfirmedCombinedSessionsForScheduledServices,
+  releaseUnconfirmedCombinedSessionsForCustomers,
   releaseUnconfirmedCombinedSessionsForCustomer,
   lockAndPinStampedSessionsForCustomer,
   releaseUnconfirmedCombinedSessions,

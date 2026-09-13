@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef, lazy, Suspense } from "react";
+import { useLocation, useNavigate, useSearchParams } from "react-router-dom";
 import {
   BarChart3,
   CalendarRange,
@@ -7,32 +8,25 @@ import {
   PhoneCall,
   Sparkles,
 } from "lucide-react";
-
 import AdminCommandHeader from "../../components/admin/AdminCommandHeader";
+import {
+  Badge as UiBadge,
+  Button,
+  Card as UiCard,
+  Table,
+  TBody,
+  TD,
+  TH,
+  THead,
+  TR,
+  UiSurface,
+} from "../../components/ui";
 import { etDateString } from "../../lib/timezone";
 import useRenderedTabBeacon from "../../hooks/useRenderedTabBeacon";
 const PPCDashboardPage = lazy(() => import("./PPCDashboardPage"));
-
 const API_BASE = import.meta.env.VITE_API_URL || "/api";
 // V2 token pass: `teal` folded to zinc-900, `purple`/`orange` fold too.
 // Semantic green/amber/red preserved for status/alert accents.
-const D = {
-  bg: "#F4F4F5",
-  card: "#FFFFFF",
-  border: "#E4E4E7",
-  teal: "#18181B",
-  green: "#15803D",
-  amber: "#A16207",
-  red: "#991B1B",
-  orange: "#18181B",
-  text: "#27272A",
-  muted: "#71717A",
-  white: "#FFFFFF",
-  purple: "#18181B",
-  heading: "#09090B",
-  inputBorder: "#D4D4D8",
-};
-const MONO = "'JetBrains Mono', monospace";
 
 function adminFetch(path) {
   return fetch(`${API_BASE}${path}`, {
@@ -52,9 +46,6 @@ function adminPost(path, body) {
     body: JSON.stringify(body),
   }).then((r) => r.json());
 }
-
-
-
 function fmt(n) {
   return (
     "$" +
@@ -76,119 +67,95 @@ function fmtDec(n) {
 function pct(n) {
   return (Number(n) || 0).toFixed(1) + "%";
 }
-
 const TABS = [
-  { key: "ppc-dashboard", label: "PPC Dashboard", Icon: Megaphone },
-  { key: "overview", label: "Overview", Icon: BarChart3 },
-  { key: "call-bridge", label: "Call Bridge", Icon: PhoneCall },
-  { key: "service-lines", label: "Service Lines", Icon: Layers },
-  { key: "advisor", label: "AI Advisor", Icon: Sparkles },
-  { key: "capacity", label: "Capacity", Icon: CalendarRange },
+  {
+    key: "ppc-dashboard",
+    label: "PPC Dashboard",
+    Icon: Megaphone,
+  },
+  {
+    key: "overview",
+    label: "Overview",
+    Icon: BarChart3,
+  },
+  {
+    key: "call-bridge",
+    label: "Call Bridge",
+    Icon: PhoneCall,
+  },
+  {
+    key: "service-lines",
+    label: "Service Lines",
+    Icon: Layers,
+  },
+  {
+    key: "advisor",
+    label: "AI Advisor",
+    Icon: Sparkles,
+  },
+  {
+    key: "capacity",
+    label: "Capacity",
+    Icon: CalendarRange,
+  },
 ];
-
-const thStyle = {
-  padding: "10px 14px",
-  textAlign: "left",
-  fontSize: 12,
-  fontWeight: 500,
-  color: D.muted,
-  borderBottom: `1px solid ${D.border}`,
-  textTransform: "uppercase",
-  letterSpacing: "0.5px",
-};
-const thR = { ...thStyle, textAlign: "right" };
-const tdStyle = {
-  padding: "10px 14px",
-  fontSize: 13,
-  color: D.text,
-  borderBottom: `1px solid ${D.border}`,
-  fontFamily: MONO,
-};
-const tdR = { ...tdStyle, textAlign: "right" };
-const tdText = { ...tdStyle, fontFamily: "inherit" };
-
-function Card({ children, style }) {
-  return (
-    <div
-      style={{
-        background: D.card,
-        border: `1px solid ${D.border}`,
-        borderRadius: 12,
-        padding: 24,
-        ...style,
-      }}
-    >
-      {children}
-    </div>
-  );
-}
-
+const UI_TABS = TABS.map((item) => ({
+  ...item,
+  className: "!h-11 !min-h-11 !text-14 !normal-case !tracking-normal",
+}));
 function KpiCard({ label, value, sub, color }) {
   return (
-    <Card
-      style={{ padding: 20, display: "flex", flexDirection: "column", gap: 4 }}
-    >
+    <UiCard className="[padding:20px] flex flex-col [gap:4px]">
       {" "}
-      <div style={{ fontSize: 12, color: D.muted, fontWeight: 500 }}>
+      <div className="text-ui-body text-ink-secondary font-medium">
         {label}
       </div>{" "}
       <div
         style={{
-          fontSize: 24,
-          fontWeight: 700,
-          color: color || D.heading,
-          fontFamily: MONO,
+          color: color || "#09090B",
         }}
+        className="text-[24px] font-medium"
       >
         {value}
       </div>
       {sub && (
         <div
           style={{
-            fontSize: 11,
-            color: sub.color || D.muted,
-            fontFamily: MONO,
+            color: sub.color || "#71717A",
           }}
+          className="text-ui-body"
         >
           {sub.text}
         </div>
       )}
-    </Card>
+    </UiCard>
   );
 }
-
 function Badge({ mode }) {
-  const colors = { base: D.green, spent: D.amber, stop: D.red };
-  const labels = { base: "BASE", spent: "SPENT", stop: "STOP" };
+  const modeClasses = {
+    base: "!bg-green-100 !text-green-700",
+    spent: "!bg-amber-100 !text-amber-700",
+    stop: "!bg-red-100 !text-red-800",
+  };
+  const labels = {
+    base: "Base",
+    spent: "Spent",
+    stop: "Stop",
+  };
   return (
-    <span
-      style={{
-        display: "inline-block",
-        padding: "2px 8px",
-        borderRadius: 4,
-        fontSize: 12, // UI audit F0357
-        fontWeight: 700,
-        background: (colors[mode] || D.muted) + "22",
-        color: colors[mode] || D.muted,
-        fontFamily: MONO,
-        letterSpacing: "0.5px",
-      }}
-    >
-      {labels[mode] || mode?.toUpperCase()}
-    </span>
+    <UiBadge tone="neutral" className={modeClasses[mode]}>
+      {labels[mode] || mode}
+    </UiBadge>
   );
 }
-
 function roasColor(roas) {
-  if (roas >= 4) return D.green;
-  if (roas >= 2) return D.amber;
-  return D.red;
+  if (roas >= 4) return "#15803D";
+  if (roas >= 2) return "#A16207";
+  return "#991B1B";
 }
-
 function fmtInt(n) {
   return Number(n || 0).toLocaleString();
 }
-
 function secondsLabel(value) {
   const seconds = Number(value || 0);
   if (!seconds) return "—";
@@ -196,13 +163,11 @@ function secondsLabel(value) {
   const remainder = seconds % 60;
   return minutes > 0 ? `${minutes}m ${remainder}s` : `${remainder}s`;
 }
-
 function bridgeStatusTone(status) {
-  if (status === "ready" || status === "already_bridged") return D.green;
-  if (status === "ambiguous") return D.amber;
-  return D.muted;
+  if (status === "ready" || status === "already_bridged") return "#15803D";
+  if (status === "ambiguous") return "#A16207";
+  return "#71717A";
 }
-
 function bridgeStatusLabel(status) {
   const labels = {
     ready: "Ready",
@@ -212,17 +177,21 @@ function bridgeStatusLabel(status) {
   };
   return labels[status] || "Unknown";
 }
-
 function bridgeDisplayStatus(match) {
-  if (match?.status === "already_bridged" && match.callLog?.googleAdsLeadMatched === false) {
+  if (
+    match?.status === "already_bridged" &&
+    match.callLog?.googleAdsLeadMatched === false
+  ) {
     return "Needs Lead";
   }
   return bridgeStatusLabel(match?.status);
 }
-
 function bridgeDisplayTone(match) {
-  if (match?.status === "already_bridged" && match.callLog?.googleAdsLeadMatched === false) {
-    return D.amber;
+  if (
+    match?.status === "already_bridged" &&
+    match.callLog?.googleAdsLeadMatched === false
+  ) {
+    return "#A16207";
   }
   return bridgeStatusTone(match?.status);
 }
@@ -233,7 +202,6 @@ function bridgeDisplayTone(match) {
 function OverviewTab() {
   const [campaigns, setCampaigns] = useState([]);
   const [loading, setLoading] = useState(true);
-
   useEffect(() => {
     adminFetch("/admin/ads/campaigns")
       .then((d) => {
@@ -242,15 +210,13 @@ function OverviewTab() {
       })
       .catch(() => setLoading(false));
   }, []);
-
   if (loading)
     return (
-      <div style={{ color: D.muted, padding: 40, textAlign: "center" }}>
+      <div className="text-ink-secondary [padding:40px] text-center">
         Loading campaigns...
       </div>
     );
   if (campaigns.length === 0) return <EmptyState />;
-
   const total7 = campaigns.reduce(
     (s, c) => ({
       spend: s.spend + (c.last7d?.spend || 0),
@@ -258,25 +224,23 @@ function OverviewTab() {
       conv: s.conv + (c.last7d?.conversions || 0),
       clicks: s.clicks + (c.last7d?.clicks || 0),
     }),
-    { spend: 0, value: 0, conv: 0, clicks: 0 },
+    {
+      spend: 0,
+      value: 0,
+      conv: 0,
+      clicks: 0,
+    },
   );
-
   return (
-    <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
+    <div className="flex flex-col [gap:20px]">
       {" "}
-      <div
-        style={{
-          display: "grid",
-          gridTemplateColumns: "repeat(4, 1fr)",
-          gap: 14,
-        }}
-      >
+      <div className="ads-kpi-grid grid max-sm:!grid-cols-2 [grid-template-columns:repeat(4,_1fr)] [gap:14px]">
         {" "}
         <KpiCard label="7-Day Ad Spend" value={fmt(total7.spend)} />{" "}
         <KpiCard
           label="7-Day Revenue"
           value={fmt(total7.value)}
-          color={D.green}
+          color={"#15803D"}
         />{" "}
         <KpiCard
           label="Blended ROAS"
@@ -286,43 +250,42 @@ function OverviewTab() {
               : "—"
           }
           color={
-            total7.spend > 0 ? roasColor(total7.value / total7.spend) : D.muted
+            total7.spend > 0
+              ? roasColor(total7.value / total7.spend)
+              : "#71717A"
           }
         />{" "}
         <KpiCard
           label="Conversions"
           value={total7.conv.toFixed(0)}
-          sub={{ text: `${total7.clicks} clicks`, color: D.muted }}
+          sub={{
+            text: `${total7.clicks} clicks`,
+            color: "#71717A",
+          }}
         />{" "}
       </div>{" "}
-      <Card>
+      <UiCard className="p-6">
         {" "}
-        <div
-          style={{
-            fontSize: 16,
-            fontWeight: 500,
-            color: D.heading,
-            marginBottom: 16,
-          }}
-        >
+        <div className="text-ui-body font-medium text-zinc-900 [margin-bottom:16px]">
           Campaign Performance
         </div>{" "}
-        <div style={{ overflowX: "auto" }}>
+        <div className="overflow-x-auto">
           {" "}
-          <table style={{ width: "100%", borderCollapse: "collapse" }}>
-            {" "}
-            <thead>
-              {" "}
-              <tr>
-                {" "}
-                <th style={thStyle}>Campaign</th> <th style={thR}>Mode</th>{" "}
-                <th style={thR}>Budget</th> <th style={thR}>7d Spend</th>{" "}
-                <th style={thR}>7d Revenue</th> <th style={thR}>ROAS</th>{" "}
-                <th style={thR}>CPA</th> <th style={thR}>Conv</th>{" "}
-                <th style={thR}>Trend</th>{" "}
-              </tr>{" "}
-            </thead>{" "}
-            <tbody>
+          <Table className="[width:100%] [border-collapse:collapse]">
+            <THead>
+              <TR>
+                <TH>Campaign</TH>
+                <TH className="text-right u-nums">Mode</TH>
+                <TH className="text-right u-nums">Budget</TH>
+                <TH className="text-right u-nums">7d Spend</TH>
+                <TH className="text-right u-nums">7d Revenue</TH>
+                <TH className="text-right u-nums">ROAS</TH>
+                <TH className="text-right u-nums">CPA</TH>
+                <TH className="text-right u-nums">Conv</TH>
+                <TH className="text-right u-nums">Trend</TH>
+              </TR>
+            </THead>
+            <TBody>
               {campaigns.map((c) => {
                 const p = c.last7d || {};
                 const trendIcon =
@@ -332,64 +295,61 @@ function OverviewTab() {
                       ? ""
                       : "";
                 return (
-                  <tr key={c.id}>
-                    {" "}
-                    <td style={tdText}>
+                  <TR key={c.id}>
+                    <TD>
                       {" "}
                       <div>{c.campaign_name}</div>{" "}
-                      <div style={{ fontSize: 11, color: D.muted }}>
+                      <div className="text-ui-body text-ink-secondary">
                         {c.target_area} • {c.campaign_type}
                       </div>{" "}
-                    </td>{" "}
-                    <td style={tdR}>
+                    </TD>
+                    <TD className="text-right u-nums">
                       <Badge mode={c.budget_mode} />
-                    </td>{" "}
-                    <td style={tdR}>{fmtDec(c.daily_budget_current)}/d</td>{" "}
-                    <td style={tdR}>{fmtDec(p.spend)}</td>{" "}
-                    <td style={tdR}>{fmtDec(p.conversionValue)}</td>{" "}
-                    <td style={{ ...tdR, color: roasColor(p.roas) }}>
+                    </TD>
+                    <TD className="text-right u-nums">
+                      {fmtDec(c.daily_budget_current)}/d
+                    </TD>
+                    <TD className="text-right u-nums">{fmtDec(p.spend)}</TD>
+                    <TD className="text-right u-nums">
+                      {fmtDec(p.conversionValue)}
+                    </TD>
+                    <TD
+                      style={{
+                        color: roasColor(p.roas),
+                      }}
+                      className="text-right u-nums"
+                    >
                       {p.roas ? p.roas + "x" : "—"}
-                    </td>{" "}
-                    <td style={tdR}>{p.cpa ? fmtDec(p.cpa) : "—"}</td>{" "}
-                    <td style={tdR}>{p.conversions || 0}</td>{" "}
-                    <td style={{ ...tdR, fontSize: 16 }}>{trendIcon}</td>{" "}
-                  </tr>
+                    </TD>
+                    <TD className="text-right u-nums">
+                      {p.cpa ? fmtDec(p.cpa) : "—"}
+                    </TD>
+                    <TD className="text-right u-nums">{p.conversions || 0}</TD>
+                    <TD className="text-right u-nums text-ui-body">
+                      {trendIcon}
+                    </TD>
+                  </TR>
                 );
               })}
-            </tbody>{" "}
-          </table>{" "}
+            </TBody>
+          </Table>{" "}
         </div>{" "}
-      </Card>{" "}
+      </UiCard>{" "}
     </div>
   );
 }
-
 function EmptyState() {
   return (
-    <Card style={{ textAlign: "center", padding: 60 }}>
+    <UiCard className="text-center [padding:60px]">
       {" "}
-      <div
-        style={{
-          fontSize: 18,
-          fontWeight: 500,
-          color: D.heading,
-          marginBottom: 8,
-        }}
-      >
+      <div className="text-ui-body font-medium text-zinc-900 [margin-bottom:8px]">
         No Campaigns Yet
       </div>{" "}
-      <div
-        style={{
-          fontSize: 14,
-          color: D.muted,
-          maxWidth: 400,
-          margin: "0 auto",
-        }}
-      >
+      <div className="text-ui-body text-ink-secondary [max-width:400px] [margin:0_auto]">
         Connect your Google Ads account to start tracking campaign performance,
         service-line attribution, and get daily AI-powered recommendations.
       </div>{" "}
-    </Card>
+    </UiCard>
   );
 }
 
@@ -402,7 +362,6 @@ function CallBridgeTab() {
   const [loading, setLoading] = useState(true);
   const [applying, setApplying] = useState(false);
   const [message, setMessage] = useState(null);
-
   const load = () => {
     setLoading(true);
     setMessage(null);
@@ -412,15 +371,16 @@ function CallBridgeTab() {
         setLoading(false);
       })
       .catch((e) => {
-        setMessage({ tone: D.red, text: e.message || "Bridge preview failed" });
+        setMessage({
+          tone: "#991B1B",
+          text: e.message || "Bridge preview failed",
+        });
         setLoading(false);
       });
   };
-
   useEffect(() => {
     load();
   }, [period]);
-
   const applyBridge = async () => {
     setApplying(true);
     setMessage(null);
@@ -431,32 +391,34 @@ function CallBridgeTab() {
       });
       setData(result);
       setMessage({
-        tone: result.appliedCount > 0 ? D.green : D.amber,
+        tone: result.appliedCount > 0 ? "#15803D" : "#A16207",
         text: `${fmtInt(result.appliedCount || 0)} bridge update${Number(result.appliedCount || 0) === 1 ? "" : "s"} applied`,
       });
     } catch (e) {
-      setMessage({ tone: D.red, text: e.message || "Bridge apply failed" });
+      setMessage({
+        tone: "#991B1B",
+        text: e.message || "Bridge apply failed",
+      });
     } finally {
       setApplying(false);
     }
   };
-
   if (loading) {
     return (
-      <div style={{ color: D.muted, padding: 40, textAlign: "center" }}>
+      <div className="text-ink-secondary [padding:40px] text-center">
         Loading call bridge...
       </div>
     );
   }
-
   const summary = data?.summary || {};
   const matches = data?.matches || [];
   const readyCount = Number(summary.ready || 0);
-  const leadRetryCount = matches.filter((match) => (
-    match.status === "already_bridged"
-    && !!match.callLog
-    && match.callLog.googleAdsLeadMatched === false
-  )).length;
+  const leadRetryCount = matches.filter(
+    (match) =>
+      match.status === "already_bridged" &&
+      !!match.callLog &&
+      match.callLog.googleAdsLeadMatched === false,
+  ).length;
   const configured = data?.configured !== false;
   const scanFailed = data?.scanFailed === true;
   const targetNumber = data?.targetNumber?.formatted || "(941) 318-7612";
@@ -468,237 +430,215 @@ function CallBridgeTab() {
   const canApply = configured && !scanFailed && !applying;
   const applyLabel = applying
     ? "Applying..."
-    : (readyCount > 0 && leadRetryCount > 0)
+    : readyCount > 0 && leadRetryCount > 0
       ? "Apply ready + retry leads"
       : leadRetryCount > 0
         ? "Retry lead attribution"
         : readyCount > 0
           ? "Apply ready matches"
           : "Record clean rescan";
-
   return (
-    <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
-      <div
-        style={{
-          display: "flex",
-          justifyContent: "space-between",
-          alignItems: "center",
-          gap: 12,
-          flexWrap: "wrap",
-        }}
-      >
+    <div className="flex flex-col [gap:20px]">
+      <div className="flex justify-between items-center [gap:12px] flex-wrap">
         <div>
-          <div style={{ fontSize: 14, color: D.muted }}>
+          <div className="text-ui-body text-ink-secondary">
             Google Ads call reporting bridge
           </div>
-          <div style={{ fontSize: 12, color: D.text, marginTop: 4 }}>
-            Main call asset: <span style={{ fontFamily: MONO }}>{targetNumber}</span>
+          <div className="text-ui-body text-zinc-900 [margin-top:4px]">
+            Main call asset: <span>{targetNumber}</span>
           </div>
         </div>
-        <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
-          <div
-            style={{
-              display: "flex",
-              gap: 4,
-              background: D.bg,
-              borderRadius: 8,
-              padding: 3,
-            }}
-          >
+        <div className="flex [gap:8px] items-center flex-wrap">
+          <div className="flex [gap:4px] bg-zinc-100 rounded-md [padding:3px]">
             {["7d", "30d", "90d"].map((p) => (
-              <button
+              <Button
                 key={p}
                 onClick={() => setPeriod(p)}
-                style={{
-                  padding: "6px 12px",
-                  borderRadius: 6,
-                  border: "none",
-                  cursor: "pointer",
-                  fontSize: 12,
-                  fontWeight: 500,
-                  background: period === p ? D.heading : "transparent",
-                  color: period === p ? D.white : D.muted,
-                }}
+                variant={period === p ? "primary" : "secondary"}
               >
                 {p}
-              </button>
+              </Button>
             ))}
           </div>
-          <button
-            onClick={load}
-            style={{
-              padding: "8px 12px",
-              borderRadius: 8,
-              border: `1px solid ${D.border}`,
-              background: D.card,
-              color: D.heading,
-              fontSize: 12,
-              fontWeight: 700,
-              cursor: "pointer",
-            }}
-          >
+          <Button onClick={load} variant="secondary">
             Preview
-          </button>
-          <button
+          </Button>
+          <Button
             onClick={applyBridge}
             disabled={!canApply}
-            style={{
-              padding: "8px 12px",
-              borderRadius: 8,
-              border: `1px solid ${canApply ? D.green : D.border}`,
-              background: canApply ? D.green : D.bg,
-              color: canApply ? D.white : D.muted,
-              fontSize: 12,
-              fontWeight: 700,
-              cursor: canApply ? "pointer" : "not-allowed",
-            }}
+            variant={canApply ? "primary" : "secondary"}
           >
             {applyLabel}
-          </button>
+          </Button>
         </div>
       </div>
 
       {!configured && (
-        <Card style={{ padding: 16, borderColor: D.amber }}>
-          <div style={{ color: D.amber, fontSize: 13, fontWeight: 700 }}>
+        <UiCard className="[padding:16px] text-zinc-700">
+          <div className="text-zinc-700 text-ui-body font-medium">
             Google Ads API is not configured in this environment.
           </div>
-        </Card>
+        </UiCard>
       )}
 
       {message && (
-        <Card style={{ padding: 16 }}>
-          <div style={{ color: message.tone, fontSize: 13, fontWeight: 700 }}>
+        <UiCard className="[padding:16px]">
+          <div
+            style={{
+              color: message.tone,
+            }}
+            className="text-ui-body font-medium"
+          >
             {message.text}
           </div>
-        </Card>
+        </UiCard>
       )}
 
-      <div style={{
-        display: "grid",
-        gridTemplateColumns: "repeat(auto-fit, minmax(170px, 1fr))",
-        gap: 14,
-      }}>
+      <div className="grid [grid-template-columns:repeat(auto-fit,_minmax(170px,_1fr))] [gap:14px]">
         <KpiCard label="Google Calls" value={fmtInt(summary.googleCalls)} />
-        <KpiCard label="Ready Matches" value={fmtInt(summary.ready)} color={D.green} />
+        <KpiCard
+          label="Ready Matches"
+          value={fmtInt(summary.ready)}
+          color={"#15803D"}
+        />
         <KpiCard
           label="Already Bridged"
           value={fmtInt(summary.alreadyBridged)}
-          sub={leadRetryCount > 0 ? { text: `${fmtInt(leadRetryCount)} lead retries`, color: D.amber } : null}
+          sub={
+            leadRetryCount > 0
+              ? {
+                  text: `${fmtInt(leadRetryCount)} lead retries`,
+                  color: "#A16207",
+                }
+              : null
+          }
         />
-        <KpiCard label="Main-Line CRM Calls" value={fmtInt(summary.crmMainLineCalls)} />
+        <KpiCard
+          label="Main-Line CRM Calls"
+          value={fmtInt(summary.crmMainLineCalls)}
+        />
       </div>
 
-      <Card>
-        <div
-          style={{
-            fontSize: 15,
-            fontWeight: 500,
-            color: D.heading,
-            marginBottom: 16,
-          }}
-        >
+      <UiCard className="p-6">
+        <div className="text-ui-body font-medium text-zinc-900 [margin-bottom:16px]">
           Bridge Queue
         </div>
         {matches.length === 0 ? (
-          <div style={{ color: D.muted, fontSize: 13 }}>
+          <div className="text-ink-secondary text-ui-body">
             No Google Ads call rows returned for this period.
           </div>
         ) : (
-          <div style={{ overflowX: "auto" }}>
-            <table style={{ width: "100%", borderCollapse: "collapse" }}>
-              <thead>
-                <tr>
-                  <th style={thStyle}>Google Call</th>
-                  <th style={thStyle}>Campaign</th>
-                  <th style={thStyle}>CRM Call</th>
-                  <th style={thR}>Confidence</th>
-                  <th style={thR}>Status</th>
-                </tr>
-              </thead>
-              <tbody>
+          <div className="overflow-x-auto">
+            <Table className="[width:100%] [border-collapse:collapse]">
+              <THead>
+                <TR>
+                  <TH>Google Call</TH>
+                  <TH>Campaign</TH>
+                  <TH>CRM Call</TH>
+                  <TH className="text-right u-nums">Confidence</TH>
+                  <TH className="text-right u-nums">Status</TH>
+                </TR>
+              </THead>
+              <TBody>
                 {matches.slice(0, 50).map((match, i) => (
-                  <tr key={match.googleCall?.resourceName || i}>
-                    <td style={tdText}>
+                  <TR key={match.googleCall?.resourceName || i}>
+                    <TD>
                       <div>{match.googleCall?.startLabel || "Unknown"}</div>
-                      <div style={{ color: D.muted, fontSize: 11 }}>
-                        {secondsLabel(match.googleCall?.durationSeconds)} · area {match.googleCall?.callerAreaCode || "—"}
+                      <div className="text-ink-secondary text-ui-body">
+                        {secondsLabel(match.googleCall?.durationSeconds)} · area{" "}
+                        {match.googleCall?.callerAreaCode || "—"}
                       </div>
-                    </td>
-                    <td style={tdText}>
+                    </TD>
+                    <TD>
                       <div>{match.googleCall?.campaignName || "—"}</div>
-                      <div style={{ color: D.muted, fontSize: 11 }}>
+                      <div className="text-ink-secondary text-ui-body">
                         {match.googleCall?.adGroupName || "—"}
                       </div>
-                    </td>
-                    <td style={tdText}>
+                    </TD>
+                    <TD>
                       {match.callLog ? (
                         <>
-                          <div>{match.callLog.fromPhone || "Unknown caller"}</div>
-                          <div style={{ color: D.muted, fontSize: 11 }}>
-                            {match.callLog.customerName || match.callLog.leadSourceName || match.callLog.status || "CRM call"}
+                          <div>
+                            {match.callLog.fromPhone || "Unknown caller"}
+                          </div>
+                          <div className="text-ink-secondary text-ui-body">
+                            {match.callLog.customerName ||
+                              match.callLog.leadSourceName ||
+                              match.callLog.status ||
+                              "CRM call"}
                           </div>
                         </>
                       ) : (
-                        <span style={{ color: D.muted }}>No CRM match</span>
+                        <span className="text-ink-secondary">No CRM match</span>
                       )}
-                    </td>
-                    <td style={{ ...tdR, color: bridgeDisplayTone(match), fontWeight: 700 }}>
+                    </TD>
+                    <TD
+                      style={{
+                        color: bridgeDisplayTone(match),
+                      }}
+                      className="text-right u-nums font-medium"
+                    >
                       {fmtInt(match.confidence)}%
-                    </td>
-                    <td style={{ ...tdR, color: bridgeDisplayTone(match), fontWeight: 700 }}>
+                    </TD>
+                    <TD
+                      style={{
+                        color: bridgeDisplayTone(match),
+                      }}
+                      className="text-right u-nums font-medium"
+                    >
                       {bridgeDisplayStatus(match)}
-                    </td>
-                  </tr>
+                    </TD>
+                  </TR>
                 ))}
-              </tbody>
-            </table>
+              </TBody>
+            </Table>
           </div>
         )}
-      </Card>
+      </UiCard>
 
-      <Card>
-        <div
-          style={{
-            fontSize: 15,
-            fontWeight: 500,
-            color: D.heading,
-            marginBottom: 16,
-          }}
-        >
+      <UiCard className="p-6">
+        <div className="text-ui-body font-medium text-zinc-900 [margin-bottom:16px]">
           Recent {targetNumber} Calls
         </div>
         {(data?.recentMainLineCalls || []).length === 0 ? (
-          <div style={{ color: D.muted, fontSize: 13 }}>
+          <div className="text-ink-secondary text-ui-body">
             No recent main-line calls in this period.
           </div>
         ) : (
-          <div style={{ overflowX: "auto" }}>
-            <table style={{ width: "100%", borderCollapse: "collapse" }}>
-              <thead>
-                <tr>
-                  <th style={thStyle}>Caller</th>
-                  <th style={thStyle}>Customer</th>
-                  <th style={thR}>Duration</th>
-                  <th style={thR}>Source</th>
-                </tr>
-              </thead>
-              <tbody>
+          <div className="overflow-x-auto">
+            <Table className="[width:100%] [border-collapse:collapse]">
+              <THead>
+                <TR>
+                  <TH>Caller</TH>
+                  <TH>Customer</TH>
+                  <TH className="text-right u-nums">Duration</TH>
+                  <TH className="text-right u-nums">Source</TH>
+                </TR>
+              </THead>
+              <TBody>
                 {(data?.recentMainLineCalls || []).slice(0, 20).map((call) => (
-                  <tr key={call.id}>
-                    <td style={tdText}>{call.fromPhone || "Unknown"}</td>
-                    <td style={tdText}>{call.customerName || "—"}</td>
-                    <td style={tdR}>{secondsLabel(call.durationSeconds)}</td>
-                    <td style={{ ...tdR, color: call.source === "google_ads" ? D.green : D.muted }}>
+                  <TR key={call.id}>
+                    <TD>{call.fromPhone || "Unknown"}</TD>
+                    <TD>{call.customerName || "—"}</TD>
+                    <TD className="text-right u-nums">
+                      {secondsLabel(call.durationSeconds)}
+                    </TD>
+                    <TD
+                      style={{
+                        color:
+                          call.source === "google_ads" ? "#15803D" : "#71717A",
+                      }}
+                      className="text-right u-nums"
+                    >
                       {call.source || "unattributed"}
-                    </td>
-                  </tr>
+                    </TD>
+                  </TR>
                 ))}
-              </tbody>
-            </table>
+              </TBody>
+            </Table>
           </div>
         )}
-      </Card>
+      </UiCard>
     </div>
   );
 }
@@ -710,7 +650,6 @@ function ServiceLinesTab() {
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
   const [period, setPeriod] = useState("30d");
-
   useEffect(() => {
     setLoading(true);
     adminFetch(`/admin/ads/service-lines?period=${period}`)
@@ -720,23 +659,21 @@ function ServiceLinesTab() {
       })
       .catch(() => setLoading(false));
   }, [period]);
-
   if (loading)
     return (
-      <div style={{ color: D.muted, padding: 40, textAlign: "center" }}>
+      <div className="text-ink-secondary [padding:40px] text-center">
         Loading service-line data...
       </div>
     );
   if (!data || data.totalLeads === 0)
     return (
-      <Card style={{ textAlign: "center", padding: 40 }}>
-        <div style={{ color: D.muted }}>
+      <UiCard className="text-center [padding:40px]">
+        <div className="text-ink-secondary">
           No attribution data yet. Leads will appear here as they come in
           through your ad campaigns.
         </div>
-      </Card>
+      </UiCard>
     );
-
   const bucketIcons = {
     recurring: "",
     one_time_entry: "",
@@ -749,260 +686,216 @@ function ServiceLinesTab() {
     high_ticket_specialty: "HIGH-TICKET SPECIALTY",
     lawn_seasonal: "LAWN SEASONAL",
   };
-
   return (
-    <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
+    <div className="flex flex-col [gap:20px]">
       {" "}
-      <div
-        style={{
-          display: "flex",
-          justifyContent: "space-between",
-          alignItems: "center",
-        }}
-      >
+      <div className="flex justify-between items-center">
         {" "}
-        <div style={{ fontSize: 14, color: D.muted }}>
+        <div className="text-ui-body text-ink-secondary">
           Service Line Performance
         </div>{" "}
-        <div
-          style={{
-            display: "flex",
-            gap: 4,
-            background: D.bg,
-            borderRadius: 8,
-            padding: 3,
-          }}
-        >
+        <div className="flex [gap:4px] bg-zinc-100 rounded-md [padding:3px]">
           {["7d", "30d", "90d"].map((p) => (
-            <button
+            <Button
               key={p}
               onClick={() => setPeriod(p)}
-              style={{
-                padding: "6px 14px",
-                borderRadius: 6,
-                border: "none",
-                cursor: "pointer",
-                fontSize: 12,
-                fontWeight: 500,
-                background: period === p ? D.teal : "transparent",
-                color: period === p ? D.white : D.muted,
-              }}
+              variant={period === p ? "primary" : "secondary"}
             >
               {p === "7d" ? "7 Days" : p === "30d" ? "30 Days" : "90 Days"}
-            </button>
+            </Button>
           ))}
         </div>{" "}
       </div>
       {(data.byBucket || []).map((b) => (
-        <Card key={b.bucket}>
+        <UiCard key={b.bucket} className="p-6">
           {" "}
-          <div
-            style={{
-              display: "flex",
-              alignItems: "center",
-              gap: 8,
-              marginBottom: 16,
-            }}
-          >
+          <div className="flex items-center [gap:8px] [margin-bottom:16px]">
             {" "}
-            <span style={{ fontSize: 18 }}>
+            <span className="text-ui-body">
               {bucketIcons[b.bucket] || ""}
             </span>{" "}
-            <span style={{ fontSize: 15, fontWeight: 500, color: D.heading }}>
+            <span className="text-ui-body font-medium text-zinc-900">
               {bucketLabels[b.bucket] || b.bucket.toUpperCase()}
             </span>{" "}
           </div>{" "}
-          <div style={{ overflowX: "auto" }}>
+          <div className="overflow-x-auto">
             {" "}
-            <table style={{ width: "100%", borderCollapse: "collapse" }}>
-              {" "}
-              <thead>
-                {" "}
-                <tr>
-                  {" "}
-                  <th style={thStyle}>Metric</th> <th style={thR}>Value</th>{" "}
-                  <th style={thStyle}>Metric</th>{" "}
-                  <th style={thR}>Value</th>{" "}
-                </tr>{" "}
-              </thead>{" "}
-              <tbody>
-                {" "}
-                <tr>
-                  {" "}
-                  <td style={tdText}>Leads</td>
-                  <td style={tdR}>{b.leads}</td> <td style={tdText}>Booked</td>
-                  <td style={tdR}>{b.booked}</td>{" "}
-                </tr>{" "}
-                <tr>
-                  {" "}
-                  <td style={tdText}>Lead → Book %</td>
-                  <td
+            <Table className="[width:100%] [border-collapse:collapse]">
+              <THead>
+                <TR>
+                  <TH>Metric</TH>
+                  <TH className="text-right u-nums">Value</TH>
+                  <TH>Metric</TH>
+                  <TH className="text-right u-nums">Value</TH>
+                </TR>
+              </THead>
+              <TBody>
+                <TR>
+                  <TD>Leads</TD>
+                  <TD className="text-right u-nums">{b.leads}</TD>
+                  <TD>Booked</TD>
+                  <TD className="text-right u-nums">{b.booked}</TD>
+                </TR>
+                <TR>
+                  <TD>Lead → Book %</TD>
+                  <TD
                     style={{
-                      ...tdR,
-                      color: b.leadToBookRate >= 60 ? D.green : D.amber,
+                      color: b.leadToBookRate >= 60 ? "#15803D" : "#A16207",
                     }}
+                    className="text-right u-nums"
                   >
                     {pct(b.leadToBookRate)}
-                  </td>{" "}
-                  <td style={tdText}>Book → Complete %</td>
-                  <td
+                  </TD>
+                  <TD>Book → Complete %</TD>
+                  <TD
                     style={{
-                      ...tdR,
-                      color: b.bookToCompleteRate >= 80 ? D.green : D.amber,
+                      color: b.bookToCompleteRate >= 80 ? "#15803D" : "#A16207",
                     }}
+                    className="text-right u-nums"
                   >
                     {pct(b.bookToCompleteRate)}
-                  </td>{" "}
-                </tr>{" "}
-                <tr>
-                  {" "}
-                  <td style={tdText}>Ad Spend</td>
-                  <td style={tdR}>{fmt(b.adSpend)}</td>{" "}
-                  <td style={tdText}>Cost/Lead</td>
-                  <td style={tdR}>{fmtDec(b.costPerLead)}</td>{" "}
-                </tr>{" "}
-                <tr>
-                  {" "}
-                  <td style={tdText}>Cost/Booked Job</td>
-                  <td style={tdR}>{fmtDec(b.costPerBookedJob)}</td>{" "}
-                  <td style={tdText}>Completed Revenue</td>
-                  <td style={{ ...tdR, color: D.green }}>
+                  </TD>
+                </TR>
+                <TR>
+                  <TD>Ad Spend</TD>
+                  <TD className="text-right u-nums">{fmt(b.adSpend)}</TD>
+                  <TD>Cost/Lead</TD>
+                  <TD className="text-right u-nums">{fmtDec(b.costPerLead)}</TD>
+                </TR>
+                <TR>
+                  <TD>Cost/Booked Job</TD>
+                  <TD className="text-right u-nums">
+                    {fmtDec(b.costPerBookedJob)}
+                  </TD>
+                  <TD>Completed Revenue</TD>
+                  <TD className="text-right u-nums text-zinc-900">
                     {fmt(b.completedRevenue)}
-                  </td>{" "}
-                </tr>{" "}
-                <tr>
-                  {" "}
-                  <td style={tdText}>ROAS</td>
-                  <td
+                  </TD>
+                </TR>
+                <TR>
+                  <TD>ROAS</TD>
+                  <TD
                     style={{
-                      ...tdR,
                       color: roasColor(b.roas),
-                      fontWeight: 700,
                     }}
+                    className="text-right u-nums font-medium"
                   >
                     {b.roas}x
-                  </td>{" "}
-                  <td style={tdText}>Avg Ticket</td>
-                  <td style={tdR}>{fmt(b.avgTicket)}</td>{" "}
-                </tr>{" "}
-                <tr>
-                  {" "}
-                  <td style={tdText}>Gross Margin</td>
-                  <td style={tdR}>{pct(b.grossMargin)}</td>{" "}
-                  <td style={tdText}>
-                    {b.ltvToCAC != null ? "LTV:CAC" : "Proj LTV 12mo"}
-                  </td>{" "}
-                  <td
+                  </TD>
+                  <TD>Avg Ticket</TD>
+                  <TD className="text-right u-nums">{fmt(b.avgTicket)}</TD>
+                </TR>
+                <TR>
+                  <TD>Gross Margin</TD>
+                  <TD className="text-right u-nums">{pct(b.grossMargin)}</TD>
+                  <TD>{b.ltvToCAC != null ? "LTV:CAC" : "Proj LTV 12mo"}</TD>
+                  <TD
                     style={{
-                      ...tdR,
-                      color: (b.ltvToCAC || 0) >= 10 ? D.green : D.amber,
+                      color: (b.ltvToCAC || 0) >= 10 ? "#15803D" : "#A16207",
                     }}
+                    className="text-right u-nums"
                   >
                     {b.ltvToCAC != null
                       ? b.ltvToCAC + "x"
                       : fmt(b.projectedLTV12mo)}
-                  </td>{" "}
-                </tr>{" "}
-              </tbody>{" "}
-            </table>{" "}
+                  </TD>
+                </TR>
+              </TBody>
+            </Table>{" "}
           </div>
           {b.verdict && (
             <div
               style={{
-                marginTop: 12,
-                padding: "10px 14px",
-                background: D.bg,
-                borderRadius: 8,
-                fontSize: 13,
-                color: D.text,
-                borderLeft: `3px solid ${b.roas >= 3 ? D.green : b.roas >= 1.5 ? D.amber : D.red}`,
+                borderLeft: `3px solid ${b.roas >= 3 ? "#15803D" : b.roas >= 1.5 ? "#A16207" : "#991B1B"}`,
               }}
+              className="[margin-top:12px] [padding:10px_14px] bg-zinc-100 rounded-md text-ui-body text-zinc-900"
             >
               {b.verdict}
             </div>
           )}
           {b.services?.length > 0 && (
-            <div style={{ marginTop: 10, fontSize: 12, color: D.muted }}>
+            <div className="[margin-top:10px] text-ui-body text-ink-secondary">
               Services: {b.services.join(", ")}
             </div>
           )}
-        </Card>
+        </UiCard>
       ))}
       {/* Per-service table */}
-      <Card>
+      <UiCard className="p-6">
         {" "}
-        <div
-          style={{
-            fontSize: 15,
-            fontWeight: 500,
-            color: D.heading,
-            marginBottom: 16,
-          }}
-        >
+        <div className="text-ui-body font-medium text-zinc-900 [margin-bottom:16px]">
           Per-Service Breakdown
         </div>{" "}
-        <div style={{ overflowX: "auto" }}>
+        <div className="overflow-x-auto">
           {" "}
-          <table style={{ width: "100%", borderCollapse: "collapse" }}>
-            {" "}
-            <thead>
-              {" "}
-              <tr>
-                {" "}
-                <th style={thStyle}>Service</th> <th style={thR}>Leads</th>{" "}
-                <th style={thR}>Booked</th> <th style={thR}>Close %</th>{" "}
-                <th style={thR}>Spend</th> <th style={thR}>CPA</th>{" "}
-                <th style={thR}>Ticket</th> <th style={thR}>ROAS</th>{" "}
-                <th style={thR}>LTV ROAS</th> <th style={thR}>Margin</th>{" "}
-              </tr>{" "}
-            </thead>{" "}
-            <tbody>
+          <Table className="[width:100%] [border-collapse:collapse]">
+            <THead>
+              <TR>
+                <TH>Service</TH>
+                <TH className="text-right u-nums">Leads</TH>
+                <TH className="text-right u-nums">Booked</TH>
+                <TH className="text-right u-nums">Close %</TH>
+                <TH className="text-right u-nums">Spend</TH>
+                <TH className="text-right u-nums">CPA</TH>
+                <TH className="text-right u-nums">Ticket</TH>
+                <TH className="text-right u-nums">ROAS</TH>
+                <TH className="text-right u-nums">LTV ROAS</TH>
+                <TH className="text-right u-nums">Margin</TH>
+              </TR>
+            </THead>
+            <TBody>
               {(data.bySpecificService || []).map((s, i) => (
-                <tr key={i}>
-                  {" "}
-                  <td style={tdText}>{s.service}</td>{" "}
-                  <td style={tdR}>{s.leads}</td> <td style={tdR}>{s.booked}</td>{" "}
-                  <td
+                <TR key={i}>
+                  <TD>{s.service}</TD>
+                  <TD className="text-right u-nums">{s.leads}</TD>
+                  <TD className="text-right u-nums">{s.booked}</TD>
+                  <TD
                     style={{
-                      ...tdR,
-                      color: s.closeRate >= 60 ? D.green : D.amber,
+                      color: s.closeRate >= 60 ? "#15803D" : "#A16207",
                     }}
+                    className="text-right u-nums"
                   >
                     {pct(s.closeRate)}
-                  </td>{" "}
-                  <td style={tdR}>{fmt(s.adSpend)}</td>{" "}
-                  <td style={tdR}>{s.cpa ? fmtDec(s.cpa) : "—"}</td>{" "}
-                  <td style={tdR}>{s.avgTicket ? fmt(s.avgTicket) : "—"}</td>{" "}
-                  <td style={{ ...tdR, color: roasColor(s.roas) }}>
+                  </TD>
+                  <TD className="text-right u-nums">{fmt(s.adSpend)}</TD>
+                  <TD className="text-right u-nums">
+                    {s.cpa ? fmtDec(s.cpa) : "—"}
+                  </TD>
+                  <TD className="text-right u-nums">
+                    {s.avgTicket ? fmt(s.avgTicket) : "—"}
+                  </TD>
+                  <TD
+                    style={{
+                      color: roasColor(s.roas),
+                    }}
+                    className="text-right u-nums"
+                  >
                     {s.roas ? s.roas + "x" : "—"}
-                  </td>{" "}
-                  <td style={{ ...tdR, color: s.ltvROAS ? D.purple : D.muted }}>
+                  </TD>
+                  <TD
+                    style={{
+                      color: s.ltvROAS ? "#18181B" : "#71717A",
+                    }}
+                    className="text-right u-nums"
+                  >
                     {s.ltvROAS ? s.ltvROAS + "x" : "—"}
-                  </td>{" "}
-                  <td style={tdR}>
+                  </TD>
+                  <TD className="text-right u-nums">
                     {s.margin != null ? s.margin + "%" : "—"}
-                  </td>{" "}
-                </tr>
+                  </TD>
+                </TR>
               ))}
-            </tbody>{" "}
-          </table>{" "}
+            </TBody>
+          </Table>{" "}
         </div>{" "}
-        <div
-          style={{
-            marginTop: 12,
-            fontSize: 12,
-            color: D.muted,
-            display: "flex",
-            gap: 16,
-          }}
-        >
+        <div className="[margin-top:12px] text-ui-body text-ink-secondary flex [gap:16px]">
           {" "}
           <span>ROAS = immediate return</span>{" "}
-          <span style={{ color: D.purple }}>
+          <span className="text-zinc-900">
             LTV ROAS = 12-month projected return (recurring services)
           </span>{" "}
         </div>{" "}
-      </Card>{" "}
+      </UiCard>{" "}
     </div>
   );
 }
@@ -1016,7 +909,6 @@ function AdvisorTab() {
   const [loading, setLoading] = useState(true);
   const [generating, setGenerating] = useState(false);
   const [applied, setApplied] = useState({});
-
   useEffect(() => {
     Promise.all([
       adminFetch("/admin/ads/advisor"),
@@ -1035,7 +927,6 @@ function AdvisorTab() {
   // must never mark the new report's recommendations as applied. The counter
   // invalidates in-flight applies; the reset clears rendered state.
   const reportGenRef = useRef(0);
-
   const handleGenerate = async () => {
     setGenerating(true);
     // Invalidate the OLD report's apply state when generation STARTS, not
@@ -1058,7 +949,6 @@ function AdvisorTab() {
       setGenerating(false);
     }
   };
-
   const handleApply = async (rec, idx) => {
     if (generating) return; // stale report — a new one is being generated
     // The button label shows the parsed value, and this confirm repeats it —
@@ -1073,7 +963,12 @@ function AdvisorTab() {
     const setAppliedIfCurrent = (updater) => {
       if (reportGenRef.current === gen) setApplied(updater);
     };
-    setAppliedIfCurrent((prev) => ({ ...prev, [idx]: { status: "pending" } }));
+    setAppliedIfCurrent((prev) => ({
+      ...prev,
+      [idx]: {
+        status: "pending",
+      },
+    }));
     try {
       const res = await fetch(`${API_BASE}/admin/ads/advisor/apply`, {
         method: "POST",
@@ -1108,12 +1003,18 @@ function AdvisorTab() {
       }
       setAppliedIfCurrent((prev) => ({
         ...prev,
-        [idx]: { status: "applied", at: new Date().toLocaleTimeString() },
+        [idx]: {
+          status: "applied",
+          at: new Date().toLocaleTimeString(),
+        },
       }));
     } catch {
       setAppliedIfCurrent((prev) => ({
         ...prev,
-        [idx]: { status: "error", message: "Network error — not applied." },
+        [idx]: {
+          status: "error",
+          message: "Network error — not applied.",
+        },
       }));
     }
   };
@@ -1124,7 +1025,11 @@ function AdvisorTab() {
   // was executed. An auto action without a concrete value (stale pre-apply_value
   // reports, a fallback rec with no known budget) is equally un-executable —
   // its Apply click could only ever 422 — so it renders as manual too.
-  const AUTO_APPLY_ACTIONS = ["increase_budget", "decrease_budget", "change_mode"];
+  const AUTO_APPLY_ACTIONS = [
+    "increase_budget",
+    "decrease_budget",
+    "change_mode",
+  ];
   const canAutoApply = (rec) => {
     if (!AUTO_APPLY_ACTIONS.includes(rec.apply_action)) return false;
     if (rec.apply_action === "change_mode")
@@ -1132,140 +1037,99 @@ function AdvisorTab() {
     const n = Number(rec.apply_value);
     return Number.isFinite(n) && n > 0;
   };
-
   if (loading)
     return (
-      <div style={{ color: D.muted, padding: 40, textAlign: "center" }}>
+      <div className="text-ink-secondary [padding:40px] text-center">
         Loading advisor report...
       </div>
     );
-
   const data = report?.report_data || {};
-
   const gradeColor = (g) => {
-    if (!g) return D.muted;
-    if (g.startsWith("A")) return D.green;
-    if (g.startsWith("B")) return D.teal;
-    if (g.startsWith("C")) return D.amber;
-    return D.red;
+    if (!g) return "#71717A";
+    if (g.startsWith("A")) return "#15803D";
+    if (g.startsWith("B")) return "#18181B";
+    if (g.startsWith("C")) return "#A16207";
+    return "#991B1B";
   };
-
-  const priorityColor = { high: D.red, medium: D.amber, low: D.muted };
-
+  const priorityColor = {
+    high: "#991B1B",
+    medium: "#A16207",
+    low: "#71717A",
+  };
   return (
-    <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
+    <div className="flex flex-col [gap:20px]">
       {/* Header */}
-      <div
-        style={{
-          display: "flex",
-          justifyContent: "space-between",
-          alignItems: "center",
-        }}
-      >
+      <div className="flex justify-between items-center">
         {" "}
-        <div style={{ fontSize: 14, color: D.muted }}>
+        <div className="text-ui-body text-ink-secondary">
           AI Campaign Advisor{" "}
           {report?.date
-            ? `— ${new Date(report.date + "T12:00:00").toLocaleDateString("en-US", { month: "long", day: "numeric", year: "numeric" })}`
+            ? `— ${new Date(report.date + "T12:00:00").toLocaleDateString(
+                "en-US",
+                {
+                  month: "long",
+                  day: "numeric",
+                  year: "numeric",
+                },
+              )}`
             : ""}
         </div>{" "}
-        <button
+        <Button
           onClick={handleGenerate}
           disabled={generating}
-          style={{
-            padding: "8px 16px",
-            borderRadius: 8,
-            border: `1px solid ${D.teal}`,
-            background: "transparent",
-            color: D.teal,
-            fontSize: 13,
-            fontWeight: 500,
-            cursor: "pointer",
-            opacity: generating ? 0.5 : 1,
-          }}
+          variant="secondary"
         >
           {generating ? "Generating..." : "Generate Report"}
-        </button>{" "}
+        </Button>{" "}
       </div>
       {!report ? (
-        <Card style={{ textAlign: "center", padding: 60 }}>
+        <UiCard className="text-center [padding:60px]">
           {" "}
-          <div style={{ fontSize: 48, marginBottom: 16 }}>AI</div>{" "}
-          <div
-            style={{
-              fontSize: 18,
-              fontWeight: 500,
-              color: D.heading,
-              marginBottom: 8,
-            }}
-          >
+          <div className="text-ui-body [margin-bottom:16px]">AI</div>{" "}
+          <div className="text-ui-body font-medium text-zinc-900 [margin-bottom:8px]">
             No Reports Yet
           </div>{" "}
-          <div style={{ fontSize: 14, color: D.muted }}>
+          <div className="text-ui-body text-ink-secondary">
             Click "Generate Report" to run the AI advisor, or wait for the daily
             8 AM auto-run.
           </div>{" "}
-        </Card>
+        </UiCard>
       ) : (
         <>
           {/* Grade + Assessment */}
-          <Card>
+          <UiCard className="p-6">
             {" "}
-            <div style={{ display: "flex", alignItems: "center", gap: 20 }}>
+            <div className="flex items-center [gap:20px]">
               {" "}
               <div
                 style={{
-                  width: 72,
-                  height: 72,
-                  borderRadius: 16,
-                  display: "flex",
-                  alignItems: "center",
-                  justifyContent: "center",
-                  fontSize: 32,
-                  fontWeight: 700,
-                  fontFamily: MONO,
                   background: gradeColor(data.grade) + "22",
                   color: gradeColor(data.grade),
                   border: `2px solid ${gradeColor(data.grade)}44`,
                 }}
+                className="[width:72px] [height:72px] rounded-md flex items-center justify-center text-ui-body font-medium"
               >
                 {data.grade || "?"}
               </div>{" "}
-              <div style={{ flex: 1 }}>
+              <div className="[flex:1]">
                 {" "}
-                <div
-                  style={{
-                    fontSize: 14,
-                    fontWeight: 500,
-                    color: D.heading,
-                    marginBottom: 4,
-                  }}
-                >
+                <div className="text-ui-body font-medium text-zinc-900 [margin-bottom:4px]">
                   Overall Grade
                 </div>{" "}
-                <div style={{ fontSize: 14, color: D.text, lineHeight: 1.5 }}>
+                <div className="text-ui-body text-zinc-900 [line-height:1.5]">
                   {data.overall_assessment}
                 </div>{" "}
               </div>{" "}
             </div>{" "}
-          </Card>
+          </UiCard>
           {/* Recommendations */}
           {(data.recommendations || []).length > 0 && (
-            <Card>
+            <UiCard className="p-6">
               {" "}
-              <div
-                style={{
-                  fontSize: 15,
-                  fontWeight: 500,
-                  color: D.heading,
-                  marginBottom: 16,
-                }}
-              >
+              <div className="text-ui-body font-medium text-zinc-900 [margin-bottom:16px]">
                 Recommendations
               </div>{" "}
-              <div
-                style={{ display: "flex", flexDirection: "column", gap: 12 }}
-              >
+              <div className="flex flex-col [gap:12px]">
                 {["high", "medium", "low"].map((priority) => {
                   const recs = (data.recommendations || []).filter(
                     (r) => r.priority === priority,
@@ -1276,13 +1140,9 @@ function AdvisorTab() {
                       {" "}
                       <div
                         style={{
-                          fontSize: 12,
-                          fontWeight: 700,
                           color: priorityColor[priority],
-                          textTransform: "uppercase",
-                          marginBottom: 8,
-                          letterSpacing: "0.5px",
                         }}
+                        className="text-ui-body font-medium [margin-bottom:8px]"
                       >
                         {priority === "high"
                           ? ""
@@ -1300,48 +1160,26 @@ function AdvisorTab() {
                           <div
                             key={idx}
                             style={{
-                              padding: "14px 16px",
-                              background: D.bg,
-                              borderRadius: 8,
-                              marginBottom: 8,
                               borderLeft: `3px solid ${priorityColor[priority]}`,
                             }}
+                            className="[padding:14px_16px] bg-zinc-100 rounded-md [margin-bottom:8px]"
                           >
                             {" "}
-                            <div
-                              style={{
-                                fontSize: 14,
-                                fontWeight: 500,
-                                color: D.heading,
-                                marginBottom: 4,
-                              }}
-                            >
+                            <div className="text-ui-body font-medium text-zinc-900 [margin-bottom:4px]">
                               {rec.campaign && (
-                                <span style={{ color: D.teal }}>
+                                <span className="text-zinc-900">
                                   {rec.campaign}:{" "}
                                 </span>
                               )}
                               {rec.action}
                             </div>
                             {rec.reasoning && (
-                              <div
-                                style={{
-                                  fontSize: 12,
-                                  color: D.muted,
-                                  marginBottom: 6,
-                                }}
-                              >
+                              <div className="text-ui-body text-ink-secondary [margin-bottom:6px]">
                                 {rec.reasoning}
                               </div>
                             )}
                             {rec.estimated_impact && (
-                              <div
-                                style={{
-                                  fontSize: 12,
-                                  color: D.green,
-                                  marginBottom: 8,
-                                }}
-                              >
+                              <div className="text-ui-body text-zinc-900 [margin-bottom:8px]">
                                 Est. impact: {rec.estimated_impact}
                               </div>
                             )}
@@ -1353,21 +1191,12 @@ function AdvisorTab() {
                                   const pending = st?.status === "pending";
                                   return (
                                     <div>
-                                      <button
-                                        onClick={() => handleApply(rec, globalIdx)}
+                                      <Button
+                                        onClick={() =>
+                                          handleApply(rec, globalIdx)
+                                        }
                                         disabled={done || pending || generating}
-                                        style={{
-                                          padding: "6px 14px",
-                                          borderRadius: 6,
-                                          border: "none",
-                                          fontSize: 12,
-                                          fontWeight: 500,
-                                          cursor:
-                                            done || pending || generating ? "default" : "pointer",
-                                          background: done ? D.green + "22" : D.teal,
-                                          color: done ? D.green : D.heading,
-                                          opacity: pending || generating ? 0.6 : 1,
-                                        }}
+                                        variant={done ? "primary" : "secondary"}
                                       >
                                         {done
                                           ? `Applied at ${st.at}`
@@ -1376,15 +1205,9 @@ function AdvisorTab() {
                                             : rec.apply_action === "change_mode"
                                               ? `Apply: set mode to ${rec.apply_value}`
                                               : `Apply: ${rec.apply_action.replace(/_/g, " ")} to $${Number(rec.apply_value)}/day`}
-                                      </button>
+                                      </Button>
                                       {st?.status === "error" && (
-                                        <div
-                                          style={{
-                                            fontSize: 11,
-                                            color: D.red,
-                                            marginTop: 6,
-                                          }}
-                                        >
+                                        <div className="text-ui-body text-alert-fg [margin-top:6px]">
                                           {st.message}
                                         </div>
                                       )}
@@ -1392,8 +1215,11 @@ function AdvisorTab() {
                                   );
                                 })()
                               ) : (
-                                <div style={{ fontSize: 11, color: D.muted }}>
-                                  Manual action: {(rec.apply_action || rec.manual_action).replace(/_/g, " ")}
+                                <div className="text-ui-body text-ink-secondary">
+                                  Manual action:{" "}
+                                  {(
+                                    rec.apply_action || rec.manual_action
+                                  ).replace(/_/g, " ")}
                                 </div>
                               ))}
                           </div>
@@ -1403,217 +1229,156 @@ function AdvisorTab() {
                   );
                 })}
               </div>{" "}
-            </Card>
+            </UiCard>
           )}
 
           {/* Waste Alerts */}
           {(data.waste_alerts || []).length > 0 && (
-            <Card>
+            <UiCard className="p-6">
               {" "}
-              <div
-                style={{
-                  fontSize: 15,
-                  fontWeight: 500,
-                  color: D.red,
-                  marginBottom: 12,
-                }}
-              >
+              <div className="text-ui-body font-medium text-alert-fg [margin-bottom:12px]">
                 Waste Alerts
               </div>{" "}
-              <div style={{ overflowX: "auto" }}>
+              <div className="overflow-x-auto">
                 {" "}
-                <table style={{ width: "100%", borderCollapse: "collapse" }}>
-                  {" "}
-                  <thead>
-                    <tr>
-                      <th style={thStyle}>Search Term</th>
-                      <th style={thR}>Spend</th>
-                      <th style={thR}>Conv</th>
-                      <th style={thR}>Action</th>
-                    </tr>
-                  </thead>{" "}
-                  <tbody>
+                <Table className="[width:100%] [border-collapse:collapse]">
+                  <THead>
+                    <TR>
+                      <TH>Search Term</TH>
+                      <TH className="text-right u-nums">Spend</TH>
+                      <TH className="text-right u-nums">Conv</TH>
+                      <TH className="text-right u-nums">Action</TH>
+                    </TR>
+                  </THead>
+                  <TBody>
                     {data.waste_alerts.map((w, i) => (
-                      <tr key={i}>
-                        {" "}
-                        <td style={tdText}>{w.search_term}</td>{" "}
-                        <td style={{ ...tdR, color: D.red }}>
+                      <TR key={i}>
+                        <TD>{w.search_term}</TD>
+                        <TD className="text-right u-nums text-alert-fg">
                           {fmtDec(w.spend)}
-                        </td>{" "}
-                        <td style={tdR}>{w.conversions}</td>{" "}
-                        <td style={tdR}>
-                          <span style={{ color: D.amber, fontSize: 12 }}>
+                        </TD>
+                        <TD className="text-right u-nums">{w.conversions}</TD>
+                        <TD className="text-right u-nums">
+                          <span className="text-zinc-700 text-ui-body">
                             {w.action}
                           </span>
-                        </td>{" "}
-                      </tr>
+                        </TD>
+                      </TR>
                     ))}
-                  </tbody>{" "}
-                </table>{" "}
+                  </TBody>
+                </Table>{" "}
               </div>{" "}
-            </Card>
+            </UiCard>
           )}
 
           {/* Scaling Opportunities */}
           {(data.scaling_opportunities || []).length > 0 && (
-            <Card>
+            <UiCard className="p-6">
               {" "}
-              <div
-                style={{
-                  fontSize: 15,
-                  fontWeight: 500,
-                  color: D.green,
-                  marginBottom: 12,
-                }}
-              >
+              <div className="text-ui-body font-medium text-zinc-900 [margin-bottom:12px]">
                 Scaling Opportunities
               </div>
               {data.scaling_opportunities.map((s, i) => (
                 <div
                   key={i}
-                  style={{
-                    padding: "10px 14px",
-                    background: D.bg,
-                    borderRadius: 8,
-                    marginBottom: 6,
-                  }}
+                  className="[padding:10px_14px] bg-zinc-100 rounded-md [margin-bottom:6px]"
                 >
                   {" "}
-                  <div style={{ fontSize: 13, color: D.heading }}>
+                  <div className="text-ui-body text-zinc-900">
                     <strong>{s.campaign}</strong>: {fmt(s.current_budget)}/d →{" "}
                     {fmt(s.suggested_budget)}/d
                   </div>{" "}
-                  <div style={{ fontSize: 12, color: D.muted }}>
+                  <div className="text-ui-body text-ink-secondary">
                     {s.headroom_reason}
                   </div>{" "}
                 </div>
               ))}
-            </Card>
+            </UiCard>
           )}
 
           {/* Insights */}
           {(data.insights || []).length > 0 && (
-            <Card>
+            <UiCard className="p-6">
               {" "}
-              <div
-                style={{
-                  fontSize: 15,
-                  fontWeight: 500,
-                  color: D.heading,
-                  marginBottom: 12,
-                }}
-              >
+              <div className="text-ui-body font-medium text-zinc-900 [margin-bottom:12px]">
                 Insights
               </div>{" "}
-              <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+              <div className="flex flex-col [gap:8px]">
                 {data.insights.map((ins, i) => (
                   <div
                     key={i}
-                    style={{
-                      fontSize: 13,
-                      color: D.text,
-                      padding: "8px 12px",
-                      background: D.bg,
-                      borderRadius: 6,
-                      lineHeight: 1.5,
-                    }}
+                    className="text-ui-body text-zinc-900 [padding:8px_12px] bg-zinc-100 rounded-sm [line-height:1.5]"
                   >
                     {"•"} {ins}
                   </div>
                 ))}
               </div>{" "}
-            </Card>
+            </UiCard>
           )}
 
           {/* Capacity Warnings */}
           {(data.capacity_warnings || []).length > 0 && (
-            <Card>
+            <UiCard className="p-6">
               {" "}
-              <div
-                style={{
-                  fontSize: 15,
-                  fontWeight: 500,
-                  color: D.amber,
-                  marginBottom: 12,
-                }}
-              >
+              <div className="text-ui-body font-medium text-zinc-700 [margin-bottom:12px]">
                 Capacity Warnings
               </div>
               {data.capacity_warnings.map((w, i) => (
                 <div
                   key={i}
-                  style={{
-                    fontSize: 13,
-                    color: D.text,
-                    padding: "8px 12px",
-                    background: D.bg,
-                    borderRadius: 6,
-                    marginBottom: 4,
-                  }}
+                  className="text-ui-body text-zinc-900 [padding:8px_12px] bg-zinc-100 rounded-sm [margin-bottom:4px]"
                 >
                   {" "}
                   <strong>{w.area}</strong>at {w.utilization}% —{" "}
                   {w.recommendation}
                 </div>
               ))}
-            </Card>
+            </UiCard>
           )}
 
           {/* History */}
           {history.length > 1 && (
-            <Card>
+            <UiCard className="p-6">
               {" "}
-              <div
-                style={{
-                  fontSize: 15,
-                  fontWeight: 500,
-                  color: D.heading,
-                  marginBottom: 12,
-                }}
-              >
+              <div className="text-ui-body font-medium text-zinc-900 [margin-bottom:12px]">
                 Previous Reports
               </div>{" "}
-              <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
+              <div className="flex flex-wrap [gap:8px]">
                 {history.slice(1, 8).map((h, i) => (
                   <div
                     key={i}
-                    style={{
-                      padding: "8px 14px",
-                      background: D.bg,
-                      borderRadius: 8,
-                      fontSize: 12,
-                      color: D.muted,
-                      border: `1px solid ${D.border}`,
-                    }}
+                    className="[padding:8px_14px] bg-zinc-100 rounded-md text-ui-body text-ink-secondary border-hairline border-zinc-200"
                   >
                     {" "}
-                    <span style={{ color: D.text }}>
+                    <span className="text-zinc-900">
                       {new Date(h.date + "T12:00:00").toLocaleDateString(
                         "en-US",
-                        { month: "short", day: "numeric" },
+                        {
+                          month: "short",
+                          day: "numeric",
+                        },
                       )}
                     </span>{" "}
                     <span
                       style={{
                         color: gradeColor(h.grade),
-                        fontWeight: 700,
-                        marginLeft: 8,
                       }}
+                      className="font-medium [margin-left:8px]"
                     >
                       {h.grade}
                     </span>{" "}
-                    <span style={{ marginLeft: 8 }}>
+                    <span className="[margin-left:8px]">
                       {h.recommendation_count} recs
                     </span>
                     {h.applied_count > 0 && (
-                      <span style={{ color: D.green, marginLeft: 4 }}>
+                      <span className="text-zinc-900 [margin-left:4px]">
                         ({h.applied_count} applied)
                       </span>
                     )}
                   </div>
                 ))}
               </div>{" "}
-            </Card>
+            </UiCard>
           )}
         </>
       )}
@@ -1627,7 +1392,6 @@ function AdvisorTab() {
 function CapacityTab() {
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
-
   useEffect(() => {
     adminFetch("/admin/ads/capacity-heatmap")
       .then((d) => {
@@ -1636,27 +1400,29 @@ function CapacityTab() {
       })
       .catch(() => setLoading(false));
   }, []);
-
   if (loading)
     return (
-      <div style={{ color: D.muted, padding: 40, textAlign: "center" }}>
+      <div className="text-ink-secondary [padding:40px] text-center">
         Loading capacity data...
       </div>
     );
   if (!data)
     return (
-      <Card style={{ textAlign: "center", padding: 40 }}>
-        <div style={{ color: D.muted }}>Unable to load capacity data</div>
-      </Card>
+      <UiCard className="text-center [padding:40px]">
+        <div className="text-ink-secondary">Unable to load capacity data</div>
+      </UiCard>
     );
-
   const zoneColors = {
-    green: D.green,
-    yellow: D.amber,
-    orange: D.orange,
-    red: D.red,
+    green: "#15803D",
+    yellow: "#A16207",
+    orange: "#92400E",
+    red: "#991B1B",
   };
-  const modeEmoji = { base: "", spent: "", stop: "" };
+  const modeEmoji = {
+    base: "",
+    spent: "",
+    stop: "",
+  };
   const areaLabels = {
     all: "ALL AREAS",
     "Lakewood Ranch": "LWR",
@@ -1664,37 +1430,29 @@ function CapacityTab() {
     Sarasota: "Sarasota",
     Venice: "Venice",
   };
-
   return (
-    <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
+    <div className="flex flex-col [gap:20px]">
       {" "}
-      <div style={{ fontSize: 14, color: D.muted }}>
+      <div className="text-ui-body text-ink-secondary">
         Capacity & Ad Budget Status — Week View
       </div>
       {Object.entries(data.heatmap || {}).map(([area, info]) => (
-        <Card key={area}>
+        <UiCard key={area} className="p-6">
           {" "}
-          <div
-            style={{
-              display: "flex",
-              justifyContent: "space-between",
-              alignItems: "center",
-              marginBottom: 16,
-            }}
-          >
+          <div className="flex justify-between items-center [margin-bottom:16px]">
             {" "}
             <div>
               {" "}
-              <div style={{ fontSize: 15, fontWeight: 500, color: D.heading }}>
+              <div className="text-ui-body font-medium text-zinc-900">
                 {areaLabels[area] || area}
               </div>{" "}
-              <div style={{ fontSize: 12, color: D.muted }}>
+              <div className="text-ui-body text-ink-secondary">
                 {info.techs} tech{info.techs !== 1 ? "s" : ""}
               </div>{" "}
             </div>{" "}
-            <div style={{ fontSize: 14, fontFamily: MONO, color: D.text }}>
+            <div className="text-ui-body text-zinc-900">
               {info.weeklyUtilization}% weekly
-              <span style={{ color: D.muted, fontSize: 12, marginLeft: 8 }}>
+              <span className="text-ink-secondary text-ui-body [margin-left:8px]">
                 {info.weeklyBooked}/{info.weeklySlots}
               </span>{" "}
             </div>{" "}
@@ -1702,201 +1460,141 @@ function CapacityTab() {
           {/* Seven fixed columns: each keeps room for "Sep 9" / "SPENT" at
               the caption floor, and the row scrolls sideways on phones
               instead of letting day labels collide (Codex round 4). */}
-          <div style={{ overflowX: "auto", WebkitOverflowScrolling: "touch" }}>
-          <div
-            style={{
-              display: "grid",
-              gridTemplateColumns: "repeat(7, minmax(84px, 1fr))",
-              gap: 8,
-            }}
-          >
-            {(info.days || []).map((day, i) => {
-              const color = zoneColors[day.colorZone] || D.muted;
-              return (
-                <div
-                  key={i}
-                  style={{
-                    background: color + "15",
-                    border: `1px solid ${color}44`,
-                    borderRadius: 10,
-                    padding: "12px 6px",
-                    boxSizing: "border-box",
-                    textAlign: "center",
-                    minWidth: 0,
-                  }}
-                >
-                  {" "}
+          <div className="overflow-x-auto">
+            <div className="grid [grid-template-columns:repeat(7,_minmax(84px,_1fr))] [gap:8px]">
+              {(info.days || []).map((day, i) => {
+                const color = zoneColors[day.colorZone] || "#71717A";
+                return (
                   <div
+                    key={i}
                     style={{
-                      fontSize: 11,
-                      fontWeight: 500,
-                      color: D.muted,
-                      marginBottom: 4,
+                      background: color + "15",
+                      border: `1px solid ${color}44`,
                     }}
+                    className="rounded-md [padding:12px_6px] box-border text-center [min-width:0px]"
                   >
-                    {day.dayName}
-                  </div>{" "}
-                  <div
-                    style={{ fontSize: 13, color: D.muted, marginBottom: 8 }}
-                  >
-                    {day.dayLabel}
-                  </div>{" "}
-                  <div
-                    style={{
-                      fontSize: 22,
-                      fontWeight: 700,
-                      color,
-                      fontFamily: MONO,
-                      marginBottom: 4,
-                    }}
-                  >
-                    {day.utilizationPct}%
-                  </div>{" "}
-                  <div
-                    style={{
-                      fontSize: 11,
-                      color: D.muted,
-                      fontFamily: MONO,
-                      marginBottom: 6,
-                    }}
-                  >
-                    {day.booked}/{day.slots}
-                  </div>{" "}
-                  <div style={{ fontSize: 12 }}>
-                    {modeEmoji[day.budgetMode] || ""}{" "}
-                    <span
+                    {" "}
+                    <div className="text-ui-body font-medium text-ink-secondary [margin-bottom:4px]">
+                      {day.dayName}
+                    </div>{" "}
+                    <div className="text-ui-body text-ink-secondary [margin-bottom:8px]">
+                      {day.dayLabel}
+                    </div>{" "}
+                    <div
                       style={{
-                        fontWeight: 500,
-                        fontSize: 12,
-                        letterSpacing: "0.5px",
-                        color: D.muted,
+                        color,
                       }}
+                      className="text-ui-body font-medium [margin-bottom:4px]"
                     >
-                      {day.budgetMode?.toUpperCase()}
-                    </span>
-                    {day.isSunday && (
-                      <span style={{ color: D.teal, fontSize: 12 }}>*</span>
-                    )}
-                  </div>{" "}
-                </div>
-              );
-            })}
-          </div>{" "}
+                      {day.utilizationPct}%
+                    </div>{" "}
+                    <div className="text-ui-body text-ink-secondary [margin-bottom:6px]">
+                      {day.booked}/{day.slots}
+                    </div>{" "}
+                    <div className="text-ui-body">
+                      {modeEmoji[day.budgetMode] || ""}{" "}
+                      <span className="font-medium text-ui-body text-ink-secondary">
+                        {day.budgetMode?.toUpperCase()}
+                      </span>
+                      {day.isSunday && (
+                        <span className="text-zinc-900 text-ui-body">*</span>
+                      )}
+                    </div>{" "}
+                  </div>
+                );
+              })}
+            </div>{" "}
           </div>
-        </Card>
+        </UiCard>
       ))}
       {/* Legend */}
-      <Card style={{ padding: 16 }}>
+      <UiCard className="[padding:16px]">
         {" "}
-        <div
-          style={{
-            display: "flex",
-            flexWrap: "wrap",
-            gap: 20,
-            fontSize: 12,
-            color: D.muted,
-          }}
-        >
+        <div className="flex flex-wrap [gap:20px] text-ui-body text-ink-secondary">
           {" "}
           <span>
-            <span
-              style={{
-                display: "inline-block",
-                width: 10,
-                height: 10,
-                borderRadius: 2,
-                background: D.green,
-                marginRight: 6,
-              }}
-            />
+            <span className="inline-block [width:10px] [height:10px] rounded-xs bg-green-700 [margin-right:6px]" />
             0–70% Green (full ads)
           </span>{" "}
           <span>
-            <span
-              style={{
-                display: "inline-block",
-                width: 10,
-                height: 10,
-                borderRadius: 2,
-                background: D.amber,
-                marginRight: 6,
-              }}
-            />
+            <span className="inline-block [width:10px] [height:10px] rounded-xs bg-amber-200 [margin-right:6px]" />
             71–85% Yellow (may cap)
           </span>{" "}
           <span>
-            <span
-              style={{
-                display: "inline-block",
-                width: 10,
-                height: 10,
-                borderRadius: 2,
-                background: D.orange,
-                marginRight: 6,
-              }}
-            />
+            <span className="inline-block [width:10px] [height:10px] rounded-xs bg-amber-800 [margin-right:6px]" />
             86–95% Orange (capped)
           </span>{" "}
           <span>
-            <span
-              style={{
-                display: "inline-block",
-                width: 10,
-                height: 10,
-                borderRadius: 2,
-                background: D.red,
-                marginRight: 6,
-              }}
-            />
+            <span className="inline-block [width:10px] [height:10px] rounded-xs bg-alert-fg [margin-right:6px]" />
             96–100% Red (soft-stop)
           </span>{" "}
         </div>{" "}
-        <div style={{ fontSize: 11, color: D.muted, marginTop: 10 }}>
+        <div className="text-ui-body text-ink-secondary [margin-top:10px]">
           {" "}
-          <span style={{ color: D.teal }}>*</span>Sunday runs at full power
+          <span className="text-zinc-900">*</span>Sunday runs at full power
           based on Monday's capacity (no time-of-day check)
         </div>{" "}
-      </Card>{" "}
+      </UiCard>{" "}
     </div>
   );
 }
-
 export default function AdsPage() {
-  const [tab, setTab] = useState("ppc-dashboard");
+  const [searchParams] = useSearchParams();
+  const location = useLocation();
+  const navigate = useNavigate();
+  const requestedTab = searchParams.get("tab");
+  const tab = TABS.some((item) => item.key === requestedTab)
+    ? requestedTab
+    : "ppc-dashboard";
+  const setTab = (nextTab) => {
+    if (nextTab === tab) return;
+    const next = new URLSearchParams(searchParams);
+    next.set("tab", nextTab);
+    navigate({
+      pathname: location.pathname,
+      search: `?${next.toString()}`,
+      hash: location.hash,
+    });
+  };
 
-  // Usage beacon for the tab that actually RENDERS. PPC tabs are pure
-  // state — they never reach the router, so without this the page's tab
-  // column is impossible, same as Communications (Codex #2961 r17).
-  useRenderedTabBeacon("/admin/ppc", tab);
-
+  // Report the validated leaf that actually renders, including fallbacks
+  // reached through same-route history navigation.
+  useRenderedTabBeacon("/admin/ppc", tab, [searchParams]);
   return (
-    <div>
-      {" "}
+    <UiSurface
+      density="comfortable"
+      className="ads-page mx-auto w-full max-w-[1400px]"
+    >
       <AdminCommandHeader
         title="PPC"
         icon={Megaphone}
-        sections={TABS}
+        sections={UI_TABS}
         activeKey={tab}
         onSectionChange={setTab}
         ariaLabel="PPC section"
         navGridClassName="grid-cols-2 md:grid-cols-6"
       />
       {tab === "ppc-dashboard" && (
-        <Suspense
-          fallback={
-            <div style={{ color: D.muted, padding: 40, textAlign: "center" }}>
-              Loading PPC dashboard...
-            </div>
-          }
-        >
-          <PPCDashboardPage />
-        </Suspense>
+        // Marked so the foundation QA can exclude it: the dashboard is migrated
+        // by its own PR and still renders explicit 11px text and sub-44px
+        // controls, which UiSurface does not override.
+        <div data-qa="ppc-dashboard">
+          <Suspense
+            fallback={
+              <div className="text-ink-secondary [padding:40px] text-center">
+                Loading PPC dashboard...
+              </div>
+            }
+          >
+            <PPCDashboardPage />
+          </Suspense>
+        </div>
       )}
       {tab === "overview" && <OverviewTab />}
       {tab === "call-bridge" && <CallBridgeTab />}
       {tab === "service-lines" && <ServiceLinesTab />}
       {tab === "advisor" && <AdvisorTab />}
       {tab === "capacity" && <CapacityTab />}
-    </div>
+    </UiSurface>
   );
 }

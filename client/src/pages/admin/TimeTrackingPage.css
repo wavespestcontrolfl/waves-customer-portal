@@ -1,0 +1,46 @@
+.staff-foundation {
+  color: #27272a;
+}
+
+/* Time Tracking still owns a large set of role-aware inline controls. Keep
+   the presentation scoped to this workspace while bringing every action and
+   field onto the comfortable admin foundation. */
+.staff-foundation button {
+  min-height: 44px;
+  border-radius: 4px;
+  font-size: 14px !important;
+  line-height: 1.3;
+}
+
+.staff-foundation input:not([type="checkbox"]):not([type="radio"]),
+.staff-foundation select,
+.staff-foundation textarea {
+  min-height: 44px;
+  border-radius: 4px;
+  font-size: 16px !important;
+}
+
+.staff-foundation table {
+  font-size: 14px !important;
+}
+
+.staff-foundation th,
+.staff-foundation td {
+  font-size: 14px !important;
+  line-height: 1.45;
+}
+
+.staff-foundation label {
+  font-size: 14px !important;
+  line-height: 1.55;
+}
+
+@media (max-width: 639px) {
+  .staff-foundation {
+    max-width: 100%;
+  }
+
+  .staff-foundation table {
+    min-width: 680px;
+  }
+}

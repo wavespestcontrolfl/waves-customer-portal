@@ -6,9 +6,8 @@ import {
 } from '../theme-brand';
 import { CUSTOMER_SURFACE } from '../theme-customer';
 import { DOC_EYEBROW, DOC_FONT, FS } from '../theme-doc';
-import { CustomerColumn } from '../components/brand';
+import { CustomerColumn, PublicStateCard } from '../components/brand';
 import Icon from '../components/Icon';
-import PublicLoadError from '../components/PublicLoadError';
 import DocumentActionBar from '../components/DocumentActionBar';
 import { ProjectAskWaves, ProjectReviewAsk } from '../components/report/ProjectReportEngage';
 import { useGlassSurface } from '../glass/glass-engine';
@@ -428,10 +427,16 @@ export default function ProjectReportViewPage() {
     </div>
   );
 
+  // App.jsx wraps this page in WavesShell, so the terminal states belong in the
+  // shared column like every other one. The full-viewport centred wrapper they
+  // had kept a 20px gutter instead of 16 and pushed the trust footer below the
+  // fold — the drift this migration exists to remove.
   if (loadError) return (
-    <div style={{ minHeight: '100vh', background: ESTIMATE_BG, display: 'grid', placeItems: 'center', padding: 20, fontFamily: FONT_BODY }}>
-      <div style={{ ...cardStyle, maxWidth: 480 }}><PublicLoadError resource="project report" onRetry={() => setLoadAttempt(a => a + 1)} /></div>
-    </div>
+    <CustomerColumn style={{ fontFamily: FONT_BODY }}>
+      <PublicStateCard state="error" title="We couldn&rsquo;t load that project report" onRetry={() => setLoadAttempt(a => a + 1)}>
+        This looks temporary. Your link is still valid&mdash;check your connection and try again.
+      </PublicStateCard>
+    </CustomerColumn>
   );
 
   // Payment-held report (402 report_payment_required): the inspection is
@@ -468,18 +473,11 @@ export default function ProjectReportViewPage() {
   );
 
   if (!data || data.error) return (
-    <div style={{ minHeight: '100vh', background: ESTIMATE_BG, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 20, fontFamily: FONT_BODY }}>
-      <div style={{ ...cardStyle, maxWidth: 420, textAlign: 'center' }}>
-        <div style={{ color: ESTIMATE_MUTED }}><Icon name="document" size={32} strokeWidth={1.75} /></div>
-        <h1 style={{ fontFamily: FONTS.serif, fontSize: 28, fontWeight: 500, color: ESTIMATE_TEXT, margin: '8px 0 0' }}>Report unavailable</h1>
-        <div style={{ fontSize: 16, color: ESTIMATE_BODY, lineHeight: 1.5, marginTop: 8 }}>
-          This link may have expired or is not valid.
-        </div>
-        <a href={`tel:${WAVES_PHONE_TEL}`} style={{
-          ...primaryButtonStyle, marginTop: 16,
-        }}>Call Waves</a>
-      </div>
-    </div>
+    <CustomerColumn style={{ fontFamily: FONT_BODY }}>
+      <PublicStateCard state="not-found" title="Report unavailable" contact="call">
+        This link may have expired or is not valid.
+      </PublicStateCard>
+    </CustomerColumn>
   );
 
   const typeLabel = TYPE_LABELS[data.projectType] || 'Project';

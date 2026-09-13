@@ -37,6 +37,9 @@ jest.mock('../services/route-optimizer', () => ({
   HQ: { lat: 27.4, lng: -82.5 },
   haversine: jest.requireActual('../services/route-optimizer').haversine,
   milesToDriveMinutes: jest.requireActual('../services/route-optimizer').milesToDriveMinutes,
+  // The route tools now run the shared window-safety guard, which scores
+  // orders with the same in-house leg model the nightly pass uses.
+  fallbackLegMetrics: jest.requireActual('../services/route-optimizer').fallbackLegMetrics,
   optimizeRoute: jest.fn(async (stops) => ({
     orderedStops: stops,
     totalDistanceMeters: 10000,
@@ -588,13 +591,23 @@ describe('two-step writes do not mutate without confirmed (behavioral)', () => {
     dbMock.transaction.mockImplementation(db.transaction);
     dbMock.schema = db.schema;
 
+    // The two route optimizers refuse BEFORE their confirmation gate while
+    // drive-time calibration is off — they may not certify an arrival window
+    // on the uncalibrated model (that refusal has its own coverage in
+    // admin-schedule-optimize-window-guard). This contract is about the gate,
+    // so give them the calibrated model and let them reach it.
+    const needsCalibration = String(toolName).startsWith('optimize_');
+    if (needsCalibration) process.env.GATE_DRIVE_TIME_CALIBRATION = 'true';
     const executor = require(path.join(TOOLS_DIR, mod))[exec];
     // This recorder has no pricing_config rows. Live sync success is a
     // controlled prerequisite here; the real-DB estimate suite tests outages.
     const pricingSync = toolName === 'save_customer_estimate'
       ? jest.spyOn(require('../services/pricing-engine'), 'syncConstantsFromDB').mockResolvedValue(true) : null;
     let result;
-    try { result = await executor(toolName, input); } finally { pricingSync?.mockRestore(); }
+    try { result = await executor(toolName, input); } finally {
+      pricingSync?.mockRestore();
+      if (needsCalibration) delete process.env.GATE_DRIVE_TIME_CALIBRATION;
+    }
 
     // The executor must have reached its confirmation gate — not an error or
     // "not found" early return — and answered with a preview/proposal.
@@ -666,6 +679,13 @@ describe('confirmed-endpoint writes are inert without server-derived context.con
     dbMock.transaction.mockImplementation(db.transaction);
     dbMock.schema = db.schema;
 
+    // The two route optimizers refuse BEFORE their confirmation gate while
+    // drive-time calibration is off — they may not certify an arrival window
+    // on the uncalibrated model (that refusal has its own coverage in
+    // admin-schedule-optimize-window-guard). This contract is about the gate,
+    // so give them the calibrated model and let them reach it.
+    const needsCalibration = String(toolName).startsWith('optimize_');
+    if (needsCalibration) process.env.GATE_DRIVE_TIME_CALIBRATION = 'true';
     const executor = require(path.join(TOOLS_DIR, mod))[exec];
     const result = await executor(toolName, input, context);
 
