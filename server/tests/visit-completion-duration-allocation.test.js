@@ -12,6 +12,80 @@ function item(serviceId, body = {}) {
 }
 
 describe('visit closeout duration allocation', () => {
+  const retainedFixture = (notes = {}, changes = {}) => ({
+    visit: { arrived_at: T0, customer_id: 'customer', scheduled_date: '2026-09-12' },
+    members: [member('live', 30), member('retained', 30, {
+      customer_id: 'customer', scheduled_date: '2026-09-12', status: 'completed',
+      actual_start_time: T0, actual_end_time: '2026-09-12T14:20:00.000Z',
+      service_time_minutes: 20, ...changes,
+    })],
+    retainedRecords: [{ id: 'record', scheduled_service_id: 'retained',
+      service_date: '2026-09-12', structured_notes: notes }],
+    items: [item('live')], actor: {}, completedAt: T59,
+  });
+
+  test('reserves same-stop recorded minutes and the existing drive charge', () => {
+    const result = buildVisitDurationAllocation(retainedFixture());
+    expect(result).toMatchObject({ totalMinutes: 59, retainedMinutes: 20,
+      driveCostOwnerServiceId: 'retained',
+      retainedWork: [{ serviceId: 'retained', serviceRecordId: 'record', minutes: 20 }],
+      items: [{ serviceId: 'live', allocatedMinutes: 39 }],
+    });
+  });
+
+  test.each([
+    [{ backfill: true }, {}],
+    [{}, { actual_end_time: '2026-09-12T13:59:00.000Z' }],
+    [{}, { actual_start_time: '2026-09-11T14:00:00.000Z' }],
+    [{}, { scheduled_date: '2026-09-11' }],
+    [{}, { status: 'cancelled' }],
+  ])('excludes historical or nonperformed retained work (%j, %j)', (notes, changes) => {
+    expect(buildVisitDurationAllocation(retainedFixture(notes, changes))).toMatchObject({
+      retainedMinutes: 0, retainedWork: [], driveCostOwnerServiceId: 'live',
+      items: [{ serviceId: 'live', allocatedMinutes: 59 }],
+    });
+  });
+
+  test.each([0, null])('keeps retained allocated %s authoritative over a shared duration', (minutes) => {
+    expect(buildVisitDurationAllocation(retainedFixture({
+      visitDurationAllocation: { version: 1, allocatedMinutes: minutes },
+    }))).toMatchObject({ retainedMinutes: minutes,
+      items: [{ allocatedMinutes: minutes === null ? null : 59 }],
+    });
+  });
+
+  test('a retained admin correction overrides its original allocation', () => {
+    expect(buildVisitDurationAllocation(retainedFixture({
+      visitDurationAllocation: { version: 1, allocatedMinutes: 20 },
+    }, { time_on_site_adjusted_minutes: 30 }))).toMatchObject({ retainedMinutes: 30,
+      items: [{ allocatedMinutes: 29 }],
+    });
+  });
+
+  test('unknown same-stop retained work prevents inventing the remaining duration', () => {
+    expect(buildVisitDurationAllocation(retainedFixture({}, { service_time_minutes: null })))
+      .toMatchObject({ retainedMinutes: null, items: [{ allocatedMinutes: null }] });
+  });
+
+  test('a previously ended stop includes a later retained completion in its final measured end', () => {
+    const input = retainedFixture({}, { actual_end_time: '2026-09-12T14:40:00.000Z' });
+    Object.assign(input.members[0], { status: 'completed', actual_end_time: '2026-09-12T14:20:00.000Z' });
+    expect(buildVisitDurationAllocation(input)).toMatchObject({
+      completedAt: '2026-09-12T14:40:00.000Z', totalMinutes: 40, retainedMinutes: 20,
+      items: [{ serviceId: 'live', allocatedMinutes: 20 }],
+    });
+  });
+
+  test('drive ownership is stable across member order and excludes historical backfills', () => {
+    const input = { visit: {}, members: [member('b', 30), member('a', 30), member('history', 30)],
+      items: [item('b', { timeOnSite: 20 }), item('history', { backfill: true }), item('a')], actor: { techRole: 'admin' } };
+    expect(buildVisitDurationAllocation(input).driveCostOwnerServiceId).toBe('a');
+    expect(buildVisitDurationAllocation({ ...input, members: [...input.members].reverse(), items: [...input.items].reverse() })
+      .driveCostOwnerServiceId).toBe('a');
+    expect(buildVisitDurationAllocation({ ...input, items: [item('history', { backfill: true })] })
+      .driveCostOwnerServiceId).toBeNull();
+  });
+
   test('splits the measured integer total by estimate using deterministic largest remainders', () => {
     const result = buildVisitDurationAllocation({
       visit: { arrived_at: T0 },

@@ -22,6 +22,7 @@ async function mount(onSubmit = vi.fn().mockResolvedValue({})) {
 }
 
 beforeEach(() => {
+  vi.stubGlobal('scrollTo', vi.fn());
   vi.stubGlobal('indexedDB', new IDBFactory());
   vi.stubGlobal('alert', vi.fn());
   localStorage.clear();

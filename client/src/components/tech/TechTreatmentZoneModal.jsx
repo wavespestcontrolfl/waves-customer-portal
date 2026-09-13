@@ -11,6 +11,8 @@
 // The saved snapshot replaces the generic schematic on the customer's service
 // report (treatmentMap.traced). Gated server-side by GATE_TREATMENT_ZONE_MAP.
 import { useCallback, useEffect, useRef, useState } from 'react';
+import useModalFocus from '../../hooks/useModalFocus';
+import useLockBodyScroll from '../../hooks/useLockBodyScroll';
 import { getAdminAuthToken } from '../../lib/adminAuth';
 import {
   MAP_WIDTH,
@@ -609,6 +611,9 @@ export default function TechTreatmentZoneModal({
     if (!saving) onClose();
   };
 
+  const dialogRef = useModalFocus(true, guardedClose);
+  useLockBodyScroll();
+
   const mapFrame = (children, extraStyle) => (
     <div
       ref={traceRef}
@@ -639,7 +644,7 @@ export default function TechTreatmentZoneModal({
 
   return (
     <div
-      onClick={guardedClose}
+      onClick={(event) => { event.stopPropagation(); guardedClose(); }}
       style={{
         position: 'fixed', inset: 0, background: T.scrim,
         display: 'flex', alignItems: 'flex-end', justifyContent: 'center',
@@ -647,6 +652,11 @@ export default function TechTreatmentZoneModal({
       }}
     >
       <div
+        ref={dialogRef}
+        role="dialog"
+        aria-modal="true"
+        aria-label="Treatment Zone"
+        tabIndex={-1}
         onClick={(e) => e.stopPropagation()}
         style={{
           background: T.bg, width: '100%', maxWidth: 560,
@@ -665,6 +675,7 @@ export default function TechTreatmentZoneModal({
           </h2>
           <button
             onClick={guardedClose}
+            aria-label="Close treatment zone"
             disabled={saving}
             style={{
               background: 'transparent', border: 'none', color: T.muted,

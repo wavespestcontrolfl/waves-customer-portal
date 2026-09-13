@@ -424,6 +424,13 @@ export default function DispatchPageV2({
       ? linkedDate
       : formatDateISO(new Date());
   });
+  // Async refreshes may finish after the operator has moved to another day.
+  // Keep the displayed date available to late modal callbacks and response
+  // guards without tying fetchSchedule's identity to date changes.
+  const pendingScheduleRequestRef = useRef(null);
+  const scheduleLoadErrorRef = useRef(null);
+  const displayedDateRef = useRef(date);
+  displayedDateRef.current = date;
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
@@ -671,7 +678,15 @@ export default function DispatchPageV2({
     // transient refresh failure) unmounts the in-place project editor and
     // its unsaved edits in board/week modes (Codex r8 P2). Loud stays the
     // default for initial loads, date changes, and explicit retries.
-    if (!silent) {
+    const updatesDisplayedDate = updateState && d === displayedDateRef.current;
+    const request = {
+      foreground: !silent || !!pendingScheduleRequestRef.current?.foreground,
+    };
+    if (updatesDisplayedDate) pendingScheduleRequestRef.current = request;
+    const isCurrent = () => updatesDisplayedDate
+      && d === displayedDateRef.current
+      && pendingScheduleRequestRef.current === request;
+    if (!silent && isCurrent()) {
       setLoading(true);
       setError(null);
     }
@@ -680,18 +695,22 @@ export default function DispatchPageV2({
         adminFetch(`/admin/schedule?date=${d}`),
         adminFetch("/admin/dispatch/products/catalog"),
       ]);
-      if (updateState) {
+      if (isCurrent()) {
         setData(scheduleData);
         setProducts(catalogData.products || []);
+        setError((current) => current === scheduleLoadErrorRef.current ? null : current);
+        setLoading(false);
       }
-      if (!silent) setLoading(false);
       return scheduleData;
     } catch (e) {
-      if (!silent) {
+      if (isCurrent() && request.foreground) {
+        scheduleLoadErrorRef.current = e;
         setError(e);
         setLoading(false);
       }
       return null;
+    } finally {
+      if (pendingScheduleRequestRef.current === request) pendingScheduleRequestRef.current = null;
     }
   }, []);
 
@@ -1369,16 +1388,20 @@ export default function DispatchPageV2({
             setShowNewAppt(false);
             setNewApptDefaults(null);
           }}
-          onCreated={(appt) => {
-            setShowNewAppt(false);
-            setNewApptDefaults(null);
+          onCreated={(appt, outcome = {}) => {
+            if (!outcome.background) {
+              setShowNewAppt(false);
+              setNewApptDefaults(null);
+            }
             // Always refresh the DISPLAYED day. Fetching the created
             // appointment's own date (default updateState) replaced the
             // board with another day's stops while the header still showed
             // `date`; a non-silent fetch of that other day would also trip
             // the page-level loading/error gates for data we discard.
             // Off-screen days are covered by the week-grid key bump below.
-            fetchSchedule(date);
+            fetchSchedule(displayedDateRef.current, {
+              silent: !!outcome.background,
+            });
             // TimeGridDays (week / 5-day) owns its own week-fetch — bump the
             // key so it refetches and the just-created appointment shows up.
             setScheduleRefreshKey((k) => k + 1);
