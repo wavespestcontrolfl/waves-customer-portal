@@ -52,7 +52,10 @@ const SERVICE_OPT_OUT_KEYS = {
 //   problem, but the policy stands independently of it.
 const NON_REMOVABLE_BY_POLICY = ['tree_shrub'];
 
-const { selectedTermiteAnnualPlanRows } = require('./estimate-termite-program-rows');
+const {
+  authoritativeMappedTermiteEnvelope,
+  selectedTermiteAnnualPlanRows,
+} = require('./estimate-termite-program-rows');
 
 function isPlainObject(value) {
   return !!value && typeof value === 'object' && !Array.isArray(value);
@@ -78,6 +81,7 @@ function termiteAnnualPlanServiceChangeBlocked(parsedData = {}, {
   serviceKey,
   included,
   removedInputs = null,
+  provenance = null,
 } = {}) {
   if (serviceKey !== 'termite_bait') return false;
   if (included === false) return selectedTermiteAnnualPlanRows(parsedData).length > 0;
@@ -92,6 +96,15 @@ function termiteAnnualPlanServiceChangeBlocked(parsedData = {}, {
     captured = readRemovedInputs(removal);
   }
   if (!isPlainObject(captured)) return false;
+
+  // A gate-off annual request prices as quarterly, and the ignored request
+  // remains in engineRequest.options. New removals capture the authoritative
+  // mapped program before deleting the result row, so that server-derived
+  // identity wins on restore. Legacy events have no stamp and continue into
+  // the conservative input checks below.
+  const pricedProgram = String(provenance?.termiteProgram || '').toLowerCase();
+  if (pricedProgram === 'quarterly') return false;
+  if (pricedProgram === 'annual_protection') return true;
 
   const serviceInputs = ['engineInputs', 'inputs'].flatMap((carrier) => {
     const services = captured?.[carrier];
@@ -270,6 +283,13 @@ function captureServiceOptOutProvenance(parsedData = {}, sectionKey) {
       if (version) provenance.pestPricingVersion = version;
     } catch (_) { /* provenance is best-effort; never block the opt-out */ }
   }
+  if (sectionKey === 'termite_bait') {
+    const mapped = authoritativeMappedTermiteEnvelope(parsedData);
+    const program = String(mapped?.plan || '').toLowerCase();
+    if (program === 'quarterly' || program === 'annual_protection') {
+      provenance.termiteProgram = program;
+    }
+  }
   try {
     const signals = require('./estimate-floor-signal-replay').savedFloorReplaySignals(parsedData);
     if (signals && Object.keys(signals).length) provenance.floorSignals = signals;
@@ -301,7 +321,9 @@ function applyServiceOptOutToEstimateData(parsedData = {}, {
   const spec = SERVICE_OPT_OUT_KEYS[serviceKey];
   if (!spec) return { ok: false, reason: 'service_not_removable' };
   if (!isPlainObject(parsedData)) return { ok: false, reason: 'service_not_removable' };
-  if (termiteAnnualPlanServiceChangeBlocked(parsedData, { serviceKey, included, removedInputs })) {
+  if (termiteAnnualPlanServiceChangeBlocked(parsedData, {
+    serviceKey, included, removedInputs, provenance,
+  })) {
     return { ok: false, reason: 'service_not_removable' };
   }
 

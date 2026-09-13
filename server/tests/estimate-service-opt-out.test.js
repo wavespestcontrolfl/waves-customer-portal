@@ -213,6 +213,35 @@ describe('applyServiceOptOutToEstimateData — the restore', () => {
     expect(data.engineInputs.services.termite_bait).toBeUndefined();
     expect(data.engineRequest.selectedServices).toEqual(['PEST']);
   });
+
+  it('restores a priced quarterly termite line when an ignored annual request remains', () => {
+    const data = {
+      engineInputs: { services: { pest: { apps: 4 }, termite_bait: { stations: 12 } } },
+      engineRequest: {
+        profile: { homeSqFt: 2000 },
+        selectedServices: ['PEST', 'TERMITE_BAIT'],
+        options: { termitePlan: 'annual_protection' },
+      },
+      result: { results: { tmBait: { plan: 'quarterly' } } },
+    };
+    const provenance = captureServiceOptOutProvenance(data, 'termite_bait');
+    expect(provenance).toMatchObject({ termiteProgram: 'quarterly' });
+
+    const removed = applyServiceOptOutToEstimateData(data, {
+      serviceKey: 'termite_bait', included: false,
+    });
+    expect(removed.ok).toBe(true);
+    data.result = { results: {} };
+
+    expect(applyServiceOptOutToEstimateData(data, {
+      serviceKey: 'termite_bait',
+      included: true,
+      removedInputs: removed.removedInputs,
+      provenance,
+    })).toEqual({ ok: true, removedInputs: null });
+    expect(data.engineInputs.services.termite_bait).toEqual({ stations: 12 });
+    expect(data.engineRequest.selectedServices).toContain('TERMITE_BAIT');
+  });
 });
 
 describe('the audit record', () => {
