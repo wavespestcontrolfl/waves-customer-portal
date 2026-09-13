@@ -163,6 +163,31 @@ describe("Project photo caption dirty signal", () => {
     await waitFor(() => expect(onDirtyChange).toHaveBeenLastCalledWith(false));
   });
 
+  it("keeps another caption draft mounted and dirty while one caption saves", async () => {
+    projectPhotos = photos;
+    const onDirtyChange = vi.fn();
+    render(<MemoryRouter><ProjectDetail
+      projectId="project-1"
+      typesRegistry={types}
+      onClose={vi.fn()}
+      onDirtyChange={onDirtyChange}
+    /></MemoryRouter>);
+
+    const editButtons = await screen.findAllByRole("button", { name: "Edit caption" });
+    fireEvent.click(editButtons[0]);
+    fireEvent.change(screen.getByPlaceholderText("Photo caption"), { target: { value: "Front entry saved" } });
+    fireEvent.click(screen.getByRole("button", { name: "Edit caption" }));
+    fireEvent.change(screen.getAllByPlaceholderText("Photo caption")[1], { target: { value: "Kitchen remains pending" } });
+
+    fireEvent.click(screen.getAllByRole("button", { name: "Save caption" })[0]);
+    await waitFor(() => expect(fetch).toHaveBeenCalledWith(
+      "/api/admin/projects/project-1/photos/photo-1",
+      expect.objectContaining({ method: "PUT" }),
+    ));
+    expect(await screen.findByDisplayValue("Kitchen remains pending")).toBeInTheDocument();
+    await waitFor(() => expect(onDirtyChange).toHaveBeenLastCalledWith(true));
+  });
+
   it("keeps a failed caption save dirty", async () => {
     projectPhotos = [photos[0]];
     const onDirtyChange = vi.fn();

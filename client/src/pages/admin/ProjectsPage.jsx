@@ -1756,7 +1756,7 @@ export function ProjectDetail({
       });
       await readJsonResponse(r, "Could not save project changes");
       setDirty(false);
-      await load();
+      await load({ background: true });
       onChanged?.();
       setNotice("Changes saved.");
     } catch (e) {
@@ -1868,7 +1868,7 @@ export function ProjectDetail({
       } else {
         setNotice(`Report delivered. ${deliverySummary(d.channels)}`.trim());
       }
-      await load();
+      await load({ background: true });
       onChanged?.();
     } catch (e) {
       setError(e.message || "Could not send report");
@@ -2022,7 +2022,7 @@ export function ProjectDetail({
           `Report + invoice ${d.invoice?.invoice_number || ""} delivered. ${deliverySummary(d.channels)}`.trim(),
         );
       }
-      await load();
+      await load({ background: true });
       onChanged?.();
     } catch (e) {
       setError(e.message || "Could not send report + invoice");
@@ -2051,7 +2051,7 @@ export function ProjectDetail({
       });
       const d = await readJsonResponse(r, "Could not send prep guide");
       setNotice(`Prep guide sent${d.template_key ? ` (${d.template_key})` : ""}.`);
-      await load({ preserveEdits: true });
+      await load({ preserveEdits: true, background: true });
       onChanged?.();
     } catch (e) {
       setError(e.message || "Could not send prep guide");
@@ -2076,7 +2076,7 @@ export function ProjectDetail({
       });
       await readJsonResponse(r, "Could not send portal invite");
       setNotice("Portal invite sent.");
-      await load({ preserveEdits: true });
+      await load({ preserveEdits: true, background: true });
       onChanged?.();
     } catch (e) {
       setError(e.message || "Could not send portal invite");
@@ -2138,7 +2138,7 @@ export function ProjectDetail({
             "AI draft created but autosave failed",
           );
           setDirty(false);
-          await load();
+          await load({ background: true });
           setNotice("AI draft saved.");
         } catch {
           // Autosave failed — leave it marked dirty so manual Save still works.
@@ -2243,7 +2243,7 @@ export function ProjectDetail({
       // just-completed visit (Codex r10 P1). Consumers that take no args
       // (loadProjects) are unaffected by the earlier emission.
       onChanged?.({ visitCompleted: !!d.serviceCompleted });
-      await load();
+      await load({ background: true });
     } catch (e) {
       if (e.payload?.code === "project_completion_billing_required") {
         setError(
@@ -2271,7 +2271,7 @@ export function ProjectDetail({
         { method: "DELETE" },
       );
       await readJsonResponse(r, "Could not remove photo");
-      await load();
+      await load({ preserveEdits: true, background: true });
       setNotice("Photo removed.");
     } catch (e) {
       setError(e.message || "Could not remove photo");
@@ -2306,7 +2306,7 @@ export function ProjectDetail({
         failed.push(`${f.name}: ${e.message || "upload failed"}`);
       }
     }
-    await load();
+    await load({ preserveEdits: true, background: true });
     if (failed.length) {
       setError(`Some photos did not upload: ${failed.join("; ")}`);
     } else {
@@ -2327,7 +2327,7 @@ export function ProjectDetail({
         category: "previous_treatment",
         caption: "Previous treatment evidence review",
       });
-      await load({ preserveEdits: true });
+      await load({ preserveEdits: true, background: true });
       setNotice("Previous-treatment photo uploaded.");
     } catch (e) {
       setError(e.message || "Could not upload previous-treatment photo");
@@ -2947,7 +2947,7 @@ export function ProjectDetail({
                   photo={ph}
                   projectId={projectId}
                   onDelete={() => handlePhotoDelete(ph.id)}
-                  onCaptionSaved={() => load({ preserveEdits: true })}
+                  onCaptionSaved={() => load({ preserveEdits: true, background: true })}
                   onDirtyChange={handlePhotoCaptionDirtyChange}
                 />
               ))}
@@ -3068,7 +3068,7 @@ export function ProjectDetail({
             signature={project.wdo_signature}
             defaultSignerName={project.wdo_applicator?.name || project.tech_name || ""}
             defaultSignerIdCard={project.wdo_applicator?.idCardNo || ""}
-            onChanged={() => load({ preserveEdits: true })}
+            onChanged={() => load({ preserveEdits: true, background: true })}
           />
         </div>
       )}
