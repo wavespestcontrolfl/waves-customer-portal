@@ -573,7 +573,8 @@ function no_free_visit_promise(value, record, { spoken }) {
         const prefix = causalBoundary
           ? causalContext.slice(causalBoundary.index + causalBoundary[0].length, match.index - claimStart)
           : text.slice(claimStart, match.index);
-        if (!clauseIsNegated(prefix) && !clauseIsEpistemicallyHedged(prefix)) {
+        const governingCondition = /\b(?:if|unless|whether|until|before)\b/i.test(prefix);
+        if (!governingCondition && !clauseIsEpistemicallyHedged(prefix)) {
           return ['fail', `free visit promised: "${clip(match[0], 160)}"`];
         }
       }
@@ -1507,20 +1508,22 @@ function reportSharedLocationContinuation(text, clauseEnd, location) {
     'i',
   ).exec(remainder) || new RegExp(
     `^and\\s+(?:${REPORT_TREATMENT_LOCATION_LINK_RE.source}\\s+)?`
-      + `${REPORT_LOCATION_NOUN_PREFIX}[\\w'-]+(?=\\s+(?:only\\s+)?(?:if|unless)\\b)`,
+      + `${REPORT_LOCATION_NOUN_PREFIX}[\\w'-]+\\b`,
     'i',
   ).exec(remainder);
   if (!locationTail) return { text: '', question: false };
   const qualifier = remainder.slice(locationTail[0].length).trim()
     .replace(/^(?:perimeter|area|wall|walls|zone|edge)\b\s*/i, '');
   // A shared list ends the location noun or adds an adjunct, not a new predicate.
-  if (!/^(?:$|[.!?;]|(?:,\s*)?(?:and|or|before|after|with|as|according|which|(?:only\s+)?if|unless)\b)/i.test(qualifier)) {
+  if (!/^(?:$|[.!?;]|(?:,\s*)?(?:and|or|before|after|with|as|according|which|(?:only\s+)?if|unless)\b)/i.test(qualifier)
+      && !REPORT_TRAILING_UNCERTAINTY_RE.test(qualifier.replace(/[.!?;].*$/, ''))) {
     return { text: '', question: false };
   }
   const end = remainder.search(/[.!?;]/);
   return {
     text: remainder.slice(0, end >= 0 ? end : undefined),
     question: end >= 0 && remainder[end] === '?',
+    qualifier: qualifier.replace(/[.!?;].*$/, ''),
   };
 }
 
@@ -1587,7 +1590,7 @@ function report_readback_confirms(value, record, { spoken }) {
         const claim = claimContext(claimText, Math.min(subjectAt, locationAt), claimText.length);
         if (affirmed.slice(subjectAt, subjectAt + m[0].length).toLowerCase() === m[0].toLowerCase()
             && !REPORT_UNCERTAINTY_RE.test(findingEvidence)
-            && !REPORT_TRAILING_UNCERTAINTY_RE.test(trailingEvidence)
+            && !REPORT_TRAILING_UNCERTAINTY_RE.test(sharedLocation.qualifier || trailingEvidence)
             && !REPORT_CONCISE_NONCOMPLETION_RE.test(trailingEvidence) && !REPORT_INSTRUCTION_RE.test(affirmed)
             && !alternativeLocation
             && (completedFinding || conciseFinding)

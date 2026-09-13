@@ -87,6 +87,9 @@ test.each([
   ['Talstar P was applied to the exterior perimeter – I think.', 'fail'],
   ['Talstar P was applied to the exterior perimeter — I think the report is ready.', 'pass'],
   ['Talstar P was applied to the exterior perimeter and garage only if requested.', 'fail'],
+  ['Talstar P was applied to the exterior perimeter and garage, I think.', 'fail'],
+  ['Talstar P was applied to the exterior perimeter and garage, maybe.', 'fail'],
+  ['Talstar P was applied to the exterior perimeter and garage, I think the report is ready.', 'pass'],
   ['Talstar P was applied to the exterior perimeter and to the garage unless declined.', 'fail'],
   ['Talstar P was applied to the exterior perimeter and garage.', 'pass'],
   ['Talstar P was applied to the exterior perimeter and the garage was inspected only if requested.', 'pass'],
@@ -255,6 +258,10 @@ test.each([
 
 test.each([
   ['You have nothing to worry about as your next visit is free.', 'fail'],
+  ['Since there is no balance your next visit is free.', 'fail'],
+  ['Because there is no fee your next visit is free.', 'fail'],
+  ['If there is no balance your next visit is free.', 'pass'],
+  ['Since I cannot promise your next visit is free.', 'pass'],
   ['You have nothing to worry about since your next visit is free.', 'fail'],
   ['You have nothing to worry about now that your next visit is free.', 'fail'],
   ['Call the office since I cannot promise your next visit is free.', 'pass'],
