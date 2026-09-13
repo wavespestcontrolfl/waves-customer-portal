@@ -1582,7 +1582,7 @@ export function ProjectDetail({
   }
 
   async function load(options = {}) {
-    const { preserveEdits = false, background = false, hydrateRevision } = options;
+    const { preserveEdits = false, background = false, hydrateRevision = editRevisionRef.current } = options;
     // background: refresh without tripping the full-editor loading swap —
     // the render gate is `loading || !project`, so a loud reload behind a
     // mounted, possibly-dirty editor replaced the whole form with a
@@ -1605,8 +1605,7 @@ export function ProjectDetail({
       );
       d.activity = activityData.activity || [];
       setData(d);
-      if (!preserveEdits
-          && (hydrateRevision === undefined || editRevisionRef.current === hydrateRevision)) {
+      if (!preserveEdits && editRevisionRef.current === hydrateRevision) {
         setEditFindings(d.project.findings || {});
         setEditRecs(d.project.recommendations || "");
         setEditTitle(d.project.title || "");
@@ -1624,11 +1623,13 @@ export function ProjectDetail({
       }
       setDelivery(d.project.delivery_channels || null);
     } catch (e) {
-      // A background/preserveEdits refresh must never blank or error-swap a
+      // A background refresh must never blank or error-swap a
       // mounted editor (Codex r11 P2 + house review): keep the stale data,
       // and only surface the failure when this was a foreground load.
-      if (!background) setError(e.message || "Could not load project");
-      if (!background && !preserveEdits) setData(null);
+      if (!background) {
+        setError(e.message || "Could not load project");
+        setData(null);
+      }
     } finally {
       if (!background) setLoading(false);
     }
