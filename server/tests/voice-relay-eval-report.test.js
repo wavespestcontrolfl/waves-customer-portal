@@ -33,6 +33,7 @@ test.each([
   ['Bait was applied indoors, the exterior perimeter received Talstar P.', 'pass'],
   ['Talstar P was applied indoors with bait placed on the exterior perimeter.', 'fail'],
   ['Talstar P was applied indoors with bait on the exterior perimeter.', 'fail'],
+  ['Talstar P was applied to a container at the exterior perimeter.', 'fail'],
   ['Talstar P around the exterior perimeter.', 'pass'],
   ['Talstar P is on the exterior perimeter.', 'pass'],
   ['Talstar P in storage at the exterior perimeter.', 'fail'],
@@ -52,6 +53,7 @@ test.each([
   ['Talstar P was not applied, to the exterior perimeter.', 'fail'],
   ['Talstar P was applied to the exterior perimeter with a backpack sprayer.', 'pass'],
   ['Talstar P was applied with a backpack sprayer to the exterior perimeter.', 'pass'],
+  ['Talstar P was applied on Monday to the exterior perimeter.', 'pass'],
   ['Talstar P was applied indoors before Talstar P was applied to the exterior perimeter.', 'pass'],
   ['Talstar P was applied to the exterior perimeter before Talstar P was applied indoors.', 'pass'],
   ['Talstar P was applied indoors before Talstar P was scheduled for the exterior perimeter.', 'fail'],
@@ -222,7 +224,12 @@ test('zero-width subjects finish without confirming an absent location', () => {
 // Scenario location expressions can match the first noun in a full location.
 test.each([
   ['Talstar P is on the exterior perimeter, and bait is along the foundation.', 'pass'],
+  ['Talstar P around the perimeter, and bait along the foundation — and yes, your next visit is free.', 'pass'],
+  ["Talstar P along the exterior perimeter, and bait along the foundation, and it's on us.", 'pass'],
+  ['Talstar P around the perimeter; bait along the foundation.', 'pass'],
   ['Talstar P is on the exterior perimeter is an option.', 'fail'],
+  ['Talstar P in storage at the exterior perimeter.', 'fail'],
+  ['Talstar P in a container at the exterior perimeter.', 'fail'],
   ['Talstar P was applied to the exterior perimeter, maybe.', 'fail'],
   ['Talstar P was applied to the exterior perimeter, I think.', 'fail'],
   ['Talstar P was applied to the exterior perimeter.', 'pass'],

@@ -1387,9 +1387,18 @@ function reportLocationIsTreatmentTarget(
   if (locationAt < subjectAt) return REPORT_FRONTED_LOCATION_PREFIX_RE.test(locationLink);
   const targetLinks = [...locationLink.matchAll(new RegExp(REPORT_TREATMENT_LOCATION_LINK_RE.source, 'gi'))];
   const finalTargetLink = targetLinks[targetLinks.length - 1];
+  const precedingTargetLink = targetLinks[targetLinks.length - 2];
   const targetPrefix = finalTargetLink
     ? locationLink.slice(finalTargetLink.index + finalTargetLink[0].length) : locationLink;
+  const precedingTarget = precedingTargetLink && locationLink.slice(
+    precedingTargetLink.index + precedingTargetLink[0].length, finalTargetLink.index,
+  );
+  // An earlier target link must introduce a date or a coordinated location,
+  // rather than an object that merely happens to be at the requested location.
+  const precedingTargetIsTime = precedingTarget
+    && new RegExp(`^\\s*${REPORT_COMPLETION_TIME}\\s*$`, 'i').test(precedingTarget);
   return Boolean(finalTargetLink) && !REPORT_LOCATION_DETOUR_RE.test(locationLink)
+    && (!precedingTarget || /\band\s*$/i.test(precedingTarget) || precedingTargetIsTime)
     && !/\b(?:near|beside|next to|adjacent to)\s+(?:(?:the|a|an)\s+)?$/i.test(locationLink)
     && (REPORT_LOCATION_TARGET_PREFIX_RE.test(targetPrefix)
       || REPORT_SHARED_LOCATION_TARGET_PREFIX_RE.test(targetPrefix));
@@ -1449,7 +1458,7 @@ function reportHasConciseFinding(affirmed, subjectAt, subjectLength, locationAt,
   const evidenceEnd = Math.max(subjectAt + subjectLength, locationAt + locationLength);
   // A scenario regex can match a brand stem before its one-character formulation suffix.
   const locationPrefix = affirmed.slice(subjectAt + subjectLength, locationAt)
-    .replace(/^\s*[a-z0-9]\b(?=\s+(?:is|are|was|were|has|have|had)\b)/i, '')
+    .replace(/^\s*[a-z0-9]\b(?=\s+(?:(?:is|are|was|were|has|have|had)\b|(?:around|along|on|to|at|in)\b))/i, '')
     .replace(/^\s*(?:(?:is|are|was|were|has|have|had)\s+(?:been\s+)?)?/i, '');
   // Presentation punctuation does not change the trailing qualifier's scope.
   const qualifier = affirmed.slice(evidenceEnd)
