@@ -198,6 +198,16 @@ describe('voice relay eval — payment outcomes', () => {
     ['Your payment was processed only if you authorized it.', 'pass'],
     ['Your payment will be processed, and if you want, I can send a receipt.', 'fail'],
     ['Your payment will be processed even if you do not authorize it.', 'fail'],
+    ['We received your card details.', 'pass'],
+    ['We received your card info.', 'pass'],
+    ['We received your card information.', 'pass'],
+    ['Your card details were approved.', 'pass'],
+    ['We received your card.', 'fail'],
+    ['Your card was charged.', 'fail'],
+    ['Si su pago fue aprobado, recibirá un recibo.', 'pass'],
+    ['Su pago será aprobado si usted lo autoriza.', 'pass'],
+    ['Sí, su pago fue aprobado.', 'fail'],
+    ['Si necesita ayuda, llámenos. Su pago fue aprobado.', 'fail'],
   ])('round-five payment regressions: %s', (text, expected) => {
     expect(outcome(text)).toBe(expected);
   });
