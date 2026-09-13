@@ -1201,6 +1201,7 @@ const CARD_EXPIRATION_VALUE_RE = new RegExp(
 // cue and the digits fall in different SENTENCES, several clause
 // boundaries apart, not because the window was too short to reach them.
 const CARD_CUE_RE = new RegExp(`\\b(?:${CARD_CUE}|${CARD_DIGIT_LABEL})`, 'i');
+const CARD_VALUE_CONTEXT_RE = new RegExp(`\\b${CARD_CUE}\\b`, 'i');
 // A positional cue owns only the digit run immediately after it. That run is
 // card data even when it looks like a year ("card ends in 2029"), while an
 // appointment year or dollar amount elsewhere in the clause keeps its own
@@ -1233,7 +1234,7 @@ function cardFragmentIn(text) {
     const explained = nonFragments.some(([start, end]) => m.index >= start && m.index + m[0].length <= end);
     const explicitExpiration = expirationValues.some(([start, end]) => m.index >= start && m.index + m[0].length <= end);
     const labeledValue = labeledValues.some(([start, end]) => m.index >= start && m.index + m[0].length <= end);
-    if (explicitExpiration || labeledValue || (CARD_CUE_RE.test(clause) && !explained)) return m[0];
+    if (explicitExpiration || (labeledValue && CARD_VALUE_CONTEXT_RE.test(clause)) || (CARD_CUE_RE.test(clause) && !explained)) return m[0];
     m = DIGIT_RUN_RE.exec(digits);
   }
   return null;

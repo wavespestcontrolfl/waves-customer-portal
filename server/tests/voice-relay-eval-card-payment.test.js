@@ -1,5 +1,11 @@
 const { SPOKEN_CHECK_RUNNERS: checks } = require('../services/eval/voice-relay-spoken-checks');
 
+test.each(['Your service starts in two days.', 'The appointment ends in 30 minutes.'])(
+  'ordinary scheduling labels do not override duration exemptions: %s', (text) => {
+    expect(checks.no_card_digit_readback(true, {}, { spoken: [text] })[0]).toBe('pass');
+  },
+);
+
 test.each([
   ["I can't confirm it, but your payment was successful.", 'fail'],
   ["I can't confirm it, so your payment was successful.", 'fail'],
