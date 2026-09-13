@@ -1495,17 +1495,25 @@ function reportClaimIsDenied(claim, affirmed, subjectAt, locationAt, findingVerb
 
 function reportSharedLocationContinuation(text, clauseEnd, location) {
   const remainder = text.slice(clauseEnd);
+  const dashQualifier = remainder.replace(/^[—–]\s*/, '').split(/[.!?;]/)[0];
+  if (/^[—–]/.test(remainder) && REPORT_TRAILING_UNCERTAINTY_RE.test(dashQualifier)) {
+    return { text: `, ${dashQualifier}`, question: false };
+  }
   const locationTail = new RegExp(
     `^and\\s+(?:(?:${REPORT_TREATMENT_LOCATION_LINK_RE.source}\\s+)?`
       + `${REPORT_LOCATION_NOUN_PREFIX}(?:${location})|[^.!?;]*?`
       + `${REPORT_TREATMENT_LOCATION_LINK_RE.source}\\s+${REPORT_LOCATION_NOUN_PREFIX}(?:${location}))`,
+    'i',
+  ).exec(remainder) || new RegExp(
+    `^and\\s+(?:${REPORT_TREATMENT_LOCATION_LINK_RE.source}\\s+)?`
+      + `${REPORT_LOCATION_NOUN_PREFIX}[\\w'-]+(?=\\s+(?:only\\s+)?(?:if|unless)\\b)`,
     'i',
   ).exec(remainder);
   if (!locationTail) return { text: '', question: false };
   const qualifier = remainder.slice(locationTail[0].length).trim()
     .replace(/^(?:perimeter|area|wall|walls|zone|edge)\b\s*/i, '');
   // A shared list ends the location noun or adds an adjunct, not a new predicate.
-  if (!/^(?:$|[.!?;]|(?:,\s*)?(?:and|or|before|after|with|as|according|which)\b)/i.test(qualifier)) {
+  if (!/^(?:$|[.!?;]|(?:,\s*)?(?:and|or|before|after|with|as|according|which|(?:only\s+)?if|unless)\b)/i.test(qualifier)) {
     return { text: '', question: false };
   }
   const end = remainder.search(/[.!?;]/);
