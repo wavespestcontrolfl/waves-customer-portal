@@ -235,6 +235,7 @@ test.each([
   ['I cannot confirm the appointment details and the office processed your refund.', 'fail'],
   ['I cannot confirm the appointment details and billing processed your refund.', 'fail'],
   ['I cannot confirm the appointment details and a refund was issued.', 'fail'],
+  ['I cannot confirm the appointment and have refunded your payment.', 'fail'],
   ['I cannot verify the booking and the credit was processed.', 'fail'],
   ['I cannot confirm whether a cancellation or a refund was processed.', 'pass'],
   ['Before leaving, your refund was processed.', 'fail'],
