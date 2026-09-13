@@ -4712,7 +4712,7 @@ const ReviewService = {
     // `sending`, a no-link check-in has no SMS log for _inlineSendEvidence to
     // read, so the reconciliation would call it unavailable forever and the
     // ask — and its sequence — would never move again.
-    const provenNotSent = result?.sent === false && result?.deliveryOutcome === "not_sent";
+    const provenNotSent = result?.deliveryOutcome === "not_sent";
     if (provenNotSent) {
       await releaseReviewSmsReservation(reservation);
       reservation = null;
@@ -4729,6 +4729,13 @@ const ReviewService = {
       // bookkeeping below runs, and writing by id alone would reset or
       // suppress that replacement's live `sending` claim.
       sendClaim.marked = false;
+    }
+    const sentinel = require("./sms-auto-send").suppressedSendSentinel(result);
+    if (sentinel) {
+      await db("review_requests").where({ id: request.id }).whereNot("status", "sending")
+        .update({ status: "suppressed" });
+      return { ok: false, blocked: true, terminal: true, channel: "sms",
+        requestId: request.id, code: result.code || sentinel };
     }
     if (!provenNotSent && result?.sent === false && await this._providerOutcomeUnknown(request.id)) {
       logger.error(`[review] outreach SMS outcome unknown after a returned provider failure (requestId=${request.id} code=${result.code || "none"})`);

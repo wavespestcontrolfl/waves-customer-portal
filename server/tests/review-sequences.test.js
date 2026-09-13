@@ -347,6 +347,23 @@ describe('review sequences — cadence engine', () => {
     expect(mock.__state.rows.review_requests[0].template_key).toBe('friendly_ask');
   });
 
+  test('a suppressed outreach ask does not enter the retry queue', async () => {
+    const mock = makeMock({ customers: [{ id: 'suppressed-ask', first_name: 'Sam', phone: '+19410000001', nearest_location_id: 'bradenton' }] });
+    db.mockImplementation(mock);
+    mockSendCustomerMessage.mockResolvedValueOnce({
+      sent: true, deliveryOutcome: 'not_sent', providerMessageId: 'template-disabled',
+    });
+
+    const out = await ReviewService.sendOutreachTouch({
+      customer: mock.__state.rows.customers[0], channel: 'sms', templateId: 'friendly_ask', manageRetryVia: 'cron',
+    });
+
+    expect(out).toMatchObject({ ok: false, blocked: true, terminal: true, code: 'template-disabled' });
+    expect(mock.__state.rows.review_requests[0].status).toBe('suppressed');
+    expect(mock.__state.rows.review_requests[0].scheduled_for ?? null).toBeNull();
+    expect(mock.__state.rows.sms_log || []).not.toContainEqual(expect.objectContaining({ status: 'sending' }));
+  });
+
   test('an SMS-opted-out customer who allows email gets the email touch instead of stalling', async () => {
     const mock = makeMock({
       customers: [{ id: 'm2', first_name: 'Eve', last_name: 'M', phone: '+19410000002', email: 'eve@x.com', nearest_location_id: 'venice' }],
