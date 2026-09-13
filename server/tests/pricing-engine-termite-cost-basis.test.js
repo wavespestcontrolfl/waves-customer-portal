@@ -264,7 +264,10 @@ describe('termite station cost replay (plan §A1 replay rule)', () => {
     expect(estimateTermiteKnobSignal).toBe(replay.termiteKnobSignalForReplay);
     const persistence = require('fs').readFileSync(require.resolve('../services/admin-estimate-persistence'), 'utf8');
     expect(persistence).toMatch(/termiteKnobSignalForReplay\(estimateData\)/);
-    expect(persistence).toMatch(/'termitePricingKnobs'/); // stripped from browser-supplied inputs
+    expect(persistence).toMatch(/require\('\.\/estimate-client-identity-fields'\)/);
+    const { CLIENT_IDENTITY_FIELDS, sanitizeClientIdentityFields } = require('../services/estimate-client-identity-fields');
+    expect(CLIENT_IDENTITY_FIELDS).toContain('termitePricingKnobs');
+    expect(sanitizeClientIdentityFields({ termitePricingKnobs: { plan: 'annual_protection' }, homeSqFt: 1 })).toEqual({ homeSqFt: 1 });
   });
 });
 
