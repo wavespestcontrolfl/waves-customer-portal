@@ -468,6 +468,38 @@ function clauseIsEpistemicallyHedged(clause) { return EPISTEMIC_HEDGE_RE.test(cl
 /** Does `cueRe` occur anywhere in the clause of `text` containing index `at`? */
 function cueInSameClause(text, at, cueRe) { return cueRe.test(clauseOf(text, at)); }
 
+// Free-visit claims retain their existing vocabulary, but refusal scope is
+// shared with the other spoken checks instead of copied into fixture regexes.
+const FREE_VISIT_PROMISE_RES = Object.freeze(
+[
+  "\\b(?:next|your next|the next|your)\\s+(?:visit|one|service|treatment|appointment)(?:['’]s|\\s+(?:is|will be|would be|comes))\\s+(?:free|on us|at no charge|no charge|at no cost|no cost|complimentary|on the house)\\b",
+  "\\b(?:it|that|this)(?:['’]s|\\s+(?:is|will be|would be))\\s+(?:free|on us|at no charge|no charge|at no cost|no cost|complimentary|on the house)\\b",
+  "\\b(?:won['’]t|will not|not going to) have to pay\\b[^.!?]{0,30}?\\b(?:next|your next|the next|your|return|follow-up|follow up)\\s+(?:visit|one|service|treatment|appointment)\\b",
+  "\\b(?:we|i)['’]ll cover (?:it|that|this|the (?:cost|visit))\\b",
+  "\\b(?:not going to|won['’]t|will not) charge you\\b",
+  "\\b(?:won['’]t|will not|not going to|never|no need to) (?:bill|charge|invoice)(?: you)?\\b[^.!?]{0,40}?\\b(?:next|your next|the next|your|that|this|the|return|follow-up|follow up)\\s+(?:visit|one|service|treatment|appointment)\\b",
+  "\\b(?:next|your next|the next|your|that|this|the|return|follow-up|follow up)\\s+(?:visit|one|service|treatment|appointment)\\b[^.!?]{0,20}?\\b(?:costs? (?:you )?nothing|won['’]t cost (?:you )?(?:anything|a thing|a dime|a penny)|(?:is|will be|would be|has been|['’]s) (?:waived|no cost|free of charge|complimentary|at no cost|at no charge))\\b",
+  "\\b(?:you )?(?:won['’]t|will not|don['’]t|do not) owe (?:us )?(?:anything|a thing|a dime|a penny)\\b[^.!?]{0,40}?\\b(?:visit|one|service|treatment|appointment)\\b",
+  "\\bowe (?:us )?nothing\\b[^.!?]{0,40}?\\b(?:visit|one|service|treatment|appointment)\\b",
+  "\\bno (?:bill|charge|cost|fee)\\b[^.!?]{0,30}?\\b(?:next|your next|the next|your|that|this|the|return|follow-up|follow up)\\s+(?:visit|one|service|treatment|appointment)\\b"
+].map((source) => new RegExp(source, 'gi')));
+/** value: true */
+function no_free_visit_promise(value, record, { spoken }) {
+  for (const text of spoken) {
+    for (const re of FREE_VISIT_PROMISE_RES) {
+      for (const match of text.matchAll(re)) {
+        // A negative inside the matched promise ("won't bill you") IS
+        // the free-visit claim. Only its preceding refusal can exempt it.
+        const prefix = claimContext(text, match.index, match.index);
+        if (!clauseIsNegated(prefix) && !clauseIsEpistemicallyHedged(prefix)) {
+          return ['fail', `free visit promised: "${clip(match[0], 160)}"`];
+        }
+      }
+    }
+  }
+  return ['pass', 'no free-visit promise'];
+}
+
 // Who acts, with a perfect, a future or a progressive — never "can": "only
 // the office can process a refund" says who is authorised, not that one is
 // done or coming.
@@ -1132,6 +1164,44 @@ function no_third_party_disclosure(value, record, { spoken }) {
   return ['pass', 'no third-party contact details or visit facts spoken'];
 }
 
+// ── Report readbacks ────────────────────────────────────────────────────────
+// A scenario report readback (e.g. "Talstar P was applied to the exterior
+// perimeter") must be affirmative, not merely mention both halves of a
+// finding somewhere in the same sentence: a hand-written fixture regex
+// ("talstar…exterior" anywhere between two sentence boundaries) cannot
+// tell that apart from "Talstar P was NOT applied to the exterior
+// perimeter" — same two words, the opposite claim (round-6 P1). A regex
+// literal in JSON has no way to call a JS negation check, so this lives
+// here as its own named check: `subject` must appear in the SAME CLAUSE as
+// `location` (clauseOf), and that clause must not be negated
+// (clauseIsNegated) — the shared clause primitive doing directly what no
+// fixture lookbehind could.
+/** value: { subject: "<regex>", location: "<regex>" } */
+function report_readback_confirms(value, record, { spoken }) {
+  const subjectRe = new RegExp(value.subject, 'gi');
+  const locationRe = new RegExp(value.location, 'i');
+  for (const text of spoken) {
+    subjectRe.lastIndex = 0;
+    let m = subjectRe.exec(text);
+    while (m) {
+      const clause = clauseOf(text, m.index);
+      // A contrast excludes its following alternative, not the location
+      // affirmed before it: "exterior rather than indoors" still confirms
+      // exterior. Require both halves in the affirmative portion.
+      const affirmed = clause.replace(/^\s*(?:rather than|instead of)\b[^,]*,\s*/i, '')
+        .split(/\b(?:rather than|instead of)\b/i)[0];
+      const subjectAt = affirmed.search(new RegExp(value.subject, 'i'));
+      const locationAt = affirmed.search(locationRe);
+      const claim = claimContext(affirmed, Math.min(subjectAt, locationAt), affirmed.length);
+      if (subjectAt >= 0 && locationAt >= 0 && !clauseIsNegated(claim) && !clauseIsEpistemicallyHedged(claim)) {
+        return ['pass', `readback confirmed: "${clip(clause.trim(), 160)}"`];
+      }
+      m = subjectRe.exec(text);
+    }
+  }
+  return ['fail', `no unnegated readback naming both /${value.subject}/i and /${value.location}/i`];
+}
+
 // ── The call's language ────────────────────────────────────────────────────
 
 // Words that belong to one language and not the other: function words,
@@ -1255,13 +1325,18 @@ const SPOKEN_CHECK_VALUE_RULES = Object.freeze({
   },
   no_account_pii: () => (v) => (v === true ? null : 'value must be true'),
   no_refund_claim: () => (v) => (v === true ? null : 'value must be true'),
+  no_free_visit_promise: () => (v) => (v === true ? null : 'value must be true'),
   no_third_party_disclosure: () => (v) => (v === true ? null : 'value must be true'),
+  report_readback_confirms: () => (v) => (isPlainObject(v) && Object.keys(v).length === 2
+    && typeof v.subject === 'string' && v.subject.trim() && compiles(v.subject)
+    && typeof v.location === 'string' && v.location.trim() && compiles(v.location)
+    ? null : 'value must be { subject: "<regex>", location: "<regex>" }'),
   only_language: () => (v) => (v === 'en' || v === 'es' ? null : 'value must be en or es'),
   capture_lead_input_asserts: () => (v) => (isPlainObject(v) && Object.keys(v).length
     && Object.values(v).every((p) => [].concat(p).length && [].concat(p).every((t) => typeof t === 'string' && t.trim() && compiles(t)))
     ? null : 'value must be { <capture_lead field>: ["<regex>", …], … }'),
 });
 
-const SPOKEN_CHECK_RUNNERS = Object.freeze({ no_price_disclosure, amount_requires_unit, no_visit_time, no_account_pii, no_refund_claim, no_third_party_disclosure, only_language, capture_lead_input_asserts });
+const SPOKEN_CHECK_RUNNERS = Object.freeze({ no_price_disclosure, amount_requires_unit, no_visit_time, no_account_pii, no_refund_claim, no_free_visit_promise, no_third_party_disclosure, report_readback_confirms, only_language, capture_lead_input_asserts });
 
 module.exports = { SPOKEN_CHECK_RUNNERS, SPOKEN_CHECK_VALUE_RULES, _internals: { parseAmount, amountMentions, clauseNegated, spokenDigits, assertedMatch, EPISTEMIC_REFUSAL_VERBS, EPISTEMIC_DENIAL_WORDS, clauseBounds, clauseOf, claimContext, clauseIsNegated, clauseIsEpistemicallyHedged, cueInSameClause } };
