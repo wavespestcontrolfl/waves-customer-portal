@@ -93,6 +93,7 @@ test.each([
   ['Perhaps, Talstar P was applied to the exterior perimeter.', 'fail'],
   ['Talstar P was applied to the exterior perimeter, possibly.', 'fail'],
   ['Talstar P was applied to the exterior perimeter, probably.', 'fail'],
+  ['Talstar P was applied to the exterior perimeter probably.', 'fail'],
   ['Talstar P was applied to the exterior perimeter, which you can see in the report.', 'pass'],
   ['Talstar P was applied to the exterior perimeter, as the report will show.', 'pass'],
   ['The technician applied Talstar P to the exterior perimeter, which you may verify in the report.', 'pass'],
@@ -139,6 +140,14 @@ test.each([
   for (const finding of findings) {
     expect(checks.report_readback_confirms(finding, {}, { spoken: [spoken] })[0]).toBe('pass');
   }
+});
+
+test.each([
+  { subject: '\\btalstar p\\b', location: '\\bexterior perimeter\\b' },
+  { subject: '\\b(?:granular\\s+)?bait\\b', location: '\\bexterior perimeter\\b' },
+])('a product list shares its following treatment predicate and location: %j', (finding) => {
+  const spoken = ['Talstar P and bait were applied to the exterior perimeter.'];
+  expect(checks.report_readback_confirms(finding, {}, { spoken })[0]).toBe('pass');
 });
 
 test('coordinated products do not borrow one another\'s treatment location', () => {

@@ -1251,7 +1251,7 @@ const REPORT_LOCATION_DETOUR_RE = /\b(?:after|before|while|when|because|since|fo
 const REPORT_COMPLETED_PASSIVE_RE = /\b(?:(?:was|were|got)|(?:has|have|had)(?:\s+(?:\w+ly|already|just|now))*\s+been)\s+(?:(?:\w+ly|already|just|now)\s+)*$/i;
 const REPORT_NONCOMPLETION_GOVERNOR_RE = /(?:\b(?:supposed|expected|required|meant|scheduled|instructed|asked|told|directed|ordered|needed|intended|planned|ought)\s+to(?:\s+(?:\w+ly|already|just|now))*(?:\s+have(?:\s+(?:\w+ly|already|just|now))*(?:\s+been)?)?(?:\s+(?:\w+ly|already|just|now))*|\bplan(?:s|ned|ning)?\s+on\s+having(?:\s+(?:\w+ly|already|just|now))*(?:\s+been)?(?:\s+(?:\w+ly|already|just|now))*)\s*$/i;
 const REPORT_NONCOMPLETION_MODIFIER_RE = /\b(?:almost|nearly)(?:\s+(?:has|have|had|was|were|got|been)){0,2}\s*$/i;
-const REPORT_TRAILING_UNCERTAINTY_RE = /^\s*,\s*(?:maybe|perhaps|possibly|potentially|probably)\s*$/i;
+const REPORT_TRAILING_UNCERTAINTY_RE = /^\s*(?:,\s*)?(?:maybe|perhaps|possibly|potentially|probably)\s*$/i;
 const REPORT_CONCISE_NONCOMPLETION_RE = /^\s*(?:(?:(?:is|are|was|were|has|have|had)(?:\s+(?:been|being))?\s+)?(?:recommended|scheduled|planned|intended|proposed|suggested|expected|required|needed|pending)\b|(?:will|shall|would|should|can|could|may|might|must|is going to|are going to|was going to|were going to)\b)/i;
 const REPORT_ASSERTION_START = `(?:(?:the|a|an)\\s+)?(?:[\\w'\u2019-]+\\s+){1,4}(?:(?:(?:was|were|is|are|has|have|had|got)\\s+(?:\\w+ly\\s+)?)?(?:${REPORT_FINDING_VERB_RE.source}|\\b(?:receiving|getting)\\b))`;
 const REPORT_ASSERTION_BOUNDARY_RE = new RegExp(`(?:,\\s*|\\b(?:with|and)\\s+)(?=${REPORT_ASSERTION_START})`, 'gi');
@@ -1292,12 +1292,27 @@ function reportHasAlternativeLocation(affirmed, locationAt, orTail) {
   return /\beither\b/i.test(affirmed) || !REPORT_UNRELATED_OR_CLAUSE_RE.test(alternativeTail);
 }
 
-function reportLocationIsTreatmentTarget(affirmed, subjectAt, subjectLength, locationAt, locationLength, locationRecipient) {
-  if (locationRecipient) return true;
+function reportCoordinatorSharesLocation(affirmed, subjectAt, subjectLength, locationAt, locationLength, findingVerb) {
+  const gapStart = locationAt < subjectAt ? locationAt + locationLength : subjectAt + subjectLength;
   const findingGap = locationAt < subjectAt
-    ? affirmed.slice(locationAt + locationLength, subjectAt) : affirmed.slice(subjectAt + subjectLength, locationAt);
-  // In a shared-verb list, each product owns the location on its side of "and".
-  if (/\band\b/i.test(findingGap)) return false;
+    ? affirmed.slice(gapStart, subjectAt) : affirmed.slice(gapStart, locationAt);
+  const coordinator = /\band\b/i.exec(findingGap);
+  if (!coordinator) return true;
+  if (locationAt < subjectAt) return false;
+  const coordinatorAt = gapStart + coordinator.index;
+  return findingVerb.index > coordinatorAt && findingVerb.index < locationAt
+    && !REPORT_FINDING_VERB_RE.test(affirmed.slice(subjectAt + subjectLength, coordinatorAt));
+}
+
+function reportLocationIsTreatmentTarget(
+  affirmed, subjectAt, subjectLength, locationAt, locationLength, locationRecipient, findingVerb,
+) {
+  if (locationRecipient) return true;
+  // A product list may share the following predicate and location. Once a
+  // treatment verb precedes "and", the coordinator instead separates pairs.
+  if (!reportCoordinatorSharesLocation(
+    affirmed, subjectAt, subjectLength, locationAt, locationLength, findingVerb,
+  )) return false;
   const locationLink = locationAt < subjectAt
     ? affirmed.slice(0, locationAt) : affirmed.slice(subjectAt + subjectLength, locationAt);
   if (locationAt < subjectAt) return REPORT_FRONTED_LOCATION_PREFIX_RE.test(locationLink);
@@ -1340,7 +1355,7 @@ function reportHasCompletedFinding(affirmed, subjectAt, subjectLength, locationA
   if (REPORT_NONCOMPLETION_GOVERNOR_RE.test(predicateIntroduction)
       || REPORT_NONCOMPLETION_MODIFIER_RE.test(predicateIntroduction)) return false;
   if (!reportLocationIsTreatmentTarget(
-    affirmed, subjectAt, subjectLength, locationAt, locationLength, locationRecipient,
+    affirmed, subjectAt, subjectLength, locationAt, locationLength, locationRecipient, findingVerb,
   )) return false;
   return reportVerbGovernsProduct(affirmed, subjectAt, subjectLength, locationAt, locationLength, findingVerb);
 }
