@@ -11730,13 +11730,19 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
               const manualSlice = acceptManualDiscountItemization?.perApplication > 0
                 ? acceptManualDiscountItemization.perApplication
                 : 0;
-              lineItems.push({
-                description: 'First service application',
-                quantity: 1,
-                unit_price: manualSlice > 0
-                  ? Math.round((standardFirstApplicationAmount + manualSlice) * 100) / 100
-                  : standardFirstApplicationAmount,
-              });
+              lineItems.push(...await require('../services/estimate-first-application-invoice').itemizeFirstApplication({
+                estimateId: estimate.id, customerId,
+                scheduledServiceId: standardConversionResult.firstScheduledServiceId,
+                rowAmounts: firstApplicationRowAmounts,
+                rowDiscounts: acceptPlanCreditSlice?.rowSlices,
+                line: {
+                  description: 'First service application',
+                  quantity: 1,
+                  unit_price: manualSlice > 0
+                    ? Math.round((standardFirstApplicationAmount + manualSlice) * 100) / 100
+                    : standardFirstApplicationAmount,
+                },
+              }, trx));
               if (manualSlice > 0) {
                 lineItems.push({
                   // _kind tags the row for the admin invoice editor's

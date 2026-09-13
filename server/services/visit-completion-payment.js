@@ -80,6 +80,11 @@ async function assertVisitCompletionCharge(trx, invoice, packetId) {
     if (!pricing || pricing.price !== Number(member.estimated_price)
         || pricing.isCallback !== Boolean(member.is_callback)
         || pricing.invoiceOnComplete !== Boolean(member.create_invoice_on_complete)) refuse('member_price_changed');
+    // Older saved packets predate the service-identity snapshot. New packets
+    // also fence in-place conversions that retain the same price and row ID.
+    if (Object.hasOwn(pricing, 'serviceType')
+        && (pricing.serviceType !== member.service_type || pricing.serviceId !== member.service_id)) refuse('member_service_changed');
+    if (require('./no-cost-visit-types').isAlwaysFreeServiceType(member.service_type)) refuse('member_coverage_changed');
     if (member.status !== 'completed' || member.record_status !== 'completed'
         || ['inspection_only', 'customer_declined', 'incomplete'].includes(member.record_notes?.visitOutcome)
         || member.prepaid_method || Number(member.prepaid_amount) > 0) refuse('member_coverage_changed');
