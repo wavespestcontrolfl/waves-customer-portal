@@ -1538,18 +1538,18 @@ const PET_GUIDANCE_RE = /\b(?:(?:technician|team member)\b[^,.!?;]{0,100}?\b(?:g
 
 const PET_SPECULATIVE_GUIDANCE_RE = /\b(?:might|may|could|would|should|maybe|perhaps|possibly|potentially|refuse[sd]?|decline[sd]?|failed|unable)\b/i;
 
-const PET_TRAILING_CONDITION_RE = /^(?:(?!\b(?:and|or|but|however|then|so)\b(?!\s+(?:only\s+)?(?:if|unless)\b))[^.!?;—–])*?\b(?:(?:only\s+)?if|unless)\b/i;
+const PET_TRAILING_CONDITION_RE = /^(?:(?!\b(?:and|or|but|however|then|so)\b(?!\s+(?:(?:only\s+)?(?:if|unless)|only\s+when)\b))[^.!?;—–])*?\b(?:(?:only\s+)?if|unless|only\s+when)\b/i;
 
 function pet_precautions_confirmed(value, record, { spoken }) {
   for (const text of spoken) {
-    for (const clause of text.split(/(?<=[.!?;—–])|\b(?:but|however|though|although|so|yet)\b(?!\s+(?:only\s+)?(?:if|unless)\b)/i)) {
+    for (const clause of text.split(/(?<=[.!?;—–])|\b(?:but|however|though|although|so|yet)\b(?!\s+(?:(?:only\s+)?(?:if|unless)|only\s+when)\b)/i)) {
       if (/\?\s*$/.test(clause) || /^\s*(?:did|does|do|will|would|can|could|should|is|are|was|were|has|have|had)\b/i.test(clause)) continue;
       for (const match of clause.matchAll(PET_GUIDANCE_RE)) {
         const matchEnd = match.index + match[0].length;
         // A temporal adjunct after the completed direction ("before
         // treatment") doesn't negate the review that was just promised, but
         // a condition after a temporal adjunct still makes it uncertain.
-        const claim = clause.slice(0, matchEnd);
+        const claim = claimContext(clause, match.index, matchEnd);
         const suffix = clause.slice(matchEnd);
         if (!PET_TRAILING_CONDITION_RE.test(suffix) && !PET_SPECULATIVE_GUIDANCE_RE.test(claim) && !clauseIsNegated(claim) && !clauseIsEpistemicallyHedged(claim)) {
           return ['pass', `pet precautions direction: "${clip(clause.trim(), 160)}"`];
