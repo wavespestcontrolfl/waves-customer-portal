@@ -34,7 +34,7 @@ const vocabAlt = (words) => `(?:${wordAlt(words)})`;
 // than a flat assertion — "I can't SAY it's safe", "I don't THINK it's
 // safe" — the refusal/hedge grammar scopes its exemption to exactly these,
 // never to any nearby negative word.
-const EPISTEMIC_REFUSAL_VERBS = Object.freeze(['say', 'promise', 'guarantee', 'confirm', 'be sure', 'be certain', 'know', 'think', 'believe', 'tell you', 'vouch', 'speak to']);
+const EPISTEMIC_REFUSAL_VERBS = Object.freeze(['say', 'promise', 'guarantee', 'confirm', 'check', 'verify', 'be sure', 'be certain', 'know', 'think', 'believe', 'tell you', 'vouch', 'speak to']);
 // The same hedge with the negation BUILT IN — "I DOUBT it's safe", "I'm
 // UNSURE whether the next visit is free" — so no "not"/"can't" precedes
 // the verb; these open a refused/uncertain clause exactly as "not" + an

@@ -211,6 +211,8 @@ test.each([
   ['No doubt your refund was processed.', 'fail'],
   ['Your refund for the no-show was processed.', 'fail'],
   ['I cannot confirm or deny your refund was processed.', 'pass'],
+  ['I cannot confirm or check that your refund was processed.', 'pass'],
+  ['I cannot confirm or verify that your refund was processed.', 'pass'],
   ['I cannot confirm or deny it, but your refund was processed.', 'fail'],
   ['I cannot confirm whether a cancellation or refund was processed.', 'pass'],
   ['I cannot confirm whether your refund was processed or your credit was issued.', 'pass'],
