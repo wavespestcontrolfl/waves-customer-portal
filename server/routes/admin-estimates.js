@@ -4314,8 +4314,8 @@ router.put('/:id/proposal', async (req, res, next) => {
         const ordinaryPublished = await publishedOrdinarySiblingExpiries(trx, locked);
         const promised = groupLinkViewableThrough(groupAnchor);
         // The current row is excluded from longestGroupFixedValidity. Its
-        // newly authored date must participate before the save commits.
-        const widest = [groupHold, ...ordinaryPublished, authoredExpiry, promised].filter(Boolean)
+        // new fixed date or restored ordinary expiry must participate before the save commits.
+        const widest = [groupHold, ...ordinaryPublished, expiryUpdate, promised].filter(Boolean)
           .reduce((latest, at) => (!latest || at > latest ? at : latest), null);
         const anchorOfferExpiry = groupAnchor.id === locked.id ? expiryUpdate || locked.expires_at : groupAnchor.expires_at;
         if (widest && (!anchorOfferExpiry || widest > new Date(anchorOfferExpiry))) {
