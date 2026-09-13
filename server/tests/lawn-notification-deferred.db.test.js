@@ -7,6 +7,7 @@ let mockKnex;
 const mockNotify = jest.fn();
 const mockSendCustomerMessage = jest.fn();
 const mockGateEnvValue = jest.fn(() => false);
+const mockIsEnabled = jest.fn((name) => name === 'cronJobs');
 const mockRenderRequiredSmsTemplate = jest.fn(async (_key, vars) => `Score ${vars.overall_score}${vars.tip_line}`);
 
 jest.mock('../models/db', () => {
@@ -18,7 +19,23 @@ jest.mock('../models/db', () => {
 });
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));
 jest.mock('../services/llm/call', () => ({ dispatchWithFallback: jest.fn() }));
-jest.mock('../config/feature-gates', () => ({ gateEnvValue: (...args) => mockGateEnvValue(...args) }));
+jest.mock('../config/feature-gates', () => ({
+  gateEnvValue: (...args) => mockGateEnvValue(...args),
+  isEnabled: (...args) => mockIsEnabled(...args),
+  logGateStatus: jest.fn(),
+}));
+jest.mock('../utils/scheduled-cron', () => ({
+  schedule: jest.fn(),
+  scheduleTimeout: jest.fn(),
+  scheduleInterval: jest.fn(),
+  isScheduledTick: () => false,
+  runAsScheduledTick: (fn) => fn(),
+}));
+jest.mock('../utils/cron-lock', () => ({
+  runExclusive: async (_name, fn) => fn(),
+  recordMissedTick: jest.fn(),
+  settleDeadRunningJobs: jest.fn(async () => ({})),
+}));
 jest.mock('../config/twilio-numbers', () => ({ getOutboundNumber: jest.fn(() => '+19415550199') }));
 jest.mock('../services/messaging/send-customer-message', () => ({
   sendCustomerMessage: (...args) => mockSendCustomerMessage(...args),
@@ -33,7 +50,8 @@ jest.mock('../services/notification-dispatcher', () => ({
 
 const LawnIntel = require('../services/lawn-intelligence');
 const RealNotificationDispatcher = jest.requireActual('../services/notification-dispatcher');
-const { replayDeferredNotification } = require('../services/lawn-visit-delivery');
+const runs = require('../services/lawn-visit-runs');
+const { deliverConfirmedAssessment, replayDeferredNotification } = require('../services/lawn-visit-delivery');
 const { recheckDeferredReplay } = require('../services/messaging/deferred-replay-registry');
 
 const DATABASE_URL = process.env.DATABASE_URL;
@@ -67,6 +85,7 @@ postgres('deferred standalone lawn assessment notification (real PostgreSQL)', (
     mockNotify.mockReset();
     mockSendCustomerMessage.mockReset();
     mockGateEnvValue.mockImplementation(() => false);
+    mockIsEnabled.mockImplementation((name) => name === 'cronJobs');
     for (const table of ['sms_log', 'notification_prefs', 'tech_calibration', 'lawn_assessment_runs', 'lawn_assessments', 'technicians', 'customers']) {
       await fixture.knex(table).del();
     }
@@ -127,6 +146,28 @@ postgres('deferred standalone lawn assessment notification (real PostgreSQL)', (
     ...queued.metadata, scheduled_sms_log_id: queued.id, customer_id: seeded.customerId,
     assessment_id: seeded.assessment.id, run_id: seeded.run.id, ...overrides,
   });
+
+  function knexAfterFirstReplaySnapshot(effect) {
+    let fired = false;
+    const wrapped = (...args) => {
+      const query = fixture.knex(...args);
+      if (!fired && (args[0] === 'lawn_assessments' || args[0] === 'lawn_assessments as assessment')) {
+        const first = query.first.bind(query);
+        query.first = (...columns) => first(...columns).then(async (row) => {
+          if (!fired) {
+            fired = true;
+            await effect();
+          }
+          return row;
+        });
+      }
+      return query;
+    };
+    wrapped.transaction = (...args) => fixture.knex.transaction(...args);
+    wrapped.raw = (...args) => fixture.knex.raw(...args);
+    Object.defineProperty(wrapped, 'fn', { get: () => fixture.knex.fn });
+    return wrapped;
+  }
 
   test('the real dispatcher turns customer quiet hours into one identity-only obligation that replays with recovery gated off', async () => {
     const seeded = await seed();
@@ -208,6 +249,171 @@ postgres('deferred standalone lawn assessment notification (real PostgreSQL)', (
     } finally {
       jest.useRealTimers();
     }
+  });
+
+  test('a replay racing a live pipeline quiet hold remains retryable until that owner releases the shared queue row', async () => {
+    const seeded = await seed();
+    const { queued } = await queueHeld(seeded.assessment.id);
+    await fixture.knex('sms_log').where({ id: queued.id }).update({ status: 'sending' });
+    mockNotify.mockClear();
+    let enteredResolve;
+    let continueResolve;
+    const entered = new Promise((resolve) => { enteredResolve = resolve; });
+    const continueDispatch = new Promise((resolve) => { continueResolve = resolve; });
+    const held = holdSms();
+    mockNotify.mockImplementation(async (_customerId, _type, options) => {
+      await options.preSendCheck();
+      enteredResolve();
+      await continueDispatch;
+      return dispatcherResult(held);
+    });
+    const running = deliverConfirmedAssessment({ assessmentId: seeded.assessment.id }, replayDeps());
+    await entered;
+    try {
+      expect(await fixture.knex('lawn_assessments').where({ id: seeded.assessment.id }).first())
+        .toMatchObject({ notification_sent: true, notification_sent_at: null });
+      const replayed = await replayDeferredNotification(replayMeta(seeded, queued), replayDeps());
+      expect(replayed).toMatchObject({
+        sent: false,
+        deliveryOutcome: 'not_sent',
+        code: 'LAWN_NOTIFICATION_BUSY',
+        retryable: true,
+        deferred: true,
+        nextAllowedAt: expect.any(String),
+      });
+      expect(new Date(replayed.nextAllowedAt).getTime()).toBeGreaterThan(Date.now());
+      expect(mockNotify).toHaveBeenCalledTimes(1);
+    } finally {
+      continueResolve();
+    }
+    await expect(running).resolves.toMatchObject({
+      notificationResult: { notificationQueued: true, deliveryOutcome: 'not_sent' },
+    });
+    expect(await fixture.knex('sms_log').where({ customer_id: seeded.customerId })).toHaveLength(1);
+    expect(await fixture.knex('lawn_assessments').where({ id: seeded.assessment.id }).first())
+      .toMatchObject({ notification_sent: false, notification_sent_at: null });
+    expect(await fixture.knex('lawn_assessment_runs').where({ id: seeded.run.id }).first())
+      .toMatchObject({ pipeline_owner_token: null, pipeline_claimed_at: expect.any(Date) });
+  });
+
+  test('a joined replay snapshot survives the live owner handing its notification claim back during the read', async () => {
+    const seeded = await seed();
+    const { queued } = await queueHeld(seeded.assessment.id);
+    await fixture.knex('lawn_assessments').where({ id: seeded.assessment.id })
+      .update({ notification_sent: true, notification_sent_at: null });
+    expect(await runs.claimPipeline(seeded.assessment.id, fixture.knex)).toBeTruthy();
+    mockNotify.mockClear();
+    const knex = knexAfterFirstReplaySnapshot(async () => fixture.knex.transaction(async (trx) => {
+      await trx('lawn_assessments').where({ id: seeded.assessment.id })
+        .update({ notification_sent: false, notification_sent_at: null });
+      await trx('lawn_assessment_runs').where({ id: seeded.run.id }).update({
+        pipeline_owner_token: null, pipeline_claimed_at: trx.raw('clock_timestamp()'),
+      });
+    }));
+
+    await expect(replayDeferredNotification(replayMeta(seeded, queued), { ...replayDeps(), knex }))
+      .resolves.toMatchObject({
+        sent: false, deliveryOutcome: 'not_sent', code: 'LAWN_NOTIFICATION_BUSY',
+        retryable: true, deferred: true, nextAllowedAt: expect.any(String),
+      });
+    expect(await fixture.knex('lawn_assessments').where({ id: seeded.assessment.id }).first())
+      .toMatchObject({ notification_sent: false, notification_sent_at: null });
+    expect(await fixture.knex('lawn_assessment_runs').where({ id: seeded.run.id }).first())
+      .toMatchObject({ pipeline_owner_token: null, pipeline_claimed_at: expect.any(Date) });
+    expect(mockNotify).not.toHaveBeenCalled();
+  });
+
+  test('the scheduler refunds a final attempt while a lawn notification pipeline lease is live', async () => {
+    const seeded = await seed();
+    const { queued } = await queueHeld(seeded.assessment.id);
+    await fixture.knex('lawn_assessments').where({ id: seeded.assessment.id })
+      .update({ notification_sent: true, notification_sent_at: null });
+    const claim = await runs.claimPipeline(seeded.assessment.id, fixture.knex);
+    expect(claim).toBeTruthy();
+    await fixture.knex('sms_log').where({ id: queued.id }).update({
+      status: 'scheduled',
+      scheduled_for: new Date(0),
+      metadata: JSON.stringify({ ...queued.metadata, scheduled_sms_attempts: 2 }),
+    });
+    const cron = require('../utils/scheduled-cron');
+    cron.schedule.mockClear();
+    require('../services/scheduler').initScheduledJobs();
+    const tick = cron.schedule.mock.calls.find(([, callback]) => String(callback).includes('claimDueScheduledSms'))[1];
+    mockNotify.mockClear();
+    await tick();
+
+    const held = await fixture.knex('sms_log').where({ id: queued.id }).first();
+    expect(held).toMatchObject({
+      status: 'scheduled',
+      metadata: {
+        scheduled_sms_attempts: 2,
+        lawn_pipeline_hold_at: expect.any(String),
+      },
+    });
+    expect(new Date(held.scheduled_for).toISOString()).toBe(
+      new Date(new Date(claim.pipeline_claimed_at).getTime() + runs.PIPELINE_STALE_MS).toISOString(),
+    );
+    expect(mockNotify).not.toHaveBeenCalled();
+    expect(mockSendCustomerMessage).not.toHaveBeenCalled();
+  });
+
+  test('the scheduler refunds a final attempt when another pipeline wins the claim after replay validation', async () => {
+    const seeded = await seed();
+    const { queued } = await queueHeld(seeded.assessment.id);
+    await fixture.knex('sms_log').where({ id: queued.id }).update({
+      status: 'scheduled',
+      scheduled_for: new Date(0),
+      metadata: JSON.stringify({ ...queued.metadata, scheduled_sms_attempts: 2 }),
+    });
+    const originalClaim = runs.claimPipeline;
+    let competingClaim;
+    const claimSpy = jest.spyOn(runs, 'claimPipeline').mockImplementationOnce(async (...args) => {
+      competingClaim = await originalClaim(args[0], fixture.knex, args[2]);
+      return null;
+    });
+    const cron = require('../utils/scheduled-cron');
+    cron.schedule.mockClear();
+    require('../services/scheduler').initScheduledJobs();
+    const tick = cron.schedule.mock.calls.find(([, callback]) => String(callback).includes('claimDueScheduledSms'))[1];
+    mockNotify.mockClear();
+    try {
+      await tick();
+    } finally {
+      claimSpy.mockRestore();
+    }
+
+    expect(competingClaim).toBeTruthy();
+    const held = await fixture.knex('sms_log').where({ id: queued.id }).first();
+    expect(held).toMatchObject({
+      status: 'scheduled',
+      metadata: { scheduled_sms_attempts: 2, lawn_pipeline_hold_at: expect.any(String) },
+    });
+    expect(new Date(held.scheduled_for).toISOString()).toBe(
+      new Date(new Date(competingClaim.pipeline_claimed_at).getTime() + runs.PIPELINE_STALE_MS).toISOString(),
+    );
+    expect(await fixture.knex('lawn_assessments').where({ id: seeded.assessment.id }).first())
+      .toMatchObject({ notification_sent: false, notification_sent_at: null });
+    expect(mockNotify).not.toHaveBeenCalled();
+    expect(mockSendCustomerMessage).not.toHaveBeenCalled();
+  });
+
+  test('an expired pipeline owner cannot make an unsettled notification claim retryable', async () => {
+    const seeded = await seed();
+    const { queued } = await queueHeld(seeded.assessment.id);
+    await fixture.knex('lawn_assessments').where({ id: seeded.assessment.id })
+      .update({ notification_sent: true, notification_sent_at: null });
+    await fixture.knex('lawn_assessment_runs').where({ id: seeded.run.id }).update({
+      pipeline_owner_token: randomUUID(),
+      pipeline_claimed_at: fixture.knex.raw("clock_timestamp() - interval '16 minutes'"),
+    });
+    mockNotify.mockClear();
+    await expect(replayDeferredNotification(replayMeta(seeded, queued), replayDeps())).resolves.toEqual({
+      sent: false,
+      blocked: true,
+      deliveryOutcome: 'uncertain',
+      code: 'LAWN_NOTIFICATION_ALREADY_CLAIMED',
+    });
+    expect(mockNotify).not.toHaveBeenCalled();
   });
 
   test('an enqueue failure preserves a proven-unsent notification as owed', async () => {
@@ -321,6 +527,12 @@ postgres('deferred standalone lawn assessment notification (real PostgreSQL)', (
       expect((await fixture.knex('lawn_assessments').where({ id: seeded.assessment.id }).first()).notification_sent_at)
         .toBeInstanceOf(Date);
       mockNotify.mockClear();
+      expect(await replayDeferredNotification(meta, replayDeps())).toMatchObject({
+        sent: false, code: 'LAWN_NOTIFICATION_BUSY', deliveryOutcome: 'not_sent', retryable: true,
+      });
+      expect(mockNotify).not.toHaveBeenCalled();
+      await fixture.knex('lawn_assessment_runs').where({ id: seeded.run.id })
+        .update({ pipeline_claimed_at: fixture.knex.raw("clock_timestamp() - interval '16 minutes'") });
       expect(await replayDeferredNotification(meta, replayDeps())).toMatchObject({
         sent: false, code: 'LAWN_NOTIFICATION_ALREADY_CLAIMED', deliveryOutcome: 'uncertain',
       });

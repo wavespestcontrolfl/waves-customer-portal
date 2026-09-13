@@ -235,24 +235,58 @@ async function deliverConfirmedAssessment({ assessmentId, scheduledSmsLogId }, d
 // assessment send and its normal lease/seal. Never fall back to a frozen body.
 async function replayDeferredNotification(meta, deps = {}) {
   const knex = deps.knex || db;
-  const assessment = await knex('lawn_assessments').where({ id: meta.assessment_id }).first();
-  const run = await runs.loadRun(meta.assessment_id, knex);
+  const staleAfterMs = deps.staleAfterMs ?? runs.PIPELINE_STALE_MS;
+  const loadSnapshot = () => knex('lawn_assessments as assessment')
+    .leftJoin('lawn_assessment_runs as run', 'run.assessment_id', 'assessment.id')
+    .where('assessment.id', meta.assessment_id)
+    .first(
+      'assessment.id as assessment_id', 'assessment.customer_id', 'assessment.confirmed_by_tech',
+      'assessment.service_id', 'assessment.notification_sent', 'run.id as run_id',
+      'run.pipeline_owner_token', 'run.pipeline_claimed_at',
+      knex.raw(`COALESCE(
+        run.pipeline_owner_token IS NOT NULL
+        AND run.pipeline_completed_at IS NULL
+        AND run.pipeline_claimed_at >= clock_timestamp() - (? * interval '1 millisecond'),
+        false
+      ) AS pipeline_live`, [staleAfterMs]),
+      knex.raw('clock_timestamp() AS database_now'),
+    );
+  const snapshot = await loadSnapshot();
   const blocked = (code) => ({ sent: false, blocked: true, deliveryOutcome: 'not_sent', code });
-  if (!assessment?.confirmed_by_tech || assessment.service_id
-    || String(assessment.customer_id) !== String(meta.customer_id)
-    || !run || String(run.id) !== String(meta.run_id) || !meta.scheduled_sms_log_id) {
+  const busy = (state) => {
+    const base = state?.pipeline_live ? state.pipeline_claimed_at : (state?.database_now ?? new Date());
+    const retryAt = new Date(base).getTime() + staleAfterMs;
+    return {
+      ...blocked('LAWN_NOTIFICATION_BUSY'), retryable: true, deferred: true,
+      ...(Number.isFinite(retryAt) ? { nextAllowedAt: new Date(retryAt).toISOString() } : {}),
+    };
+  };
+  if (!snapshot?.confirmed_by_tech || snapshot.service_id
+    || String(snapshot.customer_id) !== String(meta.customer_id)
+    || !snapshot.run_id || String(snapshot.run_id) !== String(meta.run_id) || !meta.scheduled_sms_log_id) {
     return blocked('LAWN_NOTIFICATION_UNAVAILABLE');
   }
-  // A durable claim can mean accepted OR uncertain, never permission to retry.
-  if (assessment.notification_sent) {
+  // A live pipeline may have claimed the assessment while this SAME scheduled
+  // row was already sending. Its quiet-hours deferral dedupes against that row
+  // and then releases the assessment claim, so the scheduler must wait for the
+  // live owner instead of terminally consuming its own obligation. The DB-clock
+  // ownership check distinguishes that race from an accepted or abandoned
+  // claim, which remains uncertain and must never be resent.
+  if (snapshot.notification_sent) {
+    if (snapshot.pipeline_live) return busy(snapshot);
     return { ...blocked('LAWN_NOTIFICATION_ALREADY_CLAIMED'), deliveryOutcome: 'uncertain' };
   }
   let notification;
   try {
     const result = await deliverConfirmedAssessment({
-      assessmentId: assessment.id, scheduledSmsLogId: meta.scheduled_sms_log_id,
+      assessmentId: snapshot.assessment_id, scheduledSmsLogId: meta.scheduled_sms_log_id,
     }, deps);
     notification = result.notificationResult;
+    // Losing the claim proves this replay performed no delivery work. Return a
+    // refunded scheduler hold even if the winner has already handed ownership
+    // back; the next joined snapshot will decide whether the send was accepted,
+    // remains owned, or is owed again.
+    if (!notification && result.skipped === 'not_claimed') return busy(await loadSnapshot());
     if (!notification) return { ...blocked('LAWN_NOTIFICATION_BUSY'), retryable: true };
   } catch (err) {
     notification = err.notificationResult;
