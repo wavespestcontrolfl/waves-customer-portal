@@ -107,7 +107,7 @@ const API_BASE = import.meta.env.VITE_API_URL || "/api";
 // V2 token pass: teal/blue/purple fold to zinc-900. Semantic green/amber/red preserved.
 // STATUS_COLORS folds cleanly — sent/viewed were both #0A7EC2 in V1, stay identical post-fold.
 
-async function adminFetch(path, options = {}) {
+export async function adminFetch(path, options = {}) {
   const r = await fetch(`${API_BASE}${path}`, {
     headers: {
       Authorization: `Bearer ${localStorage.getItem("waves_admin_token")}`,
@@ -117,15 +117,25 @@ async function adminFetch(path, options = {}) {
   });
   if (!r.ok) {
     let message = `HTTP ${r.status}`;
+    let code = null;
+    let body = null;
     try {
       const data = await r.clone().json();
+      body = data;
       message = data.error || data.message || message;
+      // The server's machine-readable code (e.g. DEPOSIT_CREDIT_CHANGED) —
+      // callers branch on it.
+      if (data.code) code = String(data.code);
     } catch {
       const text = await r.text().catch(() => "");
       if (text) message = text;
     }
     const err = new Error(message);
     err.status = r.status;
+    if (code) err.code = code;
+    // The refused payload (e.g. BALANCE_CHANGED's authoritative figures) —
+    // callers read what the server would actually bill.
+    if (body && typeof body === "object") err.body = body;
     throw err;
   }
   return r.json();
@@ -336,6 +346,147 @@ export function invoiceListRowDate(inv = {}) {
 // line item (the server rejects hand-supplied ones, so category is reliable).
 // Returned as a positive dollar total for the row chip — the only list-view
 // trace of deposit money, since deposits are never payments/invoices rows.
+// ---- Open-visit link: create-path conflicts and balance confirmation ----
+// Every 409 the linked create can refuse with because the VISIT or its
+// money moved since the picker loaded. All of them reload the picker while
+// keeping the selected visit (Codex P2 #4131): a visit that left the open
+// list then renders the gone-state note and blocks Create, instead of the
+// stale row staying selected with Create enabled for a 409 on every retry.
+export const VISIT_STATE_CONFLICT_CODES = [
+  "DEPOSIT_CREDIT_CHANGED",
+  "DEPOSIT_CREDIT_UNVERIFIABLE",
+  "BALANCE_CHANGED",
+  "visit_not_open",
+  "visit_link_moved",
+  "visit_invoice_refunded",
+  "visit_billing_changing",
+  "visit_prepaid",
+  "visit_billing_unverifiable",
+  "visit_already_invoiced",
+  "SCHEDULED_PRICE_MOVED",
+  // The visit's Bill-To changed between the picker's payer-derived preview
+  // and the create (Codex round 14 P2 #4131) — same reload-and-reselect
+  // recovery as every other visit-state conflict above, so the picker
+  // re-resolves the current payer instead of leaving the stale preview and
+  // a disabled retry.
+  "PAYER_CHANGED",
+];
+export function reloadsVisitPickerAfterCreateError(code) {
+  return VISIT_STATE_CONFLICT_CODES.includes(String(code || ""));
+}
+// The selected visit after a picker reload: the fresh row when it is still
+// open (its deposit credit may have moved), otherwise the stale selection is
+// RETAINED so linkedVisitGone can render — never silently deselected, which
+// would let the next Create go out unlinked.
+// A picker response is applied only while the customer it was requested
+// for is still the selected one (pre-push P1 r3): switching customers with
+// a request in flight must not let the old customer's records and visits
+// overwrite the new customer's — a cross-customer link the create would
+// then refuse (or worse, honor).
+export function visitPickerResponseIsCurrent(currentCustomerId, requestedCustomerId) {
+  return currentCustomerId != null && String(currentCustomerId) === String(requestedCustomerId);
+}
+
+export function reconcileSelectedOpenVisit(selected, visits = []) {
+  if (!selected) return null;
+  const refreshed = (Array.isArray(visits) ? visits : []).find((v) => v && v.id === selected.id);
+  return refreshed || selected;
+}
+// A linked open-visit invoice is sent now or kept as a draft — never queued
+// for a future time (Codex P1 #4131 r2): the completion reuses the linked
+// invoice and texts its pay link, and markDeliverySent clears the scheduled
+// send, so the chosen time would not be honored anyway.
+export function openVisitSendTimingBlocked(sendTiming, selectedOpenVisit) {
+  return !!selectedOpenVisit && sendTiming !== "now" && sendTiming !== "draft";
+}
+// A pre-completion invoice linked to an open visit never carries a review
+// ask (Codex P1 #4131 r4): the visit may be days away and the send route
+// would enroll the ask after its delay regardless — the server drops it,
+// and the form disables the toggle so nothing is silently ignored.
+export function openVisitReviewRequestBlocked(selectedOpenVisit) {
+  return !!selectedOpenVisit;
+}
+// The identity of a previewed balance: the visit, the deposit it carries,
+// and the billable lines. A server-confirmed balance is honored only while
+// the form still matches it — editing a line invalidates the confirmation.
+export function openVisitBalanceKey({ selectedOpenVisit, lineItems = [] }) {
+  if (!selectedOpenVisit) return null;
+  return JSON.stringify({
+    visit: selectedOpenVisit.id,
+    deposit: Math.max(0, Number(selectedOpenVisit.deposit_credit) || 0),
+    lines: (lineItems || []).map((i) => [i.description, Number(i.quantity), Number(i.unit_price), i.discount_id || null, i._kind || null]),
+  });
+}
+// The server's BALANCE_CHANGED payload as a confirmation the form can show
+// and re-submit (null for any other error, or one with no usable figure).
+export function confirmedBalanceFromError(err, key) {
+  if (!err || err.code !== "BALANCE_CHANGED" || !key) return null;
+  const b = err.body || {};
+  const balanceDue = Number(b.balanceDue);
+  if (!Number.isFinite(balanceDue) || balanceDue < 0) return null;
+  return {
+    key,
+    balanceDue: Math.round(balanceDue * 100) / 100,
+    invoiceTotal: Number.isFinite(Number(b.invoiceTotal)) ? Number(b.invoiceTotal) : null,
+    appliedDepositCredit: Number.isFinite(Number(b.appliedDepositCredit)) ? Number(b.appliedDepositCredit) : null,
+  };
+}
+// What the linked create sends for the server to check before anything is
+// created: the pending deposit the summary previewed (DEPOSIT_CREDIT_CHANGED
+// when it moved) and the balance the operator approved — the server-
+// confirmed one when the form still matches it, else the local preview
+// (BALANCE_CHANGED when the authoritative total differs).
+export function openVisitCreateExpectations({ selectedOpenVisit, balanceDue, confirmedBalance, balanceKey }) {
+  if (!selectedOpenVisit) return {};
+  const confirmed = confirmedBalance && balanceKey && confirmedBalance.key === balanceKey ? confirmedBalance : null;
+  return {
+    expectedDepositCredit: Math.max(0, Number(selectedOpenVisit.deposit_credit) || 0),
+    expectedBalanceDue: Math.round((confirmed ? confirmed.balanceDue : Math.max(0, Number(balanceDue) || 0)) * 100) / 100,
+  };
+}
+
+// The selected open visit left the open list on a reload (completed or
+// prepaid since). It stays selected so the picker renders the gone state
+// and Create is blocked — never silently dropped into an unlinked create.
+export function isLinkedVisitGone(selectedOpenVisit, openVisits = []) {
+  return !!selectedOpenVisit && !openVisits.some((v) => v.id === selectedOpenVisit.id);
+}
+// The linked visit's previewed credit (its pending estimate deposit, capped
+// at the form total like the server caps it) and the balance after it.
+export function previewLinkedBalance({ selectedOpenVisit, total }) {
+  const depositCredit = Math.min(total, Math.max(0, Number(selectedOpenVisit?.deposit_credit) || 0));
+  return { depositCredit, previewBalanceDue: Math.max(0, Math.round((total - depositCredit) * 100) / 100) };
+}
+// The balance the summary shows and the create sends: the server-confirmed
+// one (BALANCE_CHANGED) while the form still matches the state it was
+// computed for, else the local preview.
+export function resolveLinkedBalance({ confirmedBalance, balanceKey, previewBalanceDue }) {
+  const serverBalance = confirmedBalance && balanceKey && confirmedBalance.key === balanceKey ? confirmedBalance : null;
+  return { serverBalance, balanceDue: serverBalance ? serverBalance.balanceDue : previewBalanceDue };
+}
+// Create-step 1 — the pre-submit validation, as the toast that blocks it
+// (null = proceed). One place for every "cannot create yet" rule.
+export function createInvoiceBlocker({
+  selectedCustomer, lineItems, serviceDate, dueDate, sendTiming, scheduledFor, requestReview, reviewDelay, linkedVisitGone, selectedOpenVisit,
+}) {
+  if (!selectedCustomer) return "Select a customer";
+  if (!lineItems.some((i) => i._kind !== "discount" && i.description && i.unit_price > 0)) return "Add at least one line item";
+  if (!serviceDate) return "Choose a service date";
+  if (!dueDate) return "Choose a due date";
+  if (sendTiming === "custom" && !scheduledFor) return "Choose an invoice send time";
+  // The review ask is validated on the same effective value the form
+  // renders (Codex P2 r6 #4131): a linked open visit blocks the ask, so a
+  // still-true underlying state must not demand a review time the operator
+  // cannot see or set.
+  const reviewAsk = requestReview && !openVisitReviewRequestBlocked(selectedOpenVisit);
+  if (sendTiming !== "draft" && reviewAsk && reviewDelay === null) return "Choose a review request time";
+  if (linkedVisitGone) return "The linked visit is no longer open (completed or prepaid since) — re-check the visit link before creating.";
+  if (openVisitSendTimingBlocked(sendTiming, selectedOpenVisit)) {
+    return "An invoice linked to an open visit is sent now or saved as a draft — the completion sends it, so a future send time would not be kept.";
+  }
+  return null;
+}
+
 export function invoiceDepositCreditTotal(lineItems) {
   if (!Array.isArray(lineItems)) return 0;
   return lineItems
@@ -354,6 +505,15 @@ export function invoiceCreatedSendToast(invoiceNumber, res) {
   // a success (the invoice is prepaid, nothing to deliver), not a failed send.
   if (res?.covered_by_credit) {
     return `Invoice created: ${invoiceNumber} — fully covered by account credit, nothing to send`;
+  }
+  // The linked visit's completion delivered it first: a no-op, not a failure.
+  if (res?.already_delivered) {
+    return `Invoice created: ${invoiceNumber} — already delivered by the visit's completion, not sent again`;
+  }
+  // …or queued it for the send window (quiet hours): the text is live and
+  // delivers at 8 AM — also a no-op, never a Resend prompt (Codex P2 r8).
+  if (res?.queued_delivery) {
+    return `Invoice created: ${invoiceNumber} — the visit's completion already queued the text for the send window, not sent again`;
   }
   const sent = [
     res?.sms?.ok && "SMS",
@@ -440,6 +600,117 @@ export function buildInvoiceListParams({
   if (start) params.set("from", formatDateParam(start));
   return params;
 }
+
+// The "Link to visit" panel of the create form: completed records and open
+// visits, the gone-state of a selected visit that left the open list, and
+// the linked-visit notes. Renders nothing when there is nothing to link.
+// Tier 1 (components/ui + Tailwind) — mirrors the Service History card this
+// panel replaces.
+function VisitLinkPanel({
+  serviceRecords, openVisits, selectedService, selectedOpenVisit, linkedVisitGone, sectionHeader, onPick, disabled,
+}) {
+  if (serviceRecords.length === 0 && openVisits.length === 0 && !linkedVisitGone) return null;
+  const value = selectedOpenVisit ? `visit:${selectedOpenVisit.id}` : selectedService ? `record:${selectedService.id}` : "";
+  const dateLabel = (d) => new Date(d + "T12:00:00").toLocaleDateString();
+  return (
+    <Card className="p-4">
+      {sectionHeader("Link to visit")}
+      <Field className="min-w-0" label="Link a visit">
+        <Select
+          value={value}
+          onChange={(e) => {
+            const [kind, id] = String(e.target.value).split(":");
+            onPick({
+              record: kind === "record" ? serviceRecords.find((r) => r.id === id) || null : null,
+              visit: kind === "visit" ? openVisits.find((v) => v.id === id) || null : null,
+            });
+          }}
+          disabled={disabled}
+        >
+          <option value="">No visit linked</option>
+          {linkedVisitGone && (
+            <option value={`visit:${selectedOpenVisit.id}`} disabled>
+              {selectedOpenVisit.service_type} -- {dateLabel(selectedOpenVisit.scheduled_date)} -- no longer open
+            </option>
+          )}
+          {openVisits.length > 0 && (
+            <optgroup label="Open visits (not yet completed)">
+              {openVisits.map((v) => (
+                <option key={v.id} value={`visit:${v.id}`}>
+                  {v.service_type} -- {dateLabel(v.scheduled_date)} -- {String(v.status || "scheduled").replace("_", " ")}
+                </option>
+              ))}
+            </optgroup>
+          )}
+          {serviceRecords.length > 0 && (
+            <optgroup label="Completed visits">
+              {serviceRecords.map((r) => (
+                <option key={r.id} value={`record:${r.id}`}>
+                  {r.service_type} -- {dateLabel(r.service_date)} -- {r.tech_name || "Unknown tech"}
+                </option>
+              ))}
+            </optgroup>
+          )}
+        </Select>
+      </Field>
+      {selectedOpenVisit && !linkedVisitGone && (
+        <div className="mt-2 text-ui-body text-ink-secondary">
+          Linked to the open visit — when it is completed, this invoice is reused instead of a new one being created. It is sent now or kept as a draft (no future send time — the completion would send it first).
+        </div>
+      )}
+      {linkedVisitGone && (
+        <div className="mt-2 text-ui-body text-zinc-900">
+          This visit is no longer open — it was completed or prepaid since you picked it. Check the customer's invoices before creating another; pick a visit above to continue.
+        </div>
+      )}
+    </Card>
+  );
+}
+
+// The summary's balance rows for a linked open visit: the previewed deposit
+// credit and balance, or — after a BALANCE_CHANGED refusal — the server's
+// authoritative figures the next Create will send.
+function LinkedBalanceSummary({ depositCredit, balanceDue, serverBalance, rowStyle, labelStyle, amountStyle }) {
+  if (serverBalance) {
+    return (
+      <>
+        {serverBalance.invoiceTotal != null && (
+          <div style={{ ...rowStyle(), marginTop: 6 }}>
+            <span style={labelStyle}>Total on file (tax / exemption as billed by the server)</span>
+            <span style={amountStyle}>${serverBalance.invoiceTotal.toFixed(2)}</span>
+          </div>
+        )}
+        {serverBalance.appliedDepositCredit > 0 && (
+          <div style={{ ...rowStyle(), marginTop: 4 }}>
+            <span style={labelStyle}>Deposit credit (paid at acceptance) — applied automatically</span>
+            <span style={amountStyle}>-${serverBalance.appliedDepositCredit.toFixed(2)}</span>
+          </div>
+        )}
+        <div style={{ ...rowStyle(16, 700), marginTop: 4 }}>
+          <span style={labelStyle}>Balance due — as the customer will be billed</span>
+          <span style={amountStyle}>${balanceDue.toFixed(2)}</span>
+        </div>
+        <div className="mt-1 text-ui-caption text-ink-secondary">
+          The server's tax or exemption on file changed the balance from the preview above. Click Create again to send this balance.
+        </div>
+      </>
+    );
+  }
+  if (!(depositCredit > 0)) return null;
+  return (
+    <>
+      <div style={{ ...rowStyle(), marginTop: 6 }}>
+        <span style={labelStyle}>Deposit credit (paid at acceptance) — applied automatically</span>
+        <span style={amountStyle}>-${depositCredit.toFixed(2)}</span>
+      </div>
+      <div style={{ ...rowStyle(16, 700), marginTop: 4 }}>
+        <span style={labelStyle}>Balance due</span>
+        <span style={amountStyle}>${balanceDue.toFixed(2)}</span>
+      </div>
+    </>
+  );
+}
+
 export default function AdminInvoicesPage() {
   const [tab, setTab] = useState("list");
   const [stats, setStats] = useState(null);
@@ -5317,6 +5588,21 @@ function CreateInvoice({
   const [selectedCustomer, setSelectedCustomer] = useState(null);
   const [serviceRecords, setServiceRecords] = useState([]);
   const [selectedService, setSelectedService] = useState(null);
+  // The customer's OPEN visits (pending/confirmed/en route/on site) — an
+  // invoice raised before the closeout links to its visit here, so the
+  // completion reuses it instead of minting a second one.
+  const [openVisits, setOpenVisits] = useState([]);
+  const [selectedOpenVisit, setSelectedOpenVisit] = useState(null);
+  // The balance the server said it would actually bill (409 BALANCE_CHANGED),
+  // keyed to the form state it was computed for — the summary shows it and
+  // the next Create sends it as the approved balance.
+  const [confirmedBalance, setConfirmedBalance] = useState(null);
+  // The linked visit left the open list on a reload (completed or prepaid
+  // between the preview and the create). The link is kept — never silently
+  // dropped into an unlinked create, which would bypass invoice adoption
+  // and the prepaid guards — and Create is blocked until the operator picks
+  // again with the visit's new state in view.
+  const linkedVisitGone = isLinkedVisitGone(selectedOpenVisit, openVisits);
   const [serviceDate, setServiceDate] = useState(defaultServiceDate);
   const [lineItems, setLineItems] = useState(() => [newLineItem()]);
   const [notes, setNotes] = useState("");
@@ -5329,6 +5615,14 @@ function CreateInvoice({
   const [dueTiming, setDueTiming] = useState("today");
   const [dueCustomDate, setDueCustomDate] = useState("");
   const [requestReview, setRequestReview] = useState(false);
+  // ONE effective value for the review ask (Codex P2 r6 #4131): a linked
+  // open visit blocks the ask, and the checkbox renders unchecked +
+  // disabled — but the underlying state may still be true (enabled, Custom
+  // chosen with no date, THEN the visit linked). Rendering the controls
+  // and validating Create from the raw state while the checkbox shows the
+  // ask as off blocked Create on "Choose a review request time" for an ask
+  // the form said was not being made. Every reader below uses this.
+  const reviewRequestActive = requestReview && !openVisitReviewRequestBlocked(selectedOpenVisit);
   const [reviewTiming, setReviewTiming] = useState("120");
   const [reviewCustomAt, setReviewCustomAt] = useState("");
   const [serviceSearchIdx, setServiceSearchIdx] = useState(null);
@@ -5471,21 +5765,32 @@ function CreateInvoice({
 
   // Load service records when customer selected (skip in edit mode — the
   // service-history linker is hidden and the update route can't relink it).
+  // The picker feed: completed records + open visits (each with the deposit
+  // credit the linked mint will apply). Re-read after a deposit-drift
+  // refusal below, so the summary shows the credit that will actually apply.
+  // Stale-response guard (pre-push P1 r3): the customer the picker is
+  // currently for. A response for any other customer — or one that lands
+  // after the customer was cleared — is dropped, never applied. Returns
+  // null in that case so conflict-triggered reloads skip their follow-up.
+  const visitPickerCustomerRef = useRef(null);
+  const loadVisitPicker = async (customerId) => {
+    const d = await adminFetch(`/admin/invoices/service-records/${customerId}`);
+    if (!visitPickerResponseIsCurrent(visitPickerCustomerRef.current, customerId)) return null;
+    setServiceRecords(d.records || []);
+    const visits = d.openVisits || [];
+    setOpenVisits(visits);
+    return visits;
+  };
   useEffect(() => {
     let alive = true;
+    visitPickerCustomerRef.current = !editMode && selectedCustomer ? selectedCustomer.id : null;
     setServiceRecords([]);
+    setOpenVisits([]);
     setServiceRecordsError("");
     if (editMode || !selectedCustomer) return;
-    adminFetch("/admin/invoices/service-records/" + selectedCustomer.id)
-      .then((data) => {
-        if (alive) setServiceRecords(data.records || []);
-      })
-      .catch((error) => {
-        if (alive)
-          setServiceRecordsError(
-            error.message || "Service history unavailable",
-          );
-      });
+    loadVisitPicker(selectedCustomer.id).catch((error) => {
+      if (alive) setServiceRecordsError(error.message || "Service history unavailable");
+    });
     return () => {
       alive = false;
     };
@@ -5757,7 +6062,17 @@ function CreateInvoice({
       : 0;
   const tax = afterDiscount * taxRate;
   const total = afterDiscount + tax;
-  const cardCharge = computeCardTotal(total);
+  // An open visit's pending estimate deposit is credited automatically when
+  // the linked invoice is created — preview it so the operator sees the
+  // balance the customer will actually be sent (surcharge follows the balance).
+  const { depositCredit, previewBalanceDue } = previewLinkedBalance({ selectedOpenVisit, total });
+  // The server's authoritative balance (tax rate / exemption on file) once
+  // it refused the preview — shown in its place while the form still
+  // matches the state it was computed for.
+  const balanceKey = openVisitBalanceKey({ selectedOpenVisit, lineItems });
+  const { serverBalance, balanceDue } = resolveLinkedBalance({ confirmedBalance, balanceKey, previewBalanceDue });
+  const cardCharge = computeCardTotal(balanceDue);
+
   const dateOnly = (date) => {
     const parts = new Intl.DateTimeFormat("en-US", {
       timeZone: "America/New_York",
@@ -5897,37 +6212,39 @@ function CreateInvoice({
   const removeQueuedAttachment = (idx) => {
     setQueuedAttachments((prev) => prev.filter((_, i) => i !== idx));
   };
+
+  // Create-step 3 — recovery after a refused create (nothing was created).
+  // A BALANCE_CHANGED refusal keeps the server's figures for this exact
+  // form state (the summary shows them; the next Create sends them as
+  // approved). Every visit-state conflict (deposit drift, completed,
+  // prepaid, already invoiced, repriced) reloads the picker so the summary
+  // shows what will actually apply; a visit that left the open list STAYS
+  // selected — linkedVisitGone then blocks Create instead of retrying
+  // unlinked (or retrying the same 409 forever).
+  const recoverFromCreateError = async (e) => {
+    showToast(`Error: ${e.message}`);
+    const confirmed = confirmedBalanceFromError(e, balanceKey);
+    if (confirmed) setConfirmedBalance(confirmed);
+    if (!reloadsVisitPickerAfterCreateError(e.code) || !selectedOpenVisit) return;
+    try {
+      const visits = await loadVisitPicker(selectedCustomer.id);
+      if (!visits) return; // the customer changed underneath — the new customer's own load owns the state
+      setSelectedOpenVisit((current) => reconcileSelectedOpenVisit(current, visits));
+    } catch {
+      /* the toast already asks for a reload */
+    }
+  };
+
   const handleCreate = async () => {
     if (savingRef.current) return;
-    if (!selectedCustomer) {
-      showToast("Select a customer");
-      return;
-    }
-    if (
-      !lineItems.some(
-        (i) => i._kind !== "discount" && i.description && i.unit_price > 0,
-      )
-    ) {
-      showToast("Add at least one line item");
-      return;
-    }
-    if (!serviceDate) {
-      showToast("Choose a service date");
-      return;
-    }
     const dueDate = invoiceDueDate();
-    if (!dueDate) {
-      showToast("Choose a due date");
-      return;
-    }
     const scheduledFor = invoiceScheduledFor();
-    if (sendTiming === "custom" && !scheduledFor) {
-      showToast("Choose an invoice send time");
-      return;
-    }
     const reviewDelay = reviewDelayMinutes();
-    if (sendTiming !== "draft" && requestReview && reviewDelay === null) {
-      showToast("Choose a review request time");
+    const blocker = createInvoiceBlocker({
+      selectedCustomer, lineItems, serviceDate, dueDate, sendTiming, scheduledFor, requestReview: reviewRequestActive, reviewDelay, linkedVisitGone, selectedOpenVisit,
+    });
+    if (blocker) {
+      showToast(blocker);
       return;
     }
     savingRef.current = true;
@@ -5937,6 +6254,18 @@ function CreateInvoice({
       const body = {
         customerId: selectedCustomer.id,
         serviceRecordId: selectedService?.id || null,
+        scheduledServiceId: selectedOpenVisit?.id || null,
+        // The PENDING deposit the summary previewed (uncapped — the server
+        // caps it at ITS total, which carries tax exemptions and county
+        // rates this preview does not): the server refuses the create (409
+        // DEPOSIT_CREDIT_CHANGED) when the deposit moved since, so the
+        // customer is never sent a balance the operator did not see —
+        // nothing is created, nothing is sent.
+        // And the BALANCE the operator approved (the server-confirmed one
+        // after a BALANCE_CHANGED refusal): the server compares the created
+        // row's authoritative total inside the transaction and refuses
+        // when the tax/exemption on file makes it differ — nothing created.
+        ...openVisitCreateExpectations({ selectedOpenVisit, balanceDue, confirmedBalance, balanceKey }),
         serviceDate,
         lineItems: lineItems
           .filter((i) => i.description && Number(i.unit_price) !== 0)
@@ -5965,13 +6294,47 @@ function CreateInvoice({
           return;
         }
       }
+      if (sendTiming === "now" && invoice.id && invoice.payer_statement_id) {
+        // A per-job NET-terms payer accrued this invoice to its monthly
+        // statement (GATE_PAYER_STATEMENTS): statement children are never
+        // sent individually — the send endpoint would refuse and the
+        // recovery re-read would offer a Resend that always fails (Codex P2 r8).
+        showToast(
+          `Invoice created: ${invoice.invoice_number} — accrued to the payer's monthly statement, not sent individually`,
+        );
+        onCreated();
+        savingRef.current = false;
+        setSaving(false);
+        return;
+      }
+      if (sendTiming === "now" && invoice.id && (invoice.settledByDeposit || invoice.deliveryHeld)) {
+        // The linked visit's estimate deposit covered the whole invoice: the
+        // server settled it at creation (prepaid) — there is no balance to
+        // text a pay link for, and a send would be refused as not sendable.
+        // deliveryHeld = covered but NOT settleable right now (Codex P1 r7):
+        // still never send (the server refuses it too); the completion
+        // settles it, or the operator retries Send later.
+        showToast(
+          invoice.settledByDeposit
+            ? `Invoice created: ${invoice.invoice_number} — fully covered by the estimate deposit, nothing to send`
+            : `Invoice created: ${invoice.invoice_number} — fully covered by the estimate deposit but not settled yet (${invoice.deliveryHeld?.reason || invoice.deliveryHeld?.code}); not sent. It settles at the visit's completion, or retry Send later.`,
+        );
+        onCreated();
+        savingRef.current = false;
+        setSaving(false);
+        return;
+      }
       if (sendTiming === "now" && invoice.id) {
         let sendRes;
         try {
           sendRes = await adminFetch(`/admin/invoices/${invoice.id}/send`, {
             method: "POST",
             body: JSON.stringify({
-              requestReview,
+              // A FIRST delivery, never a resend: a linked invoice the
+              // visit's completion already texted between the create and
+              // this request is reported already_delivered, not sent again.
+              firstDelivery: true,
+              requestReview: reviewRequestActive,
               reviewDelayMinutes: reviewDelay,
               reviewTiming,
               reviewScheduledFor:
@@ -6064,7 +6427,7 @@ function CreateInvoice({
       }
       onCreated();
     } catch (e) {
-      showToast(`Error: ${e.message}`);
+      await recoverFromCreateError(e);
     }
     savingRef.current = false;
     setSaving(false);
@@ -6560,6 +6923,7 @@ function CreateInvoice({
                   onClick={() => {
                     setSelectedCustomer(null);
                     setSelectedService(null);
+                    setSelectedOpenVisit(null);
                     setCustomerQuery("");
                   }}
                   variant={"secondary"}
@@ -6614,6 +6978,7 @@ function CreateInvoice({
                         // Drop any visit picked for the previous customer so a
                         // stale service record can't be linked across customers.
                         setSelectedService(null);
+                        setSelectedOpenVisit(null);
                         setServiceRecords([]);
                         setCustomers([]);
                         setCustomerQuery("");
@@ -6676,50 +7041,34 @@ function CreateInvoice({
             </div>
           )}
         </Card>
-        {!editMode && serviceRecords.length > 0 && (
-          <Card className="p-4">
-            {sectionHeader("Service History")}
-            <Field className="min-w-0" label="Link a completed service">
-              <Select
-                value={selectedService?.id || ""}
-                onChange={(e) => {
-                  const sr = serviceRecords.find(
-                    (r) => r.id === e.target.value,
-                  );
-                  setSelectedService(sr || null);
-                  if (sr?.service_date) setServiceDate(sr.service_date);
-                  if (
-                    sr &&
-                    lineItems.length === 1 &&
-                    !lineItems[0].description
-                  ) {
-                    setLineItems([
-                      {
-                        ...lineItems[0],
-                        _kind: "service",
-                        description: sr.service_type,
-                        quantity: 1,
-                        unit_price: 0,
-                      },
-                    ]);
-                  }
-                }}
-                disabled={builderBusy}
-              >
-                {" "}
-                <option value="">No service linked</option>
-                {serviceRecords.map((r) => (
-                  <option key={r.id} value={r.id}>
-                    {r.service_type} --{" "}
-                    {new Date(
-                      r.service_date + "T12:00:00",
-                    ).toLocaleDateString()}{" "}
-                    -- {r.tech_name || "Unknown tech"}
-                  </option>
-                ))}
-              </Select>
-            </Field>{" "}
-          </Card>
+        {!editMode && (
+          <VisitLinkPanel
+            serviceRecords={serviceRecords}
+            openVisits={openVisits}
+            selectedService={selectedService}
+            selectedOpenVisit={selectedOpenVisit}
+            linkedVisitGone={linkedVisitGone}
+            sectionHeader={sectionHeader}
+            disabled={builderBusy}
+            onPick={({ record, visit }) => {
+              setSelectedService(record);
+              setSelectedOpenVisit(visit);
+              const picked = record || visit;
+              const pickedDate = record?.service_date || visit?.scheduled_date;
+              if (pickedDate) setServiceDate(pickedDate);
+              if (picked && lineItems.length === 1 && !lineItems[0].description) {
+                setLineItems([
+                  {
+                    ...lineItems[0],
+                    _kind: "service",
+                    description: picked.service_type,
+                    quantity: 1,
+                    unit_price: 0,
+                  },
+                ]);
+              }
+            }}
+          />
         )}
         {!editMode && (
           <Card className="p-4">
@@ -7457,11 +7806,16 @@ function CreateInvoice({
                     >
                       {" "}
                       <option value="now">Immediately</option>{" "}
-                      <option value="tomorrow_8">Tomorrow at 8 AM</option>{" "}
-                      <option value="custom">Custom time</option>{" "}
+                      <option value="tomorrow_8" disabled={!!selectedOpenVisit}>Tomorrow at 8 AM</option>{" "}
+                      <option value="custom" disabled={!!selectedOpenVisit}>Custom time</option>{" "}
                       <option value="draft">Save draft</option>{" "}
                     </Select>
                   </Field>{" "}
+                  {openVisitSendTimingBlocked(sendTiming, selectedOpenVisit) && (
+                    <div className="mt-1 text-ui-caption text-ink-secondary">
+                      Linked to an open visit — the completion sends this invoice, so pick Immediately or Save draft.
+                    </div>
+                  )}
                 </div>
               )}{" "}
               <div>
@@ -7532,19 +7886,19 @@ function CreateInvoice({
                   display: "flex",
                   alignItems: "center",
                   gap: 8,
-                  marginBottom: requestReview ? 8 : 0,
+                  marginBottom: reviewRequestActive ? 8 : 0,
                 }}
               >
                 {" "}
                 <Checkbox
-                  checked={requestReview}
+                  checked={reviewRequestActive}
                   onChange={(e) => setRequestReview(e.target.checked)}
                   id="review-toggle"
-                  label="Send review request"
-                  disabled={builderBusy || sendTiming === "draft"}
+                  label={openVisitReviewRequestBlocked(selectedOpenVisit) ? "Send review request (after the visit completes)" : "Send review request"}
+                  disabled={builderBusy || sendTiming === "draft" || openVisitReviewRequestBlocked(selectedOpenVisit)}
                 />{" "}
               </div>
-              {requestReview && (
+              {reviewRequestActive && (
                 <div
                   style={{
                     display: "grid",
@@ -7768,6 +8122,14 @@ function CreateInvoice({
               <span style={summaryLabelStyle}>Total</span>
               <span style={summaryAmountStyle}>${total.toFixed(2)}</span>{" "}
             </div>
+            <LinkedBalanceSummary
+              depositCredit={depositCredit}
+              balanceDue={balanceDue}
+              serverBalance={serverBalance}
+              rowStyle={summaryRowStyle}
+              labelStyle={summaryLabelStyle}
+              amountStyle={summaryAmountStyle}
+            />
             {cardCharge.surcharge > 0 && (
               <div
                 style={{

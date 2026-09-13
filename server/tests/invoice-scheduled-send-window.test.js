@@ -204,6 +204,34 @@ describe('processScheduledSends send-window handling', () => {
     expect(result).toEqual({ sent: 1, failed: 0, deferred: 0 });
   });
 
+  test('a failed packet Bill-To recheck restores this worker\'s token-owned claim without spending an attempt', async () => {
+    isWithinSendWindowET.mockReturnValue(true);
+    const claimToken = 'ca2fdf33-5baa-4490-b24a-a4f1b6918234';
+    const staleRecovery = chain();
+    const dueQuery = chain({ rows: [dueRow] });
+    const claim = chain({ returning: [{ id: 'inv-1', scheduled_request_review: false, scheduled_review_delay_minutes: null, send_claim_token: claimToken }] });
+    const restore = chain();
+    db
+      .mockReturnValueOnce(staleRecovery)
+      .mockReturnValueOnce(dueQuery)
+      .mockReturnValueOnce(claim)
+      .mockReturnValueOnce(restore);
+    sendSpy.mockResolvedValue({
+      ok: false,
+      code: 'bill_to_fence_failed',
+      sms: { ok: false, code: 'bill_to_fence_failed' },
+      email: { ok: false, code: 'bill_to_fence_failed' },
+    });
+
+    const result = await InvoiceService.processScheduledSends();
+
+    expect(result).toEqual({ sent: 0, failed: 0, deferred: 0 });
+    expect(restore.where).toHaveBeenCalledWith({ id: 'inv-1', status: 'sending', send_claim_token: claimToken });
+    expect(restore.update).toHaveBeenCalledWith(expect.objectContaining({ status: 'scheduled', send_claim_token: null }));
+    expect(restore.update.mock.calls[0][0].scheduled_send_attempts).toBeUndefined();
+    expect(restore.update.mock.calls[0][0].scheduled_send_at).toBeUndefined();
+  });
+
   test.each(['QUIET_HOURS_HOLD', 'PUSH_IN_FLIGHT', 'APP_DELIVERY_HOLD'])('%s reschedules at nextAllowedAt without spending an attempt', async (code) => {
     isWithinSendWindowET.mockReturnValue(true); // guard passed at 19:59...
     const staleRecovery = chain();
@@ -278,7 +306,13 @@ describe('processScheduledSends send-window handling', () => {
       };
       db
         .mockReturnValueOnce(chain({ first: { payer_statement_id: null } })) // accrual pre-check
-        .mockReturnValueOnce(chain({ first: sendingInvoice })); // claimInvoiceForSend read
+        .mockReturnValueOnce(chain({ first: sendingInvoice })) // claimInvoiceForSend read
+        // The preclaimed allowClaimed branch now reconciles the queue too
+        // (Codex round 14 P1 #4131): pre-check (none live), consume
+        // (nothing pre-existing to adopt), strict re-check (none live).
+        .mockReturnValueOnce(chain({ first: undefined }))
+        .mockReturnValueOnce(chain({ returning: [] }))
+        .mockReturnValueOnce(chain({ first: undefined }));
 
       const result = await InvoiceService.sendViaSMSAndEmail('inv-1', { allowClaimed: true });
 
@@ -317,9 +351,14 @@ describe('processScheduledSends send-window handling', () => {
       db
         .mockReturnValueOnce(chain({ first: { payer_statement_id: null } })) // accrual pre-check
         .mockReturnValueOnce(chain({ first: draftInvoice })) // claim read
+        .mockReturnValueOnce(chain({ first: undefined })) // completion pay-link replay check (none queued)
         .mockReturnValueOnce(chain({ returning: [{ ...draftInvoice, status: 'sending' }] })) // claim update
+        .mockReturnValueOnce(chain({ first: undefined })) // replay re-check under the claim (none)
+        .mockReturnValueOnce(chain({ returning: [] })) // adoption: consume the send's own scheduled held leg (none to cancel)
+        .mockReturnValueOnce(chain({ first: undefined })) // strict re-check after the consume (none live)
         .mockReturnValueOnce(chain({ first: undefined })) // requeue idempotency check (no prior row)
         .mockReturnValueOnce(requeueInsert) // held-SMS scheduled-rail insert
+        .mockReturnValueOnce(chain({ first: { ...draftInvoice, status: 'sending' } })) // second-channel collectibility recheck
         .mockReturnValueOnce(chain()) // finalize update
         .mockReturnValueOnce(chain({ first: null })); // lead-conversion read (permissive)
 
@@ -368,7 +407,11 @@ describe('processScheduledSends send-window handling', () => {
       db
         .mockReturnValueOnce(chain({ first: { payer_statement_id: null } })) // accrual pre-check
         .mockReturnValueOnce(chain({ first: draftInvoice })) // claim read
+        .mockReturnValueOnce(chain({ first: undefined })) // completion pay-link replay check (none queued)
         .mockReturnValueOnce(chain({ returning: [{ ...draftInvoice, status: 'sending' }] })) // claim update
+        .mockReturnValueOnce(chain({ first: undefined })) // replay re-check under the claim (none)
+        .mockReturnValueOnce(chain({ returning: [] })) // adoption: consume the send's own scheduled held leg (none to cancel)
+        .mockReturnValueOnce(chain({ first: undefined })) // strict re-check after the consume (none live)
         .mockReturnValueOnce(chain({ first: undefined })) // requeue idempotency check (no prior row)
         .mockReturnValueOnce(failingInsert) // held-SMS scheduled-rail insert THROWS
         .mockReturnValue(restoreChain); // restoreSendClaim + anything after
@@ -408,5 +451,131 @@ describe('processScheduledSends send-window handling', () => {
     expect(result).toEqual({ sent: 0, failed: 1, deferred: 0 });
     const updateArgs = failUpdate.update.mock.calls[0][0];
     expect(updateArgs.scheduled_send_attempts).toBe(3);
+  });
+
+  // Codex round 14 P1 #4131: claimInvoiceForSend's allowClaimed branch now
+  // runs the queued-obligation check too, which can THROW (a live queue
+  // this preclaimed send does not own) instead of only ever resolving —
+  // one row's refusal must not abort the whole batch (the remaining due
+  // invoices, and the batch counters, must survive it).
+  test('sendViaSMSAndEmail throwing (the new preclaimed queue-check refusal) is treated as an ordinary failure — the batch survives', async () => {
+    isWithinSendWindowET.mockReturnValue(true);
+    const staleRecovery = chain();
+    const dueQuery = chain({ rows: [dueRow] });
+    const claim = chain({ returning: [{ id: 'inv-1', scheduled_request_review: false, scheduled_review_delay_minutes: null }] });
+    const failUpdate = chain();
+    db
+      .mockReturnValueOnce(staleRecovery)
+      .mockReturnValueOnce(dueQuery)
+      .mockReturnValueOnce(claim)
+      .mockReturnValueOnce(failUpdate);
+    const thrown = new Error('Invoice send already in progress — a text carrying this pay link is queued for the send window');
+    thrown.code = 'queued_pay_link';
+    // Set by claimInvoiceForSend's allowClaimed branch itself (pre-push
+    // audit P1 #4131 finding 2) — every exit in that branch runs BEFORE any
+    // provider is contacted, so this is the ONE marker that tells
+    // processScheduledSends' catch it is safe to retry.
+    thrown.deliveryNeverAttempted = true;
+    sendSpy.mockRejectedValue(thrown);
+
+    const result = await InvoiceService.processScheduledSends();
+
+    expect(result).toEqual({ sent: 0, failed: 1, deferred: 0 });
+    const updateArgs = failUpdate.update.mock.calls[0][0];
+    expect(updateArgs.scheduled_send_attempts).toBe(3);
+    expect(updateArgs.scheduled_send_error).toContain('queued for the send window');
+  });
+
+  // Pre-push audit P1 (#4131 finding 2): a throw reaching this catch WITHOUT
+  // the deliveryNeverAttempted marker — sendViaSMSAndEmail's own post-
+  // delivery finalize UPDATE can throw AFTER the email (and/or SMS) already
+  // reached a provider (round-17 P1, invoice-send-adoption-restore.test.js)
+  // — used to hit the exact same synthesis as the queued_pay_link refusal
+  // above and get restored to 'scheduled' with the attempt counter bumped,
+  // so the NEXT tick emailed/texted the customer the SAME invoice again. A
+  // delivered (or merely ambiguous) failure must instead be parked under
+  // the same review hold the stale-claim recovery uses — never retried.
+  test('sendViaSMSAndEmail throwing WITHOUT deliveryNeverAttempted (a post-delivery finalize failure, or any other unverified throw) parks the row for review instead of retrying it', async () => {
+    isWithinSendWindowET.mockReturnValue(true);
+    const staleRecovery = chain();
+    const dueQuery = chain({ rows: [dueRow] });
+    const claim = chain({ returning: [{ id: 'inv-1', scheduled_request_review: false, scheduled_review_delay_minutes: null }] });
+    const holdUpdate = chain();
+    db
+      .mockReturnValueOnce(staleRecovery)
+      .mockReturnValueOnce(dueQuery)
+      .mockReturnValueOnce(claim)
+      .mockReturnValueOnce(holdUpdate);
+    const finalizeErr = new Error('synthetic finalize DB failure (post-provider-accept)');
+    sendSpy.mockRejectedValue(finalizeErr);
+
+    const result = await InvoiceService.processScheduledSends();
+
+    expect(result).toEqual({ sent: 0, failed: 1, deferred: 0 });
+    const updateArgs = holdUpdate.update.mock.calls[0][0];
+    // Parked exactly like the stale-claim recovery block: back to
+    // 'scheduled' but with scheduled_send_at cleared (out of the due
+    // query) and NO attempt burned — this is a hold, not a retry.
+    expect(updateArgs.status).toBe('scheduled');
+    expect(updateArgs.scheduled_send_at).toBeNull();
+    expect(updateArgs.scheduled_send_attempts).toBeUndefined();
+    expect(updateArgs.scheduled_send_error).toMatch(/^Recovered from stale sending claim/);
+    expect(updateArgs.scheduled_send_error).toContain('synthetic finalize DB failure');
+
+    // Next tick: with scheduled_send_at cleared, the real due query's
+    // whereNotNull('scheduled_send_at') excludes this row — simulate that
+    // by returning nothing due, and confirm sendViaSMSAndEmail is never
+    // called on it again. The customer never gets a duplicate email/SMS.
+    sendSpy.mockClear();
+    const staleRecovery2 = chain();
+    const dueQueryNextTick = chain({ rows: [] });
+    db.mockReturnValueOnce(staleRecovery2).mockReturnValueOnce(dueQueryNextTick);
+    const secondResult = await InvoiceService.processScheduledSends();
+    expect(secondResult).toEqual({ sent: 0, failed: 0, deferred: 0 });
+    expect(sendSpy).not.toHaveBeenCalled();
+  });
+
+  // Codex round 16 P1 #4131: the generic failure branch's restore used to be
+  // an unconditional UPDATE keyed only on id — a worker (or the void sweep,
+  // which takes a 'sending' row out from under a live claim by design) that
+  // moved the row to 'sent' (or 'void') between the send attempt and this
+  // restore would get clobbered back to 'scheduled' with a stale due time,
+  // double-sending on the next tick. Reworked round 18 (#4131): the restore
+  // is conditioned on status='sending' AND a dedicated send_claim_token —
+  // NOT updated_at, which round 18 found an unrelated intra-claim writer
+  // (a partial account-credit apply) can silently re-stamp, matching zero
+  // rows and stranding the invoice under 'sending' even though nothing else
+  // actually moved the row.
+  test('a worker finalizes the invoice to sent between the send attempt and the restore — the restore is a no-op, the row stays sent', async () => {
+    isWithinSendWindowET.mockReturnValue(true);
+    const CLAIM_TOKEN = 'a1b2c3d4-e5f6-4789-a012-3456789abcde';
+    const staleRecovery = chain();
+    const dueQuery = chain({ rows: [dueRow] });
+    const claim = chain({ returning: [{ id: 'inv-1', scheduled_request_review: false, scheduled_review_delay_minutes: null, send_claim_token: CLAIM_TOKEN }] });
+    // 0 rows affected: some other process already moved the row to 'sent'
+    // (or anything else) before this exact token could match.
+    const restoreAttempt = chain({ updateCount: 0 });
+    db
+      .mockReturnValueOnce(staleRecovery)
+      .mockReturnValueOnce(dueQuery)
+      .mockReturnValueOnce(claim)
+      .mockReturnValueOnce(restoreAttempt);
+    sendSpy.mockResolvedValue({
+      ok: false,
+      sms: { ok: false, error: 'Customer has no phone number' },
+      email: { ok: false, error: 'no email on file' },
+      creditApplied: 0,
+    });
+
+    const result = await InvoiceService.processScheduledSends();
+
+    expect(result).toEqual({ sent: 0, failed: 1, deferred: 0 });
+    // The restore matched on this claim's own dedicated token — an identity
+    // no other writer touches — that proves nobody else has claimed the row
+    // since, regardless of what else it may have written on the row.
+    expect(restoreAttempt.where.mock.calls[0][0]).toEqual({ id: 'inv-1', status: 'sending', send_claim_token: CLAIM_TOKEN });
+    // 0 rows affected is logged, not thrown — the batch keeps going.
+    const logger = require('../services/logger');
+    expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('moved out from under this claim'));
   });
 });

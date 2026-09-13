@@ -36,6 +36,18 @@ const INVOICE_UNCOLLECTIBLE_STATUSES = Object.freeze([
 // 'rescheduled' (a pending reschedule REQUEST parks the same row).
 const VISIT_NEVER_RAN_STATUSES = Object.freeze(['cancelled', 'canceled', 'no_show', 'skipped']);
 
+// A void/canceled invoice never settles and completion mints past it — it
+// must not silently gate anything downstream reads as "the current invoice
+// for this visit" (Codex round 16 P1 #4131): a completion-already-sent flag
+// derived from a DEAD row (e.g. a canceled invoice that happened to carry
+// sent_at from before it was canceled) reports delivered for money nobody
+// can ever collect. The ONE shared set every "newest invoice for this
+// visit" lookup filters on — the schedule feeds (admin-schedule.js) and the
+// Dispatch feed (admin-dispatch.js) alike, so they can never drift apart.
+// Refunded is deliberately NOT here: that invoice is handled by its own
+// live-vs-refunded reconciliation, not simply excluded.
+const DEAD_INVOICE_STATUSES = Object.freeze(['void', 'canceled', 'cancelled']);
+
 // Read the linked visit's status under the caller's transaction (FOR UPDATE
 // — same lock the settlement paths already take on the visit) and return
 // the terminal status when the invoice must refuse money, else null.
@@ -233,13 +245,56 @@ function formatCardLine(brand, last4) {
   return ` (${b.charAt(0).toUpperCase() + b.slice(1)} ending ${last4})`;
 }
 
+// Whether a visit's attached (checkout / pre-completion) invoice has ALREADY
+// been delivered to the customer, so the completion must reuse it silently —
+// no second pay-link text (Codex P1 #4131 r3). Durable: read from the
+// invoice row itself (sent_at, or a delivered/settled status), not from a
+// client-side flag that only the Charge Now flow used to set. Paid and
+// prepaid count as delivered — nothing is owed, nothing to link.
+function completionInvoiceAlreadyDelivered(invoice) {
+  if (!invoice) return false;
+  if (invoice.sent_at) return true;
+  return ['sent', 'paid', 'prepaid'].includes(String(invoice.status || ''));
+}
+
+// A linked visit still INCOMPLETE for invoice-COPY purposes (round-2 P1
+// #4131): the same-day office picker can invoice a visit whose technician
+// is en route or already on site, and the send copy must not claim the
+// service is done while that is true.
+//
+// This is deliberately its OWN predicate, not a reuse of
+// invoice-issued-closeout's isLiveVisitStatus, even though both read
+// scheduled_services.status and both admit null/pending/confirmed. That
+// predicate governs quiet-closeout eligibility — a different concern — and
+// EXCLUDES en_route/on_site on purpose: a technician who has started the
+// visit owns its completion (a running time_entries timer, a report of
+// their own coming), so the closeout must back off rather than complete
+// over them. Invoice copy has no such conflict — an en_route/on_site visit
+// simply hasn't finished, so the pre-service copy is exactly right. A
+// predicate that exists to gate one concern is not automatically correct
+// for another, even when the names/inputs read alike (this is the second
+// time that shape has bitten this PR — see claimInvoiceForSend's
+// firstDeliveryOnly for the first). Do not widen isLiveVisitStatus to
+// include these statuses: its own callers (the closeout resolver and the
+// locked re-check in complete-scheduled-service.js) depend on the
+// narrower set. Matches the admin-invoices.js open-visit-link picker's own
+// OPEN_VISIT_STATUSES, which independently arrived at the same four
+// statuses for the same "still open" question.
+const INVOICE_COPY_OPEN_VISIT_STATUSES = Object.freeze(['pending', 'confirmed', 'en_route', 'on_site']);
+function isVisitIncompleteForInvoiceCopy(status) {
+  return status == null || INVOICE_COPY_OPEN_VISIT_STATUSES.includes(String(status));
+}
+
 module.exports = {
+  completionInvoiceAlreadyDelivered,
+  isVisitIncompleteForInvoiceCopy,
   INVOICE_UPDATE_ALLOWED_FIELDS,
   STALE_SEND_PARK_ERROR,
   preserveWithdrawalStamp,
   selfPayAtDispatch,
   INVOICE_UNCOLLECTIBLE_STATUSES,
   VISIT_NEVER_RAN_STATUSES,
+  DEAD_INVOICE_STATUSES,
   visitRefusesSettlement,
   lockVisitForSettlement,
   assertInvoiceCollectible,

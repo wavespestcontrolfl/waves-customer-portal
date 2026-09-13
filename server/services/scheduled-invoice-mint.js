@@ -144,12 +144,19 @@ function scheduledPriceMovedError(lockedSvc) {
 // invoice; adoption = a replay transaction waking under the mint lock to
 // find another writer (Charge Now / completion mint) already committed one.
 // Same predicate either way — the ONE terminal-status filter.
+// The ONE definition of "this visit already carries an invoice the mint
+// would adopt": not void, not terminal. Applied to an `invoices` query.
+// Shared with the Invoices page picker feed, which must not offer a visit
+// the linked create would refuse as visit_already_invoiced.
+function scopeAdoptableScheduledInvoices(query) {
+  return query
+    .whereNot('status', 'void')
+    .whereNotIn('status', TERMINAL_INVOICE_STATUSES);
+}
+
 async function findAdoptableScheduledInvoice(trx, scheduledServiceId) {
   await assertScheduledInvoiceNotPacketOwned(trx, scheduledServiceId);
-  return trx('invoices')
-    .where({ scheduled_service_id: scheduledServiceId })
-    .whereNot('status', 'void')
-    .whereNotIn('status', TERMINAL_INVOICE_STATUSES)
+  return scopeAdoptableScheduledInvoices(trx('invoices').where({ scheduled_service_id: scheduledServiceId }))
     .orderBy('created_at', 'desc')
     .first();
 }
@@ -172,11 +179,101 @@ async function adoptScheduledInvoiceUnderMintLock(trx, scheduledServiceId) {
 // tier-extension apply holds FOR UPDATE on the rows it rewrites) between the
 // caller's read and this lock — retrying re-reads and bills the current
 // price instead of silently minting the stale one.
+// expectedDepositCredit: the PENDING estimate deposit the caller previewed
+// to the operator (the Invoices page "Balance due" credits it, capped at
+// the total). The pending amount read under the lock must match it to the
+// cent, or the customer is sent a different balance than the operator
+// approved (GitHub P1 #4131: another invoice consumed the deposit, a refund
+// moved it, or the uncredited final attempt below applies none). It is the
+// deposit that is compared — never the applied (total-capped) credit: the
+// server total carries verified tax exemptions and county rates the form
+// preview does not, so a cap comparison would refuse a tax-exempt customer
+// on every retry (pre-push P1). A mismatch is terminal — 409
+// DEPOSIT_CREDIT_CHANGED thrown inside the transaction before anything is
+// created; the caller re-previews and tries again. Null = no expectation
+// (every other caller).
+// expectedBalanceDue: the BALANCE the caller previewed (GitHub P1 #4131 r2).
+// The deposit check above cannot see a total that differs from the
+// caller's preview — InvoiceService.create computes the authoritative
+// after-tax total (county rate, verified exemption, third-party payer) and
+// caps the applied credit against it, while the Invoices page previews a
+// flat 7% — so a matching deposit can still deliver a different balance
+// than the operator approved. The created row's `total` IS that balance
+// (create nets the applied credit into it); it is compared to the cent
+// INSIDE the transaction, and a mismatch throws 409 BALANCE_CHANGED
+// carrying the authoritative figures, rolling the create back — the caller
+// shows them and re-submits with the confirmed balance. Null = no
+// expectation.
+const centsDiffer = (a, b) => Math.round((Number(a) || 0) * 100) !== Math.round((Number(b) || 0) * 100);
+
+// Money-validation step 1 — the PAYER-ELIGIBLE pending deposit under the
+// lock (pre-push P1): InvoiceService.create applies no homeowner deposit
+// when a third-party Bill-To resolves, and the Invoices page previews zero
+// there through the same resolver — so the expectation is compared against
+// zero when a payer resolves under the lock, and a payer assigned since a
+// non-zero preview refuses. Same resolver, same fail-soft-to-self-pay
+// contract as the create itself. Only resolved when a preview is being
+// checked and there is a deposit to check.
+async function payerEligiblePendingDeposit(trx, { svc, lockedSvc, depositCredit, expectedDepositCredit }) {
+  const pendingAmount = depositCredit ? Number(depositCredit.amount) || 0 : 0;
+  if (expectedDepositCredit == null || pendingAmount <= 0) return pendingAmount;
+  const { resolveForInvoice } = require('./payer');
+  // Fail closed like every other payer resolution on this path: a fail-soft
+  // self-pay answer here would let the deposit preview pass on a stale payer.
+  const payer = await resolveForInvoice({ database: trx, customerId: lockedSvc.customer_id || svc.customer_id || null, scheduledServiceId: svc.id, throwOnError: true });
+  return payer?.payerId ? 0 : pendingAmount;
+}
+
+// Step 2 — the pending deposit must match the preview to the cent, or the
+// customer is sent a different balance than the operator approved (GitHub
+// P1 #4131). Terminal 409 thrown before anything is created.
+function assertDepositMatchesPreview(pendingAmount, expectedDepositCredit) {
+  if (expectedDepositCredit == null || !centsDiffer(pendingAmount, expectedDepositCredit)) return;
+  const e = new Error(`The deposit credit changed while this invoice was being created (previewed $${Number(expectedDepositCredit).toFixed(2)}, now $${pendingAmount.toFixed(2)}) — nothing was created. Reload the visit and try again.`);
+  e.status = 409;
+  e.code = 'DEPOSIT_CREDIT_CHANGED';
+  e.expectedDepositCredit = Number(expectedDepositCredit);
+  e.pendingDepositCredit = pendingAmount;
+  throw e;
+}
+
+// Step 3 — the created row's authoritative balance must match the preview
+// (GitHub P1 #4131 r2): create nets the total-capped credit into `total`,
+// so `total` IS the balance the customer would be billed. A mismatch throws
+// inside the transaction (the create rolls back) carrying the real figures
+// for the caller to show and confirm.
+function assertBalanceMatchesPreview(created, expectedBalanceDue) {
+  if (expectedBalanceDue == null) return;
+  const balanceDue = Number(created?.total) || 0;
+  if (!centsDiffer(balanceDue, expectedBalanceDue)) return;
+  const effective = Number(created?.applied_deposit_credit) || 0;
+  const e = new Error(`The balance this invoice would bill ($${balanceDue.toFixed(2)}) differs from the one previewed ($${Number(expectedBalanceDue).toFixed(2)}) — the customer's tax or exemption on file changes the total. Nothing was created; the summary now shows the balance that would be sent — review it and click Create again to send it.`);
+  e.status = 409;
+  e.code = 'BALANCE_CHANGED';
+  e.expectedBalanceDue = Number(expectedBalanceDue);
+  e.balanceDue = balanceDue;
+  e.invoiceTotal = Math.round((balanceDue + effective) * 100) / 100;
+  e.appliedDepositCredit = effective;
+  throw e;
+}
+
+// Step 4 — consume from the ledger exactly what the invoice absorbed.
+async function consumeAppliedDeposit(trx, { created, sourceEstimateId }) {
+  const effective = Number(created?.applied_deposit_credit) || 0;
+  if (effective <= 0) return;
+  const { consumeDepositCredit } = require('../services/estimate-deposits');
+  const allocated = await consumeDepositCredit({ estimateId: sourceEstimateId, amount: effective, invoiceId: created.id, trx });
+  if (centsDiffer(allocated, effective)) {
+    throw new Error(`deposit allocation mismatch (applied ${effective}, allocated ${allocated})`);
+  }
+}
+
 async function mintScheduledServiceInvoiceWithDeposit({
-  svc, buildCreateParams, assertEligibleInTrx = null, allowPriceMovement = false,
+  svc, buildCreateParams, assertEligibleInTrx = null, allowPriceMovement = false, expectedDepositCredit = null,
+  expectedBalanceDue = null,
 }) {
   const InvoiceService = require('../services/invoice');
-  const { pendingDepositCredit, consumeDepositCredit } = require('../services/estimate-deposits');
+  const { pendingDepositCredit } = require('../services/estimate-deposits');
   const sourceEstimateId = svc.source_estimate_id || null;
   let lastErr = null;
   for (let attempt = 0; attempt < 3; attempt += 1) {
@@ -192,7 +289,7 @@ async function mintScheduledServiceInvoiceWithDeposit({
         const lockedSvc = await acquireScheduledMintLockChain(trx, {
           scheduledServiceId: svc.id,
           assertEligibleInTrx,
-          visitColumns: ['id', 'estimated_price', 'primary_line_price'],
+          visitColumns: ['id', 'customer_id', 'estimated_price', 'primary_line_price'],
         });
         if (!lockedSvc) {
           const e = new Error('Scheduled service not found');
@@ -211,9 +308,30 @@ async function mintScheduledServiceInvoiceWithDeposit({
             || priceMovedBetween(svc, lockedSvc, 'primary_line_price'))) {
           throw scheduledPriceMovedError(lockedSvc);
         }
+        // Serialize against markDepositReceived (Codex round 14 P1 #4131):
+        // pendingDepositCredit is a plain SELECT and the deposit-received
+        // writer runs as an entirely independent transaction, so without a
+        // shared lock a deposit could settle right after this read and
+        // right before the mint's own commit — the zero-credit check would
+        // pass, consumeAppliedDeposit would skip (nothing to apply), and a
+        // full-balance invoice would go out beside the newly received
+        // deposit. This lock is acquired FIRST, so a concurrent receipt
+        // either already committed (this read sees it) or waits behind
+        // this transaction (and sees it on its own read, after this mint
+        // commits or rolls back).
+        if (withDeposit) {
+          const { acquireEstimateDepositLedgerLock } = require('../services/estimate-deposits');
+          await acquireEstimateDepositLedgerLock(trx, sourceEstimateId);
+        }
         const depositCredit = withDeposit
           ? await pendingDepositCredit(sourceEstimateId, trx)
           : null;
+        // The money-validation flow, in order: payer-eligible pending
+        // deposit → deposit-vs-preview → create → balance-vs-preview →
+        // ledger consume. Every refusal is thrown inside this transaction,
+        // so nothing is created or consumed on a mismatch.
+        const pendingAmount = await payerEligiblePendingDeposit(trx, { svc, lockedSvc, depositCredit, expectedDepositCredit });
+        assertDepositMatchesPreview(pendingAmount, expectedDepositCredit);
         const created = await InvoiceService.create({
           ...buildCreateParams(),
           database: trx,
@@ -221,18 +339,8 @@ async function mintScheduledServiceInvoiceWithDeposit({
             ? { depositCredit: { amount: depositCredit.amount, estimateId: sourceEstimateId } }
             : {}),
         });
-        const effective = Number(created?.applied_deposit_credit) || 0;
-        if (effective > 0) {
-          const allocated = await consumeDepositCredit({
-            estimateId: sourceEstimateId,
-            amount: effective,
-            invoiceId: created.id,
-            trx,
-          });
-          if (Math.round(allocated * 100) !== Math.round(effective * 100)) {
-            throw new Error(`deposit allocation mismatch (applied ${effective}, allocated ${allocated})`);
-          }
-        }
+        assertBalanceMatchesPreview(created, expectedBalanceDue);
+        await consumeAppliedDeposit(trx, { created, sourceEstimateId });
         return { invoice: created, reused: false };
       });
     } catch (err) {
@@ -248,14 +356,30 @@ async function mintScheduledServiceInvoiceWithDeposit({
         } catch (notifyErr) {
           logger.error(`[schedule] failed to raise deposit reconcile alert: ${notifyErr.message}`);
         }
+        // An operator-previewed create never takes the uncredited fallback
+        // (GitHub r6 P1 #4131): the third attempt reads no ledger, so a
+        // deposit paid after a successful zero preview would be compared
+        // against a synthesized zero — the stale preview accepted and a
+        // full-balance invoice sent over the new deposit. The ledger could
+        // not be verified twice: refuse terminally, nothing created; the
+        // door-collection callers (no preview) keep the fallback.
+        if (expectedDepositCredit != null) throw depositLedgerUnverifiableError(err);
       }
     }
   }
   throw lastErr; // defensive — the uncredited final attempt returns or rethrows above
 }
 
+function depositLedgerUnverifiableError(cause) {
+  const e = new Error(`The estimate deposit could not be verified while this invoice was being created (${cause?.message || cause}) — nothing was created. Reload the visit and try again.`);
+  e.status = 409;
+  e.code = 'DEPOSIT_CREDIT_UNVERIFIABLE';
+  return e;
+}
+
 module.exports = {
   SCHEDULED_SERVICE_INVOICE_MINT_LOCK,
+  scopeAdoptableScheduledInvoices,
   TERMINAL_INVOICE_STATUSES,
   acquireScheduledInvoiceMintLock,
   assertScheduledInvoiceNotPacketOwned,

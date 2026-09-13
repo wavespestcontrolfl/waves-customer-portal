@@ -64,6 +64,13 @@ postgres('invoice issued ⇒ visit completed (migrated PostgreSQL)', () => {
   let trx;
   let customerId;
   const TODAY = '2040-03-04';
+  // A SEND never closes a visit scheduled TODAY (invoice-issued-closeout
+  // `visit_scheduled_today`, Codex P1 r7 #4131) — the office picker links a
+  // pre-completion invoice to today's open visit and texts it before the
+  // tech arrives. So the fixtures default to YESTERDAY, the ordinary shape
+  // for a send-triggered closeout; the same-day rule has its own assertions
+  // in the resolver test below, which date their visit to TODAY explicitly.
+  const YESTERDAY = '2040-03-03';
 
   beforeAll(() => {
     const url = new URL(process.env.DATABASE_URL);
@@ -90,12 +97,12 @@ postgres('invoice issued ⇒ visit completed (migrated PostgreSQL)', () => {
   afterEach(async () => { await trx.rollback(); require('../models/db').connection = database; });
   afterAll(async () => { await database.destroy(); });
 
-  async function visit({ status = 'confirmed', date = TODAY, serviceType = 'Quarterly Pest Control Service', ...rest } = {}) {
+  async function visit({ status = 'confirmed', date = YESTERDAY, serviceType = 'Quarterly Pest Control Service', ...rest } = {}) {
     const id = randomUUID();
     await trx('scheduled_services').insert({ id, customer_id: customerId, scheduled_date: date, service_type: serviceType, status, ...rest });
     return trx('scheduled_services').where({ id }).first();
   }
-  async function invoice({ status = 'sent', date = TODAY, serviceType = 'Quarterly Pest Control Service', ...rest } = {}) {
+  async function invoice({ status = 'sent', date = YESTERDAY, serviceType = 'Quarterly Pest Control Service', ...rest } = {}) {
     const id = randomUUID();
     await trx('invoices').insert({
       id, customer_id: customerId, invoice_number: `TST-${id.slice(0, 8)}`, token: randomUUID().replace(/-/g, ''),
@@ -107,10 +114,19 @@ postgres('invoice issued ⇒ visit completed (migrated PostgreSQL)', () => {
   }
 
   test('a linked open visit on or before today resolves; closed, future and cancelled visits do not', async () => {
-    const open = await visit();
-    expect((await resolveVisitForIssuedInvoice(trx, await invoice({ scheduled_service_id: open.id }), { today: TODAY })).svc.id).toBe(open.id);
+    const open = await visit({ date: TODAY });
+    expect((await resolveVisitForIssuedInvoice(trx, await invoice({ scheduled_service_id: open.id, date: TODAY }), { today: TODAY })).svc.id).toBe(open.id);
     const past = await visit({ date: '2040-02-20', status: 'pending' });
     expect((await resolveVisitForIssuedInvoice(trx, await invoice({ scheduled_service_id: past.id, date: '2040-02-20' }), { today: TODAY })).svc.id).toBe(past.id);
+    // A SEND leaves a visit scheduled for TODAY open (Codex P1 r7 #4131): the
+    // office picker sends pre-completion invoices for today's visits before
+    // the tech arrives. A payment still closes it; a past day closes on a send.
+    expect(await resolveVisitForIssuedInvoice(trx, await invoice({ scheduled_service_id: open.id, date: TODAY }), { today: TODAY, trigger: 'sent' })).toMatchObject({ svc: null, reason: 'visit_scheduled_today' });
+    expect((await resolveVisitForIssuedInvoice(trx, await invoice({ scheduled_service_id: open.id, date: TODAY }), { today: TODAY, trigger: 'paid' })).svc.id).toBe(open.id);
+    expect((await resolveVisitForIssuedInvoice(trx, await invoice({ scheduled_service_id: past.id, date: '2040-02-20' }), { today: TODAY, trigger: 'sent' })).svc.id).toBe(past.id);
+    // YESTERDAY is the fixture default precisely because it closes on a send.
+    const yesterday = await visit();
+    expect((await resolveVisitForIssuedInvoice(trx, await invoice({ scheduled_service_id: yesterday.id }), { today: TODAY, trigger: 'sent' })).svc.id).toBe(yesterday.id);
     // In-progress visits stay with their technician (GitHub r9 P1): a running
     // job timer and a completion of their own — the office closeout leaves them.
     const onSite = await visit({ date: '2040-02-21', status: 'on_site' });
@@ -121,6 +137,9 @@ postgres('invoice issued ⇒ visit completed (migrated PostgreSQL)', () => {
     expect((await resolveVisitForIssuedInvoice(trx, await invoice({ scheduled_service_id: future.id, date: '2040-03-05' }), { today: TODAY })).reason).toBe('visit_in_future');
     const done = await visit({ status: 'completed', date: '2040-02-01' });
     expect((await resolveVisitForIssuedInvoice(trx, await invoice({ scheduled_service_id: done.id, date: '2040-02-01' }), { today: TODAY })).reason).toBe('visit_completed');
+    // A legacy NULL-status row is live (the picker links to it) — it closes out too (Codex P2 r8).
+    const legacy = await visit({ status: null, date: '2040-02-25' });
+    expect((await resolveVisitForIssuedInvoice(trx, await invoice({ scheduled_service_id: legacy.id, date: '2040-02-25' }), { today: TODAY, trigger: 'paid' })).svc.id).toBe(legacy.id);
     const dead = await visit({ status: 'cancelled', date: '2040-02-02' });
     expect((await resolveVisitForIssuedInvoice(trx, await invoice({ scheduled_service_id: dead.id, date: '2040-02-02' }), { today: TODAY })).reason).toBe('visit_cancelled');
   });

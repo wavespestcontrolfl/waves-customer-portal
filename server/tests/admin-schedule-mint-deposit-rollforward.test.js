@@ -16,6 +16,10 @@
  *     door collection
  *   - the in-lock replay check still short-circuits before any deposit work
  *   - a visit with no source estimate mints exactly as before
+ *   - expectedDepositCredit (the credit a caller previewed to an operator):
+ *     the applied credit must match it to the cent or the mint 409s inside
+ *     the transaction (DEPOSIT_CREDIT_CHANGED) — nothing minted or consumed,
+ *     no retry, and the uncredited fallback is refused too
  */
 jest.mock('../models/db', () => {
   const dbFn = jest.fn();
@@ -36,9 +40,18 @@ jest.mock('../services/invoice', () => ({
 }));
 const mockPending = jest.fn();
 const mockConsume = jest.fn();
+// The deposit-ledger advisory lock (Codex round 14 P1 #4131): the mint
+// acquires it before reading pendingDepositCredit — a no-op stub here,
+// asserted against directly in the lock-ordering test below.
+const mockAcquireDepositLock = jest.fn(async () => undefined);
 jest.mock('../services/estimate-deposits', () => ({
   pendingDepositCredit: (...args) => mockPending(...args),
   consumeDepositCredit: (...args) => mockConsume(...args),
+  acquireEstimateDepositLedgerLock: (...args) => mockAcquireDepositLock(...args),
+}));
+const mockPayer = jest.fn(async () => ({ payerId: null }));
+jest.mock('../services/payer', () => ({
+  resolveForInvoice: (...args) => mockPayer(...args),
 }));
 const mockTrigger = jest.fn(async () => undefined);
 jest.mock('../services/notification-triggers', () => ({
@@ -146,6 +159,31 @@ describe('mintScheduledServiceInvoiceWithDeposit', () => {
     expect(mockPending).not.toHaveBeenCalled();
     expect(mockCreate.mock.calls[0][0].depositCredit).toBeUndefined();
     expect(mockConsume).not.toHaveBeenCalled();
+    // No source estimate — nothing to serialize against, so no lock either.
+    expect(mockAcquireDepositLock).not.toHaveBeenCalled();
+  });
+
+  // Codex round 14 P1 #4131: pendingDepositCredit is a plain SELECT and
+  // markDepositReceived is an independent write, so without a shared lock
+  // a deposit could settle between this read and the mint's own commit —
+  // the zero-credit check would pass and a full-balance invoice would go
+  // out beside the newly received deposit. The mint must take the SAME
+  // advisory lock (keyed on the estimate) BEFORE reading, in the SAME
+  // transaction that will go on to create() and consume.
+  it('serializes against a concurrent deposit receipt: the estimate-keyed advisory lock is taken BEFORE pendingDepositCredit reads', async () => {
+    const trx = makeTrx();
+    programTransactions(trx);
+    mockCreate.mockResolvedValueOnce({ id: 'inv-1', applied_deposit_credit: 49 });
+    mockConsume.mockResolvedValueOnce(49);
+    const callOrder = [];
+    mockAcquireDepositLock.mockImplementationOnce(async () => { callOrder.push('lock'); });
+    mockPending.mockImplementationOnce(async () => { callOrder.push('read'); return { amount: 49 }; });
+
+    await mintScheduledServiceInvoiceWithDeposit({ svc, buildCreateParams });
+
+    // Same transaction, same estimate id the read itself uses.
+    expect(mockAcquireDepositLock).toHaveBeenCalledWith(trx, 'est-1');
+    expect(callOrder).toEqual(['lock', 'read']);
   });
 
   it('retries once on allocation mismatch, then alerts and falls back to an uncredited mint', async () => {
@@ -183,6 +221,168 @@ describe('mintScheduledServiceInvoiceWithDeposit', () => {
 
     expect(result.invoice.id).toBe('inv-b');
     expect(mockTrigger).not.toHaveBeenCalled();
+  });
+
+  describe('expectedDepositCredit (the operator-previewed PENDING deposit)', () => {
+    it('mints when the pending deposit still matches the preview even though the applied credit is capped at a smaller server total (tax-exempt customer)', async () => {
+      programTransactions(makeTrx());
+      mockPending.mockResolvedValueOnce({ amount: 150 });
+      mockCreate.mockResolvedValueOnce({ id: 'inv-1', applied_deposit_credit: 100 });
+      mockConsume.mockResolvedValueOnce(100);
+
+      const result = await mintScheduledServiceInvoiceWithDeposit({ svc, buildCreateParams, expectedDepositCredit: 150 });
+
+      expect(result).toEqual({ invoice: { id: 'inv-1', applied_deposit_credit: 100 }, reused: false });
+      expect(mockConsume).toHaveBeenCalledWith(expect.objectContaining({ amount: 100 }));
+    });
+
+    it('a payer-billed visit previews zero and mints: the homeowner deposit is not payer-eligible (create applies none)', async () => {
+      programTransactions(makeTrx());
+      mockPending.mockResolvedValueOnce({ amount: 50 });
+      mockPayer.mockResolvedValueOnce({ payerId: 'payer-1' });
+      mockCreate.mockResolvedValueOnce({ id: 'inv-1', applied_deposit_credit: 0 });
+
+      const result = await mintScheduledServiceInvoiceWithDeposit({ svc: { ...svc, customer_id: 'cust-1' }, buildCreateParams, expectedDepositCredit: 0 });
+
+      expect(result).toEqual({ invoice: { id: 'inv-1', applied_deposit_credit: 0 }, reused: false });
+      expect(mockPayer).toHaveBeenCalledWith(expect.objectContaining({ customerId: 'cust-1', scheduledServiceId: 'svc-1' }));
+      expect(mockConsume).not.toHaveBeenCalled();
+    });
+
+    it('a previewed create never takes the uncredited fallback: two failed ledger reads refuse (409 DEPOSIT_CREDIT_UNVERIFIABLE) after the reconcile alert — a deposit paid after a zero preview is never billed over', async () => {
+      programTransactions(makeTrx(), makeTrx(), makeTrx());
+      // The preview read zero; the customer then paid a deposit and BOTH
+      // credited ledger reads fail — the uncredited third attempt would read
+      // nothing, compare zero to the stale zero and mint the full balance.
+      mockPending
+        .mockRejectedValueOnce(new Error('ledger read failed'))
+        .mockRejectedValueOnce(new Error('ledger read failed'));
+
+      await expect(
+        mintScheduledServiceInvoiceWithDeposit({ svc, buildCreateParams, expectedDepositCredit: 0 }),
+      ).rejects.toMatchObject({ status: 409, code: 'DEPOSIT_CREDIT_UNVERIFIABLE' });
+      expect(mockPending).toHaveBeenCalledTimes(2);
+      expect(mockCreate).not.toHaveBeenCalled();
+      expect(mockTrigger).toHaveBeenCalledWith('estimate_deposit_reconcile_needed', { estimateId: 'est-1' });
+    });
+
+    it('a payer assigned after a non-zero preview is refused — create would apply no credit the operator saw', async () => {
+      programTransactions(makeTrx());
+      mockPending.mockResolvedValueOnce({ amount: 50 });
+      mockPayer.mockResolvedValueOnce({ payerId: 'payer-1' });
+
+      await expect(
+        mintScheduledServiceInvoiceWithDeposit({ svc, buildCreateParams, expectedDepositCredit: 50 }),
+      ).rejects.toMatchObject({ status: 409, code: 'DEPOSIT_CREDIT_CHANGED', expectedDepositCredit: 50, pendingDepositCredit: 0 });
+      expect(mockCreate).not.toHaveBeenCalled();
+    });
+
+    it('mints when the pending deposit matches the preview to the cent', async () => {
+      programTransactions(makeTrx());
+      mockPending.mockResolvedValueOnce({ amount: 49 });
+      mockCreate.mockResolvedValueOnce({ id: 'inv-1', applied_deposit_credit: 49 });
+      mockConsume.mockResolvedValueOnce(49);
+
+      const result = await mintScheduledServiceInvoiceWithDeposit({ svc, buildCreateParams, expectedDepositCredit: 49 });
+
+      expect(result).toEqual({ invoice: { id: 'inv-1', applied_deposit_credit: 49 }, reused: false });
+      expect(mockConsume).toHaveBeenCalledWith(expect.objectContaining({ amount: 49 }));
+    });
+
+    it('409s inside the transaction when the credit moved since the preview — nothing consumed, no retry, no fallback', async () => {
+      programTransactions(makeTrx(), makeTrx(), makeTrx());
+      mockPending.mockResolvedValue({ amount: 20 }); // another invoice consumed $29 of the $49 previewed
+      mockCreate.mockResolvedValue({ id: 'inv-1', applied_deposit_credit: 20 });
+
+      await expect(
+        mintScheduledServiceInvoiceWithDeposit({ svc, buildCreateParams, expectedDepositCredit: 49 }),
+      ).rejects.toMatchObject({ status: 409, code: 'DEPOSIT_CREDIT_CHANGED', expectedDepositCredit: 49, pendingDepositCredit: 20 });
+      expect(mockCreate).not.toHaveBeenCalled(); // refused before anything is created
+      expect(mockConsume).not.toHaveBeenCalled();
+      expect(mockTrigger).not.toHaveBeenCalled();
+    });
+
+    it('a zero preview refuses a credit that appeared since — the customer would be sent less than the operator approved', async () => {
+      programTransactions(makeTrx());
+      mockPending.mockResolvedValueOnce({ amount: 49 });
+
+      await expect(
+        mintScheduledServiceInvoiceWithDeposit({ svc, buildCreateParams, expectedDepositCredit: 0 }),
+      ).rejects.toMatchObject({ status: 409, code: 'DEPOSIT_CREDIT_CHANGED', pendingDepositCredit: 49 });
+      expect(mockCreate).not.toHaveBeenCalled();
+      expect(mockConsume).not.toHaveBeenCalled();
+    });
+
+    it('the uncredited fallback after repeated allocation failures is never entered when a credit was previewed — the second failure refuses (DEPOSIT_CREDIT_UNVERIFIABLE) right after the reconcile alert', async () => {
+      programTransactions(makeTrx(), makeTrx(), makeTrx());
+      mockPending.mockResolvedValue({ amount: 49 });
+      mockCreate
+        .mockResolvedValueOnce({ id: 'inv-a', applied_deposit_credit: 49 })
+        .mockResolvedValueOnce({ id: 'inv-b', applied_deposit_credit: 49 });
+      mockConsume.mockResolvedValue(20);
+
+      await expect(
+        mintScheduledServiceInvoiceWithDeposit({ svc, buildCreateParams, expectedDepositCredit: 49 }),
+      ).rejects.toMatchObject({ status: 409, code: 'DEPOSIT_CREDIT_UNVERIFIABLE' });
+      expect(mockCreate).toHaveBeenCalledTimes(2); // no third, uncredited transaction is opened
+      expect(db.transaction).toHaveBeenCalledTimes(2);
+      expect(mockTrigger).toHaveBeenCalledTimes(1); // the reconcile alert still goes out
+    });
+  });
+
+  describe('expectedBalanceDue (the operator-previewed BALANCE — GitHub P1 #4131 r2)', () => {
+    it('mints when the created row\'s authoritative total matches the previewed balance to the cent', async () => {
+      programTransactions(makeTrx());
+      mockPending.mockResolvedValueOnce({ amount: 49 });
+      mockCreate.mockResolvedValueOnce({ id: 'inv-1', total: 76.19, applied_deposit_credit: 49 });
+      mockConsume.mockResolvedValueOnce(49);
+
+      const result = await mintScheduledServiceInvoiceWithDeposit({ svc, buildCreateParams, expectedDepositCredit: 49, expectedBalanceDue: 76.19 });
+
+      expect(result.reused).toBe(false);
+      expect(mockConsume).toHaveBeenCalledWith(expect.objectContaining({ amount: 49 }));
+    });
+
+    it('409s BALANCE_CHANGED inside the transaction when the server total differs (tax exemption / county rate) — nothing consumed, no retry, the real figures ride on the error', async () => {
+      programTransactions(makeTrx(), makeTrx(), makeTrx());
+      mockPending.mockResolvedValue({ amount: 49 });
+      // The form previewed 7% tax on $117 → $125.19 − $49 = $76.19; the
+      // server bills the customer's exemption → $117 − $49 = $68.
+      mockCreate.mockResolvedValue({ id: 'inv-1', total: 68, applied_deposit_credit: 49 });
+
+      await expect(
+        mintScheduledServiceInvoiceWithDeposit({ svc, buildCreateParams, expectedDepositCredit: 49, expectedBalanceDue: 76.19 }),
+      ).rejects.toMatchObject({
+        status: 409, code: 'BALANCE_CHANGED', expectedBalanceDue: 76.19, balanceDue: 68, invoiceTotal: 117, appliedDepositCredit: 49,
+      });
+      expect(mockCreate).toHaveBeenCalledTimes(1); // terminal — the transaction rolled the create back
+      expect(mockConsume).not.toHaveBeenCalled();
+      expect(mockTrigger).not.toHaveBeenCalled();
+    });
+
+    it('a zero preview refuses a positive server balance — the deposit fell between the two totals', async () => {
+      programTransactions(makeTrx());
+      mockPending.mockResolvedValueOnce({ amount: 120 });
+      // The form (7% tax: $125.19 total) capped the $120 credit at its total
+      // and previewed a $5.19 balance; the server, tax-exempt ($117 total),
+      // caps the credit at $117 and bills $0. Either direction is a mismatch.
+      mockCreate.mockResolvedValueOnce({ id: 'inv-1', total: 0, applied_deposit_credit: 117 });
+
+      await expect(
+        mintScheduledServiceInvoiceWithDeposit({ svc, buildCreateParams, expectedDepositCredit: 120, expectedBalanceDue: 5.19 }),
+      ).rejects.toMatchObject({ status: 409, code: 'BALANCE_CHANGED', balanceDue: 0, appliedDepositCredit: 117 });
+      expect(mockConsume).not.toHaveBeenCalled();
+    });
+
+    it('no balance expectation (every other caller) skips the check entirely', async () => {
+      programTransactions(makeTrx());
+      mockPending.mockResolvedValueOnce({ amount: 49 });
+      mockCreate.mockResolvedValueOnce({ id: 'inv-1', total: 68, applied_deposit_credit: 49 });
+      mockConsume.mockResolvedValueOnce(49);
+
+      const result = await mintScheduledServiceInvoiceWithDeposit({ svc, buildCreateParams, expectedDepositCredit: 49 });
+      expect(result.invoice.id).toBe('inv-1');
+    });
   });
 
   it('bubbles an uncredited-mint failure instead of looping', async () => {

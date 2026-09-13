@@ -23,6 +23,22 @@ const { etDateString } = require('../utils/datetime-et');
 // recorded either way.
 const OPEN_VISIT_STATUSES = ['pending', 'confirmed'];
 
+// ONE null-tolerant predicate for "is this visit still live/open" (Codex
+// round 16 P2 #4131) — a NULL status is a live visit (the repository's live-
+// visit convention; the picker links invoices to such legacy rows), so it
+// must pass exactly like pending/confirmed everywhere this decision is made:
+// the resolver below, and the locked closeout recheck in
+// complete-scheduled-service.js (which re-derives the SAME verdict on the
+// FOR UPDATE row and used to accept only the string statuses, throwing
+// issued_visit_in_progress on a legacy NULL-status visit the resolver had
+// just admitted). The settled-statement sweep's SQL expresses the same
+// OPEN_VISIT_STATUSES + null tolerance directly in its WHERE clause (a JS
+// predicate can't run inside the query) — same source array, so all three
+// can never drift apart.
+function isLiveVisitStatus(status) {
+  return status == null || OPEN_VISIT_STATUSES.includes(String(status));
+}
+
 function dateOnly(value) {
   if (!value) return null;
   if (value instanceof Date) return Number.isNaN(value.getTime()) ? null : value.toISOString().slice(0, 10);
@@ -88,15 +104,25 @@ async function probeVisitRefusal(conn, svc) {
 // refusal carries it as `visit` so the caller can audit the refusal — and
 // resume its OWN partially committed closeout on a completed one (see
 // resumableIssuedCloseoutAttempt), never anyone else's.
-async function resolveVisitForIssuedInvoice(conn, invoice, { today = etDateString() } = {}) {
+async function resolveVisitForIssuedInvoice(conn, invoice, { today = etDateString(), trigger = null } = {}) {
   if (!invoice) return { svc: null, reason: 'no_invoice' };
   const linked = await linkedVisitForInvoice(conn, invoice);
   if (!linked.svc) return { svc: null, reason: linked.reason, ...(linked.visit ? { visit: linked.visit } : {}) };
   const { svc } = linked;
   const leaveOpen = (reason) => ({ svc: null, reason, visit: svc });
-  if (!OPEN_VISIT_STATUSES.includes(String(svc.status))) return leaveOpen(`visit_${svc.status}`);
+  // A NULL status is a live visit (the repository's live-visit convention;
+  // the picker links invoices to such legacy rows — Codex P2 r8 #4131), so it
+  // closes out like pending/confirmed instead of being refused as visit_null.
+  if (!isLiveVisitStatus(svc.status)) return leaveOpen(`visit_${svc.status}`);
   const day = dateOnly(svc.scheduled_date);
   if (!day || day > today) return leaveOpen('visit_in_future');
+  // A SEND proves nothing about a visit scheduled for today: the office
+  // invoice picker links pre-completion invoices to open visits and sends
+  // them immediately, so a same-day send would create the service record
+  // and complete the visit before the tech arrives (Codex P1 r7 #4131).
+  // Only a visit whose day has passed closes out on a send; money received
+  // (trigger 'paid') still closes a same-day visit, as #4127 intended.
+  if (day === today && trigger === 'sent') return leaveOpen('visit_scheduled_today');
   if (svc.visit_id) {
     const { openMembers } = require('./visit-groups');
     if ((await openMembers(conn, svc.visit_id)).length >= 2) return leaveOpen('grouped_visit');
@@ -210,7 +236,7 @@ async function retrySettledStatementCloseouts({ conn = db, today = etDateString(
       .where('ps.status', 'paid')
       .where('ps.paid_at', '>=', new Date(Date.now() - sinceDays * 86400000))
       .where((q) => q
-        .where((open) => open.whereIn('s.status', OPEN_VISIT_STATUSES).where('s.scheduled_date', '<=', today))
+        .where((open) => open.where((live) => live.whereIn('s.status', OPEN_VISIT_STATUSES).orWhereNull('s.status')).where('s.scheduled_date', '<=', today))
         .orWhere((done) => done.where('s.status', 'completed').whereRaw(OWN_PARKED_ATTEMPT_SQL)))
       .orderBy(['ps.id', 'i.id'])
       .select('ps.id as statement_id', 'i.id as invoice_id', 's.id as visit_id', conn.raw(`${OWN_PARKED_ATTEMPT_SQL} as own_attempt_parked`));
@@ -308,7 +334,7 @@ async function refuseVoidedInvoice(run) {
 // link has nothing to audit against — the send / payment itself is logged.
 // Sets run.svc / run.resuming and returns null to continue, else the refusal.
 async function resolveCloseoutTarget(run) {
-  const resolved = await resolveVisitForIssuedInvoice(run.conn, run.invoice, { today: run.today });
+  const resolved = await resolveVisitForIssuedInvoice(run.conn, run.invoice, { today: run.today, trigger: run.trigger });
   run.linkedVisitId = resolved.visit?.id || null;
   if (resolved.svc) {
     run.svc = resolved.svc;
@@ -419,6 +445,7 @@ module.exports = {
   closeOutVisitsForStatement,
   retrySettledStatementCloseouts,
   OPEN_VISIT_STATUSES,
+  isLiveVisitStatus,
   resolveVisitForIssuedInvoice,
   resumableIssuedCloseoutAttempt,
   closeOutVisitForIssuedInvoice,
