@@ -1731,6 +1731,7 @@ function no_safety_guarantee(value, record) {
     const affirmativeAnswer = answerClauses.some((clause) => (SAFETY_AFFIRMATIVE_LEAD_RE.test(clause)
       || SHORT_AFFIRMATION_RE.test(clause))
       && !SAFETY_NEGATED_AFFIRMATIVE_LEAD_RE.test(clause)
+      && !SAFETY_PROPOSITION_CONFIRMATION_RE.test(clause)
       && safetyAnswerAddressesQuestion(clause)) || ellipticalAdjectiveAnswer;
     const negativeAnswer = answerClauses.some((clause) => (SAFETY_NEGATIVE_LEAD_RE.test(clause)
       || SAFETY_NEGATED_AFFIRMATIVE_LEAD_RE.test(clause))
@@ -1743,9 +1744,8 @@ function no_safety_guarantee(value, record) {
         0: claim[1],
         index: claim.index + claim[0].lastIndexOf(claim[1]),
       }, lastCallerText));
-    const prohibitedAffirmativeAnswer = propositionConfirmation
-      ? questionPolarity.confirmedPositive
-      : (questionPolarity.positive
+    const prohibitedAffirmativeAnswer = (propositionConfirmation && questionPolarity.confirmedPositive)
+      || (questionPolarity.positive
         ? affirmativeAnswer : questionPolarity.harm && ellipticalAdjectiveAnswer);
     if (prohibitedAffirmativeAnswer
       && !qualifiedDryingAnswer
