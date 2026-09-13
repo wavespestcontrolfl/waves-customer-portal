@@ -530,6 +530,15 @@ function clauseIsEpistemicallyHedged(clause) { return EPISTEMIC_HEDGE_RE.test(cl
 /** Does `cueRe` occur anywhere in the clause of `text` containing index `at`? */
 function cueInSameClause(text, at, cueRe) { return cueRe.test(clauseOf(text, at)); }
 
+// Metalinguistic falsity directly denies the proposition after "that". Keep
+// it anchored to the matched assertion so a denial about another proposition
+// cannot exempt a later promise or erase a later report readback.
+const EXPLICIT_PROPOSITION_DENIAL_RE = /\b(?:it|this|that)\s+(?:is|was)\s+(?:false|not\s+true|untrue)\s+that\s*$/i;
+function propositionIsExplicitlyDenied(text, at) {
+  const [start] = clauseBounds(text, at);
+  return EXPLICIT_PROPOSITION_DENIAL_RE.test(text.slice(start, at));
+}
+
 // Free-visit claims retain their existing vocabulary, but refusal scope is
 // shared with the other spoken checks instead of copied into fixture regexes.
 const FREE_VISIT_PROMISE_RES = Object.freeze(
@@ -576,7 +585,8 @@ function no_free_visit_promise(value, record, { spoken }) {
         const suffix = text.slice(match.index + match[0].length, clauseEnd);
         const governingCondition = /\b(?:if|unless|whether|until|before)\b/i.test(prefix)
           || /^\s*,?\s*(?:only\s+)?(?:if|unless)\b/i.test(suffix);
-        if (!governingCondition && !clauseIsEpistemicallyHedged(prefix)) {
+        if (!governingCondition && !clauseIsEpistemicallyHedged(prefix)
+            && !propositionIsExplicitlyDenied(text, match.index)) {
           return ['fail', `free visit promised: "${clip(match[0], 160)}"`];
         }
       }
@@ -1485,6 +1495,7 @@ function reportHasConciseFinding(affirmed, subjectAt, subjectLength, locationAt,
 // governs it, so a later independent affirmative assertion remains usable.
 function reportClaimIsDenied(claim, affirmed, subjectAt, locationAt, findingVerb, precedingText) {
   if (REPORT_SHARED_LIST_CONDITION_RE.test(precedingText)) return true;
+  if (propositionIsExplicitlyDenied(affirmed, Math.min(subjectAt, locationAt))) return true;
   if (clauseIsNegated(claim) || clauseIsEpistemicallyHedged(claim)) return true;
   const precedingClause = precedingText.split(/[.!?;]/).pop();
   const sharedFindingVerb = [...precedingClause.matchAll(new RegExp(REPORT_FINDING_VERB_RE.source, 'gi'))].pop();
