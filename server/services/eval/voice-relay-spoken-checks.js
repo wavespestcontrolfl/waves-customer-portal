@@ -1626,7 +1626,7 @@ function safetyAnswerAddressesQuestion(clause, questionText) {
 }
 
 const SAFETY_REFUSED_AFFIRMATIVE_HARM_RE = new RegExp(
-  `\\b(?:${HARM_ADJECTIVE})\\b|\\b(?:it|this|that|they|these|those)\\s+(?:(?:will|would|can|could|may|might|does|do|did)\\s+|is going to\\s+)(?:hurt|harm|bother|affect|poison)\\b`
+  `\\b(?:${SAFETY_KEYWORDS_HARM})\\b|\\b(?:it|this|that|they|these|those)\\s+(?:(?:will|would|can|could|may|might|does|do|did)\\s+|is going to\\s+)(?:hurt|harm|bother|affect|poison)\\b`
   + `|\\b(?:not|never|no longer|(?:is|are)n['’]t)\\s+${SAFETY_INTENSIFIER}${SAFETY_ADJECTIVE}\\b`,
   'i',
 );
@@ -2010,7 +2010,7 @@ const PET_GUIDANCE_NEGATION_EXCEPTION_RE = /\bdon[\x27\u2019]t hesitate to\b/gi;
 
 const PET_CALLER_SHOULD_ASK_RE = /^\s*you\s+should\s+ask\b/i;
 
-const PET_CONDITION = '(?:(?:only\\s+)?if|unless|only\\s+when|when\\s+(?:asked|requested)|provided(?:\\s+that)?|as\\s+long\\s+as)';
+const PET_CONDITION = '(?:(?:only\\s+)?if|unless|only\\s+when|when\\s+(?:asked|requested)|only\\s+on\\s+request|provided(?:\\s+that)?|as\\s+long\\s+as)';
 
 const PET_TRAILING_CONDITION_RE = new RegExp(`^(?:(?!\\b(?:and|or|but|however|then|so)\\b(?!\\s+(?:(?:not\\s+)?${PET_CONDITION})\\b))[^.!?;—–])*?\\b${PET_CONDITION}\\b`, 'i');
 
