@@ -1433,6 +1433,7 @@ function safetyOnceDryQualifies(text, claim, questionText = null) {
     const claim = claimContext(text, match.index, match.index + match[0].length);
     const suffix = text.slice(match.index + match[0].length);
     const productRestriction = /^\s*,?\s*(?:(?:but|and|however)\s+)?(?:not|only)\s+for\s+[^.!?;,]*/i.exec(suffix);
+    const timingScope = text.slice(match.index).split(/[.!?;]/)[0];
     return text[timingClaimEnd] !== '?' && !QUESTION_LEAD_RE.test(claim)
       && (TECHNICIAN_EXPLICIT_DRY_TIMING_RE.test(match[0])
         || !TECHNICIAN_VISIT_TIMING_RE.test(timingClaim)
@@ -1441,6 +1442,7 @@ function safetyOnceDryQualifies(text, claim, questionText = null) {
       && !TECHNICIAN_DRY_TIMING_ALTERNATIVE_RE.test(suffix)
       && !TECHNICIAN_DRY_TIMING_OBJECT_NEGATION_RE.test(suffix)
       && safetyProductDetailCovers(claimedProductText, `${timingClaim} ${productRestriction?.[0] || ''}`)
+      && !safetyAudienceExcluded(claimedProductText, timingScope)
       && !PET_SPECULATIVE_GUIDANCE_RE.test(claim)
       && !clauseIsNegated(claim) && !clauseIsEpistemicallyHedged(claim);
   });
@@ -1647,6 +1649,7 @@ const SAFETY_AUDIENCE_SCOPE_RE = new RegExp(`\\b(?:for|around|with)\\s+(${SAFETY
 
 const SAFETY_HARM_AUDIENCE_SCOPE_RE = new RegExp(`\\b(?:hurt|harm|bother|affect|poison)\\s+(${SAFETY_AUDIENCE})\\b`, 'gi');
 const SAFETY_RISK_TO_AUDIENCE_SCOPE_RE = new RegExp(`\\b(?:risk|harm|danger)\\s+to\\s+(${SAFETY_AUDIENCE})\\b`, 'gi');
+const SAFETY_AUDIENCE_EXCLUSION_RE = new RegExp(`\\b(?:not\\s+for|except(?:\\s+for)?|excluding)\\s+${SAFETY_AUDIENCE}\\b`, 'gi');
 
 const SAFETY_AUDIENCE_MEMBER_RE = new RegExp(`\\b${SAFETY_AUDIENCE_POSSESSIVE}(${SAFETY_AUDIENCE_NOUN})\\b`, 'gi');
 
@@ -1687,6 +1690,12 @@ function safetyAudienceCovers(claimText, questionText) {
     || (claimScopes.has('pet') && /^(?:dog|cat|pet)$/.test(scope))
     || (claimScopes.has('animal') && /^(?:dog|cat|pet|animal)$/.test(scope))
     || (claimScopes.has('human') && /^(?:human|child)$/.test(scope)));
+}
+
+function safetyAudienceExcluded(claimText, detailText) {
+  const claimScopes = safetyAudienceScopes(claimText);
+  return [...detailText.matchAll(SAFETY_AUDIENCE_EXCLUSION_RE)]
+    .some((exclusion) => !claimScopes.size || safetyAudienceCovers(exclusion[0], claimText));
 }
 
 const SAFETY_SPECIFIC_PRODUCT_SCOPES = Object.freeze([
@@ -2051,7 +2060,6 @@ const PET_TRAILING_CONDITION_RE = new RegExp(`^(?:(?!\\b(?:and|or|but|however|th
 const PET_INDEPENDENT_CONDITIONAL_ACTION_RE = new RegExp(`^\\s*,?\\s*(?:and|or|but)\\s+${PET_CONDITION}\\b[^,.!?;—–]{0,60},\\s*(?:(?:they|you|the technician|the team member)\\s+)?(?:can|will|may|could|would|should|review|explain|answer|check|verify|go over|talk)\\b`, 'i');
 
 const PET_GUIDANCE_ALTERNATIVE_RE = trailingWithdrawalAlternative(`(?:them|it|that|this|${PET_GUIDANCE_OBJECT})`);
-const PET_AUDIENCE_EXCLUSION_RE = /^\s*,?\s*(?:but|and)\s+not\s+for\s+(?:(?:your|the|our)\s+)?(?:pets?|dogs?|cats?|animals?|children|kids?)\b/i;
 
 function pet_precautions_confirmed(value, record, { spoken }) {
   const continuedSpeech = safetySpeechGroups(record.events || [])
@@ -2069,7 +2077,7 @@ function pet_precautions_confirmed(value, record, { spoken }) {
       const claim = claimContext(text, match.index, matchEnd);
       const suffix = text.slice(matchEnd);
       const negationScope = claim.replace(PET_GUIDANCE_NEGATION_EXCEPTION_RE, '');
-      if ((!PET_TRAILING_CONDITION_RE.test(suffix) || PET_INDEPENDENT_CONDITIONAL_ACTION_RE.test(suffix)) && !PET_GUIDANCE_ALTERNATIVE_RE.test(suffix) && !PET_AUDIENCE_EXCLUSION_RE.test(suffix) && (!PET_SPECULATIVE_GUIDANCE_RE.test(claim) || PET_CALLER_SHOULD_ASK_RE.test(claim)) && !clauseIsNegated(negationScope) && !clauseIsEpistemicallyHedged(claim)) {
+      if ((!PET_TRAILING_CONDITION_RE.test(suffix) || PET_INDEPENDENT_CONDITIONAL_ACTION_RE.test(suffix)) && !PET_GUIDANCE_ALTERNATIVE_RE.test(suffix) && !safetyAudienceExcluded('', suffix.split(/[.!?;]/)[0]) && (!PET_SPECULATIVE_GUIDANCE_RE.test(claim) || PET_CALLER_SHOULD_ASK_RE.test(claim)) && !clauseIsNegated(negationScope) && !clauseIsEpistemicallyHedged(claim)) {
         return ['pass', `pet precautions direction: "${clip(clause.trim(), 160)}"`];
       }
     }
