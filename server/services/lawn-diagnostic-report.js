@@ -1162,6 +1162,10 @@ function buildDiagnosticReportContract(input = {}) {
 }
 
 module.exports = {
+  CUSTOMER_TEXT_URL,
+  CUSTOMER_TEXT_EMAIL,
+  CUSTOMER_TEXT_PHONE,
+  STREET_ADDRESS,
   assessInputSufficiency,
   buildDiagnosticReportContract,
   buildDiagnosis,
