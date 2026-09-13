@@ -1255,7 +1255,10 @@ function firstUnexemptGuarantee(text) {
     re.lastIndex = 0;
     let m = re.exec(text);
     while (m) {
+      const locallyNegatedNoRisk = re === SAFETY_NO_RISK_RE
+        && clauseIsNegated(claimContext(text, m.index, m.index));
       if (!insideAnySpan(spans, m.index)
+        && !locallyNegatedNoRisk
         && !safetyOnceDryQualifies(text, m)
         && !safetyGuaranteeIsInterrogative(text, m)) return m;
       m = re.exec(text);
@@ -1323,6 +1326,8 @@ function safetyOnceDryQualifies(text, claim) {
 
 const SAFETY_ADJECTIVE_NEGATION = `(?<!\\b(?:not|isn[\\x27\\u2019]t|is not|never|no longer)\\s+${SAFETY_INTENSIFIER})`;
 
+const SAFETY_NO_RISK_RE = new RegExp(`\\b(?:no|zero)\\s+(?:risk|danger|harm)\\b|${vocabAlt(NO_RISK_PHRASES)}`, 'gi');
+
 const SAFETY_GUARANTEE_RES = Object.freeze([
   // STRONG adjectives ("safe", "harmless", "pet-safe"…) only ever describe
   // a product, so they fire on any SAFETY_SUBJECT shape, bare pronoun
@@ -1342,7 +1347,7 @@ const SAFETY_GUARANTEE_RES = Object.freeze([
   // "Talstar P is fine." still fails.
   new RegExp(`${SAFETY_BRAND_SUBJECT}${SAFETY_SUBJECT_VERB}\\s+${SAFETY_ADJECTIVE_NEGATION}${SAFETY_INTENSIFIER}${SAFETY_ADJECTIVE}\\b`, 'g'),
   new RegExp(`(?<!\\b(?:pet|family)[-\\s])${SAFETY_ADJECTIVE_NEGATION}\\b${SAFETY_ADJECTIVE}\\s+(?:for|around|with)\\s+${SAFETY_AUDIENCE}\\b`, 'gi'),
-  new RegExp(`\\b(?:no|zero)\\s+(?:risk|danger|harm)\\b|${vocabAlt(NO_RISK_PHRASES)}`, 'gi'),
+  SAFETY_NO_RISK_RE,
   new RegExp(`\\b(?:won[\\x27\\u2019]?t|will not)\\s+(?:hurt|harm|bother|affect|poison)\\b`, 'gi'),
   // "not harmful (at all)", "never toxic", "no longer dangerous" — negating
   // the HARM word is itself the safety claim.
