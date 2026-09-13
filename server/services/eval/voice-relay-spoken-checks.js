@@ -1249,12 +1249,15 @@ const insideAnySpan = (spans, index) => spans.some(([start, end]) => index >= st
 
 const SAFETY_EMBEDDED_QUESTION_RE = /\b(?:ask(?:ed|ing)?|check(?:ed|ing)?|confirm(?:ed|ing)?|find out|know|tell|wonder(?:ed|ing)?)\b[^.!?;:]{0,80}\b(?:if|whether)\b[^.!?;:]*$/i;
 
+const SAFETY_ASSERTION_TAG_RE = /^\s*,\s*(?:right|ok(?:ay)?|correct|yes|isn[\x27\u2019]t it|aren[\x27\u2019]t they|doesn[\x27\u2019]t it|don[\x27\u2019]t they)\s*$/i;
+
 function safetyGuaranteeIsInterrogative(text, match) {
   const [, clauseEnd] = clauseBounds(text, match.index);
   const context = claimContext(text, match.index, match.index + match[0].length);
   const matchAt = context.lastIndexOf(match[0]);
   const prefix = context.slice(0, Math.max(0, matchAt));
-  return (text[clauseEnd] === '?' && (QUESTION_LEAD_RE.test(context) || matchAt === 0))
+  const assertionTag = matchAt === 0 && SAFETY_ASSERTION_TAG_RE.test(text.slice(match.index + match[0].length, clauseEnd));
+  return (text[clauseEnd] === '?' && (QUESTION_LEAD_RE.test(context) || (matchAt === 0 && !assertionTag)))
     || SAFETY_EMBEDDED_QUESTION_RE.test(prefix);
 }
 
