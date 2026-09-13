@@ -1429,7 +1429,7 @@ const DENIAL_WORD_RE = /\b(?:(?:not|cannot|(?:is|are|do|did|does|was|were|has|ha
 // Commas may enclose an aside and "and" may coordinate denied objects.
 // End their scope only when the next phrase starts a fresh assertion.
 const CAPTURE_NOUN_ASSERTION_START_SOURCE = `(?:[\\w\\x27\\u2019-]+\\s+){1,5}${CLAUSE_FINITE_PREDICATE_RE.source}`;
-const CAPTURE_ASSERTION_START_SOURCE = `(?:(?:(?:the )?(?:caller|customer)|she|he|they)\\s+\\w+|(?:asked|asks|raised|raises|expressed|expresses|mentioned|mentions|reported|reports|voiced|voices|noting|noted|adding|added|did|does|do|is|are|was|were|has|have|had)\\b|${CAPTURE_NOUN_ASSERTION_START_SOURCE})`;
+const CAPTURE_ASSERTION_START_SOURCE = `(?:(?:(?:the )?(?:caller|customer)|she|he|they)\\s+\\w+|(?:never\\s+)?(?:asked|asks|raised|raises|expressed|expresses|mentioned|mentions|reported|reports|voiced|voices|denied|denies|noting|noted|adding|added|did|does|do|is|are|was|were|has|have|had)\\b|${CAPTURE_NOUN_ASSERTION_START_SOURCE})`;
 const DENIAL_CLAUSE_END_RE = new RegExp(`[.;!?—–]|\\s-\\s|\\b(?:but|because|however|although|though|so|while|yet)\\b|(?::|,|\\band\\b)\\s*(?:(?:then|also)\\s+)*(?=${CAPTURE_ASSERTION_START_SOURCE})`, 'gi');
 /** [[start, end), …) — the ranges of `text` a denial word governs. */
 function deniedSpans(text) {
@@ -1450,20 +1450,25 @@ function deniedSpans(text) {
     // its own denied span over the whole question.
     let assertionStart = 0;
     DENIAL_CLAUSE_END_RE.lastIndex = 0;
-    for (const boundary of prefix.matchAll(DENIAL_CLAUSE_END_RE)) assertionStart = boundary.index + boundary[0].length;
+    for (const boundary of text.matchAll(DENIAL_CLAUSE_END_RE)) {
+      if (boundary.index >= m.index) break;
+      assertionStart = boundary.index + boundary[0].length;
+    }
     const assertionPrefix = prefix.slice(assertionStart);
     const indirectQuestion = /\b(?:asked|asks|asking|wondered|wonders)\b[^.;!?]*\b(?:if|whether)\b/i.test(assertionPrefix);
     const directQuestion = prefix.match(new RegExp(`\\b(?:asked|asks|asking|wondered|wonders)\\b\\s*,\\s*${QUESTION_AUX_RE_SOURCE}\\b[^.;!?]*$`, 'i'));
-    let directQuestionDenied = false;
+    let directQuestionExempt = false;
     if (directQuestion) {
       let reporterStart = 0;
       DENIAL_CLAUSE_END_RE.lastIndex = 0;
       for (const boundary of prefix.slice(0, directQuestion.index).matchAll(DENIAL_CLAUSE_END_RE)) {
         reporterStart = boundary.index + boundary[0].length;
       }
-      directQuestionDenied = clauseIsNegated(prefix.slice(reporterStart, directQuestion.index + directQuestion[0].indexOf(',')));
+      const questionComma = directQuestion.index + directQuestion[0].indexOf(',');
+      directQuestionExempt = !clauseIsNegated(prefix.slice(reporterStart, questionComma))
+        && !prefix.slice(questionComma + 1, assertionStart).trim();
     }
-    if (indirectQuestion || (directQuestion && !directQuestionDenied)) {
+    if (indirectQuestion || directQuestionExempt) {
       m = DENIAL_WORD_RE.exec(text);
       continue;
     }
