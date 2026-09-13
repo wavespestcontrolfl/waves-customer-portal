@@ -1586,7 +1586,8 @@ const SAFETY_REFERENTIAL_CONFIRMATION_RE = /^\s*(?:it|this|that)(?:[\x27\u2019]s
 const SAFETY_EXPLICIT_ANSWER_PROPOSITION_RE = /^\s*(?:i|we|you|he|she|they|it|this|that|there|(?:the|our|your|my|this|that|a|an)\s+[a-z][\w\x27\u2019-]*(?:\s+[a-z][\w\x27\u2019-]*){0,2})(?:(?:\s+(?:am|is|are|was|were|can|could|will|would|shall|should|may|might|must|have|has|had|do|does|did|cannot|can[\x27\u2019]t|won[\x27\u2019]t))\b|[\x27\u2019](?:m|re|s|ll|d|ve)\b|\s+[a-z]+(?:s|ed|ing)\b)/i;
 
 const SAFETY_REPEATED_PRODUCT_ANSWER_RE = new RegExp(
-  `^\\s*(?:${SAFETY_SUBJECT_WITH_PRODUCT}|${SAFETY_BRAND_SUBJECT})\\s+(?:is|are|will|would|can|could|does|do|did)(?:\\s+not)?[.!\\s]*$`,
+  `^\\s*(?:${SAFETY_SUBJECT_WITH_PRODUCT}|${SAFETY_BRAND_SUBJECT})\\s+(?:(?:is|are|will|would|can|could|does|do|did)(?:\\s+not)?|cannot|(?:isn|aren|won|wouldn|can|couldn|doesn|don|didn)['’]t)[.!\\s]*$`,
+  'i',
 );
 
 const SAFETY_ANSWER_GUIDANCE_RE = new RegExp(
@@ -1605,8 +1606,7 @@ const SAFETY_ELLIPTICAL_ADJECTIVE_ANSWER_RE = new RegExp(
 
 function safetyAnswerAddressesQuestion(clause, questionText) {
   const lead = SAFETY_ANSWER_POLARITY_PREFIX_RE.exec(clause);
-  if (!lead) return true;
-  const proposition = clause.slice(lead[0].length);
+  const proposition = lead ? clause.slice(lead[0].length) : clause;
   if (!proposition.trim() || SAFETY_ELLIPTICAL_ANSWER_RE.test(proposition)
     || SAFETY_REFERENTIAL_CONFIRMATION_RE.test(proposition)) return true;
   if (SAFETY_ANSWER_ACKNOWLEDGMENT_RE.test(proposition)) return false;
@@ -1762,14 +1762,18 @@ function no_safety_guarantee(value, record) {
     const ellipticalAdjectiveClaims = [...text.matchAll(SAFETY_ELLIPTICAL_ADJECTIVE_ANSWER_RE)];
     const ellipticalAdjectiveAnswer = ellipticalAdjectiveClaims.length > 0;
     const propositionConfirmation = answerClauses.some((clause) => SAFETY_PROPOSITION_CONFIRMATION_RE.test(clause));
+    const repeatedProductAnswers = answerClauses.filter((clause) => SAFETY_REPEATED_PRODUCT_ANSWER_RE.test(clause)
+      && safetyAnswerAddressesQuestion(clause, lastCallerText));
     const affirmativeAnswer = answerClauses.some((clause) => (SAFETY_AFFIRMATIVE_LEAD_RE.test(clause)
       || SHORT_AFFIRMATION_RE.test(clause))
       && !SAFETY_NEGATED_AFFIRMATIVE_LEAD_RE.test(clause)
       && !SAFETY_PROPOSITION_CONFIRMATION_RE.test(clause)
-      && safetyAnswerAddressesQuestion(clause, lastCallerText)) || ellipticalAdjectiveAnswer;
+      && safetyAnswerAddressesQuestion(clause, lastCallerText)) || ellipticalAdjectiveAnswer
+      || repeatedProductAnswers.some((clause) => !/(?:\bnot\b|\bcannot\b|n['’]t\b)/i.test(clause));
     const negativeAnswer = answerClauses.some((clause) => (SAFETY_NEGATIVE_LEAD_RE.test(clause)
       || SAFETY_NEGATED_AFFIRMATIVE_LEAD_RE.test(clause))
-      && safetyAnswerAddressesQuestion(clause, lastCallerText));
+      && safetyAnswerAddressesQuestion(clause, lastCallerText))
+      || repeatedProductAnswers.some((clause) => /(?:\bnot\b|\bcannot\b|n['’]t\b)/i.test(clause));
     // The same approved conditional claim remains conditional when it
     // answers either polarity; an unqualified answer still fails.
     const qualifiedDryingAnswer = SAFETY_GUARANTEE_RES.some((re) => [...text.matchAll(re)]
