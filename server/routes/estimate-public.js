@@ -8132,7 +8132,21 @@ function applyMembershipRepriceToEstimate(estimate, estData, reprice) {
   return estimate;
 }
 
-async function reconcileFrozenMembershipSnapshot(estimate) {
+// Resolves undefined when there was nothing to reconcile, { ok: true } after a
+// reconcile, { ok: false, error } when the live lookup / reprice failed (the
+// row is then still the UNRECONCILED snapshot). Never rejects.
+//
+// strictMembership is OPT-IN and off for every public renderer: the default
+// live probe reads a failed customers lookup as "no plan", which is right for
+// the page (it degrades to nonmember pricing, the conservative direction, and
+// the customer still sees a quote). A reader that must not report ANY price
+// from an unverified member snapshot — the intelligence bar's
+// get_estimate_detail — passes strictMembership so the lookup failure throws
+// into the catch below and comes back as { ok: false }, and withholds.
+// Making this strict for the public route instead was the #4345 r5
+// REGRESSION: the public callers ignore the result, so strictness there
+// bought nothing and only risked repricing paths it could not report to.
+async function reconcileFrozenMembershipSnapshot(estimate, { strictMembership = false } = {}) {
   try {
     if (!estimate || !estimate.customer_id) return;
     // Never reconcile an accepted or price-locked estimate: that deal was
@@ -8189,7 +8203,7 @@ async function reconcileFrozenMembershipSnapshot(estimate) {
     const frozenUnwaivedSetup = !frozenSetupWaiver && !!estimate.customer_id
       && require('../services/estimate-converter').frozenRodentBaitSetupAmount(estData) > 0;
     if (!frozenSnapshot && !frozenRecurring && !frozenSetupWaiver && !frozenUnwaivedSetup) return;
-    const activeMember = await isActivePlanCustomer(db, estimate.customer_id);
+    const activeMember = await isActivePlanCustomer(db, estimate.customer_id, { strict: strictMembership });
     // The rodent setup waiver is re-validated INDEPENDENTLY of plan
     // membership (codex #3591 r39 P1): it was granted by ANOTHER qualifying
     // family (e.g. pest) and rodent bait never self-waives, so a still-active
@@ -8340,7 +8354,14 @@ async function reconcileFrozenMembershipSnapshot(estimate) {
     clearEstimatePricingCache(estimate.id);
   } catch (err) {
     logger.warn(`[estimate-public] membership snapshot reconcile skipped: ${err.message}`);
+    // Never throws (the public renderers fall back to the stored row), but
+    // the failure is REPORTED to callers that can act on it: a reader that
+    // must not price from an unverified member snapshot (the intelligence
+    // bar's get_estimate_detail, codex #4345 r7 P1) checks ok === false and
+    // withholds. The early returns above resolve undefined = nothing to do.
+    return { ok: false, error: err.message };
   }
+  return { ok: true };
 }
 
 async function handleEstimateView(req, res, next) {
@@ -25099,194 +25120,32 @@ router.get('/:token/warranty-comparison/pdf', dataLimiter, async (req, res, next
   } catch (err) { next(err); }
 });
 
-router.get('/:token/data', dataLimiter, async (req, res, next) => {
-  try {
-    // This JSON carries the customer's address, phone/email, notes, pricing,
-    // and a bearer askToken. With React as the default estimate view it's the
-    // primary payload, so it must be as uncacheable as the legacy server-HTML
-    // page (which sets the same on sendEstimatePage) — no shared-browser or
-    // intermediary retention of a tokenized estimate. Set on every response
-    // path (incl. 404s) by stamping before any branch.
-    res.set('Cache-Control', 'no-cache, no-store, must-revalidate');
-    res.set('Pragma', 'no-cache');
-    res.set('Referrer-Policy', 'no-referrer');
-
-    const estimate = await db('estimates').where({ token: req.params.token }).first();
-    if (!estimate) return res.status(404).json({ error: 'Estimate not found' });
-    await reconcileFrozenMembershipSnapshot(estimate);
-
-    const ip = extractRequestIp(req);
-
-    // Security gate: the React SPA fetches this for ANY token, so an expired
-    // link, an unpublished draft/scheduled-send, or a send-failed estimate must
-    // NOT return the full quote + customer phone/email/address/notes. The legacy
-    // server-HTML page short-circuited these to the expired/not-found shell
-    // before building any payload; the data endpoint owns that guard for the
-    // React path. Non-viewable → 404 (the SPA renders its "this link may have
-    // expired or isn't valid" screen).
-    //
-    // ONE bypass: the staff draft preview. When the page URL carries
-    // ?adminPreview=1 the SPA attaches the staff session's Bearer token, and
-    // an UNPUBLISHED row is served to a VERIFIED staff JWT only
-    // (verifyStaffBearer — same checks as adminAuthenticate+requireTechOrAdmin;
-    // the `waves_admin` marker cookie is a 2-year logout-persistent view-count
-    // signal, never authorization, and still grants nothing here). This is
-    // what lets "Customer View" show a draft through the RENDERER the customer
-    // actually gets, instead of the diverging legacy SSR page. Expired /
-    // send_failed / archived rows stay 404 even for staff, and every view
-    // side effect below is skipped — a preview must not count views or flip
-    // a draft's status.
-    // Verified staff preview, independent of publish status: a staff
-    // "Customer View" of a PUBLISHED estimate (?adminPreview=1 + valid staff
-    // Bearer) must not count as a customer view or fire first-view side
-    // effects — without this, previewing from a device without the marker
-    // cookie and off the admin IP inflates view_count and pings the
-    // "Estimate viewed" notification. adminDraftPreview stays the narrow
-    // unpublished-only gate for serving drafts + the payload flag. (The
-    // legacy SSR path can't get this guard: full-page navigations carry no
-    // Bearer header, so it stays on the cookie/IP heuristics.)
-    const verifiedStaffPreview = req.query.adminPreview === '1'
-      && Boolean(await verifyStaffBearer(req));
-    const adminDraftPreview = adminDraftPreviewEligible(estimate, req.query.adminPreview)
-      && verifiedStaffPreview;
-    // Signed document-render pin — verified BEFORE the viewability gate
-    // (codex #3281 r1): an operator resend of a proposal whose stored
-    // expires_at already passed supplies a pinned new validThrough, but the
-    // stored date would 404 this fetch and silently downgrade the emailed
-    // attachment to the pdfkit document. The pin only mints server-side, so
-    // honoring it here serves exactly the renders our own routes vetted —
-    // archived rows and unpublished drafts stay 404 even pinned.
-    const isPdfRenderPass = req.query.mode === 'pdf';
-    const docRenderPin = isPdfRenderPass && req.query.dpin
-      ? require('../services/pdf/estimate-doc-pdf').verifyEstimateDocPin(req.query.dpin, estimate.token)
-      : null;
-    const docPinViewBypass = docRenderPin !== null
-      && !estimate.archived_at
-      && !UNPUBLISHED_ESTIMATE_STATUSES.includes(estimate.status)
-      && !estimateOffCustomerSurface(estimate);
-    // Call-side verdict check runs alongside the estimate-side gate (codex
-    // P1, PR #3304 GH r9) and overrides EVERY bypass — a staff preview or
-    // a pinned document render of a blocked estimate is the same
-    // disclosure.
-    const callSideBlock = await callSideBlockForEstimateData(db, parseEstimateDataSafe(estimate));
-    if (callSideBlock) {
-      return res.status(404).json({ error: 'Estimate not found' });
-    }
-    if (!isEstimateCustomerViewable(estimate) && !adminDraftPreview && !docPinViewBypass) {
-      // Carries exactly one extra bit beyond the bare 404: this token maps to
-      // a real, published estimate that died of expiry (never a draft), so the
-      // SPA's not-found screen may offer the "Request an extension" button.
-      // The legacy SSR path already reveals more for the same rows (a
-      // personalized expired page), and POST /:token/extension-request
-      // re-checks eligibility + gate server-side regardless. The flag is only
-      // ever INCLUDED when true — an explicit `false` here would distinguish
-      // real-but-ineligible tokens (drafts, archived, send_failed) from
-      // unknown ones and break the generic-404 contract.
-      if (featureGates.isEnabled('estimateExtensionRequest')
-        && isEstimateExtensionRequestEligible(estimate)) {
-        return res.status(404).json({ error: 'Estimate not found', extensionRequestEligible: true });
-      }
-      return res.status(404).json({ error: 'Estimate not found' });
-    }
-
-    // View signals fire on every 200 EXCEPT bot UAs and admin-IP previews
-    // (filtered by shouldCountView). Defensive try/catch because schema
-    // drift on estimate_views or a locked row shouldn't break the
-    // customer-facing endpoint. The React page re-fetches /data after
-    // preference/slot/accept actions (and tags those `?refresh=1`); only the
-    // initial open counts, so internal refreshes don't inflate view_count the
-    // way the single legacy HTML page load never did. `refresh` is a public
-    // query param, so honor it ONLY once a first view is already recorded
-    // (`viewed_at` set) — otherwise a caller could hit `?refresh=1` first to
-    // suppress the very first "viewed" count + admin notification.
-    const isInternalRefresh = req.query.refresh === '1' && Boolean(estimate.viewed_at);
-    // Headless document render (?mode=pdf — the estimate-PDF browser pass,
-    // mirroring /report/:token?mode=pdf). `mode` alone only shapes CONTENT
-    // (the proposal block + publicOrigin below — data the token holder's own
-    // PDF already carries). Side-effect suppression additionally requires the
-    // SIGNED render pin (isPdfRenderPass/docRenderPin resolved above the
-    // viewability gate): without it, building the proposal email ATTACHMENT
-    // would stamp viewed_at and fire the "Estimate viewed" notification
-    // before the customer ever opened the link — while a customer poking
-    // ?mode=pdf by hand still counts as the view it is (unlike the refresh
-    // param above, no public input can dodge first-view tracking).
-    const verifiedPdfRenderPass = isPdfRenderPass && docRenderPin !== null;
-    // Whether THIS request is represented in estimate_views: an internal
-    // refresh belongs to the sitting that was already counted; a fresh open
-    // counts only once its row actually lands. The returning-visitor
-    // projection below refuses to run otherwise — it would treat the last
-    // stored session as current and report a visit number one too low (GH
-    // codex P2 on #3708).
-    let currentViewRecorded = isInternalRefresh;
-    if (!verifiedStaffPreview && !isInternalRefresh && !verifiedPdfRenderPass && shouldCountView(req, ip, estimate)) {
-      // ONE transaction for the aggregate counter + the per-open row: written
-      // separately, a failure of either half leaves view_count permanently
-      // diverged from COUNT(estimate_views) — the dashboard count and the
-      // engagement engine (which sessionizes off estimate_views) would then
-      // disagree forever. Still one defensive catch so schema drift or a
-      // locked row never breaks the customer-facing endpoint.
-      try {
-        const ua = (req.get('user-agent') || '').slice(0, 1000);
-        await db.transaction(async (trx) => {
-          await trx('estimates').where({ id: estimate.id }).update({
-            view_count: db.raw('COALESCE(view_count, 0) + 1'),
-            last_viewed_at: db.fn.now(),
-          });
-          await trx('estimate_views').insert({
-            estimate_id: estimate.id,
-            viewed_at: db.fn.now(),
-            ip: ip || null,
-            user_agent: ua || null,
-          });
-        });
-        currentViewRecorded = true;
-      } catch (e) { logger.error(`[estimate-data] view tracking failed: ${e.message}`); }
-
-      // Engagement-engine hook — same contract as the legacy HTML view
-      // site: fire-and-forget, never blocks the response.
-      try {
-        const EngagementEngine = require('../services/estimate-engagement-engine');
-        void EngagementEngine.onEstimateViewed(estimate).catch((err) => logger.warn(`[estimate-data] engagement hook failed: ${err.message}`));
-      } catch (e) { logger.warn(`[estimate-data] engagement hook unavailable: ${e.message}`); }
-    }
-
-    // First-view transition — keep admin preview clicks from making the
-    // estimate look customer-opened. Internal React refreshes (?refresh=1) are
-    // never the first view, so they must not flip status or notify admin twice.
-    // The staff draft preview is hard-excluded above IP/UA heuristics: the
-    // CASE below would flip a DRAFT straight to 'viewed' (publishing it in
-    // effect) if a staff preview ever slipped through shouldApplyFirstView.
-    if (!verifiedStaffPreview && !isInternalRefresh && !verifiedPdfRenderPass && !estimate.viewed_at && shouldApplyFirstViewSideEffects(req, ip, estimate) && !['accepted', 'declined', 'expired'].includes(estimate.status)) {
-      // Don't break an in-flight send's `sending` claim (which also gates
-      // PUT /:id/proposal): stamp viewed_at but leave status='sending' alone —
-      // the send's final write reconciles to `viewed` via viewed_at.
-      // Snapshot the as-viewed price for accept-time copy — see the matching
-      // first-view block in handleEstimateView for why jsonb_set.
-      await db('estimates').where({ id: estimate.id }).update({
-        viewed_at: db.fn.now(),
-        status: db.raw("CASE WHEN status = 'sending' THEN status ELSE 'viewed' END"),
-        estimate_data: db.raw(
-          "CASE WHEN jsonb_typeof(COALESCE(estimate_data, '{}'::jsonb)) = 'object' THEN jsonb_set(COALESCE(estimate_data, '{}'::jsonb), '{viewedMonthlyTotal}', to_jsonb(?::numeric), true) ELSE estimate_data END",
-          [Number(estimate.monthly_total || 0)],
-        ),
-      }).catch((e) => logger.error(`[estimate-data] first-view flip failed: ${e.message}`));
-      try {
-        await markLinkedLeadEstimateViewed({ estimateId: estimate.id });
-      } catch (e) {
-        logger.warn(`[estimate-data] linked lead view status update failed: ${e.message}`);
-      }
-
-      try {
-        const NotificationService = require('../services/notification-service');
-        await NotificationService.notifyAdmin(
-          'estimate',
-          `Estimate viewed: ${estimate.customer_name}`,
-          `${estimate.address || 'no address'} — ${proposalPriceLabel(estimate)}`,
-          { icon: '\u{1F4CB}', link: '/admin/estimates', metadata: { estimateId: estimate.id, customerId: estimate.customer_id } }
-        );
-      } catch (e) { logger.error(`[notifications] Estimate viewed notification failed: ${e.message}`); }
-    }
-
+/**
+ * Composes the JSON payload for GET /:token/data — the exact post-
+ * withholding, post-viewability-gate projection the customer estimate page
+ * renders. Pulled out of the route handler (codex #4345 re-cut) so the
+ * intelligence bar's get_estimate_detail tool can consume the SAME
+ * chokepoint instead of hand re-projecting the pricing shape: every field
+ * the page withholds (or reshapes) is withheld (or reshaped) here once, and
+ * both callers see it. Pure — reads only `estimate` and the four render-mode
+ * flags below, no `req`/`res`/`ip`; the route still owns the request-scoped
+ * work (token lookup, membership reconcile, the viewability/404 gate, view-
+ * count and first-view side effects) and passes their outcomes in as
+ * options so this stays a byte-identical move: `verifiedStaffPreview`,
+ * `currentViewRecorded`, and `isInternalRefresh` feed the returnVisit block
+ * and the verifiedStaffPreview flag exactly like the inline code did. A
+ * caller with no real request (the intelligence bar) leaves all three at
+ * their default false, which naturally withholds returnVisit and the
+ * staff-preview flag rather than fabricating request state.
+ */
+async function composeEstimateDataPayload(estimate, {
+  adminDraftPreview = false,
+  isPdfRenderPass = false,
+  docRenderPin = null,
+  verifiedStaffPreview = false,
+  currentViewRecorded = false,
+  isInternalRefresh = false,
+} = {}) {
     let estimateDataForIntelligence = {};
     try {
       estimateDataForIntelligence = typeof estimate.estimate_data === 'string'
@@ -25724,7 +25583,7 @@ router.get('/:token/data', dataLimiter, async (req, res, next) => {
       }
     }
 
-    res.json({
+    return {
       ...(propertyGroup ? { propertyGroup } : {}),
       ...returnVisitBlock,
       ...(successReferral ? { referral: successReferral } : {}),
@@ -26081,7 +25940,205 @@ router.get('/:token/data', dataLimiter, async (req, res, next) => {
         engineVersion: estimate.pricing_version || null,
         cacheHit: !!pricingBundle.cacheHit,
       },
-    });
+    };
+}
+
+router.get('/:token/data', dataLimiter, async (req, res, next) => {
+  try {
+    // This JSON carries the customer's address, phone/email, notes, pricing,
+    // and a bearer askToken. With React as the default estimate view it's the
+    // primary payload, so it must be as uncacheable as the legacy server-HTML
+    // page (which sets the same on sendEstimatePage) — no shared-browser or
+    // intermediary retention of a tokenized estimate. Set on every response
+    // path (incl. 404s) by stamping before any branch.
+    res.set('Cache-Control', 'no-cache, no-store, must-revalidate');
+    res.set('Pragma', 'no-cache');
+    res.set('Referrer-Policy', 'no-referrer');
+
+    const estimate = await db('estimates').where({ token: req.params.token }).first();
+    if (!estimate) return res.status(404).json({ error: 'Estimate not found' });
+    await reconcileFrozenMembershipSnapshot(estimate);
+
+    const ip = extractRequestIp(req);
+
+    // Security gate: the React SPA fetches this for ANY token, so an expired
+    // link, an unpublished draft/scheduled-send, or a send-failed estimate must
+    // NOT return the full quote + customer phone/email/address/notes. The legacy
+    // server-HTML page short-circuited these to the expired/not-found shell
+    // before building any payload; the data endpoint owns that guard for the
+    // React path. Non-viewable → 404 (the SPA renders its "this link may have
+    // expired or isn't valid" screen).
+    //
+    // ONE bypass: the staff draft preview. When the page URL carries
+    // ?adminPreview=1 the SPA attaches the staff session's Bearer token, and
+    // an UNPUBLISHED row is served to a VERIFIED staff JWT only
+    // (verifyStaffBearer — same checks as adminAuthenticate+requireTechOrAdmin;
+    // the `waves_admin` marker cookie is a 2-year logout-persistent view-count
+    // signal, never authorization, and still grants nothing here). This is
+    // what lets "Customer View" show a draft through the RENDERER the customer
+    // actually gets, instead of the diverging legacy SSR page. Expired /
+    // send_failed / archived rows stay 404 even for staff, and every view
+    // side effect below is skipped — a preview must not count views or flip
+    // a draft's status.
+    // Verified staff preview, independent of publish status: a staff
+    // "Customer View" of a PUBLISHED estimate (?adminPreview=1 + valid staff
+    // Bearer) must not count as a customer view or fire first-view side
+    // effects — without this, previewing from a device without the marker
+    // cookie and off the admin IP inflates view_count and pings the
+    // "Estimate viewed" notification. adminDraftPreview stays the narrow
+    // unpublished-only gate for serving drafts + the payload flag. (The
+    // legacy SSR path can't get this guard: full-page navigations carry no
+    // Bearer header, so it stays on the cookie/IP heuristics.)
+    const verifiedStaffPreview = req.query.adminPreview === '1'
+      && Boolean(await verifyStaffBearer(req));
+    const adminDraftPreview = adminDraftPreviewEligible(estimate, req.query.adminPreview)
+      && verifiedStaffPreview;
+    // Signed document-render pin — verified BEFORE the viewability gate
+    // (codex #3281 r1): an operator resend of a proposal whose stored
+    // expires_at already passed supplies a pinned new validThrough, but the
+    // stored date would 404 this fetch and silently downgrade the emailed
+    // attachment to the pdfkit document. The pin only mints server-side, so
+    // honoring it here serves exactly the renders our own routes vetted —
+    // archived rows and unpublished drafts stay 404 even pinned.
+    const isPdfRenderPass = req.query.mode === 'pdf';
+    const docRenderPin = isPdfRenderPass && req.query.dpin
+      ? require('../services/pdf/estimate-doc-pdf').verifyEstimateDocPin(req.query.dpin, estimate.token)
+      : null;
+    const docPinViewBypass = docRenderPin !== null
+      && !estimate.archived_at
+      && !UNPUBLISHED_ESTIMATE_STATUSES.includes(estimate.status)
+      && !estimateOffCustomerSurface(estimate);
+    // Call-side verdict check runs alongside the estimate-side gate (codex
+    // P1, PR #3304 GH r9) and overrides EVERY bypass — a staff preview or
+    // a pinned document render of a blocked estimate is the same
+    // disclosure.
+    const callSideBlock = await callSideBlockForEstimateData(db, parseEstimateDataSafe(estimate));
+    if (callSideBlock) {
+      return res.status(404).json({ error: 'Estimate not found' });
+    }
+    if (!isEstimateCustomerViewable(estimate) && !adminDraftPreview && !docPinViewBypass) {
+      // Carries exactly one extra bit beyond the bare 404: this token maps to
+      // a real, published estimate that died of expiry (never a draft), so the
+      // SPA's not-found screen may offer the "Request an extension" button.
+      // The legacy SSR path already reveals more for the same rows (a
+      // personalized expired page), and POST /:token/extension-request
+      // re-checks eligibility + gate server-side regardless. The flag is only
+      // ever INCLUDED when true — an explicit `false` here would distinguish
+      // real-but-ineligible tokens (drafts, archived, send_failed) from
+      // unknown ones and break the generic-404 contract.
+      if (featureGates.isEnabled('estimateExtensionRequest')
+        && isEstimateExtensionRequestEligible(estimate)) {
+        return res.status(404).json({ error: 'Estimate not found', extensionRequestEligible: true });
+      }
+      return res.status(404).json({ error: 'Estimate not found' });
+    }
+
+    // View signals fire on every 200 EXCEPT bot UAs and admin-IP previews
+    // (filtered by shouldCountView). Defensive try/catch because schema
+    // drift on estimate_views or a locked row shouldn't break the
+    // customer-facing endpoint. The React page re-fetches /data after
+    // preference/slot/accept actions (and tags those `?refresh=1`); only the
+    // initial open counts, so internal refreshes don't inflate view_count the
+    // way the single legacy HTML page load never did. `refresh` is a public
+    // query param, so honor it ONLY once a first view is already recorded
+    // (`viewed_at` set) — otherwise a caller could hit `?refresh=1` first to
+    // suppress the very first "viewed" count + admin notification.
+    const isInternalRefresh = req.query.refresh === '1' && Boolean(estimate.viewed_at);
+    // Headless document render (?mode=pdf — the estimate-PDF browser pass,
+    // mirroring /report/:token?mode=pdf). `mode` alone only shapes CONTENT
+    // (the proposal block + publicOrigin below — data the token holder's own
+    // PDF already carries). Side-effect suppression additionally requires the
+    // SIGNED render pin (isPdfRenderPass/docRenderPin resolved above the
+    // viewability gate): without it, building the proposal email ATTACHMENT
+    // would stamp viewed_at and fire the "Estimate viewed" notification
+    // before the customer ever opened the link — while a customer poking
+    // ?mode=pdf by hand still counts as the view it is (unlike the refresh
+    // param above, no public input can dodge first-view tracking).
+    const verifiedPdfRenderPass = isPdfRenderPass && docRenderPin !== null;
+    // Whether THIS request is represented in estimate_views: an internal
+    // refresh belongs to the sitting that was already counted; a fresh open
+    // counts only once its row actually lands. The returning-visitor
+    // projection below refuses to run otherwise — it would treat the last
+    // stored session as current and report a visit number one too low (GH
+    // codex P2 on #3708).
+    let currentViewRecorded = isInternalRefresh;
+    if (!verifiedStaffPreview && !isInternalRefresh && !verifiedPdfRenderPass && shouldCountView(req, ip, estimate)) {
+      // ONE transaction for the aggregate counter + the per-open row: written
+      // separately, a failure of either half leaves view_count permanently
+      // diverged from COUNT(estimate_views) — the dashboard count and the
+      // engagement engine (which sessionizes off estimate_views) would then
+      // disagree forever. Still one defensive catch so schema drift or a
+      // locked row never breaks the customer-facing endpoint.
+      try {
+        const ua = (req.get('user-agent') || '').slice(0, 1000);
+        await db.transaction(async (trx) => {
+          await trx('estimates').where({ id: estimate.id }).update({
+            view_count: db.raw('COALESCE(view_count, 0) + 1'),
+            last_viewed_at: db.fn.now(),
+          });
+          await trx('estimate_views').insert({
+            estimate_id: estimate.id,
+            viewed_at: db.fn.now(),
+            ip: ip || null,
+            user_agent: ua || null,
+          });
+        });
+        currentViewRecorded = true;
+      } catch (e) { logger.error(`[estimate-data] view tracking failed: ${e.message}`); }
+
+      // Engagement-engine hook — same contract as the legacy HTML view
+      // site: fire-and-forget, never blocks the response.
+      try {
+        const EngagementEngine = require('../services/estimate-engagement-engine');
+        void EngagementEngine.onEstimateViewed(estimate).catch((err) => logger.warn(`[estimate-data] engagement hook failed: ${err.message}`));
+      } catch (e) { logger.warn(`[estimate-data] engagement hook unavailable: ${e.message}`); }
+    }
+
+    // First-view transition — keep admin preview clicks from making the
+    // estimate look customer-opened. Internal React refreshes (?refresh=1) are
+    // never the first view, so they must not flip status or notify admin twice.
+    // The staff draft preview is hard-excluded above IP/UA heuristics: the
+    // CASE below would flip a DRAFT straight to 'viewed' (publishing it in
+    // effect) if a staff preview ever slipped through shouldApplyFirstView.
+    if (!verifiedStaffPreview && !isInternalRefresh && !verifiedPdfRenderPass && !estimate.viewed_at && shouldApplyFirstViewSideEffects(req, ip, estimate) && !['accepted', 'declined', 'expired'].includes(estimate.status)) {
+      // Don't break an in-flight send's `sending` claim (which also gates
+      // PUT /:id/proposal): stamp viewed_at but leave status='sending' alone —
+      // the send's final write reconciles to `viewed` via viewed_at.
+      // Snapshot the as-viewed price for accept-time copy — see the matching
+      // first-view block in handleEstimateView for why jsonb_set.
+      await db('estimates').where({ id: estimate.id }).update({
+        viewed_at: db.fn.now(),
+        status: db.raw("CASE WHEN status = 'sending' THEN status ELSE 'viewed' END"),
+        estimate_data: db.raw(
+          "CASE WHEN jsonb_typeof(COALESCE(estimate_data, '{}'::jsonb)) = 'object' THEN jsonb_set(COALESCE(estimate_data, '{}'::jsonb), '{viewedMonthlyTotal}', to_jsonb(?::numeric), true) ELSE estimate_data END",
+          [Number(estimate.monthly_total || 0)],
+        ),
+      }).catch((e) => logger.error(`[estimate-data] first-view flip failed: ${e.message}`));
+      try {
+        await markLinkedLeadEstimateViewed({ estimateId: estimate.id });
+      } catch (e) {
+        logger.warn(`[estimate-data] linked lead view status update failed: ${e.message}`);
+      }
+
+      try {
+        const NotificationService = require('../services/notification-service');
+        await NotificationService.notifyAdmin(
+          'estimate',
+          `Estimate viewed: ${estimate.customer_name}`,
+          `${estimate.address || 'no address'} — ${proposalPriceLabel(estimate)}`,
+          { icon: '\u{1F4CB}', link: '/admin/estimates', metadata: { estimateId: estimate.id, customerId: estimate.customer_id } }
+        );
+      } catch (e) { logger.error(`[notifications] Estimate viewed notification failed: ${e.message}`); }
+    }
+
+    res.json(await composeEstimateDataPayload(estimate, {
+      adminDraftPreview,
+      isPdfRenderPass,
+      docRenderPin,
+      verifiedStaffPreview,
+      currentViewRecorded,
+      isInternalRefresh,
+    }));
   } catch (err) { next(err); }
 });
 
@@ -26214,6 +26271,12 @@ module.exports.isStructuralOneTimeOnlyEstimate = isStructuralOneTimeOnlyEstimate
 module.exports.isRodentGuaranteeOnlyEstimate = isRodentGuaranteeOnlyEstimate;
 module.exports.resolveEstimateInvoiceMode = resolveEstimateInvoiceMode;
 module.exports.reconcileFrozenMembershipSnapshot = reconcileFrozenMembershipSnapshot;
+module.exports.composeEstimateDataPayload = composeEstimateDataPayload;
+// The route's own estimate_data parser — exported so a reader feeding the
+// SAME provenance gate (callSideBlockForEstimateData) parses the row exactly
+// the way this route does, instead of hand-rolling a second JSON fallback
+// that could disagree on a malformed row (pre-push audit P1, #4345).
+module.exports.parseEstimateDataSafe = parseEstimateDataSafe;
 module.exports.stripInternalMarginFieldsDeep = stripInternalMarginFieldsDeep;
 module.exports.sanitizePublicOneTimeBreakdown = sanitizePublicOneTimeBreakdown;
 module.exports.defaultServiceModeForEstimate = defaultServiceModeForEstimate;
