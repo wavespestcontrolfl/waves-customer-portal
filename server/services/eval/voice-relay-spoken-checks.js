@@ -1355,7 +1355,8 @@ function reportLocationIsTreatmentTarget(
   const locationLink = locationAt < subjectAt
     ? affirmed.slice(0, locationAt) : affirmed.slice(subjectAt + subjectLength, locationAt);
   if (locationAt < subjectAt) return REPORT_FRONTED_LOCATION_PREFIX_RE.test(locationLink);
-  return REPORT_TREATMENT_LOCATION_LINK_RE.test(locationLink) && !REPORT_LOCATION_DETOUR_RE.test(locationLink);
+  return REPORT_TREATMENT_LOCATION_LINK_RE.test(locationLink) && !REPORT_LOCATION_DETOUR_RE.test(locationLink)
+    && !/\b(?:near|beside|next to|adjacent to)\s+(?:(?:the|a|an)\s+)?$/i.test(locationLink);
 }
 
 function reportVerbGovernsProduct(affirmed, subjectAt, subjectLength, locationAt, locationLength, findingVerb) {
