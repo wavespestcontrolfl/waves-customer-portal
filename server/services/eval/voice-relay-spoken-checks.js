@@ -1232,6 +1232,13 @@ function cardSpokenDigits(text) {
 const CARD_PHONE_VALUE = '(?:\\(\\d{3}\\)|\\b\\d{3})[\\s.-]\\d{3}[\\s.-]\\d{4}\\b';
 const CARD_MENU_OPTION_RE = /\b(?:option|choice|key)\s+(?:number\s+)?\d+\b|\bpress\s+\d+\b/gi;
 const CARD_COUNT_NOUN = '(?:applications?|treatments?|services?|visits?|appointments?|accounts?|payments?|transactions?|attempts?|options?|cards?|rooms?|bedrooms?|bathrooms?|properties|homes?|lawns?|yards?|dogs?|cats?|pets?|animals?|children|kids?|bab(?:y|ies)|adults?|people|men|women|mice|geese|feet|fish|sheep)';
+const CARD_MONTH_DATE_VALUE = `(?:${MONTHS})\\s+(?:(?:19|20)\\d{2}|\\d{1,2}(?:st|nd|rd|th)?(?:,?\\s+(?:19|20)\\d{2})?)`;
+const CARD_NUMERIC_DATE_VALUE = '(?:0?[1-9]|1[0-2])\\s*[/.-]\\s*(?:0?[1-9]|[12]\\d|3[01])\\s*[/.-]\\s*(?:19|20)\\d{2}';
+const CARD_CALENDAR_VALUE_RES = Object.freeze([
+  new RegExp(`\\b${CARD_MONTH_DATE_VALUE}\\b`, 'gi'),
+  new RegExp(`\\b${CARD_NUMERIC_DATE_VALUE}\\b`, 'g'),
+]);
+const CARD_EXPLAINED_DATE_VALUE = `(?:${CARD_MONTH_DATE_VALUE}|(?:0?[1-9]|1[0-2])\\s*[/.-]\\s*(?:(?:0?[1-9]|[12]\\d|3[01])\\s*[/.-]\\s*)?(?:\\d{2}|(?:19|20)\\d{2})|(?:19|20)\\d{2})`;
 const CARD_NON_FRAGMENT_RES = Object.freeze([
   new RegExp(`\\b(?:${DIGITS}|${NUMBER_WORD_EN_STRICT})(?:[\\s-]+(?:and\\s+)?(?:${DIGITS}|${NUMBER_WORD_EN_STRICT})){0,6}\\s+(?:dollars?|cents?|bucks)\\b`, 'gi'),
   new RegExp(`\\$\\s*${DIGITS}`, 'gi'),
@@ -1247,9 +1254,9 @@ const CARD_NON_FRAGMENT_RES = Object.freeze([
   /\b(?:your|the|our|my)\s+(?!(?:card|payment|credit|debit|prepaid|security|pan|cvv|cvc)\b)[A-Za-z][\w'-]*\s+(?:number|code)\s+(?:is|was)\s+\d+\b/gi,
   /\b\d+(?:\.\d+)?[\s-]*(?:dollars?|cents?|percent|%|am|pm|a\.m\.|p\.m\.|o'clock|digits?|numbers?|more|times|of them|characters)(?!\w)/gi,
   /\b(?:invoice|estimate|order|ticket|account|reference|confirmation)\s+(?:number\s+|#\s*)?(?:is\s+)?[\w-]*\d[\w-]*/gi,
-  /\b(?:january|february|march|april|may|june|july|august|september|october|november|december)\s+(?:(?:19|20)\d{2}|\d{1,2}(?:st|nd|rd|th)?(?:,?\s+(?:19|20)\d{2})?)\b/gi,
-  /\b(?:0?[1-9]|1[0-2])\s*[/.-]\s*(?:0?[1-9]|[12]\d|3[01])\s*[/.-]\s*(?:19|20)\d{2}\b/g,
-  /\b(?:appointment|service|visit|calendar|date|year)(?:\s+(?:date|year))?\s+(?:(?:is|was|will be|falls?|fell|occur(?:s|red)?|happen(?:s|ed)?|scheduled|booked)\s+)?(?:(?:on|in|for)\s+)?(?:19|20)\d{2}\b/gi,
+  new RegExp(`\\b(?:appointment|service|visit|calendar|date|year)(?:\\s+(?:date|year))?\\s+`
+    + `(?:(?:is|was|will be|falls?|fell|occur(?:s|red)?|happen(?:s|ed)?|scheduled|booked)\\s+)?`
+    + `(?:(?:on|in|for)\\s+)?${CARD_EXPLAINED_DATE_VALUE}\\b`, 'gi'),
   CARD_MENU_OPTION_RE,
   /\b(?:phone|cell|mobile|office|fax|area)\s+(?:number|code)\s+(?:is\s+|of\s+)?(?:\(\d+\)|\d+)(?:[\s.-]\d+)*/gi,
   new RegExp(`\\b(?:phone|cell|mobile|fax)(?:\\s+number)?\\s+(?:is|was)\\s+${CARD_PHONE_VALUE}`, 'gi'),
@@ -1298,10 +1305,16 @@ const DIGIT_RUN_RE = /\d+(?:[\s-]\d+)*/g;
 // groups and the amount/identifier/date exclusions below still see them.
 const SEPARATED_DIGIT_RUN_RE = /\b\d(?:[\s,-]+\d)+\b/g;
 const joinSeparatedDigits = (text) => text.replace(SEPARATED_DIGIT_RUN_RE, (run) => run.replace(/[\s,-]+/g, ''));
+function cardValueHasNonCardExplanation(nonFragments, calendarSpan, start, end, inherited) {
+  const contextual = nonFragments.some(([spanStart, spanEnd]) => start >= spanStart && end <= spanEnd);
+  return contextual || (Boolean(calendarSpan) && !inherited);
+}
 function cardFragmentsIn(text, precedingReadback = false) {
   const digitParts = String(text || '').split(new RegExp(`(${SENTENCE_SPLIT_RE.source})`));
   const digits = joinSeparatedDigits(digitParts.map((part, index) => (index % 2 ? part : cardSpokenDigits(part))).join(''));
   const nonFragments = CARD_NON_FRAGMENT_RES.flatMap((re) => [...digits.matchAll(re)]
+    .map((match) => [match.index, match.index + match[0].length]));
+  const calendarValues = CARD_CALENDAR_VALUE_RES.flatMap((re) => [...digits.matchAll(re)]
     .map((match) => [match.index, match.index + match[0].length]));
   const expirationValues = [...digits.matchAll(CARD_EXPIRATION_VALUE_RE)].map((match) => {
     const start = match.index + match[0].lastIndexOf(match[1]);
@@ -1327,13 +1340,19 @@ function cardFragmentsIn(text, precedingReadback = false) {
     const priorText = digits.slice(0, clauseStart).replace(/[.!?;—–\s]+$/g, '');
     const priorClause = priorText.split(/[.!?;—–]/).pop() || '';
     const labeledContext = clause.replace(/^\s*it\b/i, `${priorClause} it`);
-    const explained = nonFragments.some(([start, end]) => m.index >= start && m.index + m[0].length <= end);
     const expirationSpan = expirationValues.find(([start, end]) => m.index >= start && m.index + m[0].length <= end);
     const slashedSpan = slashedValues.find(([start, end]) => m.index >= start && m.index + m[0].length <= end);
-    const valueSpan = expirationSpan || slashedSpan;
+    const calendarSpan = calendarValues.find(([start, end]) => m.index >= start && m.index + m[0].length <= end);
+    const valueSpan = [expirationSpan, slashedSpan, calendarSpan].find(Boolean);
     const candidateValue = valueSpan ? digits.slice(...valueSpan) : m[0];
     const precedingValueMatches = Array.isArray(precedingReadback)
       && precedingReadback.some((value) => value.replace(/\D/g, '').includes(candidateValue.replace(/\D/g, '')));
+    // A bare calendar-shaped value is still a card echo when it matches the
+    // caller's expiration. Explicit appointment/date labels and
+    // the other scoped explanations above continue to own their digit runs.
+    const explained = cardValueHasNonCardExplanation(
+      nonFragments, calendarSpan, m.index, m.index + m[0].length, precedingValueMatches,
+    );
     const inheritedReadback = precedingValueMatches
       || (CARD_BARE_FRAGMENT_RE.test(clause)
         && ((clauseStart === 0 && precedingReadback === true) || CARD_READBACK_CUE_RE.test(priorClause)));
