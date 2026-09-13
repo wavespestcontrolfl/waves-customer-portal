@@ -240,10 +240,6 @@ function statusViolations(text, context) {
   for (const sentence of sentences(text)) {
     if (/\b(?:not|never|no longer|isn['’]t|wasn['’]t|hasn['’]t|haven['’]t|didn['’]t|cannot|can['’]t)\b/i.test(sentence)
       && /\b(?:payment|paid|visit|service|appointment|estimate)\b/i.test(sentence)) violations.push('negated_status_unsupported');
-    if (/\b(?:payment|paid)\b/i.test(sentence)
-      && /\b(?:received|processed|successful|succeeded|paid|went through)\b/i.test(sentence)
-      && !statusSupported(sentence, 'recent_payment', context,
-        (fact) => SUCCESS_STATUS_RE.test(String(fact.value?.status || '')))) violations.push('payment_status_unsupported');
 
     if (/\bpayments?\b/i.test(sentence) && !stateWordsSupported(sentence, 'recent_payment', context,
       /\b(?:failed|declined|pending|processing|refunded|reversed|cancelled|canceled|voided)\b/gi)) violations.push('payment_status_unsupported');
@@ -252,13 +248,27 @@ function statusViolations(text, context) {
     if (/\b(?:visit|service|appointment)\b/i.test(sentence) && /\bcompleted\b/i.test(sentence)
       && (/\b(?:next|upcoming)\b/i.test(sentence) || !statusSupported(sentence, 'last_completed_visit', context, () => true))) violations.push('visit_status_unsupported');
 
-    if (/\b(?:visit|service|appointment)\b[^.!?]{0,60}\b(?:confirmed|booked|all set)\b|\b(?:confirmed|booked)\b[^.!?]{0,60}\b(?:visit|service|appointment)\b/i.test(sentence)
-      && !statusSupported(sentence, 'upcoming_visit', context,
-        (fact) => String(fact.value?.status).toLowerCase() === 'confirmed')) violations.push('visit_status_unsupported');
-
-    if (/\bestimate\b[^.!?]{0,40}\b(?:sent|emailed)\b|\b(?:sent|emailed)\b[^.!?]{0,40}\bestimate\b/i.test(sentence)
-      && !statusSupported(sentence, 'pending_estimate', context,
-        (fact) => /^(?:sent|viewed)$/i.test(String(fact.value?.status || '')) && fact.value?.sentAt)) violations.push('estimate_status_unsupported');
+    const statusRules = [
+      {
+        matches: /\b(?:payment|paid)\b/i.test(sentence)
+          && /\b(?:received|processed|successful|succeeded|paid|went through)\b/i.test(sentence),
+        key: 'recent_payment', violation: 'payment_status_unsupported',
+        supports: (fact) => SUCCESS_STATUS_RE.test(String(fact.value?.status || '')),
+      },
+      {
+        matches: /\b(?:visit|service|appointment)\b[^.!?]{0,60}\b(?:confirmed|booked|all set)\b|\b(?:confirmed|booked)\b[^.!?]{0,60}\b(?:visit|service|appointment)\b/i.test(sentence),
+        key: 'upcoming_visit', violation: 'visit_status_unsupported',
+        supports: (fact) => String(fact.value?.status).toLowerCase() === 'confirmed',
+      },
+      {
+        matches: /\bestimate\b[^.!?]{0,40}\b(?:sent|emailed)\b|\b(?:sent|emailed)\b[^.!?]{0,40}\bestimate\b/i.test(sentence),
+        key: 'pending_estimate', violation: 'estimate_status_unsupported',
+        supports: (fact) => /^(?:sent|viewed)$/i.test(String(fact.value?.status || '')) && fact.value?.sentAt,
+      },
+    ];
+    for (const rule of statusRules) {
+      if (rule.matches && !statusSupported(sentence, rule.key, context, rule.supports)) violations.push(rule.violation);
+    }
   }
 
   const balance = factByKey(context, 'outstanding_balance');
