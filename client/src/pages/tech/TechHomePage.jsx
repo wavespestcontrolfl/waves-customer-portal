@@ -556,6 +556,15 @@ export default function TechHomePage({ section = 'today' }) {
   // payload) CONTINUES that report in place — re-opening the create form
   // would mint a duplicate project for the same visit.
   const [continueProjectId, setContinueProjectId] = useState(null);
+  // Mirrors ProjectDetail's dirty state so the editor's close button and
+  // backdrop cannot silently discard report edits.
+  const [projectEditorDirty, setProjectEditorDirty] = useState(false);
+  const closeProjectEditor = useCallback(() => {
+    if (projectEditorDirty && !confirm('Discard unsaved report edits?')) return;
+    setProjectEditorDirty(false);
+    setContinueProjectId(null);
+    fetchSchedule();
+  }, [fetchSchedule, projectEditorDirty]);
   const [projectTypesRegistry, setProjectTypesRegistry] = useState(null);
   useEffect(() => {
     if (!continueProjectId || projectTypesRegistry) return;
@@ -575,6 +584,7 @@ export default function TechHomePage({ section = 'today' }) {
     const linkedStatus = service?.linkedProject?.status;
     if (linkedStatus === 'closed' || linkedStatus === 'sent' || service?.status === 'completed') return;
     if (service?.linkedProject?.id) {
+      setProjectEditorDirty(false);
       setContinueProjectId(service.linkedProject.id);
       return;
     }
@@ -992,7 +1002,7 @@ export default function TechHomePage({ section = 'today' }) {
              (z-50), which mounts LATER at body-end and therefore paints
              above this scrim. A higher z here would bury the dialogs. */
           style={{ position: 'fixed', inset: 0, zIndex: 50, background: 'rgba(0,0,0,0.6)', overflowY: 'auto' }}
-          onClick={() => { setContinueProjectId(null); fetchSchedule(); }}
+          onClick={closeProjectEditor}
         >
           {/* The report editor is a customer-document surface — it renders
               light (V2) over the dark portal, same as the report preview. */}
@@ -1008,7 +1018,8 @@ export default function TechHomePage({ section = 'today' }) {
               <ProjectDetail
                 projectId={continueProjectId}
                 typesRegistry={projectTypesRegistry}
-                onClose={() => { setContinueProjectId(null); fetchSchedule(); }}
+                onDirtyChange={setProjectEditorDirty}
+                onClose={closeProjectEditor}
                 onChanged={() => fetchSchedule()}
                 canAdminActions={getAdminUser()?.role === 'admin'}
               />
