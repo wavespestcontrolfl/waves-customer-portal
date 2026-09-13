@@ -370,22 +370,9 @@ export default function TriageInboxTabV2() {
         setDenyFor(null);
         setDenyFields([]);
         if (kind === "triage") {
-          // A verdict is call-level: the server resolves every open flag for the
-          // call EXCEPT email_bounce_reverify follow-ups (those judge a bounced
-          // address, not the call, and survive on the server) — so drop exactly
-          // the sibling rows the server resolved, and move that many.
-          const wasResolved = (i) =>
-            i.call_log_id === item.call_log_id
-            && i.reason_code !== "email_bounce_reverify"
-            && i.reason_code !== "property_role_confirm";
-          const removed = items.filter(wasResolved).length || 1;
-          setItems((prev) => prev.filter((i) => !wasResolved(i)));
-          setCounts((prev) => {
-            const c = { ...prev };
-            if (c[status] != null) c[status] = Math.max(0, c[status] - removed);
-            if (c.resolved != null) c.resolved += removed;
-            return c;
-          });
+          // The server decides which call siblings a verdict resolves. Reload
+          // so proposals attached after this render remain visible too.
+          load(mode, status);
         } else {
           // Auto-routed list keeps the row; just stamp the verdict locally.
           setItems((prev) => prev.map((i) =>
@@ -422,6 +409,32 @@ export default function TriageInboxTabV2() {
       .catch((err) => {
         setActioning(null);
         setDismissFor(null);
+        if (err?.status === 409) {
+          load(mode, status);
+          setError("This card changed since it loaded — review the refreshed proposals before dismissing.");
+          return;
+        }
+        setError(isRateLimitError(err) ? "You're going too fast — try again in a few seconds." : "Action failed — try again.");
+      });
+  };
+
+  const dismissRescheduleProposal = (item) => {
+    setActioning(item.id);
+    adminFetch(`/admin/call-recordings/proposals/${item.id}/dismiss`, {
+      method: "POST",
+      body: JSON.stringify({ expected_at: item.updated_at }),
+    })
+      .then(() => {
+        setActioning(null);
+        setItems((prev) => prev.filter((i) => i.id !== item.id));
+        setCounts((prev) => ({
+          ...prev,
+          [status]: Math.max(0, (prev[status] || 0) - 1),
+          dismissed: (prev.dismissed || 0) + 1,
+        }));
+      })
+      .catch((err) => {
+        setActioning(null);
         if (err?.status === 409) {
           load(mode, status);
           setError("This card changed since it loaded — review the refreshed proposals before dismissing.");
@@ -606,6 +619,7 @@ export default function TriageInboxTabV2() {
                 // click instead of an accept/deny verdict (the server rejects
                 // verdicts on them, same as bounce cards).
                 const isPropertyRoleCard = isTriage && item.reason_code === "property_role_confirm";
+                const isRescheduleProposal = isTriage && !!parsePayload(item.payload)?.reschedule_proposal;
                 // While the re-transcription is still running the card is a
                 // placeholder — resolving it would bury the candidates the
                 // worker is about to write (the worker reopens a card closed
@@ -639,7 +653,7 @@ export default function TriageInboxTabV2() {
                               on the call's ROUTING card would render here as if
                               it judged this still-pending property card — the
                               two resolve independently. */}
-                          {!isPropertyRoleCard && (
+                          {!isPropertyRoleCard && !isRescheduleProposal && (
                             <VerdictBadge verdict={item.feedback_verdict} wrongFields={item.feedback_wrong_fields} />
                           )}
                         </div>
@@ -660,12 +674,12 @@ export default function TriageInboxTabV2() {
                               size="sm"
                               variant="secondary"
                               disabled={actioning === busyKey}
-                              onClick={() => setDismissFor(item)}
+                              onClick={() => isRescheduleProposal ? dismissRescheduleProposal(item) : setDismissFor(item)}
                             >
                               <XCircle size={13} strokeWidth={1.75} className="mr-1" aria-hidden /> Dismiss
                             </Button>
                           )}
-                          {isPropertyRoleCard ? (
+                          {isRescheduleProposal ? null : isPropertyRoleCard ? (
                             <Button
                               size="sm"
                               variant="primary"
