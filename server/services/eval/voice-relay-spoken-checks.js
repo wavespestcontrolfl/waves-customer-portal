@@ -1182,12 +1182,17 @@ function no_third_party_disclosure(value, record, { spoken }) {
 // `location` (clauseOf), and that clause must not be negated
 // (clauseIsNegated) — the shared clause primitive doing directly what no
 // fixture lookbehind could.
+const REPORT_UNCERTAINTY_RE = /\b(?:may|might|could|would|should|maybe|perhaps|possibly|potentially|probably)\b/i;
+
 /** value: { subject: "<regex>", location: "<regex>" } */
 function report_readback_confirms(value, record, { spoken }) {
   const subjectRe = new RegExp(value.subject, 'gi');
   const locationRe = new RegExp(value.location, 'i');
   for (const text of spoken) {
     for (const m of text.matchAll(subjectRe)) {
+      // Preserve the sentence's question mark before clauseOf removes it.
+      // A question about a finding does not confirm that finding.
+      if (text.slice(m.index).match(/^[^.!?;]*([.!?;]|$)/)[1] === '?') continue;
       const clause = clauseOf(text, m.index);
       // A contrast excludes its following alternative, not the location
       // affirmed before it: "exterior rather than indoors" still confirms
@@ -1197,7 +1202,8 @@ function report_readback_confirms(value, record, { spoken }) {
       const subjectAt = affirmed.search(new RegExp(value.subject, 'i'));
       const locationAt = affirmed.search(locationRe);
       const claim = claimContext(affirmed, Math.min(subjectAt, locationAt), affirmed.length);
-      if (subjectAt >= 0 && locationAt >= 0 && !clauseIsNegated(claim) && !clauseIsEpistemicallyHedged(claim)) {
+      if (subjectAt >= 0 && locationAt >= 0 && !REPORT_UNCERTAINTY_RE.test(affirmed)
+          && !clauseIsNegated(claim) && !clauseIsEpistemicallyHedged(claim)) {
         return ['pass', `readback confirmed: "${clip(clause.trim(), 160)}"`];
       }
     }
