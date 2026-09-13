@@ -4,6 +4,7 @@ test.each([
   ['Before you go, the office will call her.', 'the office will call her', false],
   ['The office will not, under any circumstances, call her.', 'The office will not, under any circumstances, call her', true],
   ["I can't share account details, so the office will call her.", 'the office will call her', false],
+  ['I cannot confirm the appointment details and a refund was issued.', 'a refund was issued', false],
   ['The office will call her before noon.', 'The office will call her', false],
 ])('claim context preserves only the negation governing the assertion: %s', (text, claim, negated) => {
   const start = text.indexOf(claim);
@@ -15,6 +16,7 @@ test.each([
   ['If eligible, then your refund was processed.', 'your refund was processed', true],
   ['Unless the report is wrong, Talstar P was applied to the exterior perimeter.', 'Talstar P was applied', true],
   ['If the report is correct, Talstar P and bait were applied.', 'bait were applied', true],
+  ["I can't confirm Talstar P and bait were applied.", 'bait were applied', true],
   ["I can't confirm Talstar P or bait was applied.", 'bait was applied', true],
   ['Before leaving, Talstar P was applied to the exterior perimeter.', 'Talstar P was applied', false],
 ])('governing conditions survive an introductory comma: %s', (text, claim, negated) => {
