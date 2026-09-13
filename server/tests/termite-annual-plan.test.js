@@ -318,7 +318,7 @@ describe('replay-stamp provenance (pre-push audit #4424)', () => {
       result: { lineItems: [{ service: 'termite_bait', plan: 'quarterly', system: 'trelona', stations: 15, pricingKnobs: { system: 'trelona', stationCost: 24 } }] },
     };
     const replayed = extractEngineInputs(quarterlySold);
-    expect(replayed.termitePricingKnobs.plan).toBeUndefined();
+    expect(replayed.termitePricingKnobs.plan).toBe('quarterly');
     expect(termiteLine(generateEstimate(replayed)).plan).toBe('quarterly');
 
     // Positive control: the SAME reader returns the plan stamp when the
@@ -330,6 +330,32 @@ describe('replay-stamp provenance (pre-push audit #4424)', () => {
     };
     expect(extractEngineInputs(planSold).termitePricingKnobs.plan).toBe('annual_protection');
     expect(termiteLine(generateEstimate(extractEngineInputs(planSold))).plan).toBe('annual_protection');
+  });
+
+  test('a quarterly quote issued with the gate off stays quarterly after the gate turns on', () => {
+    const { extractEngineInputs } = require('../routes/estimate-public');
+    const inputs = HOME(2000, { services: { termite: { system: 'trelona', plan: 'annual_protection' } } });
+    delete process.env.GATE_TERMITE_ANNUAL_PLAN;
+    const issued = termiteLine(generateEstimate(inputs));
+    expect(issued).toMatchObject({ plan: 'quarterly', visitsPerYear: 4, annual: 288 });
+    expect(issued.installation).toMatchObject({ kind: 'install', price: 653 });
+    expect(issued.pricingKnobs.plan).toBe('quarterly');
+
+    // Admin V2 persists the mapped envelope, so exercise the production
+    // representation rather than relying only on the raw-line reader.
+    const mapped = mapV1ToLegacyShape(generateEstimate(inputs));
+    expect(mapped.results.tmBait.pricingKnobs.plan).toBe('quarterly');
+    const stored = { engineInputs: inputs, result: mapped };
+    process.env.GATE_TERMITE_ANNUAL_PLAN = 'true';
+    try {
+      const replayInput = extractEngineInputs(stored);
+      expect(replayInput.termitePricingKnobs.plan).toBe('quarterly');
+      const replayed = termiteLine(generateEstimate(replayInput));
+      expect(replayed).toMatchObject({ plan: 'quarterly', visitsPerYear: 4, annual: 288 });
+      expect(replayed.installation).toMatchObject({ kind: 'install', price: 653 });
+    } finally {
+      delete process.env.GATE_TERMITE_ANNUAL_PLAN;
+    }
   });
 
   test('the admin quick-quote sandbox strips the same stamp — gate off, no annual-plan pricing', async () => {

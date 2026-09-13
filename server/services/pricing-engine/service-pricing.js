@@ -4834,7 +4834,11 @@ function resolveTermiteProgram({ isAnnualPlan, annualPlan, stations, installPric
     monitoringModel: 'station_brackets',
     perApp: Math.round(monitoringMonthly * (12 / TERMITE.monitoringVisitsPerYear) * 100) / 100,
     planFields: {},
-    planKnobs: {},
+    // Stamp the billed program even when the annual-plan gate is off. A
+    // saved request can still contain plan='annual_protection'; replay must
+    // therefore use the stored RESULT's quarterly identity rather than a
+    // later live gate that would reinterpret the original request.
+    planKnobs: { plan: 'quarterly' },
   };
 }
 

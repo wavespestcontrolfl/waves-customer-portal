@@ -1071,7 +1071,14 @@ function generateEstimate(input) {
       // in-flight contracts to the quarterly program (codex #4424 r2 P0).
       const replayedPlan = input.termitePricingKnobs && typeof input.termitePricingKnobs === 'object'
         && input.termitePricingKnobs.plan === 'annual_protection';
-      const wantsAnnualPlan = (planGateOn || replayedPlan) && String(termiteOptions.plan || '').toLowerCase() === 'annual_protection';
+      // The stored RESULT also stamps quarterly. That negative evidence must
+      // outrank a later live gate: a request made while the gate was off can
+      // legitimately retain plan='annual_protection' in its stored inputs,
+      // but the issued quote was still install + four quarterly checks.
+      const replayedQuarterly = input.termitePricingKnobs && typeof input.termitePricingKnobs === 'object'
+        && input.termitePricingKnobs.plan === 'quarterly';
+      const wantsAnnualPlan = !replayedQuarterly && (planGateOn || replayedPlan)
+        && String(termiteOptions.plan || '').toLowerCase() === 'annual_protection';
       const wantsRental = !wantsAnnualPlan && rentalGateOn && String(termiteOptions.ownership || '').toLowerCase() === 'rent';
       const result = priceTermiteBait(property, {
         ...termiteOptions,
