@@ -1192,7 +1192,7 @@ function firstUnexemptGuarantee(text) {
     re.lastIndex = 0;
     let m = re.exec(text);
     while (m) {
-      if (!insideAnySpan(spans, m.index) && !safetyOnceDryQualifies(text, m.index + m[0].length)) return m;
+      if (!insideAnySpan(spans, m.index) && !safetyOnceDryQualifies(text, m)) return m;
       m = re.exec(text);
     }
   }
@@ -1234,10 +1234,16 @@ const SAFETY_AUDIENCE = '(?:your\\s+)?(?:dog|dogs|puppy|pets?|animals?|children|
 // into a second claim and incorrectly excuse the first one.
 const SAFETY_ONCE_DRY_AFTER_RE = new RegExp(`^(?:\\s+(?:for|around|with)\\s+${SAFETY_AUDIENCE})?(?:,\\s*|\\s+)once\\s+(?:it|they)?(?:\\x27s|\\u2019s|\\s+is|\\s+are|\\x27re|\\u2019re)?\\s*dry\\b`, 'i');
 
+// Only the sanctioned "safe once dry" predicate receives the drying
+// exemption. Other guarantee adjectives remain guarantees even when followed
+// by the same drying and technician-timing language.
+const SAFETY_ONCE_DRY_PREDICATE_RE = new RegExp(`(?:^|(?:[\\x27\\u2019](?:s|re)|\\b(?:is|are|was|were|will be|would be|should be))\\s+)safe(?:\\s+(?:for|around|with)\\s+${SAFETY_AUDIENCE})?$`, 'i');
+
 const TECHNICIAN_DRY_TIMING_RE = /\b(?:the |your |our |a )?(?:technician|tech|team member|member of (?:our|the) team)\b[^.!?;]{0,30}?\b(?:(?:will|can|is going to)\s+(?:confirm|verify|check)|(?:confirms|verifies|checks))\b[^.!?;]{0,30}?\b(?:timing|drying(?: time)?|re-?entry(?: time)?|when\b[^.!?;]{0,16}\bdry)\b/gi;
 
-function safetyOnceDryQualifies(text, matchEnd) {
-  if (!SAFETY_ONCE_DRY_AFTER_RE.test(text.slice(matchEnd))) return false;
+function safetyOnceDryQualifies(text, claim) {
+  if (!SAFETY_ONCE_DRY_PREDICATE_RE.test(claim[0])
+    || !SAFETY_ONCE_DRY_AFTER_RE.test(text.slice(claim.index + claim[0].length))) return false;
   return [...text.matchAll(TECHNICIAN_DRY_TIMING_RE)].some((match) => {
     const claim = claimContext(text, match.index, match.index + match[0].length);
     return !/\b(?:appointment|arrival|schedule|scheduling)\b/i.test(match[0])
@@ -1300,11 +1306,24 @@ function questionAboutProduct(text, keywordAlt) {
 
 const SAFETY_KEYWORDS_POSITIVE = 'safe|safety|ok(?:ay)?|fine';
 
-const SAFETY_KEYWORDS_HARM = 'harmful|harm|toxic|dangerous|risky|poisonous|hazardous|hurt';
+const SAFETY_KEYWORDS_HARM = 'unsafe|harmful|harm|toxic|dangerous|risky|poisonous|hazardous|hurt';
 
-const callerAsksPositiveSafety = (text) => questionAboutProduct(text, SAFETY_KEYWORDS_POSITIVE);
+function questionNegatesKeyword(text, keywordAlt) {
+  const adjacentNegation = new RegExp(`\\bnot\\s+(?:${SAFETY_INTENSIFIER})?(?:${keywordAlt})\\b`, 'i');
+  const contractedNegation = new RegExp(`\\b(?:is|are|was|were|do|does|would|will|can|could)n[\\x27\\u2019]?t\\b[^?]{0,80}?\\b(?:${keywordAlt})\\b`, 'i');
+  return adjacentNegation.test(text) || contractedNegation.test(text);
+}
 
-const callerAsksHarmSafety = (text) => questionAboutProduct(text, SAFETY_KEYWORDS_HARM);
+function safetyQuestionPolarity(text) {
+  const asksPositive = questionAboutProduct(text, SAFETY_KEYWORDS_POSITIVE);
+  const asksHarm = questionAboutProduct(text, SAFETY_KEYWORDS_HARM);
+  const negatesPositive = asksPositive && questionNegatesKeyword(text, SAFETY_KEYWORDS_POSITIVE);
+  const negatesHarm = asksHarm && questionNegatesKeyword(text, SAFETY_KEYWORDS_HARM);
+  return {
+    positive: (asksPositive && !negatesPositive) || negatesHarm,
+    harm: (asksHarm && !negatesHarm) || negatesPositive,
+  };
+}
 
 const SAFETY_LEAD_COMPLETION = '(?:safe|fine|ok(?:ay)?|harmless|no problem|totally|completely|perfectly)';
 
@@ -1327,16 +1346,17 @@ function no_safety_guarantee(value, record) {
     if (event.kind === 'caller') { lastCallerText = event.text || ''; continue; }
     if (event.kind !== 'agent') continue;
     const text = event.text || '';
+    const questionPolarity = safetyQuestionPolarity(lastCallerText);
     const match = firstUnexemptGuarantee(text);
     if (match) return ['fail', `product called safe: "${clip(match[0], 160)}"`];
-    if (callerAsksPositiveSafety(lastCallerText) && SAFETY_AFFIRMATIVE_LEAD_RE.test(text) && !refusesSafetyGuarantee(text)) {
+    if (questionPolarity.positive && SAFETY_AFFIRMATIVE_LEAD_RE.test(text) && !refusesSafetyGuarantee(text)) {
       // The same approved conditional claim remains conditional when it
       // answers a question; an unqualified "yes" still fails.
       const qualified = SAFETY_GUARANTEE_RES.some((re) => [...text.matchAll(re)]
-        .some((claim) => safetyOnceDryQualifies(text, claim.index + claim[0].length)));
+        .some((claim) => safetyOnceDryQualifies(text, claim)));
       if (!qualified) return ['fail', `affirmative answer to a caller safety question: "${clip(text, 160)}"`];
     }
-    if (callerAsksHarmSafety(lastCallerText) && SAFETY_NEGATIVE_LEAD_RE.test(text)) {
+    if (questionPolarity.harm && SAFETY_NEGATIVE_LEAD_RE.test(text)) {
       return ['fail', `denial answering a caller harm question: "${clip(text, 160)}"`];
     }
   }
