@@ -3,7 +3,7 @@
 // the replay context never carries products or notes, deltas / rates / cost /
 // variance are computed as documented, and the runner degrades honestly (a
 // case whose photos cannot be read is skipped, never analyzed on partial input).
-jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));
+jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn(), clear: jest.fn().mockReturnValue({ add: jest.fn() }) }));
 jest.mock('../models/db', () => { const db = () => ({}); db.raw = () => ({}); db.schema = {}; return db; });
 jest.mock('../services/llm/call', () => ({ ...jest.requireActual('../services/llm/call'), dispatchWithFallback: jest.fn() }));
 jest.mock('knex', () => jest.fn());
@@ -423,6 +423,24 @@ describe('ops/agents/lawn-visit-assessment-eval.js (the operator script)', () =>
     // The script is a module for tests and a program for operators.
     expect(src).toMatch(/if \(require\.main === module\) \{/);
   });
+});
+
+test('real provider logger keeps warning and error output out of the JSON document', () => {
+  const { spawnSync } = require('child_process');
+  const path = require('path');
+  const child = spawnSync(process.execPath, ['-e', `
+    require('./ops/agents/lawn-visit-assessment-eval')._internals.configureReplayLogging();
+    const logger = require('./server/services/logger');
+    logger.warn('synthetic provider fallback');
+    logger.error('synthetic provider failure');
+    logger.info('synthetic replay progress');
+    process.stdout.write(JSON.stringify({ results: [], status: 'unavailable' }));
+  `], { cwd: path.resolve(__dirname, '../..'), encoding: 'utf8', env: { ...process.env, NODE_ENV: 'test', LOG_LEVEL: 'info' } });
+  expect(child.status).toBe(0);
+  expect(JSON.parse(child.stdout)).toEqual({ results: [], status: 'unavailable' });
+  expect(child.stderr).toContain('synthetic provider fallback');
+  expect(child.stderr).toContain('synthetic provider failure');
+  expect(child.stderr).toContain('synthetic replay progress');
 });
 
 describe('runner', () => {

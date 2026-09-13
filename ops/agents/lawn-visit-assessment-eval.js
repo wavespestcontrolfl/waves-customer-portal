@@ -176,11 +176,19 @@ function assertNoLedgerWrites(gates, when) {
   }
 }
 
+function configureReplayLogging() {
+  const winston = require('winston');
+  const logger = require(path.join(REPO, 'server/services/logger'));
+  // stdout is the report document, including when a provider warns or fails.
+  logger.clear().add(new winston.transports.Console({ stderrLevels: Object.keys(winston.config.npm.levels) }));
+}
+
 async function runReplay(args) {
   // NO DB WRITES. The dispatcher's ledger + chain rows are written whenever
   // these gates resolve enabled. server/config (dotenv) loads before the
   // gates are cleared, so nothing can refill them afterwards.
   const config = require(path.join(REPO, 'server/config'));
+  configureReplayLogging();
   for (const gate of LEDGER_GATES) delete process.env[gate];
   // The registry reads the selector at load: a nonexistent Gemini id makes
   // every primary leg miss so the GPT-6 Astra fallback carries the run.
@@ -244,4 +252,4 @@ if (require.main === module) {
   });
 }
 
-module.exports = { _internals: { parseArgs, ARG_SPECS, exportFixture, runReplay } };
+module.exports = { _internals: { parseArgs, ARG_SPECS, exportFixture, runReplay, configureReplayLogging } };
