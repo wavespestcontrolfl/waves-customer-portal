@@ -117,8 +117,12 @@ async function stampSendMarker() {
 }
 
 // Pure composition: null = nothing worth an email (the common, quiet case).
+function validSamples(rows) {
+  return (rows || []).filter((row) => Number.isFinite(Number(row.turf_delta_pct)));
+}
+
 function composeTurfVarianceDigest(rows, { thresholdPct = alertPct(), samplesFloor = minSamples() } = {}) {
-  const samples = (rows || []).filter((row) => Number.isFinite(Number(row.turf_delta_pct)));
+  const samples = validSamples(rows);
   if (samples.length < samplesFloor) return null;
   const avg = samples.reduce((sum, row) => sum + Number(row.turf_delta_pct), 0) / samples.length;
   if (Math.abs(avg) < thresholdPct) return null;
@@ -171,7 +175,9 @@ async function runTurfVarianceDigest(opts = {}) {
 
   const composed = composeTurfVarianceDigest(rows, opts.thresholds || {});
   if (!composed) {
-    await retireIfClean('turf-variance'); // fall-off: variance back inside threshold
+    const samplesFloor = opts.thresholds?.samplesFloor ?? minSamples();
+    if (validSamples(rows).length < samplesFloor) return { skipped: 'insufficient_samples' };
+    await retireIfClean('turf-variance'); // measured variance back inside threshold
     return { skipped: 'within_threshold' };
   }
 

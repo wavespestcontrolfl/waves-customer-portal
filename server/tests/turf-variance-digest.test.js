@@ -11,8 +11,10 @@ jest.mock('../models/db', () => {
   const qb = () => { throw new Error('db must not be touched when loadRows is injected'); };
   return qb;
 });
+jest.mock('../services/ops-digest-fall-off', () => ({ retireIfClean: jest.fn(async () => {}) }));
 
 const logger = require('../services/logger');
+const { retireIfClean } = require('../services/ops-digest-fall-off');
 const sendgrid = require('../services/sendgrid-mail');
 const {
   runTurfVarianceDigest,
@@ -126,6 +128,14 @@ describe('runTurfVarianceDigest', () => {
     const result = await runTurfVarianceDigest({ loadRows: async () => [row(2), row(-3), row(1)] });
     expect(result.skipped).toBe('within_threshold');
     expect(sendgrid.sendOne).not.toHaveBeenCalled();
+    expect(retireIfClean).toHaveBeenCalledWith('turf-variance');
+  });
+
+  test('an under-sampled window does not count as measured recovery', async () => {
+    const result = await runTurfVarianceDigest({ loadRows: async () => [row(80), row(90)] });
+    expect(result.skipped).toBe('insufficient_samples');
+    expect(sendgrid.sendOne).not.toHaveBeenCalled();
+    expect(retireIfClean).not.toHaveBeenCalled();
   });
 
   test('kill switch skips the send but still reports what it would have said', async () => {

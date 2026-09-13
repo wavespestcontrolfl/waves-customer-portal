@@ -318,7 +318,7 @@ function digestItem(row) {
     subtitle: [meta.opsKey ? humanize(meta.opsKey) : 'digest', resolved ? 'cleared' : isAct ? 'needs you' : isFix ? 'needs a fix' : 'FYI'].join(' · '),
     status,
     startedAt: iso(row.created_at),
-    finishedAt: row.read_at ? iso(row.read_at) : null,
+    finishedAt: resolved && meta.resolvedAt ? iso(meta.resolvedAt) : row.read_at ? iso(row.read_at) : null,
     durationMs: null,
     steps: [],
     stepsDone: status === 'completed' ? 1 : 0,

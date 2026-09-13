@@ -488,7 +488,10 @@ async function runParkedRunDigest(opts = {}) {
   // (Codex r1). Every survivor is post-watermark by construction.
   const stale = staleAll.filter(isNew).map((item) => ({ ...item, is_new: true }));
   if (active.length + stale.length === 0) {
-    await retireIfClean('parked-run-digest'); // fall-off: nothing parked (not on no_new_parks — rows still exist there)
+    // The watermark can hide older stale parks from this send without
+    // clearing the underlying finding. Retire only when the source is empty.
+    if (activeAll.length + staleAll.length > 0) return { skipped: 'no_new_parks' };
+    await retireIfClean('parked-run-digest');
     return { skipped: 'no_parked_runs' };
   }
   const newCount = [...active, ...stale].filter((item) => item.is_new).length;

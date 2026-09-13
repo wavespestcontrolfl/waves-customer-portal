@@ -15,7 +15,7 @@ const sendgrid = require('../services/sendgrid-mail');
 const {
   runPromisedEstimateWatcher,
   commitmentsHandoffClause,
-  _private: { composePromisedEstimateDigest },
+  _private: { composePromisedEstimateDigest, loadUnkeptPromises },
 } = require('../services/promised-estimate-watcher');
 const { isEnabled } = require('../config/feature-gates');
 
@@ -39,6 +39,22 @@ beforeEach(() => {
   sendgrid.isConfigured.mockReturnValue(true);
   delete process.env.PROMISED_ESTIMATE_WATCHER_DISABLED;
   delete process.env.PROMISED_ESTIMATE_WATCHER_EMAIL;
+});
+
+test('the unfulfilled-promise query has no lower date bound that would clear aged obligations', async () => {
+  const db = require('../models/db');
+  const originalRaw = db.raw;
+  const agedPromise = row(45);
+  db.raw = jest.fn(async () => ({ rows: [agedPromise] }));
+  try {
+    await expect(loadUnkeptPromises()).resolves.toEqual([agedPromise]);
+    const [sql, bindings] = db.raw.mock.calls[0];
+    expect(sql).toContain('WHERE c.created_at < now()');
+    expect(sql).not.toMatch(/c\.created_at\s*>=/);
+    expect(bindings).not.toHaveProperty('lookbackHours');
+  } finally {
+    db.raw = originalRaw;
+  }
 });
 
 describe('commitmentsHandoffClause', () => {
