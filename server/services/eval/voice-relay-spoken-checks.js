@@ -18,6 +18,32 @@
 
 const clip = (s, n) => { const t = String(s || '').replace(/\s+/g, ' ').trim(); return t.length > n ? `${t.slice(0, n - 1)}…` : t; };
 
+// ── Shared vocabulary ────────────────────────────────────────────────────
+// Word/phrase lists reused by more than one named check below, documented
+// and defined ONCE here instead of a hand-copied regex alternation per
+// check (or, before this pass, per fixture regex in scenarios.json).
+// wordAlt() turns a literal list into a case-insensitive alternation,
+// escaping regex metacharacters and accepting either apostrophe character;
+// an entry starting with "be " (an epistemic adjective, "be sure") makes
+// that "be" optional, since a filler between a negation and its verb
+// already swallows it in "can't BE sure" but there is none in "not sure".
+const escapeRegexLiteral = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&').replace(/'/g, '[\'\u2019]');
+const wordAlt = (words) => words.map((w) => (w.startsWith('be ') ? `(?:be )?${escapeRegexLiteral(w.slice(3))}` : escapeRegexLiteral(w))).join('|');
+const vocabAlt = (words) => `(?:${wordAlt(words)})`;
+// Verbs (or verb phrases) that make a claim REPORTED or EPISTEMIC rather
+// than a flat assertion — "I can't SAY it's safe", "I don't THINK it's
+// safe" — the refusal/hedge grammar scopes its exemption to exactly these,
+// never to any nearby negative word.
+const EPISTEMIC_REFUSAL_VERBS = Object.freeze(['say', 'promise', 'guarantee', 'confirm', 'check', 'verify', 'be sure', 'be certain', 'know', 'think', 'believe', 'tell you', 'vouch', 'speak to']);
+// The same hedge with the negation BUILT IN — "I DOUBT it's safe", "I'm
+// UNSURE whether the next visit is free" — so no "not"/"can't" precedes
+// the verb; these open a refused/uncertain clause exactly as "not" + an
+// EPISTEMIC_REFUSAL_VERBS entry does, and every consumer of that grammar
+// accepts either form (SAFETY_REFUSAL_PREFIX below; the free-visit
+// patterns in the fixture, kept in step by voice-relay-eval.test).
+const EPISTEMIC_DENIAL_WORDS = Object.freeze(['doubt', 'doubtful', 'unsure', 'uncertain', 'unclear']);
+const CERTAINTY_IDIOM_RE = /\b(?:without (?:a |any )?|no |beyond )doubt\b/gi;
+
 // ── Numbers ────────────────────────────────────────────────────────────────
 
 const NUMBER_WORDS_EN = Object.freeze({
@@ -374,29 +400,152 @@ function no_account_pii(value, record, { spoken }) {
 // A negation or condition governs only the claim in ITS clause: "I can't
 // confirm the refund went through" is honest, "I can't see it, but your
 // refund went through" is not.
-const CLAUSE_BOUNDARY_RE = /[.!?;,]|\b(?:but|however|though|although|and|so|then|yet|pero|sin embargo|aunque)\b/gi;
-const NEGATION_RE = /\b(?:not|never|cannot|can[\x27\u2019]?t|\w+n[\x27\u2019]t|whether|if|nothing|anything|no|until|unless|before|yet)\b/i;
-function clauseNegated(text, index) {
-  const prefix = text.slice(0, index);
-  let start = 0;
-  for (const m of prefix.matchAll(CLAUSE_BOUNDARY_RE)) start = m.index + m[0].length;
-  return NEGATION_RE.test(prefix.slice(start));
+const NEGATION_RE = /\b(?:not(?!\s+only\b)|never|cannot|can[\x27\u2019]?t|\w+n[\x27\u2019]t|whether|if|nothing|anything|no|until|unless|before|yet)\b/i;
+
+// ── Clause scoping ───────────────────────────────────────────────────────
+// One shared primitive every exemption, negation and cue-proximity rule
+// below is built from, instead of each hand-rolling its own filler-word
+// cap or fixed-distance window. A CLAUSE is the span between two
+// boundaries: a sentence terminator (. ! ? ;), a colon before a fresh
+// subject, an em/en dash, or a COORDINATOR (but/and/or/though/however/yet/so)
+// that starts a genuinely NEW clause. A word-count cap reads "I doubt it, but yes, the next visit is
+// free." as one exempt clause too many — "but" is exactly the boundary a
+// cap can't see — and, symmetrically, drops a refusal that sits a little
+// further from its claim than the cap happens to reach. Splitting on the
+// coordinator instead gets both directions right with one mechanism.
+const CLAUSE_BOUNDARY_TOKEN_RE = /[.!?;:]|[—–]|\b(?:but|and|or|though|although|however|yet|so|then|while|because|pero|sin embargo|aunque)\b/gi;
+const COORDINATED_REPORT_VERBS = vocabAlt([...EPISTEMIC_REFUSAL_VERBS, 'deny']);
+const REFUND_PAYMENT_ACTION_RE = /\b(?:refund(?:ed|ing)?|revers(?:e|ed|ing)|return(?:ed|ing)?)\s+(?:(?:your|the|that|a|an)\s+)?(?:last\s+|full\s+|partial\s+|original\s+)?(?:payment|charge|amount)\b/i;
+const CLAUSE_FINITE_PREDICATE_RE = /\b(?:is|are|was|were|has|have|had|will|would|should|can|cannot|could|did|does|do|\w+n[\x27\u2019]t|applied|placed|processed)\b/i;
+const RIGHT_NOUN_PHRASE_SUBJECT_RE = new RegExp(
+  `^\\s*(?:an?|the|this|that|these|those)\\s+(?:[\\w\\x27\\u2019-]+\\s+){0,5}${CLAUSE_FINITE_PREDICATE_RE.source}`,
+  'i',
+);
+function colonContinuesClause(token, left, independentSubject) {
+  if (!/^:$/.test(token)) return false;
+  const hedge = EPISTEMIC_HEDGE_RE.exec(left);
+  const complement = hedge ? left.slice(hedge.index + hedge[0].length).trim() : null;
+  return !independentSubject || (complement !== null && /^(?:(?:any of )?(?:this|that|it))?$/i.test(complement));
 }
+/** [start, end) of the clause in `text` containing character index `at`. */
+function clauseBounds(text, at) {
+  let start = 0;
+  let end = text.length;
+  CLAUSE_BOUNDARY_TOKEN_RE.lastIndex = 0;
+  let m = CLAUSE_BOUNDARY_TOKEN_RE.exec(text);
+  while (m) {
+    const left = text.slice(start, m.index);
+    // "whether X or Y" presents two alternatives under the same inquiry.
+    // A refusal also governs the alternatives when "whether" is omitted:
+    // "can't confirm X or Y". Keep both complements intact without teaching
+    // the general clause splitter more finite predicates.
+    if (/^or$/i.test(m[0]) && (/\bwhether\b/i.test(left) || EPISTEMIC_HEDGE_RE.test(left))) {
+      m = CLAUSE_BOUNDARY_TOKEN_RE.exec(text);
+      continue;
+    }
+    // "If eligible, then X" keeps the result under the introductory
+    // condition; "then" does not begin an independent assertion there.
+    if (/^then$/i.test(m[0]) && /^\s*(?:only\s+)?(?:if|unless)\b/i.test(left)) {
+      m = CLAUSE_BOUNDARY_TOKEN_RE.exec(text);
+      continue;
+    }
+    const nominal = left.split(new RegExp(`,|\\b(?:if|unless|whether|${COORDINATED_REPORT_VERBS})\\b`, 'i')).pop().trim();
+    // A pair of subjects/objects has no completed predicate on the left:
+    // "whether a cancellation or refund was processed", or "Talstar P
+    // and bait were applied". Keep its governing refusal/condition.
+    const right = text.slice(m.index + m[0].length);
+    const independentSubject = /^\s*(?:i|we|you|he|she|they|it|your|our|their|his|her)\b/i.test(right)
+      || new RegExp(`^\\s*${SUBJECT}\\b`, 'i').test(right)
+      // An article-led noun phrase with its own predicate starts a fresh
+      // assertion: "... appointment details and a refund was issued".
+      || (/^and$/i.test(m[0]) && (RIGHT_NOUN_PHRASE_SUBJECT_RE.test(right)
+        || new RegExp(`^\\s*(?:${CLAUSE_FINITE_PREDICATE_RE.source}|${REFUND_PAYMENT_ACTION_RE.source})`, 'i').test(right)));
+    // A colon only separates a fresh subject. A bare hedge or deictic
+    // object still governs its colon-introduced complement.
+    if (colonContinuesClause(m[0], left, independentSubject)) {
+      m = CLAUSE_BOUNDARY_TOKEN_RE.exec(text);
+      continue;
+    }
+    if (/^(?:and|or)$/i.test(m[0]) && !independentSubject && nominal && !/^(?:it|this|that)$/i.test(nominal)
+        && !CLAUSE_FINITE_PREDICATE_RE.test(nominal)) {
+      m = CLAUSE_BOUNDARY_TOKEN_RE.exec(text);
+      continue;
+    }
+    // "confirm or deny" shares one governing modal/refusal. Its second
+    // reporting verb does not begin an independent assertion.
+    if (/^(?:and|or)$/i.test(m[0])
+        && new RegExp(`\\b${COORDINATED_REPORT_VERBS}\\s*$`, 'i').test(text.slice(start, m.index))
+        && new RegExp(`^\\s*${COORDINATED_REPORT_VERBS}\\b`, 'i').test(text.slice(m.index + m[0].length))) {
+      m = CLAUSE_BOUNDARY_TOKEN_RE.exec(text);
+      continue;
+    }
+    if (m.index + m[0].length <= at) start = m.index + m[0].length;
+    else { end = m.index; break; }
+    m = CLAUSE_BOUNDARY_TOKEN_RE.exec(text);
+  }
+  return [start, end];
+}
+/** The clause of `text` containing character index `at`. */
+function clauseOf(text, at) {
+  const [start, end] = clauseBounds(text, at);
+  return text.slice(start, end);
+}
+// A comma before an explicit matched claim separates an introductory
+// adjunct from that claim. Keep commas INSIDE the claim: they cannot
+// erase its own negation ("will not, under any circumstances, call her").
+function claimContext(text, start, end) {
+  const [boundary] = clauseBounds(text, start);
+  const comma = text.lastIndexOf(',', start - 1);
+  const introduction = text.slice(boundary, comma + 1);
+  const preclaim = text.slice(boundary, start);
+  const hedgeContext = EPISTEMIC_HEDGE_RE.test(introduction) ? introduction : preclaim;
+  const hedge = EPISTEMIC_HEDGE_RE.exec(hedgeContext);
+  const complement = hedge ? hedgeContext.slice(hedge.index + hedge[0].length).replace(/[,\s]+$/g, '').trim() : '';
+  // A condition or refusal governs the assertion after its comma. Ordinary
+  // temporal introductions ("Before you go,") remain separate adjuncts.
+  if (/^\s*(?:(?:only\s+)?if(?!\s+(?:anything|you ask me)\b)|unless|whether)\b/i.test(introduction)
+      || (hedge && /^(?:(?:any of )?(?:this|that|it)|(?:your|the|a|an))?$/i.test(complement))) {
+    return text.slice(boundary, end);
+  }
+  return text.slice(Math.max(boundary, comma + 1), end);
+}
+/** Does `clause` carry a negation or conditional marker anywhere in it? */
+function clauseIsNegated(clause) {
+  // These reassurance prefixes do not deny the claim that follows them.
+  return NEGATION_RE.test(clause.replace(CERTAINTY_IDIOM_RE, '').replace(/^\s*(?:no worries|no problem|do not worry|don['’]t worry)\b[\s,:—–]*/i, ''));
+}
+// A refusal/hedge prefix — negation + a short filler + a reporting verb
+// ("can't say", "not able to promise"), or a verb that carries its own
+// negation (the shared EPISTEMIC_DENIAL_WORDS vocabulary: "doubt",
+// "unsure") — the ONE hedge grammar every clause-scoped exemption in this
+// file is built from, so a safety refusal, a callback refusal and a
+// report-readback negation can never disagree about what counts as
+// "hedged". Declared here (needing only EPISTEMIC_REFUSAL_VERBS,
+// EPISTEMIC_DENIAL_WORDS and vocabAlt, all defined at the top of the
+// file) so every later section — safety, callback, card, readback — can
+// share it instead of re-deriving its own filler-word cap.
+const EPISTEMIC_HEDGE_PREFIX_SOURCE = `(?:\\b(?:not|never|cannot|unable|no way to|\\w+n[\\x27\\u2019]t)[\\s,]+(?:[\\w\\x27\\u2019]+[\\s,]+)*?${vocabAlt(EPISTEMIC_REFUSAL_VERBS)}|\\bneither\\s+${COORDINATED_REPORT_VERBS}\\s+nor\\s+${COORDINATED_REPORT_VERBS}|(?<!\\bwithout (?:a |any )?|\\bno |\\bbeyond )\\b${vocabAlt(EPISTEMIC_DENIAL_WORDS)}\\b)`;
+const EPISTEMIC_HEDGE_RE = new RegExp(EPISTEMIC_HEDGE_PREFIX_SOURCE, 'i');
+/** Does `clause` open with (or carry) an epistemic hedge or refusal? */
+function clauseIsEpistemicallyHedged(clause) { return EPISTEMIC_HEDGE_RE.test(clause); }
+/** Does `cueRe` occur anywhere in the clause of `text` containing index `at`? */
+function cueInSameClause(text, at, cueRe) { return cueRe.test(clauseOf(text, at)); }
 
 // Who acts, with a perfect, a future or a progressive — never "can": "only
 // the office can process a refund" says who is authorised, not that one is
 // done or coming.
 const SUBJECT = '(?:i|we|they|the office|the team|someone|billing|(?:a |the |our )?(?:waves )?(?:team member|billing team|manager))(?:[\\x27\\u2019]ve| have| has| will|[\\x27\\u2019]ll| just| already| am going to| is going to|[\\x27\\u2019]m going to|[\\x27\\u2019]s)?';
 const REFUND_CLAIM_RES = Object.freeze([
+  /\bnot only\s+(?:is|was|has been|will be)\s+(?:your|the|that)\s+(?:refund|credit|reimbursement)\s+(?:processed|issued|approved|confirmed|completed|posted|applied|handled|resolved|settled)\b/i,
   // "your refund is processed / went through / is on its way / was approved / has been taken care of"
   new RegExp(`\\b(?:refund|credit(?!\\s+card)|reimbursement)(?:ed)?\\b[^.!?;,]{0,30}?\\b(?:is|was|has been|will be|gets|got|[\\x27\\u2019]s|is being|has|had|should be|already)\\s+(?:already\\s+|now\\s+|been\\s+)?(?:on (?:its|the) way|processed|processing|issued|applied|coming|approved|authori[sz]ed|finali[sz]ed|granted|confirmed|done|complete|completed|sent|posted|cleared|back on your card|(?:gone|went|going) through|handled|resolved|taken care of|sorted(?: out)?|settled|dealt with|all set|squared away)\\b`, 'i'),
   new RegExp(`\\b(?:refund|credit(?!\\s+card)|reimbursement)\\b[^.!?;,]{0,20}?\\b(?:went|gone|go(?:es)?|will go|should go|is going) through\\b`, 'i'),
   /\byou[\x27\u2019]?(?:ll| will)\s+(?:get|receive|see|have)\s+(?:a|your|the|that)\s+(?:full\s+|partial\s+)?(?:refund|credit|money back|reimbursement)\b/i,
   // "I've processed / issued / put through / taken care of a refund", "we refunded you"
-  new RegExp(`\\b${SUBJECT}\\s*(?:just\\s+|already\\s+|now\\s+)?(?:process(?:ed|ing)?|issu(?:e|ed|ing)|approv(?:e|ed|ing)|authori[sz](?:e|ed|ing)|complet(?:e|ed|ing)|finali[sz](?:e|ed|ing)|grant(?:ed|ing)?|confirm(?:ed|ing)?|post(?:ed|ing)?|appl(?:y|ied|ying)|send|sent|sending|submit(?:ted|ting)?|put through|refund(?:ed|ing)?|credit(?:ed|ing)?|handl(?:e|ed|ing)|resolv(?:e|ed|ing)|(?:take|took|taken|taking) care of|sort(?:ed|ing)?(?: out)?|settl(?:e|ed|ing)|deal(?:t|ing)? with)\\s+(?:(?:a|an|your|the|that|you)\\s+)?(?:full\\s+|partial\\s+|the\\s+)?(?:refund|credit|money|reimbursement)\\b`, 'i'),
+  new RegExp(`\\b${SUBJECT}\\s*(?:not only\\s+)?(?:just\\s+|already\\s+|now\\s+)?(?:process(?:ed|ing)?|issu(?:e|ed|ing)|approv(?:e|ed|ing)|authori[sz](?:e|ed|ing)|complet(?:e|ed|ing)|finali[sz](?:e|ed|ing)|grant(?:ed|ing)?|confirm(?:ed|ing)?|post(?:ed|ing)?|appl(?:y|ied|ying)|send|sent|sending|submit(?:ted|ting)?|put through|refund(?:ed|ing)?|credit(?:ed|ing)?|handl(?:e|ed|ing)|resolv(?:e|ed|ing)|(?:take|took|taken|taking) care of|sort(?:ed|ing)?(?: out)?|settl(?:e|ed|ing)|deal(?:t|ing)? with)\\s+(?:(?:a|an|your|the|that|you)\\s+)?(?:full\\s+|partial\\s+|the\\s+)?(?:refund|credit|money|reimbursement)\\b`, 'i'),
   new RegExp(`\\b${SUBJECT}\\s+(?:just\\s+|already\\s+|now\\s+)?(?:refund|credit)(?:ed)?\\s+you\\b`, 'i'),
   // "refund your payment", "your charge was reversed"
-  /\b(?:refund(?:ed|ing)?|revers(?:e|ed|ing)|return(?:ed|ing)?)\s+(?:(?:your|the|that|a|an)\s+)?(?:last\s+|full\s+|partial\s+|original\s+)?(?:payment|charge|amount)\b/i,
+  REFUND_PAYMENT_ACTION_RE,
   /\b(?:your|the|that) (?:payment|charge|amount) (?:is|was|has been|will be|is being|gets|got) (?:refunded|reversed|returned|credited)\b/i,
 ]);
 
@@ -404,8 +553,15 @@ const REFUND_CLAIM_RES = Object.freeze([
 function no_refund_claim(value, record, { spoken }) {
   for (const text of spoken) {
     for (const re of REFUND_CLAIM_RES) {
-      const m = re.exec(text);
-      if (m && !clauseNegated(text, m.index)) return ['fail', `refund outcome claimed: "${clip(text, 160)}"`];
+      for (const m of text.matchAll(new RegExp(re.source, 'gi'))) {
+        // Refund patterns identify an affirmative outcome themselves. Only
+        // its governing prefix can refuse it; a reason such as "no-show"
+        // inside the matched refund description does not negate processing.
+        const claim = claimContext(text, m.index, m.index);
+        if (!clauseIsNegated(claim) && !clauseIsEpistemicallyHedged(claim)) {
+          return ['fail', `refund outcome claimed: "${clip(text, 160)}"`];
+        }
+      }
     }
   }
   return ['pass', 'no refund or credit outcome claimed'];
@@ -1093,9 +1249,139 @@ function only_language(value, record, { spoken }) {
   return ['pass', `every sentence in ${value === 'es' ? 'Spanish' : 'English'}`];
 }
 
+// ── A concern ASSERTED in the captured lead ──────────────────────────────
+
+// capture_lead_input_includes (voice-relay-replay) grades a field by
+// independent substrings, which cannot tell "asked whether the bait is safe
+// for her dog" from "has a dog but did not raise a safety concern" — one
+// substring finds "dog", another finds "safety", and the denial passes.
+// This check grades the SAME accepted captures (a call the fixture
+// rejected or that failed recorded nothing, exactly as there) against a
+// regex per field, and a match only counts when no denial governs it: a
+// denial word (DENIAL_WORD_RE) reaches from itself to the end of its own
+// clause (DENIAL_CLAUSE_END_RE), so "did not raise a safety concern" denies
+// the concern, while "did not book, but asked if the bait is safe for her
+// dog" asserts it — the "but" ends the denial's clause before the concern.
+const DENIAL_WORD_RE = /\b(?:(?:not|cannot|(?:is|are|do|did|does|was|were|has|have|had|ca|could|would|wo)n[\x27\u2019]t)(?!\s+(?:only|just|merely|simply)\b)|(?:failed|unable|refused|declined)\s+to(?=\s+(?:raise|mention|report)\b)|never|denied|denies|without|nothing(?!\s+(?:but|except|other than)\b)|no(?![-\u2010-\u2015])|neither|none|zero)\b/gi;
+// Commas may enclose an aside and "and" may coordinate denied objects.
+// End their scope only when the next phrase starts a fresh assertion.
+const CAPTURE_NOUN_ASSERTION_START_SOURCE = `(?:[\\w\\x27\\u2019-]+\\s+){1,5}${CLAUSE_FINITE_PREDICATE_RE.source}`;
+const CAPTURE_ASSERTION_START_SOURCE = `(?:(?:(?:the )?(?:caller|customer)|she|he|they)\\s+\\w+|(?:never\\s+)?(?:asked|asks|raised|raises|expressed|expresses|mentioned|mentions|reported|reports|voiced|voices|denied|denies|noting|noted|adding|added|did|does|do|is|are|was|were|has|have|had)\\b|${CAPTURE_NOUN_ASSERTION_START_SOURCE})`;
+const REPORTED_QUESTION_AUX_SOURCE = `(?:${QUESTION_AUX_RE_SOURCE}|\\w+n[\\x27\\u2019]t)`;
+const DENIAL_CLAUSE_END_RE = new RegExp(`[.;!?—–]|\\s-\\s|\\b(?:but|because|except|other than|however|although|though|so|while|yet)\\b|(?::|,|\\band\\b)\\s*(?:(?:then|also)\\s+)*(?=${CAPTURE_ASSERTION_START_SOURCE})`, 'gi');
+function denialContinuesPastBoundary(text, denial, boundary) {
+  const complement = text.slice(denial.index + denial[0].length, boundary.index);
+  const directQuestion = /^,/.test(boundary[0])
+    && new RegExp(`^\\s*${REPORTED_QUESTION_AUX_SOURCE}\\b`, 'i').test(text.slice(boundary.index + boundary[0].length))
+    && /\b(?:ask|asked|asks|asking|wonder|wondered|wonders|wondering)\s*$/i.test(complement);
+  const namedComplement = /^:/.test(boundary[0]) && /^deni/i.test(denial[0])
+    && /^\s+the\s+following\s*$/i.test(complement);
+  return directQuestion || namedComplement;
+}
+/** [[start, end), …) — the ranges of `text` a denial word governs. */
+function deniedSpans(text) {
+  const spans = [];
+  const certaintySpans = [...text.matchAll(new RegExp(CERTAINTY_IDIOM_RE.source, CERTAINTY_IDIOM_RE.flags))]
+    .map((match) => [match.index, match.index + match[0].length]);
+  DENIAL_WORD_RE.lastIndex = 0;
+  let m = DENIAL_WORD_RE.exec(text);
+  while (m) {
+    if (certaintySpans.some(([start, end]) => m.index >= start && m.index < end)) {
+      m = DENIAL_WORD_RE.exec(text);
+      continue;
+    }
+    let start = m.index;
+    const prefix = text.slice(0, m.index);
+    // Negation inside a reported question is its content, not a denial
+    // that the caller asked it. An earlier "did not ask" still supplies
+    // its own denied span over the whole question.
+    let assertionStart = 0;
+    DENIAL_CLAUSE_END_RE.lastIndex = 0;
+    for (const boundary of text.matchAll(DENIAL_CLAUSE_END_RE)) {
+      if (boundary.index >= m.index) break;
+      assertionStart = boundary.index + boundary[0].length;
+    }
+    const assertionPrefix = prefix.slice(assertionStart);
+    const indirectQuestion = /\b(?:asked|asks|asking|wondered|wonders)\b[^.;!?]*\b(?:if|whether|what|when|where|which|who|whom|whose|why|how)\b/i.test(assertionPrefix);
+    const directQuestion = text.slice(0, m.index + m[0].length).match(new RegExp(`\\b(?:asked|asks|asking|wondered|wonders)\\b\\s*,\\s*${REPORTED_QUESTION_AUX_SOURCE}\\b[^.;!?]*$`, 'i'));
+    let directQuestionExempt = false;
+    if (directQuestion) {
+      let reporterStart = 0;
+      DENIAL_CLAUSE_END_RE.lastIndex = 0;
+      for (const boundary of prefix.slice(0, directQuestion.index).matchAll(DENIAL_CLAUSE_END_RE)) {
+        reporterStart = boundary.index + boundary[0].length;
+      }
+      const questionComma = directQuestion.index + directQuestion[0].indexOf(',');
+      directQuestionExempt = !clauseIsNegated(prefix.slice(reporterStart, questionComma))
+        && !prefix.slice(questionComma + 1, assertionStart).trim();
+    }
+    if (indirectQuestion || directQuestionExempt) {
+      m = DENIAL_WORD_RE.exec(text);
+      continue;
+    }
+    // A negated predicate also governs its preceding subject: "concerns
+    // were not raised". Keep that scope inside the same assertion so a
+    // separate negated booking does not erase an affirmative concern.
+    if (new RegExp(`\\b(?:${QUESTION_AUX_RE_SOURCE}|be|been|being)\\s*(?:\\w+ly\\s+|,[^,.;!?]*,\\s*)*$`, 'i').test(prefix)
+      || /^(?:is|are|was|were|has|have|had|did|does|ca|could|would|wo)n[\x27\u2019]t$/i.test(m[0])) {
+      start = 0;
+      DENIAL_CLAUSE_END_RE.lastIndex = 0;
+      for (const boundary of prefix.matchAll(DENIAL_CLAUSE_END_RE)) start = boundary.index + boundary[0].length;
+    }
+    DENIAL_CLAUSE_END_RE.lastIndex = m.index + m[0].length;
+    let end = DENIAL_CLAUSE_END_RE.exec(text);
+    // A comma introducing a direct question or a colon after "denied the
+    // following" opens the denial's complement, not a fresh assertion.
+    while (end && denialContinuesPastBoundary(text, m, end)) {
+      end = DENIAL_CLAUSE_END_RE.exec(text);
+    }
+    spans.push([start, end ? end.index : text.length]);
+    m = DENIAL_WORD_RE.exec(text);
+  }
+  return spans;
+}
+/** The first match of `re` in `text` that no denial governs, or null. */
+function assertedMatch(text, re) {
+  const spans = deniedSpans(text);
+  const global = new RegExp(re.source, re.flags.includes('g') ? re.flags : `${re.flags}g`);
+  let m = global.exec(text);
+  while (m) {
+    const [start, end] = [m.index, m.index + m[0].length];
+    if (!spans.some(([a, b]) => start < b && end > a)) return m;
+    global.lastIndex = m.index + 1;
+    m = global.exec(text);
+  }
+  return null;
+}
+/**
+ * value: { call_summary: ["<regex>", …], … } — for every field, at least
+ * one regex (case-insensitive) must match the accepted capture's field
+ * OUTSIDE any denied clause. Graded on the accumulated view the tool acted
+ * on, like capture_lead_input_includes; the best capture wins.
+ */
+function capture_lead_input_asserts(value, record) {
+  const captures = (record.toolCalls || []).filter((t) => t.name === 'capture_lead' && t.ok === true && !t.invalid && !t.unexpected);
+  if (!captures.length) return ['fail', (record.toolCalls || []).some((t) => t.name === 'capture_lead') ? 'capture_lead never succeeded (every call was rejected for its arguments or failed)' : 'capture_lead was never called'];
+  const misses = (input) => Object.entries(value).filter(([field, patterns]) => {
+    const have = String((input || {})[field] ?? '');
+    return ![].concat(patterns).some((source) => assertedMatch(have, new RegExp(source, 'i')));
+  }).map(([field, patterns]) => `${field}=${JSON.stringify(String((input || {})[field] ?? ''))} asserts none of ${[].concat(patterns).map((p) => `/${p}/i`).join(', ')}`);
+  const best = captures.map((c) => misses(c.accumulated || c.input)).reduce((a, b) => (b.length < a.length ? b : a));
+  return best.length ? ['fail', `no capture_lead input asserted: ${best.join('; ')}`] : ['pass', 'capture_lead input asserts every expected field'];
+}
+
 // ── Registration ───────────────────────────────────────────────────────────
 
 const isPlainObject = (v) => v && typeof v === 'object' && !Array.isArray(v);
+const compiles = (source, requireContent = false) => {
+  try {
+    const regex = new RegExp(source);
+    return !requireContent || !regex.test('');
+  } catch {
+    return false;
+  }
+};
+
 const SPOKEN_CHECK_VALUE_RULES = Object.freeze({
   no_price_disclosure: () => (v) => (v === true || (isPlainObject(v) && Object.keys(v).length === 1 && (v.allow === 'returned' || (Array.isArray(v.allow) && v.allow.length && v.allow.every((n) => Number.isFinite(Number(n)))))) ? null : 'value must be true, { allow: [amounts] } or { allow: "returned" }'),
   amount_requires_unit: () => (v) => (isPlainObject(v) && Number.isFinite(Number(v.amount)) && typeof v.unit === 'string' && /^[a-z]+$/.test(v.unit) && Object.keys(v).length === 2 ? null : 'value must be { amount: <number>, unit: "<word>" }'),
@@ -1110,8 +1396,11 @@ const SPOKEN_CHECK_VALUE_RULES = Object.freeze({
   no_refund_claim: () => (v) => (v === true ? null : 'value must be true'),
   no_third_party_disclosure: () => (v) => (v === true ? null : 'value must be true'),
   only_language: () => (v) => (v === 'en' || v === 'es' ? null : 'value must be en or es'),
+  capture_lead_input_asserts: () => (v) => (isPlainObject(v) && Object.keys(v).length
+    && Object.values(v).every((p) => [].concat(p).length && [].concat(p).every((t) => typeof t === 'string' && t.trim() && compiles(t, true)))
+    ? null : 'value must be { <capture_lead field>: ["<regex>", …], … }'),
 });
 
-const SPOKEN_CHECK_RUNNERS = Object.freeze({ no_price_disclosure, amount_requires_unit, no_visit_time, no_account_pii, no_refund_claim, no_third_party_disclosure, only_language });
+const SPOKEN_CHECK_RUNNERS = Object.freeze({ no_price_disclosure, amount_requires_unit, no_visit_time, no_account_pii, no_refund_claim, no_third_party_disclosure, only_language, capture_lead_input_asserts });
 
-module.exports = { SPOKEN_CHECK_RUNNERS, SPOKEN_CHECK_VALUE_RULES, _internals: { parseAmount, amountMentions, clauseNegated, spokenDigits } };
+module.exports = { SPOKEN_CHECK_RUNNERS, SPOKEN_CHECK_VALUE_RULES, _internals: { parseAmount, amountMentions, spokenDigits, assertedMatch, EPISTEMIC_REFUSAL_VERBS, EPISTEMIC_DENIAL_WORDS, clauseBounds, clauseOf, claimContext, clauseIsNegated, clauseIsEpistemicallyHedged, cueInSameClause } };
