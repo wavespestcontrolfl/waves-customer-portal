@@ -1238,7 +1238,7 @@ const REPORT_INSTRUCTION_RE = /(?:^|,\s*)(?:please\s+)?(?:apply|use|put|treat|sp
 const REPORT_FINDING_VERB_RE = /\b(?:applied|placed|used|treated|sprayed|put|went|got|received)\b/i;
 const REPORT_PARTICIPLE_RE = /^(?:applied|placed|used|treated|sprayed|put|received)$/i;
 const REPORT_COMPLETED_PASSIVE_RE = /\b(?:(?:was|were|got)|(?:has|have|had)(?:\s+(?:\w+ly|already|just|now))*\s+been)\s+(?:(?:\w+ly|already|just|now)\s+)*$/i;
-const REPORT_NONCOMPLETION_GOVERNOR_RE = /\b(?:supposed|expected|required|meant|scheduled|instructed|asked|told|directed|ordered|needed|intended|planned|ought)\s+to(?:\s+have)?(?:\s+(?:\w+ly|already|just|now))*\s*$/i;
+const REPORT_NONCOMPLETION_GOVERNOR_RE = /\b(?:supposed|expected|required|meant|scheduled|instructed|asked|told|directed|ordered|needed|intended|planned|ought)\s+to(?:\s+(?:\w+ly|already|just|now))*(?:\s+have(?:\s+(?:\w+ly|already|just|now))*(?:\s+been)?)?(?:\s+(?:\w+ly|already|just|now))*\s*$/i;
 const REPORT_ASSERTION_START = `(?:(?:the|a|an)\\s+)?(?:[\\w'\u2019-]+\\s+){1,4}(?:(?:(?:was|were|is|are|has|have|had|got)\\s+(?:\\w+ly\\s+)?)?${REPORT_FINDING_VERB_RE.source})`;
 const REPORT_ASSERTION_BOUNDARY_RE = new RegExp(`(?:,\\s*|\\bwith\\s+)(?=${REPORT_ASSERTION_START})`, 'gi');
 const REPORT_UNRELATED_OR_CLAUSE_RE = /^or\s+(?:(?:the|our|your|their)\s+)?(?:technician|tech|crew|team|office|report|i|we|you|he|she|they|it)\s+(?:is|are|was|were|has|have|had|will|would|should|can|could|did|does|do)\b/i;
@@ -1278,16 +1278,16 @@ function reportHasAlternativeLocation(affirmed, locationAt, orTail) {
   return /\beither\b/i.test(affirmed) || !REPORT_UNRELATED_OR_CLAUSE_RE.test(alternativeTail);
 }
 
-// An active past treatment places its predicate before the matched product;
-// a participle after the product needs a completed passive auxiliary. This
-// excludes recommendation and command frames such as "be applied" and
-// "get Talstar applied" while retaining actual past treatment assertions.
+// A noncompletion governor excludes both active-order "was supposed to have
+// applied Talstar" and passive "Talstar was supposed to have been applied"
+// frames. Otherwise, an active past treatment places its predicate before
+// the matched product, while a participle after the product needs a completed
+// passive auxiliary. This also excludes commands such as "get Talstar applied".
 function reportHasCompletedFinding(affirmed, subjectAt, subjectLength, findingVerb) {
   if (subjectAt < 0 || !findingVerb) return false;
+  if (REPORT_NONCOMPLETION_GOVERNOR_RE.test(affirmed.slice(0, findingVerb.index))) return false;
   if (!REPORT_PARTICIPLE_RE.test(findingVerb[0])) return true;
-  if (findingVerb.index < subjectAt) {
-    return !REPORT_NONCOMPLETION_GOVERNOR_RE.test(affirmed.slice(0, findingVerb.index));
-  }
+  if (findingVerb.index < subjectAt) return true;
   const predicatePrefix = affirmed.slice(subjectAt + subjectLength, findingVerb.index);
   const tersePastFinding = /^\s*(?:(?:the|a|an)\s*)?$/i.test(affirmed.slice(0, subjectAt)) && !predicatePrefix.trim();
   return tersePastFinding || REPORT_COMPLETED_PASSIVE_RE.test(predicatePrefix);
