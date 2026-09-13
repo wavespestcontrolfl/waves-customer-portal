@@ -1318,12 +1318,19 @@ function reportCoordinatorSharesLocation(affirmed, subjectAt, subjectLength, loc
     findingVerb.index + findingVerb[0].length, coordinatorAt,
   );
   const afterCoordinator = affirmed.slice(coordinatorAt + coordinator[0].length, locationAt);
+  const coordinatedTargetLink = REPORT_TREATMENT_LOCATION_LINK_RE.exec(afterCoordinator);
   const sharedProductList = findingVerb.index > coordinatorAt && findingVerb.index < locationAt
     && !REPORT_FINDING_VERB_RE.test(affirmed.slice(subjectAt + subjectLength, coordinatorAt));
   const sharedLocationList = findingVerb.index < coordinatorAt
     && REPORT_COORDINATED_LOCATION_PREFIX_RE.test(afterCoordinator)
     && REPORT_TREATMENT_LOCATION_LINK_RE.test(verbBeforeCoordinator);
-  return sharedProductList || sharedLocationList;
+  const sharedDirectObjects = findingVerb.index < subjectAt
+    && !affirmed.slice(subjectAt + subjectLength, coordinatorAt).trim()
+    && coordinatedTargetLink && afterCoordinator.slice(0, coordinatedTargetLink.index).trim()
+    && REPORT_NOUN_LED_PREFIX_RE.test(afterCoordinator.slice(
+      coordinatedTargetLink.index + coordinatedTargetLink[0].length,
+    ));
+  return sharedProductList || sharedLocationList || sharedDirectObjects;
 }
 
 function reportLocationIsTreatmentTarget(
@@ -1346,13 +1353,17 @@ function reportVerbGovernsProduct(affirmed, subjectAt, subjectLength, locationAt
   const objectGap = findingVerb.index < subjectAt
     ? affirmed.slice(findingVerb.index + findingVerb[0].length, subjectAt) : '';
   const coordinatedObject = REPORT_COORDINATED_OBJECT_GAP_RE.test(objectGap);
+  const coordinatedDirectObject = /\band\s*$/i.test(objectGap)
+    && !REPORT_TREATMENT_LOCATION_LINK_RE.test(objectGap);
   if (!REPORT_PARTICIPLE_RE.test(findingVerb[0])) {
     if (!/^went$/i.test(findingVerb[0])) return true;
     return (subjectAt < findingVerb.index && findingVerb.index < locationAt
         && REPORT_WENT_LOCATION_RE.test(affirmed.slice(findingVerb.index + findingVerb[0].length, locationAt + locationLength)))
       || coordinatedObject;
   }
-  if (findingVerb.index < subjectAt) return REPORT_DIRECT_OBJECT_GAP_RE.test(objectGap) || coordinatedObject;
+  if (findingVerb.index < subjectAt) {
+    return REPORT_DIRECT_OBJECT_GAP_RE.test(objectGap) || coordinatedObject || coordinatedDirectObject;
+  }
   const predicatePrefix = affirmed.slice(subjectAt + subjectLength, findingVerb.index);
   const tersePastFinding = REPORT_NOUN_LED_PREFIX_RE.test(affirmed.slice(0, subjectAt)) && !predicatePrefix.trim();
   return tersePastFinding || REPORT_COMPLETED_PASSIVE_RE.test(predicatePrefix);
@@ -1408,8 +1419,9 @@ function reportClaimIsDenied(claim, affirmed, subjectAt, locationAt, findingVerb
 function reportSharedLocationContinuation(text, clauseEnd, location) {
   const remainder = text.slice(clauseEnd);
   const locationTail = new RegExp(
-    `^and\\s+(?:${REPORT_TREATMENT_LOCATION_LINK_RE.source}\\s+)?`
-      + `(?:(?:the|a|an)\\s+)?(?:${location})`,
+    `^and\\s+(?:(?:${REPORT_TREATMENT_LOCATION_LINK_RE.source}\\s+)?`
+      + `(?:(?:the|a|an)\\s+)?(?:${location})|[^.!?;]*?`
+      + `${REPORT_TREATMENT_LOCATION_LINK_RE.source}\\s+(?:(?:the|a|an)\\s+)?(?:${location}))`,
     'i',
   ).exec(remainder);
   if (!locationTail) return { text: '', question: false };

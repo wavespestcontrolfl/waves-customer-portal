@@ -157,6 +157,14 @@ test.each([
 });
 
 test.each([
+  { subject: '\\btalstar p\\b', location: '\\bexterior perimeter\\b' },
+  { subject: '\\b(?:granular\\s+)?bait\\b', location: '\\bexterior perimeter\\b' },
+])('an active treatment predicate governs its product list and shared location: %j', (finding) => {
+  const spoken = ['The technician applied Talstar P and bait to the exterior perimeter.'];
+  expect(checks.report_readback_confirms(finding, {}, { spoken })[0]).toBe('pass');
+});
+
+test.each([
   'Talstar P was applied to the garage and the exterior perimeter.',
   'Talstar P was applied to the exterior perimeter and the garage.',
   'Talstar P was applied to the garage and to the exterior perimeter.',
@@ -173,14 +181,16 @@ test.each([
   expect(checks.report_readback_confirms(report, {}, { spoken: [spoken] })[0]).toBe('fail');
 });
 
-test('coordinated products do not borrow one another\'s treatment location', () => {
-  const spoken = ['Talstar P went around the exterior perimeter and bait along the foundation.'];
+test.each([
+  'Talstar P went around the exterior perimeter and bait along the foundation.',
+  'The technician applied Talstar P to the exterior perimeter and bait to the foundation.',
+])('coordinated products do not borrow one another\'s treatment location: %s', (spoken) => {
   const swappedFindings = [
     { subject: '\\btalstar p\\b', location: '\\bfoundation\\b' },
     { subject: '\\b(?:granular\\s+)?bait\\b', location: '\\bexterior perimeter\\b' },
   ];
   for (const finding of swappedFindings) {
-    expect(checks.report_readback_confirms(finding, {}, { spoken })[0]).toBe('fail');
+    expect(checks.report_readback_confirms(finding, {}, { spoken: [spoken] })[0]).toBe('fail');
   }
 });
 
