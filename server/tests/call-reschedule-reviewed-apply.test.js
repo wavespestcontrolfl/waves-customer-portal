@@ -43,6 +43,7 @@ function visit(overrides = {}) {
     service_address_line1: '100 Example Street',
     service_address_line2: null,
     service_address_city: 'Bradenton',
+    service_address_state: 'FL',
     service_address_zip: '34205',
     ...overrides,
   };
@@ -182,6 +183,31 @@ describe('applyReviewedCallReschedule', () => {
     expect(guard).not.toHaveBeenCalled();
     expect(conn.inserts).toHaveLength(0);
     expect(AppointmentReminders.handleReschedule).not.toHaveBeenCalled();
+  });
+
+  test('a service-address state change under the lock invalidates the reviewed snapshot', async () => {
+    const conn = makeConn({ lockedVisit: visit({ service_address_state: 'GA' }) });
+    const rebooker = mover(conn);
+    const guard = jest.fn();
+
+    await expect(applyReviewedCallReschedule(applyArgs(conn, rebooker, guard))).rejects.toMatchObject({ status: 409 });
+    expect(guard).not.toHaveBeenCalled();
+    expect(conn.inserts).toHaveLength(0);
+  });
+
+  test('a recurring apply sends the complete anchor window while preserving the reviewed occurrence set', async () => {
+    const sibling = visit({ id: 'visit-sibling', scheduled_date: '2026-10-14', window_start: '11:00:00', window_end: '12:30:00' });
+    const conn = makeConn({ lockedVisits: [visit(), sibling] });
+    const rebooker = mover(conn);
+    const reviewedOccurrences = [{ id: VISIT_ID }, { id: sibling.id }];
+
+    await applyReviewedCallReschedule({ ...applyArgs(conn, rebooker), occurrenceIds: [VISIT_ID, sibling.id],
+      occurrences: reviewedOccurrences });
+
+    expect(rebooker.reschedule.mock.calls[0][2]).toEqual({ start: '14:00', end: '15:00' });
+    expect(rebooker.reschedule.mock.calls[0][5]).toMatchObject({
+      expectOccurrenceIds: [VISIT_ID, sibling.id], expectOccurrences: reviewedOccurrences,
+    });
   });
 
   test('a rejected proposal guard leaves the move side effects unwritten', async () => {

@@ -3,9 +3,13 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
 jest.mock('../services/call-booking-catalog', () => ({
   ...jest.requireActual('../services/call-booking-catalog'), planCallFollowUpShift: jest.fn().mockResolvedValue([]),
 }));
+jest.mock('../services/scheduling/window-rules', () => ({
+  ...jest.requireActual('../services/scheduling/window-rules'), probeSlotOverlap: jest.fn().mockResolvedValue([]),
+}));
 const { proposalEvidence, proposalAddress, customerWindow, previewProposal, applyProposal } = require('../services/call-reschedule-proposals');
 const { planRescheduleFromCall } = require('../services/call-reschedule-apply');
 const { classifyTriageItem } = require('../services/triage-auto-resolve');
+const { probeSlotOverlap } = require('../services/scheduling/window-rules');
 
 describe('reviewed proposed times', () => {
   const quote = 'Could you come Thursday at two instead?';
@@ -35,14 +39,15 @@ describe('reviewed proposed times', () => {
 
 
 describe('proposal preview identity', () => {
-  test.each(['service_id', 'service_type', 'deleted_at', 'address_missing'])('changing %s after preview cannot apply the old approval', async (field) => {
+  test.each(['service_id', 'service_type', 'service_address_state', 'deleted_at', 'address_missing'])('changing %s after preview cannot apply the old approval', async (field) => {
     const priorGate = process.env.GATE_RESCHEDULE_PROPOSAL_CARD;
     process.env.GATE_RESCHEDULE_PROPOSAL_CARD = 'true';
     const now = new Date('2099-09-09T08:00:00-04:00');
     const target = '2099-09-10T14:00:00-04:00';
     const quote = 'Could you come Thursday at two instead?';
     const selected = { id: 'visit', customer_id: 'customer', service_id: 'service-a', service_type: 'Original service',
-      scheduled_date: '2099-09-10', window_start: '09:00:00', window_end: '10:00:00', status: 'confirmed', property_id: null };
+      scheduled_date: '2099-09-10', window_start: '09:00:00', window_end: '10:00:00', status: 'confirmed', property_id: null,
+      service_address_state: 'FL' };
     const tables = {
       triage_items: [{ id: 'card', call_log_id: 'call', status: 'open', updated_at: now,
         payload: { reschedule_proposal: { call_generation: 1, proposed_start_at: target } } }],
@@ -58,13 +63,25 @@ describe('proposal preview identity', () => {
         first: async () => ({ ...tables[table][0] }), then: (resolve, reject) => Promise.resolve(tables[table].map((row) => ({ ...row }))).then(resolve, reject) };
       return query;
     };
+    conn.transaction = async (fn) => fn(conn);
     const rebooker = { collectiveMoveGateOn: () => false, reschedule: jest.fn() };
     try {
+      probeSlotOverlap.mockReset().mockResolvedValue(field === 'service_address_state' ? [{
+        id: 'conflict-1', scheduled_date: '2099-09-10', window_start: '13:30:00', window_end: '15:30:00',
+        status: 'confirmed', service_type: 'Conflicting service',
+      }] : []);
       const preview = await previewProposal(conn, 'card', { visitId: 'visit', now, rebooker });
       expect(preview.displayAddress.address_line1).toBe('100 Example Avenue');
+      if (field === 'service_address_state') {
+        expect(preview.overlap).toEqual({ count: 1, appointments: [{ id: 'conflict-1', scheduled_date: '2099-09-10',
+          current_window: { start_at: '2099-09-10T17:30:00.000Z', end_at: '2099-09-10T19:30:00.000Z' },
+          status: 'confirmed', service_name: 'Conflicting service' }] });
+        expect(probeSlotOverlap).toHaveBeenCalledWith(expect.objectContaining({ date: '2099-09-10',
+          windowStart: '14:00', windowEnd: '15:00', excludeServiceIds: ['visit'] }));
+      }
       if (field === 'deleted_at') tables.customers[0].deleted_at = now;
       else if (field === 'address_missing') tables.customers[0].address_line1 = null;
-      else selected[field] = field === 'service_id' ? 'service-b' : 'Changed service';
+      else selected[field] = field === 'service_id' ? 'service-b' : (field === 'service_address_state' ? 'GA' : 'Changed service');
       await expect(applyProposal(conn, 'card', { actorId: 'staff', visitId: 'visit', previewHash: preview.preview_hash, now, rebooker }))
         .rejects.toMatchObject({ status: 409 });
       expect(rebooker.reschedule).not.toHaveBeenCalled();
@@ -83,8 +100,8 @@ describe('proposal display addresses preserve the raw property identity', () => 
     expect(proposalAddress(visit, customer).address_line1).toBe('300 Property Lane');
   });
   test('a legacy visit keeps its own address and null property', () => {
-    const visit = { property: null, service_address_line1: '200 Visit Court', service_address_city: 'Visit City' };
-    expect(proposalAddress(visit, customer)).toMatchObject({ address_line1: '200 Visit Court', city: 'Visit City' });
+    const visit = { property: null, service_address_line1: '200 Visit Court', service_address_city: 'Visit City', service_address_state: 'GA' };
+    expect(proposalAddress(visit, customer)).toMatchObject({ address_line1: '200 Visit Court', city: 'Visit City', state: 'GA' });
     expect(visit.property).toBeNull();
   });
   test('customer address is the last fallback; no usable address stays unavailable', () => {

@@ -333,7 +333,7 @@ async function loadCandidates(conn, customerId, now = new Date(), { includePast 
       'scheduled_services.customer_confirmed',
       'scheduled_services.internal_notes', 'scheduled_services.is_recurring', 'scheduled_services.self_booking_id',
       'scheduled_services.service_address_line1', 'scheduled_services.service_address_line2',
-      'scheduled_services.service_address_city', 'scheduled_services.service_address_zip',
+      'scheduled_services.service_address_city', 'scheduled_services.service_address_state', 'scheduled_services.service_address_zip',
       'services.name as catalog_service_name');
 }
 
@@ -364,7 +364,7 @@ async function applyReviewedCallReschedule({ conn, call, v2, customer, candidate
     const snapshotColumns = ['customer_id', 'property_id', 'service_id', 'service_type', 'status', 'visit_id',
       'is_recurring', 'source_action', 'customer_confirmed', 'self_booking_id', 'window_start', 'window_end',
       'estimated_duration_minutes', 'service_address_line1', 'service_address_line2', 'service_address_city',
-      'service_address_zip'];
+      'service_address_state', 'service_address_zip'];
     const lockedServices = await trx('scheduled_services').whereIn('id', affectedVisitIds)
       .orderBy('id').forUpdate().select();
     const lockedService = lockedServices.find((row) => String(row.id) === String(visit.id));
@@ -414,7 +414,7 @@ async function applyReviewedCallReschedule({ conn, call, v2, customer, candidate
   const result = await (rebooker || require('./rebooker')).reschedule(
     visit.id,
     plan.newDate,
-    occurrenceIds.length ? { start: plan.newWindow.start } : plan.newWindow,
+    plan.newWindow,
     RESCHEDULE_REASON_CODE,
     'admin',
     {
