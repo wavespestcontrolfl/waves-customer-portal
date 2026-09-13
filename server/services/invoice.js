@@ -1174,13 +1174,39 @@ const InvoiceService = {
     // A stamped writer may have waited behind acceptance adoption. Its
     // missing visit link must not bypass the saved packet's billing owner.
     if (!linkedScheduledServiceId && stampedEstimateIdInNotes) {
-      const packetOwner = await database('invoices as i')
+      const packetOwners = await database('invoices as i')
         .join('visit_completion_packet_items as p', 'p.invoice_id', 'i.id')
         .join('scheduled_services as s', 's.id', 'p.scheduled_service_id')
         .where({ 'i.customer_id': customerId })
         .whereRaw('s.source_estimate_id::text = ?', [stampedEstimateIdInNotes])
-        .whereNotNull('i.visit_completion_packet_id').first('i.visit_completion_packet_id');
-      if (packetOwner?.visit_completion_packet_id) {
+        .whereNotNull('i.visit_completion_packet_id').orderBy('i.id')
+        .forUpdate('i').noWait().select('i.line_items', 'i.notes');
+      const { invoiceContainsOnlySetupFeeCharges, invoiceContainsSetupFeeLine, sumPositiveSetupFeeCents } = require('./estimate-first-application-invoice');
+      // A separate fee can be re-opened after its covering document is voided.
+      // Classify the same calculated amounts create() persists, never a raw
+      // caller amount. A fee-bearing packet still owns that fee.
+      const normalizedSetupLines = normalizeInvoiceLineItems(lineItems || []);
+      let separateSetupFee = invoiceContainsOnlySetupFeeCharges({ line_items: normalizedSetupLines })
+        && normalizedSetupLines.filter((line) => line.amount > 0)
+          .every((line) => /^WaveGuard Membership — one-time setup fee$/i.test(String(line.description || '').trim()))
+        && packetOwners.every((owner) => {
+          const lines = parseInvoiceLineItems(owner.line_items);
+          return lines.length > 0 && lines.every((line) => line && Number.isFinite(Number(line.amount)))
+            && !invoiceContainsSetupFeeLine(owner);
+        });
+      if (packetOwners.length && separateSetupFee) {
+        // Recheck all fee coverage under the estimate lock so concurrent
+        // replacements cannot each bill the same outstanding remainder.
+        await database('invoices').where({ customer_id: customerId })
+          .where('notes', 'ilike', `%accepted estimate #${stampedEstimateIdInNotes}%`)
+          .orderBy('id').forUpdate().noWait().select('id');
+        const obligation = await require('./setup-fee-obligation').findUnmintedSetupFeeObligation({
+          sourceEstimateId: stampedEstimateIdInNotes, customerId,
+        }, database);
+        separateSetupFee = obligation.owed && Number.isSafeInteger(obligation.setupFeeRemainingCents)
+          && sumPositiveSetupFeeCents({ line_items: normalizedSetupLines }) <= obligation.setupFeeRemainingCents;
+      }
+      if (packetOwners.length && !separateSetupFee) {
         throw Object.assign(new Error('This estimate is billed by its saved visit closeout. Resume that closeout.'),
           { status: 409, code: 'VISIT_PACKET_OWNS_BILLING' });
       }
