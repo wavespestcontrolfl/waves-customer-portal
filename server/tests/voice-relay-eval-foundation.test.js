@@ -277,3 +277,9 @@ test.each([
   const { SPOKEN_CHECK_RUNNERS: checks } = require('../services/eval/voice-relay-spoken-checks');
   expect(checks.no_refund_claim(true, {}, { spoken: [text] })[0]).toBe(status);
 });
+
+test.each(['should', 'shall', 'may', 'might', 'must'])('reported %s questions preserve concern assertion and reporter denial', (auxiliary) => {
+  const { assertedMatch } = require('../services/eval/voice-relay-spoken-checks')._internals;
+  expect(assertedMatch(`Customer asked, ${auxiliary} the bait not be used around her dog?`, /bait[^.]*dog/i)).not.toBeNull();
+  expect(assertedMatch(`Customer did not ask, ${auxiliary} the bait not be used around her dog?`, /bait[^.]*dog/i)).toBeNull();
+});
