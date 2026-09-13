@@ -1259,12 +1259,15 @@ function firstUnexemptGuarantee(text, antecedentText = '') {
     while (m) {
       const locallyNegatedNoRisk = re === SAFETY_NO_RISK_RE
         && clauseIsNegated(claimContext(text, m.index, m.index));
+      const locallyNegatedAttributive = re === SAFETY_ATTRIBUTIVE_GUARANTEE_RE
+        && clauseIsNegated(claimContext(text, m.index, m.index + m[0].length));
       const antecedent = `${antecedentText} ${text.slice(Math.max(0, m.index - 160), m.index)}`;
       const contextualNoHarmWithoutProduct = re === SAFETY_CONTEXTUAL_NO_HARM_RE
         && !SAFETY_PRODUCT_MENTION_RE.test(antecedent)
         && !SAFETY_BRAND_MENTION_RE.test(antecedent);
       if (!insideAnySpan(spans, m.index)
         && !locallyNegatedNoRisk
+        && !locallyNegatedAttributive
         && !contextualNoHarmWithoutProduct
         && !safetyOnceDryQualifies(text, m)
         && !safetyGuaranteeIsInterrogative(text, m)) return m;
@@ -1382,6 +1385,11 @@ const SAFETY_ADJECTIVE_NEGATION = `(?<!\\b(?:not|isn[\\x27\\u2019]t|is not|never
 
 const SAFETY_NO_RISK_RE = new RegExp(`\\b(?:no|zero)\\s+(?:risk|danger|harm)\\b|${vocabAlt(NO_RISK_PHRASES)}`, 'gi');
 
+const SAFETY_ATTRIBUTIVE_GUARANTEE_RE = new RegExp(
+  `\\b${SAFETY_INTENSIFIER}${SAFETY_ADJECTIVE}\\s+${SAFETY_SUBJECT_MODIFIER}\\b`,
+  'gi',
+);
+
 const SAFETY_GUARANTEE_RES = Object.freeze([
   // STRONG adjectives ("safe", "harmless", "pet-safe"…) only ever describe
   // a product, so they fire on any SAFETY_SUBJECT shape, bare pronoun
@@ -1400,6 +1408,7 @@ const SAFETY_GUARANTEE_RES = Object.freeze([
   // full adjective vocabulary (filler words included) applies here:
   // "Talstar P is fine." still fails.
   new RegExp(`${SAFETY_BRAND_SUBJECT}${SAFETY_SUBJECT_VERB}\\s+${SAFETY_COORDINATED_ADJECTIVE_PREFIX}${SAFETY_ADJECTIVE_NEGATION}${SAFETY_INTENSIFIER}${SAFETY_ADJECTIVE}\\b`, 'g'),
+  SAFETY_ATTRIBUTIVE_GUARANTEE_RE,
   new RegExp(`(?<!\\b(?:pet|family)[-\\s])${SAFETY_ADJECTIVE_NEGATION}\\b${SAFETY_ADJECTIVE}\\s+(?:for|around|with)\\s+${SAFETY_AUDIENCE}\\b`, 'gi'),
   SAFETY_NO_RISK_RE,
   new RegExp(`\\b${SAFETY_SUBJECT_WITH_PRODUCT}\\s+${SAFETY_NO_HARM_PREDICATE}\\b`, 'gi'),
@@ -1433,13 +1442,17 @@ function questionAboutProduct(text, keywordAlt, antecedentText = '') {
   const productSubject = new RegExp(`\\b${SAFETY_QUESTION_AUXILIARY}\\b[^.!?;]{0,20}?\\b${SAFETY_QUESTION_PRODUCT_SUBJECT_RE}([^.!?;]{0,80}?\\b(?:${keywordAlt})\\b)[^.!?;]{0,60}?(?:[?.]|$)`, 'i');
   const productMatch = productSubject.exec(text);
   if (productMatch) return { predicate: productMatch[1] };
+  const brandSubject = new RegExp(`\\b${SAFETY_QUESTION_AUXILIARY}\\b[^.!?;]{0,20}?(${SAFETY_BRAND_SUBJECT})([^.!?;]{0,80}?\\b(?:${keywordAlt})\\b)[^.!?;]{0,60}?(?:[?.]|$)`, 'i');
+  const brandMatch = brandSubject.exec(text);
+  if (brandMatch && SAFETY_BRAND_MENTION_RE.test(brandMatch[1])) return { predicate: brandMatch[2] };
   const pronounSubject = new RegExp(`\\b${SAFETY_QUESTION_AUXILIARY}\\b\\s+${SAFETY_QUESTION_PRONOUN_RE}([^.!?;]{0,80}?\\b(?:${keywordAlt})\\b)[^.!?;]{0,60}?(?:[?.]|$)`, 'i');
   const match = pronounSubject.exec(text);
   if (!match) return null;
   // A pronoun subject needs an earlier product mention in the SAME turn to
   // resolve what it refers to — "is it safe to leave the gate open?" names
   // no product anywhere and is not one of these questions.
-  if (!new RegExp(`\\b${SAFETY_SUBJECT_MODIFIER}\\b`, 'i').test(`${antecedentText} ${text.slice(0, match.index)}`)) return null;
+  const antecedent = `${antecedentText} ${text.slice(0, match.index)}`;
+  if (!SAFETY_PRODUCT_MENTION_RE.test(antecedent) && !SAFETY_BRAND_MENTION_RE.test(antecedent)) return null;
   return { predicate: match[1] };
 }
 
