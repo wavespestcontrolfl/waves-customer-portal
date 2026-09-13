@@ -2479,3 +2479,11 @@ in six places — the mocks now spread `importOriginal()`, so `PublicStateCard` 
 the heavier primitives stay stubbed. `PublicStateCard.test.jsx` asserts the
 invariants, not the pixels: an `h1` on every state, no authored font-size, one
 primary, actions from the shared constants, no width or padding knob.
+
+## 2026-09-11 — Termite annual protection plan: ruling A-1 = P1; engine + config layer ships dark (PR A2a)
+
+**Ruling (owner):** the Waves Subterranean Termite Protection plan uses price shape P1 — station setup fee `stations × $30` (one-time, never tier-discounted) plus a prepaid annual protection fee `$249 + $50 per 5-station bracket above 10` (tier-discounted like monitoring), 12-month coverage, one inspection a year, no term. The setup runs ≈ −10 % at real cost ($24 hardware + $6 buildup + install labor ≈ $33/station); the owner accepts that loss — the entry price is what a renewal customer compares, and the margin is in the annual fee (~54 % at 15 stations).
+
+**Decision (this PR):** `TERMITE.annualPlan` + `pricing_config.termite_annual_plan` (bridge, validator, seed, migration), `priceTermiteBait({ plan: 'annual_protection' })` emitting the setup as the one-time termite line (`installation.kind 'setup'`, mapped as "Station Setup") and the annual fee as the recurring termite line (`visitsPerYear 1`, `perApp = annual`), assembled by the engine ONLY behind `GATE_TERMITE_ANNUAL_PLAN`; rental and the bond rider are retired on the plan; the plan's own constants ride `pricingKnobs` and replay from day one; the Admin V1 fallback mirrors it off the row's `featureAvailable`. Stations stay Waves-owned (`stationsOwnedBy 'waves'`, `ownership 'plan'`).
+
+**Not yet (later PRs of §A3 A2):** converter / prepay-lane acceptance (`termite_active_annual` repurpose, annual/1 seeding, non-discountable prepay, station ownership stamp on conversion), agreement v3 + the 45/30-day renewal notices, and the customer/admin surfaces (estimate block, PDF terms, admin plan selector, cancel-flow nonrenewal). The gate stays OFF until those land and counsel + the certified operator sign off on the v3 agreement (ruling A-11).

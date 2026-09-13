@@ -896,6 +896,10 @@ function extractStatusCode(err) {
   return message.match(/\b(\d{3})\b/)?.[1] || null;
 }
 
+const { CLIENT_IDENTITY_FIELDS } = require('../estimate-client-identity-fields');
+
+const normalizeAgentPricingInputKey = (key) => String(key).toLowerCase().replace(/[^a-z0-9]/g, '');
+
 const AGENT_FORBIDDEN_PRICING_INPUT_KEYS = new Set([
   'allowingredientaliases',
   'allowwarrantyoverride',
@@ -908,7 +912,6 @@ const AGENT_FORBIDDEN_PRICING_INPUT_KEYS = new Set([
   'customproductozperfinishedgallon',
   'discountoverride',
   'fixedprice',
-  'isrecurringcustomer',
   'lawnlaborminutesbase',
   'lawnlaborminutesperk',
   'lawnmaterialcostperk',
@@ -923,8 +926,12 @@ const AGENT_FORBIDDEN_PRICING_INPUT_KEYS = new Set([
   'operatorpriceadjustment',
   'priceoverride',
   'pricingconfig',
-  'priorqualifyingservices',
-  'recurringcustomer',
+  // Recurring-customer identity + stored-estimate replay stamps
+  // (termitePricingKnobs, treeShrubPricingKnobs, …): the SAME list the
+  // persistence save path strips, read from its one home so a model-supplied
+  // replay stamp can never price a gated program (annual termite plan) past
+  // its gate, and a key added there is refused here without a second edit.
+  ...CLIENT_IDENTITY_FIELDS.map(normalizeAgentPricingInputKey),
   'routedriveminutes',
   'servicespecificcredits',
   'servicespecificdiscounts',
@@ -952,7 +959,7 @@ function findForbiddenAgentPricingInputs(value, path = [], found = []) {
     return found;
   }
   for (const [key, nested] of Object.entries(value)) {
-    const normalized = key.toLowerCase().replace(/[^a-z0-9]/g, '');
+    const normalized = normalizeAgentPricingInputKey(key);
     if (AGENT_FORBIDDEN_PRICING_INPUT_KEYS.has(normalized)
       || AGENT_FORBIDDEN_PRICING_INPUT_PATTERN.test(normalized)) {
       found.push([...path, key].join('.'));

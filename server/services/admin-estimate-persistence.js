@@ -1017,12 +1017,9 @@ function compareClientToServer(clientTotals, serverTotals, now = () => new Date(
 // it would forge a $99 waiver, so it is stripped like the rest; the admin
 // save re-supplies its own ACCOUNT-wide server-derived list (codex #3591
 // r15 P1 / r34 P1).
-const CLIENT_IDENTITY_FIELDS = ['priorQualifyingServices', 'setupWaiverPriorQualifyingServices', 'recurringCustomer', 'isRecurringCustomer', 'treeShrubPricingKnobs', 'termitePricingKnobs', 'palmAnnualRounding', 'commercialFloorsArmedServices', 'commercialFloorsArmed', 'rodentBaitLegacyReplay', 'rodentWaveguardPostureReplay'];
-function sanitizeClientIdentityFields(obj) {
-  if (!obj || typeof obj !== 'object' || Array.isArray(obj)) return obj;
-  for (const field of CLIENT_IDENTITY_FIELDS) delete obj[field];
-  return obj;
-}
+// One list, shared with every posted-input door (admin pricing sandbox,
+// Intelligence Bar tools) — see estimate-client-identity-fields.js.
+const { sanitizeClientIdentityFields } = require('./estimate-client-identity-fields');
 
 // A linked draft that must never be reused by the generic create: one that
 // carries ANY stored proposal object — enabled, disabled or scaffold alike.

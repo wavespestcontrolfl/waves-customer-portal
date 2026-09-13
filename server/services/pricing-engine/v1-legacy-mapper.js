@@ -727,6 +727,17 @@ function mapV1ToLegacyShape(v1Result) {
       // (estimate-tree-shrub-knob-replay#termiteKnobSignalForReplay reads it back).
       pricingKnobs: tbLI.pricingKnobs || null,
       materialCostSource: tbLI.materialCostSource || null,
+      // Program shape (ruling A-1 = P1): 'annual_protection' carries the
+      // setup fee + annual fee the customer surfaces render as one block.
+      plan: tbLI.plan || 'quarterly',
+      ...(tbLI.plan === 'annual_protection' ? {
+        planLabel: tbLI.planLabel || null,
+        planTerms: tbLI.planTerms || null,
+        setupFee: tbLI.setup?.price ?? null,
+        setupPerStation: tbLI.setup?.perStation ?? null,
+        annualFee: tbLI.annualFee ?? null,
+        visitsPerYear: 1,
+      } : {}),
     };
   }
 
@@ -1154,11 +1165,17 @@ function mapV1ToLegacyShape(v1Result) {
   let tmInstall = 0;
   if (tbLI && (tbLI.installation?.price || 0) > 0) {
     tmInstall = tbLI.installation.price;
+    const isSetup = tbLI.installation?.kind === 'setup';
     v1OtItems.push({
+      // The annual plan's one-time line is the STATION SETUP fee — same
+      // one-time identity (repointed, plan §A3), different name and detail.
       service: 'termite_bait_installation',
-      name: `${CAP(tbLI.system)} Installation`,
+      name: isSetup ? 'Station Setup' : `${CAP(tbLI.system)} Installation`,
       price: tmInstall,
-      detail: `${tbLI.stations} stations · ${tbLI.perimeter} linear ft perimeter`,
+      detail: isSetup
+        ? `${tbLI.stations} stations · $${tbLI.setup?.perStation ?? ''} per station · Waves-owned`
+        : `${tbLI.stations} stations · ${tbLI.perimeter} linear ft perimeter`,
+      ...(isSetup ? { kind: 'setup', tierDiscountable: false } : {}),
       ...measurementMetadataFields(tbLI),
     });
   }

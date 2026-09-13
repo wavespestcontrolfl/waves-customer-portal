@@ -4291,6 +4291,9 @@ function translateV2CallToV1Input(profile, selectedServices, options) {
       // line; anything else (incl. absent) is outright purchase, the
       // pre-existing behavior. Replays on re-price via engineInputs.
       ...(String(o.termiteOwnership || '').toLowerCase() === 'rent' ? { ownership: 'rent' } : {}),
+      // Annual protection plan (ruling A-1 = P1; GATE_TERMITE_ANNUAL_PLAN):
+      // the engine ignores it while dark. Replays via engineInputs.
+      ...(String(o.termitePlan || '').toLowerCase() === 'annual_protection' ? { plan: 'annual_protection' } : {}),
       // Liability scope-split (bond/warranty/install → manual quote); admin-set.
       // Persisted in engineInputs.services.termite so it replays on re-price.
       ...(o.termiteScope ? { scope: o.termiteScope } : {}),

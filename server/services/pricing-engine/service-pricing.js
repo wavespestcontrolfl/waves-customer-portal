@@ -4721,21 +4721,125 @@ function resolveTermiteInstallBasis(sys, selectedSystem, knobs) {
 // its station count (the Admin V1 CLIENT_FALLBACK envelope carries no costs
 // block) — the same model priceTermiteBait emits, on the LIVE basis, for
 // the production pricing audit's COGS view (codex #4313 r8 P1). Report only.
-function termiteProgramAnnualCostForStations(stations, system = TERMITE.defaultSystem) {
+function termiteProgramAnnualCostForStations(stations, system = TERMITE.defaultSystem, { visitsPerYear = null } = {}) {
   const n = Number(stations);
   if (!(n > 0)) return null;
   const selected = TERMITE.systems[system] ? system : TERMITE.defaultSystem;
   const sys = TERMITE.systems[selected];
   const stationCost = Number(sys?.stationCost) || 0;
+  // The stored row says how many service visits the program bills — 4 on
+  // the quarterly program, 1 on the annual plan (codex #4424 r1 P2).
+  const visits = Number(visitsPerYear) > 0 ? Number(visitsPerYear) : TERMITE.monitoringVisitsPerYear;
   const model = termiteProgramCostModel({
     stations: n,
     installMaterialCost: n * (stationCost + (Number(sys?.laborMaterial) || 0) + (Number(sys?.misc) || 0)),
     installLabor: n * 0.083 * GLOBAL.LABOR_RATE,
-    visitsPerYear: TERMITE.monitoringVisitsPerYear,
+    visitsPerYear: visits,
     stationCost,
     system: selected,
   });
   return model.annualTotal;
+}
+
+// Annual protection plan basis (ruling A-1 = P1): the replayed snapshot's
+// plan constants where stamped, else the live TERMITE.annualPlan (which the
+// DB bridge may have overlaid from pricing_config.termite_annual_plan).
+// [key, default] — a stamped or live value is accepted only inside
+// TERMITE.annualPlanBounds, the SAME bands the admin validator enforces at
+// write time (one home, constants.js), so a value outside them can only be a
+// forged or corrupted stamp, never a saved config; it is ignored and the live
+// value (or default) prices instead. The engine is the dollar authority: a
+// replay stamp may pin WHICH saved constants price a quote, never invent
+// amounts the config could not hold.
+const TERMITE_ANNUAL_PLAN_KNOBS = Object.freeze([
+  ['setupPerStation', 30], ['annualBase', 249], ['annualStep', 50], ['bracketStations', 5], ['bracketFloor', 10],
+]);
+function resolveTermiteAnnualPlanBasis(knobs) {
+  const live = TERMITE.annualPlan || {};
+  const bounds = TERMITE.annualPlanBounds || {};
+  const snap = knobs && typeof knobs === 'object' && knobs.plan === 'annual_protection' ? knobs : null;
+  const basis = {
+    visitsPerYear: Number(live.visitsPerYear) > 0 ? Number(live.visitsPerYear) : 1,
+    coverageMonths: Number(live.coverageMonths) > 0 ? Number(live.coverageMonths) : 12,
+    label: live.label || 'Subterranean Termite Protection',
+  };
+  for (const [key, fallback] of TERMITE_ANNUAL_PLAN_KNOBS) {
+    const { min = 0, max = Infinity, integer = false } = bounds[key] || {};
+    const accept = (v) => {
+      const n = Number(v);
+      return Number.isFinite(n) && n >= min && n <= max && (!integer || Number.isInteger(n));
+    };
+    const stamped = snap && accept(snap[key]) ? Number(snap[key]) : null;
+    basis[key] = stamped ?? (accept(live[key]) ? Number(live[key]) : fallback);
+  }
+  return basis;
+}
+
+// annual = base + step × max(0, ceil((stations − floor) / bracket)) — whole dollars.
+function termiteAnnualPlanFeeForStations(stations, plan = resolveTermiteAnnualPlanBasis(null)) {
+  const n = Math.max(1, Number(stations) || 0);
+  const brackets = Math.max(0, Math.ceil((n - plan.bracketFloor) / plan.bracketStations));
+  return Math.round(plan.annualBase + brackets * plan.annualStep);
+}
+
+// The program shape a termite quote is billed under — resolved ONCE so the
+// pricer carries no per-field plan/quarterly branching.
+//   quarterly:         install (or $0 on a rental) + bracketed station checks × 4
+//   annual_protection: station SETUP fee + prepaid annual fee × 1 (ruling A-1 = P1)
+// Margin on what is actually BILLED for the hardware — the outright install
+// on the quarterly program, the station setup fee on the annual plan (ruling
+// A-1 accepts its ≈ −10 %). A RENTAL keeps reporting the retail install
+// margin exactly as it did before this lane (the amortized uplift carries the
+// hardware; nothing here changes the shipped rental feature's figures).
+const billedMargin = (billed, cost) => (billed > 0 ? (billed - cost) / billed : 0);
+function resolveTermiteProgram({ isAnnualPlan, annualPlan, stations, installPrice, installCost, ownership }) {
+  if (isAnnualPlan) {
+    const setupFee = Math.round(stations * annualPlan.setupPerStation);
+    const annualFee = termiteAnnualPlanFeeForStations(stations, annualPlan);
+    return {
+      plan: 'annual_protection',
+      isRentedStations: false,
+      ownership: 'plan',
+      stationsOwnedBy: 'waves',
+      installKind: 'setup',
+      billedInstallPrice: setupFee,
+      billedInstallMargin: billedMargin(setupFee, installCost),
+      visitsPerYear: annualPlan.visitsPerYear,
+      monitoringMonthly: Math.round((annualFee / 12) * 100) / 100,
+      monitoringAnnual: annualFee,
+      monitoringModel: 'annual_protection',
+      perApp: annualFee,
+      planFields: {
+        planLabel: annualPlan.label,
+        planTerms: { coverageMonths: annualPlan.coverageMonths, visitsPerYear: annualPlan.visitsPerYear, retreatOnly: true, subterraneanOnly: true, renewal: 'annual' },
+        setup: { price: setupFee, perStation: annualPlan.setupPerStation, stations, tierDiscountable: false },
+        annualFee,
+      },
+      planKnobs: { plan: 'annual_protection', setupPerStation: annualPlan.setupPerStation, annualBase: annualPlan.annualBase, annualStep: annualPlan.annualStep, bracketStations: annualPlan.bracketStations, bracketFloor: annualPlan.bracketFloor },
+    };
+  }
+  const isRentedStations = ownership === 'rent';
+  const monitoringMonthly = termiteMonitoringMonthlyForStations(stations);
+  return {
+    plan: 'quarterly',
+    isRentedStations,
+    ownership,
+    stationsOwnedBy: isRentedStations ? 'waves' : 'customer',
+    installKind: 'install',
+    billedInstallPrice: isRentedStations ? 0 : installPrice,
+    billedInstallMargin: billedMargin(installPrice, installCost),
+    visitsPerYear: TERMITE.monitoringVisitsPerYear,
+    monitoringMonthly,
+    monitoringAnnual: monitoringMonthly * 12,
+    monitoringModel: 'station_brackets',
+    perApp: Math.round(monitoringMonthly * (12 / TERMITE.monitoringVisitsPerYear) * 100) / 100,
+    planFields: {},
+    // Stamp the billed program even when the annual-plan gate is off. A
+    // saved request can still contain plan='annual_protection'; replay must
+    // therefore use the stored RESULT's quarterly identity rather than a
+    // later live gate that would reinterpret the original request.
+    planKnobs: { plan: 'quarterly' },
+  };
 }
 
 const TERMITE_SERVICE_MINUTES_PER_STATION = 5;
@@ -4849,6 +4953,11 @@ function priceTermiteBait(property, options = {}) {
     // by both authoritative replay paths). Absent on fresh quotes, which
     // resolve the live constant / catalog-linked station cost.
     knobs = null,
+    // 'annual_protection' = the Waves Subterranean Termite Protection plan
+    // (ruling A-1 = P1): station setup fee + prepaid annual fee, one
+    // inspection a year. Passed by estimate-engine ONLY behind
+    // GATE_TERMITE_ANNUAL_PLAN; anything else prices the quarterly program.
+    plan = null,
     monitoringTier = 'basic',
     // 'own' (customer buys the stations, one-time install charge) or 'rent'
     // (Waves retains ownership, $0 install, recovery rides the quarterly).
@@ -4935,6 +5044,8 @@ function priceTermiteBait(property, options = {}) {
   // cannot re-price an already-sent install on replay (codex #4313 r5 P1).
   const basis = resolveTermiteInstallBasis(sys, selectedSystem, knobs);
   const stations = Math.max(basis.minStations, Math.ceil(perimeter / spacingFt));
+  const isAnnualPlan = plan === 'annual_protection';
+  const annualPlan = isAnnualPlan ? resolveTermiteAnnualPlanBasis(knobs) : null;
 
   const conMult = constructionMult.value;
   const foundAdj = foundationAdj.value;
@@ -4954,18 +5065,16 @@ function priceTermiteBait(property, options = {}) {
   // amount to amortize — but installation.price is what the one-time mapper
   // reads (it only emits a line when price > 0), so zeroing it here is what
   // actually drops the charge.
-  const isRentedStations = ownership === 'rent';
-  const billedInstallPrice = isRentedStations ? 0 : installPrice;
-
-  // Bracketed by the station count this property actually needs (owner
-  // 2026-07-28) — the flat Basic/Premier tiers are retired.
-  const monitoringMonthly = termiteMonitoringMonthlyForStations(stations);
-  const monitoringAnnual = monitoringMonthly * 12;
+  // The billed program: today's quarterly station checks (install, or $0 on
+  // a rental) or the annual protection plan (station SETUP fee + prepaid
+  // annual fee, one inspection a year; rental / bond have no meaning there).
+  const program = resolveTermiteProgram({ isAnnualPlan, annualPlan, stations, installPrice, installCost, ownership });
+  const { billedInstallPrice, billedInstallMargin, visitsPerYear, monitoringMonthly, monitoringAnnual } = program;
   const costs = termiteProgramCostModel({
     stations,
     installMaterialCost,
     installLabor,
-    visitsPerYear: TERMITE.monitoringVisitsPerYear,
+    visitsPerYear,
     stationCost,
     system: selectedSystem,
   });
@@ -4978,10 +5087,15 @@ function priceTermiteBait(property, options = {}) {
     monitoringTier: selectedMonitoringTier,
     selectedMonitoringTier,
     requestedMonitoringTier: monitoringResolution.requestedMonitoringTier,
-    ownership,
+    ownership: program.ownership,
     // Who owns the in-ground hardware. Carried onto the persisted estimate so
-    // conversion can stamp termite_stations.owned_by at install time.
-    stationsOwnedBy: isRentedStations ? 'waves' : 'customer',
+    // conversion can stamp termite_stations.owned_by at install time. The
+    // annual plan keeps the stations Waves-owned (retrieved when coverage ends).
+    stationsOwnedBy: program.stationsOwnedBy,
+    // The program shape this line was priced under: 'quarterly' (today's
+    // station-check program) or 'annual_protection' (ruling A-1 = P1).
+    plan: program.plan,
+    ...program.planFields,
     complexity,
     footprintSqFt: footprintResolution.value,
     footprintSource: footprintResolution.source,
@@ -5011,16 +5125,23 @@ function priceTermiteBait(property, options = {}) {
       materialCost: Math.round(installMaterialCost),
       laborCost: Math.round(installLabor),
       totalCost: Math.round(installCost),
+      // On the annual plan this is the STATION SETUP fee (kind 'setup'),
+      // otherwise the outright install charge (or 0 on a rental).
+      kind: program.installKind,
       price: billedInstallPrice,
       // Undiscounted install price regardless of ownership — on a rental
       // this is the "$0 today, $NNN of hardware" figure, and it is the base
       // priceTermiteStationRental amortizes.
       retailValue: installPrice,
-      margin: Math.round(installMargin * 1000) / 1000,
+      // Margin on the BILLED figure (setup fee on the plan); retailMargin is
+      // the outright-install formula's margin for reference.
+      margin: Math.round(billedInstallMargin * 1000) / 1000,
+      retailMargin: Math.round(installMargin * 1000) / 1000,
     },
     monitoring: {
       monthly: monitoringMonthly,
       annual: monitoringAnnual,
+      model: program.monitoringModel,
     },
     // Where the hardware cost behind installation.price came from (plan
     // 2026-09-03 §A1): 'catalog' = the inventory catalog's approved vendor
@@ -5050,6 +5171,8 @@ function priceTermiteBait(property, options = {}) {
       misc: basis.misc,
       installMultiplier: basis.installMultiplier,
       minStations: basis.minStations,
+      // The plan's own constants replay from day one (plan §A2 replay row).
+      ...program.planKnobs,
     },
     // Report-only program cost model (LAB-006): install cost plus the
     // steady-state annual cost of servicing the stations — service labor per
@@ -5063,9 +5186,10 @@ function priceTermiteBait(property, options = {}) {
     // monthly x 12): $35/mo -> $105/application, 4 applications/yr. The
     // v1 mapper forwards these onto the persisted recurring services row,
     // which is what flips the estimate view, accept billing cadence,
-    // per_application_fee, and series seeding to per-application.
-    visitsPerYear: TERMITE.monitoringVisitsPerYear,
-    perApp: Math.round(monitoringMonthly * (12 / TERMITE.monitoringVisitsPerYear) * 100) / 100,
+    // per_application_fee, and series seeding to per-application. On the
+    // annual plan: 1 visit, perApp = the annual fee.
+    visitsPerYear,
+    perApp: program.perApp,
   };
 }
 
@@ -9136,7 +9260,7 @@ module.exports = {
   priceCommercialLawn, priceCommercialTreeShrub, priceCommercialPest,
   priceCommercialMosquito, priceCommercialTermiteBait, priceCommercialRodentBait, pricePalmInjection,
   normalizeCommercialTermiteScope, COMMERCIAL_TERMITE_AUTO_SCOPES,
-  priceMosquito, priceTermiteBait, priceTermiteBond, priceTermiteStationRental, termiteProgramAnnualCostForStations,
+  priceMosquito, priceTermiteBait, priceTermiteBond, priceTermiteStationRental, termiteProgramAnnualCostForStations, termiteAnnualPlanFeeForStations,
   termiteMonitoringMonthlyForStations,
   priceRodentBait, rodentBaitBracketFor, priceRodentTrapping,
   priceRodentTrappingFollowups, priceSanitation, priceBaitSetup,

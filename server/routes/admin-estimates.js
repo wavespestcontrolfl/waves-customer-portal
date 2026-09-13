@@ -53,6 +53,7 @@ const {
   completePendingInvalidation,
   takePendingInvalidation,
 } = require('../services/admin-estimate-persistence');
+const { selectedTermiteAnnualPlanRows } = require('../services/estimate-termite-program-rows');
 const { estimateDataCarriesBermudaSuppression } = require('../services/pricing-engine/v1-legacy-mapper');
 const {
   inferEstimateServiceInterest,
@@ -572,6 +573,29 @@ function assertEstimateSendable(estimate, { engineReviewAcknowledged = false } =
       err.code = fallback ? 'CLIENT_FALLBACK_PRICING' : 'PRICING_AUTHORITY_NOT_SERVER';
       throw err;
     }
+  }
+  // Termite annual protection plan (ruling A-1) is dark behind
+  // GATE_TERMITE_ANNUAL_PLAN. The engine lets an ISSUED plan keep pricing
+  // after the kill switch is off, on the evidence of the stored replay stamp
+  // — but that stamp is written at PRICING time, not publication time, so a
+  // draft priced while the gate was on would otherwise still be deliverable
+  // once the switch went off, and a delivered estimate IS viewable and
+  // acceptable. deliveryState.firstDeliveredAt is the durable publication
+  // witness: unlike sent_at, it is stamped only after a REAL provider handoff,
+  // never for a suppressed SMS sentinel. A resend of an already-delivered plan
+  // stays allowed (killing the switch stops new contracts, it does not retract
+  // issued ones); a never-delivered plan is refused until the gate is back on
+  // or the estimate is re-saved on the quarterly program (codex #4424 P1).
+  const annualPlanGateOn = ['1', 'true', 'on']
+    .includes(String(process.env.GATE_TERMITE_ANNUAL_PLAN || '').toLowerCase());
+  const estimateData = parseEstimateData(estimate.estimate_data || estimate.estimateData);
+  const annualPlanDelivered = !!estimateData?.deliveryState?.firstDeliveredAt;
+  if (!annualPlanGateOn && !annualPlanDelivered
+    && selectedTermiteAnnualPlanRows(estimateData).length > 0) {
+    const err = new Error('The termite annual protection plan is disabled (GATE_TERMITE_ANNUAL_PLAN) — reopen the estimate in the estimate tool and save it on the quarterly program before sending.');
+    err.statusCode = 422;
+    err.code = 'TERMITE_ANNUAL_PLAN_DISABLED';
+    throw err;
   }
   assertEstimateManagerApprovalResolved(estimate);
   if (commercialRiskTypeReviewNeeded(estimate.estimate_data || estimate.estimateData)) {

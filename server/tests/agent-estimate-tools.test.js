@@ -1541,6 +1541,20 @@ describe('Agent Estimate compute input boundary', () => {
     expect(mockGenerateEstimate).not.toHaveBeenCalled();
   });
 
+  test('rejects model-supplied stored-estimate replay stamps (termite / tree-shrub pricing knobs)', async () => {
+    const result = await executeEstimateTool('compute_estimate', {
+      homeSqFt: 2000,
+      termitePricingKnobs: { plan: 'annual_protection', stationCost: 1 },
+      treeShrubPricingKnobs: { palmRate: 1 },
+      services: { termite: { plan: 'annual_protection' } },
+    });
+
+    expect(result.error).toMatch(/cannot set price, cost, discount, margin, or manager-override/i);
+    expect(result.error).toMatch(/termitePricingKnobs/);
+    expect(result.error).toMatch(/treeShrubPricingKnobs/);
+    expect(mockGenerateEstimate).not.toHaveBeenCalled();
+  });
+
   test('rejects a forbidden pricing override even if create draft is called directly', async () => {
     const { database, writes } = makeDatabase();
     mockDb.mockImplementation(database);

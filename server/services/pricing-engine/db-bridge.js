@@ -837,6 +837,16 @@ function warnCatalogRefusalOnce(key, message) {
   console.warn(message);
 }
 
+// In-code annual-plan defaults, captured ONCE at load (see the termite
+// branch of the sync — same reset-then-apply posture as the cost basis).
+const TERMITE_ANNUAL_PLAN_DEFAULTS = Object.freeze({ ...(constants.TERMITE.annualPlan || {}) });
+function resetTermiteAnnualPlanDefaults() {
+  if (!constants.TERMITE.annualPlan) return;
+  for (const key of ['setupPerStation', 'annualBase', 'annualStep', 'bracketStations', 'bracketFloor']) {
+    if (TERMITE_ANNUAL_PLAN_DEFAULTS[key] != null) constants.TERMITE.annualPlan[key] = TERMITE_ANNUAL_PLAN_DEFAULTS[key];
+  }
+}
+
 // In-code termite cost-basis defaults, captured ONCE at load (before any
 // sync mutates the constants) so every sync can restore them before the DB
 // row and the catalog link re-apply — see the termite branch of the sync.
@@ -1361,6 +1371,25 @@ async function _syncConstantsFromDBUnserialized(dbInstance) {
       if (tb1) constants.TERMITE.bond['1yr'].quarterly = tb1;
       if (tb5) constants.TERMITE.bond['5yr'].quarterly = tb5;
       if (tb10) constants.TERMITE.bond['10yr'].quarterly = tb10;
+    }
+    // Annual protection plan (ruling A-1 = P1). Reset to the in-code
+    // defaults every sync, then apply the row — a removed key falls back to
+    // the default, never a stale prior value (pre-slab pattern).
+    resetTermiteAnnualPlanDefaults();
+    if (config.termite_annual_plan) {
+      const ap = config.termite_annual_plan;
+      const plan = constants.TERMITE.annualPlan;
+      setNumber(plan, 'setupPerStation', ap.setup_per_station ?? ap.setupPerStation, money);
+      setNumber(plan, 'annualBase', ap.annual_base ?? ap.annualBase, money);
+      // A ZERO step is a valid shape (flat annual fee regardless of station
+      // count — the admin validator allows it); only a negative or
+      // non-finite step is refused and falls back to the default.
+      const step = readFiniteNumber(ap.annual_step ?? ap.annualStep);
+      if (step !== undefined && step >= 0) plan.annualStep = money(step);
+      const bracket = Number(ap.bracket_stations ?? ap.bracketStations);
+      if (Number.isInteger(bracket) && bracket > 0) plan.bracketStations = bracket;
+      const floor = Number(ap.bracket_floor ?? ap.bracketFloor);
+      if (Number.isInteger(floor) && floor >= 0) plan.bracketFloor = floor;
     }
     if (config.termite_rental) {
       // Amortization horizon for the station-rental uplift. Same posture as

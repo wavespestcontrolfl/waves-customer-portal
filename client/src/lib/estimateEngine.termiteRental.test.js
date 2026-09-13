@@ -206,3 +206,60 @@ describe("termite station rental — client fallback engine", () => {
       .toBe("rent");
   });
 });
+
+describe("annual protection plan mirror (ruling A-1 = P1; server gate word via featureAvailable)", () => {
+  it("prices setup + annual fee only when the server says the plan is available, and retires bond + rental on it", async () => {
+    const { applyServerTermiteAnnualPlanPricingConfig } = await import("./estimateEngine");
+    try {
+      // Gate off (default): a plan request is ignored — today's program.
+      const off = calculateEstimate(termiteInput({ termiteBaitSystem: "trelona", termitePlan: "annual_protection", termiteBondTerm: "5yr" }));
+      expect(off.results.tmBait.plan).toBe("quarterly");
+      expect(off.results.tmBait.setupFee).toBeUndefined();
+      applyServerTermiteAnnualPlanPricingConfig({ setup_per_station: 30, annual_base: 249, annual_step: 50, bracket_stations: 5, bracket_floor: 10 }, true);
+      const on = calculateEstimate(termiteInput({ termiteBaitSystem: "trelona", termitePlan: "annual_protection", termiteBondTerm: "5yr", termiteOwnership: "rent" }));
+      const sta = on.results.tmBait.sta;
+      const brackets = Math.max(0, Math.ceil((sta - 10) / 5));
+      expect(on.results.tmBait).toMatchObject({ plan: "annual_protection", setupFee: sta * 30, annualFee: 249 + brackets * 50, visitsPerYear: 1, stationsOwnedBy: "waves" });
+      expect(on.results.tmBait.pricingKnobs).toMatchObject({ plan: "annual_protection", setupPerStation: 30, annualBase: 249 });
+      expect(on.results.tmBond).toBeUndefined();
+      expect(on.results.tmBait.rented).toBeUndefined();
+      expect(on.results.tmBait.bondOptions).toBeUndefined();
+      const row = on.recurring.services.find((s) => s.service === "termite_bait");
+      expect(row).toMatchObject({ perTreatment: 249 + brackets * 50, visitsPerYear: 1 });
+      expect(on.oneTime.tmInstall).toBe(sta * 30);
+      // Exact annual fee in the aggregates (never the rounded monthly × 12), and Trelona forced on the plan.
+      expect(on.recurring.annualBeforeDiscount).toBe(249 + brackets * 50);
+      const adv = calculateEstimate(termiteInput({ termiteBaitSystem: "advance", termitePlan: "annual_protection" }));
+      expect(adv.results.tmBait.system).toBe("trelona");
+      expect(adv.results.tmBait.sta).toBe(sta);
+      // camelCase aliases the bridge accepts mirror too.
+      applyServerTermiteAnnualPlanPricingConfig({ setupPerStation: 35, annualBase: 259 }, true);
+      const alias = calculateEstimate(termiteInput({ termiteBaitSystem: "trelona", termitePlan: "annual_protection" }));
+      expect(alias.results.tmBait.setupFee).toBe(alias.results.tmBait.sta * 35);
+      expect(alias.results.tmBait.annualFee).toBe(259 + Math.max(0, Math.ceil((alias.results.tmBait.sta - 10) / 5)) * 50);
+      // A failed gate lookup fails closed.
+      applyServerTermiteAnnualPlanPricingConfig(null, false);
+      expect(calculateEstimate(termiteInput({ termiteBaitSystem: "trelona", termitePlan: "annual_protection" })).results.tmBait.plan).toBe("quarterly");
+    } finally {
+      applyServerTermiteAnnualPlanPricingConfig(null, false);
+    }
+  });
+
+  it("treats explicit null plan knobs as missing, matching the server defaults", async () => {
+    const { applyServerTermiteAnnualPlanPricingConfig } = await import("./estimateEngine");
+    try {
+      expect(applyServerTermiteAnnualPlanPricingConfig({ annual_step: 0, bracket_floor: 0 }, true))
+        .toMatchObject({ annualStep: 0, bracketFloor: 0 });
+      // Number(null) is zero in JavaScript, but the server bridge treats null
+      // as missing. A client zero here would turn a 15-station $299 plan into
+      // $249 when a save falls back to the browser engine.
+      const applied = applyServerTermiteAnnualPlanPricingConfig({ annual_step: null, bracket_floor: null }, true);
+      expect(applied).toMatchObject({ annualStep: 50, bracketFloor: 10 });
+      const estimate = calculateEstimate(termiteInput({ termiteBaitSystem: "trelona", termitePlan: "annual_protection", termitePerimeterLF: 224 }));
+      expect(estimate.results.tmBait.sta).toBe(15);
+      expect(estimate.results.tmBait.annualFee).toBe(299);
+    } finally {
+      applyServerTermiteAnnualPlanPricingConfig(null, false);
+    }
+  });
+});
