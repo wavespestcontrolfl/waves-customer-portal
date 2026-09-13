@@ -1291,9 +1291,9 @@ const CARD_NON_FRAGMENT_RES = Object.freeze([
 // A calendar date remains benign unless an explicit card-expiration phrase
 // describes it. Record only the value span so an expiration cue cannot turn
 // an unrelated appointment date, amount or phone number into card digits.
-const CARD_EXPIRATION_CUE = `(?:card(?:[\\x27\\u2019]s)?\\s+(?:that\\s+)?(?:(?:will|does|did)\\s+)?expir(?:e|es|ed|y|ation)|expir(?:y|ation)|card(?:[\\x27\\u2019]s)?\\s+(?:is|was)\\s+(?:valid|good)\\s+through|(?:fecha\\s+de\\s+)?vencimiento(?:\\s+de\\s+(?:la\\s+)?tarjeta)?)`;
+const CARD_EXPIRATION_CUE = `(?:${CARD_PAYMENT_LABEL}(?:[\\x27\\u2019]s)?\\s+(?:that\\s+)?(?:(?:will|does|did)\\s+)?expir(?:e|es|ed|y|ation)|expir(?:y|ation)|${CARD_PAYMENT_LABEL}(?:[\\x27\\u2019]s)?\\s+(?:is|was)\\s+(?:valid|good)\\s+through|(?:fecha\\s+de\\s+)?vencimiento(?:\\s+de\\s+(?:la\\s+)?tarjeta)?)`;
 const CARD_EXPIRATION_VALUE_RE = new RegExp(
-  `\\b${CARD_EXPIRATION_CUE}(?:\\s+date)?(?:\\s+on\\s+(?:(?:your|the|my|this|that)\\s+)?card)?`
+  `\\b${CARD_EXPIRATION_CUE}(?:\\s+date)?(?:\\s+on\\s+(?:(?:your|the|my|this|that)\\s+)?${CARD_PAYMENT_LABEL})?`
   + `(?:\\s+(?:(?:is|was|es|era)(?:\\s+(?:on|in))?|on|in|of|at\\s+(?:the\\s+)?end\\s+of))?(?:\\s+|\\s*[:—–,-]\\s*)`
   + `((?:(?:${MONTHS})\\s+(?:(?:\\d{1,2}(?:st|nd|rd|th)?(?:,\\s*|\\s+)(?:19|20)\\d{2})|(?:(?:19|20)\\d{2})|(?:\\d{2})))|(?:(?:0?[1-9]|1[0-2])\\s*[/.-]\\s*(?:(?:0?[1-9]|[12]\\d|3[01])\\s*[/.-]\\s*)?(?:\\d{2}|(?:19|20)\\d{2}))|(?:(?:19|20)\\d{2}))\\b`,
   'gi',
@@ -1355,7 +1355,7 @@ function cardValueHasNonCardExplanation(nonFragments, calendarSpan, start, end, 
   return contextual || (Boolean(calendarSpan) && !inherited);
 }
 function cardFragmentsIn(text, precedingReadback = false) {
-  const digitParts = String(text || '').split(new RegExp(`(${SENTENCE_SPLIT_RE.source})`));
+  const digitParts = String(text || '').trim().split(new RegExp(`(${SENTENCE_SPLIT_RE.source})`));
   const digits = joinSeparatedDigits(digitParts.map((part, index) => (index % 2 ? part : cardSpokenDigits(part))).join(''));
   const nonFragments = CARD_NON_FRAGMENT_RES.flatMap((re) => [...digits.matchAll(re)]
     .map((match) => [match.index, match.index + match[0].length]));

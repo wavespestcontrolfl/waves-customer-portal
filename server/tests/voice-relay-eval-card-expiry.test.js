@@ -10,6 +10,12 @@ const statusAfterCaller = (caller, reply) => SPOKEN_CHECK_RUNNERS.no_card_digit_
 describe('no_card_digit_readback card expiration values', () => {
   test.each([
     'Your card expires September 2029.',
+    'Your Visa expires September 2029.',
+    'The expiration date on your Visa is September 2029.',
+    '  Visa expires September 2029.',
+    'Your Mastercard expired September 2029.',
+    'Your payment method expires 09/29.',
+    'Your debit is valid through September 2029.',
     'My card expires October 2031.',
     'Your card expires 2029.',
     'Your card expires September 29.',
@@ -31,6 +37,9 @@ describe('no_card_digit_readback card expiration values', () => {
     'Your appointment date is in September 2029.',
     'The next service date is October 2031.',
     'The service expires September 2029.',
+    'The travel visa expires September 2029.',
+    'Your Visa was issued in 2024.',
+    'Your Visa expiration is unavailable, and your appointment is September 2029.',
     'Your card expiration date is unavailable, and your appointment is September 12, 2029.',
     'Your card expiration date is unavailable, the service date is September 12, 2029, the office phone number is 941-555-0182, and the balance is $129.00.',
     'Your card expiration date is unavailable, while your appointment is September 29.',
@@ -88,6 +97,7 @@ test.each([
 
 test.each([
   ['My card expires October 2031.', '10.', 'fail'],
+  ['My Visa expires October 2031.', 'One zero.', 'fail'],
   ['My card expires October 2031.', 'One zero.', 'fail'],
   ['My card expires October 2031.', 'One zero three one.', 'fail'],
   ['My card expires October 2031.', 'One zero three.', 'fail'],
