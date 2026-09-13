@@ -416,7 +416,7 @@ const NEGATION_RE = /\b(?:not(?!\s+only\b)|never|cannot|can[\x27\u2019]?t|\w+n[\
 const CLAUSE_BOUNDARY_TOKEN_RE = /[.!?;:]|[—–]|\b(?:but|and|or|though|although|however|yet|so|then|while|because|pero|sin embargo|aunque)\b/gi;
 const COORDINATED_REPORT_VERBS = vocabAlt([...EPISTEMIC_REFUSAL_VERBS, 'deny']);
 const REFUND_PAYMENT_ACTION_RE = /\b(?:refund(?:ed|ing)?|revers(?:e|ed|ing)|return(?:ed|ing)?)\s+(?:(?:your|the|that|a|an)\s+)?(?:last\s+|full\s+|partial\s+|original\s+)?(?:payment|charge|amount)\b/i;
-const CLAUSE_FINITE_PREDICATE_RE = /\b(?:is|are|was|were|has|have|had|will|would|should|can|cannot|could|did|does|do|\w+n[\x27\u2019]t|applied|placed|processed|came)\b/i;
+const CLAUSE_FINITE_PREDICATE_RE = /\b(?:is|are|was|were|has|have|had|will|would|should|can|cannot|could|did|does|do|\w+n[\x27\u2019]t|applied|placed|processed|refunded|came)\b/i;
 const RIGHT_NOUN_PHRASE_SUBJECT_RE = new RegExp(
   `^\\s*(?:an?|the|this|that|these|those)\\s+(?:[\\w\\x27\\u2019-]+\\s+){0,5}${CLAUSE_FINITE_PREDICATE_RE.source}`,
   'i',
@@ -497,7 +497,7 @@ function claimContext(text, start, end) {
   const preclaim = text.slice(boundary, start);
   const hedgeContext = EPISTEMIC_HEDGE_RE.test(introduction) ? introduction : preclaim;
   const concessiveIntroduction = /^\s*despite\b/i.test(introduction)
-    || (comma >= boundary && /\b(?:although|though)\s*$/i.test(text.slice(0, boundary)));
+    || (comma >= boundary && /\b(?:although|though|while)\s*$/i.test(text.slice(0, boundary)));
   const hedge = concessiveIntroduction ? null : EPISTEMIC_HEDGE_RE.exec(hedgeContext);
   const complement = hedge ? hedgeContext.slice(hedge.index + hedge[0].length).replace(/[,\s]+$/g, '').trim() : '';
   // A condition or refusal governs the assertion after its comma. Ordinary
@@ -1264,9 +1264,9 @@ function only_language(value, record, { spoken }) {
 const DENIAL_WORD_RE = /\b(?:(?:not|cannot|(?:is|are|do|did|does|was|were|has|have|had|ca|could|would|wo)n[\x27\u2019]t)(?!\s+(?:only|just|merely|simply)\b)|(?:failed|unable|refused|declined)\s+to(?=\s+(?:raise|mention|report)\b)|never|denied|denies|without|nothing(?!\s+(?:but|except|other than)\b)|no(?![-\u2010-\u2015])|neither|none|zero)\b/gi;
 // Commas may enclose an aside and "and" may coordinate denied objects.
 // End their scope only when the next phrase starts a fresh assertion.
-const CAPTURE_NOUN_ASSERTION_START_SOURCE = `(?:[\\w\\x27\\u2019-]+\\s+){1,5}${CLAUSE_FINITE_PREDICATE_RE.source}`;
-const CAPTURE_ASSERTION_START_SOURCE = `(?:(?:(?:the )?(?:caller|customer)|she|he|they)\\s+\\w+|(?:never\\s+)?(?:asked|asks|raised|raises|expressed|expresses|mentioned|mentions|reported|reports|voiced|voices|denied|denies|noting|noted|adding|added|${QUESTION_AUX_RE_SOURCE})\\b|${CAPTURE_NOUN_ASSERTION_START_SOURCE})`;
 const REPORTED_QUESTION_AUX_SOURCE = `(?:${QUESTION_AUX_RE_SOURCE}|\\w+n[\\x27\\u2019]t)`;
+const CAPTURE_NOUN_ASSERTION_START_SOURCE = `(?:[\\w\\x27\\u2019-]+\\s+){1,5}${CLAUSE_FINITE_PREDICATE_RE.source}`;
+const CAPTURE_ASSERTION_START_SOURCE = `(?:(?:(?:the )?(?:caller|customer)|she|he|they)\\s+\\w+|(?:never\\s+)?(?:asked|asks|raised|raises|expressed|expresses|mentioned|mentions|reported|reports|voiced|voices|denied|denies|noting|noted|adding|added|${REPORTED_QUESTION_AUX_SOURCE})\\b|${CAPTURE_NOUN_ASSERTION_START_SOURCE})`;
 const DENIAL_CLAUSE_END_RE = new RegExp(`[.;!?—–]|\\s-\\s|\\b(?:but|because|except|other than|however|although|though|so|while|yet)\\b|(?::|,|\\band\\b)\\s*(?:(?:then|also)\\s+)*(?=${CAPTURE_ASSERTION_START_SOURCE})`, 'gi');
 function denialContinuesPastBoundary(text, denial, boundary) {
   const complement = text.slice(denial.index + denial[0].length, boundary.index);
