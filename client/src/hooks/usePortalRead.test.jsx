@@ -3,8 +3,12 @@ import React from 'react';
 import '@testing-library/jest-dom/vitest';
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import usePortalRead, { PortalReadProvider } from './usePortalRead';
+import usePortalRead, { PortalReadProvider, usePortalRefresh } from './usePortalRead';
 import { PortalRefreshArea } from '../components/portal/PortalRefresh';
+
+const native = vi.hoisted(() => ({ enabled: false, callback: null, remove: vi.fn().mockResolvedValue(undefined) }));
+vi.mock('../native/platform', () => ({ isNativeApp: () => native.enabled }));
+vi.mock('@capacitor/app', () => ({ App: { addListener: vi.fn(async (_event, callback) => { native.callback = callback; return { remove: native.remove }; }) } }));
 
 const biometric = vi.hoisted(() => ({ locked: false }));
 vi.mock('../components/BiometricGate', () => ({ useBiometricLock: () => biometric.locked }));
@@ -19,21 +23,29 @@ const deferred = () => {
 function Read({ load }) {
   const read = usePortalRead('visits', load);
   return <>
+    <div data-testid="verified">{String(read.verified)}</div>
     <div data-testid="data">{read.data?.title || 'No saved information'}</div>
     <div data-testid="state">{read.saved ? 'saved' : read.error ? 'error' : read.loading ? 'loading' : 'ready'}</div>
     <button onClick={read.refresh}>Retry read</button>
     <button onClick={() => read.update(previous => ({ ...previous, title: 'Confirmed' }))}>Confirm fixture</button>
   </>;
 }
+function RefreshFixture() {
+  const portal = usePortalRefresh();
+  return <button onClick={portal.refresh}>Refresh fixture</button>;
+}
 function App({ load, account = 'a', show = true, enabled = true }) {
   return <PortalReadProvider key={account} enabled={enabled}><PortalRefreshArea>
-    <div data-testid="pull-target">Visits</div>
+    <RefreshFixture /><div data-testid="pull-target">Visits</div>
     {show && <Read load={load} />}
   </PortalRefreshArea></PortalReadProvider>;
 }
 
 beforeEach(() => {
   biometric.locked = false;
+  native.enabled = false;
+  native.callback = null;
+  native.remove.mockReset().mockResolvedValue(undefined);
   Object.defineProperty(navigator, 'onLine', { configurable: true, value: true });
 });
 afterEach(() => { cleanup(); vi.useRealTimers(); vi.restoreAllMocks(); });
@@ -45,7 +57,7 @@ describe('customer portal reads', () => {
       .mockReturnValueOnce(pending.promise).mockResolvedValue({ title: 'Current visit' });
     const { rerender } = render(<App load={load} />);
     await screen.findByText('Saved visit');
-    fireEvent.click(screen.getByRole('button', { name: 'Refresh', exact: true }));
+    fireEvent.click(screen.getByRole('button', { name: 'Refresh fixture', exact: true }));
     biometric.locked = true;
     rerender(<App load={load} />);
     biometric.locked = false;
@@ -64,7 +76,7 @@ describe('customer portal reads', () => {
       .mockReturnValueOnce(pending.promise).mockReturnValueOnce(recovered.promise);
     render(<App load={load} />);
     await screen.findByText('Saved visit');
-    fireEvent.click(screen.getByRole('button', { name: 'Refresh', exact: true }));
+    fireEvent.click(screen.getByRole('button', { name: 'Refresh fixture', exact: true }));
     Object.defineProperty(navigator, 'onLine', { configurable: true, value: false });
     fireEvent(window, new Event('offline'));
     Object.defineProperty(navigator, 'onLine', { configurable: true, value: true });
@@ -136,6 +148,7 @@ describe('customer portal reads', () => {
     await waitFor(() => expect(screen.getByTestId('state')).toHaveTextContent('saved'));
     fireEvent.click(screen.getByRole('button', { name: 'Retry read' }));
     expect(screen.getByTestId('state')).toHaveTextContent('saved');
+    expect(screen.getByTestId('verified')).toHaveTextContent('false');
     await act(async () => pending.resolve({ title: 'Fresh visit' }));
     expect(screen.getByTestId('data')).toHaveTextContent('Fresh visit');
   });
@@ -145,11 +158,15 @@ describe('customer portal reads', () => {
     const load = vi.fn().mockResolvedValueOnce({ title: 'Visit A' }).mockReturnValueOnce(next.promise).mockResolvedValue({ title: 'Visit B' });
     render(<App load={load} />);
     await screen.findByText('Visit A');
-    fireEvent.click(screen.getByRole('button', { name: 'Refresh', exact: true }));
+    fireEvent.click(screen.getByRole('button', { name: 'Refresh fixture', exact: true }));
     expect(screen.getByText('Visit A')).toBeInTheDocument();
+    expect(screen.getByTestId('state')).toHaveTextContent('ready');
+    expect(screen.queryByText('Refresh your visits and documents')).not.toBeInTheDocument();
+    expect(screen.getByTestId('verified')).toHaveTextContent('true');
     await act(async () => next.reject(new Error('offline')));
+    expect(screen.getByTestId('verified')).toHaveTextContent('false');
     expect(screen.getByTestId('state')).toHaveTextContent('saved');
-    fireEvent.click(screen.getByRole('button', { name: 'Refresh', exact: true }));
+    fireEvent.click(screen.getByRole('button', { name: 'Refresh fixture', exact: true }));
     await screen.findByText('Visit B');
     expect(screen.getByTestId('state')).toHaveTextContent('ready');
   });
@@ -209,7 +226,7 @@ describe('customer portal reads', () => {
     render(<App load={load} />);
     await act(async () => vi.advanceTimersByTimeAsync(15000));
     expect(screen.getByTestId('state')).toHaveTextContent('error');
-    await act(async () => fireEvent.click(screen.getByRole('button', { name: 'Refresh', exact: true })));
+    await act(async () => fireEvent.click(screen.getByRole('button', { name: 'Refresh fixture', exact: true })));
     expect(screen.getByTestId('data')).toHaveTextContent('Recovered');
     await act(async () => pending.resolve({ title: 'Expired attempt' }));
     expect(screen.getByTestId('data')).toHaveTextContent('Recovered');
@@ -220,14 +237,14 @@ describe('customer portal reads', () => {
     const load = vi.fn().mockResolvedValue({ title: 'Visit' });
     const { rerender } = render(<App load={load} />);
     await act(async () => {});
-    await act(async () => vi.advanceTimersByTimeAsync(31000));
+    await act(async () => vi.advanceTimersByTimeAsync(2000));
     await act(async () => fireEvent(window, new Event('focus')));
     expect(load).toHaveBeenCalledTimes(2);
     await act(async () => fireEvent(window, new Event('focus')));
     expect(load).toHaveBeenCalledTimes(2);
     biometric.locked = true;
     rerender(<App load={load} />);
-    await act(async () => vi.advanceTimersByTimeAsync(31000));
+    await act(async () => vi.advanceTimersByTimeAsync(2000));
     await act(async () => fireEvent(window, new Event('focus')));
     expect(load).toHaveBeenCalledTimes(2);
     biometric.locked = false;
@@ -236,6 +253,39 @@ describe('customer portal reads', () => {
     expect(load).toHaveBeenCalledTimes(3);
     await act(async () => fireEvent(window, new Event('online')));
     expect(load).toHaveBeenCalledTimes(4);
+  });
+
+  it('refreshes on native resume, coalesces browser focus, and removes its listener', async () => {
+    native.enabled = true;
+    const load = vi.fn().mockResolvedValue({ title: 'Visit' });
+    const { unmount } = render(<App load={load} />);
+    await screen.findByText('Visit');
+    await waitFor(() => expect(native.callback).toBeTypeOf('function'));
+    vi.useFakeTimers();
+    await act(async () => vi.advanceTimersByTimeAsync(2000));
+    await act(async () => native.callback({ isActive: false }));
+    expect(load).toHaveBeenCalledTimes(1);
+    await act(async () => native.callback({ isActive: true }));
+    await act(async () => fireEvent(window, new Event('focus')));
+    expect(load).toHaveBeenCalledTimes(2);
+    unmount();
+    expect(native.remove).toHaveBeenCalledTimes(1);
+    await act(async () => native.callback({ isActive: true }));
+    expect(load).toHaveBeenCalledTimes(2);
+  });
+
+  it('revalidates a restored browser page without showing a permanent refresh card', async () => {
+    vi.useFakeTimers();
+    const load = vi.fn().mockResolvedValue({ title: 'Visit' });
+    render(<App load={load} />);
+    await act(async () => {});
+    expect(screen.getByRole('button', { name: 'Refresh', exact: true })).toHaveClass('sr-only', 'focus:not-sr-only');
+    expect(screen.queryByText('Refresh your visits and documents')).not.toBeInTheDocument();
+    await act(async () => vi.advanceTimersByTimeAsync(2000));
+    const restored = new Event('pageshow');
+    Object.defineProperty(restored, 'persisted', { value: true });
+    await act(async () => fireEvent(window, restored));
+    expect(load).toHaveBeenCalledTimes(2);
   });
 
   it('keeps the rollout off without adding refresh controls or resume reads', async () => {
