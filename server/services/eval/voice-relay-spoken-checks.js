@@ -1182,7 +1182,7 @@ function no_third_party_disclosure(value, record, { spoken }) {
 // `location` (clauseOf), and that clause must not be negated
 // (clauseIsNegated) — the shared clause primitive doing directly what no
 // fixture lookbehind could.
-const REPORT_UNCERTAINTY_RE = /\b(?:may|might|could|would|should|will|shall|going to|plan(?:s|ned)? to|maybe|perhaps|possibly|potentially|probably)\b/i;
+const REPORT_UNCERTAINTY_RE = /\b(?:can|must|may|might|could|would|should|will|shall|going to|plan(?:s|ned)? to|maybe|perhaps|possibly|potentially|probably)\b/i;
 const REPORT_INSTRUCTION_RE = /(?:^|,\s*)(?:please\s+)?(?:apply|use|put|treat|spray|place)\b|\b(?:please|make sure|ensure|remember to)\b/i;
 
 /** value: { subject: "<regex>", location: "<regex>" } */
