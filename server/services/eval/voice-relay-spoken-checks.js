@@ -1361,7 +1361,7 @@ const TECHNICIAN_VISIT_TIMING_RE = /\b(?:appointment|arrival|schedule|scheduling
 
 function trailingWithdrawalAlternative(objectSource) {
   return new RegExp(
-    `^\\s*,?\\s*(?:or|and|but|though|although)\\s+(?:(?:maybe|perhaps|possibly|potentially)\\s+)?`
+    `^\\s*[^.!?;—–]{0,60}?\\s*,?\\s*(?:or|and|but|though|although)\\s+(?:(?:maybe|perhaps|possibly|potentially)\\s+)?`
     + `(?:(?:they|the technician|the team member)\\s+)?(?:(?:might|may|could|would|should|will)\\s+)?`
     + `(?:skip|omit|avoid)\\s+${objectSource}\\b`,
     'i',
