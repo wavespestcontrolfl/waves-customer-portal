@@ -578,6 +578,7 @@ const PAYMENT_EPISTEMIC_REFUSAL_ES_RE = /\bno\s+(?:(?:le|te)\s+)?(?:puedo|podemo
 const PAYMENT_OUTCOME_RES = Object.freeze([PAYMENT_OUTCOME_RE, PAYMENT_FUTURE_OUTCOME_RE, PAYMENT_OUTCOME_ES_RE]);
 const PAYMENT_CONDITION_RE = /^\s*(?:(?:after|before|once|when)(?=\s+(?:i|you|we|they|he|she|it|the|your|our|this|that|submitt(?:ed|ing)|enter(?:ed|ing)|provid(?:ed|ing)|complet(?:ed|ing)|authori[sz](?:ed|ing)|paying|paid)\b)|cuando|despu[eé]s\s+de\s+que|una\s+vez\s+que)\b/i;
 const PAYMENT_PREREQUISITE_RE = /^\s*(?:after|once|when)\b[^.!?;,]{0,80}\b(?:submit(?:ted)?|enter(?:ed)?|provide(?:d)?|complete(?:d)?|authori[sz](?:e|ed)|pay|paid)\b/i;
+const PAYMENT_HISTORICAL_PREREQUISITE_RE = /^\s*,?\s*(?:after|once|when)\s+(?:i|you|we|they|he|she)\s+(?:(?:already|just)\s+)?(?:paid|submitted|entered|provided|completed|authori[sz]ed)\b/i;
 const PAYMENT_PAST_OUTCOME_RE = new RegExp(
   `\\b(?:was|were|had|did|went|got|fue|he|hemos|han|realiz[oó]|proces[oó]|complet[oó])(?![a-záéíóúñ])|\\b${PAYMENT_ACTIVE_PAST_ES}\\s+${PAYMENT_TARGET_ES}\\b|\\b${PAYMENT_ACTOR}\\s+(?:not\\s+)?${PAYMENT_SUCCESS_ADVERBS}${PAYMENT_TRANSITIVE_SUCCESS}\\b|\\b(?:${PAYMENT_TARGET}|that|it)\\s+(?:not\\s+)?${PAYMENT_SUCCESS_ADVERBS}${PAYMENT_INTRANSITIVE_SUCCESS}\\b`,
   'i',
@@ -621,6 +622,8 @@ function paymentOutcomeIsInterrogative(text, claim, matchEnd, claimEnd) {
   return QUESTION_LEAD_RE.test(claim) || (text[claimEnd] === '?' && !followupQuestion);
 }
 function paymentOutcomeHasTemporalCondition(text, claim, claimStart, outcome, outcomeStart, trailingClaim) {
+  if (PAYMENT_HISTORICAL_PREREQUISITE_RE.test(text.slice(claimStart, outcomeStart))
+    || PAYMENT_HISTORICAL_PREREQUISITE_RE.test(trailingClaim)) return false;
   const outcomeCondition = PAYMENT_CONDITION_RE.test(claim);
   const attachedPrerequisite = PAYMENT_PREREQUISITE_RE.test(text.slice(claimStart, outcomeStart))
     || PAYMENT_CONDITION_RE.test(trailingClaim.replace(/^\s*,\s*/, ''));

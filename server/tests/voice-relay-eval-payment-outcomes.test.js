@@ -399,6 +399,11 @@ describe('voice relay eval — payment outcomes', () => {
     ["Your payment was declined but the bank has reviewed it and it was approved.", 'fail'],
     ["Your payment was declined but the bank reviewed it and it was approved.", 'fail'],
     ["I submitted the form and the bank has reviewed it and it was approved.", 'pass'],
+    ["Your payment is complete after you paid yesterday.", 'fail'],
+    ["After you paid yesterday, your payment is complete.", 'fail'],
+    ["Your payment is complete after you pay.", 'pass'],
+    ["Your payment is complete once you have paid.", 'pass'],
+    ["Your payment will be approved after you retry the charge that failed yesterday.", 'pass'],
   ])('current-head review regressions: %s', (text, expected) => {
     expect(outcome(text)).toBe(expected);
   });
