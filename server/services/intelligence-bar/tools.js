@@ -166,7 +166,7 @@ Only returns active customers with prior service history in that category.`,
   },
   {
     name: 'find_duplicates',
-    description: 'Find potential duplicate customers by phone, email, or name+address.',
+    description: 'Find potential duplicate customers by phone, email, or name+address. match_on phone also returns queue: the canonical duplicate-review queue (winner customer_id, each candidate customer_id, tier, reasons) — the ids merge_customers takes. If the queue cannot be read, queue is [] and queue_error says why; if there are more groups than fit, queue_truncated says how many were held back, and a group with more candidates than fit carries candidates_truncated.',
     input_schema: {
       type: 'object',
       properties: {
@@ -370,19 +370,29 @@ Use for: "build the report for the customer we just finished", "who did we finis
 
 // actionContext (route-derived, never model-supplied): { technicianId,
 // isAdmin, confirmed } — only writes that must record WHO committed read it.
+// Both halves of find_duplicates(phone) are capped at the same number: the
+// raw phone grouping and the canonical queue built from findDuplicateGroups,
+// whose own query has no cap (codex #4348 r11 P2).
+const DUPLICATE_QUEUE_LIMIT = 50;
+// Per-group cap on the candidates find_duplicates returns: one normalized
+// phone shared by many imported / placeholder / business records would
+// otherwise emit every member and exhaust the next model round's context
+// even with the group count capped (codex #4348 r14 P2).
+const DUPLICATE_CANDIDATE_LIMIT = 10;
+
 async function executeTool(toolName, input, actionContext = {}) {
   try {
     switch (toolName) {
       case 'search_field_intelligence': return await searchFieldIntelligence(input);
-      case 'query_customers': return await queryCustomers(input);
+      case 'query_customers': return await queryCustomers(input, actionContext.readCustomerIds);
       case 'find_overdue_customers': return await findOverdueCustomers(input);
       case 'get_customer_detail': return await getCustomerDetail(input.customer_id);
-      case 'get_schedule_view': return await getScheduleView(input);
+      case 'get_schedule_view': return await getScheduleView(input, actionContext.readCustomerIds);
       case 'query_revenue': return await queryRevenue(input);
       case 'compare_technicians': return await compareTechnicians(input);
       case 'find_duplicates': return await findDuplicates(input);
       case 'create_customer': return await createCustomer(input);
-      case 'update_customer': return await updateCustomer(input.customer_id, input.updates);
+      case 'update_customer': return await updateCustomer(input.customer_id, input.updates, input._ib_customer_version);
       case 'bulk_update_customers': return await bulkUpdateCustomers(input.customer_ids, input.updates);
       case 'update_property_access': return await updatePropertyAccess(input);
       case 'cancel_plan': return await cancelPlan(input, actionContext);
@@ -403,7 +413,7 @@ async function executeTool(toolName, input, actionContext = {}) {
 
 // ─── READ IMPLEMENTATIONS ───────────────────────────────────────
 
-async function queryCustomers(input) {
+async function queryCustomers(input, readCustomerIds = []) {
   const { filters = {}, search, sort_by, sort_dir, limit: rawLimit = 50 } = input;
   const limit = Math.max(1, Math.min(Math.trunc(rawLimit), 200));
   const offset = Math.max(0, Math.trunc(input.offset || 0));
@@ -419,7 +429,11 @@ async function queryCustomers(input) {
       db.raw("(SELECT MAX(service_date) FROM service_records WHERE service_records.customer_id = customers.id) as last_service_date"),
       db.raw("(SELECT MIN(scheduled_date) FROM scheduled_services WHERE scheduled_services.customer_id = customers.id AND scheduled_date >= CURRENT_DATE AND status NOT IN ('cancelled','completed')) as next_service_date"),
       db.raw("(SELECT COALESCE(overall_score, 0) FROM customer_health_scores WHERE customer_health_scores.customer_id = customers.id ORDER BY scored_at DESC NULLS LAST, created_at DESC LIMIT 1) as health_score"),
-    );
+    )
+    // Soft-deleted rows never surface here: get_customer_detail and the
+    // update path already refuse them, so listing one sends the operator
+    // (and the model) chasing a record no other tool will touch.
+    .whereNull('customers.deleted_at');
 
   const supportedFilters = new Set(Object.keys(TOOLS.find(t => t.name === 'query_customers').input_schema.properties.filters.properties));
   const unsupported = Object.keys(filters).filter(key => !supportedFilters.has(key));
@@ -463,6 +477,10 @@ async function queryCustomers(input) {
   }
 
   // Free text search
+  // Inside a customer-scoped task every customer list — searched, filtered or
+  // bare — may only return that customer; a genuinely unscoped request
+  // arrives with an empty scope and stays broad.
+  if (readCustomerIds.length) query = query.whereIn('customers.id', readCustomerIds);
   if (search) {
     const s = `%${search}%`;
     query = query.where(function () {
@@ -485,7 +503,7 @@ async function queryCustomers(input) {
 
   const matched = await query.clone().clearSelect().clearOrder().count('* as count').first();
   const customers = await query.orderBy('customers.id').limit(limit).offset(offset);
-  const total = await db('customers').count('* as count').first();
+  const total = await db('customers').whereNull('deleted_at').count('* as count').first();
 
   return {
     customers: customers.map(c => ({
@@ -610,7 +628,7 @@ async function findOverdueCustomers(input) {
 
 
 async function getCustomerDetail(customerId) {
-  const customer = await db('customers').where('id', customerId).first();
+  const customer = await db('customers').where('id', customerId).whereNull('deleted_at').first();
   if (!customer) return { error: 'Customer not found' };
 
   const services = await db('service_records')
@@ -621,7 +639,7 @@ async function getCustomerDetail(customerId) {
   const upcoming = await db('scheduled_services')
     .where({ customer_id: customerId })
     .where('scheduled_date', '>=', etDateString())
-    .whereNotIn('status', ['cancelled'])
+    .whereNotIn('status', ['cancelled', 'completed', 'skipped'])
     .orderBy('scheduled_date', 'asc')
     .limit(10);
 
@@ -696,8 +714,9 @@ async function getCustomerDetail(customerId) {
       type: s.service_type,
       status: s.status,
       time_window: s.window_start ? `${s.window_start}-${s.window_end}` : null,
+      property_id: s.property_id || null,
       service_address: formatAddress(effectiveServiceAddress(s, customer)),
-      property_id: s.property_id,
+      location_provenance: s.service_address_line1 ? 'appointment_snapshot' : 'account_fallback',
     })),
     recent_invoices: invoices.map(i => ({
       id: i.id,
@@ -709,7 +728,10 @@ async function getCustomerDetail(customerId) {
 }
 
 
-async function getScheduleView(input) {
+// readCustomerIds: a customer-scoped task confines the schedule to its
+// resolved customers so a date-wide read cannot expose other customers'
+// names, phones, addresses or notes to the model.
+async function getScheduleView(input, readCustomerIds = []) {
   const { date = (!input.date_from && !input.date_to ? etDateString() : undefined), date_from, date_to, technician_name, city } = input;
   const offset = Math.max(0, Math.trunc(input.offset || 0));
 
@@ -729,6 +751,7 @@ async function getScheduleView(input) {
       'technicians.name as tech_name',
     )
     .whereNotIn('scheduled_services.status', ['cancelled']);
+  if (readCustomerIds.length) query = query.whereIn('scheduled_services.customer_id', readCustomerIds);
 
   if (date) {
     query = query.where('scheduled_services.scheduled_date', date);
@@ -770,7 +793,8 @@ async function getScheduleView(input) {
     has_more: fetched.length > 200,
     next_offset: fetched.length > 200 ? offset + 200 : null,
     date: date || null,
-    coverage: 'Requested date range; cancelled appointments excluded',
+    coverage: readCustomerIds.length ? 'Requested date range for the task customer only; cancelled appointments excluded'
+      : 'Requested date range; cancelled appointments excluded',
   };
 }
 
@@ -902,16 +926,50 @@ async function findDuplicates(input) {
   if (match_on === 'phone') {
     const dupes = await db('customers')
       .select('phone', db.raw('COUNT(*) as count'), db.raw("string_agg(TRIM(first_name || ' ' || COALESCE(last_name, '')), ', ') as names"))
-      .whereNotNull('phone').where('phone', '!=', '')
+      .whereNull('deleted_at').whereNotNull('phone').where('phone', '!=', '')
       .groupBy('phone').having(db.raw('COUNT(*)'), '>', 1)
-      .orderByRaw('COUNT(*) DESC').limit(50);
-    return { match_on: 'phone', duplicates: dupes };
+      .orderByRaw('COUNT(*) DESC').limit(DUPLICATE_QUEUE_LIMIT);
+    // The canonical duplicate queue (customer-dedupe.js findDuplicateGroups:
+    // normalized phones, pickWinner, tiers, reasons) — the ids and
+    // winner/loser roles merge_customers needs; the raw grouping above
+    // matches the stored string only.
+    // queue is always an array; a failed queue read is reported beside it
+    // in queue_error so callers never branch on the shape of one field.
+    let queue = [];
+    let queueError = null;
+    let queueTruncated = null;
+    try {
+      const { findDuplicateGroups } = require('../customer-dedupe');
+      const groups = await findDuplicateGroups();
+      const name = (row) => `${row.first_name || ''} ${row.last_name || ''}`.trim() || 'Unnamed customer';
+      // findDuplicateGroups has no cap of its own, so this payload grows
+      // with the customer base and lands in a model context (codex #4348
+      // r11 P2). Capped at the same 50 the raw grouping above uses, with
+      // the truncation stated rather than silent — the queue is a worklist
+      // the model walks pair by pair, so the top of it is what matters.
+      const capped = groups.slice(0, DUPLICATE_QUEUE_LIMIT);
+      if (groups.length > capped.length) {
+        queueTruncated = { returned: capped.length, total: groups.length, note: `Showing the first ${capped.length} of ${groups.length} duplicate groups — work these, then call find_duplicates again.` };
+      }
+      queue = capped.map((g) => {
+        const candidates = g.candidates.slice(0, DUPLICATE_CANDIDATE_LIMIT)
+          .map((c) => ({ customer_id: c.loser.id, name: name(c.loser), tier: c.tier, reasons: c.reasons }));
+        const group = { phone: g.phone10 || null, winner: { customer_id: g.winner.id, name: name(g.winner) }, candidates };
+        if (g.candidates.length > candidates.length) {
+          group.candidates_truncated = { returned: candidates.length, total: g.candidates.length, note: `Showing the first ${candidates.length} of ${g.candidates.length} candidates in this group — merge these, then call find_duplicates again.` };
+        }
+        return group;
+      });
+    } catch (err) {
+      queueError = `duplicate queue unavailable: ${err.message}`;
+    }
+    return { match_on: 'phone', duplicates: dupes, queue, ...(queueTruncated ? { queue_truncated: queueTruncated } : {}), ...(queueError ? { queue_error: queueError } : {}) };
   }
 
   if (match_on === 'email') {
     const dupes = await db('customers')
       .select('email', db.raw('COUNT(*) as count'), db.raw("string_agg(TRIM(first_name || ' ' || COALESCE(last_name, '')), ', ') as names"))
-      .whereNotNull('email').where('email', '!=', '')
+      .whereNull('deleted_at').whereNotNull('email').where('email', '!=', '')
       .groupBy('email').having(db.raw('COUNT(*)'), '>', 1)
       .orderByRaw('COUNT(*) DESC').limit(50);
     return { match_on: 'email', duplicates: dupes };
@@ -925,7 +983,7 @@ async function findDuplicates(input) {
         db.raw('COUNT(*) as count'),
         db.raw("string_agg(id::text, ', ') as ids"),
       )
-      .whereNotNull('address_line1').where('address_line1', '!=', '')
+      .whereNull('deleted_at').whereNotNull('address_line1').where('address_line1', '!=', '')
       .groupByRaw("LOWER(TRIM(first_name || ' ' || COALESCE(last_name, ''))), address_line1")
       .having(db.raw('COUNT(*)'), '>', 1)
       .orderByRaw('COUNT(*) DESC').limit(50);
@@ -1083,7 +1141,7 @@ async function createCustomer(input) {
 }
 
 
-async function updateCustomer(customerId, updates) {
+async function updateCustomer(customerId, updates, expectedVersion) {
   const clean = sanitizeUpdates(updates);
   Object.assign(clean, normalizeContactRecord(clean));
   if (Object.keys(clean).length <= 1) return { error: 'No valid fields to update' };
@@ -1169,6 +1227,16 @@ async function updateCustomer(customerId, updates) {
         err.customerNoLongerLive = true;
         throw err;
       }
+      if (expectedVersion) {
+        // Compare Postgres' full-precision version while holding the same row
+        // lock as the domain write; JS Date equality loses microseconds.
+        const current = await trx('customers').where('id', customerId).first(trx.raw('updated_at::text AS version'));
+        if (current.version !== expectedVersion) {
+          const err = new Error('Customer changed since this action was prepared. Review a fresh proposal.');
+          err.previewChanged = true;
+          throw err;
+        }
+      }
       const lockedMerged = { ...lockedBefore, ...clean };
       // Close the inferred-monthly vector (#3140 resolution): billing_mode
       // is not an IB-updatable field, so a tier/rate write that leaves the
@@ -1187,12 +1255,10 @@ async function updateCustomer(customerId, updates) {
       // customer-dedupe.js and routes/admin-customers.js — extend ALL in
       // the same commit): pg_advisory_xact_lock(hashtextextended(
       //   'customer-email:' || lower(trim(<email>)), 0)).
+      // Every assigned address (primary and service-contact slots) takes the
+      // key — utils/customer-comms-lock.js lockAssignedCustomerEmails.
+      await require('../../utils/customer-comms-lock').lockAssignedCustomerEmails(trx, clean);
       if (clean.email) {
-        const emailLc = String(clean.email).trim().toLowerCase();
-        await trx.raw(
-          'SELECT pg_advisory_xact_lock(hashtextextended(?, 0))',
-          [`customer-email:${emailLc}`],
-        );
         // Serialization ONLY — deliberately NO claimant refusal (r23):
         // customers.email is intentionally non-unique (20260417000010 —
         // spouses/shared household addresses are supported), so an
@@ -1248,6 +1314,7 @@ async function updateCustomer(customerId, updates) {
       }
     });
   } catch (e) {
+    if (e?.previewChanged) return { error: e.message, preview_changed: true };
     if (e && e.customerNoLongerLive) {
       return { error: 'This customer record is no longer live (deleted or merged since the card was shown) — nothing was updated.', preview_changed: true };
     }
@@ -1545,12 +1612,8 @@ async function bulkUpdateCustomers(customerIds, updates) {
           throw err;
         }
         const lockedMerged = { ...lockedBefore, ...clean };
+        await require('../../utils/customer-comms-lock').lockAssignedCustomerEmails(trx, clean);
         if (emailSubmitted && clean.email) {
-          const emailLc = String(clean.email).trim().toLowerCase();
-          await trx.raw(
-            'SELECT pg_advisory_xact_lock(hashtextextended(?, 0))',
-            [`customer-email:${emailLc}`],
-          );
           // Serialization ONLY — no claimant refusal (r23): shared
           // household addresses are supported (20260417000010); see
           // updateCustomer.
@@ -1749,7 +1812,7 @@ function cancelPlanServiceInput(input) {
     note: input.note || '',
     // Pinned at proposal time by the pending-action layer; the commit
     // refuses (preview_changed) when the live facts no longer match it.
-    previewFingerprint: input.preview_fingerprint || null,
+    previewFingerprint: input._approved_cancel_plan_fingerprint || null,
   };
 }
 

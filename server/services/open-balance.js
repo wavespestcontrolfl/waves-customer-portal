@@ -61,6 +61,15 @@ function applyOpenSelfPayPredicates(query) {
     .whereIn('invoices.status', ['sent', 'viewed', 'overdue'])
     .whereNull('invoices.payer_id')
     .whereNull('invoices.payer_statement_id')
+    // A WITHDRAWN combined-visit packet invoice is not self-pay debt (pre-push
+    // P0): its Bill-To moved to a third-party payer after the homeowner
+    // already held the link, so it deliberately keeps a collectible status and
+    // a NULL payer_id and records the move only in this stamp. The per-row
+    // live re-resolution below cannot see it — that resolves the invoice's OWN
+    // representative service, while the payer may have been assigned to
+    // another billed member of the same packet. Left in, the row rides a
+    // sibling's combined payment and the homeowner pays payer-owned debt.
+    .whereRaw("COALESCE(invoices.scheduled_send_error, '') NOT LIKE 'payer_billed:%'")
     .whereRaw('GREATEST(invoices.total - COALESCE(invoices.credit_applied, 0), 0) > 0');
 }
 
@@ -175,6 +184,9 @@ async function openBalanceExists(customerId, { excludeInvoiceId = null, database
     .whereIn('status', ['sent', 'viewed', 'overdue'])
     .whereNull('payer_id')
     .whereNull('payer_statement_id')
+    // Same withdrawal exclusion as the full read (pre-push P0) — this boolean
+    // is SPOKEN to the customer, and payer-owned debt is not their balance.
+    .whereRaw("COALESCE(scheduled_send_error, '') NOT LIKE 'payer_billed:%'")
     .whereRaw('(ROUND(total * 100) - ROUND(COALESCE(credit_applied, 0) * 100)) > 0')
     .orderBy('created_at', 'asc')
     .limit(MAX_OPEN_INVOICES)

@@ -23,6 +23,9 @@ A prescriptive design spec for rebuilding the Waves Portal (/admin and /tech) in
 4. `/admin/customers` + `/admin/customers/:id`
 5. `/admin/estimates` + `/admin/estimates/new`
 6. `/admin/communications` + `/admin/communications/sms`
+7. `/admin/knowledge` — the Wiki (directory, article reader, sources, Health, recent queries, Q&A)
+
+Named promotions in [the active admin UI consistency contract](admin-ui-consistency-contract.md#explicitly-promoted-admin-scopes) supersede the corresponding token-only assignments below. This historical list is not an inventory of currently unmigrated pages; previously accepted migrations remain governed by the active contract.
 
 **Tier 2 — token pass only (apply tokens, strip colors, uppercase CTAs, fix status indicators; no layout restructuring, no archetype enforcement, no component architecture changes):**
 
@@ -30,7 +33,7 @@ A prescriptive design spec for rebuilding the Waves Portal (/admin and /tech) in
 - `/admin/reviews`
 - `/admin/inventory`
 - `/admin/blog`, `/admin/content/blog`, `/admin/seo`, `/admin/ads/*`, `/admin/drafts` — group these as a "Growth" nav section
-- `/admin/knowledge`, `/admin/lookup/property`, `/admin/services`, `/admin/protocols/*`
+- `/admin/lookup/property`, `/admin/services`, `/admin/protocols/*`
 - `/admin/settings/*`, `/admin/workflows/status`, `/admin/tracker`, Referrals, Pipeline/CRM, Preferences
 
 **Out of scope entirely:**
@@ -419,13 +422,55 @@ Sub-routes: unified inbox (default) and `/sms` (channel-scoped).
 - **Detail panel:** chat thread with channel tabs at top. Reply composer bottom — 60px auto-growing, attachment icon, template picker, `SEND` button.
 - **Voice Agent transcripts:** phone icon, speaker-separated blocks, AI summary at top (3-line collapsed, expandable).
 
+### 5.7 `/admin/knowledge` — Archetype H
+
+Promoted from tier 2 on 2026-09-10. The Wiki is the agronomic reference the techs
+read in the field and the surface Virginia files answers back into; the tier-2 token
+pass left it with 12px controls, sub-44px tap targets, and a hand-rolled question
+portal with no Escape or focus handling. Promoting it here is the §6 escape hatch
+taken deliberately, not an inline redesign during a token pass.
+
+**Shell:** Top bar → sidebar → `AdminCommandHeader` with the four existing sections
+as its tabs — Articles, Sources, Health, Recent Queries. Tab state stays in the URL
+(`?tab=`, or `?wikiTab=` when embedded) so a tab is linkable and the back button
+works. Health stays hidden for technicians; its endpoint is `requireAdmin` and the
+panel renders blank off the 403.
+
+- **Articles** — Archetype H proper. Search + category filter above an article list;
+  the reader is an in-page TOC plus article body at max 720px. Preserve the existing
+  category chips and the source-attribution line.
+- **Sources** — table-first inside the tab. The add-source form keeps its strict
+  error surfacing: the server's reason (e.g. `file_path must be inside the wiki/
+  folder`) renders inline on 400 rather than being swallowed.
+- **Health** — status rows on the §3.3 dot system. Severity stays semantic
+  (`high`/`medium`/`low`); `alert-fg` red is reserved for genuine alerts per §9.2.
+- **Recent Queries** — list of past questions with the answer collapsed to 3 lines,
+  expandable.
+- **Ask a question** — §3.10 modal at `comfortable` density, opened from the hub
+  header. Registered title, 44px targets, Escape and close both restore focus to the
+  opener, and the draft survives a failed request so the question can be retried.
+  Requests go through the canonical `utils/admin-fetch.js` helper for the standard
+  401 redirect and `Retry-After` recovery.
+
+**Sequencing.** The Wiki migrates in six slices, each its own PR with its own
+verification: Q&A dialog, article reader + Health, source management, recent queries
++ hub header, directory, and the separate Knowledge Base page. Until the last slice
+lands the page is a mixed surface by construction — that is accepted for the duration
+of the migration and is the reason all six are tracked together. Do not start a slice
+without finishing the one before it in this list.
+
+**Preserved, not redesigned:** every endpoint, request body, and server guard in
+`server/routes/admin-knowledge.js`; bearer auth and `VITE_API_URL`; the technician
+Health restriction; `useRenderedTabBeacon` instrumentation; and the Intelligence Bar
+census fingerprints in `docs/intelligence-bar-capabilities.json`.
+
 ---
 
 ## 6. Tier 2 — Token Pass Only
 
 For every other admin route, Claude Code applies tokens (§2), swaps buttons to UPPERCASE per §3.1, strips any colored Tailwind classes (see §7.6), converts status indicators to §3.3 dot system, and **stops there**. No layout restructuring, no archetype enforcement, no consolidation.
 
-The pages receiving this treatment: `/admin/revenue`, `/admin/reviews`, `/admin/inventory`, `/admin/blog`, `/admin/content/blog`, `/admin/seo`, `/admin/ads/*`, `/admin/drafts`, `/admin/knowledge`, `/admin/lookup/property`, `/admin/services`, `/admin/protocols/*`, `/admin/settings/*`, `/admin/workflows/status`, `/admin/tracker`, Referrals, Pipeline/CRM, Preferences.
+The pages receiving this treatment: `/admin/revenue`, `/admin/reviews`, `/admin/inventory`, `/admin/blog`, `/admin/content/blog`, `/admin/seo`, `/admin/ads/*`, `/admin/drafts`, `/admin/lookup/property`, `/admin/services`, `/admin/protocols/*`, `/admin/settings/*`, `/admin/workflows/status`, `/admin/tracker`, Referrals, Pipeline/CRM, Preferences.
 
 If any tier 2 page genuinely obstructs daily work during the tier 1 migration, promote it to tier 1 with a proper spec — don't inline-redesign it during a token pass.
 
@@ -561,7 +606,9 @@ fontFamily: { sans: ['Inter', 'system-ui', 'sans-serif'] },
 5. **Dispatch** (§5.3). Highest complexity — do after primitives are proven.
 6. **Estimates + new-estimate flow** (§5.5).
 7. **Communications** (§5.6).
-8. **Tier 2 token pass sweep** — one PR per nav section (Growth, Operations, Settings).
+8. **Wiki** (§5.7). Six slices in the order listed there; the page is a mixed
+   surface until the last one lands.
+9. **Tier 2 token pass sweep** — one PR per nav section (Growth, Operations, Settings).
 
 Each tier 1 page goes through: flag-off → operator day → Virginia day → all-users. Tier 2 sweep can ship directly if it passes preservation checklist (§9.5).
 

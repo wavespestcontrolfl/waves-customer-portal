@@ -17,7 +17,13 @@ vi.mock("./PhotoAssessmentsPage", () => ({
     React.useEffect(() => {
       if (!embedded || !onSecondaryNav) return undefined;
       onSecondaryNav({
-        actions: [{ key: "new-assessment", label: "Add Assessment", onClick: mockAddAssessment }],
+        actions: [
+          {
+            key: "new-assessment",
+            label: "Add Assessment",
+            onClick: mockAddAssessment,
+          },
+        ],
       });
       return () => onSecondaryNav(null);
     }, [embedded, onSecondaryNav]);
@@ -40,10 +46,13 @@ beforeEach(() => {
 });
 
 function renderHub(entry = "/admin/lawn-assessments") {
-  render(
+  return render(
     <MemoryRouter initialEntries={[entry]}>
       <Routes>
-        <Route path="/admin/lawn-assessments" element={<AssessmentsHubPage />} />
+        <Route
+          path="/admin/lawn-assessments"
+          element={<AssessmentsHubPage />}
+        />
       </Routes>
     </MemoryRouter>,
   );
@@ -51,9 +60,12 @@ function renderHub(entry = "/admin/lawn-assessments") {
 
 describe("AssessmentsHubPage usage reporting", () => {
   it("reports the rendered fallback for an invalid ?tab=, never the raw value", () => {
-    renderHub("/admin/lawn-assessments?tab=typo");
+    const view = renderHub("/admin/lawn-assessments?tab=typo");
 
     expect(screen.getByText("Lead magnets workspace")).toBeInTheDocument();
+    expect(
+      view.container.querySelector('[data-ui-density="comfortable"]'),
+    ).toBeInTheDocument();
     expect(trackAdminPageView).toHaveBeenCalledWith({
       pathname: "/admin/lawn-assessments",
       search: "?tab=funnel",
@@ -107,6 +119,8 @@ describe("AssessmentsHubPage usage reporting", () => {
 
     fireEvent.click(screen.getByRole("button", { name: /Field/ }));
     expect(await screen.findByText("Field workspace")).toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "Add Assessment" })).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "Add Assessment" }),
+    ).not.toBeInTheDocument();
   });
 });

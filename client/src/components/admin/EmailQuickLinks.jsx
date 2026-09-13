@@ -21,7 +21,7 @@ export default function EmailQuickLinks({ active, recipient, disabled, onInsert 
   };
 
   return <>
-    <Button variant="secondary" className="text-14" disabled={disabled} onClick={() => setOpen(true)}
+    <Button variant="secondary" disabled={disabled} onClick={(event) => { event.currentTarget.focus({ preventScroll: true }); setOpen(true); }}
       aria-haspopup="dialog" aria-expanded={active && open}>Quick Links</Button>
     <InsertLinkSheet open={active && open} onClose={() => setOpen(false)}
       layer={1100} links={[...STATIC_COMPOSER_LINKS, ...(library.links || [])]}

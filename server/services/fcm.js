@@ -122,12 +122,18 @@ function buildFcmMessage(deviceToken, notification = {}) {
  * soft so one misconfig (wrong service account / project) can't deactivate every
  * Android subscription. Mirrors apns.js's 410/Unregistered-only rule.
  */
-function classifyFcmResponse(status, errorCode) {
+function classifyFcmResponse(status, errorCode, retryAfter) {
   if (status >= 200 && status < 300) return { ok: true };
   if (/UNREGISTERED/i.test(errorCode || '')) {
     return { ok: false, expired: true, reason: errorCode || 'unregistered' };
   }
-  return { ok: false, expired: false, reason: errorCode || `fcm_status_${status || 0}` };
+  const retryable = status === 429 || status >= 500;
+  const now = Date.now();
+  const retryAt = /^\d+$/.test(String(retryAfter))
+    ? now + Number(retryAfter) * 1000 : Date.parse(retryAfter);
+  const retryAfterMs = Number.isFinite(retryAt) ? Math.max(60000, retryAt - now) : 60000;
+  return { ok: false, expired: false, reason: errorCode || `fcm_status_${status || 0}`,
+    ...(retryable ? { retryable: true, retryAfterMs } : {}) };
 }
 
 /**
@@ -135,14 +141,22 @@ function classifyFcmResponse(status, errorCode) {
  * { ok } | { skipped } | { expired } | { failed } — so a config mistake fails
  * soft and never aborts the surrounding send loop (sendToCustomer / sendToAdmins).
  */
-function send(deviceToken, notification) {
+function send(deviceToken, notification, { shouldContinue = null } = {}) {
   return new Promise((resolve) => {
     if (!configured) return resolve({ ok: false, skipped: true, reason: 'fcm_not_configured' });
     if (!deviceToken) return resolve({ ok: false, failed: true, reason: 'missing_device_token' });
 
     getAccessToken()
-      .then((token) => {
-        if (!token) return resolve({ ok: false, failed: true, reason: 'fcm_token_unavailable' });
+      .then(async (token) => {
+        if (!token) return resolve({ ok: false, failed: true, retryable: true, reason: 'fcm_token_unavailable' });
+
+        // OAuth can take most of the caller's send window. Recheck only after
+        // it resolves and immediately before constructing the provider request.
+        if (typeof shouldContinue === 'function') {
+          let proceed = false;
+          try { proceed = await shouldContinue(); } catch { proceed = false; }
+          if (!proceed) return resolve({ ok: false, skipped: true, reason: 'pre_send_check_blocked' });
+        }
 
         let body;
         try {
@@ -179,7 +193,7 @@ function send(deviceToken, notification) {
                     errorCode = j.error?.details?.[0]?.errorCode || j.error?.status || null;
                   } catch { /* non-JSON body */ }
                 }
-                const result = classifyFcmResponse(res.statusCode, errorCode);
+                const result = classifyFcmResponse(res.statusCode, errorCode, res.headers?.['retry-after']);
                 if (!result.ok && !result.expired) {
                   logger.error(`[fcm] send failed status=${res.statusCode} code=${errorCode}`);
                 }
@@ -187,7 +201,7 @@ function send(deviceToken, notification) {
               });
             },
           );
-          req.on('error', (err) => { clearTimeout(wallClockKiller); finish({ ok: false, failed: true, reason: err.message }); });
+          req.on('error', (err) => { clearTimeout(wallClockKiller); finish({ ok: false, failed: true, retryable: true, reason: err.message }); });
           // setTimeout's socket-inactivity timer only starts once the socket
           // is CONNECTED — a DNS/TCP/TLS stall never reaches it. The
           // wall-clock timer covers the whole request lifetime and destroy()
@@ -204,7 +218,12 @@ function send(deviceToken, notification) {
           finish({ ok: false, failed: true, reason: err.message });
         }
       })
-      .catch((err) => resolve({ ok: false, failed: true, reason: `fcm_auth_failed: ${err.message}` }));
+      .catch((err) => {
+        const failure = classifyFcmResponse(err.response?.status, err.code, err.response?.headers?.['retry-after']);
+        const networkFailure = ['ECONNRESET', 'ETIMEDOUT', 'EAI_AGAIN', 'ECONNREFUSED', 'ENOTFOUND'].includes(err.code);
+        resolve({ ok: false, failed: true, reason: `fcm_auth_failed: ${err.message}`,
+          ...(failure.retryable || networkFailure ? { retryable: true, retryAfterMs: failure.retryAfterMs || 60000 } : {}) });
+      });
   });
 }
 

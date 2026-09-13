@@ -4,6 +4,8 @@
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../routes/admin-dispatch', () => ({ applySeriesMoveEffects: jest.fn().mockResolvedValue({}) }));
+jest.mock('../services/appointment-reminders', () => ({ handleReschedule: jest.fn().mockResolvedValue({}) }));
+jest.mock('../services/dispatch-assignment', () => ({ emitDispatchJobUpdate: jest.fn().mockResolvedValue({}) }));
 jest.mock('../config/feature-gates', () => {
   const actual = jest.requireActual('../config/feature-gates');
   return { ...actual, isEnabled: jest.fn((name) => name === 'callAgentCommitTrustedLabels' || actual.isEnabled(name)) };
@@ -17,6 +19,9 @@ const {
   RESCHEDULE_REASON_CODE,
   INITIATED_BY,
 } = require('../services/call-reschedule-apply');
+
+const AppointmentReminders = require('../services/appointment-reminders');
+const { emitDispatchJobUpdate } = require('../services/dispatch-assignment');
 
 const planRescheduleFromCall = (args) => planWithLabelTrust({ transcriptLabelsTrusted: true, ...args });
 
@@ -64,12 +69,21 @@ const call = (overrides = {}) => ({
   created_at: new Date('2026-09-22T19:07:24Z'), transcription: `Agent: ${QUOTE}\nAgent: ${FRIDAY_QUOTE}\nAgent: ${MORNING_QUOTE}\nCaller: Thank you.`, ...overrides,
 });
 const customer = (overrides = {}) => ({ id: CUSTOMER_ID, phone: PHONE, ...ADDRESS, ...overrides });
-const visit = (overrides = {}) => ({
-  id: VISIT_ID, customer_id: CUSTOMER_ID, property_id: null, service_id: 'pest-quarterly', service_type: 'Quarterly Pest Control Service',
-  scheduled_date: new Date('2026-09-24T00:00:00Z'), window_start: '09:00:00', window_end: '10:00:00',
-  estimated_duration_minutes: null, status: 'pending', source_action: null, visit_id: null, internal_notes: null, is_recurring: true,
-  ...overrides,
-});
+const visit = (overrides = {}) => {
+  const row = {
+    id: VISIT_ID, customer_id: CUSTOMER_ID, property_id: null, service_id: 'pest-quarterly', service_type: 'Quarterly Pest Control Service',
+    scheduled_date: new Date('2026-09-24T00:00:00Z'), window_start: '09:00:00', window_end: '10:00:00',
+    estimated_duration_minutes: null, status: 'pending', source_action: null, visit_id: null, internal_notes: null, is_recurring: true,
+    self_booking_id: null, customer_confirmed: true,
+    ...overrides,
+  };
+  // loadCandidates joins the catalog and the planner matches THAT name, so an
+  // unrepointed row's catalog name is its own label. Only a test that sets
+  // catalog_service_name explicitly diverges (a repoint or a deleted catalog
+  // row); a row with no service_id has no catalog row at all.
+  if (!Object.hasOwn(row, 'catalog_service_name')) row.catalog_service_name = row.service_id ? row.service_type : null;
+  return row;
+};
 
 describe('planRescheduleFromCall', () => {
   test('a different program near the destination cannot replace the requested service outside the span', () => {
@@ -85,6 +99,45 @@ describe('planRescheduleFromCall', () => {
     expect(planRescheduleFromCall({ ...args, v2: v2(), candidates: [visit(), visit({ id: 'other-program', service_id: 'different-program', scheduled_date: '2026-12-01' })] }).reason).toBe('service_needs_review');
   });
 
+  // A repoint leaves service_type stale, so the label alone can name the
+  // requested program while the row now belongs to a different one (r8 P1).
+  test('a stale service label cannot stand in for the catalog identity', () => {
+    // Both land as service_needs_review — nothing matched the request, so the
+    // office gets the card rather than the automation guessing from the label.
+    const repointed = visit({ service_id: 'mosquito-monthly', catalog_service_name: 'Monthly Mosquito Control Service' });
+    expect(planRescheduleFromCall({ v2: v2(), call: call(), customer: customer(), now: NOW, candidates: [repointed] }).reason)
+      .toBe('service_needs_review');
+    // A row whose catalog entry is gone matches nothing rather than the label.
+    const orphaned = visit({ catalog_service_name: null });
+    expect(planRescheduleFromCall({ v2: v2(), call: call(), customer: customer(), now: NOW, candidates: [orphaned] }).reason)
+      .toBe('service_needs_review');
+    // The catalog name still carries the alias contract.
+    expect(planRescheduleFromCall({ v2: v2(), call: call(), customer: customer(), now: NOW,
+      candidates: [visit({ catalog_service_name: 'Quarterly Pest Control Service - 1 hour - $117' })] }).action).toBe('apply');
+    // A row that never named a catalog service cannot have been repointed —
+    // its free-text label is the only identity it has ever had, so it keeps
+    // matching on that.
+    expect(planRescheduleFromCall({ v2: v2(), call: call(), customer: customer(), now: NOW,
+      candidates: [visit({ service_id: null, catalog_service_name: null })] }).action).toBe('apply');
+  });
+
+  // outbound-review-confirm.js classifies an AI office-review booking by
+  // source + customer_confirmed, NOT by status: a row some writer already
+  // moved off 'pending' is still unactivated, and moving it trips the
+  // rebooker's lazy activation (review card, reminders, card funnel) for a
+  // booking nobody vetted (r6 P1).
+  test('an unactivated AI office-review booking is never moved automatically, whatever its status', () => {
+    for (const source of ['voice_agent', 'ai_call_outbound_review']) {
+      for (const status of ['pending', 'confirmed']) {
+        expect(planRescheduleFromCall({ v2: v2(), call: call(), customer: customer(), now: NOW,
+          candidates: [visit({ source_action: source, status, customer_confirmed: false })] }).reason).toBe('office_review_unconfirmed');
+      }
+      // Once the office activated it, it is an ordinary visit again.
+      expect(planRescheduleFromCall({ v2: v2(), call: call(), customer: customer(), now: NOW,
+        candidates: [visit({ source_action: source, status: 'confirmed', customer_confirmed: true })] }).action).toBe('apply');
+    }
+  });
+
   test('a known service-name alias retains the same catalog identity', () => {
     expect(planRescheduleFromCall({ v2: v2({ service_request: { specific_service_name: 'Quarterly Pest Control' } }), call: call(), customer: customer(), now: NOW,
       candidates: [visit({ service_type: 'Quarterly Pest Control Service - 1 hour - $117' })] }).action).toBe('apply');
@@ -93,6 +146,28 @@ describe('planRescheduleFromCall', () => {
   test.each(['2026-09-24T12:30:00-04:00', '2026-09-24T12:00:30-04:00', '2026-09-24T12:00:00.500-04:00'])('rejects off-hour instant %s', (confirmed_start_at) => {
     expect(planRescheduleFromCall({ v2: v2({ scheduling: { confirmed_start_at } }), call: call(), customer: customer(), candidates: [visit()], now: NOW }).reason).toBe('off_grid_start_time');
   });
+
+  // The linker matches a caller on any of the five identity columns, so the
+  // applier's own identity check must accept the same set (GH codex r5 P2).
+  test.each(['secondary_phone', 'service_contact_phone', 'service_contact2_phone', 'service_contact3_phone'])(
+    'a caller on file through %s is still the customer', (col) => {
+      const cust = customer({ phone: '+15555550199', [col]: '(555) 555-0101' });
+      expect(planRescheduleFromCall({ v2: v2(), call: call(), customer: cust, candidates: [visit()], now: NOW }))
+        .toMatchObject({ action: 'apply', visitId: VISIT_ID });
+    });
+
+  test('a number on no identity column is still refused', () => {
+    const cust = customer({ phone: '+15555550199', service_contact2_phone: '+15555550198' });
+    expect(planRescheduleFromCall({ v2: v2(), call: call(), customer: cust, candidates: [visit()], now: NOW }).reason)
+      .toBe('caller_phone_not_on_file');
+  });
+
+  test.each(['outbound', 'outbound-api', 'outbound-dial'])(
+    'an %s call is identified by the dialed party, not the Waves line', (direction) => {
+      const outbound = call({ direction, from_phone: '+15555550100', to_phone: PHONE });
+      expect(planRescheduleFromCall({ v2: v2(), call: outbound, customer: customer(), candidates: [visit()], now: NOW }))
+        .toMatchObject({ action: 'apply', visitId: VISIT_ID });
+    });
 
   test('inferred speaker labels cannot authorize a move', () => {
     expect(planWithLabelTrust({ v2: v2(), call: call(), customer: customer(), candidates: [visit()], now: NOW }).reason).toBe('untrusted_speaker_labels');
@@ -206,14 +281,23 @@ describe('planRescheduleFromCall', () => {
 });
 
 // ── applier against a mocked connection ─────────────────────────────────
-function makeConn({ owned = true, prior = null, cust = customer(), visits = [visit()], properties = [], extraction = v2(), settledCall = {}, handled = false, moved = false, openCards = 1, remaining = 0 } = {}) {
+function makeConn({ owned = true, prior = null, cust = customer(), visits = [visit()], properties = [], extraction = v2(), settledCall = {}, handled = false, moved = false, openCards = 1, remaining = 0, portalRequest = null, smsOffer = false } = {}) {
   const writes = { updates: [], inserts: [] };
+  // An actionable offer carries the option payload reschedule-sms replies to.
+  // `true` is the canonical one; an array lets a test supply raw rows (e.g. the
+  // response-less audit row every ordinary move leaves behind).
+  const offerRows = smsOffer === true
+    ? [{ id: 'pending-offer', notes: JSON.stringify({ option1: { date: '2026-09-30', window: { start: '08:00', end: '09:00' } } }) }]
+    : (Array.isArray(smsOffer) ? smsOffer : []);
+  let openRequest = portalRequest;
   const builder = (table) => {
     const state = { table, where: [], whereIn: [], updateArg: null };
     const q = {
       where(...a) { state.where.push(a); return q; },
       whereIn(...a) { state.whereIn.push(a); return q; },
-      whereNull() { return q; },
+      whereNotIn(...a) { (state.whereNotIn ||= []).push(a); return q; },
+      whereNull() { state.nulled = true; return q; },
+      leftJoin() { return q; },
       whereRaw() { return q; },
       orderBy() { return q; },
       count() { state.counted = true; return q; },
@@ -221,7 +305,7 @@ function makeConn({ owned = true, prior = null, cust = customer(), visits = [vis
       forShare() { return q; },
       modify(fn) { fn(q); return q; },
       select() { return q; },
-      update(arg) { state.updateArg = arg; writes.updates.push({ table, arg, where: state.where, whereIn: state.whereIn }); return q; },
+      update(arg) { state.updateArg = arg; writes.updates.push({ table, arg, where: state.where, whereIn: state.whereIn, whereNotIn: state.whereNotIn || [] }); return q; },
       returning() { return Promise.resolve(Array.from({ length: table === 'triage_items' ? openCards : 1 }, (_, i) => ({ id: `card-${i}` }))); },
       insert(row) { writes.inserts.push({ table, row }); return Promise.resolve([{ id: 'act-1' }]); },
       first() {
@@ -229,12 +313,18 @@ function makeConn({ owned = true, prior = null, cust = customer(), visits = [vis
         if (table === 'activity_log') return Promise.resolve(prior);
         if (table === 'customers') return Promise.resolve(cust);
         if (table === 'triage_items') return Promise.resolve(state.counted ? { n: remaining } : (handled ? { id: 'handled-card' } : undefined));
+        // Only the newer-move fence uses .first() on this table; the offer
+        // fence selects rows and filters them in JS (see `then`).
         if (table === 'reschedule_log') return Promise.resolve(moved ? { id: 'later-move' } : undefined);
+        if (table === 'service_requests') return Promise.resolve(openRequest || undefined);
         if (table === 'scheduled_services') return Promise.resolve(visits[0]);
         return Promise.resolve(undefined);
       },
       then(resolve, reject) {
         if (table === 'customer_properties') return Promise.resolve(properties).then(resolve, reject);
+        // The pending-offer fence: pending (whereNull customer_response) rows
+        // for one visit inside the 7-day window.
+        if (table === 'reschedule_log') return Promise.resolve(state.nulled ? offerRows : []).then(resolve, reject);
         if (table === 'scheduled_services' && state.updateArg == null) return Promise.resolve(visits).then(resolve, reject);
         if (state.updateArg != null) return Promise.resolve(1).then(resolve, reject);
         return Promise.resolve([]).then(resolve, reject);
@@ -247,10 +337,18 @@ function makeConn({ owned = true, prior = null, cust = customer(), visits = [vis
   conn.transaction = async (fn) => fn(conn);
   conn.writes = writes;
   conn.visits = visits;
+  // A request the customer files between the pre-apply check and the move.
+  conn.setPortalRequest = (row) => { openRequest = row; };
   return conn;
 }
 
 describe('applyCallReschedule', () => {
+  beforeEach(() => {
+    AppointmentReminders.handleReschedule.mockClear().mockResolvedValue({});
+    emitDispatchJobUpdate.mockClear().mockResolvedValue({});
+    require('../routes/admin-dispatch').applySeriesMoveEffects.mockClear();
+  });
+
   test('a service identity edited during the move cannot receive the stale call decision', async () => {
     const conn = makeConn();
     const rebooker = { reschedule: jest.fn(async (_id, _date, _win, _reason, _by, opts) => opts.moveGuard({ trx: conn,
@@ -404,6 +502,139 @@ describe('applyCallReschedule', () => {
     const result = await applyCallReschedule({ conn, call: call(), now: NOW, rebooker });
     expect(result).toMatchObject({ outcome: 'noop', reason: 'already_at_requested_time', cardsResolved: 1 });
     expect(rebooker.reschedule).not.toHaveBeenCalled();
+  });
+
+  // A row parked at 'rescheduled' is OUT of dispatch until someone rebooks it
+  // (routes/schedule.js legacy flip). Reviving one reaches into the card-hold
+  // park and the AI office-review supersession rule, so it stays a card.
+  test('a parked rescheduled row is never moved automatically', async () => {
+    const conn = makeConn({ visits: [visit({ status: 'rescheduled' })] });
+    const rebooker = { reschedule: jest.fn() };
+    const result = await applyCallReschedule({ conn, call: call(), now: NOW, rebooker });
+    expect(result).toMatchObject({ outcome: 'skipped', reason: 'visit_parked_for_rebook', visitId: VISIT_ID });
+    expect(rebooker.reschedule).not.toHaveBeenCalled();
+    const stamp = conn.writes.updates.find((u) => u.table === 'triage_items');
+    expect(stamp.arg.payload.bindings[0]).toMatch(/"skipped":"visit_parked_for_rebook"/);
+  });
+
+  test('a pending row still keeps its status', async () => {
+    const conn = makeConn();
+    const rebooker = { reschedule: jest.fn(async (_id, _date, _win, _reason, _by, opts) => {
+      await opts.moveGuard({ trx: conn, service: conn.visits[0] });
+      return { success: true };
+    }) };
+    await applyCallReschedule({ conn, call: call(), now: NOW, rebooker });
+    expect(rebooker.reschedule.mock.calls[0][5].keepStatus).toBe(true);
+  });
+
+  // The customer's portal reschedule request is a staff-owned track with its
+  // own preferred date, lifecycle and (legacy flow) parked card hold — the
+  // automation stands down rather than resolving it from here (r6 P1).
+  test('an open portal reschedule request for the visit stands the automation down', async () => {
+    const conn = makeConn({ portalRequest: { id: 'req-1' } });
+    const rebooker = { reschedule: jest.fn() };
+    const result = await applyCallReschedule({ conn, call: call(), now: NOW, rebooker });
+    expect(result).toMatchObject({ outcome: 'skipped', reason: 'portal_request_open', visitId: VISIT_ID });
+    expect(rebooker.reschedule).not.toHaveBeenCalled();
+    const req = conn.writes.updates.find((u) => u.table === 'service_requests');
+    expect(req).toBeUndefined();
+    const stamp = conn.writes.updates.find((u) => u.table === 'triage_items');
+    expect(stamp.arg.payload.bindings[0]).toMatch(/"skipped":"portal_request_open"/);
+  });
+
+  test('a portal request opened during the move is caught on the move transaction', async () => {
+    const conn = makeConn();
+    const rebooker = { reschedule: jest.fn(async (_id, _date, _win, _reason, _by, opts) => {
+      conn.setPortalRequest({ id: 'req-2' });
+      await opts.moveGuard({ trx: conn, service: conn.visits[0] });
+      return { success: true };
+    }) };
+    const result = await applyCallReschedule({ conn, call: call(), now: NOW, rebooker });
+    expect(result).toMatchObject({ outcome: 'skipped', reason: 'handled_after_call' });
+    expect(conn.writes.inserts).toHaveLength(0);
+  });
+
+  // SmartRebooker never touches appointment_reminders, so without this sync
+  // the 72h/24h reminder keeps the OLD slot — the failure this service exists
+  // to prevent (r8 P1). coverDueWindows stays unset: this path sends no text,
+  // so covering the due window would suppress the only notice of the new time.
+  test('a single move resyncs reminders, broadcasts to dispatch, and still sends nothing', async () => {
+    const conn = makeConn();
+    const rebooker = { reschedule: jest.fn(async (_id, _date, _win, _reason, _by, opts) => {
+      await opts.moveGuard({ trx: conn, service: conn.visits[0] });
+      return { success: true };
+    }) };
+    await applyCallReschedule({ conn, call: call(), now: NOW, rebooker });
+    expect(AppointmentReminders.handleReschedule).toHaveBeenCalledWith(VISIT_ID, '2026-09-24T12:00', { sendNotification: false });
+    expect(AppointmentReminders.handleReschedule.mock.calls[0][2]).not.toHaveProperty('coverDueWindows');
+    expect(emitDispatchJobUpdate).toHaveBeenCalledWith({ jobId: VISIT_ID, actorId: null });
+    expect(conn.writes.inserts.map((i) => i.table)).toEqual(['activity_log']);
+  });
+
+  test('a series move leaves the fan-out to the shared durable pass', async () => {
+    const conn = makeConn({ extraction: v2({ scheduling: { confirmed_start_at: '2026-09-25T10:00:00-04:00' } }) });
+    const rebooker = { reschedule: jest.fn(async (_id, _date, _win, _reason, _by, opts) => {
+      await opts.moveGuard({ trx: conn, service: conn.visits[0] });
+      return { success: true, seriesMoveId: 'series-1' };
+    }) };
+    await applyCallReschedule({ conn, call: call(), now: NOW, rebooker });
+    expect(require('../routes/admin-dispatch').applySeriesMoveEffects).toHaveBeenCalled();
+    expect(AppointmentReminders.handleReschedule).not.toHaveBeenCalled();
+    expect(emitDispatchJobUpdate).not.toHaveBeenCalled();
+  });
+
+  // The anchor moved under either shape, and the public reschedule route
+  // syncs this row ahead of the same series/single split.
+  test.each([
+    ['a single move', { success: true }, '2026-09-24T12:00:00-04:00', '2026-09-24', '12:00', '13:00'],
+    ['a series move', { success: true, seriesMoveId: 'series-1' }, '2026-09-25T10:00:00-04:00', '2026-09-25', '10:00', '11:00'],
+  ])("a /book visit's confirmation snapshot moves with it: %s", async (_label, result, startAt, date, start, end) => {
+    const conn = makeConn({ visits: [visit({ self_booking_id: 'sb-1' })], extraction: v2({ scheduling: { confirmed_start_at: startAt } }) });
+    const rebooker = { reschedule: jest.fn(async (_id, _date, _win, _reason, _by, opts) => {
+      await opts.moveGuard({ trx: conn, service: conn.visits[0] });
+      return result;
+    }) };
+    await applyCallReschedule({ conn, call: call(), now: NOW, rebooker });
+    const snap = conn.writes.updates.find((u) => u.table === 'self_booked_appointments');
+    expect(snap.arg).toMatchObject({ date, start_time: start, end_time: end });
+    expect(snap.where).toContainEqual([{ id: 'sb-1' }]);
+  });
+
+  test('a failed reminder sync does not undo a committed move', async () => {
+    const conn = makeConn();
+    AppointmentReminders.handleReschedule.mockRejectedValueOnce(new Error('reminders down'));
+    const rebooker = { reschedule: jest.fn(async (_id, _date, _win, _reason, _by, opts) => {
+      await opts.moveGuard({ trx: conn, service: conn.visits[0] });
+      return { success: true };
+    }) };
+    const result = await applyCallReschedule({ conn, call: call(), now: NOW, rebooker });
+    expect(result.outcome).toBe('applied');
+    expect(emitDispatchJobUpdate).toHaveBeenCalled();
+  });
+
+  // An unanswered reschedule-options text is a live offer reschedule-sms still
+  // honors for 7 days; a later '1' would rebook onto the stale slot (r8 P1).
+  test('an outstanding SMS reschedule offer stands the automation down', async () => {
+    const conn = makeConn({ smsOffer: true });
+    const rebooker = { reschedule: jest.fn() };
+    const result = await applyCallReschedule({ conn, call: call(), now: NOW, rebooker });
+    expect(result).toMatchObject({ outcome: 'skipped', reason: 'pending_sms_offer', visitId: VISIT_ID });
+    expect(rebooker.reschedule).not.toHaveBeenCalled();
+    const stamp = conn.writes.updates.find((u) => u.table === 'triage_items');
+    expect(JSON.stringify(stamp.arg)).toContain('pending_sms_offer');
+  });
+
+  // Every rebooker move leaves a response-less reschedule_log audit row. Only
+  // a row carrying the option payload is an answerable offer — treating the
+  // audit rows as offers would stand this path down for a week after any
+  // ordinary staff move.
+  test('a response-less audit row from an ordinary move is not an offer', async () => {
+    const conn = makeConn({ smsOffer: [{ id: 'audit-1', notes: null }, { id: 'audit-2', notes: '{"reason":"admin"}' }, { id: 'audit-3', notes: 'not json' }] });
+    const rebooker = { reschedule: jest.fn(async (_id, _date, _win, _reason, _by, opts) => {
+      await opts.moveGuard({ trx: conn, service: conn.visits[0] });
+      return { success: true };
+    }) };
+    expect(await applyCallReschedule({ conn, call: call(), now: NOW, rebooker })).toMatchObject({ outcome: 'applied' });
   });
 
   test('a rebooker refusal propagates (the processor step logs it non-blocking) and no activity row is written', async () => {

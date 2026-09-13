@@ -363,7 +363,7 @@ async function executeEstimateTool(toolName, input, actionContext = {}) {
       case 'read_pricing_config': return await readPricingConfig(input);
       case 'recent_pricing_changes': return await recentPricingChanges(input);
       case 'find_similar_estimates': return await findSimilarEstimates(input);
-      case 'match_existing_customer': return await matchExistingCustomer(input);
+      case 'match_existing_customer': return await matchExistingCustomer(input, actionContext.readCustomerIds);
       case 'get_waveguard_tiers': return await getWaveGuardTiers();
       case 'get_neighborhood_grass_profile': return await getNeighborhoodGrassProfile(input);
       case 'create_pending_estimate': return await createPendingEstimate(input);
@@ -1210,7 +1210,35 @@ function accountPricingFromContext(context = {}) {
   // draft. Pricing still uses the qualifying set only. Each entry carries the property addresses the service is
   // active at, and commercial_* programs also match their base key so a
   // requested `pest` collides with an active "Commercial Pest Control".
-  const activeServices = (Array.isArray(account.current_services) ? account.current_services : [])
+  const activeServices = activeRecurringServices(account.current_services);
+  const coveredKeys = new Set(activeServices.map((entry) => entry.key));
+  for (const key of priorQualifyingServices) {
+    // Qualifying keys normally also appear in current_services with address
+    // detail; a bare leftover stays an account-wide (address-less) block.
+    if (!coveredKeys.has(key)) activeServices.push({ key, addresses: [] });
+  }
+  return {
+    customerId: account.recognized ? account.customer_id : null,
+    recognized: account.recognized === true,
+    leadCustomerId: context?.lead?.customer_id || null,
+    leadCustomerIdKnown: Object.prototype.hasOwnProperty.call(context?.lead || {}, 'customer_id'),
+    phoneDerivedMatch: account.match_method === 'unambiguous_phone',
+    phoneDerivedMatchPhone: account.match_method === 'unambiguous_phone'
+      ? normalizeContactPhone(context?.lead?.phone)
+      : null,
+    serviceContextUnavailable: account.service_context_unavailable === true,
+    priorQualifyingServices,
+    activeServices,
+    customerAccount: account,
+    evidenceContext: context,
+  };
+}
+
+// Every active recurring service as { key, addresses }: the property
+// addresses it is active at, trusted for scoping only when every row of that
+// service carries one; commercial_* programs also match their base key.
+function activeRecurringServices(currentServices) {
+  return (Array.isArray(currentServices) ? currentServices : [])
     .flatMap((row) => {
       if (!row?.key) return [];
       // Addresses are trusted for property scoping only when EVERY active row
@@ -1242,27 +1270,6 @@ function accountPricingFromContext(context = {}) {
       }
       return entries;
     });
-  const coveredKeys = new Set(activeServices.map((entry) => entry.key));
-  for (const key of priorQualifyingServices) {
-    // Qualifying keys normally also appear in current_services with address
-    // detail; a bare leftover stays an account-wide (address-less) block.
-    if (!coveredKeys.has(key)) activeServices.push({ key, addresses: [] });
-  }
-  return {
-    customerId: account.recognized ? account.customer_id : null,
-    recognized: account.recognized === true,
-    leadCustomerId: context?.lead?.customer_id || null,
-    leadCustomerIdKnown: Object.prototype.hasOwnProperty.call(context?.lead || {}, 'customer_id'),
-    phoneDerivedMatch: account.match_method === 'unambiguous_phone',
-    phoneDerivedMatchPhone: account.match_method === 'unambiguous_phone'
-      ? normalizeContactPhone(context?.lead?.phone)
-      : null,
-    serviceContextUnavailable: account.service_context_unavailable === true,
-    priorQualifyingServices,
-    activeServices,
-    customerAccount: account,
-    evidenceContext: context,
-  };
 }
 
 // A recognized customer whose existing-service lookup failed has NO reliable
@@ -1669,7 +1676,7 @@ async function findSimilarEstimates({ monthly_total, service_interest, days = 90
   };
 }
 
-async function matchExistingCustomer({ phone, address, name }) {
+async function matchExistingCustomer({ phone, address, name }, readCustomerIds = []) {
   if (!phone && !address && !name) {
     return { error: 'Provide at least one of: phone, address, name' };
   }
@@ -1677,6 +1684,9 @@ async function matchExistingCustomer({ phone, address, name }) {
   let q = db('customers')
     .select('id', 'first_name', 'last_name', 'phone', 'email', 'address_line1', 'city', 'zip', 'waveguard_tier')
     .limit(10);
+  // Inside a customer-scoped task only the resolved customer may match: another
+  // account's contact, service and spend context never reaches the model.
+  if (readCustomerIds.length) q = q.whereIn('id', readCustomerIds);
 
   q = q.where(function () {
     if (phone) {
@@ -3558,13 +3568,14 @@ async function toggleEstimateV2View({ estimate_identifier, enabled, _expected_fl
     .where({ id: estimate.id })
     .modify((q) => { if (expected !== undefined) q.whereRaw('COALESCE(use_v2_view, false) = ?', [expected]); })
     .update({ use_v2_view: next });
-  if (expected !== undefined && !updated) {
+  if (!updated) {
     return { error: 'This estimate\'s view flag changed after the card was shown — nothing was toggled. Ask again for a fresh confirmation card.', preview_changed: true };
   }
 
   logger.info(`[estimate-v2] Toggled use_v2_view for estimate ${estimate.id} → ${next}`);
 
   return {
+    success: true,
     estimateId: estimate.id,
     customerName: estimate.customer_name,
     token: estimate.token,
@@ -3602,13 +3613,14 @@ async function toggleShowOneTimeOption({ estimate_identifier, enabled, _expected
     .where({ id: estimate.id })
     .modify((q) => { if (expected !== undefined) q.whereRaw('COALESCE(show_one_time_option, false) = ?', [expected]); })
     .update({ show_one_time_option: next });
-  if (expected !== undefined && !updated) {
+  if (!updated) {
     return { error: 'This estimate\'s one-time-option flag changed after the card was shown — nothing was toggled. Ask again for a fresh confirmation card.', preview_changed: true };
   }
 
   logger.info(`[estimate-v2] Toggled show_one_time_option for estimate ${estimate.id} → ${next}`);
 
   return {
+    success: true,
     estimateId: estimate.id,
     customerName: estimate.customer_name,
     token: estimate.token,
@@ -3620,6 +3632,8 @@ async function toggleShowOneTimeOption({ estimate_identifier, enabled, _expected
 module.exports = {
   ESTIMATE_TOOLS,
   executeEstimateTool,
+  activeRecurringServices,
+  duplicateCurrentServices,
   // Route-side proposal pin (W0B): resolve the toggle target ONCE at proposal
   // so the card names the estimate and Confirm acts on that immutable id.
   resolveEstimateByIdentifier,

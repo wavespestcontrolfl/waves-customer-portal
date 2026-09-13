@@ -272,9 +272,9 @@ describe('lead-funnel-bridge call sites', () => {
     expect(src).toMatch(/if \(updates\.status === 'won'\) await leadAttribution\.settleWonFunnelRow\(req\.params\.id, lead\.customer_id \|\| null\)/);
   });
 
-  test('lead-response agent contacted transition bridges', () => {
+  test('lead-response agent contacted transition bridges inside its transaction', () => {
     const src = read('../services/lead-response-tools.js');
-    expect(src).toMatch(/bridgeLeadFunnelStage\(input\.lead_id, 'contacted'\)/);
+    expect(src).toMatch(/bridgeLeadFunnelStage\(input\.lead_id, 'contacted', trx\)/);
   });
 
   test('phone-booking conversion bridges inside its savepoint', () => {

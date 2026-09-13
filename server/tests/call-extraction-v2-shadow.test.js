@@ -47,7 +47,7 @@ describe('v2 extraction prompt', () => {
 
   test('includes name extraction rules', () => {
     const prompt = buildExtractionPrompt(transcript, callerPhone, callDateET);
-    expect(prompt).toContain('Do NOT invent names');
+    expect(prompt).toContain('Do NOT invent a name');
     expect(prompt).toContain('name_confidence');
   });
 
@@ -78,8 +78,8 @@ describe('v2 extraction prompt', () => {
   });
 
   test('prompt version and hash are stable', () => {
-    expect(PROMPT_VERSION).toBe('v5');
-    expect(PROMPT_HASH).toMatch(/^v5-[a-f0-9]{12}$/);
+    expect(PROMPT_VERSION).toBe('v7');
+    expect(PROMPT_HASH).toMatch(/^v7-[a-f0-9]{12}$/);
   });
 
   test('extractionPromptVersion appends an order-sensitive catalog hash', () => {

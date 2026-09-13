@@ -63,9 +63,59 @@ function mockServiceDb({ before = serviceRow(), after = serviceRow(), counts = {
 }
 
 describe('service library guardrails', () => {
+  test.each([[30, true], [30, false], [40, true], [40, false]])('distinguishes echoed policy from duration edits: %i minutes (full form %s)', async (duration, fullForm) => {
+    const previousGate = process.env.GATE_SCHEDULING_CAPACITY;
+    process.env.GATE_SCHEDULING_CAPACITY = 'true';
+    const policy = { version: 1, min_duration_minutes: 30, default_duration_minutes: 30, max_duration_minutes: 40 };
+    const before = serviceRow({ min_duration_minutes: 60, default_duration_minutes: 60,
+      max_duration_minutes: 120, scheduling_duration_policy: policy });
+    const query = servicesQuery(before, before);
+    db.mockImplementation(() => query);
+    try {
+      await serviceLibrary.updateService(before.id, { name: 'Renamed', default_duration_minutes: duration,
+        ...(fullForm ? { min_duration_minutes: 30, max_duration_minutes: 40 } : {}) });
+      const patch = query.update.mock.calls[0][0];
+      if (duration === 30) {
+        for (const key of ['default_duration_minutes', 'min_duration_minutes', 'max_duration_minutes', 'scheduling_duration_policy']) expect(patch).not.toHaveProperty(key);
+      } else expect(patch).toMatchObject({ min_duration_minutes: 30, default_duration_minutes: 40,
+        max_duration_minutes: 40, scheduling_duration_policy: null });
+    } finally {
+      if (previousGate === undefined) delete process.env.GATE_SCHEDULING_CAPACITY;
+      else process.env.GATE_SCHEDULING_CAPACITY = previousGate;
+    }
+  });
   beforeEach(() => {
     jest.clearAllMocks();
+    // deactivateService takes the catalog writer table lock as its first
+    // statement (codex #4369 r4 P1); the transaction fake must look like one.
+    db.isTransaction = true;
+    db.raw = db.raw || jest.fn().mockResolvedValue(undefined);
     db.transaction = jest.fn(async (callback) => callback(db));
+  });
+
+  test.each([['true', 45, false], ['false', 60, true], ['false', 90, true]])('validates edits against the effective bounds (gate %s, duration %i)', async (gate, duration, valid) => {
+    const previousGate = process.env.GATE_SCHEDULING_CAPACITY;
+    process.env.GATE_SCHEDULING_CAPACITY = gate;
+    const before = serviceRow({ min_duration_minutes: 60, default_duration_minutes: 60, max_duration_minutes: 120,
+      scheduling_duration_policy: { version: 1, min_duration_minutes: 30, default_duration_minutes: 30, max_duration_minutes: 40 } });
+    const query = servicesQuery(before, before);
+    db.mockImplementation(() => query);
+    try {
+      const save = serviceLibrary.updateService(before.id, { default_duration_minutes: duration });
+      if (!valid) {
+        await expect(save).rejects.toMatchObject({ status: 400 });
+        expect(query.update).not.toHaveBeenCalled();
+      } else {
+        await save;
+        const patch = query.update.mock.calls[0][0];
+        expect(patch.default_duration_minutes).toBe(duration);
+        if (duration === 60) expect(patch).not.toHaveProperty('scheduling_duration_policy');
+        else expect(patch.scheduling_duration_policy).toBeNull();
+      }
+    } finally {
+      if (previousGate === undefined) delete process.env.GATE_SCHEDULING_CAPACITY;
+      else process.env.GATE_SCHEDULING_CAPACITY = previousGate;
+    }
   });
 
   test('rejects service key changes after creation', async () => {

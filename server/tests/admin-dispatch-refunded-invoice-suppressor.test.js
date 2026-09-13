@@ -194,7 +194,7 @@ describe('completion route: terminal invoice → no mint, no pay link, manual-bi
     expect(idx).toBeLessThan(siblingAt);
     // Unconditional (not gated on the suppressors finding nothing) — an
     // older live row must not mask a newer refunded one.
-    expect(src.slice(idx - 160, idx)).toMatch(/if \(!recapReviewOnly\) \{\s*let refundedOnVisit = null;\s*let newestLiveOnVisit = null;\s*try \{\s*$/);
+    expect(src.slice(idx - 200, idx)).toMatch(/if \(!packetEffects && \(!recapReviewOnly\)\) \{\s*let refundedOnVisit = null;\s*let newestLiveOnVisit = null;\s*try \{\s*$/);
     expect(src.slice(idx, idx + 2000)).toContain('reconcileLiveVsRefunded(existingCompletionInvoice, refundedOnVisit, newestLiveOnVisit)');
     expect(src.slice(idx, idx + 600)).toContain('newestLiveOnVisit = await completionNewestLiveInvoiceLookup(db, {');
     // Fail CLOSED: outside the non-blocking suppressor try (that catch sits
@@ -396,9 +396,11 @@ describe('completion route: terminal invoice → no mint, no pay link, manual-bi
   });
 
   test('the pre-minted lookup cannot resurrect the older live row once the refunded invoice won', () => {
-    const at = src.indexOf("preMintedInvoice = await completionSuppressorInvoiceLookup(db, { scheduled_service_id: svc.id });");
+    // The issued-invoice closeout pins its own invoice (#4127); every other
+    // completion still asks the helper for the newest linked row.
+    const at = src.search(/preMintedInvoice = issuedInvoiceCloseout\s*\n\s*\? existingCompletionInvoice\s*\n\s*: await completionSuppressorInvoiceLookup\(db, \{ scheduled_service_id: svc\.id \}\);/);
     expect(at).toBeGreaterThan(-1);
-    expect(src.slice(at, at + 600)).toContain('if (terminalCompletionInvoice) preMintedInvoice = null;');
+    expect(src.slice(at, at + 800)).toContain('if (terminalCompletionInvoice) preMintedInvoice = null;');
   });
 
   test('the terminal invoice is NEVER reused as the completion invoice / pay link', () => {
@@ -424,7 +426,7 @@ describe('completion route: terminal invoice → no mint, no pay link, manual-bi
     const at = src.indexOf("const dedupeKey = `terminal_invoice_manual_billing:${svc.id}`;");
     expect(at).toBeGreaterThan(-1);
     const block = src.slice(at - 1600, at + 18000);
-    expect(block).toContain('if (terminalCompletionInvoice && !shouldInvoice && !recapReviewOnly');
+    expect(block).toContain('if (!packetEffects && (terminalCompletionInvoice && !shouldInvoice && !recapReviewOnly');
     expect(block).toContain('&& !alreadyPaid && !prepaidCovered && !autopayCoversVisit && !preMintedInvoice && !existingCompletionInvoice');
     expect(block).toContain("require('../services/notification-service').notifyAdmin(");
     expect(block).toContain("'billing',");
@@ -436,13 +438,13 @@ describe('completion route: terminal invoice → no mint, no pay link, manual-bi
   });
 
   test('the alert fires only when the refunded invoice is the DECIDING suppressor — the guard re-asks the same gate with the terminal flag cleared', () => {
-    const at = src.indexOf('if (terminalCompletionInvoice && !shouldInvoice && !recapReviewOnly');
+    const at = src.indexOf('if (!packetEffects && (terminalCompletionInvoice && !shouldInvoice && !recapReviewOnly');
     expect(at).toBeGreaterThan(-1);
     const guard = src.slice(at, at + 500);
-    expect(guard).toContain('&& shouldAutoInvoiceCompletion({ ...completionInvoiceGateInput, terminalInvoiceOnVisit: false })) {');
+    expect(guard).toContain('&& shouldAutoInvoiceCompletion({ ...completionInvoiceGateInput, terminalInvoiceOnVisit: false }))) {');
     // The re-ask reads the SAME hoisted input the route's decision read —
     // not a second hand-built derivation that could drift.
-    expect(src).toContain('const shouldInvoice = shouldAutoInvoiceCompletion(completionInvoiceGateInput);');
+    expect(src).toContain('const shouldInvoice = !packetEffects && shouldAutoInvoiceCompletion(completionInvoiceGateInput);');
     // Semantics: a visit that would not invoice even WITHOUT the refunded
     // row (no scheduler flag, no tier/lane, gate off — nothing triggers
     // billing) owes nothing — no bell, no exposure to the alert-failure 503.
@@ -543,7 +545,7 @@ describe('completion route wiring (source contract)', () => {
   test('both suppressor lookups route through the helper — no bare whereNot(void) invoice filter in the completion route', () => {
     expect(completeRoute).toMatch(/existingCompletionInvoice = await completionSuppressorInvoiceLookup\(db, \{ service_record_id: record\.id \}\)/);
     expect(completeRoute).toMatch(/existingCompletionInvoice = await completionSuppressorInvoiceLookup\(db, \{ scheduled_service_id: svc\.id \}\)/);
-    expect(completeRoute).toMatch(/preMintedInvoice = await completionSuppressorInvoiceLookup\(db, \{ scheduled_service_id: svc\.id \}\)/);
+    expect(completeRoute).toMatch(/preMintedInvoice = issuedInvoiceCloseout\s*\n\s*\? existingCompletionInvoice\s*\n\s*: await completionSuppressorInvoiceLookup\(db, \{ scheduled_service_id: svc\.id \}\)/);
     expect(completeRoute).not.toMatch(/db\('invoices'\)[\s\S]{0,200}\.whereNot\('status', 'void'\)/);
   });
 

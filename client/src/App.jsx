@@ -43,7 +43,7 @@ function CustomerFailureScreen({ title, message, onRetry }) {
         }}>
           <Icon name="warning" size={22} strokeWidth={2} />
         </div>
-        <h1 style={{ margin: 0, fontSize: 20, fontWeight: 850, color: CUSTOMER_SURFACE.text, fontFamily: FONTS.heading }}>
+        <h1 style={{ margin: 0, fontSize: 20, fontWeight: 700, color: CUSTOMER_SURFACE.text, fontFamily: FONTS.heading }}>
           {title}
         </h1>
         <p style={{ margin: '9px 0 21px', fontSize: 14, color: CUSTOMER_SURFACE.body, lineHeight: 1.55 }}>
@@ -61,7 +61,7 @@ function CustomerFailureScreen({ title, message, onRetry }) {
             border: '1px solid rgba(4,57,94,0.16)',
             borderRadius: 10,
             fontSize: 14,
-            fontWeight: 850,
+            fontWeight: 700,
             fontFamily: FONTS.heading,
             cursor: 'pointer',
           }}
@@ -124,7 +124,7 @@ class PageErrorBoundary extends Component {
             }}>
               <Icon name="warning" size={22} strokeWidth={2} />
             </div>
-            <div style={{ fontSize: 18, fontWeight: 850, color: COLORS.glassNavy, marginBottom: 8, fontFamily: FONTS.heading }}>Something went wrong</div>
+            <div style={{ fontSize: 18, fontWeight: 700, color: COLORS.glassNavy, marginBottom: 8, fontFamily: FONTS.heading }}>Something went wrong</div>
             <div style={{ fontSize: 13, color: '#64748B', marginBottom: 20, lineHeight: 1.5 }}>
             {this.state.error.message}
             </div>
@@ -136,7 +136,7 @@ class PageErrorBoundary extends Component {
               border: 'none',
               borderRadius: 8,
               fontSize: 14,
-              fontWeight: 850,
+              fontWeight: 700,
               fontFamily: FONTS.heading,
               cursor: 'pointer',
             }}>Reload Page</button>
@@ -294,7 +294,7 @@ function ChunkLoadFallback() {
         width: 'min(420px, 100%)', background: '#fff', border: '1px solid #E7E2D7',
         borderRadius: 8, padding: 24, textAlign: 'center', boxShadow: '0 1px 2px rgba(15,23,42,0.04)',
       }}>
-        <div style={{ fontSize: 18, fontWeight: 850, color: COLORS.glassNavy, marginBottom: 8, fontFamily: FONTS.heading }}>
+        <div style={{ fontSize: 18, fontWeight: 700, color: COLORS.glassNavy, marginBottom: 8, fontFamily: FONTS.heading }}>
           Couldn&rsquo;t load this page
         </div>
         <div style={{ fontSize: 13, color: '#64748B', marginBottom: 20, lineHeight: 1.5 }}>
@@ -304,7 +304,7 @@ function ChunkLoadFallback() {
           onClick={() => { sessionStorage.removeItem('chunk-reload-attempted'); window.location.reload(); }}
           style={{
             minHeight: 42, padding: '0 18px', background: COLORS.glassNavy, color: '#fff',
-            border: 'none', borderRadius: 8, fontSize: 14, fontWeight: 850,
+            border: 'none', borderRadius: 8, fontSize: 14, fontWeight: 700,
             fontFamily: FONTS.heading, cursor: 'pointer',
           }}
         >
@@ -359,6 +359,7 @@ function lazyWithRetry(factory) {
 const StaffDocumentLibrary = lazyWithRetry(() => import('./components/staffDocuments/Library'));
 const PortalPage = lazyWithRetry(() => import('./pages/PortalPage'));
 const ReportViewPage = lazyWithRetry(() => import('./pages/ReportViewPage'));
+const VisitSummaryPage = lazyWithRetry(() => import('./pages/VisitSummaryPage'));
 const ProjectReportViewPage = lazyWithRetry(() => import('./pages/ProjectReportViewPage'));
 const AdminReviewsPage = lazyWithRetry(() => import('./pages/admin/ReviewsPage'));
 const AdminDispatchPage = lazyWithRetry(() => import('./pages/admin/AdminDispatchPage'));
@@ -371,6 +372,7 @@ const AdminPipelinePage = lazyWithRetry(() => import('./pages/admin/EstimatesPag
 const AdminAgentEstimatePage = lazyWithRetry(() => import('./pages/admin/AgentEstimatePage'));
 const AdminCommercialProposalPage = lazyWithRetry(() => import('./pages/admin/CommercialProposalPage'));
 const TechHomePage = lazyWithRetry(() => import('./pages/tech/TechHomePage'));
+const PayGrowth = lazyWithRetry(() => import('./components/payGrowth/PayGrowth'));
 const TechProtocolsPage = lazyWithRetry(() => import('./pages/tech/TechProtocolsPage'));
 const LawnReportViewPage = lazyWithRetry(() => import('./pages/LawnReportViewPage'));
 const PestReportViewPage = lazyWithRetry(() => import('./pages/PestReportViewPage'));
@@ -435,27 +437,143 @@ function RoutesErrorBoundary({ children }) {
   return <PageErrorBoundary key={location.pathname} customerGlass={customerGlass}>{children}</PageErrorBoundary>;
 }
 
+// A profile-only link (every push minted before the composers carry the
+// property) means that profile's PRIMARY — the house unstamped visits belong
+// to — so a non-primary selection on the same profile still switches back
+// rather than keeping an arbitrary house whose scoped reads would hide the
+// notified visit. While the primary entry is not known yet (list still
+// loading, or failed) the link stays pending — mounting the portal would open
+// the notification under the wrong house (codex #4207 r2); the guard's
+// propertiesError check fails it closed.
+function profileOnlyTarget({ propertyScopedDestination, sameProfile, primaryEntry, selectedId }) {
+  if (!propertyScopedDestination || !sameProfile || !selectedId) return { fallbackPropertyId: null, primaryUnknown: false };
+  if (!primaryEntry) return { fallbackPropertyId: null, primaryUnknown: true };
+  const primaryId = String(primaryEntry.propertyId);
+  return { fallbackPropertyId: selectedId !== primaryId ? primaryId : null, primaryUnknown: false };
+}
+
+// Tabs whose reads are customer-wide: a push to them requires only the right
+// profile — neither the profile's primary (uncapped codex r1r P1) nor the
+// house a completion or receipt push names (uncapped codex r1v P1): a retired
+// house must not turn a report or an invoice into "Property unavailable" when
+// the tab itself opens. Home, Visits and My Property follow the selection.
+const CUSTOMER_WIDE_TABS = ['billing', 'refer', 'documents', 'plan', 'learn'];
+
+// Where a notification deep link wants the portal to be, judged against the
+// session's current selection and property list. Pure: everything the route
+// guard decides is derived here so the guard itself stays a small effect.
+//
+// Saved-property destination (GATE_APP_PROPERTY_SCOPE): a push that knows
+// the visit's house names it too (`notificationPropertyId`). The full
+// selection is compared — same profile but a different saved property still
+// switches. A profile-only link keeps today's rule: switch only when the
+// PROFILE differs (see profileOnlyTarget).
+export function resolveNotificationTarget({ search, customer, properties, selectedProperty }) {
+  const params = new URLSearchParams(search);
+  const targetProperty = params.get('notificationProperty');
+  // The hint means something only against a SAVED-property list. A
+  // PROFILE-shaped list (gate off, or rolled back after the push was
+  // minted) has no houses to match, so the hint degrades to a profile-only
+  // link — today's routing — instead of "Property unavailable" (uncapped
+  // codex r1t P1). An EMPTY list (still loading, or failed) keeps the hint:
+  // the pending / fail-closed paths of the guard own that case.
+  // Saved entries carry a propertyId (null for a row-less profile) and a key;
+  // profile entries carry neither.
+  const listIsProfileShaped = properties.length > 0
+    && !properties.some((property) => property.key || Object.prototype.hasOwnProperty.call(property, 'propertyId'));
+  const propertyScopedDestination = !CUSTOMER_WIDE_TABS.includes(params.get('tab') || 'dashboard');
+  const targetPropertyId = listIsProfileShaped || !propertyScopedDestination ? null : params.get('notificationPropertyId');
+  const profileDiffers = !!targetProperty && String(customer?.id) !== targetProperty;
+  const sameProfile = !!targetProperty && !profileDiffers;
+  const currentProfileEntries = properties.filter((property) => String(property.customerId || property.id) === String(customer?.id));
+  const primaryEntry = currentProfileEntries.find((property) => property.isPrimaryProperty) || null;
+  const selectedId = selectedProperty?.propertyId ? String(selectedProperty.propertyId) : '';
+  // A saved property named by the link wins over the profile-only rule.
+  const profileOnly = targetPropertyId
+    ? { fallbackPropertyId: null, primaryUnknown: false }
+    : profileOnlyTarget({ propertyScopedDestination, sameProfile, primaryEntry, selectedId });
+  const resolvedTargetPropertyId = targetPropertyId || profileOnly.fallbackPropertyId;
+  const savedDiffers = sameProfile && !!resolvedTargetPropertyId && selectedId !== resolvedTargetPropertyId;
+  return {
+    targetProperty,
+    resolvedTargetPropertyId,
+    propertyScopedDestination,
+    currentProfileEntries,
+    primaryUnknown: profileOnly.primaryUnknown,
+    pending: profileDiffers || savedDiffers || profileOnly.primaryUnknown,
+  };
+}
+
 function ProtectedRoute({ children }) {
-  const { isAuthenticated, loading, error, customer, properties, propertiesError, switchProperty } = useAuth();
+  const { isAuthenticated, loading, error, customer, properties, propertiesError, switchProperty, refreshProperties, selectedProperty = null } = useAuth();
   const location = useLocation();
-  const targetProperty = new URLSearchParams(location.search).get('notificationProperty');
-  const targetPending = !!targetProperty && isAuthenticated && String(customer?.id) !== targetProperty;
+  const { targetProperty, resolvedTargetPropertyId, propertyScopedDestination, currentProfileEntries, primaryUnknown, pending } = resolveNotificationTarget({
+    search: location.search, customer, properties, selectedProperty,
+  });
+  const targetPending = isAuthenticated && pending;
   const switchingTarget = useRef(null);
   const [targetError, setTargetError] = useState(null);
+  // A target the in-memory list does not carry is re-read ONCE before it is
+  // refused: a house added after this tab last loaded `properties` (a warm
+  // app session, an in-app bell tap) is valid on the server but absent here
+  // (GitHub codex r10 P2). `refreshedFor` records the destination whose
+  // re-read finished, so the second pass decides on the fresh list; a
+  // failed re-read sets propertiesError and fails closed above.
+  const refreshingFor = useRef(null);
+  const [refreshedFor, setRefreshedFor] = useState(null);
   useEffect(() => {
-    if (!targetPending || loading || switchingTarget.current === targetProperty) return;
+    const destination = `${targetProperty}:${resolvedTargetPropertyId || ''}`;
+    // Destination satisfied (or gone): release the in-flight guard so a
+    // later return to the same notification URL — Billing, a manual switch
+    // to another house, Back — switches again instead of loading forever
+    // (uncapped codex r2d P1).
+    if (!targetPending) { switchingTarget.current = null; return; }
+    if (loading || switchingTarget.current === destination) return;
     if (propertiesError) { setTargetError('Your service properties could not be checked. Try again.'); return; }
-    if (!properties.some((property) => String(property.id) === targetProperty)) {
+    const refreshUnseen = () => {
+      if (refreshedFor === destination) return false;
+      if (refreshingFor.current === destination) return true;
+      refreshingFor.current = destination;
+      Promise.resolve(typeof refreshProperties === 'function' ? refreshProperties() : false)
+        .catch(() => false)
+        .finally(() => { refreshingFor.current = null; setRefreshedFor(destination); });
+      return true;
+    };
+    if (primaryUnknown) {
+      // Entries for this profile are listed but none is its primary (the
+      // office retired it): nothing safe to open — fail closed.
+      if (currentProfileEntries.length > 0) setTargetError('This notification belongs to a property that is no longer available on your account.');
+      return; // otherwise keep waiting for the list
+    }
+    // Saved-property entries carry composite ids (GATE_APP_PROPERTY_SCOPE);
+    // a notification names the PROFILE, so match on the entry's customer.
+    // The saved-property list omits an active profile whose houses were ALL
+    // retired. A CUSTOMER-WIDE destination (Billing, Documents…) on such a
+    // sibling profile is still reachable — /auth/select-property verifies
+    // ownership and refuses a foreign profile — so only PROPERTY-scoped
+    // destinations require the profile to list a house (uncapped codex r1x
+    // P1); a customer-wide one proceeds to the ownership-checked switch.
+    if (propertyScopedDestination && !properties.some((property) => String(property.customerId || property.id) === targetProperty)) {
+      if (refreshUnseen()) return;
       setTargetError('This notification belongs to a property that is no longer available on your account.');
       return;
     }
-    switchingTarget.current = targetProperty;
+    // A named saved property must be one of that profile's listed entries.
+    const savedEntry = resolvedTargetPropertyId
+      ? properties.find((property) => String(property.customerId || property.id) === targetProperty && String(property.propertyId) === resolvedTargetPropertyId)
+      : null;
+    if (resolvedTargetPropertyId && !savedEntry) {
+      if (refreshUnseen()) return;
+      setTargetError('This notification belongs to a property that is no longer available on your account.');
+      return;
+    }
+    switchingTarget.current = destination;
     // select-property verifies ownership again on the server. The portal
     // stays unmounted until the authenticated customer matches the target.
-    void switchProperty(targetProperty).then((switched) => {
+    void switchProperty(savedEntry ? { customerId: savedEntry.customerId, propertyId: savedEntry.propertyId } : targetProperty).then((switched) => {
       if (!switched) setTargetError('This property could not be opened. Try again.');
     }).catch(() => setTargetError('This property could not be opened. Try again.'));
-  }, [targetPending, targetProperty, loading, properties, propertiesError, switchProperty]);
+  }, [targetPending, targetProperty, resolvedTargetPropertyId, primaryUnknown, propertyScopedDestination, currentProfileEntries.length, loading, properties, propertiesError, switchProperty, refreshProperties, refreshedFor]);
   // The auth-check screen mounts the same glass scene as the portal, so
   // loading renders like the real UI instead of a flat placeholder.
   useGlassSurface(loading || targetPending);
@@ -496,7 +614,7 @@ function ProtectedRoute({ children }) {
               animation: 'portalPulse 1.4s ease infinite',
             }}
           />
-          <div style={{ fontSize: 17, fontWeight: 850, fontFamily: FONTS.heading }}>Loading your portal</div>
+          <div style={{ fontSize: 17, fontWeight: 700, fontFamily: FONTS.heading }}>Loading your portal</div>
           {/* Headline + logo only on a normal (fast) load — but while useAuth
               retries a transient failure, still tell the customer what's
               happening instead of an indefinite generic check. */}
@@ -539,6 +657,7 @@ export default function App() {
           <Route path="/report/project/:token" element={<Suspense fallback={<div style={{background:'#EDF4FA',minHeight:'100vh'}}/>}><WavesShell><ProjectReportViewPage /></WavesShell></Suspense>} />
           <Route path="/report/:token" element={<Suspense fallback={<div style={{background:'#EDF4FA',minHeight:'100vh'}}/>}><WavesShell><ReportViewPage /></WavesShell></Suspense>} />
           <Route path="/recap/:token" element={<RecapLinkRedirect />} />
+          <Route path="/visit/:token" element={<Suspense fallback={<div />}><WavesShell><VisitSummaryPage /></WavesShell></Suspense>} />
           <Route path="/pay/statement/:token" element={<Suspense fallback={<div style={{background:'#EDF4FA',minHeight:'100vh'}}/>}><StatementPayPage /></Suspense>} />
           <Route path="/pay/:token" element={<Suspense fallback={<div style={{background:'#EDF4FA',minHeight:'100vh'}}/>}><PayPage /></Suspense>} />
           <Route path="/receipt/:token" element={<Suspense fallback={<div style={{background:'#EDF4FA',minHeight:'100vh'}}/>}><ReceiptPage /></Suspense>} />
@@ -583,6 +702,7 @@ export default function App() {
             <Route path="estimate" element={<Navigate to="/admin/pipeline?tab=new" replace />} />
             <Route path="protocols" element={<Suspense fallback={<RouteFallback label="Loading protocols..." />}><TechProtocolsPage /></Suspense>} />
             <Route path="documents" element={<Suspense fallback={<RouteFallback label="Loading documents..." />}><StaffDocumentLibrary /></Suspense>} />
+            <Route path="pay-growth" element={<Suspense fallback={<RouteFallback label="Loading pay and growth…" />}><PayGrowth /></Suspense>} />
             <Route path="lawn-diagnostic" element={<Suspense fallback={<RouteFallback label="Loading lawn diagnostic..." />}><TechLawnDiagnosticPage /></Suspense>} />
             <Route path="social-post" element={<Suspense fallback={<RouteFallback label="Loading social post..." />}><TechSocialPostPage /></Suspense>} />
           </Route>

@@ -14,6 +14,9 @@ const { assertAssignableTechnician, applyAssignable } = require('../technician-e
 const { scheduledServiceTrackTokenExpiry } = require('../track-token-expiry');
 const { etDateString, addETDays, validScheduleDate, sameDayWindowElapsed } = require('../../utils/datetime-et');
 const { dayStopsQuery, guardedCoordSelects } = require('../scheduling/day-stops');
+const { resolveWindowSafeOrderByTechDay, windowSafeFigures, inProgressStartMin, loadTechDayOrigins,
+  assertTechDayOriginsFresh,
+  ROUTE_WRITE_GUARD_COLUMNS, CUSTOMER_PREMISE_ALIASES, routeWriteGuardSignature } = require('../route-reorder');
 const { probeSlotOverlap, slotOverlapWarning } = require('../scheduling/window-rules');
 
 const SCHEDULE_TOOLS = [
@@ -94,14 +97,18 @@ const SCHEDULE_TOOLS = [
   },
   {
     name: 'find_schedule_gaps',
-    description: `Find open capacity/gaps in the schedule for a date or date range. Shows which techs have room for more stops, and which zones are underserved. Useful for "any room on Tuesday?" or "where can I fit 3 more pest stops this week?"`,
+    description: `Inspect schedule gaps for a date or date range. When schedule-quality measurements are enabled, reports stored service minutes, modeled driving/waiting, overlaps and unknown capacity; gross gaps or minute budgets never prove an extra visit fits. candidate_service_id tests a specific existing visit against the saved route and known constraints; suggested times still require staff review of commitments/access and a locked save recheck. Supply the operator's workday/break allowance if known; never invent it. Otherwise returns legacy stop-count estimates, which are not bookable capacity.`,
     input_schema: {
       type: 'object',
       properties: {
         date: { type: 'string', description: 'YYYY-MM-DD single day' },
         date_from: { type: 'string', description: 'Start of range' },
         date_to: { type: 'string', description: 'End of range' },
-        service_type: { type: 'string', description: 'Optional: filter capacity for a specific service type' },
+        service_type: { type: 'string', description: 'Requested service; all existing work still counts toward the route workload.' },
+        candidate_service_id: { type: 'string', format: 'uuid', description: 'Existing appointment to test in the gaps. Loads its stored location/duration; does not move it or assume customer permission.' },
+        departure_time: { type: 'string', description: 'Known departure time, HH:MM; otherwise the route model uses 08:00.' },
+        target_return_time: { type: 'string', description: 'Operator-provided target return to base, HH:MM. Omit if unknown.' },
+        break_minutes: { type: 'number', minimum: 0, description: 'Operator-provided daily lunch/restock allowance. Omit if unknown.' },
       },
     },
   },
@@ -254,9 +261,18 @@ async function switchAppointmentProperty(input, actionContext) {
     void refreshAppointmentAddressBriefs(db, result.updated_service_ids).catch(err => {
       logger.error(`[intelligence-bar] address brief refresh failed: ${err.message}`);
     });
-    const { emitDispatchJobUpdate } = require('../dispatch-assignment');
+    const { emitDispatchJobUpdate, flushDispatchQualityDates } = require('../dispatch-assignment');
+    // A property switch restamps every future appointment at once. Each one
+    // changes where its route goes, so the dates need remeasuring — but as a
+    // single pass, not one concurrent route scan per row (codex #4295 r1 P2).
+    const qualityDates = new Set();
     const broadcasts = await Promise.allSettled(result.updated_service_ids.map(jobId =>
-      emitDispatchJobUpdate({ jobId, actorId: actionContext.technicianId })));
+      emitDispatchJobUpdate({ jobId, actorId: actionContext.technicianId, qualityDates })));
+    try {
+      await flushDispatchQualityDates(qualityDates);
+    } catch (err) {
+      logger.error(`[intelligence-bar] route quality refresh failed: ${err.message}`);
+    }
     if (broadcasts.some(item => item.status === 'rejected')) {
       logger.warn('[intelligence-bar] address saved but dispatch refresh broadcast failed');
       result.warning = 'Address saved. Live refresh failed; refresh the technician schedule to see the new destination.';
@@ -285,11 +301,41 @@ function getZone(city) {
 // any miss (row moved or reassigned since) aborts the whole rewrite
 // untouched, and an approved id missing from the fresh day set refuses with
 // preview_changed.
-async function applyApprovedRouteOrder({ date, approvedIds, services, lockKeys, expectTechFor, loadEligibleIds }) {
+async function applyApprovedRouteOrder({ date, approvedIds, services, lockKeys, expectTechFor, loadEligibleIds, RouteOptimizer, technicianId = null }) {
   const byId = new Map(services.map((s) => [String(s.id), s]));
   if (approvedIds.some((id) => !byId.has(id))) {
     return { error: "The day's stops changed after the card was shown — nothing was reordered. Ask again for a fresh card.", preview_changed: true };
   }
+  // The approved plan must still be window-safe against the rows as they are
+  // NOW, not only as they were when the card was drawn: a window, duration,
+  // pin or live status changed since then can make the approved sequence
+  // illegal, and this path applies it verbatim (codex #4430 r3 P1). The guard
+  // is asked to validate the APPROVED order — if it would rather write a
+  // different one, the card is stale.
+  // Kept for the write transaction below: a completed visit's time or pin can
+  // change while confirmation waits for locks, and completed rows are outside
+  // loadEligibleIds' own freshness check (codex #4430 r5 P1).
+  let techDayOrigins = null;
+  const preLockNow = new Date();
+  if (RouteOptimizer) {
+    const approvedOrder = approvedIds.map((id) => byId.get(id));
+    // From the truck's real position, exactly as the preview did — the day
+    // has moved on since the card was drawn.
+    techDayOrigins = await loadTechDayOrigins(db, date, { technicianId, now: preLockNow });
+    const revalidated = resolveWindowSafeOrderByTechDay({
+      RouteOptimizer, orderedStops: approvedOrder, sourceStops: services,
+      googleSource: 'approved_card', startMin: inProgressStartMin(date, preLockNow),
+      techDayOrigins,
+    });
+    if (revalidated.refusal) {
+      return { error: routeGuardMessage(revalidated.refusal.reason), reason: revalidated.refusal.reason, preview_changed: true };
+    }
+    if (revalidated.orderedIds.join(',') !== approvedIds.join(',')) {
+      return { error: "The day's promised windows changed after the card was shown — nothing was reordered. Ask again for a fresh card.", preview_changed: true };
+    }
+  }
+  // Guard inputs as the card saw them; compared again under the lock below.
+  const guardSnapshot = new Map(services.map((s) => [String(s.id), routeWriteGuardSignature(s)]));
   const { lockTechDays } = require('../scheduling/tech-day-lock');
   try {
     await db.transaction(async (trx) => {
@@ -299,10 +345,45 @@ async function applyApprovedRouteOrder({ date, approvedIds, services, lockKeys, 
       // added since the confirm preflight would sit ungoverned beside (or
       // collide with) the approved 1..N sequence, so the eligible set must
       // match the approved set exactly under the locks.
-      const eligible = (await loadEligibleIds(trx)).map(String);
+      // The WHOLE day under the lock, ungeocoded rows included: an
+      // appointment without a pin added in the gap is exactly what the
+      // COORDLESS_STOPS guard refuses, and filtering it out here would hide
+      // it while the ids and signatures still matched (codex #4430 r3 P1).
+      const dayRows = await loadEligibleIds(trx);
       const approvedSet = new Set(approvedIds);
-      if (eligible.length !== approvedIds.length || eligible.some((id) => !approvedSet.has(id))) {
+      const geocodedIds = dayRows.filter((row) => row.lat && row.lng).map((row) => String(row.id));
+      if (geocodedIds.length !== approvedIds.length || geocodedIds.some((id) => !approvedSet.has(id))) {
         throw Object.assign(new Error('stop set changed'), { code: 'STALE_OPTIMIZE_SET' });
+      }
+      // Membership over the full day, then the guard inputs themselves — the
+      // same fence the admin endpoints apply.
+      if (dayRows.length !== guardSnapshot.size
+        || dayRows.some((row) => routeWriteGuardSignature(row) !== guardSnapshot.get(String(row.id)))) {
+        throw Object.assign(new Error('guard inputs changed'), { code: 'STALE_OPTIMIZE_SET' });
+      }
+      // The completed rows the origin came from are outside that set.
+      // Scoped to the technician this card covers: an unrelated tech
+      // finishing a stop must not reject it, and their completed rows have no
+      // business being locked here (codex round 5 P2).
+      const freshOrigins = await assertTechDayOriginsFresh(trx, date, techDayOrigins, {
+        technicianId,
+        stale: () => Object.assign(new Error('completed-stop origin changed'), { code: 'STALE_OPTIMIZE_SET' }),
+      });
+      // And time has passed while this waited for locks: re-run today's
+      // decision at the CURRENT minute and refuse if the approved order is no
+      // longer the one it yields (codex #4430 r5 P1, as both admin endpoints
+      // already do).
+      const recheckStart = RouteOptimizer ? inProgressStartMin(date) : null;
+      if (recheckStart != null) {
+        const again = resolveWindowSafeOrderByTechDay({
+          RouteOptimizer, orderedStops: approvedIds.map((id) => byId.get(id)), sourceStops: services,
+          googleSource: 'approved_card', startMin: recheckStart,
+          // Clock advances, elapsed cutoff does not — see the admin recheck.
+          elapsedCutoffMin: inProgressStartMin(date, preLockNow), techDayOrigins: freshOrigins,
+        });
+        if (again.refusal || again.orderedIds.map(String).join(',') !== approvedIds.join(',')) {
+          throw Object.assign(new Error('route no longer reachable'), { code: 'STALE_OPTIMIZE_SET' });
+        }
       }
       for (let i = 0; i < approvedIds.length; i++) {
         const expectTech = expectTechFor(byId.get(approvedIds[i])) || null;
@@ -323,6 +404,14 @@ async function applyApprovedRouteOrder({ date, approvedIds, services, lockKeys, 
     if (e.code === 'STALE_OPTIMIZE') return { error: 'Schedule changed while optimizing — please retry' };
     throw e;
   }
+  // A manual reorder writes route_order directly, outside the batched
+  // dispatch/rebooker paths — without this the day's card stays stale
+  // after an operator applies the approved plan (codex #4295 r2 P2).
+  try {
+    await require('../scheduling/quality-after-change').refreshScheduleQualityAfterChange({ dates: [date] });
+  } catch (e) {
+    logger.error(`[intelligence-bar:schedule] route quality refresh failed for ${date}: ${e.message}`);
+  }
   logger.info(`[intelligence-bar:schedule] Applied approved route order for ${date}: ${approvedIds.length} stops`);
   return {
     success: true,
@@ -331,6 +420,17 @@ async function applyApprovedRouteOrder({ date, approvedIds, services, lockKeys, 
     source: 'approved_plan',
     note: 'Applied the stop order approved on the card (not re-optimized at commit).',
   };
+}
+
+
+/** Operator-facing copy for each refusal the shared window guard returns. */
+function routeGuardMessage(reason) {
+  if (reason === 'WINDOW_FIT_GATE_OFF') return 'The shortest route breaks a promised arrival window and the window-fit repair is off — nothing was changed.';
+  if (reason === 'LIVE_STOP_IN_PROGRESS') return 'A stop on this route is already in progress — reorder it once that visit is complete.';
+  if (reason === 'COORDLESS_STOPS') return 'A stop on this route has no map location, so its arrival window cannot be verified — nothing was changed.';
+  if (reason === 'MODEL_UNCALIBRATED') return 'Drive-time calibration is off, so this route\'s arrival windows cannot be verified without live traffic data — nothing was changed.';
+  if (reason === 'PROGRESS_ORIGIN_UNKNOWN') return 'This route is already under way and the last completed stop has no map location, so the remaining drive cannot be verified — nothing was changed.';
+  return 'No legal stop order keeps every promised arrival window — nothing was changed.';
 }
 
 async function optimizeAllRoutes(input) {
@@ -350,14 +450,16 @@ async function optimizeAllRoutes(input) {
       'scheduled_services.*',
       'customers.first_name', 'customers.last_name',
       'customers.address_line1', 'customers.city', 'customers.state', 'customers.zip',
+      // The co-visit merge resolves an unstamped row's premise through these.
+      ...CUSTOMER_PREMISE_ALIASES,
       ...guardedCoordSelects(db),
     ],
   });
 
-  if (!services.length) return { message: 'No services found for this date', date };
+  if (!services.length) return { blocked: true, message: 'No services found for this date', date };
 
   const stopsWithCoords = services.filter(s => s.lat && s.lng);
-  if (stopsWithCoords.length < 2) return { message: 'Need at least 2 geocoded stops to optimize', geocoded: stopsWithCoords.length, total: services.length };
+  if (stopsWithCoords.length < 2) return { blocked: true, message: 'Need at least 2 geocoded stops to optimize', geocoded: stopsWithCoords.length, total: services.length };
 
   // The card's approved sequence IS the plan (GH r14 P1): a confirmed run
   // with the fingerprint-verified order applies exactly that order under
@@ -371,11 +473,17 @@ async function optimizeAllRoutes(input) {
       services,
       lockKeys: services.map((s) => ({ techId: s.technician_id, date })),
       expectTechFor: (s) => s.technician_id || null,
+      RouteOptimizer,
       loadEligibleIds: async (trx) => (await dayStopsQuery(trx, {
         dateStr: date,
         excludeStatuses: ['cancelled', 'completed', 'rescheduled'],
-        select: ['scheduled_services.id', ...guardedCoordSelects(trx)],
-      })).filter((s) => s.lat && s.lng).map((s) => s.id),
+        select: ['scheduled_services.id',
+          ...ROUTE_WRITE_GUARD_COLUMNS.map((c) => `scheduled_services.${c}`),
+          ...CUSTOMER_PREMISE_ALIASES, ...guardedCoordSelects(trx)],
+      // FOR UPDATE: a status transition can otherwise commit en_route/on_site
+      // between this check and the writes, which constrain only id/date/tech
+      // (codex #4430 r5 P1) — the same fence the admin endpoints take.
+      }).forUpdate('scheduled_services')),
     });
   }
 
@@ -388,10 +496,52 @@ async function optimizeAllRoutes(input) {
     { startLat: RouteOptimizer.HQ.lat, startLng: RouteOptimizer.HQ.lng, endAtStart: true },
   );
 
-  const savedMiles = Math.max(0, Math.round((result.unoptimizedDistanceMeters - result.totalDistanceMeters) / 1609.34));
-  const savedPct = result.unoptimizedDistanceMeters > 0
-    ? Math.round(((result.unoptimizedDistanceMeters - result.totalDistanceMeters) / result.unoptimizedDistanceMeters) * 100)
-    : 0;
+  // Window safety BEFORE anything is proposed — the approved card is applied
+  // verbatim later, so an illegal order must never reach it.
+  // Window safety BEFORE anything is proposed — the approved card is applied
+  // verbatim later, so an illegal order must never reach it. Same shared
+  // per-tech-day resolver the admin optimize buttons and the nightly pass use
+  // (codex #4430 r3 P1: these two tools were the third writer still applying
+  // Google's raw order).
+  // sourceStops is the FULL day, not just the geocoded rows: an ungeocoded
+  // appointment is exactly what COORDLESS_STOPS and LIVE_STOP_IN_PROGRESS
+  // exist to catch, and filtering it out first would hide it (codex #4430 r3
+  // P1). Ungeocoded rows are not in the optimizer's order, so a day that
+  // passes leaves their route_order untouched.
+  const guarded = resolveWindowSafeOrderByTechDay({
+    RouteOptimizer, orderedStops: result.orderedStops, sourceStops: services,
+    googleSource: result.source,
+    // No live-leg shortcut here: the confirmation re-validates the APPROVED
+    // order, which has no legs of its own, so a preview certified on Google's
+    // legs would produce a card that could never be applied (codex round 5
+    // P2). Judge it the way it will be judged.
+    legs: null, startMin: inProgressStartMin(date),
+    techDayOrigins: await loadTechDayOrigins(db, date),
+  });
+  if (guarded.refusal) {
+    return { blocked: true, date, reason: guarded.refusal.reason, conflict: guarded.refusal.conflict,
+      technician_id: guarded.refusal.technicianId,
+      message: routeGuardMessage(guarded.refusal.reason) };
+  }
+  const optimizedById = new Map(result.orderedStops.map((s) => [s.id, s]));
+  result.orderedStops = guarded.orderedIds.map((id) => optimizedById.get(id));
+
+  // A repaired order is NOT the one Google scored, so the card must not
+  // advertise Google's savings for a sequence it will never apply — the same
+  // per-tech-day figures the admin endpoint reports (codex #4430 r3 P1).
+  const figures = windowSafeFigures(result, guarded.resolvedByTech,
+    guarded.anyWindowConstrained || guarded.scoredRouteChanged, guarded.unassigned);
+  result.totalDistanceMeters = figures.totalDistanceMeters;
+  result.unoptimizedDistanceMeters = figures.unoptimizedDistanceMeters;
+  result.totalDurationSeconds = figures.totalDurationMinutes * 60;
+  if (guarded.anyWindowConstrained) result.source = 'window_constrained';
+  const savedMiles = Math.round(figures.savedDistanceMeters / 1609.34);
+  const addedMiles = Math.round(figures.addedDistanceMeters / 1609.34);
+  // A repair that adds less than half a mile still ADDS mileage; rounding it
+  // to 0 and taking the savings branch would tell the operator the opposite
+  // (codex round 5 P2).
+  const addedMilesCopy = addedMiles > 0 ? `~${addedMiles} miles` : 'under a mile';
+  const savedPct = figures.savedPercent;
 
   const summary = {
     date,
@@ -399,6 +549,7 @@ async function optimizeAllRoutes(input) {
     total_miles_before: Math.round(result.unoptimizedDistanceMeters / 1609.34),
     total_miles_after: Math.round(result.totalDistanceMeters / 1609.34),
     miles_saved: savedMiles,
+    miles_added: addedMiles,
     percent_saved: savedPct,
     total_drive_minutes: Math.round((result.totalDurationSeconds || 0) / 60),
     source: result.source, // 'google_routes' or 'nearest_neighbor'
@@ -417,7 +568,9 @@ async function optimizeAllRoutes(input) {
     return {
       proposal: true,
       ...summary,
-      note: `Would reorder ${stopsWithCoords.length} stops, saving ~${savedMiles} miles. Re-call with confirmed:true to apply.`,
+      note: figures.addedDistanceMeters > 0
+        ? `Would reorder ${stopsWithCoords.length} stops to keep every promised arrival window — this ADDS ${addedMilesCopy}. Re-call with confirmed:true to apply.`
+        : `Would reorder ${stopsWithCoords.length} stops, saving ~${savedMiles} miles. Re-call with confirmed:true to apply.`,
     };
   }
 
@@ -480,14 +633,15 @@ async function optimizeTechRoute(input) {
       'scheduled_services.*',
       'customers.first_name', 'customers.last_name',
       'customers.city',
+      ...CUSTOMER_PREMISE_ALIASES,
       ...guardedCoordSelects(db),
     ],
   });
 
-  if (services.length < 2) return { message: `${tech.name} has ${services.length} stop(s) — nothing to optimize`, tech: tech.name };
+  if (services.length < 2) return { blocked: true, message: `${tech.name} has ${services.length} stop(s) — nothing to optimize`, tech: tech.name };
 
   const stopsWithCoords = services.filter(s => s.lat && s.lng);
-  if (stopsWithCoords.length < 2) return { message: 'Need at least 2 geocoded stops', geocoded: stopsWithCoords.length };
+  if (stopsWithCoords.length < 2) return { blocked: true, message: 'Need at least 2 geocoded stops', geocoded: stopsWithCoords.length };
 
   // Approved-plan application — same contract as optimize_all_routes above
   // (GH r14 P1).
@@ -498,12 +652,19 @@ async function optimizeTechRoute(input) {
       services,
       lockKeys: [{ techId: tech.id, date }],
       expectTechFor: () => tech.id,
+      RouteOptimizer,
+      technicianId: tech.id,
       loadEligibleIds: async (trx) => (await dayStopsQuery(trx, {
         dateStr: date,
         technicianId: tech.id,
         excludeStatuses: ['cancelled', 'completed', 'rescheduled'],
-        select: ['scheduled_services.id', ...guardedCoordSelects(trx)],
-      })).filter((s) => s.lat && s.lng).map((s) => s.id),
+        select: ['scheduled_services.id',
+          ...ROUTE_WRITE_GUARD_COLUMNS.map((c) => `scheduled_services.${c}`),
+          ...CUSTOMER_PREMISE_ALIASES, ...guardedCoordSelects(trx)],
+      // FOR UPDATE: a status transition can otherwise commit en_route/on_site
+      // between this check and the writes, which constrain only id/date/tech
+      // (codex #4430 r5 P1) — the same fence the admin endpoints take.
+      }).forUpdate('scheduled_services')),
     });
     return applied.success ? { ...applied, tech: tech.name } : applied;
   }
@@ -516,7 +677,34 @@ async function optimizeTechRoute(input) {
     { startLat: RouteOptimizer.HQ.lat, startLng: RouteOptimizer.HQ.lng, endAtStart: true },
   );
 
-  const savedMiles = Math.max(0, Math.round((result.unoptimizedDistanceMeters - result.totalDistanceMeters) / 1609.34));
+  // Full day as sourceStops, repaired figures on the card — see the notes in
+  // optimize_all_routes above.
+  const guarded = resolveWindowSafeOrderByTechDay({
+    RouteOptimizer, orderedStops: result.orderedStops, sourceStops: services,
+    googleSource: result.source,
+    // Judged as the confirmation will judge it — see optimize_all_routes.
+    legs: null, startMin: inProgressStartMin(date),
+    techDayOrigins: await loadTechDayOrigins(db, date, { technicianId: tech.id }),
+  });
+  if (guarded.refusal) {
+    return { blocked: true, date, tech: tech.name, reason: guarded.refusal.reason,
+      conflict: guarded.refusal.conflict, message: routeGuardMessage(guarded.refusal.reason) };
+  }
+  const optimizedById = new Map(result.orderedStops.map((s) => [s.id, s]));
+  result.orderedStops = guarded.orderedIds.map((id) => optimizedById.get(id));
+
+  const figures = windowSafeFigures(result, guarded.resolvedByTech,
+    guarded.anyWindowConstrained || guarded.scoredRouteChanged, guarded.unassigned);
+  result.totalDistanceMeters = figures.totalDistanceMeters;
+  result.unoptimizedDistanceMeters = figures.unoptimizedDistanceMeters;
+  result.totalDurationSeconds = figures.totalDurationMinutes * 60;
+  if (guarded.anyWindowConstrained) result.source = 'window_constrained';
+  const savedMiles = Math.round(figures.savedDistanceMeters / 1609.34);
+  const addedMiles = Math.round(figures.addedDistanceMeters / 1609.34);
+  // A repair that adds less than half a mile still ADDS mileage; rounding it
+  // to 0 and taking the savings branch would tell the operator the opposite
+  // (codex round 5 P2).
+  const addedMilesCopy = addedMiles > 0 ? `~${addedMiles} miles` : 'under a mile';
 
   const summary = {
     tech: tech.name,
@@ -525,6 +713,7 @@ async function optimizeTechRoute(input) {
     miles_before: Math.round(result.unoptimizedDistanceMeters / 1609.34),
     miles_after: Math.round(result.totalDistanceMeters / 1609.34),
     miles_saved: savedMiles,
+    miles_added: addedMiles,
     drive_minutes: Math.round((result.totalDurationSeconds || 0) / 60),
     ordered_stops: (result.orderedStops || []).map((s, i) => ({
       position: i + 1,
@@ -541,7 +730,9 @@ async function optimizeTechRoute(input) {
     return {
       proposal: true,
       ...summary,
-      note: `Would reorder ${tech.name}'s ${stopsWithCoords.length} stops, saving ~${savedMiles} miles. Re-call with confirmed:true to apply.`,
+      note: figures.addedDistanceMeters > 0
+        ? `Would reorder ${tech.name}'s ${stopsWithCoords.length} stops to keep every promised arrival window — this ADDS ${addedMilesCopy}. Re-call with confirmed:true to apply.`
+        : `Would reorder ${tech.name}'s ${stopsWithCoords.length} stops, saving ~${savedMiles} miles. Re-call with confirmed:true to apply.`,
     };
   }
 
@@ -817,7 +1008,7 @@ async function moveStopsToDay(input, actionContext = {}) {
   }
 
   const services = await db('scheduled_services')
-    .whereIn('id', serviceIds)
+    .whereIn('scheduled_services.id', serviceIds)
     .leftJoin('customers', 'scheduled_services.customer_id', 'customers.id')
     .select(
       'scheduled_services.*',
@@ -1521,7 +1712,28 @@ async function swapTechAssignments(input, actionContext = {}) {
 }
 
 
+// The measurement result is shared with the route-performance ledger, which
+// needs every planned stop's id. The Intelligence Bar does not: inside a
+// task about one customer the other stops on the route are other customers'
+// appointments, so their ids and arrival windows are reduced to counts, the
+// diagnostic id lists (missing coordinates, default durations) become
+// counts, and the late-visit rows lose their ids before the model sees them.
+function withoutStopIdentifiers(result) {
+  if (!Array.isArray(result?.days)) return result;
+  const count = list => (Array.isArray(list) ? list.length : null);
+  return { ...result, days: result.days.map(day => ({ ...day, byTech: (day.byTech || []).map(({ plannedStops, modeledLateVisits, missingCoordinates, defaultDurations, ...tech }) => ({
+    ...tech,
+    plannedStopCount: count(plannedStops),
+    missingCoordinateCount: count(missingCoordinates),
+    defaultDurationCount: count(defaultDurations),
+    modeledLateVisits: Array.isArray(modeledLateVisits) ? modeledLateVisits.map(({ id, visitId, ...late }) => late) : modeledLateVisits,
+  })) })) };
+}
+
 async function findScheduleGaps(input) {
+  if (require('../../config/feature-gates').gateEnvValue('GATE_SCHEDULE_QUALITY_MEASUREMENTS')) {
+    return withoutStopIdentifiers(await require('../scheduling/day-quality').getScheduleQualityMeasurements(input, db));
+  }
   const { date, date_from, date_to, service_type } = input;
   const MAX_STOPS_PER_DAY = 10;
 
@@ -1715,8 +1927,11 @@ async function findAvailableSlotsTool(input) {
   const { findAvailableSlots } = require('../scheduling/find-time');
   let { customer_id, address, lat, lng, duration_minutes, date_from, date_to, technician_name, top_n } = input;
 
-  // Resolve customer → lat/lng if provided
-  if (customer_id && (!lat || !lng)) {
+  // Resolve customer → lat/lng if provided. An explicit address is the
+  // destination: it is geocoded below rather than replaced by the customer's
+  // primary coordinates, so a search for a customer's other property is
+  // run around that property.
+  if (customer_id && !address && (!lat || !lng)) {
     const c = await db('customers').where('id', customer_id).select('latitude', 'longitude', 'address_line1', 'city', 'state', 'zip').first();
     if (c?.latitude && c?.longitude) { lat = parseFloat(c.latitude); lng = parseFloat(c.longitude); }
     else if (c && !address) address = [c.address_line1, c.city, c.state, c.zip].filter(Boolean).join(', ');

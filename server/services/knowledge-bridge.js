@@ -207,7 +207,11 @@ const SEND_SEAL_MS = 2 * 60 * 1000;
 // active run + the version the caller settled on, then persist a short
 // seal. Generation registration refuses while the seal is unexpired, so no
 // generation can START between the pre-send check and the dispatch.
-async function sealForSend(assessmentId, expectedVersion, computeVersion) {
+// Report delivery and lawn recovery use distinct owners so one sender cannot
+// renew or release another sender's protection. Legacy unowned seals must expire
+// before an owned sender can acquire them.
+async function sealForSend(assessmentId, expectedVersion, computeVersion, owner) {
+  if (!owner) return false;
   return db.transaction(async (trx) => {
     await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`lawn_rec_${assessmentId}`]);
     const row = await trx('lawn_assessments').where({ id: assessmentId }).first('recommendations', 'ai_summary', 'updated_at');
@@ -215,6 +219,9 @@ async function sealForSend(assessmentId, expectedVersion, computeVersion) {
     const stored = parseStoredRecommendations(row.recommendations) || {};
     if (generationInFlight(stored)) return false;
     if (computeVersion(row) !== expectedVersion) return false;
+    // Someone else's live seal is theirs until it lapses.
+    if (sendSealActive(stored) && heldByAnother(stored, owner)) return false;
+    stored._sendSealOwner = owner;
     stored._sendSealUntil = new Date(Date.now() + SEND_SEAL_MS).toISOString();
     // updated_at participates in the caller's version — do NOT touch it here.
     await trx('lawn_assessments').where({ id: assessmentId })
@@ -226,12 +233,16 @@ async function sealForSend(assessmentId, expectedVersion, computeVersion) {
 // The seal must outlive a slow dispatch (codex P1 r40): SendGrid's own
 // timeout equals the base TTL, so the sender renews the seal on a heartbeat
 // while sends are in flight and releases it when they settle.
-async function renewSendSeal(assessmentId) {
+async function renewSendSeal(assessmentId, owner) {
+  if (!owner) return false;
   return db.transaction(async (trx) => {
     await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`lawn_rec_${assessmentId}`]);
     const row = await trx('lawn_assessments').where({ id: assessmentId }).first('recommendations');
     const stored = parseStoredRecommendations(row?.recommendations);
-    if (!stored || !stored._sendSealUntil) return false;
+    if (!sendSealActive(stored)) return false;
+    // A renewal for a seal that is no longer ours answers false, which is how a
+    // sender learns its protection is gone.
+    if (heldByAnother(stored, owner)) return false;
     stored._sendSealUntil = new Date(Date.now() + SEND_SEAL_MS).toISOString();
     await trx('lawn_assessments').where({ id: assessmentId })
       .update({ recommendations: JSON.stringify(stored) });
@@ -239,17 +250,26 @@ async function renewSendSeal(assessmentId) {
   });
 }
 
-async function releaseSendSeal(assessmentId) {
+async function releaseSendSeal(assessmentId, owner) {
+  if (!owner) return false;
   return db.transaction(async (trx) => {
     await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`lawn_rec_${assessmentId}`]);
     const row = await trx('lawn_assessments').where({ id: assessmentId }).first('recommendations');
     const stored = parseStoredRecommendations(row?.recommendations);
     if (!stored || stored._sendSealUntil === undefined) return false;
+    // Releasing a seal that is not ours would strip another sender's cover.
+    if (heldByAnother(stored, owner)) return false;
+    delete stored._sendSealOwner;
     delete stored._sendSealUntil;
     await trx('lawn_assessments').where({ id: assessmentId })
       .update({ recommendations: JSON.stringify(stored) });
     return true;
   });
+}
+
+// Ownership must match, including when a legacy seal has no owner.
+function heldByAnother(stored, owner) {
+  return stored?._sendSealOwner !== owner;
 }
 
 function sendSealActive(stored) {
@@ -1495,6 +1515,9 @@ module.exports._test = { sanitizeRecommendationsAgainstTreatment, contradictsApp
 // as the last line of defense for instantly opened report links.
 module.exports.sealRecommendationsForSend = sealForSend;
 module.exports.renewRecommendationSendSeal = renewSendSeal;
+// Callers can carry a conservative renewal deadline through later provider
+// preparation without duplicating this lease duration.
+module.exports.SEND_SEAL_MS = SEND_SEAL_MS;
 module.exports.releaseRecommendationSendSeal = releaseSendSeal;
 module.exports.treatmentGuard = {
   sanitizeRecommendationsAgainstTreatment,

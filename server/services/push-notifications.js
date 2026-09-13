@@ -3,8 +3,9 @@ const db = require('../models/db');
 const logger = require('./logger');
 const apns = require('./apns');
 const fcm = require('./fcm');
-const { accountPropertyIds, resolvePrimaryProfileId } = require('./account-properties');
+const { accountPropertyIds, resolvePrimaryProfileId, appPropertyScopeEnabled } = require('./account-properties');
 const { gateEnvValue } = require('../config/feature-gates');
+const { qualifyNotificationLink } = require('./notification-links');
 
 const PUSH_HEARTBEAT_HOURS = 72;
 
@@ -60,7 +61,7 @@ try {
 // for immediate delivery; low-priority pushes stay deferrable on purpose.
 const URGENCY_BY_PRIORITY = { urgent: 'high', high: 'high', normal: 'normal', low: 'low' };
 
-async function sendSubscription(sub, notification) {
+async function sendSubscription(sub, notification, options) {
   // iOS (Capacitor) subscriptions deliver via APNs, not web-push. Routing here
   // keeps every caller (sendToCustomer / sendToAdmins / sendToAdminUsers)
   // platform-agnostic — they just iterate active rows.
@@ -75,18 +76,20 @@ async function sendSubscription(sub, notification) {
       await db('push_subscriptions').where({ id: sub.id }).update({ active: false }).catch(() => {});
       return { sent: false, expired: true, reason: result.reason };
     }
-    return result.ok ? { sent: true } : { sent: false, failed: true, reason: result.reason };
+    return result.ok ? { sent: true } : { sent: false, failed: true, reason: result.reason,
+      ...(result.retryable ? { retryable: true, retryAfterMs: result.retryAfterMs } : {}) };
   }
 
   // Android (Capacitor) subscriptions deliver via FCM, same routing shape as iOS.
   if (sub.platform === 'android') {
-    const result = await fcm.send(sub.device_token, notification);
+    const result = await fcm.send(sub.device_token, notification, { shouldContinue: options?.shouldContinue });
     if (result.skipped) return { sent: false, skipped: true, reason: result.reason };
     if (result.expired) {
       await db('push_subscriptions').where({ id: sub.id }).update({ active: false }).catch(() => {});
       return { sent: false, expired: true, reason: result.reason };
     }
-    return result.ok ? { sent: true } : { sent: false, failed: true, reason: result.reason };
+    return result.ok ? { sent: true } : { sent: false, failed: true, reason: result.reason,
+      ...(result.retryable ? { retryable: true, retryAfterMs: result.retryAfterMs } : {}) };
   }
 
   if (!webpush || !vapidConfigured) return { sent: false, skipped: true, reason: 'push_not_configured' };
@@ -161,15 +164,35 @@ class PushNotificationService {
       return { ...summarize([], 0), reason: 'preferences_unavailable' };
     }
     if (!context?.enabled) return { ...summarize([], 0), reason: 'push_disabled' };
-    if (gateEnvValue('GATE_CUSTOMER_APP_NOTIFICATIONS') && String(notification.url || '').startsWith('/') && !notification.url.startsWith('//')) {
-      const target = new URL(notification.url, 'https://portal.wavespestcontrol.com');
-      target.searchParams.set('notificationProperty', String(customerId));
-      notification = { ...notification, url: `${target.pathname}${target.search}${target.hash}` };
+    // Qualify the in-app destination under the app-notifications gate OR the
+    // property scope (uncapped codex r1w P1): with the scope on and only the
+    // legacy push routing delivering, a reminder for house B must still open
+    // house B, not whichever house is selected. Off both: today's bare link.
+    if (pushLinkQualificationEnabled() && String(notification.url || '').startsWith('/') && !notification.url.startsWith('//')) {
+      // Saved-property destination (GATE_APP_PROPERTY_SCOPE): the app opens
+      // the visit's HOUSE, not just the profile — from notification.propertyId
+      // (a composer that knows it) or resolved here from the visit id every
+      // appointment message already carries (see resolveNotificationPropertyId).
+      const notifiedPropertyId = await resolveNotificationPropertyId(customerId, notification);
+      notification = { ...notification, url: qualifyNotificationLink(notification.url, customerId, notifiedPropertyId) };
     }
-    const query = db('push_subscriptions').whereIn('customer_id', context.ids).where({ active: true, role: 'customer' });
-    if (opts.minUpdatedAt) query.where('updated_at', '>=', opts.minUpdatedAt);
-    if (opts.nativeOnly) query.whereIn('platform', ['ios', 'android']);
-    const subs = await query;
+    // This lookup is still preparation — no provider request has gone out
+    // yet — so a DB failure here must resolve as a normal no-delivery
+    // result, not an uncaught throw. A caller (push-channel-routing.js)
+    // marks its outcome 'uncertain' the moment it calls in here, on the
+    // premise that anything this function throws crossed the provider
+    // boundary; letting this query's own exception escape would report a
+    // never-attempted send as ambiguous instead of not_sent (codex P2).
+    let subs;
+    try {
+      const query = db('push_subscriptions').whereIn('customer_id', context.ids).where({ active: true, role: 'customer' });
+      if (opts.minUpdatedAt) query.where('updated_at', '>=', opts.minUpdatedAt);
+      if (opts.nativeOnly) query.whereIn('platform', ['ios', 'android']);
+      subs = await query;
+    } catch (err) {
+      logger.warn(`[push] Subscription lookup failed for ${customerId}: ${err.code || err.message}`);
+      return { ...summarize([], 0), reason: 'subscription_lookup_failed' };
+    }
     const attemptToken = randomUUID();
     if (opts.notificationId) {
       // Reuse this bell/event claim with a bounded lease. Its native collapse
@@ -196,23 +219,49 @@ class PushNotificationService {
     const results = [];
     let claimLost = false;
     for (const sub of subs) {
-      if (typeof opts.shouldContinue === 'function') {
-        let go = false;
-        try { go = await opts.shouldContinue(); } catch { go = false; }
-        if (!go) {
-          results.push({ sent: false, skipped: true, reason: 'send_window_closed' });
-          continue;
+      let earliestValidUntil = null;
+      const compositeShouldContinue = (typeof opts.shouldContinue === 'function' || opts.notificationId)
+        ? async () => {
+          if (typeof opts.shouldContinue === 'function') {
+            let verdict;
+            try { verdict = await opts.shouldContinue(); } catch { return false; }
+            if (verdict !== true && verdict?.ok !== true) return false;
+            if (verdict && typeof verdict === 'object'
+              && Object.prototype.hasOwnProperty.call(verdict, 'validUntil')) {
+              if (typeof verdict.validUntil !== 'number' || !Number.isFinite(verdict.validUntil)) return false;
+              earliestValidUntil = earliestValidUntil == null
+                ? verdict.validUntil : Math.min(earliestValidUntil, verdict.validUntil);
+            }
+          }
+          if (opts.notificationId) {
+            // The opaque caller check can wait while a newer worker reclaims
+            // the lease. Verify ownership only after it returns; never hold a
+            // notification row lock across caller code.
+            const owned = await db('notifications').where({ id: opts.notificationId })
+              .whereRaw("metadata->>'pushAttemptToken' = ? AND (metadata->>'pushLeaseUntil')::timestamptz > now()", [attemptToken])
+              .first('id', 'metadata').catch(() => null);
+            const ownedLeaseUntil = Date.parse(owned?.metadata?.pushLeaseUntil);
+            if (!owned || !Number.isFinite(ownedLeaseUntil) || ownedLeaseUntil <= Date.now()) {
+              claimLost = true;
+              return false;
+            }
+          }
+          if (earliestValidUntil != null && Date.now() >= earliestValidUntil) return false;
+          if (typeof opts.shouldContinue?.isStillValid === 'function') {
+            try { if (opts.shouldContinue.isStillValid() !== true) return false; } catch { return false; }
+          }
+          return true;
         }
+        : undefined;
+      if (compositeShouldContinue && !(await compositeShouldContinue())) {
+        if (claimLost) break;
+        results.push({ sent: false, skipped: true, reason: 'send_window_closed' });
+        continue;
       }
-      if (opts.notificationId) {
-        // A paused old worker cannot hand off another device after a newer
-        // worker reclaimed its expired lease.
-        const owned = await db('notifications').where({ id: opts.notificationId })
-          .whereRaw("metadata->>'pushAttemptToken' = ? AND (metadata->>'pushLeaseUntil')::timestamptz > now()", [attemptToken]).first('id').catch(() => null);
-        if (!owned) { claimLost = true; break; }
-      }
-      const result = await sendSubscription(sub, notification).catch(() => ({ sent: false, failed: true, reason: 'provider_failure' }));
+      const result = await sendSubscription(sub, notification, { shouldContinue: compositeShouldContinue })
+        .catch(() => ({ sent: false, failed: true, reason: 'provider_failure' }));
       results.push(result);
+      if (claimLost) break;
       if (result.sent && opts.notificationId) {
         // Persist the first acceptance before walking another device, so a
         // later provider crash does not erase an already accepted event.
@@ -250,7 +299,10 @@ class PushNotificationService {
     return summarize(results, subs.length);
   }
 
-  async sendToAdminUsers(adminUserIds, notificationForUser) {
+  // beforeDispatch runs after the subscription lookup and immediately before
+  // the first provider handoff, so a caller's durable "push started" claim
+  // is never burned by a lookup that failed or found nothing to send.
+  async sendToAdminUsers(adminUserIds, notificationForUser, { beforeDispatch = null } = {}) {
     const ids = [...new Set((adminUserIds || []).filter(Boolean))];
     if (ids.length === 0) return summarize([], 0);
     const subs = await db('push_subscriptions as ps')
@@ -260,6 +312,9 @@ class PushNotificationService {
       .whereRaw('ps.staff_token_version = t.auth_token_version')
       .whereIn('t.role', ['admin', 'technician'])
       .select('ps.*');
+    if (subs.length && typeof beforeDispatch === 'function' && (await beforeDispatch()) === false) {
+      return { ...summarize([], subs.length), superseded: true };
+    }
     const results = [];
     for (const sub of subs) {
       const notification = typeof notificationForUser === 'function'
@@ -283,12 +338,15 @@ class PushNotificationService {
 }
 
 function summarize(results, subscriptions) {
+  const retryable = results.filter((result) => result.retryable);
   return {
     subscriptions,
     sent: results.filter((r) => r.sent).length,
     expired: results.filter((r) => r.expired).length,
     failed: results.filter((r) => r.failed).length,
     skipped: results.filter((r) => r.skipped).length,
+    ...(retryable.length ? { retryable: retryable.length,
+      retryAfterMs: Math.max(60000, ...retryable.map((result) => Number(result.retryAfterMs) || 0)) } : {}),
     results,
   };
 }
@@ -297,4 +355,38 @@ const service = new PushNotificationService();
 service.PUSH_HEARTBEAT_HOURS = PUSH_HEARTBEAT_HOURS;
 // Exposed for unit tests (platform routing); not part of the public API.
 service._sendSubscription = sendSubscription;
+// The saved property a push is ABOUT (uncapped codex r1s P1 — the producer
+// half of the lane's push item, pulled forward from PR 3): a composer that
+// knows the house passes notification.propertyId; one that only knows the
+// visit (appointmentId = scheduled_services.id, which every appointment
+// message carries through sendCustomerMessage → twilio → push routing) gets
+// it resolved here, ONCE, instead of at thirty composer sites. An unstamped
+// visit resolves to nothing — the profile-only link, which the app reads as
+// the profile's PRIMARY: exactly the house an unstamped visit belongs to.
+// Best-effort: a lookup failure sends the profile-only link, never blocks
+// the push. The visit must belong to the recipient profile.
+async function resolveNotificationPropertyId(customerId, notification) {
+  // Gate off (or rolled back): the app's list is profile-shaped and cannot
+  // honor a house — a hint would only make the tap read "unavailable"
+  // (uncapped codex r1t P1). Profile-only link, today's behavior.
+  if (!appPropertyScopeEnabled()) return null;
+  if (notification?.propertyId) return String(notification.propertyId);
+  if (!notification?.appointmentId) return null;
+  try {
+    const row = await db('scheduled_services')
+      .where({ id: notification.appointmentId, customer_id: customerId })
+      .first('property_id');
+    return row && row.property_id ? String(row.property_id) : null;
+  } catch (err) {
+    logger.warn(`[push] property lookup for appointment ${notification.appointmentId} failed: ${err.message}`);
+    return null;
+  }
+}
+function pushLinkQualificationEnabled() {
+  return gateEnvValue('GATE_CUSTOMER_APP_NOTIFICATIONS') || appPropertyScopeEnabled();
+}
+service.resolveNotificationPropertyId = resolveNotificationPropertyId;
+service.pushLinkQualificationEnabled = pushLinkQualificationEnabled;
+service._resolveNotificationPropertyId = resolveNotificationPropertyId;
+
 module.exports = service;

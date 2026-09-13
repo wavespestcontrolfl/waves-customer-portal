@@ -1,5 +1,6 @@
 const db = require('../models/db');
 const logger = require('./logger');
+const { qualifyNotificationLink } = require('./notification-links');
 const { isInternalTestCustomerId } = require('./internal-test-customers');
 
 const CUSTOMER_PREFERENCE_KEYS = new Set([
@@ -45,7 +46,10 @@ function scopeAdminFeedToRole(query, role) {
   );
 }
 
-async function customerPreferenceEnabled(customerId, preferenceKey) {
+// `scheduledServiceId` (app property scope, PR 3): the five appointment keys
+// follow the visit's NON-primary saved property (enforced under
+// GATE_APP_PROPERTY_TEXTS, shadow-logged otherwise). Unknown = not sent.
+async function customerPreferenceEnabled(customerId, preferenceKey, { scheduledServiceId = null } = {}) {
   if (!preferenceKey) return true;
   if (!CUSTOMER_PREFERENCE_KEYS.has(preferenceKey)) {
     logger.error(`[notifications] Unknown customer preference key: ${preferenceKey}`);
@@ -53,9 +57,16 @@ async function customerPreferenceEnabled(customerId, preferenceKey) {
   }
 
   try {
-    const prefs = await db('notification_prefs')
+    const PropertyTexts = require('./property-notification-prefs');
+    // Only the five appointment keys are property-owned; the resolver needs
+    // the whole toggle set of the customer row to compare against.
+    const propertyOwned = !!scheduledServiceId && PropertyTexts.APPOINTMENT_TOGGLES.includes(preferenceKey);
+    let prefs = await db('notification_prefs')
       .where({ customer_id: customerId })
-      .first(preferenceKey);
+      .first(...(propertyOwned ? [...new Set([...PropertyTexts.PROPERTY_PREF_COLUMNS, preferenceKey])] : [preferenceKey]));
+    if (propertyOwned) {
+      prefs = await PropertyTexts.prefsForVisit(prefs, customerId, scheduledServiceId, 'bell');
+    }
     return !prefs || prefs[preferenceKey] !== false;
   } catch (err) {
     // Preference lookup uncertainty must not become an unwanted native push.
@@ -83,7 +94,7 @@ const NotificationService = {
   // `bell` (admin recipients only) is an explicit site-level policy tag:
   // true always rings, false never rings — see notification-bell-policy.js.
   // It only has effect while GATE_ADMIN_BELL_POLICY is on.
-  async create({ recipientType, recipientId, category, title, body, icon, link, metadata, bell, bellDefault, connection = db }) {
+  async create({ recipientType, recipientId, category, title, body, icon, link, metadata, bell, bellDefault, shouldContinue, connection = db }) {
     try {
       // Demo/internal test accounts (App Store review account) must not ring
       // the admin bell — their bounce alerts and junk service requests are
@@ -138,6 +149,18 @@ const NotificationService = {
       // A title that was ONLY emoji falls back to the original rather than
       // inserting an empty string.
       const isAdmin = recipientType === 'admin';
+      // The bell exposes the same copy as native push. Recheck after any
+      // preference/property lookup and dedupe lock, before persisting it.
+      if (typeof shouldContinue === 'function') {
+        const verdict = await shouldContinue();
+        const allowed = verdict === true || verdict?.ok === true;
+        const hasDeadline = verdict && Object.prototype.hasOwnProperty.call(verdict, 'validUntil');
+        const deadlineValid = !hasDeadline || (Number.isFinite(verdict.validUntil) && Date.now() < verdict.validUntil);
+        const windowValid = typeof shouldContinue.isStillValid !== 'function' || shouldContinue.isStillValid() === true;
+        if (!allowed || !deadlineValid || !windowValid) {
+          return { id: null, suppressed: true, reason: 'pre_send_check_blocked' };
+        }
+      }
       const [notif] = await connection('notifications').insert({
         recipient_type: recipientType,
         recipient_id: recipientId || null,
@@ -182,12 +205,12 @@ const NotificationService = {
     // unread beside the new one). Errors then PROPAGATE — swallowing one
     // inside a caller's transaction would leave it aborted and doom the
     // commit — so the caller owns containment.
-    const { dedupeKey, dedupeWindowMs, refreshOnDedupe = false, trx: callerTrx = null, relayFailureCall = null, ...createOpts } = opts;
+    const { dedupeKey, dedupeWindowMs, dedupeVersion, refreshOnDedupe = false, trx: callerTrx = null, relayFailureCall = null, ...createOpts } = opts;
     if (!dedupeKey) {
       return this.create({ recipientType: 'admin', category, title, body, ...createOpts, ...(callerTrx ? { connection: callerTrx } : {}) });
     }
     const windowMs = Number(dedupeWindowMs);
-    const metadata = { ...createOpts.metadata, dedupeKey };
+    const metadata = { ...createOpts.metadata, dedupeKey, ...(dedupeVersion === undefined ? {} : { dedupeVersion }) };
     const dedupeAndInsert = async (trx) => {
         await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`admin:${dedupeKey}`]);
         let existingQuery = trx('notifications')
@@ -203,10 +226,13 @@ const NotificationService = {
           const nextTitle = stripEmoji(title) || title;
           const nextBody = stripEmoji(body) || null;
           const nextLink = createOpts.link === undefined ? existing.link : createOpts.link || null;
-          if (refreshOnDedupe && (existing.title !== nextTitle || existing.body !== nextBody || existing.link !== nextLink)) {
-            const existingMeta = typeof existing.metadata === 'string'
-              ? (() => { try { return JSON.parse(existing.metadata); } catch { return {}; } })()
-              : (existing.metadata || {});
+          const existingMeta = typeof existing.metadata === 'string'
+            ? (() => { try { return JSON.parse(existing.metadata); } catch { return {}; } })()
+            : (existing.metadata || {});
+          // A same-count backlog can contain new deadlines or reopened work.
+          // Its optional version refreshes the one standing bell as well.
+          const versionChanged = dedupeVersion !== undefined && existingMeta.dedupeVersion !== dedupeVersion;
+          if (refreshOnDedupe && (versionChanged || existing.title !== nextTitle || existing.body !== nextBody || existing.link !== nextLink)) {
             const refreshed = { title: nextTitle, body: nextBody, link: nextLink,
               metadata: JSON.stringify({ ...existingMeta, ...metadata }), read_at: null };
             await trx('notifications').where({ id: existing.id }).update(refreshed);
@@ -286,11 +312,46 @@ const NotificationService = {
 
   // Create customer notification
   async notifyCustomer(customerId, category, title, body, opts = {}) {
-    const { preferenceKey, dedupeKey, push = true, awaitPush = false, pushOptions = {}, ...createOpts } = opts;
+    const { preferenceKey, dedupeKey, push = true, awaitPush = false, pushOptions = {}, ...createOptsRaw } = opts;
 
-    if (!(await customerPreferenceEnabled(customerId, preferenceKey))) {
+    // The visit this notification is about (same sources as the deep-link
+    // qualifier below): its saved property may own the toggle.
+    const preferenceVisitId = createOptsRaw.appointmentId
+      || (createOptsRaw.metadata && typeof createOptsRaw.metadata === 'object'
+        ? (createOptsRaw.metadata.appointmentId || createOptsRaw.metadata.scheduledServiceId) : null)
+      || null;
+    if (!(await customerPreferenceEnabled(customerId, preferenceKey, { scheduledServiceId: preferenceVisitId }))) {
       return { id: null, suppressed: true, reason: 'preference_disabled' };
     }
+
+    // Saved-property destination (GATE_APP_PROPERTY_SCOPE, uncapped codex r1t
+    // + r1u P1). The visit this notification is about: createOpts.appointmentId,
+    // or the emitters' metadata.appointmentId / metadata.scheduledServiceId
+    // (the en-route and completed bells). A notification ABOUT A VISIT stores
+    // a profile-qualified link — plus the house when the visit is stamped
+    // (resolved by the push sink's resolver) — so the same reminder opened
+    // from the bell lands where the push does: an unstamped visit belongs to
+    // the profile's PRIMARY, which the app's profile-only rule selects. Gate
+    // off: nothing is qualified or forwarded — today's link and payload,
+    // byte for byte. No visit, no house: untouched.
+    const PushService = require('./push-notifications');
+    const scopeOn = require('./account-properties').appPropertyScopeEnabled();
+    const metadataRaw = createOptsRaw.metadata || {};
+    const visitId = scopeOn
+      ? (createOptsRaw.appointmentId || metadataRaw.appointmentId || metadataRaw.scheduledServiceId || null)
+      : null;
+    // Nothing to resolve for a notification about no visit and no house (a
+    // receipt, a document): no lookup at all.
+    const notifiedPropertyId = scopeOn && (visitId || createOptsRaw.propertyId)
+      ? await PushService.resolveNotificationPropertyId(customerId, { propertyId: createOptsRaw.propertyId, appointmentId: visitId })
+      : null;
+    const createOpts = scopeOn && (visitId || notifiedPropertyId)
+      ? {
+        ...createOptsRaw,
+        ...(visitId ? { appointmentId: visitId } : {}),
+        ...(createOptsRaw.link ? { link: qualifyNotificationLink(createOptsRaw.link, customerId, notifiedPropertyId) } : {}),
+      }
+      : createOptsRaw;
 
     const metadata = {
       ...createOpts.metadata,
@@ -304,6 +365,7 @@ const NotificationService = {
       body,
       ...createOpts,
       metadata,
+      shouldContinue: pushOptions.shouldContinue,
     };
 
     let notification;
@@ -337,7 +399,6 @@ const NotificationService = {
     if (!push || (deduped && !awaitPush)) return { ...notification, deduped, push: null };
     let pushQueued = false;
     try {
-      const PushService = require('./push-notifications');
       const dispatch = PushService.sendToCustomer(customerId, {
         title,
         body: body || '',
@@ -346,6 +407,10 @@ const NotificationService = {
         notificationId: String(notification.id),
         tag: dedupeKey || `customer-notification:${notification.id}`,
         ...(pushOptions.ephemeral ? { ephemeral: true } : {}),
+        // Saved-property destination (GATE_APP_PROPERTY_SCOPE): the visit or
+        // the house this notification is about, for the push sink's link.
+        ...(createOpts.appointmentId ? { appointmentId: createOpts.appointmentId } : {}),
+        ...(createOpts.propertyId ? { propertyId: createOpts.propertyId } : {}),
       }, { ...pushOptions, ...(dedupeKey ? { notificationId: notification.id } : {}) });
       pushQueued = true;
       // Scheduled advisories can record provider acceptance separately from
@@ -359,6 +424,7 @@ const NotificationService = {
           failed: outcome.failed,
           expired: outcome.expired,
           skipped: outcome.skipped,
+          ...(outcome.retryable ? { retryable: outcome.retryable, retryAfterMs: outcome.retryAfterMs } : {}),
           ...(outcome.reason ? { reason: outcome.reason } : {}),
           ...(outcome.deduped ? { deduped: true } : {}),
         } };
@@ -465,19 +531,20 @@ const NotificationService = {
     return q.update({ read_at: new Date() });
   },
 
-  // A voicemail landed for a call the missed-call lane already rang for
-  // (the recording callback can persist after the 2-minute missed-call
-  // claim): the voicemail bell supersedes — retire the missed-call bell so
-  // the owner never holds two contradictory alerts for one call. System
-  // writer (no role scoping): every admin copy of that bell is retired.
-  async supersedeMissedCallAdmin({ callLogId, callSid } = {}) {
+  // Retire superseded call alerts without crossing triggers: voicemail
+  // supersedes a missed call; a booking supersedes a repeat-caller alert.
+  // System writer (no role scoping): every admin copy is retired.
+  async supersedeMissedCallAdmin({ callLogId, callSid, triggerKey = 'customer_missed_call' } = {}) {
     if (!callLogId && callSid) {
       const row = await db('call_log').where('twilio_call_sid', callSid).first('id');
       callLogId = row?.id || null;
     }
     if (!callLogId) return 0;
+    // Both triggers share the category; the caller must name which event
+    // became obsolete so voicemail and booking cannot retire each other's bell.
     return db('notifications')
       .where({ recipient_type: 'admin', category: 'missed_call' })
+      .whereRaw("metadata->>'triggerKey' = ?", [triggerKey])
       .whereNull('read_at')
       .whereRaw("metadata->'payload'->>'callLogId' = ?", [String(callLogId)])
       .update({ read_at: new Date() });

@@ -9,9 +9,21 @@ import {
   isPathAdminOnly,
   getAdminWorkspaceGroups,
   getAdminWorkspaceSelection,
+  searchAdminWorkspacePages,
 } from "./adminNavigation";
 
 describe("grouped workspaces", () => {
+  it('finds renamed pages by old names and workspace terms without widening access', () => {
+    const admin = getAdminWorkspaceGroups('admin');
+    for (const [query, id] of [['Recovery', 'recovery'], ['Payers', 'payers'], ['Taxes', 'taxes'], ['Tool Health', 'toolHealth'], ['dispatch', 'schedule'], ['Reports', 'jobs']]) {
+      expect(searchAdminWorkspacePages(admin, query).map((item) => item.id)).toContain(id);
+    }
+    expect(searchAdminWorkspacePages(admin, 'accounting').map((item) => item.id)).toEqual(['banking', 'taxes']);
+    const tech = getAdminWorkspaceGroups('technician', { agent_estimate: true });
+    expect(searchAdminWorkspacePages(tech, 'Sales')).toEqual([]);
+    expect(searchAdminWorkspacePages(tech, 'Contracts')).toEqual([]);
+    expect(searchAdminWorkspacePages(admin, 'Agent estimate')).toEqual([]);
+  });
   it("keeps every canonical destination exactly once, plus the existing Estimates subview", () => {
     const groups = getAdminWorkspaceGroups('admin', { agent_estimate: true });
     const ids = groups.flatMap(({ items }) => items.map(({ id }) => id));

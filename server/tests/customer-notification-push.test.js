@@ -8,6 +8,7 @@ jest.mock('../services/internal-test-customers', () => ({
 }));
 jest.mock('../services/push-notifications', () => ({
   sendToCustomer: jest.fn(),
+  resolveNotificationPropertyId: jest.fn(async () => null),
 }));
 jest.mock('../models/db', () => jest.fn());
 
@@ -172,6 +173,59 @@ describe('customer notification native push dispatch', () => {
     expect(result.push).not.toHaveProperty('accepted');
   });
 
+  test.each(['refused', 'throws'])('a guard %s after waiting for the dedupe lock prevents bell and push', async (mode) => {
+    const { notifQ, trx } = setupDb();
+    let releaseLock;
+    let lockEntered;
+    const entered = new Promise((resolve) => { lockEntered = resolve; });
+    trx.raw.mockImplementationOnce(() => new Promise((resolve) => {
+      releaseLock = resolve;
+      lockEntered();
+    }));
+    let valid = true;
+    const shouldContinue = jest.fn(async () => {
+      if (!valid && mode === 'throws') throw new Error('ownership lost');
+      return valid;
+    });
+    const pending = NotificationService.notifyCustomer('customer-1', 'lawn_health', 'Report ready', 'Current tip', {
+      dedupeKey: 'assessment-1', awaitPush: true, pushOptions: { shouldContinue },
+    });
+    await entered;
+    valid = false;
+    releaseLock();
+    const result = await pending;
+    if (mode === 'throws') expect(result).toBeNull();
+    else expect(result).toMatchObject({ suppressed: true, reason: 'pre_send_check_blocked' });
+    expect(shouldContinue).toHaveBeenCalledTimes(1);
+    expect(notifQ.insert).not.toHaveBeenCalled();
+    expect(PushService.sendToCustomer).not.toHaveBeenCalled();
+  });
+
+  test.each([
+    ['legacy true', true, true, true],
+    ['structured success', { ok: true, validUntil: Date.now() + 60000 }, true, true],
+    ['structured refusal', { ok: false }, true, false],
+    ['expired authority', { ok: true, validUntil: 0 }, true, false],
+    ['invalid authority', { ok: true, validUntil: NaN }, true, false],
+    ['closed window', { ok: true }, false, false],
+  ])('bell and push enforce %s at the structured guard boundary', async (_label, verdict, windowOpen, allowed) => {
+    const { notifQ } = setupDb();
+    const preSendCheck = Object.assign(jest.fn(async () => verdict), { isStillValid: () => windowOpen });
+    const shouldContinue = require('../services/messaging/push-channel-routing')._test.windowGuardFrom(preSendCheck);
+    const result = await NotificationService.notifyCustomer('customer-1', 'lawn_health', 'Report ready', 'Current tip', {
+      dedupeKey: 'assessment-1', awaitPush: true, pushOptions: { shouldContinue },
+    });
+    if (allowed) {
+      expect(notifQ.insert).toHaveBeenCalledTimes(1);
+      expect(PushService.sendToCustomer).toHaveBeenCalledTimes(1);
+      expect(result.id).toBe('notification-1');
+    } else {
+      expect(result).toMatchObject({ suppressed: true });
+      expect(notifQ.insert).not.toHaveBeenCalled();
+      expect(PushService.sendToCustomer).not.toHaveBeenCalled();
+    }
+  });
+
   test('fails closed when an unknown preference key is supplied', async () => {
     const { notifQ } = setupDb();
 
@@ -271,5 +325,57 @@ describe('admin feed role scoping (adminRoleOnly triggers)', () => {
     await NotificationService.markAllReadAdmin({ role: 'admin' });
     expect(adminQ.whereRaw).not.toHaveBeenCalled();
     expect(adminQ.update).toHaveBeenCalled();
+  });
+});
+
+describe('saved-property destination on customer bells (GATE_APP_PROPERTY_SCOPE)', () => {
+  const originalGate = process.env.GATE_APP_PROPERTY_SCOPE;
+  afterEach(() => { if (originalGate === undefined) delete process.env.GATE_APP_PROPERTY_SCOPE; else process.env.GATE_APP_PROPERTY_SCOPE = originalGate; });
+  beforeEach(() => {
+    jest.clearAllMocks();
+    PushService.sendToCustomer.mockResolvedValue({ subscriptions: 1, sent: 1, expired: 0, failed: 0, skipped: 0 });
+  });
+  const enRoute = (extra = {}) => NotificationService.notifyCustomer('customer-1', 'service', 'Technician en route', 'On the way.', {
+    link: '/?tab=visits', preferenceKey: 'tech_en_route', metadata: { scheduledServiceId: 'service-1' }, ...extra,
+  });
+
+  test('gate on, stamped visit (from the emitter\'s metadata.scheduledServiceId): the STORED link and the push name the house, the push carries the visit', async () => {
+    process.env.GATE_APP_PROPERTY_SCOPE = 'true';
+    PushService.resolveNotificationPropertyId.mockResolvedValue('prop-b');
+    const { notifQ } = setupDb({ prefs: { tech_en_route: true } });
+    await enRoute();
+    expect(PushService.resolveNotificationPropertyId).toHaveBeenCalledWith('customer-1', { propertyId: undefined, appointmentId: 'service-1' });
+    expect(notifQ.insert).toHaveBeenCalledWith(expect.objectContaining({ link: '/?tab=visits&notificationProperty=customer-1&notificationPropertyId=prop-b' }));
+    expect(PushService.sendToCustomer).toHaveBeenCalledWith('customer-1', expect.objectContaining({
+      url: '/?tab=visits&notificationProperty=customer-1&notificationPropertyId=prop-b', appointmentId: 'service-1',
+    }), expect.any(Object));
+  });
+
+  test('gate on, UNSTAMPED visit: the stored link is still profile-qualified (the app\'s profile-only rule opens the primary), no house', async () => {
+    process.env.GATE_APP_PROPERTY_SCOPE = 'true';
+    PushService.resolveNotificationPropertyId.mockResolvedValue(null);
+    const { notifQ } = setupDb({ prefs: { tech_en_route: true } });
+    await enRoute();
+    expect(notifQ.insert).toHaveBeenCalledWith(expect.objectContaining({ link: '/?tab=visits&notificationProperty=customer-1' }));
+    expect(PushService.sendToCustomer).toHaveBeenCalledWith('customer-1', expect.objectContaining({ url: '/?tab=visits&notificationProperty=customer-1', appointmentId: 'service-1' }), expect.any(Object));
+  });
+
+  test('gate on, a notification about NO visit: untouched', async () => {
+    process.env.GATE_APP_PROPERTY_SCOPE = 'true';
+    const { notifQ } = setupDb({ prefs: { tech_en_route: true } });
+    await NotificationService.notifyCustomer('customer-1', 'billing', 'Receipt', 'Paid.', { link: '/?tab=billing', preferenceKey: 'tech_en_route' });
+    expect(PushService.resolveNotificationPropertyId).not.toHaveBeenCalled();
+    expect(notifQ.insert).toHaveBeenCalledWith(expect.objectContaining({ link: '/?tab=billing' }));
+    expect(PushService.sendToCustomer).toHaveBeenCalledWith('customer-1', expect.not.objectContaining({ appointmentId: expect.anything() }), expect.any(Object));
+  });
+
+  test('gate OFF: nothing is resolved, qualified or forwarded — today\'s link and payload', async () => {
+    delete process.env.GATE_APP_PROPERTY_SCOPE;
+    const { notifQ } = setupDb({ prefs: { tech_en_route: true } });
+    await enRoute();
+    expect(PushService.resolveNotificationPropertyId).not.toHaveBeenCalled();
+    expect(notifQ.insert).toHaveBeenCalledWith(expect.objectContaining({ link: '/?tab=visits' }));
+    expect(PushService.sendToCustomer).toHaveBeenCalledWith('customer-1', expect.objectContaining({ url: '/?tab=visits' }), expect.any(Object));
+    expect(PushService.sendToCustomer.mock.calls[0][1]).not.toHaveProperty('appointmentId');
   });
 });

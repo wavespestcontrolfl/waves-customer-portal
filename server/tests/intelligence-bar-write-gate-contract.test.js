@@ -37,6 +37,9 @@ jest.mock('../services/route-optimizer', () => ({
   HQ: { lat: 27.4, lng: -82.5 },
   haversine: jest.requireActual('../services/route-optimizer').haversine,
   milesToDriveMinutes: jest.requireActual('../services/route-optimizer').milesToDriveMinutes,
+  // The route tools now run the shared window-safety guard, which scores
+  // orders with the same in-house leg model the nightly pass uses.
+  fallbackLegMetrics: jest.requireActual('../services/route-optimizer').fallbackLegMetrics,
   optimizeRoute: jest.fn(async (stops) => ({
     orderedStops: stops,
     totalDistanceMeters: 10000,
@@ -58,11 +61,17 @@ const ORIGINAL_DRIVE_GATE = process.env.GATE_DRIVE_TIME_CALIBRATION;
 // here: the contract under test is "no mutation without confirmed", which
 // only the live path can prove.
 const ORIGINAL_CANCEL_GATE = process.env.GATE_CANCEL_FLOW_V2;
+const ORIGINAL_PLATFORM_GATE = process.env.GATE_IB_PLATFORM;
 beforeAll(() => {
   delete process.env.GATE_DRIVE_TIME_CALIBRATION;
   process.env.GATE_CANCEL_FLOW_V2 = 'true';
+  process.env.GATE_IB_PLATFORM = 'true';
+  process.env.GATE_IB_MERGE_CUSTOMERS = 'true';
 });
 afterAll(() => {
+  delete process.env.GATE_IB_MERGE_CUSTOMERS;
+  if (ORIGINAL_PLATFORM_GATE === undefined) delete process.env.GATE_IB_PLATFORM;
+  else process.env.GATE_IB_PLATFORM = ORIGINAL_PLATFORM_GATE;
   if (ORIGINAL_DRIVE_GATE === undefined) delete process.env.GATE_DRIVE_TIME_CALIBRATION;
   else process.env.GATE_DRIVE_TIME_CALIBRATION = ORIGINAL_DRIVE_GATE;
   if (ORIGINAL_CANCEL_GATE === undefined) delete process.env.GATE_CANCEL_FLOW_V2;
@@ -73,7 +82,7 @@ afterAll(() => {
 // Helpers in services/intelligence-bar/ that are not tool modules. A new
 // non-tool helper added to the directory must be listed here explicitly —
 // otherwise the suite fails, which is the safe default.
-const NON_TOOL_FILES = new Set(['circuit-breaker.js', 'tool-events.js', 'write-gates.js', 'pending-actions.js', 'threads.js', 'authorization-contract.js', 'proposal-pins.js', 'action-registry.js', 'agent-estimate-policy.js', 'tool-definition.js']);
+const NON_TOOL_FILES = new Set(['circuit-breaker.js', 'tool-events.js', 'write-gates.js', 'pending-actions.js', 'threads.js', 'authorization-contract.js', 'proposal-pins.js', 'action-registry.js', 'agent-estimate-policy.js', 'outcomes.js', 'task-context.js', 'tasks.js', 'tool-definition.js', 'scope-policy.js', 'pii-tools.js']);
 
 function isToolShaped(entry) {
   return entry && typeof entry === 'object'
@@ -115,6 +124,10 @@ function discoverAllTools() {
 // attaches confirmed server-side; the boolean is NOT in any model-facing
 // schema. New writes go here + write-gates.js.
 const WRITE_TWO_STEP = [
+  'save_customer_estimate',
+  'add_customer_property',
+  'update_customer_property',
+  'set_primary_property',
   'switch_appointment_property',
   'create_agent_estimate_draft',
   'set_estimate_presentation',
@@ -129,6 +142,7 @@ const WRITE_TWO_STEP = [
   'create_restock_request',
   'update_restock_request',
   'cancel_plan',
+  'merge_customers',
 ];
 
 // Writes blocked in the /query tool loop and executable only via /execute
@@ -202,6 +216,7 @@ const LEGACY_BARE_WRITES = [
 // (cancel_and_reschedule_far_out) belong here — they return content for the
 // operator, the corresponding send/submit tool is the write.
 const READ_ONLY = [
+  'get_customer_estimate_context',
   'search_field_intelligence',
   'query_customers', 'find_overdue_customers', 'get_customer_detail', 'get_schedule_view',
   'query_revenue', 'compare_technicians', 'find_duplicates', 'draft_sms',
@@ -390,6 +405,26 @@ function makeRecordingDb(seed = {}) {
   return { db, mutations };
 }
 
+test.each([
+  ['optimize_all_routes', []],
+  ['optimize_all_routes', [{ id: 'stop-1' }, { id: 'stop-2' }]],
+  ['optimize_tech_route', []],
+  ['optimize_tech_route', [{ id: 'stop-1' }, { id: 'stop-2' }]],
+])('%s reports an unavailable route as blocked without a mutation', async (name, stops) => {
+  const { db: recordingDb, mutations } = makeRecordingDb({
+    technicians: [{ id: 'tech-fixture', name: 'Synthetic Technician' }], scheduled_services: stops,
+  });
+  const dbMock = require('../models/db');
+  dbMock.mockImplementation(recordingDb);
+  dbMock.raw.mockImplementation(recordingDb.raw);
+  const result = await require('../services/intelligence-bar/schedule-tools').executeScheduleTool(name, {
+    date: '2026-09-01', technician_name: 'Synthetic Technician', confirmed: true,
+  });
+  expect(result).toMatchObject({ blocked: true });
+  expect(require('../services/intelligence-bar/outcomes').executionOutcome(result)).toBe('blocked');
+  expect(mutations).toEqual([]);
+});
+
 describe('two-step writes do not mutate without confirmed (behavioral)', () => {
   const dbMock = require('../models/db');
 
@@ -458,7 +493,22 @@ describe('two-step writes do not mutate without confirmed (behavioral)', () => {
   };
 
   // Minimal valid inputs per tool, deliberately WITHOUT confirmed.
+  const propertySeed = { customers: [{ id: 'cust-property', first_name: 'Fixture' }],
+    customer_properties: [{ id: 'prop-saved', customer_id: 'cust-property', active: true,
+      address_line1: '1 Example Grove', city: 'Sarasota', state: 'FL', zip: '34201', occupancy_type: 'unknown' }] };
   const UNCONFIRMED_CALLS = [
+    ['customer-estimate-tools', 'executeCustomerEstimateTool', 'save_customer_estimate', {
+      customer_id: 'cust-estimate', property_id: '00000000-0000-0000-0000-000000000003', lawn_applications: 9,
+    }, { customers: [{ id: 'cust-estimate', first_name: 'Estimate', last_name: 'Fixture' }],
+      customer_properties: [{ id: '00000000-0000-0000-0000-000000000003', customer_id: 'cust-estimate', address_line1: '1 Example St',
+        city: 'Bradenton', state: 'FL', zip: '34208', property_sqft: 5000, lot_sqft: 10000, lawn_type: 'St. Augustine' }],
+      // No active service: the shared stops include a lawn visit, which the
+      // preview would refuse as a duplicate before reaching its gate.
+      scheduled_services: [] }],
+    ['property-tools', 'executePropertyTool', 'add_customer_property', { customer_id: 'cust-property',
+      address_line1: '2 Example Grove', city: 'Sarasota', state: 'FL', zip: '34201' }, propertySeed],
+    ['property-tools', 'executePropertyTool', 'update_customer_property', { customer_id: 'cust-property', property_id: 'prop-saved', label: 'Family' }, propertySeed],
+    ['property-tools', 'executePropertyTool', 'set_primary_property', { customer_id: 'cust-property', property_id: 'prop-saved' }, propertySeed],
     ['schedule-tools', 'executeScheduleTool', 'switch_appointment_property', {
       appointment_id: '00000000-0000-0000-0000-000000000001', property_id: '00000000-0000-0000-0000-000000000002',
     }, {
@@ -497,6 +547,18 @@ describe('two-step writes do not mutate without confirmed (behavioral)', () => {
     ['procurement-tools', 'executeProcurementTool', 'adjust_stock', { product_name: 'Bifen', movement_type: 'restock', quantity: 32 }],
     ['procurement-tools', 'executeProcurementTool', 'create_restock_request', { product_name: 'Bifen', quantity: 128, unit: 'fl_oz' }],
     ['procurement-tools', 'executeProcurementTool', 'update_restock_request', { request_id: 'req-1', action: 'receive' }],
+    // merge_customers carries its own `customers` seed (the shared SEED
+    // deliberately leaves `customers` unseeded for create_customer's
+    // duplicate-miss check).
+    ['customer-lifecycle-tools', 'executeCustomerLifecycleTool', 'merge_customers', {
+      winner_customer_id: '00000000-0000-0000-0000-00000000a001',
+      loser_customer_id: '00000000-0000-0000-0000-00000000a002',
+    }, {
+      customers: [
+        { id: '00000000-0000-0000-0000-00000000a001', first_name: 'Real', last_name: 'Winner', phone: '9415550100', email: 'winner@example.com', deleted_at: null },
+        { id: '00000000-0000-0000-0000-00000000a002', first_name: 'Unknown', last_name: '', phone: '9415550100', email: null, deleted_at: null },
+      ],
+    }],
     // cancel_plan's preview needs the customer to EXIST (create_customer's
     // duplicate check needs it to be missing), so it carries its own seed —
     // merged on top of SEED for this call only.
@@ -529,8 +591,23 @@ describe('two-step writes do not mutate without confirmed (behavioral)', () => {
     dbMock.transaction.mockImplementation(db.transaction);
     dbMock.schema = db.schema;
 
+    // The two route optimizers refuse BEFORE their confirmation gate while
+    // drive-time calibration is off — they may not certify an arrival window
+    // on the uncalibrated model (that refusal has its own coverage in
+    // admin-schedule-optimize-window-guard). This contract is about the gate,
+    // so give them the calibrated model and let them reach it.
+    const needsCalibration = String(toolName).startsWith('optimize_');
+    if (needsCalibration) process.env.GATE_DRIVE_TIME_CALIBRATION = 'true';
     const executor = require(path.join(TOOLS_DIR, mod))[exec];
-    const result = await executor(toolName, input);
+    // This recorder has no pricing_config rows. Live sync success is a
+    // controlled prerequisite here; the real-DB estimate suite tests outages.
+    const pricingSync = toolName === 'save_customer_estimate'
+      ? jest.spyOn(require('../services/pricing-engine'), 'syncConstantsFromDB').mockResolvedValue(true) : null;
+    let result;
+    try { result = await executor(toolName, input); } finally {
+      pricingSync?.mockRestore();
+      if (needsCalibration) delete process.env.GATE_DRIVE_TIME_CALIBRATION;
+    }
 
     // The executor must have reached its confirmation gate — not an error or
     // "not found" early return — and answered with a preview/proposal.
@@ -602,6 +679,13 @@ describe('confirmed-endpoint writes are inert without server-derived context.con
     dbMock.transaction.mockImplementation(db.transaction);
     dbMock.schema = db.schema;
 
+    // The two route optimizers refuse BEFORE their confirmation gate while
+    // drive-time calibration is off — they may not certify an arrival window
+    // on the uncalibrated model (that refusal has its own coverage in
+    // admin-schedule-optimize-window-guard). This contract is about the gate,
+    // so give them the calibrated model and let them reach it.
+    const needsCalibration = String(toolName).startsWith('optimize_');
+    if (needsCalibration) process.env.GATE_DRIVE_TIME_CALIBRATION = 'true';
     const executor = require(path.join(TOOLS_DIR, mod))[exec];
     const result = await executor(toolName, input, context);
 
@@ -655,6 +739,6 @@ describe('contract-test registry flags gated bare writes as sideEffects', () => 
     // Existing pure previews remain smokable. The optional address writer
     // explicitly opts out of live smoke; its preview is exercised above.
     const explicitlySkipped = WRITE_TWO_STEP.filter(name => ib.get(name)?.sideEffects === true);
-    expect(explicitlySkipped).toEqual(['switch_appointment_property']);
+    expect(explicitlySkipped).toEqual(['save_customer_estimate', 'switch_appointment_property']);
   });
 });

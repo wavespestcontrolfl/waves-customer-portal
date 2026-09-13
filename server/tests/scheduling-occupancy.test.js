@@ -198,6 +198,23 @@ describe('findConflictingVisits', () => {
     expect(q.where).toHaveBeenCalledWith('scheduled_date', '2099-01-05');
   });
 
+  test.each(['true', 'false'])('combined work blocks its full span without changing conflict rows (capacity %s)', async (gate) => {
+    const previousGate = process.env.GATE_SCHEDULING_CAPACITY;
+    process.env.GATE_SCHEDULING_CAPACITY = gate;
+    const mix = { version: 2, allocatedServiceIds: ['a', 'b'] };
+    const rows = [30, 40].map((duration, index) => ({ id: mix.allocatedServiceIds[index],
+      window_start: '09:00:00', window_end: `09:${duration}:00`, estimated_duration_minutes: duration,
+      reservation_service_mix: mix }));
+    db.mockReturnValue(makeQuery(rows));
+    try {
+      expect(await findConflictingVisits({ db, date: '2099-01-05', windowStart: '09:50', windowEnd: '10:00' })).toEqual(rows);
+      expect(await findConflictingVisits({ db, date: '2099-01-05', windowStart: '10:10', windowEnd: '10:40' })).toEqual([]);
+    } finally {
+      if (previousGate === undefined) delete process.env.GATE_SCHEDULING_CAPACITY;
+      else process.env.GATE_SCHEDULING_CAPACITY = previousGate;
+    }
+  });
+
   test('excludeServiceIds drops the moving batch (falsy entries filtered)', async () => {
     const q = makeQuery([]);
     db.mockReturnValue(q);
@@ -452,12 +469,12 @@ describe('ORDERING CONTRACT — rung 1 is first at every writer', () => {
     ['reserveSlot (services/slot-reservation.js)',
       read('services/slot-reservation.js'), 'async function reserveSlot(',
       'await acquireOccupancyLock(trx, date);',
-      'const committedClash = await findConflictingVisits({',
+      'const committedClash = ',
       "await trx('scheduled_services').insert({"],
     ['commitReservation (services/slot-reservation.js)',
       read('services/slot-reservation.js'), 'async function commitReservation(',
       'await acquireOccupancyLock(client, lockedDate);',
-      'const committedClash = await findConflictingVisits({',
+      'const committedClash = ',
       '.update(updates)'],
   ];
 
@@ -474,20 +491,48 @@ describe('ORDERING CONTRACT — rung 1 is first at every writer', () => {
     expect(writeIdx).toBeGreaterThan(probeIdx);
   });
 
-  test('the estimate-hold probes check COMMITTED visits only — hold-vs-hold semantics stay with the narrow checks', () => {
+  // Contract narrowed 2026-09-12 (hold-grace PR, codex r3 P1): the probes
+  // still check COMMITTED visits only for a PUNCTUAL hold — counting live
+  // holds there would refuse an on-time accept over a rival the reserve path
+  // already arbitrated. The one exception is a hold graduating inside the
+  // commit grace: the moment its expiry passed, every reserve-side check
+  // stopped counting it, so another customer may legitimately hold that
+  // window now, and the narrow pre-check is technician-scoped and cannot see
+  // an unassigned rival. commitReservation therefore keys includeHolds off
+  // the grace, exactly as extendReservation keys it off `alreadyLapsed`.
+  test('the estimate-hold probes check COMMITTED visits only — hold-vs-hold semantics stay with the narrow checks, except a lapsed graduation', () => {
     const src = read('services/slot-reservation.js');
-    for (const fn of ['async function reserveSlot(', 'async function commitReservation(']) {
-      const startIdx = src.indexOf(fn);
-      const probeIdx = src.indexOf('const committedClash = await findConflictingVisits({', startIdx);
-      expect(probeIdx).toBeGreaterThan(startIdx);
-      expect(src.slice(probeIdx, probeIdx + 400)).toContain('includeHolds: false');
-    }
+    // reserveSlot is unconditional: it never revives anything.
+    const reserveIdx = src.indexOf('async function reserveSlot(');
+    const reserveProbeIdx = src.indexOf('const committedClash = ', reserveIdx);
+    expect(reserveProbeIdx).toBeGreaterThan(reserveIdx);
+    expect(src.slice(reserveProbeIdx, reserveProbeIdx + 400)).toContain('includeHolds: false');
+    // commitReservation: live holds weigh in ONLY when this graduation is
+    // late, never as a blanket true.
+    const commitIdx = src.indexOf('async function commitReservation(');
+    const commitProbe = src.slice(src.indexOf('const committedClash = ', commitIdx), src.indexOf('const committedClash = ', commitIdx) + 400);
+    expect(commitProbe).toContain('includeHolds: !!row._lapsed');
+    expect(commitProbe).not.toContain('includeHolds: true');
     // commitReservation additionally excludes the hold row it is graduating.
     const commitProbeIdx = src.indexOf(
-      'const committedClash = await findConflictingVisits({',
+      'const committedClash = ',
       src.indexOf('async function commitReservation('),
     );
     expect(src.slice(commitProbeIdx, commitProbeIdx + 400)).toContain('excludeServiceIds: [scheduledServiceId]');
+  });
+
+  test.each([
+    ['async function reserveSlot(', 'await acquireOccupancyLock(trx, date);', "await trx('scheduled_services').insert({"],
+    ['async function commitReservation(', 'await acquireOccupancyLock(client, lockedDate);', '.update(updates)'],
+  ])('capacity certification stays under the occupancy lock before writes in %s', (startMarker, lockMarker, writeMarker) => {
+    const src = read('services/slot-reservation.js');
+    const start = src.indexOf(startMarker);
+    const lock = src.indexOf(lockMarker, start);
+    const proof = src.indexOf('const capacityFit = useCapacity ? await verifyArrivalCapacity(', lock);
+    const write = src.indexOf(writeMarker, lock);
+    expect(lock).toBeGreaterThan(start);
+    expect(proof).toBeGreaterThan(lock);
+    expect(write).toBeGreaterThan(proof);
   });
 
   test('every writer imports rung 1 from the shared module — no private key shapes', () => {

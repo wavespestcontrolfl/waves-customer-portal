@@ -17,6 +17,7 @@ jest.mock('../services/appointment-reminders', () => ({
 }));
 jest.mock('../services/dispatch-assignment', () => ({
   emitDispatchJobUpdate: jest.fn().mockResolvedValue(undefined),
+  flushDispatchQualityDates: jest.fn().mockResolvedValue(null),
 }));
 jest.mock('../services/sms-template-renderer', () => ({
   renderSmsTemplate: jest.fn().mockResolvedValue('rendered body'),
@@ -358,7 +359,7 @@ describe('rain-out service', () => {
         // excludeServiceIds = the row being moved ONLY, so the rebooker's
         // tech-blind occupancy check never clashes a move against the row's
         // own pre-move position — and sees every OTHER committed row.
-        { allowLive: true, overlapAdvisory: true, excludeServiceIds: ['svc-1'], seriesPolicy: 'single' },
+        { allowLive: true, qualityDates: expect.any(Set), overlapAdvisory: true, excludeServiceIds: ['svc-1'], seriesPolicy: 'single' },
       );
 
       // ...but the CUSTOMER is quoted the usual 2-hour arrival window from the
@@ -518,10 +519,10 @@ describe('rain-out service', () => {
       // anchor's 13:00 target clears it, not an exclusion).
       expect(SmartRebooker.reschedule).toHaveBeenNthCalledWith(1,
         'svc-2', '2026-06-11', { start: '15:30', end: '17:30' }, 'weather_rain', 'tech',
-        { allowLive: true, overlapAdvisory: true, excludeServiceIds: ['svc-2'], seriesPolicy: 'single' });
+        { allowLive: true, qualityDates: expect.any(Set), overlapAdvisory: true, excludeServiceIds: ['svc-2'], seriesPolicy: 'single' });
       expect(SmartRebooker.reschedule).toHaveBeenNthCalledWith(2,
         'svc-1', '2026-06-11', { start: '13:00', end: '15:00' }, 'weather_rain', 'tech',
-        { allowLive: true, overlapAdvisory: true, excludeServiceIds: ['svc-1'], seriesPolicy: 'single' });
+        { allowLive: true, qualityDates: expect.any(Set), overlapAdvisory: true, excludeServiceIds: ['svc-1'], seriesPolicy: 'single' });
     });
 
     test('same-day BACKWARD pull (custom time earlier than anchor) moves head-first', async () => {
@@ -561,10 +562,10 @@ describe('rain-out service', () => {
       // target clear of it.
       expect(SmartRebooker.reschedule).toHaveBeenNthCalledWith(1,
         'svc-1', '2026-06-11', { start: '07:00', end: '08:00' }, 'weather_rain', 'tech',
-        { allowLive: true, overlapAdvisory: true, excludeServiceIds: ['svc-1'], seriesPolicy: 'single' });
+        { allowLive: true, qualityDates: expect.any(Set), overlapAdvisory: true, excludeServiceIds: ['svc-1'], seriesPolicy: 'single' });
       expect(SmartRebooker.reschedule).toHaveBeenNthCalledWith(2,
         'svc-2', '2026-06-11', { start: '09:30', end: '11:30' }, 'weather_rain', 'tech',
-        { allowLive: true, overlapAdvisory: true, excludeServiceIds: ['svc-2'], seriesPolicy: 'single' });
+        { allowLive: true, qualityDates: expect.any(Set), overlapAdvisory: true, excludeServiceIds: ['svc-2'], seriesPolicy: 'single' });
     });
 
     test('notifyCustomer=false moves without texting', async () => {
@@ -606,7 +607,7 @@ describe('rain-out service', () => {
       // The dispatch path must log moves as admin-initiated, not 'tech'.
       expect(SmartRebooker.reschedule).toHaveBeenCalledWith(
         'svc-1', '2026-06-12', { start: '09:00', end: '11:00' }, 'weather_rain', 'admin',
-        { allowLive: true, overlapAdvisory: true, excludeServiceIds: ['svc-1'], seriesPolicy: 'single' });
+        { allowLive: true, qualityDates: expect.any(Set), overlapAdvisory: true, excludeServiceIds: ['svc-1'], seriesPolicy: 'single' });
     });
 
     test('an SMS exception after the move reports moved-but-not-notified, not failure', async () => {
@@ -813,6 +814,7 @@ describe('rain-out service', () => {
         'svc-1', '2026-06-12', { start: '13:00', end: '14:00' }, 'weather_rain', 'tech',
         {
           allowLive: true,
+          qualityDates: expect.any(Set),
           overlapAdvisory: true,
           sourceSurface: 'quick_move',
           notifyRequested: false,
@@ -828,6 +830,7 @@ describe('rain-out service', () => {
       const { applySeriesMoveEffects } = require('../routes/admin-dispatch');
       expect(applySeriesMoveEffects).toHaveBeenCalledTimes(1);
       expect(applySeriesMoveEffects.mock.calls[0][0]).toMatchObject({
+        qualityDates: expect.any(Set),
         serviceId: 'svc-1', newDate: '2026-06-12', notify: false,
         result: expect.objectContaining({ rescheduledOccurrences: expect.arrayContaining([expect.objectContaining({ id: 'sib-2', conflicted: true })]) }),
       });
@@ -900,6 +903,7 @@ describe('rain-out service', () => {
         'svc-1', '2026-06-12', { start: '13:00', end: '14:00' }, 'weather_rain', 'tech',
         {
           allowLive: true,
+          qualityDates: expect.any(Set),
           overlapAdvisory: true,
           excludeServiceIds: ['svc-1'],
           seriesPolicy: 'single',
@@ -1031,6 +1035,7 @@ describe('rain-out service', () => {
         'svc-1', '2026-06-12', { start: '13:00', end: '14:00' }, 'weather_rain', 'tech',
         {
           allowLive: true,
+          qualityDates: expect.any(Set),
           overlapAdvisory: true,
           excludeServiceIds: ['svc-1'],
           seriesPolicy: 'single',
@@ -1108,7 +1113,7 @@ describe('rain-out service', () => {
       expect(result.ok).toBe(true);
       expect(SmartRebooker.reschedule).toHaveBeenCalledWith(
         'svc-1', '2026-06-11', { start: '13:00', end: '14:00' }, 'running_late', 'tech',
-        { allowLive: true, overlapAdvisory: true, excludeServiceIds: ['svc-1'], seriesPolicy: 'single' },
+        { allowLive: true, qualityDates: expect.any(Set), overlapAdvisory: true, excludeServiceIds: ['svc-1'], seriesPolicy: 'single' },
       );
       const vars = renderSmsTemplate.mock.calls[0][1];
       expect(vars.weather_lead).toBe("we're running behind schedule today");
@@ -1247,7 +1252,7 @@ describe('rain-out service', () => {
       // the 2-in-90-days missed-appointment outreach counter.
       expect(SmartRebooker.reschedule).toHaveBeenCalledWith(
         'svc-1', '2026-06-11', { start: '13:00', end: '14:00' }, 'customer_noshow', 'tech',
-        { allowLive: true, overlapAdvisory: true, excludeServiceIds: ['svc-1'], seriesPolicy: 'single' },
+        { allowLive: true, qualityDates: expect.any(Set), overlapAdvisory: true, excludeServiceIds: ['svc-1'], seriesPolicy: 'single' },
       );
       expect(renderSmsTemplate.mock.calls[0][1].weather_lead).toBe('we missed you today');
       expect(sendCustomerMessage.mock.calls[0][0].metadata).toMatchObject({ reason_code: 'customer_noshow' });
@@ -1369,14 +1374,14 @@ describe('rain-out service', () => {
       // visible. Exclusion never grows past the row being moved.
       expect(SmartRebooker.reschedule).toHaveBeenNthCalledWith(1,
         'svc-1', '2026-06-12', { start: '09:00', end: '11:00' }, 'weather_rain', 'tech',
-        { allowLive: true, overlapAdvisory: true, excludeServiceIds: ['svc-1'], seriesPolicy: 'single' });
+        { allowLive: true, qualityDates: expect.any(Set), overlapAdvisory: true, excludeServiceIds: ['svc-1'], seriesPolicy: 'single' });
       // Route siblings keep their own windows on the new date.
       expect(SmartRebooker.reschedule).toHaveBeenNthCalledWith(2,
         'svc-2', '2026-06-12', { start: '11:30', end: '13:30' }, 'weather_rain', 'tech',
-        { allowLive: true, overlapAdvisory: true, excludeServiceIds: ['svc-2'], seriesPolicy: 'single' });
+        { allowLive: true, qualityDates: expect.any(Set), overlapAdvisory: true, excludeServiceIds: ['svc-2'], seriesPolicy: 'single' });
       expect(SmartRebooker.reschedule).toHaveBeenNthCalledWith(3,
         'svc-3', '2026-06-12', { start: '14:00', end: '16:00' }, 'weather_rain', 'tech',
-        { allowLive: true, overlapAdvisory: true, excludeServiceIds: ['svc-3'], seriesPolicy: 'single' });
+        { allowLive: true, qualityDates: expect.any(Set), overlapAdvisory: true, excludeServiceIds: ['svc-3'], seriesPolicy: 'single' });
 
       // Anchor and sibling both get the self-serve link — no reply ask;
       // no-phone sibling skipped.
@@ -1460,7 +1465,7 @@ describe('rain-out service', () => {
       // reminder helper re-arms the sibling onto its real window, not 08:00.
       expect(SmartRebooker.reschedule).toHaveBeenNthCalledWith(2,
         'svc-2', '2026-06-12', { start: '11:30', end: '13:30' }, 'weather_rain', 'tech',
-        { allowLive: true, overlapAdvisory: true, excludeServiceIds: ['svc-2'], seriesPolicy: 'single' });
+        { allowLive: true, qualityDates: expect.any(Set), overlapAdvisory: true, excludeServiceIds: ['svc-2'], seriesPolicy: 'single' });
     });
 
     test('one stop racing to terminal does not strand the rest', async () => {
@@ -1510,17 +1515,17 @@ describe('rain-out service', () => {
       // accumulates, success or failure.
       expect(SmartRebooker.reschedule).toHaveBeenNthCalledWith(1,
         'svc-1', '2026-06-12', { start: '09:00', end: '11:00' }, 'weather_rain', 'tech',
-        { allowLive: true, overlapAdvisory: true, excludeServiceIds: ['svc-1'], seriesPolicy: 'single' });
+        { allowLive: true, qualityDates: expect.any(Set), overlapAdvisory: true, excludeServiceIds: ['svc-1'], seriesPolicy: 'single' });
       expect(SmartRebooker.reschedule).toHaveBeenNthCalledWith(2,
         'svc-2', '2026-06-12', { start: '11:30', end: '13:30' }, 'weather_rain', 'tech',
-        { allowLive: true, overlapAdvisory: true, excludeServiceIds: ['svc-2'], seriesPolicy: 'single' });
+        { allowLive: true, qualityDates: expect.any(Set), overlapAdvisory: true, excludeServiceIds: ['svc-2'], seriesPolicy: 'single' });
       // svc-2 FAILED mid-batch — svc-3's probe keeps seeing the stranded
       // row (and can block on it) instead of silently double-booking on
       // top of it, exactly like it keeps seeing the successfully-moved
       // anchor's new position.
       expect(SmartRebooker.reschedule).toHaveBeenNthCalledWith(3,
         'svc-3', '2026-06-12', { start: '14:00', end: '16:00' }, 'weather_rain', 'tech',
-        { allowLive: true, overlapAdvisory: true, excludeServiceIds: ['svc-3'], seriesPolicy: 'single' });
+        { allowLive: true, qualityDates: expect.any(Set), overlapAdvisory: true, excludeServiceIds: ['svc-3'], seriesPolicy: 'single' });
     });
 
     test('a batch member RE-MOVED by another actor into a later target COMMITS that later move WITH a warning (no moved-ids exclusion; overlaps are advisory)', async () => {
@@ -1564,10 +1569,10 @@ describe('rain-out service', () => {
       // array is [its own id] — the already-moved svc-2 is NOT in it.
       expect(SmartRebooker.reschedule).toHaveBeenNthCalledWith(1,
         'svc-2', '2026-06-11', { start: '15:30', end: '17:30' }, 'weather_rain', 'tech',
-        { allowLive: true, overlapAdvisory: true, excludeServiceIds: ['svc-2'], seriesPolicy: 'single' });
+        { allowLive: true, qualityDates: expect.any(Set), overlapAdvisory: true, excludeServiceIds: ['svc-2'], seriesPolicy: 'single' });
       expect(SmartRebooker.reschedule).toHaveBeenNthCalledWith(2,
         'svc-1', '2026-06-11', { start: '13:00', end: '15:00' }, 'weather_rain', 'tech',
-        { allowLive: true, overlapAdvisory: true, excludeServiceIds: ['svc-1'], seriesPolicy: 'single' });
+        { allowLive: true, qualityDates: expect.any(Set), overlapAdvisory: true, excludeServiceIds: ['svc-1'], seriesPolicy: 'single' });
       // Both moves commit; the anchor's overlap is surfaced, never a failure.
       expect(result.ok).toBe(true);
       expect(result.movedCount).toBe(2);
@@ -1617,12 +1622,12 @@ describe('rain-out service', () => {
       // ONLY svc-2 — the unprocessed anchor stayed visible to it.
       expect(SmartRebooker.reschedule).toHaveBeenNthCalledWith(1,
         'svc-2', '2026-06-11', { start: '15:30', end: '17:30' }, 'weather_rain', 'tech',
-        { allowLive: true, overlapAdvisory: true, excludeServiceIds: ['svc-2'], seriesPolicy: 'single' });
+        { allowLive: true, qualityDates: expect.any(Set), overlapAdvisory: true, excludeServiceIds: ['svc-2'], seriesPolicy: 'single' });
       // The anchor's own move still ran, excluding only itself — the
       // exclusion is always exactly the row being moved.
       expect(SmartRebooker.reschedule).toHaveBeenNthCalledWith(2,
         'svc-1', '2026-06-11', { start: '13:00', end: '15:00' }, 'weather_rain', 'tech',
-        { allowLive: true, overlapAdvisory: true, excludeServiceIds: ['svc-1'], seriesPolicy: 'single' });
+        { allowLive: true, qualityDates: expect.any(Set), overlapAdvisory: true, excludeServiceIds: ['svc-1'], seriesPolicy: 'single' });
       // Both moves commit; the clashing member's overlap is surfaced, the
       // rest of the batch is not stranded.
       expect(result.ok).toBe(true);
@@ -2794,6 +2799,382 @@ describe('rain-out service', () => {
     });
   });
 
+  describe('preset-reason note segment cap (v3 notice + note ≤ 2 segments)', () => {
+    afterEach(() => {
+      delete process.env.GATE_RAINOUT_MOVE_BANNER;
+      delete process.env.GATE_QUICKMOVE_EXTRA_REASONS;
+    });
+
+    // The prod v3 row body — the snapshot commit() measures and the send
+    // renders from.
+    const V3_BODY = 'Hi {first_name}, {weather_lead}, so we moved your {service_type} to {new_option}.{link_clause}';
+
+    function wireSingle(extra = {}, { v3Row = { body: V3_BODY, is_active: true } } = {}) {
+      wireDb({
+        scheduled_services: [chain({ first: jest.fn().mockResolvedValue({ ...SERVICE, ...extra }) })],
+        sms_templates: [chain({ first: jest.fn().mockResolvedValue(v3Row) })],
+      });
+    }
+
+    // Realistic v3 render so the pre-move cap counts a body shaped like
+    // production's (mirrors the migration BODY as edited in prod).
+    function mockV3Render() {
+      renderSmsTemplate.mockImplementation(async (key, vars) => {
+        if (key !== 'rain_out_moved_v3') return 'rendered body';
+        return `Hi ${vars.first_name}, ${vars.weather_lead}, so we moved your ${vars.service_type} to ${vars.new_option}.${vars.link_clause}`;
+      });
+    }
+
+    // The counter measures the body the way sendCustomerMessage transforms
+    // it (scheme-stripped links, GSM-normalized punctuation).
+    const { stripSmsUrlScheme } = require('../services/messaging/sms-link-policy');
+    const { normalizeGsmPunctuation } = require('../services/messaging/gsm-normalize');
+    const asSent = (b) => normalizeGsmPunctuation(stripSmsUrlScheme(b));
+
+    const COMMIT_ARGS = {
+      serviceId: 'svc-1',
+      technicianId: 'tech-1',
+      reasonCode: 'weather_rain',
+      scope: 'job',
+      target: { date: '2026-06-12', window: { start: '13:00', end: '14:00' } },
+      notifyCustomer: true,
+      actorUserId: 'admin-7',
+    };
+
+    test('gate on: a note that would push the notice to 3 segments is rejected BEFORE the move', async () => {
+      process.env.GATE_RAINOUT_MOVE_BANNER = 'true';
+      mockV3Render();
+      wireSingle();
+
+      // ~170-slot v3 notice + the 22-slot note prefix + a 200-char note
+      // (the note cap) ≈ 390 GSM slots — over the 306-slot 2-segment budget.
+      const result = await RainOut.commit({ ...COMMIT_ARGS, customerNote: 'x'.repeat(200) });
+
+      expect(result).toMatchObject({ ok: false, reason: 'note_too_many_segments' });
+      expect(SmartRebooker.reschedule).not.toHaveBeenCalled();
+      expect(sendCustomerMessage).not.toHaveBeenCalled();
+      // Measured on the v3 rung — the one that sends — with its real link
+      // clause, not a bare template.
+      expect(renderSmsTemplate).toHaveBeenCalledTimes(1);
+      expect(renderSmsTemplate.mock.calls[0][0]).toBe('rain_out_moved_v3');
+      expect(renderSmsTemplate.mock.calls[0][1].link_clause)
+        .toBe(' New time, forecast & other options: https://waves.test/r/tok123');
+    });
+
+    test('gate on: a customer with no phone is never held to the cap — the move proceeds un-texted, nothing is measured', async () => {
+      process.env.GATE_RAINOUT_MOVE_BANNER = 'true';
+      mockV3Render();
+      wireSingle({ phone: null });
+
+      // The same over-budget note the test above rejects. Nothing can send
+      // (sendMovedSms answers no_phone and the sheet reports the un-texted
+      // move), so a message that never goes out must not block the move
+      // (codex r5 P2).
+      const result = await RainOut.commit({ ...COMMIT_ARGS, customerNote: 'x'.repeat(200) });
+
+      expect(result.ok).toBe(true);
+      expect(SmartRebooker.reschedule).toHaveBeenCalledTimes(1);
+      expect(result.results[0]).toMatchObject({ id: 'svc-1', ok: true, smsSent: false, smsReason: 'no_phone' });
+      // Not measured at all: no snapshot render, no link build, no SMS.
+      expect(renderSmsTemplate).not.toHaveBeenCalled();
+      expect(buildRescheduleLink).not.toHaveBeenCalled();
+      expect(sendCustomerMessage).not.toHaveBeenCalled();
+    });
+
+    test('gate on: a note that fits sends as v3 notice + note, measured on the same shape it sent', async () => {
+      process.env.GATE_RAINOUT_MOVE_BANNER = 'true';
+      mockV3Render();
+      wireSingle();
+
+      const result = await RainOut.commit({ ...COMMIT_ARGS, customerNote: 'See you Friday!' });
+
+      expect(result.ok).toBe(true);
+      expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
+      const { body } = sendCustomerMessage.mock.calls[0][0];
+      expect(body).toMatch(/^Hi Pat, .* so we moved your quarterly pest control to Fri, Jun 12, 1:00 PM - 3:00 PM\. New time, forecast & other options: https:\/\/waves\.test\/r\/tok123\n\nNote from our team: See you Friday!$/);
+      const { countSegments } = require('../services/messaging/segment-counter');
+      expect(countSegments(body).segmentCount).toBeLessThanOrEqual(2);
+      // The pre-move measurement uses the LONGEST lead the reason can
+      // produce, so it never undercounts the forecast-dependent send.
+      const [preCheck, send] = renderSmsTemplate.mock.calls.map((c) => c[1]);
+      // …even for a NEXT-day target: the send re-reads the ET date after the
+      // move, so a move begun just before midnight would flip to the longer
+      // same-day wording (r3 P2).
+      expect(preCheck.weather_lead).toBe('rain is moving through your area this afternoon');
+      expect(preCheck.weather_lead.length).toBeGreaterThanOrEqual(send.weather_lead.length);
+    });
+
+    test('gate on: gate_locked measures the portal nudge that rides ahead of the link', async () => {
+      process.env.GATE_RAINOUT_MOVE_BANNER = 'true';
+      process.env.GATE_QUICKMOVE_EXTRA_REASONS = 'true';
+      mockV3Render();
+      wireSingle();
+
+      // Fits a weather move (≈90 slots of headroom) but not gate_locked,
+      // whose nudge clause eats ~60 of them.
+      const result = await RainOut.commit({ ...COMMIT_ARGS, reasonCode: 'gate_locked', customerNote: 'x'.repeat(80) });
+
+      expect(result).toMatchObject({ ok: false, reason: 'note_too_many_segments' });
+      expect(renderSmsTemplate.mock.calls[0][1].link_clause)
+        .toBe(' Add gate access for next time: portal.wavespestcontrol.com. New time & other options: https://waves.test/r/tok123');
+      expect(SmartRebooker.reschedule).not.toHaveBeenCalled();
+    });
+
+    test('gate on: the note is measured AS SENT — smart punctuation and link schemes count like the send, not UCS-2', async () => {
+      process.env.GATE_RAINOUT_MOVE_BANNER = 'true';
+      mockV3Render();
+      wireSingle();
+
+      // Raw, a curly apostrophe flips the whole body to UCS-2 (67-char
+      // segments → a ~200-char body reads as 3 segments); the send
+      // normalizes it to GSM-7 first, so the cap must too (pre-push P1).
+      const result = await RainOut.commit({ ...COMMIT_ARGS, customerNote: 'We’ll see you Friday — thanks for your patience!' });
+
+      expect(result.ok).toBe(true);
+      expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
+      expect(sendCustomerMessage.mock.calls[0][0].body).toContain('Note from our team: We’ll see you Friday — thanks for your patience!');
+    });
+
+    test('gate on: the send reuses the measured link (built once, existing code preferred, eligibility kept) and pins the base v3 row', async () => {
+      process.env.GATE_RAINOUT_MOVE_BANNER = 'true';
+      mockV3Render();
+      wireSingle();
+
+      const result = await RainOut.commit({ ...COMMIT_ARGS, customerNote: 'See you Friday!' });
+
+      expect(result.ok).toBe(true);
+      // Measured through the link builder (grouped / frozen refusals apply,
+      // the pending row judged on its landed state) with the existing code
+      // preferred; the send RE-VALIDATES that same url (pinnedUrl) so the
+      // builder's checks run on the post-move state (r2 P2) — never a
+      // lookup, a fresh mint or a LONG-url fallback that could exceed the
+      // measurement (pre-push P1).
+      expect(buildRescheduleLink).toHaveBeenCalledTimes(2);
+      expect(buildRescheduleLink).toHaveBeenNthCalledWith(1, 'svc-1', { customerId: 'cust-1', reuseExisting: true, assumeConfirmed: true });
+      expect(buildRescheduleLink).toHaveBeenNthCalledWith(2, 'svc-1', { customerId: 'cust-1', pinnedUrl: 'https://waves.test/r/tok123' });
+      expect(sendCustomerMessage.mock.calls[0][0].body).toContain('https://waves.test/r/tok123');
+      const v3Calls = renderSmsTemplate.mock.calls.filter((c) => c[0] === 'rain_out_moved_v3');
+      expect(v3Calls).toHaveLength(2);
+      for (const call of v3Calls) expect(call[3]).toEqual({ noVariants: true, templateBody: V3_BODY });
+    });
+
+    test('gate on: EVERY stop is measured at the LONGEST arrival label (a stop grouped after the snapshot lands at a start only the move knows)', async () => {
+      process.env.GATE_RAINOUT_MOVE_BANNER = 'true';
+      mockV3Render();
+      wireSingle();
+
+      const result = await RainOut.commit({ ...COMMIT_ARGS, customerNote: 'See you Friday!' });
+
+      expect(result.ok).toBe(true);
+      const [preCheck, send] = renderSmsTemplate.mock.calls.filter((c) => c[0] === 'rain_out_moved_v3').map((c) => c[1]);
+      expect(preCheck.new_option).toBe('Fri, Jun 12, 10:00 AM - 12:00 PM');
+      expect(send.new_option).toBe('Fri, Jun 12, 1:00 PM - 3:00 PM');
+      expect(preCheck.new_option.length).toBeGreaterThanOrEqual(send.new_option.length);
+    });
+
+    test('gate on, no note: no pre-move render — the send is the only v3 render', async () => {
+      process.env.GATE_RAINOUT_MOVE_BANNER = 'true';
+      mockV3Render();
+      wireSingle();
+
+      const result = await RainOut.commit(COMMIT_ARGS);
+
+      expect(result.ok).toBe(true);
+      expect(renderSmsTemplate).toHaveBeenCalledTimes(1);
+      expect(sendCustomerMessage.mock.calls[0][0].body).not.toContain('Note from our team');
+    });
+
+    test('gate on: an UNREADABLE v3 row fails the move closed — never treated as uncapped', async () => {
+      process.env.GATE_RAINOUT_MOVE_BANNER = 'true';
+      mockV3Render();
+      wireDb({
+        scheduled_services: [chain({ first: jest.fn().mockResolvedValue({ ...SERVICE }) })],
+        sms_templates: [chain({ first: jest.fn().mockRejectedValue(new Error('connection reset')) })],
+      });
+
+      const result = await RainOut.commit({ ...COMMIT_ARGS, customerNote: 'See you Friday!' });
+
+      expect(result).toMatchObject({ ok: false, reason: 'note_cap_unavailable' });
+      expect(SmartRebooker.reschedule).not.toHaveBeenCalled();
+      expect(sendCustomerMessage).not.toHaveBeenCalled();
+
+      // The sheet counter reports the same, so it hides rather than lies.
+      wireDb({
+        scheduled_services: [chain({ first: jest.fn().mockResolvedValue({ ...SERVICE }) })],
+        sms_templates: [chain({ first: jest.fn().mockRejectedValue(new Error('connection reset')) })],
+      });
+      const preview = await RainOut.previewMovedSms({ serviceId: 'svc-1', reasonCode: 'weather_rain', customMessage: 'x', target: COMMIT_ARGS.target });
+      expect(preview).toEqual({ ok: false, reason: 'note_cap_unavailable' });
+    });
+
+    test('gate on: a live snapshot that FAILS to render refuses the move — never an unmeasured send', async () => {
+      process.env.GATE_RAINOUT_MOVE_BANNER = 'true';
+      renderSmsTemplate.mockResolvedValueOnce(null);
+      wireSingle();
+
+      const result = await RainOut.commit({ ...COMMIT_ARGS, customerNote: 'See you Friday!' });
+
+      expect(result).toMatchObject({ ok: false, reason: 'note_cap_unavailable' });
+      expect(SmartRebooker.reschedule).not.toHaveBeenCalled();
+      expect(sendCustomerMessage).not.toHaveBeenCalled();
+
+      renderSmsTemplate.mockResolvedValueOnce(null);
+      wireSingle();
+      const preview = await RainOut.previewMovedSms({ serviceId: 'svc-1', reasonCode: 'weather_rain', customMessage: 'x', target: COMMIT_ARGS.target });
+      expect(preview).toEqual({ ok: false, reason: 'note_cap_unavailable' });
+    });
+
+    test('gate on: a same-day move is measured at the LONGEST part-of-day lead, whatever the clock says', async () => {
+      process.env.GATE_RAINOUT_MOVE_BANNER = 'true';
+      mockV3Render();
+      wireSingle();
+      const { etDateString: today } = require('../utils/datetime-et');
+
+      const result = await RainOut.commit({ ...COMMIT_ARGS, target: { date: today(), window: { start: '18:00', end: '19:00' } }, customerNote: 'See you soon!' });
+
+      expect(result.ok).toBe(true);
+      const [preCheck, send] = renderSmsTemplate.mock.calls.filter((c) => c[0] === 'rain_out_moved_v3').map((c) => c[1]);
+      // The send reads the hour AFTER the move; a move spanning noon grows
+      // "morning" into "afternoon" by two slots (pre-push P1).
+      expect(preCheck.weather_lead).toBe('rain is moving through your area this afternoon');
+      expect(preCheck.weather_lead.length).toBeGreaterThanOrEqual(send.weather_lead.length);
+    });
+
+    test('gate on: a pre-move link build FAILURE refuses the move — measuring "no link" and sending one later would grow the body', async () => {
+      process.env.GATE_RAINOUT_MOVE_BANNER = 'true';
+      mockV3Render();
+      wireSingle();
+      buildRescheduleLink.mockResolvedValueOnce({ url: null, line: '', failed: true });
+
+      const result = await RainOut.commit({ ...COMMIT_ARGS, customerNote: 'See you Friday!' });
+
+      expect(result).toMatchObject({ ok: false, reason: 'note_cap_unavailable' });
+      expect(SmartRebooker.reschedule).not.toHaveBeenCalled();
+      expect(sendCustomerMessage).not.toHaveBeenCalled();
+
+      // The sheet counter fails the same way: a link-less body would read
+      // ~40 GSM slots of phantom headroom that commit() then refuses
+      // (claude-review P2). A plain refusal (no `failed`) still measures.
+      wireSingle();
+      buildRescheduleLink.mockResolvedValueOnce({ url: null, line: '', failed: true });
+      const preview = await RainOut.previewMovedSms({ serviceId: 'svc-1', reasonCode: 'weather_rain', customMessage: 'x', target: COMMIT_ARGS.target });
+      expect(preview).toEqual({ ok: false, reason: 'note_cap_unavailable' });
+
+      wireSingle();
+      buildRescheduleLink.mockResolvedValueOnce({ url: null, line: '' });
+      const refused = await RainOut.previewMovedSms({ serviceId: 'svc-1', reasonCode: 'weather_rain', customMessage: 'x', target: COMMIT_ARGS.target });
+      expect(refused.ok).toBe(true);
+    });
+
+    test('gate on: a measured "no link" (plain refusal) stays no link at send — never rebuilt', async () => {
+      process.env.GATE_RAINOUT_MOVE_BANNER = 'true';
+      mockV3Render();
+      wireSingle();
+      buildRescheduleLink.mockResolvedValueOnce({ url: null, line: '' });
+
+      const result = await RainOut.commit({ ...COMMIT_ARGS, customerNote: 'See you Friday!' });
+
+      expect(result.ok).toBe(true);
+      expect(buildRescheduleLink).toHaveBeenCalledTimes(1);
+      expect(sendCustomerMessage.mock.calls[0][0].body).toContain(' Need a different time? Reply to this message.');
+    });
+
+    test('gate on: a disabled v3 row is uncapped here and PINNED — the send honours the kill switch even if the row is enabled in between', async () => {
+      process.env.GATE_RAINOUT_MOVE_BANNER = 'true';
+      mockV3Render();
+      wireSingle({}, { v3Row: { body: V3_BODY, is_active: false } });
+
+      const result = await RainOut.commit({ ...COMMIT_ARGS, customerNote: 'x'.repeat(200) });
+
+      // Moved, no pre-move render, and the send never re-reads the row: a
+      // row enabled between check and send would render a body the cap
+      // never measured (r2 P2).
+      expect(result.ok).toBe(true);
+      expect(result.results[0]).toMatchObject({ ok: true, smsSent: false, smsReason: 'missing_template' });
+      expect(renderSmsTemplate).not.toHaveBeenCalled();
+      expect(sendCustomerMessage).not.toHaveBeenCalled();
+    });
+
+    test('gate on: an absent v3 row is PINNED — the send falls to v2 even if the row is created in between', async () => {
+      process.env.GATE_RAINOUT_MOVE_BANNER = 'true';
+      mockV3Render();
+      wireSingle({}, { v3Row: null });
+
+      const result = await RainOut.commit({ ...COMMIT_ARGS, customerNote: 'x'.repeat(200) });
+
+      expect(result.ok).toBe(true);
+      expect(renderSmsTemplate).toHaveBeenCalledTimes(1);
+      expect(renderSmsTemplate.mock.calls[0][0]).toBe('rain_out_moved_v2');
+    });
+
+    test('gate on: the send rebuilds the link on the POST-move state — a visit grouped in between gets no link', async () => {
+      process.env.GATE_RAINOUT_MOVE_BANNER = 'true';
+      mockV3Render();
+      wireSingle();
+      // Pre-check: eligible, existing code. Send: the builder re-validates
+      // the pinned url and now refuses (grouped / frozen in between) — the
+      // body shrinks, never grows.
+      buildRescheduleLink
+        .mockResolvedValueOnce({ url: 'https://waves.test/r/tok123', line: '' })
+        .mockResolvedValueOnce({ url: null, line: '' });
+
+      const result = await RainOut.commit({ ...COMMIT_ARGS, customerNote: 'See you Friday!' });
+
+      expect(result.ok).toBe(true);
+      const { body } = sendCustomerMessage.mock.calls[0][0];
+      expect(body).toContain(' Need a different time? Reply to this message.');
+      expect(body).not.toContain('waves.test');
+    });
+
+    test('gate off: the v2 rung is uncapped — a full-length note still moves and sends', async () => {
+      wireSingle();
+
+      const result = await RainOut.commit({ ...COMMIT_ARGS, customerNote: 'x'.repeat(200) });
+
+      expect(result.ok).toBe(true);
+      expect(renderSmsTemplate).toHaveBeenCalledTimes(1);
+      expect(renderSmsTemplate.mock.calls[0][0]).toBe('rain_out_moved_v2');
+      expect(sendCustomerMessage.mock.calls[0][0].body).toBe(`rendered body\n\nNote from our team: ${'x'.repeat(200)}`);
+    });
+
+    test('previewMovedSms: a preset reason counts the v3 notice + note; blank note = bare notice; gate off = uncapped', async () => {
+      process.env.GATE_RAINOUT_MOVE_BANNER = 'true';
+      mockV3Render();
+      wireSingle();
+      const target = { date: '2026-06-12', window: { start: '13:00', end: '14:00' } };
+
+      let result = await RainOut.previewMovedSms({
+        serviceId: 'svc-1', reasonCode: 'weather_rain', customMessage: '  See you   Friday!  ', target,
+      });
+      expect(result.ok).toBe(true);
+      expect(buildRescheduleLink).toHaveBeenCalledWith('svc-1', { customerId: 'cust-1', reuseExisting: true, previewOnly: true, assumeConfirmed: true });
+      const vars = renderSmsTemplate.mock.calls[0][1];
+      expect(vars.link_clause).toContain('https://waves.test/r/tok123');
+      const { countSegments } = require('../services/messaging/segment-counter');
+      const body = `Hi Pat, ${vars.weather_lead}, so we moved your quarterly pest control to ${vars.new_option}.${vars.link_clause}\n\nNote from our team: See you Friday!`;
+      const seg = countSegments(asSent(body));
+      expect(result).toMatchObject({
+        segments: seg.segmentCount, maxSegments: 2, withinCap: true, remaining: 306 - seg.gsmSlotCount, encoding: 'GSM_7',
+      });
+
+      wireSingle();
+      result = await RainOut.previewMovedSms({ serviceId: 'svc-1', reasonCode: 'weather_rain', customMessage: '', target });
+      expect(result.ok).toBe(true);
+      const bare = countSegments(asSent(`Hi Pat, ${vars.weather_lead}, so we moved your quarterly pest control to ${vars.new_option}.${vars.link_clause}`));
+      expect(result.remaining).toBe(306 - bare.gsmSlotCount);
+
+      delete process.env.GATE_RAINOUT_MOVE_BANNER;
+      wireSingle();
+      result = await RainOut.previewMovedSms({ serviceId: 'svc-1', reasonCode: 'weather_rain', customMessage: 'x', target });
+      expect(result).toEqual({ ok: false, reason: 'uncapped' });
+
+      // A gated-off extra reason is not a valid reason for the preview either.
+      wireSingle();
+      result = await RainOut.previewMovedSms({ serviceId: 'svc-1', reasonCode: 'gate_locked', customMessage: 'x', target });
+      expect(result).toEqual({ ok: false, reason: 'bad_reason' });
+    });
+  });
+
   describe('custom reason (GATE_QUICKMOVE_CUSTOM_REASON)', () => {
     afterEach(() => {
       delete process.env.GATE_QUICKMOVE_CUSTOM_REASON;
@@ -2929,7 +3310,7 @@ describe('rain-out service', () => {
       expect(SmartRebooker.reschedule).toHaveBeenCalledWith(
         'svc-1', '2026-06-12', { start: '13:00', end: '14:00' }, 'custom', 'tech',
         // actorId = Quick Move's actorUserId: a tech moving their own visit gets no tech notice.
-        { allowLive: true, actorId: 'admin-7', overlapAdvisory: true, excludeServiceIds: ['svc-1'], seriesPolicy: 'single' },
+        { allowLive: true, qualityDates: expect.any(Set), actorId: 'admin-7', overlapAdvisory: true, excludeServiceIds: ['svc-1'], seriesPolicy: 'single' },
       );
       expect(renderSmsTemplate).not.toHaveBeenCalled();
       expect(sendCustomerMessage).not.toHaveBeenCalled();
@@ -2958,18 +3339,19 @@ describe('rain-out service', () => {
       // codex PR P2: getOptions' counter estimates with the existing code,
       // so commit must build the body with the SAME one — a legacy
       // odd-length code vs a fresh 10-char mint flips boundary cases.
+      // The reuse goes THROUGH the link builder (reuseExisting) so the
+      // grouped / frozen / dispatch-pending refusals still apply (pre-push
+      // P1), and the send reuses the measured URL instead of building again.
       process.env.GATE_QUICKMOVE_CUSTOM_REASON = 'true';
       mockCustomRender();
-      wireDb({
-        scheduled_services: [chain({ first: jest.fn().mockResolvedValue({ ...SERVICE }) })],
-        short_codes: [chain({ first: jest.fn().mockResolvedValue({ code: 'abcde' }) })],
-      });
+      wireSingle();
 
       const result = await RainOut.commit(COMMIT_ARGS);
 
       expect(result.ok).toBe(true);
-      expect(buildRescheduleLink).not.toHaveBeenCalled();
-      expect(sendCustomerMessage.mock.calls[0][0].body).toContain('/l/abcde');
+      expect(buildRescheduleLink).toHaveBeenCalledTimes(1);
+      expect(buildRescheduleLink).toHaveBeenCalledWith('svc-1', { customerId: 'cust-1', reuseExisting: true, assumeConfirmed: true });
+      expect(sendCustomerMessage.mock.calls[0][0].body).toContain('https://waves.test/r/tok123');
     });
 
     test('custom renders pin the base row and demand the load-bearing placeholders (renderer opts contract)', async () => {
@@ -3057,7 +3439,7 @@ describe('rain-out service', () => {
       let options = await RainOut.getOptions('svc-1', { caller: { isAdmin: false, technicianId: 'tech-1' } });
       expect(options.customReasonEnabled).toBe(true);
       // No render payload — the counter is server-rendered on demand via
-      // previewCustomSms (codex r9 P1); this is only the availability flag.
+      // previewMovedSms (codex r9 P1); this is only the availability flag.
       expect(options.customCompose).toEqual({ maxSegments: 2 });
 
       // Disabled row = ops kill switch: the sheet must not offer Custom.
@@ -3085,33 +3467,31 @@ describe('rain-out service', () => {
       expect(options.customCompose).toBeNull();
     });
 
-    test('previewCustomSms: renders through the real pipeline and returns the enforcement math', async () => {
+    test('previewMovedSms: renders through the real pipeline and returns the enforcement math', async () => {
       process.env.GATE_QUICKMOVE_CUSTOM_REASON = 'true';
       mockCustomRender();
       // Existing short code reused (read-only) — never a fresh mint; the
       // counter and commit() measure the same URL (codex PR P2 lineage).
-      wireDb({
-        scheduled_services: [chain({ first: jest.fn().mockResolvedValue({ ...SERVICE, reschedule_token: 'tok-abc' }) })],
-        short_codes: [chain({ first: jest.fn().mockResolvedValue({ code: 'abcde' }) })],
-      });
+      wireSingle();
 
-      const result = await RainOut.previewCustomSms({
+      const result = await RainOut.previewMovedSms({
         serviceId: 'svc-1',
+        reasonCode: 'custom',
         customMessage: `  ${MESSAGE}  `,
         target: { date: '2026-06-12', window: { start: '13:00', end: '14:00' } },
       });
 
       expect(result.ok).toBe(true);
-      expect(buildRescheduleLink).not.toHaveBeenCalled();
+      expect(buildRescheduleLink).toHaveBeenCalledWith('svc-1', { customerId: 'cust-1', reuseExisting: true, previewOnly: true, assumeConfirmed: true });
       const vars = renderSmsTemplate.mock.calls[0][1];
-      expect(vars.link_clause).toContain('/l/abcde');
+      expect(vars.link_clause).toContain('https://waves.test/r/tok123');
       // Whitespace-collapsed like sanitizeCustomerNote before rendering.
       expect(vars.custom_message).toBe(MESSAGE);
       // The math IS the enforcement math: same countSegments over the
       // rendered body.
       const { countSegments } = require('../services/messaging/segment-counter');
       const body = `Hi Pat - ${MESSAGE}\n\nWe've moved your quarterly pest control to Fri, Jun 12, 1:00 PM - 3:00 PM.${vars.link_clause}`;
-      const seg = countSegments(body);
+      const seg = countSegments(require('../services/messaging/sms-link-policy').stripSmsUrlScheme(body));
       expect(result).toMatchObject({
         segments: seg.segmentCount,
         maxSegments: 2,
@@ -3121,15 +3501,13 @@ describe('rain-out service', () => {
       });
     });
 
-    test('previewCustomSms: blank message counts the default opener — the body commit() would send', async () => {
+    test('previewMovedSms: blank message counts the default opener — the body commit() would send', async () => {
       process.env.GATE_QUICKMOVE_CUSTOM_REASON = 'true';
       mockCustomRender();
-      wireDb({
-        scheduled_services: [chain({ first: jest.fn().mockResolvedValue({ ...SERVICE, reschedule_token: 'tok-abc' }) })],
-        short_codes: [chain({ first: jest.fn().mockResolvedValue({ code: 'abcde' }) })],
-      });
-      const result = await RainOut.previewCustomSms({
+      wireSingle();
+      const result = await RainOut.previewMovedSms({
         serviceId: 'svc-1',
+        reasonCode: 'custom',
         customMessage: '   ',
         target: { date: '2026-06-12', window: { start: '13:00', end: '14:00' } },
       });
@@ -3138,12 +3516,12 @@ describe('rain-out service', () => {
       expect(vars.custom_message).toBe('quick update on your upcoming appointment.');
     });
 
-    test('previewCustomSms: gate off / dead template reject like commit would', async () => {
+    test('previewMovedSms: gate off / dead template reject like commit would', async () => {
       wireDb({
         scheduled_services: [chain({ first: jest.fn().mockResolvedValue({ ...SERVICE }) })],
       });
-      let result = await RainOut.previewCustomSms({
-        serviceId: 'svc-1', customMessage: MESSAGE,
+      let result = await RainOut.previewMovedSms({
+        serviceId: 'svc-1', reasonCode: 'custom', customMessage: MESSAGE,
         target: { date: '2026-06-12', window: { start: '13:00', end: '14:00' } },
       });
       expect(result).toMatchObject({ ok: false, reason: 'bad_reason' });
@@ -3153,8 +3531,8 @@ describe('rain-out service', () => {
       wireDb({
         scheduled_services: [chain({ first: jest.fn().mockResolvedValue({ ...SERVICE }) })],
       });
-      result = await RainOut.previewCustomSms({
-        serviceId: 'svc-1', customMessage: MESSAGE,
+      result = await RainOut.previewMovedSms({
+        serviceId: 'svc-1', reasonCode: 'custom', customMessage: MESSAGE,
         target: { date: '2026-06-12', window: { start: '13:00', end: '14:00' } },
       });
       expect(result).toMatchObject({ ok: false, reason: 'custom_message_unavailable' });

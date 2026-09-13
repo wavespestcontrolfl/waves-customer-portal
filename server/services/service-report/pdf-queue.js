@@ -21,6 +21,7 @@ const { pestReportV2PdfSignature } = require('./pest-report-v2');
 const { termiteReportV2PdfSignature, attachTermiteReportV2 } = require('./termite-report-v2');
 const { cockroachReportV2PdfSignature, cockroachReportV2RenderedSignature, attachCockroachReportV2 } = require('./cockroach-report-v2');
 const { reserviceReportPdfSignature, reserviceReportRenderedSignature, reserviceTrendsPdfSignature } = require('./reservice-report');
+const { reportPhotoSetPdfSignature } = require('./photo-set-signature');
 const { photoMarksPdfSignature } = require('./photo-marks');
 const { treatmentZonePdfSignature } = require('../treatment-zone-maps');
 const { stationMapPdfSignature } = require('../termite-stations');
@@ -216,6 +217,11 @@ async function renderAndStoreServiceReportPdf(recordId, {
   // Re-read after the render; on mismatch the object is served unstored,
   // matching the lawn-assessment stability fence below.
   const reserviceTrendsBefore = await reserviceTrendsPdfSignature(service, knex);
+  // Photo-set key component, same before/after contract: closeout photo
+  // recovery can attach rows mid-render (Codex #4091 P1, photo-set-signature.js).
+  // The parked-summary marker comes from the snapshot this render uses
+  // (`service`, loaded above), never a fresh read — see the module doc.
+  const photoSetBefore = await reportPhotoSetPdfSignature(recordId, knex, { serviceData: service.service_data });
   for (let attempt = 0; attempt < 2; attempt += 1) {
     const renderSignature = visibilitySignature;
     const data = await buildReportV1Data(service, reportToken, knex, { pestPressureConfig, pinnedLawnAssessmentId: effectivePin, pinnedWeekPlanAvailableAt: canonical.weekPlanAvailableAt, propertyHistoryEnabled, lawnHistory, pinnedLawnHistoryIdentity });
@@ -379,8 +385,16 @@ async function renderAndStoreServiceReportPdf(recordId, {
         uncachedReason: 'callback_set_changed',
       };
     }
+    const photoSetAfter = await reportPhotoSetPdfSignature(recordId, knex);
+    if (photoSetAfter !== photoSetBefore) {
+      logger.warn(`[service-report-pdf] photo set changed during PDF render for ${recordId} — serving without storing`);
+      return {
+        key: null, pdf, rendered: true, token: reportToken, uncached: true,
+        uncachedReason: 'photo_set_changed',
+      };
+    }
     const key = await putReportPdf(recordId, pdf, {
-      visibilitySignature: visibilitySignature + summarySignature + mosquitoV2Signature + pestV2Signature + termiteV2Signature + cockroachRenderedSignature + reserviceRenderedSignature + reserviceTrendsBefore + tzSignature + smSignature + tnRenderedSignature + timeOnSiteAdjustedPdfSignature(service) + reentryAdjustedPdfSignature(service) + laSignature + photoMarksPdfSignature() + publicOriginPdfSignature(),
+      visibilitySignature: visibilitySignature + summarySignature + mosquitoV2Signature + pestV2Signature + termiteV2Signature + cockroachRenderedSignature + reserviceRenderedSignature + reserviceTrendsBefore + photoSetBefore + tzSignature + smSignature + tnRenderedSignature + timeOnSiteAdjustedPdfSignature(service) + reentryAdjustedPdfSignature(service) + laSignature + photoMarksPdfSignature() + publicOriginPdfSignature(),
     });
     await knex('service_records').where({ id: recordId }).update({ pdf_storage_key: key });
     return { key, pdf, token: reportToken };
@@ -531,7 +545,7 @@ async function getOrRenderServiceReportPdf(recordId, {
   const visibilitySignature = pestPressureVisibilitySignature(pestPressureConfig);
   const expectedPdfStorageKey = service?.id
     ? reportPdfStorageKey(service.id, {
-      visibilitySignature: visibilitySignature + summaryCopySignature(service) + mosquitoReportV2PdfSignature(service) + pestReportV2PdfSignature(service) + termiteReportV2PdfSignature(service) + await cockroachReportV2PdfSignature(service, knex) + await reserviceReportPdfSignature(service, { knex }) + await reserviceTrendsPdfSignature(service, knex) + await treatmentZonePdfSignature(service, knex) + await stationMapPdfSignature(service, knex) + await treatmentNarrativePdfSignature(service.id, knex) + timeOnSiteAdjustedPdfSignature(service) + reentryAdjustedPdfSignature(service) + await lawnAssessmentPdfSignature(service, knex, { propertyHistoryEnabled }) + photoMarksPdfSignature() + publicOriginPdfSignature(),
+      visibilitySignature: visibilitySignature + summaryCopySignature(service) + mosquitoReportV2PdfSignature(service) + pestReportV2PdfSignature(service) + termiteReportV2PdfSignature(service) + await cockroachReportV2PdfSignature(service, knex) + await reserviceReportPdfSignature(service, { knex }) + await reserviceTrendsPdfSignature(service, knex) + await reportPhotoSetPdfSignature(service.id, knex) + await treatmentZonePdfSignature(service, knex) + await stationMapPdfSignature(service, knex) + await treatmentNarrativePdfSignature(service.id, knex) + timeOnSiteAdjustedPdfSignature(service) + reentryAdjustedPdfSignature(service) + await lawnAssessmentPdfSignature(service, knex, { propertyHistoryEnabled }) + photoMarksPdfSignature() + publicOriginPdfSignature(),
     })
     : null;
   const stored = (!mustRenderFresh && service?.pdf_storage_key === expectedPdfStorageKey)

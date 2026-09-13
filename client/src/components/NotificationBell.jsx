@@ -383,7 +383,7 @@ export default function NotificationBell({ type = 'admin', customerId }) {
           <span style={{
             position: 'absolute', top: 4, right: 2,
             background: colors.badge, color: '#fff', fontSize: 10,
-            fontWeight: type === 'admin' ? 700 : 800,
+            fontWeight: 700,
             minWidth: 18, height: 18, borderRadius: 9, display: 'flex',
             alignItems: 'center', justifyContent: 'center', padding: '0 4px',
           }}>
@@ -406,7 +406,9 @@ export default function NotificationBell({ type = 'admin', customerId }) {
           // full-screen panel (no glass theme mounted on /admin).
           <div ref={attachPanelRef} role="dialog" aria-modal="true" aria-label="Notifications" data-glass={isDark ? undefined : 'modal'} style={{
             position: 'fixed',
-            top: isDark ? 'calc(56px + env(safe-area-inset-top, 0px))' : 'calc(env(safe-area-inset-top, 0px) + 8px)',
+            // 52px matches AdminLayoutV2's mobile top bar (calc(52px + safe-area));
+            // 56 left a 4px strip of page showing between header and panel.
+            top: isDark ? 'calc(52px + env(safe-area-inset-top, 0px))' : 'calc(env(safe-area-inset-top, 0px) + 8px)',
             left: isDark ? 0 : 10,
             right: isDark ? 0 : 10,
             bottom: isDark ? 'calc(56px + env(safe-area-inset-bottom, 0px))' : 'calc(env(safe-area-inset-bottom, 0px) + 78px)',
@@ -487,7 +489,7 @@ export default function NotificationBell({ type = 'admin', customerId }) {
                   <button type="button" onClick={loadNotifications} style={{
                     marginTop: 12, padding: '8px 14px', borderRadius: 8, border: '1px solid #D8D0C0',
                     background: '#fff', color: '#04395E', fontSize: 14,
-                    fontWeight: type === 'admin' ? 700 : 800, cursor: 'pointer',
+                    fontWeight: 700, cursor: 'pointer',
                   }}>Try again</button>
                 </div>
               )}

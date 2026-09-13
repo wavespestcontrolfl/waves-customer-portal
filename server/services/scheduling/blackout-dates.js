@@ -135,20 +135,67 @@ async function getBlackoutLayers(fromStr, toStr, conn = db) {
 // YYYY-MM-DD strings OR JS Date values (pg DATE columns arrive as either
 // depending on the caller) — String() on a Date is a locale string that
 // would silently never match.
-async function isBlackoutDate(dateVal) {
+// `conn`: a transaction to read through. A caller already inside a txn must
+// pass it (codex r10/r11 P2) — reading through the module-global `db` checks
+// out a SECOND pooled connection while the first is held, so enough
+// concurrent callers wait on connections each other holds until acquisition
+// times out and this lookup fails open. getWeeklyDaysOff has always taken a
+// conn; this is the other half.
+async function isBlackoutDate(dateVal, conn = db) {
   const dateStr = toDateStr(dateVal);
   if (!dateStr) return false;
-  const weekly = await getWeeklyDaysOff();
+  const weekly = await getWeeklyDaysOff(conn);
   if (weekly.has(dowOfDateStr(dateStr))) return true;
   try {
-    const row = await db('schedule_blackout_dates')
+    // Through readOptional's savepoint, like its siblings (codex r12 P2): a
+    // failed query inside a CALLER'S transaction aborts that transaction, so
+    // returning false here would leave the next statement to fail 25P02 —
+    // turning documented fail-open behaviour into a failed accept/extend.
+    const row = await readOptional(conn, (dbh) => dbh('schedule_blackout_dates')
       .where('date', dateStr)
-      .first('id');
+      .first('id'));
     return !!row;
   } catch (err) {
     logger.warn(`[blackout-dates] date lookup failed (failing open): ${err.message}`);
     return false;
   }
+}
+
+// Closure-state advisory lock — serializes the blackout-date / weekly-days-off
+// mutation endpoints (routes/admin-schedule.js: PUT /blackout-dates/weekly,
+// POST /blackout-dates, DELETE /blackout-dates/:id) against the capacity
+// reservation transaction's closure-state read (arrival-route.js
+// assertCapacityEligibility → getBlackoutLayers). Without this, a READ
+// COMMITTED reservation can read the pre-mutation closure state and commit a
+// hold for a day the admin closes a moment later (codex #4346 P2).
+//
+// Namespace + key MUST stay in lockstep with the other holders of the
+// 'slot-reserve' advisory namespace (see tech-day-lock.js header) — same
+// hashtext(namespace) classid, distinct key ('closure-state') so this lock
+// never collides with a tech-day key.
+//
+// Lock order: readers (the capacity check inside a reservation transaction)
+// already hold the date occupancy lock, tech-day fences, and row locks
+// before taking this lock SHARED. Writers (the three mutation endpoints)
+// take ONLY this lock, EXCLUSIVE, before their write, and hold no other
+// scheduling lock. A writer therefore never holds anything a reader could be
+// waiting on, so no lock-order cycle is possible.
+//
+// xact-scoped: `conn` MUST already be inside a transaction. This is a lock,
+// not a fail-open lookup — a missing transaction throws rather than
+// silently no-op'ing (a no-op here would recreate the exact race it exists
+// to close).
+const CLOSURE_LOCK_NAMESPACE = 'slot-reserve';
+const CLOSURE_LOCK_KEY = 'closure-state';
+
+async function lockClosureState(conn, { exclusive = false } = {}) {
+  if (!conn?.isTransaction) {
+    throw Object.assign(new Error('lockClosureState requires an open transaction'), { code: 'TRANSACTION_REQUIRED' });
+  }
+  const sql = exclusive
+    ? 'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))'
+    : 'SELECT pg_advisory_xact_lock_shared(hashtext(?), hashtext(?::text))';
+  await conn.raw(sql, [CLOSURE_LOCK_NAMESPACE, CLOSURE_LOCK_KEY]);
 }
 
 module.exports = {
@@ -158,5 +205,6 @@ module.exports = {
   isBlackoutDate,
   getWeeklyDaysOff,
   expandWeeklyDaysOff,
+  lockClosureState,
   WEEKLY_DAYS_OFF_KEY,
 };

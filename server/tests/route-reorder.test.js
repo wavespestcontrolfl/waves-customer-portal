@@ -26,20 +26,36 @@ jest.mock('../models/db', () => {
   fn.transaction = jest.fn();
   return fn;
 });
+// Lazily required by runScheduleQualityAlertsOnly — no existing test in this
+// file sets GATE_SCHEDULE_QUALITY_ALERTS, so the real module is never
+// otherwise exercised here.
+jest.mock('../services/scheduling/quality-alerts', () => ({
+  refreshScheduleQualityAlerts: jest.fn(),
+}));
 
 const db = require('../models/db');
 const logger = require('../services/logger');
 const { dayStopsQuery } = require('../services/scheduling/day-stops');
 const RouteOptimizer = require('../services/route-optimizer');
 const routeTiers = require('../services/auto-dispatch/route-tiers');
-const { runRouteReorder, runRouteReorderIfEnabled, recordSkippedTick } = require('../services/route-reorder');
+const { refreshScheduleQualityAlerts } = require('../services/scheduling/quality-alerts');
+const {
+  runRouteReorder, runRouteRepairAfterChange, runRouteReorderIfEnabled, recordSkippedTick,
+  runScheduleQualityAlertsOnly,
+} = require('../services/route-reorder');
 
 // Fixed clock: 2026-08-13 04:10 ET (08:10Z). Band = 2026-08-14 .. 2026-08-19.
 const NOW = new Date('2026-08-13T08:10:00Z');
 const BAND = ['2026-08-14', '2026-08-15', '2026-08-16', '2026-08-17', '2026-08-18', '2026-08-19'];
 
 function stop(id, over = {}) {
-  return { id, technician_id: 't1', route_order: null, window_start: '09:00', time_window: null, service_type: 'pest', zone: null, lat: 1, lng: 1, ...over };
+  // service_address_line1 present-but-null, as the day-load select returns
+  // it for a row that inherits the customer's address.
+  return { id, technician_id: 't1', route_order: null, window_start: '09:00', time_window: null, service_type: 'pest', zone: null, lat: 1, lng: 1, service_address_line1: null, visit_id: null,
+    // A real row: unstamped, so its premise is the customer's own
+    // primary address (the columns the day load aliases).
+    customer_address_line1: '100 Main St', customer_address_line2: null,
+    customer_city: 'Bradenton', customer_state: 'FL', customer_zip: '34205', ...over };
 }
 
 // A tech-day whose CURRENT order backtracks (B@lng3 first, then A@lng1, C@lng2
@@ -118,7 +134,14 @@ beforeEach(() => {
           // Unchanged tech-day: mirror the loaded stops for this date+tech.
           return (stopsByDate[filters.scheduled_date] || [])
             .filter((s) => s.technician_id === filters.technician_id)
-            .map((s) => ({ id: s.id, window_start: s.window_start, time_window: s.time_window, estimated_duration_minutes: s.estimated_duration_minutes, auto_dispatch_locked: s.auto_dispatch_locked, auto_dispatch_excluded: s.auto_dispatch_excluded, route_order: s.route_order, lat: s.lat, lng: s.lng }));
+            .map((s) => ({ id: s.id, window_start: s.window_start, window_end: s.window_end, visit_id: s.visit_id, time_window: s.time_window, estimated_duration_minutes: s.estimated_duration_minutes, auto_dispatch_locked: s.auto_dispatch_locked, auto_dispatch_excluded: s.auto_dispatch_excluded, route_order: s.route_order, lat: s.lat, lng: s.lng,
+              // The commit fence hashes the EFFECTIVE premise, so the live
+              // read projects the same columns the day load selected.
+              service_address_line1: s.service_address_line1, service_address_line2: s.service_address_line2,
+              service_address_city: s.service_address_city, service_address_zip: s.service_address_zip,
+              customer_id: s.customer_id,
+              customer_address_line1: s.customer_address_line1, customer_address_line2: s.customer_address_line2,
+              customer_city: s.customer_city, customer_state: s.customer_state, customer_zip: s.customer_zip }));
         },
         update: async (u) => { attempted.push({ id: filters.id, ...u }); return 1; },
       };
@@ -164,6 +187,131 @@ test('days whose visits start within 72h are skipped whole (clock freeze)', asyn
   expect(ledger.reorders[0]).toMatchObject({ date: '2026-08-16', technician_id: 't1' });
 });
 
+describe('near-term null-position repair', () => {
+  const repairDay = () => [
+    stop('one', { route_order: 1, window_start: '13:00', estimated_duration_minutes: 60 }),
+    stop('later', { route_order: 2, window_start: '15:00', window_end: '17:00', estimated_duration_minutes: 60 }),
+    stop('new', { route_order: null, window_start: '14:00', estimated_duration_minutes: 60 }),
+  ];
+  beforeEach(() => {
+    process.env.GATE_ROUTE_REORDER_REPAIR = 'true';
+    process.env.GATE_DRIVE_TIME_CALIBRATION = 'true';
+    stopsByDate[BAND[0]] = repairDay();
+  });
+  afterEach(() => {
+    delete process.env.GATE_ROUTE_REORDER_REPAIR;
+    delete process.env.GATE_DRIVE_TIME_CALIBRATION;
+    delete process.env.GATE_ROUTE_REORDER;
+  });
+
+  test('restores arrival feasibility inside 72 hours with no mileage gain, using stored work duration', async () => {
+    routeTiers.loadReminderFreeze.mockResolvedValue({ failed: false, frozen: new Set(['later']) });
+    const result = await runRouteReorder({ now: NOW });
+    expect(result.applied).toBe(1);
+    expect(trxUpdates).toEqual([{ id: 'one', route_order: 1 }, { id: 'new', route_order: 2 }, { id: 'later', route_order: 3 }]);
+    expect(RouteOptimizer.optimizeRoute).not.toHaveBeenCalled();
+    expect(JSON.parse(ledgerInserts[0].result).reorders[0]).toMatchObject({ source: 'chronological_repair',
+      saved_meters: 0, distance_change_meters: 0, before_window_feasible: false, after_window_feasible: true });
+  });
+
+  test.each([false, true])('repairs every stop beyond the Google cap without calling Google (event mode: %s)', async eventMode => {
+    process.env.GATE_ROUTE_REORDER = 'true';
+    const early = Array.from({ length: 23 }, (_, index) => stop(`early-${index}`, {
+      route_order: index + 1, window_start: '08:00', estimated_duration_minutes: 5,
+    }));
+    stopsByDate[BAND[0]] = [...early, ...repairDay().map(row => ({
+      ...row, route_order: row.route_order == null ? null : row.route_order + early.length,
+    }))];
+    const result = eventMode ? await runRouteRepairAfterChange({ dates: [BAND[0]], now: NOW }) : await runRouteReorder({ now: NOW });
+    expect(result.applied).toBe(1);
+    expect(trxUpdates.map(row => row.id)).toEqual([...early.map(row => row.id), 'one', 'new', 'later']);
+    expect(RouteOptimizer.optimizeRoute).not.toHaveBeenCalled();
+  });
+
+  test.each(['GATE_ROUTE_REORDER_REPAIR', 'GATE_DRIVE_TIME_CALIBRATION'])('%s off retains the near-term freeze', async gate => {
+    delete process.env[gate];
+    expect((await runRouteReorder({ now: NOW })).applied).toBe(0);
+    expect(trxUpdates).toEqual([]);
+  });
+
+  test.each([{ auto_dispatch_locked: true }, { auto_dispatch_excluded: true }, { lat: null }, { visit_id: 'group' },
+    { estimated_duration_minutes: null }, { estimated_duration_minutes: -10 },
+    { estimated_duration_minutes: Infinity }])('refuses protected or unverifiable work: %j', async change => {
+    Object.assign(stopsByDate[BAND[0]][0], change);
+    expect((await runRouteReorder({ now: NOW })).applied).toBe(0);
+    expect(trxUpdates).toEqual([]);
+  });
+
+  test('does not replace an intentionally nonchronological existing order', async () => {
+    stopsByDate[BAND[0]][0].route_order = 2;
+    stopsByDate[BAND[0]][1].route_order = 1;
+    expect((await runRouteReorder({ now: NOW })).applied).toBe(0);
+  });
+
+  test('does not normalize a route whose existing order still fits every promise', async () => {
+    stopsByDate[BAND[0]][1].window_end = '16:00';
+    expect((await runRouteReorder({ now: NOW })).applied).toBe(0);
+  });
+
+  test('rechecks duration and membership under the existing write fence', async () => {
+    liveRowsOverride = repairDay();
+    liveRowsOverride[1].window_end = '18:00';
+    expect((await runRouteReorder({ now: NOW })).applied).toBe(0);
+    expect(trxUpdates).toEqual([]);
+    expect(trxRawCalls[0].beforeMembershipRead).toBe(true);
+  });
+
+  test('a duration cleared during the run cannot regain the legacy fallback at commit', async () => {
+    liveRowsOverride = repairDay();
+    liveRowsOverride[0].estimated_duration_minutes = null;
+    expect((await runRouteReorder({ now: NOW })).applied).toBe(0);
+    expect(trxUpdates).toEqual([]);
+  });
+
+  test('an unreadable reminder state still fails closed', async () => {
+    routeTiers.loadReminderFreeze.mockResolvedValue({ failed: true, frozen: new Set() });
+    expect((await runRouteReorder({ now: NOW })).applied).toBe(0);
+    expect(trxUpdates).toEqual([]);
+  });
+
+  test('a repair gate revoked at commit prevents every write', async () => {
+    routeTiers.loadReminderFreeze.mockImplementation(async (conn) => {
+      if (conn !== db) delete process.env.GATE_ROUTE_REORDER_REPAIR;
+      return { failed: false, frozen: new Set() };
+    });
+    expect((await runRouteReorder({ now: NOW })).applied).toBe(0);
+    expect(trxUpdates).toEqual([]);
+  });
+
+  test('event mode only repairs the affected future dates and never invokes the distance optimizer', async () => {
+    process.env.GATE_ROUTE_REORDER = 'true';
+    stopsByDate['2026-08-24'] = repairDay();
+    stopsByDate['2026-08-25'] = backtrackDay();
+    const result = await runRouteRepairAfterChange({ dates: ['2026-08-13', '2026-08-24', '2026-08-24', '2026-08-25', '2026-09-13', 'bad'], now: NOW });
+    expect(result.applied).toBe(1);
+    expect(dayStopsQuery.mock.calls.map(([, args]) => args.dateStr)).toEqual(['2026-08-24', '2026-08-25']);
+    expect(RouteOptimizer.optimizeRoute).not.toHaveBeenCalled();
+    expect(ledgerInserts[0].run_type).toBe('route_repair_change');
+    expect(JSON.parse(ledgerInserts[0].result)).toMatchObject({ auto_dispatch: null,
+      skips: [expect.objectContaining({ date: '2026-08-25', reason: 'NO_SAFE_INSERTION' })] });
+    expect(dbCalls.some(call => call.table === 'auto_dispatch_runs')).toBe(false);
+  });
+
+  test.each(['GATE_ROUTE_REORDER', 'GATE_ROUTE_REORDER_REPAIR', 'GATE_DRIVE_TIME_CALIBRATION'])('event mode requires %s at entry and commit', async gate => {
+    process.env.GATE_ROUTE_REORDER = 'true';
+    delete process.env[gate];
+    expect(await runRouteRepairAfterChange({ dates: [BAND[0]], now: NOW })).toEqual({ status: 'gate_off' });
+    expect(dayStopsQuery).not.toHaveBeenCalled();
+    process.env[gate] = 'true';
+    routeTiers.loadReminderFreeze.mockImplementation(async conn => {
+      if (conn !== db) delete process.env[gate];
+      return { failed: false, frozen: new Set() };
+    });
+    expect((await runRouteRepairAfterChange({ dates: [BAND[0]], now: NOW })).applied).toBe(0);
+    expect(trxUpdates).toEqual([]);
+  });
+});
+
 test('a reminder-sent visit freezes its whole day', async () => {
   stopsByDate['2026-08-16'] = backtrackDay();
   routeTiers.loadReminderFreeze.mockResolvedValue({ failed: false, frozen: new Set(['C']) });
@@ -172,6 +320,38 @@ test('a reminder-sent visit freezes its whole day', async () => {
   expect(RouteOptimizer.optimizeRoute).not.toHaveBeenCalled();
   const ledger = JSON.parse(ledgerInserts[0].result);
   expect(ledger.skips).toContainEqual(expect.objectContaining({ date: '2026-08-16', reason: 'REMINDER_SENT_FROZEN' }));
+});
+
+test('quality measurements capture frozen routes in the existing ledger without changing them', async () => {
+  process.env.GATE_SCHEDULE_QUALITY_MEASUREMENTS = 'true';
+  try {
+    stopsByDate[BAND[0]] = [stop('first', { window_start: '08:00' }), stop('next', { window_start: '11:00' })];
+    const result = await runRouteReorder({ now: NOW });
+    expect(result.applied).toBe(0);
+    expect(trxUpdates).toEqual([]);
+    const measurement = JSON.parse(ledgerInserts[0].result).route_quality[0];
+    expect(measurement).toMatchObject({ date: BAND[0], technician_id: 't1', serviceMinutes: 120,
+      grossGapMinutes: 120, remainingServiceBudgetMinutes: null });
+    expect(JSON.stringify(measurement)).not.toMatch(/"lat"|"lng"|customer_name|address/);
+  } finally {
+    delete process.env.GATE_SCHEDULE_QUALITY_MEASUREMENTS;
+  }
+});
+
+test('revoking measurement collection before the ledger write omits the collected snapshots', async () => {
+  process.env.GATE_SCHEDULE_QUALITY_MEASUREMENTS = 'true';
+  try {
+    stopsByDate['2026-08-18'] = backtrackDay();
+    routeTiers.loadReminderFreeze.mockImplementation(async () => {
+      delete process.env.GATE_SCHEDULE_QUALITY_MEASUREMENTS;
+      return { failed: false, frozen: new Set() };
+    });
+    expect((await runRouteReorder({ now: NOW })).applied).toBe(1);
+    expect(JSON.parse(ledgerInserts[0].result)).not.toHaveProperty('route_quality');
+    expect(JSON.parse(ledgerInserts[0].constraints)).not.toHaveProperty('day_quality_version');
+  } finally {
+    delete process.env.GATE_SCHEDULE_QUALITY_MEASUREMENTS;
+  }
 });
 
 test('FAIL CLOSED + FAIL LOUD: unreadable reminder status freezes the day AND degrades run status', async () => {
@@ -186,14 +366,23 @@ test('FAIL CLOSED + FAIL LOUD: unreadable reminder status freezes the day AND de
   expect(ledger.failures).toContainEqual(expect.objectContaining({ date: '2026-08-17', reason: 'REMINDER_STATUS_UNKNOWN' }));
 });
 
-test('>25 geocoded stops for one tech-day is SKIPPED and LOGGED, never truncated', async () => {
+test.each([false, true])('>25 stops without a safe repair are never sent to Google (repair gate: %s)', async repairGate => {
+  if (repairGate) {
+    process.env.GATE_ROUTE_REORDER_REPAIR = 'true';
+    process.env.GATE_DRIVE_TIME_CALIBRATION = 'true';
+  }
   stopsByDate['2026-08-18'] = Array.from({ length: 26 }, (_, i) => stop(`s${i}`, { lng: i + 1 }));
-  const res = await runRouteReorder({ now: NOW });
-  expect(res.applied).toBe(0);
-  expect(RouteOptimizer.optimizeRoute).not.toHaveBeenCalled();
-  expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('25-waypoint cap'));
-  const ledger = JSON.parse(ledgerInserts[0].result);
-  expect(ledger.skips).toContainEqual(expect.objectContaining({ date: '2026-08-18', reason: 'OVER_WAYPOINT_CAP', geocoded: 26 }));
+  try {
+    const res = await runRouteReorder({ now: NOW });
+    expect(res.applied).toBe(0);
+    expect(RouteOptimizer.optimizeRoute).not.toHaveBeenCalled();
+    expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('25-waypoint cap'));
+    const ledger = JSON.parse(ledgerInserts[0].result);
+    expect(ledger.skips).toContainEqual(expect.objectContaining({ date: '2026-08-18', reason: 'OVER_WAYPOINT_CAP', geocoded: 26 }));
+  } finally {
+    delete process.env.GATE_ROUTE_REORDER_REPAIR;
+    delete process.env.GATE_DRIVE_TIME_CALIBRATION;
+  }
 });
 
 test('savings are computed under ONE model — an order no shorter than the current one applies nothing', async () => {
@@ -357,6 +546,34 @@ test('feasibility uses the optimizer\'s ACTUAL leg durations when aligned (fallb
   expect(violatesWindowFeasibility(RO, [a, b], [a, b], legs)).toBe(true);
   // Misaligned/partial legs are never trusted — falls back to the model.
   expect(violatesWindowFeasibility(RO, [a, b], [a, b], [legs[0]])).toBe(false);
+});
+
+test('feasibility guard: a same-customer same-slot pair merges into one stop (phantom-hour fix, Sat 2026-09-12); a different customer does not', () => {
+  // Mirrors advanceSim's co-visit branch (route-reorder-window-fit.js) but
+  // exercises violatesWindowFeasibility's OWN inline simulation loop
+  // directly — it does not call simulateArrivalRoute, so it needed its own
+  // co-visit check. a+b share the 09:00-11:00 promise (arrival deadline
+  // 11:00) and carry no real estimate, so each falls back to its 120-minute
+  // window span: summed, the pair's four phantom hours blow c's own 10:30
+  // deadline (12:30); merged (same customer_id) it is the one promised
+  // block and fits. Unmerged (different customer_id, i.e. two genuinely different
+  // visits) it does not — and a chain that really does carry additive
+  // estimates is charged both (see route-reorder-window-fit's (i)).
+  const { violatesWindowFeasibility } = require('../services/route-reorder')._internals;
+  const RO = require('../services/route-optimizer');
+  const a = stop('a', { customer_id: 'cust_b', window_start: '09:00', window_end: '11:00', estimated_duration_minutes: null, lat: 1, lng: 1 });
+  const b = stop('b', { customer_id: 'cust_b', window_start: '09:00', window_end: '11:00', estimated_duration_minutes: null, lat: 1, lng: 1 });
+  const c = stop('c', { window_start: '10:30' });
+  expect(violatesWindowFeasibility(RO, [a, b, c], [a, b, c])).toBe(false);
+  const bOtherCustomer = { ...b, customer_id: 'someone_else' };
+  expect(violatesWindowFeasibility(RO, [a, bOtherCustomer, c], [a, bOtherCustomer, c])).toBe(true);
+});
+
+test('the day load selects customer_id — required for the co-visit collapse (phantom-hour fix)', async () => {
+  stopsByDate['2026-08-18'] = backtrackDay();
+  await runRouteReorder({ now: NOW });
+  const [, args] = dayStopsQuery.mock.calls.find(([, a]) => a.dateStr === '2026-08-18');
+  expect(args.select).toContain('scheduled_services.customer_id');
 });
 
 test('effectiveWindowRange: arrival deadline is ALWAYS start+120 (stored window_end = service end, ignored), real band ends', () => {
@@ -652,4 +869,130 @@ test('GATE_ROUTE_REORDER off ⇒ hard no-op (no queries, no ledger)', async () =
   } finally {
     if (orig !== undefined) process.env.GATE_ROUTE_REORDER = orig;
   }
+});
+
+// With GATE_ROUTE_REORDER off, runRouteReorder (and the nightly alert
+// reconciliation folded into it) never runs — so with the measurement +
+// alert gates ON, existing route-quality defects never got an initial card
+// and no card ever expired. runScheduleQualityAlertsOnly is the standalone
+// nightly trigger for exactly that case (codex #4295 r2 P2).
+describe('runScheduleQualityAlertsOnly (reorder off, quality gates own the nightly reconciliation)', () => {
+  const GATES = ['GATE_SCHEDULE_QUALITY_MEASUREMENTS', 'GATE_SCHEDULE_QUALITY_ALERTS'];
+  let saved;
+  beforeEach(() => {
+    jest.clearAllMocks();
+    saved = Object.fromEntries(GATES.map((g) => [g, process.env[g]]));
+    for (const g of GATES) delete process.env[g];
+  });
+  afterEach(() => {
+    for (const g of GATES) {
+      if (saved[g] === undefined) delete process.env[g];
+      else process.env[g] = saved[g];
+    }
+  });
+
+  test('either gate off ⇒ gate_off, no reconciliation call', async () => {
+    const res = await runScheduleQualityAlertsOnly(NOW);
+    expect(res).toEqual({ status: 'gate_off' });
+    process.env.GATE_SCHEDULE_QUALITY_MEASUREMENTS = 'true';
+    const res2 = await runScheduleQualityAlertsOnly(NOW);
+    expect(res2).toEqual({ status: 'gate_off' });
+    expect(refreshScheduleQualityAlerts).not.toHaveBeenCalled();
+  });
+
+  test('both gates on ⇒ reconciles the same six-date band the full nightly pass would use', async () => {
+    process.env.GATE_SCHEDULE_QUALITY_MEASUREMENTS = 'true';
+    process.env.GATE_SCHEDULE_QUALITY_ALERTS = 'true';
+    refreshScheduleQualityAlerts.mockResolvedValue({ status: 'reconciled', created: 1, resolved: 2 });
+
+    const res = await runScheduleQualityAlertsOnly(NOW, db);
+
+    expect(res).toEqual({ status: 'reconciled', created: 1, resolved: 2 });
+    expect(refreshScheduleQualityAlerts).toHaveBeenCalledTimes(1);
+    expect(refreshScheduleQualityAlerts).toHaveBeenCalledWith({ dates: BAND, now: NOW }, db);
+    // No repair, no distance optimization, no planner-runs ledger row — this
+    // path skips everything runRouteReorder's writer side owns.
+    expect(dayStopsQuery).not.toHaveBeenCalled();
+    expect(ledgerInserts).toHaveLength(0);
+  });
+});
+
+// ── Round-0 fallback audit P1 ────────────────────────────────────────────
+// chooseWindowSafeOrder relaxes a window whose promised deadline has already
+// passed relative to `startMin` (the admin "today, mid-route" clock), so an
+// overdue stop no longer dictates order. Every figure it returns has to be
+// measured under that SAME relaxed view: re-simulating the accepted order
+// against the true, now-unreachable deadline returns null, and the multi-tech
+// /optimize response sums `afterSeconds || 0` — charging that whole truck
+// zero drive time.
+test('chooseWindowSafeOrder: a legal order whose promise already elapsed still reports afterSeconds', () => {
+  const { chooseWindowSafeOrder } = require('../services/route-reorder');
+  const stops = [
+    // 09:00-10:00 promise, deadline 10:00 — long past a 15:30 startMin.
+    { id: 'E1', technician_id: 't1', route_order: 1, window_start: '09:00', window_end: '10:00', estimated_duration_minutes: 60, lat: 1, lng: 3 },
+    { id: 'E2', technician_id: 't1', route_order: 2, window_start: null, window_end: null, estimated_duration_minutes: 60, lat: 1, lng: 1 },
+  ];
+  const out = chooseWindowSafeOrder({
+    RouteOptimizer, googleOrder: stops, sourceStops: stops, googleSource: 'google_routes_api', startMin: 15 * 60 + 30,
+  });
+  expect(out.orderedStops.map((s) => s.id)).toEqual(['E1', 'E2']);
+  expect(out.source).toBe('google_routes_api');
+  // 0 (this harness's legs are 0-minute), never null — null is the bug.
+  expect(out.afterSeconds).toBe(0);
+});
+
+// ── Codex #4435 round 2 ──────────────────────────────────────────────────
+// The commit-time fence hashed workDuration, which is max(window span, real
+// estimate) — so a pair of 60-minute-span rows could go from 20+20 to 20+50
+// real minutes with every workDuration still 60 and the fence none the wiser,
+// committing an order certified against a 60-minute stop that is now 70. The
+// signature carries the RAW estimate (and the merge's own customer/premise
+// inputs) for exactly that.
+test('commit-time revalidation: a raw estimate change that leaves workDuration alone still rolls back', async () => {
+  stopsByDate['2026-08-18'] = backtrackDay('', { window_end: '10:00', estimated_duration_minutes: 20 });
+  liveRowsOverride = [
+    { id: 'A', window_start: '09:00', window_end: '10:00', estimated_duration_minutes: 20, route_order: 2, lat: 1, lng: 1 },
+    // 20 → 50: still under the 60-minute span, so workDuration is unchanged.
+    { id: 'B', window_start: '09:00', window_end: '10:00', estimated_duration_minutes: 50, route_order: 1, lat: 1, lng: 3 },
+    { id: 'C', window_start: '09:00', window_end: '10:00', estimated_duration_minutes: 20, route_order: 3, lat: 1, lng: 2 },
+  ];
+  const res = await runRouteReorder({ now: NOW });
+  expect(res.applied).toBe(0);
+  expect(trxUpdates).toEqual([]);
+  const ledger = JSON.parse(ledgerInserts[0].result);
+  expect(ledger.skips).toContainEqual(expect.objectContaining({ date: '2026-08-18', reason: 'STALE_TECH_DAY' }));
+});
+
+test('commit-time revalidation: a premise re-stamp mid-run rolls back (it is a merge input)', async () => {
+  stopsByDate['2026-08-18'] = backtrackDay('', { service_address_line1: '100 Main St' });
+  liveRowsOverride = [
+    { id: 'A', window_start: '09:00', route_order: 2, lat: 1, lng: 1, service_address_line1: '100 Main St' },
+    { id: 'B', window_start: '09:00', route_order: 1, lat: 1, lng: 3, service_address_line1: '100 Main St', service_address_line2: 'Apt 2' },
+    { id: 'C', window_start: '09:00', route_order: 3, lat: 1, lng: 2, service_address_line1: '100 Main St' },
+  ];
+  const res = await runRouteReorder({ now: NOW });
+  expect(res.applied).toBe(0);
+  expect(trxUpdates).toEqual([]);
+  const ledger = JSON.parse(ledgerInserts[0].result);
+  expect(ledger.skips).toContainEqual(expect.objectContaining({ date: '2026-08-18', reason: 'STALE_TECH_DAY' }));
+});
+
+// ── Codex #4435 round 4 ──────────────────────────────────────────────────
+// isCoVisitPair resolves an UNSTAMPED row's premise from the customer's
+// primary address, so that address is a merge input: edited mid-run it
+// changes the workload the order was certified against, while every stamped
+// column and coordinate stays exactly where it was.
+test('commit-time revalidation: a CUSTOMER address change mid-run rolls back', async () => {
+  stopsByDate['2026-08-18'] = backtrackDay('', { customer_address_line1: '100 Main St' });
+  liveRowsOverride = [
+    { id: 'A', window_start: '09:00', route_order: 2, lat: 1, lng: 1, customer_address_line1: '100 Main St' },
+    // Re-stamped on the customer record — the service rows are untouched.
+    { id: 'B', window_start: '09:00', route_order: 1, lat: 1, lng: 3, customer_address_line1: '200 Oak Ave' },
+    { id: 'C', window_start: '09:00', route_order: 3, lat: 1, lng: 2, customer_address_line1: '100 Main St' },
+  ];
+  const res = await runRouteReorder({ now: NOW });
+  expect(res.applied).toBe(0);
+  expect(trxUpdates).toEqual([]);
+  const ledger = JSON.parse(ledgerInserts[0].result);
+  expect(ledger.skips).toContainEqual(expect.objectContaining({ date: '2026-08-18', reason: 'STALE_TECH_DAY' }));
 });

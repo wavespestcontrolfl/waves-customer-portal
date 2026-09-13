@@ -2,7 +2,6 @@
 // Full-screen sheet over the Customers page. Matches the compact mobile layout:
 //   · round X top-left, round "Save" pill top-right (dims when invalid)
 //   · big "New customer" heading
-//   · grey "Import from contacts" pill (stub — needs iOS bridge)
 //   · rounded outlined inputs for name / phone / email
 //   · "Address" section label then Country / Line 1 / Line 2 / City / State / ZIP
 //
@@ -11,6 +10,7 @@
 // and profile label, including the optional unit/apartment line.
 
 import { useEffect, useMemo, useState } from "react";
+import { createPortal } from "react-dom";
 import { X } from "lucide-react";
 import AddressAutocomplete from "../AddressAutocomplete";
 import useModalFocus from "../../hooks/useModalFocus";
@@ -20,7 +20,7 @@ const API_BASE = import.meta.env.VITE_API_URL || "/api";
 
 function ringClass() {
   return (
-    "block w-full bg-white text-zinc-900 border-hairline border-zinc-300 rounded-md px-4 " +
+    "block box-border w-full bg-white text-zinc-900 border-hairline border-zinc-300 rounded-md px-4 " +
     "focus:outline-none focus:border-zinc-900 focus:ring-1 focus:ring-zinc-900 u-focus-ring"
   );
 }
@@ -155,7 +155,7 @@ export default function MobileNewCustomerSheet({
 
   const handleSave = () => save();
 
-  return (
+  return createPortal(
     <div
       ref={sheetRef}
       tabIndex={-1}
@@ -167,7 +167,7 @@ export default function MobileNewCustomerSheet({
     >
       {/* Sticky header: X left, Save pill right. 56px tall. */}
       <div
-        className="sticky top-0 bg-white flex items-center px-3"
+        className="box-border sticky top-0 bg-white flex items-center px-3"
         style={{
           height: "calc(56px + env(safe-area-inset-top, 0px))",
           paddingTop: "env(safe-area-inset-top, 0px)",
@@ -224,15 +224,6 @@ export default function MobileNewCustomerSheet({
         >
           New customer
         </h1>
-        {/* Import from contacts (stub — needs native bridge) */}
-        <button
-          type="button"
-          onClick={() => alert("Import from contacts — coming soon")}
-          className="w-full rounded-full bg-zinc-100 text-zinc-900 font-medium u-focus-ring"
-          style={{ padding: "14px 20px", fontSize: 15, marginBottom: 18 }}
-        >
-          Import from contacts
-        </button>
         {/* Name + phone + email */}
         <div className="flex flex-col gap-3">
           {" "}
@@ -497,6 +488,7 @@ export default function MobileNewCustomerSheet({
           {submitting ? "Saving..." : "Save"}
         </button>
       </div>
-    </div>
+    </div>,
+    document.body,
   );
 }

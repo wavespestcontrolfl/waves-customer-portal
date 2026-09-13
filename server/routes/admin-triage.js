@@ -92,10 +92,11 @@ router.get('/', async (req, res) => {
 
     const items = await db('triage_items')
       .leftJoin('call_log', 'triage_items.call_log_id', 'call_log.id')
-      .leftJoin('customers', 'call_log.customer_id', 'customers.id')
+      .leftJoin('sms_log as triage_sms', 'triage_items.sms_log_id', 'triage_sms.id')
+      .leftJoin('customers', 'customers.id', db.raw('COALESCE(call_log.customer_id, triage_sms.customer_id)'))
       .leftJoin('route_feedback', 'triage_items.call_log_id', 'route_feedback.call_log_id')
       .whereIn('triage_items.status', status)
-      .modify((q) => { if (customerId) q.where('call_log.customer_id', customerId); })
+      .modify((q) => { if (customerId) q.where('customers.id', customerId); })
       .modify((q) => { if (source) q.where('triage_items.resolution_source', source); })
       // property_role_confirm payloads embed the customer's OTHER property
       // addresses — the same data admin-customers gates behind requireAdmin —
@@ -108,6 +109,7 @@ router.get('/', async (req, res) => {
       .select(
         'triage_items.id',
         'triage_items.call_log_id',
+        'triage_items.sms_log_id',
         'triage_items.category',
         'triage_items.severity',
         'triage_items.reason_code',
@@ -128,7 +130,7 @@ router.get('/', async (req, res) => {
         'call_log.recording_sid',
         'call_log.recording_url',
         'call_log.created_at as call_created_at',
-        'call_log.customer_id',
+        'customers.id as customer_id',
         'customers.first_name',
         'customers.last_name',
         'customers.phone as customer_phone',
@@ -381,6 +383,17 @@ router.post('/:id/apply-property-roles', async (req, res) => {
     if (req.techRole !== 'admin') {
       return res.status(403).json({ error: 'Admin access required' });
     }
+    if (!UUID_RE.test(req.params.id)) return res.status(400).json({ error: 'Invalid card id' });
+    const smsCard = await db('triage_items').where({ id: req.params.id }).first('sms_log_id');
+    if (smsCard?.sms_log_id) {
+      try {
+        const result = await require('../services/sms-additional-properties').applyAdditionalProperties({
+          id: req.params.id, actorId: req.technicianId, expectedUpdatedAt: req.body?.expected_updated_at,
+          sameResponsibility: req.body?.same_responsibility, addresses: req.body?.addresses,
+        });
+        return res.json(result);
+      } catch (error) { if (error.status) return res.status(error.status).json({ error: error.message }); throw error; }
+    }
     const { gateEnvValue } = require('../config/feature-gates');
     if (!gateEnvValue('GATE_CALL_PROPERTY_ROLE')) {
       return res.status(403).json({ error: 'Property-role apply is gated off (GATE_CALL_PROPERTY_ROLE)' });
@@ -532,6 +545,7 @@ router.post('/:id/apply-property-roles', async (req, res) => {
     });
     return res.json({ ok: true, ...outcome });
   } catch (err) {
+    if (err.code === 'property_busy') return res.status(409).json({ error: err.message, code: err.code });
     if (err.conflict) return res.status(409).json({ error: err.message || 'Item changed concurrently' });
     if (err.noProposals) return res.status(400).json({ error: 'Card carries no applicable proposals' });
     logger.error(`[admin-triage] apply-property-roles failed: ${err.message}`);

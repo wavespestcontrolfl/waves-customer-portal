@@ -114,6 +114,7 @@ describe('runRedPairAutoDismissSweep', () => {
     db.transaction.mockImplementation(async (fn) => {
       const trx = jest.fn((table) => makeChain(table, (q) => router(table, q)));
       trx.fn = { now: () => 'NOW' };
+      trx.raw = jest.fn(async () => ({ rows: [] }));
       return fn(trx);
     });
     return inserted;
@@ -750,6 +751,18 @@ describe('revertMerge', () => {
   const LOSER = 'bbbbbbbb-0000-0000-0000-000000000002';
   const JOURNAL = 'cccccccc-0000-0000-0000-000000000001';
 
+  // An undo that hands debt back to self-pay releases the packet invoices the
+  // merge withdrew. That reconciliation runs its own queries against the real
+  // schema, which this suite's trx stub does not model — stubbed here so every
+  // revert test exercises the undo itself, and asserted on directly below.
+  let reconcileWithdrawn;
+  beforeEach(() => {
+    reconcileWithdrawn = jest
+      .spyOn(require('../services/visit-completion-packets'), 'reconcileWithdrawnPacketInvoices')
+      .mockResolvedValue(0);
+  });
+  afterEach(() => reconcileWithdrawn.mockRestore());
+
   // Which TIMESTAMP columns each table actually has, transcribed from the
   // migrations. Selecting one a table lacks raises undefined_column in
   // Postgres even when no rows match — the r9 regression (an unconditional
@@ -1030,6 +1043,27 @@ describe('revertMerge', () => {
   });
   const baseLoser = () => ({
     id: LOSER, active: false, deleted_at: '2026-07-30T04:40:00Z', phone: `merged-${LOSER.slice(0, 8)}`,
+  });
+
+  it("restores the winner's own termite_stations_rented=false instead of vacating a NOT NULL column to null — a backfill with no journaled prior is cleared to null, which would throw and roll back the WHOLE undo (pre-push audit P1 on the r15 fix)", async () => {
+    const journal = baseJournal();
+    journal.winner_backfills = { termite_stations_rented: true };
+    // The priors live INSIDE repointed_ids (that is what revertMerge parses).
+    journal.repointed_ids.winner_prior_values = { termite_stations_rented: false };
+    const { trx, state } = buildRevertTrx({
+      journal,
+      winner: { ...baseWinner(), termite_stations_rented: true },
+      loser: baseLoser(),
+      tables: {
+        leads: { stillOnWinner: ['lead-1', 'lead-2'] },
+        invoices: { stillOnWinner: ['inv-1'] },
+      },
+    });
+    db.transaction.mockImplementation(async (fn) => fn(trx));
+
+    await dedupe.revertMerge({ journalId: JOURNAL, performedBy: 'admin:test' });
+
+    expect(state.winnerPatch.termite_stations_rented).toBe(false);
   });
 
   it('restores the irrigation weekly delivery identity (trigger_event_id) for exactly the journaled rows (hook P1 on 47b0a3146)', async () => {
@@ -2913,6 +2947,66 @@ describe('revertMerge', () => {
     expect(result.skipped).toHaveLength(0);
   });
 
+  it('reconciles withdrawn packet invoices on both records when the undo removes the inherited payer', async () => {
+    // The merge withdrew every packet invoice the inherited payer took over
+    // (stamp, billing hold, payer alert). An undo that hands the debt back to
+    // self-pay must release them or their send and payment rails stay blocked
+    // forever (codex r25 P2). Run after BOTH the winner patch and the loser
+    // restore, and for both records — the loser's invoices moved back to it
+    // during the un-repoint.
+    const journal = baseJournal();
+    journal.winner_backfills = { ...journal.winner_backfills, payer_id: 5 };
+    const { trx, state } = buildRevertTrx({
+      journal,
+      winner: { ...baseWinner(), payer_id: 5 },
+      loser: baseLoser(),
+      tables: {
+        leads: { stillOnWinner: ['lead-1', 'lead-2'] },
+        invoices: { stillOnWinner: ['inv-1'], probeRows: [{ id: 'inv-1' }] },
+      },
+    });
+    db.transaction.mockImplementation(async (fn) => fn(trx));
+    await dedupe.revertMerge({ journalId: JOURNAL, performedBy: 'admin:test' });
+    expect(state.winnerPatch.payer_id).toBe(null);
+    expect(reconcileWithdrawn).toHaveBeenCalledWith(trx, { customerId: WINNER });
+    expect(reconcileWithdrawn).toHaveBeenCalledWith(trx, { customerId: LOSER });
+
+    // The OPPOSITE merge direction (audit P1): a payer-linked winner absorbing
+    // a self-pay loser withdraws the loser's invoices while writing no
+    // backfill, so the winner's payer never changes — the restored loser still
+    // has to be reconciled or its returned invoices stay stamped.
+    reconcileWithdrawn.mockClear();
+    const { trx: winnerPayer } = buildRevertTrx({
+      journal: baseJournal(),
+      winner: { ...baseWinner(), payer_id: 5 },
+      loser: baseLoser(),
+      tables: {
+        leads: { stillOnWinner: ['lead-1', 'lead-2'] },
+        invoices: { stillOnWinner: ['inv-1'], probeRows: [{ id: 'inv-1' }] },
+      },
+    });
+    db.transaction.mockImplementation(async (fn) => fn(winnerPayer));
+    await dedupe.revertMerge({ journalId: JOURNAL, performedBy: 'admin:test' });
+    expect(reconcileWithdrawn).toHaveBeenCalledWith(winnerPayer, { customerId: LOSER });
+    expect(reconcileWithdrawn).not.toHaveBeenCalledWith(winnerPayer, { customerId: WINNER });
+
+    // An undo that leaves Bill-To alone still releases the restored loser.
+    reconcileWithdrawn.mockClear();
+    const { trx: noPayer } = buildRevertTrx({
+      journal: baseJournal(),
+      winner: baseWinner(),
+      loser: baseLoser(),
+      tables: {
+        leads: { stillOnWinner: ['lead-1', 'lead-2'] },
+        invoices: { stillOnWinner: ['inv-1'], probeRows: [{ id: 'inv-1' }] },
+      },
+    });
+    db.transaction.mockImplementation(async (fn) => fn(noPayer));
+    await dedupe.revertMerge({ journalId: JOURNAL, performedBy: 'admin:test' });
+    expect(reconcileWithdrawn).toHaveBeenCalledWith(noPayer, { customerId: LOSER });
+    expect(reconcileWithdrawn).not.toHaveBeenCalledWith(noPayer, { customerId: WINNER });
+  });
+
   it('refuses (409) on unjournaled payment_method_consents tied to a returned card; journaled consents pass', async () => {
     const journal = baseJournal();
     journal.repointed_ids.tables['payment_methods.customer_id'] = ['pm-1'];
@@ -3329,6 +3423,53 @@ describe('revertMerge', () => {
     const result = await dedupe.revertMerge({ journalId: JOURNAL, performedBy: 'admin:test' });
     expect(state.propertyDeleted).toEqual({ id: 'prop-9', customer_id: WINNER });
     expect(result.repointedBack['customer_properties.linked_property_removed']).toBe(1);
+  });
+
+  it('transfers (never deletes) the link-as-property row when a lawn actuals ledger row froze that property (#4113)', async () => {
+    const journal = baseJournal();
+    journal.evidence = { via: 'admin_link_as_property' };
+    journal.repointed_ids.linked_property_id = 'prop-9';
+    const { trx, state } = buildRevertTrx({
+      journal,
+      winner: baseWinner(),
+      loser: baseLoser(),
+      tables: {
+        leads: { stillOnWinner: ['lead-1', 'lead-2'] }, invoices: { stillOnWinner: ['inv-1'] },
+        // A completion ledger row still points at the property: the SET NULL
+        // FK would silently erase the frozen reference on delete.
+        lawn_protocol_service_completions: { probeRows: [{ id: 'completion-1' }] },
+      },
+    });
+    db.transaction.mockImplementation(async (fn) => fn(trx));
+    const result = await dedupe.revertMerge({ journalId: JOURNAL, performedBy: 'admin:test' });
+    expect(state.propertyDeleted).toBe(null);
+    expect(state.propertyTransferred).toMatchObject({ where: { id: 'prop-9', customer_id: WINNER } });
+    expect(result.repointedBack['customer_properties.linked_property_transferred']).toBe(1);
+  });
+
+  it('refuses the undo (zero writes) when the ledger-reference probe itself fails — an unverified read is not proof of no reference', async () => {
+    const journal = baseJournal();
+    journal.evidence = { via: 'admin_link_as_property' };
+    journal.repointed_ids.linked_property_id = 'prop-9';
+    const { trx, state } = buildRevertTrx({
+      journal,
+      winner: baseWinner(),
+      loser: baseLoser(),
+      tables: {
+        leads: { stillOnWinner: ['lead-1', 'lead-2'] }, invoices: { stillOnWinner: ['inv-1'] },
+        lawn_protocol_service_completions: { probeRows: null },
+      },
+    });
+    const route = trx.getMockImplementation();
+    trx.mockImplementation((table) => {
+      if (table === 'lawn_protocol_service_completions') throw new Error('ledger lookup failed');
+      return route(table);
+    });
+    db.transaction.mockImplementation(async (fn) => fn(trx));
+    await expect(dedupe.revertMerge({ journalId: JOURNAL, performedBy: 'admin:test' })).rejects.toThrow('ledger lookup failed');
+    expect(state.propertyDeleted).toBe(null);
+    expect(state.propertyTransferred ?? null).toBe(null);
+    expect(state.journalUpdate).toBe(null);
   });
 
   it('refuses (409) a link-as-property merge whose created property was never journaled', async () => {

@@ -21,6 +21,15 @@ function mockResponse() {
 }
 
 describe('sensitive SPA document headers', () => {
+  test('protects issued combined visit summary documents', () => {
+    const path = `/visit/${'a'.repeat(64)}`;
+    const res = mockResponse();
+    expect(isServiceReportPath(path)).toBe(true);
+    applySensitiveSpaHeaders(path, res);
+    expect(res.set).toHaveBeenCalledWith('X-Robots-Tag', 'noindex, nofollow, noarchive');
+    expect(res.set).toHaveBeenCalledWith('Referrer-Policy', 'no-referrer');
+    expect(res.set).toHaveBeenCalledWith('Cache-Control', 'no-store');
+  });
   test('marks service outline token pages noindex and no-referrer', () => {
     const res = mockResponse();
 

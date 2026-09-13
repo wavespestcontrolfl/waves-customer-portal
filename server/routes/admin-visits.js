@@ -9,7 +9,7 @@ const { adminAuthenticate, requireAdmin } = require('../middleware/admin-auth');
 const { gates } = require('../config/feature-gates');
 const VisitGroups = require('../services/visit-groups');
 const { combineRows } = require('../services/visit-combine');
-const { emitDispatchJobUpdate } = require('../services/dispatch-assignment');
+const { emitDispatchJobUpdate, flushDispatchQualityDates } = require('../services/dispatch-assignment');
 
 const router = express.Router();
 // Grouping/splitting is an OFFICE action (doc §3: "The office keeps one
@@ -33,7 +33,7 @@ router.post('/group', async (req, res, next) => {
     // split/separate on existing visits stays unrestricted.
     const anchor = await require('../models/db')('scheduled_services')
       .whereIn('id', serviceIds).first('customer_id');
-    if (!anchor || await VisitGroups.customerExcludedByAutopay(anchor.customer_id)) {
+    if (!anchor || await VisitGroups.groupingRefusedByAutopay(anchor.customer_id)) {
       return res.status(409).json({
         error: 'This customer is on autopay — visits are not grouped until grouped autopay ships.',
         code: 'visit_group_refused',
@@ -52,9 +52,12 @@ router.post('/group', async (req, res, next) => {
     // admin reschedule route sends; without it they keep the old slots
     // until a full reload (GH codex #3843 r1 P2). Best-effort, after the
     // grouping succeeded.
+    const qualityDates = new Set();
     for (const m of moved) {
-      try { await emitDispatchJobUpdate({ jobId: m.id, actorId: req.technicianId }); } catch {}
+      try { await emitDispatchJobUpdate({ jobId: m.id, actorId: req.technicianId, qualityDates }); } catch {}
     }
+    // One route refresh for the whole combine (codex #4295 r1 P2).
+    try { await flushDispatchQualityDates(qualityDates); } catch {}
     return res.json({ visit, moved });
   } catch (err) {
     if (/row not found/.test(String(err.message))) {

@@ -1,3 +1,24 @@
+import {
+  Button,
+  buttonStyles,
+  Field,
+  Input,
+  Badge,
+  Card,
+  UiSurface,
+  ActionFeedback,
+  Table,
+  THead,
+  TBody,
+  TR,
+  TH,
+  TD,
+  Dialog,
+  DialogHeader,
+  DialogTitle,
+  DialogBody,
+  DialogFooter,
+} from "../../components/ui";
 import { Fragment, useState, useEffect, useCallback, useRef } from "react";
 import {
   CheckCircle2,
@@ -18,30 +39,16 @@ import {
   ResponsiveContainer,
   Legend,
 } from "recharts";
-import { etDateString, formatETDate, formatETDateOnly } from "../../lib/timezone";
+import {
+  etDateString,
+  formatETDate,
+  formatETDateOnly,
+} from "../../lib/timezone";
 import AdminCommandHeader from "../../components/admin/AdminCommandHeader";
 import useIsMobile from "../../hooks/useIsMobile";
-import { createPortal } from "react-dom";
 import { reportError } from "../../lib/reportError";
-
 const API = import.meta.env.VITE_API_URL || "/api";
 // V2 token pass: teal/purple fold to zinc-900. Semantic green/amber/red preserved.
-const D = {
-  bg: "#F4F4F5",
-  card: "#FFFFFF",
-  border: "#E4E4E7",
-  teal: "#18181B",
-  green: "#15803D",
-  amber: "#A16207",
-  red: "#991B1B",
-  purple: "#18181B",
-  text: "#27272A",
-  muted: "#71717A",
-  white: "#FFFFFF",
-  heading: "#09090B",
-  inputBorder: "#D4D4D8",
-};
-const MONO = "'JetBrains Mono', monospace";
 
 function adminFetch(path, options = {}) {
   return fetch(`${API}${path}`, {
@@ -64,7 +71,6 @@ function adminFetch(path, options = {}) {
     return r.json();
   });
 }
-
 function adminFetchRaw(path) {
   return fetch(`${API}${path}`, {
     headers: {
@@ -72,7 +78,6 @@ function adminFetchRaw(path) {
     },
   });
 }
-
 const fmtM = (n) =>
   n != null
     ? "$" +
@@ -88,26 +93,23 @@ const fmtD = (d) => (d ? formatETDate(d) : "--");
 // Calendar-day values (Stripe arrival_date is midnight UTC "the day it
 // arrives") keep their day via the noon-UTC anchor.
 const fmtDay = (d) => (d ? formatETDateOnly(d) : "--");
-
 const STATUS_COLORS = {
-  paid: D.green,
-  pending: D.amber,
-  in_transit: "#0A7EC2",
-  failed: D.red,
+  paid: "#18181B",
+  pending: "#52525B",
+  in_transit: "#52525B",
+  failed: "#C8312F",
   // Money clawed back or a payout that never happened is a genuine alert —
   // these previously fell through to a calm neutral gray.
-  canceled: D.red,
-  reversed: D.red,
+  canceled: "#C8312F",
+  reversed: "#C8312F",
 };
 const INSTANT_PAYOUT_FEE_RATE = 0.015;
-
 function newPayoutIdempotencyKey(method = "standard") {
   const prefix = method === "instant" ? "ipo" : "spo";
   return globalThis.crypto?.randomUUID
     ? `${prefix}_${globalThis.crypto.randomUUID()}`
     : `${prefix}_${Date.now()}_${Math.random().toString(36).slice(2)}`;
 }
-
 function payoutLimitForMethod(method, available, instantAvailable) {
   const standardLimit = Math.max(0, Number(available || 0));
   if (method === "instant") {
@@ -115,63 +117,31 @@ function payoutLimitForMethod(method, available, instantAvailable) {
   }
   return standardLimit;
 }
-
 function payoutAmountInput(limit) {
   const normalized = Number(limit || 0);
   return normalized > 0 ? normalized.toFixed(2) : "";
 }
-
-function Badge({ children, color }) {
-  return (
-    <span
-      style={{
-        display: "inline-block",
-        padding: "2px 10px",
-        borderRadius: 9999,
-        fontSize: 11,
-        fontWeight: 500,
-        background: `${color || D.muted}22`,
-        color: color || D.muted,
-        textTransform: "capitalize",
-        letterSpacing: 0.5,
-      }}
-    >
-      {children}
-    </span>
-  );
-}
-
-const inputStyle = {
-  background: "#FFFFFF",
-  border: `1px solid ${D.inputBorder}`,
-  borderRadius: 6,
-  padding: "8px 12px",
-  color: D.text,
-  fontSize: 13,
-  fontFamily: "inherit",
-  outline: "none",
-  boxSizing: "border-box",
-};
-const thStyle = {
-  fontSize: 10,
-  color: D.muted,
-  textTransform: "uppercase",
-  letterSpacing: 1,
-  textAlign: "left",
-  padding: "8px 10px",
-  borderBottom: `1px solid ${D.border}`,
-};
-const tdStyle = {
-  padding: "10px",
-  borderBottom: `1px solid ${D.border}22`,
-  fontSize: 13,
-  color: D.text,
-};
 const BANKING_SECTIONS = [
-  { key: "payouts", label: "Payouts", Icon: Wallet },
-  { key: "cashflow", label: "Cash Flow", Icon: TrendingUp },
-  { key: "reconciliation", label: "Reconciliation", Icon: CheckCircle2 },
-  { key: "exports", label: "Exports", Icon: Download },
+  {
+    key: "payouts",
+    label: "Payouts",
+    Icon: Wallet,
+  },
+  {
+    key: "cashflow",
+    label: "Cash Flow",
+    Icon: TrendingUp,
+  },
+  {
+    key: "reconciliation",
+    label: "Reconciliation",
+    Icon: CheckCircle2,
+  },
+  {
+    key: "exports",
+    label: "Exports",
+    Icon: Download,
+  },
 ];
 
 // ═══════════════════════════════════════════════════════════════
@@ -183,13 +153,13 @@ function PayoutsTab() {
   const [hasMore, setHasMore] = useState(true);
   const [expanded, setExpanded] = useState(null);
   const [txns, setTxns] = useState({});
+  const [txnErrors, setTxnErrors] = useState({});
   const [loading, setLoading] = useState(false);
   const [loadError, setLoadError] = useState(null);
   // reqId guard (same pattern as CashFlowTab): rapid Next/Previous clicks
   // must not let a slower OLDER request — success or failure — clobber the
   // newer page's rows or paint its error.
   const reqIdRef = useRef(0);
-
   const load = useCallback(async (p) => {
     const reqId = ++reqIdRef.current;
     setLoading(true);
@@ -214,38 +184,52 @@ function PayoutsTab() {
     }
     if (reqId === reqIdRef.current) setLoading(false);
   }, []);
-
   useEffect(() => {
     load(page);
   }, [page, load]);
-
-  const toggleExpand = async (payoutId) => {
+  const loadTransactions = async (payoutId) => {
+    setTxnErrors((prev) => ({
+      ...prev,
+      [payoutId]: null,
+    }));
+    try {
+      const d = await adminFetch(`/admin/banking/payouts/${payoutId}`);
+      setTxns((prev) => ({
+        ...prev,
+        [payoutId]: d.transactions || [],
+      }));
+    } catch (error) {
+      setTxnErrors((prev) => ({
+        ...prev,
+        [payoutId]: error.message,
+      }));
+    }
+  };
+  const toggleExpand = (payoutId) => {
     if (expanded === payoutId) {
       setExpanded(null);
       return;
     }
     setExpanded(payoutId);
-    if (!txns[payoutId]) {
-      try {
-        const d = await adminFetch(`/admin/banking/payouts/${payoutId}`);
-        setTxns((prev) => ({ ...prev, [payoutId]: d.transactions || [] }));
-      } catch (e) {
-        setTxns((prev) => ({ ...prev, [payoutId]: [] }));
-      }
-    }
+    if (!txns[payoutId]) loadTransactions(payoutId);
   };
-
   return (
-    <div>
+    <div className="min-h-60">
+      {loading && <ActionFeedback>Loading payouts…</ActionFeedback>}
+      {!loading && !loadError && payouts.length === 0 && (
+        <ActionFeedback>
+          No payouts found. New Stripe payouts will appear here after syncing.
+        </ActionFeedback>
+      )}
       {!loading && loadError && (
         <div
           style={{
-            background: `${D.red}11`,
-            border: `1px solid ${D.red}`,
+            background: "#C8312F11",
+            border: "1px solid #C8312F",
             borderRadius: 8,
             padding: "14px 16px",
             marginBottom: 12,
-            color: D.red,
+            color: "#C8312F",
             fontSize: 14,
             display: "flex",
             justifyContent: "space-between",
@@ -255,243 +239,290 @@ function PayoutsTab() {
           }}
         >
           <span>Couldn't load payouts ({loadError}).</span>
-          <button
+          <Button
             onClick={() => load(page)}
-            style={{
-              background: "transparent",
-              border: `1px solid ${D.red}`,
-              borderRadius: 6,
-              padding: "6px 14px",
-              color: D.red,
-              fontSize: 13,
-              cursor: "pointer",
-            }}
+            type="button"
+            variant="secondary"
+            className="min-w-11"
           >
             Retry
-          </button>
+          </Button>
         </div>
       )}
-      <div style={{ overflowX: "auto" }}>
-        <table style={{ width: "100%", borderCollapse: "collapse" }}>
-          <thead>
-            <tr>
-              <th style={thStyle}>Date</th>
-              <th style={{ ...thStyle, textAlign: "right" }}>Amount</th>
-              <th style={thStyle}>Status</th>
-              <th style={{ ...thStyle, textAlign: "right" }}>Transactions</th>
-              <th style={{ ...thStyle, textAlign: "right" }}>Fees</th>
-              <th style={thStyle}>Arrival</th>
-              <th style={thStyle}>Reconciled</th>
-            </tr>
-          </thead>
-          <tbody>
+      <div
+        style={{
+          overflowX: "auto",
+        }}
+      >
+        <Table>
+          <THead>
+            <TR>
+              <TH>Date</TH>
+              <TH
+                style={{
+                  textAlign: "right",
+                }}
+              >
+                Amount
+              </TH>
+              <TH>Status</TH>
+              <TH
+                style={{
+                  textAlign: "right",
+                }}
+              >
+                Transactions
+              </TH>
+              <TH
+                style={{
+                  textAlign: "right",
+                }}
+              >
+                Fees
+              </TH>
+              <TH>Arrival</TH>
+              <TH>Reconciled</TH>
+            </TR>
+          </THead>
+          <TBody>
             {payouts.map((p) => (
               <Fragment key={p.id}>
-                <tr
+                <TR
                   onClick={() => toggleExpand(p.id)}
                   style={{
                     cursor: "pointer",
-                    background: expanded === p.id ? D.bg : "transparent",
+                    background: expanded === p.id ? "#F4F4F5" : "transparent",
                     transition: "background 0.15s",
                   }}
                   onMouseEnter={(e) => {
                     if (expanded !== p.id)
-                      e.currentTarget.style.background = `${D.card}88`;
+                      e.currentTarget.style.background = "#FFFFFF88";
                   }}
                   onMouseLeave={(e) => {
                     if (expanded !== p.id)
                       e.currentTarget.style.background = "transparent";
                   }}
                 >
-                  <td style={tdStyle}>
-                    {fmtD(
-                      p.created_at_stripe ||
-                        p.created_at ||
-                        p.date ||
-                        p.created,
-                    )}
-                  </td>
-                  <td
+                  <TD>
+                    <Button
+                      variant="ghost"
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        toggleExpand(p.id);
+                      }}
+                      aria-expanded={expanded === p.id}
+                      aria-controls={
+                        expanded === p.id ? `payout-detail-${p.id}` : undefined
+                      }
+                      aria-label={`Payout ${p.id}`}
+                    >
+                      {fmtD(
+                        p.created_at_stripe ||
+                          p.created_at ||
+                          p.date ||
+                          p.created,
+                      )}
+                    </Button>
+                  </TD>
+                  <TD
                     style={{
-                      ...tdStyle,
                       textAlign: "right",
-                      fontFamily: MONO,
-                      fontWeight: 700,
                     }}
                   >
                     {fmtM(p.amount)}
-                  </td>
-                  <td style={tdStyle}>
-                    <Badge color={STATUS_COLORS[p.status] || D.muted}>
+                  </TD>
+                  <TD>
+                    <Badge
+                      tone={
+                        (STATUS_COLORS[p.status] || "#71717A") === "#C8312F"
+                          ? "alert"
+                          : "neutral"
+                      }
+                    >
                       {p.status}
                     </Badge>
-                  </td>
-                  <td
-                    style={{ ...tdStyle, textAlign: "right", fontFamily: MONO }}
+                  </TD>
+                  <TD
+                    style={{
+                      textAlign: "right",
+                    }}
                   >
                     {p.transaction_count ?? "--"}
-                  </td>
-                  <td
+                  </TD>
+                  <TD
                     style={{
-                      ...tdStyle,
                       textAlign: "right",
-                      fontFamily: MONO,
-                      color: D.muted,
+                      color: "#71717A",
                     }}
                   >
                     {p.fee_total != null
                       ? fmtM(p.fee_total)
                       : p.fees != null
-                      ? fmtM(p.fees)
-                      : "--"}
-                  </td>
-                  <td style={tdStyle}>{fmtDay(p.arrival_date)}</td>
-                  <td style={{ ...tdStyle, textAlign: "center" }}>
+                        ? fmtM(p.fees)
+                        : "--"}
+                  </TD>
+                  <TD>{fmtDay(p.arrival_date)}</TD>
+                  <TD
+                    style={{
+                      textAlign: "center",
+                    }}
+                  >
                     {p.reconciled ? (
-                      <span style={{ color: D.green, fontSize: 16 }}>
+                      <span
+                        style={{
+                          color: "#18181B",
+                          fontSize: 16,
+                        }}
+                      >
                         &#10003;
                       </span>
                     ) : (
-                      <span style={{ color: D.muted }}>--</span>
+                      <span
+                        style={{
+                          color: "#71717A",
+                        }}
+                      >
+                        --
+                      </span>
                     )}
-                  </td>
-                </tr>
+                  </TD>
+                </TR>
                 {expanded === p.id && (
-                  <tr key={`${p.id}-detail`}>
-                    <td colSpan={7} style={{ padding: 0, background: D.bg }}>
-                      <div style={{ padding: "12px 20px" }}>
-                        {!txns[p.id] ? (
-                          <div style={{ color: D.muted, fontSize: 12 }}>
+                  <TR key={`${p.id}-detail`} id={`payout-detail-${p.id}`}>
+                    <TD
+                      colSpan={7}
+                      style={{
+                        background: "#F4F4F5",
+                      }}
+                    >
+                      <div
+                        style={{
+                          padding: "12px 20px",
+                        }}
+                      >
+                        {txnErrors[p.id] ? (
+                          <ActionFeedback
+                            error
+                            onRetry={() => loadTransactions(p.id)}
+                          >
+                            Could not load payout transactions:{" "}
+                            {txnErrors[p.id]}
+                          </ActionFeedback>
+                        ) : !txns[p.id] ? (
+                          <div
+                            style={{
+                              color: "#71717A",
+                              fontSize: 14,
+                            }}
+                          >
                             Loading transactions...
                           </div>
                         ) : txns[p.id].length === 0 ? (
-                          <div style={{ color: D.muted, fontSize: 12 }}>
+                          <div
+                            style={{
+                              color: "#71717A",
+                              fontSize: 14,
+                            }}
+                          >
                             No transaction details available
                           </div>
                         ) : (
-                          <table
-                            style={{
-                              width: "100%",
-                              borderCollapse: "collapse",
-                            }}
-                          >
-                            <thead>
-                              <tr>
-                                <th style={{ ...thStyle, fontSize: 9 }}>
-                                  Customer / Type
-                                </th>
-                                <th style={{ ...thStyle, fontSize: 9 }}>
-                                  Description
-                                </th>
-                                <th
+                          <Table>
+                            <THead>
+                              <TR>
+                                <TH>Customer / Type</TH>
+                                <TH>Description</TH>
+                                <TH
                                   style={{
-                                    ...thStyle,
-                                    fontSize: 9,
                                     textAlign: "right",
                                   }}
                                 >
                                   Amount
-                                </th>
-                                <th
+                                </TH>
+                                <TH
                                   style={{
-                                    ...thStyle,
-                                    fontSize: 9,
                                     textAlign: "right",
                                   }}
                                 >
                                   Fee
-                                </th>
-                                <th
+                                </TH>
+                                <TH
                                   style={{
-                                    ...thStyle,
-                                    fontSize: 9,
                                     textAlign: "right",
                                   }}
                                 >
                                   Net
-                                </th>
-                              </tr>
-                            </thead>
-                            <tbody>
+                                </TH>
+                              </TR>
+                            </THead>
+                            <TBody>
                               {txns[p.id].map((t, i) => {
                                 const isFee =
                                   t.type === "stripe_fee" || t.type === "fee";
                                 return (
-                                  <tr
+                                  <TR
                                     key={i}
-                                    style={{ opacity: isFee ? 0.5 : 1 }}
+                                    style={{
+                                      opacity: isFee ? 0.5 : 1,
+                                    }}
                                   >
-                                    <td
+                                    <TD
                                       style={{
-                                        ...tdStyle,
-                                        fontSize: 12,
-                                        color: isFee ? D.muted : D.text,
+                                        color: isFee ? "#71717A" : "#27272A",
                                       }}
                                     >
                                       {t.customer_name || t.type || "--"}
-                                    </td>
-                                    <td
+                                    </TD>
+                                    <TD
                                       style={{
-                                        ...tdStyle,
-                                        fontSize: 12,
-                                        color: D.muted,
+                                        color: "#71717A",
                                       }}
                                     >
                                       {t.description || "--"}
-                                    </td>
-                                    <td
+                                    </TD>
+                                    <TD
                                       style={{
-                                        ...tdStyle,
-                                        fontSize: 12,
                                         textAlign: "right",
-                                        fontFamily: MONO,
                                       }}
                                     >
                                       {fmtM(t.amount)}
-                                    </td>
-                                    <td
+                                    </TD>
+                                    <TD
                                       style={{
-                                        ...tdStyle,
-                                        fontSize: 12,
                                         textAlign: "right",
-                                        fontFamily: MONO,
-                                        color: D.muted,
+                                        color: "#71717A",
                                       }}
                                     >
                                       {t.fee != null ? fmtM(t.fee) : "--"}
-                                    </td>
-                                    <td
+                                    </TD>
+                                    <TD
                                       style={{
-                                        ...tdStyle,
-                                        fontSize: 12,
                                         textAlign: "right",
-                                        fontFamily: MONO,
-                                        fontWeight: 500,
                                       }}
                                     >
                                       {t.net != null ? fmtM(t.net) : "--"}
-                                    </td>
-                                  </tr>
+                                    </TD>
+                                  </TR>
                                 );
                               })}
-                            </tbody>
-                          </table>
+                            </TBody>
+                          </Table>
                         )}
                       </div>{" "}
-                    </td>
-                  </tr>
+                    </TD>
+                  </TR>
                 )}
               </Fragment>
             ))}
-          </tbody>
-        </table>
+          </TBody>
+        </Table>
       </div>
       {loading && (
         <div
           style={{
             textAlign: "center",
-            color: D.muted,
-            fontSize: 12,
+            color: "#71717A",
+            fontSize: 14,
             padding: 16,
           }}
         >
@@ -506,38 +537,33 @@ function PayoutsTab() {
           marginTop: 16,
         }}
       >
-        <button
+        <Button
           disabled={page <= 1}
           onClick={() => setPage((p) => p - 1)}
-          style={{
-            ...inputStyle,
-            cursor: page <= 1 ? "not-allowed" : "pointer",
-            opacity: page <= 1 ? 0.4 : 1,
-          }}
+          type="button"
+          variant="secondary"
+          className="min-w-11"
         >
           Previous
-        </button>{" "}
-        <span
+        </Button>{" "}
+        <span className="u-nums"
           style={{
-            color: D.muted,
-            fontSize: 12,
+            color: "#71717A",
+            fontSize: 14,
             alignSelf: "center",
-            fontFamily: MONO,
           }}
         >
           Page {page}
         </span>{" "}
-        <button
+        <Button
           disabled={!hasMore}
           onClick={() => setPage((p) => p + 1)}
-          style={{
-            ...inputStyle,
-            cursor: !hasMore ? "not-allowed" : "pointer",
-            opacity: !hasMore ? 0.4 : 1,
-          }}
+          type="button"
+          variant="secondary"
+          className="min-w-11"
         >
           Next
-        </button>{" "}
+        </Button>{" "}
       </div>{" "}
     </div>
   );
@@ -553,14 +579,11 @@ function CashFlowTab() {
   const [loading, setLoading] = useState(false);
   const [loadError, setLoadError] = useState(null);
   const reqIdRef = useRef(0);
-
   const today = new Date();
   const threeMonthsAgo = new Date(today);
   threeMonthsAgo.setMonth(threeMonthsAgo.getMonth() - 3);
-
   const [startDate, setStartDate] = useState(etDateString(threeMonthsAgo));
   const [endDate, setEndDate] = useState(etDateString(today));
-
   const load = useCallback(async () => {
     // reqId: a slower earlier range/period response must not overwrite the
     // newer selection (#2913 pattern, previously only on the balance hero).
@@ -583,11 +606,9 @@ function CashFlowTab() {
     }
     if (reqId === reqIdRef.current) setLoading(false);
   }, [startDate, endDate, period]);
-
   useEffect(() => {
     load();
   }, [load]);
-
   const chartData = data?.periods || [];
   const summary = data?.summary || {};
   const totalIn = summary.total_in ?? summary.total_revenue ?? 0;
@@ -596,7 +617,6 @@ function CashFlowTab() {
     (summary.total_expenses || 0) + (summary.stripe_fees || 0);
   const net =
     summary.net ?? summary.operating_cash_flow ?? summary.net_cash_flow ?? 0;
-
   return (
     <div>
       <div
@@ -608,46 +628,59 @@ function CashFlowTab() {
           alignItems: "center",
         }}
       >
-        <div style={{ display: "flex", gap: 4 }}>
+        <div
+          style={{
+            display: "flex",
+            gap: 4,
+          }}
+        >
           {["weekly", "monthly"].map((p) => (
-            <button
+            <Button
               key={p}
               onClick={() => setPeriod(p)}
-              style={{
-                background: period === p ? D.teal : "transparent",
-                border: `1px solid ${period === p ? D.teal : D.border}`,
-                borderRadius: 6,
-                padding: "6px 14px",
-                color: period === p ? D.white : D.muted,
-                fontSize: 12,
-                cursor: "pointer",
-                fontWeight: period === p ? 600 : 400,
-                textTransform: "capitalize",
-              }}
+              type="button"
+              variant={period === p ? "primary" : "secondary"}
+              aria-pressed={period === p}
+              className="min-w-11"
             >
               {p}
-            </button>
+            </Button>
           ))}
         </div>{" "}
-        <input
-          type="date"
-          value={startDate}
-          onChange={(e) => setStartDate(e.target.value)}
-          style={{ ...inputStyle, width: 140 }}
-        />{" "}
-        <span style={{ color: D.muted, fontSize: 12 }}>to</span>{" "}
-        <input
-          type="date"
-          value={endDate}
-          onChange={(e) => setEndDate(e.target.value)}
-          style={{ ...inputStyle, width: 140 }}
-        />{" "}
+        <Field label="Start date" className="min-w-0">
+          <Input
+            type="date"
+            value={startDate}
+            onChange={(e) => setStartDate(e.target.value)}
+            style={{
+              width: 140,
+            }}
+          />
+        </Field>{" "}
+        <span
+          style={{
+            color: "#71717A",
+            fontSize: 14,
+          }}
+        >
+          to
+        </span>{" "}
+        <Field label="End date" className="min-w-0">
+          <Input
+            type="date"
+            value={endDate}
+            onChange={(e) => setEndDate(e.target.value)}
+            style={{
+              width: 140,
+            }}
+          />
+        </Field>{" "}
       </div>
       {loading && (
         <div
           style={{
-            color: D.muted,
-            fontSize: 12,
+            color: "#71717A",
+            fontSize: 14,
             padding: 16,
             textAlign: "center",
           }}
@@ -656,11 +689,8 @@ function CashFlowTab() {
         </div>
       )}
       {!loading && chartData.length > 0 && (
-        <div
+        <Card
           style={{
-            background: D.card,
-            border: `1px solid ${D.border}`,
-            borderRadius: 12,
             padding: 20,
             marginBottom: 20,
           }}
@@ -668,45 +698,65 @@ function CashFlowTab() {
           <ResponsiveContainer width="100%" height={320}>
             <BarChart
               data={chartData}
-              margin={{ top: 10, right: 10, left: 0, bottom: 0 }}
+              margin={{
+                top: 10,
+                right: 10,
+                left: 0,
+                bottom: 0,
+              }}
             >
-              <CartesianGrid strokeDasharray="3 3" stroke={D.border} />{" "}
+              <CartesianGrid strokeDasharray="3 3" stroke={"#E4E4E7"} />{" "}
               <XAxis
                 dataKey="label"
-                tick={{ fill: D.muted, fontSize: 11 }}
-                axisLine={{ stroke: D.border }}
+                tick={{
+                  fill: "#71717A",
+                  fontSize: 14,
+                }}
+                axisLine={{
+                  stroke: "#E4E4E7",
+                }}
               />{" "}
-              <YAxis
-                tick={{ fill: D.muted, fontSize: 11, fontFamily: MONO }}
-                axisLine={{ stroke: D.border }}
+              <YAxis className="u-nums"
+                tick={{
+                  fill: "#71717A",
+                  fontSize: 14,
+                }}
+                axisLine={{
+                  stroke: "#E4E4E7",
+                }}
                 tickFormatter={(v) => "$" + (v / 1000).toFixed(0) + "k"}
               />{" "}
               <Tooltip content={<CashFlowTooltip />} />{" "}
-              <Legend wrapperStyle={{ fontSize: 11, color: D.muted }} />{" "}
+              <Legend
+                wrapperStyle={{
+                  fontSize: 14,
+                  color: "#71717A",
+                }}
+              />{" "}
               <Bar
                 dataKey="money_in"
                 name="Money In"
-                fill={D.green}
+                fill={"#18181B"}
                 radius={[4, 4, 0, 0]}
               />{" "}
               <Bar
                 dataKey="money_out"
                 name="Money Out"
-                fill={D.red}
+                fill={"#A1A1AA"}
                 radius={[4, 4, 0, 0]}
               />{" "}
             </BarChart>{" "}
           </ResponsiveContainer>{" "}
-        </div>
+        </Card>
       )}
       {!loading && loadError && (
         <div
           style={{
-            background: `${D.red}11`,
-            border: `1px solid ${D.red}`,
+            background: "#C8312F11",
+            border: "1px solid #C8312F",
             borderRadius: 8,
             padding: "14px 16px",
-            color: D.red,
+            color: "#C8312F",
             fontSize: 14,
             display: "flex",
             justifyContent: "space-between",
@@ -716,23 +766,17 @@ function CashFlowTab() {
           }}
         >
           <span>
-            Couldn't load cash flow ({loadError}). Figures are unavailable —
-            not zero.
+            Couldn't load cash flow ({loadError}). Figures are unavailable — not
+            zero.
           </span>
-          <button
+          <Button
             onClick={load}
-            style={{
-              background: "transparent",
-              border: `1px solid ${D.red}`,
-              borderRadius: 6,
-              padding: "6px 14px",
-              color: D.red,
-              fontSize: 13,
-              cursor: "pointer",
-            }}
+            type="button"
+            variant="secondary"
+            className="min-w-11"
           >
             Retry
-          </button>
+          </Button>
         </div>
       )}
       {!loading && !loadError && (
@@ -746,84 +790,85 @@ function CashFlowTab() {
           <SummaryCard
             label="Revenue In"
             value={data ? fmtM(totalIn) : "—"}
-            color={D.green}
+            color={"#18181B"}
           />{" "}
           <SummaryCard
             label="Expenses + Fees"
             value={data ? fmtM(totalOut) : "—"}
-            color={D.red}
+            color={"#18181B"}
           />{" "}
           <SummaryCard
             label="Operating Net"
             value={data ? fmtM(net) : "—"}
-            color={net >= 0 ? D.green : D.red}
+            color={net >= 0 ? "#18181B" : "#C8312F"}
           />{" "}
           <SummaryCard
             label="Stripe Fees"
             value={data ? fmtM(summary.stripe_fees) : "—"}
-            color={D.amber}
+            color={"#52525B"}
           />{" "}
         </div>
       )}
     </div>
   );
 }
-
 function CashFlowTooltip({ active, payload, label }) {
   if (!active || !payload?.length) return null;
   return (
-    <div
+    <Card
       style={{
-        background: D.card,
-        border: `1px solid ${D.border}`,
-        borderRadius: 8,
         padding: "10px 14px",
-        fontSize: 13,
+        fontSize: 14,
       }}
     >
-      <div style={{ color: D.muted, marginBottom: 4 }}>{label}</div>
+      <div
+        style={{
+          color: "#71717A",
+          marginBottom: 4,
+        }}
+      >
+        {label}
+      </div>
       {payload.map((p, i) => (
-        <div key={i} style={{ color: p.color, fontFamily: MONO }}>
+        <div className="u-nums"
+          key={i}
+          style={{
+            color: p.color,
+          }}
+        >
           {fmtM(p.value)} {p.name}
         </div>
       ))}
-    </div>
+    </Card>
   );
 }
-
 function SummaryCard({ label, value, color }) {
   const isMobile = useIsMobile(640);
   return (
-    <div
+    <Card
       style={{
-        background: D.card,
-        border: `1px solid ${D.border}`,
-        borderRadius: 12,
         padding: isMobile ? "12px 10px" : "16px 20px",
       }}
     >
       <div
         style={{
-          color: D.muted,
-          fontSize: 11,
-          textTransform: "uppercase",
-          letterSpacing: 1,
+          color: "#71717A",
+          fontSize: 14,
           marginBottom: 6,
         }}
       >
         {label}
       </div>{" "}
-      <div
+      <div className="u-nums"
         style={{
-          fontFamily: MONO,
           fontSize: 22,
-          fontWeight: 700,
-          color: color || D.heading,
+          fontWeight: 500,
+          color: color || "#09090B",
         }}
       >
         {value}
       </div>{" "}
-    </div>
+    </Card>
   );
 }
 
@@ -831,13 +876,15 @@ function SummaryCard({ label, value, color }) {
 // RECONCILIATION TAB
 // ═══════════════════════════════════════════════════════════════
 function ReconciliationTab() {
+  const actionRef = useRef(false);
+  const [pendingAction, setPendingAction] = useState("");
+  const [actionError, setActionError] = useState("");
   const [items, setItems] = useState([]);
   const [loading, setLoading] = useState(false);
   const [loadError, setLoadError] = useState(null);
   const [actuals, setActuals] = useState({});
   const [notes, setNotes] = useState({});
   const [reconciling, setReconciling] = useState(null);
-
   const load = useCallback(async () => {
     setLoading(true);
     try {
@@ -853,38 +900,49 @@ function ReconciliationTab() {
     }
     setLoading(false);
   }, []);
-
   useEffect(() => {
     load();
   }, [load]);
-
   const handleReconcile = async (payoutId) => {
-    const actual = actuals[payoutId];
-    if (actual == null || actual === "") return;
-    setReconciling(payoutId);
+    if (actionRef.current) return;
+    actionRef.current = true;
+    setPendingAction("handleReconcile");
+    setActionError("");
     try {
-      await adminFetch(`/admin/banking/reconciliation/${payoutId}`, {
-        method: "POST",
-        body: JSON.stringify({
-          actual_amount: parseFloat(actual),
-          notes: notes[payoutId] || "",
-        }),
-      });
-      await load();
-    } catch (e) {
-      reportError(e, "banking:reconcile");
-      alert("Reconciliation failed: " + e.message);
+      const actual = actuals[payoutId];
+      if (actual == null || actual === "") return;
+      setReconciling(payoutId);
+      try {
+        await adminFetch(`/admin/banking/reconciliation/${payoutId}`, {
+          method: "POST",
+          body: JSON.stringify({
+            actual_amount: parseFloat(actual),
+            notes: notes[payoutId] || "",
+          }),
+        });
+        await load();
+      } catch (e) {
+        reportError(e, "banking:reconcile");
+        setActionError("Reconciliation failed: " + e.message);
+      }
+      setReconciling(null);
+    } finally {
+      actionRef.current = false;
+      setPendingAction("");
     }
-    setReconciling(null);
   };
-
   return (
     <div>
+      {actionError && (
+        <ActionFeedback error className="mb-4 whitespace-pre-wrap">
+          {actionError}
+        </ActionFeedback>
+      )}
       {loading && (
         <div
           style={{
-            color: D.muted,
-            fontSize: 12,
+            color: "#71717A",
+            fontSize: 14,
             padding: 16,
             textAlign: "center",
           }}
@@ -896,11 +954,11 @@ function ReconciliationTab() {
       {!loading && loadError && (
         <div
           style={{
-            background: `${D.red}11`,
-            border: `1px solid ${D.red}`,
+            background: "#C8312F11",
+            border: "1px solid #C8312F",
             borderRadius: 8,
             padding: "14px 16px",
-            color: D.red,
+            color: "#C8312F",
             fontSize: 14,
             display: "flex",
             justifyContent: "space-between",
@@ -910,31 +968,26 @@ function ReconciliationTab() {
           }}
         >
           <span>
-            Couldn't load reconciliation ({loadError}) — outstanding payouts
-            may be hidden.
+            Couldn't load reconciliation ({loadError}) — outstanding payouts may
+            be hidden.
           </span>
-          <button
+          <Button
             onClick={load}
-            style={{
-              background: "transparent",
-              border: `1px solid ${D.red}`,
-              borderRadius: 6,
-              padding: "6px 14px",
-              color: D.red,
-              fontSize: 13,
-              cursor: "pointer",
-            }}
+            type="button"
+            variant="secondary"
+            className="min-w-11"
+            disabled={!!pendingAction}
           >
             Retry
-          </button>
+          </Button>
         </div>
       )}
 
       {!loading && !loadError && items.length === 0 && (
         <div
           style={{
-            color: D.muted,
-            fontSize: 13,
+            color: "#71717A",
+            fontSize: 14,
             padding: 20,
             textAlign: "center",
           }}
@@ -952,12 +1005,9 @@ function ReconciliationTab() {
               ).toFixed(2)
             : null;
         return (
-          <div
+          <Card
             key={item.id}
             style={{
-              background: D.card,
-              border: `1px solid ${item.reconciled ? D.green + "44" : D.border}`,
-              borderRadius: 10,
               padding: "14px 18px",
               marginBottom: 8,
             }}
@@ -970,28 +1020,67 @@ function ReconciliationTab() {
                 flexWrap: "wrap",
               }}
             >
-              <div style={{ flex: 1, minWidth: 150 }}>
+              <div
+                style={{
+                  flex: 1,
+                  minWidth: 150,
+                }}
+              >
                 <div
-                  style={{ fontSize: 13, fontWeight: 500, color: D.heading }}
+                  style={{
+                    fontSize: 14,
+                    fontWeight: 500,
+                    color: "#09090B",
+                  }}
                 >
                   {fmtD(item.date || item.created)}
                 </div>{" "}
-                <div style={{ fontSize: 11, color: D.muted, marginTop: 2 }}>
+                <div
+                  style={{
+                    fontSize: 14,
+                    color: "#71717A",
+                    marginTop: 2,
+                  }}
+                >
                   Expected:{" "}
-                  <span style={{ fontFamily: MONO, color: D.text }}>
+                  <span className="u-nums"
+                    style={{
+                      color: "#27272A",
+                    }}
+                  >
                     {fmtM(item.expected_amount || item.amount)}
                   </span>
                 </div>{" "}
               </div>
               {item.reconciled ? (
-                <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                  <span style={{ color: D.green, fontSize: 16 }}>
+                <div
+                  style={{
+                    display: "flex",
+                    alignItems: "center",
+                    gap: 8,
+                  }}
+                >
+                  <span
+                    style={{
+                      color: "#18181B",
+                      fontSize: 16,
+                    }}
+                  >
                     &#10003;
                   </span>{" "}
-                  <div style={{ fontSize: 11, color: D.muted }}>
+                  <div
+                    style={{
+                      fontSize: 14,
+                      color: "#71717A",
+                    }}
+                  >
                     <div>
                       Actual:{" "}
-                      <span style={{ fontFamily: MONO, color: D.green }}>
+                      <span className="u-nums"
+                        style={{
+                          color: "#18181B",
+                        }}
+                      >
                         {fmtM(item.actual_amount)}
                       </span>
                     </div>{" "}
@@ -1011,33 +1100,34 @@ function ReconciliationTab() {
                   }}
                 >
                   <div>
-                    <div
-                      style={{ fontSize: 10, color: D.muted, marginBottom: 2 }}
-                    >
-                      Actual Amount
-                    </div>{" "}
-                    <input
-                      type="number"
-                      step="0.01"
-                      placeholder={String(
-                        item.expected_amount || item.amount || "",
-                      )}
-                      value={actuals[item.id] || ""}
-                      onChange={(e) =>
-                        setActuals((prev) => ({
-                          ...prev,
-                          [item.id]: e.target.value,
-                        }))
-                      }
-                      style={{ ...inputStyle, width: 120, fontFamily: MONO }}
-                    />{" "}
+                    {" "}
+                    <Field label="Actual Amount" className="min-w-0">
+                      <Input
+                        type="number"
+                        step="0.01"
+                        placeholder={String(
+                          item.expected_amount || item.amount || "",
+                        )}
+                        value={actuals[item.id] || ""}
+                        onChange={(e) =>
+                          setActuals((prev) => ({
+                            ...prev,
+                            [item.id]: e.target.value,
+                          }))
+                        }
+                        style={{
+                          width: 120,
+                        }}
+                        disabled={!!pendingAction}
+                      />
+                    </Field>{" "}
                   </div>
                   {discrepancy != null && parseFloat(discrepancy) !== 0 && (
-                    <div
+                    <div className="u-nums"
                       style={{
-                        fontSize: 11,
-                        fontFamily: MONO,
-                        color: parseFloat(discrepancy) > 0 ? D.green : D.red,
+                        fontSize: 14,
+                        color:
+                          parseFloat(discrepancy) > 0 ? "#18181B" : "#C8312F",
                         alignSelf: "flex-end",
                         padding: "8px 0",
                       }}
@@ -1047,49 +1137,45 @@ function ReconciliationTab() {
                     </div>
                   )}
                   <div>
-                    <div
-                      style={{ fontSize: 10, color: D.muted, marginBottom: 2 }}
-                    >
-                      Notes
-                    </div>{" "}
-                    <input
-                      value={notes[item.id] || ""}
-                      onChange={(e) =>
-                        setNotes((prev) => ({
-                          ...prev,
-                          [item.id]: e.target.value,
-                        }))
-                      }
-                      placeholder="Optional notes"
-                      style={{ ...inputStyle, width: 160 }}
-                    />{" "}
+                    {" "}
+                    <Field label="Notes" className="min-w-0">
+                      <Input
+                        value={notes[item.id] || ""}
+                        onChange={(e) =>
+                          setNotes((prev) => ({
+                            ...prev,
+                            [item.id]: e.target.value,
+                          }))
+                        }
+                        placeholder="Optional notes"
+                        style={{
+                          width: 160,
+                        }}
+                        disabled={!!pendingAction}
+                      />
+                    </Field>{" "}
                   </div>{" "}
-                  <button
+                  <Button
                     onClick={() => handleReconcile(item.id)}
-                    disabled={reconciling === item.id || !actuals[item.id]}
+                    disabled={
+                      !!pendingAction ||
+                      reconciling === item.id ||
+                      !actuals[item.id]
+                    }
                     style={{
-                      background: D.green,
-                      border: "none",
-                      borderRadius: 6,
-                      padding: "8px 14px",
-                      color: "#fff",
-                      fontSize: 12,
-                      fontWeight: 500,
-                      cursor:
-                        reconciling === item.id || !actuals[item.id]
-                          ? "not-allowed"
-                          : "pointer",
-                      opacity:
-                        reconciling === item.id || !actuals[item.id] ? 0.5 : 1,
                       alignSelf: "flex-end",
                     }}
+                    type="button"
+                    variant="primary"
+                    loading={reconciling === item.id}
+                    className="min-w-11"
                   >
-                    {reconciling === item.id ? "Saving..." : "Reconcile"}
-                  </button>{" "}
+                    {"Reconcile"}
+                  </Button>{" "}
                 </div>
               )}
             </div>{" "}
-          </div>
+          </Card>
         );
       })}
     </div>
@@ -1100,15 +1186,19 @@ function ReconciliationTab() {
 // EXPORTS TAB
 // ═══════════════════════════════════════════════════════════════
 function ExportsTab() {
+  const actionRef = useRef(false);
+  const [pendingAction, setPendingAction] = useState("");
+  const [actionError, setActionError] = useState("");
   const today = new Date();
   const startOfMonth = new Date(today.getFullYear(), today.getMonth(), 1);
-
   const [startDate, setStartDate] = useState(etDateString(startOfMonth));
   const [endDate, setEndDate] = useState(etDateString(today));
   const [format, setFormat] = useState("csv");
   const [preview, setPreview] = useState([]);
+  const [previewError, setPreviewError] = useState("");
+  const [previewLoading, setPreviewLoading] = useState(true);
+  const [previewAttempt, setPreviewAttempt] = useState(0);
   const [downloading, setDownloading] = useState(false);
-
   const applyPreset = (preset) => {
     const now = new Date();
     let s, e;
@@ -1137,45 +1227,69 @@ function ExportsTab() {
     setStartDate(etDateString(s));
     setEndDate(etDateString(e));
   };
-
   useEffect(() => {
+    let active = true;
+    setPreviewLoading(true);
+    setPreviewError("");
     adminFetch(
       `/admin/banking/payouts?limit=5&page=1&start_date=${startDate}&end_date=${endDate}`,
     )
-      .then((d) => setPreview(d.payouts || []))
-      .catch(() => setPreview([]));
-  }, [startDate, endDate]);
-
+      .then((d) => {
+        if (active) setPreview(d.payouts || []);
+      })
+      .catch((error) => {
+        if (active) {
+          setPreview([]);
+          setPreviewError(error.message);
+        }
+      })
+      .finally(() => {
+        if (active) setPreviewLoading(false);
+      });
+    return () => {
+      active = false;
+    };
+  }, [startDate, endDate, previewAttempt]);
   const handleDownload = async () => {
-    setDownloading(true);
+    if (actionRef.current) return;
+    actionRef.current = true;
+    setPendingAction("handleDownload");
+    setActionError("");
     try {
-      const resp = await adminFetchRaw(
-        `/admin/banking/export?format=${format}&start_date=${startDate}&end_date=${endDate}`,
-      );
-      if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-      const blob = await resp.blob();
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.href = url;
-      a.download = `waves-banking-${startDate}-to-${endDate}.${format}`;
-      document.body.appendChild(a);
-      a.click();
-      document.body.removeChild(a);
-      URL.revokeObjectURL(url);
-    } catch (e) {
-      reportError(e, "banking:download");
-      alert("Download failed: " + e.message);
+      setDownloading(true);
+      try {
+        const resp = await adminFetchRaw(
+          `/admin/banking/export?format=${format}&start_date=${startDate}&end_date=${endDate}`,
+        );
+        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+        const blob = await resp.blob();
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = `waves-banking-${startDate}-to-${endDate}.${format}`;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        URL.revokeObjectURL(url);
+      } catch (e) {
+        reportError(e, "banking:download");
+        setActionError("Download failed: " + e.message);
+      }
+      setDownloading(false);
+    } finally {
+      actionRef.current = false;
+      setPendingAction("");
     }
-    setDownloading(false);
   };
-
   return (
     <div>
-      <div
+      {actionError && (
+        <ActionFeedback error className="mb-4 whitespace-pre-wrap">
+          {actionError}
+        </ActionFeedback>
+      )}
+      <Card
         style={{
-          background: D.card,
-          border: `1px solid ${D.border}`,
-          borderRadius: 12,
           padding: 20,
           marginBottom: 16,
         }}
@@ -1184,7 +1298,7 @@ function ExportsTab() {
           style={{
             fontSize: 14,
             fontWeight: 500,
-            color: D.heading,
+            color: "#09090B",
             marginBottom: 14,
           }}
         >
@@ -1201,26 +1315,32 @@ function ExportsTab() {
           }}
         >
           <div>
-            <div style={{ fontSize: 10, color: D.muted, marginBottom: 2 }}>
-              Start Date
-            </div>{" "}
-            <input
-              type="date"
-              value={startDate}
-              onChange={(e) => setStartDate(e.target.value)}
-              style={{ ...inputStyle, width: 150 }}
-            />{" "}
+            {" "}
+            <Field label="Start Date" className="min-w-0">
+              <Input
+                type="date"
+                value={startDate}
+                onChange={(e) => setStartDate(e.target.value)}
+                style={{
+                  width: 150,
+                }}
+                disabled={!!pendingAction}
+              />
+            </Field>{" "}
           </div>{" "}
           <div>
-            <div style={{ fontSize: 10, color: D.muted, marginBottom: 2 }}>
-              End Date
-            </div>{" "}
-            <input
-              type="date"
-              value={endDate}
-              onChange={(e) => setEndDate(e.target.value)}
-              style={{ ...inputStyle, width: 150 }}
-            />{" "}
+            {" "}
+            <Field label="End Date" className="min-w-0">
+              <Input
+                type="date"
+                value={endDate}
+                onChange={(e) => setEndDate(e.target.value)}
+                style={{
+                  width: 150,
+                }}
+                disabled={!!pendingAction}
+              />
+            </Field>{" "}
           </div>{" "}
         </div>
         {/* Presets */}
@@ -1233,153 +1353,171 @@ function ExportsTab() {
           }}
         >
           {[
-            { key: "this_month", label: "This Month" },
-            { key: "last_month", label: "Last Month" },
-            { key: "this_quarter", label: "This Quarter" },
-            { key: "ytd", label: "YTD" },
+            {
+              key: "this_month",
+              label: "This Month",
+            },
+            {
+              key: "last_month",
+              label: "Last Month",
+            },
+            {
+              key: "this_quarter",
+              label: "This Quarter",
+            },
+            {
+              key: "ytd",
+              label: "YTD",
+            },
           ].map((p) => (
-            <button
+            <Button
               key={p.key}
               onClick={() => applyPreset(p.key)}
-              style={{
-                background: "transparent",
-                border: `1px solid ${D.border}`,
-                borderRadius: 6,
-                padding: "6px 12px",
-                color: D.muted,
-                fontSize: 11,
-                cursor: "pointer",
-                transition: "border-color 0.15s",
-              }}
-              onMouseEnter={(e) => {
-                e.currentTarget.style.borderColor = D.teal;
-                e.currentTarget.style.color = D.text;
-              }}
-              onMouseLeave={(e) => {
-                e.currentTarget.style.borderColor = D.border;
-                e.currentTarget.style.color = D.muted;
-              }}
+              type="button"
+              variant="secondary"
+              className="min-w-11"
+              disabled={!!pendingAction}
             >
               {p.label}
-            </button>
+            </Button>
           ))}
         </div>
         {/* Format */}
-        <div style={{ marginBottom: 16 }}>
+        <div
+          style={{
+            marginBottom: 16,
+          }}
+        >
           <div
             style={{
-              fontSize: 10,
-              color: D.muted,
+              fontSize: 14,
+              color: "#71717A",
               marginBottom: 6,
-              textTransform: "uppercase",
-              letterSpacing: 1,
             }}
           >
             Format
           </div>{" "}
-          <div style={{ display: "flex", gap: 4 }}>
+          <div
+            style={{
+              display: "flex",
+              gap: 4,
+            }}
+          >
             {["csv", "ofx"].map((f) => (
-              <button
+              <Button
                 key={f}
                 onClick={() => setFormat(f)}
-                style={{
-                  background: format === f ? D.teal : "transparent",
-                  border: `1px solid ${format === f ? D.teal : D.border}`,
-                  borderRadius: 6,
-                  padding: "6px 16px",
-                  color: format === f ? D.white : D.muted,
-                  fontSize: 12,
-                  fontWeight: format === f ? 600 : 400,
-                  cursor: "pointer",
-                  textTransform: "uppercase",
-                }}
+                type="button"
+                variant={format === f ? "primary" : "secondary"}
+                aria-pressed={format === f}
+                className="min-w-11"
+                disabled={!!pendingAction}
               >
                 {f}
-              </button>
+              </Button>
             ))}
           </div>{" "}
         </div>{" "}
-        <button
+        <Button
           onClick={handleDownload}
-          disabled={downloading}
-          style={{
-            background: D.teal,
-            border: "none",
-            borderRadius: 8,
-            padding: "10px 24px",
-            color: "#fff",
-            fontSize: 14,
-            fontWeight: 700,
-            cursor: downloading ? "not-allowed" : "pointer",
-            opacity: downloading ? 0.6 : 1,
-          }}
+          disabled={!!pendingAction || downloading}
+          type="button"
+          variant="primary"
+          loading={downloading}
+          className="min-w-11"
         >
-          {downloading ? "Generating..." : "Generate & Download"}
-        </button>{" "}
-      </div>
+          {"Generate & Download"}
+        </Button>{" "}
+      </Card>
+      {previewLoading && (
+        <ActionFeedback>Loading export preview…</ActionFeedback>
+      )}
+      {previewError && (
+        <ActionFeedback
+          error
+          onRetry={() => setPreviewAttempt((value) => value + 1)}
+        >
+          Could not load export preview: {previewError}
+        </ActionFeedback>
+      )}
+      {!previewLoading && !previewError && preview.length === 0 && (
+        <ActionFeedback>
+          No payouts in this date range. Choose another range to preview.
+        </ActionFeedback>
+      )}
       {/* Preview */}
       {preview.length > 0 && (
-        <div
+        <Card
           style={{
-            background: D.card,
-            border: `1px solid ${D.border}`,
-            borderRadius: 12,
             padding: 20,
           }}
         >
           <div
             style={{
-              fontSize: 12,
+              fontSize: 14,
               fontWeight: 500,
-              color: D.heading,
+              color: "#09090B",
               marginBottom: 10,
             }}
           >
             Preview (first 5 payouts in range)
           </div>{" "}
-          <div style={{ overflowX: "auto" }}>
-          <table style={{ width: "100%", borderCollapse: "collapse" }}>
-            <thead>
-              <tr>
-                <th style={thStyle}>Date</th>
-                <th style={{ ...thStyle, textAlign: "right" }}>Amount</th>
-                <th style={thStyle}>Status</th>
-                <th style={thStyle}>Arrival</th>
-              </tr>
-            </thead>
-            <tbody>
-              {preview.map((p, i) => (
-                <tr key={i}>
-                  <td style={tdStyle}>
-                    {fmtD(
-                      p.created_at_stripe ||
-                        p.created_at ||
-                        p.date ||
-                        p.created,
-                    )}
-                  </td>
-                  <td
+          <div
+            style={{
+              overflowX: "auto",
+            }}
+          >
+            <Table>
+              <THead>
+                <TR>
+                  <TH>Date</TH>
+                  <TH
                     style={{
-                      ...tdStyle,
                       textAlign: "right",
-                      fontFamily: MONO,
-                      fontWeight: 500,
                     }}
                   >
-                    {fmtM(p.amount)}
-                  </td>
-                  <td style={tdStyle}>
-                    <Badge color={STATUS_COLORS[p.status] || D.muted}>
-                      {p.status}
-                    </Badge>
-                  </td>
-                  <td style={tdStyle}>{fmtDay(p.arrival_date)}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
+                    Amount
+                  </TH>
+                  <TH>Status</TH>
+                  <TH>Arrival</TH>
+                </TR>
+              </THead>
+              <TBody>
+                {preview.map((p, i) => (
+                  <TR key={i}>
+                    <TD>
+                      {fmtD(
+                        p.created_at_stripe ||
+                          p.created_at ||
+                          p.date ||
+                          p.created,
+                      )}
+                    </TD>
+                    <TD
+                      style={{
+                        textAlign: "right",
+                      }}
+                    >
+                      {fmtM(p.amount)}
+                    </TD>
+                    <TD>
+                      <Badge
+                        tone={
+                          (STATUS_COLORS[p.status] || "#71717A") === "#C8312F"
+                            ? "alert"
+                            : "neutral"
+                        }
+                      >
+                        {p.status}
+                      </Badge>
+                    </TD>
+                    <TD>{fmtDay(p.arrival_date)}</TD>
+                  </TR>
+                ))}
+              </TBody>
+            </Table>
           </div>
-        </div>
+        </Card>
       )}
     </div>
   );
@@ -1395,7 +1533,9 @@ function PayoutModal({
   onClose,
   onSuccess,
 }) {
-  const isMobile = useIsMobile(640);
+  const actionRef = useRef(false);
+  const [pendingAction, setPendingAction] = useState("");
+  const [actionError, setActionError] = useState("");
   const [method, setMethod] = useState(initialMethod);
   const [amount, setAmount] = useState(() =>
     payoutAmountInput(
@@ -1406,117 +1546,95 @@ function PayoutModal({
     newPayoutIdempotencyKey(initialMethod),
   );
   const [submitting, setSubmitting] = useState(false);
-
   const parsedAmount = parseFloat(amount) || 0;
   const isInstant = method === "instant";
   const fee = isInstant ? parsedAmount * INSTANT_PAYOUT_FEE_RATE : 0;
   const net = parsedAmount - fee;
   const methodLimit = payoutLimitForMethod(method, available, instantAvailable);
   const isOverLimit = parsedAmount > methodLimit;
-  const canSubmit = !submitting && parsedAmount > 0 && methodLimit > 0 && !isOverLimit;
-  const submitLabel = submitting
-    ? "Processing..."
-    : isInstant && methodLimit <= 0
+  const canSubmit =
+    !submitting && parsedAmount > 0 && methodLimit > 0 && !isOverLimit;
+  const submitLabel =
+    isInstant && methodLimit <= 0
       ? "Instant Unavailable"
       : `Confirm ${isInstant ? "Instant" : "Standard"}`;
-
   const selectMethod = (nextMethod) => {
-    const nextLimit = payoutLimitForMethod(nextMethod, available, instantAvailable);
+    const nextLimit = payoutLimitForMethod(
+      nextMethod,
+      available,
+      instantAvailable,
+    );
     setMethod(nextMethod);
     setAmount((currentAmount) => {
       const current = parseFloat(currentAmount) || 0;
-      if (current <= 0 || current > nextLimit) return payoutAmountInput(nextLimit);
+      if (current <= 0 || current > nextLimit)
+        return payoutAmountInput(nextLimit);
       return currentAmount;
     });
     setIdempotencyKey(newPayoutIdempotencyKey(nextMethod));
   };
-
   const handleSubmit = async () => {
-    if (!amount || parsedAmount <= 0) return;
-    if (parsedAmount > methodLimit) {
-      alert(
-        isInstant
-          ? `Payout amount exceeds instant-available balance ($${methodLimit.toFixed(2)}). Instant payouts draw from a smaller Stripe balance than standard payouts.`
-          : "Payout amount exceeds available balance.",
-      );
-      return;
-    }
-    setSubmitting(true);
+    if (actionRef.current) return;
+    actionRef.current = true;
+    setPendingAction("handleSubmit");
+    setActionError("");
     try {
-      const endpoint =
-        method === "instant"
-          ? "/admin/banking/payouts/instant"
-          : "/admin/banking/payouts/standard";
-      await adminFetch(endpoint, {
-        method: "POST",
-        body: JSON.stringify({
-          amount: parsedAmount,
-          idempotency_key: idempotencyKey,
-        }),
-      });
+      if (!amount || parsedAmount <= 0) return;
+      if (parsedAmount > methodLimit) {
+        alert(
+          isInstant
+            ? `Payout amount exceeds instant-available balance ($${methodLimit.toFixed(2)}). Instant payouts draw from a smaller Stripe balance than standard payouts.`
+            : "Payout amount exceeds available balance.",
+        );
+        return;
+      }
+      setSubmitting(true);
+      try {
+        const endpoint =
+          method === "instant"
+            ? "/admin/banking/payouts/instant"
+            : "/admin/banking/payouts/standard";
+        await adminFetch(endpoint, {
+          method: "POST",
+          body: JSON.stringify({
+            amount: parsedAmount,
+            idempotency_key: idempotencyKey,
+          }),
+        });
+        setSubmitting(false);
+        onSuccess();
+        return;
+      } catch (e) {
+        reportError(e, "banking:payout");
+        setActionError("Payout failed: " + e.message);
+      }
       setSubmitting(false);
-      onSuccess();
-      return;
-    } catch (e) {
-      reportError(e, "banking:payout");
-      alert("Payout failed: " + e.message);
+    } finally {
+      actionRef.current = false;
+      setPendingAction("");
     }
-    setSubmitting(false);
   };
-
-  return createPortal(
-    <div
-      style={{
-        position: "fixed",
-        inset: 0,
-        background: "rgba(0,0,0,0.7)",
-        display: "flex",
-        alignItems: "center",
-        justifyContent: "center",
-        zIndex: 9999,
-      }}
-      onClick={onClose}
-    >
-      <div
-        onClick={(e) => e.stopPropagation()}
-        style={{
-          background: D.card,
-          border: `1px solid ${D.border}`,
-          borderRadius: 16,
-          padding: 28,
-          width: "100%",
-          maxWidth: 400,
-          ...(isMobile
-            ? {
-                width: "100%",
-                maxWidth: "none",
-                height: "100%",
-                maxHeight: "none",
-                borderRadius: 0,
-                boxSizing: "border-box",
-                overflowY: "auto",
-                paddingTop: "calc(28px + env(safe-area-inset-top, 0px))",
-                paddingBottom: "calc(28px + env(safe-area-inset-bottom, 0px))",
-                paddingLeft: "calc(28px + env(safe-area-inset-left, 0px))",
-                paddingRight: "calc(28px + env(safe-area-inset-right, 0px))",
-              }
-            : {}),
-        }}
-      >
+  return (
+    <Dialog open onClose={submitting ? undefined : onClose} size="md">
+      {actionError && (
+        <ActionFeedback error className="mb-4 whitespace-pre-wrap">
+          {actionError}
+        </ActionFeedback>
+      )}
+      <DialogHeader>
+        <DialogTitle>Transfer Stripe Balance</DialogTitle>
+      </DialogHeader>
+      <DialogBody>
         <div
           style={{
-            fontSize: 18,
-            fontWeight: 700,
-            color: D.heading,
-            marginBottom: 4,
+            fontSize: 14,
+            color: "#71717A",
+            marginBottom: 20,
           }}
         >
-          Transfer Stripe Balance
-        </div>{" "}
-        <div style={{ fontSize: 12, color: D.muted, marginBottom: 20 }}>
           Standard payout avoids the Instant Payout fee. Instant is available
           when speed matters.
-        </div>{" "}
+        </div>
         <div
           style={{
             display: "grid",
@@ -1532,39 +1650,39 @@ function PayoutModal({
               note: "No instant fee",
               Icon: Clock3,
             },
-            { key: "instant", label: "Instant", note: "~1.5% fee", Icon: Zap },
+            {
+              key: "instant",
+              label: "Instant",
+              note: "~1.5% fee",
+              Icon: Zap,
+            },
           ].map(({ key, label, note, Icon }) => {
             const selected = method === key;
             const disabled =
               key === "instant" &&
               payoutLimitForMethod(key, available, instantAvailable) <= 0;
             return (
-              <button
+              <Button
                 key={key}
                 type="button"
-                disabled={disabled}
+                disabled={!!pendingAction || disabled}
                 onClick={() => {
                   if (!disabled) selectMethod(key);
                 }}
                 style={{
-                  border: `1px solid ${selected ? D.heading : D.border}`,
-                  background: selected ? D.heading : D.bg,
-                  color: selected ? D.white : D.text,
-                  borderRadius: 8,
-                  padding: "10px 12px",
                   textAlign: "left",
-                  cursor: disabled ? "not-allowed" : "pointer",
-                  minHeight: 58,
-                  opacity: disabled ? 0.5 : 1,
                 }}
+                variant={selected ? "primary" : "secondary"}
+                aria-pressed={selected}
+                className="min-w-11 flex-col !h-auto p-3"
               >
                 <span
                   style={{
                     display: "flex",
                     alignItems: "center",
                     gap: 8,
-                    fontSize: 13,
-                    fontWeight: 700,
+                    fontSize: 14,
+                    fontWeight: 500,
                   }}
                 >
                   <Icon size={16} strokeWidth={2} />
@@ -1574,62 +1692,59 @@ function PayoutModal({
                   style={{
                     display: "block",
                     marginTop: 4,
-                    fontSize: 11,
-                    color: selected ? "#D4D4D8" : D.muted,
+                    fontSize: 14,
+                    color: selected ? "#FFFFFF" : "#71717A",
                   }}
                 >
                   {disabled ? "Unavailable" : note}
                 </span>
-              </button>
+              </Button>
             );
           })}
-        </div>{" "}
-        <div style={{ marginBottom: 16 }}>
+        </div>
+        <div
+          style={{
+            marginBottom: 16,
+          }}
+        >
+          {" "}
+          <Field label="Payout Amount" className="min-w-0">
+            <Input
+              type="number"
+              step="0.01"
+              min="0"
+              max={methodLimit}
+              value={amount}
+              onChange={(e) => {
+                setAmount(e.target.value);
+                setIdempotencyKey(newPayoutIdempotencyKey(method));
+              }}
+              style={{
+                width: "100%",
+              }}
+              disabled={!!pendingAction}
+            />
+          </Field>{" "}
           <div
             style={{
-              fontSize: 10,
-              color: D.muted,
-              marginBottom: 4,
-              textTransform: "uppercase",
-              letterSpacing: 1,
+              fontSize: 14,
+              color: "#71717A",
+              marginTop: 4,
             }}
           >
-            Payout Amount
-          </div>{" "}
-          <input
-            type="number"
-            step="0.01"
-            min="0"
-            max={methodLimit}
-            value={amount}
-            onChange={(e) => {
-              setAmount(e.target.value);
-              setIdempotencyKey(newPayoutIdempotencyKey(method));
-            }}
-            style={{
-              ...inputStyle,
-              width: "100%",
-              fontSize: 20,
-              fontFamily: MONO,
-              fontWeight: 700,
-              padding: "12px 16px",
-            }}
-          />{" "}
-          <div style={{ fontSize: 11, color: D.muted, marginTop: 4 }}>
             {isInstant ? "Instant available" : "Available"}:{" "}
-            <span
+            <span className="u-nums"
               style={{
-                fontFamily: MONO,
-                color: methodLimit > 0 ? D.green : D.red,
+                color: methodLimit > 0 ? "#18181B" : "#C8312F",
               }}
             >
               {fmtM(methodLimit)}
             </span>
           </div>{" "}
-        </div>{" "}
+        </div>
         <div
           style={{
-            background: D.bg,
+            background: "#F4F4F5",
             borderRadius: 10,
             padding: 14,
             marginBottom: 20,
@@ -1642,8 +1757,20 @@ function PayoutModal({
               marginBottom: 6,
             }}
           >
-            <span style={{ fontSize: 12, color: D.muted }}>Amount</span>{" "}
-            <span style={{ fontFamily: MONO, fontSize: 13, color: D.text }}>
+            <span
+              style={{
+                fontSize: 14,
+                color: "#71717A",
+              }}
+            >
+              Amount
+            </span>{" "}
+            <span className="u-nums"
+              style={{
+                fontSize: 14,
+                color: "#27272A",
+              }}
+            >
               {fmtM(parsedAmount)}
             </span>{" "}
           </div>{" "}
@@ -1654,14 +1781,18 @@ function PayoutModal({
               marginBottom: 6,
             }}
           >
-            <span style={{ fontSize: 12, color: D.muted }}>
-              {isInstant ? "Instant fee estimate" : "Instant fee"}
-            </span>{" "}
             <span
               style={{
-                fontFamily: MONO,
-                fontSize: 13,
-                color: isInstant ? D.amber : D.green,
+                fontSize: 14,
+                color: "#71717A",
+              }}
+            >
+              {isInstant ? "Instant fee estimate" : "Instant fee"}
+            </span>{" "}
+            <span className="u-nums"
+              style={{
+                fontSize: 14,
+                color: isInstant ? "#52525B" : "#18181B",
               }}
             >
               {fmtM(fee)}
@@ -1669,65 +1800,61 @@ function PayoutModal({
           </div>{" "}
           <div
             style={{
-              borderTop: `1px solid ${D.border}`,
+              borderTop: "1px solid #E4E4E7",
               paddingTop: 6,
               display: "flex",
               justifyContent: "space-between",
             }}
           >
-            <span style={{ fontSize: 13, fontWeight: 500, color: D.heading }}>
-              Net Transfer
-            </span>{" "}
             <span
               style={{
-                fontFamily: MONO,
+                fontSize: 14,
+                fontWeight: 500,
+                color: "#09090B",
+              }}
+            >
+              Net Transfer
+            </span>{" "}
+            <span className="u-nums"
+              style={{
                 fontSize: 15,
-                fontWeight: 700,
-                color: D.green,
+                fontWeight: 500,
+                color: "#18181B",
               }}
             >
               {fmtM(net)}
             </span>{" "}
           </div>{" "}
-        </div>{" "}
-        <div style={{ display: "flex", gap: 10 }}>
-          <button
-            onClick={onClose}
-            style={{
-              flex: 1,
-              background: "transparent",
-              border: `1px solid ${D.border}`,
-              borderRadius: 8,
-              padding: "10px 16px",
-              color: D.muted,
-              fontSize: 13,
-              cursor: "pointer",
-            }}
-          >
-            Cancel
-          </button>{" "}
-          <button
-            onClick={handleSubmit}
-            disabled={!canSubmit}
-            style={{
-              flex: 1,
-              background: D.green,
-              border: "none",
-              borderRadius: 8,
-              padding: "10px 16px",
-              color: "#fff",
-              fontSize: 13,
-              fontWeight: 700,
-              cursor: canSubmit ? "pointer" : "not-allowed",
-              opacity: canSubmit ? 1 : 0.6,
-            }}
-          >
-            {submitLabel}
-          </button>{" "}
-        </div>{" "}
-      </div>{" "}
-    </div>,
-    document.body,
+        </div>
+      </DialogBody>
+      <DialogFooter>
+        <Button
+          onClick={onClose}
+          style={{
+            flex: 1,
+          }}
+          type="button"
+          variant="secondary"
+          className="min-w-11"
+          disabled={!!pendingAction}
+        >
+          Cancel
+        </Button>{" "}
+        <Button
+          onClick={handleSubmit}
+          disabled={!!pendingAction || !canSubmit}
+          style={{
+            flex: 1,
+          }}
+          type="button"
+          variant="primary"
+          className="min-w-11"
+          loading={pendingAction === "handleSubmit"}
+        >
+          {submitLabel}
+        </Button>{" "}
+      </DialogFooter>
+    </Dialog>
   );
 }
 
@@ -1744,7 +1871,6 @@ export default function BankingPage() {
   const balanceReqIdRef = useRef(0);
   const statsReqIdRef = useRef(0);
   const [payoutModalMethod, setPayoutModalMethod] = useState(null);
-
   const loadBalance = useCallback(async () => {
     // Sequence guard: only the latest request's outcome applies, so a slow
     // older request that fails after a newer one succeeded can't clobber the
@@ -1764,7 +1890,6 @@ export default function BankingPage() {
       setBalanceError(true);
     }
   }, []);
-
   const loadStats = useCallback(async () => {
     const reqId = ++statsReqIdRef.current;
     try {
@@ -1777,7 +1902,6 @@ export default function BankingPage() {
       setStatsError(true);
     }
   }, []);
-
   useEffect(() => {
     loadBalance();
     loadStats();
@@ -1790,15 +1914,16 @@ export default function BankingPage() {
   const pending = balance?.total_pending ?? 0;
   const instantAvailable = balance?.total_instant_available ?? null;
   const instantPayoutAvailable = instantAvailable > 0;
-
   const handlePayoutSuccess = () => {
     setPayoutModalMethod(null);
     loadBalance();
     loadStats();
   };
-
   return (
-    <div style={{ maxWidth: 1300, margin: "0 auto" }}>
+    <UiSurface
+      density="comfortable"
+      className="ui-workspace mx-auto max-w-[1300px] text-ui-body text-zinc-900"
+    >
       <AdminCommandHeader
         title="Banking"
         icon={Landmark}
@@ -1808,14 +1933,23 @@ export default function BankingPage() {
         action={{
           label: "Standard Payout",
           icon: Clock3,
-          onClick: () => setPayoutModalMethod("standard"),
+          onClick: (event) => {
+            event.currentTarget.focus({ preventScroll: true });
+            setPayoutModalMethod("standard");
+          },
           disabled: balanceError || !available || available <= 0,
         }}
         navGridClassName="grid-cols-2 md:grid-cols-4"
+        variant="workspace"
       />
       {/* Hero balance — Stripe account label, big balance, payout actions */}
-      <div style={{ marginBottom: 32 }}>
+      <div
+        style={{
+          marginBottom: 32,
+        }}
+      >
         <a
+          className={buttonStyles({ density: "comfortable", variant: "ghost" })}
           href="https://dashboard.stripe.com/payouts"
           target="_blank"
           rel="noopener noreferrer"
@@ -1823,88 +1957,107 @@ export default function BankingPage() {
             display: "inline-flex",
             alignItems: "center",
             gap: 4,
-            fontSize: 13,
-            color: D.muted,
+            fontSize: 14,
+            color: "#71717A",
             textDecoration: "none",
             marginBottom: 12,
           }}
         >
           Stripe payouts{" "}
-          <span aria-hidden style={{ fontSize: 14, lineHeight: 1 }}>
+          <span
+            aria-hidden
+            style={{
+              fontSize: 14,
+              lineHeight: 1,
+            }}
+          >
             ›
           </span>{" "}
         </a>{" "}
         <div
           style={{
-            fontSize: isMobile ? 40 : 48,
-            fontWeight: 700,
-            color: D.heading,
-            letterSpacing: "-0.03em",
+            fontSize: 32,
+            fontWeight: 500,
+            color: "#09090B",
             lineHeight: 1.1,
           }}
         >
-          {balanceError ? "—" : fmtM(available)}
+          {!balance || balanceError ? "—" : fmtM(available)}
         </div>{" "}
         {balanceError ? (
-          <div style={{ fontSize: 14, color: D.danger || "#dc2626", marginTop: 6 }}>
+          <div
+            style={{
+              fontSize: 14,
+              color: "#C8312F" || "#dc2626",
+              marginTop: 6,
+            }}
+          >
             Couldn&apos;t load balance.{" "}
-            <button
+            <Button
               type="button"
               onClick={loadBalance}
-              style={{ background: "none", border: "none", color: D.heading, textDecoration: "underline", cursor: "pointer", padding: 0, font: "inherit" }}
+              style={{
+                textDecoration: "underline",
+                font: "inherit",
+              }}
+              variant="secondary"
+              className="min-w-11"
             >
               Retry
-            </button>
+            </Button>
           </div>
         ) : (
-          <div style={{ fontSize: 14, color: D.muted, marginTop: 6 }}>
+          <div
+            style={{
+              fontSize: 14,
+              color: "#71717A",
+              marginTop: 6,
+            }}
+          >
             Available balance · Waves Pest Control
           </div>
         )}{" "}
         <div
-          style={{ display: "flex", gap: 10, marginTop: 20, flexWrap: "wrap" }}
+          style={{
+            display: "flex",
+            gap: 10,
+            marginTop: 20,
+            flexWrap: "wrap",
+          }}
         >
-          <button
-            onClick={() => setPayoutModalMethod("standard")}
-            disabled={balanceError || !available || available <= 0}
-            style={{
-              background: D.heading,
-              border: "none",
-              borderRadius: 9999,
-              padding: "12px 28px",
-              color: D.white,
-              fontSize: 14,
-              fontWeight: 500,
-              cursor: balanceError || !available || available <= 0 ? "not-allowed" : "pointer",
-              opacity: balanceError || !available || available <= 0 ? 0.4 : 1,
-              minHeight: 44,
+          <Button
+            onClick={(event) => {
+              event.currentTarget.focus({
+                preventScroll: true,
+              });
+              setPayoutModalMethod("standard");
             }}
+            disabled={balanceError || !available || available <= 0}
+            type="button"
+            variant="primary"
+            className="min-w-11"
           >
             Standard Payout
-          </button>{" "}
-          <button
-            onClick={() => setPayoutModalMethod("instant")}
+          </Button>{" "}
+          <Button
+            onClick={(event) => {
+              event.currentTarget.focus({
+                preventScroll: true,
+              });
+              setPayoutModalMethod("instant");
+            }}
             disabled={!instantPayoutAvailable}
             title={
               instantPayoutAvailable
                 ? "Create an instant payout"
                 : "No instant-available Stripe balance"
             }
-            style={{
-              background: D.card,
-              border: `1px solid ${D.border}`,
-              borderRadius: 9999,
-              padding: "12px 24px",
-              color: D.text,
-              fontSize: 14,
-              fontWeight: 500,
-              cursor: !instantPayoutAvailable ? "not-allowed" : "pointer",
-              opacity: !instantPayoutAvailable ? 0.4 : 1,
-              minHeight: 44,
-            }}
+            type="button"
+            variant="secondary"
+            className="min-w-11"
           >
             Instant Payout
-          </button>{" "}
+          </Button>{" "}
         </div>{" "}
       </div>
       {/* Secondary metrics */}
@@ -1916,112 +2069,119 @@ export default function BankingPage() {
           marginBottom: 28,
         }}
       >
-        <div
+        <Card
           style={{
-            background: D.card,
-            border: `1px solid ${D.border}`,
-            borderRadius: 12,
             padding: isMobile ? "14px 12px" : "16px 20px",
           }}
         >
           <div
             style={{
-              color: D.muted,
-              fontSize: 11,
-              textTransform: "uppercase",
-              letterSpacing: 1,
+              color: "#71717A",
+              fontSize: 14,
               marginBottom: 6,
             }}
           >
             Pending
           </div>{" "}
-          <div
+          <div className="u-nums"
             style={{
-              fontFamily: MONO,
               fontSize: 22,
-              fontWeight: 700,
-              color: D.amber,
+              fontWeight: 500,
+              color: "#52525B",
             }}
           >
-            {balanceError ? "—" : fmtM(pending)}
+            {!balance || balanceError ? "—" : fmtM(pending)}
           </div>{" "}
-          <div style={{ fontSize: 11, color: D.muted, marginTop: 4 }}>
+          <div
+            style={{
+              fontSize: 14,
+              color: "#71717A",
+              marginTop: 4,
+            }}
+          >
             Processing
           </div>{" "}
-        </div>{" "}
-        <div
+        </Card>{" "}
+        <Card
           style={{
-            background: D.card,
-            border: `1px solid ${D.border}`,
-            borderRadius: 12,
             padding: isMobile ? "14px 12px" : "16px 20px",
           }}
         >
           <div
             style={{
-              color: D.muted,
-              fontSize: 11,
-              textTransform: "uppercase",
-              letterSpacing: 1,
+              color: "#71717A",
+              fontSize: 14,
               marginBottom: 6,
             }}
           >
             Next Payout
           </div>{" "}
-          <div
+          <div className="u-nums"
             style={{
-              fontFamily: MONO,
               fontSize: 22,
-              fontWeight: 700,
-              color: D.heading,
+              fontWeight: 500,
+              color: "#09090B",
             }}
           >
-            {balanceError ? "—" : fmtM(balance?.next_payout?.amount)}
+            {!balance || balanceError
+              ? "—"
+              : fmtM(balance?.next_payout?.amount)}
           </div>{" "}
-          <div style={{ fontSize: 11, color: D.muted, marginTop: 4 }}>
+          <div
+            style={{
+              fontSize: 14,
+              color: "#71717A",
+              marginTop: 4,
+            }}
+          >
             {balanceError
               ? "Unavailable"
               : balance?.next_payout?.arrival_date
                 ? fmtDay(balance.next_payout.arrival_date)
                 : "No payout scheduled"}
           </div>{" "}
-        </div>{" "}
-        <div
+        </Card>{" "}
+        <Card
           style={{
-            background: D.card,
-            border: `1px solid ${D.border}`,
-            borderRadius: 12,
             padding: isMobile ? "14px 12px" : "16px 20px",
           }}
         >
           <div
             style={{
-              color: D.muted,
-              fontSize: 11,
-              textTransform: "uppercase",
-              letterSpacing: 1,
+              color: "#71717A",
+              fontSize: 14,
               marginBottom: 6,
             }}
           >
             MTD Deposited
           </div>{" "}
-          <div
+          <div className="u-nums"
             style={{
-              fontFamily: MONO,
               fontSize: 22,
-              fontWeight: 700,
-              color: D.heading,
+              fontWeight: 500,
+              color: "#09090B",
             }}
           >
-            {statsError ? "—" : fmtM(stats?.mtd_deposited)}
+            {!stats || statsError ? "—" : fmtM(stats?.mtd_deposited)}
           </div>{" "}
-          <div style={{ fontSize: 11, color: D.muted, marginTop: 4 }}>
+          <div
+            style={{
+              fontSize: 14,
+              color: "#71717A",
+              marginTop: 4,
+            }}
+          >
             {statsError
               ? "Unavailable"
               : `${stats?.payout_count ?? 0} payout${(stats?.payout_count ?? 0) !== 1 ? "s" : ""} this month`}
           </div>{" "}
-        </div>{" "}
+        </Card>{" "}
       </div>
+      {statsError && (
+        <ActionFeedback error onRetry={loadStats} className="mb-4">
+          Could not load deposit totals.
+        </ActionFeedback>
+      )}
       {tab === "payouts" && <PayoutsTab />}
       {tab === "cashflow" && <CashFlowTab />}
       {tab === "reconciliation" && <ReconciliationTab />}
@@ -2036,6 +2196,6 @@ export default function BankingPage() {
           onSuccess={handlePayoutSuccess}
         />
       )}
-    </div>
+    </UiSurface>
   );
 }

@@ -21,6 +21,7 @@ jest.mock('../services/messaging/send-customer-message', () => ({
   sendCustomerMessage: jest.fn().mockResolvedValue({ sent: true }),
 }));
 jest.mock('../utils/datetime-et', () => ({
+  ...jest.requireActual('../utils/datetime-et'),
   // No-arg call = "today"; the confirmation copy also calls it with the
   // addETDays result to compute "tomorrow".
   etDateString: jest.fn((d) => (d ? '2026-07-05' : '2026-07-04')),
@@ -113,6 +114,7 @@ describe('handleRescheduleReply — confirm-in-place', () => {
     expect(SmartRebooker.reschedule).not.toHaveBeenCalled();
     expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
     expect(sendCustomerMessage.mock.calls[0][0].body).toContain('1:00 PM - 3:00 PM');
+    expect(sendCustomerMessage.mock.calls[0][0]).toMatchObject({ appointmentId: 'svc-1', renderedSlotMs: Date.parse('2026-07-04T17:00:00Z') });
     // Confirm-in-place never re-booked, so the rain-out route's own reminder
     // sync is still accurate — no second sync from this path.
     expect(AppointmentReminders.handleReschedule).not.toHaveBeenCalled();

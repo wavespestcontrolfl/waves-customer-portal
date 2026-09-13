@@ -6,6 +6,7 @@ jest.mock('../services/logger', () => ({
 }));
 jest.mock('../services/estimate-slot-availability', () => ({
   invalidateEstimate: jest.fn(),
+  async resolveCatalogSlotProfile(estimate, options) { return this.resolveEstimateSlotProfile(estimate, options); },
   resolveEstimateSlotProfile: jest.fn(() => ({
     durationMinutes: 90,
     serviceLabel: '4x Pest Control + 9x Lawn Care',
@@ -25,7 +26,7 @@ const db = require('../models/db');
 const estimateSlotAvailability = require('../services/estimate-slot-availability');
 const slotReservation = require('../services/slot-reservation');
 const reservationHoldMigration = require('../models/migrations/20260516000016_allow_scheduled_service_reservation_holds');
-const { signSlotOffer, appendOfferToSlotId } = require('../utils/slot-offer-token');
+const { signSlotOffer, appendOfferToSlotId, CAPACITY_OFFER_POLICY } = require('../utils/slot-offer-token');
 
 // Mint the exact slotId shape the generator returns — base id + `.exp.sig`
 // (signCustomerFacingSlots). durationMinutes must match what reserveSlot
@@ -1019,6 +1020,39 @@ describe('slot reservation helpers', () => {
     }
   });
 
+  test('reselecting a same-total offer replaces stale combined member allowances', async () => {
+    jest.useFakeTimers();
+    jest.setSystemTime(new Date('2027-05-01T15:00:00Z'));
+    const capabilities = jest.spyOn(require('../services/technician-capabilities'), 'assertCapabilitiesActive')
+      .mockResolvedValue();
+    try {
+      const oldMix = { version: 2, services: ['pest_control', 'lawn_care'], durations: [30, 40], durationMinutes: 70 };
+      const newMix = { ...oldMix, durations: [40, 30] };
+      estimateSlotAvailability.resolveEstimateSlotProfile.mockReturnValueOnce({
+        durationMinutes: 70, serviceLabel: 'Pest Control + Lawn Care', reservationServiceMix: newMix,
+        services: [{ service: 'pest_control', visitsPerYear: 4 }, { service: 'lawn_care', visitsPerYear: 6 }],
+      });
+      const liveHoldsBuilder = makeLiveHoldsBuilder([{
+        id: 'held-stale', scheduled_date: '2027-05-20', window_start: '09:00:00', technician_id: 'tech-1',
+        estimated_duration_minutes: 70, reservation_service_mix: oldMix,
+      }]);
+      const deleted = makeDeleteBuilder();
+      const inserted = makeInsertBuilder({ id: 'held-fresh', reservation_expires_at: '2027-05-20T13:15:00.000Z' });
+      const trx = makeTrx({
+        estimateBuilder: makeEstimateBuilder({ id: 'estimate-456', status: 'sent' }),
+        technicianBuilder: makeTechnicianBuilder(),
+        scheduledBuilders: [liveHoldsBuilder, deleted, makeConflictBuilder(null), makeGlobalProbeBuilder([]), inserted],
+      });
+      db.transaction = jest.fn(async callback => callback(trx));
+      await expect(slotReservation.reserveSlot({ estimateId: 'estimate-456', slotId: signedSlotId({
+        estimateId: 'estimate-456', date: '2027-05-20', hhmm: '09:00', techId: 'tech-1', durationMinutes: 70,
+      }) })).resolves.toMatchObject({ scheduledServiceId: 'held-fresh' });
+      expect(deleted.whereIn).toHaveBeenCalledWith('id', ['held-stale']);
+      expect(deleted.del).toHaveBeenCalledTimes(1);
+      expect(inserted.insert).toHaveBeenCalledWith(expect.objectContaining({ reservation_service_mix: newMix }));
+    } finally { capabilities.mockRestore(); jest.useRealTimers(); }
+  });
+
   test('reserveSlot: a COMMITTED visit the tech/zone checks never see blocks the hold (global probe, round-3 P1)', async () => {
     jest.useFakeTimers();
     jest.setSystemTime(new Date('2027-05-01T15:00:00Z'));
@@ -1189,10 +1223,10 @@ describe('slot reservation helpers', () => {
   // date's key mid-txn when the hold moved: that unsorted second key is the
   // exact inversion the ordering contract bans.
 
-  function makeCommitHarness({ preReadDate, rowDate }) {
+  function makeCommitHarness({ preReadDate, rowDate, preReadTechId = 'tech-1' }) {
     const dateProbeBuilder = {
       where: jest.fn().mockReturnThis(),
-      first: jest.fn().mockResolvedValue({ scheduled_date: preReadDate }),
+      first: jest.fn().mockResolvedValue({ scheduled_date: preReadDate, technician_id: preReadTechId }),
     };
     const reservationBuilder = {
       where: jest.fn().mockReturnThis(),
@@ -1257,6 +1291,18 @@ describe('slot reservation helpers', () => {
       customer_id: 'customer-1',
       reservation_expires_at: null,
     }));
+  });
+
+  test('capacity commit rejects a changed pre-locked technician without acquiring another fence', async () => {
+    const { trx, advisoryCalls, reservationBuilder } = makeCommitHarness({
+      preReadDate: '2027-05-20', rowDate: '2027-05-20', preReadTechId: 'tech-2',
+    });
+    await expect(slotReservation.commitReservation({
+      scheduledServiceId: 'scheduled-123', customerId: 'customer-1', trx,
+      preparedCapacity: {}, preLockedDate: '2027-05-20', preLockedTechId: 'tech-1',
+    })).rejects.toMatchObject({ code: 'RESERVATION_EXPIRED' });
+    expect(advisoryCalls()).toEqual([]);
+    expect(reservationBuilder.forUpdate).not.toHaveBeenCalled();
   });
 
   test('commitReservation with a STALE preLockedDate (hold moved dates) fails RESERVATION_EXPIRED without taking ANY lock', async () => {
@@ -1393,6 +1439,63 @@ describe('reserveSlot signed-offer gate (booking-audit round 2)', () => {
     }
   });
 
+  test('a CAPACITY-policy offer redeemed with the gate OFF fails the in-txn HMAC — legacy path never books it', async () => {
+    jest.useFakeTimers();
+    jest.setSystemTime(new Date('2027-05-01T15:00:00Z'));
+    const gate = process.env.GATE_SCHEDULING_CAPACITY;
+    delete process.env.GATE_SCHEDULING_CAPACITY;
+    try {
+      const { technicianBuilder, scheduledBuilders } = makeVerifyHarness();
+      const offer = signSlotOffer({ surface: 'estimate', scopeId: 'estimate-456', date: '2027-05-20',
+        startMinutes: 9 * 60, technicianId: 'tech-1', durationMinutes: 90, policy: CAPACITY_OFFER_POLICY });
+      await expect(slotReservation.reserveSlot({
+        estimateId: 'estimate-456',
+        slotId: appendOfferToSlotId('2027-05-20_09-00_tech-1', offer),
+      })).rejects.toMatchObject({ code: 'SLOT_UNAVAILABLE' });
+      expect(scheduledBuilders).toHaveLength(0);
+      expect(technicianBuilder.where).not.toHaveBeenCalled();
+    } finally {
+      jest.useRealTimers();
+      if (gate === undefined) delete process.env.GATE_SCHEDULING_CAPACITY;
+      else process.env.GATE_SCHEDULING_CAPACITY = gate;
+    }
+  });
+
+  test('a LEGACY offer redeemed with the gate ON is rejected before the transaction and the cached slot list is invalidated', async () => {
+    jest.useFakeTimers();
+    jest.setSystemTime(new Date('2027-05-01T15:00:00Z'));
+    const gate = process.env.GATE_SCHEDULING_CAPACITY;
+    process.env.GATE_SCHEDULING_CAPACITY = 'true';
+    const estimateBuilder = {
+      where: jest.fn().mockReturnThis(),
+      first: jest.fn().mockResolvedValue({ id: 'estimate-456', status: 'sent', address: '1 Main St', service_interest: 'Pest Control' }),
+    };
+    const emptyBuilder = { where: jest.fn().mockReturnThis(), first: jest.fn().mockResolvedValue(null) };
+    db.mockImplementation((table) => (table === 'estimates' ? estimateBuilder : emptyBuilder));
+    db.transaction = jest.fn();
+    estimateSlotAvailability.resolveEstimateCoords = jest.fn().mockResolvedValue({ lat: 27.4217, lng: -82.4065 });
+    const travel = jest.spyOn(require('../services/route-optimizer'), 'createSchedulingTravel');
+    try {
+      await expect(slotReservation.reserveSlot({
+        estimateId: 'estimate-456',
+        slotId: signedSlotId({ estimateId: 'estimate-456', date: '2027-05-20', hhmm: '09:00', techId: 'tech-1', durationMinutes: 90 }),
+      })).rejects.toMatchObject({ code: 'SLOT_UNAVAILABLE', reason: 'invalid_offer' });
+      expect(db.transaction).not.toHaveBeenCalled();
+      expect(travel).not.toHaveBeenCalled();
+      // Pre-transaction rejections must still drop the wrapper cache so the
+      // public 409 recovery payload re-signs fresh slots instead of re-serving
+      // the stale list (codex #4346 P2).
+      expect(estimateSlotAvailability.invalidateEstimate).toHaveBeenCalledWith('estimate-456');
+    } finally {
+      travel.mockRestore();
+      delete estimateSlotAvailability.resolveEstimateCoords;
+      db.mockReset();
+      jest.useRealTimers();
+      if (gate === undefined) delete process.env.GATE_SCHEDULING_CAPACITY;
+      else process.env.GATE_SCHEDULING_CAPACITY = gate;
+    }
+  });
+
   test('an offer signed for ANOTHER estimate is rejected (scope binding)', async () => {
     jest.useFakeTimers();
     jest.setSystemTime(new Date('2027-05-01T15:00:00Z'));
@@ -1516,6 +1619,9 @@ describe('releaseExpiredReservations', () => {
     const trx = jest.fn(() => trxChain);
     trx.raw = jest.fn(async () => {});
     const delChain = {
+      // The grace-shifted cutoff is SQL, not a JS-computed Date, so app/DB
+      // clock skew can't sweep a hold the DB still considers in-grace.
+      whereRaw: jest.fn(() => delChain),
       where: jest.fn(() => delChain),
       whereNull: jest.fn(() => delChain),
       del: jest.fn(async () => 3),
@@ -1535,6 +1641,10 @@ describe('releaseExpiredReservations', () => {
       expect.objectContaining({ reservation_expires_at: null }),
     );
     expect(trxChain.returning).toHaveBeenCalled();
+    expect(delChain.whereRaw).toHaveBeenCalledWith(
+      'reservation_expires_at < NOW() - make_interval(mins => ?)',
+      [expect.any(Number)],
+    );
 
     // Pass 2: the DELETE is scoped to uncommitted holds only.
     expect(delChain.whereNull).toHaveBeenCalledWith('customer_id');

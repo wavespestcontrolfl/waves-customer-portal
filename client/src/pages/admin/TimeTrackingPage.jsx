@@ -1,10 +1,13 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from "react";
 import useIsMobile from "../../hooks/useIsMobile";
+import useModalFocus from "../../hooks/useModalFocus";
 import useRenderedTabBeacon from "../../hooks/useRenderedTabBeacon";
 import { createPortal } from "react-dom";
 import { useSearchParams } from "react-router-dom";
 import StaffDocumentLibrary from "../../components/staffDocuments/Library";
 import useStaffDocumentsAvailable from "../../hooks/useStaffDocumentsAvailable";
+import PayGrowth from "../../components/payGrowth/PayGrowth";
+import usePayGrowthAvailable from "../../hooks/usePayGrowthAvailable";
 import {
   BarChart3,
   CheckCircle2,
@@ -15,6 +18,7 @@ import {
   Users,
 } from "lucide-react";
 import AdminCommandHeader from "../../components/admin/AdminCommandHeader";
+import "./TimeTrackingPage.css";
 import { TECH_LINE_NUMBERS } from "../../constants/techLines";
 import {
   etDateString,
@@ -75,24 +79,30 @@ function adminFetch(path, opts = {}) {
 const sCard = {
   background: D.card,
   border: `1px solid ${D.border}`,
-  borderRadius: 12,
-  padding: 20,
+  borderRadius: 6,
+  padding: 16,
   marginBottom: 12,
-  boxShadow: "0 1px 3px rgba(0,0,0,0.08)",
+  boxShadow: "none",
 };
 const sBtn = (bg, color) => ({
-  padding: "8px 16px",
+  minHeight: 44,
+  padding: "0 16px",
   background: bg,
   color,
-  border: "none",
-  borderRadius: 8,
-  fontSize: 13,
+  border: `1px solid ${bg === "transparent" ? D.border : bg}`,
+  borderRadius: 4,
+  fontSize: 14,
   fontWeight: 500,
   cursor: "pointer",
+  display: "inline-flex",
+  alignItems: "center",
+  justifyContent: "center",
+  lineHeight: 1.3,
 });
 const sBadge = (bg, color) => ({
-  fontSize: 10,
-  padding: "2px 8px",
+  fontSize: 14,
+  lineHeight: 1.35,
+  padding: "3px 8px",
   borderRadius: 4,
   background: bg,
   color,
@@ -101,12 +111,13 @@ const sBadge = (bg, color) => ({
 });
 const sInput = {
   width: "100%",
-  padding: "8px 12px",
+  minHeight: 44,
+  padding: "0 12px",
   background: D.input,
   border: `1px solid ${D.border}`,
-  borderRadius: 8,
+  borderRadius: 4,
   color: D.text,
-  fontSize: 13,
+  fontSize: 16,
   outline: "none",
   boxSizing: "border-box",
 };
@@ -150,6 +161,7 @@ const STAFF_SECTIONS = [
   { key: "analytics", label: "Analytics", Icon: BarChart3 },
   { key: "team", label: "Team", Icon: Users },
   { key: "documents", label: "Documents", Icon: FileText },
+  { key: "pay-growth", label: "Pay & Growth", Icon: BarChart3 },
 ];
 
 // The 7-tab bar is grouped into parent sections, each revealing its leaf
@@ -167,7 +179,7 @@ const TIMETRACKING_TAB_GROUPS = [
     key: "team",
     label: "Team",
     Icon: Users,
-    tabs: ["team", "documents"],
+    tabs: ["team", "documents", "pay-growth"],
   },
   { key: "analytics", label: "Analytics", Icon: BarChart3, tabs: ["analytics"] },
 ];
@@ -175,10 +187,27 @@ const STAFF_LEAF_BY_KEY = Object.fromEntries(
   STAFF_SECTIONS.map((s) => [s.key, s]),
 );
 
+// Resolve the LEAF the page will actually render for a ?tab= deep link.
+// Gate-off or non-admin deep links to pay-growth fall back to the group's
+// default tab entirely (content + beacon + active-tab highlight), same as any
+// other invalid/role-gated deep link. While an admin's availability request
+// is still pending (null) the tab is unresolved: rendering Team meanwhile
+// would flash the wrong view and could flush a false Team usage beacon.
+export function resolveStaffTab(rawTab, payGrowthAvailable, role) {
+  if (rawTab !== "pay-growth") return rawTab;
+  if (role !== "admin" || payGrowthAvailable === false) return "team";
+  return payGrowthAvailable === true ? "pay-growth" : null;
+}
+
 export default function TimeTrackingPage() {
   const controlledDocumentsAvailable = useStaffDocumentsAvailable();
+  const payGrowthAvailable = usePayGrowthAvailable();
   const [searchParams, setSearchParams] = useSearchParams();
-  const tab = STAFF_LEAF_BY_KEY[searchParams.get("tab")] ? searchParams.get("tab") : "dashboard";
+  const rawTab = STAFF_LEAF_BY_KEY[searchParams.get("tab")] ? searchParams.get("tab") : "dashboard";
+  const payGrowthGateOpen = payGrowthAvailable === true && readStaffRole() === "admin";
+  // null = pay-growth requested by an admin while availability is still
+  // unknown: no leaf renders and no beacon fires until it resolves.
+  const tab = resolveStaffTab(rawTab, payGrowthAvailable, readStaffRole());
   const setTab = (value) => {
     const next = new URLSearchParams(searchParams);
     next.set("tab", value);
@@ -186,7 +215,7 @@ export default function TimeTrackingPage() {
     setSearchParams(next);
   };
   const activeGroup =
-    TIMETRACKING_TAB_GROUPS.find((g) => g.tabs.includes(tab)) ||
+    TIMETRACKING_TAB_GROUPS.find((g) => g.tabs.includes(tab ?? rawTab)) ||
     TIMETRACKING_TAB_GROUPS[0];
   useRenderedTabBeacon("/admin/timetracking", tab, [searchParams]);
   const [toast, setToast] = useState("");
@@ -196,7 +225,7 @@ export default function TimeTrackingPage() {
   };
 
   return (
-    <div style={{ maxWidth: 1300, margin: "0 auto" }}>
+    <div className="staff-foundation mx-auto max-w-[1500px]">
       {" "}
       <AdminCommandHeader
         title="Staff"
@@ -218,12 +247,14 @@ export default function TimeTrackingPage() {
         <div
           style={{
             display: "flex",
-            flexWrap: "wrap",
+            flexWrap: "nowrap",
+            overflowX: "auto",
             gap: 8,
             marginBottom: 16,
+            paddingBottom: 2,
           }}
         >
-          {activeGroup.tabs.map((key) => {
+          {activeGroup.tabs.filter((key) => key !== "pay-growth" || payGrowthGateOpen).map((key) => {
             const leaf = STAFF_LEAF_BY_KEY[key];
             const active = tab === key;
             const LeafIcon = leaf.Icon;
@@ -236,13 +267,11 @@ export default function TimeTrackingPage() {
                   display: "inline-flex",
                   alignItems: "center",
                   gap: 6,
-                  height: 36,
+                  minHeight: 44,
                   padding: "0 14px",
-                  borderRadius: 6,
-                  fontSize: 12,
-                  fontWeight: 700,
-                  textTransform: "uppercase",
-                  letterSpacing: "0.04em",
+                  borderRadius: 4,
+                  fontSize: 14,
+                  fontWeight: 500,
                   cursor: "pointer",
                   border: `1px solid ${active ? "#18181B" : "#E4E4E7"}`,
                   background: active ? "#18181B" : "#FFFFFF",
@@ -274,6 +303,8 @@ export default function TimeTrackingPage() {
           <DocumentsTab showToast={showToast} />
         </details>
       </> : <DocumentsTab showToast={showToast} />)}
+      {tab === "pay-growth" && <PayGrowth manage />}
+      {tab === null && <p role="status" style={{ color: "#71717A" }}>Checking pay and growth availability…</p>}
       <div
         style={{
           position: "fixed",
@@ -298,7 +329,7 @@ export default function TimeTrackingPage() {
         {" "}
         <span style={{ color: D.green }}>OK</span>
         <span style={{ color: D.text }}>{toast}</span>{" "}
-      </div>{" "}
+      </div>
     </div>
   );
 }
@@ -1563,6 +1594,7 @@ function EditEntryModal({ entry, onClose, onSave }) {
 
   return createPortal(
     <div
+      className="staff-foundation"
       style={{
         position: "fixed",
         top: 0,
@@ -2415,6 +2447,10 @@ export function TeamTab({ showToast }) {
   const [saving, setSaving] = useState(false);
   const [earningsTech, setEarningsTech] = useState(null);
   const [capabilitiesTech, setCapabilitiesTech] = useState(null);
+  const [deactivateTech, setDeactivateTech] = useState(null);
+  const [deactivateError, setDeactivateError] = useState("");
+  const [deactivating, setDeactivating] = useState(false);
+  const deactivateInFlightRef = useRef(false);
   // The capabilities routes are admin-only; the roster itself is readable by
   // technicians, so the action is hidden for them rather than 403ing.
   const isAdmin = useMemo(() => readStaffRole() === "admin", []);
@@ -2531,11 +2567,10 @@ export function TeamTab({ showToast }) {
   };
 
   const handleDeactivate = async (tech) => {
-    if (
-      !confirm(
-        `Deactivate ${tech.name}'s staff account? They will be signed out and can no longer access Staff tools. Historical time, payroll, job, and audit records will be kept.`,
-      )
-    ) return;
+    if (deactivateInFlightRef.current) return;
+    deactivateInFlightRef.current = true;
+    setDeactivating(true);
+    setDeactivateError("");
     try {
       const res = await adminFetch(`/admin/timetracking/technicians/${tech.id}`, {
         method: "DELETE",
@@ -2548,9 +2583,15 @@ export function TeamTab({ showToast }) {
           ? `${tech.name} deactivated — ${pending.length} upcoming visit${pending.length === 1 ? "" : "s"} still assigned; reassign on the Schedule`
           : `${tech.name} deactivated`,
       );
+      setDeactivateTech(null);
       load();
     } catch (e) {
-      showToast("Failed to deactivate: " + String(e.message || "Unknown error"));
+      const message = "Failed to deactivate: " + String(e.message || "Unknown error");
+      setDeactivateError(message);
+      showToast(message);
+    } finally {
+      deactivateInFlightRef.current = false;
+      setDeactivating(false);
     }
   };
 
@@ -3325,9 +3366,15 @@ export function TeamTab({ showToast }) {
                       {uploadingId === t.id ? "Uploading…" : "Photo"}
                     </button>{" "}
                     <button
-                      onClick={() => (
-                        t.active ? handleDeactivate(t) : handleActivate(t)
-                      )}
+                      onClick={(event) => {
+                        if (t.active) {
+                          event.currentTarget.focus({ preventScroll: true });
+                          setDeactivateError("");
+                          setDeactivateTech(t);
+                        } else {
+                          handleActivate(t);
+                        }
+                      }}
                       title={t.employment_status === "prospective" ? "Marks this hire as started. They set their password with Forgot password on the admin login (needs their email on this row)." : undefined}
                       style={{
                         padding: "4px 10px",
@@ -3373,7 +3420,92 @@ export function TeamTab({ showToast }) {
           showToast={showToast}
         />
       )}
+      {deactivateTech && (
+        <DeactivateStaffDialog
+          tech={deactivateTech}
+          error={deactivateError}
+          submitting={deactivating}
+          onCancel={() => {
+            if (!deactivating) setDeactivateTech(null);
+          }}
+          onConfirm={() => handleDeactivate(deactivateTech)}
+        />
+      )}
     </div>
+  );
+}
+
+function DeactivateStaffDialog({ tech, error, submitting, onCancel, onConfirm }) {
+  const dialogRef = useModalFocus(true, () => {
+    if (!submitting) onCancel();
+  });
+  const titleId = `deactivate-staff-title-${tech.id}`;
+
+  return createPortal(
+    <div
+      className="staff-foundation"
+      onClick={() => {
+        if (!submitting) onCancel();
+      }}
+      style={{
+        position: "fixed",
+        inset: 0,
+        zIndex: 200,
+        background: "rgba(0,0,0,0.45)",
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "center",
+        padding: "calc(16px + env(safe-area-inset-top, 0px)) calc(16px + env(safe-area-inset-right, 0px)) calc(16px + env(safe-area-inset-bottom, 0px)) calc(16px + env(safe-area-inset-left, 0px))",
+        overflowY: "auto",
+      }}
+    >
+      <div
+        ref={dialogRef}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby={titleId}
+        tabIndex={-1}
+        onClick={(event) => event.stopPropagation()}
+        style={{
+          background: D.card,
+          border: `1px solid ${D.border}`,
+          borderRadius: 6,
+          width: "100%",
+          maxWidth: 480,
+          maxHeight: "100%",
+          overflowY: "auto",
+          padding: 20,
+          boxSizing: "border-box",
+        }}
+      >
+        <div id={titleId} style={{ fontSize: 18, fontWeight: 500, color: D.heading }}>
+          Deactivate {tech.name}?
+        </div>
+        <p style={{ fontSize: 14, lineHeight: 1.55, color: D.text, margin: "12px 0 0" }}>
+          They will be signed out and can no longer access Staff tools. Historical time, payroll, job, and audit records will be kept.
+        </p>
+        {error && (
+          <div role="alert" style={{ color: D.red, fontSize: 14, lineHeight: 1.55, marginTop: 12 }}>
+            {error}
+          </div>
+        )}
+        <div style={{ display: "flex", justifyContent: "flex-end", flexWrap: "wrap", gap: 8, marginTop: 20 }}>
+          <button type="button" onClick={onCancel} disabled={submitting} style={sBtn("transparent", D.text)}>
+            Cancel
+          </button>
+          <button
+            type="button"
+            onClick={onConfirm}
+            disabled={submitting}
+            aria-busy={submitting || undefined}
+            style={{ ...sBtn(D.red, D.white), cursor: submitting ? "wait" : "pointer", opacity: submitting ? 0.6 : 1 }}
+          >
+            {submitting ? "Deactivating…" : "Deactivate"}
+          </button>
+        </div>
+      </div>
+    </div>,
+    document.body,
   );
 }
 
@@ -3553,6 +3685,7 @@ function CapabilitiesModal({ tech, onClose, onSaved, showToast }) {
 
   return createPortal(
     <div
+      className="staff-foundation"
       onClick={onClose}
       style={{
         position: "fixed",
@@ -3793,6 +3926,7 @@ function EarningsModal({ tech, onClose, showToast }) {
 
   return createPortal(
     <div
+      className="staff-foundation"
       onClick={onClose}
       style={{
         position: "fixed",

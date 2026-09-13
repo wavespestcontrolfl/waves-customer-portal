@@ -224,6 +224,18 @@ async function resolveCustomerEmailField(bouncedMessage, bouncedEmail) {
   let field = CUSTOMER_EMAIL_FIELDS.find(
     (f) => String(customer[f] || '').trim().toLowerCase() === bouncedEmail,
   ) || null;
+  // A secondary property profile with no email of its own is addressed at
+  // its account primary's email (customer-contact withAccountPrimaryContact):
+  // the message records the profile as recipient, but the address lives on
+  // the primary's row, which is the row a correction must update.
+  if (!field) {
+    const { withAccountPrimaryContact } = require('./customer-contact');
+    const filled = await withAccountPrimaryContact(customer).catch(() => customer);
+    const fallback = filled?.account_primary_fallback;
+    if (fallback?.fields?.includes('email') && String(filled.email || '').trim().toLowerCase() === bouncedEmail) {
+      return { customerId: fallback.customer_id, field: 'email' };
+    }
+  }
   // notification_prefs.billing_email is also a sendable customer address (the
   // invoice/balance path resolves it via getInvoiceEmailRecipients) but lives on
   // a separate table. If the bounce was to that address, mark the field so the
@@ -312,7 +324,9 @@ async function bouncedAddressStillOnFile(bouncedEmail, match, sourceEstimateId =
  * is just as much a leak. Same-entity records are positively excluded by
  * customer_id so legit lead→customer conversions don't over-block.
  */
-async function correctedAddressOwnedByOther(correctedEmail, ownCustomerId) {
+// `database` lets a caller already holding a transaction run these reads on
+// that connection instead of acquiring a second one from the pool.
+async function correctedAddressOwnedByOther(correctedEmail, ownCustomerId, database = db) {
   const email = String(correctedEmail || '').trim().toLowerCase();
   if (!email) return false;
   const own = String(ownCustomerId || '');
@@ -323,7 +337,7 @@ async function correctedAddressOwnedByOther(correctedEmail, ownCustomerId) {
   // someone else, treat it as owned so recovery routes to manual, never a
   // privacy-leaking auto-resend.
   try {
-    const customerRows = await db('customers')
+    const customerRows = await database('customers')
       .where((q) => {
         for (const f of CUSTOMER_EMAIL_FIELDS) q.orWhereRaw(`LOWER(${f}) = ?`, [email]);
       })
@@ -332,21 +346,24 @@ async function correctedAddressOwnedByOther(correctedEmail, ownCustomerId) {
 
     // Estimates / leads carry a customer_id link; a record not tied to our own
     // customer (incl. prospect rows with no customer_id) is another party.
-    const estRows = await db('estimates').whereRaw('LOWER(customer_email) = ?', [email]).select('customer_id');
+    const estRows = await database('estimates').whereRaw('LOWER(customer_email) = ?', [email]).select('customer_id');
     if (estRows.some((r) => isOther(r.customer_id))) return true;
 
-    const leadRows = await db('leads').whereRaw('LOWER(email) = ?', [email]).select('customer_id');
+    const leadRows = await database('leads').whereRaw('LOWER(email) = ?', [email]).select('customer_id');
     if (leadRows.some((r) => isOther(r.customer_id))) return true;
 
     // notification_prefs.billing_email is also a sendable customer address
     // (getInvoiceEmailRecipients), so it can belong to another customer too.
-    const prefRows = await db('notification_prefs').whereRaw('LOWER(billing_email) = ?', [email]).select('customer_id');
+    const prefRows = await database('notification_prefs').whereRaw('LOWER(billing_email) = ?', [email]).select('customer_id');
     if (prefRows.some((r) => isOther(r.customer_id))) return true;
   } catch (err) {
     logger.warn(`[bounce-recovery] ownership lookup failed — treating as owned by other: ${err.message}`);
     return true;
   }
-  return false;
+  // Gmail ignores local-part dots and everything after '+': a corrected
+  // dot/tag variant of a mailbox another account holds delivers to that
+  // account's inbox, so the exact check is completed by the inbox-identity one.
+  return gmailMailboxOwnedByOther(email, ownCustomerId, database);
 }
 
 /**
@@ -359,7 +376,7 @@ async function correctedAddressOwnedByOther(correctedEmail, ownCustomerId) {
  * fail-closed contract. Non-Google addresses return false — dots and tags
  * are significant everywhere else, so the exact check is the right one there.
  */
-async function gmailMailboxOwnedByOther(email, ownCustomerId) {
+async function gmailMailboxOwnedByOther(email, ownCustomerId, database = db) {
   const s = String(email || '').trim().toLowerCase();
   const [local, domain] = s.split('@');
   if (!local || !domain || !['gmail.com', 'googlemail.com'].includes(domain)) return false;
@@ -371,24 +388,24 @@ async function gmailMailboxOwnedByOther(email, ownCustomerId) {
   const CANON = (f) => `REPLACE(SPLIT_PART(SPLIT_PART(LOWER(${f}), '@', 1), '+', 1), '.', '')`;
   const GOOGLE = (f) => `SPLIT_PART(LOWER(${f}), '@', 2) IN ('gmail.com', 'googlemail.com')`;
   try {
-    const customerRows = await db('customers')
+    const customerRows = await database('customers')
       .where((q) => {
         for (const f of CUSTOMER_EMAIL_FIELDS) q.orWhereRaw(`(${GOOGLE(f)} AND ${CANON(f)} = ?)`, [mailbox]);
       })
       .select('id');
     if (customerRows.some((r) => String(r.id) !== own)) return true;
 
-    const estRows = await db('estimates')
+    const estRows = await database('estimates')
       .whereRaw(`${GOOGLE('customer_email')} AND ${CANON('customer_email')} = ?`, [mailbox])
       .select('customer_id');
     if (estRows.some((r) => isOther(r.customer_id))) return true;
 
-    const leadRows = await db('leads')
+    const leadRows = await database('leads')
       .whereRaw(`${GOOGLE('email')} AND ${CANON('email')} = ?`, [mailbox])
       .select('customer_id');
     if (leadRows.some((r) => isOther(r.customer_id))) return true;
 
-    const prefRows = await db('notification_prefs')
+    const prefRows = await database('notification_prefs')
       .whereRaw(`${GOOGLE('billing_email')} AND ${CANON('billing_email')} = ?`, [mailbox])
       .select('customer_id');
     if (prefRows.some((r) => isOther(r.customer_id))) return true;
@@ -416,6 +433,9 @@ async function insertRecoveryMessage(bouncedMessage, correctedEmail, recoveryId)
     template_id: bouncedMessage.template_id || null,
     template_version_id: bouncedMessage.template_version_id || null,
     template_key: bouncedMessage.template_key || null,
+    // The recovery send is the same event delivered to the corrected address:
+    // aggregates keyed on the trigger (the visit summary effect) settle from it.
+    trigger_event_id: bouncedMessage.trigger_event_id || null,
     suppression_group_key_snapshot: bouncedMessage.suppression_group_key_snapshot || '',
     recipient_type: bouncedMessage.recipient_type || null,
     recipient_id: bouncedMessage.recipient_id || null,
@@ -458,25 +478,60 @@ async function insertRecoveryMessage(bouncedMessage, correctedEmail, recoveryId)
  * Dispatch the recovery message via SendGrid and publish provider_message_id
  * LAST. Idempotent — a row already sent (e.g. a partial-retry) is not re-sent.
  */
-async function dispatchRecoveryMessage({ message, categories, bouncedMessage, correctedEmail }) {
+async function dispatchRecoveryMessage({ message, categories, bouncedMessage, correctedEmail, ownCustomerId = null }) {
   if (message.status === 'sent' && message.provider_message_id) {
     return { ok: true, messageRowId: message.id, reused: true };
   }
   try {
-    const result = await sendgrid.sendOne({
-      to: correctedEmail,
-      fromEmail: message.from_email_snapshot,
-      fromName: message.from_name_snapshot,
-      replyTo: message.reply_to_snapshot,
-      subject: message.subject_snapshot,
-      html: bouncedMessage.html_snapshot || undefined,
-      text: bouncedMessage.text_snapshot || undefined,
-      categories,
-      asmGroupId: asmGroupIdForStream(bouncedMessage.suppression_group_key_snapshot),
-      // So a fast delivery/bounce webhook can resolve this row even before
-      // provider_message_id is committed below.
-      customArgs: { email_message_id: String(message.id), send_attempt_token: message.send_attempt_token },
-    });
+    let result;
+    const dispatchToProvider = async () => {
+      result = await sendgrid.sendOne({
+        to: correctedEmail,
+        fromEmail: message.from_email_snapshot,
+        fromName: message.from_name_snapshot,
+        replyTo: message.reply_to_snapshot,
+        subject: message.subject_snapshot,
+        html: bouncedMessage.html_snapshot || undefined,
+        text: bouncedMessage.text_snapshot || undefined,
+        categories,
+        asmGroupId: asmGroupIdForStream(bouncedMessage.suppression_group_key_snapshot),
+        // So a fast delivery/bounce webhook can resolve this row even before
+        // provider_message_id is committed below.
+        customArgs: { email_message_id: String(message.id), send_attempt_token: message.send_attempt_token },
+      });
+    };
+    if (bouncedMessage.template_key === 'service.visit_summary') {
+      // Domain correction changes the destination, not the customer's consent
+      // or the authority of the original visit link. The original recipient
+      // is re-authorized on held rows and the request runs while they are
+      // held; a recheck that cannot be read fails closed through the catch.
+      let fence;
+      try {
+        fence = await require('./visit-completion-summary').retrySummaryThroughHandoff(bouncedMessage, async (trx) => {
+          // The corrected destination is revalidated immediately before the
+          // request, on the held connection: a party that claimed that
+          // address after the earlier ownership check must not receive the
+          // bearer link.
+          if (await correctedAddressOwnedByOther(correctedEmail, ownCustomerId, trx || db)) return { ok: false, reason: 'corrected_owned_by_other' };
+          await dispatchToProvider();
+          return { ok: true };
+        }, { destination: correctedEmail });
+      } catch (err) {
+        if (!result) throw err;
+        logger.warn(`[bounce-recovery] visit summary handoff guard failed after acceptance for ${message.id}: ${err.message}`);
+      }
+      if (!result) {
+        const reason = fence?.reason || 'visit_summary_unavailable';
+        await db('email_messages').where({ id: message.id, status: 'queued' })
+          .update({ status: 'blocked', error_message: reason, updated_at: new Date() }).catch(() => {});
+        // No provider request follows: settle the summary aggregate from the ledger.
+        await require('./visit-completion-summary').reconcileSummaryEmailRecovery({ ...message, status: 'blocked' })
+          .catch((err) => logger.warn(`[bounce-recovery] visit summary suppression not reconciled for ${message.id}: ${err.message}`));
+        return { ok: false, suppressed: true, reason };
+      }
+    } else {
+      await dispatchToProvider();
+    }
     // Always record the provider id + send time. These are safe regardless of
     // any concurrent webhook.
     await db('email_messages').where({ id: message.id }).update({
@@ -645,7 +700,17 @@ async function attemptRecovery(bouncedMessage, ev = {}) {
       categories: built.categories,
       bouncedMessage,
       correctedEmail: candidate.corrected,
+      ownCustomerId: match?.customerId || null,
     });
+    if (sendResult.suppressed) {
+      await db('email_bounce_recoveries').where({ id: recoveryId }).update({
+        status: sendResult.reason === 'corrected_owned_by_other' ? 'corrected_owned_by_other' : 'recipient_unauthorized',
+        updated_at: new Date(),
+        metadata: jsonbMerge({ suppression_reason: sendResult.reason }),
+      });
+      logger.info(`[bounce-recovery] resend to ${redactEmail(candidate.corrected)} suppressed: ${sendResult.reason}`);
+      return { skipped: sendResult.reason };
+    }
     if (!sendResult.ok) {
       await db('email_bounce_recoveries').where({ id: recoveryId }).update({
         status: 'send_failed',
@@ -719,7 +784,62 @@ async function commitRecoveryOnDelivery(recoveryMessage) {
     // delivery event. The resend already delivered (can't unsend), but we must NOT
     // overwrite any record to an address that now belongs to someone else. This
     // also subsumes the unique-primary-email collision check.
-    if (correctedEmail && await correctedAddressOwnedByOther(correctedEmail, rec.customer_id)) {
+    // The ownership recheck and every customer-field write run under the
+    // corrected address's key (the key every summary handoff and every
+    // customer address writer takes), so a handoff that read the address as
+    // unowned either committed its request before this claim or re-judges
+    // ownership after it, and the recheck cannot go stale before the write.
+    const customerField = rec.customer_id && rec.customer_email_field && correctedEmail
+      && CUSTOMER_EMAIL_FIELDS.includes(rec.customer_email_field) ? rec.customer_email_field : null;
+    const billingField = !customerField && rec.customer_id && rec.customer_email_field === 'billing_email' && correctedEmail;
+    // Row → key is the established order (every customer and billing-
+    // preference writer takes its row before the address key): the
+    // applicable row is held first, then the key, then the recheck under both.
+    const commit = await db.transaction(async (trx) => {
+      const before = customerField ? await trx('customers').where({ id: rec.customer_id }).forUpdate().first() : null;
+      if (billingField) await trx('notification_prefs').where({ customer_id: rec.customer_id }).forUpdate().first('customer_id');
+      if (correctedEmail) await require('../utils/customer-comms-lock').lockCustomerEmail(trx, correctedEmail);
+      if (correctedEmail && await correctedAddressOwnedByOther(correctedEmail, rec.customer_id, trx)) return { ownedByOther: true };
+      const fields = [];
+      // 1. Customer record (primary email or service-contact column), when the
+      //    bounce resolved to a customer. Only overwrite if the column STILL
+      //    holds the bad address — a human edit may have raced us, in which
+      //    case we leave their value alone.
+      if (customerField) {
+        const affected = await trx('customers')
+          .where({ id: rec.customer_id })
+          .whereRaw(`LOWER(${customerField}) = ?`, [bouncedEmail])
+          .update({ [customerField]: correctedEmail, updated_at: new Date() });
+        if (Number(affected) > 0) {
+          fields.push(customerField);
+          // A PRIMARY email correction rides the canonical fanout in this
+          // same transaction, so lead/estimate snapshots retarget and the
+          // newsletter tokens rotate; the narrowed review scope keeps an
+          // automated correction from settling an owner read-back card.
+          if (customerField === 'email') {
+            await require('./customer-email-fanout').propagateCustomerEmailChange({
+              before: { ...(before || {}), id: rec.customer_id, email: bouncedEmail },
+              after: { id: rec.customer_id, email: correctedEmail },
+              source: 'email-bounce-recovery',
+              reviewReasonCodes: ['customer_email_missing'],
+            }, trx);
+          }
+        }
+      } else if (billingField) {
+        // The bounce was to the customer's notification_prefs.billing_email — fix it
+        // there (separate table) so future invoice/balance emails stop bouncing.
+        const affected = await trx('notification_prefs')
+          .where({ customer_id: rec.customer_id })
+          .whereRaw('LOWER(billing_email) = ?', [bouncedEmail])
+          .update({ billing_email: correctedEmail, updated_at: new Date() });
+        if (Number(affected) > 0) fields.push('notification_prefs.billing_email');
+      }
+      return { fields };
+    });
+    // A failed write (a lost lock contest, a transient error) must not be
+    // recorded as committed: the throw leaves the recovery uncommitted for
+    // the next delivery event to retry.
+    if (commit.ownedByOther) {
       await db('email_bounce_recoveries').where({ id: rec.id }).update({
         status: 'delivered',
         updated_at: new Date(),
@@ -728,36 +848,7 @@ async function commitRecoveryOnDelivery(recoveryMessage) {
       await alertEmailCollision({ recovery: rec, correctedEmail });
       return;
     }
-
-    // 1. Customer record (primary email or service-contact column), when the
-    //    bounce resolved to a customer.
-    if (rec.customer_id && rec.customer_email_field && correctedEmail
-        && CUSTOMER_EMAIL_FIELDS.includes(rec.customer_email_field)) {
-      const field = rec.customer_email_field;
-      // Only overwrite if the column STILL holds the bad address — a human edit
-      // may have raced us, in which case we leave their value alone.
-      const affected = await db('customers')
-        .where({ id: rec.customer_id })
-        .whereRaw(`LOWER(${field}) = ?`, [bouncedEmail])
-        .update({ [field]: correctedEmail, updated_at: new Date() })
-        .catch((err) => {
-          logger.warn(`[bounce-recovery] customer ${field} overwrite failed: ${err.message}`);
-          return 0;
-        });
-      if (Number(affected) > 0) updatedFields.push(field);
-    } else if (rec.customer_id && rec.customer_email_field === 'billing_email' && correctedEmail) {
-      // The bounce was to the customer's notification_prefs.billing_email — fix it
-      // there (separate table) so future invoice/balance emails stop bouncing.
-      const affected = await db('notification_prefs')
-        .where({ customer_id: rec.customer_id })
-        .whereRaw('LOWER(billing_email) = ?', [bouncedEmail])
-        .update({ billing_email: correctedEmail, updated_at: new Date() })
-        .catch((err) => {
-          logger.warn(`[bounce-recovery] billing_email overwrite failed: ${err.message}`);
-          return 0;
-        });
-      if (Number(affected) > 0) updatedFields.push('notification_prefs.billing_email');
-    }
+    updatedFields.push(...(commit.fields || []));
 
     // 2. SOURCE estimate/lead rows that follow-ups read (estimate-follow-up.js →
     //    est.customer_email). Runs for BOTH customer-owned and lead/prospect
