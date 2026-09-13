@@ -355,7 +355,7 @@ function CategoryDetail({ group }) {
         {" "}
         <div className="text-ui-caption text-ink-tertiary">
           Categories are set per service. Edit a service from{" "}
-          <span className="font-medium text-zinc-900">All Services</span>to move it.
+          <span className="font-medium text-zinc-900">All Services</span>{" "}to move it.
         </div>
         {bySub.map(([sub, svcs]) => (
           <div key={sub || "__none__"} className="flex flex-col gap-1">

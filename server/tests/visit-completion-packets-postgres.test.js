@@ -271,6 +271,143 @@ postgres('visit completion packet records on PostgreSQL', () => {
       .toEqual(allocation);
   });
 
+  test('same-stop retained work reserves recorded minutes and drive cost across save and replay', async () => {
+    const [retainedId, liveId] = fixture.serviceIds;
+    const start = new Date(Date.now() - 60 * 60000);
+    await mockPg('service_visits').where({ id: fixture.visitId }).update({ arrived_at: start });
+    await mockPg('scheduled_services').where({ id: retainedId }).update({
+      status: 'completed', actual_start_time: start,
+      actual_end_time: new Date(start.getTime() + 20 * 60000),
+      service_time_minutes: 20, actual_duration_minutes: 20,
+    });
+    await mockPg('service_records').insert({
+      customer_id: fixture.customerId, technician_id: fixture.techId, scheduled_service_id: retainedId,
+      service_date: etDateString(), service_type: 'Fixture General Pest Control', status: 'completed',
+      structured_notes: JSON.stringify({ timeOnSite: 20 }),
+    });
+    const { calculateJobCost } = require('../services/job-costing');
+    const priorCost = await calculateJobCost(retainedId, mockPg);
+    const priorRecord = await mockPg('service_records').where({ scheduled_service_id: retainedId }).first();
+    const input = submission();
+    input.items = input.items.filter((item) => item.serviceId === liveId);
+    const saved = await saveVisitCompletionPacket(input);
+    expect(saved.status).toBe(202);
+    const packet = await mockPg('visit_completion_packets').where({ id: saved.body.packetId }).first();
+    expect(packet.payload.durationAllocation).toMatchObject({
+      totalMinutes: 60, retainedMinutes: 20, driveCostOwnerServiceId: retainedId,
+      items: [{ serviceId: liveId, allocatedMinutes: 40 }],
+    });
+    await runVisitCompletionPacketMemberEffects(saved.body.packetId);
+    expect((await calculateJobCost(liveId, mockPg)).drive_cost).toBe(0);
+    const retainedRecord = await mockPg('service_records').where({ scheduled_service_id: retainedId }).first();
+    expect(retainedRecord).toEqual({ ...priorRecord, structured_notes: {
+      ...priorRecord.structured_notes,
+      visitDriveCostAllocation: { version: 1, packetId: saved.body.packetId, ownerServiceId: retainedId },
+    } });
+    expect((await mockPg('scheduled_services').where({ id: liveId }).first()).actual_duration_minutes).toBe(40);
+    // Later row edits cannot change the saved packet's accounting decisions.
+    await mockPg('service_visits').where({ id: fixture.visitId }).update({ arrived_at: new Date() });
+    expect((await saveVisitCompletionPacket(input)).body.replayed).toBe(true);
+    expect((await mockPg('visit_completion_packets').where({ id: saved.body.packetId }).first()).payload.durationAllocation)
+      .toEqual(packet.payload.durationAllocation);
+    const ledger = await mockPg('job_costs').whereIn('scheduled_service_id', fixture.serviceIds);
+    expect(ledger.reduce((sum, row) => sum + Number(row.drive_cost), 0)).toBe(priorCost.drive_cost);
+  });
+
+  test('multiple retained same-stop reports reconcile to one drive charge atomically', async () => {
+    const liveId = randomUUID();
+    await mockPg('scheduled_services').insert({ id: liveId, customer_id: fixture.customerId,
+      technician_id: fixture.techId, service_id: fixture.catalogId, visit_id: fixture.visitId,
+      service_type: 'Fixture General Pest Control', scheduled_date: etDateString(),
+      window_start: '11:00', window_end: '12:00', status: 'on_site', estimated_price: 120,
+      estimated_duration_minutes: 60 });
+    const retainedIds = [...fixture.serviceIds];
+    fixture.serviceIds.push(liveId);
+    fixture.serviceIds.sort();
+    const start = new Date(Date.now() - 60 * 60000);
+    await mockPg('service_visits').where({ id: fixture.visitId }).update({ arrived_at: start });
+    const { calculateJobCost } = require('../services/job-costing');
+    const priorCosts = [];
+    for (const id of retainedIds) {
+      await mockPg('scheduled_services').where({ id }).update({ status: 'completed',
+        actual_start_time: start, actual_end_time: new Date(start.getTime() + 20 * 60000),
+        service_time_minutes: 20, actual_duration_minutes: 20 });
+      await mockPg('service_records').insert({ customer_id: fixture.customerId,
+        technician_id: fixture.techId, scheduled_service_id: id, service_date: etDateString(),
+        service_type: 'Fixture General Pest Control', status: 'completed',
+        structured_notes: JSON.stringify({ timeOnSite: 20 }) });
+      priorCosts.push(await calculateJobCost(id, mockPg));
+    }
+    expect(priorCosts.every((cost) => cost.drive_cost > 0)).toBe(true);
+    const input = submission();
+    input.items = input.items.filter((item) => item.serviceId === liveId);
+    await withReadFailure(({ sql }) => sql.startsWith('update "job_costs"'), async () => {
+      await expect(saveVisitCompletionPacket(input)).rejects.toThrow();
+      expect(await mockPg('visit_completion_packets').where({ visit_id: fixture.visitId }).first()).toBeUndefined();
+      const records = await mockPg('service_records').whereIn('scheduled_service_id', retainedIds);
+      expect(records.every((record) => !record.structured_notes.visitDriveCostAllocation)).toBe(true);
+      expect(records.every((record) => Number(record.drive_cost) === priorCosts[0].drive_cost)).toBe(true);
+    });
+    const saved = await saveVisitCompletionPacket(input);
+    expect(saved.status).toBe(202);
+    const packet = await mockPg('visit_completion_packets').where({ id: saved.body.packetId }).first();
+    expect(packet.payload.durationAllocation).toMatchObject({ retainedMinutes: 40,
+      driveCostOwnerServiceId: retainedIds[0], items: [{ serviceId: liveId, allocatedMinutes: 20 }] });
+    await runVisitCompletionPacketMemberEffects(saved.body.packetId);
+    for (const id of [...fixture.serviceIds].reverse()) await calculateJobCost(id, mockPg);
+    expect((await saveVisitCompletionPacket(input)).body.replayed).toBe(true);
+    const ledger = await mockPg('job_costs').whereIn('scheduled_service_id', fixture.serviceIds);
+    const records = await mockPg('service_records').whereIn('scheduled_service_id', fixture.serviceIds);
+    expect(records.every((record) => record.structured_notes.visitDriveCostAllocation.ownerServiceId === retainedIds[0])).toBe(true);
+    expect(ledger.reduce((sum, row) => sum + Number(row.drive_cost), 0)).toBe(priorCosts[0].drive_cost);
+    expect(records.reduce((sum, row) => sum + Number(row.drive_cost), 0)).toBe(priorCosts[0].drive_cost);
+  });
+
+  test('a retained backfill consumes neither current minutes nor the current stop drive charge', async () => {
+    const [retainedId, liveId] = fixture.serviceIds;
+    const start = new Date(Date.now() - 60 * 60000);
+    await mockPg('service_visits').where({ id: fixture.visitId }).update({ arrived_at: start });
+    await mockPg('scheduled_services').where({ id: retainedId }).update({
+      status: 'completed', actual_start_time: start, actual_end_time: new Date(), service_time_minutes: 20,
+    });
+    await mockPg('service_records').insert({
+      customer_id: fixture.customerId, technician_id: fixture.techId, scheduled_service_id: retainedId,
+      service_date: etDateString(), service_type: 'Fixture General Pest Control', status: 'completed',
+      structured_notes: JSON.stringify({ backfill: true, timeOnSite: 20 }),
+    });
+    const input = submission();
+    input.items = input.items.filter((item) => item.serviceId === liveId);
+    const saved = await saveVisitCompletionPacket(input);
+    expect(saved.status).toBe(202);
+    const packet = await mockPg('visit_completion_packets').where({ id: saved.body.packetId }).first();
+    expect(packet.payload.durationAllocation).toMatchObject({ retainedWork: [], retainedMinutes: 0,
+      driveCostOwnerServiceId: liveId, items: [{ serviceId: liveId, allocatedMinutes: 60 }],
+    });
+    const record = await mockPg('service_records').where({ scheduled_service_id: liveId }).first();
+    expect(record.structured_notes.visitDriveCostAllocation.ownerServiceId).toBe(liveId);
+  });
+
+  test('new live members share one durable drive charge even with an explicit admin duration', async () => {
+    const input = submission({ actor: { techRole: 'admin', technicianId: fixture.techId } });
+    input.items[0].body.timeOnSite = 20;
+    const saved = await saveVisitCompletionPacket(input);
+    expect(saved.status).toBe(202);
+    const { calculateJobCost } = require('../services/job-costing');
+    const owner = fixture.serviceIds[0];
+    const records = await mockPg('service_records').whereIn('scheduled_service_id', fixture.serviceIds);
+    expect(records.every((record) => record.structured_notes.visitDriveCostAllocation.ownerServiceId === owner)).toBe(true);
+    const first = await calculateJobCost(owner, mockPg);
+    expect(first.drive_cost).toBeGreaterThan(0);
+    expect((await calculateJobCost(fixture.serviceIds[1], mockPg)).drive_cost).toBe(0);
+    await runVisitCompletionPacketMemberEffects(saved.body.packetId);
+    // Recalculate in reverse order: the drive charge cannot move or multiply.
+    for (const id of [...fixture.serviceIds].reverse()) await calculateJobCost(id, mockPg);
+    const ledger = await mockPg('job_costs').whereIn('scheduled_service_id', fixture.serviceIds);
+    const updated = await mockPg('service_records').whereIn('scheduled_service_id', fixture.serviceIds);
+    expect(ledger.reduce((sum, row) => sum + Number(row.drive_cost), 0)).toBe(first.drive_cost);
+    expect(updated.reduce((sum, row) => sum + Number(row.drive_cost), 0)).toBe(first.drive_cost);
+  });
+
   test('a visit with no server-side start freezes unknown duration instead of duplicating row spans', async () => {
     const saved = await saveVisitCompletionPacket(submission());
     const packet = await mockPg('visit_completion_packets').where({ id: saved.body.packetId }).first('payload');
