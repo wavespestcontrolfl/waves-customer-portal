@@ -106,7 +106,8 @@ beforeEach(() => {
   mockReconcile.mockResolvedValue(undefined);
   mockCallSideBlock.mockReset();
   mockCallSideBlock.mockResolvedValue(null);
-  db.__rows = () => [];
+  db.__rows = (query) => /"token" in/.test(query.sql)
+    ? [estimateRow({ id: 'est-2', token: 'sib-b', address: '200 Test St' })] : [];
 });
 
 test('tool definition points at the page projection, takes either selector, and types the ids', () => {
@@ -170,6 +171,7 @@ test('no hand projection survives: the tool exposes no re-derived pricing keys o
 test('a quote-required bundle reports NO amounts: the page exits to the terminal card before rendering pricing', async () => {
   mockCompose.mockResolvedValue({
     ...JSON.parse(JSON.stringify(PAGE_PAYLOAD)),
+    estimate: { ...PAGE_PAYLOAD.estimate, membership: { currentPerVisit: 117, newPerVisit: 129, perVisitSavings: 12, newServices: [{ monthlySavings: 9 }] } },
     cta: { canAccept: false, quoteRequired: true, quoteRequiredReason: 'manager_approval', monthlyBilled: false },
   });
   const shaped = await shapeEstimate(estimateRow());
@@ -181,8 +183,31 @@ test('a quote-required bundle reports NO amounts: the page exits to the terminal
   expect(JSON.stringify(shaped.page.pricing)).not.toMatch(/1104|455\.5|99/);
   expect(shaped.page.depositPolicy).toBeUndefined();
   expect(shaped.page.cardHoldPolicy).toBeUndefined();
+  expect(shaped.page.estimate.membership).toBeUndefined();
   // …and the verdict itself still rides along, so the bar can say why.
   expect(shaped.page.cta).toMatchObject({ quoteRequired: true, quoteRequiredReason: 'manager_approval' });
+});
+
+test.each(['wrong_identity', 'in_flight', 'lookup_failure'])('a sibling with %s provenance is omitted with its identity and bearer link', async (block) => {
+  db.__rows = (query) => /"token" in/.test(query.sql)
+    ? [estimateRow({ id: 'est-2', token: 'sib-b', estimate_data: { sibling: true } })] : [];
+  mockCallSideBlock.mockImplementation(async (_database, data) => {
+    if (!data.sibling) return null;
+    if (block === 'lookup_failure') throw new Error('call lookup unavailable');
+    return { reason: block };
+  });
+  const shaped = await shapeEstimate(estimateRow());
+  expect(shaped.page.propertyGroup).toHaveLength(1);
+  expect(shaped.page.propertyGroup[0].isCurrent).toBe(true);
+  expect(JSON.stringify(shaped)).not.toMatch(/200 Test St|sib-b/);
+  expect(shaped.customer_link).toBeDefined();
+});
+
+test('a group lookup failure withholds the group while retaining the verified current offer', async () => {
+  db.__rows = () => { throw new Error('group lookup failed'); };
+  const shaped = await shapeEstimate(estimateRow());
+  expect(shaped.page.propertyGroup).toBeNull();
+  expect(shaped.page.pricing).toEqual(PAGE_PAYLOAD.pricing);
 });
 
 test('an authored proposal is quote-required by design and keeps its proposal block — that IS the billed quote', async () => {
@@ -335,7 +360,7 @@ test('an accepted row is never reconciled: a later lapse must not reprice a comm
   expect(shaped.price_locked).toBe(true);
   // No stored mode (legacy accept): the lanes cannot be split, so every column
   // is reported with the mode explicitly null.
-  expect(shaped.committed_totals).toEqual({ monthly: 47, annual: 564, one_time: 125, accepted_service_mode: null, locked_at: '2026-09-06T12:00:00Z' });
+  expect(shaped.committed_totals).toEqual({ recurring_quote_basis: { monthly: 47, annual: 564 }, recurring_basis_note: expect.stringMatching(/not the accepted invoice total/), one_time: 125, accepted_service_mode: null, locked_at: '2026-09-06T12:00:00Z' });
   // The page still reports what it would price today; the two are separate answers.
   expect(shaped.page.pricing).toEqual(PAGE_PAYLOAD.pricing);
 });
@@ -343,7 +368,7 @@ test('an accepted row is never reconciled: a later lapse must not reprice a comm
 test('a price_locked_at stamp freezes it the same way, whatever the status', async () => {
   const shaped = await shapeEstimate(estimateRow({ price_locked_at: '2026-09-07T09:00:00Z' }));
   expect(mockReconcile).not.toHaveBeenCalled();
-  expect(shaped.committed_totals).toMatchObject({ monthly: 47, locked_at: '2026-09-07T09:00:00Z' });
+  expect(shaped.committed_totals).toMatchObject({ recurring_quote_basis: { monthly: 47 }, locked_at: '2026-09-07T09:00:00Z' });
 });
 
 // The skip and committed_totals use the reconciler's OWN frozen test, so a
@@ -354,9 +379,11 @@ test('a price_locked_at stamp freezes it the same way, whatever the status', asy
 test('committed_totals reports the accepted lane and names the other as the unselected alternative', async () => {
   const recurring = await shapeEstimate(estimateRow({ status: 'accepted', accepted_at: '2026-09-06T12:00:00Z', accepted_service_mode: 'recurring' }));
   expect(recurring.committed_totals).toEqual({
-    monthly: 47, annual: 564, accepted_service_mode: 'recurring',
+    recurring_quote_basis: { monthly: 47, annual: 564 }, recurring_basis_note: expect.stringMatching(/before any annual-prepay adjustment/), accepted_service_mode: 'recurring',
     locked_at: '2026-09-06T12:00:00Z', unselected_alternative: { one_time: 125 },
   });
+  expect(recurring.committed_totals.annual).toBeUndefined();
+  expect(recurring.committed_totals.monthly).toBeUndefined();
   const oneTime = await shapeEstimate(estimateRow({ status: 'accepted', accepted_at: '2026-09-06T12:00:00Z', accepted_service_mode: 'one_time' }));
   expect(oneTime.committed_totals).toEqual({
     one_time: 125, accepted_service_mode: 'one_time',

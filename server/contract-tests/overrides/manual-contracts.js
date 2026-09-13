@@ -88,7 +88,7 @@ module.exports = {
         'monthly_total', 'annual_total', 'onetime_total', 'accepted_at', 'accepted_service_mode',
         'accepted_frequency_key', 'notes', 'token', 'sent_at', 'viewed_at', 'view_count', 'declined_at',
         'expires_at', 'archived_at', 'created_at', 'updated_at', 'estimate_data',
-        'price_locked_at', 'customer_phone', 'customer_email', 'terms_version', 'property_id',
+        'price_locked_at', 'customer_phone', 'customer_email', 'terms_version', 'property_id', 'estimate_group_id',
       ],
       // Exactly the .select(...) list in getEstimateDetail(), plus the
       // orderBy column.
@@ -109,7 +109,7 @@ module.exports = {
         'id', 'metadata', 'processing_token', 'processing_status', 'extraction_attempts',
         'created_at', 'twilio_call_sid',
       ],
-      leads: ['id', 'twilio_call_sid', 'deleted_at', 'created_at'],
+      leads: ['id', 'twilio_call_sid', 'deleted_at', 'created_at', 'estimate_id', 'first_name', 'last_name', 'email', 'phone', 'address'],
       // composeEstimateDataPayload's per-estimate appointment adoption read
       // (findLinkedUpcomingAppointment): the filtered columns plus the
       // catalog identity it left-joins for.
@@ -124,7 +124,7 @@ module.exports = {
       // estimate through estimateRendersMonthlyBilling → billing-cadence
       // (pipeline_stage, monthly_rate, billing_mode — codex round 7 P2),
       // and an authored proposal through resolveProposalBillingContext.
-      customers: ['id', 'pipeline_stage', 'monthly_rate', 'billing_mode', 'address_line1', 'address_line2', 'city', 'zip'],
+      customers: ['id', 'pipeline_stage', 'monthly_rate', 'billing_mode', 'address_line1', 'address_line2', 'city', 'state', 'zip', 'first_name', 'last_name', 'email', 'phone'],
       annual_prepay_terms: ['source_estimate_id'],
     },
     reason: 'get_estimate_detail\'s DB reads live in estimate-detail.js, not its registered sourcePath (estimate-tools.js) — the automatic scan can\'t see them.',

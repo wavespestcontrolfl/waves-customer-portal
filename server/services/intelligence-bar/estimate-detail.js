@@ -62,11 +62,9 @@
 //                  The page's 404 is a customer-surface rule, not a
 //                  staff-disclosure rule, so an expired estimate still
 //                  reports its amounts to the bar.
-//   committed    — for a price-locked row (accepted / declined /
-//                  price_locked_at) the stored monthly/annual/onetime
-//                  columns ARE the committed deal and the composer does not
-//                  recompute them; they are reported as committed_totals,
-//                  never as "the price today".
+//   accepted     — price-locked rows retain the selected quote basis.
+//                  Recurring columns precede annual-prepay adjustments,
+//                  so they are labeled as basis, never as the invoice total.
 //   deposits     — estimate_deposits, which the page never shows.
 // Record scope: estimate_id resolves to its customer through the
 // task-context RECORDS map, customer_id is the customer selector itself.
@@ -215,6 +213,7 @@ function stripPayload(payload) {
     // and no-show amounts are not part of the offer the customer sees.
     delete out.depositPolicy;
     delete out.cardHoldPolicy;
+    if (out.estimate) delete out.estimate.membership;
     out.pricing = {
       withheld: 'quote_required',
       reason: out.cta.quoteRequiredReason || null,
@@ -222,6 +221,32 @@ function stripPayload(payload) {
     };
   }
   return out;
+}
+
+// Group entries are composed without the durable call-side provenance gate.
+// Verify each sibling's full persisted row before returning its identity or
+// bearer link. A failed lookup withholds the group, not the verified estimate.
+async function verifiedPropertyGroup(group) {
+  if (!Array.isArray(group)) return group;
+  try {
+    const tokens = group.filter((sibling) => !sibling.isCurrent && sibling.token).map((sibling) => sibling.token);
+    const rows = tokens.length ? await db('estimates').whereIn('token', tokens).select('*') : [];
+    const byToken = new Map(rows.map((row) => [row.token, row]));
+    const verified = [];
+    for (const sibling of group) {
+      if (sibling.isCurrent) {
+        verified.push(sibling);
+        continue;
+      }
+      const row = byToken.get(sibling.token);
+      if (!row) continue;
+      const links = await estimateLinks(row, lazy.publicRoute().parseEstimateDataSafe(row));
+      if (links.link_state === 'customer_viewable') verified.push(sibling);
+    }
+    return verified;
+  } catch {
+    return null;
+  }
 }
 
 // The page's own composer, run for this row. adminDraftPreview mirrors what
@@ -240,7 +265,7 @@ async function pageProjection(row, linkState) {
     if (!payload || typeof payload !== 'object') {
       return { page: null, page_unavailable: 'the estimate page composed no payload for this row' };
     }
-    return { page: stripPayload(payload) };
+    return { page: stripPayload({ ...payload, propertyGroup: await verifiedPropertyGroup(payload.propertyGroup) }) };
   } catch (err) {
     // The page itself would 500 for this row — say so rather than falling
     // back to the stored columns. This tool exists because those columns are
@@ -364,7 +389,10 @@ function blockedRecord(row) {
   };
 }
 
-// The committed figure, split by the lane the customer actually accepted.
+// The stored accepted pricing, split by the lane the customer selected.
+// Recurring columns are a quote basis, not the annual-prepay commitment:
+// the accepted invoice separately applies prepay adjustments, tax and
+// credits. The estimate does not persist a dependable billing-term marker.
 // A mixed estimate keeps BOTH lanes' columns after acceptance —
 // onetime_total still holds the one-time alternative on a recurring accept,
 // monthly_total/annual_total still hold the recurring alternative on a
@@ -378,15 +406,19 @@ function blockedRecord(row) {
 function committedTotals(row) {
   const mode = row.accepted_service_mode || null;
   const recurring = { monthly: money(row.monthly_total), annual: money(row.annual_total) };
+  const recurringBasis = {
+    recurring_quote_basis: recurring,
+    recurring_basis_note: 'stored recurring quote basis before any annual-prepay adjustment; not the accepted invoice total or amount due — read the linked invoice for final discounts, tax and credits',
+  };
   const oneTime = { one_time: money(row.onetime_total) };
   const locked_at = row.price_locked_at || row.accepted_at || row.declined_at || null;
   if (mode === 'recurring') {
-    return { ...recurring, accepted_service_mode: mode, locked_at, unselected_alternative: oneTime };
+    return { ...recurringBasis, accepted_service_mode: mode, locked_at, unselected_alternative: oneTime };
   }
   if (mode === 'one_time') {
     return { ...oneTime, accepted_service_mode: mode, locked_at, unselected_alternative: recurring };
   }
-  return { ...recurring, ...oneTime, accepted_service_mode: mode, locked_at };
+  return { ...recurringBasis, ...oneTime, accepted_service_mode: mode, locked_at };
 }
 
 async function shapeEstimate(row, deposits = []) {
@@ -483,7 +515,7 @@ async function getEstimateDetail({ estimate_id, customer_id, limit } = {}) {
 
 const GET_ESTIMATE_DETAIL_TOOL = {
   name: 'get_estimate_detail',
-  description: `Read what an estimate offered, as the customer's own estimate page prices it. Returns that page's projection verbatim under \`page\`: \`page.pricing\` carries the plan cadences with their monthly / annual prices and per-application figures, each service's cadence ladder with its selectable additions (termite bond terms, station rental, commercial interior service), the priced cadence combinations on a mixed estimate, the one-time breakdown and upfront fees; \`page.cta\` carries the page's quote-required verdict and reason, whether it can still be self-accepted, and whether it bills monthly; \`page.estimate\` carries status, membership, effective invoice mode and acceptance; a formal commercial proposal arrives under \`page.proposal\` (that is the billed quote, not the engine rows). The page's own withholding applies before you see it — a quote-required bundle arrives as \`page.pricing.withheld = quote_required\` with the reason and no amounts at all, because that page shows the customer no figure — so quote whatever \`page\` says and nothing more. A grouped multi-property estimate lists its siblings under \`page.propertyGroup\` with only the one-time figure their switcher displays; each sibling's own page has to be read for its plan pricing. Also returns deposits (face amount + card surcharge; a pending or failed intent collected nothing), status and timestamps, and which link (customer or staff preview) can actually be opened. A lapsed membership is reconciled first so the amounts match the live page; when the live membership state cannot be verified, \`page\` is null and page_unavailable says so — never quote from a withheld projection. An ACCEPTED estimate, or one with an explicit price-lock stamp, also reports committed_totals: what was actually committed, which is not the same as what the page would price today — split by accepted_service_mode, with the lane the customer did not take under unselected_alternative. A declined estimate with no price-lock stamp has no committed figure at all (nothing was committed) and reports none. A cadence the page ranges rather than prices ("confirmed on site") arrives with its exact figures removed and ranged set instead — open the estimate link for the band.
+  description: `Read what an estimate offered, as the customer's own estimate page prices it. Returns that page's projection verbatim under \`page\`: \`page.pricing\` carries the plan cadences with their monthly / annual prices and per-application figures, each service's cadence ladder with its selectable additions (termite bond terms, station rental, commercial interior service), the priced cadence combinations on a mixed estimate, the one-time breakdown and upfront fees; \`page.cta\` carries the page's quote-required verdict and reason, whether it can still be self-accepted, and whether it bills monthly; \`page.estimate\` carries status, membership, effective invoice mode and acceptance; a formal commercial proposal arrives under \`page.proposal\` (that is the billed quote, not the engine rows). The page's own withholding applies before you see it — a quote-required bundle arrives as \`page.pricing.withheld = quote_required\` with the reason and no amounts at all, because that page shows the customer no figure — so quote whatever \`page\` says and nothing more. A grouped multi-property estimate lists its siblings under \`page.propertyGroup\` with only the one-time figure their switcher displays; each sibling's own page has to be read for its plan pricing. Also returns deposits (face amount + card surcharge; a pending or failed intent collected nothing), status and timestamps, and which link (customer or staff preview) can actually be opened. A lapsed membership is reconciled first so the amounts match the live page; when the live membership state cannot be verified, \`page\` is null and page_unavailable says so — never quote from a withheld projection. An ACCEPTED estimate, or one with an explicit price-lock stamp, also reports committed_totals split by accepted_service_mode, with the lane the customer did not take under unselected_alternative. Recurring columns are explicitly recurring_quote_basis, before any annual-prepay adjustment; they are NOT the accepted invoice total or amount due. Read the linked invoice for final discounts, tax and credits; never infer the prepay amount or selection from this basis. A declined estimate with no price-lock stamp has no committed figure at all (nothing was committed) and reports none. A cadence the page ranges rather than prices ("confirmed on site") arrives with its exact figures removed and ranged set instead — open the estimate link for the band.
 Use for: "what did we quote him for quarterly pest", "what is the per-application price on her estimate", "what would monthly have cost", "what did the 9/5 estimate say" — anything about the amounts inside a sent estimate. Prefer this over guessing from monthly_rate or from the SMS thread. Pass estimate_id for one estimate or customer_id for that customer's latest estimates (newest first).`,
   input_schema: {
     type: 'object',
