@@ -1343,7 +1343,7 @@ const CALLBACK_LIGHT_ACTION_FINITE = `(?:(?:\\w+\\s+){0,2}?${CALLBACK_LIGHT_VERB
 // What follows the promise grammar: the direct verb and its recipient
 // ("call her"), or the light verb with the recipient before the contact noun
 // ("give her a call") or after it ("place a call to her").
-const CALLBACK_RECIPIENT_END = '(?=\\s*(?:[.!?,;:—–]|$|and\\b|but\\b|so\\b|back\\b|again\\b|directly\\b|personally\\b|today\\b|tomorrow\\b|tonight\\b|later\\b|soon\\b|at\\b|on\\b|by\\b|before\\b|after\\b|if\\b|unless\\b|when\\b|once\\b|provided\\b|because\\b|to\\b|about\\b|regarding\\b|with\\b|(?:the|an?|this|that|these|those|some)\\b))';
+const CALLBACK_RECIPIENT_END = `(?=\\s*(?:[.!?,;:—–]|$|and\\b|but\\b|so\\b|back\\b|again\\b|directly\\b|personally\\b|today\\b|tomorrow\\b|tonight\\b|later\\b|soon\\b|next\\s+(?:week|${WEEKDAYS})\\b|at\\b|on\\b|by\\b|before\\b|after\\b|if\\b|unless\\b|when\\b|once\\b|provided\\b|because\\b|to\\b|about\\b|regarding\\b|with\\b|(?:the|an?|this|that|these|those|some)\\b))`;
 const callbackTarget = (targets, action, lightAction) => `(?:${action}\\s+(?:${targets})\\b${CALLBACK_RECIPIENT_END}|${lightAction}\\s+(?:(?:${targets})\\s+an?\\s+${CALLBACK_CONTACT_NOUN}|an?\\s+${CALLBACK_CONTACT_NOUN}\\s+(?:to|for)\\s+(?:${targets})\\b${CALLBACK_RECIPIENT_END}))`;
 const CALLBACK_QUESTION_AUX = '(?:can|could|will|would|should|shall|may|might|is|are|has|have)';
 const CALLBACK_QUESTION_ANSWER_RE = new RegExp(
@@ -1355,7 +1355,11 @@ const CALLBACK_QUESTION_DENIAL_RE = new RegExp(
   'i',
 );
 const CALLBACK_RECIPIENT_ACTION = `(?:be\\s+(?:called|phoned|rung|contacted|texted|emailed|reached(?: out to)?|followed up with)\\s+by|(?:get|receive)\\s+an?\\s+${CALLBACK_CONTACT_NOUN}\\s+from|hear from)`;
-const CALLBACK_CONSENT_ACTION = '(?:agrees?|consents?|asks?\\s+(?:us|the office|our team)\\s+to|(?:gives?|grants?)\\s+(?:(?:us|the office|our team)\\s+)?(?:permission|consent))';
+// A bare agreement ends at the condition boundary. If the caller states what
+// she agreed to, it must itself authorize contact rather than another action.
+const CALLBACK_AGREEMENT_COMPLEMENT = `(?:to\\s+(?:be\\s+(?:called|contacted|phoned|texted|emailed)|(?:receive|get)\\s+an?\\s+${CALLBACK_CONTACT_NOUN}|(?:an?|the)\\s+${CALLBACK_CONTACT_NOUN})|that\\s+(?:we|the office|our team)\\s+(?:can|could|may|will|would)\\s+(?:${CALLBACK_VERB}|${CALLBACK_LIGHT_VERB})(?:\\s+(?:her|him|them))?)`;
+const CALLBACK_AGREEMENT_ACTION = `agrees?(?:\\s+${CALLBACK_AGREEMENT_COMPLEMENT})?(?=\\s*(?:[,.;!?]|$))`;
+const CALLBACK_CONSENT_ACTION = `(?:${CALLBACK_AGREEMENT_ACTION}|consents?|asks?\\s+(?:us|the office|our team)\\s+to|(?:gives?|grants?)\\s+(?:(?:us|the office|our team)\\s+)?(?:permission|consent))`;
 const CALLBACK_DECLINE_ACTION = '(?:declines?|refuses?)';
 // Callback timing is compositional: a day, bare part of day, and clock can
 // appear together ("tomorrow morning at nine") without requiring a bespoke
