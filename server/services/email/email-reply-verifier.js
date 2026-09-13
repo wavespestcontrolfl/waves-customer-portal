@@ -68,6 +68,20 @@ function semanticFactKeys(sentence) {
   return [];
 }
 
+function mentionedFactKeys(sentence) {
+  const keys = [];
+  if (/\b(?:balance|outstanding|account current)\b/i.test(sentence)) keys.push('outstanding_balance');
+  if (/\b(?:payment|paid|went through|received)\b/i.test(sentence)) keys.push('recent_payment');
+  if (/\b(?:invoice|amount due)\b/i.test(sentence)) keys.push('open_invoice');
+  if (/\b(?:dues|surcharge|card fee|monthly (?:charge|cost|price|rate))\b/i.test(sentence)) keys.push('billing_lane');
+  if (/\bestimate\b/i.test(sentence)) keys.push('pending_estimate');
+  if (/\b(?:visit|service|appointment|scheduled|coming|arriv)\w*\b/i.test(sentence)) {
+    keys.push(/\b(?:last|previous|completed|was serviced|came out)\b/i.test(sentence)
+      ? 'last_completed_visit' : 'upcoming_visit');
+  }
+  return [...new Set(keys)];
+}
+
 function amountSupported(raw, sentence, facts) {
   const amount = cents(raw);
   const keys = semanticFactKeys(sentence);
@@ -324,6 +338,7 @@ function groundingViolations(draft, context, exemplars) {
   const facts = presentFacts(context);
   const availableDates = dateFacts(context);
   for (const sentence of sentences(draft)) {
+    if (mentionedFactKeys(sentence).length > 1) violations.push('mixed_fact_categories_unsupported');
     const amounts = sentence.match(MONEY_RE) || [];
     if (amounts.length > 1) violations.push('multiple_amounts_unsupported');
     for (const amount of amounts) {

@@ -45,6 +45,16 @@ describe('email reply verifier', () => {
     ]));
   });
 
+  test('requires independent fact categories to use separate sentences', () => {
+    const facts = contextWith().facts.map((fact) => (fact.key === 'recent_payment'
+      ? { ...fact, value: { ...fact.value, status: 'succeeded' } }
+      : fact));
+    expect(verdict('Hi Casey, your payment was received and your appointment is on September 10.', { context: { facts } }).violations)
+      .toContain('mixed_fact_categories_unsupported');
+    expect(verdict('Hi Casey, your payment was received on September 10. Your appointment is on September 15.', { context: { facts } }).ok)
+      .toBe(true);
+  });
+
   test('binds success and confirmation claims to the matching fact', () => {
     const facts = contextWith().facts.concat([
       { key: 'recent_payment', status: 'present', value: { amount: 25, paymentDate: '2026-09-11', status: 'succeeded' } },
