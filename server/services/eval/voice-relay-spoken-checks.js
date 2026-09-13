@@ -1646,6 +1646,7 @@ const SAFETY_REFUSED_AFFIRMATIVE_HARM_RE = new RegExp(
 const SAFETY_AUDIENCE_SCOPE_RE = new RegExp(`\\b(?:for|around|with)\\s+(${SAFETY_AUDIENCE})\\b`, 'gi');
 
 const SAFETY_HARM_AUDIENCE_SCOPE_RE = new RegExp(`\\b(?:hurt|harm|bother|affect|poison)\\s+(${SAFETY_AUDIENCE})\\b`, 'gi');
+const SAFETY_RISK_TO_AUDIENCE_SCOPE_RE = new RegExp(`\\b(?:risk|harm|danger)\\s+to\\s+(${SAFETY_AUDIENCE})\\b`, 'gi');
 
 const SAFETY_AUDIENCE_MEMBER_RE = new RegExp(`\\b${SAFETY_AUDIENCE_POSSESSIVE}(${SAFETY_AUDIENCE_NOUN})\\b`, 'gi');
 
@@ -1663,6 +1664,7 @@ function safetyAudienceScopes(text) {
   const scopedPhrases = [
     ...text.matchAll(SAFETY_AUDIENCE_SCOPE_RE),
     ...text.matchAll(SAFETY_HARM_AUDIENCE_SCOPE_RE),
+    ...text.matchAll(SAFETY_RISK_TO_AUDIENCE_SCOPE_RE),
   ];
   const audiences = scopedPhrases
     .flatMap((scope) => [...scope[1].matchAll(SAFETY_AUDIENCE_MEMBER_RE)]);
@@ -2049,6 +2051,7 @@ const PET_TRAILING_CONDITION_RE = new RegExp(`^(?:(?!\\b(?:and|or|but|however|th
 const PET_INDEPENDENT_CONDITIONAL_ACTION_RE = new RegExp(`^\\s*,?\\s*(?:and|or|but)\\s+${PET_CONDITION}\\b[^,.!?;—–]{0,60},\\s*(?:(?:they|you|the technician|the team member)\\s+)?(?:can|will|may|could|would|should|review|explain|answer|check|verify|go over|talk)\\b`, 'i');
 
 const PET_GUIDANCE_ALTERNATIVE_RE = trailingWithdrawalAlternative(`(?:them|it|that|this|${PET_GUIDANCE_OBJECT})`);
+const PET_AUDIENCE_EXCLUSION_RE = /^\s*,?\s*(?:but|and)\s+not\s+for\s+(?:(?:your|the|our)\s+)?(?:pets?|dogs?|cats?|animals?|children|kids?)\b/i;
 
 function pet_precautions_confirmed(value, record, { spoken }) {
   const continuedSpeech = safetySpeechGroups(record.events || [])
@@ -2066,7 +2069,7 @@ function pet_precautions_confirmed(value, record, { spoken }) {
       const claim = claimContext(text, match.index, matchEnd);
       const suffix = text.slice(matchEnd);
       const negationScope = claim.replace(PET_GUIDANCE_NEGATION_EXCEPTION_RE, '');
-      if ((!PET_TRAILING_CONDITION_RE.test(suffix) || PET_INDEPENDENT_CONDITIONAL_ACTION_RE.test(suffix)) && !PET_GUIDANCE_ALTERNATIVE_RE.test(suffix) && (!PET_SPECULATIVE_GUIDANCE_RE.test(claim) || PET_CALLER_SHOULD_ASK_RE.test(claim)) && !clauseIsNegated(negationScope) && !clauseIsEpistemicallyHedged(claim)) {
+      if ((!PET_TRAILING_CONDITION_RE.test(suffix) || PET_INDEPENDENT_CONDITIONAL_ACTION_RE.test(suffix)) && !PET_GUIDANCE_ALTERNATIVE_RE.test(suffix) && !PET_AUDIENCE_EXCLUSION_RE.test(suffix) && (!PET_SPECULATIVE_GUIDANCE_RE.test(claim) || PET_CALLER_SHOULD_ASK_RE.test(claim)) && !clauseIsNegated(negationScope) && !clauseIsEpistemicallyHedged(claim)) {
         return ['pass', `pet precautions direction: "${clip(clause.trim(), 160)}"`];
       }
     }
