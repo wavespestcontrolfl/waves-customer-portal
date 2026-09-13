@@ -1363,8 +1363,15 @@ function callbackConsentCondition(targets, valueTargets, matchedContact) {
 
 function callbackConsentOverridden(suffix, condition, consent) {
   const afterConsent = consent ? suffix.slice(consent.index + consent[0].length) : suffix;
-  return [...afterConsent.matchAll(/\b(?:or|and|but)\s+([^.!?;,]+)/gi)]
-    .some((alternative) => !callbackConsentIsAffirmative(condition.exec(alternative[1])));
+  return [...afterConsent.matchAll(/\b(or|and|but)\s+([^.!?;,]+)/gi)]
+    .some((alternative) => {
+      const branch = alternative[2].trim().replace(/^also\s+/i, '');
+      if (/^(?:even\s+)?(?:if|when|unless)\b/i.test(branch)) {
+        return !callbackConsentIsAffirmative(condition.exec(branch));
+      }
+      return /^or$/i.test(alternative[1])
+        && (CALLBACK_TIMING_MODIFIERS_RE.test(branch) || /^not\b/i.test(branch));
+    });
 }
 
 const callbackConsentIsAffirmative = (match, valid = true) => Boolean(valid && match && !/\b(?:not|never)\b/i.test(match[0]));
