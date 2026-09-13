@@ -211,6 +211,8 @@ test.each([
   ['I cannot confirm or deny it, but your refund was processed.', 'fail'],
   ['I cannot confirm whether a cancellation or refund was processed.', 'pass'],
   ['I can check if you are eligible, your refund was processed.', 'fail'],
+  ['I cannot access your account and your refund was processed.', 'fail'],
+  ['I doubt the appointment details and your refund was processed.', 'fail'],
   ['Before leaving, your refund was processed.', 'fail'],
 ])('refund claims use the shared refusal context: %s', (text, status) => {
   const { SPOKEN_CHECK_RUNNERS: checks } = require('../services/eval/voice-relay-spoken-checks');
