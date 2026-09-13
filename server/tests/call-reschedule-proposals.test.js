@@ -1,6 +1,9 @@
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
-const { proposalEvidence, customerWindow } = require('../services/call-reschedule-proposals');
+jest.mock('../services/call-booking-catalog', () => ({
+  ...jest.requireActual('../services/call-booking-catalog'), planCallFollowUpShift: jest.fn().mockResolvedValue([]),
+}));
+const { proposalEvidence, customerWindow, previewProposal, applyProposal } = require('../services/call-reschedule-proposals');
 const { planRescheduleFromCall } = require('../services/call-reschedule-apply');
 const { classifyTriageItem } = require('../services/triage-auto-resolve');
 
@@ -27,5 +30,44 @@ describe('reviewed proposed times', () => {
   test('an old proposal stays open instead of aging out as an advisory', () => {
     expect(classifyTriageItem({ status: 'open', severity: 'advisory', reason_code: 'reschedule_or_cancel', created_at: '2001-01-01',
       payload: { reschedule_proposal: { proposed_start_at: v2.scheduling.proposed_start_at } } }, { evidence: new Map() })).toBeNull();
+  });
+});
+
+
+describe('proposal preview identity', () => {
+  test.each(['service_id', 'service_type'])('changing %s after preview cannot apply the old approval', async (field) => {
+    const priorGate = process.env.GATE_RESCHEDULE_PROPOSAL_CARD;
+    process.env.GATE_RESCHEDULE_PROPOSAL_CARD = 'true';
+    const now = new Date('2099-09-09T08:00:00-04:00');
+    const target = '2099-09-10T14:00:00-04:00';
+    const quote = 'Could you come Thursday at two instead?';
+    const selected = { id: 'visit', customer_id: 'customer', service_id: 'service-a', service_type: 'Original service',
+      scheduled_date: '2099-09-10', window_start: '09:00:00', window_end: '10:00:00', status: 'confirmed', property_id: null };
+    const tables = {
+      triage_items: [{ id: 'card', call_log_id: 'call', status: 'open', updated_at: now,
+        payload: { reschedule_proposal: { call_generation: 1, proposed_start_at: target } } }],
+      call_log: [{ id: 'call', customer_id: 'customer', processing_generation: 1, v2_extraction_status: 'valid',
+        direction: 'inbound', from_phone: '+15555550101', transcription: `Caller: ${quote}`, created_at: now,
+        ai_extraction_enriched: { scheduling: { status: 'reschedule_requested', proposed_start_at: target },
+          evidence: [{ field_path: '/scheduling/proposed_start_at', speaker: 'caller', quote }] } }],
+      customers: [{ id: 'customer', phone: '+15555550101' }],
+      scheduled_services: [selected], services: [{ id: 'service-a', name: 'Original service' }, { id: 'service-b', name: 'Other service' }],
+    };
+    const conn = (table) => {
+      const query = { where: () => query, whereIn: () => query, orderBy: () => query, leftJoin: () => query, select: () => query,
+        first: async () => ({ ...tables[table][0] }), then: (resolve, reject) => Promise.resolve(tables[table].map((row) => ({ ...row }))).then(resolve, reject) };
+      return query;
+    };
+    const rebooker = { collectiveMoveGateOn: () => false, reschedule: jest.fn() };
+    try {
+      const preview = await previewProposal(conn, 'card', { visitId: 'visit', now, rebooker });
+      selected[field] = field === 'service_id' ? 'service-b' : 'Changed service';
+      await expect(applyProposal(conn, 'card', { actorId: 'staff', visitId: 'visit', previewHash: preview.preview_hash, now, rebooker }))
+        .rejects.toMatchObject({ status: 409 });
+      expect(rebooker.reschedule).not.toHaveBeenCalled();
+    } finally {
+      if (priorGate === undefined) delete process.env.GATE_RESCHEDULE_PROPOSAL_CARD;
+      else process.env.GATE_RESCHEDULE_PROPOSAL_CARD = priorGate;
+    }
   });
 });

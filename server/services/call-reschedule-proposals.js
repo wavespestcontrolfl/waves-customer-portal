@@ -139,7 +139,12 @@ async function previewProposal(conn, id, { visitId, now = new Date(), rebooker =
   if (followUps.length) throw fail('This visit has a linked follow-up. Use Pick another time to review both appointments together.');
   const snapshot = { source: digest([call.transcription, v2]), customer, property: selected.property, card_id: card.id, updated_at: new Date(card.updated_at).toISOString(), generation: call.processing_generation,
     visit_id: selection, from: { date: selected.scheduled_date, start: selected.window_start, end: selected.window_end,
-      duration: selected.estimated_duration_minutes, status: selected.status, property_id: selected.property_id },
+      duration: selected.estimated_duration_minutes, status: selected.status, property_id: selected.property_id,
+      service_id: selected.service_id, service_type: selected.service_type, service_name: selected.service_name,
+      visit_id: selected.visit_id, is_recurring: selected.is_recurring, source_action: selected.source_action,
+      customer_confirmed: selected.customer_confirmed, self_booking_id: selected.self_booking_id,
+      service_address_line1: selected.service_address_line1, service_address_line2: selected.service_address_line2,
+      service_address_city: selected.service_address_city, service_address_zip: selected.service_address_zip },
     target: v2.scheduling.proposed_start_at, series };
   return { preview_hash: digest(snapshot), card, call, customer, candidates, v2, plan, selected, series };
 }
