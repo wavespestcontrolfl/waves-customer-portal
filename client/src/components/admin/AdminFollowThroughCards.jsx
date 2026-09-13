@@ -1,5 +1,6 @@
 import { Button, Select } from '../ui';
 import FollowThroughCards from '../follow-through/FollowThroughCards';
+import RescheduleProposalCards from '../follow-through/RescheduleProposalCards';
 
 const ui = {
   Card: ({ children }) => <article className="rounded-md border-hairline border-zinc-300 bg-white p-4 space-y-2 text-14 text-ink-primary">{children}</article>,
@@ -10,5 +11,8 @@ const ui = {
 };
 
 export default function AdminFollowThroughCards(props) {
-  return <FollowThroughCards {...props} ui={ui} />;
+  return <>
+    <RescheduleProposalCards ui={ui} pollMs={props.pollMs} />
+    <FollowThroughCards {...props} ui={ui} />
+  </>;
 }
