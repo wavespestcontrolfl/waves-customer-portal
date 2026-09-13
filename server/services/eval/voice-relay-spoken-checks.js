@@ -1471,9 +1471,9 @@ function reportHasCompletedFinding(affirmed, subjectAt, subjectLength, locationA
   // "the technician received Talstar for the perimeter" describes custody.
   const locationRecipient = REPORT_LOCATION_RECIPIENT_VERB_RE.test(findingVerb[0]);
   if (locationRecipient) {
-    const receiverPrefix = affirmed.slice(0, locationAt).trim();
+    const receiverPrefix = affirmed.slice(0, locationAt);
     const receiverPredicate = affirmed.slice(locationAt + locationLength, findingVerb.index);
-    if (locationAt > findingVerb.index || !REPORT_NOUN_LED_PREFIX_RE.test(receiverPrefix)
+    if (locationAt > findingVerb.index || !REPORT_LOCATION_TARGET_PREFIX_RE.test(receiverPrefix)
         || !REPORT_LOCATION_RECIPIENT_PREDICATE_RE.test(receiverPredicate)) return false;
   }
   if (/\bimagin(?:e[sd]?|ing)\s+(?:that\s+)?$/i.test(affirmed.slice(0, subjectAt))) return false;

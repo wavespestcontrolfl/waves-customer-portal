@@ -161,6 +161,15 @@ test('a location recipient confirms the product it got before a later product me
   expect(checks.report_readback_confirms(bait, {}, { spoken })[0]).toBe('pass');
 });
 
+test.each([
+  ['The exterior perimeter received Talstar P.', 'pass'],
+  ['The exterior perimeter received bait after the technician ordered Talstar P.', 'fail'],
+  ['The technician at the exterior perimeter received Talstar P.', 'fail'],
+])('a partial location match preserves its recipient noun phrase: %s', (spoken, status) => {
+  const finding = { subject: '\\btalstar\\b', location: '\\b(?:exterior|perimeter)\\b' };
+  expect(checks.report_readback_confirms(finding, {}, { spoken: [spoken] })[0]).toBe(status);
+});
+
 test('a verbless with-assertion confirms only the product and location it names', () => {
   const spoken = ['Talstar P was applied indoors with bait on the exterior perimeter.'];
   const bait = { subject: '\\bbait\\b', location: '\\bexterior perimeter\\b' };
