@@ -74,6 +74,7 @@ describe('voice relay eval — callback commitment core', () => {
     [RUTH, 'We will call her in a few minutes.', 'fail'],
     [RUTH, 'We will call her if she agrees, but we will email her anyway.', 'fail'],
     [RUTH, 'We will call her shortly if she agrees.', 'pass'],
+    [RUTH, 'We will call her if she agrees or not.', 'fail'],
     [RUTH, 'We will contact her next week.', 'fail'],
     [RUTH, 'We will contact her next Tuesday.', 'fail'],
     [RUTH, 'We will contact her Monday.', 'fail'],
