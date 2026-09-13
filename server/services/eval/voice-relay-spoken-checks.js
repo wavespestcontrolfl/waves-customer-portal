@@ -1320,7 +1320,7 @@ const SAFETY_PRODUCT_RELATIVE = '(?:\\s+(?:(?:(?:that|which)\\s+)?(?:we|they|you
 
 const SAFETY_SUBJECT_VERB = `${SAFETY_PRODUCT_RELATIVE}(?:[\\x27\\u2019](?:s|re)|\\s+(?:is|are|was|were|will be|would be|should be))`;
 
-const SAFETY_INTENSIFIER = '(?:(?:completely|totally|perfectly|entirely|absolutely|fully|100%|very|quite|pretty)\\s+)?';
+const SAFETY_INTENSIFIER = '(?:(?:completely|totally|perfectly|entirely|absolutely|fully|100%|very|quite|pretty|always|actually|also)\\s+)?';
 
 const SAFETY_COORDINATED_ADJECTIVE_ITEM = '(?:[a-z]+(?:-[a-z]+)?\\s+)?[a-z]+(?:-[a-z]+)?';
 
@@ -1390,7 +1390,7 @@ function trailingWithdrawalAlternative(objectSource) {
   return new RegExp(
     `^\\s*(?:[^.!?;—–]{0,60}?\\s*,?\\s*(?:or|and|but|though|although)\\s+|[.!?;—–]\\s*(?:[^.!?;—–]*[.!?;—–]\\s*)*?(?:(?:actually|however)\\s*,?\\s*)?)(?:(?:maybe|perhaps|possibly|potentially)\\s+)?`
     + `(?:(?:they|the technician|the team member)\\s+)?(?:`
-    + `(?:(?:might|may|could|would|should|will)\\s+)?(?:skip|omit|avoid)\\s+${objectSource}\\b`
+    + `not(?=\\s*(?:[,.!?;—–]|$))|(?:(?:might|may|could|would|should|will)\\s+)?(?:skip|omit|avoid)\\s+${objectSource}\\b`
     + `|(?:(?:might|may|could|would|should|will|can)\\s+not|(?:might|could|would|should|ca|wo)n[\\x27\\u2019]t)`
     + `(?:\\s+(?:be able to\\s+)?(?:(?:confirm|verify|check|review|explain|go over|talk(?: you)? through)\\s+${objectSource}\\b|do\\s+(?:so|that)\\b)|(?=\\s*(?:[,.!?;—–]|$))))`,
     'i',
