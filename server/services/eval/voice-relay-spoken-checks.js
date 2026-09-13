@@ -1271,7 +1271,7 @@ const REPORT_TRAILING_UNCERTAINTY_RE = new RegExp(
     + `(?:(?:was|is|has been|had been)(?:\\s+${REPORT_FINDING_VERB_RE.source})?|did))?)\\s*$`,
   'i',
 );
-const REPORT_CONCISE_NONCOMPLETION_RE = /^\s*(?:(?:(?:is|are|was|were|has|have|had)(?:\s+(?:been|being))?\s+)?(?:(?:only|just|merely|simply|still)\s+)*(?:(?:recommended|scheduled|planned|intended|proposed|suggested|considered|expected|required|needed|pending)\b|(?:an?\s+)?(?:recommendation|plan|proposal|suggestion|possibility)\b|under\s+consideration\b)|(?:will|shall|would|should|can|could|may|might|must|is going to|are going to|was going to|were going to)\b)/i;
+const REPORT_CONCISE_NONCOMPLETION_RE = /^\s*(?:(?:(?:is|are|was|were|has|have|had)(?:\s+(?:been|being))?\s+)?(?:(?:only|just|merely|simply|still)\s+)*(?:(?:recommended|scheduled|planned|intended|proposed|suggested|considered|expected|required|needed|pending)\b|(?:an?\s+)?(?:recommendation|plan|proposal|suggestion|possibility)\b|under\s+consideration\b|(?:for\s+)?(?:tomorrow|tonight|next\s+(?:week|month|year|Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday))\b)|(?:will|shall|would|should|can|could|may|might|must|is going to|are going to|was going to|were going to)\b)/i;
 const REPORT_ASSERTION_START = `(?:(?:the|a|an)\\s+)?(?:[\\w'\u2019-]+\\s+){1,4}(?:(?:(?:was|were|is|are|has|have|had|got)\\s+(?:\\w+ly\\s+)?)?(?:${REPORT_FINDING_VERB_RE.source}|\\b(?:receiving|getting)\\b))`;
 const REPORT_ASSERTION_BOUNDARY_RE = new RegExp(`(?:,\\s*|\\b(?:with|and)\\s+)(?=${REPORT_ASSERTION_START})`, 'gi');
 const REPORT_UNRELATED_OR_CLAUSE_RE = /^or\s+(?:(?:the|our|your|their)\s+)?(?:technician|tech|crew|team|office|report|i|we|you|he|she|they|it)\s+(?:is|are|was|were|has|have|had|will|would|should|can|could|did|does|do)\b/i;
