@@ -1287,6 +1287,7 @@ const REPORT_UNCERTAINTY_RE = /\b(?:can|must|may|might|could|would|should|will|s
 const REPORT_INSTRUCTION_RE = /(?:^|,\s*)(?:please\s+)?(?:apply|use|put|treat|spray|place)\b|\b(?:please|make sure|ensure|remember to)\b/i;
 const REPORT_FINDING_VERB_RE = /\b(?:applied|placed|used|treated|sprayed|put|went|got|received)\b/i;
 const REPORT_COMPLETION_TIME = `(?:(?:on\\s+)?(?:${VISIT_TIME_RE.source})|yesterday|earlier|recently|last\\s+(?:week|month|year))`;
+const REPORT_COMPLETION_TIME_RE = new RegExp(REPORT_COMPLETION_TIME, 'gi');
 const REPORT_PARTICIPLE_RE = /^(?:applied|placed|used|treated|sprayed|put|received)$/i;
 const REPORT_LOCATION_RECIPIENT_VERB_RE = /^(?:got|received)$/i;
 const REPORT_NOUN_LED_PREFIX_RE = /^\s*(?:(?:the|a|an)\s*)?$/i;
@@ -1312,7 +1313,7 @@ const REPORT_TRAILING_UNCERTAINTY_RE = new RegExp(
     + `(?:(?:was|is|has been|had been)(?:\\s+${REPORT_FINDING_VERB_RE.source})?|did))?)\\s*(?=$|,)`,
   'i',
 );
-const REPORT_TRAILING_DENIAL_RE = /^(?:actually\s+)?(?:not(?:\s+(?:really|actually))?|no|(?:it|that|this)\s+(?:was|is|has|had)(?:n['’]t|\s+not)(?:\s+been)?)\s*$/i;
+const REPORT_TRAILING_DENIAL_RE = /^(?:actually\s+)?(?:not(?:\s+(?:really|actually))?|no|(?:it|that|this)\s+(?:was|is|has|had)(?:n['’]t|\s+not)(?:\s+been)?(?:\s+(?:true|correct|accurate))?)\s*$/i;
 const REPORT_CONCISE_NONCOMPLETION_RE = /^\s*(?:(?:(?:is|are|was|were|has|have|had)(?:\s+(?:been|being))?\s+)?(?:(?:only|just|merely|simply|still)\s+)*(?:(?:the|our|your|their|his|her|my|its)\s+)?(?:(?:recommended|scheduled|planned|intended|proposed|suggested|considered|expected|required|needed|pending)\b|(?:an?\s+)?(?:recommendation|plan|proposal|suggestion|possibility)\b|under\s+consideration\b|(?:for\s+)?(?:tomorrow|tonight|next\s+(?:week|month|year|Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday))\b)|(?:will|shall|would|should|can|could|may|might|must|is going to|are going to|was going to|were going to)\b)/i;
 // Qualified shorthand must positively state completion or cite the report;
 // unknown qualifiers can describe proposed treatment and are not evidence.
@@ -1326,6 +1327,10 @@ const REPORT_SHARED_LIST_CONDITION_RE = new RegExp(
     + `[^.!?;]*${REPORT_FINDING_VERB_RE.source}[^.!?;]*\\band\\s*$`,
   'i',
 );
+
+function reportFindingIsUncertain(text) {
+  return REPORT_UNCERTAINTY_RE.test(text.replace(REPORT_COMPLETION_TIME_RE, ''));
+}
 
 // A comma or "with" opens a separate report assertion only when its right
 // side has a fresh treatment subject/predicate and its left side already
@@ -1505,7 +1510,7 @@ function reportClaimIsDenied(claim, affirmed, subjectAt, locationAt, findingVerb
   const sharedFindingVerb = [...precedingClause.matchAll(new RegExp(REPORT_FINDING_VERB_RE.source, 'gi'))].pop();
   if (!findingVerb && sharedFindingVerb && /\band\s*$/i.test(precedingClause)) {
     const sharedClaim = claimContext(precedingClause, sharedFindingVerb.index, precedingClause.length);
-    if (clauseIsNegated(sharedClaim) || REPORT_UNCERTAINTY_RE.test(sharedClaim)) return true;
+    if (clauseIsNegated(sharedClaim) || reportFindingIsUncertain(sharedClaim)) return true;
   }
   if (subjectAt < 0 || locationAt < 0) return false;
   const firstAt = Math.min(subjectAt, locationAt, findingVerb ? findingVerb.index : affirmed.length);
@@ -1519,6 +1524,10 @@ function reportSharedLocationContinuation(text, clauseEnd, location) {
   if (/^[—–]/.test(remainder) && (REPORT_TRAILING_UNCERTAINTY_RE.test(dashQualifier)
       || REPORT_TRAILING_DENIAL_RE.test(dashQualifier))) {
     return { text: `, ${dashQualifier}`, unconfirmed: true };
+  }
+  const contrastQualifier = remainder.replace(/^(?:but|however)\s*,?\s*/i, '').split(/[.!?;]/)[0];
+  if (/^(?:but|however)\b/i.test(remainder) && REPORT_TRAILING_DENIAL_RE.test(contrastQualifier)) {
+    return { text: '', unconfirmed: true };
   }
   const locationTail = new RegExp(
     `^and\\s+(?:(?:${REPORT_TREATMENT_LOCATION_LINK_RE.source}\\s+)?`
@@ -1611,7 +1620,7 @@ function report_readback_confirms(value, record, { spoken }) {
           ? affirmed.slice(0, evidenceEnd) + affirmed.slice(evidenceEnd).replace(/\bbefore\b/gi, 'prior to') : affirmed;
         const claim = claimContext(claimText, Math.min(subjectAt, locationAt), claimText.length);
         if (affirmed.slice(subjectAt, subjectAt + m[0].length).toLowerCase() === m[0].toLowerCase()
-            && !REPORT_UNCERTAINTY_RE.test(findingEvidence)
+            && !reportFindingIsUncertain(findingEvidence)
             && !REPORT_TRAILING_UNCERTAINTY_RE.test(trailingEvidence)
             && !REPORT_CONCISE_NONCOMPLETION_RE.test(trailingEvidence) && !REPORT_INSTRUCTION_RE.test(affirmed)
             && !alternativeLocation
