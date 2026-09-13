@@ -7,6 +7,7 @@ const { etParts, addETDays } = require('../../utils/datetime-et');
 const PLACEHOLDER_RE = /\[([a-z][a-z0-9_ -]{0,30})\]|\{\{?([a-z][a-z0-9_ -]{0,30})\}?\}/gi;
 const LINK_RE = /(?:https?:\/\/|www\.)[^\s<>()]+|\b(?:[a-z0-9-]+\.)+[a-z]{2,63}(?:\/[^\s<>()]*)?/gi;
 const MONEY_RE = /\$\s*\d[\d,]*(?:\.\d{1,2})?|\b\d[\d,]*(?:\.\d{1,2})?\s+(?:dollars?|bucks?)\b/gi;
+const SIGNED_MONEY_RE = /(?:[+\-\u2212]\s*\$\s*|\$\s*[+\-\u2212]\s*)\d[\d,]*(?:\.\d{1,2})?/gi;
 const WRITTEN_MONEY_RE = /\b(?:zero|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety|hundred|thousand)\s+(?:dollars?|bucks?)\b/gi;
 const DATE_RE = /\b\d{4}-\d{2}-\d{2}\b|\b\d{1,2}\/\d{1,2}(?:\/\d{2,4})?\b|\b(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\s+\d{1,2}(?:st|nd|rd|th)?(?:,?\s+\d{4})?\b|\b\d{1,2}(?:st|nd|rd|th)\b|\b(?:sun|mon|tues?|wed(?:nes)?|thu(?:rs)?|fri|sat(?:ur)?)(?:day)?\b|\b(?:today|tomorrow)\b/gi;
 const TIME_RE = /\b\d{1,2}(?::\d{2})?\s*(?:a\.?m\.?|p\.?m\.?)\b/gi;
@@ -28,17 +29,32 @@ function cents(value) {
   return Number.isFinite(number) ? Math.round(number * 100) : null;
 }
 
+function storedCents(value) {
+  if (typeof value !== 'number' && !/^-?\d+(?:\.\d+)?$/.test(String(value).trim())) return null;
+  const number = Number(value);
+  return Number.isFinite(number) ? Math.round(number * 100) : null;
+}
+
+function hasResolvedDuesQuote(dues) {
+  const surcharge = storedCents(dues?.surcharge);
+  if (storedCents(dues?.total) == null || surcharge == null) return false;
+  if (dues?.basis === 'credit_card_surcharge') return dues.surcharged === true && surcharge > 0;
+  return dues?.basis === 'no_surcharge' && dues.surcharged === false && surcharge === 0;
+}
+
 function amountsForFact(fact) {
+  const dues = fact.value?.monthlyDues;
+  const resolvedDuesQuote = hasResolvedDuesQuote(dues);
   const byKey = {
     outstanding_balance: [fact.value],
     open_invoice: [fact.value?.amountDue],
     recent_payment: [fact.value?.amount],
-    billing_lane: [fact.value?.monthlyDues?.base, fact.value?.monthlyDues?.surcharge, fact.value?.monthlyDues?.total],
+    billing_lane: [dues?.base, ...(resolvedDuesQuote ? [dues?.surcharge, dues?.total] : [])],
   };
   const values = [];
   for (const value of byKey[fact.key] || []) {
-    if ((typeof value === 'number' || /^-?\d+(?:\.\d+)?$/.test(String(value).trim()))
-      && Number.isFinite(Number(value))) values.push(Math.round(Number(value) * 100));
+    const amount = storedCents(value);
+    if (amount != null) values.push(amount);
   }
   return values;
 }
@@ -53,23 +69,38 @@ function amountsForClaim(fact, sentence) {
   // One amount must name one billing field; proximity cannot decide ambiguous prose.
   if (fields.length > 1) return [];
   const field = fields[0] || 'base';
-  return amountsForFact({ key: fact.key, value: { monthlyDues: { [field]: fact.value?.monthlyDues?.[field] } } });
+  const dues = fact.value?.monthlyDues;
+  const amount = storedCents(dues?.[field]);
+  if (amount == null || (field !== 'base' && !hasResolvedDuesQuote(dues))) return [];
+  return [amount];
+}
+
+function factLanguage(sentence) {
+  const invoiceNoun = /\binvoices?\b/i.test(sentence);
+  const invoicePayment = /\binvoices?\s+payments?\b/i.test(sentence);
+  const paymentDue = /\bpayments?\s+(?:(?:is|are|was|were|will be|has been|becomes?|remains?)\s+)?(?:now\s+)?due\b/i.test(sentence);
+  return {
+    invoice: paymentDue || (!invoicePayment && (invoiceNoun || /\bamount due\b/i.test(sentence))),
+    payment: !paymentDue && (!invoiceNoun || invoicePayment) && /\b(?:payments?|paid|went through)\b/i.test(sentence),
+  };
 }
 
 function semanticFactKeys(sentence) {
   const text = sentence.toLowerCase();
+  const language = factLanguage(sentence);
   if (/\b(?:balance|outstanding|account current)\b/.test(text)) return ['outstanding_balance'];
-  if (/\b(?:payment|paid|went through)\b/.test(text)) return ['recent_payment'];
-  if (/\b(?:invoice|amount due)\b/.test(text)) return ['open_invoice'];
+  if (language.invoice) return ['open_invoice'];
+  if (language.payment) return ['recent_payment'];
   if (/\b(?:monthly|dues|surcharge|card fee)\b/.test(text)) return ['billing_lane'];
   return [];
 }
 
 function mentionedFactKeys(sentence) {
   const keys = [];
+  const language = factLanguage(sentence);
   if (/\b(?:balance|outstanding|account current)\b/i.test(sentence)) keys.push('outstanding_balance');
-  if (/\b(?:payment|paid|went through)\b/i.test(sentence)) keys.push('recent_payment');
-  if (/\b(?:invoice|amount due)\b/i.test(sentence)) keys.push('open_invoice');
+  if (language.payment) keys.push('recent_payment');
+  if (language.invoice) keys.push('open_invoice');
   if (/\b(?:dues|surcharge|card fee|monthly (?:charge|cost|price|rate))\b/i.test(sentence)) keys.push('billing_lane');
   if (/\bestimate\b/i.test(sentence)) keys.push('pending_estimate');
   if (/\b(?:visit|service|appointment)\w*\b/i.test(sentence)
@@ -178,8 +209,9 @@ function timeRanges(value) {
 }
 
 function dateSemanticKeys(sentence) {
-  if (/\b(?:payment|paid)\b/i.test(sentence)) return ['recent_payment'];
-  if (/\b(?:invoice|due)\b/i.test(sentence)) return ['open_invoice'];
+  const language = factLanguage(sentence);
+  if (language.invoice) return ['open_invoice'];
+  if (language.payment) return ['recent_payment'];
   if (/\bestimate\b/i.test(sentence)) return ['pending_estimate'];
   if (/\b(?:last|previous|completed|was serviced|came out)\b/i.test(sentence)) return ['last_completed_visit'];
   if (/\b(?:visit|service|appointment|scheduled|coming|arriv)\w*\b/i.test(sentence)) return ['upcoming_visit'];
@@ -239,7 +271,8 @@ function statusSupported(sentence, key, context, predicate) {
 }
 
 function stateWordsSupported(sentence, key, context, pattern) {
-  const normalized = (value) => String(value || '').toLowerCase().replace('cancelled', 'canceled').replace(/\s+/g, '_');
+  const normalized = (value) => String(value || '').toLowerCase().replace('cancelled', 'canceled')
+    .replace('voided', 'void').replace(/\s+/g, '_');
   return (sentence.match(pattern) || []).every((claim) => statusSupported(sentence, key, context,
     (fact) => normalized(fact.value?.status) === normalized(claim)));
 }
@@ -247,12 +280,15 @@ function stateWordsSupported(sentence, key, context, pattern) {
 function statusViolations(text, context) {
   const violations = [];
   for (const sentence of sentences(text)) {
+    const language = factLanguage(sentence);
     if (/\b(?:not|never|no longer|isn['’]t|wasn['’]t|hasn['’]t|haven['’]t|didn['’]t|cannot|can['’]t)\b/i.test(sentence)
-      && /\b(?:payment|paid|visit|service|appointment|estimate)\b/i.test(sentence)) violations.push('negated_status_unsupported');
+      && /\b(?:payment|paid|invoice|visit|service|appointment|estimate)\b/i.test(sentence)) violations.push('negated_status_unsupported');
 
     const stateRules = [
-      { matches: /\bpayments?\b/i.test(sentence), key: 'recent_payment', violation: 'payment_status_unsupported',
+      { matches: language.payment, key: 'recent_payment', violation: 'payment_status_unsupported',
         pattern: /\b(?:failed|declined|pending|processing|refunded|reversed|cancelled|canceled|voided)\b/gi },
+      { matches: language.invoice, key: 'open_invoice', violation: 'invoice_status_unsupported',
+        pattern: /\b(?:draft|sent|viewed|paid|prepaid|overdue|unpaid|processing|refunded|voided|void|cancelled|canceled)\b/gi },
       { matches: /\bestimate\b/i.test(sentence), key: 'pending_estimate', violation: 'estimate_status_unsupported',
         pattern: /\b(?:draft|scheduled|sending|send failed|viewed|accepted|declined|expired)\b/gi },
       { matches: /\b(?:visit|service|appointment)\b/i.test(sentence), key: 'upcoming_visit', violation: 'visit_status_unsupported',
@@ -266,7 +302,7 @@ function statusViolations(text, context) {
 
     const statusRules = [
       {
-        matches: /\b(?:payment|paid)\b/i.test(sentence)
+        matches: language.payment
           && /\b(?:received|processed|successful|succeeded|completed|paid|went through)\b/i.test(sentence),
         key: 'recent_payment', violation: 'payment_status_unsupported',
         supports: (fact) => SUCCESS_STATUS_RE.test(String(fact.value?.status || '')),
@@ -295,16 +331,25 @@ function statusViolations(text, context) {
 
 function placeholderViolations(text, context) {
   const mappings = {
-    date: ['upcoming_visits'], day: ['upcoming_visits'], time: ['upcoming_visits'], window: ['upcoming_visits'],
     visit: ['upcoming_visits'], appointment: ['upcoming_visits'], tech: ['upcoming_visits'], technician: ['upcoming_visits'],
     estimate: ['pending_estimate'], invoice: ['open_invoice'], payment: ['recent_payments'],
-    balance: ['outstanding_balance'], amount: ['outstanding_balance'], name: ['customer'], phone: [], email: [], address: [], redacted: [],
+    balance: ['outstanding_balance'], name: ['customer'], phone: [], email: [], address: [], redacted: [],
+  };
+  const absentFactKeys = {
+    recent_payment: 'recent_payments', upcoming_visit: 'upcoming_visits', last_completed_visit: 'last_completed_visit',
+    pending_estimate: 'pending_estimate', open_invoice: 'open_invoice', outstanding_balance: 'outstanding_balance',
+    billing_lane: 'billing_lane',
   };
   const violations = [];
-  for (const match of text.matchAll(PLACEHOLDER_RE)) {
-    const token = String(match[1] || match[2]).trim().toLowerCase().replace(/\s+/g, '_');
-    const keys = mappings[token];
-    if (!keys?.length || !keys.some((key) => factByKey(context, key)?.status === 'absent')) violations.push(`placeholder_unsupported:${token}`);
+  for (const sentence of sentences(text)) {
+    for (const match of sentence.matchAll(PLACEHOLDER_RE)) {
+      const token = String(match[1] || match[2]).trim().toLowerCase().replace(/\s+/g, '_');
+      let factKeys = null;
+      if (['date', 'day', 'time', 'window'].includes(token)) factKeys = dateSemanticKeys(sentence);
+      if (token === 'amount') factKeys = semanticFactKeys(sentence);
+      const keys = factKeys ? factKeys.map((key) => absentFactKeys[key]).filter(Boolean) : mappings[token];
+      if (!keys?.length || !keys.some((key) => factByKey(context, key)?.status === 'absent')) violations.push(`placeholder_unsupported:${token}`);
+    }
   }
   return violations;
 }
@@ -343,6 +388,7 @@ function sentences(text) {
 
 function structuralViolations(draft, context, wordBudget) {
   const violations = [];
+  const normalizedCopy = draft.normalize('NFKC').replace(/[\u2010-\u2015\u2212]/g, '-');
   if (!draft) violations.push('empty_reply');
   if (!Number.isInteger(wordBudget) || wordBudget < 1 || wordCount(draft) > wordBudget) violations.push('word_budget_exceeded');
   if (/<\/?[a-z][^>]*>/i.test(draft)) violations.push('html_not_allowed');
@@ -353,7 +399,7 @@ function structuralViolations(draft, context, wordBudget) {
   if (!exemplarLooksClean('', draft)) violations.push('untrusted_instruction');
   if (forgedSignature(draft)) violations.push('signature_unsupported');
   if (containsReportAccessCode(draft)) violations.push('access_code');
-  if (findBannedCustomerCopy(draft).length || /\bper[\s-]+visit\b|\bWaves\s+Lawn\s*(?:&|and)\s*Pest\b/i.test(draft)
+  if (findBannedCustomerCopy(draft).length || /\bper[\s-]+visit\b|\bWaves\s+Lawn\s*(?:&|and)\s*Pest\b/i.test(normalizedCopy)
     || reentrySafetyClaimFinding(draft)) violations.push('customer_copy_compliance');
 
   const firstName = String(context?.customer?.firstName || '').normalize('NFC').trim();
@@ -368,11 +414,13 @@ function groundingViolations(draft, context, exemplars) {
   for (const sentence of sentences(draft)) {
     if (mentionedFactKeys(sentence).length > 1) violations.push('mixed_fact_categories_unsupported');
     const amounts = sentence.match(MONEY_RE) || [];
+    const signedAmounts = sentence.match(SIGNED_MONEY_RE) || [];
     const writtenAmounts = sentence.match(WRITTEN_MONEY_RE) || [];
     if (amounts.length > 1) violations.push('multiple_amounts_unsupported');
     for (const amount of amounts) {
       if (!amountSupported(amount, sentence, facts)) violations.push(`amount_unsupported:${amount}`);
     }
+    for (const amount of signedAmounts) violations.push(`amount_unsupported:${amount}`);
     for (const amount of writtenAmounts) violations.push(`amount_unsupported:${amount}`);
     for (const date of temporalClaims(sentence)) {
       if (!dateSupported(date, sentence, availableDates)) violations.push(`date_unsupported:${date}`);

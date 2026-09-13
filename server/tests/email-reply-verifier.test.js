@@ -9,8 +9,9 @@ function contextWith(overrides = {}) {
     { key: 'upcoming_visit', status: 'present', value: { date: '2026-09-15', window: '9:00 AM–11:00 AM', status: 'pending' } },
     { key: 'last_completed_visit', status: 'present', value: { date: '2026-08-12', status: 'completed' } },
     { key: 'pending_estimate', status: 'present', value: { status: 'draft', sentAt: null } },
-    { key: 'billing_lane', status: 'present', value: { monthlyDues: { base: 98, surcharge: 2.84, total: 100.84 } } },
-    { key: 'recent_payments', status: 'absent', value: null },
+    { key: 'billing_lane', status: 'present', value: { monthlyDues: {
+      base: 98, surcharge: 2.84, total: 100.84, surcharged: true, basis: 'credit_card_surcharge',
+    } } },
   ];
   return {
     customer: { id: 'customer-1', firstName: 'Casey' },
@@ -181,6 +182,31 @@ describe('email reply verifier', () => {
     expect(verdict('Hi Casey, your $50 payment failed.').ok).toBe(true);
   });
 
+  test('invoice state claims match the authoritative open invoice state', () => {
+    expect(verdict('Hi Casey, your invoice is sent.').ok).toBe(true);
+    for (const claim of ['overdue', 'cancelled', 'paid']) {
+      expect(verdict(`Hi Casey, your invoice is ${claim}.`).violations).toContain('invoice_status_unsupported');
+    }
+    for (const wording of ['your invoice is paid', 'your paid invoice']) {
+      expect(verdict(`Hi Casey, ${wording}.`).violations).not.toContain('payment_status_unsupported');
+    }
+    expect(verdict('Hi Casey, your invoice payment failed.').ok).toBe(true);
+
+    for (const status of ['overdue', 'cancelled']) {
+      const facts = contextWith().facts.map((fact) => (fact.key === 'open_invoice'
+        ? { ...fact, value: { ...fact.value, status } }
+        : fact));
+      expect(verdict('Hi Casey, your invoice is sent.', { context: { facts } }).violations)
+        .toContain('invoice_status_unsupported');
+    }
+    const overdueFacts = contextWith().facts.map((fact) => (fact.key === 'open_invoice'
+      ? { ...fact, value: { ...fact.value, status: 'overdue' } }
+      : fact));
+    expect(verdict('Hi Casey, your invoice is overdue.', { context: { facts: overdueFacts } }).ok).toBe(true);
+    expect(verdict('Hi Casey, your invoice is not overdue.', { context: { facts: overdueFacts } }).violations)
+      .toContain('negated_status_unsupported');
+  });
+
   test.each([
     ['draft', 'draft'], ['scheduled', 'scheduled'], ['sending', 'sending'], ['send_failed', 'send failed'],
     ['viewed', 'viewed'], ['accepted', 'accepted'], ['declined', 'declined'], ['expired', 'expired'],
@@ -228,6 +254,22 @@ describe('email reply verifier', () => {
     expect(verdict('Hi Casey, your outstanding balance is $75.').ok).toBe(true);
   });
 
+  test('rejects signed currency instead of grounding its unsigned substring', () => {
+    for (const amount of ['-$75', '- $75', '−$75', '− $75', '$-75', '$ − 75', '+$75', '+ $75']) {
+      expect(verdict(`Hi Casey, your outstanding balance is ${amount}.`).violations)
+        .toContain(`amount_unsupported:${amount}`);
+    }
+    expect(verdict('Hi Casey, your outstanding balance is $75.').ok).toBe(true);
+  });
+
+  test('binds payment due dates to invoices while retaining past payment dates', () => {
+    expect(verdict('Hi Casey, your payment is due September 20.').ok).toBe(true);
+    expect(verdict('Hi Casey, your payment will be due September 20.').ok).toBe(true);
+    expect(verdict('Hi Casey, your payment is due September 10.').violations)
+      .toContain('date_unsupported:September 10');
+    expect(verdict('Hi Casey, your payment was on September 10.').ok).toBe(true);
+  });
+
   test('requires payment context before treating received as a payment claim', () => {
     expect(verdict('Hi Casey, we received your email about your appointment.').ok).toBe(true);
     const facts = contextWith().facts.map((fact) => (fact.key === 'recent_payment'
@@ -272,6 +314,30 @@ describe('email reply verifier', () => {
     expect(verdict('Hi Casey, your base monthly dues are $98.').ok).toBe(true);
   });
 
+  test('withheld monthly dues quotes cannot authorize a zero surcharge', () => {
+    const withheldFacts = contextWith().facts.map((fact) => (fact.key === 'billing_lane'
+      ? { ...fact, value: { ...fact.value, monthlyDues: {
+        base: 98, surcharge: 0, total: null, surcharged: false, basis: 'method_unknown',
+      } } }
+      : fact));
+    expect(verdict('Hi Casey, your card surcharge is $0.', { context: { facts: withheldFacts } }).violations)
+      .toContain('amount_unsupported:$0');
+    expect(verdict('Hi Casey, your monthly dues are $98.', { context: { facts: withheldFacts } }).ok).toBe(true);
+    const missingBaseFacts = withheldFacts.map((fact) => (fact.key === 'billing_lane'
+      ? { ...fact, value: { ...fact.value, monthlyDues: { ...fact.value.monthlyDues, base: null } } }
+      : fact));
+    expect(verdict('Hi Casey, your monthly dues are $0.', { context: { facts: missingBaseFacts } }).violations)
+      .toContain('amount_unsupported:$0');
+
+    const resolvedFacts = contextWith().facts.map((fact) => (fact.key === 'billing_lane'
+      ? { ...fact, value: { ...fact.value, monthlyDues: {
+        base: 98, surcharge: 0, total: 98, surcharged: false, basis: 'no_surcharge',
+      } } }
+      : fact));
+    expect(verdict('Hi Casey, your card surcharge is $0.', { context: { facts: resolvedFacts } }).ok).toBe(true);
+    expect(verdict('Hi Casey, your total monthly charge is $98.', { context: { facts: resolvedFacts } }).ok).toBe(true);
+  });
+
   test('ambiguous billing fields cannot lend a surcharge amount to a total claim', () => {
     for (const amount of ['$2.84', '$100.84']) {
       expect(verdict(`Hi Casey, your total monthly charge including the card surcharge is ${amount}.`).violations)
@@ -301,6 +367,39 @@ describe('email reply verifier', () => {
     const unavailable = absent.map((fact) => (fact.key === 'upcoming_visits' ? { ...fact, status: 'unavailable' } : fact));
     expect(verdict('Hi Casey, the next available appointment is [date].', { context: { facts: unavailable } }).violations).toContain('placeholder_unsupported:date');
     expect(verdict('Hi Casey, your appointment is [date].').violations).toContain('placeholder_unsupported:date');
+
+    const noInvoice = contextWith().facts.filter((fact) => fact.key !== 'open_invoice')
+      .concat({ key: 'open_invoice', status: 'absent', value: null });
+    expect(verdict('Hi Casey, your invoice is due [date].', { context: { facts: noInvoice } }).violations)
+      .not.toContain('placeholder_unsupported:date');
+    expect(verdict('Hi Casey, your invoice amount is [amount].', { context: { facts: noInvoice } }).violations)
+      .not.toContain('placeholder_unsupported:amount');
+    const missingVisits = contextWith().facts.filter((fact) => fact.key !== 'upcoming_visit')
+      .concat({ key: 'upcoming_visits', status: 'absent', value: null });
+    expect(verdict('Hi Casey, your invoice is due [date].', { context: { facts: missingVisits } }).violations)
+      .toContain('placeholder_unsupported:date');
+    const missingBalance = contextWith().facts.filter((fact) => fact.key !== 'outstanding_balance')
+      .concat({ key: 'outstanding_balance', status: 'absent', value: null });
+    expect(verdict('Hi Casey, your invoice amount is [amount].', { context: { facts: missingBalance } }).violations)
+      .toContain('placeholder_unsupported:amount');
+    const unavailableInvoice = noInvoice.map((fact) => (fact.key === 'open_invoice'
+      ? { ...fact, status: 'unavailable' }
+      : fact));
+    expect(verdict('Hi Casey, your invoice is due [date].', { context: { facts: unavailableInvoice } }).violations)
+      .toContain('placeholder_unsupported:date');
+
+    const noPayments = contextWith().facts.filter((fact) => fact.key !== 'recent_payment')
+      .concat({ key: 'recent_payments', status: 'absent', value: null });
+    expect(verdict('Hi Casey, your payment date is [date].', { context: { facts: noPayments } }).violations)
+      .not.toContain('placeholder_unsupported:date');
+    expect(verdict('Hi Casey, your payment occurred at [time].', { context: { facts: noPayments } }).violations)
+      .not.toContain('placeholder_unsupported:time');
+    const missingVisitsWithPayment = contextWith().facts.filter((fact) => fact.key !== 'upcoming_visit')
+      .concat({ key: 'upcoming_visits', status: 'absent', value: null });
+    expect(verdict('Hi Casey, your payment date is [date].', { context: { facts: missingVisitsWithPayment } }).violations)
+      .toContain('placeholder_unsupported:date');
+    expect(verdict('Hi Casey, your payment occurred at [time].', { context: { facts: missingVisitsWithPayment } }).violations)
+      .toContain('placeholder_unsupported:time');
   });
 
   test('rejects copied exemplar facts unless independently grounded', () => {
@@ -324,7 +423,7 @@ describe('email reply verifier', () => {
   });
 
   test('rejects retired pricing units and company copy', () => {
-    for (const unit of ['per visit', 'per-visit', 'per  visit']) {
+    for (const unit of ['per visit', 'per-visit', 'per  visit', 'per‑visit', 'per–visit']) {
       expect(verdict(`Hi Casey, your price is $98 ${unit}.`).violations).toContain('customer_copy_compliance');
     }
     expect(verdict('Hi Casey, your monthly dues are $98, billed per application.').ok).toBe(true);

@@ -17,13 +17,15 @@ an abbreviation ends a sentence to avoid ambiguous fact grouping.
 Independent fact categories also use separate sentences: the verifier does
 not infer subject relationships across coordinated billing/service clauses. Billing dues, surcharge and collected
 total keep their separate meanings; ambiguous billing-field wording requires
-review. Written-out currency amounts and ordinal dates require review; numeric dollar
-figures and calendar dates without ordinal suffixes remain the supported forms. Viewed estimates retain sent evidence.
+review. Signed or written-out currency amounts and ordinal dates require review;
+unsigned numeric dollar figures and calendar dates without ordinal suffixes
+remain the supported forms. Withheld dues quotes do not establish a surcharge
+or collected total. Invoice statuses and payment-due dates bind to the invoice. Viewed estimates retain sent evidence.
 
 The verifier also checks plain-text structure, greeting, unsupported signatures,
 boilerplate, links, access codes, existing customer-copy compliance, copied
 example facts, canonical company and per-application wording, and placeholders. Placeholders require an explicitly absent
-fact; an unavailable source is not absence. It returns `{ok, violations}`.
+fact in the relevant sentence family; an unavailable source is not absence. It returns `{ok, violations}`.
 
 These checks cover recognized claim forms; deterministic pattern matching does
 not prove the truth or completeness of arbitrary prose. The later generator
