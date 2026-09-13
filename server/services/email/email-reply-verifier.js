@@ -7,7 +7,7 @@ const { etParts, addETDays } = require('../../utils/datetime-et');
 const PLACEHOLDER_RE = /\[([a-z][a-z0-9_ -]{0,30})\]|\{\{?([a-z][a-z0-9_ -]{0,30})\}?\}/gi;
 const LINK_RE = /(?:https?:\/\/|www\.)[^\s<>()]+|\b(?:[a-z0-9-]+\.)+[a-z]{2,63}(?:\/[^\s<>()]*)?/gi;
 const MONEY_RE = /\$\s*\d[\d,]*(?:\.\d{1,2})?|\b\d[\d,]*(?:\.\d{1,2})?\s+(?:dollars?|bucks?)\b/gi;
-const DATE_RE = /\b\d{4}-\d{2}-\d{2}\b|\b\d{1,2}\/\d{1,2}(?:\/\d{2,4})?\b|\b(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\s+\d{1,2}(?:,?\s+\d{4})?\b|\b(?:sun|mon|tues?|wed(?:nes)?|thu(?:rs)?|fri|sat)(?:day)?\b|\b(?:today|tomorrow)\b/gi;
+const DATE_RE = /\b\d{4}-\d{2}-\d{2}\b|\b\d{1,2}\/\d{1,2}(?:\/\d{2,4})?\b|\b(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\s+\d{1,2}(?:,?\s+\d{4})?\b|\b(?:sun|mon|tues?|wed(?:nes)?|thu(?:rs)?|fri|sat(?:ur)?)(?:day)?\b|\b(?:today|tomorrow)\b/gi;
 const TIME_RE = /\b\d{1,2}(?::\d{2})?\s*(?:a\.?m\.?|p\.?m\.?)\b/gi;
 const TIME_RANGE_RE = /\b(\d{1,2})(?::(\d{2}))?\s*(a\.?m\.?|p\.?m\.?)?\s*(?:[-–—]|to|and)\s*(\d{1,2})(?::(\d{2}))?\s*(a\.?m\.?|p\.?m\.?)\b/gi;
 const BOILERPLATE_RE = /\bthank you for (?:reaching out|contacting us)\b|\bhope this (?:email )?finds you well\b|\bplease (?:do not|don't) hesitate to (?:reach out|contact us)\b|\blet us know if you have any (?:other |further )?questions\b/i;
@@ -42,20 +42,16 @@ function amountsForFact(fact) {
   return values;
 }
 
-function billingAmountField(raw, sentence) {
-  const index = sentence.toLowerCase().indexOf(raw.toLowerCase());
-  if (index < 0) return 'total';
-  const left = sentence.slice(Math.max(0, index - 28), index).replace(/^.*\$/s, '');
-  const right = sentence.slice(index + raw.length, index + raw.length + 28).replace(/\$.*$/s, '');
-  const nearby = `${left} ${right}`;
-  if (/\b(?:surcharge|card fee)\b/i.test(nearby)) return 'surcharge';
-  if (/\b(?:total|monthly charge)\b/i.test(nearby)) return 'total';
-  return 'base';
-}
-
-function amountsForClaim(fact, raw, sentence) {
+function amountsForClaim(fact, sentence) {
   if (fact.key !== 'billing_lane') return amountsForFact(fact);
-  const field = billingAmountField(raw, sentence);
+  const fields = [
+    [/\b(?:surcharge|card fee)\b/i, 'surcharge'],
+    [/\b(?:total|monthly charge)\b/i, 'total'],
+    [/\bbase\b/i, 'base'],
+  ].filter(([pattern]) => pattern.test(sentence)).map(([, field]) => field);
+  // One amount must name one billing field; proximity cannot decide ambiguous prose.
+  if (fields.length > 1) return [];
+  const field = fields[0] || 'base';
   return amountsForFact({ key: fact.key, value: { monthlyDues: { [field]: fact.value?.monthlyDues?.[field] } } });
 }
 
@@ -86,7 +82,7 @@ function amountSupported(raw, sentence, facts) {
   const amount = cents(raw);
   const keys = semanticFactKeys(sentence);
   if (amount == null || !keys.length) return false;
-  return facts.some((fact) => keys.includes(fact.key) && amountsForClaim(fact, raw, sentence).includes(amount));
+  return facts.some((fact) => keys.includes(fact.key) && amountsForClaim(fact, sentence).includes(amount));
 }
 
 function calendarDay(value) {
@@ -198,7 +194,7 @@ function factsMatchingClaims(sentence, key, context) {
   let candidates = presentFacts(context).filter((fact) => fact.key === key);
   const amounts = sentence.match(MONEY_RE) || [];
   if (amounts.length) {
-    candidates = candidates.filter((fact) => amounts.every((amount) => amountsForClaim(fact, amount, sentence).includes(cents(amount))));
+    candidates = candidates.filter((fact) => amounts.every((amount) => amountsForClaim(fact, sentence).includes(cents(amount))));
   }
   const dates = temporalClaims(sentence);
   if (dates.length) {
@@ -303,7 +299,7 @@ function allowedLinks(context) {
 function exemplarLeak(text, exemplars, context) {
   const facts = presentFacts(context);
   const dates = dateFacts(context);
-  const factLike = /\$\s*\d[\d,.]*|\b\d{1,2}\/\d{1,2}(?:\/\d{2,4})?\b|\b(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\s+\d{1,2}\b|\b(?:sun|mon|tues?|wed(?:nes)?|thu(?:rs)?|fri|sat)(?:day)?\b|\b\d{1,2}(?::\d{2})?\s*(?:am|pm)\b|\[[a-z_]+\]/gi;
+  const factLike = /\$\s*\d[\d,.]*|\b\d{1,2}\/\d{1,2}(?:\/\d{2,4})?\b|\b(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\s+\d{1,2}\b|\b(?:sun|mon|tues?|wed(?:nes)?|thu(?:rs)?|fri|sat(?:ur)?)(?:day)?\b|\b\d{1,2}(?::\d{2})?\s*(?:am|pm)\b|\[[a-z_]+\]/gi;
   return (exemplars || []).some((example) => (String(example?.reply_text || '').match(factLike) || [])
     .some((value) => {
       if (!text.toLowerCase().includes(value.toLowerCase())) return false;

@@ -42,6 +42,16 @@ describe('email reply verifier', () => {
     expect(verdict(`Hi Casey, your pending appointment is ${date.replace('15', '16')}.`).ok).toBe(false);
   });
 
+  test.each(['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'])('grounds the full weekday name %s', (day) => {
+    expect(verdict(`Hi Casey, your pending appointment is ${day}.`).ok).toBe(day === 'Tuesday');
+    if (day !== 'Tuesday') {
+      expect(verdict(`Hi Casey, your pending appointment is ${day}.`, {
+        exemplars: [{ reply_text: `Your appointment is ${day}.` }],
+        context: { facts: contextWith().facts.filter((fact) => fact.key === 'upcoming_visit') },
+      }).violations).toContain('few_shot_leak');
+    }
+  });
+
   test('binds amounts and dates to the fact named in the sentence', () => {
     const result = verdict('Hi Casey, your outstanding balance is $50. Your appointment is August 12. Your last completed service was September 15.');
     expect(result.ok).toBe(false);
@@ -190,6 +200,14 @@ describe('email reply verifier', () => {
     expect(verdict('Hi Casey, your monthly dues are $2.84.').violations).toContain('amount_unsupported:$2.84');
     expect(verdict('Hi Casey, your monthly charge is $98.').violations).toContain('amount_unsupported:$98');
     expect(verdict('Hi Casey, your base monthly dues are $98.').ok).toBe(true);
+  });
+
+  test('ambiguous billing fields cannot lend a surcharge amount to a total claim', () => {
+    for (const amount of ['$2.84', '$100.84']) {
+      expect(verdict(`Hi Casey, your total monthly charge including the card surcharge is ${amount}.`).violations)
+        .toContain(`amount_unsupported:${amount}`);
+    }
+    expect(verdict('Hi Casey, your total monthly charge is $100.84. The card surcharge is $2.84.').ok).toBe(true);
   });
 
   test('rejects status claims contradicted by authoritative facts', () => {
