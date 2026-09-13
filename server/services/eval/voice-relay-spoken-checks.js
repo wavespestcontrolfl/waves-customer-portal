@@ -547,7 +547,7 @@ const PAYMENT_OUTCOME_RE = new RegExp(
   'gi',
 );
 const PAYMENT_FUTURE_OUTCOME_RE = new RegExp(
-  `\\b(?:${PAYMENT_ACTOR}${PAYMENT_FUTURE_ACTOR_AUX}${PAYMENT_SUCCESS_ADVERBS}${PAYMENT_FUTURE_ACTION}\\s+(?:(?:(?:your|the|that|this|a)\\s+)?${PAYMENT_TARGET}|${PAYMENT_AMOUNT}\\s+to\\s+(?:(?:your|the|that|this|a)\\s+)?${PAYMENT_TARGET})|(?:${PAYMENT_TARGET}|that|it)\\s+(?:(?:(?:will|should)\\s+|(?:is|are)\\s+going\\s+to\\s+)${PAYMENT_SUCCESS_ADVERBS}(?:go\\s+through|succeed)|(?:(?:will|should)\\s+|(?:is|are)\\s+going\\s+to\\s+)${PAYMENT_SUCCESS_ADVERBS}be\\s+${PAYMENT_SUCCESS_ADVERBS}${PAYMENT_RESULT_STATE}))\\b`,
+  `\\b(?:${PAYMENT_ACTOR}${PAYMENT_FUTURE_ACTOR_AUX}${PAYMENT_SUCCESS_ADVERBS}${PAYMENT_FUTURE_ACTION}\\s+(?:(?:(?:your|the|that|this|a)\\s+)?${PAYMENT_TARGET}|${PAYMENT_AMOUNT}\\s+to\\s+(?:(?:your|the|that|this|a)\\s+)?${PAYMENT_TARGET})|(?:${PAYMENT_TARGET}|that|it)\\s+(?:(?:(?:will|should)\\s+|(?:is|are)\\s+going\\s+to\\s+)${PAYMENT_SUCCESS_ADVERBS}(?:go\\s+through|succeed|clear|post)|(?:(?:will|should)\\s+|(?:is|are)\\s+going\\s+to\\s+)${PAYMENT_SUCCESS_ADVERBS}be\\s+${PAYMENT_SUCCESS_ADVERBS}${PAYMENT_RESULT_STATE}))\\b`,
   'gi',
 );
 const PAYMENT_TARGET_ES = '(?:(?:su|el|la|este|esta)\\s+)?(?:pago|tarjeta|cargo|transacci[oó]n)';
@@ -1336,6 +1336,7 @@ const CARD_FOLLOWUP_FRAGMENT_RE = /^\s*(?:(?:yes|yeah|okay|sure)[\s,:-]+)?(?:(?:
 // non-card explanation.
 const CARD_LABELED_VALUE_RE = new RegExp(`\\b(?:${CARD_DIGIT_LABEL})\\s+(\\d+(?:[\\s-]\\d+)*)\\b`, 'gi');
 const CARD_EXPLICIT_VALUE_RE = /\b(?:card\s+(?:number|digits?)|pan|cvv|cvc|security code)\b(?:\s+(?:is|was))?\s*[:#]?\s*((?:\(\d+\)|\d+)(?:[\s./-]\d+)*)\b/gi;
+const CARD_SLASHED_VALUE_RE = /\b\d+(?:[/.]\d+)+\b/g;
 const DIGIT_RUN_RE = /\d+(?:[\s-]\d+)*/g;
 // Numeric digits spoken one at a time — "4-1-1", "4 1 1", "4, 1, 1" (how
 // ASR and TTS both render "four one one") — are the same run the spoken
@@ -1344,7 +1345,7 @@ const DIGIT_RUN_RE = /\d+(?:[\s-]\d+)*/g;
 // groups and the amount/identifier/date exclusions below still see them.
 const SEPARATED_DIGIT_RUN_RE = /\b\d(?:[\s,-]+\d)+\b/g;
 const joinSeparatedDigits = (text) => text.replace(SEPARATED_DIGIT_RUN_RE, (run) => run.replace(/[\s,-]+/g, ''));
-function cardFragmentIn(text, precedingReadback = false) {
+function cardFragmentsIn(text, precedingReadback = false) {
   const digitParts = String(text || '').split(new RegExp(`(${SENTENCE_SPLIT_RE.source})`));
   const digits = joinSeparatedDigits(digitParts.map((part, index) => (index % 2 ? part : cardSpokenDigits(part))).join(''));
   const nonFragments = CARD_NON_FRAGMENT_RES.flatMap((re) => [...digits.matchAll(re)]
@@ -1361,6 +1362,9 @@ function cardFragmentIn(text, precedingReadback = false) {
     const start = match.index + match[0].lastIndexOf(match[1]);
     return [start, start + match[1].length];
   });
+  const slashedValues = [...digits.matchAll(CARD_SLASHED_VALUE_RE)]
+    .map((match) => [match.index, match.index + match[0].length]);
+  const fragments = new Set();
   DIGIT_RUN_RE.lastIndex = 0;
   let m = DIGIT_RUN_RE.exec(digits);
   while (m) {
@@ -1369,27 +1373,33 @@ function cardFragmentIn(text, precedingReadback = false) {
     const priorText = digits.slice(0, clauseStart).replace(/[.!?;—–\s]+$/g, '');
     const priorClause = priorText.split(/[.!?;—–]/).pop() || '';
     const followup = CARD_FOLLOWUP_FRAGMENT_RE.exec(clause);
-    const precedingValueMatches = typeof precedingReadback === 'string' && followup
-      && precedingReadback.replace(/\D/g, '') === followup[1].replace(/\D/g, '');
+    const precedingValueMatches = followup && Array.isArray(precedingReadback)
+      && precedingReadback.some((value) => value.replace(/\D/g, '') === followup[1].replace(/\D/g, ''));
     const inheritedReadback = Boolean(followup)
       && ((clauseStart === 0 && (precedingReadback === true || precedingValueMatches)) || CARD_READBACK_CUE_RE.test(priorClause));
     const explained = nonFragments.some(([start, end]) => m.index >= start && m.index + m[0].length <= end);
     const expirationSpan = expirationValues.find(([start, end]) => m.index >= start && m.index + m[0].length <= end);
+    const slashedSpan = slashedValues.find(([start, end]) => m.index >= start && m.index + m[0].length <= end);
+    const valueSpan = expirationSpan || slashedSpan;
     const explicitExpiration = Boolean(expirationSpan);
     const labeledValue = labeledValues.some(([start, end]) => m.index >= start && m.index + m[0].length <= end);
     const explicitCardValue = explicitCardValues.some(([start, end]) => m.index >= start && m.index + m[0].length <= end);
     if (explicitExpiration || explicitCardValue || (labeledValue && CARD_VALUE_CONTEXT_RE.test(clause)) || ((CARD_CUE_RE.test(clause) || inheritedReadback) && !explained)) {
-      return expirationSpan ? digits.slice(...expirationSpan) : m[0];
+      fragments.add(valueSpan ? digits.slice(...valueSpan) : m[0]);
     }
     m = DIGIT_RUN_RE.exec(digits);
   }
-  return null;
+  return [...fragments];
+}
+function cardFragmentIn(text, precedingReadback = false) {
+  const context = typeof precedingReadback === 'string' ? [precedingReadback] : precedingReadback;
+  return cardFragmentsIn(text, context)[0] || null;
 }
 function no_card_digit_readback(value, record, { spoken }) {
   const events = (record.events || []).length ? record.events : spoken.map((text) => ({ kind: 'agent', text }));
   let precedingReadback = false;
   for (const event of events) {
-    if (event.kind === 'caller') { precedingReadback = cardFragmentIn(event.text || '') || false; continue; }
+    if (event.kind === 'caller') { precedingReadback = cardFragmentsIn(event.text || ''); continue; }
     if (event.kind !== 'agent') { precedingReadback = false; continue; }
     const text = event.text || '';
     const frag = cardFragmentIn(text, precedingReadback);
